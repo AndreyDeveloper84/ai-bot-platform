@@ -1599,27 +1599,124 @@ export interface AylaMessage {
  * него, а не в этом объекте: иначе экран мог бы показать одно, а
  * отправить на исполнение другое.
  */
+/** Строки карточки предложения (DRF-2153, макет DRF-1187): клиент / услуга / дата / время. */
+export interface AylaBookingDetails {
+  client: string;
+  service: string;
+  duration_min: number;
+  /** «21 августа, четверг» */
+  date: string;
+  /** «12:30» */
+  time: string;
+  /** «12:30–13:30» */
+  time_range?: string;
+}
+
+export interface AylaDayOffDetails {
+  kind: "day_off";
+  title: string;
+  /** «Среда, 26 августа» */
+  date: string;
+  /** «Не работаю весь день» */
+  change: string;
+}
+
 export interface AylaPendingAction {
   action: string;
   summary: string;
   confirm_label: string;
   token: string;
   expires_in_sec: number;
+  details?: AylaBookingDetails | AylaDayOffDetails;
+}
+
+/** Карточки ответа — структура вместо абзаца (DRF-2153). Строятся сервером из данных. */
+export interface AylaFreeWindow {
+  start: string;
+  end: string;
+  book_url: string;
+}
+export type AylaCard =
+  | {
+      kind: "free_windows";
+      date: string;
+      day_off?: boolean;
+      stale: boolean;
+      notice: string | null;
+      footer?: string | null;
+      recheck: string | null;
+      windows: AylaFreeWindow[];
+      book_url?: string;
+    }
+  | {
+      kind: "day";
+      date: string;
+      count: number;
+      visits: {
+        time: string;
+        client: string;
+        service: string;
+        duration_min: number;
+      }[];
+    }
+  | { kind: "clarify_client"; options: { client_id: string; label: string }[] }
+  | {
+      kind: "choose_service";
+      options: { service_id: string; name: string; duration_min: number }[];
+    }
+  | {
+      kind: "slot_taken";
+      range?: string;
+      alternatives: { time: string; start_at: string | null }[];
+      /** «Выбрать другое время» → форма М-3 на тот же день. */
+      book_url?: string;
+    }
+  | { kind: "open"; url: string; label: string };
+
+/** Выбор из карточки — уходит модели уточнением, в нить пишется только текст кнопки. */
+export interface AylaSelect {
+  client_id?: string;
+  start_at?: string;
 }
 
 export interface AylaAskResponse {
   answer: string;
   tool: string;
   pending_action: AylaPendingAction | null;
+  cards?: AylaCard[];
   message_id: string;
 }
 
 export interface AylaConfirmResponse {
   answer: string;
   action: string;
+  /** `false` — не выполнено: «занято» / «проверяем результат». */
   executed: boolean;
+  /** Дверь после результата: «Открыть запись» → обычный экран деталей. */
+  open?: { url: string; label: string } | null;
+  cards?: AylaCard[];
+  details?: AylaBookingDetails | AylaDayOffDetails | null;
   message_id: string;
 }
+
+/** Стартовый экран Ayla: контекст дня + чипы (DRF-2153). */
+export interface AylaContextResponse {
+  today: {
+    date: string;
+    count: number;
+    next: {
+      client_name_initial: string;
+      time: string;
+      service_name: string;
+      duration_min: number;
+    } | null;
+  };
+  chips: string[];
+  chip_hints?: Record<string, string>;
+}
+
+export const getAylaContext = (): Promise<AylaContextResponse> =>
+  request("/assistant/context", { method: "GET" });
 
 /** Что уже сказано в диалоге, старое первым. */
 export const getAylaHistory = (
@@ -1630,10 +1727,13 @@ export const getAylaHistory = (
   });
 
 /** Задать вопрос. Ответ может нести предложение — оно НЕ выполнено. */
-export const askAyla = (text: string): Promise<AylaAskResponse> =>
+export const askAyla = (
+  text: string,
+  select?: AylaSelect,
+): Promise<AylaAskResponse> =>
   request("/assistant/ask", {
     method: "POST",
-    body: JSON.stringify({ text }),
+    body: JSON.stringify(select ? { text, select } : { text }),
   });
 
 /** Выполнить предложение. Только по талону — своих аргументов нет. */

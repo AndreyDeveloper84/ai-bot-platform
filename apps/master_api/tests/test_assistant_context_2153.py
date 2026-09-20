@@ -397,7 +397,7 @@ class TestPrepareBooking:
         resp = _ask_with(client, "Запиши Анну на массаж завтра в 12:30")
         body = resp.json()
         assert body["pending_action"] is None
-        assert body["answer"] == "Кого вы имеете в виду?"
+        assert body["answer"] == "Нашла двух клиентов с таким именем. Кого вы имеете в виду?"
         card = next(c for c in body["cards"] if c["kind"] == "clarify_client")
         expected_date = done.start_at.astimezone(_tz(tenant)).strftime("%d.%m")
         assert [o["label"] for o in card["options"]] == [

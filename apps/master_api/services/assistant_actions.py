@@ -466,6 +466,13 @@ def _resolve_service(master, raw: Any) -> Any:
     )
 
 
+def _count_ru(n: int) -> str:
+    """«двух клиентов» / «трёх клиентов» / «несколько клиентов» — как в макете."""
+
+    words = {2: "двух", 3: "трёх", 4: "четырёх"}
+    return f"{words[n]} клиентов" if n in words else "несколько клиентов"
+
+
 def _resolve_client(master, arguments: dict[str, Any], *, tz) -> dict[str, Any]:
     """Клиент — по id из уточнения или по имени через поиск М-2.
 
@@ -511,7 +518,7 @@ def _resolve_client(master, arguments: dict[str, Any], *, tz) -> dict[str, Any]:
         from apps.master_api.services.assistant_cards import client_option_label
 
         raise ActionError(
-            "Кого вы имеете в виду?",
+            f"Нашла {_count_ru(len(enriched))} с таким именем. Кого вы имеете в виду?",
             verbatim=True,
             cards=[
                 {
@@ -632,6 +639,8 @@ def _execute_booking(payload: dict[str, Any], *, master, actor) -> ExecutedActio
             ]
             if len(alternatives) < lo:
                 alternatives = alternatives[:lo]
+        from apps.master_api.services.assistant_cards import booking_form_url
+
         return ExecutedAction(
             name=ACTION_PREPARE_BOOKING,
             text="Это время занято",
@@ -640,6 +649,7 @@ def _execute_booking(payload: dict[str, Any], *, master, actor) -> ExecutedActio
                 {
                     "kind": "slot_taken",
                     "range": details.get("time_range", ""),
+                    "book_url": booking_form_url(master, date=day.isoformat()),
                     "alternatives": [
                         {"time": a["time"], "start_at": a.get("start_at")} for a in alternatives
                     ],

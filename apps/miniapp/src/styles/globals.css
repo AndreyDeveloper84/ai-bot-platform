@@ -9283,4 +9283,162 @@ a {
   height: 1px;
   background: currentColor;
   opacity: 0.8;
+/* ---------------------------------------------------------------------------
+   Ayla для мастера — карточки макета DRF-1187 (DRF-2153, М-5).
+   Стартовый экран (контекст дня + чипы), окна свободного времени, день,
+   «Проверьте запись», ✓ «Запись создана», ⚠ «Это время занято»,
+   «последние известные данные». Токены — те же, что у SystemState.
+   ------------------------------------------------------------------------- */
+
+.ayla-card {
+  border: 1px solid var(--c-divider);
+  background: var(--c-surface-2);
+  border-radius: var(--r-md);
+  padding: var(--s-3);
+  margin-top: var(--s-2);
+}
+
+.ayla-card--danger {
+  border-color: color-mix(in srgb, var(--c-danger) 40%, var(--c-divider));
+  background: color-mix(in srgb, var(--c-danger) 8%, var(--c-surface-2));
+}
+
+.ayla-card--warning {
+  border-color: color-mix(in srgb, var(--c-warning) 40%, var(--c-divider));
+  background: color-mix(in srgb, var(--c-warning) 8%, var(--c-surface-2));
+}
+
+.ayla-card--success {
+  border-color: color-mix(in srgb, var(--c-success) 40%, var(--c-divider));
+  background: color-mix(in srgb, var(--c-success) 8%, var(--c-surface-2));
+}
+
+.ayla-card__title {
+  margin: 0 0 var(--s-1);
+  font-size: var(--font-size-300);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+
+.ayla-card--danger .ayla-card__title {
+  color: var(--c-danger);
+}
+
+.ayla-card--success .ayla-card__title {
+  color: var(--c-success);
+}
+
+.ayla-card__row {
+  margin: 0 0 var(--s-1);
+  font-size: var(--font-size-200);
+  color: var(--c-text-primary);
+}
+
+.ayla-card__row--muted {
+  color: var(--c-text-secondary);
+}
+
+.ayla-card__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+}
+
+.ayla-card__option {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  width: 100%;
+  min-height: 44px;
+  padding: var(--s-2) var(--s-3);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+  background: var(--c-surface);
+  color: var(--c-text-primary);
+  font-size: var(--font-size-200);
+  text-align: start;
+  text-decoration: none;
+}
+
+.ayla-card__row-main {
+  flex: 1;
+  font-weight: 600;
+}
+
+.ayla-card__row-meta {
+  color: var(--c-text-secondary);
+  font-size: var(--font-size-100);
+}
+
+.ayla-card__cta {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  margin-top: var(--s-2);
+  text-decoration: none;
+}
+
+.ayla-btn--secondary {
+  border: 1px solid var(--c-accent);
+  background: var(--c-surface);
+  color: var(--c-accent);
+}
+
+.ayla-card__hint {
+  margin: var(--s-2) 0 0;
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
+.ayla-review {
+  margin-bottom: var(--s-3);
+}
+
+.ayla-review__row {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  font-size: var(--font-size-200);
+  color: var(--c-text-primary);
+}
+
+.ayla-start {
+  padding: var(--s-2) 0;
+}
+
+.ayla-start__context {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s-2);
+  margin-top: 0;
+}
+
+.ayla-start__context-body {
+  flex: 1;
+}
+
+.ayla-start__icon {
+  font-size: var(--font-size-400);
+}
+
+.ayla-start__label {
+  margin: var(--s-3) 0 var(--s-2);
+  font-size: var(--font-size-200);
+  color: var(--c-text-secondary);
+}
+
+.ayla-start__chips {
+  gap: var(--s-2);
+}
+
+.ayla-start__chip {
+  flex-wrap: wrap;
+}
+
+.ayla-start__chip .ayla-card__row-main {
+  flex-basis: 100%;
 }

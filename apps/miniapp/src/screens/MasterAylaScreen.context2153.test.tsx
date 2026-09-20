@@ -52,6 +52,12 @@ const CHIPS = [
   "Добавить запись",
   "Изменить рабочий день",
 ];
+const CHIP_HINTS: Record<string, string> = {
+  "Что у меня сегодня?": "Покажите расписание дня",
+  "Когда я свободен завтра?": "Свободные окна на завтра",
+  "Добавить запись": "Создать новую запись в расписании",
+  "Изменить рабочий день": "Изменить график или недоступность",
+};
 
 function renderAt(path = "/master/ayla") {
   return render(
@@ -98,21 +104,27 @@ beforeEach(() => {
       },
     },
     chips: CHIPS,
+    chip_hints: CHIP_HINTS,
   });
   mockedAsk.mockResolvedValue(reply());
 });
 
 describe("1 · стартовый экран", () => {
-  it("контекст дня одной строкой и четыре чипа", async () => {
+  it("карточка дня в три строки макета, «Что можно сделать» и четыре чипа с подписями", async () => {
     renderAt();
+    expect(await screen.findByText("Сегодня 2 записи")).toBeInTheDocument();
+    expect(screen.getByText("Следующая — Анна П. в 10:30")).toBeInTheDocument();
     expect(
-      await screen.findByText(
-        "Сегодня 2 записи · Следующая — Анна П. в 10:30 · Классический массаж · 60 мин",
-      ),
+      screen.getByText("Классический массаж · 60 мин"),
     ).toBeInTheDocument();
+    expect(screen.getByText("Что можно сделать")).toBeInTheDocument();
     for (const chip of CHIPS) {
-      expect(screen.getByRole("button", { name: chip })).toBeInTheDocument();
+      const button = screen.getByRole("button", {
+        name: new RegExp(`^${chip}`),
+      });
+      expect(button).toHaveTextContent(CHIP_HINTS[chip]!);
     }
+    expect(screen.getByPlaceholderText("Спросите Ayla…")).toBeInTheDocument();
     // Не длинный текст от помощника: прежнее приглашение-абзац не рисуется.
     expect(screen.queryByText(/Спросите про день, загрузку/)).toBeNull();
   });
@@ -121,6 +133,7 @@ describe("1 · стартовый экран", () => {
     mockedContext.mockResolvedValue({
       today: { date: "2026-09-20", count: 0, next: null },
       chips: CHIPS,
+      chip_hints: CHIP_HINTS,
     });
     renderAt();
     expect(await screen.findByText("Сегодня записей нет")).toBeInTheDocument();
@@ -129,7 +142,7 @@ describe("1 · стартовый экран", () => {
   it("чип отправляет фразу как вопрос", async () => {
     renderAt();
     (
-      await screen.findByRole("button", { name: "Когда я свободен завтра?" })
+      await screen.findByRole("button", { name: /^Когда я свободен завтра\?/ })
     ).click();
     await waitFor(() =>
       expect(mockedAsk).toHaveBeenCalledWith(
@@ -157,6 +170,7 @@ describe("2 · ответ о свободном времени", () => {
             stale: false,
             notice: null,
             recheck: null,
+            book_url: "/master/booking/new?date=2026-09-21",
             windows: [
               {
                 start: "10:30",
@@ -177,12 +191,24 @@ describe("2 · ответ о свободном времени", () => {
     );
     renderAt();
     (
-      await screen.findByRole("button", { name: "Когда я свободен завтра?" })
+      await screen.findByRole("button", { name: /^Когда я свободен завтра\?/ })
     ).click();
-    expect(await screen.findByText("Завтра свободно:")).toBeInTheDocument();
-    expect(screen.getByText("10:30–12:00")).toBeInTheDocument();
-    expect(screen.getByText("15:00–17:30")).toBeInTheDocument();
-    screen.getAllByRole("link", { name: "Создать запись" })[1]!.click();
+    // Макет: «Завтра, 21 августа» / «Свободно:» / строки окон с длительностью
+    // (ruling (ж): «90 мин», не «1 ч 30 мин») / «Создать запись» / ⓘ подсказка.
+    expect(await screen.findByText("Свободно:")).toBeInTheDocument();
+    expect(screen.getByText(/21 сентября/)).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: /10:30–12:00.*90 мин/ }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: /15:00–17:30.*150 мин/ }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Нажмите на интервал, чтобы создать запись с этим окном. Или нажмите «Создать запись», чтобы выбрать время позже.",
+      ),
+    ).toBeInTheDocument();
+    screen.getByRole("link", { name: "Создать запись" }).click();
     expect(await screen.findByText("Экран «Новая запись»")).toBeInTheDocument();
   });
 
@@ -197,6 +223,7 @@ describe("2 · ответ о свободном времени", () => {
             stale: true,
             notice:
               "Не удалось проверить актуальное расписание. Последние известные данные",
+            footer: "Расписание могло измениться.",
             recheck: "Проверить снова",
             windows: [
               {
@@ -212,12 +239,16 @@ describe("2 · ответ о свободном времени", () => {
     );
     renderAt();
     (
-      await screen.findByRole("button", { name: "Когда я свободен завтра?" })
+      await screen.findByRole("button", { name: /^Когда я свободен завтра\?/ })
     ).click();
+    // Тексты макета дословно: заголовок / «Последние известные данные:» /
+    // строки / «Расписание могло измениться.» / «Проверить снова».
     expect(
-      await screen.findByText(
-        "Не удалось проверить актуальное расписание. Последние известные данные",
-      ),
+      await screen.findByText("Не удалось проверить актуальное расписание."),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Последние известные данные:")).toBeInTheDocument();
+    expect(
+      screen.getByText("Расписание могло измениться."),
     ).toBeInTheDocument();
     screen.getByRole("button", { name: "Проверить снова" }).click();
     await waitFor(() => expect(mockedAsk).toHaveBeenCalledTimes(2));
@@ -241,8 +272,9 @@ describe("3 · подготовленное действие", () => {
             client: "Анна П.",
             service: "Классический массаж",
             duration_min: 60,
-            date: "21 сентября",
+            date: "21 сентября, четверг",
             time: "12:30",
+            time_range: "12:30–13:30",
           },
         },
       }),
@@ -254,23 +286,40 @@ describe("3 · подготовленное действие", () => {
       message_id: "m-2",
       open: { url: "/master/bookings/a-1", label: "Открыть запись" },
       cards: [],
+      details: {
+        client: "Анна П.",
+        service: "Классический массаж",
+        duration_min: 60,
+        date: "21 сентября, четверг",
+        time: "12:30",
+        time_range: "12:30–13:30",
+      },
     });
     renderAt();
-    (await screen.findByRole("button", { name: "Добавить запись" })).click();
-    const card = await screen.findByRole("region", { name: /Подтвердите/ });
-    for (const [label, value] of [
-      ["Клиент", "Анна П."],
-      ["Услуга", "Классический массаж"],
-      ["Длительность", "60 мин"],
-      ["Дата", "21 сентября"],
-      ["Время", "12:30"],
-    ]) {
-      expect(card).toHaveTextContent(`${label}${value}`);
-    }
+    (await screen.findByRole("button", { name: /^Добавить запись/ })).click();
+    // Макет 3A: «Проверьте запись» / Анна П. / Классический массаж · 60 мин /
+    // 21 сентября, четверг / 12:30–13:30 / Подтвердить · Отмена / ⓘ.
+    const card = await screen.findByRole("region", {
+      name: "Проверьте запись",
+    });
+    expect(card).toHaveTextContent("Анна П.");
+    expect(card).toHaveTextContent("Классический массаж · 60 мин");
+    expect(card).toHaveTextContent("21 сентября, четверг");
+    expect(card).toHaveTextContent("12:30–13:30");
+    expect(
+      screen.getByText(
+        "После подтверждения запись будет создана в расписании.",
+      ),
+    ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Отмена" })).toBeInTheDocument();
     expect(mockedConfirm).not.toHaveBeenCalled();
     screen.getByRole("button", { name: "Подтвердить" }).click();
+    // Макет 3B: ✓ «Запись создана» / три строки / «Открыть запись» / ⓘ.
     expect(await screen.findByText("Запись создана")).toBeInTheDocument();
+    expect(
+      screen.getByText("Сервер подтвердил результат."),
+    ).toBeInTheDocument();
+    expect(screen.getByText("21 сентября · 12:30–13:30")).toBeInTheDocument();
     expect(mockedConfirm).toHaveBeenCalledWith("t-1");
     screen.getByRole("link", { name: "Открыть запись" }).click();
     expect(
@@ -283,7 +332,7 @@ describe("4 · уточнение и конфликт", () => {
   it("«Кого вы имеете в виду?» — варианты без телефона; выбор уходит с client_id", async () => {
     mockedAsk.mockResolvedValueOnce(
       reply({
-        answer: "Кого вы имеете в виду?",
+        answer: "Нашла двух клиентов с таким именем. Кого вы имеете в виду?",
         cards: [
           {
             kind: "clarify_client",
@@ -296,9 +345,11 @@ describe("4 · уточнение и конфликт", () => {
       }),
     );
     renderAt();
-    (await screen.findByRole("button", { name: "Добавить запись" })).click();
+    (await screen.findByRole("button", { name: /^Добавить запись/ })).click();
     expect(
-      await screen.findByText("Кого вы имеете в виду?"),
+      await screen.findByText(
+        /Нашла двух клиентов с таким именем\. Кого вы имеете в виду\?/,
+      ),
     ).toBeInTheDocument();
     screen.getByRole("button", { name: "Анна П. · была 12.05" }).click();
     await waitFor(() => expect(mockedAsk).toHaveBeenCalledTimes(2));
@@ -322,8 +373,9 @@ describe("4 · уточнение и конфликт", () => {
             client: "Анна П.",
             service: "Массаж",
             duration_min: 60,
-            date: "21 сентября",
+            date: "21 сентября, четверг",
             time: "12:30",
+            time_range: "12:30–13:30",
           },
         },
       }),
@@ -336,6 +388,8 @@ describe("4 · уточнение и конфликт", () => {
       cards: [
         {
           kind: "slot_taken",
+          range: "12:30–13:30",
+          book_url: "/master/booking/new?date=2026-09-21",
           alternatives: [
             { time: "14:00", start_at: "2026-09-21T14:00:00+03:00" },
             { time: "15:00", start_at: "2026-09-21T15:00:00+03:00" },
@@ -344,11 +398,20 @@ describe("4 · уточнение и конфликт", () => {
       ],
     });
     renderAt();
-    (await screen.findByRole("button", { name: "Добавить запись" })).click();
+    (await screen.findByRole("button", { name: /^Добавить запись/ })).click();
     (await screen.findByRole("button", { name: "Подтвердить" })).click();
+    // Макет 4: ⚠ «Это время занято» / «12:30–13:30 больше недоступно.» /
+    // «Свободно рядом:» / варианты / «Выбрать другое время».
     expect(await screen.findByText("Это время занято")).toBeInTheDocument();
+    expect(
+      screen.getByText("12:30–13:30 больше недоступно."),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Свободно рядом:")).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: "Выбрать другое время" }),
+    ).toBeInTheDocument();
     expect(screen.queryByText("Запись создана")).toBeNull();
-    screen.getByRole("button", { name: "15:00" }).click();
+    screen.getByRole("button", { name: /15:00/ }).click();
     await waitFor(() => expect(mockedAsk).toHaveBeenCalledTimes(2));
     expect(mockedAsk.mock.calls[1]).toEqual([
       "Запиши на 15:00",
