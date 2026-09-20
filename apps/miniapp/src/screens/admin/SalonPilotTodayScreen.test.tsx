@@ -34,8 +34,8 @@ vi.mock("../../lib/admin-api", async (importOriginal) => {
   return { ...original, getSalonDay: vi.fn(), getSalonReadiness: vi.fn() };
 });
 
+import { ApiError } from "../../lib/api";
 import {
-  ApiError,
   getSalonDay,
   getSalonReadiness,
   type MeResponse,
@@ -168,6 +168,8 @@ function renderToday(me: MeResponse = OWNER) {
 
 beforeEach(() => {
   mockedDay.mockReset();
+  mockedReadiness.mockReset();
+  mockedReadiness.mockResolvedValue(readiness());
 });
 
 describe("что построено с макета", () => {

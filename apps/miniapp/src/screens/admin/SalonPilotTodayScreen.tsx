@@ -43,7 +43,9 @@
  * запретил реконструировать «что изменилось» сравнением снимков
  * моделью. Значит, показать эти блоки нечем: любая их отрисовка сегодня
  * была бы либо выдумкой, либо пустой рамкой, обещающей ленту, которой
- * не будет. Вернутся вместе с event source.
+ * не будет. Вернутся вместе с event source. Строка сводки «N ситуаций
+ * требуют внимания» (DRF-2117) — не этот блок: это счётчик проблем
+ * готовности из `GET admin/readiness/`, не лента событий.
  *
  * **`Кабинет` в строке записи.** Макет обещает его у каждой записи и в
  * карточке мастера; в `DayVisit` (`apps/admin_api/services/salon_day.py`)
@@ -102,7 +104,9 @@ import {
   type MeResponse,
   type SalonDayResponse,
 } from "../../lib/admin-api";
+import { useSalonReadiness } from "../../hooks/useSalonReadiness";
 import { canCreateBooking } from "../../lib/salon-pilot";
+import { attentionLine } from "../../lib/salon-readiness";
 import {
   clientLabel,
   formatRange,
@@ -210,6 +214,11 @@ export function SalonPilotTodayScreen({ me }: { me: MeResponse }) {
    * ту, что делает возврат на экран (см. `visibilitychange` ниже).
    */
   const [loadedAtMs, setLoadedAtMs] = useState(() => Date.now());
+  /**
+   * Готовность салона (DRF-2117) — один запрос на экран: он же питает
+   * карточку и строку сводки. Перечитывается вместе с днём (`attempt`).
+   */
+  const readiness = useSalonReadiness(me, attempt);
 
   useEffect(() => {
     const ctrl = new AbortController();
@@ -287,6 +296,13 @@ export function SalonPilotTodayScreen({ me }: { me: MeResponse }) {
     else if (nextRows.length > 0)
       statusLine = `Ближайших записей: ${nextRows.length}.`;
   }
+  // DRF-2117 — «N ситуаций требуют внимания» = число проблем готовности, то
+  // же, что считает приветствие в чате. Печатается ТОЛЬКО когда счёт есть:
+  // при отказе источника, сбое ручки и у ресепшна строки нет вовсе — «0
+  // ситуаций» было бы утверждением, которого никто не делал.
+  if (!loading && readiness.kind === "problems") {
+    statusLine = `${statusLine} ${attentionLine(readiness.n)}`.trim();
+  }
 
   return (
     <SalonPilotFrame me={me} title="Сегодня" subtitle={subtitle}>
@@ -307,8 +323,8 @@ export function SalonPilotTodayScreen({ me }: { me: MeResponse }) {
       ) : null}
 
       {/* DRF-2115 — «Диалоги — N ждут ответа» и «График — N заявок»;
-          «Готовность» не рисуется до ручки (§33, DRF-2116/2117). */}
-      <SalonTodayCards />
+          DRF-2117 — «Готовность — N проблем» (ручка #1878). */}
+      <SalonTodayCards readiness={readiness} />
 
       <p className="salon-pilot__note" role="status">
         {statusLine}

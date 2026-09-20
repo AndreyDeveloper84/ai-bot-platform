@@ -76,6 +76,7 @@ import { AdminMasterDetailScreen } from "./screens/admin/AdminMasterDetailScreen
 import { AdminNewBookingScreen } from "./screens/admin/AdminNewBookingScreen";
 import { AdminPeopleScreen } from "./screens/admin/AdminPeopleScreen";
 import { AdminHandoffQueueScreen } from "./screens/admin/AdminHandoffQueueScreen";
+import { AdminReadinessScreen } from "./screens/admin/AdminReadinessScreen";
 import { AdminSalonDayScreen } from "./screens/admin/AdminSalonDayScreen";
 import { AdminSectionDeniedScreen } from "./screens/admin/AdminSectionDeniedScreen";
 import { AdminServicesMatrixScreen } from "./screens/admin/AdminServicesMatrixScreen";
@@ -325,6 +326,17 @@ function adminRouteElements(me: MeResponse): React.ReactNode {
             <AdminHandoffQueueScreen />
           ) : (
             <AdminSectionDeniedScreen me={me} section="Диалоги" />
+          )
+        }
+      />
+      {/* DRF-2117 — готовность салона поимённо: с карточки «Сегодня». */}
+      <Route
+        path="/admin/readiness"
+        element={
+          canOpenSalonPilot(me) ? (
+            <AdminReadinessScreen />
+          ) : (
+            <AdminSectionDeniedScreen me={me} section="Готовность" />
           )
         }
       />

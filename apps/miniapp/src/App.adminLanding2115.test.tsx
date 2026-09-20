@@ -104,6 +104,17 @@ async function openAvatarSheet() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // DRF-2117 — карточка «Готовность» читает ручку на каждом «Сегодня»; по
+  // умолчанию салон готов, тесты карточки переопределяют.
+  mockedReadiness.mockResolvedValue({
+    ready: true,
+    unknown: false,
+    source_problem: null,
+    checked_at: "2026-09-20T09:00:00+00:00",
+    masters_total: 1,
+    problems: [],
+    limits: [],
+  });
   mockedDay.mockResolvedValue({
     date: "2026-09-19",
     timezone: "Europe/Moscow",
@@ -282,12 +293,13 @@ describe("карточки на «Сегодня» (DRF-2115)", () => {
     expect(await screen.findByRole("heading", { name: /Запросы на смену графика/ })).toBeInTheDocument();
   });
 
-  it("ноль ждущих — карточка говорит «никто не ждёт», «Готовности» нет (§33)", async () => {
+  it("ноль ждущих — карточка говорит «никто не ждёт»; «Готовность» теперь есть (ручка #1878)", async () => {
     mockedGetMe.mockResolvedValue(OWNER_ME);
     renderAppAt("/admin/today");
     expect(await screen.findByRole("link", { name: /Диалоги — никто не ждёт/ })).toBeInTheDocument();
     expect(screen.getByRole("link", { name: /График — заявок нет/ })).toBeInTheDocument();
-    expect(screen.queryByText(/Готовность/)).toBeNull();
+    // §33 держался, пока ручки не было; с #1878 карточка на месте (DRF-2117).
+    expect(await screen.findByRole("link", { name: /Готовность — салон готов/ })).toBeInTheDocument();
   });
 
   it("ручка очереди упала — карточка без числа, не ноль", async () => {
@@ -332,8 +344,9 @@ describe("карточка «Готовность» на «Сегодня» (DRF
     await userEvent.click(card);
     expect(await screen.findByRole("heading", { name: /Готовность/ })).toBeInTheDocument();
     expect(screen.getByText("Анна — не настроен график")).toBeInTheDocument();
-    // Панель — та же тройка: экран списка живёт внутри пилота, не за его пределами.
-    expect(tabLabels()).toEqual(TRIO);
+    // «Назад» ведёт на «Сегодня» — как у очереди диалогов.
+    await userEvent.click(screen.getByRole("button", { name: "Назад" }));
+    expect(await screen.findByRole("link", { name: /Готовность — 1 проблема/ })).toBeInTheDocument();
   });
 
   it("ресепшну /admin/readiness закрыт, как и вся тройка", async () => {

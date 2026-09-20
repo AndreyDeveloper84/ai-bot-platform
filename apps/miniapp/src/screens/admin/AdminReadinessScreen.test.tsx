@@ -15,8 +15,9 @@ vi.mock("../../lib/admin-api", async (importOriginal) => {
   return { ...original, getSalonReadiness: vi.fn() };
 });
 
-import { ApiError, getSalonReadiness, type SalonReadinessResponse } from "../../lib/admin-api";
-import { AdminReadinessScreen } from "./AdminReadinessScreen";
+import { getSalonReadiness, type SalonReadinessResponse } from "../../lib/admin-api";
+import { ApiError } from "../../lib/api";
+import { AdminReadinessScreen, RECHECK_MIN_INTERVAL_MS } from "./AdminReadinessScreen";
 
 const mocked = vi.mocked(getSalonReadiness);
 
@@ -60,7 +61,12 @@ function renderScreen() {
   );
 }
 
-beforeEach(() => mocked.mockReset());
+beforeEach(() => {
+  // Блоком, не выражением: `() => mocked.mockReset()` вернул бы сам мок, а
+  // функцию, возвращённую из beforeEach, vitest зовёт как cleanup после теста —
+  // и мок с отклонённым промисом «срабатывал» вне экрана.
+  mocked.mockReset();
+});
 
 describe("AdminReadinessScreen", () => {
   it("список проблем — тексты сервера дословно, заголовок «пока не готов», сноска пределов", async () => {
@@ -115,15 +121,29 @@ describe("AdminReadinessScreen", () => {
     expect(screen.queryByText("Салон пока не готов:")).toBeNull();
   });
 
-  it("«Проверить снова» перечитывает", async () => {
+  it("«Проверить снова» — не чаще раза в 10 с, с подписью «обновлено HH:MM»", async () => {
     mocked.mockResolvedValueOnce(doc()).mockResolvedValueOnce(doc({ ready: true, problems: [] }));
-    renderScreen();
-    await screen.findByText("Салон пока не готов:");
+    const realNow = Date.now;
+    const t0 = realNow();
+    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => t0);
+    try {
+      renderScreen();
+      await screen.findByText("Салон пока не готов:");
+      // checked_at 09:00Z → в часах зрителя; проверяем форму «обновлено ЧЧ:ММ».
+      expect(screen.getByText(/^обновлено \d{2}:\d{2}$/)).toBeInTheDocument();
 
-    await userEvent.click(screen.getByRole("button", { name: "Проверить снова" }));
+      // Сразу после загрузки — повтор в кулдауне, ручка не зовётся.
+      await userEvent.click(screen.getByRole("button", { name: "Проверить снова" }));
+      expect(mocked).toHaveBeenCalledTimes(1);
 
-    expect(await screen.findByText("Салон готов принимать записи.")).toBeInTheDocument();
-    expect(mocked).toHaveBeenCalledTimes(2);
+      // Через 10 с — перечитывает.
+      nowSpy.mockImplementation(() => t0 + RECHECK_MIN_INTERVAL_MS + 1);
+      await userEvent.click(screen.getByRole("button", { name: "Проверить снова" }));
+      expect(await screen.findByText("Салон готов принимать записи.")).toBeInTheDocument();
+      expect(mocked).toHaveBeenCalledTimes(2);
+    } finally {
+      nowSpy.mockRestore();
+    }
   });
 
   it("сбой ручки — StateError с повтором, не «готов»", async () => {

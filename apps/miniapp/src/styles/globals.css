@@ -1567,6 +1567,51 @@ a {
 }
 
 /* Очередь диалогов (DRF-2115). */
+/* Готовность салона поимённо (DRF-2117) */
+.readiness__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.readiness__row {
+  padding: var(--s-2) 0;
+  border-bottom: 1px solid var(--c-divider);
+  font-size: var(--font-size-200);
+  color: var(--c-text-primary);
+  line-height: var(--leading-normal);
+}
+.readiness__row:last-child {
+  border-bottom: 0;
+}
+.readiness__limits {
+  margin-top: var(--s-4);
+}
+.readiness__limits-head {
+  margin: 0 0 var(--s-1);
+  font-size: var(--font-size-100);
+  font-weight: 600;
+  color: var(--c-text-secondary);
+}
+.readiness__limits-list {
+  margin: 0;
+  padding-left: var(--s-4);
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+.readiness__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  margin-top: var(--s-4);
+}
+.readiness__recheck {
+  min-height: 44px;
+}
+.readiness__updated {
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
 .handoff-queue__list {
   list-style: none;
   margin: 0;
