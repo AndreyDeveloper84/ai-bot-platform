@@ -350,14 +350,21 @@ def _attention_total(data: GreetingData) -> int | None:
     return data.attention + (data.readiness_problems or 0)
 
 
-def render_admin(name: str, salon: str, role_word: str, data: GreetingData) -> str:
-    head = [ADMIN_HELLO.format(name=name), ADMIN_ROLE_LINE.format(salon=salon, role=role_word)]
+def render_summary_lines(salon: str, data: GreetingData) -> list[str]:
+    """Строки сводки владельца/админа — одни на приветствие и на «утренний итог».
+
+    Спокойная строка, когда ситуаций нет и записи прочитаны; иначе «Сегодня:»
+    и по строке на доступный источник. Недоступный источник (``None``) —
+    строки нет (§103), а не «0». Все источники недоступны — пусто: вызывающий
+    решает, что с этим делать (приветствие — только шапка, итог — не слать).
+    """
+
     attention = _attention_total(data)
     if data.attention == 0 and attention == 0 and data.records is not None:
         calm = ADMIN_CALM_LINE.format(salon=salon, records=records_phrase(data.records))
         if data.readiness_problems == 0:
             calm = calm.rstrip(".") + ADMIN_CALM_READY_TAIL
-        return NL.join(head + [calm])
+        return [calm]
     items: list[str] = []
     if data.records is not None:
         items.append(records_phrase(data.records))
@@ -366,9 +373,14 @@ def render_admin(name: str, salon: str, role_word: str, data: GreetingData) -> s
     if attention is not None:
         items.append(attention_phrase(attention) if attention else ADMIN_NO_WAITING)
     if not items:
-        return NL.join(head)
+        return []
     body = [f"{item};" for item in items[:-1]] + [f"{items[-1]}."]
-    return NL.join(head + [ADMIN_TODAY_HEAD] + body)
+    return [ADMIN_TODAY_HEAD, *body]
+
+
+def render_admin(name: str, salon: str, role_word: str, data: GreetingData) -> str:
+    head = [ADMIN_HELLO.format(name=name), ADMIN_ROLE_LINE.format(salon=salon, role=role_word)]
+    return NL.join(head + render_summary_lines(salon, data))
 
 
 def render_first(name: str, salon: str, role_word: str) -> str:

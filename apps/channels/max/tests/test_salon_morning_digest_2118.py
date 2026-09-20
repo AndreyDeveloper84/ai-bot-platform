@@ -148,12 +148,16 @@ class TestP1Planner:
         from apps.channels.max import salon_digest as sd
         from apps.identity.constants import GLOBAL_BOT_TENANT_SLUG
 
+        from apps.tenancy.models import Tenant
+
         empty = _salon("empty", with_owner=False)
-        _salon(GLOBAL_BOT_TENANT_SLUG, with_owner=False)
+        if not Tenant.objects.filter(slug=GLOBAL_BOT_TENANT_SLUG).exists():
+            _salon(GLOBAL_BOT_TENANT_SLUG, with_owner=False)
+        assert Tenant.objects.filter(slug=GLOBAL_BOT_TENANT_SLUG).exists()  # положительно
         with patch.object(sd, "gather_digest", return_value=_data()):
             decisions = {d.tenant_slug: d for d in sd.plan_morning_digests(now_utc=_at(9))}
         assert decisions[empty.slug].reason == "no_recipients"
-        assert GLOBAL_BOT_TENANT_SLUG not in decisions
+        assert GLOBAL_BOT_TENANT_SLUG not in decisions  # empty-assert-ok: положительная пара выше
 
 
 # ── p2 — квота 1/день ────────────────────────────────────────────────
@@ -182,6 +186,28 @@ class TestP2OnePerDay:
             tomorrow = datetime(2026, 9, 22, 6, 50, tzinfo=dt_timezone.utc)
             sd.send_morning_digests.apply(kwargs={"now_utc": tomorrow})
         assert len(capture) == 2
+
+    def test_dedup_date_is_the_salon_date_not_utc(self, two_bots, capture) -> None:
+        """Владивосток (UTC+10): 09:50 местного = 23:50 UTC ПРЕДЫДУЩЕГО дня.
+
+        Дата дедупа — в поясе салона; иначе итог за 22-е и за 23-е могли бы
+        склеиться (оба в UTC-дате 22-го) или разойтись на один beat.
+        """
+        from apps.channels.max import salon_digest as sd
+
+        _salon("vlad", tz="Asia/Vladivostok")
+        with patch.object(sd, "gather_digest", return_value=_data()):
+            # 22.09 09:50 Владивосток = 21.09 23:50 UTC
+            first = sd.send_morning_digests.apply(
+                kwargs={"now_utc": datetime(2026, 9, 21, 23, 50, tzinfo=dt_timezone.utc)}
+            ).result
+            # 23.09 09:50 Владивосток = 22.09 23:50 UTC — новая местная дата
+            second = sd.send_morning_digests.apply(
+                kwargs={"now_utc": datetime(2026, 9, 22, 23, 50, tzinfo=dt_timezone.utc)}
+            ).result
+        assert first["sent"] == 1 and second["sent"] == 1
+        assert len(capture) == 2
+        assert "22.09" in capture[0]["text"] and "23.09" in capture[1]["text"]
 
 
 # ── p3 — содержимое = сводка приветствия ─────────────────────────────
@@ -218,6 +244,27 @@ class TestP3ContentIsTheGreetingSummary:
         assert "мастер" in text  # положительно: доступная строка на месте
         assert "запис" not in text.lower()  # empty-assert-ok: положительная пара строкой выше
         assert "0 записей" not in text
+
+    def test_all_sources_failed_sends_nothing_named(self, two_bots, capture) -> None:
+        """Все источники отказали → пустой «Итог» не уходит: reason source_failed."""
+        from apps.channels.max import salon_digest as sd
+
+        salon = _salon("dead")
+        empty = _data(
+            records=None,
+            masters_available=None,
+            attention=None,
+            readiness_problems=None,
+            missing=("records", "masters", "attention", "readiness"),
+        )
+        with patch.object(sd, "gather_digest", return_value=empty):
+            result = sd.send_morning_digests.apply(kwargs={"now_utc": _at(9)}).result
+        assert result["source_failed"] == 1 and result["sent"] == 0
+        assert capture == []  # empty-assert-ok: source_failed == 1 строкой выше
+        # И не считается «отправленным сегодня»: следующий beat попробует снова.
+        with patch.object(sd, "gather_digest", return_value=_data()):
+            again = sd.send_morning_digests.apply(kwargs={"now_utc": _at(9, 55)}).result
+        assert again["sent"] == 1 and capture[0]["user_id"] == f"owner-{salon.slug}"
 
     def test_gather_is_the_greeting_gather(self) -> None:
         """Сводку собирает ``salon_greeting.gather`` — не копия в дайджесте."""

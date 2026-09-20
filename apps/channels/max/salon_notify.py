@@ -15,6 +15,7 @@ schedule мастер просит изменить график               �
 sync    синхронизация каталога с ошибкой             Повторить · Подробнее
 master_off мастер перестал продаваться               Открыть карточку
 booking запись требует вмешательства                 Открыть запись
+digest  утренний итог (PR-2, :mod:`salon_digest`)      Открыть салон
 ======  ===========================================  ======================================
 
 Кнопки-решения — колбэки ``cb:salon:n:<kind>:<ref>:<action>``
@@ -55,7 +56,7 @@ from apps.channels.max.staff_outbound import MANAGER, StaffSendResult, send_to_s
 
 logger = logging.getLogger(__name__)
 
-KINDS: tuple[str, ...] = ("handoff", "schedule", "sync", "master_off", "booking")
+KINDS: tuple[str, ...] = ("handoff", "schedule", "sync", "master_off", "booking", "digest")
 CB_PREFIX = "cb:salon:n:"
 #: Семь дней: дольше события такого рода не живут (заявка решается за день,
 #: синк чинится за часы), короче — повтор beat-задачи прислал бы дубль.
@@ -598,6 +599,27 @@ def booking_attention_notice(
     )
 
 
+# ── тип 6 — утренний итог ────────────────────────────────────────────
+
+
+def digest_notice(tenant: Any, *, local_date: date, lines: list[str]) -> SalonNotice:
+    """Тип 6: «Доброе утро! Итог на 22.09:» + строки сводки приветствия (DRF-2114).
+
+    ``ref`` — местная дата салона: один итог в день на салон, и дата в
+    поясе салона, не UTC (Владивосток встречает 22-е, когда в UTC ещё 21-е).
+    """
+
+    return SalonNotice(
+        kind="digest",
+        tenant=tenant,
+        ref=local_date.isoformat(),
+        title=f"Доброе утро! Итог на {local_date.strftime('%d.%m')}:",
+        facts=tuple(lines),
+        buttons=_door("Открыть салон", "admin/today"),
+        log={"date": local_date.isoformat()},
+    )
+
+
 __all__ = [
     "BOOKING_REASON_HUMAN",
     "Button",
@@ -610,6 +632,7 @@ __all__ = [
     "SalonNotice",
     "booking_attention_notice",
     "callback",
+    "digest_notice",
     "handoff_waiting_notice",
     "master_unavailable_notice",
     "notify",

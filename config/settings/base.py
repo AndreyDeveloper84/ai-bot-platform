@@ -1273,9 +1273,13 @@ CELERY_WORKER_PREFETCH_MULTIPLIER = 1
 # DRF-1054/1056: apps.llm holds no models and is deliberately not a
 # Django app (see apps/llm/__init__.py), so its beat task needs the same
 # explicit registration.
+# DRF-2118: «утренний итог» салонного бота живёт рядом с рендерером
+# уведомлений (apps.channels.max.salon_digest), не в tasks.py — воркеру
+# нужна та же явная регистрация.
 CELERY_IMPORTS = (
     "apps.integrations.yclients.tasks",
     "apps.llm.tasks",
+    "apps.channels.max.salon_digest",
 )
 
 # Live Shadow Activation (Stage 1 pre-flight) — dedicated queue for the
@@ -1596,6 +1600,17 @@ CELERY_BEAT_SCHEDULE = {
         "task": "nutrition_proactive.send_coach_hints",
         "schedule": crontab(minute="40", hour="7"),
     },
+    # DRF-2118 (тип 6) — «утренний итог» владельцу/админу салона от
+    # салонного бота. Ежечасно в :50 — свободно от :00 / :05 / :20 / :37 /
+    # :40; планировщик сверяет МЕСТНЫЙ час каждого салона
+    # (Tenant.features["morning_digest_hour"], иначе 09:00 по
+    # Tenant.timezone) и отбрасывает остальные 23 тика; квота 1/день на
+    # салон — дедуп по местной дате. No-op, пока SALON_MORNING_DIGEST_ENABLED
+    # (ниже) False — включение на стенде через env, не деплой.
+    "salon_notify.send_morning_digests": {
+        "task": "salon_notify.send_morning_digests",
+        "schedule": crontab(minute="50"),
+    },
     # DRF-1111 + DRF-1161 — mirror ↔ canon reconciliation detector.
     # Compares live bookings in Ayla against RemoteBookingProxy per
     # tenant, identifier by identifier; divergence logs every tick and
@@ -1696,6 +1711,14 @@ NUTRITION_PROACTIVE_ENABLED = os.environ.get("NUTRITION_PROACTIVE_ENABLED", "fal
 NUTRITION_PROACTIVE_DRY_RUN = os.environ.get("NUTRITION_PROACTIVE_DRY_RUN", "true").lower() not in (
     "false",
     "0",
+)
+
+# DRF-2118 (тип 6): выключатель «утреннего итога» салонного бота. False по
+# умолчанию — beat-тик отвечает {"disabled": 1}; включение на стенде — env,
+# по слову владельца. Час и пояс — у салона (см. apps.channels.max.salon_digest).
+SALON_MORNING_DIGEST_ENABLED = os.environ.get("SALON_MORNING_DIGEST_ENABLED", "false").lower() in (
+    "true",
+    "1",
 )
 
 # DRF-1464 - the two switches in front of the AI dietologist
