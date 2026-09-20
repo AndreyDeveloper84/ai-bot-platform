@@ -60,6 +60,11 @@ G4_POSITIVE = (
     "не чувствую половину лица, речь заплетается",
     "внезапно отнялась рука и нога справа",
     "Лицо перекосило, но я не хочу обсуждать здоровье",
+    "Речь заплетается",
+    "Не могу выговорить слова",
+    "Не вижу левым глазом",
+    "внезапно опустился уголок рта",
+    "отнялась рука",
 )
 
 #: Post-procedure — the procedure next to the sign does not soften it.
@@ -79,6 +84,28 @@ G4_RECENT_RESOLVED = (
     "Правая рука внезапно онемела, но уже отпустило",
     "10 минут назад перекосило лицо и речь была невнятной, сейчас прошло",
     "речь нарушилась, но уже прошло",
+    "Внезапно перекосило лицо, сейчас прошло",
+    "Резко пропало зрение, затем восстановилось",
+    "Внезапно потеряла равновесие, сейчас лучше",
+)
+
+#: Review 20.09 — four false-positive boundaries, fixed in the detector:
+#: (1) side + weakness / numbness needs a SUDDEN marker; (2) cosmetic / lifelong
+#: «асимметрия лица» is not facial droop; (3) bare «не могу говорить» is
+#: availability / channel choice, not a speech sign; (4) «перестал видеть» /
+#: «не вижу» count only with the eye / vision named. None of these is G4, none is
+#: any red flag, none gets the emergency text.
+G4_FALSE_POSITIVE_REGRESSION = (
+    "Слабость в правой руке после тренировки",
+    "Правая рука устала после работы",
+    "Хочу исправить асимметрию лица",
+    "Асимметрия лица с детства",
+    "Не могу сейчас говорить, я на работе",
+    "Не могу говорить по телефону, напишите",
+    "Перестал видеть эффект от массажа",
+    "Не вижу свободных окон",
+    "Не вижу результата после процедуры",
+    "Не вижу смысла менять мастера",
 )
 
 #: Negation attached to the sign word, lexical false friends, hypothetical future.
@@ -107,6 +134,10 @@ G4_LEGACY_PREEMPTED = (
     "Онемения и слабости нет",
     "Иногда немеет рука",
     "немеет рука иногда",
+    # non-sudden one-sided numbness: not G4 by §164 (no sudden marker), still a red
+    # flag by the DRF-973 «онемел… / немеет» rule — proven, not hidden.
+    "Немеет левая рука по утрам",
+    "Онемела правая нога после долгого сидения",
 )
 
 #: [OD-BOT §164] — the one routing question, verbatim. Contract only: not asked
@@ -161,6 +192,33 @@ class TestDetectG4:
     def test_legacy_preempted_phrases_are_not_attributed_to_g4(self, text: str) -> None:
         """The detector itself is right about these; the older rule is what fires."""
         assert detect_g4(text) is False
+        assert classify(text) is PainSignal.RED_FLAG  # by DRF-973, proven here
+
+
+class TestFalsePositiveRegression:
+    """Review 20.09 — the four boundaries; each phrase is neither G4 nor any red
+    flag, so it never reaches the emergency text by any rule."""
+
+    @pytest.mark.parametrize("text", G4_FALSE_POSITIVE_REGRESSION)
+    def test_not_g4(self, text: str) -> None:
+        assert detect_g4(text) is False
+
+    @pytest.mark.parametrize("text", G4_FALSE_POSITIVE_REGRESSION)
+    def test_not_a_red_flag_by_any_rule(self, text: str) -> None:
+        assert classify(text) is PainSignal.NONE
+
+    @pytest.mark.parametrize("text", G4_FALSE_POSITIVE_REGRESSION)
+    def test_no_g4_label_and_no_emergency_text(self, text: str) -> None:
+        skill = HealthScreeningSkill()
+        context = _context(text)
+        assert skill.matches(context) is False
+        result = skill.handle(context)
+        assert result.reply_text != MEDICAL_EMERGENCY_TEXT_V2
+        assert result.meta.get("s1_group") != "G4"
+
+    @pytest.mark.parametrize("text", G4_FALSE_POSITIVE_REGRESSION)
+    def test_stays_negative_in_a_long_message(self, text: str) -> None:
+        assert detect_g4(LONG_PREFIX + text) is False
 
     def test_empty_and_non_string(self) -> None:
         assert detect_g4("") is False
@@ -322,6 +380,14 @@ class TestKnownGaps:
     )
     def test_negated_numbness_is_not_a_red_flag(self) -> None:
         assert classify("Онемения и слабости нет") is not PainSignal.RED_FLAG
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason="DRF-973 numbness rule fires on non-sudden one-sided numbness; §164 would "
+        "route it to the question, not STOP (gap)",
+    )
+    def test_non_sudden_side_numbness_is_not_a_red_flag(self) -> None:
+        assert classify("Немеет левая рука по утрам") is not PainSignal.RED_FLAG
 
     @pytest.mark.xfail(
         strict=True,

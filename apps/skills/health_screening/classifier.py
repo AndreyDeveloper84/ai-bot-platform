@@ -405,56 +405,93 @@ _G4_SUDDEN = (
     r"(?:внезапн\w*|резко|вдруг|неожиданно|в\s+один\s+момент|ни\s+с\s+того\s+ни\s+с\s+сего)"
 )
 #: One side — the §164 discriminator for weakness / numbness / loss of movement.
+#: A named side is NOT sufficient on its own: §164 says «внезапная односторонняя»,
+#: so a side + motor sign needs a SUDDEN marker in the sentence («слабость в правой
+#: руке после тренировки» is not G4). Only the hemibody distribution («половина
+#: лица / тела» + neuro word) keeps the pre-existing DRF-2004 acute-by-wording
+#: reading — that boundary predates this detector and is not widened here.
 _G4_SIDE = (
     r"(?:прав(?:ая|ую|ой|ые|ой)|лев(?:ая|ую|ой|ые)|справа|слева"
     r"|(?:с\s+)?одн(?:ой|а|у)\s+сторон\w*|половин\w+\s+(?:тела|лица))"
 )
+_G4_HEMI = r"(?:половин\w+\s+(?:тела|лица))"
 #: Weakness / numbness / loss of movement or sensation — the verb or noun forms.
 _G4_MOTOR = (
     r"(?:онемел\w*|онемени\w*|немеет|не\s+чувству\w*|ослаб\w*|слабост\w*|отнял\w*"
     r"|не\s+двига\w*|не\s+слушает\w*|повисл\w*|парализ\w*|обвисл\w*"
     r"|потерял\w*\s+чувствит\w*|перестал\w*\s+(?:двигаться|чувствовать|слушаться))"
 )
-#: A. one-sided motor / sensory sign — either order, same sentence.
+#: A. one-sided motor / sensory sign — either order, same sentence — read only
+#: with a SUDDEN marker in that sentence (``needs_sudden`` in :func:`detect_g4`).
 _G4_SIDE_MOTOR = re.compile(
     _G4_SIDE + r"[^.!?;]{0,40}?" + _G4_MOTOR + r"|" + _G4_MOTOR + r"[^.!?;]{0,40}?" + _G4_SIDE,
     re.IGNORECASE,
 )
 _G4_MOTOR_TOKEN = re.compile(_G4_MOTOR, re.IGNORECASE)
-#: A'. sudden weakness / numbness without a named side (kept from the flat list).
+#: A''. hemibody / hemiface + neuro word — acute by wording (DRF-2004 pattern kept
+#: as it was: «не чувствую половину лица, речь заплетается» is the matrix phrase).
+_G4_HEMI_MOTOR = re.compile(
+    _G4_HEMI + r"[^.!?;]{0,30}?" + _G4_MOTOR + r"|" + _G4_MOTOR + r"[^.!?;]{0,30}?" + _G4_HEMI,
+    re.IGNORECASE,
+)
+#: A'. sudden weakness / numbness without a named side, and «отнялась рука / нога»
+#: (both kept from the flat DRF-2004 list). «отняться» + a limb is acute by its
+#: lexical meaning — a sudden loss of function, never a chronic state; the
+#: negative boundary is a non-body object («отнялась суббота») and the unrelated
+#: verb «отнимает время», neither of which matches.
 _G4_SUDDEN_MOTOR = re.compile(
     r"\bвнезапн\w+\s+(?:слабость|онемени\w*)|\bотнял(?:ась|ся|ись)\s+(?:рука|нога|руки|ноги|лицо|язык)"
     r"|\b(?:рука|нога|руки|ноги)\s+отнял\w+",
     re.IGNORECASE,
 )
-#: B. face droop — unconditional (an acute sign by wording).
-_G4_FACE = r"(?:перекосил\w*|перекошен\w*|скосил\w*|опустил\w*\s+(?:уголок|угол)|асимметри\w+)"
+#: B. face droop — «перекосило лицо» is unconditional (an acute sign by wording).
+#: «асимметрия лица» is NOT here: it is a cosmetic / lifelong description («хочу
+#: исправить асимметрию лица», «асимметрия лица с детства»), not the registered
+#: boundary. A dropped corner of the mouth counts only with a SUDDEN marker.
+_G4_FACE = r"(?:перекосил\w*|перекошен\w*|скосил\w*)"
 _G4_FACE_SIGN = re.compile(
     _G4_FACE + r"[^.!?;]{0,25}?\b(?:лиц\w*|рот|рта|губ\w*|половин\w+\s+лица)\b"
     r"|\b(?:лицо|рот|половин\w+\s+лица|уголок\s+рта|угол\s+рта)\b[^.!?;]{0,25}?" + _G4_FACE,
     re.IGNORECASE,
 )
 _G4_FACE_TOKEN = re.compile(_G4_FACE, re.IGNORECASE)
+_G4_FACE_CORNER = re.compile(
+    r"(?:опустил\w*|обвис\w*|провис\w*)\s+(?:уголок|угол)\s+(?:рта|губ\w*)"
+    r"|(?:уголок|угол)\s+(?:рта|губ\w*)\s+(?:опустил\w*|обвис\w*|провис\w*)",
+    re.IGNORECASE,
+)
 #: C. speech — unconditional (§164 «нарушение речи»); «речь идёт о …» is not a sign.
+#: Only forms that describe the FORMING of speech: «речь невнятная / заплетается»,
+#: «не могу выговорить / произнести (слова)», «не могу внятно говорить». A bare
+#: «не могу говорить» is availability or channel choice («не могу сейчас говорить,
+#: я на работе», «не могу говорить по телефону») and is not a sign.
 _G4_SPEECH = (
     r"(?:реч\w*\s+(?:(?!не\b|ни\b|нет\b)[\w-]+\s+){0,2}(?:невнятн\w*|нарушил\w*|нарушен\w*|заплета\w*|пропал\w*|не\s+получ\w*)"
     r"|(?:невнятн\w+|заплетающ\w+|нарушен\w+)\s+реч\w*|нарушени\w*\s+речи"
-    r"|язык\s+заплета\w*|не\s+могу\s+(?:говорить|выговорить|произнести)"
+    r"|язык\s+заплета\w*|(?:не\s+могу|не\s+получается)\s+(?:выговорить|произнести)"
+    r"|не\s+могу\s+(?:нормально|внятно|ч[её]тко)\s+говорить|говорю\s+невнятно"
     r"|не\s+выговарива\w*|путаю\s+слова|слова\s+не\s+выговарива\w*)"
 )
 _G4_SPEECH_SIGN = re.compile(_G4_SPEECH, re.IGNORECASE)
 #: D. vision — needs a SUDDEN marker in the sentence, except the monocular / total
-#: loss forms that are acute by wording.
+#: loss forms that are acute by wording. «перестал видеть» and «не вижу» are NOT
+#: signs on their own («перестал видеть эффект», «не вижу свободных окон», «не вижу
+#: смысла»): they count only with the eye / vision named right after them.
+_G4_EYE = r"(?:(?:одним|левым|правым|одним)\s+глазом|глаз\w*|зрени\w*)"
 _G4_VISION = (
     r"(?:пропал\w*\s+зрени\w*|зрени\w*\s+(?:пропал\w*|исчезл\w*|упал\w*|потерял\w*)"
-    r"|потерял\w*\s+зрени\w*|перестал\w*\s+видеть|не\s+вижу|двоится|двоение|двоиться"
+    r"|потерял\w*\s+зрени\w*|перестал\w*\s+видеть\s+(?:[\w-]+\s+)?"
+    + _G4_EYE
+    + r"|не\s+вижу\s+(?:одним|левым|правым)\s+глазом|двоится|двоение|двоиться"
     r"|потемнел\w*\s+в\s+глазах|расплыва\w*|размыт\w*|туман\s+(?:в\s+глазах|перед\s+глазами)"
     r"|пелена\s+(?:в\s+глазах|перед\s+глазами)|нарушени\w*\s+зрения|зрени\w*\s+нарушил\w*)"
 )
 _G4_VISION_SIGN = re.compile(_G4_VISION, re.IGNORECASE)
 _G4_VISION_ACUTE = re.compile(
     r"(?:пропал\w*\s+зрени\w*|зрени\w*\s+(?:пропал\w*|исчезл\w*)|потерял\w*\s+зрени\w*"
-    r"|перестал\w*\s+видеть|не\s+вижу\s+(?:одним|левым|правым)\s+глазом)",
+    r"|перестал\w*\s+видеть\s+(?:[\w-]+\s+)?"
+    + _G4_EYE
+    + r"|не\s+вижу\s+(?:одним|левым|правым)\s+глазом)",
     re.IGNORECASE,
 )
 #: E. balance / coordination — needs a SUDDEN marker in the sentence.
@@ -552,9 +589,11 @@ def detect_g4(text: str) -> bool:
         return False
     lower = _mask_not_pain(text.strip().lower())
     return (
-        _g4_live(lower, _G4_SIDE_MOTOR, _G4_MOTOR_TOKEN)
+        _g4_live(lower, _G4_SIDE_MOTOR, _G4_MOTOR_TOKEN, needs_sudden=True)
+        or _g4_live(lower, _G4_HEMI_MOTOR, _G4_MOTOR_TOKEN)
         or _g4_live(lower, _G4_SUDDEN_MOTOR)
         or _g4_live(lower, _G4_FACE_SIGN, _G4_FACE_TOKEN)
+        or _g4_live(lower, _G4_FACE_CORNER, needs_sudden=True)
         or _g4_live(lower, _G4_SPEECH_SIGN)
         or _g4_live(lower, _G4_VISION_SIGN, needs_sudden=True, acute=_G4_VISION_ACUTE)
         or _g4_live(lower, _G4_BALANCE_SIGN, needs_sudden=True)
