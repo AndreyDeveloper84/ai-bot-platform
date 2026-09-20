@@ -9202,3 +9202,32 @@ a {
 .booking-detail__state--bare {
   margin: 0;
 }
+
+/* DRF-2194 — линия текущего времени на шкале «Расписания» (макет DRF-1183:
+   тонкая красная линия с подписью времени; «всегда видно, но не отвлекает»). */
+.schedule-now {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  margin: var(--s-1) 0;
+  color: var(--c-danger);
+}
+.schedule-now__time {
+  font-size: var(--font-size-100);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.schedule-now__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  flex-shrink: 0;
+}
+.schedule-now__line {
+  flex: 1;
+  height: 1px;
+  background: currentColor;
+  opacity: 0.8;
+}

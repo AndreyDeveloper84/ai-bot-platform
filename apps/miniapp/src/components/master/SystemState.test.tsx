@@ -60,6 +60,10 @@ describe("словарь — дословно по DRF-1181 п.10", () => {
         ownServices: "свои услуги",
         subscription: "подписку",
         payout: "выплаты",
+        // DRF-2194
+        publication: "статус публикации",
+        setup: "чек-лист настройки",
+        workingHours: "рабочие часы",
       },
     });
     expect(SYSTEM_STATE_COPY.forbidden).toEqual({

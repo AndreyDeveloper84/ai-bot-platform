@@ -10,7 +10,7 @@
  * - связь личности — отдельная строка, до LINKED слова «опубликован» нет;
  * - всё настроено — «Открыть кабинет».
  */
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -240,5 +240,22 @@ describe("экран 01", () => {
     mockedReadiness.mockResolvedValue(FRESH);
     renderScreen();
     expect(await screen.findByRole("heading", { name: "Всё готово 👋" })).toBeInTheDocument();
+  });
+});
+
+describe("системные состояния через SystemState (DRF-2194)", () => {
+  it("загрузка — общий скелет без слов", () => {
+    mockedReadiness.mockReturnValue(new Promise(() => {}));
+    renderScreen();
+    expect(screen.getByRole("status", { busy: true })).toBeInTheDocument();
+  });
+
+  it("ошибка — «Не удалось загрузить чек-лист настройки» + «Попробовать снова»", async () => {
+    mockedReadiness.mockRejectedValueOnce(new Error("boom"));
+    renderScreen();
+    expect(await screen.findByRole("alert")).toHaveTextContent("Не удалось загрузить чек-лист настройки");
+    expect(screen.queryByText(/Не получилось загрузить/)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Попробовать снова" }));
+    await waitFor(() => expect(mockedReadiness).toHaveBeenCalledTimes(2));
   });
 });

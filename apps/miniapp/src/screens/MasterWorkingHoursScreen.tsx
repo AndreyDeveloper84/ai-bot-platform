@@ -24,9 +24,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { SheetChrome } from "../components/PersonalDataSheets";
-import { DelayedSkeleton, ServiceCardSkeleton } from "../components/Skeleton";
 import { Snackbar } from "../components/Snackbar";
-import { StateError } from "../components/StateError";
+// Загрузка / ошибка загрузки — мастерский SystemState (DRF-2194), не клиентский StateError.
+import { SystemState } from "../components/master/SystemState";
 import { ToggleSwitch } from "../components/ToggleSwitch";
 import { ApiError } from "../lib/api";
 import {
@@ -67,6 +67,8 @@ export const NOT_LINKED_MESSAGE =
 type Phase =
   | { kind: "loading" }
   | { kind: "error"; err: unknown }
+  /** Профиль ещё не связан с каталогом — этап жизни, не отказ прав (DRF-2194). */
+  | { kind: "not_linked" }
   | { kind: "ready"; timezone: string | null };
 
 export type WeekDraft = WorkingHoursDay[];
@@ -149,6 +151,12 @@ export function MasterWorkingHoursScreen() {
       setWeek(weekFrom(data.schedule));
       setPhase({ kind: "ready", timezone: data.timezone });
     } catch (err) {
+      // 403 not_linked на загрузке — свой текст экрана, как на save и как у
+      // Place/Directions; иначе общий SystemState прочитал бы его как «Недостаточно прав».
+      if (err instanceof ApiError && err.status === 403) {
+        setPhase({ kind: "not_linked" });
+        return;
+      }
       setPhase({ kind: "error", err });
     }
   }, []);
@@ -206,17 +214,23 @@ export function MasterWorkingHoursScreen() {
   if (phase.kind === "loading") {
     return (
       <main className="screen working-hours">
-        <DelayedSkeleton loading>
-          <ServiceCardSkeleton />
-          <ServiceCardSkeleton />
-        </DelayedSkeleton>
+        <SystemState kind="loading" lines={2} />
+      </main>
+    );
+  }
+  if (phase.kind === "not_linked") {
+    return (
+      <main className="screen working-hours">
+        <p className="callout" role="status">
+          {NOT_LINKED_MESSAGE}
+        </p>
       </main>
     );
   }
   if (phase.kind === "error") {
     return (
       <main className="screen working-hours">
-        <StateError err={phase.err} onRetry={() => void load()} />
+        <SystemState kind="load_error" what="workingHours" err={phase.err} onRetry={() => void load()} />
       </main>
     );
   }

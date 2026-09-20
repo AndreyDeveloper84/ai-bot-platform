@@ -23,8 +23,8 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
-import { DelayedSkeleton, ServiceCardSkeleton } from "../components/Skeleton";
-import { StateError } from "../components/StateError";
+// Загрузка / ошибка загрузки — мастерский SystemState (DRF-2194), не клиентский StateError.
+import { SystemState } from "../components/master/SystemState";
 import {
   drawnReadinessItems,
   getMasterMe,
@@ -118,11 +118,7 @@ export function MasterSetupLandingScreen() {
   if (phase.kind === "loading") {
     return (
       <main className="screen setup-landing">
-        <DelayedSkeleton loading>
-          <ServiceCardSkeleton />
-          <ServiceCardSkeleton />
-          <ServiceCardSkeleton />
-        </DelayedSkeleton>
+        <SystemState kind="loading" lines={3} />
       </main>
     );
   }
@@ -130,7 +126,7 @@ export function MasterSetupLandingScreen() {
   if (phase.kind === "error") {
     return (
       <main className="screen setup-landing">
-        <StateError err={phase.err} onRetry={() => void load()} />
+        <SystemState kind="load_error" what="setup" err={phase.err} onRetry={() => void load()} />
       </main>
     );
   }
