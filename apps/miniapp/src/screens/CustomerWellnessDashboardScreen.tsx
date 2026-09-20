@@ -151,18 +151,6 @@ type ActiveGoal = NonNullable<WellnessToday["active_goals"]>[number];
 export const DIARY_CONSENT_CARD_TEXT = "Чтобы вести дневник, нужно согласие — дай его в чате с Ayla";
 export const DIARY_CONSENT_CARD_CTA = "Дать согласие в чате";
 
-/**
- * Нижняя панель — ровно пять вкладок по макету H01 (решение владельца §55 б).
- * `route: null` — эта вкладка и есть текущий экран. Порядок и подписи —
- * договор со сторожем (h01-тест) и с макетом; менять их — новое решение.
- */
-export const HOME_TABS: ReadonlyArray<{ label: string; icon: string; route: string | null }> = [
-  { label: "Главная", icon: "🏠", route: null },
-  { label: "План", icon: "📋", route: PLAN_LITE_ROUTE },
-  { label: "Дневник", icon: "📔", route: "/customer/food-scanner/diary" },
-  { label: "Записи", icon: "📅", route: "/customer/records" },
-  { label: "Профиль", icon: "👤", route: "/customer/profile" },
-];
 
 // ---------------------------------------------------------------------------
 // Loading + error state model — per-block isolation for «Partial» state
