@@ -264,6 +264,36 @@ describe("H01 · план", () => {
 // ---------------------------------------------------------------------------
 
 describe("H01 · ближайшая запись", () => {
+  // DRF-2172 — «3 200 ₽» справа в карточке (макет DRF-1321): цена — снимок
+  // на момент записи из `next_booking.price`; null / ниже 1 ₽ → строки нет
+  // (§103, DRF-1989), «0 ₽» не рисуется.
+  it("DRF-2172: с ценой — «3 200 ₽» в карточке, формат как у услуг каталога", async () => {
+    const withPrice = { ...(NEXT_BOOKING.next_booking as Record<string, unknown>), price: "3200.00" };
+    serve({ activity: { ...NEXT_BOOKING, next_booking: withPrice } });
+    renderHome();
+
+    const heading = await screen.findByRole("heading", { name: "Ближайшая запись" });
+    const block = heading.closest("section") as HTMLElement;
+    expect(within(block).getByText("3 200 ₽")).toBeInTheDocument();
+  });
+
+  it.each([
+    ["null", null],
+    ["ключа нет", undefined],
+    ["«0.00»", "0.00"],
+  ])("DRF-2172: цена %s — строки с ₽ в карточке нет, не «0 ₽»", async (_label, price) => {
+    const nb: Record<string, unknown> = { ...(NEXT_BOOKING.next_booking as Record<string, unknown>) };
+    if (price === undefined) delete nb.price;
+    else nb.price = price;
+    serve({ activity: { ...NEXT_BOOKING, next_booking: nb } });
+    renderHome();
+
+    const heading = await screen.findByRole("heading", { name: "Ближайшая запись" });
+    const block = heading.closest("section") as HTMLElement;
+    expect(within(block).getByText(/Лимфодренажный массаж/)).toBeInTheDocument();
+    expect(block.textContent ?? "").not.toMatch(/₽/);
+  });
+
   it("нет записи — «Записей нет» и «Записаться» → каталог", async () => {
     serve();
     renderHome();

@@ -157,6 +157,20 @@ describe("CustomerRecordsScreen (real data)", () => {
     }
   });
 
+  it("DRF-2172: цена записи «3 200 ₽» на карточке; без цены строки нет, не «0 ₽»", async () => {
+    mockLists([
+      booking({ id: "b-p1", service_name: "Лимфодренаж", price: "3200.00", visit_at: isoInHours(20) }),
+      booking({ id: "b-p2", service_name: "Пилинг", price: null, visit_at: isoInHours(40) }),
+      booking({ id: "b-p3", service_name: "Консультация", price: "0.00", visit_at: isoInHours(60) }),
+    ]);
+    renderScreen();
+
+    expect(await screen.findByText("3 200 ₽")).toBeInTheDocument();
+    // Ровно одна строка с ₽ — у той записи, где цена есть.
+    expect(screen.getAllByText(/₽/)).toHaveLength(1);
+    expect(screen.queryByText(/^0 ₽$/)).not.toBeInTheDocument(); // «3 200 ₽» содержит «0 ₽» — якорим
+  });
+
   it("renders real upcoming bookings with tab counts and status badges", async () => {
     mockLists();
     renderScreen();
