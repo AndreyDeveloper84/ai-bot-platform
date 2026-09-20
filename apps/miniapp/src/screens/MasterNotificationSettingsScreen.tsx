@@ -86,6 +86,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
+import { SystemState } from "../components/master/SystemState";
 import { MasterTabBar } from "../components/MasterTabBar";
 import { Snackbar } from "../components/Snackbar";
 import { ApiError } from "../lib/api";
@@ -172,13 +173,7 @@ const COPY = {
     save: "Сохранить",
     cancel: "Отмена",
   },
-  states: {
-    loading: "Загружаем настройки…",
-    errorTitle: "Не получилось загрузить",
-    errorBody:
-      "Не получилось загрузить настройки уведомлений. Проверьте интернет.",
-    retry: "Попробовать снова",
-  },
+  // Загрузка / ошибка загрузки — SystemState (DRF-2190, словарь DRF-1181 п.10).
 };
 
 // --- State model --------------------------------------------------------
@@ -370,14 +365,19 @@ export function MasterNotificationSettingsScreen() {
   if (phase.kind === "loading") {
     return (
       <NotifFrame>
-        <LoadingSkeleton />
+        <SystemState kind="loading" lines={5} />
       </NotifFrame>
     );
   }
   if (phase.kind === "error") {
     return (
       <NotifFrame>
-        <ErrorPane onRetry={() => void fetchPrefs()} />
+        <SystemState
+          kind="load_error"
+          what="notifications"
+          err={phase.err}
+          onRetry={() => void fetchPrefs()}
+        />
       </NotifFrame>
     );
   }
@@ -702,41 +702,5 @@ function OfflineBanner() {
     >
       <p style={{ margin: 0 }}>{COPY.banners.offline}</p>
     </div>
-  );
-}
-
-function LoadingSkeleton() {
-  return (
-    <div className="m-notif__skeleton-wrap" aria-busy="true">
-      <p className="m-notif__loading-label">{COPY.states.loading}</p>
-      {[0, 1, 2, 3, 4].map((i) => (
-        <div key={i} className="m-card m-card--skel">
-          <div
-            className="skeleton"
-            style={{ width: "55%", height: "1em" }}
-          />
-          <div
-            className="skeleton"
-            style={{ width: "75%", height: "0.85em", marginTop: 6 }}
-          />
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function ErrorPane({ onRetry }: { onRetry: () => void }) {
-  return (
-    <section className="m-notif__section">
-      <h2 className="m-notif__section-title">{COPY.states.errorTitle}</h2>
-      <div className="callout callout--danger" role="alert">
-        <p style={{ margin: 0 }}>{COPY.states.errorBody}</p>
-        <div style={{ marginTop: "var(--s-3)" }}>
-          <button type="button" className="btn-secondary" onClick={onRetry}>
-            {COPY.states.retry}
-          </button>
-        </div>
-      </div>
-    </section>
   );
 }

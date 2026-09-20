@@ -41,27 +41,22 @@ const ANALOGS: readonly string[] = [
   '"Загружаем ',
   '"Проверяем результат',
   '"Недостаточно прав',
+  // Ruling §61 М-6 е: кнопка повтора загрузки — «Попробовать снова»; своя
+  // подпись у экрана — второй словарь.
+  '"Повторить"',
 ];
 
 /**
- * Снимается листом М-6b: экраны вне раздела Сегодня · Расписание · Детали,
- * ещё живущие своими текстами. Убирай строку, как только экран переписан —
- * иначе тест напомнит.
+ * Остаток baseline после М-6b: переписки мастера с клиентом и со студией —
+ * НЕ переписываются, они под снятие (DRF-1255); строки уйдут вместе с
+ * файлами, тест напомнит («экрана больше нет»). Всё остальное — через
+ * SystemState.
  */
 const BASELINE_M6B: ReadonlySet<string> = new Set([
-  "MasterBillingScreen",
-  "MasterConversationDetailScreen",
-  "MasterConversationsScreen",
-  "MasterCustomersScreen",
-  "MasterDirectionsScreen",
-  "MasterInternalChatListScreen",
-  "MasterInternalChatThreadScreen",
-  "MasterNotificationSettingsScreen",
-  "MasterOnboardingScreen",
-  "MasterPlaceScreen",
-  "MasterProfileScreen",
-  "MasterServiceSelectScreen",
-  "MasterServicesScreen",
+  "MasterConversationDetailScreen", // под снятие DRF-1255
+  "MasterConversationsScreen", // под снятие DRF-1255
+  "MasterInternalChatListScreen", // под снятие DRF-1255
+  "MasterInternalChatThreadScreen", // под снятие DRF-1255
 ]);
 
 /**
@@ -70,6 +65,9 @@ const BASELINE_M6B: ReadonlySet<string> = new Set([
  */
 const DOMAIN_ALLOW: Readonly<Record<string, readonly string[]>> = {
   MasterProfileScreen: ['"Не получилось загрузить фото'],
+  // «Повторить» отправку профиля после отказа каталога — действие экрана,
+  // не повтор загрузки (ошибку загрузки экран рисует общим StateError).
+  MasterPublicationScreen: ['"Повторить"'],
 };
 
 function screenName(path: string): string {

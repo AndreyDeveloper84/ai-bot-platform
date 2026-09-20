@@ -30,7 +30,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 
-import { ApiError } from "../lib/api";
+import { SystemState } from "../components/master/SystemState";
 import { getMasterCustomers, type MasterCustomer } from "../lib/master-api";
 import { formatRelativePast } from "../lib/masterDateFormat";
 
@@ -43,8 +43,7 @@ const COPY = {
   sectionActive: (n: number) => `Активные (${n})`,
   sectionAtRisk: (n: number) => `Давно не были (${n})`,
   empty: "Здесь будет твой пул клиентов. Накопится после первых записей.",
-  errorTitle: "Не получилось загрузить клиентов",
-  retry: "Попробовать снова",
+  // Загрузка / ошибка — SystemState (DRF-2190, словарь DRF-1181 п.10).
   lostHint: "⚠ Возможно, ушла",
   returningCustomer: "постоянный клиент",
   visitsSuffix: (n: number) => {
@@ -110,14 +109,12 @@ function CustomerCard({
 
 function Skeleton() {
   return (
-    <div className="screen master-customers" aria-busy="true">
+    <div className="screen master-customers">
       <header className="master-customers__header">
         <h1>{COPY.title}</h1>
       </header>
       <div className="master-customers__body">
-        {[1, 2, 3].map((i) => (
-          <div key={i} className="skeleton customer-card customer-card--skel" />
-        ))}
+        <SystemState kind="loading" />
       </div>
     </div>
   );
@@ -136,27 +133,13 @@ function EmptyState({ text }: { text: string }) {
   );
 }
 
-function ErrorBanner({
-  message,
-  onRetry,
-}: {
-  message: string;
-  onRetry: () => void;
-}) {
+function ErrorBanner({ err, onRetry }: { err: unknown; onRetry: () => void }) {
   return (
     <div className="screen master-customers">
       <header className="master-customers__header">
         <h1>{COPY.title}</h1>
       </header>
-      <div className="callout callout--danger" role="alert">
-        <p>{COPY.errorTitle}</p>
-        <p style={{ fontSize: "var(--font-size-100)", opacity: 0.7 }}>
-          {message}
-        </p>
-        <button type="button" className="btn-secondary" onClick={onRetry}>
-          {COPY.retry}
-        </button>
-      </div>
+      <SystemState kind="load_error" what="customers" err={err} onRetry={onRetry} />
     </div>
   );
 }
@@ -165,7 +148,7 @@ function ErrorBanner({
 
 export function MasterCustomersScreen() {
   const [customers, setCustomers] = useState<MasterCustomer[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<unknown>(null);
   const [reloadKey, setReloadKey] = useState(0);
 
   useEffect(() => {
@@ -179,11 +162,7 @@ export function MasterCustomersScreen() {
       })
       .catch((e: unknown) => {
         if (cancelled) return;
-        const msg =
-          e instanceof ApiError
-            ? e.detail || e.slug
-            : "Сеть недоступна";
-        setError(msg);
+        setError(e);
       });
     return () => {
       cancelled = true;
@@ -203,13 +182,8 @@ export function MasterCustomersScreen() {
     return { active: a, atRisk: r };
   }, [customers]);
 
-  if (error) {
-    return (
-      <ErrorBanner
-        message={error}
-        onRetry={() => setReloadKey((k) => k + 1)}
-      />
-    );
+  if (error !== null) {
+    return <ErrorBanner err={error} onRetry={() => setReloadKey((k) => k + 1)} />;
   }
   if (customers === null) return <Skeleton />;
   if (customers.length === 0) return <EmptyState text={COPY.empty} />;

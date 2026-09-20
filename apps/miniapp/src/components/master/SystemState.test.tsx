@@ -43,7 +43,24 @@ describe("словарь — дословно по DRF-1181 п.10", () => {
     expect(SYSTEM_STATE_COPY.load_error).toEqual({
       withData: { text: "Не удалось обновить. Показаны последние данные" },
       initial: { title: "Не удалось загрузить", retry: "Попробовать снова" },
-      subjects: { today: "сегодняшний день", schedule: "расписание", booking: "запись" },
+      subjects: {
+        today: "сегодняшний день",
+        schedule: "расписание",
+        booking: "запись",
+        // М-6b
+        customers: "клиентов",
+        notifications: "настройки уведомлений",
+        invite: "приглашение",
+        directions: "направления",
+        place: "место работы",
+        profile: "профиль",
+        catalog: "каталог услуг",
+        templates: "услуги направления",
+        services: "услуги",
+        ownServices: "свои услуги",
+        subscription: "подписку",
+        payout: "выплаты",
+      },
     });
     expect(SYSTEM_STATE_COPY.forbidden).toEqual({
       title: "Недостаточно прав",

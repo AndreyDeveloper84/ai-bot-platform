@@ -569,13 +569,14 @@ describe("MasterServicesScreen — экран 04 «Цены и длительн�
   it.each([
     ["no_workspace_tenant", 409],
     ["catalog_unavailable", 503],
-  ])("S10: %s → «Не удалось загрузить услуги» and «Повторить» reloads", async (slug, status) => {
+  ])("S10: %s → «Не удалось загрузить услуги» and «Попробовать снова» reloads (М-6b)", async (slug, status) => {
     mockedSelection.mockRejectedValueOnce(new ApiError(status, slug, "…", { reason: slug }));
     mockedSelection.mockResolvedValueOnce(state([row("a", "Коррекция бровей")], 1, 0));
     await renderScreen();
 
-    expect(screen.getByText("Не удалось загрузить услуги.")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Повторить" }));
+    expect(screen.getByRole("alert")).toHaveTextContent("Не удалось загрузить услуги");
+    expect(screen.queryByRole("button", { name: "Повторить" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Попробовать снова" }));
     await settle();
 
     expect(mockedSelection).toHaveBeenCalledTimes(2);

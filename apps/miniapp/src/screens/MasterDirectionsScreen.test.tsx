@@ -12,7 +12,7 @@
  *   - «Продолжить» передаёт выбранное экрану 03 навигацией, а не записью.
  */
 
-import { act, configure, fireEvent, getConfig, render, screen, within } from "@testing-library/react";
+import { act, configure, fireEvent, getConfig, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -248,5 +248,22 @@ describe("«Продолжить» — навигация, не запись", (
     // Ничего не записано: ни выбора услуг, ни заявки.
     expect(mockedSelect).not.toHaveBeenCalled();
     expect(mockedCreate).not.toHaveBeenCalled();
+  });
+});
+
+describe("системные состояния через SystemState (М-6b)", () => {
+  it("загрузка — скелет без слов", () => {
+    mockedDirections.mockReturnValue(new Promise(() => {}));
+    renderScreen();
+    expect(screen.getByRole("status", { busy: true })).toBeInTheDocument();
+  });
+
+  it("ошибка — «Не удалось загрузить направления» + «Попробовать снова», повтор зовёт ручку", async () => {
+    mockedDirections.mockRejectedValueOnce(new Error("boom")).mockResolvedValueOnce({ directions: ROOTS });
+    renderScreen();
+    expect(await screen.findByRole("alert")).toHaveTextContent("Не удалось загрузить направления");
+    expect(screen.queryByRole("button", { name: "Повторить" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Попробовать снова" }));
+    await waitFor(() => expect(mockedDirections).toHaveBeenCalledTimes(2));
   });
 });
