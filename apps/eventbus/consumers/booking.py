@@ -55,6 +55,7 @@ import datetime as dt
 import logging
 from dataclasses import dataclass
 from datetime import timedelta
+from decimal import Decimal, InvalidOperation
 from typing import Any, Final, Literal
 from uuid import UUID
 
@@ -255,6 +256,34 @@ def _parse_iso(value: str) -> dt.datetime:
     ``data.end_at`` fields are JSON strings — parse here.
     """
     return dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def _parse_price_total(data: dict[str, Any], *, appointment_id: Any) -> Decimal | None:
+    """``data.price_total`` → Decimal, or ``None`` when absent / unreadable (DRF-2172).
+
+    The contract (§3.1) sends a decimal string. A missing or malformed value
+    must not fail the event — the booking itself matters more than its
+    price tag — so it is logged and stored as NULL, which the surfaces
+    render as «no price line», never as «0».
+    """
+    raw = data.get("price_total")
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return None
+    try:
+        value = Decimal(str(raw).strip())
+    except (InvalidOperation, ValueError, TypeError):
+        logger.warning(
+            "eventbus.consumer.booking.created.price_unreadable appointment_id=%s",
+            appointment_id,
+        )
+        return None
+    if not value.is_finite() or value < 0:
+        logger.warning(
+            "eventbus.consumer.booking.created.price_unreadable appointment_id=%s",
+            appointment_id,
+        )
+        return None
+    return value.quantize(Decimal("0.01"))
 
 
 def _resolve_bot_user(*, user_id: UUID, tenant: Tenant) -> BotUser | None:
@@ -875,6 +904,10 @@ def handle_booking_created(envelope: IngestEnvelope) -> None:
     specialist_uuid = UUID(data["specialist_id"]) if data.get("specialist_id") else None
     raw_source = data.get("source", "")
 
+    # DRF-2172 — the booking-time price snapshot; later events never carry
+    # or touch it, so a salon price change cannot rewrite what was agreed.
+    price_amount = _parse_price_total(data, appointment_id=appointment_id)
+
     create_defaults = {
         "tenant": tenant,
         "bot_user": bot_user,  # may be None — orphan proxy
@@ -884,6 +917,7 @@ def handle_booking_created(envelope: IngestEnvelope) -> None:
         "source": raw_source,
         "service_id": service_uuid,
         "specialist_id": specialist_uuid,
+        "price_amount": price_amount,
         "last_synced_event_id": envelope.event_id,
     }
 

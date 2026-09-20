@@ -85,6 +85,11 @@ def _error(slug: str, detail: str, status: int) -> JsonResponse:
     return JsonResponse({"error": slug, "detail": detail}, status=status)
 
 
+def _money_str(value: Decimal | None) -> str | None:
+    """Decimal → «1800.00» string for the wire; None stays None (DRF-2172)."""
+    return None if value is None else f"{value:.2f}"
+
+
 def _offer_not_sellable(reason: str) -> JsonResponse:
     """DRF-1989: каталог не продаёт предложение — 409 с причиной и словами для человека.
 
@@ -1666,6 +1671,9 @@ def _booking_to_dict(b, *, tenant, now=None) -> dict[str, Any]:
         #   null   — источник об адресе не сказал ничего. Наш пробел.
         # Ни `or ""`, ни `?? ""`: они схлопнули бы пробел в ответ салона.
         "address": tenant.address,
+        # DRF-2172 — the local BookingRequest keeps no price; the key is
+        # present so both paths share one shape, and the honest answer is null.
+        "price": None,
     }
     # C7.3: optional payment read-model — present only when the event
     # stream produced a mirror row (hold signal or a payment.* event).
@@ -1899,6 +1907,12 @@ def _proxy_booking_to_dict(proxy, *, tenant) -> dict[str, Any]:
         # пути. Поле, которое есть на одной ветке и отсутствует на другой,
         # и есть та развилка, из-за которой экран начинает гадать.
         "address": tenant.address,
+        # DRF-2172 — booking-time price snapshot mirrored from
+        # booking.created.price_total; None when the event carried none
+        # (rows older than the column included). Decimal as string, like
+        # every other money field on this wire; the screen hides the line
+        # on null and never prints «0 ₽» for it (§103).
+        "price": _money_str(proxy.price_amount),
     }
     # C7.3 parity with the local BookingItem: optional payment read-model,
     # present only when the event stream produced a mirror row (hold
@@ -4824,6 +4838,8 @@ class _ActivityRow(NamedTuple):
     booking_id: str
     #: Wire status of the row (DRF-2144) — the home card's badge.
     status: str
+    #: Booking-time price snapshot (DRF-2172); None when the source has none.
+    price_amount: Decimal | None
 
 
 def _recent_activity_from_mirror(
@@ -4861,6 +4877,7 @@ def _recent_activity_from_mirror(
             duration_min=_proxy_duration_min(proxy),
             booking_id=str(proxy.appointment_id),
             status=str(proxy.status),
+            price_amount=proxy.price_amount,
         )
 
     this_week_count = owned.filter(
@@ -4901,6 +4918,8 @@ def _recent_activity_from_local(
             duration_min=booking.duration_min or 0,
             booking_id=str(booking.id),
             status=str(booking.status),
+            # The local BookingRequest keeps no price (DRF-2172) — null, honestly.
+            price_amount=None,
         )
 
     this_week_count = owned.filter(
@@ -5056,6 +5075,10 @@ def customer_recent_activity(request: HttpRequest) -> HttpResponse:
             # выдали бы наш пробел за ответ салона.
             "address": tenant.address,
             "booking_id": next_row.booking_id,
+            # DRF-2172 — цена записи «3 200 ₽» (макет DRF-1321): снимок из
+            # зеркала (`price_total` события); локальный путь цены не хранит
+            # → null; null на экране = строки нет, не «0 ₽» (§103).
+            "price": _money_str(next_row.price_amount),
             # DRF-2144 — статус для бейджа карточки на Главной: wire-значение
             # той же строки (mirror: confirmed / awaiting_payment /
             # pending_payment — то, что этот путь и так отбирает; local:
