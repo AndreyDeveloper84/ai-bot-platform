@@ -3561,7 +3561,7 @@ def _active_goals_from_context(doc: Any, *, now: datetime) -> list[dict[str, Any
 
 
 def _iso_date_or_none(value: Any) -> str | None:
-    """``YYYY-MM-DD`` verbatim when it parses as a date; anything else → None."""
+    """An ISO calendar date, normalised to ``YYYY-MM-DD``; anything else → None."""
     if not isinstance(value, str) or not value.strip():
         return None
     try:
@@ -5514,7 +5514,10 @@ def customer_goal_select(request: HttpRequest) -> HttpResponse:
                 # DRF-2173 — то же тело под `details`: `ApiError` экрана читает
                 # только `details`, а отказ шага срока каталог говорит словами
                 # («Этот срок уже прошёл…») — их и должен увидеть человек.
-                "details": {"ayla_error": exc.body},
+                # `ayla_status` — исходный статус каталога: этот хоп сводит любой
+                # 4xx к 400, а экран обязан отличать «сказал словами» (400) от
+                # «документ протух» (409 → перечитать).
+                "details": {"ayla_error": exc.body, "ayla_status": exc.status_code},
             },
             status=400,
         )

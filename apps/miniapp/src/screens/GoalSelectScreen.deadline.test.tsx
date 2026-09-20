@@ -183,6 +183,32 @@ describe("шаг «К какому сроку хочешь?»", () => {
       await screen.findByText("Этот срок уже прошёл — назови дату не раньше сегодняшней."),
     ).toBeInTheDocument();
     expect(screen.queryByText("Не получилось отправить. Попробуй снова.")).toBeNull();
+    // Документ не менялся — не перечитываем, и набранное остаётся в поле.
+    expect(mockedFetch).toHaveBeenCalledTimes(1);
+    expect(screen.getByPlaceholderText("например, до 1 ноября")).toHaveValue("вчера");
+  });
+
+  it("протухший документ (каталог 409 за общим 400 прокси) — по-прежнему общий текст и перечитывание", async () => {
+    mockedFetch.mockResolvedValue(ASKS_DEADLINE);
+    mockedPost.mockRejectedValue(
+      new ApiError(400, "ayla_bad_request", "ayla returned HTTP 409", {
+        ayla_status: 409,
+        ayla_error: {
+          error: {
+            code: "ANKETA_STEP_MISMATCH",
+            message: "Answer does not match the expected step.",
+            details: { expected_step: "goal" },
+          },
+        },
+      }),
+    );
+    renderScreen();
+    const user = userEvent.setup();
+
+    await user.click(await screen.findByRole("button", { name: "без срока" }));
+
+    expect(await screen.findByText("Не получилось отправить. Попробуй снова.")).toBeInTheDocument();
+    await waitFor(() => expect(mockedFetch).toHaveBeenCalledTimes(2));
   });
 });
 

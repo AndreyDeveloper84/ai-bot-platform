@@ -29,7 +29,10 @@ export function formatGoalDue(iso: string | null | undefined): string {
   if (!m) return "";
   const [, y, mo, d] = m;
   const month = MONTHS_GEN[Number(mo) - 1];
-  if (!month) return "";
+  // Календарная проверка: «31 февраля» с экрана цели документ приносит
+  // напрямую, мимо фильтра бота — такую строку не рисуем.
+  const probe = new Date(Date.UTC(Number(y), Number(mo) - 1, Number(d)));
+  if (!month || probe.getUTCMonth() !== Number(mo) - 1 || probe.getUTCDate() !== Number(d)) return "";
   return `До ${Number(d)} ${month} ${y}`;
 }
 
@@ -41,8 +44,16 @@ export function formatGoalDue(iso: string | null | undefined): string {
  */
 export function answerRefusalText(err: unknown): string | null {
   if (!(err instanceof ApiError) || err.status !== 400) return null;
-  const ayla = err.details?.ayla_error as { error?: { details?: { answer?: { text?: unknown } } } } | undefined;
-  const text = ayla?.error?.details?.answer?.text;
+  // Прокси бота сводит любой 4xx каталога к 400: протухший документ (409
+  // ANKETA_STEP_MISMATCH) обязан по-прежнему перечитываться, поэтому слова
+  // берутся только у настоящей валидации каталога.
+  const details = err.details ?? {};
+  if (details.ayla_status !== undefined && details.ayla_status !== 400) return null;
+  const ayla = details.ayla_error as
+    | { error?: { code?: string; details?: { answer?: { text?: unknown } } } }
+    | undefined;
+  if (ayla?.error?.code !== "VALIDATION_ERROR") return null;
+  const text = ayla.error.details?.answer?.text;
   const first = Array.isArray(text) ? text[0] : text;
-  return typeof first === "string" && first.trim() ? first : null;
+  return typeof first === "string" && first.trim() ? first.trim() : null;
 }
