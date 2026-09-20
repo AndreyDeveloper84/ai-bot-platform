@@ -261,6 +261,16 @@ describe("совместимость и режимы", () => {
     expect(screen.getByRole("button", { name: "Сменить режим" })).toBeInTheDocument();
   });
 
+  it("«Сменить режим» на корне остаётся, даже если контекст не загрузился (DRF-2198)", async () => {
+    // Правило класса после инцидента 20.09: состояние ошибки не убирает
+    // навигацию. У многоролевого это единственный выход обратно к мастеру.
+    mockedFetch.mockRejectedValue(new Error("boom"));
+    renderAt("/", true);
+    expect(
+      await screen.findByRole("button", { name: "Сменить режим" }, { timeout: 4000 }),
+    ).toBeInTheDocument();
+  });
+
   it("«Сменить режим» не на корне уходит с экрана (§60)", async () => {
     mockedFetch.mockResolvedValue(FROM_GOAL);
     renderAt("/customer/goal-select", true);
