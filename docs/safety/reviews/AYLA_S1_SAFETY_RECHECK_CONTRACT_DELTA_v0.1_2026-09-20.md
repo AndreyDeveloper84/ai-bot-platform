@@ -1,7 +1,7 @@
 # AYLA — `safety_recheck` / `CLEARED_BY_RECHECK` contract delta v0.1 (20.09.2026)
 
-**Статус:** `WORKING DOCUMENT` — engineering rendering зарегистрированного owner-контракта; не immutable, не physician sign-off. Источник истины — immutable record `docs/safety/reviews/OWNER_RULINGS_SAFETY_RECHECK_CONTRACT_2026-09-20.md` (RECORD SHA-256 `e7b54cc3d9a27c6a067d54b7e725122093ca630f59abced86af7ce23b25a6ff1`), реестр [OD-BOT §166] / [§167]. При расхождении — record и реестр.
-**Версия:** v0.1 (2026-09-20). **Пакет:** A (docs-first). **Runtime:** не меняется; `IMPLEMENTATION CARRIER: OPEN`.
+**Статус:** `WORKING DOCUMENT` — engineering rendering зарегистрированного owner-контракта; не immutable, не physician sign-off. Источник истины — immutable record r2 `docs/safety/reviews/OWNER_RULINGS_SAFETY_RECHECK_CONTRACT_2026-09-20_r2.md` (RECORD SHA-256 `0f5324eca27544768739f4eb6d3a24c4a019848dda65ec8d35e16d63596049e8`; дословный ответ владельца «согласен, утверждаем», 20.09.2026; r1 `docs/safety/reviews/OWNER_RULINGS_SAFETY_RECHECK_CONTRACT_2026-09-20.md` — `SUPERSEDED BY r2`), реестр [OD-BOT §166] / [§167]. При расхождении — record и реестр.
+**Версия:** v0.1.1 (2026-09-20) — источник переведён на record r2, runtime baseline PR #1893 squash `40b61cb0`; содержательно без изменений (предыдущая версия v0.1 — sha256 `afc973ce458ee11a10fc9c0dca43a1ce7d47f26f627f8f4dd679b911f3cefa67`). **Пакет:** A (docs-first). **Runtime:** не меняется; `IMPLEMENTATION CARRIER: OPEN`.
 **Не является:** `CLINICAL APPROVED`, `PHYSICIAN PASS`, `SAFE FOR PILOT`; разрешением включить live-clearance.
 
 ## 1. Что регистрируется (решения 1–5 → контракт)
@@ -88,10 +88,10 @@ policy_refs                  : ["OD-BOT §156", "OD-BOT §162", "OD-BOT §166"]
 ## 6. Пакет A (этот PR) — сделано
 
 - [OD-BOT §166] (решения 1–5 дословно, формула) и [OD-BOT §167] (регистрация record) — `docs/OPEN_DECISIONS.md`;
-- immutable record `OWNER_RULINGS_SAFETY_RECHECK_CONTRACT_2026-09-20.md`;
-- Safety Matrix v0.12-reviewfix3: §6.1 «Owner amendments 20.09 — recheck contract», §14.2 OD-F0C3-09, §16;
-- Review Pack v0.1-reviewfix3: §7D physician queue (CQ-CTX-01…03 переформулированы под контракт + кнопка / recheck-вопросы / «ни один результат не звучит как разрешение»);
-- fixtures v0.2.2: 24 contract fixtures `T-S1-REC-ALLOW-01…08`, `T-S1-REC-DENY-01…16`; индекс и counts;
+- immutable record r1 `OWNER_RULINGS_SAFETY_RECHECK_CONTRACT_2026-09-20.md` (`SUPERSEDED BY r2`) и record r2 `OWNER_RULINGS_SAFETY_RECHECK_CONTRACT_2026-09-20_r2.md` (дословный ответ владельца);
+- Safety Matrix v0.12-reviewfix4: §6.1 «Owner amendments 20.09 — recheck contract», §14.2 OD-F0C3-09, §16;
+- Review Pack v0.1-reviewfix4: §7D physician queue (CQ-CTX-01…03 переформулированы под контракт + кнопка / recheck-вопросы / «ни один результат не звучит как разрешение»);
+- fixtures v0.2.3 (24 contract fixtures добавлены в v0.2.2): `T-S1-REC-ALLOW-01…08`, `T-S1-REC-DENY-01…16`; индекс и counts;
 - этот delta-документ; README индекс.
 - Runtime, тесты, code fixtures — не тронуты.
 
@@ -120,6 +120,8 @@ Live-clearance нельзя включать, пока не определены
 | запрещающие | REC-DENY-01 «мне лучше» · 02 «всё прошло» · 03 «сейчас нормально» · 04 простое «нет» · 05 `UNKNOWN` · 06 новый S1 той же группы · 07 новый S1 другой группы · 08 disqualifying recent-resolved · 09 новая сессия · 10 TTL · 11 новый intent · 12 detector silence · 13 желание продолжить booking · 14 вызов без явного user action · 15 provenance без обязательного поля · 16 очистка restriction без audit record |
 
 ## 9. Трассировка к PR #1893 (runtime, unchanged by this PR)
+
+Baseline: PR #1893 squash-merged в `dev` как `40b61cb02bcdad98b21987dd10e0106a42923be8`; `origin/dev` на момент r2 — `44a6400a`.
 
 | Контракт | #1893 сегодня | Расхождений нет? |
 |---|---|---|
