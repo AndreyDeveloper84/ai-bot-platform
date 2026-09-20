@@ -65,6 +65,9 @@ const BASELINE_M6B: ReadonlySet<string> = new Set([
  */
 const DOMAIN_ALLOW: Readonly<Record<string, readonly string[]>> = {
   MasterProfileScreen: ['"Не получилось загрузить фото'],
+  // «Повторить» отправку профиля после отказа каталога — действие экрана,
+  // не повтор загрузки (ошибку загрузки экран рисует общим StateError).
+  MasterPublicationScreen: ['"Повторить"'],
 };
 
 function screenName(path: string): string {

@@ -31,6 +31,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
+import { SystemState } from "../components/master/SystemState";
 import { ApiError } from "../lib/api";
 import {
   createServiceLocation,
@@ -86,9 +87,7 @@ export const PLACE_COPY = {
   noCoords: "Координаты появятся после проверки адреса.",
   edit: "Изменить",
   done: "Готово",
-  loadError: "Не удалось загрузить место работы.",
   saveError: "Не получилось сохранить.",
-  retry: "Повторить",
   notLinked: "Профиль ещё не связан с каталогом — сохранить место пока некуда.",
   salonManaged: "Место работы мастера салона ведёт владелец салона.",
   refusal: {
@@ -113,7 +112,7 @@ type Load =
   | { kind: "ready"; state: ServiceLocationsState }
   | { kind: "salon_managed" }
   | { kind: "not_linked" }
-  | { kind: "error" };
+  | { kind: "error"; err: unknown };
 
 function refusalSlug(e: unknown): string | null {
   if (!(e instanceof ApiError)) return null;
@@ -195,7 +194,7 @@ export function MasterPlaceScreen() {
             ? { kind: "salon_managed" }
             : slug === "not_linked"
               ? { kind: "not_linked" }
-              : { kind: "error" },
+              : { kind: "error", err: e },
         );
       });
     return () => {
@@ -302,13 +301,7 @@ export function MasterPlaceScreen() {
     return (
       <div className="screen master-services">
         {header}
-        {load.kind === "loading" && (
-          <div className="master-services__section" aria-busy="true">
-            {[1, 2, 3].map((i) => (
-              <div key={i} className="skeleton service-card service-card--skel" />
-            ))}
-          </div>
-        )}
+        {load.kind === "loading" && <SystemState kind="loading" />}
         {load.kind === "salon_managed" && (
           <p className="callout" role="status">
             {PLACE_COPY.salonManaged}
@@ -320,12 +313,12 @@ export function MasterPlaceScreen() {
           </p>
         )}
         {load.kind === "error" && (
-          <div className="callout callout--danger" role="alert">
-            <p>{PLACE_COPY.loadError}</p>
-            <button type="button" className="btn-secondary" onClick={() => setReloadKey((k) => k + 1)}>
-              {PLACE_COPY.retry}
-            </button>
-          </div>
+          <SystemState
+            kind="load_error"
+            what="place"
+            err={load.err}
+            onRetry={() => setReloadKey((k) => k + 1)}
+          />
         )}
       </div>
     );

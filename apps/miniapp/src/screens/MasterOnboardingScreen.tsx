@@ -46,6 +46,7 @@ import {
   setDeviceStorage,
   signalReady,
 } from "../lib/max-sdk";
+import { SystemState } from "../components/master/SystemState";
 import { ScreenLayout } from "../components/ScreenLayout";
 import { useReloadMe } from "../state/boot";
 import { StickyCta } from "../components/StickyCta";
@@ -78,7 +79,7 @@ const EMPTY_DRAFT: ProfileDraft = { bio: "", photo: null, photoPreview: null };
 // --- Russian copy (VERBATIM from §M0) -------------------------------------
 
 const COPY = {
-  loading: "Загружаем ваш профиль…",
+  // Загрузка / ошибка сети — SystemState (DRF-2190, словарь DRF-1181 п.10).
   step1: {
     greeting: (firstName: string) => `Здравствуйте, ${firstName}!`,
     body: (salonName: string) =>
@@ -135,8 +136,6 @@ const COPY = {
     wrong_recipient:
       "Сообщите администратору салона — возможно, ссылку отправили не туда.",
     close: "Закрыть",
-    network: "Связь пропала. Попробуйте ещё раз.",
-    retry: "Попробовать снова",
   },
 };
 
@@ -350,7 +349,7 @@ export function MasterOnboardingScreen() {
   if (state.kind === "loading") {
     return (
       <ScreenLayout back={back}>
-        <p>{COPY.loading}</p>
+        <SystemState kind="loading" />
       </ScreenLayout>
     );
   }
@@ -728,21 +727,13 @@ function NetworkErrorScreen({
   onRetry: () => void;
   err: unknown;
 }) {
-  // Surface 5xx vs offline differently per spec §M0 + customer-first-touch.
-  const isServer = err instanceof ApiError && err.status >= 500;
+  // Сеть / 5xx — общая ошибка загрузки с предметом «приглашение» (DRF-2190;
+  // ruling §61 б — шаблон «Не удалось загрузить <предмет>», альтернатива у
+  // владельца). Заголовки «Нет связи» / «Сервис временно недоступен» сняты —
+  // второй словарь состояний.
   return (
-    <ScreenLayout
-      back={INVITE_ERROR_BACK}
-      title={isServer ? "Сервис временно недоступен" : "Нет связи"}
-    >
-      <div className="callout callout--danger" role="alert">
-        <p style={{ margin: 0 }}>{COPY.errors.network}</p>
-        <div style={{ marginTop: "var(--s-3)" }}>
-          <button type="button" className="btn-secondary" onClick={onRetry}>
-            {COPY.errors.retry}
-          </button>
-        </div>
-      </div>
+    <ScreenLayout back={INVITE_ERROR_BACK}>
+      <SystemState kind="load_error" what="invite" err={err} onRetry={onRetry} />
     </ScreenLayout>
   );
 }

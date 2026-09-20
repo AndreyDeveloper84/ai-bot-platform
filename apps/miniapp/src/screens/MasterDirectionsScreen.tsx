@@ -34,6 +34,7 @@ import {
   SENT_MESSAGE,
   pickedMessage,
 } from "../components/OwnServiceForm";
+import { SystemState } from "../components/master/SystemState";
 import { ApiError } from "../lib/api";
 import {
   getServiceDirections,
@@ -56,8 +57,6 @@ export const DIRECTIONS_COPY = {
   otherContinue: "Описать услугу",
   otherCancel: "Отмена",
   directionPrefix: "Направление: ",
-  loadError: "Не удалось загрузить направления.",
-  retry: "Повторить",
   salonManaged: "Услуги салона ведёт владелец салона.",
   notLinked: "Профиль ещё не привязан — привязку выполнит оператор.",
 } as const;
@@ -75,7 +74,7 @@ type Load =
   | { kind: "ready"; directions: ServiceDirection[]; selection: ServiceSelectionState }
   | { kind: "salon_managed" }
   | { kind: "not_linked" }
-  | { kind: "error" };
+  | { kind: "error"; err: unknown };
 
 function refusalReason(e: unknown): string | null {
   if (!(e instanceof ApiError)) return null;
@@ -127,7 +126,7 @@ export function MasterDirectionsScreen() {
             ? { kind: "salon_managed" }
             : reason === "not_linked"
               ? { kind: "not_linked" }
-              : { kind: "error" },
+              : { kind: "error", err: e },
         );
       });
     return () => {
@@ -159,13 +158,7 @@ export function MasterDirectionsScreen() {
     return (
       <div className="screen master-services">
         {header}
-        {load.kind === "loading" && (
-          <div className="master-services__section" aria-busy="true">
-            {[1, 2, 3].map((i) => (
-              <div key={i} className="skeleton service-card service-card--skel" />
-            ))}
-          </div>
-        )}
+        {load.kind === "loading" && <SystemState kind="loading" />}
         {load.kind === "salon_managed" && (
           <p className="callout" role="status">
             {DIRECTIONS_COPY.salonManaged}
@@ -177,12 +170,12 @@ export function MasterDirectionsScreen() {
           </p>
         )}
         {load.kind === "error" && (
-          <div className="callout callout--danger" role="alert">
-            <p>{DIRECTIONS_COPY.loadError}</p>
-            <button type="button" className="btn-secondary" onClick={() => setReloadKey((k) => k + 1)}>
-              {DIRECTIONS_COPY.retry}
-            </button>
-          </div>
+          <SystemState
+            kind="load_error"
+            what="directions"
+            err={load.err}
+            onRetry={() => setReloadKey((k) => k + 1)}
+          />
         )}
       </div>
     );

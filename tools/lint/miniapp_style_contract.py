@@ -178,7 +178,6 @@ BASELINE: frozenset[str] = frozenset(
         "src/screens/MasterConversationsScreen.tsx::m-card--inbox",
         "src/screens/MasterCustomersScreen.tsx::master-customers__body",
         "src/screens/MasterInternalChatThreadScreen.tsx::internal-chat-bubble__stamp",
-        "src/screens/MasterServicesScreen.tsx::master-services__body",
         "src/screens/MasterSettingsScreen.tsx::master-settings",
         "src/screens/MasterSettingsScreen.tsx::master-settings__coming-soon",
         "src/screens/admin/AdminAvailabilityRequestsScreen.tsx::btn-link",
