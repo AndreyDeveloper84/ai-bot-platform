@@ -221,12 +221,16 @@ describe("тап по записи → детали, не переписки", (
     await waitFor(() => expect(mockedBooking).toHaveBeenCalledWith("b-42", expect.anything()));
   });
 
-  it("«Расписание» соло: тап по записи ведёт на /solo/bookings/:id (соло-панель остаётся одна)", async () => {
+  it("«Расписание» соло: тап по записи ведёт на /solo/bookings/:id — панель одна, соло, «Расписание» активна", async () => {
     mockedGetMe.mockResolvedValue(SOLO_ME);
     renderAppAt("/solo/schedule");
     const card = await screen.findByRole("button", { name: /Мария К\./ });
     await userEvent.click(card);
     await findDetail();
-    expect(screen.queryByRole("navigation", { name: "Основная навигация" })).toBeNull();
+    // Одна панель — соло (App), мастерская внутри экрана на /solo/* не рисуется.
+    const navs = screen.getAllByRole("navigation", { name: "Основная навигация" });
+    expect(navs).toHaveLength(1);
+    expect(navs[0]).toHaveClass("solo-tabbar");
+    expect(navs[0]?.querySelector('[aria-label="Расписание"]')).toHaveAttribute("aria-current", "page");
   });
 });

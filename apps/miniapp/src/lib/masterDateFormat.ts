@@ -120,6 +120,56 @@ export function joinClientName(
   return `${first} ${last}`;
 }
 
+// --- Duration / date helpers shared by «Сегодня» and «Детали записи» ------
+// (DRF-2156, М-4; §61 — one helper for both screens, format per DRF-1185).
+
+/**
+ * «45 мин» / «1 ч» / «1 ч 20 мин» — длительность или остаток по макету
+ * DRF-1185 («До визита 1 ч 20 мин»). Отрицательное и мусор → «0 мин»;
+ * дробные минуты — вниз.
+ */
+export function formatDurationRu(minutes: number): string {
+  const total = Number.isFinite(minutes) ? Math.max(0, Math.floor(minutes)) : 0;
+  const h = Math.floor(total / 60);
+  const m = total % 60;
+  if (h === 0) return `${m} мин`;
+  if (m === 0) return `${h} ч`;
+  return `${h} ч ${m} мин`;
+}
+
+/** «20 августа · среда» — строка даты на «Деталях записи» (макет DRF-1185). */
+export function formatDateDotWeekdayRu(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const weekday = (WEEKDAYS_FULL[d.getDay()] ?? "").toLowerCase();
+  const month = MONTHS_GEN[d.getMonth()] ?? "";
+  return `${d.getDate()} ${month} · ${weekday}`;
+}
+
+/**
+ * «Сегодня в 15:30» / «Завтра в 15:30» / «21 августа в 15:30» — когда
+ * ближайшая запись. «Сегодня»/«Завтра» — по календарному дню относительно
+ * `nowIso` (часы СЕРВЕРА, `checked_at`), не устройства; всё остальное,
+ * включая прошлое, — датой словами.
+ */
+export function formatUpcomingAtRu(startIso: string, nowIso: string): string {
+  const start = new Date(startIso);
+  if (Number.isNaN(start.getTime())) return startIso;
+  const time = formatTimeHM(startIso);
+  const now = new Date(nowIso);
+  if (!Number.isNaN(now.getTime())) {
+    const dayStart = new Date(start);
+    dayStart.setHours(0, 0, 0, 0);
+    const dayNow = new Date(now);
+    dayNow.setHours(0, 0, 0, 0);
+    const diffDays = Math.round((dayStart.getTime() - dayNow.getTime()) / (24 * 60 * 60 * 1000));
+    if (diffDays === 0) return `Сегодня в ${time}`;
+    if (diffDays === 1) return `Завтра в ${time}`;
+  }
+  const month = MONTHS_GEN[start.getMonth()] ?? "";
+  return `${start.getDate()} ${month} в ${time}`;
+}
+
 // --- Schedule helpers (M3) ------------------------------------------------
 
 const WEEKDAYS_SHORT_RU = [

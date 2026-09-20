@@ -117,6 +117,7 @@ import { MasterConversationsScreen } from "./screens/MasterConversationsScreen";
 import { MasterCustomersScreen } from "./screens/MasterCustomersScreen";
 import { MasterBillingScreen } from "./screens/MasterBillingScreen";
 import { MasterDashboardScreen } from "./screens/MasterDashboardScreen";
+import { MasterBookingDetailScreen } from "./screens/MasterBookingDetailScreen";
 import { MasterInternalChatListScreen } from "./screens/MasterInternalChatListScreen";
 import { MasterInternalChatThreadScreen } from "./screens/MasterInternalChatThreadScreen";
 import { MasterOnboardingScreen } from "./screens/MasterOnboardingScreen";
@@ -573,6 +574,9 @@ function masterRouteElements(): React.ReactNode {
       {/* D7 billing — subscription status + card binding (money path) */}
       <Route path="/master/billing" element={<MasterBillingScreen />} />
       <Route path="/master/schedule" element={<MasterScheduleScreen />} />
+      {/* DRF-2156 (М-4) — «Детали записи» по макету DRF-1185: тап по записи
+          на «Сегодня» и в «Расписании» ведёт сюда, не в переписки. */}
+      <Route path="/master/bookings/:id" element={<MasterBookingDetailScreen />} />
       {/* Раздел «Ayla» — диалог мастера с ассистентом (DRF-1180,
           OD-MASTER-IA от 25.08). Свой адрес, а не вкладка: перевод
           нижней навигации 4 → 3 идёт вместе с удалением экранов
@@ -1026,6 +1030,8 @@ function UnifiedSoloSurface({ me }: { me: MeResponse }) {
         {/* Bottom-bar destinations. */}
         <Route path="/solo/my-day" element={<MasterDashboardScreen />} />
         <Route path="/solo/bookings" element={<MasterScheduleScreen />} />
+        {/* DRF-2156 (М-4) — «Детали записи»; соло-панель подсвечивает «Расписание» по префиксу /solo/bookings. */}
+        <Route path="/solo/bookings/:id" element={<MasterBookingDetailScreen />} />
         <Route path="/solo/customers" element={<MasterCustomersScreen />} />
         <Route path="/solo/services" element={<MasterServicesScreen />} />
         {/* DRF-1808 (M16) — экран 02: направления; выбор уходит на экран 03 навигацией, не хранится. */}

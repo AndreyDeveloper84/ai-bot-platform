@@ -89,7 +89,8 @@ function stateBlock() {
 function expectPermanentPart(main: HTMLElement) {
   expect(within(main).getByRole("heading", { name: "Анна П." })).toBeInTheDocument();
   expect(within(main).getByText("20 августа · четверг")).toBeInTheDocument();
-  expect(within(main).getByText("15:30–16:30")).toBeInTheDocument();
+  // Время — в постоянной части всегда; в состоянии «now» макет повторяет его в блоке.
+  expect(within(main).getAllByText("15:30–16:30").length).toBeGreaterThanOrEqual(1);
   expect(within(main).getByText("Классический массаж")).toBeInTheDocument();
   // Длительность — подстрокой и под временем, и под услугой (как в макете).
   expect(within(main).getAllByText("1 ч")).toHaveLength(2);

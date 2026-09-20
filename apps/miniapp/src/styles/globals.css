@@ -1237,6 +1237,127 @@ a {
   font-weight: 500;
 }
 
+/* DRF-2156 — «Детали записи» мастера (макет DRF-1185): постоянная часть +
+   один контекстный блок состояния. Тона блока: accent (до/сейчас/проверяем),
+   success (завершено), нейтральный (после окончания). */
+.booking-detail__main {
+  display: block;
+}
+.booking-detail__client {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  padding: var(--s-2) 0 var(--s-4);
+}
+.booking-detail__avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: var(--c-accent-subtle);
+  color: var(--c-accent);
+  flex-shrink: 0;
+}
+.booking-detail__name {
+  margin: 0;
+  font-size: var(--font-size-400);
+  font-weight: 600;
+  line-height: var(--leading-tight);
+  color: var(--c-text-primary);
+}
+.booking-detail__facts {
+  list-style: none;
+  margin: 0 0 var(--s-4);
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+.booking-detail__fact {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s-3);
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+  padding: var(--s-3) var(--s-4);
+}
+.booking-detail__fact-icon {
+  display: inline-flex;
+  color: var(--c-accent);
+  margin-top: 2px;
+  flex-shrink: 0;
+}
+.booking-detail__fact-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.booking-detail__fact-title {
+  font-size: var(--font-size-300);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+.booking-detail__fact-sub {
+  font-size: var(--font-size-200);
+  color: var(--c-text-secondary);
+}
+.booking-detail__state {
+  border-radius: var(--r-lg);
+  padding: var(--s-4);
+  background: var(--c-surface-2);
+  color: var(--c-text-primary);
+}
+.booking-detail__state--accent {
+  background: color-mix(in srgb, var(--c-accent-subtle) 60%, var(--c-surface-1));
+}
+.booking-detail__state--success {
+  background: color-mix(in srgb, var(--c-success) 10%, var(--c-surface-2));
+  color: var(--c-success);
+}
+.booking-detail__state-title {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  font-size: var(--font-size-300);
+  font-weight: 600;
+  line-height: var(--leading-tight);
+}
+.booking-detail__state-line {
+  margin: var(--s-2) 0 0;
+  font-size: var(--font-size-200);
+  line-height: var(--leading-base);
+  color: var(--c-text-primary);
+}
+.booking-detail__state-rule {
+  border: 0;
+  border-top: 1px solid var(--c-divider);
+  margin: var(--s-3) 0;
+}
+.booking-detail__dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--c-accent);
+}
+.booking-detail__recheck {
+  margin-top: var(--s-3);
+  width: 100%;
+}
+.booking-detail__cancelled {
+  margin: 0;
+  padding: var(--s-4);
+  border-radius: var(--r-lg);
+  background: var(--c-surface-2);
+  color: var(--c-text-secondary);
+  text-align: center;
+}
+
 .m-card--tappable {
   cursor: pointer;
 }
