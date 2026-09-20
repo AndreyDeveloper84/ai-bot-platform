@@ -113,7 +113,7 @@ class _FakeClient:
             raise self.ctx
         return self.ctx
 
-    def create_plan_lite(self, *, external_user_id, goal_id, actions):
+    def create_plan_lite(self, *, external_user_id, goal_id, actions, template_version=None):
         self.calls.append(("create", external_user_id, goal_id, actions))
         if isinstance(self.create, Exception):
             raise self.create

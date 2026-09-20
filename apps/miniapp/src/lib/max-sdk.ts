@@ -205,6 +205,16 @@ const _ROUTE_MAP: Record<string, string> = {
   // не было. open_wellness ведёт туда же, куда open_water_add_250, —
   // старое имя оставлено ради клавиатур в истории чата.
   open_food_diary: "/customer/food-scanner/diary",
+  // DRF-2114 — тройка «Сегодня | Расписание | Ayla» персоналу из салонного
+  // бота (§50 п.5). Зеркало ``MINIAPP_ROUTES`` (welcome/skill.py); стража —
+  // test_miniapp_routes. Слага под /admin/handoff нет намеренно (DRF-2115).
+  open_admin_today: "/admin/today",
+  open_admin_schedule: "/admin/schedule",
+  open_admin_ayla: "/admin/ayla",
+  open_admin_booking_new: "/admin/booking/new",
+  open_master_today: "/master/dashboard",
+  open_master_schedule: "/master/schedule",
+  open_master_ayla: "/master/ayla",
   open_wellness: "/customer/wellness",
   // Legacy querystring inner-values — kept for cold-start back-compat.
   // Same destinations as the flat slugs above: a stale `route=visits`

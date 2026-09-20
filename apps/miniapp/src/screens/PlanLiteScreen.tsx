@@ -5,16 +5,28 @@
  * дашборда, когда цель есть. Под флагом сборки `VITE_PLAN_LITE=1`.
  *
  * Что здесь:
- *   - плана нет → конструктор: три обязательства-ДЕЙСТВИЯ («Записаться на
- *     услугу под цель», «Вести дневник N дней в неделю», «Пить воду N раз в
- *     день»), выбрать 1–3 → «Составить план» → POST только `actions`
- *     (активную цель знает каталог);
+ *   - плана нет → сперва ПРЕДЛОЖЕНИЕ из шаблона цели (DRF-2123, План-A):
+ *     «Ayla предлагает для цели «{метка}»», текст «почему» и строки
+ *     действий со степперами (числа — из предложения; пункт можно снять) →
+ *     «Подтвердить план» → POST `actions` + `template_version`; ссылка
+ *     «Собрать самому» → прежний конструктор. У цели нет шаблона
+ *     (`no_template`) → сразу конструктор, без блока и без ошибки. Нет
+ *     активной цели (`no_active_goal`) → «сначала выбери цель»;
+ *   - конструктор: три обязательства-ДЕЙСТВИЯ («Записаться на услугу под
+ *     цель», «Вести дневник N дней в неделю», «Пить воду N раз в день»),
+ *     выбрать 1–3 → «Составить план» → POST только `actions` (активную
+ *     цель знает каталог);
  *   - план есть → карточка: «Твоя цель: {метка}» (метка — из
  *     decision-context, как на экране цели; иначе ключ) и по обязательству
  *     «N из M» за текущее ведро — и ничего о результате: ни процента цели,
  *     ни шкалы, ни «ты пропустил» (В-5, DRF-1332); каждое обязательство
  *     ведёт туда, где оно делается (каталог / дневник / вода);
  *   - «Изменить план» = закрыть (append-only) и составить заново.
+ *
+ * Строка «дневник» в предложении без согласия дневника (тот же гейт, что у
+ * сканера — `fetchDiaryConsentGate`) помечается «Нужно согласие», снимается
+ * и в POST не уходит; пометка ведёт на экран согласия сканера с возвратом
+ * сюда. Гейт не ответил — читается как «согласия нет» (fail-closed).
  *
  * Чего здесь нет по построению: наблюдений тела, веса, прогресса по
  * результату (гейт O, DRF-1331), проактивности — человек видит план, когда
@@ -31,19 +43,25 @@ import { useScreenBack } from "../hooks/useScreenBack";
 import { ApiError } from "../lib/api";
 import { fetchDecisionContext } from "../lib/customer-goals";
 import { planLiteEnabled } from "../lib/feature-flags";
+import { fetchDiaryConsentGate } from "../lib/food-scanner";
 import {
   closePlanLite,
   createPlanLite,
   getPlanLite,
+  getPlanLiteProposal,
   type PlanLite,
   type PlanLiteAction,
   type PlanLiteActionSpec,
   type PlanLiteActionType,
+  type PlanLiteCadence,
+  type PlanLiteProposal,
 } from "../lib/plan-lite";
 import { backTo } from "../lib/screen-back";
 
 export const PLAN_LITE_ROUTE = "/customer/plan";
 const GOAL_ROUTE = "/customer/goal-select";
+/** Гейт согласия дневника живёт в экране съёмки — тот же адрес, что у недели/дня. */
+const CONSENT_GATE_ROUTE = "/customer/food-scanner/capture";
 
 export const PLAN_LITE_COPY = {
   title: "Мой план",
@@ -62,17 +80,31 @@ export const PLAN_LITE_COPY = {
   goalTitle: (goal: string) => `Твоя цель: ${goal}`,
   thisWeek: "На этой неделе",
   today: "Сегодня",
+  twoWeeks: "Эти 2 недели",
   ofTotal: (done: number, target: number) => `${done} из ${target}`,
   go: "Перейти",
   change: "Изменить план",
   changing: "Закрываю…",
   needGoal: "Сначала выбери цель — план строится от неё.",
+  chooseGoal: "Выбрать цель",
   unavailable: "«Мой план» пока недоступен.",
   transient: "Не получилось прочитать план — сервис не отвечает. Попробуй чуть позже.",
   retry: "Повторить",
   labelBook: "Записаться на услугу",
   labelFood: "Дневник",
   labelWater: "Вода",
+  // План-A (DRF-2123)
+  proposalTitle: (goal: string) => `Ayla предлагает для цели «${goal}»`,
+  proposalHint: "Можно снять пункт или поменять число — план останется про действия.",
+  confirm: "Подтвердить план",
+  confirming: "Подтверждаю…",
+  byHand: "Собрать самому",
+  needConsent: "Нужно согласие",
+  perDay: "в день",
+  perWeek: "в неделю",
+  per2Weeks: "в 2 недели",
+  unitDays: "дн.",
+  unitTimes: "раз",
 } as const;
 
 const ACTION_LABELS: Record<PlanLiteActionType, string> = {
@@ -88,18 +120,47 @@ const ACTION_ROUTES: Record<PlanLiteActionType, string> = {
   log_water: "/customer/main",
 };
 
+const CADENCE_PERIOD: Record<PlanLiteCadence, string> = {
+  per_day: PLAN_LITE_COPY.perDay,
+  per_week: PLAN_LITE_COPY.perWeek,
+  per_2_weeks: PLAN_LITE_COPY.per2Weeks,
+};
+
 const FOOD_DAYS = { min: 1, max: 7, initial: 3 };
 const WATER_TIMES = { min: 1, max: 14, initial: 7 };
+/** Степпер предложения: дневник — дни ведра, остальное — до 14 раз. */
+const PROPOSAL_MAX = 14;
+const BUCKET_DAYS: Record<PlanLiteCadence, number> = { per_day: 1, per_week: 7, per_2_weeks: 14 };
 
 type Status =
   | { kind: "loading" }
   | { kind: "builder" }
+  | { kind: "proposal"; proposal: PlanLiteProposal }
+  | { kind: "need_goal" }
   | { kind: "card"; plan: PlanLite }
   | { kind: "unavailable" }
   | { kind: "error" };
 
+/** Строка предложения — пункт из шаблона с правкой человека. */
+interface ProposalRow {
+  action_type: PlanLiteActionType;
+  cadence: PlanLiteCadence;
+  count: number;
+  included: boolean;
+}
+
 function refusalSlug(e: unknown): string | null {
   return e instanceof ApiError ? e.slug : null;
+}
+
+function rowMax(row: ProposalRow): number {
+  return row.action_type === "log_food" ? BUCKET_DAYS[row.cadence] : PROPOSAL_MAX;
+}
+
+/** «1 раз в 2 недели», «3 дн. в неделю», «6 раз в день». */
+function cadenceLabel(row: ProposalRow): string {
+  const unit = row.action_type === "log_food" ? PLAN_LITE_COPY.unitDays : PLAN_LITE_COPY.unitTimes;
+  return `${row.count} ${unit} ${CADENCE_PERIOD[row.cadence]}`;
 }
 
 export function PlanLiteScreen() {
@@ -111,6 +172,10 @@ export function PlanLiteScreen() {
   const [book, setBook] = useState(false);
   const [foodDays, setFoodDays] = useState<number | null>(null);
   const [waterTimes, setWaterTimes] = useState<number | null>(null);
+  const [rows, setRows] = useState<ProposalRow[]>([]);
+  // Согласие дневника: null — ещё не спрошено / неизвестно. Строка
+  // «дневник» уходит в POST только при true (fail-closed).
+  const [diaryConsent, setDiaryConsent] = useState<boolean | null>(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
   const alive = useRef(true);
@@ -129,13 +194,39 @@ export function PlanLiteScreen() {
     }
     setStatus({ kind: "loading" });
     setNotice(null);
+    let plan: PlanLite | null;
     try {
-      const plan = await getPlanLite();
-      if (!alive.current) return;
-      setStatus(plan ? { kind: "card", plan } : { kind: "builder" });
+      plan = await getPlanLite();
     } catch (e) {
       if (!alive.current) return;
       setStatus(refusalSlug(e) === "plan_lite_disabled" ? { kind: "unavailable" } : { kind: "error" });
+      return;
+    }
+    if (!alive.current) return;
+    if (plan) {
+      setStatus({ kind: "card", plan });
+      return;
+    }
+    // Плана нет — спросить предложение из шаблона (План-A).
+    try {
+      const proposal = await getPlanLiteProposal();
+      if (!alive.current) return;
+      setRows(
+        proposal.actions.map((a) => ({
+          action_type: a.action_type,
+          cadence: a.cadence,
+          count: Math.max(1, a.target_count),
+          included: true,
+        })),
+      );
+      setStatus({ kind: "proposal", proposal });
+    } catch (e) {
+      if (!alive.current) return;
+      const slug = refusalSlug(e);
+      if (slug === "no_template") setStatus({ kind: "builder" });
+      else if (slug === "no_active_goal") setStatus({ kind: "need_goal" });
+      else if (slug === "plan_lite_disabled") setStatus({ kind: "unavailable" });
+      else setStatus({ kind: "error" });
     }
   }, []);
 
@@ -166,6 +257,32 @@ export function PlanLiteScreen() {
     };
   }, []);
 
+  // Согласие дневника — только когда в предложении есть строка «дневник»;
+  // тот же гейт, что у сканера. Не ответил — «согласия нет».
+  const proposalHasFood = status.kind === "proposal" && rows.some((r) => r.action_type === "log_food");
+  useEffect(() => {
+    if (!proposalHasFood) return;
+    let cancelled = false;
+    fetchDiaryConsentGate()
+      .then((gate) => {
+        if (!cancelled) setDiaryConsent(gate.grantedAt !== null);
+      })
+      .catch(() => {
+        if (!cancelled) setDiaryConsent(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [proposalHasFood]);
+
+  const rowEffective = (row: ProposalRow): boolean =>
+    row.included && (row.action_type !== "log_food" || diaryConsent === true);
+
+  const proposalActions = (): PlanLiteActionSpec[] =>
+    rows
+      .filter(rowEffective)
+      .map((r) => ({ action_type: r.action_type, cadence: r.cadence, target_count: r.count }));
+
   const selectedActions = (): PlanLiteActionSpec[] => {
     const out: PlanLiteActionSpec[] = [];
     if (book) out.push({ action_type: "book_service", cadence: "per_week", target_count: 1 });
@@ -174,13 +291,12 @@ export function PlanLiteScreen() {
     return out;
   };
 
-  const compose = async () => {
-    const actions = selectedActions();
+  const submit = async (actions: PlanLiteActionSpec[], templateVersion?: number) => {
     if (!actions.length || busy) return;
     setBusy(true);
     setNotice(null);
     try {
-      const plan = await createPlanLite(actions);
+      const plan = await createPlanLite(actions, templateVersion);
       if (!alive.current) return;
       setStatus({ kind: "card", plan });
     } catch (e) {
@@ -204,6 +320,26 @@ export function PlanLiteScreen() {
     }
   };
 
+  const compose = () => submit(selectedActions());
+
+  const confirmProposal = () => {
+    if (status.kind !== "proposal") return;
+    return submit(proposalActions(), status.proposal.template_version);
+  };
+
+  const toBuilder = () => {
+    setBook(false);
+    setFoodDays(null);
+    setWaterTimes(null);
+    setStatus({ kind: "builder" });
+  };
+
+  const toggleRow = (type: PlanLiteActionType) =>
+    setRows((rs) => rs.map((r) => (r.action_type === type ? { ...r, included: !r.included } : r)));
+
+  const setRowCount = (type: PlanLiteActionType, count: number) =>
+    setRows((rs) => rs.map((r) => (r.action_type === type ? { ...r, count } : r)));
+
   const change = async () => {
     if (busy) return;
     setBusy(true);
@@ -211,10 +347,7 @@ export function PlanLiteScreen() {
     try {
       await closePlanLite();
       if (!alive.current) return;
-      setBook(false);
-      setFoodDays(null);
-      setWaterTimes(null);
-      setStatus({ kind: "builder" });
+      toBuilder();
     } catch (e) {
       if (!alive.current) return;
       // Активного плана уже нет — значит, конструктор и есть правда.
@@ -264,6 +397,86 @@ export function PlanLiteScreen() {
               {PLAN_LITE_COPY.retry}
             </button>
           </div>
+        )}
+
+        {status.kind === "need_goal" && (
+          <div className="food-scanner-diary__unreadable" role="status">
+            <p>{PLAN_LITE_COPY.needGoal}</p>
+            <button
+              type="button"
+              className="btn-secondary"
+              onClick={() => navigate(GOAL_ROUTE, { state: { returnTo: PLAN_LITE_ROUTE } })}
+            >
+              {PLAN_LITE_COPY.chooseGoal}
+            </button>
+          </div>
+        )}
+
+        {status.kind === "proposal" && (
+          <section data-testid="plan-lite-proposal" aria-label={PLAN_LITE_COPY.title}>
+            <h2 className="food-scanner-diary__caption">
+              {PLAN_LITE_COPY.proposalTitle(goalLabel ?? status.proposal.goal_key)}
+            </h2>
+            <p className="food-scanner-diary__unreadable-hint">{status.proposal.why}</p>
+            <p className="food-scanner-diary__caption">{PLAN_LITE_COPY.proposalHint}</p>
+            <ul className="food-scanner-diary__list">
+              {rows.map((row) => {
+                const needsConsent = row.action_type === "log_food" && diaryConsent !== true;
+                const on = rowEffective(row);
+                return (
+                  <li key={row.action_type} className="food-scanner-diary__entry">
+                    <div className="food-scanner-diary__entry-main">
+                      <label className={`chip${on ? " chip--active" : ""}`}>
+                        <input
+                          type="checkbox"
+                          checked={on}
+                          disabled={needsConsent}
+                          onChange={() => toggleRow(row.action_type)}
+                        />
+                        {ACTION_LABELS[row.action_type]}
+                      </label>
+                      <span className="food-scanner-diary__entry-time">{cadenceLabel(row)}</span>
+                    </div>
+                    {needsConsent && diaryConsent === false && (
+                      <div className="food-scanner-diary__entry-actions">
+                        <button
+                          type="button"
+                          className="food-scanner-diary__entry-action"
+                          onClick={() =>
+                            navigate(CONSENT_GATE_ROUTE, { state: { returnTo: PLAN_LITE_ROUTE } })
+                          }
+                        >
+                          {PLAN_LITE_COPY.needConsent}
+                        </button>
+                      </div>
+                    )}
+                    {on && (
+                      <Stepper
+                        label={ACTION_LABELS[row.action_type]}
+                        value={row.count}
+                        min={1}
+                        max={rowMax(row)}
+                        onChange={(v) => setRowCount(row.action_type, v)}
+                      />
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+            <div className="food-scanner-screen__cta-stack">
+              <button
+                type="button"
+                className="btn-primary"
+                disabled={busy || proposalActions().length === 0}
+                onClick={() => void confirmProposal()}
+              >
+                {busy ? PLAN_LITE_COPY.confirming : PLAN_LITE_COPY.confirm}
+              </button>
+              <button type="button" className="btn-secondary" disabled={busy} onClick={toBuilder}>
+                {PLAN_LITE_COPY.byHand}
+              </button>
+            </div>
+          </section>
         )}
 
         {status.kind === "builder" && (
@@ -365,7 +578,9 @@ export function PlanLiteScreen() {
 }
 
 function bucketLabel(action: PlanLiteAction): string {
-  return action.cadence === "per_day" ? PLAN_LITE_COPY.today : PLAN_LITE_COPY.thisWeek;
+  if (action.cadence === "per_day") return PLAN_LITE_COPY.today;
+  if (action.cadence === "per_2_weeks") return PLAN_LITE_COPY.twoWeeks;
+  return PLAN_LITE_COPY.thisWeek;
 }
 
 function Stepper({

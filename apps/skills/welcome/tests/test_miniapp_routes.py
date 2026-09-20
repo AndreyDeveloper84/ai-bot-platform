@@ -244,12 +244,17 @@ class TestRouteTable:
         right for both halves. Fixing the paths without fixing the shape
         leaves the trap armed for the next button.
         """
-        odd = {s: p for s, p in MINIAPP_ROUTES.items() if not p.startswith("customer/")}
+        # DRF-2114: three surface roots, one form each — root-qualified,
+        # no leading slash. A bare slug («profile») is still the trap.
+        roots = ("customer/", "admin/", "master/")
+        odd = {s: p for s, p in MINIAPP_ROUTES.items() if not p.startswith(roots)}
         assert not odd, (
-            f"these paths are not in the customer/ form: {odd}. Every customer "
-            "screen in App.tsx lives under /customer/; a bare slug means the base "
+            f"these paths are not root-qualified ({roots}): {odd}. Every screen in "
+            "App.tsx lives under one of these roots; a bare slug means the base "
             "setting has to be two different things at once."
         )
+        assert any(p.startswith("customer/") for p in MINIAPP_ROUTES.values())
+        assert any(p.startswith("admin/") for p in MINIAPP_ROUTES.values())
 
     def test_no_declared_route_is_absolute(self):
         """Paths join onto the base — a leading ``/`` would be a second form."""

@@ -73,6 +73,20 @@ from apps.orchestrator.ui.keyboards import parse_callback
 from apps.skills.base import SkillContext, SkillResult
 from apps.skills.registry import register
 
+
+def _nutrition_enabled() -> bool:
+    """Тот же читатель, что у меню, анкеты, дневника и воды — один флаг, одно место."""
+    from apps.skills.menu.marketplace import nutrition_enabled
+
+    return nutrition_enabled()
+
+
+def _nutrition_unavailable_text() -> str:
+    from apps.skills.menu.marketplace import NUTRITION_UNAVAILABLE_TEXT
+
+    return NUTRITION_UNAVAILABLE_TEXT
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -530,6 +544,24 @@ class FoodCorrectionSkill:
         return bool(shape and shape.match(text))
 
     def handle(self, context: SkillContext) -> SkillResult:
+        # DRF-2071 — единый выключатель контура питания (DRF-1994), та же
+        # талия, что у анкеты, дневника и воды: ``handle``, не хендлеры.
+        # Сюда сходятся оба входа навыка — кнопка правки под карточкой
+        # сканера (``cb:food:correct:*``, отрисованной ещё при включённом
+        # контуре) и ответ на уже заданный вопрос. Раньше флаг здесь не
+        # читался вовсе: при OFF бот спрашивал «введи вес в граммах» и
+        # писал ответ в ``MemoryEntry`` — вход в контур через кнопку
+        # прошлого сообщения. ``matches`` флаг не читает намеренно (как у
+        # анкеты): верни он ``False`` — ход уехал бы модели.
+        if not _nutrition_enabled():
+            # Открытый вопрос стирается (как ``text_entry.forget`` у соседа):
+            # иначе до конца ``_PENDING_TTL_SECONDS`` каждое число или название
+            # блюда забирал бы этот навык и отвечал той же заглушкой.
+            _write_state(context, None)
+            return SkillResult(
+                reply_text=_nutrition_unavailable_text(),
+                meta={"reply_kind": "food_correction_nutrition_off"},
+            )
         text = context.message_text.strip()
         if text.startswith("cb:food:correct:"):
             return self._handle_prompt(context, text)

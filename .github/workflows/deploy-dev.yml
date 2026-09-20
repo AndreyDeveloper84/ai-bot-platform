@@ -171,7 +171,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           GH_TOKEN: ${{ github.token }}
         run: |
-          DEV_HEAD="$(git ls-remote "https://github.com/${GITHUB_REPOSITORY}.git" refs/heads/dev | cut -f1)"
+          DEV_HEAD="$(git -c http.version=HTTP/1.1 ls-remote "https://github.com/${GITHUB_REPOSITORY}.git" refs/heads/dev | cut -f1)"
           echo "::notice::голова dev по ls-remote: ${DEV_HEAD}; проверенный ${SHA}; event=${EVENT_NAME}"
           echo "dev_head=${DEV_HEAD}" >> "$GITHUB_OUTPUT"
           GUARD=guard/tools/ci/deploy_sha_is_dev_head.sh
@@ -369,7 +369,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           GH_TOKEN: ${{ github.token }}
         run: |
-          DEV_HEAD="$(git ls-remote "https://github.com/${GITHUB_REPOSITORY}.git" refs/heads/dev | cut -f1)"
+          DEV_HEAD="$(git -c http.version=HTTP/1.1 ls-remote "https://github.com/${GITHUB_REPOSITORY}.git" refs/heads/dev | cut -f1)"
           GUARD=guard/tools/ci/deploy_sha_is_dev_head.sh
           set +e
           if [ -f "$GUARD" ]; then
@@ -443,7 +443,7 @@ jobs:
             # \`-H\` обязателен: без него \$HOME останется /root, и git с
             # docker полезут в чужие конфиги — команда отработает от нужного
             # пользователя, но с чужими настройками.
-            sudo -u \"\$OWNER\" -H git fetch origin
+            sudo -u \"\$OWNER\" -H git -c http.version=HTTP/1.1 fetch origin
             # Проверенный SHA обязан лежать на dev. Иначе dev переписан или
             # прогон был по чужой ветке — и выкладывать «проверенное» некуда.
             if ! sudo -u \"\$OWNER\" -H git merge-base --is-ancestor '${DEPLOY_SHA}' origin/dev; then
@@ -777,7 +777,7 @@ jobs:
             echo \"::notice::шаг идёт от uid \$(id -u), gid \$(id -g)\" >&2
             cd '${DEV_DEPLOY_PATH}'
             OWNER=\$(stat -c %U '${DEV_DEPLOY_PATH}')
-            sudo -u \"\$OWNER\" -H git fetch -q origin
+            sudo -u \"\$OWNER\" -H git -c http.version=HTTP/1.1 fetch -q origin
             sudo -u \"\$OWNER\" -H git rev-parse HEAD
             sudo -u \"\$OWNER\" -H git rev-parse origin/dev
             sudo -u \"\$OWNER\" -H git merge-base --is-ancestor HEAD origin/dev && echo ancestor || echo NOT-ancestor

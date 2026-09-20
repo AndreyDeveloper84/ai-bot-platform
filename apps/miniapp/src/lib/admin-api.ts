@@ -2097,3 +2097,42 @@ export const getHandoffQueue = (
     method: "GET",
     signal: init.signal,
   });
+
+// ─── Готовность салона поимённо (DRF-2117, #1878) ────────────────────────
+
+/** Откуда строка: каталог, зеркало бота или отказ источника целиком. */
+export type SalonReadinessOrigin = "catalog" | "mirror" | "source";
+
+export interface SalonReadinessProblem {
+  /** У проблем уровня салона и у отказа источника — `{id: null, name: ""}`. */
+  master: { id: string | null; name: string };
+  code: string;
+  /** Формулировка сервера («Анна — не настроен график») — показывается дословно. */
+  text: string;
+  origin: SalonReadinessOrigin;
+}
+
+/**
+ * `GET /api/v1/admin/readiness/` — `apps/admin_api/services/salon_readiness.py`.
+ * `unknown=true` — «готов» не печатается; при отказе источника
+ * `source_problem` заполнен и в `problems` ровно одна строка `origin: "source"`.
+ * Форма меняется только аддитивно (ayla-22, 20.09).
+ */
+export interface SalonReadinessResponse {
+  ready: boolean;
+  unknown: boolean;
+  source_problem: string | null;
+  /** ISO 8601 со смещением; всегда непустой. */
+  checked_at: string;
+  masters_total: number;
+  problems: SalonReadinessProblem[];
+  limits: string[];
+}
+
+export const getSalonReadiness = (
+  init: { signal?: AbortSignal } = {},
+): Promise<SalonReadinessResponse> =>
+  request<SalonReadinessResponse>("/api/v1/admin/readiness/", {
+    method: "GET",
+    signal: init.signal,
+  });

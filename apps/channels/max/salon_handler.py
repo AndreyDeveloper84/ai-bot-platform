@@ -66,6 +66,7 @@ from apps.channels.max.parser import CanonicalEvent, ParseError, parse_max_webho
 from apps.channels.max.staff_menu import (
     CB_APPROVE_PREFIX,
     CB_DAY,
+    CB_READINESS,
     CB_REQUESTS,
     OPEN_APP_PAYLOAD,
     menu_attachments,
@@ -687,7 +688,48 @@ def _open_menu_after_recheck(event: CanonicalEvent, verdict) -> None:
         logger.error("channels.max.salon.no_registry_entry tenant=%s", verdict.tenant.slug)
         return
     with bot_scope(entry):
-        _send_menu(event, verdict.role_ctx, verdict.tenant, entry)
+        _greet_or_menu(event, verdict.role_ctx, verdict.tenant, verdict.bot_user, entry)
+
+
+def _greet_or_menu(event: CanonicalEvent, role_ctx, tenant, bot_user, entry) -> None:
+    """Вход персонала (DRF-2114): приветствие по роли с живой сводкой — или меню.
+
+    Владелец / администратор — первое (по ``welcomed_at`` рабочей строки)
+    или обычное приветствие; мастер — мастерское. Ресепшн (у владельца
+    текста нет; тройка админки ему закрыта, DRF-2115) — меню как раньше.
+    """
+
+    from apps.channels.max import salon_greeting
+
+    built = salon_greeting.build_greeting(
+        bot_user=bot_user, role_ctx=role_ctx, tenant=tenant, entry=entry
+    )
+    if built is None:
+        _send_menu(event, role_ctx, tenant, entry)
+        return
+    text, buttons = built
+    first = salon_greeting.is_first_entry(bot_user)
+    _reply(event, text, attachments=_greeting_attachments(buttons, role_ctx, entry))
+    if first and (role_ctx.is_owner or role_ctx.is_admin):
+        salon_greeting.mark_greeted(bot_user)
+
+
+def _greeting_attachments(buttons: list[dict[str, str]], role_ctx, entry) -> list | None:
+    """Кнопки приветствия — все в Mini App; без Mini App у бота — меню персонала.
+
+    Иначе владелец без ``web_app`` / ``miniapp_url`` получал бы приветствие
+    без единой кнопки, а «📅 Сегодня» в чате у него было всю жизнь.
+    """
+
+    if buttons:
+        return [outbound.make_inline_keyboard_attachment(buttons, columns=1)]
+    return menu_attachments(role_ctx, entry)
+
+
+def _is_entry_start(text: str) -> bool:
+    """«/start» без хвоста-приглашения и ``bot_started`` (парсер отдаёт «/start»)."""
+
+    return text.strip().split(" ", 1)[0] == "/start"
 
 
 def _serve_unlinked(event: CanonicalEvent, verdict) -> None:
@@ -929,9 +971,10 @@ def _serve(event: CanonicalEvent, trace_id: str | uuid.UUID | None, *, tenant, b
             return
 
         # A button tap arrives as the callback payload in `text`.
-        if event.text.startswith(CB_SALON_CHOOSE_PREFIX):
-            # DRF-1766: the person just chose THIS salon — open with its menu.
-            _send_menu(event, role_ctx, tenant, entry)
+        if event.text.startswith(CB_SALON_CHOOSE_PREFIX) or _is_entry_start(event.text):
+            # DRF-1766: the person just chose THIS salon — open with its
+            # greeting (DRF-2114); «/start» / bot_started — тот же вход.
+            _greet_or_menu(event, role_ctx, tenant, bot_user, entry)
         elif _is_button_tap(event.text):
             _handle_button(event, role_ctx, bot_user, tenant, entry)
         else:
@@ -1542,7 +1585,7 @@ def _is_button_tap(text: str) -> bool:
 def _handle_button(event: CanonicalEvent, role_ctx, bot_user, tenant, entry) -> None:
     """Run the tapped action, then re-show the menu so the panel persists."""
 
-    from apps.channels.max import staff_actions
+    from apps.channels.max import salon_notify, staff_actions
 
     action = event.text
     is_admin_side = role_ctx.is_owner or role_ctx.is_admin or role_ctx.is_receptionist
@@ -1564,6 +1607,18 @@ def _handle_button(event: CanonicalEvent, role_ctx, bot_user, tenant, entry) -> 
             attachments=_requests_attachments(tenant, role_ctx, entry),
         )
         return
+    elif action == CB_READINESS and (role_ctx.is_owner or role_ctx.is_admin):
+        from apps.channels.max import salon_greeting
+
+        # DRF-2117 — только владелец / администратор: ресепшну тройка и
+        # готовность закрыты (DRF-2115). Ответ — поимённый список; после
+        # него — кнопки обычного приветствия, чтобы «Открыть салон» был рядом.
+        _reply(
+            event,
+            staff_actions.salon_readiness(tenant),
+            attachments=_greeting_attachments(salon_greeting.admin_buttons(entry), role_ctx, entry),
+        )
+        return
     elif action.startswith(CB_APPROVE_PREFIX) and is_admin_side:
         request_id = action[len(CB_APPROVE_PREFIX) :]
         outcome = staff_actions.approve_request(
@@ -1578,6 +1633,14 @@ def _handle_button(event: CanonicalEvent, role_ctx, bot_user, tenant, entry) -> 
             attachments=_requests_attachments(tenant, role_ctx, entry),
         )
         return
+    elif action.startswith(salon_notify.CB_PREFIX):
+        # DRF-2118 — кнопка уведомления-решения (Одобрить / Отклонить /
+        # Подробнее / Вернуть Ayla / Повторить). Роль проверяет сам
+        # обработчик: мастер получает объяснение, а не отказ, и ничего
+        # не меняется. Меню после — как у любого действия.
+        from apps.channels.max.salon_notify_actions import handle_action
+
+        body = handle_action(payload=action, tenant=tenant, bot_user=bot_user, role_ctx=role_ctx)
     elif action == OPEN_APP_PAYLOAD:
         # The Mini App opens client-side; nothing to do server-side. This
         # branch is defensive: whether MAX echoes an `open_app` payload
@@ -1655,8 +1718,25 @@ def _handle_talk(event: CanonicalEvent, role_ctx, bot_user, tenant, entry) -> No
     answer = _ask_assistant(bot_user, thread, event.text, exclude_id=inbound)
     if answer is None:
         # No assistant for this person (not a master yet, or the surface is
-        # off). The menu is still a real answer — and it is the one this
-        # handler gave for its whole life before now.
+        # off). DRF-2114: владельцу / администратору — приветствие с живой
+        # сводкой (у них ассистента нет); остальным — меню, как всю жизнь.
+        from apps.channels.max import salon_greeting
+
+        built = (
+            salon_greeting.build_greeting(
+                bot_user=bot_user, role_ctx=role_ctx, tenant=tenant, entry=entry
+            )
+            if (role_ctx.is_owner or role_ctx.is_admin)
+            else None
+        )
+        if built is not None:
+            body, buttons = built
+            first = salon_greeting.is_first_entry(bot_user)
+            _reply(event, body, attachments=_greeting_attachments(buttons, role_ctx, entry))
+            if first:
+                salon_greeting.mark_greeted(bot_user)
+            _remember(thread, role="assistant", content=body)
+            return
         body = menu_header(role_ctx, tenant)
         _reply(event, body, attachments=menu_attachments(role_ctx, entry))
         _remember(thread, role="assistant", content=body)
@@ -1868,11 +1948,29 @@ def _redeem_and_greet(event: CanonicalEvent, code: str, entry) -> None:
                 attachments=[outbound.make_inline_keyboard_attachment(buttons, columns=1)],
             )
             return
+        # DRF-2114: после кода — приветствие по роли (первое для
+        # владельца / администратора), не «Салон «X».».
+        from apps.channels.max import salon_greeting
+
+        built = salon_greeting.build_greeting(
+            bot_user=bot_user, role_ctx=role_ctx, tenant=tenant, entry=entry
+        )
+        if built is None:
+            _reply(
+                event,
+                f"{greeting}\n\n{menu_header(role_ctx, tenant)}",
+                attachments=menu_attachments(role_ctx, entry),
+            )
+            return
+        text, buttons = built
+        first = salon_greeting.is_first_entry(bot_user)
         _reply(
             event,
-            f"{greeting}\n\n{menu_header(role_ctx, tenant)}",
-            attachments=menu_attachments(role_ctx, entry),
+            f"{greeting}\n\n{text}",
+            attachments=_greeting_attachments(buttons, role_ctx, entry),
         )
+        if first and (role_ctx.is_owner or role_ctx.is_admin):
+            salon_greeting.mark_greeted(bot_user)
 
 
 def _reply(event: CanonicalEvent, text: str, attachments: list | None = None) -> None:

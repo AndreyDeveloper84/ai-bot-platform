@@ -6,16 +6,17 @@
  * правок профиля»; здесь точки нет (у этих разделов такого сигнала нет).
  */
 import { AvatarSheet } from "./AvatarSheet";
+import { useMasterAvatarItems } from "../hooks/useMasterAvatarItems";
 import { useMasterIdentity } from "../hooks/useMasterIdentity";
-import { masterAvatarSheetItems } from "../lib/avatar-sheet";
 
 export function MasterAvatar() {
   const identity = useMasterIdentity();
+  const items = useMasterAvatarItems();
   return (
     <AvatarSheet
       name={identity?.name ?? ""}
       photoUrl={identity?.photoUrl ?? null}
-      items={masterAvatarSheetItems()}
+      items={items}
     />
   );
 }

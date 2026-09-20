@@ -772,8 +772,8 @@ _SCHEDULING_ROOT = "<scheduling.all_tenants>"
 # MAINTENANCE: when a site is legitimately removed, lower this number IN
 # THE SAME CHANGE, on purpose. Never edit the floor after seeing red to get
 # back to green — a floor fitted to the result is not a guard any more.
-MIN_SCHEDULING_SITES = 16
-MIN_SCHEDULING_BASELINE_FILES = 7
+MIN_SCHEDULING_SITES = 17
+MIN_SCHEDULING_BASELINE_FILES = 8
 
 # Accepted pre-existing sites. Every entry is a VERDICT, and each one below
 # was reached by reading the query, not by trusting the file's neighbours:
@@ -788,12 +788,20 @@ SCHEDULING_CROSS_TENANT_BASELINE: frozenset[BaselineKey] = frozenset(
         # request, including both `select_for_update().get(id=…, tenant_id=…)`.
         # Admin authority over ONE named tenant; no discovery.
         "apps/admin_api/services/availability.py",
+        # 1 site (DRF-2129). Worker task without a tenant in kwargs: the
+        # request row is pinned by `master_id` (the master the DM goes to);
+        # the decider is then read by that row's `tenant_id`.
+        "apps/admin_api/tasks.py",
         # 1 site. `update_or_create(tenant=tenant, master=mst, …)` in a dev
         # bootstrap command, run at a terminal where no tenant ContextVar exists.
         "apps/catalog/management/commands/seed_dev_formula_tela.py",
         # 1 site. `filter(tenant_id=master.tenant_id, master_id=master.id)` —
         # scoped to the master being confirmed; runs from the consumer.
         "apps/catalog/services/schedule_confirmation.py",
+        # 1 site (DRF-2118). `ScheduleChangeRequest.all_tenants.filter(id=…,
+        # tenant=tenant)` — «Подробнее» по кнопке уведомления: тенант — тот,
+        # чью кнопку нажали, закреплён в запросе.
+        "apps/channels/max/salon_notify_actions.py",
         # 3 sites on dev, 1 after #1791. The master's own cabinet: every query
         # pins tenant_id AND master_id taken from the master being viewed.
         "apps/master_api/services/dashboard.py",

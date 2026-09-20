@@ -31,14 +31,17 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("../../lib/admin-api", async (importOriginal) => {
   const original =
     await importOriginal<typeof import("../../lib/admin-api")>();
-  return { ...original, getSalonDay: vi.fn() };
+  return { ...original, getSalonDay: vi.fn(), getSalonReadiness: vi.fn() };
 });
 
+import { ApiError } from "../../lib/api";
 import {
   getSalonDay,
+  getSalonReadiness,
   type MeResponse,
   type SalonDayResponse,
   type SalonDayVisit,
+  type SalonReadinessResponse,
 } from "../../lib/admin-api";
 import { SalonPilotTodayScreen } from "./SalonPilotTodayScreen";
 
@@ -49,6 +52,27 @@ function BookingProbe() {
 }
 
 const mockedDay = vi.mocked(getSalonDay);
+const mockedReadiness = vi.mocked(getSalonReadiness);
+
+function readiness(over: Partial<SalonReadinessResponse> = {}): SalonReadinessResponse {
+  return {
+    ready: true,
+    unknown: false,
+    source_problem: null,
+    checked_at: "2026-09-20T09:00:00+00:00",
+    masters_total: 2,
+    problems: [],
+    limits: [],
+    ...over,
+  };
+}
+
+const PROBLEM = {
+  master: { id: "m-1", name: "Анна" },
+  code: "schedule_missing",
+  text: "Анна — не настроен график",
+  origin: "catalog" as const,
+};
 
 const OWNER: MeResponse = {
   user: { id: "u-1", name: "Ирина", phone_masked: "+7 *** **12" },
@@ -144,6 +168,8 @@ function renderToday(me: MeResponse = OWNER) {
 
 beforeEach(() => {
   mockedDay.mockReset();
+  mockedReadiness.mockReset();
+  mockedReadiness.mockResolvedValue(readiness());
 });
 
 describe("что построено с макета", () => {
@@ -346,10 +372,12 @@ describe("чего экран не рисует, потому что бэкен�
     // Экран построен целиком...
     expect(await screen.findByText("Сейчас")).toBeInTheDocument();
     expect(screen.getByText("Мастера сегодня")).toBeInTheDocument();
-    // ...и обоих backend-blocked блоков в нём нет.
+    // ...и обоих backend-blocked блоков в нём нет. Блок «Требует внимания»
+    // с макета — лента событий; строка сводки «N ситуаций требуют внимания»
+    // (DRF-2117) — счётчик готовности, не лента, и здесь не ищется.
     const changes = screen.queryByText(/Изменения/i);
     expect(changes).toBeNull();
-    const attention = screen.queryByText(/Требует внимания/i);
+    const attention = screen.queryByRole("heading", { name: /Требует внимания/i });
     expect(attention).toBeNull();
   });
 
@@ -403,5 +431,101 @@ describe("остаток дня раскрывается на месте", () =>
     const gone = screen.queryByText("Клиент4");
     expect(gone).toBeNull();
     expect(screen.getByText("Клиент3")).toBeInTheDocument();
+  });
+});
+
+describe("карточка «Готовность» и строка сводки (DRF-2117)", () => {
+  it("N проблем — карточка ведёт на список, в сводке «Одна ситуация требует внимания.»", async () => {
+    mockedDay.mockResolvedValue(busyDay());
+    mockedReadiness.mockResolvedValue(readiness({ ready: false, problems: [PROBLEM] }));
+    renderToday();
+
+    const card = await screen.findByRole("link", { name: "Готовность — 1 проблема" });
+    expect(card).toHaveAttribute("href", "/admin/readiness");
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      "Одна ситуация требует внимания.",
+    );
+    // Строка дня при этом не пропала.
+    expect(screen.getByRole("status")).toHaveTextContent("Сейчас идёт записей: 1.");
+    // Один запрос на экран: карточка и сводка читают одно состояние.
+    expect(mockedReadiness).toHaveBeenCalledTimes(1);
+  });
+
+  it("несколько — «N ситуаций требуют внимания.»", async () => {
+    mockedDay.mockResolvedValue(busyDay());
+    mockedReadiness.mockResolvedValue(
+      readiness({
+        ready: false,
+        problems: [PROBLEM, { ...PROBLEM, master: { id: "m-2", name: "Иван" }, text: "Иван — не назначены услуги" }],
+      }),
+    );
+    renderToday();
+
+    expect(await screen.findByRole("link", { name: "Готовность — 2 проблемы" })).toBeInTheDocument();
+    expect(await screen.findByRole("status")).toHaveTextContent("2 ситуации требуют внимания.");
+  });
+
+  it("готов — «Готовность — салон готов», в сводке про внимание ничего", async () => {
+    mockedDay.mockResolvedValue(busyDay());
+    mockedReadiness.mockResolvedValue(readiness());
+    renderToday();
+
+    expect(await screen.findByRole("link", { name: "Готовность — салон готов" })).toBeInTheDocument();
+    expect(screen.getByRole("status")).not.toHaveTextContent(/внимани/);
+  });
+
+  it("отказ источника — «не удалось проверить», без числа и без строки о внимании", async () => {
+    mockedDay.mockResolvedValue(busyDay());
+    mockedReadiness.mockResolvedValue(
+      readiness({
+        ready: false,
+        unknown: true,
+        source_problem: "source_unavailable",
+        problems: [
+          {
+            master: { id: null, name: "" },
+            code: "source_unavailable",
+            text: "Не удалось проверить готовность: каталог не ответил. Попробуйте ещё раз.",
+            origin: "source",
+          },
+        ],
+      }),
+    );
+    renderToday();
+
+    expect(
+      await screen.findByRole("link", { name: "Готовность — не удалось проверить" }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("status")).not.toHaveTextContent(/внимани/);
+  });
+
+  it("сбой ручки — «не удалось проверить», не ноль", async () => {
+    mockedDay.mockResolvedValue(busyDay());
+    mockedReadiness.mockRejectedValue(new ApiError(500, "server_error", "x"));
+    renderToday();
+
+    expect(
+      await screen.findByRole("link", { name: "Готовность — не удалось проверить" }),
+    ).toBeInTheDocument();
+  });
+
+  it("403 (ресепшн под require_admin_role) — карточки нет вовсе, не «не удалось»", async () => {
+    mockedDay.mockResolvedValue(busyDay());
+    mockedReadiness.mockRejectedValue(new ApiError(403, "forbidden", "x"));
+    renderToday();
+
+    await screen.findByText("Сейчас");
+    await waitFor(() => expect(mockedReadiness).toHaveBeenCalled());
+    expect(screen.queryByRole("link", { name: /Готовность/ })).toBeNull();
+  });
+
+  it("ресепшну карточка не рисуется и ручка не зовётся", async () => {
+    mockedDay.mockResolvedValue(busyDay());
+    mockedReadiness.mockResolvedValue(readiness({ ready: false, problems: [PROBLEM] }));
+    renderToday(RECEPTION);
+
+    await screen.findByText("Сейчас");
+    expect(screen.queryByRole("link", { name: /Готовность/ })).toBeNull();
+    expect(mockedReadiness).not.toHaveBeenCalled();
   });
 });

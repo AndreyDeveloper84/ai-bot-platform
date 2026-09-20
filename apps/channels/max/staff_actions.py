@@ -195,6 +195,18 @@ def approve_request(*, tenant, request_id: str, actor) -> str:
     return "Заявка одобрена. Мастер получит уведомление."
 
 
+def salon_readiness(tenant) -> str:
+    """«Проверить готовность» (DRF-2117): поимённый список того, что мешает записи.
+
+    Каталог + зеркало — :mod:`apps.admin_api.services.salon_readiness`;
+    источник недоступен → «не удалось проверить», не «готов».
+    """
+
+    from apps.admin_api.services.salon_readiness import check_salon_readiness, render
+
+    return render(check_salon_readiness(tenant))
+
+
 def pending_requests(tenant) -> str:
     """Schedule-change requests waiting on an admin.
 

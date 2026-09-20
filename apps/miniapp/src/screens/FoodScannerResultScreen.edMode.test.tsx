@@ -19,7 +19,7 @@ vi.mock("../lib/customer-wellness", async (importOriginal) => {
 });
 vi.mock("../hooks/useScreenBack", () => ({ useScreenBack: () => vi.fn() }));
 
-import { getWellnessToday } from "../lib/customer-wellness";
+import { DIARY_OFF_TEXT, getWellnessToday } from "../lib/customer-wellness";
 import type { ScanResponse } from "../lib/food-scanner";
 import { FoodScannerResultScreen } from "./FoodScannerResultScreen";
 
@@ -96,5 +96,28 @@ describe("FoodScannerResultScreen — ED-признак из дневника, �
     await waitFor(() => expect(mockedToday).toHaveBeenCalledTimes(2));
     expect(screen.queryByText(/Калории:/)).not.toBeInTheDocument();
     expect(errorSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe("FoodScannerResultScreen — контур выключили между сканом и записью (DRF-2071)", () => {
+  it("сводка с nutrition_disabled → «недоступен», без «Записать» и «Уточнить»; «Не то» остаётся", async () => {
+    mockedToday.mockResolvedValue({ display_name: "", nutrition_disabled: true } as never);
+    renderResult();
+
+    expect(await screen.findByText(DIARY_OFF_TEXT)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Записать в дневник" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Уточнить" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Не то" })).toBeInTheDocument();
+    // Числа при этом спрятаны — ключа признака нет (fail-closed).
+    expect(screen.queryByText(/Калории:/)).not.toBeInTheDocument();
+  });
+
+  it("положительная стража: без маркера «Записать» и «Уточнить» на месте", async () => {
+    mockedToday.mockResolvedValue({ display_name: "", nutrition_numbers_hidden: false } as never);
+    renderResult();
+
+    expect(await screen.findByRole("button", { name: "Записать в дневник" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Уточнить" })).toBeInTheDocument();
+    expect(screen.queryByText(DIARY_OFF_TEXT)).not.toBeInTheDocument();
   });
 });

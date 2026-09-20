@@ -92,8 +92,11 @@ def ayla(monkeypatch, settings):
 
     def use(**kwargs) -> _FakeSalonClient:
         client = _FakeSalonClient(**kwargs)
-        # Имя В МОЁМ модуле: он связал ``get_salon_client`` на импорте.
-        monkeypatch.setattr("apps.admin_api.views_schedule_impact.get_salon_client", lambda: client)
+        # Имя в модуле ЧТЕНИЯ: с DRF-2118 вьюха — обёртка над
+        # ``services.schedule_impact``, и ``get_salon_client`` связан там.
+        monkeypatch.setattr(
+            "apps.admin_api.services.schedule_impact.get_salon_client", lambda: client
+        )
         return client
 
     return use

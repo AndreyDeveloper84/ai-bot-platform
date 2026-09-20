@@ -1594,6 +1594,51 @@ a {
   font-size: var(--font-size-100);
 }
 
+/* Готовность салона поимённо (DRF-2117) */
+.readiness__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.readiness__row {
+  padding: var(--s-2) 0;
+  border-bottom: 1px solid var(--c-divider);
+  font-size: var(--font-size-200);
+  color: var(--c-text-primary);
+  line-height: var(--leading-normal);
+}
+.readiness__row:last-child {
+  border-bottom: 0;
+}
+.readiness__limits {
+  margin-top: var(--s-4);
+}
+.readiness__limits-head {
+  margin: 0 0 var(--s-1);
+  font-size: var(--font-size-100);
+  font-weight: 600;
+  color: var(--c-text-secondary);
+}
+.readiness__limits-list {
+  margin: 0;
+  padding-left: var(--s-4);
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+.readiness__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  margin-top: var(--s-4);
+}
+.readiness__recheck {
+  min-height: 44px;
+}
+.readiness__updated {
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
 /* Дата под заголовком «Сегодня» — приходит с сервера, в поясе салона. */
 .salon-pilot__subtitle {
   margin: calc(var(--s-3) * -1) 0 var(--s-3);
@@ -1816,7 +1861,8 @@ a {
   inset-inline: 0;
   bottom: 0;
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  /* DRF-2127: ровно три вкладки (§28 п.2) — колонок столько же. */
+  grid-template-columns: repeat(3, 1fr);
   background: var(--c-surface-1);
   border-top: 1px solid var(--c-divider);
   padding: var(--s-2) 0 calc(var(--s-2) + var(--safe-bottom));
@@ -1864,113 +1910,6 @@ a {
 
 /* ---- «Ещё» bottom sheet (Tau §3) ------------------------------------ */
 
-.solo-more-sheet {
-  position: fixed;
-  inset: 0;
-  z-index: 200;
-  display: flex;
-  align-items: flex-end;
-  justify-content: center;
-}
-
-.solo-more-sheet__backdrop {
-  position: absolute;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.4);
-  border: 0;
-  cursor: pointer;
-  padding: 0;
-  margin: 0;
-}
-
-.solo-more-sheet__panel {
-  position: relative;
-  width: 100%;
-  max-width: 540px;
-  /* Round-1 amendment (adversarial Code Reviewer): the previous
-   * `max-height: 60vh` would clip the bottom of the sheet in landscape
-   * (~360pt-tall viewport × 60% = ~216pt — only 3 of 6 sheet items fit
-   * comfortably with no scroll affordance). `100dvh` (dynamic viewport
-   * height) accounts for the mobile URL bar; subtracting 96px reserves
-   * space for the bottom tabbar above the safe-area. `min(70vh, ...)`
-   * caps the panel on tall portrait viewports so the sheet never feels
-   * like a full-screen takeover. */
-  max-height: min(70vh, calc(100dvh - 96px));
-  background: var(--c-surface-1);
-  border-radius: var(--r-lg) var(--r-lg) 0 0;
-  padding: var(--s-3) var(--s-4) calc(var(--s-3) + var(--safe-bottom));
-  /* Round-1 amendment: inner shadow at the bottom edge hints «more
-   * content below» when the sheet is scrollable. Cheap visual
-   * affordance — no JS required. */
-  box-shadow:
-    0 -8px 24px rgba(0, 0, 0, 0.15),
-    inset 0 -16px 8px -8px rgba(0, 0, 0, 0.08);
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: var(--s-2);
-}
-
-.solo-more-sheet__grip {
-  width: 36px;
-  height: 4px;
-  border-radius: 2px;
-  background: var(--c-divider);
-  margin: 0 auto var(--s-2);
-}
-
-.solo-more-sheet__title {
-  margin: 0 0 var(--s-2);
-  font-size: var(--font-size-300);
-  font-weight: 600;
-}
-
-.solo-more-sheet__list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-}
-
-.solo-more-sheet__item {
-  width: 100%;
-  display: flex;
-  align-items: center;
-  gap: var(--s-3);
-  /* WCAG 2.5.8 — minimum 48dp height per item is generous; 56dp gives
-   * room for icon + label without crowding. */
-  min-height: 56px;
-  padding: var(--s-2) var(--s-2);
-  background: none;
-  border: 0;
-  cursor: pointer;
-  font: inherit;
-  text-align: start;
-  color: var(--c-text-primary);
-}
-
-.solo-more-sheet__item:hover,
-.solo-more-sheet__item:focus-visible {
-  background: var(--c-surface-2);
-}
-
-.solo-more-sheet__item-icon {
-  font-size: 20px;
-  line-height: 1;
-  flex: 0 0 28px;
-  text-align: center;
-}
-
-.solo-more-sheet__item-label {
-  font-size: var(--font-size-200);
-}
-
-.solo-more-sheet__divider {
-  border: 0;
-  border-top: 1px solid var(--c-divider);
-  margin: var(--s-2) 0;
-}
 
 /* ---- Tier 2 Клиенты / Услуги read-only cards (Tau §4.3 / §4.4) ------- */
 
@@ -6427,6 +6366,85 @@ a {
   font-size: var(--font-size-200);
   color: var(--c-text-secondary);
   line-height: var(--leading-normal);
+}
+
+/* R3 memory card (DRF-2133) */
+.profile-memory {
+  background: color-mix(in srgb, var(--c-divider) 30%, var(--c-surface-1));
+  border-radius: var(--r-md);
+  padding: var(--s-4);
+}
+.profile-memory__muted {
+  margin: 0;
+  font-size: var(--font-size-200);
+  color: var(--c-text-secondary);
+  line-height: var(--leading-normal);
+}
+.profile-memory__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.profile-memory__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
+  padding: var(--s-2) 0;
+  border-bottom: 1px solid var(--c-divider);
+}
+.profile-memory__row:last-child {
+  border-bottom: 0;
+}
+.profile-memory__body {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.profile-memory__text {
+  margin: 0;
+  font-size: var(--font-size-200);
+  color: var(--c-text-primary);
+  line-height: var(--leading-normal);
+}
+.profile-memory__meta {
+  margin: var(--s-1) 0 0;
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+.profile-memory__meta--inferred {
+  font-style: italic;
+}
+.profile-memory__subheading {
+  margin: var(--s-3) 0 var(--s-1);
+  font-size: var(--font-size-200);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+.profile-memory__forget,
+.profile-memory__retry,
+.profile-memory__forget-all {
+  min-height: 44px;
+  flex: 0 0 auto;
+}
+.profile-memory__forget-all {
+  width: 100%;
+  margin-top: var(--s-3);
+}
+.profile-memory__error {
+  margin: var(--s-2) 0 0;
+  font-size: var(--font-size-100);
+  color: var(--c-danger);
+}
+.profile-memory__sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 /* R4 proactive row */

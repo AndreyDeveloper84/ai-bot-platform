@@ -76,6 +76,7 @@ import { AdminMasterDetailScreen } from "./screens/admin/AdminMasterDetailScreen
 import { AdminNewBookingScreen } from "./screens/admin/AdminNewBookingScreen";
 import { AdminPeopleScreen } from "./screens/admin/AdminPeopleScreen";
 import { AdminHandoffQueueScreen } from "./screens/admin/AdminHandoffQueueScreen";
+import { AdminReadinessScreen } from "./screens/admin/AdminReadinessScreen";
 import { AdminSalonDayScreen } from "./screens/admin/AdminSalonDayScreen";
 import { AdminSectionDeniedScreen } from "./screens/admin/AdminSectionDeniedScreen";
 import { AdminServicesMatrixScreen } from "./screens/admin/AdminServicesMatrixScreen";
@@ -134,6 +135,7 @@ import { MasterSettingsScreen } from "./screens/MasterSettingsScreen";
 import { MasterSetupLandingScreen } from "./screens/MasterSetupLandingScreen";
 import { MasterWorkingHoursScreen } from "./screens/MasterWorkingHoursScreen";
 import { SoloSetupGate } from "./components/SoloSetupGate";
+import { SoloSurfaceContext } from "./hooks/useMasterAvatarItems";
 import { RescheduleScreen } from "./screens/RescheduleScreen";
 import { ServiceDetailScreen } from "./screens/ServiceDetailScreen";
 
@@ -324,6 +326,17 @@ function adminRouteElements(me: MeResponse): React.ReactNode {
             <AdminHandoffQueueScreen />
           ) : (
             <AdminSectionDeniedScreen me={me} section="Диалоги" />
+          )
+        }
+      />
+      {/* DRF-2117 — готовность салона поимённо: с карточки «Сегодня». */}
+      <Route
+        path="/admin/readiness"
+        element={
+          canOpenSalonPilot(me) ? (
+            <AdminReadinessScreen />
+          ) : (
+            <AdminSectionDeniedScreen me={me} section="Готовность" />
           )
         }
       />
@@ -872,37 +885,24 @@ function UnifiedAdminMasterRoutes({ me }: { me: MeResponse }) {
 }
 
 /**
- * Solo provider unified surface — Variant B navigation per Tau §3 verdict
- * (master-solo-surface.md r1 2026-05-26). Rebuilt from PR #798's 8-tab
- * horizontal-scroll Variant A to the 5-tab + «Ещё» bottom-sheet pattern
- * mandated by founder + Tau review for WCAG 2.5.8 compliance on 360dp
- * viewport (360 ÷ 5 = 72dp per tab, no label truncation).
+ * Solo provider unified surface (Tau §3 → §28/§50, DRF-2127).
  *
  * Activated only when `me.is_solo_provider === true` (W4 PR #760).
  *
- * Bottom-bar tabs (5):
- *   📋 День     → MasterDashboardScreen  (today agenda; reuse)
- *   📅 Записи   → MasterScheduleScreen   (booking calendar; reuse)
- *   👥 Клиенты  → MasterCustomersScreen  (Tier 2 read-only roster — this PR)
- *   💼 Услуги   → MasterServicesScreen   (экран 04: цены и длительность — DRF-1810)
- *   ⋯ Ещё      → opens bottom sheet (does NOT navigate)
+ * Bottom bar — ровно три, как у мастерской и салонной поверхности
+ * (§28 п.2, решение владельца 05.09; DRF-2127):
+ *   📋 Сегодня    → /solo/my-day    MasterDashboardScreen
+ *   📅 Расписание → /solo/schedule  MasterScheduleScreen (/solo/bookings — алиас)
+ *   ✦ Ayla        → /solo/ayla      MasterAylaScreen (OD-7: диалог с ассистентом)
  *
- * «Ещё» bottom sheet (Tau §3 spec):
- *   ⏰ Расписание   → MasterScheduleScreen  (same screen as Записи today)
- *   💰 Доходы       → SoonScreen            (post-pilot per pilot runbook)
- *   ⭐ Отзывы       → SoonScreen            (post-pilot)
- *   🤖 AI-помощник → MasterConversationsScreen (M5 + AI drafts)
- *   ──────────────
- *   👤 Профиль      → MasterProfileScreen
- *   ⚙ Настройки     → MasterSettingsScreen (M8 logout-only)
- *
- * Deep-link behaviour for /solo/more: a direct URL hit (e.g. from a stale
- * bookmark) redirects to /solo/my-day AND opens the sheet — Tau's
- * "implementation choice: simplest" instruction. Tap «Ещё» tab from the
- * bottom bar toggles the sheet without navigation.
- *
- * Legacy `/admin/*` + `/master/*` routes are still mounted so deep-links
- * from bot DMs keep working. The bottom nav just doesn't surface them.
+ * Прежние пять вкладок + лист «Ещё» (Variant B, Tau §3) сняты. Куда ушло:
+ *   Клиенты, Услуги, Отзывы, Профиль, Настройки → лист аватара
+ *     (`AvatarSheet`, `masterAvatarSheetItems({ surface: "solo" })`);
+ *   «Управление салоном» → тот же лист при владельческой роли (DRF-1149);
+ *   Доходы (/solo/earnings, экран-заглушка — §33) и «AI-помощник»
+ *     (/solo/ai — на деле переписка с клиентами, DRF-1039/1255) — в листе
+ *     не рисуются, адреса живут по прямым ссылкам.
+ * /solo/more (старая ссылка из DM) — редирект на /solo/my-day.
  */
 const SOLO_NAV_TABS: ReadonlyArray<{
   path: string;
@@ -912,127 +912,25 @@ const SOLO_NAV_TABS: ReadonlyArray<{
   /** When true, taps toggle the «Ещё» sheet instead of navigating. */
   opensSheet?: boolean;
 }> = [
-  { path: "/solo/my-day", label: "День", icon: "📋", ariaLabel: "Мой день" },
-  { path: "/solo/bookings", label: "Записи", icon: "📅", ariaLabel: "Записи" },
-  { path: "/solo/customers", label: "Клиенты", icon: "👥", ariaLabel: "Клиенты" },
-  { path: "/solo/services", label: "Услуги", icon: "💼", ariaLabel: "Услуги и цены" },
-  { path: "/solo/more", label: "Ещё", icon: "⋯", ariaLabel: "Меню «Ещё»", opensSheet: true },
+  // DRF-2127 (§28 п.2 / §50): ровно три, те же слова, что у мастерской и
+  // салонной панели. Снятое отсюда живёт в листе аватара (`AvatarSheet`,
+  // `masterAvatarSheetItems({ surface: "solo" })`): Клиенты, Услуги,
+  // Отзывы, Настройки, Профиль, «Управление салоном» при роли; «Доходы» и
+  // «AI-помощник» — только по прямым ссылкам (§33 / DRF-1039).
+  { path: "/solo/my-day", label: "Сегодня", icon: "📋", ariaLabel: "Сегодня" },
+  { path: "/solo/schedule", label: "Расписание", icon: "📅", ariaLabel: "Расписание" },
+  { path: "/solo/ayla", label: "Ayla", icon: "✦", ariaLabel: "Ayla" },
 ];
 
-interface SoloMoreSheetItem {
-  path: string;
-  label: string;
-  icon: string;
-  ariaLabel: string;
-  /** Divider sits between functional and settings items per Tau §3 mock. */
-  trailingDivider?: boolean;
-}
-
-const SOLO_MORE_SHEET_ITEMS: ReadonlyArray<SoloMoreSheetItem> = [
-  { path: "/solo/schedule", label: "Расписание", icon: "⏰", ariaLabel: "Расписание" },
-  { path: "/solo/earnings", label: "Доходы", icon: "💰", ariaLabel: "Доходы" },
-  { path: "/solo/reviews", label: "Отзывы", icon: "⭐", ariaLabel: "Отзывы" },
-  {
-    path: "/solo/ai",
-    label: "AI-помощник",
-    icon: "🤖",
-    ariaLabel: "AI-помощник",
-    trailingDivider: true,
-  },
-  { path: "/solo/profile", label: "Профиль", icon: "👤", ariaLabel: "Профиль" },
-  { path: "/solo/settings", label: "Настройки", icon: "⚙", ariaLabel: "Настройки" },
-];
-
-/**
- * The «Салон» escape hatch — DRF-1149 safety net.
- *
- * The solo surface mounts every `/admin/*` route (see
- * `UnifiedSoloSurface`) but the five-tab bar and the sheet above surface
- * none of them, so until now the only way in was typing a URL. That was
- * fine while «solo» meant «one person». It stopped being fine when the
- * pilot salon — four masters, three of them never bridged to a BotUser —
- * was mis-counted as solo and lost its entire admin surface.
- *
- * The counting bug itself is fixed in `is_solo_provider`; this item is
- * the second lock on the same door. If the classifier is ever wrong
- * again, an owner or admin can still reach the team screen instead of
- * being stranded on a surface with no way out.
- *
- * Gated on the role flags, not on `is_solo_provider`: a genuine solo
- * provider IS an owner, and «Салон» is where she manages her catalog and
- * her services regardless of headcount. A master-only caller never sees
- * it — same rule the backend enforces at `@require_admin_role`.
- */
-const SOLO_ADMIN_SHEET_ITEM: SoloMoreSheetItem = {
-  path: "/admin/team",
-  label: "Салон",
-  icon: "🏢",
-  ariaLabel: "Управление салоном",
-  trailingDivider: true,
-};
-
-/**
- * Sheet items for this caller: the Tau §3 base list, plus «Салон» when
- * the caller holds an admin-side role. The divider moves onto «Салон» so
- * the functional / settings split from the Tau mock is preserved.
- */
-function soloMoreSheetItems(me: MeResponse): ReadonlyArray<SoloMoreSheetItem> {
-  const hasAdmin = me.is_owner || me.is_admin || me.is_receptionist;
-  if (!hasAdmin) return SOLO_MORE_SHEET_ITEMS;
-  return SOLO_MORE_SHEET_ITEMS.flatMap((it) =>
-    it.trailingDivider
-      ? [{ ...it, trailingDivider: false }, SOLO_ADMIN_SHEET_ITEM]
-      : [it],
-  );
-}
-
-/**
- * Bottom-bar nav for the solo surface. Five tabs; the «Ещё» tab does
- * NOT navigate — it toggles the sheet via the `onOpenSheet` callback.
- * Active-state highlighting tracks the actual route prefix so the
- * indicator stays put even after the user dismisses the sheet.
- */
-function SoloBottomNav({
-  onOpenSheet,
-  sheetOpen,
-  moreItems,
-}: {
-  onOpenSheet: () => void;
-  sheetOpen: boolean;
-  moreItems: ReadonlyArray<SoloMoreSheetItem>;
-}) {
+function SoloBottomNav() {
   const location = useLocation();
   return (
     <nav className="solo-tabbar" aria-label="Основная навигация">
       {SOLO_NAV_TABS.map((t) => {
-        // «Ещё» is active iff sheet open OR pathname is in one of the
-        // nested sheet items (deep-link case).
-        const isMore = t.opensSheet === true;
-        const matchesPath = location.pathname.startsWith(t.path);
-        const matchesSheetItem =
-          isMore &&
-          moreItems.some((it) => location.pathname.startsWith(it.path));
-        const isActive = isMore
-          ? sheetOpen || matchesSheetItem
-          : matchesPath;
-        if (isMore) {
-          return (
-            <button
-              key={t.path}
-              type="button"
-              className={`solo-tabbar__tab${isActive ? " solo-tabbar__tab--active" : ""}`}
-              aria-label={t.ariaLabel}
-              aria-haspopup="menu"
-              aria-expanded={sheetOpen}
-              onClick={onOpenSheet}
-            >
-              <span className="solo-tabbar__icon" aria-hidden="true">
-                {t.icon}
-              </span>
-              <span className="solo-tabbar__label">{t.label}</span>
-            </button>
-          );
-        }
+        // «Расписание» подсвечивается и на алиасе /solo/bookings (тот же экран).
+        const isActive =
+          location.pathname.startsWith(t.path) ||
+          (t.path === "/solo/schedule" && location.pathname.startsWith("/solo/bookings"));
         return (
           <Link
             key={t.path}
@@ -1049,150 +947,6 @@ function SoloBottomNav({
         );
       })}
     </nav>
-  );
-}
-
-/**
- * «Ещё» bottom sheet (Tau §3). Modal-like overlay anchored to the
- * bottom edge; tap-outside dismisses, Escape dismisses. Each item is a
- * full-width row; tapping navigates AND auto-dismisses per Tau spec.
- *
- * Accessibility (round-1 adversarial Code Reviewer amendment):
- *   - role=dialog + aria-modal so SR users get the modal semantic.
- *   - Focus moves to the first item on open (was previously left on the
- *     «Ещё» trigger, which is outside the modal — SR users had no
- *     anchor inside the sheet).
- *   - Tab / Shift+Tab is trapped within the panel so keyboard users
- *     can't tab out of the modal into the backgrounded surface.
- *   - On close, focus is restored to whatever element opened the sheet
- *     (snapshot of document.activeElement at mount). This handles the
- *     bottom-bar trigger case AND the deep-link case (where there is
- *     no opening trigger — restoreFocus is a no-op then).
- */
-function SoloMoreSheet({
-  open,
-  onClose,
-  items,
-}: {
-  open: boolean;
-  onClose: () => void;
-  items: ReadonlyArray<SoloMoreSheetItem>;
-}) {
-  const navigate = useNavigate();
-  const panelRef = useRef<HTMLDivElement | null>(null);
-  const restoreFocusRef = useRef<HTMLElement | null>(null);
-
-  // Escape-key dismiss for keyboard users.
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [open, onClose]);
-
-  // Focus management — round-1 amendment. Snapshot the previously
-  // focused element on open, move focus into the panel, trap Tab/
-  // Shift+Tab within the panel, restore focus on close.
-  useEffect(() => {
-    if (!open) return;
-    // Snapshot the element that had focus when the sheet opened — we
-    // restore to it on close (typically the «Ещё» bottom-tab button).
-    if (typeof document !== "undefined") {
-      const active = document.activeElement;
-      restoreFocusRef.current =
-        active instanceof HTMLElement ? active : null;
-    }
-    const panel = panelRef.current;
-    if (!panel) return;
-
-    // Move focus to the first focusable item on open so SR users land
-    // inside the dialog instead of staying on the trigger.
-    const firstItem = panel.querySelector<HTMLElement>(
-      '[role="menuitem"], button',
-    );
-    firstItem?.focus();
-
-    // Trap Tab/Shift+Tab within the panel.
-    function onKeyDown(e: KeyboardEvent) {
-      if (e.key !== "Tab") return;
-      if (!panel) return;
-      const focusable = panel.querySelectorAll<HTMLElement>(
-        'button, [tabindex="0"], a[href]',
-      );
-      if (focusable.length === 0) return;
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      if (!first || !last) return;
-      if (e.shiftKey && document.activeElement === first) {
-        e.preventDefault();
-        last.focus();
-      } else if (!e.shiftKey && document.activeElement === last) {
-        e.preventDefault();
-        first.focus();
-      }
-    }
-    document.addEventListener("keydown", onKeyDown);
-    return () => {
-      document.removeEventListener("keydown", onKeyDown);
-      // Restore focus on close — guard against the trigger being
-      // unmounted (deep-link → /solo/more redirect case).
-      const target = restoreFocusRef.current;
-      if (target && typeof document !== "undefined" && document.contains(target)) {
-        target.focus();
-      }
-      restoreFocusRef.current = null;
-    };
-  }, [open]);
-
-  if (!open) return null;
-
-  const handleItemClick = (path: string) => {
-    onClose();
-    navigate(path);
-  };
-
-  return (
-    <div className="solo-more-sheet" role="presentation">
-      {/* Backdrop — tap-outside dismiss. */}
-      <button
-        type="button"
-        className="solo-more-sheet__backdrop"
-        aria-label="Закрыть меню"
-        onClick={onClose}
-      />
-      <div
-        ref={panelRef}
-        className="solo-more-sheet__panel"
-        role="dialog"
-        aria-modal="true"
-        aria-label="Меню «Ещё»"
-      >
-        <div className="solo-more-sheet__grip" aria-hidden="true" />
-        <h2 className="solo-more-sheet__title">Ещё</h2>
-        <ul className="solo-more-sheet__list">
-          {items.map((it) => (
-            <li key={it.path}>
-              <button
-                type="button"
-                className="solo-more-sheet__item"
-                aria-label={it.ariaLabel}
-                onClick={() => handleItemClick(it.path)}
-              >
-                <span className="solo-more-sheet__item-icon" aria-hidden="true">
-                  {it.icon}
-                </span>
-                <span className="solo-more-sheet__item-label">{it.label}</span>
-              </button>
-              {it.trailingDivider && (
-                <hr className="solo-more-sheet__divider" aria-hidden="true" />
-              )}
-            </li>
-          ))}
-        </ul>
-      </div>
-    </div>
   );
 }
 
@@ -1242,32 +996,20 @@ function SoloMoreLanding() {
 }
 
 function UnifiedSoloSurface({ me }: { me: MeResponse }) {
-  const location = useLocation();
+  // DRF-2127: «Управление салоном» в листе аватара — при владельческой
+  // роли поверх соло-профиля (правило DRF-1149, прежде жило в листе «Ещё»).
+  const soloInfo = useMemo(
+    () => ({ salonAdmin: Boolean(me.is_owner || me.is_admin || me.is_receptionist) }),
+    [me],
+  );
   // Round-1 amendment: read deep-link sheet-open state from the URL
   // on mount. If the user pasted `/solo/more` (e.g. stale bot DM
   // bookmark), the parent renders with `moreOpen=true` immediately —
   // no effect-then-Navigate race in SoloMoreLanding. The Navigate
   // away to /solo/my-day still fires from the route element below;
   // sheet state is already captured here.
-  const [moreOpen, setMoreOpen] = useState<boolean>(
-    () => location.pathname === "/solo/more",
-  );
-  const openSheet = useCallback(() => setMoreOpen(true), []);
-  const closeSheet = useCallback(() => setMoreOpen(false), []);
-  // «Салон» appears for admin-side callers only — see soloMoreSheetItems.
-  const moreItems = useMemo(() => soloMoreSheetItems(me), [me]);
-
-  // Defensive sync — if the user navigates TO /solo/more after mount
-  // (e.g. via browser back to a stale URL), re-open the sheet. Initial
-  // state already covers the mount case; this is a belt-and-braces
-  // guard for in-session URL changes.
-  useEffect(() => {
-    if (location.pathname === "/solo/more") {
-      setMoreOpen(true);
-    }
-  }, [location.pathname]);
-
   return (
+    <SoloSurfaceContext.Provider value={soloInfo}>
     <div className="solo-surface">
       <Routes>
         {/* Default landing — Tau §5.1 specifies «Мой день» as solo home;
@@ -1308,6 +1050,10 @@ function UnifiedSoloSurface({ me }: { me: MeResponse }) {
           element={<MasterReviewsScreen />}
         />
         <Route path="/solo/ai" element={<MasterConversationsScreen />} />
+        {/* DRF-2127 — «Ayla» тройки: диалог мастера с ассистентом (OD-7), не
+            переписка с клиентами. Один экран с /master/ayla; на /solo/*
+            MasterTabBar не рисуется — панель одна. */}
+        <Route path="/solo/ayla" element={<MasterAylaScreen />} />
         <Route path="/solo/profile" element={<MasterProfileScreen />} />
         <Route path="/solo/settings" element={<MasterSettingsScreen />} />
 
@@ -1321,13 +1067,9 @@ function UnifiedSoloSurface({ me }: { me: MeResponse }) {
         {/* Catch-all → land on solo home. */}
         <Route path="*" element={<CatchAllRedirect to="/solo/my-day" />} />
       </Routes>
-      <SoloBottomNav
-        onOpenSheet={openSheet}
-        sheetOpen={moreOpen}
-        moreItems={moreItems}
-      />
-      <SoloMoreSheet open={moreOpen} onClose={closeSheet} items={moreItems} />
+      <SoloBottomNav />
     </div>
+    </SoloSurfaceContext.Provider>
   );
 }
 

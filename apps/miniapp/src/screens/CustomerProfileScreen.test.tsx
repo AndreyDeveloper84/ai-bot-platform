@@ -37,6 +37,7 @@ const MARKETING = "/me/consents/marketing/";
 const HINTS = "/me/consents/proactive-hints/";
 const DATA_STORAGE = "/me/consents/data-storage/";
 const HEALTH = "/me/health-consent/";
+const MEMORY = "/memory/";
 
 const MARKETING_SWITCH = "Получать акции и предложения от салонов";
 const HINTS_SWITCH = "Получать подсказки от Ayla";
@@ -125,6 +126,8 @@ function routeRequests(
     if (handler) return Promise.resolve(handler(init)) as never;
     if (path === HEALTH) return Promise.resolve(HEALTH_STATE) as never;
     if (path === CONSENTS) return Promise.resolve(consentsDoc(base)) as never;
+    // DRF-2133 — R3 читает память; здесь по умолчанию пусто (свои тесты — MemoryCard.test.tsx).
+    if (path === MEMORY) return Promise.resolve({ green: [], health: [], status: "active" }) as never;
     return Promise.reject(new Error(`unexpected request: ${path}`)) as never;
   });
 }

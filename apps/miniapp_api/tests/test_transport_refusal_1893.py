@@ -212,7 +212,9 @@ def _unguarded(routes: list[tuple[str, Callable]]) -> list[str]:
 
 def test_every_miniapp_route_carries_the_init_data_guard():
     routes = _miniapp_routes()
-    assert len(routes) >= 126  # перепись dev 8bf99f7c: 40 + 43 + 32 + 10 + /me — скан не пуст
+    assert (
+        len(routes) >= 129
+    )  # перепись dev 8bf99f7c: 40 + 43 + 32 + 10 + /me (126) + 3 маршрута памяти DRF-2133
     assert _unguarded(routes) == []
 
 

@@ -36,9 +36,10 @@ from tests.support.pii_route_registry import (
 
 V = "apps.miniapp_api.views:"
 
-#: Named routes in ``apps/miniapp_api/urls.py`` on dev 94125e1f (18.09.2026).
+#: Named routes in ``apps/miniapp_api/urls.py`` on dev f2268007 (19.09.2026) + the
+#: DRF-2123 proposal route (49) + the three DRF-2133 memory routes (52).
 #: Lower the floor deliberately when a route is removed.
-ROUTE_FLOOR = 45
+ROUTE_FLOOR = 52
 
 _BOOKING_FIELDS = (
     "id",
@@ -425,7 +426,10 @@ CUSTOMER_ROUTES: dict[str, Entry] = {
         via=V + "customer_wellness_today",
         note=(
             "the caller's own diary day; without PERSONAL_DATA consent the body shrinks to "
-            "display_name + consent_required (+ goals) and no diary key is present at all"
+            "display_name + consent_required (+ goals) and no diary key is present at all; "
+            "with NUTRITION_ENABLED=false (DRF-2071) the body is display_name + "
+            "nutrition_disabled (+ goals) in the same shape, checked before consent, and no "
+            "diary or water key is read or sent"
         ),
     ),
     "customer_wellness_water": own(
@@ -563,6 +567,72 @@ CUSTOMER_ROUTES: dict[str, Entry] = {
             "and the commitments with their done_count — action facts only (В-5), no "
             "observation values, no phone or name; GET reads it, POST echoes the plan just "
             "created, DELETE answers with the closed flag only"
+        ),
+    ),
+    # --- Plan Lite proposal (DRF-2123, План-A, own) ---------------------
+    "customer_plan_lite_proposal": own(
+        "proposal.goal_key",
+        "proposal.why",
+        "proposal.template_version",
+        "proposal.actions[].action_type / cadence / target_count",
+        via="apps.miniapp_api.views_plan_lite:plan_lite_proposal_payload",
+        note=(
+            "the plan the catalog proposes for the caller's own active goal, read under "
+            "their external_user_id and never stored here: goal_key is the curated slug of "
+            "that goal (never the goal text the person typed), why is the owner-curated "
+            "template text for that goal (the same sentence for everyone with the goal, "
+            "nothing about the person), template_version is a provenance integer, and the "
+            "actions are the template's shape only — type, cadence, target — with no "
+            "done_count, no observation values, no phone or name; the response is "
+            "classified own because which template comes back reveals which goal the "
+            "caller has chosen"
+        ),
+    ),
+    # --- «Что Ayla помнит» (DRF-2133, Память-2, own) --------------------
+    "customer_memory": own(
+        "green[].id",
+        "green[].key",
+        "green[].label",
+        "green[].value",
+        "green[].said_at",
+        "green[].provenance",
+        "health[].id",
+        "health[].kind",
+        "health[].value",
+        "health[].said_at",
+        "status",
+        via="apps.miniapp_api.views_memory:customer_memory",
+        note=(
+            "what the bot remembers about the caller, keyed on their own ayla_user_id "
+            "(never BotUser.id) behind the same read gate the chat uses: green facts are "
+            "the current value per key (superseded history stays hidden) with the chat's "
+            "own phrasing as label and a said/inferred provenance mark; health rows are "
+            "red-zone entries and come only through RedZoneReader, which writes a "
+            "RedZoneAccessLog row per entry under the data_subject role — this is 152-ФЗ "
+            "special-category data shown to its subject and to no one else; status says "
+            "deletion_pending once forget-all or account deletion was requested, in which "
+            "case both lists are empty by the gate, not by filtering here"
+        ),
+    ),
+    "customer_memory_entry": own(
+        "id",
+        "deleted",
+        via="apps.miniapp_api.views_memory:customer_memory_entry",
+        note=(
+            "the id of the caller's own memory entry just tombstoned with reason "
+            "user_request_miniapp, and the deleted flag; a foreign, unknown or already "
+            "forgotten id is 404 with no record, and a red entry goes through "
+            "RedZoneReader.soft_delete_for_subject with a delete-type access log"
+        ),
+    ),
+    "customer_memory_forget_all": own(
+        "status",
+        via="apps.miniapp_api.views_memory:customer_memory_forget_all",
+        note=(
+            "the deletion_pending status after the caller asked to forget everything; the "
+            "body carries no fact — the request is recorded on the caller's own "
+            "UserPersonalContext and the same three chat steps run (forget-all intent, "
+            "dialogue anonymisation, Ayla profile erasure)"
         ),
     ),
 }

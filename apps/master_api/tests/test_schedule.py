@@ -796,13 +796,17 @@ class TestAvailabilityRequest:
             assert "Анна" in kwargs["text"] or accepted_master.name in kwargs["text"]
 
     @pytest.mark.django_db(transaction=True)
-    def test_no_manager_chat_id_skips_dm(
+    def test_no_manager_chat_id_still_reaches_the_owner(
         self,
         client: Client,
         bot_user: BotUser,
         tenant: Tenant,
         accepted_master: CatalogMaster,
     ) -> None:
+        """DRF-2128: адресат — активный владелец из ``TenantStaff`` (человек),
+        даже когда ``manager_chat_id`` пуст. До этого листа пустое поле
+        значило «DM никому» — и салон с владельцем, но без вручную вписанного
+        адреса, молчал."""
         # tenant fixture has empty manager_chat_id by default.
         assert tenant.manager_chat_id == ""
         start = (datetime.now(tz=timezone.utc) + timedelta(days=7)).replace(
@@ -824,7 +828,9 @@ class TestAvailabilityRequest:
                 HTTP_AUTHORIZATION=init_data_header("12345"),
             )
             assert resp.status_code == 201
-            assert not send.called
+            assert send.call_count == 1
+            assert send.call_args.kwargs["user_id"] == "99999"  # salon_owner → other_bot_user
+            assert "chat_id" not in send.call_args.kwargs
 
 
 # --- GET /availability/pending ---------------------------------------------

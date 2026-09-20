@@ -40,6 +40,7 @@ from typing import TYPE_CHECKING, Any
 
 from django.db import IntegrityError, transaction
 
+from apps.catalog.master_state import sale_block
 from apps.catalog.models import CatalogService
 from apps.tenancy.context import tenant_scope
 
@@ -284,6 +285,7 @@ def upsert_specialists(tenant: "Tenant", dtos: list["CatalogSpecialistDTO"]) -> 
                         )
                         result.created += 1
                     else:
+                        block_before = sale_block(obj)
                         for field_name, value in mirror.items():
                             setattr(obj, field_name, value)
                         # ``synced_at`` — ``auto_now``, а ``auto_now`` пишется
@@ -292,6 +294,7 @@ def upsert_specialists(tenant: "Tenant", dtos: list["CatalogSpecialistDTO"]) -> 
                         # молча замерло бы на дате создания.
                         obj.save(update_fields=[*mirror, "synced_at"])
                         result.updated += 1
+                        _note_sale_block_transition(obj, before=block_before)
             except IntegrityError as exc:
                 # ``CatalogMaster.id`` is the global PK, so one Ayla master can
                 # exist under exactly one tenant at a time. Rows mis-attributed
@@ -343,6 +346,29 @@ def upsert_specialists(tenant: "Tenant", dtos: list["CatalogSpecialistDTO"]) -> 
                 )
         _write_tenant_address(tenant, dtos)
     return result
+
+
+def _note_sale_block_transition(master: Any, *, before: str | None) -> None:
+    """Тип 4 DRF-2118: мастер продавалась — и перестала. Никогда не бросает.
+
+    Сравнивается ответ :func:`~apps.catalog.master_state.sale_block` до и
+    после записи зеркала: единственное место, где живёт «почему не
+    продаётся». Переход ``None → причина`` — событие для владельца/админа
+    (и для самой мастера); тот же ответ на следующем синке — не событие,
+    и дедуп рендерера его не пропустит.
+    """
+
+    try:
+        after = sale_block(master)
+        if before is not None or after is None:
+            return
+        from apps.channels.max import salon_notify
+
+        salon_notify.notify(salon_notify.master_unavailable_notice(master, block=after))
+    except Exception:  # noqa: BLE001 — синк не должен падать из-за уведомления
+        logger.exception(
+            "catalog.upsert.sale_block_notice_failed master=%s", getattr(master, "pk", None)
+        )
 
 
 def _write_tenant_address(tenant: "Tenant", dtos: list["CatalogSpecialistDTO"]) -> None:

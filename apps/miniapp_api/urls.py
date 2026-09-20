@@ -7,7 +7,13 @@ from __future__ import annotations
 
 from django.urls import path
 
-from apps.miniapp_api import views, views_diary_days, views_plan_lite, views_saved_meals
+from apps.miniapp_api import (
+    views,
+    views_diary_days,
+    views_memory,
+    views_plan_lite,
+    views_saved_meals,
+)
 
 app_name = "miniapp_api"
 
@@ -192,6 +198,13 @@ urlpatterns = [
         views_plan_lite.customer_plan_lite,
         name="customer_plan_lite",
     ),
+    # DRF-2123 (План-A) — предложение из шаблона активной цели; ничего не
+    # создаёт, подтверждается POST plan-lite с template_version.
+    path(
+        "plan-lite/proposal",
+        views_plan_lite.customer_plan_lite_proposal,
+        name="customer_plan_lite_proposal",
+    ),
     # DRF-2099 — дневник за неделю: строка на день и записи одного дня;
     # границы суток считает каталог по поясу человека.
     path(
@@ -209,5 +222,18 @@ urlpatterns = [
         "recent-activity",
         views.customer_recent_activity,
         name="customer_recent_activity",
+    ),
+    # DRF-2133 (Память-2) — «Что Ayla помнит»: те же читатели и удалитель,
+    # что у команд в чате; раздел «Здоровье» — только через RedZoneReader.
+    path("memory/", views_memory.customer_memory, name="customer_memory"),
+    path(
+        "memory/forget-all/",
+        views_memory.customer_memory_forget_all,
+        name="customer_memory_forget_all",
+    ),
+    path(
+        "memory/<uuid:entry_id>/",
+        views_memory.customer_memory_entry,
+        name="customer_memory_entry",
     ),
 ]

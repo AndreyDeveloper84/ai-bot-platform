@@ -88,7 +88,7 @@ from __future__ import annotations
 import datetime as dt
 import logging
 from dataclasses import dataclass
-from typing import Final
+from typing import Any, Final
 from uuid import UUID
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -581,6 +581,47 @@ def notify_booking_created(
             "booking.notify.unexpected appointment_id=%s",
             appointment_id,
         )
+
+
+def notify_booking_attention(*, proxy_pk: Any, reason: str) -> None:
+    """Тип 5 DRF-2118 — «запись требует вмешательства» управляющим салона.
+
+    Источники и их код причины: ``booking.cancelled`` не от салона →
+    ``cancelled_by_client`` (иначе ``cancelled``), ``booking.no_show`` →
+    ``no_show``. Читается строка зеркала после коммита — как и у «новой
+    записи»; названия услуги и мастера — из зеркала каталога. Никогда не
+    бросает: ингест уже завершён.
+    """
+
+    try:
+        from apps.booking.models import RemoteBookingProxy
+        from apps.channels.max import salon_notify
+
+        proxy = (
+            RemoteBookingProxy.all_tenants.filter(pk=proxy_pk)
+            .select_related("tenant", "bot_user")
+            .first()
+        )
+        if proxy is None:
+            return
+        tenant = proxy.tenant
+        master = resolve_master(tenant=tenant, specialist_id=proxy.specialist_id)
+        salon_notify.notify(
+            salon_notify.booking_attention_notice(
+                proxy,
+                reason=reason,
+                master_name=getattr(master, "name", "") or "",
+                service_name=resolve_service_name(tenant=tenant, service_id=proxy.service_id),
+            )
+        )
+    except Exception:  # noqa: BLE001 — уведомление не должно ронять хук после коммита
+        logger.exception("booking.notify.attention_failed proxy=%s reason=%s", proxy_pk, reason)
+
+
+def schedule_booking_attention_notification(*, proxy_pk: Any, reason: str) -> None:
+    """Очередь уведомления типа 5 на после коммита ингеста (DRF-2118)."""
+
+    transaction.on_commit(lambda: notify_booking_attention(proxy_pk=proxy_pk, reason=reason))
 
 
 def schedule_booking_created_notification(

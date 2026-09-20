@@ -13,6 +13,10 @@ Covers all 8 spec behaviours:
 
 Plus a few defensive cases (race condition, batch limit, message
 content sanity).
+
+Подмена — провод ``apps.channels.max.outbound.send_message``: с DRF-2128
+эскалация пишет менеджеру через ``send_to_staff`` (от салонного бота), а
+не именем ``send_message`` в своём модуле.
 """
 
 from __future__ import annotations
@@ -117,7 +121,7 @@ def _make_reminder(
 class TestHappyPath:
     def test_stale_t24h_escalates(self, tenant: Tenant, bot_user: BotUser) -> None:
         row = _make_reminder(tenant=tenant, bot_user=bot_user)
-        with patch("apps.bookings.escalation.send_message") as mock_send:
+        with patch("apps.channels.max.outbound.send_message") as mock_send:
             result = escalate_stale_reminders()
 
         assert result["escalated"] == 1
@@ -132,8 +136,8 @@ class TestHappyPath:
         assert kwargs["chat_id"] == "mgr-chat-1"
         assert kwargs["attachments"] is None
         text = kwargs["text"]
-        # Spec: message contains phone, name, service, visit time, master.
-        assert "79991234567" in text
+        # DRF-2129 (DRF-1039): name, service, visit time, master — no client phone.
+        assert "79991234567" not in text
         assert "Anna" in text
         assert "Массаж" in text
         assert "Lera" in text
@@ -155,7 +159,7 @@ class TestHappyPath:
             source="bot",
         )
         _make_reminder(tenant=tenant, bot_user=bot_user, booking_request=br)
-        with patch("apps.bookings.escalation.send_message") as mock_send:
+        with patch("apps.channels.max.outbound.send_message") as mock_send:
             escalate_stale_reminders()
         text = mock_send.call_args.kwargs["text"]
         assert str(br.id) in text
@@ -164,7 +168,7 @@ class TestHappyPath:
         self, tenant: Tenant, bot_user: BotUser
     ) -> None:
         row = _make_reminder(tenant=tenant, bot_user=bot_user)
-        with patch("apps.bookings.escalation.send_message") as mock_send:
+        with patch("apps.channels.max.outbound.send_message") as mock_send:
             escalate_stale_reminders()
         text = mock_send.call_args.kwargs["text"]
         # No booking_request → fallback to reminder UUID for traceability.
@@ -188,7 +192,7 @@ class TestKindFilter:
             kind=BookingReminder.Kind.TWO_HOURS,
             visit_offset_hours=1.0,
         )
-        with patch("apps.bookings.escalation.send_message") as mock_send:
+        with patch("apps.channels.max.outbound.send_message") as mock_send:
             result = escalate_stale_reminders()
         assert result["escalated"] == 0
         mock_send.assert_not_called()
@@ -216,7 +220,7 @@ class TestStatusFilter:
         self, tenant: Tenant, bot_user: BotUser, status: str
     ) -> None:
         row = _make_reminder(tenant=tenant, bot_user=bot_user, status=status)
-        with patch("apps.bookings.escalation.send_message") as mock_send:
+        with patch("apps.channels.max.outbound.send_message") as mock_send:
             result = escalate_stale_reminders()
         assert result["escalated"] == 0
         mock_send.assert_not_called()
@@ -231,7 +235,7 @@ class TestVisitWindowFilter:
     def test_visit_too_far_in_future_not_escalated(self, tenant: Tenant, bot_user: BotUser) -> None:
         # Visit is 20h away — outside the 12h escalation window.
         row = _make_reminder(tenant=tenant, bot_user=bot_user, visit_offset_hours=20.0)
-        with patch("apps.bookings.escalation.send_message") as mock_send:
+        with patch("apps.channels.max.outbound.send_message") as mock_send:
             result = escalate_stale_reminders()
         assert result["escalated"] == 0
         mock_send.assert_not_called()
@@ -245,7 +249,7 @@ class TestVisitWindowFilter:
         # Slight 1-min buffer to absorb test runtime between now() in
         # the fixture and now() inside the task.
         row = _make_reminder(tenant=tenant, bot_user=bot_user, visit_offset_hours=11.9)
-        with patch("apps.bookings.escalation.send_message"):
+        with patch("apps.channels.max.outbound.send_message"):
             result = escalate_stale_reminders()
         assert result["escalated"] == 1
         row.refresh_from_db()
@@ -258,7 +262,7 @@ class TestVisitWindowFilter:
         # this is correct: the manager calls to ask "did you make it?"
         # / "do you want to rebook?".
         row = _make_reminder(tenant=tenant, bot_user=bot_user, visit_offset_hours=-1.0)
-        with patch("apps.bookings.escalation.send_message"):
+        with patch("apps.channels.max.outbound.send_message"):
             result = escalate_stale_reminders()
         assert result["escalated"] == 1
         row.refresh_from_db()
@@ -271,7 +275,7 @@ class TestVisitWindowFilter:
 class TestIdempotency:
     def test_second_run_is_noop(self, tenant: Tenant, bot_user: BotUser) -> None:
         _make_reminder(tenant=tenant, bot_user=bot_user)
-        with patch("apps.bookings.escalation.send_message") as mock_send:
+        with patch("apps.channels.max.outbound.send_message") as mock_send:
             first = escalate_stale_reminders()
             second = escalate_stale_reminders()
         assert first["escalated"] == 1
@@ -308,21 +312,22 @@ class TestMultiTenant:
         _make_reminder(tenant=t1, bot_user=bu1, yc_id="yc-A")
         _make_reminder(tenant=t2, bot_user=bu2, yc_id="yc-B")
 
-        with patch("apps.bookings.escalation.send_message") as mock_send:
+        with patch("apps.channels.max.outbound.send_message") as mock_send:
             result = escalate_stale_reminders()
 
         assert result["escalated"] == 2
         assert mock_send.call_count == 2
         # Each call carried the correct per-tenant manager chat_id and
-        # the correct per-tenant client phone number — no cross-leak.
+        # the correct per-tenant client name — no cross-leak; phones are
+        # not in staff texts at all (DRF-2129, DRF-1039).
         calls_by_chat = {
             call.kwargs["chat_id"]: call.kwargs["text"] for call in mock_send.call_args_list
         }
         assert set(calls_by_chat.keys()) == {"mgr-A", "mgr-B"}
-        assert "79990000001" in calls_by_chat["mgr-A"]
         assert "Alice" in calls_by_chat["mgr-A"]
-        assert "79990000002" in calls_by_chat["mgr-B"]
         assert "Bob" in calls_by_chat["mgr-B"]
+        assert "79990000001" not in calls_by_chat["mgr-A"]
+        assert "79990000002" not in calls_by_chat["mgr-B"]
         # Negative cross-checks — Alice's phone must NOT appear in
         # Salon B's manager message.
         assert "79990000001" not in calls_by_chat["mgr-B"]
@@ -343,7 +348,7 @@ class TestEmptyManagerChatId:
         import logging
 
         with (
-            patch("apps.bookings.escalation.send_message") as mock_send,
+            patch("apps.channels.max.outbound.send_message") as mock_send,
             caplog.at_level(logging.WARNING, logger="apps.bookings.escalation"),
         ):
             result = escalate_stale_reminders()
@@ -368,7 +373,7 @@ class TestEmptyManagerChatId:
             client_name="WS",
         )
         _make_reminder(tenant=t, bot_user=bu)
-        with patch("apps.bookings.escalation.send_message") as mock_send:
+        with patch("apps.channels.max.outbound.send_message") as mock_send:
             result = escalate_stale_reminders()
         assert result["no_manager"] == 1
         mock_send.assert_not_called()
@@ -383,7 +388,7 @@ class TestSendFailureReverts:
     ) -> None:
         row = _make_reminder(tenant=tenant, bot_user=bot_user)
         with patch(
-            "apps.bookings.escalation.send_message",
+            "apps.channels.max.outbound.send_message",
             side_effect=MaxAPIError(503, "service unavailable"),
         ):
             result = escalate_stale_reminders()
@@ -396,7 +401,7 @@ class TestSendFailureReverts:
     def test_unexpected_exception_also_reverts(self, tenant: Tenant, bot_user: BotUser) -> None:
         row = _make_reminder(tenant=tenant, bot_user=bot_user)
         with patch(
-            "apps.bookings.escalation.send_message",
+            "apps.channels.max.outbound.send_message",
             side_effect=RuntimeError("boom"),
         ):
             result = escalate_stale_reminders()
@@ -408,14 +413,14 @@ class TestSendFailureReverts:
         row = _make_reminder(tenant=tenant, bot_user=bot_user)
         # First tick: send fails, status reverts.
         with patch(
-            "apps.bookings.escalation.send_message",
+            "apps.channels.max.outbound.send_message",
             side_effect=MaxAPIError(502, "bad gateway"),
         ):
             escalate_stale_reminders()
         row.refresh_from_db()
         assert row.status == BookingReminder.Status.SENT_NO_REPLY
         # Second tick: MAX recovers, escalation succeeds.
-        with patch("apps.bookings.escalation.send_message") as mock_send:
+        with patch("apps.channels.max.outbound.send_message") as mock_send:
             result = escalate_stale_reminders()
         assert result["escalated"] == 1
         assert mock_send.call_count == 1
@@ -458,7 +463,7 @@ class TestRaceCondition:
 
         with (
             patch.object(BookingReminder.all_tenants, "filter", side_effect=fake_filter),
-            patch("apps.bookings.escalation.send_message") as mock_send,
+            patch("apps.channels.max.outbound.send_message") as mock_send,
         ):
             result = escalate_stale_reminders()
 
@@ -477,7 +482,7 @@ class TestBatchLimit:
             )
         with (
             patch.object(escalation_mod, "BATCH_LIMIT", 3),
-            patch("apps.bookings.escalation.send_message") as mock_send,
+            patch("apps.channels.max.outbound.send_message") as mock_send,
         ):
             result = escalate_stale_reminders()
         assert mock_send.call_count == 3
@@ -486,7 +491,7 @@ class TestBatchLimit:
 
 class TestEmptyQueue:
     def test_no_rows_returns_zero_counters(self, tenant: Tenant) -> None:
-        with patch("apps.bookings.escalation.send_message") as mock_send:
+        with patch("apps.channels.max.outbound.send_message") as mock_send:
             result = escalate_stale_reminders()
         assert result == {
             "escalated": 0,
@@ -527,7 +532,7 @@ class TestStateRecheckBeforeSend:
         )
         row = _make_reminder(tenant=tenant, bot_user=bot_user, booking_request=br)
 
-        with patch("apps.bookings.escalation.send_message") as mock_send:
+        with patch("apps.channels.max.outbound.send_message") as mock_send:
             result = escalate_stale_reminders()
 
         mock_send.assert_not_called()
@@ -561,7 +566,7 @@ class TestStateRecheckBeforeSend:
         )
         _make_reminder(tenant=tenant, bot_user=bot_user, booking_request=br)
 
-        with patch("apps.bookings.escalation.send_message") as mock_send:
+        with patch("apps.channels.max.outbound.send_message") as mock_send:
             result = escalate_stale_reminders()
 
         mock_send.assert_not_called()
@@ -587,7 +592,7 @@ class TestStateRecheckBeforeSend:
         )
         row = _make_reminder(tenant=tenant, bot_user=bot_user, booking_request=br)
 
-        with patch("apps.bookings.escalation.send_message") as mock_send:
+        with patch("apps.channels.max.outbound.send_message") as mock_send:
             result = escalate_stale_reminders()
 
         mock_send.assert_not_called()
@@ -617,7 +622,7 @@ class TestStateRecheckBeforeSend:
         )
         _make_reminder(tenant=tenant, bot_user=bot_user, booking_request=br)
 
-        with patch("apps.bookings.escalation.send_message") as mock_send:
+        with patch("apps.channels.max.outbound.send_message") as mock_send:
             result = escalate_stale_reminders()
 
         assert mock_send.call_count == 1
@@ -634,7 +639,7 @@ class TestStateRecheckBeforeSend:
         # DO carry an Ayla appointment identity are classified against
         # RemoteBookingProxy since DRF-1144 — pinned just below.
         _make_reminder(tenant=tenant, bot_user=bot_user, booking_request=None)
-        with patch("apps.bookings.escalation.send_message") as mock_send:
+        with patch("apps.channels.max.outbound.send_message") as mock_send:
             result = escalate_stale_reminders()
         assert mock_send.call_count == 1
         assert result["escalated"] == 1
@@ -669,7 +674,7 @@ class TestStateRecheckBeforeSend:
             booking_request=None,
             yc_id=str(appointment_id),
         )
-        with patch("apps.bookings.escalation.send_message") as mock_send:
+        with patch("apps.channels.max.outbound.send_message") as mock_send:
             result = escalate_stale_reminders()
         assert mock_send.call_count == 0
         assert result["escalated"] == 0

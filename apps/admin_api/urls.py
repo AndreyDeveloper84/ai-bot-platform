@@ -21,6 +21,7 @@ from apps.admin_api import (
     views_customers,
     views_day,
     views_handoff_queue,
+    views_readiness,
     views_invite,
     views_master_exceptions,
     views_schedule_impact,
@@ -246,5 +247,12 @@ urlpatterns = [
         "handoff-queue/",
         views_handoff_queue.handoff_queue,
         name="handoff_queue",
+    ),
+    # DRF-2117 — карточка «Готовность — N проблем» на «Сегодня» (ayla-85):
+    # каталог + зеркало, только владелец / администратор (ресепшну — нет, DRF-2115).
+    path(
+        "readiness/",
+        views_readiness.salon_readiness,
+        name="salon_readiness",
     ),
 ]

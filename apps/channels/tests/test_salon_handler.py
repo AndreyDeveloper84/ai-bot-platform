@@ -585,7 +585,9 @@ class TestTheMasterAssistant:
 
         _handle("что у меня завтра", tenant)
 
-        assert "Салон" in sent.call_args.kwargs["text"]
+        # DRF-2114: владелец / администратор без ассистента слышит приветствие
+        # с живой сводкой, не «Салон «X».».
+        assert "Вы вошли в Ayla для салона" in sent.call_args.kwargs["text"]
 
     def test_a_failing_assistant_falls_back_to_the_menu(self, tenant, sent):
         """A broken assistant must not leave a master with silence."""

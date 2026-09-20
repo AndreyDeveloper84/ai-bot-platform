@@ -740,41 +740,30 @@ def _maybe_send_manager_dm(
 ) -> None:
     """Dispatch the «Анна передала диалог в админ-канал» DM.
 
-    No-op when no manager address is configured — degraded mode aligned
-    with :func:`apps.master_api.views._maybe_send_manager_dm` and the
-    reminder-escalation pattern.
+    Адресаты и отправитель — :func:`~apps.channels.max.staff_outbound.send_to_staff`
+    (DRF-2128): активные владелец/админ салона плюс адрес менеджера, от
+    салонного бота. Никого — деградация с именем; slug
+    ``no_manager_chat_id`` сохранён, это эмитируемый ключ.
 
     Local imports so the channels module isn't loaded by tests that
     don't need it.
     """
 
-    # DRF-1559 — адрес менеджера: человек, если у салона заполнен
-    # ``manager_user_id``, иначе прежний диалоговый идентификатор. Slug
-    # ``no_manager_chat_id`` сохранён — это эмитируемый ключ. Импорт
-    # локальный, как и у ``send_message`` ниже: apps.channels не нужен
-    # тем эндпоинтам master_api, которые сюда не заходят.
-    from apps.channels.max.addressing import manager_address
+    from apps.channels.max.staff_outbound import MANAGER, send_to_staff
 
-    manager = manager_address(tenant)
-    if not manager:
+    text = f"{master.name} передала диалог с {client_label} в админ-канал. Причина: {reason_class}"
+    result = send_to_staff(tenant, MANAGER, text)
+    if result.recipients == 0:
         logger.info(
             "master_api.conversations.promote.no_manager_chat_id tenant=%s master=%s",
             tenant.id,
             master.id,
         )
-        return
-
-    from apps.channels.max.outbound import MaxAPIError, send_message
-
-    text = f"{master.name} передала диалог с {client_label} в админ-канал. Причина: {reason_class}"
-    try:
-        send_message(**manager.send_kwargs(), text=text)
-    except MaxAPIError:
+    elif not result.delivered:
         logger.warning(
             "master_api.conversations.promote.manager_dm_failed tenant=%s master=%s",
             tenant.id,
             master.id,
-            exc_info=True,
         )
 
 

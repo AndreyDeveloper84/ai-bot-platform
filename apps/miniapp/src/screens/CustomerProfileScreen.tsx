@@ -6,8 +6,8 @@
  * Spec: `docs/screens/customer-profile-flow.md` (deferred Variant 3,
  * post commit `376784e`). Sections R1-R6; R2 export/delete are wired
  * to the C5 152-ФЗ endpoints since pilot phase 2a (PILOT_CONTRACTS
- * §6); only R3 memory stays deferred per §0 «Pilot scope & backend
- * reality» recon.
+ * §6); R3 memory wired to `GET/DELETE /memory/` since DRF-2133
+ * (owner ruling 19.09 В2 «до пилота»).
  *
  * # Section order (per spec §11.1 selected variant)
  *   R1 — header (avatar initials fallback + name; handle/scope rows
@@ -18,7 +18,8 @@
  *        с подтверждением, НЕ тумблер) + §4.2 accordion
  *        + «Запросить данные» / «Удалить аккаунт и личные данные» → C5 sheets
  *        (PersonalDataSheets.tsx; support deeplink = error fallback)
- *   R3 — memory transparency: coming-soon card (no data, no clear)
+ *   R3 — memory transparency: MemoryCard — факты с происхождением,
+ *        «Забыть» у каждого, «Забыть всё» с подтверждением (DRF-2133)
  *   R4 — «Подсказки от Ayla»: тумблер на `me/consents/proactive-hints/`
  *   R5 — notifications: MAX channel + soft timing + entry → support
  *   R6 — states: loading skeleton / API-down with retry / offline
@@ -42,7 +43,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
-import { ComingSoonCard } from "../components/ComingSoonCard";
+import { MemoryCard } from "../components/MemoryCard";
 import { ConsentRow } from "../components/ConsentRow";
 import { DisclosureSheet } from "../components/DisclosureSheet";
 import { TimezoneSheet, zoneLabel } from "../components/TimezoneSheet";
@@ -555,7 +556,6 @@ export function CustomerProfileScreen() {
               <DeletionRequestStatus />
             </section>
 
-            {/* R3 — Memory transparency (deferred) */}
             {/* Часовой пояс (DRF-1477). Своя секция, а не строка среди
                 согласий: пояс — не согласие, и складывать их вместе
                 значило бы предложить человеку «разрешить» своё
@@ -599,6 +599,7 @@ export function CustomerProfileScreen() {
               </dl>
             </section>
 
+            {/* R3 — Memory transparency (DRF-2133) */}
             <section
               className="profile-section"
               aria-labelledby="profile-r3-h2"
@@ -606,7 +607,7 @@ export function CustomerProfileScreen() {
               <h2 id="profile-r3-h2" className="profile-section__heading">
                 Что <span lang="en">Ayla</span> помнит
               </h2>
-              <ComingSoonCard />
+              <MemoryCard />
             </section>
 
             {/* R4 — «Подсказки от Ayla» (ручка DRF-1520). Это не

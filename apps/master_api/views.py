@@ -44,7 +44,6 @@ from typing import Any
 from collections.abc import Callable
 from functools import wraps
 
-from django.conf import settings
 from django.db import transaction
 from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.utils import timezone as dj_timezone
@@ -2151,59 +2150,18 @@ def _parse_iso_datetime(raw: str) -> datetime | None:
 
 
 def _maybe_send_manager_dm(*, tenant: Any, master: CatalogMaster, request_id: uuid.UUID) -> None:
-    """Dispatch the «Анна просит выходной» DM to the salon manager.
+    """DM «Анна просит выходной» управляющим салона — от салонного бота.
 
-    Per master-mobile §M3 line 458: «server marks slot blocked → owner
-    notified (audit + bot DM)». No-op when the manager's MAX address is
-    empty — degraded mode aligned with the reminder-escalation pattern
-    (apps/bookings/tasks::escalate_stale_reminders).
-
-    Imports are local because the function is wired via
-    ``transaction.on_commit`` and the channels module isn't needed by
-    every master endpoint.
+    Тонкая обёртка над
+    :func:`apps.master_api.services.schedule.notify_manager_of_availability_request`:
+    до DRF-2128 здесь жила своя копия той же логики (вьюхи были заняты
+    DRF-1507), теперь копия одна. Имя оставлено — его держат
+    ``transaction.on_commit`` ниже и подмены в тестах.
     """
 
-    # DRF-1559 — адрес менеджера: человек, если у салона заполнен
-    # ``manager_user_id``, иначе прежний диалоговый идентификатор. Slug
-    # ``no_manager_chat_id`` сохранён — это эмитируемый ключ. Импорт
-    # локальный, как и у ``send_message`` ниже: apps.channels не нужен
-    # тем эндпоинтам master_api, которые сюда не заходят.
-    from apps.channels.max.addressing import manager_address
+    from apps.master_api.services.schedule import notify_manager_of_availability_request
 
-    manager = manager_address(tenant)
-    if not manager:
-        logger.info(
-            "master_api.availability.no_manager_chat_id tenant=%s master=%s",
-            tenant.id,
-            master.id,
-        )
-        return
-
-    from apps.channels.max.outbound import MaxAPIError, send_message
-
-    # Admin Mini App deeplink — settings-overridable so staging can point
-    # at the staging admin URL. The default value mirrors the customer-
-    # side ADMIN_MINI_APP_URL convention from PR #450.
-    admin_url = getattr(
-        settings,
-        "ADMIN_MINI_APP_URL",
-        "https://admin.formulatela.ru/availability",
-    )
-    text = (
-        f"{master.name} просит изменить расписание. "
-        f"[Открыть запрос]({admin_url}?request_id={request_id})"
-    )
-    try:
-        send_message(**manager.send_kwargs(), text=text)
-    except MaxAPIError:
-        # Best-effort: the audit + DB row are the source of truth. DM
-        # failures are logged for ops but don't propagate.
-        logger.warning(
-            "master_api.availability.manager_dm_failed tenant=%s request=%s",
-            tenant.id,
-            request_id,
-            exc_info=True,
-        )
+    notify_manager_of_availability_request(tenant=tenant, master=master, request_id=request_id)
 
 
 @csrf_exempt

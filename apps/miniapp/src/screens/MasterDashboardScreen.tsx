@@ -61,7 +61,7 @@ import {
 } from "../lib/max-sdk";
 import { AvatarSheet } from "../components/AvatarSheet";
 import { IconMessage, MasterTabBar } from "../components/MasterTabBar";
-import { masterAvatarSheetItems } from "../lib/avatar-sheet";
+import { useMasterAvatarItems } from "../hooks/useMasterAvatarItems";
 import { unreadBadgeText } from "../lib/unread-badge";
 import { AcceptingBookingsToggle } from "../components/AcceptingBookingsToggle";
 import { PayoutPreviewCard } from "../components/PayoutPreviewCard";
@@ -492,6 +492,8 @@ export function DashboardHeader({
   // (DRF-1039/1255); здесь не трогается.
   const firstName = (masterName || "").split(/\s+/)[0] ?? "";
   const badge = unreadBadgeText(unreadCount);
+  // DRF-2127: адреса пунктов — по поверхности (/master/* или /solo/*).
+  const avatarItems = useMasterAvatarItems();
   return (
     <header className="master-dashboard__header">
       <div className="master-dashboard__header-left">
@@ -518,7 +520,7 @@ export function DashboardHeader({
             name={masterName}
             photoUrl={photoUrl}
             dot={profileHasOwnerPendingChange}
-            items={masterAvatarSheetItems()}
+            items={avatarItems}
           />
         </div>
         <div className="master-dashboard__time">{formatTimeHM(nowIso)}</div>
