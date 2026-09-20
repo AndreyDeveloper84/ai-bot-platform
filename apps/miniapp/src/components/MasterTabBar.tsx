@@ -60,14 +60,6 @@ function IconCalendar() {
   );
 }
 
-export function IconMessage() {
-  return (
-    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-      strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d="M21 11.5a8.4 8.4 0 0 1-1 4 8.5 8.5 0 0 1-7.6 4.6 8.4 8.4 0 0 1-4-1L3 21l1.9-5.4a8.5 8.5 0 1 1 16.1-4.1Z" />
-    </svg>
-  );
-}
 
 function IconAyla() {
   return (
@@ -96,9 +88,8 @@ export function MasterTabBar({ scheduleHasPendingChange }: TabBarProps) {
 
   // Solo unified surface (Tau §5) owns its own bottom nav (`SoloBottomNav`
   // in App.tsx). The solo surface deliberately reuses several master
-  // screens — MasterDashboardScreen, MasterScheduleScreen,
-  // MasterConversationsScreen — which historically rendered this
-  // MasterTabBar. Without an early-return here, those reused screens
+  // screens — MasterDashboardScreen, MasterScheduleScreen — which
+  // render this MasterTabBar. Without an early-return here, those reused screens
   // would paint a second fixed-position tab bar on top of the solo bar,
   // both at z-index 100, fighting for the same pixels.
   //

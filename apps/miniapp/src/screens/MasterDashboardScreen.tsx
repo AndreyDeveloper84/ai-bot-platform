@@ -40,7 +40,8 @@
  * «ТРЕБУЮТ ВНИМАНИЯ» (переписки), значок 💬 в шапке, «Открыть диалог ›», тап
  * по записи → переписка, «ЭТА НЕДЕЛЯ» с рейтингом, `PayoutPreviewCard`, мёртвая
  * «Заметка к визиту ›», «Сказала: «…»», «⚠ Постоянный клиент». Компоненты
- * `PayoutPreviewCard` / `IconMessage` живут дальше — с экрана сняты, не удалены.
+ * `PayoutPreviewCard` живёт дальше — с экрана снят, не удалён; переписка
+ * мастера с клиентом снята вовсе (DRF-1255).
  * Карточка записи — имя, услуга, время; сторож на набор полей — в тестах.
  * Тап по карточке → «Детали записи» `/master|solo/bookings/:id` (DRF-2156,
  * М-4); «До визита …» — общим форматтером DRF-1185 («1 ч 20 мин», §61);
@@ -321,21 +322,16 @@ export function MasterDashboardScreen() {
     active_visit,
     next_visit,
     upcoming_today,
-    inbox_preview,
     today_summary,
     tab_badges,
     states,
   } = data;
+  // DRF-1255: переписки с клиентом у мастера нет — inbox с сервера день
+  // «непустым» не делает (поле остаётся в ответе до DRF-1528).
   const isEmptyToday =
-    active_visit === null &&
-    next_visit === null &&
-    inbox_preview.length === 0 &&
-    today_summary.total_clients_today === 0;
+    active_visit === null && next_visit === null && today_summary.total_clients_today === 0;
   const isDayDone = states.is_day_done && !active_visit && !next_visit;
-  const noServices =
-    !data.master.specialization &&
-    today_summary.total_clients_today === 0 &&
-    inbox_preview.length === 0;
+  const noServices = !data.master.specialization && today_summary.total_clients_today === 0;
 
   return (
     <DashboardFrame
@@ -456,10 +452,8 @@ function DashboardFrame({
  * Шапка дашборда (§M1 «Студия Карина [Анна ●]»).
  *
  * DRF-1848 (карта кабинета D01, D02): имя мастера — видимым текстом, а не
- * только подписью аватара; значок диалогов с числом непрочитанных. Число
- * берётся из того же `tab_badges.conversations_unread`, что и у вкладки
- * «Диалоги», и пишется тем же `unreadBadgeText` — второго источника нет.
- * Тап ведёт туда же, куда карточки входящих (`onInboxCardTap`).
+ * только подписью аватара. Значка диалогов в шапке нет: прямой переписки
+ * мастера с клиентом нет вовсе (OD-7, DRF-1255).
  */
 export function DashboardHeader({
   salonName,

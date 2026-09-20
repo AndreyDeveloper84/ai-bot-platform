@@ -62,10 +62,10 @@ const CUSTOMER_SURFACE: ReadonlySet<string> = new Set(["MasterPickerScreen"]);
  * SystemState.
  */
 const BASELINE_M6B: ReadonlySet<string> = new Set([
-  "MasterConversationDetailScreen", // под снятие DRF-1255
-  "MasterConversationsScreen", // под снятие DRF-1255
-  "MasterInternalChatListScreen", // под снятие DRF-1255
-  "MasterInternalChatThreadScreen", // под снятие DRF-1255
+  // «Со студией» — переписка мастера с САЛОНОМ, не с клиентом: DRF-1255 её не
+  // снимает (текст листа), под перепись на SystemState — отдельным листом.
+  "MasterInternalChatListScreen",
+  "MasterInternalChatThreadScreen",
 ]);
 
 /**
