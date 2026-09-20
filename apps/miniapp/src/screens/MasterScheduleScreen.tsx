@@ -18,6 +18,10 @@
  *      `Помечу как недоступно` → confirmation → server marks slot blocked
  *      → owner notified (audit + bot DM)»
  *
+ * DRF-2155 (М-3): the MAIN tap on a free window now opens «Новая запись»
+ * (mockup DRF-1183/1184 — «Выбранное окно»); the unavailability request
+ * above stays as the secondary «Недоступно» action on the window card.
+ *
  * Backend contracts:
  *   GET  /api/v1/master/schedule?from&to
  *   POST /api/v1/master/availability
@@ -40,7 +44,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { Link, useLocation } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import { DEFAULT_SALON_OWNER_HINT } from "../lib/salonOwnerHint";
 import {
   getMasterSchedule,
@@ -96,6 +100,8 @@ const COPY = {
     month: "Месяц",
   },
   freeWindow: (min: number) => `свободно · ${min} мин`,
+  // DRF-2155 (М-3): вторичное действие в карточке окна — заявка о недоступности.
+  unavailable: "Недоступно",
   outsideHours: "вне рабочего времени",
   offDayLabel: "выходной",
   conflictTapHint: "уточнить у админа",
@@ -129,9 +135,7 @@ const COPY = {
   weekClientsLabel: (n: number) =>
     n === 0 ? "—" : `${n} ${pluralRu(n, "клиент", "клиента", "клиентов")}`,
   weekFreeLabel: (n: number) =>
-    n === 0
-      ? "0 окон"
-      : `${n} ${pluralRu(n, "окно", "окна", "окон")}`,
+    n === 0 ? "0 окон" : `${n} ${pluralRu(n, "окно", "окна", "окон")}`,
   // Системные состояния — через SystemState (DRF-2157, макет DRF-1181 п.10).
   weekDayLink: "Открыть день ›",
   weekDayActiveSuffix: "(сегодня)",
@@ -181,6 +185,7 @@ const EMPTY_SHEET: UnavailableSheetState = {
 
 export function MasterScheduleScreen() {
   const location = useLocation();
+  const navigate = useNavigate();
 
   const [view, setView] = useState<SegmentView>("day");
   // Currently-focused local date. Day view = that day; Week view = anchor
@@ -235,13 +240,10 @@ export function MasterScheduleScreen() {
 
   // --- Date stepping ----------------------------------------------------
 
-  const stepBy = useCallback(
-    (deltaDays: number) => {
-      hapticSelection();
-      setAnchor((prev) => addDays(prev, deltaDays));
-    },
-    [],
-  );
+  const stepBy = useCallback((deltaDays: number) => {
+    hapticSelection();
+    setAnchor((prev) => addDays(prev, deltaDays));
+  }, []);
 
   const onPrev = useCallback(() => {
     if (view === "day") stepBy(-1);
@@ -279,9 +281,28 @@ export function MasterScheduleScreen() {
     [isSolo],
   );
 
-  // --- Free-window tap → mark-unavailable sheet ------------------------
+  // --- Free-window tap → «Новая запись» (DRF-2155, М-3) -------------------
 
+  // Макет DRF-1183/1184: тап по свободному окну — создание записи с
+  // подписью «Выбранное окно». До М-3 главный тап открывал лист «Помечу как
+  // недоступно» — противоположно макету; заявка о недоступности осталась,
+  // но вторичным действием в карточке окна (`onFreeSlotUnavailable`).
   const onFreeSlotTap = useCallback(
+    (day: ScheduleDay, window: ScheduleFreeWindow) => {
+      hapticSelection();
+      const qs = new URLSearchParams({
+        date: day.date,
+        from: window.start,
+        to: window.end,
+      });
+      navigate(`${isSolo ? "/solo" : "/master"}/booking/new?${qs.toString()}`);
+    },
+    [navigate, isSolo],
+  );
+
+  // --- Free-window «Недоступно» → mark-unavailable sheet ------------------
+
+  const onFreeSlotUnavailable = useCallback(
     (day: ScheduleDay, window: ScheduleFreeWindow) => {
       hapticSelection();
       setSheet({
@@ -375,7 +396,12 @@ export function MasterScheduleScreen() {
         {phase.kind === "loading" ? (
           <SystemState kind="loading" />
         ) : phase.kind === "error_initial" ? (
-          <SystemState kind="load_error" what="schedule" err={phase.err} onRetry={() => void load()} />
+          <SystemState
+            kind="load_error"
+            what="schedule"
+            err={phase.err}
+            onRetry={() => void load()}
+          />
         ) : (
           <ScheduleBody
             view={view}
@@ -384,6 +410,7 @@ export function MasterScheduleScreen() {
             pending={phase.pending}
             bookingHref={bookingHref}
             onFreeSlotTap={onFreeSlotTap}
+            onFreeSlotUnavailable={onFreeSlotUnavailable}
             onMarkOffDay={onMarkOffDay}
             onSwitchToDay={(d) => {
               hapticSelection();
@@ -567,6 +594,7 @@ function ScheduleBody({
   pending,
   bookingHref,
   onFreeSlotTap,
+  onFreeSlotUnavailable,
   onMarkOffDay,
   onSwitchToDay,
 }: {
@@ -576,6 +604,7 @@ function ScheduleBody({
   pending: PendingAvailabilityItem[];
   bookingHref: (b: ScheduleBooking) => string;
   onFreeSlotTap: (day: ScheduleDay, window: ScheduleFreeWindow) => void;
+  onFreeSlotUnavailable: (day: ScheduleDay, window: ScheduleFreeWindow) => void;
   onMarkOffDay: (day: ScheduleDay) => void;
   onSwitchToDay: (date: Date) => void;
 }) {
@@ -587,26 +616,22 @@ function ScheduleBody({
           day={pickDay(data, anchor)}
           bookingHref={bookingHref}
           onFreeSlotTap={onFreeSlotTap}
+          onFreeSlotUnavailable={onFreeSlotUnavailable}
           onMarkOffDay={onMarkOffDay}
         />
       ) : view === "week" ? (
-        <WeekView
-          data={data}
-          anchor={anchor}
-          onSwitchToDay={onSwitchToDay}
-        />
+        <WeekView data={data} anchor={anchor} onSwitchToDay={onSwitchToDay} />
       ) : (
-        <MonthView
-          data={data}
-          anchor={anchor}
-          onSwitchToDay={onSwitchToDay}
-        />
+        <MonthView data={data} anchor={anchor} onSwitchToDay={onSwitchToDay} />
       )}
     </>
   );
 }
 
-function pickDay(data: MasterScheduleResponse, anchor: Date): ScheduleDay | null {
+function pickDay(
+  data: MasterScheduleResponse,
+  anchor: Date,
+): ScheduleDay | null {
   const ymd = formatYmdLocal(anchor);
   return data.days.find((d) => d.date === ymd) ?? null;
 }
@@ -660,11 +685,13 @@ function DayView({
   day,
   bookingHref,
   onFreeSlotTap,
+  onFreeSlotUnavailable,
   onMarkOffDay,
 }: {
   day: ScheduleDay | null;
   bookingHref: (b: ScheduleBooking) => string;
   onFreeSlotTap: (day: ScheduleDay, window: ScheduleFreeWindow) => void;
+  onFreeSlotUnavailable: (day: ScheduleDay, window: ScheduleFreeWindow) => void;
   onMarkOffDay: (day: ScheduleDay) => void;
 }) {
   if (day === null) {
@@ -720,6 +747,7 @@ function DayView({
               <FreeWindowCard
                 window={item.window}
                 onTap={() => onFreeSlotTap(day, item.window)}
+                onUnavailable={() => onFreeSlotUnavailable(day, item.window)}
               />
             ) : (
               <BlockCard block={item.block} />
@@ -761,7 +789,11 @@ type DayItem = DayItemBooking | DayItemFree | DayItemBlock;
 function buildDayItems(day: ScheduleDay): DayItem[] {
   const items: DayItem[] = [];
   for (const b of day.bookings) {
-    items.push({ kind: "booking", booking: b, startHm: localHmFromIso(b.visit_at) });
+    items.push({
+      kind: "booking",
+      booking: b,
+      startHm: localHmFromIso(b.visit_at),
+    });
   }
   for (const f of day.free_windows) {
     items.push({ kind: "free", window: f, startHm: f.start });
@@ -791,20 +823,49 @@ function ConflictBanner() {
 function FreeWindowCard({
   window,
   onTap,
+  onUnavailable,
 }: {
   window: ScheduleFreeWindow;
   onTap: () => void;
+  onUnavailable: () => void;
 }) {
+  // Главный тап — запись (макет); «Недоступно» — вторичное действие, не
+  // главный тап (DRF-2155, М-3). Две соседние кнопки, не кнопка в кнопке.
   return (
-    <button
-      type="button"
-      className="m-card m-card--tappable schedule-free"
-      onClick={onTap}
+    <div
+      className="m-card schedule-free"
+      style={{ display: "flex", alignItems: "center", gap: "var(--s-2)" }}
     >
-      <div className="m-card__title" style={{ color: "var(--c-text-secondary)" }}>
-        {window.start} · {COPY.freeWindow(window.duration_min)}
-      </div>
-    </button>
+      <button
+        type="button"
+        className="m-card--tappable"
+        onClick={onTap}
+        aria-label={`Записать на ${window.start}–${window.end}`}
+        style={{
+          flex: 1,
+          minHeight: 44,
+          background: "none",
+          border: "none",
+          textAlign: "start",
+          padding: 0,
+        }}
+      >
+        <div
+          className="m-card__title"
+          style={{ color: "var(--c-text-secondary)" }}
+        >
+          {window.start} · {COPY.freeWindow(window.duration_min)}
+        </div>
+      </button>
+      <button
+        type="button"
+        className="btn-secondary"
+        onClick={onUnavailable}
+        aria-label={`${COPY.unavailable}: ${window.start}–${window.end}`}
+      >
+        {COPY.unavailable}
+      </button>
+    </div>
   );
 }
 
@@ -813,7 +874,10 @@ function BlockCard({ block }: { block: ScheduleDay["blocks"][number] }) {
   const endHm = localHmFromIso(block.end);
   return (
     <div className="m-card" aria-label="блок">
-      <div className="m-card__title" style={{ color: "var(--c-text-secondary)" }}>
+      <div
+        className="m-card__title"
+        style={{ color: "var(--c-text-secondary)" }}
+      >
         {startHm}–{endHm} · {translateBlockReason(block.reason)}
       </div>
       {!block.approved ? (
@@ -868,7 +932,10 @@ function WeekView({
         </p>
         {/* DRF-1817 — часы можно задать самому (экран 06); для соло владелец
             и есть мастер. */}
-        <Link to="/solo/working-hours" className="btn-secondary schedule-week__setup">
+        <Link
+          to="/solo/working-hours"
+          className="btn-secondary schedule-week__setup"
+        >
           Настроить рабочие часы
         </Link>
       </section>
@@ -959,9 +1026,12 @@ function MonthView({
   const monthEnd = new Date(anchor.getFullYear(), anchor.getMonth() + 1, 0);
   // Build a Monday-aligned grid covering the visible month.
   const gridStart = startOfWeekMonday(monthStart);
-  const totalCells = Math.ceil((monthEnd.getTime() - gridStart.getTime()) / 86400000) + 1;
+  const totalCells =
+    Math.ceil((monthEnd.getTime() - gridStart.getTime()) / 86400000) + 1;
   const cellCount = Math.ceil(totalCells / 7) * 7;
-  const cells = Array.from({ length: cellCount }, (_, i) => addDays(gridStart, i));
+  const cells = Array.from({ length: cellCount }, (_, i) =>
+    addDays(gridStart, i),
+  );
   const todayYmd = formatYmdLocal(new Date());
   const byDate = new Map<string, ScheduleDay>(
     data.days.map((d) => [d.date, d]),
@@ -1002,7 +1072,8 @@ function MonthView({
 function MonthDot({ count }: { count: number }): ReactNode {
   // Per spec line 454: 0 = empty, 1 small dot = 1-3, 2 medium dots = 4-6,
   // full circle = 7+
-  if (count === 0) return <span className="schedule-month-dots" aria-hidden="true" />;
+  if (count === 0)
+    return <span className="schedule-month-dots" aria-hidden="true" />;
   if (count <= 3)
     return (
       <span className="schedule-month-dots" aria-hidden="true">
@@ -1068,16 +1139,9 @@ function UnavailableSheet({
       aria-label="Помечу как недоступно"
       onClick={onClose}
     >
-      <div
-        className="schedule-sheet"
-        onClick={(e) => e.stopPropagation()}
-      >
+      <div className="schedule-sheet" onClick={(e) => e.stopPropagation()}>
         <h2 className="schedule-sheet__title">
-          {COPY.unavailableSheet.title(
-            dateLabel,
-            state.startHm,
-            state.endHm,
-          )}
+          {COPY.unavailableSheet.title(dateLabel, state.startHm, state.endHm)}
         </h2>
         <fieldset className="schedule-sheet__field">
           <legend>{COPY.unavailableSheet.reasonLabel}</legend>
@@ -1088,9 +1152,7 @@ function UnavailableSheet({
                 name="reason"
                 value={r}
                 checked={state.reason === r}
-                onChange={() =>
-                  onChange((prev) => ({ ...prev, reason: r }))
-                }
+                onChange={() => onChange((prev) => ({ ...prev, reason: r }))}
               />
               <span>{COPY.unavailableSheet.reasons[r]}</span>
             </label>
@@ -1133,5 +1195,3 @@ function UnavailableSheet({
     </div>
   );
 }
-
-

@@ -101,8 +101,11 @@ const COPY = {
     next: "Ближайшая запись",
     later: "Дальше сегодня",
     // §61: формат DRF-1185 («1 ч 20 мин») общим helper'ом с «Деталями записи».
-    untilVisit: (min: number) => (min > 0 ? `До визита ${formatDurationRu(min)}` : "Уже сейчас"),
+    untilVisit: (min: number) =>
+      min > 0 ? `До визита ${formatDurationRu(min)}` : "Уже сейчас",
     noVisits: "На сегодня записей нет",
+    // DRF-2155 (М-3) — дверь в «Новую запись» (макет DRF-1182/1184).
+    addBooking: "Добавить запись",
     dayOff: "Сегодня выходной",
     hoursCta: "Рабочие часы →",
     frameUnknown: "Не удалось проверить расписание",
@@ -313,7 +316,15 @@ export function MasterDashboardScreen() {
   }
 
   // States.
-  const { active_visit, next_visit, upcoming_today, inbox_preview, today_summary, tab_badges, states } = data;
+  const {
+    active_visit,
+    next_visit,
+    upcoming_today,
+    inbox_preview,
+    today_summary,
+    tab_badges,
+    states,
+  } = data;
   const isEmptyToday =
     active_visit === null &&
     next_visit === null &&
@@ -336,7 +347,9 @@ export function MasterDashboardScreen() {
         masterName={data.master.name}
         photoUrl={data.master.photo_url}
         nowIso={data.now_iso}
-        profileHasOwnerPendingChange={tab_badges.profile_has_owner_pending_change}
+        profileHasOwnerPendingChange={
+          tab_badges.profile_has_owner_pending_change
+        }
       />
 
       {/* Данные есть, обновить не вышло: без сети — «Нет подключения», иначе «Не удалось обновить». */}
@@ -368,6 +381,9 @@ export function MasterDashboardScreen() {
         totalClients={today_summary.total_clients_today}
         onHours={onHoursCta}
         onRecheck={() => load(true)}
+        onAddBooking={() =>
+          navigate(isSolo ? "/solo/booking/new" : "/master/booking/new")
+        }
         bookingHref={bookingHref}
       />
 
@@ -379,7 +395,9 @@ export function MasterDashboardScreen() {
 
       <AylaEntrySection onOpen={onAylaOpen} />
 
-      <MasterTabBar scheduleHasPendingChange={tab_badges.schedule_has_pending_change} />
+      <MasterTabBar
+        scheduleHasPendingChange={tab_badges.schedule_has_pending_change}
+      />
     </DashboardFrame>
   );
 }
@@ -469,11 +487,15 @@ export function DashboardHeader({
       <div className="master-dashboard__header-left">
         <div className="master-dashboard__salon">{salonName}</div>
         {/* DRF-2179 (§61 п.6): один стиль даты с «Деталями записи» — «20 сентября · воскресенье». */}
-        <div className="master-dashboard__date">{formatDateDotWeekdayRu(nowIso)}</div>
+        <div className="master-dashboard__date">
+          {formatDateDotWeekdayRu(nowIso)}
+        </div>
       </div>
       <div className="master-dashboard__header-right">
         <div className="master-dashboard__who">
-          {firstName ? <div className="master-dashboard__name">{firstName}</div> : null}
+          {firstName ? (
+            <div className="master-dashboard__name">{firstName}</div>
+          ) : null}
           <AvatarSheet
             name={masterName}
             photoUrl={photoUrl}
@@ -503,6 +525,7 @@ function DayBlock({
   totalClients,
   onHours,
   onRecheck,
+  onAddBooking,
   bookingHref,
 }: {
   activeVisit: DashboardActiveVisit | null;
@@ -517,11 +540,17 @@ function DayBlock({
   totalClients: number;
   onHours: () => void;
   onRecheck: () => void;
+  onAddBooking: () => void;
   bookingHref: (bookingId: string) => string;
 }) {
   let body: React.ReactNode;
   if (isDayDone) {
-    body = <DayDoneLine completedCount={completedCount} totalClients={totalClients} />;
+    body = (
+      <DayDoneLine
+        completedCount={completedCount}
+        totalClients={totalClients}
+      />
+    );
   } else if (isEmptyToday) {
     if (dayOff === true) {
       body = (
@@ -540,7 +569,9 @@ function DayBlock({
       // Каталог не ответил: «не знаю» — не «свободный день» (DRF-1111).
       body = (
         <>
-          <p className="master-dashboard__empty-line">{COPY.day.frameUnknown}</p>
+          <p className="master-dashboard__empty-line">
+            {COPY.day.frameUnknown}
+          </p>
           <button
             type="button"
             className="btn-secondary master-dashboard__inline-cta"
@@ -553,15 +584,31 @@ function DayBlock({
     } else if (noServices) {
       body = <NoServicesLine salonName={salonName} />;
     } else {
-      // Кнопка «Добавить запись» — с М-3 (DRF-2155); до неё — только текст.
-      body = <p className="master-dashboard__empty-line">{COPY.day.noVisits}</p>;
+      body = (
+        <>
+          <p className="master-dashboard__empty-line">{COPY.day.noVisits}</p>
+          <button
+            type="button"
+            className="btn-secondary master-dashboard__inline-cta"
+            onClick={onAddBooking}
+          >
+            {COPY.day.addBooking}
+          </button>
+        </>
+      );
     }
   } else {
     body = (
       <>
-        {activeVisit ? <ScheduledNowCard visit={activeVisit} href={bookingHref} /> : null}
-        {nextVisit ? <NextVisitCard visit={nextVisit} href={bookingHref} /> : null}
-        {upcoming.length > 0 ? <LaterTodayList visits={upcoming} href={bookingHref} /> : null}
+        {activeVisit ? (
+          <ScheduledNowCard visit={activeVisit} href={bookingHref} />
+        ) : null}
+        {nextVisit ? (
+          <NextVisitCard visit={nextVisit} href={bookingHref} />
+        ) : null}
+        {upcoming.length > 0 ? (
+          <LaterTodayList visits={upcoming} href={bookingHref} />
+        ) : null}
       </>
     );
   }
@@ -623,7 +670,9 @@ function ScheduledNowCard({
   href: (bookingId: string) => string;
 }) {
   // Конец — по часам: начало + длительность; «До конца ≈» не рисуется.
-  const end = new Date(new Date(visit.started_at).getTime() + visit.duration_min * 60_000);
+  const end = new Date(
+    new Date(visit.started_at).getTime() + visit.duration_min * 60_000,
+  );
   return (
     <div className="master-dashboard__day-part">
       <p className="master-dashboard__day-label">{COPY.day.scheduledNow}</p>
@@ -649,7 +698,9 @@ function NextVisitCard({
 }) {
   const endIso =
     visit.end_at ||
-    new Date(new Date(visit.visit_at).getTime() + visit.duration_min * 60_000).toISOString();
+    new Date(
+      new Date(visit.visit_at).getTime() + visit.duration_min * 60_000,
+    ).toISOString();
   return (
     <div className="master-dashboard__day-part">
       <p className="master-dashboard__day-label">{COPY.day.next}</p>
@@ -662,7 +713,9 @@ function NextVisitCard({
         durationMin={visit.duration_min}
         to={href(visit.booking_id)}
       />
-      <p className="master-dashboard__day-until">{COPY.day.untilVisit(visit.minutes_until ?? 0)}</p>
+      <p className="master-dashboard__day-until">
+        {COPY.day.untilVisit(visit.minutes_until ?? 0)}
+      </p>
     </div>
   );
 }
@@ -687,7 +740,9 @@ function LaterTodayList({
               startIso={v.visit_at}
               endIso={v.end_at}
               durationMin={Math.round(
-                (new Date(v.end_at).getTime() - new Date(v.visit_at).getTime()) / 60_000,
+                (new Date(v.end_at).getTime() -
+                  new Date(v.visit_at).getTime()) /
+                  60_000,
               )}
               to={href(v.booking_id)}
               quiet
@@ -702,7 +757,9 @@ function LaterTodayList({
 function NoServicesLine({ salonName }: { salonName: string | null }) {
   return (
     <div className="callout" role="status">
-      <p style={{ margin: 0 }}>{COPY.empty.noServices(salonOwnerHint(salonName))}</p>
+      <p style={{ margin: 0 }}>
+        {COPY.empty.noServices(salonOwnerHint(salonName))}
+      </p>
     </div>
   );
 }
@@ -715,12 +772,14 @@ function DayDoneLine({
   totalClients: number;
 }) {
   const n = Math.max(completedCount, totalClients);
-  return <p className="master-dashboard__empty-line">{COPY.dayDone.body(n, null, null)}</p>;
+  return (
+    <p className="master-dashboard__empty-line">
+      {COPY.dayDone.body(n, null, null)}
+    </p>
+  );
 }
 
 /** Empty tab bar shown while data loads — keeps layout stable. */
 function TabBarBlank() {
-  return (
-    <MasterTabBar scheduleHasPendingChange={false} />
-  );
+  return <MasterTabBar scheduleHasPendingChange={false} />;
 }
