@@ -135,6 +135,7 @@ import {
   type CatalogBrowseData,
 } from "../lib/customer-booking";
 import { StatusBadge } from "../components/StatusBadge";
+import { CustomerTabBar } from "../components/CustomerTabBar";
 import { UnbookableBadge } from "../components/UnbookableNote";
 import { useScreenBack } from "../hooks/useScreenBack";
 import { PLAN_LITE_COPY, PLAN_LITE_ROUTE } from "./PlanLiteScreen";
@@ -1008,27 +1009,7 @@ export function CustomerWellnessDashboardScreen() {
           «Я» стало «Профиль». Этот экран — «Главная», поэтому активна она.
           Сетка панели подстраивается под число вкладок, см.
           `.wellness-dash__nav` в globals.css. */}
-      <nav className="wellness-dash__nav" aria-label="Основная навигация">
-        {HOME_TABS.map((tab) => (
-          <button
-            key={tab.label}
-            type="button"
-            className={
-              tab.route === null
-                ? "wellness-dash__nav-tab wellness-dash__nav-tab--active"
-                : "wellness-dash__nav-tab"
-            }
-            aria-current={tab.route === null ? "page" : undefined}
-            aria-label={tab.label}
-            onClick={tab.route === null ? undefined : () => navigate(tab.route as string)}
-          >
-            <span className="wellness-dash__nav-icon" aria-hidden="true">
-              {tab.icon}
-            </span>
-            <span className="wellness-dash__nav-label">{tab.label}</span>
-          </button>
-        ))}
-      </nav>
+      <CustomerTabBar active="home" />
     </div>
   );
 }

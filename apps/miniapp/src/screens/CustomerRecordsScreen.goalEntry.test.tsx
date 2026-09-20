@@ -15,7 +15,7 @@
  *
  * Никаких литеральных дат — только смещения от `now`.
  */
-import { act, render, screen } from "@testing-library/react";
+import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -312,14 +312,20 @@ describe("дорога к записи открыта при показанно�
     expect(await screen.findByText("CATALOG-PROBE")).toBeInTheDocument();
   });
 
-  it("нижняя навигация «Услуги» работает при показанном приглашении", async () => {
+  it("DRF-2191: «Услуги» из панели ушли, приглашение и дорога в каталог остались", async () => {
+    // Вход в каталог — с самого экрана («Найти услугу» на пустом, узел выше),
+    // из панели он снят (§55 б, макет DRF-1321). Здесь — что снятие вкладки
+    // не тронуло ни приглашение цели, ни саму панель.
     const user = userEvent.setup();
-    mockLists(UPCOMING, []);
+    mockLists([], []);
     mockedContext.mockResolvedValue(DOC_GOAL_MISSING);
     renderScreen();
 
     expect(await screen.findByRole("button", { name: GOAL_CTA })).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Услуги" }));
+    const nav = screen.getByRole("navigation", { name: "Основная навигация" });
+    expect(within(nav).queryByRole("button", { name: "Услуги" })).toBeNull();
+    expect(within(nav).getAllByRole("button")).toHaveLength(5);
+    await user.click(screen.getByRole("button", { name: "Найти услугу" }));
     expect(await screen.findByText("CATALOG-PROBE")).toBeInTheDocument();
   });
 

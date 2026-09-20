@@ -158,11 +158,15 @@ describe("CustomerRecordsScreen (real data)", () => {
   });
 
   it("DRF-2191: при отказе ручки панель остаётся — выход с экрана есть в любом состоянии", async () => {
-    mockedList.mockRejectedValue(new Error("boom"));
+    // Правило класса из инцидента 20.09 (#1918): состояние ошибки не убирает
+    // навигацию. Положительная пара — сам отказ на экране виден.
+    mockedList.mockRejectedValue(new Error("network down"));
     renderScreen();
-    expect(await screen.findByText(/через минуту/)).toBeInTheDocument();
+    expect(await screen.findByText(/Не получилось загрузить/)).toBeInTheDocument();
     const nav = within(screen.getByRole("navigation", { name: "Основная навигация" }));
-    expect(nav.getAllByRole("button")).toHaveLength(5);
+    expect(nav.getAllByRole("button").map((b) => b.getAttribute("aria-label"))).toEqual([
+      "Главная", "План", "Дневник", "Записи", "Профиль",
+    ]);
   });
 
   it("DRF-2172: цена записи «3 200 ₽» на карточке; без цены строки нет, не «0 ₽»", async () => {

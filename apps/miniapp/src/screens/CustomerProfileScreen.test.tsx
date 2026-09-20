@@ -210,9 +210,12 @@ describe("CustomerProfileScreen (настоящие ручки согласий)
         </MemoryRouter>
       </SurfaceModeContext.Provider>,
     );
-    expect(await screen.findByRole("button", { name: "Обновить" })).toBeInTheDocument();
+    // Положительная пара: отказ на экране назван (боевая форма 403, как в #1918).
+    expect(await screen.findByRole("button", { name: "Попробовать снова" })).toBeInTheDocument();
     const nav = within(screen.getByRole("navigation", { name: "Основная навигация" }));
-    expect(nav.getAllByRole("button")).toHaveLength(5);
+    expect(nav.getAllByRole("button").map((b) => b.getAttribute("aria-label"))).toEqual([
+      "Главная", "План", "Дневник", "Записи", "Профиль",
+    ]);
     expect(screen.getByRole("button", { name: "Сменить режим" })).toBeInTheDocument();
   }, 15000);
 

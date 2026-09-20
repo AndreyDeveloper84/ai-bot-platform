@@ -17,14 +17,24 @@
  *     (мёртвых вкладок нет).
  */
 import { fireEvent, render, screen, within } from "@testing-library/react";
-import { readFileSync, readdirSync } from "node:fs";
-import { join } from "node:path";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { describe, expect, it } from "vitest";
 
 import { CUSTOMER_TABS, CustomerTabBar } from "./CustomerTabBar";
 
-const SRC = join(__dirname, "..");
+/** Исходники — тем же способом, что `backContract.test.ts` и словарь мастера. */
+const CUSTOMER_SCREENS = import.meta.glob(
+  ["../screens/Customer*.tsx", "../screens/PilotComingSoon*.tsx", "../screens/PlanLite*.tsx", "../screens/FoodScanner*.tsx"],
+  { query: "?raw", import: "default", eager: true },
+) as Record<string, string>;
+const APP_SOURCE = import.meta.glob("../App.tsx", {
+  query: "?raw",
+  import: "default",
+  eager: true,
+}) as Record<string, string>;
+
+const isTest = (path: string) => path.includes(".test.");
+const baseName = (path: string) => path.split("/").pop() as string;
 
 function LocationProbe() {
   const location = useLocation();
@@ -81,31 +91,30 @@ describe("CustomerTabBar — пять вкладок по макету", () => {
 });
 
 describe("перепись: наборов вкладок в клиентских исходниках = 1", () => {
-  const screensDir = join(SRC, "screens");
-  const customerScreens = readdirSync(screensDir).filter(
-    (f) => f.endsWith(".tsx") && !f.includes(".test.") && /^(Customer|PilotComingSoon|PlanLite|FoodScanner)/.test(f),
-  );
+  const sources = Object.entries(CUSTOMER_SCREENS).filter(([path]) => !isTest(path));
 
   it("ни один клиентский экран не рисует «Основная навигация» сам", () => {
-    const offenders = customerScreens.filter((f) =>
-      readFileSync(join(screensDir, f), "utf8").includes('aria-label="Основная навигация"'),
-    );
+    const offenders = sources
+      .filter(([, src]) => src.includes('aria-label="Основная навигация"'))
+      .map(([path]) => baseName(path));
     expect(offenders).toEqual([]);
     // Положительная пара: экраны с панелью её всё-таки рисуют — через компонент.
-    const users = customerScreens.filter((f) =>
-      readFileSync(join(screensDir, f), "utf8").includes("<CustomerTabBar"),
-    );
+    const users = sources
+      .filter(([, src]) => src.includes("<CustomerTabBar"))
+      .map(([path]) => baseName(path));
     expect(users).toEqual(
       expect.arrayContaining([
         "CustomerWellnessDashboardScreen.tsx",
         "CustomerRecordsScreen.tsx",
         "CustomerProfileScreen.tsx",
+        "PilotComingSoonScreen.tsx",
       ]),
     );
   });
 
   it("каждый маршрут вкладки смонтирован в App.tsx — мёртвых вкладок нет", () => {
-    const app = readFileSync(join(SRC, "App.tsx"), "utf8");
+    const app = Object.values(APP_SOURCE)[0];
+    expect(app).toBeTruthy();
     for (const tab of CUSTOMER_TABS) {
       expect(app, `${tab.label} → ${tab.route}`).toContain(`path="${tab.route}"`);
     }
