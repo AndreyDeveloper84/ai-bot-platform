@@ -155,7 +155,7 @@ def test_schedule_impact(client: Client, tenant, owner_bot_user, monkeypatch, se
     settings.BOOKING_VIA_AYLA_REST = True
     master, expected = _prepare(tenant, kind)
     rec = _Recorder(result={"bookings": [], "timezone": "Europe/Moscow"})
-    monkeypatch.setattr("apps.admin_api.views_schedule_impact.get_salon_client", lambda: rec)
+    monkeypatch.setattr("apps.admin_api.services.schedule_impact.get_salon_client", lambda: rec)
 
     resp = client.get(
         reverse("admin_api:master_schedule_impact", args=[str(master.pk)]),

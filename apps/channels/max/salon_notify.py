@@ -307,22 +307,58 @@ def _door(label: str, path: str) -> tuple[Button, ...]:
 # ── тип 2 — мастер просит изменить график ───────────────────────────
 
 
-def _working_window(master: Any, day: date) -> tuple[time, time] | None:
-    from apps.scheduling.models import WorkingHours
+def _frame_windows(
+    master: Any, tenant: Any, days: list[date]
+) -> dict[date, tuple[time, time] | None]:
+    """Рабочее окно мастера на каждый день — из живой рамки, не из копии.
 
-    # ``all_tenants`` с явным ``tenant_id=master.tenant_id``: сюда заходят
-    # ``on_commit``-хуки и beat без тенантного контекста; строка закреплена
-    # мастером и его же салоном (реестр SCHEDULING_CROSS_TENANT_BASELINE).
-    row = (
-        WorkingHours.all_tenants.filter(
-            tenant_id=master.tenant_id, master=master, day_of_week=day.weekday()
+    :func:`~apps.master_api.services.schedule_frame.load_day_frame` сам
+    выбирает источник по ``BOOKING_VIA_AYLA_REST`` (DRF-2014: локальная
+    копия расписания на пути каталога — устаревшая рамка; уведомление обязано
+    показать «Было» тем же, что видит экран расписания). Исключение на дату
+    старше недельных часов: ``CUSTOM_HOURS`` — его окно, полный день — выходной.
+    Каталог не ответил — ``None`` на все дни, и текст скажет «по заявке».
+    """
+
+    from apps.master_api.services.schedule_frame import load_day_frame
+    from apps.scheduling.models import ScheduleException
+
+    if not days:
+        return {}
+    try:
+        hours, exceptions, _blocks = load_day_frame(
+            master, from_date=days[0], to_date=days[-1], tz=_tz(tenant)
         )
-        .values("is_working", "start_time", "end_time")
-        .first()
-    )
-    if not row or not row["is_working"] or not row["start_time"] or not row["end_time"]:
-        return None
-    return row["start_time"], row["end_time"]
+    except Exception:  # noqa: BLE001 — рамка недоступна: назовём это словами, не нулём
+        logger.warning(
+            "channels.max.salon_notify.frame_unavailable master=%s",
+            getattr(master, "pk", None),
+            exc_info=True,
+        )
+        return {day: None for day in days}
+
+    out: dict[date, tuple[time, time] | None] = {}
+    for day in days:
+        exc = exceptions.get(day)
+        if exc is not None:
+            exc_type = getattr(exc, "type", "")
+            if exc_type == ScheduleException.Type.CUSTOM_HOURS and exc.start_time and exc.end_time:
+                out[day] = (exc.start_time, exc.end_time)
+                continue
+            if exc_type in ScheduleException.FULL_DAY_TYPES:
+                out[day] = None
+                continue
+        wh = hours.get(day.weekday())
+        if (
+            wh is None
+            or not getattr(wh, "is_working", False)
+            or not wh.start_time
+            or not wh.end_time
+        ):
+            out[day] = None
+        else:
+            out[day] = (wh.start_time, wh.end_time)
+    return out
 
 
 def _becomes(window: tuple[time, time] | None, block_start: time, block_end: time) -> str:
@@ -361,10 +397,11 @@ def schedule_diff(request: Any, master: Any, tenant: Any) -> tuple[list[str], st
         days.append(cursor)
         cursor += timedelta(days=1)
 
+    windows = _frame_windows(master, tenant, days)
     was_parts: list[str] = []
     becomes_parts: list[str] = []
     for day in days:
-        window = _working_window(master, day)
+        window = windows.get(day)
         b_start = start_l.time() if day == start_l.date() else time(0, 0)
         b_end = end_l.time() if day == end_l.date() else time(23, 59)
         was = f"{_hm(window[0])}–{_hm(window[1])}" if window else "выходной"

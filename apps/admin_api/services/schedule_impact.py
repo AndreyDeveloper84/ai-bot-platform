@@ -122,7 +122,7 @@ def impact_for_window(tenant: Any, master: Any, *, start_at: str, end_at: str) -
     # DRF-1933: у строки зеркала нет id профиля в каталоге — звать каталог
     # не с чем; первичный ключ зеркала туда не уходит.
     try:
-        specialist_id = catalog_specialist_id(master)
+        catalog_specialist_id(master)
     except CatalogSpecialistUnresolved:
         return Impact(
             UNRESOLVED,
@@ -134,7 +134,7 @@ def impact_for_window(tenant: Any, master: Any, *, start_at: str, end_at: str) -
         raw = get_salon_client().get_schedule_impact(
             actor_external_id=external_user_id_for(actor_user),
             tenant_slug=tenant.slug,
-            specialist_id=specialist_id,
+            specialist_id=catalog_specialist_id(master),
             start_at=start_at,
             end_at=end_at,
         )

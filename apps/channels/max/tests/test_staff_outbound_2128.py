@@ -153,20 +153,52 @@ def _pending_row(tenant) -> Any:
 # ── Пути персоналу — каждый вызывается как есть, без обхода ──────────
 
 
+def _schedule_request_rows():
+    """Реальные строки: с DRF-2118 уведомление читает заявку из базы."""
+    from datetime import datetime as _dt, timezone as _tz
+
+    from apps.catalog.models import CatalogMaster
+    from apps.scheduling.models import ScheduleChangeRequest
+    from apps.tenancy.models import Tenant
+
+    tenant = Tenant.objects.create(
+        slug=f"sr-{uuid.uuid4().hex[:8]}", name="Салон", manager_user_id="mgr-user-1"
+    )
+    row_id = uuid.uuid4()
+    master = CatalogMaster.all_tenants.create(
+        id=row_id,
+        catalog_specialist_id=row_id,
+        tenant=tenant,
+        external_id=int(str(row_id.int)[:6]),
+        external_updated_at=_dt.now(tz=_tz.utc),
+        name="Анна",
+    )
+    start = timezone.now() + timedelta(days=3)
+    request = ScheduleChangeRequest.all_tenants.create(
+        tenant=tenant,
+        master=master,
+        requested_change={"type": "off_time"},
+        requested_start=start,
+        requested_end=start + timedelta(hours=2),
+        reason_class="personal",
+        reason_text=f"позвонить {PHONE}",
+        status=ScheduleChangeRequest.Status.PENDING,
+    )
+    return tenant, master, request
+
+
 def _path_schedule_request_view() -> None:
     from apps.master_api.views import _maybe_send_manager_dm
 
-    _maybe_send_manager_dm(
-        tenant=_tenant_double(), master=_master_double(), request_id=uuid.uuid4()
-    )
+    tenant, master, request = _schedule_request_rows()
+    _maybe_send_manager_dm(tenant=tenant, master=master, request_id=request.id)
 
 
 def _path_schedule_request_service() -> None:
     from apps.master_api.services.schedule import notify_manager_of_availability_request
 
-    notify_manager_of_availability_request(
-        tenant=_tenant_double(), master=_master_double(), request_id=uuid.uuid4()
-    )
+    tenant, master, request = _schedule_request_rows()
+    notify_manager_of_availability_request(tenant=tenant, master=master, request_id=request.id)
 
 
 def _path_conversation_promoted() -> None:

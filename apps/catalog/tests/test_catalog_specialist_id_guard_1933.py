@@ -44,7 +44,8 @@ CONVERTED = {
     ("apps/admin_api/views_availability_slots.py", 1),
     ("apps/admin_api/views_booking_create.py", 1),
     ("apps/admin_api/views_master_exceptions.py", 2),
-    ("apps/admin_api/views_schedule_impact.py", 1),
+    # DRF-2118: чтение impact переехало из вьюхи в сервис (одно на вьюху и уведомление).
+    ("apps/admin_api/services/schedule_impact.py", 1),
     ("apps/catalog/services/schedule_confirmation.py", 1),
     # Консьерж: резолв на границе адаптера (handoff держит pk зеркала).
     ("apps/skills/booking/provider.py", 5),
