@@ -141,6 +141,11 @@ screening are not asked again); a snapshot older than 365 days (by
 ``raw.targets_provenance.computed_at``) sends to the anketa — the age may
 have changed; without a date the check is not made (a named limit).
 Bounds 30–300 kg and «проверь число» are the ticket's (DRF-2139 п.1/п.4).
+``pace`` / ``diet_preference`` are not in the body: the catalogue's upsert is
+a partial patch (``_apply_patch`` touches only the keys present), so what the
+person set elsewhere stays as it was — the same six-field body the anketa
+sends. An anketa in flight keeps its answers: «вешу 65» on the anketa's own
+weight step is the step's answer, not the short path (review #1912).
 
 Two catalogue facts shape the limits (both are catalogue tickets, not bot
 workarounds): the upsert writes ``ayla_proposed`` over ``ayla_calculated``
@@ -373,6 +378,8 @@ MANUAL_STATE_KEY = "nutrition_manual_target"
 #: Свежесть открытого вопроса (как у ``food_correction``): протухший ответ
 #: не должен вечно держать текст человека вдали от консьержа.
 MANUAL_PENDING_TTL_SECONDS = 600
+#: То же окно для любого открытого вопроса навыка (ручной ориентир, вес).
+PENDING_TTL_SECONDS = MANUAL_PENDING_TTL_SECONDS
 
 #: Тексты — из листа DRF-2138 дословно. Число в карточке — ТОЛЬКО введённое;
 #: порог в отказе — из ответа каталога (``floor_kcal``), не константа бота.
@@ -435,10 +442,13 @@ UPDATE_WEIGHT_MANUAL_TARGET = (
 UPDATE_WEIGHT_WHOLE_NUMBER = "Напиши вес целым числом — например, 68."
 UPDATE_WEIGHT_CANCELLED = "Хорошо, вес не меняю."
 
+#: Строка целиком (вход уже в нижнем регистре): «[я|сейчас|теперь] [мой|новый]
+#: вес|вешу [сейчас|теперь] N [кг]» или «обнови(ть) вес [N]». Якоря и
+#: ``\d{1,3}`` держат форму детерминированной.
 _UPDATE_WEIGHT_PHRASE_RE = re.compile(
-    r"^(?:мой\s+)?(?:вес|вешу)\s*[—:-]?\s*(\d{1,3}(?:[.,]\d+)?)\s*(?:кг)?\s*$"
-    r"|^обнови(?:ть)?\s+вес\s*[—:-]?\s*(\d{1,3}(?:[.,]\d+)?)?\s*(?:кг)?\s*$",
-    re.IGNORECASE,
+    r"^(?:(?:я|сейчас|теперь)\s+)?(?:(?:мой|новый)\s+)?(?:вес|вешу)(?:\s+(?:сейчас|теперь))?"
+    r"\s*[—:-]?\s*(\d{1,3}(?:[.,]\d+)?)\s*(?:кг)?\s*$"
+    r"|^обнови(?:ть)?\s+вес\s*[—:-]?\s*(\d{1,3}(?:[.,]\d+)?)?\s*(?:кг)?\s*$"
 )
 _WEIGHT_ANSWER_RE = re.compile(r"^\s*(\d{1,3}(?:[.,]\d+)?)\s*(?:кг)?\s*$", re.IGNORECASE)
 
@@ -1159,6 +1169,12 @@ class NutritionAnketaSkill:
 
         entry = _update_weight_entry(text)
         if entry is not None:
+            if self._has_active_fsm(context):
+                # Ревью #1912: «вешу 65» на шаге веса анкеты — ответ шагу, не
+                # короткий путь: иначе предложение считалось бы от СТАРОГО
+                # снимка, пока человек прямо сейчас называет новые входы.
+                return None
+            self._clear_open_questions(context)
             if entry == "":
                 return self._update_weight_ask(context)
             return self._update_weight_with(context, entry)
@@ -1167,8 +1183,22 @@ class NutritionAnketaSkill:
             return self._update_weight_with(context, text)
         return None
 
+    def _clear_open_questions(self, context: SkillContext) -> None:
+        """Смена курса: незаконченная анкета и ЧУЖОЙ открытый вопрос (ручной
+        ориентир ↔ вес) снимаются — два открытых вопроса разом читали бы одно
+        число двумя способами (ревью #1912)."""
+        self._clear_state(context)
+        state = getattr(context.conversation, "skill_state", None)
+        present = set(state) if isinstance(state, dict) else set()
+        # Пишется только то, что стоит: лишний write на ORM-беседе — лишняя
+        # транзакция (сторож r4 DRF-2138 считает записи).
+        if MANUAL_STATE_KEY in present:
+            self._save_manual_state(context, None)
+        if UPDATE_WEIGHT_STATE_KEY in present:
+            self._save_update_weight_state(context, None)
+
     def _update_weight_ask(self, context: SkillContext) -> SkillResult:
-        self._clear_state(context)  # незаконченная анкета — смена курса
+        self._clear_open_questions(context)
         self._save_update_weight_state(context, {"step": "weight"})
         return SkillResult(
             reply_text=UPDATE_WEIGHT_ASK,
@@ -1191,7 +1221,14 @@ class NutritionAnketaSkill:
                 reply_text=UPDATE_WEIGHT_WHOLE_NUMBER,
                 meta={"reply_kind": "anketa_update_weight_invalid"},
             )
-        if parsed is None or not (UPDATE_WEIGHT_MIN_KG <= parsed <= UPDATE_WEIGHT_MAX_KG):
+        if parsed is None:
+            # Не число вовсе («что я ел сегодня») — не «проверь число».
+            self._save_update_weight_state(context, {"step": "weight"})
+            return SkillResult(
+                reply_text=UPDATE_WEIGHT_WHOLE_NUMBER,
+                meta={"reply_kind": "anketa_update_weight_invalid"},
+            )
+        if not (UPDATE_WEIGHT_MIN_KG <= parsed <= UPDATE_WEIGHT_MAX_KG):
             self._save_update_weight_state(context, {"step": "weight"})
             return SkillResult(
                 reply_text=UPDATE_WEIGHT_CHECK_NUMBER.format(
@@ -1370,9 +1407,9 @@ class NutritionAnketaSkill:
         refusal = self._manual_consent_refusal(context)
         if refusal is not None:
             return refusal
-        # Незаконченная анкета не переживает смену курса: её состояние
-        # стояло бы на шаге, к которому человек не вернётся.
-        self._clear_state(context)
+        # Незаконченная анкета и открытый вопрос веса не переживают смену
+        # курса: их состояние стояло бы на шаге, к которому человек не вернётся.
+        self._clear_open_questions(context)
         if kcal is None:
             self._save_manual_state(context, {"step": "kcal"})
             return SkillResult(
@@ -1768,7 +1805,7 @@ def _fresh_bucket(conversation: Any, key: str, steps: tuple[str, ...]) -> dict |
             return None
         if at.tzinfo is None:
             at = at.replace(tzinfo=UTC)
-        if datetime.now(UTC) - at > timedelta(seconds=MANUAL_PENDING_TTL_SECONDS):
+        if datetime.now(UTC) - at > timedelta(seconds=PENDING_TTL_SECONDS):
             return None
     return dict(bucket)
 
@@ -1776,6 +1813,16 @@ def _fresh_bucket(conversation: Any, key: str, steps: tuple[str, ...]) -> dict |
 def update_weight_pending(conversation: Any) -> bool:
     """DRF-2139, для ``is_structured_nutrition_turn``: бот ждёт вес."""
     return _fresh_bucket(conversation, UPDATE_WEIGHT_STATE_KEY, ("weight",)) is not None
+
+
+def update_weight_phrase(text: str) -> bool:
+    """Для оркестратора: детерминированная фраза «мой вес 65» / «обнови вес»."""
+    return _update_weight_entry(text) is not None
+
+
+def manual_target_phrase(text: str) -> bool:
+    """Для оркестратора: детерминированная фраза «мне врач назначил 1800 ккал»."""
+    return _manual_target_entry(text) is not None
 
 
 def _update_weight_entry(text: str) -> str | None:
@@ -1817,14 +1864,19 @@ def _update_weight_body(profile: Any, weight: int) -> dict[str, Any] | None:
     snapshot = dict(getattr(profile, "targets_input_snapshot", None) or {})
     if any(snapshot.get(name) in (None, "") for name in _SNAPSHOT_INPUTS):
         return None
-    return {
-        "gender": snapshot["gender"],
-        "age": int(snapshot["age"]),
-        "height_cm": int(snapshot["height_cm"]),
-        "weight_kg": weight,
-        "goal": snapshot["goal"],
-        "activity_coefficient": snapshot["activity_coefficient"],
-    }
+    try:
+        # Типы — как шлёт анкета: целые и float; снимок мог прийти с «28.0»
+        # или строкой — непригодный снимок = в анкету, не исключение в ходе.
+        return {
+            "gender": str(snapshot["gender"]),
+            "age": int(float(snapshot["age"])),
+            "height_cm": int(float(snapshot["height_cm"])),
+            "weight_kg": weight,
+            "goal": str(snapshot["goal"]),
+            "activity_coefficient": float(snapshot["activity_coefficient"]),
+        }
+    except (TypeError, ValueError):
+        return None
 
 
 def _snapshot_is_stale(profile: Any) -> bool:

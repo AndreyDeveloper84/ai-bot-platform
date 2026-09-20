@@ -326,7 +326,19 @@ class TestW8TheChip:
 
 class TestW9Matcher:
     @pytest.mark.parametrize(
-        "text", ["мой вес 65", "Вешу 65", "обнови вес", "вес 65 кг", "мой вес — 72"]
+        "text",
+        [
+            "мой вес 65",
+            "Вешу 65",
+            "обнови вес",
+            "вес 65 кг",
+            "мой вес — 72",
+            "я вешу 65",
+            "сейчас вешу 65",
+            "мой вес сейчас 65",
+            "новый вес 65",
+            "вес теперь 65",
+        ],
     )
     def test_ours(self, text: str) -> None:
         assert _Run().matches(text)
@@ -367,3 +379,88 @@ class TestW11NoSubstitution:
         result = run.turn("мой вес 65")
         assert result.reply_text.startswith("Сначала пройдём анкету")
         assert run.posted == []
+
+
+# ─── ревью #1912 ──────────────────────────────────────────────────────────
+
+
+class TestR1AnketaKeepsItsAnswer:
+    def test_phrase_on_the_anketa_weight_step_is_the_steps_answer(self) -> None:
+        """Блокер ревью: «вешу 65» посреди анкеты — ответ шагу, не короткий
+        путь со СТАРЫМ снимком; POST нет, FSM жив."""
+        run = _Run(profile=_calculated())
+        run.turn("/anketa")
+        run.turn("cb:anketa:choice:gender:female")
+        run.turn("30")
+        run.turn("cb:anketa:choice:screening:none")
+        run.turn("170")
+        result = run.turn("вешу 65")
+        assert run.posted == []
+        assert run.state is None
+        # Анкета на месте: валидатор шага переспросил или принял — но это её ход.
+        assert result.action_type.startswith("anketa_step_")
+        assert run.conversation.skill_state["nutrition_anketa"]["current_step"] in (
+            "weight",
+            "activity",
+        )
+
+
+class TestR2OpenQuestionsClearEachOther:
+    def test_weight_question_then_manual_phrase(self) -> None:
+        from apps.skills.nutrition_anketa.skill import MANUAL_STATE_KEY
+
+        run = _Run(profile=_calculated())
+        run.turn("обнови вес")
+        assert run.state == {"step": "weight"}
+        card = run.turn("ориентир от специалиста 1800")
+        assert card.meta["reply_kind"] == "anketa_manual_target_card"
+        assert run.state is None
+        assert MANUAL_STATE_KEY in run.conversation.skill_state
+
+    def test_manual_card_then_weight_phrase(self) -> None:
+        from apps.skills.nutrition_anketa.skill import MANUAL_STATE_KEY
+
+        run = _Run(profile=_calculated())
+        run.turn("ориентир от специалиста 1800")
+        assert MANUAL_STATE_KEY in run.conversation.skill_state
+        card = run.turn("мой вес 65")
+        assert card.meta["reply_kind"] == "anketa_update_weight_proposed"
+        assert MANUAL_STATE_KEY not in run.conversation.skill_state
+        # «70» теперь ничьё, не поправка ккал.
+        assert not run.matches("70")
+
+
+class TestR3SnapshotTypes:
+    def test_float_and_string_values_are_coerced(self) -> None:
+        snapshot = {**_SNAPSHOT, "age": 28.0, "height_cm": "168", "activity_coefficient": "1.375"}
+        run = _Run(profile=_calculated(snapshot=snapshot))
+        run.turn("мой вес 65")
+        body = run.posted[0]["data"]
+        assert body["age"] == 28 and body["height_cm"] == 168
+        assert body["activity_coefficient"] == 1.375 and isinstance(
+            body["activity_coefficient"], float
+        )
+
+    def test_junk_in_the_snapshot_goes_to_the_anketa(self) -> None:
+        run = _Run(profile=_calculated(snapshot={**_SNAPSHOT, "age": "двадцать"}))
+        result = run.turn("мой вес 65")
+        assert result.reply_text.startswith("Сначала пройдём анкету")
+        assert run.posted == []
+
+
+class TestR4Exits:
+    @pytest.mark.parametrize("text", ["/anketa", "cb:anketa:start", "Рассчитать мои нормы"])
+    def test_anketa_entries_drop_the_weight_question(self, text: str) -> None:
+        run = _Run(profile=_calculated())
+        run.turn("обнови вес")
+        assert run.state == {"step": "weight"}
+        result = run.turn(text)
+        assert run.state is None
+        assert result.action_type == "anketa_step_gender"
+
+    def test_not_a_number_is_not_check_the_number(self) -> None:
+        run = _Run(profile=_calculated())
+        run.turn("обнови вес")
+        result = run.turn("что я ел сегодня")
+        assert result.meta["reply_kind"] == "anketa_update_weight_invalid"
+        assert "проверь число" not in result.reply_text.lower()
