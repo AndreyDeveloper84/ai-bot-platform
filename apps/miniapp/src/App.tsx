@@ -59,6 +59,7 @@ import { adminLandingPath, isAdminTabAllowed } from "./lib/admin-tabs";
 import { canOpenSalonPilot } from "./lib/salon-pilot";
 import { getStartPayload, parseStartRoute } from "./lib/max-sdk";
 import { channelIdentity } from "./lib/identity";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { OpenFromMaxScreen } from "./components/OpenFromMaxScreen";
 import {
   SurfaceModeContext,
@@ -1456,7 +1457,17 @@ function CustomerFallbackWithBanner({ onRetry }: { onRetry: () => void }) {
 export function App() {
   const [identity] = useState(() => channelIdentity());
   if (identity === "no_init_data") return <OpenFromMaxScreen />;
-  return <AppShell />;
+  // DRF-2198: одна граница ошибок на приложение — `AppShell` ниже отдаёт
+  // ровно одно дерево маршрутов (мастер / соло / админ / клиент), и четыре
+  // одинаковые обёртки были бы четырьмя местами, где можно забыть. Любое
+  // исключение рендера даёт состояние с повтором, а не белый экран
+  // (инцидент 20.09, #1918). Возврат в MAX при отказе транспорта проверяется
+  // выше — граница его не перехватывает.
+  return (
+    <ErrorBoundary>
+      <AppShell />
+    </ErrorBoundary>
+  );
 }
 
 function AppShell() {
