@@ -588,7 +588,7 @@ class TestRouterIntegration:
         code path that ships raw personal data to a vendor.
         """
         from apps.llm.pii_protected_provider import PIITokenizingProvider
-        from apps.llm.router import LLMRouter, QuotaFallbackProvider, reset_router_cache
+        from apps.llm.router import LLMRouter, FallbackProvider, reset_router_cache
 
         settings.LLM_PROVIDER = "openai"  # type: ignore[attr-defined]
         settings.SKILL_LLM_PROVIDER = {}  # type: ignore[attr-defined]
@@ -600,7 +600,7 @@ class TestRouterIntegration:
 
         router = LLMRouter()
         provider = router.get_provider(tenant=None)
-        assert isinstance(provider, QuotaFallbackProvider)
+        assert isinstance(provider, FallbackProvider)
         assert isinstance(provider._primary, PIITokenizingProvider)
         # The fallback target is loaded through the same _load_provider,
         # so it is wrapped too.
