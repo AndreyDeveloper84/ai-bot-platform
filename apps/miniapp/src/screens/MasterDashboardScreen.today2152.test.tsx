@@ -4,7 +4,9 @@
  * Состояние дня — ПЕРВЫМ, одно из четырёх: ближайшая запись (имя, услуга,
  * начало–конец, «до визита N мин») + следующие спокойнее · «Сейчас по
  * расписанию» (без «Сейчас идёт визит» и «До конца ≈») · «На сегодня записей
- * нет» + «Добавить запись» · «Сегодня выходной» + «Рабочие часы →».
+ * нет» (кнопка «Добавить запись» появится с М-3 / DRF-2155 — мёртвых и лживых
+ * кнопок не рисуем, DRF-1181) · «Сегодня выходной» + «Рабочие часы →» ·
+ * рамка дня не прочитана → «Не удалось проверить расписание» + «Проверить снова».
  *
  * Убрано: «ТРЕБУЮТ ВНИМАНИЯ» (переписки), 💬 в шапке, «Открыть диалог ›», тап
  * по записи → переписка, «ЭТА НЕДЕЛЯ», PayoutPreviewCard, мёртвая «Заметка к
@@ -176,16 +178,18 @@ describe("состояние 3 — «Сейчас по расписанию»", 
 });
 
 describe("состояние 4 — записей нет", () => {
-  it("рабочий день без записей: текст + «Добавить запись» → «Расписание» с подписью-пределом", async () => {
+  it("рабочий день без записей: только текст; кнопки «Добавить запись» до М-3 нет", async () => {
     mockedDashboard.mockResolvedValue(doc());
     renderAt();
 
     const day = await screen.findByRole("region", { name: /сегодня/i });
     expect(within(day).getByText("На сегодня записей нет")).toBeInTheDocument();
-    // Предел до М-3 назван рядом с кнопкой, а не спрятан.
-    expect(within(day).getByText(/добавить запись можно из свободного окна/i)).toBeInTheDocument();
-    await userEvent.click(within(day).getByRole("button", { name: "Добавить запись" }));
-    expect(await screen.findByText("Экран «Расписание»")).toBeInTheDocument();
+    // Кнопка появится с М-3 (DRF-2155): тап по свободному окну сегодня открывает
+    // «недоступно», а не создание — кнопка сюда была бы ложью (DRF-1181).
+    expect(within(day).queryByRole("button", { name: /Добавить запись/ })).toBeNull();
+    expect(screen.queryByText(/свободного окна/)).toBeNull();
+    // И прежнего «Свободный день — отдохните» тоже нет: текст макета дословно.
+    expect(screen.queryByText(/отдохните/)).toBeNull();
   });
 
   it("выходной: «Сегодня выходной» + «Рабочие часы →»; для соло — экран часов", async () => {
@@ -211,14 +215,23 @@ describe("состояние 4 — записей нет", () => {
     expect(await screen.findByText("Экран «Расписание»")).toBeInTheDocument();
   });
 
-  it("рамка дня не прочитана (day_off: null) — выходного не рисуем, говорим про записи", async () => {
-    mockedDashboard.mockResolvedValue(
-      doc({ states: { is_day_done: false, is_offline_safe_response: false, day_off: null } }),
-    );
+  it("рамка дня не прочитана (day_off: null) — «Не удалось проверить расписание» + «Проверить снова»", async () => {
+    mockedDashboard
+      .mockResolvedValueOnce(
+        doc({ states: { is_day_done: false, is_offline_safe_response: false, day_off: null } }),
+      )
+      .mockResolvedValueOnce(
+        doc({ states: { is_day_done: false, is_offline_safe_response: false, day_off: true } }),
+      );
     renderAt();
     const day = await screen.findByRole("region", { name: /сегодня/i });
-    expect(within(day).getByText("На сегодня записей нет")).toBeInTheDocument();
+    // Молчание источника — не пустой день и не выходной (DRF-1111).
+    expect(within(day).getByText("Не удалось проверить расписание")).toBeInTheDocument();
+    expect(screen.queryByText("На сегодня записей нет")).toBeNull();
     expect(screen.queryByText("Сегодня выходной")).toBeNull();
+    await userEvent.click(within(day).getByRole("button", { name: "Проверить снова" }));
+    expect(await screen.findByText("Сегодня выходной")).toBeInTheDocument();
+    expect(mockedDashboard).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -232,10 +245,10 @@ describe("убрано по макету и §50 п.5", () => {
             conversation_id: "c-1",
             client_first_name: "Ольга",
             client_last_initial: "Р.",
-            last_message_preview: "Можно перенести?",
+            last_message_excerpt: "Можно перенести?",
             last_message_at: NOW,
             sla_tier: "red",
-            has_suggested_reply: true,
+            ai_drafted_reply_available: true,
           },
         ],
         today_summary: { total_clients_today: 1, completed_count: 0, next_free_window: null },

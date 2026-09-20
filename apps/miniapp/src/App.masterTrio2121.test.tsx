@@ -95,6 +95,7 @@ const DASHBOARD: DashboardResponse = {
   now_iso: "2026-09-19T09:00:00+03:00",
   active_visit: null,
   next_visit: null,
+  upcoming_today: [],
   inbox_preview: [],
   today_summary: { total_clients_today: 0, completed_count: 0, next_free_window: null },
   tab_badges: {
@@ -102,7 +103,7 @@ const DASHBOARD: DashboardResponse = {
     schedule_has_pending_change: false,
     profile_has_owner_pending_change: true,
   },
-  states: { is_day_done: false, is_offline_safe_response: false },
+  states: { is_day_done: false, is_offline_safe_response: false, day_off: false },
   week_summary: { week_start: "2026-09-14", week_end: "2026-09-20", bookings: 0, completed: 0, rating: null },
 };
 
@@ -216,11 +217,12 @@ describe("аватар мастера на всех трёх разделах (D
     expect(within(bar).queryByLabelText("есть изменения")).toBeNull();
   });
 
-  it("кнопка «Диалоги» с числом непрочитанных в шапке «Сегодня» остаётся (снимается DRF-1255)", async () => {
+  it("кнопки «Диалоги» в шапке «Сегодня» нет (снята DRF-2152, §50 п.5)", async () => {
     renderAppAt("/master/dashboard");
-    expect(
-      await screen.findByRole("button", { name: "Диалоги, непрочитанных: 2" }),
-    ).toBeInTheDocument();
+    // Присутствие первым: экран «Сегодня» отрисован…
+    expect(await screen.findByRole("region", { name: /сегодня/i })).toBeInTheDocument();
+    // …и переписок в шапке нет; /master/conversations живёт по прямой ссылке.
+    expect(screen.queryByRole("button", { name: /Диалоги/ })).toBeNull();
   });
 });
 

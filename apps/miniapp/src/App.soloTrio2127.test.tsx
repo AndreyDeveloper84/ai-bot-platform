@@ -97,6 +97,7 @@ const DASHBOARD: DashboardResponse = {
   now_iso: "2026-09-19T09:00:00+03:00",
   active_visit: null,
   next_visit: null,
+  upcoming_today: [],
   inbox_preview: [],
   today_summary: { total_clients_today: 0, completed_count: 0, next_free_window: null },
   tab_badges: {
@@ -104,7 +105,7 @@ const DASHBOARD: DashboardResponse = {
     schedule_has_pending_change: false,
     profile_has_owner_pending_change: false,
   },
-  states: { is_day_done: false, is_offline_safe_response: false },
+  states: { is_day_done: false, is_offline_safe_response: false, day_off: false },
   week_summary: { week_start: "2026-09-14", week_end: "2026-09-20", bookings: 0, completed: 0, rating: null },
 };
 
