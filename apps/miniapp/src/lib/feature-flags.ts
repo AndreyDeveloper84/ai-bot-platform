@@ -60,16 +60,11 @@ export function recommendationShelfEnabled(): boolean {
   return (import.meta.env.VITE_RECOMMENDATION_SHELF as string | undefined) === "1";
 }
 
-/**
- * DRF-2101 — Plan Lite без веса (§49). Флаг ВРЕМЕНИ СБОРКИ:
- * `VITE_PLAN_LITE=1` — включение на стенде = env + пересборка Mini App при
- * выкладке, не переменная бота. Тот же ключ стоит в каталоге и в боте
- * (`PLAN_LITE_ENABLED`); включаются три места разом
- * (`docs/STAGING_EFFECTIVE_CONFIG`). Функция, а не константа — как
- * `recommendationShelfEnabled`: читается при рендере, тест включает на
- * один случай без перезагрузки модуля. Выключен → маршрут и входы
- * отсутствуют, а экран по прямой ссылке говорит «недоступно» без сети.
+/*
+ * DRF-2144 — флага сборки `VITE_PLAN_LITE` больше нет (решение владельца
+ * §55 б: «План» — вкладка нижней панели, и её нельзя прятать за пересборкой).
+ * Включён ли Plan Lite, знает только сервер (`PLAN_LITE_ENABLED` в боте и
+ * каталоге): выключен → `customer/plan-lite` отвечает 404 `plan_lite_disabled`,
+ * и экран плана говорит «пока недоступен», а карточка цели на Главной не
+ * рисует строку плана. Одно место истины вместо трёх.
  */
-export function planLiteEnabled(): boolean {
-  return (import.meta.env.VITE_PLAN_LITE as string | undefined) === "1";
-}

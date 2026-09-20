@@ -218,6 +218,12 @@ export interface WellnessToday {
   active_goals?: Array<{
     title: string;
     week_num?: number;
+    /**
+     * Срок цели — МЕСТО ОСТАВЛЕНО, ждёт DRF-2173: у `ClientGoal` даты нет,
+     * сервер ключ не шлёт. ISO-дата; карточка на Главной покажет
+     * «До 1 ноября 2026» под названием, как на макете, когда ключ появится.
+     */
+    due_date?: string;
   }>;
   /**
    * Optional preferred display name (Layer 1 Identity). Falls back to
@@ -272,6 +278,20 @@ export interface RecentActivity {
      */
     address: string | null;
     booking_id: string;
+    /**
+     * DRF-2144 — wire-статус той же строки (mirror: `confirmed` /
+     * `awaiting_payment` / `pending_payment`; local: `confirmed`). Карточка
+     * на Главной переводит его через `mapBookingStatus` — тем же словарём,
+     * что список записей. Ключа нет (старый сервер) — бейджа нет.
+     */
+    status?: string;
+    /**
+     * Цена записи — МЕСТО ОСТАВЛЕНО, ждёт DRF-2172: каталог поля ещё не
+     * отдаёт, сервер ключ не шлёт. Строка «3 200 ₽» — как на макете
+     * DRF-1321 v1.2; отсутствие ключа = строки нет (§33: без источника не
+     * рисуем). Формат — как `priceFromLabel` в каталоге.
+     */
+    price?: string | null;
   };
   /**
    * Count of CONFIRMED bookings in the current week. Drives the

@@ -1,5 +1,7 @@
 /**
- * Вход в «Мой план» с экрана цели (DRF-2101) — только под флагом сборки.
+ * Вход в «Мой план» с экрана цели (DRF-2101). Флага сборки больше нет
+ * (DRF-2144, §55 б): кнопка есть всегда, когда цель известна; включён ли
+ * план, говорит сервер на экране плана.
  */
 import { fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
@@ -52,20 +54,12 @@ afterEach(() => {
 });
 
 describe("экран цели → «Мой план»", () => {
-  it("с флагом и известной целью — кнопка ведёт на экран плана", async () => {
-    vi.stubEnv("VITE_PLAN_LITE", "1");
+  it("с известной целью — кнопка ведёт на экран плана без всякого флага сборки", async () => {
+    vi.stubEnv("VITE_PLAN_LITE", "");
     renderScreen();
 
     fireEvent.click(await screen.findByRole("button", { name: PLAN_LITE_COPY.entryFromGoal }));
 
     expect(screen.getByTestId("location")).toHaveTextContent(PLAN_LITE_ROUTE);
-  });
-
-  it("без флага кнопки нет — состав экрана прежний", async () => {
-    vi.stubEnv("VITE_PLAN_LITE", "");
-    renderScreen();
-    await screen.findByText("Текущая цель");
-
-    expect(screen.queryByRole("button", { name: PLAN_LITE_COPY.entryFromGoal })).toBeNull();
   });
 });

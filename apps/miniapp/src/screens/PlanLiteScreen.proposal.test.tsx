@@ -133,7 +133,6 @@ const proposalBlock = () => screen.getByTestId("plan-lite-proposal");
 
 beforeEach(() => {
   vi.clearAllMocks();
-  vi.stubEnv("VITE_PLAN_LITE", "1");
   mockedDoc.mockResolvedValue(DOC);
   mockedGet.mockResolvedValue(null);
   mockedProposal.mockResolvedValue(PROPOSAL);

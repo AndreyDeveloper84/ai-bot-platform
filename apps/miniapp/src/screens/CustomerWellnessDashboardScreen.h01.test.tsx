@@ -446,7 +446,7 @@ describe("H01 · нижняя панель", () => {
 // ---------------------------------------------------------------------------
 
 describe("H01 · без веса и процентов (§49/§82)", () => {
-  it("в DOM нет «кг» / «%» / «вес»; «Неделя» есть — сторож не пуст", async () => {
+  it("в DOM нет «кг» / «вес»; «%» — только в строке калорий дневника (§85 §8); «Неделя» есть — сторож не пуст", async () => {
     serve({ plan: PLAN, activity: NEXT_BOOKING });
     const { container } = renderHome();
     await screen.findByRole("button", { name: "Продолжить сегодняшний план" });
@@ -454,8 +454,24 @@ describe("H01 · без веса и процентов (§49/§82)", () => {
 
     const text = container.textContent ?? "";
     expect(text).toMatch(/Неделя/);
-    expect(text).not.toMatch(/\bкг\b/i);
-    expect(text).not.toMatch(/%/);
-    expect(text).not.toMatch(/\bвес\b/i);
+    // `` — граница ASCII-слова и с кириллицей не работает: /кг/ не
+    // поймал бы « кг » никогда. Граница — «не буква» по Unicode.
+    const word = (w: string) => new RegExp(`(^|[^\\p{L}])${w}([^\\p{L}]|$)`, "iu");
+    expect(text).not.toMatch(word("кг"));
+    expect(text).not.toMatch(word("вес"));
+    expect("−2,4 кг из 10").toMatch(word("кг")); // положительная пара сторожа
+
+    // Процент калорий «1240 / 2100 ккал · 59 %» — строка дневника под
+    // ориентиром, разрешённая §85 §8 (DRF-1844); она не про цель. Всё
+    // остальное на экране — карточка цели, план, запись, панель — без «%».
+    const diary = container.querySelector(".wellness-dash__pulse-card");
+    expect(diary).not.toBeNull();
+    expect(diary?.textContent ?? "").toMatch(/%/); // положительная пара: исключение не пустое
+    const outsideDiary = Array.from(container.querySelectorAll("section"))
+      .filter((el) => !el.querySelector(".wellness-dash__pulse-card"))
+      .map((el) => el.textContent ?? "")
+      .join(" ");
+    expect(outsideDiary).toMatch(/Активная цель/);
+    expect(outsideDiary).not.toMatch(/%/);
   });
 });
