@@ -21,7 +21,6 @@ master_invite_2d8bbc4f-…», «Салон «Формула тела».», «/st
 
 from __future__ import annotations
 
-import uuid
 from unittest.mock import patch
 
 import pytest
@@ -60,7 +59,9 @@ def llm():
         yield {"script": scripted}
 
 
-INVITE_TOKEN = f"master_invite_{uuid.uuid4()}"
+# Фиксированный токен, не uuid4(): параметры тестов входят в id, а xdist требует
+# одинаковой коллекции на каждом воркере (шард 5 упал на «different tests collected»).
+INVITE_TOKEN = "master_invite_2d8bbc4f-0000-4000-8000-000000002151"
 LEAKED_ROWS = [
     ("user", f"/start {INVITE_TOKEN}"),
     ("assistant", "Салон «Формула тела». Ваш день и кабинет мастера."),
@@ -76,8 +77,12 @@ FORBIDDEN = ("/start", "inv_", "master_invite", "Салон «", "Слушаю",
 def _seed(bot_user: BotUser, rows) -> StaffAssistantThread:
     with tenant_scope(bot_user.tenant):
         thread = resolve_active_staff_thread(bot_user, role_at_open="master")
+        assert thread is not None  # create_if_missing=True — None только без тенанта
         for role, content in rows:
             record_staff_message(thread, role=role, content=content)
+        # Присутствие впереди отсутствия: подсадка ЛЕЖИТ в нити — пустой
+        # экран ниже доказывает фильтр, а не пустую базу.
+        assert StaffAssistantMessage.objects.filter(thread=thread).count() == len(rows)
     return thread
 
 
@@ -111,7 +116,7 @@ class TestTheScreenShowsOnlyAssistantTurns:
     def test_a_thread_of_commands_only_renders_empty(self, client, bot_user, accepted_master):
         """Ложный вход: одна подсадка «/start inv_X» → на экране 0 вхождений."""
         _seed(bot_user, [("user", "/start inv_X"), ("assistant", "Салон «Формула тела».")])
-        assert _history(client) == []
+        assert _history(client) == []  # empty-assert-ok: подсадка в нити доказана в _seed
 
     def test_the_rows_stay_in_the_database(self, client, bot_user, accepted_master):
         """Предел: скрыто, не стёрто — нить есть лог, чистка — отдельное решение."""
@@ -130,7 +135,7 @@ class TestThePairRule:
             bot_user,
             [("user", "/start inv_ABCD"), ("assistant", "Слушаю, Анна. Что нужно?")],
         )
-        assert _history(client) == []
+        assert _history(client) == []  # empty-assert-ok: подсадка в нити доказана в _seed
 
     def test_substantive_reply_after_a_pasted_command_stays(
         self, client, bot_user, accepted_master
@@ -159,7 +164,7 @@ class TestThePairRule:
                 ("assistant", "Салон «Формула тела»."),
             ],
         )
-        assert _history(client) == []
+        assert _history(client) == []  # empty-assert-ok: подсадка в нити доказана в _seed
 
     def test_entry_reply_not_after_a_command_stays(self, client, bot_user, accepted_master):
         """Форма входа режется только парой: сама по себе «Слушаю…» на вопрос — ответ."""
@@ -219,11 +224,15 @@ class TestCommandsAreNotWrittenAsTurns:
     ):
         """Вопроса в нити нет — ответ входа без него стал бы сиротой на экране."""
         llm["script"].append(FakeResult(text="Слушаю, Анна. Что нужно?"))
-        assert _ask(client, "/start inv_AYLAUUA6").status_code == 200
-        assert _history(client) == []
+        resp = _ask(client, "/start inv_AYLAUUA6")
+        # Присутствие: ответ человеку ушёл — отказан только след в нити.
+        assert resp.status_code == 200 and resp.json()["answer"] == "Слушаю, Анна. Что нужно?"
+        assert _history(client) == []  # empty-assert-ok: ответ выше доказан
         with tenant_scope(bot_user.tenant):
             thread = StaffAssistantThread.objects.get(bot_user=bot_user)
-            assert StaffAssistantMessage.objects.filter(thread=thread).count() == 0
+            assert (
+                StaffAssistantMessage.objects.filter(thread=thread).count() == 0
+            )  # empty-assert-ok: ответ выше доказан
 
     def test_substantive_reply_to_a_pasted_command_is_recorded(
         self, client, bot_user, accepted_master, llm
