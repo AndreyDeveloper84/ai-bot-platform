@@ -22,6 +22,8 @@
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { useScreenBack } from "../hooks/useScreenBack";
+import { backTo } from "../lib/screen-back";
 
 import { SheetChrome } from "../components/PersonalDataSheets";
 import { Snackbar } from "../components/Snackbar";
@@ -35,7 +37,7 @@ import {
   type WorkingHoursDay,
   type WorkingHoursResponse,
 } from "../lib/master-api";
-import { setBackButton, signalReady } from "../lib/max-sdk";
+import { signalReady } from "../lib/max-sdk";
 
 export const WORKING_HOURS_ROUTE = "/solo/working-hours";
 export const DAY_LABELS = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"] as const;
@@ -50,7 +52,8 @@ export const DAY_NAMES = [
 ] as const;
 
 export const TITLE = "Рабочие часы";
-export const SEMANTIC_NOTE = "По этим часам Ayla будет рассчитывать доступное время для записи.";
+export const SEMANTIC_NOTE =
+  "По этим часам Ayla будет рассчитывать доступное время для записи.";
 export const PICK_DAYS_LABEL = "Выберите рабочие дни";
 export const APPLY_ALL_LABEL = "Применить ко всем выбранным дням";
 export const SAVE_LABEL = "Сохранить расписание";
@@ -60,7 +63,8 @@ export const WORKING_DAY_SWITCH = "Рабочий день";
 export const INVALID_INTERVAL = "Начало должно быть раньше конца.";
 export const INVALID_BREAK = "Перерыв должен быть внутри рабочего времени.";
 export const NO_DAYS_YET = "Пока ни одного рабочего дня.";
-export const CONFLICT_MESSAGE = "В это время уже есть записи. Сначала разберитесь с ними.";
+export const CONFLICT_MESSAGE =
+  "В это время уже есть записи. Сначала разберитесь с ними.";
 export const NOT_LINKED_MESSAGE =
   "Профиль ещё не связан с каталогом — сохранить часы пока некуда.";
 
@@ -106,11 +110,13 @@ export function weekFrom(schedule: WorkingHoursDay[]): WeekDraft {
 /** Ошибка дня по правилам §13.3 или null. Та же проверка, что на сервере. */
 export function dayError(day: WorkingHoursDay): string | null {
   if (!day.is_working_day) return null;
-  if (!day.start_time || !day.end_time || day.start_time >= day.end_time) return INVALID_INTERVAL;
+  if (!day.start_time || !day.end_time || day.start_time >= day.end_time)
+    return INVALID_INTERVAL;
   if (day.break_start || day.break_end) {
     if (!day.break_start || !day.break_end) return INVALID_BREAK;
     if (day.break_start >= day.break_end) return INVALID_BREAK;
-    if (day.break_start < day.start_time || day.break_end > day.end_time) return INVALID_BREAK;
+    if (day.break_start < day.start_time || day.break_end > day.end_time)
+      return INVALID_BREAK;
   }
   return null;
 }
@@ -120,8 +126,12 @@ export function weekErrors(week: WeekDraft): string[] {
 }
 
 function summary(day: WorkingHoursDay): string {
-  if (!day.is_working_day || !day.start_time || !day.end_time) return "Выходной";
-  const brk = day.break_start && day.break_end ? ` · перерыв ${day.break_start}–${day.break_end}` : "";
+  if (!day.is_working_day || !day.start_time || !day.end_time)
+    return "Выходной";
+  const brk =
+    day.break_start && day.break_end
+      ? ` · перерыв ${day.break_start}–${day.break_end}`
+      : "";
   return `${day.start_time}–${day.end_time}${brk}`;
 }
 
@@ -139,8 +149,9 @@ export function MasterWorkingHoursScreen() {
   const [snack, setSnack] = useState<string | null>(null);
   const editTriggerRef = useRef<HTMLElement | null>(null);
 
+  // Возврат — «Сегодня» соло-кабинета (DRF-2150: стрелка без обработчика).
+  useScreenBack(backTo("/solo/my-day"));
   useEffect(() => {
-    setBackButton(true);
     signalReady();
   }, []);
 
@@ -173,8 +184,12 @@ export function MasterWorkingHoursScreen() {
               ...day,
               is_working_day: !day.is_working_day,
               // Снятый день теряет время; включённый берёт общее, если оно есть.
-              start_time: day.is_working_day ? null : day.start_time ?? (bulkStart || null),
-              end_time: day.is_working_day ? null : day.end_time ?? (bulkEnd || null),
+              start_time: day.is_working_day
+                ? null
+                : (day.start_time ?? (bulkStart || null)),
+              end_time: day.is_working_day
+                ? null
+                : (day.end_time ?? (bulkEnd || null)),
               break_start: day.is_working_day ? null : day.break_start,
               break_end: day.is_working_day ? null : day.break_end,
             }
@@ -186,7 +201,9 @@ export function MasterWorkingHoursScreen() {
     if (!bulkStart || !bulkEnd) return;
     setWeek((prev) =>
       prev.map((day) =>
-        day.is_working_day ? { ...day, start_time: bulkStart, end_time: bulkEnd } : day,
+        day.is_working_day
+          ? { ...day, start_time: bulkStart, end_time: bulkEnd }
+          : day,
       ),
     );
   };
@@ -230,7 +247,12 @@ export function MasterWorkingHoursScreen() {
   if (phase.kind === "error") {
     return (
       <main className="screen working-hours">
-        <SystemState kind="load_error" what="workingHours" err={phase.err} onRetry={() => void load()} />
+        <SystemState
+          kind="load_error"
+          what="workingHours"
+          err={phase.err}
+          onRetry={() => void load()}
+        />
       </main>
     );
   }
@@ -238,7 +260,10 @@ export function MasterWorkingHoursScreen() {
   const editingDay = editing === null ? null : week[editing];
 
   return (
-    <main className="screen working-hours" aria-labelledby="working-hours-title">
+    <main
+      className="screen working-hours"
+      aria-labelledby="working-hours-title"
+    >
       <h1 id="working-hours-title" className="working-hours__title">
         {TITLE}
       </h1>
@@ -272,7 +297,10 @@ export function MasterWorkingHoursScreen() {
       </section>
 
       {/* B — одно время на все выбранные дни */}
-      <section aria-labelledby="working-hours-bulk" className="working-hours__bulk">
+      <section
+        aria-labelledby="working-hours-bulk"
+        className="working-hours__bulk"
+      >
         <h2 id="working-hours-bulk" className="working-hours__section-title">
           Время работы
         </h2>
@@ -313,7 +341,9 @@ export function MasterWorkingHoursScreen() {
         <h2 id="working-hours-week" className="working-hours__section-title">
           Неделя
         </h2>
-        {selectedCount === 0 && <p className="working-hours__empty">{NO_DAYS_YET}</p>}
+        {selectedCount === 0 && (
+          <p className="working-hours__empty">{NO_DAYS_YET}</p>
+        )}
         <ul className="working-hours__list" aria-label="Неделя">
           {week.map((day) => {
             const err = dayError(day);
@@ -328,8 +358,12 @@ export function MasterWorkingHoursScreen() {
                     setEditing(day.day_of_week);
                   }}
                 >
-                  <span className="working-hours__day">{DAY_NAMES[day.day_of_week]}</span>
-                  <span className={`working-hours__summary${err ? " working-hours__summary--error" : ""}`}>
+                  <span className="working-hours__day">
+                    {DAY_NAMES[day.day_of_week]}
+                  </span>
+                  <span
+                    className={`working-hours__summary${err ? " working-hours__summary--error" : ""}`}
+                  >
                     {err ?? summary(day)}
                   </span>
                 </button>
@@ -346,7 +380,12 @@ export function MasterWorkingHoursScreen() {
       )}
 
       <div className="working-hours__actions">
-        <button type="button" className="btn-primary" disabled={!canSave} onClick={() => void save("stay")}>
+        <button
+          type="button"
+          className="btn-primary"
+          disabled={!canSave}
+          onClick={() => void save("stay")}
+        >
           {SAVE_LABEL}
         </button>
         <button
@@ -365,7 +404,9 @@ export function MasterWorkingHoursScreen() {
           day={editingDay}
           triggerRef={editTriggerRef}
           onChange={(next) =>
-            setWeek((prev) => prev.map((d) => (d.day_of_week === next.day_of_week ? next : d)))
+            setWeek((prev) =>
+              prev.map((d) => (d.day_of_week === next.day_of_week ? next : d)),
+            )
           }
           onClose={() => setEditing(null)}
         />
@@ -401,7 +442,8 @@ function DayEditor({
   onChange: (next: WorkingHoursDay) => void;
   onClose: () => void;
 }) {
-  const set = (patch: Partial<WorkingHoursDay>) => onChange({ ...day, ...patch });
+  const set = (patch: Partial<WorkingHoursDay>) =>
+    onChange({ ...day, ...patch });
   const err = dayError(day);
   return (
     <SheetChrome

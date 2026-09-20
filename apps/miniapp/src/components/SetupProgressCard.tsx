@@ -8,7 +8,7 @@
  * Ручка недоступна — карточки нет: чек-лист не важнее кабинета.
  */
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 
 import {
   drawnReadinessItems,
@@ -22,9 +22,17 @@ export const SETUP_CARD_CTA = "Открыть чек-лист";
 
 export function SetupProgressCard() {
   const navigate = useNavigate();
+  const location = useLocation();
+  // DRF-2150 (инцидент 20.09): чек-лист и его пункты живут на соло-поверхности
+  // (`/solo/setup`, deep_link'и readiness — /solo/*); у салонного мастера
+  // (/master/*) этих маршрутов нет — «Открыть чек-лист» вёл в никуда. На
+  // салонной поверхности карточка не рисуется: рабочие часы там — заявка
+  // владельцу, а не пункт самонастройки.
+  const onSoloSurface = location.pathname.startsWith("/solo/");
   const [readiness, setReadiness] = useState<OnboardingReadiness | null>(null);
 
   useEffect(() => {
+    if (!onSoloSurface) return;
     let cancelled = false;
     getOnboardingReadiness()
       .then((data) => {
@@ -36,14 +44,19 @@ export function SetupProgressCard() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [onSoloSurface]);
 
-  if (!readiness || readiness.ready) return null;
-  const open = drawnReadinessItems(readiness.items).filter((item) => item.state !== "done");
+  if (!onSoloSurface || !readiness || readiness.ready) return null;
+  const open = drawnReadinessItems(readiness.items).filter(
+    (item) => item.state !== "done",
+  );
   if (open.length === 0) return null;
 
   return (
-    <section className="master-dashboard__section" aria-labelledby="setup-card-title">
+    <section
+      className="master-dashboard__section"
+      aria-labelledby="setup-card-title"
+    >
       <div className="setup-card" data-testid="setup-card">
         <h2 id="setup-card-title" className="setup-card__title">
           {SETUP_CARD_TITLE}
@@ -55,7 +68,11 @@ export function SetupProgressCard() {
             </li>
           ))}
         </ul>
-        <button type="button" className="btn-secondary" onClick={() => navigate(SETUP_ROUTE)}>
+        <button
+          type="button"
+          className="btn-secondary"
+          onClick={() => navigate(SETUP_ROUTE)}
+        >
           {SETUP_CARD_CTA}
         </button>
       </div>

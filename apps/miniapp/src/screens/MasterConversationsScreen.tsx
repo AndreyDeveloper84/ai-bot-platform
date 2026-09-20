@@ -39,6 +39,8 @@ import {
   type RefObject,
 } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
+import { useScreenBack } from "../hooks/useScreenBack";
+import { backTo } from "../lib/screen-back";
 import { ApiError } from "../lib/api";
 import {
   FORBIDDEN_PII_KEYS,
@@ -53,15 +55,11 @@ import {
 import {
   hapticImpact,
   hapticSelection,
-  setBackButton,
   signalReady,
 } from "../lib/max-sdk";
 import { MasterTabBar } from "../components/MasterTabBar";
 import { Snackbar } from "../components/Snackbar";
-import {
-  formatRelativePast,
-  joinClientName,
-} from "../lib/masterDateFormat";
+import { formatRelativePast, joinClientName } from "../lib/masterDateFormat";
 
 // --- Russian copy (VERBATIM from §M5) -------------------------------------
 
@@ -74,8 +72,7 @@ const COPY = {
   },
   searchPlaceholder: "Поиск по имени",
   sections: {
-    awaiting_master: (n: number) =>
-      `━━ ЖДУТ ВАШЕГО ОТВЕТА (${n}) ━━━━`,
+    awaiting_master: (n: number) => `━━ ЖДУТ ВАШЕГО ОТВЕТА (${n}) ━━━━`,
     ai_drafted: (n: number) => `━━ ПРЕДЛОЖЕН ОТВЕТ (${n}) ━━━━━━━`,
     ai_handling: (n: number) => `━━ ИДЁТ ДИАЛОГ (${n}) ━━━━━━━━━━━`,
     resolved: (n: number) => `━━ РЕШЕНО СЕГОДНЯ (${n}) ━━━━━━━━`,
@@ -120,15 +117,21 @@ export function MasterConversationsScreen() {
   const [searchInput, setSearchInput] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [phase, setPhase] = useState<Phase>({ kind: "loading" });
-  const [toast, setToast] = useState<{ visible: boolean; message: string }>(
-    { visible: false, message: "" },
-  );
+  const [toast, setToast] = useState<{ visible: boolean; message: string }>({
+    visible: false,
+    message: "",
+  });
 
-  // BackButton: NOT root, so show.
+  // Возврат — «Сегодня» своей поверхности (DRF-2150: стрелка без обработчика).
+  useScreenBack(
+    backTo(
+      location.pathname.startsWith("/solo/")
+        ? "/solo/my-day"
+        : "/master/dashboard",
+    ),
+  );
   useEffect(() => {
-    setBackButton(true);
     signalReady();
-    return () => setBackButton(false);
   }, []);
 
   // Permission-cliff: spec §M5 line 623. The Mini App router sends users
@@ -283,10 +286,7 @@ export function MasterConversationsScreen() {
               : 0
           }
         />
-        <SearchBox
-          value={searchInput}
-          onChange={setSearchInput}
-        />
+        <SearchBox value={searchInput} onChange={setSearchInput} />
         <Body
           phase={phase}
           filter={filter}
@@ -338,9 +338,7 @@ function ConversationsHeader() {
   return (
     <header className="schedule-header">
       <div className="schedule-header__top">
-        <h1 className="screen__title schedule-header__title">
-          {COPY.title}
-        </h1>
+        <h1 className="screen__title schedule-header__title">{COPY.title}</h1>
       </div>
     </header>
   );
@@ -363,11 +361,13 @@ function Tabs({
       role="tablist"
       aria-label="Фильтр диалогов"
     >
-      {([
-        ["active", COPY.tabs.active(activeCount)],
-        ["all", COPY.tabs.all],
-        ["resolved", COPY.tabs.resolved],
-      ] as const).map(([key, label]) => (
+      {(
+        [
+          ["active", COPY.tabs.active(activeCount)],
+          ["all", COPY.tabs.all],
+          ["resolved", COPY.tabs.resolved],
+        ] as const
+      ).map(([key, label]) => (
         <button
           key={key}
           type="button"
@@ -460,9 +460,7 @@ function Body({
           <button
             type="button"
             className="btn-secondary master-dashboard__inline-cta"
-            onClick={() =>
-              data.next_cursor && onLoadMore(data.next_cursor)
-            }
+            onClick={() => data.next_cursor && onLoadMore(data.next_cursor)}
             disabled={phase.appending === true}
           >
             {COPY.loadMore}
@@ -593,9 +591,7 @@ function ConversationCard({
         // its hand» surface on the inbox).
         <div className="m-card__hint">{COPY.draftPreview}</div>
       ) : item.last_message_excerpt ? (
-        <div className="m-card__excerpt">
-          «{item.last_message_excerpt}»
-        </div>
+        <div className="m-card__excerpt">«{item.last_message_excerpt}»</div>
       ) : null}
     </button>
   );
@@ -620,13 +616,7 @@ function LoadingSkeleton() {
   );
 }
 
-function ErrorInitial({
-  err,
-  onRetry,
-}: {
-  err: unknown;
-  onRetry: () => void;
-}) {
+function ErrorInitial({ err, onRetry }: { err: unknown; onRetry: () => void }) {
   const isServer = err instanceof ApiError && err.status >= 500;
   const body = isServer
     ? "Что-то у нас не получается прямо сейчас."
