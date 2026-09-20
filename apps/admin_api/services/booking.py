@@ -66,19 +66,30 @@ SERVICE_NOT_BOOKABLE = Refusal(
 )
 
 
-def bookable_service(tenant_id: Any, service_id: str) -> CatalogService | Refusal:
+def bookable_service(
+    tenant_id: Any,
+    service_id: str,
+    *,
+    log: str | None = None,
+    journal: logging.Logger | None = None,
+) -> CatalogService | Refusal:
     """Услуга этого салона, которую можно записать в Ayla.
 
     Строка каталога без ``ayla_service_id`` в Ayla не записывается: сказать
     об этом лучше, чем спросить слоты с пустым id и отдать пустоту как
-    «свободного времени нет».
+    «свободного времени нет». Журнал — только если поверхность назвала
+    ``log`` (слоты писали ``…service_not_bridged``, создание — нет; так и
+    осталось).
     """
 
     service = CatalogService.objects.filter(tenant_id=tenant_id, id=service_id).first()
     if service is None:
         return SERVICE_NOT_FOUND
     if not service.ayla_service_id:
-        logger.warning("booking.service_not_bridged service=%s tenant=%s", service.id, tenant_id)
+        if log:
+            (journal or logger).warning(
+                "%s.service_not_bridged service=%s tenant=%s", log, service.id, tenant_id
+            )
         return SERVICE_NOT_BOOKABLE
     return service
 
@@ -330,7 +341,7 @@ def public_customer_row(row: dict[str, Any]) -> dict[str, Any]:
     Две формы требуют обработки, обе из ``_client_name`` Ayla (2026-08-21):
     пустое имя (намеренно там, но пустая строка в выборе бесполезна —
     нейтральная заглушка) и username вместо имени (для пришедших через бота
-    это хэндл канала ``bot:max:83146139`` — внутренний идентификатор, не
+    это хэндл канала ``bot:max:831…`` — внутренний идентификатор, не
     имя). Ни то ни другое не прячется молча: безымянный клиент читается
     безымянным, и это правда.
     """

@@ -90,7 +90,7 @@ def booking_slots(request: HttpRequest) -> HttpResponse:
     if master is None:
         return _error("not_found", "master not found", 404)
 
-    service = bookable_service(tenant.id, service_id)
+    service = bookable_service(tenant.id, service_id, log="admin_api.booking_slots", journal=logger)
     if isinstance(service, Refusal):
         return _error(service.slug, service.detail, service.status)
 

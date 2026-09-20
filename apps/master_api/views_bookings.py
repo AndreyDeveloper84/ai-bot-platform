@@ -105,10 +105,15 @@ def _alternatives(
     остаётся, человек выберет время сам.
     """
 
+    tz = get_tenant_tz(master.tenant)
     try:
-        day = datetime.fromisoformat(start_at).astimezone(get_tenant_tz(master.tenant)).date()
+        when = datetime.fromisoformat(start_at)
     except ValueError:
         return None, True
+    if when.tzinfo is None:
+        # Без смещения — день салона, не день хоста.
+        when = when.replace(tzinfo=tz)
+    day = when.astimezone(tz).date()
     slots = bookable_starts(
         master=master,
         service=service,
@@ -225,7 +230,9 @@ def booking_slots(request: HttpRequest) -> HttpResponse:
     except ValueError:
         return _error("bad_request", "date must be YYYY-MM-DD", 400)
 
-    service = bookable_service(tenant.id, service_id)
+    service = bookable_service(
+        tenant.id, service_id, log="master_api.booking_slots", journal=logger
+    )
     if isinstance(service, Refusal):
         return _error(service.slug, service.detail, service.status)
 

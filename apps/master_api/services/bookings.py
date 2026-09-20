@@ -6,9 +6,10 @@
 стойки, — а здесь то, чего у админа нет:
 
 * :func:`booking_detail` — своя запись из зеркала (``RemoteBookingProxy``,
-  ``specialist_id == master.id`` — так читает и ``visit_source`` с DRF-1085)
-  с ``temporal_state`` по часам сервера; чужая запись неотличима от
-  несуществующей — вызывающий отвечает одним 404;
+  ``specialist_id`` ∈ :func:`specialist_keys` — pk строки синка или
+  каталожный id соло/склеенного мастера) с ``temporal_state`` по часам
+  сервера; чужая запись неотличима от несуществующей — вызывающий
+  отвечает одним 404;
 * :func:`temporal_state` — пять состояний макета DRF-1185;
 * :func:`enrich_customer_rows` — к строкам поиска Ayla добавить дату
   последнего визита у ЭТОГО мастера (решение владельца 20.09: одноимённые
@@ -169,6 +170,24 @@ class BookingDetail:
         }
 
 
+def specialist_keys(master: CatalogMaster) -> list[UUID]:
+    """Под какими id зеркало знает этого мастера.
+
+    ``specialist_id`` строки зеркала — ``SpecialistProfile.id`` каталога, как
+    его прислало событие. У строки синка он равен первичному ключу; у
+    соло-мастера и склеенного приглашения (DRF-1507) первичный ключ —
+    uuid4, а каталожный id лежит в ``catalog_specialist_id`` (DRF-1933).
+    Оба ключа — иначе соло-мастер создаёт запись (в Ayla уходит
+    каталожный id) и тут же получает 404 на её детали.
+    """
+
+    keys = [master.id]
+    catalog_id = getattr(master, "catalog_specialist_id", None)
+    if catalog_id and catalog_id != master.id:
+        keys.append(catalog_id)
+    return keys
+
+
 def own_booking(master: CatalogMaster, appointment_id: UUID | str) -> RemoteBookingProxy | None:
     """Своя запись мастера из зеркала, или None.
 
@@ -179,7 +198,7 @@ def own_booking(master: CatalogMaster, appointment_id: UUID | str) -> RemoteBook
 
     return RemoteBookingProxy.all_tenants.filter(
         tenant_id=master.tenant_id,
-        specialist_id=master.id,
+        specialist_id__in=specialist_keys(master),
         appointment_id=appointment_id,
     ).first()
 
@@ -202,7 +221,7 @@ def _last_visit_dates(
         return {}
     qs = RemoteBookingProxy.all_tenants.filter(
         tenant_id=master.tenant_id,
-        specialist_id=master.id,
+        specialist_id__in=specialist_keys(master),
         status="completed",
         bot_user_id__in=ids,
     )
@@ -350,5 +369,6 @@ __all__ = [
     "name_initial",
     "own_booking",
     "public_status",
+    "specialist_keys",
     "temporal_state",
 ]

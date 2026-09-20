@@ -492,6 +492,31 @@ class TestCreateBooking:
             "idempotency_key": "k-2154",
         }
 
+    def test_ayla_not_found_is_conflict_404_with_outcome_envelope(
+        self, client, tenant, bot_user, accepted_master, bridged_service, stub_salon
+    ):
+        """Ayla не знает клиента как этого салона — приглашение записать его
+        новым гостем: конфликт, не тупик (и ``outcome``, не ``error``)."""
+
+        from apps.integrations.ayla.salon_client import SalonNotFound
+
+        stub_salon(_StubSalon(exc=SalonNotFound("client not found")))
+        resp = _post(client, bridged_service, client_id="c-404", client_name="", client_phone="")
+        assert resp.status_code == 404
+        assert resp.json()["outcome"] == "conflict"
+        assert "error" not in resp.json()
+
+    def test_alternatives_day_for_a_naive_start_is_the_salons_day(
+        self, client, tenant, bot_user, accepted_master, bridged_service, stub_salon, stub_slots
+    ):
+        """``2026-10-21T23:30`` без смещения — 21-е по Москве, а не 22-е по UTC-хосту."""
+
+        stub_salon(_StubSalon(exc=SalonSlotTaken("занято")))
+        slots = stub_slots(_StubSlots(slots=[]))
+        resp = _post(client, bridged_service, start_at="2026-10-21T23:30:00")
+        assert resp.status_code == 409
+        assert slots.calls[0]["date"] == "2026-10-21"
+
     def test_ayla_validation_is_blocked_400(
         self, client, tenant, bot_user, accepted_master, bridged_service, stub_salon
     ):
@@ -639,7 +664,7 @@ class TestCustomerSearch:
                 rows=[
                     {"id": str(CUSTOMER_AYLA_ID), "name": "Анна Петрова"},
                     {"id": newcomer_id, "name": "Анна Сидорова"},
-                    {"id": str(uuid.uuid4()), "name": "bot:max:83146139"},
+                    {"id": str(uuid.uuid4()), "name": "bot:max:83100000"},
                 ]
             )
         )
@@ -767,6 +792,10 @@ class TestSoloMaster:
             expires_in_days=None,
             linked_bot_user=row,
         )
+        # У соло-мастера первичный ключ — uuid4, каталожный id — другой
+        # (DRF-1933); событие Ayla пишет в зеркало каталожный.
+        master.catalog_specialist_id = uuid.uuid4()
+        master.save(update_fields=["catalog_specialist_id"])
         service = CatalogService.all_tenants.create(
             tenant=tenant,
             external_id=1,
@@ -780,8 +809,20 @@ class TestSoloMaster:
         return tenant, master, service
 
     def test_detail_and_create_in_the_own_tenant(self, client, solo, stub_salon):
+        """Зеркало знает соло-мастера по каталожному id, не по pk — после
+        201 детали своей записи открываются, а не 404 (замечание ревью)."""
+
         tenant, master, service = solo
-        row = _visit(master, start=_now() + timedelta(hours=2), service=service)
+        assert master.catalog_specialist_id != master.id
+        row = RemoteBookingProxy.all_tenants.create(
+            tenant=tenant,
+            appointment_id=uuid.uuid4(),
+            specialist_id=master.catalog_specialist_id,
+            start_at=_now() + timedelta(hours=2),
+            end_at=_now() + timedelta(hours=3),
+            status="confirmed",
+            service_id=service.ayla_service_id,
+        )
         resp = _get_detail(client, row.appointment_id, uid="55555")
         assert resp.status_code == 200, resp.content
         assert resp.json()["service"]["name"] == "Стрижка"
@@ -796,6 +837,31 @@ class TestSoloMaster:
         assert call["tenant_slug"] == "solo-2154"
         assert call["specialist_id"] == str(master.catalog_specialist_id)
         assert call["actor_external_id"] == "bot:max:55555"
+
+    def test_last_visit_date_folds_both_specialist_keys(self, client, solo, stub_salon):
+        tenant, master, service = solo
+        anna = BotUser.all_tenants.create(
+            tenant=tenant,
+            channel="max",
+            channel_user_id="424243",
+            client_name="Анна Петрова",
+            chat_id="424243",
+            ayla_user_id=CUSTOMER_AYLA_ID,
+        )
+        done = RemoteBookingProxy.all_tenants.create(
+            tenant=tenant,
+            appointment_id=uuid.uuid4(),
+            specialist_id=master.catalog_specialist_id,
+            start_at=_now() - timedelta(days=9),
+            end_at=_now() - timedelta(days=9) + timedelta(hours=1),
+            status="completed",
+            bot_user=anna,
+        )
+        stub_salon(_StubSalon(rows=[{"id": str(CUSTOMER_AYLA_ID), "name": "Анна Петрова"}]))
+        results = _search(client, "Анна", uid="55555").json()["results"]
+        assert results[0]["name"] == "Анна П."
+        expected = done.start_at.astimezone(mod.get_tenant_tz(tenant)).date().isoformat()
+        assert results[0]["last_visit_date"] == expected
 
 
 # ─── h7: один сервис на две поверхности ─────────────────────────────────────
