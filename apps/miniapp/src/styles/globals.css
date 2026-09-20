@@ -7568,6 +7568,14 @@ a {
   padding-bottom: calc(var(--tabbar-height) + 96px + var(--safe-bottom));
 }
 
+/* DRF-2119 — тот же диалог внутри рамки салонной админки: рамка уже
+   даёт экран и нижнюю панель, поэтому высота — от содержимого, а не
+   на весь вьюпорт, и отступ снизу только под поле ввода. */
+.ayla-screen--salon {
+  min-height: 0;
+  padding-bottom: var(--s-4);
+}
+
 .ayla-header {
   padding: var(--s-3) 0 var(--s-2);
 }

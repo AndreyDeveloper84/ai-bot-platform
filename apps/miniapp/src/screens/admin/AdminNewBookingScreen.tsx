@@ -273,6 +273,50 @@ export function AdminNewBookingScreen() {
     })();
   }, []);
 
+  // DRF-2119 — предзаполнение из query, один раз, когда справочники
+  // загружены: ассистент администратора («подготовить запись») приводит
+  // сюда с `master_id` / `service_id` / `client_name` | `client_id` /
+  // `start_at`. Мастер и услуга берутся ТОЛЬКО из загруженных списков —
+  // чужой или несуществующий id молча не заполняется. Время из query —
+  // это пожелание, не слот: слот выбирается из того, что вернёт
+  // `/booking-slots/` (единый источник свободного времени, DRF-1637), а
+  // пожелание показывается подсказкой. Запись отсюда не создаётся —
+  // человек проходит форму до «Записать» сам.
+  const prefilledRef = useRef(false);
+  const [prefillHint, setPrefillHint] = useState<string>("");
+  useEffect(() => {
+    if (prefilledRef.current) return;
+    if (masters.length === 0 && services.length === 0) return;
+    prefilledRef.current = true;
+
+    const masterId = searchParams.get("master_id") ?? "";
+    const serviceId = searchParams.get("service_id") ?? "";
+    const clientName = (searchParams.get("client_name") ?? "").trim();
+    const clientId = (searchParams.get("client_id") ?? "").trim();
+    const startAt = searchParams.get("start_at") ?? "";
+
+    const service = services.find((row) => row.id === serviceId);
+    if (service) {
+      dispatch({
+        type: "service/set",
+        service: { id: service.id, name: service.name, duration_min: service.duration_min ?? 0 },
+      });
+    }
+    const master = masters.find((row) => row.id === masterId);
+    if (master) {
+      dispatch({ type: "master/set", master: { id: master.id, name: master.name } });
+    }
+    if (clientId && clientName) {
+      dispatch({ type: "customer/set", customer: { kind: "existing", id: clientId, name: clientName } });
+    } else if (clientName) {
+      dispatch({ type: "customer/set", customer: { kind: "new", name: clientName, phone: "" } });
+    }
+    const wishTime = /T(\d{2}:\d{2})/.exec(startAt)?.[1];
+    if (wishTime) {
+      setPrefillHint(`Ayla предложила ${wishTime} — выберите время из доступных.`);
+    }
+  }, [masters, services, searchParams, dispatch]);
+
   // Slots load only once the draft can meaningfully ask (§12/§17).
   const readyForSlots = canQueryAvailability(draft);
   useEffect(() => {
@@ -429,6 +473,12 @@ export function AdminNewBookingScreen() {
       {notice && (
         <div className="callout callout--warning" role="status" aria-live="polite">
           {notice}
+        </div>
+      )}
+
+      {prefillHint && (
+        <div className="callout" role="note" aria-live="polite">
+          {prefillHint}
         </div>
       )}
 

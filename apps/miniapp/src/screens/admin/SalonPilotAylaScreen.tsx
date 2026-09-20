@@ -1,42 +1,61 @@
 /**
- * «Ayla» — третий раздел пилотной салонной админки (DRF-1235).
+ * «Ayla» — третий раздел пилотной салонной админки (DRF-1235 → DRF-2119).
  *
- * Адрес: `/admin/ayla`. Каркас, не содержимое.
+ * Адрес: `/admin/ayla`. Принцип владельца, §50 п.5: «Ayla — помощник
+ * администратора». Диалог с ассистентом салона — не список клиентских
+ * переписок и не лента уведомлений.
  *
- * По решению DRF-1235 это «разговорный вход в те же салонные операции»,
- * то есть диалог салона с ассистентом — не список клиентских переписок
- * и не лента уведомлений.
+ * # Половина А (DRF-2119)
  *
- * # Почему здесь нет диалога
+ * Тройка `admin/assistant/{history,ask,confirm}` — админский субъект на
+ * том же цикле, что у мастера. Три инструмента: найти запись (карточки
+ * дня, без телефонов), подготовить запись (черновик → форма
+ * `/admin/booking/new` с предзаполнением; запись создаёт человек в
+ * форме), подготовить изменение графика (предложение → «Изменить
+ * график» → подтверждение на сервере). «Проверить свободное время» —
+ * половина Б, после DRF-1637; сюда не заходит.
  *
- * Салонной ручки ассистента не существует. Работает только мастерская
- * тройка — `assistant/history`, `assistant/ask`, `assistant/confirm` в
- * `apps/master_api/urls.py`, — и она отвечает мастеру, а не салону:
- * нить привязана к мастеру, а действия, которые она предлагает
- * подтвердить, мастерские. Позвать её отсюда значило бы показать
- * владельцу салона чужой разговор.
+ * # Каркас общий
  *
- * Поэтому экран не ходит никуда и говорит это прямо. `MasterAylaScreen`
- * (`/master/ayla`) остаётся там, где стоял, — этот экран его не
- * заменяет и не переиспользует.
- *
- * # Что здесь появится не здесь
- *
- * Лента «Ayla · Изменения» с макета (DRF-1236) — это блок ГЛАВНОГО
- * экрана, а не этот раздел; их легко перепутать по названию. Разговор с
- * ассистентом — DRF-1249.
+ * `AylaChat` — тот же, что у `MasterAylaScreen`; здесь — только чей это
+ * ассистент и куда ведёт дверь черновика (`onOpen` → навигация).
  */
 
-import type { MeResponse } from "../../lib/admin-api";
+import { useMemo } from "react";
+import { useNavigate } from "react-router-dom";
+
+import { AylaChat, type AylaChatApi } from "../../components/AylaChat";
+import {
+  askAdminAyla,
+  confirmAdminAylaAction,
+  getAdminAylaHistory,
+  type MeResponse,
+} from "../../lib/admin-api";
 import { SalonPilotFrame } from "./SalonPilotFrame";
 
+const GREETING =
+  "Спросите про записи салона, попросите подготовить запись или изменить график мастера.";
+
 export function SalonPilotAylaScreen({ me }: { me: MeResponse }) {
+  const navigate = useNavigate();
+  const api = useMemo<AylaChatApi>(
+    () => ({
+      history: () => getAdminAylaHistory(),
+      ask: (text) => askAdminAyla(text),
+      confirm: (token) => confirmAdminAylaAction(token),
+    }),
+    [],
+  );
+
   return (
     <SalonPilotFrame me={me} title="Ayla">
-      <div className="callout" role="status">
-        <p style={{ margin: 0 }}>
-          Разговор салона с Ayla сюда пока не приходит — показывать нечего.
-        </p>
+      <div className="ayla-screen ayla-screen--salon">
+        <AylaChat
+          api={api}
+          greeting={GREETING}
+          logLabel="Диалог салона с Ayla"
+          onOpen={(url) => navigate(url)}
+        />
       </div>
     </SalonPilotFrame>
   );

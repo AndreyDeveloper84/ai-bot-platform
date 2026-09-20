@@ -13,6 +13,7 @@ from django.urls import path
 
 from apps.admin_api import (
     views,
+    views_assistant,
     views_availability,
     views_availability_slots,
     views_booking_cancel,
@@ -255,4 +256,11 @@ urlpatterns = [
         views_readiness.salon_readiness,
         name="salon_readiness",
     ),
+    # DRF-2119 — раздел «Ayla» для администратора: тройка ассистента
+    # (история / вопрос / подтверждение) под require_admin_role; ресепшну —
+    # 403 (DRF-2115). Пишущие действия только предлагаются (талон) или
+    # открывают форму в Mini App; модель ничего не пишет сама.
+    path("assistant/history", views_assistant.assistant_history, name="assistant_history"),
+    path("assistant/ask", views_assistant.assistant_ask, name="assistant_ask"),
+    path("assistant/confirm", views_assistant.assistant_confirm, name="assistant_confirm"),
 ]
