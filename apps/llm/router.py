@@ -441,7 +441,11 @@ class FallbackProvider:
             result = await secondary.complete(messages, **_retarget_model(kwargs, secondary))
             # Name the vendor that did NOT answer next to the one that did,
             # so the turn metric can tell a hop from a plain OpenAI turn.
-            return replace(result, fallback_from=self.name)
+            # Guarded: a duck-typed double that returns something other
+            # than the DTO must not turn a successful hop into a crash.
+            if isinstance(result, CompletionResult):
+                return replace(result, fallback_from=self.name)
+            return result
 
     async def embedding(self, text: str, **kwargs: Any) -> list[float]:
         """Pass-through — see the class docstring on why embeddings never hop."""
@@ -931,28 +935,30 @@ def provider_is_configured(name: str) -> bool:
     onto a vendor that is guaranteed to 401 converts one dead provider
     into two and buries the original cause under an auth error.
 
-    ### Named, not fixed: this function arms an unapproved policy
+    ### The policy this gate arms
 
-    DRF-1631 / owner decision В-14 (10.09.2026). Read what this gate
-    actually decides on the serving path: a key being *present* is the
-    whole of the evidence that lets :class:`FallbackProvider` move
-    live traffic off the configured vendor and onto another one, in
-    silence. Under ``LLM_PROVIDER=anthropic`` that is a silent runtime
-    fall-back to OpenAI, and В-14 forbids it — a fall-back is permitted
-    only under a policy designed, approved and tested, and none exists.
+    DRF-1631 / owner decision В-14 (10.09.2026) named what this gate
+    decides on the serving path: a key being *present* is the whole of
+    the evidence that lets :class:`FallbackProvider` move live traffic
+    off the configured vendor and onto another one. В-14 forbade that
+    while no policy existed — a fall-back is permitted only under a
+    policy designed, approved and tested.
 
         **Holding a secret is not permission to fall back.**
 
-    ``OPENAI_API_KEY`` is on the pilot for a different and legitimate
-    reason (embeddings — Anthropic has no embeddings API, so
-    ``op="embedding"`` routes to OpenAI by design; see the module
-    docstring). One key is therefore serving two purposes, only one of
-    which anyone chose, and this function cannot tell them apart.
+    The policy now exists: DRF-2147 (owner decision В3, 20.09.2026) —
+    one hop along ``LLM_FALLBACK_ORDER`` on quota and on unavailability,
+    never on a 400 / 422, every switch paged to the operators and
+    stamped on the answer (``fallback_from``) for the turn metric. The
+    key is still what makes a vendor a *candidate*; the policy is what
+    says a candidate is wanted, and ``LLM_FALLBACK_ORDER`` is where the
+    operator states the preference (the pilot: ``anthropic,openai``).
 
-    Left AS IS deliberately: the fix is a policy decision about
-    completions, not a line of code a monitor ticket may take on its own
-    — changing it here would swap one silent behaviour for another. The
-    operator switch that exists today is
+    ``OPENAI_API_KEY`` is on the pilot for a second, legitimate reason
+    (embeddings — Anthropic has no embeddings API, so ``op="embedding"``
+    routes to OpenAI by design; see the module docstring). One key
+    serves two purposes and this function cannot tell them apart; the
+    operator switch for completions alone is
     ``LLM_QUOTA_FALLBACK_ENABLED=0``.
     """
     spec = _PROVIDER_SPECS.get(name)
