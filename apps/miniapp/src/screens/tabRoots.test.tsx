@@ -53,12 +53,15 @@ const mockedDiary = vi.mocked(loadDiaryToday);
 const mockedBackButton = vi.mocked(setBackButton);
 
 /** Каждая вкладка панели — экран под своим маршрутом. */
-const TAB_SCREENS: Record<string, () => JSX.Element> = {
+const TAB_SCREENS = {
   "/customer/plan": PlanLiteScreen,
   "/customer/food-scanner/diary": FoodScannerDiaryScreen,
-};
+} as const;
 
-function renderAt(path: string) {
+type TabRoute = keyof typeof TAB_SCREENS;
+const isTabRoute = (route: string): route is TabRoute => route in TAB_SCREENS;
+
+function renderAt(path: TabRoute) {
   const Screen = TAB_SCREENS[path];
   return render(
     <MemoryRouter initialEntries={[path]}>
@@ -82,7 +85,10 @@ beforeEach(() => {
     intents: [],
     next: null,
   } as never);
-  mockedDiary.mockResolvedValue({ entries: [] } as never);
+  mockedDiary.mockResolvedValue({
+    today: { calories_eaten: 0, calories_target: 2000, entries: [] },
+    entries: [],
+  } as never);
 });
 
 afterEach(() => {
@@ -92,7 +98,7 @@ afterEach(() => {
 describe("вкладки панели — корни (макет DRF-1321)", () => {
   it("каждая вкладка панели ведёт на экран, который рисует ту же панель", async () => {
     for (const tab of CUSTOMER_TABS) {
-      if (!TAB_SCREENS[tab.route]) continue; // Главная/Записи/Профиль — уже корни (DRF-2191)
+      if (!isTabRoute(tab.route)) continue; // Главная/Записи/Профиль — уже корни (DRF-2191)
       const view = renderAt(tab.route);
       const nav = await screen.findByRole("navigation", { name: "Основная навигация" });
       expect(
@@ -108,15 +114,15 @@ describe("вкладки панели — корни (макет DRF-1321)", () 
   });
 
   it("на экране вкладки нет стрелки «назад» — ни нарисованной, ни системной в MAX", async () => {
-    for (const route of Object.keys(TAB_SCREENS)) {
+    for (const route of Object.keys(TAB_SCREENS) as TabRoute[]) {
       const view = renderAt(route);
       await screen.findByRole("navigation", { name: "Основная навигация" });
       expect(screen.queryByRole("button", { name: "Назад" }), route).toBeNull();
-      // `setBackButton` зовётся с `undefined` (корень) — системная кнопка спрятана.
+      // Корень не показывает системную кнопку MAX: `useBackButton` зовёт
+      // `setBackButton(false)` и ни разу — `true`.
       const calls = mockedBackButton.mock.calls.map((c) => c[0]);
-      expect(calls.every((arg) => arg === undefined), `${route}: системная «назад» спрятана`).toBe(
-        true,
-      );
+      expect(calls.length, `${route}: контракт «назад» объявлен`).toBeGreaterThan(0);
+      expect(calls.includes(true), `${route}: системная «назад» спрятана`).toBe(false);
       view.unmount();
       mockedBackButton.mockClear();
     }

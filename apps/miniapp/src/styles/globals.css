@@ -7033,6 +7033,11 @@ a {
   background: var(--c-bg);
   color: var(--c-text-primary);
 }
+/* DRF-2201 — экран-корень вкладки несёт нижнюю панель: контент не должен
+   уезжать под неё. Высота панели — та же, что у `.wellness-dash__nav`. */
+.food-scanner-screen--tab-root {
+  padding-bottom: calc(56px + var(--safe-bottom) + var(--s-3));
+}
 .food-scanner-screen__main {
   padding: var(--s-3) var(--s-4) calc(var(--s-6) + var(--safe-bottom));
   display: flex;

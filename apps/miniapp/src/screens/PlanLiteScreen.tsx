@@ -59,7 +59,8 @@ import {
   type PlanLiteCadence,
   type PlanLiteProposal,
 } from "../lib/plan-lite";
-import { backTo } from "../lib/screen-back";
+import { screenRoot } from "../lib/screen-back";
+import { CustomerTabBar } from "../components/CustomerTabBar";
 
 export const PLAN_LITE_ROUTE = "/customer/plan";
 const GOAL_ROUTE = "/customer/goal-select";
@@ -170,7 +171,16 @@ function cadenceLabel(row: ProposalRow): string {
 
 export function PlanLiteScreen() {
   const navigate = useNavigate();
-  const onBack = useScreenBack(backTo(GOAL_ROUTE));
+  // DRF-2201 — «План» вкладка панели, значит корень: стрелки «назад» у него
+  // нет (ни нарисованной, ни системной в MAX), уход — другими вкладками.
+  // Прежде стрелка вела на экран цели; такой дороги у корня быть не может —
+  // вход на цель, если он нужен, живёт ссылкой в карточке цели, не стрелкой.
+  useScreenBack(
+    screenRoot(
+      "«План» — вкладка нижней панели (макет DRF-1321, §55 б): выше неё " +
+        "ничего нет, а уход с экрана — соседние вкладки.",
+    ),
+  );
 
   const [status, setStatus] = useState<Status>({ kind: "loading" });
   const [goalLabel, setGoalLabel] = useState<string | null>(null);
@@ -359,13 +369,8 @@ export function PlanLiteScreen() {
   };
 
   return (
-    <div className="food-scanner-screen">
+    <div className="food-scanner-screen food-scanner-screen--tab-root">
       <header className="records-screen__header">
-        <button type="button" className="records-screen__back" aria-label="Назад" onClick={onBack}>
-          <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-            <path d="M12 4l-6 6 6 6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-          </svg>
-        </button>
         <h1 className="records-screen__title">{PLAN_LITE_COPY.title}</h1>
       </header>
 
@@ -579,6 +584,10 @@ export function PlanLiteScreen() {
           </section>
         )}
       </main>
+
+      {/* Панель — вкладка этого экрана (DRF-2201); стоит вне веток состояния:
+          состояние ошибки не убирает навигацию (#1918). */}
+      <CustomerTabBar active="plan" />
     </div>
   );
 }
