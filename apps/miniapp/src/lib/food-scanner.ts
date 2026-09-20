@@ -141,6 +141,27 @@ export class PhotoTooLargeError extends Error {
 }
 
 /**
+ * DRF-2195 — штатные отказы каталога по бюджету распознавания. Ни один из
+ * них не «временно недоступен»: каталог работает и отвечает осознанно.
+ * Отдельные классы нужны ровно затем, чтобы экран мог сказать человеку
+ * «сегодня» и увести писать словами вместо «попробуй через минуту».
+ */
+export class ScanDailyLimitError extends Error {
+  constructor() {
+    super("Сегодня фото больше не распознаю.");
+    this.name = "ScanDailyLimitError";
+  }
+}
+
+/** 503 `food_scan_budget_exhausted` — общий дневной бюджет распознавания. */
+export class ScanBudgetExhaustedError extends Error {
+  constructor() {
+    super("Распознавание фото сейчас недоступно.");
+    this.name = "ScanBudgetExhaustedError";
+  }
+}
+
+/**
  * Legacy (DRF-2106): nothing in this module throws it any more — the last
  * stub is gone. The class stays exported because the Processing screen
  * still maps it to its «пока не подключено» state; that branch is dead
@@ -182,6 +203,8 @@ interface ScanWire {
 /**
  * Multipart `POST /food/scan`: поле `image` — сам файл. Ошибки бота
  * приводятся к таксономии §7: `food_not_recognized` → FoodNotRecognizedError,
+ * `food_scan_daily_limit` (429) → ScanDailyLimitError,
+ * `food_scan_budget_exhausted` (503) → ScanBudgetExhaustedError,
  * `nutrition_unavailable` (503) → NutritionUnavailableError, `photo_too_large`
  * (413) → PhotoTooLargeError. Отказы гейта (403/404) пробрасываются как
  * `ApiError` — Capture-экран ведёт на согласие по слагу.
@@ -202,6 +225,12 @@ export async function scanPhoto(
   } catch (err) {
     if (err instanceof ApiError) {
       if (err.slug === "food_not_recognized") throw new FoodNotRecognizedError();
+      // DRF-2195 — бюджет читается ДО `nutrition_unavailable`, как и на
+      // стороне бота: у обоих отказов свои слаги, и 503 бюджета не должен
+      // попасть в «сервис лёг».
+      if (err.slug === "food_scan_daily_limit") throw new ScanDailyLimitError();
+      if (err.slug === "food_scan_budget_exhausted")
+        throw new ScanBudgetExhaustedError();
       if (err.slug === "nutrition_unavailable") throw new NutritionUnavailableError();
       if (err.slug === "photo_too_large") throw new PhotoTooLargeError();
     }

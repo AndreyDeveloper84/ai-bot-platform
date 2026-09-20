@@ -33,6 +33,7 @@ import pytest
 from apps.integrations.ayla import nutrition_client as nc
 from apps.integrations.ayla.tests.test_nutrition_client import (  # переиспользуем стенд
     _client_with_handler,
+    _patch_async_client,  # noqa: F401 — autouse: httpx.AsyncClient на мок-транспорт
     _set_transport,
 )
 
@@ -114,7 +115,9 @@ class TestBudgetRefusalsAreNotFailures:
         """Лестница навыка ловит `NutritionUnavailableError` — отказы бюджета
         не должны в неё попадать, иначе человек увидит «попробуй через минуту»
         вместо «напиши словами»."""
-        assert not issubclass(nc.ScanDailyLimitError, nc.NutritionUnavailableError)
-        assert not issubclass(nc.ScanBudgetExhaustedError, nc.NutritionUnavailableError)
+        # Наличие — первым: оба класса В таксономии клиента, иначе «не
+        # наследники» ниже прошли бы и на опечатке в имени.
         assert issubclass(nc.ScanDailyLimitError, nc.NutritionAPIError)
         assert issubclass(nc.ScanBudgetExhaustedError, nc.NutritionAPIError)
+        assert not issubclass(nc.ScanDailyLimitError, nc.NutritionUnavailableError)
+        assert not issubclass(nc.ScanBudgetExhaustedError, nc.NutritionUnavailableError)

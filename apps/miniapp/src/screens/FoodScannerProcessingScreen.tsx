@@ -28,6 +28,8 @@ import {
   NutritionUnavailableError,
   PhotoBytesMissingError,
   PhotoTooLargeError,
+  ScanBudgetExhaustedError,
+  ScanDailyLimitError,
   StubNotWiredError,
   scanPhoto,
   type MealType,
@@ -247,7 +249,18 @@ function ScanErrorScreen({
   // DRF-2109 — фото выключено флагом (тот же предикат, что у чата): это не
   // сбой и не «через минуту» — писать текстом работает, туда и ведём.
   const isPhotoOff = err instanceof ApiError && err.slug === "photo_scan_disabled";
-  const headline = isNotRecognized
+  // DRF-2195 — два штатных отказа по бюджету распознавания. Каталог работает
+  // и отвечает осознанно: «через минуту» здесь было бы ложью о природе отказа
+  // (счёт снимется в полночь), а «Переснять» — ложью действием: второй снимок
+  // упрётся в тот же счётчик. Рабочая дорога рядом — записать словами.
+  const isDailyLimit = err instanceof ScanDailyLimitError;
+  const isBudgetOut = err instanceof ScanBudgetExhaustedError;
+  const isBudget = isDailyLimit || isBudgetOut;
+  const headline = isDailyLimit
+    ? "Сегодня фото не распознаю"
+    : isBudgetOut
+      ? "Распознавание фото недоступно"
+      : isNotRecognized
     ? "Не разобралась"
     : isPhotoFailed
       ? "Не получилось загрузить"
@@ -260,7 +273,11 @@ function ScanErrorScreen({
             : isNotWired
               ? "Пока не подключено"
               : "Сервис недоступен";
-  const body = isNotRecognized
+  const body = isDailyLimit
+    ? "Сегодня фото больше не распознаю — напиши словами, что было."
+    : isBudgetOut
+      ? "Распознавание фото сейчас недоступно — напиши словами."
+      : isNotRecognized
     ? "Фото немного сложное — не разобралась. Можно переснять поближе или просто написать, что было."
     : isPhotoFailed
       ? "Фото пришло, но скачать не получилось — пришли ещё раз, пожалуйста."
@@ -311,7 +328,7 @@ function ScanErrorScreen({
           {/* Когда ручек нет, «Переснять» и «Написать вручную» ведут в ту
               же стену: `logMeal` закрыт тем же `guardProd`. Предлагать их
               значило бы врать второй раз, уже действием. */}
-          {!isPhotoFailed && !isNotWired && !isPhotoOff && (
+          {!isPhotoFailed && !isNotWired && !isPhotoOff && !isBudget && (
             <button
               type="button"
               className="btn-primary"
@@ -339,7 +356,7 @@ function ScanErrorScreen({
           {!isPhotoFailed && !isNotWired && !isTooLarge && !isConsentGate && (
             <button
               type="button"
-              className={isPhotoOff ? "btn-primary" : "btn-secondary"}
+              className={isPhotoOff || isBudget ? "btn-primary" : "btn-secondary"}
               onClick={() =>
                 navigate("/customer/food-scanner/manual", {
                   state: { mealType },

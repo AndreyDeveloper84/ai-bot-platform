@@ -193,6 +193,42 @@ class MealEditConflictError(NutritionAPIError):
     """DRF-1838: 409 — the entry mirrors a water entry (the water undo owns it)."""
 
 
+class ScanBudgetError(NutritionAPIError):
+    """DRF-2195: каталог отказал в распознавании ПО БЮДЖЕТУ, а не по сбою.
+
+    Каталог (#519) считает снимки дважды — на человека за сутки и на всех за
+    сутки. Исчерпанный счёт — ответ системы, которая работает: сеть цела,
+    каталог отвечает, остальные ручки питания в порядке. Поэтому такой отказ
+
+    * НЕ наследник :class:`NutritionUnavailableError` — иначе лестница навыка
+      сказала бы «попробуй через минуту» про счёт, который снимется в полночь;
+    * НЕ кормит предохранитель — см. :meth:`_parse_scan_response`.
+    """
+
+
+class ScanDailyLimitError(ScanBudgetError):
+    """429 ``FOOD_SCAN_DAILY_LIMIT`` — личный потолок человека на сутки.
+
+    ``retry_after`` (секунды до полуночи) приходит от каталога и хранится для
+    журнала и возможных будущих окон ожидания. Текстам отказа он НЕ нужен:
+    называть человеку «через N часов» — обещание часа, который ему ничего не
+    даст, когда рядом есть работающая дорога — записать еду словами.
+    """
+
+    def __init__(self, reason: str = "daily_limit", *, retry_after: int | None = None) -> None:
+        self.retry_after = retry_after
+        super().__init__(reason)
+
+
+class ScanBudgetExhaustedError(ScanBudgetError):
+    """503 ``FOOD_SCAN_BUDGET_EXHAUSTED`` — общий дневной бюджет распознавания.
+
+    Статус 5xx, но это НЕ недоступность: каталог отвечает осознанно и знает,
+    что отвечает. Именно ради этого случая разбор кода ошибки стоит ВЫШЕ
+    развилки по статусу.
+    """
+
+
 class NutritionUncertainOutcomeError(NutritionUnavailableError):
     """DRF-1838: the request left, the answer never came back (timeout / network).
 
@@ -823,6 +859,34 @@ class NutritionClient:
                 raw=body,
             )
 
+        # DRF-2195 — тело читается ПЕРВЫМ, до развилки по статусу. Иначе
+        # штатный «бюджет исчерпан» (503) попадает в ветку 5xx и кормит
+        # предохранитель, общий на весь клиент питания: пять таких снимков
+        # подряд гасят запись еды текстом, дневник, сводку и ориентиры —
+        # функции, к фото отношения не имеющие. Порядок ветвей здесь и есть
+        # содержание правки.
+        try:
+            error = resp.json().get("error") or {}
+            err_code = error.get("code", "")
+            err_details = error.get("details") or {}
+        except ValueError:
+            err_code, err_details = "", {}
+
+        if err_code == "FOOD_SCAN_DAILY_LIMIT":
+            retry_after = err_details.get("retry_after")
+            logger.info(
+                "nutrition_client.scan.daily_limit ext=%s retry_after=%s",
+                external_user_id,
+                retry_after,
+            )
+            raise ScanDailyLimitError(
+                "daily_limit",
+                retry_after=int(retry_after) if isinstance(retry_after, (int, float)) else None,
+            )
+        if err_code == "FOOD_SCAN_BUDGET_EXHAUSTED":
+            logger.info("nutrition_client.scan.budget_exhausted ext=%s", external_user_id)
+            raise ScanBudgetExhaustedError("budget_exhausted")
+
         if resp.status_code >= 500:
             self._circuit.record_failure(now=now)
             logger.warning(
@@ -831,11 +895,6 @@ class NutritionClient:
                 external_user_id,
             )
             raise NutritionUnavailableError(f"http_{resp.status_code}")
-
-        try:
-            err_code = (resp.json().get("error") or {}).get("code", "")
-        except ValueError:
-            err_code = ""
 
         if err_code == "FOOD_NOT_RECOGNIZED":
             raise FoodNotRecognizedError("low_confidence")

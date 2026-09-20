@@ -80,6 +80,27 @@ class TestPhotoScanBudgetCopy:
         assert "словам" in result.reply_text
         assert "через минуту" not in result.reply_text
 
+    def test_retry_after_never_becomes_a_promise_of_time(self) -> None:
+        """429 несёт `retry_after`, но текст времени НЕ обещает.
+
+        Счёт снимается в полночь, и «попробуй через 7 часов» — обещание часа,
+        который человеку ничего не даёт, когда соседняя дорога работает сию
+        секунду. Узел падает, если кто-нибудь вклеит `retry_after` в текст.
+        """
+        from apps.integrations.ayla.nutrition_client import ScanDailyLimitError
+
+        ctx = _context(has_attachments=True, photo_bytes=b"jpeg")
+        exc = ScanDailyLimitError("daily", retry_after=25_200)  # 7 часов
+        result = _handle(ctx, _client_raising(exc))
+
+        # Положительная часть: значение до навыка ДОШЛО — узел не вырожден.
+        assert exc.retry_after == 25_200
+        # Отрицательная: ни числа, ни единиц времени в тексте нет.
+        assert "25200" not in result.reply_text
+        assert "7" not in result.reply_text
+        for unit in ("час", "минут", "секунд", "полноч"):
+            assert unit not in result.reply_text.lower()
+
     def test_positive_pair_real_outage_still_says_a_minute(self) -> None:
         """Положительная пара: настоящая недоступность — прежний текст."""
         ctx = _context(has_attachments=True, photo_bytes=b"jpeg")
@@ -101,6 +122,9 @@ class TestPhotoScanBudgetCopy:
     def test_no_internal_codes_leak(self) -> None:
         for text in (fs.SCAN_DAILY_LIMIT_FALLBACK, fs.SCAN_BUDGET_EXHAUSTED_FALLBACK):
             lowered = text.lower()
+            # Наличие — первым: текст вообще есть и говорит по-русски про
+            # фото. Иначе пустая строка прошла бы все проверки ниже.
+            assert "фото" in lowered
             assert "scan" not in lowered
             assert "limit" not in lowered
             assert "budget" not in lowered
