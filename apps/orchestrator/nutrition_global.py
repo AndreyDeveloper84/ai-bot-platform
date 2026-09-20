@@ -452,7 +452,10 @@ def execute_nutrition_tool(
 #: перепись ``cb:``-констант клавиатур навыков питания с самих модулей, и
 #: каждая обязана быть структурной. Новое семейство без строки здесь —
 #: красный тест, а не жалоба владельца из MAX.
-_STRUCTURED_CALLBACK_PREFIXES = ("cb:anketa:", "cb:food:", "cb:pc_consent:")
+#: ``cb:plan:`` — DRF-2125: тапы карточки плана («Подтвердить план» /
+#: «Не сейчас» / «Записаться») разбираются детерминированно до навыков
+#: (:func:`apps.orchestrator.plan_lite_card.try_handle_plan_callback`).
+_STRUCTURED_CALLBACK_PREFIXES = ("cb:anketa:", "cb:food:", "cb:pc_consent:", "cb:plan:")
 
 
 # ---------------------------------------------------------------------------
@@ -697,6 +700,24 @@ def resolve_food_tap(text: str) -> AnketaTap | None:
 _NUTRI_STOP_CALLBACK_RE = re.compile(r"^cb:nutri:stop:[a-z_]+$")
 
 
+def resolve_plan_tap(text: str) -> AnketaTap | None:
+    """Разобрать тап карточки плана (``cb:plan:*``, DRF-2125); ``None`` — не наш.
+
+    ФРАЗА — «Подтвердить план» / «Не сейчас» / «Записаться» — это
+    высказывания человека о своём плане, как «✅ В дневник» у еды: человек
+    сам спросил «мой план» текстом, и молчание оставило бы в истории вопрос
+    без его ответа. Версия шаблона из payload'а в фразу не попадает —
+    человек её не видел. Форма строгая (``PLAN_CALLBACK_RE``): набранное
+    руками «cb:plan: …» тапом не является и истории не касается.
+    """
+    from apps.orchestrator.plan_lite_card import is_plan_callback, tap_history_text
+
+    stripped = (text or "").strip()
+    if not is_plan_callback(stripped):
+        return None
+    return AnketaTap(history_text=tap_history_text(stripped))
+
+
 def resolve_nutri_stop_tap(text: str) -> AnketaTap | None:
     """Разобрать тап «Не присылать»; ``None`` — «это не тап отписки».
 
@@ -820,7 +841,9 @@ def try_handle_structured_nutrition_turn(
             from apps.orchestrator.plan_lite_card import try_handle_my_plan
 
             try:
-                plan = try_handle_my_plan(text=text, bot_user=bot_user, trace_id=trace_id)
+                plan = try_handle_my_plan(
+                    text=text, bot_user=bot_user, trace_id=trace_id, conversation=conversation
+                )
             except Exception:  # noqa: BLE001 — план не должен ломать глобальный ход
                 logger.exception(
                     "orchestrator.nutrition_global.plan_lite_failed trace=%s", trace_id
@@ -836,6 +859,22 @@ def try_handle_structured_nutrition_turn(
             conversation=conversation,
             trace_id=trace_id,
         )
+
+    if text.strip().startswith("cb:plan:"):
+        # DRF-2125 — тапы карточки плана: не навык, а детерминированный
+        # разбор рядом с самой карточкой; неверная форма / выключенный флаг —
+        # честный ответ там же, до модели тап не доходит.
+        from apps.orchestrator.plan_lite_card import try_handle_plan_callback
+
+        try:
+            return try_handle_plan_callback(
+                text=text, bot_user=bot_user, trace_id=trace_id, conversation=conversation
+            )
+        except Exception:  # noqa: BLE001 — план не должен ломать глобальный ход
+            logger.exception(
+                "orchestrator.nutrition_global.plan_callback_failed trace=%s", trace_id
+            )
+            return None
 
     context = _build_context(
         message_text=text,

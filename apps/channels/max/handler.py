@@ -186,6 +186,7 @@ from apps.orchestrator.intent_resolution import resolve_and_log_turn_intent
 from apps.orchestrator.nutrition_global import (
     resolve_anketa_tap,
     resolve_food_tap,
+    resolve_plan_tap,
     resolve_nutri_stop_tap,
     try_handle_structured_nutrition_turn,
 )
@@ -1448,6 +1449,9 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     # `event.text` сломала бы и опрос согласия, и дневник еды.
     welcome_tap = resolve_welcome_tap(event.text)
     food_tap = resolve_food_tap(event.text)
+    # DRF-2125 — ``cb:plan:*``: ФРАЗА по тому же доводу, что у еды (человек
+    # сам спросил «мой план» текстом; тап — его ответ о своём плане).
+    plan_tap = resolve_plan_tap(event.text)
 
     # DRF-1468 — тап «Не присылать» (`cb:nutri:stop:*`). МОЛЧАНИЕ по той же
     # причине, что у `cb:catalog:*` и навигации анкеты: метка одна на все
@@ -1535,6 +1539,7 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
         anketa_tap,
         welcome_tap,
         food_tap,
+        plan_tap,
         discover_tap,
         nutri_stop_tap,
         health_tap,

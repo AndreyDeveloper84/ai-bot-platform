@@ -4,8 +4,10 @@
   (рядом с чтением дневника DRF-1302, тот же двухслойный приём) и рисует
   карточку из ``wellness-context.plan_lite``: «Твоя цель: … · На этой
   неделе: записаться на услугу ✓/—, дневник N из M, вода N из M»;
-* без плана — «плана пока нет», один раз и только когда человек сам
-  спросил (без проактивности, ``WELLNESS_PROACTIVE_ENABLED`` заперт);
+* без плана — предложение Ayla из шаблона цели (DRF-2125,
+  ``test_plan_chat_2125``); без шаблона — «плана пока нет», один раз и только
+  когда человек сам спросил (без проактивности, ``WELLNESS_PROACTIVE_ENABLED``
+  заперт);
 * без флага ``PLAN_LITE_ENABLED`` текст — не наш (``None`` → модель, как
   раньше); состав главного меню (§37, OD-UI-2) флаг не меняет — кнопки
   «Мой план» нет ни с ним, ни без него (решение о девятом пункте — за
@@ -58,12 +60,16 @@ def _bot_user() -> Mock:
     return bot_user
 
 
-def _turn(text: str, ctx):
+def _turn(text: str, ctx, *, proposal=None):
     fake = Mock()
     if isinstance(ctx, Exception):
         fake.get_wellness_context.side_effect = ctx
     else:
         fake.get_wellness_context.return_value = ctx
+    if isinstance(proposal, Exception):
+        fake.get_plan_lite_proposal.side_effect = proposal
+    else:
+        fake.get_plan_lite_proposal.return_value = proposal
     with patch("apps.orchestrator.plan_lite_card.WellnessContextHttpClient", return_value=fake):
         result = try_handle_structured_nutrition_turn(
             text=text,
@@ -109,9 +115,18 @@ class TestMyPlanInChat:
         assert "%" not in low
         assert "достиг" not in low and "пропуст" not in low and "прогресс" not in low
 
-    def test_my_plan_without_a_plan_says_so_without_nagging(self) -> None:
-        result, _ = _turn("мой план", WellnessContext(has_plan=False, gated=True, plan_lite=None))
+    def test_my_plan_without_a_plan_and_without_a_template_says_so_without_nagging(self) -> None:
+        """DRF-2125: без плана чат читает предложение; когда шаблона у цели нет —
+        прежняя строка «составить можно в приложении» (полный ход — test_plan_chat_2125)."""
+        from apps.integrations.ayla.wellness_context_client import PlanLiteNoTemplateError
+
+        result, fake = _turn(
+            "мой план",
+            WellnessContext(has_plan=False, gated=True, plan_lite=None),
+            proposal=PlanLiteNoTemplateError("no template"),
+        )
         assert result is not None
+        assert fake.get_plan_lite_proposal.call_count == 1
         assert result.reply_text == PLAN_LITE_COPY.no_plan
         assert result.meta["reply_kind"] == "plan_lite_none"
 

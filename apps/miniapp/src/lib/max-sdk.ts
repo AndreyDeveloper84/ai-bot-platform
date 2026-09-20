@@ -196,6 +196,8 @@ const _ROUTE_MAP: Record<string, string> = {
   open_food_scan: "/customer/food-scanner/capture",
   open_water_add_250: "/customer/wellness",
   open_goal_select: "/customer/goal-select",
+  // DRF-2125 — «Мой план» с карточки плана в чате (зеркало MINIAPP_ROUTES).
+  open_plan: "/customer/plan",
   // Home = «Мои записи» (pilot phase 3.2 orchestrator decision, App.tsx
   // comment at the /customer/main route) — newer than the onboarding spec's
   // "Dashboard empty state".
