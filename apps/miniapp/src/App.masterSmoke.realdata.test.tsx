@@ -109,7 +109,7 @@ const SCHEDULE_LIVE: unknown = {
   to: "2026-09-20",
   days: [
     {
-      date: "2026-09-21", // тенантская дата ≠ дате устройства
+      date: "2026-09-21", // clock-intentional: тенантская дата ≠ дате устройства — это и проверяем
       is_off_day: false,
       working_hours: { start: "09:00", end: "18:00" },
       bookings: [
