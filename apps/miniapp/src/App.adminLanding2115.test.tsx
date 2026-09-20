@@ -30,6 +30,7 @@ vi.mock("./lib/admin-api", async (importOriginal) => {
     listMasters: vi.fn(),
     getAvailabilityRequests: vi.fn(),
     getHandoffQueue: vi.fn(),
+    getSalonReadiness: vi.fn(),
   };
 });
 
@@ -46,6 +47,7 @@ import {
   getHandoffQueue,
   getMe,
   getSalonDay,
+  getSalonReadiness,
   listMasters,
   type MeResponse,
 } from "./lib/admin-api";
@@ -58,6 +60,7 @@ const mockedDay = vi.mocked(getSalonDay);
 const mockedMasters = vi.mocked(listMasters);
 const mockedRequests = vi.mocked(getAvailabilityRequests);
 const mockedHandoff = vi.mocked(getHandoffQueue);
+const mockedReadiness = vi.mocked(getSalonReadiness);
 
 const BASE_ME: MeResponse = {
   user: { id: "u-1", name: "Ирина Петрова", phone_masked: "+7 *** **12" },
@@ -302,5 +305,43 @@ describe("старая посадка снята (DRF-2115)", () => {
     renderAppAt("/admin/settings");
     expect(await screen.findByRole("heading", { name: /Настройки/ })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Открыть пилотную админку" })).toBeNull();
+  });
+});
+
+describe("карточка «Готовность» на «Сегодня» (DRF-2117)", () => {
+  it("«Готовность — N проблем» из admin/readiness и ведёт на список поимённо", async () => {
+    mockedGetMe.mockResolvedValue(OWNER_ME);
+    mockedReadiness.mockResolvedValue({
+      ready: false,
+      unknown: false,
+      source_problem: null,
+      checked_at: "2026-09-20T09:00:00+00:00",
+      masters_total: 2,
+      problems: [
+        {
+          master: { id: "m-1", name: "Анна" },
+          code: "schedule_missing",
+          text: "Анна — не настроен график",
+          origin: "catalog",
+        },
+      ],
+      limits: [],
+    });
+    renderAppAt("/admin/today");
+    const card = await screen.findByRole("link", { name: /Готовность — 1 проблема/ });
+    await userEvent.click(card);
+    expect(await screen.findByRole("heading", { name: /Готовность/ })).toBeInTheDocument();
+    expect(screen.getByText("Анна — не настроен график")).toBeInTheDocument();
+    // Панель — та же тройка: экран списка живёт внутри пилота, не за его пределами.
+    expect(tabLabels()).toEqual(TRIO);
+  });
+
+  it("ресепшну /admin/readiness закрыт, как и вся тройка", async () => {
+    mockedGetMe.mockResolvedValue(RECEPTION_ME);
+    renderAppAt("/admin/readiness");
+    expect(
+      await screen.findByText(/открыт владельцу и администратору салона/),
+    ).toBeInTheDocument();
+    expect(mockedReadiness).not.toHaveBeenCalled();
   });
 });
