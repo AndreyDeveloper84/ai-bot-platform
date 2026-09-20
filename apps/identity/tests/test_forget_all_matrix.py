@@ -598,7 +598,7 @@ def seed_person(tenant: Tenant, fake_redis: _FakeRedis, label: str) -> Person:
 # ── Снимок состояния по хранилищу ────────────────────────────────────────────
 
 
-def _live_entries(person: Person, zone: str) -> list[dict]:
+def _live_entries(person: Person, zone: str) -> list[Any]:
     return list(
         MemoryEntry.objects.filter(
             user_id=person.ayla_user_id, sensitivity_zone=zone, soft_deleted_at__isnull=True
@@ -608,7 +608,7 @@ def _live_entries(person: Person, zone: str) -> list[dict]:
     )
 
 
-def _tombstoned_entries(person: Person, zone: str) -> list[dict]:
+def _tombstoned_entries(person: Person, zone: str) -> list[Any]:
     return list(
         MemoryEntry.objects.filter(
             user_id=person.ayla_user_id, sensitivity_zone=zone, soft_deleted_at__isnull=False
@@ -616,7 +616,7 @@ def _tombstoned_entries(person: Person, zone: str) -> list[dict]:
     )
 
 
-def _rows(model_manager, **filters) -> list[dict]:
+def _rows(model_manager, **filters) -> list[Any]:
     return list(model_manager.filter(**filters).order_by("pk").values())
 
 
