@@ -372,26 +372,233 @@ _S1_G3_PATTERNS: tuple[re.Pattern[str], ...] = (
 
 #: G4 — «слабость одной стороны тела, нарушение речи, … внезапная потеря движения /
 #: чувствительности» (:200); «не чувствую половину лица, речь заплетается» (:205).
-#: Boundary (clinical-review :400-413): numbness or weakness WITHOUT «внезапно / одна
-#: сторона / речь» is S2, so «половина лица / тела» needs a neurological word next to
-#: it, and «отнялась» needs a body part.
-_S1_NEURO = r"(?:не\s+чувству\w*|онемел\w*|немеет|не\s+двига\w*|перекосил\w*|парализ\w*)"
-_S1_G4_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(
-        _S1_NEURO
-        + r"[^.!?]{0,30}половин\w+\s+(?:лица|тела)|половин\w+\s+(?:лица|тела)[^.!?]{0,30}"
-        + _S1_NEURO,
-        re.IGNORECASE,
-    ),
-    re.compile(r"\bперекосил\w*\s+лиц\w*|\bлицо\s+перекосил\w*", re.IGNORECASE),
-    re.compile(r"\b(?:речь|язык)\s+заплета\w*", re.IGNORECASE),
-    re.compile(
-        r"\bотнял(?:ась|ся|ись)\s+(?:рука|нога|руки|ноги|половин\w+|сторон\w+|лицо|язык)"
-        r"|\b(?:рука|нога|руки|ноги)\s+отнял\w+",
-        re.IGNORECASE,
-    ),
-    re.compile(r"\bвнезапн\w+\s+(?:слабость|онемени\w*)", re.IGNORECASE),
+#:
+#: Owner ruling 18.09 — [OD-BOT §164] G4 boundary (``docs/OPEN_DECISIONS.md``;
+#: immutable record ``docs/safety/reviews/OWNER_RULINGS_S1_AI_CLINICAL_PRE_REVIEW_2026-09-18.md``):
+#: внезапная односторонняя слабость / онемение, перекос лица, нарушение речи,
+#: внезапное нарушение зрения, внезапное нарушение равновесия / координации — явный
+#: G4 → STOP. [OD-BOT §161]: recent-resolved G4 («прошло», «стало лучше», «сейчас
+#: нормально») остаётся STOP — исчезновение признаков не снимает срочность, so the
+#: resolution words are deliberately NOT in the negation set below.
+#:
+#: The detector lives in :func:`detect_g4` (the same isolation as G6, its own
+#: semantics): a sign is read only next to its context — a SIDE («правая», «с одной
+#: стороны», «половина лица / тела») for weakness / numbness / loss of movement, a
+#: SUDDEN marker («внезапно», «резко», «вдруг») for vision, balance and coordination
+#: — never a single word («рука», «лицо», «зрение», «речь», «равновесие»,
+#: «координация», «язык»). Negation is a closed set of shapes attached to the sign
+#: word («лицо не перекосило», «речь не нарушена», «равновесие не нарушено»); a
+#: future-tense sign next to a hypothetical marker («что делать, если когда-нибудь
+#: перекосит лицо?») is not a current sign.
+#:
+#: Named limits, NOT compensated here: the pre-S1 numbness rule (DRF-973,
+#: ``_RED_FLAG_PATTERNS``: «онемен…», «немеет») still fires BEFORE this detector, so
+#: «немеет рука иногда» and «онемения и слабости нет» are a red flag by that older
+#: rule — fail-closed, not attributed to G4 (``tests/test_g4_detector.py``, strict
+#: xfail). Third-party and quoted phrases are caught (fail-closed) — attribution /
+#: quotation context is a gap of the whole S1 tract. The §164 routing question is not
+#: asked on this path (architectural blocker, see the PR). Fidelity of every pattern
+#: awaits the licensed physician (VQ1).
+
+#: Sudden onset — the §164 discriminator for vision / balance / coordination.
+_G4_SUDDEN = (
+    r"(?:внезапн\w*|резко|вдруг|неожиданно|в\s+один\s+момент|ни\s+с\s+того\s+ни\s+с\s+сего)"
 )
+#: One side — the §164 discriminator for weakness / numbness / loss of movement.
+#: A named side is NOT sufficient on its own: §164 says «внезапная односторонняя»,
+#: so a side + motor sign needs a SUDDEN marker in the sentence («слабость в правой
+#: руке после тренировки» is not G4). Only the hemibody distribution («половина
+#: лица / тела» + neuro word) keeps the pre-existing DRF-2004 acute-by-wording
+#: reading — that boundary predates this detector and is not widened here.
+_G4_SIDE = (
+    r"(?:прав(?:ая|ую|ой|ые|ой)|лев(?:ая|ую|ой|ые)|справа|слева"
+    r"|(?:с\s+)?одн(?:ой|а|у)\s+сторон\w*|половин\w+\s+(?:тела|лица))"
+)
+_G4_HEMI = r"(?:половин\w+\s+(?:тела|лица))"
+#: Weakness / numbness / loss of movement or sensation — the verb or noun forms.
+_G4_MOTOR = (
+    r"(?:онемел\w*|онемени\w*|немеет|не\s+чувству\w*|ослаб\w*|слабост\w*|отнял\w*"
+    r"|не\s+двига\w*|не\s+слушает\w*|повисл\w*|парализ\w*|обвисл\w*"
+    r"|потерял\w*\s+чувствит\w*|перестал\w*\s+(?:двигаться|чувствовать|слушаться))"
+)
+#: A. one-sided motor / sensory sign — either order, same sentence — read only
+#: with a SUDDEN marker in that sentence (``needs_sudden`` in :func:`detect_g4`).
+_G4_SIDE_MOTOR = re.compile(
+    _G4_SIDE + r"[^.!?;]{0,40}?" + _G4_MOTOR + r"|" + _G4_MOTOR + r"[^.!?;]{0,40}?" + _G4_SIDE,
+    re.IGNORECASE,
+)
+_G4_MOTOR_TOKEN = re.compile(_G4_MOTOR, re.IGNORECASE)
+#: A''. hemibody / hemiface + neuro word — acute by wording (DRF-2004 pattern kept
+#: as it was: «не чувствую половину лица, речь заплетается» is the matrix phrase).
+_G4_HEMI_MOTOR = re.compile(
+    _G4_HEMI + r"[^.!?;]{0,30}?" + _G4_MOTOR + r"|" + _G4_MOTOR + r"[^.!?;]{0,30}?" + _G4_HEMI,
+    re.IGNORECASE,
+)
+#: A'. sudden weakness / numbness without a named side, and «отнялась рука / нога»
+#: (both kept from the flat DRF-2004 list). «отняться» + a limb is acute by its
+#: lexical meaning — a sudden loss of function, never a chronic state; the
+#: negative boundary is a non-body object («отнялась суббота») and the unrelated
+#: verb «отнимает время», neither of which matches.
+_G4_SUDDEN_MOTOR = re.compile(
+    r"\bвнезапн\w+\s+(?:слабость|онемени\w*)|\bотнял(?:ась|ся|ись)\s+(?:рука|нога|руки|ноги|лицо|язык)"
+    r"|\b(?:рука|нога|руки|ноги)\s+отнял\w+",
+    re.IGNORECASE,
+)
+#: B. face droop — «перекосило лицо» is unconditional (an acute sign by wording).
+#: «асимметрия лица» is NOT here: it is a cosmetic / lifelong description («хочу
+#: исправить асимметрию лица», «асимметрия лица с детства»), not the registered
+#: boundary. A dropped corner of the mouth counts only with a SUDDEN marker.
+_G4_FACE = r"(?:перекосил\w*|перекошен\w*|скосил\w*)"
+_G4_FACE_SIGN = re.compile(
+    _G4_FACE + r"[^.!?;]{0,25}?\b(?:лиц\w*|рот|рта|губ\w*|половин\w+\s+лица)\b"
+    r"|\b(?:лицо|рот|половин\w+\s+лица|уголок\s+рта|угол\s+рта)\b[^.!?;]{0,25}?" + _G4_FACE,
+    re.IGNORECASE,
+)
+_G4_FACE_TOKEN = re.compile(_G4_FACE, re.IGNORECASE)
+_G4_FACE_CORNER = re.compile(
+    r"(?:опустил\w*|обвис\w*|провис\w*)\s+(?:уголок|угол)\s+(?:рта|губ\w*)"
+    r"|(?:уголок|угол)\s+(?:рта|губ\w*)\s+(?:опустил\w*|обвис\w*|провис\w*)",
+    re.IGNORECASE,
+)
+#: C. speech — unconditional (§164 «нарушение речи»); «речь идёт о …» is not a sign.
+#: Only forms that describe the FORMING of speech: «речь невнятная / заплетается»,
+#: «не могу выговорить / произнести (слова)», «не могу внятно говорить». A bare
+#: «не могу говорить» is availability or channel choice («не могу сейчас говорить,
+#: я на работе», «не могу говорить по телефону») and is not a sign.
+_G4_SPEECH = (
+    r"(?:реч\w*\s+(?:(?!не\b|ни\b|нет\b)[\w-]+\s+){0,2}(?:невнятн\w*|нарушил\w*|нарушен\w*|заплета\w*|пропал\w*|не\s+получ\w*)"
+    r"|(?:невнятн\w+|заплетающ\w+|нарушен\w+)\s+реч\w*|нарушени\w*\s+речи"
+    r"|язык\s+заплета\w*|(?:не\s+могу|не\s+получается)\s+(?:выговорить|произнести)"
+    r"|не\s+могу\s+(?:нормально|внятно|ч[её]тко)\s+говорить|говорю\s+невнятно"
+    r"|не\s+выговарива\w*|путаю\s+слова|слова\s+не\s+выговарива\w*)"
+)
+_G4_SPEECH_SIGN = re.compile(_G4_SPEECH, re.IGNORECASE)
+#: D. vision — needs a SUDDEN marker in the sentence, except the monocular / total
+#: loss forms that are acute by wording. «перестал видеть» and «не вижу» are NOT
+#: signs on their own («перестал видеть эффект», «не вижу свободных окон», «не вижу
+#: смысла»): they count only with the eye / vision named right after them.
+_G4_EYE = r"(?:(?:одним|левым|правым|одним)\s+глазом|глаз\w*|зрени\w*)"
+_G4_VISION = (
+    r"(?:пропал\w*\s+зрени\w*|зрени\w*\s+(?:пропал\w*|исчезл\w*|упал\w*|потерял\w*)"
+    r"|потерял\w*\s+зрени\w*|перестал\w*\s+видеть\s+(?:[\w-]+\s+)?"
+    + _G4_EYE
+    + r"|не\s+вижу\s+(?:одним|левым|правым)\s+глазом|двоится|двоение|двоиться"
+    r"|потемнел\w*\s+в\s+глазах|расплыва\w*|размыт\w*|туман\s+(?:в\s+глазах|перед\s+глазами)"
+    r"|пелена\s+(?:в\s+глазах|перед\s+глазами)|нарушени\w*\s+зрения|зрени\w*\s+нарушил\w*)"
+)
+_G4_VISION_SIGN = re.compile(_G4_VISION, re.IGNORECASE)
+_G4_VISION_ACUTE = re.compile(
+    r"(?:пропал\w*\s+зрени\w*|зрени\w*\s+(?:пропал\w*|исчезл\w*)|потерял\w*\s+зрени\w*"
+    r"|перестал\w*\s+видеть\s+(?:[\w-]+\s+)?"
+    + _G4_EYE
+    + r"|не\s+вижу\s+(?:одним|левым|правым)\s+глазом)",
+    re.IGNORECASE,
+)
+#: E. balance / coordination — needs a SUDDEN marker in the sentence.
+_G4_BALANCE = (
+    r"(?:(?:потерял\w*|нарушил\w*|пропал\w*|теря\w*)\s+(?:равновеси\w*|координаци\w*)"
+    r"|(?:равновеси\w*|координаци\w*)\s+(?:нарушил\w*|нарушен\w*|пропал\w*|потерял\w*)"
+    r"|нарушени\w*\s+(?:равновеси\w*|координаци\w*)|повело\s+в\s+сторону|заносит\s+в\s+сторону"
+    r"|не\s+могу\s+(?:нормально\s+)?(?:стоять|идти|ходить|удержать\s+равновесие)"
+    r"|шатает|падаю\s+на\s+(?:одну\s+)?сторону)"
+)
+_G4_BALANCE_SIGN = re.compile(_G4_BALANCE, re.IGNORECASE)
+_G4_SUDDEN_RE = re.compile(_G4_SUDDEN, re.IGNORECASE)
+#: Negation attached to the sign word: up to two words between the particle and the
+#: word. «прошло», «стало лучше», «сейчас нормально» are NOT here ([OD-BOT §161]).
+_G4_NEG_BEFORE = re.compile(
+    r"(?:\bне|\bни|\bнет|\bнету|\bбез|\bне\s+было|\bне\s+бывает)\s+(?:[\w-]+\s+){0,2}$",
+    re.IGNORECASE,
+)
+_G4_NEG_AFTER = re.compile(
+    r"^\s*(?:нет\b|нету\b|не\s+было\b|отсутству\w*|не\s+нарушен\w*)",
+    re.IGNORECASE,
+)
+_G4_FUTURE = re.compile(
+    r"\b(?:перекосит|онемеет|ослабнет|отнимется|пропад[её]т|потеря(?:ю|ешь|ет)|начн[её]т"
+    r"|станет|нарушится|перестан(?:у|ешь|ет)|повед[её]т|исчезнет)\b",
+    re.IGNORECASE,
+)
+_G4_HYPOTHETICAL = re.compile(
+    r"(?:что\s+делать,?\s+если|а\s+если|если\s+вдруг|если\s+когда-нибудь|когда-нибудь"
+    r"|бывает\s+ли|может\s+ли|а\s+вдруг)",
+    re.IGNORECASE,
+)
+
+
+def _g4_sentence(lower: str, pos: int) -> str:
+    start = max(lower.rfind(ch, 0, pos) for ch in ".!?;") + 1
+    end_candidates = [i for i in (lower.find(ch, pos) for ch in ".!?;") if i != -1]
+    end = min(end_candidates) if end_candidates else len(lower)
+    return lower[start:end]
+
+
+def _g4_negated(lower: str, token_start: int, token_end: int) -> bool:
+    before = lower[max(0, token_start - 40) : token_start]
+    if _G4_NEG_BEFORE.search(before):
+        return True
+    after = lower[token_end : token_end + 20]
+    return bool(_G4_NEG_AFTER.search(after))
+
+
+def _g4_hypothetical(lower: str, match: re.Match[str]) -> bool:
+    sentence = _g4_sentence(lower, match.start())
+    return bool(_G4_HYPOTHETICAL.search(sentence)) and bool(_G4_FUTURE.search(sentence))
+
+
+def _g4_live(
+    lower: str,
+    sign: re.Pattern[str],
+    token: re.Pattern[str] | None = None,
+    *,
+    needs_sudden: bool = False,
+    acute: re.Pattern[str] | None = None,
+) -> bool:
+    """A sign match that is current: not negated, not hypothetical, and — where §164
+    asks for it — accompanied by a sudden-onset marker in the same sentence (or an
+    acute-by-wording form)."""
+
+    for match in sign.finditer(lower):
+        if _g4_hypothetical(lower, match):
+            continue
+        tok = (token or sign).search(lower, match.start(), match.end())
+        if tok is None:
+            continue
+        if _g4_negated(lower, tok.start(), tok.end()):
+            continue
+        if needs_sudden:
+            sentence = _g4_sentence(lower, match.start())
+            if not _G4_SUDDEN_RE.search(sentence) and not (
+                acute is not None and acute.search(match.group(0))
+            ):
+                continue
+        return True
+    return False
+
+
+def detect_g4(text: str) -> bool:
+    """S1 group G4 — explicit, current or recent-resolved, non-negated neurological
+    sign: one-sided weakness / numbness / loss of movement, face droop, speech
+    disturbance, sudden vision loss, sudden loss of balance / coordination.
+
+    Pure regex, no LLM. Reads the same masked lower-cased text as :func:`classify`.
+    Does NOT decide the ambiguous case («немеет рука иногда») — that is the §164
+    question contract, not implemented here.
+    """
+    if not isinstance(text, str) or not text.strip():
+        return False
+    lower = _mask_not_pain(text.strip().lower())
+    return (
+        _g4_live(lower, _G4_SIDE_MOTOR, _G4_MOTOR_TOKEN, needs_sudden=True)
+        or _g4_live(lower, _G4_HEMI_MOTOR, _G4_MOTOR_TOKEN)
+        or _g4_live(lower, _G4_SUDDEN_MOTOR)
+        or _g4_live(lower, _G4_FACE_SIGN, _G4_FACE_TOKEN)
+        or _g4_live(lower, _G4_FACE_CORNER, needs_sudden=True)
+        or _g4_live(lower, _G4_SPEECH_SIGN)
+        or _g4_live(lower, _G4_VISION_SIGN, needs_sudden=True, acute=_G4_VISION_ACUTE)
+        or _g4_live(lower, _G4_BALANCE_SIGN, needs_sudden=True)
+    )
+
 
 #: G5 — «значительное или неконтролируемое кровотечение» (:201); «кровь не останавливается»
 #: (:205). «кровит» is caught too: «после эпиляции немного кровит — это нормально?» is a
@@ -599,14 +806,10 @@ _S1_G7_PATTERNS: tuple[re.Pattern[str], ...] = (
 )
 
 # One group per line, so a probe can take a whole group out with a one-line edit.
-# G6 is not in this tuple: it is negation-aware and lives in :func:`detect_g6`.
+# G4 and G6 are not in this tuple: they are negation-aware and live in
+# :func:`detect_g4` / :func:`detect_g6`.
 _RED_FLAG_PATTERNS = (
-    _RED_FLAG_PATTERNS
-    + _S1_G2_PATTERNS
-    + _S1_G3_PATTERNS
-    + _S1_G4_PATTERNS
-    + _S1_G5_PATTERNS
-    + _S1_G7_PATTERNS
+    _RED_FLAG_PATTERNS + _S1_G2_PATTERNS + _S1_G3_PATTERNS + _S1_G5_PATTERNS + _S1_G7_PATTERNS
 )
 
 
@@ -640,8 +843,11 @@ def classify(text: str) -> PainSignal:
     for pattern in _RED_FLAG_PATTERNS:
         if pattern.search(lower):
             return PainSignal.RED_FLAG
-    # G6 ([OD-BOT §159]) — negation-aware, so it is a function, not a pattern.
+    # G6 ([OD-BOT §159]) and G4 ([OD-BOT §164]) — negation-aware, so functions, not
+    # patterns. Order between them does not matter: both return RED_FLAG.
     if detect_g6(stripped):
+        return PainSignal.RED_FLAG
+    if detect_g4(stripped):
         return PainSignal.RED_FLAG
 
     for pattern in _PAIN_STEM_PATTERNS:
