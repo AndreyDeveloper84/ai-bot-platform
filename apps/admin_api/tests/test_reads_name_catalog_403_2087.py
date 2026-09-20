@@ -60,6 +60,15 @@ pytestmark = pytest.mark.django_db
 
 READERS = ("views_salon_frame", "views_schedule_impact", "views_master_exceptions")
 
+#: Где живёт само чтение каталога для читателя. С DRF-2118 предпросмотр
+#: impact читает ``services.schedule_impact`` (одно чтение на вьюху и на
+#: уведомление-решение), вьюха — обёртка; переписи и подмены — по чтению.
+READ_MODULE = {"views_schedule_impact": "services.schedule_impact"}
+
+
+def _read_module(reader: str) -> str:
+    return READ_MODULE.get(reader, reader)
+
 
 # ─── двойник каталога: один ответ на любой метод чтения ──────────────────────
 
@@ -115,7 +124,9 @@ def ayla(monkeypatch, settings):
         fake = _FakeSalonClient(exc)
         # Имя В КАЖДОМ модуле: они связывают ``get_salon_client`` на импорте.
         for name in READERS:
-            monkeypatch.setattr(f"apps.admin_api.{name}.get_salon_client", lambda: fake)
+            monkeypatch.setattr(
+                f"apps.admin_api.{_read_module(name)}.get_salon_client", lambda: fake
+            )
         return fake
 
     return use
@@ -224,9 +235,10 @@ def _reader_modules() -> list[str]:
     """Модули admin_api, читающие каталог через ``_ayla_read_actor``."""
     root = Path(admin_api_pkg.__file__).parent
     names = []
-    for path in sorted(root.glob("views_*.py")):
-        if "_ayla_read_actor" in path.read_text(encoding="utf-8"):
-            names.append(path.stem)
+    for path in sorted([*root.glob("views_*.py"), *root.glob("services/*.py")]):
+        if "_ayla_read_actor(" in path.read_text(encoding="utf-8"):
+            rel = path.relative_to(root).with_suffix("")
+            names.append(".".join(rel.parts))
     return names
 
 
@@ -258,8 +270,10 @@ class TestEveryReaderCatchesTheWholeSalonFamily:
 
     @pytest.mark.parametrize("reader", READERS)
     def test_census_covers_every_salon_error(self, reader: str) -> None:
-        assert reader in _reader_modules(), "читатель выпал из переписи — сторож ослеп"
-        module = importlib.import_module(f"apps.admin_api.{reader}")
+        assert _read_module(reader) in _reader_modules(), (
+            "читатель выпал из переписи — сторож ослеп"
+        )
+        module = importlib.import_module(f"apps.admin_api.{_read_module(reader)}")
         assert module.__file__ is not None
         tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
         family = _salon_error_classes()

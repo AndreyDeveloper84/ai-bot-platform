@@ -62,25 +62,13 @@ from datetime import date as date_cls
 from datetime import datetime, time
 from typing import Any
 
-from django.conf import settings
 from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.views.decorators.http import require_http_methods
 
-from apps.catalog.specialist_ref import CatalogSpecialistUnresolved, catalog_specialist_id
 from apps.admin_api.auth import require_admin_or_reception_read
 from apps.admin_api.services.salon_day import tenant_tz
-from apps.admin_api.services.wire_lists import UNREADABLE, read_rows
+from apps.admin_api.services.schedule_impact import impact_for_window
 from apps.catalog.models import CatalogMaster
-from apps.integrations.ayla.salon_client import (
-    SalonAPIError,
-    SalonForbidden,
-    SalonNotConfigured,
-    SalonUnavailable,
-    SalonValidationError,
-    get_salon_client,
-)
-from apps.integrations.ayla.user_proxy import external_user_id_for
-from apps.master_api.services.schedule_frame import _ayla_read_actor
 
 logger = logging.getLogger(__name__)
 
@@ -135,34 +123,6 @@ def _parse_window(request: HttpRequest, tenant: Any) -> tuple[str, str] | JsonRe
     )
 
 
-def _str_or_none(value: Any) -> str | None:
-    return value if isinstance(value, str) and value else None
-
-
-def _booking_row(item: dict[str, Any]) -> dict[str, Any] | None:
-    """Строка предпросмотра.
-
-    Клиента здесь нет — Ayla его не отдаёт, и нам нечего было бы вычистить:
-    отсутствие по построению, а не по фильтру.
-    """
-
-    appointment_id = _str_or_none(item.get("appointment_id"))
-    start = _str_or_none(item.get("start_at_local"))
-    end = _str_or_none(item.get("end_at_local"))
-    if appointment_id is None or start is None or end is None:
-        return None
-    refund = item.get("refund_percent_if_cancelled")
-    return {
-        "appointment_id": appointment_id,
-        "start_local": start,
-        "end_local": end,
-        "service_name": _str_or_none(item.get("service_name")),
-        "status": _str_or_none(item.get("status")),
-        "payment_status": _str_or_none(item.get("payment_status")),
-        "refund_percent_if_cancelled": refund if isinstance(refund, int) else None,
-    }
-
-
 @require_http_methods(["GET"])
 @require_admin_or_reception_read
 def master_schedule_impact(request: HttpRequest, master_id: str) -> HttpResponse:
@@ -178,124 +138,44 @@ def master_schedule_impact(request: HttpRequest, master_id: str) -> HttpResponse
         return parsed
     start_at, end_at = parsed
 
-    if not getattr(settings, "BOOKING_VIA_AYLA_REST", False):
-        return _error(
-            "frame_source_local_unsupported",
-            "BOOKING_VIA_AYLA_REST is off: the salon edits local tables and "
-            "Ayla's bookings do not describe them; this view reads Ayla only",
-            503,
-        )
-
-    actor_user = _ayla_read_actor(tenant)
-    if actor_user is None:
-        return _error(
-            "schedule_source_not_configured",
-            f"no active owner/admin staff to read the schedule for {tenant.slug}",
-            503,
-        )
-
     requester = getattr(request, "bot_user", None)
     logger.info(
-        "admin_api.schedule_impact.preview tenant=%s master=%s requester=%s named_to_ayla=%s",
+        "admin_api.schedule_impact.preview tenant=%s master=%s requester=%s",
         tenant.slug,
         master.pk,
         getattr(requester, "pk", None),
-        actor_user.pk,
     )
 
-    # DRF-1933: у строки зеркала нет id профиля в каталоге — звать каталог
-    # не с чем; первичный ключ зеркала туда не уходит.
-    try:
-        catalog_specialist_id(master)
-    except CatalogSpecialistUnresolved:
-        return _error(
-            "catalog_profile_unresolved",
-            "master is not set up in the catalog yet",
-            409,
-        )
-    try:
-        impact = get_salon_client().get_schedule_impact(
-            actor_external_id=external_user_id_for(actor_user),
-            tenant_slug=tenant.slug,
-            specialist_id=catalog_specialist_id(master),
-            start_at=start_at,
-            end_at=end_at,
-        )
-    except SalonValidationError as exc:
-        return _error("bad_window", str(exc), 400)
-    except SalonNotConfigured as exc:
-        return _error("schedule_source_not_configured", str(exc), 503)
-    except SalonUnavailable as exc:
-        # Названная причина, а не пустой список: пустота читается как «никого
-        # не затронет», и салон закрыл бы время поверх живых записей.
-        return _error("schedule_unavailable", str(exc), 503)
-    except SalonForbidden as exc:
-        # DRF-2087 — 403 каталога по имени, как у действий (отмена, поиск
-        # клиентов). Это не сбой, а факт настройки: человек, от чьего имени
-        # салон читает (владелец/админ, ``_ayla_read_actor``), в каталоге не
-        # администратор этого салона. 500 говорило «сломалось» и звало
-        # чинить не то; у 403 есть ход оператора, и он назван.
-        logger.warning(
-            "admin_api.schedule_impact.forbidden actor=%s tenant=%s err=%s",
-            actor_user.pk,
-            tenant.slug,
-            exc,
-        )
-        return _error(
-            "salon_forbidden",
-            f"catalog refused the salon actor for {tenant.slug}: the owner/admin "
-            "this read is named to is not an administrator of this salon in the "
-            "catalog — relink them there (provision_salon_admin) and retry; "
-            "nothing was read",
-            403,
-        )
-    except SalonAPIError as exc:
-        # DRF-2087 — страховочная сеть. Узкие ловцы выше — про то, что
-        # известно сегодня; этот — про следующий подкласс, которого сегодня
-        # нет, и про 401/404, которых здесь не ждали: без сети каждый из них
-        # — 500 без имени. Класс отказа уходит в лог, экрану — та же
-        # названная причина «источник не ответил».
-        logger.warning(
-            "admin_api.schedule_impact.salon_error class=%s tenant=%s err=%s",
-            type(exc).__name__,
-            tenant.slug,
-            exc,
-        )
-        return _error(
-            "schedule_unavailable",
-            f"catalog refused to read the schedule impact ({type(exc).__name__}); nothing was read",
-            503,
-        )
-
-    raw_rows = impact.get("bookings")
-    bookings = read_rows(raw_rows, _booking_row)
-    # Здесь предмет — СКОЛЬКО людей затронет закрытие, и молча выброшенная
-    # строка занижает вред: «затронет одну», когда затронет две. Списки
-    # исключений терпят мягкий разбор (см. wire_lists), этот — нет, поэтому
-    # выброшенные считаются и называются рядом с разобранными.
-    total = len(raw_rows) if isinstance(raw_rows, list) else 0
-    bookings["unreadable_rows"] = max(total - len(bookings["rows"]), 0)
-    if bookings["state"] == UNREADABLE or bookings["unreadable_rows"]:
-        logger.warning(
-            "admin_api.schedule_impact.unreadable tenant=%s master=%s dropped=%s state=%s",
-            tenant.slug,
-            master.pk,
-            bookings["unreadable_rows"],
-            bookings["state"],
-        )
+    # DRF-2118 — само чтение живёт в сервисе: тот же ответ читает
+    # уведомление-решение «мастер просит изменить график». Здесь — только
+    # перевод исхода в HTTP.
+    impact = impact_for_window(tenant, master, start_at=start_at, end_at=end_at)
+    if not impact.ok:
+        return _error(impact.error_slug, impact.error_detail, _STATUS_BY_SLUG[impact.error_slug])
 
     return JsonResponse(
         {
             "start_at": start_at,
             "end_at": end_at,
-            "timezone": _str_or_none(impact.get("timezone")),
-            "bookings": bookings,
+            "timezone": impact.timezone,
+            "bookings": impact.bookings,
             # Записи отсюда нет — см. докстринг модуля. Экран рисует показ и
             # подсказку, а не кнопку, которую сервер не примет.
             "writable": False,
             "next_step": NEXT_STEP,
         }
     )
+
+
+#: HTTP-код по slug отказа сервиса — те же коды, что вьюха отдавала до DRF-2118.
+_STATUS_BY_SLUG = {
+    "frame_source_local_unsupported": 503,
+    "schedule_source_not_configured": 503,
+    "catalog_profile_unresolved": 409,
+    "bad_window": 400,
+    "schedule_unavailable": 503,
+    "salon_forbidden": 403,
+}
 
 
 __all__ = ["master_schedule_impact"]

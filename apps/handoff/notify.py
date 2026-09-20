@@ -236,6 +236,12 @@ def notify_admin_task_created(task: AdminTask) -> None:
     no-op — no network, no warning logs.
     """
 
+    # DRF-2118 — персонал салона узнаёт о клиенте, который ждёт человека, в
+    # салонном боте: единый формат уведомления-решения с кнопками
+    # «Открыть диалог» / «Вернуть Ayla». Операторский канал ниже — как был:
+    # это другой адресат (оператор платформы), и он не отменяется.
+    _notify_salon_staff(task)
+
     try:
         recipients = get_notify_addresses()
         if not recipients:
@@ -255,6 +261,17 @@ def notify_admin_task_created(task: AdminTask) -> None:
             )
     except Exception:  # noqa: BLE001 — hard containment (§3.3)
         logger.exception("handoff.notify.unexpected task=%s", getattr(task, "id", None))
+
+
+def _notify_salon_staff(task: AdminTask) -> None:
+    """Тип 1 DRF-2118 — владельцу/админу салона от салонного бота. Никогда не бросает."""
+
+    try:
+        from apps.channels.max import salon_notify
+
+        salon_notify.notify(salon_notify.handoff_waiting_notice(task))
+    except Exception:  # noqa: BLE001 — операторский канал ниже важнее сбоя здесь
+        logger.exception("handoff.notify.salon_staff_failed task=%s", getattr(task, "id", None))
 
 
 def build_unclaimed_notification(task: AdminTask, *, waited_minutes: int) -> str:

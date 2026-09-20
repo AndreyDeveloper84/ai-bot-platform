@@ -64,6 +64,12 @@ EXPECTED: dict[str, tuple[str, str]] = {
         "(DRF-2019); ScheduleException здесь — словарь видов (Type, FULL_DAY_TYPES), "
         "а не чтение копии",
     ),
+    "apps/channels/max/salon_notify.py": (
+        FRAME,
+        "DRF-2118: «Было/Станет» в уведомлении о заявке — рамка через "
+        "load_day_frame; ScheduleException здесь — словарь видов (Type, "
+        "FULL_DAY_TYPES), а не чтение копии",
+    ),
     "apps/scheduling/admin.py": (WRITER_OR_OPERATOR, "операторский CRUD копии; вопрос X5"),
     "apps/scheduling/services/resolver.py": (
         WRITER_OR_OPERATOR,
@@ -101,7 +107,7 @@ EXPECTED: dict[str, tuple[str, str]] = {
 #:
 #: Нижняя граница скана: меньше — значит сканер сломан, а не стало чисто.
 MIN_FILES_SCANNED = 100
-MIN_CLASSIFIED_FILES = 7
+MIN_CLASSIFIED_FILES = 8
 MIN_MENTIONS = 35
 
 # ── Вторая перепись: политика слотов ────────────────────────────────────────
