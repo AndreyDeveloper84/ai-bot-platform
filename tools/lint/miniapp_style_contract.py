@@ -175,7 +175,6 @@ BASELINE: frozenset[str] = frozenset(
         "src/screens/MasterBillingScreen.tsx::profile-payout__item-meta",
         "src/screens/MasterBillingScreen.tsx::profile-payout__item-state",
         "src/screens/MasterBillingScreen.tsx::profile-payout__list",
-        "src/screens/MasterConversationsScreen.tsx::m-card--inbox",
         "src/screens/MasterCustomersScreen.tsx::master-customers__body",
         "src/screens/MasterInternalChatThreadScreen.tsx::internal-chat-bubble__stamp",
         "src/screens/MasterSettingsScreen.tsx::master-settings",

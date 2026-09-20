@@ -45,8 +45,13 @@ vi.mock("./lib/internal-chat-api", async (importOriginal) => {
 });
 
 import { getMe, type MeResponse } from "./lib/admin-api";
-import * as masterApi from "./lib/master-api";
-import { getDashboard, getMasterMe, getMasterSchedule, getPendingAvailability } from "./lib/master-api";
+import {
+  getDashboard,
+  getMasterMe,
+  getMasterSchedule,
+  getPendingAvailability,
+  type DashboardResponse,
+} from "./lib/master-api";
 import { App } from "./App";
 
 const APP_SOURCE = import.meta.glob("./App.tsx", { query: "?raw", import: "default", eager: true }) as Record<
@@ -79,7 +84,7 @@ const MASTER_ME: MeResponse = {
 };
 const SOLO_ME: MeResponse = { ...MASTER_ME, is_customer: true, is_solo_provider: true };
 
-const DASHBOARD: masterApi.DashboardResponse = {
+const DASHBOARD: DashboardResponse = {
   master: { id: "m-1", name: "Иван Смирнов", specialization: "Массаж", photo_url: "" },
   salon: { id: "t-1", name: "Формула тела" },
   now_iso: "2026-09-20T09:00:00",
@@ -144,9 +149,9 @@ describe("файлы переписки мастер↔клиент сняты (
     const code = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
     expect(code).not.toContain("`/conversations");
     expect(code).not.toContain('"/conversations');
-    expect((masterApi as Record<string, unknown>).getMasterConversations).toBeUndefined();
-    expect((masterApi as Record<string, unknown>).getConversationDetail).toBeUndefined();
-    expect((masterApi as Record<string, unknown>).sendConversationMessage).toBeUndefined();
+    for (const fn of ["getMasterConversations", "getConversationDetail", "markConversationRead", "sendAsMe", "releaseToAi"]) {
+      expect(code, `${fn} — функция переписки с клиентом`).not.toContain(`export const ${fn}`);
+    }
   });
 });
 
@@ -165,6 +170,10 @@ describe("старые адреса ведут на «Сегодня», не в 
     expect(screen.queryByRole("heading", { name: /Диалоги/ })).toBeNull();
     const nav = screen.getByRole("navigation", { name: "Основная навигация" });
     expect(nav).toHaveClass("solo-tabbar");
+    // На соло-«Сегодня» нет входа «AI-помощник», ведущего в никуда.
+    expect(screen.queryByText(/AI-помощник/)).toBeNull();
+    expect(screen.queryByRole("button", { name: /AI-помощник/ })).toBeNull();
+    expect(screen.queryByRole("link", { name: /AI-помощник/ })).toBeNull();
   });
 
   it("на «Сегодня» слов «Диалоги»/«Открыть диалог»/«Все диалоги» нет, бейдж непрочитанных не рисуется", async () => {

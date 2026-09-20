@@ -34,7 +34,6 @@ vi.mock("./lib/master-api", async (importOriginal) => {
     getPendingAvailability: vi.fn(),
     getAylaHistory: vi.fn(),
     getMasterMe: vi.fn(),
-    getMasterConversations: vi.fn(),
     getMasterProfileCard: vi.fn(),
     getPortfolio: vi.fn(),
   };
@@ -52,7 +51,6 @@ import { getMe, type MeResponse } from "./lib/admin-api";
 import {
   getAylaHistory,
   getDashboard,
-  getMasterConversations,
   getMasterMe,
   getMasterProfileCard,
   getMasterSchedule,
@@ -70,7 +68,6 @@ const mockedSchedule = vi.mocked(getMasterSchedule);
 const mockedPending = vi.mocked(getPendingAvailability);
 const mockedAyla = vi.mocked(getAylaHistory);
 const mockedMasterMe = vi.mocked(getMasterMe);
-const mockedConversations = vi.mocked(getMasterConversations);
 const mockedProfileCard = vi.mocked(getMasterProfileCard);
 const mockedPortfolio = vi.mocked(getPortfolio);
 
@@ -141,11 +138,6 @@ beforeEach(() => {
     master: { id: "m-1", name: "Иван Смирнов", specialization: "Массаж", bio: "", photo_url: "", services: [] },
     salon: { tenant_id: "t-1", name: "Формула тела" },
     permissions: { can_edit_schedule: true, can_edit_services: true, can_message_customers: false },
-  });
-  mockedConversations.mockResolvedValue({
-    items: [],
-    section_counts: { awaiting_master: 0, ai_drafted: 0, ai_handling: 0, resolved_today: 0 },
-    next_cursor: null,
   });
   mockedProfileCard.mockResolvedValue({
     master: { id: "m-1", name: "Иван Смирнов", bio: "", photo_url: "" },

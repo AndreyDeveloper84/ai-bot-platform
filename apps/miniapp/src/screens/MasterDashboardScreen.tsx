@@ -321,21 +321,16 @@ export function MasterDashboardScreen() {
     active_visit,
     next_visit,
     upcoming_today,
-    inbox_preview,
     today_summary,
     tab_badges,
     states,
   } = data;
+  // DRF-1255: переписки с клиентом у мастера нет — inbox с сервера день
+  // «непустым» не делает (поле остаётся в ответе до DRF-1528).
   const isEmptyToday =
-    active_visit === null &&
-    next_visit === null &&
-    inbox_preview.length === 0 &&
-    today_summary.total_clients_today === 0;
+    active_visit === null && next_visit === null && today_summary.total_clients_today === 0;
   const isDayDone = states.is_day_done && !active_visit && !next_visit;
-  const noServices =
-    !data.master.specialization &&
-    today_summary.total_clients_today === 0 &&
-    inbox_preview.length === 0;
+  const noServices = !data.master.specialization && today_summary.total_clients_today === 0;
 
   return (
     <DashboardFrame

@@ -27,7 +27,6 @@ vi.mock("../lib/master-api", async (importOriginal) => {
     ...original,
     getDashboard: vi.fn(),
     getMasterMe: vi.fn(),
-    getMasterConversations: vi.fn(),
   };
 });
 
