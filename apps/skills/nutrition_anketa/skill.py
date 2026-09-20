@@ -125,6 +125,30 @@ manual target with everything else, and «Отключить персональ�
 is offered when a ``user_entered`` target exists even without consent M
 (before this ticket it said «нечего отключать»).
 
+## «Обнови вес» — one question, not seven (DRF-2139, В3)
+
+A recount used to need the whole anketa again. The catalogue recomputes on
+every ``upsert_profile`` and keeps the inputs of the last computation in
+``targets_input_snapshot``, so one new weight plus the OLD inputs is a new
+proposal — and it becomes the acting target by the same confirmation tap
+(§5.1). Entries: the phrase («мой вес 65», «вешу 65», «обнови вес») or the
+chip «Обновить вес»; one question if the number is not in the phrase. The
+body of the POST is EXACTLY the six snapshot fields with the new weight plus
+the consent attestation (M) — nothing is invented by the bot: a snapshot
+missing any input sends the person to the anketa instead
+(:func:`_update_weight_body`). Stop states are not revisited (age and
+screening are not asked again); a snapshot older than 365 days (by
+``raw.targets_provenance.computed_at``) sends to the anketa — the age may
+have changed; without a date the check is not made (a named limit).
+Bounds 30–300 kg and «проверь число» are the ticket's (DRF-2139 п.1/п.4).
+
+Two catalogue facts shape the limits (both are catalogue tickets, not bot
+workarounds): the upsert writes ``ayla_proposed`` over ``ayla_calculated``
+and clears the confirmation, so between the POST and the tap the diary has
+no acting target; and a body parameter needs the attestation, which is also
+what permits the recompute — so a weight cannot be written WITHOUT a
+recompute, and on ``user_entered`` the bot writes nothing and says so.
+
 ## Scope cuts vs mysite
 
 Deferred to Phase 1 / a follow-up Sprint 9 ticket:
@@ -382,6 +406,42 @@ MANUAL_BUTTON_NO = "Нет"
 #: Происхождение согласия для кнопки «Дать согласие» (DRF-1968, welcome).
 MANUAL_CONSENT_ORIGIN = "target"
 
+# ─── «обнови вес» (DRF-2139) ──────────────────────────────────────────────
+
+UPDATE_WEIGHT_BUTTON = "⚖️ Обновить вес"
+UPDATE_WEIGHT_CALLBACK = "cb:anketa:update_weight"
+UPDATE_WEIGHT_CANCEL_CALLBACK = "cb:anketa:update_weight_cancel"
+UPDATE_WEIGHT_CALLBACKS = frozenset({UPDATE_WEIGHT_CALLBACK, UPDATE_WEIGHT_CANCEL_CALLBACK})
+UPDATE_WEIGHT_STATE_KEY = "nutrition_update_weight"
+#: Границы веса — из листа DRF-2139 (п.1: «число 30–300»; п.4: «вес 20» /
+#: «вес 400» → «проверь число»). Не порог ориентира — проверка ввода.
+UPDATE_WEIGHT_MIN_KG = 30
+UPDATE_WEIGHT_MAX_KG = 300
+#: Снимок старше этого — анкета заново (лист, п.3: возраст мог измениться).
+UPDATE_WEIGHT_SNAPSHOT_MAX_AGE_DAYS = 365
+#: Входы снимка, которые уезжают обратно ровно как были (+ новый вес).
+_SNAPSHOT_INPUTS: tuple[str, ...] = ("gender", "age", "height_cm", "activity_coefficient", "goal")
+
+#: Тексты из листа DRF-2139 — дословно.
+UPDATE_WEIGHT_ASK = "Какой текущий вес в килограммах?"  # тот же вопрос, что в анкете
+UPDATE_WEIGHT_NEED_ANKETA = "Сначала пройдём анкету — так я посчитаю точно."
+UPDATE_WEIGHT_STALE = "Давно не обновляли анкету — пройдём заново."
+UPDATE_WEIGHT_CHECK_NUMBER = "Проверь число — вес в килограммах, от {lo} до {hi}."
+#: Не из листа (владелец решает; названы в теле PR).
+UPDATE_WEIGHT_MANUAL_TARGET = (
+    "У тебя ориентир от специалиста — ориентир не пересчитываю. "
+    "Если он изменился, впиши новый: «ориентир от специалиста» и число ккал."
+)
+UPDATE_WEIGHT_WHOLE_NUMBER = "Напиши вес целым числом — например, 68."
+UPDATE_WEIGHT_CANCELLED = "Хорошо, вес не меняю."
+
+_UPDATE_WEIGHT_PHRASE_RE = re.compile(
+    r"^(?:мой\s+)?(?:вес|вешу)\s*[—:-]?\s*(\d{1,3}(?:[.,]\d+)?)\s*(?:кг)?\s*$"
+    r"|^обнови(?:ть)?\s+вес\s*[—:-]?\s*(\d{1,3}(?:[.,]\d+)?)?\s*(?:кг)?\s*$",
+    re.IGNORECASE,
+)
+_WEIGHT_ANSWER_RE = re.compile(r"^\s*(\d{1,3}(?:[.,]\d+)?)\s*(?:кг)?\s*$", re.IGNORECASE)
+
 #: Матчер входа — три условия, без эвристики по смыслу: слово специалиста
 #: + число С ЕДИНИЦЕЙ ккал (или буквальная фраза «ориентир от специалиста»)
 #: + рядом с числом нет единицы не-ккал / рублей / года. «врач сказал 1800»
@@ -492,6 +552,12 @@ class NutritionAnketaSkill:
         if _manual_text_is_an_answer(self._manual_state(context), text):
             return True
 
+        # DRF-2139: «обнови вес» — кнопки, фраза, ответ на вопрос веса.
+        if text in UPDATE_WEIGHT_CALLBACKS or _update_weight_entry(text) is not None:
+            return True
+        if update_weight_pending(context.conversation) and not text.startswith("cb:"):
+            return True
+
         # Resume path — claim turns while an FSM is in flight.
         if self._has_active_fsm(context):
             # Anketa choice callback or plain user input.
@@ -557,6 +623,11 @@ class NutritionAnketaSkill:
         manual = self._route_manual_target(context, text)
         if manual is not None:
             return manual
+
+        # DRF-2139: «обнови вес» — до анкеты: один вопрос, своё состояние.
+        weight = self._route_update_weight(context, text)
+        if weight is not None:
+            return weight
 
         # Entry: start fresh FSM.
         if text in ("/anketa", "cb:anketa:start") or _is_entry_phrase(text):
@@ -1065,6 +1136,150 @@ class NutritionAnketaSkill:
             meta={"reply_kind": "anketa_withdraw_kept"},
         )
 
+    # ─── «обнови вес» (DRF-2139) ────────────────────────────────────────
+
+    def _save_update_weight_state(self, context: SkillContext, bucket: dict | None) -> None:
+        _write_bucket(context.conversation, UPDATE_WEIGHT_STATE_KEY, bucket)
+
+    def _route_update_weight(self, context: SkillContext, text: str) -> SkillResult | None:
+        """Вход / ход «обнови вес» — или ``None`` («не наше»)."""
+        pending = update_weight_pending(context.conversation)
+
+        if pending and (text in ("/anketa", "cb:anketa:start") or _is_entry_phrase(text)):
+            self._save_update_weight_state(context, None)
+            return None
+        if text == UPDATE_WEIGHT_CANCEL_CALLBACK:
+            self._save_update_weight_state(context, None)
+            return SkillResult(
+                reply_text=UPDATE_WEIGHT_CANCELLED,
+                meta={"reply_kind": "anketa_update_weight_cancelled"},
+            )
+        if text == UPDATE_WEIGHT_CALLBACK:
+            return self._update_weight_ask(context)
+
+        entry = _update_weight_entry(text)
+        if entry is not None:
+            if entry == "":
+                return self._update_weight_ask(context)
+            return self._update_weight_with(context, entry)
+
+        if pending and not text.startswith("cb:"):
+            return self._update_weight_with(context, text)
+        return None
+
+    def _update_weight_ask(self, context: SkillContext) -> SkillResult:
+        self._clear_state(context)  # незаконченная анкета — смена курса
+        self._save_update_weight_state(context, {"step": "weight"})
+        return SkillResult(
+            reply_text=UPDATE_WEIGHT_ASK,
+            action_type="anketa_update_weight_ask",
+            action_data={
+                "buttons": [
+                    {"label": MANUAL_BUTTON_CANCEL, "callback": UPDATE_WEIGHT_CANCEL_CALLBACK}
+                ]
+            },
+            meta={"reply_kind": "anketa_update_weight_ask"},
+        )
+
+    def _update_weight_with(self, context: SkillContext, raw: str) -> SkillResult:
+        """Число есть — проверить ввод (границы листа), потом профиль, потом POST."""
+        parsed = _parse_weight(raw)
+        if isinstance(parsed, str):
+            # «68,5» — дробь: переспрос целым, число за человека не округляется.
+            self._save_update_weight_state(context, {"step": "weight"})
+            return SkillResult(
+                reply_text=UPDATE_WEIGHT_WHOLE_NUMBER,
+                meta={"reply_kind": "anketa_update_weight_invalid"},
+            )
+        if parsed is None or not (UPDATE_WEIGHT_MIN_KG <= parsed <= UPDATE_WEIGHT_MAX_KG):
+            self._save_update_weight_state(context, {"step": "weight"})
+            return SkillResult(
+                reply_text=UPDATE_WEIGHT_CHECK_NUMBER.format(
+                    lo=UPDATE_WEIGHT_MIN_KG, hi=UPDATE_WEIGHT_MAX_KG
+                ),
+                meta={"reply_kind": "anketa_update_weight_check_number"},
+            )
+        weight = int(parsed)
+        self._save_update_weight_state(context, None)
+
+        external_id = external_user_id_for(context.bot_user)
+        try:
+            profile = asyncio.run(get_nutrition_client().get_profile(external_user_id=external_id))
+        except NutritionUnavailableError:
+            logger.warning("anketa.update_weight_ayla_unavailable step=read")
+            return SkillResult(
+                reply_text=_AYLA_DOWN_FALLBACK, meta={"reply_kind": "anketa_ayla_down"}
+            )
+        except NutritionAPIError:
+            logger.exception("anketa.update_weight_ayla_error step=read")
+            return SkillResult(
+                reply_text=_AYLA_DOWN_FALLBACK, meta={"reply_kind": "anketa_ayla_error"}
+            )
+
+        source = getattr(profile, "targets_source", "") if profile is not None else ""
+        if source == "user_entered":
+            # К2: параметры тела требуют утверждения M, а утверждение
+            # разрешает пересчёт — вес без пересчёта каталог не запишет.
+            return SkillResult(
+                reply_text=UPDATE_WEIGHT_MANUAL_TARGET,
+                meta={"reply_kind": "anketa_update_weight_manual_target"},
+            )
+        body = _update_weight_body(profile, weight)
+        if body is None:
+            return self._update_weight_go_to_anketa(UPDATE_WEIGHT_NEED_ANKETA, "need_anketa")
+        if _snapshot_is_stale(profile):
+            return self._update_weight_go_to_anketa(UPDATE_WEIGHT_STALE, "stale")
+
+        from apps.consent.personal_calculation import (
+            ConsentAttestationUnavailable,
+            attach as attach_consent,
+            current_attestation,
+        )
+
+        try:
+            attestation = current_attestation(context.bot_user)
+        except ConsentAttestationUnavailable as exc:
+            return self._render_consent_attestation_missing(context, reason=exc.reason)
+
+        try:
+            proposed = asyncio.run(
+                get_nutrition_client().upsert_profile(
+                    external_user_id=external_id, data=attach_consent(body, attestation)
+                )
+            )
+        except NutritionUnavailableError:
+            logger.warning("anketa.update_weight_ayla_unavailable step=upsert")
+            return SkillResult(
+                reply_text=_AYLA_DOWN_FALLBACK, meta={"reply_kind": "anketa_ayla_down"}
+            )
+        except NutritionAPIError:
+            logger.exception("anketa.update_weight_ayla_error step=upsert")
+            return SkillResult(
+                reply_text=_AYLA_DOWN_FALLBACK, meta={"reply_kind": "anketa_ayla_error"}
+            )
+
+        logger.info(
+            "anketa.update_weight_proposed conv=%s source=%s",
+            getattr(context.conversation, "id", None),
+            getattr(proposed, "targets_source", ""),
+        )
+        return SkillResult(
+            reply_text=_format_summary(proposed),
+            action_type="anketa_update_weight_proposed",
+            action_data={"buttons": _post_anketa_chips(proposed)},
+            meta={"reply_kind": "anketa_update_weight_proposed"},
+        )
+
+    @staticmethod
+    def _update_weight_go_to_anketa(text: str, why: str) -> SkillResult:
+        from apps.orchestrator.personal_surface import CHIP_ANKETA
+
+        return SkillResult(
+            reply_text=text,
+            action_data={"buttons": [dict(CHIP_ANKETA)]},
+            meta={"reply_kind": f"anketa_update_weight_{why}"},
+        )
+
     # ─── ориентир от специалиста (DRF-2138) ─────────────────────────────
 
     def _manual_state(self, context: SkillContext) -> dict | None:
@@ -1073,24 +1288,7 @@ class NutritionAnketaSkill:
     def _save_manual_state(self, context: SkillContext, bucket: dict | None) -> None:
         """Тот же атомарный писатель, что у FSM (retro B1): подключ, не весь
         ``skill_state`` — соседние навыки пишут свои ключи параллельно."""
-        conversation = context.conversation
-        value = None if bucket is None else {**bucket, "asked_at": _now_iso()}
-        if _is_real_orm_conversation(conversation):
-            from apps.conversations.services import write_skill_state
-
-            write_skill_state(conversation, MANUAL_STATE_KEY, value)
-            return
-        raw = getattr(conversation, "skill_state", None) or {}
-        if not isinstance(raw, dict):
-            raw = {}
-        if value is None:
-            raw = {k: v for k, v in raw.items() if k != MANUAL_STATE_KEY}
-        else:
-            raw = {**raw, MANUAL_STATE_KEY: value}
-        conversation.skill_state = raw
-        save = getattr(conversation, "save", None)
-        if callable(save):
-            save(update_fields=["skill_state"])
+        _write_bucket(context.conversation, MANUAL_STATE_KEY, bucket)
 
     def _has_manual_target(self, context: SkillContext) -> bool:
         """Стоит ли у человека ``user_entered`` — по профилю каталога; любой
@@ -1530,9 +1728,37 @@ def manual_target_state(conversation: Any) -> dict | None:
     на глобальном пути свободный текст доходит до навыка только когда бот сам
     задал вопрос.
     """
+    return _fresh_bucket(conversation, MANUAL_STATE_KEY, ("kcal", "confirm", "deviation"))
+
+
+def manual_target_pending(conversation: Any) -> bool:
+    """Для ``is_structured_nutrition_turn``: бот ждёт число или подтверждение."""
+    return manual_target_state(conversation) is not None
+
+
+def _write_bucket(conversation: Any, key: str, bucket: dict | None) -> None:
+    """Подключ ``skill_state`` со штампом ``asked_at`` — атомарным писателем
+    (retro B1) у ORM-беседы, в памяти — у синтетической."""
+    value = None if bucket is None else {**bucket, "asked_at": _now_iso()}
+    if _is_real_orm_conversation(conversation):
+        from apps.conversations.services import write_skill_state
+
+        write_skill_state(conversation, key, value)
+        return
+    raw = getattr(conversation, "skill_state", None) or {}
+    if not isinstance(raw, dict):
+        raw = {}
+    raw = {k: v for k, v in raw.items() if k != key} if value is None else {**raw, key: value}
+    conversation.skill_state = raw
+    save = getattr(conversation, "save", None)
+    if callable(save):
+        save(update_fields=["skill_state"])
+
+
+def _fresh_bucket(conversation: Any, key: str, steps: tuple[str, ...]) -> dict | None:
     state = getattr(conversation, "skill_state", None)
-    bucket = state.get(MANUAL_STATE_KEY) if isinstance(state, dict) else None
-    if not isinstance(bucket, dict) or bucket.get("step") not in ("kcal", "confirm", "deviation"):
+    bucket = state.get(key) if isinstance(state, dict) else None
+    if not isinstance(bucket, dict) or bucket.get("step") not in steps:
         return None
     stamped = bucket.get("asked_at")
     if isinstance(stamped, str):
@@ -1547,9 +1773,75 @@ def manual_target_state(conversation: Any) -> dict | None:
     return dict(bucket)
 
 
-def manual_target_pending(conversation: Any) -> bool:
-    """Для ``is_structured_nutrition_turn``: бот ждёт число или подтверждение."""
-    return manual_target_state(conversation) is not None
+def update_weight_pending(conversation: Any) -> bool:
+    """DRF-2139, для ``is_structured_nutrition_turn``: бот ждёт вес."""
+    return _fresh_bucket(conversation, UPDATE_WEIGHT_STATE_KEY, ("weight",)) is not None
+
+
+def _update_weight_entry(text: str) -> str | None:
+    """«мой вес 65» → «65»; «обнови вес» → ``""`` (спросить); иначе ``None``.
+
+    Только форма фразы, без эвристики: строка целиком — «[мой] вес|вешу N [кг]»
+    или «обнови(ть) вес [N]». «вес ребёнка 20 кг», «перевес багажа 65», «мой
+    вес был 90 в прошлом году», «вес 65 и 70» — не наше.
+    """
+    stripped = (text or "").strip()
+    if not stripped or stripped.startswith("cb:"):
+        return None
+    normalised = _normalise_phrase(stripped)
+    match = _UPDATE_WEIGHT_PHRASE_RE.match(normalised)
+    if match is None:
+        return None
+    return match.group(1) or match.group(2) or ""
+
+
+def _parse_weight(text: str) -> int | str | None:
+    """Ответ на вопрос веса: целое → число; дробное → ``"decimal"`` (переспрос
+    целым — число за человека не округляется); прочее → ``None``."""
+    match = _WEIGHT_ANSWER_RE.match((text or "").strip())
+    if match is None:
+        return None
+    raw = match.group(1)
+    if "." in raw or "," in raw:
+        return "decimal"
+    return int(raw)
+
+
+def _update_weight_body(profile: Any, weight: int) -> dict[str, Any] | None:
+    """Тело upsert — РОВНО входы снимка с новым весом; любого нет → ``None``
+    (в анкету: число за человека не подставляется, §103)."""
+    if profile is None:
+        return None
+    if getattr(profile, "targets_source", "") not in ("ayla_calculated", "ayla_proposed"):
+        return None
+    snapshot = dict(getattr(profile, "targets_input_snapshot", None) or {})
+    if any(snapshot.get(name) in (None, "") for name in _SNAPSHOT_INPUTS):
+        return None
+    return {
+        "gender": snapshot["gender"],
+        "age": int(snapshot["age"]),
+        "height_cm": int(snapshot["height_cm"]),
+        "weight_kg": weight,
+        "goal": snapshot["goal"],
+        "activity_coefficient": snapshot["activity_coefficient"],
+    }
+
+
+def _snapshot_is_stale(profile: Any) -> bool:
+    """``raw.targets_provenance.computed_at`` старше 365 дней. Даты нет — не
+    проверяется (предел: в DTO поля нет, каталог может не прислать)."""
+    raw = getattr(profile, "raw", None) or {}
+    provenance = raw.get("targets_provenance") if isinstance(raw, dict) else None
+    stamped = provenance.get("computed_at") if isinstance(provenance, dict) else None
+    if not isinstance(stamped, str) or not stamped:
+        return False
+    try:
+        at = datetime.fromisoformat(stamped.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if at.tzinfo is None:
+        at = at.replace(tzinfo=UTC)
+    return datetime.now(UTC) - at > timedelta(days=UPDATE_WEIGHT_SNAPSHOT_MAX_AGE_DAYS)
 
 
 def _manual_text_is_an_answer(state: dict | None, text: str) -> bool:
@@ -1588,6 +1880,10 @@ def _post_anketa_chips(profile=None) -> list[dict[str, str]]:
     chips: list[dict[str, str]] = []
     if profile is not None and profile.targets_source == TARGETS_PROPOSED:
         chips.append(dict(CHIP_CONFIRM_TARGETS))
+    if profile is not None and profile.targets_source in ("ayla_calculated", "ayla_proposed"):
+        # DRF-2139: пересчёт одним вопросом — только там, где есть расчёт,
+        # входы которого можно взять из снимка.
+        chips.append({"label": UPDATE_WEIGHT_BUTTON, "callback": UPDATE_WEIGHT_CALLBACK})
     chips.append(dict(CHIP_WATER))
     if diary_is_reachable():
         # Only the global path claims «что я ел сегодня» deterministically.
