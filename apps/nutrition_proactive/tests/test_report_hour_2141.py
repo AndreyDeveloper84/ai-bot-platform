@@ -204,7 +204,17 @@ class TestSet:
         assert msk.send is False
 
     @pytest.mark.parametrize(
-        "text", ["присылай итоги в 3:00", "присылай итоги в 5", "присылай отчёт в 0:30"]
+        "text",
+        [
+            "присылай итоги в 3:00",
+            "присылай итоги в 5",
+            "присылай отчёт в 0:30",
+            # Узел: 23:00 и 22:00 — внутри тихого окна; лист говорил 6–23,
+            # но подтвердить час, в который планировщик молчит, — ложь.
+            "присылай итоги в 23:00",
+            "присылай итоги в 22",
+            "присылай отчёт в 8:30",
+        ],
     )
     def test_a_night_hour_is_refused_and_nothing_changes(
         self, bot_user: BotUser, text: str
@@ -215,12 +225,26 @@ class TestSet:
         stored = prefs.get_prefs(BotUser.all_tenants.get(pk=bot_user.pk))
         assert stored["daily_report_time"] == "19:00"
 
-    @pytest.mark.parametrize("hour", [6, 23])
-    def test_the_range_edges_are_accepted(self, bot_user: BotUser, hour: int) -> None:
+    @pytest.mark.parametrize("hour", [9, 21])
+    def test_the_range_edges_are_accepted_and_due(self, bot_user: BotUser, hour: int) -> None:
         reply = report_hour.try_handle_report_hour(
             text=f"присылай итоги в {hour}:00", bot_user=bot_user
         )
         assert reply == report_hour.SET_CONFIRMATION.format(time=f"{hour:02d}:00")
+        decision = only(
+            tasks.plan_daily_reports(now_utc=at_msk(hour), fetch=summary_reader()), bot_user
+        )
+        assert decision.send is True
+        assert decision.reason == "due"
+
+    def test_the_range_is_derived_from_the_quiet_window(self) -> None:
+        """Каждый принимаемый час — вне тихого окна, каждый отвергаемый — внутри."""
+        assert report_hour.MIN_HOUR == prefs.QUIET_END_HOUR
+        assert report_hour.MAX_HOUR == prefs.QUIET_START_HOUR - 1
+        accepted = [h for h in range(24) if report_hour.MIN_HOUR <= h <= report_hour.MAX_HOUR]
+        assert accepted == list(range(9, 22))
+        assert all(not prefs.is_quiet_hour(h) for h in accepted)
+        assert all(prefs.is_quiet_hour(h) for h in range(24) if h not in accepted)
 
     def test_other_context_keys_survive(self, bot_user: BotUser) -> None:
         BotUser.all_tenants.filter(pk=bot_user.pk).update(
@@ -336,10 +360,13 @@ class TestQuietHoursUnchanged:
         assert prefs.is_quiet_hour(8) is True
         assert prefs.is_quiet_hour(9) is False
 
-    def test_setting_2300_does_not_move_the_window(self, bot_user: BotUser) -> None:
-        """Лист принимает 23:00; тихие часы — нет. Планировщик молчит,
-        как и до этого листа (``test_report_silent_at_2300_even_when_2300_was_chosen``)."""
-        report_hour.try_handle_report_hour(text="присылай итоги в 23:00", bot_user=bot_user)
+    def test_asking_for_2300_is_refused_and_the_window_stays(self, bot_user: BotUser) -> None:
+        """Узел: «в 23:00» → отказ, prefs не тронуты; планировщик в 23:00
+        молчит, как и до листа (``test_report_silent_at_2300_even_when_2300_was_chosen``)."""
+        reply = report_hour.try_handle_report_hour(text="присылай итоги в 23:00", bot_user=bot_user)
+        assert reply == report_hour.NIGHT_REFUSAL
+        stored = prefs.get_prefs(BotUser.all_tenants.get(pk=bot_user.pk))
+        assert stored["daily_report_time"] == "19:00"
         decision = only(
             tasks.plan_daily_reports(now_utc=at_msk(23), fetch=summary_reader()), bot_user
         )
@@ -354,4 +381,4 @@ class TestTexts:
             "Итоги дня присылаю в 21:00 (по твоему времени). "
             "Скажи „присылай итоги в 20:00“, если хочешь иначе, или „не присылай отчёт“."
         )
-        assert report_hour.NIGHT_REFUSAL == "Ночью не пишу — выбери час с 6 до 23."
+        assert report_hour.NIGHT_REFUSAL == "Ночью не пишу — выбери час с 9 до 21."
