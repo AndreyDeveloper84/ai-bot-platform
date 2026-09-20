@@ -31,6 +31,13 @@ inheritance retrofit.
   VENDOR's balance is drained ("you have no credits remaining").
   Terminal, never retryable, triggers the same fallback.
 
+Since DRF-2147 the router's fallback also fires on UNAVAILABILITY —
+:class:`LLMTransportError`, :class:`apps.llm.retry.RetriableLLMError`
+(the provider's own retry budget spent on timeouts / connection
+failures / 5xx / 429) and an open circuit breaker — but never on a
+plain :class:`LLMError` (400 / 422: the request is wrong, the other
+vendor would reject it too). See :func:`apps.llm.router.hop_kind`.
+
 ### Tool spec
 
 The :class:`LLMProvider.complete` ``tools`` parameter expects the
@@ -101,6 +108,16 @@ class CompletionResult:
       finish_reason: vendor finish code, normalised lowercase string.
                      Common values: ``"stop"``, ``"length"``,
                      ``"tool_calls"``, ``"content_filter"``.
+      fallback_from: DRF-2147 — the vendor that was asked FIRST and
+                     could not answer, when the router's one-hop fallback
+                     produced this result (``"anthropic"`` when the
+                     answer above came from OpenAI because Anthropic was
+                     down or out of quota). Empty on a direct answer. Set
+                     by :class:`apps.llm.router.FallbackProvider`, never
+                     by a concrete provider; read by the turn metric as
+                     ``AIRequestMetric.llm_fallback_from`` next to
+                     ``llm_provider`` (= ``provider`` here, the vendor
+                     that actually answered).
     """
 
     text: str
@@ -110,6 +127,7 @@ class CompletionResult:
     model: str = ""
     provider: str = ""
     finish_reason: str = ""
+    fallback_from: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -258,7 +276,7 @@ class LLMProvider(Protocol):
     #: DRF-1443 added it for the same reason DRF-1437 added its sibling
     #: above, and with the same lesson attached: the fix is only real if
     #: a wrapper that forgets to forward it FAILS rather than reading as
-    #: ``""``. ``PIITokenizingProvider`` and ``QuotaFallbackProvider``
+    #: ``""``. ``PIITokenizingProvider`` and ``FallbackProvider``
     #: both sit between the router and the concrete provider; declaring
     #: the attribute here makes an omission a type error instead of a
     #: silent downgrade to the reply tier.

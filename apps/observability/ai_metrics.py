@@ -93,6 +93,7 @@ def record_ai_request(
     llm_cost_usd: Optional[Decimal] = None,
     llm_model: str = "",
     llm_pass_index: Optional[int] = None,
+    llm_fallback_from: str = "",
 ) -> AIRequestMetric:
     """Record one `AIRequestMetric` row for the just-completed AI request.
 
@@ -124,6 +125,9 @@ def record_ai_request(
             no LLM call. DRF-1211.
         llm_pass_index: 1-based index of the LLM call within one user turn
             (multi-pass concierge, DRF-1266). NULL for single-pass writers.
+        llm_fallback_from: Provider slug the router asked first and hopped
+            away from when `llm_provider` answered instead (DRF-2147).
+            Empty on a direct answer.
 
     Returns:
         The persisted `AIRequestMetric` row.
@@ -154,6 +158,7 @@ def record_ai_request(
         latency_llm_ms=latency_llm_ms,
         latency_skill_ms=latency_skill_ms,
         llm_provider=llm_provider,
+        llm_fallback_from=llm_fallback_from,
         llm_tokens_input=llm_tokens_input,
         llm_tokens_output=llm_tokens_output,
         llm_cost_usd=llm_cost_usd,

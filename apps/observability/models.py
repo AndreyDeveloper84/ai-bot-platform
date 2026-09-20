@@ -311,6 +311,15 @@ class AIRequestMetric(models.Model):
         "(pipeline, shadow) — separates the cost of multi-pass from "
         "general traffic growth.",
     )
+    llm_fallback_from = models.CharField(
+        max_length=32,
+        blank=True,
+        default="",
+        help_text="DRF-2147 — provider slug the router asked FIRST and hopped away "
+        "from (quota or unavailability) when llm_provider answered instead. "
+        "Empty on a direct answer and when no LLM call. Lets ops count turns "
+        "served by the fallback vendor and see which primary was down.",
+    )
 
     # ─── Outcome ─────────────────────────────────────────────────────────
     outcome = models.CharField(

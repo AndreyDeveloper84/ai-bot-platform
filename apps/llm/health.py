@@ -404,10 +404,10 @@ def build_probe_provider(name: str) -> Any:
     * the router's per-process provider **cache** — a pooled tunnel
       would hide the failure the probe exists to find (see the module
       docstring);
-    * :class:`~apps.llm.router.QuotaFallbackProvider` — a probe that
-      hops on quota exhaustion reports the *other* vendor's health
-      under this one's name, which is the exact confusion DRF-1631 is
-      undoing;
+    * :class:`~apps.llm.router.FallbackProvider` — a probe that hops on
+      quota exhaustion or unavailability (DRF-2147) reports the *other*
+      vendor's health under this one's name, which is the exact
+      confusion DRF-1631 is undoing;
     * :class:`~apps.llm.pii_protected_provider.PIITokenizingProvider` —
       the payload is the literal string ``ping``.
 

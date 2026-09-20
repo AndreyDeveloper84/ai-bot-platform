@@ -110,7 +110,7 @@ def _innermost(provider: object) -> object:
     """Strip the serving path's transparent wrappers.
 
     ``get_provider`` returns a ``PIITokenizingProvider`` around the
-    concrete provider, sometimes inside a ``QuotaFallbackProvider``.
+    concrete provider, sometimes inside a ``FallbackProvider``.
     Both are deliberately transparent — they copy ``.name`` and the
     model defaults through — so the object that actually talks to the
     vendor is the one at the bottom, and that is what the probe has to
@@ -297,8 +297,8 @@ def test_openai_health_does_not_colour_the_anthropic_verdict(settings, monkeypat
     """Owner decision В-14: OpenAI's health does not determine Ayla's.
 
     The serving path wraps the resolved provider in
-    ``QuotaFallbackProvider``, which hops to another vendor when the
-    first reports its credits exhausted. A probe that inherited that
+    ``FallbackProvider``, which hops to another vendor when the first
+    reports its credits exhausted or is unavailable (DRF-2147). A probe that inherited that
     wrapper would answer "the LLM is fine" on the strength of the vendor
     the product was *not* configured to use — the same confusion
     DRF-1631 is undoing, arriving through a different door.
@@ -335,35 +335,37 @@ def test_openai_health_does_not_colour_the_anthropic_verdict(settings, monkeypat
     assert result.error_class == "LLMVendorCreditsExhausted"
 
 
-def test_serving_path_still_hops_vendors_silently(settings, monkeypatch):
-    """Records a FORBIDDEN behaviour so its removal has to be deliberate.
+def test_serving_path_hops_vendors_and_says_so(settings, monkeypatch):
+    """The serving path hops — under a policy now, and out loud.
 
-    This assertion does NOT endorse what it asserts. Under
-    ``LLM_PROVIDER=anthropic`` the serving path today answers a user
-    from OpenAI when Anthropic reports its credits exhausted, without
-    telling anyone — which owner decision В-14 forbids outright: a
-    fall-back is permitted only under a policy designed, approved and
-    tested, and none exists.
+    Until DRF-2147 this test pinned a FORBIDDEN behaviour: under
+    ``LLM_PROVIDER=anthropic`` the serving path answered a user from
+    OpenAI when Anthropic reported its credits exhausted, without telling
+    anyone — which owner decision В-14 forbade, a fall-back being
+    permitted only under a policy designed, approved and tested, and
+    none existing.
 
-    It is pinned here rather than fixed because the fix is a policy
-    decision about completions and belongs to its own ticket, and
-    because an unwatched defect is how this one lasted three weeks. When
-    the policy lands, this test changes with it — visibly, in a diff,
-    instead of a behaviour quietly ceasing.
+    The policy landed with DRF-2147 (owner decision В3, 20.09.2026): one
+    hop along ``LLM_FALLBACK_ORDER`` on quota AND on unavailability, an
+    operator page on every switch, ``fallback_from`` on the answer for
+    the turn metric. So the hop is kept — and what this test now pins is
+    that it is NOT silent. The probe half of В-14 is untouched: the test
+    above still names Anthropic's outage against Anthropic.
 
-    Holding a secret is not permission to fall back: note that nothing
-    below configures a fall-back. It is armed by ``OPENAI_API_KEY``
-    merely being set (:func:`apps.llm.router.provider_is_configured`).
+    Holding a secret is still not the whole of the permission: the hop
+    is armed by ``OPENAI_API_KEY`` being set, and the policy is what
+    says the arming is wanted.
     """
 
     import asyncio
 
-    from apps.llm.protocol import LLMVendorCreditsExhausted
+    from apps.llm.protocol import CompletionResult, LLMVendorCreditsExhausted
 
     settings.LLM_PROVIDER = "anthropic"
     settings.LLM_QUOTA_FALLBACK_ENABLED = True
 
     served_by: list[str] = []
+    paged: list[str] = []
 
     async def _exhausted(self, messages, **kwargs):
         served_by.append("anthropic")
@@ -371,15 +373,21 @@ def test_serving_path_still_hops_vendors_silently(settings, monkeypatch):
 
     async def _happy(self, messages, **kwargs):
         served_by.append("openai")
-        return object()
+        return CompletionResult(text="pong", provider="openai")
 
     monkeypatch.setattr(provider_class("anthropic"), "complete", _exhausted, raising=False)
     monkeypatch.setattr(provider_class("openai"), "complete", _happy, raising=False)
+    monkeypatch.setattr(
+        "apps.observability.alerting.page",
+        lambda severity, title, body, *, dedup_key=None: paged.append(title) or True,
+    )
 
     provider = get_router().get_provider()
     assert provider.name == "anthropic"  # presence: this is the configured vendor
 
-    asyncio.run(provider.complete([{"role": "user", "content": "ping"}]))
+    result = asyncio.run(provider.complete([{"role": "user", "content": "ping"}]))
 
-    # DEFECT, pinned: the user was answered by a vendor nobody chose.
     assert served_by == ["anthropic", "openai"]
+    # Not silent: the answer says where it came from, the operators hear.
+    assert result.fallback_from == "anthropic"
+    assert paged == ["llm fallback"]

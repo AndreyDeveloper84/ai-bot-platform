@@ -10,7 +10,8 @@ dialog_transcript.sh`` — голый ``SELECT`` из ``conversations_message``.
 ``trace_id``, и по нему в базе лежат:
 
 * ``AIRequestMetric`` — по строке на вызов модели (``skill_selected``,
-  ``llm_pass_index``, ``llm_model``, ``outcome``, ``fallback_triggered``);
+  ``llm_pass_index``, ``llm_model``, ``outcome``, ``fallback_triggered``,
+  ``llm_fallback_from`` — DRF-2147, запасной провайдер ответил вместо основного);
 * ``Event`` — семь общих событий на ход и, когда сработал, вердикт
   ``pre_check``;
 * ``ReplayTrace`` — ветка, вердикты pre/post, skill, трасса инструментов —
@@ -115,6 +116,9 @@ def format_metric(row: AIRequestMetric) -> str:
     parts.append(row.outcome or "?")
     if row.fallback_triggered:
         parts.append("fallback")
+    if row.llm_fallback_from:
+        # DRF-2147 — the vendor that answered instead of the configured one.
+        parts.append(f"{row.llm_fallback_from}→{row.llm_provider or '?'}")
     if row.latency_total_ms is not None:
         parts.append(f"{row.latency_total_ms}ms")
     return " ".join(parts)
