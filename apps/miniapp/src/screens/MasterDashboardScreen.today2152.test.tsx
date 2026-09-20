@@ -36,7 +36,10 @@ import { MasterDashboardScreen } from "./MasterDashboardScreen";
 
 const mockedDashboard = vi.mocked(getDashboard);
 
-const NOW = "2026-09-20T11:15:00+03:00";
+// Метки времени — без смещения: JS читает их как локальные, а экран рендерит
+// локальное время (formatTimeHM). Так ожидания «12:00–13:30» верны и на
+// ноутбуке в МСК, и на CI-раннере в UTC.
+const NOW = "2026-09-20T11:15:00";
 
 function doc(over: Partial<DashboardResponse> = {}): DashboardResponse {
   return {
@@ -69,8 +72,8 @@ const NEXT = {
   booking_id: "b-1",
   client_first_name: "Анна",
   client_last_initial: "П.",
-  visit_at: "2026-09-20T12:00:00+03:00",
-  end_at: "2026-09-20T13:30:00+03:00",
+  visit_at: "2026-09-20T12:00:00",
+  end_at: "2026-09-20T13:30:00",
   minutes_until: 45,
   service_name: "Массаж спины",
   duration_min: 90,
@@ -118,8 +121,8 @@ describe("состояние 1 — ближайшая запись", () => {
             client_first_name: "Борис",
             client_last_initial: "К.",
             service_name: "Массаж лица",
-            visit_at: "2026-09-20T14:00:00+03:00",
-            end_at: "2026-09-20T15:00:00+03:00",
+            visit_at: "2026-09-20T14:00:00",
+            end_at: "2026-09-20T15:00:00",
           },
         ],
         today_summary: { total_clients_today: 2, completed_count: 0, next_free_window: null },
@@ -156,7 +159,7 @@ describe("состояние 3 — «Сейчас по расписанию»", 
           client_first_name: "Мария",
           client_last_initial: "И.",
           service_name: "Массаж спины",
-          started_at: "2026-09-20T11:00:00+03:00",
+          started_at: "2026-09-20T11:00:00",
           duration_min: 60,
           minutes_remaining: 45,
           is_in_progress: true,
