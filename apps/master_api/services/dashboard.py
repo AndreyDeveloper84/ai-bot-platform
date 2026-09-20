@@ -43,7 +43,7 @@ helper functions internally convert to tenant-local for date math.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone as dt_timezone
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -71,6 +71,10 @@ logger = logging.getLogger(__name__)
 # Defaults --------------------------------------------------------------
 
 DEFAULT_SERVICE_DURATION_MIN = 60
+
+#: DRF-2152 — сколько записей дня после ближайшей показывает «Сегодня».
+#: «Сегодня» — состояние дня, не журнал; полный день живёт в «Расписании».
+UPCOMING_TODAY_LIMIT = 6
 """Fallback service duration when neither BookingRequest.duration_min
 nor CatalogService.duration_min are populated. Matches the booking
 attribution model's implicit default."""
@@ -118,6 +122,26 @@ class NextVisit:
     duration_min: int
     is_returning_customer: bool
     customer_intent_hint: str
+    # DRF-2152 (макет DRF-1182): начало–конец и «до визита N мин» — оба с
+    # сервера, экран ничего не тикает и не досчитывает.
+    end_at: str = ""  # iso
+    minutes_until: int = 0
+
+
+@dataclass(frozen=True)
+class UpcomingVisit:
+    """Запись дня ПОСЛЕ ближайшей — «следующие спокойнее» (DRF-2152).
+
+    Набор полей закрыт макетом: имя, услуга, время. Телефона, цены, оплаты,
+    источника здесь нет и не появится — сторож на ключи в тестах.
+    """
+
+    booking_id: str
+    client_first_name: str
+    client_last_initial: str
+    service_name: str
+    visit_at: str  # iso
+    end_at: str  # iso
 
 
 @dataclass(frozen=True)
@@ -168,6 +192,10 @@ class TabBadges:
 class DashboardStates:
     is_day_done: bool
     is_offline_safe_response: bool
+    # DRF-2152: True — рамка дня прочитана и рабочего блока нет (выходной);
+    # False — рабочий день; None — рамка не прочитана (каталог не ответил):
+    # «не знаю» ≠ «выходной» (DRF-1111), экран в этом случае выходного не рисует.
+    day_off: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -185,6 +213,7 @@ class DashboardSnapshot:
     tab_badges: TabBadges
     states: DashboardStates
     week_summary: WeekSummary
+    upcoming_today: list[UpcomingVisit] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -193,6 +222,7 @@ class DashboardSnapshot:
             "now_iso": self.now_iso,
             "active_visit": _dc_to_dict(self.active_visit),
             "next_visit": _dc_to_dict(self.next_visit),
+            "upcoming_today": [_dc_to_dict(v) for v in self.upcoming_today],
             "inbox_preview": [_dc_to_dict(i) for i in self.inbox_preview],
             "today_summary": _dc_to_dict(self.today_summary),
             "tab_badges": _dc_to_dict(self.tab_badges),
@@ -442,7 +472,46 @@ def get_next_visit(master: CatalogMaster, now: datetime) -> NextVisit | None:
         duration_min=duration,
         is_returning_customer=_is_returning_customer(master, booking),
         customer_intent_hint=_customer_intent_hint(booking),
+        end_at=(booking.visit_at + timedelta(minutes=duration)).isoformat(),
+        minutes_until=max(int((booking.visit_at - now).total_seconds() // 60), 0),
     )
+
+
+def get_upcoming_today(master: CatalogMaster, now: datetime) -> list[UpcomingVisit]:
+    """Записи дня после ближайшей (DRF-2152) — имя, услуга, начало–конец.
+
+    Тот же источник и статусы, что у :func:`get_next_visit`; первая строка
+    выборки — это и есть ближайшая, она уже показана карточкой выше, поэтому
+    здесь отдаётся хвост. Не больше :data:`UPCOMING_TODAY_LIMIT`: «Сегодня» —
+    состояние дня, не журнал.
+    """
+
+    tz = get_tenant_tz(master.tenant)
+    _, end_of_today, _ = _today_bounds(now, tz)
+    rows = master_visits(
+        master,
+        start=now + timedelta(microseconds=1),
+        end=end_of_today,
+        statuses=UPCOMING_STATUSES,
+        limit=UPCOMING_TODAY_LIMIT + 1,
+    )
+    out: list[UpcomingVisit] = []
+    for booking in rows[1:]:
+        if booking.visit_at is None:
+            continue
+        duration = _resolve_duration(booking)
+        first, last_initial = _split_name(booking.client_name)
+        out.append(
+            UpcomingVisit(
+                booking_id=str(booking.id),
+                client_first_name=first,
+                client_last_initial=last_initial,
+                service_name=booking.service_name,
+                visit_at=booking.visit_at.isoformat(),
+                end_at=(booking.visit_at + timedelta(minutes=duration)).isoformat(),
+            )
+        )
+    return out
 
 
 # Inbox preview ---------------------------------------------------------
@@ -615,6 +684,20 @@ def _working_block_today(
     записи не меняет.
     """
 
+    block, _readable = _working_block_today_ex(master, today_local, tz=tz)
+    return block
+
+
+def _working_block_today_ex(
+    master: CatalogMaster, today_local: date, *, tz: ZoneInfo
+) -> tuple[tuple[time, time] | None, bool]:
+    """Рабочий блок дня и признак «рамка прочитана» (DRF-2152).
+
+    ``(None, False)`` — каталог не ответил: «не знаю». ``(None, True)`` — рамка
+    прочитана, блока нет: выходной. Две разные вещи под одним ``None`` были
+    причиной, по которой «Сегодня» не могло сказать «выходной» честно.
+    """
+
     from apps.master_api.services.schedule import _working_block_for_day
 
     try:
@@ -630,9 +713,10 @@ def _working_block_today(
             master.id,
             type(exc).__name__,
         )
-        return None
+        return None, False
 
-    return _working_block_for_day(master, today_local, exceptions_by_date, wh_by_weekday).working
+    block = _working_block_for_day(master, today_local, exceptions_by_date, wh_by_weekday).working
+    return block, True
 
 
 def _next_free_window(master: CatalogMaster, now: datetime) -> dict[str, str] | None:
@@ -854,7 +938,7 @@ def get_states(master: CatalogMaster, now: datetime) -> DashboardStates:
     """
 
     tz = get_tenant_tz(master.tenant)
-    start_utc, end_utc, _ = _today_bounds(now, tz)
+    start_utc, end_utc, today_local = _today_bounds(now, tz)
     latest = master_visits(
         master,
         start=start_utc,
@@ -869,9 +953,13 @@ def get_states(master: CatalogMaster, now: datetime) -> DashboardStates:
         duration = _resolve_duration(last_today)
         end_of_last = last_today.visit_at + timedelta(minutes=duration)
         is_day_done = now > end_of_last
+    # DRF-2152 — выходной только когда рамка дня ПРОЧИТАНА и блока нет.
+    block, readable = _working_block_today_ex(master, today_local, tz=tz)
+    day_off: bool | None = None if not readable else block is None
     return DashboardStates(
         is_day_done=is_day_done,
         is_offline_safe_response=False,
+        day_off=day_off,
     )
 
 
@@ -906,6 +994,7 @@ def build_dashboard(master: CatalogMaster, now: datetime) -> DashboardSnapshot:
         now_iso=now.isoformat(),
         active_visit=get_active_visit(master, now),
         next_visit=get_next_visit(master, now),
+        upcoming_today=get_upcoming_today(master, now),
         inbox_preview=get_inbox_preview(master, now),
         today_summary=get_today_summary(master, now),
         tab_badges=get_tab_badges(master, now),
@@ -923,6 +1012,8 @@ __all__ = [
     "NextVisit",
     "TabBadges",
     "TodaySummary",
+    "UPCOMING_TODAY_LIMIT",
+    "UpcomingVisit",
     "WeekSummary",
     "build_dashboard",
     "get_active_visit",
@@ -932,4 +1023,5 @@ __all__ = [
     "get_tab_badges",
     "get_tenant_tz",
     "get_today_summary",
+    "get_upcoming_today",
 ]

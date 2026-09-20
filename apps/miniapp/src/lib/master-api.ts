@@ -133,6 +133,20 @@ export interface DashboardNextVisit {
   duration_min: number;
   is_returning_customer: boolean;
   customer_intent_hint: string;
+  /** DRF-2152 — начало–конец и «до визита N мин» с сервера; экран не тикает. */
+  end_at: string; // ISO
+  minutes_until: number;
+}
+
+/** DRF-2152 — запись дня после ближайшей. Набор полей закрыт макетом DRF-1182:
+ * имя, услуга, время — без телефона/цены/оплаты/источника. */
+export interface DashboardUpcomingVisit {
+  booking_id: string;
+  client_first_name: string;
+  client_last_initial: string;
+  service_name: string;
+  visit_at: string; // ISO
+  end_at: string; // ISO
 }
 
 export type SlaTier = "red" | "yellow" | "white";
@@ -173,6 +187,10 @@ export interface DashboardTabBadges {
 export interface DashboardStatesFlags {
   is_day_done: boolean;
   is_offline_safe_response: boolean;
+  /** DRF-2152: true — выходной (рамка дня прочитана, блока нет); false —
+   * рабочий день; null — рамка не прочитана (каталог не ответил): «не знаю»
+   * ≠ «выходной» (DRF-1111), экран говорит «не удалось проверить». */
+  day_off: boolean | null;
 }
 
 export interface DashboardResponse {
@@ -181,6 +199,7 @@ export interface DashboardResponse {
   now_iso: string;
   active_visit: DashboardActiveVisit | null;
   next_visit: DashboardNextVisit | null;
+  upcoming_today: DashboardUpcomingVisit[];
   inbox_preview: DashboardInboxItem[];
   today_summary: DashboardTodaySummary;
   tab_badges: DashboardTabBadges;

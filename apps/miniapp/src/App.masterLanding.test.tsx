@@ -131,7 +131,10 @@ const DASHBOARD: DashboardResponse = {
     duration_min: 60,
     is_returning_customer: false,
     customer_intent_hint: "",
+  end_at: "2026-09-19T11:00:00+03:00",
+    minutes_until: 60,
   },
+  upcoming_today: [],
   inbox_preview: [],
   today_summary: { total_clients_today: 1, completed_count: 0, next_free_window: null },
   tab_badges: {
@@ -139,7 +142,7 @@ const DASHBOARD: DashboardResponse = {
     schedule_has_pending_change: false,
     profile_has_owner_pending_change: false,
   },
-  states: { is_day_done: false, is_offline_safe_response: false },
+  states: { is_day_done: false, is_offline_safe_response: false, day_off: false },
   week_summary: {
     week_start: "2026-08-31",
     week_end: "2026-09-06",
@@ -196,10 +199,10 @@ describe("DRF-1434 — приземление после онбординга м
       await screen.findByRole("button", { name: "Сохранить и продолжить" }),
     );
 
-    // Поверхность мастера — секции дашборда и расписание дня, ради
-    // которого весь путь и затевался.
-    expect(await screen.findByText("СЕЙЧАС")).toBeInTheDocument();
-    expect(screen.getByText("СЛЕДУЮЩИЙ КЛИЕНТ")).toBeInTheDocument();
+    // Поверхность мастера — блок дня «Сегодня» с ближайшей записью (DRF-2152:
+    // «СЕЙЧАС» / «СЛЕДУЮЩИЙ КЛИЕНТ» заменены состоянием дня по макету DRF-1182).
+    expect(await screen.findByRole("region", { name: /сегодня/i })).toBeInTheDocument();
+    expect(screen.getByText("Ближайшая запись")).toBeInTheDocument();
     // И ровно то, чего быть не должно: клиентское приветствие.
     expect(screen.queryByText(CLIENT_GREETING)).not.toBeInTheDocument();
   });

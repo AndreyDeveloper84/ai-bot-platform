@@ -1207,6 +1207,36 @@ a {
     background-color var(--dur-fast) var(--ease-out);
 }
 
+/* DRF-2152 — блок дня на «Сегодня» мастера (макет DRF-1182) */
+.master-dashboard__day-part + .master-dashboard__day-part {
+  margin-top: var(--s-3);
+}
+.master-dashboard__day-label {
+  margin: 0 0 var(--s-1);
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+.master-dashboard__day-until {
+  margin: var(--s-1) 0 0;
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+.master-dashboard__day-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+/* «Следующие спокойнее»: те же три поля, тише по тону. */
+.m-card--quiet {
+  background: color-mix(in srgb, var(--c-divider) 30%, var(--c-surface-1));
+}
+.m-card--quiet .m-card__title {
+  font-weight: 500;
+}
+
 .m-card--tappable {
   cursor: pointer;
 }
