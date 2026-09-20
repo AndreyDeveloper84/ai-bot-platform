@@ -8,15 +8,16 @@
  * `checked_at` (часы сервера), а не `new Date()`.
  *
  * Постоянная часть (всегда): имя клиента с инициалом · «20 августа · среда» ·
- * «15:30–16:30» + «1 ч» · услуга + «1 ч». Контекстный блок, один из:
+ * «15:30–16:30» + «60 мин» · услуга + «60 мин» (длительность — всегда
+ * минутами, ruling §61 М-6 ж). Контекстный блок, один из:
  *   upcoming  → «Следующая запись» · «Сегодня в 15:30» · «До визита 1 ч 20 мин»
  *   now       → «Сейчас по расписанию» · «15:30–16:30»
  *   after     → «Запись закончилась по расписанию» ·
  *                «Если всё прошло как запланировано, ничего делать не нужно.»
  *   completed → «Завершено»
  *   unknown   → «Проверяем результат» · «Не удалось получить актуальное
- *                состояние записи.» · [Проверить снова] (троттл 10 с, как у
- *                readiness; кнопка заблокирована на время запроса)
+ *                состояние записи.» · [Проверить снова] — общий SystemState
+ *                (DRF-2157); троттл 10 с и блок на время запроса — внутри него
  *
  * Отменённая (status cancelled/no_show) проверяется ДО temporal_state:
  * временного блока нет, одна строка «Запись отменена», без кнопок (решение
@@ -38,6 +39,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useLocation, useParams } from "react-router-dom";
 
+import { SystemState } from "../components/master/SystemState";
 import { MasterTabBar } from "../components/MasterTabBar";
 import { useScreenBack } from "../hooks/useScreenBack";
 import {
@@ -54,9 +56,6 @@ import {
 import { signalReady } from "../lib/max-sdk";
 import { backTo } from "../lib/screen-back";
 
-/** Не чаще раза в 10 с — как у readiness (решение главного окна 20.09). */
-export const RECHECK_MIN_INTERVAL_MS = 10_000;
-
 const COPY = {
   // Тексты макета DRF-1185 — дословно.
   stateRegion: "Состояние записи",
@@ -72,15 +71,10 @@ const COPY = {
     body: "Если всё прошло как запланировано, ничего делать не нужно.",
   },
   completed: "Завершено",
-  unknown: {
-    title: "Проверяем результат",
-    body: "Не удалось получить актуальное состояние записи.",
-    recheck: "Проверить снова",
-  },
+  // unknown: заголовок и кнопка — словарь SystemState (DRF-1181 п.10); тело — DRF-1185.
+  unknownBody: "Не удалось получить актуальное состояние записи.",
   // Вне макета — решение владельца §61.
   cancelled: "Запись отменена",
-  loading: "Загружаем запись…",
-  loadError: "Не удалось загрузить запись",
   range: (start: string, end: string) => `${start}–${end}`,
 };
 
@@ -115,26 +109,14 @@ export function MasterBookingDetailScreen() {
 
   const [phase, setPhase] = useState<Phase>({ kind: "loading" });
   const [busy, setBusy] = useState(false);
-  const [cooldown, setCooldown] = useState(false);
   const alive = useRef(true);
   const inflight = useRef<AbortController | null>(null);
-  const cooldownTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const armCooldown = useCallback(() => {
-    if (cooldownTimer.current) clearTimeout(cooldownTimer.current);
-    setCooldown(true);
-    cooldownTimer.current = setTimeout(() => {
-      if (alive.current) setCooldown(false);
-    }, RECHECK_MIN_INTERVAL_MS);
-  }, []);
-
-  const load = useCallback(
-    async (opts: { throttle: boolean } = { throttle: false }) => {
+  const load = useCallback(async () => {
       inflight.current?.abort();
       const ctrl = new AbortController();
       inflight.current = ctrl;
       setBusy(true);
-      if (opts.throttle) armCooldown();
       try {
         // Всегда — свежий ответ сервера, никакого локального «оптимизма» (§61 п.3).
         const data = await getMasterBooking(id, { signal: ctrl.signal });
@@ -146,50 +128,38 @@ export function MasterBookingDetailScreen() {
       } finally {
         if (alive.current && !ctrl.signal.aborted) setBusy(false);
       }
-    },
-    [id, armCooldown],
-  );
+  }, [id]);
 
   useEffect(() => {
     alive.current = true;
     signalReady();
     // Смена :id без размонтирования (назад/вперёд между двумя записями):
-    // чужие данные и остаток троттла новой записи не принадлежат.
+    // чужие данные новой записи не принадлежат; блок unknown размонтируется —
+    // с ним и остаток троттла «Проверить снова».
     setPhase({ kind: "loading" });
-    setCooldown(false);
     setBusy(false);
     void load();
     return () => {
       alive.current = false;
       inflight.current?.abort();
-      if (cooldownTimer.current) clearTimeout(cooldownTimer.current);
     };
   }, [load]);
 
-  // «Проверить снова» при unknown — с троттлом и блокировкой на время запроса.
-  const recheck = useCallback(() => {
-    if (busy || cooldown) return;
-    void load({ throttle: true });
-  }, [busy, cooldown, load]);
-
-  // Повтор после сбоя загрузки — без троттла: беречь нечего.
-  const retryAfterError = useCallback(() => {
+  // Всегда — свежий ответ сервера (§61 п.3). Троттл «Проверить снова» при
+  // unknown — внутри SystemState; повтор после сбоя — без троттла.
+  const reload = useCallback(() => {
     if (busy) return;
-    void load({ throttle: false });
+    void load();
   }, [busy, load]);
 
   return (
     <div className="master-dashboard">
       {phase.kind === "loading" ? (
-        <LoadingBody />
+        <SystemState kind="loading" />
       ) : phase.kind === "error" ? (
-        <ErrorBody onRetry={retryAfterError} busy={busy} />
+        <SystemState kind="load_error" what="booking" err={phase.err} busy={busy} onRetry={reload} />
       ) : (
-        <DetailBody
-          data={phase.data}
-          recheckDisabled={busy || cooldown}
-          onRecheck={recheck}
-        />
+        <DetailBody data={phase.data} busy={busy} onRecheck={reload} />
       )}
       <MasterTabBar scheduleHasPendingChange={false} />
     </div>
@@ -202,14 +172,15 @@ export function MasterBookingDetailScreen() {
 
 function DetailBody({
   data,
-  recheckDisabled,
+  busy,
   onRecheck,
 }: {
   data: MasterBookingDetail;
-  recheckDisabled: boolean;
+  busy: boolean;
   onRecheck: () => void;
 }) {
-  const duration = formatDurationRu(data.duration_min);
+  // Ruling §61 (М-6 ж): длительность всегда минутами, «1 ч» не переводим.
+  const duration = `${Math.max(0, Math.floor(data.duration_min))} мин`;
   const range = COPY.range(formatTimeHM(data.start_at), formatTimeHM(data.end_at));
   return (
     <main className="booking-detail__main" aria-labelledby="booking-detail-client">
@@ -237,7 +208,7 @@ function DetailBody({
           state={data.temporal_state}
           data={data}
           range={range}
-          recheckDisabled={recheckDisabled}
+          busy={busy}
           onRecheck={onRecheck}
         />
       )}
@@ -263,13 +234,13 @@ function StateBlock({
   state,
   data,
   range,
-  recheckDisabled,
+  busy,
   onRecheck,
 }: {
   state: BookingTemporalState;
   data: MasterBookingDetail;
   range: string;
-  recheckDisabled: boolean;
+  busy: boolean;
   onRecheck: () => void;
 }) {
   let tone = "booking-detail__state";
@@ -325,60 +296,18 @@ function StateBlock({
     case "unknown":
     default:
       // Незнакомое значение с сервера — «не знаем», а не утверждение о факте:
-      // блок «Проверяем результат» ничего не утверждает и даёт выход.
-      tone += " booking-detail__state--accent";
-      body = (
-        <>
-          <p className="booking-detail__state-title">
-            <IconRefresh /> {COPY.unknown.title}
-          </p>
-          <p className="booking-detail__state-line">{COPY.unknown.body}</p>
-          <button
-            type="button"
-            className="btn-secondary booking-detail__recheck"
-            onClick={onRecheck}
-            disabled={recheckDisabled}
-          >
-            {COPY.unknown.recheck}
-          </button>
-        </>
+      // общий блок «Проверяем результат» (DRF-1181 п.10) ничего не утверждает
+      // и даёт выход; тело — текст DRF-1185.
+      return (
+        <section className="booking-detail__state--bare" aria-label={COPY.stateRegion}>
+          <SystemState kind="pending" body={COPY.unknownBody} busy={busy} onRecheck={onRecheck} />
+        </section>
       );
-      break;
   }
   return (
     <section className={tone} aria-label={COPY.stateRegion}>
       {body}
     </section>
-  );
-}
-
-// ----------------------------------------------------------------------------
-// Loading / error
-// ----------------------------------------------------------------------------
-
-function LoadingBody() {
-  return (
-    <div className="master-dashboard__skeleton-wrap" aria-busy="true">
-      <p className="master-dashboard__loading-label">{COPY.loading}</p>
-      <div className="m-card m-card--skel" style={{ height: 56 }} />
-      <div className="m-card m-card--skel" style={{ height: 140 }} />
-      <div className="m-card m-card--skel" style={{ height: 96 }} />
-    </div>
-  );
-}
-
-function ErrorBody({ onRetry, busy }: { onRetry: () => void; busy: boolean }) {
-  return (
-    <div className="master-dashboard__section">
-      <div className="callout callout--danger" role="alert">
-        <p style={{ margin: 0 }}>{COPY.loadError}</p>
-        <div style={{ marginTop: "var(--s-3)" }}>
-          <button type="button" className="btn-secondary" onClick={onRetry} disabled={busy}>
-            {COPY.unknown.recheck}
-          </button>
-        </div>
-      </div>
-    </div>
   );
 }
 
@@ -427,15 +356,6 @@ function IconCheck() {
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
       <circle cx="12" cy="12" r="9" />
       <path d="M8 12l3 3 5-6" />
-    </svg>
-  );
-}
-
-function IconRefresh() {
-  return (
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8">
-      <path d="M20 12a8 8 0 1 1-2.3-5.7" />
-      <path d="M20 4v5h-5" />
     </svg>
   );
 }

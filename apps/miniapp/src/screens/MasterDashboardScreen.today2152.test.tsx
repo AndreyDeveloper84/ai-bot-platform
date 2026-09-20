@@ -16,7 +16,7 @@
  * Мокируется только `../lib/master-api` (как в App.masterTrio2121): экран
  * настоящий, дочерние карточки грузятся сами и тихо отказывают.
  */
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -31,6 +31,7 @@ vi.mock("../lib/master-api", async (importOriginal) => {
   };
 });
 
+import { ApiError } from "../lib/api";
 import { getDashboard, type DashboardResponse } from "../lib/master-api";
 import { MasterDashboardScreen } from "./MasterDashboardScreen";
 
@@ -153,7 +154,9 @@ describe("состояние 1 — ближайшая запись", () => {
     expect(screen.queryByText(/Сказала/)).toBeNull();
     expect(screen.queryByText(/Постоянный клиент/)).toBeNull();
     expect(screen.queryByText(/Открыть диалог/)).toBeNull();
-    expect(screen.queryByText(/90 мин/)).toBeNull();
+    // Длительность — поле карточки по DRF-1181 п.5 («⏱ 60 мин»), минутами (М-6, DRF-2157).
+    expect(within(day).getByText("90 мин")).toBeInTheDocument();
+    expect(screen.queryByText(/1 ч 30 мин/)).toBeNull();
     // Тап по записи → «Детали записи» (М-4, DRF-2156), не переписки.
     expect(within(day).queryByRole("button", { name: /Анна/ })).toBeNull();
     expect(within(day).getByRole("link", { name: /Анна/ })).toHaveAttribute(
@@ -306,5 +309,49 @@ describe("убрано по макету и §50 п.5", () => {
     // Положительный сторож той же отрисовки: шапка и «Спросить Ayla» на месте.
     expect(screen.getByText("Архипкин")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /Спросить Ayla/ })).toBeInTheDocument();
+  });
+});
+
+describe("системные состояния — через SystemState по DRF-1181 (М-6, DRF-2157)", () => {
+  it("первичная ошибка — «Не удалось загрузить» + «Попробовать снова»; старого текста нет", async () => {
+    mockedDashboard.mockRejectedValueOnce(new Error("boom")).mockResolvedValueOnce(doc());
+    renderAt();
+    expect(await screen.findByRole("alert")).toHaveTextContent("Не удалось загрузить сегодняшний день");
+    expect(screen.queryByText(/Не получилось загрузить/)).toBeNull();
+    expect(screen.queryByText(/Проверьте интернет/)).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Попробовать снова" }));
+    expect(await screen.findByRole("region", { name: /сегодня/i })).toBeInTheDocument();
+  });
+
+  it("403 — «Недостаточно прав» · «Это действие недоступно», не «Этот диалог не для вас»", async () => {
+    mockedDashboard.mockRejectedValue(new ApiError(403, "not_linked", "nope"));
+    renderAt();
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Недостаточно прав");
+    expect(alert).toHaveTextContent("Это действие недоступно");
+    expect(screen.queryByText(/Этот диалог не для вас/)).toBeNull();
+  });
+
+  it("обновление не удалось при данных — «Не удалось обновить» · «Показаны последние данные», данные на месте", async () => {
+    mockedDashboard.mockResolvedValueOnce(doc({ next_visit: NEXT })).mockRejectedValueOnce(new Error("boom"));
+    renderAt();
+    const day = await screen.findByRole("region", { name: /сегодня/i });
+    expect(within(day).getByText(/Анна П\./)).toBeInTheDocument();
+    // Pull-to-refresh: жест вниз ≥ 60px от верха.
+    const frame = day.closest(".master-dashboard") as HTMLElement;
+    fireEvent.touchStart(frame, { touches: [{ clientY: 10 }] });
+    fireEvent.touchEnd(frame, { changedTouches: [{ clientY: 100 }] });
+    const status = await screen.findByText("Не удалось обновить. Показаны последние данные");
+    expect(status.closest("[role=status]")).not.toBeNull();
+    expect(screen.queryByText(/Данные могут быть неактуальны/)).toBeNull();
+    // Данные не сброшены.
+    expect(within(screen.getByRole("region", { name: /сегодня/i })).getByText(/Анна П\./)).toBeInTheDocument();
+  });
+
+  it("загрузка — скелет без слов", () => {
+    mockedDashboard.mockReturnValue(new Promise(() => {}));
+    renderAt();
+    expect(screen.getByRole("status")).toHaveAttribute("aria-busy", "true");
+    expect(screen.queryByText(/Загружаем/)).toBeNull();
   });
 });
