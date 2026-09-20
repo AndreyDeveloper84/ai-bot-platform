@@ -200,22 +200,34 @@ function LoadError({
   busy = false,
   what,
 }: Extract<SystemStateProps, { kind: "load_error" }>) {
+  const { initial, subjects, withData } = SYSTEM_STATE_COPY.load_error;
   if (err instanceof ApiError) {
+    // Отказ транспорта / входа — эскалация независимо от hasData: сессии нет,
+    // полоса над живыми данными врала бы, что их можно обновить.
     // Перенос пути StateError (DRF-1893): отказ транспорта — возврат в MAX.
     if (isTransportRefusalSlug(err.slug)) return <OpenFromMaxBody />;
-    // Перенос пути StateError (DRF-1319): отказ входа — та же копия, что на HelloScreen.
+    // Перенос пути StateError (DRF-1319): отказ входа — та же копия, что на
+    // HelloScreen, с её же кнопкой повтора (без кнопки текст «нажмите кнопку»
+    // указывал бы в пустоту).
     if (isAuthRefusalSlug(err.slug)) {
       const copy = authErrorCopy(err.slug);
       return (
         <div className="system-state system-state--card system-state--danger" role="alert">
-          {copy.title ? <p className="system-state__title">{copy.title}</p> : null}
+          <p className="system-state__title">{copy.title}</p>
           <p className="system-state__body">{copy.body}</p>
+          <button
+            type="button"
+            className="btn-secondary system-state__cta"
+            onClick={onRetry}
+            disabled={busy}
+          >
+            {copy.retryLabel ?? initial.retry}
+          </button>
         </div>
       );
     }
     if (err.status === 403) return <Forbidden />;
   }
-  const { initial, subjects, withData } = SYSTEM_STATE_COPY.load_error;
   if (hasData) {
     return (
       <Banner

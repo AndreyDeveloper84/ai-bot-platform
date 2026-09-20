@@ -713,9 +713,6 @@ function DayView({
                 )}
                 serviceName={item.booking.service_name}
                 startIso={item.booking.visit_at}
-                endIso={new Date(
-                  new Date(item.booking.visit_at).getTime() + item.booking.duration_min * 60_000,
-                ).toISOString()}
                 durationMin={item.booking.duration_min}
                 to={bookingHref(item.booking)}
               />
@@ -1137,5 +1134,4 @@ function UnavailableSheet({
   );
 }
 
-// --- Loading / error -----------------------------------------------------
 

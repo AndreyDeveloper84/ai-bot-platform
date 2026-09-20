@@ -29,7 +29,8 @@ export interface MasterBookingCardProps {
   clientName: string;
   serviceName: string;
   startIso: string;
-  endIso: string;
+  /** Нужен только крупной карточке («10:30–11:30»); компактная показывает начало. */
+  endIso?: string;
   durationMin: number;
   /** Адрес «Деталей записи» своей поверхности. */
   to: string;
@@ -74,7 +75,7 @@ export function MasterBookingCard({
       {variant === "today" ? (
         <span className="master-booking-card__main">
           <span className="master-booking-card__time">
-            {start}–{formatTimeHM(endIso)}
+            {endIso ? `${start}–${formatTimeHM(endIso)}` : start}
           </span>
           <span className="master-booking-card__name">{clientName}</span>
           <span className="master-booking-card__service">{serviceName}</span>

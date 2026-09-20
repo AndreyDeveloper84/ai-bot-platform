@@ -17,7 +17,7 @@
  *
  * Словарь экспортируется как константы — сторож на дословность здесь же.
  */
-import { act, render, screen } from "@testing-library/react";
+import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
@@ -141,6 +141,25 @@ describe("offline / stale / load_error", () => {
     expect(screen.getByRole("alert")).toHaveTextContent("Недостаточно прав");
     expect(screen.getByRole("alert")).toHaveTextContent("Это действие недоступно");
     expect(screen.queryByRole("button")).toBeNull();
+  });
+
+  it("отказ входа (DRF-1319) — копия HelloScreen с её кнопкой повтора, не тупик", async () => {
+    const onRetry = vi.fn();
+    render(
+      <SystemState
+        kind="load_error"
+        err={new ApiError(403, "user_not_registered", "nope")}
+        onRetry={onRetry}
+        hasData
+      />,
+    );
+    const alert = screen.getByRole("alert");
+    expect(alert).not.toHaveTextContent("Недостаточно прав");
+    const btn = within(alert).getByRole("button");
+    await userEvent.click(btn);
+    expect(onRetry).toHaveBeenCalledTimes(1);
+    // Эскалация независимо от hasData: полосы «Не удалось обновить» нет.
+    expect(screen.queryByText(/Не удалось обновить/)).toBeNull();
   });
 
   it("отказ транспорта (DRF-1893) — возврат в MAX, а не повтор", () => {

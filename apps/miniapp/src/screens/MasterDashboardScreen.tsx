@@ -80,7 +80,7 @@ import { AvatarSheet } from "../components/AvatarSheet";
 import { MasterBookingCard } from "../components/master/MasterBookingCard";
 import { SystemState } from "../components/master/SystemState";
 import { MasterTabBar } from "../components/MasterTabBar";
-import { isOnline } from "../hooks/useOnline";
+import { useOnline } from "../hooks/useOnline";
 import { useMasterAvatarItems } from "../hooks/useMasterAvatarItems";
 import { AcceptingBookingsToggle } from "../components/AcceptingBookingsToggle";
 import { SetupProgressCard } from "../components/SetupProgressCard";
@@ -158,6 +158,8 @@ export function MasterDashboardScreen() {
   const lastGoodRef = useRef<DashboardResponse | null>(null);
   const [phase, setPhase] = useState<Phase>({ kind: "loading" });
   const [refreshing, setRefreshing] = useState(false);
+  // Реактивно: сеть вернулась — полоса сама сменится на «Не удалось обновить» с повтором.
+  const online = useOnline();
 
   // Pull-to-refresh state.
   const touchStartY = useRef<number | null>(null);
@@ -339,7 +341,7 @@ export function MasterDashboardScreen() {
 
       {/* Данные есть, обновить не вышло: без сети — «Нет подключения», иначе «Не удалось обновить». */}
       {isStale ? (
-        !isOnline() ? (
+        !online ? (
           <SystemState kind="offline" />
         ) : (
           <SystemState

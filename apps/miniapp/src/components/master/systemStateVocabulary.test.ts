@@ -24,18 +24,23 @@ const SCREEN_SOURCES = import.meta.glob("../../screens/Master*.tsx", {
   eager: true,
 }) as Record<string, string>;
 
-/** Фразы второго словаря. Кнопка сама по себе («Проверить снова») — не состояние. */
+/**
+ * Фразы второго словаря — как они стоят в исходнике, с открывающей кавычкой
+ * литерала, чтобы не ловить доменные тексты («Не получилось загрузить фото…»
+ * при загрузке файла — не состояние экрана). Кнопка сама по себе
+ * («Проверить снова») — не состояние.
+ */
 const ANALOGS: readonly string[] = [
-  "Данные могут быть неактуальны",
-  "Не получилось загрузить",
-  "Не удалось загрузить",
-  "Этот диалог не для вас",
-  "Нет сети",
-  "Что-то у нас не получается",
-  "Проверьте интернет",
-  "Загружаем ",
-  "Проверяем результат",
-  "Недостаточно прав",
+  '"Данные могут быть неактуальны',
+  '"Не получилось загрузить',
+  '"Не удалось загрузить ',
+  '"Этот диалог не для вас',
+  '"Нет сети',
+  '"Что-то у нас не получается',
+  '"Проверьте интернет',
+  '"Загружаем ',
+  '"Проверяем результат',
+  '"Недостаточно прав',
 ];
 
 /**
@@ -59,19 +64,44 @@ const BASELINE_M6B: ReadonlySet<string> = new Set([
   "MasterServicesScreen",
 ]);
 
+/**
+ * Доменные фразы, похожие на состояние, но не состояние экрана: результат
+ * действия (загрузка файла), не загрузка экрана. Ключ — имя экрана.
+ */
+const DOMAIN_ALLOW: Readonly<Record<string, readonly string[]>> = {
+  MasterProfileScreen: ['"Не получилось загрузить фото'],
+};
+
 function screenName(path: string): string {
   return path.replace(/^.*\//, "").replace(/\.tsx$/, "");
 }
 
-function analogsIn(src: string): string[] {
-  // Комментарии не считаем: шапка файла может упоминать снятый текст.
-  const code = src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+function analogsIn(src: string, screen = ""): string[] {
+  // Комментарии не считаем: шапка файла может упоминать снятый текст. Сначала
+  // глушим «/*» внутри строковых литералов (accept="image/*"), иначе он открыл
+  // бы ложный блочный комментарий и съел код до ближайшего «*/».
+  const masked = src.replace(/"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'/g, (m) =>
+    m.replace(/\/\*/g, "/ *"),
+  );
+  let code = masked.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+  for (const allowed of DOMAIN_ALLOW[screen] ?? []) code = code.split(allowed).join("");
   return ANALOGS.filter((a) => code.includes(a));
 }
 
 const screens = Object.entries(SCREEN_SOURCES)
   .filter(([path]) => !/\.test\.tsx$/.test(path))
   .map(([path, src]) => ({ name: screenName(path), src }));
+
+describe("сторож не слепнет от «/*» в строке", () => {
+  it('accept="image/*" не открывает ложный комментарий', () => {
+    const src = 'const a = <input accept="image/*" />;\nconst t = "Не получилось загрузить";\n{/* x */}';
+    expect(analogsIn(src)).toEqual(['"Не получилось загрузить']);
+  });
+  it("настоящие комментарии не считаются", () => {
+    const src = '/* "Не получилось загрузить" */\n// "Нет сети"\nconst t = 1;';
+    expect(analogsIn(src)).toEqual([]);
+  });
+});
 
 describe("системные состояния мастерских экранов — один словарь (DRF-2157)", () => {
   it("исходники экранов найдены", () => {
@@ -83,14 +113,14 @@ describe("системные состояния мастерских экран�
     for (const name of rewritten) {
       const s = screens.find((x) => x.name === name);
       expect(s, `${name}.tsx не найден`).toBeDefined();
-      expect(analogsIn(s!.src), `${name}: строки вне словаря SystemState`).toEqual([]);
+      expect(analogsIn(s!.src, name), `${name}: строки вне словаря SystemState`).toEqual([]);
     }
   });
 
   it("вне baseline — аналогов 0", () => {
     const offenders = screens
       .filter((s) => !BASELINE_M6B.has(s.name))
-      .map((s) => ({ name: s.name, hits: analogsIn(s.src) }))
+      .map((s) => ({ name: s.name, hits: analogsIn(s.src, s.name) }))
       .filter((s) => s.hits.length > 0);
     expect(offenders, "экран со своим словарём состояний — перепиши через SystemState").toEqual([]);
   });
@@ -98,7 +128,7 @@ describe("системные состояния мастерских экран�
   it("baseline не переживает свою причину: чистый экран из списка убран", () => {
     const stale = [...BASELINE_M6B].filter((name) => {
       const s = screens.find((x) => x.name === name);
-      return s !== undefined && analogsIn(s.src).length === 0;
+      return s !== undefined && analogsIn(s.src, s.name).length === 0;
     });
     expect(stale, "экран переписан — убери его из BASELINE_M6B").toEqual([]);
     const missing = [...BASELINE_M6B].filter((name) => !screens.some((x) => x.name === name));
