@@ -40,8 +40,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { Link, useLocation, useNavigate } from "react-router-dom";
-import { ApiError } from "../lib/api";
+import { Link, useLocation } from "react-router-dom";
 import { DEFAULT_SALON_OWNER_HINT } from "../lib/salonOwnerHint";
 import {
   getMasterSchedule,
@@ -51,7 +50,6 @@ import {
   type MasterScheduleResponse,
   type PendingAvailabilityItem,
   type ScheduleBooking,
-  type ScheduleConflict,
   type ScheduleDay,
   type ScheduleFreeWindow,
 } from "../lib/master-api";
@@ -62,11 +60,12 @@ import {
   signalReady,
 } from "../lib/max-sdk";
 import { MasterAvatar } from "../components/MasterAvatar";
+import { MasterBookingCard } from "../components/master/MasterBookingCard";
+import { SystemState } from "../components/master/SystemState";
 import { MasterTabBar } from "../components/MasterTabBar";
 import { Snackbar } from "../components/Snackbar";
 import {
   addDays,
-  addMinutesHm,
   formatMonthHeaderRu,
   formatWeekHeaderRu,
   formatWeekRangeRu,
@@ -97,11 +96,8 @@ const COPY = {
     month: "Месяц",
   },
   freeWindow: (min: number) => `свободно · ${min} мин`,
-  endingApprox: (hm: string) => `заканчивается ≈${hm}`,
-  returning: "постоянный клиент",
   outsideHours: "вне рабочего времени",
   offDayLabel: "выходной",
-  conflictChip: "⚠ Конфликт расписания",
   conflictTapHint: "уточнить у админа",
   conflictBanner: "⚠ Конфликт расписания — посмотрите",
   emptyDay: "Свободный день. Отдыхайте.",
@@ -136,9 +132,7 @@ const COPY = {
     n === 0
       ? "0 окон"
       : `${n} ${pluralRu(n, "окно", "окна", "окон")}`,
-  loading: "Загружаем расписание…",
-  errorTitle: "Не получилось загрузить",
-  retry: "Попробовать снова",
+  // Системные состояния — через SystemState (DRF-2157, макет DRF-1181 п.10).
   weekDayLink: "Открыть день ›",
   weekDayActiveSuffix: "(сегодня)",
 };
@@ -186,7 +180,6 @@ const EMPTY_SHEET: UnavailableSheetState = {
 // --- Component ------------------------------------------------------------
 
 export function MasterScheduleScreen() {
-  const navigate = useNavigate();
   const location = useLocation();
 
   const [view, setView] = useState<SegmentView>("day");
@@ -280,15 +273,10 @@ export function MasterScheduleScreen() {
   // список переписок — прямой переписки мастера с клиентом нет (§50 п.5).
   // Соло и салонный мастер делят экран; поверхность — по адресу.
   const isSolo = location.pathname.startsWith("/solo/");
-  const onBookingTap = useCallback(
-    (booking: ScheduleBooking) => {
-      hapticSelection();
-      navigate(
-        `${isSolo ? "/solo" : "/master"}/bookings/${encodeURIComponent(booking.booking_id)}`,
-        { state: { from: location.pathname } },
-      );
-    },
-    [navigate, isSolo, location.pathname],
+  const bookingHref = useCallback(
+    (booking: ScheduleBooking) =>
+      `${isSolo ? "/solo" : "/master"}/bookings/${encodeURIComponent(booking.booking_id)}`,
+    [isSolo],
   );
 
   // --- Free-window tap → mark-unavailable sheet ------------------------
@@ -385,16 +373,16 @@ export function MasterScheduleScreen() {
           onJumpToday={onJumpToday}
         />
         {phase.kind === "loading" ? (
-          <ScheduleSkeleton />
+          <SystemState kind="loading" />
         ) : phase.kind === "error_initial" ? (
-          <ScheduleError err={phase.err} onRetry={() => void load()} />
+          <SystemState kind="load_error" what="schedule" err={phase.err} onRetry={() => void load()} />
         ) : (
           <ScheduleBody
             view={view}
             anchor={anchor}
             data={phase.data}
             pending={phase.pending}
-            onBookingTap={onBookingTap}
+            bookingHref={bookingHref}
             onFreeSlotTap={onFreeSlotTap}
             onMarkOffDay={onMarkOffDay}
             onSwitchToDay={(d) => {
@@ -577,7 +565,7 @@ function ScheduleBody({
   anchor,
   data,
   pending,
-  onBookingTap,
+  bookingHref,
   onFreeSlotTap,
   onMarkOffDay,
   onSwitchToDay,
@@ -586,7 +574,7 @@ function ScheduleBody({
   anchor: Date;
   data: MasterScheduleResponse;
   pending: PendingAvailabilityItem[];
-  onBookingTap: (b: ScheduleBooking) => void;
+  bookingHref: (b: ScheduleBooking) => string;
   onFreeSlotTap: (day: ScheduleDay, window: ScheduleFreeWindow) => void;
   onMarkOffDay: (day: ScheduleDay) => void;
   onSwitchToDay: (date: Date) => void;
@@ -597,7 +585,7 @@ function ScheduleBody({
       {view === "day" ? (
         <DayView
           day={pickDay(data, anchor)}
-          onBookingTap={onBookingTap}
+          bookingHref={bookingHref}
           onFreeSlotTap={onFreeSlotTap}
           onMarkOffDay={onMarkOffDay}
         />
@@ -670,12 +658,12 @@ function formatBannerDate(iso: string): string {
 
 function DayView({
   day,
-  onBookingTap,
+  bookingHref,
   onFreeSlotTap,
   onMarkOffDay,
 }: {
   day: ScheduleDay | null;
-  onBookingTap: (b: ScheduleBooking) => void;
+  bookingHref: (b: ScheduleBooking) => string;
   onFreeSlotTap: (day: ScheduleDay, window: ScheduleFreeWindow) => void;
   onMarkOffDay: (day: ScheduleDay) => void;
 }) {
@@ -717,10 +705,19 @@ function DayView({
         {items.map((item, idx) => (
           <li key={idx}>
             {item.kind === "booking" ? (
-              <BookingCard
-                booking={item.booking}
-                conflict={findConflict(day.conflicts, item.booking.booking_id)}
-                onTap={() => onBookingTap(item.booking)}
+              <MasterBookingCard
+                variant="schedule"
+                clientName={joinClientName(
+                  item.booking.client_first_name,
+                  item.booking.client_last_initial,
+                )}
+                serviceName={item.booking.service_name}
+                startIso={item.booking.visit_at}
+                endIso={new Date(
+                  new Date(item.booking.visit_at).getTime() + item.booking.duration_min * 60_000,
+                ).toISOString()}
+                durationMin={item.booking.duration_min}
+                to={bookingHref(item.booking)}
               />
             ) : item.kind === "free" ? (
               <FreeWindowCard
@@ -779,13 +776,6 @@ function buildDayItems(day: ScheduleDay): DayItem[] {
   return items;
 }
 
-function findConflict(
-  conflicts: ScheduleConflict[],
-  bookingId: string,
-): ScheduleConflict | undefined {
-  return conflicts.find((c) => c.booking_id === bookingId);
-}
-
 function ConflictBanner() {
   return (
     <div
@@ -798,55 +788,6 @@ function ConflictBanner() {
         {COPY.conflictTapHint}
       </p>
     </div>
-  );
-}
-
-function BookingCard({
-  booking,
-  conflict,
-  onTap,
-}: {
-  booking: ScheduleBooking;
-  conflict: ScheduleConflict | undefined;
-  onTap: () => void;
-}) {
-  const startHm = localHmFromIso(booking.visit_at);
-  const endHm = addMinutesHm(startHm, booking.duration_min);
-  const clientName = joinClientName(
-    booking.client_first_name,
-    booking.client_last_initial,
-  );
-  return (
-    <button type="button" className="m-card m-card--tappable" onClick={onTap}>
-      <div className="m-card__title">
-        {booking.is_in_progress ? (
-          <span
-            className="m-card__dot m-card__dot--red"
-            aria-label="идёт сейчас"
-          />
-        ) : null}
-        <span>
-          {startHm} — {clientName} · {booking.service_name} ·{" "}
-          {booking.duration_min} мин
-        </span>
-      </div>
-      {booking.is_in_progress ? (
-        <div className="m-card__meta">{COPY.endingApprox(endHm)}</div>
-      ) : null}
-      {booking.is_returning_customer ? (
-        <div className="m-card__chip m-card__chip--warning">
-          {COPY.returning}
-        </div>
-      ) : null}
-      {conflict ? (
-        <div
-          className="m-card__chip m-card__chip--warning"
-          style={{ display: "block", marginTop: "var(--s-2)" }}
-        >
-          {COPY.conflictChip} — {conflict.description}
-        </div>
-      ) : null}
-    </button>
   );
 }
 
@@ -1198,57 +1139,3 @@ function UnavailableSheet({
 
 // --- Loading / error -----------------------------------------------------
 
-function ScheduleSkeleton() {
-  return (
-    <div className="master-dashboard__skeleton-wrap" aria-busy="true">
-      <p className="master-dashboard__loading-label">{COPY.loading}</p>
-      <div className="m-card m-card--skel">
-        <div className="skeleton" style={{ width: "70%", height: "1.1em" }} />
-        <div
-          className="skeleton"
-          style={{ width: "55%", height: "0.9em", marginTop: 8 }}
-        />
-      </div>
-      <div className="m-card m-card--skel">
-        <div className="skeleton" style={{ width: "50%", height: "1.1em" }} />
-        <div
-          className="skeleton"
-          style={{ width: "60%", height: "0.9em", marginTop: 8 }}
-        />
-      </div>
-      <div className="m-card m-card--skel">
-        <div className="skeleton" style={{ width: "65%", height: "1.1em" }} />
-        <div
-          className="skeleton"
-          style={{ width: "45%", height: "0.9em", marginTop: 8 }}
-        />
-      </div>
-    </div>
-  );
-}
-
-function ScheduleError({
-  err,
-  onRetry,
-}: {
-  err: unknown;
-  onRetry: () => void;
-}) {
-  const isServer = err instanceof ApiError && err.status >= 500;
-  const body = isServer
-    ? "Что-то у нас не получается прямо сейчас."
-    : "Не получилось загрузить. Проверьте интернет и попробуйте снова.";
-  return (
-    <div className="master-dashboard__section">
-      <h2 className="master-dashboard__section-title">{COPY.errorTitle}</h2>
-      <div className="callout callout--danger" role="alert">
-        <p style={{ margin: 0 }}>{body}</p>
-        <div style={{ marginTop: "var(--s-3)" }}>
-          <button type="button" className="btn-secondary" onClick={onRetry}>
-            {COPY.retry}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}

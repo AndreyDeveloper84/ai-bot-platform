@@ -9007,3 +9007,177 @@ a {
 .photo-crop__zoom input[type="range"] {
   flex: 1;
 }
+
+/* DRF-2157 (М-6) — универсальные системные состояния мастерских экранов
+   (макет DRF-1181 п.10). Карточка (loading/empty/forbidden/pending/conflict/
+   первичная ошибка), полоса (offline/stale/ошибка при данных), строка
+   (refreshing). Появляются на любом экране /master|solo — одним видом. */
+.system-state {
+  color: var(--c-text-primary);
+}
+.system-state--skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+.system-state--inline {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-2);
+  font-size: var(--font-size-200);
+  color: var(--c-text-secondary);
+  padding: var(--s-1) 0 var(--s-2);
+}
+.system-state--card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: var(--s-2);
+  padding: var(--s-5) var(--s-4);
+  border-radius: var(--r-lg);
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  margin: var(--s-3) 0;
+}
+.system-state--accent {
+  background: color-mix(in srgb, var(--c-accent-subtle) 60%, var(--c-surface-1));
+}
+.system-state--danger {
+  background: color-mix(in srgb, var(--c-danger) 8%, var(--c-surface-1));
+}
+.system-state--banner {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  padding: var(--s-2) var(--s-3);
+  border-radius: var(--r-md);
+  background: var(--c-surface-2);
+  margin-bottom: var(--s-3);
+}
+.system-state__icon {
+  display: inline-flex;
+  color: var(--c-text-secondary);
+  flex-shrink: 0;
+}
+.system-state--danger .system-state__icon {
+  color: var(--c-danger);
+}
+.system-state--accent .system-state__icon {
+  color: var(--c-accent);
+}
+.system-state__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--c-accent);
+}
+.system-state__text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+.system-state__title {
+  margin: 0;
+  font-size: var(--font-size-300);
+  font-weight: 600;
+  line-height: var(--leading-tight);
+}
+.system-state--banner .system-state__title,
+.system-state--inline .system-state__title {
+  font-size: var(--font-size-200);
+}
+.system-state__body {
+  margin: 0;
+  font-size: var(--font-size-200);
+  color: var(--c-text-secondary);
+  line-height: var(--leading-base);
+}
+.system-state__cta {
+  margin-top: var(--s-2);
+}
+.system-state__link {
+  background: none;
+  border: 0;
+  color: var(--c-accent);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  padding: var(--s-1) var(--s-2);
+  min-height: 32px;
+}
+.system-state__link:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* DRF-2157 (М-6) — карточка записи мастера (макет DRF-1181 п.5): крупная на
+   «Сегодня», компактная в «Расписании». Ссылка на «Детали записи». */
+.master-booking-card {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-left: 3px solid var(--c-accent);
+  border-radius: var(--r-md);
+  padding: var(--s-3) var(--s-4);
+  color: inherit;
+  text-decoration: none;
+  transition: background-color var(--dur-fast) var(--ease-out);
+}
+.master-booking-card:active {
+  background: var(--c-surface-2);
+}
+.master-booking-card--quiet {
+  border-left-color: var(--c-divider);
+  background: color-mix(in srgb, var(--c-divider) 30%, var(--c-surface-1));
+}
+.master-booking-card__main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+.master-booking-card__time {
+  font-size: var(--font-size-300);
+  font-weight: 600;
+  color: var(--c-text-primary);
+  white-space: nowrap;
+}
+.master-booking-card--today .master-booking-card__time {
+  font-size: var(--font-size-400);
+}
+.master-booking-card__name {
+  font-size: var(--font-size-300);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+.master-booking-card--quiet .master-booking-card__name {
+  font-weight: 500;
+}
+.master-booking-card__service {
+  font-size: var(--font-size-200);
+  color: var(--c-text-secondary);
+}
+.master-booking-card__duration {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-1);
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+  margin-top: var(--s-1);
+}
+.master-booking-card__chevron {
+  color: var(--c-text-secondary);
+  font-size: var(--font-size-400);
+  line-height: 1;
+  flex-shrink: 0;
+}
+/* Блок unknown на «Деталях записи» — общий SystemState внутри региона состояния. */
+.booking-detail__state--bare {
+  margin: 0;
+}

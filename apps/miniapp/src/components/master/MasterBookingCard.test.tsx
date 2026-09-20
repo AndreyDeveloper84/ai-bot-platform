@@ -3,8 +3,11 @@
  * (DRF-2157, М-6). «Показываем только кто · что · когда. Не показываем:
  * телефон, стоимость, оплату, источник, комментарии, тех. статусы.»
  *
- *   today    (крупная):   10:30–11:30 / Анна К. / Классический массаж / ⏱ 1 ч / ›
- *   schedule (компактная): 10:30 | Анна К. / Классический массаж · 1 ч / ›
+ *   today    (крупная):   10:30–11:30 / Анна К. / Классический массаж / ⏱ 60 мин / ›
+ *   schedule (компактная): 10:30 | Анна К. / Классический массаж · 60 мин / ›
+ *
+ * Длительность — минутами, как пишут макеты DRF-1181 п.5 и DRF-1183 («60 мин»);
+ * для нецелых часов макета нет — тоже минутами («90 мин»), отступление (ж).
  *
  * Карточка — ссылка на «Детали записи» (DRF-1183 «нажатие на запись → экран
  * деталей»). Набор полей закрыт: лишнего пропа нет, лишнего текста нет.
@@ -41,13 +44,14 @@ describe("режим «Сегодня» (крупная)", () => {
     expect(link).toHaveTextContent("10:30–11:30");
     expect(link).toHaveTextContent("Анна К.");
     expect(link).toHaveTextContent("Классический массаж");
-    expect(link).toHaveTextContent("1 ч");
+    expect(link).toHaveTextContent("60 мин");
+    expect(link).not.toHaveTextContent("1 ч");
   });
 
-  it("длительность — общим форматтером: 90 → «1 ч 30 мин», не «90 мин»", () => {
+  it("длительность минутами, как в макете: 90 → «90 мин» (отступление (ж): макета для нецелых часов нет)", () => {
     renderCard({ durationMin: 90 });
-    expect(screen.getByRole("link")).toHaveTextContent("1 ч 30 мин");
-    expect(screen.queryByText(/90 мин/)).toBeNull();
+    expect(screen.getByRole("link")).toHaveTextContent("90 мин");
+    expect(screen.queryByText(/1 ч 30 мин/)).toBeNull();
   });
 
   it("quiet — те же поля, тише по тону (класс)", () => {
@@ -63,7 +67,7 @@ describe("режим «Расписание» (компактная)", () => {
     const link = screen.getByRole("link", { name: /Анна К\./ });
     expect(link).toHaveAttribute("href", "/solo/bookings/b-1");
     expect(link).toHaveTextContent("10:30");
-    expect(link).toHaveTextContent("Классический массаж · 1 ч");
+    expect(link).toHaveTextContent("Классический массаж · 60 мин");
     // Компактная — без конца интервала.
     expect(link).not.toHaveTextContent("11:30");
   });

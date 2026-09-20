@@ -154,7 +154,9 @@ describe("состояние 1 — ближайшая запись", () => {
     expect(screen.queryByText(/Сказала/)).toBeNull();
     expect(screen.queryByText(/Постоянный клиент/)).toBeNull();
     expect(screen.queryByText(/Открыть диалог/)).toBeNull();
-    expect(screen.queryByText(/90 мин/)).toBeNull();
+    // Длительность — поле карточки по DRF-1181 п.5 («⏱ 60 мин»), минутами (М-6, DRF-2157).
+    expect(within(day).getByText("90 мин")).toBeInTheDocument();
+    expect(screen.queryByText(/1 ч 30 мин/)).toBeNull();
     // Тап по записи → «Детали записи» (М-4, DRF-2156), не переписки.
     expect(within(day).queryByRole("button", { name: /Анна/ })).toBeNull();
     expect(within(day).getByRole("link", { name: /Анна/ })).toHaveAttribute(
@@ -314,7 +316,7 @@ describe("системные состояния — через SystemState по 
   it("первичная ошибка — «Не удалось загрузить» + «Попробовать снова»; старого текста нет", async () => {
     mockedDashboard.mockRejectedValueOnce(new Error("boom")).mockResolvedValueOnce(doc());
     renderAt();
-    expect(await screen.findByRole("alert")).toHaveTextContent("Не удалось загрузить");
+    expect(await screen.findByRole("alert")).toHaveTextContent("Не удалось загрузить сегодняшний день");
     expect(screen.queryByText(/Не получилось загрузить/)).toBeNull();
     expect(screen.queryByText(/Проверьте интернет/)).toBeNull();
     await userEvent.click(screen.getByRole("button", { name: "Попробовать снова" }));
@@ -339,8 +341,8 @@ describe("системные состояния — через SystemState по 
     const frame = day.closest(".master-dashboard") as HTMLElement;
     fireEvent.touchStart(frame, { touches: [{ clientY: 10 }] });
     fireEvent.touchEnd(frame, { changedTouches: [{ clientY: 100 }] });
-    const status = await screen.findByText("Не удалось обновить");
-    expect(status.closest("[role=status]")).toHaveTextContent("Показаны последние данные");
+    const status = await screen.findByText("Не удалось обновить. Показаны последние данные");
+    expect(status.closest("[role=status]")).not.toBeNull();
     expect(screen.queryByText(/Данные могут быть неактуальны/)).toBeNull();
     // Данные не сброшены.
     expect(within(screen.getByRole("region", { name: /сегодня/i })).getByText(/Анна П\./)).toBeInTheDocument();

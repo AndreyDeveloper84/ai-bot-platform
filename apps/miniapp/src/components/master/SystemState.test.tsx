@@ -7,8 +7,9 @@
  *   empty        — текст экрана (у «Сегодня» — «На сегодня записей нет»)
  *   offline      — «Нет подключения» · «Показаны последние данные»
  *   stale        — «Расписание могло измениться»
- *   load_error   — с данными: «Не удалось обновить» · «Показаны последние данные»;
- *                  первичная: «Не удалось загрузить» + [Попробовать снова]
+ *   load_error   — с данными: «Не удалось обновить. Показаны последние данные»;
+ *                  первичная: «Не удалось загрузить <предмет экрана>» + [Попробовать снова]
+ *                  (ruling §61 М-6 б/е; «Проверить снова» — только у pending)
  *   forbidden    — «Недостаточно прав» · «Это действие недоступно»
  *   pending      — «Проверяем результат» · «Не удалось подтвердить, сохранилось
  *                  ли изменение.» + [Проверить снова] (троттл 10 с, блок в полёте)
@@ -40,9 +41,9 @@ describe("словарь — дословно по DRF-1181 п.10", () => {
     });
     expect(SYSTEM_STATE_COPY.stale).toEqual({ title: "Расписание могло измениться" });
     expect(SYSTEM_STATE_COPY.load_error).toEqual({
-      withData: { title: "Не удалось обновить", body: "Показаны последние данные" },
+      withData: { text: "Не удалось обновить. Показаны последние данные" },
       initial: { title: "Не удалось загрузить", retry: "Попробовать снова" },
-      booking: { title: "Не удалось загрузить запись", retry: "Проверить снова" },
+      subjects: { today: "сегодняшний день", schedule: "расписание", booking: "запись" },
     });
     expect(SYSTEM_STATE_COPY.forbidden).toEqual({
       title: "Недостаточно прав",
@@ -94,12 +95,12 @@ describe("offline / stale / load_error", () => {
     expect(screen.getByRole("status")).toHaveTextContent("Расписание могло измениться");
   });
 
-  it("load_error с данными — «Не удалось обновить» · «Показаны последние данные» + повтор", async () => {
+  it("load_error с данными — «Не удалось обновить. Показаны последние данные» (одной фразой) + повтор", async () => {
     const onRetry = vi.fn();
     render(<SystemState kind="load_error" err={new Error("x")} hasData onRetry={onRetry} />);
     const el = screen.getByRole("status");
-    expect(el).toHaveTextContent("Не удалось обновить");
-    expect(el).toHaveTextContent("Показаны последние данные");
+    expect(el).toHaveTextContent("Не удалось обновить. Показаны последние данные");
+    expect(el).not.toHaveTextContent("·");
     await userEvent.click(screen.getByRole("button", { name: "Попробовать снова" }));
     expect(onRetry).toHaveBeenCalledTimes(1);
   });
@@ -115,11 +116,16 @@ describe("offline / stale / load_error", () => {
     expect(screen.queryByText(/Что-то у нас не получается/)).toBeNull();
   });
 
-  it("load_error для записи (§61 п.3) — «Не удалось загрузить запись» + [Проверить снова]", async () => {
+  it.each([
+    ["booking", "Не удалось загрузить запись"],
+    ["schedule", "Не удалось загрузить расписание"],
+    ["today", "Не удалось загрузить сегодняшний день"],
+  ] as const)("load_error what=%s — «%s» + [Попробовать снова]; «Проверить снова» здесь нет", async (what, title) => {
     const onRetry = vi.fn();
-    render(<SystemState kind="load_error" what="booking" err={new Error("x")} onRetry={onRetry} />);
-    expect(screen.getByRole("alert")).toHaveTextContent("Не удалось загрузить запись");
-    await userEvent.click(screen.getByRole("button", { name: "Проверить снова" }));
+    render(<SystemState kind="load_error" what={what} err={new Error("x")} onRetry={onRetry} />);
+    expect(screen.getByRole("alert")).toHaveTextContent(title);
+    expect(screen.queryByRole("button", { name: "Проверить снова" })).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Попробовать снова" }));
     expect(onRetry).toHaveBeenCalledTimes(1);
   });
 
