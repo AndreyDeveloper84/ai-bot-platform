@@ -188,6 +188,9 @@ MINIAPP_ROUTES: dict[str, str] = {
     "open_food_scan": "customer/food-scanner/capture",
     "open_water_add_250": "customer/wellness",
     "open_goal_select": "customer/goal-select",
+    # DRF-2125 — «Мой план» с карточки плана в чате («Изменить» /
+    # «Изменить план»); экран — за ``VITE_PLAN_LITE`` (DRF-2101).
+    "open_plan": "customer/plan",
     "open_home": "customer/main",
     # DRF-1491 — главное меню витрины (``apps.skills.menu.marketplace``).
     # Два экрана, у которых слага до сих пор не было.
