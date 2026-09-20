@@ -237,6 +237,9 @@ class TestP1EveryKindRendersWithButtons:
             service_name="Массаж",
         )
         return {
+            "digest": sn.digest_notice(
+                salon.tenant, local_date=timezone.now().date(), lines=["Сегодня:", "7 записей."]
+            ),
             "handoff": sn.handoff_waiting_notice(task),
             "schedule": sn.schedule_request_notice(req, impact=sn.Impact(state="ok", affected=1)),
             "sync": sn.sync_failed_notice(salon.tenant, age),
@@ -244,16 +247,16 @@ class TestP1EveryKindRendersWithButtons:
             "booking": sn.booking_attention_notice(proxy, reason="cancelled_by_client"),
         }
 
-    def test_kinds_are_the_five_of_the_ticket(self) -> None:
+    def test_kinds_are_the_six_of_the_ticket(self) -> None:
         from apps.channels.max import salon_notify as sn
 
-        assert set(sn.KINDS) == {"handoff", "schedule", "sync", "master_off", "booking"}
+        assert set(sn.KINDS) == {"handoff", "schedule", "sync", "master_off", "booking", "digest"}
 
     def test_each_kind_renders_title_facts_and_parseable_buttons(self, salon, two_bots) -> None:
         from apps.channels.max import salon_notify as sn
 
         notices = self._all(salon)
-        assert set(notices) == set(sn.KINDS)  # положительно: все пять построены
+        assert set(notices) == set(sn.KINDS)  # положительно: все шесть построены
         for kind, notice in notices.items():
             assert notice.kind == kind
             text = sn.render(notice)
@@ -274,6 +277,7 @@ class TestP1EveryKindRendersWithButtons:
         assert {"open", "return"} <= actions["handoff"]
         assert {"retry", "details"} <= actions["sync"]
         assert urls["master_off"] and urls["booking"]  # «Открыть карточку» / «Открыть запись»
+        assert urls["digest"]  # «Открыть салон»
 
 
 # ── p2 — узел: событие → одно сообщение; повтор → нет дубля ──────────
