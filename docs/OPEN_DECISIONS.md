@@ -9849,3 +9849,51 @@ G6 (локальная сыпь «сыпь и зуд после крема»): �
 
 **Затронутый код:**
 НЕ ПРИМЕНИМО — документальное решение; runtime, тесты и code fixtures в этом § не меняются.
+
+---
+
+## §166. ОТВЕЧЕН (20.09.2026): product-контракт `safety_recheck` / `CLEARED_BY_RECHECK` — единственная точка входа `safety_recheck.start`; формула `ANY(1..5) AND ALL(6..8)`; граница с CLARIFY; provenance contract; Пакет A (docs) / Пакет B (runtime)
+
+**Источник:** решение владельца (Андрей Тихонов) 20.09.2026 — ответ «относится ко всем пяти решениям ниже»; дословный текст решений 1–5 и полного сообщения — immutable record `docs/safety/reviews/OWNER_RULINGS_SAFETY_RECHECK_CONTRACT_2026-09-20.md` (RECORD SHA-256 `e7b54cc3d9a27c6a067d54b7e725122093ca630f59abced86af7ce23b25a6ff1`; регистрация — [§167]); engineering rendering — `docs/safety/reviews/AYLA_S1_SAFETY_RECHECK_CONTRACT_DELTA_v0.1_2026-09-20.md`. Статус `OWNER APPROVED — PENDING PHYSICIAN CONFIRMATION`. Не physician sign-off, не `CLINICAL APPROVED`, не `SAFE FOR PILOT`. Уточняет [§156] и [§162], **не отменяет** их: механика «S1_STOP снимается только явным `safety_recheck`» и восемь условий сохраняются; здесь они получают точку входа, логическую формулу и provenance contract. Закрывает DRF-2040 q1–q3 на уровне owner-контракта (runtime — Пакет B).
+
+**Решение 1 — точка входа.** `safety_recheck` запускается только явным действием пользователя при активном ограничении: единый action ID `safety_recheck.start`; Telegram, MAX и Mini App — один backend-контракт; обычная следующая реплика, распознанное текстовое намерение, новая сессия, новый intent, TTL и повторная попытка записи **не** запускают recheck; owner-approved кандидат текста кнопки — «Повторно проверить безопасность»; действие показывается только при активном S1 restriction. Это регистрация контракта, а не разрешение реализовать кнопку сейчас.
+
+**Решение 2 — формула допуска.** `CLEARED_BY_RECHECK` допустим, только когда доказано хотя бы одно квалифицирующее основание — (1) исходный personal S1 был ложным срабатыванием; (2) сообщение было цитатой, гипотезой или переносным выражением; (3) сообщение относилось к другому человеку; (4) исправлена доказуемая опечатка или полярность; (5) ambiguous-сигнал после зарегистрированного конкретного вопроса однозначно оказался вне S1 — **и** одновременно пройдены все три обязательных guard: (6) нет `UNKNOWN`; (7) нет нового S1; (8) нет подтверждённого recent-resolved события, для которого исчезновение симптома не снимает срочность.
+
+```text
+eligible_basis = ANY(1..5)
+mandatory_guards = ALL(6..8)
+CLEARED_BY_RECHECK = eligible_basis AND mandatory_guards
+```
+
+§162 **не** читается как требование выполнить все пункты 1–5 одновременно: это взаимоисключающие альтернативные основания. Context / evidence correction ≠ выздоровление. «Мне лучше», «всё прошло», «сейчас нормально», detector silence, TTL, новая сессия, новый intent, желание записаться — не квалифицирующее основание.
+
+**Решение 3 — граница с CLARIFY.** Ограничение `open` (ambiguous-сигнал) разрешается только зарегистрированным конкретным вопросом и однозначным результатом `OUTSIDE_S1`; простое «нет», молчание, уклонение, свободная отрицательная фраза, новая тема — недостаточны. Ограничение `stop` нельзя понизить обычным CLARIFY-вопросом — только отдельный полный `safety_recheck`. Текущее поведение G4 из PR #1893 не меняется (вопрос повторяется, ограничение сохраняется); пока не утверждён детерминированный negative / safe answer contract, существующий G4-вопрос сам по себе не создаёт `CLEARED_BY_RECHECK`.
+
+**Решение 4 — provenance contract.** Любой recheck (успешный или нет) оставляет audit / provenance record без сырого медицинского текста; минимальная схема (schema_version, recheck_id, mechanism = safety_recheck, trigger = explicit_user_action, restriction_ref, original_group, original_status, question_contract_version, qualifying_basis[], guard_results {unknown_absent, new_s1_absent, disqualifying_recent_resolved_absent}, detector_result, evidence_refs[] — только ID, started_at, completed_at, result ∈ {CLEARED_BY_RECHECK, STOP_PERSISTS, S1_NOT_CURRENT_MEDICAL_FOLLOWUP_REQUIRED}, policy_refs) — дословно в record. Требования: active restriction и audit record — разные сущности; успешный recheck снимает продуктовый блокиратор, историю не уничтожает; новый `SafetyState` не создаётся; `CLEARED_BY_RECHECK` ≠ `NORMAL` / medical clearance / разрешение врача; `S1_NOT_CURRENT_MEDICAL_FOLLOWUP_REQUIRED` не разблокирует health-sensitive recommendation / booking. На docs-этапе — logical contract; runtime storage / таблица — только после отдельного architecture review; `IMPLEMENTATION CARRIER: OPEN`.
+
+**Решение 5 — порядок реализации.** Пакет A (этот PR) — только docs-first регистрация: этот §, immutable record, Safety Matrix, Review Pack / delta, recheck fixtures и индекс, state-machine / API / provenance contract, physician queue CQ-CTX-01…03; никаких runtime-изменений. Пакет B (отдельный PR) — runtime только после отдельной проверки зарегистрированного контракта и закрытия необходимых clinical blockers; live-clearance выключен до этого. В переданном тексте решения 5 есть обрыв (между «допустимость recheck по каждой группе G1» и state-machine блоком) — зафиксирован в record как `[TRANSMISSION GAP]`, не восстанавливался; state-machine фрагмент владельца — дословно в record, engineering rendering — в delta §4.
+
+**Physician queue (открыта, `PENDING_CLINICAL_EXPERT`; owner approval её не закрывает):** CQ-CTX-01 — для каких G1–G7 product recheck допустим; CQ-CTX-02 — минимальные вопросы для каждой допустимой группы; CQ-CTX-03 — какие ответы достаточны и какие recent-resolved случаи исключают clearance; формулировки кнопки и recheck-вопросов; подтверждение, что ни один результат не звучит как медицинское разрешение.
+
+**Что не меняется:** [§156], [§161], [§162], [§163], [§164]; OD-SAF-11…22; четыре `SafetyState`; семь групп; runtime PR #1893 (`QUESTION FLOW IMPLEMENTED: PARTIAL`, `clear_restriction()` отказывает).
+
+**Затронутый код:**
+- `docs/safety/reviews/OWNER_RULINGS_SAFETY_RECHECK_CONTRACT_2026-09-20.md` (новый immutable record)
+- `docs/safety/reviews/AYLA_S1_SAFETY_RECHECK_CONTRACT_DELTA_v0.1_2026-09-20.md` (новый)
+- `docs/safety/F0-C3-safety-matrix.md` (v0.12-reviewfix3)
+- `docs/safety/reviews/AYLA_CLINICAL_SAFETY_REVIEW_PACK_v0.1_2026-09-16.md` (v0.1-reviewfix3)
+- `docs/safety/reviews/S1_CONTEXT_RECHECK_ADVERSARIAL_FIXTURES_v0.2.md` (v0.2.2)
+- `docs/safety/README.md`
+- Runtime: НЕ ИЗМЕНЯЕТСЯ этим § (Пакет B — отдельный PR).
+
+---
+
+## §167. ЗАРЕГИСТРИРОВАН (20.09.2026): immutable owner record `safety_recheck` / `CLEARED_BY_RECHECK` contract + recheck contract delta v0.1
+
+**Record:** `docs/safety/reviews/OWNER_RULINGS_SAFETY_RECHECK_CONTRACT_2026-09-20.md` — `DO NOT EDIT — SUPERSEDE WITH A NEW RECORD`; RECORD SHA-256 (содержимое выше строки `---- RECORD HASH BOUNDARY ----`) `e7b54cc3d9a27c6a067d54b7e725122093ca630f59abced86af7ce23b25a6ff1`; sha256 полного файла `92d05387cbb66f32a2be70193f6a649165f4586aa547dbfa23460e10c0face49`. Содержит дословно ответ владельца, решения 1–5 ([§166]), physician queue, полный текст сообщения (Приложение A) с отмеченным `[TRANSMISSION GAP]`, статус `OWNER APPROVED — PENDING PHYSICIAN CONFIRMATION`, scope, связь с [§156] / [§162] / DRF-2040 / PR #1893.
+**Delta:** `docs/safety/reviews/AYLA_S1_SAFETY_RECHECK_CONTRACT_DELTA_v0.1_2026-09-20.md` — рабочий документ: формула, entry-point / API contract, state machine (engineering rendering), provenance schema (`IMPLEMENTATION CARRIER: OPEN`), Пакет A / B, fixture delta v0.2.1 → v0.2.2, трассировка к #1893.
+**Что не менялось:** `OWNER_RULINGS_OD-SAF-11-22_IMMUTABLE_RECORD.md` и `OWNER_RULINGS_S1_AI_CLINICAL_PRE_REVIEW_2026-09-18.md` (байт в байт), [§154–§165], четыре SafetyState, семь групп S1, runtime и code fixtures. Physician sign-off отсутствует; `CONTROLLED PILOT S1 GATE — NOT READY`; `CLEAR_RESTRICTION ENABLED: NO`.
+
+**Затронутый код:**
+НЕ ПРИМЕНИМО — документальное решение; runtime, тесты и code fixtures в этом § не меняются.
