@@ -282,6 +282,12 @@ WITHDRAW_DONE = (
     "показываются. Дневник продолжает работать как обычно.\n\n"
     "Если захотите вернуть расчёт, напишите: «Рассчитать мои нормы»."
 )
+#: DRF-2135 — те же предложения при выключенном контуре, минус два, которые
+#: при OFF ложны: дневник не работает, а «Рассчитать мои нормы» получит
+#: заглушку. Ничего нового не обещается — только убрана неправда.
+WITHDRAW_DONE_CONTOUR_OFF = (
+    "Персональный расчёт отключён. Параметры удалены, нормы больше не показываются."
+)
 #: Согласие снято, но каталог не подтвердил удаление: правда важнее
 #: гладкости — параметры уже НЕ используются, а «удалены» сказать нельзя.
 WITHDRAW_DELETE_UNCONFIRMED = (
@@ -290,8 +296,12 @@ WITHDRAW_DELETE_UNCONFIRMED = (
     "«Отключить персональный расчёт» через пару минут, я доведу его до конца."
 )
 WITHDRAW_KEPT = "Оставляю как есть: персональный расчёт работает."
+WITHDRAW_KEPT_CONTOUR_OFF = "Оставляю как есть: согласие остаётся."
 WITHDRAW_NOTHING_TO_WITHDRAW = (
     "Персональный расчёт и так не включён — отключать нечего. Дневник работает как обычно."
+)
+WITHDRAW_NOTHING_TO_WITHDRAW_CONTOUR_OFF = (
+    "Персональный расчёт и так не включён — отключать нечего."
 )
 
 
@@ -353,35 +363,44 @@ class NutritionAnketaSkill:
         # DRF-1994 (решение U) / DRF-1295 — единый выключатель контура
         # питания, и стоит он В НАВЫКЕ, а не по хендлерам. Сюда сходятся
         # ВСЕ входы анкеты: ``/anketa``, ``cb:anketa:*``, входная фраза,
-        # продолжение FSM, согласие/отзыв, инструмент консьержа через
+        # продолжение FSM, согласие, инструмент консьержа через
         # ``nutrition_global._run_skill``. Новый вход, доехавший до навыка,
-        # упрётся в ворота, не зная о них.
+        # упрётся в ворота, не зная о них. Единственное, что стоит выше
+        # ворот, — отзыв согласия (DRF-2135, ниже).
         #
         # ``matches`` флаг НЕ читает намеренно. Верни он False, «/anketa»
         # уехал бы модели, и модель заговорила бы о питании сама — ровно
         # то, что DRF-1295 запрещает. Навык забирает ход и отвечает
         # заглушкой; стерегут это ``test_nutrition_single_switch_1994``.
-        if not _nutrition_enabled():
-            return SkillResult(
-                reply_text=_nutrition_unavailable_text(),
-                meta={"reply_kind": "nutrition_anketa_nutrition_off"},
-            )
-
         text = context.message_text.strip()
 
-        # Ответ на экран согласия — до всего остального.
-        if text == CONSENT_GRANT_CALLBACK:
-            return self._on_consent_granted(context)
-        if text == CONSENT_DECLINE_CALLBACK:
-            return self._on_consent_declined(context)
-
-        # Отзыв: спросить → подтвердить / оставить.
+        # DRF-2135 — ОТЗЫВ согласия стоит ВЫШЕ ворот выключателя, и флаг на
+        # этом пути не читается вовсе. Отзыв — не функция контура питания, а
+        # право человека (§92): он обязан работать при любом флаге, как
+        # ``me/*-consent/`` в Mini App. Удаление параметров тела в каталоге
+        # (``purge_body_parameters``) — часть отзыва, поэтому при OFF каталог
+        # по этому пути зовётся. Дать согласие (``grant``/``decline``) при OFF
+        # нельзя — экран согласия при OFF и не показывается — эти ветки
+        # остаются под воротами ниже. Порядок веток стережёт
+        # ``test_withdraw_outside_switch_2135``.
         if text == WITHDRAW_CALLBACK or _is_withdraw_phrase(text):
             return self._on_withdraw_ask(context)
         if text == WITHDRAW_CONFIRM_CALLBACK:
             return self._on_withdraw_confirm(context)
         if text == WITHDRAW_KEEP_CALLBACK:
             return self._on_withdraw_keep(context)
+
+        if not _nutrition_enabled():
+            return SkillResult(
+                reply_text=_nutrition_unavailable_text(),
+                meta={"reply_kind": "nutrition_anketa_nutrition_off"},
+            )
+
+        # Ответ на экран согласия — до всего остального.
+        if text == CONSENT_GRANT_CALLBACK:
+            return self._on_consent_granted(context)
+        if text == CONSENT_DECLINE_CALLBACK:
+            return self._on_consent_declined(context)
 
         # Entry: start fresh FSM.
         if text in ("/anketa", "cb:anketa:start") or _is_entry_phrase(text):
@@ -818,7 +837,9 @@ class NutritionAnketaSkill:
 
         if not is_granted(context.bot_user):
             return SkillResult(
-                reply_text=WITHDRAW_NOTHING_TO_WITHDRAW,
+                reply_text=self._contour_copy(
+                    WITHDRAW_NOTHING_TO_WITHDRAW, WITHDRAW_NOTHING_TO_WITHDRAW_CONTOUR_OFF
+                ),
                 meta={"reply_kind": "anketa_withdraw_nothing"},
             )
         return SkillResult(
@@ -871,15 +892,23 @@ class NutritionAnketaSkill:
                 meta={"reply_kind": "anketa_withdraw_unconfirmed"},
             )
         return SkillResult(
-            reply_text=WITHDRAW_DONE,
+            reply_text=self._contour_copy(WITHDRAW_DONE, WITHDRAW_DONE_CONTOUR_OFF),
             meta={"reply_kind": "anketa_withdraw_done"},
         )
 
     def _on_withdraw_keep(self, context: SkillContext) -> SkillResult:
         return SkillResult(
-            reply_text=WITHDRAW_KEPT,
+            reply_text=self._contour_copy(WITHDRAW_KEPT, WITHDRAW_KEPT_CONTOUR_OFF),
             meta={"reply_kind": "anketa_withdraw_kept"},
         )
+
+    @staticmethod
+    def _contour_copy(when_on: str, when_off: str) -> str:
+        """Копия отзыва по состоянию контура. Флаг здесь ВЫБИРАЕТ ФРАЗУ, не
+        решает исход: отзыв уже произошёл (или не понадобился) до этой строки.
+        При OFF убраны предложения, которые при OFF ложны («дневник работает»,
+        «напишите „Рассчитать мои нормы“»); новых обещаний нет."""
+        return when_on if _nutrition_enabled() else when_off
 
     def _render_step(self, step: str, prompt: str) -> SkillResult:
         action_data: dict = {"step": step}
