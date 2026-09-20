@@ -185,8 +185,12 @@ def _parse(payload: Any) -> ResolvedIdentity:
     return ResolvedIdentity(ayla_user_id=user_id, is_proxy=bool(body.get("is_proxy", True)))
 
 
-def resolve_identity(external_user_id: str) -> ResolvedIdentity:
+def resolve_identity(external_user_id: str, *, timeout_s: float | None = None) -> ResolvedIdentity:
     """Ask Ayla which user it resolves ``external_user_id`` to.
+
+    ``timeout_s`` — a caller's tighter budget (DRF-1292: the memory write that
+    now runs BEFORE the reply is sent gives Ayla ≤ 1 s); ``None`` — the
+    module default :data:`TIMEOUT_S`. Never longer than the default.
 
     The call is a pure read from the bot's perspective, but it is not
     side-effect-free on Ayla: ``resolve_external_user`` lazily creates the
@@ -225,7 +229,9 @@ def resolve_identity(external_user_id: str) -> ResolvedIdentity:
     )
 
     try:
-        with httpx.Client(timeout=TIMEOUT_S) as http:
+        with httpx.Client(
+            timeout=min(timeout_s, TIMEOUT_S) if timeout_s is not None else TIMEOUT_S
+        ) as http:
             resp = http.get(url, headers=headers)
     except (httpx.TimeoutException, httpx.NetworkError) as exc:
         _circuit.record_failure(now=time.monotonic())

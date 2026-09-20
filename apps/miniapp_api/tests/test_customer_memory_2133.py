@@ -162,7 +162,7 @@ class TestGet:
         assert fact["key"] == "diet"
         assert fact["value"] == "vegan"
         # Тот же текст, что в чате: «помню, что ты…» читается одинаково везде.
-        assert fact["label"] == "придерживается веганского питания"
+        assert fact["label"] == "придерживаешься веганского питания"
         assert fact["provenance"] == "said"
         assert fact["said_at"].startswith(entry.created_at.date().isoformat())
 
