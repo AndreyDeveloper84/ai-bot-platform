@@ -126,6 +126,8 @@ export const PROFILE_COPY = {
   },
   reviewsTooltip: "Отзывы появятся позже — мы готовим этот раздел.",
   internalChatHint: "Личный канал общения с админами студии.",
+  // Инцидент 20.09: 403 not_linked на карточке — этап жизни, не отказ прав.
+  notLinked: "Профиль ещё не связан с каталогом — фото и текст пока не изменить. Привязку выполнит оператор.",
   toasts: {
     saved: "✓ Сохранено",
     photoSaved: "✓ Фото обновлено",
@@ -451,22 +453,50 @@ export function MasterProfileScreen() {
   }, [navigate]);
 
   // --- Ветки рендера ---
+  // Инцидент 20.09 (стенд): при 403 на карточке экран показывал одну ошибку
+  // — без «НАСТРОЙКИ» (дверь к /master/settings → «Выйти») и без панели.
+  // Правило класса: состояние загрузки/ошибки НИКОГДА не убирает навигацию.
+  const settingsSection = (
+    <ProfileSection title={PROFILE_COPY.sections.settings}>
+      <button type="button" className="btn-secondary master-profile__action-btn" onClick={goToInternalChatList}>
+        {PROFILE_COPY.buttons.internalChat}
+      </button>
+      <p className="master-profile__hint">{PROFILE_COPY.internalChatHint}</p>
+      <button type="button" className="btn-secondary master-profile__action-btn" onClick={goToNotificationSettings}>
+        {PROFILE_COPY.buttons.notificationSettings}
+      </button>
+      <button type="button" className="btn-secondary master-profile__action-btn" onClick={goToAppSettings}>
+        {PROFILE_COPY.buttons.appSettings}
+      </button>
+    </ProfileSection>
+  );
   if (phase.kind === "loading") {
     return (
       <ProfileFrame>
         <SystemState kind="loading" lines={2} />
+        {settingsSection}
+        <MasterTabBar scheduleHasPendingChange={false} />
       </ProfileFrame>
     );
   }
   if (phase.kind === "error") {
+    const notLinked = phase.err instanceof ApiError && phase.err.status === 403;
     return (
       <ProfileFrame>
-        <SystemState
-          kind="load_error"
-          what="profile"
-          err={phase.err}
-          onRetry={() => void fetchAll()}
-        />
+        {notLinked ? (
+          <p className="callout" role="status">
+            {PROFILE_COPY.notLinked}
+          </p>
+        ) : (
+          <SystemState
+            kind="load_error"
+            what="profile"
+            err={phase.err}
+            onRetry={() => void fetchAll()}
+          />
+        )}
+        {settingsSection}
+        <MasterTabBar scheduleHasPendingChange={false} />
       </ProfileFrame>
     );
   }
@@ -688,18 +718,7 @@ export function MasterProfileScreen() {
         </div>
       </ProfileSection>
 
-      <ProfileSection title={PROFILE_COPY.sections.settings}>
-        <button type="button" className="btn-secondary master-profile__action-btn" onClick={goToInternalChatList}>
-          {PROFILE_COPY.buttons.internalChat}
-        </button>
-        <p className="master-profile__hint">{PROFILE_COPY.internalChatHint}</p>
-        <button type="button" className="btn-secondary master-profile__action-btn" onClick={goToNotificationSettings}>
-          {PROFILE_COPY.buttons.notificationSettings}
-        </button>
-        <button type="button" className="btn-secondary master-profile__action-btn" onClick={goToAppSettings}>
-          {PROFILE_COPY.buttons.appSettings}
-        </button>
-      </ProfileSection>
+      {settingsSection}
 
       <MasterTabBar scheduleHasPendingChange={false} />
 

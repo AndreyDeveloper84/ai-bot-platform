@@ -180,7 +180,9 @@ function DetailBody({
   onRecheck: () => void;
 }) {
   // Ruling §61 (М-6 ж): длительность всегда минутами, «1 ч» не переводим.
-  const duration = `${Math.max(0, Math.floor(data.duration_min))} мин`;
+  const duration = Number.isFinite(data.duration_min)
+    ? `${Math.max(0, Math.floor(data.duration_min))} мин`
+    : undefined;
   const range = COPY.range(formatTimeHM(data.start_at), formatTimeHM(data.end_at));
   return (
     <main className="booking-detail__main" aria-labelledby="booking-detail-client">

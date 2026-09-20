@@ -89,6 +89,7 @@ import {
   formatDurationRu,
   formatTimeHM,
   joinClientName,
+  safeEndIso,
 } from "../lib/masterDateFormat";
 
 // --- Russian copy (VERBATIM from §M1) ------------------------------------
@@ -643,8 +644,8 @@ function VisitRow({
   lastInitial: string;
   service: string;
   startIso: string;
-  endIso: string;
-  durationMin: number;
+  endIso?: string;
+  durationMin?: number | null;
   to: string;
   quiet?: boolean;
 }) {
@@ -670,9 +671,8 @@ function ScheduledNowCard({
   href: (bookingId: string) => string;
 }) {
   // Конец — по часам: начало + длительность; «До конца ≈» не рисуется.
-  const end = new Date(
-    new Date(visit.started_at).getTime() + visit.duration_min * 60_000,
-  );
+  // Без длительности конца нет — и экран не падает (safeEndIso).
+  const endIso = safeEndIso(visit.started_at, visit.duration_min);
   return (
     <div className="master-dashboard__day-part">
       <p className="master-dashboard__day-label">{COPY.day.scheduledNow}</p>
@@ -681,7 +681,7 @@ function ScheduledNowCard({
         lastInitial={visit.client_last_initial}
         service={visit.service_name}
         startIso={visit.started_at}
-        endIso={end.toISOString()}
+        endIso={endIso}
         durationMin={visit.duration_min}
         to={href(visit.booking_id)}
       />
@@ -696,11 +696,7 @@ function NextVisitCard({
   visit: DashboardNextVisit;
   href: (bookingId: string) => string;
 }) {
-  const endIso =
-    visit.end_at ||
-    new Date(
-      new Date(visit.visit_at).getTime() + visit.duration_min * 60_000,
-    ).toISOString();
+  const endIso = safeEndIso(visit.visit_at, visit.duration_min, visit.end_at);
   return (
     <div className="master-dashboard__day-part">
       <p className="master-dashboard__day-label">{COPY.day.next}</p>
@@ -718,6 +714,14 @@ function NextVisitCard({
       </p>
     </div>
   );
+}
+
+/** Длительность из начала–конца; нет чисел — нет строки. */
+function upcomingDurationMin(v: DashboardUpcomingVisit): number | null {
+  const a = new Date(v.visit_at).getTime();
+  const b = new Date(v.end_at).getTime();
+  if (Number.isNaN(a) || Number.isNaN(b) || b < a) return null;
+  return Math.round((b - a) / 60_000);
 }
 
 function LaterTodayList({
@@ -738,12 +742,8 @@ function LaterTodayList({
               lastInitial={v.client_last_initial}
               service={v.service_name}
               startIso={v.visit_at}
-              endIso={v.end_at}
-              durationMin={Math.round(
-                (new Date(v.end_at).getTime() -
-                  new Date(v.visit_at).getTime()) /
-                  60_000,
-              )}
+              endIso={safeEndIso(v.visit_at, null, v.end_at)}
+              durationMin={upcomingDurationMin(v)}
               to={href(v.booking_id)}
               quiet
             />
