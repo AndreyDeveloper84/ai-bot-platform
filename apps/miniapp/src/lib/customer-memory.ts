@@ -15,7 +15,7 @@
  * при входе (ADR-0011), а этот экран — про прозрачность и право забыть.
  */
 
-import { request, requestWithStatus } from "./api";
+import { ApiError, request, requestWithStatus } from "./api";
 
 export type MemoryProvenance = "said" | "inferred";
 export type MemoryStatus = "active" | "deletion_pending";
@@ -55,11 +55,20 @@ export async function fetchMemory(): Promise<MemoryResponse> {
   };
 }
 
-/** «Забыть» одну запись. 404 — записи уже нет: для экрана это тот же исход. */
+/**
+ * «Забыть» одну запись. 404 — записи уже нет (забыта из чата, сменилась):
+ * для экрана это тот же исход, не ошибка, — иначе кнопка «не получилось»
+ * горела бы вечно на строке, которой нет.
+ */
 export async function forgetEntry(id: string): Promise<void> {
-  await request<{ id: string; deleted: boolean }>(`${MEMORY_PATH}${encodeURIComponent(id)}/`, {
-    method: "DELETE",
-  });
+  try {
+    await request<{ id: string; deleted: boolean }>(`${MEMORY_PATH}${encodeURIComponent(id)}/`, {
+      method: "DELETE",
+    });
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 404) return;
+    throw err;
+  }
 }
 
 /** «Забыть всё» — то же, что «забудь всё» в чате; 202 и статус. */

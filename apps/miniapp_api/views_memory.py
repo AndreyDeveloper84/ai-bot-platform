@@ -22,6 +22,14 @@ red; причина ``user_request_miniapp`` отличает экран от к
 идентификаторы; спутать их — прочитать чужую строку). Без него — пустой
 ответ, не ошибка. Гейт §2.4 (``person_context_access``) — как у чата.
 
+Чего на экране нет (осознанно): анкета предпочтений, которой владеет Ayla
+(``_declared_phrases_for_show`` в чате) — здесь только строки бот-памяти;
+«Забыть всё» её всё равно стирает (``_bridge_erase``), и лист подтверждения
+это называет. Показать анкету на этом экране — отдельный лист, не тихая
+подмена. Факт без читаемой подписи чат не произносит, а экран показывает
+сырым значением: это экран прозрачности, скрыть строку здесь хуже, чем
+показать её некрасиво.
+
 Отдельный модуль, а не :mod:`apps.miniapp_api.views`: ворота и отказы
 берутся оттуда импортом.
 """
@@ -80,11 +88,14 @@ def _green_payload(entry: MemoryEntry) -> dict[str, Any]:
     from apps.persona.memory_surface import describe_green_content
 
     content = entry.content if isinstance(entry.content, dict) else {}
+    key = content.get("key")
+    value = content.get("value")
     return {
         "id": str(entry.id),
-        "key": content.get("key"),
+        "key": key if isinstance(key, str) else None,
         "label": describe_green_content(content),
-        "value": content.get("value"),
+        # The screen renders this as text; a structured value is not a string.
+        "value": value if isinstance(value, str) else None,
         "said_at": entry.created_at.isoformat(),
         "provenance": _provenance(entry),
     }
@@ -92,10 +103,11 @@ def _green_payload(entry: MemoryEntry) -> dict[str, Any]:
 
 def _health_payload(entry: MemoryEntry) -> dict[str, Any]:
     content = entry.content if isinstance(entry.content, dict) else {}
+    value = content.get("display") or content.get("value")
     return {
         "id": str(entry.id),
         "kind": entry.kind,
-        "value": content.get("display") or content.get("value"),
+        "value": value if isinstance(value, str) else None,
         "said_at": entry.created_at.isoformat(),
     }
 
@@ -113,6 +125,32 @@ def _status(user_id: uuid.UUID) -> str:
 
 def _empty(status: str = STATUS_ACTIVE) -> JsonResponse:
     return JsonResponse({"green": [], "health": [], "status": status})
+
+
+def _green_ids_to_forget(user_id: uuid.UUID, entry_id: uuid.UUID) -> list[uuid.UUID]:
+    """The row the person pointed at — and, for a single-value key, its history.
+
+    The screen shows the CURRENT value of a single-cardinality key (DRF-1262):
+    the older live rows of the same key stay in the table. Tombstoning only
+    the winner would make the previous value the new current one — «забыла
+    кето» resurrects «веган». The chat's domain forget names this RESURRECT
+    hazard and forgets the whole key; the screen does the same. Multi-value
+    keys and keyless rows are forgotten one row at a time, as pointed.
+    Returns ``[entry_id]`` when the id is not a live green row of this
+    person — the deleter then moves nothing and the red path is tried.
+    """
+    from apps.identity.services.memory_key_policy import CARDINALITY_SINGLE, key_cardinality
+    from apps.identity.services.memory_reader import read_green_entries
+
+    live = read_green_entries(user_id)
+    target = next((e for e in live if e.id == entry_id), None)
+    if target is None:
+        return [entry_id]
+    content = target.content if isinstance(target.content, dict) else {}
+    key = content.get("key")
+    if not isinstance(key, str) or not key or key_cardinality(key) != CARDINALITY_SINGLE:
+        return [entry_id]
+    return [e.id for e in live if isinstance(e.content, dict) and e.content.get("key") == key]
 
 
 @csrf_exempt
@@ -164,7 +202,9 @@ def customer_memory_entry(request: HttpRequest, entry_id: uuid.UUID) -> HttpResp
     # Green first (the common case), then the audited red path. Both scope
     # to (user_id, live) themselves — a foreign id moves nothing.
     deleted = soft_delete_green_entries(
-        user_id, [entry_id], reason=MemoryEntry.DELETION_REASON_USER_REQUEST_MINIAPP
+        user_id,
+        _green_ids_to_forget(user_id, entry_id),
+        reason=MemoryEntry.DELETION_REASON_USER_REQUEST_MINIAPP,
     )
     if not deleted:
         deleted = RedZoneReader.soft_delete_for_subject(
@@ -194,12 +234,26 @@ def customer_memory_forget_all(request: HttpRequest) -> HttpResponse:
     if user_id is None:
         # Nothing was ever remembered under this shell; the request is honoured trivially.
         return JsonResponse({"status": STATUS_DELETION_PENDING}, status=202)
+    if _gate_closed(bot_user):
+        # Same gate as GET/DELETE and as the chat (§2.4): a shell the gate
+        # refuses does not command this person's memory — erasing on its say-so
+        # would let an unresolved salon shell wipe a client's context and
+        # dialogue. The person erases from the surface that is theirs.
+        return _error(
+            "person_context_closed",
+            "Из этого чата память не управляется — напиши мне из своего.",
+            403,
+        )
 
     request_forget_all(user_id)
-    # Same order as the chat confirmation branch: the person hears «сейчас».
+    # Same order as the chat confirmation branch: intent first (the read gate
+    # goes dark at once), then the dialogue — the person hears «сейчас».
     memory_commands._anonymize_dialogue(bot_user)
     erased = memory_commands._bridge_erase(bot_user)
-    if erased != "erased":
-        # Best-effort upstream; the sweep retries. Named in the log, not hidden.
-        logger.warning("miniapp_api.memory.forget_all.bridge_%s bot_user=%s", erased, bot_user.pk)
+    if erased == "started":
+        # Async upstream erasure in flight — the chat treats this as success-in-progress.
+        logger.info("miniapp_api.memory.forget_all.bridge_started bot_user=%s", bot_user.pk)
+    elif erased != "erased":
+        # Upstream profile survived; the sweep retries. Named in the log, not hidden.
+        logger.warning("miniapp_api.memory.forget_all.bridge_failed bot_user=%s", bot_user.pk)
     return JsonResponse({"status": STATUS_DELETION_PENDING}, status=202)

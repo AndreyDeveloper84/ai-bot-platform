@@ -9,7 +9,9 @@
  *   • каждый факт — подпись чата + происхождение («ты сказал(а) 19.09» /
  *     «мы предположили»); предположение помечено, но не скрыто;
  *   • «Забыть» у каждого факта — без подтверждения (одна строка, обратимого
- *     ничего нет, повтор — новая реплика в чате);
+ *     ничего нет, повтор — новая реплика в чате); после — перечитываем список:
+ *     сервер забывает ключ целиком у одиночных ключей (иначе «забыла кето»
+ *     воскресила бы «веган»), и правду об остатке знает только он;
  *   • «Забыть всё» внизу — с листом подтверждения: это те же три обязательства,
  *     что у «забудь всё» в чате (память, переписка обезличится, профиль у Ayla);
  *   • пустое состояние — приглашение сказать факт в чате;
@@ -30,7 +32,6 @@ import {
   forgetEntry,
   provenanceLabel,
   shortDate,
-  type GreenFact,
   type HealthFact,
   type MemoryResponse,
 } from "../lib/customer-memory";
@@ -48,6 +49,7 @@ export function MemoryCard() {
   const [data, setData] = useState<MemoryResponse | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
   const [rowError, setRowError] = useState<string | null>(null);
+  const [announce, setAnnounce] = useState<string>("");
   const [sheetOpen, setSheetOpen] = useState(false);
   const forgetAllRef = useRef<HTMLButtonElement>(null);
 
@@ -66,29 +68,21 @@ export function MemoryCard() {
     void load();
   }, [load]);
 
-  const forget = useCallback(
-    async (id: string) => {
-      setBusyId(id);
-      setRowError(null);
-      try {
-        await forgetEntry(id);
-        setData((prev) =>
-          prev
-            ? {
-                ...prev,
-                green: prev.green.filter((f) => f.id !== id),
-                health: prev.health.filter((f) => f.id !== id),
-              }
-            : prev,
-        );
-      } catch {
-        setRowError("Не получилось забыть — попробуй ещё раз.");
-      } finally {
-        setBusyId(null);
-      }
-    },
-    [],
-  );
+  const forget = useCallback(async (id: string, text: string) => {
+    setBusyId(id);
+    setRowError(null);
+    try {
+      await forgetEntry(id);
+      // Truth after a forget lives on the server (single-key history goes
+      // with the winner); refetch quietly instead of filtering one row.
+      setData(await fetchMemory());
+      setAnnounce(`Забыла: ${text}`);
+    } catch {
+      setRowError("Не получилось забыть — попробуй ещё раз.");
+    } finally {
+      setBusyId(null);
+    }
+  }, []);
 
   const onForgotAll = useCallback(() => {
     setSheetOpen(false);
@@ -135,6 +129,10 @@ export function MemoryCard() {
 
   return (
     <div className="profile-memory">
+      {/* Removing a row drops focus to <body>; the outcome is announced here (WCAG 4.1.3). */}
+      <p className="profile-memory__sr" role="status" aria-live="polite">
+        {announce}
+      </p>
       <ul className="profile-memory__list" aria-label="Что Ayla помнит">
         {data.green.map((fact) => (
           <MemoryRow
@@ -199,7 +197,7 @@ interface RowProps {
   meta: string;
   inferred: boolean;
   busy: boolean;
-  onForget: (id: string) => void;
+  onForget: (id: string, text: string) => void;
 }
 
 function MemoryRow({ id, text, meta, inferred, busy, onForget }: RowProps) {
@@ -216,7 +214,7 @@ function MemoryRow({ id, text, meta, inferred, busy, onForget }: RowProps) {
         className="btn-secondary profile-memory__forget"
         disabled={busy}
         aria-label={`Забыть: ${text}`}
-        onClick={() => onForget(id)}
+        onClick={() => onForget(id, text)}
       >
         {busy ? "…" : "Забыть"}
       </button>
@@ -308,5 +306,3 @@ export function ForgetAllSheet({ open, triggerRef, onClose, onDone }: ForgetAllS
     </SheetChrome>
   );
 }
-
-export type { GreenFact };

@@ -98,6 +98,16 @@ describe("forgetEntry / forgetAll", () => {
     expect(init.method).toBe("DELETE");
   });
 
+  it("DELETE 404 — записи уже нет: не ошибка", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ error: "not_found", detail: "нет" }, 404));
+    await expect(forgetEntry("gone")).resolves.toBeUndefined();
+  });
+
+  it("DELETE 500 — ошибка доходит до карточки", async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ error: "server", detail: "x" }, 500));
+    await expect(forgetEntry("g1")).rejects.toBeInstanceOf(Error);
+  });
+
   it("POST /memory/forget-all/ → deletion_pending", async () => {
     fetchMock.mockResolvedValueOnce(jsonResponse({ status: "deletion_pending" }, 202));
     expect(await forgetAll()).toBe("deletion_pending");

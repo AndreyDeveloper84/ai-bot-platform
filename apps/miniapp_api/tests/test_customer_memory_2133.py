@@ -4,8 +4,9 @@
     DELETE customer/memory/<entry_id>/      → своя запись забыта; чужая — 404
     POST   customer/memory/forget-all/      → то же, что «забудь всё» в чате
 
-Читатели — те же, что у чата (``memory_key_policy.read_current_view`` для
-зелёных, ``RedZoneReader`` для раздела «Здоровье»), удалитель —
+Читатели — те же, что у чата (``read_green_entries`` под
+``memory_key_policy.select_current_facts`` для зелёных, ``RedZoneReader`` для
+раздела «Здоровье»), удалитель —
 ``memory_deleter``. Экран не должен вырастить второго понятия «что помню».
 
 Сторожа из листа: чужая запись → 404; после forget-all GET пуст и статус
@@ -231,7 +232,11 @@ class TestGet:
         assert body["health"][0]["value"] == "аллергия на орехи"
         log = RedZoneAccessLog.objects.filter(user_id=ayla_user_id, memory_entry_id=red.id)
         assert log.count() == 1
-        assert log.get().accessor_role == RedZoneAccessLog.ACCESSOR_DATA_SUBJECT
+        row = log.get()
+        assert row.accessor_role == RedZoneAccessLog.ACCESSOR_DATA_SUBJECT
+        assert row.accessor_principal == f"bot_user:{bot_user.pk}"
+        assert row.purpose == "miniapp_memory_screen"
+        assert row.access_type == RedZoneAccessLog.ACCESS_READ
 
     def test_health_section_is_read_through_the_reader_not_the_orm(self, client, bot_user, upc):
         """Подмена читателя — раздел пуст: у вью нет второго пути к red."""
@@ -258,6 +263,54 @@ class TestDelete:
         assert entry.status == MemoryEntry.STATUS_DELETED
         assert entry.deletion_reason == "user_request_miniapp"
         assert _get(client, bot_user).json()["green"] == []
+
+    def test_forgetting_the_current_value_does_not_resurrect_the_previous_one(
+        self, client, bot_user, upc
+    ):
+        """Ключ diet — single: экран показывает победителя, старая строка живёт.
+        Забыть победителя = забыть ключ целиком, иначе «забыла кето» воскрешает
+        «веган» (RESURRECT — тот же риск назван у доменного «забудь» в чате)."""
+        old = _green(upc, content={"key": "diet", "value": "vegan"})
+        new = _green(upc, content={"key": "diet", "value": "keto"})
+        MemoryEntry.objects.filter(id=old.id).update(
+            created_at=old.created_at - timezone.timedelta(days=1)
+        )
+        assert [f["value"] for f in _get(client, bot_user).json()["green"]] == ["keto"]
+
+        assert _delete(client, bot_user, new.id).status_code == 200
+
+        assert _get(client, bot_user).json()["green"] == []
+        old.refresh_from_db()
+        assert old.soft_deleted_at is not None
+
+    def test_forgetting_one_value_of_a_multi_key_keeps_the_others(self, client, bot_user, upc):
+        a = _green(upc, content={"key": "preferred_districts", "value": "центр"})
+        b = _green(upc, content={"key": "preferred_districts", "value": "арбеково"})
+
+        assert _delete(client, bot_user, a.id).status_code == 200
+
+        assert [f["id"] for f in _get(client, bot_user).json()["green"]] == [str(b.id)]
+
+    def test_foreign_red_entry_is_404_with_no_access_log(self, client, bot_user, upc):
+        other = UserPersonalContext.objects.create(user_id=uuid.uuid4())
+        foreign = _red(other)
+
+        r = _delete(client, bot_user, foreign.id)
+
+        assert r.status_code == 404
+        foreign.refresh_from_db()
+        assert foreign.soft_deleted_at is None
+        assert RedZoneAccessLog.objects.count() == 0
+
+    def test_own_health_delete_logs_delete_with_principal(
+        self, client, bot_user, upc, ayla_user_id
+    ):
+        red = _red(upc)
+        assert _delete(client, bot_user, red.id).status_code == 200
+        row = RedZoneAccessLog.objects.get(memory_entry_id=red.id, user_id=ayla_user_id)
+        assert row.access_type == RedZoneAccessLog.ACCESS_DELETE
+        assert row.accessor_principal == f"bot_user:{bot_user.pk}"
+        assert row.purpose == "miniapp_memory_forget"
 
     def test_foreign_entry_is_404_and_untouched(self, client, bot_user, upc):
         other = UserPersonalContext.objects.create(user_id=uuid.uuid4())
@@ -307,14 +360,50 @@ class TestForgetAll:
     def test_forget_all_does_what_the_chat_does(self, client, bot_user, upc):
         """Не только флаг: переписка обезличивается и профиль в каталоге стирается —
         те же три обязательства, что у «забудь всё» в чате (OD_MEMORY.md §4)."""
+        order: list[str] = []
+
+        def _anon(bot_user_arg):
+            # The intent must already be on the UPC when the dialogue goes: the
+            # read gate is dark before anything else happens («сейчас»).
+            upc.refresh_from_db()
+            assert upc.forget_all_requested_at is not None
+            order.append("anonymize")
+
+        def _erase(bot_user_arg):
+            order.append("erase")
+            return "erased"
+
         with (
-            patch("apps.persona.memory_commands._anonymize_dialogue") as anon,
-            patch("apps.persona.memory_commands._bridge_erase", return_value="erased") as erase,
+            patch("apps.persona.memory_commands._anonymize_dialogue", side_effect=_anon) as anon,
+            patch("apps.persona.memory_commands._bridge_erase", side_effect=_erase) as erase,
         ):
             r = _forget_all(client, bot_user)
         assert r.status_code == 202
         assert anon.call_count == 1
         assert erase.call_count == 1
+        assert anon.call_args.args[0].pk == bot_user.pk
+        assert order == ["anonymize", "erase"]
+
+    def test_forget_all_respects_the_person_context_gate(self, client, bot_user, upc):
+        """§2.4 как у GET/DELETE и у чата: закрытая оболочка не командует памятью."""
+        _green(upc)
+        from apps.identity.services.person_context_gate import Refusal
+
+        with (
+            patch(
+                "apps.identity.services.person_context_gate.person_context_access",
+                return_value=Refusal(reason="unresolved", bot_user_id="x"),
+            ),
+            patch("apps.persona.memory_commands._anonymize_dialogue") as anon,
+            patch("apps.persona.memory_commands._bridge_erase") as erase,
+        ):
+            r = _forget_all(client, bot_user)
+        assert r.status_code == 403
+        assert r.json()["error"] == "person_context_closed"
+        upc.refresh_from_db()
+        assert upc.forget_all_requested_at is None
+        assert anon.call_count == 0
+        assert erase.call_count == 0
 
 
 class TestSurface:

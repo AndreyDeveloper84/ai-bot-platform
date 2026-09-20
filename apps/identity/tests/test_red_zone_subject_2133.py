@@ -64,6 +64,7 @@ def _list(user_id, **kw):
         accessor_role=RedZoneAccessLog.ACCESSOR_DATA_SUBJECT,
         request_id=kw.pop("request_id", uuid.uuid4()),
         purpose="miniapp_memory_screen",
+        accessor_principal=kw.pop("accessor_principal", "bot_user:1"),
         **kw,
     )
 
@@ -76,6 +77,7 @@ def _delete(entry_id, user_id, **kw):
         request_id=kw.pop("request_id", uuid.uuid4()),
         purpose="miniapp_memory_forget",
         reason=MemoryEntry.DELETION_REASON_USER_REQUEST_MINIAPP,
+        accessor_principal=kw.pop("accessor_principal", "bot_user:1"),
         **kw,
     )
 
@@ -131,14 +133,28 @@ class TestListLiveForSubject:
         assert _list(fresh.user_id) == []  # empty-assert-ok: a subject with no red rows
         assert RedZoneAccessLog.objects.count() == logs_before
 
-    def test_ops_admin_without_principal_is_refused(self, upc):
+    @pytest.mark.parametrize(
+        "role", [RedZoneAccessLog.ACCESSOR_OPS_ADMIN, RedZoneAccessLog.ACCESSOR_DATA_SUBJECT]
+    )
+    def test_role_without_a_concrete_principal_is_refused_on_both_paths(self, upc, role):
+        """«unknown» в аудите — слепое пятно 152-ФЗ гл. 3; субъект — тоже конкретный."""
+        entry = _red(upc)
         with pytest.raises(ValueError):
             RedZoneReader.list_live_for_subject(
+                user_id=upc.user_id, accessor_role=role, request_id=uuid.uuid4(), purpose="x"
+            )
+        with pytest.raises(ValueError):
+            RedZoneReader.soft_delete_for_subject(
+                entry_id=entry.id,
                 user_id=upc.user_id,
-                accessor_role=RedZoneAccessLog.ACCESSOR_OPS_ADMIN,
+                accessor_role=role,
                 request_id=uuid.uuid4(),
                 purpose="x",
+                reason=MemoryEntry.DELETION_REASON_USER_REQUEST_MINIAPP,
             )
+        entry.refresh_from_db()
+        assert entry.soft_deleted_at is None
+        assert RedZoneAccessLog.objects.count() == 0
 
     def test_guc_set_inside_atomic_and_reset_on_success(self, upc):
         """Порядок слоёв как у read(): SET → SELECT → лог, RESET в finally."""

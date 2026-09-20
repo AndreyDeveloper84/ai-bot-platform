@@ -556,7 +556,6 @@ export function CustomerProfileScreen() {
               <DeletionRequestStatus />
             </section>
 
-            {/* R3 — Memory transparency (DRF-2133) */}
             {/* Часовой пояс (DRF-1477). Своя секция, а не строка среди
                 согласий: пояс — не согласие, и складывать их вместе
                 значило бы предложить человеку «разрешить» своё
@@ -600,6 +599,7 @@ export function CustomerProfileScreen() {
               </dl>
             </section>
 
+            {/* R3 — Memory transparency (DRF-2133) */}
             <section
               className="profile-section"
               aria-labelledby="profile-r3-h2"

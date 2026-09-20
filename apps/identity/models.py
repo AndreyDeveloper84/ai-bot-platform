@@ -1260,7 +1260,8 @@ class RedZoneAccessLog(models.Model):
         max_length=32,
         choices=ACCESS_TYPE_CHOICES,
         help_text="What kind of access. Round-2 AS2 + ADR-0011 §11.3 "
-        "added 'withdrawal' + 'write_rejected_dob_lookup' values.",
+        "added 'withdrawal' + 'write_rejected_dob_lookup' values; DRF-2133 "
+        "added 'delete' (subject-requested soft-delete from the Mini App).",
     )
     ts = models.DateTimeField(
         auto_now_add=True,

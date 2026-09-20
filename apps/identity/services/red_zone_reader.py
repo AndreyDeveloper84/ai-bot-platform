@@ -35,6 +35,12 @@ AND there's no successful read with no audit row.
       accessor_principal=Optional[str],       # concrete identity (AS2)
       expected_source_tenant_id=Optional[uuid.UUID],  # None = cross-tenant
   )
+
+  # DRF-2133 — the data subject's own screen «Что Ayla помнит»:
+  RedZoneReader.list_live_for_subject(user_id=, accessor_role=, request_id=, purpose=,
+                                      accessor_principal=)   # one audit row per entry
+  RedZoneReader.soft_delete_for_subject(entry_id=, user_id=, accessor_role=, request_id=,
+                                        purpose=, reason=, accessor_principal=)  # `delete` row
 """
 
 from __future__ import annotations
@@ -72,7 +78,7 @@ def _default_principal_for_role(role: str) -> str:
 
 
 class RedZoneReader:
-    """The sole sanctioned read path for red-zone MemoryEntry rows."""
+    """The sole sanctioned read (and subject-requested delete) path for red-zone rows."""
 
     @classmethod
     def read(
@@ -113,21 +119,7 @@ class RedZoneReader:
                 leaking «exists but not yours»).
             TenantScopeViolation: cross-tenant red read attempted.
         """
-        if accessor_principal is None:
-            accessor_principal = _default_principal_for_role(accessor_role)
-
-        # ops_admin = privileged break-glass access. The fallback
-        # `"unknown"` would be a 152-ФЗ Chapter 3 forensic blind spot —
-        # auditor query «who did this access» would yield nothing
-        # actionable. Per tech-lead direction 2026-05-23 (Q2 fork):
-        # ops_admin MUST supply explicit staff identity, fail-loud.
-        if accessor_role == RedZoneAccessLog.ACCESSOR_OPS_ADMIN and accessor_principal == "unknown":
-            raise ValueError(
-                "ops_admin role requires explicit accessor_principal "
-                "(staff User UUID) per 152-ФЗ Chapter 3 audit "
-                "traceability requirement. Pass accessor_principal="
-                "str(request.user.id) at call site."
-            )
+        accessor_principal = cls._resolve_principal(accessor_role, accessor_principal)
 
         # Round-5 F1 fix: the GUC binds to the outermost (sub)transaction,
         # not to the SAVEPOINT that Django opens when `atomic()` is nested.
@@ -143,15 +135,11 @@ class RedZoneReader:
             with transaction.atomic():
                 # Step 1 — set the GUC so RLS allows the row through (Postgres).
                 # SQLite has no RLS — SET ... is unknown syntax there, so the
-                # call is gated on `connection.vendor`. On SQLite the read
-                # works without RLS gating; the audit + ownership checks still
-                # run (application-side defence works on both engines).
-                if connection.vendor == "postgresql":
-                    with connection.cursor() as cursor:
-                        cursor.execute(
-                            "SELECT set_config('ayla.red_zone_access_context', %s, true)",
-                            [str(request_id)],
-                        )
+                # call is gated on `connection.vendor` inside the helper. On
+                # SQLite the read works without RLS gating; the audit +
+                # ownership checks still run (application-side defence works
+                # on both engines).
+                cls._set_guc(request_id)
 
                 # Step 2 — ownership-scoped SELECT. If entry_id is missing OR
                 # the entry belongs to a different user, DoesNotExist fires
@@ -191,24 +179,9 @@ class RedZoneReader:
             # rolled back (set_config with is_local=true is supposed to clear
             # at transaction END, but caller's OUTER atomic keeps the txn
             # alive past our SAVEPOINT release — hence explicit RESET).
-            if connection.vendor == "postgresql":
-                # Round-5 F1-C (#703): if the connection dies between the
-                # atomic-block exit and here (Postgres OOM, network blip),
-                # `connection.cursor()` itself raises OperationalError. Letting
-                # that propagate out of `finally` would MASK the original
-                # exception from the try-block (e.g. DoesNotExist /
-                # TenantScopeViolation), so the caller would see a misleading
-                # "connection lost" instead of the real cause. A dead
-                # connection breaks subsequent ORM use regardless, so a failed
-                # RESET is non-fatal — log it for forensics and let the
-                # original exception (if any) surface unchanged.
-                try:
-                    with connection.cursor() as cursor:
-                        cursor.execute("RESET ayla.red_zone_access_context")
-                except Exception:
-                    logger.exception(
-                        "RESET of red_zone_access_context failed — connection likely unusable"
-                    )
+            # Round-5 F1-C (#703): a failed RESET must not MASK the original
+            # exception from the try-block — see `_reset_guc`.
+            cls._reset_guc()
 
     # ------------------------------------------------------------------
     # DRF-2133 — субъект данных: экран «Что Ayla помнит»
@@ -239,12 +212,7 @@ class RedZoneReader:
         ``memory_reader`` applies to green. No cross-tenant carve-out here:
         the subject sees their own memory whatever tenant wrote it.
         """
-        if accessor_principal is None:
-            accessor_principal = _default_principal_for_role(accessor_role)
-        if accessor_role == RedZoneAccessLog.ACCESSOR_OPS_ADMIN and accessor_principal == "unknown":
-            raise ValueError(
-                "ops_admin role requires explicit accessor_principal (staff User UUID)"
-            )
+        accessor_principal = cls._resolve_principal(accessor_role, accessor_principal)
 
         try:
             with transaction.atomic():
@@ -296,8 +264,7 @@ class RedZoneReader:
         ``status='deleted'`` + ``updated_at`` in one statement (CHECK 4).
         Not the subject's, not red, or already gone → ``False``, no log.
         """
-        if accessor_principal is None:
-            accessor_principal = _default_principal_for_role(accessor_role)
+        accessor_principal = cls._resolve_principal(accessor_role, accessor_principal)
 
         try:
             with transaction.atomic():
@@ -331,6 +298,32 @@ class RedZoneReader:
             cls._reset_guc()
 
     @staticmethod
+    def _resolve_principal(accessor_role: str, accessor_principal: Optional[str]) -> str:
+        """Concrete «who» for the audit row, fail-loud where a default cannot be honest.
+
+        ops_admin = privileged break-glass access. The fallback ``"unknown"``
+        would be a 152-ФЗ Chapter 3 forensic blind spot — auditor query «who
+        did this access» would yield nothing actionable. Per tech-lead
+        direction 2026-05-23 (Q2 fork): ops_admin MUST supply explicit staff
+        identity. DRF-2133 extends the same rule to ``data_subject``: the
+        subject is a concrete shell (``bot_user:<pk>``), and a self-service
+        read/delete logged as «unknown» is the same blind spot from the other
+        side. Roles with a derivable default (worker / job) keep it.
+        """
+        if accessor_principal is None:
+            accessor_principal = _default_principal_for_role(accessor_role)
+        if accessor_principal == "unknown" and accessor_role in (
+            RedZoneAccessLog.ACCESSOR_OPS_ADMIN,
+            RedZoneAccessLog.ACCESSOR_DATA_SUBJECT,
+        ):
+            raise ValueError(
+                f"{accessor_role} role requires explicit accessor_principal "
+                "(staff User UUID for ops_admin, bot_user:<pk> for data_subject) "
+                "per 152-ФЗ Chapter 3 audit traceability requirement."
+            )
+        return accessor_principal
+
+    @staticmethod
     def _set_guc(request_id: uuid.UUID) -> None:
         """Step 1 of every red access: let RLS see red rows for this txn (Postgres only)."""
         if connection.vendor == "postgresql":
@@ -342,7 +335,15 @@ class RedZoneReader:
 
     @staticmethod
     def _reset_guc() -> None:
-        """Round-5 F1: clear the GUC on every exit path; a failed RESET is logged, not raised."""
+        """Round-5 F1: clear the GUC on every exit path (Postgres only).
+
+        RESET runs even when the atomic block rolled back: ``set_config`` with
+        ``is_local=true`` clears at transaction END, but a caller's OUTER
+        ``atomic()`` keeps the txn alive past our SAVEPOINT release. Round-5
+        F1-C (#703): if the connection died, ``connection.cursor()`` itself
+        raises — letting that out of a ``finally`` would MASK the original
+        exception, so a failed RESET is logged, never raised.
+        """
         if connection.vendor == "postgresql":
             try:
                 with connection.cursor() as cursor:

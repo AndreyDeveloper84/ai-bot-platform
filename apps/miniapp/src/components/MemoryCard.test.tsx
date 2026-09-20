@@ -112,8 +112,10 @@ describe("MemoryCard — состояния", () => {
 });
 
 describe("MemoryCard — действия", () => {
-  it("«Забыть» у факта — DELETE и строка исчезает", async () => {
-    fetchMemoryMock.mockResolvedValue(doc());
+  it("«Забыть» у факта — DELETE, затем список перечитывается с сервера", async () => {
+    const after = doc();
+    after.green = after.green.filter((f) => f.id !== "g1");
+    fetchMemoryMock.mockResolvedValueOnce(doc()).mockResolvedValueOnce(after);
     forgetEntryMock.mockResolvedValue(undefined);
     render(<MemoryCard />);
     await screen.findByText("придерживается веганского питания");
@@ -126,7 +128,12 @@ describe("MemoryCard — действия", () => {
     await waitFor(() =>
       expect(screen.queryByText("придерживается веганского питания")).toBeNull(),
     );
+    // Правду об остатке знает сервер: второй GET, а не локальный фильтр.
+    expect(fetchMemoryMock).toHaveBeenCalledTimes(2);
     expect(screen.getByText("предпочитает по вечерам")).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent(
+      "Забыла: придерживается веганского питания",
+    );
   });
 
   it("«Забыть» не получилось — строка остаётся, ошибка названа", async () => {
