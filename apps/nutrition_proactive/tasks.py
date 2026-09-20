@@ -68,7 +68,11 @@ folded into ``other`` in the summary and printed once more, by slug, on a
 No person identifiers on either line. A recipient whose ``channel_user_id``
 vanished between planning and delivery is a **skip** named ``no_channel``,
 not a ``failed`` with a traceback: there is nothing to retry and nothing
-broke.
+broke. Arithmetic an operator can check on the line: armed,
+``planned == sent + skipped + failed`` and ``would_send == sent + failed +
+no_channel``; dry run, ``planned == would_send + skipped`` (no delivery, so
+``no_channel`` never appears and ``would_send`` may overstate by rows whose
+channel is already gone).
 """
 
 from __future__ import annotations
@@ -86,10 +90,10 @@ from django.utils import timezone as dj_timezone
 
 from apps.audit.services import write_audit
 from apps.channels.max.outbound import (
-    MaxAPIError,
     make_inline_keyboard_attachment,
     send_message,
 )
+from apps.identity.services.person_context_gate import REASON_SHADOW, REASON_UNRESOLVED
 from apps.integrations.ayla import (
     NutritionAPIError,
     NutritionUnavailableError,
@@ -161,9 +165,10 @@ DailyPayload = tuple[SummaryResponse, WaterTodayResponse | None, ProfileResponse
 KNOWN_SKIP_REASONS: tuple[str, ...] = (
     # shared gate (selection.check_common → notifications.proactive)
     *selection.BLOCK_REASONS,
-    # person-context gate (owner §2.4 S2-2): salon shells
-    "shadow",
-    "unresolved",
+    # person-context gate (owner §2.4 S2-2): salon shells -- the gate's own
+    # constants, so a rename there cannot strand these skips in ``other``.
+    REASON_SHADOW,
+    REASON_UNRESOLVED,
     # report ladder
     "report_off",
     "quiet_hours",
@@ -197,13 +202,15 @@ _OUTBOUND_SAFETY_PREFIX = "outbound_safety_"
 OTHER_REASON = "other"
 
 
-class NoChannelError(MaxAPIError):
+class NoChannelError(Exception):
     """``channel_user_id`` vanished between planning and delivery (DRF-2140).
 
     Nothing to retry and nothing broke: the planner refuses such a row up
     front (``no_chat_id``), so this is the one race -- erasure or a channel
     unlink -- that lands after selection. Counted as a skip named
-    ``no_channel``, not as ``failed`` with a traceback.
+    ``no_channel``, not as ``failed`` with a traceback. Deliberately NOT a
+    ``MaxAPIError``: a row with no address can never succeed, and the
+    repo's ``autoretry_for=(MaxAPIError,)`` pattern would retry it forever.
     """
 
 
@@ -559,7 +566,14 @@ def _run_task(
     dry_run_fn = dry_run if is_dry_run is None else is_dry_run
     if not enabled_fn():
         logger.info("nutrition_proactive.%s.disabled", kind)
-        return {"planned": 0, "sent": 0, "skipped": 0, "failed": 0, "dry_run": 1}
+        return {
+            "planned": 0,
+            "sent": 0,
+            "skipped": 0,
+            "failed": 0,
+            "dry_run": 1,
+            "skipped_by_reason": {},
+        }
 
     decisions = planner()
     is_dry = dry_run_fn()
@@ -639,7 +653,9 @@ def _summarise_skips(reasons: Counter[str]) -> tuple[dict[str, int], dict[str, i
     by_reason: Counter[str] = Counter()
     other: Counter[str] = Counter()
     for raw, count in reasons.items():
-        reason = raw or OTHER_REASON
+        # An empty reason is a planner bug; name it as such rather than as
+        # ``other:other`` on the skipped_other line.
+        reason = raw or "<empty>"
         if reason.startswith(_OUTBOUND_SAFETY_PREFIX):
             reason = "outbound_safety_hit"
         if reason in KNOWN_SKIP_REASONS:
@@ -671,7 +687,7 @@ def _deliver(decision: Decision, *, surface: str) -> None:
         or ""
     ).strip()
     if not user_id:
-        raise NoChannelError(0, "channel_user_id vanished between planning and delivery")
+        raise NoChannelError("channel_user_id vanished between planning and delivery")
     send_message(user_id=user_id, text=decision.text, attachments=_stop_keyboard(surface))
 
 

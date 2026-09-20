@@ -129,7 +129,10 @@ class TestReasonsInTheSummary:
     ) -> None:
         settings.NUTRITION_COACH_ENABLED = True
         settings.NUTRITION_COACH_DRY_RUN = False
-        make_user(tenant, suffix="c1")  # без coach_hints pref → hints_off / no_*_consent
+        # Без MARKETING-согласия коуч отказывает ДО любого чтения Ayla
+        # (no_marketing_consent) — сеть не нужна; выдай фикстура маркетинг,
+        # понадобилась бы подмена coach.fetch_profile.
+        make_user(tenant, suffix="c1")
         with (
             caplog.at_level(logging.INFO, logger="apps.nutrition_proactive.tasks"),
             patch("apps.nutrition_proactive.tasks.dj_timezone.now", return_value=NOON),
@@ -146,7 +149,14 @@ class TestReasonsInTheSummary:
     def test_disabled_task_returns_the_old_shape_plus_nothing_skipped(self, settings) -> None:
         settings.NUTRITION_PROACTIVE_ENABLED = False
         result = tasks.send_daily_reports()
-        assert result == {"planned": 0, "sent": 0, "skipped": 0, "failed": 0, "dry_run": 1}
+        assert result == {
+            "planned": 0,
+            "sent": 0,
+            "skipped": 0,
+            "failed": 0,
+            "dry_run": 1,
+            "skipped_by_reason": {},
+        }
 
 
 # ─── s2: незнакомый слаг → other, но не молча ────────────────────────────────
@@ -158,7 +168,7 @@ class TestUnknownReasonIsOtherButNamed:
             Counter({"report_off": 6, "brand_new_gate": 2, "outbound_safety_medical": 1, "": 1})
         )
         assert by_reason == {"report_off": 6, "other": 3, "outbound_safety_hit": 1}
-        assert other == {"brand_new_gate": 2, "other": 1}
+        assert other == {"brand_new_gate": 2, "<empty>": 1}
 
     def test_format_orders_largest_first_then_by_name(self) -> None:
         assert tasks._format_counts({"b": 2, "a": 2, "c": 5}) == "c:5,a:2,b:2"
@@ -222,7 +232,8 @@ class TestReportReallyGoesOut:
         assert result["sent"] == 0 and result["failed"] == 0
         assert result["skipped"] == 1 and result["skipped_by_reason"] == {"no_channel": 1}
         assert "skipped_by_reason=no_channel:1" in _summary_line(caplog, "report")
-        assert not any("Traceback" in (r.exc_text or "") for r in caplog.records)
+        assert not any(r.exc_info for r in caplog.records)
+        assert not any("send_failed" in r.getMessage() for r in caplog.records)
         # Ключ отправки не поднят: следующий тик попробует снова.
         assert prefs.get_prefs(BotUser.all_tenants.get(pk=user.pk)).get("last_report_date") is None
 
@@ -230,9 +241,18 @@ class TestReportReallyGoesOut:
 # ─── s4: перепись словаря ───────────────────────────────────────────────────
 
 _PACKAGE = Path(tasks.__file__).resolve().parent
-_LITERAL = re.compile(
-    r'(?:decide\(\s*"|Decision\([^)]*?,\s*False,\s*"|return\s+"|\breason=")([a-z_]+)"'
+#: Форма решения планировщика: ``decide("…")`` / ``Decision(…, False, "…")``
+#: / ``reason="…"``. Не рекурсивно (``glob``, не ``rglob``): фикстуры этих
+#: тестов сами строят ``Decision(…, "brand_new_gate")`` и в перепись
+#: попадать не должны.
+_DECISION_LITERAL = re.compile(
+    r'(?:decide\(\s*"|Decision\([^)]*?,\s*False,\s*"|\breason=")([a-z_]+)"'
 )
+#: ``return "…"`` — слаг причины только в двух модулях, которые их возвращают;
+#: ``render.py`` / ``optout.py`` возвращают тексты, и любое их «return "слово"»
+#: переписи не касается.
+_RETURN_LITERAL = re.compile(r'return\s+"([a-z_]+)"')
+_RETURNING_MODULES = ("prefs.py", "selection.py")
 #: Слаги, которые встречаются как литералы, но пропуском не являются.
 _NOT_SKIPS = {"due", "behind_proportional_norm"}
 
@@ -240,7 +260,10 @@ _NOT_SKIPS = {"due", "behind_proportional_norm"}
 def _literals_in_package() -> set[str]:
     found: set[str] = set()
     for path in _PACKAGE.glob("*.py"):
-        found.update(_LITERAL.findall(path.read_text(encoding="utf-8")))
+        text = path.read_text(encoding="utf-8")
+        found.update(_DECISION_LITERAL.findall(text))
+        if path.name in _RETURNING_MODULES:
+            found.update(_RETURN_LITERAL.findall(text))
     return found
 
 
@@ -253,10 +276,20 @@ class TestSkipReasonVocabularyCensus:
         assert missing == set(), f"reason без места в KNOWN_SKIP_REASONS (уедет в other): {missing}"
 
     def test_declared_vocabularies_are_covered(self) -> None:
-        assert set(selection.BLOCK_REASONS) <= set(tasks.KNOWN_SKIP_REASONS)
-        assert set(coach.BLOCK_REASONS) - {"due"} <= set(tasks.KNOWN_SKIP_REASONS)
-        assert {"weekly_cap_surface", "weekly_cap_total"} <= set(tasks.KNOWN_SKIP_REASONS)
-        assert {"shadow", "unresolved", "no_channel"} <= set(tasks.KNOWN_SKIP_REASONS)
+        """Источники вне пакета — константами, не литералами: переименование
+        там не должно уводить пропуски в other при зелёной переписи."""
+        from apps.identity.services.person_context_gate import (
+            REASON_SHADOW,
+            REASON_UNRESOLVED,
+        )
+        from apps.notifications import proactive
+
+        known = set(tasks.KNOWN_SKIP_REASONS)
+        assert set(selection.BLOCK_REASONS) <= known
+        assert set(coach.BLOCK_REASONS) - {"due"} <= known
+        assert set(proactive.BLOCK_REASONS) <= known  # общий сторож согласий целиком
+        assert {"weekly_cap_surface", "weekly_cap_total"} <= known
+        assert {REASON_SHADOW, REASON_UNRESOLVED, "no_channel"} <= known
 
     def test_no_duplicates_and_no_other_in_the_vocabulary(self) -> None:
         assert len(set(tasks.KNOWN_SKIP_REASONS)) == len(tasks.KNOWN_SKIP_REASONS)
