@@ -10,7 +10,7 @@
  *   - отказы по слагам: not_found на POST (нет активной цели) → экран
  *     цели; already_active → перечитать карточку; plan_lite_disabled →
  *     «недоступно»; ayla_unavailable → фраза + «Повторить»;
- *   - флаг `VITE_PLAN_LITE` выключен → «недоступно» без сетевого вызова.
+ *   - флага сборки нет (DRF-2144): «недоступно» говорит только сервер.
  */
 import { act, configure, fireEvent, getConfig, render, screen, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
@@ -98,7 +98,6 @@ function renderScreen() {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  vi.stubEnv("VITE_PLAN_LITE", "1");
   mockedDoc.mockResolvedValue(DOC);
   mockedGet.mockResolvedValue(null);
   // Здесь — прежний путь без шаблона (DRF-2123: no_template → конструктор);
@@ -108,9 +107,6 @@ beforeEach(() => {
   mockedClose.mockResolvedValue(undefined);
 });
 
-afterAll(() => {
-  vi.unstubAllEnvs();
-});
 
 describe("конструктор", () => {
   it("плана нет → три обязательства, ничего не выбрано, «Составить» не активна", async () => {
@@ -238,12 +234,13 @@ describe("отказы и флаг", () => {
     expect(screen.getByTestId("plan-lite-card")).toBeInTheDocument();
   });
 
-  it("флаг сборки выключен → «недоступно» без единого вызова", async () => {
+  it("флаг сборки VITE_PLAN_LITE ничего не решает — план читается с сервера (DRF-2144)", async () => {
     vi.stubEnv("VITE_PLAN_LITE", "");
     renderScreen();
     await settle();
 
-    expect(screen.getByText(PLAN_LITE_COPY.unavailable)).toBeInTheDocument();
-    expect(mockedGet).not.toHaveBeenCalled();
+    expect(mockedGet).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText(PLAN_LITE_COPY.unavailable)).toBeNull();
+    vi.unstubAllEnvs();
   });
 });

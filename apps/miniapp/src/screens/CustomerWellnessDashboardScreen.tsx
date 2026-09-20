@@ -13,22 +13,35 @@
  *   - `project_ayla_personal_ai` — first-person Ayla voice, «ты»,
  *     lowercase «ayla» wordmark
  *
- * # Layout (TL extension to Tau §3 — block re-numbering)
+ * # Layout — H01 по макету DRF-1321 v1.2 (UX FREEZE 25.08), DRF-2144
+ *
+ * Решение владельца 20.09 (§55): строить по макету в рамках §49/§82 — без
+ * веса, «−2,4 кг», процентов, графиков прогресса, «Добавить замер» и
+ * «Самочувствие». Порядок сверху вниз:
  *
  *   Block 1 — Greeting + human one-liner (Tau §3 / §11.9 + §11.10)
- *   Block 2 — Pulse strip (Питание + Вода + Цель)  — Tau §3 + §11.1
- *   Block 3 — Quick actions (💧 + 🎯 + 📅) — Tau §3 + §11.5 + §11.8
- *   Block 4 — Шаги на сегодня (text actions, no progress bars) — Tau §3;
- *     заголовок по решению владельца 11.09.2026 §5.2: привычка/шаг ≠ цель
- *   Block 5 — Ближайшая запись (multi-record indicator) — Tau §3 + §11.3
+ *   Block G — карточка активной цели: «Активная цель», название,
+ *     «Неделя N · выполнено N из M действий» (adherence Plan Lite),
+ *     primary «Продолжить сегодняшний план» / «Составить план»,
+ *     вторичное «Посмотреть детали цели»; без цели — «Выбери цель»
+ *   Block C — ОДИН блок согласия дневника (вместо двух абзацев)
+ *   Block P — «План на сегодня» из Plan Lite (тот же источник, что у
+ *     PlanLiteScreen); без плана блока нет
+ *   Block 2 — Pulse strip (Питание + Вода) — Tau §3 + §11.1
+ *   Block 4 — Шаги на сегодня (норма воды из анкеты; иной источник, чем план)
+ *   Block 5 — Ближайшая запись: карточка (услуга, мастер, когда, адрес,
+ *     статус, «Открыть запись», «Все мои записи»); нет — «Записей нет» +
+ *     «Записаться»
+ *   Block 3 — Быстрые действия по фризу: записать питание / стакан воды /
+ *     новая запись / скорректировать план / профиль
+ *   Block A — «Продолжить разговор с Ayla» с последней темой
+ *     (`customer/last-topic/`); без темы — нейтрально
  *   Block 6 — Прогресс недели (cold-start ≥3 days) — Tau §3 + §11.4
- *   Block 7 — Recommendations embed (TL extension; phase 3.1: real
- *     scorer picks onto mirror services, no reasoning_text)
- *   Bottom nav — 🏠 Главная / 📅 Записи / 💅 Услуги / 👤 Я
+ *   Block 7 — Recommendations embed (TL extension)
+ *   Bottom nav — Главная · План · Дневник · Записи · Профиль (§55 б)
  *
- * NOTE: Tau's literal Block 7 is the bottom nav. TL re-numbering treats
- * the bottom nav as separate and adds a new Block 7 (Recommendations
- * embed) above it. Implemented per TL ticket; deviation documented.
+ * Места, оставленные под чужие листы (условный рендер, ключа пока нет):
+ * срок цели «До 1 ноября 2026» (DRF-2173), цена записи «3 200 ₽» (DRF-2172).
  *
  * # Что снято с этого экрана и почему (DRF-1546)
  *
@@ -79,11 +92,20 @@
  *      explicit verified tokens (handled in globals.css).
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { ApiError, type Service } from "../lib/api";
 import { authErrorCopy, loadErrorReason, type LoadErrorReason } from "../lib/auth-error-copy";
+import { mapBookingStatus } from "../lib/booking-status";
+import { formatTopicWhen, getLastTopic, type LastTopic } from "../lib/customer-last-topic";
 import { formatDuration, priceFromLabel } from "../lib/format";
+import { closeApp } from "../lib/max-sdk";
+import {
+  getPlanLite,
+  type PlanLite,
+  type PlanLiteActionType,
+  type PlanLiteCadence,
+} from "../lib/plan-lite";
 import { visitAddressText } from "../lib/visit-address";
 import {
   enqueueWaterLog,
@@ -111,11 +133,34 @@ import {
   getCatalogBrowse,
   type CatalogBrowseData,
 } from "../lib/customer-booking";
+import { StatusBadge } from "../components/StatusBadge";
 import { UnbookableBadge } from "../components/UnbookableNote";
 import { useScreenBack } from "../hooks/useScreenBack";
-import { planLiteEnabled } from "../lib/feature-flags";
 import { PLAN_LITE_COPY, PLAN_LITE_ROUTE } from "./PlanLiteScreen";
 import { screenRoot } from "../lib/screen-back";
+
+/** Одна цель из `wellness/today.active_goals` (cap=1, решение №13). */
+type ActiveGoal = NonNullable<WellnessToday["active_goals"]>[number];
+
+/**
+ * Согласие дневника — ОДИН блок на экране (DRF-2144 п.6). Формулировка из
+ * листа; кнопка закрывает Mini App в чат MAX — согласие даётся там.
+ */
+export const DIARY_CONSENT_CARD_TEXT = "Чтобы вести дневник, нужно согласие — дай его в чате с Ayla";
+export const DIARY_CONSENT_CARD_CTA = "Дать согласие в чате";
+
+/**
+ * Нижняя панель — ровно пять вкладок по макету H01 (решение владельца §55 б).
+ * `route: null` — эта вкладка и есть текущий экран. Порядок и подписи —
+ * договор со сторожем (h01-тест) и с макетом; менять их — новое решение.
+ */
+export const HOME_TABS: ReadonlyArray<{ label: string; icon: string; route: string | null }> = [
+  { label: "Главная", icon: "🏠", route: null },
+  { label: "План", icon: "📋", route: PLAN_LITE_ROUTE },
+  { label: "Дневник", icon: "📔", route: "/customer/food-scanner/diary" },
+  { label: "Записи", icon: "📅", route: "/customer/records" },
+  { label: "Профиль", icon: "👤", route: "/customer/profile" },
+];
 
 // ---------------------------------------------------------------------------
 // Loading + error state model — per-block isolation for «Partial» state
@@ -127,6 +172,14 @@ type Slice<T> =
   | { kind: "loading" }
   | { kind: "ok"; data: T }
   | { kind: "error"; reason: LoadErrorReason };
+
+/**
+ * План — три состояния: читаем; прочитан (`null` = плана нет); недоступен
+ * (сервер выключил Plan Lite — 404 `plan_lite_disabled` — или не ответил).
+ * «Недоступен» и «плана нет» — разные факты: во втором случае карточка цели
+ * зовёт составить план, в первом о плане молчит.
+ */
+type PlanSlice = { kind: "loading" } | { kind: "ok"; data: PlanLite | null } | { kind: "unavailable" };
 
 function isOnline(): boolean {
   if (typeof navigator === "undefined") return true;
@@ -161,6 +214,9 @@ export function CustomerWellnessDashboardScreen() {
   const [recs, setRecs] = useState<Slice<CatalogBrowseData>>({
     kind: "loading",
   });
+  const [planSlice, setPlanSlice] = useState<PlanSlice>({ kind: "loading" });
+  // Тема — `null` и «ручка упала» читаются одинаково: блок нейтральный.
+  const [lastTopic, setLastTopic] = useState<LastTopic | null>(null);
 
   const [online, setOnline] = useState<boolean>(isOnline());
   const [waterQueueLen, setWaterQueueLen] = useState<number>(
@@ -192,13 +248,16 @@ export function CustomerWellnessDashboardScreen() {
     setToday({ kind: "loading" });
     setActivity({ kind: "loading" });
     setRecs({ kind: "loading" });
+    setPlanSlice({ kind: "loading" });
 
     // Per-slice isolation — Promise.allSettled so one failure doesn't
-    // blank all three blocks. (Tau §5 State 5 partial render.)
-    const [todayRes, activityRes, recsRes] = await Promise.allSettled([
+    // blank the other blocks. (Tau §5 State 5 partial render.)
+    const [todayRes, activityRes, recsRes, planRes, topicRes] = await Promise.allSettled([
       getWellnessToday(),
       getRecentActivity(),
       getCatalogBrowse(),
+      getPlanLite(),
+      getLastTopic(),
     ]);
 
     if (todayRes.status === "fulfilled") {
@@ -219,6 +278,13 @@ export function CustomerWellnessDashboardScreen() {
       // Recommendations errors hide the whole block silently per spec.
       setRecs({ kind: "error", reason: loadErrorReason(recsRes.reason) });
     }
+
+    // План: выключен на сервере (`plan_lite_disabled`) или не ответил —
+    // «недоступен», без ошибки на экране: Главная от плана не зависит.
+    setPlanSlice(
+      planRes.status === "fulfilled" ? { kind: "ok", data: planRes.value } : { kind: "unavailable" },
+    );
+    setLastTopic(topicRes.status === "fulfilled" ? topicRes.value : null);
   }, []);
 
   useEffect(() => {
@@ -364,21 +430,30 @@ export function CustomerWellnessDashboardScreen() {
     navigate("/customer/catalog");
   }, [navigate]);
 
-  // DRF-2101 — Plan Lite: вход «Мой план» под флагом сборки и только когда
-  // цель есть — без цели плана не бывает, и кнопка не обещает того, чего
-  // сервер не даст.
+  // DRF-2101/2144 — Plan Lite: экран плана. Флага сборки больше нет —
+  // включён ли план, скажет сервер (карточка цели уже прочитала ответ).
   const onPlanTap = useCallback(() => {
     navigate(PLAN_LITE_ROUTE);
   }, [navigate]);
 
-  // DRF-1839 — вход в дневник. Экран `/customer/food-scanner/diary`
-  // читает живую `/wellness/today` (без `guardProd`), но входа в него не
-  // было ни одного: slug `open_food_diary` без кнопки в боте и экран
-  // «Сохранённое», сам недостижимый. Записи, сделанные в чате, человек
-  // здесь не видел — пустой экран был неотличим от «ничего не ел».
-  const onDiaryTap = useCallback(() => {
-    navigate("/customer/food-scanner/diary");
+  // Вход в дневник живёт во вкладке «Дневник» (DRF-1839 → DRF-2144);
+  // быстрое действие «Записать питание» ведёт сразу к вводу текстом.
+  const onFoodTap = useCallback(() => {
+    navigate("/customer/food-scanner/manual");
   }, [navigate]);
+
+  const onProfileTap = useCallback(() => {
+    navigate("/customer/profile");
+  }, [navigate]);
+
+  // В чат MAX — закрыть Mini App: приложение открыто из диалога с Ayla, и
+  // закрытие возвращает туда. Фразу («скорректировать план», согласие,
+  // новый вопрос) человек пишет сам: deep link с текстом в MAX не
+  // существует (см. историю в StateError.tsx), и никакого контекста экран
+  // в чат не передаёт — обещать это было бы ложью.
+  const onChatTap = useCallback(() => {
+    closeApp();
+  }, []);
 
   const onDismissOnboarding = useCallback(() => {
     markOnboardingDismissed();
@@ -480,12 +555,12 @@ export function CustomerWellnessDashboardScreen() {
   // fixes. `todayData === null` (still loading) is likewise unknown.
   const goalsSlice = todayData?.active_goals;
   const goalsKnown = goalsSlice !== undefined;
-  const hasGoal = !!goalsSlice && goalsSlice.length > 0;
-  const goalCtaLabel = hasGoal
-    ? "Моя цель"
-    : goalsKnown
-      ? "Выбери цель"
-      : "Цель";
+  // Одна цель, не несколько (решение владельца №13, 06.09).
+  const goal: ActiveGoal | undefined = goalsSlice?.[0];
+  // DRF-1927 — ключей дневника нет, потому что нет согласия, а не потому,
+  // что чтение упало: один блок согласия вместо строк «Питание»/«Вода».
+  const consentRequired = todayData?.consent_required === true;
+  const topicWhen = useMemo(() => (lastTopic ? formatTopicWhen(lastTopic.at) : ""), [lastTopic]);
 
   // Block 4 actionable targets visibility.
   //
@@ -513,7 +588,10 @@ export function CustomerWellnessDashboardScreen() {
         К основному содержимому
       </a>
 
-      {/* Header — 56dp. */}
+      {/* Header — 56dp. Иконки «Профиль»/«Настройки» сняты (DRF-2144): обе
+          вели в профиль, а профиль теперь — вкладка панели. Вордмарк и
+          «спросить» — прежние; на макете H01 в шапке имя и колокольчик
+          (Д1/Д2 в списке отступлений PR). */}
       <header className="wellness-dash__header" role="banner">
         <div className="wellness-dash__brand">
           {/* «ayla» = English wordmark per Tau §7 — wrap in lang="en"
@@ -531,24 +609,6 @@ export function CustomerWellnessDashboardScreen() {
         >
           спросить
         </button>
-        <div className="wellness-dash__header-icons">
-          <button
-            type="button"
-            className="wellness-dash__icon-btn"
-            aria-label="Профиль"
-            onClick={() => navigate("/customer/profile")}
-          >
-            <span aria-hidden="true">👤</span>
-          </button>
-          <button
-            type="button"
-            className="wellness-dash__icon-btn"
-            aria-label="Настройки"
-            onClick={() => navigate("/customer/profile")}
-          >
-            <span aria-hidden="true">⚙</span>
-          </button>
-        </div>
       </header>
 
       {/* Offline banner — §5 State 4. */}
@@ -613,7 +673,7 @@ export function CustomerWellnessDashboardScreen() {
               <button
                 type="button"
                 className="btn-secondary wellness-dash__onboarding-cta"
-                onClick={() => navigate("/customer/food-scanner/manual")}
+                onClick={onFoodTap}
               >
                 Записать текстом
               </button>
@@ -629,100 +689,192 @@ export function CustomerWellnessDashboardScreen() {
           </section>
         )}
 
-        {/* Block 2 — Pulse strip (§11.1 — conditional БЖУ). */}
-        <section className="wellness-dash__pulse" aria-label="Сегодня">
-          {today.kind === "loading" && <PulseSkeleton />}
-          {today.kind === "error" && (
+        {/* Block G — карточка активной цели (макет H01, верх). Цель — из
+            `wellness/today.active_goals` (три состояния, DRF-1476), план —
+            из `plan-lite` (тот же источник, что у PlanLiteScreen). */}
+        {today.kind === "ok" && (
+          <GoalCard
+            goal={goal}
+            goalsKnown={goalsKnown}
+            plan={planSlice}
+            onPlan={onPlanTap}
+            onGoal={onGoalTap}
+          />
+        )}
+
+        {/* Block C — согласие дневника: ОДИН блок (DRF-2144 п.6) вместо двух
+            одинаковых абзацев в строках «Питание» и «Вода». */}
+        {today.kind === "ok" && consentRequired && (
+          <section
+            className="wellness-dash__consent"
+            aria-label="Согласие на дневник"
+          >
+            <p className="wellness-dash__consent-text">{DIARY_CONSENT_CARD_TEXT}</p>
+            <button type="button" className="btn-secondary" onClick={onChatTap}>
+              {DIARY_CONSENT_CARD_CTA}
+            </button>
+          </section>
+        )}
+
+        {/* Block P — «План на сегодня»: действия активного плана; без плана
+            блока нет (DRF-2144 п.2). */}
+        {planSlice.kind === "ok" && planSlice.data && (
+          <PlanToday plan={planSlice.data} onAll={onPlanTap} onAdjust={onChatTap} />
+        )}
+
+        {/* Block 2 — Pulse strip (§11.1 — conditional БЖУ). Без согласия
+            строк нет — их место занимает одна карточка согласия выше. */}
+        {!(today.kind === "ok" && consentRequired) && (
+          <section className="wellness-dash__pulse" aria-label="Сегодня">
+            {today.kind === "loading" && <PulseSkeleton />}
+            {today.kind === "error" && (
+              <BlockError
+                reason={today.reason}
+                onRetry={() => void fetchAll()}
+              />
+            )}
+            {today.kind === "ok" && diaryOff && (
+              <div className="wellness-dash__block-error" role="status" aria-live="polite">
+                <p>{DIARY_OFF_TEXT}</p>
+              </div>
+            )}
+            {today.kind === "ok" && !diaryOff && (
+              <PulseStrip data={today.data} />
+            )}
+          </section>
+        )}
+
+        {/* Block 4 — Шаги на сегодня (text actions). */}
+        {showTodayGoals && today.kind === "ok" && (
+          <section
+            className="wellness-dash__today-goals"
+            aria-labelledby="tg-header"
+          >
+            <h2 id="tg-header" className="wellness-dash__section-header">
+              Шаги на сегодня
+            </h2>
+            <ul className="wellness-dash__goal-list">
+              {waterRemaining > 0 && (
+                <li className="wellness-dash__goal-item">
+                  <span aria-hidden="true">💧</span>{" "}
+                  <span>
+                    Ещё {waterRemaining}{" "}
+                    {ruPluralWater(waterRemaining)} до нормы
+                  </span>
+                </li>
+              )}
+            </ul>
+          </section>
+        )}
+
+        {/* Block 5 — Ближайшая запись (карточка по макету H01, DRF-2144 п.3;
+            источник — `recent-activity`, как и раньше). */}
+        <section
+          className="wellness-dash__booking"
+          aria-labelledby="booking-header"
+        >
+          <h2 id="booking-header" className="wellness-dash__section-header">
+            Ближайшая запись
+          </h2>
+          {activity.kind === "loading" && <BookingSkeleton />}
+          {activity.kind === "error" && (
             <BlockError
-              reason={today.reason}
+              reason={activity.reason}
               onRetry={() => void fetchAll()}
             />
           )}
-          {today.kind === "ok" && diaryOff && (
-            <div className="wellness-dash__block-error" role="status" aria-live="polite">
-              <p>{DIARY_OFF_TEXT}</p>
-            </div>
+          {activity.kind === "ok" && !activity.data.next_booking && (
+            <BookingEmpty onBook={onCatalogTap} />
           )}
-          {today.kind === "ok" && !diaryOff && (
-            <PulseStrip data={today.data} />
+          {activity.kind === "ok" && activity.data.next_booking && (
+            <BookingCard
+              data={activity.data}
+              onOpen={() =>
+                activity.data.next_booking &&
+                navigate(
+                  `/customer/records/${activity.data.next_booking.booking_id}`,
+                )
+              }
+              onAll={() => navigate("/customer/records")}
+            />
           )}
         </section>
 
-        {/* Block 3 — Quick actions 2×2 (§11.5 + §11.7 + §11.8). */}
+        {/* Block 3 — Быстрые действия по фризу 25.08 (DRF-2144 п.4):
+            записать питание / стакан воды / новая запись / скорректировать
+            план / профиль. «Добавить замер» из макета → «стакан воды» (§49:
+            без веса). «Найди услугу» и «Моя цель» ушли: цель — в карточке,
+            услуги — по «Записаться» в каталог. Без контура питания (DRF-2071)
+            дневниковые кнопки не рисуются. */}
         <section
           className="wellness-dash__quick-actions"
           aria-labelledby="qa-header"
         >
           <h2 id="qa-header" className="wellness-dash__section-header">
-            Что сделаем сейчас
+            Быстрые действия
           </h2>
-          <div className="wellness-dash__qa-grid">
+          <div className="wellness-dash__qa-grid wellness-dash__qa-grid--row">
             {!diaryOff && (
               <button
                 type="button"
-                className="wellness-dash__qa-btn"
-                aria-label="Добавить стакан воды 250 мл"
+                className="wellness-dash__qa-btn wellness-dash__qa-btn--compact"
+                aria-label="Записать питание"
+                onClick={onFoodTap}
+              >
+                <span className="wellness-dash__qa-icon" aria-hidden="true">
+                  🍽
+                </span>
+                <span className="wellness-dash__qa-label">Записать питание</span>
+              </button>
+            )}
+            {!diaryOff && (
+              <button
+                type="button"
+                className="wellness-dash__qa-btn wellness-dash__qa-btn--compact"
+                // Видимая подпись — по макету «Стакан воды»; имя для скринридера
+                // несёт глагол: тап сразу пишет 250 мл без подтверждения.
+                aria-label="Добавить стакан воды"
                 onClick={onWaterTap}
               >
                 <span className="wellness-dash__qa-icon" aria-hidden="true">
                   💧
                 </span>
-                <span className="wellness-dash__qa-label">
-                  + стакан 250 мл
-                </span>
+                <span className="wellness-dash__qa-label">Стакан воды</span>
               </button>
             )}
             <button
               type="button"
-              className="wellness-dash__qa-btn"
-              aria-label={goalCtaLabel}
-              onClick={onGoalTap}
-            >
-              <span className="wellness-dash__qa-icon" aria-hidden="true">
-                🎯
-              </span>
-              <span className="wellness-dash__qa-label">
-                {/* §11.2 — context-aware label, tri-state per DRF-1476 */}
-                {goalCtaLabel}
-              </span>
-            </button>
-            {planLiteEnabled() && hasGoal && (
-              <button
-                type="button"
-                className="wellness-dash__qa-btn"
-                aria-label={PLAN_LITE_COPY.entryFromDashboard}
-                onClick={onPlanTap}
-              >
-                <span className="wellness-dash__qa-icon" aria-hidden="true">
-                  📋
-                </span>
-                <span className="wellness-dash__qa-label">{PLAN_LITE_COPY.entryFromDashboard}</span>
-              </button>
-            )}
-            <button
-              type="button"
-              className="wellness-dash__qa-btn"
-              aria-label="Найди услугу"
+              className="wellness-dash__qa-btn wellness-dash__qa-btn--compact"
+              aria-label="Новая запись"
               onClick={onCatalogTap}
             >
               <span className="wellness-dash__qa-icon" aria-hidden="true">
                 📅
               </span>
-              <span className="wellness-dash__qa-label">Найди услугу</span>
+              <span className="wellness-dash__qa-label">Новая запись</span>
             </button>
-            {!diaryOff && (
-              <button
-                type="button"
-                className="wellness-dash__qa-btn"
-                aria-label="Дневник питания"
-                onClick={onDiaryTap}
-              >
-                <span className="wellness-dash__qa-icon" aria-hidden="true">
-                  📔
-                </span>
-                <span className="wellness-dash__qa-label">Дневник питания</span>
-              </button>
-            )}
+            <button
+              type="button"
+              className="wellness-dash__qa-btn wellness-dash__qa-btn--compact"
+              aria-label="Скорректировать план"
+              onClick={onChatTap}
+            >
+              <span className="wellness-dash__qa-icon" aria-hidden="true">
+                📝
+              </span>
+              <span className="wellness-dash__qa-label">Скорректировать план</span>
+            </button>
+            <button
+              type="button"
+              className="wellness-dash__qa-btn wellness-dash__qa-btn--compact"
+              aria-label="Профиль"
+              onClick={onProfileTap}
+            >
+              <span className="wellness-dash__qa-icon" aria-hidden="true">
+                👤
+              </span>
+              <span className="wellness-dash__qa-label">Профиль</span>
+            </button>
           </div>
 
           {/* Sync indicator for offline water queue (§11.8). */}
@@ -758,65 +910,34 @@ export function CustomerWellnessDashboardScreen() {
           )}
         </section>
 
-        {/* Block 4 — Шаги на сегодня (text actions). */}
-        {showTodayGoals && today.kind === "ok" && (
-          <section
-            className="wellness-dash__today-goals"
-            aria-labelledby="tg-header"
-          >
-            <h2 id="tg-header" className="wellness-dash__section-header">
-              Шаги на сегодня
-            </h2>
-            <ul className="wellness-dash__goal-list">
-              {waterRemaining > 0 && (
-                <li className="wellness-dash__goal-item">
-                  <span aria-hidden="true">💧</span>{" "}
-                  <span>
-                    Ещё {waterRemaining}{" "}
-                    {ruPluralWater(waterRemaining)} до нормы
-                  </span>
-                </li>
-              )}
-            </ul>
-          </section>
-        )}
-
-        {/* Block 5 — Ближайшая запись (+ multi-record indicator §11.3). */}
-        <section
-          className="wellness-dash__booking"
-          aria-labelledby="booking-header"
-        >
-          <h2 id="booking-header" className="wellness-dash__section-header">
-            Ближайшая запись
+        {/* Block A — «Продолжить разговор с Ayla» (DRF-2144 п.5; фриз п.4:
+            превью — только реальный последний контекст, иначе нейтрально).
+            Обе кнопки закрывают Mini App — человек возвращается в чат MAX,
+            откуда приложение открыто; фразу он пишет сам (deep link с
+            текстом в MAX не существует — см. StateError.tsx). */}
+        <section className="wellness-dash__ayla" aria-labelledby="ayla-header">
+          <h2 id="ayla-header" className="wellness-dash__section-header">
+            Продолжить разговор с <span lang="en">Ayla</span>
           </h2>
-          {activity.kind === "loading" && <BookingSkeleton />}
-          {activity.kind === "error" && (
-            <BlockError
-              reason={activity.reason}
-              onRetry={() => void fetchAll()}
-            />
-          )}
-          {activity.kind === "ok" && !activity.data.next_booking && (
-            <BookingEmpty onFind={onCatalogTap} />
-          )}
-          {activity.kind === "ok" && activity.data.next_booking && (
-            <BookingCard
-              data={activity.data}
-              onOpen={() =>
-                activity.data.next_booking &&
-                navigate(
-                  `/customer/records/${activity.data.next_booking.booking_id}`,
-                )
-              }
-              onReschedule={() =>
-                activity.data.next_booking &&
-                navigate(
-                  `/customer/records/${activity.data.next_booking.booking_id}/reschedule`,
-                )
-              }
-              onAll={() => navigate("/customer/records")}
-            />
-          )}
+          <div className="wellness-dash__ayla-card">
+            {lastTopic && (
+              <>
+                <div className="wellness-dash__ayla-topic-head">
+                  <span>Последняя тема</span>
+                  {topicWhen && (
+                    <span className="wellness-dash__ayla-when">{topicWhen}</span>
+                  )}
+                </div>
+                <p className="wellness-dash__ayla-topic">{lastTopic.text}</p>
+              </>
+            )}
+            <button type="button" className="wellness-dash__cta" onClick={onChatTap}>
+              Продолжить разговор
+            </button>
+            <button type="button" className="wellness-dash__link-btn" onClick={onChatTap}>
+              Задать новый вопрос
+            </button>
+          </div>
         </section>
 
         {/* Block 6 — Прогресс недели (cold-start gate §11.4). */}
@@ -880,61 +1001,32 @@ export function CustomerWellnessDashboardScreen() {
           )}
       </main>
 
-      {/* Нижняя навигация. Этот экран — «Главная» (DRF-1546), поэтому
-          активна она.
-
-          Вкладка «День» здесь НЕ рисуется: поверхности «День» не
-          существует — её роль исполнял этот самый экран, а он теперь
-          Главная. Кнопка вела бы на страницу, на которой человек уже
-          стоит. Вкладку возвращать вместе с самой поверхностью «День»
-          (канон §3 описывает пять вкладок; пятивкладочная навигация —
-          отдельная работа). Сетка навигации подстраивается под число
-          вкладок, см. `.wellness-dash__nav` в globals.css. */}
+      {/* Нижняя панель — ровно пять вкладок по макету H01 (решение владельца
+          §55 б, DRF-2144): Главная · План · Дневник · Записи · Профиль.
+          «Услуги» ушли из панели в каталог (по «Записаться» / карточке),
+          «Я» стало «Профиль». Этот экран — «Главная», поэтому активна она.
+          Сетка панели подстраивается под число вкладок, см.
+          `.wellness-dash__nav` в globals.css. */}
       <nav className="wellness-dash__nav" aria-label="Основная навигация">
-        <button
-          type="button"
-          className="wellness-dash__nav-tab wellness-dash__nav-tab--active"
-          aria-current="page"
-          aria-label="Главная"
-        >
-          <span className="wellness-dash__nav-icon" aria-hidden="true">
-            🏠
-          </span>
-          <span className="wellness-dash__nav-label">Главная</span>
-        </button>
-        <button
-          type="button"
-          className="wellness-dash__nav-tab"
-          aria-label="Записи"
-          onClick={() => navigate("/customer/records")}
-        >
-          <span className="wellness-dash__nav-icon" aria-hidden="true">
-            📅
-          </span>
-          <span className="wellness-dash__nav-label">Записи</span>
-        </button>
-        <button
-          type="button"
-          className="wellness-dash__nav-tab"
-          aria-label="Услуги"
-          onClick={onCatalogTap}
-        >
-          <span className="wellness-dash__nav-icon" aria-hidden="true">
-            💅
-          </span>
-          <span className="wellness-dash__nav-label">Услуги</span>
-        </button>
-        <button
-          type="button"
-          className="wellness-dash__nav-tab"
-          aria-label="Я"
-          onClick={() => navigate("/customer/profile")}
-        >
-          <span className="wellness-dash__nav-icon" aria-hidden="true">
-            👤
-          </span>
-          <span className="wellness-dash__nav-label">Я</span>
-        </button>
+        {HOME_TABS.map((tab) => (
+          <button
+            key={tab.label}
+            type="button"
+            className={
+              tab.route === null
+                ? "wellness-dash__nav-tab wellness-dash__nav-tab--active"
+                : "wellness-dash__nav-tab"
+            }
+            aria-current={tab.route === null ? "page" : undefined}
+            aria-label={tab.label}
+            onClick={tab.route === null ? undefined : () => navigate(tab.route as string)}
+          >
+            <span className="wellness-dash__nav-icon" aria-hidden="true">
+              {tab.icon}
+            </span>
+            <span className="wellness-dash__nav-label">{tab.label}</span>
+          </button>
+        ))}
       </nav>
     </div>
   );
@@ -989,11 +1081,8 @@ function PulseStrip({ data }: { data: WellnessToday }) {
     waterKnown && waterTargetKnown && waterTarget > 0
       ? Math.round((waterEaten / waterTarget) * 100)
       : 0;
-  // Tri-state, same contract as the quick-action label (DRF-1476):
-  // a goal, no goal, or «the goal layer did not answer».
-  const goalsKnown = data.active_goals !== undefined;
-  // Одна цель, не несколько (решение владельца №13, 06.09).
-  const goal = data.active_goals?.[0];
+  // Цель здесь больше не рисуется — она в карточке цели над этим блоком
+  // (H01, DRF-2144); строка была бы вторым местом для того же факта.
   // DRF-1927 — ключей дневника нет, потому что нет согласия, а не потому,
   // что чтение упало: говорим, что нужно, а не «Не удалось загрузить».
   const sliceClosedCopy = data.consent_required ? DIARY_CONSENT_REQUIRED_TEXT : UNAVAILABLE;
@@ -1126,54 +1215,198 @@ function PulseStrip({ data }: { data: WellnessToday }) {
         )}
       </div>
 
-      <hr className="wellness-dash__pulse-divider" aria-hidden="true" />
-
-      {/* Goal row — §11.2 */}
-      <div
-        className="wellness-dash__pulse-row"
-        aria-label={
-          goal
-            ? [
-                `Цель: ${goal.title}`,
-                goal.week_num ? `${goal.week_num}-я неделя` : null,
-              ]
-                .filter(Boolean)
-                .join(", ")
-            : goalsKnown
-              ? "Цель не выбрана"
-              : "Цель: данные недоступны"
-        }
-      >
-        <div className="wellness-dash__pulse-head">
-          <span aria-hidden="true">🎯 </span>
-          {goal
-            ? goal.week_num
-              ? `${goal.title} · ${goal.week_num}-я неделя`
-              : goal.title
-            : goalsKnown
-              ? "Цель не выбрана"
-              : "Цель"}
-        </div>
-        {/* Ни полосы, ни процентов под целью — решение владельца №13
-            (06.09): на пилоте разрешён простой показ «Моя цель», без
-            шкал и оценок выполнения. Канон §3 рисует «78 %», и это
-            расхождение борда/макета с решением; правится макет.
-            Раньше полоса рисовалась, когда приходил `progress_pct` —
-            бэкенд его не слал никогда, так что на экране этого не
-            видели, но код был готов нарисовать. */}
-        {goal ? null : goalsKnown ? (
-          <div className="wellness-dash__pulse-numbers">
-            Расскажи о себе — точнее советую
-          </div>
-        ) : (
-          /* Goal layer unreachable — say so plainly. No CTA here: we do
-             not know whether there is a goal to choose (DRF-1476). */
-          <div className="wellness-dash__pulse-numbers">
-            Не удалось загрузить
-          </div>
-        )}
-      </div>
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// H01 (DRF-2144): карточка цели, «План на сегодня», карточка записи.
+// ---------------------------------------------------------------------------
+
+/** Ярлыки действий Plan Lite — те же, что на экране плана (одно имя на проводе). */
+const PLAN_ACTION_LABELS: Record<PlanLiteActionType, string> = {
+  book_service: PLAN_LITE_COPY.labelBook,
+  log_food: PLAN_LITE_COPY.labelFood,
+  log_water: PLAN_LITE_COPY.labelWater,
+};
+
+const PLAN_ACTION_ICONS: Record<PlanLiteActionType, string> = {
+  book_service: "📅",
+  log_food: "🍽",
+  log_water: "💧",
+};
+
+/** Период ведра — словами экрана плана: «Сегодня» / «На этой неделе» / «Эти 2 недели». */
+const PLAN_CADENCE_PERIOD: Record<PlanLiteCadence, string> = {
+  per_day: PLAN_LITE_COPY.today,
+  per_week: PLAN_LITE_COPY.thisWeek,
+  per_2_weeks: PLAN_LITE_COPY.twoWeeks,
+};
+
+/**
+ * Adherence плана — сколько действий сделано из скольких за текущие вёдра.
+ * Это счёт ДЕЙСТВИЙ, не оценка результата (§49: без веса, §82: без
+ * процентов) — поэтому строка «выполнено N из M действий», а не шкала.
+ */
+function planAdherence(plan: PlanLite): { done: number; total: number } {
+  return plan.actions.reduce(
+    (acc, a) => ({
+      done: acc.done + Math.min(a.done_count, a.target_count),
+      total: acc.total + a.target_count,
+    }),
+    { done: 0, total: 0 },
+  );
+}
+
+/** «1 ноября 2026» — срок цели; место под DRF-2173, пока ключа нет. */
+function formatGoalDue(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleDateString("ru-RU", { day: "numeric", month: "long", year: "numeric" });
+}
+
+function GoalCard({
+  goal,
+  goalsKnown,
+  plan,
+  onPlan,
+  onGoal,
+}: {
+  goal: ActiveGoal | undefined;
+  goalsKnown: boolean;
+  plan: PlanSlice;
+  onPlan: () => void;
+  onGoal: () => void;
+}) {
+  if (!goal) {
+    // Нет цели / слой цели не ответил — та же форма карточки, чтобы экран
+    // не «прыгал» между состояниями. Три состояния — DRF-1476: «Выбери цель»
+    // говорится ТОЛЬКО когда известно, что цели нет.
+    return (
+      <section className="wellness-dash__goal-card" aria-labelledby="goal-header">
+        <p id="goal-header" className="wellness-dash__goal-eyebrow">
+          Цель
+        </p>
+        {goalsKnown ? (
+          <>
+            <p className="wellness-dash__goal-hint">Расскажи о себе — точнее советую</p>
+            <button type="button" className="wellness-dash__cta" onClick={onGoal}>
+              Выбери цель
+            </button>
+          </>
+        ) : (
+          <p className="wellness-dash__goal-hint">{UNAVAILABLE}</p>
+        )}
+      </section>
+    );
+  }
+
+  const planKnown = plan.kind === "ok";
+  const activePlan = plan.kind === "ok" ? plan.data : null;
+  const due = goal.due_date ? formatGoalDue(goal.due_date) : "";
+  const weekPrefix = goal.week_num ? `Неделя ${goal.week_num} · ` : "";
+  let statusLine: string | null = null;
+  if (activePlan) {
+    const { done, total } = planAdherence(activePlan);
+    statusLine = weekPrefix
+      ? `${weekPrefix}выполнено ${done} из ${total} действий`
+      : `Выполнено ${done} из ${total} действий`;
+  } else if (planKnown) {
+    statusLine = "План ещё не составлен";
+  } else if (goal.week_num) {
+    // План недоступен (сервер выключил или не ответил) — о плане молчим,
+    // счётчик недель остаётся: это не оценка выполнения (решение №13).
+    statusLine = `Неделя ${goal.week_num}`;
+  }
+
+  return (
+    <section className="wellness-dash__goal-card" aria-labelledby="goal-header">
+      <p id="goal-header" className="wellness-dash__goal-eyebrow">
+        Активная цель
+      </p>
+      <h2 className="wellness-dash__goal-title">{goal.title}</h2>
+      {/* Срок — место оставлено под DRF-2173: ключ появится — строка встанет. */}
+      {due && <p className="wellness-dash__goal-due">До {due}</p>}
+      {/* Ни шкалы, ни процентов, ни веса под целью (§49/§82, решение №13):
+          только счёт действий из плана. */}
+      {statusLine && <p className="wellness-dash__goal-status">{statusLine}</p>}
+      {activePlan && (
+        <button type="button" className="wellness-dash__cta" onClick={onPlan}>
+          Продолжить сегодняшний план
+        </button>
+      )}
+      {!activePlan && planKnown && (
+        <button type="button" className="wellness-dash__cta" onClick={onPlan}>
+          Составить план
+        </button>
+      )}
+      <button type="button" className="wellness-dash__link-btn" onClick={onGoal}>
+        Посмотреть детали цели
+      </button>
+    </section>
+  );
+}
+
+function PlanToday({
+  plan,
+  onAll,
+  onAdjust,
+}: {
+  plan: PlanLite;
+  onAll: () => void;
+  onAdjust: () => void;
+}) {
+  return (
+    <section className="wellness-dash__plan-today" aria-labelledby="plan-today-header">
+      <div className="wellness-dash__plan-head">
+        <h2 id="plan-today-header" className="wellness-dash__section-header">
+          План на сегодня
+        </h2>
+        <button type="button" className="wellness-dash__link-btn" onClick={onAll}>
+          Смотреть весь план
+        </button>
+      </div>
+      <ul className="wellness-dash__plan-list">
+        {plan.actions.map((a) => {
+          const label = PLAN_ACTION_LABELS[a.action_type];
+          const done = a.done_count >= a.target_count;
+          return (
+            <li key={a.action_type} className="wellness-dash__plan-item">
+              <span className="wellness-dash__plan-icon" aria-hidden="true">
+                {PLAN_ACTION_ICONS[a.action_type]}
+              </span>
+              <div className="wellness-dash__plan-main">
+                <div className="wellness-dash__plan-label">{label}</div>
+                <div className="wellness-dash__plan-period">{PLAN_CADENCE_PERIOD[a.cadence]}</div>
+              </div>
+              <div className="wellness-dash__plan-state">
+                {done ? (
+                  <span
+                    className="wellness-dash__plan-done"
+                    role="img"
+                    aria-label={`${label}: выполнено`}
+                  >
+                    ✓
+                  </span>
+                ) : (
+                  PLAN_LITE_COPY.ofTotal(a.done_count, a.target_count)
+                )}
+              </div>
+              <span className="wellness-dash__plan-chip">из вашего плана</span>
+            </li>
+          );
+        })}
+      </ul>
+      {/* Attention-состояние по фризу 25.08 п.2 — человеческим языком. Кнопка
+          закрывает Mini App в чат MAX; что именно поправить, человек пишет
+          сам — контекст в чат не передаётся. */}
+      <div className="wellness-dash__plan-attention" role="note">
+        <p className="wellness-dash__plan-attention-text">Сегодня не получается по плану?</p>
+        <button type="button" className="btn-secondary" onClick={onAdjust}>
+          Скорректировать с Ayla
+        </button>
+      </div>
+    </section>
   );
 }
 
@@ -1193,14 +1426,15 @@ function BookingSkeleton() {
   );
 }
 
-function BookingEmpty({ onFind }: { onFind: () => void }) {
+function BookingEmpty({ onBook }: { onBook: () => void }) {
+  // По макету H01: «Записей нет» + «Записаться» → каталог. Прежняя заглушка
+  // «Подобрать услугу под твою цель…» обещала подбор, которого на Главной
+  // нет (C01: Home — не второй каталог).
   return (
     <div className="wellness-dash__booking-card">
-      <p className="wellness-dash__booking-empty">
-        Подобрать услугу под твою цель — расскажу что подойдёт.
-      </p>
-      <button type="button" className="btn-secondary" onClick={onFind}>
-        Найди услугу
+      <p className="wellness-dash__booking-empty">Записей нет</p>
+      <button type="button" className="btn-secondary" onClick={onBook}>
+        Записаться
       </button>
     </div>
   );
@@ -1209,35 +1443,40 @@ function BookingEmpty({ onFind }: { onFind: () => void }) {
 function BookingCard({
   data,
   onOpen,
-  onReschedule,
   onAll,
 }: {
   data: RecentActivity;
   onOpen: () => void;
-  onReschedule: () => void;
   onAll: () => void;
 }) {
   const b = data.next_booking;
   if (!b) return null;
   const moreThisWeek = data.this_week_booking_count > 1;
+  // Бейдж — тем же словарём, что список записей; ключа нет (старый сервер)
+  // — бейджа нет, а не «неизвестно».
+  const status = b.status ? mapBookingStatus(b.status) : null;
+  // Цена — место оставлено под DRF-2172: пока ключа нет, строки нет (§33).
+  const price = b.price ? priceFromLabel(b.price) : "";
   return (
     <div className="wellness-dash__booking-card">
-      <div className="wellness-dash__booking-when">{b.date_human}</div>
-      <div className="wellness-dash__booking-what">
-        {b.service_name} · {b.duration_min} мин
+      <div className="wellness-dash__booking-top">
+        <div className="wellness-dash__booking-what">
+          {b.service_name}
+          {b.duration_min ? ` · ${b.duration_min} мин` : ""}
+        </div>
+        {status && <StatusBadge rendering={status.rendering} />}
       </div>
       <div className="wellness-dash__booking-who">
         у {b.master_name} · {b.salon_name}
       </div>
+      <div className="wellness-dash__booking-row">
+        <div className="wellness-dash__booking-when">{b.date_human}</div>
+        {price && <div className="wellness-dash__booking-price">{price}</div>}
+      </div>
       {/* Адрес — три состояния, и на экране их два разных текста
           (DRF-1611). Строка есть ВСЕГДА: человек идёт на визит, и
           нужда у него одна и та же независимо от того, чей это
-          пробел — салона или наш.
-
-          Асимметрия иначе выходила бы обратная задуманной: при `""`
-          состояние окончательное (салон ответил, спрашивать некого),
-          при `null` — исправимое (адрес скорее всего есть). Спрятать
-          строку у `null` значило бы дать меньше тому, кому нужнее. */}
+          пробел — салона или наш. */}
       <div className="wellness-dash__booking-where">
         {visitAddressText(b.address)}
       </div>
@@ -1250,6 +1489,8 @@ function BookingCard({
         </div>
       )}
 
+      {/* По макету: «Открыть запись» и «Все мои записи». «Перенести» с
+          Главной снято — перенос живёт в карточке записи. */}
       <div className="wellness-dash__booking-actions">
         <button
           type="button"
@@ -1259,25 +1500,15 @@ function BookingCard({
         >
           Открыть запись
         </button>
-        <button
-          type="button"
-          className="btn-secondary"
-          onClick={onReschedule}
-          aria-label="Перенести запись"
-        >
-          Перенести
-        </button>
       </div>
-      {moreThisWeek && (
-        <button
-          type="button"
-          className="wellness-dash__booking-all"
-          onClick={onAll}
-          aria-label="Все записи"
-        >
-          Все записи →
-        </button>
-      )}
+      <button
+        type="button"
+        className="wellness-dash__booking-all"
+        onClick={onAll}
+        aria-label="Все мои записи"
+      >
+        Все мои записи →
+      </button>
     </div>
   );
 }

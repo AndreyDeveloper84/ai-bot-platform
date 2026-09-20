@@ -9,8 +9,8 @@
  * дневнику не относятся.
  *
  * Второй узел — входы в запись не рисуются: рядом с «недоступен» не должно
- * стоять «+ стакан» и «Дневник питания». Остальные быстрые действия (цель,
- * каталог) — не питание и остаются.
+ * стоять «Стакан воды» и «Записать питание» (H01, DRF-2144). Остальные
+ * быстрые действия (новая запись, профиль) — не питание и остаются.
  */
 import { render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
@@ -119,13 +119,14 @@ describe("CustomerWellnessDashboardScreen — контур питания вык
     expect(screen.queryByText(/ккал/)).not.toBeInTheDocument();
   });
 
-  it("имя и цель не теряются: приветствие с именем, кнопка цели — «Моя цель», не нейтральная «Цель»", async () => {
+  it("имя и цель не теряются: приветствие с именем, карточка «Активная цель», не нейтральная «Цель»", async () => {
     serveToday(() => off());
     await renderScreen();
 
     await screen.findByText(DIARY_OFF_TEXT);
     expect(screen.getByRole("heading", { level: 1 }).textContent).toContain("Анна");
-    expect(screen.getByRole("button", { name: "Моя цель" })).toBeInTheDocument();
+    expect(screen.getByText("Активная цель")).toBeInTheDocument();
+    expect(screen.queryByText("Выбери цель")).not.toBeInTheDocument();
   });
 
   it("цели нет — «Выбери цель», как при включённом контуре", async () => {
@@ -136,17 +137,16 @@ describe("CustomerWellnessDashboardScreen — контур питания вык
     expect(screen.getByRole("button", { name: "Выбери цель" })).toBeInTheDocument();
   });
 
-  it("входы в запись не рисуются: ни «+ стакан», ни «Дневник питания»; каталог — на месте", async () => {
+  it("входы в запись не рисуются: ни «Стакан воды», ни «Записать питание»; каталог — на месте", async () => {
     serveToday(() => off());
     await renderScreen();
 
     await screen.findByText(DIARY_OFF_TEXT);
-    expect(
-      screen.queryByRole("button", { name: "Добавить стакан воды 250 мл" }),
-    ).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Дневник питания" })).not.toBeInTheDocument();
-    // «Найди услугу» есть и в быстрых действиях, и под пустой записью.
-    expect(screen.getAllByRole("button", { name: "Найди услугу" }).length).toBeGreaterThan(0);
+    expect(screen.queryByRole("button", { name: "Добавить стакан воды" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Записать питание" })).not.toBeInTheDocument();
+    // Вход в каталог — «Новая запись» в быстрых действиях и «Записаться» под пустой записью.
+    expect(screen.getByRole("button", { name: "Новая запись" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Записаться" })).toBeInTheDocument();
   });
 
   it("положительная стража: отказ ручки — по-прежнему «через минуту» с повтором и кнопками записи", async () => {
@@ -156,16 +156,16 @@ describe("CustomerWellnessDashboardScreen — контур питания вык
     expect(await screen.findByText(/через минуту/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Обновить" })).toBeInTheDocument();
     expect(screen.queryByText(DIARY_OFF_TEXT)).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Добавить стакан воды 250 мл" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Дневник питания" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Добавить стакан воды" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Записать питание" })).toBeInTheDocument();
   });
 
   it("положительная стража: контур включён — дневник и кнопки записи как раньше", async () => {
     serveToday(live);
     await renderScreen();
 
-    expect(await screen.findByRole("button", { name: "Дневник питания" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Добавить стакан воды 250 мл" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Записать питание" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Добавить стакан воды" })).toBeInTheDocument();
     expect(screen.queryByText(DIARY_OFF_TEXT)).not.toBeInTheDocument();
   });
 });

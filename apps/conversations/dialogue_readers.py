@@ -518,4 +518,15 @@ DIALOGUE_READERS: dict[str, DialogueReader] = {
         reaches_prompt=False,
         why="Unread badge counters — timestamps and roles, not bodies.",
     ),
+    "apps.miniapp_api.views_last_topic:_recent_assistant_turns": DialogueReader(
+        storage="db_message",
+        reaches_prompt=False,
+        why=(
+            "DRF-2144: «Последняя тема» на Главной Mini App — первые 80 знаков "
+            "последнего хода АССИСТЕНТА, показанные самому человеку (rendered_text, "
+            "иначе content). Человеческая поверхность, не промпт. После «удалить "
+            "всё» ходы не позже anonymized_through отфильтрованы запросом, а "
+            "колонка у них пуста — экран говорит нейтрально «Продолжить разговор»."
+        ),
+    ),
 }
