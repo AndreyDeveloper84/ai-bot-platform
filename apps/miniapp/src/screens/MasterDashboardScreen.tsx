@@ -43,7 +43,9 @@
  * `PayoutPreviewCard` / `IconMessage` живут дальше — с экрана сняты, не удалены.
  * Карточка записи — имя, услуга, время; сторож на набор полей — в тестах.
  * Тап по карточке → «Детали записи» `/master|solo/bookings/:id` (DRF-2156,
- * М-4); «До визита …» — общим форматтером DRF-1185 («1 ч 20 мин», §61).
+ * М-4); «До визита …» — общим форматтером DRF-1185 («1 ч 20 мин», §61);
+ * дата в шапке — тем же стилем, что в деталях («20 сентября · воскресенье»,
+ * DRF-2179).
  *
  * State branches:
  *   - loading            → 3 skeleton cards
@@ -80,7 +82,7 @@ import { useMasterAvatarItems } from "../hooks/useMasterAvatarItems";
 import { AcceptingBookingsToggle } from "../components/AcceptingBookingsToggle";
 import { SetupProgressCard } from "../components/SetupProgressCard";
 import {
-  formatDateLong,
+  formatDateDotWeekdayRu,
   formatDurationRu,
   formatTimeHM,
   joinClientName,
@@ -462,7 +464,8 @@ export function DashboardHeader({
     <header className="master-dashboard__header">
       <div className="master-dashboard__header-left">
         <div className="master-dashboard__salon">{salonName}</div>
-        <div className="master-dashboard__date">{formatDateLong(nowIso)}</div>
+        {/* DRF-2179 (§61 п.6): один стиль даты с «Деталями записи» — «20 сентября · воскресенье». */}
+        <div className="master-dashboard__date">{formatDateDotWeekdayRu(nowIso)}</div>
       </div>
       <div className="master-dashboard__header-right">
         <div className="master-dashboard__who">
