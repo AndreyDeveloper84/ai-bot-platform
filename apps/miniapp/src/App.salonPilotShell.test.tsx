@@ -52,10 +52,14 @@ vi.mock("./lib/admin-api", async (importOriginal) => {
     getSalonDay: vi.fn(),
     listMasters: vi.fn(),
     getAvailabilityRequests: vi.fn(),
+    getAdminAylaHistory: vi.fn(),
+    askAdminAyla: vi.fn(),
+    confirmAdminAylaAction: vi.fn(),
   };
 });
 
 import {
+  getAdminAylaHistory,
   getAvailabilityRequests,
   getMe,
   getSalonDay,
@@ -109,6 +113,8 @@ function tabLabels(): string[] {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // DRF-2119 — раздел «Ayla» читает историю админского ассистента при входе.
+  vi.mocked(getAdminAylaHistory).mockResolvedValue({ messages: [] });
   // День с одной идущей записью. До DRF-1236 здесь стояло
   // `total: 5` при пустом списке мастеров: экран показывал только
   // число из `summary`, и расхождение ничему не мешало. Теперь экран
@@ -366,12 +372,14 @@ describe("«Расписание» и «Ayla» не обещают несуще�
     expect(mockedRequests).not.toHaveBeenCalled();
   });
 
-  it("«Ayla» говорит то же и не зовёт мастерского ассистента", async () => {
+  it("«Ayla» — админский ассистент, не мастерский (DRF-2119)", async () => {
+    // Раздел открывает диалог салона с Ayla через АДМИНСКУЮ тройку
+    // (`admin/assistant/*`), а мастерскую (`master-api`) не зовёт вовсе.
     mockedGetMe.mockResolvedValue(OWNER_ME);
+    vi.mocked(getAdminAylaHistory).mockResolvedValue({ messages: [] });
     renderAppAt("/admin/ayla");
-    expect(
-      await screen.findByText(/Разговор салона с Ayla сюда пока не приходит/),
-    ).toBeInTheDocument();
+    expect(await screen.findByText(/Спросите про записи салона/)).toBeInTheDocument();
+    expect(vi.mocked(getAdminAylaHistory)).toHaveBeenCalled();
     expect(screen.queryByText(/Скоро/)).not.toBeInTheDocument();
   });
 });

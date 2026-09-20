@@ -92,6 +92,38 @@ beforeEach(() => {
   });
 });
 
+describe("prefill from the admin assistant (DRF-2119)", () => {
+  function renderWithQuery(query: string) {
+    render(
+      <MemoryRouter initialEntries={[`/admin/booking/new?${query}`]}>
+        <AdminNewBookingScreen />
+      </MemoryRouter>,
+    );
+  }
+
+  it("fills master, service and a new client from the query; the time is a hint, not a slot", async () => {
+    renderWithQuery(
+      "date=2026-08-21&master_id=m-1&service_id=s-1&start_at=2026-08-21T11%3A00&client_name=%D0%90%D0%BD%D0%BD%D0%B0",
+    );
+    await waitFor(() =>
+      expect(screen.getByLabelText(/^Мастер: Анна/)).toBeInTheDocument(),
+    );
+    expect(screen.getByLabelText(/^Услуга: Маникюр/)).toBeInTheDocument();
+    expect(screen.getByLabelText(/^Клиент: Анна/)).toBeInTheDocument();
+    // Слот не подставлен: время из query — пожелание, слот — из /booking-slots/.
+    expect(screen.getByLabelText(/^Дата и время: выбрать/)).toBeInTheDocument();
+    expect(screen.getByRole("note")).toHaveTextContent("Ayla предложила 11:00");
+    expect(mockedCreate).not.toHaveBeenCalled();
+  });
+
+  it("ignores ids that are not in the loaded lists", async () => {
+    renderWithQuery("master_id=m-other&service_id=s-other");
+    await waitFor(() => expect(mockedMasters).toHaveBeenCalled());
+    expect(await screen.findByLabelText(/^Мастер: выбрать/)).toBeInTheDocument();
+    expect(screen.getByLabelText(/^Услуга: выбрать/)).toBeInTheDocument();
+  });
+});
+
 describe("primary screen shape (§12)", () => {
   it("shows every row at once — a draft, not a wizard", async () => {
     renderScreen();

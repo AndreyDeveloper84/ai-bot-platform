@@ -2136,3 +2136,61 @@ export const getSalonReadiness = (
     method: "GET",
     signal: init.signal,
   });
+
+
+// --- DRF-2119 — раздел «Ayla» для администратора --------------------------
+// Зеркалит apps/admin_api/views_assistant.py. Тот же контракт, что у
+// мастерской тройки (lib/master-api.ts): история с сервера, вопрос, и
+// предложение — НЕ выполненное действие. Отличие одно: `confirm_kind`.
+// `"token"` — подтверждение на сервере (`confirm`); `"open"` — сервер
+// ничего не делает, `open_url` ведёт в форму Mini App с предзаполнением
+// (черновик записи), и запись создаёт человек в форме.
+
+export interface AdminAylaMessage {
+  id: string;
+  role: string;
+  content: string;
+  tool: string;
+  created_at: string;
+}
+
+export interface AdminAylaPendingAction {
+  action: string;
+  summary: string;
+  confirm_label: string;
+  token: string;
+  expires_in_sec: number;
+  confirm_kind: "token" | "open";
+  open_url: string;
+}
+
+export interface AdminAylaAskResponse {
+  answer: string;
+  tool: string;
+  pending_action: AdminAylaPendingAction | null;
+  message_id: string;
+}
+
+export interface AdminAylaConfirmResponse {
+  answer: string;
+  action: string;
+  executed: boolean;
+  message_id: string;
+}
+
+export const getAdminAylaHistory = (limit?: number): Promise<{ messages: AdminAylaMessage[] }> =>
+  request(`/api/v1/admin/assistant/history${limit ? `?limit=${limit}` : ""}`, {
+    method: "GET",
+  });
+
+export const askAdminAyla = (text: string): Promise<AdminAylaAskResponse> =>
+  request("/api/v1/admin/assistant/ask", {
+    method: "POST",
+    body: JSON.stringify({ text }),
+  });
+
+export const confirmAdminAylaAction = (token: string): Promise<AdminAylaConfirmResponse> =>
+  request("/api/v1/admin/assistant/confirm", {
+    method: "POST",
+    body: JSON.stringify({ token }),
+  });
