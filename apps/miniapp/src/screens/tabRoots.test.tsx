@@ -18,7 +18,7 @@
  */
 import { render, screen, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../lib/plan-lite", async (importOriginal) => {
   const original = await importOriginal<typeof import("../lib/plan-lite")>();
@@ -91,10 +91,6 @@ beforeEach(() => {
   } as never);
 });
 
-afterEach(() => {
-  vi.unstubAllEnvs();
-});
-
 describe("вкладки панели — корни (макет DRF-1321)", () => {
   it("каждая вкладка панели ведёт на экран, который рисует ту же панель", async () => {
     for (const tab of CUSTOMER_TABS) {
@@ -129,15 +125,47 @@ describe("вкладки панели — корни (макет DRF-1321)", () 
   });
 });
 
-describe("перепись: у экранов вкладок объявлен корень", () => {
-  const SOURCES = import.meta.glob(["./PlanLiteScreen.tsx", "./FoodScanner*.tsx"], {
-    query: "?raw",
-    import: "default",
-    eager: true,
-  }) as Record<string, string>;
+describe("панель не исчезает в состоянии ошибки (правило #1918)", () => {
+  it("«План»: ручка упала — отказ виден И панель на месте", async () => {
+    mockedPlan.mockRejectedValue(new Error("boom"));
+    renderAt("/customer/plan");
 
-  it("PlanLiteScreen и FoodScannerDiaryScreen объявляют screenRoot, а не backTo", () => {
-    for (const name of ["PlanLiteScreen.tsx", "FoodScannerDiaryScreen.tsx"]) {
+    // Положительная пара: экран правда в ветке ошибки, а не просто пуст.
+    expect(await screen.findByRole("button", { name: "Повторить" })).toBeInTheDocument();
+    const nav = screen.getByRole("navigation", { name: "Основная навигация" });
+    expect(within(nav).getAllByRole("button")).toHaveLength(5);
+  });
+
+  it("«Дневник»: ручка упала — отказ виден И панель на месте", async () => {
+    mockedDiary.mockRejectedValue(new Error("boom"));
+    renderAt("/customer/food-scanner/diary");
+
+    expect(await screen.findByRole("navigation", { name: "Основная навигация" })).toBeInTheDocument();
+    const nav = screen.getByRole("navigation", { name: "Основная навигация" });
+    expect(within(nav).getAllByRole("button")).toHaveLength(5);
+    expect(within(nav).getByRole("button", { name: "Дневник" })).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
+  });
+});
+
+describe("перепись: у экранов вкладок объявлен корень", () => {
+  const SOURCES = import.meta.glob(
+    ["./PlanLiteScreen.tsx", "./FoodScanner*.tsx", "./CustomerProfileScreen.tsx"],
+    {
+      query: "?raw",
+      import: "default",
+      eager: true,
+    },
+  ) as Record<string, string>;
+
+  it("экраны вкладок объявляют screenRoot, а не backTo", () => {
+    for (const name of [
+      "PlanLiteScreen.tsx",
+      "FoodScannerDiaryScreen.tsx",
+      "CustomerProfileScreen.tsx",
+    ]) {
       const src = Object.entries(SOURCES).find(([p]) => p.endsWith(name))?.[1];
       expect(src, name).toBeTruthy();
       expect(src, `${name}: корень объявлен`).toMatch(/useScreenBack\(\s*screenRoot\(/);

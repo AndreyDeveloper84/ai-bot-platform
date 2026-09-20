@@ -133,8 +133,30 @@ describe("перепись: наборов вкладок в исходника�
         "CustomerRecordsScreen.tsx",
         "CustomerProfileScreen.tsx",
         "PilotComingSoonScreen.tsx",
+        // DRF-2201 — «План» и «Дневник» стали вкладками-корнями.
+        "PlanLiteScreen.tsx",
+        "FoodScannerDiaryScreen.tsx",
       ]),
     );
+  });
+
+  it("кто рисует панель — тот объявил себя корнем (DRF-2201)", () => {
+    // Панель есть только у корней: вкладка — верх поверхности, стрелке
+    // «назад» там взяться неоткуда (DRF-1493: адрес, не история). Перепись
+    // держит это фактом файла, а не памятью: экран с панелью и с `backTo`
+    // — противоречие, и оно должно быть красным.
+    const withBar = Object.entries(SOURCES).filter(
+      ([path, src]) => !isTest(path) && src.includes("<CustomerTabBar"),
+    );
+    expect(withBar.length, "панель вообще кто-то рисует").toBeGreaterThanOrEqual(5);
+    const notRoots = withBar
+      .filter(([, src]) => !/useScreenBack\(\s*screenRoot\(/.test(src))
+      .map(([path]) => baseName(path));
+    expect(notRoots).toEqual([]);
+    const withParent = withBar
+      .filter(([, src]) => /useScreenBack\(\s*backTo\(/.test(src))
+      .map(([path]) => baseName(path));
+    expect(withParent).toEqual([]);
   });
 
   it("каждый маршрут вкладки смонтирован в App.tsx — мёртвых вкладок нет", () => {
