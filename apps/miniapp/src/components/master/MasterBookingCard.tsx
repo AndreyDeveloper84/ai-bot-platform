@@ -31,7 +31,8 @@ export interface MasterBookingCardProps {
   startIso: string;
   /** Нужен только крупной карточке («10:30–11:30»); компактная показывает начало. */
   endIso?: string;
-  durationMin: number;
+  /** Нет числа — строки длительности нет (сервер мог не отдать). */
+  durationMin?: number | null;
   /** Адрес «Деталей записи» своей поверхности. */
   to: string;
   /** «Следующие спокойнее» — те же поля, тише по тону. */
@@ -39,9 +40,9 @@ export interface MasterBookingCardProps {
 }
 
 /** «60 мин» — как в макете; не formatDurationRu (тот — для «До визита»). */
-function durationLabel(min: number): string {
-  const n = Number.isFinite(min) ? Math.max(0, Math.floor(min)) : 0;
-  return `${n} мин`;
+function durationLabel(min: number | null | undefined): string | null {
+  if (typeof min !== "number" || !Number.isFinite(min)) return null;
+  return `${Math.max(0, Math.floor(min))} мин`;
 }
 
 export function MasterBookingCard({
@@ -79,9 +80,11 @@ export function MasterBookingCard({
           </span>
           <span className="master-booking-card__name">{clientName}</span>
           <span className="master-booking-card__service">{serviceName}</span>
-          <span className="master-booking-card__duration">
-            <IconClock /> {duration}
-          </span>
+          {duration ? (
+            <span className="master-booking-card__duration">
+              <IconClock /> {duration}
+            </span>
+          ) : null}
         </span>
       ) : (
         <>
@@ -89,7 +92,7 @@ export function MasterBookingCard({
           <span className="master-booking-card__main">
             <span className="master-booking-card__name">{clientName}</span>
             <span className="master-booking-card__service">
-              {serviceName} · {duration}
+              {duration ? `${serviceName} · ${duration}` : serviceName}
             </span>
           </span>
         </>
