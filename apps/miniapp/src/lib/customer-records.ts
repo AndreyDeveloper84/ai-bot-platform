@@ -84,6 +84,12 @@ export interface RecordItem {
   rating: number | null;
   /** C7.3 — raw capture_state when the passthrough ships it; else null. */
   paymentState?: string | null;
+  /**
+   * DRF-2172 — цена записи (снимок на момент записи), Decimal-строка или
+   * null. Формат для экрана — `priceFromLabel` (как у услуг каталога):
+   * «3 200 ₽»; ниже 1 ₽ — пусто (DRF-1989).
+   */
+  price: string | null;
 }
 
 export interface RecordsPage {
@@ -149,6 +155,7 @@ function toRecordItem(
     actions: actionsFor(item, section),
     rating: item.rating,
     paymentState: item.payment?.capture_state ?? null,
+    price: item.price ?? null,
   };
 }
 

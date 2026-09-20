@@ -787,6 +787,13 @@ export interface BookingItem {
   rating: number | null;
   can_rate: boolean;
   /**
+   * DRF-2172 — цена записи как снимок на момент записи (зеркало
+   * `booking.created.price_total`), Decimal-строка «3200.00» или `null`,
+   * когда источник цены не нёс (локальный путь; строки старше столбца).
+   * `null` → строки нет (§103), не «0 ₽». Ключа нет — старый сервер.
+   */
+  price?: string | null;
+  /**
    * C7.3 payment read model — present only when the event stream
    * produced a mirror row (hold signal or a payment.* event).
    * `amount` is a Decimal string per §1 (e.g. "2000.00").
