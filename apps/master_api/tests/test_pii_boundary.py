@@ -109,6 +109,8 @@ CUSTOMER_DIGITS = "79997775544"
 #: Pinned so the assertions below never depend on random UUID digits.
 CUSTOMER_ID = uuid.UUID("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
 CONVERSATION_ID = uuid.UUID("bbbbbbbb-cccc-dddd-eeee-ffffffffffff")
+#: The upcoming mirror row — what ``booking_detail`` (DRF-2154) renders.
+UPCOMING_APPOINTMENT_ID = uuid.UUID("aaaaaaaa-2154-4000-8000-000000002154")
 
 #: What the master surface renders for :data:`CUSTOMER_ID` — the first
 #: name, which is as much of the customer as OD-W2-2 permits. Every route
@@ -394,9 +396,11 @@ def seeded_surface(
     service.ayla_service_id = uuid.uuid4()
     service.save(update_fields=["ayla_service_id"])
 
-    def _seed_mirror(visit_at: datetime, status: str) -> None:
+    def _seed_mirror(
+        visit_at: datetime, status: str, *, appointment_id: uuid.UUID | None = None
+    ) -> None:
         RemoteBookingProxy.all_tenants.create(
-            appointment_id=uuid.uuid4(),
+            appointment_id=appointment_id or uuid.uuid4(),
             tenant=tenant,
             bot_user=customer,
             specialist_id=accepted_master.id,
@@ -429,6 +433,7 @@ def seeded_surface(
     _seed_mirror(
         _visit_at(days_offset=FUTURE_VISIT_DAYS_AHEAD),
         RemoteBookingProxy.Status.CONFIRMED,
+        appointment_id=UPCOMING_APPOINTMENT_ID,
     )
 
     ScheduleChangeRequest.all_tenants.create(
@@ -536,7 +541,17 @@ SWEPT_READ_ROUTES: dict[str, SweptRoute] = {
     "customers_list": SweptRoute(
         lambda: reverse("master_api:customers_list"),
         witness=CUSTOMER_FIRST_NAME,
-        why="customers[].first_name",
+        why=(
+            "customers[].first_name; with ?q= the same route answers the booking-flow "
+            "search (DRF-2154) — {id, name «Имя Ф.», last_visit_date, named} from a "
+            "stubbed Ayla lookup, swept in test_master_bookings_2154"
+        ),
+        carries_customer_data=True,
+    ),
+    "booking_detail": SweptRoute(
+        lambda: reverse("master_api:booking_detail", args=[UPCOMING_APPOINTMENT_ID]),
+        witness=CUSTOMER_FIRST_NAME,
+        why="client.name_initial on the master's own booking (DRF-2154 / DRF-1185)",
         carries_customer_data=True,
     ),
     "catalog_list": SweptRoute(
@@ -1074,6 +1089,22 @@ NOT_SWEPT_ROUTES: dict[str, str] = {
     "canon_gap_request_detail": (
         "one own canon-gap request from the catalog; no customer record — covered "
         "with a stubbed client in test_canon_gap_requests_1802"
+    ),
+    # DRF-2154 (М-2) — записи мастера: создание и слоты идут через тот же
+    # сервис, что салонная стойка (admin_api/services/booking); ответы —
+    # исход §18 / окна времени, клиентских полей в них нет по построению.
+    # Телефон нового гостя — только ВХОД (DRF-1184 «имя + телефон»), в ответ
+    # не эхом — пришпилено в test_master_bookings_2154 (_assert_no_customer_phone).
+    "create_booking": (
+        "POST; the §18 outcome envelope {outcome, detail, appointment_id | reason_code, "
+        "alternatives, idempotency_key} — a verdict about the action, never the customer; "
+        "the new guest's phone is input only and is pinned as never echoed in "
+        "test_master_bookings_2154"
+    ),
+    "booking_slots": (
+        "GET proxy of Ayla's bookable starts for the master's own day and one service: "
+        "{date, timezone, service_id, duration_min, slots[]} — no customer record; swept "
+        "with a stubbed client in test_master_bookings_2154"
     ),
     "accepting_bookings": (
         "GET/PATCH proxy to the catalog's availability route (DRF-1845): the "

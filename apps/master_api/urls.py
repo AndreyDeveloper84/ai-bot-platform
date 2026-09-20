@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from django.urls import path
 
-from apps.master_api import views, views_assistant, views_profile_card
+from apps.master_api import views, views_assistant, views_bookings, views_profile_card
 
 app_name = "master_api"
 
@@ -80,6 +80,18 @@ urlpatterns = [
     ),
     # DRF-1845 — «Принимаю записи»; не путать с «availability» (заявка на выходной).
     path("accepting-bookings", views.accepting_bookings, name="accepting_bookings"),
+    # DRF-2154 (М-2) — записи мастера: детали с временным состоянием
+    # (DRF-1185), создание и окна под услугу (DRF-1184) — тем же кодом, что
+    # салонная стойка (admin_api/services/booking). Субъект — мастер из
+    # initData: master_id в путях и телах НЕТ по построению. Поиск клиента
+    # — `customers?q=` (тот же маршрут, что ростер).
+    path("bookings", views_bookings.create_booking, name="create_booking"),
+    path(
+        "bookings/<uuid:appointment_id>",
+        views_bookings.booking_detail_view,
+        name="booking_detail",
+    ),
+    path("booking-slots", views_bookings.booking_slots, name="booking_slots"),
     # DRF-1857 (K14) — «Мои отзывы»: прокси в каталог под субъектом мастера.
     path("reviews", views.reviews, name="reviews"),
     path("availability", views.availability_request, name="availability_request"),
