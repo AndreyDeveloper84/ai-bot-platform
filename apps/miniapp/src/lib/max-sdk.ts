@@ -154,6 +154,15 @@ export const MASTER_ONBOARDING_PATH = "/onboarding/master";
  */
 export const RESCHEDULE_PAYLOAD_PREFIX = "reschedule_";
 
+/**
+ * DRF-1773 — ссылка на карточку C04 «направление + почему»: бот кладёт
+ * `reco_<uuid>` в `open_app` payload кнопки «Подобрать вариант».
+ * Назначение то же, что у каталога (исполнение начинается там), а сам id
+ * доезжает до провенанса интента (`deep_link:reco_<uuid>`) и связывает
+ * бронь с рекомендацией, из которой она выросла.
+ */
+export const RECO_PAYLOAD_PREFIX = "reco_";
+
 /** Canonical address of the reschedule screen (DRF-1481). */
 export const RESCHEDULE_PATH_PREFIX = "/customer/records";
 
@@ -169,6 +178,12 @@ const _MASTER_INVITE_RE = new RegExp(
  * `_MASTER_INVITE_RE` above: the tail becomes part of the app's own URL,
  * so "anything after the prefix" is a hole, not a shortcut.
  */
+const _RECO_RE = new RegExp(
+  `^${RECO_PAYLOAD_PREFIX}` +
+    "([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-" +
+    "[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$",
+);
+
 const _RESCHEDULE_RE = new RegExp(
   `^${RESCHEDULE_PAYLOAD_PREFIX}` +
     "([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-" +
@@ -262,6 +277,13 @@ export function parseStartRoute(payload: string): string | null {
   // `route=catalog`. Claiming the prefix is what makes the strictness
   // above mean something — matching order alone would not, since a
   // failed `exec` simply falls through.
+  // DRF-1773 — ссылка на карточку: маршрут тот же, что у каталога, id
+  // остаётся в payload для провенанса. Claimed by prefix и разбирается
+  // строгой формой, как соседи ниже: «объявил себя ссылкой и не
+  // является» — это не маршрут, а отказ.
+  if (payload.startsWith(RECO_PAYLOAD_PREFIX)) {
+    return _RECO_RE.test(payload) ? (_ROUTE_MAP["open_catalog"] ?? null) : null;
+  }
   if (payload.startsWith(MASTER_INVITE_PAYLOAD_PREFIX)) {
     const invite = _MASTER_INVITE_RE.exec(payload);
     return invite ? `${MASTER_ONBOARDING_PATH}?token=${invite[1]}` : null;

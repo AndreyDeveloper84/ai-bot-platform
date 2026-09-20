@@ -295,7 +295,14 @@ def render_why_more_text(draft: CardDraft) -> str:
     return "\n".join(lines)
 
 
-def _app_button(label: str, slug: str) -> dict[str, str] | None:
+def _app_button(label: str, slug: str, *, payload: str | None = None) -> dict[str, str] | None:
+    """``open_app`` на экран Mini App; ``payload`` — start-param поверх маршрута.
+
+    Маршрут payload'а разбирает сам Mini App (`max-sdk.ts::parseStartRoute`):
+    у `reco_<id>` назначение — тот же каталог, а сам id доезжает до
+    провенанса интента. Без ``web_app`` — ссылка на экран, и тогда id не
+    едет: у внешней ссылки start-param нет.
+    """
     from apps.channels.miniapp_config import miniapp_target
     from apps.skills.welcome.skill import MINIAPP_ROUTES, _miniapp_url
 
@@ -303,7 +310,7 @@ def _app_button(label: str, slug: str) -> dict[str, str] | None:
         return None
     target = miniapp_target()
     if target.web_app:
-        return {"label": label, "callback": slug, "web_app": target.web_app}
+        return {"label": label, "callback": payload or slug, "web_app": target.web_app}
     if target.miniapp_url:
         return {"label": label, "url": _miniapp_url(target.miniapp_url, slug)}
     return None
@@ -312,11 +319,16 @@ def _app_button(label: str, slug: str) -> dict[str, str] | None:
 def card_keyboard(recommendation_id: str) -> dict[str, Any] | None:
     """Четыре кнопки C04.1 дословно. «Подобрать вариант» до К-4 (C05) ведёт в
     каталог Mini App — единственный сегодняшний вход в исполнение
-    (отступление, названо в PR)."""
+    (отступление, названо в PR) — и несёт ССЫЛКУ НА ЭТУ КАРТОЧКУ
+    (`reco_<id>`, DRF-1773): по ней бронь свяжется с рекомендацией, из
+    которой выросла."""
     from apps.orchestrator.discovery import keyboard_envelope
+    from apps.recommendation.provenance import RECO_PAYLOAD_PREFIX
 
     buttons = [
-        _app_button(BUTTON_PICK, "open_catalog"),
+        _app_button(
+            BUTTON_PICK, "open_catalog", payload=f"{RECO_PAYLOAD_PREFIX}{recommendation_id}"
+        ),
         {"label": BUTTON_WHY, "callback": f"{RECO_WHY_PREFIX}{recommendation_id}"},
         {"label": BUTTON_ALT, "callback": f"{RECO_ALT_PREFIX}{recommendation_id}"},
         {"label": BUTTON_SKIP, "callback": f"{RECO_SKIP_PREFIX}{recommendation_id}"},

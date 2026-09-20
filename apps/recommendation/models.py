@@ -61,6 +61,11 @@ class Recommendation(models.Model):
         max_length=32, choices=Reaction.choices, blank=True, default=Reaction.NONE
     )
     reacted_at = models.DateTimeField(null=True, blank=True)
+    #: К какой брони привела эта карточка (DRF-1773). Строкой, а не FK:
+    #: бронь — собственность Ayla (ADR-0009), её ключ у нас чужой. Пусто —
+    #: «показана, но записи не было»: `shown ≠ engaged ≠ booked` (R17).
+    booking_id = models.CharField(max_length=64, blank=True, default="")
+    booked_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

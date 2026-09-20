@@ -750,6 +750,13 @@ export const createBooking = (body: {
   /** DRF-1708: what the confirmation screen showed — see customer-booking.ts. */
   quoted_price?: string;
   quoted_duration_minutes?: number;
+  /**
+   * DRF-1773 — откуда пришёл этот путь (`resolveEntryPoint`): то же
+   * значение, что у `PendingBookingIntent.entry_point`. Нужно ровно для
+   * атрибуции: `deep_link:reco_<id>` связывает бронь с карточкой C04.
+   * Необязательное; сервер проверяет принадлежность карточки сам.
+   */
+  entry_point?: string;
 }): Promise<{ booking: CreatedBooking }> =>
   request("/bookings", { method: "POST", body: JSON.stringify(body) });
 

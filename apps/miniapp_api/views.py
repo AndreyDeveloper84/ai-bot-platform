@@ -1555,6 +1555,11 @@ def create_booking(request: HttpRequest) -> HttpResponse:
                 service_id=service_id,
                 master_id=master_id,
                 visit_at=visit_at,
+                # DRF-1773 (К-3 N7) — чем начался путь. Ссылку на карточку
+                # C04 сервис кладёт в `attribution_metadata`, проверив, что
+                # карточка принадлежит этому человеку; всё остальное
+                # (`catalog` / `master` / `direct`) — как прежде.
+                entry_point=str(body.get("entry_point") or "")[:64],
             ),
             correlation_id=correlation_id or None,
         )
