@@ -92,6 +92,39 @@ the person's input). Any refusal of the goals read — not configured,
 unavailable, malformed — renders the plain step; the hint is a courtesy,
 not a dependency. The read happens only when the goal step is rendered.
 
+## Manual target from a specialist (DRF-2138, mode 3 of §82)
+
+The catalogue has had mode 3 for a while (``targets/manual/``, the only
+writer of ``targets_source=user_entered``); the bot had no way in, and the
+stop text said so. Now there are two ways in and one dialogue:
+
+* the stop branch (§7.1) offers «Впиши ориентир от специалиста» under
+  the stop text — the person who cannot be computed for CAN carry a
+  number a specialist gave them;
+* a deterministic phrase — a number next to a specialist word («мне врач
+  назначил 1800 ккал»), or «ориентир от специалиста» without a number.
+  A bare «1800», «1800 ккал» without the specialist, or a number next to a
+  non-kcal unit («2000 шагов») is NOT ours — the digit could be about
+  anything (:func:`_manual_target_entry`).
+
+The dialogue: «Сколько ккал в день назначил специалист?» → number →
+card «Ориентир от специалиста: N ккал. Источник — ты, не расчёт Ayla.
+Подтвердить?» → POST only on the tap. The number is the person's input
+and nothing else; the card prints no other number. Thresholds are the
+catalogue's (§85): 422 → refusal that names the catalogue's floor, 409
+``calories_deviation`` → one more question, ``calories_low`` → a warning
+line. Consent M (``personal_calculation``) is NOT required — this is not
+a calculation; the gate is PERSONAL_DATA (the same second gate the diary
+writers use). Health is not asked and not stored. Protein is not asked:
+the catalogue's contract has no protein for a manual target (DRF-2186).
+State lives in ``skill_state["nutrition_manual_target"]``, separate from
+the anketa FSM; entering the manual path drops an unfinished anketa.
+
+Withdrawal (DRF-2135) touches this too: the catalogue purge clears a
+manual target with everything else, and «Отключить персональный расчёт»
+is offered when a ``user_entered`` target exists even without consent M
+(before this ticket it said «нечего отключать»).
+
 ## Scope cuts vs mysite
 
 Deferred to Phase 1 / a follow-up Sprint 9 ticket:
@@ -118,7 +151,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING, ClassVar
+import re
+from datetime import UTC, datetime, timedelta
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from apps.integrations.ayla import (
     NutritionAPIError,
@@ -129,6 +164,8 @@ from apps.integrations.ayla import (
 from apps.integrations.ayla.goals_client import fetch_decision_context
 from apps.integrations.ayla.nutrition_client import (
     TARGETS_PROPOSED,
+    ManualTargetsConfirmationRequiredError,
+    ManualTargetsRefusedError,
     NothingToConfirmError,
     health_factor_refusals,
     proposed_norms,
@@ -190,11 +227,11 @@ _AYLA_DOWN_FALLBACK = (
 
 #: Shared tail. The diary staying open IS the decision, so it is stated
 #: plainly rather than tacked on as an apology.
+#: DRF-2138: фраза «вписать его пока некуда — такой ручки у меня ещё нет»
+#: снята — ручка есть, кнопка под стоп-текстом первой (:data:`MANUAL_TARGET_BUTTON`).
 _STOP_DIARY_TAIL = (
     "Дневник остаётся: записывай еду и воду, я посчитаю и покажу, сколько "
-    "вышло за день. Без дневной цели и без процентов.\n\n"
-    "Если ориентир тебе назначил специалист, вписать его пока некуда — "
-    "такой ручки у меня ещё нет."
+    "вышло за день. Без дневной цели и без процентов."
 )
 
 _STOP_MINOR = (
@@ -288,6 +325,86 @@ WITHDRAW_ACTION_TEXT = "Отключить персональный расчёт
 WITHDRAW_CALLBACK = "cb:pc_consent:withdraw"
 WITHDRAW_CONFIRM_CALLBACK = "cb:pc_consent:withdraw_confirm"
 WITHDRAW_KEEP_CALLBACK = "cb:pc_consent:withdraw_keep"
+
+# ─── ориентир от специалиста (DRF-2138, режим 3 §82) ──────────────────────
+
+#: Кнопка под стоп-текстом — метка из листа DRF-2138.
+MANUAL_TARGET_BUTTON = "Впиши ориентир от специалиста"
+MANUAL_TARGET_CALLBACK = "cb:anketa:manual_target"
+MANUAL_CONFIRM_CALLBACK = "cb:anketa:manual_confirm"
+MANUAL_CANCEL_CALLBACK = "cb:anketa:manual_cancel"
+MANUAL_CONFIRM_DEVIATION_CALLBACK = "cb:anketa:manual_confirm_deviation"
+MANUAL_DEVIATION_NO_CALLBACK = "cb:anketa:manual_deviation_no"
+MANUAL_CALLBACKS = frozenset(
+    {
+        MANUAL_TARGET_CALLBACK,
+        MANUAL_CONFIRM_CALLBACK,
+        MANUAL_CANCEL_CALLBACK,
+        MANUAL_CONFIRM_DEVIATION_CALLBACK,
+        MANUAL_DEVIATION_NO_CALLBACK,
+    }
+)
+#: Ключ в ``Conversation.skill_state`` — отдельно от FSM анкеты.
+MANUAL_STATE_KEY = "nutrition_manual_target"
+#: Свежесть открытого вопроса (как у ``food_correction``): протухший ответ
+#: не должен вечно держать текст человека вдали от консьержа.
+MANUAL_PENDING_TTL_SECONDS = 600
+
+#: Тексты — из листа DRF-2138 дословно. Число в карточке — ТОЛЬКО введённое;
+#: порог в отказе — из ответа каталога (``floor_kcal``), не константа бота.
+MANUAL_ASK_KCAL = "Сколько ккал в день назначил специалист?"
+MANUAL_CARD = "Ориентир от специалиста: {kcal} ккал. Источник — ты, не расчёт Ayla. Подтвердить?"
+MANUAL_BELOW_FLOOR = (
+    "Такой ориентир я записать не могу — ниже {floor} ккал числа должен вести специалист напрямую."
+)
+#: Каталог отказал 422, но порога в ответе нет — предложение без числа.
+MANUAL_BELOW_FLOOR_NO_NUMBER = (
+    "Такой ориентир я записать не могу — такие числа должен вести специалист напрямую."
+)
+MANUAL_LOW = "Записала; это низкий ориентир — держись под наблюдением специалиста."
+MANUAL_DEVIATION_ASK = "Это сильно отличается от расчётного — подтверждаешь?"
+#: Заголовок сводки ``user_entered`` — та же формула источника, что в карточке.
+MANUAL_SUMMARY_HEAD = "Ориентир от специалиста: {kcal} ккал. Источник — ты, не расчёт Ayla."
+#: Не из листа (тексты бота, владелец решает — названы в теле PR).
+MANUAL_KCAL_INVALID = "Не разобрала число. " + MANUAL_ASK_KCAL
+MANUAL_CANCELLED = "Хорошо, не записываю. Дневник работает как обычно."
+MANUAL_UNAVAILABLE = (
+    "Не могу записать ориентир: сервис сейчас не отвечает. Нажми «Подтвердить» чуть позже."
+)
+MANUAL_CONSENT_REQUIRED = (
+    "Чтобы записать ориентир, мне нужно согласие на обработку личных данных — "
+    "без него я ничего не записываю."
+)
+MANUAL_BUTTON_CONFIRM = "Подтвердить"
+MANUAL_BUTTON_CANCEL = "Не сейчас"
+MANUAL_BUTTON_YES = "Да, подтверждаю"
+MANUAL_BUTTON_NO = "Нет"
+#: Происхождение согласия для кнопки «Дать согласие» (DRF-1968, welcome).
+MANUAL_CONSENT_ORIGIN = "target"
+
+#: Матчер входа — три условия, без эвристики по смыслу: слово специалиста
+#: + число С ЕДИНИЦЕЙ ккал (или буквальная фраза «ориентир от специалиста»)
+#: + рядом с числом нет единицы не-ккал / рублей / года. «врач сказал 1800»
+#: без «ккал» — не наше (ревью #1907: «у специалиста был в 2019»,
+#: «консультация специалиста 3000 руб» иначе читались бы как ориентир).
+_MANUAL_ENTRY_PHRASE = "ориентир от специалиста"
+_SPECIALIST_WORD_RE = re.compile(
+    r"\b(врач|диетолог|нутрициолог|специалист|доктор|эндокринолог|терапевт)\w*",
+    re.IGNORECASE,
+)
+_KCAL_UNIT = r"(ккал|калори\w*|kcal)"
+_KCAL_NUMBER_RE = re.compile(r"(?<![\d-])(\d{3,5})(?!\d)\s*" + _KCAL_UNIT, re.IGNORECASE)
+_ANY_NUMBER_RE = re.compile(r"(?<![\d-])\d{3,5}(?!\d)")
+_NON_KCAL_UNIT_RE = re.compile(
+    r"(?<![\d-])\d{3,5}(?!\d)\s*"
+    r"(шаг\w*|мл|л\b|мг|г\b|гр\b|грамм\w*|кг|см|мин\w*|м\b|руб\w*|₽|р\b|год\w*|г\.)",
+    re.IGNORECASE,
+)
+#: «1 800» / «1.800» — обычное русское написание тысяч; диапазон «1500-1800»
+#: — два числа, не наше (человек не назвал одно).
+_THOUSANDS_RE = re.compile(r"(?<!\d)(\d{1,2})[ .](\d{3})(?!\d)")
+_RANGE_RE = re.compile(r"\d{3,5}\s*[-–—]\s*\d{3,5}|\bот\s+\d{3,5}\s+до\s+\d{3,5}")
+_PLAIN_NUMBER_RE = re.compile(r"^\s*(\d{1,6})\s*" + _KCAL_UNIT + r"?\s*$", re.IGNORECASE)
 WITHDRAW_BUTTON_CONFIRM = "Отключить и удалить"
 WITHDRAW_BUTTON_KEEP = "Оставить как есть"
 
@@ -369,6 +486,12 @@ class NutritionAnketaSkill:
         if _is_withdraw_phrase(text):
             return True
 
+        # DRF-2138: ориентир от специалиста — кнопки, фраза, ход диалога.
+        if text in MANUAL_CALLBACKS or _manual_target_entry(text) is not None:
+            return True
+        if _manual_text_is_an_answer(self._manual_state(context), text):
+            return True
+
         # Resume path — claim turns while an FSM is in flight.
         if self._has_active_fsm(context):
             # Anketa choice callback or plain user input.
@@ -429,6 +552,11 @@ class NutritionAnketaSkill:
             return self._on_consent_granted(context)
         if text == CONSENT_DECLINE_CALLBACK:
             return self._on_consent_declined(context)
+
+        # DRF-2138: ориентир от специалиста — до анкеты: свой диалог, своё состояние.
+        manual = self._route_manual_target(context, text)
+        if manual is not None:
+            return manual
 
         # Entry: start fresh FSM.
         if text in ("/anketa", "cb:anketa:start") or _is_entry_phrase(text):
@@ -584,9 +712,13 @@ class NutritionAnketaSkill:
             action_type="anketa_stop",
             action_data={
                 "reason": reason,
-                # The same two next moves the completed anketa offers. The
-                # branch says the diary stays open, so it has to open it.
-                "buttons": _post_anketa_chips(),
+                # DRF-2138: первой — ручка для числа от специалиста (режим 3
+                # §82): тот, кому не считаем, может принести своё число.
+                # Дальше — те же ходы, что после законченной анкеты.
+                "buttons": [
+                    {"label": MANUAL_TARGET_BUTTON, "callback": MANUAL_TARGET_CALLBACK},
+                    *_post_anketa_chips(),
+                ],
             },
             meta={"reply_kind": f"anketa_stop_{reason}"},
         )
@@ -863,7 +995,10 @@ class NutritionAnketaSkill:
         """
         from apps.consent.personal_calculation import is_granted
 
-        if not is_granted(context.bot_user):
+        # DRF-2138 (касание отзыва): ручной ориентир ставится без согласия M,
+        # и «нечего отключать» при стоящем user_entered было бы неправдой —
+        # purge каталога снимает и его. Профиль читается только когда M нет.
+        if not is_granted(context.bot_user) and not self._has_manual_target(context):
             return SkillResult(
                 reply_text=self._contour_copy(
                     WITHDRAW_NOTHING_TO_WITHDRAW, WITHDRAW_NOTHING_TO_WITHDRAW_CONTOUR_OFF
@@ -928,6 +1063,220 @@ class NutritionAnketaSkill:
         return SkillResult(
             reply_text=self._contour_copy(WITHDRAW_KEPT, WITHDRAW_KEPT_CONTOUR_OFF),
             meta={"reply_kind": "anketa_withdraw_kept"},
+        )
+
+    # ─── ориентир от специалиста (DRF-2138) ─────────────────────────────
+
+    def _manual_state(self, context: SkillContext) -> dict | None:
+        return manual_target_state(context.conversation)
+
+    def _save_manual_state(self, context: SkillContext, bucket: dict | None) -> None:
+        """Тот же атомарный писатель, что у FSM (retro B1): подключ, не весь
+        ``skill_state`` — соседние навыки пишут свои ключи параллельно."""
+        conversation = context.conversation
+        value = None if bucket is None else {**bucket, "asked_at": _now_iso()}
+        if _is_real_orm_conversation(conversation):
+            from apps.conversations.services import write_skill_state
+
+            write_skill_state(conversation, MANUAL_STATE_KEY, value)
+            return
+        raw = getattr(conversation, "skill_state", None) or {}
+        if not isinstance(raw, dict):
+            raw = {}
+        if value is None:
+            raw = {k: v for k, v in raw.items() if k != MANUAL_STATE_KEY}
+        else:
+            raw = {**raw, MANUAL_STATE_KEY: value}
+        conversation.skill_state = raw
+        save = getattr(conversation, "save", None)
+        if callable(save):
+            save(update_fields=["skill_state"])
+
+    def _has_manual_target(self, context: SkillContext) -> bool:
+        """Стоит ли у человека ``user_entered`` — по профилю каталога; любой
+        отказ чтения — «нет» (тогда путь отзыва отвечает как прежде)."""
+        try:
+            profile = asyncio.run(
+                get_nutrition_client().get_profile(
+                    external_user_id=external_user_id_for(context.bot_user)
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 — чтение ради вежливости, не ворота
+            logger.info("anketa.manual_target_probe_failed class=%s", type(exc).__name__)
+            return False
+        return getattr(profile, "targets_source", "") == "user_entered"
+
+    def _manual_consent_refusal(self, context: SkillContext) -> SkillResult | None:
+        """PERSONAL_DATA — то же второе ворото, что у писателей дневника
+        (``diary_write_refusal``); согласие M здесь не спрашивается."""
+        from apps.orchestrator import personal_surface
+
+        if personal_surface.personal_records_consent_open(context.bot_user):
+            return None
+        from apps.skills.welcome.skill import consent_offer_action_data
+
+        self._save_manual_state(context, None)
+        return SkillResult(
+            reply_text=MANUAL_CONSENT_REQUIRED,
+            action_data=consent_offer_action_data(MANUAL_CONSENT_ORIGIN),
+            meta={"reply_kind": "anketa_manual_target_consent_required"},
+        )
+
+    def _route_manual_target(self, context: SkillContext, text: str) -> SkillResult | None:
+        """Вход / ход диалога ручного ориентира — или ``None`` («не наше»)."""
+        state = self._manual_state(context)
+
+        # Выходы: «/anketa», кнопка старта и входная фраза анкеты снимают
+        # открытый вопрос и уходят в анкету (ревью #1907: иначе «/anketa» на
+        # шаге числа отвечал бы «Не разобрала число» без конца).
+        if state is not None and (text in ("/anketa", "cb:anketa:start") or _is_entry_phrase(text)):
+            self._save_manual_state(context, None)
+            return None
+
+        if text == MANUAL_TARGET_CALLBACK:
+            return self._manual_start(context, kcal=None)
+        entry = _manual_target_entry(text)
+        if entry is not None:
+            return self._manual_start(context, kcal=entry or None)
+
+        if text == MANUAL_CANCEL_CALLBACK or text == MANUAL_DEVIATION_NO_CALLBACK:
+            self._save_manual_state(context, None)
+            return SkillResult(
+                reply_text=MANUAL_CANCELLED,
+                action_data={"buttons": _post_anketa_chips()},
+                meta={"reply_kind": "anketa_manual_target_cancelled"},
+            )
+        if text == MANUAL_CONFIRM_CALLBACK:
+            if state is None or state.get("step") not in ("confirm", "deviation"):
+                return self._manual_stale()
+            return self._manual_post(context, int(state["kcal"]), confirm_deviation=False)
+        if text == MANUAL_CONFIRM_DEVIATION_CALLBACK:
+            if state is None or state.get("step") != "deviation":
+                return self._manual_stale()
+            return self._manual_post(context, int(state["kcal"]), confirm_deviation=True)
+
+        if _manual_text_is_an_answer(state, text):
+            kcal = _parse_kcal(text)
+            if kcal is None:
+                # Только на шаге числа: на карточке чужой текст не наш.
+                return SkillResult(
+                    reply_text=MANUAL_KCAL_INVALID,
+                    action_data={"buttons": _manual_cancel_button()},
+                    meta={"reply_kind": "anketa_manual_target_kcal_invalid"},
+                )
+            # На карточке новое число — поправка: карточка перерисовывается.
+            return self._manual_card(context, kcal)
+        return None
+
+    def _manual_start(self, context: SkillContext, *, kcal: int | None) -> SkillResult:
+        refusal = self._manual_consent_refusal(context)
+        if refusal is not None:
+            return refusal
+        # Незаконченная анкета не переживает смену курса: её состояние
+        # стояло бы на шаге, к которому человек не вернётся.
+        self._clear_state(context)
+        if kcal is None:
+            self._save_manual_state(context, {"step": "kcal"})
+            return SkillResult(
+                reply_text=MANUAL_ASK_KCAL,
+                action_type="anketa_manual_target_ask",
+                action_data={"buttons": _manual_cancel_button()},
+                meta={"reply_kind": "anketa_manual_target_ask"},
+            )
+        return self._manual_card(context, kcal)
+
+    def _manual_card(self, context: SkillContext, kcal: int) -> SkillResult:
+        self._save_manual_state(context, {"step": "confirm", "kcal": kcal})
+        return SkillResult(
+            reply_text=MANUAL_CARD.format(kcal=kcal),
+            action_type="anketa_manual_target_card",
+            action_data={
+                "buttons": [
+                    {"label": MANUAL_BUTTON_CONFIRM, "callback": MANUAL_CONFIRM_CALLBACK},
+                    {"label": MANUAL_BUTTON_CANCEL, "callback": MANUAL_CANCEL_CALLBACK},
+                ]
+            },
+            meta={"reply_kind": "anketa_manual_target_card"},
+        )
+
+    @staticmethod
+    def _manual_stale() -> SkillResult:
+        return SkillResult(
+            reply_text=MANUAL_CANCELLED,
+            meta={"reply_kind": "anketa_manual_target_stale"},
+        )
+
+    def _manual_post(
+        self, context: SkillContext, kcal: int, *, confirm_deviation: bool
+    ) -> SkillResult:
+        """POST в каталог — только отсюда, только по тапу подтверждения."""
+        refusal = self._manual_consent_refusal(context)
+        if refusal is not None:
+            return refusal
+        external_id = external_user_id_for(context.bot_user)
+        # Флаг подтверждения — только когда человек его дал: тело без ключа,
+        # не ``false`` (тот же контракт, что на проводе).
+        kwargs: dict = {"external_user_id": external_id, "calories_kcal": kcal}
+        if confirm_deviation:
+            kwargs["confirm_deviation"] = True
+        try:
+            profile, report = asyncio.run(get_nutrition_client().set_manual_targets(**kwargs))
+        except ManualTargetsRefusedError as exc:
+            # 422: не сохранено; порог называет каталог.
+            self._save_manual_state(context, None)
+            logger.info("anketa.manual_target_refused code=%s", exc.code)
+            floor = exc.details.get("floor_kcal")
+            return SkillResult(
+                reply_text=(
+                    MANUAL_BELOW_FLOOR.format(floor=floor)
+                    if isinstance(floor, int) and not isinstance(floor, bool)
+                    else MANUAL_BELOW_FLOOR_NO_NUMBER
+                ),
+                action_data={"buttons": _post_anketa_chips()},
+                meta={"reply_kind": "anketa_manual_target_refused"},
+            )
+        except ManualTargetsConfirmationRequiredError as exc:
+            self._save_manual_state(context, {"step": "deviation", "kcal": kcal})
+            logger.info("anketa.manual_target_confirmation_required kind=%s", exc.kind)
+            return SkillResult(
+                reply_text=MANUAL_DEVIATION_ASK,
+                action_type="anketa_manual_target_deviation",
+                action_data={
+                    "buttons": [
+                        {"label": MANUAL_BUTTON_YES, "callback": MANUAL_CONFIRM_DEVIATION_CALLBACK},
+                        {"label": MANUAL_BUTTON_NO, "callback": MANUAL_DEVIATION_NO_CALLBACK},
+                    ]
+                },
+                meta={"reply_kind": "anketa_manual_target_deviation"},
+            )
+        except (NutritionUnavailableError, NutritionAPIError) as exc:
+            # Число не теряется: карточка стоит, кнопку можно нажать ещё раз.
+            logger.warning("anketa.manual_target_unavailable class=%s", type(exc).__name__)
+            return SkillResult(
+                reply_text=MANUAL_UNAVAILABLE,
+                action_data={
+                    "buttons": [
+                        {"label": MANUAL_BUTTON_CONFIRM, "callback": MANUAL_CONFIRM_CALLBACK},
+                        {"label": MANUAL_BUTTON_CANCEL, "callback": MANUAL_CANCEL_CALLBACK},
+                    ]
+                },
+                meta={"reply_kind": "anketa_manual_target_unavailable"},
+            )
+
+        self._save_manual_state(context, None)
+        logger.info(
+            "anketa.manual_target_set warnings=%s conv=%s",
+            list(report.get("warnings") or []),
+            getattr(context.conversation, "id", None),
+        )
+        parts = [_format_summary(profile)]
+        if "calories_low" in (report.get("warnings") or []):
+            parts.append(MANUAL_LOW)
+        return SkillResult(
+            reply_text="\n\n".join(parts),
+            action_type="anketa_manual_target_done",
+            action_data={"buttons": _post_anketa_chips(profile)},
+            meta={"reply_kind": "anketa_manual_target_done"},
         )
 
     @staticmethod
@@ -1120,6 +1469,101 @@ def _normalise_phrase(text: str) -> str:
 
 def _is_entry_phrase(text: str) -> bool:
     return _normalise_phrase(text) == _normalise_phrase(ENTRY_PHRASE)
+
+
+def _manual_target_entry(text: str) -> int | None:
+    """Детерминированный вход ручного ориентира (DRF-2138) — или ``None``.
+
+    Возвращает число из фразы («мне врач назначил 1800 ккал» → 1800) или
+    ``0`` для фразы без числа («ориентир от специалиста» → спросить).
+    Не наше: голое число, «1800 ккал» без слова специалиста, число рядом с
+    единицей не-ккал («2000 шагов», «2000 мл», «100 г белка») — цифра могла
+    быть про что угодно. Не LLM, не эвристика по смыслу — три условия.
+    """
+    stripped = (text or "").strip()
+    if not stripped or stripped.startswith("cb:"):
+        return None
+    normalised = _join_thousands(_normalise_phrase(stripped))
+    literal = _MANUAL_ENTRY_PHRASE in normalised
+    if not literal and not _SPECIALIST_WORD_RE.search(normalised):
+        return None
+    if _NON_KCAL_UNIT_RE.search(normalised) or _RANGE_RE.search(normalised):
+        return None
+    all_numbers = _ANY_NUMBER_RE.findall(normalised)
+    if not all_numbers:
+        return 0 if literal else None
+    if len(all_numbers) != 1:
+        return None
+    with_unit = _KCAL_NUMBER_RE.findall(normalised)
+    if with_unit:
+        return int(with_unit[0][0])
+    # Число без «ккал»: только при буквальной фразе — иначе цифра про что угодно.
+    return int(all_numbers[0]) if literal else None
+
+
+def _join_thousands(text: str) -> str:
+    """«1 800» / «1.800» → «1800» — обычное написание тысяч."""
+    return _THOUSANDS_RE.sub(lambda m: m.group(1) + m.group(2), text)
+
+
+def _parse_kcal(text: str) -> int | None:
+    """Ответ на «Сколько ккал…»: одно число, необязательно с «ккал».
+    Диапазон не проверяется здесь — пороги у каталога (§85); отсекается
+    только то, что числом не является, и ноль."""
+    match = _PLAIN_NUMBER_RE.match(_join_thousands(text or ""))
+    if match is None:
+        return None
+    value = int(match.group(1))
+    return value if value > 0 else None
+
+
+def _now_iso() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+def manual_target_state(conversation: Any) -> dict | None:
+    """Свежий открытый вопрос ручного ориентира — или ``None``.
+
+    Протухший (старше :data:`MANUAL_PENDING_TTL_SECONDS`) читается как
+    отсутствующий: иначе одно нажатие кнопки навсегда забирало бы у консьержа
+    любой текст человека. Читается и оркестратором (``nutrition_global``) —
+    на глобальном пути свободный текст доходит до навыка только когда бот сам
+    задал вопрос.
+    """
+    state = getattr(conversation, "skill_state", None)
+    bucket = state.get(MANUAL_STATE_KEY) if isinstance(state, dict) else None
+    if not isinstance(bucket, dict) or bucket.get("step") not in ("kcal", "confirm", "deviation"):
+        return None
+    stamped = bucket.get("asked_at")
+    if isinstance(stamped, str):
+        try:
+            at = datetime.fromisoformat(stamped)
+        except ValueError:
+            return None
+        if at.tzinfo is None:
+            at = at.replace(tzinfo=UTC)
+        if datetime.now(UTC) - at > timedelta(seconds=MANUAL_PENDING_TTL_SECONDS):
+            return None
+    return dict(bucket)
+
+
+def manual_target_pending(conversation: Any) -> bool:
+    """Для ``is_structured_nutrition_turn``: бот ждёт число или подтверждение."""
+    return manual_target_state(conversation) is not None
+
+
+def _manual_text_is_an_answer(state: dict | None, text: str) -> bool:
+    """Свободный текст — наш ответ? На шаге числа — любой (переспросим);
+    на карточке — только новое число (поправка), остальное не наше."""
+    if state is None or text.startswith("cb:"):
+        return False
+    if state.get("step") == "kcal":
+        return True
+    return _parse_kcal(text) is not None
+
+
+def _manual_cancel_button() -> list[dict[str, str]]:
+    return [{"label": MANUAL_BUTTON_CANCEL, "callback": MANUAL_CANCEL_CALLBACK}]
 
 
 def _is_withdraw_phrase(text: str) -> bool:
@@ -1326,6 +1770,25 @@ def _format_summary(profile) -> str:
     refused_for = health_factor_refusals(profile)
     if refused_for:
         return _format_health_factor_refusal(refused_for)
+
+    # DRF-2138: ручной ориентир — «от специалиста», не «считала по методике».
+    # Число — то, что человек назвал; строки методики и входов нет по
+    # построению (снимок пуст), вода справочная остаётся своей строкой.
+    if getattr(profile, "targets_source", "") == "user_entered":
+        kcal = int(getattr(profile, "daily_kcal", 0) or 0)
+        manual_parts = [MANUAL_SUMMARY_HEAD.format(kcal=kcal)] if kcal > 0 else []
+        water = int(getattr(profile, "water_ml", 0) or 0)
+        if water > 0:
+            manual_parts.append(f"💧 Вода: {water} мл")
+            manual_fluids = _fluids_reference_line(profile)
+            if manual_fluids:
+                manual_parts.append(manual_fluids)
+        if not manual_parts:
+            return (
+                "Дневник готов — записывай еду и воду, я всё сохраню.\n"
+                "Дневных ориентиров пока не считаю."
+            )
+        return "\n\n".join(manual_parts)
 
     # §5.1: предложение показывается как предложение. Числа — из ``raw``:
     # инвариант DTO обнуляет поля у не настроенного источника, и это

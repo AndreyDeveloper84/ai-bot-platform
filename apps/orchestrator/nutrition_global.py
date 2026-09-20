@@ -736,6 +736,34 @@ def _anketa_fsm_active(conversation: Any) -> bool:
     return bool(isinstance(state, dict) and state.get("nutrition_anketa"))
 
 
+def _manual_target_pending(conversation: Any) -> bool:
+    """Ждёт ли бот число / подтверждение ручного ориентира (DRF-2138)?
+
+    Та же форма, что у :func:`_food_correction_pending`, и та же причина:
+    вопрос, который бот задал сам, владеет ответом. Свежесть решает навык.
+    """
+
+    try:
+        from apps.skills.nutrition_anketa.skill import manual_target_pending
+
+        return manual_target_pending(conversation)
+    except Exception:  # noqa: BLE001 — a predicate must never break the turn
+        logger.exception("orchestrator.nutrition_global.manual_target_pending_check_failed")
+        return False
+
+
+def _manual_target_phrase(text: str) -> bool:
+    """Детерминированный вход «мне врач назначил 1800 ккал» (DRF-2138)."""
+
+    try:
+        from apps.skills.nutrition_anketa.skill import _manual_target_entry
+
+        return _manual_target_entry(text) is not None
+    except Exception:  # noqa: BLE001 — a predicate must never break the turn
+        logger.exception("orchestrator.nutrition_global.manual_target_phrase_check_failed")
+        return False
+
+
 def _food_correction_pending(conversation: Any) -> bool:
     """Is a fresh «✏️ Уточнить» prompt still waiting for its answer? (DRF-1454)
 
@@ -784,7 +812,10 @@ def is_structured_nutrition_turn(
 
     Free text is NEVER structured — it belongs to the concierge model
     with the nutrition tools above — with one exception per open question the
-    bot itself asked: an in-flight anketa step, or a pending food correction.
+    bot itself asked: an in-flight anketa step, a pending food correction, a
+    pending manual target (DRF-2138) — and one deterministic phrase, «мне врач
+    назначил 1800 ккал», which is a number the person carries, not a question
+    for the model.
     """
 
     stripped = text.strip()
@@ -796,6 +827,8 @@ def is_structured_nutrition_turn(
         _anketa_fsm_active(conversation)
         or _food_correction_pending(conversation)
         or _food_text_pending(conversation)
+        or _manual_target_pending(conversation)
+        or _manual_target_phrase(stripped)
     )
 
 
