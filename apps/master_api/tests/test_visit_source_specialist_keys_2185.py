@@ -14,8 +14,9 @@
   строки синка тоже виден; чужой каталожный id — не виден;
 * h2 — ``master_visit_count`` / ``master_client_ids`` /
   ``_build_returning_customer_index`` — по обоим ключам;
-* h3 — ``master_deactivation``: живая запись по каталожному id считается
-  (касание admin_api вне master_api — одна строка);
+* h3 — ``master_deactivation``: живая запись по каталожному id считается;
+  ``salon_day``: визит склеенного мастера — в его колонке, не в сиротах
+  (касания admin_api вне master_api — по слову главного окна / ревью);
 * h4 — ``specialist_keys``: pk == catalog → один ключ; пусто → один; разные → два;
 * h5 — AST-гард класса: любой ``filter/exclude/get/Q(... specialist_id=…)``
   или ``specialist_id__in=…`` вне tests обязан брать значение из
@@ -215,25 +216,31 @@ class TestCountsAndIndexesUseBothKeys:
 
 class TestDeactivationCountsLiveBookings:
     def test_a_live_booking_keyed_on_the_catalog_id_counts(self, tenant, bot_user, solo_master):
-        from apps.admin_api.services import master_deactivation as mod
+        from apps.admin_api.services.master_deactivation import _count_future_mirror_bookings
 
         _mirror_row(
             tenant,
             solo_master.catalog_specialist_id,
             start=dj_timezone.now() + timedelta(days=1),
         )
-        func_name = _mirror_counter_name(Path(mod.__file__).read_text(encoding="utf-8"))
-        count = getattr(mod, func_name)(solo_master)
-        assert count == 1
+        assert _count_future_mirror_bookings(solo_master) == 1
 
 
-def _mirror_counter_name(source: str) -> str:
-    tree = ast.parse(source)
-    for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and "RemoteBookingProxy" in ast.unparse(node):
-            if "specialist_keys" in ast.unparse(node):
-                return node.name
-    raise AssertionError("master_deactivation: счётчик по зеркалу не найден")
+class TestSalonDayBucketsTheMergedMastersVisits:
+    def test_a_visit_keyed_on_the_catalog_id_lands_in_the_masters_column(
+        self, tenant, bot_user, solo_master, customer
+    ):
+        """День салона у стойки: визит склеенного мастера — в его колонке, не в сиротах."""
+
+        from apps.admin_api.services.salon_day import build_salon_day
+
+        start = _today_at(tenant, 23)
+        row = _mirror_row(tenant, solo_master.catalog_specialist_id, start=start, bot_user=customer)
+        with tenant_scope(tenant):
+            day = build_salon_day(tenant, day=start.date(), now=dj_timezone.now())
+        column = next(m for m in day.masters if m.master_id == str(solo_master.id))
+        assert [v.id for v in column.visits] == [str(row.appointment_id)]
+        assert day.orphan_visits == []  # empty-assert-ok: визит найден в колонке выше
 
 
 # ─── h4: резолвер ───────────────────────────────────────────────────────────
@@ -266,11 +273,17 @@ _QUERY_ATTRS = {"filter", "exclude", "get"}
 _KEYS = {"specialist_id", "specialist_id__in"}
 
 
-def _is_specialist_keys_call(value: ast.expr) -> bool:
-    if isinstance(value, ast.Call):
-        name = getattr(value.func, "id", getattr(value.func, "attr", ""))
-        return name == "specialist_keys"
-    return False
+def _is_resolved(kw: ast.keyword) -> bool:
+    """``specialist_id__in=specialist_keys(...)`` — и только так.
+
+    Голое ``specialist_id=specialist_keys(m)`` — ошибка времени выполнения
+    (UUIDField против списка), а не перевод: считается неразрешённым.
+    """
+
+    if kw.arg != "specialist_id__in" or not isinstance(kw.value, ast.Call):
+        return False
+    name = getattr(kw.value.func, "id", getattr(kw.value.func, "attr", ""))
+    return name == "specialist_keys"
 
 
 def _mirror_key_sites() -> list[tuple[str, int, bool]]:
@@ -280,8 +293,10 @@ def _mirror_key_sites() -> list[tuple[str, int, bool]]:
     Предел гарда (назван, не спрятан): он видит только ключевой аргумент
     в этих четырёх формах. Слепые зоны — распаковка ``**{"specialist_id": …}``,
     имя ключа, собранное в переменную (``.filter(**kw)``), ``related__specialist_id``
-    через связь, и ``.values_list``/``.annotate`` без фильтра. Такой обход
-    — осознанный, и его увидит ревью, не гард.
+    через связь, ``.values_list``/``.annotate`` без фильтра и **членство в
+    dict/set, ключёванном ``master.id``** (так была устроена корзина
+    ``salon_day.by_master`` — нашло ревью, не гард). Такой обход —
+    осознанный, и его увидит ревью, не гард.
     """
 
     found: list[tuple[str, int, bool]] = []
@@ -294,13 +309,15 @@ def _mirror_key_sites() -> list[tuple[str, int, bool]]:
                 continue
             func = node.func
             is_query = isinstance(func, ast.Attribute) and func.attr in _QUERY_ATTRS
-            is_q = isinstance(func, ast.Name) and func.id == "Q"
+            is_q = (isinstance(func, ast.Name) and func.id == "Q") or (
+                isinstance(func, ast.Attribute) and func.attr == "Q"
+            )
             if not (is_query or is_q):
                 continue
             for kw in node.keywords:
                 if kw.arg in _KEYS:
-                    found.append((rel, node.lineno, _is_specialist_keys_call(kw.value)))
-    return found
+                    found.append((rel, node.lineno, _is_resolved(kw)))
+    return sorted(found)
 
 
 class TestMirrorReadersGoThroughSpecialistKeys:
@@ -331,11 +348,22 @@ class TestMirrorReadersGoThroughSpecialistKeys:
         planted_root.mkdir(parents=True)
         (planted_root / "reader.py").write_text(
             "def f(master):\n"
-            "    return RemoteBookingProxy.all_tenants.filter(specialist_id=master.id)\n",
+            "    a = RemoteBookingProxy.all_tenants.filter(specialist_id=master.id)\n"
+            "    b = Proxy.objects.filter(specialist_id=specialist_keys(master))\n"
+            "    c = Proxy.objects.filter(models.Q(specialist_id__in=[master.id]))\n"
+            "    d = Proxy.objects.filter(specialist_id__in=specialist_keys(master))\n"
+            "    return a, b, c, d\n",
             encoding="utf-8",
         )
         monkeypatch.setattr(
             "apps.master_api.tests.test_visit_source_specialist_keys_2185.REPO_ROOT", tmp_path
         )
         sites = _mirror_key_sites()
-        assert sites == [("apps/planted/reader.py", 2, False)]
+        # a — по pk; b — голое specialist_id= со списком (ошибка, не перевод);
+        # c — models.Q по pk; d — единственный переведённый.
+        assert sites == [
+            ("apps/planted/reader.py", 2, False),
+            ("apps/planted/reader.py", 3, False),
+            ("apps/planted/reader.py", 4, False),
+            ("apps/planted/reader.py", 5, True),
+        ]

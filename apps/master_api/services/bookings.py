@@ -352,6 +352,5 @@ __all__ = [
     "name_initial",
     "own_booking",
     "public_status",
-    "specialist_keys",
     "temporal_state",
 ]
