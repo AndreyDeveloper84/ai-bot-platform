@@ -37,6 +37,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 from django.test import Client
+from freezegun import freeze_time
 from django.urls import reverse
 from django.utils import timezone as dj_timezone
 
@@ -60,6 +61,11 @@ CONFIRM_URL = reverse("master_api:assistant_confirm")
 CUSTOMER_PHONE = "+79997775544"
 ANNA_P_AYLA_ID = uuid.UUID("2d8bbc4f-0000-4000-8000-000000002153")
 ANNA_S_AYLA_ID = uuid.UUID("2d8bbc4f-0000-4000-8000-000000002154")
+
+#: Полдень по часам салона (09:00 UTC = 12:00 МСК) — чтобы «сегодня» и «ещё
+#: впереди» не зависели от времени прогона: CI в 23:02 МСК ронял узлы
+#: контекста и дня, потому что «сейчас + 45 мин» попадало в завтра.
+FROZEN_NOON = "2026-09-21 09:00:00"
 
 CHIPS = [
     "Что у меня сегодня?",
@@ -237,17 +243,15 @@ class TestContext:
     def test_today_with_visits_names_the_next_one(
         self, client, tenant, bot_user, accepted_master, anna, bridged_service
     ):
-        now = dj_timezone.now()
-        soon = now + timedelta(minutes=45)
-        _visit(accepted_master, start=soon, bot_user=anna, service=bridged_service)
-        # Вторая запись — раньше сегодня (не «+3 ч», чтобы поздним вечером
-        # не перевалить за полночь салона).
-        local = now.astimezone(_tz(tenant))
-        earlier = max(
-            local.replace(hour=0, minute=30, second=0, microsecond=0), local - timedelta(hours=6)
-        )
-        _visit(accepted_master, start=earlier)
-        resp = _context(client)
+        # Часы заморожены: «сейчас + 45 мин» поздним вечером салона попадает в
+        # завтра, и контекст честно пустеет — тест краснел бы от времени суток.
+        # `context` берёт `now` на сервере, передать его нечем.
+        with freeze_time(FROZEN_NOON):
+            # Замороженный полдень салона: 14:00 — ещё впереди, 09:00 — уже был.
+            soon = _today_at(tenant, 14)
+            _visit(accepted_master, start=soon, bot_user=anna, service=bridged_service)
+            _visit(accepted_master, start=_today_at(tenant, 9))
+            resp = _context(client)
         assert resp.status_code == 200, resp.content
         body = resp.json()
         assert body["today"]["count"] == 2
@@ -352,14 +356,15 @@ class TestCards:
     def test_my_day_answer_carries_a_day_card(
         self, client, tenant, bot_user, accepted_master, anna, bridged_service, llm
     ):
-        soon = dj_timezone.now() + timedelta(minutes=45)
-        _visit(accepted_master, start=soon, bot_user=anna, service=bridged_service)
-        today = dj_timezone.now().astimezone(_tz(tenant)).date().isoformat()
-        llm["script"].append(
-            FakeResult(tool_calls=[FakeToolCall(name="my_day", arguments={"date": today})])
-        )
-        llm["script"].append(FakeResult(text="Сегодня одна запись."))
-        resp = _ask_with(client, "Что у меня сегодня?")
+        with freeze_time(FROZEN_NOON):
+            soon = _today_at(tenant, 14)
+            _visit(accepted_master, start=soon, bot_user=anna, service=bridged_service)
+            today = soon.astimezone(_tz(tenant)).date().isoformat()
+            llm["script"].append(
+                FakeResult(tool_calls=[FakeToolCall(name="my_day", arguments={"date": today})])
+            )
+            llm["script"].append(FakeResult(text="Сегодня одна запись."))
+            resp = _ask_with(client, "Что у меня сегодня?")
         body = resp.json()
         card = next(c for c in body["cards"] if c["kind"] == "day")
         assert card["count"] == 1
