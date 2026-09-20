@@ -166,7 +166,8 @@ class TestC4bForeign409IsNotAQuestion:
         _set_transport(transport)
         with pytest.raises(nc.NutritionAPIError) as ei:
             await client.set_manual_targets(external_user_id="bot:max:1", calories_kcal=1200)
-        assert not isinstance(ei.value, nc.ManualTargetsConfirmationRequiredError)
+        # Присутствие: это именно наша ошибка API с кодом каталога в тексте.
+        assert type(ei.value) is nc.NutritionAPIError and "SOMETHING_ELSE" in str(ei.value)
 
     @pytest.mark.asyncio
     async def test_non_object_json_body_is_handled(self) -> None:
@@ -192,5 +193,5 @@ class TestC5OtherFailures:
         _set_transport(transport)
         with pytest.raises(nc.NutritionAPIError) as ei:
             await client.set_manual_targets(external_user_id="bot:max:1", calories_kcal=1800)
-        assert not isinstance(ei.value, nc.ManualTargetsRefusedError)
-        assert not isinstance(ei.value, nc.ManualTargetsConfirmationRequiredError)
+        # Присутствие: базовый класс, не один из двух именованных отказов.
+        assert type(ei.value) is nc.NutritionAPIError
