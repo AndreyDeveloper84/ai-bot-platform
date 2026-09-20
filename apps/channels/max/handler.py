@@ -198,7 +198,6 @@ from apps.orchestrator.visits import (
     route_visits,
 )
 from apps.orchestrator.memory import short_term
-from apps.orchestrator.memory.personal_context import record_explicit_green_facts
 from apps.orchestrator.said_memory import (
     OTHER_QUESTIONS as SAID_OTHER_QUESTIONS,
 )
@@ -210,9 +209,15 @@ from apps.orchestrator.said_memory import (
 )
 from apps.orchestrator.said_memory import (
     confirm_said_fact,
-    record_said_facts,
     resolve_said_tap,
     said_question_id,
+)
+from apps.orchestrator.memory_announce import (
+    PRE_SEND_LINK_BUDGET_S,
+    bridge_after_send,
+    guard_service_line,
+    record_turn_facts,
+    weave_service_line,
 )
 from apps.orchestrator.memory_ask import maybe_weave_question, try_handle_answer
 from apps.orchestrator.memory_block import build_concierge_memory_block
@@ -2453,15 +2458,10 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
                             persisted=turn_reply.assistant_persisted,
                         )
                         concierge_turn_ran = True
-                        # W5 (S3.5): organically weave ONE memory question when the Ayla
-                        # anti-spam engine allows asking. Best-effort.
-                        try:
-                            reply = maybe_weave_question(conversation, bot_user, reply)
-                        except Exception:  # noqa: BLE001
-                            logger.exception(
-                                "channels.max.global.memory_ask_weave_failed bot_user=%s",
-                                bot_user.id,
-                            )
+                        # W5 (S3.5): the ONE memory question used to be woven
+                        # right here. Since DRF-1292 the service line under the
+                        # reply (question OR «Запомнила: …») is decided in one
+                        # place, after guard_outbound — see weave_service_line.
 
     # DRF-1325 — the time half of «хочу на массаж завтра вечером». On
     # 2026-08-23 it was dropped without a word and the booking landed five
@@ -2502,6 +2502,67 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             # message is also the only form in which «тут нужен человек» reads
             # as the turn stopping rather than the question changing.
             clarify_redraw = False
+
+    # DRF-1292 — memory write + the ONE service line, in one place.
+    #
+    # Until DRF-1292 the green facts of this turn were written AFTER the send
+    # (zero latency, «never affects the reply already sent»). The owner's
+    # ruling (19.09, §52 В3) wants the person told on the SAME reply —
+    # «Запомнила: ты …» — so the write moves here: after the guard has said
+    # «allow» (a blocked or crisis reply gets no memory line; the safety copy
+    # is founder-approved and stays byte-identical) and before persist/send.
+    #
+    # Budget: the writers are best-effort; the one network call they keep
+    # here (``ensure_ayla_link`` for a person not linked yet) gets ≤ 1 s per
+    # turn (a sibling writer stops once the budget is spent), and the Ayla
+    # declared-prefs mirror (two REST calls, 5 s each) is NOT run here — it
+    # goes after the send (``bridge_after_send``). Budget ran out? The rows
+    # that writer did not write are written after the send as before, and no
+    # line is said about them: a line promises what is already done, never
+    # what might be (rows a faster sibling did write are announced honestly).
+    #
+    # One service line per turn: the announce takes the slot; the memory
+    # question (memory_ask) is asked only when there is nothing to announce,
+    # and only on a concierge turn — exactly the branch that wove it before.
+    # The appended line then passes the same outbound guard the reply did
+    # (DRF-1210: the guard sees the FINAL text) — blocked → the line is dropped.
+    memory_written: list = []
+    memory_link_timed_out = False
+    memory_pre_send_ran = False
+    if (
+        not was_memory_command
+        and post_verdict != "block"
+        and assistant_action_type
+        not in (
+            "safety_pre_check",
+            "ai_unavailable",
+        )
+    ):
+        memory_pre_send_ran = True
+        sink = record_turn_facts(
+            bot_user,
+            conversation,
+            event.text,
+            tool_trace=getattr(turn_reply, "tool_trace", None) if concierge_turn_ran else None,
+            link_timeout_s=PRE_SEND_LINK_BUDGET_S,
+            bridge=False,
+        )
+        memory_written = sink.entries
+        memory_link_timed_out = sink.link_timed_out
+        before_line = reply
+        reply = weave_service_line(
+            conversation,
+            bot_user,
+            reply,
+            written=memory_written,
+            allow_question=concierge_turn_ran,
+            weave_question=maybe_weave_question,
+        )
+        reply = guard_service_line(
+            before_line,
+            reply,
+            lambda tail: guard_outbound(tail, surface="max", bot_user=bot_user, trace_id=trace_id),
+        )
 
     # Persist + remember the assistant turn, then send to MAX (with any keyboard).
     # W5: the AIConcierge store already persisted concierge turns
@@ -2622,24 +2683,32 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
                 "channels.max.global.intent_resolution_failed bot_user=%s", bot_user.id
             )
 
-    # Memory write (M-B2 / #1099): learn explicit green facts the user stated
-    # this turn (e.g. «я веган»). Best-effort + consent-gated inside; never
-    # affects the reply already sent. No active questioning in the pilot.
+    # Memory write (M-B2 / #1099) — the post-send fallback. Since DRF-1292 the
+    # facts of this turn are written BEFORE the send (see the block above the
+    # persist) so the reply can carry «Запомнила: …». Two cases still land
+    # here, both without a line:
+    #   * the pre-send Ayla link ran out its 1 s budget — write now, with the
+    #     client's default timeout, as this block always did;
+    #   * a blocked / crisis / outage reply skipped the pre-send write — a
+    #     fact the person stated is still theirs to keep, the line just has
+    #     no reply to ride on.
     #
     # SKIP when this turn was a memory command (M-B4): «забудь что я веган»
     # contains the substring «я веган», so re-running the extractor here would
     # instantly re-create the fact the user just asked to forget — nullifying
     # the 152-ФЗ erasure. A forget/show turn must never write memory.
     if not was_memory_command:
-        record_explicit_green_facts(bot_user, event.text)
-        # Бриф «Мозг» п.4 — город поиска и «когда удобно приходить», если их
-        # сказал сам человек. После отправки, не бросает.
-        record_said_facts(
-            bot_user,
-            conversation,
-            event.text,
-            tool_trace=getattr(turn_reply, "tool_trace", None) if concierge_turn_ran else None,
-        )
+        if memory_link_timed_out or not memory_pre_send_ran:
+            record_turn_facts(
+                bot_user,
+                conversation,
+                event.text,
+                tool_trace=getattr(turn_reply, "tool_trace", None) if concierge_turn_ran else None,
+            )
+        else:
+            # The pre-send write skipped the Ayla declared-prefs mirror to keep
+            # its budget; the mirror runs here, as it always did — after the send.
+            bridge_after_send(bot_user, event.text)
 
 
 def _remember_time_preference(conversation, bot_user, text: str, reply):

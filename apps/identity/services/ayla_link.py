@@ -271,13 +271,18 @@ def persist_resolved_identity(bot_user: "BotUser", identity, *, trigger: str) ->
         )
 
 
-def ensure_ayla_link(bot_user: "BotUser", *, trigger: str = "unknown") -> uuid.UUID | None:
+def ensure_ayla_link(
+    bot_user: "BotUser", *, trigger: str = "unknown", timeout_s: float | None = None
+) -> uuid.UUID | None:
     """Return this person's canonical Ayla user id, resolving it if needed.
 
     Args:
       bot_user: the acting ``BotUser``.
       trigger: which capability asked (``booking`` / ``memory_write`` /
         ``personal_data``) — observability only, never affects behaviour.
+      timeout_s: a tighter REST budget for THIS resolution (DRF-1292 — the
+        pre-send memory write); ``None`` — the client default. A cache hit
+        costs nothing either way.
 
     Returns the ``UUID`` on success, or ``None`` when Ayla could not be
     reached or answered unusably AND no key was stored yet (a stored key is
@@ -318,7 +323,13 @@ def ensure_ayla_link(bot_user: "BotUser", *, trigger: str = "unknown") -> uuid.U
 
     started = time.monotonic()
     try:
-        identity = resolve_identity(external_user_id)
+        # Keyword only when set: doubles of ``resolve_identity`` in tests (and
+        # any future one) keep the one-argument shape.
+        identity = (
+            resolve_identity(external_user_id, timeout_s=timeout_s)
+            if timeout_s is not None
+            else resolve_identity(external_user_id)
+        )
     except IdentityResolveError as exc:
         # Degrade, never raise. `str(exc)` is a fixed reason string built
         # by the client (`network: ReadTimeout`, `server: HTTP 502`, …) —
