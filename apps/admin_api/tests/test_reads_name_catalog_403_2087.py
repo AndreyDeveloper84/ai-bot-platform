@@ -270,7 +270,9 @@ class TestEveryReaderCatchesTheWholeSalonFamily:
 
     @pytest.mark.parametrize("reader", READERS)
     def test_census_covers_every_salon_error(self, reader: str) -> None:
-        assert _read_module(reader) in _reader_modules(), "читатель выпал из переписи — сторож ослеп"
+        assert _read_module(reader) in _reader_modules(), (
+            "читатель выпал из переписи — сторож ослеп"
+        )
         module = importlib.import_module(f"apps.admin_api.{_read_module(reader)}")
         assert module.__file__ is not None
         tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
