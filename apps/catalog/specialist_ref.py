@@ -18,11 +18,20 @@
 Стережёт ``apps/catalog/tests/test_catalog_specialist_id_guard_1933.py``:
 вызов клиента каталога с ``specialist_id`` обязан пройти здесь или быть
 назван поимённо.
+
+Обратная сторона той же монеты — :func:`specialist_keys` (DRF-2185):
+событие Ayla пишет в зеркало ``RemoteBookingProxy.specialist_id`` тот же
+каталожный id, поэтому читатель зеркала, ищущий строки мастера по
+``master.id``, у соло/склеенного мастера не находит ничего — дашборд и
+расписание пусты при живых записях. Читатели зеркала фильтруют по
+``specialist_id__in=specialist_keys(master)``; стережёт
+``apps/master_api/tests/test_visit_source_specialist_keys_2185.py``.
 """
 
 from __future__ import annotations
 
 from typing import Any
+from uuid import UUID
 
 
 class CatalogSpecialistUnresolved(Exception):
@@ -44,4 +53,23 @@ def catalog_specialist_id(master: Any) -> str:
     return str(value)
 
 
-__all__ = ["CatalogSpecialistUnresolved", "catalog_specialist_id"]
+def specialist_keys(master: Any) -> list[UUID]:
+    """Под какими id зеркало ``RemoteBookingProxy`` знает этого мастера.
+
+    ``specialist_id`` строки зеркала — ``SpecialistProfile.id`` каталога, как
+    его прислало событие. У строки синка он равен первичному ключу; у
+    соло-мастера и склеенного приглашения (DRF-1507) первичный ключ —
+    uuid4, а каталожный id лежит в ``catalog_specialist_id`` (DRF-1933).
+    Оба ключа — иначе соло-мастер создаёт запись (в Ayla уходит
+    каталожный id) и тут же видит пустой день. Пустая колонка — один
+    ключ, не отказ: чтение зеркала не зовёт каталог.
+    """
+
+    keys = [master.id]
+    catalog_id = getattr(master, "catalog_specialist_id", None)
+    if catalog_id and catalog_id != master.id:
+        keys.append(catalog_id)
+    return keys
+
+
+__all__ = ["CatalogSpecialistUnresolved", "catalog_specialist_id", "specialist_keys"]

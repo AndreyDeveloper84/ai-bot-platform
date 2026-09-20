@@ -35,6 +35,7 @@ from django.db.models import Max
 
 from apps.booking.models import RemoteBookingProxy
 from apps.catalog.models import CatalogMaster, CatalogService
+from apps.catalog.specialist_ref import specialist_keys
 from apps.identity.models import BotUser
 from apps.master_api.services.dashboard import get_tenant_tz
 from apps.master_api.services.visit_source import GUEST_NAME
@@ -168,24 +169,6 @@ class BookingDetail:
             "minutes_until": self.minutes_until,
             "checked_at": _iso(self.checked_at),
         }
-
-
-def specialist_keys(master: CatalogMaster) -> list[UUID]:
-    """Под какими id зеркало знает этого мастера.
-
-    ``specialist_id`` строки зеркала — ``SpecialistProfile.id`` каталога, как
-    его прислало событие. У строки синка он равен первичному ключу; у
-    соло-мастера и склеенного приглашения (DRF-1507) первичный ключ —
-    uuid4, а каталожный id лежит в ``catalog_specialist_id`` (DRF-1933).
-    Оба ключа — иначе соло-мастер создаёт запись (в Ayla уходит
-    каталожный id) и тут же получает 404 на её детали.
-    """
-
-    keys = [master.id]
-    catalog_id = getattr(master, "catalog_specialist_id", None)
-    if catalog_id and catalog_id != master.id:
-        keys.append(catalog_id)
-    return keys
 
 
 def own_booking(master: CatalogMaster, appointment_id: UUID | str) -> RemoteBookingProxy | None:

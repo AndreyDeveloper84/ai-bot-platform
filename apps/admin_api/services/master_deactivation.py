@@ -71,6 +71,7 @@ from apps.booking.services.transitions import (
 )
 from apps.catalog.master_state import is_available
 from apps.catalog.models import CatalogMaster, MasterService
+from apps.catalog.specialist_ref import specialist_keys
 from apps.channels.max.addressing import MaxAddress
 from apps.channels.max.outbound import MaxAPIError, send_message
 from apps.channels.max.staff_outbound import send_to_staff
@@ -545,9 +546,11 @@ def _count_future_mirror_bookings(master: CatalogMaster) -> int:
     anything coming up».
     """
 
+    # DRF-2185: у соло/склеенного мастера зеркало ключится каталожным id,
+    # не pk — по одному pk счётчик отвечал 0 при живых записях.
     return RemoteBookingProxy.all_tenants.filter(
         tenant_id=master.tenant_id,
-        specialist_id=master.id,
+        specialist_id__in=specialist_keys(master),
         status__in=MIRROR_LIVE_STATUSES,
         start_at__gte=timezone.now(),
     ).count()
