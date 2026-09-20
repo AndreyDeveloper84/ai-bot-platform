@@ -33,6 +33,8 @@ interface TabSpec {
   key: TabKey;
   label: string;
   to: string;
+  /** Дополнительные префиксы адресов, при которых вкладка активна. */
+  also?: readonly string[];
   icon: JSX.Element;
   badgeDot?: boolean;
 }
@@ -120,6 +122,8 @@ export function MasterTabBar({ scheduleHasPendingChange }: TabBarProps) {
       key: "schedule",
       label: MASTER_TAB_LABELS[1],
       to: "/master/schedule",
+      // «Детали записи» (DRF-2156) — часть раздела «Расписание», как в макете DRF-1185.
+      also: ["/master/bookings/"],
       icon: <IconCalendar />,
       badgeDot: scheduleHasPendingChange,
     },
@@ -142,7 +146,9 @@ export function MasterTabBar({ scheduleHasPendingChange }: TabBarProps) {
   return (
     <nav className="master-tabbar" aria-label="Основная навигация">
       {tabs.map((tab) => {
-        const isActive = location.pathname.startsWith(tab.to);
+        const isActive =
+          location.pathname.startsWith(tab.to) ||
+          (tab.also ?? []).some((prefix) => location.pathname.startsWith(prefix));
         return (
           <button
             type="button"

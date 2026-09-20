@@ -28,11 +28,9 @@
  *   - HapticFeedback.selectionChanged() on date step
  *   - HapticFeedback.impactOccurred('heavy') on availability-request confirm
  *
- * Conversation deeplink: ScheduleBooking does not carry a conversation_id
- * (M3 payload is booking-keyed). Tapping a booking card therefore routes
- * to /master/conversations (the list) where the master picks the thread
- * by client name. The conversations list itself routes into M6
- * (/master/conversations/:id) per its own card-tap handler.
+ * Booking tap → «Детали записи» `/master|solo/bookings/:id` (DRF-2156, М-4;
+ * макет DRF-1183 «нажатие на запись → экран деталей»). Раньше вело в список
+ * переписок — снято: прямой переписки мастера с клиентом нет (§50 п.5).
  */
 
 import {
@@ -42,7 +40,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import { ApiError } from "../lib/api";
 import { DEFAULT_SALON_OWNER_HINT } from "../lib/salonOwnerHint";
 import {
@@ -189,6 +187,7 @@ const EMPTY_SHEET: UnavailableSheetState = {
 
 export function MasterScheduleScreen() {
   const navigate = useNavigate();
+  const location = useLocation();
 
   const [view, setView] = useState<SegmentView>("day");
   // Currently-focused local date. Day view = that day; Week view = anchor
@@ -275,21 +274,21 @@ export function MasterScheduleScreen() {
     setView(v);
   }, []);
 
-  // --- Booking → conversation list (intentional indirection) ---------
+  // --- Booking → «Детали записи» (DRF-2156, М-4) -----------------------
 
+  // Макет DRF-1183 «нажатие на запись → экран деталей записи». Раньше вело в
+  // список переписок — прямой переписки мастера с клиентом нет (§50 п.5).
+  // Соло и салонный мастер делят экран; поверхность — по адресу.
+  const isSolo = location.pathname.startsWith("/solo/");
   const onBookingTap = useCallback(
-    (_booking: ScheduleBooking) => {
+    (booking: ScheduleBooking) => {
       hapticSelection();
-      // M6 (conversation detail) is wired, but ScheduleBooking does NOT
-      // carry a `conversation_id` — the M3 backend returns booking rows
-      // only. Adding the join here would mean a second round-trip per
-      // tap. Cheapest correct UX: route to the conversations list, where
-      // the master can pick the right thread by client name. A future
-      // PR can extend the schedule payload with conversation_id if the
-      // tap flow proves heavy enough to justify it.
-      navigate("/master/conversations");
+      navigate(
+        `${isSolo ? "/solo" : "/master"}/bookings/${encodeURIComponent(booking.booking_id)}`,
+        { state: { from: location.pathname } },
+      );
     },
-    [navigate],
+    [navigate, isSolo, location.pathname],
   );
 
   // --- Free-window tap → mark-unavailable sheet ------------------------

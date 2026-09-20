@@ -42,6 +42,8 @@
  * «Заметка к визиту ›», «Сказала: «…»», «⚠ Постоянный клиент». Компоненты
  * `PayoutPreviewCard` / `IconMessage` живут дальше — с экрана сняты, не удалены.
  * Карточка записи — имя, услуга, время; сторож на набор полей — в тестах.
+ * Тап по карточке → «Детали записи» `/master|solo/bookings/:id` (DRF-2156,
+ * М-4); «До визита …» — общим форматтером DRF-1185 («1 ч 20 мин», §61).
  *
  * State branches:
  *   - loading            → 3 skeleton cards
@@ -56,7 +58,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useLocation, useNavigate } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import { ApiError } from "../lib/api";
 import { salonOwnerHint } from "../lib/salonOwnerHint";
 import {
@@ -77,7 +79,12 @@ import { MasterTabBar } from "../components/MasterTabBar";
 import { useMasterAvatarItems } from "../hooks/useMasterAvatarItems";
 import { AcceptingBookingsToggle } from "../components/AcceptingBookingsToggle";
 import { SetupProgressCard } from "../components/SetupProgressCard";
-import { formatDateLong, formatTimeHM, joinClientName } from "../lib/masterDateFormat";
+import {
+  formatDateLong,
+  formatDurationRu,
+  formatTimeHM,
+  joinClientName,
+} from "../lib/masterDateFormat";
 
 // --- Russian copy (VERBATIM from §M1) ------------------------------------
 
@@ -88,7 +95,8 @@ const COPY = {
     scheduledNow: "Сейчас по расписанию",
     next: "Ближайшая запись",
     later: "Дальше сегодня",
-    untilVisit: (min: number) => (min > 0 ? `До визита ${min} мин` : "Уже сейчас"),
+    // §61: формат DRF-1185 («1 ч 20 мин») общим helper'ом с «Деталями записи».
+    untilVisit: (min: number) => (min > 0 ? `До визита ${formatDurationRu(min)}` : "Уже сейчас"),
     range: (start: string, end: string) => `${start}–${end}`,
     noVisits: "На сегодня записей нет",
     dayOff: "Сегодня выходной",
@@ -239,6 +247,13 @@ export function MasterDashboardScreen() {
   const location = useLocation();
   const isSolo = location.pathname.startsWith("/solo/");
 
+  // DRF-2156 (М-4): тап по записи → «Детали записи» своей поверхности.
+  const bookingHref = useCallback(
+    (bookingId: string) =>
+      `${isSolo ? "/solo" : "/master"}/bookings/${encodeURIComponent(bookingId)}`,
+    [isSolo],
+  );
+
   // «Рабочие часы →» на выходном: соло правит часы сам, салонный — подаёт
   // заявку владельцу на экране «Расписание».
   const onHoursCta = useCallback(() => {
@@ -347,6 +362,7 @@ export function MasterDashboardScreen() {
         totalClients={today_summary.total_clients_today}
         onHours={onHoursCta}
         onRecheck={() => load(true)}
+        bookingHref={bookingHref}
       />
 
       {/* DRF-1807 — карточка «Продолжить настройку», пока readiness не закрыт. */}
@@ -480,6 +496,7 @@ function DayBlock({
   totalClients,
   onHours,
   onRecheck,
+  bookingHref,
 }: {
   activeVisit: DashboardActiveVisit | null;
   nextVisit: DashboardNextVisit | null;
@@ -493,6 +510,7 @@ function DayBlock({
   totalClients: number;
   onHours: () => void;
   onRecheck: () => void;
+  bookingHref: (bookingId: string) => string;
 }) {
   let body: React.ReactNode;
   if (isDayDone) {
@@ -534,9 +552,9 @@ function DayBlock({
   } else {
     body = (
       <>
-        {activeVisit ? <ScheduledNowCard visit={activeVisit} /> : null}
-        {nextVisit ? <NextVisitCard visit={nextVisit} /> : null}
-        {upcoming.length > 0 ? <LaterTodayList visits={upcoming} /> : null}
+        {activeVisit ? <ScheduledNowCard visit={activeVisit} href={bookingHref} /> : null}
+        {nextVisit ? <NextVisitCard visit={nextVisit} href={bookingHref} /> : null}
+        {upcoming.length > 0 ? <LaterTodayList visits={upcoming} href={bookingHref} /> : null}
       </>
     );
   }
@@ -553,13 +571,18 @@ function DayBlock({
   );
 }
 
-/** Имя — услуга — HH:MM–HH:MM. Три поля, и только они (макет DRF-1182). */
+/**
+ * Имя — услуга — HH:MM–HH:MM. Три поля, и только они (макет DRF-1182).
+ * Карточка — ссылка на «Детали записи» (DRF-2156; DRF-1183 «нажатие на
+ * запись → экран деталей»); адрес возврата — этот экран.
+ */
 function VisitRow({
   first,
   lastInitial,
   service,
   startIso,
   endIso,
+  to,
   quiet = false,
 }: {
   first: string;
@@ -567,21 +590,34 @@ function VisitRow({
   service: string;
   startIso: string;
   endIso: string;
+  to: string;
   quiet?: boolean;
 }) {
   const clientName = joinClientName(first, lastInitial);
+  const location = useLocation();
   return (
-    <article className={quiet ? "m-card m-card--quiet" : "m-card"}>
+    <Link
+      to={to}
+      state={{ from: location.pathname }}
+      className={quiet ? "m-card m-card--tappable m-card--quiet" : "m-card m-card--tappable"}
+      onClick={() => hapticSelection()}
+    >
       <div className="m-card__title">{clientName}</div>
       <div className="m-card__meta">{service}</div>
       <div className="m-card__meta">
         {COPY.day.range(formatTimeHM(startIso), formatTimeHM(endIso))}
       </div>
-    </article>
+    </Link>
   );
 }
 
-function ScheduledNowCard({ visit }: { visit: DashboardActiveVisit }) {
+function ScheduledNowCard({
+  visit,
+  href,
+}: {
+  visit: DashboardActiveVisit;
+  href: (bookingId: string) => string;
+}) {
   // Конец — по часам: начало + длительность; «До конца ≈» не рисуется.
   const end = new Date(new Date(visit.started_at).getTime() + visit.duration_min * 60_000);
   return (
@@ -593,12 +629,19 @@ function ScheduledNowCard({ visit }: { visit: DashboardActiveVisit }) {
         service={visit.service_name}
         startIso={visit.started_at}
         endIso={end.toISOString()}
+        to={href(visit.booking_id)}
       />
     </div>
   );
 }
 
-function NextVisitCard({ visit }: { visit: DashboardNextVisit }) {
+function NextVisitCard({
+  visit,
+  href,
+}: {
+  visit: DashboardNextVisit;
+  href: (bookingId: string) => string;
+}) {
   const endIso =
     visit.end_at ||
     new Date(new Date(visit.visit_at).getTime() + visit.duration_min * 60_000).toISOString();
@@ -611,13 +654,20 @@ function NextVisitCard({ visit }: { visit: DashboardNextVisit }) {
         service={visit.service_name}
         startIso={visit.visit_at}
         endIso={endIso}
+        to={href(visit.booking_id)}
       />
       <p className="master-dashboard__day-until">{COPY.day.untilVisit(visit.minutes_until ?? 0)}</p>
     </div>
   );
 }
 
-function LaterTodayList({ visits }: { visits: DashboardUpcomingVisit[] }) {
+function LaterTodayList({
+  visits,
+  href,
+}: {
+  visits: DashboardUpcomingVisit[];
+  href: (bookingId: string) => string;
+}) {
   return (
     <div className="master-dashboard__day-part">
       <p className="master-dashboard__day-label">{COPY.day.later}</p>
@@ -630,6 +680,7 @@ function LaterTodayList({ visits }: { visits: DashboardUpcomingVisit[] }) {
               service={v.service_name}
               startIso={v.visit_at}
               endIso={v.end_at}
+              to={href(v.booking_id)}
               quiet
             />
           </li>
