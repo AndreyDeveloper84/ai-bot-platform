@@ -1,6 +1,6 @@
 /**
- * Карточки на «Сегодня» (DRF-2115, §50 п.6): «Диалоги — N ждут ответа» и
- * «График — N заявок».
+ * Карточки на «Сегодня» (DRF-2115, §50 п.6; DRF-2117): «Диалоги — N ждут
+ * ответа», «График — N заявок», «Готовность — N проблем».
  *
  * * «Диалоги» — очередь handoff (`GET admin/handoff-queue/`): сколько
  *   клиентов ждут человека. Решение владельца 19.09: карточка на
@@ -8,8 +8,11 @@
  * * «График» — заявки мастеров на смену графика, ожидающие решения
  *   (`GET admin/availability-requests/?status=pending`). Ведёт на экран
  *   заявок, который есть с M3-admin.
- * * «Готовность — N проблем» НЕ рисуется: ручки нет (DRF-2116/2117), а
- *   блок без ручки на экран не выходит (§33).
+ * * «Готовность» — салонная готовность поимённо (`GET admin/readiness/`,
+ *   #1878). Состояние приходит от экрана (`useSalonReadiness`): тот же
+ *   ответ питает строку сводки, второй запрос не нужен. Ресепшну не
+ *   рисуется (`hidden`): ручка ей 403, а карточка «не удалось проверить»
+ *   на её экране была бы ложью о сбое. Ведёт на список (`/admin/readiness`).
  *
  * Число — только из ответа. Сбой ручки — карточка есть, числа нет и оно
  * НЕ ноль: «не удалось посчитать» — не «никто не ждёт». Список заявок
@@ -18,7 +21,9 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 
+import type { ReadinessView } from "../../hooks/useSalonReadiness";
 import { getAvailabilityRequests, getHandoffQueue } from "../../lib/admin-api";
+import { READINESS_PATH, readinessCardText } from "../../lib/salon-readiness";
 
 export const HANDOFF_QUEUE_PATH = "/admin/handoff";
 export const AVAILABILITY_REQUESTS_PATH = "/admin/availability-requests";
@@ -57,7 +62,7 @@ export function scheduleCardText(c: Count): string {
 
 const PENDING_PAGE = 50;
 
-export function SalonTodayCards() {
+export function SalonTodayCards({ readiness }: { readiness: ReadinessView }) {
   const [dialogs, setDialogs] = useState<Count>({ kind: "loading" });
   const [schedule, setSchedule] = useState<Count>({ kind: "loading" });
 
@@ -86,6 +91,11 @@ export function SalonTodayCards() {
       <Link className="salon-today__card" to={AVAILABILITY_REQUESTS_PATH}>
         {scheduleCardText(schedule)}
       </Link>
+      {readiness.kind !== "hidden" ? (
+        <Link className="salon-today__card" to={READINESS_PATH}>
+          {readinessCardText(readiness)}
+        </Link>
+      ) : null}
     </div>
   );
 }
