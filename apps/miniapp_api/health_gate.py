@@ -299,16 +299,24 @@ def _screen(
         if inbound_stop is not None:
             return inbound_stop, forward
 
-    # 2. The persisted state. A lookup FAILURE is not «no state»: it raises and
-    #    the request is blocked (fail-closed) — unless the text itself is an
-    #    explicit red flag, which is the stronger outcome and needs no state.
+    # 2. The persisted state: the durable restriction on the identity
+    #    (``BotUser.context``, survives a new conversation) and the
+    #    conversational question on the conversation. A lookup FAILURE is not
+    #    «no state»: it is recorded and the request is blocked (fail-closed)
+    #    — unless the text itself is an explicit red flag, which is the
+    #    stronger outcome and needs no state.
     carrier_failed = False
     conversation = None
     try:
         conversation = _conversation_for(bot_user, create=False)
     except _CarrierUnavailable:
         carrier_failed = True
-    state = g4_state(conversation) if conversation is not None else None
+    try:
+        state: Any = g4_state(conversation, bot_user)
+    except Exception:  # noqa: BLE001 — an unreadable identity row is a failure, not «no state»
+        logger.exception("miniapp_api.health_gate.state_read_failed bot_user=%s", bot_user.pk)
+        state = None
+        carrier_failed = True
 
     if state is not None and state.stopped:
         # [OD-BOT §156]: a durable S1 STOP — every later request gets the STOP
@@ -316,19 +324,26 @@ def _screen(
         return _S1_STOP, forward
 
     if state is not None and state.active:
-        # [OD-BOT §164] — the open question binds whatever the person sends
+        # [OD-BOT §164] — the open restriction binds whatever the person sends
         # next: the answer field, or the free text itself. The body is never
-        # forwarded while the question is open — a «нет» is not clearance.
+        # forwarded while it is open — a «нет» is not clearance. A restriction
+        # without a conversation (new session, or the row could not be read)
+        # is still a restriction: the question is put again on a carrier
+        # created on demand; if none can be had, the request is blocked.
         if not reply_text:
             return _G4_QUESTION_STOP, forward
-        outcome = route_g4_reply(conversation, reply_text)
+        if conversation is None:
+            conversation = _conversation_for(bot_user, create=True)
+            if conversation is None:
+                raise _CarrierUnavailable
+        outcome = route_g4_reply(conversation, bot_user, reply_text)
         logger.info(
             "miniapp_api.health_gate.g4 outcome=%s group=%s bot_user=%s",
             outcome.kind,
             outcome.group,
             bot_user.pk,
         )
-        if outcome.stop and not g4_state(conversation).stopped:
+        if outcome.stop and not g4_state(conversation, bot_user).stopped:
             # The STOP reply is still the STOP reply; the durable record did not
             # land — logged, and the request stays blocked either way.
             logger.error("miniapp_api.health_gate.stop_not_persisted bot_user=%s", bot_user.pk)
@@ -363,7 +378,7 @@ def _screen(
         # demand; if it cannot be created or the state cannot be written, the
         # request is blocked (fail-closed) instead of asked-and-forgotten.
         conversation = _conversation_for(bot_user, create=True)
-        if conversation is None or not ask_g4(conversation):
+        if conversation is None or not ask_g4(conversation, bot_user):
             raise _CarrierUnavailable
         logger.info("miniapp_api.health_gate.g4_asked bot_user=%s", bot_user.pk)
         return _G4_QUESTION_STOP, forward

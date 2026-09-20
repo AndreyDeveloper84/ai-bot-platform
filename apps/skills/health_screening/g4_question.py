@@ -13,10 +13,11 @@ Two states, deliberately separate:
 * the CONVERSATIONAL question — :mod:`apps.orchestrator.open_question`, binding,
   B13 two-hour TTL: «the bot knows it asked, and the next reply is this
   question's»;
-* the DURABLE restriction — :mod:`apps.orchestrator.safety.s1_restriction`, no
-  TTL: «health-sensitive recommendation / booking are blocked until a
-  registered resolution». [§162]: a TTL is never clearance, so the question
-  may expire and be put again — the restriction does not move.
+* the DURABLE restriction — :mod:`apps.orchestrator.safety.s1_restriction`, on
+  the BotUser, no TTL: «health-sensitive recommendation / booking are blocked
+  until a registered resolution». [§162]: a TTL is never clearance, so the
+  question may expire and be put again — the restriction does not move; a
+  NEW conversation of the same identity is still restricted.
 
 What every surface calls (chat skill on MAX / Telegram, the global concierge,
 the Mini App goal gate):
@@ -59,8 +60,7 @@ from apps.orchestrator.safety.s1_restriction import (
 from apps.skills.health_screening.classifier import (
     PainSignal,
     classify,
-    detect_g4,
-    detect_g6,
+    s1_group_of,
 )
 
 logger = logging.getLogger(__name__)
@@ -82,8 +82,10 @@ class G4Outcome:
     """What the reply to the open G4 question means."""
 
     kind: OutcomeKind
-    #: ``"G4"`` / ``"G6"`` for an attributed stop, None for an unattributed
-    #: red flag of the older rules, None while the restriction persists.
+    #: The group the classifier attributes the stop to (``G6`` keeps precedence,
+    #: then ``G4``, then G1 / G2 / G3 / G5 / G7 by their named tuples); ``None``
+    #: for a red flag of an unnamed older rule — never mislabelled as G4 — and
+    #: None while the restriction persists.
     group: str | None = None
 
     @property
@@ -116,66 +118,72 @@ def g4_pending(conversation: Any) -> bool:
     return pending is not None and pending.binding and pending.question_id == G4_QUESTION_ID
 
 
-def g4_state(conversation: Any) -> G4State:
-    return G4State(question_pending=g4_pending(conversation), restriction=restriction(conversation))
+def g4_state(conversation: Any, bot_user: Any) -> G4State:
+    """Conversational question (on the conversation) + durable restriction (on
+    the identity), read together."""
+
+    return G4State(question_pending=g4_pending(conversation), restriction=restriction(bot_user))
 
 
-def ask_g4(conversation: Any) -> bool:
-    """Record the open restriction and put the single binding question.
+def ask_g4(conversation: Any, bot_user: Any) -> bool:
+    """Record the open restriction on the identity and put the single binding
+    question on the conversation.
 
-    Returns True only when BOTH are on the conversation after the write
-    (re-read); False means the state could not be persisted and the caller
-    must not proceed as if unrestricted.
+    Returns True only when BOTH are persisted after the write (re-read); False
+    means the state could not be persisted and the caller must not proceed as
+    if unrestricted.
     """
 
-    if conversation is None:
+    if conversation is None or bot_user is None:
         return False
     restricted = open_restriction(
-        conversation, group="G4", question_id=G4_QUESTION_ID, source="health_screening.g4"
+        bot_user, group="G4", question_id=G4_QUESTION_ID, source="health_screening.g4"
     )
     open_question(conversation, G4_QUESTION_ID, asked_text=G4_ROUTING_QUESTION, binding=True)
     persisted = restricted and g4_pending(conversation)
     if not persisted:
         logger.error(
-            "health_screening.g4.ask_not_persisted conversation=%s restriction=%s question=%s",
+            "health_screening.g4.ask_not_persisted conversation=%s bot_user=%s "
+            "restriction=%s question=%s",
             getattr(conversation, "id", None),
+            getattr(bot_user, "pk", None),
             restricted,
             g4_pending(conversation),
         )
     return persisted
 
 
-def route_g4_reply(conversation: Any, text: str) -> G4Outcome:
+def route_g4_reply(conversation: Any, bot_user: Any, text: str) -> G4Outcome:
     """Deterministic outcome of ``text`` as the reply to the open G4 question.
 
     The crisis route is not decided here: ``evaluate_inbound`` runs before
     any of this on every surface, so a crisis phrase never reaches it.
     """
 
-    if detect_g6(text):
-        outcome, reason = G4Outcome("stop", "G6"), "g6_sign"
-    elif detect_g4(text):
-        outcome, reason = G4Outcome("stop", "G4"), "positive_sign"
-    elif classify(text) is PainSignal.RED_FLAG:
-        outcome, reason = G4Outcome("stop", None), "red_flag"
+    if classify(text) is PainSignal.RED_FLAG:
+        group = s1_group_of(text)
+        reason = {"G6": "g6_sign", "G4": "positive_sign"}.get(group or "", "red_flag")
+        outcome = G4Outcome("stop", group)
     else:
         outcome, reason = G4Outcome("restriction_persists"), "unknown"
 
     if outcome.stop:
         # [§156]: the STOP is durable — the question is answered, the
-        # restriction is not lifted. Nothing here is clearance.
+        # restriction is not lifted. Nothing here is clearance. The group is
+        # the classifier's attribution or None — never a default of G4.
         resolve_question(conversation, G4_QUESTION_ID, text)
         mark_stop(
-            conversation,
-            group=outcome.group or "G4",
+            bot_user,
+            group=outcome.group,
             question_id=G4_QUESTION_ID,
             source="health_screening.g4",
             reason=reason,
         )
     else:
         # Same question, same slot — the conversational record is re-stamped
-        # (or re-opened after its TTL); the durable restriction was never gone.
-        ask_g4(conversation)
+        # (or re-opened after its TTL / in a new conversation); the durable
+        # restriction was never gone.
+        ask_g4(conversation, bot_user)
     logger.info(
         "health_screening.g4.reply conversation=%s outcome=%s group=%s",
         getattr(conversation, "id", None),

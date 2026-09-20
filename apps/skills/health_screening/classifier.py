@@ -341,15 +341,21 @@ _RED_FLAG_PATTERNS: tuple[re.Pattern[str], ...] = (
     # asthma or panic attack indoors is real, and a false «лучше к врачу» is
     # cheaper than a missed breathing red flag. Known false positive, named:
     # irony («не могу дышать без этого крема, шучу»).
+    # Pregnancy + back pain is a soft red-flag — surface but don't block;
+    # caller emits the warning. We keep this OUT of the regex list for
+    # now; future versions can add tiered red-flags.
+)
+
+#: G1 — breathing (the five regexes above, unchanged; named so a STOP can be
+#: attributed to G1 by :func:`s1_group_of` — no rule moved, no rule added).
+_S1_G1_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\b(?:трудно|тяжело)\s+дышать", re.IGNORECASE),
     re.compile(r"\bне\s+могу\s+(?:вдохнуть|дышать|отдышаться)", re.IGNORECASE),
     re.compile(r"\bзадыха\w*+(?!\s+от\s+(?:смеха|хохота|восторга|счастья|радости))", re.IGNORECASE),
     re.compile(r"\bудушь\w*", re.IGNORECASE),
     re.compile(r"(?:не\s+хватает\s+воздуха|воздуха\s+не\s+хватает)", re.IGNORECASE),
-    # Pregnancy + back pain is a soft red-flag — surface but don't block;
-    # caller emits the warning. We keep this OUT of the regex list for
-    # now; future versions can add tiered red-flags.
 )
+_RED_FLAG_PATTERNS = _RED_FLAG_PATTERNS + _S1_G1_PATTERNS
 
 # -- S1 groups G2–G7 (DRF-2004, S-1d) ----------------------------------------
 # Only obvious red flags. Each group is narrowed by its own text in
@@ -826,8 +832,21 @@ _RED_FLAG_PATTERNS = (
 #: Limb context for ambiguous WEAKNESS — [OD-BOT §164] names «слабость … с одной
 #: стороны» as the sign; without the sudden marker it is the question. Weakness
 #: is read only next to a limb (never bare «слабость» / «устала»: general fatigue
-#: after a workout or an illness is not the contract).
+#: after a workout or an illness is not the contract). Weakness after an
+#: explicitly named physical exertion («после тренировки / зала / пробежки /
+#: тяжёлой сумки») is NOT the ambiguity either — review #1875 fixed «Слабость в
+#: правой руке после тренировки» as NONE, and that boundary is kept: only
+#: UNEXPLAINED limb weakness asks. Whether exertion should still ask is an owner
+#: question, not this rule's.
 _G4_LIMB = r"(?:рук(?:а|и|е|у|ой|ах)|ног(?:а|и|е|у|ой|ах)|конечност\w*)"
+_G4_EXERTION = re.compile(
+    r"\bпосле\s+(?:[\w-]+\s+){0,2}(?:тренировк\w*|зала|спортзала|фитнес\w*|пробежк\w*|бега"
+    r"|нагрузк\w*|подъ[её]ма\s+тяжест\w*|тяжест\w*|тяж[её]л\w+\s+сумк\w*|уборк\w*|дачи"
+    r"|огород\w*|ремонт\w*|переезд\w*|работы|смены)\b"
+    r"|\b(?:перетрениров\w*|перенапряг\w*|натрудил\w*)",
+    re.IGNORECASE,
+)
+_G4_WEAKNESS_TOKEN = re.compile(r"слабост\w*|слабе(?:ет|ют)|ослаб\w*", re.IGNORECASE)
 _G4_AMBIGUOUS_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\bонемен", re.IGNORECASE),
     re.compile(r"\b(?:о)?неме(?:ет|ют|л|ла|ло|ли|ть|вш\w*)\b", re.IGNORECASE),
@@ -858,7 +877,51 @@ def detect_g4_ambiguous(text: str) -> bool:
     if detect_g6(text) or detect_g4(text):
         return False
     lower = _mask_not_pain(text.strip().lower())
-    return any(pattern.search(lower) for pattern in _G4_AMBIGUOUS_PATTERNS)
+    for pattern in _G4_AMBIGUOUS_PATTERNS:
+        match = pattern.search(lower)
+        if match is None:
+            continue
+        if _G4_WEAKNESS_TOKEN.search(match.group(0)) and _G4_EXERTION.search(
+            _g4_sentence(lower, match.start())
+        ):
+            # weakness explained by a named exertion in the same sentence —
+            # the #1875 boundary (NONE), not the question
+            continue
+        return True
+    return False
+
+
+#: Attribution order — the explicit detectors first, then the named group
+#: tuples. ``None`` for a red flag of an unnamed older rule (DRF-973 nerve-root,
+#: acute systemic, functional collapse): a STOP is never mislabelled.
+_S1_GROUP_TUPLES: tuple[tuple[str, tuple[re.Pattern[str], ...]], ...] = (
+    ("G1", _S1_G1_PATTERNS),
+    ("G2", _S1_G2_PATTERNS),
+    ("G3", _S1_G3_PATTERNS),
+    ("G5", _S1_G5_PATTERNS),
+    ("G7", _S1_G7_PATTERNS),
+)
+
+
+def s1_group_of(text: str) -> str | None:
+    """The S1 group an explicit red flag is attributed to, by the existing rules.
+
+    G6 and G4 by their detectors (G6 keeps precedence), G1 / G2 / G3 / G5 / G7 by
+    their named pattern tuples, ``None`` when only an unnamed older rule fires
+    or when the text is not a red flag at all. No new rule, no new group.
+    """
+
+    if not isinstance(text, str) or not text.strip():
+        return None
+    if detect_g6(text):
+        return "G6"
+    if detect_g4(text):
+        return "G4"
+    lower = _mask_not_pain(text.strip().lower())
+    for group, patterns in _S1_GROUP_TUPLES:
+        if any(pattern.search(lower) for pattern in patterns):
+            return group
+    return None
 
 
 def classify(text: str) -> PainSignal:

@@ -25,7 +25,8 @@ from django.core.cache import cache
 from django.test import Client
 from django.urls import reverse
 
-from apps.conversations.services import resolve_conversation_for_bot_user
+from apps.conversations.services import close_conversation, resolve_conversation_for_bot_user
+from apps.conversations.models import Conversation
 from apps.identity.models import BotUser
 from apps.integrations.ayla.goals_client import reset_goals_circuit
 from apps.miniapp_api.health_gate import (
@@ -38,6 +39,7 @@ from apps.miniapp_api.health_gate import (
 )
 from apps.orchestrator.safety.gate import CRISIS_REPLY_TEXT
 from apps.orchestrator.safety.medical_emergency import MEDICAL_EMERGENCY_TEXT_V2
+from apps.orchestrator.safety.s1_restriction import restriction
 from apps.skills.base import SkillContext
 from apps.skills.health_screening.g4_question import G4_ROUTING_QUESTION, g4_pending
 from apps.skills.health_screening.skill import HealthScreeningSkill
@@ -118,6 +120,13 @@ def _goal(text: str, **extra: object) -> dict:
 
 
 def _pending(bot_user: BotUser) -> bool:
+    """The durable restriction on the identity (re-read from the DB)."""
+
+    fresh = BotUser.all_tenants.get(pk=bot_user.pk)
+    return restriction(fresh) is not None
+
+
+def _question_open(bot_user: BotUser) -> bool:
     conversation = resolve_conversation_for_bot_user(bot_user)
     return conversation is not None and g4_pending(conversation)
 
@@ -190,7 +199,10 @@ class TestTheAnswerIsRoutedNotTrustedAsClearance:
         )
         assert out["safety"] == {"kind": KIND_RED_FLAG, "text": MEDICAL_EMERGENCY_TEXT_V2}
         assert forwarded == []
-        assert _pending(bot_user) is False
+        # the question is answered; the restriction stays, now as a durable STOP
+        assert _question_open(bot_user) is False
+        rec = restriction(BotUser.all_tenants.get(pk=bot_user.pk))
+        assert rec is not None and rec.status == "stop" and rec.group == "G4"
 
     def test_g6_answer_is_the_emergency_stop(self, client: Client, bot_user: BotUser) -> None:
         _post(client, bot_user, _goal(AMBIGUOUS))
@@ -296,7 +308,7 @@ class TestFailClosedOnStateFailure:
         assert forwarded == []
         assert _pending(bot_user) is False
 
-    def test_write_failure_on_an_ambiguous_goal_blocks(
+    def test_question_write_failure_on_an_ambiguous_goal_blocks(
         self, client: Client, bot_user: BotUser
     ) -> None:
         with patch(
@@ -306,16 +318,29 @@ class TestFailClosedOnStateFailure:
             status, out, forwarded = _post(client, bot_user, _goal(AMBIGUOUS))
         assert out["safety"] == {"kind": KIND_STATE_UNAVAILABLE, "text": STATE_UNAVAILABLE_TEXT}
         assert forwarded == []
+        assert _question_open(bot_user) is False
+        # The durable restriction landed before the question failed: blocked
+        # either way, and the next request asks again (fail-closed, not lost).
+        assert _pending(bot_user) is True
+
+    def test_restriction_write_failure_on_an_ambiguous_goal_blocks(
+        self, client: Client, bot_user: BotUser
+    ) -> None:
+        """The identity row could not be written (the writer swallows and logs;
+        the re-read finds nothing) → blocked, nothing forwarded, nothing persisted."""
+
+        with patch("apps.orchestrator.safety.s1_restriction._write_row", new=lambda *a, **k: None):
+            status, out, forwarded = _post(client, bot_user, _goal(AMBIGUOUS))
+        assert out["safety"] == {"kind": KIND_STATE_UNAVAILABLE, "text": STATE_UNAVAILABLE_TEXT}
+        assert forwarded == []
         assert _pending(bot_user) is False
 
     def test_the_request_after_a_failure_is_screened_again(
         self, client: Client, bot_user: BotUser
     ) -> None:
-        with patch(
-            "apps.conversations.services.write_skill_state",
-            side_effect=RuntimeError("write failed"),
-        ):
+        with patch("apps.orchestrator.safety.s1_restriction._write_row", new=lambda *a, **k: None):
             _post(client, bot_user, _goal(AMBIGUOUS))
+        assert _pending(bot_user) is False
         # Storage is back: the same ambiguous goal asks and persists; a benign
         # goal after that is still bound to the question.
         status, out, forwarded = _post(client, bot_user, _goal(AMBIGUOUS))
@@ -356,3 +381,23 @@ class TestDurableStopOnTheMiniApp:
             _, out, forwarded = _post(client, bot_user, _goal(text))
             assert out["safety"] == {"kind": KIND_RED_FLAG, "text": MEDICAL_EMERGENCY_TEXT_V2}
             assert forwarded == []
+
+
+class TestNewSessionOnTheMiniApp:
+    def test_a_closed_conversation_and_a_fresh_one_keep_the_restriction(
+        self, client: Client, bot_user: BotUser
+    ) -> None:
+        """[OD-BOT §162] «новая сессия — не clearance» over HTTP: the runtime's own
+        close, a fresh row, and the goal is still blocked with the question."""
+
+        _post(client, bot_user, _goal(AMBIGUOUS))
+        first = resolve_conversation_for_bot_user(bot_user)
+        assert first is not None
+        close_conversation(first, outcome=Conversation.Outcome.values[0])
+
+        _, out, forwarded = _post(client, bot_user, _goal("хочу массаж спины"))
+        assert out["safety"] == G4_FRAME
+        assert forwarded == []
+        second = resolve_conversation_for_bot_user(bot_user)
+        assert second is not None and second.pk != first.pk
+        assert g4_pending(second) is True

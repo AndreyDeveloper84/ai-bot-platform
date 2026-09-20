@@ -109,7 +109,7 @@ class HealthScreeningSkill:
         # skill BEFORE any intent / booking / recommendation skill (registry
         # order: health_screening precedes booking). Read first: the reply may
         # be «нет» or «запишите меня» — no signal of its own.
-        if g4_state(context.conversation).active:
+        if g4_state(context.conversation, context.bot_user).active:
             return True
         signal = classify(context.message_text)
         if signal == PainSignal.NONE:
@@ -123,22 +123,22 @@ class HealthScreeningSkill:
         # deterministically by :func:`route_g4_reply`; the same function every
         # surface calls, so MAX / Telegram / the global concierge / the Mini
         # App cannot disagree about what a reply means.
-        state = g4_state(context.conversation)
+        state = g4_state(context.conversation, context.bot_user)
         if state.stopped:
             # [OD-BOT §156]: S1 STOP is durable — a later turn (a booking intent,
-            # «мне лучше», a new session) gets the STOP reply again; nothing is
-            # clearance here.
+            # «мне лучше», a new session, a new conversation) gets the STOP reply
+            # again; nothing is clearance here. The label is the recorded
+            # attribution, or absent when the STOP came from an unnamed rule.
             assert state.restriction is not None
-            return SkillResult(
-                reply_text=RED_FLAG_REPLY,
-                meta={
-                    "reply_kind": "health_red_flag",
-                    "s1_group": state.restriction.group,
-                    "s1_restriction": "stop",
-                },
-            )
+            meta_durable: dict[str, object] = {
+                "reply_kind": "health_red_flag",
+                "s1_restriction": "stop",
+            }
+            if state.restriction.group is not None:
+                meta_durable["s1_group"] = state.restriction.group
+            return SkillResult(reply_text=RED_FLAG_REPLY, meta=meta_durable)
         if state.active:
-            outcome = route_g4_reply(context.conversation, context.message_text)
+            outcome = route_g4_reply(context.conversation, context.bot_user, context.message_text)
             if outcome.stop:
                 meta_stop: dict[str, object] = {
                     "reply_kind": "health_red_flag",
@@ -164,7 +164,7 @@ class HealthScreeningSkill:
             # they could not be persisted the question is still put (the reply
             # is the same) and the failure is logged — the chat turn ends here
             # either way, nothing downstream runs.
-            persisted = ask_g4(context.conversation)
+            persisted = ask_g4(context.conversation, context.bot_user)
             logger.info(
                 "health_screening.g4.asked conversation=%s persisted=%s",
                 context.conversation.id if context.conversation else None,

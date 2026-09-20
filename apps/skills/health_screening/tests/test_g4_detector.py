@@ -32,7 +32,9 @@ import pytest
 from apps.orchestrator import open_question as open_question_module
 from apps.orchestrator.open_question import pending_question
 from apps.orchestrator.safety.gate import CRISIS_REPLY_TEXT, evaluate_inbound
+from apps.orchestrator.safety import s1_restriction as s1_restriction_module
 from apps.orchestrator.safety.medical_emergency import MEDICAL_EMERGENCY_TEXT_V2
+from apps.orchestrator.safety.s1_restriction import restriction
 from apps.skills.base import SkillContext
 from apps.skills.health_screening.classifier import (
     PainSignal,
@@ -94,6 +96,7 @@ G4_RECENT_RESOLVED = (
 #: «не вижу» count only with the eye / vision named. None of these is G4, none is
 #: any red flag, none gets the emergency text.
 G4_FALSE_POSITIVE_REGRESSION = (
+    "Слабость в правой руке после тренировки",  # review #1875: NONE — kept (round 2)
     "Правая рука устала после работы",
     "Хочу исправить асимметрию лица",
     "Асимметрия лица с детства",
@@ -134,11 +137,21 @@ G4_AMBIGUOUS = (
     "немеет рука иногда",
     "Немеет левая рука по утрам",
     "Онемела правая нога после долгого сидения",
-    # limb weakness — the §164 sign without the sudden marker (review 20.09)
+    # UNEXPLAINED limb weakness — the §164 sign without the sudden marker
     "слабость в правой руке иногда",
     "иногда слабеет левая рука",
-    "Слабость в правой руке после тренировки",  # a workout is context, not clearance: ask
     "рука ослабла к вечеру",
+    "слабость в левой ноге",
+)
+
+#: Limb weakness explained by a NAMED physical exertion in the same sentence —
+#: the review-#1875 boundary (NONE): not the question, not a stop, no
+#: restriction. Whether exertion should still ask is an owner question.
+EXERTION_WEAKNESS_NOT_G4 = (
+    "Слабость в правой руке после тренировки",
+    "после зала слабость в руках",
+    "ноги слабые после пробежки",
+    "рука ослабла после тяжёлой сумки",
 )
 
 #: General fatigue / weakness with NO limb named — not the contract, never a
@@ -164,10 +177,16 @@ def _conversation() -> SimpleNamespace:
     return SimpleNamespace(id="conv-g4", skill_state={})
 
 
-def _context(text: str, conversation: Any = None) -> SkillContext:
+def _bot_user() -> SimpleNamespace:
+    """An identity with a ``context`` dict — the durable restriction's carrier."""
+
+    return SimpleNamespace(pk=1, context={})
+
+
+def _context(text: str, conversation: Any = None, bot_user: Any = None) -> SkillContext:
     return SkillContext(
         conversation=conversation if conversation is not None else Mock(id="conv-g4"),
-        bot_user=Mock(),
+        bot_user=bot_user if bot_user is not None else Mock(),
         message_text=text,
     )
 
@@ -205,11 +224,19 @@ class TestDetectG4:
         assert detect_g4(text) is False
         assert classify(text) is PainSignal.CLARIFY
 
-    @pytest.mark.parametrize("text", GENERAL_FATIGUE_NOT_G4)
-    def test_general_fatigue_is_neither_question_nor_stop(self, text: str) -> None:
+    @pytest.mark.parametrize("text", GENERAL_FATIGUE_NOT_G4 + EXERTION_WEAKNESS_NOT_G4)
+    def test_general_fatigue_or_exertion_is_neither_question_nor_stop(self, text: str) -> None:
         assert detect_g4(text) is False
         assert classify(text) is not PainSignal.CLARIFY
         assert classify(text) is not PainSignal.RED_FLAG
+
+    @pytest.mark.parametrize("text", EXERTION_WEAKNESS_NOT_G4)
+    def test_exertion_weakness_is_none_and_opens_no_restriction(self, text: str) -> None:
+        assert classify(text) is PainSignal.NONE
+        bot_user = _bot_user()
+        skill = HealthScreeningSkill()
+        assert skill.matches(_context(text, _conversation(), bot_user)) is False
+        assert restriction(bot_user) is None
 
     @pytest.mark.parametrize(
         "text", ("Резко ослабла левая рука", "Внезапно онемела правая сторона тела")
@@ -322,7 +349,9 @@ class TestSkillRouting:
 
     @pytest.mark.usefixtures("memory_carrier")
     def test_ambiguous_phrase_gets_the_question_not_the_emergency_text(self) -> None:
-        result = HealthScreeningSkill().handle(_context("немеет рука иногда", _conversation()))
+        result = HealthScreeningSkill().handle(
+            _context("немеет рука иногда", _conversation(), _bot_user())
+        )
         assert result.reply_text == G4_ROUTING_QUESTION
         assert result.meta == {
             "reply_kind": "health_clarify_g4",
@@ -351,7 +380,14 @@ def memory_carrier(monkeypatch: pytest.MonkeyPatch) -> None:
         else:
             conversation.skill_state[subkey] = value
 
+    def _write_row(bot_user: Any, row: Any) -> None:
+        if row is None:
+            bot_user.context.pop(s1_restriction_module.RESTRICTION_KEY, None)
+        else:
+            bot_user.context[s1_restriction_module.RESTRICTION_KEY] = row
+
     monkeypatch.setattr(open_question_module, "_write", _write)
+    monkeypatch.setattr(s1_restriction_module, "_write_row", _write_row)
 
 
 @pytest.mark.usefixtures("memory_carrier")
@@ -366,36 +402,39 @@ class TestQuestionContract:
         assert classify("немеет рука иногда") is PainSignal.CLARIFY
 
     def test_ambiguous_gets_exactly_the_routing_question(self) -> None:
-        conversation = _conversation()
-        result = HealthScreeningSkill().handle(_context("немеет рука иногда", conversation))
+        conversation, bot_user = _conversation(), _bot_user()
+        result = HealthScreeningSkill().handle(
+            _context("немеет рука иногда", conversation, bot_user)
+        )
+        assert restriction(bot_user) is not None
         assert result.reply_text == G4_ROUTING_QUESTION
         pending = pending_question(conversation)
         assert pending is not None and pending.question_id == G4_QUESTION_ID
 
     def test_unknown_answer_keeps_the_restriction(self) -> None:
-        conversation = _conversation()
+        conversation, bot_user = _conversation(), _bot_user()
         skill = HealthScreeningSkill()
-        skill.handle(_context("немеет рука иногда", conversation))
-        follow_up = _context("не знаю", conversation)
+        skill.handle(_context("немеет рука иногда", conversation, bot_user))
+        follow_up = _context("не знаю", conversation, bot_user)
         assert skill.matches(follow_up) is True
         assert skill.handle(follow_up).meta.get("reply_kind") == "health_restriction_persists"
         assert pending_question(conversation) is not None  # still open, still binding
 
     def test_new_booking_intent_keeps_the_restriction(self) -> None:
-        conversation = _conversation()
+        conversation, bot_user = _conversation(), _bot_user()
         skill = HealthScreeningSkill()
-        skill.handle(_context("немеет рука иногда", conversation))
-        follow_up = _context("запишите меня на массаж в пятницу", conversation)
+        skill.handle(_context("немеет рука иногда", conversation, bot_user))
+        follow_up = _context("запишите меня на массаж в пятницу", conversation, bot_user)
         assert skill.matches(follow_up) is True
         assert skill.handle(follow_up).meta.get("reply_kind") == "health_restriction_persists"
         pending = pending_question(conversation)
         assert pending is not None and pending.binding
 
     def test_plain_no_is_not_clearance(self) -> None:
-        conversation = _conversation()
+        conversation, bot_user = _conversation(), _bot_user()
         skill = HealthScreeningSkill()
-        skill.handle(_context("немеет рука иногда", conversation))
-        follow_up = _context("нет", conversation)
+        skill.handle(_context("немеет рука иногда", conversation, bot_user))
+        follow_up = _context("нет", conversation, bot_user)
         assert skill.matches(follow_up) is True
         result = skill.handle(follow_up)
         assert result.meta.get("reply_kind") != "health_no_signal"
