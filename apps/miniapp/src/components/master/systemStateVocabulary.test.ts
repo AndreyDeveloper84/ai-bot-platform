@@ -44,7 +44,16 @@ const ANALOGS: readonly string[] = [
   // Ruling §61 М-6 е: кнопка повтора загрузки — «Попробовать снова»; своя
   // подпись у экрана — второй словарь.
   '"Повторить"',
+  // DRF-2194: клиентский StateError на мастерском экране — его словарь
+  // («Не получилось загрузить…») сторож по тексту экрана не видит, ловим импорт.
+  'from "../components/StateError"',
 ];
+
+/**
+ * Файлы Master*.tsx, которые не мастерская поверхность: клиентский выбор
+ * мастера (/book/master). Их словарь — клиентский, здесь не судим.
+ */
+const CUSTOMER_SURFACE: ReadonlySet<string> = new Set(["MasterPickerScreen"]);
 
 /**
  * Остаток baseline после М-6b: переписки мастера с клиентом и со студией —
@@ -88,7 +97,8 @@ function analogsIn(src: string, screen = ""): string[] {
 
 const screens = Object.entries(SCREEN_SOURCES)
   .filter(([path]) => !/\.test\.tsx$/.test(path))
-  .map(([path, src]) => ({ name: screenName(path), src }));
+  .map(([path, src]) => ({ name: screenName(path), src }))
+  .filter((s) => !CUSTOMER_SURFACE.has(s.name));
 
 describe("сторож не слепнет от «/*» в строке", () => {
   it('accept="image/*" не открывает ложный комментарий', () => {

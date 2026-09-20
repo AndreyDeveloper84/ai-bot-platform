@@ -500,3 +500,21 @@ describe("экран 08 — слова", () => {
     expect(document.body.textContent).not.toMatch(FORBIDDEN_COPY);
   });
 });
+
+describe("системные состояния через SystemState (DRF-2194)", () => {
+  it("загрузка — общий скелет без слов", () => {
+    mockedStatus.mockReturnValue(new Promise(() => {}));
+    void renderScreen();
+    expect(screen.getByRole("status", { busy: true })).toBeInTheDocument();
+  });
+
+  it("ошибка — «Не удалось загрузить статус публикации» + «Попробовать снова», без клиентского словаря", async () => {
+    mockedStatus.mockRejectedValueOnce(new Error("boom"));
+    await renderScreen();
+    expect(screen.getByRole("alert")).toHaveTextContent("Не удалось загрузить статус публикации");
+    expect(screen.queryByText(/Не получилось загрузить/)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Попробовать снова" }));
+    await settle();
+    expect(mockedStatus).toHaveBeenCalledTimes(2);
+  });
+});
