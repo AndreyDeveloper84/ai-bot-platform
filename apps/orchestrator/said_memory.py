@@ -279,6 +279,8 @@ def _write_said_fact(
     факта новый ``said_at``, а живая строка по ключу по-прежнему одна.
     """
 
+    import time
+
     from django.utils import timezone
 
     from apps.consent.memory import can_store_green_memory
@@ -290,13 +292,13 @@ def _write_said_fact(
         read_green_entries,
     )
     from apps.identity.services.memory_writer import supersede_entries, write_entry
-
-    import time
-
     from apps.orchestrator.memory.write_sink import link_within_budget
 
     key, value = content["key"], content["value"]
     if not can_store_green_memory(bot_user):
+        return False
+    if sink is not None and sink.link_timed_out:
+        # The budget is per turn, not per writer: a sibling already spent it.
         return False
     link_started = time.monotonic()
     user_id = ensure_ayla_link(bot_user, trigger="memory_write", timeout_s=link_timeout_s)

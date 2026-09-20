@@ -213,6 +213,8 @@ from apps.orchestrator.said_memory import (
 )
 from apps.orchestrator.memory_announce import (
     PRE_SEND_LINK_BUDGET_S,
+    bridge_after_send,
+    guard_service_line,
     record_turn_facts,
     weave_service_line,
 )
@@ -2505,16 +2507,23 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     # «allow» (a blocked or crisis reply gets no memory line; the safety copy
     # is founder-approved and stays byte-identical) and before persist/send.
     #
-    # Budget: the writers are best-effort, and the only network call in them
-    # (``ensure_ayla_link`` for a person not linked yet) gets ≤ 1 s. Ran out?
-    # The fact is written after the send as before — and the line is NOT
-    # added: it promises what is already done, never what might be.
+    # Budget: the writers are best-effort; the one network call they keep
+    # here (``ensure_ayla_link`` for a person not linked yet) gets ≤ 1 s per
+    # turn (a sibling writer stops once the budget is spent), and the Ayla
+    # declared-prefs mirror (two REST calls, 5 s each) is NOT run here — it
+    # goes after the send (``bridge_after_send``). Budget ran out? The rows
+    # that writer did not write are written after the send as before, and no
+    # line is said about them: a line promises what is already done, never
+    # what might be (rows a faster sibling did write are announced honestly).
     #
     # One service line per turn: the announce takes the slot; the memory
     # question (memory_ask) is asked only when there is nothing to announce,
     # and only on a concierge turn — exactly the branch that wove it before.
+    # The appended line then passes the same outbound guard the reply did
+    # (DRF-1210: the guard sees the FINAL text) — blocked → the line is dropped.
     memory_written: list = []
     memory_link_timed_out = False
+    memory_pre_send_ran = False
     if (
         not was_memory_command
         and post_verdict != "block"
@@ -2524,15 +2533,18 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             "ai_unavailable",
         )
     ):
+        memory_pre_send_ran = True
         sink = record_turn_facts(
             bot_user,
             conversation,
             event.text,
             tool_trace=getattr(turn_reply, "tool_trace", None) if concierge_turn_ran else None,
             link_timeout_s=PRE_SEND_LINK_BUDGET_S,
+            bridge=False,
         )
         memory_written = sink.entries
         memory_link_timed_out = sink.link_timed_out
+        before_line = reply
         reply = weave_service_line(
             conversation,
             bot_user,
@@ -2540,6 +2552,11 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             written=memory_written,
             allow_question=concierge_turn_ran,
             weave_question=maybe_weave_question,
+        )
+        reply = guard_service_line(
+            before_line,
+            reply,
+            lambda tail: guard_outbound(tail, surface="max", bot_user=bot_user, trace_id=trace_id),
         )
 
     # Persist + remember the assistant turn, then send to MAX (with any keyboard).
@@ -2675,17 +2692,18 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     # contains the substring «я веган», so re-running the extractor here would
     # instantly re-create the fact the user just asked to forget — nullifying
     # the 152-ФЗ erasure. A forget/show turn must never write memory.
-    if not was_memory_command and (
-        memory_link_timed_out
-        or post_verdict == "block"
-        or assistant_action_type in ("safety_pre_check", "ai_unavailable")
-    ):
-        record_turn_facts(
-            bot_user,
-            conversation,
-            event.text,
-            tool_trace=getattr(turn_reply, "tool_trace", None) if concierge_turn_ran else None,
-        )
+    if not was_memory_command:
+        if memory_link_timed_out or not memory_pre_send_ran:
+            record_turn_facts(
+                bot_user,
+                conversation,
+                event.text,
+                tool_trace=getattr(turn_reply, "tool_trace", None) if concierge_turn_ran else None,
+            )
+        else:
+            # The pre-send write skipped the Ayla declared-prefs mirror to keep
+            # its budget; the mirror runs here, as it always did — after the send.
+            bridge_after_send(bot_user, event.text)
 
 
 def _remember_time_preference(conversation, bot_user, text: str, reply):

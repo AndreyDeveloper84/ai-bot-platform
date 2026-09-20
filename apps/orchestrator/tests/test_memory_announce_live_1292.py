@@ -295,3 +295,66 @@ class TestAnnounceOnLivePath:
         _turn(sent, uid, "я веган", 1)
 
         assert order[:2] == ["record:1.0", "send"]
+
+    def test_blocked_reply_gets_no_line_but_the_fact_is_kept(self, monkeypatch, sent, fake_redis):
+        """Гард заблокировал ответ → строки нет, но факт человека записан (после отправки)."""
+        from types import SimpleNamespace as _NS
+
+        _model(monkeypatch)
+        bot_user, uid = _person()
+        monkeypatch.setattr(
+            max_handler,
+            "guard_outbound",
+            lambda text, **kw: _NS(
+                blocked=True, text="Тут нужен человек — передаю администратору."
+            ),
+        )
+
+        text = _turn(sent, uid, "я веган", 1)
+
+        assert text == "Тут нужен человек — передаю администратору."
+        assert "Запомнила" not in text
+        assert MemoryEntry.objects.filter(user_id=bot_user.ayla_user_id).count() == 1
+
+    def test_service_line_itself_passes_the_outbound_guard(self, monkeypatch, sent, fake_redis):
+        """DRF-1210: гард видит и дописанную строку; она заблокирована → ответ без неё."""
+        from types import SimpleNamespace as _NS
+
+        _model(monkeypatch)
+        bot_user, uid = _person()
+        real_guard = max_handler.guard_outbound
+        seen: list[str] = []
+
+        def picky_guard(text, **kw):
+            seen.append(text)
+            if text.startswith("Запомнила"):
+                return _NS(blocked=True, text="—")
+            return real_guard(text, **kw)
+
+        monkeypatch.setattr(max_handler, "guard_outbound", picky_guard)
+
+        text = _turn(sent, uid, "я веган", 1)
+
+        assert text == ANSWER
+        assert any(t.startswith("Запомнила") for t in seen)
+        assert MemoryEntry.objects.filter(user_id=bot_user.ayla_user_id).count() == 1
+
+    def test_bridge_to_ayla_runs_after_the_send_not_before(self, monkeypatch, sent, fake_redis):
+        """Зеркало анкеты Ayla (два REST по 5 с) — вне бюджета строки: после отправки."""
+        from apps.orchestrator.memory import personal_context as pc
+
+        _model(monkeypatch)
+        _, uid = _person()
+        order: list[str] = []
+        monkeypatch.setattr(pc, "_bridge", lambda bot_user, candidates: order.append("bridge"))
+        real_send = max_handler.send_message
+
+        def spy_send(**kw):
+            order.append("send")
+            return real_send(**kw)
+
+        monkeypatch.setattr(max_handler, "send_message", spy_send)
+
+        _turn(sent, uid, "я веган", 1)
+
+        assert order == ["send", "bridge"]

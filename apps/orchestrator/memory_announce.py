@@ -146,18 +146,24 @@ def record_turn_facts(
     *,
     tool_trace: Any = None,
     link_timeout_s: float | None = None,
+    bridge: bool = True,
 ) -> WriteSink:
     """Оба писателя зелёной памяти за один вызов; что записали — в ``sink``.
 
     Те же два писателя и тот же порядок, что стояли после отправки (M-B2 +
     бриф «Мозг» п.4); их гейты (согласие, дедуп, forget-all) — внутри них.
+    ``bridge=False`` — для вызова ДО отправки: зеркало в Ayla (два REST по
+    5 с) в бюджет 1 с не входит и уезжает после отправки
+    (:func:`bridge_after_send`).
     """
     from apps.orchestrator.memory.personal_context import record_explicit_green_facts
     from apps.orchestrator.said_memory import record_said_facts
 
     sink = WriteSink()
     try:
-        record_explicit_green_facts(bot_user, text, sink=sink, link_timeout_s=link_timeout_s)
+        record_explicit_green_facts(
+            bot_user, text, sink=sink, link_timeout_s=link_timeout_s, bridge=bridge
+        )
         record_said_facts(
             bot_user,
             conversation,
@@ -169,3 +175,41 @@ def record_turn_facts(
     except Exception:  # noqa: BLE001 — memory must never break the turn
         logger.exception("orchestrator.memory_announce.record_failed")
     return sink
+
+
+def bridge_after_send(bot_user: Any, text: str) -> None:
+    """Зеркало сказанного в анкету Ayla — после отправки, вне бюджета строки."""
+    from apps.orchestrator.memory.personal_context import bridge_explicit_candidates
+
+    try:
+        bridge_explicit_candidates(bot_user, text)
+    except Exception:  # noqa: BLE001 — the mirror owes the turn nothing
+        logger.exception("orchestrator.memory_announce.bridge_failed")
+
+
+def guard_service_line(
+    before: DiscoveryReply,
+    after: DiscoveryReply,
+    guard: Callable[[str], Any],
+) -> DiscoveryReply:
+    """DRF-1210: the guard sees the FINAL reply — including the line added after it.
+
+    The service line is appended after ``guard_outbound`` ran over the reply,
+    so the appended tail alone goes through the same guard here. Blocked →
+    the line is dropped and the reply stays as the guard already approved it;
+    the fact itself stays written (it is the person's), only the sentence
+    about it does not ship.
+    """
+    if after is before or not after.text.startswith(before.text):
+        return after
+    tail = after.text[len(before.text) :].strip()
+    if not tail:
+        return after
+    try:
+        if getattr(guard(tail), "blocked", False):
+            logger.warning("orchestrator.memory_announce.service_line_blocked")
+            return before
+    except Exception:  # noqa: BLE001 — a guard failure must not ship an unchecked line
+        logger.exception("orchestrator.memory_announce.service_line_guard_failed")
+        return before
+    return after

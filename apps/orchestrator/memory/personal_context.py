@@ -48,6 +48,7 @@ def record_explicit_green_facts(
     *,
     sink: WriteSink | None = None,
     link_timeout_s: float | None = None,
+    bridge: bool = True,
 ) -> int:
     """Extract + persist explicit green facts from a user turn. Returns count written.
 
@@ -58,6 +59,10 @@ def record_explicit_green_facts(
     is built from them); ``link_timeout_s`` bounds the Ayla identity call when
     this runs BEFORE the reply is sent. A link that ran out the budget is noted
     on the sink and nothing is written here — the handler retries post-send.
+    ``bridge=False`` skips the Ayla declared-prefs mirror (two REST calls with
+    the client's 5 s timeout each) — the pre-send caller runs it after the
+    send through :func:`bridge_explicit_candidates`; the mirror is idempotent
+    LWW and owes the reply nothing.
 
     DRF-1035 — gate order is deliberate: consent, then extraction, then identity.
     Persisting memory needs a permanent Ayla subject, so this is an
@@ -68,6 +73,10 @@ def record_explicit_green_facts(
     """
 
     if not can_store_green_memory(bot_user):
+        return 0
+    if sink is not None and sink.link_timed_out:
+        # A sibling writer already ran the budget out this turn — one more
+        # 1 s wait would compound it; the post-send retry covers this writer too.
         return 0
 
     try:
@@ -162,15 +171,8 @@ def record_explicit_green_facts(
         # Ayla declared prefs. ALL extracted candidates are offered (not only
         # newly written rows) — PATCH is idempotent LWW, so a repeated
         # statement heals a transient upstream failure. Best-effort inside.
-        try:
-            from apps.orchestrator.memory.ayla_bridge import bridge_candidates_to_ayla
-
-            bridge_candidates_to_ayla(bot_user, candidates)
-        except Exception:  # noqa: BLE001 — the bridge must never break the turn
-            logger.exception(
-                "orchestrator.memory.bridge_failed bot_user=%s",
-                getattr(bot_user, "id", "?"),
-            )
+        if bridge:
+            _bridge(bot_user, candidates)
         return written
     except Exception:  # noqa: BLE001 — memory write must never break the turn
         logger.exception(
@@ -178,3 +180,34 @@ def record_explicit_green_facts(
             getattr(bot_user, "id", "?"),
         )
         return 0
+
+
+def _bridge(bot_user, candidates) -> None:
+    try:
+        from apps.orchestrator.memory.ayla_bridge import bridge_candidates_to_ayla
+
+        bridge_candidates_to_ayla(bot_user, candidates)
+    except Exception:  # noqa: BLE001 — the bridge must never break the turn
+        logger.exception(
+            "orchestrator.memory.bridge_failed bot_user=%s",
+            getattr(bot_user, "id", "?"),
+        )
+
+
+def bridge_explicit_candidates(bot_user, text: str) -> None:
+    """The Ayla mirror for this turn's stated facts, run AFTER the send (DRF-1292).
+
+    Same extraction and same bridge as :func:`record_explicit_green_facts`
+    with ``bridge=True`` — only the moment differs: the pre-send write must
+    fit a 1 s budget and the mirror's two REST calls (5 s each) do not. Gate
+    order as in the writer: consent first, nothing extracted → nothing sent.
+    """
+    if not can_store_green_memory(bot_user):
+        return
+    try:
+        candidates = extract_user_facts(text).candidates
+    except Exception:  # noqa: BLE001 — extraction must never break the turn
+        logger.exception("orchestrator.memory.bridge_extract_failed")
+        return
+    if candidates:
+        _bridge(bot_user, candidates)

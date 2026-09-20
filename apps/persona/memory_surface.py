@@ -236,19 +236,24 @@ def render_personal_context(view: PersonalContextView) -> str | None:
         phrase = _render_fact(fact)
         if not phrase:
             continue
+        # Фразы банка — во 2-м лице (DRF-1292); «ты …» ставится здесь, чтобы
+        # summary (свободный текст) остался как есть.
         if fact.source == MemoryEntry.SOURCE_EXPLICIT:
-            parts.append(phrase)
+            parts.append(f"ты {phrase}")
         else:
-            derived.append(phrase)
+            derived.append(f"возможно, ты {phrase}")
 
     if not parts and not derived:
         return None
 
     if parts:
+        # Фразы — во 2-м лице, как сказать самому клиенту (DRF-1292): рамка
+        # называет это прямо, чтобы «ты …» модель читала как обращение к нему,
+        # а не к себе.
         block = (
-            "Что ты уже знаешь об этом клиенте (используй естественно и только когда "
-            "уместно — например «помню, что ты…»; НЕ перечисляй списком и НЕ "
-            f"придумывай ничего сверх этого): {'; '.join(parts)}."
+            "Что ты уже знаешь об этом клиенте — в форме обращения к нему, повторяй "
+            "естественно и только когда уместно, например «помню, что ты…»; НЕ "
+            f"перечисляй списком и НЕ придумывай ничего сверх этого: {'; '.join(parts)}."
         )
     else:
         block = ""

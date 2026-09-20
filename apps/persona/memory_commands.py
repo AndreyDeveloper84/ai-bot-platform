@@ -561,7 +561,8 @@ def handle_memory_command(
             soft_delete_green_entries(user_id, [e.id for e in fact_matched])
             _bridge_clear(bot_user, keys)
             label = describe_green_content(fact_matched[0].content) or "это"
-            return MemoryCommandResult(text=f"Готово — забыла: {label}.")
+            # Фраза факта — во 2-м лице (DRF-1292), поэтому «забыла, что ты …».
+            return MemoryCommandResult(text=f"Готово — забыла, что ты {label}.")
 
         matched_domains: set[str] = set()
         for e in entries:

@@ -229,7 +229,9 @@ def resolve_identity(external_user_id: str, *, timeout_s: float | None = None) -
     )
 
     try:
-        with httpx.Client(timeout=min(timeout_s, TIMEOUT_S) if timeout_s else TIMEOUT_S) as http:
+        with httpx.Client(
+            timeout=min(timeout_s, TIMEOUT_S) if timeout_s is not None else TIMEOUT_S
+        ) as http:
             resp = http.get(url, headers=headers)
     except (httpx.TimeoutException, httpx.NetworkError) as exc:
         _circuit.record_failure(now=time.monotonic())

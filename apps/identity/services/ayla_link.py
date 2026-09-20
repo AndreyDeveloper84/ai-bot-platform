@@ -323,7 +323,13 @@ def ensure_ayla_link(
 
     started = time.monotonic()
     try:
-        identity = resolve_identity(external_user_id, timeout_s=timeout_s)
+        # Keyword only when set: doubles of ``resolve_identity`` in tests (and
+        # any future one) keep the one-argument shape.
+        identity = (
+            resolve_identity(external_user_id, timeout_s=timeout_s)
+            if timeout_s is not None
+            else resolve_identity(external_user_id)
+        )
     except IdentityResolveError as exc:
         # Degrade, never raise. `str(exc)` is a fixed reason string built
         # by the client (`network: ReadTimeout`, `server: HTTP 502`, …) —

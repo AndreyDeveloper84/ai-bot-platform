@@ -25,9 +25,11 @@ from django.utils import timezone
 
 from apps.identity.models import MemoryEntry, UserPersonalContext
 from apps.orchestrator.discovery import DiscoveryReply
+from apps.orchestrator.memory.write_sink import WriteSink, link_within_budget
 from apps.orchestrator.memory_announce import (
     ANNOUNCE_TAIL,
     announce_line,
+    guard_service_line,
     weave_service_line,
 )
 
@@ -188,3 +190,89 @@ class TestOneServiceLinePerTurn:
         )
         assert out.action_data == {"k": 1}
         assert out.persisted is True
+
+
+class TestSaidFactAnnounce:
+    def test_city_from_said_memory_gets_its_domain_hint(self):
+        """said_memory пишет display во 2-м лице; подсказка — «забудь про город»."""
+        upc = _upc()
+        entry = _entry(
+            upc,
+            kind="preference",
+            content={
+                "key": "city",
+                "value": "Пенза",
+                "origin": "conversation",
+                "display": "ищешь мастеров в городе Пенза",
+            },
+        )
+        line = announce_line([entry])
+        assert (
+            line
+            == "Запомнила: ты ищешь мастеров в городе Пенза. Скажи «забудь про город», если не надо."
+        )
+
+
+class TestLinkBudget:
+    def test_none_after_the_budget_is_a_timeout(self):
+        sink = WriteSink()
+        import time
+
+        link_within_budget(sink, time.monotonic() - 1.0, 1.0, None)
+        assert sink.link_timed_out is True
+
+    def test_none_well_before_the_budget_is_ayla_down_not_a_timeout(self):
+        sink = WriteSink()
+        import time
+
+        link_within_budget(sink, time.monotonic() - 0.1, 1.0, None)
+        assert sink.link_timed_out is False
+
+    def test_resolved_or_no_budget_never_marks(self):
+        import time
+
+        sink = WriteSink()
+        link_within_budget(sink, time.monotonic() - 5.0, 1.0, uuid.uuid4())
+        link_within_budget(sink, time.monotonic() - 5.0, None, None)
+        link_within_budget(None, time.monotonic() - 5.0, 1.0, None)
+        assert sink.link_timed_out is False
+
+
+class TestGuardedServiceLine:
+    def _pair(self):
+        before = DiscoveryReply(text="Ответ.", action_data={"k": 1}, persisted=True)
+        after = DiscoveryReply(
+            text="Ответ.\n\nЗапомнила: ты ешь халяль.", action_data={"k": 1}, persisted=True
+        )
+        return before, after
+
+    def test_allowed_tail_ships(self):
+        before, after = self._pair()
+        seen: list[str] = []
+
+        def guard(tail):
+            seen.append(tail)
+            return SimpleNamespace(blocked=False)
+
+        assert guard_service_line(before, after, guard) is after
+        # Гард видит ТОЛЬКО дописанное — ответ он уже проверял.
+        assert seen == ["Запомнила: ты ешь халяль."]
+
+    def test_blocked_tail_is_dropped_and_the_reply_stays_as_approved(self):
+        before, after = self._pair()
+        out = guard_service_line(before, after, lambda tail: SimpleNamespace(blocked=True))
+        assert out is before
+
+    def test_guard_failure_drops_the_line_not_the_reply(self):
+        before, after = self._pair()
+
+        def boom(tail):
+            raise RuntimeError("guard down")
+
+        assert guard_service_line(before, after, boom) is before
+
+    def test_unchanged_reply_is_not_guarded_again(self):
+        before, _ = self._pair()
+        guard = MagicMock()
+        assert guard_service_line(before, before, guard) is before
+        guard.assert_not_called()
