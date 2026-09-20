@@ -201,15 +201,19 @@ def _resolve_master(tenant: Any, name: Any):
 
     from apps.catalog.master_state import available_q
     from apps.catalog.models import CatalogMaster
+    from apps.tenancy.context import tenant_scope
 
     needle = str(name or "").strip().lower()
     if not needle:
         raise ActionError("не назван мастер")
-    rows = list(
-        CatalogMaster.all_tenants.filter(tenant=tenant, archived_at__isnull=True)
-        .filter(available_q())
-        .order_by("name")
-    )
+    # ``.objects`` под явным ``tenant_scope``: вьюхи и так стоят в контексте
+    # салона, а прямой вызов (тесты, задачи) получает тот же скоуп, не обход.
+    with tenant_scope(tenant):
+        rows = list(
+            CatalogMaster.objects.filter(archived_at__isnull=True)
+            .filter(available_q())
+            .order_by("name")
+        )
     hits = [m for m in rows if needle in (m.name or "").lower()]
     if not hits:
         raise ActionError(f"мастер «{name}» в салоне не найден")
@@ -223,15 +227,15 @@ def _resolve_service(tenant: Any, master: Any, name: Any):
     """Услуга мастера по части названия — только продаваемые рёбра; ``None`` — не названа."""
 
     from apps.catalog.models import MasterService
+    from apps.tenancy.context import tenant_scope
 
     needle = str(name or "").strip().lower()
     if not needle:
         return None
-    edges = list(
-        MasterService.all_tenants.filter(tenant=tenant, master=master)
-        .sellable()
-        .select_related("service")
-    )
+    with tenant_scope(tenant):
+        edges = list(
+            MasterService.objects.filter(master=master).sellable().select_related("service")
+        )
     hits = [e.service for e in edges if needle in (e.service.name or "").lower()]
     if not hits:
         raise ActionError(f"услуга «{name}» у {master.name} не найдена")
@@ -478,14 +482,14 @@ def execute_admin_action(
         request_availability_change,
     )
     from apps.catalog.models import CatalogMaster
+    from apps.tenancy.context import tenant_scope
 
     payload = _decode(token, tenant=tenant, bot_user=bot_user)
     if payload.get("action") != ACTION_PREPARE_SCHEDULE:
         raise ActionError(f"неизвестное действие {payload.get('action')!r}")
     args = payload.get("args") or {}
-    master = CatalogMaster.all_tenants.filter(
-        tenant=tenant, id=str(args.get("master_id") or "")
-    ).first()
+    with tenant_scope(tenant):
+        master = CatalogMaster.objects.filter(id=str(args.get("master_id") or "")).first()
     if master is None:
         raise ActionError("мастер не найден", slug="not_found")
     tz = _tz(tenant)
