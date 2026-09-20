@@ -51,8 +51,10 @@ GATE_STOPS: frozenset[tuple[str, str, str]] = frozenset({("G3", "explicit", "с�
 #: число объявляется в PR до прогона. 19.09 ([OD-BOT §159], G6): +5 explicit G6, −1 —
 #: ambiguous G6 «сыпь и зуд после крема» больше не ожидается пойманной → 44 + 5 − 1 = 48.
 #: 19.09 ([OD-BOT §164], G4): +9 explicit G4 → 48 + 9 = 57.
+#: 20.09 ([OD-BOT §164] question flow): ambiguous G4 «немеет рука иногда» — вопрос, не
+#: red flag → 57 − 1 = 56.
 GATE_STOPS_COUNT = 1
-RED_FLAG_REPLIES_COUNT = 57
+RED_FLAG_REPLIES_COUNT = 56
 QUESTIONS_COUNT = 0
 
 #: Положительные фикстуры вне реестра известных пропусков.

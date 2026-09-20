@@ -47,6 +47,12 @@ from apps.skills.base import SkillContext, SkillResult
 from apps.orchestrator.safety.medical_emergency import MEDICAL_EMERGENCY_TEXT_V2
 from apps.skills.health_screening.classifier import PainSignal, classify, detect_g4, detect_g6
 from apps.orchestrator.open_question import open_question
+from apps.skills.health_screening.g4_question import (
+    G4_ROUTING_QUESTION,
+    ask_g4,
+    g4_pending,
+    route_g4_reply,
+)
 from apps.skills.health_screening.memo import (
     remember_screening_asked,
     screening_asked_recently,
@@ -99,15 +105,50 @@ class HealthScreeningSkill:
         (``dto.content``) — ход возвращается модели, как и просил тикет.
         """
 
+        # [OD-BOT §164] — an open G4 question binds the next reply to this
+        # skill BEFORE any intent / booking / recommendation skill (registry
+        # order: health_screening precedes booking). Read first: the reply may
+        # be «нет» or «запишите меня» — no signal of its own.
+        if g4_pending(context.conversation):
+            return True
         signal = classify(context.message_text)
         if signal == PainSignal.NONE:
             return False
-        if signal == PainSignal.RED_FLAG:
+        if signal in (PainSignal.RED_FLAG, PainSignal.CLARIFY):
             return True
         return not screening_asked_recently(context.conversation)
 
     def handle(self, context: SkillContext) -> SkillResult:
+        # [OD-BOT §164] — the reply to the open G4 question, routed
+        # deterministically by :func:`route_g4_reply`; the same function every
+        # surface calls, so MAX / Telegram / the global concierge / the Mini
+        # App cannot disagree about what a reply means.
+        if g4_pending(context.conversation):
+            outcome = route_g4_reply(context.conversation, context.message_text)
+            if outcome.stop:
+                meta_stop: dict[str, object] = {"reply_kind": "health_red_flag"}
+                if outcome.group is not None:
+                    meta_stop["s1_group"] = outcome.group
+                return SkillResult(reply_text=RED_FLAG_REPLY, meta=meta_stop)
+            return SkillResult(
+                reply_text=G4_ROUTING_QUESTION,
+                meta={"reply_kind": "health_restriction_persists", "s1_group": "G4"},
+            )
+
         signal = classify(context.message_text)
+
+        if signal == PainSignal.CLARIFY:
+            # Ambiguous G4 — exactly one registered question, persisted as a
+            # binding open question; the restriction is that open question.
+            ask_g4(context.conversation)
+            logger.info(
+                "health_screening.g4.asked conversation=%s",
+                context.conversation.id if context.conversation else None,
+            )
+            return SkillResult(
+                reply_text=G4_ROUTING_QUESTION,
+                meta={"reply_kind": "health_clarify_g4", "s1_group": "G4"},
+            )
 
         if signal == PainSignal.RED_FLAG:
             # Attribution only — the reply is the same canonical text for every

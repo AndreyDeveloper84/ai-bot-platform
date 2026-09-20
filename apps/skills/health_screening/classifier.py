@@ -74,6 +74,10 @@ class PainSignal(str, Enum):
     NONE = "none"
     SOFT = "soft"
     RED_FLAG = "red_flag"
+    #: Ambiguous S1 — [OD-BOT §164]: exactly one registered routing question,
+    #: the restriction stays until it is resolved. Today only the G4 ambiguity
+    #: (numbness / weakness without sudden onset and side) lands here.
+    CLARIFY = "clarify"
 
 
 # ─── pain stems (broad — a miss is the expensive direction) ───────────────
@@ -305,9 +309,12 @@ _RED_FLAG_PATTERNS: tuple[re.Pattern[str], ...] = (
     # NEITHER this list NOR any soft-pain stem and classified as NONE: a
     # red flag that never fired. Both verbs are spelled out now, in
     # EXACT forms (never «неме\w*») so «немецкий» cannot qualify.
-    re.compile(r"\bонемен", re.IGNORECASE),
-    re.compile(r"\b(?:о)?неме(?:ет|ют|л|ла|ло|ли|ть|вш\w*)\b", re.IGNORECASE),
-    re.compile(r"потерял[аио]? чувствит", re.IGNORECASE),
+    # The three numbness forms («онемен…», «немеет / онемела», «потерял
+    # чувствительность») are no longer here: without a sudden marker and a
+    # side they are the AMBIGUOUS G4 of [OD-BOT §164] — one routing question,
+    # not STOP — and live in :data:`_G4_AMBIGUOUS_PATTERNS` (``CLARIFY``).
+    # With a sudden marker and a side they are the explicit G4 of
+    # :func:`detect_g4`, read before the ambiguity.
     re.compile(r"отнима(?:ет|ется|ются)", re.IGNORECASE),
     re.compile(r"отдаёт в (?:руку|ногу|пальц)", re.IGNORECASE),
     re.compile(r"отдает в (?:руку|ногу|пальц)", re.IGNORECASE),
@@ -813,6 +820,30 @@ _RED_FLAG_PATTERNS = (
 )
 
 
+#: [OD-BOT §164] ambiguous G4 — the DRF-973 numbness forms, verbatim, moved out of
+#: the flat red-flag tuple. Negation is NOT modelled here (a named gap, strict
+#: xfail in ``tests/test_g4_detector.py``): «онемения нет» asks the question too.
+_G4_AMBIGUOUS_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bонемен", re.IGNORECASE),
+    re.compile(r"\b(?:о)?неме(?:ет|ют|л|ла|ло|ли|ть|вш\w*)\b", re.IGNORECASE),
+    re.compile(r"потерял[аио]? чувствит", re.IGNORECASE),
+)
+
+
+def detect_g4_ambiguous(text: str) -> bool:
+    """Numbness / weakness named without the §164 discriminators — ask, don't stop.
+
+    True only when no explicit sign fires: an explicit / recent-resolved G4 or
+    G6 in the same message is STOP, never a question.
+    """
+    if not isinstance(text, str) or not text.strip():
+        return False
+    if detect_g6(text) or detect_g4(text):
+        return False
+    lower = _mask_not_pain(text.strip().lower())
+    return any(pattern.search(lower) for pattern in _G4_AMBIGUOUS_PATTERNS)
+
+
 def classify(text: str) -> PainSignal:
     """Return the strongest pain signal in ``text``.
 
@@ -849,6 +880,11 @@ def classify(text: str) -> PainSignal:
         return PainSignal.RED_FLAG
     if detect_g4(stripped):
         return PainSignal.RED_FLAG
+    # [OD-BOT §164] — ambiguous G4 is a question, not a stop; read after every
+    # explicit rule so a message with both an ambiguous and an explicit sign is
+    # still STOP.
+    if detect_g4_ambiguous(stripped):
+        return PainSignal.CLARIFY
 
     for pattern in _PAIN_STEM_PATTERNS:
         if pattern.search(lower):

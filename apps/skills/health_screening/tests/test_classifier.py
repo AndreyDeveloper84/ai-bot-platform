@@ -29,12 +29,31 @@ class TestSoftPain:
         assert classify(text) == PainSignal.SOFT
 
 
-class TestRedFlags:
+class TestAmbiguousG4:
+    """[OD-BOT §164] — numbness / loss of sensation without a sudden marker and a
+    side is the AMBIGUOUS G4: one routing question (``CLARIFY``), never STOP and
+    never silence. These used to be DRF-973 red flags; the signal is not lost,
+    it is routed."""
+
     @pytest.mark.parametrize(
         "text",
         [
             "Потерял чувствительность в ноге",
             "Онемение в руке",
+            "болит шея, онемение в руке",
+            "напряжение в шее и немеет рука",
+        ],
+    )
+    def test_ambiguous_g4_is_clarify(self, text: str) -> None:
+        assert classify(text) == PainSignal.CLARIFY
+
+
+class TestRedFlags:
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "Внезапно потерял чувствительность в правой ноге",
+            "Внезапно онемела правая рука",
             "Болит шея, отдаёт в руку",
             "Болит спина, отдает в ногу",
             "У меня температура 38",
@@ -55,8 +74,12 @@ class TestRedFlags:
 class TestRedFlagShadowsSoft:
     """Red-flag pattern wins when it co-occurs with a soft pain word."""
 
-    def test_pain_plus_numbness_is_red(self) -> None:
-        assert classify("болит шея, онемение в руке") == PainSignal.RED_FLAG
+    def test_pain_plus_numbness_is_the_g4_question_not_soft(self) -> None:
+        """[OD-BOT §164]: the ambiguous S1 shadows the soft-pain path too."""
+        assert classify("болит шея, онемение в руке") == PainSignal.CLARIFY
+
+    def test_pain_plus_sudden_one_sided_numbness_is_red(self) -> None:
+        assert classify("болит шея, внезапно онемела правая рука") == PainSignal.RED_FLAG
 
     def test_pain_plus_radiation_is_red(self) -> None:
         assert classify("Тянет в пояснице, отдаёт в ногу") == PainSignal.RED_FLAG
@@ -131,8 +154,9 @@ class TestTensionIsANeedNotPain:
     def test_tension_with_pain_still_asks(self) -> None:
         assert classify("зажимы в шее, болит") == PainSignal.SOFT
 
-    def test_tension_with_numbness_is_still_a_red_flag(self) -> None:
-        assert classify("напряжение в шее и немеет рука") == PainSignal.RED_FLAG
+    def test_tension_with_numbness_is_still_an_s1_signal(self) -> None:
+        """Not NONE: the ambiguous G4 question ([OD-BOT §164]), not the need path."""
+        assert classify("напряжение в шее и немеет рука") == PainSignal.CLARIFY
 
 
 class TestTypeTolerance:
@@ -276,7 +300,11 @@ PAIN_PHRASES: tuple[str, ...] = (
     "шею тянет на сквозняке",
 )
 
-RED_FLAG_PHRASES: tuple[str, ...] = (
+#: [OD-BOT §164] — the DRF-973 numbness phrases, verbatim. They are no longer
+#: red flags: without a sudden marker and a side they are the ambiguous G4 and
+#: get the one routing question (``CLARIFY``). The DRF-973 guard survives in
+#: :class:`TestDrf973PainSurvives` as «never NONE».
+AMBIGUOUS_G4_PHRASES: tuple[str, ...] = (
     # DRF-973 — the two that matched NOTHING before the patch.
     "онемела рука",
     "немеет рука",
@@ -285,6 +313,9 @@ RED_FLAG_PHRASES: tuple[str, ...] = (
     # the ones that already worked
     "онемение в ноге",
     "потеряла чувствительность",
+)
+
+RED_FLAG_PHRASES: tuple[str, ...] = (
     "отнимается нога",
     "отдаёт в руку",
     "температура 38.5",
@@ -319,6 +350,13 @@ class TestDrf973PainSurvives:
     @pytest.mark.parametrize("text", RED_FLAG_PHRASES)
     def test_red_flags_still_redirect_to_a_doctor(self, text: str) -> None:
         assert classify(text) == PainSignal.RED_FLAG
+
+    @pytest.mark.parametrize("text", AMBIGUOUS_G4_PHRASES)
+    def test_numbness_still_reaches_the_screening_as_the_g4_question(self, text: str) -> None:
+        """The DRF-973 half that must stay honest: the fix routes the signal to
+        the [OD-BOT §164] question — it never loses it (NONE) and never asks the
+        pain questions (SOFT)."""
+        assert classify(text) == PainSignal.CLARIFY
 
 
 class TestDrf973MaskingIsPhraseScoped:

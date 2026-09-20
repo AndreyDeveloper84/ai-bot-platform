@@ -1,18 +1,23 @@
 name: health_numbness_red_flag
 description: |
-  Numbness — red-flag → medical emergency text v2 ([OD-BOT §163]):
-  emergency numbers, no procedure, no booking.
+  Numbness without a sudden marker and a side — the AMBIGUOUS G4 of
+  [OD-BOT §164]: exactly one routing question (`health_screening.g4`), not
+  the emergency STOP and not the pain questions. The emergency text v2 must
+  NOT appear on this turn; a positive answer on the next turn gets it.
 input:
   channel: max
   text: Онемение в ноге
 must_pass:
   - response_contains_all:
-      - "103"
-      - "112"
+      - "внезапно"
+      - "с одной стороны"
+      - "перекос лица"
 forbidden:
   - response_contains_any:
+      - "103"
+      - "112"
       - сначала к врачу
-      - даст добро
+      - "Где именно болит"
 voice_check:
   max_length: 400
   caps_lock: 0.5

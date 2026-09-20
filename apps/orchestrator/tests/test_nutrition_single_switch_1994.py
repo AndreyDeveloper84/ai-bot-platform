@@ -393,7 +393,8 @@ class TestCoarseGuardStaysOnWhenTheNutritionContourIsOff:
         ``NUTRITION_ONLY_TOOL_NAMES``, и этот узел стережёт, чтобы кто-нибудь
         «не довёл» выключатель за компанию."""
         skill = HealthScreeningSkill()
-        context = _ctx("онемела рука")
+        # explicit G4 ([OD-BOT §164]); bare «онемела рука» is the routing question now.
+        context = _ctx("внезапно онемела правая рука")
 
         assert skill.matches(context) is True
         result = skill.handle(context)
@@ -409,14 +410,17 @@ class TestCoarseGuardStaysOnWhenTheNutritionContourIsOff:
                 bot_user=Mock(),
                 conversation=SimpleNamespace(id=1, skill_state={}),
                 trace_id="t-1994",
-                message_text="онемела рука",
+                message_text="внезапно онемела правая рука",
             )
         assert result is not None
         assert result.reply_text == RED_FLAG_REPLY
 
     def test_health_screening_is_still_offered_to_the_model_on_a_red_flag(self, nutrition_off):
         offered = {
-            spec["name"] for spec in _tools_offered("онемела рука", SimpleNamespace(skill_state={}))
+            spec["name"]
+            for spec in _tools_offered(
+                "внезапно онемела правая рука", SimpleNamespace(skill_state={})
+            )
         }
         assert "health_screening" in offered
         assert not (offered & NUTRITION_ONLY_TOOL_NAMES)

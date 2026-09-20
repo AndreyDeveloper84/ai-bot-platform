@@ -50,7 +50,8 @@ class TestHandle:
         assert "запис" not in result.reply_text.lower()
 
     def test_red_flag_redirects_to_doctor(self) -> None:
-        result = HealthScreeningSkill().handle(_context("Онемение в ноге"))
+        # explicit G4 ([OD-BOT §164]); bare «онемение в ноге» is the question now.
+        result = HealthScreeningSkill().handle(_context("Внезапно онемела правая нога"))
         assert result.reply_text == RED_FLAG_REPLY
         # [OD-BOT §163]: the reply points to emergency help, not «к врачу».
         assert "103" in result.reply_text and "112" in result.reply_text

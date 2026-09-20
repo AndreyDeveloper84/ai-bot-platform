@@ -21,7 +21,7 @@ Read at source (`apps/skills/health_screening/skill.py:100-105`):
     signal = classify(context.message_text)
     if signal == PainSignal.NONE:
         return False
-    if signal == PainSignal.RED_FLAG:
+    if signal in (PainSignal.RED_FLAG, PainSignal.CLARIFY):
         return True
     return not screening_asked_recently(context.conversation)
 
