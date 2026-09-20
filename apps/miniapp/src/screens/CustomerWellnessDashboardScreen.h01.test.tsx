@@ -197,6 +197,20 @@ describe("H01 · цель без плана", () => {
     expect(screen.getByTestId("location")).toHaveTextContent("/customer/plan");
   });
 
+  it("DRF-2173: срок цели «До 1 ноября 2026» под названием; без срока строки нет", async () => {
+    serve({ today: { ...TODAY_WITH_GOAL, active_goals: [{ title: "Подтянуть фигуру", week_num: 2, target_date: "2026-11-01", target_date_passed: false }] } });
+    renderHome();
+    const card = (await screen.findByText("Активная цель")).closest("section") as HTMLElement;
+    expect(within(card).getByText("До 1 ноября 2026")).toBeInTheDocument();
+  });
+
+  it("DRF-2173: без срока — строки «До …» нет", async () => {
+    serve();
+    renderHome();
+    const card = (await screen.findByText("Активная цель")).closest("section") as HTMLElement;
+    expect(within(card).queryByText(/^До \d/)).toBeNull();
+  });
+
   it("«Посмотреть детали цели» — вторичное действие, ведёт на экран цели", async () => {
     serve();
     renderHome();

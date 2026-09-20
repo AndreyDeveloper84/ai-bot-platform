@@ -5511,6 +5511,10 @@ def customer_goal_select(request: HttpRequest) -> HttpResponse:
                 "error": "ayla_bad_request",
                 "detail": f"ayla returned HTTP {exc.status_code}",
                 "ayla_error": exc.body,
+                # DRF-2173 — то же тело под `details`: `ApiError` экрана читает
+                # только `details`, а отказ шага срока каталог говорит словами
+                # («Этот срок уже прошёл…») — их и должен увидеть человек.
+                "details": {"ayla_error": exc.body},
             },
             status=400,
         )
