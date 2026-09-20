@@ -67,6 +67,8 @@ export const NOT_LINKED_MESSAGE =
 type Phase =
   | { kind: "loading" }
   | { kind: "error"; err: unknown }
+  /** Профиль ещё не связан с каталогом — этап жизни, не отказ прав (DRF-2194). */
+  | { kind: "not_linked" }
   | { kind: "ready"; timezone: string | null };
 
 export type WeekDraft = WorkingHoursDay[];
@@ -149,6 +151,12 @@ export function MasterWorkingHoursScreen() {
       setWeek(weekFrom(data.schedule));
       setPhase({ kind: "ready", timezone: data.timezone });
     } catch (err) {
+      // 403 not_linked на загрузке — свой текст экрана, как на save и как у
+      // Place/Directions; иначе общий SystemState прочитал бы его как «Недостаточно прав».
+      if (err instanceof ApiError && err.status === 403) {
+        setPhase({ kind: "not_linked" });
+        return;
+      }
       setPhase({ kind: "error", err });
     }
   }, []);
@@ -207,6 +215,15 @@ export function MasterWorkingHoursScreen() {
     return (
       <main className="screen working-hours">
         <SystemState kind="loading" lines={2} />
+      </main>
+    );
+  }
+  if (phase.kind === "not_linked") {
+    return (
+      <main className="screen working-hours">
+        <p className="callout" role="status">
+          {NOT_LINKED_MESSAGE}
+        </p>
       </main>
     );
   }

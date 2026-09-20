@@ -237,6 +237,14 @@ describe("системные состояния через SystemState (DRF-2194
     expect(screen.getByRole("status", { busy: true })).toBeInTheDocument();
   });
 
+  it("403 not_linked на загрузке — свой текст экрана, не «Недостаточно прав»", async () => {
+    mockedGet.mockRejectedValueOnce(new ApiError(403, "not_linked", "…"));
+    renderScreen();
+    // Скелет тоже role=status (busy) — ждём текст, а не роль.
+    expect(await screen.findByText(NOT_LINKED_MESSAGE)).toBeInTheDocument();
+    expect(screen.queryByText(/Недостаточно прав/)).toBeNull();
+  });
+
   it("ошибка — «Не удалось загрузить рабочие часы» + «Попробовать снова»", async () => {
     mockedGet.mockRejectedValueOnce(new Error("boom"));
     renderScreen();

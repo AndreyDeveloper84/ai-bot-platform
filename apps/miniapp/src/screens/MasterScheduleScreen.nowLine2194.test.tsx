@@ -120,7 +120,14 @@ describe("линия «сейчас» на дне (DRF-1183, DRF-2194)", () => {
   it("линия не тикает: экран не заводит setInterval (по исходнику)", () => {
     const src = Object.values(SCHEDULE_SOURCE)[0] ?? "";
     expect(src.length).toBeGreaterThan(0);
-    expect(src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "")).not.toContain("setInterval");
+    // Как в systemStateVocabulary: сначала глушим «/*» в строках (accept="image/*"),
+    // потом режем комментарии — иначе строка могла бы скрыть настоящий таймер.
+    const masked = src.replace(/"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'/g, (m) =>
+      m.replace(/\/\*/g, "/ *"),
+    );
+    const code = masked.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "");
+    expect(code).not.toContain("setInterval");
+    expect(code).not.toContain("requestAnimationFrame");
   });
 
   it("сегодня 08:00, до всех записей — линия первой; 20:00, после всех — последней", async () => {
