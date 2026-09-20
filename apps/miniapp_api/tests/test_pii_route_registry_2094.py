@@ -433,6 +433,7 @@ CUSTOMER_ROUTES: dict[str, Entry] = {
         "water_glasses_eaten",
         "water_glasses_target",
         "active_goals",
+        "active_goals.target_date",
         "coach_observation",
         via=V + "customer_wellness_today",
         note=(
@@ -440,7 +441,8 @@ CUSTOMER_ROUTES: dict[str, Entry] = {
             "display_name + consent_required (+ goals) and no diary key is present at all; "
             "with NUTRITION_ENABLED=false (DRF-2071) the body is display_name + "
             "nutrition_disabled (+ goals) in the same shape, checked before consent, and no "
-            "diary or water key is read or sent"
+            "diary or water key is read or sent; active_goals.target_date (DRF-2173) is the "
+            "deadline the caller named for their own goal, mirrored from the catalog document"
         ),
     ),
     "customer_wellness_water": own(
