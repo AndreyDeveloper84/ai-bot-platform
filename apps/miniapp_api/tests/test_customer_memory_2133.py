@@ -170,6 +170,9 @@ class TestGet:
             upc,
             source=MemoryEntry.SOURCE_INFERRED,
             provenance=None,
+            # CHECK 1 (0007): inferred rows carry last_inferred_at — Postgres
+            # enforces it, SQLite does not; the fixture must satisfy both.
+            last_inferred_at=timezone.now(),
             content={"key": "preferred_time_slots", "value": "evening"},
         )
 
