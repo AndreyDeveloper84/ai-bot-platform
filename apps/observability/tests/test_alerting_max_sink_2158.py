@@ -214,6 +214,7 @@ class TestMaxText:
         page("critical", "LLM недоступна", body, dedup_key="m")
 
         text = max_sent.texts[0]
+        assert " · Причина: сеть" in text
         assert "\n" not in text
         assert text == (
             "⚠️ [CRITICAL] LLM недоступна — 🔴 LLM недоступна · "
