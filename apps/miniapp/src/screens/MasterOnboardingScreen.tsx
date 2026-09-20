@@ -732,7 +732,7 @@ function NetworkErrorScreen({
   // владельца). Заголовки «Нет связи» / «Сервис временно недоступен» сняты —
   // второй словарь состояний.
   return (
-    <ScreenLayout back={INVITE_ERROR_BACK}>
+    <ScreenLayout back={INVITE_ERROR_BACK} title="Приглашение">
       <SystemState kind="load_error" what="invite" err={err} onRetry={onRetry} />
     </ScreenLayout>
   );

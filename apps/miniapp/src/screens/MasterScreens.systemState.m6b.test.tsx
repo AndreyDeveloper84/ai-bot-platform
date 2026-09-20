@@ -56,7 +56,8 @@ function renderAt(path: string, element: React.ReactElement, routePath = path) {
 }
 
 beforeEach(() => {
-  vi.clearAllMocks();
+  // resetAllMocks: «вечная» загрузка из теста скелета не должна пережить свой тест.
+  vi.resetAllMocks();
 });
 
 describe("«Клиенты» — SystemState", () => {

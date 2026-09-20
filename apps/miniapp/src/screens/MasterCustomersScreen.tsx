@@ -182,7 +182,7 @@ export function MasterCustomersScreen() {
     return { active: a, atRisk: r };
   }, [customers]);
 
-  if (error) {
+  if (error !== null) {
     return <ErrorBanner err={error} onRetry={() => setReloadKey((k) => k + 1)} />;
   }
   if (customers === null) return <Skeleton />;
