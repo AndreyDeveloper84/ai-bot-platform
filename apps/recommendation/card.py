@@ -199,8 +199,13 @@ def grounded_reasons(goal: dict[str, Any]) -> tuple[tuple[str, ...], dict[str, A
             continue
         step = str(answer.get("step") or "")
         spoken = _said_in_own_words(answer)
-        if spoken and QUOTE_THE_PERSON:
-            reasons.append(WHY_STEP_QUOTED.format(quote=spoken))
+        if spoken:
+            # Набранный текст — либо цитата, либо ничего: формы пересказа
+            # под произвольные слова у нас нет, а «Ты выбрала: болит спина»
+            # врёт о способе — человек это написал, а не выбрал. Факт при
+            # этом остаётся фактом и едет в запись.
+            if QUOTE_THE_PERSON:
+                reasons.append(WHY_STEP_QUOTED.format(quote=spoken))
             facts[step] = {"value": spoken, "origin": ORIGIN_TEXT}
             continue
         text = normalize_quote(answer.get("label"))
@@ -216,7 +221,7 @@ def grounded_reasons(goal: dict[str, Any]) -> tuple[tuple[str, ...], dict[str, A
             continue
         # Происхождение — правда о факте, а не о форме фразы: человек мог
         # набрать текст, а цитирование быть выключено.
-        facts[step] = {"value": text, "origin": ORIGIN_TEXT if spoken else ORIGIN_CHOICE}
+        facts[step] = {"value": text, "origin": ORIGIN_CHOICE}
     return tuple(reasons[:MAX_REASONS]), facts
 
 

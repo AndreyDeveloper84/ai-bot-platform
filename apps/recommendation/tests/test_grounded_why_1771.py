@@ -101,6 +101,20 @@ class TestSaidVersusChose:
         # Происхождение остаётся правдой даже без цитаты.
         assert facts["goal"]["origin"] == c.ORIGIN_TEXT
 
+    def test_with_quoting_off_a_typed_answer_gives_no_phrase_but_stays_a_fact(self):
+        """«Ты выбрала: болит спина» врёт о способе — человек это написал.
+        Формы пересказа под произвольные слова у нас нет, поэтому фразы
+        нет вовсе; факт с происхождением остаётся в записи."""
+        goal = _goal(answers=[_answer("area", label="болит спина", text="болит спина")])
+        monkeypatch = pytest.MonkeyPatch()
+        monkeypatch.setattr(c, "QUOTE_THE_PERSON", False)
+        try:
+            why, facts = c.grounded_reasons(goal)
+        finally:
+            monkeypatch.undo()
+        assert why == (c.WHY_GOAL.format(goal="привести себя в порядок"),)
+        assert facts["area"] == {"value": "болит спина", "origin": c.ORIGIN_TEXT}
+
 
 class TestForbiddenForm:
     @pytest.mark.parametrize(
