@@ -96,6 +96,12 @@ class AssistantReply:
     #: ждут подтверждения; выполнить его можно только отдельным
     #: запросом с талоном изнутри. `None` — ничего не предлагалось.
     pending_action: dict[str, Any] | None = None
+    #: Данные последнего инструмента — из них поверхность строит карточки
+    #: (DRF-2153): окна, день. Текст модели карточек не заменяет.
+    tool_data: dict[str, Any] | None = None
+    #: Карточки, которые действие отдало вместе с вопросом (уточнение
+    #: клиента, выбор услуги, дверь в форму, день с записями).
+    cards: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _system_prompt(master, *, today: date, tz_label: str) -> str:
@@ -382,6 +388,12 @@ def run_assistant(
         try:
             proposal = subject.propose(call.name, call.arguments or {})
         except ActionError as exc:
+            if getattr(exc, "verbatim", False):
+                # Короткий вопрос макета («Какая услуга?») — как есть, с карточками.
+                reply.tool_name = call.name
+                reply.cards = list(getattr(exc, "cards", None) or [])
+                reply.text = subject.postprocess(exc.detail)
+                return reply
             return _done(reply, f"Не смог подготовить действие: {exc.detail}")
         reply.tool_name = proposal.name
         reply.pending_action = proposal.as_dict()
@@ -397,6 +409,7 @@ def run_assistant(
         return _done(reply, FAILED_TEXT)
 
     reply.tool_name = outcome.name
+    reply.tool_data = outcome.data if isinstance(outcome.data, dict) else None
     messages.append(
         {
             "role": "user",

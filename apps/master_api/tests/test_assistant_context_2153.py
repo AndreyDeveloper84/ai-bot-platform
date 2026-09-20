@@ -28,9 +28,11 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from datetime import datetime, timedelta
 from typing import Any
+from unittest.mock import patch
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -45,7 +47,8 @@ from apps.integrations.ayla.salon_client import SalonSlotTaken, SalonUnavailable
 from apps.master_api.pii import find_forbidden_pii
 from apps.master_api.services import assistant_actions as actions_mod
 from apps.master_api.tests.conftest import init_data_header
-from apps.master_api.tests.test_assistant_api import FakeResult, FakeToolCall, _ask, llm  # noqa: F401
+from apps.master_api.services import assistant as assistant_mod
+from apps.master_api.tests.test_assistant_api import FakeResult, FakeToolCall
 from apps.tenancy.models import Tenant
 
 pytestmark = pytest.mark.django_db
@@ -67,6 +70,22 @@ CHIPS = [
 
 
 # ─── фикстуры ───────────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def llm():
+    """Подменённый провайдер — та же форма, что в test_assistant_api (fixture не
+    импортируется: ruff читает параметр как переопределение импорта)."""
+
+    calls: list[dict[str, Any]] = []
+    scripted: list[FakeResult] = []
+
+    def fake_complete(messages, *, tenant, tools=None):
+        calls.append({"messages": list(messages), "tools": tools})
+        return scripted.pop(0) if scripted else FakeResult(text="ответ")
+
+    with patch.object(assistant_mod, "_complete", side_effect=fake_complete):
+        yield {"calls": calls, "script": scripted}
 
 
 @pytest.fixture
@@ -187,11 +206,18 @@ def stub_slots(monkeypatch):
     return _install
 
 
+def _tomorrow_1230() -> str:
+    """Завтра 12:30 по часам салона (Europe/Moscow), не UTC."""
+
+    local = dj_timezone.now().astimezone(ZoneInfo("Europe/Moscow")) + timedelta(days=1)
+    return local.replace(hour=12, minute=30, second=0, microsecond=0).isoformat()
+
+
 def _prepare_call(**over) -> FakeToolCall:
     args = {
         "client_name": "Анна",
         "service": "массаж",
-        "start_at": (dj_timezone.now() + timedelta(days=1)).replace(hour=12, minute=30).isoformat(),
+        "start_at": _tomorrow_1230(),
     }
     args.update(over)
     return FakeToolCall(name="prepare_booking", arguments=args)
@@ -273,8 +299,10 @@ class TestCards:
             ("10:00", "12:00"),
             ("15:00", "18:00"),
         ]
-        assert card["windows"][0]["book_url"] == (
-            f"/master/booking/new?date={tomorrow.isoformat()}&from=10%3A00&to=12%3A00"
+        # Поверхность — /master или /solo (в тестовом салоне один мастер → соло).
+        assert re.fullmatch(
+            rf"/(master|solo)/booking/new\?date={tomorrow.isoformat()}&from=10%3A00&to=12%3A00",
+            card["windows"][0]["book_url"],
         )
 
     def test_unreadable_frame_is_stale_never_a_confident_free(
@@ -408,7 +436,7 @@ class TestPrepareBooking:
             == "Клиента с таким именем нет. Нового клиента можно добавить в форме записи."
         )
         card = next(c for c in body["cards"] if c["kind"] == "open")
-        assert card["url"].startswith("/master/booking/new")
+        assert re.match(r"^/(master|solo)/booking/new", card["url"])
         assert card["label"] == "Добавить запись"
 
 
@@ -434,7 +462,8 @@ class TestConfirmBooking:
         assert resp.status_code == 200, resp.content
         body = resp.json()
         assert body["answer"] == "Запись создана"
-        assert body["open"] == {"url": "/master/bookings/a-2153", "label": "Открыть запись"}
+        assert body["open"]["label"] == "Открыть запись"
+        assert re.fullmatch(r"/(master|solo)/bookings/a-2153", body["open"]["url"])
         call = stub.calls[-1]["create_appointment"]
         assert call["actor_external_id"] == "bot:max:12345"
         assert call["specialist_id"] == str(accepted_master.catalog_specialist_id)
@@ -502,8 +531,8 @@ class TestScheduleChangeConflict:
                     FakeToolCall(
                         name=actions_mod.ACTION_BLOCK_TIME,
                         arguments={
-                            "start_at": start.isoformat(),
-                            "end_at": (start + timedelta(days=1)).isoformat(),
+                            "start": start.isoformat(),
+                            "end": (start + timedelta(days=1)).isoformat(),
                             "reason_class": "personal",
                         },
                     )

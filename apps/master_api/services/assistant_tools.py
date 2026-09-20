@@ -156,9 +156,41 @@ def my_week(master, *, date_from: Any, date_to: Any) -> dict[str, Any]:
     }
 
 
-def free_slots(master, *, date: Any, duration_min: Any = 60) -> dict[str, Any]:
-    """Gaps of at least ``duration_min`` inside the working day."""
+def _working_block(master, day: date_cls) -> tuple[time, time, bool] | None:
+    """Рабочая рамка дня из живого источника (как у «Сегодня», DRF-2152).
 
+    ``None`` — рамка прочитана, мастер в этот день не работает. Отказ
+    источника (``Salon*``) НЕ ловится здесь: :func:`free_slots` переводит
+    его в «последние известные данные» (DRF-2153, макет DRF-1187).
+    """
+
+    from apps.master_api.services.schedule import _working_block_for_day
+    from apps.master_api.services.schedule_frame import load_day_frame
+
+    tz = _tz(master)
+    wh_by_weekday, exceptions_by_date, _extra = load_day_frame(
+        master, from_date=day, to_date=day, tz=tz
+    )
+    block = _working_block_for_day(master, day, exceptions_by_date, wh_by_weekday).working
+    if block is None:
+        return None
+    return block[0], block[1], True
+
+
+def free_slots(master, *, date: Any, duration_min: Any = 60) -> dict[str, Any]:
+    """Gaps of at least ``duration_min`` inside the working day.
+
+    Рамка дня — живая (каталог / Ayla). Когда источник не отвечает, окна
+    считаются по зашитым часам и зеркалу, а ответ помечается ``stale``:
+    модель не должна уверенно говорить «свободно», а экран показывает
+    «Последние известные данные» + «Проверить снова» (DRF-2153).
+    """
+
+    from apps.integrations.ayla.salon_client import (
+        SalonAPIError,
+        SalonNotConfigured,
+        SalonUnavailable,
+    )
     from apps.master_api.services.visit_source import occupied_intervals
 
     tz = _tz(master)
@@ -170,8 +202,24 @@ def free_slots(master, *, date: Any, duration_min: Any = 60) -> dict[str, Any]:
     if wanted < MIN_SLOT_MINUTES:
         wanted = MIN_SLOT_MINUTES
 
-    day_start = datetime.combine(day, DEFAULT_DAY_START, tzinfo=tz)
-    day_end = datetime.combine(day, DEFAULT_DAY_END, tzinfo=tz)
+    stale = False
+    try:
+        block = _working_block(master, day)
+    except (SalonNotConfigured, SalonUnavailable, SalonAPIError):
+        stale = True
+        block = (DEFAULT_DAY_START, DEFAULT_DAY_END, False)
+    if block is None:
+        return {
+            "date": day.isoformat(),
+            "duration_min": wanted,
+            "working_hours": None,
+            "day_off": True,
+            "slots": [],
+            "count": 0,
+            "stale": False,
+        }
+    day_start = datetime.combine(day, block[0], tzinfo=tz)
+    day_end = datetime.combine(day, block[1], tzinfo=tz)
     bound_start, bound_end = _day_bounds(day, tz)
 
     busy = sorted(occupied_intervals(master, day_start=bound_start, day_end=bound_end))
@@ -192,9 +240,12 @@ def free_slots(master, *, date: Any, duration_min: Any = 60) -> dict[str, Any]:
     return {
         "date": day.isoformat(),
         "duration_min": wanted,
-        "working_hours": f"{DEFAULT_DAY_START:%H:%M}–{DEFAULT_DAY_END:%H:%M}",
+        "working_hours": f"{day_start:%H:%M}–{day_end:%H:%M}",
+        "day_off": False,
         "slots": gaps[:MAX_ROWS],
         "count": len(gaps),
+        # Источник не ответил — данные последние известные, не подтверждённые.
+        "stale": stale,
     }
 
 
