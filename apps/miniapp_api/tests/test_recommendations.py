@@ -253,6 +253,9 @@ class TestRecommendationsView:
         """
         import logging
 
+        # Обе ветки — переведено (INFO) и не переведено (WARNING) — несут
+        # состав: без мастера в зеркале ключи не переводятся, и тест
+        # проверял бы одну ветку под именем другой.
         decision = _decision_body(str(uuid.uuid4()), str(uuid.uuid4()))["data"]
         with (
             self._resolver(ResolveOutcome("ok", decision=decision)),
@@ -264,11 +267,49 @@ class TestRecommendationsView:
         lines = [
             r.getMessage()
             for r in caplog.records
-            if "customer_recommendations.keys" in r.getMessage()
+            if r.getMessage().startswith("customer_recommendations.keys_untranslated")
         ]
         assert len(lines) == 1, lines
         assert "ordered=2" in lines[0]
         assert "kinds=PROVIDER" in lines[0]
+
+    def test_the_translated_log_line_names_the_shape_too(
+        self, client: Client, bot_user: BotUser, tenant: Tenant, caplog
+    ):
+        """INFO-ветка (ключи переведены) — тот же `ordered=N kinds=…` (DRF-2174)."""
+        import logging
+
+        from django.utils import timezone
+
+        from apps.catalog.models import CatalogMaster
+
+        ayla_id = uuid.uuid4()
+        CatalogMaster.all_tenants.create(
+            tenant=tenant,
+            external_updated_at=timezone.now(),
+            external_id=970002,
+            name="Мастер зеркала",
+            specialization="Парикмахер",
+            is_active=True,
+            invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+            ayla_user_id=ayla_id,
+        )
+
+        with (
+            self._resolver(ResolveOutcome("ok", decision=_decision_body(str(ayla_id))["data"])),
+            caplog.at_level(logging.INFO, logger="apps.miniapp_api.views"),
+        ):
+            resp = self._post(client, bot_user)
+
+        assert resp.status_code == 200
+        lines = [
+            r.getMessage()
+            for r in caplog.records
+            if r.getMessage().startswith("customer_recommendations.keys ")
+        ]
+        assert len(lines) == 1, lines
+        assert "translated=1" in lines[0]
+        assert "ordered=1 kinds=PROVIDER" in lines[0]
 
     def test_an_untranslatable_candidate_is_not_dropped(
         self, client: Client, bot_user: BotUser, tenant: Tenant
