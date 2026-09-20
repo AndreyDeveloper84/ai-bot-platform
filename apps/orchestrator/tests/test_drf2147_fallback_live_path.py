@@ -139,9 +139,7 @@ class TestFallbackOnTheLivePath:
         assert rows[0].llm_fallback_from == ""
         assert self.pages == []
 
-    def test_both_down_is_the_outage_line_as_before(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_both_down_is_the_outage_line_as_before(self, monkeypatch: pytest.MonkeyPatch) -> None:
         stubs = {
             "anthropic": StubProvider("anthropic", raises=_timeout_exhausted()),
             "openai": StubProvider("openai", raises=_timeout_exhausted()),

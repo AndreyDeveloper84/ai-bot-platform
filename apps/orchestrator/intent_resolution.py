@@ -1071,6 +1071,7 @@ def _record_resolution_metric(
             latency_total_ms=latency_ms,
             latency_llm_ms=None,
             llm_provider=getattr(llm_client, "last_provider", "") or "",
+            llm_fallback_from=getattr(llm_client, "last_fallback_from", "") or "",
             llm_model=llm_model,
             llm_tokens_input=tokens_in,
             llm_tokens_output=tokens_out,

@@ -301,6 +301,9 @@ class _RouterCompletions:
         # adapter's constant) — so the metric reader picks them up here.
         self.last_provider = ""
         self.last_model = ""
+        # DRF-2147 — the vendor the router asked first and hopped away
+        # from, when ``last_provider`` is the fallback. Empty otherwise.
+        self.last_fallback_from = ""
         # DRF-1286 - promise-without-tool retry. Armed per pass by
         # `generate_concierge_reply`: forcing a tool call is only correct
         # while a tool call is still a legitimate outcome. On the
@@ -419,6 +422,7 @@ class _RouterCompletions:
 
         self.last_provider = result.provider or ""
         self.last_model = result.model or ""
+        self.last_fallback_from = getattr(result, "fallback_from", "") or ""
         return _to_openai_shape(result)
 
 
@@ -437,6 +441,11 @@ class RouterLLMClient:
     def last_model(self) -> str:
         """Vendor-resolved model id of the most recent completion."""
         return self.chat.completions.last_model
+
+    @property
+    def last_fallback_from(self) -> str:
+        """Provider the router hopped away from on the most recent completion (DRF-2147)."""
+        return self.chat.completions.last_fallback_from
 
     def arm_forced_tool_retry(self, armed: bool) -> None:
         """Enable/disable the DRF-1286 promise-without-tool retry.
@@ -812,6 +821,7 @@ def _record_concierge_metric(
 
         llm_provider = ""
         llm_model = ""
+        llm_fallback_from = ""
         tokens_in: int | None = None
         tokens_out: int | None = None
         latency_llm_ms: int | None = None
@@ -825,6 +835,7 @@ def _record_concierge_metric(
         if llm_client is not None:
             llm_provider = llm_client.last_provider
             llm_model = llm_client.last_model
+            llm_fallback_from = llm_client.last_fallback_from
         if llm_model and tokens_in is not None:
             try:
                 cost_usd = compute_cost(
@@ -845,6 +856,7 @@ def _record_concierge_metric(
             latency_total_ms=latency_total_ms,
             latency_llm_ms=latency_llm_ms,
             llm_provider=llm_provider,
+            llm_fallback_from=llm_fallback_from,
             llm_model=llm_model,
             llm_tokens_input=tokens_in,
             llm_tokens_output=tokens_out,

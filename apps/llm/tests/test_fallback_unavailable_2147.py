@@ -104,9 +104,7 @@ def pages(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
     sent: list[dict[str, Any]] = []
 
     def _page(severity: str, title: str, body: str, *, dedup_key: str | None = None) -> bool:
-        sent.append(
-            {"severity": severity, "title": title, "body": body, "dedup_key": dedup_key}
-        )
+        sent.append({"severity": severity, "title": title, "body": body, "dedup_key": dedup_key})
         return True
 
     monkeypatch.setattr("apps.observability.alerting.page", _page)
@@ -147,9 +145,7 @@ class TestUnavailabilityHops:
         assert stubs["openai"].calls == 1
 
     @pytest.mark.asyncio
-    async def test_the_hop_pages_operators_exactly_once(
-        self, pages: list[dict[str, Any]]
-    ) -> None:
+    async def test_the_hop_pages_operators_exactly_once(self, pages: list[dict[str, Any]]) -> None:
         await _ask(_down_and_healthy(_timeout_exhausted()))
 
         assert len(pages) == 1
@@ -162,9 +158,7 @@ class TestUnavailabilityHops:
         assert pages[0]["dedup_key"] == "llm_fallback:anthropic:openai"
 
     @pytest.mark.asyncio
-    async def test_the_result_names_where_it_came_from(
-        self, pages: list[dict[str, Any]]
-    ) -> None:
+    async def test_the_result_names_where_it_came_from(self, pages: list[dict[str, Any]]) -> None:
         """The turn metric reads ``provider`` (used) and ``fallback_from``
         off the result — the hop has to leave both there."""
         result = await _ask(_down_and_healthy(_timeout_exhausted()))
@@ -188,10 +182,10 @@ class TestUnavailabilityHops:
         [
             pytest.param(_retry_exhausted(_sdk_exc("APIConnectionError")), id="connection"),
             pytest.param(_retry_exhausted(_sdk_exc("InternalServerError")), id="5xx-class"),
+            pytest.param(_retry_exhausted(_sdk_exc("APIStatusError", status=503)), id="5xx-status"),
             pytest.param(
-                _retry_exhausted(_sdk_exc("APIStatusError", status=503)), id="5xx-status"
+                LLMTransportError("anthropic.complete: APIConnectionError"), id="transport"
             ),
-            pytest.param(LLMTransportError("anthropic.complete: APIConnectionError"), id="transport"),
             pytest.param(_sdk_exc("BreakerOpenError"), id="breaker-open"),
         ],
     )
@@ -254,8 +248,7 @@ class TestBothUnavailable:
             await _ask(stubs)
 
         assert type(caught.value.last_error).__name__ == "APIConnectionError", (
-            "the SECOND vendor's failure is what surfaces — the log must say "
-            "both were tried"
+            "the SECOND vendor's failure is what surfaces — the log must say both were tried"
         )
         assert stubs["anthropic"].calls == 1
         assert stubs["openai"].calls == 1
@@ -292,9 +285,7 @@ class TestBadRequestDoesNotHop:
             # What ``_reraise_as_llm_error`` produces for BadRequestError /
             # UnprocessableEntityError: the base class, nothing more specific.
             pytest.param(LLMError("anthropic.complete: BadRequestError: 400"), id="400"),
-            pytest.param(
-                LLMError("anthropic.complete: UnprocessableEntityError: 422"), id="422"
-            ),
+            pytest.param(LLMError("anthropic.complete: UnprocessableEntityError: 422"), id="422"),
             # A vendor rate-limit that did NOT go through the retry layer:
             # «slow down», which is the retry layer's job, not a hop.
             pytest.param(LLMQuotaError("anthropic.complete: rate-limited"), id="429-direct"),
@@ -389,9 +380,7 @@ class TestPageDedup:
             ).count()
 
         paged = await sync_to_async(_count, thread_sensitive=False)("observability.alert.paged")
-        deduped = await sync_to_async(_count, thread_sensitive=False)(
-            "observability.alert.deduped"
-        )
+        deduped = await sync_to_async(_count, thread_sensitive=False)("observability.alert.deduped")
         assert (paged, deduped) == (1, 1)
 
     @pytest.mark.asyncio

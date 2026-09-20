@@ -1873,9 +1873,13 @@ ANTHROPIC_PROXY = os.environ.get("ANTHROPIC_PROXY", "")
 
 # LLM_QUOTA_FALLBACK_ENABLED — master switch for the router's one-hop
 # fallback onto another vendor when the chosen one reports its quota or
-# credit balance exhausted. On by default; the off switch exists so an
-# operator can pin traffic to a single vendor during a cost incident
-# without editing code.
+# credit balance exhausted — and, since DRF-2147, when it is unavailable
+# (timeout / connection failure / 5xx after the provider's own retries,
+# or an open breaker; never a 400 / 422). The name predates the widening
+# and is kept so existing deployments keep their switch. On by default;
+# the off switch exists so an operator can pin traffic to a single vendor
+# during a cost incident without editing code. Every switch pages the
+# operators («llm fallback», warning, deduplicated ALERTS_DEDUP_TTL_SECONDS).
 LLM_QUOTA_FALLBACK_ENABLED = os.environ.get("LLM_QUOTA_FALLBACK_ENABLED", "1") not in {
     "0",
     "false",
