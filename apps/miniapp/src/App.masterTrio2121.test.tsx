@@ -238,10 +238,11 @@ describe("состав листа мастера (DRF-2121)", () => {
   });
 });
 
-describe("прямые ссылки живут (DRF-2121)", () => {
-  it("/master/conversations открывается по прямой ссылке, из панели — нет", async () => {
+describe("старый адрес переписок (DRF-1255)", () => {
+  it("/master/conversations по прямой ссылке ведёт на «Сегодня», панель — тройка", async () => {
     renderAppAt("/master/conversations");
-    expect(await screen.findByRole("heading", { name: /Диалоги/ })).toBeInTheDocument();
+    expect(await screen.findByRole("region", { name: /сегодня/i })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /Диалоги/ })).toBeNull();
     expect(tabLabels()).toEqual(TRIO);
   });
 });
