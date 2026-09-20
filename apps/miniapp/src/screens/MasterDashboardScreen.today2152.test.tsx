@@ -144,9 +144,34 @@ describe("состояние 1 — ближайшая запись", () => {
     expect(screen.queryByText(/Постоянный клиент/)).toBeNull();
     expect(screen.queryByText(/Открыть диалог/)).toBeNull();
     expect(screen.queryByText(/90 мин/)).toBeNull();
-    // Тапа по записи нет: карточка — не кнопка и не ссылка.
+    // Тап по записи → «Детали записи» (М-4, DRF-2156), не переписки.
     expect(within(day).queryByRole("button", { name: /Анна/ })).toBeNull();
-    expect(within(day).queryByRole("link", { name: /Анна/ })).toBeNull();
+    expect(within(day).getByRole("link", { name: /Анна/ })).toHaveAttribute(
+      "href",
+      "/master/bookings/b-1",
+    );
+    expect(within(day).getByRole("link", { name: /Борис/ })).toHaveAttribute(
+      "href",
+      "/master/bookings/b-2",
+    );
+  });
+
+  it("«До визита» — общим форматтером DRF-1185: 80 → «1 ч 20 мин» (§61)", async () => {
+    mockedDashboard.mockResolvedValue(doc({ next_visit: { ...NEXT, minutes_until: 80 } }));
+    renderAt();
+    const day = await screen.findByRole("region", { name: /сегодня/i });
+    expect(within(day).getByText("До визита 1 ч 20 мин")).toBeInTheDocument();
+    expect(screen.queryByText(/80 мин/)).toBeNull();
+  });
+
+  it("на /solo/my-day ссылка карточки ведёт на /solo/bookings/:id", async () => {
+    mockedDashboard.mockResolvedValue(doc({ next_visit: NEXT }));
+    renderAt("/solo/my-day");
+    const day = await screen.findByRole("region", { name: /сегодня/i });
+    expect(within(day).getByRole("link", { name: /Анна/ })).toHaveAttribute(
+      "href",
+      "/solo/bookings/b-1",
+    );
   });
 });
 
