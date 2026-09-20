@@ -24,9 +24,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { SheetChrome } from "../components/PersonalDataSheets";
-import { DelayedSkeleton, ServiceCardSkeleton } from "../components/Skeleton";
 import { Snackbar } from "../components/Snackbar";
-import { StateError } from "../components/StateError";
+// Загрузка / ошибка загрузки — мастерский SystemState (DRF-2194), не клиентский StateError.
+import { SystemState } from "../components/master/SystemState";
 import { ToggleSwitch } from "../components/ToggleSwitch";
 import { ApiError } from "../lib/api";
 import {
@@ -206,17 +206,14 @@ export function MasterWorkingHoursScreen() {
   if (phase.kind === "loading") {
     return (
       <main className="screen working-hours">
-        <DelayedSkeleton loading>
-          <ServiceCardSkeleton />
-          <ServiceCardSkeleton />
-        </DelayedSkeleton>
+        <SystemState kind="loading" lines={2} />
       </main>
     );
   }
   if (phase.kind === "error") {
     return (
       <main className="screen working-hours">
-        <StateError err={phase.err} onRetry={() => void load()} />
+        <SystemState kind="load_error" what="workingHours" err={phase.err} onRetry={() => void load()} />
       </main>
     );
   }

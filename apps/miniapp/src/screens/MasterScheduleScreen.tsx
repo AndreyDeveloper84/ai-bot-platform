@@ -73,6 +73,7 @@ import {
   formatMonthHeaderRu,
   formatWeekHeaderRu,
   formatWeekRangeRu,
+  formatTimeHM,
   formatYmdLocal,
   joinClientName,
   localHmFromIso,
@@ -107,6 +108,9 @@ const COPY = {
   conflictTapHint: "уточнить у админа",
   conflictBanner: "⚠ Конфликт расписания — посмотрите",
   emptyDay: "Свободный день. Отдыхайте.",
+  // DRF-2194 — шкала дня и линия текущего времени (DRF-1183).
+  dayListLabel: "Расписание дня",
+  nowLabel: (hm: string) => `Сейчас ${hm}`,
   // The admin is named by the salon, never by a hardcoded first name — see
   // lib/salonOwnerHint.ts. `MasterScheduleResponse` carries no salon, so both
   // call sites pass the neutral default; the parameter is here so that wiring a
@@ -721,17 +725,21 @@ function DayView({
   // Always render a stable timeline based on working_hours. Bookings,
   // blocks, free-windows are merged in chronological order; the
   // working-window bounds drive the gray-outside-hours surface.
-  const items = buildDayItems(day);
+  // DRF-2194 (DRF-1183): на сегодняшнем дне — линия «сейчас» между карточками
+  // по HH:MM. Часы устройства, на момент рендера; не тикает.
+  const items = buildDayItems(day, nowMarkerFor(day));
   return (
     <section className="master-dashboard__section">
       {day.conflicts.length > 0 ? <ConflictBanner /> : null}
       {noContent ? (
         <p className="master-dashboard__empty-line">{COPY.emptyDay}</p>
       ) : null}
-      <ul className="schedule-day">
+      <ul className="schedule-day" aria-label={COPY.dayListLabel}>
         {items.map((item, idx) => (
           <li key={idx}>
-            {item.kind === "booking" ? (
+            {item.kind === "now" ? (
+              <NowLine hm={item.startHm} />
+            ) : item.kind === "booking" ? (
               <MasterBookingCard
                 variant="schedule"
                 clientName={joinClientName(
@@ -783,11 +791,26 @@ interface DayItemBlock {
   block: ScheduleDay["blocks"][number];
   startHm: string;
 }
+/** Линия текущего времени (DRF-1183) — элемент шкалы, не карточка. */
+interface DayItemNow {
+  kind: "now";
+  startHm: string;
+}
 
-type DayItem = DayItemBooking | DayItemFree | DayItemBlock;
+type DayItem = DayItemBooking | DayItemFree | DayItemBlock | DayItemNow;
 
-function buildDayItems(day: ScheduleDay): DayItem[] {
+/**
+ * «Сейчас» для дня: HH:MM по часам устройства, если день — сегодня; иначе
+ * null. Источник — устройство: ответ расписания серверного now не несёт
+ * (отступление (т), у владельца). Линия — про часы, не про состояние записи.
+ */
+function nowMarkerFor(day: ScheduleDay, now: Date = new Date()): string | null {
+  return day.date === formatYmdLocal(now) ? formatTimeHM(now.toISOString()) : null;
+}
+
+function buildDayItems(day: ScheduleDay, nowHm: string | null = null): DayItem[] {
   const items: DayItem[] = [];
+  if (nowHm !== null) items.push({ kind: "now", startHm: nowHm });
   for (const b of day.bookings) {
     items.push({
       kind: "booking",
@@ -801,8 +824,23 @@ function buildDayItems(day: ScheduleDay): DayItem[] {
   for (const bl of day.blocks) {
     items.push({ kind: "block", block: bl, startHm: localHmFromIso(bl.start) });
   }
-  items.sort((a, b) => a.startHm.localeCompare(b.startHm));
+  // Стабильная сортировка: при равном времени линия «сейчас» стоит перед
+  // карточкой, начинающейся в эту минуту.
+  items.sort(
+    (a, b) => a.startHm.localeCompare(b.startHm) || Number(b.kind === "now") - Number(a.kind === "now"),
+  );
   return items;
+}
+
+/** Тонкая красная линия с подписью времени — DRF-1183 «Текущее время». */
+function NowLine({ hm }: { hm: string }) {
+  return (
+    <div className="schedule-now" role="separator" aria-label={COPY.nowLabel(hm)}>
+      <span className="schedule-now__time">{hm}</span>
+      <span className="schedule-now__dot" aria-hidden="true" />
+      <span className="schedule-now__line" aria-hidden="true" />
+    </div>
+  );
 }
 
 function ConflictBanner() {

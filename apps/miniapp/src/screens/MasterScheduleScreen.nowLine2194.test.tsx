@@ -28,6 +28,12 @@ import {
 import { addDays, formatYmdLocal } from "../lib/masterDateFormat";
 import { MasterScheduleScreen } from "./MasterScheduleScreen";
 
+const SCHEDULE_SOURCE = import.meta.glob("./MasterScheduleScreen.tsx", {
+  query: "?raw",
+  import: "default",
+  eager: true,
+}) as Record<string, string>;
+
 const mockedSchedule = vi.mocked(getMasterSchedule);
 const mockedPending = vi.mocked(getPendingAvailability);
 
@@ -97,7 +103,6 @@ describe("линия «сейчас» на дне (DRF-1183, DRF-2194)", () => {
     const now = freezeNow("13:37");
     const today = formatYmdLocal(now);
     mockedSchedule.mockResolvedValue(scheduleFor([day(today, ["12:00", "15:00"])]));
-    const intervals = vi.spyOn(globalThis, "setInterval");
     renderAt();
 
     const list = await screen.findByRole("list", { name: /расписание дня/i });
@@ -110,9 +115,12 @@ describe("линия «сейчас» на дне (DRF-1183, DRF-2194)", () => {
     expect(idxFirst).toBeGreaterThanOrEqual(0);
     expect(idxNow).toBeGreaterThan(idxFirst);
     expect(idxSecond).toBeGreaterThan(idxNow);
-    // Линия не тикает: интервалов экран не заводит.
-    expect(intervals).not.toHaveBeenCalled();
-    intervals.mockRestore();
+  });
+
+  it("линия не тикает: экран не заводит setInterval (по исходнику)", () => {
+    const src = Object.values(SCHEDULE_SOURCE)[0] ?? "";
+    expect(src.length).toBeGreaterThan(0);
+    expect(src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "")).not.toContain("setInterval");
   });
 
   it("сегодня 08:00, до всех записей — линия первой; 20:00, после всех — последней", async () => {

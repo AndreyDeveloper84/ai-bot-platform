@@ -62,6 +62,10 @@ export const SYSTEM_STATE_COPY = {
       ownServices: "свои услуги",
       subscription: "подписку",
       payout: "выплаты",
+      // DRF-2194 (М-6c) — экраны, рисовавшие ошибку клиентским StateError.
+      publication: "статус публикации",
+      setup: "чек-лист настройки",
+      workingHours: "рабочие часы",
     },
   },
   forbidden: { title: "Недостаточно прав", body: "Это действие недоступно" },
