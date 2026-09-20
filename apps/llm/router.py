@@ -767,8 +767,10 @@ def _page_fallback(
     body = (
         f"Переключение на запасного провайдера LLM: {from_provider} → {to_provider}.\n"
         f"Причина: {why} — {reason}.\n"
-        f"Навык: {skill or '-'}. Бот отвечает через {to_provider}, пока "
-        f"{from_provider} не восстановится; повтор страницы не чаще раза в окно дедупа."
+        f"Навык: {skill or '-'}. Бот пробует отвечать через {to_provider}; если и он "
+        f"недоступен — клиент получит заглушку, а операторам уйдёт «retry exhausted». "
+        f"Повтор этой страницы — не чаще раза в окно дедупа, пока {from_provider} не "
+        f"восстановится."
     )
     sent = alerting.page(
         "warning",
