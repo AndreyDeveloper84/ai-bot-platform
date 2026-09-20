@@ -44,7 +44,13 @@ from apps.tenancy.models import Tenant
 pytestmark = pytest.mark.django_db(transaction=True)
 
 BOT_TOKEN = "123456:test-bot-token"  # noqa: S105  # pragma: allowlist secret
-_DOC = {"goal": None, "questions": [], "suggestions": [], "intents": [], "next": None}
+_DOC: dict[str, object] = {
+    "goal": None,
+    "questions": [],
+    "suggestions": [],
+    "intents": [],
+    "next": None,
+}
 
 AMBIGUOUS = "немеет рука иногда"
 G4_FRAME = {"kind": KIND_CLARIFY, "questions": [G4_ROUTING_QUESTION]}
