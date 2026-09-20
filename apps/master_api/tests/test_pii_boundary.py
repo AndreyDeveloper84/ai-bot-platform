@@ -1076,8 +1076,11 @@ NOT_SWEPT_ROUTES: dict[str, str] = {
     "assistant_confirm": "POST mutation; body is a signed action token only",
     "working_hours": (
         "GET/PUT proxy to the catalog's working-hours route (DRF-1816): the "
-        "response is the master's own weekly template + timezone, no customer "
-        "record — swept with a stubbed client in test_working_hours_1816"
+        "response is the master's own weekly template + timezone — swept with a "
+        "stubbed client in test_working_hours_1816. Отказ 409 (DRF-2200, макет "
+        "DRF-1186 экран 4) несёт конфликтующие записи, и клиент в них назван "
+        "именем с инициалом («Анна П.»), как на «Расписании»: телефона нет, "
+        "сметено в test_hours_conflicts_2200.TestConflictsKeepThePiiBoundary"
     ),
     # DRF-1802 (M10) — «своя услуга» мастера: прокси заявок о разрыве канона
     # в каталог. Отдают только собственные заявки мастера (название, цена,

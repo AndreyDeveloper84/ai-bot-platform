@@ -10,7 +10,7 @@
  */
 import { render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../lib/master-api", async (importOriginal) => {
   const original = await importOriginal<typeof import("../lib/master-api")>();
@@ -125,7 +125,15 @@ function renderAt(path: string) {
   );
 }
 
+afterEach(() => {
+  vi.useRealTimers();
+});
+
 beforeEach(() => {
+  // Фикстура датирована 2026-09-20, а «Расписание» прячет прошедшие окна по
+  // часам устройства: без заморозки тест зеленел ровно один день (DRF-2200).
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(new Date(NOW));
   vi.clearAllMocks();
   mockedDashboard.mockResolvedValue(dashboard());
   mockedSchedule.mockResolvedValue(schedule());

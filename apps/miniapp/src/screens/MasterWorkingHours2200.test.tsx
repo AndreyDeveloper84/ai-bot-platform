@@ -1,10 +1,10 @@
 /**
  * «Рабочее время» мастера по макету DRF-1186 (DRF-2200, М-7).
  *
- * Красное листа: экран смонтирован только на `/solo/working-hours`; у
- * салонного мастера «Рабочие часы →» перебрасывает на «Расписание», а
- * «Сегодня» при отсутствии шаблона говорит «Сегодня выходной» — часов нет,
- * а не выходной.
+ * Лист начинался красным: экран был смонтирован только на
+ * `/solo/working-hours`, у салонного мастера «Рабочие часы →»
+ * перебрасывало в «Расписание», а «Сегодня» при отсутствии шаблона
+ * говорило «Сегодня выходной» — часов нет, а не выходной.
  *
  * * h1 — экран 1 «Рабочий график»: заголовок и подпись макета, семь дней с
  *   интервалами / «Выходной», тап по дню открывает экран дня;
@@ -18,11 +18,12 @@
  *   карточка конфликтующей записи, «Открыть запись» и «Вернуться»;
  *   изменение НЕ применено, черновик сохранён;
  * * h5 — салонная поверхность: тот же экран только на чтение + «Запросить
- *   изменение» (заявка владельцу, §83), правки нет;
+ *   изменение» (заявка владельцу, §83), правки нет; заявка уходит ТЕМ, что
+ *   выбрано, и на названную дату, а «по обычному графику» просить нечего;
  * * h6 — «часы не заданы» ≠ «выходной» на «Сегодня», и дверь ведёт по
  *   поверхности: соло — в редактор, салонный — в заявку.
  */
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -164,6 +165,16 @@ function dashboard(
   } as DashboardResponse;
 }
 
+/** Ближайшая среда в счёте экрана (Пн=0…Вс=6), как `nextDateFor`. */
+function nextWednesday(): string {
+  const today = new Date();
+  const mondayFirst = (today.getDay() + 6) % 7;
+  const d = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  d.setDate(d.getDate() + ((2 - mondayFirst + 7) % 7));
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
 function renderAt(path: string) {
   return render(
     <MemoryRouter initialEntries={[path]}>
@@ -180,6 +191,10 @@ function renderAt(path: string) {
         <Route path="/solo/my-day" element={<MasterDashboardScreen />} />
         <Route
           path="/master/bookings/:id"
+          element={<p>Экран «Детали записи»</p>}
+        />
+        <Route
+          path="/solo/bookings/:id"
           element={<p>Экран «Детали записи»</p>}
         />
       </Routes>
@@ -224,7 +239,7 @@ describe("1 · «Рабочий график» — неделя по макет�
 describe("2 · «Изменить конкретный день» — три варианта макета", () => {
   it("метка «Изменение только на этот день» и три именованных варианта", async () => {
     renderAt("/solo/working-hours");
-    (await screen.findByRole("button", { name: /^Среда/ })).click();
+    fireEvent.click(await screen.findByRole("button", { name: /^Среда/ }));
     expect(
       await screen.findByText("Изменение только на этот день"),
     ).toBeInTheDocument();
@@ -248,11 +263,11 @@ describe("2 · «Изменить конкретный день» — три в�
 
   it("«Другие часы» — начало и окончание, «Сохранить» пишет только этот день", async () => {
     renderAt("/solo/working-hours");
-    (await screen.findByRole("button", { name: /^Среда/ })).click();
-    screen.getByRole("radio", { name: /^Другие часы/ }).click();
+    fireEvent.click(await screen.findByRole("button", { name: /^Среда/ }));
+    fireEvent.click(screen.getByRole("radio", { name: /^Другие часы/ }));
     expect(await screen.findByLabelText("Начало")).toBeInTheDocument();
     expect(screen.getByLabelText("Окончание")).toBeInTheDocument();
-    screen.getByRole("button", { name: "Сохранить" }).click();
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить" }));
     await waitFor(() => expect(mockedPut).toHaveBeenCalledTimes(1));
     const saved = mockedPut.mock.calls[0]?.[0] ?? [];
     expect(saved.filter((d) => d.day_of_week === 2)).toHaveLength(1);
@@ -262,8 +277,8 @@ describe("2 · «Изменить конкретный день» — три в�
 describe("3 · «Недоступно (часть дня)»", () => {
   it("С / До / причина необязательна / ⓘ о новых записях", async () => {
     renderAt("/solo/working-hours");
-    (await screen.findByRole("button", { name: /^Среда/ })).click();
-    screen.getByRole("button", { name: HOURS_COPY.unavailable.open }).click();
+    fireEvent.click(await screen.findByRole("button", { name: /^Среда/ }));
+    fireEvent.click(screen.getByRole("button", { name: HOURS_COPY.unavailable.open }));
     expect(
       await screen.findByText("Укажите период, в который вы недоступны."),
     ).toBeInTheDocument();
@@ -276,7 +291,7 @@ describe("3 · «Недоступно (часть дня)»", () => {
       screen.getByText("Новые записи на это время не смогут быть созданы."),
     ).toBeInTheDocument();
     // Причина пуста — «Сохранить» всё равно работает (макет: не требуем причину).
-    screen.getByRole("button", { name: "Сохранить" }).click();
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить" }));
     await waitFor(() => expect(mockedRequest).toHaveBeenCalledTimes(1));
     expect(mockedRequest.mock.calls[0]?.[0]).toMatchObject({ reason_text: "" });
   });
@@ -305,9 +320,9 @@ describe("4 · «Конфликт с записью»", () => {
       ),
     );
     renderAt("/solo/working-hours");
-    (await screen.findByRole("button", { name: /^Среда/ })).click();
-    screen.getByRole("radio", { name: /^Не работаю/ }).click();
-    screen.getByRole("button", { name: "Сохранить" }).click();
+    fireEvent.click(await screen.findByRole("button", { name: /^Среда/ }));
+    fireEvent.click(screen.getByRole("radio", { name: /^Не работаю/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить" }));
 
     expect(
       await screen.findByText("На это время уже есть запись."),
@@ -326,7 +341,7 @@ describe("4 · «Конфликт с записью»", () => {
       ),
     ).toBeInTheDocument();
     // «Вернуться» — к изменению графика, черновик цел.
-    screen.getByRole("button", { name: "Вернуться" }).click();
+    fireEvent.click(screen.getByRole("button", { name: "Вернуться" }));
     expect(
       await screen.findByText("Изменение только на этот день"),
     ).toBeInTheDocument();
@@ -354,11 +369,13 @@ describe("4 · «Конфликт с записью»", () => {
         } as never,
       ),
     );
-    renderAt("/master/working-hours");
-    (await screen.findByRole("button", { name: /^Среда/ })).click();
-    screen.getByRole("radio", { name: /^Не работаю/ }).click();
-    screen.getByRole("button", { name: HOURS_COPY.salon.request }).click();
-    (await screen.findByRole("link", { name: "Открыть запись" })).click();
+    // Конфликт — ответ на ЗАПИСЬ часов, а её делает только соло: у
+    // салонного мастера часы пишет салон, заявка ничего не меняет (5·b).
+    renderAt("/solo/working-hours");
+    fireEvent.click(await screen.findByRole("button", { name: /^Среда/ }));
+    fireEvent.click(screen.getByRole("radio", { name: /^Не работаю/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Сохранить" }));
+    fireEvent.click(await screen.findByRole("link", { name: "Открыть запись" }));
     expect(
       await screen.findByText("Экран «Детали записи»"),
     ).toBeInTheDocument();
@@ -381,14 +398,44 @@ describe("5 · салонная поверхность — чтение и за�
     ).toBeInTheDocument();
   });
 
-  it("заявка уходит администратору, часы не пишутся", async () => {
+  it("заявка уходит администратору тем, что выбрано, и часы не пишутся", async () => {
     renderAt("/master/working-hours");
-    (await screen.findByRole("button", { name: /^Среда/ })).click();
-    screen.getByRole("radio", { name: /^Не работаю/ }).click();
-    screen.getByRole("button", { name: HOURS_COPY.salon.request }).click();
+    fireEvent.click(await screen.findByRole("button", { name: /^Среда/ }));
+    fireEvent.click(screen.getByRole("radio", { name: /^Не работаю/ }));
+    fireEvent.click(screen.getByRole("button", { name: HOURS_COPY.salon.request }));
     await waitFor(() => expect(mockedRequest).toHaveBeenCalledTimes(1));
     expect(mockedPut).not.toHaveBeenCalled();
+    // Тело заявки — сутки НАЗВАННОЙ даты (ближайшая среда), и администратор
+    // читает словами, о чём просили: пустая заявка «на весь день» без повода
+    // была бы не тем, что человек выбрал.
+    const sent = mockedRequest.mock.calls[0]?.[0];
+    const date = nextWednesday();
+    expect(sent).toMatchObject({
+      start: `${date}T00:00:00`,
+      end: `${date}T23:59:00`,
+    });
+    expect(sent?.reason_text).toContain("Не работаю");
     expect(await screen.findByText(HOURS_COPY.salon.sent)).toBeInTheDocument();
+  });
+
+  it("«По обычному графику» просить нечего — кнопка недоступна", async () => {
+    renderAt("/master/working-hours");
+    fireEvent.click(await screen.findByRole("button", { name: /^Среда/ }));
+    // Вариант по умолчанию — «ничего не меняем»: один тап по главной кнопке
+    // не должен просить у салона целый день.
+    expect(screen.getByRole("radio", { name: /^По обычному графику/ })).toBeChecked();
+    expect(
+      screen.getByRole("button", { name: HOURS_COPY.salon.request }),
+    ).toBeDisabled();
+    expect(screen.getByText(HOURS_COPY.salon.nothingToAsk)).toBeInTheDocument();
+    expect(mockedRequest).not.toHaveBeenCalled();
+  });
+
+  it("дата заявки названа в шапке листа, а не угадана молча", async () => {
+    renderAt("/master/working-hours");
+    fireEvent.click(await screen.findByRole("button", { name: /^Среда/ }));
+    const dialog = await screen.findByRole("dialog");
+    expect(dialog).toHaveAccessibleName(/^Среда, \d{1,2} /);
   });
 });
 
@@ -399,7 +446,18 @@ describe("6 · «часы не заданы» ≠ «выходной»", () => {
       await screen.findByText(HOURS_COPY.notSet.title),
     ).toBeInTheDocument();
     expect(screen.queryByText("Сегодня выходной")).toBeNull();
-    screen.getByRole("button", { name: HOURS_COPY.notSet.cta }).click();
+    fireEvent.click(screen.getByRole("button", { name: HOURS_COPY.notSet.cta }));
+    expect(await screen.findByText(HOURS_COPY.title)).toBeInTheDocument();
+  });
+
+  it("у соло — своя дверь: «Задать часы →» ведёт в редактор", async () => {
+    renderAt("/solo/my-day");
+    expect(
+      await screen.findByText(HOURS_COPY.notSet.title),
+    ).toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", { name: HOURS_COPY.notSet.ctaSolo }),
+    );
     expect(await screen.findByText(HOURS_COPY.title)).toBeInTheDocument();
   });
 

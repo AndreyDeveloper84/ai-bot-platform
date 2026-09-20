@@ -92,6 +92,9 @@ import {
   joinClientName,
   safeEndIso,
 } from "../lib/masterDateFormat";
+// DRF-2200: слова про часы — из словаря экрана часов, чтобы «Сегодня» и
+// «Рабочий график» не расходились в формулировках.
+import { HOURS_COPY } from "./MasterWorkingHoursScreen";
 
 // --- Russian copy (VERBATIM from §M1) ------------------------------------
 
@@ -256,11 +259,12 @@ export function MasterDashboardScreen() {
     [isSolo],
   );
 
-  // «Рабочие часы →» на выходном: соло правит часы сам, салонный — подаёт
-  // заявку владельцу на экране «Расписание».
+  // «Рабочие часы →»: соло правит часы сам, салонный — та же неделя только
+  // на чтение и «Запросить изменение» (DRF-2200, §83). До М-7 салонного
+  // уводили в «Расписание» — там заявка была, а часов он не видел.
   const onHoursCta = useCallback(() => {
     hapticSelection();
-    navigate(isSolo ? "/solo/working-hours" : "/master/schedule");
+    navigate(isSolo ? "/solo/working-hours" : "/master/working-hours");
   }, [navigate, isSolo]);
 
   // Вход в раздел «Ayla» (DRF-1180). Временно карточкой, а не вкладкой:
@@ -377,6 +381,8 @@ export function MasterDashboardScreen() {
         noServices={noServices}
         salonName={data.salon.name}
         dayOff={states.day_off}
+        hoursSet={states.hours_set}
+        isSolo={isSolo}
         completedCount={today_summary.completed_count}
         totalClients={today_summary.total_clients_today}
         onHours={onHoursCta}
@@ -519,6 +525,8 @@ function DayBlock({
   noServices,
   salonName,
   dayOff,
+  hoursSet,
+  isSolo,
   completedCount,
   totalClients,
   onHours,
@@ -534,6 +542,9 @@ function DayBlock({
   noServices: boolean;
   salonName: string | null;
   dayOff: boolean | null | undefined;
+  /** DRF-2200: задан ли недельный график вообще; undefined — сервер старый. */
+  hoursSet: boolean | null | undefined;
+  isSolo: boolean;
   completedCount: number;
   totalClients: number;
   onHours: () => void;
@@ -550,7 +561,25 @@ function DayBlock({
       />
     );
   } else if (isEmptyToday) {
-    if (dayOff === true) {
+    if (dayOff === true && hoursSet === false) {
+      // DRF-2200: рамка прочитана, блока нет — но шаблона нет ВООБЩЕ.
+      // «Сегодня выходной» здесь неправда: часов никто не ставил, и дверь
+      // ведёт по поверхности (соло — задать, салонному — запросить).
+      body = (
+        <>
+          <p className="master-dashboard__empty-line">
+            {HOURS_COPY.notSet.title}
+          </p>
+          <button
+            type="button"
+            className="btn-secondary master-dashboard__inline-cta"
+            onClick={onHours}
+          >
+            {isSolo ? HOURS_COPY.notSet.ctaSolo : HOURS_COPY.notSet.cta}
+          </button>
+        </>
+      );
+    } else if (dayOff === true) {
       body = (
         <>
           <p className="master-dashboard__empty-line">{COPY.day.dayOff}</p>

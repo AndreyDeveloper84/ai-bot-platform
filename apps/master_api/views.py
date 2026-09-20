@@ -116,7 +116,9 @@ from apps.master_api.services.schedule import (
     AvailabilityRequestError,
     DEFAULT_RANGE_DAYS,
     MAX_RANGE_DAYS,
+    TEMPLATE_CONFLICT_HORIZON_DAYS,
     build_schedule,
+    conflicting_bookings_for_template,
     list_pending_requests,
     request_availability_change,
 )
@@ -1152,10 +1154,30 @@ def working_hours(request: HttpRequest) -> HttpResponse:
             specialist_id=catalog_specialist_id(master), external_user_id=actor, schedule=schedule
         )
     except ScheduleBlockConflictError:
-        return _error(
+        # DRF-2200 (макет DRF-1186, экран 4): каталог говорит «есть записи», но
+        # не говорит какие — экран без них показывает тупик. Состав берётся из
+        # того же вычислителя, что рисует «Расписание» (build_schedule), чтобы
+        # мастер не увидел конфликт, которого в его расписании нет.
+        try:
+            conflicts = conflicting_bookings_for_template(master, schedule)
+        except Exception:  # noqa: BLE001 — украшение отказа, а не сам отказ
+            # Ловим широко намеренно: 409 сказал каталог, и он правда. Любая
+            # поломка сборщика карточек (нечитаемая дата, чужая форма тела,
+            # молчащий каталог) не имеет права превратить честный отказ в 500.
+            logger.warning(
+                "master_api.working_hours.conflicts_unreadable master=%s",
+                master.id,
+                exc_info=True,
+            )
+            conflicts = []
+        return _error_with(
             "has_active_appointments",
             "В это время уже есть записи. Сначала разберитесь с ними.",
             409,
+            conflicts=conflicts,
+            # Горизонт поиска — чтобы экран назвал его словами, а не делал
+            # вид, что показал всё будущее (DRF-2200).
+            horizon_days=TEMPLATE_CONFLICT_HORIZON_DAYS,
         )
     except BookingBadRequestError as exc:
         return _working_hours_refusal(exc)
