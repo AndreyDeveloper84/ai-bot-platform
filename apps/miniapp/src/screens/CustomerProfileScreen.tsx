@@ -76,6 +76,7 @@ import {
   type HealthConsentState,
 } from "../lib/health-consent";
 import { SurfaceSwitchButton } from "../components/SurfaceSwitch";
+import { CustomerTabBar } from "../components/CustomerTabBar";
 import { useScreenBack } from "../hooks/useScreenBack";
 import { backTo } from "../lib/screen-back";
 
@@ -670,58 +671,9 @@ export function CustomerProfileScreen() {
         )}
       </main>
 
-      {/* Bottom nav — mirror records / wellness so the «Я» tab is selected. */}
-      <nav className="wellness-dash__nav" aria-label="Основная навигация">
-        <button
-          type="button"
-          className="wellness-dash__nav-tab"
-          aria-label="Главная"
-          onClick={() => navigate("/customer/main")}
-        >
-          <span className="wellness-dash__nav-icon" aria-hidden="true">
-            🏠
-          </span>
-          <span className="wellness-dash__nav-label">Главная</span>
-        </button>
-        {/* Вкладки «День» здесь нет (DRF-1546): поверхности «День» не
-            существует — её роль исполнял домашний экран, а он теперь
-            «Главная». Кнопка вела бы на страницу с подсвеченной
-            «Главной», то есть врала бы о том, куда ведёт. Возвращать
-            вместе с самой поверхностью «День». */}
-        <button
-          type="button"
-          className="wellness-dash__nav-tab"
-          aria-label="Записи"
-          onClick={() => navigate("/customer/records")}
-        >
-          <span className="wellness-dash__nav-icon" aria-hidden="true">
-            📅
-          </span>
-          <span className="wellness-dash__nav-label">Записи</span>
-        </button>
-        <button
-          type="button"
-          className="wellness-dash__nav-tab"
-          aria-label="Услуги"
-          onClick={() => navigate("/customer/catalog")}
-        >
-          <span className="wellness-dash__nav-icon" aria-hidden="true">
-            💅
-          </span>
-          <span className="wellness-dash__nav-label">Услуги</span>
-        </button>
-        <button
-          type="button"
-          className="wellness-dash__nav-tab wellness-dash__nav-tab--active"
-          aria-current="page"
-          aria-label="Я"
-        >
-          <span className="wellness-dash__nav-icon" aria-hidden="true">
-            👤
-          </span>
-          <span className="wellness-dash__nav-label">Я</span>
-        </button>
-      </nav>
+      {/* Панель — общая для клиентских экранов (DRF-2191); активна «Профиль».
+          Стоит вне веток состояния: отказ ручки не убирает навигацию (#1918). */}
+      <CustomerTabBar active="profile" />
 
       {/* C5 export sheet (152-ФЗ) */}
       <HealthConsentSheet

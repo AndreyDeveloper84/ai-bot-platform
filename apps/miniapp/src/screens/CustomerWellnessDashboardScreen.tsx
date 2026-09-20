@@ -135,6 +135,7 @@ import {
   type CatalogBrowseData,
 } from "../lib/customer-booking";
 import { StatusBadge } from "../components/StatusBadge";
+import { CustomerTabBar } from "../components/CustomerTabBar";
 import { UnbookableBadge } from "../components/UnbookableNote";
 import { useScreenBack } from "../hooks/useScreenBack";
 import { PLAN_LITE_COPY, PLAN_LITE_ROUTE } from "./PlanLiteScreen";
@@ -149,19 +150,6 @@ type ActiveGoal = NonNullable<WellnessToday["active_goals"]>[number];
  */
 export const DIARY_CONSENT_CARD_TEXT = "Чтобы вести дневник, нужно согласие — дай его в чате с Ayla";
 export const DIARY_CONSENT_CARD_CTA = "Дать согласие в чате";
-
-/**
- * Нижняя панель — ровно пять вкладок по макету H01 (решение владельца §55 б).
- * `route: null` — эта вкладка и есть текущий экран. Порядок и подписи —
- * договор со сторожем (h01-тест) и с макетом; менять их — новое решение.
- */
-export const HOME_TABS: ReadonlyArray<{ label: string; icon: string; route: string | null }> = [
-  { label: "Главная", icon: "🏠", route: null },
-  { label: "План", icon: "📋", route: PLAN_LITE_ROUTE },
-  { label: "Дневник", icon: "📔", route: "/customer/food-scanner/diary" },
-  { label: "Записи", icon: "📅", route: "/customer/records" },
-  { label: "Профиль", icon: "👤", route: "/customer/profile" },
-];
 
 // ---------------------------------------------------------------------------
 // Loading + error state model — per-block isolation for «Partial» state
@@ -1002,33 +990,9 @@ export function CustomerWellnessDashboardScreen() {
           )}
       </main>
 
-      {/* Нижняя панель — ровно пять вкладок по макету H01 (решение владельца
-          §55 б, DRF-2144): Главная · План · Дневник · Записи · Профиль.
-          «Услуги» ушли из панели в каталог (по «Записаться» / карточке),
-          «Я» стало «Профиль». Этот экран — «Главная», поэтому активна она.
-          Сетка панели подстраивается под число вкладок, см.
-          `.wellness-dash__nav` в globals.css. */}
-      <nav className="wellness-dash__nav" aria-label="Основная навигация">
-        {HOME_TABS.map((tab) => (
-          <button
-            key={tab.label}
-            type="button"
-            className={
-              tab.route === null
-                ? "wellness-dash__nav-tab wellness-dash__nav-tab--active"
-                : "wellness-dash__nav-tab"
-            }
-            aria-current={tab.route === null ? "page" : undefined}
-            aria-label={tab.label}
-            onClick={tab.route === null ? undefined : () => navigate(tab.route as string)}
-          >
-            <span className="wellness-dash__nav-icon" aria-hidden="true">
-              {tab.icon}
-            </span>
-            <span className="wellness-dash__nav-label">{tab.label}</span>
-          </button>
-        ))}
-      </nav>
+      {/* Панель — общая для клиентских экранов (DRF-2191, состав и правила —
+          в `components/CustomerTabBar.tsx`); этот экран «Главная». */}
+      <CustomerTabBar active="home" />
     </div>
   );
 }

@@ -50,6 +50,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { BookingCard, BookingCardSkeleton } from "../components/BookingCard";
+import { CustomerTabBar } from "../components/CustomerTabBar";
 import { EmptyRecordsState } from "../components/EmptyRecordsState";
 import { GoalInviteCard } from "../components/GoalInviteCard";
 import { TimeGroupHeader } from "../components/TimeGroupHeader";
@@ -457,57 +458,7 @@ export function CustomerRecordsScreen() {
       </main>
 
       {/* Bottom nav — records is home, the «Записи» tab is selected. */}
-      <nav className="wellness-dash__nav" aria-label="Основная навигация">
-        <button
-          type="button"
-          className="wellness-dash__nav-tab"
-          aria-label="Главная"
-          onClick={() => navigate("/customer/main")}
-        >
-          <span className="wellness-dash__nav-icon" aria-hidden="true">
-            🏠
-          </span>
-          <span className="wellness-dash__nav-label">Главная</span>
-        </button>
-        {/* Вкладки «День» здесь нет (DRF-1546): поверхности «День» не
-            существует — её роль исполнял домашний экран, а он теперь
-            «Главная». Кнопка вела бы на страницу с подсвеченной
-            «Главной», то есть врала бы о том, куда ведёт. Возвращать
-            вместе с самой поверхностью «День». */}
-        <button
-          type="button"
-          className="wellness-dash__nav-tab wellness-dash__nav-tab--active"
-          aria-current="page"
-          aria-label="Записи"
-        >
-          <span className="wellness-dash__nav-icon" aria-hidden="true">
-            📅
-          </span>
-          <span className="wellness-dash__nav-label">Записи</span>
-        </button>
-        <button
-          type="button"
-          className="wellness-dash__nav-tab"
-          aria-label="Услуги"
-          onClick={() => navigate("/customer/catalog")}
-        >
-          <span className="wellness-dash__nav-icon" aria-hidden="true">
-            💅
-          </span>
-          <span className="wellness-dash__nav-label">Услуги</span>
-        </button>
-        <button
-          type="button"
-          className="wellness-dash__nav-tab"
-          aria-label="Я"
-          onClick={() => navigate("/customer/profile")}
-        >
-          <span className="wellness-dash__nav-icon" aria-hidden="true">
-            👤
-          </span>
-          <span className="wellness-dash__nav-label">Я</span>
-        </button>
-      </nav>
+      <CustomerTabBar active="records" />
     </div>
   );
 }

@@ -23,6 +23,7 @@
 import { useNavigate } from "react-router-dom";
 
 import { ComingSoonCard } from "../components/ComingSoonCard";
+import { CustomerTabBar, type CustomerTabKey } from "../components/CustomerTabBar";
 import { useScreenBack } from "../hooks/useScreenBack";
 import { screenRoot } from "../lib/screen-back";
 
@@ -64,15 +65,16 @@ export function PilotComingSoonScreen({ surface }: Props) {
   );
 
   const copy = COPY[surface];
-  const activeTab = surface === "home" ? "Главная" : "Услуги";
-  // Без вкладки «День» (DRF-1546): поверхности «День» не существует —
-  // её роль исполнял домашний экран, а он теперь «Главная».
-  const tabs: Array<{ label: string; icon: string; path: string }> = [
-    { label: "Главная", icon: "🏠", path: "/customer/main" },
-    { label: "Записи", icon: "📅", path: "/customer/records" },
-    { label: "Услуги", icon: "💅", path: "/customer/catalog" },
-    { label: "Я", icon: "👤", path: "/customer/profile" },
-  ];
+  // Таблицей, а не тернаром: новая поверхность без вкладки не проскочит молча
+  // — TypeScript потребует строку в этой записи.
+  const activeTab: Record<Surface, CustomerTabKey | undefined> = {
+    home: "home",
+    catalog: undefined,
+  };
+  // DRF-2191 — панель одна на всех клиентских экранах (`CustomerTabBar`).
+  // «Услуги» из неё ушли (§55 б, макет DRF-1321), поэтому заглушка каталога
+  // рисует панель без подсвеченной вкладки: подсветить нечего, и врать
+  // «ты в Записях» нельзя.
 
   return (
     <div className="profile-screen">
@@ -98,32 +100,9 @@ export function PilotComingSoonScreen({ surface }: Props) {
         </section>
       </main>
 
-      {/* Bottom nav — mirrors the other tab screens; the active tab is
-          the gated surface itself. */}
-      <nav className="wellness-dash__nav" aria-label="Основная навигация">
-        {tabs.map((tab) => {
-          const active = tab.label === activeTab;
-          return (
-            <button
-              key={tab.label}
-              type="button"
-              className={`wellness-dash__nav-tab${
-                active ? " wellness-dash__nav-tab--active" : ""
-              }`}
-              aria-label={tab.label}
-              aria-current={active ? "page" : undefined}
-              onClick={() => {
-                if (!active) navigate(tab.path);
-              }}
-            >
-              <span className="wellness-dash__nav-icon" aria-hidden="true">
-                {tab.icon}
-              </span>
-              <span className="wellness-dash__nav-label">{tab.label}</span>
-            </button>
-          );
-        })}
-      </nav>
+      {/* Панель — общая; активная вкладка только у «Главной» (каталог
+          вкладкой больше не является). */}
+      <CustomerTabBar active={activeTab[surface]} />
     </div>
   );
 }
