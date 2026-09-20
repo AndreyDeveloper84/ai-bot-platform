@@ -103,9 +103,9 @@ describe("GoalSelectScreen (dumb renderer over the decision document)", () => {
       goal_key: "relax",
       source_channel: "miniapp",
     });
-    // New document replaces state: current-goal block shows the label,
-    // the old missing prompt is gone.
-    const current = await screen.findByRole("region", { name: "Текущая цель" });
+    // New document replaces state: the goal now sits in «Уже учла»
+    // (DRF-2177 — from the first frame), the old missing prompt is gone.
+    const current = await screen.findByRole("region", { name: "Уже учла" });
     expect(
       within(current).getByText("Расслабиться и восстановиться"),
     ).toBeInTheDocument();

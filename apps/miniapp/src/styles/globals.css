@@ -830,6 +830,27 @@ a {
   line-height: 1.5;
 }
 
+/* C03.5 (DRF-2177, макет DRF-1178): контекст собран — галочка и одна
+   фраза по центру, ничего кликабельного: уход авто-переходом. */
+.goal-select__done {
+  text-align: center;
+  padding: var(--s-6) var(--s-3);
+}
+
+.goal-select__done-mark {
+  margin: 0 0 var(--s-3);
+  font-size: var(--font-size-500);
+  color: var(--c-accent);
+}
+
+.goal-select__done-text {
+  margin: 0;
+  font-size: var(--font-size-400);
+  font-weight: 600;
+  color: var(--c-text-primary);
+  line-height: 1.4;
+}
+
 /* «Уже учла» (DRF-1744): память заметна, но не спорит с вопросом —
    тот же тихий фон, что у «Текущей цели», строки в один ряд, действие
    «Изменить» — тихая текстовая кнопка, как у побочных намерений. */

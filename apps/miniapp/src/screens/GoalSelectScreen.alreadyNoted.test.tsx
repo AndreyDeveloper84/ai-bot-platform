@@ -152,13 +152,16 @@ describe("«Уже учла» рисуется из документа", () => {
     expect(screen.queryByText("Текущая цель")).toBeNull();
   });
 
-  it("без ответов блока нет — документ до DRF-1744 рисуется как раньше", async () => {
+  it("без ответов блок всё равно есть — цель в «Уже учла» с первого кадра (DRF-2177)", async () => {
+    // Макет C03 (DRF-1178): «Уже учла» стоит на каждом кадре, начиная с
+    // первого; прежняя секция «Текущая цель» снята — на макете её нет.
     mockedFetch.mockResolvedValue(docWith([], "хочу маникюр"));
     renderScreen();
 
     expect(await screen.findByText(FINAL_PROMPT)).toBeInTheDocument();
-    expect(screen.queryByRole("region", { name: ALREADY_NOTED_TITLE })).toBeNull();
-    expect(screen.getByText("Текущая цель")).toBeInTheDocument();
+    const b = screen.getByRole("region", { name: ALREADY_NOTED_TITLE });
+    expect(within(b).getByText("хочу маникюр")).toBeInTheDocument();
+    expect(screen.queryByText("Текущая цель")).toBeNull();
   });
 
   it("«Изменить» только там, где сервер сказал revisable", async () => {
