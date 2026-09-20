@@ -78,7 +78,7 @@ import {
 import { SurfaceSwitchButton } from "../components/SurfaceSwitch";
 import { CustomerTabBar } from "../components/CustomerTabBar";
 import { useScreenBack } from "../hooks/useScreenBack";
-import { backTo } from "../lib/screen-back";
+import { screenRoot } from "../lib/screen-back";
 
 // ---------------------------------------------------------------------------
 // Реальные данные (DRF-1475 §24, DRF-1520). Экран целиком стоит на
@@ -140,15 +140,19 @@ const EMPTY_TOAST: ToastState = { visible: false, message: "" };
 export function CustomerProfileScreen() {
   const navigate = useNavigate();
 
-  // Возврат (DRF-1493) — на дом клиентской поверхности.
+  // Возврат (DRF-1493 → DRF-2201). Прежде у профиля была стрелка «назад» на
+  // Главную — и открытый вопрос «нужна ли вкладке стрелка вообще» (DRF-1481).
+  // Ответ дан макетом DRF-1321: не нужна.
   //
-  // Профиль — вкладка со своей нижней навигацией, и стрелка у него
-  // была и раньше. DRF-1493 не снимает существующие органы
-  // управления, а доводит их до работающего состояния: стрелка
-  // остаётся, но ведёт в заданное место, а не в историю, которой у
-  // пришедшего по deep link нет. Нужна ли вкладке стрелка вообще —
-  // вопрос раскладки поверхности, он у DRF-1481.
-  const onBack = useScreenBack(backTo("/customer/main"));
+  // DRF-2201 — «Профиль» вкладка панели, значит корень: стрелки «назад» нет,
+  // уход — другими вкладками (прежде стрелка вела на Главную — теперь это
+  // вкладка «Главная»). «Сменить режим» для многоролевого остаётся выше.
+  useScreenBack(
+    screenRoot(
+      "«Профиль» — вкладка нижней панели (макет DRF-1321, §55 б): выше неё " +
+        "ничего нет, а уход с экрана — соседние вкладки.",
+    ),
+  );
   const [status, setStatus] = useState<Status>({ kind: "loading" });
   const [offline, setOffline] = useState<boolean>(
     typeof navigator !== "undefined" ? !navigator.onLine : false,
@@ -372,22 +376,6 @@ export function CustomerProfileScreen() {
       <SurfaceSwitchButton />
 
       <header className="records-screen__header">
-        <button
-          type="button"
-          className="records-screen__back"
-          aria-label="Назад"
-          onClick={onBack}
-        >
-          <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-            <path
-              d="M12 4l-6 6 6 6"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          </svg>
-        </button>
         <h1 className="records-screen__title">Профиль</h1>
       </header>
 

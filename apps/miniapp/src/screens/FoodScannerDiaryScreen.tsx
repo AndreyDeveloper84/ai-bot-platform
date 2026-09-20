@@ -37,7 +37,8 @@ import { ApiError } from "../lib/api";
 import { minutesRu, restoreWindowMinutesLeft } from "../lib/restore-window";
 import { saveMealFromEntry } from "../lib/saved-meals";
 import { useScreenBack } from "../hooks/useScreenBack";
-import { backTo } from "../lib/screen-back";
+import { screenRoot } from "../lib/screen-back";
+import { CustomerTabBar } from "../components/CustomerTabBar";
 import { FAVORITES_COPY, FAVORITES_ROUTE, favoritesRefusalText } from "./FoodScannerFavoritesScreen";
 import { WEEK_COPY, WEEK_ROUTE } from "./FoodScannerWeekScreen";
 
@@ -91,7 +92,16 @@ export function FoodScannerDiaryScreen() {
   const navigate = useNavigate();
 
   // Возврат (DRF-1493) — на дом; адрес прежний, теперь объявленный.
-  const onBack = useScreenBack(backTo("/customer/main"));
+  // DRF-2201 — «Дневник» вкладка панели, значит корень: стрелки «назад» нет,
+  // уход — другими вкладками. Экраны «Неделя», «День», «Избранное» и ручной
+  // ввод остаются листовыми и возвращаются В дневник — их возврат этим не
+  // тронут (они ведут сюда, а не через этот экран).
+  useScreenBack(
+    screenRoot(
+      "«Дневник» — вкладка нижней панели (макет DRF-1321, §55 б): выше неё " +
+        "ничего нет, а уход с экрана — соседние вкладки.",
+    ),
+  );
   const [status, setStatus] = useState<Status>({ kind: "loading" });
 
   const load = useCallback(async () => {
@@ -236,24 +246,8 @@ export function FoodScannerDiaryScreen() {
   );
 
   return (
-    <div className="food-scanner-screen">
+    <div className="food-scanner-screen food-scanner-screen--tab-root">
       <header className="records-screen__header">
-        <button
-          type="button"
-          className="records-screen__back"
-          aria-label="Назад"
-          onClick={onBack}
-        >
-          <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
-            <path
-              d="M12 4l-6 6 6 6"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-          </svg>
-        </button>
         <h1 className="records-screen__title">Питание</h1>
       </header>
 
@@ -339,6 +333,10 @@ export function FoodScannerDiaryScreen() {
           />
         )}
       </main>
+
+      {/* Панель — вкладка этого экрана (DRF-2201); стоит вне веток состояния:
+          состояние ошибки не убирает навигацию (#1918). */}
+      <CustomerTabBar active="diary" />
     </div>
   );
 }
