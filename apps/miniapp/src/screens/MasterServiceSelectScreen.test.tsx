@@ -292,7 +292,8 @@ describe("MasterServiceSelectScreen — отказы", () => {
   it.each([
     [new ApiError(409, "salon_catalog_owner_managed", "…", { reason: "salon_catalog_owner_managed" }), SELECT_COPY.salonManaged],
     [new ApiError(403, "not_linked", "…"), SELECT_COPY.notLinked],
-    [new ApiError(503, "catalog_unavailable", "…"), SELECT_COPY.loadError],
+    // М-6b: ошибка загрузки — общий SystemState «Не удалось загрузить каталог услуг».
+    [new ApiError(503, "catalog_unavailable", "…"), "Не удалось загрузить каталог услуг"],
   ])("E1: %s → its own text, no directions", async (error, text) => {
     mockedSelection.mockRejectedValue(error);
     await renderScreen();
@@ -306,9 +307,11 @@ describe("MasterServiceSelectScreen — отказы", () => {
     await renderScreen();
     await openDirection("Направление 0");
 
-    expect(screen.getByText(SELECT_COPY.templatesError)).toBeInTheDocument();
+    // М-6b: «Не удалось загрузить услуги направления» + «Попробовать снова» (ruling §61 е).
+    expect(screen.getByText("Не удалось загрузить услуги направления")).toBeInTheDocument();
     expect(screen.queryByText(SELECT_COPY.noTemplates)).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: SELECT_COPY.retry }));
+    expect(screen.queryByRole("button", { name: "Повторить" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Попробовать снова" }));
     await settle();
     expect(screen.getByLabelText(/Классический маникюр/)).toBeInTheDocument();
   });

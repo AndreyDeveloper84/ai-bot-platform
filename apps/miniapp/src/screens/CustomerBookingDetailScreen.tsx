@@ -41,7 +41,7 @@ import {
   type CancelReasonClass,
 } from "../lib/api";
 import { displayStatusFor, getBookingDetail, renderStatus } from "../lib/customer-records";
-import { formatDuration, formatMoney, formatVisitFull } from "../lib/format";
+import { formatDuration, formatMoney, formatVisitFull, priceFromLabel } from "../lib/format";
 import { visitAddressText } from "../lib/visit-address";
 import { useScreenBack } from "../hooks/useScreenBack";
 import { backTo } from "../lib/screen-back";
@@ -211,6 +211,8 @@ export function CustomerBookingDetailScreen() {
 
   const b = state.booking;
   const { rendering } = renderStatus(displayStatusFor(b));
+  // DRF-2172 — цена записи (снимок); ниже 1 ₽ / null → строки нет.
+  const priceLabel = b.price ? priceFromLabel(b.price) : "";
   const isHistoryRow =
     rendering.label !== "Подтверждена" || new Date(b.visit_at).getTime() < Date.now();
 
@@ -261,6 +263,14 @@ export function CustomerBookingDetailScreen() {
                 ответ взять. Разбор трёхзначности — в lib/visit-address. */}
             <dt>Адрес</dt>
             <dd>{visitAddressText(b.address)}</dd>
+            {/* DRF-2172 — цена записи (снимок на момент записи); без цены
+                строки нет, «Сумма» ниже — это платёж, другой факт. */}
+            {priceLabel && (
+              <>
+                <dt>Цена</dt>
+                <dd>{priceLabel}</dd>
+              </>
+            )}
             {b.payment?.amount && (
               <>
                 <dt>Сумма</dt>

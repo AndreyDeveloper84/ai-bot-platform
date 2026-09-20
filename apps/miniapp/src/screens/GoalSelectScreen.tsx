@@ -98,6 +98,7 @@ import {
   type SafetyStop,
 } from "../lib/customer-goals";
 import { SAFETY_KIND_CLARIFY } from "../lib/health-gate-copy";
+import { closeApp, maxBridge } from "../lib/max-sdk";
 import { backTo, screenRoot, type BackIntent } from "../lib/screen-back";
 import { PLAN_LITE_COPY, PLAN_LITE_ROUTE } from "./PlanLiteScreen";
 
@@ -120,18 +121,36 @@ const GOAL_TEXT_MAX = 500;
  * DRF-1483 ниже ставит запасной выход.
  */
 const NEXT_ROUTES: Record<string, string> = {
+  // Документ каталога до #517 (DRF-2177). Остаётся, пока такой документ
+  // может прийти: выкладки каталога и бота не одновременные.
   browse_catalog: "/customer/catalog",
 };
 
 /**
- * Запасной выход и запасная подпись поля — собственность ЭКРАНА, а не
- * документа (DRF-1483). Появляются ровно тогда, когда документ не дал
- * ни того, ни другого; во всех остальных случаях слова остаются
- * серверными. Каталог выбран не произвольно: это то же место, куда
- * сервер уводит своим единственным сегодняшним `next`.
+ * DRF-2177 — контекст собран (макет C03.5): не маршрут и не кнопка, а
+ * кадр «✓ + Спасибо!» с авто-переходом. В MAX — `closeApp()`: человек
+ * возвращается в чат, где его ждёт следующий шаг (C04 — К-3); вне MAX —
+ * на главный. Текст — дословно с макета DRF-1178; `next.label` документа
+ * («Вернуться в чат») здесь не рисуется — он для потребителя, который
+ * этого id не знает.
  */
-const GUARD_EXIT_ROUTE = "/customer/catalog";
-const GUARD_EXIT_LABEL = "Посмотреть услуги";
+export const NEXT_RETURN_TO_CHAT = "return_to_chat";
+export const COMPLETION_TEXT = "Спасибо! Этого достаточно, чтобы подобрать тебе подходящий шаг.";
+/** Пауза перед авто-переходом — чтобы кадр успел прочитаться. */
+export const COMPLETION_AUTO_MS = 1500;
+const HOME_ROUTE = "/customer/main";
+
+/**
+ * Запасная подпись поля — собственность ЭКРАНА, а не документа
+ * (DRF-1483). Появляется ровно тогда, когда документ не дал свободного
+ * ввода; во всех остальных случаях слова остаются серверными.
+ *
+ * Запасного ВЫХОДА в каталог («Посмотреть услуги») больше нет
+ * (DRF-2177, §60: «Найти услугу» с экрана уходит). Пол под человеком —
+ * кнопка «назад» на главный (экран не корень, DRF-1493; каталог оттуда в
+ * одном тапе) и свободный ввод, который экран ставит сам, если документ
+ * его не дал. Отступление от буквы C-2 по §60 — вынесено владельцу.
+ */
 const FREE_TEXT_FALLBACK_LABEL = "Опиши своими словами";
 
 /**
@@ -146,6 +165,15 @@ const LAST_QUESTION_NOTE = "Ещё один короткий вопрос";
 /** The anketa step currently on the surface, if the server sent one. */
 function currentAnketaStep(doc: DecisionContext): MissingItem | null {
   return doc.missing.find((item) => typeof item.step === "string") ?? null;
+}
+
+/**
+ * DRF-2177 — C03.5: контекст собран. Одно место для кадра и для таймера
+ * авто-перехода, чтобы они не разошлись. Только когда документ пуст: с
+ * вопросом на экране этот `next` — противоречие, и экран рисует вопрос.
+ */
+function isCollected(doc: DecisionContext): boolean {
+  return doc.next?.id === NEXT_RETURN_TO_CHAT && doc.missing.length === 0;
 }
 
 interface Props {
@@ -248,6 +276,31 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
   // возврата нет вовсе (см. абзац выше); в остальных случаях цель
   // открывают с дома клиентской поверхности — «Записи», — и по
   // deep-link `open_goal_select` из бота, где истории нет совсем.
+  // DRF-2177 — C03.5: авто-переход после кадра благодарности. Внутри MAX —
+  // закрыть мини-апп (человек возвращается в чат), вне MAX — на главный.
+  // Таймер живёт ровно пока документ «собран»: новый документ или уход с
+  // экрана его снимают.
+  //
+  // Не пока идёт отправка и не пока открыт пересмотр: уйти посреди
+  // запроса или правки — оставить человека без ответа на то, что он
+  // только что сделал (ревью #1913).
+  const isCompleted =
+    state.kind === "ok" && isCollected(state.doc) && !submitting && revisingStep === null;
+  useEffect(() => {
+    if (!isCompleted) return;
+    const timer = window.setTimeout(() => {
+      // `closeApp()` закрывает только при живом `close()`; без него (или
+      // по deep-link без истории) человек остался бы на кадре без кнопки —
+      // тогда домой сами.
+      if (maxBridge()?.close) {
+        closeApp();
+      } else {
+        navigate(HOME_ROUTE, { replace: true });
+      }
+    }, COMPLETION_AUTO_MS);
+    return () => window.clearTimeout(timer);
+  }, [isCompleted, navigate]);
+
   const back: BackIntent = isRoot
     ? screenRoot(
         "Поверхность цели смонтирована на `/` первым экраном клиента — " +
@@ -389,9 +442,12 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
 
   const { doc } = state;
   const knownGoal = doc.known.goal;
+  // DRF-2177: подпись цели — из документа (`label`); прежний вывод по
+  // ряду `suggestions` — для документа каталога до #517.
   const knownLabel = knownGoal
-    ? knownGoal.goal_text ??
-      doc.suggestions.find((s) => s.key === knownGoal.goal_key)?.label ??
+    ? knownGoal.label ||
+      knownGoal.goal_text ||
+      doc.suggestions.find((s) => s.key === knownGoal.goal_key)?.label ||
       knownGoal.goal_key
     : null;
   const intentLabel = (id: string) =>
@@ -446,10 +502,13 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
   const stepAllowsFreeText = Boolean(
     anketaStep?.allow_free_text && anketaStep.step && !stepOwnTextField,
   );
+  // DRF-2177 — C03.5: контекст собран, вопросов нет — кадр благодарности
+  // и авто-переход (см. `isCollected`).
+  const completed = isCollected(doc);
   const hasFreeText = Boolean(formulateOwnLabel) || stepAllowsFreeText;
-  const hasOnward = Boolean(nextRoute) || stepOwnTextField;
+  const hasOnward = Boolean(nextRoute) || stepOwnTextField || completed;
   const documentIsGate = !hasFreeText && !hasOnward;
-  const showFreeText = hasFreeText || documentIsGate;
+  const showFreeText = (hasFreeText || documentIsGate) && !completed;
   const freeTextLabel = formulateOwnLabel ?? FREE_TEXT_FALLBACK_LABEL;
 
   // Куда уедет введённый текст, решает сервер, а не экран: пока текущий
@@ -473,22 +532,11 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
       </StickyCtaButton>
     ) : null;
 
-  // Выход с поверхности (DRF-1469) — рядом, но НЕ вместо: `next` ведёт
-  // дальше по клиентскому пути, «Сменить режим» уводит с клиентской
-  // поверхности целиком. От документа не зависит намеренно: сервер
-  // вправе прислать документ без `next`, и остаться без выхода в этот
-  // момент — ровно та ловушка, из-за которой анкету прятали.
-  const surfaceExit = canSwitch ? <SurfaceSwitchExit /> : null;
-
-  // Выход, который экран ставит САМ, когда документ не оставил ни
-  // одного. Не «ещё одна кнопка рядом с `next`»: пока `next` есть,
-  // этого выхода нет — иначе экран начал бы спорить с сервером о том,
-  // куда вести. Он появляется только на документе-воротах.
-  const guardExit = documentIsGate ? (
-    <StickyCtaButton disabled={submitting} onClick={() => navigate(GUARD_EXIT_ROUTE)}>
-      {GUARD_EXIT_LABEL}
-    </StickyCtaButton>
-  ) : null;
+  // Выход с поверхности (DRF-1469) — ТОЛЬКО на корне (DRF-2177, §60:
+  // «Сменить режим» с экрана уходит). На корне кнопки «назад» нет, и
+  // многоролевому без цели иначе не уйти с клиентской поверхности; не на
+  // корне выход с экрана — «назад» на главный, а смена режима — там.
+  const surfaceExit = isRoot && canSwitch ? <SurfaceSwitchExit /> : null;
   // Сохранение свободного текста — липкой кнопкой, пока в поле есть текст.
   //
   // Раньше единственная кнопка, сохраняющая формулировку человека, стояла
@@ -511,19 +559,20 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
     </StickyCtaButton>
   ) : null;
 
-  const stickyCount = [saveFreeText, onward, guardExit, surfaceExit].filter(Boolean).length;
+  const stickyCount = [saveFreeText, onward, surfaceExit].filter(Boolean).length;
 
   return (
     <ScreenLayout
       back={back}
-      title="Какая у тебя цель?"
+      // DRF-2177 — макет C03 (DRF-1178) заголовка не рисует: кадры с
+      // известной целью идут без него; шаг цели — как прежде.
+      title={knownGoal ? undefined : "Какая у тебя цель?"}
       tallCta={stickyCount > 1}
       cta={
         stickyCount > 0 ? (
           <StickyBar>
             {saveFreeText}
             {onward}
-            {guardExit}
             {surfaceExit}
           </StickyBar>
         ) : undefined
@@ -543,63 +592,52 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
           вторая половина починки — липкая «Отправить» выше: она исчезает
           вместе с очищенным полем, то есть изменение происходит ТАМ, где
           человек стоит, а не одной строкой выше сгиба. */}
-      {savedNotice && (
+      {savedNotice && !completed && (
         <div className="callout callout--success" role="status">
           <p style={{ margin: 0 }}>{savedNotice}</p>
         </div>
       )}
 
-      {/* «Уже учла» (DRF-1744) — пока идёт проход: цель (если есть) и
-          ответы с «Изменить». Без ответов — прежняя секция «Текущая
-          цель», чтобы документы до DRF-1744 рисовались как раньше. */}
-      {knownAnswers.length > 0 ? (
+      {/* «Уже учла» (DRF-1744) — с ПЕРВОГО кадра (DRF-2177, макет C03):
+          цель с «Изменить» и ответы прохода, сколько их есть. Прежняя
+          секция «Текущая цель» снята — на макете её нет. */}
+      {(knownLabel || knownAnswers.length > 0) && (
         <AlreadyNoted
           goalLabel={knownLabel}
           answers={knownAnswers}
           disabled={submitting}
           onRevise={setRevisingStep}
-          onReviseGoal={reviseGoal ?? undefined}
+          // На кадре C03.5 ничего кликабельного (макет): «Изменить» уходит,
+          // иначе тап за 1,5 с до авто-перехода ушёл бы в никуда.
+          onReviseGoal={completed ? undefined : reviseGoal ?? undefined}
         />
-      ) : (
-        knownGoal &&
-        knownLabel && (
-          <section aria-labelledby="goal-select-current">
-            <h2 id="goal-select-current" className="goal-select__section-title">
-              Текущая цель
-            </h2>
-            <p className="goal-select__current">
-              {knownLabel}
-              {/* DRF-1758 — «Твоя цель: … · Изменить» (макет C02.1): кнопка
-                  ровно когда сервер прислал намерение start_anketa. */}
-              {reviseGoal && (
-                <>
-                  {" · "}
-                  <button
-                    type="button"
-                    className="goal-select__minor-action"
-                    disabled={submitting}
-                    onClick={reviseGoal}
-                    aria-label={`Изменить: ${knownLabel}`}
-                  >
-                    Изменить
-                  </button>
-                </>
-              )}
-            </p>
-            {/* DRF-2101 — Plan Lite: «Мой план» строится от этой цели. Флага
-                сборки нет (DRF-2144): включён ли план, скажет сервер на самом
-                экране плана. */}
-            <div className="food-scanner-screen__cta-stack">
-              <button
-                type="button"
-                className="btn-secondary"
-                onClick={() => navigate(PLAN_LITE_ROUTE)}
-              >
-                {PLAN_LITE_COPY.entryFromGoal}
-              </button>
-            </div>
-          </section>
-        )
+      )}
+
+      {/* DRF-2101 — Plan Lite: «Мой план» строится от этой цели. Флага
+          сборки нет (DRF-2144): включён ли план, скажет сервер на самом
+          экране плана. На макете C03 этого входа нет — решение владельца
+          §49 (Plan Lite), не тронуто в DRF-2177. */}
+      {knownGoal && knownLabel && !completed && (
+        <div className="food-scanner-screen__cta-stack">
+          <button
+            type="button"
+            className="btn-secondary"
+            onClick={() => navigate(PLAN_LITE_ROUTE)}
+          >
+            {PLAN_LITE_COPY.entryFromGoal}
+          </button>
+        </div>
+      )}
+
+      {/* DRF-2177 — C03.5: контекст собран. Кадр макета дословно; уход —
+          авто-переходом (эффект ниже), кнопки нет. */}
+      {completed && (
+        <section className="goal-select__done" role="status" aria-live="polite">
+          <p className="goal-select__done-mark" aria-hidden="true">
+            ✓
+          </p>
+          <p className="goal-select__done-text">{COMPLETION_TEXT}</p>
+        </section>
       )}
 
       {/* Пересмотр ответа занимает место вопроса: варианты — те, что
@@ -686,7 +724,11 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
         </section>
       )}
 
-      {doc.suggestions.length > 0 && (
+      {/* DRF-2177 (§60): при известной цели ряд целей скрыт — семь целей
+          только за «Изменить» (start_anketa → шаг цели с теми же
+          опциями). Ряд остаётся в документе ради подписи цели у прежних
+          читателей, поэтому правило здесь, а не на сервере. */}
+      {!knownGoal && doc.suggestions.length > 0 && (
         <section aria-labelledby="goal-select-suggestions">
           <h2
             id="goal-select-suggestions"
@@ -700,14 +742,14 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
             aria-labelledby="goal-select-suggestions"
           >
             {doc.suggestions.map((s) => {
-              const active = knownGoal?.goal_key === s.key;
+              // Ряд рисуется только без цели (выше), подсвечивать нечего.
               return (
                 <button
                   key={s.key}
                   type="button"
                   role="radio"
-                  aria-checked={active}
-                  className={`chip${active ? " chip--active" : ""}`}
+                  aria-checked={false}
+                  className="chip"
                   disabled={submitting}
                   onClick={() =>
                     submit({ goal_key: s.key, source_channel: "miniapp" })

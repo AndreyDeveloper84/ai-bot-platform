@@ -229,3 +229,28 @@ describe("правила §13.3 (чистые)", () => {
     expect(week[0]?.is_working_day).toBe(false);
   });
 });
+
+describe("системные состояния через SystemState (DRF-2194)", () => {
+  it("загрузка — общий скелет без слов", () => {
+    mockedGet.mockReturnValue(new Promise(() => {}));
+    renderScreen();
+    expect(screen.getByRole("status", { busy: true })).toBeInTheDocument();
+  });
+
+  it("403 not_linked на загрузке — свой текст экрана, не «Недостаточно прав»", async () => {
+    mockedGet.mockRejectedValueOnce(new ApiError(403, "not_linked", "…"));
+    renderScreen();
+    // Скелет тоже role=status (busy) — ждём текст, а не роль.
+    expect(await screen.findByText(NOT_LINKED_MESSAGE)).toBeInTheDocument();
+    expect(screen.queryByText(/Недостаточно прав/)).toBeNull();
+  });
+
+  it("ошибка — «Не удалось загрузить рабочие часы» + «Попробовать снова»", async () => {
+    mockedGet.mockRejectedValueOnce(new Error("boom"));
+    renderScreen();
+    expect(await screen.findByRole("alert")).toHaveTextContent("Не удалось загрузить рабочие часы");
+    expect(screen.queryByText(/Не получилось загрузить/)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Попробовать снова" }));
+    await waitFor(() => expect(mockedGet).toHaveBeenCalledTimes(2));
+  });
+});

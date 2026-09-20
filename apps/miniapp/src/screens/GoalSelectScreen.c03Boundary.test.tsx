@@ -35,6 +35,7 @@ function docWithStep(step: string, prompt: string): DecisionContext {
       goal: {
         goal_key: "relax",
         goal_text: null,
+        label: "Расслабиться",
         selected_at: "2026-09-12T10:00:00Z",
         source_channel: "miniapp",
       },
@@ -97,8 +98,9 @@ describe("граница C03", () => {
       expect(C03_FORBIDDEN_STEP_KEYS.has(step)).toBe(true);
       mockedFetch.mockResolvedValue(docWithStep(step, "В каком районе удобнее?"));
       renderScreen();
-      // Экран дорисовался (цель на месте) — а вопроса нет.
-      expect(await screen.findByText(/Расслабиться|Твоя цель|цель/i)).toBeInTheDocument();
+      // Экран дорисовался (цель в «Уже учла») — а вопроса нет. DRF-2177:
+      // заголовка на кадре с целью нет, ориентир — подпись цели.
+      expect(await screen.findByText("Расслабиться")).toBeInTheDocument();
       expect(screen.queryByText("В каком районе удобнее?")).toBeNull();
       expect(screen.queryByRole("button", { name: "Вариант" })).toBeNull();
       const ours = boundaryWarnings();

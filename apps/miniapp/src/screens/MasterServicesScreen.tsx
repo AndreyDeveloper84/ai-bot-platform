@@ -48,6 +48,7 @@ import {
   pickedMessage,
   type PickAvailability,
 } from "../components/OwnServiceForm";
+import { SystemState } from "../components/master/SystemState";
 import { ApiError } from "../lib/api";
 import { SUPPORT_DEEPLINK } from "../lib/customer-profile";
 import {
@@ -76,13 +77,10 @@ const COPY = {
   chooseFromCatalog: "Выбрать из каталога",
   // DRF-1808 (M16): направления можно изменить в любое время (P13) — экран 02.
   directions: "Направления",
-  loadError: "Не удалось загрузить услуги.",
-  retryLoad: "Повторить",
   salonManaged: "Услуги салона ведёт владелец салона.",
   notLinkedTitle: "Доступ не настроен",
   notLinkedText: "Профиль ещё не привязан — привязку выполнит оператор.",
   support: "Написать в поддержку",
-  retry: "Попробовать снова",
   durationUnit: "мин",
   priceUnit: "₽",
 };
@@ -149,7 +147,6 @@ export {
   type OwnServiceDraft,
   type OwnServiceErrors,
 } from "../components/OwnServiceForm";
-export const OWN_LOAD_ERROR = "Не получилось загрузить свои услуги";
 
 // --- helpers (pure) ------------------------------------------------------------
 
@@ -450,7 +447,7 @@ function OwnServicesSection({
   onSelected: (state: ServiceSelectionState) => void;
 }) {
   const [items, setItems] = useState<CanonGapRequest[] | null>(null);
-  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loadError, setLoadError] = useState<unknown>(null);
   const [notLinked, setNotLinked] = useState(false);
   const [formOpen, setFormOpen] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -468,7 +465,7 @@ function OwnServicesSection({
           setItems([]);
           return;
         }
-        setLoadError(e instanceof ApiError ? e.detail || e.slug : "Сеть недоступна");
+        setLoadError(e);
       });
   }, []);
 
@@ -487,14 +484,13 @@ function OwnServicesSection({
           {NOT_LINKED_MESSAGE}
         </p>
       )}
-      {loadError && (
-        <div className="callout callout--danger" role="alert">
-          <p>{OWN_LOAD_ERROR}</p>
-          <p style={{ fontSize: "var(--font-size-100)", opacity: 0.7 }}>{loadError}</p>
-          <button type="button" className="btn-secondary" onClick={() => void load()}>
-            {COPY.retry}
-          </button>
-        </div>
+      {loadError !== null && loadError !== undefined && (
+        <SystemState
+          kind="load_error"
+          what="ownServices"
+          err={loadError}
+          onRetry={() => void load()}
+        />
       )}
       {message && <p role="status">{message}</p>}
       {items !== null && items.length === 0 && !notLinked && <p>{OWN_EMPTY}</p>}
@@ -536,7 +532,7 @@ type SelectionLoad =
   | { kind: "ready"; state: ServiceSelectionState }
   | { kind: "salon_managed" }
   | { kind: "not_linked" }
-  | { kind: "error" };
+  | { kind: "error"; err: unknown };
 
 export function MasterServicesScreen() {
   const navigate = useNavigate();
@@ -560,7 +556,7 @@ export function MasterServicesScreen() {
             ? { kind: "salon_managed" }
             : reason === "not_linked"
               ? { kind: "not_linked" }
-              : { kind: "error" },
+              : { kind: "error", err: e },
         );
       });
     return () => {
@@ -632,25 +628,19 @@ export function MasterServicesScreen() {
         <h1>{COPY.title}</h1>
       </header>
 
-      {load.kind === "loading" && (
-        <div className="master-services__body" aria-busy="true">
-          {[1, 2, 3].map((i) => (
-            <div key={i} className="skeleton service-card service-card--skel" />
-          ))}
-        </div>
-      )}
+      {load.kind === "loading" && <SystemState kind="loading" />}
       {load.kind === "salon_managed" && (
         <p className="callout" role="status">
           {COPY.salonManaged}
         </p>
       )}
       {load.kind === "error" && (
-        <div className="callout callout--danger" role="alert">
-          <p>{COPY.loadError}</p>
-          <button type="button" className="btn-secondary" onClick={() => setReloadKey((k) => k + 1)}>
-            {COPY.retryLoad}
-          </button>
-        </div>
+        <SystemState
+          kind="load_error"
+          what="services"
+          err={load.err}
+          onRetry={() => setReloadKey((k) => k + 1)}
+        />
       )}
 
       {state && (

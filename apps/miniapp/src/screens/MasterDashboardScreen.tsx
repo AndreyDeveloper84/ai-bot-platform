@@ -60,7 +60,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Link, useLocation, useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import { ApiError } from "../lib/api";
 import { salonOwnerHint } from "../lib/salonOwnerHint";
 import {
@@ -77,7 +77,10 @@ import {
   signalReady,
 } from "../lib/max-sdk";
 import { AvatarSheet } from "../components/AvatarSheet";
+import { MasterBookingCard } from "../components/master/MasterBookingCard";
+import { SystemState } from "../components/master/SystemState";
 import { MasterTabBar } from "../components/MasterTabBar";
+import { useOnline } from "../hooks/useOnline";
 import { useMasterAvatarItems } from "../hooks/useMasterAvatarItems";
 import { AcceptingBookingsToggle } from "../components/AcceptingBookingsToggle";
 import { SetupProgressCard } from "../components/SetupProgressCard";
@@ -98,9 +101,11 @@ const COPY = {
     next: "Ближайшая запись",
     later: "Дальше сегодня",
     // §61: формат DRF-1185 («1 ч 20 мин») общим helper'ом с «Деталями записи».
-    untilVisit: (min: number) => (min > 0 ? `До визита ${formatDurationRu(min)}` : "Уже сейчас"),
-    range: (start: string, end: string) => `${start}–${end}`,
+    untilVisit: (min: number) =>
+      min > 0 ? `До визита ${formatDurationRu(min)}` : "Уже сейчас",
     noVisits: "На сегодня записей нет",
+    // DRF-2155 (М-3) — дверь в «Новую запись» (макет DRF-1182/1184).
+    addBooking: "Добавить запись",
     dayOff: "Сегодня выходной",
     hoursCta: "Рабочие часы →",
     frameUnknown: "Не удалось проверить расписание",
@@ -122,17 +127,8 @@ const COPY = {
           : `Вы провели ${n} ${pluralRu(n, "клиента", "клиентов", "клиентов")}. Хороший день.`
         : "Хороший день. Завтра увидимся.",
   },
-  offline: {
-    banner: "Данные могут быть неактуальны",
-    retry: "Обновить",
-  },
-  permissionDenied: {
-    title: "Этот диалог не для вас",
-    body: "Если думаете, что должны видеть — напишите администратору салона.",
-  },
-  loading: "Загружаем рабочий стол…",
-  errorTitle: "Не получилось загрузить",
-  retry: "Попробовать снова",
+  // Системные состояния (загрузка / ошибка / нет прав / нет сети / устарело)
+  // — только через SystemState и его словарь (DRF-2157, макет DRF-1181 п.10).
 };
 
 /** Russian plural — picks (one / few / many) based on Slavic rules. */
@@ -165,6 +161,8 @@ export function MasterDashboardScreen() {
   const lastGoodRef = useRef<DashboardResponse | null>(null);
   const [phase, setPhase] = useState<Phase>({ kind: "loading" });
   const [refreshing, setRefreshing] = useState(false);
+  // Реактивно: сеть вернулась — полоса сама сменится на «Не удалось обновить» с повтором.
+  const online = useOnline();
 
   // Pull-to-refresh state.
   const touchStartY = useRef<number | null>(null);
@@ -280,35 +278,33 @@ export function MasterDashboardScreen() {
 
   // --- Branch rendering --------------------------------------------------
 
+  // Системные состояния — один компонент на все мастерские экраны (DRF-2157).
   if (phase.kind === "error_permission") {
     return (
-      <PermissionDeniedScreen
-        onRetry={() => navigate("/master/dashboard", { replace: true })}
-      />
+      <div className="master-dashboard">
+        <SystemState kind="forbidden" />
+      </div>
     );
   }
 
-  if (phase.kind === "loading") {
+  if (phase.kind === "loading" || phase.kind === "error_initial") {
     return (
       <DashboardFrame
         scrollRef={scrollContainerRef}
         onTouchStart={onTouchStart}
         onTouchEnd={onTouchEnd}
       >
-        <LoadingSkeleton />
-        <TabBarBlank />
-      </DashboardFrame>
-    );
-  }
-
-  if (phase.kind === "error_initial") {
-    return (
-      <DashboardFrame
-        scrollRef={scrollContainerRef}
-        onTouchStart={onTouchStart}
-        onTouchEnd={onTouchEnd}
-      >
-        <ErrorInitial err={phase.err} onRetry={() => load(false)} />
+        {phase.kind === "loading" ? (
+          <SystemState kind="loading" />
+        ) : (
+          <SystemState
+            kind="load_error"
+            what="today"
+            err={phase.err}
+            busy={refreshing}
+            onRetry={() => load(false)}
+          />
+        )}
         <TabBarBlank />
       </DashboardFrame>
     );
@@ -320,7 +316,15 @@ export function MasterDashboardScreen() {
   }
 
   // States.
-  const { active_visit, next_visit, upcoming_today, inbox_preview, today_summary, tab_badges, states } = data;
+  const {
+    active_visit,
+    next_visit,
+    upcoming_today,
+    inbox_preview,
+    today_summary,
+    tab_badges,
+    states,
+  } = data;
   const isEmptyToday =
     active_visit === null &&
     next_visit === null &&
@@ -343,11 +347,24 @@ export function MasterDashboardScreen() {
         masterName={data.master.name}
         photoUrl={data.master.photo_url}
         nowIso={data.now_iso}
-        profileHasOwnerPendingChange={tab_badges.profile_has_owner_pending_change}
+        profileHasOwnerPendingChange={
+          tab_badges.profile_has_owner_pending_change
+        }
       />
 
+      {/* Данные есть, обновить не вышло: без сети — «Нет подключения», иначе «Не удалось обновить». */}
       {isStale ? (
-        <StaleBanner onRetry={() => load(true)} refreshing={refreshing} />
+        !online ? (
+          <SystemState kind="offline" />
+        ) : (
+          <SystemState
+            kind="load_error"
+            err={phase.err}
+            hasData
+            busy={refreshing}
+            onRetry={() => load(true)}
+          />
+        )
       ) : null}
 
       {/* DRF-2152 — состояние дня ПЕРВЫМ (макет DRF-1182). */}
@@ -364,6 +381,9 @@ export function MasterDashboardScreen() {
         totalClients={today_summary.total_clients_today}
         onHours={onHoursCta}
         onRecheck={() => load(true)}
+        onAddBooking={() =>
+          navigate(isSolo ? "/solo/booking/new" : "/master/booking/new")
+        }
         bookingHref={bookingHref}
       />
 
@@ -375,7 +395,9 @@ export function MasterDashboardScreen() {
 
       <AylaEntrySection onOpen={onAylaOpen} />
 
-      <MasterTabBar scheduleHasPendingChange={tab_badges.schedule_has_pending_change} />
+      <MasterTabBar
+        scheduleHasPendingChange={tab_badges.schedule_has_pending_change}
+      />
     </DashboardFrame>
   );
 }
@@ -465,11 +487,15 @@ export function DashboardHeader({
       <div className="master-dashboard__header-left">
         <div className="master-dashboard__salon">{salonName}</div>
         {/* DRF-2179 (§61 п.6): один стиль даты с «Деталями записи» — «20 сентября · воскресенье». */}
-        <div className="master-dashboard__date">{formatDateDotWeekdayRu(nowIso)}</div>
+        <div className="master-dashboard__date">
+          {formatDateDotWeekdayRu(nowIso)}
+        </div>
       </div>
       <div className="master-dashboard__header-right">
         <div className="master-dashboard__who">
-          {firstName ? <div className="master-dashboard__name">{firstName}</div> : null}
+          {firstName ? (
+            <div className="master-dashboard__name">{firstName}</div>
+          ) : null}
           <AvatarSheet
             name={masterName}
             photoUrl={photoUrl}
@@ -499,6 +525,7 @@ function DayBlock({
   totalClients,
   onHours,
   onRecheck,
+  onAddBooking,
   bookingHref,
 }: {
   activeVisit: DashboardActiveVisit | null;
@@ -513,11 +540,17 @@ function DayBlock({
   totalClients: number;
   onHours: () => void;
   onRecheck: () => void;
+  onAddBooking: () => void;
   bookingHref: (bookingId: string) => string;
 }) {
   let body: React.ReactNode;
   if (isDayDone) {
-    body = <DayDoneLine completedCount={completedCount} totalClients={totalClients} />;
+    body = (
+      <DayDoneLine
+        completedCount={completedCount}
+        totalClients={totalClients}
+      />
+    );
   } else if (isEmptyToday) {
     if (dayOff === true) {
       body = (
@@ -536,7 +569,9 @@ function DayBlock({
       // Каталог не ответил: «не знаю» — не «свободный день» (DRF-1111).
       body = (
         <>
-          <p className="master-dashboard__empty-line">{COPY.day.frameUnknown}</p>
+          <p className="master-dashboard__empty-line">
+            {COPY.day.frameUnknown}
+          </p>
           <button
             type="button"
             className="btn-secondary master-dashboard__inline-cta"
@@ -549,15 +584,31 @@ function DayBlock({
     } else if (noServices) {
       body = <NoServicesLine salonName={salonName} />;
     } else {
-      // Кнопка «Добавить запись» — с М-3 (DRF-2155); до неё — только текст.
-      body = <p className="master-dashboard__empty-line">{COPY.day.noVisits}</p>;
+      body = (
+        <>
+          <p className="master-dashboard__empty-line">{COPY.day.noVisits}</p>
+          <button
+            type="button"
+            className="btn-secondary master-dashboard__inline-cta"
+            onClick={onAddBooking}
+          >
+            {COPY.day.addBooking}
+          </button>
+        </>
+      );
     }
   } else {
     body = (
       <>
-        {activeVisit ? <ScheduledNowCard visit={activeVisit} href={bookingHref} /> : null}
-        {nextVisit ? <NextVisitCard visit={nextVisit} href={bookingHref} /> : null}
-        {upcoming.length > 0 ? <LaterTodayList visits={upcoming} href={bookingHref} /> : null}
+        {activeVisit ? (
+          <ScheduledNowCard visit={activeVisit} href={bookingHref} />
+        ) : null}
+        {nextVisit ? (
+          <NextVisitCard visit={nextVisit} href={bookingHref} />
+        ) : null}
+        {upcoming.length > 0 ? (
+          <LaterTodayList visits={upcoming} href={bookingHref} />
+        ) : null}
       </>
     );
   }
@@ -575,9 +626,8 @@ function DayBlock({
 }
 
 /**
- * Имя — услуга — HH:MM–HH:MM. Три поля, и только они (макет DRF-1182).
- * Карточка — ссылка на «Детали записи» (DRF-2156; DRF-1183 «нажатие на
- * запись → экран деталей»); адрес возврата — этот экран.
+ * Карточка записи — общая MasterBookingCard (DRF-1181 п.5, DRF-2157): время,
+ * имя, услуга, длительность; ссылка на «Детали записи» (DRF-2156).
  */
 function VisitRow({
   first,
@@ -585,6 +635,7 @@ function VisitRow({
   service,
   startIso,
   endIso,
+  durationMin,
   to,
   quiet = false,
 }: {
@@ -593,24 +644,21 @@ function VisitRow({
   service: string;
   startIso: string;
   endIso: string;
+  durationMin: number;
   to: string;
   quiet?: boolean;
 }) {
-  const clientName = joinClientName(first, lastInitial);
-  const location = useLocation();
   return (
-    <Link
+    <MasterBookingCard
+      variant="today"
+      clientName={joinClientName(first, lastInitial)}
+      serviceName={service}
+      startIso={startIso}
+      endIso={endIso}
+      durationMin={durationMin}
       to={to}
-      state={{ from: location.pathname }}
-      className={quiet ? "m-card m-card--tappable m-card--quiet" : "m-card m-card--tappable"}
-      onClick={() => hapticSelection()}
-    >
-      <div className="m-card__title">{clientName}</div>
-      <div className="m-card__meta">{service}</div>
-      <div className="m-card__meta">
-        {COPY.day.range(formatTimeHM(startIso), formatTimeHM(endIso))}
-      </div>
-    </Link>
+      quiet={quiet}
+    />
   );
 }
 
@@ -622,7 +670,9 @@ function ScheduledNowCard({
   href: (bookingId: string) => string;
 }) {
   // Конец — по часам: начало + длительность; «До конца ≈» не рисуется.
-  const end = new Date(new Date(visit.started_at).getTime() + visit.duration_min * 60_000);
+  const end = new Date(
+    new Date(visit.started_at).getTime() + visit.duration_min * 60_000,
+  );
   return (
     <div className="master-dashboard__day-part">
       <p className="master-dashboard__day-label">{COPY.day.scheduledNow}</p>
@@ -632,6 +682,7 @@ function ScheduledNowCard({
         service={visit.service_name}
         startIso={visit.started_at}
         endIso={end.toISOString()}
+        durationMin={visit.duration_min}
         to={href(visit.booking_id)}
       />
     </div>
@@ -647,7 +698,9 @@ function NextVisitCard({
 }) {
   const endIso =
     visit.end_at ||
-    new Date(new Date(visit.visit_at).getTime() + visit.duration_min * 60_000).toISOString();
+    new Date(
+      new Date(visit.visit_at).getTime() + visit.duration_min * 60_000,
+    ).toISOString();
   return (
     <div className="master-dashboard__day-part">
       <p className="master-dashboard__day-label">{COPY.day.next}</p>
@@ -657,9 +710,12 @@ function NextVisitCard({
         service={visit.service_name}
         startIso={visit.visit_at}
         endIso={endIso}
+        durationMin={visit.duration_min}
         to={href(visit.booking_id)}
       />
-      <p className="master-dashboard__day-until">{COPY.day.untilVisit(visit.minutes_until ?? 0)}</p>
+      <p className="master-dashboard__day-until">
+        {COPY.day.untilVisit(visit.minutes_until ?? 0)}
+      </p>
     </div>
   );
 }
@@ -683,6 +739,11 @@ function LaterTodayList({
               service={v.service_name}
               startIso={v.visit_at}
               endIso={v.end_at}
+              durationMin={Math.round(
+                (new Date(v.end_at).getTime() -
+                  new Date(v.visit_at).getTime()) /
+                  60_000,
+              )}
               to={href(v.booking_id)}
               quiet
             />
@@ -696,7 +757,9 @@ function LaterTodayList({
 function NoServicesLine({ salonName }: { salonName: string | null }) {
   return (
     <div className="callout" role="status">
-      <p style={{ margin: 0 }}>{COPY.empty.noServices(salonOwnerHint(salonName))}</p>
+      <p style={{ margin: 0 }}>
+        {COPY.empty.noServices(salonOwnerHint(salonName))}
+      </p>
     </div>
   );
 }
@@ -709,103 +772,14 @@ function DayDoneLine({
   totalClients: number;
 }) {
   const n = Math.max(completedCount, totalClients);
-  return <p className="master-dashboard__empty-line">{COPY.dayDone.body(n, null, null)}</p>;
-}
-
-// ----------------------------------------------------------------------------
-// Loading / error / stale
-// ----------------------------------------------------------------------------
-
-function LoadingSkeleton() {
   return (
-    <div className="master-dashboard__skeleton-wrap" aria-busy="true">
-      <p className="master-dashboard__loading-label">{COPY.loading}</p>
-      <div className="m-card m-card--skel">
-        <div className="skeleton" style={{ width: "60%", height: "1.1em" }} />
-        <div className="skeleton" style={{ width: "40%", height: "0.9em", marginTop: 8 }} />
-      </div>
-      <div className="m-card m-card--skel">
-        <div className="skeleton" style={{ width: "70%", height: "1.1em" }} />
-        <div className="skeleton" style={{ width: "50%", height: "0.9em", marginTop: 8 }} />
-      </div>
-      <div className="m-card m-card--skel">
-        <div className="skeleton" style={{ width: "55%", height: "1.1em" }} />
-        <div className="skeleton" style={{ width: "65%", height: "0.9em", marginTop: 8 }} />
-      </div>
-    </div>
-  );
-}
-
-function ErrorInitial({
-  err,
-  onRetry,
-}: {
-  err: unknown;
-  onRetry: () => void;
-}) {
-  const isServer = err instanceof ApiError && err.status >= 500;
-  const body = isServer
-    ? "Что-то у нас не получается прямо сейчас."
-    : "Не получилось загрузить. Проверьте интернет и попробуйте снова.";
-  return (
-    <div className="master-dashboard__section">
-      <h2 className="master-dashboard__section-title">{COPY.errorTitle}</h2>
-      <div className="callout callout--danger" role="alert">
-        <p style={{ margin: 0 }}>{body}</p>
-        <div style={{ marginTop: "var(--s-3)" }}>
-          <button
-            type="button"
-            className="btn-secondary"
-            onClick={onRetry}
-          >
-            {COPY.retry}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function StaleBanner({
-  onRetry,
-  refreshing,
-}: {
-  onRetry: () => void;
-  refreshing: boolean;
-}) {
-  return (
-    <div className="master-dashboard__stale-banner" role="status">
-      <span>{COPY.offline.banner}</span>
-      <button
-        type="button"
-        className="master-dashboard__stale-retry"
-        onClick={onRetry}
-        disabled={refreshing}
-      >
-        {COPY.offline.retry}
-      </button>
-    </div>
-  );
-}
-
-function PermissionDeniedScreen({ onRetry: _onRetry }: { onRetry: () => void }) {
-  return (
-    <div className="master-dashboard">
-      <section className="master-dashboard__section">
-        <h2 className="master-dashboard__section-title">
-          {COPY.permissionDenied.title}
-        </h2>
-        <div className="callout callout--danger" role="alert">
-          <p style={{ margin: 0 }}>{COPY.permissionDenied.body}</p>
-        </div>
-      </section>
-    </div>
+    <p className="master-dashboard__empty-line">
+      {COPY.dayDone.body(n, null, null)}
+    </p>
   );
 }
 
 /** Empty tab bar shown while data loads — keeps layout stable. */
 function TabBarBlank() {
-  return (
-    <MasterTabBar scheduleHasPendingChange={false} />
-  );
+  return <MasterTabBar scheduleHasPendingChange={false} />;
 }

@@ -24,6 +24,7 @@
 
 import type { RecordItem } from "../lib/customer-records";
 import { renderStatus } from "../lib/customer-records";
+import { priceFromLabel } from "../lib/format";
 import { PaymentStatusBadge } from "./PaymentStatusBadge";
 import { StatusBadge, tintColourVar } from "./StatusBadge";
 
@@ -70,6 +71,7 @@ export function BookingCard({
   const accent = tintColourVar(rendering.tint);
   const actions = new Set(item.actions);
   const reviewPending = variant === "past" && actions.has("review");
+  const priceLabel = item.price ? priceFromLabel(item.price) : "";
 
   return (
     <article
@@ -100,6 +102,11 @@ export function BookingCard({
       </div>
 
       <div className="records-card__who">у {item.masterName}</div>
+
+      {/* DRF-2172 — цена записи «3 200 ₽» (снимок на момент записи), в
+          той же форме, что в карточке на Главной. null / ниже 1 ₽ →
+          строки нет (§103, DRF-1989) — «0 ₽» не рисуется. */}
+      {priceLabel && <div className="records-card__price">{priceLabel}</div>}
 
       {reviewPending && (
         <p className="records-card__review-hint" aria-live="polite">

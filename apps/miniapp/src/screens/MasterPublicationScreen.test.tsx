@@ -481,7 +481,8 @@ describe("экран 08 — отказы", () => {
     mockedStatus.mockRejectedValue(new ApiError(503, "catalog_unavailable", "Каталог сейчас недоступен."));
     await renderScreen();
 
-    expect(screen.getByText("Что-то у нас не получается прямо сейчас.")).toBeInTheDocument();
+    // DRF-2194: общий мастерский SystemState, не клиентский StateError.
+    expect(screen.getByRole("alert")).toHaveTextContent("Не удалось загрузить статус публикации");
     expect(screen.queryByTestId("publication-refusal")).toBeNull();
   });
 });
@@ -498,5 +499,23 @@ describe("экран 08 — слова", () => {
 
     expect(title()).toHaveTextContent(heading);
     expect(document.body.textContent).not.toMatch(FORBIDDEN_COPY);
+  });
+});
+
+describe("системные состояния через SystemState (DRF-2194)", () => {
+  it("загрузка — общий скелет без слов", () => {
+    mockedStatus.mockReturnValue(new Promise(() => {}));
+    void renderScreen();
+    expect(screen.getByRole("status", { busy: true })).toBeInTheDocument();
+  });
+
+  it("ошибка — «Не удалось загрузить статус публикации» + «Попробовать снова», без клиентского словаря", async () => {
+    mockedStatus.mockRejectedValueOnce(new Error("boom"));
+    await renderScreen();
+    expect(screen.getByRole("alert")).toHaveTextContent("Не удалось загрузить статус публикации");
+    expect(screen.queryByText(/Не получилось загрузить/)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Попробовать снова" }));
+    await settle();
+    expect(mockedStatus).toHaveBeenCalledTimes(2);
   });
 });

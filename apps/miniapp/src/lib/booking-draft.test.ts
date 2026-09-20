@@ -33,11 +33,19 @@ const COLORING: DraftService = {
 const ANNA = { id: "m-1", name: "Анна" };
 const INNA = { id: "m-2", name: "Инна" };
 const SLOT = { time: "15:00", start_at: "2026-08-21T12:00:00Z" };
-const WINDOW = { start_at: "2026-08-21T12:00:00Z", end_at: "2026-08-21T15:00:00Z" };
+const WINDOW = {
+  start_at: "2026-08-21T12:00:00Z",
+  end_at: "2026-08-21T15:00:00Z",
+};
 
 function draftWithSlot(): BookingDraft {
   return {
-    customer: { kind: "existing", id: "c-1", name: "Мария", phone_masked: "+• ••• ••67" },
+    customer: {
+      kind: "existing",
+      id: "c-1",
+      name: "Мария",
+      phone_masked: "+• ••• ••67",
+    },
     service: MANICURE,
     master: ANNA,
     window: WINDOW,
@@ -67,7 +75,10 @@ describe("draft invalidation (§16)", () => {
   it("drops the chosen start when the window changes", () => {
     const { draft, slotInvalidatedBy } = applyDraftAction(draftWithSlot(), {
       type: "window/set",
-      window: { start_at: "2026-08-22T09:00:00Z", end_at: "2026-08-22T12:00:00Z" },
+      window: {
+        start_at: "2026-08-22T09:00:00Z",
+        end_at: "2026-08-22T12:00:00Z",
+      },
     });
     expect(draft.slot).toBeNull();
     expect(slotInvalidatedBy).toBe("window_changed");
@@ -139,7 +150,9 @@ describe("flow order (§12, §17)", () => {
   });
 
   it("will not query availability without an assignment", () => {
-    expect(canQueryAvailability({ ...EMPTY_DRAFT, service: MANICURE })).toBe(false);
+    expect(canQueryAvailability({ ...EMPTY_DRAFT, service: MANICURE })).toBe(
+      false,
+    );
   });
 
   it("queries availability once service and master are known", () => {
@@ -183,7 +196,12 @@ describe("review readiness (§18)", () => {
 
 describe("submit outcomes (§18)", () => {
   it("keeps the entered data for every non-committed outcome", () => {
-    for (const outcome of ["conflict", "blocked", "pending", "failed"] as const) {
+    for (const outcome of [
+      "conflict",
+      "blocked",
+      "pending",
+      "failed",
+    ] as const) {
       expect(outcomeKeepsDraft(outcome)).toBe(true);
     }
     expect(outcomeKeepsDraft("committed")).toBe(false);
@@ -235,5 +253,34 @@ describe("window semantics (§12)", () => {
   it("resets everything on reset", () => {
     const { draft } = applyDraftAction(draftWithSlot(), { type: "reset" });
     expect(draft).toEqual(EMPTY_DRAFT);
+  });
+});
+
+describe("субъект-мастер: мастер не шаг черновика (DRF-2155, М-3)", () => {
+  const svc: DraftService = { id: "s-1", name: "Маникюр", duration_min: 60 };
+  const customer = { kind: "existing" as const, id: "c-1", name: "Анна П." };
+  const slot = { time: "15:00", start_at: "2026-10-21T15:00:00+03:00" };
+
+  it("canQueryAvailability: услуги достаточно, когда мастер — субъект", () => {
+    const draft: BookingDraft = { ...EMPTY_DRAFT, service: svc };
+    expect(canQueryAvailability(draft)).toBe(false); // салон — как раньше
+    expect(canQueryAvailability(draft, { requiresMaster: false })).toBe(true);
+  });
+
+  it("canReview / missingSteps: без «мастера» в списке и в условии", () => {
+    const draft: BookingDraft = {
+      ...EMPTY_DRAFT,
+      customer,
+      service: svc,
+      slot,
+    };
+    expect(canReview(draft)).toBe(false);
+    expect(canReview(draft, { requiresMaster: false })).toBe(true);
+    expect(missingSteps(EMPTY_DRAFT, { requiresMaster: false })).toEqual([
+      "клиента",
+      "услугу",
+      "время",
+    ]);
+    expect(missingSteps(EMPTY_DRAFT)).toContain("мастера"); // салон — как раньше
   });
 });

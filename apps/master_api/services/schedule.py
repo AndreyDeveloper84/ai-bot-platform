@@ -68,6 +68,7 @@ from django.utils import timezone as dj_timezone
 
 from apps.booking.models import RemoteBookingProxy
 from apps.catalog.models import CatalogMaster, CatalogService
+from apps.catalog.specialist_ref import specialist_keys
 from apps.identity.models import BotUser
 from apps.master_api.services.visit_source import (
     UPCOMING_STATUSES,
@@ -604,7 +605,7 @@ def _build_returning_customer_index(master: CatalogMaster, bot_user_ids: list[An
 
     rows = RemoteBookingProxy.all_tenants.filter(
         tenant_id=master.tenant_id,
-        specialist_id=master.id,
+        specialist_id__in=specialist_keys(master),
         bot_user_id__in=list(bot_user_ids),
         status="completed",
     ).values_list("bot_user_id", flat=True)

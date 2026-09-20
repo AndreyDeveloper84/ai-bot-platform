@@ -52,6 +52,11 @@ _BOOKING_FIELDS = (
     "rating",
     "can_rate",
     "address",
+    # DRF-2172 — booking-time price snapshot of the caller's own booking
+    # (mirror price_amount from booking.created.price_total; null on the
+    # local path). A price is not personal data, but it is named here so
+    # the wire shape stays classified.
+    "price",
 )
 
 _MASTER_ON_BOOKING = third_party(
@@ -326,11 +331,14 @@ CUSTOMER_ROUTES: dict[str, Entry] = {
             "next_booking.booking_id",
             "next_booking.address",
             "next_booking.status",
+            "next_booking.price",
             via=V + "customer_recent_activity",
             note=(
                 "the caller's own next visit and this week's count, from the mirror or local "
                 "rows scoped to bot_user; the salon address travels verbatim (DRF-1652); the "
-                "status is the wire value of that same row (DRF-2144 home card badge)"
+                "status is the wire value of that same row (DRF-2144 home card badge); the "
+                "price is the booking-time snapshot mirrored from booking.created.price_total "
+                "(DRF-2172), null when the source carried none"
             ),
         ),
         third_party(

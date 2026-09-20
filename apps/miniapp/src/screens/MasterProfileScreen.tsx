@@ -31,6 +31,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { MasterCard } from "../components/MasterCard";
+import { SystemState } from "../components/master/SystemState";
 import { MasterTabBar } from "../components/MasterTabBar";
 import { CROP_COPY, PhotoCropSheet } from "../components/PhotoCropSheet";
 import { Snackbar } from "../components/Snackbar";
@@ -132,9 +133,7 @@ export const PROFILE_COPY = {
     workRemoved: "✓ Фото удалено",
   },
   states: {
-    loading: "Загружаем профиль…",
-    errorTitle: "Не получилось загрузить",
-    errorBody: "Не получилось загрузить ваш профиль. Проверьте интернет и попробуйте снова.",
+    // Загрузка / ошибка загрузки — SystemState (DRF-2190, словарь DRF-1181 п.10).
     saveError: "Не удалось сохранить. Попробуйте ещё раз.",
     photoTooLarge: (mb: number) => `Фото больше ${mb} МБ. Уменьшите размер.`,
     photoBadMime: "Поддерживаются JPG / PNG / WebP",
@@ -455,14 +454,19 @@ export function MasterProfileScreen() {
   if (phase.kind === "loading") {
     return (
       <ProfileFrame>
-        <LoadingSkeleton />
+        <SystemState kind="loading" lines={2} />
       </ProfileFrame>
     );
   }
   if (phase.kind === "error") {
     return (
       <ProfileFrame>
-        <ErrorBanner onRetry={() => void fetchAll()} />
+        <SystemState
+          kind="load_error"
+          what="profile"
+          err={phase.err}
+          onRetry={() => void fetchAll()}
+        />
       </ProfileFrame>
     );
   }
@@ -853,37 +857,6 @@ function TextEditorSheet({
         </div>
       </div>
     </div>
-  );
-}
-
-function LoadingSkeleton() {
-  return (
-    <div className="master-profile__skeleton-wrap" aria-busy="true">
-      <p className="master-profile__loading-label">{PROFILE_COPY.states.loading}</p>
-      <div className="m-card m-card--skel">
-        <div className="skeleton" style={{ width: "60%", height: "1.2em" }} />
-        <div className="skeleton" style={{ width: "40%", height: "1em", marginTop: 8 }} />
-      </div>
-      <div className="m-card m-card--skel">
-        <div className="skeleton" style={{ width: "70%", height: "1em" }} />
-      </div>
-    </div>
-  );
-}
-
-function ErrorBanner({ onRetry }: { onRetry: () => void }) {
-  return (
-    <section className="master-profile__section">
-      <h2 className="master-profile__section-title">{PROFILE_COPY.states.errorTitle}</h2>
-      <div className="callout callout--danger" role="alert">
-        <p style={{ margin: 0 }}>{PROFILE_COPY.states.errorBody}</p>
-        <div style={{ marginTop: "var(--s-3)" }}>
-          <button type="button" className="btn-secondary" onClick={onRetry}>
-            {PROFILE_COPY.buttons.retry}
-          </button>
-        </div>
-      </div>
-    </section>
   );
 }
 

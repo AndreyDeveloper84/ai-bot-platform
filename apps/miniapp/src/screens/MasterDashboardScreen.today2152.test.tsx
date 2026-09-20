@@ -16,7 +16,7 @@
  * Мокируется только `../lib/master-api` (как в App.masterTrio2121): экран
  * настоящий, дочерние карточки грузятся сами и тихо отказывают.
  */
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -31,6 +31,7 @@ vi.mock("../lib/master-api", async (importOriginal) => {
   };
 });
 
+import { ApiError } from "../lib/api";
 import { getDashboard, type DashboardResponse } from "../lib/master-api";
 import { MasterDashboardScreen } from "./MasterDashboardScreen";
 
@@ -43,20 +44,33 @@ const NOW = "2026-09-20T11:15:00";
 
 function doc(over: Partial<DashboardResponse> = {}): DashboardResponse {
   return {
-    master: { id: "m-1", name: "Архипкин", specialization: "Массаж", photo_url: "" },
+    master: {
+      id: "m-1",
+      name: "Архипкин",
+      specialization: "Массаж",
+      photo_url: "",
+    },
     salon: { id: "t-1", name: "Формула тела" },
     now_iso: NOW,
     active_visit: null,
     next_visit: null,
     upcoming_today: [],
     inbox_preview: [],
-    today_summary: { total_clients_today: 0, completed_count: 0, next_free_window: null },
+    today_summary: {
+      total_clients_today: 0,
+      completed_count: 0,
+      next_free_window: null,
+    },
     tab_badges: {
       conversations_unread: 2,
       schedule_has_pending_change: false,
       profile_has_owner_pending_change: false,
     },
-    states: { is_day_done: false, is_offline_safe_response: false, day_off: false },
+    states: {
+      is_day_done: false,
+      is_offline_safe_response: false,
+      day_off: false,
+    },
     week_summary: {
       week_start: "2026-09-14",
       week_end: "2026-09-20",
@@ -88,7 +102,10 @@ function renderAt(path = "/master/dashboard") {
         <Route path="/master/dashboard" element={<MasterDashboardScreen />} />
         <Route path="/solo/my-day" element={<MasterDashboardScreen />} />
         <Route path="/master/schedule" element={<p>Экран «Расписание»</p>} />
-        <Route path="/solo/working-hours" element={<p>Экран «Рабочие часы»</p>} />
+        <Route
+          path="/solo/working-hours"
+          element={<p>Экран «Рабочие часы»</p>}
+        />
         <Route path="/master/conversations" element={<p>Экран переписок</p>} />
       </Routes>
     </MemoryRouter>,
@@ -116,7 +133,9 @@ describe("порядок: состояние дня — первым", () => {
     const day = await screen.findByRole("region", { name: /сегодня/i });
     const ayla = screen.getByRole("button", { name: /Спросить Ayla/ });
     // DOM order: day block precedes the Ayla entry.
-    expect(day.compareDocumentPosition(ayla) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(
+      day.compareDocumentPosition(ayla) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
   });
 });
 
@@ -135,7 +154,11 @@ describe("состояние 1 — ближайшая запись", () => {
             end_at: "2026-09-20T15:00:00",
           },
         ],
-        today_summary: { total_clients_today: 2, completed_count: 0, next_free_window: null },
+        today_summary: {
+          total_clients_today: 2,
+          completed_count: 0,
+          next_free_window: null,
+        },
       }),
     );
     renderAt();
@@ -153,7 +176,9 @@ describe("состояние 1 — ближайшая запись", () => {
     expect(screen.queryByText(/Сказала/)).toBeNull();
     expect(screen.queryByText(/Постоянный клиент/)).toBeNull();
     expect(screen.queryByText(/Открыть диалог/)).toBeNull();
-    expect(screen.queryByText(/90 мин/)).toBeNull();
+    // Длительность — поле карточки по DRF-1181 п.5 («⏱ 60 мин»), минутами (М-6, DRF-2157).
+    expect(within(day).getByText("90 мин")).toBeInTheDocument();
+    expect(screen.queryByText(/1 ч 30 мин/)).toBeNull();
     // Тап по записи → «Детали записи» (М-4, DRF-2156), не переписки.
     expect(within(day).queryByRole("button", { name: /Анна/ })).toBeNull();
     expect(within(day).getByRole("link", { name: /Анна/ })).toHaveAttribute(
@@ -167,7 +192,9 @@ describe("состояние 1 — ближайшая запись", () => {
   });
 
   it("«До визита» — общим форматтером DRF-1185: 80 → «1 ч 20 мин» (§61)", async () => {
-    mockedDashboard.mockResolvedValue(doc({ next_visit: { ...NEXT, minutes_until: 80 } }));
+    mockedDashboard.mockResolvedValue(
+      doc({ next_visit: { ...NEXT, minutes_until: 80 } }),
+    );
     renderAt();
     const day = await screen.findByRole("region", { name: /сегодня/i });
     expect(within(day).getByText("До визита 1 ч 20 мин")).toBeInTheDocument();
@@ -200,7 +227,11 @@ describe("состояние 3 — «Сейчас по расписанию»", 
           is_in_progress: true,
           note: "",
         },
-        today_summary: { total_clients_today: 1, completed_count: 0, next_free_window: null },
+        today_summary: {
+          total_clients_today: 1,
+          completed_count: 0,
+          next_free_window: null,
+        },
       }),
     );
     renderAt();
@@ -216,15 +247,17 @@ describe("состояние 3 — «Сейчас по расписанию»", 
 });
 
 describe("состояние 4 — записей нет", () => {
-  it("рабочий день без записей: только текст; кнопки «Добавить запись» до М-3 нет", async () => {
+  it("рабочий день без записей: текст макета и кнопка «Добавить запись» (М-3)", async () => {
     mockedDashboard.mockResolvedValue(doc());
     renderAt();
 
     const day = await screen.findByRole("region", { name: /сегодня/i });
     expect(within(day).getByText("На сегодня записей нет")).toBeInTheDocument();
-    // Кнопка появится с М-3 (DRF-2155): тап по свободному окну сегодня открывает
-    // «недоступно», а не создание — кнопка сюда была бы ложью (DRF-1181).
-    expect(within(day).queryByRole("button", { name: /Добавить запись/ })).toBeNull();
+    // С М-3 (DRF-2155) кнопка — дверь в «Новую запись» (тап по свободному
+    // окну в «Расписании» тоже ведёт в создание, не в «недоступно»).
+    expect(
+      within(day).getByRole("button", { name: "Добавить запись" }),
+    ).toBeInTheDocument();
     expect(screen.queryByText(/свободного окна/)).toBeNull();
     // И прежнего «Свободный день — отдохните» тоже нет: текст макета дословно.
     expect(screen.queryByText(/отдохните/)).toBeNull();
@@ -232,42 +265,74 @@ describe("состояние 4 — записей нет", () => {
 
   it("выходной: «Сегодня выходной» + «Рабочие часы →»; для соло — экран часов", async () => {
     mockedDashboard.mockResolvedValue(
-      doc({ states: { is_day_done: false, is_offline_safe_response: false, day_off: true } }),
+      doc({
+        states: {
+          is_day_done: false,
+          is_offline_safe_response: false,
+          day_off: true,
+        },
+      }),
     );
     renderAt("/solo/my-day");
 
     const day = await screen.findByRole("region", { name: /сегодня/i });
     expect(within(day).getByText("Сегодня выходной")).toBeInTheDocument();
     expect(screen.queryByText("На сегодня записей нет")).toBeNull();
-    await userEvent.click(within(day).getByRole("button", { name: /Рабочие часы/ }));
+    await userEvent.click(
+      within(day).getByRole("button", { name: /Рабочие часы/ }),
+    );
     expect(await screen.findByText("Экран «Рабочие часы»")).toBeInTheDocument();
   });
 
   it("выходной у салонного мастера — «Рабочие часы →» ведёт в «Расписание» (заявка)", async () => {
     mockedDashboard.mockResolvedValue(
-      doc({ states: { is_day_done: false, is_offline_safe_response: false, day_off: true } }),
+      doc({
+        states: {
+          is_day_done: false,
+          is_offline_safe_response: false,
+          day_off: true,
+        },
+      }),
     );
     renderAt("/master/dashboard");
     const day = await screen.findByRole("region", { name: /сегодня/i });
-    await userEvent.click(within(day).getByRole("button", { name: /Рабочие часы/ }));
+    await userEvent.click(
+      within(day).getByRole("button", { name: /Рабочие часы/ }),
+    );
     expect(await screen.findByText("Экран «Расписание»")).toBeInTheDocument();
   });
 
   it("рамка дня не прочитана (day_off: null) — «Не удалось проверить расписание» + «Проверить снова»", async () => {
     mockedDashboard
       .mockResolvedValueOnce(
-        doc({ states: { is_day_done: false, is_offline_safe_response: false, day_off: null } }),
+        doc({
+          states: {
+            is_day_done: false,
+            is_offline_safe_response: false,
+            day_off: null,
+          },
+        }),
       )
       .mockResolvedValueOnce(
-        doc({ states: { is_day_done: false, is_offline_safe_response: false, day_off: true } }),
+        doc({
+          states: {
+            is_day_done: false,
+            is_offline_safe_response: false,
+            day_off: true,
+          },
+        }),
       );
     renderAt();
     const day = await screen.findByRole("region", { name: /сегодня/i });
     // Молчание источника — не пустой день и не выходной (DRF-1111).
-    expect(within(day).getByText("Не удалось проверить расписание")).toBeInTheDocument();
+    expect(
+      within(day).getByText("Не удалось проверить расписание"),
+    ).toBeInTheDocument();
     expect(screen.queryByText("На сегодня записей нет")).toBeNull();
     expect(screen.queryByText("Сегодня выходной")).toBeNull();
-    await userEvent.click(within(day).getByRole("button", { name: "Проверить снова" }));
+    await userEvent.click(
+      within(day).getByRole("button", { name: "Проверить снова" }),
+    );
     expect(await screen.findByText("Сегодня выходной")).toBeInTheDocument();
     expect(mockedDashboard).toHaveBeenCalledTimes(2);
   });
@@ -289,7 +354,11 @@ describe("убрано по макету и §50 п.5", () => {
             ai_drafted_reply_available: true,
           },
         ],
-        today_summary: { total_clients_today: 1, completed_count: 0, next_free_window: null },
+        today_summary: {
+          total_clients_today: 1,
+          completed_count: 0,
+          next_free_window: null,
+        },
       }),
     );
     renderAt();
@@ -305,6 +374,68 @@ describe("убрано по макету и §50 п.5", () => {
     expect(screen.queryByRole("button", { name: /Диалоги/ })).toBeNull();
     // Положительный сторож той же отрисовки: шапка и «Спросить Ayla» на месте.
     expect(screen.getByText("Архипкин")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /Спросить Ayla/ })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /Спросить Ayla/ }),
+    ).toBeInTheDocument();
+  });
+});
+
+describe("системные состояния — через SystemState по DRF-1181 (М-6, DRF-2157)", () => {
+  it("первичная ошибка — «Не удалось загрузить» + «Попробовать снова»; старого текста нет", async () => {
+    mockedDashboard
+      .mockRejectedValueOnce(new Error("boom"))
+      .mockResolvedValueOnce(doc());
+    renderAt();
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Не удалось загрузить сегодняшний день",
+    );
+    expect(screen.queryByText(/Не получилось загрузить/)).toBeNull();
+    expect(screen.queryByText(/Проверьте интернет/)).toBeNull();
+    await userEvent.click(
+      screen.getByRole("button", { name: "Попробовать снова" }),
+    );
+    expect(
+      await screen.findByRole("region", { name: /сегодня/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("403 — «Недостаточно прав» · «Это действие недоступно», не «Этот диалог не для вас»", async () => {
+    mockedDashboard.mockRejectedValue(new ApiError(403, "not_linked", "nope"));
+    renderAt();
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Недостаточно прав");
+    expect(alert).toHaveTextContent("Это действие недоступно");
+    expect(screen.queryByText(/Этот диалог не для вас/)).toBeNull();
+  });
+
+  it("обновление не удалось при данных — «Не удалось обновить» · «Показаны последние данные», данные на месте", async () => {
+    mockedDashboard
+      .mockResolvedValueOnce(doc({ next_visit: NEXT }))
+      .mockRejectedValueOnce(new Error("boom"));
+    renderAt();
+    const day = await screen.findByRole("region", { name: /сегодня/i });
+    expect(within(day).getByText(/Анна П\./)).toBeInTheDocument();
+    // Pull-to-refresh: жест вниз ≥ 60px от верха.
+    const frame = day.closest(".master-dashboard") as HTMLElement;
+    fireEvent.touchStart(frame, { touches: [{ clientY: 10 }] });
+    fireEvent.touchEnd(frame, { changedTouches: [{ clientY: 100 }] });
+    const status = await screen.findByText(
+      "Не удалось обновить. Показаны последние данные",
+    );
+    expect(status.closest("[role=status]")).not.toBeNull();
+    expect(screen.queryByText(/Данные могут быть неактуальны/)).toBeNull();
+    // Данные не сброшены.
+    expect(
+      within(screen.getByRole("region", { name: /сегодня/i })).getByText(
+        /Анна П\./,
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("загрузка — скелет без слов", () => {
+    mockedDashboard.mockReturnValue(new Promise(() => {}));
+    renderAt();
+    expect(screen.getByRole("status")).toHaveAttribute("aria-busy", "true");
+    expect(screen.queryByText(/Загружаем/)).toBeNull();
   });
 });

@@ -123,6 +123,7 @@ function renderScreen() {
       <Routes>
         <Route path="/customer/goal-select" element={<GoalSelectScreen />} />
         <Route path="/customer/catalog" element={<div>ЭКРАН ПОДБОРА</div>} />
+        <Route path="/customer/main" element={<div>ГЛАВНЫЙ</div>} />
       </Routes>
     </MemoryRouter>,
   );
@@ -417,9 +418,13 @@ describe("C-2 держит экран, а не сервер (DRF-1483)", () => {
       await screen.findByText("Что сейчас хочется привести в порядок?"),
     ).toBeInTheDocument();
 
-    // И выход есть, хотя сервер его не дал.
-    await userEvent.click(screen.getByRole("button", { name: "Посмотреть услуги" }));
-    expect(screen.getByText("ЭКРАН ПОДБОРА")).toBeInTheDocument();
+    // Выход есть, хотя сервер его не дал: «назад» — на главный.
+    // DRF-2177 (§60): выхода в каталог с экрана больше нет; пол —
+    // «назад» (экран не корень, DRF-1493) и свободный ввод, который
+    // экран ставит сам. Отступление от буквы C-2 по §60.
+    expect(screen.queryByRole("button", { name: "Посмотреть услуги" })).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Назад" }));
+    expect(screen.getByText("ГЛАВНЫЙ")).toBeInTheDocument();
 
     // ЗАМЕР: ушёл, не ответив ни на один вопрос и вообще ничего не послав.
     expect(answersSent()).toEqual([]);
@@ -442,17 +447,16 @@ describe("C-2 держит экран, а не сервер (DRF-1483)", () => {
     expect(answersSent()).toEqual([]);
   });
 
-  it("выход экрана стоит в липкой панели, а не в хвосте документа", async () => {
-    // Та же причина, что и у серверного `next` (DRF-1458): выход,
-    // который надо доскроллить, — это выход, которого на экране нет.
+  it("на воротах в липкой панели нет кнопки в каталог — выход в шапке (DRF-2177)", async () => {
+    // Раньше здесь стояла липкая «Посмотреть услуги» (DRF-1483). По §60
+    // выход в каталог с экрана ушёл; «назад» живёт в шапке экрана и
+    // доскролливать до него не надо.
     mockedFetch.mockResolvedValue(GATE);
     renderScreen();
 
     await screen.findByText("Что сейчас хочется привести в порядок?");
-    const cta = screen.getByRole("region", { name: "Действие" });
-    expect(
-      within(cta).getByRole("button", { name: "Посмотреть услуги" }),
-    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Назад" })).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Действие" })).toBeNull();
   });
 
   it("назначение, которого нет в таблице маршрутов, — те же ворота", async () => {
@@ -471,9 +475,11 @@ describe("C-2 держит экран, а не сервер (DRF-1483)", () => {
     renderScreen();
 
     await screen.findByText("Что сейчас хочется привести в порядок?");
-    // Присутствие подставного выхода — и отсутствие серверного.
-    expect(screen.getByRole("button", { name: "Посмотреть услуги" })).toBeInTheDocument();
+    // Пол на месте (свободный ввод, который ставит экран) — и никакой
+    // кнопки в никуда. Подставного выхода в каталог нет (DRF-2177).
+    expect(screen.getByRole("textbox", { name: "Опиши своими словами" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Куда-то" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Посмотреть услуги" })).toBeNull();
   });
 
   it("незнакомый next при живом свободном вводе — ни кнопки в никуда, ни лишнего выхода", async () => {

@@ -75,11 +75,13 @@ beforeEach(() => {
 });
 
 describe("«Изменить» у цели (DRF-1758)", () => {
-  it("завершённый проход: у «Текущей цели» есть «Изменить», тап уходит намерением start_anketa", async () => {
+  it("завершённый проход: у цели в «Уже учла» есть «Изменить», тап уходит намерением start_anketa", async () => {
+    // DRF-2177: секции «Текущая цель» больше нет — цель стоит в «Уже
+    // учла» с первого кадра (макет C03); «Изменить» — там же.
     mockedFetch.mockResolvedValue(doc({ startAnketa: true, answers: [] }));
     mockedPost.mockResolvedValue(doc({ startAnketa: false, answers: [] }));
     renderScreen();
-    await screen.findByText("Текущая цель");
+    await screen.findByRole("region", { name: ALREADY_NOTED_TITLE });
     await userEvent.click(screen.getByRole("button", { name: "Изменить: Расслабиться" }));
     expect(mockedPost).toHaveBeenCalledWith({ intent: "start_anketa", source_channel: "miniapp" });
   });

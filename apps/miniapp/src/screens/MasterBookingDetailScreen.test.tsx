@@ -30,10 +30,8 @@ vi.mock("../lib/master-api", async (importOriginal) => {
 
 import { ApiError } from "../lib/api";
 import { getMasterBooking, type MasterBookingDetail } from "../lib/master-api";
-import {
-  MasterBookingDetailScreen,
-  RECHECK_MIN_INTERVAL_MS,
-} from "./MasterBookingDetailScreen";
+import { RECHECK_MIN_INTERVAL_MS } from "../components/master/SystemState";
+import { MasterBookingDetailScreen } from "./MasterBookingDetailScreen";
 
 const mocked = vi.mocked(getMasterBooking);
 
@@ -92,8 +90,9 @@ function expectPermanentPart(main: HTMLElement) {
   // Время — в постоянной части всегда; в состоянии «now» макет повторяет его в блоке.
   expect(within(main).getAllByText("15:30–16:30").length).toBeGreaterThanOrEqual(1);
   expect(within(main).getByText("Классический массаж")).toBeInTheDocument();
-  // Длительность — подстрокой и под временем, и под услугой (как в макете).
-  expect(within(main).getAllByText("1 ч")).toHaveLength(2);
+  // Длительность — подстрокой и под временем, и под услугой, минутами (макет; ruling §61 ж).
+  expect(within(main).getAllByText("60 мин")).toHaveLength(2);
+  expect(screen.queryByText("1 ч")).toBeNull();
 }
 
 /** Что не должно появиться ни в одном состоянии. */
@@ -386,7 +385,8 @@ describe("смена записи без размонтирования", () => 
 
     await user.click(screen.getByRole("button", { name: "к b-2" }));
     // Пока b-2 в полёте — загрузка, а не имя и состояние b-1.
-    expect(await screen.findByText("Загружаем запись…")).toBeInTheDocument();
+    // Загрузка — общий скелет SystemState (без слов), имени b-1 уже нет.
+    expect(await screen.findByRole("status", { busy: true })).toBeInTheDocument();
     expect(screen.queryByText("Анна П.")).toBeNull();
     expect(mocked).toHaveBeenLastCalledWith("b-2", expect.anything());
     await act(async () => {
@@ -406,15 +406,16 @@ describe("смена записи без размонтирования", () => 
 });
 
 describe("ошибки загрузки", () => {
-  it("404 not_found → «Не удалось загрузить запись» + «Проверить снова»; без «Завершено» и без имени", async () => {
+  it("404 not_found → «Не удалось загрузить запись» + «Попробовать снова» (ruling §61 е); без «Завершено» и без имени", async () => {
     mocked.mockRejectedValueOnce(new ApiError(404, "not_found", "booking not found"));
     mocked.mockResolvedValueOnce(detail());
     renderAt();
-    expect(await screen.findByText("Не удалось загрузить запись")).toBeInTheDocument();
+    expect(await screen.findByRole("alert")).toHaveTextContent("Не удалось загрузить запись");
     expect(screen.queryByText("Завершено")).toBeNull();
     expect(screen.queryByText("Анна П.")).toBeNull();
-    // Повтор после ошибки — без троттла (беречь нечего), и он работает.
-    await userEvent.click(screen.getByRole("button", { name: "Проверить снова" }));
+    // Повтор после ошибки — «Попробовать снова», без троттла, и он работает.
+    expect(screen.queryByRole("button", { name: "Проверить снова" })).toBeNull();
+    await userEvent.click(screen.getByRole("button", { name: "Попробовать снова" }));
     expect(await findScreen()).toBeInTheDocument();
     expect(mocked).toHaveBeenCalledTimes(2);
   });
@@ -423,7 +424,7 @@ describe("ошибки загрузки", () => {
     mocked.mockRejectedValue(new ApiError(503, "unavailable", "mirror down"));
     renderAt();
     expect(await screen.findByText("Не удалось загрузить запись")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Проверить снова" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Попробовать снова" })).toBeInTheDocument();
   });
 });
 

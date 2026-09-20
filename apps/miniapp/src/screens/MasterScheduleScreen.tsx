@@ -18,6 +18,10 @@
  *      `Помечу как недоступно` → confirmation → server marks slot blocked
  *      → owner notified (audit + bot DM)»
  *
+ * DRF-2155 (М-3): the MAIN tap on a free window now opens «Новая запись»
+ * (mockup DRF-1183/1184 — «Выбранное окно»); the unavailability request
+ * above stays as the secondary «Недоступно» action on the window card.
+ *
  * Backend contracts:
  *   GET  /api/v1/master/schedule?from&to
  *   POST /api/v1/master/availability
@@ -41,7 +45,6 @@ import {
   type ReactNode,
 } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
-import { ApiError } from "../lib/api";
 import { DEFAULT_SALON_OWNER_HINT } from "../lib/salonOwnerHint";
 import {
   getMasterSchedule,
@@ -51,7 +54,6 @@ import {
   type MasterScheduleResponse,
   type PendingAvailabilityItem,
   type ScheduleBooking,
-  type ScheduleConflict,
   type ScheduleDay,
   type ScheduleFreeWindow,
 } from "../lib/master-api";
@@ -62,14 +64,16 @@ import {
   signalReady,
 } from "../lib/max-sdk";
 import { MasterAvatar } from "../components/MasterAvatar";
+import { MasterBookingCard } from "../components/master/MasterBookingCard";
+import { SystemState } from "../components/master/SystemState";
 import { MasterTabBar } from "../components/MasterTabBar";
 import { Snackbar } from "../components/Snackbar";
 import {
   addDays,
-  addMinutesHm,
   formatMonthHeaderRu,
   formatWeekHeaderRu,
   formatWeekRangeRu,
+  formatTimeHM,
   formatYmdLocal,
   joinClientName,
   localHmFromIso,
@@ -97,14 +101,16 @@ const COPY = {
     month: "Месяц",
   },
   freeWindow: (min: number) => `свободно · ${min} мин`,
-  endingApprox: (hm: string) => `заканчивается ≈${hm}`,
-  returning: "постоянный клиент",
+  // DRF-2155 (М-3): вторичное действие в карточке окна — заявка о недоступности.
+  unavailable: "Недоступно",
   outsideHours: "вне рабочего времени",
   offDayLabel: "выходной",
-  conflictChip: "⚠ Конфликт расписания",
   conflictTapHint: "уточнить у админа",
   conflictBanner: "⚠ Конфликт расписания — посмотрите",
   emptyDay: "Свободный день. Отдыхайте.",
+  // DRF-2194 — шкала дня и линия текущего времени (DRF-1183).
+  dayListLabel: "Расписание дня",
+  nowLabel: (hm: string) => `Сейчас ${hm}`,
   // The admin is named by the salon, never by a hardcoded first name — see
   // lib/salonOwnerHint.ts. `MasterScheduleResponse` carries no salon, so both
   // call sites pass the neutral default; the parameter is here so that wiring a
@@ -133,12 +139,8 @@ const COPY = {
   weekClientsLabel: (n: number) =>
     n === 0 ? "—" : `${n} ${pluralRu(n, "клиент", "клиента", "клиентов")}`,
   weekFreeLabel: (n: number) =>
-    n === 0
-      ? "0 окон"
-      : `${n} ${pluralRu(n, "окно", "окна", "окон")}`,
-  loading: "Загружаем расписание…",
-  errorTitle: "Не получилось загрузить",
-  retry: "Попробовать снова",
+    n === 0 ? "0 окон" : `${n} ${pluralRu(n, "окно", "окна", "окон")}`,
+  // Системные состояния — через SystemState (DRF-2157, макет DRF-1181 п.10).
   weekDayLink: "Открыть день ›",
   weekDayActiveSuffix: "(сегодня)",
 };
@@ -186,8 +188,8 @@ const EMPTY_SHEET: UnavailableSheetState = {
 // --- Component ------------------------------------------------------------
 
 export function MasterScheduleScreen() {
-  const navigate = useNavigate();
   const location = useLocation();
+  const navigate = useNavigate();
 
   const [view, setView] = useState<SegmentView>("day");
   // Currently-focused local date. Day view = that day; Week view = anchor
@@ -242,13 +244,10 @@ export function MasterScheduleScreen() {
 
   // --- Date stepping ----------------------------------------------------
 
-  const stepBy = useCallback(
-    (deltaDays: number) => {
-      hapticSelection();
-      setAnchor((prev) => addDays(prev, deltaDays));
-    },
-    [],
-  );
+  const stepBy = useCallback((deltaDays: number) => {
+    hapticSelection();
+    setAnchor((prev) => addDays(prev, deltaDays));
+  }, []);
 
   const onPrev = useCallback(() => {
     if (view === "day") stepBy(-1);
@@ -280,20 +279,34 @@ export function MasterScheduleScreen() {
   // список переписок — прямой переписки мастера с клиентом нет (§50 п.5).
   // Соло и салонный мастер делят экран; поверхность — по адресу.
   const isSolo = location.pathname.startsWith("/solo/");
-  const onBookingTap = useCallback(
-    (booking: ScheduleBooking) => {
-      hapticSelection();
-      navigate(
-        `${isSolo ? "/solo" : "/master"}/bookings/${encodeURIComponent(booking.booking_id)}`,
-        { state: { from: location.pathname } },
-      );
-    },
-    [navigate, isSolo, location.pathname],
+  const bookingHref = useCallback(
+    (booking: ScheduleBooking) =>
+      `${isSolo ? "/solo" : "/master"}/bookings/${encodeURIComponent(booking.booking_id)}`,
+    [isSolo],
   );
 
-  // --- Free-window tap → mark-unavailable sheet ------------------------
+  // --- Free-window tap → «Новая запись» (DRF-2155, М-3) -------------------
 
+  // Макет DRF-1183/1184: тап по свободному окну — создание записи с
+  // подписью «Выбранное окно». До М-3 главный тап открывал лист «Помечу как
+  // недоступно» — противоположно макету; заявка о недоступности осталась,
+  // но вторичным действием в карточке окна (`onFreeSlotUnavailable`).
   const onFreeSlotTap = useCallback(
+    (day: ScheduleDay, window: ScheduleFreeWindow) => {
+      hapticSelection();
+      const qs = new URLSearchParams({
+        date: day.date,
+        from: window.start,
+        to: window.end,
+      });
+      navigate(`${isSolo ? "/solo" : "/master"}/booking/new?${qs.toString()}`);
+    },
+    [navigate, isSolo],
+  );
+
+  // --- Free-window «Недоступно» → mark-unavailable sheet ------------------
+
+  const onFreeSlotUnavailable = useCallback(
     (day: ScheduleDay, window: ScheduleFreeWindow) => {
       hapticSelection();
       setSheet({
@@ -385,17 +398,23 @@ export function MasterScheduleScreen() {
           onJumpToday={onJumpToday}
         />
         {phase.kind === "loading" ? (
-          <ScheduleSkeleton />
+          <SystemState kind="loading" />
         ) : phase.kind === "error_initial" ? (
-          <ScheduleError err={phase.err} onRetry={() => void load()} />
+          <SystemState
+            kind="load_error"
+            what="schedule"
+            err={phase.err}
+            onRetry={() => void load()}
+          />
         ) : (
           <ScheduleBody
             view={view}
             anchor={anchor}
             data={phase.data}
             pending={phase.pending}
-            onBookingTap={onBookingTap}
+            bookingHref={bookingHref}
             onFreeSlotTap={onFreeSlotTap}
+            onFreeSlotUnavailable={onFreeSlotUnavailable}
             onMarkOffDay={onMarkOffDay}
             onSwitchToDay={(d) => {
               hapticSelection();
@@ -577,8 +596,9 @@ function ScheduleBody({
   anchor,
   data,
   pending,
-  onBookingTap,
+  bookingHref,
   onFreeSlotTap,
+  onFreeSlotUnavailable,
   onMarkOffDay,
   onSwitchToDay,
 }: {
@@ -586,8 +606,9 @@ function ScheduleBody({
   anchor: Date;
   data: MasterScheduleResponse;
   pending: PendingAvailabilityItem[];
-  onBookingTap: (b: ScheduleBooking) => void;
+  bookingHref: (b: ScheduleBooking) => string;
   onFreeSlotTap: (day: ScheduleDay, window: ScheduleFreeWindow) => void;
+  onFreeSlotUnavailable: (day: ScheduleDay, window: ScheduleFreeWindow) => void;
   onMarkOffDay: (day: ScheduleDay) => void;
   onSwitchToDay: (date: Date) => void;
 }) {
@@ -597,28 +618,24 @@ function ScheduleBody({
       {view === "day" ? (
         <DayView
           day={pickDay(data, anchor)}
-          onBookingTap={onBookingTap}
+          bookingHref={bookingHref}
           onFreeSlotTap={onFreeSlotTap}
+          onFreeSlotUnavailable={onFreeSlotUnavailable}
           onMarkOffDay={onMarkOffDay}
         />
       ) : view === "week" ? (
-        <WeekView
-          data={data}
-          anchor={anchor}
-          onSwitchToDay={onSwitchToDay}
-        />
+        <WeekView data={data} anchor={anchor} onSwitchToDay={onSwitchToDay} />
       ) : (
-        <MonthView
-          data={data}
-          anchor={anchor}
-          onSwitchToDay={onSwitchToDay}
-        />
+        <MonthView data={data} anchor={anchor} onSwitchToDay={onSwitchToDay} />
       )}
     </>
   );
 }
 
-function pickDay(data: MasterScheduleResponse, anchor: Date): ScheduleDay | null {
+function pickDay(
+  data: MasterScheduleResponse,
+  anchor: Date,
+): ScheduleDay | null {
   const ymd = formatYmdLocal(anchor);
   return data.days.find((d) => d.date === ymd) ?? null;
 }
@@ -670,13 +687,15 @@ function formatBannerDate(iso: string): string {
 
 function DayView({
   day,
-  onBookingTap,
+  bookingHref,
   onFreeSlotTap,
+  onFreeSlotUnavailable,
   onMarkOffDay,
 }: {
   day: ScheduleDay | null;
-  onBookingTap: (b: ScheduleBooking) => void;
+  bookingHref: (b: ScheduleBooking) => string;
   onFreeSlotTap: (day: ScheduleDay, window: ScheduleFreeWindow) => void;
+  onFreeSlotUnavailable: (day: ScheduleDay, window: ScheduleFreeWindow) => void;
   onMarkOffDay: (day: ScheduleDay) => void;
 }) {
   if (day === null) {
@@ -706,26 +725,37 @@ function DayView({
   // Always render a stable timeline based on working_hours. Bookings,
   // blocks, free-windows are merged in chronological order; the
   // working-window bounds drive the gray-outside-hours surface.
-  const items = buildDayItems(day);
+  // DRF-2194 (DRF-1183): на сегодняшнем дне — линия «сейчас» между карточками
+  // по HH:MM. Часы устройства, на момент рендера; не тикает.
+  const items = buildDayItems(day, nowMarkerFor(day));
   return (
     <section className="master-dashboard__section">
       {day.conflicts.length > 0 ? <ConflictBanner /> : null}
       {noContent ? (
         <p className="master-dashboard__empty-line">{COPY.emptyDay}</p>
       ) : null}
-      <ul className="schedule-day">
+      <ul className="schedule-day" aria-label={COPY.dayListLabel}>
         {items.map((item, idx) => (
           <li key={idx}>
-            {item.kind === "booking" ? (
-              <BookingCard
-                booking={item.booking}
-                conflict={findConflict(day.conflicts, item.booking.booking_id)}
-                onTap={() => onBookingTap(item.booking)}
+            {item.kind === "now" ? (
+              <NowLine hm={item.startHm} />
+            ) : item.kind === "booking" ? (
+              <MasterBookingCard
+                variant="schedule"
+                clientName={joinClientName(
+                  item.booking.client_first_name,
+                  item.booking.client_last_initial,
+                )}
+                serviceName={item.booking.service_name}
+                startIso={item.booking.visit_at}
+                durationMin={item.booking.duration_min}
+                to={bookingHref(item.booking)}
               />
             ) : item.kind === "free" ? (
               <FreeWindowCard
                 window={item.window}
                 onTap={() => onFreeSlotTap(day, item.window)}
+                onUnavailable={() => onFreeSlotUnavailable(day, item.window)}
               />
             ) : (
               <BlockCard block={item.block} />
@@ -761,13 +791,32 @@ interface DayItemBlock {
   block: ScheduleDay["blocks"][number];
   startHm: string;
 }
+/** Линия текущего времени (DRF-1183) — элемент шкалы, не карточка. */
+interface DayItemNow {
+  kind: "now";
+  startHm: string;
+}
 
-type DayItem = DayItemBooking | DayItemFree | DayItemBlock;
+type DayItem = DayItemBooking | DayItemFree | DayItemBlock | DayItemNow;
 
-function buildDayItems(day: ScheduleDay): DayItem[] {
+/**
+ * «Сейчас» для дня: HH:MM по часам устройства, если день — сегодня; иначе
+ * null. Источник — устройство: ответ расписания серверного now не несёт
+ * (отступление (т), у владельца). Линия — про часы, не про состояние записи.
+ */
+function nowMarkerFor(day: ScheduleDay, now: Date = new Date()): string | null {
+  return day.date === formatYmdLocal(now) ? formatTimeHM(now.toISOString()) : null;
+}
+
+function buildDayItems(day: ScheduleDay, nowHm: string | null = null): DayItem[] {
   const items: DayItem[] = [];
+  if (nowHm !== null) items.push({ kind: "now", startHm: nowHm });
   for (const b of day.bookings) {
-    items.push({ kind: "booking", booking: b, startHm: localHmFromIso(b.visit_at) });
+    items.push({
+      kind: "booking",
+      booking: b,
+      startHm: localHmFromIso(b.visit_at),
+    });
   }
   for (const f of day.free_windows) {
     items.push({ kind: "free", window: f, startHm: f.start });
@@ -775,15 +824,23 @@ function buildDayItems(day: ScheduleDay): DayItem[] {
   for (const bl of day.blocks) {
     items.push({ kind: "block", block: bl, startHm: localHmFromIso(bl.start) });
   }
-  items.sort((a, b) => a.startHm.localeCompare(b.startHm));
+  // Стабильная сортировка: при равном времени линия «сейчас» стоит перед
+  // карточкой, начинающейся в эту минуту.
+  items.sort(
+    (a, b) => a.startHm.localeCompare(b.startHm) || Number(b.kind === "now") - Number(a.kind === "now"),
+  );
   return items;
 }
 
-function findConflict(
-  conflicts: ScheduleConflict[],
-  bookingId: string,
-): ScheduleConflict | undefined {
-  return conflicts.find((c) => c.booking_id === bookingId);
+/** Тонкая красная линия с подписью времени — DRF-1183 «Текущее время». */
+function NowLine({ hm }: { hm: string }) {
+  return (
+    <div className="schedule-now" role="separator" aria-label={COPY.nowLabel(hm)}>
+      <span className="schedule-now__time">{hm}</span>
+      <span className="schedule-now__dot" aria-hidden="true" />
+      <span className="schedule-now__line" aria-hidden="true" />
+    </div>
+  );
 }
 
 function ConflictBanner() {
@@ -801,72 +858,52 @@ function ConflictBanner() {
   );
 }
 
-function BookingCard({
-  booking,
-  conflict,
-  onTap,
-}: {
-  booking: ScheduleBooking;
-  conflict: ScheduleConflict | undefined;
-  onTap: () => void;
-}) {
-  const startHm = localHmFromIso(booking.visit_at);
-  const endHm = addMinutesHm(startHm, booking.duration_min);
-  const clientName = joinClientName(
-    booking.client_first_name,
-    booking.client_last_initial,
-  );
-  return (
-    <button type="button" className="m-card m-card--tappable" onClick={onTap}>
-      <div className="m-card__title">
-        {booking.is_in_progress ? (
-          <span
-            className="m-card__dot m-card__dot--red"
-            aria-label="идёт сейчас"
-          />
-        ) : null}
-        <span>
-          {startHm} — {clientName} · {booking.service_name} ·{" "}
-          {booking.duration_min} мин
-        </span>
-      </div>
-      {booking.is_in_progress ? (
-        <div className="m-card__meta">{COPY.endingApprox(endHm)}</div>
-      ) : null}
-      {booking.is_returning_customer ? (
-        <div className="m-card__chip m-card__chip--warning">
-          {COPY.returning}
-        </div>
-      ) : null}
-      {conflict ? (
-        <div
-          className="m-card__chip m-card__chip--warning"
-          style={{ display: "block", marginTop: "var(--s-2)" }}
-        >
-          {COPY.conflictChip} — {conflict.description}
-        </div>
-      ) : null}
-    </button>
-  );
-}
-
 function FreeWindowCard({
   window,
   onTap,
+  onUnavailable,
 }: {
   window: ScheduleFreeWindow;
   onTap: () => void;
+  onUnavailable: () => void;
 }) {
+  // Главный тап — запись (макет); «Недоступно» — вторичное действие, не
+  // главный тап (DRF-2155, М-3). Две соседние кнопки, не кнопка в кнопке.
   return (
-    <button
-      type="button"
-      className="m-card m-card--tappable schedule-free"
-      onClick={onTap}
+    <div
+      className="m-card schedule-free"
+      style={{ display: "flex", alignItems: "center", gap: "var(--s-2)" }}
     >
-      <div className="m-card__title" style={{ color: "var(--c-text-secondary)" }}>
-        {window.start} · {COPY.freeWindow(window.duration_min)}
-      </div>
-    </button>
+      <button
+        type="button"
+        className="m-card--tappable"
+        onClick={onTap}
+        aria-label={`Записать на ${window.start}–${window.end}`}
+        style={{
+          flex: 1,
+          minHeight: 44,
+          background: "none",
+          border: "none",
+          textAlign: "start",
+          padding: 0,
+        }}
+      >
+        <div
+          className="m-card__title"
+          style={{ color: "var(--c-text-secondary)" }}
+        >
+          {window.start} · {COPY.freeWindow(window.duration_min)}
+        </div>
+      </button>
+      <button
+        type="button"
+        className="btn-secondary"
+        onClick={onUnavailable}
+        aria-label={`${COPY.unavailable}: ${window.start}–${window.end}`}
+      >
+        {COPY.unavailable}
+      </button>
+    </div>
   );
 }
 
@@ -875,7 +912,10 @@ function BlockCard({ block }: { block: ScheduleDay["blocks"][number] }) {
   const endHm = localHmFromIso(block.end);
   return (
     <div className="m-card" aria-label="блок">
-      <div className="m-card__title" style={{ color: "var(--c-text-secondary)" }}>
+      <div
+        className="m-card__title"
+        style={{ color: "var(--c-text-secondary)" }}
+      >
         {startHm}–{endHm} · {translateBlockReason(block.reason)}
       </div>
       {!block.approved ? (
@@ -930,7 +970,10 @@ function WeekView({
         </p>
         {/* DRF-1817 — часы можно задать самому (экран 06); для соло владелец
             и есть мастер. */}
-        <Link to="/solo/working-hours" className="btn-secondary schedule-week__setup">
+        <Link
+          to="/solo/working-hours"
+          className="btn-secondary schedule-week__setup"
+        >
           Настроить рабочие часы
         </Link>
       </section>
@@ -1021,9 +1064,12 @@ function MonthView({
   const monthEnd = new Date(anchor.getFullYear(), anchor.getMonth() + 1, 0);
   // Build a Monday-aligned grid covering the visible month.
   const gridStart = startOfWeekMonday(monthStart);
-  const totalCells = Math.ceil((monthEnd.getTime() - gridStart.getTime()) / 86400000) + 1;
+  const totalCells =
+    Math.ceil((monthEnd.getTime() - gridStart.getTime()) / 86400000) + 1;
   const cellCount = Math.ceil(totalCells / 7) * 7;
-  const cells = Array.from({ length: cellCount }, (_, i) => addDays(gridStart, i));
+  const cells = Array.from({ length: cellCount }, (_, i) =>
+    addDays(gridStart, i),
+  );
   const todayYmd = formatYmdLocal(new Date());
   const byDate = new Map<string, ScheduleDay>(
     data.days.map((d) => [d.date, d]),
@@ -1064,7 +1110,8 @@ function MonthView({
 function MonthDot({ count }: { count: number }): ReactNode {
   // Per spec line 454: 0 = empty, 1 small dot = 1-3, 2 medium dots = 4-6,
   // full circle = 7+
-  if (count === 0) return <span className="schedule-month-dots" aria-hidden="true" />;
+  if (count === 0)
+    return <span className="schedule-month-dots" aria-hidden="true" />;
   if (count <= 3)
     return (
       <span className="schedule-month-dots" aria-hidden="true">
@@ -1130,16 +1177,9 @@ function UnavailableSheet({
       aria-label="Помечу как недоступно"
       onClick={onClose}
     >
-      <div
-        className="schedule-sheet"
-        onClick={(e) => e.stopPropagation()}
-      >
+      <div className="schedule-sheet" onClick={(e) => e.stopPropagation()}>
         <h2 className="schedule-sheet__title">
-          {COPY.unavailableSheet.title(
-            dateLabel,
-            state.startHm,
-            state.endHm,
-          )}
+          {COPY.unavailableSheet.title(dateLabel, state.startHm, state.endHm)}
         </h2>
         <fieldset className="schedule-sheet__field">
           <legend>{COPY.unavailableSheet.reasonLabel}</legend>
@@ -1150,9 +1190,7 @@ function UnavailableSheet({
                 name="reason"
                 value={r}
                 checked={state.reason === r}
-                onChange={() =>
-                  onChange((prev) => ({ ...prev, reason: r }))
-                }
+                onChange={() => onChange((prev) => ({ ...prev, reason: r }))}
               />
               <span>{COPY.unavailableSheet.reasons[r]}</span>
             </label>
@@ -1189,63 +1227,6 @@ function UnavailableSheet({
             disabled={state.submitting}
           >
             {COPY.unavailableSheet.submit}
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// --- Loading / error -----------------------------------------------------
-
-function ScheduleSkeleton() {
-  return (
-    <div className="master-dashboard__skeleton-wrap" aria-busy="true">
-      <p className="master-dashboard__loading-label">{COPY.loading}</p>
-      <div className="m-card m-card--skel">
-        <div className="skeleton" style={{ width: "70%", height: "1.1em" }} />
-        <div
-          className="skeleton"
-          style={{ width: "55%", height: "0.9em", marginTop: 8 }}
-        />
-      </div>
-      <div className="m-card m-card--skel">
-        <div className="skeleton" style={{ width: "50%", height: "1.1em" }} />
-        <div
-          className="skeleton"
-          style={{ width: "60%", height: "0.9em", marginTop: 8 }}
-        />
-      </div>
-      <div className="m-card m-card--skel">
-        <div className="skeleton" style={{ width: "65%", height: "1.1em" }} />
-        <div
-          className="skeleton"
-          style={{ width: "45%", height: "0.9em", marginTop: 8 }}
-        />
-      </div>
-    </div>
-  );
-}
-
-function ScheduleError({
-  err,
-  onRetry,
-}: {
-  err: unknown;
-  onRetry: () => void;
-}) {
-  const isServer = err instanceof ApiError && err.status >= 500;
-  const body = isServer
-    ? "Что-то у нас не получается прямо сейчас."
-    : "Не получилось загрузить. Проверьте интернет и попробуйте снова.";
-  return (
-    <div className="master-dashboard__section">
-      <h2 className="master-dashboard__section-title">{COPY.errorTitle}</h2>
-      <div className="callout callout--danger" role="alert">
-        <p style={{ margin: 0 }}>{body}</p>
-        <div style={{ marginTop: "var(--s-3)" }}>
-          <button type="button" className="btn-secondary" onClick={onRetry}>
-            {COPY.retry}
           </button>
         </div>
       </div>

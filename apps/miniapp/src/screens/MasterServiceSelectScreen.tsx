@@ -37,6 +37,7 @@ import {
   pickedMessage,
   type PickAvailability,
 } from "../components/OwnServiceForm";
+import { SystemState } from "../components/master/SystemState";
 import { ApiError } from "../lib/api";
 import {
   getServiceDirections,
@@ -64,10 +65,7 @@ export const SELECT_COPY = {
   backToDirections: "К списку направлений",
   toPrices: "Перейти к ценам",
   addOwn: "+ Добавить свою услугу",
-  loadError: "Не удалось загрузить каталог услуг.",
-  templatesError: "Не удалось загрузить услуги направления.",
   saveError: "Не получилось сохранить выбор.",
-  retry: "Повторить",
   salonManaged: "Услуги салона ведёт владелец салона.",
   notLinked: "Профиль ещё не привязан — привязку выполнит оператор.",
 } as const;
@@ -79,12 +77,12 @@ type Load =
   | { kind: "ready"; directions: ServiceDirection[]; selection: ServiceSelectionState }
   | { kind: "salon_managed" }
   | { kind: "not_linked" }
-  | { kind: "error" };
+  | { kind: "error"; err: unknown };
 
 type TemplatesLoad =
   | { kind: "loading" }
   | { kind: "ready"; templates: ServiceTemplate[] }
-  | { kind: "error" };
+  | { kind: "error"; err: unknown };
 
 function refusalReason(e: unknown): string | null {
   if (!(e instanceof ApiError)) return null;
@@ -136,8 +134,8 @@ function DirectionPicker({
       .then((res) => {
         if (alive) setLoad({ kind: "ready", templates: res.templates });
       })
-      .catch(() => {
-        if (alive) setLoad({ kind: "error" });
+      .catch((e: unknown) => {
+        if (alive) setLoad({ kind: "error", err: e });
       });
     return () => {
       alive = false;
@@ -178,16 +176,17 @@ function DirectionPicker({
   };
 
   if (load.kind === "loading") {
-    return <div className="skeleton service-card service-card--skel" aria-busy="true" />;
+    return <SystemState kind="loading" lines={1} />;
   }
   if (load.kind === "error") {
+    // Ошибка секции внутри загруженного экрана — та же карточка с предметом.
     return (
-      <div className="callout callout--danger" role="alert">
-        <p>{SELECT_COPY.templatesError}</p>
-        <button type="button" className="btn-secondary" onClick={() => setReloadKey((k) => k + 1)}>
-          {SELECT_COPY.retry}
-        </button>
-      </div>
+      <SystemState
+        kind="load_error"
+        what="templates"
+        err={load.err}
+        onRetry={() => setReloadKey((k) => k + 1)}
+      />
     );
   }
 
@@ -276,7 +275,7 @@ export function MasterServiceSelectScreen() {
             ? { kind: "salon_managed" }
             : reason === "not_linked"
               ? { kind: "not_linked" }
-              : { kind: "error" },
+              : { kind: "error", err: e },
         );
       });
     return () => {
@@ -298,13 +297,7 @@ export function MasterServiceSelectScreen() {
     return (
       <div className="screen master-services">
         {header}
-        {load.kind === "loading" && (
-          <div className="master-services__section" aria-busy="true">
-            {[1, 2, 3].map((i) => (
-              <div key={i} className="skeleton service-card service-card--skel" />
-            ))}
-          </div>
-        )}
+        {load.kind === "loading" && <SystemState kind="loading" />}
         {load.kind === "salon_managed" && (
           <p className="callout" role="status">
             {SELECT_COPY.salonManaged}
@@ -316,12 +309,12 @@ export function MasterServiceSelectScreen() {
           </p>
         )}
         {load.kind === "error" && (
-          <div className="callout callout--danger" role="alert">
-            <p>{SELECT_COPY.loadError}</p>
-            <button type="button" className="btn-secondary" onClick={() => setReloadKey((k) => k + 1)}>
-              {SELECT_COPY.retry}
-            </button>
-          </div>
+          <SystemState
+            kind="load_error"
+            what="catalog"
+            err={load.err}
+            onRetry={() => setReloadKey((k) => k + 1)}
+          />
         )}
       </div>
     );

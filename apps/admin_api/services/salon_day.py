@@ -60,6 +60,7 @@ from django.utils import timezone as dj_timezone
 
 from apps.booking.models import RemoteBookingProxy
 from apps.catalog.models import CatalogMaster, CatalogService
+from apps.catalog.specialist_ref import specialist_keys
 from apps.identity.models import BotUser
 from apps.tenancy.context import tenant_scope
 
@@ -280,7 +281,14 @@ def build_salon_day(tenant, *, day: date_cls, now: datetime | None = None) -> Sa
                 "name"
             )
         )
-    by_master: dict[UUID, list[DayVisit]] = {m.id: [] for m in masters}
+    # DRF-2185: зеркало ключится каталожным id мастера; у соло/склеенного
+    # он ≠ pk — одна корзина на мастера под каждым из его ключей, иначе
+    # его визиты уходят в сироты, а колонка пуста.
+    by_master: dict[UUID, list[DayVisit]] = {}
+    for m in masters:
+        shared: list[DayVisit] = []
+        for key in specialist_keys(m):
+            by_master[key] = shared
     orphans: list[DayVisit] = []
 
     for proxy in proxies:

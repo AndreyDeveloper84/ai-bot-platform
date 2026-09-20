@@ -24,8 +24,8 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
-import { DelayedSkeleton, ServiceCardSkeleton } from "../components/Skeleton";
-import { StateError } from "../components/StateError";
+// Загрузка / ошибка загрузки — мастерский SystemState (DRF-2194), не клиентский StateError.
+import { SystemState } from "../components/master/SystemState";
 import { ApiError } from "../lib/api";
 import { formatDuration, formatMoney } from "../lib/format";
 import {
@@ -263,10 +263,7 @@ export function MasterPublicationScreen() {
   if (phase.kind === "loading") {
     return (
       <main className="screen publication">
-        <DelayedSkeleton loading>
-          <ServiceCardSkeleton />
-          <ServiceCardSkeleton />
-        </DelayedSkeleton>
+        <SystemState kind="loading" lines={2} />
       </main>
     );
   }
@@ -274,7 +271,7 @@ export function MasterPublicationScreen() {
   if (phase.kind === "error") {
     return (
       <main className="screen publication">
-        <StateError err={phase.err} onRetry={() => void load()} />
+        <SystemState kind="load_error" what="publication" err={phase.err} onRetry={() => void load()} />
       </main>
     );
   }

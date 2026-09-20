@@ -22,6 +22,13 @@ export type GoalSourceChannel = "bot" | "miniapp";
 export interface KnownGoal {
   goal_key: string | null;
   goal_text: string | null;
+  /**
+   * DRF-2177 — подпись цели едет С ЦЕЛЬЮ (каталог #517). До этого экран
+   * выводил её из `suggestions[].label` по ключу — то есть подпись
+   * зависела от того, показан ли ряд целей. Необязательное: документ
+   * каталога до выкладки #517 её не несёт, тогда — прежний вывод.
+   */
+  label?: string;
   selected_at: string; // ISO 8601
   source_channel: GoalSourceChannel;
 }

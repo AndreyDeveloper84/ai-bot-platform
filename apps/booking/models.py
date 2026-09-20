@@ -984,6 +984,23 @@ class RemoteBookingProxy(models.Model):
         help_text="Ayla Master.id — analogous to ``service_id``.",
         verbose_name="Мастер (идентификатор в Ayla)",
     )
+    # DRF-2172 — цена записи как снимок на момент записи: ``price_total`` из
+    # ``booking.created`` (event-contract §3.1 — поле там с v1, консьюмер его
+    # до этого выбрасывал). Последующие события цену не несут; повторный
+    # ``booking.created`` может лишь ЗАПОЛНИТЬ NULL (запись из диалога пишет
+    # зеркало раньше события, без цены), но не перезаписать — смена прайса у
+    # салона на записанное не влияет. ``NULL`` — цена не
+    # доехала (событие без поля / нечисло / строка старше этого столбца):
+    # экран строку не рисует (§103), «0» не выдумывается. Валюта — не
+    # хранится: в каталоге её нет нигде (решение владельца, Phase 5).
+    price_amount = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        help_text="Snapshot of booking.created.price_total; NULL when the event carried none.",
+        verbose_name="Цена записи (снимок)",
+    )
 
     # ── Announcement claims (DRF-1069) ─────────────────────────────
     #
