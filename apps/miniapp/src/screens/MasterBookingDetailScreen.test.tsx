@@ -30,10 +30,8 @@ vi.mock("../lib/master-api", async (importOriginal) => {
 
 import { ApiError } from "../lib/api";
 import { getMasterBooking, type MasterBookingDetail } from "../lib/master-api";
-import {
-  MasterBookingDetailScreen,
-  RECHECK_MIN_INTERVAL_MS,
-} from "./MasterBookingDetailScreen";
+import { RECHECK_MIN_INTERVAL_MS } from "../components/master/SystemState";
+import { MasterBookingDetailScreen } from "./MasterBookingDetailScreen";
 
 const mocked = vi.mocked(getMasterBooking);
 
@@ -386,7 +384,8 @@ describe("смена записи без размонтирования", () => 
 
     await user.click(screen.getByRole("button", { name: "к b-2" }));
     // Пока b-2 в полёте — загрузка, а не имя и состояние b-1.
-    expect(await screen.findByText("Загружаем запись…")).toBeInTheDocument();
+    // Загрузка — общий скелет SystemState (без слов), имени b-1 уже нет.
+    expect(await screen.findByRole("status", { busy: true })).toBeInTheDocument();
     expect(screen.queryByText("Анна П.")).toBeNull();
     expect(mocked).toHaveBeenLastCalledWith("b-2", expect.anything());
     await act(async () => {
@@ -410,7 +409,7 @@ describe("ошибки загрузки", () => {
     mocked.mockRejectedValueOnce(new ApiError(404, "not_found", "booking not found"));
     mocked.mockResolvedValueOnce(detail());
     renderAt();
-    expect(await screen.findByText("Не удалось загрузить запись")).toBeInTheDocument();
+    expect(await screen.findByRole("alert")).toHaveTextContent("Не удалось загрузить запись");
     expect(screen.queryByText("Завершено")).toBeNull();
     expect(screen.queryByText("Анна П.")).toBeNull();
     // Повтор после ошибки — без троттла (беречь нечего), и он работает.

@@ -215,7 +215,8 @@ describe("тап по записи → детали, не переписки", (
 
   it("«Расписание»: тап по записи открывает детали этой записи", async () => {
     renderAppAt("/master/schedule");
-    const card = await screen.findByRole("button", { name: /Мария К\./ });
+    // М-6 (DRF-2157): карточка в «Расписании» — та же MasterBookingCard, ссылка.
+    const card = await screen.findByRole("link", { name: /Мария К\./ });
     await userEvent.click(card);
     await findDetail();
     await waitFor(() => expect(mockedBooking).toHaveBeenCalledWith("b-42", expect.anything()));
@@ -224,7 +225,8 @@ describe("тап по записи → детали, не переписки", (
   it("«Расписание» соло: тап по записи ведёт на /solo/bookings/:id — панель одна, соло, «Расписание» активна", async () => {
     mockedGetMe.mockResolvedValue(SOLO_ME);
     renderAppAt("/solo/schedule");
-    const card = await screen.findByRole("button", { name: /Мария К\./ });
+    // М-6 (DRF-2157): карточка в «Расписании» — та же MasterBookingCard, ссылка.
+    const card = await screen.findByRole("link", { name: /Мария К\./ });
     await userEvent.click(card);
     await findDetail();
     // Одна панель — соло (App), мастерская внутри экрана на /solo/* не рисуется.
