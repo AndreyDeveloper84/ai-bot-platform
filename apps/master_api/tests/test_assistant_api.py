@@ -147,7 +147,8 @@ class TestTheRouteAnswers:
         _ask(client, "хочу выходной")
 
         offered = {t["name"] for t in llm["calls"][0]["tools"]}
-        assert offered == {"my_day", "my_week", "free_slots", ACTION_BLOCK_TIME}
+        # DRF-2153 (М-5): + prepare_booking — запись через ассистента.
+        assert offered == {"my_day", "my_week", "free_slots", ACTION_BLOCK_TIME, "prepare_booking"}
 
     def test_the_turn_lands_in_the_thread_the_bot_uses(
         self, client, bot_user, accepted_master, llm

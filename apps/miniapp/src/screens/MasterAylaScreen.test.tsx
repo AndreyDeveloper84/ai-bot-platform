@@ -18,8 +18,7 @@ import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../lib/master-api", async (importOriginal) => {
-  const original =
-    await importOriginal<typeof import("../lib/master-api")>();
+  const original = await importOriginal<typeof import("../lib/master-api")>();
   return {
     ...original,
     getAylaHistory: vi.fn(),
@@ -118,7 +117,8 @@ describe("MasterAylaScreen · диалог", () => {
 
     await ask("когда у меня окно");
 
-    expect(mockedAsk).toHaveBeenCalledWith("когда у меня окно");
+    // DRF-2153: второй аргумент — уточнение из карточки; у набранного вопроса его нет.
+    expect(mockedAsk).toHaveBeenCalledWith("когда у меня окно", undefined);
     expect(
       await screen.findByText("В четверг окно с 14:00."),
     ).toBeInTheDocument();
@@ -154,9 +154,7 @@ describe("MasterAylaScreen · подтверждение действия (DRF-1
 
     // Положительная половина: карточка со сводкой на экране.
     expect(await screen.findByText("Подтвердите действие")).toBeInTheDocument();
-    expect(
-      screen.getByText(/заявку на нерабочее время/),
-    ).toBeInTheDocument();
+    expect(screen.getByText(/заявку на нерабочее время/)).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Отправить заявку" }),
     ).toBeInTheDocument();
@@ -196,7 +194,7 @@ describe("MasterAylaScreen · подтверждение действия (DRF-1
     );
   });
 
-  it("«Не надо» ничего не выполняет и убирает карточку", async () => {
+  it("«Отмена» ничего не выполняет и убирает карточку", async () => {
     mockedAsk.mockResolvedValue({
       answer: PROPOSAL.summary,
       tool: "block_time",
@@ -208,7 +206,8 @@ describe("MasterAylaScreen · подтверждение действия (DRF-1
     const user = await ask("хочу выходной в пятницу");
     await screen.findByText("Подтвердите действие");
 
-    await user.click(screen.getByRole("button", { name: "Не надо" }));
+    // DRF-2153: у мастера отказ — «Отмена» (макет DRF-1187); у администратора — «Не надо».
+    await user.click(screen.getByRole("button", { name: "Отмена" }));
 
     expect(mockedConfirm).not.toHaveBeenCalled();
     expect(

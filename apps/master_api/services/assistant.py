@@ -96,6 +96,12 @@ class AssistantReply:
     #: ждут подтверждения; выполнить его можно только отдельным
     #: запросом с талоном изнутри. `None` — ничего не предлагалось.
     pending_action: dict[str, Any] | None = None
+    #: Данные последнего инструмента — из них поверхность строит карточки
+    #: (DRF-2153): окна, день. Текст модели карточек не заменяет.
+    tool_data: dict[str, Any] | None = None
+    #: Карточки, которые действие отдало вместе с вопросом (уточнение
+    #: клиента, выбор услуги, дверь в форму, день с записями).
+    cards: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _system_prompt(master, *, today: date, tz_label: str) -> str:
@@ -130,11 +136,22 @@ def _system_prompt(master, *, today: date, tz_label: str) -> str:
     )
 
 
+#: Скрытая строка нити с выбором из карточки (DRF-2153).
+SELECT_HINT_PREFIX = "Уточнение мастера:"
+
+
 def _history_messages(history) -> list[dict[str, str]]:
     out: list[dict[str, str]] = []
     for row in history:
         body = (row.content or "").strip()
-        if not body or row.role not in ("user", "assistant"):
+        if not body:
+            continue
+        if row.role == "tool" and body.startswith(SELECT_HINT_PREFIX):
+            # DRF-2153: выбор из карточки (клиент, время) записан скрытой
+            # tool-строкой — экран её не рисует, модель помнит на следующем ходе.
+            out.append({"role": "user", "content": body})
+            continue
+        if row.role not in ("user", "assistant"):
             continue
         out.append({"role": row.role, "content": body})
     return out
@@ -382,6 +399,12 @@ def run_assistant(
         try:
             proposal = subject.propose(call.name, call.arguments or {})
         except ActionError as exc:
+            if getattr(exc, "verbatim", False):
+                # Короткий вопрос макета («Какая услуга?») — как есть, с карточками.
+                reply.tool_name = call.name
+                reply.cards = list(getattr(exc, "cards", None) or [])
+                reply.text = subject.postprocess(exc.detail)
+                return reply
             return _done(reply, f"Не смог подготовить действие: {exc.detail}")
         reply.tool_name = proposal.name
         reply.pending_action = proposal.as_dict()
@@ -397,13 +420,16 @@ def run_assistant(
         return _done(reply, FAILED_TEXT)
 
     reply.tool_name = outcome.name
+    reply.tool_data = outcome.data if isinstance(outcome.data, dict) else None
     messages.append(
         {
             "role": "user",
             "content": (
                 f"Данные инструмента {outcome.name}:\n"
                 f"{json.dumps(outcome.data, ensure_ascii=False)}\n\n"
-                f"Ответь {subject.addressee} по этим данным. Ничего не добавляй от себя."
+                f"Ответь {subject.addressee} по этим данным. Ничего не добавляй от себя. "
+                "Если в данных stale=true — скажи, что расписание не удалось проверить и "
+                "это последние известные данные; day_off=true — в этот день выходной."
             ),
         }
     )
@@ -441,6 +467,7 @@ __all__ = [
     "FAILED_TEXT",
     "MAX_REPLY_CHARS",
     "NO_MASTER_TEXT",
+    "SELECT_HINT_PREFIX",
     "AssistantReply",
     "AssistantSubject",
     "MasterSubject",

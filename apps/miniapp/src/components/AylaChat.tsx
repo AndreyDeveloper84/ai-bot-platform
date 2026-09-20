@@ -17,12 +17,42 @@
  * Mini App по `open_url` с предзаполнением (черновик записи), и саму
  * запись создаёт человек в форме. Без `onOpen` такой карточке некуда
  * вести — вызывающий экран обязан его дать, если его API умеет `open`.
+ *
+ * # Карточки (DRF-2153, М-5, макет DRF-1187)
+ *
+ * Ответ может нести `cards` — структуру вместо абзаца (окна свободного
+ * времени, день, уточнение клиента, «занято» с вариантами, «последние
+ * известные данные»). Карточки рисуются под репликой, к которой пришли;
+ * выбор из карточки — новая фраза с уточнением `select`. Предложение
+ * записи (`pending_action.details`) — карточка «Проверьте запись» с
+ * четырьмя строками; результат — ✓ «Запись создана» + «Открыть запись».
+ * `startScreen` — стартовый экран пустого диалога (контекст дня + чипы);
+ * админский экран его не передаёт и видит прежнее приглашение.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 
 import { ApiError } from "../lib/api";
+import type {
+  AylaBookingDetails,
+  AylaCard,
+  AylaDayOffDetails,
+  AylaSelect,
+} from "../lib/master-api";
 import { hapticImpact, hapticSelection, signalReady } from "../lib/max-sdk";
+import {
+  AylaCards,
+  BookingCreatedCard,
+  BookingReviewRows,
+  CARD_COPY,
+  InfoHint,
+} from "./AylaCards";
 
 /** Тот же потолок, что у сервера (`views_assistant.MAX_QUESTION_CHARS`). */
 export const MAX_QUESTION_CHARS = 1000;
@@ -49,15 +79,30 @@ export interface AylaChatPendingAction {
   confirm_kind?: string;
   /** Куда ведёт дверь при `confirm_kind === "open"`. */
   open_url?: string;
+  /** Строки карточки предложения (DRF-2153): запись или рабочий день. */
+  details?: AylaBookingDetails | AylaDayOffDetails;
+}
+
+export interface AylaChatConfirmResult {
+  answer: string;
+  /** `false` — не выполнено («занято», «проверяем результат»). */
+  executed?: boolean;
+  open?: { url: string; label: string } | null;
+  cards?: AylaCard[];
+  details?: AylaBookingDetails | AylaDayOffDetails | null;
 }
 
 export interface AylaChatApi {
   history: () => Promise<{ messages: AylaChatMessage[] }>;
-  ask: (text: string) => Promise<{
+  ask: (
+    text: string,
+    select?: AylaSelect,
+  ) => Promise<{
     answer: string;
     pending_action: AylaChatPendingAction | null;
+    cards?: AylaCard[];
   }>;
-  confirm: (token: string) => Promise<{ answer: string }>;
+  confirm: (token: string) => Promise<AylaChatConfirmResult>;
 }
 
 export interface AylaChatProps {
@@ -68,18 +113,36 @@ export interface AylaChatProps {
   onOpen?: (url: string) => void;
   /** `aria-label` ленты — какой это диалог. */
   logLabel?: string;
+  /** Подпись отказа от предложения: у мастера — «Отмена» (макет DRF-1187). */
+  declineLabel?: string;
+  /** Стартовый экран пустого диалога (контекст дня + чипы); чип шлёт фразу через `send`. */
+  startScreen?: (send: (text: string) => void) => ReactNode;
 }
 
 /** Черновая реплика, ещё не подтверждённая сервером. */
 interface LocalMessage extends AylaChatMessage {
   pending?: boolean;
+  /** Карточки под репликой (DRF-2153). */
+  cards?: AylaCard[];
+  /** Результат подтверждения — карточка ✓ «Запись создана» вместо пузыря. */
+  created?: {
+    details: AylaBookingDetails | null;
+    open: { url: string; label: string } | null;
+  };
+}
+
+function isBookingDetails(
+  details: AylaBookingDetails | AylaDayOffDetails | null | undefined,
+): details is AylaBookingDetails {
+  return !!details && !("kind" in details);
 }
 
 let localSeq = 0;
 // DRF-2151 — второй слой поверх фильтра бэкенда: команда или токен
 // приглашения на экране не рисуются никогда, даже если история пришла
 // со старого бэкенда. Формы — те же, что читает салонный бот.
-const HIDDEN_TURN = /^\/|master_invite_[0-9a-fA-F-]{8,}|\binv_[A-Za-z0-9]{4,}\b/;
+const HIDDEN_TURN =
+  /^\/|master_invite_[0-9a-fA-F-]{8,}|\binv_[A-Za-z0-9]{4,}\b/;
 // Код сотрудника — ровно четыре знака алфавита кодов после AYLA в любом
 // регистре (staff_invites.CODE_ALPHABET); «AYLA Beauty» — не код.
 const TYPED_CODE = /\bAYLA[-_ ]?[23456789ABCDEFGHJKMNPQRSTUVWXYZ]{4}\b/i;
@@ -89,7 +152,9 @@ export function isHiddenTurn(content: string): boolean {
   return HIDDEN_TURN.test(text) || TYPED_CODE.test(text);
 }
 
-export function visibleMessages<T extends { content: string }>(messages: T[]): T[] {
+export function visibleMessages<T extends { content: string }>(
+  messages: T[],
+): T[] {
   return messages.filter((m) => !isHiddenTurn(m.content));
 }
 
@@ -105,7 +170,14 @@ function localMessage(role: string, content: string): LocalMessage {
   };
 }
 
-export function AylaChat({ api, greeting, onOpen, logLabel = "Диалог с Ayla" }: AylaChatProps) {
+export function AylaChat({
+  api,
+  greeting,
+  onOpen,
+  logLabel = "Диалог с Ayla",
+  declineLabel = "Не надо",
+  startScreen,
+}: AylaChatProps) {
   const [messages, setMessages] = useState<LocalMessage[]>([]);
   const [draft, setDraft] = useState("");
   const [loadingHistory, setLoadingHistory] = useState(true);
@@ -152,38 +224,61 @@ export function AylaChat({ api, greeting, onOpen, logLabel = "Диалог с Ay
     }
   }, [messages.length, pending]);
 
-  const onSend = useCallback(async () => {
-    const text = draft.trim();
-    if (!text || sending) return;
+  // Последний вопрос — для «Проверить снова» (данные могли устареть).
+  const lastQuestion = useRef<{ text: string; select?: AylaSelect } | null>(
+    null,
+  );
 
-    hapticSelection();
-    setDraft("");
-    setError("");
-    // Новый вопрос отменяет висящее предложение: подтверждать сводку,
-    // на которую сверху лёг другой разговор, человек не должен.
-    setPending(null);
-    // DRF-2151: команда/токен на экране не рисуется и до перезахода.
-    if (!isHiddenTurn(text)) {
-      setMessages((prev) => [...prev, localMessage("user", text)]);
-    }
-    setSending(true);
-    try {
-      const res = await api.ask(text);
-      // Предложение показывается карточкой, а не пузырём: иначе один и
-      // тот же текст стоял бы на экране дважды — сводкой и репликой.
-      // На сервере он записан репликой в любом случае, так что после
-      // перезахода диалог читается целиком.
-      if (res.pending_action === null) {
-        setMessages((prev) => [...prev, localMessage("assistant", res.answer)]);
+  const send = useCallback(
+    async (rawText: string, select?: AylaSelect) => {
+      const text = rawText.trim();
+      if (!text || sending) return;
+
+      hapticSelection();
+      setDraft("");
+      setError("");
+      // Новый вопрос отменяет висящее предложение: подтверждать сводку,
+      // на которую сверху лёг другой разговор, человек не должен.
+      setPending(null);
+      // DRF-2151: команда/токен на экране не рисуется и до перезахода.
+      if (!isHiddenTurn(text)) {
+        setMessages((prev) => [...prev, localMessage("user", text)]);
       }
-      setPending(res.pending_action);
-    } catch (err) {
-      const detail = err instanceof ApiError && err.detail ? err.detail : FAILED_TEXT;
-      setError(detail);
-    } finally {
-      setSending(false);
-    }
-  }, [api, draft, sending]);
+      lastQuestion.current = select ? { text, select } : { text };
+      setSending(true);
+      try {
+        const res = await api.ask(text, select);
+        // Предложение показывается карточкой, а не пузырём: иначе один и
+        // тот же текст стоял бы на экране дважды — сводкой и репликой.
+        // На сервере он записан репликой в любом случае, так что после
+        // перезахода диалог читается целиком.
+        if (res.pending_action === null) {
+          setMessages((prev) => [
+            ...prev,
+            {
+              ...localMessage("assistant", res.answer),
+              cards: res.cards ?? [],
+            },
+          ]);
+        }
+        setPending(res.pending_action);
+      } catch (err) {
+        const detail =
+          err instanceof ApiError && err.detail ? err.detail : FAILED_TEXT;
+        setError(detail);
+      } finally {
+        setSending(false);
+      }
+    },
+    [api, sending],
+  );
+
+  const onSend = useCallback(() => void send(draft), [send, draft]);
+
+  const onRecheck = useCallback(() => {
+    const last = lastQuestion.current;
+    if (last) void send(last.text, last.select);
+  }, [send]);
 
   const onConfirm = useCallback(async () => {
     if (pending === null || confirming) return;
@@ -193,7 +288,10 @@ export function AylaChat({ api, greeting, onOpen, logLabel = "Диалог с Ay
       // создаст человек уже там — кнопкой формы.
       const url = pending.open_url ?? "";
       setPending(null);
-      setMessages((prev) => [...prev, localMessage("assistant", pending.summary)]);
+      setMessages((prev) => [
+        ...prev,
+        localMessage("assistant", pending.summary),
+      ]);
       if (url && onOpen) onOpen(url);
       return;
     }
@@ -202,9 +300,21 @@ export function AylaChat({ api, greeting, onOpen, logLabel = "Диалог с Ay
     try {
       const res = await api.confirm(pending.token);
       setPending(null);
-      setMessages((prev) => [...prev, localMessage("assistant", res.answer)]);
+      const created =
+        res.executed !== false && isBookingDetails(res.details)
+          ? { details: res.details, open: res.open ?? null }
+          : undefined;
+      setMessages((prev) => [
+        ...prev,
+        {
+          ...localMessage("assistant", res.answer),
+          cards: res.cards ?? [],
+          created,
+        },
+      ]);
     } catch (err) {
-      const detail = err instanceof ApiError && err.detail ? err.detail : FAILED_TEXT;
+      const detail =
+        err instanceof ApiError && err.detail ? err.detail : FAILED_TEXT;
       setError(detail);
     } finally {
       setConfirming(false);
@@ -222,23 +332,50 @@ export function AylaChat({ api, greeting, onOpen, logLabel = "Диалог с Ay
   return (
     <>
       <div className="ayla-list" role="log" aria-label={logLabel}>
+        {/* Стартовый экран — всегда сверху: история общая с ботом, и мастер,
+            который уже говорил с Ayla, иначе не увидел бы контекст и чипы. */}
+        {startScreen && !loadingHistory
+          ? startScreen((text) => void send(text))
+          : null}
         {loadingHistory ? (
           <p className="ayla-empty" aria-live="polite">
             Загружаю диалог…
           </p>
-        ) : messages.length === 0 ? (
+        ) : messages.length === 0 && !startScreen ? (
           <p className="ayla-empty">{greeting}</p>
         ) : (
-          messages.map((m) => (
-            <div
-              key={m.id}
-              className={
-                m.role === "user" ? "ayla-bubble ayla-bubble--mine" : "ayla-bubble ayla-bubble--ayla"
-              }
-            >
-              <p className="ayla-bubble__content">{m.content}</p>
-            </div>
-          ))
+          messages.map((m) =>
+            m.created ? (
+              <BookingCreatedCard
+                key={m.id}
+                details={m.created.details}
+                open={m.created.open}
+              />
+            ) : (
+              <div key={m.id}>
+                {/* Карточка «занято» сама несёт заголовок — тот же текст пузырём был бы дважды. */}
+                {m.cards?.some((c) => c.kind === "slot_taken") &&
+                m.content === CARD_COPY.slotTakenTitle ? null : (
+                  <div
+                    className={
+                      m.role === "user"
+                        ? "ayla-bubble ayla-bubble--mine"
+                        : "ayla-bubble ayla-bubble--ayla"
+                    }
+                  >
+                    <p className="ayla-bubble__content">{m.content}</p>
+                  </div>
+                )}
+                {m.cards && m.cards.length > 0 ? (
+                  <AylaCards
+                    cards={m.cards}
+                    onSelect={(text, select) => void send(text, select)}
+                    onRecheck={onRecheck}
+                  />
+                ) : null}
+              </div>
+            ),
+          )
         )}
 
         {sending ? (
@@ -248,11 +385,32 @@ export function AylaChat({ api, greeting, onOpen, logLabel = "Диалог с Ay
         ) : null}
 
         {pending !== null ? (
-          <section className="ayla-confirm" aria-labelledby="ayla-confirm-title">
+          <section
+            className="ayla-confirm"
+            aria-labelledby="ayla-confirm-title"
+          >
             <h2 className="ayla-confirm__title" id="ayla-confirm-title">
-              {pending.confirm_kind === "open" ? "Черновик готов" : "Подтвердите действие"}
+              {isBookingDetails(pending.details)
+                ? CARD_COPY.reviewTitle
+                : pending.details?.kind === "day_off"
+                  ? pending.details.title
+                  : pending.confirm_kind === "open"
+                    ? "Черновик готов"
+                    : "Подтвердите действие"}
             </h2>
-            <p className="ayla-confirm__summary">{pending.summary}</p>
+            {isBookingDetails(pending.details) ? (
+              // Макет 3A: четыре строки с иконками — не сводка одной строкой.
+              <BookingReviewRows details={pending.details} />
+            ) : pending.details?.kind === "day_off" ? (
+              <ul className="ayla-card__list ayla-review">
+                <li className="ayla-review__row">
+                  <span aria-hidden="true">📅</span> {pending.details.date}
+                </li>
+                <li className="ayla-review__row">{pending.details.change}</li>
+              </ul>
+            ) : (
+              <p className="ayla-confirm__summary">{pending.summary}</p>
+            )}
             <div className="ayla-confirm__actions">
               <button
                 type="button"
@@ -268,9 +426,12 @@ export function AylaChat({ api, greeting, onOpen, logLabel = "Диалог с Ay
                 onClick={onDecline}
                 disabled={confirming}
               >
-                Не надо
+                {declineLabel}
               </button>
             </div>
+            {isBookingDetails(pending.details) ? (
+              <InfoHint text={CARD_COPY.reviewHint} />
+            ) : null}
           </section>
         ) : null}
 
@@ -294,7 +455,7 @@ export function AylaChat({ api, greeting, onOpen, logLabel = "Диалог с Ay
           <textarea
             className="ayla-compose__textarea"
             aria-label="Вопрос к Ayla"
-            placeholder="Спросите Ayla"
+            placeholder="Спросите Ayla…"
             value={draft}
             rows={1}
             onChange={(e) => setDraft(e.target.value)}
