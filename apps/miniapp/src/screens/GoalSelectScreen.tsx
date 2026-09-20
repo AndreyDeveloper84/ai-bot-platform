@@ -167,6 +167,15 @@ function currentAnketaStep(doc: DecisionContext): MissingItem | null {
   return doc.missing.find((item) => typeof item.step === "string") ?? null;
 }
 
+/**
+ * DRF-2177 — C03.5: контекст собран. Одно место для кадра и для таймера
+ * авто-перехода, чтобы они не разошлись. Только когда документ пуст: с
+ * вопросом на экране этот `next` — противоречие, и экран рисует вопрос.
+ */
+function isCollected(doc: DecisionContext): boolean {
+  return doc.next?.id === NEXT_RETURN_TO_CHAT && doc.missing.length === 0;
+}
+
 interface Props {
   /**
    * Документ, уже полученный вызывающим (DRF-1451).
@@ -271,14 +280,19 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
   // закрыть мини-апп (человек возвращается в чат), вне MAX — на главный.
   // Таймер живёт ровно пока документ «собран»: новый документ или уход с
   // экрана его снимают.
+  //
+  // Не пока идёт отправка и не пока открыт пересмотр: уйти посреди
+  // запроса или правки — оставить человека без ответа на то, что он
+  // только что сделал (ревью #1913).
   const isCompleted =
-    state.kind === "ok" &&
-    state.doc.next?.id === NEXT_RETURN_TO_CHAT &&
-    state.doc.missing.length === 0;
+    state.kind === "ok" && isCollected(state.doc) && !submitting && revisingStep === null;
   useEffect(() => {
     if (!isCompleted) return;
     const timer = window.setTimeout(() => {
-      if (maxBridge() !== null) {
+      // `closeApp()` закрывает только при живом `close()`; без него (или
+      // по deep-link без истории) человек остался бы на кадре без кнопки —
+      // тогда домой сами.
+      if (maxBridge()?.close) {
         closeApp();
       } else {
         navigate(HOME_ROUTE, { replace: true });
@@ -431,9 +445,9 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
   // DRF-2177: подпись цели — из документа (`label`); прежний вывод по
   // ряду `suggestions` — для документа каталога до #517.
   const knownLabel = knownGoal
-    ? knownGoal.label ??
-      knownGoal.goal_text ??
-      doc.suggestions.find((s) => s.key === knownGoal.goal_key)?.label ??
+    ? knownGoal.label ||
+      knownGoal.goal_text ||
+      doc.suggestions.find((s) => s.key === knownGoal.goal_key)?.label ||
       knownGoal.goal_key
     : null;
   const intentLabel = (id: string) =>
@@ -489,10 +503,8 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
     anketaStep?.allow_free_text && anketaStep.step && !stepOwnTextField,
   );
   // DRF-2177 — C03.5: контекст собран, вопросов нет — кадр благодарности
-  // и авто-переход. Только когда документ действительно пуст: с открытым
-  // пересмотром или вопросом на экране этот `next` — противоречие, и
-  // экран рисует вопрос, а не прощается.
-  const completed = nextStep?.id === NEXT_RETURN_TO_CHAT && doc.missing.length === 0;
+  // и авто-переход (см. `isCollected`).
+  const completed = isCollected(doc);
   const hasFreeText = Boolean(formulateOwnLabel) || stepAllowsFreeText;
   const hasOnward = Boolean(nextRoute) || stepOwnTextField || completed;
   const documentIsGate = !hasFreeText && !hasOnward;
@@ -580,7 +592,7 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
           вторая половина починки — липкая «Отправить» выше: она исчезает
           вместе с очищенным полем, то есть изменение происходит ТАМ, где
           человек стоит, а не одной строкой выше сгиба. */}
-      {savedNotice && (
+      {savedNotice && !completed && (
         <div className="callout callout--success" role="status">
           <p style={{ margin: 0 }}>{savedNotice}</p>
         </div>
@@ -595,7 +607,9 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
           answers={knownAnswers}
           disabled={submitting}
           onRevise={setRevisingStep}
-          onReviseGoal={reviseGoal ?? undefined}
+          // На кадре C03.5 ничего кликабельного (макет): «Изменить» уходит,
+          // иначе тап за 1,5 с до авто-перехода ушёл бы в никуда.
+          onReviseGoal={completed ? undefined : reviseGoal ?? undefined}
         />
       )}
 

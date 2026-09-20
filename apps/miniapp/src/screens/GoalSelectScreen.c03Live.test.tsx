@@ -201,11 +201,13 @@ describe("кадр C03.5 — контекст собран", () => {
     expect(COMPLETION_TEXT).toBe("Спасибо! Этого достаточно, чтобы подобрать тебе подходящий шаг.");
     expect(screen.queryByRole("button", { name: "Вернуться в чат" })).toBeNull();
     expect(screen.queryByRole("button", { name: "Найти услугу" })).toBeNull();
+    // Ничего кликабельного (макет C03.5): «Изменить» на этом кадре нет.
+    expect(screen.queryByRole("button", { name: /Изменить/ })).toBeNull();
   });
 
   it("внутри MAX через паузу закрывает мини-апп — человек возвращается в чат", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
-    mockedBridge.mockReturnValue({} as never);
+    mockedBridge.mockReturnValue({ close: () => {} } as never);
     mockedFetch.mockResolvedValue(COLLECTED);
     renderAt("/customer/goal-select");
 
@@ -215,6 +217,19 @@ describe("кадр C03.5 — контекст собран", () => {
       vi.advanceTimersByTime(COMPLETION_AUTO_MS + 10);
     });
     expect(mockedClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("мост без close() — не виснем на кадре, уходим на главный", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    mockedBridge.mockReturnValue({} as never);
+    mockedFetch.mockResolvedValue(COLLECTED);
+    renderAt("/customer/goal-select");
+    await screen.findByText(COMPLETION_TEXT);
+    await act(async () => {
+      vi.advanceTimersByTime(COMPLETION_AUTO_MS + 10);
+    });
+    expect(screen.getByText("ГЛАВНЫЙ H01")).toBeInTheDocument();
+    expect(mockedClose).not.toHaveBeenCalled();
   });
 
   it("вне MAX через паузу уходит на главный H01", async () => {
