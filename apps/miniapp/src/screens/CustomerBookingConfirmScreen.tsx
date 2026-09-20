@@ -70,9 +70,9 @@ import {
   type QuoteChange,
 } from "../lib/customer-booking";
 import { formatDuration, formatMoney, formatVisitFull, priceFromLabel } from "../lib/format";
-import { openPaymentConfirmation } from "../lib/max-sdk";
+import { getStartPayload, openPaymentConfirmation } from "../lib/max-sdk";
 import { createPayment } from "../lib/payments";
-import { restorePendingIntent } from "../lib/pending-booking-intent";
+import { resolveEntryPoint, restorePendingIntent } from "../lib/pending-booking-intent";
 import {
   resetBooking,
   setMaster,
@@ -313,6 +313,11 @@ export function CustomerBookingConfirmScreen() {
         visit_at: draft.visitAt,
         // AMD-002 / C7.4 — user's payment choice rides the create call.
         payment_required: paymentChoice === "online",
+        // DRF-1773 — чем начался этот путь. `deep_link:reco_<id>` — запись
+        // выросла из карточки C04, и бронь будет с ней связана; все
+        // прежние значения (`catalog` / `master` / `direct`) едут как есть
+        // и ничего не меняют.
+        entry_point: resolveEntryPoint(draft.entryPoint, getStartPayload()),
         // DRF-1708 / D4 — ровно то, что показано в карточке выше; сервер
         // сверит с применяемым внутри транзакции создания.
         ...(shownPrice != null ? { quoted_price: shownPrice } : {}),

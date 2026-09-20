@@ -553,6 +553,8 @@ export interface BookingCreatePayload {
   visit_at: string;
   /** AMD-002 / C7.4 — user's payment choice from the summary screen. */
   payment_required?: boolean;
+  /** DRF-1773 — провенанс пути (`resolveEntryPoint`); см. `api.ts`. */
+  entry_point?: string;
   /**
    * DRF-1708 (решение владельца, пакет 2, D4): ровно то, что человек
    * ВИДЕЛ на подтверждении. Цена — десятичной строкой как пришла из

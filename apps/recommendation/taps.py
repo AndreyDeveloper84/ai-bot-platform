@@ -21,6 +21,7 @@ from django.utils import timezone
 from apps.orchestrator.discovery import DiscoveryReply
 from apps.recommendation import card as c
 from apps.recommendation.models import Recommendation
+from apps.recommendation.provenance import audit_reaction
 
 logger = logging.getLogger(__name__)
 
@@ -76,6 +77,9 @@ def route_recommendation_callback(*, global_bot_user, callback_text: str) -> Dis
     record.reaction = reaction
     record.reacted_at = timezone.now()
     record.save(update_fields=["reaction", "reacted_at"])
+    # DRF-1773 — реакция в существующий аудит; новой шины нет,
+    # `recommendation.accepted` не вводится (снят владельцем, B8).
+    audit_reaction(record, reaction)
     logger.info("recommendation.tap kind=%s recommendation=%s", kind, record.id)
 
     if kind == "why":
