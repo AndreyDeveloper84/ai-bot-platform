@@ -188,6 +188,34 @@ def merge_prefs(bot_user: Any, updates: dict[str, Any]) -> dict[str, Any]:
     return context
 
 
+def write_prefs(bot_user: Any, updates: dict[str, Any]) -> dict[str, Any]:
+    """Merge ``updates`` and persist them -- the ONE chat-side prefs writer.
+
+    :func:`merge_prefs` decides *what* the context becomes; this decides
+    *how* it lands: ``all_tenants`` + one ``.update()`` -- no full-model
+    save that could clobber a concurrent write to another column, and no
+    dependence on a tenant context being active (the global surface runs
+    at ``current_tenant() is None``). The in-memory instance is refreshed
+    so anything later in the turn reads what was written.
+
+    Every chat command that edits a preference goes through here -- the
+    surface stop button (:mod:`~apps.nutrition_proactive.optout`) and the
+    report-hour commands (:mod:`~apps.nutrition_proactive.report_hour`)
+    -- so two switches for one key can never drift in how reliably they
+    land (DRF-2141: «тот же prefs-писатель, не второй»).
+
+    Returns the full new ``context``. For a shell the person-context gate
+    refuses :func:`merge_prefs` returns the context untouched, so the
+    ``.update()`` below changes nothing -- the §2.4 rule holds here too.
+    """
+    from apps.identity.models import BotUser
+
+    context_json = merge_prefs(bot_user, updates)
+    BotUser.all_tenants.filter(pk=bot_user.pk).update(context=context_json)
+    bot_user.context = context_json
+    return context_json
+
+
 def report_time(prefs: dict[str, Any]) -> str:
     """Normalised ``daily_report_time``. Anything unparseable reads as off.
 

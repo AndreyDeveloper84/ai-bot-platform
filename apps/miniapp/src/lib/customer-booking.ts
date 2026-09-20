@@ -204,18 +204,58 @@ export interface ServicePick {
   reasons: string[];
 }
 
+/**
+ * Одна рекомендация МАСТЕРА, доведённая до экрана (DRF-2174).
+ *
+ * Резолвер рекомендует людей (решение владельца §81), контракт объявляет
+ * это явно — `candidate.kind = PROVIDER` (§5, K1), транзит переводит ключ
+ * Ayla в ключ зеркала мастеров (`apps/marketplace/resolver_keys.py`).
+ * До этого среза полка умела только услуги, и первый же живой ответ
+ * резолвера (стенд 20.09: `ordered=1`, PROVIDER) она называла
+ * `UNRENDERABLE_CANDIDATES` — то есть отказом источника с кнопкой
+ * повтора, который детерминированно давал то же самое.
+ *
+ * Отдельный тип, а не `kind` внутри {@link ServicePick}: у пика мастера
+ * другой ключ и другая карточка, и потребители, знающие только услуги
+ * (главный экран, DRF-2144), не должны узнать о мастерах случайно — блок
+ * «Ayla подобрала» там без флага полки, а OD-PILOT-9 для Mini App никто
+ * не снимал (§60 снял его только для C04 в чате).
+ */
+export interface ProviderPick {
+  /** Идентификатор мастера в зеркале — экраны склеивают по нему. */
+  masterId: string;
+  /** Ярус §4.3 — см. {@link ServicePick.tier}. */
+  tier: number;
+  /** Позиция в `ordered[]`, начиная с 1. */
+  rank: number;
+  reasonCodes: string[];
+  /** Непусто: без WHY кандидат сюда не доходит (гейт владельца 25.08). */
+  reasons: string[];
+}
+
 export interface CatalogBrowseData {
   /** Активные услуги из зеркала бота (дословно). */
   services: Service[];
   /** Мастера из зеркала бота (дословно). */
   masters: Master[];
   /**
-   * Рекомендации в порядке резолвера, суженные до услуг, которые есть
+   * Рекомендации-УСЛУГИ в порядке резолвера, суженные до тех, что есть
    * в зеркале и которым нашлась хоть одна фраза WHY. Пусто, когда
    * источник недоступен, разошёлся с контрактом или объяснить ему
    * нечего — во всех трёх случаях блок скрывается.
    */
   picks: ServicePick[];
+  /**
+   * Рекомендации-МАСТЕРА, тем же порядком и под тем же гейтом WHY.
+   * Сегодня резолвер производит только их ({@link ProviderPick}).
+   * Два списка вместо одного с `kind` — намеренно, см. там же.
+   *
+   * Необязательное — ПЕРЕХОДНО (DRF-2174 → снять после DRF-2144):
+   * `getCatalogBrowse` отдаёт поле всегда; `?` держится ради 19 фикстур
+   * главного экрана, который параллельно переписывается под H01, — новое
+   * обязательное поле резало бы ту ветку. Потребитель читает `?? []`.
+   */
+  providerPicks?: ProviderPick[];
   /**
    * Почему `picks` именно такой — ШЕСТЬ различимых исходов, и свести
    * любые два значило бы вернуть то самое смешение отсутствия с нулём.
@@ -228,17 +268,18 @@ export interface CatalogBrowseData {
    * | `NO_VERIFIED_CANDIDATES` | связи не подтверждены (§76) | бессмыслен | разметку каталога |
    * | `SAFETY_BLOCKED` | гейт безопасности закрыл выдачу | бессмыслен | **ничего** |
    * | `NO_CAPABLE_CANDIDATES` | нужда названа, никто не совпал | бессмыслен | запрос |
-   * | `UNRENDERABLE_CANDIDATES` | кандидаты есть, полка их не умеет | бессмыслен | **нас** |
+   * | `UNRENDERABLE_CANDIDATES` | кандидаты есть, зеркало их не знает | осмыслен позже | **зеркало** |
    *
-   * Последний — единственный, где виноват потребитель, а не источник и
-   * не данные. Он существует потому, что замер 08.09 показал: источник
+   * Последний существует потому, что замер 08.09 показал: источник
    * отдаёт `kind=PROVIDER` с ключами Ayla
-   * (`users/recommendation_source.py:209`), а полка умеет `kind=SERVICE`
-   * с ключами зеркала (`apps/miniapp_api/views.py:695`). Без имени это
-   * состояние выглядело бы как `OK` с пустой полкой — и всплыло бы не
-   * сейчас, а через недели, когда кто-то разметит связи и будет ждать,
-   * что полка загорится. Разбор — `bus/CLIENT-SURFACE-note-resolver-
-   * candidate-kind-mismatch.md`.
+   * (`users/recommendation_source.py:209`), а полка умела `kind=SERVICE`
+   * с ключами зеркала. Без имени это состояние выглядело бы как `OK` с
+   * пустой полкой. Имя сработало ровно так, как задумано, — на первом
+   * живом ответе (стенд 20.09), — но кадр у него был чужой: «попробуй
+   * ещё раз» на детерминированном расхождении. С DRF-2174 полка умеет
+   * оба вида, и `UNRENDERABLE` остаётся за одним случаем: ключ кандидата
+   * (услуги или мастера) неизвестен зеркалу — оно отстало, и повтор
+   * позже действительно осмыслен.
    *
    * Последние три — пустая полка, и снаружи они **неразличимы**: 200 и
    * пустой `ordered[]` у всех трёх. Различает их только код исключения,
@@ -387,11 +428,15 @@ export async function getCatalogBrowse(): Promise<CatalogBrowseData> {
     fetchServices(),
     fetchMasters(),
   ]);
-  const { picks, picksOutcome } = await resolveCatalogPicks(servicesRes.services);
+  const { picks, providerPicks, picksOutcome } = await resolveCatalogPicks(
+    servicesRes.services,
+    mastersRes.masters,
+  );
   return {
     services: servicesRes.services,
     masters: mastersRes.masters,
     picks,
+    providerPicks,
     picksOutcome,
     emptyReason: servicesRes.empty_reason ?? null,
   };
@@ -408,8 +453,10 @@ export async function getCatalogBrowse(): Promise<CatalogBrowseData> {
  */
 export async function resolveCatalogPicks(
   services: Service[],
-): Promise<{ picks: ServicePick[]; picksOutcome: PicksOutcome }> {
+  masters: Master[],
+): Promise<{ picks: ServicePick[]; providerPicks: ProviderPick[]; picksOutcome: PicksOutcome }> {
   let picks: ServicePick[] = [];
+  let providerPicks: ProviderPick[] = [];
   const recs = await loadRecommendations();
   let picksOutcome: PicksOutcome = recs.state;
   if (recs.state === "CONTRACT_VIOLATION") {
@@ -431,30 +478,38 @@ export async function resolveCatalogPicks(
     // стоящий рядом.
     picksOutcome = classifyEmptiness(recs.decision);
   } else if (recs.state === "OK") {
-    const known = new Set(services.map((s) => s.id));
-    // Кандидаты, которые эта поверхность вообще способна показать:
-    // услуга (не мастер, не слот) и притом известная зеркалу.
-    const renderable = recs.decision.ordered.filter(
-      (c) => c.candidate.kind === "SERVICE" && known.has(c.candidate.id),
+    const knownServices = new Set(services.map((s) => s.id));
+    const knownMasters = new Set(masters.map((m) => m.id));
+    // Кандидаты, которые эта поверхность способна показать: услуга или
+    // мастер (§81 / K1 — то, что резолвер производит), и притом с ключом,
+    // который зеркало знает. `OFFER` и `SLOT` карточки здесь не имеют.
+    const renderableServices = recs.decision.ordered.filter(
+      (c) => c.candidate.kind === "SERVICE" && knownServices.has(c.candidate.id),
     );
-    if (renderable.length === 0) {
+    const renderableProviders = recs.decision.ordered.filter(
+      (c) => c.candidate.kind === "PROVIDER" && knownMasters.has(c.candidate.id),
+    );
+    if (renderableServices.length === 0 && renderableProviders.length === 0) {
       // Источник ответил, кандидаты есть — и ни одного из них полка
       // отрисовать не может. Это НЕ «нечего показать»: это «нам
-      // прислали то, чего мы не умеем», и молчать об этом нельзя.
+      // прислали то, чего мы не знаем», и молчать об этом нельзя.
       // eslint-disable-next-line no-console
       console.error(
         "[recommendations] решение содержит " +
           `${recs.decision.ordered.length} кандидат(ов), и ни один не ` +
-          "отрисуем этой полкой: она умеет kind=SERVICE и ключи зеркала " +
+          "отрисуем этой полкой: она умеет kind=SERVICE и kind=PROVIDER " +
+          "с ключами зеркала " +
           `(kinds: ${[...new Set(recs.decision.ordered.map((c) => c.candidate.kind))].join(",")}). ` +
-          "Подбор остаётся пустым; см. bus/CLIENT-SURFACE-note-resolver-" +
-          "candidate-kind-mismatch.md.",
+          "Подбор остаётся пустым; ключи не переведены транзитом " +
+          "(apps/marketplace/resolver_keys.py) или зеркало отстало.",
       );
       picksOutcome = "UNRENDERABLE_CANDIDATES";
     }
-    picks = renderable
-      // Порядок НЕ трогается: он пришёл готовым, и пересобрать его не
-      // из чего — баллов в ответе нет (§4.3).
+    // Порядок НЕ трогается: он пришёл готовым, и пересобрать его не
+    // из чего — баллов в ответе нет (§4.3).
+    // Гейт владельца 25.08 — кандидат, которого нечем объяснить, не
+    // является рекомендацией Ayla. Одна строка на список, весь гейт.
+    picks = renderableServices
       .map((c) => ({
         serviceId: c.candidate.id,
         tier: c.tier,
@@ -462,11 +517,18 @@ export async function resolveCatalogPicks(
         reasonCodes: c.reason_codes,
         reasons: displayableReasons(c),
       }))
-      // Гейт владельца 25.08 — кандидат, которого нечем объяснить, не
-      // является рекомендацией Ayla. Одна строка, весь гейт.
+      .filter((p) => p.reasons.length > 0);
+    providerPicks = renderableProviders
+      .map((c) => ({
+        masterId: c.candidate.id,
+        tier: c.tier,
+        rank: c.rank,
+        reasonCodes: c.reason_codes,
+        reasons: displayableReasons(c),
+      }))
       .filter((p) => p.reasons.length > 0);
   }
-  return { picks, picksOutcome };
+  return { picks, providerPicks, picksOutcome };
 }
 
 // ---------------------------------------------------------------------------

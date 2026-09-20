@@ -154,19 +154,24 @@ is a table and a migration for two strings.
 
 ### Transport
 
-The alert reuses :func:`apps.handoff.notify.send_max_notification` and
-the recipient list from ``HANDOFF_NOTIFY_MAX_CHAT_IDS`` — the primitive
-DRF-1029 already put in production for escalations. No second transport,
-no second address book.
+Each transition goes to :func:`apps.observability.alerting.page`
+(``critical`` down / ``warning`` up) — and only there. ``page`` fans out
+to Telegram + Sentry + the operators' MAX chat (``HANDOFF_NOTIFY_MAX_CHAT_IDS``
+/ ``_USER_IDS``, the DRF-1029 escalation recipients) and writes one
+audit row ``observability.alert.paged`` with ``telegram_sent`` /
+``sentry_sent`` / ``max_sent``, so an unconfigured channel is visible
+there rather than silent.
 
-**DRF-1938 — and the operational channel next to it.** 15.09 the probe
-went DOWN at 07:40 and the message reached the one MAX chat configured —
-where nobody saw it for 45 minutes. So each transition is also handed to
-:func:`apps.observability.alerting.page` (Telegram + Sentry, ``critical``
-down / ``warning`` up), with the cause class in the text (network/proxy,
-provider, or unclassified — never guessed). An unconfigured Telegram does
-not fail silently: ``page`` writes ``observability.alert.paged`` with
-``telegram_sent=false``.
+History. Until DRF-1938 the probe sent to MAX directly through
+:func:`apps.handoff.notify.send_max_notification`. 15.09 the probe went
+DOWN at 07:40 and the message reached the one MAX chat configured — where
+nobody saw it for 45 minutes — so DRF-1938 added ``page`` (Telegram +
+Sentry) next to the direct MAX call, with the cause class in the text
+(network/proxy, provider, or unclassified — never guessed). DRF-2158 made
+MAX the third sink of ``page`` itself for every operator alert; the direct
+call here was removed, otherwise «LLM недоступна» would land in the chat
+twice. Invariant: **llm.health.down → exactly one message in MAX**
+(guarded in ``tests/test_health_alert_delivery_1938.py``).
 
 ### Secrets
 
@@ -399,10 +404,10 @@ def build_probe_provider(name: str) -> Any:
     * the router's per-process provider **cache** — a pooled tunnel
       would hide the failure the probe exists to find (see the module
       docstring);
-    * :class:`~apps.llm.router.QuotaFallbackProvider` — a probe that
-      hops on quota exhaustion reports the *other* vendor's health
-      under this one's name, which is the exact confusion DRF-1631 is
-      undoing;
+    * :class:`~apps.llm.router.FallbackProvider` — a probe that hops on
+      quota exhaustion or unavailability (DRF-2147) reports the *other*
+      vendor's health under this one's name, which is the exact
+      confusion DRF-1631 is undoing;
     * :class:`~apps.llm.pii_protected_provider.PIITokenizingProvider` —
       the payload is the literal string ``ping``.
 
@@ -613,7 +618,6 @@ def evaluate_probe(result: ProbeResult) -> str:
             },
         )
         up_text = build_recovered_message(result, down_since=down_since)
-        _notify(up_text)
         _page(
             "warning", "LLM снова доступна", up_text, dedup_key=f"llm.health.recovered:{down_since}"
         )
@@ -664,10 +668,10 @@ def evaluate_probe(result: ProbeResult) -> str:
         },
     )
     down_text = build_down_message(result, failures=failures)
-    _notify(down_text)
-    # DRF-1938 — рядом с MAX: Telegram + Sentry. 15.09 алерт ушёл в один чат
-    # MAX и остался незамеченным; ненастроенный канал виден в аудите
-    # ``observability.alert.paged`` (telegram_sent=false), а не молчит.
+    # DRF-1938 / DRF-2158 — единственный путь: ``page`` = Telegram + Sentry +
+    # MAX. Прямого вызова MAX здесь больше нет — иначе сообщение приходило
+    # бы дважды. Ненастроенный канал виден в аудите
+    # ``observability.alert.paged`` (telegram_sent / sentry_sent / max_sent).
     _page("critical", "LLM недоступна", down_text, dedup_key=f"llm.health.down:{now_iso}")
     return TRANSITION_DOWN
 
@@ -767,41 +771,14 @@ def build_recovered_message(result: ProbeResult, *, down_since: object = None) -
 # ---------------------------------------------------------------------------
 
 
-def _notify(text: str) -> int:
-    """Fan the text out to the DRF-1029 MAX recipients. Never raises.
-
-    Empty recipient list = mechanism off (the CI / local-dev default),
-    exactly as for escalations.
-    """
-
-    try:
-        from apps.handoff.notify import get_notify_addresses, send_max_notification
-
-        recipients = get_notify_addresses()
-        if not recipients:
-            logger.info("llm.health.notify_skipped reason=no_recipients")
-            return 0
-        # DRF-1559 — тот же список операторов, но выбор ключа адресации
-        # сделан за нас: людей предпочитаем диалогам.
-        failures = send_max_notification(text=text, addresses=recipients)
-        logger.info(
-            "llm.health.notify_sent recipients=%d failures=%d addressed_by=%s",
-            len(recipients),
-            failures,
-            recipients[0].key,
-        )
-        return failures
-    except Exception:  # noqa: BLE001 — alerting must never break the probe
-        logger.exception("llm.health.notify_unexpected")
-        return 0
-
-
 def _page(severity: str, title: str, body: str, *, dedup_key: str) -> bool:
-    """Тот же текст в операционный канал (DRF-1938): Telegram + Sentry. Never raises.
+    """Текст перехода в операционный канал (DRF-1938 / DRF-2158). Never raises.
 
-    ``apps.observability.alerting.page`` сам пишет аудит ``observability.alert.paged``
-    с ``telegram_sent`` / ``sentry_sent`` — ненастроенный канал виден там, а не
-    теряется. Текста реплик в ``body`` нет: это сообщение пробы.
+    ``apps.observability.alerting.page`` — Telegram + Sentry + MAX
+    (``HANDOFF_NOTIFY_MAX_CHAT_IDS`` / ``_USER_IDS``); он сам пишет аудит
+    ``observability.alert.paged`` с ``telegram_sent`` / ``sentry_sent`` /
+    ``max_sent`` — ненастроенный канал виден там, а не теряется. Текста
+    реплик в ``body`` нет: это сообщение пробы.
     """
 
     try:

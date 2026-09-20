@@ -41,15 +41,23 @@ next configured vendor from :func:`fallback_candidates`. If that one
 raises too, the exception propagates: better to surface "every vendor
 is down" than chase an infinite loop.
 
+Since DRF-2147 the same hop fires on **unavailability** — the primary's
+retry budget spent on timeouts / connection failures / 5xx
+(``RetriableLLMError``), a bare transport error, or an open breaker —
+and every switch pages the operators (``alerting.page("warning", "llm
+fallback", …)``, deduplicated 5 min) and stamps
+``CompletionResult.fallback_from`` for the turn metric. A 400 / 422
+still does not hop: see :func:`hop_kind`.
+
 **This used to be the caller's job and the callers never did it.**
 Until DRF-1437 the router was purely "pick provider" and the fallback
 was driven by the call site re-asking with
 ``get_provider(prefer_fallback_from=current)``. A tree sweep on
 2026-08-31 found zero production call sites doing so — the parameter
 was exercised only by tests. So the hop now lives in
-:class:`QuotaFallbackProvider`, a wrapper applied inside
-:meth:`get_provider`; every call site inherits it and none can forget
-it. ``prefer_fallback_from`` survives for the explicit path and
+:class:`FallbackProvider` (``QuotaFallbackProvider`` until DRF-2147), a
+wrapper applied inside :meth:`get_provider`; every call site inherits it
+and none can forget it. ``prefer_fallback_from`` survives for the explicit path and
 suppresses the wrapper so a hand-driven retry cannot double-hop.
 
 Fallback targets are filtered by :func:`provider_is_configured` — the
@@ -67,7 +75,8 @@ fallback walker, or the embedding swap is hard-coded to two vendors.
 
 Every resolution writes an audit row with the chosen provider name
 and the tier that resolved it (``tenant_feature`` / ``skill_default``
-/ ``org_default`` / ``embedding_fallback`` / ``quota_fallback``).
+/ ``org_default`` / ``embedding_fallback`` / ``quota_fallback`` /
+``unavailable_fallback``).
 Sprint 8 monitoring panels filter on ``source`` to spot tier-cascade
 patterns ("everyone's hitting embedding_fallback" → Anthropic is
 the configured default in places it shouldn't be).
@@ -78,7 +87,7 @@ from __future__ import annotations
 import importlib
 import logging
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 from django.conf import settings
@@ -90,7 +99,9 @@ from apps.llm.protocol import (
     LLMProvider,
     LLMProviderQuotaExceeded,
     LLMProviderUnavailable,
+    LLMTransportError,
 )
+from apps.llm.retry import RetriableLLMError
 
 if TYPE_CHECKING:
     from apps.tenancy.models import Tenant
@@ -155,9 +166,82 @@ _SOURCE_SKILL = "skill_default"
 _SOURCE_ORG = "org_default"
 _SOURCE_EMBED_FALLBACK = "embedding_fallback"
 _SOURCE_QUOTA_FALLBACK = "quota_fallback"
+# DRF-2147 — a hop taken because the primary was UNAVAILABLE (timeout,
+# connection failure, 5xx, open breaker), not because it ran out of
+# quota. Kept apart from ``quota_fallback`` so the panels that filter on
+# the latter keep meaning what they meant.
+_SOURCE_UNAVAILABLE_FALLBACK = "unavailable_fallback"
 
 EVENT_PROVIDER_RESOLVED = "llm.provider_resolved"
+# Historical name, kept: every hop — quota OR unavailability — writes this
+# event, and ``payload["kind"]`` / ``payload["source"]`` say which. Renaming
+# the event would silently empty every panel filtering on it.
 EVENT_QUOTA_FALLBACK_USED = "llm.quota_fallback_used"
+
+# DRF-2147 — why the wrapper hopped. ``payload["kind"]`` on the audit row.
+HOP_KIND_QUOTA = "quota"
+HOP_KIND_UNAVAILABLE = "unavailable"
+
+# DRF-2147 — operator page on every switch, collapsed by the alerting
+# layer's dedup window (``ALERTS_DEDUP_TTL_SECONDS``, 5 min by default).
+FALLBACK_PAGE_TITLE = "llm fallback"
+FALLBACK_PAGE_DEDUP_PREFIX = "llm_fallback"
+
+
+def hop_kind(exc: BaseException) -> str | None:
+    """Classify a primary-provider failure: hop, and why — or stay put.
+
+    Returns :data:`HOP_KIND_QUOTA`, :data:`HOP_KIND_UNAVAILABLE`, or
+    ``None`` for «do not hop, re-raise». THE single place that decides
+    which failures move traffic to another vendor (DRF-2147); the
+    wrapper and the tests both read it here.
+
+    * **quota** — :class:`LLMProviderQuotaExceeded` and its subclass
+      :class:`~apps.llm.protocol.LLMVendorCreditsExhausted`: our daily
+      cap or the vendor's drained balance. The Sprint 7 contract, kept.
+    * **unavailable** — the vendor could not be reached or could not
+      serve, and the layer whose job it was to wait for it has given up:
+
+      - :class:`~apps.llm.retry.RetriableLLMError` — the provider's own
+        retry budget spent on transient failures (``APITimeoutError``,
+        ``APIConnectionError``, ``InternalServerError``, 5xx / 429 by
+        status). This is the shape the 2026-09-15 incident took: 45
+        minutes of a dead Anthropic proxy, every turn ending in the
+        static stub while OpenAI, behind another proxy, was healthy.
+        A 429 that survived the retries is included on purpose: after
+        the wait the vendor still would not serve, and the client is
+        waiting too.
+      - :class:`~apps.llm.protocol.LLMTransportError` — the same three
+        SDK classes surfaced without a retry loop around them.
+      - ``BreakerOpenError`` (matched by class name — it lives in
+        ``apps.orchestrator.llm.breaker``, which this module must not
+        import) — the breaker refuses to even try.
+
+    * **None** — everything else. In particular a plain
+      :class:`~apps.llm.protocol.LLMError`, which is what the providers
+      raise for 400 / 422 / 401 / 403 / 404: the request is wrong, or
+      we are; the other vendor would say the same, at a second price.
+      A direct :class:`~apps.llm.protocol.LLMQuotaError` (a vendor
+      rate-limit that did NOT pass through the retry layer) stays put
+      too — «slow down» is the retry layer's job, not a reason to move.
+    """
+    if isinstance(exc, LLMProviderQuotaExceeded):
+        return HOP_KIND_QUOTA
+    if isinstance(exc, (RetriableLLMError, LLMTransportError)):
+        return HOP_KIND_UNAVAILABLE
+    if any(klass.__name__ == "BreakerOpenError" for klass in type(exc).__mro__):
+        return HOP_KIND_UNAVAILABLE
+    return None
+
+
+def _hop_reason(exc: BaseException) -> str:
+    """Short, secret-free description for the log line, the audit row and the page."""
+    if isinstance(exc, RetriableLLMError):
+        return (
+            f"{type(exc).__name__}(attempts={exc.attempts}, "
+            f"last_error={type(exc.last_error).__name__})"
+        )
+    return type(exc).__name__
 
 
 def _retarget_model(kwargs: dict[str, Any], secondary: LLMProvider) -> dict[str, Any]:
@@ -220,10 +304,10 @@ def _retarget_model(kwargs: dict[str, Any], secondary: LLMProvider) -> dict[str,
     return {**kwargs, "model": target_model}
 
 
-class QuotaFallbackProvider:
-    """Wraps a primary provider and hops to the next one on exhaustion.
+class FallbackProvider:
+    """Wraps a primary provider and hops to the next one when it cannot answer.
 
-    ### Why this exists (DRF-1437)
+    ### Why this exists (DRF-1437, widened by DRF-2147)
 
     The router has advertised a one-hop quota fallback since Sprint 7,
     but it was documented as *caller-driven*: the call site was supposed
@@ -241,6 +325,13 @@ class QuotaFallbackProvider:
     every consumer of ``get_provider`` inherits it, including consumers
     written after this comment, and a new call site cannot forget.
 
+    Until DRF-2147 this class was ``QuotaFallbackProvider`` and hopped
+    ONLY on quota. On 2026-09-15 the Anthropic proxy was down for 45
+    minutes; every turn ran primary → retry → ``RetriableLLMError`` →
+    the static stub, while OpenAI behind a different proxy was healthy.
+    The hop now also fires on unavailability — see :func:`hop_kind` for
+    the exact set, and for what still does NOT hop (400 / 422).
+
     ### Scope of the hop
 
     * ``complete`` only. ``embedding`` deliberately does NOT hop —
@@ -249,16 +340,27 @@ class QuotaFallbackProvider:
       there. A hop would be a hop to nowhere.
     * ONE hop per call — the first configured candidate, never a walk
       down the list. If it raises too, that exception propagates and
-      callers keep their existing ``except LLMError`` degradation. With
-      the two-vendor registry a hop and a walk are the same thing;
+      callers keep their existing degradation: the concierge draws its
+      outage line, the pipeline its «retry exhausted» stub + alert.
+      With the two-vendor registry a hop and a walk are the same thing;
       widening to a walk when a third vendor lands multiplies latency
       and spend across N vendors on one turn, so it wants its own
       ticket.
-    * Only :class:`LLMProviderQuotaExceeded` (and therefore its subclass
-      :class:`apps.llm.protocol.LLMVendorCreditsExhausted`) triggers it.
-      A transport error or a 5xx does NOT — those are the retry layer's
-      job, and hopping vendors on a transient blip would double the
-      spend and halve the observability for no gain.
+    * Every switch is announced: an audit row (``source`` says quota or
+      unavailability), an operator page (``warning`` / «llm fallback»,
+      deduplicated by the alerting layer — 5 minutes by default), and
+      ``CompletionResult.fallback_from`` on the answer so the turn metric
+      can record which vendor answered and which one did not.
+
+    ### What the wrapper does NOT do
+
+    It does not tokenize PII and it does not translate tools. Both
+    happen a layer down: ``load`` is :meth:`LLMRouter._load_provider`,
+    which returns every vendor — the fallback included — already inside
+    :class:`~apps.llm.pii_protected_provider.PIITokenizingProvider`;
+    and the concrete providers each convert the canonical tool spec to
+    their own shape on every call, hop or not. The tests pin both with a
+    deliberately mis-wired ``load`` that hands out a bare vendor.
     """
 
     def __init__(
@@ -268,12 +370,14 @@ class QuotaFallbackProvider:
         primary_name: str,
         load: "Callable[[str], LLMProvider]",
         candidates: list[str],
-        audit: "Callable[[str, str], Awaitable[None]]",
+        audit: "Callable[[str, str, str], Awaitable[None]]",
+        page: "Callable[[str, str, str], Awaitable[None]] | None" = None,
     ) -> None:
         self._primary = primary
         self._candidates = candidates
         self._load = load
         self._audit = audit
+        self._page = page
         # Audit, cost attribution and telemetry read ``.name`` and must
         # see the vendor actually chosen, not the wrapper.
         self.name = primary_name
@@ -292,17 +396,24 @@ class QuotaFallbackProvider:
     async def complete(self, messages: list[dict[str, Any]], **kwargs: Any) -> CompletionResult:
         try:
             return await self._primary.complete(messages, **kwargs)
-        except LLMProviderQuotaExceeded as exc:
+        except Exception as exc:
+            kind = hop_kind(exc)
+            if kind is None:
+                # A bad request, a foreign exception, a direct rate-limit:
+                # not this wrapper's business. Same exception, same
+                # handler at the call site as before.
+                raise
             if not self._candidates:
                 # No configured alternative. Re-raise so the call site's
                 # existing LLMError handling serves its static fallback —
                 # and so the log says "nowhere to go", not "we never
                 # tried".
                 logger.error(
-                    "llm.router.quota_fallback_exhausted from=%s reason=%s "
+                    "llm.router.fallback_exhausted from=%s kind=%s reason=%s "
                     "candidates=0 (check the other vendor's API key setting)",
                     self.name,
-                    type(exc).__name__,
+                    kind,
+                    _hop_reason(exc),
                 )
                 raise
 
@@ -314,16 +425,27 @@ class QuotaFallbackProvider:
             # vendors on a single turn) and wants its own ticket rather
             # than arriving as a side effect of the registry refactor.
             candidate = self._candidates[0]
+            reason = _hop_reason(exc)
             logger.warning(
-                "llm.router.quota_fallback from=%s to=%s reason=%s remaining_untried=%d",
+                "llm.router.fallback from=%s to=%s kind=%s reason=%s remaining_untried=%d",
                 self.name,
                 candidate,
-                type(exc).__name__,
+                kind,
+                reason,
                 len(self._candidates) - 1,
             )
-            await self._audit(candidate, type(exc).__name__)
+            await self._audit(candidate, reason, kind)
+            if self._page is not None:
+                await self._page(candidate, reason, kind)
             secondary = self._load(candidate)
-            return await secondary.complete(messages, **_retarget_model(kwargs, secondary))
+            result = await secondary.complete(messages, **_retarget_model(kwargs, secondary))
+            # Name the vendor that did NOT answer next to the one that did,
+            # so the turn metric can tell a hop from a plain OpenAI turn.
+            # Guarded: a duck-typed double that returns something other
+            # than the DTO must not turn a successful hop into a crash.
+            if isinstance(result, CompletionResult):
+                return replace(result, fallback_from=self.name)
+            return result
 
     async def embedding(self, text: str, **kwargs: Any) -> list[float]:
         """Pass-through — see the class docstring on why embeddings never hop."""
@@ -414,7 +536,8 @@ class LLMRouter:
             source=source,
         )
 
-        # DRF-1437 — wrap in the one-hop quota fallback. Skipped when:
+        # DRF-1437 — wrap in the one-hop fallback (quota, and since
+        # DRF-2147 unavailability). Skipped when:
         #   * the caller already drove an explicit hop
         #     (``prefer_fallback_from``) — that is the legacy path and
         #     must stay a pure pick, or a caller retrying by hand would
@@ -451,15 +574,15 @@ class LLMRouter:
         skill: str,
         op: str,
     ) -> LLMProvider:
-        """Build the :class:`QuotaFallbackProvider` around ``provider``.
+        """Build the :class:`FallbackProvider` around ``provider``.
 
         The wrapper is built per resolution (cheap — it holds references,
         not clients) rather than cached, because the candidate list
-        depends on live settings and the audit closure carries this
+        depends on live settings and the audit / page closures carry this
         call's tenant/skill context.
         """
 
-        async def _audit_hop(chosen: str, reason: str) -> None:
+        async def _audit_hop(chosen: str, reason: str, kind: str) -> None:
             # ``write_audit`` is a sync ORM write and the hop happens
             # inside ``await provider.complete(...)`` — calling it
             # directly raises Django's SynchronousOnlyOperation. Same
@@ -476,24 +599,50 @@ class LLMRouter:
                 "op": op,
                 "from_provider": primary_name,
                 "chosen_provider": chosen,
-                "source": _SOURCE_QUOTA_FALLBACK,
+                "source": (
+                    _SOURCE_QUOTA_FALLBACK
+                    if kind == HOP_KIND_QUOTA
+                    else _SOURCE_UNAVAILABLE_FALLBACK
+                ),
+                "kind": kind,
                 "reason": reason,
             }
             try:
                 await sync_to_async(_write_quota_fallback_audit, thread_sensitive=False)(payload)
             except Exception:  # noqa: BLE001 — telemetry must not break the hop
                 logger.exception(
-                    "llm.router.quota_fallback_audit_failed from=%s to=%s",
+                    "llm.router.fallback_audit_failed from=%s to=%s",
                     primary_name,
                     chosen,
                 )
 
-        return QuotaFallbackProvider(
+        async def _page_hop(chosen: str, reason: str, kind: str) -> None:
+            # DRF-2147 — operators must see that the bot is living on the
+            # second vendor. ``alerting.page`` is sync (cache + ORM +
+            # HTTP), so it runs in a thread like the audit row; it never
+            # raises by contract, and the belt-and-braces ``except`` is
+            # for the contract being wrong — an alert must never cost the
+            # client the answer that was just obtained.
+            from asgiref.sync import sync_to_async
+
+            try:
+                await sync_to_async(_page_fallback, thread_sensitive=False)(
+                    primary_name, chosen, reason, kind, skill
+                )
+            except Exception:  # noqa: BLE001 — alerting must not break the hop
+                logger.exception(
+                    "llm.router.fallback_page_failed from=%s to=%s",
+                    primary_name,
+                    chosen,
+                )
+
+        return FallbackProvider(
             primary=provider,
             primary_name=primary_name,
             load=self._load_provider,
             candidates=candidates,
             audit=_audit_hop,
+            page=_page_hop,
         )
 
     # ------------------------------------------------------------------
@@ -597,6 +746,44 @@ def _write_quota_fallback_audit(payload: dict[str, Any]) -> None:
         EVENT_QUOTA_FALLBACK_USED,
         target="LLMRouter",
         payload=payload,
+    )
+
+
+def _page_fallback(
+    from_provider: str, to_provider: str, reason: str, kind: str, skill: str
+) -> None:
+    """Sync helper for the async page hook in :meth:`LLMRouter._wrap_with_fallback`.
+
+    One ``warning`` page per switch, keyed by the (from, to) pair so the
+    alerting layer's dedup window (``ALERTS_DEDUP_TTL_SECONDS``, 5 min)
+    turns a 45-minute outage into nine pages rather than nine hundred.
+    The body names the vendors, the reason class and the skill — never a
+    message, a key or a URL. Delivery (Telegram + Sentry today; the MAX
+    receiver is DRF-2158's) is the alerting module's business.
+    """
+    from apps.observability import alerting
+
+    why = "квота" if kind == HOP_KIND_QUOTA else "недоступность"
+    body = (
+        f"Переключение на запасного провайдера LLM: {from_provider} → {to_provider}.\n"
+        f"Причина: {why} — {reason}.\n"
+        f"Навык: {skill or '-'}. Бот пробует отвечать через {to_provider}; если и он "
+        f"недоступен — клиент получит заглушку, а операторам уйдёт «retry exhausted». "
+        f"Повтор этой страницы — не чаще раза в окно дедупа, пока {from_provider} не "
+        f"восстановится."
+    )
+    sent = alerting.page(
+        "warning",
+        FALLBACK_PAGE_TITLE,
+        body,
+        dedup_key=f"{FALLBACK_PAGE_DEDUP_PREFIX}:{from_provider}:{to_provider}",
+    )
+    logger.info(
+        "llm.router.fallback_paged from=%s to=%s kind=%s sent=%s",
+        from_provider,
+        to_provider,
+        kind,
+        sent,
     )
 
 
@@ -750,28 +937,30 @@ def provider_is_configured(name: str) -> bool:
     onto a vendor that is guaranteed to 401 converts one dead provider
     into two and buries the original cause under an auth error.
 
-    ### Named, not fixed: this function arms an unapproved policy
+    ### The policy this gate arms
 
-    DRF-1631 / owner decision В-14 (10.09.2026). Read what this gate
-    actually decides on the serving path: a key being *present* is the
-    whole of the evidence that lets :class:`QuotaFallbackProvider` move
-    live traffic off the configured vendor and onto another one, in
-    silence. Under ``LLM_PROVIDER=anthropic`` that is a silent runtime
-    fall-back to OpenAI, and В-14 forbids it — a fall-back is permitted
-    only under a policy designed, approved and tested, and none exists.
+    DRF-1631 / owner decision В-14 (10.09.2026) named what this gate
+    decides on the serving path: a key being *present* is the whole of
+    the evidence that lets :class:`FallbackProvider` move live traffic
+    off the configured vendor and onto another one. В-14 forbade that
+    while no policy existed — a fall-back is permitted only under a
+    policy designed, approved and tested.
 
         **Holding a secret is not permission to fall back.**
 
-    ``OPENAI_API_KEY`` is on the pilot for a different and legitimate
-    reason (embeddings — Anthropic has no embeddings API, so
-    ``op="embedding"`` routes to OpenAI by design; see the module
-    docstring). One key is therefore serving two purposes, only one of
-    which anyone chose, and this function cannot tell them apart.
+    The policy now exists: DRF-2147 (owner decision В3, 20.09.2026) —
+    one hop along ``LLM_FALLBACK_ORDER`` on quota and on unavailability,
+    never on a 400 / 422, every switch paged to the operators and
+    stamped on the answer (``fallback_from``) for the turn metric. The
+    key is still what makes a vendor a *candidate*; the policy is what
+    says a candidate is wanted, and ``LLM_FALLBACK_ORDER`` is where the
+    operator states the preference (the pilot: ``anthropic,openai``).
 
-    Left AS IS deliberately: the fix is a policy decision about
-    completions, not a line of code a monitor ticket may take on its own
-    — changing it here would swap one silent behaviour for another. The
-    operator switch that exists today is
+    ``OPENAI_API_KEY`` is on the pilot for a second, legitimate reason
+    (embeddings — Anthropic has no embeddings API, so ``op="embedding"``
+    routes to OpenAI by design; see the module docstring). One key
+    serves two purposes and this function cannot tell them apart; the
+    operator switch for completions alone is
     ``LLM_QUOTA_FALLBACK_ENABLED=0``.
     """
     spec = _PROVIDER_SPECS.get(name)

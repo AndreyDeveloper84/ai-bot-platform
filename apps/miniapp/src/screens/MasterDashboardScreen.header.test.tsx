@@ -8,11 +8,9 @@
  * `unreadBadgeText`); тап ведёт туда же, куда «Все диалоги».
  */
 import { render, screen, within } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
-import { unreadBadgeText } from "../lib/unread-badge";
 import { DashboardHeader } from "./MasterDashboardScreen";
 
 type Props = Parameters<typeof DashboardHeader>[0];
@@ -22,8 +20,6 @@ const BASE: Props = {
   masterName: "Анна Петрова",
   photoUrl: "",
   nowIso: "2026-05-21T14:42:00+03:00",
-  unreadCount: 0,
-  onInbox: () => {},
 };
 
 function renderHeader(overrides: Partial<Props> = {}) {
@@ -40,32 +36,15 @@ describe("DashboardHeader", () => {
     expect(screen.getByText("Анна")).toBeInTheDocument();
   });
 
-  it("без непрочитанных значок есть, числа нет", () => {
-    renderHeader({ unreadCount: 0 });
-    const inbox = screen.getByRole("button", { name: "Диалоги" });
-    expect(inbox.textContent).toBe("");
-  });
-
-  it("с непрочитанными — число и подпись для читающего экран", () => {
-    renderHeader({ unreadCount: 2 });
-    const inbox = screen.getByRole("button", { name: "Диалоги, непрочитанных: 2" });
-    expect(inbox).toHaveTextContent("2");
-  });
-
-  it("тап по значку — onInbox", async () => {
-    const user = userEvent.setup();
-    const onInbox = vi.fn();
-    renderHeader({ unreadCount: 1, onInbox });
-    await user.click(screen.getByRole("button", { name: /^Диалоги/ }));
-    expect(onInbox).toHaveBeenCalledTimes(1);
-  });
-
-  // DRF-2121: вкладки «Диалоги» в панели больше нет — число живёт только в
-  // шапке и пишется тем же правилом `unreadBadgeText`, что и раньше.
-  it.each([1, 7, 99, 100, 120])("число в шапке — по правилу unreadBadgeText: %i", (count) => {
-    const { container } = renderHeader({ unreadCount: count });
-    const headerText = within(container).getByRole("button", { name: /^Диалоги/ }).textContent;
-    expect(headerText).toBe(unreadBadgeText(count));
+  // DRF-2152 (§50 п.5, макет DRF-1182): кнопки «Диалоги» (💬 с числом) в шапке
+  // больше нет — прямой переписки мастера с клиентом на экране нет вовсе.
+  it("кнопки «Диалоги» в шапке нет", () => {
+    renderHeader();
+    // Присутствие первым: шапка отрисована — аватар на месте…
+    expect(screen.getByRole("button", { name: "Меню профиля" })).toBeInTheDocument();
+    // …а переписок в ней нет.
+    expect(screen.queryByRole("button", { name: /Диалоги/ })).toBeNull();
+    expect(screen.queryByText(/непрочитанных/)).toBeNull();
   });
 
   it("аватар — кнопка листа профиля, с точкой, когда владелец ждёт правок (DRF-2121)", () => {

@@ -37,9 +37,10 @@ from tests.support.pii_route_registry import (
 V = "apps.miniapp_api.views:"
 
 #: Named routes in ``apps/miniapp_api/urls.py`` on dev f2268007 (19.09.2026) + the
-#: DRF-2123 proposal route (49) + the three DRF-2133 memory routes (52).
+#: DRF-2123 proposal route (49) + the three DRF-2133 memory routes (52) + the
+#: DRF-2144 last-topic route (53).
 #: Lower the floor deliberately when a route is removed.
-ROUTE_FLOOR = 52
+ROUTE_FLOOR = 53
 
 _BOOKING_FIELDS = (
     "id",
@@ -324,10 +325,12 @@ CUSTOMER_ROUTES: dict[str, Entry] = {
             "next_booking.duration_min",
             "next_booking.booking_id",
             "next_booking.address",
+            "next_booking.status",
             via=V + "customer_recent_activity",
             note=(
                 "the caller's own next visit and this week's count, from the mirror or local "
-                "rows scoped to bot_user; the salon address travels verbatim (DRF-1652)"
+                "rows scoped to bot_user; the salon address travels verbatim (DRF-1652); the "
+                "status is the wire value of that same row (DRF-2144 home card badge)"
             ),
         ),
         third_party(
@@ -633,6 +636,19 @@ CUSTOMER_ROUTES: dict[str, Entry] = {
             "body carries no fact — the request is recorded on the caller's own "
             "UserPersonalContext and the same three chat steps run (forget-all intent, "
             "dialogue anonymisation, Ayla profile erasure)"
+        ),
+    ),
+    # --- «Продолжить разговор с Ayla» (DRF-2144, H01, own) ---------------
+    "customer_last_topic": own(
+        "last_topic.text",
+        "last_topic.at",
+        via="apps.miniapp_api.views_last_topic:customer_last_topic",
+        note=(
+            "the first 80 characters of the last assistant turn in the caller's own "
+            "conversations (rows scoped to bot_user; shadow, deleted and anonymised threads "
+            "excluded) plus that turn's timestamp — the text the caller already read in the "
+            "chat, cut by word; safety canned lines (§128) and memory service lines "
+            "(DRF-1292) never become the topic, and no topic is null rather than an error"
         ),
     ),
 }

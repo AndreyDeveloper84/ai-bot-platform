@@ -22,7 +22,7 @@ stops one layer short of the network:
 
 Everything between the call site and the SDK runs for real: the router's
 three-tier resolution, ``PIITokenizingProvider``,
-``QuotaFallbackProvider``, and the concrete provider's own model
+``FallbackProvider``, and the concrete provider's own model
 resolution. Only ``_get_client`` is replaced, by a recorder that reports
 the model id the vendor SDK was about to be handed.
 

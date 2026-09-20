@@ -3401,6 +3401,17 @@ def customer_recommendations(request: HttpRequest) -> HttpResponse:
         logger.warning("customer_recommendations.mirror_unavailable: %s", exc)
         return _error("mirror_unavailable", "catalog mirror unavailable", 503)
 
+    # Состав того, что уезжает полке: сколько кандидатов в `ordered[]` и
+    # какого вида (DRF-2174). Стенд 20.09: бот писал `translated=31`,
+    # каталог — `ordered=1`, и ни одна строка не говорила, ЧТО именно
+    # получит полка. Её исход (`picksOutcome`) считается на клиенте и
+    # канала наружу не имеет (DRF-1556) — вид кандидата до экрана виден
+    # только здесь. Числа из решения, не из перевода: `translated`
+    # считает все ссылки, включая `excluded[]`.
+    ordered = decision.get("ordered") or []
+    kinds = ",".join(sorted({str((c.get("candidate") or {}).get("kind")) for c in ordered})) or "-"
+    shape = f"ordered={len(ordered)} kinds={kinds}"
+
     if keys.untranslated:
         # Две причины раздельно, не одной суммой: «зеркало отстало»
         # и «разошлись в том, кто продаётся» — разные болезни с разным
@@ -3408,11 +3419,12 @@ def customer_recommendations(request: HttpRequest) -> HttpResponse:
         # мы продать не можем. Чинить это здесь нельзя (условие
         # принадлежит Ayla, DRF-1571), видеть — обязательно.
         logger.warning(
-            "customer_recommendations.keys_untranslated %s",
+            "customer_recommendations.keys_untranslated %s %s",
             keys.as_log_fields(),
+            shape,
         )
     else:
-        logger.info("customer_recommendations.keys %s", keys.as_log_fields())
+        logger.info("customer_recommendations.keys %s %s", keys.as_log_fields(), shape)
 
     return JsonResponse(translated)
 
@@ -4810,6 +4822,8 @@ class _ActivityRow(NamedTuple):
     master_name: str
     duration_min: int
     booking_id: str
+    #: Wire status of the row (DRF-2144) — the home card's badge.
+    status: str
 
 
 def _recent_activity_from_mirror(
@@ -4846,6 +4860,7 @@ def _recent_activity_from_mirror(
             master_name=master.name if master else "",
             duration_min=_proxy_duration_min(proxy),
             booking_id=str(proxy.appointment_id),
+            status=str(proxy.status),
         )
 
     this_week_count = owned.filter(
@@ -4885,6 +4900,7 @@ def _recent_activity_from_local(
             master_name=booking.master_name,
             duration_min=booking.duration_min or 0,
             booking_id=str(booking.id),
+            status=str(booking.status),
         )
 
     this_week_count = owned.filter(
@@ -5040,6 +5056,12 @@ def customer_recent_activity(request: HttpRequest) -> HttpResponse:
             # выдали бы наш пробел за ответ салона.
             "address": tenant.address,
             "booking_id": next_row.booking_id,
+            # DRF-2144 — статус для бейджа карточки на Главной: wire-значение
+            # той же строки (mirror: confirmed / awaiting_payment /
+            # pending_payment — то, что этот путь и так отбирает; local:
+            # CONFIRMED). Экран переводит его через `mapBookingStatus`, как
+            # список записей, — второго словаря статусов не заводится.
+            "status": next_row.status,
         }
         if tenant.address is None:
             # Счётчик НАШЕГО пробела. Без него нечем сказать, растёт он

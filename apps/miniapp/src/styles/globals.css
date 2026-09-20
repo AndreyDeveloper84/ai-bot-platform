@@ -1203,8 +1203,161 @@ a {
   min-height: 56px;
   color: inherit;
   font: inherit;
+  /* Карточка бывает и <a> (DRF-2156: запись → детали) — без подчёркивания. */
+  text-decoration: none;
   transition: border-color var(--dur-fast) var(--ease-out),
     background-color var(--dur-fast) var(--ease-out);
+}
+
+/* DRF-2152 — блок дня на «Сегодня» мастера (макет DRF-1182) */
+.master-dashboard__day-part + .master-dashboard__day-part {
+  margin-top: var(--s-3);
+}
+.master-dashboard__day-label {
+  margin: 0 0 var(--s-1);
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+.master-dashboard__day-until {
+  margin: var(--s-1) 0 0;
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+.master-dashboard__day-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+/* «Следующие спокойнее»: те же три поля, тише по тону. */
+.m-card--quiet {
+  background: color-mix(in srgb, var(--c-divider) 30%, var(--c-surface-1));
+}
+.m-card--quiet .m-card__title {
+  font-weight: 500;
+}
+
+/* DRF-2156 — «Детали записи» мастера (макет DRF-1185): постоянная часть +
+   один контекстный блок состояния. Тона блока: accent (до/сейчас/проверяем),
+   success (завершено), нейтральный (после окончания). */
+.booking-detail__main {
+  display: block;
+}
+.booking-detail__client {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  padding: var(--s-2) 0 var(--s-4);
+}
+.booking-detail__avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: var(--c-accent-subtle);
+  color: var(--c-accent);
+  flex-shrink: 0;
+}
+.booking-detail__name {
+  margin: 0;
+  font-size: var(--font-size-400);
+  font-weight: 600;
+  line-height: var(--leading-tight);
+  color: var(--c-text-primary);
+}
+.booking-detail__facts {
+  list-style: none;
+  margin: 0 0 var(--s-4);
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+.booking-detail__fact {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s-3);
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+  padding: var(--s-3) var(--s-4);
+}
+.booking-detail__fact-icon {
+  display: inline-flex;
+  color: var(--c-accent);
+  margin-top: 2px;
+  flex-shrink: 0;
+}
+.booking-detail__fact-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.booking-detail__fact-title {
+  font-size: var(--font-size-300);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+.booking-detail__fact-sub {
+  font-size: var(--font-size-200);
+  color: var(--c-text-secondary);
+}
+.booking-detail__state {
+  border-radius: var(--r-lg);
+  padding: var(--s-4);
+  background: var(--c-surface-2);
+  color: var(--c-text-primary);
+}
+.booking-detail__state--accent {
+  background: color-mix(in srgb, var(--c-accent-subtle) 60%, var(--c-surface-1));
+}
+.booking-detail__state--success {
+  background: color-mix(in srgb, var(--c-success) 10%, var(--c-surface-2));
+  color: var(--c-success);
+}
+.booking-detail__state-title {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  font-size: var(--font-size-300);
+  font-weight: 600;
+  line-height: var(--leading-tight);
+}
+.booking-detail__state-line {
+  margin: var(--s-2) 0 0;
+  font-size: var(--font-size-200);
+  line-height: var(--leading-base);
+  color: var(--c-text-primary);
+}
+.booking-detail__state-rule {
+  border: 0;
+  border-top: 1px solid var(--c-divider);
+  margin: var(--s-3) 0;
+}
+.booking-detail__dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--c-accent);
+}
+.booking-detail__recheck {
+  margin-top: var(--s-3);
+  width: 100%;
+}
+.booking-detail__cancelled {
+  margin: 0;
+  padding: var(--s-4);
+  border-radius: var(--r-lg);
+  background: var(--c-surface-2);
+  color: var(--c-text-secondary);
+  text-align: center;
 }
 
 .m-card--tappable {
@@ -5068,6 +5221,288 @@ a {
 .wellness-dash__booking-empty {
   margin: 0 0 var(--s-2);
   color: var(--c-text-primary);
+}
+
+/* ──────────────────────────────────────────────────────────────────
+ * H01 — главный экран клиента по макету DRF-1321 v1.2 (DRF-2144).
+ * Карточка цели, один блок согласия, «План на сегодня», карточка записи,
+ * «Продолжить разговор с Ayla», компактный ряд быстрых действий.
+ * Токены — те же, что у всего экрана; заливка акцентом у главного
+ * действия — как `.salon-today__cta` (своего `.btn-primary` нет).
+ * ────────────────────────────────────────────────────────────────── */
+
+/* Главное действие в потоке: «Продолжить сегодняшний план», «Составить
+   план», «Выбери цель», «Продолжить разговор». */
+.wellness-dash__cta {
+  display: block;
+  width: 100%;
+  min-height: 48px;
+  margin: var(--s-2) 0 0;
+  padding: 0 var(--s-4);
+  background: var(--c-accent);
+  color: var(--c-text-on-accent);
+  border: none;
+  border-radius: var(--r-md);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-300);
+  font-weight: 600;
+  cursor: pointer;
+}
+.wellness-dash__cta:active {
+  background: var(--c-accent-pressed);
+}
+.wellness-dash__cta:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 2px;
+}
+
+/* Вторичное действие-ссылка: «Посмотреть детали цели», «Смотреть весь
+   план», «Задать новый вопрос». ≥44dp по высоте (WCAG 2.5.8). */
+.wellness-dash__link-btn {
+  display: inline-block;
+  background: transparent;
+  border: none;
+  color: var(--c-accent);
+  padding: var(--s-2) var(--s-1);
+  min-height: 44px;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-200);
+  font-weight: 500;
+  cursor: pointer;
+  text-align: center;
+}
+.wellness-dash__link-btn:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 2px;
+  border-radius: var(--r-sm);
+}
+
+/* Карточка активной цели. */
+.wellness-dash__goal-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  padding: var(--s-4);
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-lg);
+}
+.wellness-dash__goal-eyebrow {
+  align-self: flex-start;
+  margin: 0;
+  padding: 2px var(--s-2);
+  border-radius: var(--r-pill);
+  background: var(--c-accent-subtle);
+  color: var(--c-accent);
+  font-size: var(--font-size-100);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+.wellness-dash__goal-title {
+  margin: var(--s-1) 0 0;
+  font-size: var(--font-size-400);
+  font-weight: 700;
+  color: var(--c-text-primary);
+}
+.wellness-dash__goal-due,
+.wellness-dash__goal-status,
+.wellness-dash__goal-hint {
+  margin: 0;
+  font-size: var(--font-size-200);
+  color: var(--c-text-secondary);
+}
+.wellness-dash__goal-card .wellness-dash__link-btn {
+  align-self: center;
+}
+
+/* Один блок согласия дневника. */
+.wellness-dash__consent {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  padding: var(--s-3);
+  background: var(--c-surface-2);
+  border-radius: var(--r-md);
+}
+.wellness-dash__consent-text {
+  margin: 0;
+  color: var(--c-text-primary);
+  font-size: var(--font-size-200);
+}
+
+/* «План на сегодня». */
+.wellness-dash__plan-today {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+.wellness-dash__plan-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-2);
+}
+.wellness-dash__plan-head .wellness-dash__section-header {
+  margin: 0;
+}
+.wellness-dash__plan-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+.wellness-dash__plan-item {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  grid-template-areas:
+    "icon main state"
+    "icon chip chip";
+  column-gap: var(--s-3);
+  row-gap: var(--s-1);
+  align-items: center;
+  padding: var(--s-3);
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+}
+.wellness-dash__plan-icon {
+  grid-area: icon;
+  font-size: var(--font-size-400);
+  line-height: 1;
+}
+.wellness-dash__plan-main {
+  grid-area: main;
+  min-width: 0;
+}
+.wellness-dash__plan-label {
+  font-size: var(--font-size-200);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+.wellness-dash__plan-period {
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+.wellness-dash__plan-state {
+  grid-area: state;
+  font-size: var(--font-size-200);
+  font-weight: 600;
+  color: var(--c-text-primary);
+  white-space: nowrap;
+}
+.wellness-dash__plan-done {
+  color: var(--c-success);
+}
+.wellness-dash__plan-chip {
+  grid-area: chip;
+  justify-self: start;
+  padding: 1px var(--s-2);
+  border-radius: var(--r-pill);
+  background: var(--c-accent-subtle);
+  color: var(--c-accent);
+  font-size: var(--font-size-100);
+}
+.wellness-dash__plan-attention {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-2);
+  padding: var(--s-3);
+  border-radius: var(--r-md);
+  background: color-mix(in srgb, var(--c-warning) 10%, var(--c-surface-2));
+}
+.wellness-dash__plan-attention-text {
+  margin: 0;
+  font-size: var(--font-size-200);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+
+/* Карточка ближайшей записи — по макету: услуга + статус, мастер, когда +
+   цена (место под DRF-2172), адрес. */
+.wellness-dash__booking-top,
+.wellness-dash__booking-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--s-2);
+}
+.wellness-dash__booking-top .wellness-dash__booking-what {
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+.wellness-dash__booking-price {
+  font-weight: 600;
+  color: var(--c-text-primary);
+  white-space: nowrap;
+}
+
+/* Быстрые действия — компактный ряд из пяти (макет H01). Flex, а не сетка
+   на пять колонок: при выключенном контуре питания кнопок три (DRF-2071), и
+   они делят ряд поровну, а не оставляют две пустые ячейки. */
+.wellness-dash__qa-grid--row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-1);
+}
+.wellness-dash__qa-btn--compact {
+  flex: 1 1 0;
+  min-width: 56px;
+  align-items: center;
+  justify-content: flex-start;
+  min-height: 76px;
+  padding: var(--s-2) var(--s-1);
+  text-align: center;
+}
+@media (max-width: 360px) {
+  .wellness-dash__qa-btn--compact {
+    flex-basis: calc(33% - var(--s-1));
+  }
+}
+.wellness-dash__qa-btn--compact .wellness-dash__qa-label {
+  font-size: var(--font-size-100);
+  line-height: 1.2;
+}
+
+/* «Продолжить разговор с Ayla». */
+.wellness-dash__ayla {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+.wellness-dash__ayla-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  padding: var(--s-3);
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-lg);
+}
+.wellness-dash__ayla-topic-head {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--s-2);
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+.wellness-dash__ayla-when {
+  white-space: nowrap;
+}
+.wellness-dash__ayla-topic {
+  margin: 0;
+  padding: var(--s-2) var(--s-3);
+  border-radius: var(--r-md);
+  background: var(--c-surface-2);
+  color: var(--c-text-primary);
+  font-size: var(--font-size-200);
+}
+.wellness-dash__ayla-card .wellness-dash__link-btn {
+  align-self: center;
 }
 .wellness-dash__weekly-list li {
   font-size: var(--font-size-200);

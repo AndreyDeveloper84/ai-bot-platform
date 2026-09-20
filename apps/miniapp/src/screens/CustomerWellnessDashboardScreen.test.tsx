@@ -158,29 +158,27 @@ describe("CustomerWellnessDashboardScreen — the home surface", () => {
     await renderScreen(true);
     expect(await screen.findByText(/4 \/ 8 стаканов/)).toBeInTheDocument();
 
-    // Смотрим ровно в блок быстрых действий: «Найди услугу» есть ещё и
-    // в пустом состоянии карточки записи, и без области проверка ловила
-    // бы не ту кнопку.
-    const qa = within(screen.getByRole("region", { name: "Что сделаем сейчас" }));
+    // Смотрим ровно в блок быстрых действий (H01, DRF-2144: пять по фризу).
+    const qa = within(screen.getByRole("region", { name: "Быстрые действия" }));
     // NEGATIVE: кнопки, ведущей на падающий экран, нет.
     expect(
       qa.queryByRole("button", { name: "Сфотографируй еду" }),
     ).not.toBeInTheDocument();
     expect(screen.queryByText(/Сфотографируй еду/)).not.toBeInTheDocument();
-    // POSITIVE (парная): три действия с живыми ручками на месте.
-    expect(
-      qa.getByRole("button", { name: "Добавить стакан воды 250 мл" }),
-    ).toBeInTheDocument();
-    expect(qa.getByRole("button", { name: "Выбери цель" })).toBeInTheDocument();
-    expect(qa.getByRole("button", { name: "Найди услугу" })).toBeInTheDocument();
-    // DRF-1839: вход в дневник — живая ручка `/wellness/today`.
-    expect(qa.getByRole("button", { name: "Дневник питания" })).toBeInTheDocument();
+    // POSITIVE (парная): действия с живыми ручками на месте.
+    expect(qa.getByRole("button", { name: "Добавить стакан воды" })).toBeInTheDocument();
+    expect(qa.getByRole("button", { name: "Записать питание" })).toBeInTheDocument();
+    expect(qa.getByRole("button", { name: "Новая запись" })).toBeInTheDocument();
+    // Цель — в карточке цели, не в быстрых действиях (DRF-2144 п.4).
+    expect(qa.queryByRole("button", { name: "Выбери цель" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Выбери цель" })).toBeInTheDocument();
   });
 
-  it("«📔 Дневник питания» ведёт на экран дневника (DRF-1839)", async () => {
+  it("вкладка «Дневник» ведёт на экран дневника (DRF-1839 → DRF-2144)", async () => {
     // До DRF-1839 входа в дневник с главной не было ни одного: записи из
-    // чата человек в Mini App не видел. Проверяется переход, а не кнопка —
-    // кнопка без маршрута была бы той же дырой в новой обёртке.
+    // чата человек в Mini App не видел. С DRF-2144 вход — вкладка панели.
+    // Проверяется переход, а не кнопка — кнопка без маршрута была бы той
+    // же дырой в новой обёртке.
     vi.resetModules();
     const { CustomerWellnessDashboardScreen } = await import(
       "./CustomerWellnessDashboardScreen"
@@ -196,8 +194,8 @@ describe("CustomerWellnessDashboardScreen — the home surface", () => {
         </Routes>
       </MemoryRouter>,
     );
-    const qa = within(await screen.findByRole("region", { name: "Что сделаем сейчас" }));
-    fireEvent.click(qa.getByRole("button", { name: "Дневник питания" }));
+    const nav = within(await screen.findByRole("navigation", { name: "Основная навигация" }));
+    fireEvent.click(nav.getByRole("button", { name: "Дневник" }));
     expect(await screen.findByText("экран дневника")).toBeInTheDocument();
   });
 
@@ -215,10 +213,11 @@ describe("CustomerWellnessDashboardScreen — the home surface", () => {
     expect(
       within(nav).queryByRole("button", { name: "День" }),
     ).not.toBeInTheDocument();
-    // ...а живые вкладки на месте.
-    for (const tab of ["Записи", "Услуги", "Я"]) {
+    // ...а живые вкладки на месте — ровно пять по макету H01 (§55 б).
+    for (const tab of ["План", "Дневник", "Записи", "Профиль"]) {
       expect(within(nav).getByRole("button", { name: tab })).toBeInTheDocument();
     }
+    expect(within(nav).getAllByRole("button")).toHaveLength(5);
   });
 
   const PEDIKYUR = {
@@ -338,11 +337,12 @@ describe("CustomerWellnessDashboardScreen — goal truthfulness (DRF-1476)", () 
     );
     await renderScreen(false);
 
-    // POSITIVE: the person's actual goal is on screen, by name.
+    // POSITIVE: the person's actual goal is on screen, by name — in the
+    // goal card (H01, DRF-2144).
     expect(
       await screen.findByText(/Позаботиться о коже лица/),
     ).toBeInTheDocument();
-    expect(screen.getByText("Моя цель")).toBeInTheDocument();
+    expect(screen.getByText("Активная цель")).toBeInTheDocument();
     // NEGATIVE (paired, same render): the bug is gone.
     expect(screen.queryByText("Выбери цель")).not.toBeInTheDocument();
   });
@@ -354,8 +354,8 @@ describe("CustomerWellnessDashboardScreen — goal truthfulness (DRF-1476)", () 
     await renderScreen(false);
 
     expect(await screen.findByText("Выбери цель")).toBeInTheDocument();
-    expect(screen.getByText(/Цель не выбрана/)).toBeInTheDocument();
-    expect(screen.queryByText("Моя цель")).not.toBeInTheDocument();
+    expect(screen.getByText(/Расскажи о себе/)).toBeInTheDocument();
+    expect(screen.queryByText("Активная цель")).not.toBeInTheDocument();
   });
 
   it("goal layer unreachable: neither claim is made", async () => {
@@ -365,15 +365,15 @@ describe("CustomerWellnessDashboardScreen — goal truthfulness (DRF-1476)", () 
     serve({ ...BASE_TODAY }, { this_week_booking_count: 0 });
     await renderScreen(false);
 
-    // POSITIVE: the dashboard rendered and the goal row is honest.
+    // POSITIVE: the dashboard rendered and the goal card is honest.
     expect(await screen.findByText(/Не удалось загрузить/)).toBeInTheDocument();
-    // Two neutral «Цель» labels — the pulse row head and the quick
-    // action — neither of which asserts anything about having a goal.
-    expect(screen.getAllByText("Цель")).toHaveLength(2);
+    // One neutral «Цель» eyebrow on the card — it asserts nothing about
+    // having a goal.
+    expect(screen.getAllByText("Цель")).toHaveLength(1);
     // NEGATIVE (paired): neither of the two claims appears.
     expect(screen.queryByText("Выбери цель")).not.toBeInTheDocument();
-    expect(screen.queryByText("Моя цель")).not.toBeInTheDocument();
-    expect(screen.queryByText(/Цель не выбрана/)).not.toBeInTheDocument();
+    expect(screen.queryByText("Активная цель")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Расскажи о себе/)).not.toBeInTheDocument();
   });
 
   it("goal: name and week show, no percentage and no bar", async () => {
@@ -383,14 +383,15 @@ describe("CustomerWellnessDashboardScreen — goal truthfulness (DRF-1476)", () 
     );
     await renderScreen(false);
 
-    // POSITIVE: goal and its real week are rendered.
+    // POSITIVE: goal and its real week are rendered (план недоступен в этом
+    // тесте — fetch плана не обслужен, — и карточка говорит только «Неделя 3»).
     expect(await screen.findByText(/Меньше стресса/)).toBeInTheDocument();
-    expect(screen.getByText(/3-я неделя/)).toBeInTheDocument();
-    // NEGATIVE (paired): ни процента, ни шкалы ВНУТРИ строки цели.
-    // Проценты калорий рядом — это другой ряд и другой факт.
-    const goalRow = within(screen.getByLabelText(/^Цель: Меньше стресса/));
-    expect(goalRow.queryByText(/%/)).not.toBeInTheDocument();
-    expect(goalRow.queryByRole("progressbar")).not.toBeInTheDocument();
+    expect(screen.getByText("Неделя 3")).toBeInTheDocument();
+    // NEGATIVE (paired): ни процента, ни шкалы ВНУТРИ карточки цели.
+    // Проценты калорий ниже — это другой блок и другой факт.
+    const goalCard = within(screen.getByRole("region", { name: "Активная цель" }));
+    expect(goalCard.queryByText(/%/)).not.toBeInTheDocument();
+    expect(goalCard.queryByRole("progressbar")).not.toBeInTheDocument();
   });
 
   it("goal progress is not drawn even if a percentage arrives (решение №13)", async () => {
@@ -412,7 +413,7 @@ describe("CustomerWellnessDashboardScreen — goal truthfulness (DRF-1476)", () 
 
     // POSITIVE: цель на месте — снят прогресс, а не сама цель.
     expect(await screen.findByText(/Меньше стресса/)).toBeInTheDocument();
-    expect(screen.getByText("Моя цель")).toBeInTheDocument();
+    expect(screen.getByText("Активная цель")).toBeInTheDocument();
     // NEGATIVE (paired): процента и шкалы нет.
     expect(screen.queryByText(/78 %/)).not.toBeInTheDocument();
     expect(
@@ -586,7 +587,7 @@ describe("CustomerWellnessDashboardScreen — degraded reads (DRF-1546)", () => 
     window.history.replaceState({}, "", "/customer/main");
   });
 
-  it("DRF-1927: no personal-data consent — the diary rows say why, not «Не удалось загрузить»", async () => {
+  it("DRF-1927 → DRF-2144: no personal-data consent — ONE consent card says why, not «Не удалось загрузить»", async () => {
     serve(
       {
         // Ключей дневника нет: сервер его не читал — нет согласия.
@@ -598,11 +599,11 @@ describe("CustomerWellnessDashboardScreen — degraded reads (DRF-1546)", () => 
     );
     await renderScreen(false);
 
-    // POSITIVE: обе строки дневника говорят про согласие.
-    expect(
-      await screen.findAllByText(/нужно согласие на обработку личных данных/),
-    ).toHaveLength(2);
-    // NEGATIVE (парная): это не сбой и не пустой день.
+    // POSITIVE: один блок согласия (DRF-2144 п.6) — не две строки дневника.
+    expect(await screen.findAllByText(/Чтобы вести дневник, нужно согласие/)).toHaveLength(1);
+    expect(screen.getByRole("button", { name: "Дать согласие в чате" })).toBeInTheDocument();
+    // NEGATIVE (парная): это не сбой и не пустой день; старой пары абзацев нет.
+    expect(screen.queryByText(/нужно согласие на обработку личных данных/)).not.toBeInTheDocument();
     expect(screen.queryByText("Не удалось загрузить")).not.toBeInTheDocument();
     expect(screen.queryByText(/ккал/)).not.toBeInTheDocument();
     expect(screen.queryByText(/стаканов/)).not.toBeInTheDocument();
@@ -652,7 +653,7 @@ describe("CustomerWellnessDashboardScreen — degraded reads (DRF-1546)", () => 
     ).not.toBeInTheDocument();
     // POSITIVE (парная): запись воды — отдельная ручка, она жива.
     expect(
-      screen.getByRole("button", { name: "Добавить стакан воды 250 мл" }),
+      screen.getByRole("button", { name: "Добавить стакан воды" }),
     ).toBeInTheDocument();
   });
 
@@ -1117,8 +1118,8 @@ describe("CustomerWellnessDashboardScreen — отмена стакана (DRF-1
 
   async function tapWater() {
     await renderScreen(true);
-    const qa = within(await screen.findByRole("region", { name: "Что сделаем сейчас" }));
-    fireEvent.click(qa.getByRole("button", { name: "Добавить стакан воды 250 мл" }));
+    const qa = within(await screen.findByRole("region", { name: "Быстрые действия" }));
+    fireEvent.click(qa.getByRole("button", { name: "Добавить стакан воды" }));
   }
 
   it("принятый стакан можно отменить: DELETE по id записи, тост «Стакан убран»", async () => {
@@ -1275,8 +1276,8 @@ describe("CustomerWellnessDashboardScreen — отмена стакана (DRF-1
     const posts = () => calls.filter((c) => c.startsWith("POST")).length;
     await vi.waitFor(() => expect(posts()).toBe(1));
 
-    const qa = within(screen.getByRole("region", { name: "Что сделаем сейчас" }));
-    fireEvent.click(qa.getByRole("button", { name: "Добавить стакан воды 250 мл" }));
+    const qa = within(screen.getByRole("region", { name: "Быстрые действия" }));
+    fireEvent.click(qa.getByRole("button", { name: "Добавить стакан воды" }));
     releaseFirst();
 
     await vi.waitFor(() => expect(posts()).toBe(2));
@@ -1296,7 +1297,7 @@ describe("CustomerWellnessDashboardScreen — отмена стакана (DRF-1
       () => json({ error: "consent_required", detail: "no consent" }, 403),
     );
     await renderScreen(true);
-    await screen.findByRole("region", { name: "Что сделаем сейчас" });
+    await screen.findByRole("region", { name: "Быстрые действия" });
 
     window.dispatchEvent(new Event("online"));
 
@@ -1326,9 +1327,9 @@ describe("CustomerWellnessDashboardScreen — отмена стакана (DRF-1
     await tapWater();
     const posts = () => calls.filter((c) => c.startsWith("POST")).length;
     await vi.waitFor(() => expect(posts()).toBe(1));
-    const qa = within(screen.getByRole("region", { name: "Что сделаем сейчас" }));
-    fireEvent.click(qa.getByRole("button", { name: "Добавить стакан воды 250 мл" }));
-    fireEvent.click(qa.getByRole("button", { name: "Добавить стакан воды 250 мл" }));
+    const qa = within(screen.getByRole("region", { name: "Быстрые действия" }));
+    fireEvent.click(qa.getByRole("button", { name: "Добавить стакан воды" }));
+    fireEvent.click(qa.getByRole("button", { name: "Добавить стакан воды" }));
     releaseFirst();
 
     await vi.waitFor(() => expect(posts()).toBe(3));
@@ -1356,8 +1357,8 @@ describe("CustomerWellnessDashboardScreen — отмена стакана (DRF-1
     await tapWater();
     const posts = () => calls.filter((c) => c.startsWith("POST")).length;
     await vi.waitFor(() => expect(posts()).toBe(1));
-    const qa = within(screen.getByRole("region", { name: "Что сделаем сейчас" }));
-    fireEvent.click(qa.getByRole("button", { name: "Добавить стакан воды 250 мл" }));
+    const qa = within(screen.getByRole("region", { name: "Быстрые действия" }));
+    fireEvent.click(qa.getByRole("button", { name: "Добавить стакан воды" }));
     releaseFirst();
 
     expect(await screen.findByText("+1 стакан · 1 стакан ждёт синхронизации")).toBeInTheDocument();
@@ -1402,12 +1403,12 @@ describe("CustomerWellnessDashboardScreen — отмена стакана (DRF-1
   it("DRF-1919: стакан не сохранился (хранилище не пишет) — так и сказано, без «ждёт»", async () => {
     const calls = serveWater(() => new Response(null, { status: 204 }));
     await renderScreen(true);
-    const qa = within(await screen.findByRole("region", { name: "Что сделаем сейчас" }));
+    const qa = within(await screen.findByRole("region", { name: "Быстрые действия" }));
     vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
       throw new DOMException("quota", "QuotaExceededError");
     });
 
-    fireEvent.click(qa.getByRole("button", { name: "Добавить стакан воды 250 мл" }));
+    fireEvent.click(qa.getByRole("button", { name: "Добавить стакан воды" }));
 
     expect(await screen.findByText("Стакан не сохранён — попробуй ещё раз.")).toBeInTheDocument();
     expect(screen.queryByText(/синхронизации/)).not.toBeInTheDocument();

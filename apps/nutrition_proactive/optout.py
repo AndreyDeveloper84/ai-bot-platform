@@ -178,16 +178,13 @@ def apply_surface_opt_out(bot_user: Any, surface: str) -> str:
     """Silence ONE surface for ``bot_user`` and return the confirmation.
 
     The platform-wide veto is deliberately NOT set: the tap answered one
-    message, not every future one. Same persistence shape as
-    :func:`apply_opt_out` -- one ``.update()``, no full-model save, no
-    tenant-context dependence -- so the two switches can never drift in
-    how reliably they land.
+    message, not every future one. Persists through
+    :func:`prefs.write_prefs` -- the same one-``.update()`` shape as
+    :func:`apply_opt_out` and the same writer the chat report-hour
+    commands use (DRF-2141) -- so the switches can never drift in how
+    reliably they land.
     """
-    from apps.identity.models import BotUser
-
-    context_json = prefs.merge_prefs(bot_user, SURFACE_OPT_OUT_PREFS[surface])
-    BotUser.all_tenants.filter(pk=bot_user.pk).update(context=context_json)
-    bot_user.context = context_json
+    prefs.write_prefs(bot_user, SURFACE_OPT_OUT_PREFS[surface])
 
     logger.info(
         "nutrition_proactive.surface_opt_out bot_user=%s surface=%s",

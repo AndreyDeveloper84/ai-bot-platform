@@ -1,8 +1,10 @@
 /**
  * «Мой план» — Plan Lite без веса (DRF-2101, решение владельца §49).
  *
- * Route: `/customer/plan`. Входы — «Мой план» с экрана цели (C01) и с
- * дашборда, когда цель есть. Под флагом сборки `VITE_PLAN_LITE=1`.
+ * Route: `/customer/plan`. Входы — вкладка «План» нижней панели, карточка
+ * цели на Главной («Продолжить сегодняшний план» / «Составить план») и «Мой
+ * план» с экрана цели (C01). Флага сборки нет (DRF-2144, §55 б): включён ли
+ * план, решает сервер — 404 `plan_lite_disabled` → «пока недоступен».
  *
  * Что здесь:
  *   - плана нет → сперва ПРЕДЛОЖЕНИЕ из шаблона цели (DRF-2123, План-A):
@@ -42,7 +44,6 @@ import { useNavigate } from "react-router-dom";
 import { useScreenBack } from "../hooks/useScreenBack";
 import { ApiError } from "../lib/api";
 import { fetchDecisionContext } from "../lib/customer-goals";
-import { planLiteEnabled } from "../lib/feature-flags";
 import { fetchDiaryConsentGate } from "../lib/food-scanner";
 import {
   closePlanLite,
@@ -188,10 +189,6 @@ export function PlanLiteScreen() {
   }, []);
 
   const load = useCallback(async () => {
-    if (!planLiteEnabled()) {
-      setStatus({ kind: "unavailable" });
-      return;
-    }
     setStatus({ kind: "loading" });
     setNotice(null);
     let plan: PlanLite | null;
@@ -238,7 +235,6 @@ export function PlanLiteScreen() {
   // курируемой цели из документа; сервер отдаёт лишь ключ. Не смогли
   // спросить — показываем ключ, план от этого не зависит.
   useEffect(() => {
-    if (!planLiteEnabled()) return;
     let cancelled = false;
     fetchDecisionContext()
       .then((doc) => {

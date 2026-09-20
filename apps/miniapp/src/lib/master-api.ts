@@ -133,6 +133,20 @@ export interface DashboardNextVisit {
   duration_min: number;
   is_returning_customer: boolean;
   customer_intent_hint: string;
+  /** DRF-2152 — начало–конец и «до визита N мин» с сервера; экран не тикает. */
+  end_at: string; // ISO
+  minutes_until: number;
+}
+
+/** DRF-2152 — запись дня после ближайшей. Набор полей закрыт макетом DRF-1182:
+ * имя, услуга, время — без телефона/цены/оплаты/источника. */
+export interface DashboardUpcomingVisit {
+  booking_id: string;
+  client_first_name: string;
+  client_last_initial: string;
+  service_name: string;
+  visit_at: string; // ISO
+  end_at: string; // ISO
 }
 
 export type SlaTier = "red" | "yellow" | "white";
@@ -173,6 +187,10 @@ export interface DashboardTabBadges {
 export interface DashboardStatesFlags {
   is_day_done: boolean;
   is_offline_safe_response: boolean;
+  /** DRF-2152: true — выходной (рамка дня прочитана, блока нет); false —
+   * рабочий день; null — рамка не прочитана (каталог не ответил): «не знаю»
+   * ≠ «выходной» (DRF-1111), экран говорит «не удалось проверить». */
+  day_off: boolean | null;
 }
 
 export interface DashboardResponse {
@@ -181,6 +199,7 @@ export interface DashboardResponse {
   now_iso: string;
   active_visit: DashboardActiveVisit | null;
   next_visit: DashboardNextVisit | null;
+  upcoming_today: DashboardUpcomingVisit[];
   inbox_preview: DashboardInboxItem[];
   today_summary: DashboardTodaySummary;
   tab_badges: DashboardTabBadges;
@@ -228,6 +247,54 @@ export const patchOnboardingProfile = (input: {
 
 export const getDashboard = (): Promise<DashboardResponse> =>
   request("/dashboard", { method: "GET" });
+
+// --- М-4 booking detail (DRF-2156) — контракт М-2 GET master/bookings/<uuid>
+// (DRF-2154, зафиксирован ayla-22 20.09). Экран «Детали записи» по макету
+// DRF-1185: постоянная часть (клиент, дата, время, услуга) + ОДИН контекстный
+// блок по `temporal_state`. Состояние считает СЕРВЕР по своим часам
+// (`checked_at`); `completed` — только по подтверждённому `status`, экран
+// ничего не переводит по часам устройства. На экран не выходят: телефон,
+// оплата, история, заметки (их в контракте и нет — DRF-1039).
+
+export type BookingTemporalState = "upcoming" | "now" | "after" | "completed" | "unknown";
+
+/** Сырой статус зеркала Ayla. Экран смотрит только на cancelled/no_show. */
+export type MasterBookingStatus =
+  | "confirmed"
+  | "awaiting_payment"
+  | "pending_payment"
+  | "completed"
+  | "cancelled"
+  | "no_show"
+  | (string & {});
+
+export interface MasterBookingDetail {
+  /** Ayla appointment_id — тот же uuid, что booking_id в dashboard/schedule. */
+  id: string;
+  client: {
+    /** «Анна П.»; без bot_user — «Гость». */
+    name_initial: string;
+    /** Последний completed визит у этого мастера, YYYY-MM-DD; на экран М-4 не выходит. */
+    last_visit_date: string | null;
+  };
+  service: { id: string; name: string };
+  start_at: string; // ISO со смещением тенанта
+  end_at: string; // ISO со смещением тенанта
+  duration_min: number;
+  status: MasterBookingStatus;
+  temporal_state: BookingTemporalState;
+  /** Только для upcoming, по часам сервера; иначе null. */
+  minutes_until: number | null;
+  /** Часы сервера в tz тенанта — точка отсчёта для «Сегодня/Завтра». */
+  checked_at: string;
+}
+
+/** 404 `not_found` одним телом — и чужая, и несуществующая запись. */
+export const getMasterBooking = (
+  id: string,
+  opts: { signal?: AbortSignal } = {},
+): Promise<MasterBookingDetail> =>
+  request(`/bookings/${encodeURIComponent(id)}`, { method: "GET", signal: opts.signal });
 
 // --- M4 master profile (read-by-self + edit own bio/photo) --------------
 // Mirrors apps/master_api/views.py::me() + onboarding_profile() (PATCH).

@@ -2854,7 +2854,20 @@ def customers_list(request: HttpRequest) -> HttpResponse:
         {"customers": [...]}
 
     Empty array when the master has no bookings yet.
+
+    With ``?q=`` (DRF-2154) the same route answers the booking-flow search
+    instead: ``{"results": [{id, name «Анна П.», last_visit_date, named}]}``
+    — see :func:`apps.master_api.views_bookings.search_customers`.
     """
+
+    query = (request.GET.get("q") or "").strip()
+    if query:
+        # DRF-2154 (М-2): поиск клиента для записи — имя + инициал + дата
+        # последнего визита у этого мастера; телефона нет ни на входе, ни
+        # на выходе. Один маршрут на ростер и поиск.
+        from apps.master_api.views_bookings import search_customers
+
+        return search_customers(request, query)
 
     master: CatalogMaster = request.master  # type: ignore[attr-defined]
     items = list_master_customers(master=master)

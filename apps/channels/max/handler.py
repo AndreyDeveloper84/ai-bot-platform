@@ -191,6 +191,8 @@ from apps.orchestrator.nutrition_global import (
     try_handle_structured_nutrition_turn,
 )
 from apps.nutrition_proactive.optout import try_handle_opt_out, try_handle_surface_stop
+from apps.nutrition_proactive.report_hour import ACTION_TYPE as REPORT_HOUR_ACTION_TYPE
+from apps.nutrition_proactive.report_hour import try_handle_report_hour
 from apps.orchestrator.visits import (
     CALLBACK_VISIT_REPEAT_PREFIX,
     VISIT_CALLBACK_PREFIXES,
@@ -1779,6 +1781,28 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             t_start=t_start,
             outcome=AIRequestMetric.OUTCOME_SUCCESS,
             skill_selected="proactive_opt_out",
+        )
+    elif (
+        _report_hour_reply := try_handle_report_hour(text=event.text, bot_user=bot_user)
+    ) is not None:
+        # DRF-2141 — час отчёта словами: «присылай итоги в 21:00» /
+        # «не присылай отчёт» / «во сколько ты присылаешь итоги?». Стоит
+        # рядом с отпиской и по той же причине выше остальных веток:
+        # закрытый матч по целому сообщению, глагол обязателен, так что
+        # «21:00» без глагола и любая фраза соседей сюда не попадают.
+        # Под обоими флагами питания (NUTRITION_ENABLED и
+        # NUTRITION_PROACTIVE_ENABLED): при выключенном — None, и ход идёт
+        # туда же, куда у прочих нутриционных веток.
+        reply = DiscoveryReply(text=_report_hour_reply)
+        assistant_action_type = REPORT_HOUR_ACTION_TYPE
+        _record_live_path_metric(
+            bot_user=bot_user,
+            conversation=conversation,
+            trace_id=trace_id,
+            message_text=event.text,
+            t_start=t_start,
+            outcome=AIRequestMetric.OUTCOME_SUCCESS,
+            skill_selected=REPORT_HOUR_ACTION_TYPE,
         )
     elif stale_tap:
         # DRF-1348 — тап, который нечем подставить. Стоит здесь, а не среди

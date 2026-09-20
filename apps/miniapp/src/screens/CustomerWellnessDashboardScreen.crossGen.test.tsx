@@ -4,7 +4,9 @@
  * `CustomerWellnessDashboardScreen` — это «Главная» (DRF-1546), то есть
  * живой экран нового поколения. Два его перехода вели в старое:
  *
- *   - «Перенести» у ближайшей записи → `/my-visits/:id/reschedule`;
+ *   - «Открыть запись» у ближайшей записи → `/my-visits/:id` (до DRF-2144
+ *     здесь же стояло «Перенести» → `/my-visits/:id/reschedule`; с H01
+ *     перенос живёт в карточке записи, на Главной — только «Открыть»);
  *   - карточка подбора «Ayla подобрала тебе» → `/catalog/:id`.
  *
  * Оба адреса остаются смонтированными в `App.tsx` как compatibility-
@@ -107,8 +109,8 @@ function renderScreen() {
         />
         {/* Канонические адреса нового поколения. */}
         <Route
-          path="/customer/records/:bookingId/reschedule"
-          element={<div>RESCHEDULE-LIVE</div>}
+          path="/customer/records/:bookingId"
+          element={<div>RECORD-LIVE</div>}
         />
         <Route
           path="/customer/catalog/:serviceId"
@@ -116,8 +118,8 @@ function renderScreen() {
         />
         {/* Алиасы прежнего поколения — пробы «сюда не ведём». */}
         <Route
-          path="/my-visits/:bookingId/reschedule"
-          element={<div>RESCHEDULE-LEGACY</div>}
+          path="/my-visits/:bookingId"
+          element={<div>RECORD-LEGACY</div>}
         />
         <Route
           path="/catalog/:serviceId"
@@ -141,21 +143,23 @@ beforeEach(() => {
   });
 });
 
-describe("Главная → перенос записи ведёт в живое поколение", () => {
-  it("«Перенести» открывает /customer/records/:id/reschedule", async () => {
+describe("Главная → карточка записи ведёт в живое поколение", () => {
+  it("«Открыть запись» открывает /customer/records/:id", async () => {
     serve({ next_booking: NEXT_BOOKING, this_week_booking_count: 1 });
     renderScreen();
 
     const user = userEvent.setup();
     const button = await screen.findByRole("button", {
-      name: "Перенести запись",
+      name: "Открыть запись",
     });
+    // «Перенести» с Главной снято (H01, DRF-2144) — перенос в карточке записи.
+    expect(screen.queryByRole("button", { name: "Перенести запись" })).not.toBeInTheDocument();
     await user.click(button);
 
     // Положительно: канонический адрес, и id из карточки — тот же.
-    expect(await screen.findByText("RESCHEDULE-LIVE")).toBeInTheDocument();
+    expect(await screen.findByText("RECORD-LIVE")).toBeInTheDocument();
     // Отрицательно, на том же переходе: алиас не задет.
-    expect(screen.queryByText("RESCHEDULE-LEGACY")).not.toBeInTheDocument();
+    expect(screen.queryByText("RECORD-LEGACY")).not.toBeInTheDocument();
   });
 });
 

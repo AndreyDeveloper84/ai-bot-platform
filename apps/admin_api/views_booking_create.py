@@ -2,8 +2,10 @@
 
 ``POST /api/v1/admin/bookings/``
 
-Thin shell over :class:`apps.integrations.ayla.salon_client.AylaSalonClient`.
-Ayla owns booking state (ADR-0009 rule 5); nothing here writes a booking row.
+Thin shell over :func:`apps.admin_api.services.booking.create_appointment_as`
+(DRF-2154 moved the Ayla call and its §18 outcome mapping there so the
+master surface books through the same code). Ayla owns booking state
+(ADR-0009 rule 5); nothing here writes a booking row.
 
 ### Why the response says «what happened», not «ok / not ok»
 
@@ -39,10 +41,13 @@ from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
-from apps.catalog.specialist_ref import CatalogSpecialistUnresolved, catalog_specialist_id
 from apps.admin_api.auth import require_admin_role
+from apps.admin_api.services.booking import (
+    Refusal,
+    bookable_service,
+    create_appointment_as,
+)
 from apps.admin_api.views import _get_master_or_404
-from apps.catalog.models import CatalogService
 from apps.identity.models import BotUser
 from apps.integrations.ayla.user_proxy import external_user_id_for
 
@@ -124,15 +129,9 @@ def create_booking(request: HttpRequest) -> HttpResponse:
     if master is None:
         return _error("not_found", "master not found", 404)
 
-    service = CatalogService.objects.filter(tenant_id=tenant.id, id=service_id).first()
-    if service is None:
-        return _error("not_found", "service not found", 404)
-    if not service.ayla_service_id:
-        return _error(
-            "service_not_bookable",
-            "this service is not linked to the booking system yet",
-            409,
-        )
+    service = bookable_service(tenant.id, service_id)
+    if isinstance(service, Refusal):
+        return _error(service.slug, service.detail, service.status)
 
     # A caller that repeats a submission MUST repeat its key, or the retry
     # becomes a second booking (Ayla invents a key when the header is absent).
@@ -141,161 +140,20 @@ def create_booking(request: HttpRequest) -> HttpResponse:
     if not idempotency_key:
         idempotency_key = str(uuid.uuid4())
 
-    from apps.integrations.ayla.health_check import text_for
-    from apps.integrations.ayla.offer_refusal import OFFER_NOT_SELLABLE_SLUG, staff_text_for
-    from apps.integrations.ayla.salon_client import (
-        SalonAPIError,
-        SalonOfferNotSellable,
-        SalonForbidden,
-        SalonHealthCheckHandoff,
-        SalonNotConfigured,
-        SalonNotFound,
-        SalonSlotTaken,
-        SalonUnauthorized,
-        SalonUnavailable,
-        SalonValidationError,
-        get_salon_client,
+    result = create_appointment_as(
+        actor=external_user_id_for(bot_user),
+        tenant=tenant,
+        master=master,
+        service=service,
+        start_at=start_at,
+        idempotency_key=idempotency_key,
+        client_id=client_id,
+        client_name=client_name,
+        client_phone=client_phone,
+        log="admin_api.create_booking",
+        journal=logger,
     )
-
-    actor = external_user_id_for(bot_user)
-
-    # DRF-1933: у строки зеркала нет id профиля в каталоге — звать каталог
-    # не с чем; первичный ключ зеркала туда не уходит.
-    try:
-        catalog_specialist_id(master)
-    except CatalogSpecialistUnresolved:
-        return _outcome(
-            "blocked",
-            "master is not set up in the catalog yet",
-            409,
-        )
-    try:
-        created = get_salon_client().create_appointment(
-            actor_external_id=actor,
-            idempotency_key=idempotency_key,
-            tenant_slug=tenant.slug,
-            specialist_id=catalog_specialist_id(master),
-            service_id=str(service.ayla_service_id),
-            start_datetime=start_at,
-            client_id=client_id,
-            client_name=client_name,
-            client_phone=client_phone,
-        )
-    except SalonNotConfigured as exc:
-        logger.error("admin_api.create_booking.not_configured err=%s", exc)
-        return _outcome(
-            "blocked",
-            "booking is not configured on this deployment",
-            503,
-        )
-    except SalonUnauthorized as exc:
-        # Our credential, not this person's rights. Loud in the log because
-        # only an operator can fix it, and neutral on screen because the
-        # administrator did nothing wrong and can do nothing about it.
-        logger.error(
-            "admin_api.create_booking.upstream_unauthorized tenant=%s err=%s",
-            tenant.id,
-            exc,
-        )
-        return _outcome(
-            "blocked",
-            "запись сейчас недоступна — обратитесь к поддержке",
-            503,
-        )
-    except SalonSlotTaken as exc:
-        return _outcome("conflict", str(exc), 409)
-    except SalonForbidden as exc:
-        logger.warning(
-            "admin_api.create_booking.forbidden actor=%s tenant=%s err=%s",
-            actor,
-            tenant.id,
-            exc,
-        )
-        # §106 — `blocked` наружу одно, различает `reason_code`. Без него
-        # «нельзя по правам» и «нужен скрининг» приезжают на экран одним
-        # словом, и различать нечем ровно так же, как до этой задачи, —
-        # только в другую сторону.
-        return _outcome("blocked", str(exc), 403, reason_code="permission_denied")
-    except SalonNotFound as exc:
-        # Ayla knows the specialist or the customer is not this salon's. For
-        # a customer that is an invitation to book them as a new guest, which
-        # is what the screen offers — so it is a conflict, not a dead end.
-        return _outcome("conflict", str(exc), 404)
-    except SalonValidationError as exc:
-        return _outcome("blocked", str(exc), 400)
-    except SalonUnavailable as exc:
-        # The write may have landed. Never call this a failure.
-        logger.warning("admin_api.create_booking.unknown actor=%s err=%s", actor, exc)
-        return _outcome(
-            "pending",
-            "the schedule did not answer — refresh the day before trying again",
-            504,
-            idempotency_key=idempotency_key,
-        )
-    except SalonHealthCheckHandoff as exc:
-        # DRF-1614. Caught BEFORE the SalonAPIError catch-all below, which
-        # used to render this as outcome="failed" with HTTP 502 — a
-        # deliberate medical refusal shown to the administrator as a
-        # server outage, i.e. the one reading that makes somebody call
-        # support about a system that is working exactly as decided.
-        #
-        # `blocked` and not a new fifth outcome: §18 fixes four, and
-        # "explain, do not retry" is what this is. The outward code is
-        # what lets the screen tell it from a rights block without
-        # branching on prose.
-        #
-        # The log keeps the EXACT code while the screen gets the merged
-        # name: the annotation queue is prioritised by how many
-        # HEALTH_CHECK_UNKNOWN a service produced, and that counter dies
-        # if REQUIRED and UNKNOWN arrive here as one word.
-        logger.info(
-            "admin_api.create_booking.health_check_handoff actor=%s tenant=%s code=%s",
-            actor,
-            tenant.id,
-            exc.code or "MISSING",
-        )
-        return _outcome(
-            "blocked",
-            text_for(exc.code, handoff=exc.handoff),
-            422,
-            # §106: на ЭТОЙ поверхности причины различаются все три, а не
-            # две. Клиенту `REQUIRED` и `UNKNOWN` — одно имя, потому что
-            # разница наша; администратору она адресована: `unknown`
-            # означает «нужна консультация И разметка», и разметка — его
-            # работа. Слитый здесь код отнял бы у экрана именно то
-            # различие, ради которого владелец завёл `reason_code`.
-            reason_code=(exc.code or "").lower() or "health_check_unspecified",
-        )
-    except SalonOfferNotSellable as exc:
-        # DRF-1989. Осознанный отказ каталога — не поломка: раньше он уходил в
-        # catch-all ниже и читался администратором как 502 «failed». Наружу —
-        # ``blocked`` (§18: объяснить, не повторять) с причиной и тем, что
-        # исправить.
-        logger.info(
-            "admin_api.create_booking.offer_not_sellable actor=%s tenant=%s reason=%s",
-            actor,
-            tenant.id,
-            exc.reason,
-        )
-        return _outcome(
-            "blocked",
-            staff_text_for(exc.reason),
-            409,
-            reason_code=OFFER_NOT_SELLABLE_SLUG,
-            unsellable_reason=exc.reason,
-        )
-    except SalonAPIError as exc:
-        logger.warning("admin_api.create_booking.error actor=%s err=%s", actor, exc)
-        return _outcome("failed", str(exc), 502)
-
-    appointment_id = str(created.get("id") or "") if isinstance(created, dict) else ""
-    logger.info(
-        "admin_api.create_booking.committed appointment=%s actor=%s tenant=%s",
-        appointment_id,
-        actor,
-        tenant.id,
-    )
-    return _outcome("committed", "appointment created", 201, appointment_id=appointment_id)
+    return _outcome(result.outcome, result.detail, result.status, **result.extra)
 
 
 __all__ = ["create_booking"]

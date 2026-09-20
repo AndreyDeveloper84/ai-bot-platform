@@ -189,7 +189,8 @@ MINIAPP_ROUTES: dict[str, str] = {
     "open_water_add_250": "customer/wellness",
     "open_goal_select": "customer/goal-select",
     # DRF-2125 — «Мой план» с карточки плана в чате («Изменить» /
-    # «Изменить план»); экран — за ``VITE_PLAN_LITE`` (DRF-2101).
+    # «Изменить план»). Флага сборки у экрана больше нет (DRF-2144): он же
+    # вкладка «План» нижней панели; включён ли план, решает ``PLAN_LITE_ENABLED``.
     "open_plan": "customer/plan",
     "open_home": "customer/main",
     # DRF-1491 — главное меню витрины (``apps.skills.menu.marketplace``).
