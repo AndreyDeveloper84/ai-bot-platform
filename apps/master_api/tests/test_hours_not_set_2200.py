@@ -27,7 +27,7 @@ from datetime import time as time_cls
 
 import pytest
 from django.urls import reverse
-from django.utils import timezone as dj_timezone
+from freezegun import freeze_time
 
 from apps.integrations.ayla.salon_client import SalonUnavailable
 from apps.master_api.tests.conftest import init_data_header
@@ -36,6 +36,12 @@ from apps.scheduling.models import WorkingHours
 pytestmark = pytest.mark.django_db
 
 DASHBOARD_URL = reverse("master_api:dashboard")
+#: Понедельник, 12:00 MSK. День недели считается в поясе АРЕНДАТОРА, а не
+#: сервера: на CI (UTC) 22:45 — это уже вторник в Москве, и «завтрашний»
+#: рабочий день оказывался сегодняшним. Заперто, чтобы тест не зеленел по
+#: времени суток.
+FROZEN = "2026-09-21 09:00:00"
+TUESDAY = 1
 
 
 def _dashboard(client):
@@ -54,6 +60,7 @@ def _week(tenant, master, *, working: set[int], start=time_cls(10, 0), end=time_
         )
 
 
+@freeze_time(FROZEN)
 class TestHoursSetIsItsOwnFact:
     def test_no_template_at_all_reads_as_hours_not_set(
         self, client, tenant, bot_user, accepted_master
@@ -74,8 +81,8 @@ class TestHoursSetIsItsOwnFact:
     def test_a_day_off_inside_a_real_template_stays_a_day_off(
         self, client, tenant, bot_user, accepted_master
     ):
-        today = dj_timezone.now().astimezone().weekday()
-        _week(tenant, accepted_master, working={(today + 1) % 7})
+        # Сегодня понедельник (заперто): рабочий — только вторник.
+        _week(tenant, accepted_master, working={TUESDAY})
         states = _dashboard(client).json()["states"]
         assert states["day_off"] is True
         assert states["hours_set"] is True
