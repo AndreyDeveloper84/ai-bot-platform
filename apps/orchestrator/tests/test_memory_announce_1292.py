@@ -60,8 +60,11 @@ class TestAnnounceLine:
         upc = _upc()
         line = announce_line([_entry(upc)])
         # Та же фраза, что «Помню, что ты …» в чате и label на экране.
-        assert line == f"Запомнила: ты придерживается веганского питания. {ANNOUNCE_TAIL}"
-        assert "забудь" in line
+        assert (
+            line
+            == "Запомнила: ты придерживаешься веганского питания. Скажи «забудь про питание», если не надо."
+        )
+        assert ANNOUNCE_TAIL not in line  # доменная подсказка, не голое «забудь»
 
     def test_inferred_fact_is_never_announced(self):
         """Ложный вход: выведенное — не сказанное. Строки нет вовсе."""
@@ -94,6 +97,7 @@ class TestAnnounceLine:
         assert line is not None
         assert line.count("Запомнила") == 1
         assert "веганского" in line and "3 000" in line
+        assert "«забудь про питание» или «забудь про бюджет»" in line
 
     def test_unrenderable_fact_gives_no_line(self):
         upc = _upc()
@@ -120,7 +124,7 @@ class TestOneServiceLinePerTurn:
             weave_question=weave,
         )
         assert out.text.startswith("Конечно, подберу.")
-        assert "Запомнила: ты придерживается веганского питания." in out.text
+        assert "Запомнила: ты придерживаешься веганского питания." in out.text
         assert "Вопрос?" not in out.text
         weave.assert_not_called()
 

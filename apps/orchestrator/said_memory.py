@@ -261,7 +261,13 @@ def _answered_screening_this_turn(conversation: Any, message_text: str) -> bool:
 # Запись                                                                      #
 # --------------------------------------------------------------------------- #
 def _write_said_fact(
-    bot_user: Any, *, kind: str, content: dict[str, str], refresh: bool = False
+    bot_user: Any,
+    *,
+    kind: str,
+    content: dict[str, str],
+    refresh: bool = False,
+    sink: Any = None,
+    link_timeout_s: float | None = None,
 ) -> bool:
     """Одна зелёная строка «сказано в разговоре». Гейты — как у M-B2.
 
@@ -285,10 +291,16 @@ def _write_said_fact(
     )
     from apps.identity.services.memory_writer import supersede_entries, write_entry
 
+    import time
+
+    from apps.orchestrator.memory.write_sink import link_within_budget
+
     key, value = content["key"], content["value"]
     if not can_store_green_memory(bot_user):
         return False
-    user_id = ensure_ayla_link(bot_user, trigger="memory_write")
+    link_started = time.monotonic()
+    user_id = ensure_ayla_link(bot_user, trigger="memory_write", timeout_s=link_timeout_s)
+    link_within_budget(sink, link_started, link_timeout_s, user_id)
     if user_id is None:
         return False
     for fact in read_current_view(user_id).green_facts:
@@ -317,6 +329,8 @@ def _write_said_fact(
     )
     if entry is None:
         return False
+    if sink is not None:
+        sink.add(entry)
     displaced = [
         row
         for row in live_rows
@@ -344,10 +358,15 @@ def record_said_facts(
     message_text: str,
     *,
     tool_trace: Any = None,
+    sink: Any = None,
+    link_timeout_s: float | None = None,
 ) -> int:
     """Записать сказанное на этом ходу. Возвращает число записанных фактов.
 
-    Вызывается ПОСЛЕ отправки ответа; не бросает — память не стоит хода.
+    Не бросает — память не стоит хода. С DRF-1292 зовётся ДО отправки с
+    бюджетом ``link_timeout_s`` на связь с Ayla (записанные строки — в
+    ``sink``, из них строится «Запомнила: …»); при исчерпанном бюджете —
+    ещё раз после отправки, как раньше, уже без строки.
     """
 
     written = 0
@@ -361,12 +380,20 @@ def record_said_facts(
                 (named[c.casefold()] for c in reversed(searched) if c.casefold() in named), None
             )
             if city and _write_said_fact(
-                bot_user, kind="preference", content={"key": "city", "value": city}
+                bot_user,
+                kind="preference",
+                content={"key": "city", "value": city},
+                sink=sink,
+                link_timeout_s=link_timeout_s,
             ):
                 written += 1
         visit = visit_context_from_text(message_text)
         if visit and _write_said_fact(
-            bot_user, kind="lifestyle", content={"key": "visit_context", "value": visit}
+            bot_user,
+            kind="lifestyle",
+            content={"key": "visit_context", "value": visit},
+            sink=sink,
+            link_timeout_s=link_timeout_s,
         ):
             written += 1
     except Exception:  # noqa: BLE001 — память не стоит хода

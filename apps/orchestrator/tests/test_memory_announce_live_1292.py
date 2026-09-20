@@ -22,6 +22,7 @@ from unittest.mock import AsyncMock, MagicMock, Mock
 import pytest
 
 from apps.channels.max import handler as max_handler
+from apps.channels.max.quick_actions import AI_UNAVAILABLE_TEXT
 from apps.consent.services import record_global_consent
 from apps.conversations.services import resolve_active_global_conversation
 from apps.identity.models import MemoryEntry
@@ -157,8 +158,8 @@ class TestAnnounceOnLivePath:
 
         first = _turn(sent, uid, "я веган", 1)
         assert first.startswith(ANSWER)
-        assert "Запомнила: ты придерживается веганского питания." in first
-        assert "забудь" in first
+        assert "Запомнила: ты придерживаешься веганского питания." in first
+        assert "«забудь про питание»" in first
         assert MemoryEntry.objects.filter(user_id=bot_user.ayla_user_id).count() == 1
 
         # Тот же факт — записи нет (дедуп), строки нет (один раз на факт).
@@ -168,7 +169,7 @@ class TestAnnounceOnLivePath:
 
         # Новое значение одиночного ключа — supersede — объявляется снова.
         third = _turn(sent, uid, "я теперь на кето", 3)
-        assert "Запомнила: ты придерживается кето-диеты." in third
+        assert "Запомнила: ты придерживаешься кето-диеты." in third
 
     def test_turn_without_a_fact_has_no_line(self, monkeypatch, sent, fake_redis):
         _model(monkeypatch)
@@ -182,8 +183,12 @@ class TestAnnounceOnLivePath:
         bot_user, uid = _person()
         _turn(sent, uid, "я веган", 1)
 
-        text = _turn(sent, uid, "забудь, что я веган", 2)
+        text = _turn(sent, uid, "забудь про питание", 2)
 
+        # Присутствие первым: это ответ команды памяти, не консьержа…
+        assert "Готово — забыла" in text
+        # …и в нём нет анонса (а первый ход его имел — сторож живой).
+        assert "Запомнила" in sent[-2]["text"]
         assert "Запомнила" not in text
         live = MemoryEntry.objects.filter(
             user_id=bot_user.ayla_user_id, soft_deleted_at__isnull=True
@@ -202,11 +207,91 @@ class TestAnnounceOnLivePath:
         assert weave == []  # вопрос даже не спрашивали
 
         plain = _turn(sent, uid, "мне бы совет", 2)
+        assert plain.startswith(ANSWER)
+        assert "когда тебе удобно" in plain  # вопрос — когда объявлять нечего
         assert "Запомнила" not in plain
-        assert "когда тебе удобно" in plain
 
     def test_outage_turn_gets_no_line_even_with_a_fact(self, monkeypatch, sent, fake_redis):
         _model(monkeypatch, raises=RuntimeError("provider down"))
-        _, uid = _person()
+        bot_user, uid = _person()
+        _last_person_ayla_id = bot_user.ayla_user_id
         text = _turn(sent, uid, "я веган", 1)
+        # Присутствие первым: экран сбоя, не ответ консьержа.
+        assert text == AI_UNAVAILABLE_TEXT
         assert "Запомнила" not in text
+        # Факт при этом записан после отправки — человек его сказал.
+        assert MemoryEntry.objects.filter(user_id=_last_person_ayla_id).count() == 1
+
+    def test_link_over_budget_writes_after_send_and_adds_no_line(
+        self, monkeypatch, sent, fake_redis
+    ):
+        """Узел бюджета: связь с Ayla не уложилась в 1 с → строки нет, факт
+        записан ПОСЛЕ отправки (как раньше), не потерян."""
+        import time as _time
+
+        from apps.orchestrator.memory import personal_context as pc
+
+        _model(monkeypatch)
+        user_id_holder = uuid.uuid4()
+        # Человек ещё НЕ связан с Ayla — писатель обязан пойти в ensure_ayla_link.
+        from django.utils import timezone
+
+        uid = next(_UID)
+        bot_user = resolve_or_create_global_bot_user(
+            channel="max", channel_user_id=str(uid), chat_id="8899"
+        )
+        bot_user.welcomed_at = timezone.now()
+        bot_user.save(update_fields=["welcomed_at"])
+        record_global_consent(
+            bot_user,
+            consent_type="personal_data",
+            source="test:drf1292",
+            document_version="welcome-s2-v1",
+        )
+        resolve_active_global_conversation(bot_user)
+
+        calls: list[float | None] = []
+
+        def slow_link(_bot_user, *, trigger="unknown", timeout_s=None):
+            calls.append(timeout_s)
+            if timeout_s is not None:
+                # Пре-отправка: «Ayla молчит» весь бюджет — и ничего.
+                _time.sleep(timeout_s)
+                return None
+            # Пост-отправка, без бюджета: связь состоялась.
+            return user_id_holder
+
+        monkeypatch.setattr(pc, "ensure_ayla_link", slow_link)
+
+        text = _turn(sent, uid, "я веган", 1)
+
+        assert text == ANSWER  # строки нет: обещать «запомнила» до записи нельзя
+        assert calls[0] == 1.0  # бюджет пре-отправки
+        assert None in calls[1:]  # повтор после отправки — обычный таймаут клиента
+        assert MemoryEntry.objects.filter(user_id=user_id_holder).count() == 1
+
+    def test_writers_run_before_the_send(self, monkeypatch, sent, fake_redis):
+        """Порядок: запись факта — ДО send_message, иначе строка обещала бы будущее."""
+        from apps.orchestrator import memory_announce
+
+        _model(monkeypatch)
+        _, uid = _person()
+        order: list[str] = []
+        real_record = memory_announce.record_turn_facts
+
+        def spy_record(*a, **kw):
+            order.append(f"record:{kw.get('link_timeout_s')}")
+            return real_record(*a, **kw)
+
+        monkeypatch.setattr(max_handler, "record_turn_facts", spy_record)
+        real_send = max_handler.send_message
+
+        def spy_send(**kw):
+            order.append("send")
+            return real_send(**kw)
+
+        monkeypatch.setattr(max_handler, "send_message", spy_send)
+
+        _turn(sent, uid, "я веган", 1)
+
+        assert order[:2] == ["record:1.0", "send"]

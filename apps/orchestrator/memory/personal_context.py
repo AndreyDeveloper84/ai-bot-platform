@@ -20,6 +20,7 @@ Guarantees:
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 
 from apps.consent.memory import can_store_green_memory
@@ -32,6 +33,7 @@ from apps.identity.services.memory_reader import (
     read_personal_context,
 )
 from apps.identity.services.memory_writer import supersede_entries, write_entry
+from apps.orchestrator.memory.write_sink import WriteSink, link_within_budget
 from apps.persona.memory_extract import extract_user_facts
 
 logger = logging.getLogger(__name__)
@@ -40,11 +42,22 @@ logger = logging.getLogger(__name__)
 _WRITE_PURPOSE = "discovery:explicit_green_fact"
 
 
-def record_explicit_green_facts(bot_user, text: str) -> int:
+def record_explicit_green_facts(
+    bot_user,
+    text: str,
+    *,
+    sink: WriteSink | None = None,
+    link_timeout_s: float | None = None,
+) -> int:
     """Extract + persist explicit green facts from a user turn. Returns count written.
 
     No-op (returns 0) when: no active PERSONAL_DATA consent, nothing extracted,
     identity could not be resolved, or every extracted fact already exists live.
+
+    DRF-1292 — ``sink`` collects the rows actually written (the announce line
+    is built from them); ``link_timeout_s`` bounds the Ayla identity call when
+    this runs BEFORE the reply is sent. A link that ran out the budget is noted
+    on the sink and nothing is written here — the handler retries post-send.
 
     DRF-1035 — gate order is deliberate: consent, then extraction, then identity.
     Persisting memory needs a permanent Ayla subject, so this is an
@@ -71,7 +84,9 @@ def record_explicit_green_facts(bot_user, text: str) -> int:
         if not candidates:
             return 0
 
-        user_id = ensure_ayla_link(bot_user, trigger="memory_write")
+        link_started = time.monotonic()
+        user_id = ensure_ayla_link(bot_user, trigger="memory_write", timeout_s=link_timeout_s)
+        link_within_budget(sink, link_started, link_timeout_s, user_id)
         if user_id is None:
             # Ayla unreachable, or resolution failed. Dropping the fact is the
             # correct degradation: memory is keyed on this id, so there is no
@@ -116,6 +131,8 @@ def record_explicit_green_facts(bot_user, text: str) -> int:
             )
             if entry is not None:
                 written += 1
+                if sink is not None:
+                    sink.add(entry)
                 seen.add(candidate.dedup_key)
                 key = candidate.content.get("key")
                 if key_cardinality(key) == CARDINALITY_SINGLE:
