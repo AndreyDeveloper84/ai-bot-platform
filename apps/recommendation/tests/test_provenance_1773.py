@@ -100,6 +100,12 @@ class TestEntryPointReading:
         """Отрицательная пара: не-рекомендация работает как раньше."""
         assert recommendation_id_from_entry_point(entry) is None
 
+    def test_the_id_comes_back_canonical(self, card):
+        """Один id, записанный по-разному, — одна строка: по ней сверяют
+        бронь с карточкой в аудите, и сравнение там строковое."""
+        upper = f"deep_link:{RECO_PAYLOAD_PREFIX}{str(card.id).upper()}"
+        assert recommendation_id_from_entry_point(upper) == str(card.id)
+
     def test_a_malformed_id_is_not_a_recommendation(self):
         assert recommendation_id_from_entry_point("deep_link:reco_not-a-uuid") is None
 

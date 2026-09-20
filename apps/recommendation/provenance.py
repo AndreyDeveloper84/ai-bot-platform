@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import logging
 import re
+import uuid
 from typing import Any
 
 from django.utils import timezone
@@ -69,7 +70,12 @@ def recommendation_id_from_entry_point(entry_point: Any) -> str | None:
     if not isinstance(entry_point, str):
         return None
     match = _ENTRY_RE.match(entry_point.strip())
-    return match.group(1) if match else None
+    if match is None:
+        return None
+    # Канонический вид: один и тот же id, записанный в разном регистре,
+    # обязан давать одну строку — по ней сверяют бронь с карточкой в
+    # аудите, а сравнение там строковое.
+    return str(uuid.UUID(match.group(1)))
 
 
 def _own_card(bot_user: Any, recommendation_id: str) -> Recommendation | None:
