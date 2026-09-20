@@ -2204,10 +2204,18 @@ def discover_services(
     tenant_id: UUID | None = None,
     city: str | None = None,
     query: str | None = None,
+    goal_key: str | None = None,
     limit: int = _DEFAULT_LIMIT,
     rotation_seed: str | None = None,
 ) -> list[ServiceCard]:
     """Return active services of salons on the platform, as public DTOs.
+
+    ``goal_key`` (DRF-2125) — the curated goal key DIRECTLY, bypassing the
+    text parser: the plan card knows the key (``PlanLite.goal_key``), and
+    re-parsing its label as free text would depend on the label's wording
+    (short tokens, stems shared with another goal). Same selection the goal
+    branch of ``query`` makes (:func:`service_rows_match_q`), unranked.
+    Mutually exclusive with ``query``; ``goal_key`` wins.
 
     Filters (all optional, AND-ed): ``salon`` — substring of the tenant name;
     ``tenant_id`` — that one salon, exactly (the chip-tap read: the button
@@ -2268,7 +2276,10 @@ def discover_services(
         qs = qs.filter(tenant__city__iexact=city)
 
     order: tuple[str, ...] = ("tenant__name", "name", "id")
-    if query:
+    goal_key = (goal_key or "").strip()
+    if goal_key:
+        qs = qs.filter(service_rows_match_q(ParsedQuery(stems=[], cities=[], goals=[goal_key])))
+    elif query:
         parsed = _parse_query(query)
         stems, named_cities = parsed.stems, parsed.cities
         if parsed.is_empty:

@@ -27,10 +27,14 @@
 from __future__ import annotations
 
 import logging
+import uuid
+from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
+from django.conf import settings as dj_settings
+from django.utils import timezone
 
 from apps.integrations.ayla.wellness_context_client import (
     PlanLite,
@@ -267,6 +271,12 @@ class TestAccept:
         assert result is not None and result.meta["reply_kind"] == "plan_lite_card"
         assert result.reply_text.startswith("План уже есть — вот он.\nТвоя цель")
 
+    def test_already_active_without_a_document_does_not_promise_a_card(self) -> None:
+        fake = _fake(ctx=NO_PLAN, created=PlanLiteAlreadyActiveError("409"))
+        result = _turn("cb:plan:accept:3", fake)
+        assert result.reply_text == PLAN_LITE_COPY.already_active_no_card
+        assert _labels(result) == ["Изменить план"]
+
     def test_goal_gone_at_accept_asks_for_the_goal(self) -> None:
         result = _turn("cb:plan:accept:3", _fake(proposal=PlanLiteGoalNotFoundError("no")))
         assert result.reply_text == PLAN_LITE_COPY.no_goal
@@ -326,6 +336,29 @@ class TestLater:
         again = _turn("мой план", _fake(), conversation=conversation)
         assert again.meta["reply_kind"] == "plan_lite_proposal"  # явный запрос — показываем
 
+    def test_later_persists_the_marker_on_a_real_conversation_outside_a_tenant_scope(self) -> None:
+        """Глобальный путь идёт при current_tenant()=None; write_skill_state требует
+        область — маркер обязан долететь до строки, не до DEBUG-лога."""
+        from apps.conversations.models import Conversation
+        from apps.identity.models import BotUser
+        from apps.identity.services.global_tenant import get_global_bot_tenant
+        from apps.tenancy.context import current_tenant
+
+        tenant = get_global_bot_tenant()
+        bot_user = BotUser.all_tenants.create(
+            tenant=tenant, channel="max", channel_user_id="2125-l", chat_id="2125-l"
+        )
+        conversation = Conversation.all_tenants.create(
+            tenant=tenant, bot_user=bot_user, skill_state={"plan_lite": {"other": 1}}
+        )
+        assert current_tenant() is None
+        _turn("cb:plan:later", _fake(), conversation=conversation)
+        conversation.refresh_from_db()
+        bucket = conversation.skill_state["plan_lite"]
+        assert bucket["plan_proposal_declined_at"]
+        assert bucket["other"] == 1  # read-merge-write: соседние ключи ведра целы
+        assert card.declined_at(conversation) is not None
+
     def test_declined_at_reads_none_without_a_marker(self) -> None:
         assert card.declined_at(SimpleNamespace(skill_state={})) is None
         assert card.declined_at(SimpleNamespace(skill_state={"plan_lite": {"x": 1}})) is None
@@ -335,22 +368,67 @@ class TestLater:
 
 
 class TestBook:
-    def test_book_runs_show_services_by_the_goal_label(self) -> None:
-        reply = SimpleNamespace(text="Вот услуги под «Расслабиться»", action_data={"buttons": []})
-        with patch("apps.orchestrator.discovery.execute_catalog_tool", return_value=reply) as tool:
-            result = _turn("cb:plan:book", _fake(ctx=WITH_PLAN))
-        assert tool.call_args.args[0] == "show_services"
-        assert tool.call_args.args[1] == {"query": "Расслабиться"}
-        assert result.reply_text == reply.text and result.meta["reply_kind"] == "plan_lite_book"
+    def test_book_selects_services_by_the_goal_key_not_by_the_label(self) -> None:
+        from apps.marketplace.dto import ServiceCard
 
-    def test_book_without_a_live_service_points_to_the_catalog(self, monkeypatch) -> None:
-        monkeypatch.setattr("apps.marketplace.discovery._known_goals", lambda: {})
-        with patch("apps.orchestrator.discovery.execute_catalog_tool") as tool:
+        card_row = ServiceCard(
+            tenant_id=uuid.uuid4(),
+            service_id=uuid.uuid4(),
+            name="Релакс-массаж",
+            price_from=Decimal("3000"),
+            duration_min=60,
+            salon_name="Формула тела",
+            city="Пенза",
+            has_bookable_master=True,
+        )
+        with patch(
+            "apps.marketplace.discovery.discover_services", return_value=[card_row]
+        ) as discover:
             result = _turn("cb:plan:book", _fake(ctx=WITH_PLAN))
-        assert tool.call_count == 0
+        assert discover.call_args.kwargs["goal_key"] == "relax"  # ключ, не разбор метки
+        assert "query" not in discover.call_args.kwargs
+        assert result.meta["reply_kind"] == "plan_lite_book"
+        assert "Релакс-массаж" in result.reply_text
+        assert result.action_data is not None  # карточки с тапами записи — как у show_services
+
+    def test_book_without_a_live_service_points_to_the_catalog(self) -> None:
+        with patch("apps.marketplace.discovery.discover_services", return_value=[]):
+            result = _turn("cb:plan:book", _fake(ctx=WITH_PLAN))
         assert result.reply_text == PLAN_LITE_COPY.no_services_for_goal
+        assert result.meta["reply_kind"] == "plan_lite_book_none"
         (catalog,) = _buttons(result)
         assert catalog["callback"] == "open_catalog"
+
+    @pytest.mark.skipif(
+        "postgresql" not in str(dj_settings.DATABASES["default"]["ENGINE"]),
+        reason="jsonb containment по ключу цели требует Postgres (как test_discovery_goal_selection).",
+    )
+    def test_discover_services_by_goal_key_hits_the_curated_key_directly(self) -> None:
+        """Живой запрос: услуга несёт ключ relax → найдена по ключу; чужой ключ — пусто."""
+        from apps.catalog.models import CatalogMaster, CatalogService, MasterService
+        from apps.marketplace.discovery import discover_services
+        from apps.tenancy.models import Tenant
+
+        tenant = Tenant.objects.create(slug="plan-2125", name="Формула тела", city="Пенза")
+        service = CatalogService.all_tenants.create(
+            tenant=tenant,
+            slug="relax-massage",
+            name="Релакс-массаж",
+            is_active=True,
+            goals=[{"key": "relax", "label": "Расслабиться"}],
+            external_updated_at=timezone.now(),
+        )
+        master = CatalogMaster.all_tenants.create(
+            tenant=tenant,
+            external_updated_at=timezone.now(),
+            name="Анна",
+            is_active=True,
+            invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+            ayla_user_id=uuid.uuid4(),
+        )
+        MasterService.all_tenants.create(tenant=tenant, master=master, service=service)
+        assert [c.name for c in discover_services(goal_key="relax")] == ["Релакс-массаж"]
+        assert discover_services(goal_key="body_shape") == []
 
     def test_book_without_a_plan_falls_back_to_the_proposal(self) -> None:
         result = _turn("cb:plan:book", _fake())

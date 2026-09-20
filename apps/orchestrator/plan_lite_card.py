@@ -125,6 +125,7 @@ class _Copy:
     proposal_tail: str = "Подтвердить план можно кнопкой ниже — или изменить его в приложении."
     accepted: str = "План составлен."
     already_active: str = "План уже есть — вот он."
+    already_active_no_card: str = "План уже есть — посмотри его в приложении."
     proposal_changed: str = "Предложение обновилось — посмотри свежее:"
     later: str = "Хорошо, вернёмся к плану, когда скажешь. Напиши «мой план» — покажу снова."
     stale: str = "Эта кнопка уже не действует — напиши «мой план», покажу свежее."
@@ -328,24 +329,39 @@ def plan_buttons() -> dict[str, Any] | None:
 
 
 def _mark_declined(conversation: Any) -> None:
-    """Маркер для A4 (DRF-2126): в этот день предложение не дёргать."""
-    value = {DECLINED_AT: datetime.now(UTC).isoformat()}
+    """Маркер для A4 (DRF-2126): в этот день предложение не дёргать.
+
+    Read-merge-write внутри ведра ``plan_lite`` — соседние ключи (их добавит
+    A4) не затираются. Глобальный путь идёт при ``current_tenant()=None`` по
+    замыслу, а ``write_skill_state`` требует область — она входится на время
+    одной записи и берётся у самого разговора (тот же приём, что
+    ``open_question._write``; ветка «внутри навыка» её уже держит).
+    """
+    raw = getattr(conversation, "skill_state", None)
+    bucket = dict(raw.get(STATE_KEY) or {}) if isinstance(raw, dict) else {}
+    bucket[DECLINED_AT] = datetime.now(UTC).isoformat()
     try:
         from apps.conversations.models import Conversation
 
         if isinstance(conversation, Conversation):
             from apps.conversations.services import write_skill_state
+            from apps.tenancy.context import current_tenant, tenant_scope
 
-            write_skill_state(conversation, STATE_KEY, value)
+            if current_tenant() is not None:
+                write_skill_state(conversation, STATE_KEY, bucket)
+            else:
+                with tenant_scope(conversation.tenant):
+                    write_skill_state(conversation, STATE_KEY, bucket)
             return
-    except Exception:  # noqa: BLE001 — потеря маркера стоит одного лишнего напоминания
-        logger.debug(
-            "plan_lite.state_write_skipped conversation=%s", getattr(conversation, "id", None)
+    except Exception:  # noqa: BLE001 — потеря маркера стоит одного лишнего напоминания A4
+        logger.warning(
+            "plan_lite.state_write_failed conversation=%s",
+            getattr(conversation, "id", None),
+            exc_info=True,
         )
         return
-    raw = getattr(conversation, "skill_state", None)
     if isinstance(raw, dict):
-        raw[STATE_KEY] = value
+        raw[STATE_KEY] = bucket
 
 
 def declined_at(conversation: Any) -> datetime | None:
@@ -510,7 +526,13 @@ def _accept(
         except WellnessContextError as exc:
             return _unavailable(bot_user, exc, step="accept_existing", trace_id=trace_id)
         if ctx.plan_lite is None:
-            return _result(PLAN_LITE_COPY.already_active, "plan_lite_already_active")
+            # Каталог сказал «план есть», документ его не отдал (гейт /
+            # запаздывание): карточку не обещаем — дверь в приложение.
+            return _result(
+                PLAN_LITE_COPY.already_active_no_card,
+                "plan_lite_already_active",
+                buttons=_buttons(_app_button(PLAN_LITE_COPY.button_edit_plan, OPEN_PLAN_SLUG)),
+            )
         return _plan_result(ctx.plan_lite, prefix=PLAN_LITE_COPY.already_active)
     except PlanLiteGoalNotFoundError:
         return _no_goal_result()
@@ -534,9 +556,18 @@ def _book(
     trace_id: str,
     conversation: Any,
 ) -> SkillResult:
-    """«Записаться»: услуги по курируемому ключу цели плана — не рекомендательный движок."""
-    from apps.marketplace.discovery import _known_goals
-    from apps.orchestrator.discovery import SHOW_SERVICES_TOOL_SPEC, execute_catalog_tool
+    """«Записаться»: услуги по курируемому ключу цели плана — не рекомендательный движок.
+
+    Выбор — ``discover_services(goal_key=…)`` по ключу напрямую (не через
+    разбор метки как текста), рендер — тот же, что у инструмента
+    ``show_services`` консьержа; пусто — названо, а не «ничего не нашла».
+    """
+    from apps.marketplace.discovery import _known_goals, discover_services
+    from apps.orchestrator.discovery import (
+        MAX_SERVICE_CARDS,
+        render_service_cards,
+        rotation_seed,
+    )
 
     try:
         ctx = client.get_wellness_context(external_user_id=external_id)
@@ -546,13 +577,11 @@ def _book(
         return _proposal_or_refusal(
             client, external_id=external_id, bot_user=bot_user, trace_id=trace_id
         )
-    label = _known_goals().get(ctx.plan_lite.goal_key)
-    reply = None
-    if label:
-        reply = execute_catalog_tool(
-            SHOW_SERVICES_TOOL_SPEC["name"], {"query": label}, conversation=conversation
-        )
-    if reply is None or not (reply.text or "").strip():
+    goal_key = ctx.plan_lite.goal_key
+    services = discover_services(
+        goal_key=goal_key, limit=MAX_SERVICE_CARDS + 1, rotation_seed=rotation_seed(conversation)
+    )
+    if not services:
         logger.info(
             "orchestrator.plan_lite.book_no_services bot_user=%s trace=%s",
             getattr(bot_user, "pk", None),
@@ -563,8 +592,14 @@ def _book(
             "plan_lite_book_none",
             buttons=_buttons(_app_button(PLAN_LITE_COPY.button_catalog, OPEN_CATALOG_SLUG)),
         )
+    reply = render_service_cards(
+        services, shown=MAX_SERVICE_CARDS, query=_known_goals().get(goal_key) or goal_key
+    )
     logger.info(
-        "orchestrator.plan_lite.book bot_user=%s trace=%s", getattr(bot_user, "pk", None), trace_id
+        "orchestrator.plan_lite.book bot_user=%s services=%d trace=%s",
+        getattr(bot_user, "pk", None),
+        len(services),
+        trace_id,
     )
     return SkillResult(
         reply_text=reply.text,

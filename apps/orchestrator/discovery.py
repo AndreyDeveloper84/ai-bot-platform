@@ -1478,6 +1478,24 @@ def render_no_services(
     return _reply_with_chips(text[:_MAX_REPLY_CHARS], buttons)
 
 
+def render_service_cards(
+    services: list[ServiceCard],
+    *,
+    shown: int,
+    salon: str | None = None,
+    city: str | None = None,
+    query: str | None = None,
+) -> DiscoveryReply:
+    """Public name of :func:`_render_service_cards` (DRF-2125): the plan card
+    renders services it selected by goal key with the same renderer the
+    ``show_services`` tool uses, so the two surfaces cannot drift."""
+    return _render_service_cards(services, shown=shown, salon=salon, city=city, query=query)
+
+
+#: Public name of the service-card page size (DRF-2125).
+MAX_SERVICE_CARDS = _MAX_SERVICE_CARDS
+
+
 def _render_service_cards(
     services: list[ServiceCard],
     *,
