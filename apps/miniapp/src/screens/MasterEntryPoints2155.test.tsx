@@ -160,7 +160,9 @@ describe("«Сегодня»: «Добавить запись» на пусто�
 describe("«Расписание»: свободное окно ведёт в запись, «недоступно» — вторично", () => {
   it("главный тап по окну → форма с ?date&from&to", async () => {
     renderAt("/master/schedule");
-    (await screen.findByRole("button", { name: /14:00 · свободно/ })).click();
+    (
+      await screen.findByRole("button", { name: "Записать на 14:00–17:00" })
+    ).click();
     const where = parsedWhere(
       (await screen.findByTestId("where")).textContent ?? "",
     );
@@ -172,7 +174,9 @@ describe("«Расписание»: свободное окно ведёт в з
 
   it("на /solo/schedule — /solo/booking/new", async () => {
     renderAt("/solo/schedule");
-    (await screen.findByRole("button", { name: /14:00 · свободно/ })).click();
+    (
+      await screen.findByRole("button", { name: "Записать на 14:00–17:00" })
+    ).click();
     const where = parsedWhere(
       (await screen.findByTestId("where")).textContent ?? "",
     );
@@ -184,8 +188,11 @@ describe("«Расписание»: свободное окно ведёт в з
 
   it("«Недоступно» — отдельная кнопка окна, открывает прежний лист заявки", async () => {
     renderAt("/master/schedule");
-    await screen.findByRole("button", { name: /14:00 · свободно/ });
-    screen.getByRole("button", { name: "Недоступно" }).click();
+    await screen.findByRole("button", { name: "Записать на 14:00–17:00" });
+    // Имена для AT различают окна: «Записать на 14:00–17:00» / «Недоступно: 14:00–17:00»;
+    // видимый текст окна на месте.
+    expect(screen.getByText(/14:00 · свободно/)).toBeInTheDocument();
+    screen.getByRole("button", { name: "Недоступно: 14:00–17:00" }).click();
     await waitFor(() =>
       expect(
         screen.getByLabelText("Помечу как недоступно"),

@@ -34,6 +34,7 @@ vi.mock("../lib/master-api", async (importOriginal) => {
 });
 
 import { SYSTEM_STATE_COPY } from "../components/master/SystemState";
+import { ApiError } from "../lib/api";
 import {
   createMasterBooking,
   getMasterBookingSlots,
@@ -239,6 +240,107 @@ describe("выбор клиента — без телефона (DRF-1039, вл�
     // …и нигде не вернулся: ни в строке, ни в проверке, ни после создания.
     expect(document.body.textContent).not.toContain(CUSTOMER_PHONE);
     expect(document.body.textContent).not.toContain("5544");
+  });
+});
+
+describe("границы после ревью (DRF-2155)", () => {
+  it("phone_masked в строке поиска не проходит в черновик мастера", async () => {
+    mockedSearch.mockResolvedValue([
+      {
+        id: "c-9",
+        name: "Анна П.",
+        named: true,
+        last_visit_date: null,
+        // Ayla такого не шлёт; если пришлёт — на экран не попадёт.
+        ...({ phone_masked: "+• ••67" } as object),
+      },
+    ]);
+    renderAt("/master/booking/new?date=2026-10-21");
+    await fillWholeDraft();
+    expect(screen.getByLabelText(/^Клиент/).textContent).not.toContain("67");
+    expect(document.body.textContent).not.toContain("••67");
+  });
+
+  it("телефон в поиске → «Ищите по имени», не «не удалось выполнить поиск»", async () => {
+    mockedSearch.mockRejectedValue(
+      new ApiError(400, "phone_search_closed", "search by name"),
+    );
+    renderAt();
+    screen.getByLabelText(/Клиент/).click();
+    fireEvent.change(await screen.findByLabelText("Поиск клиента"), {
+      target: { value: "+79997775544" },
+    });
+    expect(await screen.findByText("Ищите по имени.")).toBeInTheDocument();
+    expect(screen.queryByText(/Не удалось выполнить поиск/)).toBeNull();
+  });
+
+  it("выбор времени из листа после «занято» снимает конфликт", async () => {
+    mockedCreate.mockResolvedValue({
+      outcome: "conflict",
+      detail: "занято",
+      reason_code: "slot_taken",
+      alternatives: null,
+      alternatives_unavailable: true,
+    });
+    renderAt("/master/booking/new?date=2026-10-21");
+    await fillWholeDraft();
+    screen.getByRole("button", { name: "Создать запись" }).click();
+    (
+      await screen.findByRole("button", {
+        name: SYSTEM_STATE_COPY.conflict.cta,
+      })
+    ).click();
+    (await screen.findByRole("button", { name: "16:00" })).click();
+    await waitFor(() =>
+      expect(screen.getByLabelText(/^Дата и время/).textContent).toMatch(
+        /16:00/,
+      ),
+    );
+    expect(screen.queryByText(SYSTEM_STATE_COPY.conflict.title)).toBeNull();
+  });
+
+  it("при «Проверяем результат» главная кнопка заблокирована — только «Проверить снова»", async () => {
+    mockedCreate.mockResolvedValue({
+      outcome: "pending",
+      detail: "…",
+      reason_code: "result_pending",
+      idempotency_key: "k-1",
+    });
+    renderAt("/master/booking/new?date=2026-10-21");
+    await fillWholeDraft();
+    screen.getByRole("button", { name: "Создать запись" }).click();
+    await screen.findByText(SYSTEM_STATE_COPY.pending.title);
+    expect(
+      screen.getByRole("button", { name: "Создать запись" }),
+    ).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: SYSTEM_STATE_COPY.pending.recheck }),
+    ).toBeEnabled();
+  });
+
+  it("«Выбранное окно» держит день окна, даже если лист времени листали на завтра", async () => {
+    renderAt("/master/booking/new?date=2026-10-21&from=14:00&to=17:00");
+    await screen.findByText("Выбранное окно");
+    const before = screen.getByText(/14:00–17:00/).textContent;
+    await chooseService();
+    screen.getByLabelText(/Дата и время/).click();
+    (await screen.findByRole("button", { name: "Следующий день" })).click();
+    await waitFor(() => expect(mockedSlots).toHaveBeenCalledTimes(2));
+    expect(mockedSlots.mock.calls[1]?.[0]).toMatchObject({
+      date: "2026-10-22",
+    });
+    expect(screen.getByText(/14:00–17:00/).textContent).toBe(before);
+  });
+
+  it("prefill из адреса (client_id, service_id) на мастерской поверхности не действует", async () => {
+    renderAt(
+      "/master/booking/new?service_id=s-1&client_id=c-x&client_name=%D0%90",
+    );
+    await waitFor(() => expect(mockedCatalog).toHaveBeenCalled());
+    expect(
+      await screen.findByLabelText(/^Клиент: выбрать/),
+    ).toBeInTheDocument();
+    expect(screen.getByLabelText(/^Услуга: выбрать/)).toBeInTheDocument();
   });
 });
 

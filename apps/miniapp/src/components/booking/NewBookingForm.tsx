@@ -246,7 +246,10 @@ export function NewBookingForm({
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const isMaster = subject.kind === "master";
-  const rules: DraftRules = { requiresMaster: !isMaster };
+  const rules = useMemo<DraftRules>(
+    () => ({ requiresMaster: !isMaster }),
+    [isMaster],
+  );
 
   const [draft, setDraft] = useState<BookingDraft>(EMPTY_DRAFT);
   const [sheet, setSheet] = useState<Sheet>(null);
@@ -274,7 +277,7 @@ export function NewBookingForm({
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<FormCustomerRow[]>([]);
   const [searchState, setSearchState] = useState<
-    "idle" | "searching" | "done" | "unavailable" | "error"
+    "idle" | "searching" | "done" | "unavailable" | "error" | "phone_closed"
   >("idle");
 
   // Inline «Новый клиент» form (§14 — the minimum is name + phone).
@@ -339,6 +342,9 @@ export function NewBookingForm({
     if (prefilledRef.current) return;
     if (masters.length === 0 && services.length === 0) return;
     prefilledRef.current = true;
+    // У мастера предзаполнения нет (его зовут только «Сегодня» и «Расписание»
+    // с окном); client_id из адреса на этой поверхности не принимается.
+    if (isMaster) return;
 
     const masterId = searchParams.get("master_id") ?? "";
     const serviceId = searchParams.get("service_id") ?? "";
@@ -381,19 +387,24 @@ export function NewBookingForm({
         `Ayla предложила ${wishTime} — выберите время из доступных.`,
       );
     }
-  }, [masters, services, searchParams, dispatch]);
+  }, [masters, services, searchParams, dispatch, isMaster]);
 
   // Мастер: из «Расписания» тап по свободному окну приводит с
   // `?date&from&to` — «Выбранное окно: 14:00–17:00» (DRF-1183, состояние 4).
   // Подпись — диапазон, с которого начали, не длительность записи.
   const windowRef = useRef(false);
+  // День окна — из адреса, а не текущий день листа времени: листая ←/→,
+  // мастер не должен увидеть «23 сентября · 14:00–17:00» для окна 22-го.
+  const [windowDate, setWindowDate] = useState<string>("");
   useEffect(() => {
     if (!isMaster || windowRef.current) return;
     windowRef.current = true;
     const from = searchParams.get("from") ?? "";
     const to = searchParams.get("to") ?? "";
+    const day = searchParams.get("date") ?? "";
     if (/^\d{2}:\d{2}$/.test(from) && /^\d{2}:\d{2}$/.test(to)) {
       dispatch({ type: "window/set", window: { start_at: from, end_at: to } });
+      setWindowDate(day);
     }
   }, [isMaster, searchParams, dispatch]);
 
@@ -455,7 +466,11 @@ export function NewBookingForm({
           // The capability being absent and the request failing are both
           // «could not look», and neither is «not here» (§13).
           setSearchState(
-            e instanceof CustomerSearchUnavailable ? "unavailable" : "error",
+            e instanceof CustomerSearchUnavailable
+              ? "unavailable"
+              : e instanceof ApiError && e.slug === "phone_search_closed"
+                ? "phone_closed"
+                : "error",
           );
         }
       })();
@@ -469,7 +484,9 @@ export function NewBookingForm({
   const submit = useCallback(async () => {
     if (!canReview(draft, rules) || submitting) return;
     setSubmitting(true);
-    setOutcome(null);
+    // «Проверить снова» у мастера — тот же запрос под той же карточкой:
+    // не снимать «Проверяем результат» на время повтора.
+    if (!(isMaster && outcome === "pending")) setOutcome(null);
     setAlternatives(null);
     try {
       const res = await api.createBooking({
@@ -499,7 +516,7 @@ export function NewBookingForm({
     } finally {
       setSubmitting(false);
     }
-  }, [draft, submitting, dispatch, api, rules]);
+  }, [draft, submitting, dispatch, api, rules, isMaster, outcome]);
 
   const customerLabel = useMemo(() => {
     if (draft.customer === null) return null;
@@ -539,7 +556,7 @@ export function NewBookingForm({
               never the length of the appointment. */}
           <div style={{ color: "var(--c-text-secondary)" }}>Выбранное окно</div>
           <div style={{ fontWeight: 600 }}>
-            {formatDayTitle(date)} · {draft.window.start_at}–
+            {formatDayTitle(windowDate || date)} · {draft.window.start_at}–
             {draft.window.end_at}
           </div>
         </div>
@@ -623,8 +640,12 @@ export function NewBookingForm({
           type="button"
           className="cta-bar__button"
           style={{ width: "100%" }}
-          disabled={!commitable || submitting}
-          aria-disabled={!commitable || submitting}
+          disabled={
+            !commitable || submitting || (isMaster && outcome === "pending")
+          }
+          aria-disabled={
+            !commitable || submitting || (isMaster && outcome === "pending")
+          }
           onClick={() => void submit()}
         >
           {submitting ? "Создаю…" : "Создать запись"}
@@ -822,10 +843,18 @@ export function NewBookingForm({
             </div>
           )}
 
+          {searchState === "phone_closed" && (
+            // Мастер: поиск по номеру закрыт (DRF-1039) — сказать, как искать.
+            <div className="callout" role="status">
+              Ищите по имени.
+            </div>
+          )}
+
           {searchState === "done" && results.length === 0 && (
             <div className="callout" role="status">
-              Совпадений нет. Возможно, клиент записан под другим именем или
-              телефоном.
+              {isMaster
+                ? "Совпадений нет. Возможно, клиент записан под другим именем."
+                : "Совпадений нет. Возможно, клиент записан под другим именем или телефоном."}
             </div>
           )}
 
@@ -843,7 +872,8 @@ export function NewBookingForm({
                           kind: "existing",
                           id: c.id,
                           name: c.name,
-                          phone_masked: c.phone_masked,
+                          // Мастер: маски телефона в черновике не бывает по построению.
+                          phone_masked: isMaster ? undefined : c.phone_masked,
                         },
                       });
                       setSheet(null);
@@ -1076,6 +1106,11 @@ export function NewBookingForm({
                               type: "slot/set",
                               slot: { time: s.time, start_at: s.start_at },
                             });
+                            if (isMaster && outcome === "conflict") {
+                              // Новое время выбрано — «Это время занято» больше не про него.
+                              setOutcome(null);
+                              setAlternatives(null);
+                            }
                             setSheet(null);
                           }}
                         >

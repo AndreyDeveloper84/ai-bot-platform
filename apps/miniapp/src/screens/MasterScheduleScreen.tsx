@@ -830,7 +830,7 @@ function FreeWindowCard({
   onUnavailable: () => void;
 }) {
   // Главный тап — запись (макет); «Недоступно» — вторичное действие, не
-  // главный тап (DRF-2155, М-3).
+  // главный тап (DRF-2155, М-3). Две соседние кнопки, не кнопка в кнопке.
   return (
     <div
       className="m-card schedule-free"
@@ -840,8 +840,10 @@ function FreeWindowCard({
         type="button"
         className="m-card--tappable"
         onClick={onTap}
+        aria-label={`Записать на ${window.start}–${window.end}`}
         style={{
           flex: 1,
+          minHeight: 44,
           background: "none",
           border: "none",
           textAlign: "start",
@@ -855,7 +857,12 @@ function FreeWindowCard({
           {window.start} · {COPY.freeWindow(window.duration_min)}
         </div>
       </button>
-      <button type="button" className="btn-secondary" onClick={onUnavailable}>
+      <button
+        type="button"
+        className="btn-secondary"
+        onClick={onUnavailable}
+        aria-label={`${COPY.unavailable}: ${window.start}–${window.end}`}
+      >
         {COPY.unavailable}
       </button>
     </div>
