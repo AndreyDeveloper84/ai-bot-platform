@@ -56,7 +56,7 @@ describe("searchMasterCustomers", () => {
         last_visit_date: "2026-05-12",
       },
     ]);
-    const url = String(fetchMock.mock.calls[0][0]);
+    const url = String(fetchMock.mock.calls[0]?.[0]);
     expect(url).toMatch(
       /\/api\/v1\/master\/customers\?q=%D0%90%D0%BD%D0%BD%D0%B0$/,
     );
@@ -79,7 +79,7 @@ describe("getMasterBookingSlots", () => {
       date: "2026-10-21",
     });
     expect(res.timezone).toBe("Europe/Moscow");
-    const url = String(fetchMock.mock.calls[0][0]);
+    const url = String(fetchMock.mock.calls[0]?.[0]);
     expect(url).toContain("/api/v1/master/booking-slots?");
     expect(url).toContain("date=2026-10-21");
     expect(url).toContain("service_id=s-1");

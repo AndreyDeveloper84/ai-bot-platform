@@ -174,7 +174,7 @@ describe("один экран по макету DRF-1184", () => {
     screen.getByLabelText(/Дата и время/).click();
     await screen.findByRole("button", { name: "15:00" });
     expect(mockedSlots).toHaveBeenCalledTimes(1);
-    expect(mockedSlots.mock.calls[0][0]).toEqual({
+    expect(mockedSlots.mock.calls[0]?.[0]).toEqual({
       serviceId: "s-1",
       date: "2026-10-21",
     });
@@ -200,28 +200,31 @@ describe("выбор клиента — без телефона (DRF-1039, вл�
     fireEvent.change(input, { target: { value: "Анна" } });
     expect(await screen.findByText("Анна П. · была 12.05")).toBeInTheDocument();
     expect(screen.getByText("Анна С. · новый клиент")).toBeInTheDocument();
-    expect(mockedSearch.mock.calls[0][0]).toBe("Анна");
+    expect(mockedSearch.mock.calls[0]?.[0]).toBe("Анна");
   });
 
   it("«Новый клиент»: имя + телефон + пояснение; телефон не возвращается на экран", async () => {
     renderAt();
     screen.getByLabelText(/Клиент/).click();
-    (await screen.findByRole("button", { name: /Новый клиент/ })).click();
+    // «Новый клиент» — тот же блок, что у стойки: имя + телефон; у мастера — с
+    // пояснением макета.
+    expect(await screen.findByText("Новый клиент")).toBeInTheDocument();
     expect(
       screen.getByText(
         "Имя и телефон нужны для создания записи и связи по ней.",
       ),
     ).toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText("Имя"), {
+    fireEvent.change(screen.getByLabelText("Имя клиента"), {
       target: { value: "Мария" },
     });
-    fireEvent.change(screen.getByLabelText("Телефон"), {
+    fireEvent.change(screen.getByLabelText("Телефон клиента"), {
       target: { value: CUSTOMER_PHONE },
     });
-    screen.getByRole("button", { name: "Добавить" }).click();
+    screen.getByRole("button", { name: "Сохранить клиента" }).click();
 
-    // Присутствие: клиент выбран — его имя в строке.
-    expect(screen.getByLabelText(/^Клиент/).textContent).toMatch(/Мария/);
+    // Присутствие: клиент выбран — его имя в строке, телефона в ней нет.
+    const row = await screen.findByLabelText(/^Клиент: Мария/);
+    expect(row.textContent).not.toContain("5544");
     await chooseService();
     await chooseSlot();
     await screen.findByText(/Проверьте запись/);
@@ -229,7 +232,7 @@ describe("выбор клиента — без телефона (DRF-1039, вл�
     expect(await screen.findByText("Запись создана.")).toBeInTheDocument();
 
     // Телефон ушёл в каталог…
-    expect(mockedCreate.mock.calls[0][0]).toMatchObject({
+    expect(mockedCreate.mock.calls[0]?.[0]).toMatchObject({
       client_name: "Мария",
       client_phone: CUSTOMER_PHONE,
     });
@@ -247,7 +250,9 @@ describe("«Выбранное окно» из расписания (DRF-1183 с
     await chooseService();
     screen.getByLabelText(/Дата и время/).click();
     await screen.findByRole("button", { name: "15:00" });
-    expect(mockedSlots.mock.calls[0][0]).toMatchObject({ date: "2026-10-21" });
+    expect(mockedSlots.mock.calls[0]?.[0]).toMatchObject({
+      date: "2026-10-21",
+    });
   });
 
   it("сторож: «Исходный интервал» на мастерском экране не звучит", () => {
@@ -293,7 +298,11 @@ describe("исходы — словами SystemState (М-6)", () => {
     expect(screen.getByLabelText(/^Услуга/).textContent).toMatch(/Маникюр/);
     // Варианты — кнопки; выбор варианта ставит слот и убирает конфликт.
     screen.getByRole("button", { name: "17:00" }).click();
-    expect(screen.getByLabelText(/^Дата и время/).textContent).toMatch(/17:00/);
+    await waitFor(() =>
+      expect(screen.getByLabelText(/^Дата и время/).textContent).toMatch(
+        /17:00/,
+      ),
+    );
     expect(screen.queryByText(SYSTEM_STATE_COPY.conflict.title)).toBeNull();
   });
 
@@ -349,8 +358,8 @@ describe("исходы — словами SystemState (М-6)", () => {
       .click();
     await screen.findByText("Запись создана.");
     expect(mockedCreate).toHaveBeenCalledTimes(2);
-    expect(mockedCreate.mock.calls[1][0].idempotency_key).toBe(
-      mockedCreate.mock.calls[0][0].idempotency_key,
+    expect(mockedCreate.mock.calls[1]?.[0].idempotency_key).toBe(
+      mockedCreate.mock.calls[0]?.[0].idempotency_key,
     );
   });
 

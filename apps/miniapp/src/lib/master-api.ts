@@ -25,7 +25,10 @@ interface ErrorBody {
   detail: string;
 }
 
-export async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+export async function request<T>(
+  path: string,
+  init: RequestInit = {},
+): Promise<T> {
   const initData = getInitData();
   const headers = new Headers(init.headers);
   if (initData) headers.set("Authorization", `MaxInitData ${initData}`);
@@ -256,7 +259,8 @@ export const getDashboard = (): Promise<DashboardResponse> =>
 // ничего не переводит по часам устройства. На экран не выходят: телефон,
 // оплата, история, заметки (их в контракте и нет — DRF-1039).
 
-export type BookingTemporalState = "upcoming" | "now" | "after" | "completed" | "unknown";
+export type BookingTemporalState =
+  "upcoming" | "now" | "after" | "completed" | "unknown";
 
 /** Сырой статус зеркала Ayla. Экран смотрит только на cancelled/no_show. */
 export type MasterBookingStatus =
@@ -294,7 +298,10 @@ export const getMasterBooking = (
   id: string,
   opts: { signal?: AbortSignal } = {},
 ): Promise<MasterBookingDetail> =>
-  request(`/bookings/${encodeURIComponent(id)}`, { method: "GET", signal: opts.signal });
+  request(`/bookings/${encodeURIComponent(id)}`, {
+    method: "GET",
+    signal: opts.signal,
+  });
 
 // --- M4 master profile (read-by-self + edit own bio/photo) --------------
 // Mirrors apps/master_api/views.py::me() + onboarding_profile() (PATCH).
@@ -402,7 +409,10 @@ export const getWorkingHours = (): Promise<WorkingHoursResponse> =>
 export const putWorkingHours = (
   schedule: WorkingHoursDay[],
 ): Promise<WorkingHoursResponse> =>
-  request("/working-hours", { method: "PUT", body: JSON.stringify({ schedule }) });
+  request("/working-hours", {
+    method: "PUT",
+    body: JSON.stringify({ schedule }),
+  });
 
 // --- M19 место работы (DRF-1811) -----------------------------------------------
 // Mirrors apps/master_api/views.py::service_locations / service_location_detail /
@@ -444,7 +454,12 @@ export interface ServiceLocationsState {
 }
 
 export type ServiceLocationCreate =
-  | { kind: PlaceKind; address: string; label?: string; note_for_client?: string }
+  | {
+      kind: PlaceKind;
+      address: string;
+      label?: string;
+      note_for_client?: string;
+    }
   | { kind: "mobile"; coverage: AreaCoverage };
 
 export const getServiceLocations = (): Promise<ServiceLocationsState> =>
@@ -457,7 +472,13 @@ export const createServiceLocation = (
 
 export const patchServiceLocation = (
   itemId: string,
-  body: Partial<{ kind: PlaceKind; address: string; label: string; note_for_client: string; coverage: AreaCoverage }>,
+  body: Partial<{
+    kind: PlaceKind;
+    address: string;
+    label: string;
+    note_for_client: string;
+    coverage: AreaCoverage;
+  }>,
 ): Promise<ServiceLocationsState> =>
   request(`/service-locations/${encodeURIComponent(itemId)}`, {
     method: "PATCH",
@@ -482,14 +503,18 @@ export interface AddressSuggestResponse {
  * `available: false`; экран читает их как «подсказок нет», не как ошибку.
  */
 export const suggestAddress = (q: string): Promise<AddressSuggestResponse> =>
-  request("/geocoding/suggest", { method: "POST", body: JSON.stringify({ q }) });
+  request("/geocoding/suggest", {
+    method: "POST",
+    body: JSON.stringify({ q }),
+  });
 
 // --- M18a «Свои услуги» — заявки о разрыве канона (DRF-1896 / DRF-1802) ---------
 // Mirrors apps/master_api/views.py::canon_gap_requests / canon_gap_similar /
 // canon_gap_request_detail — a proxy to the catalog (DRF-1801). The answer is
 // the catalog's, never an echo; the owner decides, the screen only shows.
 
-export type CanonGapStatus = "pending" | "approved" | "needs_clarification" | "rejected";
+export type CanonGapStatus =
+  "pending" | "approved" | "needs_clarification" | "rejected";
 
 export interface CanonGapRequest {
   id: string;
@@ -521,18 +546,24 @@ export interface CanonGapRequestCreate {
   price: string;
 }
 
-export const listCanonGapRequests = (): Promise<{ requests: CanonGapRequest[] }> =>
-  request("/canon-gap-requests", { method: "GET" });
+export const listCanonGapRequests = (): Promise<{
+  requests: CanonGapRequest[];
+}> => request("/canon-gap-requests", { method: "GET" });
 
 export const createCanonGapRequest = (
   body: CanonGapRequestCreate,
 ): Promise<{ request: CanonGapRequest; similar: CanonGapSimilar[] }> =>
-  request("/canon-gap-requests", { method: "POST", body: JSON.stringify(body) });
+  request("/canon-gap-requests", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
 
 export const getSimilarCanonTemplates = (
   name: string,
 ): Promise<{ similar: CanonGapSimilar[] }> =>
-  request(`/canon-gap-requests/similar?name=${encodeURIComponent(name)}`, { method: "GET" });
+  request(`/canon-gap-requests/similar?name=${encodeURIComponent(name)}`, {
+    method: "GET",
+  });
 
 // --- DRF-1895 (M10b) выбор канонических услуг и цена мастера ------------------
 // Mirrors apps/master_api/views.py::service_selection / service_offer /
@@ -585,7 +616,10 @@ export const putServiceOffer = (
   salonServiceId: string,
   body: { price: string; duration_minutes: number },
 ): Promise<ServiceSelectionState & { offer_id: string }> =>
-  request(`/services/${salonServiceId}/offer`, { method: "PUT", body: JSON.stringify(body) });
+  request(`/services/${salonServiceId}/offer`, {
+    method: "PUT",
+    body: JSON.stringify(body),
+  });
 
 export const removeService = (
   salonServiceId: string,
@@ -614,13 +648,17 @@ export interface ServiceTemplate {
   category_name: string | null;
 }
 
-export const getServiceDirections = (): Promise<{ directions: ServiceDirection[] }> =>
-  request("/services/directions", { method: "GET" });
+export const getServiceDirections = (): Promise<{
+  directions: ServiceDirection[];
+}> => request("/services/directions", { method: "GET" });
 
 export const getServiceTemplates = (
   directionId: string,
 ): Promise<{ direction_id: string; templates: ServiceTemplate[] }> =>
-  request(`/services/templates?direction_id=${encodeURIComponent(directionId)}`, { method: "GET" });
+  request(
+    `/services/templates?direction_id=${encodeURIComponent(directionId)}`,
+    { method: "GET" },
+  );
 
 // --- M5/M26 publication (DRF-1797 / DRF-1818) ------------------------------
 // Mirrors apps/master_api/views.py::publication_status / publication_publish —
@@ -668,7 +706,10 @@ export const getPublicationStatus = (): Promise<PublicationStatus> =>
   request("/publication/status", { method: "GET" });
 
 /** `commandId` — ключ одной попытки: повтор с тем же ключом каталог не выполнит второй раз. */
-export const publishProfile = (commandId: string, signal?: AbortSignal): Promise<PublishResponse> =>
+export const publishProfile = (
+  commandId: string,
+  signal?: AbortSignal,
+): Promise<PublishResponse> =>
   request("/publication", {
     method: "POST",
     body: JSON.stringify({ command_id: commandId }),
@@ -684,9 +725,14 @@ export const drawnReadinessItems = (items: ReadinessItem[]): ReadinessItem[] =>
  * показывается словами: ни процентов, ни «N из M» (макет: «no fake percent
  * complete»; доктрина 12.09 — счётчик как обещание времени).
  */
-export const readinessFill = (items: ReadinessItem[]): { done: number; total: number } => {
+export const readinessFill = (
+  items: ReadinessItem[],
+): { done: number; total: number } => {
   const drawn = drawnReadinessItems(items);
-  return { done: drawn.filter((item) => item.state === "done").length, total: drawn.length };
+  return {
+    done: drawn.filter((item) => item.state === "done").length,
+    total: drawn.length,
+  };
 };
 
 /**
@@ -798,11 +844,17 @@ export const getMasterProfileCard = (): Promise<MasterProfileCard> =>
 export const getPortfolio = (): Promise<PortfolioList> =>
   request("/profile/portfolio", { method: "GET" });
 
-export const deletePortfolioItem = (itemId: string): Promise<{ count: number; limit: number }> =>
-  request(`/profile/portfolio/${encodeURIComponent(itemId)}`, { method: "DELETE" });
+export const deletePortfolioItem = (
+  itemId: string,
+): Promise<{ count: number; limit: number }> =>
+  request(`/profile/portfolio/${encodeURIComponent(itemId)}`, {
+    method: "DELETE",
+  });
 
 /** Загрузка работы — multipart `image`; тот же обход `request()`, что у фото профиля. */
-export const uploadPortfolioPhoto = async (file: File): Promise<PortfolioItem> => {
+export const uploadPortfolioPhoto = async (
+  file: File,
+): Promise<PortfolioItem> => {
   const fd = new FormData();
   fd.set("image", file);
   const initData = getInitData();
@@ -840,9 +892,7 @@ export interface ScheduleFreeWindow {
 }
 
 export type ScheduleConflictType =
-  | "double_booking"
-  | "outside_hours"
-  | "overlapping_exception";
+  "double_booking" | "outside_hours" | "overlapping_exception";
 
 export interface ScheduleConflict {
   type: ScheduleConflictType | string;
@@ -887,10 +937,7 @@ export interface MasterScheduleResponse {
 }
 
 export type AvailabilityReasonClass =
-  | "vacation"
-  | "sick"
-  | "personal"
-  | "other";
+  "vacation" | "sick" | "personal" | "other";
 
 export interface AvailabilityRequestBody {
   start: string; // ISO datetime
@@ -950,11 +997,7 @@ export const getPendingAvailability =
 // Mirrors apps/master_api/services/conversations.py::ConversationsListResponse.
 
 export type ConversationSection =
-  | "awaiting_master"
-  | "ai_drafted"
-  | "ai_handling"
-  | "resolved"
-  | "other";
+  "awaiting_master" | "ai_drafted" | "ai_handling" | "resolved" | "other";
 
 export type ConversationFilter = "active" | "all" | "resolved";
 
@@ -1035,9 +1078,7 @@ export const FORBIDDEN_PII_KEYS = [
   "client_full_name",
 ] as const;
 
-export function findForbiddenPiiKeys(
-  item: Record<string, unknown>,
-): string[] {
+export function findForbiddenPiiKeys(item: Record<string, unknown>): string[] {
   return FORBIDDEN_PII_KEYS.filter((k) => k in item);
 }
 
@@ -1047,16 +1088,11 @@ export function findForbiddenPiiKeys(
 // Spec: docs/design/handoffs/2026-05-18-master-mobile-handoff.md §M6.
 
 export type ConversationTier =
-  | "ai_continuity"
-  | "human_supervised"
-  | "human_locked";
+  "ai_continuity" | "human_supervised" | "human_locked";
 
 /** «Передать админу» reason classes — mirrors backend `VALID_REASON_CLASSES`. */
 export type PromoteReasonClass =
-  | "complaint"
-  | "financial"
-  | "medical"
-  | "other";
+  "complaint" | "financial" | "medical" | "other";
 
 export interface ConversationMessage {
   message_id: string;
@@ -1249,10 +1285,13 @@ export const sendDraftAsMaster = (
 ): Promise<DraftMessageResponse> => {
   const body: Record<string, string> = {};
   if (overrideContent !== undefined) body.override_content = overrideContent;
-  return request(`/conversations/${conversationId}/drafts/${draftId}/send-as-me`, {
-    method: "POST",
-    body: JSON.stringify(body),
-  });
+  return request(
+    `/conversations/${conversationId}/drafts/${draftId}/send-as-me`,
+    {
+      method: "POST",
+      body: JSON.stringify(body),
+    },
+  );
 };
 
 /**
@@ -1309,9 +1348,7 @@ export interface MasterNotificationPrefs {
  * Surfaced via ApiError.slug — callers do not parse the body themselves.
  */
 export type NotificationPrefsErrorSlug =
-  | "urgent_forced_on"
-  | "time_invalid"
-  | "bad_request";
+  "urgent_forced_on" | "time_invalid" | "bad_request";
 
 /** Partial-update shape — all fields optional, urgent intentionally NOT settable. */
 export type NotificationPrefsPatch = Partial<
@@ -1327,10 +1364,13 @@ interface PrefsEnvelope {
  * with §M7 defaults (transparent — the UI does not show a «first load»
  * banner). Subsequent calls are read-only.
  */
-export const getNotificationPrefs = async (): Promise<MasterNotificationPrefs> => {
-  const env = await request<PrefsEnvelope>("/notification-prefs/", { method: "GET" });
-  return env.prefs;
-};
+export const getNotificationPrefs =
+  async (): Promise<MasterNotificationPrefs> => {
+    const env = await request<PrefsEnvelope>("/notification-prefs/", {
+      method: "GET",
+    });
+    return env.prefs;
+  };
 
 /**
  * PATCH a subset of fields. On 400 the request() helper throws ApiError —
@@ -1447,11 +1487,7 @@ export const getMasterCatalog = async (): Promise<MasterServiceItem[]> => {
 // 502 billing_upstream_unavailable.
 
 export type SubscriptionStatus =
-  | "trial"
-  | "active"
-  | "past_due"
-  | "canceled"
-  | "none";
+  "trial" | "active" | "past_due" | "canceled" | "none";
 
 export interface BillingStatusNextCharge {
   subscription_amount: string;
@@ -1586,7 +1622,9 @@ export interface AylaConfirmResponse {
 }
 
 /** Что уже сказано в диалоге, старое первым. */
-export const getAylaHistory = (limit?: number): Promise<{ messages: AylaMessage[] }> =>
+export const getAylaHistory = (
+  limit?: number,
+): Promise<{ messages: AylaMessage[] }> =>
   request(`/assistant/history${limit ? `?limit=${limit}` : ""}`, {
     method: "GET",
   });
@@ -1599,7 +1637,9 @@ export const askAyla = (text: string): Promise<AylaAskResponse> =>
   });
 
 /** Выполнить предложение. Только по талону — своих аргументов нет. */
-export const confirmAylaAction = (token: string): Promise<AylaConfirmResponse> =>
+export const confirmAylaAction = (
+  token: string,
+): Promise<AylaConfirmResponse> =>
   request("/assistant/confirm", {
     method: "POST",
     body: JSON.stringify({ token }),
@@ -1649,3 +1689,125 @@ export interface MasterReviewsResponse {
 
 export const getMasterReviews = (): Promise<MasterReviewsResponse> =>
   request("/reviews", { method: "GET" });
+
+// --- Ручки М-2 для «Новой записи» мастера (DRF-2154 → DRF-2155, М-3) -------
+//
+// Субъект — мастер из initData: ни в путях, ни в телах нет master_id.
+// Телефон клиента — только ВХОД для нового гостя; наружу не приходит ни
+// в списке поиска, ни в деталях (DRF-1039, владелец 20.09).
+
+import type { BookingSlot } from "./admin-api";
+
+/** Строка `GET /customers?q=` — «Анна П.» + дата последнего визита у этого мастера. */
+export interface MasterCustomerSearchRow {
+  /** Ayla client id — уходит в `client_id` при создании. */
+  id: string;
+  /** «Имя Ф.»; «Без имени», когда каталог не знает имени. */
+  name: string;
+  named: boolean;
+  /** YYYY-MM-DD последнего completed визита у этого мастера; null — новый клиент. */
+  last_visit_date: string | null;
+}
+
+export const searchMasterCustomers = async (
+  q: string,
+  opts: { signal?: AbortSignal } = {},
+): Promise<MasterCustomerSearchRow[]> => {
+  const env = await request<{ results: MasterCustomerSearchRow[] }>(
+    `/customers?q=${encodeURIComponent(q)}`,
+    { method: "GET", signal: opts.signal },
+  );
+  return env.results;
+};
+
+export interface MasterBookingSlotsResponse {
+  date: string;
+  timezone: string;
+  service_id: string;
+  duration_min: number;
+  slots: BookingSlot[];
+}
+
+export const getMasterBookingSlots = (
+  params: { serviceId: string; date: string },
+  opts: { signal?: AbortSignal } = {},
+): Promise<MasterBookingSlotsResponse> => {
+  const qs = new URLSearchParams({
+    date: params.date,
+    service_id: params.serviceId,
+  });
+  return request(`/booking-slots?${qs.toString()}`, {
+    method: "GET",
+    signal: opts.signal,
+  });
+};
+
+export interface MasterCreateBookingBody {
+  service_id: string;
+  /** ISO start, как отдало расписание. */
+  start_at: string;
+  /** Один ключ на попытку, тот же при повторе — иначе повтор станет второй записью. */
+  idempotency_key: string;
+  /** Ровно один путь (§14). Телефон — вход нового гостя, обратно не приходит. */
+  client_id?: string;
+  client_name?: string;
+  client_phone?: string;
+}
+
+export interface MasterCreateBookingResult {
+  outcome: "committed" | "conflict" | "blocked" | "pending" | "failed";
+  detail: string;
+  appointment_id?: string;
+  /** `slot_taken` при conflict, `result_pending` при pending, иначе — как у стойки. */
+  reason_code?: string;
+  /** Ближайшие окна того дня при `slot_taken`; null — слоты были недоступны. */
+  alternatives?: BookingSlot[] | null;
+  alternatives_unavailable?: boolean;
+  /** На `pending` — чтобы повтор был той же записью. */
+  idempotency_key?: string;
+}
+
+/**
+ * Создать запись к себе. Не через `request`: 409 «занято» и 202 «проверяем
+ * результат» — исходы §18, не ошибки. Сеть упала / тело не прочитано —
+ * `pending` с тем же ключом: запись могла лечь, «failed» подтолкнул бы
+ * нажать ещё раз.
+ */
+export const createMasterBooking = async (
+  body: MasterCreateBookingBody,
+): Promise<MasterCreateBookingResult> => {
+  const initData = getInitData();
+  const headers = new Headers({ "Content-Type": "application/json" });
+  if (initData) headers.set("Authorization", `MaxInitData ${initData}`);
+  applyDevBypassHeaders(headers);
+  applySalonChoiceHeader(headers);
+
+  let res: Response;
+  try {
+    res = await fetch(`${MASTER_API_BASE}/bookings`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+    });
+  } catch {
+    return {
+      outcome: "pending",
+      detail: "нет ответа от сети",
+      idempotency_key: body.idempotency_key,
+    };
+  }
+
+  try {
+    const data = (await res.json()) as Partial<MasterCreateBookingResult> & {
+      error?: string;
+    };
+    if (data.outcome) return data as MasterCreateBookingResult;
+    return { outcome: "failed", detail: data.detail ?? "неизвестная ошибка" };
+  } catch {
+    return {
+      outcome: "pending",
+      detail: "ответ не прочитан",
+      idempotency_key: body.idempotency_key,
+    };
+  }
+};

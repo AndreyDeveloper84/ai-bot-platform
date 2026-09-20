@@ -26,6 +26,7 @@ vi.mock("../lib/master-api", async (importOriginal) => {
 
 import {
   getDashboard,
+  getMasterMe,
   getMasterSchedule,
   getPendingAvailability,
   type DashboardResponse,
@@ -37,6 +38,7 @@ import { MasterScheduleScreen } from "./MasterScheduleScreen";
 const mockedDashboard = vi.mocked(getDashboard);
 const mockedSchedule = vi.mocked(getMasterSchedule);
 const mockedPending = vi.mocked(getPendingAvailability);
+const mockedMe = vi.mocked(getMasterMe);
 
 const NOW = "2026-09-20T11:15:00";
 const TODAY = "2026-09-20";
@@ -123,8 +125,19 @@ beforeEach(() => {
   vi.clearAllMocks();
   mockedDashboard.mockResolvedValue(dashboard());
   mockedSchedule.mockResolvedValue(schedule());
-  mockedPending.mockResolvedValue([]);
+  mockedPending.mockResolvedValue({ items: [] });
+  // Шапка тянет личность — отказ хук глотает; главное, что промис есть.
+  mockedMe.mockRejectedValue(new Error("not needed here"));
 });
+
+/** Адрес формы с разобранным окном — `URLSearchParams` кодирует «:». */
+function parsedWhere(text: string): {
+  path: string;
+  params: Record<string, string>;
+} {
+  const url = new URL(text, "http://x");
+  return { path: url.pathname, params: Object.fromEntries(url.searchParams) };
+}
 
 describe("«Сегодня»: «Добавить запись» на пустом дне", () => {
   it("мастер салона → /master/booking/new", async () => {
@@ -148,17 +161,25 @@ describe("«Расписание»: свободное окно ведёт в з
   it("главный тап по окну → форма с ?date&from&to", async () => {
     renderAt("/master/schedule");
     (await screen.findByRole("button", { name: /14:00 · свободно/ })).click();
-    expect(await screen.findByTestId("where")).toHaveTextContent(
-      "/master/booking/new?date=2026-09-20&from=14:00&to=17:00",
+    const where = parsedWhere(
+      (await screen.findByTestId("where")).textContent ?? "",
     );
+    expect(where).toEqual({
+      path: "/master/booking/new",
+      params: { date: "2026-09-20", from: "14:00", to: "17:00" },
+    });
   });
 
   it("на /solo/schedule — /solo/booking/new", async () => {
     renderAt("/solo/schedule");
     (await screen.findByRole("button", { name: /14:00 · свободно/ })).click();
-    expect(await screen.findByTestId("where")).toHaveTextContent(
-      "/solo/booking/new?date=2026-09-20&from=14:00&to=17:00",
+    const where = parsedWhere(
+      (await screen.findByTestId("where")).textContent ?? "",
     );
+    expect(where).toEqual({
+      path: "/solo/booking/new",
+      params: { date: "2026-09-20", from: "14:00", to: "17:00" },
+    });
   });
 
   it("«Недоступно» — отдельная кнопка окна, открывает прежний лист заявки", async () => {
