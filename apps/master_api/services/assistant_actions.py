@@ -435,13 +435,20 @@ def propose(name: str, arguments: dict[str, Any], *, master) -> ProposedAction:
 
 
 def _master_services(master) -> list[Any]:
-    """Услуги мастера — те же, что предлагает форма М-3 (только активные)."""
+    """Услуги мастера для записи — только ПРОДАВАЕМЫЕ рёбра (DRF-1964a).
+
+    Это путь продажи: выбранную здесь услугу ассистент отдаёт в
+    ``create_appointment_as``. Непродаваемое ребро предлагать нечего —
+    предикат один на всех читателей (``sellable()``), своего фильтра тут нет.
+    """
 
     from apps.catalog.models import MasterService
 
-    rows = MasterService.all_tenants.filter(
-        tenant_id=master.tenant_id, master_id=master.id
-    ).select_related("service")
+    rows = (
+        MasterService.all_tenants.filter(tenant_id=master.tenant_id, master_id=master.id)
+        .sellable()
+        .select_related("service")
+    )
     return [ms.service for ms in rows if ms.service is not None and ms.service.is_active]
 
 
