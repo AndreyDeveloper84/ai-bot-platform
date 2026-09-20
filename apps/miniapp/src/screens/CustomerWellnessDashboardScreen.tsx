@@ -151,7 +151,6 @@ type ActiveGoal = NonNullable<WellnessToday["active_goals"]>[number];
 export const DIARY_CONSENT_CARD_TEXT = "Чтобы вести дневник, нужно согласие — дай его в чате с Ayla";
 export const DIARY_CONSENT_CARD_CTA = "Дать согласие в чате";
 
-
 // ---------------------------------------------------------------------------
 // Loading + error state model — per-block isolation for «Partial» state
 // (Tau §5 State 5). Each remote slice carries its own status so a
@@ -991,12 +990,8 @@ export function CustomerWellnessDashboardScreen() {
           )}
       </main>
 
-      {/* Нижняя панель — ровно пять вкладок по макету H01 (решение владельца
-          §55 б, DRF-2144): Главная · План · Дневник · Записи · Профиль.
-          «Услуги» ушли из панели в каталог (по «Записаться» / карточке),
-          «Я» стало «Профиль». Этот экран — «Главная», поэтому активна она.
-          Сетка панели подстраивается под число вкладок, см.
-          `.wellness-dash__nav` в globals.css. */}
+      {/* Панель — общая для клиентских экранов (DRF-2191, состав и правила —
+          в `components/CustomerTabBar.tsx`); этот экран «Главная». */}
       <CustomerTabBar active="home" />
     </div>
   );

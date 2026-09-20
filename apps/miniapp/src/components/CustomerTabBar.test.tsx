@@ -22,19 +22,34 @@ import { describe, expect, it } from "vitest";
 
 import { CUSTOMER_TABS, CustomerTabBar } from "./CustomerTabBar";
 
-/** Исходники — тем же способом, что `backContract.test.ts` и словарь мастера. */
-const CUSTOMER_SCREENS = import.meta.glob(
-  ["../screens/Customer*.tsx", "../screens/PilotComingSoon*.tsx", "../screens/PlanLite*.tsx", "../screens/FoodScanner*.tsx"],
-  { query: "?raw", import: "default", eager: true },
-) as Record<string, string>;
-const APP_SOURCE = import.meta.glob("../App.tsx", {
+/**
+ * Исходники — тем же способом, что `backContract.test.ts` и словарь мастера.
+ * Берутся ВСЕ экраны и компоненты, а не выборка по имени файла: панель может
+ * появиться и в экране, которого нет в клиентском именовании
+ * (`GoalSelectScreen`, `ServiceDetailScreen`…), и в обёртке-компоненте.
+ * Список панелей — белый, по одному файлу на поверхность.
+ */
+const SOURCES = import.meta.glob(["../screens/**/*.tsx", "../components/**/*.tsx", "../App.tsx"], {
   query: "?raw",
   import: "default",
   eager: true,
 }) as Record<string, string>;
 
+/** Панель каждой поверхности — ровно один файл; всё остальное её не рисует. */
+const TAB_BAR_FILES = [
+  "CustomerTabBar.tsx",
+  "MasterTabBar.tsx",
+  "AdminTabBar.tsx",
+  "SalonPilotTabBar.tsx",
+  // Соло-панель владельца живёт в App.tsx (DRF-2127) — там же её разметка.
+  "App.tsx",
+];
+
 const isTest = (path: string) => path.includes(".test.");
 const baseName = (path: string) => path.split("/").pop() as string;
+const APP_SOURCE = Object.fromEntries(
+  Object.entries(SOURCES).filter(([path]) => baseName(path) === "App.tsx"),
+);
 
 function LocationProbe() {
   const location = useLocation();
@@ -90,18 +105,28 @@ describe("CustomerTabBar — пять вкладок по макету", () => {
   });
 });
 
-describe("перепись: наборов вкладок в клиентских исходниках = 1", () => {
-  const sources = Object.entries(CUSTOMER_SCREENS).filter(([path]) => !isTest(path));
+describe("перепись: наборов вкладок в исходниках — по одному на поверхность", () => {
+  const sources = Object.entries(SOURCES).filter(
+    ([path]) => !isTest(path) && !TAB_BAR_FILES.includes(baseName(path)),
+  );
 
-  it("ни один клиентский экран не рисует «Основная навигация» сам", () => {
+  it("ни один экран и ни один компонент не рисует панель сам", () => {
+    // Две приметы разом: подпись панели и её класс — копипаста прежнего блока
+    // (самый вероятный возврат) попадается по обеим, а переименованная
+    // подпись — по классу. Сторож ловит копию, а не всякую навигацию вообще:
+    // это названо здесь, чтобы «зелёный» не читался шире, чем он есть.
     const offenders = sources
-      .filter(([, src]) => src.includes('aria-label="Основная навигация"'))
+      .filter(
+        ([, src]) =>
+          src.includes('aria-label="Основная навигация"') || src.includes('"wellness-dash__nav'),
+      )
       .map(([path]) => baseName(path));
     expect(offenders).toEqual([]);
     // Положительная пара: экраны с панелью её всё-таки рисуют — через компонент.
     const users = sources
       .filter(([, src]) => src.includes("<CustomerTabBar"))
-      .map(([path]) => baseName(path));
+      .map(([path]) => baseName(path))
+      .sort();
     expect(users).toEqual(
       expect.arrayContaining([
         "CustomerWellnessDashboardScreen.tsx",

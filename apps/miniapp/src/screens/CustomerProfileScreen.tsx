@@ -671,7 +671,8 @@ export function CustomerProfileScreen() {
         )}
       </main>
 
-      {/* Bottom nav — mirror records / wellness so the «Я» tab is selected. */}
+      {/* Панель — общая для клиентских экранов (DRF-2191); активна «Профиль».
+          Стоит вне веток состояния: отказ ручки не убирает навигацию (#1918). */}
       <CustomerTabBar active="profile" />
 
       {/* C5 export sheet (152-ФЗ) */}

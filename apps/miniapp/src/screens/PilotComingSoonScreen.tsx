@@ -23,7 +23,7 @@
 import { useNavigate } from "react-router-dom";
 
 import { ComingSoonCard } from "../components/ComingSoonCard";
-import { CustomerTabBar } from "../components/CustomerTabBar";
+import { CustomerTabBar, type CustomerTabKey } from "../components/CustomerTabBar";
 import { useScreenBack } from "../hooks/useScreenBack";
 import { screenRoot } from "../lib/screen-back";
 
@@ -65,6 +65,12 @@ export function PilotComingSoonScreen({ surface }: Props) {
   );
 
   const copy = COPY[surface];
+  // Таблицей, а не тернаром: новая поверхность без вкладки не проскочит молча
+  // — TypeScript потребует строку в этой записи.
+  const activeTab: Record<Surface, CustomerTabKey | undefined> = {
+    home: "home",
+    catalog: undefined,
+  };
   // DRF-2191 — панель одна на всех клиентских экранах (`CustomerTabBar`).
   // «Услуги» из неё ушли (§55 б, макет DRF-1321), поэтому заглушка каталога
   // рисует панель без подсвеченной вкладки: подсветить нечего, и врать
@@ -96,7 +102,7 @@ export function PilotComingSoonScreen({ surface }: Props) {
 
       {/* Панель — общая; активная вкладка только у «Главной» (каталог
           вкладкой больше не является). */}
-      <CustomerTabBar active={surface === "home" ? "home" : undefined} />
+      <CustomerTabBar active={activeTab[surface]} />
     </div>
   );
 }
