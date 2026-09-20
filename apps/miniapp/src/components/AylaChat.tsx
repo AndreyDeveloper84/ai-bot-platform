@@ -76,6 +76,23 @@ interface LocalMessage extends AylaChatMessage {
 }
 
 let localSeq = 0;
+// DRF-2151 — второй слой поверх фильтра бэкенда: команда или токен
+// приглашения на экране не рисуются никогда, даже если история пришла
+// со старого бэкенда. Формы — те же, что читает салонный бот.
+const HIDDEN_TURN = /^\/|master_invite_[0-9a-fA-F-]{8,}|\binv_[A-Za-z0-9]{4,}\b/;
+// Код сотрудника — ровно четыре знака алфавита кодов после AYLA в любом
+// регистре (staff_invites.CODE_ALPHABET); «AYLA Beauty» — не код.
+const TYPED_CODE = /\bAYLA[-_ ]?[23456789ABCDEFGHJKMNPQRSTUVWXYZ]{4}\b/i;
+
+export function isHiddenTurn(content: string): boolean {
+  const text = (content || "").trim();
+  return HIDDEN_TURN.test(text) || TYPED_CODE.test(text);
+}
+
+export function visibleMessages<T extends { content: string }>(messages: T[]): T[] {
+  return messages.filter((m) => !isHiddenTurn(m.content));
+}
+
 function localMessage(role: string, content: string): LocalMessage {
   localSeq += 1;
   return {
@@ -105,7 +122,7 @@ export function AylaChat({ api, greeting, onOpen, logLabel = "Диалог с Ay
       .history()
       .then((res) => {
         if (!alive) return;
-        setMessages(res.messages);
+        setMessages(visibleMessages(res.messages));
       })
       .catch(() => {
         // История — не условие разговора. Пустой экран с приглашением
@@ -145,7 +162,10 @@ export function AylaChat({ api, greeting, onOpen, logLabel = "Диалог с Ay
     // Новый вопрос отменяет висящее предложение: подтверждать сводку,
     // на которую сверху лёг другой разговор, человек не должен.
     setPending(null);
-    setMessages((prev) => [...prev, localMessage("user", text)]);
+    // DRF-2151: команда/токен на экране не рисуется и до перезахода.
+    if (!isHiddenTurn(text)) {
+      setMessages((prev) => [...prev, localMessage("user", text)]);
+    }
     setSending(true);
     try {
       const res = await api.ask(text);
