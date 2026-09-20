@@ -1363,7 +1363,7 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     # machinery that answers anything a person says, not by a second parallel
     # path that could disagree with it.
     #
-    # Toggles and «Ни один вариант» keep their payload and are answered by the
+    # Toggles and «Другое (расскажу сама)» keep their payload and are answered by the
     # branch below. A payload that matched the prefix but decoded to nothing
     # is NOT allowed to fall through — a raw `cb:clarify:…` string reaching
     # the concierge is precisely the DRF-988 defect.

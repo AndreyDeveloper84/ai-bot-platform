@@ -2202,13 +2202,15 @@ def _render_ask_clarification(
 
     No options → plain question text, no keyboard: the user answers freely.
 
-    ``mode`` (DRF-1362) is metadata ONLY. It rides in
-    ``action_data["clarification"]["mode"]`` — a key no channel renderer
-    reads, since ``apps.channels.max.handler._build_attachments`` looks at
-    ``attachments`` / ``buttons`` / ``button_rows`` and nothing else. That is
-    the point: the wire bytes of every clarification already in the pilot are
-    unchanged by this argument, whatever it says. Adding a mode must not
-    quietly rewrite turns that work.
+    ``mode`` (DRF-1362) rides in ``action_data["clarification"]["mode"]`` —
+    a key no channel renderer reads, since
+    ``apps.channels.max.handler._build_attachments`` looks at
+    ``attachments`` / ``buttons`` / ``button_rows`` and nothing else. For
+    ``confirm_one`` and ``free`` the wire bytes are unchanged by this
+    argument, whatever it says — adding a mode must not quietly rewrite turns
+    that work. ``choose_many`` (DRF-2176) is the one mode that DOES change the
+    screen: it is the multi-select of :func:`render_multiselect_clarification`,
+    because that is what the model asked for and what the mock (C02.2) draws.
 
     The option-less branch keeps ``action_data=None`` for the same reason,
     one step stricter: with no keyboard there is nothing to disambiguate, and
@@ -2248,6 +2250,14 @@ def _render_ask_clarification(
             },
         )
     resolved = normalize_clarification_mode(mode, cleaned)
+    if resolved == CLARIFICATION_MODE_CHOOSE_MANY:
+        # DRF-2176 (К-1, макет C02.2) — мультивыбор ЖИВЬЁМ. До этого среза
+        # `choose_many` был только метаданными: кнопки рисовались одиночными
+        # «тап = ответ», а экран ☑/☐ строился лишь перерисовкой после тапа —
+        # то есть никогда, потому что первого показа не было. Тот же рендер,
+        # что и у перерисовки, одной функцией: два входа на один экран не
+        # могут разойтись.
+        return render_multiselect_clarification(text, cleaned, mask=0)
     shown = cleaned[:_MAX_CLARIFICATION_OPTIONS]
     buttons = [{"label": opt[:_MAX_OPTION_LABEL_CHARS], "callback": opt} for opt in shown]
     action_data = {
@@ -2269,7 +2279,7 @@ def _render_ask_clarification(
 #:
 #:     cb:clarify:tg:{mask}:{index}   toggle option {index}
 #:     cb:clarify:ok:{mask}           «Продолжить» — submit the accumulated set
-#:     cb:clarify:no                  «Ни один вариант» — close with nothing
+#:     cb:clarify:no                  «Другое (расскажу сама)» — close with nothing
 #:
 #: ``{mask}`` is the CURRENT selection encoded as a bitmask (bit *i* set ==
 #: option *i* chosen), carried in the payload of every button in the keyboard
@@ -2303,7 +2313,10 @@ CLARIFY_MARK_ON = "☑ "
 CLARIFY_MARK_OFF = "☐ "
 
 CLARIFY_SUBMIT_LABEL = "Продолжить"
-CLARIFY_NONE_LABEL = "Ни один вариант"
+#: Макет C02.2 (DRF-1176) дословно: строка после опций, «ничего из этого —
+#: расскажу сама». Семантика та же, что у прежнего «Ни один вариант»
+#: (DRF-1362): закрыть без выбора и позвать ответ своими словами.
+CLARIFY_NONE_LABEL = "Другое (расскажу сама)"
 CLARIFY_DONT_KNOW_LABEL = "Не знаю"
 #: Ответ на «Не знаю» — по макету C03: «Ayla либо продолжает без этого
 #: факта, либо задаёт более простой вопрос». Без движка простой вопрос
@@ -2490,9 +2503,11 @@ def execute_clarify_callback(
 
     chosen = selected_clarification_options(options, tap.mask)
     if not chosen:
-        # «Продолжить» with nothing ticked is the same intent as «Ни один
-        # вариант» — answering it with an empty submitted text would send a
-        # blank turn into the concierge.
+        # «Продолжить» with nothing ticked is the same intent as «Другое
+        # (расскажу сама)» — answering it with an empty submitted text would
+        # send a blank turn into the concierge. Since DRF-2176 the button is
+        # not drawn at mask=0, so this is a stale keyboard from an older
+        # message; the reply still has to be a sentence, not silence.
         logger.info("orchestrator.discovery.clarify_tap kind=submit outcome=empty")
         return ClarifyOutcome(reply=DiscoveryReply(text=CLARIFY_NONE_TEXT), redraw=True)
 
@@ -2509,7 +2524,10 @@ def render_multiselect_clarification(
     """Draw the ``choose_many`` screen at a given selection state.
 
     One option per row, each carrying its mark and the mask the NEXT tap
-    would start from, then «Продолжить» and «Ни один вариант». Redrawing
+    would start from, then «Другое (расскажу сама)» and — once at least one
+    option is ticked — «Продолжить» (mock C02.2: the primary button is active
+    only after a choice; MAX has no disabled state, so an inactive button is
+    an absent one, DRF-2176). Redrawing
     this with a new ``mask`` and pushing it through
     ``apps.channels.max.outbound.edit_message_or_send`` is what makes two
     taps update one message instead of stacking three — the same shape as
@@ -2534,15 +2552,16 @@ def render_multiselect_clarification(
     shown = cleaned[:_MAX_CLARIFICATION_OPTIONS]
     if not shown:
         return DiscoveryReply(text=text)
-    # DRF-1760 — «Выбрано: N» (макет C02.2): честное число отмеченного,
-    # считается по маске тех же кнопок; при нуле строки нет. Сам вопрос
-    # уходит в ``clarification.question`` отдельно от текста: перерисовка
-    # сохраняется строкой ассистента, и следующий тап читает вопрос оттуда —
-    # иначе счётчик наслаивался бы на счётчик.
+    # DRF-1760 / DRF-2176 — «Выбрано: N из M» (макет C02.2 дословно): честное
+    # число отмеченного из числа предложенного, считается по маске тех же
+    # кнопок; при нуле строки нет. Сам вопрос уходит в
+    # ``clarification.question`` отдельно от текста: перерисовка сохраняется
+    # строкой ассистента, и следующий тап читает вопрос оттуда — иначе
+    # счётчик наслаивался бы на счётчик.
     asked = text
     selected = len(selected_clarification_options(shown, mask))
     if selected:
-        text = f"{asked}\n\nВыбрано: {selected}"[:_MAX_REPLY_CHARS]
+        text = f"{asked}\n\nВыбрано: {selected} из {len(shown)}"[:_MAX_REPLY_CHARS]
 
     rows: list[list[dict[str, str]]] = []
     for i, opt in enumerate(shown):
@@ -2550,8 +2569,10 @@ def render_multiselect_clarification(
         mark = CLARIFY_MARK_ON if chosen else CLARIFY_MARK_OFF
         label = f"{mark}{opt}"[:_MAX_OPTION_LABEL_CHARS]
         rows.append([{"label": label, "callback": f"{CLARIFY_TOGGLE_PREFIX}{mask}:{i}"}])
-    rows.append([{"label": CLARIFY_SUBMIT_LABEL, "callback": f"{CLARIFY_SUBMIT_PREFIX}{mask}"}])
+    # Порядок макета: опции → «Другое (расскажу сама)» → «Продолжить».
     rows.append([{"label": CLARIFY_NONE_LABEL, "callback": CLARIFY_NONE_CALLBACK}])
+    if selected:
+        rows.append([{"label": CLARIFY_SUBMIT_LABEL, "callback": f"{CLARIFY_SUBMIT_PREFIX}{mask}"}])
 
     action_data = {
         "button_rows": rows,

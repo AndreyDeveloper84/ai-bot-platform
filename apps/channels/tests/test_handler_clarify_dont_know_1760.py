@@ -56,9 +56,9 @@ class TestSelectedCountOnTheWire:
         """
         _ms._open_multiselect(monkeypatch, fake_redis)
         _run(_tap("cb:clarify:tg:0:0", mid="m-open"))
-        assert wire[-1]["text"] == f"{_QUESTION}\n\nВыбрано: 1"
+        assert wire[-1]["text"] == f"{_QUESTION}\n\nВыбрано: 1 из 3"
         _run(_tap("cb:clarify:tg:1:2", mid="m-open"))
-        assert wire[-1]["text"] == f"{_QUESTION}\n\nВыбрано: 2"
+        assert wire[-1]["text"] == f"{_QUESTION}\n\nВыбрано: 2 из 3"
         assert wire[-1]["text"].count("Выбрано") == 1
 
 
