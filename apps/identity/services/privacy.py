@@ -804,6 +804,21 @@ def delete_personal_data(
         logger.exception("identity.privacy.dialogue_anonymize_failed")
         steps.append(DeleteStep("dialogue_anonymize", False))
 
+    # Step 7 — карточки C04 (DRF-1772, К-3). Запись Recommendation несёт
+    # слова человека (причины и факты, из которых они собраны); по D7 сама
+    # строка остаётся tombstone для attribution (B13), слова обнуляются.
+    # Свой шаг, а не хвост шага 6: у него свой предмет и своё имя в отчёте.
+    from apps.recommendation.erasure import anonymize_recommendations
+
+    try:
+        anonymize_recommendations(_person_shell_ids(bot_user, link))
+        steps.append(
+            DeleteStep("recommendation_erase", True, "own_row_only" if link.conflict else "")
+        )
+    except Exception:  # noqa: BLE001 — per-step isolation, reported below
+        logger.exception("identity.privacy.recommendation_erase_failed")
+        steps.append(DeleteStep("recommendation_erase", False))
+
     result = DeleteCascadeResult(steps=tuple(steps))
     # Audit: actor + scope only — never the deleted values (C5 §6.2).
     write_audit(

@@ -5495,6 +5495,14 @@ def customer_goal_select(request: HttpRequest) -> HttpResponse:
         logger.warning("customer_goal_select.unavailable: %s", exc)
         return _error("ayla_unavailable", "ayla goals unavailable", 502)
 
+    # DRF-1772 (К-3) — контекст под цель собран (`next.id == return_to_chat`,
+    # серверный факт каталога): человек возвращается в чат (C03.5, К-2), и
+    # там его ждёт карточка C04 «направление + почему» — или честное C04.4.
+    # Один раз на собранный контекст; отказ DM экран не трогает.
+    from apps.recommendation.dispatch import maybe_send_card
+
+    maybe_send_card(request.bot_user, ayla_body)  # type: ignore[attr-defined]
+
     # Тот же конверт, что и у чтения выше, и по той же причине: SPA
     # разворачивает `env.data` на обеих ручках
     # (`customer-goals.ts:158-166`). Обе стороны обязаны меняться вместе —
