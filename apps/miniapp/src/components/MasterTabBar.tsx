@@ -88,9 +88,8 @@ export function MasterTabBar({ scheduleHasPendingChange }: TabBarProps) {
 
   // Solo unified surface (Tau §5) owns its own bottom nav (`SoloBottomNav`
   // in App.tsx). The solo surface deliberately reuses several master
-  // screens — MasterDashboardScreen, MasterScheduleScreen,
-  // MasterConversationsScreen — which historically rendered this
-  // MasterTabBar. Without an early-return here, those reused screens
+  // screens — MasterDashboardScreen, MasterScheduleScreen — which
+  // render this MasterTabBar. Without an early-return here, those reused screens
   // would paint a second fixed-position tab bar on top of the solo bar,
   // both at z-index 100, fighting for the same pixels.
   //
