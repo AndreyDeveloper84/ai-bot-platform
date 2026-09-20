@@ -1457,25 +1457,20 @@ function CustomerFallbackWithBanner({ onRetry }: { onRetry: () => void }) {
 export function App() {
   const [identity] = useState(() => channelIdentity());
   if (identity === "no_init_data") return <OpenFromMaxScreen />;
-  return <AppShell />;
-}
-
-/**
- * DRF-2198: одна граница ошибок на приложение — диспетчер ниже отдаёт ровно
- * одно дерево маршрутов (мастер / соло / админ / клиент), и четыре
- * одинаковые обёртки были бы четырьмя местами, где можно забыть. Любое
- * исключение рендера даёт состояние с повтором, а не белый экран
- * (инцидент 20.09, #1918).
- */
-function AppShell() {
+  // DRF-2198: одна граница ошибок на приложение — `AppShell` ниже отдаёт
+  // ровно одно дерево маршрутов (мастер / соло / админ / клиент), и четыре
+  // одинаковые обёртки были бы четырьмя местами, где можно забыть. Любое
+  // исключение рендера даёт состояние с повтором, а не белый экран
+  // (инцидент 20.09, #1918). Возврат в MAX при отказе транспорта проверяется
+  // выше — граница его не перехватывает.
   return (
     <ErrorBoundary>
-      <AppSurface />
+      <AppShell />
     </ErrorBoundary>
   );
 }
 
-function AppSurface() {
+function AppShell() {
   const [boot, setBoot] = useState<BootState>(INITIAL);
   // Surface choice drives the cascade below, so it has to be reactive —
   // a bare localStorage read wouldn't re-render when the user picks
