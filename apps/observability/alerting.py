@@ -81,6 +81,7 @@ from django.conf import settings
 from django.core.cache import cache
 
 from apps.audit.services import write_audit
+from apps.observability.pii_filter import redact_pii
 
 logger = logging.getLogger(__name__)
 
@@ -379,8 +380,6 @@ def _max_text(severity: Severity, title: str, body: str) -> str:
     in a chat bubble. Masking runs BEFORE the cut so a phone number on
     the 1000-character boundary cannot leave half its digits behind.
     """
-    from apps.observability.pii_filter import redact_pii  # noqa: PLC0415 — sibling, lazy
-
     label = _MAX_SEVERITY_LABEL[severity]
     head = _one_line(title)
     tail = _one_line(body)
