@@ -943,8 +943,8 @@ class NutritionAnketaSkill:
         step: str,
         prompt: str,
         *,
-        context: SkillContext,
-        fsm: AnketaFSM,
+        context: SkillContext | None = None,
+        fsm: AnketaFSM | None = None,
     ) -> SkillResult:
         action_data: dict = {"step": step}
         if step in CHOICE_STEPS:
@@ -952,13 +952,15 @@ class NutritionAnketaSkill:
             # (история хода читает их той же таблицей — стража a5
             # DRF-2102). Подсказка цели (ниже) кнопок не касается.
             action_data["buttons"] = anketa_choice_keyboard(step, choice_keyboard_options(step))
-        if step == "goal":
+        if step == "goal" and context is not None:
             # DRF-2124: подсказка — строкой под вопросом и данными в
-            # action_data; в answers она не пишет ничего.
+            # action_data; в answers она не пишет ничего. Без context
+            # (рендер шага вне хода — тесты провода MAX) подсказки нет.
             hint = _goal_hint(context)
             if hint is not None:
                 goal_key, label, options = hint
-                prompt = f"{prompt}\n\n" + _goal_hint_line(label, options, fsm.answers)
+                answers = fsm.answers if fsm is not None else {}
+                prompt = f"{prompt}\n\n" + _goal_hint_line(label, options, answers)
                 action_data["goal_hint"] = {"goal_key": goal_key, "options": options}
         return SkillResult(
             reply_text=prompt,

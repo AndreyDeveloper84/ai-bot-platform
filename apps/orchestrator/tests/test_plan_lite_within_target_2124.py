@@ -95,4 +95,6 @@ class TestC6OnlyFood:
                 PlanLiteAction("book_service", "per_week", 2, 1, *_BUCKET, within_target_count=1),
             )
         )
+        # Присутствие раньше отсутствия: обе строки на месте.
+        assert "вода 4 из 7 (сегодня)" in text and "услугу 1 из 2" in text
         assert "ориентир" not in text.lower()
