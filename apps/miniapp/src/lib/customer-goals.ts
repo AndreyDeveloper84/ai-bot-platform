@@ -29,6 +29,14 @@ export interface KnownGoal {
    * каталога до выкладки #517 её не несёт, тогда — прежний вывод.
    */
   label?: string;
+  /**
+   * DRF-2173 — срок цели: ISO-дата («2026-11-01») или null — без срока
+   * (умолчание; строки на экране нет, §103). `target_date_passed` — факт
+   * сервера «срок прошёл»: экран с календарём не сверяет. Необязательные:
+   * документ каталога до выкладки #518 их не несёт.
+   */
+  target_date?: string | null;
+  target_date_passed?: boolean;
   selected_at: string; // ISO 8601
   source_channel: GoalSourceChannel;
 }

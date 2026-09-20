@@ -603,6 +603,84 @@ class TestWellnessTodayActiveGoals:
         assert goal["title"] == "Меньше стресса"
         assert "progress_pct" not in goal
 
+    # ── DRF-2173 — срок цели ────────────────────────────────────────────
+    def test_target_date_travels_with_the_goal(self, client: Client, bot_user: BotUser, goals_stub):
+        """«До 1 ноября 2026» на карточке H01 — из `known.goal.target_date` каталога."""
+        doc = _goal_doc(goal_text="Похудеть к отпуску")
+        doc["known"]["goal"]["target_date"] = "2026-11-01"
+        doc["known"]["goal"]["target_date_passed"] = False
+        goals_stub.return_value = doc
+        with _patch_nutrition(summary=_FakeSummary(), water=_FakeWater()):
+            resp = client.get(
+                _url(), HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id)
+            )
+        goal = resp.json()["active_goals"][0]
+        assert goal["target_date"] == "2026-11-01"
+        assert goal["target_date_passed"] is False
+
+    def test_no_deadline_omits_the_keys_rather_than_sending_null(
+        self, client: Client, bot_user: BotUser, goals_stub
+    ):
+        """Без срока — ключа нет (§103): экран не рисует строку и ничего не выдумывает."""
+        doc = _goal_doc(goal_text="Похудеть к отпуску")
+        doc["known"]["goal"]["target_date"] = None
+        doc["known"]["goal"]["target_date_passed"] = False
+        goals_stub.return_value = doc
+        with _patch_nutrition(summary=_FakeSummary(), water=_FakeWater()):
+            resp = client.get(
+                _url(), HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id)
+            )
+        goal = resp.json()["active_goals"][0]
+        # POSITIVE: цель на месте — снят только срок, не сама цель.
+        assert goal["title"] == "Похудеть к отпуску"
+        assert "target_date" not in goal
+        assert "target_date_passed" not in goal
+
+    def test_passed_deadline_is_the_servers_fact(
+        self, client: Client, bot_user: BotUser, goals_stub
+    ):
+        doc = _goal_doc(goal_text="Похудеть к отпуску")
+        doc["known"]["goal"]["target_date"] = "2026-01-01"
+        doc["known"]["goal"]["target_date_passed"] = True
+        goals_stub.return_value = doc
+        with _patch_nutrition(summary=_FakeSummary(), water=_FakeWater()):
+            resp = client.get(
+                _url(), HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id)
+            )
+        goal = resp.json()["active_goals"][0]
+        assert goal["target_date"] == "2026-01-01"
+        assert goal["target_date_passed"] is True
+
+    def test_unreadable_target_date_is_dropped_not_echoed(
+        self, client: Client, bot_user: BotUser, goals_stub
+    ):
+        """Подсадка: не-ISO строка от источника — ключа нет, экран не падает."""
+        doc = _goal_doc(goal_text="Похудеть к отпуску")
+        doc["known"]["goal"]["target_date"] = "скоро"
+        goals_stub.return_value = doc
+        with _patch_nutrition(summary=_FakeSummary(), water=_FakeWater()):
+            resp = client.get(
+                _url(), HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id)
+            )
+        assert resp.status_code == 200
+        goal = resp.json()["active_goals"][0]
+        # POSITIVE: цель доехала — отброшена только нечитаемая дата.
+        assert goal["title"] == "Похудеть к отпуску"
+        assert "target_date" not in goal
+
+    def test_label_from_the_document_wins_over_suggestions(
+        self, client: Client, bot_user: BotUser, goals_stub
+    ):
+        """К-2 (DRF-2177): при цели `suggestions=[]`, подпись едет как `known.goal.label`."""
+        doc = _goal_doc(goal_key="face_skin", goal_text=None, suggestions=[])
+        doc["known"]["goal"]["label"] = "Позаботиться о коже лица"
+        goals_stub.return_value = doc
+        with _patch_nutrition(summary=_FakeSummary(), water=_FakeWater()):
+            resp = client.get(
+                _url(), HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id)
+            )
+        assert resp.json()["active_goals"][0]["title"] == "Позаботиться о коже лица"
+
     @pytest.mark.parametrize(
         ("days_ago", "expected_week"),
         [(0, 1), (6, 1), (7, 2), (15, 3), (70, 11)],

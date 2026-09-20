@@ -3505,13 +3505,20 @@ def _active_goals_from_context(doc: Any, *, now: datetime) -> list[dict[str, Any
     Title resolution, in order:
 
     1. ``goal_text`` — the person's own wording (free-text selection).
-    2. the matching ``suggestions[].label`` — a curated goal is stored as
-       ``goal_key`` with ``goal_text=None`` (``goals/api.py`` writes one
-       or the other, never both), and the label for that key travels in
-       the SAME document, so no second round-trip is needed.
-    3. ``goal_key`` itself — only when the option has since been
-       deactivated and dropped out of ``suggestions``. A slug is ugly but
-       factual; inventing a title would not be.
+    2. ``known.goal.label`` — since K-2 (DRF-2177) the catalog sends the
+       curated label WITH the goal (``suggestions`` is empty once a goal
+       is chosen), so the label no longer has to be looked up.
+    3. the matching ``suggestions[].label`` — the pre-K-2 document shape,
+       kept for a catalog that has not been redeployed yet.
+    4. ``goal_key`` itself — only when the option has since been
+       deactivated. A slug is ugly but factual; inventing a title would
+       not be.
+
+    ``target_date`` / ``target_date_passed`` (DRF-2173) — the deadline the
+    person named, ISO date, and the server's «it has passed» fact. Both
+    keys are OMITTED when there is no deadline (§103: absence, not null,
+    so the screen draws no line and cannot misread «none» as a date). A
+    non-ISO value from the source is dropped, not echoed.
 
     ``progress_pct`` is deliberately absent: Ayla's goal layer stores no
     progress for a goal (``ClientGoal`` has ``goal_key`` / ``goal_text`` /
@@ -3528,6 +3535,8 @@ def _active_goals_from_context(doc: Any, *, now: datetime) -> list[dict[str, Any
 
     title = (goal.get("goal_text") or "").strip()
     key = goal.get("goal_key")
+    if not title:
+        title = (goal.get("label") or "").strip()
     if not title and key:
         for option in doc.get("suggestions") or []:
             if isinstance(option, dict) and option.get("key") == key:
@@ -3544,7 +3553,21 @@ def _active_goals_from_context(doc: Any, *, now: datetime) -> list[dict[str, Any
     week_num = _goal_week_num(goal.get("selected_at"), now=now)
     if week_num is not None:
         entry["week_num"] = week_num
+    target_date = _iso_date_or_none(goal.get("target_date"))
+    if target_date is not None:
+        entry["target_date"] = target_date
+        entry["target_date_passed"] = bool(goal.get("target_date_passed"))
     return [entry]
+
+
+def _iso_date_or_none(value: Any) -> str | None:
+    """An ISO calendar date, normalised to ``YYYY-MM-DD``; anything else → None."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        return date_cls.fromisoformat(value.strip()).isoformat()
+    except ValueError:
+        return None
 
 
 #: Значение ``?surface=`` у ``wellness/today``, по которому — и ТОЛЬКО по
@@ -5488,6 +5511,13 @@ def customer_goal_select(request: HttpRequest) -> HttpResponse:
                 "error": "ayla_bad_request",
                 "detail": f"ayla returned HTTP {exc.status_code}",
                 "ayla_error": exc.body,
+                # DRF-2173 — то же тело под `details`: `ApiError` экрана читает
+                # только `details`, а отказ шага срока каталог говорит словами
+                # («Этот срок уже прошёл…») — их и должен увидеть человек.
+                # `ayla_status` — исходный статус каталога: этот хоп сводит любой
+                # 4xx к 400, а экран обязан отличать «сказал словами» (400) от
+                # «документ протух» (409 → перечитать).
+                "details": {"ayla_error": exc.body, "ayla_status": exc.status_code},
             },
             status=400,
         )

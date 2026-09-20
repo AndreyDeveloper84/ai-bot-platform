@@ -1,7 +1,7 @@
 /** Russian-locale formatting per assistant-persona.md voice rules. */
 
 const WEEKDAYS = ["вс", "пн", "вт", "ср", "чт", "пт", "сб"];
-const MONTHS_GEN = [
+export const MONTHS_GEN = [
   "января", "февраля", "марта", "апреля", "мая", "июня",
   "июля", "августа", "сентября", "октября", "ноября", "декабря",
 ];

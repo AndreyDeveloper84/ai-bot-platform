@@ -877,6 +877,22 @@ a {
   overflow-wrap: anywhere;
 }
 
+/* DRF-2173 — срок цели под «Уже учла»: «До 1 ноября 2026» и, при прошедшем
+   сроке, тихое действие «Срок прошёл — обновить?» в том же ряду. */
+.goal-select__deadline {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-2);
+  margin: var(--s-2) 0 0;
+  padding: 0 var(--s-3);
+  color: var(--c-text-secondary);
+  font-size: var(--font-size-200);
+}
+.goal-select__deadline-date {
+  min-width: 0;
+}
+
 /* «Рядом со мной» (DRF-1707): пояснение стоит до кнопки — D3 «понятно,
    зачем location нужна» — тихим текстом; расстояние на карточке — рядом
    с рейтингом, тем же вторичным цветом. */

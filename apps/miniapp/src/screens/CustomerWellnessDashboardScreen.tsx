@@ -41,7 +41,7 @@
  *   Bottom nav — Главная · План · Дневник · Записи · Профиль (§55 б)
  *
  * Места, оставленные под чужие листы (условный рендер, ключа пока нет):
- * срок цели «До 1 ноября 2026» (DRF-2173), цена записи «3 200 ₽» (DRF-2172).
+ * срок цели — DRF-2173 (заполнено), цена записи — DRF-2172 (заполнено).
  *
  * # Что снято с этого экрана и почему (DRF-1546)
  *
@@ -106,6 +106,7 @@ import {
   type PlanLiteActionType,
   type PlanLiteCadence,
 } from "../lib/plan-lite";
+import { formatGoalDue } from "../lib/goal-deadline";
 import { visitAddressText } from "../lib/visit-address";
 import {
   enqueueWaterLog,
@@ -1258,13 +1259,6 @@ function planAdherence(plan: PlanLite): { done: number; total: number } {
   );
 }
 
-/** «1 ноября 2026» — срок цели; место под DRF-2173, пока ключа нет. */
-function formatGoalDue(iso: string): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "";
-  return d.toLocaleDateString("ru-RU", { day: "numeric", month: "long", year: "numeric" });
-}
-
 function GoalCard({
   goal,
   goalsKnown,
@@ -1303,7 +1297,7 @@ function GoalCard({
 
   const planKnown = plan.kind === "ok";
   const activePlan = plan.kind === "ok" ? plan.data : null;
-  const due = goal.due_date ? formatGoalDue(goal.due_date) : "";
+  const due = formatGoalDue(goal.target_date);
   const weekPrefix = goal.week_num ? `Неделя ${goal.week_num} · ` : "";
   let statusLine: string | null = null;
   if (activePlan) {
@@ -1325,8 +1319,8 @@ function GoalCard({
         Активная цель
       </p>
       <h2 className="wellness-dash__goal-title">{goal.title}</h2>
-      {/* Срок — место оставлено под DRF-2173: ключ появится — строка встанет. */}
-      {due && <p className="wellness-dash__goal-due">До {due}</p>}
+      {/* DRF-2173 — срок цели «До 1 ноября 2026» (макет DRF-1321); без срока строки нет. */}
+      {due && <p className="wellness-dash__goal-due">{due}</p>}
       {/* Ни шкалы, ни процентов, ни веса под целью (§49/§82, решение №13):
           только счёт действий из плана. */}
       {statusLine && <p className="wellness-dash__goal-status">{statusLine}</p>}
