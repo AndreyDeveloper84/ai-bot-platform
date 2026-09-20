@@ -295,6 +295,35 @@ ADMIN_ROUTES: dict[str, Entry] = {
     "availability_requests_list": _AVAILABILITY_REQUEST,
     "availability_request_approve": _AVAILABILITY_REQUEST,
     "availability_request_reject": _AVAILABILITY_REQUEST,
+    # --- DRF-2119 — ассистент администратора ------------------------------
+    # Ответы — текст модели по данным инструментов; инструменты отдают
+    # клиента ТОЛЬКО как «имя + инициал» из build_salon_day (у DayVisit нет
+    # поля телефона), а на выходе стоит mask_phones. История — свои же
+    # реплики администратора и ответы ассистента.
+    "assistant_history": third_party(
+        "messages[].content",
+        via=A + "views_assistant:_message_dict",
+        whose="the administrator's own questions and the assistant's answers",
+        why=(
+            "the admin re-opens their own thread; answers name customers by first name "
+            "and initial from the salon day, never a phone (mask_phones on the way out)"
+        ),
+    ),
+    "assistant_ask": third_party(
+        "answer",
+        "pending_action.summary",
+        via=A + "services.assistant:AdminSubject.postprocess",
+        whose="customers of the salon, by first name and initial",
+        why=(
+            "«найти запись» reads the same build_salon_day as «Сегодня»; the draft "
+            "summary names the customer the admin themselves typed; phones are masked"
+        ),
+    ),
+    "assistant_confirm": none(
+        "the executed action's text names the master and the closed window; "
+        "no customer is involved (only prepare_schedule_change has a token)",
+        via=A + "services.assistant:execute_admin_action",
+    ),
     # --- DRF-2117 — готовность салона поимённо ----------------------------
     "salon_readiness": third_party(
         "problems[].master.name",

@@ -113,8 +113,6 @@ def _visit(*, master, client_first="Анна", at: datetime, service="Масса
         end_at=at + timedelta(minutes=60),
         duration_min=60,
         status="confirmed",
-        master_id=str(master.id),
-        master_name=master.name,
         service_id=str(uuid.uuid4()),
         service_name=service,
         client_first_name=client_first,
@@ -183,6 +181,22 @@ class TestP2FindBooking:
         assert not violates_phone_rule(json.dumps(out.data, ensure_ascii=False))
         assert "phone" not in json.dumps(out.data).lower()  # empty-assert-ok: строки выше
 
+    def test_card_shape_has_no_phone_field(self, tenant, master) -> None:
+        """Сторож на ФОРМУ карточки, не только на текст (поправка главного окна)."""
+        from apps.admin_api.services import assistant as aa
+
+        visits = [_visit(master=master, at=NOW.replace(hour=10))]
+        with patch.object(aa, "_salon_day", return_value=_day(tenant, master, visits)):
+            out = aa.run_admin_tool("find_booking", {"date": "2026-09-21"}, tenant=tenant, now=NOW)
+        assert set(out.data["bookings"][0]) == {
+            "id",
+            "time",
+            "client",
+            "master",
+            "service",
+            "status",
+        }
+
     def test_by_master_only(self, tenant, master) -> None:
         from apps.admin_api.services import assistant as aa
 
@@ -222,7 +236,7 @@ class TestP3PrepareBookingWritesNothing:
             "prepare_booking",
             {
                 "master": master_with_service.name,
-                "service": "Массаж",
+                "service": "Маникюр",
                 "start_at": "2026-09-22T11:00",
                 "client_name": "Анна",
             },
@@ -280,6 +294,40 @@ class TestP4ScheduleChangeNeedsConfirmation:
         assert rows[0].master_id == master.id
         assert str(rows[0].resolved_by_bot_user_id) == str(owner_bot_user.id)
         assert "график" in done.text.lower() or "готово" in done.text.lower()
+
+    def test_author_is_the_admin_and_the_master_hears_once(
+        self, tenant, owner_bot_user, master, settings
+    ) -> None:
+        """Узел главного окна: requested_by — админ (не «Анна просила»), мастеру — ровно один DM."""
+        from django.test import TestCase
+
+        from apps.admin_api.services import assistant as aa
+        from apps.identity.models import BotUser
+        from apps.scheduling.models import ScheduleChangeRequest
+
+        settings.BOOKING_VIA_AYLA_REST = False
+        person = BotUser.all_tenants.create(
+            tenant=tenant, channel="max", channel_user_id="m-2119", chat_id="c-m-2119"
+        )
+        master.linked_bot_user = person
+        master.save(update_fields=["linked_bot_user"])
+        proposal = aa.propose_admin_action(
+            "prepare_schedule_change",
+            {"master": master.name, "start": "2026-09-25T10:00", "end": "2026-09-25T12:00"},
+            tenant=tenant,
+            bot_user=owner_bot_user,
+        )
+        with (
+            patch("apps.admin_api.tasks.dispatch_master_decision_dm.delay") as dm,
+            TestCase.captureOnCommitCallbacks(execute=True),
+        ):
+            aa.execute_admin_action(proposal.token, tenant=tenant, bot_user=owner_bot_user)
+        row = ScheduleChangeRequest.all_tenants.get(tenant=tenant)
+        assert row.requested_by_id == owner_bot_user.id  # автор — админ
+        assert str(row.resolved_by_bot_user_id) == str(owner_bot_user.id)
+        assert dm.call_count == 1
+        assert dm.call_args.kwargs["user_id"] == "m-2119"
+        assert dm.call_args.kwargs["decision"] == "approved"
 
     def test_foreign_or_broken_token_is_refused(
         self, tenant, other_tenant, owner_bot_user, master
