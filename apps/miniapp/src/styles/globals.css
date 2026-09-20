@@ -5288,22 +5288,27 @@ a {
   white-space: nowrap;
 }
 
-/* Быстрые действия — компактный ряд из пяти (макет H01). */
+/* Быстрые действия — компактный ряд из пяти (макет H01). Flex, а не сетка
+   на пять колонок: при выключенном контуре питания кнопок три (DRF-2071), и
+   они делят ряд поровну, а не оставляют две пустые ячейки. */
 .wellness-dash__qa-grid--row {
-  grid-template-columns: repeat(5, 1fr);
+  display: flex;
+  flex-wrap: wrap;
   gap: var(--s-1);
 }
-@media (max-width: 360px) {
-  .wellness-dash__qa-grid--row {
-    grid-template-columns: repeat(3, 1fr);
-  }
-}
 .wellness-dash__qa-btn--compact {
+  flex: 1 1 0;
+  min-width: 56px;
   align-items: center;
   justify-content: flex-start;
   min-height: 76px;
   padding: var(--s-2) var(--s-1);
   text-align: center;
+}
+@media (max-width: 360px) {
+  .wellness-dash__qa-btn--compact {
+    flex-basis: calc(33% - var(--s-1));
+  }
 }
 .wellness-dash__qa-btn--compact .wellness-dash__qa-label {
   font-size: var(--font-size-100);

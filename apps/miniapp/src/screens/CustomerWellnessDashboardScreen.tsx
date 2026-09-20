@@ -589,8 +589,9 @@ export function CustomerWellnessDashboardScreen() {
       </a>
 
       {/* Header — 56dp. Иконки «Профиль»/«Настройки» сняты (DRF-2144): обе
-          вели в профиль, а профиль теперь — вкладка панели; на макете H01 в
-          шапке только имя и колокольчик. */}
+          вели в профиль, а профиль теперь — вкладка панели. Вордмарк и
+          «спросить» — прежние; на макете H01 в шапке имя и колокольчик
+          (Д1/Д2 в списке отступлений PR). */}
       <header className="wellness-dash__header" role="banner">
         <div className="wellness-dash__brand">
           {/* «ayla» = English wordmark per Tau §7 — wrap in lang="en"
@@ -830,7 +831,9 @@ export function CustomerWellnessDashboardScreen() {
               <button
                 type="button"
                 className="wellness-dash__qa-btn wellness-dash__qa-btn--compact"
-                aria-label="Стакан воды"
+                // Видимая подпись — по макету «Стакан воды»; имя для скринридера
+                // несёт глагол: тап сразу пишет 250 мл без подтверждения.
+                aria-label="Добавить стакан воды"
                 onClick={onWaterTap}
               >
                 <span className="wellness-dash__qa-icon" aria-hidden="true">

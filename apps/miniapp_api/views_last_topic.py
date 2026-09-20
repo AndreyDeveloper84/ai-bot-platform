@@ -40,7 +40,7 @@ from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
-from apps.conversations.models import Message
+from apps.conversations.models import Conversation, Message
 from apps.identity.models import BotUser
 from apps.miniapp_api.views import require_init_data
 
@@ -77,7 +77,13 @@ def _is_canned_safety(text: str) -> bool:
 
 
 def _answer_paragraph(text: str) -> str:
-    """Первый абзац ответа без служебных строк; пусто — темы в ходе нет."""
+    """Первый абзац ответа без служебных строк; пусто — темы в ходе нет.
+
+    Служебная строка сегодня — отдельный абзац (пустая строка перед ней); на
+    случай, если её когда-нибудь приклеят одним переводом строки, абзац ещё и
+    обрезается по первому вхождению служебного начала — строка памяти в
+    превью не попадёт ни в какой сборке.
+    """
     heads = _service_line_heads()
     for paragraph in text.replace("\r\n", "\n").split("\n\n"):
         candidate = " ".join(paragraph.split())
@@ -85,7 +91,11 @@ def _answer_paragraph(text: str) -> str:
             continue
         if candidate.startswith(heads):
             continue
-        return candidate
+        cut = min((i for i in (candidate.find(h) for h in heads) if i > 0), default=-1)
+        if cut > 0:
+            candidate = candidate[:cut].rstrip()
+        if candidate:
+            return candidate
     return ""
 
 
@@ -112,12 +122,18 @@ def _topic_of(message: Message) -> str | None:
 
 
 def _recent_assistant_turns(bot_user: BotUser) -> list[Message]:
+    # Сначала — разговоры человека (их единицы), потом ходы по ним: индекс
+    # ``(conversation, created_at)`` вместо обратного прохода по всему тенанту.
+    threads = Conversation.all_tenants.filter(
+        tenant=bot_user.tenant,
+        bot_user=bot_user,
+        is_shadow=False,
+        deleted_at__isnull=True,
+    )
     return list(
         Message.all_tenants.filter(
             tenant=bot_user.tenant,
-            conversation__bot_user=bot_user,
-            conversation__is_shadow=False,
-            conversation__deleted_at__isnull=True,
+            conversation__in=threads,
             role=Message.Role.ASSISTANT,
         )
         .filter(

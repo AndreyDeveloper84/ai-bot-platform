@@ -341,7 +341,9 @@ describe("H01 · быстрые действия", () => {
     const labels = within(block)
       .getAllByRole("button")
       .map((b) => b.getAttribute("aria-label"));
-    expect(labels).toEqual(["Записать питание", "Стакан воды", "Новая запись", "Скорректировать план", "Профиль"]);
+    // Имя стакана для скринридера — с глаголом (тап пишет 250 мл сразу); видимая подпись — «Стакан воды».
+    expect(labels).toEqual(["Записать питание", "Добавить стакан воды", "Новая запись", "Скорректировать план", "Профиль"]);
+    expect(within(block).getByText("Стакан воды")).toBeInTheDocument();
     // Ушедшие из быстрых действий: цель — в карточке, услуги — в каталоге.
     expect(within(block).queryByRole("button", { name: "Найди услугу" })).toBeNull();
     expect(within(block).queryByRole("button", { name: "Моя цель" })).toBeNull();
@@ -454,8 +456,8 @@ describe("H01 · без веса и процентов (§49/§82)", () => {
 
     const text = container.textContent ?? "";
     expect(text).toMatch(/Неделя/);
-    // `` — граница ASCII-слова и с кириллицей не работает: /кг/ не
-    // поймал бы « кг » никогда. Граница — «не буква» по Unicode.
+    // Граница ASCII-слова (backslash-b) с кириллицей не работает: она не
+    // поймала бы « кг » никогда. Граница здесь — «не буква» по Unicode.
     const word = (w: string) => new RegExp(`(^|[^\\p{L}])${w}([^\\p{L}]|$)`, "iu");
     expect(text).not.toMatch(word("кг"));
     expect(text).not.toMatch(word("вес"));

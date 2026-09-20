@@ -182,6 +182,27 @@ class TestLastTopic:
 
         assert _get(client, bot_user).json() == {"last_topic": None}
 
+    def test_turn_before_anonymisation_cutoff_is_not_read_even_with_text(
+        self, client, tenant, bot_user
+    ):
+        """Отсечка ``anonymized_through`` сама по себе: тело ещё не стёрто, а ход уже не читается."""
+        conv = _conversation(
+            tenant, bot_user, anonymized_through=timezone.now() + timedelta(minutes=5)
+        )
+        _turn(conv, Message.Role.ASSISTANT, "Ещё не обезличено, но уже забыто.", minutes_ago=1)
+
+        assert _get(client, bot_user).json() == {"last_topic": None}
+
+    def test_turn_after_anonymisation_cutoff_is_read(self, client, tenant, bot_user):
+        """Положительная пара: ход ПОСЛЕ отсечки — новая тема, разговор продолжается."""
+        conv = _conversation(
+            tenant, bot_user, anonymized_through=timezone.now() - timedelta(minutes=10)
+        )
+        _turn(conv, Message.Role.ASSISTANT, "старое, до отсечки", minutes_ago=20)
+        _turn(conv, Message.Role.ASSISTANT, "новое, после отсечки", minutes_ago=1)
+
+        assert _get(client, bot_user).json()["last_topic"]["text"] == "новое, после отсечки"
+
     def test_safety_canned_reply_is_skipped_for_the_previous_real_turn(
         self, client, tenant, bot_user
     ):
@@ -244,6 +265,18 @@ class TestLastTopic:
         _turn(conv, Message.Role.ASSISTANT, text, minutes_ago=1)
 
         assert _get(client, bot_user).json()["last_topic"]["text"] == "Есть окно в 14:00."
+
+    def test_service_line_glued_with_a_single_newline_is_still_cut(self, client, tenant, bot_user):
+        """Подсадка: служебная строка приклеена одним переводом строки — в превью не попадает."""
+        conv = _conversation(tenant, bot_user)
+        _turn(
+            conv,
+            Message.Role.ASSISTANT,
+            f"Записала ужин: салат.\n{ANNOUNCE_HEAD}не ешь мясо.",
+            minutes_ago=1,
+        )
+
+        assert _get(client, bot_user).json()["last_topic"]["text"] == "Записала ужин: салат."
 
     def test_turn_made_only_of_a_service_line_is_skipped(self, client, tenant, bot_user):
         """Подсадка: ход из одной служебной строки — не тема; берётся ход до него."""

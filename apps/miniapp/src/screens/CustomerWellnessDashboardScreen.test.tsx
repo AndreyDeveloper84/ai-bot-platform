@@ -166,7 +166,7 @@ describe("CustomerWellnessDashboardScreen — the home surface", () => {
     ).not.toBeInTheDocument();
     expect(screen.queryByText(/Сфотографируй еду/)).not.toBeInTheDocument();
     // POSITIVE (парная): действия с живыми ручками на месте.
-    expect(qa.getByRole("button", { name: "Стакан воды" })).toBeInTheDocument();
+    expect(qa.getByRole("button", { name: "Добавить стакан воды" })).toBeInTheDocument();
     expect(qa.getByRole("button", { name: "Записать питание" })).toBeInTheDocument();
     expect(qa.getByRole("button", { name: "Новая запись" })).toBeInTheDocument();
     // Цель — в карточке цели, не в быстрых действиях (DRF-2144 п.4).
@@ -653,7 +653,7 @@ describe("CustomerWellnessDashboardScreen — degraded reads (DRF-1546)", () => 
     ).not.toBeInTheDocument();
     // POSITIVE (парная): запись воды — отдельная ручка, она жива.
     expect(
-      screen.getByRole("button", { name: "Стакан воды" }),
+      screen.getByRole("button", { name: "Добавить стакан воды" }),
     ).toBeInTheDocument();
   });
 
@@ -1119,7 +1119,7 @@ describe("CustomerWellnessDashboardScreen — отмена стакана (DRF-1
   async function tapWater() {
     await renderScreen(true);
     const qa = within(await screen.findByRole("region", { name: "Быстрые действия" }));
-    fireEvent.click(qa.getByRole("button", { name: "Стакан воды" }));
+    fireEvent.click(qa.getByRole("button", { name: "Добавить стакан воды" }));
   }
 
   it("принятый стакан можно отменить: DELETE по id записи, тост «Стакан убран»", async () => {
@@ -1277,7 +1277,7 @@ describe("CustomerWellnessDashboardScreen — отмена стакана (DRF-1
     await vi.waitFor(() => expect(posts()).toBe(1));
 
     const qa = within(screen.getByRole("region", { name: "Быстрые действия" }));
-    fireEvent.click(qa.getByRole("button", { name: "Стакан воды" }));
+    fireEvent.click(qa.getByRole("button", { name: "Добавить стакан воды" }));
     releaseFirst();
 
     await vi.waitFor(() => expect(posts()).toBe(2));
@@ -1328,8 +1328,8 @@ describe("CustomerWellnessDashboardScreen — отмена стакана (DRF-1
     const posts = () => calls.filter((c) => c.startsWith("POST")).length;
     await vi.waitFor(() => expect(posts()).toBe(1));
     const qa = within(screen.getByRole("region", { name: "Быстрые действия" }));
-    fireEvent.click(qa.getByRole("button", { name: "Стакан воды" }));
-    fireEvent.click(qa.getByRole("button", { name: "Стакан воды" }));
+    fireEvent.click(qa.getByRole("button", { name: "Добавить стакан воды" }));
+    fireEvent.click(qa.getByRole("button", { name: "Добавить стакан воды" }));
     releaseFirst();
 
     await vi.waitFor(() => expect(posts()).toBe(3));
@@ -1358,7 +1358,7 @@ describe("CustomerWellnessDashboardScreen — отмена стакана (DRF-1
     const posts = () => calls.filter((c) => c.startsWith("POST")).length;
     await vi.waitFor(() => expect(posts()).toBe(1));
     const qa = within(screen.getByRole("region", { name: "Быстрые действия" }));
-    fireEvent.click(qa.getByRole("button", { name: "Стакан воды" }));
+    fireEvent.click(qa.getByRole("button", { name: "Добавить стакан воды" }));
     releaseFirst();
 
     expect(await screen.findByText("+1 стакан · 1 стакан ждёт синхронизации")).toBeInTheDocument();
@@ -1408,7 +1408,7 @@ describe("CustomerWellnessDashboardScreen — отмена стакана (DRF-1
       throw new DOMException("quota", "QuotaExceededError");
     });
 
-    fireEvent.click(qa.getByRole("button", { name: "Стакан воды" }));
+    fireEvent.click(qa.getByRole("button", { name: "Добавить стакан воды" }));
 
     expect(await screen.findByText("Стакан не сохранён — попробуй ещё раз.")).toBeInTheDocument();
     expect(screen.queryByText(/синхронизации/)).not.toBeInTheDocument();

@@ -142,7 +142,7 @@ describe("CustomerWellnessDashboardScreen — контур питания вык
     await renderScreen();
 
     await screen.findByText(DIARY_OFF_TEXT);
-    expect(screen.queryByRole("button", { name: "Стакан воды" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Добавить стакан воды" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Записать питание" })).not.toBeInTheDocument();
     // Вход в каталог — «Новая запись» в быстрых действиях и «Записаться» под пустой записью.
     expect(screen.getByRole("button", { name: "Новая запись" })).toBeInTheDocument();
@@ -156,7 +156,7 @@ describe("CustomerWellnessDashboardScreen — контур питания вык
     expect(await screen.findByText(/через минуту/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Обновить" })).toBeInTheDocument();
     expect(screen.queryByText(DIARY_OFF_TEXT)).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Стакан воды" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Добавить стакан воды" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Записать питание" })).toBeInTheDocument();
   });
 
@@ -165,7 +165,7 @@ describe("CustomerWellnessDashboardScreen — контур питания вык
     await renderScreen();
 
     expect(await screen.findByRole("button", { name: "Записать питание" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Стакан воды" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Добавить стакан воды" })).toBeInTheDocument();
     expect(screen.queryByText(DIARY_OFF_TEXT)).not.toBeInTheDocument();
   });
 });
