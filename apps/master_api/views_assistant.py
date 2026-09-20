@@ -129,9 +129,14 @@ def _message_dict(row) -> dict[str, Any]:
 @require_http_methods(["GET"])
 @require_master_init_data
 def assistant_history(request: HttpRequest) -> HttpResponse:
-    """Последние реплики диалога мастера с Ayla, старые первыми."""
+    """Последние реплики диалога мастера с Ayla, старые первыми.
 
-    from apps.conversations.staff_assistant import recent_staff_history
+    DRF-2151: только ходы ассистента — команды («/start …»), токены
+    приглашений, ответы входа и tool-строки на экран не попадают
+    (:func:`apps.conversations.staff_assistant.visible_staff_history`).
+    """
+
+    from apps.conversations.staff_assistant import visible_staff_history
 
     bot_user = request.bot_user  # type: ignore[attr-defined]
 
@@ -146,7 +151,7 @@ def assistant_history(request: HttpRequest) -> HttpResponse:
     if thread is None:
         return JsonResponse({"messages": []})
 
-    rows = recent_staff_history(thread, limit=limit)
+    rows = visible_staff_history(thread, limit=limit)
     return JsonResponse({"messages": [_message_dict(r) for r in rows]})
 
 
@@ -171,10 +176,14 @@ def assistant_ask(request: HttpRequest) -> HttpResponse:
     if len(text) > MAX_QUESTION_CHARS:
         return _error("bad_request", f"text must be ≤ {MAX_QUESTION_CHARS} chars", 400)
 
-    from apps.conversations.staff_assistant import recent_staff_history
+    from apps.conversations.staff_assistant import is_hidden_staff_turn, recent_staff_history
 
     thread = _thread(bot_user)
-    inbound = _remember(thread, role="user", content=text)
+    # DRF-2151: вставленная команда / токен приглашения отвечается, но в
+    # нить как реплика не ложится — ей нечего делать на экране и в памяти.
+    inbound = (
+        None if is_hidden_staff_turn("user", text) else _remember(thread, role="user", content=text)
+    )
     history = (
         recent_staff_history(thread, exclude_id=getattr(inbound, "id", None))
         if thread is not None

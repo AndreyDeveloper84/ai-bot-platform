@@ -89,7 +89,7 @@ def _message_dict(row) -> dict[str, Any]:
 def assistant_history(request: HttpRequest) -> HttpResponse:
     """Последние реплики администратора с Ayla, старые первыми."""
 
-    from apps.conversations.staff_assistant import recent_staff_history
+    from apps.conversations.staff_assistant import visible_staff_history
 
     bot_user = request.bot_user  # type: ignore[attr-defined]
     raw_limit = request.GET.get("limit", "")
@@ -102,7 +102,8 @@ def assistant_history(request: HttpRequest) -> HttpResponse:
     thread = _thread(bot_user)
     if thread is None:
         return JsonResponse({"messages": []})
-    rows = recent_staff_history(thread, limit=limit)
+    # DRF-2151: тот же фильтр, что у мастера — команды/токены/tool-строки не на экране.
+    rows = visible_staff_history(thread, limit=limit)
     return JsonResponse({"messages": [_message_dict(r) for r in rows]})
 
 
@@ -129,7 +130,12 @@ def assistant_ask(request: HttpRequest) -> HttpResponse:
         return _error("bad_request", f"text must be ≤ {MAX_QUESTION_CHARS} chars", 400)
 
     thread = _thread(bot_user)
-    inbound = _remember(thread, role="user", content=text)
+    from apps.conversations.staff_assistant import is_hidden_staff_turn
+
+    # DRF-2151: команда / токен приглашения в нить не пишется.
+    inbound = (
+        None if is_hidden_staff_turn("user", text) else _remember(thread, role="user", content=text)
+    )
     history = (
         recent_staff_history(thread, exclude_id=getattr(inbound, "id", None))
         if thread is not None

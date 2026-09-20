@@ -1712,8 +1712,16 @@ def _handle_talk(event: CanonicalEvent, role_ctx, bot_user, tenant, entry) -> No
     history provoked hallucinated refusals).
     """
 
+    from apps.conversations.staff_assistant import is_hidden_staff_turn
+
     thread = _open_thread(bot_user, role_ctx)
-    inbound = _remember(thread, role="user", content=event.text)
+    # DRF-2151: команда или токен приглашения, дошедшие сюда (форма, которую
+    # входные ветки выше не признали), — не реплика: отвечаем, не записываем.
+    inbound = (
+        None
+        if is_hidden_staff_turn("user", event.text)
+        else _remember(thread, role="user", content=event.text)
+    )
 
     answer = _ask_assistant(bot_user, thread, event.text, exclude_id=inbound)
     if answer is None:

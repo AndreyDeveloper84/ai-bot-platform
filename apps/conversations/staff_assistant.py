@@ -23,6 +23,7 @@ still be there. Postgres is the whole memory here.
 from __future__ import annotations
 
 import logging
+import re
 import uuid
 from decimal import Decimal
 
@@ -38,6 +39,104 @@ logger = logging.getLogger(__name__)
 #: How many turns the assistant gets to see. Ten matches the customer
 #: concierge; beyond that the prompt grows faster than the answer improves.
 DEFAULT_HISTORY_LIMIT = 10
+
+
+# ─── what the «Ayla» screen may show (DRF-2151) ──────────────────────────────
+#
+# The thread is a log, not the assistant's memory: the salon bot wrote
+# every typed line into it, and before the entry guards (DRF-2113/2114)
+# that included «/start master_invite_<uuid>», «/start inv_AYLAUUA6» and the
+# bot's entry replies. A one-time invitation token on a screen is a leak
+# (DRF-1228 keeps codes out of the DB in the open — and here they were on
+# the screen). The screen therefore shows assistant TURNS only: a question
+# the person asked and the answer, never a command, never a token, never a
+# tool row. Old rows are hidden, not erased — a log is not memory; purging
+# it is a separate owner decision.
+
+#: A line that is a command or carries an invitation token — never a turn.
+#: Leading «/» covers «/start …», «/whoami», «/anketa» and whatever the bot
+#: grows next; the token shapes are the ones ``salon_handler`` reads
+#: (``master_invite_<uuid>``, ``inv_XXXX``) plus the typed code «AYLA-XXXX».
+_HIDDEN_USER_TURN = re.compile(
+    r"^/"
+    r"|master_invite_[0-9a-fA-F-]{8,}"
+    r"|\binv_[A-Za-z0-9]{4,}\b"
+    r"|\bAYLA[- ]?[A-Za-z0-9]{4,}\b",
+)
+
+#: Entry replies the bot sends to a command — the assistant said nothing,
+#: the door did. Cut only when the reply follows a hidden command AND has
+#: one of these shapes; a substantive answer after a pasted «/start» stays
+#: (main-window ruling 20.09): ``menu_header`` («Салон «X».» / «… Ваш день
+#: и кабинет мастера.»), «Слушаю, …», «Чем могу помочь? …».
+_ENTRY_REPLY = re.compile(
+    r"^Салон «[^»]+»\.( Ваш день и кабинет мастера\.)?$"
+    r"|^Слушаю\b"
+    r"|^Чем могу помочь\b",
+)
+
+#: Roles the screen renders. ``tool`` rows are raw tool output and
+#: ``system`` rows are prompt scaffolding — neither is a turn.
+VISIBLE_ROLES = frozenset({StaffAssistantMessage.Role.USER, StaffAssistantMessage.Role.ASSISTANT})
+
+
+def is_hidden_staff_turn(role: str, content: str) -> bool:
+    """``True`` — this row must never reach a screen (or be written as a user turn).
+
+    Commands and invitation tokens are hidden whatever the role; roles
+    other than user / assistant are hidden by kind.
+    """
+    if role not in VISIBLE_ROLES:
+        return True
+    text = (content or "").strip()
+    if not text:
+        return True
+    return bool(_HIDDEN_USER_TURN.search(text))
+
+
+def is_entry_reply(content: str) -> bool:
+    """The bot's answer to a command — a door, not an assistant turn."""
+    return bool(_ENTRY_REPLY.search((content or "").strip()))
+
+
+def visible_staff_history(
+    thread: StaffAssistantThread,
+    *,
+    limit: int = DEFAULT_HISTORY_LIMIT,
+) -> list[StaffAssistantMessage]:
+    """The last ``limit`` turns the «Ayla» screen may show, oldest first.
+
+    Reads a wider window than ``limit`` so hidden rows do not eat the
+    screen's quota, then drops: hidden rows (commands, tokens, tool /
+    system rows) and the entry reply immediately following a hidden
+    command. An assistant row after a hidden command that is NOT an entry
+    form stays — the answer to a question the person pasted after the
+    command is still their answer.
+
+    The model's own window (:func:`recent_staff_history`) is untouched:
+    this is about what a person sees, not what the assistant remembers.
+    """
+    # Four times the screen's quota, capped: the pilot's worst thread had
+    # a handful of commands, not hundreds; a thread that is all commands
+    # simply renders empty, which is the honest picture.
+    scan = min(max(limit * 4, 40), 400)
+    rows = recent_staff_history(thread, limit=scan)
+    kept: list[StaffAssistantMessage] = []
+    previous_hidden_command = False
+    for row in rows:
+        if is_hidden_staff_turn(row.role, row.content):
+            previous_hidden_command = row.role == StaffAssistantMessage.Role.USER
+            continue
+        if (
+            previous_hidden_command
+            and row.role == StaffAssistantMessage.Role.ASSISTANT
+            and is_entry_reply(row.content)
+        ):
+            previous_hidden_command = False
+            continue
+        previous_hidden_command = False
+        kept.append(row)
+    return kept[-limit:] if limit > 0 else []
 
 
 def resolve_active_staff_thread(
