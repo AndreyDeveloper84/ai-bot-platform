@@ -325,7 +325,9 @@ class TestTheCompositionIsDerivedNotRecalled:
     def test_every_declared_store_has_an_outcome(self):
         """Хранилище в экспорте без исхода здесь — красный сам по себе."""
 
-        missing = sorted(stores_declared_by_export_coverage() - set(OUTCOMES))
+        declared = stores_declared_by_export_coverage()
+        assert declared, "вывод из реестра пуст — сравнивать не с чем"
+        missing = sorted(declared - set(OUTCOMES))
         assert not missing, (
             "хранилища из export_coverage без исхода в матрице «забудь всё» — "
             f"добавить в OUTCOMES с исходом и причиной: {missing}"
@@ -508,7 +510,10 @@ def seed_person(tenant: Tenant, fake_redis: _FakeRedis, label: str) -> Person:
         skill_state={"nutrition_intake": {"weight_kg": 61, "height_cm": 168, "label": label}},
     )
     Conversation.all_tenants.filter(pk=conversation.pk).update(created_at=earlier)
-    for role, text in (("user", f"мой телефон {_PHONE}, я веган [{label}]"), ("assistant", "Записала.")):
+    for role, text in (
+        ("user", f"мой телефон {_PHONE}, я веган [{label}]"),
+        ("assistant", "Записала."),
+    ):
         message = Message.all_tenants.create(
             tenant=tenant,
             conversation=conversation,
@@ -640,9 +645,7 @@ def snapshot(store: str, person: Person, fake_redis: _FakeRedis) -> Any:
             .values("body", "rendered_body", "reason", "retention_until")
         )
     if store == "conversations.AiDraft":
-        return list(
-            AiDraft.all_tenants.filter(conversation=person.conversation).values("content")
-        )
+        return list(AiDraft.all_tenants.filter(conversation=person.conversation).values("content"))
     if store == "redis.short_term":
         return fake_redis.store.get(f"conv:{person.conversation.id}:msgs")
     if store == "redis.pii_tokenmap":
@@ -690,9 +693,7 @@ def snapshot(store: str, person: Person, fake_redis: _FakeRedis) -> Any:
             )
         )
     if store == "tenancy.TenantStaff":
-        return list(
-            TenantStaff.all_tenants.filter(bot_user=bu).values("role", "deactivated_at")
-        )
+        return list(TenantStaff.all_tenants.filter(bot_user=bu).values("role", "deactivated_at"))
     if store == "tenancy.StaffInvite":
         return list(
             StaffInvite.all_tenants.filter(used_by=bu).values("note", "used_at", "revoked_at")
@@ -713,7 +714,9 @@ def _present(state: Any) -> bool:
 # ── Ожидаемый исход по хранилищу ─────────────────────────────────────────────
 
 
-def assert_outcome(store: str, person: Person, before: Any, after: Any, catalog: _FakeCatalog) -> None:
+def assert_outcome(
+    store: str, person: Person, before: Any, after: Any, catalog: _FakeCatalog
+) -> None:
     """DELETE → 0 живых; ANONYMISE → строка есть, ПДн пусты; RETAIN → строка не изменилась."""
 
     expected = OUTCOMES[store].outcome
@@ -727,7 +730,9 @@ def assert_outcome(store: str, person: Person, before: Any, after: Any, catalog:
             assert len(after) == len(snapshot("conversations.Message", person, _FakeRedis()))
             for row in after:
                 assert _PHONE not in row["body"], row["body"]
-                assert "[PHONE]" in row["body"] or "веган" in row["body"] or row["body"] == "Записала."
+                assert (
+                    "[PHONE]" in row["body"] or "веган" in row["body"] or row["body"] == "Записала."
+                )
                 assert row["reason"] == ArchivedMessage.Reason.FORGET_ALL
                 assert row["retention_until"] > timezone.now() + timedelta(days=80)
             return
@@ -849,9 +854,17 @@ class TestAfterTheSweepEveryStoreHasItsOutcome:
     def test_the_neighbour_is_untouched_in_every_store(self, swept):
         run = swept()
         before = run.before["neighbour"]
-        assert all(_present(before[s]) for s in OUTCOMES if s not in {"conversations.ArchivedMessage", CATALOG_STORE})
+        assert all(
+            _present(before[s])
+            for s in OUTCOMES
+            if s not in {"conversations.ArchivedMessage", CATALOG_STORE}
+        )
         after = {store: snapshot(store, run.neighbour, run.fake_redis) for store in OUTCOMES}
-        changed = {store: (before[store], after[store]) for store in OUTCOMES if before[store] != after[store]}
+        changed = {
+            store: (before[store], after[store])
+            for store in OUTCOMES
+            if before[store] != after[store]
+        }
         assert changed == {}, changed  # empty-assert-ok: присутствие соседа доказано строкой выше
         assert run.neighbour.ayla_user_id not in run.catalog.deleted_for
         assert f"conv:{run.neighbour.conversation.id}:msgs" not in run.fake_redis.deleted
@@ -876,5 +889,7 @@ class TestTheCatalogReadbackIsTheLastWord:
         assert job["attempts"] == 1
         assert job["next_attempt_at"] is not None
         # Бот-половина при этом ДОДЕЛАНА: readback каталога — последняя строка, не первая.
-        assert snapshot("identity.MemoryEntry:green", run.person, run.fake_redis) == []  # empty-assert-ok: посев зелёной строки проверен в before
-        assert run.before["person"]["identity.MemoryEntry:green"] != []
+        seeded = run.before["person"]["identity.MemoryEntry:green"]
+        assert len(seeded) == 1
+        live = snapshot("identity.MemoryEntry:green", run.person, run.fake_redis)
+        assert live == []  # empty-assert-ok: посев доказан строкой выше (seeded)
