@@ -54,6 +54,10 @@ _LABEL = "apps.skills.nutrition_anketa.skill.goal_label"
 
 _BODY = {"gender": "female", "age": 28, "height": 168, "weight": 62}
 
+#: Зеркало меток (goal_label): ключ без метки отдаётся как есть — и тогда
+#: подсказки нет (h7).
+_MIRROR = {"body_shape": "Подтянуть фигуру", "recharge": "Перезагрузиться"}
+
 
 def _state(current_step: str, answers: dict[str, Any]) -> dict:
     return {
@@ -114,7 +118,7 @@ class _Run:
             ),
             patch(_ATTESTATION_LOOKUP, return_value=_ATTESTATION),
             patch(_FETCH, self.fetch),
-            patch(_LABEL, side_effect=lambda key: {"body_shape": "Подтянуть фигуру"}.get(key, key)),
+            patch(_LABEL, side_effect=lambda key: _MIRROR.get(key, key)),
         ):
             return self.skill.handle(ctx)
 
@@ -177,8 +181,12 @@ class TestH2NoHintMeansThePlainStep:
             {"version": 2, "known": {"goal": None}},
             {"version": 2, "known": {}},
             {"version": 2},
+            {
+                "version": 2,
+                "known": {"goal": {**_doc(["lose"])["known"]["goal"], "is_active": False}},
+            },
         ],
-        ids=["hint-null", "no-goal", "known-empty", "no-known"],
+        ids=["hint-null", "no-goal", "known-empty", "no-known", "archived-goal"],
     )
     def test_the_prompt_is_exactly_the_plain_one(self, doc: dict) -> None:
         run = _Run(_state("activity", _BODY), doc=doc)
@@ -229,6 +237,7 @@ class TestH5AylaFailuresLeaveThePlainStep:
         [
             Mock(side_effect=GoalsUnavailable("timeout")),
             Mock(side_effect=GoalsConfigError("not configured")),
+            Mock(side_effect=RuntimeError("boom")),
             Mock(return_value="not a document"),
             Mock(
                 return_value={
@@ -236,7 +245,7 @@ class TestH5AylaFailuresLeaveThePlainStep:
                 }
             ),
         ],
-        ids=["unavailable", "not-configured", "not-a-dict", "hint-not-a-list"],
+        ids=["unavailable", "not-configured", "any-exception", "not-a-dict", "hint-not-a-list"],
     )
     def test_the_step_renders_without_a_hint(self, fetch: Mock) -> None:
         run = _Run(_state("activity", _BODY), fetch=fetch)
@@ -261,6 +270,15 @@ class TestH6OnlyTableValuesAreHinted:
 
 
 class TestH7TheGoalNameIsTheCuratedLabel:
+    def test_a_key_the_mirror_does_not_know_means_no_hint(self) -> None:
+        """Ревью #1895: ``goal_label`` без метки отдаёт сырой ключ — в текст
+        человеку слаг не печатается; подсказки просто нет."""
+        run = _Run(_state("activity", _BODY), doc=_doc(["lose"], goal_key="mystery_goal"))
+        result = _ask_goal(run)
+        assert result.reply_text == _PLAIN_GOAL_PROMPT
+        assert "goal_hint" not in result.action_data
+        assert "mystery_goal" not in result.reply_text
+
     def test_goal_text_of_the_person_is_not_printed(self) -> None:
         run = _Run(
             _state("activity", _BODY),

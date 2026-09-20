@@ -957,8 +957,8 @@ class NutritionAnketaSkill:
             # action_data; в answers она не пишет ничего.
             hint = _goal_hint(context)
             if hint is not None:
-                goal_key, options = hint
-                prompt = f"{prompt}\n\n" + _goal_hint_line(goal_key, options, fsm.answers)
+                goal_key, label, options = hint
+                prompt = f"{prompt}\n\n" + _goal_hint_line(label, options, fsm.answers)
                 action_data["goal_hint"] = {"goal_key": goal_key, "options": options}
         return SkillResult(
             reply_text=prompt,
@@ -1031,15 +1031,17 @@ class NutritionAnketaSkill:
 # ─── helpers ──────────────────────────────────────────────────────────────
 
 
-def _goal_hint(context: SkillContext) -> tuple[str, list[str]] | None:
-    """DRF-2124: ``(goal_key, [slug, …])`` подсказки из decision-context или ``None``.
+def _goal_hint(context: SkillContext) -> tuple[str, str, list[str]] | None:
+    """DRF-2124: ``(goal_key, метка, [slug, …])`` подсказки из decision-context или ``None``.
 
     Читает ``known.goal.nutrition_goal_hint`` активной цели; оставляет только
     значения из таблицы анкеты (:data:`GOAL_CHOICES`) в её порядке — чужое
-    (``slim``) не печатается. ``None`` — цели нет, подсказки нет (``null``,
-    §103), список без известных значений, документ не той формы или Ayla
-    не ответила: подсказка — вежливость, шаг без неё полноценен. В лог —
-    класс отказа, без идентификатора канала (DRF-2009).
+    (``slim``) не печатается. ``None`` — цели нет (в т.ч. ``is_active: false``,
+    как у :mod:`apps.nutrition_coach.goals`), подсказки нет (``null``, §103),
+    список без известных значений, документ не той формы, у зеркала нет
+    метки для ключа (в текст человеку не печатается сырой слаг — только
+    курируемое слово) или Ayla не ответила: подсказка — вежливость, шаг без
+    неё полноценен. В лог — класс отказа, без идентификатора канала (DRF-2009).
     """
     try:
         document = fetch_decision_context(external_user_id=external_user_id_for(context.bot_user))
@@ -1048,7 +1050,7 @@ def _goal_hint(context: SkillContext) -> tuple[str, list[str]] | None:
         return None
     known = document.get("known") if isinstance(document, dict) else None
     goal = known.get("goal") if isinstance(known, dict) else None
-    if not isinstance(goal, dict):
+    if not isinstance(goal, dict) or goal.get("is_active") is False:
         return None
     goal_key = goal.get("goal_key")
     raw = goal.get("nutrition_goal_hint")
@@ -1057,16 +1059,20 @@ def _goal_hint(context: SkillContext) -> tuple[str, list[str]] | None:
     options = [slug for slug in GOAL_CHOICES if slug in raw]
     if not options:
         return None
-    return goal_key, options
+    label = goal_label(goal_key)
+    if not label or label == goal_key:
+        # Зеркало знает только цели с живой услугой; без метки — без подсказки.
+        return None
+    return goal_key, label, options
 
 
-def _goal_hint_line(goal_key: str, options: list[str], answers: dict) -> str:
+def _goal_hint_line(label: str, options: list[str], answers: dict) -> str:
     """Строка подсказки: метка цели из зеркала (не свободный текст человека),
     метки вариантов — из таблицы анкеты, хвост — по полу с первого шага."""
     labels = [f"«{GOAL_CHOICES[slug]}»" for slug in options]
     joined = labels[0] if len(labels) == 1 else ", ".join(labels[:-1]) + " или " + labels[-1]
     you = _GOAL_HINT_YOU.get(str(answers.get("gender")), _GOAL_HINT_YOU_DEFAULT)
-    return _GOAL_HINT_LINE.format(goal=goal_label(goal_key), options=joined, you=you)
+    return _GOAL_HINT_LINE.format(goal=label, options=joined, you=you)
 
 
 def _is_real_orm_conversation(conversation: object) -> bool:
