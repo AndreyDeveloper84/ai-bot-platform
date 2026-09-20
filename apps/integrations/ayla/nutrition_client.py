@@ -220,6 +220,19 @@ class ScanDailyLimitError(ScanBudgetError):
         super().__init__(reason)
 
 
+def _retry_after_or_none(value: object) -> int | None:
+    """``retry_after`` из чужого тела → секунды или ничего.
+
+    ``bool`` — не число секунд (``True`` дало бы «через 1 секунду»), а
+    бесконечность и NaN json разбирает молча и роняют ``int()``.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if value != value or value in (float("inf"), float("-inf")):  # NaN / ±inf
+        return None
+    return int(value)
+
+
 class ScanBudgetExhaustedError(ScanBudgetError):
     """503 ``FOOD_SCAN_BUDGET_EXHAUSTED`` — общий дневной бюджет распознавания.
 
@@ -807,7 +820,15 @@ class NutritionClient:
         Raises:
             NutritionUnavailableError: circuit open, network error, 5xx, timeout.
             FoodNotRecognizedError: 400 FOOD_NOT_RECOGNIZED.
+            ScanDailyLimitError: 429 FOOD_SCAN_DAILY_LIMIT (DRF-2195).
+            ScanBudgetExhaustedError: 503 FOOD_SCAN_BUDGET_EXHAUSTED (DRF-2195).
             NutritionAPIError: other 4xx.
+
+        Два класса бюджета — штатные отказы, а не сбой: они НЕ наследники
+        ``NutritionUnavailableError``, не кормят предохранитель и требуют
+        своего текста («напиши словами»), а не «попробуй через минуту».
+        Вызывающий, который ловит только ``NutritionUnavailableError``, их
+        пропустит; общий хвост ``NutritionAPIError`` — поймает.
         """
         now = time.monotonic()
         if self._circuit.is_open(now=now):
@@ -865,12 +886,20 @@ class NutritionClient:
         # подряд гасят запись еды текстом, дневник, сводку и ориентиры —
         # функции, к фото отношения не имеющие. Порядок ветвей здесь и есть
         # содержание правки.
+        # Тело — чужие данные: `{"error": "service overloaded"}` встречается у
+        # прокси и балансировщиков не реже объекта. Разбор идёт через
+        # `isinstance`, как в ветке 409/422 ниже: иначе `AttributeError`
+        # улетел бы мимо ветки 5xx — предохранитель не сработал бы В САМУЮ
+        # АВАРИЮ, а человек получил бы трассировку вместо отказа.
         try:
-            error = resp.json().get("error") or {}
-            err_code = error.get("code", "")
-            err_details = error.get("details") or {}
+            payload = resp.json()
         except ValueError:
-            err_code, err_details = "", {}
+            payload = {}
+        error = payload.get("error") if isinstance(payload, dict) else None
+        error = error if isinstance(error, dict) else {}
+        err_code = str(error.get("code") or "")
+        raw_details = error.get("details")
+        err_details: dict[str, Any] = raw_details if isinstance(raw_details, dict) else {}
 
         if err_code == "FOOD_SCAN_DAILY_LIMIT":
             retry_after = err_details.get("retry_after")
@@ -879,13 +908,18 @@ class NutritionClient:
                 external_user_id,
                 retry_after,
             )
-            raise ScanDailyLimitError(
-                "daily_limit",
-                retry_after=int(retry_after) if isinstance(retry_after, (int, float)) else None,
-            )
+            raise ScanDailyLimitError("daily_limit", retry_after=_retry_after_or_none(retry_after))
         if err_code == "FOOD_SCAN_BUDGET_EXHAUSTED":
             logger.info("nutrition_client.scan.budget_exhausted ext=%s", external_user_id)
             raise ScanBudgetExhaustedError("budget_exhausted")
+
+        # Ни одна из двух веток выше не зовёт и `record_success()` — это
+        # осознанно, а не забыто. Отказ по бюджету доказывает, что жива
+        # РУЧКА СКАНА, но ничего не говорит про остальной каталог, чьи сбои
+        # копятся в том же окне. Обнулять их отказом сканера значило бы
+        # оттягивать предохранитель в настоящую аварию. Ветки 409/422 ниже
+        # зовут `record_success()` потому, что там ответ приходит от той же
+        # ручки, что и успех.
 
         if resp.status_code >= 500:
             self._circuit.record_failure(now=now)

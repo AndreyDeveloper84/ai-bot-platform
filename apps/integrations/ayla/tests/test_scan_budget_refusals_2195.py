@@ -111,6 +111,51 @@ class TestBudgetRefusalsAreNotFailures:
         assert client._circuit.is_open(now=time.monotonic()) is True
 
     @pytest.mark.asyncio
+    async def test_non_object_error_body_still_feeds_the_breaker(self) -> None:
+        """Чужое тело не объект — авария остаётся аварией.
+
+        `{"error": "service overloaded"}` — обычная форма у прокси и
+        балансировщиков. Разбор тела стоит ВЫШЕ развилки по статусу, поэтому
+        `error.get(...)` на строке уронил бы `AttributeError` мимо ветки 5xx:
+        предохранитель не сработал бы в самую аварию, а человек получил бы
+        трассировку вместо отказа.
+        """
+        client, transport = _client_with_handler(_responder(503, {"error": "service overloaded"}))
+        _set_transport(transport)
+
+        for _ in range(5):
+            with pytest.raises(nc.NutritionUnavailableError):
+                await client.scan_photo(external_user_id="bot:1", image_bytes=b"...")
+
+        assert client._circuit.is_open(now=time.monotonic()) is True
+
+    @pytest.mark.asyncio
+    async def test_empty_and_listy_bodies_do_not_crash_the_parse(self) -> None:
+        """Тело пустое, список или голое число — разбор переживает."""
+        for body in ({}, [1, 2], {"error": None}, {"error": {"code": None}}):
+            client, transport = _client_with_handler(_responder(503, body))  # type: ignore[arg-type]
+            _set_transport(transport)
+            with pytest.raises(nc.NutritionUnavailableError):
+                await client.scan_photo(external_user_id="bot:1", image_bytes=b"...")
+
+    @pytest.mark.asyncio
+    async def test_retry_after_garbage_becomes_none_not_a_crash(self) -> None:
+        """`retry_after` — чужое число. `True` не «1 секунда», inf не число."""
+        for raw, expected in ((3600, 3600), (True, None), ("soon", None), (None, None)):
+            body = {
+                "error": {
+                    "code": "FOOD_SCAN_DAILY_LIMIT",
+                    "message": "m",
+                    "details": {"retry_after": raw},
+                }
+            }
+            client, transport = _client_with_handler(_responder(429, body))
+            _set_transport(transport)
+            with pytest.raises(nc.ScanDailyLimitError) as exc:
+                await client.scan_photo(external_user_id="bot:1", image_bytes=b"...")
+            assert exc.value.retry_after == expected, raw
+
+    @pytest.mark.asyncio
     async def test_budget_errors_are_not_unavailable_subclasses(self) -> None:
         """Лестница навыка ловит `NutritionUnavailableError` — отказы бюджета
         не должны в неё попадать, иначе человек увидит «попробуй через минуту»

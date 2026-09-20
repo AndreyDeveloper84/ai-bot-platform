@@ -106,7 +106,6 @@ export interface DailySummaryResponse {
   ai_comment?: string;
 }
 
-
 // ---------------------------------------------------------------------------
 // Error taxonomy — UI maps each to one of the §7 state screens.
 // ---------------------------------------------------------------------------
@@ -224,14 +223,16 @@ export async function scanPhoto(
     });
   } catch (err) {
     if (err instanceof ApiError) {
-      if (err.slug === "food_not_recognized") throw new FoodNotRecognizedError();
+      if (err.slug === "food_not_recognized")
+        throw new FoodNotRecognizedError();
       // DRF-2195 — бюджет читается ДО `nutrition_unavailable`, как и на
       // стороне бота: у обоих отказов свои слаги, и 503 бюджета не должен
       // попасть в «сервис лёг».
       if (err.slug === "food_scan_daily_limit") throw new ScanDailyLimitError();
       if (err.slug === "food_scan_budget_exhausted")
         throw new ScanBudgetExhaustedError();
-      if (err.slug === "nutrition_unavailable") throw new NutritionUnavailableError();
+      if (err.slug === "nutrition_unavailable")
+        throw new NutritionUnavailableError();
       if (err.slug === "photo_too_large") throw new PhotoTooLargeError();
     }
     throw err;
@@ -439,7 +440,9 @@ export async function grantConsent(): Promise<string | null> {
     "/me/food-scanner-consent/",
     {
       method: "POST",
-      body: JSON.stringify({ document_version: FOOD_DIARY_CONSENT_DOCUMENT_VERSION }),
+      body: JSON.stringify({
+        document_version: FOOD_DIARY_CONSENT_DOCUMENT_VERSION,
+      }),
     },
   );
   return res.granted_at ?? null;
@@ -543,10 +546,7 @@ export const PORTION_STEPS: ReadonlyArray<number> = [
   0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0,
 ];
 
-export function nextPortion(
-  current: number,
-  direction: "up" | "down",
-): number {
+export function nextPortion(current: number, direction: "up" | "down"): number {
   const idx = PORTION_STEPS.findIndex((s) => Math.abs(s - current) < 0.001);
   if (idx < 0) return 1.0;
   if (direction === "up") {
@@ -594,10 +594,7 @@ export function nextPortion(
  */
 export class ImageStripUnsupportedError extends Error {
   readonly reason:
-    | "no_browser_api"
-    | "decode_failed"
-    | "no_canvas_context"
-    | "encode_failed";
+    "no_browser_api" | "decode_failed" | "no_canvas_context" | "encode_failed";
   constructor(
     reason:
       | "no_browser_api"

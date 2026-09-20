@@ -124,10 +124,7 @@ export function FoodScannerProcessingScreen() {
         if (controller.signal.aborted) return;
         // AbortError surfaces through the same rejection path; treat
         // as silent cancel rather than rendering an error screen.
-        if (
-          err instanceof DOMException &&
-          err.name === "AbortError"
-        ) {
+        if (err instanceof DOMException && err.name === "AbortError") {
           return;
         }
         setPhase({ kind: "error", err });
@@ -177,10 +174,7 @@ export function FoodScannerProcessingScreen() {
           </div>
         )}
         <p className="food-scanner-processing__line">Узнаю что на фото</p>
-        <div
-          className="food-scanner-processing__dots"
-          aria-hidden="true"
-        >
+        <div className="food-scanner-processing__dots" aria-hidden="true">
           <span />
           <span />
           <span />
@@ -188,8 +182,8 @@ export function FoodScannerProcessingScreen() {
         {phase.kind === "showCancel" && (
           <>
             <p className="food-scanner-processing__hint">
-              Если занимает дольше обычного, можно отменить — фото
-              останется на месте.
+              Если занимает дольше обычного, можно отменить — фото останется на
+              месте.
             </p>
             <button
               type="button"
@@ -245,51 +239,62 @@ function ScanErrorScreen({
   const isTooLarge = err instanceof PhotoTooLargeError;
   const isConsentGate =
     err instanceof ApiError &&
-    (err.slug === "food_diary_consent_required" || err.slug === "consent_required");
+    (err.slug === "food_diary_consent_required" ||
+      err.slug === "consent_required");
   // DRF-2109 — фото выключено флагом (тот же предикат, что у чата): это не
   // сбой и не «через минуту» — писать текстом работает, туда и ведём.
-  const isPhotoOff = err instanceof ApiError && err.slug === "photo_scan_disabled";
+  const isPhotoOff =
+    err instanceof ApiError && err.slug === "photo_scan_disabled";
   // DRF-2195 — два штатных отказа по бюджету распознавания. Каталог работает
   // и отвечает осознанно: «через минуту» здесь было бы ложью о природе отказа
   // (счёт снимется в полночь), а «Переснять» — ложью действием: второй снимок
   // упрётся в тот же счётчик. Рабочая дорога рядом — записать словами.
-  const isDailyLimit = err instanceof ScanDailyLimitError;
-  const isBudgetOut = err instanceof ScanBudgetExhaustedError;
-  const isBudget = isDailyLimit || isBudgetOut;
-  const headline = isDailyLimit
-    ? "Сегодня фото не распознаю"
-    : isBudgetOut
-      ? "Распознавание фото недоступно"
-      : isNotRecognized
-    ? "Не разобралась"
-    : isPhotoFailed
-      ? "Не получилось загрузить"
-      : isTooLarge
-        ? "Фото слишком большое"
-        : isConsentGate
-          ? "Нужно разрешение"
-          : isPhotoOff
-            ? "Фото пока не принимаю"
-            : isNotWired
-              ? "Пока не подключено"
-              : "Сервис недоступен";
-  const body = isDailyLimit
-    ? "Сегодня фото больше не распознаю — напиши словами, что было."
-    : isBudgetOut
-      ? "Распознавание фото сейчас недоступно — напиши словами."
-      : isNotRecognized
-    ? "Фото немного сложное — не разобралась. Можно переснять поближе или просто написать, что было."
-    : isPhotoFailed
-      ? "Фото пришло, но скачать не получилось — пришли ещё раз, пожалуйста."
-      : isTooLarge
-        ? "Такое фото не пройдёт — попробуй снять ещё раз или выбрать снимок поменьше."
-        : isConsentGate
-          ? "Чтобы распознавать еду по фото, нужно разрешение на дневник питания — вернись к сканеру и дай его."
-          : isPhotoOff
-            ? "Распознавание по фото сейчас выключено. Напиши, что было и сколько граммов, — посчитаю и покажу, прежде чем записать."
-            : isNotWired
-            ? "Распознавание еды по фото в приложении ещё не работает. Дневник питания сейчас ведёт Ayla в чате."
-            : "Сервис распознавания временно недоступен. Попробуй через минуту.";
+  // Заголовок и тело лежат парой в одном месте: у отказа по бюджету их два,
+  // и регистрировать новый вид отказа в двух разных тернарных лестницах —
+  // как раз та дорога, на которой 429 когда-то и потерялся.
+  const budget =
+    err instanceof ScanDailyLimitError
+      ? {
+          headline: "Сегодня фото не распознаю",
+          body: "Сегодня фото больше не распознаю — напиши словами, что было.",
+        }
+      : err instanceof ScanBudgetExhaustedError
+        ? {
+            headline: "Распознавание фото недоступно",
+            body: "Распознавание фото сейчас недоступно — напиши словами.",
+          }
+        : null;
+  const isBudget = budget !== null;
+  const headline = budget
+    ? budget.headline
+    : isNotRecognized
+      ? "Не разобралась"
+      : isPhotoFailed
+        ? "Не получилось загрузить"
+        : isTooLarge
+          ? "Фото слишком большое"
+          : isConsentGate
+            ? "Нужно разрешение"
+            : isPhotoOff
+              ? "Фото пока не принимаю"
+              : isNotWired
+                ? "Пока не подключено"
+                : "Сервис недоступен";
+  const body = budget
+    ? budget.body
+    : isNotRecognized
+      ? "Фото немного сложное — не разобралась. Можно переснять поближе или просто написать, что было."
+      : isPhotoFailed
+        ? "Фото пришло, но скачать не получилось — пришли ещё раз, пожалуйста."
+        : isTooLarge
+          ? "Такое фото не пройдёт — попробуй снять ещё раз или выбрать снимок поменьше."
+          : isConsentGate
+            ? "Чтобы распознавать еду по фото, нужно разрешение на дневник питания — вернись к сканеру и дай его."
+            : isPhotoOff
+              ? "Распознавание по фото сейчас выключено. Напиши, что было и сколько граммов, — посчитаю и покажу, прежде чем записать."
+              : isNotWired
+                ? "Распознавание еды по фото в приложении ещё не работает. Дневник питания сейчас ведёт Ayla в чате."
+                : "Сервис распознавания временно недоступен. Попробуй через минуту.";
   return (
     <div className="food-scanner-screen">
       <header className="records-screen__header">
@@ -356,7 +361,9 @@ function ScanErrorScreen({
           {!isPhotoFailed && !isNotWired && !isTooLarge && !isConsentGate && (
             <button
               type="button"
-              className={isPhotoOff || isBudget ? "btn-primary" : "btn-secondary"}
+              className={
+                isPhotoOff || isBudget ? "btn-primary" : "btn-secondary"
+              }
               onClick={() =>
                 navigate("/customer/food-scanner/manual", {
                   state: { mealType },
@@ -366,11 +373,7 @@ function ScanErrorScreen({
               Написать вручную
             </button>
           )}
-          <button
-            type="button"
-            className="btn-secondary"
-            onClick={onBack}
-          >
+          <button type="button" className="btn-secondary" onClick={onBack}>
             Назад на главную
           </button>
         </div>

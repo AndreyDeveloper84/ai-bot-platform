@@ -18,7 +18,7 @@
  * свои кнопки. Правка, переписавшая бы ВСЕ ветки в «напиши словами»,
  * прошла бы отрицательные и упала на положительной.
  */
-import { render, screen } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -84,32 +84,61 @@ describe("бюджет распознавания исчерпан — DRF-2195"
     mockedScan.mockRejectedValue(new ScanDailyLimitError());
     renderScreen();
 
-    expect(await screen.findByText("Сегодня фото не распознаю")).toBeInTheDocument();
+    expect(
+      await screen.findByText("Сегодня фото не распознаю"),
+    ).toBeInTheDocument();
     // Положительная часть: назван срок и названа рабочая дорога.
     expect(screen.getByText(/словами/)).toBeInTheDocument();
     // Отрицательная: не обещаем «через минуту» и не зовём переснимать —
     // ещё один снимок упрётся в тот же счётчик.
     expect(screen.queryByText(/через минуту/)).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Переснять" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Написать вручную" })).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Переснять" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Написать вручную" }),
+    ).toBeInTheDocument();
   });
 
   it("общий дневной бюджет: свой текст, та же дорога словами", async () => {
     mockedScan.mockRejectedValue(new ScanBudgetExhaustedError());
     renderScreen();
 
-    expect(await screen.findByText("Распознавание фото недоступно")).toBeInTheDocument();
+    expect(
+      await screen.findByText("Распознавание фото недоступно"),
+    ).toBeInTheDocument();
     expect(screen.getByText(/словами/)).toBeInTheDocument();
     expect(screen.queryByText(/через минуту/)).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "Переснять" })).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Написать вручную" })).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Переснять" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Написать вручную" }),
+    ).toBeInTheDocument();
   });
 
-  it("два отказа бюджета различимы между собой", async () => {
+  it("два отказа бюджета различимы между собой — в обе стороны", async () => {
+    // Пара проверяется с двух концов: односторонний узел («у суточного не
+    // тот заголовок») прошёл бы и на экране, который для ОБОИХ отказов
+    // рисует текст суточного.
     mockedScan.mockRejectedValue(new ScanDailyLimitError());
     renderScreen();
-    expect(await screen.findByText("Сегодня фото не распознаю")).toBeInTheDocument();
-    expect(screen.queryByText("Распознавание фото недоступно")).not.toBeInTheDocument();
+    expect(
+      await screen.findByText("Сегодня фото не распознаю"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("Распознавание фото недоступно"),
+    ).not.toBeInTheDocument();
+
+    cleanup();
+    mockedScan.mockRejectedValue(new ScanBudgetExhaustedError());
+    renderScreen();
+    expect(
+      await screen.findByText("Распознавание фото недоступно"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("Сегодня фото не распознаю"),
+    ).not.toBeInTheDocument();
   });
 
   it("положительная пара: настоящая недоступность — прежний текст и «Переснять»", async () => {
@@ -118,14 +147,20 @@ describe("бюджет распознавания исчерпан — DRF-2195"
 
     expect(await screen.findByText("Сервис недоступен")).toBeInTheDocument();
     expect(screen.getByText(/через минуту/)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Переснять" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Переснять" }),
+    ).toBeInTheDocument();
   });
 
   it("у экрана отказа остаётся уход: правило #1918 (ошибка не снимает навигацию)", async () => {
     mockedScan.mockRejectedValue(new ScanDailyLimitError());
     renderScreen();
 
-    expect(await screen.findByText("Сегодня фото не распознаю")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Назад на главную" })).toBeInTheDocument();
+    expect(
+      await screen.findByText("Сегодня фото не распознаю"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Назад на главную" }),
+    ).toBeInTheDocument();
   });
 });

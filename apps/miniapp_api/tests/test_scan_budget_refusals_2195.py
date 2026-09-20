@@ -61,6 +61,9 @@ class TestScanBudgetRefusalsHaveTheirOwnNames:
         with patcher:
             resp = _scan(client, bot_user)
 
+        # Наличие — первым: имя у отказа своё. Иначе узел прошёл бы и на
+        # 500-ке без тела, где «не ayla_bad_request» верно по случайности.
+        assert resp.json()["error"] == "food_scan_daily_limit"
         assert resp.json()["error"] != "ayla_bad_request"
         assert resp.json()["error"] != "nutrition_unavailable"
 
