@@ -857,13 +857,73 @@ describe("три пустоты различаются кодом, а не пу�
 // --- Кандидаты, которых полка не умеет, перестают называться OK ------------
 //
 // Замер 08.09.2026: источник отдаёт `kind=PROVIDER` с ключами Ayla
-// (`users/recommendation_source.py:209`), полка умеет `kind=SERVICE` с
-// ключами зеркала (`apps/miniapp_api/views.py:695`). Без имени это
-// состояние выглядит как `OK` с пустой полкой — и всплывает не тогда,
-// когда возникло, а через недели, когда кто-то разметит связи и будет
-// ждать, что полка загорится.
+// (`users/recommendation_source.py:209`); транзит переводит их в ключи
+// зеркала мастеров (`apps/marketplace/resolver_keys.py`). До DRF-2174
+// полка умела ТОЛЬКО `kind=SERVICE` — и первый же живой ответ резолвера
+// (стенд 20.09: ordered=1, PROVIDER) стал «Не получилось подобрать —
+// попробуй ещё раз» с кнопкой повтора, которая детерминированно давала
+// то же самое. Полка учится тому, что резолвер реально производит
+// (§81: рекомендуются мастера; контракт §5 K1). `UNRENDERABLE` остаётся
+// за кандидатами, которых зеркало не знает, — то есть за отставшим
+// зеркалом, и только за ним.
 //
 // Единственный из исходов, где виноват ПОТРЕБИТЕЛЬ, а не источник.
+
+describe("PROVIDER-кандидаты — полка умеет то, что резолвер производит (DRF-2174)", () => {
+  beforeEach(() => {
+    mockedFetchServices.mockResolvedValue({
+      services: [service({ id: "svc-1", name: "Маникюр" })],
+    });
+    mockedFetchMasters.mockResolvedValue({ masters: [MASTER] });
+  });
+
+  function provider(id: string, rank: number): unknown {
+    return {
+      candidate: { kind: "PROVIDER", id },
+      rank,
+      tier: 1,
+      reason_codes: ["MATCH_SERVICE_EXACT"],
+    };
+  }
+
+  it("мастер из зеркала — это OK и пик мастера, а не отказ источника", async () => {
+    // Живой случай стенда 20.09: один PROVIDER, ключ переведён транзитом
+    // в id мастера зеркала. Раньше — UNRENDERABLE и плашка с повтором.
+    mockedFetchRecommendations.mockResolvedValue(decision([provider(MASTER.id, 1)]));
+    const data = await getCatalogBrowse();
+
+    expect(data.picksOutcome).toBe("OK");
+    expect(data.providerPicks!.map((p) => p.masterId)).toEqual([MASTER.id]);
+    expect(data.providerPicks![0]!.reasons.length).toBeGreaterThan(0);
+    // Полка услуг про мастеров не знает — и не должна: у неё свой список.
+    expect(data.picks).toEqual([]);
+    expect(consoleErrorSpy).not.toHaveBeenCalled();
+  });
+
+  it("порядок резолвера у мастеров не трогается", async () => {
+    mockedFetchMasters.mockResolvedValue({
+      masters: [MASTER, { ...MASTER, id: "mst-2", name: "Карина" }],
+    });
+    mockedFetchRecommendations.mockResolvedValue(
+      decision([provider("mst-2", 1), provider(MASTER.id, 2)]),
+    );
+    const data = await getCatalogBrowse();
+    expect(data.providerPicks!.map((p) => [p.masterId, p.rank])).toEqual([
+      ["mst-2", 1],
+      [MASTER.id, 2],
+    ]);
+  });
+
+  it("мастер без WHY проходит гейт владельца так же, как услуга", async () => {
+    mockedFetchRecommendations.mockResolvedValue(
+      decision([{ ...(provider(MASTER.id, 1) as object), reason_codes: ["MATCH_UNDETERMINED"] }]),
+    );
+    const data = await getCatalogBrowse();
+    expect(data.picksOutcome).toBe("OK");
+    expect(data.providerPicks).toEqual([]);
+    expect(consoleErrorSpy).not.toHaveBeenCalled();
+  });
+});
 
 describe("UNRENDERABLE_CANDIDATES — «нам прислали то, чего мы не умеем»", () => {
   beforeEach(() => {
@@ -882,20 +942,21 @@ describe("UNRENDERABLE_CANDIDATES — «нам прислали то, чего �
     };
   }
 
-  it("решение из одних мастеров не выдаётся за OK и не молчит", async () => {
+  it("мастера, которых зеркало не знает, не выдаются за OK и не молчат", async () => {
+    // Ключи не переведены транзитом (зеркало отстало) — показать их нечем.
     mockedFetchRecommendations.mockResolvedValue(
       decision([provider("ayla-mst-1", 1), provider("ayla-mst-2", 2)]),
     );
     const data = await getCatalogBrowse();
-
-    expect(data.picksOutcome).toBe("UNRENDERABLE_CANDIDATES");
-    expect(data.picks).toEqual([]);
 
     expect(consoleErrorSpy).toHaveBeenCalledTimes(1);
     const message = String(consoleErrorSpy.mock.calls[0]![0]);
     // Названо И сколько пришло, И какого вида — чинить будут по этому.
     expect(message).toContain("2 кандидат");
     expect(message).toContain("PROVIDER");
+    expect(data.picksOutcome).toBe("UNRENDERABLE_CANDIDATES");
+    expect(data.picks).toEqual([]);
+    expect(data.providerPicks).toEqual([]);
     // Ключей и имён в журнале нет: он в консоли самого человека.
     expect(message).not.toContain("ayla-mst-1");
   });

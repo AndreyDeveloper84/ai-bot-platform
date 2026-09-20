@@ -260,6 +260,39 @@ describe("положительная стража и поиск", () => {
     for (const text of ALL_TEXTS) expect(screen.queryByText(text)).toBeNull();
   });
 
+  it("живой ответ стенда 20.09 — один PROVIDER из зеркала — ни одного кадра (DRF-2174)", async () => {
+    // До этого среза: `renderable` знал только kind=SERVICE → при
+    // ordered=1 (PROVIDER) поднимался UNRENDERABLE → «Не получилось
+    // подобрать — попробуй ещё раз» с кнопкой, повтор которой давал то же.
+    mockedRecs.mockResolvedValue(
+      decision([
+        { candidate: { kind: "PROVIDER", id: "m-1" }, tier: 1, rank: 1, reason_codes: ["MATCH_SERVICE_EXACT"] },
+      ]) as never,
+    );
+    renderScreen();
+    await catalogReady();
+    // Каталог под плашкой на месте — как и был.
+    expect(screen.getByRole("region", { name: "Мастера" })).toBeInTheDocument();
+    for (const text of ALL_TEXTS) expect(screen.queryByText(text)).toBeNull();
+    expect(screen.queryByRole("button", { name: ACTION_RETRY })).toBeNull();
+  });
+
+  it("под флагом полка рисует мастера с WHY — того, кого резолвер назвал", async () => {
+    vi.stubEnv("VITE_RECOMMENDATION_SHELF", "1"); // флаг НЕ включается этим срезом (OD-PILOT-9)
+    mockedRecs.mockResolvedValue(
+      decision([
+        { candidate: { kind: "PROVIDER", id: "m-1" }, tier: 1, rank: 1, reason_codes: ["MATCH_SERVICE_EXACT"] },
+      ]) as never,
+    );
+    renderScreen();
+    const shelf = await screen.findByRole("region", { name: /Ayla рекомендует/ });
+    const cards = within(shelf).getAllByRole("article");
+    expect(cards).toHaveLength(1);
+    expect(cards[0]).toHaveTextContent("Анна");
+    // WHY — фраза из утверждённого реестра, ничего сочинённого.
+    expect(cards[0]).toHaveTextContent("Это та услуга, которую ты искала");
+  });
+
   it("поверх поиска кадры не рисуются", async () => {
     mockedRecs.mockResolvedValue(decision([], { reason_codes: ["ELIG_EXCLUDED_SAFETY"] }) as never);
     renderScreen();
