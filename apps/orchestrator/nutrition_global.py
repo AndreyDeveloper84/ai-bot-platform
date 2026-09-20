@@ -752,13 +752,37 @@ def _manual_target_pending(conversation: Any) -> bool:
         return False
 
 
+def _update_weight_pending(conversation: Any) -> bool:
+    """Ждёт ли бот вес — «обнови вес» (DRF-2139)? Та же форма, что выше."""
+
+    try:
+        from apps.skills.nutrition_anketa.skill import update_weight_pending
+
+        return update_weight_pending(conversation)
+    except Exception:  # noqa: BLE001 — a predicate must never break the turn
+        logger.exception("orchestrator.nutrition_global.update_weight_pending_check_failed")
+        return False
+
+
+def _update_weight_phrase(text: str) -> bool:
+    """Детерминированный вход «мой вес 65» / «обнови вес» (DRF-2139)."""
+
+    try:
+        from apps.skills.nutrition_anketa.skill import update_weight_phrase
+
+        return update_weight_phrase(text)
+    except Exception:  # noqa: BLE001 — a predicate must never break the turn
+        logger.exception("orchestrator.nutrition_global.update_weight_phrase_check_failed")
+        return False
+
+
 def _manual_target_phrase(text: str) -> bool:
     """Детерминированный вход «мне врач назначил 1800 ккал» (DRF-2138)."""
 
     try:
-        from apps.skills.nutrition_anketa.skill import _manual_target_entry
+        from apps.skills.nutrition_anketa.skill import manual_target_phrase
 
-        return _manual_target_entry(text) is not None
+        return manual_target_phrase(text)
     except Exception:  # noqa: BLE001 — a predicate must never break the turn
         logger.exception("orchestrator.nutrition_global.manual_target_phrase_check_failed")
         return False
@@ -829,6 +853,8 @@ def is_structured_nutrition_turn(
         or _food_text_pending(conversation)
         or _manual_target_pending(conversation)
         or _manual_target_phrase(stripped)
+        or _update_weight_pending(conversation)
+        or _update_weight_phrase(stripped)
     )
 
 
