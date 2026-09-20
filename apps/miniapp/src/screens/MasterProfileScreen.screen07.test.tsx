@@ -323,10 +323,21 @@ describe("ошибки", () => {
     mountScreen();
     await settle();
 
-    expect(screen.getByText(PROFILE_COPY.states.errorTitle)).toBeInTheDocument();
-    fireEvent.click(screen.getByText(PROFILE_COPY.buttons.retry));
+    // М-6b: общий SystemState — «Не удалось загрузить профиль» + «Попробовать снова».
+    expect(screen.getByRole("alert")).toHaveTextContent("Не удалось загрузить профиль");
+    expect(screen.queryByText(/Не получилось загрузить/)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Попробовать снова" }));
     await settle();
     expect(getMasterProfileCard).toHaveBeenCalledTimes(2);
     expect(screen.getAllByText("Анна Петрова").length).toBeGreaterThan(0);
+  });
+});
+
+describe("системные состояния через SystemState (М-6b)", () => {
+  it("загрузка — скелет без слов", () => {
+    vi.mocked(getMasterProfileCard).mockReturnValue(new Promise(() => {}));
+    mountScreen();
+    expect(screen.getByRole("status", { busy: true })).toBeInTheDocument();
+    expect(screen.queryByText(/Загружаем/)).toBeNull();
   });
 });

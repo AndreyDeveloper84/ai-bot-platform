@@ -15,7 +15,7 @@
  *   - отказ каталога `place_already_set` показан по имени.
  */
 
-import { act, configure, fireEvent, getConfig, render, screen, within } from "@testing-library/react";
+import { act, configure, fireEvent, getConfig, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -314,5 +314,22 @@ describe("отказы каталога — по имени; изменение 
 
     expect(mockedCreate).not.toHaveBeenCalled();
     expect(mockedPatch).toHaveBeenCalledWith("pl-1", expect.objectContaining({ note_for_client: "Второй этаж" }));
+  });
+});
+
+describe("системные состояния через SystemState (М-6b)", () => {
+  it("загрузка — скелет без слов", () => {
+    mockedGet.mockReturnValue(new Promise(() => {}));
+    renderScreen();
+    expect(screen.getByRole("status", { busy: true })).toBeInTheDocument();
+  });
+
+  it("ошибка — «Не удалось загрузить место работы» + «Попробовать снова», повтор зовёт ручку", async () => {
+    mockedGet.mockRejectedValueOnce(new Error("boom")).mockResolvedValueOnce(state());
+    renderScreen();
+    expect(await screen.findByRole("alert")).toHaveTextContent("Не удалось загрузить место работы");
+    expect(screen.queryByRole("button", { name: "Повторить" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Попробовать снова" }));
+    await waitFor(() => expect(mockedGet).toHaveBeenCalledTimes(2));
   });
 });
