@@ -5,7 +5,7 @@
  * (`salon_readiness.TEXTS`), экран их не переписывает. Отказ источника —
  * одна строка о салоне, не пустой список и не «готов».
  */
-import { render, screen, within } from "@testing-library/react";
+import { act, render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -121,28 +121,70 @@ describe("AdminReadinessScreen", () => {
     expect(screen.queryByText("Салон пока не готов:")).toBeNull();
   });
 
-  it("«Проверить снова» — не чаще раза в 10 с, с подписью «обновлено HH:MM»", async () => {
-    mocked.mockResolvedValueOnce(doc()).mockResolvedValueOnce(doc({ ready: true, problems: [] }));
-    const realNow = Date.now;
-    const t0 = realNow();
-    const nowSpy = vi.spyOn(Date, "now").mockImplementation(() => t0);
+  it("«Проверить снова» — выключена 10 с после каждой проверки, подпись «обновлено HH:MM»", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    mocked
+      .mockResolvedValueOnce(doc())
+      .mockResolvedValueOnce(doc({ ready: true, problems: [] }))
+      .mockResolvedValueOnce(doc());
     try {
       renderScreen();
       await screen.findByText("Салон пока не готов:");
       // checked_at 09:00Z → в часах зрителя; проверяем форму «обновлено ЧЧ:ММ».
       expect(screen.getByText(/^обновлено \d{2}:\d{2}$/)).toBeInTheDocument();
 
-      // Сразу после загрузки — повтор в кулдауне, ручка не зовётся.
-      await userEvent.click(screen.getByRole("button", { name: "Проверить снова" }));
+      // Сразу после загрузки кнопка ВЫКЛЮЧЕНА — не «живая, но молчит».
+      const button = screen.getByRole("button", { name: "Проверить снова" });
+      expect(button).toBeDisabled();
+      await user.click(button);
       expect(mocked).toHaveBeenCalledTimes(1);
 
-      // Через 10 с — перечитывает.
-      nowSpy.mockImplementation(() => t0 + RECHECK_MIN_INTERVAL_MS + 1);
-      await userEvent.click(screen.getByRole("button", { name: "Проверить снова" }));
+      // Через 10 с — включена и перечитывает…
+      await act(async () => {
+        vi.advanceTimersByTime(RECHECK_MIN_INTERVAL_MS + 1);
+      });
+      expect(button).toBeEnabled();
+      await user.click(button);
       expect(await screen.findByText("Салон готов принимать записи.")).toBeInTheDocument();
       expect(mocked).toHaveBeenCalledTimes(2);
+
+      // …и снова выключена: кулдаун после повтора, не только после первой загрузки.
+      expect(screen.getByRole("button", { name: "Проверить снова" })).toBeDisabled();
+      await user.click(screen.getByRole("button", { name: "Проверить снова" }));
+      expect(mocked).toHaveBeenCalledTimes(2);
     } finally {
-      nowSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it("уход с экрана до ответа — без setState после unmount и без висящего таймера", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    let resolve: ((v: SalonReadinessResponse) => void) | null = null;
+    mocked.mockImplementation(
+      () =>
+        new Promise<SalonReadinessResponse>((r) => {
+          resolve = r;
+        }),
+    );
+    const errors: unknown[] = [];
+    const errSpy = vi.spyOn(console, "error").mockImplementation((...a) => errors.push(a));
+    try {
+      const { unmount } = render(
+        <MemoryRouter initialEntries={["/admin/readiness"]}>
+          <AdminReadinessScreen />
+        </MemoryRouter>,
+      );
+      expect(mocked).toHaveBeenCalledTimes(1);
+      unmount();
+      await act(async () => {
+        resolve?.(doc());
+        vi.advanceTimersByTime(RECHECK_MIN_INTERVAL_MS + 1);
+      });
+      expect(errors).toEqual([]);
+    } finally {
+      errSpy.mockRestore();
+      vi.useRealTimers();
     }
   });
 

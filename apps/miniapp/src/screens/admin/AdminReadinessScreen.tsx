@@ -13,10 +13,13 @@
  *   * отказ источника — одна строка о салоне (`origin: "source"`), не «готов»
  *     и не пустой список; `unknown` без строк — тоже «не удалось проверить».
  *
- * «Проверить снова» — без спама (решение главного окна 20.09): кнопка
- * заблокирована на время запроса и не чаще раза в 10 с; бот кэширует ответ
- * каталога на 120 с, поэтому рядом — «обновлено HH:MM» из `checked_at`, и
- * человек видит, что повтор мог вернуть тот же снимок.
+ * «Проверить снова» — без спама (решение главного окна 20.09): каждая
+ * проверка (и первая, и повтор) блокирует кнопку на время запроса и ещё на
+ * 10 с после него — кнопка либо работает, либо выглядит выключенной, «живая,
+ * но молчит» здесь не бывает. Бот кэширует ответ каталога на 120 с, поэтому
+ * рядом — «обновлено HH:MM» из `checked_at`, и человек видит, что повтор мог
+ * вернуть тот же снимок. Повтор из `StateError` (после сбоя) — вне троттла:
+ * там нечего кэшировать и нечего беречь.
  *
  * Ресепшну маршрут закрыт вместе с тройкой (`canOpenSalonPilot`) — как
  * `/admin/handoff`.
@@ -59,37 +62,56 @@ export function AdminReadinessScreen() {
   const [state, setState] = useState<State>({ kind: "loading" });
   const [busy, setBusy] = useState(false);
   const [cooldown, setCooldown] = useState(false);
-  const lastRunAt = useRef(0);
+  const alive = useRef(true);
+  const inflight = useRef<AbortController | null>(null);
   const cooldownTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const load = useCallback(async () => {
-    setBusy(true);
-    lastRunAt.current = Date.now();
-    try {
-      const data = await getSalonReadiness();
-      setState({ kind: "ready", data });
-    } catch (err) {
-      setState({ kind: "error", err });
-    } finally {
-      setBusy(false);
-    }
+  const armCooldown = useCallback(() => {
+    if (cooldownTimer.current) clearTimeout(cooldownTimer.current);
+    setCooldown(true);
+    cooldownTimer.current = setTimeout(() => {
+      if (alive.current) setCooldown(false);
+    }, RECHECK_MIN_INTERVAL_MS);
   }, []);
 
+  const load = useCallback(
+    async (opts: { throttle: boolean } = { throttle: true }) => {
+      inflight.current?.abort();
+      const ctrl = new AbortController();
+      inflight.current = ctrl;
+      setBusy(true);
+      if (opts.throttle) armCooldown();
+      try {
+        const data = await getSalonReadiness({ signal: ctrl.signal });
+        if (!alive.current || ctrl.signal.aborted) return;
+        setState({ kind: "ready", data });
+      } catch (err) {
+        if (!alive.current || ctrl.signal.aborted) return;
+        setState({ kind: "error", err });
+      } finally {
+        if (alive.current && !ctrl.signal.aborted) setBusy(false);
+      }
+    },
+    [armCooldown],
+  );
+
   useEffect(() => {
+    alive.current = true;
     void load();
     return () => {
+      alive.current = false;
+      inflight.current?.abort();
       if (cooldownTimer.current) clearTimeout(cooldownTimer.current);
     };
   }, [load]);
 
   const recheck = useCallback(() => {
     if (busy || cooldown) return;
-    const since = Date.now() - lastRunAt.current;
-    if (since < RECHECK_MIN_INTERVAL_MS) return;
-    setCooldown(true);
-    cooldownTimer.current = setTimeout(() => setCooldown(false), RECHECK_MIN_INTERVAL_MS);
     void load();
   }, [busy, cooldown, load]);
+
+  // После сбоя повтор — без троттла: беречь нечего, кэш каталога не при чём.
+  const retryAfterError = useCallback(() => void load({ throttle: false }), [load]);
 
   const data = state.kind === "ready" ? state.data : null;
   const view = data ? readinessState(data) : null;
@@ -113,30 +135,22 @@ export function AdminReadinessScreen() {
       </header>
 
       <div className="screen__body">
-        {state.kind === "loading" ? (
-          <p className="salon-pilot__note" role="status">
-            {READINESS_COPY.loading}
-          </p>
-        ) : null}
+        {/* Одна постоянная live-область, меняется только текст: смена
+            «загружаем» → итог объявляется, а вставка новой role=status — нет
+            (то же правило, что у statusLine на «Сегодня»). */}
+        <p className="salon-pilot__note" role="status">
+          {state.kind === "loading" ? READINESS_COPY.loading : ""}
+          {view?.kind === "ready" ? READINESS_COPY.ready : ""}
+          {view?.kind === "unknown"
+            ? // Отказ источника — его строка о салоне дословно; unknown без строк — своя.
+              (data?.problems[0]?.text ?? READINESS_COPY.unknown)
+            : ""}
+        </p>
 
-        {state.kind === "error" ? <StateError err={state.err} onRetry={load} /> : null}
+        {state.kind === "error" ? <StateError err={state.err} onRetry={retryAfterError} /> : null}
 
         {data && view ? (
           <>
-            {view.kind === "ready" ? (
-              <div className="callout" role="status">
-                <p style={{ margin: 0 }}>{READINESS_COPY.ready}</p>
-              </div>
-            ) : null}
-
-            {view.kind === "unknown" ? (
-              <div className="callout callout--danger" role="status">
-                <p style={{ margin: 0 }}>
-                  {/* Отказ источника — его строка о салоне дословно; unknown без строк — своя. */}
-                  {data.problems[0]?.text ?? READINESS_COPY.unknown}
-                </p>
-              </div>
-            ) : null}
 
             {view.kind === "problems" ? (
               <>

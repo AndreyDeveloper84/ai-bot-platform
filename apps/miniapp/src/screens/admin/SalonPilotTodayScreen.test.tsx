@@ -447,6 +447,8 @@ describe("карточка «Готовность» и строка сводки
     );
     // Строка дня при этом не пропала.
     expect(screen.getByRole("status")).toHaveTextContent("Сейчас идёт записей: 1.");
+    // Один запрос на экран: карточка и сводка читают одно состояние.
+    expect(mockedReadiness).toHaveBeenCalledTimes(1);
   });
 
   it("несколько — «N ситуаций требуют внимания.»", async () => {

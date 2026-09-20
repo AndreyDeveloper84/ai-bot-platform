@@ -11,6 +11,7 @@ import { describe, expect, it } from "vitest";
 import type { SalonReadinessResponse } from "./admin-api";
 import {
   attentionLine,
+  checkedAtLabel,
   problemsLabel,
   readinessCardText,
   readinessState,
@@ -103,6 +104,12 @@ describe("тексты", () => {
     expect(readinessCardText({ kind: "unknown" })).toBe("Готовность — не удалось проверить");
     expect(readinessCardText({ kind: "ready" })).toBe("Готовность — салон готов");
     expect(readinessCardText({ kind: "problems", n: 3 })).toBe("Готовность — 3 проблемы");
+  });
+
+  it("checkedAtLabel: ISO → ЧЧ:ММ, мусор → пустая строка (не «NaN:NaN»)", () => {
+    expect(checkedAtLabel("2026-09-20T09:00:00+00:00")).toMatch(/^\d{2}:\d{2}$/);
+    expect(checkedAtLabel("not-a-date")).toBe("");
+    expect(checkedAtLabel("")).toBe("");
   });
 
   it("строка сводки: одна ситуация / N ситуаций; ноль — пусто", () => {

@@ -65,7 +65,7 @@ export function attentionLine(n: number): string {
 
 /** «2026-09-20T09:00:00+00:00» → «12:00» по часам зрителя; мусор → "". */
 export function checkedAtLabel(iso: string): string {
-  const t = Date.parse(iso ?? "");
+  const t = Date.parse(iso);
   if (Number.isNaN(t)) return "";
   return new Intl.DateTimeFormat("ru-RU", { hour: "2-digit", minute: "2-digit" }).format(new Date(t));
 }
