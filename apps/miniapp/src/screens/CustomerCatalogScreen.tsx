@@ -60,7 +60,7 @@ import {
 } from "../lib/recommendation-absence";
 import { StateError } from "../components/StateError";
 import { useOnline } from "../hooks/useOnline";
-import type { Service } from "../lib/api";
+import type { Master, Service } from "../lib/api";
 import {
   getCatalogBrowse,
   resolveCatalogPicks,
@@ -102,6 +102,11 @@ type State =
 
 /** Founder cut #1: never more than 3 picks, whatever the scorer sends. */
 const PICKS_CAP = 3;
+
+/** Одна карточка полки: что показать и чем объяснить. Показ — из зеркала, WHY — от границы. */
+type ShelfEntry =
+  | { kind: "service"; rank: number; service: Service; reasons: string[] }
+  | { kind: "master"; rank: number; master: Master; reasons: string[] };
 
 export function CustomerCatalogScreen() {
   const online = useOnline();
@@ -173,12 +178,14 @@ export function CustomerCatalogScreen() {
   // кнопка заблокирована — второй тап не плодит второй запрос.
   const retryPicks = useCallback(() => {
     if (state.kind !== "ok" || retryingPicks) return;
-    const { services } = state.data;
+    const { services, masters } = state.data;
     setRetryingPicks(true);
-    resolveCatalogPicks(services)
-      .then(({ picks, picksOutcome: outcome }) => {
+    resolveCatalogPicks(services, masters)
+      .then(({ picks, providerPicks, picksOutcome: outcome }) => {
         setState((prev) =>
-          prev.kind === "ok" ? { kind: "ok", data: { ...prev.data, picks, picksOutcome: outcome } } : prev,
+          prev.kind === "ok"
+            ? { kind: "ok", data: { ...prev.data, picks, providerPicks, picksOutcome: outcome } }
+            : prev,
         );
       })
       .finally(() => setRetryingPicks(false));
@@ -191,15 +198,22 @@ export function CustomerCatalogScreen() {
   const frame = !query ? absenceFrame(picksOutcome) : null;
   const insideMax = maxBridge() !== null;
 
-  const picksWithWhy = useMemo(() => {
+  const picksWithWhy = useMemo((): ShelfEntry[] => {
     if (state.kind !== "ok") return [];
-    const byId = new Map(state.data.services.map((s) => [s.id, s]));
-    return state.data.picks
-      .map((pick) => ({ service: byId.get(pick.serviceId), reasons: pick.reasons }))
-      .filter(
-        (p): p is { service: Service; reasons: string[] } => p.service != null,
-      )
-      .slice(0, PICKS_CAP);
+    const serviceById = new Map(state.data.services.map((s) => [s.id, s]));
+    const masterById = new Map(state.data.masters.map((m) => [m.id, m]));
+    // Услуги и мастера — одной полкой, порядком резолвера (`rank`, §4.3).
+    // Сегодня резолвер производит только мастеров (§81 / K1, DRF-2174);
+    // услуги здесь — на случай, когда он начнёт производить и их.
+    const services = state.data.picks.flatMap((pick): ShelfEntry[] => {
+      const service = serviceById.get(pick.serviceId);
+      return service ? [{ kind: "service", rank: pick.rank, service, reasons: pick.reasons }] : [];
+    });
+    const masters = (state.data.providerPicks ?? []).flatMap((pick): ShelfEntry[] => {
+      const master = masterById.get(pick.masterId);
+      return master ? [{ kind: "master", rank: pick.rank, master, reasons: pick.reasons }] : [];
+    });
+    return [...services, ...masters].sort((a, b) => a.rank - b.rank).slice(0, PICKS_CAP);
   }, [state]);
 
   if (state.kind === "loading") {
@@ -385,15 +399,25 @@ export function CustomerCatalogScreen() {
             <span aria-hidden="true">✨ </span>
             {CANONICAL_SHELF_TITLE}
           </h2>
-          {picksWithWhy.map(({ service, reasons }) => (
-            <article key={service.id} className="customer-catalog__card-l2">
-              <ServiceCard
-                service={service}
-                onSelect={() => navigate(`/customer/catalog/${service.id}`)}
-              />
+          {picksWithWhy.map((entry) => (
+            <article
+              key={entry.kind === "service" ? `s:${entry.service.id}` : `m:${entry.master.id}`}
+              className="customer-catalog__card-l2"
+            >
+              {entry.kind === "service" ? (
+                <ServiceCard
+                  service={entry.service}
+                  onSelect={() => navigate(`/customer/catalog/${entry.service.id}`)}
+                />
+              ) : (
+                <MasterCard
+                  master={entry.master}
+                  onSelect={() => navigate(`/customer/masters/${entry.master.id}`)}
+                />
+              )}
               {/* WHY — verbatim from the source, never composed here. */}
               <ul className="customer-catalog__why">
-                {reasons.map((reason) => (
+                {entry.reasons.map((reason) => (
                   <li key={reason} className="customer-catalog__why-item">
                     {reason}
                   </li>
