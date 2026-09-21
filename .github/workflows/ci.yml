@@ -1102,14 +1102,26 @@ jobs:
         shard:
           - id: "1"
             args: "apps/skills/booking/tests/test_lookup_routing.py"
+          # DRF-2205 — `apps/channels` переехал из шарда 2 в шард 5 по
+          # замеру, а не по названию папок. Сумма времени тестов по junit
+          # зонда #1941 (до деления на четыре воркера): 1:1323 2:1650
+          # 3:1073 4:1297 5:1061 с. Шард 2 был самым тяжёлым — не из-за
+          # виновного теста, а объёмом (2055 тестов apps.orchestrator.tests
+          # + ~271 с apps/channels), — и потому под замедлением раннера
+          # первым переходил потолок. После переезда: 2:~1378 5:~1332,
+          # максимум −16%.
+          #
+          # Чего это НЕ лечит: троекратных замедлений самого раннера. Оно
+          # лишь перестаёт делать всегда один и тот же шард первым
+          # кандидатом на отмену. Перемерять — снова по junit, не на глаз.
           - id: "2"
-            args: "apps/orchestrator apps/channels"
+            args: "apps/orchestrator"
           - id: "3"
             args: "apps/identity apps/replay"
           - id: "4"
             args: "apps/consent apps/skills apps/admin_api --ignore=apps/skills/booking/tests/test_lookup_routing.py"
           - id: "5"
-            args: "apps/ --ignore=apps/skills --ignore=apps/orchestrator --ignore=apps/identity --ignore=apps/consent --ignore=apps/replay --ignore=apps/channels --ignore=apps/admin_api"
+            args: "apps/ --ignore=apps/skills --ignore=apps/orchestrator --ignore=apps/identity --ignore=apps/consent --ignore=apps/replay --ignore=apps/admin_api"
 
     services:
       postgres:
