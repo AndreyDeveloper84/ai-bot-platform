@@ -111,7 +111,12 @@ class TestReportIsSubstantive:
         remark = render.goal_remark(
             summary(calories_total=total), water(), profile(goal="maintain")
         )
-        assert "уложил" not in remark.lower()
+        # Точное ожидание, а не «слова нет»: ниже ориентира — разность,
+        # на ориентире и выше (без перебора для «удержать») — тишина.
+        expected = (
+            f"До ориентира по калориям осталось {round(1900 - total)} ккал." if total < 1900 else ""
+        )
+        assert remark == expected
 
     def test_a_day_at_or_over_the_target_without_overshoot_is_silent(self) -> None:
         """Цель «удержать», съедено ровно ориентир — сказать нечего: ни
