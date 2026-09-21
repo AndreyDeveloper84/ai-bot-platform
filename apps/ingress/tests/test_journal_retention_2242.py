@@ -292,3 +292,29 @@ class TestLinkIsSevered:
             channel="max", external_event_id="mid.new:1", raw_payload=_body(4848)
         )
         assert created is True
+
+    def test_a_row_whose_body_already_expired_is_severed_via_the_trace(self, settings) -> None:
+        """После W тела уже нет, и отправителя по нему не узнать, а связь через
+        trace живёт все 90 дней. Второй путь — по ``trace_id`` сообщений человека."""
+        import uuid
+
+        from apps.conversations.erasure import anonymize_dialogue
+        from apps.conversations.models import ArchivedMessage, Conversation, Message
+
+        settings.STRICT_TENANT_SCOPE = "off"
+        person = _person(4949)
+        conv = Conversation.all_tenants.create(tenant=person.tenant, bot_user=person)
+        trace = uuid.uuid4()
+        Message.all_tenants.create(
+            tenant=person.tenant, conversation=conv, role="user", content="x", trace_id=trace
+        )
+        row = _row(4949, age=timedelta(days=10), event_id="mid.4949:1")
+        WebhookJournal.objects.filter(pk=row.pk).update(raw_payload={}, trace_id=str(trace))
+
+        anonymize_dialogue(
+            [person.id], through=timezone.now(), reason=ArchivedMessage.Reason.FORGET_ALL
+        )
+
+        row.refresh_from_db()
+        assert row.trace_id == ""
+        assert row.external_event_id.startswith("erased:")
