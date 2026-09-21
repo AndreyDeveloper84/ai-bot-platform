@@ -48,6 +48,7 @@ from django.utils import timezone
 
 from apps.catalog.master_state import IDENTITY_LINKED, SaleBlock, sale_block
 from apps.catalog.models import CatalogMaster
+from apps.identity.services.workspace_kind import workspace_kind
 from apps.integrations.ayla.salon_client import SalonAPIError, SalonNotConfigured, SalonUnavailable
 from apps.master_api.services.catalog import list_master_services
 from apps.master_api.services.schedule_frame import load_day_frame
@@ -76,6 +77,15 @@ DEEP_LINKS: dict[str, str] = {
 #: экрана 02 и с экрана 04. Считается по тому же ``detail.selected``, что
 #: отдаёт пункт. Экран 01 своей константы не держит — ведёт по ``deep_link``.
 SERVICES_DIRECTIONS_LINK = "/solo/directions"
+
+#: DRF-2254 — пункты, которые ведёт не мастер в приложении, когда каталог
+#: называет рабочее пространство салоном (``Tenant.kind == salon``). Причина
+#: нейтральная: это и настоящий однолюдный салон (место ведёт салон — правда),
+#: и соло до G4, которому признак проставят позже (решение владельца, 3а).
+#: Такие пункты ``unavailable`` и НЕ блокируют ``ready`` — это не то, что
+#: мастер может сделать сам; иначе однолюдный салон не стал бы «готов» никогда.
+MANAGED_OUTSIDE_APP = "managed_outside_app"
+SALON_MANAGED_ITEMS: tuple[str, ...] = ("services", "location")
 
 
 @dataclass(frozen=True)
@@ -114,7 +124,9 @@ class Readiness:
         return [
             f"{item.key}:{item.state}"
             for item in self.items
-            if item.key in REQUIRED_ITEMS and item.state != "done"
+            if item.key in REQUIRED_ITEMS
+            and item.state != "done"
+            and not (item.state == "unavailable" and item.reason == MANAGED_OUTSIDE_APP)
         ]
 
     @property
@@ -137,12 +149,18 @@ class Readiness:
 
 
 def build_readiness(master: CatalogMaster) -> Readiness:
-    """Собрать проекцию по живым фактам. Ничего не пишет."""
+    """Собрать проекцию по живым фактам. Ничего не пишет.
 
+    DRF-2254: вид рабочего пространства — из каталога (``workspace_kind``).
+    ``salon`` — место и услуги ведутся вне приложения; ``solo`` и «не знаю» —
+    как прежде.
+    """
+
+    salon_managed = workspace_kind(master.tenant_id) == "salon"
     return Readiness(
         items=(
-            _services_item(master),
-            _location_item(),
+            _managed_outside("services") if salon_managed else _services_item(master),
+            _managed_outside("location") if salon_managed else _location_item(),
             _hours_item(master),
             _profile_item(master),
         ),
@@ -170,6 +188,10 @@ def _services_item(master: CatalogMaster) -> ReadinessItem:
         return ReadinessItem("services", "done", detail)
     reason = "offer_not_sellable" if any(not r["sellable"] for r in rows) else None
     return ReadinessItem("services", "missing", detail, reason=reason)
+
+
+def _managed_outside(key: str) -> ReadinessItem:
+    return ReadinessItem(key, "unavailable", {}, reason=MANAGED_OUTSIDE_APP)
 
 
 def _location_item() -> ReadinessItem:
@@ -235,4 +257,11 @@ def _a_week_from(day: date_cls) -> date_cls:
     return day + timedelta(days=6)
 
 
-__all__ = ["Readiness", "ReadinessItem", "REQUIRED_ITEMS", "build_readiness", "identity_facts"]
+__all__ = [
+    "MANAGED_OUTSIDE_APP",
+    "Readiness",
+    "ReadinessItem",
+    "REQUIRED_ITEMS",
+    "build_readiness",
+    "identity_facts",
+]

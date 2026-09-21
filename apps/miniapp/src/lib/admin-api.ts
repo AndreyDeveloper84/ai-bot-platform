@@ -111,6 +111,14 @@ export interface MeResponse {
    * App.tsx treats absence as `false`.
    */
   is_solo_provider?: boolean;
+  /**
+   * DRF-2254 — «чьё место и кто ведёт услуги»: `Tenant.kind` каталога,
+   * единственный источник. `is_solo_provider` выше — только раскладка.
+   * Экраны самообслуживания мастера (место, услуги, выбор услуг) на соло-
+   * поверхности не рисуются при `"salon"`; `null`/отсутствие — «не знаю»,
+   * всё как прежде (авторитетен отказ каталога).
+   */
+  workspace_kind?: "salon" | "solo" | null;
 }
 
 export const getMe = (): Promise<MeResponse> =>

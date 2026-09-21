@@ -15,15 +15,30 @@ import { masterAvatarSheetItems, type AvatarSheetItem } from "../lib/avatar-shee
 export interface SoloSurfaceInfo {
   /** Владелец / администратор / ресепшн поверх соло-профиля (DRF-1149). */
   salonAdmin: boolean;
+  /**
+   * DRF-2254: экраны самообслуживания (место, услуги, выбор услуг) — только
+   * когда каталог не назвал рабочее пространство салоном
+   * (`me.workspace_kind !== "salon"`; «не знаю» — как прежде).
+   */
+  selfService: boolean;
 }
 
 export const SoloSurfaceContext = createContext<SoloSurfaceInfo | null>(null);
+
+/** DRF-2254: вне соло-поверхности контекста нет — там и экранов нет, ничего не прячем. */
+export function useSelfService(): boolean {
+  return useContext(SoloSurfaceContext)?.selfService ?? true;
+}
 
 export function useMasterAvatarItems(): AvatarSheetItem[] {
   const location = useLocation();
   const solo = useContext(SoloSurfaceContext);
   if (location.pathname.startsWith("/solo/")) {
-    return masterAvatarSheetItems({ surface: "solo", salonAdmin: solo?.salonAdmin ?? false });
+    return masterAvatarSheetItems({
+      surface: "solo",
+      salonAdmin: solo?.salonAdmin ?? false,
+      selfService: solo?.selfService ?? true,
+    });
   }
   return masterAvatarSheetItems({ surface: "master" });
 }
