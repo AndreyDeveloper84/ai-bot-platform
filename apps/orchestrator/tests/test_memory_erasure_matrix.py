@@ -661,8 +661,9 @@ class TestDialogueHistory:
         # в окне есть — иначе «после каскада их нет» ничего не значит.
         # Окно читается тем же правилом, что читал снятый `_recent_history`:
         # строки позже `anonymized_through` (DRF-1528 — сам читатель снят).
-        before = _readable_window(conversation)
-        assert [m.content for m in before] == ["я веган, мой мастер — Анна, телефон 89990001122"]
+        assert [m.content for m in _readable_window(conversation)] == [
+            "я веган, мой мастер — Анна, телефон 89990001122"
+        ]
 
         result = delete_personal_data(bu, client=ayla)
 

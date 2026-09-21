@@ -61,6 +61,17 @@ MINIAPP_URL_PREFIXES = (
 )
 MINIAPP_EXACT_ROUTES = ("api/v1/me",)
 
+#: Снятые маршруты: отвечают 410 всем и не читают ни строки, поэтому личность
+#: не разбирают — 401 вместо 410 отправил бы звонящего чинить не то. Список
+#: красный в обе стороны: маршрут обязан существовать и без initData отвечать
+#: именно 410, иначе исключение прикрыло бы живую ручку
+#: (``test_retired_routes_really_are_retired``).
+RETIRED_ROUTES: dict[str, str] = {
+    "api/v1/master/^conversations(?:/.*)?$": (
+        "DRF-1528: переписка мастер↔клиент снята (OD-7), девять ручек — 410"
+    ),
+}
+
 
 @pytest.fixture(autouse=True)
 def _bot_token(settings) -> None:
@@ -207,7 +218,11 @@ def _miniapp_routes() -> list[tuple[str, Callable]]:
 
 
 def _unguarded(routes: list[tuple[str, Callable]]) -> list[str]:
-    return sorted(route for route, callback in routes if not getattr(callback, GUARD_ATTR, None))
+    return sorted(
+        route
+        for route, callback in routes
+        if not getattr(callback, GUARD_ATTR, None) and route not in RETIRED_ROUTES
+    )
 
 
 def test_every_miniapp_route_carries_the_init_data_guard():
@@ -216,6 +231,15 @@ def test_every_miniapp_route_carries_the_init_data_guard():
         len(routes) >= 130
     )  # перепись dev 8bf99f7c: 40 + 43 + 32 + 10 + /me (126) + 3 маршрута памяти DRF-2133 + last-topic DRF-2144
     assert _unguarded(routes) == []
+
+
+def test_retired_routes_really_are_retired(client):
+    """Исключение из переписи не прикрывает живую ручку: маршрут есть и отвечает 410."""
+    routes = dict(_miniapp_routes())
+    for route in RETIRED_ROUTES:
+        assert route in routes, f"снятый маршрут {route!r} пропал из URLconf — убери исключение"
+    response = client.get("/api/v1/master/conversations")
+    assert response.status_code == 410, response.status_code
 
 
 def test_guard_catches_a_route_without_the_marker():
