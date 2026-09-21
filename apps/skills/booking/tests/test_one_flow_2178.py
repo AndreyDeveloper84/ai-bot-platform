@@ -104,3 +104,62 @@ class TestMiniappEntry:
     def test_no_entry_where_there_is_nowhere_to_go(self, without_miniapp):
         """Войти некуда — и входа нет; вызывающий остаётся на чатовом пути."""
         assert miniapp_entry_result(master_id="mst-1") is None
+
+
+class TestTheSecondPickerStaysUnreachable:
+    """«Выбрать дату» гейта не получил — и не должен его получить.
+
+    Второй вызов `_render_date_picker` (разворот полного списка дат)
+    достижим ТОЛЬКО из первого: кнопку с этим callback рисует сам
+    пикер, а пикер рисуется лишь когда предикат разрешил чат. Ставить
+    предикат дважды значило бы завести две ветки вместо одной.
+
+    Но через год кто-нибудь может нарисовать ту же кнопку из меню — и
+    обойти предикат, ничего не заметив. Узел держит именно это: у
+    callback'а ровно один производитель, и он внутри пикера.
+    """
+
+    def test_only_the_picker_emits_the_more_dates_button(self):
+        import inspect
+
+        from apps.skills.booking import skill as booking_skill
+
+        source = inspect.getsource(booking_skill)
+        emitters = [
+            line
+            for line in source.splitlines()
+            if "CALLBACK_BOOK_MORE_DATES_PREFIX" in line and '"callback"' in line
+        ]
+        assert len(emitters) == 1, (
+            "Кнопку «Выбрать дату» рисует кто-то ещё. Проверь, что этот "
+            "путь проходит через chat_step_by_step_allowed(), иначе он "
+            "обходит единственное место, где решается, где спрашивать время."
+        )
+
+    def test_the_producers_of_date_chips_are_the_known_three(self):
+        """Перепись производителей, а не имён файлов.
+
+        Чипы дат собирает один помощник, но зовут его три места, и все
+        три — продолжения уже начатого чатового пути: сам пикер, его
+        разворот и «другие даты» после пустого дня. Появится четвёртое —
+        узел покраснеет, и автор обязан будет спросить себя, проходит ли
+        его путь через `chat_step_by_step_allowed()`. Без этого через год
+        кто-нибудь нарисует те же чипы из меню и обойдёт предикат, ничего
+        не заметив.
+        """
+        import inspect
+
+        from apps.skills.booking import skill as booking_skill
+
+        source = inspect.getsource(booking_skill).splitlines()
+        callers: set[str] = set()
+        current = ""
+        for line in source:
+            if line.startswith("def "):
+                current = line[4:].split("(", 1)[0]
+            if "_action_data_for_date_pick(" in line and not line.startswith("def "):
+                callers.add(current)
+        assert callers == {"_render_other_dates", "_render_date_picker"}, (
+            f"Чипы дат собирает кто-то ещё: {sorted(callers)}. Проверь, что "
+            "этот путь проходит через chat_step_by_step_allowed()."
+        )
