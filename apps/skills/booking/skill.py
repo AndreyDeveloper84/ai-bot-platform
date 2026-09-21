@@ -653,25 +653,7 @@ class BookingSkill:
                     text=_BROKEN_CALLBACK_TEXT,
                     detail=f"field=service_id raw={raw_payload!r}",
                 )
-            # DRF-2178, Э-4 — ОДИН поток записи. Время спрашивают там,
-            # где его показывает макет: в приложении. Прежний чатовый
-            # пошаговый выбор остаётся только там, где в приложение не
-            # войти (`web_app` и `miniapp_url` у бота бывают пусты) —
-            # иначе мы отняли бы запись у такого развёртывания. Решает
-            # один предикат, а не эта ветка: две ветки со своим «а есть
-            # ли приложение» разъехались бы на первой правке.
-            from apps.skills.booking.one_flow import (
-                chat_step_by_step_allowed,
-                miniapp_entry_result,
-            )
-
-            if not chat_step_by_step_allowed():
-                entry = miniapp_entry_result(master_id=master_id)
-                # `None` — войти всё-таки некуда; тогда путь прежний.
-                # Без обоих способов человек остаться не может.
-                if entry is not None:
-                    return entry
-
+            # CD §69 (DRF-2265): запись, начатая в боте, в боте и заканчивается — не уводить в приложение.
             return _render_date_picker(
                 master_id=master_id,
                 service_id=service_id,
