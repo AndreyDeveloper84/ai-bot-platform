@@ -200,6 +200,7 @@ from apps.integrations.ayla.nutrition_client import (
     ManualTargetsRefusedError,
     NothingToConfirmError,
     health_factor_refusals,
+    insufficient_inputs,
     pending_proposal,
     proposed_norms,
 )
@@ -210,7 +211,7 @@ from apps.skills.fsm import Completed, NextStep
 from apps.skills.nutrition_anketa.fsm import (
     ACTIVITY_CHOICES,
     ACTIVITY_COEFFICIENTS,
-    ACTIVITY_DEFAULT_ON_SKIP,
+    PACE_GOALS,
     ACTIVITY_SKIP,
     ADULT_AGE,
     CHOICE_STEPS,
@@ -432,6 +433,23 @@ UPDATE_WEIGHT_MAX_KG = 300
 UPDATE_WEIGHT_SNAPSHOT_MAX_AGE_DAYS = 365
 #: Входы снимка, которые уезжают обратно ровно как были (+ новый вес).
 _SNAPSHOT_INPUTS: tuple[str, ...] = ("gender", "age", "height_cm", "activity_coefficient", "goal")
+
+#: Вопрос 59 (CD §72) — не из листа, в списке владельцу: отказ каталога
+#: без названных входов называет, чего не хватает.
+INSUFFICIENT_INPUTS_TEXT = (
+    "Дневник готов — записывай еду и воду, я всё сохраню.\n"
+    "Ориентиры не считаю: не хватает данных — {fields}. "
+    "Пройди анкету ещё раз и ответь на этот вопрос — тогда посчитаю."
+)
+_MISSING_INPUT_LABELS: dict[str, str] = {
+    "gender": "пол",
+    "age": "возраст",
+    "height_cm": "рост",
+    "weight_kg": "вес",
+    "goal": "цель",
+    "pace": "темп",
+    "activity_coefficient": "активность",
+}
 
 #: Тексты из листа DRF-2139 — дословно.
 UPDATE_WEIGHT_ASK = "Какой текущий вес в килограммах?"  # тот же вопрос, что в анкете
@@ -782,6 +800,12 @@ class NutritionAnketaSkill:
             # the whole cost. Guards the mechanism; whether such states
             # exist on the pilot is not claimed here.
             step_result = fsm.goto("activity")
+            self._save_state(context, fsm)
+            return self._render_step(fsm.current_step, step_result.prompt, context=context, fsm=fsm)
+        if result.answers.get("goal") in PACE_GOALS and not result.answers.get("pace"):
+            # Вопрос 59: состояние, сохранённое до шага «темп», — темп
+            # спрашивается, а не подставляется за человека.
+            step_result = fsm.goto("pace")
             self._save_state(context, fsm)
             return self._render_step(fsm.current_step, step_result.prompt, context=context, fsm=fsm)
         return self._on_complete(context, result.answers)
@@ -1681,10 +1705,12 @@ class NutritionAnketaSkill:
         """Map FSM answers to the Ayla profile schema.
 
         Активность — ответ человека (DRF-2102): один из четырёх
-        коэффициентов §85 по slug. «Не знаю» — пропуск: уходит
-        ``ACTIVITY_DEFAULT_ON_SKIP`` и ``_skipped_fields: ["activity"]``,
-        из которого каталог делает ``health_flags.activity_skipped`` —
-        число-умолчание помечено как умолчание, а не выдано за ответ.
+        коэффициентов §85 по slug. «Не знаю» — пропуск: числа НЕТ (CD §72,
+        вопрос 59), уходит только ``_skipped_fields: ["activity"]``, и
+        каталог отвечает «не хватает данных: активность». До вопроса 59
+        здесь уходило 1.375 — число, выбранное за человека.
+
+        Темп — только при цели, которая его использует (:data:`PACE_GOALS`).
         Отсутствие ответа — ``KeyError``, как у остальных полей: тихого
         умолчания за человека здесь нет (см. ``_on_transition``).
 
@@ -1702,12 +1728,11 @@ class NutritionAnketaSkill:
             "height_cm": int(answers["height"]),
             "weight_kg": int(answers["weight"]),
             "goal": answers["goal"],
-            "activity_coefficient": (
-                ACTIVITY_DEFAULT_ON_SKIP
-                if activity == ACTIVITY_SKIP
-                else ACTIVITY_COEFFICIENTS[activity]
-            ),
         }
+        if activity != ACTIVITY_SKIP:
+            body["activity_coefficient"] = ACTIVITY_COEFFICIENTS[activity]
+        if answers["goal"] in PACE_GOALS:
+            body["pace"] = answers["pace"]
         if activity == ACTIVITY_SKIP:
             body["_skipped_fields"] = ["activity"]
         return attach_consent(body, attestation)
@@ -1963,10 +1988,15 @@ def _update_weight_body(profile: Any, weight: int) -> dict[str, Any] | None:
     snapshot = dict(getattr(profile, "targets_input_snapshot", None) or {})
     if any(snapshot.get(name) in (None, "") for name in _SNAPSHOT_INPUTS):
         return None
+    # Вопрос 59: при цели, которая использует темп, он — такой же вход
+    # снимка; нет его — в анкету, темп за человека не подставляется.
+    needs_pace = str(snapshot.get("goal")) in PACE_GOALS
+    if needs_pace and snapshot.get("pace") in (None, ""):
+        return None
     try:
         # Типы — как шлёт анкета: целые и float; снимок мог прийти с «28.0»
         # или строкой — непригодный снимок = в анкету, не исключение в ходе.
-        return {
+        body: dict[str, Any] = {
             "gender": str(snapshot["gender"]),
             "age": int(float(snapshot["age"])),
             "height_cm": int(float(snapshot["height_cm"])),
@@ -1976,6 +2006,9 @@ def _update_weight_body(profile: Any, weight: int) -> dict[str, Any] | None:
         }
     except (TypeError, ValueError):
         return None
+    if needs_pace:
+        body["pace"] = str(snapshot["pace"])
+    return body
 
 
 def _snapshot_is_stale(profile: Any) -> bool:
@@ -2221,6 +2254,13 @@ def _format_summary(profile) -> str:
     refused_for = health_factor_refusals(profile)
     if refused_for:
         return _format_health_factor_refusal(refused_for)
+
+    # Вопрос 59 / #527: каталог не считает без названных входов — назвать
+    # их, а не сказать общее «пока не считаю».
+    missing = insufficient_inputs(profile)
+    if missing and not int(getattr(profile, "daily_kcal", 0) or 0):
+        named = ", ".join(_MISSING_INPUT_LABELS.get(name, name) for name in missing)
+        return INSUFFICIENT_INPUTS_TEXT.format(fields=named)
 
     # DRF-2138: ручной ориентир — «от специалиста», не «считала по методике».
     # Число — то, что человек назвал; строки методики и входов нет по

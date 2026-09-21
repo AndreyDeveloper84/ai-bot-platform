@@ -46,12 +46,12 @@ so. See :data:`ACTIVITY_SKIP`.
 
 ## What is deliberately NOT here yet
 
-* ``pace`` / desired rate. §7.1 also stops at "losing faster than about
-  0.9 kg per week", but that threshold only means something against a
-  methodology that computes a rate, and the pilot methodology
-  (Mifflin-St Jeor, flat ±10% goal correction) has no pace term yet.
-  The question lands with the calculation service, not here — otherwise
-  we would be asking for a number nothing consumes.
+* a pace **for «поддержать»**. Pace is asked (CD §72, question 59) only
+  when the goal moves the number: the catalogue's goal correction is zero
+  for ``maintain``, so a pace question there would ask for something the
+  calculation never uses. For «похудеть» / «набрать» it is the step after
+  the goal (:data:`PACE_GOALS`) — the catalogue no longer assumes
+  ``moderate`` and refuses without it.
 * **Consent is not a step here.** It sits BEFORE the FSM is entered:
   ``skill.py`` (``_on_enter``, #1664, §92) shows the
   ``personal_calculation`` consent screen and only constructs this FSM
@@ -69,7 +69,10 @@ from typing import Any, ClassVar
 
 from apps.skills.fsm import (
     COMPLETE,
+    Completed,
+    NextStep,
     SkillFSM,
+    TransitionResult,
     _Step,
     validate_choice,
     validate_int_range,
@@ -117,12 +120,24 @@ ACTIVITY_COEFFICIENTS: dict[str, float] = {
     "high": 1.725,
 }
 
-#: The skip answer. Not a coefficient: the skill substitutes
-#: :data:`ACTIVITY_DEFAULT_ON_SKIP` and names the skip in ``_skipped_fields``.
+#: The skip answer. Not a coefficient: no number is sent for it (CD §72,
+#: question 59) — only ``_skipped_fields: ["activity"]``, and the catalogue
+#: answers «не хватает данных: активность». Until question 59 the skill sent
+#: 1.375 here, a number chosen for the person.
 ACTIVITY_SKIP = "unknown"
 
-#: What a skipped activity is sent as (DRF-2102, the ticket's default).
-ACTIVITY_DEFAULT_ON_SKIP = 1.375
+#: Pace answers — the catalogue's ``NutritionProfile.Pace`` choices with its
+#: labels verbatim («Мягкий» / «Средний»); texts not from a ticket, listed
+#: for the owner in the PR.
+_PACE_CHOICES = {
+    "gentle": "Мягкий",
+    "moderate": "Средний",
+}
+
+#: Goals whose correction is non-zero, so pace changes the number (catalogue
+#: ``GOAL_FACTORS``: lose/tone 0.90, gain 1.10, maintain 1.00). ``tone`` is
+#: not offered by this anketa but is named so the rule is the catalogue's.
+PACE_GOALS = frozenset({"lose", "gain", "tone"})
 
 #: Below this the calculation is not offered (§7.1). The diary stays.
 ADULT_AGE = 18
@@ -192,6 +207,12 @@ class AnketaFSM(SkillFSM):
             validator=validate_choice(_GOAL_CHOICES),
             next=COMPLETE,
         ),
+        # Asked only after «похудеть» / «набрать» — see ``transition``.
+        "pace": _Step(
+            prompt="В каком темпе идти к цели?",
+            validator=validate_choice(_PACE_CHOICES),
+            next=COMPLETE,
+        ),
     }
     INITIAL_STEP: ClassVar[str] = "gender"
 
@@ -199,6 +220,27 @@ class AnketaFSM(SkillFSM):
     current_step: str = ""
     answers: dict[str, Any] = field(default_factory=dict)
     is_complete: bool = False
+
+    def transition(self, user_input: str) -> TransitionResult:
+        """The goal closes the anketa — unless it needs a pace (question 59).
+
+        After «похудеть» / «набрать» the pace step follows; an earlier pace
+        answer (the edit flow re-asks only the goal) is kept. A goal that
+        needs no pace drops a pace left from an earlier answer: it would be
+        sent for a calculation that does not use it.
+        """
+        answered = self.current_step
+        result = super().transition(user_input)
+        if answered != "goal" or not isinstance(result, Completed):
+            return result
+        if self.answers.get("goal") in PACE_GOALS:
+            if not self.answers.get("pace"):
+                self.is_complete = False
+                self.current_step = "pace"
+                return NextStep(prompt=self.STEPS["pace"].prompt)
+            return result
+        self.answers.pop("pace", None)
+        return Completed(answers=dict(self.answers))
 
 
 # ─── public helpers ──────────────────────────────────────────────────────
@@ -208,6 +250,7 @@ GENDER_CHOICES = _GENDER_CHOICES
 GOAL_CHOICES = _GOAL_CHOICES
 SCREENING_CHOICES = _SCREENING_CHOICES
 ACTIVITY_CHOICES = _ACTIVITY_CHOICES
+PACE_CHOICES = _PACE_CHOICES
 
 
 def choice_keyboard_options(step: str) -> list[tuple[str, str]]:
@@ -223,6 +266,8 @@ def choice_keyboard_options(step: str) -> list[tuple[str, str]]:
         return [(label, slug) for slug, label in _GENDER_CHOICES.items()]
     if step == "goal":
         return [(label, slug) for slug, label in _GOAL_CHOICES.items()]
+    if step == "pace":
+        return [(label, slug) for slug, label in _PACE_CHOICES.items()]
     if step == "screening":
         # «Ничего из этого» first: it is the common answer, and putting
         # the conditions above it would make the neutral path the one you
@@ -235,5 +280,5 @@ def choice_keyboard_options(step: str) -> list[tuple[str, str]]:
     raise KeyError(f"step {step!r} has no choice keyboard (text-input step)")
 
 
-CHOICE_STEPS = frozenset({"gender", "goal", "screening", "activity"})
+CHOICE_STEPS = frozenset({"gender", "goal", "screening", "activity", "pace"})
 """Steps that present a choice keyboard. Text-input steps are the complement."""

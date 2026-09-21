@@ -224,6 +224,8 @@ class TestH4ThePersonsChoiceWins:
         run = _Run(_state("activity", _BODY), doc=_doc(["lose", "maintain"]))
         _ask_goal(run)
         run.turn("cb:anketa:choice:goal:gain")
+        # Вопрос 59: «набрать» спрашивает темп — ответ закрывает анкету.
+        run.turn("cb:anketa:choice:pace:gentle")
         assert len(run.captured) == 1
         data = run.captured[0]["data"]
         assert data["goal"] == "gain"

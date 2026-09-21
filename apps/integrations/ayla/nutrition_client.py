@@ -586,6 +586,20 @@ def health_factor_refusals(profile: "ProfileResponse") -> list[str]:
     return names
 
 
+def insufficient_inputs(profile: "ProfileResponse") -> list[str]:
+    """Входы, без которых каталог отказал считать (``insufficient_inputs``).
+
+    С вопроса 59 (CD §72) каталог не подставляет темп и активность, а с
+    #527 — пол и цель: без них расчёта нет, и отказ называет поля. Пусто —
+    такого отказа не было.
+    """
+    overrides = profile.raw.get("overrides_applied") or []
+    for entry in overrides:
+        if isinstance(entry, dict) and entry.get("reason") == "insufficient_inputs":
+            return [str(name) for name in (entry.get("fields") or [])]
+    return []
+
+
 def _target_or_none(norms: dict[str, Any], key: str) -> int | None:
     """Ориентир из блока ``norms`` — или ``None``, если его там нет.
 

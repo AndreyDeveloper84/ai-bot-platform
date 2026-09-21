@@ -93,4 +93,3 @@ class TestP4UpdateWeightCarriesPace:
         run.turn("мой вес 65")
         assert len(run.posted) == 1
         assert "pace" not in run.posted[0]["data"]
-
