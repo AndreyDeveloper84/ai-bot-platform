@@ -529,6 +529,48 @@ def proposed_norms(profile: "ProfileResponse") -> dict[str, int | None]:
     }
 
 
+def pending_proposal(profile: "ProfileResponse | None") -> dict[str, Any]:
+    """Предложение, лежащее РЯДОМ с действующим ориентиром (каталог DRF-2192).
+
+    С каталожного #525 пересчёт на подтверждённом расчёте (``ayla_calculated``)
+    больше не ставит ``ayla_proposed`` поверх действующего: действующее
+    остаётся, новое лежит в ``targets_provenance.pending_proposal``, и
+    ``confirm_targets`` его забирает. ``targets_source`` при этом —
+    ``ayla_calculated``, поэтому ``proposed_norms`` его не видит по
+    построению.
+
+    Возвращает ``{"kinds": […], "norms": {…}, "input_snapshot": {…},
+    "method_versions": {…}}`` — числа под теми же ключами, что у
+    ``proposed_norms``, — или
+    пустой словарь, если рядом ничего нет (каталог старый — ключа нет вовсе).
+    """
+    if profile is None:
+        return {}
+    raw = getattr(profile, "raw", None) or {}
+    provenance = raw.get("targets_provenance") if isinstance(raw, dict) else None
+    pending = provenance.get("pending_proposal") if isinstance(provenance, dict) else None
+    if not isinstance(pending, dict):
+        return {}
+    norms = {
+        "daily_kcal": _target_or_none(pending, "daily_kcal"),
+        "protein_g": _target_or_none(pending, "daily_protein_g"),
+        "fat_g": _target_or_none(pending, "daily_fat_g"),
+        "carbs_g": _target_or_none(pending, "daily_carbs_g"),
+        "water_ml": _target_or_none(pending, "daily_water_ml"),
+    }
+    if not any(norms.values()):
+        return {}
+    kinds = [str(k) for k in (pending.get("kinds") or []) if k in ("calories", "fluids")]
+    return {
+        # Виды, которые пересчитаны: карточка показывает и сравнивает только
+        # их — остальные действуют как были.
+        "kinds": kinds or ["calories", "fluids"],
+        "norms": norms,
+        "input_snapshot": dict(pending.get("input_snapshot") or {}),
+        "method_versions": dict(pending.get("method_versions") or {}),
+    }
+
+
 def health_factor_refusals(profile: "ProfileResponse") -> list[str]:
     """Имена health-факторов, по которым каталог отказал считать (§5.1).
 
