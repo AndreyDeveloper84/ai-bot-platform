@@ -251,6 +251,18 @@ CAUSE_TEXT = {
     CAUSE_UNCLASSIFIED: "причина не классифицирована",
 }
 
+# DRF-2065 — состояние ПУТИ к LLM, которое читает readyz. Инцидент 16–17.09:
+# 9 ч аварийного текста при зелёном readyz. После DRF-2147 бот умеет уйти на
+# резерв, и «основной лёг» больше не значит «клиентам отвечает заглушка» —
+# состояний три, плюс честное «не знаю».
+PATH_PRIMARY = "primary"
+PATH_FALLBACK = "fallback"
+PATH_DOWN = "down"
+PATH_UNKNOWN = "unknown"
+CACHE_KEY_PATH = "llm:health:path"
+#: Три пропущенных тика (beat раз в 5 минут) — это уже не знание.
+DEFAULT_PATH_STALE_S = 900
+
 #: Skip reasons returned by :func:`check_llm_availability` without probing.
 SKIP_DISABLED = "disabled"
 SKIP_NO_API_KEY = "no_api_key"  # pragma: allowlist secret — a skip reason, not a key
@@ -391,7 +403,7 @@ def probe_target() -> tuple[str, str]:
     return resolve_provider_tier()
 
 
-def build_probe_provider(name: str) -> Any:
+def build_probe_provider(name: str, **overrides: Any) -> Any:
     """A FRESH, unwrapped instance of vendor ``name`` for one probe.
 
     Construction goes through :func:`apps.llm.router.build_provider`,
@@ -423,7 +435,9 @@ def build_probe_provider(name: str) -> Any:
     from apps.llm.retry import RetryPolicy
     from apps.llm.router import build_provider
 
-    return build_provider(name, retry_policy=RetryPolicy(max_attempts=1))
+    # ``overrides`` — только то, что проба меняет осознанно: ``proxy=""``
+    # для замера прямого пути (DRF-2065). Всё остальное — как у продакшена.
+    return build_provider(name, retry_policy=RetryPolicy(max_attempts=1), **overrides)
 
 
 def _log_uncovered_vendors(probed: str) -> list[str]:
@@ -455,7 +469,12 @@ def _log_uncovered_vendors(probed: str) -> list[str]:
     return uncovered
 
 
-async def probe_llm(*, model: str | None = None) -> ProbeResult:
+async def probe_llm(
+    *,
+    model: str | None = None,
+    provider_name: str | None = None,
+    proxy: str | None = None,
+) -> ProbeResult:
     """Make one cheap real completion down the production LLM path.
 
     Never raises: every failure mode is folded into ``ok=False``. A
@@ -472,17 +491,26 @@ async def probe_llm(*, model: str | None = None) -> ProbeResult:
 
     WHICH vendor is asked comes from the router, not from this module —
     see the docstring section "WHICH provider the probe builds".
+
+    DRF-2065: ``provider_name`` и ``proxy`` задаёт только
+    :func:`check_llm_availability` — для второго замера того же тика
+    (резерв из ``fallback_candidates`` DRF-2147 или прямой путь без
+    прокси). Без них — ровно прежняя проба основного вендора.
     """
 
     chosen_model = model or getattr(settings, "LLM_HEALTH_PROBE_MODEL", "") or None
     ceiling = float(getattr(settings, "LLM_HEALTH_PROBE_TIMEOUT_S", 60.0))
 
-    provider_name, source = probe_target()
-    _log_uncovered_vendors(provider_name)
+    if provider_name is None:
+        provider_name, source = probe_target()
+        _log_uncovered_vendors(provider_name)
+    else:
+        source = "drf2065_second_look"
+    overrides = {} if proxy is None else {"proxy": proxy}
 
     started = time.monotonic()
     try:
-        provider = build_probe_provider(provider_name)
+        provider = build_probe_provider(provider_name, **overrides)
     except Exception as exc:  # noqa: BLE001 — the probe reports, never raises
         # A vendor that cannot even be CONSTRUCTED (missing SDK, unset
         # key, malformed settings) is a dead path, not a skipped check.
@@ -574,7 +602,12 @@ def _failure_threshold() -> int:
     return max(1, int(getattr(settings, "LLM_HEALTH_FAILURE_THRESHOLD", 2)))
 
 
-def evaluate_probe(result: ProbeResult) -> str:
+def evaluate_probe(
+    result: ProbeResult,
+    *,
+    path: dict[str, Any] | None = None,
+    previous_path_state: str | None = None,
+) -> str:
     """Fold ``result`` into the persisted state; notify only on change.
 
     Returns one of :data:`TRANSITION_NONE` / :data:`TRANSITION_DOWN` /
@@ -627,6 +660,24 @@ def evaluate_probe(result: ProbeResult) -> str:
     cache.set(CACHE_KEY_FAILURES, failures, ttl)
 
     if previous == STATE_DOWN:
+        # DRF-2065: основной лежит, а резерв умер или ожил — это новость,
+        # а не повтор: объявленное «работаем на резерве» перестало быть
+        # правдой (или стало ей). Один раз на смену, не на тик.
+        new_path_state = path.get("state") if path else None
+        watched = (PATH_FALLBACK, PATH_DOWN)
+        if (
+            previous_path_state in watched
+            and new_path_state in watched
+            and new_path_state != previous_path_state
+        ):
+            now_iso = timezone.now().isoformat()
+            lost = new_path_state == PATH_DOWN
+            _page(
+                "critical" if lost else "warning",
+                "LLM: резерв тоже недоступен" if lost else "LLM: работаем на резерве",
+                build_down_message(result, failures=failures, path=path),
+                dedup_key=f"llm.health.path:{new_path_state}:{now_iso}",
+            )
         # Already announced. Keep the log trail, stay off the channel —
         # a repeating alert is a muted alert.
         logger.warning(
@@ -667,19 +718,107 @@ def evaluate_probe(result: ProbeResult) -> str:
             "latency_s": round(result.latency_s, 3),
         },
     )
-    down_text = build_down_message(result, failures=failures)
+    down_text = build_down_message(result, failures=failures, path=path)
+    on_fallback = (path or {}).get("state") == PATH_FALLBACK
     # DRF-1938 / DRF-2158 — единственный путь: ``page`` = Telegram + Sentry +
     # MAX. Прямого вызова MAX здесь больше нет — иначе сообщение приходило
     # бы дважды. Ненастроенный канал виден в аудите
     # ``observability.alert.paged`` (telegram_sent / sentry_sent / max_sent).
-    _page("critical", "LLM недоступна", down_text, dedup_key=f"llm.health.down:{now_iso}")
+    if on_fallback:
+        # Клиентам отвечает резерв — для клиентов это не авария, но основной
+        # путь всё равно чинить: warning, а не тишина.
+        _page(
+            "warning", "LLM: работаем на резерве", down_text, dedup_key=f"llm.health.down:{now_iso}"
+        )
+    else:
+        _page("critical", "LLM недоступна", down_text, dedup_key=f"llm.health.down:{now_iso}")
     return TRANSITION_DOWN
 
 
 def reset_state() -> None:
     """Drop the persisted health state. Test + operator escape hatch."""
 
-    cache.delete_many([CACHE_KEY_STATE, CACHE_KEY_FAILURES, CACHE_KEY_DOWN_SINCE])
+    cache.delete_many([CACHE_KEY_STATE, CACHE_KEY_FAILURES, CACHE_KEY_DOWN_SINCE, CACHE_KEY_PATH])
+
+
+# ---------------------------------------------------------------------------
+# Path state (DRF-2065) — what readyz reads
+# ---------------------------------------------------------------------------
+
+
+def _empty_path_state() -> dict[str, Any]:
+    return {
+        "state": PATH_UNKNOWN,
+        "primary": None,
+        "fallback": None,
+        "direct_path": None,
+        "checked_at": None,
+    }
+
+
+def write_path_state(
+    *,
+    state: str,
+    primary: str | None,
+    fallback: str | None,
+    direct_path: bool | None,
+    checked_at: str | None = None,
+) -> dict[str, Any]:
+    """Итог тика для readyz. ``direct_path`` — None, если прямой путь не мерили."""
+
+    record = {
+        "state": state,
+        "primary": primary,
+        "fallback": fallback,
+        "direct_path": direct_path,
+        "checked_at": checked_at or timezone.now().isoformat(),
+    }
+    cache.set(CACHE_KEY_PATH, record, _state_ttl())
+    return record
+
+
+def read_path_state() -> dict[str, Any]:
+    """Последнее измеренное состояние пути — или честное ``unknown``.
+
+    Никакого вызова LLM: readyz опрашивается часто, и зависимость от
+    внешнего API ему противопоказана (см. ``apps.orchestrator.health``).
+    Неизмеренное — ``unknown``, а не «основной жив»; измеренное давнее
+    ``LLM_HEALTH_PATH_STALE_S`` — тоже ``unknown`` с ``detail="stale"``:
+    если beat умер, readyz не должен вечно показывать последний зелёный тик.
+    """
+
+    record = cache.get(CACHE_KEY_PATH)
+    if not isinstance(record, dict):
+        return _empty_path_state()
+    out = {**_empty_path_state(), **record}
+    try:
+        checked = datetime.fromisoformat(str(out["checked_at"]))
+    except ValueError:
+        return {**out, "state": PATH_UNKNOWN, "detail": "unparseable"}
+    if timezone.is_naive(checked):
+        checked = timezone.make_aware(checked, timezone.get_default_timezone())
+    stale_s = int(getattr(settings, "LLM_HEALTH_PATH_STALE_S", DEFAULT_PATH_STALE_S))
+    if (timezone.now() - checked).total_seconds() > stale_s:
+        return {**out, "state": PATH_UNKNOWN, "detail": "stale"}
+    return out
+
+
+def _direct_verdict(result: ProbeResult) -> bool | None:
+    """Прямой путь «есть», если провайдер ответил хоть чем-то.
+
+    403 региона — тоже ответ: сеть до провайдера жива, значит мёртв
+    прокси (замер 17.09: 403 за 0.1 с при ConnectError через прокси).
+    Сетевой отказ — «нет». Неклассифицированное — не угадываем.
+    """
+
+    if result.ok:
+        return True
+    cause = classify_cause(result.error_class)
+    if cause == CAUSE_PROVIDER:
+        return True
+    if cause == CAUSE_NETWORK:
+        return False
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -721,15 +860,26 @@ def classify_cause(error_class: str | None) -> str:
     return CAUSE_UNCLASSIFIED
 
 
-def build_down_message(result: ProbeResult, *, failures: int) -> str:
+def build_down_message(
+    result: ProbeResult, *, failures: int, path: dict[str, Any] | None = None
+) -> str:
     """Operator-facing text for the UP → DOWN transition.
 
-    No credentials, no endpoint URLs — ``result.error_message`` has
-    already been through :func:`redact_secrets`.
+    No credentials — ``result.error_message`` has already been through
+    :func:`redact_secrets`. The proxy HOST stays (decision on DRF-2065):
+    operators need it to know which proxy to replace.
+
+    DRF-2065: ``path`` — итог тика. После DRF-2147 основной путь может
+    лежать, пока клиентам отвечает резерв; тогда строка «бот отвечает
+    аварийным текстом» была бы неправдой, пережившей свою причину.
     """
 
+    tick = path or {}
+    on_fallback = tick.get("state") == PATH_FALLBACK
     lines = [
-        "🔴 LLM недоступна",
+        "🟠 Основной путь к LLM недоступен — работаем на резерве"
+        if on_fallback
+        else "🔴 LLM недоступна",
         "Проверка пути к языковой модели не проходит.",
         f"Неудачных проверок подряд: {failures}",
     ]
@@ -741,12 +891,23 @@ def build_down_message(result: ProbeResult, *, failures: int) -> str:
         lines.append(f"Провайдер: {result.provider}")
     # DRF-1938 — сеть/прокси или провайдер: первым делом, до имени исключения.
     lines.append(f"Причина: {CAUSE_TEXT[classify_cause(result.error_class)]}")
+    direct = tick.get("direct_path")
+    if direct is True:
+        lines.append("Прямой путь к провайдеру: есть — сеть жива, менять нужно прокси.")
+    elif direct is False:
+        lines.append("Прямой путь к провайдеру: нет — провайдер недоступен и в обход прокси.")
     lines.append(f"Ошибка: {result.error_class or 'unknown'}")
     if result.error_message:
         lines.append(f"Детали: {result.error_message}")
     lines.append(f"Проверка длилась: {result.latency_s:.1f} с")
     lines.append(f"Время: {_now_label()}")
-    lines.append("Бот сейчас отвечает клиентам аварийным текстом.")
+    if on_fallback:
+        lines.append(
+            f"Клиентам отвечает резервный провайдер: {tick.get('fallback')}. "
+            "Основной путь нужно чинить."
+        )
+    else:
+        lines.append("Бот сейчас отвечает клиентам аварийным текстом.")
     return "\n".join(lines)
 
 
@@ -846,11 +1007,69 @@ def check_llm_availability(*, model: str | None = None) -> dict[str, object]:
         return {"skipped": SKIP_NO_API_KEY, "provider": provider_name}
 
     result = run_probe_sync(model=model)
-    transition = evaluate_probe(result)
+    path = _measure_path(provider_name, result, model=model)
+    previous_path = cache.get(CACHE_KEY_PATH)
+    previous_path_state = previous_path.get("state") if isinstance(previous_path, dict) else None
+    write_path_state(**path)
+    transition = evaluate_probe(result, path=path, previous_path_state=previous_path_state)
     return {
         "ok": result.ok,
         "provider": result.provider,
         "latency_s": round(result.latency_s, 3),
         "transition": transition,
         "error_class": result.error_class,
+        "path": path["state"],
+    }
+
+
+def _measure_path(primary: str, result: ProbeResult, *, model: str | None) -> dict[str, Any]:
+    """Итог тика: основной / резерв / лежат — и прямой путь, если он что-то проясняет.
+
+    В штатное время — ноль лишних вызовов: тик стоит одну проверку, как до
+    DRF-2065. Второй взгляд — только когда основной не ответил:
+
+    * резерв — тот кандидат, на которого ушёл бы живой ход
+      (:func:`apps.llm.router.serving_fallback_candidates`, правило DRF-2147);
+      модель — его собственная по умолчанию: ``LLM_HEALTH_PROBE_MODEL`` может
+      называть модель основного вендора;
+    * прямой путь — только при СЕТЕВОМ отказе и только если основной шёл
+      через прокси: иначе упавший путь и был прямым, а ответ 500 ничего не
+      говорит о сети.
+    """
+
+    from apps.llm.router import provider_class, serving_fallback_candidates
+
+    if result.ok:
+        return {"state": PATH_PRIMARY, "primary": primary, "fallback": None, "direct_path": None}
+
+    candidates = serving_fallback_candidates(primary)
+    fallback = candidates[0] if candidates else None
+    fallback_ok = False
+    if fallback is not None:
+        fallback_ok = asyncio.run(probe_llm(provider_name=fallback)).ok
+
+    direct: bool | None = None
+    if classify_cause(result.error_class) == CAUSE_NETWORK:
+        try:
+            via_proxy = bool(provider_class(primary).configured_proxy())
+        except Exception:  # noqa: BLE001 — the probe reports, never raises
+            logger.warning("llm.health.proxy_unresolved provider=%s", primary, exc_info=True)
+            via_proxy = False
+        if via_proxy:
+            direct = _direct_verdict(
+                asyncio.run(probe_llm(model=model, provider_name=primary, proxy=""))
+            )
+
+    logger.warning(
+        "llm.health.path primary=%s fallback=%s fallback_ok=%s direct_path=%s",
+        primary,
+        fallback,
+        fallback_ok,
+        direct,
+    )
+    return {
+        "state": PATH_FALLBACK if fallback_ok else PATH_DOWN,
+        "primary": primary,
+        "fallback": fallback,
+        "direct_path": direct,
     }

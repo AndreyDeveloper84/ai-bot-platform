@@ -1941,6 +1941,11 @@ LLM_WARMUP_PROVIDERS = [
 # LLM_HEALTH_STATE_TTL_S: how long the Redis state keys live. A week —
 #   comfortably longer than any plausible gap between ticks. Losing the
 #   state costs at most one duplicate alert on the next transition.
+# LLM_HEALTH_PATH_STALE_S (DRF-2065): сколько секунд последний тик пробы
+#   считается знанием для readyz (``checks.llm.state``). 900 = три тика по
+#   5 минут; дольше — ``unknown`` с ``detail="stale"``: умерший beat не
+#   должен вечно показывать последний зелёный тик.
+LLM_HEALTH_PATH_STALE_S = int(os.environ.get("LLM_HEALTH_PATH_STALE_S", "900"))
 LLM_HEALTH_PROBE_ENABLED = os.environ.get("LLM_HEALTH_PROBE_ENABLED", "1") not in {
     "0",
     "false",
