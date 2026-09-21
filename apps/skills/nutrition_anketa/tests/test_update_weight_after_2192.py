@@ -28,44 +28,17 @@ from __future__ import annotations
 from dataclasses import replace
 
 from apps.skills.nutrition_anketa.skill import CB_CONFIRM_TARGETS
-from apps.skills.nutrition_anketa.tests.test_skill import _profile
 from apps.skills.nutrition_anketa.tests.test_update_weight_2139 import (
-    _SNAPSHOT,
     _calculated,
     _callbacks,
+    _catalog_after_2192,
     _Run,
 )
 
 
 def _calculated_with_pending(weight: int):
-    """Ответ каталога после #525: действующее + предложение рядом."""
-    return replace(
-        _profile(),
-        weight_kg=weight,
-        targets_source="ayla_calculated",
-        targets_input_snapshot=dict(_SNAPSHOT),
-        raw={
-            "norms": {"daily_kcal": 1800},
-            "targets_provenance": {
-                "source": "ayla_calculated",
-                "input_snapshot": dict(_SNAPSHOT),
-                "pending_proposal": {
-                    "kinds": ["calories"],
-                    "daily_kcal": 1700,
-                    "daily_protein_g": 110,
-                    "daily_fat_g": 60,
-                    "daily_carbs_g": 180,
-                    "input_snapshot": {**_SNAPSHOT, "weight_kg": weight},
-                    "method_versions": {"calories": "mifflin_st_jeor_v2"},
-                    "computed_at": "2026-09-21T09:00:00.000Z",
-                    "goal": "maintain",
-                    "pace": "moderate",
-                    "goal_overridden_by": None,
-                    "overrides_applied": [],
-                },
-            },
-        },
-    )
+    """Ответ каталога после #525 — из того же источника, что мок w1."""
+    return _catalog_after_2192(weight)
 
 
 class TestP1TheProposalBesideTheActingTarget:
@@ -110,7 +83,8 @@ class TestM1WeightOverAManualTarget:
         assert body["consent"]["type"] == "personal_calculation"
         # Ручной ориентир снимка не имеет — полей анкеты бот не выдумывает.
         assert set(body) == {"weight_kg", "consent"}
-        assert "65" in result.reply_text
-        assert "не пересчитываю" not in result.reply_text
+        # Вес записан — не прежний отказ «ориентир не пересчитываю».
+        assert "Записала вес — 65 кг" in result.reply_text
+        assert "остаётся прежним" in result.reply_text
         assert result.meta["reply_kind"] == "anketa_update_weight_manual_saved"
         assert CB_CONFIRM_TARGETS not in _callbacks(result)

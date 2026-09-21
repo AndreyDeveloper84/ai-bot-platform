@@ -13,8 +13,9 @@
   подтверждения → подтвердить → ``confirm_targets``;
 * w2 — без анкеты (профиля нет / снимок пуст / источник ``none``) → «Сначала
   пройдём анкету — так я посчитаю точно» + кнопка анкеты; POST нет;
-* w3 — ``user_entered`` → «ориентир от специалиста … не пересчитываю»; POST
-  нет (каталог не умеет записать вес без пересчёта — предел, лист каталогу);
+* w3 — ``user_entered`` → вес пишется (каталог #525, DRF-2193), ориентир
+  человека остаётся; тело — только вес и утверждение. До #525 здесь стояло
+  отступление «POST нет»: каталог не умел записать вес без пересчёта;
 * w4 — ложный вход: «вес 20» / «вес 400» → «проверь число», POST нет;
   «68,5» — переспрос целым числом;
 * w5 — «обнови вес» / кнопка → вопрос веса → «68» → карточка;
@@ -98,6 +99,53 @@ def _calculated(
     )
 
 
+def _catalog_after_2192(weight: int, *, acting_kcal: int = 1800):
+    """Ответ каталога на пересчёт ПОДТВЕРЖДЁННОГО расчёта — форма после #525.
+
+    Один источник для мока: до этой правки мок отдавал старую форму
+    (``ayla_proposed`` на месте), и w1 был зелёным, пока каталог после #525
+    отвечал уже иначе — мок пинил контракт, которого больше не было.
+    """
+    return replace(
+        _profile(),
+        weight_kg=weight,
+        daily_kcal=acting_kcal,
+        targets_source="ayla_calculated",
+        targets_input_snapshot=dict(_SNAPSHOT),
+        targets_method_versions={"calories": "mifflin_st_jeor_v2"},
+        raw={
+            "norms": {"daily_kcal": acting_kcal},
+            "targets_provenance": {
+                "source": "ayla_calculated",
+                "input_snapshot": dict(_SNAPSHOT),
+                "pending_proposal": {
+                    "kinds": ["calories"],
+                    "daily_kcal": 1700,
+                    "daily_protein_g": 110,
+                    "daily_fat_g": 60,
+                    "daily_carbs_g": 180,
+                    "input_snapshot": {**_SNAPSHOT, "weight_kg": weight},
+                    "method_versions": {"calories": "mifflin_st_jeor_v2"},
+                    "computed_at": "2026-09-21T09:00:00.000Z",
+                    "goal": "maintain",
+                    "pace": "moderate",
+                    "goal_overridden_by": None,
+                    "overrides_applied": [],
+                },
+            },
+        },
+    )
+
+
+def _catalog_answer(profile: Any, weight: int):
+    """Что каталог (после #525) отвечает на вес — по источнику до POST."""
+    if getattr(profile, "targets_source", "") == "ayla_calculated":
+        return _catalog_after_2192(weight)
+    if getattr(profile, "targets_source", "") == "user_entered":
+        return replace(profile, weight_kg=weight)
+    return _proposed(weight)
+
+
 def _proposed(weight: int):
     return replace(
         _profile(),
@@ -131,7 +179,9 @@ class _Run:
             self.posted.append(kwargs)
             if isinstance(upsert, Exception):
                 raise upsert
-            return upsert if upsert is not None else _proposed(kwargs["data"]["weight_kg"])
+            if upsert is not None:
+                return upsert
+            return _catalog_answer(profile, kwargs["data"]["weight_kg"])
 
         async def _confirm(**kwargs):
             self.confirmed += 1
@@ -233,13 +283,14 @@ class TestW2WithoutAnAnketa:
 
 
 class TestW3UserEntered:
-    def test_no_recompute_no_write(self) -> None:
-        run = _Run(profile=_calculated(source="user_entered"))
+    def test_weight_is_written_and_the_target_stays(self) -> None:
+        """До #525 тест пинил «POST нет» — отступление, которое каталог снял."""
+        run = _Run(profile=_calculated(source="user_entered", snapshot={}))
         result = run.turn("мой вес 65")
         assert "ориентир от специалиста" in result.reply_text.lower()
-        assert "не пересчитываю" in result.reply_text
-        assert run.posted == []
-        assert result.meta["reply_kind"] == "anketa_update_weight_manual_target"
+        assert "остаётся прежним" in result.reply_text
+        assert [p["data"]["weight_kg"] for p in run.posted] == [65]
+        assert result.meta["reply_kind"] == "anketa_update_weight_manual_saved"
 
 
 class TestW4CheckTheNumber:
