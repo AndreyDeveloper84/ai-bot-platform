@@ -2093,6 +2093,15 @@ _GOAL_LABELS: dict[str, str] = {
     "tone": "подтянуть",
 }
 _PACE_LABELS: dict[str, str] = {"gentle": "мягкий", "moderate": "средний"}
+#: Ступень ``bmr_floor``: каталог перевёл цель «похудеть» в «поддерживать»,
+#: потому что дефицит опустил бы ориентир ниже BMR (DRF-2222). Тексты
+#: утверждены владельцем дословно (CD §72). Ступень бывает только при
+#: названной цели «похудеть» — поэтому цель в тексте литеральная.
+_BMR_FLOOR = "bmr_floor"
+_BMR_FLOOR_GOAL_TEXT = (
+    "Твоя цель — снизить вес. Сейчас ориентир на поддержание: ниже безопасного минимума не опускаю."
+)
+_BMR_FLOOR_REMARK = "Ориентир не ниже безопасного минимума."
 #: Число из снимка → слово, которое человек выбирал (DRF-2102). Значение
 #: вне таблицы (1.4 у профилей, посчитанных до шага) печатается числом.
 _ACTIVITY_LABELS: dict[float, str] = {
@@ -2138,8 +2147,11 @@ def _method_and_inputs_line(profile) -> str:
         activity = snapshot["activity_coefficient"]
         label = _ACTIVITY_LABELS.get(activity) if isinstance(activity, (int, float)) else None
         facts.append(f"активность — {label} ({activity})" if label else f"активность — {activity}")
+    floored = getattr(profile, "goal_overridden_by", None) == _BMR_FLOOR
     goal = snapshot.get("goal")
-    if goal:
+    # При ступени в снимке — расчётная цель «поддерживать», а не названная
+    # человеком: «цель — поддерживать» выдало бы её за его выбор.
+    if goal and not floored:
         facts.append(f"цель — {_GOAL_LABELS.get(str(goal), str(goal))}")
     pace = snapshot.get("pace")
     if pace:
@@ -2150,7 +2162,8 @@ def _method_and_inputs_line(profile) -> str:
         if version
         else "Считала"
     )
-    return f"{head} от твоих данных: {', '.join(facts)}."
+    line = f"{head} от твоих данных: {', '.join(facts)}."
+    return f"{line} {_BMR_FLOOR_GOAL_TEXT}" if floored else line
 
 
 def _fluids_reference_line(profile) -> str:
@@ -2334,7 +2347,10 @@ def _format_summary(profile) -> str:
     fluids_line = _fluids_reference_line(profile)
     if fluids_line:
         parts.append(fluids_line)
-    if profile.goal_overridden_by:
+    if profile.goal_overridden_by == _BMR_FLOOR:
+        # Ступень по BMR — граница расчёта, не анамнез.
+        parts.append(_BMR_FLOOR_REMARK)
+    elif profile.goal_overridden_by:
         # Ayla applied a safety override (pregnancy / eating-disorder /
         # BMI floor). Mention it gently — the override is the right call,
         # not a downgrade.
