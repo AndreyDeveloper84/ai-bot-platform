@@ -169,6 +169,9 @@ class AnonymizeResult:
     #: entries leave by INGRESS_RAW_RETENTION_HOURS; callers must say so
     #: rather than report the streams as erased.
     raw_streams_checked: bool = True
+    #: DRF-2242 — rows of ``WebhookJournal`` severed from this person: body
+    #: emptied, trace cleared, event id hashed.
+    journal_rows_severed: int = 0
 
     @property
     def changed(self) -> bool:
@@ -424,6 +427,39 @@ def _has_updated_at(instance: Any) -> bool:
     return any(f.name == "updated_at" for f in instance._meta.concrete_fields)
 
 
+def _erase_journal_rows(bot_user_ids: list[uuid.UUID], *, through: datetime) -> int:
+    """Оторвать строки ``WebhookJournal`` от человека до ``through`` (DRF-2242).
+
+    Тот же фильтр оболочек, что у :func:`_purge_raw_entries` (только MAX:
+    чужое пространство id могло бы совпасть числом), плюс ``trace_id`` его
+    сообщений: после ``INGRESS_RAW_RETENTION_HOURS`` тела уже нет, а трасса
+    связывает строку с человеком весь срок строки.
+    """
+
+    from apps.identity.models import BotUser
+    from apps.ingress.retention import erase_person_rows
+
+    channel_user_ids = [
+        cid
+        for cid in BotUser.all_tenants.filter(id__in=bot_user_ids, channel="max").values_list(
+            "channel_user_id", flat=True
+        )
+        if cid
+    ]
+    trace_ids = (
+        Message.all_tenants.filter(
+            conversation__bot_user_id__in=bot_user_ids,
+            created_at__lte=through,
+            trace_id__isnull=False,
+        )
+        .values_list("trace_id", flat=True)
+        .distinct()
+    )
+    return erase_person_rows(
+        channel_user_ids, trace_ids=[str(t) for t in trace_ids], through=through
+    )
+
+
 def shell_ids_for_person(
     *,
     bot_user: Any = None,
@@ -513,6 +549,13 @@ def anonymize_dialogue(
 
         raw = RawPurgeResult()
         raw_checked = False
+
+    # DRF-2242 — the same bodies' copy in Postgres (`WebhookJournal`), and the
+    # trace / event id that tie a body-less row back to the person. Same
+    # database as the dialogue, so unlike the streams a failure is NOT
+    # swallowed: it propagates, the cutoff stays unmoved, and the sweep
+    # retries — the same contract `_clear_redis_stores` keeps below.
+    journal_rows = _erase_journal_rows(ids, through=through)
 
     conversations = list(
         # ``created_at__lte`` matters: a thread STARTED after the request
@@ -658,6 +701,7 @@ def anonymize_dialogue(
         raw_entries_deleted=raw.deleted,
         raw_entries_unattributed=raw.unattributed,
         raw_streams_checked=raw_checked,
+        journal_rows_severed=journal_rows,
     )
 
     if result.changed:

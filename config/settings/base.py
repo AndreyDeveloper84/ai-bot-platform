@@ -337,6 +337,16 @@ PEL_REAPER_BATCH_SIZE = int(os.environ.get("PEL_REAPER_BATCH_SIZE", "100"))
 # answer differs, this one value changes.
 INGRESS_RAW_RETENTION_HOURS = int(os.environ.get("INGRESS_RAW_RETENTION_HOURS", "72"))
 
+# DRF-2242 — how long a ``WebhookJournal`` row outlives its body. The body goes
+# after INGRESS_RAW_RETENTION_HOURS (the same raw copy as the stream entry);
+# the row stays for MAX retry dedup and the service trace. 90 days — the main
+# window's call by analogy with the ArchivedMessage audit tier (a trace_id is
+# joined to AuditLog during incident review); put to the owner, one number.
+# A body-less row is still pseudonymous personal data (trace_id → Message →
+# BotUser.channel_user_id), so «забудь всё» severs it at once — see
+# apps.ingress.retention.
+WEBHOOK_JOURNAL_ROW_RETENTION_DAYS = int(os.environ.get("WEBHOOK_JOURNAL_ROW_RETENTION_DAYS", "90"))
+
 # Sprint 8 / F2 (DRF-731) — STRICT_TENANT_SCOPE post-flip monitor armed.
 # Operator sets this to the ISO 8601 flip timestamp at the same moment
 # they roll STRICT_TENANT_SCOPE=strict in /etc/ai-bot-platform/.env.
@@ -1443,6 +1453,13 @@ CELERY_BEAT_SCHEDULE = {
     "workers.trim_ingress_streams": {
         "task": "apps.workers.tasks.trim_ingress_streams",
         "schedule": crontab(minute="17"),
+    },
+    # DRF-2242 — WebhookJournal: bodies past INGRESS_RAW_RETENTION_HOURS and
+    # rows past WEBHOOK_JOURNAL_ROW_RETENTION_DAYS, rolling edge only; the
+    # backlog is the `purge_webhook_journal` command's, on the owner's word.
+    "ingress.sweep_webhook_journal": {
+        "task": "apps.ingress.tasks.sweep_webhook_journal",
+        "schedule": crontab(minute="23"),
     },
     # PR #507 adversarial A8 — bound the cross-service event-ingest
     # tables' retention. DLQ persists envelope.data per §6.4 (PII

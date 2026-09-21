@@ -23,6 +23,7 @@ import pytest
 from django.core.management import call_command
 from django.utils import timezone
 
+from apps.conversations.tests.test_erasure import fake_redis  # noqa: F401 — фикстура
 from apps.ingress.models import WebhookJournal
 
 pytestmark = [pytest.mark.django_db, pytest.mark.usefixtures("ingress_streams_empty")]
@@ -293,7 +294,11 @@ class TestLinkIsSevered:
         )
         assert created is True
 
-    def test_a_row_whose_body_already_expired_is_severed_via_the_trace(self, settings) -> None:
+    def test_a_row_whose_body_already_expired_is_severed_via_the_trace(
+        self,
+        settings,
+        fake_redis,  # noqa: F811 — фикстура из test_erasure
+    ) -> None:
         """После W тела уже нет, и отправителя по нему не узнать, а связь через
         trace живёт все 90 дней. Второй путь — по ``trace_id`` сообщений человека."""
         import uuid
