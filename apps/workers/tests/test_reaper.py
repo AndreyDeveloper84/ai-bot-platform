@@ -15,7 +15,7 @@ from apps.events.models import Event
 from apps.ingress import streams
 from apps.workers import reaper
 from apps.workers.base import TenantAwareTask
-from apps.workers.registry import clear_registry, register
+from apps.workers.registry import emptied_registry_for_tests, register
 from apps.workers.tasks import reap_pel
 from apps.workers.tests.test_consumer import _FakeStreamRedis
 
@@ -31,9 +31,9 @@ def fake_redis(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _clean_registry():
-    clear_registry()
-    yield
-    clear_registry()
+    # DRF-2220 — empty for the test, the production handlers back after.
+    with emptied_registry_for_tests():
+        yield
 
 
 # ---------------------------------------------------------------------------
