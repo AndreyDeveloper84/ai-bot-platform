@@ -152,10 +152,13 @@ class TestP4GlobalPathIsDeterministic:
         router.get_provider.return_value = provider
         monkeypatch.setattr(concierge, "get_router", lambda: router)
 
+        # DRF-2213 Q2: одна точка — обработчик MAX зовёт red_flag_reply сразу
+        # после гейта (сквозной ход — test_safety_under_handoff_2213::TestP2).
+        from apps.orchestrator.red_flag_turn import red_flag_reply
+
         bot_user, conversation = self._bot_user_and_conversation(text[:6].encode().hex()[:8])
-        reply = concierge.generate_concierge_reply(
-            text, bot_user=bot_user, conversation=conversation
-        )
+        reply = red_flag_reply(text, bot_user=bot_user, conversation=conversation, trace_id=None)
+        assert reply is not None
         assert reply.text == MEDICAL_EMERGENCY_TEXT_V2
         assert provider.complete.call_count == 0  # empty-assert-ok: текст v2 строкой выше
 
