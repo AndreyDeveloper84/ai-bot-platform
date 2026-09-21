@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 from typing import Any
+from uuid import UUID
 
 from apps.orchestrator.discovery import DiscoveryReply
 
@@ -27,7 +28,7 @@ RED_FLAG_ACTION_TYPE = "health_screening"
 
 
 def red_flag_reply(
-    message_text: str, *, bot_user: Any, conversation: Any, trace_id: str | None
+    message_text: str, *, bot_user: Any, conversation: Any, trace_id: str | UUID | None
 ) -> DiscoveryReply | None:
     """Ответ на red flag классификатора или ``None`` (сигнала нет / навык отказал).
 
@@ -52,7 +53,7 @@ def red_flag_reply(
             {"symptom_text": message_text},
             bot_user=bot_user,
             conversation=conversation,
-            trace_id=trace_id or "",
+            trace_id=str(trace_id) if trace_id else "",
             message_text=message_text,
         )
     except Exception:  # noqa: BLE001 — сбой детерминированной ветки не стоит хода
