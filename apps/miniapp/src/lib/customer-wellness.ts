@@ -708,6 +708,25 @@ export async function postWaterLog(entry: QueuedWaterLog): Promise<WaterLogResul
   });
 }
 
+/**
+ * DRF-2230 — «Дать согласие в чате»: сервер шлёт в чат MAX приглашение с
+ * кнопкой «Дать согласие». `sent: false` — либо приглашение уже отправлено
+ * недавно (`recently_sent`, дубля нет — можно закрываться), либо согласие
+ * уже есть (`already_granted` — закрываться незачем, данные перечитываются).
+ */
+export interface ConsentPromptResult {
+  sent: boolean;
+  reason?: "recently_sent" | "already_granted";
+}
+
+export function requestDiaryConsentPrompt(): Promise<ConsentPromptResult> {
+  return request<ConsentPromptResult>("/wellness/consent-prompt", { method: "POST" });
+}
+
+/** DRF-2230 — ЧЕРНОВИК: приглашение в чат не ушло; приложение не закрывается. */
+export const CONSENT_PROMPT_FAILED_TEXT =
+  "Не получилось отправить приглашение в чат. Попробуй ещё раз.";
+
 /** DRF-1919 — одна фраза на «нет согласия» для дневника еды и воды. */
 export const DIARY_CONSENT_REQUIRED_TEXT =
   "Чтобы менять дневник, нужно согласие на обработку личных данных — дай его в чате с Ayla.";

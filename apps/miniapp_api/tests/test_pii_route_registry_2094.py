@@ -471,6 +471,12 @@ CUSTOMER_ROUTES: dict[str, Entry] = {
             "omitted when no target exists rather than sent as null"
         ),
     ),
+    "customer_wellness_consent_prompt": none(
+        "DRF-2230: 200 {sent, reason} — a delivery fact, no record of the caller in the body; "
+        "the invitation itself goes to the caller's own MAX chat (user_id of the verified "
+        "init data), never to anyone else",
+        via=V + "customer_wellness_consent_prompt",
+    ),
     "customer_wellness_water_undo": none(
         "204 with no body when the caller's own water entry is undone; refusals carry an "
         "error slug and a sentence, not the entry",

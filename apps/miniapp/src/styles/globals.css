@@ -5473,6 +5473,13 @@ a {
   font-size: var(--font-size-200);
 }
 
+/* DRF-2230 — приглашение в чат не ушло: сказано вслух, экран не закрыт. */
+.wellness-dash__consent-error {
+  margin: 0;
+  color: var(--c-danger);
+  font-size: var(--font-size-200);
+}
+
 /* «План на сегодня». */
 .wellness-dash__plan-today {
   display: flex;

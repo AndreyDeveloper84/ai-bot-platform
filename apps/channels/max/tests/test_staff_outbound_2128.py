@@ -353,6 +353,9 @@ DIRECT_SEND_SITES: dict[str, str] = {
     # DRF-1772 (К-3) — карточка C04 в DM после анкеты: клиенту, от глобального
     # бота (диспетчер сам отказывает пользователям салонных ботов).
     "apps/recommendation/dispatch.py": "client",
+    # DRF-2230 — приглашение к согласию по нажатию на Главной Mini App: клиенту,
+    # от клиентского бота (Mini App клиента живёт под ним; bot_scope не ставится).
+    "apps/miniapp_api/views.py:customer_wellness_consent_prompt": "client",
     # транспорт — фан-аут, отправитель задаётся вызывающим (bot_scope)
     "apps/handoff/notify.py": "transport",
     "apps/channels/apps.py": "transport",

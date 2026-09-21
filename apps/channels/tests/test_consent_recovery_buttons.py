@@ -43,7 +43,8 @@ from apps.skills.food_clarify.text_entry import CONSENT_TEXT
 pytestmark = pytest.mark.django_db
 
 OFFER_LABEL = "Дать согласие"
-ORIGINS = ("photo", "text", "water")
+#: DRF-2230: ``miniapp`` — приглашение из Главной Mini App; путь тот же, что у отказов.
+ORIGINS = ("photo", "text", "water", "miniapp")
 
 
 @pytest.fixture(autouse=True)
