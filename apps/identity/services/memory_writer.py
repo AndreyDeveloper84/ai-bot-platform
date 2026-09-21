@@ -26,6 +26,14 @@ consent event).
    argument — otherwise `ZonePromotionRequiresConsent` (ADR-0011
    §11.2). Demotion (yellow→green, red→yellow) is always allowed.
 
+   **Minor protection applies to this path too (DRF-2180).** Until this
+   list, `promote_zone` checked neither the DOB stub nor `minor_lock`:
+   «write green, then promote» reached the red zone around the
+   fail-closed gate in one line, and left no `write_rejected_dob_lookup`
+   row — because there was no check to reject. Consent and age are
+   different questions: a token says the person agreed, it does not say
+   the person is an adult.
+
 # Phase 0 reality
 
 The Ayla REST DOB endpoint does not exist yet (tracked in #597). Per
@@ -252,11 +260,46 @@ def supersede_entries(
         )
 
 
+def _guard_minor_protection_for_promotion(
+    *,
+    user_id: uuid.UUID,
+    request_id: uuid.UUID,
+    purpose: str,
+) -> None:
+    """Та же защита, что у прямой записи, — на пути повышения зоны.
+
+    Судебная строка пишется ПЕРЕД броском: отказ платформы писать
+    специальную категорию, потому что возраст не подтверждён, — это
+    доказательство по 152-ФЗ гл. 3, и терять его на исключении нельзя.
+    ``_audit_write_rejected`` коммитит её durable, независимо от отката
+    вызывающего, по той же причине, что и у ``write_entry``.
+    """
+    # Нет строки UPC — нет и `minor_lock`, который можно прочитать. Сегодня
+    # это безопасно: `_check_minor_protection` ниже всё равно всегда бросает.
+    # После #597, когда он начнёт пропускать взрослых, отсутствие UPC станет
+    # «замка нет» — и это ровно тот момент, когда сюда нужен отказ, а не
+    # пропуск. `write_entry` от этого защищён тем, что берёт
+    # `personal_context` обязательным аргументом.
+    personal_context = UserPersonalContext.objects.filter(user_id=user_id).first()
+    if personal_context is not None and personal_context.minor_lock:
+        _audit_write_rejected(user_id, request_id, purpose)
+        raise MinorProtectionLookupFailed(
+            f"minor_lock is set for user {user_id} — zone promotion refused (ADR-0011 §10.2)."
+        )
+    try:
+        _check_minor_protection(user_id)
+    except MinorProtectionLookupFailed:
+        _audit_write_rejected(user_id, request_id, purpose)
+        raise
+
+
 def promote_zone(
     *,
     entry: MemoryEntry,
     new_zone: str,
     consent_token: Optional[str] = None,
+    request_id: uuid.UUID,
+    purpose: str,
 ) -> MemoryEntry:
     """Change `entry.sensitivity_zone`.
 
@@ -271,6 +314,33 @@ def promote_zone(
 
     Either way ``updated_at`` moves to the transition moment (DRF-1263).
     A REJECTED promotion is not a transition and moves nothing.
+
+    DRF-2180 — promotion up ALSO passes minor protection, exactly as
+    :func:`write_entry` does: ``minor_lock`` first (cheaper and more
+    specific), then the DOB check. A rejection raises
+    ``MinorProtectionLookupFailed`` and leaves the forensic
+    ``write_rejected_dob_lookup`` row.
+
+    ``request_id`` and ``purpose`` are REQUIRED for the same reason they are
+    on :func:`write_entry`: the forensic row has to be joinable to the
+    request that produced it. A default would mint a random id attached to
+    nothing and give every rejection the same purpose text — evidence
+    without a subject.
+
+    **Callers MUST NOT wrap this in their own ``transaction.atomic()``**, the
+    same contract ``write_entry`` carries and for the same reason: the
+    forensic row commits via ``atomic(durable=True)``, and a durable block
+    nested in another atomic raises ``RuntimeError`` — you would catch
+    something other than ``MinorProtectionLookupFailed``. Fail-loud is
+    deliberate (Q2 fork 2026-05-25): a rejection row lost to a caller-side
+    rollback breaks the regulatory invariant the guard exists to uphold.
+
+    The two paths differ in ONE thing, deliberately: ``write_entry``
+    swallows the exception and returns ``None`` (there was nothing to
+    return), while ``promote_zone`` re-raises. It takes an EXISTING row
+    and must answer «did the zone change?»; returning the unchanged entry
+    would answer «yes, it is green» to a caller who asked for red, and the
+    caller would store a red fact believing it protected.
     """
     promoting_up = entry.sensitivity_zone == MemoryEntry.SENSITIVITY_GREEN and new_zone in (
         MemoryEntry.SENSITIVITY_YELLOW,
@@ -291,6 +361,14 @@ def promote_zone(
                 f"{entry.sensitivity_zone!r} to {new_zone!r} without "
                 "consent_token (ADR-0011 §11.2)."
             )
+        # DRF-2180 — согласие и возраст это разные вопросы: токен говорит,
+        # что человек согласился, и ничего не говорит о том, взрослый ли он.
+        # Порядок как у `write_entry`: `minor_lock` дешевле и адреснее.
+        _guard_minor_protection_for_promotion(
+            user_id=entry.user_id,
+            request_id=request_id,
+            purpose=purpose,
+        )
         # Same UPDATE — satisfies CHECK 2 (yellow/red require
         # consent_at NOT NULL).
         entry.sensitivity_zone = new_zone
