@@ -1091,7 +1091,9 @@ jobs:
     # That would mean the fit above understated the tail. Recompute it
     # from fresh jobs-API data — do not simply nudge the ceiling upward.
     # ---- end of inherited history ----
-    timeout-minutes: 30
+    # ЗОНД DRF-2208: 40 только здесь, чтобы дамп faulthandler (через
+    # 240/120 с на тест) успел напечататься до отмены. Боевое число — 30.
+    timeout-minutes: 40
 
     strategy:
       # A red shard must not cancel its siblings. With fail-fast the run
@@ -1100,28 +1102,19 @@ jobs:
       fail-fast: false
       matrix:
         shard:
-          - id: "1"
-            args: "apps/skills/booking/tests/test_lookup_routing.py"
-          # DRF-2205 — `apps/channels` переехал из шарда 2 в шард 5 по
-          # замеру, а не по названию папок. Сумма времени тестов по junit
-          # зонда #1941 (до деления на четыре воркера): 1:1323 2:1650
-          # 3:1073 4:1297 5:1061 с. Шард 2 был самым тяжёлым — не из-за
-          # виновного теста, а объёмом (2055 тестов apps.orchestrator.tests
-          # + ~271 с apps/channels), — и потому под замедлением раннера
-          # первым переходил потолок. После переезда: 2:~1378 5:~1332,
-          # максимум −16%.
-          #
-          # Чего это НЕ лечит: троекратных замедлений самого раннера. Оно
-          # лишь перестаёт делать всегда один и тот же шард первым
-          # кандидатом на отмену. Перемерять — снова по junit, не на глаз.
-          - id: "2"
-            args: "apps/orchestrator"
-          - id: "3"
-            args: "apps/identity apps/replay"
-          - id: "4"
-            args: "apps/consent apps/skills apps/admin_api --ignore=apps/skills/booking/tests/test_lookup_routing.py"
-          - id: "5"
+          # ЗОНД DRF-2208 — НЕ СЛИВАТЬ. Три боевых шарда 5 (там теперь
+          # apps/channels) и две ноги, гоняющие файл с замороженными
+          # часами 15 раз подряд без xdist.
+          - id: "5a"
             args: "apps/ --ignore=apps/skills --ignore=apps/orchestrator --ignore=apps/identity --ignore=apps/consent --ignore=apps/replay --ignore=apps/admin_api"
+          - id: "5b"
+            args: "apps/ --ignore=apps/skills --ignore=apps/orchestrator --ignore=apps/identity --ignore=apps/consent --ignore=apps/replay --ignore=apps/admin_api"
+          - id: "5c"
+            args: "apps/ --ignore=apps/skills --ignore=apps/orchestrator --ignore=apps/identity --ignore=apps/consent --ignore=apps/replay --ignore=apps/admin_api"
+          - id: "L1"
+            args: "apps/channels/tests/test_global_booking_continuation.py"
+          - id: "L2"
+            args: "apps/channels/tests/test_global_booking_continuation.py"
 
     services:
       postgres:
@@ -1304,13 +1297,23 @@ jobs:
         run: |
           rm -f "$JUNIT_FILE"
           echo "SHARD $SHARD_ID selector: $SHARD_ARGS"
+          # ЗОНД DRF-2208: ноги L* — петля по одному файлу, без xdist.
+          # faulthandler_timeout печатает стеки ВСЕХ потоков, если тест
+          # идёт дольше порога: зависание само покажет, где оно.
+          case "$SHARD_ID" in L*)
+            for i in $(seq 1 15); do
+              echo "== DRF-2208 loop $i/15"
+              uv run pytest $SHARD_ARGS -q -o faulthandler_timeout=120
+            done
+            exit 0 ;;
+          esac
           # DRF-2205 — `worksteal` вместо `load`: СМЯГЧЕНИЕ, НЕ ФИКС.
           # При `load` очередь делится заранее, и один воркер, получивший
           # хвост из медленных тестов, держит весь шард, пока три других
           # простаивают. `worksteal` даёт простаивающим забирать работу.
           # Это прячет неравномерность, а не устраняет её причину;
           # причину лечит перераспределение шардов в матрице выше.
-          uv run pytest $SHARD_ARGS -q -n 4 --dist worksteal \
+          uv run pytest $SHARD_ARGS -q -n 4 --dist worksteal -o faulthandler_timeout=240 \
             --junitxml="$JUNIT_FILE" \
             --deselect apps/miniapp_api/tests/test_c7_payments.py::TestPaymentMirrorReadModel::test_booking_confirmed_with_payment_id_stamps_hold \
             --deselect apps/miniapp_api/tests/test_c7_payments.py::TestPaymentMirrorReadModel::test_booking_confirmed_without_payment_id_no_mirror \
