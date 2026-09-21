@@ -184,7 +184,9 @@ NON_REGISTRY_STORES: Mapping[str, str] = {
         "Состояние незавершённых пошаговых сценариев, в том числе анкеты "
         "питания и коррекции блюда. Живёт до конца сценария и пересобирается "
         "заново; итог, если человек его подтвердил, оседает зелёной записью "
-        "памяти и выгружается в разделе memory."
+        "памяти и выгружается в разделе memory. После «удалить всё» "
+        "опустошается целиком тем же обновлением, что обезличивает переписку "
+        "(DRF-2181)."
     ),
     "identity.MemoryEntry:yellow": (
         "Жёлтая зона — личные факты с обязательным согласием при записи и "
@@ -202,12 +204,74 @@ NON_REGISTRY_STORES: Mapping[str, str] = {
         "стирает (DRF-1276); в выгрузку клиента они не входят, потому что "
         "это рабочая поверхность сотрудника, а не клиента."
     ),
+    # DRF-2183 — три хранилища, о которых выгрузка молчала. Решение по
+    # черновикам взято по прецеденту `Message.content`, до слова владельца:
+    # это та же переписка плюс работа мастера, и если владелец решит
+    # выгружать переписку, черновики поедут вместе с ней.
+    "conversations.AiDraft.content": (
+        "Неотправленный черновик ответа мастеру, который ассистент собирает "
+        "из реплик клиента и который может цитировать их дословно. Не "
+        "выгружается по тем же двум причинам, что и живая переписка — объём "
+        "и данные третьих лиц: черновик — рабочая поверхность мастера, а не "
+        "клиента. Текст очищается, когда мастер отправил черновик сам, "
+        "передал ответ ИИ или черновик заменён более новым. Неиспользованный "
+        "черновик хранится до следующего сообщения в диалоге. При «удалить "
+        "всё» очищается сразу вместе с обезличиванием переписки (DRF-1369), "
+        "а если чатовый путь не сработал — самое позднее в течение часа."
+    ),
+    "redis.short_term": (
+        "Кратковременная память диалога в Redis — последние реплики человека "
+        "и ответы Ayla, те же, что в самой переписке. Живёт сутки "
+        "(SHORT_TERM_MEMORY_TTL_SECONDS, продлевается на каждой реплике) и "
+        "нужна, чтобы Ayla помнила ход разговора. Не выгружается по тем же "
+        "причинам, что и переписка, чьей копией на сутки она является. При "
+        "«удалить всё» очищается сразу, не дожидаясь срока, а если чатовый "
+        "путь не сработал — самое позднее в течение часа."
+    ),
+    "redis.pii_tokenmap": (
+        "Техническая обратная карта «токен → исходное значение» для "
+        "маскировки в запросах к языковой модели: модель видит токен, а не "
+        "значение. Туда попадают телефоны, адреса почты, номера карт, "
+        "одноразовые коды и ссылки с токенами, встреченные в переписке и "
+        "промптах этого диалога, — в том числе принадлежащие третьим лицам "
+        "(мастеру, салону, тому, чей номер человек прислал). Не выгружается "
+        "по тем же причинам, что и переписка. В Postgres не пишется; живёт в "
+        "Redis до 25 часов после последнего появления такого значения в "
+        "диалоге. При «удалить всё» очищается сразу, а если чатовый путь не "
+        "сработал — самое позднее в течение часа, следующим прогоном свипа."
+    ),
+}
+
+#: Stores that hold personal data, have no slot in the registry, and ARE
+#: carried in the export — under the named section (DRF-2183).
+#:
+#: ``NON_REGISTRY_STORES`` renders into ``withheld``, so before this table the
+#: coverage could only say «not exported» about a non-registry store. Consents
+#: ARE exported (the ``consents`` section) — declaring them withheld would have
+#: told the person «we do not give you this» about data two paragraphs up in
+#: the same file: a false statement in a legal document. ``test_export_coverage_
+#: undeclared_2183`` pins that every section named here is a real top-level key
+#: of the export, so the declaration cannot promise what the file does not hold.
+#:
+#: ``consent.ConsentRecord`` is carried in substance — type, granted, document
+#: version, source and both dates. Not carried: the internal id, the FK back to
+#: the person, and the tenant (which salon the consent was given to) — the last
+#: one is a known gap of the ``consents`` section itself, tracked separately.
+NON_REGISTRY_SECTIONS: Mapping[str, str] = {
+    "consent.ConsentRecord": "consents",
 }
 
 #: Known incompleteness of the export ITSELF — not a store, a behaviour.
 #: Declared for the same reason as everything else here: it is better written
 #: down than discovered by a regulator.
 KNOWN_LIMITS: tuple[str, ...] = (
+    # DRF-2183 — пробел раздела `consents`, найденный замером: назван в самом
+    # документе, а не только в комментарии кода (отдельный лист у главного
+    # окна).
+    "Раздел consents перечисляет каждое согласие — тип, дано или отозвано, "
+    "версию документа, источник и обе даты, — но не указывает салон, которому "
+    "оно дано. Если вы пользовались несколькими салонами, строки согласий в "
+    "этом разделе по салонам не различить.",
     "Разделы memory и personal_context читаются через тот же гейт, что и "
     "промпт. Поэтому в окне между «забудь всё» и развёрткой "
     "(apps.identity.services.forget_all_sweep, ежечасно) выгрузка покажет "
@@ -257,6 +321,9 @@ def build_coverage_section() -> dict:
                 or "СОСТАВ НЕ ОБЪЯВЛЕН — поле добавлено без решения о выгрузке.",
             }
         )
+
+    for store, section in NON_REGISTRY_SECTIONS.items():
+        included.setdefault(section, []).append(store)
 
     for store, reason in NON_REGISTRY_STORES.items():
         withheld.append({"field": store, "reason": reason})

@@ -133,7 +133,18 @@ class TestTheCoverageBlock:
 
     def test_every_registry_slot_appears_exactly_once(self):
         section = build_coverage_section()
-        listed = [site for sites in section["included"].values() for site in sites]
+        # DRF-2183 — в `included` теперь есть и хранилища вне реестра
+        # (`NON_REGISTRY_SECTIONS`). Вычитаются ЯВНО, а не фильтром «по
+        # реестру»: посторонний элемент в `included`, пришедший любым будущим
+        # путём, обязан уронить узел, а не тихо из него выпасть.
+        from apps.identity.export_coverage import NON_REGISTRY_SECTIONS
+
+        listed = [
+            site
+            for sites in section["included"].values()
+            for site in sites
+            if site not in NON_REGISTRY_SECTIONS
+        ]
         listed += [row["field"] for row in section["withheld"] if row["field"] in _registry_sites()]
         assert sorted(listed) == sorted(_registry_sites())
         assert len(listed) == len(set(listed))
