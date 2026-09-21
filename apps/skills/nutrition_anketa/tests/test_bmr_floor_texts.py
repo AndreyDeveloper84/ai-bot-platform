@@ -8,7 +8,8 @@
 * на месте «цель — поддерживать» в строке «Считала … от твоих данных» —
   «Твоя цель — снизить вес. Сейчас ориентир на поддержание: ниже безопасного
   минимума не опускаю.»: цель — названная человеком, а «поддержание» —
-  расчётная, после ступени (каталог DRF-2241 хранит их порознь).
+  расчётная: каталог кладёт в снимок цель уже после ступени
+  (``nutrition_profile_service``: ``goal = "maintain"`` до ``_input_snapshot``).
 
 Ступень ``bmr_floor`` — единственное переопределение, которое Ayla выдаёт
 вместе с расчётом (DRF-2222, ``nutrition_proactive/render.py``). Прочие
@@ -44,7 +45,7 @@ SNAPSHOT = {
 def _floor_profile(name: str = "bmr_floor"):
     return replace(
         _profile(goal_overridden_by=name),
-        goal="lose",  # названная человеком (DRF-2241)
+        goal="lose",  # названная человеком
         targets_method_versions={"calories": "mifflin_st_jeor_v2"},
         targets_input_snapshot=dict(SNAPSHOT),
     )
