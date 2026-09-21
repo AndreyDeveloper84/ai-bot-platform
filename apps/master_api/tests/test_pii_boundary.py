@@ -1067,6 +1067,12 @@ NOT_SWEPT_ROUTES: dict[str, str] = {
         "empty thread and prove nothing — DRF-1406)"
     ),
     "assistant_ask": "POST; calls the LLM — covered by test_assistant_api",
+    "assistant_context": (
+        "GET (DRF-2153): the master's own day context for the Ayla start screen — "
+        "{today: {count, next: {client_name_initial «Анна П.», time, service_name, "
+        "duration_min}}, chips}; the customer reaches it as first name + initial only, "
+        "swept for the customer's phone in test_assistant_context_2153"
+    ),
     "assistant_confirm": "POST mutation; body is a signed action token only",
     "working_hours": (
         "GET/PUT proxy to the catalog's working-hours route (DRF-1816): the "

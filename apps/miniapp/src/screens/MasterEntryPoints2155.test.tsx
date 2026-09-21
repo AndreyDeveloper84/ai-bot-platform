@@ -18,7 +18,6 @@ vi.mock("../lib/master-api", async (importOriginal) => {
     ...original,
     getDashboard: vi.fn(),
     getMasterMe: vi.fn(),
-    getMasterConversations: vi.fn(),
     getMasterSchedule: vi.fn(),
     getPendingAvailability: vi.fn(),
   };
@@ -32,6 +31,7 @@ import {
   type DashboardResponse,
   type MasterScheduleResponse,
 } from "../lib/master-api";
+import { formatYmdLocal } from "../lib/masterDateFormat";
 import { MasterDashboardScreen } from "./MasterDashboardScreen";
 import { MasterScheduleScreen } from "./MasterScheduleScreen";
 
@@ -40,8 +40,12 @@ const mockedSchedule = vi.mocked(getMasterSchedule);
 const mockedPending = vi.mocked(getPendingAvailability);
 const mockedMe = vi.mocked(getMasterMe);
 
-const NOW = "2026-09-20T11:15:00";
-const TODAY = "2026-09-20";
+// Экран рисует день по часам УСТРОЙСТВА (`anchor = new Date()`), поэтому
+// фикстура обязана идти за ними: зашитая дата держалась ровно до полуночи
+// UTC, после чего «сегодня» экрана и день ответа расходились и кнопка окна
+// исчезала (красный на dev 21.09; тот же класс, что #1892 и DRF-2194).
+const TODAY = formatYmdLocal(new Date());
+const NOW = `${TODAY}T11:15:00`;
 
 function dashboard(): DashboardResponse {
   return {
@@ -73,7 +77,7 @@ function dashboard(): DashboardResponse {
       day_off: false,
     },
     week_summary: {
-      week_start: "2026-09-14",
+      week_start: TODAY,
       week_end: "2026-09-20",
       bookings: 0,
       completed: 0,
@@ -168,7 +172,7 @@ describe("«Расписание»: свободное окно ведёт в з
     );
     expect(where).toEqual({
       path: "/master/booking/new",
-      params: { date: "2026-09-20", from: "14:00", to: "17:00" },
+      params: { date: TODAY, from: "14:00", to: "17:00" },
     });
   });
 
@@ -182,7 +186,7 @@ describe("«Расписание»: свободное окно ведёт в з
     );
     expect(where).toEqual({
       path: "/solo/booking/new",
-      params: { date: "2026-09-20", from: "14:00", to: "17:00" },
+      params: { date: TODAY, from: "14:00", to: "17:00" },
     });
   });
 

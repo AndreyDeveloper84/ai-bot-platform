@@ -42,7 +42,7 @@ def tenant() -> Tenant:
 
 @pytest.fixture
 def master(tenant) -> CatalogMaster:
-    return CatalogMaster.all_tenants.create(
+    row = CatalogMaster.all_tenants.create(
         tenant=tenant,
         name="Ольга",
         external_id=None,
@@ -50,6 +50,23 @@ def master(tenant) -> CatalogMaster:
         invite_status=CatalogMaster.InviteStatus.ACCEPTED,
         is_active=True,
     )
+    # DRF-2153: free_slots читает живую рамку дня (как «Сегодня»), а не
+    # зашитые 09:00–21:00; без шаблона день — выходной. Рамка здесь та же,
+    # что раньше подразумевалась, — ожидания тестов не меняются.
+    from datetime import time as time_cls
+
+    from apps.scheduling.models import WorkingHours
+
+    for weekday in range(7):
+        WorkingHours.all_tenants.create(
+            tenant=tenant,
+            master=row,
+            day_of_week=weekday,
+            is_working=True,
+            start_time=time_cls(9, 0),
+            end_time=time_cls(21, 0),
+        )
+    return row
 
 
 @pytest.fixture

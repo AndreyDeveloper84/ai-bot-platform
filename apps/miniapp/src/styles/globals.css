@@ -46,8 +46,7 @@ a {
    ref Part 6 Pattern 1). */
 .screen {
   min-height: 100dvh;
-  padding: var(--s-4) var(--s-4)
-    calc(var(--cta-clearance) + var(--safe-bottom));
+  padding: var(--s-4) var(--s-4) calc(var(--cta-clearance) + var(--safe-bottom));
 }
 
 /* Панель в два ряда — под ней надо освободить на ряд больше
@@ -107,8 +106,7 @@ a {
   position: fixed;
   inset-inline: 0;
   bottom: 0;
-  padding: var(--s-3) var(--s-4)
-    calc(var(--s-3) + var(--safe-bottom));
+  padding: var(--s-3) var(--s-4) calc(var(--s-3) + var(--safe-bottom));
   background: var(--c-surface-1);
   border-top: 1px solid var(--c-divider);
   z-index: 10;
@@ -199,9 +197,15 @@ a {
 
 /* Skeleton placeholders — spec §7.1 + §9. */
 @keyframes skeleton-shimmer {
-  0% { opacity: 0.6; }
-  50% { opacity: 1; }
-  100% { opacity: 0.6; }
+  0% {
+    opacity: 0.6;
+  }
+  50% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0.6;
+  }
 }
 
 .skeleton {
@@ -222,7 +226,8 @@ a {
   padding: var(--s-3) var(--s-4);
   margin-bottom: var(--s-2);
   min-height: 48px;
-  transition: border-color var(--dur-fast) var(--ease-out),
+  transition:
+    border-color var(--dur-fast) var(--ease-out),
     background-color var(--dur-fast) var(--ease-out);
 }
 
@@ -717,7 +722,9 @@ a {
   padding: var(--s-1);
   min-width: 56px;
   min-height: 56px;
-  transition: transform 0.12s ease, color 0.12s ease;
+  transition:
+    transform 0.12s ease,
+    color 0.12s ease;
 }
 
 .star-picker__star:active {
@@ -766,7 +773,6 @@ a {
   color: var(--c-text-primary);
   line-height: 1.5;
 }
-
 
 /* Filter chips (My visits §3.4).
 
@@ -875,6 +881,22 @@ a {
 .already-noted__label {
   min-width: 0;
   overflow-wrap: anywhere;
+}
+
+/* DRF-2173 — срок цели под «Уже учла»: «До 1 ноября 2026» и, при прошедшем
+   сроке, тихое действие «Срок прошёл — обновить?» в том же ряду. */
+.goal-select__deadline {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-2);
+  margin: var(--s-2) 0 0;
+  padding: 0 var(--s-3);
+  color: var(--c-text-secondary);
+  font-size: var(--font-size-200);
+}
+.goal-select__deadline-date {
+  min-width: 0;
 }
 
 /* «Рядом со мной» (DRF-1707): пояснение стоит до кнопки — D3 «понятно,
@@ -1226,7 +1248,8 @@ a {
   font: inherit;
   /* Карточка бывает и <a> (DRF-2156: запись → детали) — без подчёркивания. */
   text-decoration: none;
-  transition: border-color var(--dur-fast) var(--ease-out),
+  transition:
+    border-color var(--dur-fast) var(--ease-out),
     background-color var(--dur-fast) var(--ease-out);
 }
 
@@ -1335,7 +1358,11 @@ a {
   color: var(--c-text-primary);
 }
 .booking-detail__state--accent {
-  background: color-mix(in srgb, var(--c-accent-subtle) 60%, var(--c-surface-1));
+  background: color-mix(
+    in srgb,
+    var(--c-accent-subtle) 60%,
+    var(--c-surface-1)
+  );
 }
 .booking-detail__state--success {
   background: color-mix(in srgb, var(--c-success) 10%, var(--c-surface-2));
@@ -1391,7 +1418,11 @@ a {
 
 .m-card--active {
   border-color: var(--c-accent-subtle);
-  background: color-mix(in srgb, var(--c-accent-subtle) 50%, var(--c-surface-1));
+  background: color-mix(
+    in srgb,
+    var(--c-accent-subtle) 50%,
+    var(--c-surface-1)
+  );
 }
 
 .m-card--skel {
@@ -1652,7 +1683,9 @@ a {
 .avatar-sheet {
   position: fixed;
   inset: 0;
-  z-index: 40;
+  /* DRF-2150 (инцидент 20.09): лист лежал под .master-tabbar (z-index 100) —
+     на iPhone видна была одна строка из трёх. Лист — поверх панели. */
+  z-index: 200;
 }
 .avatar-sheet__backdrop {
   position: absolute;
@@ -1668,7 +1701,8 @@ a {
   bottom: 0;
   background: var(--c-surface-1);
   border-radius: var(--r-md) var(--r-md) 0 0;
-  padding: var(--s-2) var(--s-4) var(--s-5);
+  /* Нижний отступ учитывает home-индикатор iPhone (safe-area). */
+  padding: var(--s-2) var(--s-4) calc(var(--s-5) + var(--safe-bottom));
 }
 .avatar-sheet__grip {
   width: 36px;
@@ -2083,7 +2117,6 @@ a {
 }
 
 /* ---- «Ещё» bottom sheet (Tau §3) ------------------------------------ */
-
 
 /* ---- Tier 2 Клиенты / Услуги read-only cards (Tau §4.3 / §4.4) ------- */
 
@@ -2508,7 +2541,11 @@ a {
 
 .schedule-week-cell--today {
   border-color: var(--c-accent);
-  background: color-mix(in srgb, var(--c-accent-subtle) 40%, var(--c-surface-1));
+  background: color-mix(
+    in srgb,
+    var(--c-accent-subtle) 40%,
+    var(--c-surface-1)
+  );
 }
 
 .schedule-week-cell--off {
@@ -2609,7 +2646,11 @@ a {
 
 .schedule-month-cell--today {
   border-color: var(--c-accent);
-  background: color-mix(in srgb, var(--c-accent-subtle) 40%, var(--c-surface-1));
+  background: color-mix(
+    in srgb,
+    var(--c-accent-subtle) 40%,
+    var(--c-surface-1)
+  );
 }
 
 .schedule-month-cell__date {
@@ -2663,8 +2704,7 @@ a {
   background: var(--c-surface-1);
   border-top-left-radius: var(--r-lg);
   border-top-right-radius: var(--r-lg);
-  padding: var(--s-4) var(--s-4)
-    calc(var(--s-4) + var(--safe-bottom, 0px));
+  padding: var(--s-4) var(--s-4) calc(var(--s-4) + var(--safe-bottom, 0px));
   display: flex;
   flex-direction: column;
   gap: var(--s-3);
@@ -2944,7 +2984,11 @@ a {
 .m6-draft-card {
   margin: var(--s-3) 0;
   padding: var(--s-3);
-  background: color-mix(in srgb, var(--c-accent-subtle) 50%, var(--c-surface-1));
+  background: color-mix(
+    in srgb,
+    var(--c-accent-subtle) 50%,
+    var(--c-surface-1)
+  );
   border: 1px solid var(--c-accent-subtle);
   border-radius: var(--r-md);
 }
@@ -3005,8 +3049,13 @@ a {
 }
 
 @keyframes m6-draft-pulse {
-  0%, 100% { opacity: 0.55; }
-  50% { opacity: 1; }
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+  50% {
+    opacity: 1;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -4733,6 +4782,64 @@ a {
   border-color: var(--c-accent);
 }
 
+/* Полоса дней кадра 3 макета DRF-1320 (DRF-2178).
+
+   Горизонтальная лента с прокруткой: дней в окне четырнадцать, и
+   переносить их в сетку значило бы отдать полэкрана под выбор дня.
+   Прокрутка по X, а не перенос — поэтому `flex` без `wrap`. */
+.customer-slots__day-strip {
+  list-style: none;
+  padding: 0 0 var(--s-1);
+  margin: 0 0 var(--s-3);
+  display: flex;
+  gap: var(--s-2);
+  overflow-x: auto;
+  scroll-snap-type: x proximity;
+  -webkit-overflow-scrolling: touch;
+}
+.customer-slots__day-chip {
+  min-width: 80px;
+  min-height: 56px;
+  padding: var(--s-2);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  scroll-snap-align: start;
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-sm, 8px);
+  color: inherit;
+  cursor: pointer;
+}
+/* День без окон остаётся в полосе и виден — но нажать его нечем.
+   Гасим яркость, а не прячем: «нет мест» это ответ, а не пустота. */
+.customer-slots__day-chip:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.customer-slots__day-chip--active {
+  background: var(--c-accent);
+  color: var(--c-text-on-accent);
+  border-color: var(--c-accent);
+}
+.customer-slots__day-chip-date {
+  font-size: var(--font-size-200);
+  font-weight: 500;
+}
+.customer-slots__day-chip-count {
+  font-size: var(--font-size-100);
+  opacity: 0.8;
+}
+/* «★ Подходит под твоё обычное время» — пояснение под группой. */
+.customer-slots__suggested-note {
+  margin: var(--s-2) 0 0;
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
 /* F4 — Confirm. */
 
 /* Payment choice (C7.4 / AMD-002).
@@ -4754,6 +4861,20 @@ a {
   padding: 0;
   font-size: var(--font-size-200);
   color: var(--c-text-secondary);
+}
+/* «Изменить …» у строки сводки (DRF-2178, кадр 4 макета DRF-1320).
+
+   Ссылка рядом со значением, а не кнопка в ряду действий: правит эта
+   строка, и стоять она должна при ней. Цель нажатия — 44px по высоте
+   через отступы, иначе на телефоне в неё не попасть. */
+.customer-confirm__change {
+  margin-left: var(--s-2);
+  padding: var(--s-2) 0;
+  background: none;
+  border: 0;
+  color: var(--c-accent);
+  font-size: var(--font-size-100);
+  cursor: pointer;
 }
 .customer-confirm__payment-option {
   display: flex;
@@ -6984,6 +7105,18 @@ a {
   background: var(--c-bg);
   color: var(--c-text-primary);
 }
+/* DRF-2201 — экран-корень вкладки несёт нижнюю панель: контент не должен
+   уезжать под неё. Высота панели — та же, что у `.wellness-dash__nav`, и та
+   же запись, что у `.records-screen` / `.profile-screen`. */
+.food-scanner-screen--tab-root {
+  padding-bottom: calc(56px + var(--safe-bottom) + var(--s-3));
+}
+/* Отступ под панель уже дан выше; у `__main` он тогда лишний — иначе
+   `--safe-bottom` считается дважды и под последним элементом остаётся
+   пустая полоса (на экранах без панели `__main` свой отступ сохраняет). */
+.food-scanner-screen--tab-root .food-scanner-screen__main {
+  padding-bottom: var(--s-4);
+}
 .food-scanner-screen__main {
   padding: var(--s-3) var(--s-4) calc(var(--s-6) + var(--safe-bottom));
   display: flex;
@@ -9062,7 +9195,11 @@ a {
   margin: var(--s-3) 0;
 }
 .system-state--accent {
-  background: color-mix(in srgb, var(--c-accent-subtle) 60%, var(--c-surface-1));
+  background: color-mix(
+    in srgb,
+    var(--c-accent-subtle) 60%,
+    var(--c-surface-1)
+  );
 }
 .system-state--danger {
   background: color-mix(in srgb, var(--c-danger) 8%, var(--c-surface-1));
@@ -9230,4 +9367,164 @@ a {
   height: 1px;
   background: currentColor;
   opacity: 0.8;
+}
+
+/* ---------------------------------------------------------------------------
+   Ayla для мастера — карточки макета DRF-1187 (DRF-2153, М-5).
+   Стартовый экран (контекст дня + чипы), окна свободного времени, день,
+   «Проверьте запись», ✓ «Запись создана», ⚠ «Это время занято»,
+   «последние известные данные». Токены — те же, что у SystemState.
+   ------------------------------------------------------------------------- */
+
+.ayla-card {
+  border: 1px solid var(--c-divider);
+  background: var(--c-surface-2);
+  border-radius: var(--r-md);
+  padding: var(--s-3);
+  margin-top: var(--s-2);
+}
+
+.ayla-card--danger {
+  border-color: color-mix(in srgb, var(--c-danger) 40%, var(--c-divider));
+  background: color-mix(in srgb, var(--c-danger) 8%, var(--c-surface-2));
+}
+
+.ayla-card--warning {
+  border-color: color-mix(in srgb, var(--c-warning) 40%, var(--c-divider));
+  background: color-mix(in srgb, var(--c-warning) 8%, var(--c-surface-2));
+}
+
+.ayla-card--success {
+  border-color: color-mix(in srgb, var(--c-success) 40%, var(--c-divider));
+  background: color-mix(in srgb, var(--c-success) 8%, var(--c-surface-2));
+}
+
+.ayla-card__title {
+  margin: 0 0 var(--s-1);
+  font-size: var(--font-size-300);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+
+.ayla-card--danger .ayla-card__title {
+  color: var(--c-danger);
+}
+
+.ayla-card--success .ayla-card__title {
+  color: var(--c-success);
+}
+
+.ayla-card__row {
+  margin: 0 0 var(--s-1);
+  font-size: var(--font-size-200);
+  color: var(--c-text-primary);
+}
+
+.ayla-card__row--muted {
+  color: var(--c-text-secondary);
+}
+
+.ayla-card__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+}
+
+.ayla-card__option {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  width: 100%;
+  min-height: 44px;
+  padding: var(--s-2) var(--s-3);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+  background: var(--c-surface);
+  color: var(--c-text-primary);
+  font-size: var(--font-size-200);
+  text-align: start;
+  text-decoration: none;
+}
+
+.ayla-card__row-main {
+  flex: 1;
+  font-weight: 600;
+}
+
+.ayla-card__row-meta {
+  color: var(--c-text-secondary);
+  font-size: var(--font-size-100);
+}
+
+.ayla-card__cta {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  margin-top: var(--s-2);
+  text-decoration: none;
+}
+
+.ayla-btn--secondary {
+  border: 1px solid var(--c-accent);
+  background: var(--c-surface);
+  color: var(--c-accent);
+}
+
+.ayla-card__hint {
+  margin: var(--s-2) 0 0;
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
+.ayla-review {
+  margin-bottom: var(--s-3);
+}
+
+.ayla-review__row {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  font-size: var(--font-size-200);
+  color: var(--c-text-primary);
+}
+
+.ayla-start {
+  padding: var(--s-2) 0;
+}
+
+.ayla-start__context {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s-2);
+  margin-top: 0;
+}
+
+.ayla-start__context-body {
+  flex: 1;
+}
+
+.ayla-start__icon {
+  font-size: var(--font-size-400);
+}
+
+.ayla-start__label {
+  margin: var(--s-3) 0 var(--s-2);
+  font-size: var(--font-size-200);
+  color: var(--c-text-secondary);
+}
+
+.ayla-start__chips {
+  gap: var(--s-2);
+}
+
+.ayla-start__chip {
+  flex-wrap: wrap;
+}
+
+.ayla-start__chip .ayla-card__row-main {
+  flex-basis: 100%;
 }

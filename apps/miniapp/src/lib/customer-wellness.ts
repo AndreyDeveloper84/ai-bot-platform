@@ -219,11 +219,13 @@ export interface WellnessToday {
     title: string;
     week_num?: number;
     /**
-     * Срок цели — МЕСТО ОСТАВЛЕНО, ждёт DRF-2173: у `ClientGoal` даты нет,
-     * сервер ключ не шлёт. ISO-дата; карточка на Главной покажет
-     * «До 1 ноября 2026» под названием, как на макете, когда ключ появится.
+     * DRF-2173 — срок цели: ISO-дата из `known.goal.target_date` каталога;
+     * ключ опускается, когда срока нет (§103 — строки на карточке нет).
+     * `target_date_passed` — факт сервера «срок прошёл» (на Главной строка
+     * «До …» остаётся; «Срок прошёл — обновить?» живёт на экране цели).
      */
-    due_date?: string;
+    target_date?: string;
+    target_date_passed?: boolean;
   }>;
   /**
    * Optional preferred display name (Layer 1 Identity). Falls back to

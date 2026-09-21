@@ -47,7 +47,13 @@ import { useOnline } from "../hooks/useOnline";
 import { useHaptics } from "../hooks/useHaptics";
 import { getCustomerSlots } from "../lib/customer-booking";
 import { formatDateLabel, formatSlotTime } from "../lib/format";
-import { channelIdentity } from "../lib/identity";
+import {
+  SUGGESTED_MARK,
+  SUGGESTED_NOTE,
+  daysWithCounts,
+  groupByDayPart,
+  type DayWithCount,
+} from "../lib/booking-time";
 import { setVisitAt, useBookingDraft } from "../state/booking";
 import { backTo } from "../lib/screen-back";
 
@@ -66,47 +72,24 @@ type State =
     }
   | { kind: "error"; err: unknown };
 
-/** Tau §8 F3 state-dependent header per founder cut #4. */
-type CustomerMode = "no_init_data" | "registered" | "loyal";
-
-function suggestionsHeader(mode: CustomerMode, personalised: boolean): string {
-  // Нет сигнала персонализации — нет и персонализирующего обещания.
-  // «Похоже подойдёт» над первыми двумя слотами по времени — это
-  // утверждение «мы посмотрели на тебя», которого никто не делал:
-  // сохранённого предпочтения по времени бэкенд не отдаёт вовсе.
-  if (!personalised) return "Ближайшие свободные";
-  switch (mode) {
-    case "no_init_data":
-      return "Ближайшие свободные";
-    case "loyal":
-      return "Твоё обычное время";
-    case "registered":
-    default:
-      return "Похоже подойдёт";
-  }
-}
-
-/**
- * Best-effort mode detection. Anonymous detection mirrors F4
- * (CustomerBookingConfirmScreen) — empty `initData` from MAX SDK =
- * anonymous user. Until the `/me` response surfaces
- * `is_loyal_with_master` / similar, we default registered users
- * to «registered» (no «loyal» fast path yet). Hooked so backend
- * can plumb a real signal later without changing this component.
+/*
+ * Словарь заголовков блока подсказок (founder cut #4) снят вместе с самим
+ * блоком — DRF-2178, кадр 3 макета DRF-1320 его не знает.
  *
- * Round-1 fix: the prior heuristic («masterName set ⇒ registered»)
- * incorrectly tagged anonymous browsers (who DO have masterName from
- * the deeplink) as «registered», surfacing «Похоже подойдёт» — wrong
- * tone for first-time visitors. Now we consult MAX initData first.
+ * Что именно снято, чтобы это не пришлось откапывать: три состояния —
+ * «Ближайшие свободные» (нет сигнала персонализации либо нет initData),
+ * «Похоже подойдёт» (зарегистрирован), «Твоё обычное время» (лояльный,
+ * 5+ визитов), — и определение режима по `channelIdentity()`.
+ *
+ * Вместо них макет даёт ОДНУ пометку у времени
+ * (`booking-time.ts::SUGGESTED_NOTE`), и она по-прежнему показывается
+ * только по серверному признаку: обещание персонализации без сигнала
+ * не вернулось ни в каком виде — это и было сутью DRF-1319.
+ *
+ * Конфликт двух текстов владельца (макет против founder cut) вынесен ему
+ * вопросом; если он выберет три заголовка, они возвращаются сюда, и
+ * состояние по-прежнему решается ОДНИМ местом.
  */
-// DRF-1319 B. Здесь стояло второе определение «анонима» — теперь одно,
-// в `lib/identity.ts`. Режим `no_init_data` — не «гость»: внутри MAX
-// пустой initData значит «канал не передал данные для входа». Тексты
-// заголовка не меняются (1319-D заперт), меняется только имя состояния.
-function detectCustomerMode(): CustomerMode {
-  if (channelIdentity() === "no_init_data") return "no_init_data";
-  return "registered";
-}
 
 export function CustomerSlotsScreen() {
   const online = useOnline();
@@ -115,6 +98,11 @@ export function CustomerSlotsScreen() {
   const haptics = useHaptics();
   const draft = useBookingDraft();
   const [state, setState] = useState<State>({ kind: "loading" });
+  // DRF-2178 — окно, которое СПРОСИЛИ: полоса дней строится по нему, а
+  // не по ответу (сервер шлёт только свободное).
+  const [window, setWindow] = useState<{ from: string; to: string } | null>(null);
+  // Выбранный день полосы; `null` — ещё не выбран, возьмём первый с окнами.
+  const [pickedDay, setPickedDay] = useState<string | null>(null);
   // DRF-1776 — «Другие даты»: сдвиг окна в днях; 0 — ближайшие две недели.
   const [windowOffset, setWindowOffset] = useState(0);
   // DRF-1776 — слот, который только что оказался занят (возврат с
@@ -140,8 +128,9 @@ export function CustomerSlotsScreen() {
       days: 14,
       offsetDays: windowOffset,
     })
-      .then(({ slots }) => {
+      .then(({ slots, dateFrom, dateTo }) => {
         if (cancelled) return;
+        setWindow({ from: dateFrom, to: dateTo });
         // Re-shape to our local row type; `is_suggested` is a future
         // backend field — absent today, defaults to false.
         // `is_suggested` — серверная пометка (Tau §5.2). Ручка её
@@ -173,6 +162,11 @@ export function CustomerSlotsScreen() {
     return load();
   }, [masterId, draft.serviceId, navigate, load]);
 
+  // Сдвинули окно — прежний выбранный день в нём может не лежать.
+  useEffect(() => {
+    setPickedDay(null);
+  }, [windowOffset]);
+
   const slotsByDate = useMemo(() => {
     const m = new Map<string, SlotRow[]>();
     if (state.kind !== "ok") return m;
@@ -184,14 +178,25 @@ export function CustomerSlotsScreen() {
     return m;
   }, [state]);
 
-  const suggestions = useMemo(() => {
-    if (state.kind !== "ok") return [];
-    // Tau §5.2: backend marks suggested via `is_suggested`; fallback
-    // (no backend signal yet) is first 2 chronologically.
-    const flagged = state.slots.filter((s) => s.isSuggested);
-    if (flagged.length > 0) return flagged.slice(0, 2);
-    return state.slots.slice(0, 2);
-  }, [state]);
+  // DRF-2178 — полоса дней и части суток кадра 3 макета DRF-1320.
+  // Блок «Ближайшие свободные» снят: его содержимое — те же слоты
+  // выбранного дня, и на кадре они лежат под Утро/День/Вечер. Недостижимым
+  // не стало ничего, исчез дубль ярлыка (отступление названо в теле PR;
+  // вопрос владельцу 45г — вернуть блок или оставить снятым).
+  const days = useMemo<DayWithCount[]>(() => {
+    if (state.kind !== "ok" || window === null) return [];
+    return daysWithCounts(state.slots, window.from, window.to);
+  }, [state, window]);
+
+  const selectedDay = useMemo(() => {
+    if (pickedDay !== null) return pickedDay;
+    return days.find((d) => d.count > 0)?.date ?? null;
+  }, [pickedDay, days]);
+
+  const dayGroups = useMemo(() => {
+    if (selectedDay === null) return [];
+    return groupByDayPart(slotsByDate.get(selectedDay) ?? []);
+  }, [selectedDay, slotsByDate]);
 
   function onPickSlot(slotIso: string) {
     haptics.selection();
@@ -244,11 +249,6 @@ export function CustomerSlotsScreen() {
     );
   }
 
-  const mode = detectCustomerMode();
-  // Персонализация есть ровно тогда, когда её прислал бэкенд.
-  const personalised = state.slots.some((s) => s.isSuggested === true);
-  const sugHeader = suggestionsHeader(mode, personalised);
-  const dates = Array.from(slotsByDate.keys());
 
   return (
     <ScreenLayout
@@ -278,72 +278,79 @@ export function CustomerSlotsScreen() {
           </button>
         </p>
       )}
-      {suggestions.length > 0 && (
-        <section aria-labelledby="slots-suggestions-title">
-          <h2 id="slots-suggestions-title" className="customer-slots__section-title">
-            <span aria-hidden="true">✨ </span>
-            {sugHeader}
-          </h2>
-          <ul className="customer-slots__suggestions" role="list">
-            {suggestions.map((s) => {
-              const active = draft.visitAt === s.start;
+      {/* Кадр 3 макета DRF-1320 — полоса дней со счётчиком окон. День
+          без окон остаётся в полосе и говорит «нет мест»: выброси его —
+          и человек увидит не «сегодня уже поздно», а «сегодня не
+          бывает». */}
+      <section aria-label="Дни со свободным временем">
+        {/* Видимого заголовка у полосы нет: на кадре макета его нет, а
+            придумывать свой — значит добавить человеку текст, которого
+            владелец не писал. Имя секции остаётся для скринридера. */}
+        <ul className="customer-slots__day-strip" role="list">
+          {days.map((day) => {
+            const active = day.date === selectedDay;
+            return (
+              <li key={day.date}>
+                <button
+                  type="button"
+                  className={`customer-slots__day-chip${active ? " customer-slots__day-chip--active" : ""}`}
+                  aria-pressed={active}
+                  disabled={day.count === 0}
+                  aria-label={`${formatDateLabel(day.date)}, ${day.label}`}
+                  onClick={() => setPickedDay(day.date)}
+                >
+                  <span className="customer-slots__day-chip-date">
+                    {formatDateLabel(day.date)}
+                  </span>
+                  <span className="customer-slots__day-chip-count">{day.label}</span>
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      </section>
+
+      {/* Части суток выбранного дня. Пустая группа не рисуется — заголовок
+          без окон под ним обещал бы время, которого нет. */}
+      {dayGroups.map((group) => (
+        <section key={group.key} aria-labelledby={`slots-part-${group.key}`}>
+          <h3 id={`slots-part-${group.key}`} className="customer-slots__day-title">
+            {group.label}
+          </h3>
+          <ul className="customer-slots__day-list" role="list">
+            {group.slots.map((slot) => {
+              const active = draft.visitAt === slot.start;
+              // ПРАВКА 2 макета: пометка — только по серверному признаку.
+              // Сегодня он не приходит, и её не видно ни разу; выдумывать
+              // предпочтение за человека мы не станем.
+              const suggested = (slot as SlotRow).isSuggested === true;
               return (
-                <li key={s.start}>
+                <li key={slot.start}>
                   <button
                     type="button"
-                    className={`customer-slots__suggestion${active ? " customer-slots__suggestion--active" : ""}`}
+                    className={`customer-slots__cell${active ? " customer-slots__cell--active" : ""}`}
                     aria-pressed={active}
-                    aria-label={`${formatDateLabel(s.date)} в ${formatSlotTime(s.start)}${s.isSuggested ? ", обычное время" : ""}`}
-                    onClick={() => onPickSlot(s.start)}
+                    aria-label={`${formatDateLabel(slot.date)} в ${formatSlotTime(slot.start)}${
+                      suggested ? ", обычное время" : ""
+                    }`}
+                    onClick={() => onPickSlot(slot.start)}
                   >
-                    <div className="customer-slots__suggestion-day">
-                      {formatDateLabel(s.date)}
-                    </div>
-                    <div className="customer-slots__suggestion-time">
-                      {formatSlotTime(s.start)}
-                    </div>
+                    {formatSlotTime(slot.start)}
+                    {suggested ? <span aria-hidden="true"> {SUGGESTED_MARK}</span> : null}
                   </button>
                 </li>
               );
             })}
           </ul>
+          {group.slots.some((slot) => (slot as SlotRow).isSuggested === true) ? (
+            <p className="customer-slots__suggested-note">
+              <span aria-hidden="true">{SUGGESTED_MARK} </span>
+              {SUGGESTED_NOTE}
+            </p>
+          ) : null}
         </section>
-      )}
+      ))}
 
-      <section aria-labelledby="slots-all-title">
-        <h2 id="slots-all-title" className="customer-slots__section-title">
-          Все слоты
-        </h2>
-        {dates.map((d) => {
-          const daySlots = slotsByDate.get(d) ?? [];
-          if (daySlots.length === 0) return null;
-          return (
-            <div key={d} className="customer-slots__day">
-              <h3 className="customer-slots__day-title">
-                {formatDateLabel(d)}
-              </h3>
-              <ul className="customer-slots__day-list" role="list">
-                {daySlots.map((s) => {
-                  const active = draft.visitAt === s.start;
-                  return (
-                    <li key={s.start}>
-                      <button
-                        type="button"
-                        className={`customer-slots__cell${active ? " customer-slots__cell--active" : ""}`}
-                        aria-pressed={active}
-                        aria-label={`${formatDateLabel(d)} в ${formatSlotTime(s.start)}`}
-                        onClick={() => onPickSlot(s.start)}
-                      >
-                        {formatSlotTime(s.start)}
-                      </button>
-                    </li>
-                  );
-                })}
-              </ul>
-            </div>
-          );
-        })}
-      </section>
     </ScreenLayout>
   );
 }

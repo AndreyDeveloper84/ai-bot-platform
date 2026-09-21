@@ -101,6 +101,7 @@ DATA_STORAGE_REVOCATION_CONSEQUENCES = (
     "profile_pii_erase",
     "staff_assistant_erase",
     "dialogue_anonymize",
+    "recommendation_erase",
 )
 
 #: Что отзыв НЕ трогает и почему. Транзакционные записи хранятся по

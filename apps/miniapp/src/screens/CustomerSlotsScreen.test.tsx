@@ -1,24 +1,24 @@
 /**
- * F3 — заголовок блока подсказок не обещает персонализации, которой нет.
+ * F3 — экран времени не обещает персонализации, которой нет (DRF-1319).
  *
- * До правки `detectCustomerMode()` возвращал «registered» любому, у кого
- * есть `initData` от MAX, и экран рисовал «✨ Похоже подойдёт» над
- * ПЕРВЫМИ ДВУМЯ СЛОТАМИ ПО ВРЕМЕНИ. Сохранённого предпочтения по времени
- * бэкенд не отдаёт вовсе (`is_suggested` не приходит), то есть заголовок
- * утверждал «мы посмотрели на тебя» там, где никто не смотрел.
+ * Гарантия та же, форма новая. До DRF-2178 обещание жило в заголовке
+ * блока «ближайших» («Похоже подойдёт» над первыми двумя слотами по
+ * времени — утверждение «мы посмотрели на тебя», которого никто не
+ * делал). Кадр 3 макета DRF-1320 блока не знает: есть полоса дней,
+ * части суток и ОДНА пометка у самого времени.
  *
- * Рационал спеки `docs/screens/customer-booking-flow.md` §5.1 сказан
- * ровно про это: «не имитировать персонализацию там где её нет».
+ * Обещание никуда не переехало — оно по-прежнему зависит только от
+ * серверного признака `is_suggested`, которого бэкенд не шлёт. Поэтому
+ * пометки не видно ни разу, и рационал спеки §5.1 «не имитировать
+ * персонализацию там где её нет» держится теперь на ней.
  *
- * Стража парная (`negative_assert_guard`, DRF-1411): к отрицательной
- * проверке «персонализирующего заголовка нет» приложены положительные на
- * тех же данных — блок ближайших слотов на месте, «Все слоты» на месте,
- * и по слоту по-прежнему можно кликнуть. Правка, которая снесла бы блок
- * целиком, прошла бы отрицательную проверку и упала на положительных.
+ * Стража парная (`negative_assert_guard`, DRF-1411): к отрицательным
+ * проверкам приложены положительные на тех же данных — время на месте,
+ * выбирается, CTA разблокируется.
  *
- * Тест умеет падать: верните `suggestionsHeader(mode)` без параметра
- * `personalised` — покраснеет первый случай; уберите `personalised` из
- * ветки с серверной пометкой — покраснеет третий.
+ * Тест умеет падать: нарисуйте пометку без серверного признака —
+ * покраснеет первый случай; перестаньте её рисовать по признаку —
+ * покраснеет третий.
  */
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -38,6 +38,7 @@ vi.mock("../lib/customer-booking", async (importOriginal) => {
 
 import { getCustomerSlots } from "../lib/customer-booking";
 import { resetBooking, setMaster, setService } from "../state/booking";
+import { SUGGESTED_NOTE } from "../lib/booking-time";
 import { CustomerSlotsScreen } from "./CustomerSlotsScreen";
 
 const mockedSlots = vi.mocked(getCustomerSlots);
@@ -68,28 +69,23 @@ beforeEach(() => {
   resetBooking();
   setService("svc-1", "Маникюр");
   setMaster("mst-1", "Анна Соколова");
-  mockedSlots.mockResolvedValue({ slots: SLOTS });
+  mockedSlots.mockResolvedValue({ slots: SLOTS, dateFrom: DAY, dateTo: DAY });
 });
 
-describe("подсказки слотов без сигнала персонализации", () => {
-  it("не обещает «твоё обычное время» / «похоже подойдёт»", async () => {
+describe("без сигнала персонализации экран ничего не обещает", () => {
+  it("ни пометки «обычное время», ни прежних персонализирующих заголовков", async () => {
     renderScreen();
-    await screen.findByRole("heading", { name: /Ближайшие свободные/ });
+    await screen.findByText("День");
     expect(screen.queryByText(/обычное время/)).not.toBeInTheDocument();
     expect(screen.queryByText(/Похоже подойдёт/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Подходит под тво/)).not.toBeInTheDocument();
   });
 
-  it("положительная стража: блок и остальной экран на месте", async () => {
+  it("положительная стража: время на месте, выбирается, CTA оживает", async () => {
     renderScreen();
-    // Сам блок ближайших слотов остался — сняли обещание, не блок.
-    expect(
-      await screen.findByRole("heading", { name: /Ближайшие свободные/ }),
-    ).toBeInTheDocument();
-    // «Все слоты» и сетка дня на месте.
-    expect(
-      screen.getByRole("heading", { name: "Все слоты" }),
-    ).toBeInTheDocument();
-    // Слот по-прежнему выбирается, и CTA разблокируется.
+    // Части суток и полоса дней — на месте, экран не опустел.
+    expect(await screen.findByText("День")).toBeInTheDocument();
+    expect(screen.getByText(/3 окна/)).toBeInTheDocument();
     const user = userEvent.setup();
     expect(screen.getByRole("button", { name: "Выбери слот" })).toBeDisabled();
     const [slot] = screen.getAllByRole("button", { name: /в 15:00/ });
@@ -98,20 +94,18 @@ describe("подсказки слотов без сигнала персонал
   });
 });
 
-describe("подсказки слотов КОГДА бэкенд действительно пометил слоты", () => {
-  it("персонализирующий заголовок возвращается по серверной пометке", async () => {
+describe("КОГДА бэкенд действительно пометил слот", () => {
+  it("пометка макета появляется — у самого времени и строкой под группой", async () => {
     mockedSlots.mockResolvedValue({
-      slots: [
-        { ...SLOTS[0], is_suggested: true },
-        SLOTS[1],
-        SLOTS[2],
-      ] as typeof SLOTS,
+      slots: [{ ...SLOTS[0], is_suggested: true }, SLOTS[1], SLOTS[2]] as typeof SLOTS,
+      dateFrom: DAY,
+      dateTo: DAY,
     });
     renderScreen();
-    expect(
-      await screen.findByRole("heading", { name: /Похоже подойдёт/ }),
-    ).toBeInTheDocument();
-    // И в блок попадает именно помеченный слот, а не первые два подряд.
+    // Строка макета — дословно, и ровно одна.
+    expect(await screen.findByText(SUGGESTED_NOTE)).toBeInTheDocument();
+    // Помечено именно то время, которое пометил сервер, а не первое подряд.
     expect(screen.getByLabelText(/в 10:00, обычное время/)).toBeInTheDocument();
+    expect(screen.queryByLabelText(/в 11:30, обычное время/)).not.toBeInTheDocument();
   });
 });

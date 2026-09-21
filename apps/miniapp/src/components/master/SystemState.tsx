@@ -63,6 +63,8 @@ export const SYSTEM_STATE_COPY = {
       subscription: "подписку",
       payout: "выплаты",
       // DRF-2194 (М-6c) — экраны, рисовавшие ошибку клиентским StateError.
+      // DRF-2198 — граница ошибок: предмет не экранный, а «экран целиком».
+      screen: "экран",
       publication: "статус публикации",
       setup: "чек-лист настройки",
       workingHours: "рабочие часы",

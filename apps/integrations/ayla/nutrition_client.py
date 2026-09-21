@@ -193,6 +193,55 @@ class MealEditConflictError(NutritionAPIError):
     """DRF-1838: 409 — the entry mirrors a water entry (the water undo owns it)."""
 
 
+class ScanBudgetError(NutritionAPIError):
+    """DRF-2195: каталог отказал в распознавании ПО БЮДЖЕТУ, а не по сбою.
+
+    Каталог (#519) считает снимки дважды — на человека за сутки и на всех за
+    сутки. Исчерпанный счёт — ответ системы, которая работает: сеть цела,
+    каталог отвечает, остальные ручки питания в порядке. Поэтому такой отказ
+
+    * НЕ наследник :class:`NutritionUnavailableError` — иначе лестница навыка
+      сказала бы «попробуй через минуту» про счёт, который снимется в полночь;
+    * НЕ кормит предохранитель — см. :meth:`_parse_scan_response`.
+    """
+
+
+class ScanDailyLimitError(ScanBudgetError):
+    """429 ``FOOD_SCAN_DAILY_LIMIT`` — личный потолок человека на сутки.
+
+    ``retry_after`` (секунды до полуночи) приходит от каталога и хранится для
+    журнала и возможных будущих окон ожидания. Текстам отказа он НЕ нужен:
+    называть человеку «через N часов» — обещание часа, который ему ничего не
+    даст, когда рядом есть работающая дорога — записать еду словами.
+    """
+
+    def __init__(self, reason: str = "daily_limit", *, retry_after: int | None = None) -> None:
+        self.retry_after = retry_after
+        super().__init__(reason)
+
+
+def _retry_after_or_none(value: object) -> int | None:
+    """``retry_after`` из чужого тела → секунды или ничего.
+
+    ``bool`` — не число секунд (``True`` дало бы «через 1 секунду»), а
+    бесконечность и NaN json разбирает молча и роняют ``int()``.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if value != value or value in (float("inf"), float("-inf")):  # NaN / ±inf
+        return None
+    return int(value)
+
+
+class ScanBudgetExhaustedError(ScanBudgetError):
+    """503 ``FOOD_SCAN_BUDGET_EXHAUSTED`` — общий дневной бюджет распознавания.
+
+    Статус 5xx, но это НЕ недоступность: каталог отвечает осознанно и знает,
+    что отвечает. Именно ради этого случая разбор кода ошибки стоит ВЫШЕ
+    развилки по статусу.
+    """
+
+
 class NutritionUncertainOutcomeError(NutritionUnavailableError):
     """DRF-1838: the request left, the answer never came back (timeout / network).
 
@@ -771,7 +820,15 @@ class NutritionClient:
         Raises:
             NutritionUnavailableError: circuit open, network error, 5xx, timeout.
             FoodNotRecognizedError: 400 FOOD_NOT_RECOGNIZED.
+            ScanDailyLimitError: 429 FOOD_SCAN_DAILY_LIMIT (DRF-2195).
+            ScanBudgetExhaustedError: 503 FOOD_SCAN_BUDGET_EXHAUSTED (DRF-2195).
             NutritionAPIError: other 4xx.
+
+        Два класса бюджета — штатные отказы, а не сбой: они НЕ наследники
+        ``NutritionUnavailableError``, не кормят предохранитель и требуют
+        своего текста («напиши словами»), а не «попробуй через минуту».
+        Вызывающий, который ловит только ``NutritionUnavailableError``, их
+        пропустит; общий хвост ``NutritionAPIError`` — поймает.
         """
         now = time.monotonic()
         if self._circuit.is_open(now=now):
@@ -823,6 +880,47 @@ class NutritionClient:
                 raw=body,
             )
 
+        # DRF-2195 — тело читается ПЕРВЫМ, до развилки по статусу. Иначе
+        # штатный «бюджет исчерпан» (503) попадает в ветку 5xx и кормит
+        # предохранитель, общий на весь клиент питания: пять таких снимков
+        # подряд гасят запись еды текстом, дневник, сводку и ориентиры —
+        # функции, к фото отношения не имеющие. Порядок ветвей здесь и есть
+        # содержание правки.
+        # Тело — чужие данные: `{"error": "service overloaded"}` встречается у
+        # прокси и балансировщиков не реже объекта. Разбор идёт через
+        # `isinstance`, как в ветке 409/422 ниже: иначе `AttributeError`
+        # улетел бы мимо ветки 5xx — предохранитель не сработал бы В САМУЮ
+        # АВАРИЮ, а человек получил бы трассировку вместо отказа.
+        try:
+            payload = resp.json()
+        except ValueError:
+            payload = {}
+        error = payload.get("error") if isinstance(payload, dict) else None
+        error = error if isinstance(error, dict) else {}
+        err_code = str(error.get("code") or "")
+        raw_details = error.get("details")
+        err_details: dict[str, Any] = raw_details if isinstance(raw_details, dict) else {}
+
+        if err_code == "FOOD_SCAN_DAILY_LIMIT":
+            retry_after = err_details.get("retry_after")
+            logger.info(
+                "nutrition_client.scan.daily_limit ext=%s retry_after=%s",
+                external_user_id,
+                retry_after,
+            )
+            raise ScanDailyLimitError("daily_limit", retry_after=_retry_after_or_none(retry_after))
+        if err_code == "FOOD_SCAN_BUDGET_EXHAUSTED":
+            logger.info("nutrition_client.scan.budget_exhausted ext=%s", external_user_id)
+            raise ScanBudgetExhaustedError("budget_exhausted")
+
+        # Ни одна из двух веток выше не зовёт и `record_success()` — это
+        # осознанно, а не забыто. Отказ по бюджету доказывает, что жива
+        # РУЧКА СКАНА, но ничего не говорит про остальной каталог, чьи сбои
+        # копятся в том же окне. Обнулять их отказом сканера значило бы
+        # оттягивать предохранитель в настоящую аварию. Ветки 409/422 ниже
+        # зовут `record_success()` потому, что там ответ приходит от той же
+        # ручки, что и успех.
+
         if resp.status_code >= 500:
             self._circuit.record_failure(now=now)
             logger.warning(
@@ -831,11 +929,6 @@ class NutritionClient:
                 external_user_id,
             )
             raise NutritionUnavailableError(f"http_{resp.status_code}")
-
-        try:
-            err_code = (resp.json().get("error") or {}).get("code", "")
-        except ValueError:
-            err_code = ""
 
         if err_code == "FOOD_NOT_RECOGNIZED":
             raise FoodNotRecognizedError("low_confidence")

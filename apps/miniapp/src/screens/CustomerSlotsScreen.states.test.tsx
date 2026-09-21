@@ -88,7 +88,7 @@ beforeEach(() => {
 
 describe("нет окон — локальные выходы", () => {
   it("«Другие даты» сдвигает окно на 14 дней; «Другой специалист» — к выбору мастера под ту же услугу", async () => {
-    mockedSlots.mockResolvedValue({ slots: [] });
+    mockedSlots.mockResolvedValue({ slots: [], dateFrom: DAY, dateTo: DAY });
     renderSlots();
 
     const callout = await screen.findByRole("status");
@@ -104,7 +104,7 @@ describe("нет окон — локальные выходы", () => {
   });
 
   it("после потолка «Другие даты» исчезает, текст говорит почему", async () => {
-    mockedSlots.mockResolvedValue({ slots: [] });
+    mockedSlots.mockResolvedValue({ slots: [], dateFrom: DAY, dateTo: DAY });
     renderSlots();
     await screen.findByRole("status");
     // 0 → 14 → 28 → 42: на 42 следующий шаг вышел бы за 56 дней.
@@ -119,12 +119,14 @@ describe("нет окон — локальные выходы", () => {
   });
 
   it("окно позже обычного названо над списком, «Ближайшие» возвращает", async () => {
-    mockedSlots.mockResolvedValueOnce({ slots: [] }).mockResolvedValueOnce({ slots: SLOTS });
+    mockedSlots
+      .mockResolvedValueOnce({ slots: [], dateFrom: DAY, dateTo: DAY })
+      .mockResolvedValueOnce({ slots: SLOTS, dateFrom: DAY, dateTo: DAY });
     renderSlots();
     await userEvent.click(await screen.findByRole("button", { name: OTHER_DATES_LABEL }));
 
     expect(await screen.findByText(/Окна на две недели позже обычного/)).toBeInTheDocument();
-    mockedSlots.mockResolvedValueOnce({ slots: SLOTS });
+    mockedSlots.mockResolvedValueOnce({ slots: SLOTS, dateFrom: DAY, dateTo: DAY });
     await userEvent.click(screen.getByRole("button", { name: "Ближайшие" }));
     expect(mockedSlots).toHaveBeenLastCalledWith(expect.objectContaining({ offsetDays: 0 }));
   });
@@ -132,7 +134,7 @@ describe("нет окон — локальные выходы", () => {
 
 describe("слот заняли между выбором и подтверждением", () => {
   it("возврат по 409 называет занятое время", async () => {
-    mockedSlots.mockResolvedValue({ slots: SLOTS });
+    mockedSlots.mockResolvedValue({ slots: SLOTS, dateFrom: DAY, dateTo: DAY });
     renderSlots({ unavailableSlot: `${DAY}T10:00:00+03:00` });
     const note = await screen.findByTestId("slot-unavailable-note");
     expect(note).toHaveTextContent(/уже заняли — выбери другое время/);
@@ -141,7 +143,7 @@ describe("слот заняли между выбором и подтвержд�
   });
 
   it("положительная стража: без state заметки нет", async () => {
-    mockedSlots.mockResolvedValue({ slots: SLOTS });
+    mockedSlots.mockResolvedValue({ slots: SLOTS, dateFrom: DAY, dateTo: DAY });
     renderSlots();
     await screen.findAllByRole("button", { name: /11:30/ });
     expect(screen.queryByTestId("slot-unavailable-note")).toBeNull();

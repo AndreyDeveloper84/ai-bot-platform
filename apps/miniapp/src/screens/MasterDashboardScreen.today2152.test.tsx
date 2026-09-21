@@ -27,7 +27,6 @@ vi.mock("../lib/master-api", async (importOriginal) => {
     ...original,
     getDashboard: vi.fn(),
     getMasterMe: vi.fn(),
-    getMasterConversations: vi.fn(),
   };
 });
 
@@ -437,5 +436,30 @@ describe("системные состояния — через SystemState по 
     renderAt();
     expect(screen.getByRole("status")).toHaveAttribute("aria-busy", "true");
     expect(screen.queryByText(/Загружаем/)).toBeNull();
+  });
+});
+
+describe("переписок на «Сегодня» нет (DRF-1255)", () => {
+  it("inbox_preview с сервера не влияет на состояние дня: без записей — «На сегодня записей нет»", async () => {
+    mockedDashboard.mockResolvedValue(
+      doc({
+        inbox_preview: [
+          {
+            conversation_id: "c-1",
+            client_first_name: "Ксения",
+            client_last_initial: "Л.",
+            last_message_excerpt: "Здравствуйте!",
+            last_message_at: "2026-09-20T10:00:00",
+            sla_tier: "red",
+            ai_drafted_reply_available: false,
+          },
+        ],
+      }),
+    );
+    renderAt();
+    const day = await screen.findByRole("region", { name: /сегодня/i });
+    expect(within(day).getByText("На сегодня записей нет")).toBeInTheDocument();
+    expect(screen.queryByText(/Ксения/)).toBeNull();
+    expect(screen.queryByText(/Здравствуйте/)).toBeNull();
   });
 });

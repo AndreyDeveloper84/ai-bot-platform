@@ -109,6 +109,12 @@ class CreateBookingInput:
     master_id: str
     visit_at: datetime  # timezone-aware, in the future
     created_by: str = "execute_confirm"
+    #: DRF-1773 — провенанс пути (`PendingBookingIntent.entry_point`).
+    #: `deep_link:reco_<id>` связывает бронь с карточкой C04, из которой
+    #: она выросла; принадлежность карточки проверяется здесь же, потому
+    #: что значение приходит от клиента. Прочие значения (`catalog` /
+    #: `master` / `direct`) в атрибуции ничего не меняют.
+    entry_point: str = ""
     """Attribution tag — 'execute_confirm' (default) or 'execute_reschedule'.
 
     The reschedule service (apps.booking.services.reschedule) passes
@@ -165,6 +171,22 @@ def _occupied_intervals(*, tenant, master, on_date, tz):
         tz=tz,
     )
     return intervals
+
+
+def _stamp_recommendation(inp: "CreateBookingInput", booking: BookingRequest) -> None:
+    """Отметить на карточке C04 бронь, к которой она привела (DRF-1773)."""
+    from apps.recommendation.provenance import (
+        mark_booked,
+        recommendation_id_from_entry_point,
+    )
+
+    recommendation_id = recommendation_id_from_entry_point(inp.entry_point)
+    if recommendation_id is None:
+        return
+    try:
+        mark_booked(inp.bot_user, recommendation_id, booking.id)
+    except Exception:  # noqa: BLE001 — атрибуция не отменяет бронь
+        logger.exception("booking.recommendation_stamp_failed booking=%s", booking.id)
 
 
 def create_customer_booking(
@@ -330,6 +352,12 @@ def create_customer_booking(
                 test_mode=False,
                 created_by=inp.created_by,
             )
+            # DRF-1773 — какая рекомендация привела к этой брони (B13:
+            # доказать это через два часа иначе нечем). Чужая или
+            # несуществующая карточка ключа не добавляет и бронь не ломает.
+            from apps.recommendation.provenance import attribution_for
+
+            attribution_metadata.update(attribution_for(inp.bot_user, inp.entry_point))
             billable, billing_reason = compute_billable(
                 booking_source="ai_direct",
                 status=BookingRequest.Status.CONFIRMED,
@@ -362,6 +390,11 @@ def create_customer_booking(
             )
 
     # Emit AFTER commit so consumers see the row.
+    # DRF-1773 — обратная ссылка: карточка знает, к какой брони привела
+    # (`shown ≠ engaged ≠ booked`, R17). Отмечается ПОСЛЕ транзакции: сбой
+    # отметки не должен отменять состоявшуюся бронь.
+    _stamp_recommendation(inp, booking)
+
     emit(
         "booking.created",
         properties={

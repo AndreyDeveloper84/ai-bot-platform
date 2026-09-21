@@ -27,12 +27,36 @@ from datetime import timedelta
 import pytest
 from django.utils import timezone
 
+from unittest.mock import patch
+
 from apps.identity.models import MemoryEntry, RedZoneAccessLog, UserPersonalContext
 from apps.identity.services.exceptions import ZonePromotionRequiresConsent
+
+
 from apps.identity.services.memory_writer import (
     promote_zone,
     write_entry,
 )
+
+
+def _adult():
+    """Повышение зоны проходит защиту несовершеннолетних (DRF-2180).
+
+    До DRF-2180 ``promote_zone`` её не звал вовсе — «запиши зелёное и
+    повысь» обходило fail-closed одной строкой. Теперь зовёт, а значит
+    на заглушке, которая ВСЕГДА бросает (ручки DOB нет, #597), повышение
+    вверх недостижимо — ровно как прямая жёлтая/красная запись.
+
+    Узлы НИЖЕ — про контракт смены зоны (согласие, ``consent_at``,
+    ``updated_at``), а не про возраст. Подменяем проверку на «взрослый»,
+    чтобы они проверяли то, про что написаны. Сам fail-closed на этом
+    пути пришпилен отдельно — ``test_red_zone_forget_all_2180.py``.
+    """
+    return patch(
+        "apps.identity.services.memory_writer._check_minor_protection",
+        return_value=None,
+    )
+
 
 pytestmark = pytest.mark.django_db
 
@@ -229,7 +253,12 @@ class TestZonePromotionGuard:
             content={"likes": "x"},
         )
         with pytest.raises(ZonePromotionRequiresConsent):
-            promote_zone(entry=entry, new_zone=MemoryEntry.SENSITIVITY_YELLOW)
+            promote_zone(
+                entry=entry,
+                new_zone=MemoryEntry.SENSITIVITY_YELLOW,
+                request_id=uuid.uuid4(),
+                purpose="тест: смена зоны",
+            )
 
         entry.refresh_from_db()
         assert entry.sensitivity_zone == MemoryEntry.SENSITIVITY_GREEN, (
@@ -247,7 +276,12 @@ class TestZonePromotionGuard:
             content={"likes": "x"},
         )
         with pytest.raises(ZonePromotionRequiresConsent):
-            promote_zone(entry=entry, new_zone=MemoryEntry.SENSITIVITY_RED)
+            promote_zone(
+                entry=entry,
+                new_zone=MemoryEntry.SENSITIVITY_RED,
+                request_id=uuid.uuid4(),
+                purpose="тест: смена зоны",
+            )
 
     def test_green_to_yellow_with_consent_succeeds(self, upc) -> None:
         """Token present → promotion succeeds, consent_at set in same UPDATE."""
@@ -260,11 +294,14 @@ class TestZonePromotionGuard:
             kind="preference",
             content={"likes": "x"},
         )
-        promote_zone(
-            entry=entry,
-            new_zone=MemoryEntry.SENSITIVITY_YELLOW,
-            consent_token="user-affirmed-2026-05-23",
-        )
+        with _adult():
+            promote_zone(
+                entry=entry,
+                new_zone=MemoryEntry.SENSITIVITY_YELLOW,
+                consent_token="user-affirmed-2026-05-23",
+                request_id=uuid.uuid4(),
+                purpose="тест: смена зоны",
+            )
         entry.refresh_from_db()
         assert entry.sensitivity_zone == MemoryEntry.SENSITIVITY_YELLOW
         assert entry.consent_at is not None, (
@@ -284,7 +321,12 @@ class TestZonePromotionGuard:
             content={"likes": "x"},
             consent_at=timezone.now(),
         )
-        promote_zone(entry=entry, new_zone=MemoryEntry.SENSITIVITY_GREEN)
+        promote_zone(
+            entry=entry,
+            new_zone=MemoryEntry.SENSITIVITY_GREEN,
+            request_id=uuid.uuid4(),
+            purpose="тест: смена зоны",
+        )
         entry.refresh_from_db()
         assert entry.sensitivity_zone == MemoryEntry.SENSITIVITY_GREEN
 
@@ -300,7 +342,12 @@ class TestZonePromotionGuard:
             content={"x": "y"},
             consent_at=timezone.now(),
         )
-        promote_zone(entry=entry, new_zone=MemoryEntry.SENSITIVITY_YELLOW)
+        promote_zone(
+            entry=entry,
+            new_zone=MemoryEntry.SENSITIVITY_YELLOW,
+            request_id=uuid.uuid4(),
+            purpose="тест: смена зоны",
+        )
         entry.refresh_from_db()
         assert entry.sensitivity_zone == MemoryEntry.SENSITIVITY_YELLOW
 
@@ -496,11 +543,14 @@ class TestPromoteZoneMovesUpdatedAt:
     def test_promotion_moves_updated_at(self, upc) -> None:
         entry = self._green(upc)
         before = entry.updated_at
-        promote_zone(
-            entry=entry,
-            new_zone=MemoryEntry.SENSITIVITY_YELLOW,
-            consent_token="user-affirmed",
-        )
+        with _adult():
+            promote_zone(
+                entry=entry,
+                new_zone=MemoryEntry.SENSITIVITY_YELLOW,
+                consent_token="user-affirmed",
+                request_id=uuid.uuid4(),
+                purpose="тест: смена зоны",
+            )
         entry.refresh_from_db()
         assert entry.updated_at > before, (
             "promote_zone changed the zone but left updated_at behind — the "
@@ -514,7 +564,12 @@ class TestPromoteZoneMovesUpdatedAt:
         )
         entry.refresh_from_db()
         before = entry.updated_at
-        promote_zone(entry=entry, new_zone=MemoryEntry.SENSITIVITY_GREEN)
+        promote_zone(
+            entry=entry,
+            new_zone=MemoryEntry.SENSITIVITY_GREEN,
+            request_id=uuid.uuid4(),
+            purpose="тест: смена зоны",
+        )
         entry.refresh_from_db()
         assert entry.updated_at > before
 
@@ -523,6 +578,11 @@ class TestPromoteZoneMovesUpdatedAt:
         entry = self._green(upc)
         before = entry.updated_at
         with pytest.raises(ZonePromotionRequiresConsent):
-            promote_zone(entry=entry, new_zone=MemoryEntry.SENSITIVITY_YELLOW)
+            promote_zone(
+                entry=entry,
+                new_zone=MemoryEntry.SENSITIVITY_YELLOW,
+                request_id=uuid.uuid4(),
+                purpose="тест: смена зоны",
+            )
         entry.refresh_from_db()
         assert entry.updated_at == before

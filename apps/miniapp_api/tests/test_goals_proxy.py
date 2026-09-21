@@ -272,6 +272,10 @@ class TestGoalSelectView:
         data = resp.json()
         assert data["error"] == "ayla_bad_request"
         assert "ayla_error" in data
+        # DRF-2173 — то же тело и исходный статус под `details`: единственное,
+        # что доезжает до `ApiError` экрана (lib/api.ts читает `body.details`).
+        assert data["details"]["ayla_error"] == {"detail": "Provide exactly one of: ..."}
+        assert data["details"]["ayla_status"] == 400
 
     def test_ayla_unavailable_returns_502(self, client: Client, bot_user: BotUser):
         with patch(

@@ -152,6 +152,8 @@ urlpatterns = [
     # Маршрут поверх уже работающего `services.assistant`; исполнение
     # пишущего действия отделено от ответа (см. views_assistant).
     path("assistant/history", views_assistant.assistant_history, name="assistant_history"),
+    # DRF-2153 (М-5) — стартовый экран Ayla: контекст дня + чипы (макет DRF-1187).
+    path("assistant/context", views_assistant.assistant_context, name="assistant_context"),
     path("assistant/ask", views_assistant.assistant_ask, name="assistant_ask"),
     path("assistant/confirm", views_assistant.assistant_confirm, name="assistant_confirm"),
     # Billing status (C2) + payout preview (C3) proxies (pilot 2026-08-15)

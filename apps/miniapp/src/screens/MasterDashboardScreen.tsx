@@ -40,7 +40,8 @@
  * «ТРЕБУЮТ ВНИМАНИЯ» (переписки), значок 💬 в шапке, «Открыть диалог ›», тап
  * по записи → переписка, «ЭТА НЕДЕЛЯ» с рейтингом, `PayoutPreviewCard`, мёртвая
  * «Заметка к визиту ›», «Сказала: «…»», «⚠ Постоянный клиент». Компоненты
- * `PayoutPreviewCard` / `IconMessage` живут дальше — с экрана сняты, не удалены.
+ * `PayoutPreviewCard` живёт дальше — с экрана снят, не удалён; переписка
+ * мастера с клиентом снята вовсе (DRF-1255).
  * Карточка записи — имя, услуга, время; сторож на набор полей — в тестах.
  * Тап по карточке → «Детали записи» `/master|solo/bookings/:id` (DRF-2156,
  * М-4); «До визита …» — общим форматтером DRF-1185 («1 ч 20 мин», §61);
@@ -89,6 +90,7 @@ import {
   formatDurationRu,
   formatTimeHM,
   joinClientName,
+  safeEndIso,
 } from "../lib/masterDateFormat";
 
 // --- Russian copy (VERBATIM from §M1) ------------------------------------
@@ -279,10 +281,13 @@ export function MasterDashboardScreen() {
   // --- Branch rendering --------------------------------------------------
 
   // Системные состояния — один компонент на все мастерские экраны (DRF-2157).
+  // DRF-2198: состояние ошибки не убирает навигацию — панель и аватар-лист
+  // (выход с поверхности) остаются во всех ветках.
   if (phase.kind === "error_permission") {
     return (
       <div className="master-dashboard">
         <SystemState kind="forbidden" />
+        <TabBarBlank />
       </div>
     );
   }
@@ -320,21 +325,16 @@ export function MasterDashboardScreen() {
     active_visit,
     next_visit,
     upcoming_today,
-    inbox_preview,
     today_summary,
     tab_badges,
     states,
   } = data;
+  // DRF-1255: переписки с клиентом у мастера нет — inbox с сервера день
+  // «непустым» не делает (поле остаётся в ответе до DRF-1528).
   const isEmptyToday =
-    active_visit === null &&
-    next_visit === null &&
-    inbox_preview.length === 0 &&
-    today_summary.total_clients_today === 0;
+    active_visit === null && next_visit === null && today_summary.total_clients_today === 0;
   const isDayDone = states.is_day_done && !active_visit && !next_visit;
-  const noServices =
-    !data.master.specialization &&
-    today_summary.total_clients_today === 0 &&
-    inbox_preview.length === 0;
+  const noServices = !data.master.specialization && today_summary.total_clients_today === 0;
 
   return (
     <DashboardFrame
@@ -455,10 +455,8 @@ function DashboardFrame({
  * Шапка дашборда (§M1 «Студия Карина [Анна ●]»).
  *
  * DRF-1848 (карта кабинета D01, D02): имя мастера — видимым текстом, а не
- * только подписью аватара; значок диалогов с числом непрочитанных. Число
- * берётся из того же `tab_badges.conversations_unread`, что и у вкладки
- * «Диалоги», и пишется тем же `unreadBadgeText` — второго источника нет.
- * Тап ведёт туда же, куда карточки входящих (`onInboxCardTap`).
+ * только подписью аватара. Значка диалогов в шапке нет: прямой переписки
+ * мастера с клиентом нет вовсе (OD-7, DRF-1255).
  */
 export function DashboardHeader({
   salonName,
@@ -643,8 +641,8 @@ function VisitRow({
   lastInitial: string;
   service: string;
   startIso: string;
-  endIso: string;
-  durationMin: number;
+  endIso?: string;
+  durationMin?: number | null;
   to: string;
   quiet?: boolean;
 }) {
@@ -670,9 +668,8 @@ function ScheduledNowCard({
   href: (bookingId: string) => string;
 }) {
   // Конец — по часам: начало + длительность; «До конца ≈» не рисуется.
-  const end = new Date(
-    new Date(visit.started_at).getTime() + visit.duration_min * 60_000,
-  );
+  // Без длительности конца нет — и экран не падает (safeEndIso).
+  const endIso = safeEndIso(visit.started_at, visit.duration_min);
   return (
     <div className="master-dashboard__day-part">
       <p className="master-dashboard__day-label">{COPY.day.scheduledNow}</p>
@@ -681,7 +678,7 @@ function ScheduledNowCard({
         lastInitial={visit.client_last_initial}
         service={visit.service_name}
         startIso={visit.started_at}
-        endIso={end.toISOString()}
+        endIso={endIso}
         durationMin={visit.duration_min}
         to={href(visit.booking_id)}
       />
@@ -696,11 +693,7 @@ function NextVisitCard({
   visit: DashboardNextVisit;
   href: (bookingId: string) => string;
 }) {
-  const endIso =
-    visit.end_at ||
-    new Date(
-      new Date(visit.visit_at).getTime() + visit.duration_min * 60_000,
-    ).toISOString();
+  const endIso = safeEndIso(visit.visit_at, visit.duration_min, visit.end_at);
   return (
     <div className="master-dashboard__day-part">
       <p className="master-dashboard__day-label">{COPY.day.next}</p>
@@ -718,6 +711,14 @@ function NextVisitCard({
       </p>
     </div>
   );
+}
+
+/** Длительность из начала–конца; нет чисел — нет строки. */
+function upcomingDurationMin(v: DashboardUpcomingVisit): number | null {
+  const a = new Date(v.visit_at).getTime();
+  const b = new Date(v.end_at).getTime();
+  if (Number.isNaN(a) || Number.isNaN(b) || b < a) return null;
+  return Math.round((b - a) / 60_000);
 }
 
 function LaterTodayList({
@@ -738,12 +739,8 @@ function LaterTodayList({
               lastInitial={v.client_last_initial}
               service={v.service_name}
               startIso={v.visit_at}
-              endIso={v.end_at}
-              durationMin={Math.round(
-                (new Date(v.end_at).getTime() -
-                  new Date(v.visit_at).getTime()) /
-                  60_000,
-              )}
+              endIso={safeEndIso(v.visit_at, null, v.end_at)}
+              durationMin={upcomingDurationMin(v)}
               to={href(v.booking_id)}
               quiet
             />

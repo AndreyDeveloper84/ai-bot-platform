@@ -59,6 +59,7 @@ import { adminLandingPath, isAdminTabAllowed } from "./lib/admin-tabs";
 import { canOpenSalonPilot } from "./lib/salon-pilot";
 import { getStartPayload, parseStartRoute } from "./lib/max-sdk";
 import { channelIdentity } from "./lib/identity";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import { OpenFromMaxScreen } from "./components/OpenFromMaxScreen";
 import {
   SurfaceModeContext,
@@ -97,6 +98,9 @@ import { CustomerBookingConfirmScreen } from "./screens/CustomerBookingConfirmSc
 import { CustomerBookingDetailScreen } from "./screens/CustomerBookingDetailScreen";
 import { CustomerBookingSuccessScreen } from "./screens/CustomerBookingSuccessScreen";
 import { CustomerCatalogScreen } from "./screens/CustomerCatalogScreen";
+import { RecommendationCardScreen } from "./screens/RecommendationCardScreen";
+import { ExecutionOptionScreen } from "./screens/ExecutionOptionScreen";
+import { ProviderChoiceScreen } from "./screens/ProviderChoiceScreen";
 import { CustomerMasterDetailScreen } from "./screens/CustomerMasterDetailScreen";
 import { CustomerProfileScreen } from "./screens/CustomerProfileScreen";
 import { CustomerNotificationSettingsScreen } from "./screens/CustomerNotificationSettingsScreen";
@@ -119,8 +123,6 @@ import { FoodScannerFavoritesScreen } from "./screens/FoodScannerFavoritesScreen
 import { HelloScreen } from "./screens/HelloScreen";
 import { CustomerEntryScreen } from "./screens/CustomerEntryScreen";
 import { RoleNotReadyScreen } from "./screens/RoleNotReadyScreen";
-import { MasterConversationDetailScreen } from "./screens/MasterConversationDetailScreen";
-import { MasterConversationsScreen } from "./screens/MasterConversationsScreen";
 import { MasterCustomersScreen } from "./screens/MasterCustomersScreen";
 import { MasterBillingScreen } from "./screens/MasterBillingScreen";
 import { MasterDashboardScreen } from "./screens/MasterDashboardScreen";
@@ -600,18 +602,13 @@ function masterRouteElements(): React.ReactNode {
           ?date&from&to → «Выбранное окно»). */}
       <Route path="/master/booking/new" element={<MasterNewBookingScreen />} />
       {/* Раздел «Ayla» — диалог мастера с ассистентом (DRF-1180,
-          OD-MASTER-IA от 25.08). Свой адрес, а не вкладка: перевод
-          нижней навигации 4 → 3 идёт вместе с удалением экранов
-          переписки (DRF-1255). */}
+          OD-MASTER-IA от 25.08). */}
       <Route path="/master/ayla" element={<MasterAylaScreen />} />
-      <Route
-        path="/master/conversations"
-        element={<MasterConversationsScreen />}
-      />
-      <Route
-        path="/master/conversations/:id"
-        element={<MasterConversationDetailScreen />}
-      />
+      {/* DRF-1255 (OD-7): прямой переписки мастера с клиентом нет — экраны
+          сняты. Адреса могли остаться в старых DM/deeplink'ах: ведём на
+          «Сегодня», а не в пустой экран. */}
+      <Route path="/master/conversations" element={<Navigate to="/master/dashboard" replace />} />
+      <Route path="/master/conversations/:id" element={<Navigate to="/master/dashboard" replace />} />
       <Route path="/master/profile" element={<MasterProfileScreen />} />
       {/* M7 notification settings (Bundle B / item 3) */}
       <Route
@@ -928,9 +925,9 @@ function UnifiedAdminMasterRoutes({ me }: { me: MeResponse }) {
  *   Клиенты, Услуги, Отзывы, Профиль, Настройки → лист аватара
  *     (`AvatarSheet`, `masterAvatarSheetItems({ surface: "solo" })`);
  *   «Управление салоном» → тот же лист при владельческой роли (DRF-1149);
- *   Доходы (/solo/earnings, экран-заглушка — §33) и «AI-помощник»
- *     (/solo/ai — на деле переписка с клиентами, DRF-1039/1255) — в листе
- *     не рисуются, адреса живут по прямым ссылкам.
+ *   Доходы (/solo/earnings, экран-заглушка — §33) — в листе не рисуются,
+ *     адрес живёт по прямой ссылке; «AI-помощник» (/solo/ai — переписка с
+ *     клиентами) снят DRF-1255, адрес ведёт на «Сегодня».
  * /solo/more (старая ссылка из DM) — редирект на /solo/my-day.
  */
 const SOLO_NAV_TABS: ReadonlyArray<{
@@ -945,7 +942,7 @@ const SOLO_NAV_TABS: ReadonlyArray<{
   // салонной панели. Снятое отсюда живёт в листе аватара (`AvatarSheet`,
   // `masterAvatarSheetItems({ surface: "solo" })`): Клиенты, Услуги,
   // Отзывы, Настройки, Профиль, «Управление салоном» при роли; «Доходы» и
-  // «AI-помощник» — только по прямым ссылкам (§33 / DRF-1039).
+  // «Доходы» — только по прямой ссылке (§33); «AI-помощник» снят (DRF-1255).
   { path: "/solo/my-day", label: "Сегодня", icon: "📋", ariaLabel: "Сегодня" },
   {
     path: "/solo/schedule",
@@ -1102,7 +1099,8 @@ function UnifiedSoloSurface({ me }: { me: MeResponse }) {
             element={<SoonScreen tab="Доходы" slug="solo-earnings-screen" />}
           />
           <Route path="/solo/reviews" element={<MasterReviewsScreen />} />
-          <Route path="/solo/ai" element={<MasterConversationsScreen />} />
+          {/* DRF-1255: «AI-помощник» был переписка с клиентами — снят; старый адрес → «Сегодня». */}
+          <Route path="/solo/ai" element={<Navigate to="/solo/my-day" replace />} />
           {/* DRF-2127 — «Ayla» тройки: диалог мастера с ассистентом (OD-7), не
             переписка с клиентами. Один экран с /master/ayla; на /solo/*
             MasterTabBar не рисуется — панель одна. */}
@@ -1112,8 +1110,8 @@ function UnifiedSoloSurface({ me }: { me: MeResponse }) {
 
           {/* Legacy admin/master routes still accessible via deep link.
            * The bot DM might link directly to `/admin/services` or
-           * `/master/conversations/:id` — those must keep working even
-           * though the solo bottom nav doesn't surface them. */}
+           * `/master/profile` — those must keep working even though the
+           * solo bottom nav doesn't surface them. */}
           {adminRouteElements(me)}
           {masterRouteElements()}
 
@@ -1259,6 +1257,19 @@ export function CustomerRoutes() {
         path="/customer/wellness"
         element={<CustomerWellnessDashboardScreen />}
       />
+      {/* Карточка C04 «направление + почему» (DRF-1769): свой адрес,
+          потому что у записи есть id и ссылка из чата ведёт именно на
+          неё. Исполнение живёт в каталоге, и «Подобрать вариант»
+          отсюда ведёт туда одним тапом. */}
+      <Route
+        path="/customer/recommendation/:recommendationId"
+        element={<RecommendationCardScreen />}
+      />
+      {/* Один поток записи C05 по макету DRF-1320 (DRF-2178, этап 1 из 4):
+          способ исполнения → выбор специалиста. Время и «Проверь запись»
+          пока прежние экраны — радиус этапа ограничен намеренно. */}
+      <Route path="/customer/booking/option" element={<ExecutionOptionScreen />} />
+      <Route path="/customer/booking/provider" element={<ProviderChoiceScreen />} />
       <Route path="/customer/catalog" element={<CustomerCatalogScreen />} />
       {/*
         DRF-1481 — канонический адрес общей карточки услуги. Тот же
@@ -1462,7 +1473,17 @@ function CustomerFallbackWithBanner({ onRetry }: { onRetry: () => void }) {
 export function App() {
   const [identity] = useState(() => channelIdentity());
   if (identity === "no_init_data") return <OpenFromMaxScreen />;
-  return <AppShell />;
+  // DRF-2198: одна граница ошибок на приложение — `AppShell` ниже отдаёт
+  // ровно одно дерево маршрутов (мастер / соло / админ / клиент), и четыре
+  // одинаковые обёртки были бы четырьмя местами, где можно забыть. Любое
+  // исключение рендера даёт состояние с повтором, а не белый экран
+  // (инцидент 20.09, #1918). Возврат в MAX при отказе транспорта проверяется
+  // выше — граница его не перехватывает.
+  return (
+    <ErrorBoundary>
+      <AppShell />
+    </ErrorBoundary>
+  );
 }
 
 function AppShell() {

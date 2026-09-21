@@ -4,7 +4,7 @@
  * decision, pilot commit 4): no fake data, working navigation to the
  * real sections (profile with C5 152-ФЗ actions).
  */
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { describe, expect, it } from "vitest";
@@ -44,23 +44,32 @@ describe("PilotComingSoonScreen", () => {
     expect(await screen.findByText("PROFILE-PROBE")).toBeInTheDocument();
   });
 
-  it("catalog surface: «Услуги» title and active «Услуги» tab", () => {
+  it("catalog surface: заголовок «Услуги», но вкладки «Услуги» в панели нет (DRF-2191)", () => {
+    // Панель одна на всех клиентских экранах и «Услуги» из неё ушли
+    // (§55 б, макет DRF-1321): подсвечивать на заглушке каталога нечего,
+    // и врать «ты в Записях» нельзя — активной вкладки просто нет.
     renderWithRoutes("catalog");
-    expect(
-      screen.getByRole("heading", { name: "Услуги" }),
-    ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Услуги" })).toHaveAttribute(
-      "aria-current",
-      "page",
-    );
+    expect(screen.getByRole("heading", { name: "Услуги" })).toBeInTheDocument();
+    const nav = within(screen.getByRole("navigation", { name: "Основная навигация" }));
+    expect(nav.queryByRole("button", { name: "Услуги" })).toBeNull();
+    expect(nav.queryByRole("button", { current: "page" })).toBeNull();
     expect(screen.getByText(/выдуманных/)).toBeInTheDocument();
   });
 
-  it("nav «Я» tab leads to the real profile (C5 actions live there)", async () => {
+  it("nav «Профиль» ведёт в настоящий профиль (C5 actions live there)", async () => {
     const user = userEvent.setup();
     renderWithRoutes("home");
-    await user.click(screen.getByRole("button", { name: "Я" }));
+    await user.click(screen.getByRole("button", { name: "Профиль" }));
     expect(await screen.findByText("PROFILE-PROBE")).toBeInTheDocument();
+  });
+
+  it("home surface: активна «Главная», панель — пять вкладок макета (DRF-2191)", () => {
+    renderWithRoutes("home");
+    const nav = within(screen.getByRole("navigation", { name: "Основная навигация" }));
+    expect(nav.getAllByRole("button").map((b) => b.getAttribute("aria-label"))).toEqual([
+      "Главная", "План", "Дневник", "Записи", "Профиль",
+    ]);
+    expect(nav.getByRole("button", { name: "Главная" })).toHaveAttribute("aria-current", "page");
   });
 
   it("nav «Главная» tab leads to the home screen, and «День» is not offered", async () => {

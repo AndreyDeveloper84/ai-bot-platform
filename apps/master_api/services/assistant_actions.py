@@ -53,8 +53,8 @@ from __future__ import annotations
 import json
 import logging
 import uuid
-from dataclasses import dataclass
-from datetime import datetime
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
 from typing import Any
 
 from django.core.signing import BadSignature, SignatureExpired, TimestampSigner
@@ -74,6 +74,21 @@ ACTION_TOKEN_SALT = "master_api.assistant_action"
 ACTION_TOKEN_TTL_SECONDS = 15 * 60
 
 ACTION_BLOCK_TIME = "block_time"
+#: DRF-2153 (М-5): запись через ассистента — предложение по макету DRF-1187
+#: (карточка клиент / услуга / дата / время → «Подтвердить»), создание —
+#: тем же сервисом, что стойка и форма мастера (М-2).
+ACTION_PREPARE_BOOKING = "prepare_booking"
+#: Сколько вариантов рядом предлагать, когда время занято (макет: два).
+SLOT_TAKEN_ALTERNATIVES = (2, 4)
+_WEEKDAYS_RU = (
+    "понедельник",
+    "вторник",
+    "среда",
+    "четверг",
+    "пятница",
+    "суббота",
+    "воскресенье",
+)
 
 #: Классы причины — те же, что принимает `POST /availability`.
 _REASON_CLASSES = ("vacation", "sick", "personal", "other")
@@ -105,15 +120,30 @@ DONE_TEXT = "Готово. Заявка отправлена администр�
 
 
 class ActionError(Exception):
-    """Действие нельзя ни предложить, ни выполнить. Несёт слаг для HTTP."""
+    """Действие нельзя ни предложить, ни выполнить. Несёт слаг для HTTP.
+
+    ``verbatim`` — текст показать мастеру как есть (короткий уточняющий
+    вопрос макета: «Какая услуга?»), а не «Не смог подготовить действие: …»;
+    ``cards`` — структурные карточки к нему (варианты клиентов, дверь в
+    форму, день с записями).
+    """
 
     slug = "action_invalid"
 
-    def __init__(self, detail: str = "", *, slug: str = "") -> None:
+    def __init__(
+        self,
+        detail: str = "",
+        *,
+        slug: str = "",
+        verbatim: bool = False,
+        cards: list[dict[str, Any]] | None = None,
+    ) -> None:
         super().__init__(detail or self.slug)
         self.detail = detail or self.slug
         if slug:
             self.slug = slug
+        self.verbatim = verbatim
+        self.cards = cards or []
 
 
 @dataclass(frozen=True)
@@ -125,15 +155,21 @@ class ProposedAction:
     confirm_label: str
     token: str
     expires_in_sec: int
+    #: Поля карточки макета (DRF-1187): клиент / услуга / длительность /
+    #: дата / время — экран рисует строки, а не разбирает summary.
+    details: dict[str, Any] | None = None
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "action": self.name,
             "summary": self.summary,
             "confirm_label": self.confirm_label,
             "token": self.token,
             "expires_in_sec": self.expires_in_sec,
         }
+        if self.details is not None:
+            out["details"] = self.details
+        return out
 
 
 @dataclass(frozen=True)
@@ -143,6 +179,14 @@ class ExecutedAction:
     name: str
     text: str
     target_id: uuid.UUID | None = None
+    #: Дверь после результата («Открыть запись» → обычный экран деталей).
+    open: dict[str, str] | None = None
+    #: Карточки к ответу (варианты времени при «занято»).
+    cards: list[dict[str, Any]] = field(default_factory=list)
+    #: ``False`` — действие НЕ выполнено (занято / результат неизвестен).
+    executed: bool = True
+    #: Строки итога для карточки «Запись создана».
+    details: dict[str, Any] | None = None
 
 
 #: Спецификации пишущих действий для модели. ОТДЕЛЬНЫЙ список: он
@@ -184,6 +228,42 @@ ACTION_SPECS: list[dict[str, Any]] = [
         },
     },
 ]
+
+ACTION_SPECS.append(
+    {
+        "name": ACTION_PREPARE_BOOKING,
+        "description": (
+            "ПРЕДЛОЖИТЬ записать клиента к мастеру. Ничего не создаёт: мастер "
+            "увидит карточку (клиент, услуга, дата, время) и подтвердит отдельно. "
+            "Вызывай, когда мастер просит записать клиента. Клиента ищи по имени "
+            "(client_name) или бери client_id из уточнения мастера; услугу — по "
+            "названию из его списка. Не угадывай клиента, услугу или время — "
+            "если чего-то нет, всё равно вызови: инструмент задаст вопрос."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "client_name": {
+                    "type": "string",
+                    "description": "Имя клиента, как сказал мастер. Обязательно, и при client_id тоже.",
+                },
+                "client_id": {
+                    "type": "string",
+                    "description": (
+                        "Id клиента из уточнения мастера («client_id=…»), если было — "
+                        "вместе с client_name."
+                    ),
+                },
+                "service": {"type": "string", "description": "Название услуги, как сказал мастер."},
+                "start_at": {
+                    "type": "string",
+                    "description": "Начало, ISO 8601: ГГГГ-ММ-ДДTЧЧ:ММ.",
+                },
+            },
+            "required": ["client_name", "start_at"],
+        },
+    }
+)
 
 ACTION_NAMES = frozenset(spec["name"] for spec in ACTION_SPECS)
 
@@ -274,30 +354,353 @@ def _validate_block_time(arguments: dict[str, Any], *, master) -> tuple[dict[str
     return normalised, summary
 
 
-_CONFIRM_LABELS = {ACTION_BLOCK_TIME: "Отправить заявку"}
+def _visits_in(master, start: datetime, end: datetime) -> list[dict[str, Any]]:
+    """Записи мастера в окне — карточкой дня (без телефона по построению)."""
+
+    from apps.master_api.services.assistant_cards import visit_card_rows
+    from apps.master_api.services.visit_source import master_visits
+
+    rows = master_visits(master, start=start, end=end)
+    return visit_card_rows(rows, _tenant_tz(master))
+
+
+def _block_time_details(start: datetime, end: datetime, tz) -> dict[str, Any]:
+    """Строки карточки макета: «Среда, 26 августа» / «Не работаю весь день»."""
+
+    local_start = start.astimezone(tz)
+    local_end = end.astimezone(tz)
+    day = f"{_WEEKDAYS_RU[local_start.weekday()].capitalize()}, {local_start.day} {_MONTHS_RU[local_start.month - 1]}"
+    whole_day = local_start.time() == datetime.min.time() and (
+        local_end - local_start
+    ) >= timedelta(hours=23)
+    change = (
+        "Не работаю весь день" if whole_day else f"Не работаю {local_start:%H:%M}–{local_end:%H:%M}"
+    )
+    return {"kind": "day_off", "title": "Изменить рабочий день", "date": day, "change": change}
+
+
+_CONFIRM_LABELS = {ACTION_BLOCK_TIME: "Отправить заявку", ACTION_PREPARE_BOOKING: "Подтвердить"}
+
+
+def _sign(payload: dict[str, Any]) -> str:
+    return _signer().sign(json.dumps(payload, separators=(",", ":"), ensure_ascii=False))
 
 
 def propose(name: str, arguments: dict[str, Any], *, master) -> ProposedAction:
     """Собрать предложение. НИЧЕГО не выполняет и ничего не пишет в базу."""
 
+    if name == ACTION_PREPARE_BOOKING:
+        return _propose_booking(arguments or {}, master=master)
     if name != ACTION_BLOCK_TIME:
         raise ActionError(f"неизвестное действие {name!r}")
-
     normalised, summary = _validate_block_time(arguments or {}, master=master)
+    tz = _tenant_tz(master)
+    start = _parse_dt(normalised["start"], field="start")
+    end = _parse_dt(normalised["end"], field="end")
+    # Макет DRF-1187: «Если есть записи — будет показан экран конфликта».
+    # День с записями не закрывается заявкой — сначала разобраться с ними.
+    visits = _visits_in(master, start, end)
+    if visits:
+        first = visits[0]
+        raise ActionError(
+            f"На этот день уже есть записи: {first['client']} в {first['time']}. "
+            "Сначала разберитесь с ними.",
+            verbatim=True,
+            cards=[
+                {
+                    "kind": "day",
+                    "date": start.astimezone(tz).date().isoformat(),
+                    "count": len(visits),
+                    "visits": visits,
+                }
+            ],
+        )
     payload = {
         "action": name,
         "args": normalised,
         "master_id": str(master.id),
         "tenant_id": str(master.tenant_id),
     }
-    token = _signer().sign(json.dumps(payload, separators=(",", ":"), ensure_ascii=False))
     return ProposedAction(
         name=name,
         summary=summary,
         confirm_label=_CONFIRM_LABELS[name],
-        token=token,
+        token=_sign(payload),
         expires_in_sec=ACTION_TOKEN_TTL_SECONDS,
+        details=_block_time_details(start, end, tz),
     )
+
+
+# ─── prepare_booking (DRF-2153) ────────────────────────────────────────────
+
+
+def _master_services(master) -> list[Any]:
+    """Услуги мастера для записи — только ПРОДАВАЕМЫЕ рёбра (DRF-1964a).
+
+    Это путь продажи: выбранную здесь услугу ассистент отдаёт в
+    ``create_appointment_as``. Непродаваемое ребро предлагать нечего —
+    предикат один на всех читателей (``sellable()``), своего фильтра тут нет.
+    """
+
+    from apps.catalog.models import MasterService
+
+    rows = (
+        MasterService.all_tenants.filter(tenant_id=master.tenant_id, master_id=master.id)
+        .sellable()
+        .select_related("service")
+    )
+    return [ms.service for ms in rows if ms.service is not None and ms.service.is_active]
+
+
+def _resolve_service(master, raw: Any) -> Any:
+    """Услуга по названию среди своих; пусто/не найдено → вопрос макета."""
+
+    from apps.master_api.services.assistant_cards import service_options
+
+    services = _master_services(master)
+    wanted = str(raw or "").strip().lower()
+    if not wanted:
+        raise ActionError(
+            "Какая услуга?",
+            verbatim=True,
+            cards=[{"kind": "choose_service", "options": service_options(services)}],
+        )
+    exact = [s for s in services if s.name.lower() == wanted]
+    if len(exact) == 1:
+        return exact[0]
+    partial = [s for s in services if wanted in s.name.lower() or s.name.lower() in wanted]
+    if len(partial) == 1:
+        return partial[0]
+    # Ни одной или несколько похожих — не угадывать (макет: «Ayla не угадывает услугу»).
+    raise ActionError(
+        "Какая услуга?",
+        verbatim=True,
+        cards=[{"kind": "choose_service", "options": service_options(partial or services)}],
+    )
+
+
+def _count_ru(n: int) -> str:
+    """«двух клиентов» / «трёх клиентов» / «несколько клиентов» — как в макете."""
+
+    words = {2: "двух", 3: "трёх", 4: "четырёх"}
+    return f"{words[n]} клиентов" if n in words else "несколько клиентов"
+
+
+def _resolve_client(master, arguments: dict[str, Any], *, tz) -> dict[str, Any]:
+    """Клиент — по id из уточнения или по имени через поиск М-2.
+
+    0 совпадений — не изобретать: дверь в форму, где нового гостя заводят с
+    телефоном; ≥2 — «Кого вы имеете в виду?» с датой последнего визита, без
+    телефона (решение владельца 20.09, DRF-1039).
+    """
+
+    from apps.admin_api.services.booking import Refusal, search_customers_as
+    from apps.integrations.ayla.user_proxy import external_user_id_for
+    from apps.master_api.services.bookings import enrich_customer_rows
+
+    from apps.master_api.services.bookings import looks_like_phone
+
+    client_id = str(arguments.get("client_id") or "").strip()[:64]
+    client_name = str(arguments.get("client_name") or "").strip()[:80]
+    if not client_name:
+        raise ActionError("Кого записать?", verbatim=True)
+    # DRF-1039: поиск по номеру закрыт и здесь — иначе «запиши +7999…» стал бы
+    # обратным поиском «чей это номер» (та же дверь, что М-2 держит на 400).
+    if looks_like_phone(client_name):
+        raise ActionError("Ищу по имени, не по номеру.", verbatim=True)
+
+    actor_user = getattr(master, "linked_bot_user", None)
+    actor = external_user_id_for(actor_user) if actor_user is not None else ""
+    rows = search_customers_as(
+        actor=actor,
+        tenant=master.tenant,
+        query=client_name,
+        log="master_api.assistant.find_client",
+    )
+    if isinstance(rows, Refusal):
+        raise ActionError("Не удалось проверить клиентов. Попробуйте снова.", verbatim=True)
+    enriched = enrich_customer_rows(master, rows)
+    if client_id:
+        # Выбор из карточки: берётся ровно тот, кого мастер нажал; если его
+        # среди найденных нет — спросить заново, не подставлять первого.
+        picked = [r for r in enriched if r["id"] == client_id]
+        if picked:
+            return picked[0]
+        if enriched:
+            from apps.master_api.services.assistant_cards import client_option_label
+
+            raise ActionError(
+                "Кого вы имеете в виду?",
+                verbatim=True,
+                cards=[
+                    {
+                        "kind": "clarify_client",
+                        "options": [
+                            {"client_id": r["id"], "label": client_option_label(r)}
+                            for r in enriched
+                        ],
+                    }
+                ],
+            )
+    if not enriched:
+        from apps.master_api.services.assistant_cards import booking_form_url
+
+        raise ActionError(
+            "Клиента с таким именем нет. Нового клиента можно добавить в форме записи.",
+            verbatim=True,
+            cards=[{"kind": "open", "url": booking_form_url(master), "label": "Добавить запись"}],
+        )
+    if len(enriched) > 1:
+        from apps.master_api.services.assistant_cards import client_option_label
+
+        raise ActionError(
+            f"Нашла {_count_ru(len(enriched))} с таким именем. Кого вы имеете в виду?",
+            verbatim=True,
+            cards=[
+                {
+                    "kind": "clarify_client",
+                    "options": [
+                        {"client_id": r["id"], "label": client_option_label(r)} for r in enriched
+                    ],
+                }
+            ],
+        )
+    return enriched[0]
+
+
+def _propose_booking(arguments: dict[str, Any], *, master) -> ProposedAction:
+    tz = _tenant_tz(master)
+    start = _localise(_parse_dt(arguments.get("start_at"), field="start_at"), tz)
+    if start <= dj_timezone.now():
+        raise ActionError("Это время уже прошло. На какое время записать?", verbatim=True)
+    client = _resolve_client(master, arguments, tz=tz)
+    service = _resolve_service(master, arguments.get("service"))
+    if not getattr(service, "ayla_service_id", None):
+        raise ActionError("Эта услуга пока не подключена к записи.", verbatim=True)
+
+    duration = int(getattr(service, "duration_min", 0) or 0)
+    local = start.astimezone(tz)
+    end_local = local + timedelta(minutes=duration)
+    day = f"{local.day} {_MONTHS_RU[local.month - 1]}"
+    details = {
+        "client": client["name"],
+        "service": service.name,
+        "duration_min": duration,
+        "date": f"{day}, {_WEEKDAYS_RU[local.weekday()]}",
+        "time": f"{local:%H:%M}",
+        "time_range": f"{local:%H:%M}–{end_local:%H:%M}",
+    }
+    payload = {
+        "action": ACTION_PREPARE_BOOKING,
+        "args": {
+            "client_id": client["id"],
+            "service_id": str(service.id),
+            "start_at": local.isoformat(),
+        },
+        "details": details,
+        "master_id": str(master.id),
+        "tenant_id": str(master.tenant_id),
+    }
+    summary = f"{client['name']} · {service.name} · {duration} мин · {day} · {local:%H:%M}"
+    return ProposedAction(
+        name=ACTION_PREPARE_BOOKING,
+        summary=summary,
+        confirm_label=_CONFIRM_LABELS[ACTION_PREPARE_BOOKING],
+        token=_sign(payload),
+        expires_in_sec=ACTION_TOKEN_TTL_SECONDS,
+        details=details,
+    )
+
+
+def _execute_booking(payload: dict[str, Any], *, master, actor, token: str = "") -> ExecutedAction:
+    """Создать запись тем же сервисом, что стойка и форма мастера (М-2).
+
+    Одна попытка. «Занято» → варианты рядом, без тихого переноса; нет
+    ответа → «Проверяем результат», а не «создана» (макет DRF-1187).
+    """
+
+    import hashlib
+
+    from apps.admin_api.services.booking import (
+        Refusal,
+        bookable_service,
+        bookable_starts,
+        create_appointment_as,
+        slot_payload,
+    )
+    from apps.integrations.ayla.user_proxy import external_user_id_for
+    from apps.master_api.services.assistant_cards import booking_detail_url
+
+    args = payload.get("args") or {}
+    details = payload.get("details") or {}
+    service = bookable_service(master.tenant_id, str(args.get("service_id") or ""))
+    if isinstance(service, Refusal):
+        raise ActionError(service.detail, slug="action_rejected")
+    start_at = str(args.get("start_at") or "")
+    result = create_appointment_as(
+        actor=external_user_id_for(actor),
+        tenant=master.tenant,
+        master=master,
+        service=service,
+        start_at=start_at,
+        # Ключ — от талона: повтор того же подтверждения — та же запись в
+        # Ayla, не вторая (в т.ч. после «Проверяем результат»).
+        idempotency_key=hashlib.sha256(token.encode("utf-8")).hexdigest()[:32],
+        client_id=str(args.get("client_id") or "") or None,
+        client_name=None,
+        client_phone=None,
+        log="master_api.assistant.create_booking",
+    )
+    if result.outcome == "committed":
+        appointment_id = str(result.extra.get("appointment_id") or "")
+        return ExecutedAction(
+            name=ACTION_PREPARE_BOOKING,
+            text="Запись создана",
+            open={"url": booking_detail_url(master, appointment_id), "label": "Открыть запись"},
+            details=details,
+        )
+    if result.outcome == "conflict" and result.status == 409:
+        # Только «занято» (409). 404 «Ayla не знает клиента» — тоже conflict у
+        # стойки, но предлагать другое время тут бессмысленно.
+        tz = _tenant_tz(master)
+        try:
+            day = datetime.fromisoformat(start_at).astimezone(tz).date()
+        except ValueError:
+            day = dj_timezone.now().astimezone(tz).date()
+        slots = bookable_starts(
+            master=master, service=service, day=day, log="master_api.assistant.alternatives"
+        )
+        alternatives: list[dict[str, Any]] = []
+        if not isinstance(slots, Refusal):
+            lo, hi = SLOT_TAKEN_ALTERNATIVES
+            taken = details.get("time")
+            alternatives = [s for s in (slot_payload(x) for x in slots) if s.get("time") != taken][
+                :hi
+            ]
+            if len(alternatives) < lo:
+                alternatives = alternatives[:lo]
+        from apps.master_api.services.assistant_cards import booking_form_url
+
+        return ExecutedAction(
+            name=ACTION_PREPARE_BOOKING,
+            text="Это время занято",
+            executed=False,
+            cards=[
+                {
+                    "kind": "slot_taken",
+                    "range": details.get("time_range", ""),
+                    "book_url": booking_form_url(master, date=day.isoformat()),
+                    "alternatives": [
+                        {"time": a["time"], "start_at": a.get("start_at")} for a in alternatives
+                    ],
+                }
+            ],
+        )
+    if result.outcome == "pending":
+        return ExecutedAction(
+            name=ACTION_PREPARE_BOOKING, text="Проверяем результат", executed=False
+        )
+    raise ActionError(result.detail or "не удалось создать запись", slug="action_rejected")
 
 
 def _decode(token: str, *, master) -> dict[str, Any]:
@@ -342,6 +745,8 @@ def execute(token: str, *, master, actor) -> ExecutedAction:
     )
 
     payload = _decode(token, master=master)
+    if payload.get("action") == ACTION_PREPARE_BOOKING:
+        return _execute_booking(payload, master=master, actor=actor, token=token)
     if payload.get("action") != ACTION_BLOCK_TIME:
         raise ActionError(f"неизвестное действие {payload.get('action')!r}")
 
@@ -397,6 +802,7 @@ def execute(token: str, *, master, actor) -> ExecutedAction:
 
 __all__ = [
     "ACTION_BLOCK_TIME",
+    "ACTION_PREPARE_BOOKING",
     "ACTION_NAMES",
     "ACTION_SPECS",
     "ACTION_TOKEN_TTL_SECONDS",

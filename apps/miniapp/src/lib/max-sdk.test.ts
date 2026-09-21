@@ -7,6 +7,28 @@ import {
   RESCHEDULE_PAYLOAD_PREFIX,
   parseStartRoute,
 } from "./max-sdk";
+import { resolveEntryPoint } from "./pending-booking-intent";
+
+describe("parseStartRoute — ссылка на карточку C04 (DRF-1773)", () => {
+  const ID = "11111111-2222-3333-4444-555555555555";
+
+  it("reco_<uuid> ведёт на карточку — у неё появился свой адрес (DRF-1769)", () => {
+    // До N3 ссылка вела в каталог: id ехал ради провенанса, а показать
+    // карточку на экране было нечем. Теперь есть — и ссылка с именем
+    // карточки открывает карточку, а исполнение начинается тапом с неё.
+    expect(parseStartRoute(`reco_${ID}`)).toBe(`/customer/recommendation/${ID}`);
+  });
+
+  it("а сам id остаётся в payload и доезжает до провенанса интента", () => {
+    // `resolveEntryPoint` кладёт его как `deep_link:reco_<id>`; бот читает
+    // оттуда, каким предложением началась запись.
+    expect(resolveEntryPoint(null, `reco_${ID}`)).toBe(`deep_link:reco_${ID}`);
+  });
+
+  it("ломаный id маршрута не даёт — не каталог и не ошибка", () => {
+    expect(parseStartRoute("reco_not-a-uuid")).toBeNull();
+  });
+});
 
 describe("parseStartRoute", () => {
   it("maps pre-existing slugs", () => {

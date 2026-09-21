@@ -146,12 +146,18 @@ class TestSoloMasterSeesTheirDay:
     def test_dashboard_shows_the_solo_masters_next_visit(
         self, tenant, bot_user, solo_master, customer
     ):
-        """Красное листа: «Сегодня» соло-мастера был пуст при живой записи."""
+        """Красное листа: «Сегодня» соло-мастера был пуст при живой записи.
 
-        start = dj_timezone.now() + timedelta(hours=1)
+        Часы дня заданы явно: «через час» от реального времени поздним
+        вечером салона попадает в завтра, и «Сегодня» честно пустеет — тест
+        краснел бы от времени суток, а не от дефекта.
+        """
+
+        now = _today_at(tenant, 10)
+        start = _today_at(tenant, 11)
         row = _mirror_row(tenant, solo_master.catalog_specialist_id, start=start, bot_user=customer)
         with tenant_scope(tenant):
-            snapshot = build_dashboard(solo_master, dj_timezone.now())
+            snapshot = build_dashboard(solo_master, now)
         payload = snapshot.to_dict()
         assert payload["next_visit"] is not None, payload
         assert payload["next_visit"]["booking_id"] == str(row.appointment_id)
@@ -160,8 +166,9 @@ class TestSoloMasterSeesTheirDay:
     def test_schedule_shows_the_solo_masters_day(self, tenant, bot_user, solo_master, customer):
         from apps.master_api.services.schedule import build_schedule
 
-        now = dj_timezone.now()
-        start = now + timedelta(hours=2)
+        # Тот же предел, что выше: часы дня — явные, не «сейчас + 2 ч».
+        now = _today_at(tenant, 10)
+        start = _today_at(tenant, 12)
         row = _mirror_row(tenant, solo_master.catalog_specialist_id, start=start, bot_user=customer)
         tz = ZoneInfo(tenant.timezone)
         with tenant_scope(tenant):

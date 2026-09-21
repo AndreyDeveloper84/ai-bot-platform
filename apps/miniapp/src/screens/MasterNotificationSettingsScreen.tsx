@@ -476,7 +476,6 @@ export function MasterNotificationSettingsScreen() {
         />
       </NotifSection>
 
-      <MasterTabBar scheduleHasPendingChange={false} />
 
       {editor !== null ? (
         <QuietHoursEditor
@@ -516,6 +515,7 @@ function NotifFrame({ children }: { children: React.ReactNode }) {
         <h1 className="m-notif__title">{COPY.header}</h1>
       </header>
       {children}
+      <MasterTabBar scheduleHasPendingChange={false} />
     </div>
   );
 }

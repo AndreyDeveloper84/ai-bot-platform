@@ -1555,6 +1555,11 @@ def create_booking(request: HttpRequest) -> HttpResponse:
                 service_id=service_id,
                 master_id=master_id,
                 visit_at=visit_at,
+                # DRF-1773 (К-3 N7) — чем начался путь. Ссылку на карточку
+                # C04 сервис кладёт в `attribution_metadata`, проверив, что
+                # карточка принадлежит этому человеку; всё остальное
+                # (`catalog` / `master` / `direct`) — как прежде.
+                entry_point=str(body.get("entry_point") or "")[:64],
             ),
             correlation_id=correlation_id or None,
         )
@@ -3505,13 +3510,20 @@ def _active_goals_from_context(doc: Any, *, now: datetime) -> list[dict[str, Any
     Title resolution, in order:
 
     1. ``goal_text`` — the person's own wording (free-text selection).
-    2. the matching ``suggestions[].label`` — a curated goal is stored as
-       ``goal_key`` with ``goal_text=None`` (``goals/api.py`` writes one
-       or the other, never both), and the label for that key travels in
-       the SAME document, so no second round-trip is needed.
-    3. ``goal_key`` itself — only when the option has since been
-       deactivated and dropped out of ``suggestions``. A slug is ugly but
-       factual; inventing a title would not be.
+    2. ``known.goal.label`` — since K-2 (DRF-2177) the catalog sends the
+       curated label WITH the goal (``suggestions`` is empty once a goal
+       is chosen), so the label no longer has to be looked up.
+    3. the matching ``suggestions[].label`` — the pre-K-2 document shape,
+       kept for a catalog that has not been redeployed yet.
+    4. ``goal_key`` itself — only when the option has since been
+       deactivated. A slug is ugly but factual; inventing a title would
+       not be.
+
+    ``target_date`` / ``target_date_passed`` (DRF-2173) — the deadline the
+    person named, ISO date, and the server's «it has passed» fact. Both
+    keys are OMITTED when there is no deadline (§103: absence, not null,
+    so the screen draws no line and cannot misread «none» as a date). A
+    non-ISO value from the source is dropped, not echoed.
 
     ``progress_pct`` is deliberately absent: Ayla's goal layer stores no
     progress for a goal (``ClientGoal`` has ``goal_key`` / ``goal_text`` /
@@ -3528,6 +3540,8 @@ def _active_goals_from_context(doc: Any, *, now: datetime) -> list[dict[str, Any
 
     title = (goal.get("goal_text") or "").strip()
     key = goal.get("goal_key")
+    if not title:
+        title = (goal.get("label") or "").strip()
     if not title and key:
         for option in doc.get("suggestions") or []:
             if isinstance(option, dict) and option.get("key") == key:
@@ -3544,7 +3558,21 @@ def _active_goals_from_context(doc: Any, *, now: datetime) -> list[dict[str, Any
     week_num = _goal_week_num(goal.get("selected_at"), now=now)
     if week_num is not None:
         entry["week_num"] = week_num
+    target_date = _iso_date_or_none(goal.get("target_date"))
+    if target_date is not None:
+        entry["target_date"] = target_date
+        entry["target_date_passed"] = bool(goal.get("target_date_passed"))
     return [entry]
+
+
+def _iso_date_or_none(value: Any) -> str | None:
+    """An ISO calendar date, normalised to ``YYYY-MM-DD``; anything else → None."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        return date_cls.fromisoformat(value.strip()).isoformat()
+    except ValueError:
+        return None
 
 
 #: Значение ``?surface=`` у ``wellness/today``, по которому — и ТОЛЬКО по
@@ -4327,10 +4355,28 @@ def _food_text_catalog_refusal(exc: Exception, *, external_id: str, step: str) -
     from apps.integrations.ayla.nutrition_client import (
         FoodNotRecognizedError,
         NutritionUnavailableError,
+        ScanBudgetExhaustedError,
+        ScanDailyLimitError,
     )
 
     if isinstance(exc, FoodNotRecognizedError):
         return _error("food_not_recognized", "dish not found in the reference", 400)
+    # DRF-2195 — отказы по бюджету распознавания идут своими именами, ВЫШЕ
+    # общего хвоста. Без этого они падали бы в `ayla_bad_request`, а он значит
+    # «программа послала каталогу чушь», то есть баг: экран не смог бы сказать
+    # человеку ни «сегодня», ни «напиши словами». Коды — как у каталога: 429
+    # личный потолок на сутки, 503 общий дневной бюджет.
+    if isinstance(exc, ScanDailyLimitError):
+        logger.info(
+            "food_text_ma.%s.daily_limit ext=%s retry_after=%s",
+            step,
+            external_id,
+            exc.retry_after,
+        )
+        return _error("food_scan_daily_limit", "personal daily scan limit reached", 429)
+    if isinstance(exc, ScanBudgetExhaustedError):
+        logger.info("food_text_ma.%s.budget_exhausted ext=%s", step, external_id)
+        return _error("food_scan_budget_exhausted", "daily scan budget exhausted", 503)
     if isinstance(exc, NutritionUnavailableError):
         logger.warning("food_text_ma.%s.unavailable ext=%s err=%s", step, external_id, exc)
         return _error("nutrition_unavailable", "ayla nutrition unavailable", 503)
@@ -5379,6 +5425,60 @@ def card_delete(request: HttpRequest, card_id) -> HttpResponse:
     return HttpResponse(status=204)
 
 
+# --- /customer/recommendation/<id> — карточка C04, как её показали (DRF-1769)
+
+
+@require_http_methods(["GET"])
+@require_init_data
+def customer_recommendation(request: HttpRequest, recommendation_id) -> HttpResponse:
+    """Карточка C04 для экрана — **запись**, а не пересчёт (К-3 N3).
+
+    Экран показывает ровно то, что человек увидел в чате: ту же формулу
+    направления, те же причины, те же другие подходы. Пересобирать их на
+    клиенте значило бы завести второй источник истины для фраз владельца
+    — и однажды показать на экране не то, что сказал бот.
+
+    Границы, которые держатся здесь по построению, а не проверкой:
+
+    * **R11** — услуги, мастера, цены и слота в ответе нет, потому что их
+      нет в записи: карточка C04 их не содержит (B2/B3), и брать неоткуда;
+    * **чужая запись** — тот же 404, что и несуществующая. Запись ищется
+      по `bot_user` звонящего, и «не твоя» снаружи неотличима от «нет
+      такой»: иначе id стал бы оракулом «а есть ли у неё карточка».
+      Мини-апп открывают и из салонного бота — там записи нет, и это тот
+      же 404, а не утечка в чужой диалог;
+    * **стёртая запись** — тоже 404. Каскад C5 слова обнуляет, оставляя
+      tombstone для attribution (B13); пустая карточка на экране была бы
+      утверждением «карточка есть», которого больше нет.
+
+    `kind=absence` — не отказ, а состояние: 200 с этим видом, и экран
+    рисует C04.4 тем же текстом владельца, что и DM.
+    """
+    from apps.recommendation.models import Recommendation
+
+    record = Recommendation.objects.filter(
+        id=recommendation_id,
+        bot_user=request.bot_user,  # type: ignore[attr-defined]
+    ).first()
+    if record is None or (
+        record.kind == Recommendation.Kind.DIRECTION and not (record.what or "").strip()
+    ):
+        return _error("not_found", "no such recommendation", 404)
+
+    return JsonResponse(
+        {
+            "data": {
+                "id": str(record.id),
+                "kind": record.kind,
+                "what": record.what,
+                "subline": record.subline,
+                "why": list(record.why or []),
+                "alternatives": list(record.alternatives or []),
+            }
+        }
+    )
+
+
 # --- /customer/decision-context + /customer/goals/select — goal layer proxy (DRF-1190)
 
 
@@ -5488,12 +5588,27 @@ def customer_goal_select(request: HttpRequest) -> HttpResponse:
                 "error": "ayla_bad_request",
                 "detail": f"ayla returned HTTP {exc.status_code}",
                 "ayla_error": exc.body,
+                # DRF-2173 — то же тело под `details`: `ApiError` экрана читает
+                # только `details`, а отказ шага срока каталог говорит словами
+                # («Этот срок уже прошёл…») — их и должен увидеть человек.
+                # `ayla_status` — исходный статус каталога: этот хоп сводит любой
+                # 4xx к 400, а экран обязан отличать «сказал словами» (400) от
+                # «документ протух» (409 → перечитать).
+                "details": {"ayla_error": exc.body, "ayla_status": exc.status_code},
             },
             status=400,
         )
     except GoalsUnavailable as exc:
         logger.warning("customer_goal_select.unavailable: %s", exc)
         return _error("ayla_unavailable", "ayla goals unavailable", 502)
+
+    # DRF-1772 (К-3) — контекст под цель собран (`next.id == return_to_chat`,
+    # серверный факт каталога): человек возвращается в чат (C03.5, К-2), и
+    # там его ждёт карточка C04 «направление + почему» — или честное C04.4.
+    # Один раз на собранный контекст; отказ DM экран не трогает.
+    from apps.recommendation.dispatch import maybe_send_card
+
+    maybe_send_card(request.bot_user, ayla_body)  # type: ignore[attr-defined]
 
     # Тот же конверт, что и у чтения выше, и по той же причине: SPA
     # разворачивает `env.data` на обеих ручках

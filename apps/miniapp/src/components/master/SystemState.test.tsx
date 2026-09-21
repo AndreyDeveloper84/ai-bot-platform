@@ -61,6 +61,7 @@ describe("словарь — дословно по DRF-1181 п.10", () => {
         subscription: "подписку",
         payout: "выплаты",
         // DRF-2194
+        screen: "экран",
         publication: "статус публикации",
         setup: "чек-лист настройки",
         workingHours: "рабочие часы",

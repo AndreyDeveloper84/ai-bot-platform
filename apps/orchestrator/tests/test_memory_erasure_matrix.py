@@ -651,6 +651,37 @@ class TestDialogueHistory:
         conversation.refresh_from_db()
         assert _recent_history(conversation) == []
 
+    def test_account_delete_blanks_the_recommendation_words(self, settings, ayla, monkeypatch):
+        """DRF-1772 (К-3) — карточка C04 хранит слова человека (причины и факты
+        из его ответов). Шаг 7 каскада: строка остаётся tombstone (что и когда
+        показано, реакция — attribution, B13/D7), слова уходят.
+        """
+        from apps.identity.services.privacy import delete_personal_data
+        from apps.recommendation.models import Recommendation
+
+        self._fake_redis(monkeypatch)
+        bu = _bot_user("erase-reco-1")
+        _consents(bu, settings)
+        card = Recommendation.objects.create(
+            bot_user=bu,
+            goal_id="goal-1",
+            what="Уменьшить утреннюю отёчность",
+            subline="Сфокусируемся на этом.",
+            why=["Ты сказала, что хочешь привести себя в порядок"],
+            facts={"goal": "Привести себя в порядок"},
+            fingerprint="fp-erase",
+            reaction=Recommendation.Reaction.WHY_REQUESTED,
+        )
+        assert card.why  # присутствие: слова на месте до каскада
+
+        result = delete_personal_data(bu, client=ayla)
+
+        assert {s.step: s.ok for s in result.steps}["recommendation_erase"] is True
+        card.refresh_from_db()
+        assert card.reaction == Recommendation.Reaction.WHY_REQUESTED  # tombstone жив
+        assert card.what == "" and card.subline == ""
+        assert card.why == [] and card.facts == {}
+
     def test_account_delete_empties_the_short_term_window(self, settings, ayla, monkeypatch):
         """FIXED (was GAP, P0) — same for the Redis window, which is the actual
         history the MAX prompt is built from.

@@ -553,6 +553,8 @@ export interface BookingCreatePayload {
   visit_at: string;
   /** AMD-002 / C7.4 — user's payment choice from the summary screen. */
   payment_required?: boolean;
+  /** DRF-1773 — провенанс пути (`resolveEntryPoint`); см. `api.ts`. */
+  entry_point?: string;
   /**
    * DRF-1708 (решение владельца, пакет 2, D4): ровно то, что человек
    * ВИДЕЛ на подтверждении. Цена — десятичной строкой как пришла из
@@ -638,7 +640,7 @@ export const getCustomerSlots = (params: {
    * окна прежний (сервер держит потолок 14 дней на запрос).
    */
   offsetDays?: number;
-}): Promise<SlotsResponse> => {
+}): Promise<SlotsResponse & { dateFrom: string; dateTo: string }> => {
   const days = params.days ?? 14;
   const today = new Date();
   today.setDate(today.getDate() + (params.offsetDays ?? 0));
@@ -646,12 +648,18 @@ export const getCustomerSlots = (params: {
   future.setDate(today.getDate() + days);
   const isoDate = (d: Date): string =>
     `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  const dateFrom = isoDate(today);
+  const dateTo = isoDate(future);
+  // DRF-2178 — окно возвращается вместе со слотами. Полосе дней нужно
+  // знать, ЧТО спросили: сервер шлёт только свободное, и день без окон
+  // в ответе отсутствует. Посчитай экран границы сам — это был бы
+  // второй расчёт того же окна, и однажды он разошёлся бы с запросом.
   return fetchSlots({
     masterId: params.masterId,
     serviceId: params.serviceId,
-    dateFrom: isoDate(today),
-    dateTo: isoDate(future),
-  });
+    dateFrom,
+    dateTo,
+  }).then((response) => ({ ...response, dateFrom, dateTo }));
 };
 
 export const createCustomerBooking = (

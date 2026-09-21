@@ -46,16 +46,19 @@ AND there's no successful read with no audit row.
 from __future__ import annotations
 
 import logging
-import os
-import socket
 import uuid
 from typing import Optional
 
-from django.db import connection, transaction
+from django.db import transaction
 from django.utils import timezone
 
 from apps.identity.models import MemoryEntry, RedZoneAccessLog
 from apps.identity.services.exceptions import TenantScopeViolation
+from apps.identity.services.red_zone_guc import (
+    _reset_red_zone_guc,
+    _set_red_zone_guc,
+    red_zone_principal,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -68,12 +71,10 @@ def _default_principal_for_role(role: str) -> str:
     service-account name). For `ops_admin` callers we cannot infer
     the staff UUID — they MUST supply `accessor_principal` explicitly.
     """
-    hostname = socket.gethostname()
-    pid = os.getpid()
     if role == RedZoneAccessLog.ACCESSOR_AYLA_LLM:
-        return f"worker:{hostname}:{pid}"
+        return red_zone_principal(role, "worker")
     if role == RedZoneAccessLog.ACCESSOR_SYSTEM_JOB:
-        return f"system:{hostname}:{pid}"
+        return red_zone_principal(role, "system")
     return "unknown"
 
 
@@ -325,30 +326,16 @@ class RedZoneReader:
 
     @staticmethod
     def _set_guc(request_id: uuid.UUID) -> None:
-        """Step 1 of every red access: let RLS see red rows for this txn (Postgres only)."""
-        if connection.vendor == "postgresql":
-            with connection.cursor() as cursor:
-                cursor.execute(
-                    "SELECT set_config('ayla.red_zone_access_context', %s, true)",
-                    [str(request_id)],
-                )
+        """Шаг 1 любого красного доступа. DRF-2180 — общая реализация."""
+        _set_red_zone_guc(request_id)
 
     @staticmethod
     def _reset_guc() -> None:
-        """Round-5 F1: clear the GUC on every exit path (Postgres only).
+        """Снятие GUC на любом пути выхода. DRF-2180 — общая реализация.
 
-        RESET runs even when the atomic block rolled back: ``set_config`` with
-        ``is_local=true`` clears at transaction END, but a caller's OUTER
-        ``atomic()`` keeps the txn alive past our SAVEPOINT release. Round-5
-        F1-C (#703): if the connection died, ``connection.cursor()`` itself
-        raises — letting that out of a ``finally`` would MASK the original
-        exception, so a failed RESET is logged, never raised.
+        Вынесено в :mod:`apps.identity.services.red_zone_guc`, когда у зоны
+        появился второй законный путь (массовое снятие по «забудь всё»):
+        правило «только под GUC» живёт ровно в той мере, в какой у него одна
+        реализация.
         """
-        if connection.vendor == "postgresql":
-            try:
-                with connection.cursor() as cursor:
-                    cursor.execute("RESET ayla.red_zone_access_context")
-            except Exception:
-                logger.exception(
-                    "RESET of red_zone_access_context failed — connection likely unusable"
-                )
+        _reset_red_zone_guc()

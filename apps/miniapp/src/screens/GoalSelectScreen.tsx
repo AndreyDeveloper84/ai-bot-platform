@@ -100,6 +100,13 @@ import {
 import { SAFETY_KIND_CLARIFY } from "../lib/health-gate-copy";
 import { closeApp, maxBridge } from "../lib/max-sdk";
 import { backTo, screenRoot, type BackIntent } from "../lib/screen-back";
+import {
+  DEADLINE_PASSED_CTA,
+  DEADLINE_STEP,
+  DEADLINE_TEXT_PLACEHOLDER,
+  answerRefusalText,
+  formatGoalDue,
+} from "../lib/goal-deadline";
 import { PLAN_LITE_COPY, PLAN_LITE_ROUTE } from "./PlanLiteScreen";
 
 type State =
@@ -327,7 +334,15 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
         setRevisingStep(null);
         setSavedNotice(noticeFor(body));
       })
-      .catch(() => {
+      .catch((err: unknown) => {
+        // DRF-2173 — каталог отказал словами (400 на шаге срока: «Этот
+        // срок уже прошёл…»): показать их и НЕ перечитывать — документ не
+        // менялся, а перечитывание стёрло бы набранный текст.
+        const words = answerRefusalText(err);
+        if (words) {
+          setSubmitError(words);
+          return;
+        }
         // Показать отказ И перечитать документ.
         //
         // Раньше документ оставался прежним, и человеку предлагалось
@@ -354,8 +369,22 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
   }
 
   if (state.kind === "error") {
+    // DRF-2198 (правило класса после инцидента 20.09): состояние ошибки не
+    // убирает навигацию. На корне «назад» нет, и «Сменить режим» —
+    // единственный выход многоролевого с клиентской поверхности: он обязан
+    // пережить отказ загрузки, иначе человек заперт на экране ошибки.
     return (
-      <ScreenLayout back={back} title="Какая у тебя цель?">
+      <ScreenLayout
+        back={back}
+        title="Какая у тебя цель?"
+        cta={
+          isRoot && canSwitch ? (
+            <StickyBar>
+              <SurfaceSwitchExit />
+            </StickyBar>
+          ) : undefined
+        }
+      >
         <StateError err={state.err} onRetry={load} screenId="goal-select" />
       </ScreenLayout>
     );
@@ -462,6 +491,8 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
     : null;
   const anketaStep = currentAnketaStep(doc);
   const knownAnswers = doc.known.anketa ?? [];
+  // DRF-2173 — строка срока; пустая, когда срока нет или дата нечитаема.
+  const deadlineLine = formatGoalDue(knownGoal?.target_date);
   // Пересматриваемый шаг берётся из документа, не из памяти экрана: если
   // сервер его уже не показывает, пересматривать нечего.
   const revising = revisingStep
@@ -611,6 +642,28 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
           // иначе тап за 1,5 с до авто-перехода ушёл бы в никуда.
           onReviseGoal={completed ? undefined : reviseGoal ?? undefined}
         />
+      )}
+
+      {/* DRF-2173 — срок цели «До 1 ноября 2026» (макет DRF-1321), под «Уже
+          учла». Без срока строки нет (§103). Срок прошёл — «Срок прошёл —
+          обновить?» → повторный проход (`start_anketa`, шаг срока
+          спросится снова); кнопка только когда сервер прислал намерение и
+          экран не на кадре C03.5 (там ничего кликабельного). Процентов
+          «времени прошло» и напоминаний нет (лист п.4). */}
+      {knownGoal && deadlineLine && (
+        <div className="goal-select__deadline" role="note">
+          <span className="goal-select__deadline-date">{deadlineLine}</span>
+          {knownGoal.target_date_passed && !completed && reviseGoal && (
+            <button
+              type="button"
+              className="goal-select__minor-action"
+              disabled={submitting}
+              onClick={reviseGoal}
+            >
+              {DEADLINE_PASSED_CTA}
+            </button>
+          )}
+        </div>
       )}
 
       {/* DRF-2101 — Plan Lite: «Мой план» строится от этой цели. Флага
@@ -774,7 +827,9 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
             onChange={(e) => setGoalText(e.target.value)}
             maxLength={GOAL_TEXT_MAX}
             rows={2}
-            placeholder="Опиши своими словами"
+            placeholder={
+              anketaStep?.step === DEADLINE_STEP ? DEADLINE_TEXT_PLACEHOLDER : "Опиши своими словами"
+            }
             aria-label={freeTextLabel}
             disabled={submitting}
           />

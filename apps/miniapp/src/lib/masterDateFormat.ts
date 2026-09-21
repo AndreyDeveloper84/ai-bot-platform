@@ -170,6 +170,26 @@ export function formatUpcomingAtRu(startIso: string, nowIso: string): string {
   return `${start.getDate()} ${month} в ${time}`;
 }
 
+/**
+ * Конец записи для карточки: `endIso` сервера, если он читается; иначе
+ * начало + длительность; иначе — ничего. Никогда не бросает: `new Date(NaN)
+ * .toISOString()` кидает RangeError и без ErrorBoundary роняет весь экран
+ * (боевой инцидент 20.09 — запись с duration_min=null на «Сегодня»).
+ */
+export function safeEndIso(
+  startIso: string | null | undefined,
+  durationMin: number | null | undefined,
+  endIso?: string | null,
+): string | undefined {
+  if (endIso && !Number.isNaN(new Date(endIso).getTime())) return endIso;
+  if (!startIso) return undefined;
+  const start = new Date(startIso).getTime();
+  if (Number.isNaN(start) || typeof durationMin !== "number" || !Number.isFinite(durationMin)) {
+    return undefined;
+  }
+  return new Date(start + durationMin * 60_000).toISOString();
+}
+
 // --- Schedule helpers (M3) ------------------------------------------------
 
 const WEEKDAYS_SHORT_RU = [

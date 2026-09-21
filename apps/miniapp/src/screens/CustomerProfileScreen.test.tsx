@@ -189,9 +189,34 @@ describe("CustomerProfileScreen (настоящие ручки согласий)
       await screen.findByRole("navigation", { name: "Основная навигация" }),
     );
     expect(nav.queryByRole("button", { name: "День" })).not.toBeInTheDocument();
-    for (const tab of ["Главная", "Записи", "Услуги", "Я"]) {
-      expect(nav.getByRole("button", { name: tab })).toBeInTheDocument();
-    }
+    // DRF-2191 — одна панель на всех клиентских экранах: «Я» → «Профиль» (активна).
+    expect(nav.getAllByRole("button").map((b) => b.getAttribute("aria-label"))).toEqual([
+      "Главная", "План", "Дневник", "Записи", "Профиль",
+    ]);
+    expect(nav.getByRole("button", { name: "Профиль" })).toHaveAttribute("aria-current", "page");
+  }, 15000);
+
+  it("DRF-2191: при 403 профиля панель и «Сменить режим» остаются — человек не заперт", async () => {
+    // Инцидент 20.09 на мастерских экранах (профиль при 403 без выхода, #1918):
+    // на клиентской поверхности выход обязан жить вне веток состояния.
+    fetchProfileMock.mockRejectedValueOnce(new ApiError(403, "forbidden", "нет"));
+    vi.resetModules();
+    const { CustomerProfileScreen } = await import("./CustomerProfileScreen");
+    const { SurfaceModeContext } = await import("../components/SurfaceSwitch");
+    render(
+      <SurfaceModeContext.Provider value={{ canSwitch: true, requestChooser: () => {} }}>
+        <MemoryRouter initialEntries={["/customer/profile"]}>
+          <CustomerProfileScreen />
+        </MemoryRouter>
+      </SurfaceModeContext.Provider>,
+    );
+    // Положительная пара: отказ на экране назван (боевая форма 403, как в #1918).
+    expect(await screen.findByRole("button", { name: "Попробовать снова" })).toBeInTheDocument();
+    const nav = within(screen.getByRole("navigation", { name: "Основная навигация" }));
+    expect(nav.getAllByRole("button").map((b) => b.getAttribute("aria-label"))).toEqual([
+      "Главная", "План", "Дневник", "Записи", "Профиль",
+    ]);
+    expect(screen.getByRole("button", { name: "Сменить режим" })).toBeInTheDocument();
   }, 15000);
 
   it("загрузка: скелет вместо выдуманного состояния", async () => {

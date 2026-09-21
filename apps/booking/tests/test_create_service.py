@@ -129,6 +129,63 @@ class TestCreateCustomerBooking:
         assert booking.service_id == service.id
         assert booking.master_id == master.id
 
+    def test_a_booking_from_a_recommendation_card_is_attributed_to_it(
+        self, tenant, bot_user, master, service, master_service, working_hours
+    ) -> None:
+        """DRF-1773 — «какая рекомендация привела к этой брони» (B13).
+
+        Сквозной случай: карточка C04 → провенанс интента → атрибуция
+        брони и обратная ссылка на карточке.
+        """
+        from apps.recommendation.models import Recommendation
+        from apps.recommendation.provenance import RECO_PAYLOAD_PREFIX
+
+        card = Recommendation.objects.create(
+            bot_user=bot_user,
+            goal_id="goal-1",
+            kind=Recommendation.Kind.DIRECTION,
+            what="Уменьшить утреннюю отёчность",
+            why=["Ты сказала, что хочешь привести себя в порядок"],
+            fingerprint="fp-create-service",
+        )
+
+        booking = create_customer_booking(
+            inp=CreateBookingInput(
+                tenant=tenant,
+                bot_user=bot_user,
+                service_id=str(service.id),
+                master_id=str(master.id),
+                visit_at=_far_future_monday_noon(),
+                entry_point=f"deep_link:{RECO_PAYLOAD_PREFIX}{card.id}",
+            ),
+            correlation_id="corr-reco",
+        )
+
+        assert booking.attribution_metadata["recommendation_id"] == str(card.id)
+        # Прежние ключи атрибуции на месте — добавка, не замена.
+        assert booking.attribution_metadata["actor_type"] == "customer"
+        card.refresh_from_db()
+        assert card.booking_id == str(booking.id)
+        assert card.booked_at is not None
+
+    def test_a_booking_without_a_card_keeps_the_old_attribution(
+        self, tenant, bot_user, master, service, master_service, working_hours
+    ) -> None:
+        """Отрицательная пара: прежний провенанс ничего не добавляет."""
+        booking = create_customer_booking(
+            inp=CreateBookingInput(
+                tenant=tenant,
+                bot_user=bot_user,
+                service_id=str(service.id),
+                master_id=str(master.id),
+                visit_at=_far_future_monday_noon(),
+                entry_point="catalog",
+            ),
+            correlation_id="corr-plain",
+        )
+        assert booking.attribution_metadata["actor_type"] == "customer"
+        assert "recommendation_id" not in booking.attribution_metadata
+
     def test_visit_in_past(
         self, tenant, bot_user, master, service, master_service, working_hours
     ) -> None:

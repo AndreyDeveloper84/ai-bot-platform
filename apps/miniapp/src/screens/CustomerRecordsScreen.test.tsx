@@ -141,20 +141,32 @@ beforeEach(() => {
 });
 
 describe("CustomerRecordsScreen (real data)", () => {
-  it("bottom nav: «День» is not offered, the four real tabs are", async () => {
-    // DRF-1546 — поверхности «День» не существует: её роль исполнял
-    // домашний экран, а он теперь «Главная». Вкладка вела бы на
-    // страницу с подсвеченной «Главной», то есть врала бы о том, куда
-    // ведёт. Стража парная: снята одна вкладка, а не навигация.
+  it("bottom nav: та же панель, что на Главной — пять вкладок, «Записи» активна (DRF-2191)", async () => {
+    // DRF-1546 снял «День»; DRF-2191 — одна панель на всех клиентских экранах
+    // по макету DRF-1321: «Услуги»/«Я» ушли, вход в каталог — с Главной.
     mockLists();
     renderScreen();
     const nav = within(
       await screen.findByRole("navigation", { name: "Основная навигация" }),
     );
     expect(nav.queryByRole("button", { name: "День" })).not.toBeInTheDocument();
-    for (const tab of ["Главная", "Записи", "Услуги", "Я"]) {
-      expect(nav.getByRole("button", { name: tab })).toBeInTheDocument();
-    }
+    expect(nav.getAllByRole("button").map((b) => b.getAttribute("aria-label"))).toEqual([
+      "Главная", "План", "Дневник", "Записи", "Профиль",
+    ]);
+    expect(nav.getByRole("button", { name: "Записи" })).toHaveAttribute("aria-current", "page");
+    expect(nav.queryByRole("button", { name: "Услуги" })).toBeNull();
+  });
+
+  it("DRF-2191: при отказе ручки панель остаётся — выход с экрана есть в любом состоянии", async () => {
+    // Правило класса из инцидента 20.09 (#1918): состояние ошибки не убирает
+    // навигацию. Положительная пара — сам отказ на экране виден.
+    mockedList.mockRejectedValue(new Error("network down"));
+    renderScreen();
+    expect(await screen.findByText(/Не получилось загрузить/)).toBeInTheDocument();
+    const nav = within(screen.getByRole("navigation", { name: "Основная навигация" }));
+    expect(nav.getAllByRole("button").map((b) => b.getAttribute("aria-label"))).toEqual([
+      "Главная", "План", "Дневник", "Записи", "Профиль",
+    ]);
   });
 
   it("DRF-2172: цена записи «3 200 ₽» на карточке; без цены строки нет, не «0 ₽»", async () => {

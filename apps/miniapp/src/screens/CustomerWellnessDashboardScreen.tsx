@@ -41,7 +41,7 @@
  *   Bottom nav — Главная · План · Дневник · Записи · Профиль (§55 б)
  *
  * Места, оставленные под чужие листы (условный рендер, ключа пока нет):
- * срок цели «До 1 ноября 2026» (DRF-2173), цена записи «3 200 ₽» (DRF-2172).
+ * срок цели — DRF-2173 (заполнено), цена записи — DRF-2172 (заполнено).
  *
  * # Что снято с этого экрана и почему (DRF-1546)
  *
@@ -106,6 +106,7 @@ import {
   type PlanLiteActionType,
   type PlanLiteCadence,
 } from "../lib/plan-lite";
+import { formatGoalDue } from "../lib/goal-deadline";
 import { visitAddressText } from "../lib/visit-address";
 import {
   enqueueWaterLog,
@@ -134,6 +135,7 @@ import {
   type CatalogBrowseData,
 } from "../lib/customer-booking";
 import { StatusBadge } from "../components/StatusBadge";
+import { CustomerTabBar } from "../components/CustomerTabBar";
 import { UnbookableBadge } from "../components/UnbookableNote";
 import { useScreenBack } from "../hooks/useScreenBack";
 import { PLAN_LITE_COPY, PLAN_LITE_ROUTE } from "./PlanLiteScreen";
@@ -148,19 +150,6 @@ type ActiveGoal = NonNullable<WellnessToday["active_goals"]>[number];
  */
 export const DIARY_CONSENT_CARD_TEXT = "Чтобы вести дневник, нужно согласие — дай его в чате с Ayla";
 export const DIARY_CONSENT_CARD_CTA = "Дать согласие в чате";
-
-/**
- * Нижняя панель — ровно пять вкладок по макету H01 (решение владельца §55 б).
- * `route: null` — эта вкладка и есть текущий экран. Порядок и подписи —
- * договор со сторожем (h01-тест) и с макетом; менять их — новое решение.
- */
-export const HOME_TABS: ReadonlyArray<{ label: string; icon: string; route: string | null }> = [
-  { label: "Главная", icon: "🏠", route: null },
-  { label: "План", icon: "📋", route: PLAN_LITE_ROUTE },
-  { label: "Дневник", icon: "📔", route: "/customer/food-scanner/diary" },
-  { label: "Записи", icon: "📅", route: "/customer/records" },
-  { label: "Профиль", icon: "👤", route: "/customer/profile" },
-];
 
 // ---------------------------------------------------------------------------
 // Loading + error state model — per-block isolation for «Partial» state
@@ -1001,33 +990,9 @@ export function CustomerWellnessDashboardScreen() {
           )}
       </main>
 
-      {/* Нижняя панель — ровно пять вкладок по макету H01 (решение владельца
-          §55 б, DRF-2144): Главная · План · Дневник · Записи · Профиль.
-          «Услуги» ушли из панели в каталог (по «Записаться» / карточке),
-          «Я» стало «Профиль». Этот экран — «Главная», поэтому активна она.
-          Сетка панели подстраивается под число вкладок, см.
-          `.wellness-dash__nav` в globals.css. */}
-      <nav className="wellness-dash__nav" aria-label="Основная навигация">
-        {HOME_TABS.map((tab) => (
-          <button
-            key={tab.label}
-            type="button"
-            className={
-              tab.route === null
-                ? "wellness-dash__nav-tab wellness-dash__nav-tab--active"
-                : "wellness-dash__nav-tab"
-            }
-            aria-current={tab.route === null ? "page" : undefined}
-            aria-label={tab.label}
-            onClick={tab.route === null ? undefined : () => navigate(tab.route as string)}
-          >
-            <span className="wellness-dash__nav-icon" aria-hidden="true">
-              {tab.icon}
-            </span>
-            <span className="wellness-dash__nav-label">{tab.label}</span>
-          </button>
-        ))}
-      </nav>
+      {/* Панель — общая для клиентских экранов (DRF-2191, состав и правила —
+          в `components/CustomerTabBar.tsx`); этот экран «Главная». */}
+      <CustomerTabBar active="home" />
     </div>
   );
 }
@@ -1258,13 +1223,6 @@ function planAdherence(plan: PlanLite): { done: number; total: number } {
   );
 }
 
-/** «1 ноября 2026» — срок цели; место под DRF-2173, пока ключа нет. */
-function formatGoalDue(iso: string): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return "";
-  return d.toLocaleDateString("ru-RU", { day: "numeric", month: "long", year: "numeric" });
-}
-
 function GoalCard({
   goal,
   goalsKnown,
@@ -1303,7 +1261,7 @@ function GoalCard({
 
   const planKnown = plan.kind === "ok";
   const activePlan = plan.kind === "ok" ? plan.data : null;
-  const due = goal.due_date ? formatGoalDue(goal.due_date) : "";
+  const due = formatGoalDue(goal.target_date);
   const weekPrefix = goal.week_num ? `Неделя ${goal.week_num} · ` : "";
   let statusLine: string | null = null;
   if (activePlan) {
@@ -1325,8 +1283,8 @@ function GoalCard({
         Активная цель
       </p>
       <h2 className="wellness-dash__goal-title">{goal.title}</h2>
-      {/* Срок — место оставлено под DRF-2173: ключ появится — строка встанет. */}
-      {due && <p className="wellness-dash__goal-due">До {due}</p>}
+      {/* DRF-2173 — срок цели «До 1 ноября 2026» (макет DRF-1321); без срока строки нет. */}
+      {due && <p className="wellness-dash__goal-due">{due}</p>}
       {/* Ни шкалы, ни процентов, ни веса под целью (§49/§82, решение №13):
           только счёт действий из плана. */}
       {statusLine && <p className="wellness-dash__goal-status">{statusLine}</p>}
