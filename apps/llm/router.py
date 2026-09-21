@@ -317,7 +317,8 @@ class FallbackProvider:
     exercised only by ``apps/llm/tests/test_router.py`` and a replay
     stub. Every real call site (``apps/skills/{faq,booking}``,
     ``apps/orchestrator/{concierge,discovery,intent_router}``,
-    ``apps/master_api/services/{assistant,ai_drafts}``) instead caught
+    ``apps/master_api/services/assistant`` — рядом стоял ``ai_drafts``,
+    снятый в DRF-1528) instead caught
     ``LLMError`` and degraded straight to a static Russian fallback.
 
     So the guarantee depended on discipline at seven-plus call sites and

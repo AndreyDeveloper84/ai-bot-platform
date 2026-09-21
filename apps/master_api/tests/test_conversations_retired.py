@@ -24,7 +24,10 @@ from django.test import Client
 from django.urls import NoReverseMatch, reverse
 
 from apps.conversations.models import AiDraft, Conversation, Message
+from apps.conversations.services import record_message
+from apps.identity.models import BotUser
 from apps.master_api.tests.conftest import init_data_header, make_master
+from apps.tenancy.context import tenant_scope
 from apps.tenancy.models import Tenant
 
 pytestmark = pytest.mark.django_db
@@ -129,14 +132,19 @@ class TestCodeIsGoneNotJustUnrouted:
         """
         from apps.conversations.dialogue_readers import DIALOGUE_READERS
 
-        stale = [key for key in DIALOGUE_READERS if key.startswith("apps.master_api.services.")]
+        deleted = (
+            "apps.master_api.services.conversations",
+            "apps.master_api.services.conversation_detail",
+            "apps.master_api.services.ai_drafts",
+        )
+        stale = [key for key in DIALOGUE_READERS if key.split(":")[0] in deleted]
         assert stale == [], stale
+        # Строки про `services.dashboard` остаются намеренно: дашборд не
+        # удаляется, его читатели переписки живы и классифицированы.
 
 
 class TestDataUntouched:
-    def test_rows_survive_the_retired_endpoints(
-        self, linked_master: tuple[Tenant, str]
-    ) -> None:
+    def test_rows_survive_the_retired_endpoints(self, linked_master: tuple[Tenant, str]) -> None:
         """Ruling 06.09: «Данные существующих диалогов не удалять».
 
         Счётчик до и после обращения ко всем снятым ручкам: ни одна из них
@@ -157,6 +165,53 @@ class TestDataUntouched:
             AiDraft.all_tenants.count(),
         )
         assert after == before, (before, after)
+
+
+class TestAutoDraftWireIsCut:
+    """Провод из канонической записи сообщения в снятый таск.
+
+    `record_message` на каждое входящее сообщение клиента ставил в
+    очередь `master_api.tasks.auto_generate_draft_for_inbound` — таск,
+    который звал `ai_drafts.generate_draft_for_conversation`. Оставить
+    провод и удалить модуль значило бы уронить `on_commit` на КАЖДОМ
+    входящем сообщении любого диалога, включая переписку клиента с
+    ассистентом: ImportError после коммита, уже за пределами try
+    обработчика канала.
+    """
+
+    def test_the_task_module_is_gone(self) -> None:
+        import importlib
+
+        with pytest.raises(ModuleNotFoundError):
+            importlib.import_module("apps.master_api.tasks")
+
+    @pytest.mark.django_db(transaction=True)
+    def test_storing_an_inbound_message_enqueues_nothing(self) -> None:
+        """Положительная пара: сообщение по-прежнему сохраняется.
+
+        `transaction=True` — иначе `on_commit` откатится вместе с тестом
+        и «ничего не упало» ничего не значило бы: именно в этом режиме
+        прежний провод и звал брокера (у которого в тестах нет адреса).
+        """
+
+        tenant = Tenant.objects.create(name="Формула тела", slug="formula-wire")
+        customer = BotUser.all_tenants.create(
+            tenant=tenant,
+            channel="max",
+            channel_user_id="wire-customer-1",
+            chat_id="wire-customer-1",
+            display_name="Ксения",
+        )
+        with tenant_scope(tenant):
+            conversation = Conversation.all_tenants.create(
+                tenant=tenant, bot_user=customer, is_active=True
+            )
+            message = record_message(
+                conversation,
+                role=Message.Role.USER,
+                content="Здравствуйте, хочу записаться",
+            )
+            assert Message.all_tenants.filter(pk=message.pk).exists()
 
 
 class TestStudioChatStillWorks:

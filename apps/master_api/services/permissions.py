@@ -25,7 +25,10 @@ PERMISSION_ROUTES: dict[str, str] = {
     "can_edit_schedule": "master_api:availability_request",
     # Услуги и цены — ручка M10; пока её нет, право ложно.
     "can_edit_services": "master_api:services_write",
-    # Ответ клиенту из кабинета (M5).
+    # Ответ клиенту из кабинета (M5) — маршрут снят в DRF-1528 вместе с
+    # перепиской мастер↔клиент (OD-7), поэтому право гаснет само. Строка
+    # оставлена намеренно: ровно это DRF-1805 и обещал — «снять маршрут,
+    # и флаг погаснет», а не «править право руками в двух местах».
     "can_message_customers": "master_api:conversation_send_message",
 }
 

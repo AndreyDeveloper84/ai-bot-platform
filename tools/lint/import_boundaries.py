@@ -565,18 +565,6 @@ BASELINE: frozenset[BaselineKey] = frozenset(
         ),
         (
             "G9-booking-request-outside-owner",
-            "apps/master_api/services/conversation_detail.py",
-            "<module>",
-            "apps.booking.models.BookingRequest",
-        ),
-        (
-            "G9-booking-request-outside-owner",
-            "apps/master_api/services/conversations.py",
-            "<module>",
-            "apps.booking.models.BookingRequest",
-        ),
-        (
-            "G9-booking-request-outside-owner",
             "apps/master_api/services/customers.py",
             "<module>",
             "apps.booking.models.BookingRequest",
@@ -587,12 +575,9 @@ BASELINE: frozenset[BaselineKey] = frozenset(
         # ratchet then demanded the entries be deleted — debt paid, line
         # removed. This is the baseline working as designed, not a
         # relaxation: a stale entry is a lie about the shape of the code.
-        (
-            "G9-booking-request-outside-owner",
-            "apps/master_api/tasks.py",
-            "auto_generate_draft_for_inbound",
-            "apps.booking.models.BookingRequest",
-        ),
+        # Тем же порядком DRF-1528 снял записи переписки мастер↔клиент
+        # (`services/conversations.py`, `services/conversation_detail.py`)
+        # и автотриггера черновиков (`tasks.py`): файлов нет — записи ушли.
     }
 )
 
@@ -709,7 +694,6 @@ CATALOG_CROSS_TENANT_BASELINE: frozenset[BaselineKey] = frozenset(
         # runs at a terminal with no request and therefore no tenant
         # ContextVar. Same posture as the other management commands above.
         "apps/identity/management/commands/issue_staff_invite.py",
-        "apps/master_api/tasks.py",
         "apps/master_api/views.py",
         # booking write paths (S1) — explicit-id reads before canonical write
         "apps/booking/services/create.py",
@@ -1261,35 +1245,8 @@ BASELINE_NOTES: dict[BaselineKey, BaselineNote] = {
     ),
     (
         "G9-booking-request-outside-owner",
-        "apps/master_api/services/conversation_detail.py",
-        "<module>",
-        "apps.booking.models.BookingRequest",
-    ): BaselineNote(
-        "UNTRIAGED",
-        "Zero BOOKING_VIA_AYLA_REST references in the file (DRF-1109 sweep, 2026-08-15). Neither confirmed safe nor confirmed broken - nobody has looked at this surface since the contract first surfaced it.",
-    ),
-    (
-        "G9-booking-request-outside-owner",
-        "apps/master_api/services/conversations.py",
-        "<module>",
-        "apps.booking.models.BookingRequest",
-    ): BaselineNote(
-        "UNTRIAGED",
-        "Zero BOOKING_VIA_AYLA_REST references in the file (DRF-1109 sweep, 2026-08-15). Neither confirmed safe nor confirmed broken - nobody has looked at this surface since the contract first surfaced it.",
-    ),
-    (
-        "G9-booking-request-outside-owner",
         "apps/master_api/services/customers.py",
         "<module>",
-        "apps.booking.models.BookingRequest",
-    ): BaselineNote(
-        "UNTRIAGED",
-        "Zero BOOKING_VIA_AYLA_REST references in the file (DRF-1109 sweep, 2026-08-15). Neither confirmed safe nor confirmed broken - nobody has looked at this surface since the contract first surfaced it.",
-    ),
-    (
-        "G9-booking-request-outside-owner",
-        "apps/master_api/tasks.py",
-        "auto_generate_draft_for_inbound",
         "apps.booking.models.BookingRequest",
     ): BaselineNote(
         "UNTRIAGED",

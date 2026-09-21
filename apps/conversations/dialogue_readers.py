@@ -294,24 +294,6 @@ def discover_read_sites(apps_root: Path) -> dict[str, ReadSite]:
 #: erased person's words fails loudest of all.
 DIALOGUE_READERS: dict[str, DialogueReader] = {
     # ── Prompt-bound ────────────────────────────────────────────────────
-    "apps.master_api.services.ai_drafts:_recent_history": DialogueReader(
-        storage="db_message",
-        reaches_prompt=True,
-        why=(
-            "The master's AI draft is assembled from these rows — the route "
-            "the audit missed while looking at the concierge. Anonymisation "
-            "empties content/rendered_text, and this reader also drops every "
-            "row at or before Conversation.anonymized_through."
-        ),
-    ),
-    "apps.master_api.services.ai_drafts:_latest_customer_message": DialogueReader(
-        storage="db_message",
-        reaches_prompt=True,
-        why=(
-            "The row the draft is answering. Its body is empty after "
-            "anonymisation; the id it is mostly used for is not personal data."
-        ),
-    ),
     "apps.channels.max.handler:_last_user_content": DialogueReader(
         storage="db_message",
         reaches_prompt=True,
@@ -412,16 +394,6 @@ DIALOGUE_READERS: dict[str, DialogueReader] = {
             "bodies it copies are empty."
         ),
     ),
-    "apps.master_api.services.conversations:list_master_conversations": DialogueReader(
-        storage="db_message",
-        reaches_prompt=False,
-        why="Master inbox list — last-message preview and SLA timestamps, rendered to a human.",
-    ),
-    "apps.master_api.services.conversation_detail:get_conversation_detail": DialogueReader(
-        storage="db_message",
-        reaches_prompt=False,
-        why="The master's chat screen — a human surface, already PII-redacted for the master.",
-    ),
     "apps.observability.delta:_load_shadow_rows": DialogueReader(
         storage="db_message",
         reaches_prompt=False,
@@ -439,15 +411,6 @@ DIALOGUE_READERS: dict[str, DialogueReader] = {
         storage="db_message",
         reaches_prompt=False,
         why="Returning-customer detection — row counts split by conversation, not bodies.",
-    ),
-    "apps.master_api.services.conversation_detail:mark_conversation_read": DialogueReader(
-        storage="db_message",
-        reaches_prompt=False,
-        why=(
-            "Counts unread rows to stamp last_read_by_master_at. The chain "
-            "ends in .count() on a variable the scanner cannot follow, so it "
-            "surfaces here rather than being skipped — no body is read."
-        ),
     ),
     "apps.master_api.services.dashboard:_customer_intent_hint": DialogueReader(
         storage="db_message",

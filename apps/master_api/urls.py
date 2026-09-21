@@ -5,7 +5,7 @@ Mounted under ``/api/v1/master/`` from :mod:`config.urls`.
 
 from __future__ import annotations
 
-from django.urls import path
+from django.urls import path, re_path
 
 from apps.master_api import views, views_assistant, views_bookings, views_profile_card
 
@@ -100,44 +100,15 @@ urlpatterns = [
         views.availability_pending,
         name="availability_pending",
     ),
-    # M5 conversations list (master-mobile §M5, PR Tier1.3)
-    path("conversations", views.conversations_list, name="conversations_list"),
-    # M6 conversation detail backend (master-mobile §M6, PR M6.1)
-    path(
-        "conversations/<uuid:conversation_id>",
-        views.conversation_detail,
-        name="conversation_detail",
-    ),
-    path(
-        "conversations/<uuid:conversation_id>/messages",
-        views.conversation_send_message,
-        name="conversation_send_message",
-    ),
-    path(
-        "conversations/<uuid:conversation_id>/mark-read",
-        views.conversation_mark_read,
-        name="conversation_mark_read",
-    ),
-    path(
-        "conversations/<uuid:conversation_id>/promote",
-        views.conversation_promote,
-        name="conversation_promote",
-    ),
-    # M6 AI drafts (master-mobile §M6, Bundle B / item 4 backend)
-    path(
-        "conversations/<uuid:conversation_id>/drafts/generate",
-        views.conversation_draft_generate,
-        name="conversation_draft_generate",
-    ),
-    path(
-        "conversations/<uuid:conversation_id>/drafts/<uuid:draft_id>/send-as-me",
-        views.conversation_draft_send_as_me,
-        name="conversation_draft_send_as_me",
-    ),
-    path(
-        "conversations/<uuid:conversation_id>/drafts/<uuid:draft_id>/release-to-ai",
-        views.conversation_draft_release_to_ai,
-        name="conversation_draft_release_to_ai",
+    # DRF-1528 (ruling владельца 06.09): прямой переписки мастера с клиентом
+    # нет (OD-7), поверхность снята в DRF-1255. Открытые ручки — способ
+    # обойти DRF-1039 в обход поверхности, поэтому сняты и они. Один
+    # «ушедший» маршрут на весь префикс: девять прежних адресов отвечают
+    # 410 Gone с причиной, а не 404 (молчание) и не 500 (зовёт повторить).
+    re_path(
+        r"^conversations(?:/.*)?$",
+        views.conversations_retired,
+        name="conversations_retired",
     ),
     # M7 notification preferences (master-mobile §M7, Bundle B / item 3)
     path(

@@ -13,23 +13,6 @@ from __future__ import annotations
 import pytest
 
 
-@pytest.fixture(autouse=True)
-def _stub_auto_draft_enqueue(monkeypatch):
-    """Stub the auto-draft Celery enqueue so handler tests need no broker.
-
-    ``record_message`` (apps/conversations/services) enqueues
-    ``auto_generate_draft_for_inbound.delay(...)`` for every USER message via
-    ``transaction.on_commit``. Under ``django_db(transaction=True)`` (the skills
-    tests) that callback actually fires → a Celery ``.delay()`` publish to a
-    broker that isn't running in tests (kombu ConnectionRefused). These handler
-    tests don't exercise the auto-draft path, so stub the enqueue to a no-op.
-    (Non-transactional tests roll the on_commit back, so this is a no-op there.)
-    """
-    from apps.master_api import tasks as _mt
-
-    monkeypatch.setattr(_mt.auto_generate_draft_for_inbound, "delay", lambda **kw: None)
-
-
 @pytest.fixture
 def mark_welcomed():
     """Return a callable that pre-marks a BotUser as welcomed (inside tenant_scope)."""

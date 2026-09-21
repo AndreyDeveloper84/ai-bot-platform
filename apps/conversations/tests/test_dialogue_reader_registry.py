@@ -186,21 +186,6 @@ def erased(seeded) -> Conversation:
 # ---------------------------------------------------------------------------
 
 
-def _probe_ai_drafts_history(conversation: Conversation) -> str:
-    from apps.master_api.services.ai_drafts import _recent_history
-
-    return " ".join(
-        f"{m.content or ''} {m.rendered_text or ''}" for m in _recent_history(conversation)
-    )
-
-
-def _probe_ai_drafts_latest(conversation: Conversation) -> str:
-    from apps.master_api.services.ai_drafts import _latest_customer_message
-
-    msg = _latest_customer_message(conversation)
-    return "" if msg is None else f"{msg.content or ''} {msg.rendered_text or ''}"
-
-
 def _probe_handler_retry_text(conversation: Conversation) -> str:
     from apps.channels.max.handler import _last_user_content
 
@@ -240,8 +225,6 @@ def _probe_concierge_store_history(conversation: Conversation) -> str:
 
 
 PROBES: dict[str, Callable[[Conversation], str]] = {
-    "apps.master_api.services.ai_drafts:_recent_history": _probe_ai_drafts_history,
-    "apps.master_api.services.ai_drafts:_latest_customer_message": _probe_ai_drafts_latest,
     "apps.channels.max.handler:_last_user_content": _probe_handler_retry_text,
     "apps.channels.max.handler:_last_clarification_offer": _probe_handler_clarification,
     "apps.channels.max.handler:_handle_global_max_event_inner": _probe_max_prompt_window,
