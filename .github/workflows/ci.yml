@@ -1304,7 +1304,13 @@ jobs:
         run: |
           rm -f "$JUNIT_FILE"
           echo "SHARD $SHARD_ID selector: $SHARD_ARGS"
-          uv run pytest $SHARD_ARGS -q -n 4 --dist load \
+          # DRF-2205 — `worksteal` вместо `load`: СМЯГЧЕНИЕ, НЕ ФИКС.
+          # При `load` очередь делится заранее, и один воркер, получивший
+          # хвост из медленных тестов, держит весь шард, пока три других
+          # простаивают. `worksteal` даёт простаивающим забирать работу.
+          # Это прячет неравномерность, а не устраняет её причину;
+          # причину лечит перераспределение шардов в матрице выше.
+          uv run pytest $SHARD_ARGS -q -n 4 --dist worksteal \
             --junitxml="$JUNIT_FILE" \
             --deselect apps/miniapp_api/tests/test_c7_payments.py::TestPaymentMirrorReadModel::test_booking_confirmed_with_payment_id_stamps_hold \
             --deselect apps/miniapp_api/tests/test_c7_payments.py::TestPaymentMirrorReadModel::test_booking_confirmed_without_payment_id_no_mirror \
