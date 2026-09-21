@@ -352,9 +352,10 @@ class TestDedupTtlSurvivesTheMidnightEdge:
         ):
             sba.signal_budget(used=400, limit=500, day=DAY)
 
-        timeouts = {c.kwargs.get("timeout") for c in added.call_args_list}
-        assert timeouts, "ключ вообще занимается"
-        assert all(t >= 24 * 60 * 60 for t in timeouts), timeouts
+        timeouts = [c.kwargs["timeout"] for c in added.call_args_list]
+        # Наличие — первым: ключ вообще занимается, и TTL у него задан.
+        assert timeouts, "ключ занимается с явным TTL"
+        assert all(int(t) >= 24 * 60 * 60 for t in timeouts), timeouts
 
     def test_the_day_is_in_the_key(self) -> None:
         """Положительная пара к TTL: сутки различаются ключом, а не временем."""
