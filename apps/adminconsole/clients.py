@@ -49,6 +49,12 @@ from django.urls import reverse
 from apps.adminconsole.client_access import is_platform_operator, record_denial, record_view
 from apps.identity.services.blocking import block_user, is_blocked, unblock_user
 
+#: Блокировка — операция оператора платформы (DRF-2276, CD §72 п.15:
+#: «отозвать доступ к салону — владелец, заблокировать на платформе —
+#: оператор»), а не право правки модели клиента (``change_botuser`` есть и
+#: у правящего).
+BLOCK_PERM = "tenancy.platform_operations"
+
 logger = logging.getLogger(__name__)
 
 #: Имя экрана в журнале доступа для межсалонных блоков карточки (S2-4).
@@ -181,7 +187,7 @@ def client_card_view(request: HttpRequest, bot_user_id: Any) -> HttpResponse:
             **_admin_context(request),
             "client": bot_user,
             "blocked": is_blocked(bot_user),
-            "can_block": request.user.has_perm("identity.change_botuser"),
+            "can_block": request.user.has_perm(BLOCK_PERM),
             "platform_operator": platform,
             "salons": salons,
             "consents": _consents_of(bot_user),
@@ -212,7 +218,7 @@ def client_unblock_view(request: HttpRequest, bot_user_id: Any) -> HttpResponse:
 
 
 def _block_form(request: HttpRequest, bot_user_id: Any, *, action: str) -> HttpResponse:
-    denial = _require_perm(request, "identity.change_botuser")
+    denial = _require_perm(request, BLOCK_PERM)
     if denial is not None:
         return denial
 
