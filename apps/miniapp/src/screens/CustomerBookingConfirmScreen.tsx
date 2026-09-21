@@ -53,6 +53,14 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { ApiError, authVerify, isHealthCheckSlug } from "../lib/api";
+import {
+  CHANGE_PROVIDER,
+  CHANGE_SERVICE,
+  CHANGE_TIME,
+  CREATING_ALSO_IN_CHAT,
+  CREATING_HEAD,
+  CREATING_HINT,
+} from "../lib/booking-outcome";
 import { channelIdentity } from "../lib/identity";
 import { OpenFromMaxScreen } from "../components/OpenFromMaxScreen";
 import { OfflineBanner } from "../components/OfflineBanner";
@@ -455,15 +463,77 @@ export function CustomerBookingConfirmScreen() {
           человек жал её и получал ошибку сети вместо записи. */}
       <OfflineBanner online={online} />
 
-      {/* 1. Visit summary — что / где / когда / цена */}
+      {/* Кадр 5 макета DRF-1320 — «Создаю запись…».
+
+          Пока запись создаётся, прежняя форма человеку не нужна: её
+          поля уже ничего не решают, а кнопка под ними приглашает нажать
+          второй раз. Кадр говорит, что происходит, сколько это обычно
+          длится и где ещё появится результат (ПРАВКА 4) — именно
+          неуверенность «прошло или нет» и рождает дубли.
+
+          Повторный submit невозможен по построению: действия на кадре
+          нет вовсе, а ключ идемпотентности всё равно считает сервер. */}
+      {submitting ? (
+        <section className="callout" role="status" aria-live="polite">
+          <h2>{CREATING_HEAD}</h2>
+          <p>{CREATING_HINT}</p>
+          <p>{CREATING_ALSO_IN_CHAT}</p>
+        </section>
+      ) : null}
+
+      {/* 1. Visit summary — что / где / когда / цена.
+
+          DRF-2178, кадр 4 макета DRF-1320: у каждой строки своё действие
+          «Изменить …». Кнопка «назад» этого не заменяет — она возвращает
+          на предыдущий шаг, а человеку нужно поправить КОНКРЕТНУЮ строку
+          и знать заранее, какую. Уход не стирает остальное: черновик
+          живёт в своём хранилище и переживает переход (правило М-3
+          «ничего не сдвигается молча»). */}
       <div className="confirm-card">
         <dl>
           <dt>Услуга</dt>
-          <dd>{draft.serviceName || "—"}</dd>
+          <dd>
+            {draft.serviceName || "—"}
+            <button
+              type="button"
+              className="customer-confirm__change"
+              onClick={() => navigate("/customer/booking/option")}
+            >
+              {CHANGE_SERVICE}
+            </button>
+          </dd>
           <dt>Мастер</dt>
-          <dd>{draft.masterName || "—"}</dd>
+          <dd>
+            {draft.masterName || "—"}
+            <button
+              type="button"
+              className="customer-confirm__change"
+              onClick={() =>
+                navigate(
+                  draft.serviceId
+                    ? `/customer/booking/provider?service=${draft.serviceId}`
+                    : "/customer/booking/provider",
+                )
+              }
+            >
+              {CHANGE_PROVIDER}
+            </button>
+          </dd>
           <dt>Время</dt>
-          <dd>{formatVisitFull(draft.visitAt)}</dd>
+          <dd>
+            {formatVisitFull(draft.visitAt)}
+            {/* Время меняют там же, где выбирали: у того же мастера.
+                Без мастера адреса нет — и действия тоже. */}
+            {draft.masterId ? (
+              <button
+                type="button"
+                className="customer-confirm__change"
+                onClick={() => navigate(`/customer/masters/${draft.masterId}/slots`)}
+              >
+                {CHANGE_TIME}
+              </button>
+            ) : null}
+          </dd>
           {/* DRF-1708 — длительность и цена из котировки ребра: то, что
               здесь показано, уезжает как quoted_* и сверяется сервером.
               Неизвестное не рисуется — никакого числа из воздуха.

@@ -4862,6 +4862,20 @@ a {
   font-size: var(--font-size-200);
   color: var(--c-text-secondary);
 }
+/* «Изменить …» у строки сводки (DRF-2178, кадр 4 макета DRF-1320).
+
+   Ссылка рядом со значением, а не кнопка в ряду действий: правит эта
+   строка, и стоять она должна при ней. Цель нажатия — 44px по высоте
+   через отступы, иначе на телефоне в неё не попасть. */
+.customer-confirm__change {
+  margin-left: var(--s-2);
+  padding: var(--s-2) 0;
+  background: none;
+  border: 0;
+  color: var(--c-accent);
+  font-size: var(--font-size-100);
+  cursor: pointer;
+}
 .customer-confirm__payment-option {
   display: flex;
   align-items: flex-start;
