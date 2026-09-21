@@ -447,6 +447,11 @@ UPDATE_WEIGHT_MANUAL_SAVED = (
 )
 #: Перед анкетой при ручном ориентире — анкета его не заменит (каталог #525).
 ANKETA_OVER_MANUAL_NOTE = "Анкета не заменит твой ориентир от специалиста — он останется."
+#: DRF-2225 — таймаут пробы «стоит ли ориентир специалиста». Проба — вежливость,
+#: не ворота: вход в анкету не ждёт общие 10 с клиента, а таймаут пробы не
+#: кормит общий breaker питания. Инженерная константа (не продуктовый порог):
+#: заметно короче хода чата, с запасом на холодный TLS до каталога.
+MANUAL_TARGET_PROBE_TIMEOUT_S = 1.5
 #: Ручной ориентир без согласия на расчёт: каталог принимает вес только с
 #: утверждением этого согласия — сказать об этом, а не о «расчёте».
 UPDATE_WEIGHT_MANUAL_NO_CONSENT = (
@@ -1111,7 +1116,10 @@ class NutritionAnketaSkill:
         # DRF-2138 (касание отзыва): ручной ориентир ставится без согласия M,
         # и «нечего отключать» при стоящем user_entered было бы неправдой —
         # purge каталога снимает и его. Профиль читается только когда M нет.
-        if not is_granted(context.bot_user) and not self._has_manual_target(context):
+        # DRF-2225: проба теперь короткая и мимо breaker'а; «не ответил» (None)
+        # здесь читается как прежде — «нет» (поведение отзыва этим листом не
+        # меняется, предел назван в PR).
+        if not is_granted(context.bot_user) and self._manual_target_probe(context) is not True:
             return SkillResult(
                 reply_text=self._contour_copy(
                     WITHDRAW_NOTHING_TO_WITHDRAW, WITHDRAW_NOTHING_TO_WITHDRAW_CONTOUR_OFF
@@ -1407,19 +1415,30 @@ class NutritionAnketaSkill:
         ``skill_state`` — соседние навыки пишут свои ключи параллельно."""
         _write_bucket(context.conversation, MANUAL_STATE_KEY, bucket)
 
-    def _has_manual_target(self, context: SkillContext) -> bool:
-        """Стоит ли у человека ``user_entered`` — по профилю каталога; любой
-        отказ чтения — «нет» (тогда путь отзыва отвечает как прежде)."""
+    def _manual_target_probe(self, context: SkillContext) -> bool | None:
+        """Стоит ли у человека ``user_entered`` — ``True`` / ``False``, или
+        ``None`` — каталог не ответил за :data:`MANUAL_TARGET_PROBE_TIMEOUT_S`
+        (или отказал). Таймаут пробы общий breaker не кормит (DRF-2225).
+        Что делать с ``None`` — решает каждый вызывающий, и решение названо.
+        """
         try:
             profile = asyncio.run(
                 get_nutrition_client().get_profile(
-                    external_user_id=external_user_id_for(context.bot_user)
+                    external_user_id=external_user_id_for(context.bot_user),
+                    timeout_s=MANUAL_TARGET_PROBE_TIMEOUT_S,
+                    feeds_circuit=False,
                 )
             )
         except Exception as exc:  # noqa: BLE001 — чтение ради вежливости, не ворота
             logger.info("anketa.manual_target_probe_failed class=%s", type(exc).__name__)
-            return False
+            return None
         return getattr(profile, "targets_source", "") == "user_entered"
+
+    def _has_manual_target(self, context: SkillContext) -> bool:
+        """Вход в анкету: фраза «анкета не заменит ориентир специалиста» — только
+        при ПОДТВЕРЖДЁННОМ ``user_entered``. Каталог не ответил → фразы нет: без
+        ответа бот не утверждает, что у человека есть ориентир (DRF-2225)."""
+        return self._manual_target_probe(context) is True
 
     def _manual_consent_refusal(self, context: SkillContext) -> SkillResult | None:
         """PERSONAL_DATA — то же второе ворото, что у писателей дневника

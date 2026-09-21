@@ -17,9 +17,9 @@ circuit breaker питания: медленный каталог держал �
 * p3 — вход в анкету при таймауте пробы — анкета начинается, фразы «анкета не
   заменит твой ориентир от специалиста» НЕТ: без ответа каталога бот не
   утверждает, что у человека есть ориентир специалиста (выбор назван);
-* p4 — отзыв при таймауте пробы и без согласия M — экран «Отключить и
-  удалить», а не «отключать нечего»: неизвестность решается в пользу права
-  человека (§92), удаление в каталоге идемпотентно;
+* p4 — отзыв при таймауте пробы и без согласия M — прежнее поведение
+  («отключать нечего»), но уже с коротким таймаутом и мимо breaker'а;
+  поведение отзыва этим листом не меняется (предел назван в PR);
 * p5 — положительные пары: ``user_entered`` → фраза есть; расчёт → фразы нет.
 """
 
@@ -134,9 +134,17 @@ class TestP3EntryOnTimeout:
 
 
 class TestP4WithdrawOnTimeout:
-    def test_unknown_offers_the_withdraw_screen(self) -> None:
-        result = _turn(WITHDRAW_CALLBACK, _client_with(_timeout), m_granted=False)
-        assert result.action_type == "anketa_withdraw_ask"
+    def test_unknown_keeps_the_previous_answer_via_the_short_probe(self) -> None:
+        seen: dict = {}
+
+        async def _slow(**kwargs):
+            seen.update(kwargs)
+            raise nc.NutritionUnavailableError("network: ReadTimeout")
+
+        result = _turn(WITHDRAW_CALLBACK, _client_with(_slow), m_granted=False)
+        assert seen["timeout_s"] == MANUAL_TARGET_PROBE_TIMEOUT_S
+        assert seen["feeds_circuit"] is False
+        assert result.meta["reply_kind"] == "anketa_withdraw_nothing"
 
 
 class TestP5PositivePairs:
