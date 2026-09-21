@@ -616,6 +616,167 @@ def _build_returning_customer_index(master: CatalogMaster, bot_user_ids: list[An
 # --- public: build_schedule -------------------------------------------
 
 
+#: Насколько вперёд ищутся записи, мешающие новому графику (DRF-2200).
+#: Две недели — столько же, сколько показывает «Расписание» одним запросом;
+#: дальше конфликт всё равно разойдётся с тем, что человек видит. Число
+#: уезжает в тело отказа, чтобы экран мог назвать горизонт словами, а не
+#: молчать о нём.
+TEMPLATE_CONFLICT_HORIZON_DAYS = 14
+
+
+class ProposedDay(NamedTuple):
+    """Один день недели из ПРЕДЛАГАЕМОГО шаблона (тело PUT /working-hours)."""
+
+    working: tuple[time, time] | None
+    lunch: tuple[time, time] | None
+
+
+def _proposed_week(schedule: list[dict[str, Any]]) -> dict[int, ProposedDay]:
+    """Тело PUT → день недели → смена и перерыв. Невнятную строку пропускаем.
+
+    Строка без часов или с нечитаемым временем — «не работаю»: писать её как
+    рабочую значило бы придумать смену, которой в теле нет.
+    """
+
+    out: dict[int, ProposedDay] = {}
+    for row in schedule or []:
+        if not isinstance(row, dict):
+            continue
+        raw_weekday = row.get("day_of_week")
+        if raw_weekday is None:
+            continue
+        try:
+            weekday = int(raw_weekday)
+        except (TypeError, ValueError):
+            continue
+        if not row.get("is_working_day"):
+            out[weekday] = ProposedDay(None, None)
+            continue
+        working = _hm_pair(row.get("start_time"), row.get("end_time"))
+        out[weekday] = ProposedDay(working, _hm_pair(row.get("break_start"), row.get("break_end")))
+    return out
+
+
+def _hm_pair(raw_start: Any, raw_end: Any) -> tuple[time, time] | None:
+    try:
+        start = time.fromisoformat(str(raw_start or "")[:5])
+        end = time.fromisoformat(str(raw_end or "")[:5])
+    except ValueError:
+        return None
+    return (start, end) if start < end else None
+
+
+def conflicting_bookings_for_template(
+    master: CatalogMaster,
+    schedule: list[dict[str, Any]],
+    *,
+    now: datetime | None = None,
+    horizon_days: int = TEMPLATE_CONFLICT_HORIZON_DAYS,
+) -> list[dict[str, Any]]:
+    """Записи, которые не помещаются в ПРЕДЛАГАЕМЫЙ недельный график (DRF-2200).
+
+    Макет DRF-1186, экран 4: «На это время уже есть запись» показывает саму
+    запись, а не слово «конфликт». Источник — тот же, что у «Расписания»
+    (:func:`build_schedule`): второй вычислитель разошёлся бы с экраном, и
+    мастер увидел бы конфликт, которого в его расписании нет.
+
+    ``schedule`` — тело PUT: семь строк ``{day_of_week, is_working_day,
+    start_time, end_time, break_start, break_end}``. Запись мешает, если она
+    начинается раньше начала смены, заканчивается позже конца, попадает на
+    предложенный перерыв или на день, который в новом графике нерабочий.
+
+    Чего здесь НЕТ и почему:
+
+    * **Даты с исключением каталога** пропускаются: их рамку задаёт
+      исключение, а не шаблон (:func:`_working_block_for_day`), и менять
+      шаблон на такой день бессмысленно — мастер увидел бы конфликт,
+      который его правка всё равно не разрешит.
+    * **Дальше горизонта** (:data:`TEMPLATE_CONFLICT_HORIZON_DAYS`) не
+      смотрим: Ayla отказывает по всему будущему, поэтому список —
+      «вот что мешает в ближайшие две недели», и горизонт экран называет.
+    """
+
+    tz = get_tenant_tz(master.tenant)
+    resolved_now = now if now is not None else dj_timezone.now()
+    local_now = resolved_now.astimezone(tz)
+    from_date = local_now.date()
+    to_date = from_date + timedelta(days=max(horizon_days, 0))
+
+    proposed = _proposed_week(schedule)
+    if not proposed:
+        return []
+
+    # Рамка нужна только ради дат с исключением — см. докстроку.
+    _wh_by_weekday, exceptions_by_date, _extra_blocks = load_day_frame(
+        master, from_date=from_date, to_date=to_date, tz=tz
+    )
+
+    payload = build_schedule(master, from_date=from_date, to_date=to_date, now=resolved_now)
+    out: list[dict[str, Any]] = []
+    for day in payload.days:
+        day_date = date_cls.fromisoformat(day.date)
+        # День не назван в теле — график на него не меняется, и мешать нечему.
+        if day_date.weekday() not in proposed or day_date in exceptions_by_date:
+            continue
+        shift = proposed[day_date.weekday()]
+        for booking in day.bookings:
+            try:
+                visit_at = datetime.fromisoformat(booking.visit_at)
+            except ValueError:
+                continue
+            start_local = visit_at.astimezone(tz)
+            end_local = start_local + timedelta(minutes=booking.duration_min or 0)
+            if end_local <= local_now:
+                continue
+            if _fits_proposed(shift, day_date, start_local, end_local, tz=tz):
+                continue
+            out.append(
+                {
+                    "booking_id": booking.booking_id,
+                    "date": day.date,
+                    "client_name": " ".join(
+                        p for p in (booking.client_first_name, booking.client_last_initial) if p
+                    ).strip(),
+                    "service_name": booking.service_name,
+                    "duration_min": booking.duration_min,
+                    "start_at": start_local.isoformat(),
+                    "end_at": end_local.isoformat(),
+                }
+            )
+    return out
+
+
+def _fits_proposed(
+    shift: ProposedDay,
+    day: date_cls,
+    start_local: datetime,
+    end_local: datetime,
+    *,
+    tz: ZoneInfo,
+) -> bool:
+    """Помещается ли запись в предложенную смену этого дня.
+
+    Сравниваются МОМЕНТЫ, а не ``.time()``: запись 23:30+60 мин кончается
+    00:30 следующего дня, и по часам она «раньше 19:00» — то есть при
+    сравнении времён исчезала бы из конфликтов вовсе.
+    """
+
+    if shift.working is None:
+        return False
+    block_start = datetime.combine(day, shift.working[0], tzinfo=tz)
+    block_end = datetime.combine(day, shift.working[1], tzinfo=tz)
+    if start_local < block_start or end_local > block_end:
+        return False
+    if shift.lunch is not None:
+        lunch_start = datetime.combine(day, shift.lunch[0], tzinfo=tz)
+        lunch_end = datetime.combine(day, shift.lunch[1], tzinfo=tz)
+        # Перерыв, заведённый поверх записи, — такой же конфликт: после
+        # записи часов в это время новых записей быть не может, а эта есть.
+        if start_local < lunch_end and end_local > lunch_start:
+            return False
+    return True
+
+
 def build_schedule(
     master: CatalogMaster,
     *,
@@ -1105,6 +1266,7 @@ def notify_manager_of_availability_request(*, tenant, master, request_id) -> Non
 __all__ = [
     "AvailabilityRequestError",
     "Conflict",
+    "TEMPLATE_CONFLICT_HORIZON_DAYS",
     "DEFAULT_RANGE_DAYS",
     "FREE_WINDOW_MIN_GAP_MIN",
     "FreeWindow",
@@ -1115,6 +1277,7 @@ __all__ = [
     "ScheduleDay",
     "ScheduleResponse",
     "build_schedule",
+    "conflicting_bookings_for_template",
     "get_tenant_tz",
     "list_pending_requests",
     "notify_manager_of_availability_request",

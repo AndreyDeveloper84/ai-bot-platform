@@ -105,6 +105,10 @@ function renderAt(path = "/master/dashboard") {
           path="/solo/working-hours"
           element={<p>Экран «Рабочие часы»</p>}
         />
+        <Route
+          path="/master/working-hours"
+          element={<p>Экран «Рабочие часы»</p>}
+        />
         <Route path="/master/conversations" element={<p>Экран переписок</p>} />
       </Routes>
     </MemoryRouter>,
@@ -283,7 +287,7 @@ describe("состояние 4 — записей нет", () => {
     expect(await screen.findByText("Экран «Рабочие часы»")).toBeInTheDocument();
   });
 
-  it("выходной у салонного мастера — «Рабочие часы →» ведёт в «Расписание» (заявка)", async () => {
+  it("выходной у салонного мастера — «Рабочие часы →» ведёт на его часы (чтение + заявка)", async () => {
     mockedDashboard.mockResolvedValue(
       doc({
         states: {
@@ -298,7 +302,9 @@ describe("состояние 4 — записей нет", () => {
     await userEvent.click(
       within(day).getByRole("button", { name: /Рабочие часы/ }),
     );
-    expect(await screen.findByText("Экран «Расписание»")).toBeInTheDocument();
+    // DRF-2200: до М-7 салонного уводили в «Расписание» — там была заявка,
+    // но своих часов он не видел; теперь это та же неделя на чтение.
+    expect(await screen.findByText("Экран «Рабочие часы»")).toBeInTheDocument();
   });
 
   it("рамка дня не прочитана (day_off: null) — «Не удалось проверить расписание» + «Проверить снова»", async () => {

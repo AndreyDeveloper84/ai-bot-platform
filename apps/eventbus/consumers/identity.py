@@ -40,7 +40,7 @@ Per event-contract.md §3.12. One handler:
   that pair, and nothing authorizes touching another tenant's rows.
 
 * **Subject = envelope, not payload** — the acted-upon user is
-  ``envelope.user_id``, the field the tenant-authorization helper
+  ``envelope.require_user_id()``, the field the tenant-authorization helper
   verified. A ``data["user_id"]`` that disagrees is a contract
   violation and the event is dropped with no REST call and no write.
 
@@ -115,7 +115,7 @@ def handle_user_profile_updated(envelope: IngestEnvelope) -> None:
 
     data = envelope.data
 
-    # The SUBJECT of the event is ``envelope.user_id`` — the field the
+    # The SUBJECT of the event is ``envelope.require_user_id()`` — the field the
     # envelope parser requires, the field every other consumer family keys
     # off, and the field the tenant-authorization helper just verified.
     # This handler used to key off ``data["user_id"]`` instead: an
@@ -125,7 +125,7 @@ def handle_user_profile_updated(envelope: IngestEnvelope) -> None:
     # against arbitrary Ayla user UUIDs. Use the envelope; treat a payload
     # that disagrees as a contract violation.
     try:
-        user_id = UUID(envelope.user_id)
+        user_id = UUID(envelope.require_user_id())
     except (ValueError, TypeError) as exc:
         logger.warning(
             "eventbus.consumer.identity.profile_updated.bad_user_id event_id=%s exc=%s",
@@ -151,7 +151,7 @@ def handle_user_profile_updated(envelope: IngestEnvelope) -> None:
                 "disagrees with the authorized envelope subject; dropping "
                 "without REST or DB side effects.",
                 envelope.event_id,
-                envelope.user_id,
+                envelope.require_user_id(),
             )
             return
 

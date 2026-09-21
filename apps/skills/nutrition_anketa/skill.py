@@ -147,12 +147,15 @@ person set elsewhere stays as it was — the same six-field body the anketa
 sends. An anketa in flight keeps its answers: «вешу 65» on the anketa's own
 weight step is the step's answer, not the short path (review #1912).
 
-Two catalogue facts shape the limits (both are catalogue tickets, not bot
-workarounds): the upsert writes ``ayla_proposed`` over ``ayla_calculated``
-and clears the confirmation, so between the POST and the tap the diary has
-no acting target; and a body parameter needs the attestation, which is also
-what permits the recompute — so a weight cannot be written WITHOUT a
-recompute, and on ``user_entered`` the bot writes nothing and says so.
+Since the catalogue's #525 (DRF-2192 / DRF-2193) the answer has a new shape,
+and both old limits are gone. On ``ayla_calculated`` the upsert no longer
+writes ``ayla_proposed`` over the acting target: the acting target stays and
+the new one lies beside it in ``targets_provenance.pending_proposal`` until
+the person confirms it — the card shows it as a proposal with the confirm
+chip (:func:`pending_proposal`). On ``user_entered`` the catalogue records
+the weight and leaves the person's own target alone, so the bot now writes
+the weight — ``{weight_kg, consent}`` only: a manual target has no snapshot,
+and the bot invents no anketa fields.
 
 ## Scope cuts vs mysite
 
@@ -197,6 +200,7 @@ from apps.integrations.ayla.nutrition_client import (
     ManualTargetsRefusedError,
     NothingToConfirmError,
     health_factor_refusals,
+    pending_proposal,
     proposed_norms,
 )
 from apps.orchestrator.plan_lite_card import goal_label
@@ -435,10 +439,31 @@ UPDATE_WEIGHT_NEED_ANKETA = "Сначала пройдём анкету — та
 UPDATE_WEIGHT_STALE = "Давно не обновляли анкету — пройдём заново."
 UPDATE_WEIGHT_CHECK_NUMBER = "Проверь число — вес в килограммах, от {lo} до {hi}."
 #: Не из листа (владелец решает; названы в теле PR).
-UPDATE_WEIGHT_MANUAL_TARGET = (
-    "У тебя ориентир от специалиста — ориентир не пересчитываю. "
-    "Если он изменился, впиши новый: «ориентир от специалиста» и число ккал."
+#: DRF-2193 (каталог #525): вес пишется, ручной ориентир не трогается.
+UPDATE_WEIGHT_MANUAL_SAVED = (
+    "Записала вес — {kg} кг. Твой ориентир от специалиста остаётся прежним, "
+    "я его не пересчитываю. Если он изменился, впиши новый: «ориентир от "
+    "специалиста» и число ккал."
 )
+#: Перед анкетой при ручном ориентире — анкета его не заменит (каталог #525).
+ANKETA_OVER_MANUAL_NOTE = "Анкета не заменит твой ориентир от специалиста — он останется."
+#: Ручной ориентир без согласия на расчёт: каталог принимает вес только с
+#: утверждением этого согласия — сказать об этом, а не о «расчёте».
+UPDATE_WEIGHT_MANUAL_NO_CONSENT = (
+    "Вес записываю только с согласием на персональный расчёт — его пока нет, "
+    "поэтому вес не записала. Твой ориентир от специалиста остаётся прежним."
+)
+#: Карточка предложения рядом с действующим (каталог DRF-2192).
+PENDING_HEAD = "Предлагаю ориентиры по новым данным — посмотри и подтверди:"
+PENDING_ACTING = "Пока ты не подтвердишь, действует прежний ориентир — {what}."
+PENDING_UNCHANGED = "Без изменений:"
+
+#: Строки карточки по видам (каталог DRF-1929): калории и всё, что из них
+#: выведено, — и вода.
+_KIND_ROWS: dict[str, tuple[str, ...]] = {
+    "calories": ("daily_kcal", "protein_g", "fat_g", "carbs_g"),
+    "fluids": ("water_ml",),
+}
 UPDATE_WEIGHT_WHOLE_NUMBER = "Напиши вес целым числом — например, 68."
 UPDATE_WEIGHT_CANCELLED = "Хорошо, вес не меняю."
 
@@ -680,7 +705,14 @@ class NutritionAnketaSkill:
         fsm = AnketaFSM()
         step_result = fsm.enter()
         self._save_state(context, fsm)
-        return self._render_step(fsm.current_step, step_result.prompt, context=context, fsm=fsm)
+        result = self._render_step(fsm.current_step, step_result.prompt, context=context, fsm=fsm)
+        # Каталог (#525) ручной ориентир анкетой не заменяет — сказать это
+        # ДО вопросов, а не после: человек со словами врача должен знать,
+        # что анкета не отнимет его число. Проба чтения падает в «нет» —
+        # тогда фразы просто нет, анкета идёт как обычно.
+        if self._has_manual_target(context):
+            result.reply_text = f"{ANKETA_OVER_MANUAL_NOTE}\n\n{result.reply_text}"
+        return result
 
     # ─── edit (cb:anketa:edit:{step}) ────────────────────────────────────
 
@@ -1255,12 +1287,10 @@ class NutritionAnketaSkill:
 
         source = getattr(profile, "targets_source", "") if profile is not None else ""
         if source == "user_entered":
-            # К2: параметры тела требуют утверждения M, а утверждение
-            # разрешает пересчёт — вес без пересчёта каталог не запишет.
-            return SkillResult(
-                reply_text=UPDATE_WEIGHT_MANUAL_TARGET,
-                meta={"reply_kind": "anketa_update_weight_manual_target"},
-            )
+            # DRF-2193 (каталог #525): вес пишется, ручной ориентир каталог не
+            # трогает и предложения рядом не кладёт. Тело — только вес:
+            # снимка у ручного ориентира нет, полей анкеты бот не выдумывает.
+            return self._update_weight_over_manual(context, external_id, weight)
         body = _update_weight_body(profile, weight)
         if body is None:
             return self._update_weight_go_to_anketa(UPDATE_WEIGHT_NEED_ANKETA, "need_anketa")
@@ -1305,6 +1335,56 @@ class NutritionAnketaSkill:
             action_type="anketa_update_weight_proposed",
             action_data={"buttons": _post_anketa_chips(proposed)},
             meta={"reply_kind": "anketa_update_weight_proposed"},
+        )
+
+    def _update_weight_over_manual(
+        self, context: SkillContext, external_id: str, weight: int
+    ) -> SkillResult:
+        from apps.consent.personal_calculation import (
+            ConsentAttestationUnavailable,
+            attach as attach_consent,
+            current_attestation,
+        )
+
+        try:
+            attestation = current_attestation(context.bot_user)
+        except ConsentAttestationUnavailable as exc:
+            # Путь ручного ориентира согласия на расчёт не спрашивает, и у
+            # многих его нет. Общий текст «расчёт пока не запускаю…»
+            # сказал бы про расчёт, которого здесь нет, — говорим про вес.
+            logger.info("anketa.update_weight_manual_no_consent reason=%s", exc.reason)
+            return SkillResult(
+                reply_text=UPDATE_WEIGHT_MANUAL_NO_CONSENT,
+                meta={"reply_kind": "anketa_update_weight_manual_no_consent"},
+            )
+        try:
+            saved = asyncio.run(
+                get_nutrition_client().upsert_profile(
+                    external_user_id=external_id,
+                    data=attach_consent({"weight_kg": weight}, attestation),
+                )
+            )
+        except NutritionUnavailableError:
+            logger.warning("anketa.update_weight_ayla_unavailable step=upsert_manual")
+            return SkillResult(
+                reply_text=_AYLA_DOWN_FALLBACK, meta={"reply_kind": "anketa_ayla_down"}
+            )
+        except NutritionAPIError:
+            logger.exception("anketa.update_weight_ayla_error step=upsert_manual")
+            return SkillResult(
+                reply_text=_AYLA_DOWN_FALLBACK, meta={"reply_kind": "anketa_ayla_error"}
+            )
+        saved_kg = getattr(saved, "weight_kg", None)
+        if saved_kg is not None and round(float(saved_kg)) != weight:
+            # Каталог ответил, но другим весом — не говорим «записала».
+            logger.warning("anketa.update_weight_manual_mismatch")
+            return SkillResult(
+                reply_text=_AYLA_DOWN_FALLBACK, meta={"reply_kind": "anketa_ayla_error"}
+            )
+        return SkillResult(
+            reply_text=UPDATE_WEIGHT_MANUAL_SAVED.format(kg=weight),
+            action_data={"buttons": _post_anketa_chips(saved)},
+            meta={"reply_kind": "anketa_update_weight_manual_saved"},
         )
 
     @staticmethod
@@ -1930,7 +2010,11 @@ def _post_anketa_chips(profile=None) -> list[dict[str, str]]:
     from apps.orchestrator.personal_surface import CHIP_DIARY, CHIP_WATER, diary_is_reachable
 
     chips: list[dict[str, str]] = []
-    if profile is not None and profile.targets_source == TARGETS_PROPOSED:
+    if profile is not None and (
+        profile.targets_source == TARGETS_PROPOSED or pending_proposal(profile)
+    ):
+        # DRF-2192: предложение рядом с действующим подтверждается той же
+        # кнопкой — каталог ``confirm_targets`` забирает его.
         chips.append(dict(CHIP_CONFIRM_TARGETS))
     if profile is not None and profile.targets_source in ("ayla_calculated", "ayla_proposed"):
         # DRF-2139: пересчёт одним вопросом — только там, где есть расчёт,
@@ -2137,6 +2221,52 @@ def _format_summary(profile) -> str:
                 "Дневных ориентиров пока не считаю."
             )
         return "\n\n".join(manual_parts)
+
+    # DRF-2192 (каталог #525): новое предложение лежит РЯДОМ с действующим.
+    # Показать его как предложение и назвать, что до подтверждения действует
+    # прежний ориентир, — иначе карточка говорила бы «Готово, посчитала»
+    # прежними числами, а новое было бы невидимо и неподтверждаемо.
+    beside = pending_proposal(profile)
+    if beside:
+        # Показываются ТОЛЬКО пересчитанные виды: вода-предложение не
+        # сравнивается с калориями, и действующая вода не пропадает с
+        # карточки, если пересчитаны только калории.
+        pending_fields = {f for k in beside["kinds"] for f in _KIND_ROWS.get(k, ())}
+        pending_rows = [
+            f"{label}: {value} {unit}"
+            for label, field, unit in _SUMMARY_ROWS
+            if field in pending_fields and (value := int(beside["norms"].get(field) or 0)) > 0
+        ]
+        if pending_rows:
+            from types import SimpleNamespace
+
+            pending_parts = [PENDING_HEAD, "\n".join(pending_rows)]
+            method_line = _method_and_inputs_line(
+                SimpleNamespace(
+                    targets_input_snapshot=beside["input_snapshot"],
+                    targets_method_versions=beside["method_versions"],
+                )
+            )
+            if method_line:
+                pending_parts.append(method_line)
+            acting: list[str] = []
+            acting_kcal = int(getattr(profile, "daily_kcal", 0) or 0)
+            if "calories" in beside["kinds"] and acting_kcal > 0:
+                acting.append(f"{acting_kcal} ккал в день")
+            acting_water = int(getattr(profile, "water_ml", 0) or 0)
+            if "fluids" in beside["kinds"] and acting_water > 0:
+                acting.append(f"вода {acting_water} мл")
+            if acting:
+                pending_parts.append(PENDING_ACTING.format(what=", ".join(acting)))
+            unchanged = [
+                f"{label}: {value} {unit}"
+                for label, field, unit in _SUMMARY_ROWS
+                if field not in pending_fields
+                and (value := int(getattr(profile, field, 0) or 0)) > 0
+            ]
+            if unchanged:
+                pending_parts.append(f"{PENDING_UNCHANGED}\n" + "\n".join(unchanged))
+            return "\n\n".join(pending_parts)
 
     # §5.1: предложение показывается как предложение. Числа — из ``raw``:
     # инвариант DTO обнуляет поля у не настроенного источника, и это

@@ -591,6 +591,12 @@ function masterRouteElements(): React.ReactNode {
       {/* D7 billing — subscription status + card binding (money path) */}
       <Route path="/master/billing" element={<MasterBillingScreen />} />
       <Route path="/master/schedule" element={<MasterScheduleScreen />} />
+      {/* DRF-2200 (М-7) — «Рабочий график» мастера салона: тот же экран,
+       * только на чтение, с «Запросить изменение» (§83). */}
+      <Route
+        path="/master/working-hours"
+        element={<MasterWorkingHoursScreen />}
+      />
       {/* DRF-2156 (М-4) — «Детали записи» по макету DRF-1185: тап по записи
           на «Сегодня» и в «Расписании» ведёт сюда, не в переписки. */}
       <Route

@@ -77,6 +77,7 @@ from apps.conversations.models import (
 from apps.identity.export_coverage import (
     EXCLUSIONS,
     KNOWN_LIMITS,
+    NON_REGISTRY_SECTIONS,
     NON_REGISTRY_STORES,
     SECTIONS,
 )
@@ -183,7 +184,8 @@ OUTCOMES: dict[str, Outcome] = {
     ),
     "conversations.Conversation": Outcome(
         DELETE,
-        "никто — anonymize_dialogue двигает только anonymized_through",
+        "conversations.erasure.anonymize_dialogue — skill_state={} тем же "
+        "обновлением, что и anonymized_through (DRF-2181)",
         "skill_state держит незавершённые анкеты (питание: вес/рост/цель); "
         "после «забудь всё» должен быть пуст",
     ),
@@ -247,13 +249,10 @@ OUTCOMES: dict[str, Outcome] = {
 #: Хранилища ПДн, о которых export_coverage сегодня МОЛЧИТ. Каждое — находка:
 #: лист следом; когда строка появится в реестре экспорта, strict-xfail покраснеет.
 UNDECLARED_IN_EXPORT: dict[str, str] = {
-    "consent.ConsentRecord": (
-        "выгружается разделом consents, но в таблице coverage не объявлен: "
-        "included/withheld о нём молчат"
-    ),
-    "conversations.AiDraft": "черновик мастера цитирует клиента; ни в NON_REGISTRY_STORES, ни в слотах",
-    "redis.short_term": "окно сырых реплик в Redis (TTL 24 ч) не названо в реестре экспорта",
-    "redis.pii_tokenmap": "обратная карта токенов → настоящий телефон не названа в реестре",
+    # DRF-2183 закрыл четыре строки: согласия объявлены выгруженными
+    # (`NON_REGISTRY_SECTIONS`), черновики мастера и оба хранилища Redis —
+    # невыгруженными с причиной. Метки сняты, потому что strict-xfail
+    # покраснел сам.
     "tenancy.TenantStaff": "решение владельца 20.09 (§58): хранилище с исходом — в экспорте нет",
     "tenancy.StaffInvite": "решение владельца 20.09 (§58): хранилище с исходом — в экспорте нет",
 }
@@ -261,9 +260,9 @@ UNDECLARED_IN_EXPORT: dict[str, str] = {
 #: Хранилища, где сегодняшняя цепочка НЕ даёт ожидаемого исхода. Лист следом.
 ERASURE_HOLES: dict[str, str] = {
     # DRF-2180 закрыл обе строки MemoryEntry: свип снимает все три зоны, на
-    # красную — строка RedZoneAccessLog. Метки сняты, потому что strict-xfail
-    # покраснел сам, как и задумано этим реестром.
-    "conversations.Conversation": "skill_state с анкетой не очищается ни свипом, ни обезличиванием",
+    # красную — строка RedZoneAccessLog. DRF-2181 закрыл Conversation:
+    # anonymize_dialogue опустошает skill_state. Метки сняты, потому что
+    # strict-xfail покраснел сам, как и задумано этим реестром.
 }
 
 
@@ -282,7 +281,10 @@ def _store_of(slot: str) -> str:
 
 
 def stores_declared_by_export_coverage() -> set[str]:
-    declared = {_store_of(slot) for slot in (*SECTIONS, *EXCLUSIONS, *NON_REGISTRY_STORES)}
+    declared = {
+        _store_of(slot)
+        for slot in (*SECTIONS, *EXCLUSIONS, *NON_REGISTRY_STORES, *NON_REGISTRY_SECTIONS)
+    }
     if any(re.search(r"users\.UserPersonalContext", limit) for limit in KNOWN_LIMITS):
         declared.add(CATALOG_STORE)
     return declared

@@ -72,6 +72,12 @@ class EventBusConfig(AppConfig):
 
         register_schedule_handlers()
 
+        # DRF-2196 (а1, §64) — системные события без субъекта
+        # (`system.module.health.degraded` → ядро страницы в MAX).
+        from apps.eventbus.consumers.system import register_system_handlers
+
+        register_system_handlers()
+
         # #445 — Register reviews (review.created) consumer.
         from apps.eventbus.consumers.reviews import register_reviews_handlers
 
