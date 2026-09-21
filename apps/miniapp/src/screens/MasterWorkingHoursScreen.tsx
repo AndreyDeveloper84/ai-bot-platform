@@ -46,6 +46,7 @@ import { useScreenBack } from "../hooks/useScreenBack";
 import { backTo } from "../lib/screen-back";
 
 import { SheetChrome } from "../components/PersonalDataSheets";
+import { MasterTabBar } from "../components/MasterTabBar";
 import { Snackbar } from "../components/Snackbar";
 // Загрузка / ошибка загрузки — мастерский SystemState (DRF-2194), не клиентский StateError.
 import { SystemState } from "../components/master/SystemState";
@@ -170,7 +171,7 @@ export const INVALID_BREAK = "Перерыв должен быть внутри 
 export const CONFLICT_MESSAGE =
   "В это время уже есть записи. Сначала разберитесь с ними.";
 export const NOT_LINKED_MESSAGE =
-  "Профиль ещё не связан с каталогом — сохранить часы пока некуда.";
+  "Профиль ещё не связан с каталогом — сохранить часы пока некуда. Привязку выполнит оператор.";
 export const REQUEST_FAILED = "Не удалось отправить заявку. Попробуйте ещё раз.";
 
 type Phase =
@@ -554,10 +555,14 @@ export function MasterWorkingHoursScreen() {
     `${isSolo ? "/solo" : "/master"}/bookings/${encodeURIComponent(bookingId)}`;
 
 
+  // Инцидент 21.09 (DRF-2150): на экран ведёт дверь с «Сегодня», значит это
+  // не лист-подэкран — панель в КАЖДОЙ ветке, иначе «не связан» становится
+  // тупиком. На /solo/* MasterTabBar сам себя не рисует (там свой каркас).
   if (phase.kind === "loading") {
     return (
       <main className="screen working-hours">
         <SystemState kind="loading" lines={2} />
+        <MasterTabBar scheduleHasPendingChange={false} />
       </main>
     );
   }
@@ -567,6 +572,7 @@ export function MasterWorkingHoursScreen() {
         <p className="callout" role="status">
           {NOT_LINKED_MESSAGE}
         </p>
+        <MasterTabBar scheduleHasPendingChange={false} />
       </main>
     );
   }
@@ -579,6 +585,7 @@ export function MasterWorkingHoursScreen() {
           err={phase.err}
           onRetry={() => void load()}
         />
+        <MasterTabBar scheduleHasPendingChange={false} />
       </main>
     );
   }
@@ -715,6 +722,7 @@ export function MasterWorkingHoursScreen() {
         durationMs={4000}
         onTimeout={() => setSnack(null)}
       />
+      <MasterTabBar scheduleHasPendingChange={false} />
     </main>
   );
 }

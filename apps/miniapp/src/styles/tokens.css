@@ -90,6 +90,13 @@
      (DRF-1469). Высота ряда + его верхний отступ. */
   --cta-exit-height: 52px;
   --safe-bottom: env(safe-area-inset-bottom, 0px);
+  /* Высота фиксированной нижней панели мастера / пилота (без safe-area).
+     Инцидент 21.09 (DRF-2150): токен жил только внутри `.master-dashboard`,
+     и на «Ayla» `calc(var(--tabbar-height) + …)` был недействителен —
+     отступ снизу 0, композер ушёл под панель. Экран без панели ставит 0px. */
+  --tabbar-height: 64px;
+  /* Высота поля ввода чата «Ayla» — поле прокрутки к последней реплике. */
+  --ayla-compose-height: 72px;
 
   /* Motion — restrained (anti-slop §18 #11). */
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
