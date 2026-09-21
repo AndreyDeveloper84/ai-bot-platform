@@ -101,6 +101,12 @@ def _global_conversation(user_id: int) -> Conversation:
     return Conversation.all_tenants.get(bot_user=bot_user, tenant__slug=GLOBAL_BOT_TENANT_SLUG)
 
 
+def _kind(expected: str) -> str:
+    """Детерминированная метка параметра для slug тенанта (не ``hash()``:
+    он солится по процессу — DRF-1158)."""
+    return "crisis" if expected == CRISIS_REPLY_TEXT else "medical"
+
+
 # ── p1 — handoff не глушит кризис и неотложку ────────────────────────
 
 
@@ -119,7 +125,7 @@ class TestP1SafetyReachesThePersonDuringHandoff:
 
     @pytest.mark.parametrize(("text", "expected"), SAFETY_UNDER_HANDOFF)
     def test_per_tenant_max(self, sent, text, expected) -> None:
-        tenant = Tenant.objects.create(slug=f"drf2213-{abs(hash(text)) % 10_000}", name="T")
+        tenant = Tenant.objects.create(slug=f"drf2213-{_kind(expected)}", name="T")
 
         def run(t: str, mid: str) -> None:
             trace = uuid.uuid4()
@@ -141,7 +147,7 @@ class TestP1SafetyReachesThePersonDuringHandoff:
         from unittest.mock import patch
 
         tenant = Tenant.objects.create(
-            slug=f"drf2213-tg-{abs(hash(text)) % 10_000}",
+            slug=f"drf2213-tg-{_kind(expected)}",
             name="TG",
             telegram_bot_token="bot-token-2213",  # pragma: allowlist secret
             telegram_webhook_secret="secret-2213",  # pragma: allowlist secret

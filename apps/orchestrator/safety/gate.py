@@ -173,6 +173,23 @@ def evaluate_inbound(text: str) -> SafetyGateOutcome:
     )
 
 
+#: Verdicts that are answered even while a human operator drives the
+#: conversation (DRF-2213 Q1). Owner decision N-1 (CD §67, AYLA-DEC-0096),
+#: verbatim: «кризис и неотложка получают детерминированный ответ всегда, в
+#: том числе при согласии, не данном или отозванном, и при работе оператора».
+#: It overrides the S1-B barge-guard (#1053, REPLY_DRF-1015 №1 «не перебивать
+#: оператора») for these two verdicts ONLY: ``BLOCK`` and everything else stay
+#: silent under handoff, as before.
+REACHES_THROUGH_HANDOFF: frozenset[str] = frozenset(
+    {SafetyVerdict.HANDOFF.value, SafetyVerdict.MEDICAL.value}
+)
+
+
+def reaches_through_handoff(outcome: SafetyGateOutcome) -> bool:
+    """True when this inbound verdict must be answered despite a handoff."""
+    return not outcome.allowed and outcome.verdict in REACHES_THROUGH_HANDOFF
+
+
 # --------------------------------------------------------------------------- #
 # Outbound half (DRF-1210)                                                     #
 # --------------------------------------------------------------------------- #
@@ -281,7 +298,9 @@ __all__ = [
     "CRISIS_REPLY_TEXT",
     "OUTBOUND_ACTION_TYPE",
     "OutboundGuardOutcome",
+    "REACHES_THROUGH_HANDOFF",
     "SafetyGateOutcome",
     "evaluate_inbound",
     "guard_outbound",
+    "reaches_through_handoff",
 ]

@@ -354,10 +354,11 @@ class TestIntentionalDivergence:
         )
         assert last.action_type == "safety_pre_check"
 
-    def test_per_tenant_gate_does_not_barge_operator(self, mock_send, fake_redis):
-        # Per-tenant gate: the HUMAN_HANDOFF guard keeps the gate silent while an
-        # operator is driving. (The global path now mutes too — earlier, via
-        # global_handoff_muted / DRF-1015 — covered by test_global_human_handoff.)
+    def test_per_tenant_gate_answers_crisis_even_under_handoff(self, mock_send, fake_redis):
+        # DRF-2213 Q1 — owner decision N-1 (CD §67) overrides the barge-guard for
+        # crisis and medical emergency: the deterministic reply goes out ALWAYS,
+        # operator or not. BLOCK stays muted under handoff
+        # (test_safety_in_handoff_2213_q1). Until Q1 this test pinned silence.
         tenant = Tenant.objects.create(slug="parity-hh", name="HH")
         _run_per_tenant(tenant, "привет", mid="a")
         conv = Conversation.all_tenants.get(tenant=tenant)
@@ -365,7 +366,7 @@ class TestIntentionalDivergence:
         mock_send.clear()
 
         _run_per_tenant(tenant, "я думаю о суициде", mid="b")
-        assert mock_send == []  # silent — no crisis barge over the operator
+        assert [call["text"] for call in mock_send] == [CRISIS_REPLY_TEXT]
 
 
 # --------------------------------------------------------------------------- #
