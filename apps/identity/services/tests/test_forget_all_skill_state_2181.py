@@ -79,6 +79,9 @@ def _forgotten_with_dialogue(settings, skill_state: dict):
     conversation, _message = TestTheDialogueHalf._dialogue(upc, settings)
     Conversation.all_tenants.filter(pk=conversation.pk).update(skill_state=skill_state)
     conversation.refresh_from_db()
+    # Наличие — до стирания: без этого «стало пусто» прошло бы и на стенде,
+    # который молча не записал анкету, то есть проверяло бы ничего.
+    assert conversation.skill_state == skill_state and skill_state
     return upc, conversation
 
 
@@ -90,6 +93,7 @@ class TestTheAnketaDoesNotSurvive:
     def test_an_unfinished_nutrition_anketa_is_emptied(self, redis, settings) -> None:
         """Сердце листа: вес, рост, возраст из брошенной анкеты — после «забудь всё»."""
         upc, conversation = _forgotten_with_dialogue(settings, {"nutrition_anketa": ANKETA})
+        assert _state(conversation) == {"nutrition_anketa": ANKETA}
 
         sweep_forget_all(upc.user_id)
 
@@ -107,6 +111,7 @@ class TestTheAnketaDoesNotSurvive:
                 "nutrition_manual_target": {"kcal": 1650},
             },
         )
+        assert len(_state(conversation)) == 5
 
         sweep_forget_all(upc.user_id)
 
@@ -140,8 +145,10 @@ class TestTheTimeBoundary:
         fresh = Conversation.all_tenants.create(
             tenant=tenant, bot_user=bot_user, skill_state={"nutrition_anketa": ANKETA}
         )
+        requested_at = upc.forget_all_requested_at
+        assert requested_at is not None
         Conversation.all_tenants.filter(pk=fresh.pk).update(
-            created_at=upc.forget_all_requested_at + timedelta(minutes=5)
+            created_at=requested_at + timedelta(minutes=5)
         )
 
         sweep_forget_all(upc.user_id)
@@ -158,6 +165,7 @@ class TestTheTimeBoundary:
         обезличенный до того же момента, и её не трогает.
         """
         upc, conversation = _forgotten_with_dialogue(settings, {"nutrition_anketa": ANKETA})
+        assert _state(conversation) == {"nutrition_anketa": ANKETA}
         sweep_forget_all(upc.user_id)
         assert _state(conversation) == {}
 
@@ -199,6 +207,7 @@ class TestEveryErasurePathEmptiesIt:
         from apps.persona.memory_commands import _anonymize_dialogue
 
         upc, conversation = _forgotten_with_dialogue(settings, {"nutrition_anketa": ANKETA})
+        assert _state(conversation) == {"nutrition_anketa": ANKETA}
 
         _anonymize_dialogue(conversation.bot_user)
 
@@ -210,6 +219,7 @@ class TestEveryErasurePathEmptiesIt:
         from apps.conversations.models import ArchivedMessage
 
         upc, conversation = _forgotten_with_dialogue(settings, {"nutrition_anketa": ANKETA})
+        assert _state(conversation) == {"nutrition_anketa": ANKETA}
 
         anonymize_dialogue(
             [conversation.bot_user_id],
