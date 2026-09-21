@@ -162,3 +162,81 @@ class TestTheNewKindOfLineHasItsOwnRules:
         withheld = {store(k) for k in NON_REGISTRY_STORES}
         assert carried  # наличие
         assert not (carried & withheld)
+
+
+class TestTheProseNamesOnlyRealSections:
+    def test_every_section_named_in_a_reason_is_a_real_export_key(self, bot_user) -> None:
+        """Причина не может отправить человека в раздел, которого нет в файле.
+
+        Этот узел поймал бы ошибку, которую нашло ревью: причина карты
+        токенов говорила «сам телефон выгружается в разделе channel_shell»,
+        а `channel_shell` — слаг ПРИЧИНЫ, а не раздел выгрузки, и сам телефон
+        не выгружается вовсе. Проверка прозы регулярным выражением грубая,
+        но дешёвая, и ложь именно этой формы — «см. раздел X» — она ловит.
+        """
+        import re
+
+        from apps.identity.export_coverage import NON_REGISTRY_STORES, REASONS
+
+        payload = export_personal_data(bot_user, client=_no_ayla())
+        named = set()
+        for prose in (*REASONS.values(), *NON_REGISTRY_STORES.values()):
+            named |= set(re.findall(r"в разделе ([a-z_]+)", prose))
+
+        assert named  # наличие: причины правда ссылаются на разделы
+        for section in named:
+            assert section in payload, f"причина ссылается на раздел «{section}», а его нет"
+
+    def test_the_tokenmap_reason_does_not_call_itself_a_phone_copy(self) -> None:
+        """Карта держит телефоны, почту, карты, коды и ссылки — в т.ч. чужие."""
+        from apps.identity.export_coverage import NON_REGISTRY_STORES
+
+        reason = NON_REGISTRY_STORES["redis.pii_tokenmap"]
+        # Наличие — первым: причина называет состав.
+        for word in ("почты", "карт", "третьим лицам"):
+            assert word in reason, word
+        assert "служебная копия" not in reason
+
+
+class TestConsentsAreReallyCarriedForEverySalon:
+    def test_consents_from_two_salons_both_reach_the_file(self) -> None:
+        """«Выгружено» проверено на настоящих согласиях, а не на пустом ключе.
+
+        Две оболочки одного человека в двух салонах, по согласию в каждой:
+        оба согласия обязаны оказаться в файле. Иначе объявление «выгружено»
+        перехваливало бы выгрузку для человека с несколькими салонами.
+        """
+        from apps.consent.models import ConsentRecord
+
+        ayla_id = uuid.uuid4()
+        shells = []
+        for n in (1, 2):
+            tenant = Tenant.objects.create(slug=f"cov-2183-{n}", name=f"Салон {n}")
+            shells.append(
+                BotUser.all_tenants.create(
+                    tenant=tenant,
+                    channel="max",
+                    channel_user_id=f"2183{n}",
+                    chat_id=f"2183{n}",
+                    ayla_user_id=ayla_id,
+                )
+            )
+        for shell in shells:
+            ConsentRecord.all_tenants.create(
+                tenant=shell.tenant,
+                bot_user=shell,
+                consent_type="personal_data",
+                granted=True,
+                source="test",
+                document_version="v1",
+            )
+
+        payload = export_personal_data(shells[0], client=_no_ayla())
+
+        assert len(payload["consents"]) == 2, payload["consents"]
+        assert "consent.ConsentRecord" in payload["coverage"]["included"]["consents"]
+
+    def test_the_missing_salon_is_declared_in_the_file_itself(self) -> None:
+        """Пробел раздела назван в документе, который человек получает."""
+        limits = " ".join(build_coverage_section()["known_limits"])
+        assert "не указывает салон" in limits
