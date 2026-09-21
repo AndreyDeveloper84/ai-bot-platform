@@ -2015,13 +2015,23 @@ def _update_weight_body(profile: Any, weight: int) -> dict[str, Any] | None:
     snapshot = dict(getattr(profile, "targets_input_snapshot", None) or {})
     if any(snapshot.get(name) in (None, "") for name in _SNAPSHOT_INPUTS):
         return None
-    # Вопрос 59: при цели, которая использует темп, он — такой же вход
-    # снимка; нет его — в анкету, темп бот не подставляет. Предел (назван в
-    # PR, решение (а1)): у снимков, посчитанных ДО вопроса 59, темп и
-    # активность подставлял каталог — «moderate», 1.4 → 1.375 — и они
-    # неотличимы от названных; бот их переносит, как любой вход снимка.
-    needs_pace = str(snapshot.get("goal")) in PACE_GOALS
-    if needs_pace and snapshot.get("pace") in (None, ""):
+    # Цель и темп — НАЗВАННЫЕ человеком (поля профиля), а не расчётные из
+    # снимка. Снимок хранит результат ступени пола BMR («поддержание»,
+    # «мягкий» темп), и отправить его как вход значило бы записать за
+    # человека цель и темп, которых он не выбирал (DRF-2241 для цели,
+    # вопрос 59 для темпа).
+    #
+    # Вопрос 59: при цели, которая использует темп, он обязателен; нет его —
+    # в анкету, темп бот не подставляет. Предел (назван в PR, решение (а1)):
+    # у профилей, посчитанных ДО вопроса 59, темп и активность подставлял
+    # каталог — «moderate», 1.4 → 1.375 — и они неотличимы от названных; бот
+    # их переносит, как любой вход.
+    goal = str(getattr(profile, "goal", "") or "")
+    pace = str(getattr(profile, "goal_pace", "") or "")
+    if not goal:
+        return None
+    needs_pace = goal in PACE_GOALS
+    if needs_pace and not pace:
         return None
     try:
         # Типы — как шлёт анкета: целые и float; снимок мог прийти с «28.0»
@@ -2031,13 +2041,13 @@ def _update_weight_body(profile: Any, weight: int) -> dict[str, Any] | None:
             "age": int(float(snapshot["age"])),
             "height_cm": int(float(snapshot["height_cm"])),
             "weight_kg": weight,
-            "goal": str(snapshot["goal"]),
+            "goal": goal,
             "activity_coefficient": float(snapshot["activity_coefficient"]),
         }
     except (TypeError, ValueError):
         return None
     if needs_pace:
-        body["pace"] = str(snapshot["pace"])
+        body["pace"] = pace
     return body
 
 

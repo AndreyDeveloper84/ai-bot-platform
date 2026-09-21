@@ -101,6 +101,17 @@ class TestP4UpdateWeightCarriesPace:
         assert run.posted == []
         assert result.meta["reply_kind"] == "anketa_update_weight_need_anketa"
 
+    def test_the_named_goal_and_pace_go_not_the_ladders(self) -> None:
+        """Ступень пола BMR записала в снимок «поддержание» и «мягкий» — это
+        расчёт, а не выбор человека. «Обнови вес» шлёт НАЗВАННЫЕ цель и темп."""
+        snapshot = {**_SNAPSHOT, "goal": "maintain", "pace": "gentle"}
+        profile = replace(_calculated(snapshot=snapshot), goal="lose", goal_pace="moderate")
+        run = _WeightRun(profile=profile)
+        run.turn("мой вес 65")
+        assert len(run.posted) == 1
+        assert run.posted[0]["data"]["goal"] == "lose"
+        assert run.posted[0]["data"]["pace"] == "moderate"
+
     def test_maintain_snapshot_needs_no_pace(self) -> None:
         run = _WeightRun(profile=_calculated(snapshot=dict(_SNAPSHOT)))
         run.turn("мой вес 65")
