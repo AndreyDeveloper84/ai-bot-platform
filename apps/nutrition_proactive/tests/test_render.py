@@ -99,9 +99,27 @@ class TestReportIsSubstantive:
             "Калорий вышло на 400 ккал больше ориентира из профиля — цель в профиле «снизить вес»."
         )
 
-    def test_a_day_within_the_bands_is_acknowledged(self) -> None:
+    def test_a_day_within_the_bands_gets_numbers_not_a_verdict(self) -> None:
+        # DRF-2215 (T-2, безопасная форма): «день уложился» — оценка дня, её
+        # не говорим вообще; остаётся арифметика «осталось N».
         remark = render.goal_remark(summary(), water(), profile())
-        assert remark == "День уложился в ориентир из твоего профиля."
+        assert remark == "До ориентира по калориям осталось 400 ккал."
+
+    @pytest.mark.parametrize("total", [1330.0, 1500.0, 1899.0, 1900.0, 2000.0, 2090.0])
+    def test_no_remark_ever_judges_the_day(self, total: float) -> None:
+        """DRF-2215: сетка от 70 % до перебора — ни одной реплики-вердикта."""
+        remark = render.goal_remark(
+            summary(calories_total=total), water(), profile(goal="maintain")
+        )
+        assert "уложил" not in remark.lower()
+
+    def test_a_day_at_or_over_the_target_without_overshoot_is_silent(self) -> None:
+        """Цель «удержать», съедено ровно ориентир — сказать нечего: ни
+        «осталось», ни «перебор», ни «уложился»."""
+        remark = render.goal_remark(
+            summary(calories_total=1950.0), water(), profile(goal="maintain")
+        )
+        assert remark == ""
 
     def test_at_most_one_remark_ever(self) -> None:
         """Protein short AND water short AND over calories — still one line."""
