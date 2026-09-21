@@ -94,6 +94,16 @@ class TestC1Client:
                 client.get_tenant_kind(tenant_id=TENANT_ID, timeout_s=1.5, feeds_circuit=False)
         record.assert_not_called()
 
+    def test_by_default_a_timeout_does_feed_the_breaker(self) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise httpx.ReadTimeout("slow", request=request)
+
+        client = _client_with(handler)
+        with patch.object(client._circuit, "record_failure") as record:
+            with pytest.raises(bc.BookingUnavailableError):
+                client.get_tenant_kind(tenant_id=TENANT_ID, timeout_s=1.5)
+        record.assert_called_once()
+
     def test_the_per_call_timeout_reaches_the_request(self) -> None:
         seen: list[dict] = []
 
@@ -163,6 +173,12 @@ class TestS1Service:
         with patch.object(wk, "get_ayla_booking_client", return_value=fake):
             assert wk.workspace_kind(TENANT_ID) is None
 
+    def test_a_code_error_is_null_and_does_not_break_me(self, configured) -> None:
+        broken = _FakeClient(exc=TypeError("signature drift"))
+        with patch.object(wk, "get_ayla_booking_client", return_value=broken):
+            assert wk.workspace_kind(TENANT_ID) is None
+        assert len(broken.calls) == 1
+
     def test_without_a_catalog_there_is_no_call(self, settings) -> None:
         settings.AYLA_BASE_URL = ""
         fake = _FakeClient("solo")
@@ -184,7 +200,7 @@ class TestM1Me:
     def test_case_a_one_person_salon_kind(
         self,
         client: Client,
-        tenant: Tenant,
+        tenant: Tenant,  # noqa: F811
         bot_user: BotUser,  # noqa: F811
     ) -> None:
         TenantStaff.all_tenants.create(
@@ -200,7 +216,7 @@ class TestM1Me:
     def test_case_b_two_people_solo_kind(
         self,
         client: Client,
-        tenant: Tenant,
+        tenant: Tenant,  # noqa: F811
         bot_user: BotUser,  # noqa: F811
     ) -> None:
         other = BotUser.all_tenants.create(
@@ -215,11 +231,29 @@ class TestM1Me:
         assert data["is_solo_provider"] is False
         assert data["workspace_kind"] == "solo"
 
-    def test_unknown_is_null(self, client: Client, bot_user: BotUser) -> None:  # noqa: F811
-        with patch.object(wk, "workspace_kind", return_value=None):
+    def test_staff_with_an_unknown_kind_gets_null(
+        self,
+        client: Client,
+        tenant: Tenant,  # noqa: F811
+        bot_user: BotUser,  # noqa: F811
+    ) -> None:
+        _make_master(tenant, bot_user)
+        with patch.object(wk, "workspace_kind", return_value=None) as read:
             data = _me(client, bot_user)
+        read.assert_called_once_with(tenant.id)
         assert "workspace_kind" in data
         assert data["workspace_kind"] is None
+
+    def test_a_customer_gets_null_without_a_catalog_call(
+        self,
+        client: Client,
+        bot_user: BotUser,  # noqa: F811
+    ) -> None:
+        with patch.object(wk, "workspace_kind", return_value="solo") as read:
+            data = _me(client, bot_user)
+        assert data["is_customer"] is True
+        assert data["workspace_kind"] is None
+        read.assert_not_called()
 
 
 # ─── готовность онбординга ───────────────────────────────────────────────────
@@ -268,10 +302,11 @@ class TestR1Readiness:
         assert r.ready is True
 
     @pytest.mark.parametrize("kind", ["solo", None])
-    def test_solo_and_unknown_are_as_before(self, master, kind) -> None:
-        states = _states(_readiness(master, kind))
+    def test_solo_and_unknown_are_as_before(self, master, kind, settings) -> None:
+        settings.BOOKING_VIA_AYLA_REST = False
+        r = _readiness(master, kind)
+        states = _states(r)
         assert states["services"][0] == "missing"
         assert states["location"] == ("unavailable", "capability_not_built")
-        r = _readiness(master, kind)
         assert "location:unavailable" in r.blocking
         assert "services:missing" in r.blocking

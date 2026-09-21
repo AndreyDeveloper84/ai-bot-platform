@@ -28,7 +28,7 @@ from typing import Any, Literal
 from django.conf import settings
 from django.core.cache import cache
 
-from apps.integrations.ayla.booking_client import get_ayla_booking_client
+from apps.integrations.ayla.booking_client import BookingAPIError, get_ayla_booking_client
 
 logger = logging.getLogger(__name__)
 
@@ -70,8 +70,15 @@ def workspace_kind(tenant_id: Any) -> WorkspaceKind | None:
             timeout_s=WORKSPACE_KIND_TIMEOUT_S,
             feeds_circuit=False,
         )
-    except Exception as exc:  # noqa: BLE001 — любой отказ: «не знаю», как сейчас
-        logger.warning("identity.workspace_kind.unavailable err=%s", type(exc).__name__)
+    except BookingAPIError as exc:
+        # Отказ каталога (сеть / breaker / 5xx / 4xx, в т.ч. 403 от чужого
+        # токена) — «не знаю», как сейчас. Текст — код ответа, без людей.
+        logger.warning(
+            "identity.workspace_kind.unavailable err=%s detail=%s", type(exc).__name__, exc
+        )
+        return None
+    except Exception:  # noqa: BLE001 — ошибка кода: громко в журнал, но /me не роняем
+        logger.exception("identity.workspace_kind.bug")
         return None
 
     if kind not in WORKSPACE_KINDS:
