@@ -150,7 +150,9 @@ class TestNoConsentNoDiaryRead:
     def test_a_consent_read_that_raises_reads_as_no_consent(
         self, client: Client, bot_user: BotUser, nutrition, goals
     ):
-        with patch("apps.consent.services.has_global_consent", side_effect=RuntimeError("down")):
+        # DRF-2230: Главная читает согласие по человеку (``has_person_consent``) —
+        # сбой подменяется там, где чтение теперь живёт, иначе клетка пустая.
+        with patch("apps.consent.services.has_person_consent", side_effect=RuntimeError("down")):
             body = _get(client, bot_user).json()
 
         assert body["consent_required"] is True

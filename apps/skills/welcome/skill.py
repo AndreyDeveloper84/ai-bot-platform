@@ -664,6 +664,15 @@ class WelcomeSkill:
         # и накрыл бы возврат в поток полным первым приветствием.
         _stamp_welcomed_at(context.bot_user)
         action_data: dict | None = None
+        reply_text = CONSENT_RECOVERY_RETURN_TEXTS[origin]
+        if origin == "miniapp":
+            # DRF-2230 (скрин владельца 21.09): «возвращайся в приложение» без
+            # кнопки оставлял человека в чате без пути дальше.
+            button = _miniapp_return_button()
+            if button is not None:
+                action_data = {"buttons": [button], "button_columns": 1}
+            else:
+                reply_text = f"{reply_text} {MINIAPP_RETURN_HINT}"
         if origin == "target":
             # DRF-2138: возврат — кнопкой, не инструкцией «напиши фразу»:
             # тап структурен на обоих путях, фраза на глобальном — нет.
@@ -676,7 +685,7 @@ class WelcomeSkill:
                 "buttons": [{"label": MANUAL_TARGET_BUTTON, "callback": MANUAL_TARGET_CALLBACK}]
             }
         return SkillResult(
-            reply_text=CONSENT_RECOVERY_RETURN_TEXTS[origin],
+            reply_text=reply_text,
             action_type="welcome_consent_recovery_granted",
             action_data=action_data,
             meta={
@@ -1040,6 +1049,22 @@ CONSENT_RECOVERY_RETURN_TEXTS: dict[str, str] = {
     # DRF-2230 — ЧЕРНОВИК, к владельцу списком в теле PR.
     "miniapp": "Готово, согласие есть. Возвращайся в приложение — дневник открыт.",
 }
+
+
+#: DRF-2230 — ЧЕРНОВИКИ к владельцу: подпись кнопки возврата и подсказка там,
+#: где кнопку построить не из чего (Mini App в настройках бота не задан).
+MINIAPP_RETURN_LABEL = "Открыть приложение"
+MINIAPP_RETURN_HINT = "Открой его тем же путём, каким открывал в прошлый раз."
+
+
+def _miniapp_return_button() -> dict[str, str] | None:
+    """``open_app`` на Главную (``open_home``) → ссылка → ничего (лестница DRF-1361)."""
+    web_app, miniapp_url, _ = miniapp_target()
+    if web_app:
+        return {"label": MINIAPP_RETURN_LABEL, "callback": "open_home", "web_app": web_app}
+    if miniapp_url:
+        return {"label": MINIAPP_RETURN_LABEL, "url": _miniapp_url(miniapp_url, "open_home")}
+    return None
 
 
 def consent_offer_buttons(origin: str) -> list[dict[str, str]]:

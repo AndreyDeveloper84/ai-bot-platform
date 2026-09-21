@@ -197,7 +197,9 @@ class TestGrantWritesTheJournalAndReturns:
         # Сверка константы с самой собой: доказывает ПРОВОДКУ origin → текст, и
         # это и есть предмет узла. Про сам текст он не говорит ничего — тексты
         # черновики W3; читать его как покрытие содержания нельзя.
-        assert reply.text == CONSENT_RECOVERY_RETURN_TEXTS[origin]
+        # DRF-2230: у ``miniapp`` без Mini App в настройках к тексту добавляется
+        # подсказка, как вернуться, — поэтому начало, а не равенство.
+        assert reply.text.startswith(CONSENT_RECOVERY_RETURN_TEXTS[origin])
 
     def test_every_new_tap_has_a_history_label(self) -> None:
         from apps.skills.welcome.skill import welcome_tap_labels

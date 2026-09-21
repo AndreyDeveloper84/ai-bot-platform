@@ -723,6 +723,15 @@ export function requestDiaryConsentPrompt(): Promise<ConsentPromptResult> {
   return request<ConsentPromptResult>("/wellness/consent-prompt", { method: "POST" });
 }
 
+/**
+ * DRF-2230 (живой проход владельца 21.09) — ЧЕРНОВИКИ: повтор в окне дубля.
+ * Приглашение уже лежит в чате; закрыть приложение молча значило «провалиться
+ * в чат», не понимая, что там ждёт. Выход в чат — по явной кнопке.
+ */
+export const CONSENT_PROMPT_ALREADY_SENT_TEXT =
+  "Приглашение уже в чате с Ayla — открой его и нажми «Дать согласие».";
+export const CONSENT_PROMPT_OPEN_CHAT_CTA = "Открыть чат";
+
 /** DRF-2230 — ЧЕРНОВИК: приглашение в чат не ушло; приложение не закрывается. */
 export const CONSENT_PROMPT_FAILED_TEXT =
   "Не получилось отправить приглашение в чат. Попробуй ещё раз.";

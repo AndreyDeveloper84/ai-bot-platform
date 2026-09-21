@@ -151,18 +151,17 @@ def _person_shells(bot_user: "BotUser") -> list["BotUser"]:
     Пустой ``channel_user_id`` идентичностью не является: совпадение по
     нему собрало бы посторонних людей. Тогда — только сама строка.
     """
-    from apps.identity.models import BotUser as BotUserModel
-
-    channel = (bot_user.channel or "").strip()
-    channel_user_id = (bot_user.channel_user_id or "").strip()
-    if not channel or not channel_user_id:
+    # DRF-2230 — определение одно (``services.person_channel_shells``): им же
+    # читается согласие по человеку. Предупреждение про пустой id — здесь, на
+    # записи: ради него тумблер и сужается до строки.
+    if not (bot_user.channel or "").strip() or not (bot_user.channel_user_id or "").strip():
         logger.warning(
             "consent.customer.no_channel_identity bot_user=%s — narrowing to the row",
             bot_user.id,
         )
-        return [bot_user]
-    shells = list(BotUserModel.all_tenants.filter(channel=channel, channel_user_id=channel_user_id))
-    return shells or [bot_user]
+    from apps.consent.services import person_channel_shells
+
+    return person_channel_shells(bot_user)
 
 
 def _active_states(shells: list["BotUser"]) -> dict[str, dict[str, Any]]:

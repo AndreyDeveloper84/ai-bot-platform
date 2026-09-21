@@ -4098,19 +4098,29 @@ def customer_wellness_consent_prompt(request: HttpRequest) -> HttpResponse:
     if not cache.add(key, 1, CONSENT_PROMPT_DEDUP_S):
         return JsonResponse({"sent": False, "reason": "recently_sent"})
 
+    from apps.channels.bot_context import bot_scope
+    from apps.channels.bot_registry import effective_registry, resolve_by_slug
     from apps.channels.max import outbound
     from apps.skills.welcome.skill import consent_offer_buttons
 
+    # Приглашение — от того бота, из которого открыт Mini App: initData
+    # проверяется по всем ботам реестра, и подошедший записан в ``bot_slug``.
+    # Без него — прежний токен по умолчанию (однобот).
+    verified = getattr(request, "verified_init_data", None)
+    slug = getattr(verified, "bot_slug", "") or ""
+    sender = resolve_by_slug(slug, effective_registry()) if slug else None
+
     try:
-        outbound.send_message(
-            user_id=str(bot_user.channel_user_id),
-            text=CONSENT_PROMPT_TEXT,
-            attachments=[
-                outbound.make_inline_keyboard_attachment(
-                    consent_offer_buttons("miniapp"), columns=1
-                )
-            ],
-        )
+        with bot_scope(sender):
+            outbound.send_message(
+                user_id=str(bot_user.channel_user_id),
+                text=CONSENT_PROMPT_TEXT,
+                attachments=[
+                    outbound.make_inline_keyboard_attachment(
+                        consent_offer_buttons("miniapp"), columns=1
+                    )
+                ],
+            )
     except outbound.MaxAPIError as exc:
         # Окно дубля не занимает то, что не дошло: повтор обязан отправить.
         cache.delete(key)

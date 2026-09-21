@@ -22,6 +22,8 @@ import pytest
 from django.test import Client
 from django.urls import reverse
 
+from unittest.mock import AsyncMock, Mock, patch
+
 from apps.consent.models import ConsentRecord
 from apps.identity.models import BotUser
 from apps.miniapp_api.tests.test_wellness_today import _init_data_header
@@ -46,6 +48,30 @@ def miniapp_tenant(settings) -> Tenant:
     tenant = Tenant.objects.create(slug="formula-2230b", name="Формула 2230b")
     settings.MAX_BOT_TENANT_SLUG = "formula-2230b"
     return tenant
+
+
+@pytest.fixture(autouse=True)
+def _ayla_reads():
+    """С согласием Главная идёт читать дневник в Ayla — сеть подменена, как в DRF-1927."""
+    from apps.miniapp_api.tests.test_wellness_today import (
+        _FakeProfile,
+        _FakeSummary,
+        _FakeWater,
+        _goal_doc,
+    )
+
+    client = Mock()
+    client.daily_summary = AsyncMock(return_value=_FakeSummary(entries=[]))
+    client.get_water_today = AsyncMock(return_value=_FakeWater())
+    client.get_profile = AsyncMock(return_value=_FakeProfile())
+    with (
+        patch("apps.integrations.ayla.get_nutrition_client", return_value=client),
+        patch(
+            "apps.integrations.ayla.goals_client.fetch_decision_context",
+            return_value=_goal_doc(goal_text="Высыпаться"),
+        ),
+    ):
+        yield client
 
 
 def _grant_in_chat() -> BotUser:
@@ -86,8 +112,13 @@ def test_consent_given_in_chat_clears_the_home_block(client, miniapp_tenant) -> 
     ).exists()
 
     # Это тот же человек, но ДРУГАЯ строка: Mini App резолвит свою.
-    miniapp_row = BotUser.all_tenants.get(tenant=miniapp_tenant, channel="max", channel_user_id=HUMAN)
+    miniapp_row = BotUser.all_tenants.get(
+        tenant=miniapp_tenant, channel="max", channel_user_id=HUMAN
+    )
     assert miniapp_row.pk != chat_row.pk
 
     # Главная после согласия в чате не должна требовать согласия снова.
-    assert "consent_required" not in _home(client), "блок висит после согласия в чате"
+    after = _home(client)
+    # Положительная пара на том же ответе: Главная правда прочла дневник.
+    assert "entries" in after, after
+    assert "consent_required" not in after, "блок висит после согласия в чате"
