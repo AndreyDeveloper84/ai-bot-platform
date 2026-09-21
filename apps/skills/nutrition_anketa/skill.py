@@ -705,9 +705,7 @@ class NutritionAnketaSkill:
         fsm = AnketaFSM()
         step_result = fsm.enter()
         self._save_state(context, fsm)
-        result = self._render_step(
-            fsm.current_step, step_result.prompt, context=context, fsm=fsm
-        )
+        result = self._render_step(fsm.current_step, step_result.prompt, context=context, fsm=fsm)
         # Каталог (#525) ручной ориентир анкетой не заменяет — сказать это
         # ДО вопросов, а не после: человек со словами врача должен знать,
         # что анкета не отнимет его число. Проба чтения падает в «нет» —

@@ -78,7 +78,10 @@ class TestP2NoPendingNoInvention:
     def test_without_a_pending_proposal_the_card_is_the_acting_one(self) -> None:
         confirmed = replace(
             _calculated_with_pending(65),
-            raw={"norms": {"daily_kcal": 1800}, "targets_provenance": {"source": "ayla_calculated"}},
+            raw={
+                "norms": {"daily_kcal": 1800},
+                "targets_provenance": {"source": "ayla_calculated"},
+            },
         )
         run = _Run(profile=_calculated(), upsert=confirmed)
         card = run.turn("мой вес 65")
