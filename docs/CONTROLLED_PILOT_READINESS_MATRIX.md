@@ -167,7 +167,7 @@ Product Brain, 5–10 человек. Не demo. Пилот не обязан п
 7. **Recommendation alternatives** — отсутствуют.
 8. **Goal-фильтр выдачи** — флагом `GOAL_RESOLUTION_ENABLED` (сейчас **True**).
 9. **Discovery clarify** — порогом `DISCOVERY_CLARIFY_MIN_TIER` (ниже 2 отключается; сейчас 4).
-10. **AI-drafts автотриггер** — `AI_DRAFTS_AUTO_TRIGGER_ENABLED=False`.
+10. **AI-drafts автотриггер** — поверхность снята в DRF-1528 вместе с перепиской мастер↔клиент; флага `AI_DRAFTS_AUTO_TRIGGER_ENABLED` больше нет.
 11. **Shadow-оркестратор** — `ORCHESTRATOR_SHADOW_ENABLED=False`, sample 0.0.
 
 ---

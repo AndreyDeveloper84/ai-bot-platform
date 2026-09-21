@@ -73,26 +73,6 @@ from apps.integrations.ayla.booking_client import (
 )
 from apps.integrations.ayla.salon_client import SalonAPIError
 from apps.integrations.ayla.user_proxy import external_user_id_for
-from apps.conversations.models import AiDraft
-from apps.master_api.services.conversations import (
-    ConversationsListError,
-    DEFAULT_LIMIT as CONVERSATIONS_DEFAULT_LIMIT,
-    MAX_LIMIT as CONVERSATIONS_MAX_LIMIT,
-    list_master_conversations,
-)
-from apps.master_api.services.ai_draft_limits import check_and_consume_rate_limit
-from apps.master_api.services.ai_drafts import (
-    generate_draft_for_conversation,
-    release_draft_to_ai,
-    send_draft_as_master,
-)
-from apps.master_api.services.conversation_detail import (
-    ConversationDetailError,
-    get_conversation_detail,
-    mark_conversation_read,
-    promote_to_human_locked,
-    send_master_message,
-)
 from apps.master_api.services.catalog import list_master_services
 from apps.master_api.services.customers import list_master_customers
 from apps.master_api.services.onboarding_readiness import build_readiness, identity_facts
@@ -151,35 +131,6 @@ logger = logging.getLogger(__name__)
 
 def _error(slug: str, detail: str, status: int) -> JsonResponse:
     return JsonResponse({"error": slug, "detail": detail}, status=status)
-
-
-def _draft_error_response(exc: Any) -> JsonResponse:
-    """Map a :class:`DraftActionError` to a JSON response.
-
-    Mirrors the inline mapping in
-    :func:`conversation_draft_generate` for the ``generate_in_flight``
-    slug (Issue #550). Generalised here so the send/release endpoints
-    surface ``conversation_busy`` (Issue #551 — lock symmetry) with the
-    same shape: JSON body carries ``retry_after_seconds`` AND the
-    response has a ``Retry-After`` header for clients that read it.
-
-    Slugs handled with Retry-After:
-      * ``generate_in_flight`` — Issue #550 (generate path)
-      * ``conversation_busy`` — Issue #551 (send / release path)
-      * ``cost_cap_exceeded`` — fixed 1h hint
-    """
-
-    retry_after = exc.extra.get("retry_after_seconds") if exc.extra else None
-    body: dict[str, Any] = {"error": exc.slug, "detail": exc.detail}
-    if isinstance(retry_after, int) and retry_after > 0:
-        body["retry_after_seconds"] = retry_after
-    resp = JsonResponse(body, status=exc.status)
-    if exc.slug in ("generate_in_flight", "conversation_busy"):
-        secs = retry_after if isinstance(retry_after, int) and retry_after > 0 else 3
-        resp["Retry-After"] = str(secs)
-    elif exc.slug == "cost_cap_exceeded":
-        resp["Retry-After"] = "3600"
-    return resp
 
 
 def _parse_json_body(request: HttpRequest) -> dict[str, Any] | JsonResponse:
@@ -2390,385 +2341,6 @@ def availability_request(request: HttpRequest) -> HttpResponse:
 
 @require_http_methods(["GET"])
 @require_master_init_data
-def conversations_list(request: HttpRequest) -> HttpResponse:
-    """M5 master conversations list (master-mobile §M5, PR Tier1.3).
-
-    Spec quote (§M5 line 552):
-
-        «Screen M5 — Master conversation list (their conversations only)»
-
-    Spec quote (§M5 lines 608-614):
-
-        «Master's card is **stripped down** vs admin's: ❌ No LTV /
-        financial signal … ✅ Customer first name only … ✅ Last name
-        as 1-letter initial»
-
-    Query params (all optional):
-      filter: "active" (default) | "all" | "resolved"
-      search: substring on customer first name (case-insensitive)
-      cursor: opaque base64-JSON signed token
-      limit:  default 25, max 50
-
-    Returns 200 with::
-
-        {
-          "items": [...],
-          "section_counts": {...},
-          "next_cursor": null | "<token>"
-        }
-
-    Read-only. No audit row, no event emit. Cross-master + cross-tenant
-    isolation enforced by :func:`require_master_init_data` plus the
-    explicit ``master_id`` + ``tenant_id`` filters in the service layer.
-    """
-
-    master: CatalogMaster = request.master  # type: ignore[attr-defined]
-
-    raw_filter = (request.GET.get("filter") or "active").strip().lower()
-    raw_search = (request.GET.get("search") or "").strip()
-    raw_cursor = (request.GET.get("cursor") or "").strip() or None
-    raw_limit = (request.GET.get("limit") or "").strip()
-    if raw_limit:
-        try:
-            limit = int(raw_limit)
-        except ValueError:
-            return _error("bad_request", "'limit' must be an integer", 400)
-    else:
-        limit = CONVERSATIONS_DEFAULT_LIMIT
-    if limit < 1 or limit > CONVERSATIONS_MAX_LIMIT:
-        return _error(
-            "bad_request",
-            f"'limit' must be in 1..{CONVERSATIONS_MAX_LIMIT}",
-            400,
-        )
-
-    try:
-        response = list_master_conversations(
-            master,
-            filter=raw_filter,  # type: ignore[arg-type]
-            search=raw_search,
-            cursor=raw_cursor,
-            limit=limit,
-            now=dj_timezone.now(),
-        )
-    except ConversationsListError as exc:
-        return _error(exc.slug, exc.detail, 400)
-
-    return JsonResponse(response.to_dict())
-
-
-# --- M6 conversation detail (PR M6.1) -------------------------------------
-
-
-@require_http_methods(["GET"])
-@require_master_init_data
-def conversation_detail(request: HttpRequest, conversation_id: str) -> HttpResponse:
-    """M6 master conversation detail (master-mobile §M6).
-
-    Spec quote (§M6 lines 706-712):
-
-        «When master taps «Отправить от себя» on a draft, the message
-        renders to the customer as «Помощник: …». Same single assistant
-        identity. Master's authorship is recorded in attribution
-        metadata (``actor_type=master``, ``composed_by=master_id``)»
-
-    Cross-master + cross-tenant isolation enforced by
-    :func:`apps.master_api.services.conversation_detail._verify_master_involved`.
-    """
-
-    master: CatalogMaster = request.master  # type: ignore[attr-defined]
-    try:
-        response = get_conversation_detail(master, conversation_id)
-    except ConversationDetailError as exc:
-        return _error(exc.slug, exc.detail, exc.status)
-    return JsonResponse(response.to_dict())
-
-
-@csrf_exempt
-@require_http_methods(["POST"])
-@require_master_init_data
-def conversation_send_message(request: HttpRequest, conversation_id: str) -> HttpResponse:
-    """M6 master compose endpoint (§M6 lines 668, 674).
-
-    Stamps the message with attribution metadata
-    ``{"actor_type": "master", "composed_by": <master_id>}`` so audit /
-    admin views can distinguish bot-authored from master-authored text.
-
-    Rejects HUMAN_LOCKED with 403 ``tier_locked``.
-    """
-
-    master: CatalogMaster = request.master  # type: ignore[attr-defined]
-    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
-
-    body = _parse_json_body(request)
-    if isinstance(body, JsonResponse):
-        return body
-
-    content = body.get("content") or ""
-    try:
-        response = send_master_message(
-            master,
-            conversation_id,
-            content=content,
-            actor_bot_user=bot_user,
-        )
-    except ConversationDetailError as exc:
-        return _error(exc.slug, exc.detail, exc.status)
-    return JsonResponse(response.to_dict(), status=201)
-
-
-@csrf_exempt
-@require_http_methods(["POST"])
-@require_master_init_data
-def conversation_mark_read(request: HttpRequest, conversation_id: str) -> HttpResponse:
-    """M6 mark-read endpoint — debounced (one audit row per call)."""
-
-    master: CatalogMaster = request.master  # type: ignore[attr-defined]
-    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
-
-    try:
-        marked = mark_conversation_read(
-            master,
-            conversation_id,
-            actor_bot_user=bot_user,
-        )
-    except ConversationDetailError as exc:
-        return _error(exc.slug, exc.detail, exc.status)
-    return JsonResponse({"marked_count": marked})
-
-
-@csrf_exempt
-@require_http_methods(["POST"])
-@require_master_init_data
-def conversation_promote(request: HttpRequest, conversation_id: str) -> HttpResponse:
-    """M6 safety promote — escalate to HUMAN_LOCKED (§M6 line 765).
-
-    Returns 409 ``already_locked`` if the conversation is already
-    locked; 400 on missing/invalid reason_class.
-    """
-
-    master: CatalogMaster = request.master  # type: ignore[attr-defined]
-    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
-
-    body = _parse_json_body(request)
-    if isinstance(body, JsonResponse):
-        return body
-
-    reason_class = body.get("reason_class") or ""
-    reason_text = body.get("reason_text") or ""
-    try:
-        response = promote_to_human_locked(
-            master,
-            conversation_id,
-            reason_class=reason_class,
-            reason_text=reason_text,
-            actor_bot_user=bot_user,
-        )
-    except ConversationDetailError as exc:
-        return _error(exc.slug, exc.detail, exc.status)
-    return JsonResponse(response.to_dict())
-
-
-# --- M6 AI drafts (Bundle B / item 4 backend) -----------------------------
-
-
-@csrf_exempt
-@require_http_methods(["POST"])
-@require_master_init_data
-def conversation_draft_generate(request: HttpRequest, conversation_id: str) -> HttpResponse:
-    """Generate a fresh AI draft for the master on this conversation.
-
-    Spec quote (master-mobile §M6 lines 662-671):
-
-        «✨ Предложенный ответ ... [Отправить от себя] [Отредактировать]
-        [Пусть помощник ответит]»
-
-    Body: empty (any JSON dict ignored — keeps the endpoint a pure
-    «generate now» trigger).
-
-    Status codes:
-      200  — fresh draft (or idempotent re-serve within 60s window)
-      400  — ``conversation_locked``: HUMAN_LOCKED tier
-      404  — master not involved / conversation not found
-      429  — ``rate_limit_exceeded`` (per-master 10/min, 100/day) /
-             ``cost_cap_exceeded`` (per-master $X/day cumulative) /
-             ``generate_in_flight`` (another concurrent generate holds
-             the Conversation row lock; issue #550). All three include
-             a ``Retry-After`` header.
-      503  — ``llm_unavailable``: provider raised; refer to logs
-    """
-
-    master: CatalogMaster = request.master  # type: ignore[attr-defined]
-    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
-
-    # Blocker #2: per-master rate limit at the view layer — fail fast
-    # BEFORE any service work so a rogue loop can't burn budget.
-    rate = check_and_consume_rate_limit(master.id)
-    if not rate.allowed:
-        resp = _error(rate.slug, rate.detail, 429)
-        if rate.retry_after_seconds > 0:
-            resp["Retry-After"] = str(rate.retry_after_seconds)
-        return resp
-
-    try:
-        response = generate_draft_for_conversation(
-            conversation_id=conversation_id,
-            master=master,
-            actor_bot_user=bot_user,
-        )
-    except ConversationDetailError as exc:
-        # Issue #550 + #551: ``generate_in_flight`` /
-        # ``conversation_busy`` carry ``extra={"retry_after_seconds": 3}``
-        # so the frontend gets a concrete hint how long «Помощник уже
-        # думает…» should hold before re-enabling the tap. The shared
-        # :func:`_draft_error_response` helper surfaces the field in
-        # the JSON body AND sets the ``Retry-After`` header for clients
-        # that don't read JSON shims.
-        return _draft_error_response(exc)
-    return JsonResponse(response.to_dict())
-
-
-def _log_auto_draft_acted(draft_id: str, action_kind: str) -> None:
-    """Emit ``master_api.tasks.auto_draft.acted`` INFO slug (issue #707).
-
-    Slug prefix ``master_api.tasks.auto_draft.`` is the **logical
-    operational namespace** for the M6 auto-draft pipeline — it
-    intentionally matches PR #700's task-side prefix
-    (``apps/master_api/tasks.py``) so log triage / Grafana dashboards
-    (runbook ``m6-auto-draft-suppress-tuning.md`` Panel 4) can scrape a
-    single namespace regardless of whether the event came from the
-    Celery task or this HTTP view. We are NOT in ``tasks.py`` here, but
-    the namespace is by operational concern, not by code module.
-
-    Payload is PII-safe: UUIDs + enum + floats only. No customer
-    content — that's the contract that classifies this PR as NON-§H.3.
-    """
-
-    draft = AiDraft.all_tenants.filter(pk=draft_id).first()
-    if draft is None:
-        # Defence-in-depth: service path guaranteed the row existed at
-        # 201-return time, but a parallel hard-delete window is
-        # theoretically possible. Skip the log rather than 500.
-        return
-    now = dj_timezone.now()
-    draft_age_seconds = (now - draft.created_at).total_seconds()
-    trigger_id = draft.trigger_message_id
-    if trigger_id is None:
-        trigger_age_seconds = -1.0
-    else:
-        # Avoid triggering an extra Message fetch when we just need
-        # created_at. trigger_message FK is auto-fetched lazily; the
-        # `.trigger_message` access loads the related row.
-        trigger_msg = draft.trigger_message
-        trigger_age_seconds = (
-            (now - trigger_msg.created_at).total_seconds() if trigger_msg is not None else -1.0
-        )
-    logger.info(
-        "master_api.tasks.auto_draft.acted "
-        "conv=%s draft=%s action=%s "
-        "draft_age_seconds=%.1f trigger_age_seconds=%.1f",
-        draft.conversation_id,
-        draft.id,
-        action_kind,
-        draft_age_seconds,
-        trigger_age_seconds,
-    )
-
-
-@csrf_exempt
-@require_http_methods(["POST"])
-@require_master_init_data
-def conversation_draft_send_as_me(
-    request: HttpRequest, conversation_id: str, draft_id: str
-) -> HttpResponse:
-    """Send the draft text (or override) as a master-attributed message.
-
-    Spec quote (master-mobile §M6 lines 706-712):
-
-        «When master taps «Отправить от себя» on a draft, the message
-        renders to the customer as «Помощник: …». Same single assistant
-        identity. Master's authorship is recorded in attribution metadata
-        (``actor_type=master``, ``composed_by=master_id``)»
-
-    Body (optional):
-      ``{"override_content": "edited text"}`` — the «Отредактировать»
-      path. When present, replaces the draft's LLM text with the
-      master's edited version. ≤ 2000 chars.
-
-    Status codes:
-      201  — message created; draft marked SENT_AS_MASTER
-      400  — ``draft_already_acted`` (non-ACTIVE) / ``bad_request``
-             (override too long or empty)
-      403  — ``tier_locked``: HUMAN_LOCKED
-      404  — master not involved / draft not found
-    """
-
-    master: CatalogMaster = request.master  # type: ignore[attr-defined]
-    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
-
-    body = _parse_json_body(request)
-    if isinstance(body, JsonResponse):
-        return body
-
-    override_content = body.get("override_content")
-    if override_content is not None and not isinstance(override_content, str):
-        return _error("bad_request", "override_content must be a string", 400)
-
-    try:
-        response = send_draft_as_master(
-            conversation_id=conversation_id,
-            draft_id=draft_id,
-            master=master,
-            actor_bot_user=bot_user,
-            override_content=override_content,
-        )
-    except ConversationDetailError as exc:
-        return _draft_error_response(exc)
-    # Issue #707: ground-truth log for Panel 4 (tap-to-decide latency).
-    _log_auto_draft_acted(draft_id, "sent_as_master")
-    return JsonResponse(response.to_dict(), status=201)
-
-
-@csrf_exempt
-@require_http_methods(["POST"])
-@require_master_init_data
-def conversation_draft_release_to_ai(
-    request: HttpRequest, conversation_id: str, draft_id: str
-) -> HttpResponse:
-    """Let the AI auto-send the draft (no master attribution).
-
-    Spec quote (master-mobile §M6 line 670):
-
-        «[Пусть помощник ответит]  Releases to AI auto-send»
-
-    Body: empty.
-
-    Status codes:
-      201  — message created; draft marked RELEASED_TO_AI
-      400  — ``draft_already_acted``
-      403  — ``tier_locked``
-      404  — master not involved / draft not found
-    """
-
-    master: CatalogMaster = request.master  # type: ignore[attr-defined]
-    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
-
-    try:
-        response = release_draft_to_ai(
-            conversation_id=conversation_id,
-            draft_id=draft_id,
-            master=master,
-            actor_bot_user=bot_user,
-        )
-    except ConversationDetailError as exc:
-        return _draft_error_response(exc)
-    # Issue #707: ground-truth log for Panel 4 (tap-to-decide latency).
-    _log_auto_draft_acted(draft_id, "released_to_ai")
-    return JsonResponse(response.to_dict(), status=201)
-
-
-@require_http_methods(["GET"])
-@require_master_init_data
 def availability_pending(request: HttpRequest) -> HttpResponse:
     """M3 list of master's own pending + recently-decided requests.
 
@@ -2784,6 +2356,40 @@ def availability_pending(request: HttpRequest) -> HttpResponse:
     master: CatalogMaster = request.master  # type: ignore[attr-defined]
     items = list_pending_requests(master, now=dj_timezone.now())
     return JsonResponse({"items": items})
+
+
+# --- DRF-1528: переписка мастер↔клиент снята ------------------------------
+
+
+@csrf_exempt
+def conversations_retired(request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
+    """Девять прежних ручек переписки отвечают 410 Gone.
+
+    Почему не 404: молчание неотличимо от опечатки в адресе, и следующий,
+    кто увидит его в логе, пойдёт искать маршрут. Почему не 500: он зовёт
+    повторить запрос, хотя повторять нечего — ручки больше нет.
+    Прецедент — ``apps.integrations.yookassa_retired`` (#732): 410 ради
+    громкости в логах и соответствия RFC 9110 §15.5.11.
+
+    Личность не разбирается: ручка снята для всех, и 401 вместо 410 только
+    отправил бы звонящего чинить не то.
+    """
+
+    logger.info(
+        "master_api.conversations.retired path=%s method=%s",
+        request.path,
+        request.method,
+    )
+    return JsonResponse(
+        {
+            "error": "master_client_chat_retired",
+            "detail": (
+                "Прямой переписки мастера с клиентом нет (OD-7). "
+                "Поверхность снята в DRF-1255, ручки — в DRF-1528."
+            ),
+        },
+        status=410,
+    )
 
 
 # --- M7 notification preferences (Bundle B / item 3) -----------------------

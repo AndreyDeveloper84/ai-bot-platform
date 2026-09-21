@@ -70,7 +70,9 @@ class TestMe:
         # право ложно; заявка о недоступности и ответ клиенту есть.
         assert data["permissions"]["can_edit_schedule"] is True
         assert data["permissions"]["can_edit_services"] is False
-        assert data["permissions"]["can_message_customers"] is True
+        # DRF-1528: маршрута ответа клиенту нет — право погасло само,
+        # ровно как обещал DRF-1805 («снять маршрут — флаг погаснет»).
+        assert data["permissions"]["can_message_customers"] is False
         # Services list populated from the M2M fixture.
         assert len(data["master"]["services"]) >= 1
 

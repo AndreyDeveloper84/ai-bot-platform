@@ -295,7 +295,7 @@ except Exception:  # noqa: BLE001 — a broken regex must not eat the turn
 | `PLAN_LITE` | **НЕТ.** `git grep -i "plan_lite\|plan-lite\|planlite"` по обоим репозиториям → 0. Ближайшее по смыслу — `wellness/services.py:70-103`, и там не флаг, а **захардкоженный fail-closed** (`GateDecision(allowed=False, reason_code="scope_not_approved")`) | `MISSING` / `DEGRADED` |
 | `NUTRITION_PROACTIVE` | **ЕСТЬ**, полноценно: `NUTRITION_PROACTIVE_ENABLED` + `NUTRITION_PROACTIVE_DRY_RUN` | `EXISTS` |
 | `PROACTIVE_HINTS` | **НЕТ как системного рубильника.** `proactive_hints` — это **согласие конкретного человека** (`apps/consent/customer.py:254`, ручка `POST /api/v1/customer/me/consents/proactive-hints/`), а не рычаг оператора. Выключить фичу для всех одной переменной нельзя | `MISSING` / `DEGRADED` |
-| «прочие необязательные AI-поверхности» | частично: `CONCIERGE_MEMORY_ENABLED`, `CONCIERGE_NUTRITION_CONTEXT_ENABLED`, `AI_DRAFTS_AUTO_TRIGGER_ENABLED`, `ORCHESTRATOR_SHADOW_ENABLED`, `INTENT_RESOLUTION_FROM_TOOL_CHOICE_ENABLED`. **Не покрыты рубильником:** каталожный AI-чат `/api/v1/ai/**` (флага нет вовсе), выдача MAX-бота `apps/marketplace/discovery.py`, tools консьержа `show_masters` / `start_booking` / `ask_clarification` | `PARTIAL` / `DEGRADED` |
+| «прочие необязательные AI-поверхности» | частично: `CONCIERGE_MEMORY_ENABLED`, `CONCIERGE_NUTRITION_CONTEXT_ENABLED`, `ORCHESTRATOR_SHADOW_ENABLED`, `INTENT_RESOLUTION_FROM_TOOL_CHOICE_ENABLED`. **Не покрыты рубильником:** каталожный AI-чат `/api/v1/ai/**` (флага нет вовсе), выдача MAX-бота `apps/marketplace/discovery.py`, tools консьержа `show_masters` / `start_booking` / `ask_clarification` | `PARTIAL` / `DEGRADED` |
 
 **Может ли какой-нибудь флаг превратить «safety выключен» в «небезопасный legacy-фолбэк»? — ДА, один. F19, класс `MISSING`+`CONTRADICTS_CANON` / `STOP`.**
 
@@ -341,7 +341,7 @@ OFF (:1504-1513)   строки нет в зеркале                        
 | `FOOD_SCANNER_MEMORY_ENABLED` | 1894 | **`true`** | `orchestrator/memory/food.py:229` | память сканера не читается | нет |
 | `CONCIERGE_NUTRITION_CONTEXT_ENABLED` | 1927 | `false` | `orchestrator/nutrition_context.py:154` | консьерж не видит картину питания | нет |
 | `CERTIFICATE_PAYMENT_ENABLED` | 920 | `false` | `skills/booking/tools.py:417,3194`, `prompts.py:152` | сертификаты не предлагаются | нет |
-| `AI_DRAFTS_AUTO_TRIGGER_ENABLED` | 668 | `false` | `master_api/tasks.py:226` | черновики ответов мастеру не генерируются | нет |
+| ~~`AI_DRAFTS_AUTO_TRIGGER_ENABLED`~~ | — | — | снят в DRF-1528 | поверхность (переписка мастер↔клиент) снята целиком, выключать нечего | — |
 | `ORCHESTRATOR_SHADOW_ENABLED` | 2331 | `false` | `orchestrator/shadow_turn.py:81` | теневой прогон выключен (side-effect-free) | нет |
 | `ORCHESTRATOR_SHADOW_SAMPLE_RATE` | 2344 | `0.0` | там же | — | — |
 | `INTENT_RESOLUTION_FROM_TOOL_CHOICE_ENABLED` | 2359 | `false` | `orchestrator/intent_resolution.py:259` | намерение не выводится из tool-choice | нет |
@@ -468,7 +468,7 @@ docker compose exec -T web python manage.py shell -c "from django.conf import se
 docker compose exec -T web python manage.py shell -c "from django.conf import settings; print('CONCIERGE_NUTRITION_CONTEXT_ENABLED=', settings.CONCIERGE_NUTRITION_CONTEXT_ENABLED)"
 docker compose exec -T web python manage.py shell -c "from django.conf import settings; print('FOOD_SCANNER_MEMORY_ENABLED=', settings.FOOD_SCANNER_MEMORY_ENABLED)"
 docker compose exec -T web python manage.py shell -c "from django.conf import settings; print('CERTIFICATE_PAYMENT_ENABLED=', settings.CERTIFICATE_PAYMENT_ENABLED)"
-docker compose exec -T web python manage.py shell -c "from django.conf import settings; print('AI_DRAFTS_AUTO_TRIGGER_ENABLED=', settings.AI_DRAFTS_AUTO_TRIGGER_ENABLED)"
+# (проверка AI_DRAFTS_AUTO_TRIGGER_ENABLED снята: DRF-1528 убрал и флаг, и поверхность)
 docker compose exec -T web python manage.py shell -c "from django.conf import settings; print('SKILL_CONFIDENCE_FLOOR_LIVE_ENABLED=', settings.SKILL_CONFIDENCE_FLOOR_LIVE_ENABLED)"
 docker compose exec -T web python manage.py shell -c "from django.conf import settings; print('LIVE_PATH_AI_METRIC_ENABLED=', settings.LIVE_PATH_AI_METRIC_ENABLED)"
 docker compose exec -T web python manage.py shell -c "from django.conf import settings; print('REPLAY_LIVE_CAPTURE_ENABLED=', settings.REPLAY_LIVE_CAPTURE_ENABLED)"

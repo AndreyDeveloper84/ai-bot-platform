@@ -262,23 +262,6 @@ def _iter_string_values(payload: object) -> list[str]:
     return out
 
 
-def _assert_excerpt_survived(body: object, *, where: str, witness: str) -> None:
-    """The redacted text must still be in the response.
-
-    Same rule as :func:`_assert_body_is_worth_sweeping`, applied to the
-    redaction tests: «the number is gone» proves nothing about redaction
-    if the *message* is gone too. Redaction that ate the whole excerpt —
-    or a fixture that stopped producing one — would clear every
-    assertion in this class.
-    """
-
-    assert any(witness in value for value in _iter_string_values(body)), (
-        f"{where}: the redacted message is not in the response at all "
-        f"({witness!r} is absent), so «no phone digits here» is vacuous. "
-        "Redaction is supposed to remove the number, not the message."
-    )
-
-
 def _assert_no_customer_phone(raw: str, *, where: str, body: object = None) -> None:
     """No fragment of the customer's number survives anywhere in the response.
 
@@ -526,18 +509,6 @@ SWEPT_READ_ROUTES: dict[str, SweptRoute] = {
         why="the master's own pending schedule-change request",
         carries_customer_data=False,
     ),
-    "conversations_list": SweptRoute(
-        lambda: reverse("master_api:conversations_list"),
-        witness=CUSTOMER_FIRST_NAME,
-        why="items[].client_first_name",
-        carries_customer_data=True,
-    ),
-    "conversation_detail": SweptRoute(
-        lambda: reverse("master_api:conversation_detail", args=[CONVERSATION_ID]),
-        witness=CUSTOMER_FIRST_NAME,
-        why="client_first_name on the conversation header",
-        carries_customer_data=True,
-    ),
     "customers_list": SweptRoute(
         lambda: reverse("master_api:customers_list"),
         witness=CUSTOMER_FIRST_NAME,
@@ -654,18 +625,25 @@ class TestLiveResponseSweep:
         client: Client,
         seeded_surface: Conversation,
     ) -> None:
-        """At least five routes must render the seeded customer.
+        """At least four routes must render the seeded customer.
 
         The per-route witness catches one route going quiet. This catches
         the fixture going quiet everywhere at once — the shape DRF-1406
         actually had, where the sweep still «covered nine routes» but
         only three of them had ever seen the customer.
+
+        Порог был пять и опущен до четырёх ровно один раз, с причиной:
+        DRF-1528 снял ``conversations_list`` и ``conversation_detail``
+        вместе с перепиской мастер↔клиент, поэтому клиента показывают
+        четыре маршрута — dashboard, schedule, booking_detail,
+        customers_list. Порог здесь только против тихого усыхания; в обе
+        стороны держит утверждение ``reached == expected`` ниже.
         """
 
         expected = {
             name for name, route in SWEPT_READ_ROUTES.items() if route.carries_customer_data
         }
-        assert len(expected) >= 5, "the customer-facing half of the surface shrank — why?"
+        assert len(expected) >= 4, "the customer-facing half of the surface shrank — why?"
 
         reached = set()
         for name in sorted(SWEPT_READ_ROUTES):
@@ -750,11 +728,23 @@ class TestCustomerTypedContactsAreRedacted:
     OD-W2-2 says «телефон клиента исполнителю не передаётся ни в каком
     виде». A number the customer typed is a form.
 
-    The formats below are the ones a person actually types. The bare
-    ten digits matter in particular: ``apps/observability/pii_filter.py``
-    requires a literal ``+7``/``8`` prefix and would sail past it.
+    **DRF-1528: половина этого класса снята вместе со своей поверхностью.**
+    Ячейки, звавшие ``conversations_list`` / ``conversation_detail``,
+    удалены — не потому, что правило ослабло, а потому, что маршрутов
+    нет: свободный текст клиента мастеру больше не echo-ится ниоткуда, и
+    тест, зовущий снятую ручку, проверял бы 410, а не редактуру. Сам
+    запрет на месте и держится двумя уровнями выше: любой новый маршрут
+    попадает в :data:`SWEPT_READ_ROUTES` или в :data:`NOT_SWEPT_ROUTES`
+    под присмотром :class:`TestRouteCoverage`, а поле с запретным именем
+    ловит :class:`TestSourceLiterals`.
+
+    Что осталось здесь — утверждения о самой редактуре и о маске этого
+    файла: они чистые (не ходят по HTTP) и переживают снятие поверхности.
     """
 
+    #: Форматы, которыми номер пишет живой человек. Голые десять цифр важны
+    #: отдельно: ``apps/observability/pii_filter.py`` требует буквального
+    #: ``+7``/``8`` и мимо них проходит — а редактура обязана поймать.
     TYPED_FORMS = [
         "+79997775544",
         "8 999 777 55 44",
@@ -764,52 +754,21 @@ class TestCustomerTypedContactsAreRedacted:
     ]
 
     @pytest.mark.parametrize("typed", TYPED_FORMS)
-    def test_list_excerpt_carries_no_typed_number(
-        self,
-        client: Client,
-        tenant: Tenant,
-        seeded_surface: Conversation,
-        typed: str,
-    ) -> None:
-        Message.all_tenants.create(
-            tenant=tenant,
-            conversation=seeded_surface,
-            role=Message.Role.USER,
-            content=f"Мой номер {typed}, перезвоните пожалуйста",
-        )
-        resp = client.get(
-            reverse("master_api:conversations_list"),
-            HTTP_AUTHORIZATION=init_data_header("12345"),
-        )
-        assert resp.status_code == 200, resp.content[:400]
-        _assert_excerpt_survived(resp.json(), where="conversations_list", witness="перезвоните")
-        _assert_no_customer_phone(
-            resp.content.decode("utf-8"), where="conversations_list", body=resp.json()
-        )
+    def test_every_typed_form_is_redacted(self, typed: str) -> None:
+        """Утверждение пережило снятие поверхности — здесь оно о функции.
 
-    @pytest.mark.parametrize("typed", TYPED_FORMS)
-    def test_detail_message_body_carries_no_typed_number(
-        self,
-        client: Client,
-        tenant: Tenant,
-        seeded_surface: Conversation,
-        typed: str,
-    ) -> None:
-        Message.all_tenants.create(
-            tenant=tenant,
-            conversation=seeded_surface,
-            role=Message.Role.USER,
-            content=f"Мой номер {typed}, перезвоните пожалуйста",
-        )
-        resp = client.get(
-            reverse("master_api:conversation_detail", args=[CONVERSATION_ID]),
-            HTTP_AUTHORIZATION=init_data_header("12345"),
-        )
-        assert resp.status_code == 200, resp.content[:400]
-        _assert_excerpt_survived(resp.json(), where="conversation_detail", witness="перезвоните")
-        _assert_no_customer_phone(
-            resp.content.decode("utf-8"), where="conversation_detail", body=resp.json()
-        )
+        Раньше те же пять форматов проверялись через ответ снятых ручек.
+        Маршрутов нет, правило есть: текст клиента, где бы он ни всплыл
+        дальше, проходит через :func:`redact_contacts`.
+        """
+
+        from apps.master_api.pii import PHONE_PLACEHOLDER, redact_contacts
+
+        out = redact_contacts(f"Мой номер {typed}, перезвоните пожалуйста")
+        assert PHONE_PLACEHOLDER in out, out
+        # Положительная пара: сообщение осталось сообщением, а не пустотой.
+        assert "перезвоните" in out, out
+        _assert_no_customer_phone(out, where="redact_contacts", body={"text": out})
 
     # --- DRF-2095: the clock is not a parameter of this test any more ------
 
@@ -829,38 +788,6 @@ class TestCustomerTypedContactsAreRedacted:
 
         tomorrow = (dj_timezone.now() + timedelta(days=1)).date()
         return datetime.combine(tomorrow, clock, tzinfo=timezone.utc)
-
-    @pytest.mark.parametrize("clock", COLLIDING_TIMES, ids=lambda t: t.strftime("%H:%M:%S"))
-    def test_a_timestamp_that_collapses_into_a_phone_window_is_not_a_leak(
-        self,
-        client: Client,
-        tenant: Tenant,
-        seeded_surface: Conversation,
-        clock: time,
-    ) -> None:
-        """False input: the message is stamped at a colliding second (by ``update()``,
-        not by freezing the clock) and the excerpt carries no number at all."""
-
-        instant = self._colliding_instant(clock)
-        message = Message.all_tenants.create(
-            tenant=tenant,
-            conversation=seeded_surface,
-            role=Message.Role.USER,
-            content="Перезвоните пожалуйста, когда сможете",
-        )
-        Message.all_tenants.filter(pk=message.pk).update(created_at=instant)
-        resp = client.get(
-            reverse("master_api:conversations_list"),
-            HTTP_AUTHORIZATION=init_data_header("12345"),
-        )
-        assert resp.status_code == 200, resp.content[:400]
-        body = resp.json()
-        # Positive guard: the colliding timestamp really is in the response.
-        assert any(instant.isoformat() in v for v in _iter_string_values(body)), body
-        _assert_excerpt_survived(body, where="conversations_list", witness="Перезвоните")
-        _assert_no_customer_phone(
-            resp.content.decode("utf-8"), where="conversations_list", body=body
-        )
 
     def test_a_real_leak_next_to_a_colliding_timestamp_is_still_caught(self) -> None:
         """The mask hides the timestamp, not the number beside it."""
@@ -889,42 +816,6 @@ class TestCustomerTypedContactsAreRedacted:
         body = {"note": dressed}
         with pytest.raises(AssertionError, match="4 digits of the customer's phone"):
             _assert_no_customer_phone(json.dumps(body), where="probe", body=body)
-
-    def test_truncation_cannot_leave_a_four_digit_tail(
-        self,
-        client: Client,
-        tenant: Tenant,
-        seeded_surface: Conversation,
-    ) -> None:
-        """Redaction must run BEFORE the 100-char excerpt truncation.
-
-        Truncating first and redacting the excerpt afterwards leaves the
-        head of a sliced number in the excerpt — and a four-digit head is
-        a phone under OD-W2-2 just as a four-digit tail is. The number is
-        placed so the cut lands inside it.
-        """
-
-        from apps.master_api.services.conversations import EXCERPT_MAX_LEN
-
-        padding = "а" * (EXCERPT_MAX_LEN - 12)
-        Message.all_tenants.create(
-            tenant=tenant,
-            conversation=seeded_surface,
-            role=Message.Role.USER,
-            content=f"{padding} {CUSTOMER_PHONE} хвост",
-        )
-        resp = client.get(
-            reverse("master_api:conversations_list"),
-            HTTP_AUTHORIZATION=init_data_header("12345"),
-        )
-        assert resp.status_code == 200, resp.content[:400]
-        # The excerpt must actually be the one just written — an empty or
-        # stale excerpt would clear the assertion below without the sliced
-        # number ever having been in the response.
-        _assert_excerpt_survived(resp.json(), where="conversations_list", witness=padding[:40])
-        _assert_no_customer_phone(
-            resp.content.decode("utf-8"), where="conversations_list", body=resp.json()
-        )
 
     def test_redaction_leaves_canonical_uuids_alone(self) -> None:
         """The UUID trap in ``apps/replay/redactor.py``, not repeated here.
@@ -996,6 +887,11 @@ class TestSelfPiiExemption:
 #: must be added to :data:`SWEPT_READ_ROUTES` or to this map — forcing that
 #: choice is the point of :class:`TestRouteCoverage`.
 NOT_SWEPT_ROUTES: dict[str, str] = {
+    "conversations_retired": (
+        "DRF-1528: девять ручек переписки мастер↔клиент сняты (OD-7); маршрут "
+        "отвечает постоянным 410 с причиной и не читает ни одной строки — "
+        "подметать в нём нечего, см. test_conversations_retired"
+    ),
     "onboarding_claim": "swept by TestSelfPiiExemption (carries the one exemption)",
     "onboarding_accept": "POST mutation; response is {master_id, session_token, expires_at}",
     "onboarding_reject": "POST mutation; response carries no customer data",
@@ -1014,12 +910,6 @@ NOT_SWEPT_ROUTES: dict[str, str] = {
         "DELETE proxy to the catalog's portfolio item (DRF-1814); response is {count, limit}"
     ),
     "availability_request": "POST mutation; response is the master's own request id/status",
-    "conversation_send_message": "POST mutation; body is the master's own outbound message",
-    "conversation_mark_read": "POST mutation; response is an ack",
-    "conversation_promote": "POST mutation; response is the conversation tier",
-    "conversation_draft_generate": "POST mutation; calls the LLM — covered by test_ai_drafts",
-    "conversation_draft_send_as_me": "POST mutation; covered by test_ai_drafts",
-    "conversation_draft_release_to_ai": "POST mutation; covered by test_ai_drafts",
     "billing_status": "proxy to the external billing service; shape is the provider's",
     "billing_card_setup": "proxy to the external billing service",
     "billing_pay_debt": "proxy to the external billing service",

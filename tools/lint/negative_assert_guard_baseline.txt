@@ -216,13 +216,6 @@ apps/master_api/tests/test_assistant.py::test_the_result_returns_as_a_plain_mess
 apps/master_api/tests/test_assistant_tools.py::test_gaps_shorter_than_asked_are_not_offered::assert {"from": "09:00", "to": "09:30"} not in result["slots"]
 apps/master_api/tests/test_assistant_tools.py::test_no_phone_number_in_the_shape::assert "phone" not in visit
 apps/master_api/tests/test_catalog.py::test_empty_master_returns_empty::assert svc.list_master_services(master=accepted_master) == []
-apps/master_api/tests/test_conversation_detail.py::test_pii_gate_no_phone_no_full_lastname_no_email_no_ltv::assert "+79161112233" not in raw
-apps/master_api/tests/test_conversation_detail.py::test_pii_gate_no_phone_no_full_lastname_no_email_no_ltv::assert "email" not in raw.lower()
-apps/master_api/tests/test_conversation_detail.py::test_pii_gate_no_phone_no_full_lastname_no_email_no_ltv::assert "ltv" not in raw.lower()
-apps/master_api/tests/test_conversation_detail.py::test_pii_gate_no_phone_no_full_lastname_no_email_no_ltv::assert "Леонова" not in raw
-apps/master_api/tests/test_conversations.py::test_response_excludes_phone_email_ltv_last_name::assert "79161234567" not in raw
-apps/master_api/tests/test_conversations.py::test_response_excludes_phone_email_ltv_last_name::assert "Леонова" not in raw  # full last name never serialised
-apps/master_api/tests/test_conversations.py::test_response_excludes_phone_email_ltv_last_name::assert not forbidden.intersection(item.keys()), item
 apps/master_api/tests/test_customers.py::test_cancelled_bookings_excluded::assert out == []
 apps/master_api/tests/test_customers.py::test_confirmed_but_never_completed_is_not_a_visit::assert out == []
 apps/master_api/tests/test_customers.py::test_empty_master_returns_empty_list::assert out == []
@@ -294,7 +287,6 @@ apps/orchestrator/tests/test_memory_block.py::test_without_backend_data_sources_
 apps/orchestrator/tests/test_memory_bridge.py::test_domain_forget_triggers_bridge_clear::assert read_green_entries(bu.ayla_user_id) == []
 apps/orchestrator/tests/test_memory_bridge.py::test_slots_no_duplicate_when_already_declared::assert _patches(client) == []
 apps/orchestrator/tests/test_memory_erasure_matrix.py::test_a_refused_erasure_is_not_reported_as_done::assert "забыла всё, что о тебе знала" not in reply
-apps/orchestrator/tests/test_memory_erasure_matrix.py::test_account_delete_anonymizes_customer_messages::assert _recent_history(conversation) == []
 apps/orchestrator/tests/test_memory_erasure_matrix.py::test_skin_sensitivities_never_reach_the_max_prompt::assert "ретинол" not in block
 apps/orchestrator/tests/test_memory_erasure_matrix.py::test_skin_sensitivities_never_reach_the_max_prompt::assert "чувствительн" not in block.lower()
 apps/orchestrator/tests/test_nutrition_context.py::test_malformed_pct_does_not_raise::assert "от нормы" not in block

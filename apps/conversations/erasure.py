@@ -41,11 +41,12 @@ reverse map is literally ``rev:<PHONE_a8f2c1d4_1>`` → the person's real phone
 number, kept so the LLM's reply can be de-tokenised. Clearing the message
 window and leaving that behind would empty the sentence and keep the number.
 
-The remaining prompt-bound reader that touches ``Message`` at all —
-``master_api.services.ai_drafts._recent_history`` — additionally honours the
-cutoff, so the master's draft prompt does not even receive the blanked rows.
-That is belt-and-braces, not the mechanism; the mechanism is that the text is
-not in the column.
+Читатель, который раньше приводили здесь как второй рубеж —
+``master_api.services.ai_drafts._recent_history`` — снят вместе с перепиской
+мастер↔клиент (DRF-1528). Это ничего не ослабляет: он и был «ремнём поверх
+подтяжек», а механизм — в том, что текста нет в колонке. Прочие
+prompt-bound читатели перечислены в ``dialogue_readers.DIALOGUE_READERS``, и
+каждый из них проверяется зондом в ``test_dialogue_reader_registry``.
 
 The standing proof that a *future* reader cannot quietly reopen the route is
 the registry guard in ``apps/conversations/dialogue_readers.py`` and
@@ -441,9 +442,11 @@ def anonymize_dialogue(
 
             # AiDraft.content quotes the customer verbatim — it is the master's
             # unsent reply built from these very turns. Layer 1 clears it at
-            # terminal status (`master_api.services.ai_drafts`); an ACTIVE
-            # draft would otherwise carry the erased person's words into the
-            # master's compose box after the erasure.
+            # terminal status — слой жил в `master_api.services.ai_drafts`
+            # и снят вместе с перепиской (DRF-1528). Новых черновиков не
+            # появляется, но старые строки остаются, и стирание обязано
+            # чистить их здесь: иначе слова стёртого человека переживут
+            # каскад в поле, которое просто перестали показывать.
             #
             # Deliberately NOT scoped to the cutoff, unlike the messages. A
             # draft carries `trigger_message`, so one written after the request

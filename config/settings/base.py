@@ -694,63 +694,12 @@ SOLO_REGISTRATION_DRAFT_TTL_HOURS = int(os.environ.get("SOLO_REGISTRATION_DRAFT_
 SITE_DOMAIN = os.environ.get("SITE_DOMAIN", "http://localhost:5173")
 MASTER_BOT_USERNAME = os.environ.get("MASTER_BOT_USERNAME", "")
 
-# M6 AI drafts auto-trigger (deferred follow-up from PR #535 / #540).
-#
-# When True, every inbound customer Message (``role=USER``) on a
-# conversation that involves a master enqueues a Celery task that
-# generates an :class:`apps.conversations.models.AiDraft` proactively —
-# so the master sees «✨ Предложен ответ» on M5 list refresh without
-# tapping «✨ Предложить ответ» first (spec §M6 line 660 «— помощник
-# готовит ответ —»).
-#
-# Default False keeps the pilot launch ramp conservative. Operators
-# flip per-environment via env var once cost / rate telemetry is
-# stable. The Celery task is enqueued unconditionally from the hook;
-# the flag is re-checked inside the worker as a cheap short-circuit
-# so an LLM call NEVER happens with the flag off.
-AI_DRAFTS_AUTO_TRIGGER_ENABLED = os.environ.get(
-    "AI_DRAFTS_AUTO_TRIGGER_ENABLED", "false"
-).lower() in ("true", "1")
-
-
-# M6 auto-trigger idle-active-draft suppress window (issue #659).
-# If an ACTIVE draft on a conversation is younger than this many seconds,
-# skip auto-trigger regeneration — the master is probably still viewing
-# the existing draft. Prevents the documented #659 collision race:
-#
-#   1. Customer message arrives → auto-trigger task starts LLM call
-#      (1-3s under Conversation row lock).
-#   2. Master taps «Отправить от себя» on the ACTIVE draft visible in UI.
-#   3. send_draft_as_master returns 429 conversation_busy (PR #551 lock).
-#   4. Frontend retries after Retry-After: 3 — by then auto-trigger has
-#      REPLACED the visible draft with a fresh one.
-#   5. send-as-me targets REPLACED draft → 400 draft_already_acted.
-#
-# Suppressing auto-trigger while the master likely still has the draft
-# on-screen breaks the race at step 1. Setting this to 0 disables the
-# suppress (regression escape hatch for ops).
-#
-# Issue #693 (follow-up from #659 review): wrap ``int()`` parsing in a
-# try/except so a non-integer env value (operator typo, e.g.
-# ``IDLE_ACTIVE_DRAFT_SUPPRESS_WINDOW_SECONDS=abc``) does NOT crash
-# Django boot on every worker.  Fall back to the 60s default and log a
-# WARNING so the misconfiguration is visible without taking the service
-# down — module-load ValueErrors take out ALL workers simultaneously.
-def _parse_idle_active_draft_suppress_window() -> int:
-    raw = os.environ.get("IDLE_ACTIVE_DRAFT_SUPPRESS_WINDOW_SECONDS", "60")
-    try:
-        return int(raw)
-    except ValueError:
-        import logging
-
-        logging.getLogger(__name__).warning(
-            "Invalid IDLE_ACTIVE_DRAFT_SUPPRESS_WINDOW_SECONDS=%r — falling back to 60",
-            raw,
-        )
-        return 60
-
-
-IDLE_ACTIVE_DRAFT_SUPPRESS_WINDOW_SECONDS = _parse_idle_active_draft_suppress_window()
+# DRF-1528: две настройки M6-автотриггера сняты вместе со своим таском —
+# `AI_DRAFTS_AUTO_TRIGGER_ENABLED` и `IDLE_ACTIVE_DRAFT_SUPPRESS_WINDOW_SECONDS`.
+# Черновики ответа клиенту генерировать некуда: переписка мастер↔клиент
+# снята (OD-7). Рубильник, который ничего не выключает, хуже отсутствия
+# рубильника — оператор считает поверхность управляемой. Значения из env
+# просто игнорируются; удалять их из окружений не требуется.
 
 # Sprint 9 / I1 (DRF-825) — Ayla nutrition backend.
 # Empty defaults make the lazy singleton fail loudly on first use rather
@@ -1507,10 +1456,11 @@ CELERY_BEAT_SCHEDULE = {
     # PR #535 follow-up Blocker #5 Layer 2 — AI draft retention sweep.
     # Hard-deletes terminal AiDraft rows (SENT_AS_MASTER / RELEASED_TO_AI
     # / REPLACED / DISMISSED) older than 30 days. Layer 1 (immediate
-    # content clear on status flip) lives in
-    # apps/master_api/services/ai_drafts.py — that closes the at-rest
-    # PII window. Layer 2 sweeps the metadata stubs after the finance
-    # reconciliation window closes. Daily 03:15 UTC — slotted between
+    # content clear on status flip) жил в apps/master_api/services/
+    # ai_drafts.py и снят вместе с перепиской мастер↔клиент (DRF-1528):
+    # новых черновиков не появляется, а слова из старых чистит стирание
+    # (apps/conversations/erasure.py). Эта — Layer 2 — выметает
+    # метаданные после финансового окна сверки. Daily 03:15 UTC — slotted between
     # the 03:00 audit cleanup and the 03:30 profile recompute to keep
     # worker pool spikes staggered.
     "purge_old_ai_drafts": {

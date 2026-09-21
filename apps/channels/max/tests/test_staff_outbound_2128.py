@@ -201,17 +201,6 @@ def _path_schedule_request_service() -> None:
     notify_manager_of_availability_request(tenant=tenant, master=master, request_id=request.id)
 
 
-def _path_conversation_promoted() -> None:
-    from apps.master_api.services.conversation_detail import _maybe_send_manager_dm
-
-    _maybe_send_manager_dm(
-        tenant=_tenant_double(),
-        master=_master_double(),
-        client_label="Anna",
-        reason_class="complaint",
-    )
-
-
 def _path_reschedule_partial() -> None:
     from apps.bookings.callbacks import _notify_manager_partial_reschedule
 
@@ -318,10 +307,12 @@ def _path_master_reactivated() -> None:
         reactivate_master(master, notify_master=True, actor=actor, actor_role="owner")
 
 
+# DRF-1528: путь `conversation_promoted` снят вместе с перепиской
+# мастер↔клиент — «Анна передала диалог в админ-канал» слал `promote`,
+# которого больше нет. Остальные пути салонных DM не затронуты.
 STAFF_PATHS: dict[str, Callable[[], None]] = {
     "schedule_request_view": _path_schedule_request_view,
     "schedule_request_service": _path_schedule_request_service,
-    "conversation_promoted": _path_conversation_promoted,
     "reschedule_partial": _path_reschedule_partial,
     "reschedule_success": _path_reschedule_success,
     "master_decision_dm": _path_master_decision_dm,

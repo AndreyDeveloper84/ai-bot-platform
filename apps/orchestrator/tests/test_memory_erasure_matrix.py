@@ -135,6 +135,22 @@ class _FakeRedis:
         self.store.pop(key, None)
 
 
+def _readable_window(conversation):
+    """Строки, которые читатель промпта имел право взять: позже cutoff.
+
+    Правило то же, что было зашито в снятом `ai_drafts._recent_history`
+    (DRF-1528): анонимизация пустит колонку, а `anonymized_through`
+    отрезает всё, что было до неё.
+    """
+    from apps.conversations.models import Message
+
+    rows = Message.all_tenants.filter(conversation=conversation).order_by("created_at")
+    cutoff = conversation.anonymized_through
+    if cutoff is not None:
+        rows = rows.filter(created_at__gt=cutoff)
+    return [m for m in rows if (m.content or "").strip()]
+
+
 def _bot_user(uid: str):
     return resolve_or_create_global_bot_user(
         channel="max", channel_user_id=uid, ayla_user_id=uuid.uuid4()
@@ -615,13 +631,19 @@ class TestDialogueHistory:
 
         Step 5 erased ``StaffAssistantMessage`` — the EMPLOYEE surface. The
         customer's own words survived verbatim and were read straight into the
-        master's AI draft prompt (``ai_drafts._recent_history``), which is the
-        route the audit missed while looking at the concierge.
+        history window built for the master's AI draft — the route the audit
+        missed while it was looking at the concierge.
+
+        DRF-1528 снял самого читателя вместе с перепиской мастер↔клиент,
+        поэтому ячейка проверяет то, на чём он стоял: правило «до cutoff
+        слова не выдаются» держит не читатель, а пустая колонка и
+        ``anonymized_through``. Окно здесь собирается тем же правилом
+        (:func:`_readable_window`) — иначе утверждение сузилось бы до
+        «строка есть, а что в ней — неважно».
         """
         from apps.conversations.models import Message
         from apps.conversations.services import resolve_active_global_conversation
         from apps.identity.services.privacy import delete_personal_data
-        from apps.master_api.services.ai_drafts import _recent_history
 
         self._fake_redis(monkeypatch)
 
@@ -635,11 +657,13 @@ class TestDialogueHistory:
             content="я веган, мой мастер — Анна, телефон 89990001122",
         )
 
-        # Positive guard on the READER, not just on the row: this cell claims
-        # the master's draft prompt stops carrying the person's words, and that
-        # claim is empty unless the prompt carried them a line earlier.
-        before = _recent_history(conversation)
-        assert [m.content for m in before] == ["я веган, мой мастер — Анна, телефон 89990001122"]
+        # Положительная пара к утверждению об отсутствии: до каскада слова
+        # в окне есть — иначе «после каскада их нет» ничего не значит.
+        # Окно читается тем же правилом, что читал снятый `_recent_history`:
+        # строки позже `anonymized_through` (DRF-1528 — сам читатель снят).
+        assert [m.content for m in _readable_window(conversation)] == [
+            "я веган, мой мастер — Анна, телефон 89990001122"
+        ]
 
         result = delete_personal_data(bu, client=ayla)
 
@@ -647,9 +671,9 @@ class TestDialogueHistory:
         rows = list(Message.all_tenants.filter(conversation=conversation))
         assert len(rows) == 1  # строка на месте
         assert rows[0].content == ""  # а слов в ней нет
-        # And the prompt-side reader hands back nothing.
+        # И окно, из которого собирался промпт, пустое.
         conversation.refresh_from_db()
-        assert _recent_history(conversation) == []
+        assert _readable_window(conversation) == []
 
     def test_account_delete_blanks_the_recommendation_words(self, settings, ayla, monkeypatch):
         """DRF-1772 (К-3) — карточка C04 хранит слова человека (причины и факты

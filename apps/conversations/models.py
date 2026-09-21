@@ -709,8 +709,10 @@ class AiDraft(models.Model):
         «✨ Предложенный ответ ... [Отправить от себя] [Отредактировать]
         [Пусть помощник ответит]»
 
-    The three action endpoints in :mod:`apps.master_api.services.ai_drafts`
-    map 1:1 to these three buttons.
+    Три действия этих кнопок жили в ``master_api.services.ai_drafts``;
+    модуль снят вместе с перепиской мастер↔клиент (DRF-1528, OD-7).
+    Модель и строки остаются: их чистит каскад стирания и
+    :func:`apps.conversations.tasks.purge_old_ai_drafts`.
     """
 
     class Status(models.TextChoices):

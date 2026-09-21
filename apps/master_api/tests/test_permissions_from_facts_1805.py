@@ -37,12 +37,14 @@ class TestToday:
         assert permissions == {
             "can_edit_schedule": True,
             "can_edit_services": False,
-            "can_message_customers": True,
+            # DRF-1528: переписка мастер↔клиент снята — маршрута нет, права нет.
+            "can_message_customers": False,
         }
 
     def test_route_table_names_only_routes_that_exist_or_are_named_for_m10(self):
         assert perms.route_exists("master_api:availability_request")
-        assert perms.route_exists("master_api:conversation_send_message")
+        # DRF-1528: маршрут ответа клиенту снят — проводки больше нет.
+        assert not perms.route_exists("master_api:conversation_send_message")
         assert not perms.route_exists("master_api:services_write")
         assert not perms.route_exists("master_api:no_such_route")
 
