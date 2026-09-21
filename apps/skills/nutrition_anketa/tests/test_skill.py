@@ -422,6 +422,7 @@ class TestScreeningQuestionSitsWhereItSays:
             "weight",
             "activity",
             "goal",
+            "pace",
         ]
 
     def test_screening_prompt_names_what_follows(self) -> None:

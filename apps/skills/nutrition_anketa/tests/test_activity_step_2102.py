@@ -10,9 +10,9 @@
   «Не знаю» последней;
 * a2 — каждый из четырёх ответов уходит в каталог ровно своим числом,
   без ``_skipped_fields``;
-* a3 — «Не знаю» → 1.375 **и** ``_skipped_fields == ["activity"]``; пара:
-  выбранная «Лёгкая активность» — то же 1.375, но без пометки. Пропуск
-  отличим от выбора с тем же числом;
+* a3 — «Не знаю» → числа НЕТ, только ``_skipped_fields == ["activity"]``
+  (вопрос 59, CD §72; до него здесь уходило 1.375 — число за человека);
+  пара: выбранная «Лёгкая активность» — 1.375 и без пометки;
 * a4 — состояние, сохранённое до появления шага (стоит на цели, ответа
   про активность нет): при завершении анкета спрашивает активность, а не
   подставляет число за человека; цель переспрашивается. Это стража
@@ -127,6 +127,8 @@ class TestA1TheStepSitsBetweenWeightAndGoal:
             "weight",
             "activity",
             "goal",
+            # Вопрос 59: темп — только после «похудеть» / «набрать».
+            "pace",
         ]
         assert AnketaFSM.STEPS["weight"].next == "activity"
         assert AnketaFSM.STEPS["activity"].next == "goal"
@@ -166,14 +168,16 @@ class TestA2EachAnswerIsItsOwnCoefficient:
 
 
 class TestA3SkipIsMarkedAndDistinctFromTheSameNumber:
-    def test_unknown_is_1375_with_the_skip_marker(self) -> None:
+    def test_unknown_sends_no_number_only_the_skip_marker(self) -> None:
+        """До вопроса 59 тест пинил «Не знаю → 1.375» — умолчание, которое
+        владелец отменил (CD §72): числа за человека нет."""
         run = _Run(_state("activity", _BODY))
         run.turn(f"cb:anketa:choice:activity:{ACTIVITY_SKIP}")
         done = run.turn("cb:anketa:choice:goal:maintain")
         assert done.action_type == "anketa_complete"
         data = run.captured[0]["data"]
-        assert data["activity_coefficient"] == 1.375
         assert data["_skipped_fields"] == ["activity"]
+        assert "activity_coefficient" not in data
 
     def test_light_is_1375_without_the_marker(self) -> None:
         light = next(
@@ -200,10 +204,13 @@ class TestA4AStateFromBeforeTheStepIsAskedNotDefaulted:
         # Ответил про активность — цель переспрашивается, затем расчёт.
         again = run.turn("cb:anketa:choice:activity:moderate")
         assert again.action_type == "anketa_step_goal"
-        done = run.turn("cb:anketa:choice:goal:lose")
+        # Вопрос 59: после «похудеть» — темп, затем расчёт.
+        assert run.turn("cb:anketa:choice:goal:lose").action_type == "anketa_step_pace"
+        done = run.turn("cb:anketa:choice:pace:moderate")
         assert done.action_type == "anketa_complete"
         data = run.captured[0]["data"]
         assert data["activity_coefficient"] == 1.55 and data["goal"] == "lose"
+        assert data["pace"] == "moderate"
         assert "_skipped_fields" not in data
 
 
