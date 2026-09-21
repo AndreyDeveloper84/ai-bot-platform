@@ -369,8 +369,22 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
   }
 
   if (state.kind === "error") {
+    // DRF-2198 (правило класса после инцидента 20.09): состояние ошибки не
+    // убирает навигацию. На корне «назад» нет, и «Сменить режим» —
+    // единственный выход многоролевого с клиентской поверхности: он обязан
+    // пережить отказ загрузки, иначе человек заперт на экране ошибки.
     return (
-      <ScreenLayout back={back} title="Какая у тебя цель?">
+      <ScreenLayout
+        back={back}
+        title="Какая у тебя цель?"
+        cta={
+          isRoot && canSwitch ? (
+            <StickyBar>
+              <SurfaceSwitchExit />
+            </StickyBar>
+          ) : undefined
+        }
+      >
         <StateError err={state.err} onRetry={load} screenId="goal-select" />
       </ScreenLayout>
     );
