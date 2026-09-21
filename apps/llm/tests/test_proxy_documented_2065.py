@@ -45,7 +45,7 @@ def _compose_file_set(text: str) -> set[str]:
 
 
 def _recreate_command(runbook: str) -> str:
-    """Команда пересоздания целиком: строки с `\` в конце склеиваются."""
+    """Команда пересоздания целиком: строки с обратной косой в конце склеиваются."""
     joined = re.sub(r"\\\n\s*", " ", runbook)
     lines = [line for line in joined.splitlines() if "--force-recreate" in line]
     assert lines, "в раннбуке нет строки пересоздания"

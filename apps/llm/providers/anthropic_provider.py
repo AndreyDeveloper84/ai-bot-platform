@@ -143,6 +143,19 @@ class AnthropicProvider:
 
     name = "anthropic"
 
+    @classmethod
+    def configured_proxy(cls) -> str:
+        """Прокси, через который пойдёт вызов без явного ``proxy=``.
+
+        Пустой ``ANTHROPIC_PROXY`` молча уступает ``OPENAI_PROXY`` — один
+        туннель обычно обслуживает обоих. Единственное место правила:
+        ``__init__`` и проба пути (DRF-2065) читают его отсюда, иначе
+        диагностика проверяла бы не тот прокси, по которому ходит бот.
+        """
+        return (
+            getattr(settings, "ANTHROPIC_PROXY", "") or getattr(settings, "OPENAI_PROXY", "") or ""
+        )
+
     def __init__(
         self,
         *,
@@ -153,14 +166,7 @@ class AnthropicProvider:
         retry_policy: RetryPolicy | None = None,
     ) -> None:
         self._api_key = api_key or getattr(settings, "ANTHROPIC_API_KEY", "") or ""
-        if proxy is not None:
-            self._proxy = proxy
-        else:
-            self._proxy = (
-                getattr(settings, "ANTHROPIC_PROXY", "")
-                or getattr(settings, "OPENAI_PROXY", "")
-                or ""
-            )
+        self._proxy = proxy if proxy is not None else self.configured_proxy()
         self.default_completion_model = default_completion_model
         # DRF-1443 — ``_DEFAULT_INTENT_MODEL`` was declared by Decision 18
         # and then never reachable: nothing read it, so every Anthropic

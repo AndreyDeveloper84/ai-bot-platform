@@ -208,6 +208,8 @@ class TestDirectPath:
         """500 от провайдера — не про сеть; прямой путь ничего не прояснит."""
         calls = _world(monkeypatch, primary=InternalServerError("500"))
         health.check_llm_availability()
+        # Положительная пара: основной правда пробовался — иначе «прямой не звали» пусто.
+        assert ("anthropic", "<settings>") in calls, calls
         assert ("anthropic", "") not in calls, calls
         assert _path()["direct_path"] is None
 
@@ -217,6 +219,8 @@ class TestDirectPath:
         settings.OPENAI_PROXY = ""
         calls = _world(monkeypatch, primary=APIConnectionError("no route"))
         health.check_llm_availability()
+        # Положительная пара: основной правда пробовался — иначе «прямой не звали» пусто.
+        assert ("anthropic", "<settings>") in calls, calls
         assert ("anthropic", "") not in calls, calls
 
     def test_openai_proxy_fallback_counts_as_a_proxy(self, monkeypatch, settings, pages) -> None:
@@ -265,19 +269,63 @@ class TestDownMessageTellsTheTruth:
         assert "Прямой путь к провайдеру: есть" in body, body
         assert "прокси" in body.lower(), body
 
-    def test_proxy_address_never_reaches_the_alert(self, monkeypatch, settings, pages) -> None:
+    def test_proxy_credentials_hidden_host_kept(self, monkeypatch, settings, pages) -> None:
         settings.ANTHROPIC_PROXY = (
             "http://user:s3cret@proxy.example:3128"  # pragma: allowlist secret
         )
         _world(
             monkeypatch,
-            primary=APIConnectionError("cannot CONNECT http://user:s3cret@proxy.example:3128"),
+            primary=APIConnectionError(
+                "cannot CONNECT http://user:s3cret@proxy.example:3128"
+            ),  # pragma: allowlist secret
             fallback=APIConnectionError("x"),
             direct=PermissionDeniedError("403"),
         )
         health.check_llm_availability()
         body = pages[-1]["body"]
-        # Учётные данные — никогда. Хост прокси сегодня доходит до алерта
-        # (userinfo-проход redact_secrets срабатывает раньше дословной
-        # замены значения) — вынесено вопросом на GO, здесь не закрепляется.
+        # Учётные данные — никогда.
         assert "s3cret" not in body and "user:" not in body, body
+        # Хост — остаётся (решение на GO DRF-2065): оператору он нужен, чтобы
+        # понять, КАКОЙ прокси менять. Узел, чтобы следующая правка
+        # redact_secrets не спрятала его молча.
+        assert "proxy.example:3128" in body, body
+
+
+class TestPathChangeWhileDown:
+    """Основной лежит, а резерв умер или ожил — объявленное перестало быть правдой."""
+
+    def test_fallback_lost_is_paged_once(self, monkeypatch, pages) -> None:
+        _world(monkeypatch, primary=APIConnectionError("proxy refused"))
+        health.check_llm_availability()
+        assert _path()["state"] == health.PATH_FALLBACK
+        before = len(pages)
+
+        _world(
+            monkeypatch,
+            primary=APIConnectionError("proxy refused"),
+            fallback=APIConnectionError("proxy refused"),
+        )
+        health.check_llm_availability()
+        assert _path()["state"] == health.PATH_DOWN
+        new = pages[before:]
+        assert len(new) == 1, new
+        assert new[0]["severity"] == "critical", new
+        assert "аварийным текстом" in new[0]["body"], new
+
+        # Тот же расклад на следующем тике — не новость.
+        health.check_llm_availability()
+        assert len(pages) == before + 1, pages[before:]
+
+    def test_fallback_regained_is_paged(self, monkeypatch, pages) -> None:
+        _world(
+            monkeypatch,
+            primary=APIConnectionError("proxy refused"),
+            fallback=APIConnectionError("proxy refused"),
+        )
+        health.check_llm_availability()
+        before = len(pages)
+        _world(monkeypatch, primary=APIConnectionError("proxy refused"))
+        health.check_llm_availability()
+        new = pages[before:]
+        assert len(new) == 1, new
+        assert "резерв" in new[0]["body"].lower() and "аварийным текстом" not in new[0]["body"]

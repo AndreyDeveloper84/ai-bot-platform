@@ -108,6 +108,45 @@ def check_intent_router() -> dict[str, Any]:
         }
 
 
+def check_llm_path() -> dict[str, Any]:
+    """Путь к LLM по последнему тику пробы (DRF-2065). Без вызова LLM.
+
+    До DRF-2065 readyz о доступности LLM молчал: 16–17.09 стенд 9 ч
+    отвечал аварийным текстом при зелёном readyz. Теперь в теле —
+    ``state``: ``primary`` (основной жив), ``fallback`` (работаем на
+    резерве DRF-2147), ``down`` (оба лежат), ``unknown`` (не мерили или
+    мерили давно). Плюс ``direct_path``, если при сетевом отказе через
+    прокси мерили прямой путь.
+
+    ``ok`` всегда True — решение на GO DRF-2065: LLM не переворачивает
+    readyz в 503. Деплой-смоук (``deploy-dev.yml``: ``curl -fsS
+    /readyz/``) упал бы ровно на выкатке починки — проба меряет раз в
+    5 минут, смоук ждёт 30 секунд. Операторов о лежащей LLM будит сама
+    проба (``llm.health.down`` → ``alerting.page``); мониторинг читает
+    ``checks.llm.state``.
+    """
+
+    start = time.monotonic()
+    try:
+        from apps.llm.health import read_path_state
+
+        state = read_path_state()
+        return {
+            "ok": True,
+            "error": None,
+            "duration_ms": int((time.monotonic() - start) * 1000),
+            **state,
+        }
+    except Exception as exc:  # noqa: BLE001 — health never raises
+        logger.exception("health.check_llm_path.error")
+        return {
+            "ok": True,
+            "error": f"{type(exc).__name__}: {exc}",
+            "duration_ms": int((time.monotonic() - start) * 1000),
+            "state": "unknown",
+        }
+
+
 def check_skill_registry() -> dict[str, Any]:
     """Verify the skill registry has at least the FAQ skill registered.
 
@@ -148,6 +187,8 @@ def pipeline_health() -> dict[str, dict[str, Any]]:
     return {
         "intent_router": check_intent_router(),
         "skill_registry": check_skill_registry(),
+        # DRF-2065 — путь к LLM: основной / резерв / оба лежат / неизвестно.
+        "llm": check_llm_path(),
         # Sprint 8 / G4 (DRF-735) — extended health surface.
         "chromadb_auth": check_chromadb_auth(),
         "audit_cleanup": check_audit_cleanup_recent(),

@@ -546,12 +546,8 @@ class LLMRouter:
         #   * the operator disabled it via ``LLM_QUOTA_FALLBACK_ENABLED``;
         #   * no other vendor has a key configured — then the wrapper
         #     would add a frame and change nothing.
-        if (
-            prefer_fallback_from is None
-            and op == "complete"
-            and getattr(settings, "LLM_QUOTA_FALLBACK_ENABLED", True)
-        ):
-            candidates = fallback_candidates(candidate)
+        if prefer_fallback_from is None and op == "complete":
+            candidates = serving_fallback_candidates(candidate)
             if candidates:
                 return self._wrap_with_fallback(
                     provider=provider,
@@ -1000,6 +996,20 @@ def fallback_candidates(exclude: str, *, require_embedding: bool = False) -> lis
         and provider_is_configured(name)
         and (not require_embedding or _PROVIDER_SPECS[name].supports_embedding)
     ]
+
+
+def serving_fallback_candidates(primary: str) -> list[str]:
+    """Кого живой ход ``complete`` попробует после ``primary`` — пусто, если никого.
+
+    Одно правило на двоих: :meth:`LLMRouter.get_provider` вооружает им
+    :class:`FallbackProvider`, а проба пути (DRF-2065) — второй замер тика.
+    Иначе readyz мог бы сказать «работаем на резерве» про резерв, на
+    который живой ход не уйдёт (выключатель ``LLM_QUOTA_FALLBACK_ENABLED``
+    или нет ключа), — ровно класс DRF-1631.
+    """
+    if not getattr(settings, "LLM_QUOTA_FALLBACK_ENABLED", True):
+        return []
+    return fallback_candidates(primary)
 
 
 def _other_provider(name: str) -> str:
