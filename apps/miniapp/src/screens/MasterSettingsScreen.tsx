@@ -44,7 +44,7 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 
 import { SurfaceSwitchButton } from "../components/SurfaceSwitch";
 import { MASTER_SESSION_STORAGE_KEY } from "../lib/master-api";
@@ -76,6 +76,10 @@ const COPY = {
 
 export function MasterSettingsScreen() {
   const navigate = useNavigate();
+  // DRF-2247: экран общий у соло и салонного мастера — двери ведут в
+  // маршруты СВОЕЙ поверхности. Раньше «Рабочие часы» и «Место работы» вели
+  // на /solo/* и салонного мастера молча выбрасывало на «Сегодня».
+  const isSolo = useLocation().pathname.startsWith("/solo/");
   const [confirmOpen, setConfirmOpen] = useState(false);
 
   // --- Bridge: BackButton wiring ---
@@ -141,20 +145,24 @@ export function MasterSettingsScreen() {
         type="button"
         className="btn-secondary"
         style={{ width: "100%", justifyContent: "center", marginBottom: "var(--s-3)" }}
-        onClick={() => navigate("/solo/working-hours")}
+        onClick={() => navigate(isSolo ? "/solo/working-hours" : "/master/working-hours")}
       >
         Рабочие часы
       </button>
 
-      {/* DRF-1811 (M19) — экран 05: место работы (изменить формат/адрес в любое время, P45/P50). */}
-      <button
-        type="button"
-        className="btn-secondary"
-        style={{ width: "100%", justifyContent: "center", marginBottom: "var(--s-3)" }}
-        onClick={() => navigate("/solo/place")}
-      >
-        Место работы
-      </button>
+      {/* DRF-1811 (M19) — экран 05: место работы (изменить формат/адрес в любое время, P45/P50).
+          DRF-2247: только соло — у салонного мастера место задаёт салон, и
+          экрана «Место работы» на его поверхности нет. */}
+      {isSolo ? (
+        <button
+          type="button"
+          className="btn-secondary"
+          style={{ width: "100%", justifyContent: "center", marginBottom: "var(--s-3)" }}
+          onClick={() => navigate("/solo/place")}
+        >
+          Место работы
+        </button>
+      ) : null}
 
       {/* Phase 2b — billing / payout surface (C2/C3, real proxies). */}
       <button
