@@ -130,8 +130,8 @@ class TestSnapshotIsAnonymized:
 class TestTheCutoff:
     def test_turns_after_the_request_stay_in_the_snapshot(self, person, fake_redis) -> None:
         """Тот же cutoff, что у сообщений: реплики после просьбы — снова свои."""
+        conv = _conversation(person)  # до cutoff: иначе диалог вне выборки
         now = timezone.now()
-        conv = _conversation(person)
         _message(conv, "до просьбы", at=now - timedelta(minutes=10))
         _message(conv, "после просьбы", at=now + timedelta(minutes=10))
         task = _task(conv)
