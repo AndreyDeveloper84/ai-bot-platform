@@ -35,8 +35,9 @@ from typing import Any
 
 import pytest
 
-from apps.integrations.ayla import ProfileResponse, SummaryResponse
+from apps.integrations.ayla import ProfileResponse
 from apps.nutrition_proactive.render import goal_remark, remarks_suppressed
+from apps.nutrition_proactive.tests.test_render import summary as render_summary
 
 _BASE = ProfileResponse(
     gender="female",
@@ -55,16 +56,10 @@ _BASE = ProfileResponse(
     targets_source="ayla_calculated",
 )
 
-_SUMMARY = SummaryResponse(
-    date="2026-09-21",
-    calories_total=2400.0,  # перебор при цели «снизить» — реплика есть у обычного профиля
-    calories_goal=1900,
-    protein_g=100.0,
-    fat_g=55.0,
-    carbs_g=160.0,
-    entries=[{"id": 1}],
-    raw={},
-)
+#: Сводка «ориентир ЕСТЬ» — из фикстур ``test_render.py`` (в списке
+#: ``nutrition_target_guard``: изображать состояние «ориентир есть» можно
+#: только там). Перебор при цели «снизить» — реплика есть у обычного профиля.
+_SUMMARY = render_summary(calories_total=2400.0, protein_g=100.0)
 
 
 def profile(**overrides: Any) -> ProfileResponse:
