@@ -347,8 +347,10 @@ class TestScope:
         yellow.refresh_from_db()
         assert yellow.soft_deleted_at is not None
         assert yellow.deletion_reason == MemoryEntry.DELETION_REASON_FORGET_ALL
-        # И читатель по-прежнему её не видит — это не изменилось.
-        assert read_green_entries(upc.user_id) == []
+        # Прежняя строка «и читатель её всё равно не видел» снята: она была
+        # осмысленной, пока жёлтая переживала свип («лежит, но недостижима»).
+        # Теперь строка снята, и «читатель ничего не вернул» верно по другой
+        # причине — то есть проверяет не то, про что написано.
 
     def test_notification_settings_are_not_erased(self):
         """The decision, pinned: standing instructions are not memories.
