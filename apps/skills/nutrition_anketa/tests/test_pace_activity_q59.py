@@ -17,11 +17,24 @@
   (каталог отвечает «не хватает данных: активность»);
 * p4 — «обнови вес» при цели «похудеть» несёт темп из снимка; снимок без
   темпа → в анкету, темп не подставляется.
+
+Узлы ревью:
+
+* r1 — кнопка ДРУГОГО шага (старая «Средняя активность» в истории) на
+  вопросе о темпе — не ответ: slug «moderate» у них общий, и без проверки
+  темп записался бы невыбранным;
+* r2 — отказ каталога «не хватает данных» назван словами и в верном числе;
+  если у человека есть хоть один ориентир (ручная вода), карточка его не
+  прячет.
 """
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from apps.skills.nutrition_anketa.fsm import ACTIVITY_SKIP
+from apps.skills.nutrition_anketa.skill import _format_summary
+from apps.skills.nutrition_anketa.tests.test_skill import _profile
 from apps.skills.nutrition_anketa.tests.test_activity_step_2102 import _BODY, _Run, _state
 from apps.skills.nutrition_anketa.tests.test_update_weight_2139 import (
     _SNAPSHOT,
@@ -93,3 +106,53 @@ class TestP4UpdateWeightCarriesPace:
         run.turn("мой вес 65")
         assert len(run.posted) == 1
         assert "pace" not in run.posted[0]["data"]
+
+
+class TestR1ATapOfAnotherStepIsNotAnAnswer:
+    def test_old_activity_button_on_the_pace_question_is_not_a_pace(self) -> None:
+        run = _Run(_state("goal", _ANSWERED))
+        assert run.turn("cb:anketa:choice:goal:lose").action_type == "anketa_step_pace"
+
+        again = run.turn("cb:anketa:choice:activity:moderate")
+        # Вопрос о темпе задан снова, в каталог ничего не ушло.
+        assert again.action_type == "anketa_step_pace"
+        assert run.captured == []
+        assert "pace" not in run.bucket["answers"]
+
+        done = run.turn("cb:anketa:choice:pace:gentle")
+        assert done.action_type == "anketa_complete"
+        assert run.captured[0]["data"]["pace"] == "gentle"
+
+
+def _refused(fields: list[str], **over):
+    values = {
+        "targets_source": "none",
+        "daily_kcal": 0,
+        "protein_g": 0,
+        "fat_g": 0,
+        "carbs_g": 0,
+        "water_ml": 0,
+        "raw": {"overrides_applied": [{"reason": "insufficient_inputs", "fields": fields}]},
+        **over,
+    }
+    return replace(_profile(), **values)
+
+
+class TestR2TheRefusalNamesWhatIsMissing:
+    def test_one_missing_input_is_named(self) -> None:
+        text = _format_summary(_refused(["activity_coefficient"]))
+        assert "не хватает данных — активность" in text
+        assert "этот вопрос" in text
+
+    def test_several_missing_inputs_are_named_in_the_plural(self) -> None:
+        text = _format_summary(_refused(["pace", "activity_coefficient"]))
+        assert "темп, активность" in text
+        assert "эти вопросы" in text
+
+    def test_a_manual_water_target_is_not_hidden(self) -> None:
+        text = _format_summary(
+            _refused(["activity_coefficient"], water_ml=2000, targets_source="user_entered")
+        )
+        # Присутствие: ручная вода на карточке — а общий отказ её не прячет.
+        assert "2000" in text
+        assert "не хватает данных" not in text

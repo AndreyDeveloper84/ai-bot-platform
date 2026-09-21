@@ -50,8 +50,9 @@ so. See :data:`ACTIVITY_SKIP`.
   when the goal moves the number: the catalogue's goal correction is zero
   for ``maintain``, so a pace question there would ask for something the
   calculation never uses. For «похудеть» / «набрать» it is the step after
-  the goal (:data:`PACE_GOALS`) — the catalogue no longer assumes
-  ``moderate`` and refuses without it.
+  the goal (:data:`PACE_GOALS`). With the catalogue half of question 59 the
+  catalogue no longer assumes ``moderate`` and refuses without it; until it
+  lands the catalogue still fills its default.
 * **Consent is not a step here.** It sits BEFORE the FSM is entered:
   ``skill.py`` (``_on_enter``, #1664, §92) shows the
   ``personal_calculation`` consent screen and only constructs this FSM
@@ -121,9 +122,10 @@ ACTIVITY_COEFFICIENTS: dict[str, float] = {
 }
 
 #: The skip answer. Not a coefficient: no number is sent for it (CD §72,
-#: question 59) — only ``_skipped_fields: ["activity"]``, and the catalogue
-#: answers «не хватает данных: активность». Until question 59 the skill sent
-#: 1.375 here, a number chosen for the person.
+#: question 59) — only ``_skipped_fields: ["activity"]``. With the catalogue
+#: half the catalogue clears any earlier activity on it and answers «не
+#: хватает данных: активность». Until question 59 the skill sent 1.375 here,
+#: a number chosen for the person.
 ACTIVITY_SKIP = "unknown"
 
 #: Pace answers — the catalogue's ``NutritionProfile.Pace`` choices with its
