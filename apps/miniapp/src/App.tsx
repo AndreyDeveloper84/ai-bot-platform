@@ -99,6 +99,8 @@ import { CustomerBookingDetailScreen } from "./screens/CustomerBookingDetailScre
 import { CustomerBookingSuccessScreen } from "./screens/CustomerBookingSuccessScreen";
 import { CustomerCatalogScreen } from "./screens/CustomerCatalogScreen";
 import { RecommendationCardScreen } from "./screens/RecommendationCardScreen";
+import { ExecutionOptionScreen } from "./screens/ExecutionOptionScreen";
+import { ProviderChoiceScreen } from "./screens/ProviderChoiceScreen";
 import { CustomerMasterDetailScreen } from "./screens/CustomerMasterDetailScreen";
 import { CustomerProfileScreen } from "./screens/CustomerProfileScreen";
 import { CustomerNotificationSettingsScreen } from "./screens/CustomerNotificationSettingsScreen";
@@ -1263,6 +1265,11 @@ export function CustomerRoutes() {
         path="/customer/recommendation/:recommendationId"
         element={<RecommendationCardScreen />}
       />
+      {/* Один поток записи C05 по макету DRF-1320 (DRF-2178, этап 1 из 4):
+          способ исполнения → выбор специалиста. Время и «Проверь запись»
+          пока прежние экраны — радиус этапа ограничен намеренно. */}
+      <Route path="/customer/booking/option" element={<ExecutionOptionScreen />} />
+      <Route path="/customer/booking/provider" element={<ProviderChoiceScreen />} />
       <Route path="/customer/catalog" element={<CustomerCatalogScreen />} />
       {/*
         DRF-1481 — канонический адрес общей карточки услуги. Тот же

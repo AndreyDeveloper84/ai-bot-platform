@@ -13,15 +13,18 @@
  * кадр этого экрана, а другое состояние записи (`kind: "absence"`), и
  * говорится он словами владельца, общими с DM.
  *
- * «Подобрать вариант» ведёт в каталог СРАЗУ, без второго подтверждения:
- * человек пришёл сюда по ссылке из чата, и путь до подбора обязан быть
- * в один тап — иначе кадр читается как тупик.
+ * «Подобрать вариант» ведёт в поток записи СРАЗУ, без второго
+ * подтверждения: человек пришёл сюда по ссылке из чата, и путь до
+ * подбора обязан быть в один тап — иначе кадр читается как тупик.
+ * До DRF-2178 кнопка вела в каталог: шага «подходящий вариант» не
+ * существовало, и каталог был единственным честным продолжением.
  */
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 
 import { ScreenLayout } from "../components/ScreenLayout";
 import { ApiError } from "../lib/api";
+import { OPTION_ROUTE } from "../lib/booking-flow";
 import { closeApp, maxBridge } from "../lib/max-sdk";
 import { NO_VERIFIED_EVIDENCE_TEXT } from "../lib/recommendation-absence";
 import {
@@ -184,7 +187,7 @@ export function RecommendationCardScreen() {
         ))}
       </ul>
 
-      <button type="button" className="btn-primary" onClick={() => navigate("/customer/catalog")}>
+      <button type="button" className="btn-primary" onClick={() => navigate(OPTION_ROUTE)}>
         {BUTTON_PICK}
       </button>
       <button type="button" className="btn-secondary" onClick={() => setFrame("why")}>
