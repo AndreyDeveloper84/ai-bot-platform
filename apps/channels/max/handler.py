@@ -222,6 +222,7 @@ from apps.orchestrator.memory_announce import (
     weave_service_line,
 )
 from apps.orchestrator.memory_ask import maybe_weave_question, try_handle_answer
+from apps.orchestrator.red_flag_turn import RED_FLAG_ACTION_TYPE, red_flag_reply
 from apps.orchestrator.memory_block import build_concierge_memory_block
 from apps.orchestrator.nutrition_context import build_nutrition_context_block
 from apps.orchestrator.nutrition_wellness import interpretation_eligible
@@ -1749,6 +1750,29 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             t_start=t_start,
             outcome=AIRequestMetric.OUTCOME_SUCCESS,
             skill_selected="safety_pre_check",
+        )
+    elif (
+        _red_flag_reply := red_flag_reply(
+            event.text, bot_user=bot_user, conversation=conversation, trace_id=trace_id
+        )
+    ) is not None:
+        # DRF-2213 Q2 — медицинский red flag G1–G7 классификатора: ответ навыка
+        # health_screening без модели, сразу после гейта и ВЫШЕ любой другой
+        # ветки. В DRF-2000 это замыкание стояло внутри консьержа, и ветки
+        # ниже (онбординг, продолжение записи, ответ на вопрос памяти)
+        # отвечали на red flag своим текстом — «онемела половина лица»
+        # первым сообщением получало приветствие. Гейт выше уже снял
+        # «неотложку» и кризис; здесь — остальные группы классификатора.
+        reply = _red_flag_reply
+        assistant_action_type = RED_FLAG_ACTION_TYPE
+        _record_live_path_metric(
+            bot_user=bot_user,
+            conversation=conversation,
+            trace_id=trace_id,
+            message_text=event.text,
+            t_start=t_start,
+            outcome=AIRequestMetric.OUTCOME_SUCCESS,
+            skill_selected=RED_FLAG_ACTION_TYPE,
         )
     elif (_opt_out_reply := try_handle_opt_out(text=event.text, bot_user=bot_user)) is not None:
         # DRF-1285 — «не пиши мне» must work on THIS surface too. The skill
