@@ -9,8 +9,12 @@ FAQ / discovery instead of a safe response. This module wires the SAME
 
 ### Scope (S1-B, #1053) — detection + canned reply only
 
-* ``HANDOFF`` verdict (suicide / self-harm / acute emergency / abuse) → a canned
-  **crisis** reply (crisis resources).
+* ``HANDOFF`` verdict (suicide / self-harm / abuse) → a canned **crisis** reply
+  (crisis resources).
+* ``MEDICAL`` verdict (acute medical emergency — the «неотложка» group, DRF-2000)
+  → the medical emergency text
+  (:data:`apps.orchestrator.safety.medical_emergency.MEDICAL_EMERGENCY_TEXT_V2`,
+  103 / 112), never the psychological helpline.
 * ``BLOCK`` verdict (specific drugs / definitive diagnosis / legal advice) → a
   canned **block** reply.
 * ``CLARIFY`` and ``ALLOW`` → the turn proceeds to normal handling. We
