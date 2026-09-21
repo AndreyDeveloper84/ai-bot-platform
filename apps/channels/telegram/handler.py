@@ -105,6 +105,7 @@ from apps.orchestrator.safety.gate import (
     evaluate_inbound,
     guard_outbound,
     reaches_through_handoff,
+    under_handoff,
 )
 from apps.orchestrator.turn_seam import (
     SURFACE_PER_TENANT,
@@ -232,10 +233,18 @@ def handle_inbound(payload: dict[str, Any], tenant: "Tenant") -> None:
     # seam is contractually side-effect-free (it never persists, never sends)
     # and MAX already gates above it, so putting it there would either double-
     # run the verdict or force side effects into the seam.
+    #
+    # Q1 п.1в / п.1а (CD §72): under a handoff a classifier red flag becomes the
+    # MEDICAL outcome (``under_handoff``), and the operator is signalled.
     safety = evaluate_inbound(event.text)
-    if not safety.allowed and (
-        conversation.state != Conversation.State.HUMAN_HANDOFF or reaches_through_handoff(safety)
-    ):
+    in_handoff = conversation.state == Conversation.State.HUMAN_HANDOFF
+    if in_handoff:
+        safety = under_handoff(event.text, safety)
+    if in_handoff and reaches_through_handoff(safety):
+        from apps.handoff.notify import notify_safety_reply_during_handoff
+
+        notify_safety_reply_during_handoff(conversation=conversation)
+    if not safety.allowed and (not in_handoff or reaches_through_handoff(safety)):
         _emit_safety_shortcircuit(bot_user, safety)
         record_message(
             conversation,

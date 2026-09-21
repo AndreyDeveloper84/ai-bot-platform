@@ -44,6 +44,7 @@ a second copy.
 from __future__ import annotations
 
 import logging
+from typing import Any
 from collections.abc import Callable, Sequence
 
 from django.conf import settings
@@ -366,3 +367,95 @@ def _write_notify_failure_audit(task: AdminTask, address: str, exc: Exception) -
         )
     except Exception:  # noqa: BLE001 — the audit row is best-effort too
         logger.exception("handoff.notify.audit_failed task=%s", task.id)
+
+
+# ---------------------------------------------------------------------------
+# DRF-2213 Q1 п.1а — a safety reply went out over the operator
+# ---------------------------------------------------------------------------
+
+#: The signal names what happened, never what the client wrote: the operator
+#: opens the dialogue to read it, where access is logged (client_scope).
+SAFETY_REPLY_SIGNAL_TEXT = (
+    "Ayla отправила клиенту экстренный ответ (кризис или неотложка), пока "
+    "диалог ведёт оператор. Текст клиента сюда не пересылается — откройте "
+    "диалог."
+)
+
+
+def _open_handoff_task(*, conversation: Any, channel: str, channel_user_id: str) -> Any:
+    """The open HANDOFF task a muted turn belongs to — same reach as
+    ``orchestrator.handoff.global_handoff_muted``: this conversation, or any
+    BotUser of the same channel identity (the task may sit in a salon queue)."""
+
+    from apps.identity.models import BotUser
+
+    open_statuses = (AdminTask.Status.OPEN, AdminTask.Status.IN_PROGRESS)
+    task = (
+        AdminTask.all_tenants.filter(conversation=conversation, status__in=open_statuses)
+        .order_by("-created_at")
+        .first()
+    )
+    if task is not None or not channel_user_id:
+        return task
+    return (
+        AdminTask.all_tenants.filter(
+            bot_user_id__in=BotUser.all_tenants.filter(
+                channel=channel, channel_user_id=channel_user_id
+            ).values("id"),
+            task_type=AdminTask.TaskType.HANDOFF,
+            status__in=open_statuses,
+        )
+        .order_by("-created_at")
+        .first()
+    )
+
+
+def notify_safety_reply_during_handoff(
+    *, conversation: Any, channel: str = "", channel_user_id: str = ""
+) -> None:
+    """Tell the operator a crisis / emergency reply went out over them. NEVER raises.
+
+    Owner decision «все по рекомендациям» (CD §72, DRF-2213 Q1 п.1а): the
+    reply itself is N-1 (always answered); the operator must not learn about
+    it only from the history. Routed where the task lives:
+
+    * a salon's task → its staff through ``salon_notify`` (kind ``handoff``);
+    * the platform's task (the tenant-less global bot) → the platform
+      operators' channel (``HANDOFF_NOTIFY_MAX_*``).
+
+    No new ``AdminTask`` (п.1б) — the operator already has one. No client
+    text in either signal.
+    """
+
+    try:
+        from apps.identity.constants import GLOBAL_BOT_TENANT_SLUG
+
+        task = _open_handoff_task(
+            conversation=conversation, channel=channel, channel_user_id=channel_user_id
+        )
+        tenant = getattr(task, "tenant", None) or getattr(conversation, "tenant", None)
+        if getattr(tenant, "slug", "") == GLOBAL_BOT_TENANT_SLUG:
+            recipients = get_notify_addresses()
+            if not recipients:
+                return
+            url = admin_task_url(task.id) if task is not None else ""
+            text = SAFETY_REPLY_SIGNAL_TEXT + (f"\n{url}" if url else "")
+            send_max_notification(text=text, addresses=recipients)
+            logger.info(
+                "handoff.notify.safety_reply_signalled route=platform task=%s",
+                getattr(task, "id", None),
+            )
+            return
+
+        from apps.channels.max import salon_notify
+
+        salon_notify.notify(salon_notify.safety_reply_notice(conversation, task, tenant=tenant))
+        logger.info(
+            "handoff.notify.safety_reply_signalled route=salon task=%s",
+            getattr(task, "id", None),
+        )
+    except Exception:  # noqa: BLE001 — the reply already went out; the signal is best-effort
+        logger.exception(
+            "handoff.notify.safety_reply_signal_failed conversation=%s",
+            getattr(conversation, "id", None),
+        )
