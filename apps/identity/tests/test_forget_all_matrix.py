@@ -55,6 +55,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import uuid
 from collections.abc import Callable
@@ -181,6 +182,13 @@ OUTCOMES: dict[str, Outcome] = {
         DELETE,
         "conversations.erasure._clear_redis_stores → pii_tokenizer.clear_conversation",
         "обратная карта токенов rev:<PHONE_…> → настоящий номер удаляется",
+    ),
+    "redis.ingress_stream": Outcome(
+        DELETE,
+        "conversations.erasure._purge_raw_entries → ingress.streams.purge_person_entries",
+        "сырые тела вебхуков человека до момента запроса удаляются из ingress:* и "
+        "их :dlq (DRF-2220); тело, отправителя которого не прочитать, уходит по "
+        "INGRESS_RAW_RETENTION_HOURS",
     ),
     "conversations.Conversation": Outcome(
         DELETE,
@@ -373,10 +381,45 @@ class _FakeRedis:
     def __init__(self) -> None:
         self.store: dict[str, Any] = {}
         self.deleted: list[str] = []
+        # DRF-2220 — ingress streams: stream → [(id, fields)].
+        self.streams: dict[str, list[tuple[str, dict[str, str]]]] = {}
 
     def delete(self, key: str) -> int:
         self.deleted.append(key)
         return 1 if self.store.pop(key, None) is not None else 0
+
+    @staticmethod
+    def _bound(raw: str, *, upper: bool) -> tuple[float, float, bool]:
+        # (ms, seq, exclusive). An id without «-seq» covers the whole
+        # millisecond, as in Redis: as an upper bound it reaches every seq.
+        exclusive = raw.startswith("(")
+        raw = raw.lstrip("(")
+        if raw == "-":
+            return (float("-inf"), 0, exclusive)
+        if raw == "+":
+            return (float("inf"), 0, exclusive)
+        ms, _, seq = raw.partition("-")
+        default_seq = float("inf") if upper else 0
+        return (float(ms), float(seq) if seq else default_seq, exclusive)
+
+    def xrange(self, stream: str, min: str = "-", max: str = "+", count: int | None = None):  # noqa: A002
+        lo_ms, lo_seq, lo_ex = self._bound(min, upper=False)
+        hi_ms, hi_seq, hi_ex = self._bound(max, upper=True)
+        out = []
+        for entry_id, fields in self.streams.get(stream, []):
+            ms, _, seq = entry_id.partition("-")
+            key = (float(ms), float(seq))
+            if key < (lo_ms, lo_seq) or (lo_ex and key == (lo_ms, lo_seq)):
+                continue
+            if key > (hi_ms, hi_seq) or (hi_ex and key == (hi_ms, hi_seq)):
+                continue
+            out.append((entry_id, dict(fields)))
+        return out[:count] if count else out
+
+    def xdel(self, stream: str, *entry_ids: str) -> int:
+        before = len(self.streams.get(stream, []))
+        self.streams[stream] = [e for e in self.streams.get(stream, []) if e[0] not in entry_ids]
+        return before - len(self.streams[stream])
 
 
 @pytest.fixture
@@ -384,9 +427,12 @@ def fake_redis(monkeypatch) -> _FakeRedis:
     from apps.llm import pii_tokenizer
     from apps.orchestrator.memory import short_term
 
+    from apps.ingress import streams
+
     fake = _FakeRedis()
     monkeypatch.setattr(short_term, "_redis_client", lambda: fake)
     monkeypatch.setattr(pii_tokenizer, "_redis_client", lambda: fake)
+    monkeypatch.setattr(streams, "_client", lambda: fake)
     return fake
 
 
@@ -473,6 +519,12 @@ def _memory_entry(upc: UserPersonalContext, zone: str, label: str) -> MemoryEntr
     )
 
 
+#: DRF-2220 — the stream the seeded raw entry lands in; must be one the purge
+#: scans (a registered ingress stream), checked by the matrix test below.
+_INGRESS_STREAM = "ingress:max_global"
+_INGRESS_SEQ = [0]
+
+
 def seed_person(tenant: Tenant, fake_redis: _FakeRedis, label: str) -> Person:
     """По одной строке в КАЖДОМ хранилище из :data:`OUTCOMES` (кроме каталога — он подменён)."""
 
@@ -541,6 +593,30 @@ def seed_person(tenant: Tenant, fake_redis: _FakeRedis, label: str) -> Person:
     )
     fake_redis.store[f"conv:{conversation.id}:msgs"] = [f"raw-{label}"]
     fake_redis.store[f"pii_tokenmap:{conversation.id}"] = {"rev:PHONE_1": _PHONE}
+    # DRF-2220 — the raw webhook of one of those turns, left in the stream
+    # (a failed entry: a processed one is already gone). Its id is the
+    # enqueue millisecond, before the request like the turns themselves.
+    _INGRESS_SEQ[0] += 1
+    fake_redis.streams.setdefault(_INGRESS_STREAM, []).append(
+        (
+            f"{int(earlier.timestamp() * 1000)}-{_INGRESS_SEQ[0]}",
+            {
+                "data": json.dumps(
+                    {
+                        "update_type": "message_created",
+                        "message": {
+                            "sender": {"user_id": bot_user.channel_user_id},
+                            "recipient": {"chat_id": bot_user.chat_id},
+                            "body": {"text": f"я веган, мой номер {_PHONE} [{label}]"},
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                "trace_id": "",
+                "resolved_tenant_id": "",
+            },
+        )
+    )
 
     staff_thread = StaffAssistantThread.all_tenants.create(
         tenant=tenant, bot_user=bot_user, role_at_open="admin"
@@ -654,6 +730,17 @@ def snapshot(store: str, person: Person, fake_redis: _FakeRedis) -> Any:
         return fake_redis.store.get(f"conv:{person.conversation.id}:msgs")
     if store == "redis.pii_tokenmap":
         return fake_redis.store.get(f"pii_tokenmap:{person.conversation.id}")
+    if store == "redis.ingress_stream":
+        from apps.ingress.streams import raw_streams
+
+        # «No entries» reads as None, the same «key is gone» the other Redis
+        # stores report, so the shared DELETE rule applies unchanged.
+        return [
+            fields["data"]
+            for stream in raw_streams()
+            for _entry_id, fields in fake_redis.streams.get(stream, [])
+            if json.loads(fields["data"])["message"]["sender"]["user_id"] == bu.channel_user_id
+        ] or None
     if store == "conversations.Conversation":
         return list(
             Conversation.all_tenants.filter(pk=person.conversation.pk).values(
@@ -878,6 +965,48 @@ class TestAfterTheSweepEveryStoreHasItsOutcome:
         again = sweep_forget_all(run.person.ayla_user_id)
         assert again.changed is False
         assert f"conv:{run.neighbour.conversation.id}:msgs" in run.fake_redis.store
+
+
+class TestTheStreamsUnreachable:
+    """DRF-2220 — Redis down at «забудь всё»: the rest runs, the gap is named.
+
+    The ingress streams hold copies that expire by INGRESS_RAW_RETENTION_HOURS,
+    so an outage there must neither block the database half nor be reported
+    as erased. Checked end to end: the dialogue is anonymised, the raw entry
+    is still there, and the sweep's own audit row says the streams were not
+    checked.
+    """
+
+    def test_the_database_half_runs_and_the_streams_are_named_unchecked(self, swept, monkeypatch):
+        import redis
+
+        from apps.audit.models import AuditLog
+        from apps.ingress import streams
+
+        def _down():
+            raise redis.ConnectionError("ingress redis is down")
+
+        monkeypatch.setattr(streams, "_client", _down)
+
+        run = swept()
+
+        assert run.status is GateStatus.OK, run.status
+        after = snapshot("conversations.Message", run.person, run.fake_redis)
+        assert_outcome(
+            "conversations.Message",
+            run.person,
+            run.before["person"]["conversations.Message"],
+            after,
+            run.catalog,
+        )
+        assert snapshot("redis.ingress_stream", run.person, run.fake_redis) is not None
+        rows = [
+            a.payload
+            for a in AuditLog.all_tenants.filter(action="memory.forget_all_swept")
+            if a.payload.get("user_id") == str(run.person.ayla_user_id)
+        ]
+        assert rows, "the sweep wrote no audit row"
+        assert all(r["raw_streams_checked"] is False for r in rows), rows
 
 
 class TestTheCatalogReadbackIsTheLastWord:

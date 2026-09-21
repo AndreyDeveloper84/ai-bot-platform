@@ -46,7 +46,12 @@ from apps.orchestrator.memory.personal_context import record_explicit_green_fact
 from apps.orchestrator.memory_block import build_concierge_memory_block
 from apps.persona.memory_commands import FORGET_ALL_PROMPT, handle_memory_command
 
-pytestmark = pytest.mark.django_db(transaction=True)
+# DRF-2220 — erasure also purges the ingress streams; this file is not
+# about them, so they are empty and need no Redis (apps/conftest.py).
+pytestmark = [
+    pytest.mark.django_db(transaction=True),
+    pytest.mark.usefixtures("ingress_streams_empty"),
+]
 
 
 # ---------------------------------------------------------------------------

@@ -156,6 +156,16 @@ class AnonymizeResult:
     drafts_cleared: int = 0
     windows_cleared: int = 0
     conversation_ids: tuple[uuid.UUID, ...] = field(default_factory=tuple)
+    #: DRF-2220 — raw webhook entries of this person deleted from the
+    #: ``ingress:*`` streams and their DLQs, and entries up to the cutoff
+    #: whose sender could not be read (kept; gone by the retention window).
+    raw_entries_deleted: int = 0
+    raw_entries_unattributed: int = 0
+    #: False when Redis could not be read for that purge. The database half
+    #: still ran — a side store must not hold the erasure hostage — and the
+    #: entries leave by INGRESS_RAW_RETENTION_HOURS; callers must say so
+    #: rather than report the streams as erased.
+    raw_streams_checked: bool = True
 
     @property
     def changed(self) -> bool:
@@ -303,6 +313,28 @@ def _clear_redis_stores(conversation_id: uuid.UUID) -> None:
     pii_tokenizer.clear_conversation(conversation_id)
 
 
+def _purge_raw_entries(bot_user_ids: list[uuid.UUID], *, through: datetime) -> Any:
+    """XDEL the person's raw MAX webhook entries up to ``through`` (DRF-2220).
+
+    The streams key an entry by the MAX user id inside its body, so the
+    shells are mapped to their ``channel_user_id`` first — MAX shells only:
+    another channel's id space could collide with a MAX id and take a
+    stranger's entry.
+    """
+
+    from apps.identity.models import BotUser
+    from apps.ingress.streams import purge_person_entries
+
+    channel_user_ids = [
+        cid
+        for cid in BotUser.all_tenants.filter(id__in=bot_user_ids, channel="max").values_list(
+            "channel_user_id", flat=True
+        )
+        if cid
+    ]
+    return purge_person_entries(channel_user_ids, through=through)
+
+
 def shell_ids_for_person(
     *,
     bot_user: Any = None,
@@ -366,6 +398,32 @@ def anonymize_dialogue(
     ids = [i for i in bot_user_ids if i is not None]
     if not ids:
         return AnonymizeResult()
+
+    # DRF-2220 — the raw webhook bodies of the same turns. A processed entry
+    # is already gone; what can remain is a failed one (PEL) or its DLQ copy,
+    # up to INGRESS_RAW_RETENTION_HOURS. Bounded by ``through`` like the rest
+    # of this function, so re-running is free and a turn sent after the
+    # request is never touched.
+    #
+    # Unlike `_clear_redis_stores` below, a failure here does NOT stop the
+    # database half. That one guards the dialogue itself and its retry is
+    # the unmoved cutoff; this store holds copies that expire by the term
+    # anyway, and a person without a pre-request conversation has no cutoff
+    # to leave unmoved — raising would block their erasure without buying a
+    # retry. So: log it, carry `raw_streams_checked=False` to every caller,
+    # and let none of them report the streams as erased.
+    raw_checked = True
+    try:
+        raw = _purge_raw_entries(ids, through=through)
+    except Exception:  # noqa: BLE001 — named in the result, not swallowed
+        logger.exception(
+            "conversations.erasure.ingress_purge_failed — streams unchecked; "
+            "raw entries leave by INGRESS_RAW_RETENTION_HOURS"
+        )
+        from apps.ingress.streams import RawPurgeResult
+
+        raw = RawPurgeResult()
+        raw_checked = False
 
     conversations = list(
         # ``created_at__lte`` matters: a thread STARTED after the request
@@ -504,6 +562,9 @@ def anonymize_dialogue(
         drafts_cleared=drafts_total,
         windows_cleared=windows_total,
         conversation_ids=tuple(touched),
+        raw_entries_deleted=raw.deleted,
+        raw_entries_unattributed=raw.unattributed,
+        raw_streams_checked=raw_checked,
     )
 
     if result.changed:

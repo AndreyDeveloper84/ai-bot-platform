@@ -26,7 +26,9 @@ from apps.identity.services.deletion_gate import (
 from apps.identity.services.privacy import DeleteCascadeResult, DeleteStep
 from apps.tenancy.models import Tenant
 
-pytestmark = pytest.mark.django_db
+# DRF-2220 — erasure also purges the ingress streams; this file is not
+# about them, so they are empty and need no Redis (apps/conftest.py).
+pytestmark = [pytest.mark.django_db, pytest.mark.usefixtures("ingress_streams_empty")]
 
 AYLA_ID = uuid.UUID("11111111-2222-3333-4444-555555555555")
 REQUEST_ID = str(uuid.uuid4())

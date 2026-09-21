@@ -60,3 +60,32 @@ def catalog_admin_link_stub(monkeypatch) -> CatalogAdminLinkStub:
 
     monkeypatch.setattr(salon_admin_link, "ensure_catalog_salon_admin", _fake)
     return stub
+
+
+class _EmptyIngressStreams:
+    """The ingress streams as a fresh Redis would answer: nothing in them."""
+
+    def xrange(self, stream, min="-", max="+", count=None):  # noqa: A002
+        return []
+
+    def xdel(self, stream, *entry_ids):
+        return 0
+
+
+@pytest.fixture
+def ingress_streams_empty(monkeypatch) -> _EmptyIngressStreams:
+    """No raw webhook entries in Redis, and no Redis needed to learn it (DRF-2220).
+
+    Every erasure path now also purges the person's raw webhook bodies from
+    the ``ingress:*`` streams (``conversations.erasure._purge_raw_entries``),
+    so a test that erases someone reaches the stream client even when it is
+    about something else. Opt in with ``pytest.mark.usefixtures(
+    "ingress_streams_empty")`` — the purge itself is proven against a real
+    stream shape in ``apps/ingress/tests/test_raw_retention.py`` and, across
+    every store, in ``apps/identity/tests/test_forget_all_matrix.py``.
+    """
+    from apps.ingress import streams
+
+    fake = _EmptyIngressStreams()
+    monkeypatch.setattr(streams, "_client", lambda: fake)
+    return fake

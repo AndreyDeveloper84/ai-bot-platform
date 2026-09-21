@@ -45,7 +45,12 @@ from apps.identity.models import BotUser
 from apps.orchestrator.memory import short_term
 from apps.tenancy.models import Tenant
 
-pytestmark = pytest.mark.django_db(transaction=True)
+# DRF-2220 — erasure also purges the ingress streams; this file is not
+# about them, so they are empty and need no Redis (apps/conftest.py).
+pytestmark = [
+    pytest.mark.django_db(transaction=True),
+    pytest.mark.usefixtures("ingress_streams_empty"),
+]
 
 APPS_ROOT = Path(__file__).resolve().parents[2]
 

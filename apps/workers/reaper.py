@@ -70,7 +70,7 @@ from apps.workers.registry import registered_streams
 
 logger = logging.getLogger(__name__)
 
-DLQ_SUFFIX = ":dlq"
+DLQ_SUFFIX = ingress_streams.DLQ_SUFFIX
 PEL_REAPED_EVENT_TYPE = "worker.pel_reaped"
 
 # D-1 (adversarial-pass): hostname-suffixed consumer name so two beat
@@ -430,6 +430,19 @@ def reap_pel_once(
             )
             # Skip the emit too — next tick's audit row will cover it.
             continue
+
+        # DRF-2220 — the body now lives in the DLQ (or was re-added); the
+        # original would otherwise stay in the source stream for good. A
+        # failure here is not a correctness problem: the retention trim
+        # removes the entry by its age.
+        try:
+            client.xdel(stream, entry_id)
+        except Exception:  # noqa: BLE001
+            logger.exception(
+                "workers.reaper.xdel_failed stream=%s entry_id=%s — left to the retention trim",
+                stream,
+                entry_id,
+            )
 
         try:
             emit(

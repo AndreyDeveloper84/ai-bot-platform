@@ -35,6 +35,9 @@ class _FakeStreamRedis:
         self._counter = 0
         # Reaper cursor persistence (B3 adversarial-pass).
         self._kv: dict[str, str] = {}
+        # DRF-2220 — XDEL'd ids. Kept as a set, not removed from the list,
+        # so ``group_offset`` (an index into that list) stays valid.
+        self.deleted: set[tuple[str, str]] = set()
 
     def xgroup_create(self, name: str, groupname: str, id: str, mkstream: bool):  # noqa: A002
         import redis
@@ -83,8 +86,17 @@ class _FakeStreamRedis:
             return 1
         return 0
 
+    def xdel(self, stream: str, *entry_ids: str) -> int:
+        live = {eid for eid, _ in self.streams.get(stream, [])}
+        removed = 0
+        for eid in entry_ids:
+            if eid in live and (stream, eid) not in self.deleted:
+                self.deleted.add((stream, eid))
+                removed += 1
+        return removed
+
     def xrange(self, stream: str) -> list[tuple[str, dict[str, str]]]:
-        return list(self.streams.get(stream, []))
+        return [e for e in self.streams.get(stream, []) if (stream, e[0]) not in self.deleted]
 
     def xautoclaim(
         self,
@@ -185,6 +197,27 @@ class TestConsumeOnce:
         # PEL should be empty — the entry was XACK'd.
         assert fake_redis.pel.get(("ingress:max", "consumers"), {}) == {}
 
+    def test_a_processed_entry_leaves_the_stream(self, fake_redis):
+        """DRF-2220 — the raw webhook body does not outlive its processing.
+
+        XACK only clears the PEL; the entry itself — message text, name, a
+        shared contact — stayed in ``ingress:<channel>`` for good (on the
+        stand: from 03.09 on). Nothing reads a processed entry again: the
+        group reads ``>`` only, and the reaper claims from the PEL.
+        """
+
+        @register("ingress:max")
+        class _H(TenantAwareTask):
+            def handle(self, payload):
+                pass
+
+        entry_id = streams.enqueue("max", {"text": "позвоните мне"})
+        assert [eid for eid, _ in fake_redis.xrange("ingress:max")] == [entry_id]
+
+        consumer.consume_once(streams=["ingress:max"])
+
+        assert fake_redis.xrange("ingress:max") == []
+
 
 class TestTenantContextRestoration:
     def test_tenant_set_during_handler(self, fake_redis, settings):
@@ -252,6 +285,23 @@ class TestHandlerFailure:
         # PEL still holds the entry — consumer didn't XACK.
         pel = fake_redis.pel.get(("ingress:max", "consumers"), {})
         assert len(pel) == 1
+
+    def test_a_failed_entry_stays_in_the_stream_for_the_reaper(self, fake_redis):
+        """DRF-2220 — the other half: XAUTOCLAIM needs the body to exist.
+
+        A failed entry is kept for the PEL reaper / operator; deleting it
+        here would hand the reaper an id with no fields.
+        """
+
+        @register("ingress:max")
+        class _H(TenantAwareTask):
+            def handle(self, payload):
+                raise RuntimeError("boom")
+
+        entry_id = streams.enqueue("max", {"text": "позвоните мне"})
+        consumer.consume_once(streams=["ingress:max"])
+
+        assert [eid for eid, _ in fake_redis.xrange("ingress:max")] == [entry_id]
 
     def test_failed_handler_emits_event(self, fake_redis):
         @register("ingress:max")

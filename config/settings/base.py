@@ -326,6 +326,17 @@ PEL_REAPER_IDLE_SECONDS = int(os.environ.get("PEL_REAPER_IDLE_SECONDS", "3600"))
 # DoS the audit pipeline if 100K entries are stuck.
 PEL_REAPER_BATCH_SIZE = int(os.environ.get("PEL_REAPER_BATCH_SIZE", "100"))
 
+# DRF-2220 — the longest a raw inbound webhook body (message text, name, a
+# shared contact) may stay in an ``ingress:*`` stream or its ``:dlq``. A
+# processed entry is deleted at once (consumer XACK+XDEL); this bounds the
+# rest — entries that failed and wait in the PEL, and the reaper's DLQ copies.
+# 72 h is the main window's proposal, not a measured figure: redelivery is
+# never automatic (the group reads ">" only), the reaper claims after
+# PEL_REAPER_IDLE_SECONDS, and past that only manual triage remains. The
+# retention period is the owner's question and has been put to them; if the
+# answer differs, this one value changes.
+INGRESS_RAW_RETENTION_HOURS = int(os.environ.get("INGRESS_RAW_RETENTION_HOURS", "72"))
+
 # Sprint 8 / F2 (DRF-731) — STRICT_TENANT_SCOPE post-flip monitor armed.
 # Operator sets this to the ISO 8601 flip timestamp at the same moment
 # they roll STRICT_TENANT_SCOPE=strict in /etc/ai-bot-platform/.env.
@@ -1425,6 +1436,13 @@ CELERY_BEAT_SCHEDULE = {
     "workers.reap_pel": {
         "task": "apps.workers.tasks.reap_pel",
         "schedule": crontab(minute="*/5"),
+    },
+    # DRF-2220 — raw webhook bodies older than INGRESS_RAW_RETENTION_HOURS
+    # leave every ``ingress:*`` stream and its ``:dlq``. Not gated on the
+    # reaper flag: with the reaper off, failed entries have no other exit.
+    "workers.trim_ingress_streams": {
+        "task": "apps.workers.tasks.trim_ingress_streams",
+        "schedule": crontab(minute="17"),
     },
     # PR #507 adversarial A8 — bound the cross-service event-ingest
     # tables' retention. DLQ persists envelope.data per §6.4 (PII
