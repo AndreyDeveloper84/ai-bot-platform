@@ -183,7 +183,8 @@ OUTCOMES: dict[str, Outcome] = {
     ),
     "conversations.Conversation": Outcome(
         DELETE,
-        "никто — anonymize_dialogue двигает только anonymized_through",
+        "conversations.erasure.anonymize_dialogue — skill_state={} тем же "
+        "обновлением, что и anonymized_through (DRF-2181)",
         "skill_state держит незавершённые анкеты (питание: вес/рост/цель); "
         "после «забудь всё» должен быть пуст",
     ),
@@ -261,9 +262,9 @@ UNDECLARED_IN_EXPORT: dict[str, str] = {
 #: Хранилища, где сегодняшняя цепочка НЕ даёт ожидаемого исхода. Лист следом.
 ERASURE_HOLES: dict[str, str] = {
     # DRF-2180 закрыл обе строки MemoryEntry: свип снимает все три зоны, на
-    # красную — строка RedZoneAccessLog. Метки сняты, потому что strict-xfail
-    # покраснел сам, как и задумано этим реестром.
-    "conversations.Conversation": "skill_state с анкетой не очищается ни свипом, ни обезличиванием",
+    # красную — строка RedZoneAccessLog. DRF-2181 закрыл Conversation:
+    # anonymize_dialogue опустошает skill_state. Метки сняты, потому что
+    # strict-xfail покраснел сам, как и задумано этим реестром.
 }
 
 
