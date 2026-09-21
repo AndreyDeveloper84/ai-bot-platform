@@ -91,7 +91,7 @@ def handle_review_created(envelope: IngestEnvelope) -> None:
          INSERT-or-IntegrityError pattern. On collision → already
          processed → short-circuit.
       4. Locate ClientProfile via BotUser.ayla_user_id =
-         envelope.user_id, filtered by tenant.
+         envelope.require_user_id(), filtered by tenant.
       5. Update ClientProfile review-derived fields if W4 fields are
          present; gracefully skip with warning otherwise.
     """
@@ -138,13 +138,13 @@ def handle_review_created(envelope: IngestEnvelope) -> None:
     low_rating = rating <= 2
 
     try:
-        user_id = UUID(envelope.user_id)
+        user_id = UUID(envelope.require_user_id())
     except (TypeError, ValueError) as exc:
         logger.warning(
             "eventbus.consumer.reviews.review_created.bad_envelope_user_id "
             "event_id=%s user_id=%r exc=%s",
             envelope.event_id,
-            envelope.user_id,
+            envelope.require_user_id(),
             exc,
         )
         return

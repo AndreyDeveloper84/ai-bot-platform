@@ -398,3 +398,40 @@ class TestSignalIsNeverMoreImportantThanWork:
             sba.signal_budget(used=10, limit=0, day=DAY)
             sba.signal_budget(used=10, limit=-5, day=DAY)
         assert paged.call_args_list == []
+
+
+class TestTheOutcomeIsReturned:
+    """DRF-2196 (по ревью бот-стороны): ядро говорит вызывающему, что не справилось.
+
+    У события каталога вызов на сутки и порог один — «следующий скан
+    переспросит» там неправда. Вызывающий обязан отличать «звучать не нужно»
+    от «страница не ушла», чтобы на втором отказаться принимать событие.
+    """
+
+    def test_delivered(self) -> None:
+        with patch.object(sba, "page", return_value=True):
+            assert sba.signal_budget(used=500, limit=500, day=DAY) == "delivered"
+
+    def test_not_delivered_when_no_sink_took_it(self) -> None:
+        with patch.object(sba, "page", return_value=False):
+            assert sba.signal_budget(used=500, limit=500, day=DAY) == "not_delivered"
+
+    def test_not_delivered_when_the_sink_raised(self) -> None:
+        with patch.object(sba, "page", side_effect=RuntimeError("sink down")):
+            assert sba.signal_budget(used=500, limit=500, day=DAY) == "not_delivered"
+
+    @pytest.mark.parametrize(
+        ("used", "limit"),
+        [(100, 500), (None, 500), (500, 0)],
+        ids=["ниже порога", "мусор", "нет потолка"],
+    )
+    def test_skipped_when_there_is_nothing_to_say(self, used, limit) -> None:
+        with patch.object(sba, "page", return_value=True) as paged:
+            assert sba.signal_budget(used=used, limit=limit, day=DAY) == "skipped"
+        assert paged.call_args_list == []
+
+    def test_skipped_when_it_already_sounded_today(self) -> None:
+        """Положительная пара к `delivered`: второй раз за сутки — не страница."""
+        with patch.object(sba, "page", return_value=True):
+            assert sba.signal_budget(used=500, limit=500, day=DAY) == "delivered"
+            assert sba.signal_budget(used=500, limit=500, day=DAY) == "skipped"

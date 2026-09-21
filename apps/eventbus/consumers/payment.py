@@ -265,12 +265,12 @@ def handle_payment_authorized(envelope: IngestEnvelope) -> None:
         )
         return
 
-    conversation = _resolve_conversation(tenant=tenant, user_id=envelope.user_id)
+    conversation = _resolve_conversation(tenant=tenant, user_id=envelope.require_user_id())
     if conversation is None:
         logger.info(
             "eventbus.consumer.payment.authorized.no_conversation "
             "user_id=%s tenant_id=%s payment_id=%s",
-            envelope.user_id,
+            envelope.require_user_id(),
             envelope.tenant_id,
             payment_id,
         )
@@ -326,7 +326,7 @@ def handle_payment_captured(envelope: IngestEnvelope) -> None:
         event_id=envelope.event_id,
     )
 
-    conversation = _resolve_conversation(tenant=tenant, user_id=envelope.user_id)
+    conversation = _resolve_conversation(tenant=tenant, user_id=envelope.require_user_id())
 
     # Round-2 NEW-2 fix: put dedupe INSERT + Conversation update +
     # emit inside the SAME inner atomic so a partial failure rolls
@@ -379,7 +379,7 @@ def handle_payment_captured(envelope: IngestEnvelope) -> None:
             emit_internal_event(
                 "loyalty_bonus_eligible",
                 properties={
-                    "user_id": envelope.user_id,
+                    "user_id": envelope.require_user_id(),
                     "tenant_id": envelope.tenant_id,
                     "payment_id": str(payment_id),
                     "appointment_id": str(appointment_id),
@@ -432,12 +432,12 @@ def handle_payment_failed(envelope: IngestEnvelope) -> None:
         event_id=envelope.event_id,
     )
 
-    conversation = _resolve_conversation(tenant=tenant, user_id=envelope.user_id)
+    conversation = _resolve_conversation(tenant=tenant, user_id=envelope.require_user_id())
     if conversation is None:
         logger.info(
             "eventbus.consumer.payment.failed.no_conversation "
             "user_id=%s tenant_id=%s payment_id=%s",
-            envelope.user_id,
+            envelope.require_user_id(),
             envelope.tenant_id,
             payment_id,
         )
@@ -522,7 +522,7 @@ def handle_payment_failed(envelope: IngestEnvelope) -> None:
         skill_payload = {
             "payment_id": str(payment_id),
             "appointment_id": str(appointment_id),
-            "client_user_id": envelope.user_id,
+            "client_user_id": envelope.require_user_id(),
             "tenant_id": envelope.tenant_id,
             "failure_code": failure_code,
             "consecutive_failures": new_count,
@@ -564,7 +564,7 @@ def handle_payment_failed(envelope: IngestEnvelope) -> None:
             # recipient's bound channel (MAX in pilot) — derived, not
             # hardcoded, so a future multi-channel user is keyed
             # correctly. ``locked.bot_user`` is the select_related row.
-            dispatch_recipient_id = envelope.user_id
+            dispatch_recipient_id = envelope.require_user_id()
             dispatch_channel = locked.bot_user.channel
 
             def _dispatch_skill() -> None:
@@ -646,7 +646,7 @@ def handle_payment_refunded(envelope: IngestEnvelope) -> None:
         event_id=envelope.event_id,
     )
 
-    conversation = _resolve_conversation(tenant=tenant, user_id=envelope.user_id)
+    conversation = _resolve_conversation(tenant=tenant, user_id=envelope.require_user_id())
 
     # Round-2 fixes (mirror handle_payment_captured):
     # * NEW-1: tenant in dedupe unique key blocks cross-tenant
@@ -675,7 +675,7 @@ def handle_payment_refunded(envelope: IngestEnvelope) -> None:
             emit_internal_event(
                 "loyalty_refund_reverse",
                 properties={
-                    "user_id": envelope.user_id,
+                    "user_id": envelope.require_user_id(),
                     "tenant_id": envelope.tenant_id,
                     "payment_id": str(payment_id),
                     "appointment_id": str(appointment_id),
