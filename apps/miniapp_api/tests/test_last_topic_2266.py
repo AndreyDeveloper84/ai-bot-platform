@@ -107,3 +107,50 @@ class TestReplacementCharactersAreNotAPreview:
         _turn(conv, A, f"{FFFD * 3} {FFFD * 4}", minutes_ago=5)
         body = _get(client, bot_user).json()
         assert body["last_topic"]["text"] == "Подобрала мастера на субботу"
+
+
+class TestChatLinkForTheButtons:
+    """«Продолжить разговор» ведёт в чат того бота, из которого открыт Mini App.
+
+    web.max.ru (скрины владельца 21.09): моста ``close()`` там может не быть,
+    и кнопка молча ничего не делала. Ссылка на диалог бота — из его записи
+    реестра (``MAX_BOT_<S>_LINK``), бот — тот, что подписал initData.
+    """
+
+    @pytest.fixture
+    def two_bots(self, settings):
+        from dataclasses import replace
+
+        from apps.miniapp_api.tests.test_auth_multi_bot import REGISTRY
+
+        client, salon = REGISTRY
+        settings.MAX_BOT_REGISTRY = (
+            replace(client, link="https://max.ru/ayla_client_bot"),
+            replace(salon, link="https://max.ru/ayla_salon_bot"),
+        )
+        return settings
+
+    def _get_signed_by(self, client: Client, token: str, user_id: int):
+        from django.urls import reverse
+
+        from apps.miniapp_api.tests.test_auth_multi_bot import make_init_data
+
+        return client.get(
+            reverse("miniapp_api:customer_last_topic"),
+            HTTP_AUTHORIZATION=f"MaxInitData {make_init_data(token, user_id=user_id)}",
+        )
+
+    def test_link_of_the_bot_that_opened_the_app(self, client: Client, tenant, two_bots) -> None:
+        from apps.miniapp_api.tests.test_auth_multi_bot import CLIENT_TOKEN, SALON_TOKEN
+
+        assert self._get_signed_by(client, CLIENT_TOKEN, 22660002).json()["chat_link"] == (
+            "https://max.ru/ayla_client_bot"
+        )
+        assert self._get_signed_by(client, SALON_TOKEN, 22660003).json()["chat_link"] == (
+            "https://max.ru/ayla_salon_bot"
+        )
+
+    def test_no_link_configured_is_null_not_a_guess(self, client: Client, bot_user) -> None:
+        body = _get(client, bot_user).json()
+        assert "chat_link" in body, body  # ключ есть всегда — контракт экрана
+        assert body["chat_link"] is None

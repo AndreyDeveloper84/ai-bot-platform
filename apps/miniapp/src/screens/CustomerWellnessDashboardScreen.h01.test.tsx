@@ -31,14 +31,17 @@ vi.mock("../lib/max-sdk", () => ({
   applyTheme: vi.fn(),
   hapticImpact: vi.fn(),
   closeApp: vi.fn(),
+  // DRF-2266: двери в чат идут одним путём — мост close → ссылка на диалог → подсказка.
+  returnToChat: vi.fn(() => "closed"),
 }));
 
 import { getCatalogBrowse } from "../lib/customer-booking";
-import { closeApp } from "../lib/max-sdk";
+import { returnToChat } from "../lib/max-sdk";
 import { CustomerWellnessDashboardScreen } from "./CustomerWellnessDashboardScreen";
 
 const mockedBrowse = vi.mocked(getCatalogBrowse);
-const mockedClose = vi.mocked(closeApp);
+/** «Ушёл в чат» — теперь `returnToChat` (DRF-2266), а не голый `closeApp`. */
+const mockedClose = vi.mocked(returnToChat);
 
 // ---------------------------------------------------------------------------
 // Ответы ручек — по умолчанию «цель есть, плана нет, записи нет, темы нет».
@@ -155,6 +158,7 @@ function renderHome() {
 beforeEach(() => {
   vi.restoreAllMocks();
   mockedClose.mockReset();
+  mockedClose.mockReturnValue("closed");
   mockedBrowse.mockResolvedValue({ services: [], masters: [], picks: [], picksOutcome: "OK" } as never);
 });
 
@@ -403,6 +407,16 @@ describe("H01 · нет согласия дневника", () => {
     expect(mockedClose).toHaveBeenCalledTimes(1);
   });
 
+  it("«Открыть чат» идёт тем же путём: застрял — подсказка вернуться в чат", async () => {
+    mockedClose.mockReturnValue("stuck");
+    serve({ today: CONSENT_TODAY, consentPrompt: ok({ sent: false, reason: "recently_sent" }) });
+    renderHome();
+    fireEvent.click(await screen.findByRole("button", { name: "Дать согласие в чате" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Открыть чат" }));
+    expect(mockedClose).toHaveBeenCalledTimes(1);
+    expect(await screen.findByText(/Вернись в чат с Ayla/)).toBeInTheDocument();
+  });
+
   it("сбой отправки — приложение НЕ закрывается молча, сказано, что делать", async () => {
     serve({ today: CONSENT_TODAY, consentPrompt: refused(502, "consent_prompt_not_sent") });
     renderHome();
@@ -480,6 +494,42 @@ describe("H01 · продолжить разговор с Ayla", () => {
     fireEvent.click(within(block).getByRole("button", { name: "Продолжить разговор" }));
     fireEvent.click(within(block).getByRole("button", { name: "Задать новый вопрос" }));
     expect(mockedClose).toHaveBeenCalledTimes(2);
+  });
+
+  // ── DRF-2266 — кнопка молча ничего не делала (web.max.ru, 21.09) ──────────
+
+  it("ссылка на чат из last-topic уходит в returnToChat", async () => {
+    serve({ lastTopic: { last_topic: null, chat_link: "https://max.ru/ayla_client_bot" } });
+    renderHome();
+    const heading = await screen.findByRole("heading", { name: /Продолжить разговор с Ayla/ });
+    const block = heading.closest("section") as HTMLElement;
+    await waitFor(() =>
+      expect(within(block).getByRole("button", { name: "Продолжить разговор" })).toBeEnabled(),
+    );
+    fireEvent.click(within(block).getByRole("button", { name: "Продолжить разговор" }));
+    await waitFor(() =>
+      expect(mockedClose).toHaveBeenCalledWith("https://max.ru/ayla_client_bot"),
+    );
+  });
+
+  it("ни закрыть, ни открыть диалог нечем — подсказка, а не тишина", async () => {
+    mockedClose.mockReturnValue("stuck");
+    serve({ lastTopic: { last_topic: null, chat_link: null } });
+    renderHome();
+    const heading = await screen.findByRole("heading", { name: /Продолжить разговор с Ayla/ });
+    const block = heading.closest("section") as HTMLElement;
+    fireEvent.click(within(block).getByRole("button", { name: "Задать новый вопрос" }));
+    expect(await within(block).findByText(/Вернись в чат с Ayla/)).toBeInTheDocument();
+  });
+
+  it("закрылось — подсказки нет (положительная пара)", async () => {
+    serve({ lastTopic: { last_topic: null, chat_link: null } });
+    renderHome();
+    const heading = await screen.findByRole("heading", { name: /Продолжить разговор с Ayla/ });
+    const block = heading.closest("section") as HTMLElement;
+    fireEvent.click(within(block).getByRole("button", { name: "Задать новый вопрос" }));
+    await waitFor(() => expect(mockedClose).toHaveBeenCalledTimes(1));
+    expect(within(block).queryByText(/Вернись в чат с Ayla/)).toBeNull();
   });
 
   it("без темы — нейтрально: «Продолжить разговор», подписи «Последняя тема» нет (фриз п.4)", async () => {
