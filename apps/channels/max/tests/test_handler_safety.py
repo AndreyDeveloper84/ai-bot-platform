@@ -123,12 +123,13 @@ class TestRedFlagShortCircuit:
 
 
 class TestHumanHandoffSilence:
-    def test_red_flag_stays_silent_when_operator_driving(
+    def test_crisis_is_answered_even_when_operator_driving(
         self, tenant_a, mock_send, fake_redis, settings
     ):
-        # CR Finding 1: a conversation already in HUMAN_HANDOFF (a human operator
-        # is handling the distressed user) must NOT get a bot crisis barge-in — the
-        # gate must respect the silence contract and stay quiet.
+        # DRF-2213 Q1 — owner decision N-1 (CD §67) overrides CR Finding 1's
+        # silence contract for crisis and medical emergency: the deterministic
+        # reply goes out ALWAYS, operator or not. Still no AdminTask here — the
+        # operator already has the conversation. Until Q1 this test pinned silence.
         settings.STRICT_TENANT_SCOPE = "strict"
         # First contact stamps the BotUser + creates the conversation.
         _run(tenant_a, "привет", mid="m-1")
@@ -138,9 +139,8 @@ class TestHumanHandoffSilence:
 
         _run(tenant_a, "я думаю о суициде", mid="m-2")
 
-        # Bot silent — no crisis reply sent over the operator.
-        assert mock_send == []
-        assert AdminTask.all_tenants.count() == 0
+        assert [call["text"] for call in mock_send] == [CRISIS_REPLY_TEXT]
+        assert AdminTask.all_tenants.count() == 0  # empty-assert-ok: ответ ушёл — строкой выше
 
 
 class TestHappyPathRegression:

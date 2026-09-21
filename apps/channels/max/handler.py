@@ -230,6 +230,7 @@ from apps.orchestrator.safety.gate import (
     OUTBOUND_ACTION_TYPE,
     evaluate_inbound,
     guard_outbound,
+    reaches_through_handoff,
 )
 from apps.orchestrator.turn_seam import (
     SURFACE_GLOBAL,
@@ -1612,7 +1613,14 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     # the user turn is already recorded above (parity with the per-tenant
     # path), but nothing is sent. The mute lifts on its own when the operator
     # closes the task (DRF-980) — no linkage bookkeeping.
-    if global_handoff_muted(
+    #
+    # DRF-2213 Q1 — except crisis and medical emergency. Owner decision N-1
+    # (CD §67): they get the deterministic reply ALWAYS, operator or not. The
+    # gate therefore runs BEFORE the mute check, and a turn it stops with one
+    # of those two verdicts falls through to the safety branch below instead
+    # of returning silent. Everything else (BLOCK included) stays muted.
+    safety = evaluate_inbound(event.text)
+    if not reaches_through_handoff(safety) and global_handoff_muted(
         conversation=conversation,
         channel=event.channel,
         channel_user_id=event.channel_user_id,
@@ -1726,7 +1734,7 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     clarify_redraw = False
     was_memory_command = False
     concierge_turn_ran = False
-    safety = evaluate_inbound(event.text)
+    # ``safety`` посчитан выше, до проверки глушения handoff (DRF-2213 Q1).
     # DRF-1885 — ход открывает новую ревизию DecisionReadiness и пишет в неё
     # вердикт pre_check. Ответ не меняет: решение ниже принимает прежний
     # путь; читатель вердикта сегодня — теневой движок (флаг
@@ -3009,8 +3017,15 @@ def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | N
     # runs BEFORE dispatch, so without this guard it would barge a canned crisis
     # reply over the operator — the worst moment to auto-inject. When in handoff we
     # skip the short-circuit and fall through to dispatch, which mutes the turn.
+    #
+    # DRF-2213 Q1 — except crisis and medical emergency: owner decision N-1
+    # (CD §67) overrides the barge-guard for exactly those two verdicts — they
+    # get the deterministic reply ALWAYS, operator or not
+    # (``gate.reaches_through_handoff``). BLOCK stays muted under handoff.
     safety = evaluate_inbound(event.text)
-    if not safety.allowed and conversation.state != Conversation.State.HUMAN_HANDOFF:
+    if not safety.allowed and (
+        conversation.state != Conversation.State.HUMAN_HANDOFF or reaches_through_handoff(safety)
+    ):
         _emit_safety_shortcircuit(bot_user, safety, is_global=False)
         record_message(
             conversation,

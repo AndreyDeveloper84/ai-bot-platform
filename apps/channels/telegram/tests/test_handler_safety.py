@@ -164,9 +164,12 @@ class TestObservabilityIsPIISafe:
 
 
 class TestHumanHandoffBargeGuard:
-    def test_gate_stays_silent_while_an_operator_is_driving(self, tenant, fake_redis, mock_post):
-        # Same rule as the per-tenant MAX gate: a canned reply barged over a live
-        # human is the worst possible moment for an auto-response.
+    def test_crisis_is_answered_even_while_an_operator_is_driving(
+        self, tenant, fake_redis, mock_post
+    ):
+        # DRF-2213 Q1 — owner decision N-1 (CD §67) overrides the barge-guard for
+        # crisis and medical emergency: the deterministic reply goes out ALWAYS,
+        # operator or not. Until Q1 this test pinned silence.
         with tenant_scope(tenant):
             tg_handler.handle_inbound(_payload("привет", message_id=1), tenant=tenant)
         conv = Conversation.all_tenants.get()
@@ -176,7 +179,7 @@ class TestHumanHandoffBargeGuard:
         with tenant_scope(tenant):
             tg_handler.handle_inbound(_payload(CRISIS_TEXT, message_id=2), tenant=tenant)
 
-        assert CRISIS_REPLY_TEXT not in _sent_texts(mock_post)
+        assert _sent_texts(mock_post) == [CRISIS_REPLY_TEXT]
 
 
 class TestHappyPathUnchanged:

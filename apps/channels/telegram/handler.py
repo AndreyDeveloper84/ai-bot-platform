@@ -104,6 +104,7 @@ from apps.orchestrator.safety.gate import (
     OUTBOUND_ACTION_TYPE,
     evaluate_inbound,
     guard_outbound,
+    reaches_through_handoff,
 )
 from apps.orchestrator.turn_seam import (
     SURFACE_PER_TENANT,
@@ -222,12 +223,19 @@ def handle_inbound(payload: dict[str, Any], tenant: "Tenant") -> None:
     # reply over a live human at the worst possible moment. In handoff we fall
     # through to the seam, which mutes the turn (should_send=False).
     #
+    # DRF-2213 Q1 — except crisis and medical emergency: owner decision N-1
+    # (CD §67) overrides this guard for exactly those two verdicts — they get
+    # the deterministic reply ALWAYS, operator or not
+    # (``gate.reaches_through_handoff``). BLOCK stays muted under handoff.
+    #
     # The gate is deliberately NOT pushed down into `orchestrate_turn`: the
     # seam is contractually side-effect-free (it never persists, never sends)
     # and MAX already gates above it, so putting it there would either double-
     # run the verdict or force side effects into the seam.
     safety = evaluate_inbound(event.text)
-    if not safety.allowed and conversation.state != Conversation.State.HUMAN_HANDOFF:
+    if not safety.allowed and (
+        conversation.state != Conversation.State.HUMAN_HANDOFF or reaches_through_handoff(safety)
+    ):
         _emit_safety_shortcircuit(bot_user, safety)
         record_message(
             conversation,
