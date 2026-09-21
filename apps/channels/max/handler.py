@@ -173,6 +173,7 @@ from apps.orchestrator.discovery import (
     execute_show_more,
     resolve_discover_tap,
 )
+from apps.handoff.notify import notify_safety_reply_during_handoff
 from apps.orchestrator.handoff import (
     BOOKING_CALLBACK_PREFIXES,
     global_handoff_muted,
@@ -231,6 +232,7 @@ from apps.orchestrator.safety.gate import (
     evaluate_inbound,
     guard_outbound,
     reaches_through_handoff,
+    under_handoff,
 )
 from apps.orchestrator.turn_seam import (
     SURFACE_GLOBAL,
@@ -1619,12 +1621,27 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     # gate therefore runs BEFORE the mute check, and a turn it stops with one
     # of those two verdicts falls through to the safety branch below instead
     # of returning silent. Everything else (BLOCK included) stays muted.
+    #
+    # DRF-2213 Q1 п.1в (CD §72): under a handoff a medical red flag of the
+    # classifier is «неотложка» too — ``under_handoff`` turns it into the same
+    # MEDICAL outcome, so the safety branch below answers it with the one
+    # medical text. П.1а: the operator is told a safety reply went out over
+    # them — no client text in the signal.
     safety = evaluate_inbound(event.text)
-    if not reaches_through_handoff(safety) and global_handoff_muted(
+    handoff_muted = global_handoff_muted(
         conversation=conversation,
         channel=event.channel,
         channel_user_id=event.channel_user_id,
-    ):
+    )
+    if handoff_muted:
+        safety = under_handoff(event.text, safety)
+    if handoff_muted and reaches_through_handoff(safety):
+        notify_safety_reply_during_handoff(
+            conversation=conversation,
+            channel=event.channel,
+            channel_user_id=event.channel_user_id,
+        )
+    if handoff_muted and not reaches_through_handoff(safety):
         logger.info(
             "channels.max.global.silenced_by_handoff conversation=%s",
             conversation.id,
@@ -3022,10 +3039,15 @@ def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | N
     # (CD §67) overrides the barge-guard for exactly those two verdicts — they
     # get the deterministic reply ALWAYS, operator or not
     # (``gate.reaches_through_handoff``). BLOCK stays muted under handoff.
+    # Q1 п.1в / п.1а (CD §72): under a handoff a classifier red flag becomes
+    # the MEDICAL outcome (``under_handoff``), and the operator is signalled.
     safety = evaluate_inbound(event.text)
-    if not safety.allowed and (
-        conversation.state != Conversation.State.HUMAN_HANDOFF or reaches_through_handoff(safety)
-    ):
+    in_handoff = conversation.state == Conversation.State.HUMAN_HANDOFF
+    if in_handoff:
+        safety = under_handoff(event.text, safety)
+    if in_handoff and reaches_through_handoff(safety):
+        notify_safety_reply_during_handoff(conversation=conversation)
+    if not safety.allowed and (not in_handoff or reaches_through_handoff(safety)):
         _emit_safety_shortcircuit(bot_user, safety, is_global=False)
         record_message(
             conversation,

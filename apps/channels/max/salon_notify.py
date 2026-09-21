@@ -502,6 +502,38 @@ def handoff_waiting_notice(task: Any) -> SalonNotice:
     )
 
 
+def safety_reply_notice(conversation: Any, task: Any, *, tenant: Any) -> SalonNotice:
+    """DRF-2213 Q1 п.1а: Ayla ответила клиенту экстренно, пока диалог у человека.
+
+    Без текста клиента — только факт и дверь в диалог. Дедуп — по диалогу и
+    пятиминутному окну: серия кризисных реплик не превращается в серию
+    уведомлений, а новая через пять минут снова доходит.
+    """
+
+    import time as _time
+
+    from apps.handoff.notify import admin_task_url
+
+    name = _first_name(getattr(conversation, "bot_user", None))
+    buttons: list[Button] = []
+    url = admin_task_url(task.id) if task is not None else ""
+    if url:
+        buttons.append(Button("Открыть диалог", url=url))
+    window = int(_time.time() // 300)
+    return SalonNotice(
+        kind="handoff",
+        tenant=tenant,
+        ref=f"safety:{getattr(conversation, 'id', '-')}:{window}",
+        title=f"Клиенту {name} отправлен экстренный ответ",
+        facts=(
+            "Ayla ответила на кризис или неотложку, пока диалог ведёт человек.",
+            "Текст клиента сюда не пересылается — откройте диалог.",
+        ),
+        buttons=tuple(buttons),
+        log={"conversation": getattr(conversation, "id", None), "task": getattr(task, "id", None)},
+    )
+
+
 # ── тип 3 — синхронизация с ошибкой ──────────────────────────────────
 
 
