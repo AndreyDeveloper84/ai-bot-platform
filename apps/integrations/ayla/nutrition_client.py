@@ -1570,11 +1570,19 @@ class NutritionClient:
         self,
         *,
         external_user_id: str,
+        timeout_s: float | None = None,
+        feeds_circuit: bool = True,
     ) -> ProfileResponse | None:
         """GET ``/api/v1/nutrition/internal/profile/``.
 
         Returns the profile when found, ``None`` when Ayla returns 404
         PROFILE_NOT_FOUND or 200 with ``exists=false``.
+
+        ``timeout_s`` — свой таймаут вызова (по умолчанию общий клиента).
+        ``feeds_circuit=False`` — ТАЙМАУТ этого вызова не записывается в общий
+        breaker (DRF-2225): проба-вежливость с коротким таймаутом не должна
+        открывать breaker для всего питания. Прочие сетевые отказы и 5xx
+        считаются как обычно — это настоящий сигнал о каталоге.
 
         Raises:
             NutritionUnavailableError: circuit / 5xx / network.
@@ -1591,10 +1599,15 @@ class NutritionClient:
                 "X-External-User-ID": external_user_id,
             }
         )
+        timeout = self._timeout_s if timeout_s is None else timeout_s
         try:
-            async with httpx.AsyncClient(timeout=self._timeout_s) as http:
+            async with httpx.AsyncClient(timeout=timeout) as http:
                 resp = await http.get(url, headers=headers)
-        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+        except httpx.TimeoutException as exc:
+            if feeds_circuit:
+                self._circuit.record_failure(now=now)
+            raise NutritionUnavailableError(f"network: {type(exc).__name__}") from exc
+        except httpx.NetworkError as exc:
             self._circuit.record_failure(now=now)
             raise NutritionUnavailableError(f"network: {type(exc).__name__}") from exc
 
