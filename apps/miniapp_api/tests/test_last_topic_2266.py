@@ -93,7 +93,7 @@ class TestReplacementCharactersAreNotAPreview:
         conv = _conversation(tenant, bot_user)
         _turn(conv, A, f"{FFFD * 4} {FFFD * 5}", minutes_ago=5)
         body = _get(client, bot_user).json()
-        assert body == {"last_topic": None}
+        assert body["last_topic"] is None, body
 
     def test_an_earlier_clean_turn_is_used_instead(
         self,

@@ -21,11 +21,25 @@ export interface LastTopic {
   at: string;
 }
 
-export async function getLastTopic(): Promise<LastTopic | null> {
-  const res = await request<{ last_topic: LastTopic | null }>("/last-topic/");
+/** DRF-2266 — тема и ссылка на диалог бота, из которого открыт Mini App. */
+export interface LastTopicAndChat {
+  topic: LastTopic | null;
+  /** Публичная ссылка на диалог бота (`MAX_BOT_<S>_LINK`) или `null`. */
+  chatLink: string | null;
+}
+
+export async function getLastTopicAndChatLink(): Promise<LastTopicAndChat> {
+  const res = await request<{ last_topic: LastTopic | null; chat_link?: string | null }>(
+    "/last-topic/",
+  );
   const topic = res.last_topic;
-  if (!topic || typeof topic.text !== "string" || !topic.text.trim()) return null;
-  return topic;
+  const clean = !topic || typeof topic.text !== "string" || !topic.text.trim() ? null : topic;
+  const link = typeof res.chat_link === "string" && res.chat_link.trim() ? res.chat_link : null;
+  return { topic: clean, chatLink: link };
+}
+
+export async function getLastTopic(): Promise<LastTopic | null> {
+  return (await getLastTopicAndChatLink()).topic;
 }
 
 /** «20 сент., 11:30» — когда был этот ход; пустая строка, если дата нечитаема. */

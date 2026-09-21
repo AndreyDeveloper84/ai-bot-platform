@@ -167,20 +167,20 @@ class TestLastTopic:
     def test_no_conversation_is_null_not_error(self, client, bot_user):
         res = _get(client, bot_user)
         assert res.status_code == 200
-        assert res.json() == {"last_topic": None}
+        assert res.json()["last_topic"] is None  # DRF-2266: рядом — chat_link
 
     def test_only_user_turns_is_null(self, client, tenant, bot_user):
         conv = _conversation(tenant, bot_user)
         _turn(conv, Message.Role.USER, "привет", minutes_ago=1)
 
-        assert _get(client, bot_user).json() == {"last_topic": None}
+        assert _get(client, bot_user).json()["last_topic"] is None
 
     def test_anonymised_turn_is_not_a_topic(self, client, tenant, bot_user):
         """После «забудь всё» тело хода пустое — темы нет, а не пустая строка."""
         conv = _conversation(tenant, bot_user, anonymized_through=timezone.now())
         _turn(conv, Message.Role.ASSISTANT, "", minutes_ago=1, rendered="")
 
-        assert _get(client, bot_user).json() == {"last_topic": None}
+        assert _get(client, bot_user).json()["last_topic"] is None
 
     def test_turn_before_anonymisation_cutoff_is_not_read_even_with_text(
         self, client, tenant, bot_user
@@ -191,7 +191,7 @@ class TestLastTopic:
         )
         _turn(conv, Message.Role.ASSISTANT, "Ещё не обезличено, но уже забыто.", minutes_ago=1)
 
-        assert _get(client, bot_user).json() == {"last_topic": None}
+        assert _get(client, bot_user).json()["last_topic"] is None
 
     def test_turn_after_anonymisation_cutoff_is_read(self, client, tenant, bot_user):
         """Положительная пара: ход ПОСЛЕ отсечки — новая тема, разговор продолжается."""
@@ -241,7 +241,7 @@ class TestLastTopic:
         conv = _conversation(tenant, bot_user)
         _turn(conv, Message.Role.ASSISTANT, REPLACEMENT_TEXT, minutes_ago=1)
 
-        assert _get(client, bot_user).json() == {"last_topic": None}
+        assert _get(client, bot_user).json()["last_topic"] is None
 
     def test_memory_announce_paragraph_is_not_part_of_the_topic(self, client, tenant, bot_user):
         """DRF-1292: «Запомнила: …» дописана абзацем под ответом — тема только ответ."""
@@ -295,7 +295,7 @@ class TestLastTopic:
         theirs = _conversation(tenant, stranger)
         _turn(theirs, Message.Role.ASSISTANT, "Ольга, ваш массаж в 12:00.", minutes_ago=1)
 
-        assert _get(client, bot_user).json() == {"last_topic": None}
+        assert _get(client, bot_user).json()["last_topic"] is None
 
     def test_shadow_and_deleted_conversations_do_not_count(self, client, tenant, bot_user):
         shadow = _conversation(tenant, bot_user, is_shadow=True)
@@ -303,7 +303,7 @@ class TestLastTopic:
         gone = _conversation(tenant, bot_user, is_active=False, deleted_at=timezone.now())
         _turn(gone, Message.Role.ASSISTANT, "удалено", minutes_ago=2)
 
-        assert _get(client, bot_user).json() == {"last_topic": None}
+        assert _get(client, bot_user).json()["last_topic"] is None
 
     def test_latest_across_conversations(self, client, tenant, bot_user):
         old = _conversation(tenant, bot_user, is_active=False)
