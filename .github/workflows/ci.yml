@@ -1091,7 +1091,12 @@ jobs:
     # That would mean the fit above understated the tail. Recompute it
     # from fresh jobs-API data — do not simply nudge the ceiling upward.
     # ---- end of inherited history ----
-    timeout-minutes: 30
+    # [ЗОНД DRF-2205 — НЕ СЛИВАТЬ] Потолок поднят ТОЛЬКО в зонде.
+    # `--durations` печатает таблицу в КОНЦЕ прогона: отменённый по
+    # потолку медленный прогон унёс бы её с собой — ровно тот прогон,
+    # ради которого зонд и заведён. Правило над этой строкой («перемерить,
+    # не поднимать») относится к боевому числу; это не оно.
+    timeout-minutes: 60
 
     strategy:
       # A red shard must not cancel its siblings. With fail-fast the run
@@ -1103,6 +1108,14 @@ jobs:
           - id: "1"
             args: "apps/skills/booking/tests/test_lookup_routing.py"
           - id: "2"
+            args: "apps/orchestrator apps/channels"
+          # [ЗОНД DRF-2205] Тот же шард ещё дважды. Явление перемежающееся
+          # (~10 мин обычно, >30 иногда, на одинаковом коде), поэтому один
+          # замер может попасть на быстрый прогон и честно ничего не
+          # показать. Ищем тест, который прыгает «секунда ↔ минуты».
+          - id: "2b"
+            args: "apps/orchestrator apps/channels"
+          - id: "2c"
             args: "apps/orchestrator apps/channels"
           - id: "3"
             args: "apps/identity apps/replay"
@@ -1293,6 +1306,7 @@ jobs:
           rm -f "$JUNIT_FILE"
           echo "SHARD $SHARD_ID selector: $SHARD_ARGS"
           uv run pytest $SHARD_ARGS -q -n 4 --dist load \
+            --durations=30 --durations-min=1.0 \
             --junitxml="$JUNIT_FILE" \
             --deselect apps/miniapp_api/tests/test_c7_payments.py::TestPaymentMirrorReadModel::test_booking_confirmed_with_payment_id_stamps_hold \
             --deselect apps/miniapp_api/tests/test_c7_payments.py::TestPaymentMirrorReadModel::test_booking_confirmed_without_payment_id_no_mirror \
