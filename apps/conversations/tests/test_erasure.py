@@ -32,7 +32,12 @@ from apps.conversations.tasks import purge_expired_archived_messages
 from apps.identity.models import BotUser
 from apps.tenancy.models import Tenant
 
-pytestmark = pytest.mark.django_db(transaction=True)
+# DRF-2220 — erasure also purges the ingress streams; this file is not
+# about them, so they are empty and need no Redis (apps/conftest.py).
+pytestmark = [
+    pytest.mark.django_db(transaction=True),
+    pytest.mark.usefixtures("ingress_streams_empty"),
+]
 
 FORGET_ALL = ArchivedMessage.Reason.FORGET_ALL
 

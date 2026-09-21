@@ -144,6 +144,11 @@ class ForgetAllSweepResult:
     tombstoned: bool = False
     conversations_anonymized: int = 0
     messages_archived: int = 0
+    #: DRF-2220 — raw webhook entries deleted from the ingress streams, and
+    #: those up to the cutoff whose sender could not be read (counted, kept,
+    #: gone by INGRESS_RAW_RETENTION_HOURS).
+    raw_entries_deleted: int = 0
+    raw_entries_unattributed: int = 0
 
     @property
     def changed(self) -> bool:
@@ -154,6 +159,7 @@ class ForgetAllSweepResult:
             or self.context_fields_cleared
             or self.tombstoned
             or self.conversations_anonymized
+            or self.raw_entries_deleted
         )
 
 
@@ -258,6 +264,8 @@ def sweep_forget_all(user_id: uuid.UUID) -> ForgetAllSweepResult:
         tombstoned=tombstoned,
         conversations_anonymized=dialogue.conversations,
         messages_archived=dialogue.messages_archived,
+        raw_entries_deleted=dialogue.raw_entries_deleted,
+        raw_entries_unattributed=dialogue.raw_entries_unattributed,
     )
 
     if result.changed:
@@ -274,17 +282,21 @@ def sweep_forget_all(user_id: uuid.UUID) -> ForgetAllSweepResult:
                 "tombstoned": result.tombstoned,
                 "conversations_anonymized": result.conversations_anonymized,
                 "messages_archived": result.messages_archived,
+                "raw_entries_deleted": result.raw_entries_deleted,
+                "raw_entries_unattributed": result.raw_entries_unattributed,
             },
         )
         logger.info(
             "identity.forget_all_sweep.user user_id=%s entries=%d fields=%d "
-            "tombstoned=%s conversations=%d messages=%d",
+            "tombstoned=%s conversations=%d messages=%d raw_deleted=%d raw_unattributed=%d",
             user_id,
             result.entries_deleted,
             result.context_fields_cleared,
             result.tombstoned,
             result.conversations_anonymized,
             result.messages_archived,
+            result.raw_entries_deleted,
+            result.raw_entries_unattributed,
         )
     return result
 

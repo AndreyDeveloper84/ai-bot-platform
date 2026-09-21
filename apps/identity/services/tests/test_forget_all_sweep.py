@@ -65,7 +65,9 @@ from apps.orchestrator import memory_block
 from apps.orchestrator.memory_block import build_concierge_memory_block
 from apps.tenancy.models import Tenant
 
-pytestmark = pytest.mark.django_db
+# DRF-2220 — erasure also purges the ingress streams; this file is not
+# about them, so they are empty and need no Redis (apps/conftest.py).
+pytestmark = [pytest.mark.django_db, pytest.mark.usefixtures("ingress_streams_empty")]
 
 _SUMMARY = "Мария, 34, ходит на маникюр раз в три недели, любит тишину в кресле."
 

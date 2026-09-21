@@ -39,7 +39,9 @@ from apps.integrations.ayla.personal_context_client import (
 from apps.tenancy.models import Tenant
 
 
-pytestmark = pytest.mark.django_db
+# DRF-2220 — erasure also purges the ingress streams; this file is not
+# about them, so they are empty and need no Redis (apps/conftest.py).
+pytestmark = [pytest.mark.django_db, pytest.mark.usefixtures("ingress_streams_empty")]
 
 BOT_TOKEN = "test-bot-token-xyz"
 CT = ConsentRecord.ConsentType

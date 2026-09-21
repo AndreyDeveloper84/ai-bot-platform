@@ -183,6 +183,10 @@ def consume_once(
                 continue
 
             client.xack(stream_name, group, entry_id)
+            # DRF-2220 — XACK clears the PEL only; the raw body (message
+            # text, name, a shared contact) would stay in the stream for
+            # good. Nothing reads a processed entry again, so it goes now.
+            client.xdel(stream_name, entry_id)
             processed += 1
 
     return processed
