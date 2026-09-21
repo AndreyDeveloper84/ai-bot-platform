@@ -134,14 +134,31 @@ class TestBoundary:
     @pytest.mark.parametrize(
         "what",
         [
-            "Ayla рекомендует массаж",
-            "Рекомендую начать с лица",
+            # §60 дословно: рекомендация УСЛУГИ. Родовое имя ловится
+            # словарём и не зависит от того, доступен ли каталог.
+            "Ayla рекомендует услугу «Массаж»",
+            "Ayla рекомендует мастера",
             "Курс за 1500 ₽",
             "Стоимость по запросу",
         ],
     )
     def test_recommends_or_price_in_what_refuses_the_card(self, what):
         assert c.build_card(_doc(_goal(direction={"what": what, "subline": ""}))) is None
+
+    def test_the_word_alone_is_not_a_violation_any_more(self):
+        """Сторож сужен по ПРЕДМЕТУ (решение главного окна, К-3 N4).
+
+        До N4 запрещено было слово «рекоменду…» само по себе. Оно стоит в
+        заголовке макета C04.2 «Основной вариант (рекомендую):» — и это
+        про НАПРАВЛЕНИЕ, а §60 запрещает «Ayla рекомендует услугу X».
+        Правило не ослаблено: предмет проверяется тем же сторожем, что и
+        опции C02, — см. `test_alternatives_1770.py`.
+        """
+        draft = c.build_card(
+            _doc(_goal(direction={"what": "Рекомендую начать с лица", "subline": ""}))
+        )
+        assert draft is not None
+        assert draft.what == "Рекомендую начать с лица"
 
     def test_price_in_subline_refuses_the_card(self):
         goal = _goal(direction={"what": "Свежий вид", "subline": "от 2000 руб"})

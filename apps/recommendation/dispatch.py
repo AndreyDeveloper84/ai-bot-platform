@@ -94,7 +94,7 @@ def _send_once(bot_user: Any, doc: dict[str, Any]) -> Recommendation | None:
     goal_id = str(goal.get("id") or "")
 
     if draft is None:
-        record = _create(
+        record = create_record(
             bot_user,
             kind=Recommendation.Kind.ABSENCE,
             goal_id=goal_id,
@@ -106,7 +106,7 @@ def _send_once(bot_user: Any, doc: dict[str, Any]) -> Recommendation | None:
         envelope = c.absence_keyboard()
         action_type = ACTION_TYPE_ABSENCE
     else:
-        record = _create(
+        record = create_record(
             bot_user,
             kind=Recommendation.Kind.DIRECTION,
             goal_id=draft.goal_id,
@@ -115,6 +115,7 @@ def _send_once(bot_user: Any, doc: dict[str, Any]) -> Recommendation | None:
             subline=draft.subline,
             why=list(draft.why),
             facts=draft.facts,
+            alternatives=list(draft.alternatives),
         )
         if record is None:
             return None
@@ -132,8 +133,14 @@ def _send_once(bot_user: Any, doc: dict[str, Any]) -> Recommendation | None:
     return record
 
 
-def _create(bot_user: Any, **fields: Any) -> Recommendation | None:
-    """Запись или ``None``, если такая уже была (идемпотентность по fingerprint)."""
+def create_record(bot_user: Any, **fields: Any) -> Recommendation | None:
+    """Запись или ``None``, если такая уже была (идемпотентность по fingerprint).
+
+    Публична ради одного читателя — выбора другого подхода в
+    :mod:`apps.recommendation.taps`: там рождается вторая карточка того же
+    разговора, и идемпотентность у неё должна быть ровно эта, а не
+    вторая, написанная рядом.
+    """
     try:
         with transaction.atomic():
             return Recommendation.objects.create(bot_user=bot_user, **fields)
@@ -185,4 +192,10 @@ def _deliver(
     )
 
 
-__all__ = ["ACTION_TYPE_ABSENCE", "ACTION_TYPE_CARD", "context_collected", "maybe_send_card"]
+__all__ = [
+    "ACTION_TYPE_ABSENCE",
+    "ACTION_TYPE_CARD",
+    "context_collected",
+    "create_record",
+    "maybe_send_card",
+]
