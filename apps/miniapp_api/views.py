@@ -4355,10 +4355,28 @@ def _food_text_catalog_refusal(exc: Exception, *, external_id: str, step: str) -
     from apps.integrations.ayla.nutrition_client import (
         FoodNotRecognizedError,
         NutritionUnavailableError,
+        ScanBudgetExhaustedError,
+        ScanDailyLimitError,
     )
 
     if isinstance(exc, FoodNotRecognizedError):
         return _error("food_not_recognized", "dish not found in the reference", 400)
+    # DRF-2195 — отказы по бюджету распознавания идут своими именами, ВЫШЕ
+    # общего хвоста. Без этого они падали бы в `ayla_bad_request`, а он значит
+    # «программа послала каталогу чушь», то есть баг: экран не смог бы сказать
+    # человеку ни «сегодня», ни «напиши словами». Коды — как у каталога: 429
+    # личный потолок на сутки, 503 общий дневной бюджет.
+    if isinstance(exc, ScanDailyLimitError):
+        logger.info(
+            "food_text_ma.%s.daily_limit ext=%s retry_after=%s",
+            step,
+            external_id,
+            exc.retry_after,
+        )
+        return _error("food_scan_daily_limit", "personal daily scan limit reached", 429)
+    if isinstance(exc, ScanBudgetExhaustedError):
+        logger.info("food_text_ma.%s.budget_exhausted ext=%s", step, external_id)
+        return _error("food_scan_budget_exhausted", "daily scan budget exhausted", 503)
     if isinstance(exc, NutritionUnavailableError):
         logger.warning("food_text_ma.%s.unavailable ext=%s err=%s", step, external_id, exc)
         return _error("nutrition_unavailable", "ayla nutrition unavailable", 503)

@@ -18,6 +18,8 @@ import { ApiError } from "./api";
 import {
   FoodNotRecognizedError,
   NutritionUnavailableError,
+  ScanBudgetExhaustedError,
+  ScanDailyLimitError,
   PhotoTooLargeError,
   logMeal,
   scanPhoto,
@@ -38,9 +40,13 @@ function callAt(n: number): [string, RequestInit] {
   return call as [string, RequestInit];
 }
 
-const PHOTO = new File([new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3])], "plate.jpg", {
-  type: "image/jpeg",
-});
+const PHOTO = new File(
+  [new Uint8Array([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3])],
+  "plate.jpg",
+  {
+    type: "image/jpeg",
+  },
+);
 
 const SCAN_WIRE = {
   scan_id: "scan-2098-1",
@@ -89,10 +95,18 @@ describe("scanPhoto — multipart к POST /food/scan", () => {
 
   it.each([
     ["food_not_recognized", 400, FoodNotRecognizedError],
+    // DRF-2195 — слаги бюджета читаются ДО `nutrition_unavailable`. Опечатка
+    // с любой стороны провода (`views.py::_food_text_catalog_refusal` ↔ этот
+    // модуль) уронила бы оба отказа в общую ветку экрана «Сервис недоступен,
+    // попробуй через минуту» — ровно тот дефект, который лист чинит.
+    ["food_scan_daily_limit", 429, ScanDailyLimitError],
+    ["food_scan_budget_exhausted", 503, ScanBudgetExhaustedError],
     ["nutrition_unavailable", 503, NutritionUnavailableError],
     ["photo_too_large", 413, PhotoTooLargeError],
   ])("отказ бота %s → своя ошибка §7", async (slug, status, cls) => {
-    fetchMock.mockResolvedValueOnce(jsonResponse({ error: slug, detail: "x" }, status));
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({ error: slug, detail: "x" }, status),
+    );
     await expect(scanPhoto(PHOTO)).rejects.toBeInstanceOf(cls);
   });
 
@@ -107,7 +121,9 @@ describe("scanPhoto — multipart к POST /food/scan", () => {
 
   it("не подменяет ответ stub-данными в DEV: то, что вернул бот, то и отдано", async () => {
     vi.stubEnv("DEV", true);
-    fetchMock.mockResolvedValueOnce(jsonResponse({ ...SCAN_WIRE, dish_name: "свекольник" }));
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({ ...SCAN_WIRE, dish_name: "свекольник" }),
+    );
     const result = await scanPhoto(PHOTO);
     expect(result.dish_name).toBe("свекольник");
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -145,11 +161,18 @@ describe("logMeal — запись по scan_id через POST /food/log", () =
     });
     expect("note" in body).toBe(false);
     expect("dish_name" in body).toBe(false);
-    expect(res).toEqual({ log_id: WIRE.log_id, dish_name: "борщ", meal_type: "lunch", calories: 250 });
+    expect(res).toEqual({
+      log_id: WIRE.log_id,
+      dish_name: "борщ",
+      meal_type: "lunch",
+      calories: 250,
+    });
   });
 
   it("переименование шлёт dish_name РЯДОМ со scan_id — провенанс фото не теряется", async () => {
-    fetchMock.mockResolvedValueOnce(jsonResponse({ ...WIRE, dish_name: "свекольник" }, 201));
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({ ...WIRE, dish_name: "свекольник" }, 201),
+    );
 
     await logMeal({
       scan_id: "scan-2098-1",
@@ -159,7 +182,10 @@ describe("logMeal — запись по scan_id через POST /food/log", () =
       idempotency_key: "k-2",
     });
 
-    const body = JSON.parse(String(callAt(0)[1].body)) as Record<string, unknown>;
+    const body = JSON.parse(String(callAt(0)[1].body)) as Record<
+      string,
+      unknown
+    >;
     expect(body.scan_id).toBe("scan-2098-1");
     expect(body.dish_name).toBe("свекольник");
   });

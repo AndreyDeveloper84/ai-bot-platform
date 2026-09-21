@@ -104,6 +104,8 @@ from apps.integrations.ayla import (
     FoodNotRecognizedError,
     NutritionAPIError,
     NutritionUnavailableError,
+    ScanBudgetExhaustedError,
+    ScanDailyLimitError,
     external_user_id_for,
     get_nutrition_client,
 )
@@ -139,6 +141,18 @@ CLARIFY_PROMPT = "Что не так? Напиши коротко — попра
 ALREADY_LOGGED_LINE = "Сегодня это блюдо уже есть в дневнике."
 
 AYLA_DOWN_FALLBACK = "Сервис распознавания временно недоступен — попробуй через минуту."
+
+# DRF-2195 — штатные отказы каталога по бюджету распознавания. Ни один из них
+# не «временно недоступен»: каталог работает и отвечает осознанно, а счёт
+# снимется в полночь, не «через минуту». Поэтому тексты называют срок и зовут
+# туда, где дорога открыта прямо сейчас, — записать еду словами.
+#
+# `retry_after` у суточного потолка есть, но в текст не идёт: «попробуй через
+# 7 часов» — обещание часа, который человеку ничего не даёт, когда соседняя
+# дорога работает сию секунду.
+SCAN_DAILY_LIMIT_FALLBACK = "Сегодня фото больше не распознаю — напиши словами, что было."
+
+SCAN_BUDGET_EXHAUSTED_FALLBACK = "Распознавание фото сейчас недоступно — напиши словами."
 
 NOT_RECOGNIZED_FALLBACK = (
     "Фото немного сложное — не разобралась. Можешь переснять поближе или просто написать, что было?"
@@ -225,6 +239,26 @@ class FoodScannerSkill:
             return SkillResult(
                 reply_text=NOT_RECOGNIZED_FALLBACK,
                 meta={"reply_kind": "food_scanner_not_recognized"},
+            )
+        except ScanDailyLimitError as exc:
+            # Порядок ветвей: оба класса бюджета — наследники
+            # `NutritionAPIError`, значит стоят ВЫШЕ общего хвоста, иначе
+            # ветка недостижима. И НЕ наследники `NutritionUnavailableError`,
+            # значит ветка ниже их не перехватит.
+            logger.info(
+                "food_scanner.daily_limit user=%s retry_after=%s",
+                external_id,
+                exc.retry_after,
+            )
+            return SkillResult(
+                reply_text=SCAN_DAILY_LIMIT_FALLBACK,
+                meta={"reply_kind": "food_scanner_daily_limit"},
+            )
+        except ScanBudgetExhaustedError:
+            logger.info("food_scanner.budget_exhausted user=%s", external_id)
+            return SkillResult(
+                reply_text=SCAN_BUDGET_EXHAUSTED_FALLBACK,
+                meta={"reply_kind": "food_scanner_budget_exhausted"},
             )
         except NutritionUnavailableError:
             logger.warning("food_scanner.unavailable user=%s", external_id)
