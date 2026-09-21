@@ -278,7 +278,9 @@ class TestSensitivePerimeter:
     sensitive-периметр гасит ВСЮ поверхность)."""
 
     @pytest.mark.parametrize(
-        "override", ["pregnancy", "breastfeeding", "eating_disorder", "bmi_floor"]
+        # DRF-2222: ``bmr_floor`` — имя, которое Ayla выдаёт; остальные — старые.
+        "override",
+        ["bmr_floor", "pregnancy", "breastfeeding", "eating_disorder", "bmi_floor"],
     )
     def test_every_sensitive_override_gates_the_hint(self, tenant: Tenant, override: str) -> None:
         user = coach_user(tenant)
@@ -287,9 +289,21 @@ class TestSensitivePerimeter:
         )
         assert only(decisions, user).reason == "sensitive_perimeter"
 
-    def test_an_eating_disorder_flag_gates_the_hint(self, tenant: Tenant) -> None:
+    @pytest.mark.parametrize("flag", ["eating_disorder", "pregnant", "breastfeeding"])
+    def test_a_health_flag_gates_the_hint(self, tenant: Tenant, flag: str) -> None:
+        # DRF-2222: с #372 каталога беременность и кормление приходят ТОЛЬКО
+        # флагом (расчёт отказывает с пустым goal_overridden_by).
         user = coach_user(tenant)
-        profile = clean_profile(health_flags={"eating_disorder": True})
+        profile = clean_profile(health_flags={flag: True})
+        decisions = plan(user, fetch_profile=profile_reader(profile))
+        assert only(decisions, user).reason == "sensitive_perimeter"
+
+    def test_a_pending_sensitive_override_gates_the_hint(self, tenant: Tenant) -> None:
+        # DRF-2222: переопределение пересчёта, ждущего подтверждения, тоже гасит.
+        user = coach_user(tenant)
+        profile = clean_profile(
+            raw={"targets_provenance": {"pending_proposal": {"goal_overridden_by": "bmr_floor"}}}
+        )
         decisions = plan(user, fetch_profile=profile_reader(profile))
         assert only(decisions, user).reason == "sensitive_perimeter"
 
