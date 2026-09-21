@@ -46,6 +46,10 @@ class InternalServerError(Exception):
     pass
 
 
+#: Фальшивый адрес с учётными данными — проверяем, что они не доходят до алерта.
+_PROXY_WITH_CREDS = "http://user:s3cret@proxy.example:3128"  # pragma: allowlist secret
+
+
 class _Fake:
     """Провайдер пробы: отвечает или бросает заданное; пишет, как его построили."""
 
@@ -270,14 +274,10 @@ class TestDownMessageTellsTheTruth:
         assert "прокси" in body.lower(), body
 
     def test_proxy_credentials_hidden_host_kept(self, monkeypatch, settings, pages) -> None:
-        settings.ANTHROPIC_PROXY = (
-            "http://user:s3cret@proxy.example:3128"  # pragma: allowlist secret
-        )
+        settings.ANTHROPIC_PROXY = _PROXY_WITH_CREDS
         _world(
             monkeypatch,
-            primary=APIConnectionError(
-                "cannot CONNECT http://user:s3cret@proxy.example:3128"
-            ),  # pragma: allowlist secret
+            primary=APIConnectionError(f"cannot CONNECT {_PROXY_WITH_CREDS}"),
             fallback=APIConnectionError("x"),
             direct=PermissionDeniedError("403"),
         )
