@@ -48,9 +48,11 @@ class TestHandoff:
         r = pre_check("I want to kill myself")
         assert r.verdict == SafetyVerdict.HANDOFF
 
-    def test_acute_emergency(self):
+    def test_acute_emergency_is_medical_not_crisis(self):
+        # DRF-2000 (S-2): the cardiac group left the crisis bucket — 103 / 112,
+        # not the helpline. HANDOFF above still holds for self-harm.
         r = pre_check("у меня сердечный приступ, что делать")
-        assert r.verdict == SafetyVerdict.HANDOFF
+        assert r.verdict == SafetyVerdict.MEDICAL
 
     def test_abuse_signal(self):
         r = pre_check("меня избивает муж")
@@ -170,12 +172,16 @@ class TestVerdictPriority:
         """
         from apps.orchestrator.safety.pre_check import _VERDICT_PRIORITY
 
+        # DRF-2000 (S-2, owner 20.09): MEDICAL sits between BLOCK and HANDOFF —
+        # a STOP with a required next step (103 / 112), below self-harm so a
+        # person who writes both keeps the helpline.
         assert _VERDICT_PRIORITY == [
             SafetyVerdict.ALLOW.value,
             SafetyVerdict.CLARIFY.value,
             SafetyVerdict.BLOCK.value,
+            SafetyVerdict.MEDICAL.value,
             SafetyVerdict.HANDOFF.value,
-        ], "priority list changed — §3 / §127 say which way it may"
+        ], "priority list changed — §3 / §127 / DRF-2000 say which way it may"
         assert "caution" not in _VERDICT_PRIORITY
 
     def test_every_pair_of_buckets_reduces_to_the_higher(self):

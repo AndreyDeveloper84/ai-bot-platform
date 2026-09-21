@@ -61,6 +61,10 @@ class SafetyVerdict(str, Enum):
     ALLOW = "allow"
     CLARIFY = "clarify"
     BLOCK = "block"
+    #: DRF-2000 (S-2): медицинская неотложка — 103 / 112. Отдельно от
+    #: ``HANDOFF`` (психологический кризис, телефон доверия): это два
+    #: разных ответа человеку, и первой строкой у них стоят разные номера.
+    MEDICAL = "medical"
     HANDOFF = "handoff"
 
 
@@ -118,13 +122,34 @@ _DEFAULT_PATTERNS: dict[str, list[str]] = {
         r"(?i)(\bkill\w*\s+my\s?self|\bhang\w*\s+my\s?self|\b(hurt|harm|cut)\w*\s+my\s?self"
         r"|\bslit\w*\s+my\s+wrist|take\s+my\s+own\s+life|\bend\s+(my\s+life|it(\s+all)?)\b"
         r"|\bsuicid|self[\s-]?harm|\boverdos)",
-        # Acute medical emergency. `умираю` excludes the hyperbole «умираю (как)
-        # хочу…» (common on a beauty bot) via negative lookahead — but NOT
-        # «умираю от…», because «умираю от боли» is a real emergency we must catch.
-        r"(?i)(\bскорая\b|\bemergency\b|\bумираю\b(?!\s+(как\s+)?хочу)|\bdying\b"
-        r"|сердечный приступ|heart attack)",
+        # Bare «умираю» stays here (crisis): without «от боли / скорую /
+        # сердце» it reads as despair as often as as a body. The hyperbole
+        # «умираю (как) хочу…» (common on a beauty bot) is excluded by the
+        # negative lookahead; the physical «умираю от …» moved to MEDICAL
+        # (DRF-2000) together with the rest of the acute-emergency group.
+        r"(?i)(\bумираю\b(?!\s+(как\s+)?хочу)(?!\s+от\b)|\bdying\b)",
         # Abuse / domestic violence — stems
         r"(?i)(\bизбива|\bнасили|\babuse\b|\bbattered\b)",
+    ],
+    # DRF-2000 (S-2) — the «неотложка» group, owner ruling 20.09 (ticket
+    # comment) on top of [OD-BOT §163]: a heart attack, a call for an
+    # ambulance, «не могу дышать / теряю сознание / давит в груди». The
+    # reply is the medical emergency text (103 / 112 first line), never the
+    # psychological helpline. Until DRF-2000 the cardiac phrases sat in the
+    # HANDOFF list and got the crisis text; «скорая» matched only the
+    # nominative, so «вызовите скорую» went to the model.
+    SafetyVerdict.MEDICAL.value: [
+        # Cardiac / ambulance / dying of pain — all inflections of «скорая».
+        r"(?i)(сердечн\w*\s+приступ|heart\s+attack|\bинфаркт|\bинсульт"
+        r"|\bскор(ая|ую|ой|ые)\b(\s+помощ\w*)?|\bemergency\b|\bумираю\s+от\b)",
+        # Breathing / consciousness / chest — with the same emotional-idiom
+        # exception the health_screening classifier keeps («задыхаюсь от
+        # смеха», «потеряла сознание от восторга» are not emergencies; S-1b).
+        r"(?i)(не\s+могу\s+(в)?дышать|нечем\s+дышать|\bудушь\w*"
+        r"|\bзадыха\w*+(?!\s+от\s+(смеха|хохота|восторга|счастья|радости)))",
+        r"(?i)((теря|потеря)\w*\s+сознани\w*+(?!\s+от\s+(смеха|хохота|восторга|счастья|радости))"
+        r"|без\s+сознания|\bобморок\w*)",
+        r"(?i)((давит|сдавил\w*|жж[её]т|боль)\s+(в\s+)?груд\w*|груд\w*\s+давит)",
     ],
     SafetyVerdict.BLOCK.value: [
         # Owner decision 11.09 §3, verbatim: «Простое упоминание лекарства не
@@ -221,7 +246,7 @@ def pre_check(
       :class:`SafetyResult`. Default verdict is ALLOW. Empty text → ALLOW.
 
     ### Verdict priority (highest wins)
-    HANDOFF > BLOCK > CLARIFY > ALLOW
+    HANDOFF > MEDICAL > BLOCK > CLARIFY > ALLOW
 
     Multiple matches across verdicts: highest-priority verdict wins, but
     `matched_patterns` carries ALL matches (forensic). Cross-tenant
@@ -269,10 +294,14 @@ def pre_check(
 
 
 # Verdict priority — higher index = higher priority.
+# HANDOFF > MEDICAL > BLOCK > CLARIFY > ALLOW. Self-harm outranks the medical
+# group on purpose: the crisis text already names 112, and a person who
+# writes both must not lose the helpline (DRF-2000).
 _VERDICT_PRIORITY = [
     SafetyVerdict.ALLOW.value,
     SafetyVerdict.CLARIFY.value,
     SafetyVerdict.BLOCK.value,
+    SafetyVerdict.MEDICAL.value,
     SafetyVerdict.HANDOFF.value,
 ]
 

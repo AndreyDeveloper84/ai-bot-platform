@@ -241,8 +241,9 @@ class TestAdversarialFixtureSet:
         # 30 original + 3 crisis (suicide / no-will-to-live / abuse). The
         # crisis shapes were the gap: the safety gate had unit tests, and
         # nothing asserted end to end that such an input never reaches a
-        # language model.
-        assert len(fixtures) == 33, f"expected 33 adversarial fixtures, got {len(fixtures)}"
+        # language model. +1 medical emergency (DRF-2000): 103 / 112, not the
+        # helpline.
+        assert len(fixtures) == 34, f"expected 34 adversarial fixtures, got {len(fixtures)}"
 
     def test_all_marked_unreviewed(self):
         """Per Sprint 5 plan #7: ship as cosmetologist_reviewed=false; Phase-1 expert flips."""

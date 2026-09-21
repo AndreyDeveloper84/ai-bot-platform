@@ -24,10 +24,19 @@ What the ruling fixes about this text:
   of the registered owner policy does not constitute CLINICAL APPROVED,
   PHYSICIAN PASS or SAFE FOR PILOT.
 
-Named limits (not fixed here): «сердечный приступ / скорая» still reach the
-crisis ``HANDOFF`` route of ``pre_check`` (DRF-2000, S-2); G7 «резко стало
-очень плохо» is still a plain red flag instead of the one-question CLARIFY of
-[§160]; there is no persistence of the S1 state between turns (DRF-2040).
+Since DRF-2000 (S-2, owner ruling 20.09) the text is also the reply of the
+``MEDICAL`` verdict of :func:`apps.orchestrator.safety.pre_check.pre_check` —
+the «неотложка» group (heart attack / ambulance / cannot breathe / losing
+consciousness / chest pressure) — on every surface that reads the gate
+(:func:`apps.orchestrator.safety.gate.evaluate_inbound`, the pipeline), and
+of the deterministic red-flag branch of the global concierge path.
+
+Named limits (not fixed here): the ``health_screening`` classifier still
+returns NONE for «сердечный приступ / скорая / инфаркт» — only the gate
+catches them, so a direct skill call with such ``symptom_text`` does not see
+the red flag; G7 «резко стало очень плохо» is still a plain red flag instead
+of the one-question CLARIFY of [§160]; there is no persistence of the S1
+state between turns (DRF-2040).
 """
 
 from __future__ import annotations

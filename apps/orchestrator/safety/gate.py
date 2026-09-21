@@ -9,8 +9,12 @@ FAQ / discovery instead of a safe response. This module wires the SAME
 
 ### Scope (S1-B, #1053) — detection + canned reply only
 
-* ``HANDOFF`` verdict (suicide / self-harm / acute emergency / abuse) → a canned
-  **crisis** reply (crisis resources).
+* ``HANDOFF`` verdict (suicide / self-harm / abuse) → a canned **crisis** reply
+  (crisis resources).
+* ``MEDICAL`` verdict (acute medical emergency — the «неотложка» group, DRF-2000)
+  → the medical emergency text
+  (:data:`apps.orchestrator.safety.medical_emergency.MEDICAL_EMERGENCY_TEXT_V2`,
+  103 / 112), never the psychological helpline.
 * ``BLOCK`` verdict (specific drugs / definitive diagnosis / legal advice) → a
   canned **block** reply.
 * ``CLARIFY`` and ``ALLOW`` → the turn proceeds to normal handling. We
@@ -67,6 +71,7 @@ from dataclasses import dataclass, field
 
 import logging
 
+from apps.orchestrator.safety.medical_emergency import MEDICAL_EMERGENCY_TEXT_V2
 from apps.orchestrator.safety.outbound import evaluate_action_promise, evaluate_outbound
 from apps.orchestrator.safety.pre_check import SafetyResult, SafetyVerdict, pre_check
 
@@ -119,9 +124,10 @@ class SafetyGateOutcome:
 def evaluate_inbound(text: str) -> SafetyGateOutcome:
     """Run the shared safety pre-check over inbound ``text`` for the MAX handlers.
 
-    Returns an :class:`SafetyGateOutcome`. Short-circuits (``allowed=False``) only
-    on ``HANDOFF`` (crisis reply) and ``BLOCK`` (block reply); ``CLARIFY`` and
-    ``ALLOW`` return ``allowed=True`` so the turn proceeds as before.
+    Returns an :class:`SafetyGateOutcome`. Short-circuits (``allowed=False``) on
+    ``HANDOFF`` (crisis reply), ``MEDICAL`` (medical emergency text, 103 / 112 —
+    DRF-2000) and ``BLOCK`` (block reply); ``CLARIFY`` and ``ALLOW`` return
+    ``allowed=True`` so the turn proceeds as before.
 
     ``intent_decision`` is intentionally not passed — neither live MAX path runs
     the LLM intent classifier (that is the pipeline's step 6, dead in prod). This
@@ -135,6 +141,18 @@ def evaluate_inbound(text: str) -> SafetyGateOutcome:
             allowed=False,
             verdict=verdict.value,
             reply_text=CRISIS_REPLY_TEXT,
+            reason=result.reason,
+            matched_patterns=list(result.matched_patterns),
+            result=result,
+        )
+    if verdict == SafetyVerdict.MEDICAL:
+        # DRF-2000 (S-2): the «неотложка» group ends the safety-sensitive
+        # flow with the owner's medical text — 103 / 112 in the first line,
+        # no helpline, no diagnosis. Separate from the crisis reply above.
+        return SafetyGateOutcome(
+            allowed=False,
+            verdict=verdict.value,
+            reply_text=MEDICAL_EMERGENCY_TEXT_V2,
             reason=result.reason,
             matched_patterns=list(result.matched_patterns),
             result=result,

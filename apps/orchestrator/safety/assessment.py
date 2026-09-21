@@ -66,6 +66,10 @@ _MAPPING: dict[SafetyVerdict, tuple[SafetyState, Handoff]] = {
     SafetyVerdict.ALLOW: (SafetyState.NORMAL, Handoff.NONE),
     SafetyVerdict.CLARIFY: (SafetyState.CLARIFY, Handoff.NONE),
     SafetyVerdict.BLOCK: (SafetyState.STOP, Handoff.NONE),
+    # DRF-2000: a medical emergency stops the action and REQUIRES a next
+    # step outside the bot (103 / 112) — the same promise strength as the
+    # crisis handoff, a different sentence to the person.
+    SafetyVerdict.MEDICAL: (SafetyState.STOP, Handoff.REQUIRED),
     SafetyVerdict.HANDOFF: (SafetyState.STOP, Handoff.REQUIRED),
 }
 
