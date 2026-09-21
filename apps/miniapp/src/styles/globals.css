@@ -8556,24 +8556,10 @@ a {
 }
 
 .working-hours__note,
-.working-hours__tz,
-.working-hours__empty {
+.working-hours__tz {
   margin: 0 0 var(--s-3);
   font-size: var(--font-size-100);
   color: var(--c-text-secondary);
-}
-
-.working-hours__section-title {
-  margin: var(--s-4) 0 var(--s-2);
-  font-size: var(--font-size-100);
-  font-weight: 600;
-  color: var(--c-text-secondary);
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-}
-
-.working-hours__bulk {
-  margin-bottom: var(--s-3);
 }
 
 .working-hours__times {
@@ -8652,14 +8638,114 @@ a {
   margin-top: var(--s-4);
 }
 
-.working-hours__switch-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--s-3);
-  margin-bottom: var(--s-3);
+/* DRF-2200 (М-7) — «Рабочий график» по макету DRF-1186: подпись недели,
+   три варианта дня, «недоступно (часть дня)» и карточка конфликта. */
+.working-hours__lead {
+  margin: 0 0 var(--s-1);
   font-size: var(--font-size-200);
   color: var(--c-text-primary);
+}
+
+.working-hours__scope {
+  margin: 0 0 var(--s-3);
+  font-size: var(--font-size-100);
+  font-weight: 600;
+  color: var(--c-text-secondary);
+}
+
+.working-hours__hint {
+  margin: var(--s-3) 0;
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
+.working-hours__options {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
+.working-hours__option {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 0 var(--s-2);
+  min-height: 44px;
+  padding: var(--s-2) 0;
+  cursor: pointer;
+}
+
+.working-hours__option-input {
+  grid-row: span 2;
+  width: 20px;
+  height: 20px;
+  accent-color: var(--c-accent);
+}
+
+.working-hours__option-name {
+  font-size: var(--font-size-200);
+  color: var(--c-text-primary);
+}
+
+.working-hours__option-hint {
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
+.working-hours__field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  margin-bottom: var(--s-3);
+}
+
+.working-hours__field-label {
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
+.working-hours__reason {
+  min-height: 44px;
+  padding: var(--s-1) var(--s-2);
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+  font-size: var(--font-size-200);
+  color: var(--c-text-primary);
+}
+
+.working-hours__conflict-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  padding: var(--s-3);
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+}
+
+.working-hours__conflict-card + .working-hours__conflict-card {
+  margin-top: var(--s-2);
+}
+
+.working-hours__conflict-who {
+  margin: 0;
+  font-size: var(--font-size-200);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+
+.working-hours__conflict-when,
+.working-hours__conflict-what {
+  margin: 0;
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
+.working-hours__conflict-link {
+  margin-top: var(--s-1);
+  font-size: var(--font-size-200);
+  color: var(--c-accent);
 }
 
 .schedule-week__setup {

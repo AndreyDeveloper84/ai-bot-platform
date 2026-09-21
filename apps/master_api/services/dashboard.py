@@ -196,6 +196,11 @@ class DashboardStates:
     # False — рабочий день; None — рамка не прочитана (каталог не ответил):
     # «не знаю» ≠ «выходной» (DRF-1111), экран в этом случае выходного не рисует.
     day_off: bool | None = None
+    # DRF-2200 (М-7): задан ли недельный шаблон часов ВООБЩЕ. `day_off` про
+    # сегодня, а это — про то, есть ли у мастера график: «часы не заданы» и
+    # «сегодня выходной» — разные слова и разные двери (макет DRF-1186).
+    # None — рамка не прочитана: «не знаю», как и у `day_off`.
+    hours_set: bool | None = None
 
 
 @dataclass(frozen=True)
@@ -684,18 +689,20 @@ def _working_block_today(
     записи не меняет.
     """
 
-    block, _readable = _working_block_today_ex(master, today_local, tz=tz)
+    block, _readable, _hours_set = _working_block_today_ex(master, today_local, tz=tz)
     return block
 
 
 def _working_block_today_ex(
     master: CatalogMaster, today_local: date, *, tz: ZoneInfo
-) -> tuple[tuple[time, time] | None, bool]:
-    """Рабочий блок дня и признак «рамка прочитана» (DRF-2152).
+) -> tuple[tuple[time, time] | None, bool, bool]:
+    """Рабочий блок дня, «рамка прочитана» и «шаблон задан» (DRF-2152, DRF-2200).
 
-    ``(None, False)`` — каталог не ответил: «не знаю». ``(None, True)`` — рамка
-    прочитана, блока нет: выходной. Две разные вещи под одним ``None`` были
-    причиной, по которой «Сегодня» не могло сказать «выходной» честно.
+    ``(None, False, False)`` — каталог не ответил: «не знаю». ``(None, True, …)``
+    — рамка прочитана, блока на сегодня нет. Третье значение отвечает на
+    ДРУГОЙ вопрос: есть ли у мастера недельный график вообще. Пустой
+    шаблон и выходной по шаблону раньше звучали одинаково («Сегодня
+    выходной»), хотя во втором случае часов просто никто не ставил.
     """
 
     from apps.master_api.services.schedule import _working_block_for_day
@@ -713,10 +720,13 @@ def _working_block_today_ex(
             master.id,
             type(exc).__name__,
         )
-        return None, False
+        return None, False, False
 
     block = _working_block_for_day(master, today_local, exceptions_by_date, wh_by_weekday).working
-    return block, True
+    # «Шаблон задан» — есть хотя бы один рабочий день недели. Семь строк
+    # `is_working=False` — это «часы сняты», а не «график есть».
+    hours_set = any(row.is_working for row in wh_by_weekday.values())
+    return block, True, hours_set
 
 
 def _next_free_window(master: CatalogMaster, now: datetime) -> dict[str, str] | None:
@@ -954,12 +964,14 @@ def get_states(master: CatalogMaster, now: datetime) -> DashboardStates:
         end_of_last = last_today.visit_at + timedelta(minutes=duration)
         is_day_done = now > end_of_last
     # DRF-2152 — выходной только когда рамка дня ПРОЧИТАНА и блока нет.
-    block, readable = _working_block_today_ex(master, today_local, tz=tz)
+    block, readable, hours_set = _working_block_today_ex(master, today_local, tz=tz)
     day_off: bool | None = None if not readable else block is None
     return DashboardStates(
         is_day_done=is_day_done,
         is_offline_safe_response=False,
         day_off=day_off,
+        # DRF-2200: «не знаю» про рамку — «не знаю» и про график.
+        hours_set=None if not readable else hours_set,
     )
 
 
