@@ -27,6 +27,7 @@
  * обоих экранов.
  */
 import type { Master, Service } from "./api";
+import { formatDuration, priceFromLabel } from "./format";
 import type { CatalogBrowseData } from "./customer-booking";
 
 /** Кадр 1 — дословно с макета. */
@@ -122,27 +123,28 @@ export function providerChoice(browse: CatalogBrowseData): ProviderChoice | null
 }
 
 /**
- * «60 минут · 3 200 ₽» — только то, что есть в данных.
+ * «60 мин · 3 200 ₽» — только то, что есть в данных.
  *
- * Пустая строка значит «сказать нечего»: экран не рисует ни «0 ₽», ни
- * прочерк. Цена приходит строкой вида «3200.00» — разделяем разряды и
- * убираем нулевые копейки, как это делает витрина каталога.
+ * Считает НЕ этот модуль: цена и длительность форматируются теми же
+ * `priceFromLabel` и `formatDuration`, что и карточка каталога. Свой
+ * формат здесь был бы вторым на ту же работу — и однажды разошёлся бы
+ * с витриной, показав «90 минут» там, где весь остальной продукт
+ * говорит «1 ч 30 мин».
+ *
+ * Названное отступление от макета: он пишет «60 минут» словом, витрина
+ * везде сокращает. Второй формат ради одного слова не завожу.
+ *
+ * Пустая строка значит «сказать нечего»: ни «0 ₽», ни прочерка. Цена —
+ * прайс зеркала («от»), а не снимок: снимок цены фиксируется на шаге
+ * «Проверь запись» (DRF-1708/2172), и до создания записи его нет.
  */
 export function serviceMeta(service: Service): string {
   const parts: string[] = [];
-  if (service.duration_min) parts.push(`${service.duration_min} минут`);
-  const price = formatPrice(service.price_from);
+  const duration = formatDuration(service.duration_min);
+  if (duration) parts.push(duration);
+  const price = priceFromLabel(service.price_from);
   if (price) parts.push(price);
   return parts.join(" · ");
-}
-
-function formatPrice(raw: string | null): string {
-  const value = Number(raw);
-  if (!raw || !Number.isFinite(value) || value <= 0) return "";
-  const whole = Math.round(value);
-  // `toLocaleString` разделяет разряды НЕРАЗРЫВНЫМ пробелом; заменяем
-  // на обычный, иначе поиск по «3 200» у человека не совпадёт.
-  return `${whole.toLocaleString("ru-RU").replace(/\u00A0/g, " ")} ₽`;
 }
 
 /** «4.8 · 74 отзыва» — или пусто. Нет данных — нет скобок (DRF-1778). */
