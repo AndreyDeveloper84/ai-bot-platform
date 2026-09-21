@@ -9646,3 +9646,10 @@ a {
 .ayla-start__chip .ayla-card__row-main {
   flex-basis: 100%;
 }
+
+/* DRF-2268 — вернуться в чат не вышло: подсказка рядом с кнопкой. */
+.return-to-chat-hint {
+  margin: var(--s-2) 0 0;
+  color: var(--c-text-secondary);
+  font-size: var(--font-size-100);
+}

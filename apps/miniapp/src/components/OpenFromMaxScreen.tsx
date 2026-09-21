@@ -13,7 +13,10 @@
 
 import { ScreenLayout } from "./ScreenLayout";
 import { OPEN_FROM_MAX_COPY } from "../lib/auth-error-copy";
-import { closeApp } from "../lib/max-sdk";
+import { useState } from "react";
+
+import { returnToChat } from "../lib/max-sdk";
+import { ReturnToChatHint } from "./ReturnToChatHint";
 import { screenRoot } from "../lib/screen-back";
 
 const BACK = screenRoot(
@@ -21,16 +24,24 @@ const BACK = screenRoot(
     "внутри Mini App идти некуда, выход один — вернуться в MAX.",
 );
 
+/** «Вернуться в MAX» — одним путём с остальными дверями в чат (DRF-2268). */
+function useBackToMax(): [boolean, () => void] {
+  const [stuck, setStuck] = useState(false);
+  return [stuck, () => setStuck(returnToChat() === "stuck")];
+}
+
 /** Тело отказа — для экранов, которые рисуют его внутри своей раскладки. */
 export function OpenFromMaxBody() {
+  const [stuck, back] = useBackToMax();
   return (
     <div className="hello-error" role="alert">
       <p style={{ margin: 0, fontWeight: 600 }}>{OPEN_FROM_MAX_COPY.title}</p>
       <p style={{ margin: "var(--s-1) 0 0" }}>{OPEN_FROM_MAX_COPY.body}</p>
       <div style={{ marginTop: "var(--s-3)" }}>
-        <button type="button" className="btn-secondary" onClick={() => closeApp()}>
+        <button type="button" className="btn-secondary" onClick={back}>
           {OPEN_FROM_MAX_COPY.action}
         </button>
+        {stuck && <ReturnToChatHint />}
       </div>
     </div>
   );
@@ -38,12 +49,14 @@ export function OpenFromMaxBody() {
 
 /** Полный экран — на месте всего приложения. */
 export function OpenFromMaxScreen() {
+  const [stuck, back] = useBackToMax();
   return (
     <ScreenLayout back={BACK} title={OPEN_FROM_MAX_COPY.title}>
       <p>{OPEN_FROM_MAX_COPY.body}</p>
-      <button type="button" className="btn-secondary" onClick={() => closeApp()}>
+      <button type="button" className="btn-secondary" onClick={back}>
         {OPEN_FROM_MAX_COPY.action}
       </button>
+      {stuck && <ReturnToChatHint />}
     </ScreenLayout>
   );
 }
