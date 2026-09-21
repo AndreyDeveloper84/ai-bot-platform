@@ -16,7 +16,7 @@
  * что у `PlanLiteScreen`); запись — `recent-activity` (bookings, authoritative);
  * последняя тема — новая ручка `last-topic/` (реестр 2094).
  */
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -52,6 +52,8 @@ interface Served {
   /** `null` — плана нет; объект — план; `"disabled"` — 404 plan_lite_disabled. */
   plan?: Json | "disabled";
   lastTopic?: Json;
+  /** DRF-2230 — ответ ручки «позвать в чат за согласием». */
+  consentPrompt?: Response;
 }
 
 const TODAY_WITH_GOAL: Record<string, unknown> = {
@@ -128,6 +130,7 @@ function serve(s: Served = {}) {
         return plan === "disabled" ? refused(404, "plan_lite_disabled") : ok(plan);
       }
       if (u.includes("/last-topic")) return ok(lastTopic);
+      if (u.includes("/wellness/consent-prompt")) return s.consentPrompt ?? ok({ sent: true });
       throw new Error(`unexpected fetch: ${u}`);
     }),
   );
@@ -359,7 +362,57 @@ describe("H01 · нет согласия дневника", () => {
     expect(screen.queryAllByText(/Чтобы менять дневник, нужно согласие/)).toHaveLength(0);
 
     fireEvent.click(screen.getByRole("button", { name: "Дать согласие в чате" }));
-    expect(mockedClose).toHaveBeenCalledTimes(1);
+    // DRF-2230: сперва приглашение уходит в чат, потом экран закрывается.
+    await waitFor(() => expect(mockedClose).toHaveBeenCalledTimes(1));
+  });
+
+  // ── DRF-2230 — кнопка зовёт в чат, а не просто закрывает приложение ──────
+
+  const CONSENT_TODAY = {
+    consent_required: true,
+    active_goals: [{ title: "Подтянуть фигуру", week_num: 2 }],
+    display_name: "Анна",
+  };
+
+  function promptCalls(): unknown[][] {
+    return vi
+      .mocked(fetch)
+      .mock.calls.filter(([url]) => String(url).includes("/wellness/consent-prompt"));
+  }
+
+  it("нажатие шлёт приглашение в чат (POST) и только потом закрывает приложение", async () => {
+    serve({ today: CONSENT_TODAY });
+    renderHome();
+    fireEvent.click(await screen.findByRole("button", { name: "Дать согласие в чате" }));
+    await waitFor(() => expect(mockedClose).toHaveBeenCalledTimes(1));
+    const calls = promptCalls();
+    expect(calls).toHaveLength(1);
+    expect((calls[0]?.[1] as RequestInit | undefined)?.method).toBe("POST");
+  });
+
+  it("приглашение уже в чате (повтор) — тоже закрываем: дубля нет, путь тот же", async () => {
+    serve({ today: CONSENT_TODAY, consentPrompt: ok({ sent: false, reason: "recently_sent" }) });
+    renderHome();
+    fireEvent.click(await screen.findByRole("button", { name: "Дать согласие в чате" }));
+    await waitFor(() => expect(mockedClose).toHaveBeenCalledTimes(1));
+  });
+
+  it("сбой отправки — приложение НЕ закрывается молча, сказано, что делать", async () => {
+    serve({ today: CONSENT_TODAY, consentPrompt: refused(502, "consent_prompt_not_sent") });
+    renderHome();
+    fireEvent.click(await screen.findByRole("button", { name: "Дать согласие в чате" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(/не получилось/i);
+    // Положительная пара: запрос был, а закрытия — нет.
+    expect(promptCalls()).toHaveLength(1);
+    expect(mockedClose).not.toHaveBeenCalled();
+  });
+
+  it("согласие уже есть (ответ already_granted) — не закрываем, блок уходит после перечитывания", async () => {
+    serve({ today: CONSENT_TODAY, consentPrompt: ok({ sent: false, reason: "already_granted" }) });
+    renderHome();
+    fireEvent.click(await screen.findByRole("button", { name: "Дать согласие в чате" }));
+    await waitFor(() => expect(promptCalls()).toHaveLength(1));
+    expect(mockedClose).not.toHaveBeenCalled();
   });
 
   it("ложный вход: с согласием блока согласия нет вовсе", async () => {
