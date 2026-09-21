@@ -104,6 +104,7 @@ import {
 } from "../lib/customer-last-topic";
 import { formatDuration, priceFromLabel } from "../lib/format";
 import { returnToChat } from "../lib/max-sdk";
+import { ReturnToChatHint } from "../components/ReturnToChatHint";
 import {
   getPlanLite,
   type PlanLite,
@@ -162,20 +163,11 @@ type ActiveGoal = NonNullable<WellnessToday["active_goals"]>[number];
 export const DIARY_CONSENT_CARD_TEXT = "Чтобы вести дневник, нужно согласие — дай его в чате с Ayla";
 export const DIARY_CONSENT_CARD_CTA = "Дать согласие в чате";
 
-/**
- * DRF-2266 — ЧЕРНОВИК владельцу: вернуться в чат не вышло ни мостом, ни
- * ссылкой (web.max.ru без `close()` и без ссылки на бота). Раньше здесь была
- * тишина — «кнопка не работает».
- */
-export const CHAT_STUCK_HINT =
-  "Вернись в чат с Ayla: закрой приложение крестиком вверху — чат останется под ним.";
+// DRF-2268: строка и компонент подсказки — общие, `components/ReturnToChatHint`.
+export { CHAT_STUCK_HINT } from "../components/ReturnToChatHint";
 
 function ChatStuckHint() {
-  return (
-    <p className="wellness-dash__chat-hint" role="status">
-      {CHAT_STUCK_HINT}
-    </p>
-  );
+  return <ReturnToChatHint className="wellness-dash__chat-hint" />;
 }
 
 // ---------------------------------------------------------------------------

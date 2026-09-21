@@ -32,18 +32,18 @@ vi.mock("../lib/customer-goals", async (importOriginal) => {
 });
 vi.mock("../lib/max-sdk", async (importOriginal) => {
   const original = await importOriginal<typeof import("../lib/max-sdk")>();
-  return { ...original, maxBridge: vi.fn(() => null), closeApp: vi.fn() };
+  return { ...original, maxBridge: vi.fn(() => null), returnToChat: vi.fn(() => "closed") };
 });
 
 import { SurfaceModeContext } from "../components/SurfaceSwitch";
 import { fetchDecisionContext, postGoalSelect, type DecisionContext } from "../lib/customer-goals";
-import { closeApp, maxBridge } from "../lib/max-sdk";
+import { maxBridge, returnToChat } from "../lib/max-sdk";
 import { COMPLETION_AUTO_MS, COMPLETION_TEXT, GoalSelectScreen } from "./GoalSelectScreen";
 
 const mockedFetch = vi.mocked(fetchDecisionContext);
 const mockedPost = vi.mocked(postGoalSelect);
 const mockedBridge = vi.mocked(maxBridge);
-const mockedClose = vi.mocked(closeApp);
+const mockedClose = vi.mocked(returnToChat);
 
 const INTENTS: DecisionContext["intents"] = [
   { id: "choose_suggested", label: "Выбрать из предложенного" },
@@ -135,6 +135,7 @@ function renderAt(path: string, canSwitch = false) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockedClose.mockReturnValue("closed");
   mockedBridge.mockReturnValue(null);
 });
 afterEach(() => {
@@ -219,21 +220,36 @@ describe("кадр C03.5 — контекст собран", () => {
     expect(mockedClose).toHaveBeenCalledTimes(1);
   });
 
-  it("мост без close() — не виснем на кадре, уходим на главный", async () => {
+  it("вернуться в чат нечем (DRF-2268: returnToChat → stuck) — не виснем, уходим на главный", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     mockedBridge.mockReturnValue({} as never);
+    mockedClose.mockReturnValue("stuck");
     mockedFetch.mockResolvedValue(COLLECTED);
     renderAt("/customer/goal-select");
     await screen.findByText(COMPLETION_TEXT);
     await act(async () => {
       vi.advanceTimersByTime(COMPLETION_AUTO_MS + 10);
     });
+    expect(mockedClose).toHaveBeenCalledTimes(1);
     expect(screen.getByText("ГЛАВНЫЙ H01")).toBeInTheDocument();
-    expect(mockedClose).not.toHaveBeenCalled();
+  });
+
+  it("диалог открыт ссылкой (opened_chat) — на главный не уходим", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    mockedClose.mockReturnValue("opened_chat");
+    mockedFetch.mockResolvedValue(COLLECTED);
+    renderAt("/customer/goal-select");
+    await screen.findByText(COMPLETION_TEXT);
+    await act(async () => {
+      vi.advanceTimersByTime(COMPLETION_AUTO_MS + 10);
+    });
+    expect(mockedClose).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText("ГЛАВНЫЙ H01")).toBeNull();
   });
 
   it("вне MAX через паузу уходит на главный H01", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
+    mockedClose.mockReturnValue("stuck");
     mockedFetch.mockResolvedValue(COLLECTED);
     renderAt("/customer/goal-select");
 
@@ -242,7 +258,6 @@ describe("кадр C03.5 — контекст собран", () => {
       vi.advanceTimersByTime(COMPLETION_AUTO_MS + 10);
     });
     expect(screen.getByText("ГЛАВНЫЙ H01")).toBeInTheDocument();
-    expect(mockedClose).not.toHaveBeenCalled();
   });
 });
 

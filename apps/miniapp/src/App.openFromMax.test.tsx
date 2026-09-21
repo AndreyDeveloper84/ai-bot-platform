@@ -83,7 +83,7 @@ describe("без initData — экран «Открой Ayla из MAX» на к�
 
   it("«Вернуться в MAX» закрывает Mini App", () => {
     vi.spyOn(identity, "channelIdentity").mockReturnValue("no_init_data");
-    const close = vi.spyOn(maxSdk, "closeApp").mockImplementation(() => {});
+    const close = vi.spyOn(maxSdk, "returnToChat").mockReturnValue("closed");
 
     renderAt("/");
     fireEvent.click(screen.getByRole("button", { name: RETURN }));

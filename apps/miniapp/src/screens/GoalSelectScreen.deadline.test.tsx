@@ -28,7 +28,7 @@ vi.mock("../lib/customer-goals", async (importOriginal) => {
 });
 vi.mock("../lib/max-sdk", async (importOriginal) => {
   const original = await importOriginal<typeof import("../lib/max-sdk")>();
-  return { ...original, maxBridge: vi.fn(), closeApp: vi.fn() };
+  return { ...original, maxBridge: vi.fn(), returnToChat: vi.fn(() => "closed") };
 });
 
 import { SurfaceModeContext } from "../components/SurfaceSwitch";

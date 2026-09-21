@@ -33,6 +33,7 @@ vi.mock("../lib/max-sdk", () => ({
   closeApp: vi.fn(),
   // DRF-2266: двери в чат идут одним путём — мост close → ссылка на диалог → подсказка.
   returnToChat: vi.fn(() => "closed"),
+  rememberChatLink: vi.fn(),
 }));
 
 import { getCatalogBrowse } from "../lib/customer-booking";

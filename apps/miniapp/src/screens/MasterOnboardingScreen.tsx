@@ -41,12 +41,13 @@ import {
   type ClaimResponse,
 } from "../lib/master-api";
 import {
-  closeApp,
+  returnToChat,
   hapticNotify,
   setDeviceStorage,
   signalReady,
 } from "../lib/max-sdk";
 import { SystemState } from "../components/master/SystemState";
+import { ReturnToChatHint } from "../components/ReturnToChatHint";
 import { ScreenLayout } from "../components/ScreenLayout";
 import { useReloadMe } from "../state/boot";
 import { StickyCta } from "../components/StickyCta";
@@ -706,13 +707,20 @@ function InviteUsedScreen({ onOpen }: { onOpen: () => void }) {
   );
 }
 
-function WrongRecipientScreen() {
+export function WrongRecipientScreen() {
+  // DRF-2268: «Закрыть» не молчит — «застрял» → подсказка.
+  const [stuck, setStuck] = useState(false);
   return (
     <ScreenLayout
       back={INVITE_ERROR_BACK}
       title="Не тот получатель"
-      cta={<StickyCta onClick={closeApp}>{COPY.errors.close}</StickyCta>}
+      cta={
+        <StickyCta onClick={() => setStuck(returnToChat() === "stuck")}>
+          {COPY.errors.close}
+        </StickyCta>
+      }
     >
+      {stuck && <ReturnToChatHint />}
       <div className="callout callout--danger" role="alert">
         <p style={{ margin: 0 }}>{COPY.errors.wrong_recipient}</p>
       </div>

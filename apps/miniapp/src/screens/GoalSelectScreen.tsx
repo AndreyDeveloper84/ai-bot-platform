@@ -98,7 +98,7 @@ import {
   type SafetyStop,
 } from "../lib/customer-goals";
 import { SAFETY_KIND_CLARIFY } from "../lib/health-gate-copy";
-import { closeApp, maxBridge } from "../lib/max-sdk";
+import { returnToChat } from "../lib/max-sdk";
 import { backTo, screenRoot, type BackIntent } from "../lib/screen-back";
 import {
   DEADLINE_PASSED_CTA,
@@ -135,7 +135,7 @@ const NEXT_ROUTES: Record<string, string> = {
 
 /**
  * DRF-2177 — контекст собран (макет C03.5): не маршрут и не кнопка, а
- * кадр «✓ + Спасибо!» с авто-переходом. В MAX — `closeApp()`: человек
+ * кадр «✓ + Спасибо!» с авто-переходом. В MAX — `returnToChat()`: человек
  * возвращается в чат, где его ждёт следующий шаг (C04 — К-3); вне MAX —
  * на главный. Текст — дословно с макета DRF-1178; `next.label` документа
  * («Вернуться в чат») здесь не рисуется — он для потребителя, который
@@ -296,12 +296,9 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
   useEffect(() => {
     if (!isCompleted) return;
     const timer = window.setTimeout(() => {
-      // `closeApp()` закрывает только при живом `close()`; без него (или
-      // по deep-link без истории) человек остался бы на кадре без кнопки —
-      // тогда домой сами.
-      if (maxBridge()?.close) {
-        closeApp();
-      } else {
+      // DRF-2268: в чат — через returnToChat (мост close() → ссылка на
+      // диалог); вернуть не вышло — Главная, а не кадр без кнопки.
+      if (returnToChat() === "stuck") {
         navigate(HOME_ROUTE, { replace: true });
       }
     }, COMPLETION_AUTO_MS);
