@@ -390,11 +390,17 @@ describe("H01 · нет согласия дневника", () => {
     expect((calls[0]?.[1] as RequestInit | undefined)?.method).toBe("POST");
   });
 
-  it("приглашение уже в чате (повтор) — тоже закрываем: дубля нет, путь тот же", async () => {
+  it("приглашение уже в чате (повтор) — не проваливаемся молча: подсказка и «Открыть чат»", async () => {
+    // Живой проход владельца 21.09: повтор в окне дубля закрывал приложение, и
+    // человек «просто проваливался в чат», не понимая, что там уже ждёт.
     serve({ today: CONSENT_TODAY, consentPrompt: ok({ sent: false, reason: "recently_sent" }) });
     renderHome();
     fireEvent.click(await screen.findByRole("button", { name: "Дать согласие в чате" }));
-    await waitFor(() => expect(mockedClose).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText(/Приглашение уже в чате/)).toBeInTheDocument();
+    expect(mockedClose).not.toHaveBeenCalled();
+    // Положительная пара: выход в чат — по явной кнопке.
+    fireEvent.click(screen.getByRole("button", { name: "Открыть чат" }));
+    expect(mockedClose).toHaveBeenCalledTimes(1);
   });
 
   it("сбой отправки — приложение НЕ закрывается молча, сказано, что делать", async () => {

@@ -411,6 +411,61 @@ def has_consent(
     return qs.exists()
 
 
+def person_channel_shells(bot_user: "BotUser") -> list["BotUser"]:
+    """Оболочки человека по его каналу — ``(channel, channel_user_id)``.
+
+    В пилоте у человека несколько ``BotUser``: Mini App резолвит строку под
+    ``MAX_BOT_TENANT_SLUG``, чат глобального бота — под сентинелом
+    ``global_bot``. Это разные строки по ``unique_together (tenant, channel,
+    channel_user_id)``. Пустой ``channel_user_id`` идентичностью не является:
+    совпадение по нему собрало бы посторонних людей — тогда только сама строка.
+
+    Намеренно без ``privacy.person_shell_ids``: тот резолв при отсутствии
+    связки с Ayla ходит в сеть и заводит upstream-прокси — уместно для права
+    на стирание, дико для чтения согласия на каждом ходу.
+    """
+    from apps.identity.models import BotUser as BotUserModel
+
+    channel = (getattr(bot_user, "channel", "") or "").strip()
+    channel_user_id = (getattr(bot_user, "channel_user_id", "") or "").strip()
+    if not channel or not channel_user_id:
+        return [bot_user]
+    shells = list(BotUserModel.all_tenants.filter(channel=channel, channel_user_id=channel_user_id))
+    return shells or [bot_user]
+
+
+def has_person_consent(bot_user: "BotUser", consent_type: str) -> bool:
+    """Согласие ЧЕЛОВЕКА, а не строки (DRF-2230, живой проход владельца 21.09).
+
+    Чат пишет согласие на свою оболочку, Mini App читал свою — и после
+    «Готово, согласие есть» в чате Главная продолжала требовать согласия.
+    Читаем по всем оболочкам (:func:`person_channel_shells`):
+
+    * открыто, если у человека есть активный грант (``granted`` и не отозван)
+      **и** его последний грант позже последнего отзыва на любой оболочке —
+      отзыв где угодно закрывает, новый грант после него открывает снова;
+    * на одной строке это ровно прежнее правило :func:`has_global_consent`.
+
+    Ложноположительного направления нет: отзыв и так идёт по всем оболочкам
+    (``withdraw_personal_data_for_bot_users``, §8.4), а последнее событие
+    человека решает даже там, где отзыв задел лишь одну строку.
+    """
+    rows = list(
+        ConsentRecord.all_tenants.filter(
+            bot_user__in=person_channel_shells(bot_user),
+            consent_type=consent_type,
+            granted=True,
+        ).values_list("captured_at", "withdrawn_at")
+    )
+    active = [captured for captured, withdrawn in rows if withdrawn is None]
+    if not active:
+        return False
+    withdrawals = [withdrawn for _, withdrawn in rows if withdrawn is not None]
+    if not withdrawals:
+        return True
+    return max(active) > max(withdrawals)
+
+
 def has_global_consent(
     bot_user: "BotUser",
     consent_type: str,

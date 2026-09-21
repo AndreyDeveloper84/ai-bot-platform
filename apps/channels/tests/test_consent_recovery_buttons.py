@@ -197,7 +197,9 @@ class TestGrantWritesTheJournalAndReturns:
         # Сверка константы с самой собой: доказывает ПРОВОДКУ origin → текст, и
         # это и есть предмет узла. Про сам текст он не говорит ничего — тексты
         # черновики W3; читать его как покрытие содержания нельзя.
-        assert reply.text == CONSENT_RECOVERY_RETURN_TEXTS[origin]
+        # DRF-2230: у ``miniapp`` без Mini App в настройках к тексту добавляется
+        # подсказка, как вернуться, — поэтому начало, а не равенство.
+        assert reply.text.startswith(CONSENT_RECOVERY_RETURN_TEXTS[origin])
 
     def test_every_new_tap_has_a_history_label(self) -> None:
         from apps.skills.welcome.skill import welcome_tap_labels
@@ -248,3 +250,44 @@ class TestGuards:
 
         rows = ConsentRecord.all_tenants.filter(bot_user=bot_user, granted=True, withdrawn_at=None)
         assert rows.count() == 2  # personal_data + memory_green, без дублей
+
+
+# ── 4. Возврат в приложение — кнопкой (DRF-2230, скрин владельца 21.09) ─────
+
+
+class TestMiniappReturnCarriesTheAppButton:
+    """«Готово, согласие есть. Возвращайся в приложение…» — без кнопки человек
+    оставался в чате и «не знал, что дальше». С Mini App в настройках под
+    сообщением — ``open_app`` на Главную (``open_home``); без неё сообщение не
+    ломается и само говорит, как вернуться."""
+
+    def _grant(self):
+        from apps.channels.max.global_onboarding import run_onboarding_turn
+
+        bot_user, conversation = _global_user_and_conv("990077")
+        return run_onboarding_turn(conversation, bot_user, "cb:welcome:consent_yes_miniapp")
+
+    def test_with_web_app_the_return_opens_home(self, settings) -> None:
+        settings.MAX_BOT_WEB_APP = "aylabot"
+        reply = self._grant()
+        buttons = [b for b in _buttons(reply) if b.get("web_app")]
+        assert buttons, _buttons(reply)
+        assert buttons[0]["web_app"] == "aylabot"
+        assert buttons[0]["callback"] == "open_home"
+
+    def test_with_only_a_url_the_return_links_home(self, settings) -> None:
+        settings.MAX_BOT_WEB_APP = ""
+        settings.MAX_MINIAPP_URL = "https://app.example"
+        reply = self._grant()
+        links = [b for b in _buttons(reply) if b.get("url")]
+        assert links and links[0]["url"].startswith("https://app.example"), _buttons(reply)
+
+    def test_without_a_mini_app_the_message_still_says_how_to_return(self, settings) -> None:
+        from apps.skills.welcome.skill import CONSENT_RECOVERY_RETURN_TEXTS
+
+        settings.MAX_BOT_WEB_APP = ""
+        settings.MAX_MINIAPP_URL = ""
+        reply = self._grant()
+        assert reply.text.startswith(CONSENT_RECOVERY_RETURN_TEXTS["miniapp"])
+        assert _buttons(reply) == []  # empty-assert-ok: кнопки строить не из чего
+        assert "приложени" in reply.text.lower()

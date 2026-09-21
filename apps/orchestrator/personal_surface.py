@@ -383,9 +383,11 @@ def personal_records_consent_open(bot_user: Any) -> bool:
     """
     try:
         from apps.consent.models import ConsentRecord
-        from apps.consent.services import has_global_consent
+        from apps.consent.services import has_person_consent
 
-        return has_global_consent(bot_user, ConsentRecord.ConsentType.PERSONAL_DATA.value)
+        # DRF-2230: по человеку, а не по строке — согласие, данное в чате
+        # (оболочка ``global_bot``), видно Главной Mini App (своя оболочка).
+        return has_person_consent(bot_user, ConsentRecord.ConsentType.PERSONAL_DATA.value)
     except Exception:  # noqa: BLE001 — fail-closed: no consent proven, no read
         logger.exception("orchestrator.personal_surface.consent_check_failed")
         return False

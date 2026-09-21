@@ -511,9 +511,11 @@ def _consent_captured(bot_user: Any) -> bool:
     """
     try:
         from apps.consent.models import ConsentRecord
-        from apps.consent.services import has_global_consent
+        from apps.consent.services import has_person_consent
 
-        return has_global_consent(bot_user, ConsentRecord.ConsentType.PERSONAL_DATA.value)
+        # DRF-2230: зеркало Главной — согласие, данное в Mini App (своя
+        # оболочка), не заставляет чат спрашивать заново.
+        return has_person_consent(bot_user, ConsentRecord.ConsentType.PERSONAL_DATA.value)
     except Exception:  # noqa: BLE001 — consent probe must never break the turn
         logger.exception(
             "global_onboarding.consent_probe_failed bot_user=%s",

@@ -130,6 +130,8 @@ import {
   DIARY_OFF_TEXT,
   diaryIsOff,
   CONSENT_PROMPT_FAILED_TEXT,
+  CONSENT_PROMPT_ALREADY_SENT_TEXT,
+  CONSENT_PROMPT_OPEN_CHAT_CTA,
   requestDiaryConsentPrompt,
 } from "../lib/customer-wellness";
 import {
@@ -454,14 +456,23 @@ export function CustomerWellnessDashboardScreen() {
   // бы снова отправить человека в чат, где ему нечего нажать.
   const [consentPromptError, setConsentPromptError] = useState<string | null>(null);
   const [consentPromptBusy, setConsentPromptBusy] = useState(false);
+  const [consentPromptAlreadySent, setConsentPromptAlreadySent] = useState(false);
   const onConsentTap = useCallback(async () => {
     setConsentPromptError(null);
+    setConsentPromptAlreadySent(false);
     setConsentPromptBusy(true);
     try {
       const res = await requestDiaryConsentPrompt();
       if (res.reason === "already_granted") {
         // Согласие уже есть — блок уйдёт после перечитывания; в чат незачем.
         void fetchAll();
+        return;
+      }
+      if (res.reason === "recently_sent") {
+        // Живой проход 21.09: повтор закрывал приложение молча — человек
+        // «проваливался в чат». Теперь говорим, что ждёт в чате, и уходим
+        // туда по явной кнопке.
+        setConsentPromptAlreadySent(true);
         return;
       }
       closeApp();
@@ -739,6 +750,16 @@ export function CustomerWellnessDashboardScreen() {
               <p className="wellness-dash__consent-error" role="alert">
                 {consentPromptError}
               </p>
+            ) : null}
+            {consentPromptAlreadySent ? (
+              <>
+                <p className="wellness-dash__consent-text" role="status">
+                  {CONSENT_PROMPT_ALREADY_SENT_TEXT}
+                </p>
+                <button type="button" className="btn-primary" onClick={closeApp}>
+                  {CONSENT_PROMPT_OPEN_CHAT_CTA}
+                </button>
+              </>
             ) : null}
           </section>
         )}
