@@ -29,7 +29,7 @@
   детерминированный ответ v2 БЕЗ вызова модели (провайдер, который бросает
   при обращении); per-tenant навык по-прежнему отвечает v2;
 * p5 — DRE/Mini App: ``assess`` знает вердикт ``medical`` (STOP, handoff
-  REQUIRED), ``health_gate._hard_stop`` отдаёт ``health_red_flag``, не ``block``.
+  REQUIRED), ``health_gate._crisis_or_block`` отдаёт ``health_red_flag``, не ``block``.
 """
 
 from __future__ import annotations
@@ -203,7 +203,7 @@ class TestP5ConsumersKnowMedical:
     def test_miniapp_health_gate_names_it_a_red_flag(self) -> None:
         from apps.miniapp_api import health_gate
 
-        stop = health_gate._hard_stop("сердечный приступ")
+        stop = health_gate._crisis_or_block("сердечный приступ")
         assert stop is not None
         assert stop.kind == health_gate.KIND_RED_FLAG
         assert stop.text == MEDICAL_EMERGENCY_TEXT_V2

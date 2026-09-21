@@ -233,7 +233,7 @@ def _remember(bot_user: Any, state: str) -> None:
 
 
 def _crisis_or_block(text: str) -> SafetyStop | None:
-    """The inbound gate's two verdicts that end the flow, on their own route."""
+    """The inbound gate's verdicts that end the flow (crisis, medical — DRF-2000, block), on their own route."""
 
     inbound = evaluate_inbound(text)
     if not inbound.allowed:
