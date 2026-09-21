@@ -75,6 +75,7 @@ class TestTopicComesFromThePersonsConversation:
             channel="max", channel_user_id=bot_user.channel_user_id
         )
         live = resolve_active_global_conversation(chat_row)
+        assert live is not None  # разговор на строке чата правда заведён
         _turn(live, A, "Вчера мы говорили про воду и сон", minutes_ago=60)
 
         body = _get(client, bot_user).json()
