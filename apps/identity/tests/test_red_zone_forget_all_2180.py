@@ -1,8 +1,10 @@
-"""«Забудь всё» обязано снимать красную зону, и повышение зоны — не лазейка (DRF-2132).
+"""«Забудь всё» снимает все зоны, и повышение зоны — не лазейка (DRF-2180).
 
-Лист Память-1 просит хранить аллергии и непереносимости в красной зоне.
-Замер показал, что до самих аллергий стоят две дыры в основании, и обе
-живут в коде, который красную зону как раз и охраняет.
+Лист Память-5 (DRF-2180) — долг из матрицы удаления #1896. Найден при
+замере DRF-2132 («аллергии в красной зоне»): до самих аллергий стоят две
+дыры в основании, и обе живут в коде, который красную зону как раз и
+охраняет. DRF-2132 остаётся открытым — он упирается в два решения
+владельца (см. хвост докстринга), а это основание нужно при любом из них.
 
 # Дыра 1. Свип «забудь всё» красное не снимает — а матрица требует
 
@@ -41,8 +43,8 @@ carries extra rules … and is not in scope here».
 
 # Чего эти узлы НЕ решают
 
-Сам лист (аллергии в красной зоне) упирается в два решения владельца,
-названные в докладе: красные записи сегодня отбрасываются на 100 %
+Сам DRF-2132 (аллергии в красной зоне) упирается в два решения
+владельца: красные записи сегодня отбрасываются на 100 %
 (fail-closed до #597), а DRF-1290 запрещает извлечение фраз про аллергии
 до всякого хранения, и DRF-1371 этот запрет подтвердил. Узлы ниже не
 трогают ни то, ни другое — они про основание, на котором аллергии потом
@@ -54,6 +56,7 @@ from __future__ import annotations
 import uuid
 
 import pytest
+from django.db import connection, transaction
 from django.utils import timezone
 
 from apps.identity.models import (
@@ -66,6 +69,11 @@ from apps.identity.services.forget_all_sweep import sweep_forget_all
 from apps.identity.services.memory_writer import promote_zone
 
 pytestmark = pytest.mark.django_db
+
+#: RLS — механизм Postgres; под SQLite проверять нечего.
+_PG_ONLY = pytest.mark.skipif(
+    connection.vendor != "postgresql", reason="RLS/GUC — механизм Postgres."
+)
 
 
 def _upc(*, forgotten: bool = True, minor_lock: bool = False) -> UserPersonalContext:
@@ -169,10 +177,102 @@ class TestForgetAllReachesTheRedZone:
         )
         assert {first.id, second.id} <= logged
 
+    def test_exactly_one_log_row_per_red_entry(self) -> None:
+        """«По одной строке на запись» — счёт, а не вхождение.
+
+        Проверка подмножеством (`{a, b} <= logged`) дубликатов не видит:
+        мутация «писать каждую строку дважды» проходила её насквозь. Для
+        аудитора двойная строка — это два обращения к специальной
+        категории там, где было одно.
+        """
+        upc = _upc()
+        red = _entry(upc, MemoryEntry.SENSITIVITY_RED, key="a")
+        other = _entry(upc, MemoryEntry.SENSITIVITY_RED, key="b")
+
+        sweep_forget_all(upc.user_id)
+
+        for entry in (red, other):
+            assert (
+                RedZoneAccessLog.objects.filter(
+                    memory_entry_id=entry.id,
+                    access_type=RedZoneAccessLog.ACCESS_DELETE,
+                ).count()
+                == 1
+            ), entry.id
+
+    def test_one_request_id_for_the_whole_sweep(self) -> None:
+        """Одна просьба «забудь всё» — одно обращение, разбитое на строки.
+
+        Иначе по журналу нельзя собрать «что сняли за этот раз»: строки
+        со случайными идентификаторами не соединяются ни во что.
+        """
+        upc = _upc()
+        for key in ("a", "b", "c"):
+            _entry(upc, MemoryEntry.SENSITIVITY_RED, key=key)
+
+        sweep_forget_all(upc.user_id)
+
+        request_ids = set(
+            RedZoneAccessLog.objects.filter(
+                user_id=upc.user_id, access_type=RedZoneAccessLog.ACCESS_DELETE
+            ).values_list("request_id", flat=True)
+        )
+        assert len(request_ids) == 1, request_ids
+
+    def test_the_log_row_names_who_and_why(self) -> None:
+        """Строка журнала без «кто» и «зачем» доказывает только факт запроса."""
+        upc = _upc()
+        _entry(upc, MemoryEntry.SENSITIVITY_RED)
+
+        sweep_forget_all(upc.user_id)
+
+        row = RedZoneAccessLog.objects.filter(
+            user_id=upc.user_id, access_type=RedZoneAccessLog.ACCESS_DELETE
+        ).first()
+        assert row is not None
+        assert row.accessor_role == RedZoneAccessLog.ACCESSOR_SYSTEM_JOB
+        assert row.accessor_principal.startswith("forget_all_sweep:")
+        assert "забыть всё" in row.purpose
+
+    def test_a_second_sweep_adds_no_log_rows(self) -> None:
+        """Идемпотентность ЖУРНАЛА, а не только результата.
+
+        Второй прогон живых красных не находит — значит и строк журнала
+        завести не должен. Иначе повторные прогоны (а свип идёт по
+        расписанию) размножали бы доказательство одного обращения.
+        """
+        upc = _upc()
+        _entry(upc, MemoryEntry.SENSITIVITY_RED)
+
+        sweep_forget_all(upc.user_id)
+        after_first = RedZoneAccessLog.objects.filter(user_id=upc.user_id).count()
+        sweep_forget_all(upc.user_id)
+
+        assert RedZoneAccessLog.objects.filter(user_id=upc.user_id).count() == after_first
+        assert after_first == 1
+
+    def test_a_superseded_red_row_is_swept_too(self) -> None:
+        """Живость — про надгробие, а не про статус.
+
+        Строка со `status='superseded'` и пустым надгробием всё ещё лежит
+        в базе и всё ещё специальная категория. Получено умолчанием
+        (фильтр по надгробию), поэтому пришпилено: следующая правка
+        фильтра иначе отняла бы это молча.
+        """
+        upc = _upc()
+        red = _entry(upc, MemoryEntry.SENSITIVITY_RED)
+        MemoryEntry.objects.filter(id=red.id).update(status=MemoryEntry.STATUS_SUPERSEDED)
+
+        sweep_forget_all(upc.user_id)
+
+        red.refresh_from_db()
+        assert red.soft_deleted_at is not None
+
     def test_green_rows_do_not_pollute_the_red_zone_log(self) -> None:
         """Положительная пара: журнал красной зоны — про красные строки."""
         upc = _upc()
         green = _entry(upc, MemoryEntry.SENSITIVITY_GREEN)
+        red = _entry(upc, MemoryEntry.SENSITIVITY_RED, key="r")
 
         sweep_forget_all(upc.user_id)
 
@@ -181,6 +281,9 @@ class TestForgetAllReachesTheRedZone:
                 "memory_entry_id", flat=True
             )
         )
+        # Наличие — первым: журнал вообще пишется в этом же прогоне. Иначе
+        # «зелёной строки там нет» было бы правдой и у пустого журнала.
+        assert red.id in logged
         assert green.id not in logged
 
     def test_minor_lock_still_survives(self) -> None:
@@ -216,6 +319,8 @@ class TestZonePromotionIsNotABackDoor:
                 entry=entry,
                 new_zone=MemoryEntry.SENSITIVITY_RED,
                 consent_token="t",
+                request_id=uuid.uuid4(),
+                purpose="тест: повышение зоны",
             )
 
         entry.refresh_from_db()
@@ -230,7 +335,12 @@ class TestZonePromotionIsNotABackDoor:
                 entry=entry,
                 new_zone=MemoryEntry.SENSITIVITY_YELLOW,
                 consent_token="t",
+                request_id=uuid.uuid4(),
+                purpose="тест: повышение зоны",
             )
+
+        entry.refresh_from_db()
+        assert entry.sensitivity_zone == MemoryEntry.SENSITIVITY_GREEN
 
     def test_rejected_promotion_leaves_the_forensic_row(self) -> None:
         """Отказ писать специальную категорию — доказательство по 152-ФЗ гл. 3.
@@ -246,6 +356,8 @@ class TestZonePromotionIsNotABackDoor:
                 entry=entry,
                 new_zone=MemoryEntry.SENSITIVITY_RED,
                 consent_token="t",
+                request_id=uuid.uuid4(),
+                purpose="тест: повышение зоны",
             )
 
         assert RedZoneAccessLog.objects.filter(
@@ -258,7 +370,12 @@ class TestZonePromotionIsNotABackDoor:
         upc = _upc(forgotten=False)
         entry = _entry(upc, MemoryEntry.SENSITIVITY_RED)
 
-        promoted = promote_zone(entry=entry, new_zone=MemoryEntry.SENSITIVITY_GREEN)
+        promoted = promote_zone(
+            entry=entry,
+            new_zone=MemoryEntry.SENSITIVITY_GREEN,
+            request_id=uuid.uuid4(),
+            purpose="тест: понижение зоны",
+        )
 
         assert promoted.sensitivity_zone == MemoryEntry.SENSITIVITY_GREEN
 
@@ -266,9 +383,110 @@ class TestZonePromotionIsNotABackDoor:
         upc = _upc(forgotten=False)
         entry = _entry(upc, MemoryEntry.SENSITIVITY_GREEN)
 
-        promoted = promote_zone(entry=entry, new_zone=MemoryEntry.SENSITIVITY_GREEN)
+        promoted = promote_zone(
+            entry=entry,
+            new_zone=MemoryEntry.SENSITIVITY_GREEN,
+            request_id=uuid.uuid4(),
+            purpose="тест: понижение зоны",
+        )
 
         assert promoted.sensitivity_zone == MemoryEntry.SENSITIVITY_GREEN
+
+
+@_PG_ONLY
+class TestTheSweepSeesRedUnderTheAppRole:
+    """Регрессия под ``ayla_app`` — иначе сторож ничего не стережёт.
+
+    Политика ``memory_entry_non_red_visible`` (миграция 0008) прячет
+    красные строки от SELECT без GUC, и **WHERE у UPDATE подчиняется той
+    же политике**. Вся сюита идёт под суперпользователем, который RLS
+    обходит, поэтому свип без GUC был бы зелёным во всех тестах и
+    отказал бы ровно в день перехода приложения на ``ayla_app``
+    (ADR-0011 §16, фаза 2, шаг 5) — молча: красные строки не попали бы в
+    выборку, счёт занизился бы, журнал остался бы пуст, а свип вернул бы
+    успех.
+
+    Узел переключает роль внутри транзакции, как это делает
+    ``test_db_security.py``, и падает ровно на снятом GUC.
+    """
+
+    def test_red_is_swept_and_logged_under_ayla_app(self) -> None:
+        upc = _upc()
+        red = _entry(upc, MemoryEntry.SENSITIVITY_RED)
+        green = _entry(upc, MemoryEntry.SENSITIVITY_GREEN)
+
+        with transaction.atomic():
+            with connection.cursor() as cur:
+                cur.execute("SET LOCAL ROLE ayla_app")
+            sweep_forget_all(upc.user_id)
+
+        red.refresh_from_db()
+        green.refresh_from_db()
+        assert red.soft_deleted_at is not None, (
+            "красная строка пережила «забудь всё» под ролью приложения — "
+            "запрос свипа идёт без GUC и RLS его не пускает"
+        )
+        assert green.soft_deleted_at is not None
+        assert RedZoneAccessLog.objects.filter(
+            memory_entry_id=red.id, access_type=RedZoneAccessLog.ACCESS_DELETE
+        ).exists()
+
+    def test_positive_pair_the_role_really_is_restricted(self) -> None:
+        """Иначе узел выше прошёл бы и на роли, которая RLS обходит."""
+        upc = _upc(forgotten=False)
+        _entry(upc, MemoryEntry.SENSITIVITY_RED)
+
+        with transaction.atomic():
+            with connection.cursor() as cur:
+                cur.execute("SET LOCAL ROLE ayla_app")
+                cur.execute(
+                    "SELECT count(*) FROM identity_memoryentry "
+                    "WHERE sensitivity_zone = 'red' AND user_id = %s",
+                    [str(upc.user_id)],
+                )
+                visible = cur.fetchone()[0]
+
+        assert visible == 0, (
+            "под ayla_app красная строка видна без GUC — значит роль не "
+            "ограничена, и узел выше ничего не доказывает"
+        )
+
+
+class TestPromoteZoneContract:
+    def test_a_durable_forensic_row_forbids_an_outer_atomic(self) -> None:
+        """Контракт, унаследованный от ``write_entry``, — назван и пришпилен.
+
+        Судебная строка коммитится ``atomic(durable=True)``, чтобы её не
+        унёс откат вызывающего. Плата: внутри чужого ``atomic()`` это
+        ``RuntimeError``, а не ``MinorProtectionLookupFailed`` — то есть
+        вызывающий поймает не то, что ловит. Пусть это будет решением, а
+        не сюрпризом для следующего.
+        """
+        upc = _upc(forgotten=False)
+        entry = _entry(upc, MemoryEntry.SENSITIVITY_GREEN)
+
+        with pytest.raises(RuntimeError, match="durable"), transaction.atomic():
+            promote_zone(
+                entry=entry,
+                new_zone=MemoryEntry.SENSITIVITY_RED,
+                consent_token="t",
+                request_id=uuid.uuid4(),
+                purpose="тест: повышение внутри чужой транзакции",
+            )
+
+    def test_request_id_and_purpose_are_required(self) -> None:
+        """Доказательство без предмета — не доказательство.
+
+        У ``write_entry`` оба обязательны, чтобы судебную строку можно
+        было соединить с запросом, который её породил. Умолчание выдало
+        бы случайный id, не присоединяемый ни к чему, и один и тот же
+        текст причины на все отказы.
+        """
+        import inspect
+
+        params = inspect.signature(promote_zone).parameters
+        assert params["request_id"].default is inspect.Parameter.empty
+        assert params["purpose"].default is inspect.Parameter.empty
 
 
 class TestRedNeverReachesThePrompt:

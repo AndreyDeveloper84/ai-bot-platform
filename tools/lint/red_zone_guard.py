@@ -34,6 +34,9 @@ ALLOWED:
 These paths are permitted to query red rows (they're the audited path):
   - `apps/identity/services/red_zone_reader.py` (THE sanctioned reader)
   - `apps/identity/services/memory_writer.py` (writer's read-before-update flows)
+  - `apps/identity/services/memory_deleter.py` (DRF-2180: the forget-all
+    sweep's mass erasure reads red ids to log them; it is the second
+    sanctioned red path and, like the reader, sets the GUC first)
   - `apps/identity/tests/**` (fixtures)
   - `apps/identity/migrations/**` (backfills)
 
@@ -90,6 +93,14 @@ from pathlib import Path
 _ALLOWLIST_FRAGMENTS = (
     "apps/identity/services/red_zone_reader.py",
     "apps/identity/services/memory_writer.py",
+    # DRF-2180 — второй законный красный путь: массовое снятие по «забудь
+    # всё». Он читает id красных строк, чтобы завести на каждую строку
+    # журнала, и, как и читатель, ставит GUC перед запросом. Исключение
+    # названо здесь, а не получено молча: до этого листа сторож новый
+    # запрос ПРОСТО НЕ РАЗЛИЧАЛ (`_is_red_constant` сверяет строковый
+    # литерал `'red'`, а там `MemoryEntry.SENSITIVITY_RED` — атрибут), то
+    # есть исключение действовало бы и без строки, но как незамеченное.
+    "apps/identity/services/memory_deleter.py",
     "apps/identity/tests/",
     "apps/identity/migrations/",
 )

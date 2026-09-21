@@ -139,12 +139,13 @@ OUTCOMES: dict[str, Outcome] = {
     ),
     "identity.MemoryEntry:yellow": Outcome(
         DELETE,
-        "никто — развёртка объявлена green-only (forget_all_sweep, docstring)",
+        "forget_all_sweep.sweep_forget_all — все три зоны одним свипом (DRF-2180)",
         "человек сказал «забудь всё»; жёлтая зона — личные факты с TTL 365 дней",
     ),
     "identity.MemoryEntry:red": Outcome(
         DELETE,
-        "никто — развёртка объявлена green-only; red_zone_reader умеет только по одной",
+        "forget_all_sweep.sweep_forget_all — плюс строка RedZoneAccessLog "
+        "на каждую снятую строку (DRF-2180)",
         "специальная категория (152-ФЗ ст. 10) не должна переживать «забудь всё»",
     ),
     "identity.UserPersonalContext": Outcome(
@@ -259,8 +260,9 @@ UNDECLARED_IN_EXPORT: dict[str, str] = {
 
 #: Хранилища, где сегодняшняя цепочка НЕ даёт ожидаемого исхода. Лист следом.
 ERASURE_HOLES: dict[str, str] = {
-    "identity.MemoryEntry:yellow": "жёлтые строки переживают «забудь всё» живыми (свип green-only)",
-    "identity.MemoryEntry:red": "красные строки переживают «забудь всё» живыми (свип green-only)",
+    # DRF-2180 закрыл обе строки MemoryEntry: свип снимает все три зоны, на
+    # красную — строка RedZoneAccessLog. Метки сняты, потому что strict-xfail
+    # покраснел сам, как и задумано этим реестром.
     "conversations.Conversation": "skill_state с анкетой не очищается ни свипом, ни обезличиванием",
 }
 

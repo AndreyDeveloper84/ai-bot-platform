@@ -27,7 +27,8 @@ changes the stored state so that a gate-less read finds nothing to return.
 
 # What it erases
 
-* Every live 🟢 green ``MemoryEntry`` → the existing soft-delete tombstone
+* Every live ``MemoryEntry`` of the subject, **любой зоны** → soft-delete
+  tombstone
   (``delete_requested_at`` + ``soft_deleted_at`` + ``deletion_reason`` +
   ``status='deleted'``), via :func:`memory_deleter.soft_delete_green_entries`
   so there is exactly one way a green row is ever tombstoned.
@@ -44,20 +45,38 @@ changes the stored state so that a gate-less read finds nothing to return.
 * Finally the UPC is stamped ``soft_deleted_at`` — the «completed forget-all»
   state ``memory_reader`` already documents.
 
+# Все три зоны, а не только зелёная (DRF-2180)
+
+До этого листа свип фильтровал ``sensitivity_zone=GREEN`` и объявлял это
+осознанным: «yellow/red erasure carries extra rules … not in scope here».
+Матрица удаления (DRF-2134, ``test_forget_all_matrix.py``) говорит обратное
+и НОВЕЕ — для обеих зон ``DELETE``, исполнитель «никто»:
+
+    "identity.MemoryEntry:red": «специальная категория (152-ФЗ ст. 10) не
+    должна переживать „забудь всё"»
+    "identity.MemoryEntry:yellow": «человек сказал „забудь всё"; жёлтая
+    зона — личные факты с TTL 365 дней»
+
+То есть требование было записано вместе с причиной и записано как долг.
+«Extra rules», на которые ссылался прежний докстринг, — это не повод не
+стирать, а описание ТОГО, КАК стирать: у красной строки доступ — строка
+журнала, и свип её заводит (``RedZoneAccessLog``, ``access_type='delete'``,
+``accessor_role='system_job'``). Предупреждения о противопоказаниях
+(policy §8.4) — про показ строки мастеру, а не про её снятие по просьбе
+самого человека.
+
+Зелёный удалитель при этом НЕ расширен: его зовут ещё чатовая команда
+«забудь про веганство», экран памяти Mini App и путь стирания Ayla, и там
+строку называет человек по идентификатору — жёсткая привязка к зелёной
+зоне держит дверь «снять красную строку по id мимо журнала» закрытой. У
+свипа свой путь, ``memory_deleter.soft_delete_all_zones_for_forget_all``.
+
 # What it deliberately does NOT erase
 
 * **``minor_lock``** — a protection, not a fact about the person. It blocks
   yellow/red writes once reconciliation finds the user is a minor. Clearing
   it as part of an erasure would turn a subject-rights request into a safety
   downgrade.
-* **Yellow and red entries.** This stream is green-only, as the whole
-  ``memory_deleter`` module is: yellow/red erasure carries extra rules
-  (``RedZoneAccessLog``, contraindication warnings — policy §8.4) and is not
-  in scope here. Neither zone is readable by the surfacing path this sweep
-  is protecting: ``memory_reader`` never selects them, and red is reachable
-  only through the audited ``red_zone_reader`` accessor. Named here rather
-  than silently skipped — see ``export_coverage`` for the same rule applied
-  to the export.
 * **``UserPreferences``** — the four notification toggles and the profile
   screen's birthday. Standing instructions and a form the person maintains
   themselves are not things Ayla «remembers about» them; deleting that row
@@ -105,7 +124,7 @@ from apps.conversations.erasure import (
 )
 from apps.conversations.models import ArchivedMessage, Conversation
 from apps.identity.models import MemoryEntry, UserPersonalContext
-from apps.identity.services.memory_deleter import soft_delete_green_entries
+from apps.identity.services.memory_deleter import soft_delete_all_zones_for_forget_all
 
 logger = logging.getLogger(__name__)
 
@@ -157,21 +176,30 @@ def sweep_forget_all(user_id: uuid.UUID) -> ForgetAllSweepResult:
     # the surfacing reader is blind to the very rows we are here to bury. Going
     # around it is the point of the module; every OTHER caller must keep using
     # the reader.
+    # DRF-2180 — по зоне НЕ фильтруем: человек попросил забыть всё, и
+    # матрица объявляет `DELETE` для всех трёх зон. Причина надгробия —
+    # `forget_all`, не `user_delete`: строк никто не называл, а надгробие,
+    # которое их не различает, не ответит аудиту «почему эта строка снята».
+    #
+    # «Живая» строка — та, у которой ПУСТЫ оба поля надгробия. Строка, где
+    # выставлен только `delete_requested_at`, сюда не попадёт: сегодня такого
+    # состояния не бывает (все три писателя ставят оба поля разом), но если
+    # появится — свип окажется молча неполным, и красная строка переживёт
+    # «забудь всё» без единого следа. Условие оставлено прежним намеренно:
+    # менять предикат живости в этом листе значило бы менять то, что он не
+    # измерял.
     doomed_ids = list(
         MemoryEntry.objects.filter(
             user_id=user_id,
-            sensitivity_zone=MemoryEntry.SENSITIVITY_GREEN,
             soft_deleted_at__isnull=True,
             delete_requested_at__isnull=True,
         ).values_list("id", flat=True)
     )
-    entries_deleted = soft_delete_green_entries(
-        user_id,
-        doomed_ids,
-        # Not `user_delete`: nobody named these rows. The tombstone must say
-        # which request buried it, or an audit cannot tell «я забыла про
-        # веганство» from «забудь всё».
-        reason=MemoryEntry.DELETION_REASON_FORGET_ALL,
+    # Один `request_id` на прогон: одна просьба «забудь всё» — это одно
+    # обращение к красной зоне, разбитое на строки. Он же уходит в GUC и в
+    # каждую строку журнала, так что по нему их собирают обратно.
+    entries_deleted, red_deleted = soft_delete_all_zones_for_forget_all(
+        user_id, doomed_ids, request_id=uuid.uuid4()
     )
 
     now = timezone.now()
