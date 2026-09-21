@@ -176,8 +176,8 @@ def _as_int(value: object) -> int | None:
 
 def signal_budget(
     *,
-    used: int,
-    limit: int,
+    used: object,
+    limit: object,
     day: str,
     cost_usd: str | None = None,
 ) -> None:

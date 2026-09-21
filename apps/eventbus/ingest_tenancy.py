@@ -79,6 +79,7 @@ from typing import Any
 
 from django.conf import settings
 
+from apps.eventbus.ingest_envelope import SYSTEM_EVENT_NAMES
 from apps.eventbus.ingest_allowlist import (
     AllowlistConfigurationError,
     resolve_allowed_events,
@@ -100,6 +101,10 @@ _TENANT_NULLABLE_EVENT_NAMES: frozenset[str] = frozenset(
         "subscription.activated",
         "subscription.past_due",
         "billing.fee_charged",
+        # DRF-2196 (а1, §64) — системный сигнал. Идёт своей веткой в
+        # `assert_envelope_tenant_authorized` ДО tenant-null карвинга:
+        # карвинг проверяет пользователя, а у системного события его нет.
+        "system.module.health.degraded",
     }
 )
 
@@ -423,6 +428,44 @@ def _authorize_tenant_null_envelope(
     )
 
 
+def _authorize_system_envelope(
+    *,
+    event_id: str,
+    event_name: str,
+    user_id: Any,
+    tenant_id: Any,
+    correlation_id: str | None,
+) -> None:
+    """Третий путь авторизации — системное событие без субъекта (DRF-2196, §64).
+
+    Разбор конверта (``parse_envelope``) уже потребовал, чтобы у события из
+    закрытого набора не было ни пользователя, ни тенанта, а ``actor`` был
+    ``system``; HMAC проверен вью раньше разбора. Проверять здесь по
+    ``TenantUserRelationship`` нечего — субъекта нет.
+
+    Повтор тех же условий — защита для вызывающего, который соберёт конверт
+    мимо ``parse_envelope``: системное событие, называющее пользователя или
+    тенанта, отвергается и здесь, а не проходит в потребителя с чужим
+    субъектом.
+
+    Путь ``tenant_id=null`` обходит allowlist событий целиком — для
+    системного события остаются только HMAC и закрытый набор имён. Принято
+    владельцем сознательно (§64); строка журнала ниже — единственный
+    детективный контроль этой поверхности.
+    """
+    if user_id is not None or tenant_id is not None:
+        raise TenantAuthorizationError(
+            f"system_event_has_subject event_name={_safe_log_value(event_name)}"
+        )
+    logger.info(
+        "eventbus.ingest.tenant_verify_accepted "
+        "verification_mode=system_event event_id=%s event_name=%s correlation_id=%s",
+        _safe_log_value(event_id),
+        _safe_log_value(event_name),
+        _safe_log_value(correlation_id),
+    )
+
+
 def assert_envelope_tenant_authorized(envelope: Any) -> None:
     """Verify ``(envelope.user_id, envelope.tenant_id)`` authorization.
 
@@ -474,6 +517,16 @@ def assert_envelope_tenant_authorized(envelope: Any) -> None:
     tenant_id = getattr(envelope, "tenant_id", None)
     event_id = getattr(envelope, "event_id", "")
     correlation_id = getattr(envelope, "correlation_id", None)
+
+    if event_name in SYSTEM_EVENT_NAMES:
+        _authorize_system_envelope(
+            event_id=event_id,
+            event_name=event_name,
+            user_id=user_id,
+            tenant_id=tenant_id,
+            correlation_id=correlation_id,
+        )
+        return
 
     if tenant_id is None:
         if event_name not in _TENANT_NULLABLE_EVENT_NAMES:
