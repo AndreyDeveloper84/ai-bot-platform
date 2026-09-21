@@ -39,8 +39,12 @@ MAX-чат операторов (DRF-2158), и он здесь, в боте.
 1. **Дедуп ``page()`` — ГЛОБАЛЬНОЕ окно** ``ALERTS_DEDUP_TTL_SECONDS``
    (умолчание 300 с, один knob на весь бот). «Одна страница в сутки» его
    средствами не выражается: поднять окно до суток — значит заглушить
-   дедуп всему остальному. Поэтому свой ключ по дню, ДО вызова ``page``,
-   — той же формы, что у каталога (``food_scan:signal:{day}:{level}``).
+   дедуп всему остальному. Поэтому свой ключ — ``scan_budget_alert:{day}:
+   {ratio}:{level}`` — по той же мысли, что у каталога
+   (``food_scan:signal:{day}:{level}``), но со своим префиксом: кэши у
+   репозиториев разные, общей формы тут не требуется. Порог в ключе — не
+   украшение: без него третий порог с уже занятым уровнем закрыл бы счёт
+   соседнему (см. :func:`signal_budget`).
 2. **``severity="critical"`` дедуп ОБХОДИТ** (``alerting._is_duplicate``:
    «never dedup critical»). Поэтому 100 % — ``error``, а не ``critical``:
    иначе «одна страница в сутки» превратилась бы в страницу на КАЖДУЮ
@@ -52,17 +56,33 @@ MAX-чат операторов (DRF-2158), и он здесь, в боте.
 
 # Страж не роняет то, что стережёт
 
-Сигнал не важнее работы: :func:`signal_budget` никогда не бросает наружу.
-Потолок ``0`` или отрицательный — молчание, а не падение; упавший сток
-алертинга — предупреждение в лог, а не исключение в вызывающего. Тот же
-принцип, что у ``page()`` («best-effort and never raises») и у
+Сигнал не важнее работы: :func:`signal_budget` никогда не бросает наружу —
+**и это относится к чужим данным, а не только к своим стокам.** Числа
+приходят снаружи: в варианте (а) это разобранный JSON, где ``used`` вполне
+может оказаться строкой (каталог и стоимость отдаёт строкой — отсюда
+``cost_usd: str | None``). Незащищённое сравнение уронило бы ``TypeError``
+внутри обработчика ingest, то есть страж уронил бы не свой сигнал, а
+входящее событие. Поэтому аргументы приводятся к целым в начале, а доля
+считается точной дробью: ``used`` и ``limit`` — целые без потолка, и
+``used / limit`` на большом числе дало бы ``OverflowError``.
+
+Потолок ``0`` или отрицательный — молчание; упавший сток — строка в лог.
+Тот же принцип, что у ``page()`` («best-effort and never raises») и у
 ``_signal_if_crossed`` каталога («сигнал никогда не важнее скана»).
+
+# Чего в сигнале нет по построению
+
+Идентификаторам людей взяться неоткуда: :func:`signal_budget` не принимает
+ни одного параметра, которым человека можно назвать, — каталог считает
+снимки, а не тех, кто их прислал (ключ человека ``food_scan:user:{pk}``
+в этот путь не заходит). Это проверяется переписью подписи, а не осмотром
+литерала: литерал можно отредактировать, подпись — нет, не заметив.
 """
 
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime, timedelta
+from fractions import Fraction
 from typing import Final
 
 from django.core.cache import cache
@@ -71,12 +91,30 @@ from apps.observability.alerting import Severity, page
 
 logger = logging.getLogger(__name__)
 
-#: Пороги — те же, что у каталога (``food_scan_budget.SIGNAL_THRESHOLDS``).
-#: Уровни намеренно ``warning`` / ``error`` и никогда ``critical`` — см.
-#: капкан 2 в докстринге модуля.
-THRESHOLDS: Final[tuple[tuple[float, Severity], ...]] = ((0.8, "warning"), (1.0, "error"))
+#: Пороги — те же, что у каталога (``food_scan_budget.SIGNAL_THRESHOLDS``),
+#: но точными дробями, а не ``float``: доля считается сравнением целых
+#: (``used * знаменатель >= limit * числитель``), поэтому потолок в
+#: миллиард распознаваний не даёт ``OverflowError`` там, где ``used / limit``
+#: дал бы. Уровни намеренно ``warning`` / ``error`` и никогда ``critical`` —
+#: см. капкан 2 в докстринге модуля.
+THRESHOLDS: Final[tuple[tuple[Fraction, Severity], ...]] = (
+    (Fraction(4, 5), "warning"),
+    (Fraction(1, 1), "error"),
+)
 
-_DEDUP_KEY: Final = "scan_budget_alert:{day}:{level}"
+#: Порог — часть ключа. Без него третий порог с уже занятым уровнем
+#: закрыл бы счёт соседнему, и «у каждого порога свой счёт в сутки» было
+#: бы правдой лишь по совпадению «уровней ровно столько же, сколько
+#: порогов».
+_DEDUP_KEY: Final = "scan_budget_alert:{day}:{ratio}:{level}"
+
+#: TTL ключа дедупа. Двое суток, а не «до ближайшей полуночи»: день уже
+#: зашит в ключ, выравнивать TTL по нему незачем — нужно пережить
+#: опоздавшую доставку. «До полуночи» давало бы в 23:59:59 ключ на ОДНУ
+#: секунду, и повторная доставка события про те же сутки (у рельса
+#: каталога есть ретраи и dead-letter) подняла бы вторую страницу за те
+#: же сутки.
+_DEDUP_TTL_SECONDS: Final = 48 * 60 * 60
 
 #: Что это значит людям — а не «счётчик достиг числа». Оператор читает
 #: последствие: фото перестали распознаваться, и сами по себе не начнут
@@ -91,14 +129,20 @@ _CONSEQUENCE_AT_WARNING: Final = (
 )
 
 
-def _seconds_until_midnight_utc() -> int:
-    now = datetime.now(UTC)
-    midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-    return max(1, int((midnight - now).total_seconds()))
+def _key(day: str, ratio: Fraction, level: Severity) -> str:
+    return _DEDUP_KEY.format(day=day, ratio=ratio, level=level)
 
 
-def _first_today(day: str, level: Severity) -> bool:
-    """Первый ли это сигнал такого уровня в эти сутки.
+def _release(key: str) -> None:
+    """Вернуть счёт суток: доставки не было, следующий скан переспросит."""
+    try:
+        cache.delete(key)
+    except Exception as exc:  # noqa: BLE001 — освобождение — лучшее усилие
+        logger.warning("observability.scan_budget.dedup_release_failed err=%s", type(exc).__name__)
+
+
+def _claim(key: str) -> bool:
+    """Занять счёт этих суток под этот порог.
 
     Потеря кэша читается как «уже звучал» — молчание, а не шквал. Довод:
     ``page()`` дедуплицирует ЧЕРЕЗ ТОТ ЖЕ кэш, поэтому при его потере
@@ -107,19 +151,27 @@ def _first_today(day: str, level: Severity) -> bool:
     ``_signal_if_crossed`` выбрал то же самое.
     """
     try:
-        return bool(
-            cache.add(
-                _DEDUP_KEY.format(day=day, level=level), 1, timeout=_seconds_until_midnight_utc()
-            )
-        )
+        return bool(cache.add(key, 1, timeout=_DEDUP_TTL_SECONDS))
     except Exception as exc:  # noqa: BLE001 — потеря кэша не роняет вызывающего
         logger.warning(
-            "observability.scan_budget.dedup_unavailable day=%s level=%s err=%s",
-            day,
-            level,
-            type(exc).__name__,
+            "observability.scan_budget.dedup_unavailable key=%s err=%s", key, type(exc).__name__
         )
         return False
+
+
+def _as_int(value: object) -> int | None:
+    """Чужое число → целое или ничего.
+
+    ``bool`` отсекается отдельно: ``True`` — не «одно распознавание».
+    Числа приходят из разобранного JSON, где строка на месте числа —
+    обычное дело; ронять на этом обработчик ingest страж не вправе.
+    """
+    if isinstance(value, bool):
+        return None
+    try:
+        return int(value)  # type: ignore[call-overload]
+    except (TypeError, ValueError, OverflowError):
+        return None
 
 
 def signal_budget(
@@ -139,56 +191,98 @@ def signal_budget(
         посчитано» (цены не заданы либо провайдер не отдал ``usage``);
         сигнал звучит всё равно, просто без справки.
 
-    Ничего не возвращает и никогда не бросает: сигнал не важнее работы.
+    Ничего не возвращает и никогда не бросает — ни на своих стоках, ни на
+    чужих числах: ``used`` и ``limit`` приводятся к целым, а не берутся на
+    веру. Типы в подписи адресованы автору, а не рантайму: разобранный
+    JSON приходит как ``Any``, и mypy на нём молчит.
     """
-    if limit <= 0:
+    used_i = _as_int(used)
+    limit_i = _as_int(limit)
+    if used_i is None or limit_i is None:
+        logger.warning(
+            "observability.scan_budget.not_numbers used=%r limit=%r day=%r", used, limit, day
+        )
+        return
+
+    if limit_i <= 0:
         # Потолка нет — порогов тоже. Не падение и не сигнал: делить на
         # ноль нечего, а «звучать всегда» при выключенном бюджете значит
         # звучать зря.
-        logger.info("observability.scan_budget.no_limit used=%s limit=%s day=%s", used, limit, day)
+        logger.info(
+            "observability.scan_budget.no_limit used=%s limit=%s day=%s", used_i, limit_i, day
+        )
         return
 
-    crossed = [(ratio, level) for ratio, level in THRESHOLDS if used >= limit * ratio]
+    # Сравнение целых, не `float`: `used >= limit * ratio` на дробях точно и
+    # не переполняется там, где `used / limit` дал бы `OverflowError`.
+    crossed = [
+        (ratio, level)
+        for ratio, level in THRESHOLDS
+        if used_i * ratio.denominator >= limit_i * ratio.numerator
+    ]
     if not crossed:
         return
 
     # Пересечено несколько порогов разом (расход прыгнул с нуля к потолку):
-    # звучит СТАРШИЙ, младшие гасятся молча — их ключ дедупа занимается, но
-    # страница не идёт. Каталог в `_signal_if_crossed` шлёт все пересечённые;
-    # здесь это было бы «80 % и 100 % одной пачкой», то есть предупреждение о
-    # том, что уже случилось. Младший порог не выбрасывается, а помечается
-    # израсходованным: иначе он прозвучал бы следующим сканом, после того как
-    # оператор уже прочитал про 100 %.
-    *lower, (ratio, level) = crossed
-    for _lower_ratio, lower_level in lower:
-        _first_today(day, lower_level)
+    # звучит СТАРШИЙ, младшие гасятся молча — их ключ занимается, но страница
+    # не идёт. Каталог в `_signal_if_crossed` шлёт все пересечённые; здесь это
+    # было бы «80 % и 100 % одной пачкой», то есть предупреждение о том, что
+    # уже случилось. Младший порог не выбрасывается, а помечается
+    # израсходованным: иначе он прозвучал бы, когда расход откатится обратно
+    # в зону 80–100 % (каталог делает `_decr` при `BudgetExhausted`, а
+    # оператор может поднять потолок) — уже ПОСЛЕ страницы про 100 %.
+    ratio, level = max(crossed, key=lambda pair: pair[0])
+    for lower_ratio, lower_level in crossed:
+        if lower_ratio != ratio:
+            _claim(_key(day, lower_ratio, lower_level))
 
-    if _first_today(day, level):
-        percent = int(ratio * 100)
-        at_limit = ratio >= 1.0
-        title = f"Бюджет распознавания фото: {percent} % за сутки ({used}/{limit})"
-        body = (
-            f"{_CONSEQUENCE_AT_LIMIT if at_limit else _CONSEQUENCE_AT_WARNING}\n\n"
-            f"сутки (UTC): {day}\n"
-            f"израсходовано: {used} из {limit} ({used / limit:.0%})\n"
-            f"стоимость за сутки, USD: {cost_usd if cost_usd is not None else 'не посчитана'}\n\n"
-            "Потолки — FOOD_SCAN_DAILY_TOTAL (общий) и FOOD_SCAN_DAILY_PER_USER "
-            "(личный) в настройках каталога; счётчик обнуляется в полночь UTC.\n"
-            "В сигнале нет и не может быть идентификаторов людей: каталог "
-            "считает снимки, а не тех, кто их прислал."
+    key = _key(day, ratio, level)
+    if not _claim(key):
+        return
+
+    share = Fraction(used_i, limit_i)
+    percent = int(share * 100)
+    at_limit = ratio >= 1
+    title = f"Бюджет распознавания фото: {percent} % за сутки ({used_i}/{limit_i})"
+    body = (
+        f"{_CONSEQUENCE_AT_LIMIT if at_limit else _CONSEQUENCE_AT_WARNING}\n\n"
+        f"сутки (UTC): {day}\n"
+        f"израсходовано: {used_i} из {limit_i} ({percent} %)\n"
+        f"стоимость за сутки, USD: {cost_usd if cost_usd is not None else 'не посчитана'}\n\n"
+        "Потолки — FOOD_SCAN_DAILY_TOTAL (общий) и FOOD_SCAN_DAILY_PER_USER "
+        "(личный) в настройках каталога; счётчик обнуляется в полночь UTC."
+    )
+
+    # `page` — best-effort и сам не бросает, но сток за ним чужой:
+    # оборачиваем, потому что страж не должен ронять то, что стережёт.
+    try:
+        delivered = page(level, title, body, dedup_key=f"scan_budget:{day}:{ratio}:{level}")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "observability.scan_budget.page_failed day=%s level=%s err=%s",
+            day,
+            level,
+            type(exc).__name__,
         )
+        delivered = False
 
-        # `page` — best-effort и сам не бросает, но сток за ним чужой:
-        # оборачиваем, потому что страж не должен ронять то, что стережёт.
-        try:
-            page(level, title, body, dedup_key=f"scan_budget:{day}:{level}")
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "observability.scan_budget.page_failed day=%s level=%s err=%s",
-                day,
-                level,
-                type(exc).__name__,
-            )
+    if not delivered:
+        # Счёт суток занимается ДО отправки (иначе два воркера пошлют две
+        # страницы), но «одна страница в сутки» — про страницу, а не про
+        # попытку: недоставленную надо вернуть, иначе один сетевой сбой MAX
+        # ровно в момент пересечения 100 % крадёт сигнал до полуночи UTC —
+        # то есть ровно то состояние, ради предотвращения которого лист и
+        # заведён. Повтор ограничен собственным дедупом `page` (5 минут):
+        # следующий скан переспросит, доставки не будет, и так до настоящей
+        # повторной попытки — не шквал.
+        logger.warning(
+            "observability.scan_budget.page_not_delivered day=%s level=%s used=%s/%s",
+            day,
+            level,
+            used_i,
+            limit_i,
+        )
+        _release(key)
 
 
 __all__ = ["THRESHOLDS", "signal_budget"]
