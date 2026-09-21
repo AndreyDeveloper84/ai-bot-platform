@@ -75,9 +75,13 @@ class TestThresholds:
         with patch.object(sba, "page", return_value=True) as paged:
             sba.signal_budget(used=500, limit=500, day=DAY)
 
-        bodies = " ".join(f"{t} {b}" for _s, t, b in _calls(paged))
+        # Регистр не проверяем: «Фото» в начале предложения — это тот же
+        # факт, что «фото» в середине. Проверяется смысл, а не заглавная.
+        bodies = " ".join(f"{t} {b}" for _s, t, b in _calls(paged)).lower()
         assert "фото не распознаются" in bodies
-        assert "полуночи UTC" in bodies
+        assert "полуночи utc" in bodies
+        # Положительная пара: это НЕ предупреждение «кончится», а факт.
+        assert "кончится" not in bodies
 
     def test_100_percent_is_error_not_critical(self) -> None:
         """`critical` обходит дедуп `page()` — страница на каждую попытку."""
@@ -120,6 +124,21 @@ class TestOnePagePerDay:
 
         assert len(paged.call_args_list) == 1
 
+    def test_a_jump_straight_to_the_limit_pages_once_not_twice(self) -> None:
+        """Расход прыгнул с нуля к потолку — звучит СТАРШИЙ порог.
+
+        Обе отметки пересечены одним вызовом; слать обе значило бы выдать
+        оператору предупреждение о том, что уже случилось. Младший порог
+        не выбрасывается, а помечается израсходованным — иначе он
+        прозвучал бы следующим сканом, ПОСЛЕ страницы про 100 %.
+        """
+        with patch.object(sba, "page", return_value=True) as paged:
+            sba.signal_budget(used=500, limit=500, day=DAY)
+            sba.signal_budget(used=505, limit=500, day=DAY)
+
+        severities = [s for s, _t, _b in _calls(paged)]
+        assert severities == ["error"]
+
     def test_two_thresholds_are_deduped_apart(self) -> None:
         """80 % и 100 % — разные факты, у каждого свой счёт в сутки."""
         with patch.object(sba, "page", return_value=True) as paged:
@@ -150,6 +169,23 @@ class TestNoPersonIdentifiers:
         with patch.object(sba, "page", return_value=True) as paged:
             sba.signal_budget(used=500, limit=500, day=DAY, cost_usd=None)
         assert len(paged.call_args_list) == 1
+
+
+class TestCacheLoss:
+    def test_dedup_cache_down_is_silence_not_a_storm(self) -> None:
+        """Потеря кэша читается как «уже звучал».
+
+        `page()` дедуплицирует ЧЕРЕЗ ТОТ ЖЕ кэш, поэтому открытый отказ
+        дал бы не одну лишнюю страницу, а страницу на каждую попытку
+        скана — то самое, от чего оператор глушит канал.
+        """
+        with (
+            patch.object(sba.cache, "add", side_effect=RuntimeError("redis down")),
+            patch.object(sba, "page", return_value=True) as paged,
+        ):
+            sba.signal_budget(used=500, limit=500, day=DAY)
+
+        assert paged.call_args_list == []
 
 
 class TestSignalIsNeverMoreImportantThanWork:
