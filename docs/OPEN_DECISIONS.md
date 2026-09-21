@@ -9905,3 +9905,54 @@ CLEARED_BY_RECHECK = eligible_basis AND mandatory_guards
 
 **Затронутый код:**
 НЕ ПРИМЕНИМО — документальное решение; runtime, тесты и code fixtures в этом § не меняются.
+
+---
+
+## §168. ОТВЕЧЕН (21.09.2026): клинические границы `safety_recheck` по группам G1–G7 — `EVIDENCE_CORRECTION` / `SYMPTOM_UPDATE`; односложные ответы недостаточны; recent-resolved; CQ-CTX-01…03 — owner policy resolved, physician sign-off pending
+
+**Источник:** ответ владельца (Андрей Тихонов) 21.09.2026 на предложенные решения 1–5 — дословно `утвержда.` (не исправлялся); полный текст решений — immutable record `docs/safety/reviews/OWNER_RULINGS_S1_RECHECK_CLINICAL_BOUNDARIES_2026-09-21.md` (RECORD SHA-256 `cf0263dd5d890217e534817ab6fc7ece15af3cbbddfceb827c557c52f15af094`; регистрация — [§169]). Статусы: `OWNER POLICY: APPROVED` · `CLINICAL PRE-REVIEW: COMPLETE` · `INDEPENDENT PHYSICIAN SIGN-OFF: PENDING` · `CLINICAL APPROVED: NO` · `PHYSICIAN PASS: NO` · `SAFE FOR PILOT: NO` · `CONTROLLED PILOT S1 GATE READY: NO`. Owner-approved clinical pre-review для продуктовой политики — не независимый врачебный sign-off.
+
+**Связь:** уточняет клиническую применимость и не отменяет record r4 `docs/safety/reviews/OWNER_RULINGS_SAFETY_RECHECK_CONTRACT_2026-09-20_r4.md` (RECORD SHA-256 `2245924e6f551cb5dd84a4e67f50093a1ec2a64646408881449281f1d64a7ef0`) и формулу `eligible_basis = ANY(1..5)`, `mandatory_guards = ALL(6..8)`, `CLEARED_BY_RECHECK = eligible_basis AND mandatory_guards` ([§166–§167]); опирается на [§156], [§162], [§164] (record 18.09 не меняется); DRF-2040; PR #1893 (`clear_restriction()` закрыт).
+
+**Решение 1 — два вида recheck.** `EVIDENCE_CORRECTION` (цитата, гипотеза, метафора, другой человек, однозначная опечатка / ошибка полярности) и `SYMPTOM_UPDATE` (симптом был, ослаб или исчез). `CLEARED_BY_RECHECK` допустим прежде всего для `EVIDENCE_CORRECTION`; исчезновение реального потенциально опасного симптома само по себе не clearance.
+
+**Решение 2 — границы G1–G7** (дословно — в record):
+
+| Группа | Clearance допустим | Clearance запрещён | Outcome при запрете / blocker |
+|---|---|---|---|
+| G1 дыхание | однозначная коррекция контекста; либо question contract G1 [§164] устанавливает полностью прошедшую реакцию на нагрузку без тяжёлой одышки | реальный эпизод удушья / тяжёлой одышки в покое, невозможности говорить полными фразами, посинения, спутанности, другого тяжёлого признака | `S1_NOT_CURRENT_MEDICAL_FOLLOWUP_REQUIRED` (не NORMAL) |
+| G2 потеря сознания | установлено: фактической потери сознания не было, текущих симптомов и опасных признаков нет | фактический обморок; текущий симптом, неполное восстановление, речь / движение, боль в груди, опасный ритм, травма, судороги, обморок при нагрузке или лёжа | обморок → минимум `MEDICAL_REVIEW_REQUIRED`; опасные признаки → `STOP` |
+| G3 грудной симптом | только однозначная коррекция доказательства (метафора, цитата, третье лицо, гипотетика, ошибка текста, не личный симптом) | любой реальный недавний эпизод боли / давления / тяжести / сжатия — даже если прошёл | `STOP` (18.09 RES-G3 не понижается); прошедший реальный — медицинская маршрутизация, не NORMAL |
+| G4 очаговая неврология | только доказанное отсутствие личного очагового эпизода или однозначная контекстная ошибка | достоверный внезапный эпизод односторонней слабости / онемения, перекоса лица, речи, зрения, равновесия — даже если прошёл; один «нет» на составной вопрос | экстренная маршрутизация (`STOP`); одиночный «нет» → `UNKNOWN` |
+| G5 кровотечение | одновременно: небольшая поверхностная рана, полностью остановлено, не возобновляется, нет пульсирующей / трудно контролируемой крови, не глубокая и не большая, нет инородного тела, нет нарушения чувствительности / движения, нет нового S1 | продолжающееся, усиливающееся, возобновляющееся, трудноостанавливаемое, глубокое или осложнённое | `STOP`; **blocker:** вопрос G5 [§164] не выясняет глубину, инородное тело, чувствительность |
+| G6 анафилаксия | локальная сыпь / зуд при явном отсутствии отёка губ / рта / языка / горла, затруднения дыхания / глотания, выраженного головокружения, обморока, других системных признаков | любой реальный системный эпизод — даже если стало лучше | `STOP`; вне S1 может сохраниться `CAUTION` |
+| G7 тяжёлое системное ухудшение | только однозначная `EVIDENCE_CORRECTION` (до регистрации G7 question contract) | clearance по изменению самочувствия или простому ответу; `UNKNOWN`; подтверждённый тяжёлый признак | restriction сохраняется / `STOP`; **blocker:** G7 question contract не зарегистрирован |
+
+**Решение 3 — односложные ответы недостаточны.** «нет», «уже прошло», «стало лучше», «сейчас нормально», «всё хорошо» и эквиваленты — не основание. Для clearance установить одновременно: (1) к кому относился сигнал; (2) был ли симптом в действительности; (3) текущий или недавно прошедший; (4) исключены ли признаки question contract группы; (5) нет нового S1. Недостающий элемент → `UNKNOWN`, restriction сохраняется. Только уже зарегистрированные owner-вопросы; недостаточность вопроса — blocker, не расширение.
+
+**Решение 4 — recent-resolved.** `CLEARED_BY_RECHECK` запрещён после достоверного эпизода G1 (тяжёлая одышка / невозможность говорить), G3, G4, G6, G7 (подтверждённый тяжёлый признак); G2 — минимум `MEDICAL_REVIEW_REQUIRED`; исключение — G5 при доказанном небольшом поверхностном остановившемся кровотечении без осложняющих признаков. Контекстная коррекция — не «выздоровление».
+
+**Решение 5 — статус реализации.** Регистрация решений, clinical applicability, документация и документальные fixtures (`T-S1-RCB-*`, 32: ALLOW 11 / DENY 12 / UNKNOWN 9). Не включает транспорт `safety_recheck.start`, runtime state machine, provenance carrier, live-clearance; `clear_restriction()` не открывается; runtime не меняется; Controlled Pilot S1 не готов.
+
+**CQ-CTX-01…03:** `OWNER_POLICY_RESOLVED / PENDING_INDEPENDENT_PHYSICIAN_SIGNOFF`.
+
+**Blockers:** (1) G7 question contract и group-specific матрица recent-resolved G7 не зарегистрированы — до их регистрации для G7 допустима только `EVIDENCE_CORRECTION` (реш. 2 G7). (2) Вопрос G5 [§164] не выясняет глубину / размер раны, инородное тело и нарушение чувствительности / движения — через зарегистрированные вопросы `SYMPTOM_UPDATE`-clearance для G5 достижим только если пользователь сам сообщает все условия; иначе `UNKNOWN` (реш. 3 запрещает расширять вопрос). (3) Составной вопрос G4 [§164] допускает одиночный ответ «нет», который по реш. 2 G4 не отрицает все части — нужен owner-зарегистрированный способ получить поэлементный ответ; до этого одиночный «нет» → `UNKNOWN`. (4) Независимый врачебный sign-off CQ-CTX-01…03 (+ CQ-CTX-08, CQ-CTX-09) — `PENDING`. (5) Пакет B (транспорт `safety_recheck.start`, runtime state machine, provenance carrier, live-clearance) не реализован; `clear_restriction()` закрыт.
+
+**Затронутый код:**
+- `docs/safety/reviews/OWNER_RULINGS_S1_RECHECK_CLINICAL_BOUNDARIES_2026-09-21.md` (новый immutable record)
+- `docs/safety/F0-C3-safety-matrix.md` (v0.12-reviewfix7)
+- `docs/safety/reviews/AYLA_CLINICAL_SAFETY_REVIEW_PACK_v0.1_2026-09-16.md` (v0.1-reviewfix7)
+- `docs/safety/reviews/AYLA_S1_SAFETY_RECHECK_CONTRACT_DELTA_v0.1_2026-09-20.md` (v0.1.4)
+- `docs/safety/reviews/S1_CONTEXT_RECHECK_ADVERSARIAL_FIXTURES_v0.2.md` (v0.2.6)
+- `docs/safety/README.md`
+- Runtime, code fixtures, `clear_restriction()`: НЕ ИЗМЕНЯЮТСЯ этим §.
+
+---
+
+## §169. ЗАРЕГИСТРИРОВАН (21.09.2026): immutable owner record — S1 `safety_recheck` clinical boundaries G1–G7
+
+**Record:** `docs/safety/reviews/OWNER_RULINGS_S1_RECHECK_CLINICAL_BOUNDARIES_2026-09-21.md` — `DO NOT EDIT — SUPERSEDE WITH A NEW RECORD`; RECORD SHA-256 (содержимое выше строки `---- RECORD HASH BOUNDARY ----`) `cf0263dd5d890217e534817ab6fc7ece15af3cbbddfceb827c557c52f15af094`; sha256 полного файла `eb39bf45142241a16d07988160ecc46c03eaf62a0ac5bdc518702d98a257f3c2`. Содержит дословный ответ владельца `утвержда.` (21.09.2026), полный текст решений 1–5 ([§168]), разграничение owner ruling / clinical rationale (NHS, AHA, ASA — supporting only, проверено 21.09.2026) / engineering elaboration, статусы, связь с record r4, [§156], [§162], [§164], [§166–§167], DRF-2040, PR #1893.
+**Что не менялось:** records OD-SAF-11…22, 18.09, r1, r2, r3, r4 (байт в байт); формула r4; семь групп S1; четыре `SafetyState`; question contracts G1–G6; текст эскалации v2; runtime и code fixtures; 93 прежних фикстуры v0.2.x и 35 фикстур v0.1.1 и их verdicts. Действующий источник контракта `safety_recheck` — по-прежнему record r4.
+
+**Затронутый код:**
+НЕ ПРИМЕНИМО — документальное решение; runtime, тесты и code fixtures в этом § не меняются.
