@@ -51,6 +51,7 @@ import {
   fetchRecommendation,
   type RecommendationCard,
 } from "../lib/recommendation-card";
+import { OPTION_ROUTE } from "../lib/booking-flow";
 import { NO_VERIFIED_EVIDENCE_TEXT } from "../lib/recommendation-absence";
 import { RecommendationCardScreen } from "./RecommendationCardScreen";
 
@@ -122,11 +123,14 @@ describe("кадр C04.1", () => {
 });
 
 describe("действия карточки", () => {
-  it("«Подобрать вариант» ведёт в каталог — исполнение живёт там", async () => {
+  it("«Подобрать вариант» ведёт в поток записи — на шаг способа (DRF-2178)", async () => {
+    // До этапа 1 кнопка вела в каталог: шага «подходящий вариант» не
+    // существовало. Теперь существует, и кнопка ведёт туда, где
+    // подбирают, — по-прежнему одним тапом.
     renderScreen();
     await screen.findByText(CARD_HEAD);
     await userEvent.click(screen.getByRole("button", { name: BUTTON_PICK }));
-    expect(navigateSpy).toHaveBeenCalledWith("/customer/catalog");
+    expect(navigateSpy).toHaveBeenCalledWith(OPTION_ROUTE);
   });
 
   it("«Почему» раскрывает кадр C04.3 теми же причинами", async () => {
