@@ -436,9 +436,18 @@ class TestTheDeleterSeesRedUnderTheAppRole:
         ):
             with connection.cursor() as cur:
                 cur.execute("SET LOCAL ROLE ayla_app")
-            deleted, red_count = soft_delete_all_zones_for_forget_all(
-                upc.user_id, request_id=request_id
-            )
+            try:
+                deleted, red_count = soft_delete_all_zones_for_forget_all(
+                    upc.user_id, request_id=request_id
+                )
+            finally:
+                # `SET LOCAL ROLE` снимается в конце ТРАНЗАКЦИИ, а не
+                # savepoint'а, а pytest-django держит транзакцию теста
+                # открытой — без явного сброса проверки ниже пошли бы под
+                # `ayla_app` без GUC и не нашли бы красную строку вовсе.
+                # Та же тонкость, что у `_reset_red_zone_guc`.
+                with connection.cursor() as cur:
+                    cur.execute("RESET ROLE")
 
         assert red_count == 1, (
             "красная строка не попала в выборку под ролью приложения — "
@@ -463,12 +472,15 @@ class TestTheDeleterSeesRedUnderTheAppRole:
         with transaction.atomic():
             with connection.cursor() as cur:
                 cur.execute("SET LOCAL ROLE ayla_app")
-                cur.execute(
-                    "SELECT count(*) FROM identity_memoryentry "
-                    "WHERE sensitivity_zone = 'red' AND user_id = %s",
-                    [str(upc.user_id)],
-                )
-                visible = cur.fetchone()[0]
+                try:
+                    cur.execute(
+                        "SELECT count(*) FROM identity_memoryentry "
+                        "WHERE sensitivity_zone = 'red' AND user_id = %s",
+                        [str(upc.user_id)],
+                    )
+                    visible = cur.fetchone()[0]
+                finally:
+                    cur.execute("RESET ROLE")
 
         assert visible == 0, (
             "под ayla_app красная строка видна без GUC — значит роль не "
