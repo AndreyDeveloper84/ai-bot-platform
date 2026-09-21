@@ -670,13 +670,17 @@ CUSTOMER_ROUTES: dict[str, Entry] = {
     "customer_last_topic": own(
         "last_topic.text",
         "last_topic.at",
+        "chat_link",
         via="apps.miniapp_api.views_last_topic:customer_last_topic",
         note=(
             "the first 80 characters of the last assistant turn in the caller's own "
             "conversations (rows scoped to bot_user; shadow, deleted and anonymised threads "
             "excluded) plus that turn's timestamp — the text the caller already read in the "
             "chat, cut by word; safety canned lines (§128) and memory service lines "
-            "(DRF-1292) never become the topic, and no topic is null rather than an error"
+            "(DRF-1292) never become the topic, and no topic is null rather than an error; "
+            "DRF-2266: turns are read across the caller's own channel shells "
+            "(person_channel_shells), and chat_link is the public dialog link of the bot "
+            "that signed the init data — a bot address, not a record of the caller"
         ),
     ),
 }

@@ -443,6 +443,40 @@ export function openPaymentConfirmation(url: string): void {
   }
 }
 
+/** Чем кончилась попытка вернуть человека в чат (DRF-2266). */
+export type ReturnToChatOutcome = "closed" | "opened_chat" | "stuck";
+
+/**
+ * Вернуть человека в чат с ботом — и честно сказать, получилось ли.
+ *
+ * DRF-2266 (скрины владельца 21.09, web.max.ru): `closeApp()` при отсутствии
+ * моста `close()` и пустой истории молча ничего не делал — «кнопка не
+ * работает». Порядок: мост `close()` → ссылка на диалог бота через
+ * `openLink` (её отдаёт сервер — `chat_link`) → `"stuck"`, и экран
+ * показывает подсказку. `history.back()` здесь нет намеренно: он уводит
+ * внутри приложения, а не в чат.
+ */
+export function returnToChat(chatLink?: string | null): ReturnToChatOutcome {
+  const b = maxBridge();
+  if (b?.close) {
+    try {
+      b.close();
+      return "closed";
+    } catch (err) {
+      console.warn("[max-sdk] close() failed, trying the chat link", err);
+    }
+  }
+  if (b?.openLink && chatLink) {
+    try {
+      b.openLink(chatLink);
+      return "opened_chat";
+    } catch (err) {
+      console.warn("[max-sdk] openLink(chat) failed", err);
+    }
+  }
+  return "stuck";
+}
+
 /**
  * Ask MAX to close the Mini App. Falls back to ``history.back()`` when
  * the bridge isn't available — at least navigates the dev browser away.

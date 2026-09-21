@@ -5615,6 +5615,18 @@ a {
 .wellness-dash__qa-btn--compact .wellness-dash__qa-label {
   font-size: var(--font-size-100);
   line-height: 1.2;
+  /* DRF-2266 (скрин владельца 21.09): «Скорректировать» — одно слово длиннее
+     плитки ряда (min-width 56px); без переноса оно рисовалось поверх соседа. */
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  hyphens: auto;
+}
+
+/* DRF-2266 — вернуться в чат не вышло: подсказка вместо тишины. */
+.wellness-dash__chat-hint {
+  margin: 0;
+  color: var(--c-text-secondary);
+  font-size: var(--font-size-100);
 }
 
 /* «Продолжить разговор с Ayla». */

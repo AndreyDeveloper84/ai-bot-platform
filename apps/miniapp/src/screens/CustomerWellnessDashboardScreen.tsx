@@ -97,9 +97,13 @@ import { useNavigate } from "react-router-dom";
 import { ApiError, type Service } from "../lib/api";
 import { authErrorCopy, loadErrorReason, type LoadErrorReason } from "../lib/auth-error-copy";
 import { mapBookingStatus } from "../lib/booking-status";
-import { formatTopicWhen, getLastTopic, type LastTopic } from "../lib/customer-last-topic";
+import {
+  formatTopicWhen,
+  getLastTopicAndChatLink,
+  type LastTopic,
+} from "../lib/customer-last-topic";
 import { formatDuration, priceFromLabel } from "../lib/format";
-import { closeApp } from "../lib/max-sdk";
+import { returnToChat } from "../lib/max-sdk";
 import {
   getPlanLite,
   type PlanLite,
@@ -158,6 +162,22 @@ type ActiveGoal = NonNullable<WellnessToday["active_goals"]>[number];
 export const DIARY_CONSENT_CARD_TEXT = "Чтобы вести дневник, нужно согласие — дай его в чате с Ayla";
 export const DIARY_CONSENT_CARD_CTA = "Дать согласие в чате";
 
+/**
+ * DRF-2266 — ЧЕРНОВИК владельцу: вернуться в чат не вышло ни мостом, ни
+ * ссылкой (web.max.ru без `close()` и без ссылки на бота). Раньше здесь была
+ * тишина — «кнопка не работает».
+ */
+export const CHAT_STUCK_HINT =
+  "Вернись в чат с Ayla: закрой приложение крестиком вверху — чат останется под ним.";
+
+function ChatStuckHint() {
+  return (
+    <p className="wellness-dash__chat-hint" role="status">
+      {CHAT_STUCK_HINT}
+    </p>
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Loading + error state model — per-block isolation for «Partial» state
 // (Tau §5 State 5). Each remote slice carries its own status so a
@@ -213,6 +233,9 @@ export function CustomerWellnessDashboardScreen() {
   const [planSlice, setPlanSlice] = useState<PlanSlice>({ kind: "loading" });
   // Тема — `null` и «ручка упала» читаются одинаково: блок нейтральный.
   const [lastTopic, setLastTopic] = useState<LastTopic | null>(null);
+  // DRF-2266 — куда ведут двери в чат, и где они «застряли» (web.max.ru).
+  const [chatLink, setChatLink] = useState<string | null>(null);
+  const [chatStuckAt, setChatStuckAt] = useState<"ayla" | "consent" | "plan" | null>(null);
 
   const [online, setOnline] = useState<boolean>(isOnline());
   const [waterQueueLen, setWaterQueueLen] = useState<number>(
@@ -253,7 +276,7 @@ export function CustomerWellnessDashboardScreen() {
       getRecentActivity(),
       getCatalogBrowse(),
       getPlanLite(),
-      getLastTopic(),
+      getLastTopicAndChatLink(),
     ]);
 
     if (todayRes.status === "fulfilled") {
@@ -280,7 +303,8 @@ export function CustomerWellnessDashboardScreen() {
     setPlanSlice(
       planRes.status === "fulfilled" ? { kind: "ok", data: planRes.value } : { kind: "unavailable" },
     );
-    setLastTopic(topicRes.status === "fulfilled" ? topicRes.value : null);
+    setLastTopic(topicRes.status === "fulfilled" ? topicRes.value.topic : null);
+    setChatLink(topicRes.status === "fulfilled" ? topicRes.value.chatLink : null);
   }, []);
 
   useEffect(() => {
@@ -447,9 +471,18 @@ export function CustomerWellnessDashboardScreen() {
   // новый вопрос) человек пишет сам: deep link с текстом в MAX не
   // существует (см. историю в StateError.tsx), и никакого контекста экран
   // в чат не передаёт — обещать это было бы ложью.
-  const onChatTap = useCallback(() => {
-    closeApp();
-  }, []);
+  // DRF-2266 — все двери Главной в чат идут одним путём: мост close() →
+  // ссылка на диалог бота → подсказка рядом с нажатой кнопкой (web.max.ru:
+  // раньше `closeApp()` там молча ничего не делал — «кнопка не работает»).
+  const goToChat = useCallback(
+    (where: "ayla" | "consent" | "plan") => {
+      const outcome = returnToChat(chatLink);
+      setChatStuckAt(outcome === "stuck" ? where : null);
+    },
+    [chatLink],
+  );
+  const onChatTap = useCallback(() => goToChat("ayla"), [goToChat]);
+  const onPlanChatTap = useCallback(() => goToChat("plan"), [goToChat]);
 
   // DRF-2230 — приглашение к согласию уходит в чат, и лишь потом экран
   // закрывается. Сбой отправки — вслух и без закрытия: закрыться молча значило
@@ -475,13 +508,13 @@ export function CustomerWellnessDashboardScreen() {
         setConsentPromptAlreadySent(true);
         return;
       }
-      closeApp();
+      goToChat("consent");
     } catch {
       setConsentPromptError(CONSENT_PROMPT_FAILED_TEXT);
     } finally {
       setConsentPromptBusy(false);
     }
-  }, [fetchAll]);
+  }, [fetchAll, goToChat]);
 
   const onDismissOnboarding = useCallback(() => {
     markOnboardingDismissed();
@@ -756,18 +789,19 @@ export function CustomerWellnessDashboardScreen() {
                 <p className="wellness-dash__consent-text" role="status">
                   {CONSENT_PROMPT_ALREADY_SENT_TEXT}
                 </p>
-                <button type="button" className="btn-primary" onClick={closeApp}>
+                <button type="button" className="btn-primary" onClick={() => goToChat("consent")}>
                   {CONSENT_PROMPT_OPEN_CHAT_CTA}
                 </button>
               </>
             ) : null}
+            {chatStuckAt === "consent" && <ChatStuckHint />}
           </section>
         )}
 
         {/* Block P — «План на сегодня»: действия активного плана; без плана
             блока нет (DRF-2144 п.2). */}
         {planSlice.kind === "ok" && planSlice.data && (
-          <PlanToday plan={planSlice.data} onAll={onPlanTap} onAdjust={onChatTap} />
+          <PlanToday plan={planSlice.data} onAll={onPlanTap} onAdjust={onPlanChatTap} />
         )}
 
         {/* Block 2 — Pulse strip (§11.1 — conditional БЖУ). Без согласия
@@ -905,7 +939,7 @@ export function CustomerWellnessDashboardScreen() {
               type="button"
               className="wellness-dash__qa-btn wellness-dash__qa-btn--compact"
               aria-label="Скорректировать план"
-              onClick={onChatTap}
+              onClick={onPlanChatTap}
             >
               <span className="wellness-dash__qa-icon" aria-hidden="true">
                 📝
@@ -924,6 +958,8 @@ export function CustomerWellnessDashboardScreen() {
               <span className="wellness-dash__qa-label">Профиль</span>
             </button>
           </div>
+          {/* DRF-2266 — «Скорректировать план» тоже дверь в чат. */}
+          {chatStuckAt === "plan" && <ChatStuckHint />}
 
           {/* Sync indicator for offline water queue (§11.8). */}
           {waterQueueLen > 0 && (
@@ -985,6 +1021,7 @@ export function CustomerWellnessDashboardScreen() {
             <button type="button" className="wellness-dash__link-btn" onClick={onChatTap}>
               Задать новый вопрос
             </button>
+            {chatStuckAt === "ayla" && <ChatStuckHint />}
           </div>
         </section>
 
