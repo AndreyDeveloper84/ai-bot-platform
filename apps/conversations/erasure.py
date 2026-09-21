@@ -161,6 +161,11 @@ class AnonymizeResult:
     #: whose sender could not be read (kept; gone by the retention window).
     raw_entries_deleted: int = 0
     raw_entries_unattributed: int = 0
+    #: False when Redis could not be read for that purge. The database half
+    #: still ran — a side store must not hold the erasure hostage — and the
+    #: entries leave by INGRESS_RAW_RETENTION_HOURS; callers must say so
+    #: rather than report the streams as erased.
+    raw_streams_checked: bool = True
 
     @property
     def changed(self) -> bool:
@@ -398,9 +403,27 @@ def anonymize_dialogue(
     # is already gone; what can remain is a failed one (PEL) or its DLQ copy,
     # up to INGRESS_RAW_RETENTION_HOURS. Bounded by ``through`` like the rest
     # of this function, so re-running is free and a turn sent after the
-    # request is never touched. Before the transaction, for the same reason
-    # as `_clear_redis_stores`: a Redis failure must leave the cutoff unmoved.
-    raw = _purge_raw_entries(ids, through=through)
+    # request is never touched.
+    #
+    # Unlike `_clear_redis_stores` below, a failure here does NOT stop the
+    # database half. That one guards the dialogue itself and its retry is
+    # the unmoved cutoff; this store holds copies that expire by the term
+    # anyway, and a person without a pre-request conversation has no cutoff
+    # to leave unmoved — raising would block their erasure without buying a
+    # retry. So: log it, carry `raw_streams_checked=False` to every caller,
+    # and let none of them report the streams as erased.
+    raw_checked = True
+    try:
+        raw = _purge_raw_entries(ids, through=through)
+    except Exception:  # noqa: BLE001 — named in the result, not swallowed
+        logger.exception(
+            "conversations.erasure.ingress_purge_failed — streams unchecked; "
+            "raw entries leave by INGRESS_RAW_RETENTION_HOURS"
+        )
+        from apps.ingress.streams import RawPurgeResult
+
+        raw = RawPurgeResult()
+        raw_checked = False
 
     conversations = list(
         # ``created_at__lte`` matters: a thread STARTED after the request
@@ -541,6 +564,7 @@ def anonymize_dialogue(
         conversation_ids=tuple(touched),
         raw_entries_deleted=raw.deleted,
         raw_entries_unattributed=raw.unattributed,
+        raw_streams_checked=raw_checked,
     )
 
     if result.changed:

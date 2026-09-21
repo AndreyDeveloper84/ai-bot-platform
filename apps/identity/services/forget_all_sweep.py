@@ -149,6 +149,9 @@ class ForgetAllSweepResult:
     #: gone by INGRESS_RAW_RETENTION_HOURS).
     raw_entries_deleted: int = 0
     raw_entries_unattributed: int = 0
+    #: False when Redis was unreachable for the stream purge: the rest of the
+    #: sweep still ran, and this says the streams were NOT checked.
+    raw_streams_checked: bool = True
 
     @property
     def changed(self) -> bool:
@@ -160,6 +163,7 @@ class ForgetAllSweepResult:
             or self.tombstoned
             or self.conversations_anonymized
             or self.raw_entries_deleted
+            or not self.raw_streams_checked
         )
 
 
@@ -266,6 +270,7 @@ def sweep_forget_all(user_id: uuid.UUID) -> ForgetAllSweepResult:
         messages_archived=dialogue.messages_archived,
         raw_entries_deleted=dialogue.raw_entries_deleted,
         raw_entries_unattributed=dialogue.raw_entries_unattributed,
+        raw_streams_checked=dialogue.raw_streams_checked,
     )
 
     if result.changed:
@@ -284,11 +289,13 @@ def sweep_forget_all(user_id: uuid.UUID) -> ForgetAllSweepResult:
                 "messages_archived": result.messages_archived,
                 "raw_entries_deleted": result.raw_entries_deleted,
                 "raw_entries_unattributed": result.raw_entries_unattributed,
+                "raw_streams_checked": result.raw_streams_checked,
             },
         )
         logger.info(
             "identity.forget_all_sweep.user user_id=%s entries=%d fields=%d "
-            "tombstoned=%s conversations=%d messages=%d raw_deleted=%d raw_unattributed=%d",
+            "tombstoned=%s conversations=%d messages=%d raw_deleted=%d raw_unattributed=%d "
+            "raw_streams_checked=%s",
             user_id,
             result.entries_deleted,
             result.context_fields_cleared,
@@ -297,6 +304,7 @@ def sweep_forget_all(user_id: uuid.UUID) -> ForgetAllSweepResult:
             result.messages_archived,
             result.raw_entries_deleted,
             result.raw_entries_unattributed,
+            result.raw_streams_checked,
         )
     return result
 

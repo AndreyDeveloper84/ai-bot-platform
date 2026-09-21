@@ -792,14 +792,21 @@ def delete_personal_data(
     from apps.conversations.models import ArchivedMessage
 
     try:
-        anonymize_dialogue(
+        dialogue = anonymize_dialogue(
             _person_shell_ids(bot_user, link),
             through=timezone.now(),
             reason=ArchivedMessage.Reason.ACCOUNT_DELETE,
         )
-        steps.append(
-            DeleteStep("dialogue_anonymize", True, "own_row_only" if link.conflict else "")
-        )
+        if not dialogue.raw_streams_checked:
+            # DRF-2220 — the database half ran, the raw webhook copies in
+            # Redis were not checked. Not «done»: the step reports failure,
+            # the answer is partial, and a retry re-runs this idempotent step
+            # — which is the retry of the purge.
+            steps.append(DeleteStep("dialogue_anonymize", False, "ingress_streams_unchecked"))
+        else:
+            steps.append(
+                DeleteStep("dialogue_anonymize", True, "own_row_only" if link.conflict else "")
+            )
     except Exception:  # noqa: BLE001 — per-step isolation, reported below
         logger.exception("identity.privacy.dialogue_anonymize_failed")
         steps.append(DeleteStep("dialogue_anonymize", False))

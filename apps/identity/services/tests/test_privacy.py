@@ -422,6 +422,36 @@ class TestDelete:
             bot_user=bot_user, withdrawn_at__isnull=True
         ).exists()
 
+    def test_unchecked_ingress_streams_are_not_reported_done(
+        self, bot_user, ayla_user_id, monkeypatch
+    ) -> None:
+        """DRF-2220 — Redis down: the rest of the cascade runs, the answer is partial.
+
+        The raw webhook copies were not checked, so the dialogue step must not
+        say «done»; a retry re-runs that idempotent step, which retries the purge.
+        """
+        import redis
+
+        from apps.ingress import streams
+
+        def _down():
+            raise redis.ConnectionError("ingress redis is down")
+
+        monkeypatch.setattr(streams, "_client", _down)
+        _seed_memory(bot_user, ayla_user_id)
+
+        result = delete_personal_data(bot_user, client=_StubPCClient())  # type: ignore[arg-type]
+
+        steps = {s.step: s for s in result.steps}
+        assert steps["dialogue_anonymize"].ok is False
+        assert steps["dialogue_anonymize"].detail == "ingress_streams_unchecked"
+        assert not result.all_ok
+        # Everything else still ran.
+        assert steps["memory_delete"].ok is True
+        assert not MemoryEntry.objects.filter(
+            user_id=ayla_user_id, soft_deleted_at__isnull=True
+        ).exists()
+
     def test_idempotent_repeat(self, bot_user, ayla_user_id) -> None:
         _seed_memory(bot_user, ayla_user_id)
         client = _StubPCClient()

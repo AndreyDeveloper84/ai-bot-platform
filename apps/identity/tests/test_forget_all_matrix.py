@@ -967,6 +967,48 @@ class TestAfterTheSweepEveryStoreHasItsOutcome:
         assert f"conv:{run.neighbour.conversation.id}:msgs" in run.fake_redis.store
 
 
+class TestTheStreamsUnreachable:
+    """DRF-2220 — Redis down at «забудь всё»: the rest runs, the gap is named.
+
+    The ingress streams hold copies that expire by INGRESS_RAW_RETENTION_HOURS,
+    so an outage there must neither block the database half nor be reported
+    as erased. Checked end to end: the dialogue is anonymised, the raw entry
+    is still there, and the sweep's own audit row says the streams were not
+    checked.
+    """
+
+    def test_the_database_half_runs_and_the_streams_are_named_unchecked(self, swept, monkeypatch):
+        import redis
+
+        from apps.audit.models import AuditLog
+        from apps.ingress import streams
+
+        def _down():
+            raise redis.ConnectionError("ingress redis is down")
+
+        monkeypatch.setattr(streams, "_client", _down)
+
+        run = swept()
+
+        assert run.status is GateStatus.OK, run.status
+        after = snapshot("conversations.Message", run.person, run.fake_redis)
+        assert_outcome(
+            "conversations.Message",
+            run.person,
+            run.before["person"]["conversations.Message"],
+            after,
+            run.catalog,
+        )
+        assert snapshot("redis.ingress_stream", run.person, run.fake_redis) is not None
+        rows = [
+            a.payload
+            for a in AuditLog.all_tenants.filter(action="memory.forget_all_swept")
+            if a.payload.get("user_id") == str(run.person.ayla_user_id)
+        ]
+        assert rows, "the sweep wrote no audit row"
+        assert all(r["raw_streams_checked"] is False for r in rows), rows
+
+
 class TestTheCatalogReadbackIsTheLastWord:
     """DRF-1984: пока readback не вернул ``erased`` — не «удалено», а «запущено»."""
 
