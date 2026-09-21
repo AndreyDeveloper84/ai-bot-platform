@@ -48,8 +48,10 @@ class TestReadyzAllHealthy:
         body = response.json()
         assert body["status"] == "ok"
         # Sprint 6 / G3 added pipeline component checks alongside the service probes;
-        # Sprint 8 / G4 (DRF-735) added chromadb_auth + audit_cleanup.
+        # Sprint 8 / G4 (DRF-735) added chromadb_auth + audit_cleanup;
+        # DRF-2065 added llm (path state from the probe, never flips the code).
         expected = {
+            "llm",
             "postgres",
             "redis",
             "chromadb",

@@ -166,6 +166,12 @@ urlpatterns = [
     # DRF-2098 (F8, фото-половина) — скан фото из Mini App под тем же гейтом
     # дневника v1; запись — через food/log по scan_id.
     path("food/scan", views.customer_food_scan, name="customer_food_scan"),
+    # DRF-2230 — «Дать согласие в чате»: приглашение с кнопкой в чат MAX.
+    path(
+        "wellness/consent-prompt",
+        views.customer_wellness_consent_prompt,
+        name="customer_wellness_consent_prompt",
+    ),
     # Wellness write path (DRF-1402) — log / undo a water entry on Ayla.
     path(
         "wellness/water",

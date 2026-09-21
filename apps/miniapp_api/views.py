@@ -53,6 +53,7 @@ from apps.integrations.ayla.payments_client import (
 from apps.integrations.ayla.user_proxy import external_user_id_for
 
 from django.conf import settings
+from django.core.cache import cache
 from django.utils.dateparse import parse_datetime
 
 from apps.catalog.models import CatalogMaster, CatalogService, MasterService, sellable_edge_q
@@ -4032,6 +4033,98 @@ def customer_wellness_today(request: HttpRequest) -> HttpResponse:
 # send anything. Bound it before it reaches Ayla — a 20-litre "glass"
 # would corrupt the customer's day for good.
 _WATER_ML_MIN = 1
+#: DRF-2230 — приглашение к согласию, которое Главная Mini App шлёт в чат.
+#: ЧЕРНОВИК (черновик главного окна), к владельцу списком в теле PR.
+CONSENT_PROMPT_TEXT = (
+    "Чтобы вести дневник питания, мне нужно твоё согласие на обработку личных "
+    "данных. Нажми «Дать согласие» ниже и возвращайся в приложение."
+)
+#: Окно, в котором повторное нажатие не шлёт второе приглашение: первое уже в
+#: чате, дубль только засоряет ленту. Неудачная отправка окно не занимает.
+CONSENT_PROMPT_DEDUP_S = 600
+
+
+def _consent_prompt_key(bot_user: BotUser) -> str:
+    return f"miniapp:consent_prompt:{bot_user.pk}"
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_init_data
+def customer_wellness_consent_prompt(request: HttpRequest) -> HttpResponse:
+    """DRF-2230 — «Дать согласие в чате»: приглашение с кнопкой — в чат MAX.
+
+    До листа кнопка на Главной только закрывала Mini App, а в чате о
+    согласии не было ни слова (скрин владельца 21.09). Теперь нажатие
+    отправляет ЭТОМУ человеку сообщение с кнопкой «Дать согласие» — тот же
+    вход, что у отказов в чате (DRF-1968, ``cb:welcome:consent_offer_*``),
+    с происхождением ``miniapp``; после согласия бот зовёт обратно в
+    приложение (``CONSENT_RECOVERY_RETURN_TEXTS["miniapp"]``).
+
+    Какую ветку согласия это закрывает. Блок Главной рисуется по
+    ``wellness/today.consent_required`` — только PERSONAL_DATA. Именно его
+    кнопка чата и выдаёт, так что петли нет. Согласие дневника в реестре
+    (``food-diary-v1``) чат выдать не может; до этого блока та ветка не
+    доходит — её отказ приходит на запись и ведёт на экран согласия в самом
+    Mini App.
+
+    Ответы:
+      * 200 ``{"sent": true}`` — приглашение ушло;
+      * 200 ``{"sent": false, "reason": "recently_sent"}`` — уже отправлено
+        в последние ``CONSENT_PROMPT_DEDUP_S`` секунд, дубля нет;
+      * 200 ``{"sent": false, "reason": "already_granted"}`` — согласие уже
+        есть, приглашать не к чему;
+      * 404 ``nutrition_disabled`` — контур питания выключен;
+      * 502 ``consent_prompt_not_sent`` — MAX не принял сообщение. Экран
+        остаётся открытым и говорит об этом — закрыться молча значило бы
+        снова отправить человека в пустой чат.
+
+    Это не «бот пишет первым» в смысле ``apps.notifications.proactive``:
+    человек сам нажал кнопку и ждёт сообщения, а просьба о согласии по
+    определению идёт тому, у кого согласия нет (как приветствие S2).
+    """
+
+    if not getattr(settings, "NUTRITION_ENABLED", False):
+        return _error("nutrition_disabled", "nutrition contour is off", 404)
+
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+
+    from apps.orchestrator.personal_surface import personal_records_consent_open
+
+    if personal_records_consent_open(bot_user):
+        return JsonResponse({"sent": False, "reason": "already_granted"})
+
+    key = _consent_prompt_key(bot_user)
+    if not cache.add(key, 1, CONSENT_PROMPT_DEDUP_S):
+        return JsonResponse({"sent": False, "reason": "recently_sent"})
+
+    from apps.channels.max import outbound
+    from apps.skills.welcome.skill import consent_offer_buttons
+
+    try:
+        outbound.send_message(
+            user_id=str(bot_user.channel_user_id),
+            text=CONSENT_PROMPT_TEXT,
+            attachments=[
+                outbound.make_inline_keyboard_attachment(
+                    consent_offer_buttons("miniapp"), columns=1
+                )
+            ],
+        )
+    except outbound.MaxAPIError as exc:
+        # Окно дубля не занимает то, что не дошло: повтор обязан отправить.
+        cache.delete(key)
+        logger.warning(
+            "miniapp.consent_prompt.send_failed bot_user=%s status=%s",
+            bot_user.pk,
+            getattr(exc, "status_code", None),
+        )
+        return _error("consent_prompt_not_sent", "the chat message was not delivered", 502)
+
+    logger.info("miniapp.consent_prompt.sent bot_user=%s", bot_user.pk)
+    return JsonResponse({"sent": True})
+
+
 _WATER_ML_MAX = 5000
 
 

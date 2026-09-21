@@ -96,6 +96,16 @@ class OpenAIProvider:
 
     name = "openai"
 
+    @classmethod
+    def configured_proxy(cls) -> str:
+        """Прокси, через который пойдёт вызов без явного ``proxy=``.
+
+        Единственное место правила: ``__init__`` и проба пути (DRF-2065)
+        читают его отсюда, чтобы «через прокси ли мы шли» не жило в двух
+        копиях.
+        """
+        return getattr(settings, "OPENAI_PROXY", "") or ""
+
     def __init__(
         self,
         *,
@@ -107,7 +117,7 @@ class OpenAIProvider:
         retry_policy: RetryPolicy | None = None,
     ) -> None:
         self._api_key = api_key or getattr(settings, "OPENAI_API_KEY", "") or ""
-        self._proxy = proxy if proxy is not None else getattr(settings, "OPENAI_PROXY", "") or ""
+        self._proxy = proxy if proxy is not None else self.configured_proxy()
         self.default_completion_model = default_completion_model
         self.default_embedding_model = default_embedding_model
         self.default_fast_model = default_fast_model
