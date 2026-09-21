@@ -1880,19 +1880,6 @@ def _concierge_turn(
             persisted=True,
         )
 
-    # DRF-2000 (S-2) — медицинский red flag G1–G7 на global-пути отвечает
-    # ДЕТЕРМИНИРОВАННО, до модели. Раньше тот же ответ (текст [OD-BOT §163])
-    # приходил, только если модель сама выбирала инструмент health_screening;
-    # решение владельца 20.09: не LLM. Гейт (``evaluate_inbound``) уже снял
-    # группу «неотложка» раньше этого места; здесь — остальные группы
-    # классификатора. Ответ — тот же навык, тем же исполнителем, что и по
-    # вызову модели: ни второго текста, ни второго классификатора.
-    red_flag = _deterministic_red_flag_reply(
-        message_text, bot_user=bot_user, conversation=conversation, trace_id=trace_id
-    )
-    if red_flag is not None:
-        return red_flag
-
     # DRF-1779 — если бот на прошлом ходу задал вопрос, эта реплика — ответ на
     # него. Вопрос снимается ДО вызова модели (второй раз его не задать), ответ
     # ложится в состояние, а модель получает это фактом в system-prompt.
@@ -1903,6 +1890,21 @@ def _concierge_turn(
             answered.question.question_id,
             trace_id,
         )
+
+    # DRF-2000 (S-2) — медицинский red flag G1–G7 на global-пути отвечает
+    # ДЕТЕРМИНИРОВАННО, до модели. Раньше тот же ответ (текст [OD-BOT §163])
+    # приходил, только если модель сама выбирала инструмент health_screening;
+    # решение владельца 20.09: не LLM. Гейт (``evaluate_inbound``) уже снял
+    # группу «неотложка» раньше этого места; здесь — остальные группы
+    # классификатора. Стоит ПОСЛЕ ``close_question``: red flag в ответе на
+    # открытый вопрос закрывает его, а не оставляет висеть. Ответ — тот же
+    # навык, тем же исполнителем, что и по вызову модели: ни второго текста,
+    # ни второго классификатора.
+    red_flag = _deterministic_red_flag_reply(
+        message_text, bot_user=bot_user, conversation=conversation, trace_id=trace_id
+    )
+    if red_flag is not None:
+        return red_flag
 
     llm_client = RouterLLMClient(skill=CONCIERGE_SKILL)
 

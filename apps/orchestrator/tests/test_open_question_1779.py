@@ -32,6 +32,7 @@ from apps.llm.protocol import CompletionResult, ToolCall
 from apps.orchestrator import concierge, open_question
 from apps.orchestrator.llm import templates
 from apps.orchestrator.memory import short_term
+from apps.orchestrator.safety.medical_emergency import MEDICAL_EMERGENCY_TEXT_V2
 from apps.skills.health_screening.skill import SOFT_PAIN_REPLY
 
 # ``transaction=True`` — ход консьержа пишет в БД из другого потока
@@ -245,12 +246,24 @@ class TestOwnerDialogue:
 
 
 class TestRedFlagStillReachesScreening:
-    def test_red_flag_in_the_answer_offers_the_tool(self, sent, model):
+    def test_red_flag_in_the_answer_gets_the_emergency_text_without_the_model(self, sent, model):
         """§35 п.5: тревожный признак включает безопасную ветку всегда —
-        и на ходу ответа тоже. Памятка гасит только повтор SOFT."""
+        и на ходу ответа тоже. Памятка гасит только повтор SOFT.
+
+        DRF-2000 (S-2, решение владельца 20.09): на global-пути red flag
+        отвечает детерминированно, до модели — ответ = текст [OD-BOT §163],
+        а модель на этой реплике не вызывается вовсе."""
         answer = "спина, и ещё немеет рука и нога"
-        _run_turns(sent, OWNER_TURNS[0], answer)
-        assert "health_screening" in _calls_for(model, answer)[0]["tools"]
+        conversation, screens = _run_turns(sent, OWNER_TURNS[0], answer)
+        assert screens[1] == MEDICAL_EMERGENCY_TEXT_V2
+        assert "103" in screens[1] and "112" in screens[1]
+        assert _calls_for(model, OWNER_TURNS[0])  # положительно: ход 1 модель звал
+        assert [
+            call for call in model.calls if call["user"] == answer
+        ] == []  # empty-assert-ok: текст v2 выше
+        # Открытый SOFT-вопрос хода 1 закрыт этим ответом (DRF-1779), а не
+        # висит до следующей реплики.
+        assert open_question.pending_question(conversation) is None
 
 
 # --------------------------------------------------------------------------- #
