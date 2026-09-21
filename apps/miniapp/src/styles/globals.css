@@ -4782,6 +4782,64 @@ a {
   border-color: var(--c-accent);
 }
 
+/* Полоса дней кадра 3 макета DRF-1320 (DRF-2178).
+
+   Горизонтальная лента с прокруткой: дней в окне четырнадцать, и
+   переносить их в сетку значило бы отдать полэкрана под выбор дня.
+   Прокрутка по X, а не перенос — поэтому `flex` без `wrap`. */
+.customer-slots__day-strip {
+  list-style: none;
+  padding: 0 0 var(--s-1);
+  margin: 0 0 var(--s-3);
+  display: flex;
+  gap: var(--s-2);
+  overflow-x: auto;
+  scroll-snap-type: x proximity;
+  -webkit-overflow-scrolling: touch;
+}
+.customer-slots__day-chip {
+  min-width: 80px;
+  min-height: 56px;
+  padding: var(--s-2);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  scroll-snap-align: start;
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-sm, 8px);
+  color: inherit;
+  cursor: pointer;
+}
+/* День без окон остаётся в полосе и виден — но нажать его нечем.
+   Гасим яркость, а не прячем: «нет мест» это ответ, а не пустота. */
+.customer-slots__day-chip:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.customer-slots__day-chip--active {
+  background: var(--c-accent);
+  color: var(--c-text-on-accent);
+  border-color: var(--c-accent);
+}
+.customer-slots__day-chip-date {
+  font-size: var(--font-size-200);
+  font-weight: 500;
+}
+.customer-slots__day-chip-count {
+  font-size: var(--font-size-100);
+  opacity: 0.8;
+}
+/* «★ Подходит под твоё обычное время» — пояснение под группой. */
+.customer-slots__suggested-note {
+  margin: var(--s-2) 0 0;
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
 /* F4 — Confirm. */
 
 /* Payment choice (C7.4 / AMD-002).
