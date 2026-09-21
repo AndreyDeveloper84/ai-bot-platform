@@ -67,6 +67,7 @@ from apps.identity.models import (
 )
 from apps.identity.services.exceptions import MinorProtectionLookupFailed
 from apps.identity.services.forget_all_sweep import sweep_forget_all
+from apps.identity.services.memory_deleter import soft_delete_all_zones_for_forget_all
 from apps.identity.services.memory_writer import promote_zone
 
 pytestmark = pytest.mark.django_db
@@ -395,53 +396,63 @@ class TestZonePromotionIsNotABackDoor:
 
 
 @_PG_ONLY
-class TestTheSweepSeesRedUnderTheAppRole:
+class TestTheDeleterSeesRedUnderTheAppRole:
     """Регрессия под ``ayla_app`` — иначе сторож ничего не стережёт.
 
     Политика ``memory_entry_non_red_visible`` (миграция 0008) прячет
-    красные строки от SELECT без GUC, и **WHERE у UPDATE подчиняется той
-    же политике**. Вся сюита идёт под суперпользователем, который RLS
-    обходит, поэтому свип без GUC был бы зелёным во всех тестах и
-    отказал бы ровно в день перехода приложения на ``ayla_app``
-    (ADR-0011 §16, фаза 2, шаг 5) — молча: красные строки не попали бы в
-    выборку, счёт занизился бы, журнал остался бы пуст, а свип вернул бы
-    успех.
+    красные строки от SELECT без ``ayla.red_zone_access_context``, и
+    **WHERE у UPDATE подчиняется той же политике**. Вся сюита идёт под
+    суперпользователем, который RLS обходит, поэтому запрос без GUC был
+    бы зелёным во всех тестах и отказал бы ровно в день перехода
+    приложения на ``ayla_app`` (ADR-0011 §16, фаза 2, шаг 5) — молча:
+    красные строки не попали бы в выборку, счёт занизился бы, журнал
+    остался бы пуст, а свип вернул бы успех.
 
-    Узел переключает роль внутри транзакции, как это делает
-    ``test_db_security.py``, и падает ровно на снятом GUC.
+    # Почему узел на делетере, а не на всём свипе
 
-    ``write_audit`` подменён намеренно. Под ``ayla_app`` запись в
-    ``audit_auditlog`` отказывает по правам — и это НЕ дефект свипа: у
-    роли попросту нет грантов на таблицу аудита, поэтому под ней сегодня
-    не работает ЛЮБОЙ путь с аудитом, не только этот. Гранты — предмет
-    миграции ADR-0011 §16, а здесь проверяется видимость красной зоны:
-    тянуть в узел чужую незаконченную работу значило бы красить его по
-    причине, к его предмету не относящейся.
+    Миграция 0008 выдала ``ayla_app`` гранты ровно на три таблицы —
+    ``identity_memoryentry``, ``identity_userpersonalcontext``,
+    ``identity_redzoneaccesslog``, — и это ровно то, что трогает
+    делетер. Свип идёт дальше: аудит, ``BotUser``, обезличивание
+    диалогов. Под этой ролью он падает на ``permission denied`` для
+    таблиц, к красной зоне отношения не имеющих, — то есть узел красился
+    бы по причине, к его предмету не относящейся, и сторожил бы не то.
+    Недостающие гранты — предмет миграции §16, здесь они названы, а не
+    подпёрты.
+
+    ``write_audit`` подменён по той же причине: таблица аудита в списке
+    грантов отсутствует.
     """
 
-    def test_red_is_swept_and_logged_under_ayla_app(self) -> None:
+    def test_the_red_row_is_tombstoned_and_logged_under_ayla_app(self) -> None:
         upc = _upc()
         red = _entry(upc, MemoryEntry.SENSITIVITY_RED)
         green = _entry(upc, MemoryEntry.SENSITIVITY_GREEN)
+        request_id = uuid.uuid4()
 
         with (
             patch("apps.identity.services.memory_deleter.write_audit"),
-            patch("apps.identity.services.forget_all_sweep.write_audit"),
             transaction.atomic(),
         ):
             with connection.cursor() as cur:
                 cur.execute("SET LOCAL ROLE ayla_app")
-            sweep_forget_all(upc.user_id)
+            deleted, red_count = soft_delete_all_zones_for_forget_all(
+                upc.user_id, request_id=request_id
+            )
 
+        assert red_count == 1, (
+            "красная строка не попала в выборку под ролью приложения — "
+            "запрос идёт без GUC, и RLS его не пускает"
+        )
+        assert deleted == 2
         red.refresh_from_db()
         green.refresh_from_db()
-        assert red.soft_deleted_at is not None, (
-            "красная строка пережила «забудь всё» под ролью приложения — "
-            "запрос свипа идёт без GUC и RLS его не пускает"
-        )
+        assert red.soft_deleted_at is not None
         assert green.soft_deleted_at is not None
         assert RedZoneAccessLog.objects.filter(
-            memory_entry_id=red.id, access_type=RedZoneAccessLog.ACCESS_DELETE
+            memory_entry_id=red.id,
+            access_type=RedZoneAccessLog.ACCESS_DELETE,
+            request_id=request_id,
         ).exists()
 
     def test_positive_pair_the_role_really_is_restricted(self) -> None:
