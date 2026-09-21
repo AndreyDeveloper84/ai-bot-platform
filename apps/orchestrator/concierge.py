@@ -1768,52 +1768,6 @@ def generate_concierge_reply(
     return reply
 
 
-def _deterministic_red_flag_reply(
-    message_text: str, *, bot_user: Any, conversation: Any, trace_id: str | None
-) -> DiscoveryReply | None:
-    """Медицинский red flag → ответ навыка health_screening без модели (DRF-2000).
-
-    Возвращает ``None``, когда сигнала нет или исполнитель отказал (тогда ход
-    идёт к модели, как раньше). Никогда не бросает.
-    """
-
-    from apps.skills.health_screening.classifier import PainSignal, classify
-
-    try:
-        if classify(message_text) != PainSignal.RED_FLAG:
-            return None
-        started = time.monotonic()
-        result = execute_nutrition_tool(
-            "health_screening",
-            {"symptom_text": message_text},
-            bot_user=bot_user,
-            conversation=conversation,
-            trace_id=trace_id or "",
-            message_text=message_text,
-        )
-    except Exception:  # noqa: BLE001 — сбой детерминированной ветки не стоит хода
-        logger.exception("orchestrator.concierge.red_flag_short_circuit_failed trace=%s", trace_id)
-        return None
-    if result is None or not result.reply_text:
-        return None
-    logger.info("orchestrator.concierge.red_flag_short_circuit trace=%s", trace_id)
-    _record_concierge_metric(
-        bot_user=bot_user,
-        conversation=conversation,
-        trace_id=trace_id,
-        message_text=message_text,
-        pass_index=None,
-        outcome=AIRequestMetric.OUTCOME_SUCCESS,
-        latency_total_ms=int((time.monotonic() - started) * 1000),
-        skill_selected="health_screening",
-    )
-    return DiscoveryReply(
-        text=result.reply_text[:_MAX_REPLY_CHARS],
-        action_data=result.action_data,
-        persisted=True,
-    )
-
-
 def _g4_question_turn(
     message_text: str, *, conversation: Any, bot_user: Any, trace_id: str | None
 ) -> DiscoveryReply | None:
@@ -1956,21 +1910,9 @@ def _concierge_turn(
             trace_id,
         )
 
-    # DRF-2000 (S-2) — медицинский red flag G1–G7 на global-пути отвечает
-    # ДЕТЕРМИНИРОВАННО, до модели. Раньше тот же ответ (текст [OD-BOT §163])
-    # приходил, только если модель сама выбирала инструмент health_screening;
-    # решение владельца 20.09: не LLM. Гейт (``evaluate_inbound``) уже снял
-    # группу «неотложка» раньше этого места; здесь — остальные группы
-    # классификатора. Стоит ПОСЛЕ ``close_question``: red flag в ответе на
-    # открытый вопрос закрывает его, а не оставляет висеть. Ответ — тот же
-    # навык, тем же исполнителем, что и по вызову модели: ни второго текста,
-    # ни второго классификатора.
-    red_flag = _deterministic_red_flag_reply(
-        message_text, bot_user=bot_user, conversation=conversation, trace_id=trace_id
-    )
-    if red_flag is not None:
-        return red_flag
-
+    # Медицинский red flag G1–G7 сюда не доходит: обработчик MAX отвечает на
+    # него детерминированно сразу после гейта (DRF-2000 → DRF-2213 Q2,
+    # :mod:`apps.orchestrator.red_flag_turn`).
     llm_client = RouterLLMClient(skill=CONCIERGE_SKILL)
 
     concierge = AIConcierge(
