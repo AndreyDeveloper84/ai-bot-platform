@@ -109,9 +109,12 @@ class TestTheAnketaDoesNotSurvive:
                 "food_text": {"last": "борщ 250"},
                 "plan_lite": {"day": 3},
                 "nutrition_manual_target": {"kcal": 1650},
+                # Самый сильный довод за «снимать всё»: здесь лежат слова
+                # человека ДОСЛОВНО (до 400 знаков, `open_question`).
+                "last_answered": {"answer_text": "вешу 71, рост 168, мне 34"},
             },
         )
-        assert len(_state(conversation)) == 5
+        assert len(_state(conversation)) == 6
 
         sweep_forget_all(upc.user_id)
 
@@ -175,31 +178,54 @@ class TestTheTimeBoundary:
 
         assert _state(conversation) == new_anketa
 
-    def test_a_person_who_never_asked_keeps_their_state(self, redis, settings) -> None:
-        """Положительная пара: снимается только у попросивших."""
-        upc = _upc()
-        settings.STRICT_TENANT_SCOPE = "off"
-        tenant = Tenant.objects.create(slug=f"fas-{uuid.uuid4().hex[:8]}", name="Sweep")
-        bot_user = BotUser.all_tenants.create(
-            tenant=tenant,
+    def test_the_neighbour_is_untouched(self, redis, settings) -> None:
+        """Положительная пара к ПРАВКЕ, а не к фильтру свипа.
+
+        Прежний узел («не просивший — не тронут») падал бы раньше правки: свип
+        отсекает таких людей своим фильтром ещё до `anonymize_dialogue`, то
+        есть узел стерёг фильтр, а не опустошение. Здесь — сама функция,
+        вызванная для одного человека: чужой диалог обязан остаться как был.
+        """
+        from apps.conversations.erasure import anonymize_dialogue
+        from apps.conversations.models import ArchivedMessage
+
+        upc, conversation = _forgotten_with_dialogue(settings, {"nutrition_anketa": ANKETA})
+        # Сосед — другой человек в том же салоне, его диалог тоже старше
+        # момента стирания: `created_at__lte` его бы пропустил, отсекает его
+        # ТОЛЬКО то, что его `bot_user_id` в вызов не передан.
+        neighbour_user = BotUser.all_tenants.create(
+            tenant=conversation.tenant,
             channel="max",
-            channel_user_id=f"fas-{uuid.uuid4().hex[:8]}",
-            ayla_user_id=upc.user_id,
+            channel_user_id=f"nb-{uuid.uuid4().hex[:8]}",
+            ayla_user_id=uuid.uuid4(),
         )
-        conversation = Conversation.all_tenants.create(
-            tenant=tenant, bot_user=bot_user, skill_state={"nutrition_anketa": ANKETA}
+        neighbour = Conversation.all_tenants.create(
+            tenant=conversation.tenant,
+            bot_user=neighbour_user,
+            skill_state={"nutrition_anketa": ANKETA},
+        )
+        Conversation.all_tenants.filter(pk=neighbour.pk).update(created_at=conversation.created_at)
+        assert _state(neighbour) == {"nutrition_anketa": ANKETA}
+
+        anonymize_dialogue(
+            [conversation.bot_user_id],
+            through=timezone.now(),
+            reason=ArchivedMessage.Reason.FORGET_ALL,
         )
 
-        sweep_forget_all(upc.user_id)
-
-        assert _state(conversation) == {"nutrition_anketa": ANKETA}
+        assert _state(conversation) == {}
+        assert _state(neighbour) == {"nutrition_anketa": ANKETA}
 
 
 class TestEveryErasurePathEmptiesIt:
     """Три пути стирания зовут один и тот же ``anonymize_dialogue``.
 
-    Опустошение живёт там, а не в свипе, — иначе чатовое «забудь всё» (оно
-    обезличивает сразу, не дожидаясь часа) оставило бы анкету лежать до
+    Свип покрыт классами выше; здесь — чатовое «забудь всё» и сама функция.
+    Удаление аккаунта (``privacy.delete_personal_data``) отдельным узлом не
+    покрыто: оно зовёт ту же функцию, и узел про неё закрывает его тоже.
+
+    Опустошение живёт в функции, а не в свипе, — иначе чатовое «забудь всё»
+    (оно обезличивает сразу, не дожидаясь часа) оставило бы анкету лежать до
     ближайшего прогона.
     """
 
