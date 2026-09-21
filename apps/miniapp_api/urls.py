@@ -134,6 +134,13 @@ urlpatterns = [
         views.customer_recommendations,
         name="customer_recommendations",
     ),
+    # Карточка C04 «направление + почему» для экрана (DRF-1769): бот
+    # отдаёт ЗАПИСЬ, которую человек уже увидел в чате, — не пересчёт.
+    path(
+        "recommendation/<uuid:recommendation_id>",
+        views.customer_recommendation,
+        name="customer_recommendation",
+    ),
     # Goal layer (DRF-1190) — decision-context document + goal selection,
     # proxied onto Ayla verbatim (Mini App is a dumb renderer).
     path(

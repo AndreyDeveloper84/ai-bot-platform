@@ -12,8 +12,11 @@ import { resolveEntryPoint } from "./pending-booking-intent";
 describe("parseStartRoute — ссылка на карточку C04 (DRF-1773)", () => {
   const ID = "11111111-2222-3333-4444-555555555555";
 
-  it("reco_<uuid> ведёт в каталог — исполнение начинается там", () => {
-    expect(parseStartRoute(`reco_${ID}`)).toBe("/customer/catalog");
+  it("reco_<uuid> ведёт на карточку — у неё появился свой адрес (DRF-1769)", () => {
+    // До N3 ссылка вела в каталог: id ехал ради провенанса, а показать
+    // карточку на экране было нечем. Теперь есть — и ссылка с именем
+    // карточки открывает карточку, а исполнение начинается тапом с неё.
+    expect(parseStartRoute(`reco_${ID}`)).toBe(`/customer/recommendation/${ID}`);
   });
 
   it("а сам id остаётся в payload и доезжает до провенанса интента", () => {

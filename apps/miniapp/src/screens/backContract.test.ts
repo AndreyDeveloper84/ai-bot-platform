@@ -140,6 +140,7 @@ const EXPECTED_SCREENS = [
   "HelloScreen",
   "MasterPickerScreen",
   "PlanLiteScreen",
+  "RecommendationCardScreen",
   "RescheduleScreen",
   "RoleNotReadyScreen",
   "ServiceDetailScreen",

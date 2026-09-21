@@ -98,6 +98,7 @@ import { CustomerBookingConfirmScreen } from "./screens/CustomerBookingConfirmSc
 import { CustomerBookingDetailScreen } from "./screens/CustomerBookingDetailScreen";
 import { CustomerBookingSuccessScreen } from "./screens/CustomerBookingSuccessScreen";
 import { CustomerCatalogScreen } from "./screens/CustomerCatalogScreen";
+import { RecommendationCardScreen } from "./screens/RecommendationCardScreen";
 import { CustomerMasterDetailScreen } from "./screens/CustomerMasterDetailScreen";
 import { CustomerProfileScreen } from "./screens/CustomerProfileScreen";
 import { CustomerNotificationSettingsScreen } from "./screens/CustomerNotificationSettingsScreen";
@@ -1253,6 +1254,14 @@ export function CustomerRoutes() {
       <Route
         path="/customer/wellness"
         element={<CustomerWellnessDashboardScreen />}
+      />
+      {/* Карточка C04 «направление + почему» (DRF-1769): свой адрес,
+          потому что у записи есть id и ссылка из чата ведёт именно на
+          неё. Исполнение живёт в каталоге, и «Подобрать вариант»
+          отсюда ведёт туда одним тапом. */}
+      <Route
+        path="/customer/recommendation/:recommendationId"
+        element={<RecommendationCardScreen />}
       />
       <Route path="/customer/catalog" element={<CustomerCatalogScreen />} />
       {/*
