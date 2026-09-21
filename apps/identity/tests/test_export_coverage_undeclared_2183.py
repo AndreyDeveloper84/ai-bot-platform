@@ -29,6 +29,7 @@
 from __future__ import annotations
 
 import uuid
+from typing import TYPE_CHECKING, cast
 
 import pytest
 
@@ -38,14 +39,29 @@ from apps.identity.services.privacy import export_personal_data
 from apps.identity.tests.test_export_coverage import _NoAyla
 from apps.tenancy.models import Tenant
 
+if TYPE_CHECKING:
+    from apps.integrations.ayla.personal_context_client import PersonalContextHttpClient
+
 pytestmark = pytest.mark.django_db
+
+
+def _no_ayla() -> "PersonalContextHttpClient":
+    """Заглушка Ayla (пустая выгрузка) — утверждается только половина бота.
+
+    Приведение явное: заглушка повторяет ровно два метода, которые зовёт
+    выгрузка, а не весь клиент. Соседний тест того же файла не требует
+    этого лишь потому, что его методы без аннотаций и mypy их тела не
+    проверяет.
+    """
+    return cast("PersonalContextHttpClient", _NoAyla())
+
 
 WITHHELD_NOW = ("conversations.AiDraft", "redis.short_term", "redis.pii_tokenmap")
 
 
 def _withheld_by_store() -> dict[str, str]:
     """``withheld`` строками по хранилищу (``conversations.AiDraft.content`` → ``conversations.AiDraft``)."""
-    rows = {}
+    rows: dict[str, str] = {}
     for row in build_coverage_section()["withheld"]:
         field = row["field"]
         store = field if field.startswith("redis.") else ".".join(field.split(".")[:2])
@@ -94,7 +110,7 @@ class TestTheDeclarationMatchesTheDocument:
         Иначе декларация врала бы в обратную сторону — обещала бы то, чего
         человек в полученном файле не найдёт.
         """
-        payload = export_personal_data(bot_user, client=_NoAyla())
+        payload = export_personal_data(bot_user, client=_no_ayla())
         included = payload["coverage"]["included"]
 
         assert "consents" in included  # наличие
@@ -103,7 +119,7 @@ class TestTheDeclarationMatchesTheDocument:
 
     def test_the_real_export_carries_the_same_declaration(self, bot_user) -> None:
         """Не только функция таблицы — сам файл, который получает человек."""
-        payload = export_personal_data(bot_user, client=_NoAyla())
+        payload = export_personal_data(bot_user, client=_no_ayla())
 
         assert "consent.ConsentRecord" in payload["coverage"]["included"]["consents"]
         withheld_fields = {row["field"] for row in payload["coverage"]["withheld"]}
@@ -123,3 +139,26 @@ class TestTheMatrixDebtIsClosed:
         for store in ("consent.ConsentRecord", *WITHHELD_NOW):
             assert store in declared, store
             assert store not in UNDECLARED_IN_EXPORT, store
+
+
+class TestTheNewKindOfLineHasItsOwnRules:
+    def test_a_non_registry_section_is_not_a_registry_slot(self) -> None:
+        """Слот реестра объявляется через `SECTIONS`; второй путь дал бы два объявления."""
+        from apps.identity.export_coverage import NON_REGISTRY_SECTIONS
+        from apps.identity.personal_fields import PERSONAL_FIELDS
+
+        registry = {f.site for f in PERSONAL_FIELDS}
+        assert NON_REGISTRY_SECTIONS  # наличие
+        assert not (set(NON_REGISTRY_SECTIONS) & registry)
+
+    def test_a_store_is_never_both_carried_and_withheld(self) -> None:
+        """Одно хранилище — одно решение: «выгружено» и «не выгружено» разом — ложь."""
+        from apps.identity.export_coverage import NON_REGISTRY_SECTIONS, NON_REGISTRY_STORES
+
+        def store(key: str) -> str:
+            return key if key.startswith("redis.") else ".".join(key.split(".")[:2])
+
+        carried = {store(k) for k in NON_REGISTRY_SECTIONS}
+        withheld = {store(k) for k in NON_REGISTRY_STORES}
+        assert carried  # наличие
+        assert not (carried & withheld)
