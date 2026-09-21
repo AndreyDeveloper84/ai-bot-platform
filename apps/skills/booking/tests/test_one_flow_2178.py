@@ -34,6 +34,12 @@ from __future__ import annotations
 
 import pytest
 
+from apps.skills.booking.tests.test_skill import (  # noqa: F401 — fixtures
+    _isolated_env,
+    bot_user,
+    context,
+    tenant,
+)
 from apps.skills.booking.one_flow import (
     ENTRY_TEXT,
     OPEN_LABEL,
@@ -163,3 +169,64 @@ class TestTheSecondPickerStaysUnreachable:
             f"Чипы дат собирает кто-то ещё: {sorted(callers)}. Проверь, что "
             "этот путь проходит через chat_step_by_step_allowed()."
         )
+
+
+# --- DRF-2265 — CD §69: запись, начатая в боте, в боте и заканчивается -------
+
+
+class TestAChatStartedBookingStaysInChat:
+    """Владелец 21.09: «но запись если начинается в боте, она и заканчивается в боте».
+
+    Главный узел — бот С настроенным Mini App. До §69 тап по специалисту
+    уводил в приложение текстом «Открой приложение — там выберешь время.»
+    (скрин владельца `docs/screens/err-write-bot.png`).
+    """
+
+    @staticmethod
+    def _tap_specialist(context, tenant):
+        from apps.skills.base import SkillContext
+        from apps.skills.booking.skill import BookingSkill
+        from apps.skills.booking.tests.test_skill import (
+            BOOKING_DATE,
+            FakeYClients,
+            _booking_date,
+            _patch_provider_complete,
+            _patch_yclients,
+            _service,
+            _staff,
+        )
+        from apps.tenancy.context import tenant_scope
+
+        client = FakeYClients()
+        client.services_rows = [_service(22)]
+        client.staff_rows = [_staff(11)]
+        client.dates = [BOOKING_DATE, _booking_date(1), _booking_date(3)]
+        ctx = SkillContext(
+            conversation=context.conversation,
+            bot_user=context.bot_user,
+            message_text="cb:book:pick_master:11:22",
+        )
+        with _patch_yclients(client), _patch_provider_complete([]):
+            with tenant_scope(tenant):
+                return BookingSkill().handle(ctx), BOOKING_DATE
+
+    def test_with_the_app_configured_the_date_is_still_asked_in_chat(
+        self, with_miniapp, context, tenant
+    ):
+        result, first_date = self._tap_specialist(context, tenant)
+
+        assert result.reply_text == "Выберите дату:"
+        callbacks = [
+            b["callback"] for b in result.action_data["attachments"][0]["payload"]["buttons"]
+        ]
+        assert f"cb:book:pick_date:11:{first_date}:22" in callbacks
+        assert "Открой приложение" not in result.reply_text
+
+    def test_without_the_app_the_same_chat_path(self, without_miniapp, context, tenant):
+        result, first_date = self._tap_specialist(context, tenant)
+
+        assert result.reply_text == "Выберите дату:"
+        callbacks = [
+            b["callback"] for b in result.action_data["attachments"][0]["payload"]["buttons"]
+        ]
+        assert f"cb:book:pick_date:11:{first_date}:22" in callbacks
