@@ -33,7 +33,7 @@ vi.mock("../lib/max-sdk", () => ({
   getInitData: () => "test-init-data",
   setBackButton: () => undefined,
   onBackButton: () => () => undefined,
-  closeApp: () => undefined,
+  returnToChat: () => "closed",
   hapticSelection: () => undefined,
   hapticImpact: () => undefined,
   signalReady: () => undefined,

@@ -23,7 +23,7 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../lib/recommendation-card", async (importOriginal) => {
   const original = await importOriginal<typeof import("../lib/recommendation-card")>();
@@ -53,6 +53,7 @@ import {
 } from "../lib/recommendation-card";
 import { OPTION_ROUTE } from "../lib/booking-flow";
 import { NO_VERIFIED_EVIDENCE_TEXT } from "../lib/recommendation-absence";
+import { rememberChatLink } from "../lib/max-sdk";
 import { RecommendationCardScreen } from "./RecommendationCardScreen";
 
 const mockedFetch = vi.mocked(fetchRecommendation);
@@ -183,5 +184,37 @@ describe("состояния, в которых карточки нет", () => 
       expect(screen.queryByText(CARD_HEAD)).not.toBeInTheDocument();
     });
     expect(screen.getByRole("status").textContent ?? "").not.toBe("");
+  });
+});
+
+describe("«Не сейчас» — назад в чат, а не молча (DRF-2268)", () => {
+  afterEach(() => {
+    delete (window as { WebApp?: unknown }).WebApp;
+    rememberChatLink(null);
+  });
+
+  it("мост умеет закрыть — закрывает, на Главную не уводит", async () => {
+    const close = vi.fn();
+    (window as { WebApp?: unknown }).WebApp = { close };
+    renderScreen();
+    await userEvent.click(await screen.findByRole("button", { name: BUTTON_SKIP }));
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(navigateSpy).not.toHaveBeenCalledWith("/customer/main");
+  });
+
+  it("закрыть нечем, есть ссылка на диалог — открывает диалог бота", async () => {
+    const openLink = vi.fn();
+    (window as { WebApp?: unknown }).WebApp = { openLink };
+    rememberChatLink("https://max.ru/ayla_client_bot");
+    renderScreen();
+    await userEvent.click(await screen.findByRole("button", { name: BUTTON_SKIP }));
+    expect(openLink).toHaveBeenCalledWith("https://max.ru/ayla_client_bot");
+    expect(navigateSpy).not.toHaveBeenCalledWith("/customer/main");
+  });
+
+  it("ни закрыть, ни ссылки — Главная (прежнее честное поведение)", async () => {
+    renderScreen();
+    await userEvent.click(await screen.findByRole("button", { name: BUTTON_SKIP }));
+    expect(navigateSpy).toHaveBeenCalledWith("/customer/main");
   });
 });
