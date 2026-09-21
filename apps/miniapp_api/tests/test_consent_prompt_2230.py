@@ -164,3 +164,60 @@ class TestTheButtonLandsInTheExistingConsentFlow:
         back = CONSENT_RECOVERY_RETURN_TEXTS["miniapp"]
         # После согласия человека возвращают туда, откуда он пришёл, — в приложение.
         assert "приложени" in back.lower(), back
+
+
+class TestSentAsTheBotThatOpenedTheMiniApp:
+    """Приглашение уходит от бота, подписавшего initData, а не от токена по умолчанию.
+
+    Mini App проверяет initData по всем ботам реестра и помнит, какой подошёл
+    (``VerifiedInitData.bot_slug``). Отправка без ``bot_scope`` шла как
+    ``settings.MAX_BOT_TOKEN`` — на стенде это совпало с ботом Mini App, но при
+    втором клиентском боте приглашение ушло бы в чужой диалог.
+    """
+
+    @pytest.fixture
+    def two_bots(self, settings):
+        from apps.miniapp_api.tests.test_auth_multi_bot import CLIENT_TOKEN, REGISTRY
+
+        settings.MAX_BOT_REGISTRY = REGISTRY
+        settings.MAX_BOT_TOKEN = CLIENT_TOKEN  # «по умолчанию» — другой бот
+        return settings
+
+    def _tap_signed_by(self, client, token: str):
+        from apps.miniapp_api.tests.test_auth_multi_bot import make_init_data
+
+        return client.post(
+            reverse("miniapp_api:customer_wellness_consent_prompt"),
+            HTTP_AUTHORIZATION=f"MaxInitData {make_init_data(token, user_id=92230)}",
+        )
+
+    def _capture(self, monkeypatch) -> list[str]:
+        seen: list[str] = []
+
+        def _fake_send(**_kwargs):
+            from apps.channels.max.outbound import _token
+
+            seen.append(_token())
+            return {}
+
+        monkeypatch.setattr(SEND, _fake_send)
+        return seen
+
+    def test_salon_bot_opened_it_salon_bot_sends(self, client, bot_user, two_bots, monkeypatch):
+        from apps.miniapp_api.tests.test_auth_multi_bot import SALON_TOKEN
+
+        seen = self._capture(monkeypatch)
+        with patch(CONSENT, return_value=False):
+            response = self._tap_signed_by(client, SALON_TOKEN)
+        assert response.status_code == 200, response.content
+        assert seen == [SALON_TOKEN]
+
+    def test_client_bot_opened_it_client_bot_sends(self, client, bot_user, two_bots, monkeypatch):
+        """Положительная пара: подписал клиентский — шлёт клиентский."""
+        from apps.miniapp_api.tests.test_auth_multi_bot import CLIENT_TOKEN
+
+        seen = self._capture(monkeypatch)
+        with patch(CONSENT, return_value=False):
+            response = self._tap_signed_by(client, CLIENT_TOKEN)
+        assert response.status_code == 200, response.content
+        assert seen == [CLIENT_TOKEN]
