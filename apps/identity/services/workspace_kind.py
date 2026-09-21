@@ -9,8 +9,10 @@
 
 Числа — решение главного окна DRF-2254, не выдуманы здесь:
 
-* таймаут чтения — 1.5 с, как у пробы DRF-2225, и мимо общего breaker брони:
-  тормоз каталога не должен задерживать загрузку Mini App;
+* таймаут чтения — бюджет ~1.5 с на весь вызов, доли фаз: connect 0.5,
+  read 1.0, write 0.2, pool 0.2 (худший случай ≈1.9 с); мимо общего breaker
+  брони, как проба DRF-2225: тормоз каталога не должен задерживать загрузку
+  Mini App;
 * кэш — 10 минут на тенант. ``kind`` пишет только provisioning каталога и
   сейчас не меняется; когда его начнут менять (заполнение до G4, переход
   соло→команда — решения владельца), добавят сброс по событию.
@@ -25,6 +27,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Literal
 
+import httpx
 from django.conf import settings
 from django.core.cache import cache
 
@@ -37,8 +40,9 @@ WorkspaceKind = Literal["salon", "solo"]
 #: Закрытый список вида — как ``Tenant.Kind`` каталога.
 WORKSPACE_KINDS: frozenset[str] = frozenset({"salon", "solo"})
 
-#: Таймаут чтения в ``/me`` — решение DRF-2254 (как проба DRF-2225).
-WORKSPACE_KIND_TIMEOUT_S = 1.5
+#: Таймаут чтения в ``/me`` — решение главного окна DRF-2254: доли фаз, а не
+#: одно число (число httpx применяет к КАЖДОЙ фазе отдельно).
+WORKSPACE_KIND_TIMEOUT = httpx.Timeout(connect=0.5, read=1.0, write=0.2, pool=0.2)
 
 #: Кэш на тенант — решение DRF-2254: 10 минут.
 WORKSPACE_KIND_CACHE_TTL_S = 600
@@ -67,7 +71,7 @@ def workspace_kind(tenant_id: Any) -> WorkspaceKind | None:
     try:
         kind = get_ayla_booking_client().get_tenant_kind(
             tenant_id=tenant_id,
-            timeout_s=WORKSPACE_KIND_TIMEOUT_S,
+            timeout=WORKSPACE_KIND_TIMEOUT,
             feeds_circuit=False,
         )
     except BookingAPIError as exc:
@@ -96,7 +100,7 @@ def workspace_kind(tenant_id: Any) -> WorkspaceKind | None:
 __all__ = [
     "WORKSPACE_KINDS",
     "WORKSPACE_KIND_CACHE_TTL_S",
-    "WORKSPACE_KIND_TIMEOUT_S",
+    "WORKSPACE_KIND_TIMEOUT",
     "WorkspaceKind",
     "workspace_kind",
 ]

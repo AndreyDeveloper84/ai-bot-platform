@@ -10,17 +10,18 @@
 
 Теперь бот читает ``kind`` каталога (``GET internal/tenants/<id>/kind/``) и
 отдаёт в ``/me`` как ``workspace_kind``; ``is_solo_provider`` — только
-раскладка. Решения главного окна: таймаут чтения 1.5 с мимо общего breaker
-(как проба DRF-2225), кэш 10 минут на тенант, отказ каталога → ``null`` →
-«как сейчас».
+раскладка. Решения главного окна: таймаут чтения — доли фаз connect 0.5 /
+read 1.0 / write 0.2 / pool 0.2 мимо общего breaker (как проба DRF-2225), кэш
+10 минут на тенант, отказ каталога → ``null`` → «как сейчас».
 
 * c* — клиент: ответ каталога, 404 → нет вида, таймаут не кормит breaker;
 * s* — сервис: кэш, отказ не кэшируется, чужое значение — не вид, без
   каталога — ``None`` без вызова;
 * m* — ``/me``: A и B;
 * r* — готовность онбординга: в A пункты ``services``/``location`` —
-  ``unavailable`` / ``managed_outside_app`` и не блокируют ``ready``; соло и
-  ``null`` — как было.
+  ``unavailable`` / ``managed_outside_app`` без ``deep_link``; ``ready``
+  по-прежнему блокируют (достижимость — решение владельца); соло и ``null`` —
+  как было.
 """
 
 from __future__ import annotations
@@ -91,7 +92,9 @@ class TestC1Client:
         client = _client_with(handler)
         with patch.object(client._circuit, "record_failure") as record:
             with pytest.raises(bc.BookingUnavailableError):
-                client.get_tenant_kind(tenant_id=TENANT_ID, timeout_s=1.5, feeds_circuit=False)
+                client.get_tenant_kind(
+                    tenant_id=TENANT_ID, timeout=wk.WORKSPACE_KIND_TIMEOUT, feeds_circuit=False
+                )
         record.assert_not_called()
 
     def test_by_default_a_timeout_does_feed_the_breaker(self) -> None:
@@ -101,7 +104,7 @@ class TestC1Client:
         client = _client_with(handler)
         with patch.object(client._circuit, "record_failure") as record:
             with pytest.raises(bc.BookingUnavailableError):
-                client.get_tenant_kind(tenant_id=TENANT_ID, timeout_s=1.5)
+                client.get_tenant_kind(tenant_id=TENANT_ID, timeout=wk.WORKSPACE_KIND_TIMEOUT)
         record.assert_called_once()
 
     def test_the_per_call_timeout_reaches_the_request(self) -> None:
@@ -111,8 +114,12 @@ class TestC1Client:
             seen.append(request.extensions["timeout"])
             return httpx.Response(200, json={"data": {"id": str(TENANT_ID), "kind": "salon"}})
 
-        assert _client_with(handler).get_tenant_kind(tenant_id=TENANT_ID, timeout_s=1.5) == "salon"
-        assert seen[0]["read"] == 1.5
+        kind = _client_with(handler).get_tenant_kind(
+            tenant_id=TENANT_ID, timeout=wk.WORKSPACE_KIND_TIMEOUT
+        )
+        assert kind == "salon"
+        # Доли фаз — решение главного окна: бюджет на весь вызов, а не 1.5 с на каждую фазу.
+        assert seen[0] == {"connect": 0.5, "read": 1.0, "write": 0.2, "pool": 0.2}
 
 
 # ─── сервис ──────────────────────────────────────────────────────────────────
@@ -142,7 +149,12 @@ class TestS1Service:
         fake = _FakeClient("solo")
         with patch.object(wk, "get_ayla_booking_client", return_value=fake):
             assert wk.workspace_kind(TENANT_ID) == "solo"
-        assert fake.calls == [{"tenant_id": TENANT_ID, "timeout_s": 1.5, "feeds_circuit": False}]
+        assert fake.calls == [
+            {"tenant_id": TENANT_ID, "timeout": wk.WORKSPACE_KIND_TIMEOUT, "feeds_circuit": False}
+        ]
+        assert wk.WORKSPACE_KIND_TIMEOUT == httpx.Timeout(
+            connect=0.5, read=1.0, write=0.2, pool=0.2
+        )
         assert wk.WORKSPACE_KIND_CACHE_TTL_S == 600
 
     def test_a_read_is_cached_per_tenant(self, configured) -> None:
@@ -279,7 +291,7 @@ def _states(readiness) -> dict[str, tuple[str, str | None]]:
 
 
 class TestR1Readiness:
-    def test_case_a_services_and_location_are_managed_outside_and_do_not_block(
+    def test_case_a_services_and_location_are_managed_outside_and_still_block(
         self, master, settings
     ) -> None:
         settings.BOOKING_VIA_AYLA_REST = False
@@ -298,8 +310,13 @@ class TestR1Readiness:
         assert states["services"] == ("unavailable", "managed_outside_app")
         assert states["location"] == ("unavailable", "managed_outside_app")
         assert states["hours"][0] == "done" and states["profile"][0] == "done"
-        assert r.blocking == []
-        assert r.ready is True
+        # Вести некуда — ссылки нет; у остальных пунктов она прежняя.
+        links = {item["key"]: item["deep_link"] for item in r.as_dict()["items"]}
+        assert links["hours"] == "/solo/working-hours"
+        assert links["services"] is None and links["location"] is None
+        # Смысл ready не меняется: достижимость «готово» — решение владельца.
+        assert r.blocking == ["services:unavailable", "location:unavailable"]
+        assert r.ready is False
 
     @pytest.mark.parametrize("kind", ["solo", None])
     def test_solo_and_unknown_are_as_before(self, master, kind, settings) -> None:

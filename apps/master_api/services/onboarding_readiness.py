@@ -82,8 +82,9 @@ SERVICES_DIRECTIONS_LINK = "/solo/directions"
 #: называет рабочее пространство салоном (``Tenant.kind == salon``). Причина
 #: нейтральная: это и настоящий однолюдный салон (место ведёт салон — правда),
 #: и соло до G4, которому признак проставят позже (решение владельца, 3а).
-#: Такие пункты ``unavailable`` и НЕ блокируют ``ready`` — это не то, что
-#: мастер может сделать сам; иначе однолюдный салон не стал бы «готов» никогда.
+#: Такие пункты ``unavailable`` и без ``deep_link`` (вести некуда). ``ready``
+#: они блокируют, как блокирует ``capability_not_built``: достижимость «готово»
+#: при ведении вне приложения — отдельное решение владельца, не этот лист.
 MANAGED_OUTSIDE_APP = "managed_outside_app"
 SALON_MANAGED_ITEMS: tuple[str, ...] = ("services", "location")
 
@@ -96,7 +97,9 @@ class ReadinessItem:
     reason: str | None = None
 
     @property
-    def deep_link(self) -> str:
+    def deep_link(self) -> str | None:
+        if self.reason == MANAGED_OUTSIDE_APP:
+            return None
         if self.key == "services" and not self.detail.get("selected"):
             return SERVICES_DIRECTIONS_LINK
         return DEEP_LINKS[self.key]
@@ -124,9 +127,7 @@ class Readiness:
         return [
             f"{item.key}:{item.state}"
             for item in self.items
-            if item.key in REQUIRED_ITEMS
-            and item.state != "done"
-            and not (item.state == "unavailable" and item.reason == MANAGED_OUTSIDE_APP)
+            if item.key in REQUIRED_ITEMS and item.state != "done"
         ]
 
     @property

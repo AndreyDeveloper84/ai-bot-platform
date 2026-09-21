@@ -1309,13 +1309,14 @@ class AylaBookingHTTPClient:
         self,
         *,
         tenant_id: Any,
-        timeout_s: float | None = None,
+        timeout: httpx.Timeout | float | None = None,
         feeds_circuit: bool = True,
     ) -> str | None:
         """``GET internal/tenants/{id}/kind/`` — ``salon`` | ``solo`` каталога.
 
-        ``None`` — тенанта в каталоге нет (404). ``timeout_s`` — свой таймаут
-        вызова; ``feeds_circuit=False`` — ТАЙМАУТ этого вызова не пишется в
+        ``None`` — тенанта в каталоге нет (404). ``timeout`` — свой таймаут
+        вызова (``httpx.Timeout`` с долями фаз или число — на КАЖДУЮ фазу);
+        ``feeds_circuit=False`` — ТАЙМАУТ этого вызова не пишется в
         общий breaker (как проба DRF-2225): чтение на загрузке Mini App с
         коротким таймаутом не должно открывать breaker для всей брони.
         Прочие сетевые отказы и 5xx считаются как обычно.
@@ -1329,9 +1330,9 @@ class AylaBookingHTTPClient:
             raise BookingUnavailableError("circuit_open")
 
         url = self._urls.build(f"internal/tenants/{tenant_id}/kind/")
-        timeout = self._timeout_s if timeout_s is None else timeout_s
+        per_call = self._timeout_s if timeout is None else timeout
         try:
-            resp = self._client().get(url, headers=self._headers(), timeout=timeout)
+            resp = self._client().get(url, headers=self._headers(), timeout=per_call)
         except httpx.TimeoutException as exc:
             if feeds_circuit:
                 self._circuit.record_failure(now=now)
