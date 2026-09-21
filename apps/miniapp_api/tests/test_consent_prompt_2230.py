@@ -110,9 +110,10 @@ class TestTheInvitationGoesToThisPersonsChat:
     def test_send_failure_is_loud_and_a_retry_really_retries(self, client, bot_user):
         from apps.channels.max.outbound import MaxAPIError
 
-        with patch(CONSENT, return_value=False), patch(
-            SEND, side_effect=MaxAPIError(502, "boom")
-        ) as send:
+        with (
+            patch(CONSENT, return_value=False),
+            patch(SEND, side_effect=MaxAPIError(502, "boom")) as send,
+        ):
             failed = _tap(client, bot_user)
         assert failed.status_code == 502, failed.content
         assert failed.json()["error"] == "consent_prompt_not_sent"

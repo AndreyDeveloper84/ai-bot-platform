@@ -129,6 +129,8 @@ import {
   DIARY_CONSENT_REQUIRED_TEXT,
   DIARY_OFF_TEXT,
   diaryIsOff,
+  CONSENT_PROMPT_FAILED_TEXT,
+  requestDiaryConsentPrompt,
 } from "../lib/customer-wellness";
 import {
   getCatalogBrowse,
@@ -146,7 +148,10 @@ type ActiveGoal = NonNullable<WellnessToday["active_goals"]>[number];
 
 /**
  * Согласие дневника — ОДИН блок на экране (DRF-2144 п.6). Формулировка из
- * листа; кнопка закрывает Mini App в чат MAX — согласие даётся там.
+ * листа. Кнопка сперва просит сервер прислать в чат MAX приглашение с
+ * кнопкой «Дать согласие» (DRF-2230) и только потом закрывает Mini App:
+ * раньше она просто закрывала приложение, и человек попадал в чат, где о
+ * согласии не было ни слова (скрин владельца 21.09).
  */
 export const DIARY_CONSENT_CARD_TEXT = "Чтобы вести дневник, нужно согласие — дай его в чате с Ayla";
 export const DIARY_CONSENT_CARD_CTA = "Дать согласие в чате";
@@ -444,6 +449,29 @@ export function CustomerWellnessDashboardScreen() {
     closeApp();
   }, []);
 
+  // DRF-2230 — приглашение к согласию уходит в чат, и лишь потом экран
+  // закрывается. Сбой отправки — вслух и без закрытия: закрыться молча значило
+  // бы снова отправить человека в чат, где ему нечего нажать.
+  const [consentPromptError, setConsentPromptError] = useState<string | null>(null);
+  const [consentPromptBusy, setConsentPromptBusy] = useState(false);
+  const onConsentTap = useCallback(async () => {
+    setConsentPromptError(null);
+    setConsentPromptBusy(true);
+    try {
+      const res = await requestDiaryConsentPrompt();
+      if (res.reason === "already_granted") {
+        // Согласие уже есть — блок уйдёт после перечитывания; в чат незачем.
+        void fetchAll();
+        return;
+      }
+      closeApp();
+    } catch {
+      setConsentPromptError(CONSENT_PROMPT_FAILED_TEXT);
+    } finally {
+      setConsentPromptBusy(false);
+    }
+  }, [fetchAll]);
+
   const onDismissOnboarding = useCallback(() => {
     markOnboardingDismissed();
     setOnboardingDismissed(true);
@@ -699,9 +727,19 @@ export function CustomerWellnessDashboardScreen() {
             aria-label="Согласие на дневник"
           >
             <p className="wellness-dash__consent-text">{DIARY_CONSENT_CARD_TEXT}</p>
-            <button type="button" className="btn-secondary" onClick={onChatTap}>
+            <button
+              type="button"
+              className="btn-secondary"
+              onClick={() => void onConsentTap()}
+              disabled={consentPromptBusy}
+            >
               {DIARY_CONSENT_CARD_CTA}
             </button>
+            {consentPromptError ? (
+              <p className="wellness-dash__consent-error" role="alert">
+                {consentPromptError}
+              </p>
+            ) : null}
           </section>
         )}
 
