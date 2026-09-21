@@ -38,7 +38,9 @@ from apps.conversations.tests.test_erasure import (  # noqa: F401 — фикст
 from apps.handoff.models import AdminTask
 from apps.handoff.services import package_transcript
 
-pytestmark = pytest.mark.django_db
+# После DRF-2220 (#1952) каждое стирание чистит и потоки ``ingress:*`` — без
+# этой фикстуры тест шёл бы в настоящий Redis.
+pytestmark = [pytest.mark.django_db, pytest.mark.usefixtures("ingress_streams_empty")]
 
 WORDS = "мне плохо после процедуры, телефон 89001234567"
 
