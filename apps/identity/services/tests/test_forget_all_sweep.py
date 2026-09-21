@@ -332,15 +332,22 @@ class TestScope:
         upc.refresh_from_db()
         assert upc.minor_lock is True
 
-    def test_yellow_is_left_for_its_own_stream(self):
-        """Green-only, like the whole memory_deleter module. Named, not skipped."""
+    def test_yellow_does_not_survive_either(self):
+        """DRF-2180 — прежде узел держал обратное: «green-only, named, not skipped».
+
+        Матрица удаления (DRF-2134) объявляла для жёлтой зоны ``DELETE`` с
+        исполнителем «никто» — то есть долг, а не решение. Свип его закрыл,
+        и этот узел развёрнут вслед за ним: он пинил не свойство, а
+        состояние, которое лист и пришёл менять.
+        """
         upc = _upc()
         yellow = _yellow(upc)
         request_forget_all(upc.user_id)
         sweep_forget_all(upc.user_id)
         yellow.refresh_from_db()
-        assert yellow.soft_deleted_at is None
-        # And it was never reachable by the reader this sweep protects.
+        assert yellow.soft_deleted_at is not None
+        assert yellow.deletion_reason == MemoryEntry.DELETION_REASON_FORGET_ALL
+        # И читатель по-прежнему её не видит — это не изменилось.
         assert read_green_entries(upc.user_id) == []
 
     def test_notification_settings_are_not_erased(self):

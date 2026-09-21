@@ -188,18 +188,18 @@ def sweep_forget_all(user_id: uuid.UUID) -> ForgetAllSweepResult:
     # «забудь всё» без единого следа. Условие оставлено прежним намеренно:
     # менять предикат живости в этом листе значило бы менять то, что он не
     # измерял.
-    doomed_ids = list(
-        MemoryEntry.objects.filter(
-            user_id=user_id,
-            soft_deleted_at__isnull=True,
-            delete_requested_at__isnull=True,
-        ).values_list("id", flat=True)
-    )
+    #
+    # Сам отбор живёт В ДЕЛЕТЕРЕ, а не здесь: GUC красной зоны должен
+    # накрывать весь путь, а SELECT отсюда шёл бы без него — и красные строки
+    # не доехали бы до делетера вовсе, сколько бы GUC он у себя ни ставил.
+    # Граница «кто ставит GUC» обязана совпадать с границей «кто трогает
+    # красное», иначе она не граница.
+    #
     # Один `request_id` на прогон: одна просьба «забудь всё» — это одно
     # обращение к красной зоне, разбитое на строки. Он же уходит в GUC и в
     # каждую строку журнала, так что по нему их собирают обратно.
     entries_deleted, red_deleted = soft_delete_all_zones_for_forget_all(
-        user_id, doomed_ids, request_id=uuid.uuid4()
+        user_id, request_id=uuid.uuid4()
     )
 
     now = timezone.now()

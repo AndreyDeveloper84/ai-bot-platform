@@ -54,6 +54,7 @@ carries extra rules … and is not in scope here».
 from __future__ import annotations
 
 import uuid
+from unittest.mock import patch
 
 import pytest
 from django.db import connection, transaction
@@ -408,6 +409,14 @@ class TestTheSweepSeesRedUnderTheAppRole:
 
     Узел переключает роль внутри транзакции, как это делает
     ``test_db_security.py``, и падает ровно на снятом GUC.
+
+    ``write_audit`` подменён намеренно. Под ``ayla_app`` запись в
+    ``audit_auditlog`` отказывает по правам — и это НЕ дефект свипа: у
+    роли попросту нет грантов на таблицу аудита, поэтому под ней сегодня
+    не работает ЛЮБОЙ путь с аудитом, не только этот. Гранты — предмет
+    миграции ADR-0011 §16, а здесь проверяется видимость красной зоны:
+    тянуть в узел чужую незаконченную работу значило бы красить его по
+    причине, к его предмету не относящейся.
     """
 
     def test_red_is_swept_and_logged_under_ayla_app(self) -> None:
@@ -415,7 +424,11 @@ class TestTheSweepSeesRedUnderTheAppRole:
         red = _entry(upc, MemoryEntry.SENSITIVITY_RED)
         green = _entry(upc, MemoryEntry.SENSITIVITY_GREEN)
 
-        with transaction.atomic():
+        with (
+            patch("apps.identity.services.memory_deleter.write_audit"),
+            patch("apps.identity.services.forget_all_sweep.write_audit"),
+            transaction.atomic(),
+        ):
             with connection.cursor() as cur:
                 cur.execute("SET LOCAL ROLE ayla_app")
             sweep_forget_all(upc.user_id)

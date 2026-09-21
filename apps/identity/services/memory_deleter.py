@@ -109,7 +109,6 @@ def soft_delete_green_entries(
 
 def soft_delete_all_zones_for_forget_all(
     user_id: uuid.UUID,
-    entry_ids: Iterable[uuid.UUID],
     *,
     request_id: uuid.UUID,
 ) -> tuple[int, int]:
@@ -150,6 +149,14 @@ def soft_delete_all_zones_for_forget_all(
     не чинит**: живых красных уже нет, второй свип их не увидит. Потеря
     доказательства по 152-ФЗ гл. 3 была бы молчаливой и навсегда.
 
+    # Почему отбор строк живёт ЗДЕСЬ, а не у вызывающего
+
+    Обречённые id выбирает эта функция, а не свип. Иначе GUC накрывал бы
+    только половину пути: SELECT свипа шёл бы без него, красные id до
+    делетера не доехали бы вовсе, и его собственный GUC оказался бы
+    бесполезен. Граница «кто ставит GUC» должна совпадать с границей «кто
+    трогает красное» — иначе она не граница.
+
     Args:
       request_id: один на прогон свипа — одна просьба «забудь всё» это одно
         обращение к зоне, разбитое на строки. Он же уходит в GUC, потому что
@@ -158,32 +165,25 @@ def soft_delete_all_zones_for_forget_all(
     Returns:
       ``(сколько сняли всего, сколько из них красных)``.
     """
-    ids = list(entry_ids)
-    if not ids:
-        return 0, 0
-
     now = timezone.now()
     red_count = 0
+    deleted = 0
     with transaction.atomic():
         _set_red_zone_guc(request_id)
         try:
-            # Красные id читаются ДО UPDATE: после него зона на месте, но
-            # «живых» строк уже нет, и выборка по тому же условию вернёт пусто.
-            red_ids = list(
-                MemoryEntry.objects.filter(
-                    id__in=ids,
-                    user_id=user_id,
-                    sensitivity_zone=MemoryEntry.SENSITIVITY_RED,
-                    soft_deleted_at__isnull=True,
-                    delete_requested_at__isnull=True,
-                ).values_list("id", flat=True)
-            )
-            deleted = MemoryEntry.objects.filter(
-                id__in=ids,
+            live = MemoryEntry.objects.filter(
                 user_id=user_id,
                 soft_deleted_at__isnull=True,
                 delete_requested_at__isnull=True,
-            ).update(
+            )
+            # Красные id читаются ДО UPDATE: после него зона на месте, но
+            # «живых» строк уже нет, и выборка по тому же условию вернёт пусто.
+            red_ids = list(
+                live.filter(sensitivity_zone=MemoryEntry.SENSITIVITY_RED).values_list(
+                    "id", flat=True
+                )
+            )
+            deleted = live.update(
                 delete_requested_at=now,
                 soft_deleted_at=now,
                 deletion_reason=MemoryEntry.DELETION_REASON_FORGET_ALL,
