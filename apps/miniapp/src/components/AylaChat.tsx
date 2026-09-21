@@ -441,7 +441,7 @@ export function AylaChat({
           </p>
         ) : null}
 
-        <div ref={listEndRef} />
+        <div ref={listEndRef} className="ayla-list__end" />
       </div>
 
       <form

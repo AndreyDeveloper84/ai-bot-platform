@@ -8154,7 +8154,11 @@ a {
   display: flex;
   flex-direction: column;
   min-height: 100dvh;
-  padding-bottom: calc(var(--tabbar-height) + 96px + var(--safe-bottom));
+  /* Композер — sticky и стоит в потоке, его высота уже внутри документа;
+     прибавлять её сюда ещё раз — пустая полоса между ним и панелью. Отступ
+     нужен ровно под фиксированную панель: в конце прокрутки композер
+     ложится прямо над ней (инцидент 21.09, DRF-2150). */
+  padding-bottom: calc(var(--tabbar-height) + var(--safe-bottom));
 }
 
 /* DRF-2119 — тот же диалог внутри рамки салонной админки: рамка уже
@@ -8187,6 +8191,15 @@ a {
   flex-direction: column;
   gap: var(--s-2);
   flex: 1;
+}
+
+/* Метка конца ленты: `scrollIntoView({ block: "end" })` ставит её к низу
+   вьюпорта — а там композер и панель. Поля прокрутки поднимают последнюю
+   реплику над ними (инцидент 21.09, DRF-2150). */
+.ayla-list__end {
+  scroll-margin-bottom: calc(
+    var(--tabbar-height) + var(--ayla-compose-height) + var(--safe-bottom)
+  );
 }
 
 .ayla-empty,

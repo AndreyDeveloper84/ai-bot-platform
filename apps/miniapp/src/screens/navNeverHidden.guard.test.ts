@@ -39,7 +39,6 @@ const NO_TABBAR_BY_DESIGN: ReadonlySet<string> = new Set([
   "MasterServicesScreen",
   "MasterSettingsScreen",
   "MasterSetupLandingScreen",
-  "MasterWorkingHoursScreen",
 ]);
 
 const STATE_BRANCH =

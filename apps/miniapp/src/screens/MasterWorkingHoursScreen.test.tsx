@@ -324,6 +324,23 @@ describe("системные состояния через SystemState (DRF-2194
     expect(screen.queryByText(/Недостаточно прав/)).toBeNull();
   });
 
+  it("инцидент 21.09 (DRF-2150): не связан — панель на месте и сказано, кто привяжет", async () => {
+    // Салонный мастер: на /master/* панель рисуется (на /solo/* её несёт соло-каркас).
+    mockedGet.mockRejectedValueOnce(new ApiError(403, "not_linked", "…"));
+    render(
+      <MemoryRouter initialEntries={["/master/working-hours"]}>
+        <Routes>
+          <Route path="/master/working-hours" element={<MasterWorkingHoursScreen />} />
+          <Route path="*" element={<LocationProbe />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    expect(await screen.findByText(NOT_LINKED_MESSAGE)).toBeInTheDocument();
+    expect(NOT_LINKED_MESSAGE).toContain("Привязку выполнит оператор.");
+    const nav = screen.getByRole("navigation", { name: "Основная навигация" });
+    expect(within(nav).getByRole("button", { name: "Сегодня" })).toBeInTheDocument();
+  });
+
   it("ошибка — «Не удалось загрузить рабочие часы» + «Попробовать снова»", async () => {
     mockedGet.mockRejectedValueOnce(new Error("boom"));
     renderScreen();
