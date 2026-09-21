@@ -500,6 +500,7 @@ def assert_envelope_tenant_authorized(envelope: Any) -> None:
 
     | tenant_id state | model available | pilot allowlist | flag  | outcome    |
     |-----------------|-----------------|-----------------|-------|------------|
+    | system.* name   | n/a             | not consulted   | n/a   | system path (DRF-2196) |
     | None + nullable | no              | n/a             | n/a   | log + pass |
     | None + nullable | yes             | n/a             | n/a   | user check |
     | None + others   | n/a             | n/a             | n/a   | RAISE      |
@@ -527,6 +528,15 @@ def assert_envelope_tenant_authorized(envelope: Any) -> None:
             correlation_id=correlation_id,
         )
         return
+
+    # Симметрия с системной веткой (DRF-2196): несистемное событие без
+    # субъекта отвергается и здесь, а не только на разборе. Иначе конверт,
+    # собранный мимо `parse_envelope`, прошёл бы через pilot allowlist,
+    # который пользователя не смотрит вовсе.
+    if user_id is None:
+        raise TenantAuthorizationError(
+            f"missing_subject_for_non_system_event event_name={_safe_log_value(event_name)}"
+        )
 
     if tenant_id is None:
         if event_name not in _TENANT_NULLABLE_EVENT_NAMES:

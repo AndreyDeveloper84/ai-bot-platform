@@ -913,7 +913,7 @@ def handle_booking_created(envelope: IngestEnvelope) -> None:
 
     # Resolve channel-side BotUser so we know whether the proxy is
     # linked or orphan before the upsert fires.
-    bot_user = _resolve_bot_user(user_id=UUID(envelope.user_id), tenant=tenant)
+    bot_user = _resolve_bot_user(user_id=UUID(envelope.require_user_id()), tenant=tenant)
 
     service_uuid = UUID(data["service_id"]) if data.get("service_id") else None
     specialist_uuid = UUID(data["specialist_id"]) if data.get("specialist_id") else None
@@ -1255,7 +1255,7 @@ def handle_booking_rescheduled(envelope: IngestEnvelope) -> None:
     # Conversation context update (§3.3 step 3) — refresh
     # last_booking_at to the new time so AI references the
     # rescheduled slot.
-    bot_user = _resolve_bot_user(user_id=UUID(envelope.user_id), tenant=tenant)
+    bot_user = _resolve_bot_user(user_id=UUID(envelope.require_user_id()), tenant=tenant)
     if bot_user is not None:
         _touch_conversation_last_booking(
             bot_user=bot_user,
@@ -1633,7 +1633,7 @@ def handle_appointment_rescheduled_canonical(envelope: IngestEnvelope) -> None:
     if new_start_at is not None:
         _reschedule_reminders(appointment_id=canonical.appointment_id, new_start_at=new_start_at)
 
-        bot_user = _resolve_bot_user(user_id=UUID(envelope.user_id), tenant=tenant)
+        bot_user = _resolve_bot_user(user_id=UUID(envelope.require_user_id()), tenant=tenant)
         if bot_user is not None:
             _touch_conversation_last_booking(
                 bot_user=bot_user,
@@ -1810,7 +1810,7 @@ def handle_booking_confirmed(envelope: IngestEnvelope) -> None:
     proxy.last_synced_event_id = envelope.event_id
     proxy.save(update_fields=["status", "last_synced_event_id", "synced_at"])
 
-    bot_user = _resolve_bot_user(user_id=UUID(envelope.user_id), tenant=tenant)
+    bot_user = _resolve_bot_user(user_id=UUID(envelope.require_user_id()), tenant=tenant)
     if bot_user is not None:
         _schedule_reminders(
             tenant=tenant,

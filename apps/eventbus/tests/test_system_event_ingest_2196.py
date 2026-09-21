@@ -195,7 +195,9 @@ class TestTheSignatureIsTheWholeAuthorisation:
 class TestTheConsumerFeedsTheCore:
     def test_the_numbers_reach_the_core(self, wired, client) -> None:
         body = json.dumps(_envelope()).encode()
-        with patch("apps.eventbus.consumers.system.signal_budget") as signal:
+        with patch(
+            "apps.eventbus.consumers.system.signal_budget", return_value="delivered"
+        ) as signal:
             _post(client, body)
 
         (call,) = signal.call_args_list
@@ -221,8 +223,18 @@ class TestTheConsumerFeedsTheCore:
         модуль было бы шумом; страница по данным, которых ядро не понимает, —
         ложью. Принять, записать в лог, ничего не звать.
         """
+        # `metric` — валидный объект и порог пересечён: единственное, что
+        # отличает событие от «нашего», — модуль. Прежде здесь стоял
+        # `metric: "x"`, и узел выходил по ветке «metric не объект», оставаясь
+        # зелёным без проверки модуля вовсе (мутация ревью M8).
         body = json.dumps(
-            _envelope(data={"module_name": "somewhere.else", "severity": "warning", "metric": "x"})
+            _envelope(
+                data={
+                    "module_name": "somewhere.else",
+                    "severity": "error",
+                    "metric": {"used": 500, "limit": 500, "day": "2026-09-21", "cost_usd": None},
+                }
+            )
         ).encode()
         with patch("apps.eventbus.consumers.system.signal_budget") as signal:
             resp = _post(client, body)
@@ -246,3 +258,158 @@ class TestTheClosedSetsAgree:
         assert NAME in _KNOWN_NAMES
         assert NAME in TENANT_NULLABLE_EVENT_NAMES
         assert NAME in _TENANT_NULLABLE_EVENT_NAMES
+
+
+class TestAnUndeliveredPageIsNotAnAcceptedEvent:
+    """Главная находка ревью: страница, которая не ушла, — не принятое событие.
+
+    Каталог шлёт событие ОДИН раз на сутки и порог. Если ядро не доставило
+    страницу, а бот ответил 200, строка дедупа легла, outbox каталога
+    повторять не стал — и страницы нет до полуночи UTC.
+    """
+
+    def test_not_delivered_is_refused_and_can_be_redelivered(self, wired, client) -> None:
+        body = json.dumps(_envelope()).encode()
+
+        with patch("apps.eventbus.consumers.system.signal_budget", return_value="not_delivered"):
+            first = _post(client, body)
+        assert first.status_code == 500
+
+        # Строка дедупа откатилась вместе с исключением — повтор того же
+        # события обрабатывается, а не отсекается как дубль.
+        with patch(
+            "apps.eventbus.consumers.system.signal_budget", return_value="delivered"
+        ) as signal:
+            second = _post(client, body)
+        assert second.status_code == 200, second.content
+        assert len(signal.call_args_list) == 1
+
+    def test_skipped_is_accepted(self, wired, client) -> None:
+        """Положительная пара: «звучать не нужно» — не повод для повтора."""
+        body = json.dumps(_envelope()).encode()
+        with patch("apps.eventbus.consumers.system.signal_budget", return_value="skipped"):
+            resp = _post(client, body)
+        assert resp.status_code == 200, resp.content
+
+
+class TestTheThirdAuthorisationPath:
+    def test_the_system_route_runs_before_the_tenant_null_carve_out(self, wired, client) -> None:
+        """Когда `TenantUserRelationship` появится (#246), маршрут обязан стоять первым.
+
+        Без него системное событие попало бы на tenant-null карвинг, а тот
+        при доступной модели проверяет пользователя — которого нет. Здесь
+        модель «доступна», но импортировать её нечего: карвинг упал бы на
+        импорте, и ответ был бы 500. Системная ветка до него не доходит.
+        """
+        body = json.dumps(_envelope()).encode()
+        with (
+            patch(
+                "apps.eventbus.ingest_tenancy._tenant_user_relationship_available",
+                return_value=True,
+            ),
+            patch("apps.eventbus.consumers.system.signal_budget", return_value="delivered"),
+        ):
+            resp = _post(client, body)
+        assert resp.status_code == 200, resp.content
+
+    def test_a_system_envelope_built_around_the_parser_is_refused(self) -> None:
+        """Защита на втором рубеже: конверт мимо `parse_envelope` с субъектом."""
+        import datetime as dt
+
+        from apps.eventbus.ingest_envelope import IngestEnvelope
+        from apps.eventbus.ingest_tenancy import (
+            TenantAuthorizationError,
+            assert_envelope_tenant_authorized,
+        )
+
+        forged = IngestEnvelope(
+            event_id=str(uuid.uuid4()),
+            event_name=NAME,
+            event_version=1,
+            occurred_at=dt.datetime(2026, 9, 21, tzinfo=dt.UTC),
+            tenant_id=None,
+            user_id=str(uuid.uuid4()),
+            actor="system",
+            correlation_id=str(uuid.uuid4()),
+            causation_id=None,
+            data={},
+        )
+        with pytest.raises(TenantAuthorizationError):
+            assert_envelope_tenant_authorized(forged)
+
+    def test_a_non_system_envelope_without_a_subject_is_refused_too(self) -> None:
+        """Симметрия: несистемное без субъекта не проходит и мимо разбора."""
+        import datetime as dt
+
+        from apps.eventbus.ingest_envelope import IngestEnvelope
+        from apps.eventbus.ingest_tenancy import (
+            TenantAuthorizationError,
+            assert_envelope_tenant_authorized,
+        )
+
+        forged = IngestEnvelope(
+            event_id=str(uuid.uuid4()),
+            event_name="booking.created",
+            event_version=1,
+            occurred_at=dt.datetime(2026, 9, 21, tzinfo=dt.UTC),
+            tenant_id=str(uuid.uuid4()),
+            user_id=None,
+            actor="system",
+            correlation_id=str(uuid.uuid4()),
+            causation_id=None,
+            data={},
+        )
+        with pytest.raises(TenantAuthorizationError):
+            assert_envelope_tenant_authorized(forged)
+
+
+class TestGarbageIsAcknowledgedNotPaged:
+    """Мусор в данных — принять и не звать (мутации ревью M7, M9 выживали)."""
+
+    @pytest.mark.parametrize(
+        "metric",
+        ["x", None, 42],
+        ids=["metric строкой", "metric null", "metric числом"],
+    )
+    def test_a_metric_that_is_not_an_object(self, wired, client, metric) -> None:
+        body = json.dumps(
+            _envelope(
+                data={"module_name": "nutrition.food_scan", "severity": "error", "metric": metric}
+            )
+        ).encode()
+        with patch("apps.eventbus.consumers.system.signal_budget") as signal:
+            resp = _post(client, body)
+        assert resp.status_code == 200, resp.content
+        assert signal.call_args_list == []
+
+    @pytest.mark.parametrize(
+        "day",
+        [None, "", 20260921, "2026-09-21\nИнъекция", "вчера", "x" * 10_000],
+        ids=["нет", "пусто", "число", "перевод строки", "не дата", "10 КБ"],
+    )
+    def test_a_day_that_is_not_an_iso_date(self, wired, client, day) -> None:
+        """`day` уходит в ключ дедупа ядра И в текст страницы — только ISO-дата."""
+        metric = {"used": 500, "limit": 500, "day": day, "cost_usd": None}
+        body = json.dumps(
+            _envelope(
+                data={"module_name": "nutrition.food_scan", "severity": "error", "metric": metric}
+            )
+        ).encode()
+        with patch("apps.eventbus.consumers.system.signal_budget") as signal:
+            resp = _post(client, body)
+        assert resp.status_code == 200, resp.content
+        assert signal.call_args_list == []
+
+    def test_a_non_string_cost_becomes_not_computed(self, wired, client) -> None:
+        """Число или объект вместо строки суммы — «не посчитано», не текст как есть."""
+        metric = {"used": 500, "limit": 500, "day": "2026-09-21", "cost_usd": {"x": 1}}
+        body = json.dumps(
+            _envelope(
+                data={"module_name": "nutrition.food_scan", "severity": "error", "metric": metric}
+            )
+        ).encode()
+        with patch(
+            "apps.eventbus.consumers.system.signal_budget", return_value="delivered"
+        ) as signal:
+            _post(client, body)
+        assert signal.call_args_list[0].kwargs["cost_usd"] is None

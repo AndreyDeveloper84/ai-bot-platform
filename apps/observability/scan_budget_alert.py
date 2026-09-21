@@ -83,7 +83,7 @@ from __future__ import annotations
 
 import logging
 from fractions import Fraction
-from typing import Final
+from typing import Final, Literal
 
 from django.core.cache import cache
 
@@ -106,6 +106,22 @@ THRESHOLDS: Final[tuple[tuple[Fraction, Severity], ...]] = (
 #: закрыл бы счёт соседнему, и «у каждого порога свой счёт в сутки» было
 #: бы правдой лишь по совпадению «уровней ровно столько же, сколько
 #: порогов».
+#: Исход одного вызова (DRF-2196, по ревью бот-стороны).
+#:
+#: * ``delivered`` — страница ушла хоть в один сток;
+#: * ``skipped`` — звучать было не нужно или нельзя: ниже порога, уже звучало
+#:   в эти сутки, потолка нет, числа — мусор, кэш дедупа недоступен;
+#: * ``not_delivered`` — звучать было нужно, а страница никуда не ушла.
+#:
+#: Различие между последними двумя — всё содержание возврата. Ядро писалось
+#: под многократного вызывающего («следующий скан переспросит»), а у
+#: события каталога (вариант а1) вызов на сутки и порог ОДИН: каталог сам
+#: дедуплицирует и шлёт событие однажды. Поэтому вызывающий обязан знать,
+#: что страница не ушла, и отказаться принять событие — тогда его повторит
+#: outbox каталога. Иначе сбой MAX ровно в момент 100 % терял страницу до
+#: полуночи UTC.
+Outcome = Literal["delivered", "skipped", "not_delivered"]
+
 _DEDUP_KEY: Final = "scan_budget_alert:{day}:{ratio}:{level}"
 
 #: TTL ключа дедупа. Двое суток, а не «до ближайшей полуночи»: день уже
@@ -180,7 +196,7 @@ def signal_budget(
     limit: object,
     day: str,
     cost_usd: str | None = None,
-) -> None:
+) -> Outcome:
     """Поднять страницу операторам, если сутки пересекли порог бюджета.
 
     Args:
@@ -191,10 +207,11 @@ def signal_budget(
         посчитано» (цены не заданы либо провайдер не отдал ``usage``);
         сигнал звучит всё равно, просто без справки.
 
-    Ничего не возвращает и никогда не бросает — ни на своих стоках, ни на
-    чужих числах: ``used`` и ``limit`` приводятся к целым, а не берутся на
-    веру. Типы в подписи адресованы автору, а не рантайму: разобранный
-    JSON приходит как ``Any``, и mypy на нём молчит.
+    Никогда не бросает — ни на своих стоках, ни на чужих числах: ``used`` и
+    ``limit`` приводятся к целым, а не берутся на веру. Возвращает исход
+    (:data:`Outcome`): решать, что делать с ``not_delivered``, — дело
+    вызывающего, а не ядра. Страж не роняет то, что стережёт, но и не
+    скрывает от него, что не справился.
     """
     used_i = _as_int(used)
     limit_i = _as_int(limit)
@@ -202,7 +219,7 @@ def signal_budget(
         logger.warning(
             "observability.scan_budget.not_numbers used=%r limit=%r day=%r", used, limit, day
         )
-        return
+        return "skipped"
 
     if limit_i <= 0:
         # Потолка нет — порогов тоже. Не падение и не сигнал: делить на
@@ -211,7 +228,7 @@ def signal_budget(
         logger.info(
             "observability.scan_budget.no_limit used=%s limit=%s day=%s", used_i, limit_i, day
         )
-        return
+        return "skipped"
 
     # Сравнение целых, не `float`: `used >= limit * ratio` на дробях точно и
     # не переполняется там, где `used / limit` дал бы `OverflowError`.
@@ -221,7 +238,7 @@ def signal_budget(
         if used_i * ratio.denominator >= limit_i * ratio.numerator
     ]
     if not crossed:
-        return
+        return "skipped"
 
     # Пересечено несколько порогов разом (расход прыгнул с нуля к потолку):
     # звучит СТАРШИЙ, младшие гасятся молча — их ключ занимается, но страница
@@ -238,7 +255,7 @@ def signal_budget(
 
     key = _key(day, ratio, level)
     if not _claim(key):
-        return
+        return "skipped"
 
     share = Fraction(used_i, limit_i)
     percent = int(share * 100)
@@ -272,9 +289,12 @@ def signal_budget(
         # попытку: недоставленную надо вернуть, иначе один сетевой сбой MAX
         # ровно в момент пересечения 100 % крадёт сигнал до полуночи UTC —
         # то есть ровно то состояние, ради предотвращения которого лист и
-        # заведён. Повтор ограничен собственным дедупом `page` (5 минут):
-        # следующий скан переспросит, доставки не будет, и так до настоящей
-        # повторной попытки — не шквал.
+        # заведён. Переспросит вызывающий: исход `not_delivered` —
+        # вызывающий события (вариант а1) на нём откажется принимать, и
+        # outbox каталога повторит доставку с отступом. Повтор внутри пяти
+        # минут `page` сочтёт дублем и снова вернёт `not_delivered` — это
+        # ограничено расписанием ретраев каталога (60 с, 2, 4, 8 минут), и
+        # третья попытка уже за окном `page`.
         logger.warning(
             "observability.scan_budget.page_not_delivered day=%s level=%s used=%s/%s",
             day,
@@ -283,6 +303,8 @@ def signal_budget(
             limit_i,
         )
         _release(key)
+        return "not_delivered"
+    return "delivered"
 
 
 __all__ = ["THRESHOLDS", "signal_budget"]

@@ -61,6 +61,7 @@ def test_every_registered_handler_name_is_allowlisted() -> None:
     from apps.eventbus.consumers.payment import register_payment_handlers
     from apps.eventbus.consumers.reviews import register_reviews_handlers
     from apps.eventbus.consumers.schedule import register_schedule_handlers
+    from apps.eventbus.consumers.system import register_system_handlers
 
     snapshot = dict(dispatcher_module._REGISTRY)
     dispatcher_module._REGISTRY.clear()
@@ -71,6 +72,8 @@ def test_every_registered_handler_name_is_allowlisted() -> None:
         register_identity_handlers()
         register_schedule_handlers()
         register_reviews_handlers()
+        # DRF-2196 — страж обязан охватывать и системного потребителя.
+        register_system_handlers()
         handler_names = {name for (name, _version) in dispatcher_module._REGISTRY}
     finally:
         dispatcher_module._REGISTRY.clear()
