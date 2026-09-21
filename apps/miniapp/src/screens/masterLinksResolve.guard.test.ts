@@ -32,6 +32,8 @@ const SOURCES = import.meta.glob("./**/Master*.tsx", {
 
 /** Цели `/solo/…`, которые экран держит внутри соло-ветки (`isSolo ? (…)`). */
 const SOLO_ONLY_SITES: Record<string, string> = {
+  "MasterSettingsScreen:/solo/place":
+    "«Место работы» — внутри `isSolo ? (…) : null`: у салонного мастера место задаёт салон (DRF-2247)",
   "MasterWorkingHoursScreen:/solo/setup":
     "«Продолжить позже» — внутри ветки isSolo: дверь по чек-листу соло-настройки (DRF-1807)",
 };

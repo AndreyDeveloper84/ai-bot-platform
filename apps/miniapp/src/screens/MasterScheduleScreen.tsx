@@ -966,6 +966,7 @@ function WeekView({
   anchor: Date;
   onSwitchToDay: (d: Date) => void;
 }) {
+  const location = useLocation();
   const start = startOfWeekMonday(anchor);
   const days = Array.from({ length: 7 }, (_, i) => addDays(start, i));
   const todayYmd = formatYmdLocal(new Date());
@@ -977,6 +978,9 @@ function WeekView({
     const row = byDate.get(formatYmdLocal(d));
     return row && !row.is_off_day && row.working_hours !== null;
   });
+  // DRF-2247: дверь к часам — своей поверхности (у салонного мастера /solo/*
+  // нет: ссылка выбрасывала его на «Сегодня»).
+  const isSolo = location.pathname.startsWith("/solo/");
   if (!anyWorking) {
     return (
       <section className="master-dashboard__section">
@@ -986,7 +990,7 @@ function WeekView({
         {/* DRF-1817 — часы можно задать самому (экран 06); для соло владелец
             и есть мастер. */}
         <Link
-          to="/solo/working-hours"
+          to={isSolo ? "/solo/working-hours" : "/master/working-hours"}
           className="btn-secondary schedule-week__setup"
         >
           Настроить рабочие часы
