@@ -30,10 +30,21 @@ Never:
 
 ### Why the remark goes silent for some people
 
-``ProfileResponse.goal_overridden_by`` is Ayla's own signal that it
-overrode the stated goal because of pregnancy, breastfeeding, an eating
-disorder, or a BMI floor; ``health_flags["eating_disorder"]`` is the
-explicit flag the legacy bot also honoured. For those people the numbers
+Pregnancy, breastfeeding, an eating disorder, or the BMR floor. Ayla says so
+in two places, and both are read (DRF-2222):
+
+* ``health_flags`` — ``pregnant`` / ``breastfeeding`` / ``eating_disorder``.
+  Since catalogue #372 (DRF-1623 N-g) these make Ayla REFUSE the
+  calculation with ``goal_overridden_by=""``; the flag is the only signal
+  left, and a hand-entered (``user_entered``) target stays active through
+  the refusal — so the remarks would keep flowing without this read;
+* ``goal_overridden_by`` — only ``"bmr_floor"`` survives a calculation, on
+  the active target AND on the recalculation waiting beside it
+  (``targets_provenance.pending_proposal``, DRF-2192). Both are read: the
+  proposal is what the person is about to confirm, and an unconfirmed
+  sensitive override is still sensitive (fail-closed).
+
+For those people the numbers
 still render -- they asked for their diary back -- but every trace of
 "you are behind on X, top it up" is dropped. A nudge toward eating more or
 less is exactly the sentence that stops being neutral in that context, and
@@ -46,12 +57,21 @@ from typing import Any
 
 from apps.integrations.ayla import ProfileResponse, SummaryResponse, WaterTodayResponse
 
-#: ``goal_overridden_by`` values that suppress every remark. ``bmi_floor``
-#: is included: Ayla raises the floor when a loss target would go too low,
-#: and "you ate under your calories" is not a neutral observation there.
+#: ``goal_overridden_by`` values that suppress every remark. ``bmr_floor``:
+#: Ayla moves a loss goal to maintain when it would undercut BMR, and "you
+#: ate under your calories" is not a neutral observation there. The other
+#: names are kept as old names (a stale cached profile may still carry
+#: them); ``bmi_floor`` Ayla never emitted — ``git log -S`` DRF-300…dev
+#: finds only ``bmr_floor`` (DRF-2222). The drift guard in
+#: ``tests/test_remarks_suppressed_2222.py`` pins this set against the
+#: catalogue's own list.
 SENSITIVE_OVERRIDES: frozenset[str] = frozenset(
-    {"pregnancy", "breastfeeding", "eating_disorder", "bmi_floor"}
+    {"bmr_floor", "pregnancy", "breastfeeding", "eating_disorder", "bmi_floor"}
 )
+
+#: ``health_flags`` keys that suppress every remark — the catalogue's
+#: ``HEALTH_FACTOR_FLAGS`` (DRF-2222).
+SENSITIVE_HEALTH_FLAGS: frozenset[str] = frozenset({"pregnant", "breastfeeding", "eating_disorder"})
 
 #: A macro under this share of its profile norm is what the remark points
 #: at. 0.7 rather than a tighter band because the remark should fire on a
@@ -76,13 +96,32 @@ GOAL_LABELS: dict[str, str] = {
 
 
 def remarks_suppressed(profile: ProfileResponse | None) -> bool:
-    """True when this person gets numbers only, never a suggestion."""
+    """True when this person gets numbers only, never a suggestion.
+
+    Fail-closed: the active override, the pending proposal's override and
+    the health flags are read as a union — any one of them silences.
+    """
     if profile is None:
         return True
-    if str(profile.goal_overridden_by or "") in SENSITIVE_OVERRIDES:
+    overrides = {str(profile.goal_overridden_by or ""), _pending_override(profile)}
+    if overrides & SENSITIVE_OVERRIDES:
         return True
     flags: dict[str, Any] = profile.health_flags or {}
-    return bool(flags.get("eating_disorder"))
+    return any(flags.get(flag) for flag in SENSITIVE_HEALTH_FLAGS)
+
+
+def _pending_override(profile: ProfileResponse) -> str:
+    """``goal_overridden_by`` of the recalculation waiting beside the active
+    target (DRF-2192), or ``""``. Read from the raw body on purpose, not via
+    :func:`apps.integrations.ayla.nutrition_client.pending_proposal`: that
+    helper drops a proposal without numbers, and an override must not be
+    dropped with it."""
+    raw = getattr(profile, "raw", None) or {}
+    provenance = raw.get("targets_provenance") if isinstance(raw, dict) else None
+    pending = provenance.get("pending_proposal") if isinstance(provenance, dict) else None
+    if not isinstance(pending, dict):
+        return ""
+    return str(pending.get("goal_overridden_by") or "")
 
 
 def render_daily_report(

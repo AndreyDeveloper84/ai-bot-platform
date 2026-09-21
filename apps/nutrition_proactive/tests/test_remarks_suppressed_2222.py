@@ -24,7 +24,8 @@
 * ручной ориентир (``user_entered``) при отказе остаётся действующим — реплики
   по нему идут, и беременность их не гасит.
 
-Красные — p1–p3; контроль в обе стороны — p4.
+p1–p3 — красные на замере (eb7cad4f), зелёные после правки; контроль в обе
+стороны — p4; p5 — сторож дрейфа имён между каталогом и ботом.
 """
 
 from __future__ import annotations
@@ -159,3 +160,35 @@ class TestP4Controls:
             {"reason": "activity_normalised"}
         ]
         assert remarks_suppressed(p) is False
+
+
+# ── p5 — сторож дрейфа имён между каталогом и ботом ──────────────────
+
+#: Копия перечня имён, которые каталог Ayla ВЫДАЁТ в ``goal_overridden_by``
+#: (beautygo_backend ``origin/dev`` 08c0b26a):
+#: ``nutrition/services/nutrition_profile_service.py:464`` —
+#: ``overridden_by = overridden_by or "bmr_floor"``; ``:375`` — ``""`` у
+#: отказа. Новое имя в каталоге → сначала сюда, и тест скажет, знает ли его
+#: подавление. ``bmi_floor`` в боте прожил с DRF-300 до DRF-2222 именно
+#: потому, что такой копии не было.
+AYLA_EMITTED_OVERRIDES: frozenset[str] = frozenset({"bmr_floor"})
+
+#: ``HEALTH_FACTOR_FLAGS`` каталога — там же, ``:184``.
+AYLA_HEALTH_FACTOR_FLAGS: frozenset[str] = frozenset(
+    {"pregnant", "breastfeeding", "eating_disorder"}
+)
+
+
+class TestP5CatalogueDriftGuard:
+    def test_every_override_ayla_emits_is_sensitive(self) -> None:
+        from apps.nutrition_proactive.render import SENSITIVE_OVERRIDES
+
+        assert AYLA_EMITTED_OVERRIDES  # положительно: перечень не пуст
+        assert AYLA_EMITTED_OVERRIDES <= SENSITIVE_OVERRIDES, (
+            AYLA_EMITTED_OVERRIDES - SENSITIVE_OVERRIDES
+        )
+
+    def test_every_health_factor_ayla_refuses_on_is_read(self) -> None:
+        from apps.nutrition_proactive.render import SENSITIVE_HEALTH_FLAGS
+
+        assert AYLA_HEALTH_FACTOR_FLAGS == SENSITIVE_HEALTH_FLAGS

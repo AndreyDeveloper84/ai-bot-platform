@@ -185,10 +185,17 @@ class TestLadder:
     def test_no_health_consent_means_no_line(self) -> None:
         assert _decide(_person("gate-1", health=False)) is None
 
-    def test_sensitive_perimeter_means_no_line(self) -> None:
-        person = _person("sens-1")
-        sensitive = _profile(health_flags={"eating_disorder": True})
+    @pytest.mark.parametrize("flag", ["eating_disorder", "pregnant", "breastfeeding"])
+    def test_sensitive_perimeter_means_no_line(self, flag: str) -> None:
+        # DRF-2222: беременность и кормление с #372 каталога — только флагом.
+        person = _person(f"sens-1-{flag}")
+        sensitive = _profile(health_flags={flag: True})
         assert _decide(person, profile=sensitive) is None
+
+    def test_a_pending_sensitive_override_means_no_line(self) -> None:
+        # DRF-2222: переопределение пересчёта, ждущего подтверждения.
+        pending = {"targets_provenance": {"pending_proposal": {"goal_overridden_by": "bmr_floor"}}}
+        assert _decide(_person("sens-3"), profile=_profile(raw=pending)) is None
 
     def test_an_unreadable_profile_reads_as_silence(self) -> None:
         assert _decide(_person("sens-2"), profile=None) is None
