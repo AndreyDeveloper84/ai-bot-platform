@@ -539,8 +539,9 @@ def pending_proposal(profile: "ProfileResponse | None") -> dict[str, Any]:
     ``ayla_calculated``, поэтому ``proposed_norms`` его не видит по
     построению.
 
-    Возвращает ``{"norms": {…}, "input_snapshot": {…}, "method_versions":
-    {…}}`` — числа под теми же ключами, что у ``proposed_norms``, — или
+    Возвращает ``{"kinds": […], "norms": {…}, "input_snapshot": {…},
+    "method_versions": {…}}`` — числа под теми же ключами, что у
+    ``proposed_norms``, — или
     пустой словарь, если рядом ничего нет (каталог старый — ключа нет вовсе).
     """
     if profile is None:
@@ -559,7 +560,11 @@ def pending_proposal(profile: "ProfileResponse | None") -> dict[str, Any]:
     }
     if not any(norms.values()):
         return {}
+    kinds = [str(k) for k in (pending.get("kinds") or []) if k in ("calories", "fluids")]
     return {
+        # Виды, которые пересчитаны: карточка показывает и сравнивает только
+        # их — остальные действуют как были.
+        "kinds": kinds or ["calories", "fluids"],
         "norms": norms,
         "input_snapshot": dict(pending.get("input_snapshot") or {}),
         "method_versions": dict(pending.get("method_versions") or {}),

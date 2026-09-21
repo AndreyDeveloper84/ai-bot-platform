@@ -446,13 +446,24 @@ UPDATE_WEIGHT_MANUAL_SAVED = (
     "специалиста» и число ккал."
 )
 #: Перед анкетой при ручном ориентире — анкета его не заменит (каталог #525).
-ANKETA_OVER_MANUAL_NOTE = (
-    "Анкета не заменит твой ориентир от специалиста — он останется, "
-    "а анкета только обновит твои данные."
+ANKETA_OVER_MANUAL_NOTE = "Анкета не заменит твой ориентир от специалиста — он останется."
+#: Ручной ориентир без согласия на расчёт: каталог принимает вес только с
+#: утверждением этого согласия — сказать об этом, а не о «расчёте».
+UPDATE_WEIGHT_MANUAL_NO_CONSENT = (
+    "Вес записываю только с согласием на персональный расчёт — его пока нет, "
+    "поэтому вес не записала. Твой ориентир от специалиста остаётся прежним."
 )
 #: Карточка предложения рядом с действующим (каталог DRF-2192).
 PENDING_HEAD = "Предлагаю ориентиры по новым данным — посмотри и подтверди:"
-PENDING_ACTING = "Пока ты не подтвердишь, действует прежний ориентир — {kcal} ккал в день."
+PENDING_ACTING = "Пока ты не подтвердишь, действует прежний ориентир — {what}."
+PENDING_UNCHANGED = "Без изменений:"
+
+#: Строки карточки по видам (каталог DRF-1929): калории и всё, что из них
+#: выведено, — и вода.
+_KIND_ROWS: dict[str, tuple[str, ...]] = {
+    "calories": ("daily_kcal", "protein_g", "fat_g", "carbs_g"),
+    "fluids": ("water_ml",),
+}
 UPDATE_WEIGHT_WHOLE_NUMBER = "Напиши вес целым числом — например, 68."
 UPDATE_WEIGHT_CANCELLED = "Хорошо, вес не меняю."
 
@@ -699,7 +710,8 @@ class NutritionAnketaSkill:
         )
         # Каталог (#525) ручной ориентир анкетой не заменяет — сказать это
         # ДО вопросов, а не после: человек со словами врача должен знать,
-        # что анкета не отнимет его число.
+        # что анкета не отнимет его число. Проба чтения падает в «нет» —
+        # тогда фразы просто нет, анкета идёт как обычно.
         if self._has_manual_target(context):
             result.reply_text = f"{ANKETA_OVER_MANUAL_NOTE}\n\n{result.reply_text}"
         return result
@@ -1339,7 +1351,14 @@ class NutritionAnketaSkill:
         try:
             attestation = current_attestation(context.bot_user)
         except ConsentAttestationUnavailable as exc:
-            return self._render_consent_attestation_missing(context, reason=exc.reason)
+            # Путь ручного ориентира согласия на расчёт не спрашивает, и у
+            # многих его нет. Общий текст «расчёт пока не запускаю…»
+            # сказал бы про расчёт, которого здесь нет, — говорим про вес.
+            logger.info("anketa.update_weight_manual_no_consent reason=%s", exc.reason)
+            return SkillResult(
+                reply_text=UPDATE_WEIGHT_MANUAL_NO_CONSENT,
+                meta={"reply_kind": "anketa_update_weight_manual_no_consent"},
+            )
         try:
             saved = asyncio.run(
                 get_nutrition_client().upsert_profile(
@@ -1354,6 +1373,13 @@ class NutritionAnketaSkill:
             )
         except NutritionAPIError:
             logger.exception("anketa.update_weight_ayla_error step=upsert_manual")
+            return SkillResult(
+                reply_text=_AYLA_DOWN_FALLBACK, meta={"reply_kind": "anketa_ayla_error"}
+            )
+        saved_kg = getattr(saved, "weight_kg", None)
+        if saved_kg is not None and round(float(saved_kg)) != weight:
+            # Каталог ответил, но другим весом — не говорим «записала».
+            logger.warning("anketa.update_weight_manual_mismatch")
             return SkillResult(
                 reply_text=_AYLA_DOWN_FALLBACK, meta={"reply_kind": "anketa_ayla_error"}
             )
@@ -2204,15 +2230,19 @@ def _format_summary(profile) -> str:
     # прежними числами, а новое было бы невидимо и неподтверждаемо.
     beside = pending_proposal(profile)
     if beside:
+        # Показываются ТОЛЬКО пересчитанные виды: вода-предложение не
+        # сравнивается с калориями, и действующая вода не пропадает с
+        # карточки, если пересчитаны только калории.
+        pending_fields = {f for k in beside["kinds"] for f in _KIND_ROWS.get(k, ())}
         pending_rows = [
             f"{label}: {value} {unit}"
             for label, field, unit in _SUMMARY_ROWS
-            if (value := int(beside["norms"].get(field) or 0)) > 0
+            if field in pending_fields and (value := int(beside["norms"].get(field) or 0)) > 0
         ]
         if pending_rows:
             from types import SimpleNamespace
 
-            parts = [PENDING_HEAD, "\n".join(pending_rows)]
+            pending_parts = [PENDING_HEAD, "\n".join(pending_rows)]
             method_line = _method_and_inputs_line(
                 SimpleNamespace(
                     targets_input_snapshot=beside["input_snapshot"],
@@ -2220,11 +2250,25 @@ def _format_summary(profile) -> str:
                 )
             )
             if method_line:
-                parts.append(method_line)
+                pending_parts.append(method_line)
+            acting: list[str] = []
             acting_kcal = int(getattr(profile, "daily_kcal", 0) or 0)
-            if acting_kcal > 0:
-                parts.append(PENDING_ACTING.format(kcal=acting_kcal))
-            return "\n\n".join(parts)
+            if "calories" in beside["kinds"] and acting_kcal > 0:
+                acting.append(f"{acting_kcal} ккал в день")
+            acting_water = int(getattr(profile, "water_ml", 0) or 0)
+            if "fluids" in beside["kinds"] and acting_water > 0:
+                acting.append(f"вода {acting_water} мл")
+            if acting:
+                pending_parts.append(PENDING_ACTING.format(what=", ".join(acting)))
+            unchanged = [
+                f"{label}: {value} {unit}"
+                for label, field, unit in _SUMMARY_ROWS
+                if field not in pending_fields
+                and (value := int(getattr(profile, field, 0) or 0)) > 0
+            ]
+            if unchanged:
+                pending_parts.append(f"{PENDING_UNCHANGED}\n" + "\n".join(unchanged))
+            return "\n\n".join(pending_parts)
 
     # §5.1: предложение показывается как предложение. Числа — из ``raw``:
     # инвариант DTO обнуляет поля у не настроенного источника, и это
