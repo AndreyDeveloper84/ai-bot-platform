@@ -92,7 +92,7 @@ policy_refs                  : ["OD-BOT §156", "OD-BOT §162", "OD-BOT §166"]
 - immutable records r1 и r2 (superseded transmission drafts), r3 (`SUPERSEDED BY r4 — provenance-only correction`) и действующий record r4 `OWNER_RULINGS_SAFETY_RECHECK_CONTRACT_2026-09-20_r4.md` (canonical owner wording, полный утверждённый текст решений 1–5; единственный источник истины);
 - Safety Matrix v0.12-reviewfix6: §6.1 «Owner amendments 20.09 — recheck contract», §14.2 OD-F0C3-09, §16;
 - Review Pack v0.1-reviewfix6: §7D physician queue (CQ-CTX-01…03 переформулированы под контракт + кнопка / recheck-вопросы / «ни один результат не звучит как разрешение»);
-- fixtures v0.2.4 (24 contract fixtures добавлены в v0.2.2): `T-S1-REC-ALLOW-01…08`, `T-S1-REC-DENY-01…16`; индекс и counts;
+- fixtures v0.2.5 (sha256 `9e9bac9c79730f09ad16aea1745238cd51fa77e2d3729f705e6d0ba44c7b69ea`; 24 contract fixtures добавлены в v0.2.2): `T-S1-REC-ALLOW-01…08`, `T-S1-REC-DENY-01…16`; индекс и counts;
 - этот delta-документ; README индекс.
 - Runtime, тесты, code fixtures — не тронуты.
 

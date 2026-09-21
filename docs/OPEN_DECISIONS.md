@@ -9886,7 +9886,7 @@ CLEARED_BY_RECHECK = eligible_basis AND mandatory_guards
 - `docs/safety/reviews/AYLA_S1_SAFETY_RECHECK_CONTRACT_DELTA_v0.1_2026-09-20.md` (новый)
 - `docs/safety/F0-C3-safety-matrix.md` (v0.12-reviewfix5)
 - `docs/safety/reviews/AYLA_CLINICAL_SAFETY_REVIEW_PACK_v0.1_2026-09-16.md` (v0.1-reviewfix5)
-- `docs/safety/reviews/S1_CONTEXT_RECHECK_ADVERSARIAL_FIXTURES_v0.2.md` (v0.2.4)
+- `docs/safety/reviews/S1_CONTEXT_RECHECK_ADVERSARIAL_FIXTURES_v0.2.md` (v0.2.5, sha256 `9e9bac9c79730f09ad16aea1745238cd51fa77e2d3729f705e6d0ba44c7b69ea`; источник — r4; предыдущая v0.2.4 `deb414a73bb8ddbc5275a63405daf234a7221f3d5f0047a96fd4ddf7cb2e98c7`)
 - `docs/safety/README.md`
 - Runtime: НЕ ИЗМЕНЯЕТСЯ этим § (Пакет B — отдельный PR).
 
