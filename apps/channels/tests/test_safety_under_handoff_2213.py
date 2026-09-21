@@ -9,9 +9,8 @@
   вердикт, но явно пропускает ответ при ``HUMAN_HANDOFF`` («не перебивать
   оператора», S1-B #1053) — тоже тишина. Требование главного окна (DRF-2213):
   кризис / неотложка → детерминированный текст ДАЖЕ в handoff.
-* p2 — соседние пути red flag G1–G7 (классификатор, не группа гейта) на
-  global: онбординг нового человека стоит ПЕРЕД консьержем → «онемела
-  половина лица» первым сообщением получает приветствие, а не 103 / 112.
+* p2 — соседние пути red flag: вынесено в ``test_red_flag_single_point_2213.py``
+  (Q2, отдельный PR).
 * p3 — проактив (nutrition report / coach / water) не читает safety: общий
   гейт ``selection.check_common`` смотрит согласия, отписку, периметр, но
   не то, что сегодня человек получил кризисный / медицинский ответ.
@@ -189,25 +188,6 @@ class TestP1SafetyReachesThePersonDuringHandoff:
         _run_global("когда ответите?", user_id=4404, mid="c")
         assert len(sent) == before  # empty-assert-ok: handoff открыт — проверено в p1
         assert CRISIS_HOTLINE not in " ".join(call["text"] for call in sent)
-
-
-# ── p2 — соседние пути red flag на global ────────────────────────────
-
-
-class TestP2RedFlagBeatsOnboarding:
-    def test_first_message_red_flag_gets_the_emergency_text(
-        self, sent, spy_concierge, settings
-    ) -> None:
-        from apps.skills.health_screening.classifier import PainSignal, classify
-
-        settings.GLOBAL_BOT_ONBOARDING = True
-        text = "онемела половина лица"
-        assert classify(text) == PainSignal.RED_FLAG  # положительно: red flag классификатора
-
-        _run_global(text, user_id=4405, mid="a")
-
-        assert sent, "ничего не отправлено"
-        assert sent[0]["text"] == MEDICAL_EMERGENCY_TEXT_V2
 
 
 # ── p3 — проактив читает safety ──────────────────────────────────────
