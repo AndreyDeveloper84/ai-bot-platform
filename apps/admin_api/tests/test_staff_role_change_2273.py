@@ -149,5 +149,5 @@ class TestRoleChange:
         assert resp.status_code == 409
         body = resp.json()
         assert body["error"] == "catalog_admin_link_refused"
-        assert body["hint"]
+        assert body["details"]["hint"]
         assert _active_roles(receptionist_bot_user) == {"receptionist"}

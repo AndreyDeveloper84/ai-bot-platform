@@ -2017,6 +2017,35 @@ export const getStaffRoster = (
 ): Promise<StaffRosterResponse> =>
   request("/api/v1/admin/staff/", { method: "GET", signal: init.signal });
 
+// --- /api/v1/admin/staff/role/ -------------------------------------------
+//
+// DRF-2273. Replaces every active staff role one person holds with `role`.
+// OWNER ONLY — the view narrows `require_admin_role` the same way the
+// roster does. Never `owner` (403: ownership is handed over separately)
+// and never the caller themself (403). The master link is a different
+// table and is not touched.
+
+export type ChangeableRole = "admin" | "receptionist";
+
+export interface StaffRoleChangePayload {
+  bot_user_id: string;
+  role: ChangeableRole;
+}
+
+export interface StaffRoleChangeResponse {
+  role: ChangeableRole;
+  /** The staff roles that were replaced, sorted. */
+  previous_roles: string[];
+}
+
+export const changeStaffRole = (
+  payload: StaffRoleChangePayload,
+): Promise<StaffRoleChangeResponse> =>
+  request("/api/v1/admin/staff/role/", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+
 // --- /api/v1/admin/staff/revoke/ -----------------------------------------
 //
 // The other half of `issueStaffInvite`. The endpoint has existed since
