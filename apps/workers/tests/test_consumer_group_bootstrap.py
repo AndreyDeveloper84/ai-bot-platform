@@ -39,7 +39,7 @@ import redis
 from apps.ingress import streams
 from apps.workers import consumer
 from apps.workers.base import TenantAwareTask
-from apps.workers.registry import clear_registry, register
+from apps.workers.registry import emptied_registry_for_tests, register
 
 pytestmark = pytest.mark.django_db
 
@@ -89,9 +89,9 @@ def strict_redis(monkeypatch) -> _StrictRedis:
 
 @pytest.fixture(autouse=True)
 def _clean_registry():
-    clear_registry()
-    yield
-    clear_registry()
+    # DRF-2220 — empty for the test, the production handlers back after.
+    with emptied_registry_for_tests():
+        yield
 
 
 def _register(stream: str) -> None:

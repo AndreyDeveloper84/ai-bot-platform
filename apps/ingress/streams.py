@@ -213,6 +213,12 @@ def trim_expired(now: datetime | None = None) -> dict[str, int]:
     return trimmed
 
 
+class NoIngressStreams(RuntimeError):
+    """The handler registry is empty, so there is nothing to scan — and «nothing
+    found» would be a lie. Raised instead of returning an empty result so that
+    the caller reports the streams as NOT checked (DRF-2220)."""
+
+
 @dataclass(frozen=True)
 class RawPurgeResult:
     """What one per-person purge moved. Counts, never bodies."""
@@ -248,11 +254,20 @@ def purge_person_entries(channel_user_ids: Iterable[str], *, through: datetime) 
     if not wanted:
         return RawPurgeResult()
 
+    targets = raw_streams()
+    if not targets:
+        # The registry is filled by `apps.channels` at app ready. A process
+        # without it would scan zero streams and report «0 deleted» as if it
+        # had looked. It did not look — say so.
+        raise NoIngressStreams(
+            "no ingress streams registered — the channel handlers are not loaded in this process"
+        )
+
     client = _client()
     max_id = str(int(through.timestamp() * 1000))
     deleted = 0
     unattributed = 0
-    for stream in raw_streams():
+    for stream in targets:
         doomed: list[str] = []
         low = "-"
         while True:
