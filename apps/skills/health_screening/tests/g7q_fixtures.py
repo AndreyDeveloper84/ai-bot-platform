@@ -36,7 +36,8 @@ class G7QFixture:
 #: removing an older STOP rule — an owner decision, not this package's.
 GAP_TEMPERATURE = (
     "DRF-973 older red-flag rule (temperature + digit) STOPs an isolated temperature; "
-    "[OD-BOT §170] решение 1 says it is not G7 — removing the older rule is an owner decision"
+    "[OD-BOT §170] решение 1 says it is not G7; owner (22.09, №48): leave DRF-973 as is "
+    "until a separate clinically checked temperature matrix is registered"
 )
 
 #: The S1 tract has no attribution / third-party context (``classifier.py`` notes at
