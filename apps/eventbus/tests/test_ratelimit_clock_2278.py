@@ -68,7 +68,7 @@ def test_frozen_ratelimit_clock_holds_the_window(
 
 def test_the_frozen_clock_is_local_to_ratelimit(wall_clock, frozen_ratelimit_clock) -> None:
     """Часы стоят только у django-ratelimit — остальной процесс их не видит."""
-    import django_ratelimit.core as core
+    import django_ratelimit.core as core  # type: ignore[import-untyped]
 
     before = core.time.time()
     wall_clock["t"] += 3600

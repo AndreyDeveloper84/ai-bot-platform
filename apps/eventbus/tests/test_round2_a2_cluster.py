@@ -21,7 +21,9 @@ from django.core.cache import cache
 from django.test import Client, override_settings
 
 
-pytestmark = pytest.mark.django_db
+# DRF-2278 — окна ratelimit по неподвижным часам: без этого тест мигает, если
+# его запросы разъехались по границе окна (см. apps/conftest.py).
+pytestmark = [pytest.mark.django_db, pytest.mark.usefixtures("frozen_ratelimit_clock")]
 
 
 SECRET = "ingest-test-secret"  # pragma: allowlist secret

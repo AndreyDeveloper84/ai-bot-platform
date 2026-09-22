@@ -26,11 +26,12 @@ class TestRandomIdsAreNotText:
 
     def test_a_tail_inside_an_opaque_token_is_not_a_leak(self) -> None:
         payload = {"pending_action": {"token": TOKEN_WITH_TAIL}}
-        assert "5544" not in visible_text(payload)
         assert "pending_action" in visible_text(payload)  # положительно: ключи на месте
+        assert "5544" not in visible_text(payload)
 
     def test_a_long_hex_digest_is_not_text(self) -> None:
         payload = {"correlation_id": "a1b2c3d4e5f60718293a4b5c6d7e5544"}
+        assert "correlation_id" in visible_text(payload)  # положительно: ключ виден
         assert "5544" not in visible_text(payload)
 
 
@@ -63,5 +64,6 @@ class TestTheGapIsClosedByTheRawCheck:
         где случайное совпадение 10 цифр пренебрежимо; этот узел держит
         разделение ролей."""
         payload = {"token": "abcDEF9997775544xyzTOKEN123456"}
+        assert "token" in visible_text(payload)  # положительно: ключ виден
         assert "5544" not in visible_text(payload)
         assert "9997775544" in json.dumps(payload)

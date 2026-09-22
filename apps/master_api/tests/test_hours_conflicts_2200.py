@@ -44,6 +44,7 @@ from apps.master_api.services.schedule import build_schedule
 from apps.master_api.tests.conftest import init_data_header
 from apps.scheduling.models import ScheduleException, WorkingHours
 from apps.tenancy.models import Tenant
+from tests.support.pii_asserts import visible_text
 
 pytestmark = pytest.mark.django_db
 
@@ -243,7 +244,9 @@ class TestConflictsKeepThePiiBoundary:
         assert str(booking.appointment_id) in raw
         assert CUSTOMER_PHONE not in raw
         assert "9997775544" not in raw
-        assert "5544" not in raw
+        assert "5544" not in visible_text(
+            body
+        )  # хвост — в видимом тексте: в raw есть случайные id (DRF-2278)
 
 
 @freeze_time(FROZEN)

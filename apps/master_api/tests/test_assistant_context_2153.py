@@ -51,6 +51,7 @@ from apps.master_api.tests.conftest import init_data_header
 from apps.master_api.services import assistant as assistant_mod
 from apps.master_api.tests.test_assistant_api import FakeResult, FakeToolCall
 from apps.tenancy.models import Tenant
+from tests.support.pii_asserts import visible_text
 
 pytestmark = pytest.mark.django_db
 
@@ -233,7 +234,9 @@ def _assert_no_phone(raw: str, body: object) -> None:
     assert find_forbidden_pii(body) == []  # empty-assert-ok: тело проверено вызывающим
     assert CUSTOMER_PHONE not in raw
     assert "9997775544" not in raw
-    assert "5544" not in raw
+    assert "5544" not in visible_text(
+        body
+    )  # хвост — в видимом тексте: в raw есть случайные id (DRF-2278)
 
 
 # ─── h1: контекст дня ───────────────────────────────────────────────────────
