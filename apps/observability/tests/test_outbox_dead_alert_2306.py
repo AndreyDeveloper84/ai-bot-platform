@@ -190,6 +190,19 @@ METRIC = {
 }
 
 
+@pytest.fixture
+def core_calls(monkeypatch) -> list[dict]:
+    """Шпион ядра страницы outbox в потребителе."""
+    calls: list[dict] = []
+
+    def spy(**kw: object) -> str:
+        calls.append(kw)
+        return "delivered"
+
+    monkeypatch.setattr("apps.eventbus.consumers.system.signal_outbox_dead", spy)
+    return calls
+
+
 class TestTheConsumerRoutesTheOutboxModule:
     def test_the_metric_reaches_the_core(self, wired, monkeypatch) -> None:
         seen: list[dict] = []
@@ -203,13 +216,8 @@ class TestTheConsumerRoutesTheOutboxModule:
         assert resp.status_code == 200, resp.content
         assert seen == [METRIC]
 
-    def test_the_budget_path_is_untouched(self, wired, monkeypatch) -> None:
+    def test_the_budget_path_is_untouched(self, wired, core_calls) -> None:
         """Контроль: модуль outbox не забирает события бюджета."""
-        called: list[str] = []
-        monkeypatch.setattr(
-            "apps.eventbus.consumers.system.signal_outbox_dead",
-            lambda **kw: called.append("outbox") or "delivered",
-        )
         body = json.loads(_envelope(METRIC))
         body["data"] = {
             "module_name": "nutrition.food_scan",
@@ -217,16 +225,11 @@ class TestTheConsumerRoutesTheOutboxModule:
             "metric": {"used": 1, "limit": 500, "day": "2026-09-22", "cost_usd": None},
         }
         assert _post(json.dumps(body).encode()).status_code == 200
-        assert called == []  # empty-assert-ok: бюджет ниже порога — ответ 200 выше
+        assert core_calls == []  # empty-assert-ok: бюджет ниже порога — ответ 200 выше
 
-    def test_a_metric_that_is_not_an_object_is_acknowledged(self, wired, monkeypatch) -> None:
-        called: list[str] = []
-        monkeypatch.setattr(
-            "apps.eventbus.consumers.system.signal_outbox_dead",
-            lambda **kw: called.append("x") or "delivered",
-        )
+    def test_a_metric_that_is_not_an_object_is_acknowledged(self, wired, core_calls) -> None:
         assert _post(_envelope("broken")).status_code == 200
-        assert called == []  # empty-assert-ok: ответ 200 выше — принято, не звать
+        assert core_calls == []  # empty-assert-ok: ответ 200 выше — принято, не звать
 
     def test_an_undelivered_page_is_refused(self, wired, monkeypatch) -> None:
         monkeypatch.setattr(

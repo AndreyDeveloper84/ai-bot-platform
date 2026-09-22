@@ -16,8 +16,9 @@
 
 # Чужой модуль — принять, не звать
 
-Имя события общее для всех модулей; сегодня понятен один —
-``nutrition.food_scan``. Мёртвое письмо на каждый новый модуль было бы
+Имя события общее для всех модулей; сегодня понятны два —
+``nutrition.food_scan`` и ``appointments.outbox`` (dead-letter outbox
+каталога, DRF-2306, ядро :mod:`apps.observability.outbox_dead_alert`). Мёртвое письмо на каждый новый модуль было бы
 шумом, а страница по данным, которых ядро не понимает, — ложью. Поэтому
 чужой модуль принимается, пишется в лог и ничего не зовёт.
 
@@ -50,6 +51,7 @@ import logging
 from apps.eventbus.ingest_dispatcher import register
 from apps.eventbus.ingest_envelope import IngestEnvelope
 from apps.eventbus.ingest_tenancy import assert_envelope_tenant_authorized
+from apps.observability.outbox_dead_alert import signal_outbox_dead
 from apps.observability.scan_budget_alert import signal_budget
 
 
@@ -63,6 +65,11 @@ EVENT_NAME = "system.module.health.degraded"
 
 #: Модули, которые этот потребитель понимает. Остальные — принять и молчать.
 _FOOD_SCAN_MODULE = "nutrition.food_scan"
+#: DRF-2306 — dead-letter outbox каталога (контракт §6.4).
+_OUTBOX_MODULE = "appointments.outbox"
+
+#: Поля метрики outbox — ровно те, что принимает ядро страницы.
+_OUTBOX_FIELDS = ("topic", "failure", "http_status", "count", "hour", "reason")
 
 
 def handle_system_health_degraded(envelope: IngestEnvelope) -> None:
@@ -73,6 +80,9 @@ def handle_system_health_degraded(envelope: IngestEnvelope) -> None:
 
     data = envelope.data
     module = data.get("module_name")
+    if module == _OUTBOX_MODULE:
+        _handle_outbox_dead(envelope)
+        return
     if module != _FOOD_SCAN_MODULE:
         logger.info(
             "eventbus.system.unknown_module event_id=%s module=%r — принято, не звать",
@@ -113,6 +123,27 @@ def handle_system_health_degraded(envelope: IngestEnvelope) -> None:
     if outcome == "not_delivered":
         raise PageNotDeliveredError(
             f"scan budget page not delivered event_id={envelope.event_id} day={day}"
+        )
+
+
+def _handle_outbox_dead(envelope: IngestEnvelope) -> None:
+    """DRF-2306 — dead-letter outbox каталога → страница операторам.
+
+    Поля проверяет ядро (:func:`signal_outbox_dead`); здесь только форма
+    метрики и отказ принять событие, если страница не ушла, — как у бюджета.
+    """
+    metric = envelope.data.get("metric")
+    if not isinstance(metric, dict):
+        logger.warning(
+            "eventbus.system.outbox_metric_not_object event_id=%s type=%s",
+            envelope.event_id,
+            type(metric).__name__,
+        )
+        return
+    outcome = signal_outbox_dead(**{field: metric.get(field) for field in _OUTBOX_FIELDS})
+    if outcome == "not_delivered":
+        raise PageNotDeliveredError(
+            f"outbox dead-letter page not delivered event_id={envelope.event_id}"
         )
 
 

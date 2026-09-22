@@ -683,19 +683,22 @@ A module reports that it has crossed an operational threshold. First emitter: th
 
 | Field         | Type                | Description |
 |---------------|---------------------|-------------|
-| `module_name` | string              | Emitting module. Today: `nutrition.food_scan`. |
+| `module_name` | string              | Emitting module. Today: `nutrition.food_scan`, `appointments.outbox` (DRF-2306). |
 | `severity`    | enum string         | `warning` \| `error`. Never `critical`. Informational — the consumer decides the level itself. |
-| `metric`      | object \| string    | Module-specific. **Two shapes under one name:** bot-internal emitters send a string; `nutrition.food_scan` sends an object `{used: int, limit: int, day: "YYYY-MM-DD", cost_usd: string \| null}`. `cost_usd: null` means «not computed», never a placeholder string. |
+| `metric`      | object \| string    | Module-specific. **Two shapes under one name:** bot-internal emitters send a string; `nutrition.food_scan` sends an object `{used: int, limit: int, day: "YYYY-MM-DD", cost_usd: string \| null}`. `cost_usd: null` means «not computed», never a placeholder string. `appointments.outbox` sends `{topic: string, failure: "rejected" \| "retries_exhausted", http_status: int \| null, count: int, hour: "YYYY-MM-DDTHH" (UTC), reason: slug \| null}` — see below. |
 
 No personal data: the module counts events, not the people behind them (§7).
 
 **Consumer contract (bot, `apps/eventbus/consumers/system.py`):**
 1. Authorization is HMAC plus the closed name set. The system-event path — a branch of its own in `assert_envelope_tenant_authorized`, ahead of the tenant-null carve-out — like the tenant-null path, does not consult `EVENT_INGEST_ALLOWED_EVENTS`. Accepted deliberately (§64); the only detective control is the `verification_mode=system_event` accept log line.
 2. `nutrition.food_scan` → `apps.observability.scan_budget_alert.signal_budget(used, limit, day, cost_usd)`, which owns the level, the per-day-per-threshold dedup and delivery to the operators' MAX chat.
+2a. `appointments.outbox` (DRF-2306, §6.4 alert) → `apps.observability.outbox_dead_alert.signal_outbox_dead`: one operator page per (topic, failure, UTC hour); topic shown only if it has the shape of an event name (else `?`), `reason` only if a slug, numbers only if integers; an unknown `failure` or a malformed `hour` is acknowledged and not paged (both are part of the dedup key). `not_delivered` → 500, as in 5.
 3. An unknown `module_name` is acknowledged, logged and not paged — neither a dead letter per new module nor a page built from data the consumer does not understand.
 4. Idempotent: redelivery is cut by `event_id` dedupe before the handler; the core's own per-day dedup is the second line.
 5. **A page that was not delivered is not an accepted event.** Ayla emits this event once per day per threshold, so the consumer is the only place a lost page can be retried: on `not_delivered` the handler raises, the dedupe row rolls back with it, ingest answers 500, and the Ayla outbox redelivers with backoff (then dead-letters — visible). Accepting it would lose the page until midnight UTC.
 6. `metric.day` must be an ISO date and `metric.cost_usd` a string or `null`; anything else is acknowledged and not paged (the day becomes the core's dedup key and part of the operator text).
+
+**`appointments.outbox` — dead-letter signal (DRF-2306).** When the Ayla publisher dead-letters rows, it emits one event per (topic, failure) per publisher batch, deduplicated per UTC hour: `failure=rejected` for a 4xx (a permanent refusal, §8.12 — `reason` is the slug from the bot's 422 body), `retries_exhausted` for 5xx / network after the retry budget. It never signals the death of a `system.module.health.degraded` row — that would be a signal about a dead signal. **Known limit:** the signal rides the same outbox to the same bot; when rows died because the bot was down, the signal waits for the bot too, and after ~4.5 h of downtime it is dead-lettered itself, silently. The catalog has no independent channel (DRF-2145).
 
 **Enablement order (Ayla side).** The Ayla publisher dead-letters any 4xx except 429 immediately. `OUTBOX_EXTERNAL_DELIVERY_TOPICS` must include this topic **only after** the bot consumer is merged and green — otherwise every event goes straight to dead-letter.
 
