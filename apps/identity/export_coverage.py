@@ -330,7 +330,8 @@ NON_REGISTRY_SECTIONS: Mapping[str, str] = {
 #: разделов запомненного) и в строку ``KNOWN_LIMITS`` про ``ayla``, и дай ему
 #: исход в матрице «забудь всё». Сверку «зеркало ↔ объявления» держит
 #: ``test_catalog_sections_declared_2307``; «зеркало ↔ настоящий каталог» —
-#: ночной живой узел ``tests/e2e/test_ayla_integration.py``.
+#: живой узел ``tests/e2e/test_ayla_integration.py``, запускаемый вручную с
+#: учётными данными стенда (в CI пропускается).
 CATALOG_EXPORT_SECTIONS: tuple[str, ...] = (
     "user_id",
     "exported_at",
