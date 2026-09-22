@@ -669,8 +669,8 @@ class WelcomeSkill:
         # и накрыл бы возврат в поток полным первым приветствием.
         _stamp_welcomed_at(context.bot_user)
         action_data: dict | None = None
-        if origin == "diary":
-            # Возврат к дневнику делает вызывающий, после записи согласия.
+        if origin in CONSENT_RECOVERY_RESUMED_ORIGINS:
+            # Возврат делает вызывающий, после записи согласия.
             from apps.orchestrator.personal_surface import DIARY_UNAVAILABLE_TEXT
 
             reply_text = DIARY_UNAVAILABLE_TEXT
@@ -1064,6 +1064,14 @@ CONSENT_OFFER_LABEL = "Дать согласие"
 #: «После consent возвращать пользователя в исходный flow»). ЧЕРНОВИК: сами
 #: фразы владельцем не утверждены, вынесены вопросом W3 вместе с текстами
 #: «забудь всё»; экран согласия при этом — утверждённый S2_CONSENT_TEXT.
+#: Входы, которые возвращают человека СВОЕЙ поверхностью, а не заготовленной
+#: фразой: возврат у них — сам ответ того потока (для ``diary`` — дневник,
+#: который рисует :func:`apps.channels.max.global_onboarding._resume_after_consent`
+#: после записи согласия). Фразы в :data:`CONSENT_RECOVERY_RETURN_TEXTS` у
+#: них нет и не должно быть: это был бы новый видимый текст рядом с ответом,
+#: который человек и так получит.
+CONSENT_RECOVERY_RESUMED_ORIGINS: frozenset[str] = frozenset({"diary"})
+
 #: Для ``diary`` строки здесь нет намеренно: возвращает сам дневник, своим
 #: текстом (см. :data:`CONSENT_RECOVERY_ORIGINS`). Сюда ветка доходит только
 #: если возврат не состоялся, и тогда говорит то же, что дневник в свой

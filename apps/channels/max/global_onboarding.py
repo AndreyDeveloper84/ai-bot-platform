@@ -491,7 +491,10 @@ def _resume_after_consent(result: Any, bot_user: Any) -> DiscoveryReply | None:
     отрисовки тоже ``None``: согласие уже записано, и ронять ход из-за
     возврата нельзя.
     """
-    if (getattr(result, "meta", None) or {}).get("consent_origin") != "diary":
+    from apps.skills.welcome.skill import CONSENT_RECOVERY_RESUMED_ORIGINS
+
+    origin = (getattr(result, "meta", None) or {}).get("consent_origin")
+    if origin not in CONSENT_RECOVERY_RESUMED_ORIGINS:
         return None
     try:
         from apps.orchestrator.coach_observation import Cadence

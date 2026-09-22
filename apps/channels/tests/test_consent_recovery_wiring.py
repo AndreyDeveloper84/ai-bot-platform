@@ -452,19 +452,35 @@ class TestGuards:
             "cb:welcome:consent_offer_water"
         ]
 
-    def test_the_three_return_texts_are_different(self) -> None:
+    def test_each_origin_returns_to_its_own_flow(self) -> None:
         """Возврат — в СВОЙ поток: одинаковые фразы сделали бы origin фикцией.
 
-        Предел: проверяется РАЗЛИЧИЕ, а не содержание. Узел зелен для любых трёх
-        непохожих черновиков — содержание текстов ждёт слова владельца (W3).
+        Вход возвращает человека ОДНИМ из двух способов, и третьего нет:
+
+        * своей заготовленной фразой — тогда фразы всех таких входов различны
+          (предел прежний: проверяется РАЗЛИЧИЕ, а не содержание, — оно ждёт
+          слова владельца, W3);
+        * своей поверхностью (:data:`CONSENT_RECOVERY_RESUMED_ORIGINS`,
+          DRF-2267) — тогда фразы у него нет и быть не должно: возврат и есть
+          ответ того потока, а заготовка рядом с ним была бы новым видимым
+          текстом.
+
+        Пересечение множеств запрещено: вход с фразой И с возвратом
+        поверхностью означал бы два разных ответа на один тап.
         """
         from apps.skills.welcome.skill import (
             CONSENT_RECOVERY_ORIGINS,
+            CONSENT_RECOVERY_RESUMED_ORIGINS,
             CONSENT_RECOVERY_RETURN_TEXTS,
         )
 
-        texts = [CONSENT_RECOVERY_RETURN_TEXTS[o] for o in CONSENT_RECOVERY_ORIGINS]
-        assert len(set(texts)) == len(CONSENT_RECOVERY_ORIGINS)
+        by_text = [o for o in CONSENT_RECOVERY_ORIGINS if o not in CONSENT_RECOVERY_RESUMED_ORIGINS]
+        texts = [CONSENT_RECOVERY_RETURN_TEXTS[o] for o in by_text]
+        assert by_text, "положительная пара: входы с фразами существуют"
+        assert len(set(texts)) == len(by_text)
+        # Каждый вход обслужен ровно одним способом.
+        assert set(CONSENT_RECOVERY_RESUMED_ORIGINS) <= set(CONSENT_RECOVERY_ORIGINS)
+        assert not set(CONSENT_RECOVERY_RESUMED_ORIGINS) & set(CONSENT_RECOVERY_RETURN_TEXTS)
 
     def test_the_offer_screen_buttons_are_exactly_three(self) -> None:
         from apps.skills.welcome.skill import WelcomeSkill
