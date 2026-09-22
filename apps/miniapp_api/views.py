@@ -3943,11 +3943,17 @@ def customer_wellness_today(request: HttpRequest) -> HttpResponse:
     # происхождения, что ``calories_target``: без подтверждённого ориентира
     # ключа нет, строка БЖУ остаётся фактом. Читается ``getattr`` с ``None``,
     # как соседние признаки: чужой объект без поля — «ориентира нет», не 500.
+    # DRF-2288 (решение владельца №41, CD §76): жиры и углеводы — тем же
+    # признаком; каждый ключ сам по себе — нет ориентира, нет ключа.
     if pfc is not None and calories_configured:
-        protein_target = getattr(profile_res, "protein_g", None)
-        if isinstance(protein_target, (int, float)) and not isinstance(protein_target, bool):
-            if protein_target > 0:
-                pfc["protein_target_g"] = round(protein_target)
+        for attr, key in (
+            ("protein_g", "protein_target_g"),
+            ("fat_g", "fat_target_g"),
+            ("carbs_g", "carbs_target_g"),
+        ):
+            target = getattr(profile_res, attr, None)
+            if isinstance(target, (int, float)) and not isinstance(target, bool) and target > 0:
+                pfc[key] = round(target)
 
     # ── hydration (from get_water_today) ────────────────────────────────
     water_known = True

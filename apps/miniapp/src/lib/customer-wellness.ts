@@ -133,6 +133,9 @@ export interface WellnessToday {
     fat_g: number;
     carbs_g: number;
     protein_target_g?: number;
+    /** DRF-2288 (№41): ориентиры жиров и углеводов — тем же признаком, каждый сам по себе. */
+    fat_target_g?: number;
+    carbs_target_g?: number;
   };
   /**
    * Стаканы за сегодня и дневная норма.

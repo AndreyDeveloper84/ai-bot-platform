@@ -1113,6 +1113,14 @@ function PulseSkeleton() {
  *  it since DRF-1546. */
 const UNAVAILABLE = "Не удалось загрузить";
 
+/** DRF-2288 (№41, CD §76) — текст пустого дня, слово владельца вместо «залогировано». */
+export const EMPTY_DAY_TEXT = "Сегодня ещё ничего не записано";
+
+/** « / 61» при ориентире; без ориентира — ничего (§85 §8: «из» только при ориентире). */
+function withTarget(target: number | undefined): string {
+  return target !== undefined ? ` / ${target}` : "";
+}
+
 function PulseStrip({ data }: { data: WellnessToday }) {
   // Absent is not zero (DRF-1546). `0` is «nothing logged yet» and draws
   // normally; an ABSENT key means the read failed and must say so.
@@ -1126,7 +1134,7 @@ function PulseStrip({ data }: { data: WellnessToday }) {
   // Знать выпитое и не знать нормы — обычное состояние, а не сбой.
   const waterKnown = waterEaten !== undefined;
   const waterTargetKnown = waterTarget !== undefined;
-  // «Ещё ничего не залогировано» — состояние всего дня, а не одной
+  // «Сегодня ещё ничего не записано» — состояние всего дня, а не одной
   // строки, поэтому считается один раз и решает и текст, и шкалу.
   const dayIsEmpty = caloriesEaten === 0 && waterEaten === 0;
   const caloriesPct =
@@ -1167,20 +1175,22 @@ function PulseStrip({ data }: { data: WellnessToday }) {
           <>
             <div className="wellness-dash__pulse-numbers" aria-hidden="true">
               {dayIsEmpty
-                ? "Ещё ничего не залогировано"
+                ? EMPTY_DAY_TEXT
                 : `${caloriesEaten} / ${caloriesTarget} ккал · ${caloriesPct} %`}
             </div>
             {/* §11.1 — БЖУ row hidden when pfc absent. DRF-1844: белок
                 «108 / 130 г», когда ориентир по белку приехал; без него —
                 факт без второго числа (§85 §8: процент и «из» только при
                 ориентире). */}
-            {data.pfc && (
+            {/* DRF-2288 (№41): ориентиры Ж и У — тем же признаком, что белок;
+                в пустой день строки нулей нет — рядом уже сказано, что
+                ничего не записано. */}
+            {data.pfc && !dayIsEmpty && (
               <div className="wellness-dash__pulse-pfc" aria-hidden="true">
                 Б {data.pfc.protein_g}
-                {data.pfc.protein_target_g !== undefined
-                  ? ` / ${data.pfc.protein_target_g}`
-                  : ""}{" "}
-                · Ж {data.pfc.fat_g} · У {data.pfc.carbs_g} г
+                {withTarget(data.pfc.protein_target_g)} · Ж {data.pfc.fat_g}
+                {withTarget(data.pfc.fat_target_g)} · У {data.pfc.carbs_g}
+                {withTarget(data.pfc.carbs_target_g)} г
               </div>
             )}
             {/* Пустой день — без шкалы. Полоса при нуле не видна глазом,
@@ -1210,7 +1220,7 @@ function PulseStrip({ data }: { data: WellnessToday }) {
              цели, а цели нет. Та же форма, что у воды ниже. */
           <div className="wellness-dash__pulse-numbers">
             {dayIsEmpty
-              ? "Ещё ничего не залогировано"
+              ? EMPTY_DAY_TEXT
               : `${caloriesEaten} ккал сегодня`}
           </div>
         ) : (
