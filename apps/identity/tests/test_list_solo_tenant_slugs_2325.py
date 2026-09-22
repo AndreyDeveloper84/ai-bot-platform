@@ -21,6 +21,7 @@
 * a6 — неактивный тенант не попадает в список, но назван в отчёте;
 * a7 — команда не пишет: снимок базы до и после совпадает.
 """
+
 from __future__ import annotations
 
 import uuid
@@ -48,6 +49,15 @@ def _slugs(stdout: str) -> list[str]:
     return [line.strip() for line in stdout.splitlines() if line.strip()]
 
 
+def _count(err: str, key: str) -> int:
+    """Число из строки отчёта «ключ: N»."""
+    for line in err.splitlines():
+        name, _, value = line.partition(":")
+        if name.strip() == key:
+            return int(value.strip())
+    raise AssertionError(f"в отчёте нет строки {key!r}: {err!r}")
+
+
 def _identity() -> str:
     return f"id-{uuid.uuid4().hex[:8]}"
 
@@ -59,18 +69,14 @@ def _tenant_with_owner(
     channel: str = CHANNEL,
     is_active: bool = True,
 ) -> Tenant:
-    tenant = Tenant.all_objects.create(
-        slug=slug, name=f"Мастерская {slug}", is_active=is_active
-    )
+    tenant = Tenant.all_objects.create(slug=slug, name=f"Мастерская {slug}", is_active=is_active)
     owner = BotUser.all_tenants.create(
         tenant=tenant,
         channel=channel,
         channel_user_id=channel_user_id,
         display_name="Ольга Иванова",
     )
-    TenantStaff.all_tenants.create(
-        tenant=tenant, bot_user=owner, role=TenantStaff.Role.OWNER
-    )
+    TenantStaff.all_tenants.create(tenant=tenant, bot_user=owner, role=TenantStaff.Role.OWNER)
     return tenant
 
 
@@ -105,23 +111,28 @@ class TestA2SalonIsNotListed:
 class TestA3PrefixIsNotProof:
     def test_a_solo_looking_slug_with_another_identity_is_refused(self) -> None:
         """Слаг чужой личности: выглядит как соло, пересчёт не сходится."""
+        proven, _ = _solo_tenant()
         stranger = _solo_tenant_slug(CHANNEL, _identity())
         _tenant_with_owner(stranger, channel_user_id=_identity())
 
         out, _err = _run()
 
-        assert _slugs(out) == []
+        assert proven.slug in _slugs(out)  # наличие: доказанный печатается
+        assert stranger not in out
 
 
 class TestA4TenantWithoutOwner:
     def test_it_is_skipped_and_named_by_count(self) -> None:
+        """Счёт берётся приростом: в базе есть и служебные тенанты окружения,
+        и абсолютное число мерило бы их, а не поведение команды."""
         solo, _ = _solo_tenant()
-        Tenant.all_objects.create(slug="bez-vladelca", name="Без владельца")
+        _out, before = _run()
 
+        Tenant.all_objects.create(slug="bez-vladelca", name="Без владельца")
         out, err = _run()
 
         assert _slugs(out) == [solo.slug]
-        assert "без владельца: 1" in err
+        assert _count(err, "без владельца") == _count(before, "без владельца") + 1
 
 
 class TestA5TheListIsPipeableAndCarriesNoPeople:
