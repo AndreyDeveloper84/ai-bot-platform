@@ -205,7 +205,10 @@ class TestReviewFindings:
         run = _Run(profile=_marked("pace", snapshot=_SNAPSHOT))
         card = run.turn("мой вес 65")
         assert card.meta["reply_kind"] == "anketa_update_weight_proposed"
-        assert "pace" not in _sent(run)
+        body = _sent(run)
+        # Presence first: the body is the maintain body, with its goal.
+        assert body["goal"] == "maintain"
+        assert "pace" not in body
 
     def test_only_activity_marked_forwards_the_named_pace(self) -> None:
         run = _Run(profile=_marked("activity_coefficient"))
