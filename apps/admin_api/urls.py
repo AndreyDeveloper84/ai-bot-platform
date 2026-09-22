@@ -30,6 +30,7 @@ from apps.admin_api import (
     views_master_verify,
     views_salon_frame,
     views_staff_invite,
+    views_staff_invites,
     views_staff_revoke,
     views_staff_role,
     views_staff_roster,
@@ -140,6 +141,23 @@ urlpatterns = [
         "staff/restore/",
         views_staff_role.staff_restore,
         name="staff_restore",
+    ),
+    # DRF-2275 — issued codes: list, cancel, resend. Owner and admin; an
+    # owner code is the owner's alone. See the view.
+    path(
+        "staff/invites/",
+        views_staff_invites.staff_invites_list,
+        name="staff_invites_list",
+    ),
+    path(
+        "staff/invites/<str:invite_id>/cancel/",
+        views_staff_invites.staff_invite_cancel,
+        name="staff_invite_cancel",
+    ),
+    path(
+        "staff/invites/<str:invite_id>/resend/",
+        views_staff_invites.staff_invite_resend,
+        name="staff_invite_resend",
     ),
     # The list nothing produced: every person of the salon with every
     # role they hold, merged across TenantStaff and CatalogMaster
