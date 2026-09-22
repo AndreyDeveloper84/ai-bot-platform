@@ -66,6 +66,13 @@ def diary_button() -> dict[str, str]:
     return dict(CHIP_DIARY)
 
 
+def water_button() -> dict[str, str]:
+    """«Записать стакан воды» — ``CHIP_WATER`` (одно определение, ``personal_surface``)."""
+    from apps.orchestrator.personal_surface import CHIP_WATER
+
+    return dict(CHIP_WATER)
+
+
 def after_entry_buttons() -> list[dict[str, str]]:
     """Под записанным в дневник (еда, вода): «Мой дневник» и «Меню».
 
@@ -94,6 +101,7 @@ __all__ = [
     "discover_button",
     "log_food_button",
     "menu_button",
+    "water_button",
     "next_step_action_data",
     "salons_button",
 ]

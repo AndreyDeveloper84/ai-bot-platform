@@ -69,8 +69,8 @@ def _ctx(text: str, *, photo: bytes | None = None) -> SkillContext:
     bot_user.channel_user_id = "2267c"
     bot_user.pk = 2267
     conversation = SimpleNamespace(id="conv-2267c", skill_state={}, last_photo_bytes=photo)
-    return SkillContext(  # type: ignore[arg-type]
-        conversation=conversation,
+    return SkillContext(
+        conversation=conversation,  # type: ignore[arg-type]
         bot_user=bot_user,
         message_text=text,
         has_attachments=photo is not None,
