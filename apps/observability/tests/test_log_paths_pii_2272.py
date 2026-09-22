@@ -21,6 +21,7 @@ import io
 import logging
 import logging.config
 from collections.abc import Iterator
+from typing import Any
 
 import pytest
 from django.conf import settings
@@ -38,7 +39,7 @@ def sink() -> Iterator[io.StringIO]:
 
     logging.config.dictConfig(copy.deepcopy(LOGGING_CONFIG))
     stream = io.StringIO()
-    config = copy.deepcopy(settings.LOGGING)
+    config: dict[str, Any] = copy.deepcopy(dict(settings.LOGGING))
     config["handlers"]["console"]["stream"] = stream
     logging.config.dictConfig(config)
     try:
