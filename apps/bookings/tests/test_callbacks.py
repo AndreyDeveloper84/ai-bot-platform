@@ -180,9 +180,18 @@ class TestCancel:
         assert reminder.status == BookingReminder.Status.CANCELLED
         assert reminder.replied_at is not None
 
-    def test_upstream_failure_does_not_block_local_cancel(
+    def test_a_yclients_outage_does_not_block_local_cancel(
         self, tenant: Tenant, bot_user: BotUser, conversation: Conversation
     ) -> None:
+        """Сбой ПОСТАВЩИКА не держит локальную отмену — и только он.
+
+        DRF-2337 сузил этот узел до его настоящего случая. Он был верен для
+        строки YClients, где вызов делается и может не дойти; под него же
+        попадала строка из Ayla, где вызов не делался вовсе, — и человеку
+        говорили «отменена» при живой записи. Строка из Ayla теперь идёт
+        своим путём (``test_cancel_reaches_ayla_2337``) и успех по факту
+        отказа не сообщает.
+        """
         reminder = _reminder(tenant, bot_user, yc_id="123456")
         ctx = _ctx(
             f"cb:rem:cancel:{reminder.pk}",

@@ -124,7 +124,10 @@ def _tap(reminder, bot_user, conversation):
 
 class TestAnAylaBookingIsCancelledInAyla:
     def test_the_rest_call_is_made_by_appointment_id(
-        self, tenant, bot_user, conversation,
+        self,
+        tenant,
+        bot_user,
+        conversation,
     ) -> None:
         appointment_id = uuid.uuid4()
         reminder = _ayla_reminder(tenant, bot_user, appointment_id)
@@ -136,7 +139,10 @@ class TestAnAylaBookingIsCancelledInAyla:
         assert cancel.call_args.kwargs["appointment_id"] == str(appointment_id)
 
     def test_a_successful_cancel_says_so_and_closes_the_row(
-        self, tenant, bot_user, conversation,
+        self,
+        tenant,
+        bot_user,
+        conversation,
     ) -> None:
         reminder = _ayla_reminder(tenant, bot_user)
 
@@ -148,7 +154,10 @@ class TestAnAylaBookingIsCancelledInAyla:
         assert reminder.status == BookingReminder.Status.CANCELLED
 
     def test_an_appointment_already_gone_is_said_honestly(
-        self, tenant, bot_user, conversation,
+        self,
+        tenant,
+        bot_user,
+        conversation,
     ) -> None:
         """Человек хотел, чтобы записи не было, — её нет. Но не «я отменила»."""
         reminder = _ayla_reminder(tenant, bot_user)
@@ -165,7 +174,10 @@ class TestAFailedCancelIsNeverReportedAsSuccess:
     """Главное правило листа: успех — только по факту."""
 
     def test_an_unreachable_service_does_not_say_cancelled(
-        self, tenant, bot_user, conversation,
+        self,
+        tenant,
+        bot_user,
+        conversation,
     ) -> None:
         reminder = _ayla_reminder(tenant, bot_user)
 
@@ -176,7 +188,10 @@ class TestAFailedCancelIsNeverReportedAsSuccess:
         assert result.reply_text == _CANCEL_UNAVAILABLE_TEXT
 
     def test_a_refusal_by_the_salon_does_not_say_cancelled(
-        self, tenant, bot_user, conversation,
+        self,
+        tenant,
+        bot_user,
+        conversation,
     ) -> None:
         reminder = _ayla_reminder(tenant, bot_user)
 
@@ -187,7 +202,10 @@ class TestAFailedCancelIsNeverReportedAsSuccess:
         assert result.reply_text == _CANCEL_REFUSED_TEXT
 
     def test_a_failed_cancel_leaves_the_row_open(
-        self, tenant, bot_user, conversation,
+        self,
+        tenant,
+        bot_user,
+        conversation,
     ) -> None:
         """Иначе повтор упрётся в «эта запись уже обработана» — тупик."""
         reminder = _ayla_reminder(tenant, bot_user)
@@ -199,7 +217,10 @@ class TestAFailedCancelIsNeverReportedAsSuccess:
         assert reminder.status == BookingReminder.Status.SENT_NO_REPLY
 
     def test_a_second_tap_after_a_failure_tries_again(
-        self, tenant, bot_user, conversation,
+        self,
+        tenant,
+        bot_user,
+        conversation,
     ) -> None:
         reminder = _ayla_reminder(tenant, bot_user)
 
@@ -212,7 +233,10 @@ class TestAFailedCancelIsNeverReportedAsSuccess:
         assert result.reply_text == REPLY_CANCELLED
 
     def test_a_replay_after_a_successful_cancel_does_not_call_twice(
-        self, tenant, bot_user, conversation,
+        self,
+        tenant,
+        bot_user,
+        conversation,
     ) -> None:
         """Контроль: защита от двойного тапа не потеряна."""
         reminder = _ayla_reminder(tenant, bot_user)
@@ -230,7 +254,10 @@ class TestTheYClientsPathIsUnchanged:
     """Сужение, а не снос: прежнее решение осталось при своём случае."""
 
     def test_a_yclients_row_does_not_call_ayla(
-        self, tenant, bot_user, conversation,
+        self,
+        tenant,
+        bot_user,
+        conversation,
     ) -> None:
         reminder = _yclients_reminder(tenant, bot_user)
 
@@ -244,7 +271,10 @@ class TestTheYClientsPathIsUnchanged:
         assert result.reply_text == REPLY_CANCELLED
 
     def test_a_real_supplier_outage_still_does_not_block_the_local_cancel(
-        self, tenant, bot_user, conversation,
+        self,
+        tenant,
+        bot_user,
+        conversation,
     ) -> None:
         """Тот самый прежний узел — теперь только про настоящий сбой поставщика."""
         reminder = _yclients_reminder(tenant, bot_user)
