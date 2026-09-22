@@ -152,6 +152,10 @@ class ForgetAllSweepResult:
     #: False when Redis was unreachable for the stream purge: the rest of the
     #: sweep still ran, and this says the streams were NOT checked.
     raw_streams_checked: bool = True
+    #: DRF-2214 — cards whose reasons, facts and goal key were blanked, and
+    #: shells whose proactive-nutrition observations were removed.
+    recommendations_anonymized: int = 0
+    nutrition_observations_cleared: int = 0
 
     @property
     def changed(self) -> bool:
@@ -164,7 +168,87 @@ class ForgetAllSweepResult:
             or self.conversations_anonymized
             or self.raw_entries_deleted
             or not self.raw_streams_checked
+            or self.recommendations_anonymized
+            or self.nutrition_observations_cleared
         )
+
+
+#: DRF-2214 — observations inside ``BotUser.context["nutrition_proactive"]``:
+#: how much the person drank (``water``) and the day of the last report. The
+#: toggles (``daily_report_time``, ``water_reminders``, ``opted_out_at``) are
+#: notification settings — «настройки уведомлений остаются» — and the send
+#: journal (``outbox``) holds only times and kinds, which the anti-spam reads.
+NUTRITION_OBSERVATION_KEYS: tuple[str, ...] = ("water", "last_report_date")
+
+
+#: DRF-2308 — the fingerprint of an erased card; the account deletion path
+#: writes the same (``recommendation/erasure.py``).
+ERASED_FINGERPRINT_PREFIX = "erased:"
+
+
+def anonymise_recommendations(shell_ids) -> int:
+    """Blank the person's words on every card; keep the card (DRF-2214).
+
+    ``why`` is the reasons verbatim, ``facts`` the labels of the goal and the
+    answers they were built from, ``goal_id`` the key of a goal «забудь всё»
+    erases in the catalog (#526). ``fingerprint`` goes too (DRF-2308): an
+    ABSENCE card keys it ``absence:{goal_id}`` — the goal in plain text — and
+    a DIRECTION card an unsalted ``sha256({goal, what, why})`` that brute force
+    recovers. It becomes ``erased:{id}``: unique per row, so the
+    ``(bot_user, fingerprint)`` constraint holds, and meaningless.
+
+    Row by row in Python, in one transaction — the same value the account
+    deletion path writes (``recommendation/erasure.py``, #1986). A SQL cast of
+    the UUID would render differently on SQLite (no dashes) and Postgres, and
+    the two paths must agree. Rows already carrying the marker are skipped, so
+    a repeat sweep changes nothing.
+
+    The row stays for attribution (owner B13: which card led to which
+    booking) — ``reaction``, ``booking_id``, dates; ``what``/``subline``/
+    ``alternatives`` are the owner's curated table, not data about the person.
+    A side effect, accepted: the same context under the same goal may produce
+    a new card later, since the old fingerprint no longer deduplicates it.
+    """
+    from django.db.models import Q
+
+    from apps.recommendation.models import Recommendation
+
+    rows = list(
+        Recommendation.objects.filter(bot_user_id__in=list(shell_ids))
+        .exclude(fingerprint__startswith=ERASED_FINGERPRINT_PREFIX)
+        .only("id")
+    )
+    rows += list(
+        Recommendation.objects.filter(
+            bot_user_id__in=list(shell_ids), fingerprint__startswith=ERASED_FINGERPRINT_PREFIX
+        )
+        .filter(~Q(why=[]) | ~Q(facts={}) | ~Q(goal_id=""))
+        .only("id")
+    )
+    with transaction.atomic():
+        for row in rows:
+            Recommendation.objects.filter(pk=row.pk).update(
+                why=[], facts={}, goal_id="", fingerprint=f"{ERASED_FINGERPRINT_PREFIX}{row.pk}"
+            )
+    return len(rows)
+
+
+def forget_nutrition_observations(shell_ids) -> int:
+    """Remove the observation keys from each shell's proactive-nutrition prefs."""
+    from apps.identity.models import BotUser
+
+    cleared = 0
+    for bot_user in BotUser.all_tenants.filter(pk__in=list(shell_ids)).only("pk", "context"):
+        context = dict(bot_user.context or {})
+        prefs = context.get("nutrition_proactive")
+        if not isinstance(prefs, dict) or not any(k in prefs for k in NUTRITION_OBSERVATION_KEYS):
+            continue
+        context["nutrition_proactive"] = {
+            k: v for k, v in prefs.items() if k not in NUTRITION_OBSERVATION_KEYS
+        }
+        BotUser.all_tenants.filter(pk=bot_user.pk).update(context=context)
+        cleared += 1
+    return cleared
 
 
 def sweep_forget_all(user_id: uuid.UUID) -> ForgetAllSweepResult:
@@ -251,15 +335,20 @@ def sweep_forget_all(user_id: uuid.UUID) -> ForgetAllSweepResult:
     # bound to a local so the invariant is stated where it is relied on rather
     # than asserted away with a cast.
     requested_at = upc.forget_all_requested_at
+    shells = shell_ids_for_person(ayla_user_id=user_id)
     dialogue = (
         anonymize_dialogue(
-            shell_ids_for_person(ayla_user_id=user_id),
+            shells,
             through=requested_at,
             reason=ArchivedMessage.Reason.FORGET_ALL,
         )
         if requested_at is not None
         else AnonymizeResult()
     )
+
+    # DRF-2214 — the two bot stores «забудь всё» used to leave standing.
+    recommendations_anonymized = anonymise_recommendations(shells)
+    nutrition_observations_cleared = forget_nutrition_observations(shells)
 
     result = ForgetAllSweepResult(
         user_id=user_id,
@@ -271,6 +360,8 @@ def sweep_forget_all(user_id: uuid.UUID) -> ForgetAllSweepResult:
         raw_entries_deleted=dialogue.raw_entries_deleted,
         raw_entries_unattributed=dialogue.raw_entries_unattributed,
         raw_streams_checked=dialogue.raw_streams_checked,
+        recommendations_anonymized=recommendations_anonymized,
+        nutrition_observations_cleared=nutrition_observations_cleared,
     )
 
     if result.changed:
@@ -290,6 +381,8 @@ def sweep_forget_all(user_id: uuid.UUID) -> ForgetAllSweepResult:
                 "raw_entries_deleted": result.raw_entries_deleted,
                 "raw_entries_unattributed": result.raw_entries_unattributed,
                 "raw_streams_checked": result.raw_streams_checked,
+                "recommendations_anonymized": result.recommendations_anonymized,
+                "nutrition_observations_cleared": result.nutrition_observations_cleared,
             },
         )
         logger.info(

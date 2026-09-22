@@ -555,6 +555,10 @@ class TestDialogueHistory:
         fake = _FakeRedis()
         monkeypatch.setattr(short_term, "_redis_client", lambda: fake)
         monkeypatch.setattr(pii_tokenizer, "_redis_client", lambda: fake)
+        # DRF-2214 — «забудь всё» снимает и состояние движка готовности (dre:state).
+        monkeypatch.setattr(
+            "apps.orchestrator.decision_readiness.state._redis_client", lambda: fake
+        )
         return fake
 
     def test_forget_all_empties_the_short_term_window(self, settings, ayla, monkeypatch):
