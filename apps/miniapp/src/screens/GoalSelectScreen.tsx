@@ -395,7 +395,10 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
   if (safetyStop) {
     const { stop, pendingBody } = safetyStop;
     const clarify = stop.kind === SAFETY_KIND_CLARIFY;
-    const answerPending = clarify && safetyAnswer.trim().length > 0;
+    // [OD-BOT §170] — a question with structured answers (G7): the answer is
+    // one of the server's options, never free text.
+    const structured = clarify && (stop.options?.length ?? 0) > 0;
+    const answerPending = clarify && !structured && safetyAnswer.trim().length > 0;
     const cta = clarify ? (
       answerPending ? (
         <StickyBar>
@@ -449,7 +452,24 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
               ))}
             </ol>
           )}
-          {clarify && (
+          {structured && (
+            <div className="goal-select__safety-options" data-testid="goal-safety-options">
+              {stop.options?.map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  className="goal-select__safety-option"
+                  disabled={submitting}
+                  onClick={() =>
+                    submit({ ...pendingBody, safety_answer: option.value } as GoalSelectBody)
+                  }
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+          )}
+          {clarify && !structured && (
             <textarea
               className="goal-select__textarea"
               value={safetyAnswer}

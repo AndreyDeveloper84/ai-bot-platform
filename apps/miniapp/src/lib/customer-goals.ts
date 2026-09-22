@@ -219,6 +219,18 @@ export interface SafetyStop {
   text?: string;
   acknowledgement?: string;
   questions?: string[];
+  /**
+   * [OD-BOT §170] — the G7 question's three structured answers. `value` goes
+   * back verbatim as `safety_answer` (it carries the slot's one-time token);
+   * free text is not an answer to this question, so no text box is shown.
+   */
+  options?: SafetyOption[];
+  question_id?: string;
+}
+
+export interface SafetyOption {
+  label: string;
+  value: string;
 }
 
 export interface SafetyEnvelope {
