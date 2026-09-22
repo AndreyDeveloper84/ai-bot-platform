@@ -4460,6 +4460,7 @@ def _food_text_catalog_refusal(exc: Exception, *, external_id: str, step: str) -
         NutritionUnavailableError,
         ScanBudgetExhaustedError,
         ScanDailyLimitError,
+        ScanProviderDownError,
     )
 
     if isinstance(exc, FoodNotRecognizedError):
@@ -4480,6 +4481,13 @@ def _food_text_catalog_refusal(exc: Exception, *, external_id: str, step: str) -
     if isinstance(exc, ScanBudgetExhaustedError):
         logger.info("food_text_ma.%s.budget_exhausted ext=%s", step, external_id)
         return _error("food_scan_budget_exhausted", "daily scan budget exhausted", 503)
+    # DRF-2318 — стойкий отказ распознавателя (счёт, ключ, квота): не баг
+    # запроса (`ayla_bad_request`) и не «через минуту» (`nutrition_unavailable`).
+    if isinstance(exc, ScanProviderDownError):
+        logger.warning(
+            "food_text_ma.%s.provider_down ext=%s reason=%s", step, external_id, exc.reason
+        )
+        return _error("food_scan_provider_down", "photo recognition is down", 503)
     if isinstance(exc, NutritionUnavailableError):
         logger.warning("food_text_ma.%s.unavailable ext=%s err=%s", step, external_id, exc)
         return _error("nutrition_unavailable", "ayla nutrition unavailable", 503)

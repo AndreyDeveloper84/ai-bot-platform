@@ -231,6 +231,10 @@ export async function scanPhoto(
       if (err.slug === "food_scan_daily_limit") throw new ScanDailyLimitError();
       if (err.slug === "food_scan_budget_exhausted")
         throw new ScanBudgetExhaustedError();
+      // DRF-2318 — стойкий отказ распознавателя (счёт, ключ, квота): тот же
+      // честный экран «сейчас недоступно — напиши словами», без «через минуту».
+      if (err.slug === "food_scan_provider_down")
+        throw new ScanBudgetExhaustedError();
       if (err.slug === "nutrition_unavailable")
         throw new NutritionUnavailableError();
       if (err.slug === "photo_too_large") throw new PhotoTooLargeError();

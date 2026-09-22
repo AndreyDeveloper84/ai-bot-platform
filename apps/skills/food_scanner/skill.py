@@ -105,6 +105,7 @@ from apps.integrations.ayla import (
     NutritionAPIError,
     NutritionUnavailableError,
     ScanBudgetExhaustedError,
+    ScanProviderDownError,
     ScanDailyLimitError,
     external_user_id_for,
     get_nutrition_client,
@@ -112,6 +113,7 @@ from apps.integrations.ayla import (
 from apps.orchestrator import food_history
 from apps.orchestrator.memory import food as food_memory
 from apps.orchestrator.ui.keyboards import (
+    Button,
     food_recognition_keyboard,
     parse_callback,
 )
@@ -153,6 +155,19 @@ AYLA_DOWN_FALLBACK = "Сервис распознавания временно �
 SCAN_DAILY_LIMIT_FALLBACK = "Сегодня фото больше не распознаю — напиши словами, что было."
 
 SCAN_BUDGET_EXHAUSTED_FALLBACK = "Распознавание фото сейчас недоступно — напиши словами."
+
+# DRF-2318 — стойкий отказ распознавателя в каталоге (счёт, ключ, квота).
+# Через минуту ничего не изменится; дорога рядом — записать словами. ЧЕРНОВИК
+# владельцу: текст не из листа, утверждает владелец.
+SCAN_PROVIDER_DOWN_FALLBACK = (
+    "Распознавание фото сейчас не работает — мы уже чиним. "
+    "А пока напиши словами, что было, — посчитаю и покажу."
+)
+#: Кнопка «Записать словами» — тот же тап, что «📔 В дневник» без фразы:
+#: ведёт в запись текстом (``food_clarify`` → ``ASK_WHAT_TEXT``).
+#: Контракт кнопки — ``Button`` (ключ ``label``): композер пропускает словари
+#: без ``label`` молча (ревью #1997).
+WRITE_IN_WORDS_BUTTON = Button(label="Записать словами", callback="cb:food:diary")
 
 NOT_RECOGNIZED_FALLBACK = (
     "Фото немного сложное — не разобралась. Можешь переснять поближе или просто написать, что было?"
@@ -263,6 +278,19 @@ class FoodScannerSkill:
                 reply_text=SCAN_BUDGET_EXHAUSTED_FALLBACK,
                 action_data=_log_it_another_way(),
                 meta={"reply_kind": "food_scanner_budget_exhausted"},
+            )
+        except ScanProviderDownError as exc:
+            # DRF-2318: стойкий отказ — честно и с дорогой. Старая фраза из
+            # состояния записи текстом забывается: иначе тап «Записать
+            # словами» оценил бы её, а не спросил, что было.
+            logger.warning("food_scanner.provider_down user=%s reason=%s", external_id, exc.reason)
+            from apps.skills.food_clarify import text_entry
+
+            text_entry.forget(context)
+            return SkillResult(
+                reply_text=SCAN_PROVIDER_DOWN_FALLBACK,
+                action_data={"buttons": [WRITE_IN_WORDS_BUTTON.as_dict()]},
+                meta={"reply_kind": "food_scanner_provider_down"},
             )
         except NutritionUnavailableError:
             logger.warning("food_scanner.unavailable user=%s", external_id)

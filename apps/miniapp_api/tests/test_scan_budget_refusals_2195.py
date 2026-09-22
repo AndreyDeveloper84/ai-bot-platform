@@ -53,6 +53,17 @@ class TestScanBudgetRefusalsHaveTheirOwnNames:
         assert resp.status_code == 503
         assert resp.json()["error"] == "food_scan_budget_exhausted"
 
+    def test_provider_down_is_503_with_its_own_slug(self, client, bot_user) -> None:  # noqa: F811
+        """DRF-2318: стойкий отказ распознавателя — не «чушь» и не «через минуту»."""
+        from apps.integrations.ayla.nutrition_client import ScanProviderDownError
+
+        patcher, _ = _patch_client(scan=ScanProviderDownError("billing_not_active"))
+        with patcher:
+            resp = _scan(client, bot_user)
+
+        assert resp.status_code == 503
+        assert resp.json()["error"] == "food_scan_provider_down"
+
     def test_budget_refusal_is_not_the_bad_request_bag(self, client, bot_user) -> None:  # noqa: F811
         """Штатный предел — не «мы послали каталогу чушь»."""
         from apps.integrations.ayla.nutrition_client import ScanDailyLimitError

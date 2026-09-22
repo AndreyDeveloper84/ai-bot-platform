@@ -242,6 +242,36 @@ class ScanBudgetExhaustedError(ScanBudgetError):
     """
 
 
+class ScanProviderDownError(NutritionAPIError):
+    """503 ``FOOD_API_UNAVAILABLE`` с ``details.permanent`` — распознаватель отказал стойко (DRF-2318).
+
+    Каталог (#549): у всех провайдеров стойкий отказ — счёт не активен, ключ
+    отвергнут, квота исчерпана, ключ не задан. Через минуту ничего не
+    изменится, поэтому это
+
+    * НЕ наследник :class:`NutritionUnavailableError` — иначе лестница навыка
+      сказала бы «попробуй через минуту»;
+    * НЕ кормит предохранитель — неоплаченный распознаватель не гасит запись
+      текстом, дневник и сводку (как бюджет, DRF-2195).
+
+    ``reason`` — закрытое слово каталога или ``unknown``.
+    """
+
+    REASONS = frozenset(
+        {
+            "billing_not_active",
+            "quota_exhausted",
+            "invalid_api_key",
+            "auth_rejected",
+            "not_configured",
+        }
+    )
+
+    def __init__(self, reason: str = "unknown") -> None:
+        self.reason = reason if reason in self.REASONS else "unknown"
+        super().__init__(f"scan_provider_down:{self.reason}")
+
+
 class NutritionUncertainOutcomeError(NutritionUnavailableError):
     """DRF-1838: the request left, the answer never came back (timeout / network).
 
@@ -968,6 +998,11 @@ class NutritionClient:
         if err_code == "FOOD_SCAN_BUDGET_EXHAUSTED":
             logger.info("nutrition_client.scan.budget_exhausted ext=%s", external_user_id)
             raise ScanBudgetExhaustedError("budget_exhausted")
+        if err_code == "FOOD_API_UNAVAILABLE" and err_details.get("permanent") is True:
+            # DRF-2318: стойкий отказ распознавателя — не авария каталога.
+            reason = str(err_details.get("reason") or "")
+            logger.warning("nutrition_client.scan.provider_down reason=%s", reason[:32])
+            raise ScanProviderDownError(reason)
 
         # Ни одна из двух веток выше не зовёт и `record_success()` — это
         # осознанно, а не забыто. Отказ по бюджету доказывает, что жива
