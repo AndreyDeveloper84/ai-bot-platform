@@ -144,7 +144,11 @@ class TestTransientAndRealFailuresStay500:
         handler["after"] = RuntimeError("bug")
         resp = _send()
         assert resp.status_code == 500
-        assert "rejected" not in resp.content.decode()  # положительная пара — код выше
+        assert json.loads(resp.content) == {
+            "status": "internal_error",
+            "reason": "handler_exception",
+        }
+        assert _dlq_reasons() == []  # empty-assert-ok: первый сбой — до порога DLQ (3), ответ выше
 
 
 class TestReplayAfterTheFix:

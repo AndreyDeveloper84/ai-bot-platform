@@ -934,7 +934,8 @@ class TestDedupeSemantics:
         ):
             result = dispatch_envelope(envelope)
 
-        assert result.outcome == DispatchOutcome.HANDLER_EXCEPTION
+        # DRF-2302 — тенант вне allowlist: постоянный отказ (422), повтор — после правки.
+        assert result.outcome == DispatchOutcome.REJECTED
         assert isinstance(result.exception, TenantAuthorizationError)
         assert not IngestDedupe.objects.filter(event_id="EV-RETRY-1").exists(), (
             "a rejected event must not be marked processed"

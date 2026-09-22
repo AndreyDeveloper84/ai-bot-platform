@@ -888,6 +888,8 @@ The ingest endpoint's handler-routing layer:
 
 The consumer's own dedupe table is NOT written on exception — that way the retry actually re-attempts processing.
 
+This section covers failures a retry can fix (an event ahead of its booking, a DB error) and genuine consumer bugs. A refusal that no retry will ever fix is §8.12 — 422, not 500.
+
 ### 8.2 Ingest endpoint is down (HTTP 5xx, timeout, connection refused)
 
 Ayla's dispatcher keeps the outbox row pending and retries per §6.3. Outbox rows accumulate during the outage. On recovery, dispatcher drains the queue; lag SLA alert (§6.5) will fire if drain takes >5 min.
@@ -960,6 +962,19 @@ Long-running consumer work (e.g. catalog cache rebuild) MUST be moved off the sy
 ### 8.11 Consumer crash between processing and dedupe write
 
 Pattern enforced by §5.1 (process-then-INSERT in one transaction) prevents this: a crash inside the transaction rolls back BOTH the side-effect and the dedupe row, leaving the system in the pre-event state. Ayla's retry then re-delivers and re-processes cleanly. No silent loss.
+
+### 8.12 Consumer rejects the event permanently (DRF-2302)
+
+Some refusals no retry can fix: the tenant does not exist in bot-platform, the tenant or the event is outside the pilot allowlist (`tenant_not_found`, `tenant_not_allowed`, `event_not_allowed`, `relationship_unavailable`), the envelope is structurally wrong for its event (`system_event_has_subject`, `missing_subject`, `tenant_id_null`), the appointment belongs to another tenant (`cross_tenant_appointment`), or the payload is invalid (`unknown_booking_status`, `invalid_payload`). Answering those with 500 (§8.1) would make Ayla's outbox retry 9 times over ~4.5 h before dead-lettering — noise that hides the refusal.
+
+The consumer raises an `IngestRejection` (`apps/eventbus/ingest_rejection.py`) carrying a `reason` slug. The ingest endpoint:
+
+1. Rolls back the handler transaction — the dedupe row is NOT written, so a replay after the fix is processed as a new delivery, not a duplicate.
+2. Writes a DLQ row with `reason=<slug>` immediately (no attempt counter — there will be no more attempts).
+3. Returns HTTP 422 `{"status": "rejected", "reason": "<slug>"}` and an audit row `eventbus.ingest.rejected` (slug only, never the exception text).
+4. Ayla's outbox dead-letters the 422 at once (4xx except 429). After the root cause is fixed — tenant provisioned, allowlist corrected — the operator replays with `replay_dead_outbox_events`.
+
+Refusals that a retry CAN fix stay on §8.1 (500): tenant-verification probe / DB errors, an import race, an allowlist lookup error, a malformed allowlist configuration (ours to fix; the retry window gives time), `no_active_relationship` (until #246 the relationship may arrive after the event), an event ahead of its booking, a version gap, an undelivered page.
 
 ---
 

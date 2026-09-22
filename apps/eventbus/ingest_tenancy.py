@@ -80,6 +80,7 @@ from typing import Any
 from django.conf import settings
 
 from apps.eventbus.ingest_envelope import SYSTEM_EVENT_NAMES
+from apps.eventbus.ingest_rejection import IngestRejection
 from apps.eventbus.ingest_allowlist import (
     AllowlistConfigurationError,
     resolve_allowed_events,
@@ -116,7 +117,33 @@ class TenantAuthorizationError(Exception):
     :attr:`apps.eventbus.ingest_dispatcher.DispatchOutcome.HANDLER_EXCEPTION`
     per `event-contract.md` §8.1. The publisher's retry budget will
     expend and the event will dead-letter — operator triage required.
+
+    DRF-2302: this bare class is the TRANSIENT refusal — a probe or DB
+    error, an import race, a relationship that may still arrive (retry can
+    help, so 500). A refusal no retry can fix raises
+    :class:`TenantRejectedError` instead.
     """
+
+
+class TenantRejectedError(TenantAuthorizationError, IngestRejection):
+    """Постоянный отказ по тенанту (DRF-2302, §8.12): 422 + DLQ, без повтора.
+
+    Наследует :class:`TenantAuthorizationError`, чтобы прежние ``except`` и
+    линт-мандат потребителей работали как были; ``reason`` — slug для DLQ.
+    """
+
+    def __init__(self, message: str, *, reason: str) -> None:
+        super().__init__(message, reason=reason)
+
+
+#: Причины отказа pilot allowlist, которые повтор не исправит — только
+#: правка конфигурации или заведение тенанта, после чего событие повторяют
+#: вручную (DRF-2302). ``tenant_lookup_error`` (сбой БД) и
+#: ``malformed_configuration`` (наша конфигурация сломана — 4,5 ч повторов
+#: дают время починить) остаются временными.
+PERMANENT_ALLOWLIST_REASONS: frozenset[str] = frozenset(
+    {"tenant_not_found", "tenant_not_allowed", "event_not_allowed", "relationship_unavailable"}
+)
 
 
 def _tenant_user_relationship_available() -> bool:
@@ -454,8 +481,9 @@ def _authorize_system_envelope(
     детективный контроль этой поверхности.
     """
     if user_id is not None or tenant_id is not None:
-        raise TenantAuthorizationError(
-            f"system_event_has_subject event_name={_safe_log_value(event_name)}"
+        raise TenantRejectedError(
+            f"system_event_has_subject event_name={_safe_log_value(event_name)}",
+            reason="system_event_has_subject",
         )
     logger.info(
         "eventbus.ingest.tenant_verify_accepted "
@@ -534,14 +562,16 @@ def assert_envelope_tenant_authorized(envelope: Any) -> None:
     # собранный мимо `parse_envelope`, прошёл бы через pilot allowlist,
     # который пользователя не смотрит вовсе.
     if user_id is None:
-        raise TenantAuthorizationError(
-            f"missing_subject_for_non_system_event event_name={_safe_log_value(event_name)}"
+        raise TenantRejectedError(
+            f"missing_subject_for_non_system_event event_name={_safe_log_value(event_name)}",
+            reason="missing_subject",
         )
 
     if tenant_id is None:
         if event_name not in _TENANT_NULLABLE_EVENT_NAMES:
-            raise TenantAuthorizationError(
-                f"tenant_id is null for non-nullable event {_safe_log_value(event_name)!r}"
+            raise TenantRejectedError(
+                f"tenant_id is null for non-nullable event {_safe_log_value(event_name)!r}",
+                reason="tenant_id_null",
             )
         _authorize_tenant_null_envelope(
             event_id=event_id,
@@ -618,7 +648,10 @@ def assert_envelope_tenant_authorized(envelope: Any) -> None:
     # the global escape hatch.
     fail_open = bool(getattr(settings, "EVENT_INGEST_TENANT_VERIFY_FAIL_OPEN", False))
     if not fail_open:
-        raise TenantAuthorizationError(
+        # DRF-2302 — отказ, который исправит только правка конфига или
+        # заведение тенанта, — постоянный (422); сбой поиска и сломанная
+        # конфигурация — временные (500, повтор).
+        message = (
             f"tenant_authorization_denied reason={reason} "
             f"event_name={_safe_log_value(event_name)} "
             f"tenant_id={_safe_log_value(tenant_id)}. "
@@ -628,6 +661,9 @@ def assert_envelope_tenant_authorized(envelope: Any) -> None:
             "EVENT_INGEST_ALLOWED_TENANTS and the event to "
             "EVENT_INGEST_ALLOWED_EVENTS if this delivery is expected."
         )
+        if reason in PERMANENT_ALLOWLIST_REASONS:
+            raise TenantRejectedError(message, reason=reason)
+        raise TenantAuthorizationError(message)
 
     # Opt-in fall-through. Round-3 NEW-5 + Round-4 R3-2 — log +
     # audit row (sampled per (user_id, tenant_id)) per fall-through.
