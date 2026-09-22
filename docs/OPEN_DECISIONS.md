@@ -9956,3 +9956,46 @@ CLEARED_BY_RECHECK = eligible_basis AND mandatory_guards
 
 **Затронутый код:**
 НЕ ПРИМЕНИМО — документальное решение; runtime, тесты и code fixtures в этом § не меняются.
+
+---
+
+## §170. ОТВЕЧЕН (21.09.2026): G7 question contract — G7 только fallback после G1–G6; единственный вопрос `health_screening.g7`; ровно три структурированных ответа; ответ не всегда снимает ограничение; реальный прошедший эпизод сохраняет STOP
+
+**Источник:** ответ владельца (Андрей Тихонов) 21.09.2026 — дословно `утверждаю` (ко всем пяти решениям); полный текст решений — immutable record `docs/safety/reviews/OWNER_RULINGS_S1_G7_QUESTION_CONTRACT_2026-09-21.md` (RECORD SHA-256 `b4f2f3f11045f5527b2c16f616bf4116e15c682ab309e54ccbea1d1f7c3597d9`; регистрация — [§171]). `OWNER POLICY: APPROVED` · `INDEPENDENT PHYSICIAN SIGN-OFF: PENDING` · `CLINICAL APPROVED: NO` · `PHYSICIAN PASS: NO` · `SAFE FOR PILOT: NO` · `CONTROLLED PILOT S1 GATE READY: NO`.
+
+**Связь:** общий контракт и формула record r4 `docs/safety/reviews/OWNER_RULINGS_SAFETY_RECHECK_CONTRACT_2026-09-20_r4.md` (RECORD SHA-256 `2245924e6f551cb5dd84a4e67f50093a1ec2a64646408881449281f1d64a7ef0`) — `CLEARED_BY_RECHECK = ANY(1..5) AND ALL(6..8)` — **не изменены**; уточняет [§160] (G7 → CLARIFY + один вопрос), продолжает [§164] (question contracts G1–G6), [§166–§167], [§168–§169] (record клинических границ `docs/safety/reviews/OWNER_RULINGS_S1_RECHECK_CLINICAL_BOUNDARIES_2026-09-21.md`, RECORD SHA-256 `cf0263dd5d890217e534817ab6fc7ece15af3cbbddfceb827c557c52f15af094`): его owner blocker «G7 question contract не зарегистрирован» снят. Формулировка G7-вопроса record 18.09 ([§160]) — «Прямо сейчас тебе трудно дышать, стоять, говорить, ты теряешь сознание или состояние быстро ухудшается?» — для `health_screening.g7` заменена точным текстом решения 2; record 18.09 и фикстуры с прежней формулировкой не редактируются (историческая формулировка).
+
+**Решение 1.** G7 — только fallback: сначала конкретный признак в G1–G6; G7 — внезапное тяжёлое системное ухудшение, которое нельзя надёжно отнести к G1–G6. Не G7: обычная усталость, недосып, изолированная температура, тошнота без тяжёлого ухудшения, обычное головокружение, переносные выражения о цене, отдалённый эпизод.
+**Решение 2.** `question_id: health_screening.g7`, точный текст «Сейчас есть хотя бы один из признаков: кажется, что вы вот-вот потеряете сознание; трудно самостоятельно стоять, говорить или дышать; появилась спутанность; состояние быстро ухудшается?»; только после неоднозначных сообщений; при явном тяжёлом признаке вопрос не задаётся — STOP; перечень признаков не расширяется.
+**Решение 3.** Ровно три структурированных ответа: «Да, есть хотя бы один признак» → STOP; «Нет — этих признаков не было и сейчас нет, состояние не ухудшается» → `OUTSIDE_S1_G7` (если не выявлена другая группа S1); «Не уверен(а) или не могу ответить» → UNKNOWN. Свободные ответы не эквивалентны ответу 2.
+**Решение 4.** Первый ambiguous-ход без активного ограничения: ответ 2 — G7 не подтверждён, restriction не создаётся, остальные safety-классы проверяются. При активном ограничении ответ 2 — только eligible basis №5 внутри явного `safety_recheck.start` при всех mandatory guards r4; обычная реплика — не recheck.
+**Решение 5.** Реальный прошедший тяжёлый эпизод — не `OUTSIDE_S1_G7`, не `CLEARED_BY_RECHECK`, STOP сохраняется, booking / recommendations не разблокируются; «Было просто очень плохо, но не знаю как» — UNKNOWN / CLARIFY; третье лицо — без личного restriction, с безопасной экстренной рекомендацией, без диагноза и beauty / wellness CTA.
+
+Documentary fixtures `T-S1-G7Q-*`: 25 (ALLOW 10 / DENY 9 / UNKNOWN 6); technical `NOT_IMPLEMENTED`; clinical `PENDING_INDEPENDENT_PHYSICIAN_SIGNOFF`. Runtime `health_screening.g7` не реализуется этим §.
+
+**Остающиеся blockers:**
+1. независимый врачебный sign-off (`INDEPENDENT PHYSICIAN SIGN-OFF: PENDING`);
+2. CQ-CTX-01…03 — `OWNER_POLICY_RESOLVED / PENDING_INDEPENDENT_PHYSICIAN_SIGNOFF`; CQ-CTX-08 и CQ-CTX-09 — `PENDING_CLINICAL_EXPERT` (+ Legal для 08) — без изменений;
+3. G5: вопрос [§164] не выясняет глубину / размер раны, инородное тело, чувствительность / движение;
+4. G4: одиночный ответ «нет» на составной вопрос не отрицает все части;
+5. Package B не реализован (транспорт `safety_recheck.start`, runtime state machine, provenance carrier, runtime `health_screening.g7`);
+6. `clear_restriction()` закрыт (`RecheckNotRegistered`); live-clearance отсутствует.
+
+**Затронутый код:**
+- `docs/safety/reviews/OWNER_RULINGS_S1_G7_QUESTION_CONTRACT_2026-09-21.md` (новый immutable record)
+- `docs/safety/F0-C3-safety-matrix.md` (v0.12-reviewfix8)
+- `docs/safety/reviews/AYLA_CLINICAL_SAFETY_REVIEW_PACK_v0.1_2026-09-16.md` (v0.1-reviewfix8)
+- `docs/safety/reviews/AYLA_S1_SAFETY_RECHECK_CONTRACT_DELTA_v0.1_2026-09-20.md` (v0.1.5)
+- `docs/safety/reviews/S1_CONTEXT_RECHECK_ADVERSARIAL_FIXTURES_v0.2.md` (v0.2.7)
+- `docs/safety/README.md`
+- Runtime, code fixtures, enum / state machine, `clear_restriction()`: НЕ ИЗМЕНЯЮТСЯ этим §.
+
+---
+
+## §171. ЗАРЕГИСТРИРОВАН (21.09.2026): immutable owner record — S1 G7 question contract and structured answers
+
+**Record:** `docs/safety/reviews/OWNER_RULINGS_S1_G7_QUESTION_CONTRACT_2026-09-21.md` — `DO NOT EDIT — SUPERSEDE WITH A NEW RECORD`; RECORD SHA-256 (содержимое выше строки `---- RECORD HASH BOUNDARY ----`) `b4f2f3f11045f5527b2c16f616bf4116e15c682ab309e54ccbea1d1f7c3597d9`; sha256 полного файла `cf28412cd9fec7d43e96edd323f2c926c17a34637f3f33568585eca8656f93a2`. Содержит дословный ответ владельца `утверждаю` (21.09.2026), полный текст решений 1–5 ([§170]), связь с [§160], [§164], [§166–§169], record r4 и record клинических границ 21.09, разграничение owner ruling / supporting rationale (NHS Sepsis — supporting only, проверено 21.09.2026) / engineering elaboration.
+**Что не менялось:** records OD-SAF-11…22, 18.09, r1–r4, клинические границы 21.09 (байт в байт); формула r4; семь групп S1; четыре `SafetyState`; question contracts G1–G6; текст эскалации v2; runtime и code fixtures; 125 прежних фикстур v0.2.x и 35 фикстур v0.1.1 и их verdicts.
+
+**Затронутый код:**
+НЕ ПРИМЕНИМО — документальное решение; runtime, тесты и code fixtures в этом § не меняются.
