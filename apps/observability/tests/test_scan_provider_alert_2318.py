@@ -20,12 +20,14 @@ dead-letter (DRF-2306): второй дедуп по часу, чужие пол
 from __future__ import annotations
 
 import uuid
+from typing import cast
 from unittest.mock import patch
 
 import pytest
 from django.core.cache import cache
 
 from apps.eventbus.consumers import system
+from apps.eventbus.ingest_envelope import IngestEnvelope
 from apps.observability import scan_provider_alert
 from apps.observability.scan_provider_alert import signal_scan_provider_down
 
@@ -94,7 +96,12 @@ class TestA3UndeliveredReleasesTheHour:
             == "not_delivered"
         )
         sent: list = []
-        monkeypatch.setattr(scan_provider_alert, "page", lambda *a, **k: sent.append(1) or True)
+
+        def _ok(*args, **kwargs) -> bool:
+            sent.append(1)
+            return True
+
+        monkeypatch.setattr(scan_provider_alert, "page", _ok)
         assert (
             signal_scan_provider_down(provider="openai", reason="billing_not_active", hour=HOUR)
             == "delivered"
@@ -121,7 +128,7 @@ class TestE1TheConsumerRoutesTheModule:
             patch.object(system, "signal_scan_provider_down", return_value="delivered") as core,
             patch.object(system, "signal_budget") as budget,
         ):
-            system.handle_system_health_degraded(env)
+            system.handle_system_health_degraded(cast(IngestEnvelope, env))
         core.assert_called_once_with(provider="openai", reason="billing_not_active", hour=HOUR)
         budget.assert_not_called()
 
@@ -137,4 +144,4 @@ class TestE1TheConsumerRoutesTheModule:
             patch.object(system, "signal_scan_provider_down", return_value="not_delivered"),
             pytest.raises(system.PageNotDeliveredError),
         ):
-            system.handle_system_health_degraded(env)
+            system.handle_system_health_degraded(cast(IngestEnvelope, env))
