@@ -152,6 +152,7 @@ class TestTheButtonIsNotALie:
         # И среди них нет «недоступно через бот» — ни под старым именем, ни
         # под любым другим.
         assert [name for name, value in texts.items() if "временно недоступна" in value] == []
+        assert "_CLIENT_RETRY_SUCCESS_TEMPLATE" in vars(payment_skill)
         assert "_CLIENT_RETRY_PENDING_TEMPLATE" not in vars(payment_skill)
 
     @pytest.mark.parametrize(
