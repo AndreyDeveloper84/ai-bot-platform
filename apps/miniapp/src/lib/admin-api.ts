@@ -23,6 +23,13 @@ import { applySalonChoiceHeader } from "./salon-choice";
 interface ErrorBody {
   error: string;
   detail: string;
+  /**
+   * Structured refusal details when the server sends them — the same
+   * field `api.ts` already forwards (DRF-2273: the catalog's «что
+   * сделать» rides in `details.hint`). Dropping it here left the admin
+   * screens with only the English `detail`.
+   */
+  details?: Record<string, unknown>;
 }
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -62,7 +69,7 @@ async function requestWithResponse<T>(
     } catch {
       /* non-JSON 5xx */
     }
-    throw new ApiError(res.status, parsed.error, parsed.detail);
+    throw new ApiError(res.status, parsed.error, parsed.detail, parsed.details);
   }
   if (res.status === 204) {
     return { data: undefined as T, response: res };
