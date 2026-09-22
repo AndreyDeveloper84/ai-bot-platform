@@ -421,7 +421,11 @@ def on_diary_tap(context: SkillContext) -> SkillResult:
     """«📔 В дневник» под «Это про еду?»: оценить исходную фразу — или спросить её."""
     bucket = _bucket(context.conversation)
     source = bucket.get("source") if bucket else None
-    parsed = parse_food_text(source) if isinstance(source, str) else None
+    # DRF-2287: фраза-вопрос («а торт в справочнике есть?») — не описание
+    # еды. Оценить её значило бы искать в справочнике весь вопрос и ответить
+    # «Не нашла «а есть вообще торт…»». Спрашиваем, что было, — как без фразы.
+    is_question = isinstance(source, str) and source.rstrip(" )!.…").endswith(("?", "？"))
+    parsed = parse_food_text(source) if isinstance(source, str) and not is_question else None
     if parsed is None:
         _write(context.conversation, {"expect_food": True, "at": _now_iso()})
         return SkillResult(reply_text=ASK_WHAT_TEXT, meta={"reply_kind": "food_text_ask"})

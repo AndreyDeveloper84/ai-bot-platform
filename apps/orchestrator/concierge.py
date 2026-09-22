@@ -1203,6 +1203,29 @@ _NUTRITION_TOOLS_PROMPT_LINES = (
 )
 
 
+#: DRF-2285 (живой проход 22.09): «Сфотографируем еду?» → «Я не умею делать
+#: фото», хотя фото без подписи — рабочий вход в сканер
+#: (``is_structured_nutrition_turn``). Строка — по воротам фото
+#: (:func:`apps.consent.photo_gate.photo_scan_refusal`, флаг
+#: ``FOOD_PHOTO_SCAN_ENABLED``, cross-border): при выключенном распознавании
+#: пригласить прислать фото значило бы пообещать и отказать (ревью #1979).
+FOOD_PHOTO_ON_PROMPT_LINE = (
+    "- Фото еды человек присылает прямо в этот чат, без подписи — бот "
+    "распознаёт его сам и покажет, прежде чем записать. На «сфотографируем "
+    "еду?» пригласи прислать фото; не говори, что не умеешь.\n"
+)
+FOOD_PHOTO_OFF_PROMPT_LINE = (
+    "- Распознавание фото еды сейчас выключено: не обещай разобрать фото — "
+    "предложи написать, что было, словами.\n"
+)
+
+
+def _food_photo_prompt_line() -> str:
+    from apps.consent.photo_gate import photo_scan_refusal
+
+    return FOOD_PHOTO_OFF_PROMPT_LINE if photo_scan_refusal() else FOOD_PHOTO_ON_PROMPT_LINE
+
+
 def _nutrition_tools_prompt_block() -> str:
     """Блок «Инструменты питания» промпта — с учётом единого выключателя.
 
@@ -1222,7 +1245,9 @@ def _nutrition_tools_prompt_block() -> str:
     другой в обоих положениях флага.
     """
     tool_lines = (
-        _NUTRITION_TOOLS_PROMPT_LINES if _nutrition_enabled() else _nutrition_off_prompt_line()
+        _NUTRITION_TOOLS_PROMPT_LINES + _food_photo_prompt_line()
+        if _nutrition_enabled()
+        else _nutrition_off_prompt_line()
     )
     return (
         "Инструменты питания (приоритет обязателен):\n"
