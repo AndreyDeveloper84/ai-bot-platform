@@ -606,7 +606,10 @@ class TestCoachHintTask:
         ):
             tasks.send_coach_hints()
         attachments = send.call_args.kwargs["attachments"]
-        assert button_payloads(attachments) == ["cb:nutri:stop:coach_hint"]
+        # DRF-2267 (CD §72): под сообщением теперь есть и шаг записи;
+        # предмет этого узла — что отписка НА МЕСТЕ и стоит последней
+        # (состав сторожит test_no_dead_ends_proactive_2267).
+        assert button_payloads(attachments)[-1] == "cb:nutri:stop:coach_hint"
 
     def test_a_safety_hit_is_not_journaled(self, tenant: Tenant, settings) -> None:
         """Mandatory case: a guard hit is silence — no send, no journal,
