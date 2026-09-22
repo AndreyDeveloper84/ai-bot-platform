@@ -516,6 +516,26 @@ UPDATE_WEIGHT_CONFIRM_PACE = (
     "Прежде чем пересчитать: темп в профиле — «{current}», но {chose} — "
     "его подставляла прежняя версия анкеты. Какой темп оставить?"
 )
+
+
+#: DRF-2267 (§72): у аварийного хвоста «обнови вес» тоже есть следующий шаг.
+#: Ярлыки — уже живущие в боте: чип «Обновить вес» (повторить, когда каталог
+#: ответит) и «Меню». Новых видимых текстов здесь нет.
+def _update_weight_down(reply_kind: str) -> SkillResult:
+    from apps.orchestrator.next_steps import menu_button
+
+    return SkillResult(
+        reply_text=_AYLA_DOWN_FALLBACK,
+        action_data={
+            "buttons": [
+                {"label": UPDATE_WEIGHT_BUTTON, "callback": UPDATE_WEIGHT_CALLBACK},
+                menu_button(),
+            ]
+        },
+        meta={"reply_kind": reply_kind},
+    )
+
+
 #: Склонение по полу из анкеты, как у подсказки цели; пола нет — без рода.
 _CONFIRM_PACE_CHOSE = {"female": "выбрала его не ты", "male": "выбрал его не ты"}
 _CONFIRM_PACE_CHOSE_DEFAULT = "выбран он не тобой"
@@ -1446,14 +1466,10 @@ class NutritionAnketaSkill:
             )
         except NutritionUnavailableError:
             logger.warning("anketa.update_weight_ayla_unavailable step=upsert")
-            return SkillResult(
-                reply_text=_AYLA_DOWN_FALLBACK, meta={"reply_kind": "anketa_ayla_down"}
-            )
+            return _update_weight_down("anketa_ayla_down")
         except NutritionAPIError:
             logger.exception("anketa.update_weight_ayla_error step=upsert")
-            return SkillResult(
-                reply_text=_AYLA_DOWN_FALLBACK, meta={"reply_kind": "anketa_ayla_error"}
-            )
+            return _update_weight_down("anketa_ayla_error")
 
         logger.info(
             "anketa.update_weight_proposed conv=%s source=%s",
@@ -1592,15 +1608,11 @@ class NutritionAnketaSkill:
         except NutritionUnavailableError:
             self._save_update_weight_state(context, None)
             logger.warning("anketa.update_weight_ayla_unavailable step=confirm_read")
-            return SkillResult(
-                reply_text=_AYLA_DOWN_FALLBACK, meta={"reply_kind": "anketa_ayla_down"}
-            )
+            return _update_weight_down("anketa_ayla_down")
         except NutritionAPIError:
             self._save_update_weight_state(context, None)
             logger.exception("anketa.update_weight_ayla_error step=confirm_read")
-            return SkillResult(
-                reply_text=_AYLA_DOWN_FALLBACK, meta={"reply_kind": "anketa_ayla_error"}
-            )
+            return _update_weight_down("anketa_ayla_error")
 
         if getattr(profile, "targets_source", "") == "user_entered":
             # Пока вопрос висел, человек поставил ориентир специалиста: вес

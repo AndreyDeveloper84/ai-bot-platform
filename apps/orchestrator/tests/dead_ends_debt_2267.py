@@ -70,7 +70,9 @@ DEBT: dict[str, int] = {
     "apps/skills/nutrition_anketa/skill.py::_on_withdraw_keep": 1,
     "apps/skills/nutrition_anketa/skill.py::_route_update_weight": 1,
     "apps/skills/nutrition_anketa/skill.py::_update_weight_over_manual": 4,
-    "apps/skills/nutrition_anketa/skill.py::_update_weight_with": 7,
+    # DRF-2279: два хвоста уехали в ``_update_weight_send`` (сплит) и получили
+    # кнопки — долг уменьшен, не снят.
+    "apps/skills/nutrition_anketa/skill.py::_update_weight_with": 5,
     "apps/skills/nutrition_anketa/skill.py::handle": 1,
     "apps/skills/payment_failed/skill.py::_build_reply": 1,
     "apps/skills/privacy_consent/skill.py::handle": 3,

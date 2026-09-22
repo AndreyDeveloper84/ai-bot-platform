@@ -36,11 +36,15 @@ import httpx
 import pytest
 
 from apps.integrations.ayla.nutrition_client import NutritionClient
-from apps.skills.nutrition_anketa.skill import UPDATE_WEIGHT_CANCEL_CALLBACK
+from apps.skills.nutrition_anketa.skill import (
+    UPDATE_WEIGHT_BUTTON,
+    UPDATE_WEIGHT_CANCEL_CALLBACK,
+)
 from apps.skills.nutrition_anketa.tests.test_update_weight_2139 import (
     _SNAPSHOT,
     _calculated,
     _callbacks,
+    _labels,
     _Run,
 )
 
@@ -293,3 +297,18 @@ class TestVoice:
         asked = run.turn("мой вес 65")
         assert "не твой ответ" in asked.reply_text
         assert "Какая у тебя обычно активность?" in asked.reply_text
+
+
+class TestNoDeadEnd:
+    """§72 / DRF-2267: аварийный хвост подтверждения тоже даёт следующий шаг."""
+
+    def test_the_catalogue_down_tail_carries_buttons(self) -> None:
+        run = _Run(profile=_marked("pace"))
+        run.turn("мой вес 65")
+        run._client.get_profile = _raise_unavailable
+        down = run.turn(f"{CB_PACE}moderate")
+
+        assert down.meta["reply_kind"] == "anketa_ayla_down"
+        # Ярлыки — те, что уже живут в боте: повторить вес и «Меню».
+        assert _labels(down)[0] == UPDATE_WEIGHT_BUTTON
+        assert len(_labels(down)) == 2
