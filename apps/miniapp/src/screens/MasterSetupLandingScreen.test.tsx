@@ -132,12 +132,17 @@ describe("экран 01", () => {
     expect(screen.getByText(SETUP_RESUME_NOTE)).toBeInTheDocument();
   });
 
-  it("недоступный пункт не тапается: вести некуда, deep_link пуст", async () => {
+  it("недоступный пункт не тапается — даже когда сервер прислал ссылку", async () => {
+    // У location в FRESH deep_link НЕ пуст намеренно: проверяем поведение,
+    // а не форму. Иначе `onClick` на том же div прошёл бы обе проверки и
+    // открыл ровно ту дверь, которую тикет открывать запрещает.
     mockedReadiness.mockResolvedValue(FRESH);
     renderScreen();
     const row = await screen.findByTestId("setup-item-location");
     expect(row.tagName).not.toBe("BUTTON");
     expect(within(row).queryByRole("button")).toBeNull();
+    fireEvent.click(row);
+    expect(screen.queryByTestId("location")).toBeNull();
   });
 
   it("причина «ведётся не здесь» названа своим текстом, чужой причины — нет", async () => {
@@ -168,11 +173,58 @@ describe("экран 01", () => {
     expect(row.textContent).not.toContain("нечто_новое");
   });
 
-  it("недоступный пункт не становится следующим шагом и не входит в бар", async () => {
-    mockedReadiness.mockResolvedValue(FRESH);
+  it("причины нет вовсе: пункт называет состояние и молчит о причине", async () => {
+    mockedReadiness.mockResolvedValue(
+      readiness([
+        item("services", "unavailable", { reason: null, deep_link: null }),
+        item("hours", "missing"),
+      ]),
+    );
+    renderScreen();
+    const row = await screen.findByTestId("setup-item-services");
+    expect(row.textContent).toContain(ITEM_STATE_TEXT.unavailable);
+    expect(row.textContent).toBe(`—Услуги и цены${ITEM_STATE_TEXT.unavailable}`);
+  });
+
+  it("салонный мастер: оба недоступных пункта названы; бар полон, кнопки нет", async () => {
+    // Замер, а не одобрение. У салонного мастера сервер помечает недоступными
+    // И услуги, И место (workspace_kind == "salon", DRF-2254). Когда остальное
+    // настроено, экран показывает полный бар, не даёт ни одной кнопки действия
+    // и не объясняет, почему нельзя отправить профиль: `ready` ложно, оба
+    // пункта остались в blocking. Тикет DRF-2326 этот тупик не чинит — он
+    // называет пункты; узел держит нынешнее поведение, чтобы молчание было
+    // записанным, а не случайным.
+    mockedReadiness.mockResolvedValue(
+      readiness([
+        item("services", "unavailable", { reason: "managed_outside_app", deep_link: null }),
+        item("location", "unavailable", { reason: "managed_outside_app", deep_link: null }),
+        item("hours", "done"),
+        item("profile", "done"),
+      ]),
+    );
+    renderScreen();
+    const list = await screen.findByRole("list", { name: "Осталось настроить" });
+    expect(within(list).getAllByRole("listitem")).toHaveLength(4);
+    expect(within(list).getAllByText(REASON_TEXT.managed_outside_app)).toHaveLength(2);
+    const bar = screen.getByTestId("setup-bar");
+    expect(bar).toHaveAttribute("aria-valuemax", "2");
+    expect(bar).toHaveAttribute("aria-valuenow", "2");
+    expect(screen.queryByRole("button", { name: START_LABEL })).toBeNull();
+    expect(screen.queryByRole("button", { name: PUBLISH_ENTRY_LABEL })).toBeNull();
+  });
+
+  it("недоступный пункт не становится следующим шагом", async () => {
+    // Недоступный пункт стоит ПЕРВЫМ: иначе «первый незакрытый» совпал бы с
+    // верным ответом и без отбора, и узел ничего бы не держал.
+    mockedReadiness.mockResolvedValue(
+      readiness([
+        item("location", "unavailable", { reason: "capability_not_built", deep_link: null }),
+        item("services", "missing"),
+        item("hours", "missing"),
+      ]),
+    );
     renderScreen();
     fireEvent.click(await screen.findByRole("button", { name: START_LABEL }));
-    // Первый незакрытый — «Услуги и цены», а не недоступное «Место работы».
     expect(await screen.findByTestId("location")).toHaveTextContent("/solo/services");
   });
 

@@ -360,8 +360,11 @@ export type ReadinessItemKey = "services" | "location" | "hours" | "profile";
 /**
  * `done` / `missing` — факт; `unknown` — канон не ответил (`reason` — имя
  * исключения): экран НЕ пишет «настройте», а показывает «не удалось
- * прочитать»; `unavailable` — возможности ещё нет (`capability_not_built`):
- * пункт не рисуется вовсе.
+ * прочитать»; `unavailable` — шага у мастера сейчас нет: либо возможности
+ * ещё нет (`capability_not_built`), либо он ведётся не в приложении
+ * (`managed_outside_app` — салонное рабочее пространство, DRF-2254). До
+ * DRF-2326 такой пункт не рисовался вовсе; теперь рисуется названным
+ * недоступным, с причиной и без тапа.
  */
 export type ReadinessItemState = "done" | "missing" | "unknown" | "unavailable";
 

@@ -72,10 +72,16 @@ export const ITEM_STATE_TEXT = {
  *
  * ЧЕРНОВИК ТЕКСТА: формулировки в тикете не заданы, их утверждает владелец.
  */
-export const REASON_TEXT: Record<string, string> = {
+export const REASON_TEXT = {
   capability_not_built: "Возможности ещё нет",
   managed_outside_app: "Настраивается не в приложении",
-};
+} as const;
+
+/** Текст причины по коду сервера; незнакомый код — без текста, не сырым кодом. */
+export function reasonText(reason: string | null): string | undefined {
+  if (!reason) return undefined;
+  return (REASON_TEXT as Record<string, string | undefined>)[reason];
+}
 
 export const SETUP_LEAD = "Ваше рабочее пространство уже создано.";
 export const SETUP_EXPLAIN = "Теперь подготовим профиль, чтобы клиенты могли записываться к вам.";
@@ -246,7 +252,7 @@ function ItemRow({ item, onOpen }: { item: ReadinessItem; onOpen: () => void }) 
   if (item.state === "unavailable") {
     // Шага у мастера сейчас нет: показываем и называем причину, но вести
     // некуда — `deep_link` у таких пунктов пуст.
-    const reason = item.reason ? REASON_TEXT[item.reason] : undefined;
+    const reason = reasonText(item.reason);
     return (
       <div className="setup-landing__row" data-testid={`setup-item-${item.key}`}>
         <span className="setup-landing__mark" aria-hidden="true">
