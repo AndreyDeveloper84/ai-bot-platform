@@ -339,14 +339,9 @@ export function CustomerWellnessDashboardScreen() {
   }, [waterToast, undoEntryId]);
   // ── quick-action handlers ────────────────────────────────────────────
   //
-  // Быстрого действия «📸 Сфотографируй еду» здесь БОЛЬШЕ НЕТ
-  // (DRF-1546, тот же признак, что §33 / DRF-1543). За ним не было
-  // ручки: `/api/v1/customer/food/{scan,log,daily}` отвечают 404 на
-  // боевом контуре, а `food-scanner.ts::guardProd` вне DEV бросает
-  // `StubNotWiredError` — то есть кнопка вела на падающий экран.
-  // Маршруты `/customer/food-scanner/*` намеренно оставлены (§33:
-  // снимается вход, а не маршрут); вернуть кнопку — одна строка, когда
-  // ручки появятся. Настоящий дневник питания живёт в боте.
+  // Отдельного «📸 Сфотографируй еду» нет (снято в DRF-1546, пока у
+  // съёмки не было ручки). Ручки подключены (DRF-2098/2106), и фото
+  // теперь — вход «Записать питание» (DRF-2289, ниже).
 
   const onWaterTap = useCallback(() => {
     // §11.8 — offline: queue to localStorage 24h TTL. Real POST is
@@ -449,8 +444,16 @@ export function CustomerWellnessDashboardScreen() {
   }, [navigate]);
 
   // Вход в дневник живёт во вкладке «Дневник» (DRF-1839 → DRF-2144);
-  // быстрое действие «Записать питание» ведёт сразу к вводу текстом.
+  // быстрое действие «Записать питание» ведёт к съёмке фото (DRF-2289),
+  // ввод текстом — ссылкой «Записать текстом» на том же экране. Гейт
+  // согласия на сканер съёмка проверяет сама (DRF-1564).
   const onFoodTap = useCallback(() => {
+    navigate("/customer/food-scanner/capture");
+  }, [navigate]);
+
+  // Карточка «Начнём с малого?» обещает именно текст — её кнопка ведёт
+  // прямо в ввод текстом, а не на съёмку (DRF-2289).
+  const onFoodTextTap = useCallback(() => {
     navigate("/customer/food-scanner/manual");
   }, [navigate]);
 
@@ -726,7 +729,7 @@ export function CustomerWellnessDashboardScreen() {
               <button
                 type="button"
                 className="btn-secondary wellness-dash__onboarding-cta"
-                onClick={onFoodTap}
+                onClick={onFoodTextTap}
               >
                 Записать текстом
               </button>

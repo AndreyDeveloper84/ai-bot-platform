@@ -44,6 +44,7 @@ import {
   FOOD_DIARY_DISCLOSURE_VERSION,
 } from "../lib/food-diary-disclosure";
 import { Skeleton } from "../components/Skeleton";
+import { MANUAL_ROUTE } from "./FoodScannerManualScreen";
 import { StateError } from "../components/StateError";
 import { useScreenBack } from "../hooks/useScreenBack";
 import { backTo } from "../lib/screen-back";
@@ -373,6 +374,18 @@ export function FoodScannerCaptureScreen() {
             {error}
           </div>
         )}
+
+        {/* DRF-2289 — фото не единственный путь: вход с Главной ведёт
+            сюда, а ввод текстом — эта ссылка. Подпись — черновик для
+            владельца. */}
+        <button
+          type="button"
+          className="food-scanner-screen__text-link"
+          disabled={processing}
+          onClick={() => navigate(MANUAL_ROUTE)}
+        >
+          Записать текстом
+        </button>
 
         <p className="food-scanner-screen__privacy">
           Фото нужно только чтобы узнать блюдо — удаляю сразу.
