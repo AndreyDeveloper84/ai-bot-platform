@@ -379,8 +379,10 @@ class TestNoNutrientRemarkWithoutFood:
             summary(calories_total=0.0, protein_g=0.0, entries=[]), water(total_ml=2000), profile()
         )
         assert "Вода: 2000 из 2000 мл." in text  # наличие: отчёт нарисован
-        assert "Белка" not in text
-        assert "ккал" not in text
+        # Реплика — оценка («меньше ориентира», «осталось») — снята. Строки
+        # фактов («Калории: 0 из 1900») — не этот лист: названы главному окну.
+        assert "меньше ориентира" not in text
+        assert "осталось" not in text
 
 
 class TestNoTargetNoJudgement:
