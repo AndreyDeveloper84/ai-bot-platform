@@ -12,11 +12,15 @@
 ``HUMAN_HANDOFF``. Лист подключает перенос к этому пути.
 
 **Текст не меняется** — он становится правдой.
+
+Красных до правки — пять; ещё два узла зелёные и до неё: они сторожа, а не
+измерение (текст обещания и состояние напоминания не должны были поменяться).
 """
 
 from __future__ import annotations
 
 from datetime import timedelta
+from unittest import mock
 
 import pytest
 from django.utils import timezone
@@ -137,6 +141,70 @@ class TestThePromiseHasAnAddressee:
 
         conversation.refresh_from_db()
         assert conversation.state == Conversation.State.HUMAN_HANDOFF
+
+
+class TestTheHandoverIsAllOrNothing:
+    def test_a_failed_handover_leaves_the_reminder_alone(
+        self, tenant: Tenant, bot_user: BotUser, conversation: Conversation, reminder
+    ) -> None:
+        """Ради этого и транзакция: не передали — не пометили «перенос запрошен».
+
+        Иначе человек остался бы со строкой «запрошено», которую никто не
+        держит, а повтор получил бы «уже обработано».
+        """
+        with tenant_scope(tenant):
+            with mock.patch(
+                "apps.bookings.callbacks.create_admin_task", side_effect=RuntimeError("boom")
+            ):
+                with pytest.raises(RuntimeError):
+                    _press_reschedule(reminder, bot_user, conversation)
+
+        reminder.refresh_from_db()
+        assert reminder.status == BookingReminder.Status.SENT_NO_REPLY
+        assert reminder.replied_at is None
+        assert _tasks(conversation) == []
+
+    def test_after_a_failure_the_person_can_press_again(
+        self, tenant: Tenant, bot_user: BotUser, conversation: Conversation, reminder
+    ) -> None:
+        """Положительная пара: откат не запирает кнопку."""
+        with tenant_scope(tenant):
+            with mock.patch(
+                "apps.bookings.callbacks.create_admin_task", side_effect=RuntimeError("boom")
+            ):
+                with pytest.raises(RuntimeError):
+                    _press_reschedule(reminder, bot_user, conversation)
+            result = _press_reschedule(reminder, bot_user, conversation)
+
+        assert result.reply_text == REPLY_RESCHEDULE
+        assert len(_tasks(conversation)) == 1
+
+
+class TestTheTaskTypeKeepsTheMuteNarrow:
+    def test_the_task_is_manual_not_handoff(
+        self, tenant: Tenant, bot_user: BotUser, conversation: Conversation, reminder
+    ) -> None:
+        """MANUAL, а не HANDOFF: `global_handoff_muted` фильтрует HANDOFF, и
+        глобальный диалог человека остаётся с ботом — молчит только салонный."""
+        with tenant_scope(tenant):
+            _press_reschedule(reminder, bot_user, conversation)
+
+        (task,) = _tasks(conversation)
+        assert task.task_type == AdminTask.TaskType.MANUAL
+
+    def test_the_reason_carries_no_phone(
+        self, tenant: Tenant, bot_user: BotUser, conversation: Conversation, reminder
+    ) -> None:
+        """DRF-1039: телефон клиента персоналу не показывается."""
+        BotUser.all_tenants.filter(pk=bot_user.pk).update(phone="+79995550111")
+
+        with tenant_scope(tenant):
+            _press_reschedule(reminder, bot_user, conversation)
+
+        (task,) = _tasks(conversation)
+        assert RECORD_ID in task.reason  # наличие: строка та самая
+        assert "+79995550111" not in task.reason
+        assert "9995550111" not in task.reason
 
 
 class TestTheTextIsUnchanged:

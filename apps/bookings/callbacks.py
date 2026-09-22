@@ -733,10 +733,23 @@ class BookingReminderCallbackSkill:
         do not change; they become true.
 
         The status flip and the task live in ONE transaction, in that order.
-        The conditional UPDATE is the lock that makes a second press a replay
-        (one task per reminder); wrapping both means a failed handover leaves
-        the reminder untouched, so the person can press again — instead of a
-        row marked «requested» with nobody holding it.
+        The conditional UPDATE is what makes a second press a replay — and it
+        only works as a lock from INSIDE the transaction: a concurrent press
+        blocks on the row until this one commits, then re-evaluates
+        ``status=SENT_NO_REPLY`` and gets zero rows. Wrapping both also means a
+        failed handover leaves the reminder untouched, so the person can press
+        again — instead of a row marked «requested» with nobody holding it.
+        The cost of that honesty: a failure raises, and a raising callback
+        turn sends no reply at all (the consumer logs it) — silence, not a lie.
+
+        ``MANUAL`` rather than ``HANDOFF`` keeps the mute narrow:
+        ``apps.orchestrator.handoff.global_handoff_muted`` filters on
+        ``HANDOFF``, so the person's global dialogue keeps working while the
+        salon one waits for the operator.
+
+        Requires a tenant in scope — the consumer loop opens it
+        (``apps/workers/consumer.py``), and ``turn_seam`` already refuses a
+        per-tenant turn without one.
         """
         now = timezone.now()
         with transaction.atomic():
