@@ -669,7 +669,13 @@ class WelcomeSkill:
         # и накрыл бы возврат в поток полным первым приветствием.
         _stamp_welcomed_at(context.bot_user)
         action_data: dict | None = None
-        reply_text = CONSENT_RECOVERY_RETURN_TEXTS[origin]
+        if origin in CONSENT_RECOVERY_RESUMED_ORIGINS:
+            # Возврат делает вызывающий, после записи согласия.
+            from apps.orchestrator.personal_surface import DIARY_UNAVAILABLE_TEXT
+
+            reply_text = DIARY_UNAVAILABLE_TEXT
+        else:
+            reply_text = CONSENT_RECOVERY_RETURN_TEXTS[origin]
         if origin == "miniapp":
             # DRF-2230 (скрин владельца 21.09): «возвращайся в приложение» без
             # кнопки оставлял человека в чате без пути дальше.
@@ -1019,7 +1025,19 @@ def _start_buttons() -> list[dict[str, str]]:
 #: входе ручного ориентира ведёт сюда же.
 #: ``miniapp`` — кнопка «Дать согласие в чате» на Главной Mini App (DRF-2230):
 #: приглашение приходит в чат само, по нажатию в приложении.
-CONSENT_RECOVERY_ORIGINS: tuple[str, ...] = ("photo", "text", "water", "target", "miniapp")
+#: ``diary`` (DRF-2267) — отказ ЧТЕНИЯ дневника: «мне нужно согласие на
+#: обработку личных данных». Возврат у него особый и живёт не здесь, а в
+#: ``global_onboarding.run_onboarding_turn``: дневник рисуется ПОСЛЕ записи
+#: согласия, иначе он спросил бы своё согласие раньше, чем оно записано, и
+#: человек получил бы отказ сразу после того, как согласие дал.
+CONSENT_RECOVERY_ORIGINS: tuple[str, ...] = (
+    "photo",
+    "text",
+    "water",
+    "target",
+    "miniapp",
+    "diary",
+)
 
 #: Вид ответа «согласие выдано из отказа»: по нему глобальный онбординг пишет
 #: журнал согласий тем же путём, что и приветственный S5.
@@ -1046,6 +1064,18 @@ CONSENT_OFFER_LABEL = "Дать согласие"
 #: «После consent возвращать пользователя в исходный flow»). ЧЕРНОВИК: сами
 #: фразы владельцем не утверждены, вынесены вопросом W3 вместе с текстами
 #: «забудь всё»; экран согласия при этом — утверждённый S2_CONSENT_TEXT.
+#: Входы, которые возвращают человека СВОЕЙ поверхностью, а не заготовленной
+#: фразой: возврат у них — сам ответ того потока (для ``diary`` — дневник,
+#: который рисует :func:`apps.channels.max.global_onboarding._resume_after_consent`
+#: после записи согласия). Фразы в :data:`CONSENT_RECOVERY_RETURN_TEXTS` у
+#: них нет и не должно быть: это был бы новый видимый текст рядом с ответом,
+#: который человек и так получит.
+CONSENT_RECOVERY_RESUMED_ORIGINS: frozenset[str] = frozenset({"diary"})
+
+#: Для ``diary`` строки здесь нет намеренно: возвращает сам дневник, своим
+#: текстом (см. :data:`CONSENT_RECOVERY_ORIGINS`). Сюда ветка доходит только
+#: если возврат не состоялся, и тогда говорит то же, что дневник в свой
+#: недоступный час, — не выдумывая нового обещания.
 CONSENT_RECOVERY_RETURN_TEXTS: dict[str, str] = {
     "photo": "Готово, согласие есть. Пришли фото ещё раз — запишу в дневник.",
     "text": "Готово, согласие есть. Напиши, что съела, — посчитаю и запишу.",

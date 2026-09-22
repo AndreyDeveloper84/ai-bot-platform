@@ -432,7 +432,18 @@ def render_diary(
         return _reply(_nutrition_unavailable_text(), [])
 
     if not personal_records_consent_open(bot_user):
-        return _reply(CONSENT_CLOSED_TEXT, [])
+        # DRF-2267 (CD §72): отказ назвал условие и не давал его выполнить.
+        # Кнопка ведёт на экран согласия и помнит, что человек шёл в дневник
+        # (DRF-1968); вне глобального пути её нет — там тап вернулся бы к
+        # тому же отказу, — и остаётся общий выход.
+        from apps.skills.welcome.skill import consent_offer_action_data
+
+        offer = consent_offer_action_data("diary")
+        if offer is not None:
+            return DiscoveryReply(text=CONSENT_CLOSED_TEXT, action_data=offer)
+        from apps.orchestrator.next_steps import menu_button
+
+        return _reply(CONSENT_CLOSED_TEXT, [menu_button()])
 
     profile = _fetch_profile(bot_user)
     if period == PERIOD_WEEK:
