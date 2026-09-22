@@ -34,7 +34,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { ScreenLayout } from "../../components/ScreenLayout";
-import { ShareableLink } from "../../components/ShareableLink";
 import { StickyCta } from "../../components/StickyCta";
 import { ApiError } from "../../lib/api";
 import {
@@ -45,11 +44,12 @@ import {
   type StaffInviteResponse,
   type StaffInviteRole,
 } from "../../lib/admin-api";
-import { formatDateLong } from "../../lib/masterDateFormat";
 import { hapticNotify, hapticSelection } from "../../lib/max-sdk";
 import { backTo, screenRoot } from "../../lib/screen-back";
 import { useClosingConfirmation } from "../../hooks/useClosingConfirmation";
 import type { ReactNode } from "react";
+
+import { IssuedAccessCode } from "./IssuedAccessCode";
 
 /**
  * Ready-to-forward invitation text — STILL NOT DECIDED FOR THIS BRANCH.
@@ -134,7 +134,6 @@ export function AddPersonAccessCodeSection({ me, switcher }: Props) {
   const [mastersFailed, setMastersFailed] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
 
   const visibleRoles = useMemo(
     () => ROLE_OPTIONS.filter((o) => !o.ownerOnly || me.is_owner),
@@ -204,23 +203,9 @@ export function AddPersonAccessCodeSection({ me, switcher }: Props) {
 
   function onIssueAnother() {
     hapticSelection();
-    setCopied(false);
     setErr(null);
     setNote("");
     setStage({ kind: "form" });
-  }
-
-  async function onCopy(code: string) {
-    // Clipboard is a convenience, never the only way out: the code stays
-    // selectable on screen, so a refusal (older webview, denied
-    // permission) costs nothing but the button's feedback.
-    try {
-      await navigator.clipboard.writeText(code);
-      setCopied(true);
-      hapticSelection();
-    } catch {
-      setCopied(false);
-    }
   }
 
   if (stage.kind === "issued") {
@@ -233,70 +218,11 @@ export function AddPersonAccessCodeSection({ me, switcher }: Props) {
         title="Код доступа"
         cta={<StickyCta onClick={goBackToTeam}>Готово</StickyCta>}
       >
-        {/* Above the code on purpose: a warning under it is read after the
-            reader has already decided what to do. */}
-        <div className="callout callout--danger" role="alert">
-          <p className="staff-access__once">
-            Код и ссылка показываются один раз.
-          </p>
-          <p className="staff-access__once-detail">
-            Мы храним только отпечаток кода — восстановить его нельзя ни здесь,
-            ни в поддержке. Передайте до того, как закроете экран.
-          </p>
-        </div>
-
-        <p className="staff-access__code" aria-label={`Код доступа ${issued.code}`}>
-          {issued.code}
-        </p>
-
-        <button
-          type="button"
-          className="btn-secondary"
-          onClick={() => void onCopy(issued.code)}
-        >
-          {copied ? "Скопировано" : "Скопировать код"}
-        </button>
-        {/* Слышимый итог: смена подписи кнопки скринридеру не событие. */}
-        {copied && (
-          <p className="shareable__copied" role="status">
-            Код скопирован.
-          </p>
-        )}
-
-        {issued.invite_link ? (
-          <ShareableLink
-            url={issued.invite_link}
-            label="Ссылка вместо кода"
-            hint={
-              "Открывшему её доступ откроется сразу — код вводить не нужно. " +
-              "Это тот же самый код: кто перейдёт по ссылке, тот его и " +
-              "потратит, поэтому отправляйте её только тому человеку."
-            }
-          />
-        ) : (
-          <p className="admin-hint">
-            Ссылки нет: в этом контуре не настроен салонный бот. Код по-прежнему
-            работает, если ввести его в диалоге с ботом.
-          </p>
-        )}
-
-        <dl className="staff-access__meta">
-          <dt>Роль</dt>
-          <dd>{roleLabel}</dd>
-          {masterName && (
-            <>
-              <dt>Мастер</dt>
-              <dd>{masterName}</dd>
-            </>
-          )}
-          <dt>Действует до</dt>
-          <dd>{formatDateLong(issued.expires_at)}</dd>
-        </dl>
-
-        <p className="staff-access__how">
-          Человек отправляет этот код салонному боту в диалоге — доступ
-          откроется сразу.
-        </p>
+        <IssuedAccessCode
+          issued={issued}
+          roleLabel={roleLabel}
+          masterName={masterName}
+        />
 
         {/* The seam described at the top of this file. Absent until the
             owner rules on the wording; never a placeholder. */}
