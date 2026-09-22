@@ -53,6 +53,7 @@ from apps.eventbus.ingest_envelope import IngestEnvelope
 from apps.eventbus.ingest_tenancy import assert_envelope_tenant_authorized
 from apps.observability.outbox_dead_alert import signal_outbox_dead
 from apps.observability.scan_budget_alert import signal_budget
+from apps.observability.scan_provider_alert import signal_scan_provider_down
 
 
 class PageNotDeliveredError(RuntimeError):
@@ -68,6 +69,9 @@ _FOOD_SCAN_MODULE = "nutrition.food_scan"
 #: DRF-2306 — dead-letter outbox каталога (контракт §6.4).
 _OUTBOX_MODULE = "appointments.outbox"
 
+#: DRF-2318 — стойкий отказ распознавателя фото в каталоге. Своё имя модуля:
+#: под ``nutrition.food_scan`` здесь читается метрика бюджета (с ``day``).
+_SCAN_PROVIDER_MODULE = "nutrition.food_scan.provider"
 #: Поля метрики outbox — ровно те, что принимает ядро страницы.
 _OUTBOX_FIELDS = ("topic", "failure", "http_status", "count", "hour", "reason")
 
@@ -82,6 +86,9 @@ def handle_system_health_degraded(envelope: IngestEnvelope) -> None:
     module = data.get("module_name")
     if module == _OUTBOX_MODULE:
         _handle_outbox_dead(envelope)
+        return
+    if module == _SCAN_PROVIDER_MODULE:
+        _handle_scan_provider_down(envelope)
         return
     if module != _FOOD_SCAN_MODULE:
         logger.info(
@@ -144,6 +151,29 @@ def _handle_outbox_dead(envelope: IngestEnvelope) -> None:
     if outcome == "not_delivered":
         raise PageNotDeliveredError(
             f"outbox dead-letter page not delivered event_id={envelope.event_id}"
+        )
+
+
+def _handle_scan_provider_down(envelope: IngestEnvelope) -> None:
+    """DRF-2318 — стойкий отказ распознавателя → страница операторам.
+
+    Поля проверяет ядро (:func:`signal_scan_provider_down`); здесь только форма
+    метрики и отказ принять событие, если страница не ушла, — как у бюджета.
+    """
+    metric = envelope.data.get("metric")
+    if not isinstance(metric, dict):
+        logger.warning(
+            "eventbus.system.scan_provider_metric_not_object event_id=%s type=%s",
+            envelope.event_id,
+            type(metric).__name__,
+        )
+        return
+    outcome = signal_scan_provider_down(
+        provider=metric.get("provider"), reason=metric.get("reason"), hour=metric.get("hour")
+    )
+    if outcome == "not_delivered":
+        raise PageNotDeliveredError(
+            f"scan provider page not delivered event_id={envelope.event_id}"
         )
 
 

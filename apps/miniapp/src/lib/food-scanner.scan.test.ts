@@ -101,6 +101,8 @@ describe("scanPhoto — multipart к POST /food/scan", () => {
     // попробуй через минуту» — ровно тот дефект, который лист чинит.
     ["food_scan_daily_limit", 429, ScanDailyLimitError],
     ["food_scan_budget_exhausted", 503, ScanBudgetExhaustedError],
+    // DRF-2318 — стойкий отказ распознавателя: тот же честный экран без «через минуту».
+    ["food_scan_provider_down", 503, ScanBudgetExhaustedError],
     ["nutrition_unavailable", 503, NutritionUnavailableError],
     ["photo_too_large", 413, PhotoTooLargeError],
   ])("отказ бота %s → своя ошибка §7", async (slug, status, cls) => {
