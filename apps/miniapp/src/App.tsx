@@ -83,6 +83,7 @@ import { AdminInternalChatThreadScreen } from "./screens/admin/AdminInternalChat
 import { AdminMasterDetailScreen } from "./screens/admin/AdminMasterDetailScreen";
 import { AdminNewBookingScreen } from "./screens/admin/AdminNewBookingScreen";
 import { AdminPeopleScreen } from "./screens/admin/AdminPeopleScreen";
+import { AdminInvitesScreen } from "./screens/admin/AdminInvitesScreen";
 import { AdminHandoffQueueScreen } from "./screens/admin/AdminHandoffQueueScreen";
 import { AdminReadinessScreen } from "./screens/admin/AdminReadinessScreen";
 import { AdminSalonDayScreen } from "./screens/admin/AdminSalonDayScreen";
@@ -420,6 +421,11 @@ function adminRouteElements(me: MeResponse): React.ReactNode {
       <Route
         path="/admin/team/people"
         element={<AdminPeopleScreen me={me} />}
+      />
+      {/* DRF-2275 — issued access codes. Owner and admin; see the screen. */}
+      <Route
+        path="/admin/team/invites"
+        element={<AdminInvitesScreen me={me} />}
       />
       <Route
         path="/admin/team/:masterId/deactivate"

@@ -271,6 +271,26 @@ ADMIN_ROUTES: dict[str, Entry] = {
         "a flag and a role name, no field of the person",
         via=A + "views_staff_role:staff_restore",
     ),
+    "staff_invites_list": third_party(
+        "items[].note",
+        "items[].master_name",
+        via=A + "views_staff_invites:staff_invites_list",
+        whose="the people the salon invited — as the issuer labelled them, and the master card",
+        why=(
+            "the owner or admin who issues codes sees which are still waiting and for whom; the "
+            "note is the issuer's own label written at issue time, the card name is the catalog's; "
+            "never the code, which is stored only as a hash"
+        ),
+    ),
+    "staff_invite_cancel": none(
+        "{changed, status} — whether the code was cancelled; a flag and a status word",
+        via=A + "views_staff_invites:staff_invite_cancel",
+    ),
+    "staff_invite_resend": none(
+        "{invite_id, role, code, expires_at, code_is_shown_once, invite_link, resent_from} — a "
+        "fresh one-time access code for the same invitation; no field of the person",
+        via=A + "views_staff_invites:staff_invite_resend",
+    ),
     "staff_roster": third_party(
         "items[].name",
         "items[].bot_user_id",

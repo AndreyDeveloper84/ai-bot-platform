@@ -511,6 +511,24 @@ export function AdminTeamScreen({ me }: Props) {
         </button>
       )}
 
+      {/*
+        DRF-2275 — the codes issued from «Добавить человека»: who has not
+        arrived yet, and cancelling or re-issuing a code. Owner AND admin,
+        unlike the entry above: whoever issues codes manages them.
+      */}
+      {(me.is_owner || me.is_admin) && (
+        <button
+          type="button"
+          className="admin-flow-back"
+          onClick={() => {
+            hapticSelection();
+            navigate("/admin/team/invites");
+          }}
+        >
+          Выданные коды доступа
+        </button>
+      )}
+
       <div
         role="tablist"
         aria-label="Фильтр команды"
