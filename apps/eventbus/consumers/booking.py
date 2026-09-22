@@ -76,6 +76,7 @@ from apps.booking.models import BookingReminder, RemoteBookingProxy
 from apps.booking.reminder_lookup import reminders_for_appointment
 from apps.booking.services.attribution import compute_assist_score, compute_billable
 from apps.conversations.models import Conversation
+from apps.eventbus.ingest_rejection import IngestRejection
 from apps.events.services import emit as emit_internal_event
 from apps.eventbus import vocabulary as V
 from apps.eventbus.ingest_dispatcher import register
@@ -216,8 +217,13 @@ _ANNOUNCEMENT_BLOCKED_STATUSES: Final[frozenset[str]] = frozenset(
 )
 
 
-class UnknownBookingStatusError(ValueError):
-    """``booking.created`` carried a status outside the closed enum."""
+class UnknownBookingStatusError(ValueError, IngestRejection):
+    """``booking.created`` carried a status outside the closed enum.
+
+    DRF-2302 — постоянный отказ: повтор того же статуса не исправит (422 + DLQ).
+    """
+
+    reason = "unknown_booking_status"
 
 
 class BookingConfirmedPendingProxyError(ValueError):
@@ -372,7 +378,7 @@ def _assert_proxy_tenant(
     if proxy is None:
         return
     if proxy.tenant_id != expected_tenant.id:
-        from apps.eventbus.ingest_tenancy import TenantAuthorizationError
+        from apps.eventbus.ingest_tenancy import TenantRejectedError
 
         logger.error(
             "eventbus.consumer.booking.cross_tenant_spoof_blocked "
@@ -382,9 +388,12 @@ def _assert_proxy_tenant(
             proxy.tenant_id,
             envelope.event_id,
         )
-        raise TenantAuthorizationError(
+        # DRF-2302 — повтор не сделает запись своей: 422 + DLQ, а ERROR-строка
+        # выше остаётся сигналом оператору.
+        raise TenantRejectedError(
             f"appointment_id {proxy.appointment_id} belongs to tenant "
-            f"{proxy.tenant_id}; envelope claims tenant {expected_tenant.id}"
+            f"{proxy.tenant_id}; envelope claims tenant {expected_tenant.id}",
+            reason="cross_tenant_appointment",
         )
 
 
@@ -1277,16 +1286,18 @@ def handle_booking_rescheduled(envelope: IngestEnvelope) -> None:
 # ─── canonical appointment.rescheduled (AYLA-DEC-0022, AYLA-DEC-0036) ──────
 
 
-class CanonicalReschedulePayloadError(ValueError):
+class CanonicalReschedulePayloadError(ValueError, IngestRejection):
     """``appointment.rescheduled`` DER payload fails required-field or
     shape validation.
 
     A *controlled* failure — raised deliberately instead of letting a
     missing/malformed field surface as a raw ``KeyError``/``TypeError``.
-    Propagates to the dispatcher's handler-exception path like any
-    other handler error (HANDLER_EXCEPTION → Ayla retry → DLQ on
-    threshold, #433) — no new dispatcher outcome is introduced.
+
+    DRF-2302 — постоянный отказ: тот же payload на повторе так же битый,
+    поэтому ``REJECTED`` → 422 + DLQ сразу, а не 500 → 9 повторов за 4,5 ч.
     """
+
+    reason = "invalid_payload"
 
 
 class CanonicalRescheduleVersionGapError(RuntimeError):
