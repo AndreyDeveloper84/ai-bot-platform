@@ -592,10 +592,18 @@ def _diary_chips(profile: Any) -> list[dict[str, str]]:
     это «предложение настроить ориентиры» из §6 — рядом с действием, а не
     вместо него. Раньше без профиля чип был один, анкета, и этот докстринг
     говорил «the anketa IS the next step». §6 говорит обратное.
+
+    DRF-2303 (решение владельца CD §72): первым — «Записать еду». Экран,
+    открытый кнопкой «Дневник питания», давал итоги и воду, а записать еду
+    или прислать фото отсюда было нельзя. Последним — «Меню». Все четыре
+    отвечают на глобальном пути, а дневник рисуется только там.
     """
-    chips = [dict(CHIP_WATER)]
+    from apps.orchestrator.next_steps import log_food_button, menu_button
+
+    chips = [log_food_button(), dict(CHIP_WATER)]
     if profile is None or not profile.targets_are_configured:
         chips.append(dict(CHIP_ANKETA))
+    chips.append(menu_button())
     return chips
 
 

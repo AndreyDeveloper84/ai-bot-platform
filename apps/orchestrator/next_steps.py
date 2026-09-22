@@ -21,6 +21,8 @@ from typing import Any
 MENU_LABEL = "Меню"
 #: «Подобрать услугу» — подпись пункта меню витрины и экрана возврата.
 DISCOVER_LABEL = "Подобрать услугу"
+#: «Записать еду» — подпись экрана возврата (``RETURNING_LABEL_LOG_FOOD``).
+LOG_FOOD_LABEL = "Записать еду"
 
 
 def discover_button() -> dict[str, str]:
@@ -44,6 +46,40 @@ def menu_button() -> dict[str, str]:
     return {"label": MENU_LABEL, "callback": CALLBACK_MENU_HELP}
 
 
+def log_food_button() -> dict[str, str]:
+    """«Записать еду» — ``cb:welcome:food``, как на экране возврата.
+
+    Ответ на него — приглашение прислать фото блюда или название, с воротами
+    дневника (``global_onboarding._food_prompt_reply``): без согласия человек
+    получает объяснение и путь к согласию, а не приглашение, которому
+    откажут на следующем ходу.
+    """
+    from apps.channels.max.global_onboarding import CALLBACK_LOG_FOOD
+
+    return {"label": LOG_FOOD_LABEL, "callback": CALLBACK_LOG_FOOD}
+
+
+def diary_button() -> dict[str, str]:
+    """«Мой дневник» — ``CHIP_DIARY`` (одно определение, ``personal_surface``)."""
+    from apps.orchestrator.personal_surface import CHIP_DIARY
+
+    return dict(CHIP_DIARY)
+
+
+def after_entry_buttons() -> list[dict[str, str]]:
+    """Под записанным в дневник (еда, вода): «Мой дневник» и «Меню».
+
+    «Мой дневник» — только там, где тап дойдёт до дневника
+    (:func:`personal_surface.diary_is_reachable`, глобальный путь): на
+    лестнице тенанта ветки для него нет, и кнопка ответила бы «не понял»
+    (DRF-1492). «Меню» отвечает на обоих путях.
+    """
+    from apps.orchestrator import personal_surface
+
+    buttons = [diary_button()] if personal_surface.diary_is_reachable() else []
+    return [*buttons, menu_button()]
+
+
 def next_step_action_data(*buttons: dict[str, str]) -> dict[str, Any]:
     """``action_data`` с кнопками следующего шага — столбиком, как у остального пути."""
     return {"buttons": list(buttons), "button_columns": 1}
@@ -51,8 +87,12 @@ def next_step_action_data(*buttons: dict[str, str]) -> dict[str, Any]:
 
 __all__ = [
     "DISCOVER_LABEL",
+    "LOG_FOOD_LABEL",
     "MENU_LABEL",
+    "after_entry_buttons",
+    "diary_button",
     "discover_button",
+    "log_food_button",
     "menu_button",
     "next_step_action_data",
     "salons_button",

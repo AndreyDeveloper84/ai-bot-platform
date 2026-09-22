@@ -93,7 +93,16 @@ def _turn(text: str, catalogue: _Catalogue):
 
 
 def _callbacks(result) -> list[str]:
-    return [b["callback"] for b in (result.action_data or {}).get("buttons") or []]
+    """Чипы САМОЙ записи — предмет этого файла.
+
+    С DRF-2267 (CD §72) за ними идут кнопки следующего шага; их состав
+    сторожит ``apps/orchestrator/tests/test_no_dead_ends_diary_2267.py``.
+    """
+    return [
+        b["callback"]
+        for b in (result.action_data or {}).get("buttons") or []
+        if b["callback"].startswith("cb:food:entry_")
+    ]
 
 
 # ─── чипы по происхождению ───────────────────────────────────────────────────

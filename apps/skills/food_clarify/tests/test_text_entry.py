@@ -105,6 +105,20 @@ class _Catalogue:
         )
 
 
+def _entry_callbacks(result) -> list[str]:
+    """Чипы САМОЙ записи (исправить / удалить / вернуть) — предмет этих тестов.
+
+    С DRF-2267 (CD §72) за ними идут кнопки следующего шага («Мой дневник»,
+    «Записать еду», «Меню»); их состав сторожит
+    ``apps/orchestrator/tests/test_no_dead_ends_diary_2267.py``.
+    """
+    return [
+        b["callback"]
+        for b in (result.action_data or {}).get("buttons") or []
+        if b["callback"].startswith("cb:food:entry_")
+    ]
+
+
 @pytest.fixture(autouse=True)
 def _nutrition_on(settings):
     settings.NUTRITION_ENABLED = True
@@ -373,7 +387,7 @@ class TestSavedEntryChips:
         result = self._logged(conversation, catalogue)
 
         assert result.reply_text == "Записала в дневник: борщ — 150 ккал."
-        assert [b["callback"] for b in result.action_data["buttons"]] == [
+        assert _entry_callbacks(result) == [
             "cb:food:entry_fix:log-1",
             "cb:food:entry_del:log-1",
         ]
@@ -385,15 +399,13 @@ class TestSavedEntryChips:
 
         assert catalogue.deletes == [{"external_user_id": "bot:max:1837", "log_id": LOG_ID}]
         assert deleted.reply_text == "Убрала запись из дневника. Вернуть можно ещё 15 минут."
-        assert [b["callback"] for b in deleted.action_data["buttons"]] == [
-            f"cb:food:entry_undo:{LOG_ID}"
-        ]
+        assert _entry_callbacks(deleted) == [f"cb:food:entry_undo:{LOG_ID}"]
 
         restored = _turn(conversation, f"cb:food:entry_undo:{LOG_ID}", catalogue)
 
         assert catalogue.restores == [{"external_user_id": "bot:max:1837", "log_id": LOG_ID}]
         assert restored.reply_text == "Вернула в дневник: борщ — 150 ккал."
-        assert [b["callback"] for b in restored.action_data["buttons"]] == [
+        assert _entry_callbacks(restored) == [
             f"cb:food:entry_fix:{LOG_ID}",
             f"cb:food:entry_del:{LOG_ID}",
         ]
@@ -446,7 +458,7 @@ class TestSavedEntryChips:
             {"external_user_id": "bot:max:1837", "log_id": LOG_ID, "portion_multiplier": 2.5}
         ]
         assert result.reply_text == "Исправила: борщ — теперь 125 ккал."
-        assert [b["callback"] for b in result.action_data["buttons"]] == [
+        assert _entry_callbacks(result) == [
             f"cb:food:entry_fix:{LOG_ID}",
             f"cb:food:entry_del:{LOG_ID}",
         ]
@@ -612,7 +624,9 @@ class TestEntryDecisionsAndEdges:
         # POSITIVE first: the entry was written and said so.
         assert result.reply_text == "Записала в дневник: борщ — 150 ккал."
         assert result.action_data["log_id"] == "x" * 46
-        assert "buttons" not in result.action_data
+        # Чипов записи нет — id не влезает в кнопку; следующий шаг есть (DRF-2267).
+        assert result.action_data["buttons"]
+        assert _entry_callbacks(result) == []
 
     def test_a_long_id_tap_still_obeys_the_history_choice(self) -> None:
         from apps.orchestrator import nutrition_global
