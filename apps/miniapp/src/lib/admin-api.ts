@@ -1902,6 +1902,57 @@ export const issueStaffInvite = (
     body: JSON.stringify(payload),
   });
 
+// --- /api/v1/admin/staff/invites/ ---------------------------------------
+//
+// DRF-2275. Codes already issued: list with a status, cancel, resend.
+// Owner AND admin — whoever issues codes manages them. An owner code is
+// the owner's alone: the server answers 403 to an admin acting on one.
+// The list never carries the code — only its hash exists; «Отправить
+// заново» issues a NEW code, returned once in the `staff/invite/` shape.
+
+export type StaffInviteStatus = "pending" | "accepted" | "expired" | "cancelled";
+
+export interface StaffInviteRow {
+  id: string;
+  role: StaffInviteRole;
+  status: StaffInviteStatus;
+  /** The issuer's own label, written at issue time. May be empty. */
+  note: string;
+  /** Catalog name of the card a master code links to; null otherwise. */
+  master_name: string | null;
+  created_at: string;
+  expires_at: string;
+  used_at: string | null;
+  revoked_at: string | null;
+}
+
+export interface StaffInvitesResponse {
+  items: StaffInviteRow[];
+  total_count: number;
+  truncated: boolean;
+}
+
+export const listStaffInvites = (
+  init: { signal?: AbortSignal } = {},
+): Promise<StaffInvitesResponse> =>
+  request("/api/v1/admin/staff/invites/", { method: "GET", signal: init.signal });
+
+export const cancelStaffInvite = (
+  inviteId: string,
+): Promise<{ changed: boolean; status: "cancelled" }> =>
+  request(`/api/v1/admin/staff/invites/${encodeURIComponent(inviteId)}/cancel/`, {
+    method: "POST",
+    body: "{}",
+  });
+
+export const resendStaffInvite = (
+  inviteId: string,
+): Promise<StaffInviteResponse & { resent_from: string }> =>
+  request(`/api/v1/admin/staff/invites/${encodeURIComponent(inviteId)}/resend/`, {
+    method: "POST",
+    body: "{}",
+  });
+
 // --- /api/v1/admin/staff/ (roster) ---------------------------------------
 //
 // The list of people, which nothing produced before. Access could be
