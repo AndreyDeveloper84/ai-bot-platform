@@ -77,6 +77,7 @@ from apps.skills.booking.tools import (
 )
 from apps.skills.menu.matching import (
     CALLBACK_MENU_BOOK,
+    CALLBACK_MENU_HELP,
     CALLBACK_MENU_MY_BOOKINGS,
     pilot_ux_enabled,
 )
@@ -228,6 +229,27 @@ def _menu_keyboard(label: str, callback: str) -> dict | None:
 
 def _my_bookings_keyboard() -> dict | None:
     return _menu_keyboard(LABEL_MY_BOOKINGS, CALLBACK_MENU_MY_BOOKINGS)
+
+
+#: DRF-2267 (CD §72) — «Меню» под подтверждением и переносом.
+LABEL_MENU = "Меню"
+
+
+def _my_bookings_and_menu_keyboard() -> dict | None:
+    """«Мои записи» + «Меню» — под «Подтверждено» и «Передал администратору».
+
+    Решение владельца CD §72 переворачивает прежнее (DRF-1411: «подтверждение
+    не называет шага»): после каждого завершённого действия — следующий шаг
+    и «Меню». Тот же выключатель, что у остальных ``cb:menu:*`` кнопок.
+    """
+    if not pilot_ux_enabled():
+        return None
+    return _keyboard(
+        [
+            {"label": LABEL_MY_BOOKINGS, "callback": CALLBACK_MENU_MY_BOOKINGS},
+            {"label": LABEL_MENU, "callback": CALLBACK_MENU_HELP},
+        ]
+    )
 
 
 def _book_again_keyboard() -> dict | None:
@@ -438,7 +460,7 @@ class BookingReminderCallbackSkill:
             },
             distinct_id=str(reminder.bot_user_id),
         )
-        return SkillResult(reply_text=REPLY_CONFIRMED)
+        return SkillResult(reply_text=REPLY_CONFIRMED, action_data=_my_bookings_and_menu_keyboard())
 
     def _handle_cancel(self, reminder: BookingReminder) -> SkillResult:
         """SENT_NO_REPLY → CANCELLED. Best-effort YClients cancel."""
@@ -520,7 +542,9 @@ class BookingReminderCallbackSkill:
             },
             distinct_id=str(reminder.bot_user_id),
         )
-        return SkillResult(reply_text=REPLY_RESCHEDULE)
+        return SkillResult(
+            reply_text=REPLY_RESCHEDULE, action_data=_my_bookings_and_menu_keyboard()
+        )
 
 
 def _parse_gate_token(callback_text: str) -> tuple[str, UUID] | None:

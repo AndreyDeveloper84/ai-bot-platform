@@ -359,7 +359,13 @@ class TestOutboundGuardOutranksTheRedraw:
 
         assert wire[-1]["kind"] == "send", "a blocked reply is replaced, never edited"
         assert wire[-1]["text"] == REPLACEMENT_TEXT
-        assert wire[-1]["att"] is None, "the keyboard goes with the text"
+        # DRF-2267 (CD §72): клавиатура мультивыбора уходит с текстом; под
+        # заменой — её собственные продолжения, а не ☑/☐ прежнего вопроса.
+        cells = [
+            c for att in wire[-1]["att"] or [] for row in att["payload"]["buttons"] for c in row
+        ]
+        assert cells, "под заменой — продолжения"
+        assert not any("clarify" in str(c.get("payload")) for c in cells), cells
 
     def test_an_unblocked_redraw_is_untouched_by_the_guard(self, wire, fake_redis, monkeypatch):
         _open_multiselect(monkeypatch, fake_redis)

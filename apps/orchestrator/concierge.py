@@ -2561,7 +2561,19 @@ def _concierge_turn(
     # Only the KEYBOARD is taken from the renderer; the model keeps the words.
     # Same cards, same callbacks, same order — the tap path is identical to
     # the pre-DRF-1266 reply.
-    action_data = None
+    # DRF-2267 (CD §72) — ответ словами без карточек больше не тупик: под ним
+    # следующий шаг и «Меню». Карточки мастеров (ниже) заменяют эти кнопки —
+    # у них своя клавиатура с «Записаться».
+    from apps.orchestrator.next_steps import (
+        discover_button,
+        menu_button,
+        next_step_action_data,
+        salons_button,
+    )
+
+    action_data: dict[str, Any] | None = next_step_action_data(
+        discover_button(), salons_button(), menu_button()
+    )
     reply_text = text[:_MAX_REPLY_CHARS]
     if pending_cards:
         action_data = _render_master_cards(

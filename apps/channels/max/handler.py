@@ -2723,7 +2723,13 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             # under «тут нужен человек» would be an edited reply by another
             # name. ``persisted=False``: whatever the producer wrote, the
             # transcript has to end up holding what the person actually read.
-            reply = DiscoveryReply(text=guarded.text, action_data=None, persisted=False)
+            # DRF-2267 (§72): карточки уходят с текстом, а под заменой —
+            # продолжения, которые она называет («Посмотреть услуги», «Меню»).
+            from apps.orchestrator.safety.outbound import replacement_action_data
+
+            reply = DiscoveryReply(
+                text=guarded.text, action_data=replacement_action_data(), persisted=False
+            )
             assistant_action_type = OUTBOUND_ACTION_TYPE
             # DRF-1362 — and it is never an in-place edit either. ``outbound.py``
             # 's rule is that a blocked reply is REPLACED, not edited; quietly

@@ -163,7 +163,11 @@ def test_show_masters_without_criteria_asks_instead_of_listing_catalogue(monkeyp
     # Not the no-match line either: masters DO exist, we just weren't told
     # what to look for. Saying "не нашлось" here would be false.
     assert "не нашлось" not in reply.text
-    assert reply.action_data is None
+    assert reply.action_data is not None
+    assert [b["callback"] for b in reply.action_data["buttons"]] == [
+        "cb:catalog:salons",
+        "cb:menu:help",
+    ]  # DRF-2267 (§72): канон + выход
 
 
 def test_show_masters_blank_criteria_are_no_criteria(monkeypatch) -> None:

@@ -1588,7 +1588,7 @@ def has_service_criteria(salon: str | None, city: str | None, query: str | None)
 
 def render_no_service_criteria_clarification() -> DiscoveryReply:
     """The canon-prescribed reply to a criteria-less ``show_services`` call."""
-    return _render_ask_clarification(NO_SERVICE_CRITERIA_QUESTION, [])
+    return _canon_question_with_way_on(NO_SERVICE_CRITERIA_QUESTION)
 
 
 # ─── DRF-1355: who decides WHICH salon ───────────────────────────────────
@@ -2472,8 +2472,16 @@ def execute_clarify_callback(
         # До проверки «вопрос протух»: у free-вопроса опций нет по
         # построению, и «Не знаю» на нём — штатный ответ, не протухший тап.
         logger.info("orchestrator.discovery.clarify_tap kind=dontknow outcome=answered")
+        # DRF-2267 (§72) — текст предлагает «посмотрим доступные услуги?», и
+        # кнопка это делает; «Найти салон» — второй путь, как в меню.
+        from apps.orchestrator.next_steps import discover_button, next_step_action_data
+
         return ClarifyOutcome(
-            reply=DiscoveryReply(text=CLARIFY_DONT_KNOW_TEXT), answer_text=CLARIFY_DONT_KNOW_LABEL
+            reply=DiscoveryReply(
+                text=CLARIFY_DONT_KNOW_TEXT,
+                action_data=next_step_action_data(discover_button(), show_salons_button()),
+            ),
+            answer_text=CLARIFY_DONT_KNOW_LABEL,
         )
 
     if not options:
@@ -2617,9 +2625,25 @@ def has_discovery_criteria(city: str | None, specialization: str | None) -> bool
     return bool((city or "").strip() or (specialization or "").strip())
 
 
+def _canon_question_with_way_on(question: str) -> DiscoveryReply:
+    """Канонический вопрос без критериев + «Найти салон» и «Меню» (DRF-2267, §72).
+
+    Текст канона не меняется ни на байт; добавляется только выход: человек,
+    который не знает, что ответить, может сразу пойти в список салонов или
+    в меню, а не остаться перед вопросом без кнопок.
+    """
+    from apps.orchestrator.next_steps import menu_button, next_step_action_data
+
+    reply = _render_ask_clarification(question, [])
+    return DiscoveryReply(
+        text=reply.text,
+        action_data=next_step_action_data(show_salons_button(), menu_button()),
+    )
+
+
 def render_no_criteria_clarification() -> DiscoveryReply:
     """The canon-prescribed reply to a criteria-less ``show_masters`` call."""
-    return _render_ask_clarification(NO_CRITERIA_QUESTION, [])
+    return _canon_question_with_way_on(NO_CRITERIA_QUESTION)
 
 
 # ─── DRF-1531: ask ONE question instead of sorting the indistinguishable ────

@@ -285,6 +285,29 @@ REPLACEMENT_TEXT = (
 #: to survive exactly this gap.
 OFFERED_CONTINUATIONS: tuple[str, ...] = ("Посмотреть услуги", "Уточнить запрос")
 
+#: DRF-2267 (CD §72) — подпись кнопки под подменённым ответом. «Посмотреть
+#: услуги» — первое продолжение §128, у него есть ветка: та же фраза, что у
+#: «Подобрать услугу». «Уточнить запрос» кнопкой не становится — ветки, которая
+#: бы на неё ответила, нет (DRF-1492); его место — в тексте.
+REPLACEMENT_SERVICES_LABEL = OFFERED_CONTINUATIONS[0]
+
+
+def replacement_action_data() -> dict:
+    """Клавиатура под подменённым ответом: «Посмотреть услуги» и «Меню».
+
+    Карточки черновика по-прежнему уходят вместе с текстом (ответ ЗАМЕНЯЕТСЯ,
+    а не правится); вместо них — продолжения, которые текст называет.
+    """
+    from apps.orchestrator.next_steps import (
+        discover_button,
+        menu_button,
+        next_step_action_data,
+    )
+
+    services = {**discover_button(), "label": REPLACEMENT_SERVICES_LABEL}
+    return next_step_action_data(services, menu_button())
+
+
 #: Category recorded when the check itself could not run. Deliberately not one
 #: of the content labels: an operator has to be able to separate "the draft
 #: matched a banned shape" from "we never got to look at the draft". The first
