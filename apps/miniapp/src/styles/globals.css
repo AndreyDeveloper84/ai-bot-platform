@@ -7227,6 +7227,28 @@ a {
 .food-scanner-screen__error {
   margin: 0;
 }
+/* DRF-2289 — «Записать текстом» под съёмкой: ссылка, не третья кнопка. */
+.food-scanner-screen__text-link {
+  align-self: center;
+  background: transparent;
+  border: none;
+  color: var(--c-accent);
+  padding: var(--s-2) var(--s-1);
+  min-height: 44px;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-200);
+  font-weight: 500;
+  cursor: pointer;
+}
+.food-scanner-screen__text-link:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 2px;
+  border-radius: var(--r-sm);
+}
+.food-scanner-screen__text-link:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
 .food-scanner-screen__privacy {
   margin: 0;
   font-size: var(--font-size-100);

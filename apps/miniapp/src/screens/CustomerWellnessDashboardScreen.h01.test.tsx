@@ -469,11 +469,21 @@ describe("H01 · быстрые действия", () => {
     expect(screen.queryByText(/замер/i)).toBeNull();
   });
 
-  it("«Записать питание» → ввод текстом, «Новая запись» → каталог, «Профиль» → профиль", async () => {
+  it("«Записать питание» → съёмка фото (DRF-2289; текстом — ссылкой оттуда)", async () => {
     serve();
     renderHome();
 
     fireEvent.click(await screen.findByRole("button", { name: "Записать питание" }));
+    expect(screen.getByTestId("location")).toHaveTextContent("/customer/food-scanner/capture");
+  });
+
+  it("карточка «Начнём с малого?» обещает текст — её «Записать текстом» ведёт в ввод текстом (DRF-2289)", async () => {
+    // Пустой день — условие карточки первого шага.
+    serve({ today: { ...TODAY_WITH_GOAL, calories_eaten: 0, water_glasses_eaten: 0 } });
+    renderHome();
+
+    expect(await screen.findByText("Начнём с малого?")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Записать текстом" }));
     expect(screen.getByTestId("location")).toHaveTextContent("/customer/food-scanner/manual");
   });
 });
