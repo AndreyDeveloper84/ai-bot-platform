@@ -328,8 +328,17 @@ class FoodScannerSkill:
             # see food_memory.note_recognition_rejected for why it is a quality
             # signal and never a stored fact.
             food_memory.note_recognition_rejected(context.bot_user, scan_id=scan_id)
+            # DRF-2267 (CD §72): текст зовёт прислать ещё фото — кнопка
+            # «Записать еду» зовёт туда же (фото или название), плюс «Меню».
+            from apps.orchestrator.next_steps import (
+                log_food_button,
+                menu_button,
+                next_step_action_data,
+            )
+
             return SkillResult(
                 reply_text=REJECTED_ACK,
+                action_data=next_step_action_data(log_food_button(), menu_button()),
                 meta={"reply_kind": "food_scanner_rejected"},
             )
 
@@ -411,6 +420,7 @@ class FoodScannerSkill:
         # DRF-2108 — §109 шаг 7 и под фото-записью: только «Удалить».
         # «Исправить граммы» (÷100) верно лишь для записи текстом; обработчик
         # чипов общий (``food_clarify.text_entry.on_entry_callback``).
+        from apps.orchestrator.next_steps import after_entry_buttons
         from apps.orchestrator.ui.keyboards import ENTRY_ID_RE, food_entry_keyboard
 
         action_data: dict[str, Any] = {
@@ -418,8 +428,11 @@ class FoodScannerSkill:
             "dish_name": log.dish_name,
             "calories": log.calories,
         }
+        entry_chips: list[dict[str, str]] = []
         if log.log_id and ENTRY_ID_RE.match(log.log_id):
-            action_data["buttons"] = food_entry_keyboard(log.log_id, fixable=False)
+            entry_chips = food_entry_keyboard(log.log_id, fixable=False)
+        # DRF-2267 (CD §72): и следующий шаг — «Мой дневник», «Меню».
+        action_data["buttons"] = [*entry_chips, *after_entry_buttons()]
         return SkillResult(
             reply_text=reply,
             action_type="food_logged",

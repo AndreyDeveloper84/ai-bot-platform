@@ -562,7 +562,13 @@ class TestChipsExecute:
                 monkeypatch, _FakeAyla(summary=_summary(), water=_water(), profile=profile)
             )
             reply = render_diary(_bot_user(uid))
-            assert _callbacks(reply) == [CHIP_WATER["callback"], CHIP_ANKETA["callback"]], uid
+            # DRF-2303 / DRF-2267: «Записать еду» первым, «Меню» последним.
+            assert _callbacks(reply) == [
+                "cb:welcome:food",
+                CHIP_WATER["callback"],
+                CHIP_ANKETA["callback"],
+                "cb:menu:help",
+            ], uid
 
         for uid, source in {"chip-calc": "ayla_calculated", "chip-user": "user_entered"}.items():
             _install_ayla(
@@ -572,7 +578,11 @@ class TestChipsExecute:
                 ),
             )
             reply = render_diary(_bot_user(uid))
-            assert _callbacks(reply) == [CHIP_WATER["callback"]], uid
+            assert _callbacks(reply) == [
+                "cb:welcome:food",
+                CHIP_WATER["callback"],
+                "cb:menu:help",
+            ], uid
 
     def test_the_anketa_finale_offers_the_steps_that_exist(self, monkeypatch):
         """Post-anketa the bot used to hand over five numbers and go quiet.

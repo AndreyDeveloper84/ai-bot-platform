@@ -20,7 +20,6 @@ DEBT: dict[str, int] = {
     "apps/channels/max/handler.py::_handle_global_max_event_inner": 11,
     "apps/orchestrator/concierge.py::_concierge_turn._reply": 1,
     "apps/orchestrator/concierge.py::_execute_start_booking": 1,
-    "apps/orchestrator/concierge.py::_g4_question_turn": 1,
     "apps/orchestrator/concierge.py::generate_concierge_reply": 1,
     "apps/orchestrator/discovery.py::_render_ask_clarification": 1,
     "apps/orchestrator/discovery.py::execute_catalog_callback": 1,
@@ -45,7 +44,6 @@ DEBT: dict[str, int] = {
     "apps/skills/echo/skill.py::handle": 4,
     "apps/skills/faq/skill.py::_build_skill_result": 1,
     "apps/skills/food_clarify/skill.py::handle": 2,
-    "apps/skills/food_clarify/text_entry.py::_delete_entry": 1,
     "apps/skills/food_clarify/text_entry.py::_entry_refusal": 5,
     "apps/skills/food_clarify/text_entry.py::_log": 3,
     "apps/skills/food_clarify/text_entry.py::_on_fix_grams_answer": 1,
@@ -61,7 +59,7 @@ DEBT: dict[str, int] = {
     "apps/skills/food_correction/skill.py::_handle_prompt": 5,
     "apps/skills/food_correction/skill.py::handle": 1,
     "apps/skills/food_scanner/skill.py::_check_gates": 2,
-    "apps/skills/food_scanner/skill.py::_handle_callback": 7,
+    "apps/skills/food_scanner/skill.py::_handle_callback": 6,
     "apps/skills/food_scanner/skill.py::_handle_photo": 6,
     "apps/skills/nutrition_anketa/skill.py::_manual_stale": 1,
     "apps/skills/nutrition_anketa/skill.py::_on_complete": 2,
@@ -79,7 +77,7 @@ DEBT: dict[str, int] = {
     "apps/skills/payment_failed/skill.py::_build_reply": 1,
     "apps/skills/privacy_consent/skill.py::handle": 3,
     "apps/skills/registry.py::dispatch": 1,
-    "apps/skills/water/skill.py::handle": 5,
+    "apps/skills/water/skill.py::handle": 4,
     "apps/skills/welcome/skill.py::handle": 3,
 }
 
@@ -102,6 +100,10 @@ EXCEPTIONS: dict[str, str] = {
     ),
     "apps/skills/health_screening/skill.py::handle": (
         "F4 — медицинские ответы (G4, красные флаги с 103/112, «где болит»): кнопок записи нет по решению §72"
+    ),
+    "apps/skills/health_screening/skill.py::_g7_turn": (
+        "F4 — медицинские ответы G7 (#1982): красный флаг, ограничение S1, вопросы G4/G7; "
+        "кнопок записи нет по решению §72"
     ),
     "apps/skills/human_handoff/skill.py::handle": (
         "B24/F5 — передача оператору: пока задача открыта, бот молчит, любая кнопка упадёт в молчание"

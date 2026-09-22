@@ -170,6 +170,10 @@ class WaterSkill:
             )
 
         reply = _format_reply(entry, parsed)
+        # DRF-2267 (CD §72): записанное — завершённый шаг; следующий —
+        # «Мой дневник» (где тап дойдёт до дневника) и «Меню».
+        from apps.orchestrator.next_steps import after_entry_buttons
+
         return SkillResult(
             reply_text=reply,
             action_type="water_logged",
@@ -178,6 +182,7 @@ class WaterSkill:
                 "slug": parsed.slug,
                 "ml": parsed.ml,
                 "water_ml": entry.water_ml,
+                "buttons": after_entry_buttons(),
             },
             meta={"reply_kind": "water_logged"},
         )

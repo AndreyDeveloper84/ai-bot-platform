@@ -583,9 +583,12 @@ def _log(context: SkillContext, bucket: dict[str, Any]) -> SkillResult:
         "calories": log.calories,
         "entry_origin": origin,
     }
+    entry_chips: list[dict[str, str]] = []
     if log.log_id and ENTRY_ID_RE.match(log.log_id):
         # DRF-1838 — §109 шаг 7: сохранённую запись можно исправить или удалить.
-        action_data["buttons"] = food_text_logged_keyboard(log.log_id)
+        entry_chips = food_text_logged_keyboard(log.log_id)
+    # DRF-2267 (CD §72): и следующий шаг — «Мой дневник», «Меню».
+    action_data["buttons"] = [*entry_chips, *_after_entry_buttons()]
     return SkillResult(
         reply_text=f"Записала в дневник: {log.dish_name} — {int(round(log.calories))} ккал.",
         action_type="food_logged",
@@ -692,15 +695,32 @@ def _delete_entry(context: SkillContext, log_id: str) -> SkillResult:
         return SkillResult(
             reply_text=DELETED_TEXT,
             action_type="food_entry_deleted",
-            action_data={"log_id": log_id},
+            action_data={"log_id": log_id, "buttons": _after_delete_buttons()},
             meta={"reply_kind": "food_entry_deleted"},
         )
     return SkillResult(
         reply_text=DELETED_WITH_WINDOW_TEXT.format(minutes=_minutes_ru(minutes)),
         action_type="food_entry_deleted",
-        action_data={"log_id": log_id, "buttons": food_text_deleted_keyboard(log_id)},
+        action_data={
+            "log_id": log_id,
+            "buttons": [*food_text_deleted_keyboard(log_id), *_after_delete_buttons()],
+        },
         meta={"reply_kind": "food_entry_deleted"},
     )
+
+
+def _after_entry_buttons() -> list[dict[str, str]]:
+    """DRF-2267 (CD §72) — под записанным: «Мой дневник» (где дойдёт) и «Меню»."""
+    from apps.orchestrator.next_steps import after_entry_buttons
+
+    return after_entry_buttons()
+
+
+def _after_delete_buttons() -> list[dict[str, str]]:
+    """DRF-2267 (CD §72) — после удаления: записать заново и «Меню»."""
+    from apps.orchestrator.next_steps import log_food_button, menu_button
+
+    return [log_food_button(), menu_button()]
 
 
 def _restore_entry(context: SkillContext, log_id: str) -> SkillResult:
@@ -716,7 +736,10 @@ def _restore_entry(context: SkillContext, log_id: str) -> SkillResult:
         action_type="food_entry_restored",
         action_data={
             "log_id": log_id,
-            "buttons": food_entry_keyboard(log_id, fixable=_entry_fixable(log)),
+            "buttons": [
+                *food_entry_keyboard(log_id, fixable=_entry_fixable(log)),
+                *_after_entry_buttons(),
+            ],
         },
         meta={"reply_kind": "food_entry_restored"},
     )
@@ -753,7 +776,10 @@ def _on_fix_grams_answer(context: SkillContext, bucket: dict[str, Any], text: st
         action_type="food_entry_updated",
         action_data={
             "log_id": log_id,
-            "buttons": food_entry_keyboard(log_id, fixable=_entry_fixable(log)),
+            "buttons": [
+                *food_entry_keyboard(log_id, fixable=_entry_fixable(log)),
+                *_after_entry_buttons(),
+            ],
         },
         meta={"reply_kind": "food_entry_updated"},
     )

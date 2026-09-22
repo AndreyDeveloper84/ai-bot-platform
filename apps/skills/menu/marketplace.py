@@ -529,7 +529,9 @@ NUTRITION_ITEMS: tuple[MenuItem, ...] = (
         label="Дневник питания",
         emoji="🥗",
         callback=DIARY_TAP_TEXT,
-        line="дневник питания — что вы ели и пили",
+        # DRF-2304 — перечень называет и запись: фото или текстом (черновик
+        # формулировки для владельца).
+        line="дневник питания — записать еду по фото или текстом, воду и посмотреть итоги дня",
         where="bot",
         surface="food_diary",
     ),
@@ -1070,7 +1072,9 @@ def _lines(items: tuple[MenuItem, ...]) -> list[str]:
     return [f"• {item.line}" for item in items if item.line]
 
 
-def marketplace_menu_text(*, intro: str = _INTRO, compact: bool = False) -> str:
+def marketplace_menu_text(
+    *, intro: str = _INTRO, compact: bool = False, bot_user: Any = None
+) -> str:
     """Текст меню — перечень ПОСТОЯННОГО состава, а не копия клавиатуры.
 
     **Перечень и клавиатура намеренно не совпадают, и это не расхождение,
@@ -1083,9 +1087,14 @@ def marketplace_menu_text(*, intro: str = _INTRO, compact: bool = False) -> str:
     в перечне не может оказаться того, чего нет на клавиатуре.
 
     Асимметрия держится на том, что пищевой пункт и БЕЗ перечня не
-    молчит: его подпись («🥗 Дневник питания») сама себя объясняет, а
-    ``line`` у него существует ради будущих поверхностей, где перечень
-    будет строиться на человека.
+    молчит: его подпись («🥗 Дневник питания») сама себя объясняет.
+
+    DRF-2304: когда известен ``bot_user``, перечень строится на человека
+    — пищевая строка добавляется ровно тогда, когда его кнопка нарисована
+    (:func:`_nutrition_buttons`, те же ворота §25 п.6). Меню, которое
+    перечисляло «что умею» без дневника и фото еды, при нарисованной
+    кнопке дневника занижало собственный состав. Без ``bot_user`` правило
+    прежнее: не знаем человека — не обещаем.
 
     ``compact`` — рамка промаха: перечень и длинный хвост опускаются
     ЦЕЛИКОМ, чтобы реплика влезала в потолок длины (см.
@@ -1105,13 +1114,18 @@ def marketplace_menu_text(*, intro: str = _INTRO, compact: bool = False) -> str:
     if compact:
         return f"{intro}\n\n{_FALLBACK_OUTRO}"
     drawn = tuple(item for item in MAIN_ITEMS if item.where == "bot" or miniapp_configured())
+    if bot_user is not None and _nutrition_buttons(bot_user=bot_user):
+        drawn = (*drawn, *NUTRITION_ITEMS)
     return "\n\n".join([intro, "\n".join(_lines(drawn)), _OUTRO])
 
 
 def marketplace_menu_reply(*, bot_user: Any) -> tuple[str, dict[str, Any]]:
     """Экран «что хотите сделать» — текст и клавиатура одним куском."""
     buttons = marketplace_menu_buttons(bot_user=bot_user)
-    return marketplace_menu_text(), _menu_action_data(buttons, kind="marketplace_menu")
+    return (
+        marketplace_menu_text(bot_user=bot_user),
+        _menu_action_data(buttons, kind="marketplace_menu"),
+    )
 
 
 def marketplace_fallback_reply(*, bot_user: Any) -> tuple[str, dict[str, Any]]:
