@@ -28,7 +28,11 @@
   - v6: администратор — через каталог (DRF-2085): отказ — 409 с подсказкой,
     роли нет;
   - v7: ростер отдаёт ``restorable_master`` — иначе экрану не понять, у
-    какой строки мастера есть кого возвращать.
+    какой строки мастера есть кого возвращать;
+  - v8: журнал пережил человека — «забудь всё» журнал не трогает, а
+    удаление аккаунта (``account_reset``) оставляет ``AuditLog.target_id``
+    намеренно (``KEPT_BY_DESIGN``). Строка есть, человека нет — 409
+    ``person_gone``, не «роли не было»: роль была, вернуть некому.
 
 Каталог — заглушка ``catalog_admin_link_stub``: файл доказывает ручку.
 """
@@ -42,6 +46,7 @@ import pytest
 from django.test import Client
 from django.urls import reverse
 
+from apps.audit.models import AuditLog
 from apps.tenancy.models import TenantStaff
 
 from .conftest import _make_bot_user, init_data_header, link_master_to_bot_user, make_master
@@ -249,6 +254,23 @@ class TestRestoreMaster:
         resp = _post(client, "staff_restore", {"master_id": str(master.id), "role": "master"})
         assert resp.status_code == 409
         assert resp.json()["error"] == "role_not_previously_held"
+
+    def test_a_person_gone_since_is_named_as_gone(
+        self, client, owner_bot_user, tenant, master, master_only_bot_user
+    ):
+        self._revoked_master(client, master, master_only_bot_user)
+        # The account deleted since: the journal keeps the id by design and
+        # the BotUser is gone. Pointing the row elsewhere stands in for the
+        # deletion — the real one needs the whole reset plan.
+        AuditLog.all_tenants.filter(
+            action="staff.access_revoked", payload__master_id=str(master.id)
+        ).update(target_id=uuid.uuid4())
+
+        resp = _post(client, "staff_restore", {"master_id": str(master.id), "role": "master"})
+        assert resp.status_code == 409
+        assert resp.json()["error"] == "person_gone"
+        master.refresh_from_db()
+        assert master.linked_bot_user_id is None
 
     def test_a_card_taken_since_is_refused(
         self, client, owner_bot_user, tenant, master, master_only_bot_user, customer_bot_user

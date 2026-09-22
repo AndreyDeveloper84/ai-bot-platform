@@ -46,6 +46,13 @@ revoke: restoring is granting a role, and granting roles is the owner's
 
 Restoring what is already back answers 200 ``changed: false`` — as a
 second revoke does.
+
+The journal outlives the person on purpose: «забудь всё» does not touch
+the audit log, and deleting the account (``account_reset``) keeps
+``AuditLog.target_id`` by design (``KEPT_BY_DESIGN``). So the row can name
+somebody who no longer exists — that answers 409 ``person_gone``, never
+``role_not_previously_held``: the role was held, there is nobody to give
+it back to.
 """
 
 from __future__ import annotations
@@ -323,7 +330,11 @@ def _restore_master(request: HttpRequest, *, master_id: str, bot_user_id: str) -
 
     person = BotUser.objects.filter(pk=revoke.target_id).first()
     if person is None:
-        return _not_held("master")
+        return _error(
+            "person_gone",
+            "the person who held this card no longer has an account here",
+            409,
+        )
     if person.id == actor.id:
         return _error("forbidden", "you cannot restore your own access", 403)
 
