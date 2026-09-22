@@ -157,7 +157,13 @@ from apps.persona.memory_commands import handle_memory_command
 from apps.persona.memory_surface import render_current_personal_context
 from apps.persona.voice import SALON_BUSINESS_NAME
 from apps.orchestrator.concierge import generate_direct_show_masters_reply
+from apps.integrations.ayla.user_proxy import external_user_id_for
 from apps.orchestrator.fast_path import claims_direct_show_masters
+from apps.orchestrator.goal_capture import (
+    CONFIRMATION_DRAFT,
+    capture_goal_from_chat,
+    looks_like_goal_statement,
+)
 from apps.orchestrator.open_question import close_question, open_question
 from apps.orchestrator.discovery import (
     CALLBACK_DISCOVER_BOOK_PREFIX,
@@ -2408,12 +2414,46 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
                         "channels.max.global.nutrition_turn_failed bot_user=%s", bot_user.id
                     )
                     nutrition_result = None
+                # DRF-2283 / CD §73 — цель словами человека, сказанная в
+                # переписке. Стоит ПОСЛЕ всех, кто ведёт незаконченный шаг
+                # (ответ памяти, воронка записи, прямой показ мастеров,
+                # нутриционная анкета): фраза, сказанная ВНУТРИ шага, целью
+                # не становится, даже если начинается с «хочу». Ниже —
+                # только консьерж, поэтому ход у модели отбирается лишь
+                # тогда, когда цель действительно записана.
+                #
+                # `ayla_user_id is not None` — та же личность памяти, что и
+                # у команд выше: согласие PERSONAL_DATA есть. Без него цель
+                # человека никуда не пишется.
+                goal_reply: DiscoveryReply | None = None
+                if (
+                    nutrition_result is None
+                    and ayla_user_id is not None
+                    and looks_like_goal_statement(event.text)
+                ):
+                    try:
+                        captured = capture_goal_from_chat(
+                            bot_user=bot_user,
+                            external_user_id=external_user_id_for(bot_user),
+                            text=event.text,
+                        )
+                    except Exception:  # noqa: BLE001 — запись цели не ломает ход
+                        logger.exception(
+                            "channels.max.global.goal_capture_failed bot_user=%s", bot_user.id
+                        )
+                        captured = None
+                    if captured is not None:
+                        goal_reply = DiscoveryReply(text=CONFIRMATION_DRAFT.format(goal=captured))
+
                 if nutrition_result is not None:
                     reply = DiscoveryReply(
                         text=nutrition_result.reply_text,
                         action_data=nutrition_result.action_data,
                     )
                     assistant_action_type = nutrition_result.action_type or "nutrition_skill"
+                elif goal_reply is not None:
+                    reply = goal_reply
+                    assistant_action_type = "goal_stated"
                 elif looks_like_callback_payload(event.text):
                     # DRF-1491 — ветка «не поняла» глобального пути.
                     #
