@@ -461,8 +461,47 @@ def run_onboarding_turn(
             from apps.skills.welcome.skill import CONSENT_RECOVERY_FAILED_TEXT
 
             return DiscoveryReply(text=CONSENT_RECOVERY_FAILED_TEXT)
+        if recorded:
+            resumed = _resume_after_consent(result, bot_user)
+            if resumed is not None:
+                return resumed
 
     return _to_discovery_reply(result, bot_user)
+
+
+def _resume_after_consent(result: Any, bot_user: Any) -> DiscoveryReply | None:
+    """Возврат в поток, ради которого человек дал согласие (DRF-2267).
+
+    Сегодня такой поток один — чтение дневника (``consent_origin == "diary"``):
+    отказ «мне нужно согласие на обработку личных данных» получил кнопку
+    согласия, и после неё человек должен увидеть то, за чем шёл.
+
+    **Почему здесь, а не в навыке.** Журнал 152-ФЗ пишется выше по этой же
+    функции, ПОСЛЕ ``WelcomeSkill.handle``. Дневник, нарисованный внутри
+    навыка, спросил бы своё согласие раньше записи и ответил бы отказом на
+    ход, которым согласие давали.
+
+    **Ворота не обходятся.** Дневник рисуется обычным путём и спрашивает
+    согласие сам: если его всё ещё нет, человек читает тот же отказ, а не
+    записи. ``UNTRACKED`` — как в :mod:`apps.orchestrator.health_return`:
+    заход не планировался как открытие дневника, и суточный слот
+    наблюдения диетолога он не тратит.
+
+    ``None`` — «возвращать нечего», ответ навыка уходит как есть. Сбой
+    отрисовки тоже ``None``: согласие уже записано, и ронять ход из-за
+    возврата нельзя.
+    """
+    if (getattr(result, "meta", None) or {}).get("consent_origin") != "diary":
+        return None
+    try:
+        from apps.orchestrator.coach_observation import Cadence
+        from apps.orchestrator.personal_surface import render_diary
+
+        diary = render_diary(bot_user, cadence=Cadence.UNTRACKED)
+    except Exception:  # noqa: BLE001 — возврат не может стоить согласия
+        logger.exception("global_onboarding.consent_resume_failed origin=diary")
+        return None
+    return DiscoveryReply(text=diary.text, action_data=diary.action_data)
 
 
 def _is_consent_grant_turn(result: Any) -> bool:

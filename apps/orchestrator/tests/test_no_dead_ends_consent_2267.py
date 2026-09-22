@@ -90,6 +90,7 @@ class TestTheRefusalOffersTheConsentScreen:
             reply = render_diary(object())
 
         assert reply.text == CONSENT_CLOSED_TEXT  # текст согласия не трогаем
+        assert reply.action_data is not None
         assert _callbacks(reply.action_data) == [OFFER_CALLBACK]
         assert [b["label"] for b in reply.action_data["buttons"]] == [CONSENT_OFFER_LABEL]
 
