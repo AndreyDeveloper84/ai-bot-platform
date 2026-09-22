@@ -20,7 +20,6 @@ DEBT: dict[str, int] = {
     "apps/channels/max/handler.py::_handle_global_max_event_inner": 11,
     "apps/orchestrator/concierge.py::_concierge_turn._reply": 1,
     "apps/orchestrator/concierge.py::_execute_start_booking": 1,
-    "apps/orchestrator/concierge.py::_g4_question_turn": 1,
     "apps/orchestrator/concierge.py::generate_concierge_reply": 1,
     "apps/orchestrator/discovery.py::_render_ask_clarification": 1,
     "apps/orchestrator/discovery.py::execute_catalog_callback": 1,
@@ -101,6 +100,10 @@ EXCEPTIONS: dict[str, str] = {
     ),
     "apps/skills/health_screening/skill.py::handle": (
         "F4 — медицинские ответы (G4, красные флаги с 103/112, «где болит»): кнопок записи нет по решению §72"
+    ),
+    "apps/skills/health_screening/skill.py::_g7_turn": (
+        "F4 — медицинские ответы G7 (#1982): красный флаг, ограничение S1, вопросы G4/G7; "
+        "кнопок записи нет по решению §72"
     ),
     "apps/skills/human_handoff/skill.py::handle": (
         "B24/F5 — передача оператору: пока задача открыта, бот молчит, любая кнопка упадёт в молчание"
