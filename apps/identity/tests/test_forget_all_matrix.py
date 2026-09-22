@@ -679,7 +679,7 @@ def seed_person(tenant: Tenant, fake_redis: _FakeRedis, label: str) -> Person:
         why=[f"вы сказали, что хотите к свадьбе сестры [{label}]"],
         facts={"goal": "вес", "answer": f"после родов [{label}]"},
         alternatives=[{"what": "Прессотерапия", "subline": "курс"}],
-        fingerprint=uuid.uuid4().hex,
+        fingerprint="absence:weight",  # DRF-2308: ключ цели открытым текстом
     )
     # DRF-2220 — the raw webhook of one of those turns, left in the stream
     # (a failed entry: a processed one is already gone). Its id is the
@@ -891,7 +891,7 @@ def snapshot(store: str, person: Person, fake_redis: _FakeRedis) -> Any:
 
         return list(
             Recommendation.objects.filter(bot_user=bu).values(
-                "why", "facts", "goal_id", "alternatives", "what", "reaction"
+                "id", "why", "facts", "goal_id", "fingerprint", "alternatives", "what", "reaction"
             )
         )
     if store == "redis.dre_state":
@@ -977,6 +977,12 @@ def assert_outcome(
                 assert row["why"] == []
                 assert row["facts"] == {}
                 assert row["goal_id"] == ""
+                # DRF-2308 — отпечаток нёс ключ цели открытым текстом (ABSENCE)
+                # или несолёный хеш цели/причин (DIRECTION): заменён на
+                # уникальную метку без смысла.
+                assert row["fingerprint"] == f"erased:{row['id']}", row["fingerprint"]
+                assert row["fingerprint"] != was["fingerprint"]
+                assert "weight" not in row["fingerprint"]
                 # Курируемое и атрибуция — остаются.
                 assert row["alternatives"] == was["alternatives"]
                 assert row["what"] == was["what"]
