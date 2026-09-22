@@ -44,9 +44,10 @@ for "who sent this message" in the platform's identity model.
 from __future__ import annotations
 
 import logging
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 from uuid import UUID
 
+from django.db import transaction
 from django.utils import timezone
 
 from apps.audit.services import write_audit
@@ -68,6 +69,8 @@ from apps.bookings.pending_actions import (
     latest_relevant_pending,
 )
 from apps.events.services import emit
+from apps.handoff.models import AdminTask
+from apps.handoff.services import create_admin_task
 from apps.integrations.ayla.offer_refusal import OFFER_NOT_SELLABLE_SLUG
 from apps.skills.base import SkillContext, SkillResult
 from apps.skills.booking.tools import (
@@ -82,6 +85,9 @@ from apps.skills.menu.matching import (
     pilot_ux_enabled,
 )
 from apps.skills.registry import register
+
+if TYPE_CHECKING:
+    from apps.conversations.models import Conversation
 
 logger = logging.getLogger(__name__)
 
@@ -514,7 +520,7 @@ class BookingReminderCallbackSkill:
             return self._handle_cancel(reminder)
         # action == "reschedule" (only remaining; _parse_reminder_pk
         # exhausts the namespace)
-        return self._handle_reschedule(reminder)
+        return self._handle_reschedule(reminder, context.conversation)
 
     # ─── per-action handlers ─────────────────────────────────────────────
 
@@ -712,30 +718,49 @@ class BookingReminderCallbackSkill:
             distinct_id=str(reminder.bot_user_id),
         )
 
-    def _handle_reschedule(self, reminder: BookingReminder) -> SkillResult:
-        """SENT_NO_REPLY → RESCHEDULE_REQUESTED. Defer operator-page TODO."""
-        now = timezone.now()
-        rowcount = BookingReminder.all_tenants.filter(
-            pk=reminder.pk,
-            status=BookingReminder.Status.SENT_NO_REPLY,
-        ).update(
-            status=BookingReminder.Status.RESCHEDULE_REQUESTED,
-            replied_at=now,
-        )
-        if rowcount == 0:
-            return SkillResult(
-                reply_text=REPLY_ALREADY_HANDLED, action_data=_my_bookings_and_menu_keyboard()
-            )
+    def _handle_reschedule(
+        self, reminder: BookingReminder, conversation: "Conversation"
+    ) -> SkillResult:
+        """SENT_NO_REPLY → RESCHEDULE_REQUESTED + hand the person to an operator.
 
-        # TODO(Phase 2): notify the operator chat that this reminder
-        # needs manual rebooking. mysite did this via a direct
-        # send_max_message to ADMIN_MAX_CHAT_ID; on the platform side
-        # the same channel exists (settings.ADMIN_MAX_CHAT_ID) but the
-        # "operator notification" lane is a separate skill/service
-        # cross-cutting concern (see apps.handoff). Deferring to a
-        # follow-up ticket — the audit row + canonical event below
-        # are enough for an operator to spot the reschedule request
-        # via the admin console in the meantime.
+        DRF-2338 — the reply says «передал администратору, скоро напишут», and
+        until this ticket nobody was told: the old ``TODO(Phase 2)`` left the
+        audit row and the event as the only trace, and «an operator may spot it
+        in the admin console» is not the same as being handed the person. The
+        handover that works in this repository is
+        :func:`apps.handoff.services.create_admin_task` — it addresses the task
+        (DRF-1488) and moves the conversation to ``HUMAN_HANDOFF``. The words
+        do not change; they become true.
+
+        The status flip and the task live in ONE transaction, in that order.
+        The conditional UPDATE is the lock that makes a second press a replay
+        (one task per reminder); wrapping both means a failed handover leaves
+        the reminder untouched, so the person can press again — instead of a
+        row marked «requested» with nobody holding it.
+        """
+        now = timezone.now()
+        with transaction.atomic():
+            rowcount = BookingReminder.all_tenants.filter(
+                pk=reminder.pk,
+                status=BookingReminder.Status.SENT_NO_REPLY,
+            ).update(
+                status=BookingReminder.Status.RESCHEDULE_REQUESTED,
+                replied_at=now,
+            )
+            if rowcount == 0:
+                return SkillResult(
+                    reply_text=REPLY_ALREADY_HANDLED,
+                    action_data=_my_bookings_and_menu_keyboard(),
+                )
+
+            # MANUAL, as the outbound-DLQ path does (pipeline §Phase 0): the
+            # operator acts out of band — reaches the person and rebooks in
+            # YClients — rather than continuing this dialogue as the bot.
+            create_admin_task(
+                conversation,
+                task_type=AdminTask.TaskType.MANUAL,
+                reason=_reschedule_reason(reminder),
+            )
 
         write_audit(
             action=AUDIT_REMINDER_RESCHEDULE,
@@ -755,6 +780,20 @@ class BookingReminderCallbackSkill:
         return SkillResult(
             reply_text=REPLY_RESCHEDULE, action_data=_my_bookings_and_menu_keyboard()
         )
+
+
+def _reschedule_reason(reminder: BookingReminder) -> str:
+    """What the operator needs to rebook, in one line — no contact details.
+
+    The phone is deliberately absent: an operator opens the person's card for
+    that, and DRF-1039 keeps the client's number off the staff surfaces.
+    """
+    visit = timezone.localtime(reminder.visit_at).strftime("%d.%m %H:%M")
+    return (
+        f"[перенос записи] запись {reminder.yclients_record_id}, визит {visit}, "
+        f"услуга {reminder.service_name}, мастер {reminder.master_name} "
+        f"(напоминание {reminder.pk})"
+    )
 
 
 def _parse_gate_token(callback_text: str) -> tuple[str, UUID] | None:

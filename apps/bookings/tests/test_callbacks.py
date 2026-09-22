@@ -228,7 +228,11 @@ class TestReschedule:
             bot_user=bot_user,
             conversation=conversation,
         )
-        result = BookingReminderCallbackSkill().handle(ctx)
+        # DRF-2338 — перенос теперь передаёт человека оператору
+        # (``create_admin_task``), а тот требует тенанта в области видимости:
+        # в бою её открывает цикл потребителя (apps/workers/consumer.py).
+        with tenant_scope(tenant):
+            result = BookingReminderCallbackSkill().handle(ctx)
         assert result.reply_text == REPLY_RESCHEDULE
         reminder.refresh_from_db()
         assert reminder.status == BookingReminder.Status.RESCHEDULE_REQUESTED
