@@ -123,6 +123,9 @@ function refusalText(err: unknown): string | null {
   if (err.slug === "invite_already_used") {
     return "Этим кодом уже воспользовались — доступ выдан. Обновите список.";
   }
+  if (err.slug === "invite_already_resent") {
+    return "Новый код по этому приглашению уже выдан — он в списке. Если его не успели передать, отмените его и выдайте заново.";
+  }
   if (err.slug === "invite_master_missing") {
     return "Карточка мастера в архиве — код для неё выдать нельзя.";
   }
@@ -221,8 +224,12 @@ export function AdminInvitesScreen({ me }: Props) {
           </StickyCta>
         }
       >
+        {/* Only a WAITING code was cancelled by the resend; saying so of an
+            expired or cancelled one would claim a step that did not happen. */}
         <p style={{ margin: "0 0 var(--s-3)" }}>
-          Прежний код больше не работает. Передайте человеку этот.
+          {issued.invite.status === "pending"
+            ? "Прежний код больше не работает. Передайте человеку этот."
+            : "Передайте человеку этот код."}
         </p>
         <IssuedAccessCode
           issued={issued.issued}

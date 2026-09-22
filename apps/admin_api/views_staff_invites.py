@@ -34,6 +34,11 @@ it once — as ``staff/invite/`` does — and cancels the old one if it was
 still pending, in one transaction: there is never a moment with two live
 codes for one invitation. An expired or cancelled code may be re-issued
 too (that is the usual reason to press the button); an accepted one may not.
+
+Once only: a second resend of the same code answers 409
+``invite_already_resent`` (the issue record carries ``resent_from``; the old
+row is locked while asking). The new code is in the list — to replace it,
+resend or cancel THAT one.
 """
 
 from __future__ import annotations
@@ -50,6 +55,7 @@ from django.views.decorators.http import require_http_methods
 
 from apps.admin_api.auth import require_admin_role
 from apps.admin_api.views_staff_invite import _code_start_link
+from apps.audit.models import AuditLog
 from apps.audit.services import write_audit
 from apps.events.vocabulary import STAFF_INVITE_ISSUED
 from apps.identity.services.staff_invites import (
@@ -63,6 +69,10 @@ logger = logging.getLogger(__name__)
 
 #: The list is a screen, not an export. Newest first; the cap is said.
 MAX_INVITES = 100
+
+
+class _AlreadyResent(Exception):
+    """This invitation already has a re-issued code — rolls the transaction back."""
 
 
 def _error(slug: str, detail: str, status: int) -> JsonResponse:
@@ -190,6 +200,21 @@ def staff_invite_resend(request: HttpRequest, invite_id: str) -> HttpResponse:
 
     try:
         with transaction.atomic():
+            # Serialise resends of ONE invitation on its row, then ask whether
+            # it was resent already. Without this, «Повторить» after a lost
+            # response (or two taps on two phones) issued a second live code,
+            # the first of which nobody ever saw. Holds for expired and
+            # cancelled codes too, which the revoke below never locks.
+            locked = StaffInvite.all_tenants.select_for_update().get(pk=old.pk)
+            if AuditLog.all_tenants.filter(
+                tenant_id=tenant.id,
+                action=STAFF_INVITE_ISSUED,
+                payload__resent_from=str(old.id),
+            ).exists():
+                raise _AlreadyResent
+            status = invite_status(locked)
+            if status == "accepted":
+                raise InviteAlreadyUsed("the code was used while it was being resent")
             if status == "pending":
                 revoke_staff_invite(
                     old,
@@ -223,6 +248,12 @@ def staff_invite_resend(request: HttpRequest, invite_id: str) -> HttpResponse:
     except InviteAlreadyUsed as exc:
         # Used between the read and the lock — say so, issue nothing.
         return _error(exc.slug, str(exc), 409)
+    except _AlreadyResent:
+        return _error(
+            "invite_already_resent",
+            "a new code for this invitation was already issued — it is in the list",
+            409,
+        )
 
     logger.info(
         "admin_api.staff_invite.resent tenant=%s role=%s old=%s new=%s by=%s",

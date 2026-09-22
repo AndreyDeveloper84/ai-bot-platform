@@ -230,6 +230,23 @@ describe("resend", () => {
     expect(screen.queryByText("AYLA-7Q2K")).not.toBeInTheDocument();
   });
 
+  it("says a second resend in words — the first new code is in the list", async () => {
+    mockedResend.mockRejectedValue(new ApiError(409, "invite_already_resent", "resent"));
+    renderScreen();
+    await screen.findByText("Заметка: Лена");
+    fireEvent.click(
+      within(row("Заметка: Лена")).getByRole("button", { name: /Отправить заново/ }),
+    );
+    fireEvent.click(
+      within(await screen.findByRole("dialog")).getByRole("button", { name: "Выдать новый код" }),
+    );
+
+    expect(
+      await screen.findByText(/Новый код по этому приглашению уже выдан/),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Попробовать снова" })).not.toBeInTheDocument();
+  });
+
   it("does not claim an old code stops working when it already had", async () => {
     renderScreen();
     await screen.findByText("истёк");
@@ -238,5 +255,8 @@ describe("resend", () => {
 
     const dialog = await screen.findByRole("dialog");
     expect(within(dialog).getByText("Выдадим новый код на ту же роль.")).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole("button", { name: "Выдать новый код" }));
+    expect(await screen.findByText("Передайте человеку этот код.")).toBeInTheDocument();
+    expect(screen.queryByText(/Прежний код больше не работает/)).not.toBeInTheDocument();
   });
 });

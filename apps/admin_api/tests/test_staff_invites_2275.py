@@ -200,3 +200,69 @@ class TestWhoManages:
         assert owner_code.revoked_at is None
         # The owner may.
         assert _post(client, "staff_invite_cancel", owner_code.id).status_code == 200
+
+
+class TestReviewFindings:
+    """Code Reviewer, DRF-2275."""
+
+    def test_resending_twice_never_leaves_two_live_codes(self, client, owner_bot_user, tenant):
+        # The UI's «Повторить» after a lost response is the real trigger:
+        # the first new code is live and was shown to nobody.
+        for old in (
+            _invite(tenant, note="ждёт"),
+            _invite(tenant, note="истёк", expires_at=timezone.now() - timedelta(days=1)),
+        ):
+            first = _post(client, "staff_invite_resend", old.id)
+            assert first.status_code == 200, first.content
+            again = _post(client, "staff_invite_resend", old.id)
+            assert again.status_code == 409
+            assert again.json()["error"] == "invite_already_resent"
+            assert (
+                StaffInvite.all_tenants.filter(tenant=tenant, note=old.note)
+                .exclude(pk=old.pk)
+                .count()
+                == 1
+            )
+
+    def test_resend_is_recorded(self, client, owner_bot_user, tenant):
+        old = _invite(tenant)
+        new_id = _post(client, "staff_invite_resend", old.id).json()["invite_id"]
+        issued = AuditLog.all_tenants.get(action="staff.invite_issued", target_id=new_id)
+        assert issued.payload["resent_from"] == str(old.id)
+        assert "code" not in issued.payload
+        assert AuditLog.all_tenants.filter(action="staff.invite_revoked", target_id=old.id).exists()
+
+    def test_an_archived_card_gets_no_new_code(self, client, owner_bot_user, tenant, master):
+        old = _invite(tenant, role="master", master=master)
+        master.archived_at = timezone.now()
+        master.save(update_fields=["archived_at"])
+        before = StaffInvite.all_tenants.filter(tenant=tenant).count()
+
+        resp = _post(client, "staff_invite_resend", old.id)
+        assert resp.status_code == 409
+        assert resp.json()["error"] == "invite_master_missing"
+        assert StaffInvite.all_tenants.filter(tenant=tenant).count() == before
+
+    def test_another_salon_or_a_malformed_id_is_not_found(
+        self, client, owner_bot_user, tenant, other_tenant
+    ):
+        theirs = _invite(other_tenant)
+        assert _post(client, "staff_invite_resend", theirs.id).status_code == 404
+        assert _post(client, "staff_invite_resend", "not-a-uuid").status_code == 404
+        assert _post(client, "staff_invite_cancel", "not-a-uuid").status_code == 404
+        assert StaffInvite.all_tenants.filter(tenant=other_tenant).count() == 1
+
+    def test_the_owner_resends_an_owner_code(self, client, owner_bot_user, tenant):
+        owner_code = _invite(tenant, role="owner")
+        resp = _post(client, "staff_invite_resend", owner_code.id)
+        assert resp.status_code == 200, resp.content
+        assert resp.json()["role"] == "owner"
+
+    def test_the_list_says_when_it_is_cut(self, client, owner_bot_user, tenant, monkeypatch):
+        from apps.admin_api import views_staff_invites
+
+        monkeypatch.setattr(views_staff_invites, "MAX_INVITES", 2)
+        for _ in range(3):
+            _invite(tenant)
+        body = _list(client).json()
+        assert (len(body["items"]), body["total_count"], body["truncated"]) == (2, 3, True)
