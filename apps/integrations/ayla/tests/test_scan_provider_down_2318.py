@@ -53,6 +53,7 @@ class TestC1PermanentIsItsOwnError:
         _set_transport(transport)
         with pytest.raises(nc.ScanProviderDownError) as exc:
             await client.scan_photo(external_user_id="bot:1", image_bytes=b"...")
+        assert isinstance(exc.value, nc.ScanProviderDownError)  # наличие: своя ошибка
         assert exc.value.reason == "billing_not_active"
         assert not isinstance(exc.value, nc.NutritionUnavailableError)
 
