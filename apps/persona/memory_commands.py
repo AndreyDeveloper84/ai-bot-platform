@@ -63,18 +63,28 @@ _FORGET_ALL_MARKER = "напиши одним словом: удалить"
 # apps.identity.services.forget_all_sweep) and the Ayla-side declared profile.
 # What still stands is now visible: the export carries the preferences and
 # declares its own composition (apps.identity.export_coverage).
+#
+# DRF-2214 (CD §76, №30) — the erasure is now wider than «what I remembered
+# from our conversations»: goals, the plan, the nutrition profile, the food
+# diary, recommendation cards (#526/#530/#541/#1980). The owner's text names
+# what stays instead: bookings and payments; favourite masters, which live in
+# the BeautyGO mobile app (``FavoriteSpecialist``) and are kept; the settings
+# on the profile screen. Pinned verbatim by
+# ``apps/persona/tests/test_forget_all_texts_2214.py``.
 FORGET_ALL_PROMPT = (
-    "Это серьёзный шаг: я забуду всё, что запомнила о тебе из наших разговоров, "
-    "и анкету предпочтений — вернуть будет нельзя.\n"
+    "Это серьёзный шаг: я забуду всё, что знаю о тебе, кроме бронирований и оплат, "
+    "— вернуть будет нельзя.\n"
     "Саму переписку я обезличу: текст останется без твоих контактов — только на "
     "случай спора о записи, и удалится через 90 дней.\n"
-    "Останутся бронирования и оплаты (это по закону) и настройки уведомлений "
-    "с датой рождения — ими ты управляешь сам на экране профиля.\n"
+    "Останутся бронирования и оплаты (это по закону), избранные мастера — они в "
+    "приложении BeautyGO, а также настройки уведомлений с датой рождения — их ты "
+    "меняешь сам на экране профиля.\n"
     f"Чтобы подтвердить — {_FORGET_ALL_MARKER}"
 )
 _FORGET_ALL_DONE = (
-    "Готово — я забыла всё, что о тебе помнила. Настройки уведомлений и дата "
-    "рождения остались на экране профиля: их меняешь ты, не я 🙂"
+    "Готово — я забыла всё, что о тебе помнила. Избранные мастера остались в "
+    "приложении BeautyGO, настройки уведомлений и дата рождения — на экране "
+    "профиля: их меняешь ты, не я 🙂"
 )
 
 # DRF-1367: said when the bot-side memory is gone but Ayla — the owner of the
