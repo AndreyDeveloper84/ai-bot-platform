@@ -38,6 +38,7 @@ vi.mock("../lib/max-sdk", async (importOriginal) => {
   return { ...original, setBackButton: vi.fn(), signalReady: vi.fn() };
 });
 
+import { SoloSurfaceContext, type SoloSurfaceInfo } from "../hooks/useMasterAvatarItems";
 import { ApiError } from "../lib/api";
 import {
   getMasterMe,
@@ -221,15 +222,16 @@ function LocationProbe() {
   return <div data-testid="location">{location.pathname}</div>;
 }
 
-async function renderScreen() {
-  render(
+async function renderScreen(solo?: SoloSurfaceInfo) {
+  const routes = (
     <MemoryRouter initialEntries={["/solo/publication"]}>
       <Routes>
         <Route path="/solo/publication" element={<MasterPublicationScreen />} />
         <Route path="*" element={<LocationProbe />} />
       </Routes>
-    </MemoryRouter>,
+    </MemoryRouter>
   );
+  render(solo ? <SoloSurfaceContext.Provider value={solo}>{routes}</SoloSurfaceContext.Provider> : routes);
   await settle();
 }
 
@@ -334,6 +336,14 @@ describe("экран 08 — состояния из ответа каталог�
 
     fireEvent.click(screen.getByRole("button", { name: PUBLICATION_COPY.addServices }));
     expect(screen.getByTestId("location")).toHaveTextContent("/solo/services/select");
+  });
+
+  it("S3c (DRF-2254): каталог назвал пространство салоном — «Добавить ещё услуги» нет, кабинет есть", async () => {
+    mockedStatus.mockResolvedValue(withStatus("active"));
+    await renderScreen({ salonAdmin: false, selfService: false });
+
+    expect(screen.getByRole("button", { name: PUBLICATION_COPY.toCabinet })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: PUBLICATION_COPY.addServices })).toBeNull();
   });
 
   it("S3b: ACTIVE — «Перейти в кабинет» ведёт в «Мой день»", async () => {

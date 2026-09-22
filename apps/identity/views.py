@@ -146,6 +146,7 @@ def me_view(request: HttpRequest) -> HttpResponse:
     # Local import to avoid an apps.identity.views ↔ apps.identity.services
     # circular at module-load time (services may import view helpers
     # later); the per-request cost of import resolution is negligible.
+    from apps.identity.services import workspace_kind
     from apps.identity.services.solo_onboarding import is_solo_provider
 
     return JsonResponse(
@@ -172,6 +173,21 @@ def me_view(request: HttpRequest) -> HttpResponse:
             # admin-only chrome for self-employed solo providers (1 distinct
             # person = staff ∪ master_link is a single user).
             "is_solo_provider": is_solo_provider(tenant),
+            # DRF-2254 — «чьё место и кто ведёт услуги»: ``Tenant.kind``
+            # каталога, единственный источник; ``is_solo_provider`` выше —
+            # только раскладка. Экраны самообслуживания мастера гейтятся по
+            # этому полю. ``null`` — не знаю (каталог молчит / у клиента не
+            # спрашиваем): Mini App ведёт себя как прежде.
+            "workspace_kind": (
+                workspace_kind.workspace_kind(tenant.id)
+                if (
+                    role_ctx.is_master
+                    or role_ctx.is_owner
+                    or role_ctx.is_admin
+                    or role_ctx.is_receptionist
+                )
+                else None
+            ),
             "master_id": str(role_ctx.master_id) if role_ctx.master_id else None,
             "landing_path": role_ctx.landing_path,
         }

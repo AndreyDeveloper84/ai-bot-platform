@@ -370,7 +370,8 @@ export interface ReadinessItem {
   state: ReadinessItemState | string;
   detail: Record<string, unknown>;
   reason: string | null;
-  deep_link: string;
+  /** DRF-2254: `null` — вести некуда (пункт ведётся вне приложения, `managed_outside_app`). */
+  deep_link: string | null;
 }
 
 /** Связь личности — условие ПУБЛИКАЦИИ (ruling 6), не настройки. */

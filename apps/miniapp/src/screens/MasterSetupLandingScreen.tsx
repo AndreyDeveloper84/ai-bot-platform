@@ -172,7 +172,7 @@ export function MasterSetupLandingScreen() {
       <ul className="setup-landing__list" aria-label="Осталось настроить">
         {items.map((item) => (
           <li key={item.key} className={`setup-landing__item setup-landing__item--${item.state}`}>
-            <ItemRow item={item} onOpen={() => navigate(item.deep_link)} />
+            <ItemRow item={item} onOpen={() => item.deep_link && navigate(item.deep_link)} />
           </li>
         ))}
       </ul>
@@ -190,7 +190,7 @@ export function MasterSetupLandingScreen() {
           <button
             type="button"
             className="btn-primary"
-            onClick={() => navigate(next.deep_link)}
+            onClick={() => next.deep_link && navigate(next.deep_link)}
           >
             {fill.done > 0 ? CONTINUE_LABEL : START_LABEL}
           </button>

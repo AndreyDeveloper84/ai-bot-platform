@@ -47,6 +47,7 @@ import { useCallback, useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
 import { SurfaceSwitchButton } from "../components/SurfaceSwitch";
+import { useSelfService } from "../hooks/useMasterAvatarItems";
 import { MASTER_SESSION_STORAGE_KEY } from "../lib/master-api";
 import {
   hapticNotify,
@@ -80,6 +81,8 @@ export function MasterSettingsScreen() {
   // маршруты СВОЕЙ поверхности. Раньше «Рабочие часы» и «Место работы» вели
   // на /solo/* и салонного мастера молча выбрасывало на «Сегодня».
   const isSolo = useLocation().pathname.startsWith("/solo/");
+  // DRF-2254: «Место работы» — только когда каталог не назвал пространство салоном.
+  const selfService = useSelfService();
   const [confirmOpen, setConfirmOpen] = useState(false);
 
   // --- Bridge: BackButton wiring ---
@@ -153,7 +156,7 @@ export function MasterSettingsScreen() {
       {/* DRF-1811 (M19) — экран 05: место работы (изменить формат/адрес в любое время, P45/P50).
           DRF-2247: только соло — у салонного мастера место задаёт салон, и
           экрана «Место работы» на его поверхности нет. */}
-      {isSolo ? (
+      {isSolo && selfService ? (
         <button
           type="button"
           className="btn-secondary"
