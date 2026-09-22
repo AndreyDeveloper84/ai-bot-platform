@@ -369,7 +369,9 @@ class BookingReminderCallbackSkill:
         parsed = _parse_reminder_pk(text)
         if parsed is None:
             logger.info("bookings.callback.malformed text=%r", text)
-            return SkillResult(reply_text=REPLY_NOT_FOUND)
+            return SkillResult(
+                reply_text=REPLY_NOT_FOUND, action_data=_my_bookings_and_menu_keyboard()
+            )
 
         action, pk = parsed
         # ``all_tenants`` because the conversation handler may not
@@ -385,7 +387,9 @@ class BookingReminderCallbackSkill:
             ).get(pk=pk)
         except BookingReminder.DoesNotExist:
             logger.info("bookings.callback.not_found pk=%s action=%s", pk, action)
-            return SkillResult(reply_text=REPLY_NOT_FOUND)
+            return SkillResult(
+                reply_text=REPLY_NOT_FOUND, action_data=_my_bookings_and_menu_keyboard()
+            )
 
         if not _sender_matches(reminder, context.bot_user.pk):
             logger.warning(
@@ -400,7 +404,9 @@ class BookingReminderCallbackSkill:
                 target_id=reminder.pk,
                 payload={"action": action, "sender_id": str(context.bot_user.pk)},
             )
-            return SkillResult(reply_text=REPLY_FORBIDDEN)
+            return SkillResult(
+                reply_text=REPLY_FORBIDDEN, action_data=_my_bookings_and_menu_keyboard()
+            )
 
         if reminder.status != BookingReminder.Status.SENT_NO_REPLY:
             # Idempotent replay — user re-clicked after the first
@@ -418,7 +424,9 @@ class BookingReminderCallbackSkill:
                 target_id=reminder.pk,
                 payload={"action": action, "current_status": reminder.status},
             )
-            return SkillResult(reply_text=REPLY_ALREADY_HANDLED)
+            return SkillResult(
+                reply_text=REPLY_ALREADY_HANDLED, action_data=_my_bookings_and_menu_keyboard()
+            )
 
         if action == "confirm":
             return self._handle_confirm(reminder)
@@ -443,7 +451,9 @@ class BookingReminderCallbackSkill:
         if rowcount == 0:
             # Concurrent click — the other branch won. Mirror the
             # replay path.
-            return SkillResult(reply_text=REPLY_ALREADY_HANDLED)
+            return SkillResult(
+                reply_text=REPLY_ALREADY_HANDLED, action_data=_my_bookings_and_menu_keyboard()
+            )
 
         write_audit(
             action=AUDIT_REMINDER_CONFIRMED,
@@ -473,7 +483,9 @@ class BookingReminderCallbackSkill:
             replied_at=now,
         )
         if rowcount == 0:
-            return SkillResult(reply_text=REPLY_ALREADY_HANDLED)
+            return SkillResult(
+                reply_text=REPLY_ALREADY_HANDLED, action_data=_my_bookings_and_menu_keyboard()
+            )
 
         # Best-effort upstream cancel. The B1 YClients client exposes
         # ``delete_record`` (per the integration's published shape);
@@ -515,7 +527,9 @@ class BookingReminderCallbackSkill:
             replied_at=now,
         )
         if rowcount == 0:
-            return SkillResult(reply_text=REPLY_ALREADY_HANDLED)
+            return SkillResult(
+                reply_text=REPLY_ALREADY_HANDLED, action_data=_my_bookings_and_menu_keyboard()
+            )
 
         # TODO(Phase 2): notify the operator chat that this reminder
         # needs manual rebooking. mysite did this via a direct
@@ -679,7 +693,10 @@ class BookingGateCallbackSkill:
             if row is None:
                 # matches() and handle() disagree only when the row was
                 # consumed/expired between the two calls — fail closed.
-                return SkillResult(reply_text=REPLY_BOOK_ALREADY_HANDLED)
+                return SkillResult(
+                    reply_text=REPLY_BOOK_ALREADY_HANDLED,
+                    action_data=_my_bookings_and_menu_keyboard(),
+                )
             clear_booking_flow(context.conversation)
             if is_confirm_text(text):
                 logger.info(
@@ -706,7 +723,7 @@ class BookingGateCallbackSkill:
             return self._handle_cancel_tap(context, row.pk)
 
         logger.info("bookings.gate.malformed text=%r", text)
-        return SkillResult(reply_text=REPLY_NOT_FOUND)
+        return SkillResult(reply_text=REPLY_NOT_FOUND, action_data=_my_bookings_and_menu_keyboard())
 
     # ─── confirm-tap (executes the destructive verb) ─────────────────────
 
@@ -732,7 +749,9 @@ class BookingGateCallbackSkill:
         try:
             row = PendingBookingAction.all_tenants.get(pk=token)
         except PendingBookingAction.DoesNotExist:
-            return SkillResult(reply_text=REPLY_NOT_FOUND)
+            return SkillResult(
+                reply_text=REPLY_NOT_FOUND, action_data=_my_bookings_and_menu_keyboard()
+            )
 
         if not _gate_tenant_matches(row, context.bot_user):
             # Bookings/callbacks retro #3: defence-in-depth tenant guard.
@@ -753,7 +772,9 @@ class BookingGateCallbackSkill:
                     "sender_tenant_id": str(context.bot_user.tenant_id),
                 },
             )
-            return SkillResult(reply_text=REPLY_FORBIDDEN)
+            return SkillResult(
+                reply_text=REPLY_FORBIDDEN, action_data=_my_bookings_and_menu_keyboard()
+            )
 
         if not _gate_sender_matches(row, context.bot_user.pk):
             write_audit(
@@ -762,11 +783,15 @@ class BookingGateCallbackSkill:
                 target_id=row.pk,
                 payload={"sender_id": str(context.bot_user.pk)},
             )
-            return SkillResult(reply_text=REPLY_FORBIDDEN)
+            return SkillResult(
+                reply_text=REPLY_FORBIDDEN, action_data=_my_bookings_and_menu_keyboard()
+            )
 
         lookup = consume_pending(token)
         if lookup.row is None:
-            return SkillResult(reply_text=REPLY_NOT_FOUND)
+            return SkillResult(
+                reply_text=REPLY_NOT_FOUND, action_data=_my_bookings_and_menu_keyboard()
+            )
 
         if lookup.expired:
             write_audit(
@@ -800,7 +825,9 @@ class BookingGateCallbackSkill:
                 target_id=lookup.row.pk,
                 payload={"kind": lookup.row.kind},
             )
-            return SkillResult(reply_text=REPLY_BOOK_ALREADY_HANDLED)
+            return SkillResult(
+                reply_text=REPLY_BOOK_ALREADY_HANDLED, action_data=_my_bookings_and_menu_keyboard()
+            )
 
         # We claimed the row. Execute the matching verb.
         row = lookup.row
@@ -923,6 +950,8 @@ class BookingGateCallbackSkill:
             )
         if result.error == "invalid_record_id":
             return SkillResult(
+                # DRF-2267: кнопок нет намеренно — ход передаётся оператору
+                # (B24/F5), и после передачи бот молчит: тап упал бы в тишину.
                 reply_text=REPLY_NOT_FOUND,
                 should_handoff=True,
                 handoff_reason="booking_invalid_record_id",
@@ -980,6 +1009,8 @@ class BookingGateCallbackSkill:
             )
         if result.error == "invalid_record_id":
             return SkillResult(
+                # DRF-2267: кнопок нет намеренно — ход передаётся оператору
+                # (B24/F5), и после передачи бот молчит: тап упал бы в тишину.
                 reply_text=REPLY_NOT_FOUND,
                 should_handoff=True,
                 handoff_reason="booking_invalid_record_id",
@@ -1000,7 +1031,10 @@ class BookingGateCallbackSkill:
             target_id=row.pk,
             payload={"kind": "reschedule"},
         )
-        return SkillResult(reply_text=result.text)
+        # DRF-2267 (CD §72): перенос удался — дальше то же, что после
+        # подтверждения: свои записи и «Меню». До этого успешный перенос
+        # был единственным завершённым действием ворот без единой кнопки.
+        return SkillResult(reply_text=result.text, action_data=_my_bookings_and_menu_keyboard())
 
     # ─── cancel-tap (discard preview, no destructive call) ───────────────
 
@@ -1015,7 +1049,9 @@ class BookingGateCallbackSkill:
         try:
             row = PendingBookingAction.all_tenants.get(pk=token)
         except PendingBookingAction.DoesNotExist:
-            return SkillResult(reply_text=REPLY_NOT_FOUND)
+            return SkillResult(
+                reply_text=REPLY_NOT_FOUND, action_data=_my_bookings_and_menu_keyboard()
+            )
 
         # Symmetric tenant guard (see retro #3 note in _handle_confirm_tap).
         if not _gate_tenant_matches(row, context.bot_user):
@@ -1030,7 +1066,9 @@ class BookingGateCallbackSkill:
                     "sender_tenant_id": str(context.bot_user.tenant_id),
                 },
             )
-            return SkillResult(reply_text=REPLY_FORBIDDEN)
+            return SkillResult(
+                reply_text=REPLY_FORBIDDEN, action_data=_my_bookings_and_menu_keyboard()
+            )
 
         if not _gate_sender_matches(row, context.bot_user.pk):
             write_audit(
@@ -1039,17 +1077,23 @@ class BookingGateCallbackSkill:
                 target_id=row.pk,
                 payload={"sender_id": str(context.bot_user.pk)},
             )
-            return SkillResult(reply_text=REPLY_FORBIDDEN)
+            return SkillResult(
+                reply_text=REPLY_FORBIDDEN, action_data=_my_bookings_and_menu_keyboard()
+            )
 
         if row.consumed_at is not None:
-            return SkillResult(reply_text=REPLY_BOOK_ALREADY_HANDLED)
+            return SkillResult(
+                reply_text=REPLY_BOOK_ALREADY_HANDLED, action_data=_my_bookings_and_menu_keyboard()
+            )
 
         ok = discard_pending(token)
         if not ok:
             # Either expired between the lookup and the discard CAS,
             # or another tap raced and already consumed it. Either
             # way, "already handled" is the right message.
-            return SkillResult(reply_text=REPLY_BOOK_ALREADY_HANDLED)
+            return SkillResult(
+                reply_text=REPLY_BOOK_ALREADY_HANDLED, action_data=_my_bookings_and_menu_keyboard()
+            )
 
         write_audit(
             action=AUDIT_BOOK_GATE_CANCELLED,
