@@ -135,6 +135,12 @@ urlpatterns = [
         views_staff_role.staff_role_change,
         name="staff_role_change",
     ),
+    # DRF-2274 — giving back a revoked role. Owner-only; see the view.
+    path(
+        "staff/restore/",
+        views_staff_role.staff_restore,
+        name="staff_restore",
+    ),
     # The list nothing produced: every person of the salon with every
     # role they hold, merged across TenantStaff and CatalogMaster
     # (ADR-0008). Owner-only — see the view's module docstring.
