@@ -144,10 +144,15 @@ class TestTheButtonIsNotALie:
             for name, value in vars(payment_skill).items()
             if isinstance(value, str) and name.isupper() or name.startswith("_CLIENT")
         }
-        # Присутствие: тексты ответов на месте и читаются.
+        # Присутствие: тексты ответов на месте и читаются — три отказа и успех.
         assert payment_skill._CLIENT_RETRY_SUCCESS_TEMPLATE in texts.values()
-        assert not hasattr(payment_skill, "_CLIENT_RETRY_PENDING_TEMPLATE")
+        assert payment_skill._CLIENT_RETRY_OBSOLETE_TEMPLATE in texts.values()
+        assert payment_skill._CLIENT_RETRY_TRANSIENT_ERROR in texts.values()
+        assert payment_skill._CALLBACK_NOT_AUTHORIZED in texts.values()
+        # И среди них нет «недоступно через бот» — ни под старым именем, ни
+        # под любым другим.
         assert [name for name, value in texts.items() if "временно недоступна" in value] == []
+        assert "_CLIENT_RETRY_PENDING_TEMPLATE" not in vars(payment_skill)
 
     @pytest.mark.parametrize(
         "answer",
