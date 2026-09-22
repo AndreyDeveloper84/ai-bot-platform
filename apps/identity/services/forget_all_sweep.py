@@ -181,26 +181,56 @@ class ForgetAllSweepResult:
 NUTRITION_OBSERVATION_KEYS: tuple[str, ...] = ("water", "last_report_date")
 
 
+#: DRF-2308 — the fingerprint of an erased card; the account deletion path
+#: writes the same (``recommendation/erasure.py``).
+ERASED_FINGERPRINT_PREFIX = "erased:"
+
+
 def anonymise_recommendations(shell_ids) -> int:
     """Blank the person's words on every card; keep the card (DRF-2214).
 
     ``why`` is the reasons verbatim, ``facts`` the labels of the goal and the
     answers they were built from, ``goal_id`` the key of a goal «забудь всё»
-    erases in the catalog (#526). The row stays for attribution (owner B13:
-    which card led to which booking) — ``reaction``, ``booking_id``, dates;
-    ``what``/``subline``/``alternatives`` are the owner's curated table, not
-    data about the person. Only cards still holding something are touched, so
+    erases in the catalog (#526). ``fingerprint`` goes too (DRF-2308): an
+    ABSENCE card keys it ``absence:{goal_id}`` — the goal in plain text — and
+    a DIRECTION card an unsalted ``sha256({goal, what, why})`` that brute force
+    recovers. It becomes ``erased:{id}``: unique per row, so the
+    ``(bot_user, fingerprint)`` constraint holds, and meaningless.
+
+    Row by row in Python, in one transaction — the same value the account
+    deletion path writes (``recommendation/erasure.py``, #1986). A SQL cast of
+    the UUID would render differently on SQLite (no dashes) and Postgres, and
+    the two paths must agree. Rows already carrying the marker are skipped, so
     a repeat sweep changes nothing.
+
+    The row stays for attribution (owner B13: which card led to which
+    booking) — ``reaction``, ``booking_id``, dates; ``what``/``subline``/
+    ``alternatives`` are the owner's curated table, not data about the person.
+    A side effect, accepted: the same context under the same goal may produce
+    a new card later, since the old fingerprint no longer deduplicates it.
     """
     from django.db.models import Q
 
     from apps.recommendation.models import Recommendation
 
-    return (
+    rows = list(
         Recommendation.objects.filter(bot_user_id__in=list(shell_ids))
-        .filter(~Q(why=[]) | ~Q(facts={}) | ~Q(goal_id=""))
-        .update(why=[], facts={}, goal_id="")
+        .exclude(fingerprint__startswith=ERASED_FINGERPRINT_PREFIX)
+        .only("id")
     )
+    rows += list(
+        Recommendation.objects.filter(
+            bot_user_id__in=list(shell_ids), fingerprint__startswith=ERASED_FINGERPRINT_PREFIX
+        )
+        .filter(~Q(why=[]) | ~Q(facts={}) | ~Q(goal_id=""))
+        .only("id")
+    )
+    with transaction.atomic():
+        for row in rows:
+            Recommendation.objects.filter(pk=row.pk).update(
+                why=[], facts={}, goal_id="", fingerprint=f"{ERASED_FINGERPRINT_PREFIX}{row.pk}"
+            )
+    return len(rows)
 
 
 def forget_nutrition_observations(shell_ids) -> int:
