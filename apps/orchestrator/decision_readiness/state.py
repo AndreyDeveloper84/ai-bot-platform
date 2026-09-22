@@ -631,6 +631,18 @@ def save(state: ConversationState, *, now: datetime | None = None) -> None:
     )
 
 
+def clear(conversation_id: str) -> None:
+    """Drop the conversation state — «забудь всё» (DRF-2214).
+
+    The slots carry what the person said (their evidence), so the state must
+    not outlive the request for its two-hour TTL. Only the state blob goes:
+    the revision counter (``dre:rev:<id>``) is a number, not something the
+    person said, and keeping it keeps revisions monotone across the gap
+    exactly as an expiry would.
+    """
+    _redis_client().delete(_state_key(conversation_id))
+
+
 def load(conversation_id: str, *, now: datetime | None = None) -> LoadResult:
     """Read the state, and say which of the three things happened.
 

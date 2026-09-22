@@ -152,6 +152,10 @@ class ForgetAllSweepResult:
     #: False when Redis was unreachable for the stream purge: the rest of the
     #: sweep still ran, and this says the streams were NOT checked.
     raw_streams_checked: bool = True
+    #: DRF-2214 — cards whose reasons, facts and goal key were blanked, and
+    #: shells whose proactive-nutrition observations were removed.
+    recommendations_anonymized: int = 0
+    nutrition_observations_cleared: int = 0
 
     @property
     def changed(self) -> bool:
@@ -164,7 +168,57 @@ class ForgetAllSweepResult:
             or self.conversations_anonymized
             or self.raw_entries_deleted
             or not self.raw_streams_checked
+            or self.recommendations_anonymized
+            or self.nutrition_observations_cleared
         )
+
+
+#: DRF-2214 — observations inside ``BotUser.context["nutrition_proactive"]``:
+#: how much the person drank (``water``) and the day of the last report. The
+#: toggles (``daily_report_time``, ``water_reminders``, ``opted_out_at``) are
+#: notification settings — «настройки уведомлений остаются» — and the send
+#: journal (``outbox``) holds only times and kinds, which the anti-spam reads.
+NUTRITION_OBSERVATION_KEYS: tuple[str, ...] = ("water", "last_report_date")
+
+
+def anonymise_recommendations(shell_ids) -> int:
+    """Blank the person's words on every card; keep the card (DRF-2214).
+
+    ``why`` is the reasons verbatim, ``facts`` the labels of the goal and the
+    answers they were built from, ``goal_id`` the key of a goal «забудь всё»
+    erases in the catalog (#526). The row stays for attribution (owner B13:
+    which card led to which booking) — ``reaction``, ``booking_id``, dates;
+    ``what``/``subline``/``alternatives`` are the owner's curated table, not
+    data about the person. Only cards still holding something are touched, so
+    a repeat sweep changes nothing.
+    """
+    from django.db.models import Q
+
+    from apps.recommendation.models import Recommendation
+
+    return (
+        Recommendation.objects.filter(bot_user_id__in=list(shell_ids))
+        .filter(~Q(why=[]) | ~Q(facts={}) | ~Q(goal_id=""))
+        .update(why=[], facts={}, goal_id="")
+    )
+
+
+def forget_nutrition_observations(shell_ids) -> int:
+    """Remove the observation keys from each shell's proactive-nutrition prefs."""
+    from apps.identity.models import BotUser
+
+    cleared = 0
+    for bot_user in BotUser.all_tenants.filter(pk__in=list(shell_ids)).only("pk", "context"):
+        context = dict(bot_user.context or {})
+        prefs = context.get("nutrition_proactive")
+        if not isinstance(prefs, dict) or not any(k in prefs for k in NUTRITION_OBSERVATION_KEYS):
+            continue
+        context["nutrition_proactive"] = {
+            k: v for k, v in prefs.items() if k not in NUTRITION_OBSERVATION_KEYS
+        }
+        BotUser.all_tenants.filter(pk=bot_user.pk).update(context=context)
+        cleared += 1
+    return cleared
 
 
 def sweep_forget_all(user_id: uuid.UUID) -> ForgetAllSweepResult:
@@ -251,15 +305,20 @@ def sweep_forget_all(user_id: uuid.UUID) -> ForgetAllSweepResult:
     # bound to a local so the invariant is stated where it is relied on rather
     # than asserted away with a cast.
     requested_at = upc.forget_all_requested_at
+    shells = shell_ids_for_person(ayla_user_id=user_id)
     dialogue = (
         anonymize_dialogue(
-            shell_ids_for_person(ayla_user_id=user_id),
+            shells,
             through=requested_at,
             reason=ArchivedMessage.Reason.FORGET_ALL,
         )
         if requested_at is not None
         else AnonymizeResult()
     )
+
+    # DRF-2214 — the two bot stores «забудь всё» used to leave standing.
+    recommendations_anonymized = anonymise_recommendations(shells)
+    nutrition_observations_cleared = forget_nutrition_observations(shells)
 
     result = ForgetAllSweepResult(
         user_id=user_id,
@@ -271,6 +330,8 @@ def sweep_forget_all(user_id: uuid.UUID) -> ForgetAllSweepResult:
         raw_entries_deleted=dialogue.raw_entries_deleted,
         raw_entries_unattributed=dialogue.raw_entries_unattributed,
         raw_streams_checked=dialogue.raw_streams_checked,
+        recommendations_anonymized=recommendations_anonymized,
+        nutrition_observations_cleared=nutrition_observations_cleared,
     )
 
     if result.changed:
@@ -290,6 +351,8 @@ def sweep_forget_all(user_id: uuid.UUID) -> ForgetAllSweepResult:
                 "raw_entries_deleted": result.raw_entries_deleted,
                 "raw_entries_unattributed": result.raw_entries_unattributed,
                 "raw_streams_checked": result.raw_streams_checked,
+                "recommendations_anonymized": result.recommendations_anonymized,
+                "nutrition_observations_cleared": result.nutrition_observations_cleared,
             },
         )
         logger.info(
