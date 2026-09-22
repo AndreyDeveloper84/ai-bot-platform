@@ -134,7 +134,36 @@ class AylaPaymentsUnavailableError(AylaPaymentsAPIError):
     """Ayla payments unreachable or breaker open — caller surfaces a handoff."""
 
 
+class AylaPaymentsRetryRefused(AylaPaymentsAPIError):
+    """409 ``INVALID_STATUS`` — the payment is not retry-eligible (DRF-2339).
+
+    An ANSWER, not a breakdown: the payment went through, or the booking was
+    cancelled. The breaker is not fed, and the caller says «эта оплата уже
+    неактуальна» — a different sentence from «провайдер недоступен», where
+    retrying is the right move.
+    """
+
+
+class AylaPaymentsNotAuthorized(AylaPaymentsAPIError):
+    """401 / 403 / 404 — this payment is not this person's to retry (DRF-2339).
+
+    403 is the catalogue's cross-check (``body.client_id`` vs the user behind
+    ``X-External-User-ID``); 404 is «not found FOR THIS USER». Both mean the
+    tap came from somebody the payment does not belong to — a forwarded chat,
+    a screenshot. Not a breakdown either: the breaker is not fed.
+    """
+
+
 # ─── DTOs ──────────────────────────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class RetryPaymentResult:
+    """A fresh checkout URL for an existing Ayla Payment (DRF-2339)."""
+
+    payment_id: str
+    confirmation_url: str
+    amount: str | None = None
 
 
 @dataclass(frozen=True)
@@ -343,6 +372,160 @@ class AylaPaymentsClient:
             raise AylaPaymentsUnavailableError(f"request_error: {type(exc).__name__}") from exc
 
         return self._parse_create_response(response, idempotence_key=idempotence_key)
+
+    def retry_payment(
+        self,
+        *,
+        payment_id: str,
+        ayla_user_id: str,
+        external_user_id: str,
+        idempotency_key: str,
+    ) -> RetryPaymentResult:
+        """POST ``/api/v1/payments/internal/<id>/retry`` — a new checkout URL.
+
+        The bot half of Ayla's ``InternalPaymentRetryView``: bearer token +
+        ``X-External-User-ID`` identify the actor, and ``body.client_id`` names
+        the same person again so a leaked token alone cannot impersonate one
+        (the catalogue answers 403 on a mismatch).
+
+        Args:
+          payment_id: the Ayla Payment that failed.
+          ayla_user_id: the person's Ayla User id — goes in the body.
+          external_user_id: ``bot:<channel>:<id>`` — goes in the header.
+          idempotency_key: REQUIRED and deterministic
+              (``payment_retry:<payment_id>``): a second tap must return the
+              same payment, not a second charge. Sent as the canonical
+              ``X-Idempotency-Key``, which Ayla reads first.
+
+        ``return_url`` is deliberately not sent: the catalogue has its own
+        default, and the bot does not invent an address for money.
+
+        **Test mode is not read here.** It stubs ``create_payment`` with a fake
+        checkout URL; doing that for a retry would answer «готово» with a link
+        that pays nobody, right after a failed payment. Either a real call or
+        an honest refusal.
+
+        Raises:
+          AylaPaymentsRetryRefused: 409 — not retry-eligible.
+          AylaPaymentsNotAuthorized: 401 / 403 / 404.
+          AylaPaymentsUnavailableError: network failure, 5xx, breaker open.
+          AylaPaymentsAPIError: other 4xx, malformed JSON, missing URL.
+        """
+        if not self.base_url:
+            raise AylaPaymentsAPIError("AYLA_BASE_URL is empty — retry requires it")
+        if not self._api_token:
+            raise AylaPaymentsAPIError("AYLA_INTERNAL_API_TOKEN is empty — retry requires it")
+
+        now = time.monotonic()
+        if self._circuit.is_open(now=now):
+            raise AylaPaymentsUnavailableError("circuit_open")
+
+        headers = with_request_id(
+            {
+                "Authorization": f"Bearer {self._api_token}",
+                "X-External-User-ID": external_user_id,
+                "X-Idempotency-Key": idempotency_key,
+            }
+        )
+        try:
+            url = AylaUrlBuilder(self.base_url).build(f"payments/internal/{payment_id}/retry")
+        except AylaUrlError as exc:
+            raise AylaPaymentsAPIError(f"invalid AYLA_BASE_URL: {exc}") from exc
+
+        try:
+            response = self._session.post(
+                url,
+                json={"client_id": ayla_user_id},
+                headers=headers,
+                timeout=self._timeout_s,
+            )
+        except requests.exceptions.Timeout as exc:
+            self._circuit.record_failure(now=now)
+            logger.warning("ayla_payments_client.retry.timeout payment=%s", payment_id)
+            raise AylaPaymentsUnavailableError("timeout") from exc
+        except requests.exceptions.ConnectionError as exc:
+            self._circuit.record_failure(now=now)
+            logger.warning("ayla_payments_client.retry.connection_error payment=%s", payment_id)
+            raise AylaPaymentsUnavailableError("connection_error") from exc
+        except requests.exceptions.RequestException as exc:
+            self._circuit.record_failure(now=now)
+            logger.warning(
+                "ayla_payments_client.retry.request_error payment=%s err=%s",
+                payment_id,
+                type(exc).__name__,
+            )
+            raise AylaPaymentsUnavailableError(f"request_error: {type(exc).__name__}") from exc
+
+        return self._parse_retry_response(response, payment_id=payment_id)
+
+    def _parse_retry_response(
+        self,
+        response: requests.Response,
+        *,
+        payment_id: str,
+    ) -> RetryPaymentResult:
+        now = time.monotonic()
+        status_code = response.status_code
+
+        if status_code >= 500:
+            # 502 / 503 are the provider's, not ours — but they are a
+            # breakdown, and the breaker exists for exactly this.
+            self._circuit.record_failure(now=now)
+            logger.warning(
+                "ayla_payments_client.retry.5xx status=%d payment=%s", status_code, payment_id
+            )
+            raise AylaPaymentsUnavailableError(f"http_{status_code}")
+
+        if status_code == 409:
+            # An answer about state, not a fault: the breaker stays untouched,
+            # otherwise a run of «уже оплачено» would open it and take the
+            # working retries down with it.
+            logger.info("ayla_payments_client.retry.not_eligible payment=%s", payment_id)
+            raise AylaPaymentsRetryRefused("http_409")
+
+        if status_code in (401, 403, 404):
+            logger.info(
+                "ayla_payments_client.retry.not_authorized status=%d payment=%s",
+                status_code,
+                payment_id,
+            )
+            raise AylaPaymentsNotAuthorized(f"http_{status_code}")
+
+        if status_code >= 400:
+            body_preview = (response.text or "")[:300]
+            logger.info(
+                "ayla_payments_client.retry.4xx status=%d payment=%s body=%s",
+                status_code,
+                payment_id,
+                body_preview,
+            )
+            raise AylaPaymentsAPIError(f"http_{status_code}: {body_preview}")
+
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            self._circuit.record_failure(now=now)
+            raise AylaPaymentsAPIError(f"invalid_json: {exc}") from exc
+
+        if not isinstance(payload, dict):
+            raise AylaPaymentsAPIError(f"unexpected_payload_type: {type(payload).__name__}")
+        # Ayla wraps in ``{"data": …}``; a flat body is read too, so a wrapper
+        # change does not turn a paid link into a silent failure.
+        data = payload.get("data")
+        if not isinstance(data, dict):
+            data = payload
+
+        confirmation_url = str(data.get("confirmation_url") or "")
+        if not confirmation_url:
+            raise AylaPaymentsAPIError("missing_confirmation_url")
+        amount = data.get("amount")
+
+        self._circuit.record_success()
+        return RetryPaymentResult(
+            payment_id=str(data.get("payment_id") or payment_id),
+            confirmation_url=confirmation_url,
+            amount=None if amount is None else str(amount),
+        )
 
     def _parse_create_response(
         self,

@@ -136,11 +136,18 @@ class TestEachRefusalSoundsLikeItself:
 class TestTheButtonIsNotALie:
     """Кнопка показана → тап не отвечает «недоступно» (просьба главного окна)."""
 
-    def test_no_path_answers_that_payment_is_unavailable_via_the_bot(self) -> None:
-        source = __import__("pathlib").Path(payment_skill.__file__).read_text(encoding="utf-8")
-        # Присутствие: файл прочитан и это тот самый скилл.
-        assert "CALLBACK_PAYMENT_RETRY_PREFIX" in source
-        assert "временно недоступна" not in source
+    def test_no_reply_text_says_payment_is_unavailable_via_the_bot(self) -> None:
+        """Предмет — ТЕКСТЫ модуля, не его исходник: докстринг вправе назвать
+        снятую заглушку, а ответ человеку — нет."""
+        texts = {
+            name: value
+            for name, value in vars(payment_skill).items()
+            if isinstance(value, str) and name.isupper() or name.startswith("_CLIENT")
+        }
+        # Присутствие: тексты ответов на месте и читаются.
+        assert payment_skill._CLIENT_RETRY_SUCCESS_TEMPLATE in texts.values()
+        assert not hasattr(payment_skill, "_CLIENT_RETRY_PENDING_TEMPLATE")
+        assert [name for name, value in texts.items() if "временно недоступна" in value] == []
 
     @pytest.mark.parametrize(
         "answer",
