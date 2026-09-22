@@ -212,6 +212,11 @@ class Person:
     master_id: UUID | None
     name: str
     roles: list[RoleGrant] = field(default_factory=list)
+    #: DRF-2274. A master row whose link was revoked here: the card is
+    #: unlinked and a ``staff.access_revoked`` audit row names it. Only
+    #: such a row has somebody for ``staff/restore/`` to link back — the
+    #: screen cannot tell it from a card nobody ever held without this.
+    restorable_master: bool = False
 
     @property
     def is_active(self) -> bool:
@@ -245,6 +250,7 @@ class Person:
             "has_account": self.has_account,
             "is_active": self.is_active,
             "roles": [r.to_payload() for r in self.effective_roles()],
+            "restorable_master": self.restorable_master,
         }
 
     def effective_roles(self) -> list[RoleGrant]:
@@ -511,7 +517,26 @@ def _build(tenant: Any) -> tuple[list[Person], int, bool]:
         "linked_bot_user__display_name",
         "linked_bot_user__client_name",
     )
-    for row in master_rows:
+    # DRF-2274 — which unlinked cards were unlinked BY A REVOKE. One query
+    # for the lot; `all_tenants` because an archived audit row is still the
+    # record, with the tenant filtered explicitly.
+    master_list = list(master_rows)
+    unlinked_ids = [str(r["id"]) for r in master_list if r["linked_bot_user_id"] is None]
+    revoked_master_ids: set[str] = set()
+    if unlinked_ids:
+        from apps.audit.models import AuditLog
+        from apps.events.vocabulary import STAFF_ACCESS_REVOKED
+
+        revoked_master_ids = {
+            str(mid)
+            for mid in AuditLog.all_tenants.filter(
+                tenant_id=tenant.id,
+                action=STAFF_ACCESS_REVOKED,
+                payload__master_id__in=unlinked_ids,
+            ).values_list("payload__master_id", flat=True)
+        }
+
+    for row in master_list:
         linked_id = row["linked_bot_user_id"]
         # The bridge: a linked master lands on the SAME key as her staff
         # rows, which is the whole reason an owner-master appears once.
@@ -527,6 +552,8 @@ def _build(tenant: Any) -> tuple[list[Person], int, bool]:
             people[key] = person
         else:
             person.master_id = row["id"]
+        if linked_id is None and str(row["id"]) in revoked_master_ids:
+            person.restorable_master = True
         # The catalog name wins over the channel-reported display name:
         # it is what the salon calls this person on every other screen.
         #

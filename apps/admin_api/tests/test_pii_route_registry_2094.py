@@ -266,6 +266,11 @@ ADMIN_ROUTES: dict[str, Entry] = {
         "role names only, no field of the person",
         via=A + "views_staff_role:staff_role_change",
     ),
+    "staff_restore": none(
+        "{changed, role} — whether the revoked role came back and which role it was; "
+        "a flag and a role name, no field of the person",
+        via=A + "views_staff_role:staff_restore",
+    ),
     "staff_roster": third_party(
         "items[].name",
         "items[].bot_user_id",
