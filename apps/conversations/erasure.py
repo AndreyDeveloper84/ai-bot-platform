@@ -307,6 +307,7 @@ def _clear_redis_stores(conversation_id: uuid.UUID) -> None:
     """
 
     from apps.llm import pii_tokenizer
+    from apps.orchestrator.decision_readiness import state as dre_state
     from apps.orchestrator.memory import short_term
 
     # The window itself — the raw sentence the fact was extracted from. This
@@ -317,6 +318,10 @@ def _clear_redis_stores(conversation_id: uuid.UUID) -> None:
     # kept so the model's reply can be de-tokenised. Emptying the sentence
     # and leaving this behind would keep the number.
     pii_tokenizer.clear_conversation(conversation_id)
+    # DRF-2214 — the decision-readiness state: its slots hold what the person
+    # said in this conversation (``dre:state:<id>``, TTL 2 h). Keyed by the
+    # conversation id as a string — the same key ``dr_shadow`` writes.
+    dre_state.clear(str(conversation_id))
 
 
 def _purge_raw_entries(bot_user_ids: list[uuid.UUID], *, through: datetime) -> Any:

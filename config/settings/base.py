@@ -1236,6 +1236,10 @@ CELERY_RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND", "")
 CELERY_TASK_ACKS_LATE = True
 CELERY_TASK_REJECT_ON_WORKER_LOST = True
 CELERY_WORKER_PREFETCH_MULTIPLIER = 1
+# DRF-2272 — Celery 5 по умолчанию снимает root-обработчики и ставит свой: в
+# воркере пропадали и фильтр ПДн, и JSON. Логи уходят в постоянный журнал —
+# root остаётся нашим (``LOGGING`` ниже).
+CELERY_WORKER_HIJACK_ROOT_LOGGER = False
 
 # Modules whose tasks Celery autodiscover_tasks() misses because the
 # package isn't a Django app in INSTALLED_APPS. Producer-side imports
@@ -2522,6 +2526,14 @@ LOGGING = {
     "root": {
         "level": "INFO",
         "handlers": ["console"],
+    },
+    # DRF-2272 — uvicorn ставит свои обработчики (``propagate=False``), и
+    # access-строка «метод путь?query статус» шла на диск мимо фильтра ПДн.
+    # Django применяет этот конфиг при загрузке приложения — ПОСЛЕ uvicorn,
+    # поэтому здесь его логгеры переводятся на тот же ``console``.
+    "loggers": {
+        name: {"handlers": ["console"], "level": "INFO", "propagate": False}
+        for name in ("uvicorn", "uvicorn.error", "uvicorn.access")
     },
 }
 
