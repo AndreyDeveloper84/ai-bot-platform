@@ -247,11 +247,20 @@ def goal_remark(
 
     goal_label = GOAL_LABELS.get(profile.goal, "")
     calories_goal = _summary_goal(summary, profile)
+    # DRF-2319 (живой проход 22.09): реплики про нутриенты — только при
+    # записанной еде. День с одной водой давал «Белка меньше ориентира на
+    # 123 г»: ноль без записей — это «еду не записывали», а не «мало белка».
+    # Водная реплика от еды не зависит и остаётся.
+    food_logged = _food_logged(summary)
 
     # DRF-1844 / §82: про калории и белок — «ориентир», не «норма». Вода
     # остаётся «нормой» намеренно — решение владельца 11.09.2026 §5.2:
     # норма воды — мера шага («до нормы», не «до цели»), это другой предмет.
-    if profile.protein_g and summary.protein_g < profile.protein_g * SHORTFALL_RATIO:
+    if (
+        food_logged
+        and profile.protein_g
+        and summary.protein_g < profile.protein_g * SHORTFALL_RATIO
+    ):
         short = round(profile.protein_g - summary.protein_g)
         tail = f" — при цели «{goal_label}» его обычно добирают первым" if goal_label else ""
         return f"Белка сегодня меньше ориентира из профиля на {short} г{tail}."
@@ -260,8 +269,11 @@ def goal_remark(
     if water is not None and water_norm and water.total_ml < water_norm * SHORTFALL_RATIO:
         return f"До нормы воды из профиля осталось {round(water_norm - water.total_ml)} мл."
 
+    # Страж ниже не меняет исхода (без еды калорий ноль и перебора нет) —
+    # оставлен для симметрии: все три реплики про нутриенты — при еде.
     if (
-        profile.goal in {"lose", "tone"}
+        food_logged
+        and profile.goal in {"lose", "tone"}
         and calories_goal
         and summary.calories_total > calories_goal * OVERSHOOT_RATIO
     ):
@@ -276,7 +288,7 @@ def goal_remark(
     # DRF-1844 (F1, D15): «осталось N ккал» — только при действующем
     # ориентире. Арифметика, не оценка: §85 §8 запрещает осуждающие
     # формулировки, а «осталось» — просто разность.
-    if calories_goal and summary.calories_total < calories_goal:
+    if food_logged and calories_goal and summary.calories_total < calories_goal:
         return f"До ориентира по калориям осталось {round(calories_goal - summary.calories_total)} ккал."
 
     return ""
@@ -336,10 +348,21 @@ def _entry_lines(summary: SummaryResponse) -> list[str]:
     return lines
 
 
+def _food_logged(summary: SummaryResponse) -> bool:
+    """Записана ли еда — одно определение на отчёт и реплику (DRF-2319).
+
+    Предел: каталог зеркалит в ``FoodLog`` КАЛОРИЙНЫЕ напитки (латте, кефир,
+    сок — ``water_entry_service._create_food_log_mirror``), и в ``entries`` они
+    неотличимы от еды: у сводки нет признака происхождения записи. День из
+    одних таких напитков считается днём с едой. Чистая вода (0 ккал) сюда не
+    попадает. Различить — контракт каталога (признак источника записи).
+    """
+    return summary.calories_total > 0 or bool(summary.entries)
+
+
 def _anything_logged(summary: SummaryResponse, water: WaterTodayResponse | None) -> bool:
-    logged_food = summary.calories_total > 0 or bool(summary.entries)
     logged_water = water is not None and water.total_ml > 0
-    return logged_food or logged_water
+    return _food_logged(summary) or logged_water
 
 
 def _target(profile: ProfileResponse | None, field: str) -> float | None:

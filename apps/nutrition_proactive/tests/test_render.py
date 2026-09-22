@@ -342,6 +342,60 @@ class TestEmptyDay:
         assert "Вода: 500 из 2000 мл." in text
 
 
+class TestNoNutrientRemarkWithoutFood:
+    """DRF-2319: реплика про нутриенты — только при записанной еде.
+
+    Живой проход 22.09: в итогах дня при одной воде — «Белка меньше
+    ориентира на 123 г…». Ноль белка без единой записи еды — не «мало
+    белка», а «еду не записывали»; то же для «до ориентира по калориям
+    осталось N ккал».
+    """
+
+    def test_water_only_day_says_nothing_about_protein_or_calories(self) -> None:
+        remark = render.goal_remark(
+            summary(calories_total=0.0, protein_g=0.0, entries=[]),
+            water(total_ml=2000),
+            profile(),
+        )
+        assert remark == ""
+
+    def test_water_only_day_keeps_the_water_remark(self) -> None:
+        remark = render.goal_remark(
+            summary(calories_total=0.0, protein_g=0.0, entries=[]),
+            water(total_ml=500),
+            profile(),
+        )
+        assert remark.startswith("До нормы воды из профиля осталось")
+        assert "Белка" not in remark
+
+    def test_positive_pair_logged_food_with_little_protein_still_says_it(self) -> None:
+        remark = render.goal_remark(
+            summary(calories_total=600.0, protein_g=10.0), water(), profile()
+        )
+        assert remark.startswith("Белка сегодня меньше ориентира из профиля")
+
+    def test_known_limit_a_caloric_drink_counts_as_food(self) -> None:
+        """Пришпилен предел: калорийный напиток каталог зеркалит в записи еды,
+        и сводка не отличает его от еды. Кто починит (признак источника в
+        контракте каталога) — поменяет этот узел осознанно."""
+        remark = render.goal_remark(
+            summary(calories_total=120.0, protein_g=6.0, entries=[{"id": 1, "meal_type": "snack"}]),
+            water(total_ml=2000),
+            profile(),
+        )
+        assert remark.startswith("Белка сегодня меньше ориентира из профиля")
+
+    def test_the_whole_report_on_a_water_only_day(self) -> None:
+        text = render.render_daily_report(
+            summary(calories_total=0.0, protein_g=0.0, entries=[]), water(total_ml=2000), profile()
+        )
+        assert "Вода: 2000 из 2000 мл." in text  # наличие: отчёт нарисован
+        # Реплика — оценка («меньше ориентира», «осталось») — снята. Строки
+        # фактов («Калории: 0 из 1900») — не этот лист: названы главному окну.
+        assert "меньше ориентира" not in text
+        assert "осталось" not in text
+
+
 class TestNoTargetNoJudgement:
     """Ориентира нет — отчёт называет факт и молчит про цель (§82, §85).
 
