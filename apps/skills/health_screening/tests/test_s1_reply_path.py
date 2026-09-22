@@ -76,8 +76,10 @@ GATE_STOPS: frozenset[tuple[str, str, str]] = frozenset(
 #: 22.09 ([OD-BOT §170], G7 question contract): два explicit G7 без тяжёлого признака
 #: («резко стало очень плохо», «мне очень плохо, муж сделал чай…») — вопрос
 #: ``health_screening.g7``, не red flag → 46 − 2 = 44.
+#: 22.09 (CD §74): «плохо» + телесный признак / процедура — вопрос G7, не red flag:
+#: 1 explicit + 1 ambiguous + 4 post_procedure → 44 − 6 = 38.
 GATE_STOPS_COUNT = 11
-RED_FLAG_REPLIES_COUNT = 44
+RED_FLAG_REPLIES_COUNT = 38
 QUESTIONS_COUNT = 0
 
 #: Положительные фикстуры вне реестра известных пропусков.

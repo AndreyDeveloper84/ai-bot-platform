@@ -859,8 +859,10 @@ _S1_G7_AMBIGUOUS_PATTERNS: tuple[re.Pattern[str], ...] = (
     ),
 )
 
-#: «плохо» next to a bodily sign or a procedure (main window, 15.09). Explicit
-#: STOP before [OD-BOT §170]; see :data:`_S1_G7_CO_SIGNAL_PATTERNS` placement.
+#: «плохо» next to a bodily sign or a procedure (main window, 15.09). Not named in
+#: [OD-BOT §160] / [§170]; owner ruling CD §74 (22.09, verbatim «(а) задавать
+#: уточняющий вопрос G7»): it asks the ``health_screening.g7`` question — the
+#: question itself catches the severe signs — instead of an explicit STOP.
 _S1_G7_CO_SIGNAL_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(
         _S1_BARE_PLOHO
@@ -873,7 +875,7 @@ _S1_G7_CO_SIGNAL_PATTERNS: tuple[re.Pattern[str], ...] = (
         re.IGNORECASE,
     ),
 )
-_S1_G7_EXPLICIT_PATTERNS = _S1_G7_EXPLICIT_PATTERNS + _S1_G7_CO_SIGNAL_PATTERNS
+_S1_G7_AMBIGUOUS_PATTERNS = _S1_G7_AMBIGUOUS_PATTERNS + _S1_G7_CO_SIGNAL_PATTERNS
 
 #: Remote history — [OD-BOT §170] решение 1: «отдалённый эпизод, например год
 #: назад» is not G7. Read in the SAME sentence as the G7 sign only.
