@@ -101,7 +101,7 @@ class TestDontKnowOffersWhatItSays:
         )
 
         outcome = execute_clarify_callback(CLARIFY_DONT_KNOW_CALLBACK, [])
-        assert outcome is not None
+        assert outcome is not None and outcome.reply is not None
         assert outcome.reply.text == CLARIFY_DONT_KNOW_TEXT
         assert _callbacks(outcome.reply.action_data) == [DISCOVER_TAP_TEXT, SALONS]
 

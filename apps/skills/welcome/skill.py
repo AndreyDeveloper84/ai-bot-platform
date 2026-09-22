@@ -99,7 +99,8 @@ privacy consent prompt (Tau's customer-onboarding-flow.md §5):
   conditional rule (user already saw scope disclosure → S3
   repositioning would feel repetitive).
 * ``cb:welcome:consent_details`` — S2a expanded fold disclosing scope.
-* ``cb:welcome:consent_refuse`` — State 3 graceful exit. No keyboard.
+* ``cb:welcome:consent_refuse`` — State 3 graceful exit. Keyboard «Дать согласие» /
+  «Узнать что хранится» since DRF-2267 (owner CD §72).
 
 ### S3 positioning + S5 first-action grid — task #85 part 3, 2026-05-26
 
@@ -556,8 +557,12 @@ class WelcomeSkill:
                 getattr(context.bot_user, "id", None),
                 getattr(context.bot_user, "channel", None),
             )
+            # DRF-2267 (решение владельца CD §72) переворачивает Tau §11
+            # «no keyboard»: отказ — не тупик, дверь к согласию остаётся
+            # открытой той же парой, что на экране S2.
             return SkillResult(
                 reply_text=S2_REFUSED_TEXT,
+                action_data={"buttons": _s2_refused_buttons(), "button_columns": 1},
                 meta={"reply_kind": "welcome_consent_refused"},
             )
         # /start OR S1 auto-trigger OR Mini-App-opening callback that we
@@ -1152,6 +1157,18 @@ def _s2a_details_buttons_for(origin: str) -> list[dict[str, str]]:
             "callback": f"cb:welcome:consent_yes_via_s2a_{origin}",
         },
         {"label": "Не сейчас", "callback": "cb:welcome:consent_refuse"},
+    ]
+
+
+def _s2_refused_buttons() -> list[dict[str, str]]:
+    """Под «Поняла. Когда захочешь — пиши, я тут.» (DRF-2267, CD §72).
+
+    «Дать согласие» — снова экран S2 (``cb:welcome:start_s2``), «Узнать что
+    хранится» — разворот S2a. Подписи — те же, что у кнопки отказа и у S2.
+    """
+    return [
+        {"label": CONSENT_OFFER_LABEL, "callback": "cb:welcome:start_s2"},
+        {"label": "Узнать что хранится", "callback": "cb:welcome:consent_details"},
     ]
 
 
