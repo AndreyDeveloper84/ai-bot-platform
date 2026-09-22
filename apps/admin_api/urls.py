@@ -31,6 +31,7 @@ from apps.admin_api import (
     views_salon_frame,
     views_staff_invite,
     views_staff_revoke,
+    views_staff_role,
     views_staff_roster,
     views_master_deactivation,
     views_services_mapping,
@@ -127,6 +128,12 @@ urlpatterns = [
         "staff/revoke/",
         views_staff_revoke.staff_revoke,
         name="staff_revoke",
+    ),
+    # DRF-2273 — changing a person's role. Owner-only; see the view.
+    path(
+        "staff/role/",
+        views_staff_role.staff_role_change,
+        name="staff_role_change",
     ),
     # The list nothing produced: every person of the salon with every
     # role they hold, merged across TenantStaff and CatalogMaster
