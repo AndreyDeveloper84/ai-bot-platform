@@ -123,8 +123,14 @@ CATALOG_SECTIONS: tuple[str, ...] = (
     "catalog.nutrition_profile",
     "catalog.food_diary",
     "catalog.shown_hints",
+    # DRF-2307 — beautygo_backend #545 (DRF-2277, CD §72 п.3).
+    "catalog.notification_history",
+    "catalog.app_ai_chat",
 )
-CATALOG_STORES = frozenset({CATALOG_STORE, *CATALOG_SECTIONS})
+#: DRF-2307 — разделы C5.1, которые «забудь всё» ОСТАВЛЯЕТ (beautygo_backend
+#: #548; ``forget_all_catalog.KEPT_BY_FORGET_ALL``).
+CATALOG_RETAINED: tuple[str, ...] = ("catalog.favorite_specialists",)
+CATALOG_STORES = frozenset({CATALOG_STORE, *CATALOG_SECTIONS, *CATALOG_RETAINED})
 
 #: Телефон в тестовом диапазоне (pii_guard: префикс 999) — направляется в
 #: диалог, чтобы обезличивание было проверяемо, а не предположено.
@@ -300,6 +306,13 @@ OUTCOMES: dict[str, Outcome] = {
         )
         for section in CATALOG_SECTIONS
     },
+    "catalog.favorite_specialists": Outcome(
+        RETAIN,
+        "никто — forget_all_catalog.KEPT_BY_FORGET_ALL в каталоге (CD §72 п.3); "
+        "сверку держит сторож beautygo_backend #539",
+        "избранные мастера — выбор человека в приложении BeautyGO; «забудь всё» "
+        "их оставляет, и текст команды так и говорит (CD §76)",
+    ),
     CATALOG_STORE: Outcome(
         DELETE,
         "ayla_erasure.erase_with_readback (DELETE → readback erasure-status; DRF-1950/1984)",
@@ -935,6 +948,13 @@ def assert_outcome(
     )
 
     if expected == RETAIN:
+        if store in CATALOG_RETAINED:
+            # DRF-2307 — бот каталожных строк не видит: его снимок — задание
+            # readback. Исход держит каталог (KEPT_BY_FORGET_ALL, сторож #539);
+            # здесь проверяемо одно — бот звал только C5.2, который избранных
+            # не трогает по договору, и ничего сверх него.
+            assert catalog.deleted_for == [str(person.ayla_user_id)]
+            return
         if store == "conversations.ArchivedMessage":
             # Строк «до» нет по построению: архив рождается в свипе.
             assert len(after) == len(snapshot("conversations.Message", person, _FakeRedis()))
