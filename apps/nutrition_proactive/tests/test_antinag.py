@@ -368,7 +368,10 @@ class TestStopButtonAttached:
         assert result["sent"] == 1
 
         attachments = send.call_args.kwargs["attachments"]
-        assert button_payloads(attachments) == ["cb:nutri:stop:water"]
+        # DRF-2267 (CD §72): под сообщением теперь есть и шаг записи;
+        # предмет этого узла — что отписка НА МЕСТЕ и стоит последней
+        # (состав сторожит test_no_dead_ends_proactive_2267).
+        assert button_payloads(attachments)[-1] == "cb:nutri:stop:water"
 
     def test_every_report_send_carries_it_too(self, tenant: Tenant, settings) -> None:
         make_user(tenant, report="19:00")
@@ -386,7 +389,10 @@ class TestStopButtonAttached:
         assert result["sent"] == 1
 
         attachments = send.call_args.kwargs["attachments"]
-        assert button_payloads(attachments) == ["cb:nutri:stop:report"]
+        # DRF-2267 (CD §72): под сообщением теперь есть и шаг записи;
+        # предмет этого узла — что отписка НА МЕСТЕ и стоит последней
+        # (состав сторожит test_no_dead_ends_proactive_2267).
+        assert button_payloads(attachments)[-1] == "cb:nutri:stop:report"
 
 
 # ---------------------------------------------------------------------------
