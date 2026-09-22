@@ -89,3 +89,20 @@ def ingress_streams_empty(monkeypatch) -> _EmptyIngressStreams:
     fake = _EmptyIngressStreams()
     monkeypatch.setattr(streams, "_client", lambda: fake)
     return fake
+
+
+@pytest.fixture
+def frozen_ratelimit_clock(monkeypatch) -> None:
+    """Неподвижные часы для django-ratelimit — и только для него (DRF-2278).
+
+    ratelimit считает фиксированные окна по ``time.time()``: если запросы
+    теста разъехались по границе окна, лимит «не срабатывает», и тест мигает
+    (CI: 500 вместо 429). Подменяется ссылка ``django_ratelimit.core.time``,
+    а не ``time.time`` процесса: подписи, TTL и прочие часы идут как шли.
+    """
+    import types
+
+    import django_ratelimit.core as ratelimit_core  # type: ignore[import-untyped]
+
+    frozen = ratelimit_core.time.time()
+    monkeypatch.setattr(ratelimit_core, "time", types.SimpleNamespace(time=lambda: frozen))
