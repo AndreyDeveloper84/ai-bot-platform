@@ -374,6 +374,17 @@ class TestNoNutrientRemarkWithoutFood:
         )
         assert remark.startswith("Белка сегодня меньше ориентира из профиля")
 
+    def test_known_limit_a_caloric_drink_counts_as_food(self) -> None:
+        """Пришпилен предел: калорийный напиток каталог зеркалит в записи еды,
+        и сводка не отличает его от еды. Кто починит (признак источника в
+        контракте каталога) — поменяет этот узел осознанно."""
+        remark = render.goal_remark(
+            summary(calories_total=120.0, protein_g=6.0, entries=[{"id": 1, "meal_type": "snack"}]),
+            water(total_ml=2000),
+            profile(),
+        )
+        assert remark.startswith("Белка сегодня меньше ориентира из профиля")
+
     def test_the_whole_report_on_a_water_only_day(self) -> None:
         text = render.render_daily_report(
             summary(calories_total=0.0, protein_g=0.0, entries=[]), water(total_ml=2000), profile()

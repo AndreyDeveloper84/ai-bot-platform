@@ -251,7 +251,7 @@ def goal_remark(
     # записанной еде. День с одной водой давал «Белка меньше ориентира на
     # 123 г»: ноль без записей — это «еду не записывали», а не «мало белка».
     # Водная реплика от еды не зависит и остаётся.
-    food_logged = bool(summary.entries) or summary.calories_total > 0
+    food_logged = _food_logged(summary)
 
     # DRF-1844 / §82: про калории и белок — «ориентир», не «норма». Вода
     # остаётся «нормой» намеренно — решение владельца 11.09.2026 §5.2:
@@ -269,6 +269,8 @@ def goal_remark(
     if water is not None and water_norm and water.total_ml < water_norm * SHORTFALL_RATIO:
         return f"До нормы воды из профиля осталось {round(water_norm - water.total_ml)} мл."
 
+    # Страж ниже не меняет исхода (без еды калорий ноль и перебора нет) —
+    # оставлен для симметрии: все три реплики про нутриенты — при еде.
     if (
         food_logged
         and profile.goal in {"lose", "tone"}
@@ -346,10 +348,21 @@ def _entry_lines(summary: SummaryResponse) -> list[str]:
     return lines
 
 
+def _food_logged(summary: SummaryResponse) -> bool:
+    """Записана ли еда — одно определение на отчёт и реплику (DRF-2319).
+
+    Предел: каталог зеркалит в ``FoodLog`` КАЛОРИЙНЫЕ напитки (латте, кефир,
+    сок — ``water_entry_service._create_food_log_mirror``), и в ``entries`` они
+    неотличимы от еды: у сводки нет признака происхождения записи. День из
+    одних таких напитков считается днём с едой. Чистая вода (0 ккал) сюда не
+    попадает. Различить — контракт каталога (признак источника записи).
+    """
+    return summary.calories_total > 0 or bool(summary.entries)
+
+
 def _anything_logged(summary: SummaryResponse, water: WaterTodayResponse | None) -> bool:
-    logged_food = summary.calories_total > 0 or bool(summary.entries)
     logged_water = water is not None and water.total_ml > 0
-    return logged_food or logged_water
+    return _food_logged(summary) or logged_water
 
 
 def _target(profile: ProfileResponse | None, field: str) -> float | None:
