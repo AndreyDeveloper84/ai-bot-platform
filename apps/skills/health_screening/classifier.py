@@ -796,16 +796,74 @@ _S1_PROCEDURE = (
 )
 _S1_G7_CO_SIGNAL = "(?:" + _S1_BODY_SIGN + "|" + _S1_PROCEDURE + ")"
 _S1_BARE_PLOHO = r"\b(?:мне|стало|становится)\s+(?:(?:очень|резко|совсем|как-то)\s+)?плохо\b"
-_S1_G7_PATTERNS: tuple[re.Pattern[str], ...] = (
+
+#: G7 explicit — [OD-BOT §160] / [OD-BOT §170] (owner record
+#: ``docs/safety/reviews/OWNER_RULINGS_S1_G7_QUESTION_CONTRACT_2026-09-21.md``):
+#: only the signs the owner named — «мне очень плохо, сейчас упаду», sudden
+#: confusion, cannot stand, cannot speak normally, rapid current deterioration.
+#: Severe breathing is G1, loss of consciousness G2 — they win before G7 by the
+#: order of :func:`s1_group_of`. No new medical vocabulary.
+_S1_G7_EXPLICIT_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"\bсейчас\s+упаду\b", re.IGNORECASE),
+    re.compile(r"\bспутанн\w*", re.IGNORECASE),
+    # present and past: a real episode that has passed is still STOP
+    # ([OD-BOT §170] решение 5)
+    re.compile(
+        r"\b(?:не\s+(?:могу|могла|мог|могли)|не\s+в\s+силах|трудно|было\s+трудно)"
+        r"\s+(?:самостоятельно\s+)?стоять\b",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\bне\s+(?:могу|могла|мог|могли)\s+нормально\s+говорить\b", re.IGNORECASE),
+    re.compile(
+        r"\bсостояние\s+быстро\s+ухудша\w*|\bбыстро\s+(?:становится|стало)\s+(?:вс[её]\s+)?хуже\b",
+        re.IGNORECASE,
+    ),
+)
+
+#: G7 ambiguous — [OD-BOT §170] решение 2 / промпт §6: «Мне резко стало очень
+#: плохо», «Мне внезапно совсем плохо», «Не понимаю, что со мной, становится
+#: хуже» and narrow equivalents → ONE question ``health_screening.g7``, not STOP.
+#: The intensifier rule and its adjacent exceptions (main window, 15.09) are
+#: kept; «плохо от цены» is figurative ([OD-BOT §170] решение 1).
+_S1_G7_FIGURATIVE = r"(?!\s+от\s+(?:цен\w*|стоимост\w*))"
+_S1_G7_AMBIGUOUS_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(
         r"\b(?:мне|стало|становится)\s+(?:очень|резко|совсем)\s+плохо\b"
-        + _S1_G7_ADJACENT_EXCEPTION,
+        + _S1_G7_ADJACENT_EXCEPTION
+        + _S1_G7_FIGURATIVE,
         re.IGNORECASE,
     ),
     re.compile(
-        r"\bрезко\s+(?:стало\s+)?(?:очень\s+)?плохо\b" + _S1_G7_ADJACENT_EXCEPTION, re.IGNORECASE
+        r"\bрезко\s+(?:стало\s+)?(?:очень\s+)?плохо\b"
+        + _S1_G7_ADJACENT_EXCEPTION
+        + _S1_G7_FIGURATIVE,
+        re.IGNORECASE,
     ),
-    re.compile(r"\bсейчас\s+упаду\b", re.IGNORECASE),
+    re.compile(
+        r"\bвнезапно\s+(?:стало\s+)?(?:совсем\s+|очень\s+)?плохо\b"
+        + _S1_G7_ADJACENT_EXCEPTION
+        + _S1_G7_FIGURATIVE,
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bне\s+понимаю,?\s+что\s+со\s+мной,?\s+(?:вс[её]\s+)?(?:становится|стало)\s+(?:вс[её]\s+)?хуже\b",
+        re.IGNORECASE,
+    ),
+    # [OD-BOT §170] решение 5, verbatim example: «Было просто очень плохо, но не
+    # знаю как» — a vague recent episode stays UNKNOWN / CLARIFY.
+    re.compile(
+        r"\bбыло\s+(?:просто\s+)?(?:очень|совсем)\s+плохо\b"
+        + r"(?!\s+(?:сделан\w*|видно|подход\w*|спал\w*|сплю|с\s+деньгами))"
+        + _S1_G7_FIGURATIVE,
+        re.IGNORECASE,
+    ),
+)
+
+#: «плохо» next to a bodily sign or a procedure (main window, 15.09). Not named in
+#: [OD-BOT §160] / [§170]; owner ruling CD §74 (22.09, verbatim «(а) задавать
+#: уточняющий вопрос G7»): it asks the ``health_screening.g7`` question — the
+#: question itself catches the severe signs — instead of an explicit STOP.
+_S1_G7_CO_SIGNAL_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(
         _S1_BARE_PLOHO
         + r"[^.!?]{0,40}"
@@ -817,13 +875,21 @@ _S1_G7_PATTERNS: tuple[re.Pattern[str], ...] = (
         re.IGNORECASE,
     ),
 )
+_S1_G7_AMBIGUOUS_PATTERNS = _S1_G7_AMBIGUOUS_PATTERNS + _S1_G7_CO_SIGNAL_PATTERNS
+
+#: Remote history — [OD-BOT §170] решение 1: «отдалённый эпизод, например год
+#: назад» is not G7. Read in the SAME sentence as the G7 sign only.
+_G7_REMOTE = re.compile(
+    r"\b(?:\d+|один|два|три|четыре|пять|пару|несколько|полгода)?\s*(?:год|года|лет)\s+назад\b"
+    r"|\bв\s+прошлом\s+году\b",
+    re.IGNORECASE,
+)
 
 # One group per line, so a probe can take a whole group out with a one-line edit.
-# G4 and G6 are not in this tuple: they are negation-aware and live in
-# :func:`detect_g4` / :func:`detect_g6`.
-_RED_FLAG_PATTERNS = (
-    _RED_FLAG_PATTERNS + _S1_G2_PATTERNS + _S1_G3_PATTERNS + _S1_G5_PATTERNS + _S1_G7_PATTERNS
-)
+# G4, G6 and G7 are not in this tuple: G4 / G6 are negation-aware and G7 is
+# read after G1–G6 with its remote-history boundary — they live in
+# :func:`detect_g4` / :func:`detect_g6` / :func:`detect_g7`.
+_RED_FLAG_PATTERNS = _RED_FLAG_PATTERNS + _S1_G2_PATTERNS + _S1_G3_PATTERNS + _S1_G5_PATTERNS
 
 
 #: [OD-BOT §164] ambiguous G4 — the DRF-973 numbness forms, verbatim, moved out of
@@ -891,24 +957,70 @@ def detect_g4_ambiguous(text: str) -> bool:
     return False
 
 
+def _g7_live(lower: str, patterns: tuple[re.Pattern[str], ...]) -> bool:
+    """A G7 pattern outside a remote-history sentence ([OD-BOT §170] решение 1)."""
+
+    for pattern in patterns:
+        for match in pattern.finditer(lower):
+            if not _G7_REMOTE.search(_g4_sentence(lower, match.start())):
+                return True
+    return False
+
+
+def detect_g7(text: str) -> bool:
+    """Explicit G7 — [OD-BOT §160] / [OD-BOT §170]: STOP without a question.
+
+    Read only as a fallback: the callers ask G1–G6 first. Remote history
+    («год назад …») is not G7.
+    """
+
+    if not isinstance(text, str) or not text.strip():
+        return False
+    return _g7_live(_mask_not_pain(text.strip().lower()), _S1_G7_EXPLICIT_PATTERNS)
+
+
+def _red_flag_before_g7(text: str) -> bool:
+    """Any red flag of G1–G6 or of an older unnamed rule — G7 is a fallback."""
+
+    lower = _mask_not_pain(text.strip().lower())
+    if any(pattern.search(lower) for pattern in _RED_FLAG_PATTERNS):
+        return True
+    return detect_g6(text) or detect_g4(text)
+
+
+def detect_g7_ambiguous(text: str) -> bool:
+    """Ambiguous G7 — [OD-BOT §170] решение 2: ONE question ``health_screening.g7``.
+
+    True only when nothing more specific fires: an explicit sign of any group
+    (G1–G6, an older rule, explicit G7) is STOP, and an ambiguous G4 asks its
+    own question first.
+    """
+
+    if not isinstance(text, str) or not text.strip():
+        return False
+    if _red_flag_before_g7(text) or detect_g7(text) or detect_g4_ambiguous(text):
+        return False
+    return _g7_live(_mask_not_pain(text.strip().lower()), _S1_G7_AMBIGUOUS_PATTERNS)
+
+
 #: Attribution order — the explicit detectors first, then the named group
-#: tuples. ``None`` for a red flag of an unnamed older rule (DRF-973 nerve-root,
-#: acute systemic, functional collapse): a STOP is never mislabelled.
+#: tuples, G7 last. ``None`` for a red flag of an unnamed older rule (DRF-973
+#: nerve-root, acute systemic, functional collapse): a STOP is never mislabelled.
 _S1_GROUP_TUPLES: tuple[tuple[str, tuple[re.Pattern[str], ...]], ...] = (
     ("G1", _S1_G1_PATTERNS),
     ("G2", _S1_G2_PATTERNS),
     ("G3", _S1_G3_PATTERNS),
     ("G5", _S1_G5_PATTERNS),
-    ("G7", _S1_G7_PATTERNS),
 )
 
 
 def s1_group_of(text: str) -> str | None:
     """The S1 group an explicit red flag is attributed to, by the existing rules.
 
-    G6 and G4 by their detectors (G6 keeps precedence), G1 / G2 / G3 / G5 / G7 by
-    their named pattern tuples, ``None`` when only an unnamed older rule fires
-    or when the text is not a red flag at all. No new rule, no new group.
+    G6 and G4 by their detectors (G6 keeps precedence), G1 / G2 / G3 / G5 by
+    their named pattern tuples, G7 last by :func:`detect_g7` ([OD-BOT §170]
+    решение 1: G7 only as a fallback), ``None`` when only an unnamed older rule
+    fires or when the text is not a red flag at all. No new group.
     """
 
     if not isinstance(text, str) or not text.strip():
@@ -921,6 +1033,25 @@ def s1_group_of(text: str) -> str | None:
     for group, patterns in _S1_GROUP_TUPLES:
         if any(pattern.search(lower) for pattern in patterns):
             return group
+    if any(pattern.search(lower) for pattern in _RED_FLAG_PATTERNS):
+        # an older unnamed rule fired — never relabelled as G7
+        return None
+    if detect_g7(text):
+        return "G7"
+    return None
+
+
+def clarify_group(text: str) -> str | None:
+    """Which registered question a ``CLARIFY`` belongs to: ``G4`` or ``G7``.
+
+    G4 first — a named group before the fallback. ``None`` when the text is not
+    an ambiguous S1 message.
+    """
+
+    if detect_g4_ambiguous(text):
+        return "G4"
+    if detect_g7_ambiguous(text):
+        return "G7"
     return None
 
 
@@ -960,10 +1091,17 @@ def classify(text: str) -> PainSignal:
         return PainSignal.RED_FLAG
     if detect_g4(stripped):
         return PainSignal.RED_FLAG
+    # [OD-BOT §170] — explicit G7 only after G1–G6 (a fallback).
+    if detect_g7(stripped):
+        return PainSignal.RED_FLAG
     # [OD-BOT §164] — ambiguous G4 is a question, not a stop; read after every
     # explicit rule so a message with both an ambiguous and an explicit sign is
     # still STOP.
     if detect_g4_ambiguous(stripped):
+        return PainSignal.CLARIFY
+    # [OD-BOT §170] — ambiguous G7: the one ``health_screening.g7`` question.
+    # Which question a CLARIFY belongs to — :func:`clarify_group`.
+    if detect_g7_ambiguous(stripped):
         return PainSignal.CLARIFY
 
     for pattern in _PAIN_STEM_PATTERNS:

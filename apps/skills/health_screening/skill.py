@@ -45,13 +45,28 @@ from typing import ClassVar
 
 from apps.skills.base import SkillContext, SkillResult
 from apps.orchestrator.safety.medical_emergency import MEDICAL_EMERGENCY_TEXT_V2
-from apps.skills.health_screening.classifier import PainSignal, classify, detect_g4, detect_g6
-from apps.orchestrator.open_question import open_question
+from apps.skills.health_screening.classifier import (
+    PainSignal,
+    clarify_group,
+    classify,
+    s1_group_of,
+)
+from apps.orchestrator.open_question import open_question, resolve_question
 from apps.skills.health_screening.g4_question import (
     G4_ROUTING_QUESTION,
     ask_g4,
     g4_state,
     route_g4_reply,
+)
+from apps.skills.health_screening.g7_question import (
+    G7_QUESTION_ID,
+    G7_QUESTION_TEXT,
+    OUTSIDE_S1_G7_ACK,
+    ask_g7,
+    g7_action_data,
+    g7_pending,
+    is_g7_callback,
+    route_g7_turn,
 )
 from apps.skills.health_screening.memo import (
     remember_screening_asked,
@@ -111,6 +126,10 @@ class HealthScreeningSkill:
         # be «нет» or «запишите меня» — no signal of its own.
         if g4_state(context.conversation, context.bot_user).active:
             return True
+        # [OD-BOT §170] — an open G7 question binds the next reply the same way,
+        # and a G7 structured answer (live or stale) is this skill's to route.
+        if g7_pending(context.conversation) is not None or is_g7_callback(context.message_text):
+            return True
         signal = classify(context.message_text)
         if signal == PainSignal.NONE:
             return False
@@ -156,7 +175,15 @@ class HealthScreeningSkill:
                 },
             )
 
+        # [OD-BOT §170] — the reply to the open G7 question (or a G7 tap), routed
+        # by :func:`route_g7_turn`, the same function every surface calls.
+        if g7_pending(context.conversation) is not None or is_g7_callback(context.message_text):
+            return self._g7_turn(context)
+
         signal = classify(context.message_text)
+
+        if signal == PainSignal.CLARIFY and clarify_group(context.message_text) == "G7":
+            return self._ask_g7(context)
 
         if signal == PainSignal.CLARIFY:
             # Ambiguous G4 — exactly one registered question. The durable
@@ -181,11 +208,12 @@ class HealthScreeningSkill:
 
         if signal == PainSignal.RED_FLAG:
             # Attribution only — the reply is the same canonical text for every
-            # medical S1 group. G6 ([OD-BOT §159]) and G4 ([OD-BOT §164]) are the
-            # two groups with an explicit detector; the older flat rules carry no
-            # group. One label per turn: a message with both signs is logged as G6.
+            # medical S1 group. The label is the group that actually won
+            # (:func:`s1_group_of`: G6, G4, G1 / G2 / G3 / G5, G7 last —
+            # [OD-BOT §170] решение 1); the older flat rules carry no group. One
+            # label per turn: a message with both G6 and G4 signs is logged as G6.
             text = context.message_text
-            group = "G6" if detect_g6(text) else "G4" if detect_g4(text) else None
+            group = s1_group_of(text)
             logger.info(
                 "health_screening.red_flag conversation=%s group=%s",
                 context.conversation.id if context.conversation else None,
@@ -220,4 +248,106 @@ class HealthScreeningSkill:
             reply_text="",
             should_send=False,
             meta={"reply_kind": "health_no_signal"},
+        )
+
+    def _ask_g7(self, context: SkillContext) -> SkillResult:
+        """Ambiguous G7 — ONE question ``health_screening.g7`` with its three
+        structured answers. No durable restriction ([OD-BOT §170] решение 4)."""
+
+        token = ask_g7(context.conversation)
+        logger.info(
+            "health_screening.g7.asked conversation=%s persisted=%s",
+            context.conversation.id if context.conversation else None,
+            token is not None,
+        )
+        return SkillResult(
+            reply_text=G7_QUESTION_TEXT,
+            action_data=g7_action_data(token) if token else None,
+            meta={
+                "reply_kind": "health_clarify_g7",
+                "s1_group": "G7",
+                "question_id": G7_QUESTION_ID,
+                "g7_question": "pending" if token else "not_persisted",
+            },
+        )
+
+    def _g7_turn(self, context: SkillContext) -> SkillResult:
+        """A turn while the G7 question is open, or a G7 structured answer."""
+
+        pending_before = g7_pending(context.conversation)
+        if (
+            pending_before is not None
+            and not is_g7_callback(context.message_text)
+            and clarify_group(context.message_text) == "G4"
+        ):
+            # A named group before the fallback ([OD-BOT §170] решение 1): an
+            # ambiguous G4 sign while the G7 question is open hands over to the
+            # G4 question — so a later «Нет» to G7 can never hide it.
+            resolve_question(context.conversation, G7_QUESTION_ID, "handover_g4")
+            persisted = ask_g4(context.conversation, context.bot_user)
+            return SkillResult(
+                reply_text=G4_ROUTING_QUESTION,
+                meta={
+                    "reply_kind": "health_clarify_g4",
+                    "s1_group": "G4",
+                    "s1_restriction": "open" if persisted else "not_persisted",
+                    "g7_outcome": "handover_g4",
+                },
+            )
+        outcome = route_g7_turn(context.conversation, context.bot_user, context.message_text)
+        logger.info(
+            "health_screening.g7.turn outcome=%s reason=%s conversation=%s",
+            outcome.kind,
+            outcome.reason,
+            context.conversation.id if context.conversation else None,
+        )
+        if outcome.stop:
+            meta_stop: dict[str, object] = {
+                "reply_kind": "health_red_flag",
+                "s1_restriction": "stop",
+                "g7_outcome": outcome.reason,
+            }
+            if outcome.group is not None:
+                meta_stop["s1_group"] = outcome.group
+            return SkillResult(reply_text=RED_FLAG_REPLY, meta=meta_stop)
+        if outcome.kind == "restriction_persists":
+            # [OD-BOT §170] решение 4 — answer №2 with a restriction on record is
+            # not a recheck: the durable reply stands, nothing is lifted.
+            return SkillResult(
+                reply_text=RED_FLAG_REPLY,
+                meta={
+                    "reply_kind": "health_restriction_persists",
+                    "g7_outcome": outcome.reason,
+                },
+            )
+        if outcome.kind == "outside_s1_g7":
+            # G7 not confirmed: the first ambiguous turn, a live structured
+            # action №2, no restriction, no other S1 group — the only case for
+            # the owner-approved acknowledgement (decisions on PR #1982). Not
+            # medical clearance, not CLEARED_BY_RECHECK.
+            return SkillResult(
+                reply_text=OUTSIDE_S1_G7_ACK,
+                meta={"reply_kind": "health_outside_s1_g7", "g7_outcome": outcome.reason},
+            )
+        if pending_before is None:
+            # A G7 tap with no open question and no restriction (a duplicate
+            # delivery, an old keyboard, a forgery): not an accepted action —
+            # no state change and no text (idempotent). The acknowledgement is
+            # for a real answer only.
+            return SkillResult(
+                reply_text="",
+                should_send=False,
+                meta={"reply_kind": "health_g7_stale_tap", "g7_outcome": outcome.reason},
+            )
+        # UNKNOWN — the same single question again, same slot and token.
+        return SkillResult(
+            reply_text=G7_QUESTION_TEXT,
+            action_data=g7_action_data(pending_before.token),
+            meta={
+                "reply_kind": "health_clarify_g7",
+                "s1_group": "G7",
+                "question_id": G7_QUESTION_ID,
+                "g7_question": "pending",
+                "g7_outcome": outcome.reason,
+            },
         )

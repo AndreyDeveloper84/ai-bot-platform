@@ -1807,10 +1807,17 @@ def _g4_question_turn(
     from apps.skills.base import SkillContext
     from apps.skills.health_screening.classifier import PainSignal, classify
     from apps.skills.health_screening.g4_question import g4_state
+    from apps.skills.health_screening.g7_question import g7_pending, is_g7_callback
     from apps.skills.health_screening.skill import HealthScreeningSkill
 
+    # [OD-BOT §164] G4 and [OD-BOT §170] G7 — an open safety question (or a G7
+    # structured answer) is answered before the model: the model never sees
+    # the turn, and a question of its own cannot replace the safety one.
     if not (
-        g4_state(conversation, bot_user).active or classify(message_text) is PainSignal.CLARIFY
+        g4_state(conversation, bot_user).active
+        or g7_pending(conversation) is not None
+        or is_g7_callback(message_text)
+        or classify(message_text) is PainSignal.CLARIFY
     ):
         return None
     started = time.monotonic()
@@ -1832,7 +1839,8 @@ def _g4_question_turn(
         latency_total_ms=int((time.monotonic() - started) * 1000),
         skill_selected="health_screening",
     )
-    return DiscoveryReply(text=result.reply_text, action_data=None, persisted=True)
+    # The G7 question carries its three structured answers as buttons.
+    return DiscoveryReply(text=result.reply_text, action_data=result.action_data, persisted=True)
 
 
 def _concierge_turn(

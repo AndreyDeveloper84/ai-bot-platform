@@ -967,6 +967,40 @@ a {
   line-height: 1.5;
 }
 
+/* DRF-2282 [OD-BOT §170] — три структурированных ответа вопроса G7: столбец
+   кнопок во всю ширину, по одной на строку (подписи — длинные фразы владельца).
+   Макета для этого кадра нет — отступление названо в PR. */
+.goal-select__safety-options {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  margin: var(--s-2) 0 var(--s-3);
+}
+
+.goal-select__safety-option {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  padding: var(--s-3);
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+  font-size: var(--font-size-200);
+  color: var(--c-text-primary);
+  text-align: left;
+  line-height: 1.4;
+  /* владелец, решения по PR #1982: длинный текст переносится */
+  white-space: normal;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+.goal-select__safety-option:disabled {
+  background: var(--c-surface-2);
+  color: var(--c-text-secondary);
+  cursor: default;
+}
+
 .goal-select__actions {
   margin-top: var(--s-2);
 }
