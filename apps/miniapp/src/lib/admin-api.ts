@@ -23,6 +23,13 @@ import { applySalonChoiceHeader } from "./salon-choice";
 interface ErrorBody {
   error: string;
   detail: string;
+  /**
+   * Structured refusal details when the server sends them — the same
+   * field `api.ts` already forwards (DRF-2273: the catalog's «что
+   * сделать» rides in `details.hint`). Dropping it here left the admin
+   * screens with only the English `detail`.
+   */
+  details?: Record<string, unknown>;
 }
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -62,7 +69,7 @@ async function requestWithResponse<T>(
     } catch {
       /* non-JSON 5xx */
     }
-    throw new ApiError(res.status, parsed.error, parsed.detail);
+    throw new ApiError(res.status, parsed.error, parsed.detail, parsed.details);
   }
   if (res.status === 204) {
     return { data: undefined as T, response: res };
@@ -111,6 +118,14 @@ export interface MeResponse {
    * App.tsx treats absence as `false`.
    */
   is_solo_provider?: boolean;
+  /**
+   * DRF-2254 — «чьё место и кто ведёт услуги»: `Tenant.kind` каталога,
+   * единственный источник. `is_solo_provider` выше — только раскладка.
+   * Экраны самообслуживания мастера (место, услуги, выбор услуг) на соло-
+   * поверхности не рисуются при `"salon"`; `null`/отсутствие — «не знаю»,
+   * всё как прежде (авторитетен отказ каталога).
+   */
+  workspace_kind?: "salon" | "solo" | null;
 }
 
 export const getMe = (): Promise<MeResponse> =>
@@ -2016,6 +2031,35 @@ export const getStaffRoster = (
   init: { signal?: AbortSignal } = {},
 ): Promise<StaffRosterResponse> =>
   request("/api/v1/admin/staff/", { method: "GET", signal: init.signal });
+
+// --- /api/v1/admin/staff/role/ -------------------------------------------
+//
+// DRF-2273. Replaces every active staff role one person holds with `role`.
+// OWNER ONLY — the view narrows `require_admin_role` the same way the
+// roster does. Never `owner` (403: ownership is handed over separately)
+// and never the caller themself (403). The master link is a different
+// table and is not touched.
+
+export type ChangeableRole = "admin" | "receptionist";
+
+export interface StaffRoleChangePayload {
+  bot_user_id: string;
+  role: ChangeableRole;
+}
+
+export interface StaffRoleChangeResponse {
+  role: ChangeableRole;
+  /** The staff roles that were replaced, sorted. */
+  previous_roles: string[];
+}
+
+export const changeStaffRole = (
+  payload: StaffRoleChangePayload,
+): Promise<StaffRoleChangeResponse> =>
+  request("/api/v1/admin/staff/role/", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
 
 // --- /api/v1/admin/staff/revoke/ -----------------------------------------
 //

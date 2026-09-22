@@ -174,6 +174,11 @@ from apps.orchestrator.discovery import (
     resolve_discover_tap,
 )
 from apps.handoff.notify import notify_safety_reply_during_handoff
+from apps.identity.services.blocking import (
+    BLOCK_NOTICE_TEXT,
+    blocked_since,
+    claim_block_notice,
+)
 from apps.orchestrator.handoff import (
     BOOKING_CALLBACK_PREFIXES,
     global_handoff_muted,
@@ -705,8 +710,14 @@ def _deliver_crisis_reply(
     trace_id: str | uuid.UUID | None,
     is_global: bool,
     attachments: list[dict[str, Any]] | None = None,
+    blocked: bool = False,
 ) -> None:
     """Send a safety/crisis reply, alerting LOUDLY if delivery fails (#1082).
+
+    ``blocked`` (DRF-2276): the recipient is blocked by a platform operator,
+    and the reply still goes out — N-1 (CD §67). Only then does the send carry
+    ``bypass_block="safety"``: for everyone else the call stays exactly what
+    it was, so nothing about the unblocked path changes.
 
     A crisis reply that fails to send is categorically worse than a normal one:
     ``with_idempotency`` has already claimed the key, so a PEL retry hits
@@ -723,7 +734,11 @@ def _deliver_crisis_reply(
     the only addition.
     """
     try:
-        send_message(chat_id=chat_id, text=text, attachments=attachments)
+        if blocked:
+            # DRF-2276 — N-1: ответ безопасности проходит забор блокировки.
+            send_message(chat_id=chat_id, text=text, attachments=attachments, bypass_block="safety")
+        else:
+            send_message(chat_id=chat_id, text=text, attachments=attachments)
     except Exception:
         logger.error(
             "channels.max.safety.crisis_delivery_failed bot_user=%s is_global=%s trace=%s",
@@ -743,6 +758,58 @@ def _deliver_crisis_reply(
         except Exception:  # noqa: BLE001 — the alert event must not mask the send failure
             logger.exception("channels.max.safety.crisis_delivery_alert_emit_failed")
         raise
+
+
+#: ``Message.action_type`` фразы блокировки (DRF-2276).
+BLOCK_NOTICE_ACTION_TYPE = "block_notice"
+
+
+def _answer_blocked(
+    *,
+    conversation: Any,
+    bot_user: Any,
+    chat_id: str | None,
+    trace_id: str | uuid.UUID | None,
+    since: Any,
+    is_global: bool,
+) -> None:
+    """Ход заблокированного человека (DRF-2276, CD §72 п.15): фраза раз за эпизод.
+
+    Зовётся только когда гейт не нашёл ни кризиса, ни неотложки — их
+    заблокированному отвечает safety-ветка (N-1). Дальше ничего: ни навыков,
+    ни модели. Входящее уже записано в диалог — карточка покажет, что человек
+    писал. Событие без текста клиента.
+    """
+    told = claim_block_notice(bot_user, since=since)
+    logger.info(
+        "channels.max.blocked_inbound conversation=%s is_global=%s notice=%s",
+        conversation.id,
+        is_global,
+        told,
+    )
+    emit(
+        "channels.max.blocked_inbound",
+        payload={
+            "bot_user_id": str(bot_user.id),
+            "conversation_id": str(conversation.id),
+            "is_global_bot": is_global,
+            "notice_sent": told,
+        },
+    )
+    if not told or not chat_id:
+        return
+    # Витринный диалог живёт у тенанта-стража и пишется своей функцией.
+    record = record_global_message if is_global else record_message
+    record(
+        conversation,
+        role="assistant",
+        content=BLOCK_NOTICE_TEXT,
+        rendered_text=BLOCK_NOTICE_TEXT,
+        action_type=BLOCK_NOTICE_ACTION_TYPE,
+        trace_id=trace_id,
+    )
+    short_term.append(conversation.id, role="assistant", content=BLOCK_NOTICE_TEXT)
+    send_message(chat_id=chat_id, text=BLOCK_NOTICE_TEXT, bypass_block="block_notice")
 
 
 def _confidence_floor_reason(skill_result: Any) -> str:
@@ -1627,13 +1694,21 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     # MEDICAL outcome, so the safety branch below answers it with the one
     # medical text. П.1а: the operator is told a safety reply went out over
     # them — no client text in the signal.
+    #
+    # DRF-2276 (CD §72 п.15) — блокировка оператором платформы. Тот же приём:
+    # гейт раньше блокировки, кризис и неотложка (с red flag классификатора —
+    # навыки заблокированному не работают, иначе red flag промолчал бы)
+    # отвечаются; всё прочее — фраза раз за эпизод и ``return``. Блок раньше
+    # handoff: заблокированному под открытой задачей — фраза блока, не
+    # уведомление о молчании.
     safety = evaluate_inbound(event.text)
     handoff_muted = global_handoff_muted(
         conversation=conversation,
         channel=event.channel,
         channel_user_id=event.channel_user_id,
     )
-    if handoff_muted:
+    blocked_at = blocked_since(channel=event.channel, channel_user_id=event.channel_user_id)
+    if handoff_muted or blocked_at is not None:
         safety = under_handoff(event.text, safety)
     if handoff_muted and reaches_through_handoff(safety):
         notify_safety_reply_during_handoff(
@@ -1641,6 +1716,16 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             channel=event.channel,
             channel_user_id=event.channel_user_id,
         )
+    if blocked_at is not None and not reaches_through_handoff(safety):
+        _answer_blocked(
+            conversation=conversation,
+            bot_user=bot_user,
+            chat_id=event.chat_id,
+            trace_id=trace_id,
+            since=blocked_at,
+            is_global=True,
+        )
+        return
     if handoff_muted and not reaches_through_handoff(safety):
         logger.info(
             "channels.max.global.silenced_by_handoff conversation=%s",
@@ -2695,6 +2780,7 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             trace_id=trace_id,
             is_global=True,
             attachments=_build_attachments(reply.action_data),
+            blocked=blocked_at is not None,
         )
     elif clarify_redraw and event.channel_message_id:
         # DRF-1362 — the whole point of the ticket: two taps update ONE
@@ -2973,6 +3059,8 @@ def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | N
     # `create_if_missing=True` (default) → never returns None. The
     # narrow tells mypy this; an assertion in case the contract slips.
     assert conversation is not None  # noqa: S101 — contract guard
+    # DRF-2276 — блокировка оператором платформы; эффект ниже, после гейта.
+    blocked_at = blocked_since(channel=event.channel, channel_user_id=event.channel_user_id)
 
     # MAX UX indicators: tell the chat we've read the message and we're
     # typing a reply BEFORE doing any heavy work (LLM call, DB writes).
@@ -3004,7 +3092,8 @@ def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | N
         from apps.channels.max.outbound import send_chat_action
 
         send_chat_action(chat_id=event.chat_id, action="mark_seen")
-        if conversation.state != Conversation.State.HUMAN_HANDOFF:
+        # DRF-2276 — и не заблокированному: ему «печатает…» не обещается.
+        if conversation.state != Conversation.State.HUMAN_HANDOFF and blocked_at is None:
             send_chat_action(chat_id=event.chat_id, action="typing_on")
 
     # Persist the inbound turn.
@@ -3043,10 +3132,22 @@ def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | N
     # the MEDICAL outcome (``under_handoff``), and the operator is signalled.
     safety = evaluate_inbound(event.text)
     in_handoff = conversation.state == Conversation.State.HUMAN_HANDOFF
-    if in_handoff:
+    # DRF-2276 — заблокированному, как и под handoff, навыки не отвечают:
+    # red flag классификатора становится «неотложкой» гейта (N-1).
+    if in_handoff or blocked_at is not None:
         safety = under_handoff(event.text, safety)
     if in_handoff and reaches_through_handoff(safety):
         notify_safety_reply_during_handoff(conversation=conversation)
+    if blocked_at is not None and not reaches_through_handoff(safety):
+        _answer_blocked(
+            conversation=conversation,
+            bot_user=bot_user,
+            chat_id=event.chat_id,
+            trace_id=trace_id,
+            since=blocked_at,
+            is_global=False,
+        )
+        return
     if not safety.allowed and (not in_handoff or reaches_through_handoff(safety)):
         _emit_safety_shortcircuit(bot_user, safety, is_global=False)
         record_message(
@@ -3064,6 +3165,7 @@ def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | N
             bot_user=bot_user,
             trace_id=trace_id,
             is_global=False,
+            blocked=blocked_at is not None,
         )
         logger.info(
             "channels.max.handler.safety_shortcircuit conversation=%s verdict=%s",

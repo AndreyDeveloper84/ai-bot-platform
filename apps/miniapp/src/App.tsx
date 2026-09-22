@@ -1039,9 +1039,16 @@ function UnifiedSoloSurface({ me }: { me: MeResponse }) {
   const soloInfo = useMemo(
     () => ({
       salonAdmin: Boolean(me.is_owner || me.is_admin || me.is_receptionist),
+      // DRF-2254: место и услуги ведёт мастер сам, только если каталог не
+      // назвал пространство салоном; «не знаю» (null) — как прежде.
+      selfService: me.workspace_kind !== "salon",
     }),
     [me],
   );
+  // DRF-2254: при "salon" экранов самообслуживания нет — прямая ссылка
+  // уводит на «Мой день», а не на отказ каталога «ведёт владелец салона».
+  const selfServiceOnly = (screen: React.ReactElement) =>
+    soloInfo.selfService ? screen : <Navigate to="/solo/my-day" replace />;
   // Round-1 amendment: read deep-link sheet-open state from the URL
   // on mount. If the user pasted `/solo/more` (e.g. stale bot DM
   // bookmark), the parent renders with `moreOpen=true` immediately —
@@ -1067,7 +1074,7 @@ function UnifiedSoloSurface({ me }: { me: MeResponse }) {
             element={<MasterWorkingHoursScreen />}
           />
           {/* DRF-1811 (M19) — экран 05: место работы; всё в каталоге через /service-locations. */}
-          <Route path="/solo/place" element={<MasterPlaceScreen />} />
+          <Route path="/solo/place" element={selfServiceOnly(<MasterPlaceScreen />)} />
 
           {/* Bottom-bar destinations. */}
           <Route path="/solo/my-day" element={<MasterDashboardScreen />} />
@@ -1083,13 +1090,13 @@ function UnifiedSoloSurface({ me }: { me: MeResponse }) {
             element={<MasterNewBookingScreen />}
           />
           <Route path="/solo/customers" element={<MasterCustomersScreen />} />
-          <Route path="/solo/services" element={<MasterServicesScreen />} />
+          <Route path="/solo/services" element={selfServiceOnly(<MasterServicesScreen />)} />
           {/* DRF-1808 (M16) — экран 02: направления; выбор уходит на экран 03 навигацией, не хранится. */}
-          <Route path="/solo/directions" element={<MasterDirectionsScreen />} />
+          <Route path="/solo/directions" element={selfServiceOnly(<MasterDirectionsScreen />)} />
           {/* DRF-1809 (M17) — экран 03: выбор услуг из каталога по направлению. */}
           <Route
             path="/solo/services/select"
-            element={<MasterServiceSelectScreen />}
+            element={selfServiceOnly(<MasterServiceSelectScreen />)}
           />
           {/* /solo/more — deep-link only; redirects synchronously to
            * /solo/my-day. The parent (`UnifiedSoloSurface`) reads the URL

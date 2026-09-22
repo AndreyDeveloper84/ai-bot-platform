@@ -261,6 +261,11 @@ ADMIN_ROUTES: dict[str, Entry] = {
         "roles; role names and flags, no field of the person",
         via=A + "views_staff_revoke:staff_revoke",
     ),
+    "staff_role_change": none(
+        "{role, previous_roles} — the role the target now holds and the roles it replaced; "
+        "role names only, no field of the person",
+        via=A + "views_staff_role:staff_role_change",
+    ),
     "staff_roster": third_party(
         "items[].name",
         "items[].bot_user_id",

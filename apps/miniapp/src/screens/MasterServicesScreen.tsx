@@ -581,9 +581,9 @@ export function MasterServicesScreen() {
         (item) =>
           item.state === "missing" &&
           item.key !== SELF_READINESS_KEY &&
-          item.deep_link.startsWith("/"),
+          Boolean(item.deep_link?.startsWith("/")),
       );
-      if (next) target = next.deep_link;
+      if (next?.deep_link) target = next.deep_link;
     } catch {
       // Готовность не прочиталась — не гадаем, ведём в одну точку «позже».
     }
