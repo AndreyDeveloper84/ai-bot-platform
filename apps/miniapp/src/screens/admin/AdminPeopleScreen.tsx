@@ -394,6 +394,14 @@ function roleChangeRefusal(err: unknown): string | null {
   if (err.slug === "no_active_role") {
     return "У этого человека уже нет роли в салоне — обновите список.";
   }
+  // Refusals a retry cannot change: the person left the salon, or the
+  // row no longer allows it. «Повторить» would repeat the same answer.
+  if (err.status === 404) {
+    return "Этого человека больше нет в салоне — обновите список.";
+  }
+  if (err.status === 403) {
+    return "Эту роль отсюда сменить нельзя — обновите список.";
+  }
   return null;
 }
 
@@ -519,6 +527,8 @@ export function AdminPeopleScreen({ me }: Props) {
   // The endpoint is owner-only and answers 403 to everyone else. The
   // check here is so an admin who deep-links sees a sentence instead of
   // an error card; the backend 403 is the actual gate.
+  const roleRefusal = roleErr != null ? roleChangeRefusal(roleErr) : null;
+
   if (!me.is_owner) {
     return (
       <div className="screen">
@@ -851,8 +861,16 @@ export function AdminPeopleScreen({ me }: Props) {
                 margin: "var(--s-3) 0",
               }}
             >
+              {/*
+                The current role is hidden only when it is the ONE role
+                held: a person with both admin and receptionist rows may
+                be collapsed into either, and hiding both would leave a
+                sheet with nothing to pick.
+              */}
               {CHANGEABLE_ROLES.filter(
-                (r) => !roleChange.current.some((g) => g.role === r),
+                (r) =>
+                  roleChange.current.length > 1 ||
+                  !roleChange.current.some((g) => g.role === r),
               ).map((r) => (
                 <button
                   key={r}
@@ -872,19 +890,21 @@ export function AdminPeopleScreen({ me }: Props) {
               ))}
             </div>
 
-            {roleErr != null && (
+            {roleRefusal != null && (
               <div style={{ margin: "var(--s-3) 0" }}>
                 <p style={{ margin: "0 0 var(--s-2)" }}>Роль не изменена.</p>
-                {roleChangeRefusal(roleErr) ? (
-                  <div className="callout callout--danger" role="alert">
-                    {roleChangeRefusal(roleErr)}
-                  </div>
-                ) : (
-                  <StateError
-                    err={roleErr}
-                    onRetry={() => void confirmRoleChange()}
-                  />
-                )}
+                <div className="callout callout--danger" role="alert">
+                  {roleRefusal}
+                </div>
+              </div>
+            )}
+            {roleErr != null && roleRefusal == null && (
+              <div style={{ margin: "var(--s-3) 0" }}>
+                <p style={{ margin: "0 0 var(--s-2)" }}>Роль не изменена.</p>
+                <StateError
+                  err={roleErr}
+                  onRetry={() => void confirmRoleChange()}
+                />
               </div>
             )}
 

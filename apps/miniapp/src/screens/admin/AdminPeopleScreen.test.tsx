@@ -724,6 +724,59 @@ describe("DRF-2273 — the role sheet", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("offers both roles to a person who holds both — never an empty sheet", async () => {
+    await openRoleSheet({
+      ...LENA_ADMIN,
+      roles: [
+        grant("admin", "active", "access_code", daysAgo(40)),
+        grant("receptionist", "active", "access_code", daysAgo(20)),
+      ],
+    });
+
+    expect(
+      screen.getByText(/Сейчас: Администратор и Ресепшен\./),
+    ).toBeInTheDocument();
+    expect(
+      screen.getAllByRole("radio").map((o) => o.textContent),
+    ).toEqual(["Администратор", "Ресепшен"]);
+  });
+
+  it("names a catalog refusal even without a hint", async () => {
+    mockedChangeRole.mockRejectedValue(
+      new ApiError(409, "catalog_admin_link_refused", "transport_error"),
+    );
+    await openRoleSheet({
+      ...LENA_ADMIN,
+      roles: [grant("receptionist", "active", "access_code", daysAgo(40))],
+    });
+
+    fireEvent.click(screen.getByRole("radio", { name: "Администратор" }));
+    fireEvent.click(screen.getByRole("button", { name: "Сменить роль" }));
+
+    expect(
+      await screen.findByText("Каталог не подтвердил администратора."),
+    ).toBeInTheDocument();
+  });
+
+  it("says a 404 in words and offers no pointless retry", async () => {
+    mockedChangeRole.mockRejectedValue(
+      new ApiError(404, "not_found", "no such person in this salon"),
+    );
+    await openRoleSheet(LENA_ADMIN);
+
+    fireEvent.click(screen.getByRole("radio", { name: "Ресепшен" }));
+    fireEvent.click(screen.getByRole("button", { name: "Сменить роль" }));
+
+    expect(
+      await screen.findByText(
+        "Этого человека больше нет в салоне — обновите список.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Попробовать снова" }),
+    ).not.toBeInTheDocument();
+  });
+
   it("sends nothing until a new role is picked", async () => {
     await openRoleSheet(LENA_ADMIN);
 

@@ -38,7 +38,7 @@ from django.urls import reverse
 from apps.audit.models import AuditLog
 from apps.tenancy.models import TenantStaff
 
-from .conftest import init_data_header
+from .conftest import _make_bot_user, init_data_header
 
 pytestmark = [pytest.mark.django_db, pytest.mark.usefixtures("catalog_admin_link_stub")]
 
@@ -119,11 +119,61 @@ class TestRoleChange:
         assert none.status_code == 409
         assert none.json()["error"] == "no_active_role"
 
-    def test_a_person_from_another_salon_is_not_found(self, client, owner_bot_user, tenant):
+    def test_a_person_from_another_salon_is_not_found(
+        self, client, owner_bot_user, tenant, other_tenant
+    ):
+        # A real person with a real role in the other salon — a random id
+        # would prove «unknown id», not the tenant wall.
+        stranger = _make_bot_user(other_tenant, channel_user_id="7001", display_name="Чужая")
+        TenantStaff.all_tenants.create(
+            tenant=other_tenant, bot_user=stranger, role=TenantStaff.Role.ADMIN
+        )
+
         resp = _post(
-            client, "staff_role_change", {"bot_user_id": str(uuid.uuid4()), "role": "admin"}
+            client, "staff_role_change", {"bot_user_id": str(stranger.id), "role": "receptionist"}
         )
         assert resp.status_code == 404
+        assert _active_roles(stranger) == {"admin"}
+        unknown = _post(
+            client, "staff_role_change", {"bot_user_id": str(uuid.uuid4()), "role": "admin"}
+        )
+        assert unknown.status_code == 404
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            json.dumps({"bot_user_id": "not-a-uuid", "role": "admin"}),
+            json.dumps({"role": "admin"}),
+            json.dumps(["admin"]),
+            "{",
+        ],
+        ids=["malformed-id", "missing-id", "not-an-object", "not-json"],
+    )
+    def test_a_malformed_request_is_400(self, client, owner_bot_user, tenant, raw):
+        resp = client.post(
+            reverse("admin_api:staff_role_change"),
+            data=raw,
+            content_type="application/json",
+            HTTP_AUTHORIZATION=init_data_header("5001"),
+        )
+        assert resp.status_code == 400
+
+    def test_two_staff_roles_collapse_into_the_chosen_one(
+        self, client, owner_bot_user, tenant, admin_bot_user
+    ):
+        TenantStaff.all_tenants.create(
+            tenant=tenant, bot_user=admin_bot_user, role=TenantStaff.Role.RECEPTIONIST
+        )
+        assert _active_roles(admin_bot_user) == {"admin", "receptionist"}
+
+        resp = _post(
+            client,
+            "staff_role_change",
+            {"bot_user_id": str(admin_bot_user.id), "role": "receptionist"},
+        )
+        assert resp.status_code == 200, resp.content
+        assert resp.json()["previous_roles"] == ["admin", "receptionist"]
+        assert _active_roles(admin_bot_user) == {"receptionist"}
 
     def test_promoting_to_admin_asks_the_catalog(
         self, client, owner_bot_user, tenant, receptionist_bot_user, catalog_admin_link_stub
