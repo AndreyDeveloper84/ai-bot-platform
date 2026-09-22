@@ -52,6 +52,7 @@ from apps.master_api.pii import FORBIDDEN_PII_KEYS, find_forbidden_pii
 from apps.master_api.services import bookings as mod
 from apps.master_api.tests.conftest import init_data_header, make_master
 from apps.tenancy.models import Tenant
+from tests.support.pii_asserts import visible_text
 
 pytestmark = pytest.mark.django_db
 
@@ -204,7 +205,9 @@ def _assert_no_customer_phone(resp) -> None:
     assert find_forbidden_pii(resp.json()) == []  # empty-assert-ok: тело проверено вызывающим
     assert CUSTOMER_PHONE not in raw
     assert CUSTOMER_PHONE_DIGITS not in raw
-    assert "5544" not in raw
+    assert "5544" not in visible_text(
+        resp.json()
+    )  # хвост — в видимом тексте: в raw есть случайные id (DRF-2278)
 
 
 # ─── h1: детали и временные состояния ───────────────────────────────────────
