@@ -428,7 +428,12 @@ class AylaPaymentsClient:
             }
         )
         try:
-            url = AylaUrlBuilder(self.base_url).build(f"payments/internal/{payment_id}/retry")
+            # Со СЛЕШОМ на конце: маршруты каталога slash-канонические, и
+            # ``build`` слеш сохраняет. Без него APPEND_SLASH отвечает 301,
+            # requests превращает POST в GET и теряет тело — тап снова не
+            # платит, только с другим текстом. Так же у всех соседних
+            # клиентов (nutrition, booking, profile).
+            url = AylaUrlBuilder(self.base_url).build(f"payments/internal/{payment_id}/retry/")
         except AylaUrlError as exc:
             raise AylaPaymentsAPIError(f"invalid AYLA_BASE_URL: {exc}") from exc
 

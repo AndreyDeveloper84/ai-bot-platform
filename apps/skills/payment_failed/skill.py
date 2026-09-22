@@ -656,10 +656,12 @@ class PaymentRetryCallbackSkill:
             )
             return _build_reply(_CALLBACK_MALFORMED)
 
-        # 2. Authorization — bot_user из текущего context должен быть
-        #    клиентом (`ayla_user_id` соответствует Ayla payment.appointment.client).
-        #    Без этой проверки можно было бы дёрнуть чужой retry через
-        #    скопированный callback (forwarded chat, screenshot, web share).
+        # 2. Здесь проверяется ТОЛЬКО то, что человека вообще можно назвать
+        #    каталогу: есть ли у него ``ayla_user_id``. Что платёж именно
+        #    его — решает каталог: ``PaymentRetryService.execute`` ищет
+        #    ``Payment.objects.get(pk=…, appointment__client=user)``, и на
+        #    чужой платёж отвечает 404 → «эта кнопка не для тебя». Поэтому
+        #    пересланный callback (forwarded chat, screenshot) ссылки не даёт.
         bot_user = context.bot_user
         if not getattr(bot_user, "ayla_user_id", None):
             # Bot_user ещё не bridge-нут к Ayla User. Authorization невозможна;

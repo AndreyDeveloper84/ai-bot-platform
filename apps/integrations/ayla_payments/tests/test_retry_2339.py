@@ -59,7 +59,9 @@ from apps.integrations.ayla_payments.client import (
 PAYMENT_ID = "6f1c6d3e-1f2a-4a7f-9a44-2f0d5a9b1111"
 AYLA_USER_ID = "2b7f9c10-5d3e-4c1a-9f88-11aa22bb3344"
 EXTERNAL_USER_ID = "bot:max:12345"
-URL = "https://ayla.test/api/v1/payments/internal/" + PAYMENT_ID + "/retry"
+# Со слешом на конце — маршрут каталога slash-канонический; без него
+# APPEND_SLASH отвечает 301, и POST теряет тело по дороге.
+URL = "https://ayla.test/api/v1/payments/internal/" + PAYMENT_ID + "/retry/"
 
 
 @pytest.fixture(autouse=True)
@@ -119,6 +121,7 @@ class TestTheWire:
         assert result.payment_id == PAYMENT_ID
         kwargs = post.call_args.kwargs
         assert post.call_args.args[0] == URL
+        assert post.call_args.args[0].endswith("/retry/")
         assert kwargs["json"] == {"client_id": AYLA_USER_ID}
         headers = kwargs["headers"]
         assert headers["Authorization"] == "Bearer secret-token"
