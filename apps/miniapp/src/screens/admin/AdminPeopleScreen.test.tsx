@@ -43,6 +43,7 @@ vi.mock("../../lib/admin-api", async (importOriginal) => {
     getStaffRoster: vi.fn(),
     revokeStaffAccess: vi.fn(),
     changeStaffRole: vi.fn(),
+    restoreStaffAccess: vi.fn(),
   };
 });
 
@@ -50,6 +51,7 @@ import { ApiError } from "../../lib/api";
 import {
   changeStaffRole,
   getStaffRoster,
+  restoreStaffAccess,
   revokeStaffAccess,
   type MeResponse,
   type RoleSource,
@@ -63,6 +65,7 @@ import { AdminPeopleScreen } from "./AdminPeopleScreen";
 const mockedRoster = vi.mocked(getStaffRoster);
 const mockedRevoke = vi.mocked(revokeStaffAccess);
 const mockedChangeRole = vi.mocked(changeStaffRole);
+const mockedRestore = vi.mocked(restoreStaffAccess);
 
 const OWNER_ME: MeResponse = {
   user: { id: "u-1", name: "Карина", phone_masked: "+• ••• ••• ••12" },
@@ -113,6 +116,7 @@ const OWNER_MASTER: StaffRosterPerson = {
   name: "Карина",
   has_account: true,
   is_active: true,
+  restorable_master: false,
   roles: [
     grant("owner", "active", "direct", daysAgo(300)),
     grant("master", "active", "master_invite", daysAgo(120)),
@@ -194,6 +198,7 @@ describe("pending, revoked and ayla_unlinked never share wording", () => {
     name: "Наталья Прохорова",
     has_account: false,
     is_active: false,
+  restorable_master: false,
     roles: [],
   };
 
@@ -384,6 +389,7 @@ const ANYA: StaffRosterPerson = {
   name: "Аня Ковалёва",
   has_account: true,
   is_active: true,
+  restorable_master: false,
   roles: [grant("master", "active", "master_invite", daysAgo(30))],
 };
 
@@ -417,8 +423,10 @@ describe("the confirmation names who and what", () => {
     // The role, so «доступ» is not an abstraction. A confirmation that
     // says neither is a confirmation of nothing.
     expect(screen.getByText(/Снимаем роль: Мастер\./)).toBeInTheDocument();
-    // And that this is a one-way door — the whole reason to confirm.
-    expect(screen.getByText(/придётся выдать новое/)).toBeInTheDocument();
+    // And where the way back is — since DRF-2274 it is on this screen.
+    expect(
+      screen.getByText(/Вернуть доступ можно будет здесь же/),
+    ).toBeInTheDocument();
   });
 
   it("lists every role a two-role person is about to lose", async () => {
@@ -683,6 +691,7 @@ const LENA_ADMIN: StaffRosterPerson = {
   name: "Лена",
   has_account: true,
   is_active: true,
+  restorable_master: false,
   roles: [grant("admin", "active", "access_code", daysAgo(40))],
 };
 
@@ -886,6 +895,173 @@ describe("DRF-2273 — «Сменить роль» only where the server would a
     expect(screen.getByText("Аня Ковалёва")).toBeInTheDocument();
     for (const name of ["Сама", "Владелица", "Аня Ковалёва", "Ушедшая"]) {
       expect(queryRoleButton(name)).not.toBeInTheDocument();
+    }
+  });
+});
+
+/**
+ * DRF-2274 — «Вернуть доступ». Owner only; gives back the role the row
+ * shows as revoked, never a new one.
+ *
+ * Pinned: the button appears only where the server has something to give
+ * back (a revoked staff chip on a row with an account, or a master card
+ * flagged `restorable_master`); the master card is named by `master_id`
+ * alone — after the revoke it has no account; a single role is
+ * preselected, several make the owner choose; refusals are words.
+ */
+const LENA_REVOKED: StaffRosterPerson = {
+  ...LENA_ADMIN,
+  is_active: false,
+  roles: [grant("admin", "revoked", "access_code", daysAgo(40))],
+};
+
+const MASTER_CARD_REVOKED: StaffRosterPerson = {
+  id: "master:m-5",
+  bot_user_id: null,
+  master_id: "m-5",
+  name: "Вера Лис",
+  has_account: false,
+  is_active: true,
+  restorable_master: true,
+  roles: [grant("master", "active", "master_invite", daysAgo(90))],
+};
+
+const restoreButton = (name: string) =>
+  screen.getByRole("button", { name: `Вернуть доступ: ${name}` });
+
+const queryRestoreButton = (name: string) =>
+  screen.queryByRole("button", { name: `Вернуть доступ: ${name}` });
+
+async function openRestore(person: StaffRosterPerson) {
+  mockedRoster.mockResolvedValue(rosterOf(person));
+  renderScreen();
+  await waitFor(() => {
+    expect(restoreButton(person.name)).toBeInTheDocument();
+  });
+  fireEvent.click(restoreButton(person.name));
+  await screen.findByRole("dialog");
+}
+
+describe("DRF-2274 — the restore sheet", () => {
+  beforeEach(() => {
+    mockedRestore.mockResolvedValue({ changed: true, role: "admin" });
+  });
+
+  it("names the person and the one role coming back, and sends it by bot_user_id", async () => {
+    await openRestore(LENA_REVOKED);
+
+    expect(screen.getByRole("dialog")).toHaveAccessibleName(
+      "Вернуть доступ: Лена",
+    );
+    expect(screen.getByText(/Вернём роль: Администратор\./)).toBeInTheDocument();
+    expect(screen.queryAllByRole("radio")).toHaveLength(0);
+
+    const readsBefore = mockedRoster.mock.calls.length;
+    fireEvent.click(screen.getByRole("button", { name: "Вернуть доступ" }));
+    await waitFor(() => {
+      expect(mockedRestore).toHaveBeenCalledTimes(1);
+    });
+    expect(mockedRestore.mock.calls.at(0)?.[0]).toEqual({
+      role: "admin",
+      bot_user_id: "u-8",
+    });
+    await waitFor(() => {
+      expect(mockedRoster.mock.calls.length).toBe(readsBefore + 1);
+    });
+  });
+
+  it("names a revoked master card by master_id alone", async () => {
+    mockedRestore.mockResolvedValue({ changed: true, role: "master" });
+    await openRestore(MASTER_CARD_REVOKED);
+
+    expect(screen.getByText(/Вернём роль: Мастер\./)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Вернуть доступ" }));
+    await waitFor(() => {
+      expect(mockedRestore).toHaveBeenCalledTimes(1);
+    });
+    expect(mockedRestore.mock.calls.at(0)?.[0]).toEqual({
+      role: "master",
+      master_id: "m-5",
+    });
+  });
+
+  it("makes the owner choose when two roles were revoked", async () => {
+    await openRestore({
+      ...LENA_REVOKED,
+      roles: [
+        grant("admin", "revoked", "access_code", daysAgo(40)),
+        grant("receptionist", "revoked", "access_code", daysAgo(20)),
+      ],
+    });
+
+    const confirm = screen.getByRole("button", { name: "Вернуть доступ" });
+    expect(confirm).toBeDisabled();
+    expect(screen.getAllByRole("radio").map((o) => o.textContent)).toEqual([
+      "Администратор",
+      "Ресепшен",
+    ]);
+    fireEvent.click(screen.getByRole("radio", { name: "Ресепшен" }));
+    fireEvent.click(confirm);
+    await waitFor(() => {
+      expect(mockedRestore).toHaveBeenCalledTimes(1);
+    });
+    expect(mockedRestore.mock.calls.at(0)?.[0]).toEqual({
+      role: "receptionist",
+      bot_user_id: "u-8",
+    });
+  });
+
+  it("says a person who is gone in words, and keeps the sheet", async () => {
+    mockedRestore.mockRejectedValue(
+      new ApiError(409, "person_gone", "no account"),
+    );
+    await openRestore(MASTER_CARD_REVOKED);
+
+    fireEvent.click(screen.getByRole("button", { name: "Вернуть доступ" }));
+
+    expect(await screen.findByText("Доступ не возвращён.")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Аккаунта этого человека больше нет — пригласите его заново на экране «Команда».",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+  });
+});
+
+describe("DRF-2274 — «Вернуть доступ» only where there is something to give back", () => {
+  it("is offered on a revoked admin and on a flagged master card", async () => {
+    mockedRoster.mockResolvedValue(rosterOf(LENA_REVOKED, MASTER_CARD_REVOKED));
+    renderScreen();
+
+    await waitFor(() => {
+      expect(restoreButton("Лена")).toBeInTheDocument();
+    });
+    expect(restoreButton("Вера Лис")).toBeInTheDocument();
+  });
+
+  it("never on a live role, an unflagged card, yourself or a revoked owner", async () => {
+    mockedRoster.mockResolvedValue(
+      rosterOf(
+        LENA_ADMIN,
+        { ...MASTER_CARD_REVOKED, id: "master:m-6", master_id: "m-6", name: "Нина", restorable_master: false },
+        { ...LENA_REVOKED, id: "bot:u-1", bot_user_id: "u-1", name: "Сама" },
+        {
+          ...LENA_REVOKED,
+          id: "bot:u-9",
+          bot_user_id: "u-9",
+          name: "Бывшая владелица",
+          roles: [grant("owner", "revoked", "direct", daysAgo(300))],
+        },
+      ),
+    );
+    renderScreen();
+
+    // Presence first: the rows rendered, so the absences mean «no button».
+    expect(await screen.findByText("Бывшая владелица")).toBeInTheDocument();
+    expect(screen.getByText("Нина")).toBeInTheDocument();
+    for (const name of ["Лена", "Нина", "Сама", "Бывшая владелица"]) {
+      expect(queryRestoreButton(name)).not.toBeInTheDocument();
     }
   });
 });

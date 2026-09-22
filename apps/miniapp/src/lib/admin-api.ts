@@ -2018,6 +2018,13 @@ export interface StaffRosterPerson {
    * blindness this endpoint was built to remove.
    */
   roles: StaffRoleGrant[];
+  /**
+   * DRF-2274. A master card whose link was taken away by a revoke here —
+   * the only kind of master row `staff/restore/` has anybody to link back
+   * to. After a revoke the card has no account, so without this flag it
+   * looks exactly like a card nobody ever held.
+   */
+  restorable_master: boolean;
 }
 
 export interface StaffRosterResponse {
@@ -2057,6 +2064,34 @@ export const changeStaffRole = (
   payload: StaffRoleChangePayload,
 ): Promise<StaffRoleChangeResponse> =>
   request("/api/v1/admin/staff/role/", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+
+// --- /api/v1/admin/staff/restore/ ----------------------------------------
+//
+// DRF-2274. Gives back the role a person HELD and had revoked — never a new
+// one. OWNER ONLY. A staff role is named by `bot_user_id`; the master link
+// by `master_id` alone — the server finds who held the card in the revoke
+// journal. Restoring what is already back answers `changed: false`.
+
+export type RestorableRole = ChangeableRole | "master";
+
+export interface StaffRestorePayload {
+  role: RestorableRole;
+  bot_user_id?: string;
+  master_id?: string;
+}
+
+export interface StaffRestoreResponse {
+  changed: boolean;
+  role: RestorableRole;
+}
+
+export const restoreStaffAccess = (
+  payload: StaffRestorePayload,
+): Promise<StaffRestoreResponse> =>
+  request("/api/v1/admin/staff/restore/", {
     method: "POST",
     body: JSON.stringify(payload),
   });
