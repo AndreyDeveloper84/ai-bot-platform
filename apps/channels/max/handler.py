@@ -710,8 +710,14 @@ def _deliver_crisis_reply(
     trace_id: str | uuid.UUID | None,
     is_global: bool,
     attachments: list[dict[str, Any]] | None = None,
+    blocked: bool = False,
 ) -> None:
     """Send a safety/crisis reply, alerting LOUDLY if delivery fails (#1082).
+
+    ``blocked`` (DRF-2276): the recipient is blocked by a platform operator,
+    and the reply still goes out — N-1 (CD §67). Only then does the send carry
+    ``bypass_block="safety"``: for everyone else the call stays exactly what
+    it was, so nothing about the unblocked path changes.
 
     A crisis reply that fails to send is categorically worse than a normal one:
     ``with_idempotency`` has already claimed the key, so a PEL retry hits
@@ -728,8 +734,11 @@ def _deliver_crisis_reply(
     the only addition.
     """
     try:
-        # DRF-2276 — N-1: ответ безопасности проходит забор блокировки.
-        send_message(chat_id=chat_id, text=text, attachments=attachments, bypass_block="safety")
+        if blocked:
+            # DRF-2276 — N-1: ответ безопасности проходит забор блокировки.
+            send_message(chat_id=chat_id, text=text, attachments=attachments, bypass_block="safety")
+        else:
+            send_message(chat_id=chat_id, text=text, attachments=attachments)
     except Exception:
         logger.error(
             "channels.max.safety.crisis_delivery_failed bot_user=%s is_global=%s trace=%s",
@@ -2771,6 +2780,7 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             trace_id=trace_id,
             is_global=True,
             attachments=_build_attachments(reply.action_data),
+            blocked=blocked_at is not None,
         )
     elif clarify_redraw and event.channel_message_id:
         # DRF-1362 — the whole point of the ticket: two taps update ONE
@@ -3155,6 +3165,7 @@ def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | N
             bot_user=bot_user,
             trace_id=trace_id,
             is_global=False,
+            blocked=blocked_at is not None,
         )
         logger.info(
             "channels.max.handler.safety_shortcircuit conversation=%s verdict=%s",
