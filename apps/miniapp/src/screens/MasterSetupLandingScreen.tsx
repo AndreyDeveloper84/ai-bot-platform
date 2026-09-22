@@ -11,7 +11,14 @@
  * - `done` / `missing` — факт: ✓ либо «не настроено», тап ведёт по `deep_link`;
  * - `unknown` — канон не ответил: «не удалось прочитать», а НЕ «настройте»
  *   (человеку, который настроил расписание, это была бы ложь);
- * - `unavailable` — возможности ещё нет: пункт не рисуется вовсе.
+ * - `unavailable` — шага у мастера сейчас нет: пункт РИСУЕТСЯ, назван
+ *   недоступным и причиной, но не тапается (DRF-2326). Раньше он прятался
+ *   вовсе, и мастер читал экран как «у меня всё настроено», хотя пункт
+ *   оставался в `blocking` и профиль было не отправить. Молчание хуже
+ *   отказа: отказ хотя бы называет причину.
+ *
+ * Включение таких шагов в этот экран НЕ входит: `deep_link` у них пуст,
+ * вести некуда, и тикет DRF-2326 их не открывает.
  *
  * Бар — от числа закрытых пунктов, без процентов и без «N из M» (макет:
  * «no fake percent complete»). Связь личности — отдельная строка: это
@@ -26,7 +33,7 @@ import { useNavigate } from "react-router-dom";
 // Загрузка / ошибка загрузки — мастерский SystemState (DRF-2194), не клиентский StateError.
 import { SystemState } from "../components/master/SystemState";
 import {
-  drawnReadinessItems,
+  actionableReadinessItems,
   getMasterMe,
   getOnboardingReadiness,
   readinessFill,
@@ -52,7 +59,23 @@ export const ITEM_STATE_TEXT = {
   done: "Настроено",
   missing: "Не настроено",
   unknown: "Не удалось прочитать",
+  unavailable: "Недоступно",
 } as const;
+
+/**
+ * Причина недоступности — словами, по коду причины из readiness (DRF-2326).
+ *
+ * Коды заводит сервер (`onboarding_readiness.MANAGED_OUTSIDE_APP`,
+ * `capability_not_built`); сырой код на экран не попадает — незнакомая
+ * причина остаётся без строки, и пункт называет только состояние. Выдумать
+ * причину хуже, чем не назвать её.
+ *
+ * ЧЕРНОВИК ТЕКСТА: формулировки в тикете не заданы, их утверждает владелец.
+ */
+export const REASON_TEXT: Record<string, string> = {
+  capability_not_built: "Возможности ещё нет",
+  managed_outside_app: "Настраивается не в приложении",
+};
 
 export const SETUP_LEAD = "Ваше рабочее пространство уже создано.";
 export const SETUP_EXPLAIN = "Теперь подготовим профиль, чтобы клиенты могли записываться к вам.";
@@ -78,7 +101,7 @@ export function itemLabel(item: ReadinessItem): string {
 
 /** Первый незакрытый пункт, с которого начинается настройка. */
 export function firstOpenItem(items: ReadinessItem[]): ReadinessItem | null {
-  return drawnReadinessItems(items).find((item) => item.state !== "done") ?? null;
+  return actionableReadinessItems(items).find((item) => item.state !== "done") ?? null;
 }
 
 export function identityNote(state: string): string | null {
@@ -132,7 +155,9 @@ export function MasterSetupLandingScreen() {
   }
 
   const { readiness, name } = phase;
-  const items = drawnReadinessItems(readiness.items);
+  // Рисуются ВСЕ пункты, включая недоступные (DRF-2326); бар и «следующий
+  // шаг» ниже считают только достижимые.
+  const items = readiness.items;
   const fill = readinessFill(readiness.items);
   const next = firstOpenItem(readiness.items);
   const note = identityNote(readiness.identity.state);
@@ -218,6 +243,21 @@ export function MasterSetupLandingScreen() {
 
 function ItemRow({ item, onOpen }: { item: ReadinessItem; onOpen: () => void }) {
   const label = itemLabel(item);
+  if (item.state === "unavailable") {
+    // Шага у мастера сейчас нет: показываем и называем причину, но вести
+    // некуда — `deep_link` у таких пунктов пуст.
+    const reason = item.reason ? REASON_TEXT[item.reason] : undefined;
+    return (
+      <div className="setup-landing__row" data-testid={`setup-item-${item.key}`}>
+        <span className="setup-landing__mark" aria-hidden="true">
+          —
+        </span>
+        <span className="setup-landing__label">{label}</span>
+        <span className="setup-landing__state">{ITEM_STATE_TEXT.unavailable}</span>
+        {reason && <span className="setup-landing__reason">{reason}</span>}
+      </div>
+    );
+  }
   if (item.state === "unknown") {
     // Канон не ответил — это не «не настроено», и вести настраивать нельзя.
     return (

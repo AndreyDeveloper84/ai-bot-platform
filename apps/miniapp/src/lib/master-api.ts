@@ -724,19 +724,29 @@ export const publishProfile = (
     signal,
   });
 
-/** Пункты, которые экран рисует: всё, кроме `unavailable`. */
-export const drawnReadinessItems = (items: ReadinessItem[]): ReadinessItem[] =>
+/**
+ * Пункты, которые мастер может закрыть САМ: всё, кроме `unavailable`.
+ *
+ * До DRF-2326 имя было `drawnReadinessItems` — «что экран рисует». Экран 01
+ * теперь рисует и недоступные пункты (спрятанный шаг мастер читает как «у
+ * меня всё», хотя профиль всё равно не отправить), поэтому имя врало бы.
+ * Отбор остался прежним, и смысл у него всегда был этот: бар готовности,
+ * «следующий шаг» и карточка «продолжить настройку» считают достижимое —
+ * недоступный пункт в знаменателе обещал бы работу, которой мастер сделать
+ * не может.
+ */
+export const actionableReadinessItems = (items: ReadinessItem[]): ReadinessItem[] =>
   items.filter((item) => item.state !== "unavailable");
 
 /**
- * Бар готовности — доля закрытых пунктов среди нарисованных. Число не
+ * Бар готовности — доля закрытых пунктов среди достижимых. Число не
  * показывается словами: ни процентов, ни «N из M» (макет: «no fake percent
  * complete»; доктрина 12.09 — счётчик как обещание времени).
  */
 export const readinessFill = (
   items: ReadinessItem[],
 ): { done: number; total: number } => {
-  const drawn = drawnReadinessItems(items);
+  const drawn = actionableReadinessItems(items);
   return {
     done: drawn.filter((item) => item.state === "done").length,
     total: drawn.length,
