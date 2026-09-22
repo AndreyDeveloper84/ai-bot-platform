@@ -8,7 +8,7 @@
 
 DEBT: dict[str, int] = {
     "apps/bookings/callbacks.py::_dispatch_cancel": 3,
-    "apps/bookings/callbacks.py::_dispatch_confirm": 6,
+    "apps/bookings/callbacks.py::_dispatch_confirm": 3,
     "apps/bookings/callbacks.py::_dispatch_reschedule": 4,
     "apps/bookings/callbacks.py::_handle_confirm_tap": 1,
     "apps/channels/max/global_onboarding.py::run_onboarding_turn": 1,

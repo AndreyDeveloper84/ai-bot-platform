@@ -256,6 +256,55 @@ def _book_again_keyboard() -> dict | None:
     return _menu_keyboard(LABEL_BOOK_AGAIN, CALLBACK_MENU_BOOK)
 
 
+def _menu_only_keyboard() -> dict | None:
+    """Один нейтральный выход — «Меню» (DRF-2267).
+
+    Для отказов, которые НЕ называют следующего шага и после которых звать
+    обратно к записи нельзя (медицинская ветка §100.A): человеку сказали,
+    что этой дорогой нельзя, и выход ко всему остальному — всё, что здесь
+    честно предложить.
+    """
+    return _menu_keyboard(LABEL_MENU, CALLBACK_MENU_HELP)
+
+
+def _book_again_and_menu_keyboard() -> dict | None:
+    """«📅 Записаться» и «Меню» — когда каталог не продаёт предложение.
+
+    DRF-2267: текст отказа зовёт написать администратору салона, но такого
+    входа у клиентского бота нет; настоящий выход — начать подбор заново.
+    ``cb:menu:book`` выбран вместо «Подобрать услугу»/«Найти салон»
+    сознательно: ворота отвечают на двух поверхностях, а те две фразы живут
+    только на глобальной — на салонном боте они ответили бы «не понял»
+    (DRF-1492).
+    """
+    if not pilot_ux_enabled():
+        return None
+    return _keyboard(
+        [
+            {"label": LABEL_BOOK_AGAIN, "callback": CALLBACK_MENU_BOOK},
+            {"label": LABEL_MENU, "callback": CALLBACK_MENU_HELP},
+        ]
+    )
+
+
+def _another_time_and_menu_keyboard(payload: dict) -> dict | None:
+    """«🔄 Выбрать другое время» для той же пары + «Меню» (DRF-2267).
+
+    Чип строится тем же :func:`_another_time_keyboard` — со всеми его
+    оговорками про длину колбэка и запасное «Записаться», — а «Меню»
+    добавляется рядом как общий выход.
+    """
+    same_pair = _another_time_keyboard(payload) or {}
+    buttons = [
+        b
+        for att in same_pair.get("attachments") or []
+        for b in (att.get("payload") or {}).get("buttons") or []
+    ]
+    if not pilot_ux_enabled():
+        return _another_time_keyboard(payload)
+    return _keyboard([*buttons, {"label": LABEL_MENU, "callback": CALLBACK_MENU_HELP}])
+
+
 def _another_time_keyboard(payload: dict) -> dict | None:
     """«Выбрать другое время» for the pair the abandoned preview named.
 
@@ -872,7 +921,7 @@ class BookingGateCallbackSkill:
             # DRF-1989: каталог не продаёт предложение и назвал причину — у
             # отказа свои слова, передавать менеджеру нечего. Остальные ошибки
             # (в том числе health_check_handoff) — как были, см. DRF-2012.
-            return SkillResult(reply_text=result.text)
+            return SkillResult(reply_text=result.text, action_data=_book_again_and_menu_keyboard())
         if result.error == "health_check_handoff":
             # DRF-2012: the refusal already carries the owner's sentence
             # (§98) and Ayla's own decision about a specialist. Sending the
@@ -882,8 +931,14 @@ class BookingGateCallbackSkill:
             # operator. ``handoff`` is the decision, not the prose — see
             # ``promises_a_specialist``: a refusal that promises nobody must
             # not open a handoff, or it becomes a promise nobody keeps.
+            # DRF-2267: у ветки БЕЗ передачи следующего шага нет — ни один
+            # текст его не называет, и звать обратно к записи, которую только
+            # что закрыли, нельзя (происхождение медицинское). Остаётся
+            # нейтральный выход. С передачей кнопок нет: бот молчит, пока
+            # задача открыта, и тап упал бы в тишину.
             return SkillResult(
                 reply_text=result.text,
+                action_data=None if result.handoff else _menu_only_keyboard(),
                 should_handoff=result.handoff,
                 handoff_reason="booking_health_check_required" if result.handoff else "",
             )
@@ -898,7 +953,12 @@ class BookingGateCallbackSkill:
         if result.error == "schedule_unavailable":
             # The schedule is down, not the booking: its own sentence says so,
             # and there is nothing for an operator to do about it.
-            return SkillResult(reply_text=result.text)
+            # DRF-2267: «попробуйте через минуту» — и чип, который пробует:
+            # та же пара мастер+услуга из заявки, то есть тот же поток.
+            return SkillResult(
+                reply_text=result.text,
+                action_data=_another_time_and_menu_keyboard(row.payload or {}),
+            )
         named_reason = _CONFIRM_FAILURE_REASONS.get(result.error)
         if named_reason:
             return SkillResult(
