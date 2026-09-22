@@ -176,6 +176,16 @@ class TestGlobalMax:
         assert ANSWER_LABELS["no"] in contents  # the label, as what the person said
         assert not any(c.startswith("cb:s1g7:") for c in contents)  # never the payload
 
+        # owner decisions on PR #1982: the same tap delivered again is not an
+        # accepted action — nothing is sent and nothing is recorded (idempotent)
+        sent_before, rows_before = len(wire), len(contents)
+        _global(_tap(tap, user_id=8202, mid="c"))
+        assert len(wire) == sent_before
+        assert (
+            Message.all_tenants.filter(conversation=conversation, role="user").count()
+            == rows_before
+        )
+
     def test_a_yes_tap_is_the_durable_stop(self, wire, spy_concierge) -> None:
         _global(_msg(AMBIGUOUS, user_id=8203, mid="a"))
         conversation = _global_conversation(8203)

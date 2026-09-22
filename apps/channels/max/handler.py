@@ -237,6 +237,7 @@ from apps.skills.health_screening.g7_question import (
     g7_under_mute,
     history_text as g7_history_text,
     is_g7_callback,
+    is_stale_g7_tap,
 )
 from apps.orchestrator.memory_block import build_concierge_memory_block
 from apps.orchestrator.nutrition_context import build_nutrition_context_block
@@ -1627,6 +1628,14 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     # есть в промпт консьержа, у которого есть нутриционные инструменты,
     # — и модель истолковала бы его как просьбу человека про еду сразу
     # после того, как бот пообещал эту тему больше не поднимать.
+    # [OD-BOT §170], owner decisions on PR #1982 — a G7 tap with nothing to
+    # answer (no open G7 question, no S1 restriction: a duplicate delivery, an
+    # old keyboard, a forgery) is not an accepted action. No state change, no
+    # history row, no text — the one idempotent outcome that neither invents a
+    # reply nor shows the «Нет» acknowledgement reserved for a real answer.
+    if is_stale_g7_tap(conversation, bot_user, event.text):
+        logger.info("channels.max.global.g7_stale_tap conversation=%s", conversation.id)
+        return
     health_tap = resolve_health_tap(event.text)
 
     inbound_history_text: str | None = event.text

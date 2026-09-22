@@ -84,10 +84,12 @@ CALLBACK_PREFIX = "cb:s1g7:"
 #: A live tap is exactly ``cb:s1g7:<answer>:<12 hex>`` — by FORM, not by prefix.
 _CALLBACK_RE = re.compile(r"^cb:s1g7:(yes|no|unsure):([0-9a-f]{12})$")
 
-#: After answer №2 on the first ambiguous turn — NOT owner text (named in the PR
-#: for owner review): a neutral acknowledgement with no medical judgement, no
-#: diagnosis and no beauty / wellness CTA.
-OUTSIDE_S1_G7_ACK = "Спасибо, что ответили. Чем могу помочь дальше?"
+#: Owner-approved (decisions on PR #1982, 22.09), verbatim. Shown ONLY when all
+#: hold: the first ambiguous G7 turn, a REAL structured action №2 with the live
+#: slot token, no active S1 restriction, no other S1 group. Never on an active
+#: restriction, another S1 group or an unstructured answer. It is not medical
+#: clearance and not ``CLEARED_BY_RECHECK``.
+OUTSIDE_S1_G7_ACK = "Спасибо, что уточнили. Чем могу помочь дальше?"
 
 OutcomeKind = Literal["stop", "outside_s1_g7", "unknown", "restriction_persists"]
 
@@ -216,6 +218,21 @@ def live_g7_answer(conversation: Any, text: str) -> str | None:
     return parsed[0]
 
 
+def is_stale_g7_tap(conversation: Any, bot_user: Any, text: str) -> bool:
+    """A G7 tap with nothing to answer: no open G7 question and no S1
+    restriction on record (a duplicate delivery, an old keyboard, a forgery).
+
+    Owner decisions on PR #1982: an action is accepted ONLY with the live slot
+    token, and the «Нет» acknowledgement is shown only for a real answer. Such a
+    tap is therefore a no-op — no state change, no text: idempotent. With a
+    restriction on record the tap is NOT stale: the durable reply stands.
+    """
+
+    return (
+        is_g7_callback(text) and g7_pending(conversation) is None and restriction(bot_user) is None
+    )
+
+
 def history_text(text: str) -> str | None:
     """What a G7 tap was as a reply — its verbatim label — for the dialog
     history, never the raw ``cb:`` payload. None when ``text`` is not a tap."""
@@ -323,6 +340,7 @@ __all__ = [
     "g7_under_mute",
     "history_text",
     "is_g7_callback",
+    "is_stale_g7_tap",
     "live_g7_answer",
     "parse_g7_callback",
     "route_g7_turn",

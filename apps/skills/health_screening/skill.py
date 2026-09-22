@@ -51,7 +51,7 @@ from apps.skills.health_screening.classifier import (
     classify,
     s1_group_of,
 )
-from apps.orchestrator.open_question import open_question
+from apps.orchestrator.open_question import open_question, resolve_question
 from apps.skills.health_screening.g4_question import (
     G4_ROUTING_QUESTION,
     ask_g4,
@@ -275,6 +275,25 @@ class HealthScreeningSkill:
         """A turn while the G7 question is open, or a G7 structured answer."""
 
         pending_before = g7_pending(context.conversation)
+        if (
+            pending_before is not None
+            and not is_g7_callback(context.message_text)
+            and clarify_group(context.message_text) == "G4"
+        ):
+            # A named group before the fallback ([OD-BOT §170] решение 1): an
+            # ambiguous G4 sign while the G7 question is open hands over to the
+            # G4 question — so a later «Нет» to G7 can never hide it.
+            resolve_question(context.conversation, G7_QUESTION_ID, "handover_g4")
+            persisted = ask_g4(context.conversation, context.bot_user)
+            return SkillResult(
+                reply_text=G4_ROUTING_QUESTION,
+                meta={
+                    "reply_kind": "health_clarify_g4",
+                    "s1_group": "G4",
+                    "s1_restriction": "open" if persisted else "not_persisted",
+                    "g7_outcome": "handover_g4",
+                },
+            )
         outcome = route_g7_turn(context.conversation, context.bot_user, context.message_text)
         logger.info(
             "health_screening.g7.turn outcome=%s reason=%s conversation=%s",
@@ -302,17 +321,22 @@ class HealthScreeningSkill:
                 },
             )
         if outcome.kind == "outside_s1_g7":
-            # G7 not confirmed on the first ambiguous turn: no restriction, the
-            # flow continues on the next turn. Neutral, no CTA ([OD-BOT §170]).
+            # G7 not confirmed: the first ambiguous turn, a live structured
+            # action №2, no restriction, no other S1 group — the only case for
+            # the owner-approved acknowledgement (decisions on PR #1982). Not
+            # medical clearance, not CLEARED_BY_RECHECK.
             return SkillResult(
                 reply_text=OUTSIDE_S1_G7_ACK,
                 meta={"reply_kind": "health_outside_s1_g7", "g7_outcome": outcome.reason},
             )
         if pending_before is None:
-            # A G7 tap with no open question (stale / resolved / forged): no state
-            # change and no question re-opened by a tap.
+            # A G7 tap with no open question and no restriction (a duplicate
+            # delivery, an old keyboard, a forgery): not an accepted action —
+            # no state change and no text (idempotent). The acknowledgement is
+            # for a real answer only.
             return SkillResult(
-                reply_text=OUTSIDE_S1_G7_ACK,
+                reply_text="",
+                should_send=False,
                 meta={"reply_kind": "health_g7_stale_tap", "g7_outcome": outcome.reason},
             )
         # UNKNOWN — the same single question again, same slot and token.

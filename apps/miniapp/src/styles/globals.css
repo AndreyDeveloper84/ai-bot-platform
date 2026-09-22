@@ -989,6 +989,9 @@ a {
   color: var(--c-text-primary);
   text-align: left;
   line-height: 1.4;
+  /* владелец, решения по PR #1982: длинный текст переносится */
+  white-space: normal;
+  overflow-wrap: anywhere;
   cursor: pointer;
 }
 

@@ -64,6 +64,7 @@ from apps.skills.health_screening.g7_question import (
     ANSWERS,
     G7_QUESTION_ID,
     G7_QUESTION_TEXT,
+    OUTSIDE_S1_G7_ACK,
     ask_g7,
     buttons_of,
     g7_callback,
@@ -287,6 +288,10 @@ class TestPersistence:
         assert _tap("no", conversation, bot_user).meta["reply_kind"] == "health_outside_s1_g7"
         stale = _dispatch(g7_callback("no", token), conversation, bot_user)
         assert stale.meta["reply_kind"] == "health_g7_stale_tap"
+        # owner decisions on PR #1982: not an accepted action — no text at all,
+        # and never the acknowledgement reserved for a real answer
+        assert stale.should_send is False
+        assert stale.reply_text == ""
         assert g7_pending(_fresh(conversation)) is None  # a tap never re-opens the question
         assert restriction(_fresh_user(bot_user)) is None
 
@@ -345,6 +350,63 @@ class TestActiveRestriction:
         bot_user, _ = _pair("refuse")
         with pytest.raises(RecheckNotRegistered):
             clear_restriction(bot_user, provenance={"mechanism": "safety_recheck"})
+
+
+class TestNoAcknowledgement:
+    """Owner decisions on PR #1982 (22.09), point 1 — the exact string, and only
+    for a live structured №2 on the first ambiguous turn with no restriction and
+    no other S1 group."""
+
+    def test_the_exact_owner_string(self) -> None:
+        assert OUTSIDE_S1_G7_ACK == "Спасибо, что уточнили. Чем могу помочь дальше?"
+
+    def test_shown_for_a_live_answer_no(self) -> None:
+        bot_user, conversation = _pair("ack-yes")
+        _dispatch(AMBIGUOUS, conversation, bot_user)
+        result = _tap("no", conversation, bot_user)
+        assert result.reply_text == OUTSIDE_S1_G7_ACK
+
+    @pytest.mark.parametrize("reply", ("нет", ANSWER_LABELS["no"]))
+    def test_never_for_an_unstructured_answer(self, reply: str) -> None:
+        bot_user, conversation = _pair(f"ack-free-{abs(hash(reply)) % 99991}")
+        _dispatch(AMBIGUOUS, conversation, bot_user)
+        result = _dispatch(reply, conversation, bot_user)
+        assert result.reply_text == G7_QUESTION_TEXT
+        assert result.reply_text != OUTSIDE_S1_G7_ACK
+
+    def test_never_with_an_active_restriction(self) -> None:
+        bot_user, conversation = _pair("ack-active")
+        _dispatch(AMBIGUOUS, conversation, bot_user)
+        token = _token(conversation)
+        assert mark_stop(
+            _fresh_user(bot_user),
+            group="G4",
+            question_id="health_screening.g4",
+            source="t",
+            reason="x",
+        )
+        result = _dispatch(g7_callback("no", token), conversation, bot_user)
+        assert result.reply_text == MEDICAL_EMERGENCY_TEXT_V2
+        assert result.reply_text != OUTSIDE_S1_G7_ACK
+
+    def test_never_with_another_s1_group(self) -> None:
+        bot_user, conversation = _pair("ack-other")
+        _dispatch(AMBIGUOUS, conversation, bot_user)
+        result = _dispatch("губы и язык опухли", conversation, bot_user)
+        assert result.reply_text == MEDICAL_EMERGENCY_TEXT_V2
+        # the question is resolved by the STOP; a later «Нет» tap gets no ack
+        assert g7_pending(_fresh(conversation)) is None
+        later = _dispatch(g7_callback("no", "0" * 12), conversation, bot_user)
+        assert later.reply_text != OUTSIDE_S1_G7_ACK
+
+    def test_an_ambiguous_g4_sign_hands_over_to_the_g4_question(self) -> None:
+        bot_user, conversation = _pair("ack-g4")
+        _dispatch(AMBIGUOUS, conversation, bot_user)
+        result = _dispatch("немеет рука иногда", conversation, bot_user)
+        assert result.meta["reply_kind"] == "health_clarify_g4"
+        assert g7_pending(_fresh(conversation)) is None
+        rec = restriction(_fresh_user(bot_user))
+        assert rec is not None and rec.status == "open" and rec.group == "G4"
 
 
 class TestOtherRoutesUnchanged:
