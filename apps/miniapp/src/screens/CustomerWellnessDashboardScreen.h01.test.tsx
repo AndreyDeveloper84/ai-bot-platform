@@ -469,12 +469,12 @@ describe("H01 · быстрые действия", () => {
     expect(screen.queryByText(/замер/i)).toBeNull();
   });
 
-  it("«Записать питание» → ввод текстом, «Новая запись» → каталог, «Профиль» → профиль", async () => {
+  it("«Записать питание» → съёмка фото (DRF-2289; текстом — ссылкой оттуда)", async () => {
     serve();
     renderHome();
 
     fireEvent.click(await screen.findByRole("button", { name: "Записать питание" }));
-    expect(screen.getByTestId("location")).toHaveTextContent("/customer/food-scanner/manual");
+    expect(screen.getByTestId("location")).toHaveTextContent("/customer/food-scanner/capture");
   });
 });
 
