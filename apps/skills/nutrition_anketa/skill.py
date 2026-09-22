@@ -158,6 +158,17 @@ the weight and leaves the person's own target alone, so the bot now writes
 the weight — ``{weight_kg, consent}`` only: a manual target has no snapshot,
 and the bot invents no anketa fields.
 
+Since DRF-2279 (CD §76, №32) the catalogue marks pace and activity that it
+substituted before question 59 as ``legacy_default_inputs``, and a marked
+input is «not named» for the calculation. The short path used to carry the
+snapshot's activity and the profile's pace forward as they were — and the
+catalogue reads a value that arrives as its confirmation, so the bot would
+have confirmed an old default for the person. With marks present the weight
+is held and one question per marked input is asked first (activity, then
+pace — pace only where the goal uses it); the POST follows with the answers
+NAMED. «Не знаю» on activity is a skip, as in the anketa. The anketa itself
+needs nothing extra: it asks pace and activity anew every time.
+
 ## Scope cuts vs mysite
 
 Deferred to Phase 1 / a follow-up Sprint 9 ticket:
@@ -215,6 +226,7 @@ from apps.skills.nutrition_anketa.fsm import (
     PACE_GOALS,
     ACTIVITY_SKIP,
     ADULT_AGE,
+    PACE_CHOICES,
     CHOICE_STEPS,
     GOAL_CHOICES,
     SCREENING_CLEAR,
@@ -491,6 +503,27 @@ _KIND_ROWS: dict[str, tuple[str, ...]] = {
 UPDATE_WEIGHT_WHOLE_NUMBER = "Напиши вес целым числом — например, 68."
 UPDATE_WEIGHT_CANCELLED = "Хорошо, вес не меняю."
 
+#: DRF-2279 (CD §76, №32) — прежние умолчания переспрашиваются, а не
+#: переносятся. ЧЕРНОВИКИ текстов — владельцу на утверждение (в PR).
+CB_UW_ACTIVITY = "cb:anketa:uw_activity:"
+CB_UW_PACE = "cb:anketa:uw_pace:"
+UPDATE_WEIGHT_CONFIRM_ACTIVITY = (
+    "Прежде чем пересчитать: активность в профиле — прежнее значение по "
+    "умолчанию, а не ваш ответ. Какая у вас обычно активность?"
+)
+UPDATE_WEIGHT_CONFIRM_PACE = (
+    "Прежде чем пересчитать: темп в профиле — «{current}», но выбрали его не вы — "
+    "его подставляла прежняя версия анкеты. Какой темп оставить?"
+)
+#: Порядок вопросов: активность, потом темп — как в анкете.
+_LEGACY_CONFIRM_ORDER: tuple[tuple[str, str], ...] = (
+    ("activity_coefficient", "confirm_activity"),
+    ("pace", "confirm_pace"),
+)
+_UPDATE_WEIGHT_STEPS = ("weight", "confirm_activity", "confirm_pace")
+_LEGACY_MARKS = frozenset(name for name, _step in _LEGACY_CONFIRM_ORDER)
+_LEGACY_MARK_ALIASES = {"activity": "activity_coefficient"}
+
 #: Строка целиком (вход уже в нижнем регистре): «[я|сейчас|теперь] [мой|новый]
 #: вес|вешу [сейчас|теперь] N [кг]» или «обнови(ть) вес [N]». Якоря и
 #: ``\d{1,3}`` держат форму детерминированной.
@@ -613,6 +646,10 @@ class NutritionAnketaSkill:
 
         # DRF-2139: «обнови вес» — кнопки, фраза, ответ на вопрос веса.
         if text in UPDATE_WEIGHT_CALLBACKS or _update_weight_entry(text) is not None:
+            return True
+        # DRF-2279: кнопки подтверждения — наши и после истечения вопроса: иначе
+        # нажатие уходило в «не поняла», и вес пропадал молча.
+        if text.startswith((CB_UW_ACTIVITY, CB_UW_PACE)):
             return True
         if update_weight_pending(context.conversation) and not text.startswith("cb:"):
             return True
@@ -1268,9 +1305,19 @@ class NutritionAnketaSkill:
                 return self._update_weight_ask(context)
             return self._update_weight_with(context, entry)
 
+        if text.startswith((CB_UW_ACTIVITY, CB_UW_PACE)):
+            return self._update_weight_confirm(context, text)
         if pending and not text.startswith("cb:"):
+            bucket = self._update_weight_bucket(context)
+            if bucket and str(bucket.get("step", "")).startswith("confirm_"):
+                # DRF-2279: вопрос задан кнопками — текст ответом не
+                # считается, вопрос повторяется; веса он не меняет.
+                return self._update_weight_confirm_ask(context, bucket)
             return self._update_weight_with(context, text)
         return None
+
+    def _update_weight_bucket(self, context: SkillContext) -> dict | None:
+        return _fresh_bucket(context.conversation, UPDATE_WEIGHT_STATE_KEY, _UPDATE_WEIGHT_STEPS)
 
     def _clear_open_questions(self, context: SkillContext) -> None:
         """Смена курса: незаконченная анкета и ЧУЖОЙ открытый вопрос (ручной
@@ -1354,6 +1401,27 @@ class NutritionAnketaSkill:
         if _snapshot_is_stale(profile):
             return self._update_weight_go_to_anketa(UPDATE_WEIGHT_STALE, "stale")
 
+        # DRF-2279: помеченное прежнее умолчание не переносится — у каталога
+        # присланное значение и есть подтверждение, и бот подтвердил бы его
+        # за человека. Сначала вопрос; вес держится в состоянии.
+        to_ask = _legacy_steps(profile)
+        if to_ask:
+            bucket = {
+                "step": to_ask[0],
+                "weight": weight,
+                "answers": {},
+                # Темп — каким он был, когда вопрос задан: одна запись на ход.
+                "current_pace": str(getattr(profile, "goal_pace", "") or ""),
+            }
+            self._save_update_weight_state(context, bucket)
+            return self._update_weight_confirm_ask(context, bucket, profile=profile)
+
+        return self._update_weight_send(context, external_id, body)
+
+    def _update_weight_send(
+        self, context: SkillContext, external_id: str, body: dict[str, Any]
+    ) -> SkillResult:
+        """Согласие M → POST → карточка предложения (общий хвост «обнови вес»)."""
         from apps.consent.personal_calculation import (
             ConsentAttestationUnavailable,
             attach as attach_consent,
@@ -1443,6 +1511,119 @@ class NutritionAnketaSkill:
             action_data={"buttons": _post_anketa_chips(saved)},
             meta={"reply_kind": "anketa_update_weight_manual_saved"},
         )
+
+    # ─── DRF-2279: прежние умолчания — вопрос, а не перенос ─────────────
+
+    def _update_weight_confirm_ask(
+        self, context: SkillContext, bucket: dict, *, profile: Any = None
+    ) -> SkillResult:
+        """Вопрос текущего шага подтверждения; вес ждёт в ``bucket``."""
+        cancel = {"label": MANUAL_BUTTON_CANCEL, "callback": UPDATE_WEIGHT_CANCEL_CALLBACK}
+        if bucket.get("step") == "confirm_activity":
+            buttons = [
+                {"label": label, "callback": f"{CB_UW_ACTIVITY}{slug}"}
+                for slug, label in ACTIVITY_CHOICES.items()
+            ]
+            return SkillResult(
+                reply_text=UPDATE_WEIGHT_CONFIRM_ACTIVITY,
+                action_type="anketa_update_weight_confirm",
+                action_data={"buttons": [*buttons, cancel]},
+                meta={"reply_kind": "anketa_update_weight_confirm_activity"},
+            )
+        current = str(bucket.get("current_pace") or getattr(profile, "goal_pace", "") or "")
+        if current and "current_pace" not in bucket:
+            bucket = {**bucket, "current_pace": current}
+            self._save_update_weight_state(context, bucket)
+        # Нынешний темп — первым: это вопрос «оставить?», а не выбор с нуля.
+        order = [current] if current in PACE_CHOICES else []
+        order += [slug for slug in PACE_CHOICES if slug not in order]
+        buttons = [
+            {
+                "label": f"{PACE_CHOICES[slug]} — оставить"
+                if slug == current
+                else PACE_CHOICES[slug],
+                "callback": f"{CB_UW_PACE}{slug}",
+            }
+            for slug in order
+        ]
+        return SkillResult(
+            reply_text=UPDATE_WEIGHT_CONFIRM_PACE.format(
+                current=PACE_CHOICES.get(current, current or "—")
+            ),
+            action_type="anketa_update_weight_confirm",
+            action_data={"buttons": [*buttons, cancel]},
+            meta={"reply_kind": "anketa_update_weight_confirm_pace"},
+        )
+
+    def _update_weight_confirm(self, context: SkillContext, text: str) -> SkillResult:
+        """Ответ кнопкой: записать, следующий вопрос или — все названы — POST."""
+        bucket = self._update_weight_bucket(context)
+        if bucket is None or not str(bucket.get("step", "")).startswith("confirm_"):
+            # Вопрос истёк или не задавался — вес не угадывается, спрашиваем заново.
+            return self._update_weight_ask(context)
+        step = bucket["step"]
+        answers = dict(bucket.get("answers") or {})
+        if step == "confirm_activity" and text.startswith(CB_UW_ACTIVITY):
+            slug = text[len(CB_UW_ACTIVITY) :]
+            if slug not in ACTIVITY_CHOICES:
+                return self._update_weight_confirm_ask(context, bucket)
+            answers["activity"] = slug
+        elif step == "confirm_pace" and text.startswith(CB_UW_PACE):
+            slug = text[len(CB_UW_PACE) :]
+            if slug not in PACE_CHOICES:
+                return self._update_weight_confirm_ask(context, bucket)
+            answers["pace"] = slug
+        else:
+            # Кнопка другого шага (старое сообщение) — текущий вопрос снова.
+            return self._update_weight_confirm_ask(context, bucket)
+
+        external_id = external_user_id_for(context.bot_user)
+        try:
+            profile = asyncio.run(get_nutrition_client().get_profile(external_user_id=external_id))
+        except NutritionUnavailableError:
+            self._save_update_weight_state(context, None)
+            logger.warning("anketa.update_weight_ayla_unavailable step=confirm_read")
+            return SkillResult(
+                reply_text=_AYLA_DOWN_FALLBACK, meta={"reply_kind": "anketa_ayla_down"}
+            )
+        except NutritionAPIError:
+            self._save_update_weight_state(context, None)
+            logger.exception("anketa.update_weight_ayla_error step=confirm_read")
+            return SkillResult(
+                reply_text=_AYLA_DOWN_FALLBACK, meta={"reply_kind": "anketa_ayla_error"}
+            )
+
+        if getattr(profile, "targets_source", "") == "user_entered":
+            # Пока вопрос висел, человек поставил ориентир специалиста: вес
+            # пишется поверх ручного ориентира (DRF-2193), а не теряется.
+            self._save_update_weight_state(context, None)
+            return self._update_weight_over_manual(context, external_id, int(bucket["weight"]))
+
+        answered = {"confirm_activity": "activity", "confirm_pace": "pace"}
+        remaining = [s for s in _legacy_steps(profile) if answered[s] not in answers]
+        if remaining:
+            bucket = {**bucket, "step": remaining[0], "answers": answers}
+            self._save_update_weight_state(context, bucket)
+            return self._update_weight_confirm_ask(context, bucket, profile=profile)
+
+        self._save_update_weight_state(context, None)
+        body = _update_weight_body(profile, int(bucket["weight"]))
+        if body is None:
+            return self._update_weight_go_to_anketa(UPDATE_WEIGHT_NEED_ANKETA, "need_anketa")
+        if _snapshot_is_stale(profile):
+            return self._update_weight_go_to_anketa(UPDATE_WEIGHT_STALE, "stale")
+        # Ответы — НАЗВАННЫЕ человеком: у каталога они снимают пометку.
+        if "activity" in answers:
+            if answers["activity"] == ACTIVITY_SKIP:
+                # «Не знаю» — пропуск, не число (вопрос 59): каталог ответит
+                # «не хватает данных: активность».
+                body.pop("activity_coefficient", None)
+                body["_skipped_fields"] = ["activity"]
+            else:
+                body["activity_coefficient"] = ACTIVITY_COEFFICIENTS[answers["activity"]]
+        if "pace" in answers and body.get("goal") in PACE_GOALS:
+            body["pace"] = answers["pace"]
+        return self._update_weight_send(context, external_id, body)
 
     @staticmethod
     def _update_weight_go_to_anketa(text: str, why: str) -> SkillResult:
@@ -1963,7 +2144,7 @@ def _fresh_bucket(conversation: Any, key: str, steps: tuple[str, ...]) -> dict |
 
 def update_weight_pending(conversation: Any) -> bool:
     """DRF-2139, для ``is_structured_nutrition_turn``: бот ждёт вес."""
-    return _fresh_bucket(conversation, UPDATE_WEIGHT_STATE_KEY, ("weight",)) is not None
+    return _fresh_bucket(conversation, UPDATE_WEIGHT_STATE_KEY, _UPDATE_WEIGHT_STEPS) is not None
 
 
 def update_weight_phrase(text: str) -> bool:
@@ -2049,6 +2230,33 @@ def _update_weight_body(profile: Any, weight: int) -> dict[str, Any] | None:
     if needs_pace:
         body["pace"] = pace
     return body
+
+
+def _legacy_steps(profile: Any) -> list[str]:
+    """Шаги подтверждения по пометкам каталога (DRF-2279), в порядке анкеты.
+
+    Темп спрашивается только там, где он меняет число (цель с темпом, вопрос
+    59): у «поддерживать» его в теле нет, и подтверждать нечего.
+    """
+    marks: set[str] = set()
+    for name in getattr(profile, "legacy_default_inputs", ()) or ():
+        # Имена — каталога (``activity_coefficient``, ``pace``). Тот же API
+        # зовёт активность «activity» в ``_skipped_fields``: пометка под этим
+        # именем тоже пометка — иначе старое умолчание ушло бы молча.
+        name = _LEGACY_MARK_ALIASES.get(name, name)
+        if name in _LEGACY_MARKS:
+            marks.add(name)
+        else:
+            logger.warning("anketa.legacy_default_unknown_mark name=%s", name)
+    goal = str(getattr(profile, "goal", "") or "")
+    steps: list[str] = []
+    for name, step in _LEGACY_CONFIRM_ORDER:
+        if name not in marks:
+            continue
+        if name == "pace" and goal not in PACE_GOALS:
+            continue
+        steps.append(step)
+    return steps
 
 
 def _snapshot_is_stale(profile: Any) -> bool:

@@ -708,6 +708,12 @@ class ProfileResponse:
     #: уходят. Пусто, когда расчёта нет.
     targets_method_versions: dict[str, str] = field(default_factory=dict)
     targets_input_snapshot: dict[str, Any] = field(default_factory=dict)
+    #: DRF-2279 (CD §76, №32): входы, которые каталог пометил как прежние
+    #: умолчания (``pace``, ``activity_coefficient``) — подставлены до
+    #: вопроса 59, человек их не называл. Для расчёта они «не названы», и бот
+    #: переспрашивает, а не переносит. Пусто — пометок нет ИЛИ каталог ключа
+    #: ещё не присылает (бот выходит раньше каталога).
+    legacy_default_inputs: tuple[str, ...] = ()
     raw: dict[str, Any] = field(default_factory=dict)
 
     #: Поля, которые обязаны быть ``None`` у не настроенного профиля —
@@ -1891,6 +1897,11 @@ class NutritionClient:
                 goal=str(body.get("goal") or ""),
                 # Ayla spec uses "pace"; "goal_pace" is the back-compat name.
                 goal_pace=str(body.get("pace") or body.get("goal_pace") or ""),
+                legacy_default_inputs=tuple(
+                    str(name)
+                    for name in (body.get("legacy_default_inputs") or [])
+                    if isinstance(name, str) and name
+                ),
                 # Ayla spec uses "activity_coefficient" (number); "activity"
                 # is the back-compat string name.
                 activity=str(body.get("activity_coefficient") or body.get("activity") or ""),
