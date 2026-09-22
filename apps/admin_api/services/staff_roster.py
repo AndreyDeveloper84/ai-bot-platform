@@ -109,6 +109,7 @@ from datetime import datetime, timedelta
 from typing import Any, Literal
 from uuid import UUID
 
+from apps.admin_api.services.staff_restore import restorable_masters, restorable_staff_roles
 from apps.catalog.master_state import RoleState as _RoleState
 from apps.catalog.master_state import master_state
 from apps.catalog.models import CatalogMaster
@@ -212,11 +213,12 @@ class Person:
     master_id: UUID | None
     name: str
     roles: list[RoleGrant] = field(default_factory=list)
-    #: DRF-2274. A master row whose link was revoked here: the card is
-    #: unlinked and a ``staff.access_revoked`` audit row names it. Only
-    #: such a row has somebody for ``staff/restore/`` to link back — the
-    #: screen cannot tell it from a card nobody ever held without this.
-    restorable_master: bool = False
+    #: DRF-2274. What ``staff/restore/`` would give back on this row —
+    #: computed by ``services/staff_restore.py``, the same rule the endpoint
+    #: applies, so the button can never be offered where the server refuses.
+    #: The screen cannot derive it: a role change closes rows too and reads
+    #: as «revoked», and a revoked master card looks like one nobody held.
+    restorable_roles: list[str] = field(default_factory=list)
 
     @property
     def is_active(self) -> bool:
@@ -250,7 +252,7 @@ class Person:
             "has_account": self.has_account,
             "is_active": self.is_active,
             "roles": [r.to_payload() for r in self.effective_roles()],
-            "restorable_master": self.restorable_master,
+            "restorable_roles": list(self.restorable_roles),
         }
 
     def effective_roles(self) -> list[RoleGrant]:
@@ -517,24 +519,9 @@ def _build(tenant: Any) -> tuple[list[Person], int, bool]:
         "linked_bot_user__display_name",
         "linked_bot_user__client_name",
     )
-    # DRF-2274 — which unlinked cards were unlinked BY A REVOKE. One query
-    # for the lot; `all_tenants` because an archived audit row is still the
-    # record, with the tenant filtered explicitly.
+    # DRF-2274 — which unlinked cards a revoke took, and from whom.
     master_list = list(master_rows)
-    unlinked_ids = [str(r["id"]) for r in master_list if r["linked_bot_user_id"] is None]
-    revoked_master_ids: set[str] = set()
-    if unlinked_ids:
-        from apps.audit.models import AuditLog
-        from apps.events.vocabulary import STAFF_ACCESS_REVOKED
-
-        revoked_master_ids = {
-            str(mid)
-            for mid in AuditLog.all_tenants.filter(
-                tenant_id=tenant.id,
-                action=STAFF_ACCESS_REVOKED,
-                payload__master_id__in=unlinked_ids,
-            ).values_list("payload__master_id", flat=True)
-        }
+    restorable_cards = restorable_masters(tenant.id, master_list)
 
     for row in master_list:
         linked_id = row["linked_bot_user_id"]
@@ -552,8 +539,8 @@ def _build(tenant: Any) -> tuple[list[Person], int, bool]:
             people[key] = person
         else:
             person.master_id = row["id"]
-        if linked_id is None and str(row["id"]) in revoked_master_ids:
-            person.restorable_master = True
+        if linked_id is None and str(row["id"]) in restorable_cards:
+            person.restorable_roles.append("master")
         # The catalog name wins over the channel-reported display name:
         # it is what the salon calls this person on every other screen.
         #
@@ -595,6 +582,13 @@ def _build(tenant: Any) -> tuple[list[Person], int, bool]:
                 since=since,
             )
         )
+
+    # DRF-2274 — staff roles a revoke took and nothing has replaced.
+    bot_ids = [p.bot_user_id for p in people.values() if p.bot_user_id is not None]
+    for pid, roles in restorable_staff_roles(tenant.id, bot_ids).items():
+        person = people.get(f"bot:{pid}")
+        if person is not None:
+            person.restorable_roles = sorted(roles) + person.restorable_roles
 
     ordered = sorted(people.values(), key=_person_sort_key)
     total = len(ordered)

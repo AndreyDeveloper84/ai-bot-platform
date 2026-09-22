@@ -286,15 +286,134 @@ class TestRestoreMaster:
 
 
 class TestRosterSaysWhatCanBeRestored:
-    def test_a_revoked_master_row_is_restorable_and_a_plain_one_is_not(
+    def _roster(self, client) -> dict:
+        resp = client.get(reverse("admin_api:staff_roster"), HTTP_AUTHORIZATION=init_data_header())
+        assert resp.status_code == 200
+        return resp.json()
+
+    def test_a_revoked_master_card_is_restorable_and_a_plain_one_is_not(
         self, client, owner_bot_user, tenant, master, master_only_bot_user
     ):
         plain = make_master(tenant, name="Вера Лис", external_id=77)
         link_master_to_bot_user(master, master_only_bot_user)
         _revoke(client, master_id=master.id)
 
-        resp = client.get(reverse("admin_api:staff_roster"), HTTP_AUTHORIZATION=init_data_header())
-        assert resp.status_code == 200
-        by_master = {row["master_id"]: row for row in resp.json()["items"] if row["master_id"]}
-        assert by_master[str(master.id)]["restorable_master"] is True
-        assert by_master[str(plain.id)]["restorable_master"] is False
+        by_master = {r["master_id"]: r for r in self._roster(client)["items"] if r["master_id"]}
+        assert by_master[str(master.id)]["restorable_roles"] == ["master"]
+        assert by_master[str(plain.id)]["restorable_roles"] == []
+
+    def test_a_revoked_admin_is_restorable(self, client, owner_bot_user, tenant, admin_bot_user):
+        _revoke(client, bot_user_id=admin_bot_user.id)
+
+        by_bot = {r["bot_user_id"]: r for r in self._roster(client)["items"] if r["bot_user_id"]}
+        assert by_bot[str(admin_bot_user.id)]["restorable_roles"] == ["admin"]
+        assert by_bot[str(owner_bot_user.id)]["restorable_roles"] == []
+
+
+class TestReviewFindings:
+    """Code Reviewer, DRF-2274: «held» was looser than «held and revoked»."""
+
+    def test_a_role_change_is_not_a_revoke(self, client, owner_bot_user, tenant, admin_bot_user):
+        # admin → receptionist closes the admin row, and the roster shows
+        # it as «revoked». Restoring it would leave two roles.
+        changed = _post(
+            client,
+            "staff_role_change",
+            {"bot_user_id": str(admin_bot_user.id), "role": "receptionist"},
+        )
+        assert changed.status_code == 200, changed.content
+
+        resp = _post(
+            client, "staff_restore", {"bot_user_id": str(admin_bot_user.id), "role": "admin"}
+        )
+        assert resp.status_code == 409
+        assert resp.json()["error"] == "holds_another_role"
+        assert _active_roles(admin_bot_user) == {"receptionist"}
+        roster = client.get(
+            reverse("admin_api:staff_roster"), HTTP_AUTHORIZATION=init_data_header()
+        ).json()
+        row = next(r for r in roster["items"] if r["bot_user_id"] == str(admin_bot_user.id))
+        assert row["restorable_roles"] == []
+
+    def test_only_what_the_latest_revoke_took(self, client, owner_bot_user, tenant, admin_bot_user):
+        # admin → receptionist, then revoked: the revoke took receptionist.
+        # The older admin row is closed too, but no revoke took it.
+        _post(
+            client,
+            "staff_role_change",
+            {"bot_user_id": str(admin_bot_user.id), "role": "receptionist"},
+        )
+        _revoke(client, bot_user_id=admin_bot_user.id)
+
+        refused = _post(
+            client, "staff_restore", {"bot_user_id": str(admin_bot_user.id), "role": "admin"}
+        )
+        assert refused.status_code == 409
+        assert refused.json()["error"] == "role_not_previously_held"
+        ok = _post(
+            client,
+            "staff_restore",
+            {"bot_user_id": str(admin_bot_user.id), "role": "receptionist"},
+        )
+        assert ok.status_code == 200, ok.content
+        assert _active_roles(admin_bot_user) == {"receptionist"}
+
+    def test_a_card_linked_since_is_not_handed_back(
+        self, client, owner_bot_user, tenant, master, master_only_bot_user, customer_bot_user
+    ):
+        from datetime import timedelta
+
+        from django.utils import timezone
+
+        link_master_to_bot_user(master, master_only_bot_user)
+        _revoke(client, master_id=master.id)
+        # Re-invited and taken by somebody else, then unlinked WITHOUT a
+        # revoke (her account deleted — SET_NULL): the old revoke row is stale.
+        master.refresh_from_db()
+        master.invited_at = timezone.now() + timedelta(seconds=1)
+        master.save(update_fields=["invited_at"])
+
+        resp = _post(client, "staff_restore", {"master_id": str(master.id), "role": "master"})
+        assert resp.status_code == 409
+        assert resp.json()["error"] == "role_not_previously_held"
+        master.refresh_from_db()
+        assert master.linked_bot_user_id is None
+
+    def test_an_archived_card_is_not_offered_nor_restored(
+        self, client, owner_bot_user, tenant, master, master_only_bot_user
+    ):
+        from django.utils import timezone
+
+        link_master_to_bot_user(master, master_only_bot_user)
+        _revoke(client, master_id=master.id)
+        master.refresh_from_db()
+        master.archived_at = timezone.now()
+        master.save(update_fields=["archived_at"])
+
+        resp = _post(client, "staff_restore", {"master_id": str(master.id), "role": "master"})
+        assert resp.status_code == 409
+        assert resp.json()["error"] == "invite_master_missing"
+        roster = client.get(
+            reverse("admin_api:staff_roster"), HTTP_AUTHORIZATION=init_data_header()
+        ).json()
+        row = next(r for r in roster["items"] if r["master_id"] == str(master.id))
+        assert row["restorable_roles"] == []
+
+    def test_a_failed_record_rolls_the_link_back(
+        self, client, owner_bot_user, tenant, master, master_only_bot_user, monkeypatch
+    ):
+        link_master_to_bot_user(master, master_only_bot_user)
+        _revoke(client, master_id=master.id)
+
+        from apps.audit import services as audit_services
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("audit down")
+
+        monkeypatch.setattr(audit_services, "write_audit", _boom)
+        client.raise_request_exception = False
+        resp = _post(client, "staff_restore", {"master_id": str(master.id), "role": "master"})
+        assert resp.status_code == 500
+        master.refresh_from_db()
+        # No link without its record — a retry can still restore AND record.
+        assert master.linked_bot_user_id is None

@@ -378,31 +378,20 @@ function roleChangeTarget(
 
 /**
  * What «Вернуть доступ» can give back on this row, or `null` for no
- * button. Only what the server would accept:
- *
- *   - a REVOKED admin / receptionist chip on a row with an account — the
- *     deactivated row is the server's proof it was held;
- *   - a master card flagged `restorable_master` — unlinked by a revoke,
- *     so the journal names who held it;
- *   - never yourself, never the owner role (403 either way).
+ * button. The list is the SERVER's (`restorable_roles`, the same rule
+ * `staff/restore/` applies) — never derived from the chips here: a role
+ * change closes rows too and they read as «доступ отозван», and giving
+ * that role back would leave two roles. Yourself is dropped here as well
+ * (the view answers 403).
  */
 function restoreTarget(
   person: StaffRosterPerson,
   me: MeResponse,
 ): RestorableRole[] | null {
   if (person.bot_user_id && person.bot_user_id === me.user.id) return null;
-  const roles: RestorableRole[] = [];
-  if (person.bot_user_id) {
-    for (const g of person.roles) {
-      if (
-        g.state === "revoked" &&
-        (CHANGEABLE_ROLES as string[]).includes(g.role)
-      ) {
-        roles.push(g.role as ChangeableRole);
-      }
-    }
-  }
-  if (person.restorable_master && person.master_id) roles.push("master");
+  const roles = person.restorable_roles.filter(
+    (r) => r !== "master" || person.master_id !== null,
+  );
   return roles.length > 0 ? roles : null;
 }
 
@@ -450,6 +439,12 @@ function accessRefusal(err: unknown): string | null {
   }
   if (err.slug === "person_already_master") {
     return "Этот человек уже связан с другой карточкой мастера.";
+  }
+  if (err.slug === "holds_another_role") {
+    return "У человека уже есть другая роль — поменяйте её кнопкой «Сменить роль».";
+  }
+  if (err.slug === "invite_master_missing") {
+    return "Карточка мастера в архиве — вернуть доступ к ней нельзя.";
   }
   // Refusals a retry cannot change: the person left the salon, or the
   // row no longer allows it. «Повторить» would repeat the same answer.

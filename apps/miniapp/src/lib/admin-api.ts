@@ -2019,12 +2019,12 @@ export interface StaffRosterPerson {
    */
   roles: StaffRoleGrant[];
   /**
-   * DRF-2274. A master card whose link was taken away by a revoke here —
-   * the only kind of master row `staff/restore/` has anybody to link back
-   * to. After a revoke the card has no account, so without this flag it
-   * looks exactly like a card nobody ever held.
+   * DRF-2274. What `staff/restore/` would give back on this row, computed
+   * by the server with the same rule the endpoint applies. The screen must
+   * not derive it: a role change closes rows too and they read as
+   * «revoked», and a revoked master card looks like one nobody held.
    */
-  restorable_master: boolean;
+  restorable_roles: RestorableRole[];
 }
 
 export interface StaffRosterResponse {

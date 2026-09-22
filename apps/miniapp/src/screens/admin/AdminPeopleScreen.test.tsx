@@ -116,7 +116,7 @@ const OWNER_MASTER: StaffRosterPerson = {
   name: "Карина",
   has_account: true,
   is_active: true,
-  restorable_master: false,
+  restorable_roles: [],
   roles: [
     grant("owner", "active", "direct", daysAgo(300)),
     grant("master", "active", "master_invite", daysAgo(120)),
@@ -198,7 +198,7 @@ describe("pending, revoked and ayla_unlinked never share wording", () => {
     name: "Наталья Прохорова",
     has_account: false,
     is_active: false,
-  restorable_master: false,
+  restorable_roles: [],
     roles: [],
   };
 
@@ -389,7 +389,7 @@ const ANYA: StaffRosterPerson = {
   name: "Аня Ковалёва",
   has_account: true,
   is_active: true,
-  restorable_master: false,
+  restorable_roles: [],
   roles: [grant("master", "active", "master_invite", daysAgo(30))],
 };
 
@@ -691,7 +691,7 @@ const LENA_ADMIN: StaffRosterPerson = {
   name: "Лена",
   has_account: true,
   is_active: true,
-  restorable_master: false,
+  restorable_roles: [],
   roles: [grant("admin", "active", "access_code", daysAgo(40))],
 };
 
@@ -913,6 +913,7 @@ const LENA_REVOKED: StaffRosterPerson = {
   ...LENA_ADMIN,
   is_active: false,
   roles: [grant("admin", "revoked", "access_code", daysAgo(40))],
+  restorable_roles: ["admin"],
 };
 
 const MASTER_CARD_REVOKED: StaffRosterPerson = {
@@ -922,7 +923,7 @@ const MASTER_CARD_REVOKED: StaffRosterPerson = {
   name: "Вера Лис",
   has_account: false,
   is_active: true,
-  restorable_master: true,
+  restorable_roles: ["master"],
   roles: [grant("master", "active", "master_invite", daysAgo(90))],
 };
 
@@ -992,6 +993,7 @@ describe("DRF-2274 — the restore sheet", () => {
         grant("admin", "revoked", "access_code", daysAgo(40)),
         grant("receptionist", "revoked", "access_code", daysAgo(20)),
       ],
+      restorable_roles: ["admin", "receptionist"],
     });
 
     const confirm = screen.getByRole("button", { name: "Вернуть доступ" });
@@ -1044,7 +1046,7 @@ describe("DRF-2274 — «Вернуть доступ» only where there is somet
     mockedRoster.mockResolvedValue(
       rosterOf(
         LENA_ADMIN,
-        { ...MASTER_CARD_REVOKED, id: "master:m-6", master_id: "m-6", name: "Нина", restorable_master: false },
+        { ...MASTER_CARD_REVOKED, id: "master:m-6", master_id: "m-6", name: "Нина", restorable_roles: [] },
         { ...LENA_REVOKED, id: "bot:u-1", bot_user_id: "u-1", name: "Сама" },
         {
           ...LENA_REVOKED,
@@ -1052,6 +1054,20 @@ describe("DRF-2274 — «Вернуть доступ» only where there is somet
           bot_user_id: "u-9",
           name: "Бывшая владелица",
           roles: [grant("owner", "revoked", "direct", daysAgo(300))],
+          restorable_roles: [],
+        },
+        {
+          // A role change closes the old row and it reads as «revoked» —
+          // but no revoke took it, and the server says so.
+          ...LENA_ADMIN,
+          id: "bot:u-12",
+          bot_user_id: "u-12",
+          name: "Сменила роль",
+          roles: [
+            grant("admin", "revoked", "access_code", daysAgo(40)),
+            grant("receptionist", "active", "direct", daysAgo(1)),
+          ],
+          restorable_roles: [],
         },
       ),
     );
@@ -1060,7 +1076,7 @@ describe("DRF-2274 — «Вернуть доступ» only where there is somet
     // Presence first: the rows rendered, so the absences mean «no button».
     expect(await screen.findByText("Бывшая владелица")).toBeInTheDocument();
     expect(screen.getByText("Нина")).toBeInTheDocument();
-    for (const name of ["Лена", "Нина", "Сама", "Бывшая владелица"]) {
+    for (const name of ["Лена", "Нина", "Сама", "Бывшая владелица", "Сменила роль"]) {
       expect(queryRestoreButton(name)).not.toBeInTheDocument();
     }
   });
