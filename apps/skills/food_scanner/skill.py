@@ -113,6 +113,7 @@ from apps.integrations.ayla import (
 from apps.orchestrator import food_history
 from apps.orchestrator.memory import food as food_memory
 from apps.orchestrator.ui.keyboards import (
+    Button,
     food_recognition_keyboard,
     parse_callback,
 )
@@ -164,7 +165,9 @@ SCAN_PROVIDER_DOWN_FALLBACK = (
 )
 #: Кнопка «Записать словами» — тот же тап, что «📔 В дневник» без фразы:
 #: ведёт в запись текстом (``food_clarify`` → ``ASK_WHAT_TEXT``).
-WRITE_IN_WORDS_BUTTON = {"text": "Записать словами", "callback": "cb:food:diary"}
+#: Контракт кнопки — ``Button`` (ключ ``label``): композер пропускает словари
+#: без ``label`` молча (ревью #1997).
+WRITE_IN_WORDS_BUTTON = Button(label="Записать словами", callback="cb:food:diary")
 
 NOT_RECOGNIZED_FALLBACK = (
     "Фото немного сложное — не разобралась. Можешь переснять поближе или просто написать, что было?"
@@ -282,7 +285,7 @@ class FoodScannerSkill:
             text_entry.forget(context)
             return SkillResult(
                 reply_text=SCAN_PROVIDER_DOWN_FALLBACK,
-                action_data={"buttons": [dict(WRITE_IN_WORDS_BUTTON)]},
+                action_data={"buttons": [WRITE_IN_WORDS_BUTTON.as_dict()]},
                 meta={"reply_kind": "food_scanner_provider_down"},
             )
         except NutritionUnavailableError:

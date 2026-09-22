@@ -47,8 +47,12 @@ class TestK1HonestCopyWithAWay:
         assert result.meta["reply_kind"] == "food_scanner_provider_down"
         assert "словам" in result.reply_text
         assert "через минуту" not in result.reply_text
-        (button,) = result.action_data["buttons"]
-        assert button["text"] == "Записать словами"
+        # Через композер — ровно то, что уйдёт в канал: словарь без ``label``
+        # он пропустил бы молча, и кнопки у человека не было бы (ревью #1997).
+        from apps.orchestrator.composer import _render_keyboard
+
+        (button,) = _render_keyboard(result.action_data)
+        assert button["label"] == "Записать словами"
         assert button["callback"] == "cb:food:diary"
 
 
