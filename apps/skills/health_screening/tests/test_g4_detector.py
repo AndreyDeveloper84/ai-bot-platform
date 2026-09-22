@@ -285,7 +285,8 @@ class TestFalsePositiveRegression:
             "кровь не останавливается",
             "после лекарства внезапно опухли губы",
             "онемела рука и температура 38.5",
-            "резко стало очень плохо",
+            # [OD-BOT §170]: explicit G7 (ambiguous «резко стало очень плохо» is a question)
+            "мне очень плохо, сейчас упаду",
         ):
             assert classify(text) is PainSignal.RED_FLAG, text
             assert detect_g4(text) is False, text

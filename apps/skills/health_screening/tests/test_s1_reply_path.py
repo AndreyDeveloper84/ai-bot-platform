@@ -73,8 +73,11 @@ GATE_STOPS: frozenset[tuple[str, str, str]] = frozenset(
 #: red flag → 57 − 1 = 56.
 #: 21.09 (DRF-2000, S-2): 10 фикстур G1–G3 «неотложки» встают на гейт (вердикт ``medical``)
 #: → GATE_STOPS 1 + 10 = 11, RED_FLAG_REPLIES 56 − 10 = 46; сумма 57 не меняется.
+#: 22.09 ([OD-BOT §170], G7 question contract): два explicit G7 без тяжёлого признака
+#: («резко стало очень плохо», «мне очень плохо, муж сделал чай…») — вопрос
+#: ``health_screening.g7``, не red flag → 46 − 2 = 44.
 GATE_STOPS_COUNT = 11
-RED_FLAG_REPLIES_COUNT = 46
+RED_FLAG_REPLIES_COUNT = 44
 QUESTIONS_COUNT = 0
 
 #: Положительные фикстуры вне реестра известных пропусков.

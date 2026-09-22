@@ -217,6 +217,11 @@ _DETECTION_OVERRIDES: dict[tuple[str, str, str], bool] = {
     # [OD-BOT §164]: неоднозначный G4 — ОДИН routing-вопрос (CLARIFY), не STOP; реализован
     # (``health_screening.g4``). Здесь «пойман» = HANDOFF / RED_FLAG, вопрос — нет.
     ("G4", "ambiguous", "немеет рука иногда"): False,
+    # [OD-BOT §170] решение 2 (owner record 21.09, G7 question contract): «резко стало
+    # очень плохо» и «мне очень плохо, …» без явного тяжёлого признака — неоднозначный
+    # G7, ОДИН вопрос ``health_screening.g7`` (CLARIFY), не STOP. Раньше — explicit STOP.
+    ("G7", "explicit", "резко стало очень плохо"): False,
+    ("G7", "explicit", "мне очень плохо, муж сделал чай, не помогает"): False,
 }
 
 
