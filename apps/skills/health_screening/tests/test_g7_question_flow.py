@@ -65,6 +65,7 @@ from apps.skills.health_screening.g7_question import (
     G7_QUESTION_ID,
     G7_QUESTION_TEXT,
     ask_g7,
+    buttons_of,
     g7_callback,
     g7_pending,
     parse_g7_callback,
@@ -174,8 +175,12 @@ class TestPrecedence:
         assert clarify_group("мне резко стало очень плохо и немеет рука") == "G4"
 
     def test_the_runtime_does_not_use_the_historical_wording(self) -> None:
+        source = inspect.getsource(g7_question)
+        # presence first: the registered wording IS in the module …
+        assert "кажется, что вы вот-вот потеряете сознание" in source
         assert G7_QUESTION_TEXT != HISTORICAL_18_09
-        assert HISTORICAL_18_09 not in inspect.getsource(g7_question)
+        # … and the historical 18.09 wording is not
+        assert HISTORICAL_18_09 not in source
 
 
 class TestQuestionContract:
@@ -216,7 +221,7 @@ class TestPersistence:
         bot_user, conversation = _pair("slot")
         first = _dispatch(AMBIGUOUS, conversation, bot_user)
         token = _token(conversation)
-        assert [b["callback"] for b in first.action_data["buttons"]] == [
+        assert [b["callback"] for b in buttons_of(first.action_data)] == [
             g7_callback(a, token) for a in ANSWERS
         ]
         _dispatch("Мне внезапно совсем плохо", conversation, bot_user)
@@ -373,7 +378,7 @@ class TestGlobalConcierge:
         bot_user, conversation = _pair("gl-ask")
         reply = generate_concierge_reply(AMBIGUOUS, bot_user=bot_user, conversation=conversation)
         assert reply.text == G7_QUESTION_TEXT
-        assert reply.action_data is not None and len(reply.action_data["buttons"]) == 3
+        assert reply.action_data is not None and len(buttons_of(reply.action_data)) == 3
         provider.complete.assert_not_called()
 
     @pytest.mark.parametrize("reply_text", ("нет", BOOKING_INTENT))

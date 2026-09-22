@@ -65,4 +65,48 @@ def red_flag_reply(
     return DiscoveryReply(text=result.reply_text, action_data=result.action_data, persisted=False)
 
 
-__all__ = ["RED_FLAG_ACTION_TYPE", "red_flag_reply"]
+def g7_question_reply(
+    message_text: str, *, bot_user: Any, conversation: Any, trace_id: str | UUID | None
+) -> DiscoveryReply | None:
+    """[OD-BOT §170] — the G7 question turn, at the same point as the red flag.
+
+    An ambiguous G7 message asks the one ``health_screening.g7`` question; an
+    open G7 question binds the next turn; a G7 tap is routed. All by the same
+    skill every other surface runs (:class:`HealthScreeningSkill`), BEFORE any
+    other branch of the handler ladder (onboarding, booking continuation, a
+    memory answer) and before the model — otherwise one of them would answer
+    in the question's place. ``None`` — not a G7 turn (or the skill failed:
+    the concierge still runs the same skill before the model).
+    """
+
+    from apps.skills.base import SkillContext
+    from apps.skills.health_screening.classifier import PainSignal, clarify_group, classify
+    from apps.skills.health_screening.g7_question import g7_pending, is_g7_callback
+    from apps.skills.health_screening.skill import HealthScreeningSkill
+
+    try:
+        if not (
+            g7_pending(conversation) is not None
+            or is_g7_callback(message_text)
+            or (
+                classify(message_text) is PainSignal.CLARIFY and clarify_group(message_text) == "G7"
+            )
+        ):
+            return None
+        result = HealthScreeningSkill().handle(
+            SkillContext(conversation=conversation, bot_user=bot_user, message_text=message_text)
+        )
+    except Exception:  # noqa: BLE001 — сбой детерминированной ветки не стоит хода
+        logger.exception("orchestrator.red_flag_turn.g7_failed trace=%s", trace_id)
+        return None
+    if not result.reply_text:
+        return None
+    logger.info(
+        "orchestrator.red_flag_turn.g7 kind=%s trace=%s",
+        (result.meta or {}).get("reply_kind"),
+        trace_id,
+    )
+    return DiscoveryReply(text=result.reply_text, action_data=result.action_data, persisted=False)
+
+
+__all__ = ["RED_FLAG_ACTION_TYPE", "g7_question_reply", "red_flag_reply"]

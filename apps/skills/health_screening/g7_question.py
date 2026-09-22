@@ -158,9 +158,27 @@ def g7_buttons(token: str) -> list[dict[str, str]]:
 
 
 def g7_action_data(token: str) -> dict[str, Any]:
-    """``action_data`` for a reply that carries the question."""
+    """``action_data`` for a reply that carries the question.
 
-    return {"buttons": g7_buttons(token), "question_id": G7_QUESTION_ID}
+    The platform-canonical envelope — the one shape BOTH adapters read
+    (``telegram.handler._extract_keyboard`` reads only this one; MAX
+    ``_build_attachments`` reads it first). One button per row: the labels are
+    long sentences.
+    """
+
+    return {
+        "attachments": [{"type": "inline_keyboard", "payload": {"buttons": g7_buttons(token)}}],
+        "question_id": G7_QUESTION_ID,
+    }
+
+
+def buttons_of(action_data: dict[str, Any] | None) -> list[dict[str, str]]:
+    """The G7 buttons inside an ``action_data`` built by :func:`g7_action_data`."""
+
+    for attachment in (action_data or {}).get("attachments") or []:
+        if isinstance(attachment, dict) and attachment.get("type") == "inline_keyboard":
+            return list((attachment.get("payload") or {}).get("buttons") or [])
+    return []
 
 
 def is_g7_callback(text: str) -> bool:
@@ -186,6 +204,56 @@ def _record_stop(bot_user: Any, group: str | None, reason: str) -> None:
         logger.error(
             "health_screening.g7.stop_not_persisted bot_user=%s", getattr(bot_user, "pk", None)
         )
+
+
+def live_g7_answer(conversation: Any, text: str) -> str | None:
+    """The answer of a tap bound to THIS conversation's open slot, or None."""
+
+    parsed = parse_g7_callback(text)
+    pending = g7_pending(conversation)
+    if parsed is None or pending is None or parsed[1] != pending.token:
+        return None
+    return parsed[0]
+
+
+def history_text(text: str) -> str | None:
+    """What a G7 tap was as a reply — its verbatim label — for the dialog
+    history, never the raw ``cb:`` payload. None when ``text`` is not a tap."""
+
+    parsed = parse_g7_callback(text)
+    return ANSWER_LABELS[parsed[0]] if parsed is not None else None
+
+
+def g7_under_mute(conversation: Any, bot_user: Any, text: str, outcome: Any) -> Any:
+    """The inbound verdict while the bot is muted (operator handoff or a
+    platform block, DRF-2213 / DRF-2276), with the G7 question honoured.
+
+    A live «Да, есть хотя бы один признак» tap is a medical emergency: it
+    reaches the person through the mute exactly like the gate's ``MEDICAL``
+    verdict (owner decision N-1, CD §67 — «кризис и неотложка получают
+    детерминированный ответ всегда»). The durable G7 STOP is recorded and the
+    question resolved here, because no skill runs under the mute. Any other
+    turn — the two other answers included — keeps the verdict it had.
+    """
+
+    if not getattr(outcome, "allowed", False):
+        return outcome
+    if live_g7_answer(conversation, text) != ANSWER_YES:
+        return outcome
+    from apps.orchestrator.safety.gate import SafetyGateOutcome
+    from apps.orchestrator.safety.medical_emergency import MEDICAL_EMERGENCY_TEXT_V2
+    from apps.orchestrator.safety.pre_check import SafetyResult, SafetyVerdict
+
+    _record_stop(bot_user, "G7", "g7_answer_yes_under_mute")
+    resolve_question(conversation, G7_QUESTION_ID, ANSWER_YES)
+    reason = "health_screening_g7_answer_yes_under_mute"
+    return SafetyGateOutcome(
+        allowed=False,
+        verdict=SafetyVerdict.MEDICAL.value,
+        reply_text=MEDICAL_EMERGENCY_TEXT_V2,
+        reason=reason,
+        result=SafetyResult(verdict=SafetyVerdict.MEDICAL, reason=reason),
+    )
 
 
 def route_g7_turn(conversation: Any, bot_user: Any, text: str) -> G7Outcome:
@@ -247,11 +315,15 @@ __all__ = [
     "G7_QUESTION_TEXT",
     "OUTSIDE_S1_G7_ACK",
     "ask_g7",
+    "buttons_of",
     "g7_action_data",
     "g7_buttons",
     "g7_callback",
     "g7_pending",
+    "g7_under_mute",
+    "history_text",
     "is_g7_callback",
+    "live_g7_answer",
     "parse_g7_callback",
     "route_g7_turn",
 ]

@@ -249,6 +249,11 @@ def handle_inbound(payload: dict[str, Any], tenant: "Tenant") -> None:
     blocked_at = blocked_since(channel="telegram", channel_user_id=event.channel_user_id)
     if in_handoff or blocked_at is not None:
         safety = under_handoff(event.text, safety)
+        # [OD-BOT §170] — a live G7 «Да» tap is «неотложка» and reaches through
+        # the mute (N-1); the durable G7 STOP is recorded there.
+        from apps.skills.health_screening.g7_question import g7_under_mute
+
+        safety = g7_under_mute(conversation, bot_user, event.text, safety)
     if in_handoff and reaches_through_handoff(safety):
         from apps.handoff.notify import notify_safety_reply_during_handoff
 

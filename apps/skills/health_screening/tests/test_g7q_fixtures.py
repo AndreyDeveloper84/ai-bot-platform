@@ -33,6 +33,7 @@ from apps.skills.health_screening.g7_question import (
     ANSWER_LABELS,
     G7_QUESTION_ID,
     G7_QUESTION_TEXT,
+    buttons_of,
     g7_callback,
     g7_pending,
 )
@@ -119,7 +120,7 @@ def test_g7q_fixture(fixture: G7QFixture) -> None:
     elif check == "asks_once":
         bot_user, conversation, (result,) = _run(fixture)
         assert result.reply_text == G7_QUESTION_TEXT
-        assert len(result.action_data["buttons"]) == 3
+        assert len(buttons_of(result.action_data)) == 3
         token = _token(conversation)
         again = _send(fixture.turns[0], conversation, bot_user)  # the same ambiguity again
         assert again.reply_text == G7_QUESTION_TEXT

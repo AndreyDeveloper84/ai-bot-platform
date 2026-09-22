@@ -228,7 +228,16 @@ from apps.orchestrator.memory_announce import (
     weave_service_line,
 )
 from apps.orchestrator.memory_ask import maybe_weave_question, try_handle_answer
-from apps.orchestrator.red_flag_turn import RED_FLAG_ACTION_TYPE, red_flag_reply
+from apps.orchestrator.red_flag_turn import (
+    RED_FLAG_ACTION_TYPE,
+    g7_question_reply,
+    red_flag_reply,
+)
+from apps.skills.health_screening.g7_question import (
+    g7_under_mute,
+    history_text as g7_history_text,
+    is_g7_callback,
+)
 from apps.orchestrator.memory_block import build_concierge_memory_block
 from apps.orchestrator.nutrition_context import build_nutrition_context_block
 from apps.orchestrator.nutrition_wellness import interpretation_eligible
@@ -1641,6 +1650,10 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
         # ответ на вопрос «чем этот тап был как реплика».
         inbound_history_text = tap.history_text
         break
+    if is_g7_callback(event.text):
+        # [OD-BOT §170] — a G7 answer lies in the history as its verbatim
+        # label, never as the raw ``cb:s1g7:`` payload the model would read.
+        inbound_history_text = g7_history_text(event.text)
     if (
         is_booking_callback
         or is_catalog_callback
@@ -1710,6 +1723,9 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     blocked_at = blocked_since(channel=event.channel, channel_user_id=event.channel_user_id)
     if handoff_muted or blocked_at is not None:
         safety = under_handoff(event.text, safety)
+        # [OD-BOT §170] — a live «Да, есть хотя бы один признак» tap is the same
+        # «неотложка» and reaches through the mute (N-1).
+        safety = g7_under_mute(conversation, bot_user, event.text, safety)
     if handoff_muted and reaches_through_handoff(safety):
         notify_safety_reply_during_handoff(
             conversation=conversation,
@@ -1874,6 +1890,25 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
         # первым сообщением получало приветствие. Гейт выше уже снял
         # «неотложку» и кризис; здесь — остальные группы классификатора.
         reply = _red_flag_reply
+        assistant_action_type = RED_FLAG_ACTION_TYPE
+        _record_live_path_metric(
+            bot_user=bot_user,
+            conversation=conversation,
+            trace_id=trace_id,
+            message_text=event.text,
+            t_start=t_start,
+            outcome=AIRequestMetric.OUTCOME_SUCCESS,
+            skill_selected=RED_FLAG_ACTION_TYPE,
+        )
+    elif (
+        _g7_reply := g7_question_reply(
+            event.text, bot_user=bot_user, conversation=conversation, trace_id=trace_id
+        )
+    ) is not None:
+        # [OD-BOT §170] — the G7 question turn at the red flag's point: the
+        # ambiguous message asks, the open question binds the reply, a tap is
+        # routed — above every branch that could answer in its place.
+        reply = _g7_reply
         assistant_action_type = RED_FLAG_ACTION_TYPE
         _record_live_path_metric(
             bot_user=bot_user,
@@ -3136,6 +3171,8 @@ def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | N
     # red flag классификатора становится «неотложкой» гейта (N-1).
     if in_handoff or blocked_at is not None:
         safety = under_handoff(event.text, safety)
+        # [OD-BOT §170] — a live G7 «Да» tap reaches through the mute (N-1).
+        safety = g7_under_mute(conversation, bot_user, event.text, safety)
     if in_handoff and reaches_through_handoff(safety):
         notify_safety_reply_during_handoff(conversation=conversation)
     if blocked_at is not None and not reaches_through_handoff(safety):
