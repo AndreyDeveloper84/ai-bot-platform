@@ -204,6 +204,12 @@ def _recipient_blocked(*, chat_id: str | None = None, user_id: str | None = None
         return False
 
 
+#: Кому забор блокировки уступает (DRF-2276). Ответ безопасности — N-1
+#: (CD §67): кризис и неотложка отвечаются всем, заблокированным тоже.
+#: Фраза блокировки — единственное, что заблокированный слышит сверх этого.
+BLOCK_BYPASS_REASONS: frozenset[str] = frozenset({"safety", "block_notice"})
+
+
 def send_message(
     *,
     chat_id: str | None = None,
@@ -212,6 +218,7 @@ def send_message(
     attachments: list[dict[str, Any]] | None = None,
     timeout: float = 10.0,
     bot: "BotEntry | None" = None,
+    bypass_block: str | None = None,
 ) -> dict[str, Any]:
     """POST a message to a MAX dialog (``chat_id``) or person (``user_id``).
 
@@ -239,6 +246,11 @@ def send_message(
            ``bot_scope``, then the single configured bot. Pass it explicitly
            only when the sender is not implied by the context — otherwise
            prefer scoping, so intermediate layers cannot forget to forward it.
+      bypass_block: send even to a blocked recipient (DRF-2276). Only a
+           name from :data:`BLOCK_BYPASS_REASONS` — ``"safety"`` for the
+           crisis / medical reply (N-1), ``"block_notice"`` for the block
+           notice itself. Named at the call site on purpose: a bypass must be
+           visible where it happens, not carried by ambient context.
 
     Returns:
       Parsed JSON response (typically the created message envelope).
@@ -249,6 +261,12 @@ def send_message(
         mistake surfaces in tests rather than as a wrong-address 404.
       MaxAPIError: non-2xx OR network error.
     """
+
+    if bypass_block is not None and bypass_block not in BLOCK_BYPASS_REASONS:
+        raise ValueError(
+            f"bypass_block={bypass_block!r} is not a known reason — only "
+            f"{sorted(BLOCK_BYPASS_REASONS)} may pass the block fence (DRF-2276)"
+        )
 
     if (chat_id is None) == (user_id is None):
         raise ValueError(
@@ -266,7 +284,15 @@ def send_message(
         # `channels.max.outbound.no_token` audit.
         raise MaxAPIError(0, "MAX_BOT_TOKEN is not configured")
 
-    if _recipient_blocked(chat_id=chat_id, user_id=user_id):
+    if bypass_block is not None and _recipient_blocked(chat_id=chat_id, user_id=user_id):
+        # DRF-2276 — забор уступает ответу безопасности и фразе блокировки.
+        # Отметка в логе — чтобы обход был виден так же, как подавление.
+        logger.info(
+            "channels.max.outbound.recipient_blocked_bypassed %s reason=%s",
+            _addressed(chat_id=chat_id, user_id=user_id),
+            bypass_block,
+        )
+    elif _recipient_blocked(chat_id=chat_id, user_id=user_id):
         # DRF-1497 — заблокированный из админки клиент не получает ничего:
         # ни ответы, ни напоминания, ни проактив. Это не сбой доставки,
         # поэтому не raise (иначе PEL уйдёт в вечный retry), а подавленная

@@ -27,6 +27,21 @@ def _card_url(bot_user: BotUser) -> str:
     return f"{SEARCH_URL}{bot_user.pk}/"
 
 
+def _operator(login_as, username: str):  # noqa: ANN001, ANN202
+    """Оператор платформы: роль правящего плюс ``tenancy.platform_operations``.
+
+    Блокировка — операция оператора платформы (DRF-2276, CD §72 п.15), а не
+    право правки модели клиента.
+    """
+    from django.contrib.auth.models import Permission
+
+    client = login_as(username, "editor")
+    get_user_model().objects.get(username=username).user_permissions.add(
+        Permission.objects.get(codename="platform_operations", content_type__app_label="tenancy")
+    )
+    return client
+
+
 @pytest.fixture
 def client_thread(salon):  # noqa: ANN001, ANN201
     """Человек с телефоном, диалогом, сообщением и обращением."""
@@ -153,7 +168,7 @@ def test_consent_cannot_be_granted_from_admin(login_as, salon, client_thread) ->
 
 def test_block_without_reason_is_rejected(login_as, client_thread) -> None:  # noqa: ANN001
     bot_user, *_ = client_thread
-    client = login_as("i.blokiruyushiy", "editor")
+    client = _operator(login_as, "i.blokiruyushiy")
 
     form = client.get(f"{_card_url(bot_user)}block/")
     assert form.status_code == 200
@@ -173,7 +188,7 @@ def test_block_without_reason_is_rejected(login_as, client_thread) -> None:  # n
 
 def test_block_and_unblock_are_journaled_with_actor_and_reason(login_as, client_thread) -> None:  # noqa: ANN001
     bot_user, *_ = client_thread
-    client = login_as("i.zhurnalny", "editor")
+    client = _operator(login_as, "i.zhurnalny")
 
     blocked = client.post(f"{_card_url(bot_user)}block/", {"reason": "шлёт рекламный спам в чат"})
     assert blocked.status_code == 302
@@ -197,19 +212,47 @@ def test_block_and_unblock_are_journaled_with_actor_and_reason(login_as, client_
     ).exists()
 
 
-def test_viewer_cannot_block_editor_can(login_as, client_thread) -> None:  # noqa: ANN001
+def test_only_a_platform_operator_can_block(login_as, client_thread) -> None:  # noqa: ANN001
+    """DRF-2276: право — ``tenancy.platform_operations``, не ``change_botuser``.
+
+    Правящий (ayla-editor) правит модель клиента, но блокировать на платформе
+    не может: владелец назвал это операцией оператора (CD §72 п.15).
+    """
+    bot_user, *_ = client_thread
+    editor = login_as("i.pravyashchiy", "editor")
+
+    # Присутствие: карточку правящий открывает и видит клиента.
+    card = editor.get(_card_url(bot_user))
+    assert card.status_code == 200
+    card_body = _body(card)
+    assert "Алина" in card_body
+    # Кнопки «Заблокировать» у роли без права оператора нет.
+    assert "Заблокировать" not in card_body
+
+    assert editor.get(f"{_card_url(bot_user)}block/").status_code == 403
+    posted = editor.post(f"{_card_url(bot_user)}block/", {"reason": "проверяю права роли"})
+    assert posted.status_code == 403
+    bot_user.refresh_from_db()
+    assert bot_user.blocked_at is None
+
+    # Пара: оператор платформы видит кнопку и блокирует.
+    operator = _operator(login_as, "i.operator")
+    assert "Заблокировать" in _body(operator.get(_card_url(bot_user)))
+    done = operator.post(f"{_card_url(bot_user)}block/", {"reason": "шлёт рекламный спам в чат"})
+    assert done.status_code == 302
+    bot_user.refresh_from_db()
+    assert bot_user.blocked_at is not None
+
+
+def test_viewer_cannot_block(login_as, client_thread) -> None:  # noqa: ANN001
     bot_user, *_ = client_thread
     viewer = login_as("i.tolko-smotrit", "viewer")
 
     # Присутствие: карточку смотрящий открывает и видит клиента.
     card = viewer.get(_card_url(bot_user))
     assert card.status_code == 200
-    card_body = _body(card)
-    assert "Алина" in card_body
-    # Кнопки «Заблокировать» у роли без права change нет.
-    assert "Заблокировать" not in card_body
+    assert "Алина" in _body(card)
 
-    assert viewer.get(f"{_card_url(bot_user)}block/").status_code == 403
     posted = viewer.post(f"{_card_url(bot_user)}block/", {"reason": "проверяю права роли"})
     assert posted.status_code == 403
     bot_user.refresh_from_db()

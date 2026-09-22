@@ -24,14 +24,32 @@ handoff (DRF-1015), но «сотрудник выключил этого кли
 ни самому клиенту, когда его разблокируют. Каждая постановка и снятие
 пишут строку в ``AuditLog`` с автором и причиной — тот же журнал, куда
 DRF-1495 пишет действия админки.
+
+### Вход (DRF-2276, CD §72 п.15)
+
+Блокировка — операция оператора платформы (право
+``tenancy.platform_operations``), и её эффект начинается на входе, а не
+только на выходе. Каналы спрашивают :func:`blocked_since` сразу после гейта
+безопасности:
+
+* кризис и неотложка (включая red flag классификатора) заблокированному
+  отвечаются всё равно — N-1 (CD §67), гейт раньше блокировки;
+* всё остальное — :data:`BLOCK_NOTICE_TEXT` раз за эпизод
+  (:func:`claim_block_notice`) и больше ничего: ни навыков, ни модели.
+
+Блокировка платформенная: достаточно одной заблокированной строки человека
+в канале (любой салон или витринный бот) — та же выборка, что у забора на
+выходе.
 """
 
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from typing import Any
 
 from django.core.exceptions import ValidationError
+from django.db.models import Max, Q
 from django.utils import timezone
 
 from apps.audit.services import write_audit
@@ -40,6 +58,15 @@ logger = logging.getLogger(__name__)
 
 #: Короче этого причина ничего не объясняет читающему журнал.
 MIN_REASON_LENGTH = 12
+
+#: Что заблокированный слышит в ответ — раз за эпизод блокировки (DRF-2276).
+#: Черновик владельцу (VQ, CD §72 п.15): до его слова текст не окончательный.
+#: Вторая фраза — не вежливость, а правда: кризис и неотложка заблокированному
+#: отвечаются всё равно (N-1, CD §67).
+BLOCK_NOTICE_TEXT = (
+    "Сейчас я не могу продолжить этот разговор. "
+    "Если что-то срочное со здоровьем — напиши, я подскажу, куда обратиться."
+)
 
 ACTION_BLOCKED = "admin.client.blocked"
 ACTION_UNBLOCKED = "admin.client.unblocked"
@@ -65,6 +92,50 @@ def check_block_reason(reason: str) -> str:
 def is_blocked(bot_user: Any) -> bool:
     """Заблокирован ли человек прямо сейчас."""
     return getattr(bot_user, "blocked_at", None) is not None
+
+
+def blocked_since(*, channel: str, channel_user_id: str) -> datetime | None:
+    """Время действующей блокировки человека в канале или ``None``.
+
+    Любая строка ``BotUser`` этого человека в канале (салонная или
+    витринная) — платформенная блокировка; при нескольких берётся самая
+    поздняя: от неё отсчитывается эпизод фразы.
+
+    Сбой запроса — fail-open, как у забора на выходе
+    (``max/outbound._recipient_blocked``): блокировка — рабочее действие
+    поддержки, не контур безопасности. Контур безопасности (гейт) к этому
+    моменту уже отработал.
+    """
+    from apps.identity.models import BotUser
+
+    try:
+        return BotUser.all_tenants.filter(
+            channel=channel,
+            channel_user_id=str(channel_user_id),
+            blocked_at__isnull=False,
+        ).aggregate(latest=Max("blocked_at"))["latest"]
+    except Exception:  # noqa: BLE001 — см. docstring: fail-open, но с криком в лог
+        logger.exception("identity.blocking.blocked_since_failed channel=%s", channel)
+        return None
+
+
+def claim_block_notice(bot_user: Any, *, since: datetime) -> bool:
+    """Забрать право сказать фразу блокировки в этом эпизоде. True — говорить.
+
+    Эпизод — действующая блокировка с ``since``: метка строки раньше неё (или
+    пусто) — фраза ещё не звучала. Условный UPDATE, а не чтение-запись: кто
+    выиграл его, тот и говорит, остальные находят ноль строк и молчат — тот же
+    приём, что у ``handoff.silence.notify_silence``. Метка ставится ДО
+    отправки: сказать дважды хуже, чем один раз не сказать.
+    """
+    from apps.identity.models import BotUser
+
+    claimed = (
+        BotUser.all_tenants.filter(pk=bot_user.pk)
+        .filter(Q(block_notice_at__isnull=True) | Q(block_notice_at__lt=since))
+        .update(block_notice_at=timezone.now())
+    )
+    return bool(claimed)
 
 
 def block_user(*, actor: Any, bot_user: Any, reason: str) -> Any:

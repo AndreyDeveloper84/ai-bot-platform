@@ -694,6 +694,10 @@ NOT_PERSONAL: Mapping[str, str] = {
         "Block bookkeeping — which admin account blocked. Audit duplicate, not a "
         "fact about the person."
     ),
+    "identity.BotUser.block_notice_at": (
+        "Block bookkeeping (DRF-2276) — when the block notice was last said to "
+        "this row; the «once per episode» stamp, not a fact about the person."
+    ),
     # identity.UserPreferences
     "identity.UserPreferences.bot_user": "Row identity — the person this row is.",
     "identity.UserPreferences.tenant": "Scoping.",
