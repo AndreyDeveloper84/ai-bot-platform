@@ -628,7 +628,7 @@ describe("CustomerWellnessDashboardScreen — degraded reads (DRF-1546)", () => 
     // NEGATIVE (парная): ни нулей, ни процентов, ни «ничего не залогировано».
     expect(screen.queryByText(/ккал/)).not.toBeInTheDocument();
     expect(
-      screen.queryByText(/Ещё ничего не залогировано/),
+      screen.queryByText(/Сегодня ещё ничего не записано/),
     ).not.toBeInTheDocument();
   });
 
@@ -699,7 +699,7 @@ describe("CustomerWellnessDashboardScreen — degraded reads (DRF-1546)", () => 
     await renderScreen(false);
 
     expect(
-      await screen.findByText(/Ещё ничего не залогировано/),
+      await screen.findByText(/Сегодня ещё ничего не записано/),
     ).toBeInTheDocument();
     expect(screen.getByText(/0 \/ 8 стаканов/)).toBeInTheDocument();
     expect(screen.queryByText("Не удалось загрузить")).not.toBeInTheDocument();
@@ -755,6 +755,51 @@ describe("CustomerWellnessDashboardScreen — degraded reads (DRF-1546)", () => 
     // Ни одного осуждающего слова в блоке питания (§85 §8).
     const row = screen.getByLabelText(/^Питание:/);
     expect(row.textContent).not.toMatch(/перебор|превыш|слишком|много/i);
+  });
+
+  it("DRF-2288 (№41): ориентиры жиров и углеводов — в той же строке, что у белка", async () => {
+    serve(
+      {
+        calories_eaten: 800,
+        calories_target: 2100,
+        pfc: {
+          protein_g: 65,
+          fat_g: 40,
+          carbs_g: 120,
+          protein_target_g: 100,
+          fat_target_g: 61,
+          carbs_target_g: 220,
+        },
+        water_glasses_eaten: 4,
+        water_glasses_target: 8,
+        active_goals: [],
+        display_name: "Анна",
+      },
+      { this_week_booking_count: 0 },
+    );
+    await renderScreen(false);
+
+    expect(await screen.findByText(/Б 65 \/ 100 · Ж 40 \/ 61 · У 120 \/ 220 г/)).toBeInTheDocument();
+  });
+
+  it("DRF-2288 (№41): пустой день — «ничего не записано» и без строки нулей БЖУ", async () => {
+    serve(
+      {
+        calories_eaten: 0,
+        calories_target: 2100,
+        pfc: { protein_g: 0, fat_g: 0, carbs_g: 0, protein_target_g: 123 },
+        water_glasses_eaten: 0,
+        water_glasses_target: 12,
+        active_goals: [],
+        display_name: "Анна",
+      },
+      { this_week_booking_count: 0 },
+    );
+    await renderScreen(false);
+
+    expect(await screen.findByText("Сегодня ещё ничего не записано")).toBeInTheDocument();
+    expect(screen.queryByText(/Б 0/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/залогировано/)).not.toBeInTheDocument();
   });
 });
 
@@ -1048,7 +1093,7 @@ describe("CustomerWellnessDashboardScreen — цель калорий не вы�
     await renderScreen(false);
 
     // POSITIVE: экран действительно нарисован и говорит про пустой день.
-    expect(await screen.findByText("Ещё ничего не залогировано")).toBeInTheDocument();
+    expect(await screen.findByText("Сегодня ещё ничего не записано")).toBeInTheDocument();
     // NEGATIVE: полоса при нуле не видна глазом, но `role="progressbar"`
     // озвучивал «Калории: 0 из 2100» — дефект доставался ровно тому, кто
     // не может проверить глазами.
