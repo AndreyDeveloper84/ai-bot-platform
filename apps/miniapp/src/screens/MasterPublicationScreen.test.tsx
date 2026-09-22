@@ -513,14 +513,25 @@ describe("экран 08 — слова", () => {
 });
 
 describe("системные состояния через SystemState (DRF-2194)", () => {
-  it("загрузка — общий скелет без слов", () => {
+  it("загрузка — общий скелет без слов", async () => {
     mockedStatus.mockReturnValue(new Promise(() => {}));
-    void renderScreen();
+    // DRF-2204: `await`, а не `void`. `renderScreen` после рендера делает
+    // шесть раундов `act`, и без `await` этот хвост доезжал в СЛЕДУЮЩИЙ
+    // тест и перемешивался с его рендером — тот падал, хотя в одиночку
+    // проходил. Дождаться хвоста безопасно: запрос висит вечно, и экран
+    // после шести раундов по-прежнему в состоянии загрузки.
+    await renderScreen();
     expect(screen.getByRole("status", { busy: true })).toBeInTheDocument();
   });
 
   it("ошибка — «Не удалось загрузить статус публикации» + «Попробовать снова», без клиентского словаря", async () => {
-    mockedStatus.mockRejectedValueOnce(new Error("boom"));
+    // DRF-2204: тест сам задаёт ОБА ответа — и отказ, и то, что вернёт
+    // повтор. Раньше второй ответ он одалживал у соседа: `beforeEach`
+    // зовёт `vi.clearAllMocks()`, а тот сбрасывает вызовы, но НЕ
+    // реализации, и `mockResolvedValue` из предыдущего теста доживал до
+    // этого. Запущенный первым — через `-t` или при перемешанном порядке —
+    // тест получал на повторе `undefined` и падал на `profile_status`.
+    mockedStatus.mockRejectedValueOnce(new Error("boom")).mockResolvedValueOnce(DRAFT_READY);
     await renderScreen();
     expect(screen.getByRole("alert")).toHaveTextContent("Не удалось загрузить статус публикации");
     expect(screen.queryByText(/Не получилось загрузить/)).toBeNull();

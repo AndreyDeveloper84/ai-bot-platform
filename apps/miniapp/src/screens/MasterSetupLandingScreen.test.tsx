@@ -251,7 +251,10 @@ describe("системные состояния через SystemState (DRF-2194
   });
 
   it("ошибка — «Не удалось загрузить чек-лист настройки» + «Попробовать снова»", async () => {
-    mockedReadiness.mockRejectedValueOnce(new Error("boom"));
+    // DRF-2204 — the retry needs its own answer. Without it the second call
+    // returned whatever the previous test left (or nothing), and the screen
+    // crashed on `readiness.items` after the test had already passed.
+    mockedReadiness.mockRejectedValueOnce(new Error("boom")).mockResolvedValueOnce(FRESH);
     renderScreen();
     expect(await screen.findByRole("alert")).toHaveTextContent("Не удалось загрузить чек-лист настройки");
     expect(screen.queryByText(/Не получилось загрузить/)).toBeNull();
