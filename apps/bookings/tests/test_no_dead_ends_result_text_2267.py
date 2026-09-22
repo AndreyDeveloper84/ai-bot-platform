@@ -173,7 +173,17 @@ class TestHealthCheckRefusals:
             BookingToolResult(text=HANDOFF_TEXT, error="health_check_handoff", handoff=True),
         )
 
-        assert result.should_handoff is True  # присутствие: передача объявлена
+        # Положительная пара: соседняя ветка того же отказа кнопку получает,
+        # значит пустота ниже — решение, а не общее «кнопок тут не бывает».
+        nobody = _confirm(
+            tenant,
+            bot_user,
+            conversation,
+            BookingToolResult(text=HANDOFF_TEXT, error="health_check_handoff", handoff=False),
+        )
+        assert _buttons(nobody) == [(LABEL_MENU, CALLBACK_MENU_HELP)]
+
+        assert result.should_handoff is True  # передача объявлена
         assert _buttons(result) == []
 
 
