@@ -38,3 +38,46 @@ def test_the_purge_sees_every_production_stream():
     for stream in registered_streams():
         assert stream in streams
         assert f"{stream}:dlq" in streams
+
+
+class TestAnEmptyRegistryIsNotAClean:
+    """A process without the channel handlers must not report the streams as checked.
+
+    The purge takes its stream list from the registry. Empty, it would scan
+    nothing and answer «0 deleted» — a clean bill for work it never did.
+    """
+
+    def test_the_purge_refuses_rather_than_scans_nothing(self):
+        from datetime import datetime, timezone
+
+        import pytest
+
+        from apps.ingress.streams import NoIngressStreams, purge_person_entries
+
+        with emptied_registry_for_tests():
+            with pytest.raises(NoIngressStreams):
+                purge_person_entries(["someone"], through=datetime.now(timezone.utc))
+
+    def test_the_erasure_says_not_checked_and_logs_why(self, db, caplog):
+        import logging
+        import uuid
+
+        from django.utils import timezone as dj_timezone
+
+        from apps.conversations.erasure import anonymize_dialogue
+        from apps.conversations.models import ArchivedMessage
+        from apps.identity.models import BotUser
+        from apps.tenancy.models import Tenant
+
+        tenant = Tenant.objects.create(slug=f"reg-{uuid.uuid4().hex[:8]}", name="Registry 2220")
+        person = BotUser.all_tenants.create(
+            tenant=tenant, channel="max", channel_user_id="u-reg-2220", chat_id="u-reg-2220"
+        )
+
+        with emptied_registry_for_tests(), caplog.at_level(logging.ERROR):
+            result = anonymize_dialogue(
+                [person.id], through=dj_timezone.now(), reason=ArchivedMessage.Reason.FORGET_ALL
+            )
+
+        assert result.raw_streams_checked is False
+        assert "no ingress streams registered" in caplog.text
