@@ -133,6 +133,9 @@ export interface WellnessToday {
     fat_g: number;
     carbs_g: number;
     protein_target_g?: number;
+    /** DRF-2288 (№41): ориентиры жиров и углеводов — тем же признаком, каждый сам по себе. */
+    fat_target_g?: number;
+    carbs_target_g?: number;
   };
   /**
    * Стаканы за сегодня и дневная норма.
@@ -1165,4 +1168,21 @@ export function pickOneLiner(args: {
     return "Что нужно сегодня?";
   }
   return "Что нужно сегодня?";
+}
+
+/**
+ * DRF-2288 (№41): строка БЖУ — одна на Главной и в дневнике. Ориентир у буквы —
+ * « / N», без ориентира — только факт (§85 §8: «из» только при ориентире).
+ * Нет еды (``eaten === 0``) — строки нет: нулей не рисуем.
+ */
+export function pfcLine(
+  pfc: NonNullable<WellnessToday["pfc"]>,
+  eaten: number | undefined,
+): string | null {
+  if (eaten === 0) return null;
+  const t = (target: number | undefined) => (target !== undefined ? ` / ${target}` : "");
+  return (
+    `Б ${pfc.protein_g}${t(pfc.protein_target_g)} · Ж ${pfc.fat_g}${t(pfc.fat_target_g)} · ` +
+    `У ${pfc.carbs_g}${t(pfc.carbs_target_g)} г`
+  );
 }

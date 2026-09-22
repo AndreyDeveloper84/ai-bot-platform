@@ -113,6 +113,27 @@ describe("дневник рисует НАСТОЯЩИЕ числа источн
     expect(screen.getByText(/Б 108 \/ 130 · Ж 13 · У 66/)).toBeInTheDocument();
   });
 
+  it("DRF-2288 (№41): ориентиры жиров и углеводов — та же строка, что на Главной", async () => {
+    mockedLoad.mockResolvedValue({
+      state: "entries",
+      entries: [OATS, SOUP],
+      hideNumbers: false,
+      today: today({
+        pfc: {
+          protein_g: 108,
+          fat_g: 13,
+          carbs_g: 66,
+          protein_target_g: 130,
+          fat_target_g: 61,
+          carbs_target_g: 220,
+        },
+      }),
+    });
+    renderScreen();
+
+    expect(await screen.findByText("Б 108 / 130 · Ж 13 / 61 · У 66 / 220 г")).toBeInTheDocument();
+  });
+
   it("БЖУ приходит от источника, а не вычисляется из калорий", async () => {
     mockedLoad.mockResolvedValue({
       state: "entries",

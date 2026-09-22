@@ -32,6 +32,7 @@ import {
   type FoodDiaryEntry,
   DIARY_CONSENT_REQUIRED_TEXT,
   DIARY_OFF_TEXT,
+  pfcLine,
 } from "../lib/customer-wellness";
 import { ApiError } from "../lib/api";
 import { minutesRu, restoreWindowMinutesLeft } from "../lib/restore-window";
@@ -483,14 +484,9 @@ function DiaryReady({
           {/* БЖУ — строка целевая: живёт и гаснет вместе с целью, ровно
               как на дашборде. Считать его здесь не из чего и незачем:
               настоящее приходит с каждой записью. */}
-          {pfc && (
-            <p className="food-scanner-saved__macros">
-              Б {pfc.protein_g}
-              {pfc.protein_target_g !== undefined
-                ? ` / ${pfc.protein_target_g}`
-                : ""}{" "}
-              · Ж {pfc.fat_g} · У {pfc.carbs_g} г
-            </p>
+          {/* DRF-2288 (№41): та же строка, что на Главной, — одна функция. */}
+          {pfc && pfcLine(pfc, eaten) !== null && (
+            <p className="food-scanner-saved__macros">{pfcLine(pfc, eaten)}</p>
           )}
         </section>
       )}
