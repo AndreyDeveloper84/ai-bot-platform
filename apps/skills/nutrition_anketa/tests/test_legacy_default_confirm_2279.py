@@ -268,3 +268,28 @@ async def _raise_unavailable(**kwargs):
     from apps.integrations.ayla.nutrition_client import NutritionUnavailableError
 
     raise NutritionUnavailableError("down")
+
+
+class TestVoice:
+    """The bot speaks «ты» (main window, #1998); the verb follows the anketa's gender."""
+
+    @pytest.mark.parametrize(
+        ("gender", "clause"),
+        [
+            ("female", "но выбрала его не ты"),
+            ("male", "но выбрал его не ты"),
+            ("", "но выбран он не тобой"),
+        ],
+    )
+    def test_pace_question(self, gender: str, clause: str) -> None:
+        run = _Run(profile=replace(_marked("pace"), gender=gender))
+        asked = run.turn("мой вес 65")
+        assert "темп в профиле — «Средний»" in asked.reply_text
+        assert clause in asked.reply_text
+        assert " вы " not in f" {asked.reply_text} "
+
+    def test_activity_question(self) -> None:
+        run = _Run(profile=_marked("activity_coefficient", snapshot=_SNAPSHOT))
+        asked = run.turn("мой вес 65")
+        assert "не твой ответ" in asked.reply_text
+        assert "Какая у тебя обычно активность?" in asked.reply_text
