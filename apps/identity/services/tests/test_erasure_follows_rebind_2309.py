@@ -72,7 +72,7 @@ class TestChatForgetFollowsTheBinding:
         bu = _bot_user(tenant)
         ayla = _Ayla(statuses=[CONFIRMED])
         with patch(RESOLVE, return_value=ResolvedIdentity(ayla_user_id=ACCOUNT, is_proxy=False)):
-            result = erase_declared_prefs(bu, client=ayla, retry_source="chat_forget")
+            result = erase_declared_prefs(bu, client=ayla, retry_source="chat_forget")  # type: ignore[arg-type]
 
         assert result.status is GateStatus.OK
         assert _addressed(ayla) == {str(ACCOUNT)}  # не ключ прокси
@@ -84,7 +84,7 @@ class TestChatForgetFollowsTheBinding:
         bu = _bot_user(tenant, key=None, is_proxy=None, cid="230902")
         ayla = _Ayla()
         with patch(RESOLVE) as resolve:
-            result = erase_declared_prefs(bu, client=ayla, retry_source="chat_forget")
+            result = erase_declared_prefs(bu, client=ayla, retry_source="chat_forget")  # type: ignore[arg-type]
 
         assert result.status is GateStatus.BLOCKED_CONSENT
         resolve.assert_not_called()
@@ -94,7 +94,7 @@ class TestChatForgetFollowsTheBinding:
         bu = _bot_user(tenant, key=ACCOUNT, is_proxy=False, cid="230903")
         ayla = _Ayla(statuses=[CONFIRMED])
         with patch(RESOLVE) as resolve:
-            result = erase_declared_prefs(bu, client=ayla, retry_source="chat_forget")
+            result = erase_declared_prefs(bu, client=ayla, retry_source="chat_forget")  # type: ignore[arg-type]
 
         assert result.status is GateStatus.OK
         resolve.assert_not_called()
@@ -104,7 +104,7 @@ class TestChatForgetFollowsTheBinding:
         bu = _bot_user(tenant, cid="230904")
         ayla = _Ayla(statuses=[CONFIRMED])
         with patch(RESOLVE, return_value=ResolvedIdentity(ayla_user_id=PROXY, is_proxy=True)):
-            erase_declared_prefs(bu, client=ayla, retry_source="chat_forget")
+            erase_declared_prefs(bu, client=ayla, retry_source="chat_forget")  # type: ignore[arg-type]
 
         assert _addressed(ayla) == {str(PROXY)}
 
@@ -113,7 +113,7 @@ class TestChatForgetFollowsTheBinding:
         bu = _bot_user(tenant, cid="230905")
         ayla = _Ayla(statuses=[CONFIRMED])
         with patch(RESOLVE, side_effect=IdentityResolveError("network: ReadTimeout")):
-            erase_declared_prefs(bu, client=ayla, retry_source="chat_forget")
+            erase_declared_prefs(bu, client=ayla, retry_source="chat_forget")  # type: ignore[arg-type]
 
         assert _addressed(ayla) == {str(PROXY)}
 
