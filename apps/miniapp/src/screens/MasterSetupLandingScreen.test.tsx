@@ -2,7 +2,9 @@
  * Экран 01 «всё готово» (DRF-1807, M15) — по контракту readiness (M2).
  *
  * Сторожа:
- * - пункты — ровно из `items` сервера, `unavailable` не рисуется;
+ * - пункты — ровно из `items` сервера; `unavailable` РИСУЕТСЯ с причиной и
+ *   без тапа (DRF-2326): спрятанный шаг мастер читает как «у меня всё», а
+ *   отправить профиль всё равно не может — молчание хуже отказа;
  * - `unknown` — «не удалось прочитать», без «настройте» и без тапа;
  * - бар — по числу `done`, в тексте экрана нет ни `%`, ни «из N»;
  * - «Начать настройку» ведёт на deep_link первого незакрытого пункта,
@@ -36,6 +38,7 @@ import {
 import {
   ITEM_STATE_TEXT,
   LATER_LABEL,
+  REASON_TEXT,
   MasterSetupLandingScreen,
   PUBLICATION_ROUTE,
   PUBLISH_ENTRY_LABEL,
@@ -114,7 +117,7 @@ beforeEach(() => {
 });
 
 describe("экран 01", () => {
-  it("приветствие по имени, пункты из readiness, unavailable не рисуется", async () => {
+  it("приветствие по имени, пункты из readiness, unavailable виден с причиной", async () => {
     mockedReadiness.mockResolvedValue(FRESH);
     renderScreen();
     expect(await screen.findByRole("heading", { name: "Андрей, всё готово 👋" })).toBeInTheDocument();
@@ -122,11 +125,69 @@ describe("экран 01", () => {
     const rows = within(list).getAllByRole("listitem");
     expect(rows.map((r) => r.textContent)).toEqual([
       `○Услуги и цены${ITEM_STATE_TEXT.missing}`,
+      `—Место работы${ITEM_STATE_TEXT.unavailable}${REASON_TEXT.capability_not_built}`,
       `○Расписание${ITEM_STATE_TEXT.missing}`,
       `○Профиль для клиентов${ITEM_STATE_TEXT.missing}`,
     ]);
-    expect(screen.queryByText("Место работы")).toBeNull();
     expect(screen.getByText(SETUP_RESUME_NOTE)).toBeInTheDocument();
+  });
+
+  it("недоступный пункт не тапается: вести некуда, deep_link пуст", async () => {
+    mockedReadiness.mockResolvedValue(FRESH);
+    renderScreen();
+    const row = await screen.findByTestId("setup-item-location");
+    expect(row.tagName).not.toBe("BUTTON");
+    expect(within(row).queryByRole("button")).toBeNull();
+  });
+
+  it("причина «ведётся не здесь» названа своим текстом, чужой причины — нет", async () => {
+    mockedReadiness.mockResolvedValue(
+      readiness([
+        item("services", "unavailable", { reason: "managed_outside_app", deep_link: null }),
+        item("hours", "missing"),
+        item("profile", "missing"),
+      ]),
+    );
+    renderScreen();
+    const row = await screen.findByTestId("setup-item-services");
+    expect(row.textContent).toContain(REASON_TEXT.managed_outside_app);
+    expect(row.textContent).not.toContain(REASON_TEXT.capability_not_built);
+  });
+
+  it("причина, которой экран не знает: состояние названо, выдумки нет", async () => {
+    mockedReadiness.mockResolvedValue(
+      readiness([
+        item("services", "unavailable", { reason: "нечто_новое", deep_link: null }),
+        item("hours", "missing"),
+        item("profile", "missing"),
+      ]),
+    );
+    renderScreen();
+    const row = await screen.findByTestId("setup-item-services");
+    expect(row.textContent).toContain(ITEM_STATE_TEXT.unavailable);
+    expect(row.textContent).not.toContain("нечто_новое");
+  });
+
+  it("недоступный пункт не становится следующим шагом и не входит в бар", async () => {
+    mockedReadiness.mockResolvedValue(FRESH);
+    renderScreen();
+    fireEvent.click(await screen.findByRole("button", { name: START_LABEL }));
+    // Первый незакрытый — «Услуги и цены», а не недоступное «Место работы».
+    expect(await screen.findByTestId("location")).toHaveTextContent("/solo/services");
+  });
+
+  it("бар считает только то, что мастер может закрыть сам", async () => {
+    mockedReadiness.mockResolvedValue(
+      readiness([
+        item("services", "done"),
+        item("location", "unavailable", { reason: "capability_not_built", deep_link: null }),
+        item("hours", "missing"),
+      ]),
+    );
+    renderScreen();
+    const bar = await screen.findByTestId("setup-bar");
+    expect(bar).toHaveAttribute("aria-valuemax", "2");
+    expect(bar).toHaveAttribute("aria-valuenow", "1");
   });
 
   it("в тексте экрана нет процентов и «из N»; бар — по числу done", async () => {
