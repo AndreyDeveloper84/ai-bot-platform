@@ -601,6 +601,10 @@ jobs:
               -f docker-compose.yml -f docker-compose.staging.yml \
               -f docker-compose.staging.local.yml \
               -p ayla-bot-staging up -d --force-recreate --no-deps web worker celery-worker celery-beat shadow-worker
+            # DRF-2272 — логи сервисов идут в journald хоста; без постоянного
+            # журнала (/var/log/journal) они не переживут перезагрузку хоста.
+            # Предупреждение, не отказ: выкладка важнее архива логов.
+            [ -d /var/log/journal ] || echo \"::warning::DRF-2272: /var/log/journal нет — журнал не постоянный, логи контейнеров не переживут перезагрузку хоста\"
             sudo -u \"\$OWNER\" -H docker compose -p ayla-bot-staging ps
           "
 
