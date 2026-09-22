@@ -68,6 +68,7 @@ provisioning solo-workspace; миграция 0007 поставила всем �
 
 from __future__ import annotations
 
+import uuid
 from collections import defaultdict
 
 from django.core.management.base import BaseCommand
@@ -91,7 +92,7 @@ class Command(BaseCommand):
         """Отчёт в stderr без стиля ошибки: удачный прогон не красный."""
         self.stderr.write(line, lambda text: text)
 
-    def _owner_identities(self) -> dict[object, set[tuple[str, str]]]:
+    def _owner_identities(self) -> dict[uuid.UUID, set[tuple[str, str]]]:
         """Личности владельцев по тенантам — одним запросом, без N+1.
 
         ``all_tenants``: команда ходит по всем тенантам сразу и вне
@@ -100,7 +101,7 @@ class Command(BaseCommand):
         достаёт ``BotUser`` тем же запросом и минует его собственный
         арендаторский менеджер.
         """
-        identities: dict[object, set[tuple[str, str]]] = defaultdict(set)
+        identities: dict[uuid.UUID, set[tuple[str, str]]] = defaultdict(set)
         rows = TenantStaff.all_tenants.filter(role=TenantStaff.Role.OWNER).select_related(
             "bot_user"
         )
@@ -117,11 +118,14 @@ class Command(BaseCommand):
         solo_shaped_refused = 0
         inactive_proven = 0
         ownerless = 0
+        solo_shaped_ownerless = 0
 
         for tenant in Tenant.all_objects.all().order_by("slug").iterator():
             identities = owners.get(tenant.id)
             if not identities:
                 ownerless += 1
+                if tenant.slug.startswith(SOLO_SHAPE):
+                    solo_shaped_ownerless += 1
                 continue
             if not any(_solo_tenant_slug(*identity) == tenant.slug for identity in identities):
                 # Пересчёт не сошёлся: либо салон, либо слаг соло-вида,
@@ -145,6 +149,15 @@ class Command(BaseCommand):
         # нуля значит, что пересчёт отказал слагам соло-вида — так системная
         # поломка пересчёта (переименованное поле, изменённый хеш) видна
         # оператору, а не прячется за правдоподобным «не соло».
-        self._plain(f"  из них слаги соло-вида (ожидается 0): {solo_shaped_refused}")
+        self._plain(
+            f"  из них слаги соло-вида, пересчёт отказал (ожидается 0): {solo_shaped_refused}"
+        )
         self._plain(f"неактивные доказанные, не в списке: {inactive_proven}")
         self._plain(f"без владельца: {ownerless}")
+        # Вторая дверь той же диагностики: поломка не в пересчёте, а в поиске
+        # владельцев (ровно форма исходного блокера) уронила бы доказанные
+        # тенанты сюда, а строка выше читалась бы здоровой. «Без владельца» и
+        # так никогда не ноль, поэтому всплеск там сам по себе не тревожит.
+        self._plain(
+            f"  из них слаги соло-вида, владельца не нашли (ожидается 0): {solo_shaped_ownerless}"
+        )
