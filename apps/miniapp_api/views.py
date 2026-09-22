@@ -3719,6 +3719,8 @@ def customer_wellness_today(request: HttpRequest) -> HttpResponse:
     * ``pfc.protein_target_g`` — DRF-1844: from the profile's
       ``daily_protein_g`` (derived from the §85 calories target), sent only
       under the same provenance flag as ``calories_target``; absent otherwise.
+      ``pfc.fat_target_g`` / ``pfc.carbs_target_g`` — DRF-2288 (owner №41):
+      ``daily_fat_g`` / ``daily_carbs_g`` under the same flag, each key alone.
       ``day_pattern_hint`` — omitted (no clean source). Frontend treats both
       as optional.
 

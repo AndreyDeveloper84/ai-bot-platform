@@ -138,6 +138,7 @@ import {
   CONSENT_PROMPT_ALREADY_SENT_TEXT,
   CONSENT_PROMPT_OPEN_CHAT_CTA,
   requestDiaryConsentPrompt,
+  pfcLine,
 } from "../lib/customer-wellness";
 import {
   getCatalogBrowse,
@@ -1116,9 +1117,9 @@ const UNAVAILABLE = "Не удалось загрузить";
 /** DRF-2288 (№41, CD §76) — текст пустого дня, слово владельца вместо «залогировано». */
 export const EMPTY_DAY_TEXT = "Сегодня ещё ничего не записано";
 
-/** « / 61» при ориентире; без ориентира — ничего (§85 §8: «из» только при ориентире). */
-function withTarget(target: number | undefined): string {
-  return target !== undefined ? ` / ${target}` : "";
+/** То же для скринридера: « из 61». */
+function spokenTarget(target: number | undefined): string {
+  return target !== undefined ? ` из ${target}` : "";
 }
 
 function PulseStrip({ data }: { data: WellnessToday }) {
@@ -1137,6 +1138,17 @@ function PulseStrip({ data }: { data: WellnessToday }) {
   // «Сегодня ещё ничего не записано» — состояние всего дня, а не одной
   // строки, поэтому считается один раз и решает и текст, и шкалу.
   const dayIsEmpty = caloriesEaten === 0 && waterEaten === 0;
+  // DRF-2288 (№41): строка БЖУ из нулей не рисуется, как только еды нет, —
+  // даже если вода уже записана (решение владельца: «строку нулей не рисовать»).
+  const foodIsEmpty = caloriesEaten === 0;
+  const pfcSpoken =
+    data.pfc && !foodIsEmpty
+      ? `. Белки ${data.pfc.protein_g}${spokenTarget(data.pfc.protein_target_g)}, жиры ${
+          data.pfc.fat_g
+        }${spokenTarget(data.pfc.fat_target_g)}, углеводы ${data.pfc.carbs_g}${spokenTarget(
+          data.pfc.carbs_target_g,
+        )} граммов`
+      : "";
   const caloriesPct =
     caloriesKnown && caloriesTargetKnown && caloriesTarget > 0
       ? Math.round((caloriesEaten / caloriesTarget) * 100)
@@ -1159,13 +1171,12 @@ function PulseStrip({ data }: { data: WellnessToday }) {
         aria-label={
           !caloriesKnown
             ? `Питание: ${sliceClosedCopy}`
-            : caloriesTargetKnown
-              ? `Питание: ${caloriesEaten} из ${caloriesTarget} килокалорий, ${caloriesPct} процентов${
-                  data.pfc
-                    ? `. Белки ${data.pfc.protein_g}, жиры ${data.pfc.fat_g}, углеводы ${data.pfc.carbs_g} граммов`
-                    : ""
-                }`
-              : `Питание: ${caloriesEaten} килокалорий сегодня`
+            : dayIsEmpty
+              ? // DRF-2288: скринридер слышит то же, что видно глазу, — не «0 из 2100».
+                `Питание: ${EMPTY_DAY_TEXT}`
+              : caloriesTargetKnown
+                ? `Питание: ${caloriesEaten} из ${caloriesTarget} килокалорий, ${caloriesPct} процентов${pfcSpoken}`
+                : `Питание: ${caloriesEaten} килокалорий сегодня`
         }
       >
         <div className="wellness-dash__pulse-head">
@@ -1185,12 +1196,9 @@ function PulseStrip({ data }: { data: WellnessToday }) {
             {/* DRF-2288 (№41): ориентиры Ж и У — тем же признаком, что белок;
                 в пустой день строки нулей нет — рядом уже сказано, что
                 ничего не записано. */}
-            {data.pfc && !dayIsEmpty && (
+            {data.pfc && !foodIsEmpty && (
               <div className="wellness-dash__pulse-pfc" aria-hidden="true">
-                Б {data.pfc.protein_g}
-                {withTarget(data.pfc.protein_target_g)} · Ж {data.pfc.fat_g}
-                {withTarget(data.pfc.fat_target_g)} · У {data.pfc.carbs_g}
-                {withTarget(data.pfc.carbs_target_g)} г
+                {pfcLine(data.pfc, caloriesEaten)}
               </div>
             )}
             {/* Пустой день — без шкалы. Полоса при нуле не видна глазом,

@@ -66,7 +66,8 @@ class TestT2NoProvenanceNoTargets:
     def test_unconfirmed_calories_send_none(self, client: Client, bot_user: BotUser) -> None:  # noqa: F811
         data = _get(client, bot_user, _ProfileWithMacros(calories_override=False))
         assert "calories_eaten" in data  # наличие: срез питания в ответе есть
-        pfc = data.get("pfc", {})
+        pfc = data["pfc"]
+        assert pfc["protein_g"] is not None  # наличие: строка БЖУ в ответе есть
         assert not {"protein_target_g", "fat_target_g", "carbs_target_g"} & set(pfc)
 
 

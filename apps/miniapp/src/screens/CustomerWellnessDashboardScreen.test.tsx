@@ -780,6 +780,48 @@ describe("CustomerWellnessDashboardScreen — degraded reads (DRF-1546)", () => 
     await renderScreen(false);
 
     expect(await screen.findByText(/Б 65 \/ 100 · Ж 40 \/ 61 · У 120 \/ 220 г/)).toBeInTheDocument();
+    // Скринридер слышит те же ориентиры.
+    expect(screen.getByLabelText(/^Питание:/)).toHaveAttribute(
+      "aria-label",
+      expect.stringContaining("Белки 65 из 100, жиры 40 из 61, углеводы 120 из 220 граммов"),
+    );
+  });
+
+  it("DRF-2288 (№41): без ориентира у одной буквы — только факт у неё", async () => {
+    serve(
+      {
+        calories_eaten: 800,
+        calories_target: 2100,
+        pfc: { protein_g: 65, fat_g: 40, carbs_g: 120, protein_target_g: 100, carbs_target_g: 220 },
+        water_glasses_eaten: 4,
+        water_glasses_target: 8,
+        active_goals: [],
+        display_name: "Анна",
+      },
+      { this_week_booking_count: 0 },
+    );
+    await renderScreen(false);
+
+    expect(await screen.findByText(/Б 65 \/ 100 · Ж 40 · У 120 \/ 220 г/)).toBeInTheDocument();
+  });
+
+  it("DRF-2288 (№41): вода есть, еды нет — строки нулей БЖУ нет", async () => {
+    serve(
+      {
+        calories_eaten: 0,
+        calories_target: 2100,
+        pfc: { protein_g: 0, fat_g: 0, carbs_g: 0, protein_target_g: 123 },
+        water_glasses_eaten: 3,
+        water_glasses_target: 12,
+        active_goals: [],
+        display_name: "Анна",
+      },
+      { this_week_booking_count: 0 },
+    );
+    await renderScreen(false);
+
+    expect(await screen.findByText(/3 \/ 12 стаканов/)).toBeInTheDocument();
+    expect(screen.queryByText(/Б 0/)).not.toBeInTheDocument();
   });
 
   it("DRF-2288 (№41): пустой день — «ничего не записано» и без строки нулей БЖУ", async () => {
@@ -798,6 +840,8 @@ describe("CustomerWellnessDashboardScreen — degraded reads (DRF-1546)", () => 
     await renderScreen(false);
 
     expect(await screen.findByText("Сегодня ещё ничего не записано")).toBeInTheDocument();
+    // Скринридер слышит то же, что видно, — не «0 из 2100 … белки 0».
+    expect(screen.getByLabelText("Питание: Сегодня ещё ничего не записано")).toBeInTheDocument();
     expect(screen.queryByText(/Б 0/)).not.toBeInTheDocument();
     expect(screen.queryByText(/залогировано/)).not.toBeInTheDocument();
   });
