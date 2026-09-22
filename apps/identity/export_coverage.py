@@ -317,7 +317,36 @@ NON_REGISTRY_SECTIONS: Mapping[str, str] = {
     "catalog.nutrition_profile": "ayla",
     "catalog.food_diary": "ayla",
     "catalog.shown_hints": "ayla",
+    # DRF-2307 — beautygo_backend #545 и #548.
+    "catalog.notification_history": "ayla",
+    "catalog.app_ai_chat": "ayla",
+    "catalog.favorite_specialists": "ayla",
 }
+
+#: DRF-2307 — зеркало верхних ключей ответа C5.1 каталога
+#: (``users.personal_data_api.InternalPersonalDataExportView``), вручную, как
+#: ``ROUTE_TABLE`` в ``apps/integrations/ayla/tests/test_contract_route_table``.
+#: Каталог добавил раздел — впиши сюда, в ``NON_REGISTRY_SECTIONS`` (для
+#: разделов запомненного) и в строку ``KNOWN_LIMITS`` про ``ayla``, и дай ему
+#: исход в матрице «забудь всё». Сверку «зеркало ↔ объявления» держит
+#: ``test_catalog_sections_declared_2307``; «зеркало ↔ настоящий каталог» —
+#: ночной живой узел ``tests/e2e/test_ayla_integration.py``.
+CATALOG_EXPORT_SECTIONS: tuple[str, ...] = (
+    "user_id",
+    "exported_at",
+    "profile",
+    "personal_context",
+    "specialist_profile",
+    "goals",
+    "wellness_plan",
+    "nutrition_profile",
+    "food_diary",
+    "shown_hints",
+    "notification_history",
+    "app_ai_chat",
+    "favorite_specialists",
+    "linked_identities",
+)
 
 #: Known incompleteness of the export ITSELF — not a store, a behaviour.
 #: Declared for the same reason as everything else here: it is better written
@@ -341,7 +370,10 @@ KNOWN_LIMITS: tuple[str, ...] = (
     "профиль мастера и то, что каталог запомнил о вас вне профиля: цели и "
     "ответы анкеты цели (goals), план и отметки прогресса (wellness_plan), "
     "профиль питания (nutrition_profile), дневник питания с фото сканера "
-    "(food_diary) и история показанных подсказок (shown_hints). Полнота того "
+    "(food_diary), история показанных подсказок (shown_hints), история "
+    "уведомлений (notification_history), переписка с ИИ-чатом приложения "
+    "(app_ai_chat) и избранные мастера из приложения BeautyGO "
+    "(favorite_specialists) — их «забудь всё» оставляет. Полнота того "
     "раздела — обязательство Ayla, и проверяется на её стороне; здесь он не "
     "переписывается и не фильтруется, чтобы выгрузка не расходилась с тем, "
     "что реально хранит владелец.",
