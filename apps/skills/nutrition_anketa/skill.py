@@ -521,6 +521,8 @@ _LEGACY_CONFIRM_ORDER: tuple[tuple[str, str], ...] = (
     ("pace", "confirm_pace"),
 )
 _UPDATE_WEIGHT_STEPS = ("weight", "confirm_activity", "confirm_pace")
+_LEGACY_MARKS = frozenset(name for name, _step in _LEGACY_CONFIRM_ORDER)
+_LEGACY_MARK_ALIASES = {"activity": "activity_coefficient"}
 
 #: Строка целиком (вход уже в нижнем регистре): «[я|сейчас|теперь] [мой|новый]
 #: вес|вешу [сейчас|теперь] N [кг]» или «обнови(ть) вес [N]». Якоря и
@@ -645,9 +647,11 @@ class NutritionAnketaSkill:
         # DRF-2139: «обнови вес» — кнопки, фраза, ответ на вопрос веса.
         if text in UPDATE_WEIGHT_CALLBACKS or _update_weight_entry(text) is not None:
             return True
-        if update_weight_pending(context.conversation) and (
-            not text.startswith("cb:") or text.startswith((CB_UW_ACTIVITY, CB_UW_PACE))
-        ):
+        # DRF-2279: кнопки подтверждения — наши и после истечения вопроса: иначе
+        # нажатие уходило в «не поняла», и вес пропадал молча.
+        if text.startswith((CB_UW_ACTIVITY, CB_UW_PACE)):
+            return True
+        if update_weight_pending(context.conversation) and not text.startswith("cb:"):
             return True
 
         # Resume path — claim turns while an FSM is in flight.
@@ -1301,7 +1305,7 @@ class NutritionAnketaSkill:
                 return self._update_weight_ask(context)
             return self._update_weight_with(context, entry)
 
-        if pending and text.startswith((CB_UW_ACTIVITY, CB_UW_PACE)):
+        if text.startswith((CB_UW_ACTIVITY, CB_UW_PACE)):
             return self._update_weight_confirm(context, text)
         if pending and not text.startswith("cb:"):
             bucket = self._update_weight_bucket(context)
@@ -1402,7 +1406,13 @@ class NutritionAnketaSkill:
         # за человека. Сначала вопрос; вес держится в состоянии.
         to_ask = _legacy_steps(profile)
         if to_ask:
-            bucket = {"step": to_ask[0], "weight": weight, "answers": {}}
+            bucket = {
+                "step": to_ask[0],
+                "weight": weight,
+                "answers": {},
+                # Темп — каким он был, когда вопрос задан: одна запись на ход.
+                "current_pace": str(getattr(profile, "goal_pace", "") or ""),
+            }
             self._save_update_weight_state(context, bucket)
             return self._update_weight_confirm_ask(context, bucket, profile=profile)
 
@@ -1582,6 +1592,12 @@ class NutritionAnketaSkill:
             return SkillResult(
                 reply_text=_AYLA_DOWN_FALLBACK, meta={"reply_kind": "anketa_ayla_error"}
             )
+
+        if getattr(profile, "targets_source", "") == "user_entered":
+            # Пока вопрос висел, человек поставил ориентир специалиста: вес
+            # пишется поверх ручного ориентира (DRF-2193), а не теряется.
+            self._save_update_weight_state(context, None)
+            return self._update_weight_over_manual(context, external_id, int(bucket["weight"]))
 
         answered = {"confirm_activity": "activity", "confirm_pace": "pace"}
         remaining = [s for s in _legacy_steps(profile) if answered[s] not in answers]
@@ -2222,7 +2238,16 @@ def _legacy_steps(profile: Any) -> list[str]:
     Темп спрашивается только там, где он меняет число (цель с темпом, вопрос
     59): у «поддерживать» его в теле нет, и подтверждать нечего.
     """
-    marks = set(getattr(profile, "legacy_default_inputs", ()) or ())
+    marks: set[str] = set()
+    for name in getattr(profile, "legacy_default_inputs", ()) or ():
+        # Имена — каталога (``activity_coefficient``, ``pace``). Тот же API
+        # зовёт активность «activity» в ``_skipped_fields``: пометка под этим
+        # именем тоже пометка — иначе старое умолчание ушло бы молча.
+        name = _LEGACY_MARK_ALIASES.get(name, name)
+        if name in _LEGACY_MARKS:
+            marks.add(name)
+        else:
+            logger.warning("anketa.legacy_default_unknown_mark name=%s", name)
     goal = str(getattr(profile, "goal", "") or "")
     steps: list[str] = []
     for name, step in _LEGACY_CONFIRM_ORDER:

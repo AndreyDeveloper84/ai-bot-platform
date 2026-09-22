@@ -196,3 +196,72 @@ class TestL7Cancel:
 
         assert run.posted == []
         assert run.state is None
+
+
+class TestReviewFindings:
+    """Code Reviewer, DRF-2279 (bot)."""
+
+    def test_a_marked_pace_with_maintain_asks_nothing(self) -> None:
+        run = _Run(profile=_marked("pace", snapshot=_SNAPSHOT))
+        card = run.turn("мой вес 65")
+        assert card.meta["reply_kind"] == "anketa_update_weight_proposed"
+        assert "pace" not in _sent(run)
+
+    def test_only_activity_marked_forwards_the_named_pace(self) -> None:
+        run = _Run(profile=_marked("activity_coefficient"))
+        run.turn("мой вес 65")
+        run.turn(f"{CB_ACTIVITY}high")
+        body = _sent(run)
+        assert (body["activity_coefficient"], body["pace"]) == (1.725, "moderate")
+
+    def test_the_activity_alias_is_a_mark_too(self) -> None:
+        # The same API calls this input «activity» in ``_skipped_fields``; a
+        # mark under that name must not let the old default through.
+        run = _Run(profile=_marked("activity", snapshot=_SNAPSHOT))
+        asked = run.turn("мой вес 65")
+        assert run.posted == []
+        assert asked.meta["reply_kind"] == "anketa_update_weight_confirm_activity"
+
+    def test_an_old_button_after_the_question_expired_asks_the_weight(self) -> None:
+        run = _Run(profile=_marked("pace"))
+        assert run.matches(f"{CB_PACE}moderate")
+        again = run.turn(f"{CB_PACE}moderate")
+        assert run.posted == []
+        assert again.meta["reply_kind"] == "anketa_update_weight_ask"
+
+    def test_catalogue_down_at_the_answer_says_so_and_clears(self) -> None:
+        run = _Run(profile=_marked("pace"))
+        run.turn("мой вес 65")
+        run._client.get_profile = _raise_unavailable
+        down = run.turn(f"{CB_PACE}moderate")
+        assert down.meta["reply_kind"] == "anketa_ayla_down"
+        assert run.posted == []
+        assert run.state is None
+
+    def test_a_manual_target_set_meanwhile_keeps_the_weight(self) -> None:
+        run = _Run(profile=_marked("pace"))
+        run.turn("мой вес 65")
+        manual = replace(_calculated(snapshot=_LOSE), targets_source="user_entered")
+
+        async def _manual(**kwargs):
+            return manual
+
+        run._client.get_profile = _manual
+        done = run.turn(f"{CB_PACE}moderate")
+        assert done.meta["reply_kind"].startswith("anketa_update_weight_manual")
+        assert _sent(run)["weight_kg"] == 65
+
+    def test_the_pace_question_is_one_write(self) -> None:
+        run = _Run(profile=_marked("pace", "activity_coefficient"))
+        run.turn("мой вес 65")
+        before = len(run.conversation.save_calls)
+        run.turn(f"{CB_ACTIVITY}light")
+        assert len(run.conversation.save_calls) - before == 1
+        assert run.state is not None
+        assert run.state["current_pace"] == "moderate"
+
+
+async def _raise_unavailable(**kwargs):
+    from apps.integrations.ayla.nutrition_client import NutritionUnavailableError
+
+    raise NutritionUnavailableError("down")
