@@ -44,7 +44,6 @@ DEBT: dict[str, int] = {
     "apps/skills/echo/skill.py::handle": 4,
     "apps/skills/faq/skill.py::_build_skill_result": 1,
     "apps/skills/food_clarify/skill.py::handle": 2,
-    "apps/skills/food_clarify/text_entry.py::_entry_refusal": 5,
     "apps/skills/food_clarify/text_entry.py::_log": 3,
     "apps/skills/food_clarify/text_entry.py::_on_fix_grams_answer": 1,
     "apps/skills/food_clarify/text_entry.py::_on_grams_answer": 1,
@@ -60,7 +59,6 @@ DEBT: dict[str, int] = {
     "apps/skills/food_correction/skill.py::handle": 1,
     "apps/skills/food_scanner/skill.py::_check_gates": 2,
     "apps/skills/food_scanner/skill.py::_handle_callback": 6,
-    "apps/skills/food_scanner/skill.py::_handle_photo": 6,
     "apps/skills/nutrition_anketa/skill.py::_manual_stale": 1,
     "apps/skills/nutrition_anketa/skill.py::_on_complete": 2,
     "apps/skills/nutrition_anketa/skill.py::_on_confirm_targets": 2,
@@ -77,7 +75,7 @@ DEBT: dict[str, int] = {
     "apps/skills/payment_failed/skill.py::_build_reply": 1,
     "apps/skills/privacy_consent/skill.py::handle": 3,
     "apps/skills/registry.py::dispatch": 1,
-    "apps/skills/water/skill.py::handle": 4,
+    "apps/skills/water/skill.py::handle": 1,
     "apps/skills/welcome/skill.py::handle": 3,
 }
 

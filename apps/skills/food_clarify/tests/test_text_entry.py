@@ -421,7 +421,11 @@ class TestSavedEntryChips:
         assert result.reply_text == (
             "Уже не вернуть: окно возврата закрылось, запись удалена окончательно."
         )
-        assert "buttons" not in (result.action_data or {})
+        # DRF-2267 (CD §72): вернуть нечего — но отказ не тупик. Чипов САМОЙ
+        # записи нет (её больше нет), есть выход: «Меню», а на глобальном пути
+        # ещё и «Мой дневник» (состав сторожит test_no_dead_ends_errors_2267).
+        assert _entry_callbacks(result) == []
+        assert [b["callback"] for b in result.action_data["buttons"]] == ["cb:menu:help"]
 
     @pytest.mark.parametrize(
         ("refusal", "text"),

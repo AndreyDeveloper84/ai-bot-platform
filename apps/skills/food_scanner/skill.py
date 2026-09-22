@@ -229,6 +229,7 @@ class FoodScannerSkill:
             )
             return SkillResult(
                 reply_text=PHOTO_NO_BYTES,
+                action_data=_log_it_another_way(),
                 meta={"reply_kind": "food_scanner_no_bytes"},
             )
 
@@ -238,6 +239,7 @@ class FoodScannerSkill:
         except FoodNotRecognizedError:
             return SkillResult(
                 reply_text=NOT_RECOGNIZED_FALLBACK,
+                action_data=_log_it_another_way(),
                 meta={"reply_kind": "food_scanner_not_recognized"},
             )
         except ScanDailyLimitError as exc:
@@ -252,24 +254,28 @@ class FoodScannerSkill:
             )
             return SkillResult(
                 reply_text=SCAN_DAILY_LIMIT_FALLBACK,
+                action_data=_log_it_another_way(),
                 meta={"reply_kind": "food_scanner_daily_limit"},
             )
         except ScanBudgetExhaustedError:
             logger.info("food_scanner.budget_exhausted user=%s", external_id)
             return SkillResult(
                 reply_text=SCAN_BUDGET_EXHAUSTED_FALLBACK,
+                action_data=_log_it_another_way(),
                 meta={"reply_kind": "food_scanner_budget_exhausted"},
             )
         except NutritionUnavailableError:
             logger.warning("food_scanner.unavailable user=%s", external_id)
             return SkillResult(
                 reply_text=AYLA_DOWN_FALLBACK,
+                action_data=_log_it_another_way(),
                 meta={"reply_kind": "food_scanner_unavailable"},
             )
         except NutritionAPIError:
             logger.exception("food_scanner.api_error user=%s", external_id)
             return SkillResult(
                 reply_text=AYLA_DOWN_FALLBACK,
+                action_data=_log_it_another_way(),
                 meta={"reply_kind": "food_scanner_error"},
             )
 
@@ -442,6 +448,18 @@ class FoodScannerSkill:
 
 
 # ─── helpers ──────────────────────────────────────────────────────────────
+
+
+def _log_it_another_way() -> dict:
+    """DRF-2267 (CD §72) — под отказом по фото: «Записать еду» и «Меню».
+
+    Все эти тексты зовут в одно и то же — написать словами или прислать
+    ещё фото; ``cb:welcome:food`` отвечает ровно этим приглашением (и с
+    воротами дневника), то есть кнопка делает то, что обещает текст.
+    """
+    from apps.orchestrator.next_steps import log_food_button, menu_button, next_step_action_data
+
+    return next_step_action_data(log_food_button(), menu_button())
 
 
 def _extract_photo_bytes(context: SkillContext) -> bytes | None:

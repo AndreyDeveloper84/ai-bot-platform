@@ -661,23 +661,38 @@ def on_entry_callback(context: SkillContext, text: str) -> SkillResult:
 
 
 def _entry_refusal(exc: Exception, *, external_id: str, step: str) -> SkillResult:
+    # DRF-2267 (CD §72) — отказ про УЖЕ существующую запись: «Мой дневник»
+    # показывает, что в дневнике на самом деле, и «Меню».
+    way_on = {"buttons": _after_entry_buttons(), "button_columns": 1}
     if isinstance(exc, MealRestoreExpiredError):
         return SkillResult(
-            reply_text=RESTORE_EXPIRED_TEXT, meta={"reply_kind": "food_entry_restore_expired"}
+            reply_text=RESTORE_EXPIRED_TEXT,
+            action_data=way_on,
+            meta={"reply_kind": "food_entry_restore_expired"},
         )
     if isinstance(exc, MealNotFoundError):
-        return SkillResult(reply_text=ENTRY_GONE_TEXT, meta={"reply_kind": "food_entry_gone"})
+        return SkillResult(
+            reply_text=ENTRY_GONE_TEXT, action_data=way_on, meta={"reply_kind": "food_entry_gone"}
+        )
     if isinstance(exc, MealEditConflictError):
-        return SkillResult(reply_text=ENTRY_WATER_TEXT, meta={"reply_kind": "food_entry_water"})
+        return SkillResult(
+            reply_text=ENTRY_WATER_TEXT, action_data=way_on, meta={"reply_kind": "food_entry_water"}
+        )
     if isinstance(exc, NutritionUncertainOutcomeError):
         logger.warning("food_entry.%s.uncertain user=%s", step, external_id)
-        return SkillResult(reply_text=UNCERTAIN_TEXT, meta={"reply_kind": "food_entry_uncertain"})
+        return SkillResult(
+            reply_text=UNCERTAIN_TEXT,
+            action_data=way_on,
+            meta={"reply_kind": "food_entry_uncertain"},
+        )
     if isinstance(exc, NutritionUnavailableError):
         logger.warning("food_entry.%s.unavailable user=%s", step, external_id)
     else:
         logger.exception("food_entry.%s.error user=%s", step, external_id)
     return SkillResult(
-        reply_text=EDIT_UNAVAILABLE_TEXT, meta={"reply_kind": "food_entry_unavailable"}
+        reply_text=EDIT_UNAVAILABLE_TEXT,
+        action_data=way_on,
+        meta={"reply_kind": "food_entry_unavailable"},
     )
 
 
