@@ -46,7 +46,6 @@ import {
   type StaffInviteRow,
   type StaffInviteStatus,
 } from "../../lib/admin-api";
-import { formatDateLong } from "../../lib/masterDateFormat";
 import { hapticNotify } from "../../lib/max-sdk";
 import { backTo, screenRoot } from "../../lib/screen-back";
 
@@ -87,18 +86,29 @@ function mayManage(inv: StaffInviteRow, me: MeResponse): boolean {
   return inv.role !== "owner" || me.is_owner;
 }
 
+/**
+ * «20 сентября» — mid-sentence, so no weekday: `formatDateLong` leads with a
+ * capitalised one («выдан Воскресенье, …»), which reads as a typo here.
+ */
+const DAY_MONTH = new Intl.DateTimeFormat("ru-RU", { day: "numeric", month: "long" });
+
+function dayMonth(iso: string): string {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? "" : DAY_MONTH.format(d);
+}
+
 /** The date line under a code — the one fact that matters for its status. */
 function dateLine(inv: StaffInviteRow): string {
-  const issued = `выдан ${formatDateLong(inv.created_at)}`;
+  const issued = `выдан ${dayMonth(inv.created_at)}`;
   switch (inv.status) {
     case "pending":
-      return `${issued} · действует до ${formatDateLong(inv.expires_at)}`;
+      return `${issued} · действует до ${dayMonth(inv.expires_at)}`;
     case "accepted":
-      return `${issued} · принят ${formatDateLong(inv.used_at ?? inv.created_at)}`;
+      return `${issued} · принят ${dayMonth(inv.used_at ?? inv.created_at)}`;
     case "expired":
-      return `${issued} · истёк ${formatDateLong(inv.expires_at)}`;
+      return `${issued} · истёк ${dayMonth(inv.expires_at)}`;
     case "cancelled":
-      return `${issued} · отменён ${formatDateLong(inv.revoked_at ?? inv.created_at)}`;
+      return `${issued} · отменён ${dayMonth(inv.revoked_at ?? inv.created_at)}`;
   }
 }
 
