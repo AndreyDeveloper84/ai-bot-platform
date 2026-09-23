@@ -176,32 +176,58 @@ class TestTheClientReadsTheSetting:
 
 
 class TestTheCheckSaysTheModeOutLoud:
-    def test_one_word_about_the_mode_and_nothing_else(self, settings) -> None:  # noqa: F811
+    """payments.W001 — голос только там, где ответ неожиданный (DRF-2021)."""
+
+    def test_stub_links_on_a_deploy_shaped_contour_are_named(self, settings) -> None:  # noqa: F811
+        from django.core.checks import Warning as CheckWarning
+
         from apps.orders.checks import check_payments_mode_declared
 
         settings.AYLA_PAYMENTS_TEST_MODE = True
+        settings.DEBUG = False
         settings.AYLA_BASE_URL = "https://ayla.example"
         settings.AYLA_INTERNAL_API_TOKEN = "super-secret-token"  # noqa: S105  # pragma: allowlist secret
         messages = check_payments_mode_declared(None)
 
         assert len(messages) == 1  # присутствие: проверка говорит
-        text = f"{messages[0].msg} {messages[0].hint or ''}"
+        message = messages[0]
+        # Предупреждение, а не ошибка: тестовый контур — законная настройка,
+        # и Error останавливал бы выкладку верного стенда.
+        assert isinstance(message, CheckWarning)
+        assert message.id == "payments.W001"
+        text = f"{message.msg} {message.hint or ''}"
         assert "test" in text.lower()
-        # Ни ключей, ни адресов, ни сумм: ``manage.py check`` гоняют там,
-        # где вывод сохраняется.
+        # Ни ключей, ни адресов, ни сумм: вывод ``manage.py check`` сохраняют.
         assert "super-secret-token" not in text
         assert "ayla.example" not in text
 
-    def test_live_mode_is_named_too_and_is_not_a_warning_storm(
+    @pytest.mark.parametrize(
+        ("test_mode", "debug", "why"),
+        [
+            (False, False, "живой режим — ответ ожидаемый"),
+            (True, True, "локальная разработка и CI — заглушка очевидна"),
+        ],
+    )
+    def test_the_expected_answer_is_silent(
         self,
-        settings,  # noqa: F811
+        settings,
+        test_mode: bool,
+        debug: bool,
+        why: str,  # noqa: F811
     ) -> None:
+        """DRF-2021: предупреждение в каждом зелёном прогоне учат пропускать глазами."""
         from apps.orders.checks import check_payments_mode_declared
 
-        settings.AYLA_PAYMENTS_TEST_MODE = False
-        messages = check_payments_mode_declared(None)
-        assert len(messages) == 1
-        assert "live" in f"{messages[0].msg}".lower()
+        settings.AYLA_PAYMENTS_TEST_MODE = test_mode
+        settings.DEBUG = debug
+        assert check_payments_mode_declared(None) == [], why
+
+    def test_the_check_is_registered_and_runs_in_manage_py_check(self, settings) -> None:  # noqa: F811
+        from django.core.checks import registry
+
+        # Присутствие: проверка зарегистрирована, а не просто написана.
+        names = {getattr(fn, "__name__", "") for fn in registry.registry.get_checks()}
+        assert "check_payments_mode_declared" in names
 
 
 class TestDeclaredSurfaceMatchesTheLiveOne:
@@ -218,3 +244,36 @@ class TestDeclaredSurfaceMatchesTheLiveOne:
         # ``.env.example`` про локальную разработку, AYLA_* там нет).
         assert anchor in text
         assert "AYLA_PAYMENTS_TEST_MODE" in text
+
+
+class TestEveryContourDeclaresIt:
+    """Ни один контур не молчит — иначе режим снова живёт в третьем аргументе."""
+
+    @pytest.mark.parametrize("module", ["base", "local", "staging", "production"])
+    def test_the_name_appears_in_the_settings_file(self, module: str) -> None:
+        text = (REPO / "config" / "settings" / f"{module}.py").read_text(encoding="utf-8")
+        # Присутствие: файл тот самый.
+        assert "DEBUG" in text or "from .base import" in text
+        assert "AYLA_PAYMENTS_TEST_MODE" in text
+
+    @pytest.mark.parametrize("module", ["local", "staging"])
+    def test_an_explicit_value_is_not_discarded(
+        self, monkeypatch: pytest.MonkeyPatch, module: str
+    ) -> None:
+        """`manage.py`, celery и воркеры садятся на local по умолчанию, а
+        docker-compose задаёт его через ``environment:`` — жёсткое ``True``
+        означало бы заглушечные ссылки вопреки контуру (DRF-1391 про ту же
+        механику)."""
+        import importlib
+        import sys
+
+        monkeypatch.setenv("AYLA_PAYMENTS_TEST_MODE", "false")
+        name = f"config.settings.{module}"
+        saved = sys.modules.pop(name, None)
+        try:
+            loaded = importlib.import_module(name)
+            assert loaded.AYLA_PAYMENTS_TEST_MODE is False
+        finally:
+            sys.modules.pop(name, None)
+            if saved is not None:
+                sys.modules[name] = saved

@@ -17,6 +17,7 @@ import os
 from django.core.exceptions import ImproperlyConfigured
 
 from .base import *  # noqa: F401,F403
+from .base import payments_test_mode_from
 
 DEBUG = False
 
@@ -99,8 +100,11 @@ if _PAYMENTS_MODE_RAW is None or not _PAYMENTS_MODE_RAW.strip():
         "(a contour that issues stub checkout links). Unset used to mean "
         "'true' silently — people would get a fake payment link."
     )
-# Мусор — отказ с именем переменной (разбор общий, из base).
-AYLA_PAYMENTS_TEST_MODE = payments_test_mode_from(_PAYMENTS_MODE_RAW)  # noqa: F405
+# Мусорное значение до этой строки не доходит: разбор общий, и ``base``
+# читает ту же переменную при импорте — отказ приходит оттуда, с тем же
+# именем в тексте. Здесь остаётся то, чего base знать не может: в бою у
+# режима нет умолчания вообще.
+AYLA_PAYMENTS_TEST_MODE = payments_test_mode_from(_PAYMENTS_MODE_RAW)
 
 
 # Phase 2.2 — domain bus subscriber registry. Production activates

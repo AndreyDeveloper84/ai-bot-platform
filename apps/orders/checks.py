@@ -18,6 +18,19 @@ stand runs that way today), so an ``Error`` would block deploys over a
 correct setup. The point is that the answer stops being invisible — the
 failure this ticket exists for was silence, not a wrong value.
 
+### Only when the answer is surprising
+
+It fires for stub links on a contour with ``DEBUG = False`` — a stand, a
+staging box, anything deploy-shaped — and stays quiet in local dev and CI,
+where stub links are the obvious and correct answer.
+
+That silence is not laziness; it is the DRF-2021 decision. A warning
+printed by every green run teaches readers to skip the
+``System check identified`` line, and the next warning of the same shape —
+a real one — goes past the same way. That ticket went as far as injecting a
+fake ``MAX_BOT_WEB_APP`` into CI rather than let a correct warning become
+wallpaper, and recorded that ``0 silenced`` must stay zero.
+
 ### One word, and nothing else
 
 ``manage.py check`` output is copied into deploy logs and tickets. The
@@ -37,19 +50,22 @@ from django.core.checks import Warning as CheckWarning, register
 def check_payments_mode_declared(app_configs: Any, **kwargs: Any) -> list[CheckWarning]:
     """payments.W001 — say whether checkout links are real or stubs."""
 
-    test_mode = bool(getattr(settings, "AYLA_PAYMENTS_TEST_MODE", True))
-    mode = "test" if test_mode else "live"
-    hint = (
-        "Stub checkout links: nobody can actually pay. Deliberate on a "
-        "stand; in production the settings module refuses to boot without "
-        "an explicit AYLA_PAYMENTS_TEST_MODE."
-        if test_mode
-        else "Real checkout links: taps take money."
-    )
+    # Direct read, not ``getattr`` with a default: the hidden third argument
+    # is exactly what this ticket removed, and every contour declares it.
+    if not settings.AYLA_PAYMENTS_TEST_MODE:
+        return []
+    if settings.DEBUG:
+        # Local dev and CI: stub links are the obvious answer — see above.
+        return []
     return [
         CheckWarning(
-            f"Payments mode: {mode}.",
-            hint=hint,
+            "Payments mode: test.",
+            hint=(
+                "Stub checkout links: nobody can actually pay, on a contour "
+                "that is not DEBUG. Deliberate on a stand; production has no "
+                "default and refuses to boot without an explicit "
+                "AYLA_PAYMENTS_TEST_MODE."
+            ),
             id="payments.W001",
         )
     ]
