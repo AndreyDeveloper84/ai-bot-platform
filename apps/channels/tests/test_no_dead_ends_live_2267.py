@@ -178,6 +178,36 @@ def _an_empty_catalogue(monkeypatch) -> None:
     monkeypatch.setattr("apps.orchestrator.discovery.discover_salons", lambda **kw: [])
 
 
+def _a_diary_with_records(monkeypatch) -> None:
+    """Согласие есть, каталог питания отвечает итогами дня.
+
+    Подставляется тот же двойник, что у узлов дневника
+    (``test_personal_surface._FakeAyla``), — с настоящей поверхностью, а не
+    ``Mock``: подменённый клиент, который отвечает на что угодно, прятал бы
+    ошибку чтения вместо того, чтобы её показать.
+    """
+    from apps.orchestrator.tests.test_personal_surface import (
+        _FakeAyla,
+        _install_ayla,
+        _profile,
+        _summary,
+        _water,
+    )
+
+    monkeypatch.setattr(
+        "apps.orchestrator.personal_surface.personal_records_consent_open", lambda _u: True
+    )
+    monkeypatch.setattr("apps.consent.nutrition.diary_is_granted", lambda _u: True)
+    _install_ayla(
+        monkeypatch,
+        _FakeAyla(
+            summary=_summary(),
+            water=_water(),
+            profile=_profile(targets_source="ayla_calculated"),
+        ),
+    )
+
+
 def _no_personal_data(monkeypatch) -> None:
     """Согласия на личные данные нет — записи читать нельзя (срез 7)."""
     monkeypatch.setattr(
@@ -208,6 +238,7 @@ LADDER: tuple[tuple[str, str, str, Callable[[Any], None] | None], ...] = (
     ("cb:catalog:salons", "catalogue_salons_empty", "пока нет", _an_empty_catalogue),
     # ── согласие и личные данные ─────────────────────────────────────────
     ("что я ел сегодня", "diary_without_consent", "нужно согласие", _no_personal_data),
+    ("что я ел сегодня", "diary_with_records", "ккал", _a_diary_with_records),
     # ── просьбы замолчать и настройка проактива ──────────────────────────
     ("не пиши мне", "opt_out", "больше не пишу первой", None),
     ("cb:nutri:stop:report", "surface_stop", "больше не присылаю", None),
