@@ -18,8 +18,15 @@ from apps.skills.base import SkillResult
 
 class TestOneReaderTwoCarriers:
     def test_the_field_and_the_meta_key_read_the_same(self) -> None:
-        by_field = SkillResult(
-            reply_text="Записала 250 мл 💧",
+        """Носителя два, и оба настоящие.
+
+        ``meta`` — у ответов навыков: его шов переносит целиком, а отдельное
+        поле умерло бы на шве молча (сторож шва, DRF-1419, это и ловит).
+        Поле — у ``MemoryCommandResult``, у которого ``meta`` нет вовсе и
+        который через шов не ходит.
+        """
+        by_field = MemoryCommandResult(
+            text="Записала 250 мл 💧",
             claims_done="water_logged",
             claims_done_evidence="ayla.entry_id",
         )
@@ -53,7 +60,9 @@ class TestOneReaderTwoCarriers:
         будет их найти. Читатель не подставляет доказательство и не роняет
         ход: он отдаёт утверждение с пустым доказательством.
         """
-        claim = done_claim(SkillResult(reply_text="Подтверждено", claims_done="visit_confirmed"))
+        claim = done_claim(
+            SkillResult(reply_text="Подтверждено", meta={KIND_KEY: "visit_confirmed"})
+        )
 
         assert claim is not None
         assert claim.kind == "visit_confirmed"
@@ -78,8 +87,8 @@ class TestTheMarkedBranchesAgree:
             if "tests" in path.parts or "migrations" in path.parts:
                 continue
             src = path.read_text(encoding="utf-8")
-            for match in re.finditer(r'claims_done="([^"]+)"', src):
+            for match in re.finditer(r'"?claims_done"?[=:] ?"([^"]+)"', src):
                 marked += 1
                 tail = src[match.end() : match.end() + 400]
-                assert 'claims_done_evidence="' in tail, f"{path.name}: {match.group(1)}"
+                assert "claims_done_evidence" in tail, f"{path.name}: {match.group(1)}"
         assert marked >= 10, marked
