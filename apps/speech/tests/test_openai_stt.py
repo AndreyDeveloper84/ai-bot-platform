@@ -108,7 +108,10 @@ class TestTranscribe:
             out = provider.transcribe(b"OggS", mime="audio/ogg", timeout_s=15.0)
         assert out == SpeechRefusal(RefusalCode.EMPTY, "empty_text")
 
+    @override_settings(OPENAI_API_KEY="")
     def test_no_api_key_refuses_without_network(self):
+        # В CI OPENAI_API_KEY задан в окружении — пустой аргумент падает на
+        # настройки, поэтому ключ снимается и там.
         p = OpenAISpeechProvider(api_key="", proxy="")
         with patch.object(p, "_get_client") as get_client:
             out = p.transcribe(b"OggS", mime="audio/ogg", timeout_s=15.0)
