@@ -59,7 +59,8 @@ logger = logging.getLogger(__name__)
 
 ItemState = Literal["done", "missing", "unknown", "unavailable"]
 
-#: Пункты, без которых ``ready`` не бывает истиной. ``identity`` сюда не
+#: Пункты, без которых ``ready_to_submit`` не бывает истиной, — когда мастер
+#: может их закрыть (недоступные считаются отдельно). ``identity`` сюда не
 #: входит: связь — условие ПУБЛИКАЦИИ (ruling 6), а не настройки; она
 #: отдаётся отдельным полем, чтобы экран показал «ожидает оператора», не
 #: смешивая с тем, что мастер может сделать сам.
@@ -84,9 +85,10 @@ SERVICES_DIRECTIONS_LINK = "/solo/directions"
 #: называет рабочее пространство салоном (``Tenant.kind == salon``). Причина
 #: нейтральная: это и настоящий однолюдный салон (место ведёт салон — правда),
 #: и соло до G4, которому признак проставят позже (решение владельца, 3а).
-#: Такие пункты ``unavailable`` и без ``deep_link`` (вести некуда). ``ready``
-#: они блокируют, как блокирует ``capability_not_built``: достижимость «готово»
-#: при ведении вне приложения — отдельное решение владельца, не этот лист.
+#: Такие пункты ``unavailable`` и без ``deep_link`` (вести некуда). Отправку
+#: профиля они больше НЕ держат — DRF-2350 (§77 п. 1, 23.09.2026): владелец
+#: ответил на вопрос, который этот лист ему оставил. Пункт остаётся требуемым
+#: и виден в ``managed_elsewhere``.
 MANAGED_OUTSIDE_APP = "managed_outside_app"
 SALON_MANAGED_ITEMS: tuple[str, ...] = ("services", "location")
 
@@ -124,16 +126,53 @@ class Readiness:
 
     @property
     def blocking(self) -> list[str]:
-        """Пункты, из-за которых ``ready`` ложно — с состоянием, не только именем."""
+        """Пункты, которые ДЕРЖАТ отправку — с состоянием, не только именем.
+
+        DRF-2350 (§77 п. 1, решение владельца 23.09.2026): недоступный пункт
+        отсюда убран. Держать отправку из-за шага, которого у мастера нет,
+        значит требовать работы, которой он сделать не может: салонный
+        мастер с закрытыми расписанием и профилем упирался в полную полосу
+        готовности без единой кнопки (замер DRF-2326). Недоступное не
+        пропадает — оно в :attr:`managed_elsewhere`.
+
+        ``unknown`` держит по-прежнему: «канон не ответил» — это незнание, а
+        не отсутствие шага, и открывать по нему отправку значило бы гадать.
+        """
 
         return [
             f"{item.key}:{item.state}"
             for item in self.items
-            if item.key in REQUIRED_ITEMS and item.state != "done"
+            if item.key in REQUIRED_ITEMS and item.state not in ("done", "unavailable")
         ]
 
     @property
-    def ready(self) -> bool:
+    def managed_elsewhere(self) -> list[str]:
+        """Требуемые пункты, которых у мастера сейчас нет, — с ПРИЧИНОЙ.
+
+        Без этого списка «готов» читался бы как «настроено всё», а это
+        неправда: часть шагов ведётся не здесь либо возможности ещё нет.
+        Причина, а не состояние: состояние у всех одно (``unavailable``), и
+        список из четырёх одинаковых слов не сказал бы читателю ничего.
+        """
+
+        return [
+            f"{item.key}:{item.reason or item.state}"
+            for item in self.items
+            if item.key in REQUIRED_ITEMS and item.state == "unavailable"
+        ]
+
+    @property
+    def ready_to_submit(self) -> bool:
+        """Закрыто всё, что мастер может закрыть САМ.
+
+        Имя новое намеренно (DRF-2350). Прежнее ``ready`` значило «настроены
+        все требуемые пункты»; теперь признак говорит о другом — о том, что
+        от мастера больше ничего не ждут. Старое имя на этом смысле врало бы
+        читателю, который его помнит. На проводе ключ остаётся ``ready``:
+        его читает уже отгруженная сборка Mini App, и смена значения для неё
+        — ровно то, чего хотел владелец (кнопка отправки появляется).
+        """
+
         return not self.blocking
 
     @property
@@ -142,8 +181,9 @@ class Readiness:
 
     def as_dict(self) -> dict[str, Any]:
         return {
-            "ready": self.ready,
+            "ready": self.ready_to_submit,
             "blocking": self.blocking,
+            "managed_elsewhere": self.managed_elsewhere,
             "items": [item.as_dict() for item in self.items],
             "identity": dict(self.identity),
             "setup_state": self.setup_state,
