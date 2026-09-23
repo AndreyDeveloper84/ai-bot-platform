@@ -518,7 +518,17 @@ def _resolve_client(master, arguments: dict[str, Any], *, tz) -> dict[str, Any]:
         log="master_api.assistant.find_client",
     )
     if isinstance(rows, Refusal):
-        raise ActionError("Не удалось проверить клиентов. Попробуйте снова.", verbatim=True)
+        # DRF-2362: без карточки отказ запирает разговор — на любой ответ
+        # мастера («это новый клиент») помощник повторял ту же строку.
+        # Дверь берётся у соседней ветки «клиента с таким именем нет»: она
+        # ведёт туда же, где нового гостя и заводят, и новых слов не вносит.
+        from apps.master_api.services.assistant_cards import booking_form_url
+
+        raise ActionError(
+            "Не удалось проверить клиентов. Попробуйте снова.",
+            verbatim=True,
+            cards=[{"kind": "open", "url": booking_form_url(master), "label": "Добавить запись"}],
+        )
     enriched = enrich_customer_rows(master, rows)
     if client_id:
         # Выбор из карточки: берётся ровно тот, кого мастер нажал; если его
