@@ -5089,10 +5089,25 @@ a {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  background: var(--c-surface-2);
-  color: var(--c-text-secondary);
+  /* Те же краски, что у кружка на профиле клиента (`.profile-header__
+     avatar`): один человек — один узнаваемый кружок на обоих экранах.
+     Прежняя пара `--c-surface-2` на `--c-surface-1` давала контраст
+     ~1.05:1, то есть кружка не было видно вовсе, а инициалы читались
+     как две отбившиеся серые буквы (найдено ревью DRF-2331). */
+  background: var(--c-success);
+  color: var(--c-text-on-accent);
   font-size: var(--font-size-100);
   font-weight: 600;
+  letter-spacing: 0.04em;
+}
+/* Держит высоту строки имени, пока день грузится. */
+.wellness-dash__person-skel {
+  width: 96px;
+  height: 15px;
+  border-radius: var(--r-sm);
+}
+.wellness-dash__person-wave {
+  flex: none;
 }
 .wellness-dash__person-text {
   display: flex;

@@ -721,15 +721,36 @@ export function CustomerWellnessDashboardScreen() {
             {avatarInitials(displayName)}
           </span>
           <span className="wellness-dash__person-text">
-            {displayName && (
-              <span className="wellness-dash__person-name">
-                {displayName} <span aria-hidden="true">👋</span>
-              </span>
+            {/* Пока день грузится, имени ещё нет — и раньше строка просто
+                отсутствовала, отчего «Рада вас видеть!» прыгала внутри
+                56 px при каждом обновлении (в том числе при «Отменить» у
+                стакана воды, DRF-2331, по ревью). Скелет держит высоту и
+                говорит «грузится», а не «имени нет» — тем же приёмом, что
+                блок приветствия ниже. */}
+            {today.kind === "loading" ? (
+              <span
+                className="skeleton wellness-dash__person-skel"
+                aria-hidden="true"
+              />
+            ) : (
+              displayName && (
+                <span className="wellness-dash__person-name">
+                  {displayName}
+                </span>
+              )
             )}
             <span className="wellness-dash__person-hi">
               {HEADER_WELCOME_LINE}
             </span>
           </span>
+          {/* 👋 — сосед строки имени, не её содержимое: внутри он
+              съедался многоточием первым, и длинное имя оставалось без
+              приветственного жеста макета. */}
+          {today.kind !== "loading" && displayName && (
+            <span className="wellness-dash__person-wave" aria-hidden="true">
+              👋
+            </span>
+          )}
         </div>
         <div className="wellness-dash__brand">
           {/* «ayla» = English wordmark per Tau §7 — wrap in lang="en"

@@ -58,8 +58,10 @@ vi.mock("../lib/max-sdk", () => ({
 }));
 
 import { getCatalogBrowse } from "../lib/customer-booking";
-import { CustomerWellnessDashboardScreen } from "./CustomerWellnessDashboardScreen";
-import { HEADER_WELCOME_LINE } from "./CustomerWellnessDashboardScreen";
+import {
+  CustomerWellnessDashboardScreen,
+  HEADER_WELCOME_LINE,
+} from "./CustomerWellnessDashboardScreen";
 
 const mockedBrowse = vi.mocked(getCatalogBrowse);
 
@@ -159,22 +161,88 @@ describe("Д1 — шапка H01 (DRF-2331)", () => {
     );
   });
 
-  it("без имени: кружок не пустой, приветствие на месте, пустой строки имени нет", async () => {
-    // Сервер имени не прислал — это бывает и на загрузке, и когда ручка
-    // отдала день без `display_name`. Шапка обязана остаться осмысленной.
-    serve({ ...TODAY, display_name: "" });
+  // Два РАЗНЫХ отсутствия имени, и оба реальны.
+  //
+  // `""` — то, что шлёт этот сервер: имя он собирает сам
+  // (`client_name or display_name or ""`, `views.py` 3760/3778/3994), то
+  // есть ключ приходит всегда, а пустым бывает у человека, который не
+  // назвался и чей канал имени не дал.
+  //
+  // Ключа нет вовсе — контракт это допускает (`display_name?: string`), и
+  // так ответит сервер постарше. Проверяются оба, потому что сходятся они
+  // только на `?? ""`, а это ровно та строка, которую узел и стережёт.
+  const NO_NAME_CASES: Array<[string, Record<string, unknown>]> = [
+    ["пустая строка от сервера", { ...TODAY, display_name: "" }],
+    [
+      "ключа нет вовсе",
+      Object.fromEntries(
+        Object.entries(TODAY).filter(([k]) => k !== "display_name"),
+      ),
+    ],
+  ];
+
+  it.each(NO_NAME_CASES)(
+    "без имени (%s): кружок не пустой, приветствие на месте, строки имени нет",
+    async (_case, today) => {
+      serve(today);
+      renderHome();
+
+      // Сперва утверждение о НАЛИЧИИ: без него проверки ниже были бы
+      // зелёными и на не отрисовавшейся шапке.
+      await waitFor(() =>
+        expect(
+          within(header()).getByText(HEADER_WELCOME_LINE),
+        ).toBeInTheDocument(),
+      );
+      // «·» — ответ приложения на «имени нет», тот же, что на профиле.
+      expect(within(header()).getByText("·")).toBeInTheDocument();
+      expect(within(header()).queryByText("Мария Петрова")).toBeNull();
+      // Строки имени нет КАК УЗЛА, а не «в ней пусто»: без этого сторож
+      // пропустил бы жирную пустую строку с одиноким 👋 — ровно то, что
+      // осталось бы, потеряйся условие в вёрстке (найдено ревью).
+      expect(header().querySelector(".wellness-dash__person-name")).toBeNull();
+      expect(within(header()).queryByText("👋")).toBeNull();
+    },
+  );
+
+  it("пока день грузится, шапка не роняет высоту и не врёт про имя", async () => {
+    // Обновление дня (в том числе «Отменить» у стакана воды) возвращает
+    // экран в `loading`. Раньше строка имени в этот момент исчезала, и
+    // «Рада вас видеть!» прыгала внутри 56 px; теперь место держит скелет.
+    let release: (v: unknown) => void = () => undefined;
+    const held = new Promise((resolve) => {
+      release = resolve;
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: unknown) => {
+        const u = String(url);
+        if (u.includes("/wellness/today")) {
+          await held;
+          return ok(TODAY);
+        }
+        if (u.includes("/recent-activity")) return ok({ this_week_booking_count: 0 });
+        if (u.includes("/plan-lite")) return ok({ plan_lite: null });
+        if (u.includes("/last-topic")) return ok({ last_topic: null });
+        throw new Error(`unexpected fetch: ${u}`);
+      }),
+    );
     renderHome();
 
-    // Сперва утверждение о НАЛИЧИИ: без него следующая проверка была бы
-    // зелёной и на не отрисовавшейся шапке.
+    // Наличие — первым: шапка отрисована и здоровается уже на загрузке.
     await waitFor(() =>
       expect(
         within(header()).getByText(HEADER_WELCOME_LINE),
       ).toBeInTheDocument(),
     );
-    // «·» — ответ приложения на «имени нет», тот же, что на профиле.
-    expect(within(header()).getByText("·")).toBeInTheDocument();
-    expect(within(header()).queryByText("Мария Петрова")).toBeNull();
+    expect(header().querySelector(".wellness-dash__person-skel")).not.toBeNull();
+
+    release(null);
+    await waitFor(() =>
+      expect(within(header()).getByText(/Мария Петрова/)).toBeInTheDocument(),
+    );
+    // Скелет ушёл, как только имя пришло.
+    expect(header().querySelector(".wellness-dash__person-skel")).toBeNull();
   });
 
   it("колокольчика нет: ленты уведомлений не существует", async () => {
