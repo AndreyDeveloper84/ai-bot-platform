@@ -1,4 +1,5 @@
 import { getInitData } from "./max-sdk";
+import { markRead } from "./claims";
 import { applyDevBypassHeaders } from "./dev-bypass";
 import { applySalonChoiceHeader } from "./salon-choice";
 
@@ -63,7 +64,11 @@ export async function requestWithStatus<T>(
     throw new ApiError(res.status, body.error, body.detail, body.details);
   }
   if (res.status === 204) return { status: res.status, data: undefined as T };
-  return { status: res.status, data: (await res.json()) as T };
+  // DRF-2347 — метка прочитанного. Доказательство утверждения экрана можно
+  // поставить только здесь, внутри клиента: символ метки наружу не вывозится.
+  // Метка неперечислимая — тело ответа остаётся тем же телом.
+  const body = markRead((await res.json()) as T, { source: path, status: res.status });
+  return { status: res.status, data: body };
 }
 
 // --- auth ---
