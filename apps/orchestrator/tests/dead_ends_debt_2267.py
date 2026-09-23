@@ -12,7 +12,7 @@ DEBT: dict[str, int] = {
     "apps/bookings/callbacks.py::_dispatch_reschedule": 4,
     "apps/bookings/callbacks.py::_handle_confirm_tap": 1,
     "apps/channels/max/global_onboarding.py::run_onboarding_turn": 1,
-    "apps/channels/max/handler.py::_handle_global_max_event_inner": 11,
+    "apps/channels/max/handler.py::_handle_global_max_event_inner": 10,
     "apps/orchestrator/concierge.py::_concierge_turn._reply": 1,
     "apps/orchestrator/concierge.py::_execute_start_booking": 1,
     "apps/orchestrator/concierge.py::generate_concierge_reply": 1,
