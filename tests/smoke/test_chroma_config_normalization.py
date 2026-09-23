@@ -109,6 +109,8 @@ def _set_required_production_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MYSITE_WEBHOOK_HMAC_SECRET", "hmac-secret-abc")  # noqa: S105
     # DRF-2340 — режим оплаты обязателен в бою, как и токены выше.
     monkeypatch.setenv("AYLA_PAYMENTS_TEST_MODE", "false")
+    # DRF-2346 — путь записи обязателен в бою, как и режим оплаты выше.
+    monkeypatch.setenv("BOOKING_VIA_AYLA_REST", "true")
 
 
 class TestProductionAuthGuard:
