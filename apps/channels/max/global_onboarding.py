@@ -472,9 +472,9 @@ def run_onboarding_turn(
 def _resume_after_consent(result: Any, bot_user: Any) -> DiscoveryReply | None:
     """Возврат в поток, ради которого человек дал согласие (DRF-2267).
 
-    Сегодня такой поток один — чтение дневника (``consent_origin == "diary"``):
+    Таких потоков два — чтение дневника и список памяти (``consent_origin``):
     отказ «мне нужно согласие на обработку личных данных» получил кнопку
-    согласия, и после неё человек должен увидеть то, за чем шёл.
+    согласия, и после неё человек должен увидеть то, за чем шёл, а не начало.
 
     **Почему здесь, а не в навыке.** Журнал 152-ФЗ пишется выше по этой же
     функции, ПОСЛЕ ``WelcomeSkill.handle``. Дневник, нарисованный внутри
@@ -497,14 +497,17 @@ def _resume_after_consent(result: Any, bot_user: Any) -> DiscoveryReply | None:
     if origin not in CONSENT_RECOVERY_RESUMED_ORIGINS:
         return None
     try:
+        from apps.orchestrator import personal_surface
         from apps.orchestrator.coach_observation import Cadence
-        from apps.orchestrator.personal_surface import render_diary
 
-        diary = render_diary(bot_user, cadence=Cadence.UNTRACKED)
+        if origin == "memory":
+            resumed = personal_surface.render_memory(bot_user)
+        else:
+            resumed = personal_surface.render_diary(bot_user, cadence=Cadence.UNTRACKED)
     except Exception:  # noqa: BLE001 — возврат не может стоить согласия
-        logger.exception("global_onboarding.consent_resume_failed origin=diary")
+        logger.exception("global_onboarding.consent_resume_failed origin=%s", origin)
         return None
-    return DiscoveryReply(text=diary.text, action_data=diary.action_data)
+    return DiscoveryReply(text=resumed.text, action_data=resumed.action_data)
 
 
 def _is_consent_grant_turn(result: Any) -> bool:

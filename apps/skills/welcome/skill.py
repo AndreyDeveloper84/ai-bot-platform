@@ -670,10 +670,15 @@ class WelcomeSkill:
         _stamp_welcomed_at(context.bot_user)
         action_data: dict | None = None
         if origin in CONSENT_RECOVERY_RESUMED_ORIGINS:
-            # Возврат делает вызывающий, после записи согласия.
-            from apps.orchestrator.personal_surface import DIARY_UNAVAILABLE_TEXT
+            # Возврат делает вызывающий, после записи согласия. Сюда ветка
+            # доходит, только если возврат не состоялся, и тогда говорит то
+            # же, что сама поверхность в свой недоступный час.
+            from apps.orchestrator.personal_surface import (
+                DIARY_UNAVAILABLE_TEXT,
+                MEMORY_UNAVAILABLE_TEXT,
+            )
 
-            reply_text = DIARY_UNAVAILABLE_TEXT
+            reply_text = MEMORY_UNAVAILABLE_TEXT if origin == "memory" else DIARY_UNAVAILABLE_TEXT
         else:
             reply_text = CONSENT_RECOVERY_RETURN_TEXTS[origin]
         if origin == "miniapp":
@@ -1037,6 +1042,7 @@ CONSENT_RECOVERY_ORIGINS: tuple[str, ...] = (
     "target",
     "miniapp",
     "diary",
+    "memory",
 )
 
 #: Вид ответа «согласие выдано из отказа»: по нему глобальный онбординг пишет
@@ -1070,7 +1076,7 @@ CONSENT_OFFER_LABEL = "Дать согласие"
 #: после записи согласия). Фразы в :data:`CONSENT_RECOVERY_RETURN_TEXTS` у
 #: них нет и не должно быть: это был бы новый видимый текст рядом с ответом,
 #: который человек и так получит.
-CONSENT_RECOVERY_RESUMED_ORIGINS: frozenset[str] = frozenset({"diary"})
+CONSENT_RECOVERY_RESUMED_ORIGINS: frozenset[str] = frozenset({"diary", "memory"})
 
 #: Для ``diary`` строки здесь нет намеренно: возвращает сам дневник, своим
 #: текстом (см. :data:`CONSENT_RECOVERY_ORIGINS`). Сюда ветка доходит только

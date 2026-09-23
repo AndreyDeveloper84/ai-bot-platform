@@ -230,6 +230,11 @@ DIARY_UNAVAILABLE_TEXT = (
 #: PERSONAL_DATA is not granted. The bot must not read, and must not pretend
 #: the record is empty either — «пусто» and «мне нельзя смотреть» are
 #: different truths.
+#: Память не поднялась. Строка та же, что была внутри :func:`render_memory`;
+#: имя понадобилось, чтобы запасной путь возврата после согласия (DRF-2267)
+#: говорил ровно то же, а не выдумывал новое обещание.
+MEMORY_UNAVAILABLE_TEXT = "Не могу сейчас поднять, что о тебе помню."
+
 CONSENT_CLOSED_TEXT = (
     "Чтобы показать твои записи, мне нужно согласие на обработку личных "
     "данных — без него я к ним не обращаюсь."
@@ -432,18 +437,7 @@ def render_diary(
         return _reply(_nutrition_unavailable_text(), [])
 
     if not personal_records_consent_open(bot_user):
-        # DRF-2267 (CD §72): отказ назвал условие и не давал его выполнить.
-        # Кнопка ведёт на экран согласия и помнит, что человек шёл в дневник
-        # (DRF-1968); вне глобального пути её нет — там тап вернулся бы к
-        # тому же отказу, — и остаётся общий выход.
-        from apps.skills.welcome.skill import consent_offer_action_data
-
-        offer = consent_offer_action_data("diary")
-        if offer is not None:
-            return DiscoveryReply(text=CONSENT_CLOSED_TEXT, action_data=offer)
-        from apps.orchestrator.next_steps import menu_button
-
-        return _reply(CONSENT_CLOSED_TEXT, [menu_button()])
+        return _consent_closed_reply("diary")
 
     profile = _fetch_profile(bot_user)
     if period == PERIOD_WEEK:
@@ -592,6 +586,26 @@ def _render_week(bot_user: Any, profile: Any) -> DiscoveryReply:
     return _reply("\n".join(lines), _diary_chips(profile))
 
 
+def _consent_closed_reply(origin: str) -> DiscoveryReply:
+    """Отказ по согласию с выходом — кнопкой согласия или «Меню» (DRF-2267).
+
+    Отказ называл условие и не давал способа его выполнить. Кнопка ведёт на
+    экран согласия и помнит, куда человек шёл (DRF-1968): после согласия он
+    возвращается в СВОЙ поток, а не в начало. Вне глобального пути кнопки
+    нет — там тап вернул бы к тому же отказу, — и остаётся общий выход.
+
+    Ворота этим не трогаются: обе поверхности спрашивают согласие сами.
+    """
+    from apps.skills.welcome.skill import consent_offer_action_data
+
+    offer = consent_offer_action_data(origin)
+    if offer is not None:
+        return DiscoveryReply(text=CONSENT_CLOSED_TEXT, action_data=offer)
+    from apps.orchestrator.next_steps import menu_button
+
+    return _reply(CONSENT_CLOSED_TEXT, [menu_button()])
+
+
 def _diary_chips(profile: Any) -> list[dict[str, str]]:
     """Chips for a diary view. Each callback is claimed deterministically.
 
@@ -635,13 +649,17 @@ def render_memory(bot_user: Any) -> DiscoveryReply:
     about a person, which is the one thing this surface may never produce.
     """
     if not personal_records_consent_open(bot_user):
-        return _reply(CONSENT_CLOSED_TEXT, [])
+        return _consent_closed_reply("memory")
     from apps.identity.services.person_context_gate import person_context_access
 
     if person_context_access(bot_user) is not None:
         # §2.4 (S2-2): the same closed door as no consent, from the person's
         # side — not a placeholder, not a fact. The reason is in the gate's log.
-        return _reply(CONSENT_CLOSED_TEXT, [])
+        #
+        # DRF-2267: выход тот же. На глобальном пути эта дверь не запирается
+        # вовсе (ворота пропускают сентинел), а на салонном кнопки согласия
+        # нет — остаётся «Меню».
+        return _consent_closed_reply("memory")
     try:
         from apps.persona.memory_commands import memory_show_chips, render_memory_summary
 
@@ -649,7 +667,7 @@ def render_memory(bot_user: Any) -> DiscoveryReply:
         chips = memory_show_chips(bot_user)
     except Exception:  # noqa: BLE001 — memory must never break the turn
         logger.exception("orchestrator.personal_surface.memory_render_failed")
-        return _reply("Не могу сейчас поднять, что о тебе помню.", [])
+        return _reply(MEMORY_UNAVAILABLE_TEXT, [])
     if chips:
         text = f"{text}\n\n{MEMORY_CORRECT_HINT}"
     return _reply(text, chips)
