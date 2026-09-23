@@ -247,7 +247,7 @@ describe("CustomerWellnessDashboardScreen — the home surface", () => {
   // `ServiceDetailScreen.price.test.tsx` на карточке услуги. Вернётся полка
   // — вернётся и её ценовой узел. Код полки НЕ удалён — вопрос 40 от
   // 20.09 (снимать совсем или оставить обездвиженной) у владельца, и
-  // включение — одна строка `SHOW_AYLA_PICKS_SHELF`. Поэтому узел пинит
+  // включение — одна строка в `lib/ayla-picks-shelf`. Поэтому узел пинит
   // ОТСУТСТВИЕ НА ЭКРАНЕ при полноценном ответе источника: если полку
   // вернут, не ответив на вопрос 40, он покраснеет.
   it("DEV build, Block 7: picks with WHY still do NOT reach the screen", async () => {
@@ -266,10 +266,16 @@ describe("CustomerWellnessDashboardScreen — the home surface", () => {
       picksOutcome: "OK",
     });
     await renderScreen(false);
-    // Присутствие: экран отрисован, подборка пришла с объяснением —
-    // значит отсутствие ниже про решение, а не про пустой ответ.
+    // Присутствие: экран отрисован — значит отсутствие ниже про решение,
+    // а не про пустой рендер.
+    //
+    // Прежде присутствием служил сам запрос («подборка пришла с
+    // объяснением»). DRF-2348 его снял: пока полка обездвижена, Главная за
+    // данными не ходит (§172, ответ 40). Утверждается то, что стало
+    // верным; пара «зажжено → запрос и картинка» живёт в
+    // `…shelfRequest2348.test.tsx`.
     expect(await screen.findByText(/стаканов/)).toBeInTheDocument();
-    expect(mockedBrowse).toHaveBeenCalled();
+    expect(mockedBrowse).not.toHaveBeenCalled();
     expect(
       screen.queryByRole("heading", { name: /Ayla подобрала тебе/ }),
     ).not.toBeInTheDocument();
