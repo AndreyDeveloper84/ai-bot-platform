@@ -225,6 +225,9 @@ from apps.skills.nutrition_anketa.fsm import (
     ACTIVITY_COEFFICIENTS,
     PACE_GOALS,
     ACTIVITY_SKIP,
+    DIET_OTHER,
+    DIET_SKIP,
+    DIET_SKIP_WIRE_NAME,
     ADULT_AGE,
     PACE_CHOICES,
     CHOICE_STEPS,
@@ -1974,8 +1977,23 @@ class NutritionAnketaSkill:
             body["activity_coefficient"] = ACTIVITY_COEFFICIENTS[activity]
         if answers["goal"] in PACE_GOALS:
             body["pace"] = answers["pace"]
+        skipped: list[str] = []
         if activity == ACTIVITY_SKIP:
-            body["_skipped_fields"] = ["activity"]
+            skipped.append("activity")
+
+        # DRF-2310. Тип питания: значение из словаря каталога, слова — только
+        # у «другого». «Пропустить» значения НЕ подставляет: молчание ответом
+        # не становится, уходит пометка с коротким именем вопроса.
+        diet = answers.get("diet")
+        if diet == DIET_SKIP:
+            skipped.append(DIET_SKIP_WIRE_NAME)
+        elif diet:
+            body["diet_preference"] = diet
+            if diet == DIET_OTHER:
+                body["diet_note"] = answers["diet_note"]
+
+        if skipped:
+            body["_skipped_fields"] = skipped
         return attach_consent(body, attestation)
 
 

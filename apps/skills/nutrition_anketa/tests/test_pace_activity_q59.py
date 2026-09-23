@@ -52,7 +52,8 @@ class TestP1LoseAsksPace:
         assert asked.action_type == "anketa_step_pace"
         assert run.captured == []
 
-        done = run.turn("cb:anketa:choice:pace:gentle")
+        run.turn("cb:anketa:choice:pace:gentle")
+        done = run.turn("cb:anketa:choice:diet:omnivore")  # DRF-2310: анкету замыкает питание
         assert done.action_type == "anketa_complete"
         assert run.captured[0]["data"]["pace"] == "gentle"
 
@@ -64,7 +65,8 @@ class TestP1LoseAsksPace:
 class TestP2MaintainDoesNotAskPace:
     def test_maintain_completes_without_pace(self) -> None:
         run = _Run(_state("goal", _ANSWERED))
-        done = run.turn("cb:anketa:choice:goal:maintain")
+        run.turn("cb:anketa:choice:goal:maintain")
+        done = run.turn("cb:anketa:choice:diet:omnivore")  # DRF-2310: анкету замыкает питание
         assert done.action_type == "anketa_complete"
         data = run.captured[0]["data"]
         # Присутствие: тело ушло — отсутствие ниже про темп.
@@ -79,7 +81,8 @@ class TestP3UnknownActivitySendsNoNumber:
         хватает данных»."""
         run = _Run(_state("activity", _BODY))
         run.turn(f"cb:anketa:choice:activity:{ACTIVITY_SKIP}")
-        done = run.turn("cb:anketa:choice:goal:maintain")
+        run.turn("cb:anketa:choice:goal:maintain")
+        done = run.turn("cb:anketa:choice:diet:omnivore")  # DRF-2310: анкету замыкает питание
         assert done.action_type == "anketa_complete"
         data = run.captured[0]["data"]
         assert data["_skipped_fields"] == ["activity"]
@@ -130,7 +133,8 @@ class TestR1ATapOfAnotherStepIsNotAnAnswer:
         assert run.captured == []
         assert "pace" not in run.bucket["answers"]
 
-        done = run.turn("cb:anketa:choice:pace:gentle")
+        run.turn("cb:anketa:choice:pace:gentle")
+        done = run.turn("cb:anketa:choice:diet:omnivore")  # DRF-2310: анкету замыкает питание
         assert done.action_type == "anketa_complete"
         assert run.captured[0]["data"]["pace"] == "gentle"
 

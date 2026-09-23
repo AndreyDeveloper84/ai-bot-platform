@@ -226,6 +226,7 @@ class TestH4ThePersonsChoiceWins:
         run.turn("cb:anketa:choice:goal:gain")
         # Вопрос 59: «набрать» спрашивает темп — ответ закрывает анкету.
         run.turn("cb:anketa:choice:pace:gentle")
+        run.turn("cb:anketa:choice:diet:omnivore")  # DRF-2310: анкету замыкает питание
         assert len(run.captured) == 1
         data = run.captured[0]["data"]
         assert data["goal"] == "gain"

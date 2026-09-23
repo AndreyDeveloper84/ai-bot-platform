@@ -58,6 +58,23 @@ _READY_FOR_GOAL = {
     }
 }
 
+#: DRF-2310: анкету замыкает шаг «тип питания», и тело уходит на НЁМ, а не на
+#: цели. Утверждение о согласии от этого не меняется — меняется последний шаг.
+_READY_FOR_DIET = {
+    "nutrition_anketa": {
+        "current_step": "diet",
+        "answers": {
+            "gender": "female",
+            "age": 28,
+            "height": 168,
+            "weight": 62,
+            "activity": "light",
+            "goal": "maintain",
+        },
+        "is_complete": False,
+    }
+}
+
 
 class _Conversation:
     def __init__(self, initial: dict | None = None) -> None:
@@ -137,8 +154,8 @@ def _complete(ctx: SkillContext, client: Mock, attestation_side_effect: object) 
 
 
 class TestWithAttestationTheBodyCarriesIt:
-    def test_body_is_six_fields_plus_the_consent_block_verbatim(self) -> None:
-        ctx, conversation = _context("cb:anketa:choice:goal:maintain", state=_READY_FOR_GOAL)
+    def test_body_is_the_named_fields_plus_the_consent_block_verbatim(self) -> None:
+        ctx, conversation = _context("cb:anketa:choice:diet:omnivore", state=_READY_FOR_DIET)
         client, captured = _capturing_client()
         attestation = ConsentAttestation(type="personal_calculation", document_version=VERSION)
 
@@ -154,13 +171,15 @@ class TestWithAttestationTheBodyCarriesIt:
             "weight_kg": 62,
             "goal": "maintain",
             "activity_coefficient": 1.375,
+            # DRF-2310: тип питания — часть тела с этого листа.
+            "diet_preference": "omnivore",
             "consent": {"type": "personal_calculation", "document_version": VERSION},
         }
         assert "nutrition_anketa" not in conversation.skill_state
 
     def test_the_attestation_is_asked_for_this_person(self) -> None:
         """Утверждение берётся по ``bot_user`` из контекста, не откуда-то ещё."""
-        ctx, _ = _context("cb:anketa:choice:goal:maintain", state=_READY_FOR_GOAL)
+        ctx, _ = _context("cb:anketa:choice:diet:omnivore", state=_READY_FOR_DIET)
         client, _ = _capturing_client()
         seen: list[object] = []
 
@@ -178,7 +197,7 @@ class TestWithAttestationTheBodyCarriesIt:
 
 class TestWithoutAttestationNothingIsSent:
     def _refused(self, reason: str) -> tuple[SkillResult, dict[str, Any], _Conversation]:
-        ctx, conversation = _context("cb:anketa:choice:goal:maintain", state=_READY_FOR_GOAL)
+        ctx, conversation = _context("cb:anketa:choice:diet:omnivore", state=_READY_FOR_DIET)
         result = _complete(
             ctx,
             _client_that_must_not_be_called(),
@@ -216,7 +235,7 @@ class TestWithoutAttestationNothingIsSent:
         ошибку реестра отвечал «согласие есть», этот тест дошёл бы до
         клиента и упал там.
         """
-        ctx, _ = _context("cb:anketa:choice:goal:maintain", state=_READY_FOR_GOAL)
+        ctx, _ = _context("cb:anketa:choice:diet:omnivore", state=_READY_FOR_DIET)
         with patch(_CLIENT, return_value=_client_that_must_not_be_called()):
             result = NutritionAnketaSkill().handle(ctx)
 

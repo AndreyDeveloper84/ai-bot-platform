@@ -152,7 +152,7 @@ class TestMatches:
 
 
 class TestFullWalk:
-    def test_full_7_step_completion_posts_to_ayla(self) -> None:
+    def test_full_walk_completion_posts_to_ayla(self) -> None:
         """Simulate the entire flow turn-by-turn. Same conversation
         object is mutated across turns; that's how the platform
         pipeline runs in practice (one conversation per chain)."""
@@ -214,9 +214,13 @@ class TestFullWalk:
             r7 = skill.handle(_ctx("cb:anketa:choice:activity:light"))
             assert r7.action_type == "anketa_step_goal"
 
-            # Turn 8: goal → complete.
+            # Turn 8: goal → тип питания (DRF-2310), не расчёт.
             r6 = skill.handle(_ctx("cb:anketa:choice:goal:maintain"))
-            assert r6.action_type == "anketa_complete"
+            assert r6.action_type == "anketa_step_diet"
+
+            # Turn 9: тип питания замыкает анкету.
+            r9 = skill.handle(_ctx("cb:anketa:choice:diet:omnivore"))
+            assert r9.action_type == "anketa_complete"
 
         # Ayla payload assembled correctly.
         assert len(captured) == 1
@@ -228,6 +232,8 @@ class TestFullWalk:
             "weight_kg": 62,
             "goal": "maintain",
             "activity_coefficient": 1.375,
+            # DRF-2310: тип питания — часть тела с этого листа.
+            "diet_preference": "omnivore",
             # DRF-1658: утверждение о согласии в форме границы #324.
             "consent": {
                 "type": "personal_calculation",
@@ -239,9 +245,10 @@ class TestFullWalk:
         # State wiped on completion.
         assert "nutrition_anketa" not in conversation.skill_state
 
-        # Summary mentions norms.
-        assert "ккал" in r6.reply_text.lower()
-        assert "1900" in r6.reply_text
+        # Summary mentions norms — на ответе ПОСЛЕДНЕГО шага (DRF-2310: им
+        # стал тип питания, на цели анкета больше не замыкается).
+        assert "ккал" in r9.reply_text.lower()
+        assert "1900" in r9.reply_text
 
 
 # ─── validation errors re-ask ─────────────────────────────────────────────
@@ -328,13 +335,15 @@ class TestErrorPaths:
         conversation = _StatefulConversation(
             {
                 "nutrition_anketa": {
-                    "current_step": "goal",
+                    # DRF-2310: анкету замыкает питание — отправка идёт на нём.
+                    "current_step": "diet",
                     "answers": {
                         "gender": "female",
                         "age": 28,
                         "height": 168,
                         "weight": 62,
                         "activity": "light",
+                        "goal": "maintain",
                     },
                     "is_complete": False,
                 }
@@ -344,7 +353,7 @@ class TestErrorPaths:
         ctx = SkillContext(
             conversation=conversation,  # type: ignore[arg-type]
             bot_user=bot_user,
-            message_text="cb:anketa:choice:goal:maintain",
+            message_text="cb:anketa:choice:diet:omnivore",
         )
 
         client = Mock()
@@ -423,6 +432,10 @@ class TestScreeningQuestionSitsWhereItSays:
             "activity",
             "goal",
             "pace",
+            # DRF-2310: тип питания замыкает анкету — расчёта он не касается,
+            # поэтому стоит после всего, что в расчёт входит.
+            "diet",
+            "diet_note",
         ]
 
     def test_screening_prompt_names_what_follows(self) -> None:
