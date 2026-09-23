@@ -80,6 +80,10 @@ LIVE_EXCEPTIONS: dict[str, str] = {
         "«не присылай итоги» — просьба замолчать, сказанная словами; тот же "
         "род, что тап «Не присылать»"
     ),
+    "catalogue_salons_empty": (
+        "B13 — «салонов пока нет»: кнопка здесь перерисовала бы то же самое "
+        "сообщение, а петля хуже точки (render_no_salons, DRF-1492)"
+    ),
     "surface_stop": (
         "тап «Не присылать» — та же просьба, только про одну поверхность: "
         "предлагать следующий шаг в ответ на «хватит» нельзя"
@@ -149,6 +153,31 @@ def _buttons(call: dict[str, Any]) -> list[dict[str, str]]:
     return out
 
 
+def _salons_in_the_catalogue(monkeypatch) -> None:
+    """Каталог отвечает салонами — ровно то, что читает ветка ``show_salons``.
+
+    Подставляется чтение (`discover_salons`), а не ответ ветки: в тот день,
+    когда каталог начнёт отдавать другое, строка обязана упасть.
+    """
+    from apps.marketplace.dto import SalonCard
+
+    card = SalonCard(
+        tenant_id=uuid.uuid4(),
+        name="Салон на Тверской",
+        city="Москва",
+        address="Тверская, 1",
+        master_count=3,
+        service_count=12,
+        sample_services=("Маникюр", "Стрижка"),
+    )
+    monkeypatch.setattr("apps.orchestrator.discovery.discover_salons", lambda **kw: [card])
+
+
+def _an_empty_catalogue(monkeypatch) -> None:
+    """Каталог пуст — тот же читатель, другой ответ."""
+    monkeypatch.setattr("apps.orchestrator.discovery.discover_salons", lambda **kw: [])
+
+
 def _no_personal_data(monkeypatch) -> None:
     """Согласия на личные данные нет — записи читать нельзя (срез 7)."""
     monkeypatch.setattr(
@@ -170,6 +199,13 @@ LADDER: tuple[tuple[str, str, str, Callable[[Any], None] | None], ...] = (
         "Не нахожу этого мастера в каталоге",
         None,
     ),
+    (
+        "cb:catalog:salons",
+        "catalogue_salons_found",
+        "Салон на Тверской",
+        _salons_in_the_catalogue,
+    ),
+    ("cb:catalog:salons", "catalogue_salons_empty", "пока нет", _an_empty_catalogue),
     # ── согласие и личные данные ─────────────────────────────────────────
     ("что я ел сегодня", "diary_without_consent", "нужно согласие", _no_personal_data),
     # ── просьбы замолчать и настройка проактива ──────────────────────────
