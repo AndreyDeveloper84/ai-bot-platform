@@ -47,6 +47,8 @@ import {
   useState,
 } from "react";
 import { useNavigate, useParams } from "react-router-dom";
+import { useScreenBack } from "../../hooks/useScreenBack";
+import { backByAction } from "../../lib/screen-back";
 
 import { Snackbar } from "../../components/Snackbar";
 import { StateError } from "../../components/StateError";
@@ -241,6 +243,22 @@ export function AdminDeactivationFlowScreen({ me }: Props) {
   const navigate = useNavigate();
   const { masterId = "" } = useParams<{ masterId: string }>();
   const [state, dispatch] = useReducer(reducer, initialState);
+
+  // DRF-2368 — возврат этого экрана НЕ адрес: это поток из трёх шагов, и
+  // «назад» на втором и третьем значит шаг назад, а не выход из потока.
+  // Аппаратная кнопка MAX появляется здесь впервые, и объявить ей адрес
+  // значило бы вынести человека из потока с середины — с уже принятыми
+  // решениями по будущим записям. Поэтому `backByAction`: третий вид
+  // договора заведён ровно для «шага назад внутри мастера».
+  const onBack = useScreenBack(
+    backByAction(() => {
+      if (state.step === 1) {
+        navigate("/admin/team");
+        return;
+      }
+      dispatch({ type: "step/set", step: state.step === 3 ? 2 : 1 });
+    }),
+  );
   const [showTemplateEdit, setShowTemplateEdit] = useState<boolean>(false);
 
   // Polish item (c) from PR #498 review — Step 1 stale-preview callout.
@@ -584,7 +602,7 @@ export function AdminDeactivationFlowScreen({ me }: Props) {
         <button
           type="button"
           className="admin-flow-back"
-          onClick={() => navigate("/admin/team")}
+          onClick={onBack}
         >
           ← Назад
         </button>
@@ -699,7 +717,7 @@ export function AdminDeactivationFlowScreen({ me }: Props) {
         <button
           type="button"
           className="admin-flow-back"
-          onClick={() => dispatch({ type: "step/set", step: 1 })}
+          onClick={onBack}
         >
           ← Назад · Шаг 2 из 3
         </button>
