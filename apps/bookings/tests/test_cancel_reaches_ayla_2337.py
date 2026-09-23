@@ -285,3 +285,62 @@ class TestTheYClientsPathIsUnchanged:
         assert result.reply_text == REPLY_CANCELLED
         reminder.refresh_from_db()
         assert reminder.status == BookingReminder.Status.CANCELLED
+
+
+class TestTheBranchDeclaresWhatItClaims:
+    """DRF-2341: ветка, утверждающая выполненное, объявляет это признаком.
+
+    По тексту такие ветки не различить — «Запись отменена» и «Не удалось
+    отменить» отличаются одним словом, и формулировки правит владелец.
+    Признак ставит тот, кто знает, что сделал; ветка без признака сторожу
+    класса невидима.
+    """
+
+    def test_a_confirmed_cancel_declares_it(self, tenant, bot_user, conversation) -> None:
+        reminder = _ayla_reminder(tenant, bot_user)
+
+        with patch(_CANCEL, return_value="ok"):
+            result = _tap(reminder, bot_user, conversation)
+
+        assert result.claims_done is True
+
+    def test_a_failed_cancel_claims_nothing(self, tenant, bot_user, conversation) -> None:
+        reminder = _ayla_reminder(tenant, bot_user)
+
+        with patch(_CANCEL, return_value="backend_unavailable"):
+            result = _tap(reminder, bot_user, conversation)
+
+        assert result.claims_done is False
+
+    def test_an_appointment_already_gone_claims_nothing(
+        self,
+        tenant,
+        bot_user,
+        conversation,
+    ) -> None:
+        """Записи не стало не от нашего действия — приписывать себе нечего."""
+        reminder = _ayla_reminder(tenant, bot_user)
+
+        with patch(_CANCEL, return_value="already_gone"):
+            result = _tap(reminder, bot_user, conversation)
+
+        assert result.claims_done is False
+
+
+class TestNoAnswerIsADeadEnd:
+    """§72: «не получилось» без следующего шага — тупик."""
+
+    @pytest.mark.parametrize("status", ["backend_unavailable", "refused"])
+    def test_a_refusal_still_offers_a_next_step(
+        self,
+        tenant,
+        bot_user,
+        conversation,
+        status,
+    ) -> None:
+        reminder = _ayla_reminder(tenant, bot_user)
+
+        with patch(_CANCEL, return_value=status):
+            result = _tap(reminder, bot_user, conversation)
+
+        assert result.action_data, "человеку некуда нажать после отказа"
