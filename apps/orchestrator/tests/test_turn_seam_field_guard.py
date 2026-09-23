@@ -104,6 +104,9 @@ SKILL_RESULT_PROBES: dict[str, Any] = {
     "should_close_conversation": True,
     "meta": {"probe": "meta"},
     "confidence": 0.37,
+    # DRF-2341 — признак «утверждаю выполненное» и подтверждение от источника.
+    "claims_done": True,
+    "claims_done_evidence": "probe.source:2xx",
 }
 
 
