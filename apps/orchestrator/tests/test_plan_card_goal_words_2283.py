@@ -41,7 +41,7 @@ def _plan() -> PlanLite:
     return PlanLite(
         plan_id="p-1",
         goal_key="weight",
-        actions=[PlanLiteAction("log_food", "per_week", 5, 4, *BUCKET)],
+        actions=(PlanLiteAction("log_food", "per_week", 5, 4, *BUCKET),),
     )
 
 
