@@ -5063,11 +5063,77 @@ a {
 .wellness-dash__header {
   display: flex;
   align-items: center;
+  /* Человек слева, фирменный знак справа (Д1, DRF-2331). Знак занял
+     место, где макет держал колокольчик: колокольчик не рисуется — за
+     ним нет ленты уведомлений. */
+  justify-content: space-between;
   gap: var(--s-3);
   height: 56px;
   padding: 0 var(--s-3);
   border-bottom: 1px solid var(--c-divider);
   background: var(--c-surface-1);
+}
+/* Д1 — аватар, имя, «Рада вас видеть!». */
+.wellness-dash__person {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  /* Длинное имя ужимается, знак справа не выдавливается за край. */
+  min-width: 0;
+}
+.wellness-dash__avatar {
+  flex: none;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  /* Те же краски, что у кружка на профиле клиента (`.profile-header__
+     avatar`): один человек — один узнаваемый кружок на обоих экранах.
+     Прежняя пара `--c-surface-2` на `--c-surface-1` давала контраст
+     ~1.05:1, то есть кружка не было видно вовсе, а инициалы читались
+     как две отбившиеся серые буквы (найдено ревью DRF-2331). */
+  background: var(--c-success);
+  color: var(--c-text-on-accent);
+  font-size: var(--font-size-100);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+/* Держит высоту строки имени, пока день грузится. */
+.wellness-dash__person-skel {
+  width: 96px;
+  height: 15px;
+  border-radius: var(--r-sm);
+}
+.wellness-dash__person-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.wellness-dash__person-name {
+  display: flex;
+  align-items: baseline;
+  /* Зазор стилем, а не пробелом в вёрстке: флекс обрезает пробел между
+     своими детьми, и 👋 прилипал к имени. */
+  gap: var(--s-1);
+  min-width: 0;
+  font-size: var(--font-size-200);
+  font-weight: 600;
+}
+/* Обрезается имя; 👋 рядом с многоточием, а не вместо него. */
+.wellness-dash__person-name-text {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.wellness-dash__person-hi {
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .wellness-dash__brand {
   display: flex;

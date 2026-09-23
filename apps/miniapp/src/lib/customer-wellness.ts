@@ -231,8 +231,21 @@ export interface WellnessToday {
     target_date_passed?: boolean;
   }>;
   /**
-   * Optional preferred display name (Layer 1 Identity). Falls back to
-   * `me.user.client_name` from `/auth/verify` when undefined.
+   * Preferred display name (Layer 1 Identity) — **собирает сервер**:
+   * `bot_user.client_name or bot_user.display_name or ""` во всех трёх
+   * ветках ручки (`apps/miniapp_api/views.py`, строки 3760, 3778, 3994).
+   * Клиенту запасного источника искать не нужно и негде: второй запрос за
+   * именем на Главной — ровно то, что с неё сейчас снимают (DRF-2348).
+   *
+   * Поэтому ключ приходит всегда, но может быть `""` — у человека,
+   * который не назвался сам и у которого канал не дал имени. Пустая
+   * строка значит «имени нет», а не «не загрузилось»: шапка рисует на
+   * этом месте «·» (Д1, DRF-2331), заголовок — приветствие без имени.
+   *
+   * Прежний текст здесь обещал клиентский запасной путь к
+   * `me.user.client_name` из `/auth/verify`. Такого пути нет ни в одном
+   * экране, и он не нужен — работу делает сервер (найдено ревью
+   * DRF-2331).
    */
   display_name?: string;
   /**
