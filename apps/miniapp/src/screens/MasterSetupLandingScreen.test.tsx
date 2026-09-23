@@ -42,6 +42,7 @@ import {
   MasterSetupLandingScreen,
   PUBLICATION_ROUTE,
   PUBLISH_ENTRY_LABEL,
+  SETUP_EXPLAIN,
   SETUP_RESUME_NOTE,
   START_LABEL,
 } from "./MasterSetupLandingScreen";
@@ -209,8 +210,17 @@ describe("экран 01", () => {
     const bar = screen.getByTestId("setup-bar");
     expect(bar).toHaveAttribute("aria-valuemax", "2");
     expect(bar).toHaveAttribute("aria-valuenow", "2");
-    expect(screen.queryByRole("button", { name: START_LABEL })).toBeNull();
-    expect(screen.queryByRole("button", { name: PUBLISH_ENTRY_LABEL })).toBeNull();
+    // Весь набор кнопок, а не отсутствие одной подписи: при fill.done > 0
+    // кнопка звалась бы «Продолжить настройку», и проверка на START_LABEL не
+    // могла бы упасть — ровно та вакуумность, против которой этот узел.
+    const actions = screen.getAllByRole("button").filter((b) => !list.contains(b));
+    expect(actions.map((b) => b.textContent)).toEqual(["Открыть кабинет"]);
+    // Самое громкое в тупике — слова: заголовок по-прежнему «всё готово», а
+    // лид обещает подготовку профиля, которой мастеру негде сделать.
+    expect(
+      screen.getByRole("heading", { name: "Андрей, всё готово 👋" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText(SETUP_EXPLAIN)).toBeInTheDocument();
   });
 
   it("недоступный пункт не становится следующим шагом", async () => {
