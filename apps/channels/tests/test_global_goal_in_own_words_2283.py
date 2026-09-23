@@ -120,9 +120,10 @@ class TestTheGoalIsWrittenFromChat:
         # §72 (DRF-2267): завершённый шаг не оставляет человека без пути —
         # под ответом кнопки следующего шага и «Меню», подписи прежние.
         labels = [
-            b["label"]
-            for a in (mock_send[-1]["attachments"] or [])
-            for b in a.get("payload", {}).get("buttons", [])
+            button["text"]
+            for attachment in (mock_send[-1]["attachments"] or [])
+            for row in attachment.get("payload", {}).get("buttons", [])
+            for button in row
         ]
         assert labels == ["Подобрать услугу", "Меню"]
 

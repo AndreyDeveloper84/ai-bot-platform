@@ -159,11 +159,6 @@ from apps.persona.voice import SALON_BUSINESS_NAME
 from apps.orchestrator.concierge import generate_direct_show_masters_reply
 from apps.integrations.ayla.user_proxy import external_user_id_for
 from apps.orchestrator.fast_path import claims_direct_show_masters
-from apps.orchestrator.next_steps import (
-    discover_button,
-    menu_button,
-    next_step_action_data,
-)
 from apps.orchestrator.goal_capture import (
     CONFIRMATION_DRAFT,
     capture_goal_from_chat,
@@ -2448,6 +2443,15 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
                         )
                         captured = None
                     if captured is not None:
+                        # Ленивый импорт — как у соседей по этой функции ниже:
+                        # те же имена уже импортируются внутри другой ветки, и
+                        # модульный импорт ими затенялся бы (UnboundLocalError).
+                        from apps.orchestrator.next_steps import (
+                            discover_button as _discover_button,
+                            menu_button as _menu_button,
+                            next_step_action_data as _next_step_action_data,
+                        )
+
                         # §72 (DRF-2267): после завершённого шага — 1–2 кнопки
                         # следующего шага и «Меню», иначе человек остаётся с
                         # текстом и без пути. Подписи НЕ новые: те же, что у
@@ -2456,7 +2460,7 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
                         # ответом ждёт слова главного окна вместе с текстом.
                         goal_reply = DiscoveryReply(
                             text=CONFIRMATION_DRAFT.format(goal=captured),
-                            action_data=next_step_action_data(discover_button(), menu_button()),
+                            action_data=_next_step_action_data(_discover_button(), _menu_button()),
                         )
 
                 if nutrition_result is not None:
