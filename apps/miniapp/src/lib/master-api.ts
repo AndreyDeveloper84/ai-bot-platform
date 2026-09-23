@@ -360,8 +360,11 @@ export type ReadinessItemKey = "services" | "location" | "hours" | "profile";
 /**
  * `done` / `missing` — факт; `unknown` — канон не ответил (`reason` — имя
  * исключения): экран НЕ пишет «настройте», а показывает «не удалось
- * прочитать»; `unavailable` — возможности ещё нет (`capability_not_built`):
- * пункт не рисуется вовсе.
+ * прочитать»; `unavailable` — шага у мастера сейчас нет: либо возможности
+ * ещё нет (`capability_not_built`), либо он ведётся не в приложении
+ * (`managed_outside_app` — салонное рабочее пространство, DRF-2254). До
+ * DRF-2326 такой пункт не рисовался вовсе; теперь рисуется названным
+ * недоступным, с причиной и без тапа.
  */
 export type ReadinessItemState = "done" | "missing" | "unknown" | "unavailable";
 
@@ -724,19 +727,29 @@ export const publishProfile = (
     signal,
   });
 
-/** Пункты, которые экран рисует: всё, кроме `unavailable`. */
-export const drawnReadinessItems = (items: ReadinessItem[]): ReadinessItem[] =>
+/**
+ * Пункты, которые мастер может закрыть САМ: всё, кроме `unavailable`.
+ *
+ * До DRF-2326 имя было `drawnReadinessItems` — «что экран рисует». Экран 01
+ * теперь рисует и недоступные пункты (спрятанный шаг мастер читает как «у
+ * меня всё», хотя профиль всё равно не отправить), поэтому имя врало бы.
+ * Отбор остался прежним, и смысл у него всегда был этот: бар готовности,
+ * «следующий шаг» и карточка «продолжить настройку» считают достижимое —
+ * недоступный пункт в знаменателе обещал бы работу, которой мастер сделать
+ * не может.
+ */
+export const actionableReadinessItems = (items: ReadinessItem[]): ReadinessItem[] =>
   items.filter((item) => item.state !== "unavailable");
 
 /**
- * Бар готовности — доля закрытых пунктов среди нарисованных. Число не
+ * Бар готовности — доля закрытых пунктов среди достижимых. Число не
  * показывается словами: ни процентов, ни «N из M» (макет: «no fake percent
  * complete»; доктрина 12.09 — счётчик как обещание времени).
  */
 export const readinessFill = (
   items: ReadinessItem[],
 ): { done: number; total: number } => {
-  const drawn = drawnReadinessItems(items);
+  const drawn = actionableReadinessItems(items);
   return {
     done: drawn.filter((item) => item.state === "done").length,
     total: drawn.length,

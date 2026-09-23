@@ -11,7 +11,7 @@ import { useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
 import {
-  drawnReadinessItems,
+  actionableReadinessItems,
   getOnboardingReadiness,
   type OnboardingReadiness,
 } from "../lib/master-api";
@@ -47,7 +47,7 @@ export function SetupProgressCard() {
   }, [onSoloSurface]);
 
   if (!onSoloSurface || !readiness || readiness.ready) return null;
-  const open = drawnReadinessItems(readiness.items).filter(
+  const open = actionableReadinessItems(readiness.items).filter(
     (item) => item.state !== "done",
   );
   if (open.length === 0) return null;
