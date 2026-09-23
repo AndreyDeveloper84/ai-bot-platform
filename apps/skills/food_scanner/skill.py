@@ -469,9 +469,13 @@ class FoodScannerSkill:
         action_data["buttons"] = [*entry_chips, *after_entry_buttons()]
         return SkillResult(
             reply_text=reply,
+            claims_done=True,
+            claims_done_evidence="ayla.meals.log:log_id",
             action_type="food_logged",
             action_data=action_data,
-            meta={"reply_kind": "food_scanner_logged"},
+            meta={
+                "reply_kind": "food_scanner_logged",
+            },
         )
 
 

@@ -219,6 +219,13 @@ class MemoryCommandResult:
     text: str
     action_type: str = ""
     action_data: dict | None = None
+    #: DRF-2341 — см. ``apps.orchestrator.done_claims``.
+    #: DRF-2341 — те же имена и та же форма, что у ``SkillResult``: булев
+    #: признак плюс подтверждение «источник:что он ответил». ``meta`` у
+    #: этого класса нет, поэтому носитель — поле; читатель общий,
+    #: ``apps.skills.base.claims_done_of``.
+    claims_done: bool = False
+    claims_done_evidence: str = ""
 
 
 def _normalise(text: str) -> str:
@@ -535,7 +542,14 @@ def handle_memory_command(
                 # person would catch us out on the next turn, when the prompt
                 # still names their budget.
                 return MemoryCommandResult(text=_FORGET_ALL_PARTIAL)
-            return MemoryCommandResult(text=_FORGET_ALL_DONE)
+            return MemoryCommandResult(
+                text=_FORGET_ALL_DONE,
+                # Наше действие: доказательство — прочитанный исход стирания
+                # («erased»), а не факт вызова; «started» и «partial» выше
+                # отвечают другим текстом.
+                claims_done=True,
+                claims_done_evidence="bridge.erase:erased",
+            )
         return None  # bare «удалить» with no pending prompt → not a command
 
     # 2. «забудь всё» request → the confirmation prompt (does NOT delete yet).

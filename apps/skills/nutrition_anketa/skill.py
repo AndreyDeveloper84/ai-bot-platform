@@ -1050,13 +1050,17 @@ class NutritionAnketaSkill:
         )
         return SkillResult(
             reply_text=f"{head}\n\n{_format_summary(profile)}",
+            claims_done=True,
+            claims_done_evidence="ayla.profile.confirm_targets:2xx",
             action_type="anketa_targets_confirmed",
             action_data={
                 "outcome": outcome,
                 "daily_kcal": profile.daily_kcal,
                 "buttons": _post_anketa_chips(profile),
             },
-            meta={"reply_kind": "anketa_targets_confirmed"},
+            meta={
+                "reply_kind": "anketa_targets_confirmed",
+            },
         )
 
     # ─── helpers ────────────────────────────────────────────────────────
@@ -1287,6 +1291,10 @@ class NutritionAnketaSkill:
             )
         return SkillResult(
             reply_text=self._contour_copy(WITHDRAW_DONE, WITHDRAW_DONE_CONTOUR_OFF),
+            # ``deleted`` — прочитанный результат, а не факт вызова: при
+            # ``False`` ветка выше отвечает «не подтверждено».
+            claims_done=True,
+            claims_done_evidence="ayla.profile.purge:deleted",
             meta={"reply_kind": "anketa_withdraw_done"},
         )
 
@@ -1530,6 +1538,10 @@ class NutritionAnketaSkill:
         return SkillResult(
             reply_text=UPDATE_WEIGHT_MANUAL_SAVED.format(kg=weight),
             action_data={"buttons": _post_anketa_chips(saved)},
+            # Подтверждение сверено: вес, вернувшийся от каталога, равен
+            # тому, что просили (иначе ветка выше отвечает аварийным текстом).
+            claims_done=True,
+            claims_done_evidence="ayla.profile.upsert:weight_kg",
             meta={"reply_kind": "anketa_update_weight_manual_saved"},
         )
 
