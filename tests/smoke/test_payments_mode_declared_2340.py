@@ -48,10 +48,10 @@ from django.core.exceptions import ImproperlyConfigured
 
 REPO = Path(__file__).resolve().parents[2]
 REQUIRED_ENV = {
-    "AYLA_INTERNAL_API_TOKEN": "ayla-token-abc",
-    "CHROMA_AUTH_TOKEN": "chroma-token-abc",
+    "AYLA_INTERNAL_API_TOKEN": "ayla-token-abc",  # pragma: allowlist secret
+    "CHROMA_AUTH_TOKEN": "chroma-token-abc",  # pragma: allowlist secret
     "SENTRY_DSN": "https://public@sentry.example.com/1",
-    "MYSITE_WEBHOOK_HMAC_SECRET": "hmac-secret-abc",
+    "MYSITE_WEBHOOK_HMAC_SECRET": "hmac-secret-abc",  # pragma: allowlist secret
 }
 
 
@@ -181,7 +181,7 @@ class TestTheCheckSaysTheModeOutLoud:
 
         settings.AYLA_PAYMENTS_TEST_MODE = True
         settings.AYLA_BASE_URL = "https://ayla.example"
-        settings.AYLA_INTERNAL_API_TOKEN = "super-secret-token"  # noqa: S105
+        settings.AYLA_INTERNAL_API_TOKEN = "super-secret-token"  # noqa: S105  # pragma: allowlist secret
         messages = check_payments_mode_declared(None)
 
         assert len(messages) == 1  # присутствие: проверка говорит
