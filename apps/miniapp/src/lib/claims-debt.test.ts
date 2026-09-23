@@ -11,7 +11,12 @@
 
 import { describe, expect, it } from "vitest";
 
-import { CLAIM_WORDS, CLAIMS_DEBT_FILES, CLAIMS_OUTSIDE_PRIMITIVE_DEBT } from "./claims-debt";
+import {
+  CLAIM_WORDS,
+  CLAIMS_DEBT_FILES,
+  CLAIMS_OUTSIDE_PRIMITIVE_DEBT,
+  UNMARKED_CLIENT_CALLS_DEBT,
+} from "./claims-debt";
 
 const SOURCES = import.meta.glob("../**/*.{ts,tsx}", { query: "?raw", import: "default", eager: true }) as Record<
   string,
@@ -34,6 +39,21 @@ function claimStrings(): { total: number; files: string[] } {
   return { total, files };
 }
 
+/** Вызовы мимо обёртки: `fetch(` в модулях клиентов, кроме самой обёртки. */
+function unmarkedCalls(): number {
+  // По имени файла, а не по пути: сборщик отдаёт соседей по каталогу как
+  // «./api.ts», и совпадение по «/lib/api.ts» молча не находило ничего.
+  const CLIENTS = new Set(["api.ts", "admin-api.ts", "master-api.ts", "internal-chat-api.ts"]);
+  let total = 0;
+  for (const [path, text] of Object.entries(SOURCES)) {
+    if (!CLIENTS.has(path.split("/").pop() ?? "")) continue;
+    const calls = text.match(/await fetch\(|= fetch\(/g)?.length ?? 0;
+    // Одна обёртка на модуль — она и есть то место, где ставится метка.
+    total += Math.max(0, calls - 1);
+  }
+  return total;
+}
+
 describe("размер слепого пятна", () => {
   it("перепись видит исходники и утверждения в них", () => {
     const { total, files } = claimStrings();
@@ -52,5 +72,12 @@ describe("размер слепого пятна", () => {
       строк: CLAIMS_OUTSIDE_PRIMITIVE_DEBT,
       файлов: CLAIMS_DEBT_FILES,
     });
+  });
+
+  it("вызовы мимо обёртки клиента посчитаны — их ответы метку не несут", () => {
+    const calls = unmarkedCalls();
+
+    expect(calls).toBeGreaterThan(0); // наличие: разбор видит вызовы
+    expect(calls).toBe(UNMARKED_CLIENT_CALLS_DEBT);
   });
 });

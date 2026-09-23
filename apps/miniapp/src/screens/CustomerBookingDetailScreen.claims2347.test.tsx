@@ -1,17 +1,21 @@
 /**
- * Настоящий случай для механизма утверждений (DRF-2347 × DRF-2346).
+ * Механизм утверждений на настоящем экране (DRF-2347 × DRF-2346).
  *
- * Механизм сам по себе доказан в `lib/claims.test.ts`. Этот узел проверяет,
- * что он ловит **живой дефект**: экран запрашивает отмену, источник отвечает
- * `cancel_requested`, экран читает этот статус — и говорит «Запись отменена».
+ * Сам механизм доказан в `lib/claims.test.ts`. Здесь — экран, на котором
+ * дефект этого класса жил: запросили отмену, источник ответил
+ * `cancel_requested`, экран прочитал статус и говорил «Запись отменена».
  *
- * ## Почему `it.fails`
+ * **DRF-2346 починен (#2024), поэтому узел здесь — сторож, а не измерение.**
+ * Он держит починку: вернётся утверждение о факте при «запрошена отмена» —
+ * покраснеет. Красное, доказывающее сам механизм, — в
+ * `components/Snackbar.claims2347.test.tsx`: там утверждение, противоречащее
+ * прочитанному, останавливает сборку.
  *
- * DRF-2346 ещё не починен, и узел обязан краснеть на нём **сегодня**. Зелёный
- * с самого начала узел ничего не доказывал бы. `it.fails` — та же форма, что
- * strict-xfail в реестрах бота: сейчас он зелёный **потому что внутри
- * красное**, а когда DRF-2346 починят, узел упадёт и потребует снять метку.
- * Тогда `it.fails` меняется на `it`, и проверка становится обычным сторожем.
+ * История одного промаха, чтобы он не повторился: первая версия узла была
+ * помечена `it.fails` («лист следом»), и метка показывала зелёное — но не
+ * потому, что дефект жив, а потому что узел падал на разборе адреса
+ * (`:id` вместо `:bookingId`) и до кнопки не доходил. Метка «ожидаемо
+ * красный» скрывает ПРИЧИНУ красноты; проверять её обязательно.
  */
 
 import { render, screen } from "@testing-library/react";
@@ -62,50 +66,40 @@ function read(status: BookingItem["status"]): Read<BookingItem> {
 }
 
 beforeEach(() => {
-  vi.useFakeTimers({ shouldAdvanceTime: true });
-  mockedFetch.mockResolvedValue({ booking: booking("confirmed") });
+  vi.clearAllMocks();
 });
 
 afterEach(() => {
   vi.useRealTimers();
-  vi.clearAllMocks();
 });
 
-async function cancelAndReadMessage(): Promise<string> {
-  const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
-  mockedRequest.mockResolvedValue({ booking: read("cancel_requested") });
-
-  render(
-    <MemoryRouter initialEntries={["/customer/bookings/b-2346"]}>
-      <Routes>
-        <Route path="/customer/bookings/:id" element={<CustomerBookingDetailScreen />} />
-      </Routes>
-    </MemoryRouter>,
-  );
-
-  await user.click(await screen.findByRole("button", { name: "Отменить" }));
-  await user.click(await screen.findByRole("button", { name: "Отменить запись" }));
-  return (await screen.findByRole("status")).textContent ?? "";
-}
-
-describe("утверждение экрана при cancel_requested", () => {
-  it("источник говорит «запрошена отмена» — и это ЕГО слово, а не наше", () => {
-    // Наличие: ответ прочитан, статус в нём именно такой. Дефект не в том,
-    // что чтения не было, — чтение было.
-    expect(verifyClaim({ outcome: "booking_cancel_requested", from: read("cancel_requested") }).ok).toBe(
-      true,
-    );
+describe("утверждение экрана при «запрошена отмена»", () => {
+  it("источник говорит «запрошена отмена» — и это его слово, а не наше", () => {
+    // Наличие: ответ прочитан, статус в нём именно такой. Дефект класса был
+    // не в отсутствии чтения — чтение было.
+    expect(
+      verifyClaim({ outcome: "booking_cancel_requested", from: read("cancel_requested") }).ok,
+    ).toBe(true);
   });
 
-  it.fails(
-    "лист следом (DRF-2346): экран не вправе говорить «отменена» до завершения отмены",
-    async () => {
-      const message = await cancelAndReadMessage();
+  it("экран не говорит «отменена», пока отмена не завершена", async () => {
+    const user = userEvent.setup();
+    mockedFetch.mockResolvedValue({ booking: booking("confirmed") });
+    mockedRequest.mockResolvedValue({ booking: read("cancel_requested") });
 
-      // Сегодня здесь «Запись отменена» — при статусе `cancel_requested`.
-      // Когда DRF-2346 починят, эта проверка станет верной, узел упадёт
-      // из-за `it.fails`, и метку нужно будет снять.
-      expect(message).not.toContain("отменена");
-    },
-  );
+    render(
+      <MemoryRouter initialEntries={["/customer/records/b-2346"]}>
+        <Routes>
+          <Route path="/customer/records/:bookingId" element={<CustomerBookingDetailScreen />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+
+    await user.click(await screen.findByRole("button", { name: "Отменить" }));
+    await user.click(await screen.findByRole("button", { name: "Отменить запись" }));
+
+    const message = (await screen.findByRole("status")).textContent ?? "";
+    expect(message).toContain("Отменяю"); // наличие: сообщение о ходе дела есть
+    expect(message).not.toContain("отменена");
+  });
 });
