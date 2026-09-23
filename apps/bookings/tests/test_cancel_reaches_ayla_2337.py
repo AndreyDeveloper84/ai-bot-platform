@@ -48,7 +48,7 @@ from apps.orchestrator.visits import (
     _CANCEL_REFUSED_TEXT,
     _CANCEL_UNAVAILABLE_TEXT,
 )
-from apps.skills.base import SkillContext
+from apps.skills.base import SkillContext, claims_done_of
 from apps.tenancy.models import Tenant
 
 pytestmark = pytest.mark.django_db
@@ -344,3 +344,61 @@ class TestNoAnswerIsADeadEnd:
             result = _tap(reminder, bot_user, conversation)
 
         assert result.action_data, "человеку некуда нажать после отказа"
+
+
+class TestTheEvidenceIsReadThroughOneDoor:
+    """DRF-2341: признак и подтверждение читает один читатель, не два.
+
+    Носитель у ответов разный — поле у ``SkillResult``, ключ ``meta`` там,
+    где объекта-ответа нет. Имена общие, и расходиться в чтении нельзя:
+    разойдясь, сторож класса молча перестанет видеть часть веток.
+    """
+
+    def test_a_confirmed_cancel_carries_evidence_from_the_source(
+        self,
+        tenant,
+        bot_user,
+        conversation,
+    ) -> None:
+        reminder = _ayla_reminder(tenant, bot_user)
+
+        with patch(_CANCEL, return_value="ok"):
+            result = _tap(reminder, bot_user, conversation)
+
+        claims, evidence = claims_done_of(result)
+        assert claims is True
+        assert evidence == "ayla.appointments.cancel:2xx"
+
+    def test_a_failed_cancel_carries_neither(
+        self,
+        tenant,
+        bot_user,
+        conversation,
+    ) -> None:
+        reminder = _ayla_reminder(tenant, bot_user)
+
+        with patch(_CANCEL, return_value="refused"):
+            result = _tap(reminder, bot_user, conversation)
+
+        assert claims_done_of(result) == (False, "")
+
+    def test_the_yclients_branch_claims_without_evidence(
+        self,
+        tenant,
+        bot_user,
+        conversation,
+    ) -> None:
+        """Честное состояние, а не недосмотр: подтверждать там нечем."""
+        reminder = _yclients_reminder(tenant, bot_user)
+
+        with patch("apps.bookings.callbacks._try_yclients_cancel", return_value=True):
+            result = _tap(reminder, bot_user, conversation)
+
+        assert claims_done_of(result) == (True, "")
+
+    def test_the_reader_sees_the_meta_carrier_too(self) -> None:
+        """Обработчики без ``SkillResult`` кладут признак в ``meta``."""
+        assert claims_done_of({"claims_done": True, "claims_done_evidence": "handoff.task:id"}) == (
+            True,
+            "handoff.task:id",
+        )

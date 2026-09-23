@@ -154,8 +154,15 @@ class SkillResult:
     #: было вовсе, а ответ говорил «отменена».
     #:
     #: Имя одно на весь бот: сторож класса (DRF-2341) ищет именно его, и
-    #: ветка без признака для него невидима.
+    #: ветка без признака для него невидима. Носитель — какой есть: здесь
+    #: поле, а в обработчиках без ``SkillResult`` — ключ ``meta`` под тем же
+    #: именем. Читают оба носителя ТОЛЬКО через :func:`claims_done_of`.
     claims_done: bool = False
+    #: Чем подтверждено выполнение — коротким машинным словом, пришедшим ОТ
+    #: источника («что он ответил»), а не собранным у нас. Пусто при
+    #: ``claims_done=True`` значит «утверждаем без подтверждения»: сторож
+    #: класса краснеет, и это не сбой сторожа, а честное состояние ветки.
+    claims_done_evidence: str = ""
     action_data: dict[str, Any] | None = None
     should_send: bool = True
     should_close_conversation: bool = False
@@ -185,3 +192,26 @@ class Skill(Protocol):
 
     def handle(self, context: SkillContext) -> SkillResult:  # pragma: no cover - Protocol
         ...
+
+
+def claims_done_of(reply: Any) -> tuple[bool, str]:
+    """Признак «ветка утверждает выполненное» и его подтверждение — из любого носителя.
+
+    Ответы бота живут в двух формах: :class:`SkillResult` (у него признак —
+    поле) и голый результат обработчика обратных вызовов, где объекта-ответа
+    нет и признак лежит в ``meta`` рядом с ``reply_kind``. Имена в обоих
+    случаях одни и те же — ``claims_done`` и ``claims_done_evidence``.
+
+    Читатель ОДИН намеренно. Два места, читающие признак по-разному,
+    разойдутся за неделю, и разойдутся молча: сторож класса (DRF-2341)
+    перестанет видеть часть веток, а выглядеть это будет как зелёный.
+    """
+    meta = getattr(reply, "meta", None)
+    if not isinstance(meta, dict):
+        meta = reply if isinstance(reply, dict) else {}
+
+    claims = bool(getattr(reply, "claims_done", False) or meta.get("claims_done"))
+    evidence = str(
+        getattr(reply, "claims_done_evidence", "") or meta.get("claims_done_evidence") or ""
+    )
+    return claims, evidence
