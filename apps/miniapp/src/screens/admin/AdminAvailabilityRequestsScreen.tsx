@@ -43,6 +43,7 @@ import { AdminTabBar } from "../../components/AdminTabBar";
 import { Snackbar } from "../../components/Snackbar";
 import { StateError } from "../../components/StateError";
 import { ApiError } from "../../lib/api";
+import { countLabel, type MaybeCount } from "../../lib/format";
 import {
   approveAvailabilityRequest,
   getAvailabilityRequests,
@@ -215,8 +216,10 @@ export function AdminAvailabilityRequestsScreen({ me }: Props) {
   const [loading, setLoading] = useState<boolean>(false);
   const [loadingMore, setLoadingMore] = useState<boolean>(false);
   const [err, setErr] = useState<unknown>(null);
-  const [pendingCount, setPendingCount] = useState<number>(0);
-  const [decidedCount, setDecidedCount] = useState<number>(0);
+  // DRF-2366 — `null` значит «не удалось узнать». Умолчанием был ноль, и
+  // чипы показывали «Ожидают (0)» там, где счёт не состоялся.
+  const [pendingCount, setPendingCount] = useState<MaybeCount>(null);
+  const [decidedCount, setDecidedCount] = useState<MaybeCount>(null);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
   const [approveState, setApproveState] = useState<ConfirmApproveState>(
@@ -312,8 +315,13 @@ export function AdminAvailabilityRequestsScreen({ me }: Props) {
       setPendingCount(pendingRes.items.length);
       setDecidedCount(decidedRes.items.length);
     } catch {
-      // Counts are best-effort — silent fail keeps the chips visible
-      // with stale or zero numbers; the main list path surfaces errors.
+      // Счётчики остаются best-effort: список несёт свои ошибки сам, и
+      // ронять экран из-за чипа незачем. Но неизвестность больше не
+      // выдаётся за ноль — чип показывает знак «значения нет» (DRF-2366).
+      if (!signal?.aborted) {
+        setPendingCount(null);
+        setDecidedCount(null);
+      }
     }
   }, []);
 
@@ -400,8 +408,10 @@ export function AdminAvailabilityRequestsScreen({ me }: Props) {
           p.request_id === req.request_id ? { ...p, ...result } : p,
         );
       });
-      setPendingCount((c) => Math.max(0, c - 1));
-      setDecidedCount((c) => c + 1);
+      // Неизвестность не становится известной от того, что мы решили один
+      // запрос: `null` остаётся `null`, а не превращается в число.
+      setPendingCount((c) => (c === null ? null : Math.max(0, c - 1)));
+      setDecidedCount((c) => (c === null ? null : c + 1));
       setToast(`✓ Запрос ${req.master_name} одобрен`);
       setApproveState(EMPTY_APPROVE_STATE);
     } catch (e) {
@@ -480,8 +490,10 @@ export function AdminAvailabilityRequestsScreen({ me }: Props) {
           p.request_id === req.request_id ? { ...p, ...result } : p,
         );
       });
-      setPendingCount((c) => Math.max(0, c - 1));
-      setDecidedCount((c) => c + 1);
+      // Неизвестность не становится известной от того, что мы решили один
+      // запрос: `null` остаётся `null`, а не превращается в число.
+      setPendingCount((c) => (c === null ? null : Math.max(0, c - 1)));
+      setDecidedCount((c) => (c === null ? null : c + 1));
       setToast(`✗ Запрос ${req.master_name} отклонён`);
       setRejectState(EMPTY_REJECT_STATE);
     } catch (e) {
@@ -553,12 +565,12 @@ export function AdminAvailabilityRequestsScreen({ me }: Props) {
           }}
         >
           Запросы на смену графика
-          {pendingCount > 0 && (
+          {(pendingCount === null || pendingCount > 0) && (
             <span
               className="admin-count-chip"
-              aria-label={`ожидают: ${pendingCount}`}
+              aria-label={`ожидают: ${countLabel(pendingCount)}`}
             >
-              {pendingCount}
+              {countLabel(pendingCount)}
             </span>
           )}
         </h1>
@@ -576,7 +588,7 @@ export function AdminAvailabilityRequestsScreen({ me }: Props) {
           className={`admin-filter-tabs__tab${filter === "pending" ? " admin-filter-tabs__tab--active" : ""}`}
           onClick={() => handleFilterChange("pending")}
         >
-          {`● Ожидают (${pendingCount})`}
+          {`● Ожидают (${countLabel(pendingCount)})`}
         </button>
         <button
           type="button"
@@ -585,7 +597,7 @@ export function AdminAvailabilityRequestsScreen({ me }: Props) {
           className={`admin-filter-tabs__tab${filter === "decided" ? " admin-filter-tabs__tab--active" : ""}`}
           onClick={() => handleFilterChange("decided")}
         >
-          {`Решены (${decidedCount})`}
+          {`Решены (${countLabel(decidedCount)})`}
         </button>
         <button
           type="button"

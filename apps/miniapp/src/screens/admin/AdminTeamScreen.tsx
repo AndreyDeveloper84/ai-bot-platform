@@ -18,6 +18,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
 import { AdminTabBar } from "../../components/AdminTabBar";
+import { countLabel, type MaybeCount } from "../../lib/format";
 import { Snackbar } from "../../components/Snackbar";
 import { StateError } from "../../components/StateError";
 import { ApiError } from "../../lib/api";
@@ -55,6 +56,20 @@ function initials(name: string): string {
     .join("");
 }
 
+/**
+ * Строка на случай «не удалось узнать» (DRF-2366).
+ *
+ * Слов своих не сочинял, и добавленных нами тоже нет: это ДОСЛОВНО домашняя
+ * формула этой же поверхности — `AdminReadinessScreen` говорит «Не удалось
+ * проверить готовность.», сервер — «{name} — не удалось проверить свободные
+ * окна». Решение главного окна: берём чистую формулу без хвоста, чтобы в
+ * тексте не было ни одного слова, которого владелец не писал.
+ *
+ * Чего в строке быть не должно — утверждения о пустоте: «Все запросы
+ * рассмотрены» и «Новых обсуждений нет» это ровно то, чего мы не знаем.
+ */
+const TEAM_COUNT_UNKNOWN_COPY = "Не удалось проверить.";
+
 export function AdminTeamScreen({ me }: Props) {
   const navigate = useNavigate();
   const location = useLocation();
@@ -84,15 +99,18 @@ export function AdminTeamScreen({ me }: Props) {
   // M3-admin (Bundle B) — pending availability-requests badge on the
   // root nav card. Best-effort fetch; failure is silent and the card
   // hides the count rather than blocking the team screen.
+  // DRF-2366 — `null` значит «не удалось узнать», и это НЕ ноль. Умолчанием
+  // был ноль, поэтому до первого ответа и после отказа карточка утверждала
+  // «Все запросы рассмотрены» — про запросы, о которых ничего не знала.
   const [pendingAvailabilityCount, setPendingAvailabilityCount] =
-    useState<number>(0);
+    useState<MaybeCount>(null);
   // «Чаты с мастерами» nav badge — count of threads in the tenant
   // queue that need admin response (status ∈ {open, master_responded}).
   // Best-effort fetch; failure is silent and the card renders without
   // the badge rather than blocking the team screen. Mirrors the
   // existing availability-requests pattern above.
   const [internalChatUnreadCount, setInternalChatUnreadCount] =
-    useState<number>(0);
+    useState<MaybeCount>(null);
 
   // DRF-1597 — очередь «ждут подтверждения».
   //
@@ -122,7 +140,9 @@ export function AdminTeamScreen({ me }: Props) {
         if (controller.signal.aborted) return;
         setPendingAvailabilityCount(res.items.length);
       } catch {
-        // Silent — the card still renders without the badge.
+        // Экран не падает из-за счётчика — это решение остаётся. Но и не
+        // выдаёт неизвестность за ноль: счётчик остаётся `null` (DRF-2366).
+        if (!controller.signal.aborted) setPendingAvailabilityCount(null);
       }
     })();
     return () => controller.abort();
@@ -143,7 +163,7 @@ export function AdminTeamScreen({ me }: Props) {
         const count = res.items.filter(threadNeedsAdminResponse).length;
         setInternalChatUnreadCount(count);
       } catch {
-        // Silent — the card renders without the badge.
+        if (!cancelled) setInternalChatUnreadCount(null);
       }
     })();
     return () => {
@@ -602,17 +622,19 @@ export function AdminTeamScreen({ me }: Props) {
               className="master-card__spec"
               style={{ display: "block" }}
             >
-              {pendingAvailabilityCount > 0
-                ? `${pendingAvailabilityCount} ожидают решения`
-                : "Все запросы рассмотрены"}
+              {pendingAvailabilityCount === null
+                ? TEAM_COUNT_UNKNOWN_COPY
+                : pendingAvailabilityCount > 0
+                  ? `${pendingAvailabilityCount} ожидают решения`
+                  : "Все запросы рассмотрены"}
             </span>
           </span>
-          {pendingAvailabilityCount > 0 && (
+          {(pendingAvailabilityCount === null || pendingAvailabilityCount > 0) && (
             <span
               className="admin-count-chip"
-              aria-label={`ожидают: ${pendingAvailabilityCount}`}
+              aria-label={`ожидают: ${countLabel(pendingAvailabilityCount)}`}
             >
-              {pendingAvailabilityCount}
+              {countLabel(pendingAvailabilityCount)}
             </span>
           )}
         </button>
@@ -646,17 +668,19 @@ export function AdminTeamScreen({ me }: Props) {
               className="master-card__spec"
               style={{ display: "block" }}
             >
-              {internalChatUnreadCount > 0
-                ? `${internalChatUnreadCount} требуют ответа`
-                : "Новых обсуждений нет"}
+              {internalChatUnreadCount === null
+                ? TEAM_COUNT_UNKNOWN_COPY
+                : internalChatUnreadCount > 0
+                  ? `${internalChatUnreadCount} требуют ответа`
+                  : "Новых обсуждений нет"}
             </span>
           </span>
-          {internalChatUnreadCount > 0 && (
+          {(internalChatUnreadCount === null || internalChatUnreadCount > 0) && (
             <span
               className="admin-count-chip"
-              aria-label={`требуют ответа: ${internalChatUnreadCount}`}
+              aria-label={`требуют ответа: ${countLabel(internalChatUnreadCount)}`}
             >
-              {internalChatUnreadCount}
+              {countLabel(internalChatUnreadCount)}
             </span>
           )}
         </button>
