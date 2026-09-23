@@ -807,6 +807,39 @@ NUTRITION_SERVICE_TOKEN = (
 # production flips deliberately, never ad-hoc.
 BOOKING_VIA_AYLA_REST = os.environ.get("BOOKING_VIA_AYLA_REST", "false").lower() == "true"
 
+
+# DRF-2340 — РЕЖИМ ОПЛАТЫ ОБЪЯВЛЕН, а не спрятан третьим аргументом getattr.
+#
+# До этой правки имя не встречалось ни в одном файле настроек: единственным
+# чтением было ``getattr(settings, "AYLA_PAYMENTS_TEST_MODE", True)`` внутри
+# клиента платежей. Снаружи режим не был виден ничем — ни в settings, ни в
+# env-шаблонах. Опасность не в стенде (там заглушка ожидаема), а в бою: не
+# задал — человек получает ПОДДЕЛЬНУЮ ссылку, «оплачивает», денег нет, и
+# узнать об этом неоткуда. Поэтому: в бою умолчания нет совсем
+# (``production.py`` падает на импорте), здесь — объявленное ``true`` для
+# разработки и тестов.
+#
+# Мусор отказом, а не ложью: «maybe», пустая строка, «0 1» не должны молча
+# стать «боем». Один такой раз — и деньги идут мимо.
+def payments_test_mode_from(raw: str) -> bool:
+    """``"true"/"1"`` → True, ``"false"/"0"`` → False, всё прочее — отказ."""
+    from django.core.exceptions import ImproperlyConfigured
+
+    value = (raw or "").strip().lower()
+    if value in {"true", "1"}:
+        return True
+    if value in {"false", "0"}:
+        return False
+    raise ImproperlyConfigured(
+        "AYLA_PAYMENTS_TEST_MODE must be one of true/false/1/0 "
+        f"(got {raw!r}). Payments mode is never guessed: a value read as "
+        "«live» by accident sends people to a checkout that takes no money, "
+        "and a value read as «test» by accident hands them a fake link."
+    )
+
+
+AYLA_PAYMENTS_TEST_MODE = payments_test_mode_from(os.environ.get("AYLA_PAYMENTS_TEST_MODE", "true"))
+
 # §83 — требовать ли АКТУАЛЬНОЕ подтверждение расписания для продажи мастера.
 #
 # DEFAULT OFF, и умолчание здесь несёт цену, а не осторожность. В момент

@@ -107,6 +107,8 @@ def _set_required_production_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AYLA_INTERNAL_API_TOKEN", "ayla-token-abc")  # noqa: S105
     monkeypatch.setenv("SENTRY_DSN", "https://public@sentry.example.com/1")
     monkeypatch.setenv("MYSITE_WEBHOOK_HMAC_SECRET", "hmac-secret-abc")  # noqa: S105
+    # DRF-2340 — режим оплаты обязателен в бою, как и токены выше.
+    monkeypatch.setenv("AYLA_PAYMENTS_TEST_MODE", "false")
 
 
 class TestProductionAuthGuard:

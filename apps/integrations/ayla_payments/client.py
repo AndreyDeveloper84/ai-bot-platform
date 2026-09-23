@@ -9,11 +9,13 @@ URL via an inline button.
 
 ### Test mode
 
-``settings.AYLA_PAYMENTS_TEST_MODE = True`` (the default) makes
-:meth:`AylaPaymentsClient.create_payment` return a stubbed checkout
-URL WITHOUT any HTTP call. Production deployments set this to False
-explicitly. Tests rely on test-mode plus mocked HTTP for
-network-touching paths.
+``settings.AYLA_PAYMENTS_TEST_MODE`` makes
+:meth:`AylaPaymentsClient.create_payment` return a stubbed checkout URL
+WITHOUT any HTTP call. Since DRF-2340 the setting is DECLARED in every
+contour (base / local / staging explicitly; production has NO default —
+the module refuses to boot without it), so the mode is read off the
+settings instead of a third ``getattr`` argument. Tests rely on test-mode
+plus mocked HTTP for network-touching paths.
 
 ### Why a new module instead of yookassa_client
 
@@ -265,7 +267,7 @@ class AylaPaymentsClient:
             stub_url = f"https://yoomoney.test/checkout/{idempotence_key}"
             stub_id = f"test-{idempotence_key}"
             logger.info(
-                "ayla_payments_client.create_payment.test_mode idem=%s base_url=%s",
+                "ayla_payments_client.create_payment mode=test idem=%s base_url=%s",
                 idempotence_key,
                 self.base_url or "<unset>",
             )
@@ -390,6 +392,13 @@ class AylaPaymentsClient:
         status = str(payload.get("status") or "pending")
 
         self._circuit.record_success()
+        # DRF-2340 — режим одним словом, без сумм и без данных человека: по
+        # журналу видно, настоящая это оплата или заглушка.
+        logger.info(
+            "ayla_payments_client.create_payment mode=live idem=%s payment=%s",
+            idempotence_key,
+            payment_id,
+        )
         return CreatePaymentResult(
             payment_id=payment_id,
             checkout_url=checkout_url,
@@ -438,7 +447,11 @@ def get_ayla_payments_client() -> AylaPaymentsClient:
         _SINGLETON = AylaPaymentsClient(
             base_url=getattr(settings, "AYLA_BASE_URL", ""),
             api_token=getattr(settings, "AYLA_INTERNAL_API_TOKEN", ""),
-            test_mode=bool(getattr(settings, "AYLA_PAYMENTS_TEST_MODE", True)),
+            # DRF-2340: настройка объявлена в каждом контуре — читаем её как
+            # есть. Прежнее ``getattr(..., True)`` прятало режим в третьем
+            # аргументе: незаданная переменная в бою означала «тест», и
+            # человек получал поддельную ссылку.
+            test_mode=bool(settings.AYLA_PAYMENTS_TEST_MODE),
         )
     return _SINGLETON
 
