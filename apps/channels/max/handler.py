@@ -1980,7 +1980,22 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
         # Под обоими флагами питания (NUTRITION_ENABLED и
         # NUTRITION_PROACTIVE_ENABLED): при выключенном — None, и ход идёт
         # туда же, куда у прочих нутриционных веток.
-        reply = DiscoveryReply(text=_report_hour_reply)
+        # DRF-2267 (CD §72): час поставлен — шаг завершён, и под ним есть
+        # выход: «Мой дневник» (фразу разбирает эта же, глобальная, лестница)
+        # и «Меню». «Больше не присылай» кнопок не получает: это просьба
+        # замолчать, и предлагать следующий шаг в ответ на «хватит» нельзя.
+        from apps.orchestrator.next_steps import (
+            diary_button,
+            menu_button,
+            next_step_action_data,
+        )
+
+        reply = DiscoveryReply(
+            text=str(_report_hour_reply),
+            action_data=None
+            if _report_hour_reply.silences
+            else next_step_action_data(diary_button(), menu_button()),
+        )
         assistant_action_type = REPORT_HOUR_ACTION_TYPE
         _record_live_path_metric(
             bot_user=bot_user,
