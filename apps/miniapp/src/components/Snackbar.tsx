@@ -14,9 +14,17 @@
 
 import { useEffect, useRef } from "react";
 
+import { assertClaim, type Claim } from "../lib/claims";
+
 interface Props {
   visible: boolean;
   message: string;
+  /**
+   * DRF-2347 — что сообщение утверждает выполненным и чем это подтверждено.
+   * Обязательно для сообщений о СДЕЛАННОМ; сообщения о запросе, ошибке и
+   * ходе дела его не несут — им нечего доказывать.
+   */
+  claim?: Claim<unknown>;
   actionLabel?: string;
   onAction?: () => void;
   durationMs?: number;
@@ -27,6 +35,7 @@ interface Props {
 export function Snackbar({
   visible,
   message,
+  claim,
   actionLabel,
   onAction,
   durationMs = 5000,
@@ -34,6 +43,13 @@ export function Snackbar({
   onDismiss,
 }: Props) {
   const timerRef = useRef<number | null>(null);
+
+  // Сверка утверждения с прочитанным (DRF-2347) — при отрисовке, а не в
+  // эффекте: несоответствие обязано останавливать ТАМ ЖЕ, где сообщение
+  // рождается, и быть поймано обычным `expect(...).toThrow()`. В отладочной
+  // и тестовой сборке бросает; перед человеком сторож молчит — он проверяет
+  // наши слова, а не его действия.
+  if (visible && claim) assertClaim(claim);
 
   useEffect(() => {
     if (!visible) {
