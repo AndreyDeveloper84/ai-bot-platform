@@ -25,7 +25,7 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react"
 import { useLocation, useNavigate } from "react-router-dom";
 
 import { useScreenBack } from "../hooks/useScreenBack";
-import { backByAction } from "../lib/screen-back";
+import { backByAction, originFrom } from "../lib/screen-back";
 
 import { Snackbar } from "../components/Snackbar";
 import { DIARY_OFF_TEXT, diaryIsOff, getWellnessToday } from "../lib/customer-wellness";
@@ -44,6 +44,8 @@ interface RouterState {
   photo?: File;
   mealType?: MealType;
   previewUrl?: string;
+  /** DRF-2349 — откуда вошли в поток; здесь поток заканчивается. */
+  returnTo?: string;
 }
 
 const MEAL_TYPES: ReadonlyArray<MealType> = [
@@ -59,6 +61,8 @@ export function FoodScannerResultScreen() {
   const navigate = useNavigate();
   const location = useLocation();
   const state = (location.state ?? {}) as RouterState;
+  // DRF-2349 — поток заканчивается здесь, и выйти надо туда, откуда вошли.
+  const origin = originFrom(location.state);
   const result = state.result;
   const photo = state.photo;
   const initialMealType = state.mealType ?? "lunch";
@@ -73,7 +77,7 @@ export function FoodScannerResultScreen() {
     () =>
       navigate("/customer/food-scanner/capture", {
         replace: true,
-        state: { photo, mealType },
+        state: { photo, mealType, returnTo: state.returnTo },
       }),
     [navigate, photo, mealType],
   );
@@ -201,6 +205,7 @@ export function FoodScannerResultScreen() {
           dishName: renamed ? trimmed : result.dish_name,
           calories,
           edMode: hideNumbers,
+          returnTo: state.returnTo,
         },
       });
     } catch {
@@ -233,8 +238,8 @@ export function FoodScannerResultScreen() {
       visible: true,
       message: "Поняла, не записываю. Если хочешь — пришли ещё фото.",
     });
-    window.setTimeout(() => navigate("/customer/main"), 1800);
-  }, [navigate]);
+    window.setTimeout(() => navigate(origin ?? "/customer/main"), 1800);
+  }, [navigate, origin]);
 
   const openClarify = useCallback(() => setClarifyOpen(true), []);
   const closeClarify = useCallback(() => {
@@ -265,7 +270,7 @@ export function FoodScannerResultScreen() {
       }
       // rephoto
       navigate("/customer/food-scanner/capture", {
-        state: { mealType, photo: null },
+        state: { mealType, photo: null, returnTo: state.returnTo },
       });
     },
     [mealType, navigate],
