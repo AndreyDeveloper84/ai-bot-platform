@@ -76,9 +76,7 @@ class TestTheReadIsBestEffort:
         def _down(*, external_user_id):
             raise RuntimeError("goals down")
 
-        monkeypatch.setattr(
-            "apps.integrations.ayla.goals_client.fetch_decision_context", _down
-        )
+        monkeypatch.setattr("apps.integrations.ayla.goals_client.fetch_decision_context", _down)
 
         assert plan_lite_card.goal_words("ext-1") is None
 

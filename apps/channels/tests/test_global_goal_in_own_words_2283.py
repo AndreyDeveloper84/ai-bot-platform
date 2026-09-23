@@ -52,7 +52,7 @@ def mock_send(monkeypatch):
         max_handler,
         "send_message",
         lambda *, chat_id, text, attachments=None, timeout=10.0: (
-            calls.append({"text": text}) or {"ok": True}
+            calls.append({"text": text, "attachments": attachments}) or {"ok": True}
         ),
     )
     return calls
@@ -117,6 +117,14 @@ class TestTheGoalIsWrittenFromChat:
         # Ответ — о цели, а не разговор консьержа.
         assert mock_send[-1]["text"] != "__DISCOVERY__"
         assert GOAL in mock_send[-1]["text"]
+        # §72 (DRF-2267): завершённый шаг не оставляет человека без пути —
+        # под ответом кнопки следующего шага и «Меню», подписи прежние.
+        labels = [
+            b["label"]
+            for a in (mock_send[-1]["attachments"] or [])
+            for b in a.get("payload", {}).get("buttons", [])
+        ]
+        assert labels == ["Подобрать услугу", "Меню"]
 
 
 class TestWhatItMustNotClaim:

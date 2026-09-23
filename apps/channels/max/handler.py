@@ -159,6 +159,11 @@ from apps.persona.voice import SALON_BUSINESS_NAME
 from apps.orchestrator.concierge import generate_direct_show_masters_reply
 from apps.integrations.ayla.user_proxy import external_user_id_for
 from apps.orchestrator.fast_path import claims_direct_show_masters
+from apps.orchestrator.next_steps import (
+    discover_button,
+    menu_button,
+    next_step_action_data,
+)
 from apps.orchestrator.goal_capture import (
     CONFIRMATION_DRAFT,
     capture_goal_from_chat,
@@ -2443,7 +2448,16 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
                         )
                         captured = None
                     if captured is not None:
-                        goal_reply = DiscoveryReply(text=CONFIRMATION_DRAFT.format(goal=captured))
+                        # §72 (DRF-2267): после завершённого шага — 1–2 кнопки
+                        # следующего шага и «Меню», иначе человек остаётся с
+                        # текстом и без пути. Подписи НЕ новые: те же, что у
+                        # пунктов меню витрины и экрана возврата
+                        # (`orchestrator.next_steps`). Состав кнопок под этим
+                        # ответом ждёт слова главного окна вместе с текстом.
+                        goal_reply = DiscoveryReply(
+                            text=CONFIRMATION_DRAFT.format(goal=captured),
+                            action_data=next_step_action_data(discover_button(), menu_button()),
+                        )
 
                 if nutrition_result is not None:
                     reply = DiscoveryReply(
