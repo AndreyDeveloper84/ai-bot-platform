@@ -933,7 +933,10 @@ except _IngestAllowlistConfigurationError as exc:
 # runtime overrides in tests work. Pilot-env config sets the live
 # values via env vars — the import-time read here is the boot-time
 # snapshot used by the skill + endpoints.
-NUTRITION_ENABLED = os.environ.get("NUTRITION_ENABLED", "false").lower() in ("true", "1")
+NUTRITION_ENABLED = os.environ.get("NUTRITION_ENABLED", "false").lower() in (
+    "true",
+    "1",
+)
 # 3. ``FOOD_DIARY_CANONICAL_CONSENT`` — каноническое согласие на дневник
 #    питания (F10/Z9, решение владельца). Пока ВЫКЛЮЧЕН: текст раскрытия
 #    имеет статус WORKING PRODUCT COPY до Privacy/Legal review, и
@@ -1767,7 +1770,10 @@ WELLNESS_PROACTIVE_ENABLED = os.environ.get("WELLNESS_PROACTIVE_ENABLED", "false
 # включает главное окно на стенде после проверки владельцем. Выключен →
 # прокси customer/plan-lite отвечает 404 plan_lite_disabled ДО вызова
 # каталога, «мой план» в чате — не наш текст (уходит модели, как раньше).
-PLAN_LITE_ENABLED = os.environ.get("PLAN_LITE_ENABLED", "false").lower() in ("true", "1")
+PLAN_LITE_ENABLED = os.environ.get("PLAN_LITE_ENABLED", "false").lower() in (
+    "true",
+    "1",
+)
 
 # DRF-1301 — the same two switches in front of the post-visit follow-up
 # («как прошёл вчерашний визит?»), for the same reason and in the same
@@ -2232,6 +2238,30 @@ CATALOG_SYNC_THROTTLE_WAIT_BUDGET_SECONDS = int(
 # makes it confidently deny services the salon sells. Full reasoning lives
 # in apps/catalog/staleness.py, next to the code that applies it.
 CATALOG_SYNC_STALE_AFTER_SECONDS = int(os.environ.get("CATALOG_SYNC_STALE_AFTER_SECONDS", "3600"))
+
+# DRF-1942 — распознавание голосовых (apps/speech), этап 1 голосового ввода.
+# Здесь только настройки самого распознавания. Включение голоса людям
+# (VOICE_INPUT_ENABLED, флаг трансграничной передачи, эхо, гейт без
+# знаков) — PR 3 того же этапа; без них ничего из этого не вызывается.
+#
+# VOICE_STT_PROVIDER — `openai` (решение владельца, K1 18.09.2026) или
+#   `fake` (тесты, локальная работа без сети). Неизвестное имя → отказ
+#   `voice_provider_unavailable`, не падение.
+# VOICE_STT_MODEL — `gpt-transcribe`: whisper-1 и gpt-4o-*-transcribe
+#   OpenAI отключает 26.02.2027. Ключ и прокси — общие с текстовым
+#   провайдером: OPENAI_API_KEY / OPENAI_PROXY.
+# VOICE_STT_TIMEOUT_S — бюджет одного вызова провайдера (замер этапа 0:
+#   норма 1–2 с, один из 198 запросов повис). Вызывающий может передать
+#   меньше — остаток общего лимита хода.
+# VOICE_MAX_DURATION_S — длиннее не отправляем (отказ `voice_too_long`
+#   до траты денег); рекомендация ТЗ — 60 с, решение владельца открыто.
+# VOICE_STT_MONTHLY_MINUTES_CAP — потолок минут аудио в календарный месяц
+#   (вопрос 7 ТЗ); 0 = без потолка. Счётчик в кэше, best-effort.
+VOICE_STT_PROVIDER = os.environ.get("VOICE_STT_PROVIDER", "openai")
+VOICE_STT_MODEL = os.environ.get("VOICE_STT_MODEL", "gpt-transcribe")
+VOICE_STT_TIMEOUT_S = float(os.environ.get("VOICE_STT_TIMEOUT_S", "15"))
+VOICE_MAX_DURATION_S = float(os.environ.get("VOICE_MAX_DURATION_S", "60"))
+VOICE_STT_MONTHLY_MINUTES_CAP = int(os.environ.get("VOICE_STT_MONTHLY_MINUTES_CAP", "0"))
 
 # DRF-1500 — экран здоровья контура (/admin/health/). Опрос Ayla за
 # полными числами услуг/мастеров: короткий таймаут (экран не ждёт дольше,
