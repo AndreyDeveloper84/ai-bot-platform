@@ -190,7 +190,8 @@ export /**
  */
 const SHOW_AYLA_PICKS_SHELF = false;
 
-const DIARY_CONSENT_CARD_TEXT = "Чтобы вести дневник, нужно согласие — дай его в чате с Ayla";
+export const DIARY_CONSENT_CARD_TEXT =
+  "Чтобы вести дневник, нужно согласие — дай его в чате с Ayla";
 export const DIARY_CONSENT_CARD_CTA = "Дать согласие в чате";
 
 // DRF-2268: строка и компонент подсказки — общие, `components/ReturnToChatHint`.
@@ -809,15 +810,23 @@ export function CustomerWellnessDashboardScreen() {
             <h2 id="booking-header" className="wellness-dash__section-header">
               Ближайшая запись
             </h2>
-            <button
-              type="button"
-              className="wellness-dash__booking-all"
-              onClick={() => navigate("/customer/records")}
-              aria-label="Все мои записи"
-            >
-              Все мои записи
-              <span aria-hidden="true"> →</span>
-            </button>
+            {/* Только когда запись действительно есть. Д11 — про МЕСТО
+                кнопки, а не про новое приглашение: у человека без записей
+                «Все мои записи» вело бы в пустой список, а на загрузке и
+                на ошибке — предлагало бы переход рядом со строкой «не
+                удалось прочитать». Прежде кнопка жила внутри карточки и
+                этого условия не теряла. */}
+            {activity.kind === "ok" && activity.data.next_booking && (
+              <button
+                type="button"
+                className="wellness-dash__booking-all"
+                onClick={() => navigate("/customer/records")}
+                aria-label="Все мои записи"
+              >
+                Все мои записи
+                <span aria-hidden="true"> →</span>
+              </button>
+            )}
           </div>
           {activity.kind === "loading" && <BookingSkeleton />}
           {activity.kind === "error" && (
@@ -1586,7 +1595,8 @@ function BookingCard({
         </div>
       )}
 
-      {/* По макету: «Открыть запись» и «Все мои записи». «Перенести» с
+      {/* По макету: «Открыть запись». «Все мои записи» уехала в строку
+          заголовка блока (Д11, решение владельца 22.09), «Перенести» с
           Главной снято — перенос живёт в карточке записи. */}
       <div className="wellness-dash__booking-actions">
         <button

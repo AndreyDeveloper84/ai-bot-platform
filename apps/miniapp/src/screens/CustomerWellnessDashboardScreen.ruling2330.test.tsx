@@ -213,6 +213,14 @@ describe("Д32 — порядок блоков по макету", () => {
     expect(booking).toBeLessThan(quick);
     expect(quick).toBeLessThan(ayla);
     expect(ayla).toBeLessThan(diary);
+
+    // Два НАЗВАННЫХ отклонения (в таблице PR) — тоже под сторожем, иначе
+    // следующая перестановка сломает согласованное исключение молча:
+    // согласие стоит НАД полосой дневника (оно её и закрывает), «Шаги на
+    // сегодня» — сразу ПОСЛЕ неё (это её числа).
+    const steps = indexOfClass(order, "today-goals");
+    expect(steps).toBeGreaterThanOrEqual(0);
+    expect(diary).toBeLessThan(steps);
   });
 });
 
@@ -336,5 +344,29 @@ describe("Ответы владельца 23.09 (§61)", () => {
     expect(
       await screen.findByRole("button", { name: "Посмотреть детали цели" }),
     ).toBeInTheDocument();
+  });
+});
+
+
+describe("Д11 — кнопка «Все мои записи» не зовёт в пустоту", () => {
+  it("без записей кнопки нет, а блок и приглашение записаться на месте", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: unknown) => {
+        const u = String(url);
+        if (u.includes("/wellness/today")) return ok(TODAY);
+        if (u.includes("/recent-activity")) return ok({ this_week_booking_count: 0 });
+        if (u.includes("/plan-lite")) return ok(PLAN);
+        if (u.includes("/last-topic")) return ok({ last_topic: null });
+        if (u.includes("/wellness/consent-prompt")) return ok({ sent: true });
+        throw new Error(`unexpected fetch: ${u}`);
+      }),
+    );
+    renderHome();
+    // Присутствие: блок записи отрисован и предлагает записаться.
+    expect(
+      await screen.findByRole("heading", { name: /Ближайшая запись/ }),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Все мои записи" })).toBeNull();
   });
 });
