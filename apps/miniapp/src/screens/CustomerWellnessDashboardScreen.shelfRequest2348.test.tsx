@@ -16,6 +16,15 @@
  *
  * Поэтому выключатель один на оба места (`lib/ayla-picks-shelf`), а не
  * два рядом стоящих условия: два рано или поздно разъезжаются.
+ *
+ * Третьего узла — «выключатель один и тот же» — здесь НЕТ намеренно. Он
+ * был написан и снят: два независимых `false` прошли бы его точно так же,
+ * то есть именно того, ради чего он назван, он показать не мог, а всё
+ * остальное в нём уже доказано двумя узлами ниже (найдено ревью).
+ *
+ * И то, чего этот файл НЕ проверяет: условие `shelfOn` в самой вёрстке.
+ * При тёмной полке данных в срезе нет вовсе, поэтому снятие того условия
+ * ничего не меняет — цена решения, названная вслух.
  */
 import { render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
@@ -26,9 +35,15 @@ vi.mock("../lib/customer-booking", async (importOriginal) => {
     await importOriginal<typeof import("../lib/customer-booking")>();
   return { ...original, getCatalogBrowse: vi.fn() };
 });
-vi.mock("../lib/ayla-picks-shelf", () => ({
-  aylaPicksShelfOn: vi.fn(() => false),
-}));
+vi.mock("../lib/ayla-picks-shelf", async (importOriginal) => {
+  // Подменяется ТОЛЬКО выключатель: замена модуля целиком отдала бы
+  // `AYLA_PICKS_SHELF_ON` как `undefined`, и если экран когда-нибудь
+  // прочитает константу напрямую, оба «тёмных» узла пройдут по неверной
+  // причине (найдено ревью).
+  const original =
+    await importOriginal<typeof import("../lib/ayla-picks-shelf")>();
+  return { ...original, aylaPicksShelfOn: vi.fn(() => false) };
+});
 vi.mock("../lib/max-sdk", () => ({
   getInitData: () => "",
   setBackButton: vi.fn(),
@@ -41,11 +56,29 @@ vi.mock("../lib/max-sdk", () => ({
 }));
 
 import { getCatalogBrowse } from "../lib/customer-booking";
+import type { CatalogBrowseData } from "../lib/customer-booking";
 import { aylaPicksShelfOn } from "../lib/ayla-picks-shelf";
 import { CustomerWellnessDashboardScreen } from "./CustomerWellnessDashboardScreen";
 
 const mockedBrowse = vi.mocked(getCatalogBrowse);
 const mockedShelfOn = vi.mocked(aylaPicksShelfOn);
+
+/** Полка, которой ЕСТЬ что показать: иначе «включена — рисуется» прошёл
+ *  бы на пустом ответе, ничего не доказав. */
+const SHELF_ANSWER = {
+  services: [
+    {
+      id: "s1",
+      name: "Массаж",
+      price_from: "2000",
+      duration_min: 60,
+      is_active: true,
+    },
+  ],
+  masters: [],
+  picks: [{ serviceId: "s1", tier: 1, rank: 1, reasonCodes: [], reasons: ["ты искала массаж"] }],
+  picksOutcome: "OK",
+} as unknown as CatalogBrowseData;
 
 const TODAY: Record<string, unknown> = {
   calories_eaten: 1240,
@@ -100,14 +133,10 @@ beforeEach(() => {
   // теста, где полка зажжена. Сам же узел это и поймал.
   vi.clearAllMocks();
   mockedShelfOn.mockReturnValue(false);
-  // Полка, которая ЕСТЬ что показать: иначе узел «включена — рисуется»
-  // прошёл бы на пустом ответе, ничего не доказав.
-  mockedBrowse.mockResolvedValue({
-    services: [{ id: "s1", name: "Массаж", price_amount: 2000 }],
-    masters: [],
-    picks: [{ serviceId: "s1", reasons: ["ты искала массаж"] }],
-    picksOutcome: "OK",
-  } as never);
+  // Под типом, а не `as never`: это единственная фикстура листа, которая
+  // обязана доехать до DOM, и переименование поля в контракте должно
+  // ронять сборку, а не превращаться в непонятный промах `getByText`.
+  mockedBrowse.mockResolvedValue(SHELF_ANSWER);
   serve();
 });
 
@@ -136,15 +165,5 @@ describe("Запрос за полкой ходит только при зажж
     await waitFor(() =>
       expect(screen.getByText("ты искала массаж")).toBeInTheDocument(),
     );
-  });
-
-  it("выключатель один: тот же, что решает, рисовать ли полку", async () => {
-    renderHome();
-    expect(await screen.findByText("Подтянуть фигуру")).toBeInTheDocument();
-    // Полки нет — и обращения нет. Два состояния одного выключателя, а не
-    // два независимых условия, которые однажды разъедутся.
-    expect(screen.queryByText("ты искала массаж")).toBeNull();
-    expect(mockedBrowse).not.toHaveBeenCalled();
-    expect(mockedShelfOn).toHaveBeenCalled();
   });
 });

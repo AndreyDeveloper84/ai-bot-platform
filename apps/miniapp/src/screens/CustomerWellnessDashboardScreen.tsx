@@ -267,7 +267,12 @@ export function CustomerWellnessDashboardScreen() {
   // заведены ровно для того, чтобы не смешивать отсутствие с нулём
   // (`customer-booking.ts`, таблица исходов). Полка тёмная — вопроса не
   // было, и так и записано.
-  const [recs, setRecs] = useState<RecsSlice>({ kind: "not_requested" });
+  const [recs, setRecs] = useState<RecsSlice>(() =>
+    // Ленивое начальное значение, потому что «не спрашивали» — ровно то
+    // утверждение, ради которого это состояние и заведено: при зажжённой
+    // полке первый кадр говорил бы неправду до первого `fetchAll`.
+    aylaPicksShelfOn() ? { kind: "loading" } : { kind: "not_requested" },
+  );
   const [planSlice, setPlanSlice] = useState<PlanSlice>({ kind: "loading" });
   // Тема — `null` и «ручка упала» читаются одинаково: блок нейтральный.
   const [lastTopic, setLastTopic] = useState<LastTopic | null>(null);
@@ -344,11 +349,17 @@ export function CustomerWellnessDashboardScreen() {
     if (!shelfOn) {
       // Вопроса не было — и в срезе стоит именно это, а не пустой ответ.
       setRecs({ kind: "not_requested" });
-    } else if (recsRes.status === "fulfilled" && recsRes.value !== null) {
-      setRecs({ kind: "ok", data: recsRes.value });
     } else if (recsRes.status === "rejected") {
       // Recommendations errors hide the whole block silently per spec.
       setRecs({ kind: "error", reason: loadErrorReason(recsRes.reason) });
+    } else {
+      // Всё остальное при зажжённой полке — ответ. Ветки «а если `null`»
+      // здесь намеренно нет: `null` кладёт только выключенная полка, её
+      // забрал первый случай. Отдельное условие на `null` выглядело бы
+      // аккуратнее, а на деле оставляло бы срез в «грузится» навсегда,
+      // если `getCatalogBrowse` однажды станет возвращать `null` — то
+      // есть меняло бы тип ошибки на самую тихую (найдено ревью).
+      setRecs({ kind: "ok", data: recsRes.value as CatalogBrowseData });
     }
 
     // План: выключен на сервере (`plan_lite_disabled`) или не ответил —
@@ -1178,6 +1189,12 @@ export function CustomerWellnessDashboardScreen() {
             signature «Ayla подобрала тебе» is gated on the WHY the
             SOURCE sent, not on a flag: the block reappears on its own
             once `POST /recommendations` returns reasons. */}
+        {/* `shelfOn` здесь — пояс поверх подтяжек, и проверить его узлом
+            НЕЛЬЗЯ: при тёмной полке за данными не ходят, `picksWithWhy`
+            всегда пуст, и снятие этого условия ничего не меняет (проверено
+            мутацией на ревью). Условие оставлено на случай, если срез
+            когда-нибудь наполнится из другого места — из кэша, из общего
+            состояния. Настоящие ворота — в `fetchAll`. */}
         {shelfOn && picksWithWhy.length > 0 && (
             <section
               className="wellness-dash__recos"
