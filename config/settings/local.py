@@ -22,3 +22,7 @@ CACHES = {
 # exercise the tokenizer explicitly (`test_pii_*`) use `fake_redis`
 # fixture + opt back in via settings override / explicit `pii_context`.
 PII_TOKENIZER_ENABLED = False
+
+# DRF-2340 — режим оплаты называется в контуре, а не подразумевается.
+# Локально и в тестах — тестовый: сеть не трогается, ссылка заглушечная.
+AYLA_PAYMENTS_TEST_MODE = True

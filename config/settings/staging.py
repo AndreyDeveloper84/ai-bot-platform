@@ -26,6 +26,16 @@ DEBUG = False
 # Sprint 4 / D1 — IM-2 timing.
 STRICT_TENANT_SCOPE = "strict"
 
+# DRF-2340 — режим оплаты объявлен здесь, а не подразумевается третьим
+# аргументом ``getattr`` внутри клиента. Значение берётся из окружения;
+# объявленное умолчание — ``true``, то есть ровно то, как стенд работает
+# сегодня (замер: переменной в окружении нет). Какое значение стоит на
+# стенде — решает владелец; эта правка работает при любом его ответе и
+# сама за него ничего не выбирает. Мусорное значение — отказ, не «бой».
+AYLA_PAYMENTS_TEST_MODE = payments_test_mode_from(  # noqa: F405
+    os.environ.get("AYLA_PAYMENTS_TEST_MODE", "true")  # noqa: F405
+)
+
 # T-02 / OD-T02-1 — the unconditional
 # ``EVENT_INGEST_TENANT_VERIFY_FAIL_OPEN = True`` that used to live here is
 # REMOVED. It disabled tenant verification for every tenant and every event

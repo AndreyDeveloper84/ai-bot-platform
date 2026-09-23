@@ -84,6 +84,25 @@ if not MYSITE_WEBHOOK_HMAC_SECRET:
     )
 
 
+# DRF-2340 — режим оплаты в бою называется явно. Умолчания здесь нет
+# намеренно: до этой правки незаданная переменная означала «тест», то есть
+# боевой контур молча выдавал бы людям заглушечные ссылки на оплату —
+# «оплатил» без денег, и никакого сигнала об этом. Падение на загрузке —
+# та же форма, что у AYLA_INTERNAL_API_TOKEN и SENTRY_DSN ниже: цена
+# неверного ответа — выкладка, которая не стартует, а не человек с
+# поддельной ссылкой.
+_PAYMENTS_MODE_RAW = os.environ.get("AYLA_PAYMENTS_TEST_MODE")
+if _PAYMENTS_MODE_RAW is None or not _PAYMENTS_MODE_RAW.strip():
+    raise ImproperlyConfigured(
+        "AYLA_PAYMENTS_TEST_MODE is required in production and has no default. "
+        "Set it to 'false' to take real payments, or to 'true' deliberately "
+        "(a contour that issues stub checkout links). Unset used to mean "
+        "'true' silently — people would get a fake payment link."
+    )
+# Мусор — отказ с именем переменной (разбор общий, из base).
+AYLA_PAYMENTS_TEST_MODE = payments_test_mode_from(_PAYMENTS_MODE_RAW)  # noqa: F405
+
+
 # Phase 2.2 — domain bus subscriber registry. Production activates
 # AuditSubscriber by default so every dispatched DomainEvent gets
 # mirrored into AuditLog (forensic chain-of-custody for billing
