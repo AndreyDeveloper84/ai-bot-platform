@@ -101,6 +101,8 @@ class TestThePromiseHasAnAddressee:
         self, tenant: Tenant, bot_user: BotUser, conversation: Conversation, reminder
     ) -> None:
         """Сердце листа: сказал «передал» — задача у операторов есть."""
+        # Состояние ДО действия: без «ноль до» утверждение «одна после» пусто.
+        # empty-assert-ok: задач не создавал ещё никто.
         assert _tasks(conversation) == []
 
         with tenant_scope(tenant):
@@ -161,8 +163,12 @@ class TestTheHandoverIsAllOrNothing:
                     _press_reschedule(reminder, bot_user, conversation)
 
         reminder.refresh_from_db()
+        # Наличие рядом: строка напоминания жива и нетронута — откатился
+        # статус, а не запись.
         assert reminder.status == BookingReminder.Status.SENT_NO_REPLY
         assert reminder.replied_at is None
+        # Передача упала внутри транзакции — задачи не создавалось вовсе.
+        # empty-assert-ok: «ноль» здесь единственная возможная форма.
         assert _tasks(conversation) == []
 
     def test_after_a_failure_the_person_can_press_again(
