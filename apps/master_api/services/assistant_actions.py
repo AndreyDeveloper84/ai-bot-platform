@@ -486,6 +486,20 @@ def _count_ru(n: int) -> str:
     return f"{words[n]} клиентов" if n in words else "несколько клиентов"
 
 
+def _new_client_door(master) -> dict[str, Any]:
+    """Дверь в форму записи — там нового гостя заводят с телефоном.
+
+    Одна на два исхода разбора клиента: «такого имени нет» и «не смогли
+    спросить» (DRF-2362). Причины разные, и слова у них разные, но идти
+    мастеру в обоих случаях некуда, кроме формы, — а две копии одной
+    карточки однажды разошлись бы подписью.
+    """
+
+    from apps.master_api.services.assistant_cards import booking_form_url
+
+    return {"kind": "open", "url": booking_form_url(master), "label": "Добавить запись"}
+
+
 def _resolve_client(master, arguments: dict[str, Any], *, tz) -> dict[str, Any]:
     """Клиент — по id из уточнения или по имени через поиск М-2.
 
@@ -518,16 +532,12 @@ def _resolve_client(master, arguments: dict[str, Any], *, tz) -> dict[str, Any]:
         log="master_api.assistant.find_client",
     )
     if isinstance(rows, Refusal):
-        # DRF-2362: без карточки отказ запирает разговор — на любой ответ
+        # DRF-2362: без карточки отказ запирал разговор — на любой ответ
         # мастера («это новый клиент») помощник повторял ту же строку.
-        # Дверь берётся у соседней ветки «клиента с таким именем нет»: она
-        # ведёт туда же, где нового гостя и заводят, и новых слов не вносит.
-        from apps.master_api.services.assistant_cards import booking_form_url
-
         raise ActionError(
             "Не удалось проверить клиентов. Попробуйте снова.",
             verbatim=True,
-            cards=[{"kind": "open", "url": booking_form_url(master), "label": "Добавить запись"}],
+            cards=[_new_client_door(master)],
         )
     enriched = enrich_customer_rows(master, rows)
     if client_id:
@@ -553,12 +563,10 @@ def _resolve_client(master, arguments: dict[str, Any], *, tz) -> dict[str, Any]:
                 ],
             )
     if not enriched:
-        from apps.master_api.services.assistant_cards import booking_form_url
-
         raise ActionError(
             "Клиента с таким именем нет. Нового клиента можно добавить в форме записи.",
             verbatim=True,
-            cards=[{"kind": "open", "url": booking_form_url(master), "label": "Добавить запись"}],
+            cards=[_new_client_door(master)],
         )
     if len(enriched) > 1:
         from apps.master_api.services.assistant_cards import client_option_label
