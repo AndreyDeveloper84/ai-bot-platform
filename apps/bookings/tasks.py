@@ -170,6 +170,36 @@ def _target_status(kind: str) -> str:
     return BookingReminder.Status.SENT
 
 
+def _handoff_silenced(row: Any) -> bool:
+    """Занят ли этим человеком живой оператор прямо сейчас (DRF-2342).
+
+    Жалоба владельца: администратор переносит запись руками, а боту в этот
+    же момент наступает T-2, и человек получает напоминание о СТАРОМ
+    времени — о том самом, что сейчас меняют.
+
+    Отдельная проверка, а не расширение соседних, потому что обе соседние
+    про другое и обе легко принять за эту:
+
+    * :func:`_recheck_booking_state` откладывает ход при
+      ``CANCEL_REQUESTED`` / ``RESCHEDULE_REQUESTED`` — окно отмены в
+      секунды; пока оператор работает руками, статус остаётся
+      ``CONFIRMED``;
+    * :func:`_reminders_muted` — личный выключатель человека, он и должен
+      действовать независимо от того, занят ли им оператор.
+
+    **Срок здесь пока не стоит, и это не забывчивость.** Задача
+    администратора сама не закрывается (DRF-1015), то есть «молчать, пока
+    открыта» без срока — неограниченная тишина. Каким он будет (потолок
+    ожидания, отсечка по SLA подхвата, отправка с оговоркой), решает
+    владелец; когда решит, условие встанет ЗДЕСЬ, в одном месте, а не
+    рассыплется по ходу отправки.
+    """
+    from apps.orchestrator.handoff import person_handoff_muted
+
+    bot_user = row.bot_user
+    return person_handoff_muted(channel=bot_user.channel, channel_user_id=bot_user.channel_user_id)
+
+
 def _reminders_muted(row: Any) -> bool:
     """Has the person switched booking reminders off?
 
@@ -312,6 +342,17 @@ def send_due_reminders() -> dict[str, int]:
         # same either way. Service class (DRF-1833 registry): no consent
         # gate here — this IS the person's own booking — but their own
         # «no» is honoured.
+        # DRF-2342 — человеком занят живой оператор: напоминание ЖДЁТ, а не
+        # сгорает. Строка остаётся PENDING, следующий тик проверит заново:
+        # задача закроется — напоминание уйдёт, если визит ещё впереди.
+        # Стоит ПЕРЕД личным выключателем намеренно: выключатель меняет
+        # статус безвозвратно, и проверив его первым, мы сожгли бы строку,
+        # которую всего лишь надо придержать.
+        if _handoff_silenced(row):
+            deferred += 1
+            logger.info("bookings.dispatch.deferred_handoff pk=%s kind=%s", row.pk, row.kind)
+            continue
+
         if _reminders_muted(row):
             rowcount = BookingReminder.all_tenants.filter(
                 pk=row.pk,

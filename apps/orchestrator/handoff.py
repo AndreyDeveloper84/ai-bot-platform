@@ -1361,6 +1361,39 @@ def matches_human_handoff_request(text: str) -> bool:
     return False
 
 
+def person_handoff_muted(*, channel: str, channel_user_id: str) -> bool:
+    """True, пока человеком занят живой оператор — БЕЗ привязки к диалогу.
+
+    Тот же радиус, что у :func:`global_handoff_muted` (DRF-1015: мьют ходит
+    за человеком, а не за диалогом), но спрашивать можно оттуда, где текущего
+    диалога нет вовсе, — например из проактивной задачи (DRF-2342).
+
+    Две половины, и вторая не лишняя: задача может быть заведена на одной
+    оболочке личности, а диалог в ``HUMAN_HANDOFF`` — другой; проверять
+    только задачи значило бы пропустить путь, который состояние диалога
+    ставит сам.
+
+    Один источник у обоих читателей: :func:`global_handoff_muted` зовёт эту
+    же функцию, поэтому спискам статусов и типов задач разойтись нечем.
+    """
+    from apps.conversations.models import Conversation
+    from apps.handoff.models import AdminTask
+    from apps.identity.models import BotUser
+
+    shells = BotUser.all_tenants.filter(channel=channel, channel_user_id=channel_user_id).values(
+        "id"
+    )
+    if AdminTask.all_tenants.filter(
+        bot_user_id__in=shells,
+        task_type=AdminTask.TaskType.HANDOFF,
+        status__in=(AdminTask.Status.OPEN, AdminTask.Status.IN_PROGRESS),
+    ).exists():
+        return True
+    return Conversation.all_tenants.filter(
+        bot_user_id__in=shells, state=Conversation.State.HUMAN_HANDOFF
+    ).exists()
+
+
 def global_handoff_muted(*, conversation, channel: str, channel_user_id: str) -> bool:
     """True while a human operator drives ANY of this user's dialogs (DRF-1015).
 
@@ -1381,18 +1414,12 @@ def global_handoff_muted(*, conversation, channel: str, channel_user_id: str) ->
     filtered by ``task_type``/``status`` (``status`` is db_indexed).
     """
     from apps.conversations.models import Conversation
-    from apps.handoff.models import AdminTask
-    from apps.identity.models import BotUser
 
     if conversation.state == Conversation.State.HUMAN_HANDOFF:
         return True
-    return AdminTask.all_tenants.filter(
-        bot_user_id__in=BotUser.all_tenants.filter(
-            channel=channel, channel_user_id=channel_user_id
-        ).values("id"),
-        task_type=AdminTask.TaskType.HANDOFF,
-        status__in=(AdminTask.Status.OPEN, AdminTask.Status.IN_PROGRESS),
-    ).exists()
+    # Вторая половина — одна на обоих читателей (DRF-2342): список статусов
+    # и тип задачи живут в одном месте, копии разойтись нечему.
+    return person_handoff_muted(channel=channel, channel_user_id=channel_user_id)
 
 
 def route_global_human_handoff(
