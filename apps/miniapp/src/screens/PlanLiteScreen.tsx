@@ -246,8 +246,13 @@ export function PlanLiteScreen() {
   }, [load]);
 
   // Метка цели — как на экране цели: текст человека, иначе подпись
-  // курируемой цели из документа; сервер отдаёт лишь ключ. Не смогли
-  // спросить — показываем ключ, план от этого не зависит.
+  // курируемой цели из документа; сервер отдаёт лишь ключ.
+  //
+  // DRF-2355: не смогли спросить — метки просто нет, и заголовок обходится
+  // без имени цели. Ключ (`tone_up`) — адрес внутри системы, а не слово,
+  // которым человек называет свою цель; показывать его вместо названия
+  // значит отвечать служебным кодом на вопрос «а какая у меня цель».
+  // План от метки не зависит и рисуется полностью.
   useEffect(() => {
     let cancelled = false;
     fetchDecisionContext()
@@ -420,7 +425,7 @@ export function PlanLiteScreen() {
         {status.kind === "proposal" && (
           <section data-testid="plan-lite-proposal" aria-label={PLAN_LITE_COPY.title}>
             <h2 className="food-scanner-diary__caption">
-              {PLAN_LITE_COPY.proposalTitle(goalLabel ?? status.proposal.goal_key)}
+              {goalLabel ? PLAN_LITE_COPY.proposalTitle(goalLabel) : PLAN_LITE_COPY.title}
             </h2>
             <p className="food-scanner-diary__unreadable-hint">{status.proposal.why}</p>
             <p className="food-scanner-diary__caption">{PLAN_LITE_COPY.proposalHint}</p>
@@ -545,7 +550,7 @@ export function PlanLiteScreen() {
         {status.kind === "card" && (
           <section data-testid="plan-lite-card" aria-label={PLAN_LITE_COPY.title}>
             <h2 className="food-scanner-diary__caption">
-              {PLAN_LITE_COPY.goalTitle(goalLabel ?? status.plan.goal_key)}
+              {goalLabel ? PLAN_LITE_COPY.goalTitle(goalLabel) : PLAN_LITE_COPY.title}
             </h2>
             <ul className="food-scanner-diary__list">
               {status.plan.actions.map((action) => (

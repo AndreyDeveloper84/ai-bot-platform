@@ -244,3 +244,51 @@ describe("отказы и флаг", () => {
     vi.unstubAllEnvs();
   });
 });
+
+describe("служебный ключ на экран не попадает (DRF-2355)", () => {
+  // Метка цели тянется ВТОРЫМ запросом. Раньше при его сбое подставлялся
+  // `goal_key` — человеку показывался слаг вида «tone_up». Ключ — адрес
+  // внутри системы, а не слово, которым человек называет свою цель.
+  it("сбой второго запроса не выводит ключ в карточке", async () => {
+    mockedGet.mockResolvedValue(PLAN);
+    mockedDoc.mockRejectedValue(new Error("boom"));
+
+    renderScreen();
+    await settle();
+
+    expect(screen.getByTestId("plan-lite-card")).toBeInTheDocument();
+    expect(screen.queryByText(/tone_up/)).toBeNull();
+    // Заголовок остаётся — просто без имени цели, прежними словами.
+    expect(screen.getAllByText(PLAN_LITE_COPY.title).length).toBeGreaterThan(0);
+  });
+
+  it("сбой второго запроса не выводит ключ в предложении", async () => {
+    mockedGet.mockResolvedValue(null);
+    mockedProposal.mockResolvedValue({
+      goal_key: "tone_up",
+      why: "Под твою цель",
+      template_version: 1,
+      actions: [{ action_type: "log_water", cadence: "per_day", target_count: 7 }],
+    });
+    mockedDoc.mockRejectedValue(new Error("boom"));
+
+    renderScreen();
+    await settle();
+
+    expect(screen.getByTestId("plan-lite-proposal")).toBeInTheDocument();
+    expect(screen.queryByText(/tone_up/)).toBeNull();
+  });
+
+  it("метка есть — цель зовётся словами человека", async () => {
+    mockedGet.mockResolvedValue(PLAN);
+    mockedDoc.mockResolvedValue({
+      ...DOC,
+      known: { goal: { ...DOC.known.goal!, goal_text: "хочу −5 кг к лету" } },
+    });
+
+    renderScreen();
+    await settle();
+
+    expect(screen.getByText(PLAN_LITE_COPY.goalTitle("хочу −5 кг к лету"))).toBeInTheDocument();
+  });
+});
