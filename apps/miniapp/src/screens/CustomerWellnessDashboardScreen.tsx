@@ -19,26 +19,37 @@
  * веса, «−2,4 кг», процентов, графиков прогресса, «Добавить замер» и
  * «Самочувствие». Порядок сверху вниз:
  *
- *   Block 1 — Greeting + human one-liner (Tau §3 / §11.9 + §11.10)
+ * Порядок по макету — решение владельца 22.09 (Д32, DRF-2330):
+ * цель → план → запись → быстрые действия → Ayla → дневник.
+ *
+ *   Block 1 — Greeting + human one-liner (Tau §3 / §11.9 + §11.10);
+ *     внутри — карточка «Начнём с малого?» (Д31 а): подсказка первого шага
+ *     человеку с пустым днём, поэтому наверху, а не в конце экрана
  *   Block G — карточка активной цели: «Активная цель», название,
  *     «Неделя N · выполнено N из M действий» (adherence Plan Lite),
- *     primary «Продолжить сегодняшний план» / «Составить план»,
+ *     primary «Продолжить сегодняшний план →» / «Составить план»,
  *     вторичное «Посмотреть детали цели»; без цели — «Выбери цель»
- *   Block C — ОДИН блок согласия дневника (вместо двух абзацев)
  *   Block P — «План на сегодня» из Plan Lite (тот же источник, что у
  *     PlanLiteScreen); без плана блока нет
- *   Block 2 — Pulse strip (Питание + Вода) — Tau §3 + §11.1
- *   Block 4 — Шаги на сегодня (норма воды из анкеты; иной источник, чем план)
  *   Block 5 — Ближайшая запись: карточка (услуга, мастер, когда, адрес,
- *     статус, «Открыть запись», «Все мои записи»); нет — «Записей нет» +
- *     «Записаться»
+ *     статус, «Открыть запись»); «Все мои записи» — справа от заголовка
+ *     (Д11); нет записи — «Записей нет» + «Записаться»
  *   Block 3 — Быстрые действия по фризу: записать питание / стакан воды /
  *     новая запись / скорректировать план / профиль
  *   Block A — «Продолжить разговор с Ayla» с последней темой
- *     (`customer/last-topic/`); без темы — нейтрально
- *   Block 6 — Прогресс недели (cold-start ≥3 days) — Tau §3 + §11.4
- *   Block 7 — Recommendations embed (TL extension)
+ *     (`customer/last-topic/`); без темы — нейтрально. ЕДИНСТВЕННЫЙ вход в
+ *     чат с этого экрана (Д2)
+ *   Block C — ОДИН блок согласия дневника (вместо двух абзацев); стоит над
+ *     полосой дневника, которую и закрывает
+ *   Block 2 — Pulse strip (Питание + Вода) — Tau §3 + §11.1
+ *   Block 4 — Шаги на сегодня (норма воды из анкеты; иной источник, чем
+ *     план) — сразу после дневника: это его числа (Д31 б)
+ *   Block 7 — Recommendations embed: СКРЫТ (Д31 г), см.
+ *     `SHOW_AYLA_PICKS_SHELF` и вопрос 40
  *   Bottom nav — Главная · План · Дневник · Записи · Профиль (§55 б)
+ *
+ * Снято решением владельца 22.09: кнопка «спросить» из шапки (Д2) и блок
+ * «Прогресс недели» (Д31 в — сервер этих данных и так не слал).
  *
  * Места, оставленные под чужие листы (условный рендер, ключа пока нет):
  * срок цели — DRF-2173 (заполнено), цена записи — DRF-2172 (заполнено).
@@ -161,7 +172,19 @@ type ActiveGoal = NonNullable<WellnessToday["active_goals"]>[number];
  * раньше она просто закрывала приложение, и человек попадал в чат, где о
  * согласии не было ни слова (скрин владельца 21.09).
  */
-export const DIARY_CONSENT_CARD_TEXT = "Чтобы вести дневник, нужно согласие — дай его в чате с Ayla";
+export /**
+ * Д31 (г), решение владельца 22.09 (DRF-2330): полка «Ayla подобрала тебе»
+ * уходит С ЭКРАНА. Код оставлен НАМЕРЕННО и ждёт ответа на **вопрос 40 от
+ * 20.09** (`docs/OWNER_QUESTIONS_H01_DEVIATIONS_2026-09-20.md`): снимать
+ * полку совсем или оставить обездвиженной. Пока ответа нет, включение —
+ * одна строка здесь, и ничего не успевает сгнить.
+ *
+ * Дата в тексте не для красоты: без неё через месяц никто не вспомнит, чего
+ * ждёт эта константа, и её побоятся трогать.
+ */
+const SHOW_AYLA_PICKS_SHELF = false;
+
+const DIARY_CONSENT_CARD_TEXT = "Чтобы вести дневник, нужно согласие — дай его в чате с Ayla";
 export const DIARY_CONSENT_CARD_CTA = "Дать согласие в чате";
 
 // DRF-2268: строка и компонент подсказки — общие, `components/ReturnToChatHint`.
@@ -600,11 +623,10 @@ export function CustomerWellnessDashboardScreen() {
     !activityData?.next_booking;
 
   // Block 6 gate — PRESENCE first, then the cold-start threshold
-  // (§11.4). The backend omits `weekly_progress` while it has no real
-  // source for it, so «absent» must hide the block on its own and not
-  // lean on `>= 3` to do it (DRF-1476).
-  const weeklyProgress = activityData?.weekly_progress;
-  const showWeekly = !!weeklyProgress && weeklyProgress.active_days_count >= 3;
+  // «Прогресс недели» снят с экрана решением владельца 22.09 (Д31 в): он
+  // дублировал план, а сервер этих данных и так не слал. Вместе с блоком
+  // ушли и его ключи — держать вычисление ради снятого блока значило бы
+  // оставить мёртвый код, который читается как живой.
 
   // Goal CTA is TRI-state (DRF-1476). `active_goals` absent means the
   // backend could not reach the goal layer — that is not «no goal», and
@@ -646,9 +668,14 @@ export function CustomerWellnessDashboardScreen() {
       </a>
 
       {/* Header — 56dp. Иконки «Профиль»/«Настройки» сняты (DRF-2144): обе
-          вели в профиль, а профиль теперь — вкладка панели. Вордмарк и
-          «спросить» — прежние; на макете H01 в шапке имя и колокольчик
-          (Д1/Д2 в списке отступлений PR). */}
+          вели в профиль, а профиль теперь — вкладка панели.
+
+          Д2 (решение владельца 22.09, DRF-2330): кнопка «спросить» снята —
+          «один вход в чат вместо двух». Второй и единственный остаётся
+          блоком «Продолжить разговор с Ayla» ниже: он несёт последнюю тему,
+          а шапочная кнопка вела в тот же чат без неё.
+
+          Имя и колокольчик макета — Д1, отдельный лист DRF-2331. */}
       <header className="wellness-dash__header" role="banner">
         <div className="wellness-dash__brand">
           {/* «ayla» = English wordmark per Tau §7 — wrap in lang="en"
@@ -658,14 +685,6 @@ export function CustomerWellnessDashboardScreen() {
           </span>
           <span aria-hidden="true"> ✨</span>
         </div>
-        <button
-          type="button"
-          className="wellness-dash__ask"
-          aria-label="Спросить у ayla"
-          onClick={() => navigate("/")}
-        >
-          спросить
-        </button>
       </header>
 
       {/* Offline banner — §5 State 4. */}
@@ -759,90 +778,10 @@ export function CustomerWellnessDashboardScreen() {
           />
         )}
 
-        {/* Block C — согласие дневника: ОДИН блок (DRF-2144 п.6) вместо двух
-            одинаковых абзацев в строках «Питание» и «Вода». */}
-        {today.kind === "ok" && consentRequired && (
-          <section
-            className="wellness-dash__consent"
-            aria-label="Согласие на дневник"
-          >
-            <p className="wellness-dash__consent-text">{DIARY_CONSENT_CARD_TEXT}</p>
-            <button
-              type="button"
-              className="btn-secondary"
-              onClick={() => void onConsentTap()}
-              disabled={consentPromptBusy}
-            >
-              {DIARY_CONSENT_CARD_CTA}
-            </button>
-            {consentPromptError ? (
-              <p className="wellness-dash__consent-error" role="alert">
-                {consentPromptError}
-              </p>
-            ) : null}
-            {consentPromptAlreadySent ? (
-              <>
-                <p className="wellness-dash__consent-text" role="status">
-                  {CONSENT_PROMPT_ALREADY_SENT_TEXT}
-                </p>
-                <button type="button" className="btn-primary" onClick={() => goToChat("consent")}>
-                  {CONSENT_PROMPT_OPEN_CHAT_CTA}
-                </button>
-              </>
-            ) : null}
-            {chatStuckAt === "consent" && <ChatStuckHint />}
-          </section>
-        )}
-
         {/* Block P — «План на сегодня»: действия активного плана; без плана
             блока нет (DRF-2144 п.2). */}
         {planSlice.kind === "ok" && planSlice.data && (
           <PlanToday plan={planSlice.data} onAll={onPlanTap} onAdjust={onPlanChatTap} />
-        )}
-
-        {/* Block 2 — Pulse strip (§11.1 — conditional БЖУ). Без согласия
-            строк нет — их место занимает одна карточка согласия выше. */}
-        {!(today.kind === "ok" && consentRequired) && (
-          <section className="wellness-dash__pulse" aria-label="Сегодня">
-            {today.kind === "loading" && <PulseSkeleton />}
-            {today.kind === "error" && (
-              <BlockError
-                reason={today.reason}
-                onRetry={() => void fetchAll()}
-              />
-            )}
-            {today.kind === "ok" && diaryOff && (
-              <div className="wellness-dash__block-error" role="status" aria-live="polite">
-                <p>{DIARY_OFF_TEXT}</p>
-              </div>
-            )}
-            {today.kind === "ok" && !diaryOff && (
-              <PulseStrip data={today.data} />
-            )}
-          </section>
-        )}
-
-        {/* Block 4 — Шаги на сегодня (text actions). */}
-        {showTodayGoals && today.kind === "ok" && (
-          <section
-            className="wellness-dash__today-goals"
-            aria-labelledby="tg-header"
-          >
-            <h2 id="tg-header" className="wellness-dash__section-header">
-              Шаги на сегодня
-            </h2>
-            <ul className="wellness-dash__goal-list">
-              {waterRemaining > 0 && (
-                <li className="wellness-dash__goal-item">
-                  <span aria-hidden="true">💧</span>{" "}
-                  <span>
-                    Ещё {waterRemaining}{" "}
-                    {ruPluralWater(waterRemaining)} до нормы
-                  </span>
-                </li>
-              )}
-            </ul>
-          </section>
         )}
 
         {/* Block 5 — Ближайшая запись (карточка по макету H01, DRF-2144 п.3;
@@ -851,9 +790,29 @@ export function CustomerWellnessDashboardScreen() {
           className="wellness-dash__booking"
           aria-labelledby="booking-header"
         >
-          <h2 id="booking-header" className="wellness-dash__section-header">
-            Ближайшая запись
-          </h2>
+          {/* Д11 (решение владельца 22.09): «Все мои записи» — СПРАВА ОТ
+              ЗАГОЛОВКА, как в макете. Раньше кнопка стояла в самом низу
+              карточки, под «Открыть запись»: человек находил её последней,
+              хотя это выход ко всем записям, а не действие над этой.
+
+              Раскладка — существующий `wellness-dash__plan-head` (та же
+              строка заголовка у блока плана), а не новый класс: у нового
+              не было бы правила в стилях, и сторож стиля (DRF-1066) прав,
+              что такой класс мёртв. */}
+          <div className="wellness-dash__plan-head">
+            <h2 id="booking-header" className="wellness-dash__section-header">
+              Ближайшая запись
+            </h2>
+            <button
+              type="button"
+              className="wellness-dash__booking-all"
+              onClick={() => navigate("/customer/records")}
+              aria-label="Все мои записи"
+            >
+              Все мои записи
+              <span aria-hidden="true"> →</span>
+            </button>
+          </div>
           {activity.kind === "loading" && <BookingSkeleton />}
           {activity.kind === "error" && (
             <BlockError
@@ -873,7 +832,6 @@ export function CustomerWellnessDashboardScreen() {
                   `/customer/records/${activity.data.next_booking.booking_id}`,
                 )
               }
-              onAll={() => navigate("/customer/records")}
             />
           )}
         </section>
@@ -1021,32 +979,99 @@ export function CustomerWellnessDashboardScreen() {
           </div>
         </section>
 
-        {/* Block 6 — Прогресс недели (cold-start gate §11.4). */}
-        {showWeekly && weeklyProgress && activity.kind === "ok" && (
+        {/* ── Дневник, и то, что при нём (Д32, решение владельца 22.09) ──
+
+            По макету дневник идёт последним: цель → план → запись → быстрые
+            действия → Ayla → дневник.
+
+            Рядом с ним, НАЗВАННЫМИ отклонениями (в таблице PR):
+
+            * согласие стоит НАД полосой дневника, потому что оно её и
+              закрывает (``consentRequired`` — единственный ключ, который
+              гасит эту полосу, и ничего выше он не стережёт; замерено).
+              Ворота не могут стоять ниже двери, которую запирают;
+            * «Шаги на сегодня» — сразу ПОСЛЕ дневника: предмет блока это
+              числа дневника («Ещё N стаканов до нормы», норма из анкеты
+              питания). Прежнее место между дневником и записью — случайность
+              истории. Владелец оставил блок ради этой строки (Д31 б). */}
+
+        {/* Block C — согласие дневника: ОДИН блок (DRF-2144 п.6) вместо двух
+            одинаковых абзацев в строках «Питание» и «Вода». */}
+        {today.kind === "ok" && consentRequired && (
           <section
-            className="wellness-dash__weekly"
-            aria-labelledby="weekly-header"
+            className="wellness-dash__consent"
+            aria-label="Согласие на дневник"
           >
-            <h2 id="weekly-header" className="wellness-dash__section-header">
-              Прогресс недели
+            <p className="wellness-dash__consent-text">{DIARY_CONSENT_CARD_TEXT}</p>
+            <button
+              type="button"
+              className="btn-secondary"
+              onClick={() => void onConsentTap()}
+              disabled={consentPromptBusy}
+            >
+              {DIARY_CONSENT_CARD_CTA}
+            </button>
+            {consentPromptError ? (
+              <p className="wellness-dash__consent-error" role="alert">
+                {consentPromptError}
+              </p>
+            ) : null}
+            {consentPromptAlreadySent ? (
+              <>
+                <p className="wellness-dash__consent-text" role="status">
+                  {CONSENT_PROMPT_ALREADY_SENT_TEXT}
+                </p>
+                <button type="button" className="btn-primary" onClick={() => goToChat("consent")}>
+                  {CONSENT_PROMPT_OPEN_CHAT_CTA}
+                </button>
+              </>
+            ) : null}
+            {chatStuckAt === "consent" && <ChatStuckHint />}
+          </section>
+        )}
+
+        {/* Block 2 — Pulse strip (§11.1 — conditional БЖУ). Без согласия
+            строк нет — их место занимает одна карточка согласия выше. */}
+        {!(today.kind === "ok" && consentRequired) && (
+          <section className="wellness-dash__pulse" aria-label="Сегодня">
+            {today.kind === "loading" && <PulseSkeleton />}
+            {today.kind === "error" && (
+              <BlockError
+                reason={today.reason}
+                onRetry={() => void fetchAll()}
+              />
+            )}
+            {today.kind === "ok" && diaryOff && (
+              <div className="wellness-dash__block-error" role="status" aria-live="polite">
+                <p>{DIARY_OFF_TEXT}</p>
+              </div>
+            )}
+            {today.kind === "ok" && !diaryOff && (
+              <PulseStrip data={today.data} />
+            )}
+          </section>
+        )}
+
+        {/* Block 4 — Шаги на сегодня (text actions). */}
+        {showTodayGoals && today.kind === "ok" && (
+          <section
+            className="wellness-dash__today-goals"
+            aria-labelledby="tg-header"
+          >
+            <h2 id="tg-header" className="wellness-dash__section-header">
+              Шаги на сегодня
             </h2>
-            <ul className="wellness-dash__weekly-list">
-              <li>
-                <span aria-hidden="true">💧</span> Вода:{" "}
-                {weeklyProgress.water_days_logged} из 7 дней
-              </li>
-              <li>
-                <span aria-hidden="true">🍽</span> Питание:{" "}
-                {weeklyProgress.food_days_logged} из 7 дней
-              </li>
-              <li>
-                <span aria-hidden="true">📅</span> Активность:{" "}
-                {weeklyProgress.active_days_count} дней
-              </li>
+            <ul className="wellness-dash__goal-list">
+              {waterRemaining > 0 && (
+                <li className="wellness-dash__goal-item">
+                  <span aria-hidden="true">💧</span>{" "}
+                  <span>
+                    Ещё {waterRemaining}{" "}
+                    {ruPluralWater(waterRemaining)} до нормы
+                  </span>
+                </li>
+              )}
             </ul>
-            {/* Кнопка «Подробнее в Дне» снята (DRF-1546): поверхности
-                «День» не существует, а вела она на `/` — экран входа.
-                Вернуть вместе с самой вкладкой «День». */}
           </section>
         )}
 
@@ -1056,7 +1081,7 @@ export function CustomerWellnessDashboardScreen() {
             signature «Ayla подобрала тебе» is gated on the WHY the
             SOURCE sent, not on a flag: the block reappears on its own
             once `POST /recommendations` returns reasons. */}
-        {picksWithWhy.length > 0 && (
+        {SHOW_AYLA_PICKS_SHELF && picksWithWhy.length > 0 && (
             <section
               className="wellness-dash__recos"
               aria-labelledby="recos-header"
@@ -1400,6 +1425,7 @@ function GoalCard({
       {activePlan && (
         <button type="button" className="wellness-dash__cta" onClick={onPlan}>
           Продолжить сегодняшний план
+          <span aria-hidden="true"> →</span>
         </button>
       )}
       {!activePlan && planKnown && (
@@ -1510,11 +1536,9 @@ function BookingEmpty({ onBook }: { onBook: () => void }) {
 function BookingCard({
   data,
   onOpen,
-  onAll,
 }: {
   data: RecentActivity;
   onOpen: () => void;
-  onAll: () => void;
 }) {
   const b = data.next_booking;
   if (!b) return null;
@@ -1568,14 +1592,6 @@ function BookingCard({
           Открыть запись
         </button>
       </div>
-      <button
-        type="button"
-        className="wellness-dash__booking-all"
-        onClick={onAll}
-        aria-label="Все мои записи"
-      >
-        Все мои записи →
-      </button>
     </div>
   );
 }

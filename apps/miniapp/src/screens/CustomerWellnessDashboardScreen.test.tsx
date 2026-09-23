@@ -132,8 +132,12 @@ describe("CustomerWellnessDashboardScreen — the home surface", () => {
   });
 
   it("DEV build: renders the dashboard", async () => {
+    // Узел ПЕРЕВЁРНУТ (DRF-2330): раньше «экран отрисовался» доказывалось
+    // строкой «Вода: N из 7 дней» СНЯТОГО «Прогресса недели» (Д31 в,
+    // решение владельца 22.09). Доказательство переехало на полосу
+    // дневника — она на экране осталась и по макету стоит последней.
     await renderScreen(false);
-    expect(await screen.findByText(/Вода:/)).toBeInTheDocument();
+    expect(await screen.findByText(/стаканов/)).toBeInTheDocument();
     expect(screen.queryByText(/выдуманных данных/)).not.toBeInTheDocument();
   });
 
@@ -233,7 +237,13 @@ describe("CustomerWellnessDashboardScreen — the home surface", () => {
     is_bookable: true,
   };
 
-  it("DEV build, Block 7: renders scorer picks WITH the WHY the source sent", async () => {
+  // Узел ПЕРЕВЁРНУТ (DRF-2330, Д31 г): полка «Ayla подобрала тебе» снята С
+  // ЭКРАНА решением владельца 22.09. Код полки НЕ удалён — вопрос 40 от
+  // 20.09 (снимать совсем или оставить обездвиженной) у владельца, и
+  // включение — одна строка `SHOW_AYLA_PICKS_SHELF`. Поэтому узел пинит
+  // ОТСУТСТВИЕ НА ЭКРАНЕ при полноценном ответе источника: если полку
+  // вернут, не ответив на вопрос 40, он покраснеет.
+  it("DEV build, Block 7: picks with WHY still do NOT reach the screen", async () => {
     mockedBrowse.mockResolvedValue({
       services: [PEDIKYUR],
       masters: [],
@@ -249,12 +259,14 @@ describe("CustomerWellnessDashboardScreen — the home surface", () => {
       picksOutcome: "OK",
     });
     await renderScreen(false);
+    // Присутствие: экран отрисован, подборка пришла с объяснением —
+    // значит отсутствие ниже про решение, а не про пустой ответ.
+    expect(await screen.findByText(/стаканов/)).toBeInTheDocument();
+    expect(mockedBrowse).toHaveBeenCalled();
     expect(
-      await screen.findByRole("heading", { name: /Ayla подобрала тебе/ }),
-    ).toBeInTheDocument();
-    expect(screen.getByText("Педикюр")).toBeInTheDocument();
-    expect(screen.getByText(/2 200 ₽/)).toBeInTheDocument();
-    expect(screen.getByText("Есть свободное время в нужном окне")).toBeInTheDocument();
+      screen.queryByRole("heading", { name: /Ayla подобрала тебе/ }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("Педикюр")).not.toBeInTheDocument();
   });
 
   // Owner ruling 25.08 — same gate on the second branded surface.
@@ -266,8 +278,9 @@ describe("CustomerWellnessDashboardScreen — the home surface", () => {
       picksOutcome: "OK",
     });
     await renderScreen(false);
-    // Dashboard itself still renders.
-    expect(await screen.findByText(/Вода:/)).toBeInTheDocument();
+    // Dashboard itself still renders. Проверка переехала со строки снятого
+    // «Прогресса недели» на полосу дневника (DRF-2330).
+    expect(await screen.findByText(/стаканов/)).toBeInTheDocument();
     expect(
       screen.queryByRole("heading", { name: /Ayla подобрала тебе/ }),
     ).not.toBeInTheDocument();
@@ -510,9 +523,11 @@ describe("CustomerWellnessDashboardScreen — weekly rollup (DRF-1476)", () => {
     expect(screen.queryByText(/из 7 дней/)).not.toBeInTheDocument();
   });
 
-  it("rollup present and past the cold-start gate: Block 6 renders it", async () => {
-    // The guard: proves Block 6 is hidden above for want of data, and
-    // has not simply been removed.
+  it("rollup present: Block 6 is gone from the screen (owner ruling 22.09)", async () => {
+    // Узел ПЕРЕВЁРНУТ (DRF-2330, Д31 в): он пинил отменённый контракт —
+    // «данные пришли → блок рисуется». Владелец снял «Прогресс недели»:
+    // он дублировал план, а сервер этих данных и так не слал. Теперь узел
+    // сторожит обратное — даже с данными блока нет.
     serve({
       this_week_booking_count: 0,
       weekly_progress: {
@@ -523,9 +538,10 @@ describe("CustomerWellnessDashboardScreen — weekly rollup (DRF-1476)", () => {
     });
     await renderScreen(false);
 
-    expect(await screen.findByText(/Прогресс недели/)).toBeInTheDocument();
-    expect(screen.getByText(/4 из 7 дней/)).toBeInTheDocument();
-    expect(screen.getByText(/5 из 7 дней/)).toBeInTheDocument();
+    // Присутствие: экран отрисован — значит отсутствие ниже про блок.
+    expect(await screen.findByText("Выбери цель")).toBeInTheDocument();
+    expect(screen.queryByText(/Прогресс недели/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/из 7 дней/)).not.toBeInTheDocument();
   });
 
   it("rollup present but below the cold-start gate: still hidden (§11.4)", async () => {

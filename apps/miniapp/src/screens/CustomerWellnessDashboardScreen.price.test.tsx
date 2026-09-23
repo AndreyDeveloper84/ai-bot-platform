@@ -53,7 +53,10 @@ describe("CustomerWellnessDashboardScreen — цена ниже 1 ₽ (DRF-1989)
     );
   });
 
-  it("подборка с ценой 0.00 не пишет «от 0 ₽»", async () => {
+  // Узел ПЕРЕВЁРНУТ (DRF-2330, Д31 г): полка снята с экрана, поэтому её
+  // цену на Главной проверять не на чем. Остаётся верным и пинится то, что
+  // «от 0 ₽» на экране не появляется ни при каком ответе источника.
+  it("подборка с ценой 0.00 на Главную не попадает вовсе", async () => {
     mockedBrowse.mockResolvedValue({
       services: [PILING],
       masters: [],
@@ -76,7 +79,9 @@ describe("CustomerWellnessDashboardScreen — цена ниже 1 ₽ (DRF-1989)
       </MemoryRouter>,
     );
 
-    expect(await screen.findByText("Пилинг 1989")).toBeInTheDocument();
+    // Присутствие: экран отрисован — значит отсутствие ниже про полку.
+    expect(await screen.findByText(/стаканов/)).toBeInTheDocument();
+    expect(screen.queryByText("Пилинг 1989")).not.toBeInTheDocument();
     expect(document.body.textContent ?? "").not.toMatch(/от 0 ₽/);
   });
 });

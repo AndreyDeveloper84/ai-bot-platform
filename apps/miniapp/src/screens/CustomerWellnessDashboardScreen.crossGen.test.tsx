@@ -164,7 +164,12 @@ describe("Главная → карточка записи ведёт в жив�
 });
 
 describe("Главная → карточка подбора ведёт в живое поколение", () => {
-  it("подбор «Ayla подобрала тебе» открывает /customer/catalog/:id", async () => {
+  // Узел ПЕРЕВЁРНУТ (DRF-2330, Д31 г): полка «Ayla подобрала тебе» снята с
+  // экрана решением владельца 22.09, поэтому переход из неё проверять не на
+  // чем. Пинится то, что осталось верным: карточки подбора на Главной нет,
+  // даже когда источник прислал объяснённый подбор. Переход живого
+  // поколения по-прежнему закреплён узлом «Главная → запись» выше.
+  it("карточки подбора на Главной нет — полка снята (решение владельца 22.09)", async () => {
     mockedBrowse.mockResolvedValue({
       services: [SERVICE],
       masters: [],
@@ -182,16 +187,15 @@ describe("Главная → карточка подбора ведёт в жи�
     serve({ this_week_booking_count: 0 });
     renderScreen();
 
-    const user = userEvent.setup();
-    // Положительно: блок подбора отрисован — иначе клик проверял бы
-    // пустоту, а тест зеленел бы ни на чём.
-    const card = await screen.findByRole("button", {
-      name: /Массаж лимфодренаж/,
-    });
-    expect(screen.getByText("Подходит под твою цель")).toBeInTheDocument();
-    await user.click(card);
-
-    expect(await screen.findByText("SERVICE-LIVE")).toBeInTheDocument();
-    expect(screen.queryByText("SERVICE-LEGACY")).not.toBeInTheDocument();
+    // Присутствие: экран отрисован и подбор у источника запрошен —
+    // значит отсутствие ниже про решение, а не про пустой ответ.
+    expect(
+      await screen.findByRole("heading", { name: /Ближайшая запись/ }),
+    ).toBeInTheDocument();
+    expect(mockedBrowse).toHaveBeenCalled();
+    expect(
+      screen.queryByRole("button", { name: /Массаж лимфодренаж/ }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("Подходит под твою цель")).not.toBeInTheDocument();
   });
 });
