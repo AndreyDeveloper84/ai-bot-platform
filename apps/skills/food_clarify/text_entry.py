@@ -591,12 +591,12 @@ def _log(context: SkillContext, bucket: dict[str, Any]) -> SkillResult:
     action_data["buttons"] = [*entry_chips, *_after_entry_buttons()]
     return SkillResult(
         reply_text=f"Записала в дневник: {log.dish_name} — {int(round(log.calories))} ккал.",
+        claims_done=True,
+        claims_done_evidence="ayla.meals.log:log_id",
         action_type="food_logged",
         action_data=action_data,
         meta={
             "reply_kind": "food_text_logged",
-            "claims_done": "food_logged",
-            "claims_done_evidence": "ayla.log_id",
         },
     )
 
@@ -713,16 +713,18 @@ def _delete_entry(context: SkillContext, log_id: str) -> SkillResult:
         # Окна с провода нет — не обещаем ни фразой, ни чипом (fail-closed).
         return SkillResult(
             reply_text=DELETED_TEXT,
+            claims_done=True,
+            claims_done_evidence="ayla.meals.delete:2xx",
             action_type="food_entry_deleted",
             action_data={"log_id": log_id, "buttons": _after_delete_buttons()},
             meta={
                 "reply_kind": "food_entry_deleted",
-                "claims_done": "food_entry_deleted",
-                "claims_done_evidence": "ayla.meal_deletion",
             },
         )
     return SkillResult(
         reply_text=DELETED_WITH_WINDOW_TEXT.format(minutes=_minutes_ru(minutes)),
+        claims_done=True,
+        claims_done_evidence="ayla.meals.delete:restore_window",
         action_type="food_entry_deleted",
         action_data={
             "log_id": log_id,
@@ -730,8 +732,6 @@ def _delete_entry(context: SkillContext, log_id: str) -> SkillResult:
         },
         meta={
             "reply_kind": "food_entry_deleted",
-            "claims_done": "food_entry_deleted",
-            "claims_done_evidence": "ayla.meal_deletion",
         },
     )
 
@@ -760,6 +760,8 @@ def _restore_entry(context: SkillContext, log_id: str) -> SkillResult:
         return _entry_refusal(exc, external_id=external_id, step="restore")
     return SkillResult(
         reply_text=RESTORED_TEXT.format(dish=log.dish_name, kcal=int(round(log.calories))),
+        claims_done=True,
+        claims_done_evidence="ayla.meals.restore:log_id",
         action_type="food_entry_restored",
         action_data={
             "log_id": log_id,
@@ -770,8 +772,6 @@ def _restore_entry(context: SkillContext, log_id: str) -> SkillResult:
         },
         meta={
             "reply_kind": "food_entry_restored",
-            "claims_done": "food_entry_restored",
-            "claims_done_evidence": "ayla.log_id",
         },
     )
 
@@ -804,6 +804,8 @@ def _on_fix_grams_answer(context: SkillContext, bucket: dict[str, Any], text: st
     forget(context)
     return SkillResult(
         reply_text=FIXED_TEXT.format(dish=log.dish_name, kcal=int(round(log.calories))),
+        claims_done=True,
+        claims_done_evidence="ayla.meals.update:log_id",
         action_type="food_entry_updated",
         action_data={
             "log_id": log_id,
@@ -814,7 +816,5 @@ def _on_fix_grams_answer(context: SkillContext, bucket: dict[str, Any], text: st
         },
         meta={
             "reply_kind": "food_entry_updated",
-            "claims_done": "food_entry_updated",
-            "claims_done_evidence": "ayla.update_meal",
         },
     )

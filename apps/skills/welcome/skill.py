@@ -711,8 +711,6 @@ class WelcomeSkill:
                 # онбординг проверяет, что журнал 152-ФЗ записан, и при
                 # неудаче заменяет ответ на «не получилось сохранить
                 # согласие» (``run_onboarding_turn``). Здесь — объявление.
-                "claims_done": "consent_recorded",
-                "claims_done_evidence": "consent_record.recorded",
             },
         )
 

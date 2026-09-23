@@ -183,6 +183,8 @@ class WaterSkill:
 
         return SkillResult(
             reply_text=reply,
+            claims_done=True,
+            claims_done_evidence="ayla.water.add:entry_id",
             action_type="water_logged",
             action_data={
                 "entry_id": entry.entry_id,
@@ -193,8 +195,6 @@ class WaterSkill:
             },
             meta={
                 "reply_kind": "water_logged",
-                "claims_done": "water_logged",
-                "claims_done_evidence": "ayla.entry_id",
             },
         )
 

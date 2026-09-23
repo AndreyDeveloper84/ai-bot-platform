@@ -220,7 +220,11 @@ class MemoryCommandResult:
     action_type: str = ""
     action_data: dict | None = None
     #: DRF-2341 — см. ``apps.orchestrator.done_claims``.
-    claims_done: str = ""
+    #: DRF-2341 — те же имена и та же форма, что у ``SkillResult``: булев
+    #: признак плюс подтверждение «источник:что он ответил». ``meta`` у
+    #: этого класса нет, поэтому носитель — поле; читатель общий,
+    #: ``apps.skills.base.claims_done_of``.
+    claims_done: bool = False
     claims_done_evidence: str = ""
 
 
@@ -543,8 +547,8 @@ def handle_memory_command(
                 # Наше действие: доказательство — прочитанный исход стирания
                 # («erased»), а не факт вызова; «started» и «partial» выше
                 # отвечают другим текстом.
-                claims_done="memory_erased",
-                claims_done_evidence="bridge.erase_outcome",
+                claims_done=True,
+                claims_done_evidence="bridge.erase:erased",
             )
         return None  # bare «удалить» with no pending prompt → not a command
 

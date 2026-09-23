@@ -169,11 +169,6 @@ class SkillResult:
     new_state: str | None = None
     # Free-form skill-metadata bag for logging / events. Not persisted.
     meta: dict[str, Any] = field(default_factory=dict)
-    #: DRF-2341 — разметка «утверждаю выполненное» едет в :attr:`meta`
-    #: (ключи ``claims_done`` / ``claims_done_evidence``), а не отдельным
-    #: полем: ``meta`` шов переносит целиком, а новое поле умерло бы на нём
-    #: молча — ровно тот дефект, который сторож шва (DRF-1419) и ловит.
-    #: Читать только через ``apps.orchestrator.done_claims.done_claim``.
     # Sprint 7 / O1 (DRF-559) contract extension — KB-driven skills.
     should_handoff: bool = False
     handoff_reason: str = ""
