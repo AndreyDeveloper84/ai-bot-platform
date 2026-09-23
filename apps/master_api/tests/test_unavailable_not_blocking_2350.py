@@ -17,7 +17,8 @@
   снято ровно одно основание, а не проверка целиком;
 * c3 — салонный мастер с закрытыми расписанием и профилем готов отправлять;
 * c4 — `managed_elsewhere` называет причину, а не только имя пункта;
-* c5 — в ответе ручки есть оба поля, и они не пересекаются.
+* c5 — пункт вне `REQUIRED_ITEMS` не попадает ни в один из списков;
+* c6 — в ответе ручки есть оба поля, и они не пересекаются.
 """
 
 from __future__ import annotations
@@ -29,8 +30,6 @@ from apps.master_api.services.onboarding_readiness import (
     Readiness,
     ReadinessItem,
 )
-
-pytestmark = pytest.mark.django_db
 
 
 def _readiness(*items: ReadinessItem, identity: str = "linked") -> Readiness:
@@ -54,7 +53,10 @@ class TestC1UnavailableDoesNotBlock:
             _item("profile", "done"),
         )
 
-        assert r.managed_elsewhere  # наличие: недоступное названо
+        assert r.managed_elsewhere == [  # наличие: недоступное названо
+            f"services:{MANAGED_OUTSIDE_APP}",
+            "location:capability_not_built",
+        ]
         assert r.blocking == []
         assert r.ready_to_submit is True
 
@@ -104,7 +106,27 @@ class TestC4TheReasonTravelsWithTheItem:
         ]
 
 
-class TestC5TheAnswerCarriesBothLists:
+class TestC5NonRequiredItemsAreInNeitherList:
+    def test_a_key_outside_REQUIRED_ITEMS_is_not_counted(self) -> None:
+        """Названный предел: списки отвечают за ТРЕБУЕМЫЕ пункты. Пункт вне
+        `REQUIRED_ITEMS` не держит отправку и в «ведётся не здесь» не
+        попадает — сегодня таких пунктов не строит никто, и узел стоит,
+        чтобы появление первого было видно, а не молчаливо."""
+        r = _readiness(
+            _item("services", "done"),
+            _item("location", "done"),
+            _item("hours", "done"),
+            _item("profile", "done"),
+            _item("portfolio", "unavailable", MANAGED_OUTSIDE_APP),
+            _item("banner", "missing"),
+        )
+
+        assert r.ready_to_submit is True
+        assert r.blocking == []
+        assert r.managed_elsewhere == []
+
+
+class TestC6TheAnswerCarriesBothLists:
     def test_they_are_disjoint_and_both_present(self) -> None:
         r = _readiness(
             _item("services", "unavailable", MANAGED_OUTSIDE_APP),

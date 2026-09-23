@@ -328,7 +328,7 @@ class TestR1Readiness:
         assert r.ready_to_submit is True
 
     @pytest.mark.parametrize("kind", ["solo", None])
-    def test_solo_and_unknown_are_as_before(self, master, kind, settings) -> None:
+    def test_solo_and_unknown_keep_their_states(self, master, kind, settings) -> None:
         settings.BOOKING_VIA_AYLA_REST = False
         r = _readiness(master, kind)
         states = _states(r)

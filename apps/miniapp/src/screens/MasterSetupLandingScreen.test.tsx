@@ -247,6 +247,22 @@ describe("экран 01", () => {
     );
   });
 
+  it("пока настроено не всё, полоса молчит: объявить «готово» было бы ложью", async () => {
+    // Недоступный пункт есть у КАЖДОГО мастера (место работы), поэтому
+    // условие только по нему объявляло бы «настроено всё, что настраивается
+    // здесь» на первом же visit'е при нуле закрытых шагов. `aria-valuetext`
+    // не дополняет число, а ЗАМЕНЯЕТ его — соврал бы вместо «ноль процентов».
+    mockedReadiness.mockResolvedValue(
+      readiness([
+        item("location", "unavailable", { reason: "capability_not_built", deep_link: null }),
+        item("hours", "missing"),
+        item("profile", "missing"),
+      ]),
+    );
+    renderScreen();
+    expect(await screen.findByTestId("setup-bar")).not.toHaveAttribute("aria-valuetext");
+  });
+
   it("когда недоступных шагов нет, полоса ничего лишнего не объявляет", async () => {
     mockedReadiness.mockResolvedValue(
       readiness([item("services", "done"), item("hours", "missing")]),
