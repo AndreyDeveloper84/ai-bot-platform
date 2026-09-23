@@ -273,7 +273,17 @@ export function PlanLiteScreen() {
   }, []);
 
   // Согласие дневника — только когда в предложении есть строка «дневник»;
-  // тот же гейт, что у сканера. Не ответил — «согласия нет».
+  // тот же гейт, что у сканера.
+  //
+  // DRF-2354 — исходов ТРИ, и «не знаю» не выдаётся за «нет». Состояние
+  // уже трёхзначное (`boolean | null`), но сбой чтения сводился к `false`,
+  // строка дневника молча выпадала из отправки, и человек подтверждал план
+  // без дневника, не зная почему. Тихое замыкание «в безопасную сторону»
+  // неотличимо от его собственного решения — а решение здесь его.
+  //
+  // `null` (ответа нет) → строка видна, включена и уходит в план. Если
+  // согласия действительно нет, откажет каталог — и это его ответ, а не
+  // наша догадка за человека.
   const proposalHasFood = status.kind === "proposal" && rows.some((r) => r.action_type === "log_food");
   useEffect(() => {
     if (!proposalHasFood) return;
@@ -283,7 +293,8 @@ export function PlanLiteScreen() {
         if (!cancelled) setDiaryConsent(gate.grantedAt !== null);
       })
       .catch(() => {
-        if (!cancelled) setDiaryConsent(false);
+        // Не «нет», а «не знаем»: состояние остаётся `null`.
+        if (!cancelled) setDiaryConsent(null);
       });
     return () => {
       cancelled = true;
@@ -291,7 +302,7 @@ export function PlanLiteScreen() {
   }, [proposalHasFood]);
 
   const rowEffective = (row: ProposalRow): boolean =>
-    row.included && (row.action_type !== "log_food" || diaryConsent === true);
+    row.included && (row.action_type !== "log_food" || diaryConsent !== false);
 
   const proposalActions = (): PlanLiteActionSpec[] =>
     rows
@@ -431,7 +442,9 @@ export function PlanLiteScreen() {
             <p className="food-scanner-diary__caption">{PLAN_LITE_COPY.proposalHint}</p>
             <ul className="food-scanner-diary__list">
               {rows.map((row) => {
-                const needsConsent = row.action_type === "log_food" && diaryConsent !== true;
+                // Запрет — только на явное «нет»: при «не знаю» строка
+                // остаётся в руках человека (DRF-2354).
+                const needsConsent = row.action_type === "log_food" && diaryConsent === false;
                 const on = rowEffective(row);
                 return (
                   <li key={row.action_type} className="food-scanner-diary__entry">
@@ -447,7 +460,7 @@ export function PlanLiteScreen() {
                       </label>
                       <span className="food-scanner-diary__entry-time">{cadenceLabel(row)}</span>
                     </div>
-                    {needsConsent && diaryConsent === false && (
+                    {needsConsent && (
                       <div className="food-scanner-diary__entry-actions">
                         <button
                           type="button"
