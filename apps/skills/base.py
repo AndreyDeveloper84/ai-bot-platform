@@ -169,6 +169,12 @@ class SkillResult:
     new_state: str | None = None
     # Free-form skill-metadata bag for logging / events. Not persisted.
     meta: dict[str, Any] = field(default_factory=dict)
+    #: DRF-2341 — что ветка утверждает выполненным и чем это доказано.
+    #: Пустое ``claims_done`` — «ничего не утверждает»; пустое доказательство
+    #: при непустом утверждении — честно названный дефект, а не недосмотр.
+    #: Читать только через ``apps.orchestrator.done_claims.done_claim``.
+    claims_done: str = ""
+    claims_done_evidence: str = ""
     # Sprint 7 / O1 (DRF-559) contract extension — KB-driven skills.
     should_handoff: bool = False
     handoff_reason: str = ""

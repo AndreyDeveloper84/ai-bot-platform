@@ -219,6 +219,9 @@ class MemoryCommandResult:
     text: str
     action_type: str = ""
     action_data: dict | None = None
+    #: DRF-2341 — см. ``apps.orchestrator.done_claims``.
+    claims_done: str = ""
+    claims_done_evidence: str = ""
 
 
 def _normalise(text: str) -> str:
@@ -535,7 +538,14 @@ def handle_memory_command(
                 # person would catch us out on the next turn, when the prompt
                 # still names their budget.
                 return MemoryCommandResult(text=_FORGET_ALL_PARTIAL)
-            return MemoryCommandResult(text=_FORGET_ALL_DONE)
+            return MemoryCommandResult(
+                text=_FORGET_ALL_DONE,
+                # Наше действие: доказательство — прочитанный исход стирания
+                # («erased»), а не факт вызова; «started» и «partial» выше
+                # отвечают другим текстом.
+                claims_done="memory_erased",
+                claims_done_evidence="bridge.erase_outcome",
+            )
         return None  # bare «удалить» with no pending prompt → not a command
 
     # 2. «забудь всё» request → the confirmation prompt (does NOT delete yet).

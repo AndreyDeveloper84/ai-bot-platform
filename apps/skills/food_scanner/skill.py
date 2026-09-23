@@ -471,6 +471,8 @@ class FoodScannerSkill:
             reply_text=reply,
             action_type="food_logged",
             action_data=action_data,
+            claims_done="food_logged",
+            claims_done_evidence="ayla.log_id",
             meta={"reply_kind": "food_scanner_logged"},
         )
 

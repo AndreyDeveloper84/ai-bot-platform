@@ -703,6 +703,12 @@ class WelcomeSkill:
         return SkillResult(
             reply_text=reply_text,
             action_type="welcome_consent_recovery_granted",
+            # Наше действие. Доказательство читает вызывающий: глобальный
+            # онбординг проверяет, что журнал 152-ФЗ записан, и при неудаче
+            # заменяет ответ на «не получилось сохранить согласие»
+            # (``run_onboarding_turn``). Здесь — только объявление.
+            claims_done="consent_recorded",
+            claims_done_evidence="consent_record.recorded",
             action_data=action_data,
             meta={
                 "reply_kind": CONSENT_RECOVERY_GRANT_KIND,

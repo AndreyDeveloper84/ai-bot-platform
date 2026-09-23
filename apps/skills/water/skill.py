@@ -184,6 +184,8 @@ class WaterSkill:
         return SkillResult(
             reply_text=reply,
             action_type="water_logged",
+            claims_done="water_logged",
+            claims_done_evidence="ayla.entry_id",
             action_data={
                 "entry_id": entry.entry_id,
                 "slug": parsed.slug,
