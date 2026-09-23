@@ -59,6 +59,22 @@ const REASON_CHIPS: { value: CancelReasonClass; label: string }[] = [
   { value: "other", label: "Другое" },
 ];
 
+/**
+ * DRF-2346 — текст ЖДЁТ СЛОВА ВЛАДЕЛЬЦА (вопрос задан 23.09).
+ *
+ * Смысл, который он обязан нести: отмена ЗАПУЩЕНА и через несколько секунд
+ * станет окончательной; завершится сама, даже если закрыть приложение;
+ * вернуть пока можно, кнопка рядом. Чего в нём быть не должно — слова,
+ * утверждающего выполненное («отменена», «отменила», «готово»): сервер в
+ * этот момент отвечает «отмена запрошена».
+ *
+ * Соседние два исхода не меняются и менять их не предлагалось: немедленная
+ * отмена (путь через Ayla) говорит «Запись отменена», и это правда;
+ * истёкшее окно возврата говорит «Окно отмены истекло».
+ */
+export const CANCEL_STARTED_COPY =
+  "Отменяю запись — через несколько секунд станет окончательно. Пока можно вернуть.";
+
 export function CustomerBookingDetailScreen() {
   const navigate = useNavigate();
 
@@ -112,8 +128,12 @@ export function CustomerBookingDetailScreen() {
       setModalOpen(false);
       setReasonClass(null);
       if (booking.status === "cancel_requested") {
-        // Local path: 2-step with the server-held undo window.
-        setSnack({ visible: true, message: "Запись отменена", showUndo: true });
+        // DRF-2346 — местный двухшаговый путь: сервер вернул «отмена
+        // запрошена», а не «отменена», и говорить о факте нельзя. Отмену
+        // теперь добивает сервер (`bookings.commit_expired_cancels`), даже
+        // если эту вкладку закрыть, — поэтому обещание «завершится само»
+        // правдиво, а не наоборот.
+        setSnack({ visible: true, message: CANCEL_STARTED_COPY, showUndo: true });
       } else {
         // Ayla path: cancel is immediate (no two-step confirm, no undo
         // window — the proxy flips to cancelled via the round-trip

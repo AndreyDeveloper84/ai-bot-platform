@@ -799,13 +799,42 @@ NUTRITION_SERVICE_TOKEN = (
     else os.environ.get("AYLA_SERVICE_TOKEN", "")
 )
 
+
 # Feature flag: route the booking skill through the Ayla canonical REST bridge
 # instead of direct YClients calls. DEFAULT OFF — the flip (#1041) is gated on
 # the ayla_service_id coverage report (#1016/#1034, command:
 # link_ayla_service_ids) and is executed by the orchestrator. The flag-ON path
 # (real HTTP client + RemoteBookingProxy mirror) is implemented and tested;
 # production flips deliberately, never ad-hoc.
-BOOKING_VIA_AYLA_REST = os.environ.get("BOOKING_VIA_AYLA_REST", "false").lower() == "true"
+# DRF-2346 — ПУТЬ ЗАПИСИ ОБЪЯВЛЕН В КАЖДОМ КОНТУРЕ, а не подразумевается.
+#
+# Значение решает, какой отменой пользуется человек. При ``true`` отмена идёт
+# в Ayla и завершается сразу. При ``false`` работает местный двухшаговый путь
+# с пятисекундным окном возврата, и до DRF-2346 его завершал ТОЛЬКО таймер на
+# странице: закрыл приложение — запись зависала навсегда. Подметание эту дыру
+# закрыло, но умолчание всё равно называется явно: «забыли задать» не должно
+# означать «выбрали за нас».
+#
+# Разбор общий с режимом оплаты и по той же причине: мусорное значение —
+# отказ при загрузке, а не молчаливое «false».
+def booking_via_ayla_rest_from(raw: str) -> bool:
+    """``"true"/"1"`` → True, ``"false"/"0"`` → False, всё прочее — отказ."""
+    from django.core.exceptions import ImproperlyConfigured
+
+    value = (raw or "").strip().lower()
+    if value in {"true", "1"}:
+        return True
+    if value in {"false", "0"}:
+        return False
+    raise ImproperlyConfigured(
+        "BOOKING_VIA_AYLA_REST must be one of true/false/1/0 "
+        f"(got {raw!r}). Путь записи не угадывают: прочитанное по ошибке "
+        "«false» включает местный двухшаговый путь отмены там, где записи "
+        "принадлежат Ayla."
+    )
+
+
+BOOKING_VIA_AYLA_REST = booking_via_ayla_rest_from(os.environ.get("BOOKING_VIA_AYLA_REST", "false"))
 
 
 # DRF-2340 — РЕЖИМ ОПЛАТЫ ОБЪЯВЛЕН, а не спрятан третьим аргументом getattr.
@@ -1457,6 +1486,17 @@ CELERY_BEAT_SCHEDULE = {
     "bookings.escalate_stale_reminders": {
         "task": "bookings.escalate_stale_reminders",
         "schedule": crontab(minute="0"),
+    },
+    # DRF-2346 — добить отмены, чьё окно возврата истекло. Отмену из Mini App
+    # завершает таймер на СТРАНИЦЕ, а страницу человек закрывает: до этой
+    # задачи такая запись оставалась «отмена запрошена» навсегда —
+    # напоминания не сняты, администратор видит «клиент попросил отменить»,
+    # слот занят. Минута — не «почаще на всякий случай»: окно возврата пять
+    # секунд, и человек, закрывший приложение, не должен ждать час, пока
+    # его слот освободится для других.
+    "bookings.commit_expired_cancels": {
+        "task": "bookings.commit_expired_cancels",
+        "schedule": crontab(minute="*"),
     },
     # Phase 1 / R3 (DRF-846) — post-visit follow-up nudge. Runs once
     # daily at 19:00 МСК (= 16:00 UTC) and sends a low-pressure
