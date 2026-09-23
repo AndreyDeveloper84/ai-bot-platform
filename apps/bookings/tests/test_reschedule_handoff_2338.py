@@ -27,7 +27,7 @@ from django.utils import timezone
 
 from apps.booking.models import BookingReminder
 from apps.bookings.callbacks import (
-    CLAIM_HANDED_TO_OPERATOR,
+    CLAIM_EVIDENCE_ADMIN_TASK,
     REPLY_ALREADY_HANDLED,
     REPLY_RESCHEDULE,
     BookingReminderCallbackSkill,
@@ -35,7 +35,7 @@ from apps.bookings.callbacks import (
 from apps.conversations.models import Conversation
 from apps.handoff.models import AdminTask
 from apps.identity.models import BotUser
-from apps.skills.base import SkillContext
+from apps.skills.base import SkillContext, claims_done_of
 from apps.tenancy.context import tenant_scope
 from apps.tenancy.models import Tenant
 
@@ -224,9 +224,12 @@ class TestTheReplyDeclaresWhatItClaims:
             result = _press_reschedule(reminder, bot_user, conversation)
 
         (task,) = _tasks(conversation)
-        assert result.meta["claims_done"] == CLAIM_HANDED_TO_OPERATOR
-        # Доказательство — ключ задачи от исполнителя передачи, а не «позвали».
-        assert result.meta["claims_done_evidence"] == {"admin_task_id": str(task.pk)}
+        # Читаем общим читателем (DRF-2341): у обратного вызова признак в
+        # ``meta``, у ответа навыка — в полях, а форма одна.
+        claims, evidence = claims_done_of(result)
+        assert claims is True
+        # Подтверждение — ключ задачи от исполнителя передачи, а не «позвали».
+        assert evidence == f"{CLAIM_EVIDENCE_ADMIN_TASK}:{task.pk}"
 
     def test_a_replay_claims_nothing(
         self, tenant: Tenant, bot_user: BotUser, conversation: Conversation, reminder
@@ -236,9 +239,9 @@ class TestTheReplyDeclaresWhatItClaims:
             first = _press_reschedule(reminder, bot_user, conversation)
             again = _press_reschedule(reminder, bot_user, conversation)
 
-        assert first.meta["claims_done"] == CLAIM_HANDED_TO_OPERATOR  # наличие
+        assert claims_done_of(first)[0] is True  # наличие
         assert again.reply_text == REPLY_ALREADY_HANDLED
-        assert "claims_done" not in again.meta
+        assert claims_done_of(again) == (False, "")
 
 
 class TestTheTextIsUnchanged:
