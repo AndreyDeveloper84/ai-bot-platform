@@ -155,6 +155,7 @@ import {
   getCatalogBrowse,
   type CatalogBrowseData,
 } from "../lib/customer-booking";
+import { avatarInitials } from "../lib/customer-profile";
 import { StatusBadge } from "../components/StatusBadge";
 import { CustomerTabBar } from "../components/CustomerTabBar";
 import { UnbookableBadge } from "../components/UnbookableNote";
@@ -182,6 +183,21 @@ type ActiveGoal = NonNullable<WellnessToday["active_goals"]>[number];
  * таблица «макет → код» отвечала бы на два вопроса разом.
  */
 const SHOW_AYLA_PICKS_SHELF = false;
+
+/**
+ * Шапка H01 здоровается словами макета — Д1, дословно (DRF-2331).
+ *
+ * Строка вынесена сюда, потому что PR обещает «с макета дословно»: сверять
+ * обещание надо с одним местом, а не с копией в тесте.
+ *
+ * ⚠ С этой строкой экран здоровается ДВАЖДЫ: ниже стоит блок приветствия
+ * «Доброе утро, Анна 🌿» (`docs/screens/customer-main-wellness-dashboard.md`
+ * §7), а макет здоровается один раз — только в шапке. Вопрос у владельца
+ * тремя вариантами (шапка вместо блока / шапка без этой строки / оставить
+ * оба). До его слова не трогаем ни то, ни другое: любой выбор здесь
+ * выдал бы догадку за решение.
+ */
+export const HEADER_WELCOME_LINE = "Рада вас видеть!";
 
 /**
  * Согласие дневника — ОДИН блок на экране (DRF-2144 п.6). Формулировка из
@@ -677,13 +693,44 @@ export function CustomerWellnessDashboardScreen() {
       {/* Header — 56dp. Иконки «Профиль»/«Настройки» сняты (DRF-2144): обе
           вели в профиль, а профиль теперь — вкладка панели.
 
-          Д2 (решение владельца 22.09, DRF-2330): кнопка «спросить» снята —
+          Д2 (решение владельца 22.09, §172): кнопка «спросить» снята —
           «один вход в чат вместо двух». Второй и единственный остаётся
           блоком «Продолжить разговор с Ayla» ниже: он несёт последнюю тему,
           а шапочная кнопка вела в тот же чат без неё.
 
-          Имя и колокольчик макета — Д1, отдельный лист DRF-2331. */}
+          Д1 (DRF-2331): человек слева — аватар, имя, «Рада вас видеть!».
+
+          Колокольчика макета НЕТ, и это решение: ленты уведомлений у
+          клиента не существует — ни ручки на сервере, ни экрана на
+          клиенте (есть только настройки уведомлений, а это не они).
+          Счётчик «2» брать неоткуда вовсе. Мёртвый control запрещён
+          решением владельца (§61, М-4 п. 1) и DRF-1181.
+
+          Вордмарк макет в шапке не рисует, но он ОСТАЁТСЯ и занимает
+          освободившееся справа место: его держат
+          `docs/screens/customer-main-wellness-dashboard.md` §7 и
+          `docs/design/policies/ayla-identity-and-brand.md` §7.1. Снять
+          фирменный знак — решение о бренде, а не правка вёрстки. */}
       <header className="wellness-dash__header" role="banner">
+        <div className="wellness-dash__person">
+          {/* Фотографии клиента нет ни в одном контракте — ни у
+              `wellness/today`, ни у `/me`. Новой сущности под Д1 не
+              заводим: `avatarInitials` уже рисует кружок на профиле
+              клиента, и «·» — его же ответ на «имени нет». */}
+          <span className="wellness-dash__avatar" aria-hidden="true">
+            {avatarInitials(displayName)}
+          </span>
+          <span className="wellness-dash__person-text">
+            {displayName && (
+              <span className="wellness-dash__person-name">
+                {displayName} <span aria-hidden="true">👋</span>
+              </span>
+            )}
+            <span className="wellness-dash__person-hi">
+              {HEADER_WELCOME_LINE}
+            </span>
+          </span>
+        </div>
         <div className="wellness-dash__brand">
           {/* «ayla» = English wordmark per Tau §7 — wrap in lang="en"
               to keep RU TTS from pronouncing it «Айла» (WCAG 3.1.2). */}

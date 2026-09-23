@@ -5063,11 +5063,55 @@ a {
 .wellness-dash__header {
   display: flex;
   align-items: center;
+  /* Человек слева, фирменный знак справа (Д1, DRF-2331). Знак занял
+     место, где макет держал колокольчик: колокольчик не рисуется — за
+     ним нет ленты уведомлений. */
+  justify-content: space-between;
   gap: var(--s-3);
   height: 56px;
   padding: 0 var(--s-3);
   border-bottom: 1px solid var(--c-divider);
   background: var(--c-surface-1);
+}
+/* Д1 — аватар, имя, «Рада вас видеть!». */
+.wellness-dash__person {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  /* Длинное имя ужимается, знак справа не выдавливается за край. */
+  min-width: 0;
+}
+.wellness-dash__avatar {
+  flex: none;
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--c-surface-2);
+  color: var(--c-text-secondary);
+  font-size: var(--font-size-100);
+  font-weight: 600;
+}
+.wellness-dash__person-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.wellness-dash__person-name {
+  font-size: var(--font-size-200);
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.wellness-dash__person-hi {
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .wellness-dash__brand {
   display: flex;
