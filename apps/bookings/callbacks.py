@@ -104,6 +104,16 @@ REPLY_RESCHEDULE = "Передал администратору, скоро на
 #: ``apps.skills.base.claims_done_of``.
 CLAIM_EVIDENCE_ADMIN_TASK = "handoff.admin_task"
 
+#: DRF-2341 — чем подтверждается действие ворот записи. Источник у ворот
+#: один и тот же по смыслу, но РАЗНЫЙ по исполнителю: под флагом
+#: ``BOOKING_VIA_AYLA_REST`` действует Ayla, без него — YClients, и выбор
+#: делается на ходу. Поэтому префикс называет роль («каталог записи»), а не
+#: систему: соврать он не может, а различать две системы здесь нечем и
+#: незачем — идентификатор записи приходит от той, что действовала.
+CLAIM_EVIDENCE_BOOKING_CREATE = "catalogue.appointments.create"
+CLAIM_EVIDENCE_BOOKING_CANCEL = "catalogue.appointments.cancel"
+CLAIM_EVIDENCE_BOOKING_RESCHEDULE = "catalogue.appointments.reschedule"
+
 # DRF-2337 — исходы отмены записи, принадлежащей Ayla. Слова НЕ новые: их
 # уже говорит карточка визита (`apps.orchestrator.visits`, DRF-1547) на тот
 # же набор исходов. Два входа в одну и ту же отмену должны отвечать человеку
@@ -562,7 +572,20 @@ class BookingReminderCallbackSkill:
             },
             distinct_id=str(reminder.bot_user_id),
         )
-        return SkillResult(reply_text=REPLY_CONFIRMED, action_data=_my_bookings_and_menu_keyboard())
+        # DRF-2341 + DRF-2344: ветка утверждает выполненное («ждём вас» —
+        # читается как «салон знает»), и подтверждения у неё НЕТ: исходящего
+        # вызова здесь нет вовсе, меняется только наша строка напоминания.
+        # ``claims_done_evidence`` пуст не по недосмотру, а по факту —
+        # подтверждать нечем. Признак поставлен, чтобы ветка не была
+        # невидимой сторожу класса: когда тот появится, она станет красной,
+        # и это верно. Чинить её здесь нельзя — некуда слать: ручки
+        # «клиент подтвердил визит» у источника нет (замер DRF-2344).
+        return SkillResult(
+            reply_text=REPLY_CONFIRMED,
+            action_data=_my_bookings_and_menu_keyboard(),
+            claims_done=True,
+            claims_done_evidence="",
+        )
 
     def _handle_cancel(self, reminder: BookingReminder) -> SkillResult:
         """Отмена. Путь зависит от того, кто владеет записью.
@@ -1208,7 +1231,17 @@ class BookingGateCallbackSkill:
         # told a fact about a booking and had no way to look at it. «Мои
         # записи» is the one next step that is true right after a confirm —
         # it reads the backend and shows the row that was just created.
-        return SkillResult(reply_text=result.text, action_data=_my_bookings_keyboard())
+        #
+        # DRF-2341: подтверждение — идентификатор записи, который вернул
+        # каталог (``confirmation.record_id`` при ``ok=True``), а не факт
+        # вызова: ветки выше отвечают на каждый исход отдельно и сюда
+        # доходят только с успехом.
+        return SkillResult(
+            reply_text=result.text,
+            action_data=_my_bookings_keyboard(),
+            claims_done=True,
+            claims_done_evidence=f"{CLAIM_EVIDENCE_BOOKING_CREATE}:record_id",
+        )
 
     def _dispatch_cancel(
         self,
@@ -1249,7 +1282,16 @@ class BookingGateCallbackSkill:
         )
         # Same end, same rule as the confirm above: a cancellation is where a
         # rebooking most often starts.
-        return SkillResult(reply_text=result.text, action_data=_book_again_keyboard())
+        #
+        # DRF-2341: сюда ход доходит, только когда исполнитель отмены вернул
+        # успех — каждый отказ каталога разобран ветками выше и отвечает
+        # своим текстом. Подтверждение — этот прочитанный исход.
+        return SkillResult(
+            reply_text=result.text,
+            action_data=_book_again_keyboard(),
+            claims_done=True,
+            claims_done_evidence=f"{CLAIM_EVIDENCE_BOOKING_CANCEL}:ok",
+        )
 
     def _dispatch_reschedule(
         self,
@@ -1313,7 +1355,15 @@ class BookingGateCallbackSkill:
         # DRF-2267 (CD §72): перенос удался — дальше то же, что после
         # подтверждения: свои записи и «Меню». До этого успешный перенос
         # был единственным завершённым действием ворот без единой кнопки.
-        return SkillResult(reply_text=result.text, action_data=_my_bookings_and_menu_keyboard())
+        #
+        # DRF-2341: подтверждение — идентификатор перенесённой записи от
+        # каталога (``confirmation.record_id``), а не факт вызова.
+        return SkillResult(
+            reply_text=result.text,
+            action_data=_my_bookings_and_menu_keyboard(),
+            claims_done=True,
+            claims_done_evidence=f"{CLAIM_EVIDENCE_BOOKING_RESCHEDULE}:record_id",
+        )
 
     # ─── cancel-tap (discard preview, no destructive call) ───────────────
 
