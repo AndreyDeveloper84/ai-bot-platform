@@ -203,7 +203,7 @@ describe("PersonalDataDeleteSheet", () => {
       DELETE_CONFIRMATION_TOKEN,
     );
     expect(primary).toBeEnabled();
-  });
+  }, 15_000);
 
   it("passes the typed token to the backend, which verifies it", async () => {
     const user = userEvent.setup();

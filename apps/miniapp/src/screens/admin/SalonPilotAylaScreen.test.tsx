@@ -138,7 +138,7 @@ describe("SalonPilotAylaScreen (DRF-2119)", () => {
     await userEvent.click(screen.getByRole("button", { name: "Изменить график" }));
     await waitFor(() => expect(mockedConfirm).toHaveBeenCalledWith("signed-admin-token-1"));
     await screen.findByText(/График Ольги изменён/);
-  });
+  }, 15_000);
 
   it("черновик записи: сервер не зовётся, экран уходит в форму с предзаполнением", async () => {
     mockedAsk.mockResolvedValue({

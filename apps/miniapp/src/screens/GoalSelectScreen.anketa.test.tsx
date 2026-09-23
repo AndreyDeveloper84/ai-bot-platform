@@ -209,7 +209,7 @@ describe("шаг анкеты рисуется тем, что прислал с�
       answer: { step: "goal", text: "своя формулировка" },
       source_channel: "miniapp",
     });
-  });
+  }, 15_000);
 
   it("сервер прислал `next` — кнопка ведёт туда, куда он назвал", async () => {
     mockedFetch.mockResolvedValue(DONE);

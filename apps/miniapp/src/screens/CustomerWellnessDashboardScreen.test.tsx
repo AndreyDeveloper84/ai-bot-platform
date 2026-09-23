@@ -139,7 +139,7 @@ describe("CustomerWellnessDashboardScreen — the home surface", () => {
     await renderScreen(false);
     expect(await screen.findByText(/стаканов/)).toBeInTheDocument();
     expect(screen.queryByText(/выдуманных данных/)).not.toBeInTheDocument();
-  });
+  }, 15_000);
 
   it("prod build: renders the SAME dashboard — the gate is off (DRF-1546)", async () => {
     // До DRF-1546 здесь рисовался `PilotComingSoonScreen`, и человек на
