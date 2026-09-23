@@ -1664,6 +1664,10 @@ jobs:
   # the dev deploy — which is the intent.
   # ---------------------------------------------------------------------
   miniapp:
+    # Имя намеренно НЕ переименовано после добавления шага eslint (DRF-2388):
+    # эта строка — контекст обязательной проверки в защите ветки (см. список
+    # выше), и переименование сделало бы требуемую проверку несуществующей, то
+    # есть тихо отключило бы её для всех PR. Состав шагов ниже.
     name: miniapp (typecheck + vitest)
     runs-on: ubuntu-latest
     # Measured: npm ci ~15s + tsc ~10s + 259 vitest tests ~40s on a warm
@@ -1785,6 +1789,19 @@ jobs:
         if: steps.detect.outputs.run_fe == 'true'
         working-directory: apps/miniapp
         run: npm ci
+
+      # DRF-2388 — до этого шага в apps/miniapp не было конфигурации ESLint
+      # вовсе, и линтер никогда не гонялся ни здесь, ни где-либо ещё. Поэтому
+      # нарушение порядка хуков дожило до пилота (DRF-2374): tsc его не видит,
+      # а vitest замечает, только если сломанную ветку кто-то отрисует.
+      #
+      # Шаг обязательный и стоит ДО typecheck намеренно: нарушение порядка
+      # хуков — дефект независимо от типов, и красный крест должен называть
+      # именно его, а не теряться за ошибкой компиляции.
+      - name: eslint (порядок хуков — ошибкой)
+        if: steps.detect.outputs.run_fe == 'true'
+        working-directory: apps/miniapp
+        run: npm run lint
 
       - name: tsc --noEmit (typecheck)
         if: steps.detect.outputs.run_fe == 'true'
