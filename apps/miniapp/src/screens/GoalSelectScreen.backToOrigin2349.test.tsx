@@ -25,8 +25,8 @@ const mockedFetch = vi.mocked(fetchDecisionContext);
 
 const NEEDS_GOAL: DecisionContext = {
   version: 1,
-  known: {},
-  missing: ["goal"],
+  known: { goal: null },
+  missing: [{ kind: "goal", prompt: "Что хочешь получить от визита?" }],
   suggestions: [{ key: "tone_up", label: "Подтянуть фигуру" }],
   intents: [{ id: "choose_suggested", label: "Выбери из вариантов" }],
 };
