@@ -98,6 +98,12 @@ class TurnReply:
     # 1:1 so the channel handler can enforce the confidence floor (pipeline
     # step 10.5) on the live path. None = the skill computed no score.
     confidence: float | None = None
+    # DRF-2341 — ветка утверждает ВЫПОЛНЕННОЕ действие, и чем это
+    # подтверждено со стороны источника. Переносятся 1:1 и не толкуются:
+    # шов не имеет мнения о том, вправе ли ветка утверждать — он лишь не
+    # теряет её объявление по дороге к поверхности.
+    claims_done: bool = False
+    claims_done_evidence: str = ""
     # DRF-1348 — mirrors DiscoveryReply.outage: the model could not be
     # reached at all. Carried, never interpreted: the seam has no opinion
     # about what a surface should draw for it.
@@ -204,6 +210,13 @@ SKILL_RESULT_TO_TURN: Mapping[str, str] = MappingProxyType(
         "should_close_conversation": "should_close_conversation",
         "meta": "meta",
         "confidence": "confidence",
+        # DRF-2341 — признак «ветка утверждает выполненное» и подтверждение
+        # от источника. ПЕРЕНОСЯТСЯ: признак описывает ответ, который увидит
+        # человек, и сторож класса читает живой ответ. Не перенести — значит
+        # сделать признак невидимым за швом, то есть ровно та слепота, от
+        # которой этот признак и заводится.
+        "claims_done": "claims_done",
+        "claims_done_evidence": "claims_done_evidence",
     }
 )
 
@@ -395,6 +408,8 @@ def _per_tenant_legacy_adapter(context: TurnContext) -> TurnReply:
         should_close_conversation=result.should_close_conversation,
         meta=result.meta,
         confidence=result.confidence,
+        claims_done=result.claims_done,
+        claims_done_evidence=result.claims_done_evidence,
     )
 
 

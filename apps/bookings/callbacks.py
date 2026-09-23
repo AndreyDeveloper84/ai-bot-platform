@@ -92,6 +92,37 @@ REPLY_CONFIRMED = "Подтверждено, ждём вас!"
 REPLY_CANCELLED = "Запись отменена, надеемся увидеть вас позже."
 REPLY_RESCHEDULE = "Передал администратору, скоро напишут."
 
+# DRF-2337 — исходы отмены записи, принадлежащей Ayla. Слова НЕ новые: их
+# уже говорит карточка визита (`apps.orchestrator.visits`, DRF-1547) на тот
+# же набор исходов. Два входа в одну и ту же отмену должны отвечать человеку
+# одинаково, иначе «салон её уже не отдаёт» из карточки и «отменена» из
+# напоминания были бы двумя правдами об одной записи.
+#
+# ``_CANCEL_SETTLED`` — исходы, после которых записи в Ayla точно нет, и
+# только они закрывают нашу строку. Всё прочее оставляет её открытой:
+# человек должен иметь возможность нажать ещё раз.
+_CANCEL_SETTLED = frozenset({"ok", "already_gone", "not_found"})
+
+
+def _cancel_outcome_text(status: str) -> str:
+    """Слово на исход отмены — из карточки визита, не своё.
+
+    Импорт ленивый: `apps.orchestrator.visits` тянет за собой половину
+    оркестратора, а этот модуль грузится обработчиком каждого нажатия.
+    """
+    from apps.orchestrator.visits import (
+        _CANCEL_GONE_TEXT,
+        _CANCEL_REFUSED_TEXT,
+        _CANCEL_UNAVAILABLE_TEXT,
+    )
+
+    return {
+        "already_gone": _CANCEL_GONE_TEXT,
+        "not_found": _CANCEL_GONE_TEXT,
+        "refused": _CANCEL_REFUSED_TEXT,
+    }.get(status, _CANCEL_UNAVAILABLE_TEXT)
+
+
 # Idempotency replies — when the user re-clicks after the row's
 # already been transitioned out of SENT_NO_REPLY.
 REPLY_ALREADY_HANDLED = "Эта запись уже обработана."
@@ -522,6 +553,102 @@ class BookingReminderCallbackSkill:
         return SkillResult(reply_text=REPLY_CONFIRMED, action_data=_my_bookings_and_menu_keyboard())
 
     def _handle_cancel(self, reminder: BookingReminder) -> SkillResult:
+        """Отмена. Путь зависит от того, кто владеет записью.
+
+        Запись, пришедшая событием из Ayla, отменяется ТОЛЬКО REST-вызовом
+        Ayla (ADR-0009: её состояние меняет она). До DRF-2337 эта ветка
+        смотрела лишь на ``yclients_record_id``, на пустом коротко замыкалась
+        и отвечала человеку «Запись отменена» — при живой записи в Ayla.
+        Мастер ждал, слот стоял занятым, человек не приходил.
+
+        Успех сообщается по факту: не дозвонились или салон отказал — не
+        говорим «отменена» и НЕ закрываем свою строку, иначе повтор упрётся
+        в «эта запись уже обработана».
+
+        Запись из YClients идёт прежним путём: там отмена «по возможности»
+        была осмысленным решением (локальная отмена не должна висеть на
+        чужом простое), и оно осталось при своём случае.
+        """
+        if reminder.ayla_appointment_id is not None:
+            return self._cancel_ayla_booking(reminder)
+        return self._cancel_yclients_booking(reminder)
+
+    def _cancel_ayla_booking(self, reminder: BookingReminder) -> SkillResult:
+        """Отмена в Ayla, затем — наша строка. Порядок не косметический.
+
+        Строка закрывается только после того, как отмена состоялась: иначе
+        неудачный вызов оставил бы человека с закрытой строкой и живой
+        записью, без способа повторить.
+
+        Двойной тап при этом не опасен: ключ идемпотентности
+        ``cancel_booking`` выводит из (человек, «cancel», запись), так что
+        два быстрых нажатия наверху — одно намерение, а не два.
+        """
+        from apps.booking.services.records import cancel_booking
+
+        status = cancel_booking(
+            bot_user=reminder.bot_user,
+            appointment_id=str(reminder.ayla_appointment_id),
+        )
+        logger.info(
+            "bookings.reminder.cancel.ayla reminder=%s appointment=%s status=%s",
+            reminder.pk,
+            reminder.ayla_appointment_id,
+            status,
+        )
+        if status not in _CANCEL_SETTLED:
+            # Запись жива. Слова на каждый исход уже названы карточкой визита
+            # (DRF-1547) — тот же набор исходов, те же слова, чтобы два входа
+            # в одну отмену не говорили человеку разное.
+            #
+            # Кнопки обязательны (§72): «не получилось» без следующего шага —
+            # тупик. «Мои записи» и есть следующий шаг: с карточки визита
+            # отмену можно повторить, а при отказе — увидеть, что запись жива.
+            return SkillResult(
+                reply_text=_cancel_outcome_text(status),
+                action_data=_my_bookings_and_menu_keyboard(),
+            )
+
+        rowcount = BookingReminder.all_tenants.filter(
+            pk=reminder.pk,
+            status=BookingReminder.Status.SENT_NO_REPLY,
+        ).update(
+            status=BookingReminder.Status.CANCELLED,
+            replied_at=timezone.now(),
+        )
+        if rowcount == 0:
+            # §72: «уже обработана» без кнопок — тупик; долг снят, а не
+            # перенесён на новое имя функции после разделения ветки.
+            return SkillResult(
+                reply_text=REPLY_ALREADY_HANDLED,
+                action_data=_my_bookings_and_menu_keyboard(),
+            )
+
+        self._write_cancel_trail(reminder, upstream_ok=True)
+        if status == "ok":
+            # DRF-2341: единственная ветка отмены из Ayla, которая утверждает
+            # выполненное. Право на это даёт ответ каталога на его же ручку
+            # отмены, прочитанный ПОСЛЕ вызова, — не факт отправки.
+            #
+            # Предел назван честно: подтверждение — это 2xx на
+            # ``appointments/{id}/cancel/``; тела у 204 нет, идентификатора
+            # отменённой записи в ответе не приходит, и отдельного
+            # перечитывания статуса записи мы НЕ делаем. Источник действовал
+            # и ответил — это статус от источника; но если он ответит 2xx, не
+            # отменив, мы этого не увидим.
+            return SkillResult(
+                reply_text=REPLY_CANCELLED,
+                action_data=_book_again_keyboard(),
+                claims_done=True,
+                claims_done_evidence="ayla.appointments.cancel:2xx",
+            )
+        # Записи уже не было — человек получил то, чего хотел, но «я отменила»
+        # было бы приписыванием себе чужого результата.
+        return SkillResult(
+            reply_text=_cancel_outcome_text(status), action_data=_book_again_keyboard()
+        )
+
+    def _cancel_yclients_booking(self, reminder: BookingReminder) -> SkillResult:
         """SENT_NO_REPLY → CANCELLED. Best-effort YClients cancel."""
         now = timezone.now()
         rowcount = BookingReminder.all_tenants.filter(
@@ -533,7 +660,8 @@ class BookingReminderCallbackSkill:
         )
         if rowcount == 0:
             return SkillResult(
-                reply_text=REPLY_ALREADY_HANDLED, action_data=_my_bookings_and_menu_keyboard()
+                reply_text=REPLY_ALREADY_HANDLED,
+                action_data=_my_bookings_and_menu_keyboard(),
             )
 
         # Best-effort upstream cancel. The B1 YClients client exposes
@@ -542,28 +670,47 @@ class BookingReminderCallbackSkill:
         # client doesn't break local cancel.
         upstream_ok = _try_yclients_cancel(reminder.yclients_record_id)
 
+        self._write_cancel_trail(reminder, upstream_ok=upstream_ok)
+        # DRF-1492 — «надеемся увидеть вас позже» with no way to come back is
+        # a wish, not an offer. The chip is that way back.
+        #
+        # DRF-2341: ветка утверждает выполненное — и объявляет это честно,
+        # хотя подтверждения от YClients здесь нет: отмена «по возможности»,
+        # и при ``upstream_ok=False`` человеку всё равно говорится «отменена».
+        # Поэтому ``claims_done_evidence`` ПУСТ — не забыт, а пуст по факту:
+        # подтверждать нечем. Признак поставлен не потому, что ветка права, а
+        # потому, что без него она была бы невидима сторожу класса; когда тот
+        # появится, эта ветка станет его первым красным. Сужать её или
+        # признать исключением — вопрос владельцу, не этот лист.
+        return SkillResult(
+            reply_text=REPLY_CANCELLED,
+            action_data=_book_again_keyboard(),
+            claims_done=True,
+            claims_done_evidence="",
+        )
+
+    @staticmethod
+    def _write_cancel_trail(reminder: BookingReminder, *, upstream_ok: bool) -> None:
+        """Аудит и событие отмены — один след на оба пути."""
+        payload = {
+            "yclients_record_id": reminder.yclients_record_id,
+            "yclients_cancel_ok": upstream_ok,
+        }
         write_audit(
             action=AUDIT_REMINDER_CANCELLED,
             target="BookingReminder",
             target_id=reminder.pk,
-            payload={
-                "yclients_record_id": reminder.yclients_record_id,
-                "yclients_cancel_ok": upstream_ok,
-            },
+            payload=payload,
         )
         emit(
             AUDIT_REMINDER_CANCELLED,
             properties={
-                "yclients_record_id": reminder.yclients_record_id,
+                **payload,
                 "reminder_id": str(reminder.pk),
                 "bot_user_id": str(reminder.bot_user_id),
-                "yclients_cancel_ok": upstream_ok,
             },
             distinct_id=str(reminder.bot_user_id),
         )
-        # DRF-1492 — «надеемся увидеть вас позже» with no way to come back is
-        # a wish, not an offer. The chip is that way back.
-        return SkillResult(reply_text=REPLY_CANCELLED, action_data=_book_again_keyboard())
 
     def _handle_reschedule(self, reminder: BookingReminder) -> SkillResult:
         """SENT_NO_REPLY → RESCHEDULE_REQUESTED. Defer operator-page TODO."""
