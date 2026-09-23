@@ -28,7 +28,18 @@
  * 40 (снимать совсем или оставить обездвиженной) у владельца. Поэтому узел
  * ниже проверяет отсутствие на экране, а не отсутствие в файле.
  *
- * Вопросы 39, 41–43 — не трогаются. Д8/Д9 — правится макет, не код.
+ * Ответы владельца 23.09 (§61) — закреплены ниже:
+ *
+ * * **39** — стрелка «→» ТОЛЬКО у «Продолжить сегодняшний план»; у
+ *   «Составить план» и «Выбери цель» её нет;
+ * * **40** — полка «Ayla подобрала тебе» остаётся обездвиженной, код не
+ *   удаляется (константа `SHOW_AYLA_PICKS_SHELF`);
+ * * **41** — вход на экран цели один: «Посмотреть детали цели» на Главной.
+ *
+ * **42 и 43** (возврат после «изменить цель» и после съёмки фото) — это
+ * навигация между экранами, а не вёрстка Главной: отдельный PR.
+ *
+ * Д8/Д9 — правится макет, не код.
  */
 import { render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
@@ -276,5 +287,54 @@ describe("Д31 — два блока ОСТАЮТСЯ: это решение в�
     );
     renderHome();
     expect(await screen.findByText("Начнём с малого?")).toBeInTheDocument();
+  });
+});
+
+
+describe("Ответы владельца 23.09 (§61)", () => {
+  it("39 — стрелки нет у «Составить план»", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: unknown) => {
+        const u = String(url);
+        if (u.includes("/wellness/today")) return ok(TODAY);
+        if (u.includes("/recent-activity")) return ok(BOOKING);
+        if (u.includes("/plan-lite")) return ok({ plan_lite: null });
+        if (u.includes("/last-topic")) return ok({ last_topic: null });
+        if (u.includes("/wellness/consent-prompt")) return ok({ sent: true });
+        throw new Error(`unexpected fetch: ${u}`);
+      }),
+    );
+    renderHome();
+    const cta = await screen.findByRole("button", { name: "Составить план" });
+    // Присутствие: кнопка та самая и на экране.
+    expect(cta).toBeInTheDocument();
+    expect(cta.textContent).not.toContain("→");
+  });
+
+  it("39 — стрелки нет у «Выбери цель»", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: unknown) => {
+        const u = String(url);
+        if (u.includes("/wellness/today")) return ok({ ...TODAY, active_goals: [] });
+        if (u.includes("/recent-activity")) return ok(BOOKING);
+        if (u.includes("/plan-lite")) return ok({ plan_lite: null });
+        if (u.includes("/last-topic")) return ok({ last_topic: null });
+        if (u.includes("/wellness/consent-prompt")) return ok({ sent: true });
+        throw new Error(`unexpected fetch: ${u}`);
+      }),
+    );
+    renderHome();
+    const cta = await screen.findByRole("button", { name: "Выбери цель" });
+    expect(cta).toBeInTheDocument();
+    expect(cta.textContent).not.toContain("→");
+  });
+
+  it("41 — вход на экран цели с Главной: «Посмотреть детали цели»", async () => {
+    renderHome();
+    expect(
+      await screen.findByRole("button", { name: "Посмотреть детали цели" }),
+    ).toBeInTheDocument();
   });
 });
