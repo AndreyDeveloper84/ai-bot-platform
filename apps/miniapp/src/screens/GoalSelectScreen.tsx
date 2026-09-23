@@ -99,7 +99,7 @@ import {
 } from "../lib/customer-goals";
 import { SAFETY_KIND_CLARIFY } from "../lib/health-gate-copy";
 import { returnToChat } from "../lib/max-sdk";
-import { backTo, screenRoot, type BackIntent } from "../lib/screen-back";
+import { backToOrigin, originFrom, screenRoot, type BackIntent } from "../lib/screen-back";
 import {
   DEADLINE_PASSED_CTA,
   DEADLINE_STEP,
@@ -214,7 +214,11 @@ function noticeFor(body: GoalSelectBody): string | null {
 
 export function GoalSelectScreen({ initialDoc }: Props = {}) {
   const navigate = useNavigate();
-  const { pathname } = useLocation();
+  const { pathname, state: routerState } = useLocation();
+  // DRF-2349 — откуда пришли. «Изменить цель» открывают и с Главной, и с
+  // «Плана» (`PlanLiteScreen` давно передаёт `returnTo`), и возврат обязан
+  // вести туда же. Нет происхождения — прежний адрес, прежнее поведение.
+  const origin = originFrom(routerState);
   // Единственное, что экран отсюда берёт, — есть ли у человека вторая
   // поверхность. Ни на один вопрос документа это не влияет.
   const { canSwitch } = useSurfaceMode();
@@ -298,19 +302,25 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
     const timer = window.setTimeout(() => {
       // DRF-2268: в чат — через returnToChat (мост close() → ссылка на
       // диалог); вернуть не вышло — Главная, а не кадр без кнопки.
-      if (returnToChat() === "stuck") {
+      // Пришли изнутри приложения — возвращаемся туда же: человек менял
+      // цель СВОЕГО плана, и уводить его в переписку значило бы прервать
+      // начатое. Пришли по ссылке из бота — прежний путь: в чат, а не
+      // вышло — на Главную (DRF-2268).
+      if (origin !== null) {
+        navigate(origin, { replace: true });
+      } else if (returnToChat() === "stuck") {
         navigate(HOME_ROUTE, { replace: true });
       }
     }, COMPLETION_AUTO_MS);
     return () => window.clearTimeout(timer);
-  }, [isCompleted, navigate]);
+  }, [isCompleted, navigate, origin]);
 
   const back: BackIntent = isRoot
     ? screenRoot(
         "Поверхность цели смонтирована на `/` первым экраном клиента — " +
           "истории за корнем нет, вести кнопке некуда.",
       )
-    : backTo("/customer/main");
+    : backToOrigin(routerState, "/customer/main");
 
   const submit = useCallback((body: GoalSelectBody) => {
     setSubmitting(true);
