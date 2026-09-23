@@ -216,3 +216,102 @@ describe("DRF-1493 · каждый клиентский экран объявл�
     },
   );
 });
+
+/**
+ * DRF-2368 — вторая рука сторожа: экраны кабинета БЕЗ нижней навигации.
+ *
+ * Прежний довод («у админа есть постоянная нижняя навигация, поэтому
+ * объявление ему не нужно») верен не для всех: шесть экранов кабинета её не
+ * несут, и выход у них держался на том, что автор не забыл нарисовать свою
+ * кнопку. Сегодняшней поломки за этим не было — все шесть возвращали по
+ * адресу, — но не было и защиты от следующего автора, а она и есть предмет
+ * этого сторожа.
+ *
+ * Выборка НЕ ручной список: она вычисляется — экран кабинета, в теле
+ * которого нет `AdminTabBar`. Седьмой такой экран попадёт сюда сам, и
+ * именно этого прежняя граница не умела.
+ *
+ * Экраны С нижней навигацией остаются вне проверки намеренно: у них выход
+ * есть всегда, и требовать от них объявления — отдельное решение с отдельной
+ * ценой (у каждого появится аппаратная кнопка MAX).
+ *
+ * `useBackButton` объявлением НЕ считается: это старый хук аппаратной
+ * кнопки, он не связывает её с видимой стрелкой и не несёт вида экрана.
+ * Признать его значило бы принять два приёма за один — ровно та слабость,
+ * которой сторож избегает.
+ */
+const ADMIN_TAB_BAR = /<AdminTabBar|<SalonPilotFrame/;
+
+/**
+ * Два исключения, и оба названы, а не подразумеваются.
+ *
+ * `SalonPilotFrame` — сам каркас с навигацией: в его теле нет `<SalonPilotFrame`
+ * по той же причине, по которой дверь не содержит саму себя. Требовать от
+ * него объявления бессмысленно.
+ *
+ * `AdminAddPersonScreen` — хозяин на 150 строк, который выбирает, какую из
+ * двух секций показать; человек видит СЕКЦИЮ, и объявление живёт там
+ * (`AddPersonAccessCodeSection`, `AddPersonNewMasterSection` — обе в выборке
+ * ниже). Второе объявление у хозяина нарушило бы «ровно один вызов на
+ * смонтированное дерево» — это привело бы к двум переходам на одно нажатие,
+ * то есть ровно к дефекту, который `useScreenBack` и закрывает.
+ */
+const NOT_A_SCREEN_ITSELF = new Set(["SalonPilotFrame", "AdminAddPersonScreen"]);
+
+/** Экраны кабинета без постоянной нижней навигации — выборка, а не список. */
+function adminScreensWithoutTabBar(): string[] {
+  const names: string[] = [];
+  for (const [path, src] of Object.entries(SCREEN_SOURCES)) {
+    if (path.endsWith(".test.tsx")) continue;
+    if (!path.includes("/admin/")) continue;
+    const name = path.split("/").pop()!.replace(/\.tsx$/, "");
+    const isScreen = /^(Admin|SalonPilot)/.test(name) || /Section$/.test(name);
+    if (!isScreen || NOT_A_SCREEN_ITSELF.has(name)) continue;
+    if (!/export function /.test(src)) continue;
+    if (ADMIN_TAB_BAR.test(src)) continue;
+    names.push(name);
+  }
+  return names.sort();
+}
+
+/**
+ * Точный ожидаемый состав — по тому же доводу, что у клиентского дерева:
+ * порог «сколько-то» пережил бы молчаливую потерю экрана из выборки.
+ */
+const EXPECTED_ADMIN_SCREENS = [
+  "AddPersonAccessCodeSection",
+  "AddPersonNewMasterSection",
+  "AdminDeactivationFlowScreen",
+  "AdminHandoffQueueScreen",
+  "AdminInternalChatThreadScreen",
+  "AdminInvitesScreen",
+  "AdminMasterDetailScreen",
+  "AdminNewBookingScreen",
+  "AdminReadinessScreen",
+];
+
+describe("DRF-2368 · экран кабинета без нижней навигации объявляет возврат", () => {
+  it("выборка ровно та, что ожидается", () => {
+    expect(adminScreensWithoutTabBar()).toEqual([...EXPECTED_ADMIN_SCREENS]);
+  });
+
+  it.each(EXPECTED_ADMIN_SCREENS)(
+    "%s объявляет, куда ведёт возврат",
+    (name) => {
+      const body = componentBody(name);
+      expect(
+        body,
+        `Не нашёл тело компонента ${name} — проверка по нему ослепла`,
+      ).not.toBeNull();
+      expect(
+        DECLARED.test(body!),
+        `Экран ${name} живёт в кабинете без нижней навигации, то есть выход ` +
+          "у него только свой, — и в теле нигде не объявил, куда он ведёт. " +
+          'Позовите `useScreenBack(backTo("/адрес"))`, а для потока из ' +
+          "нескольких шагов — `useScreenBack(backByAction(…))`, чтобы " +
+          "аппаратная кнопка не выносила человека из потока с середины. " +
+          "`useBackButton` объявлением не считается.",
+      ).toBe(true);
+    },
+  );
+});

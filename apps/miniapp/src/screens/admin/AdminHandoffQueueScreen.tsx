@@ -14,10 +14,10 @@
  * кнопкой MAX и стрелкой на «Сегодня».
  */
 import { useCallback, useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
 
 import { StateError } from "../../components/StateError";
-import { useBackButton } from "../../hooks/useBackButton";
+import { useScreenBack } from "../../hooks/useScreenBack";
+import { backTo } from "../../lib/screen-back";
 import { getHandoffQueue, type HandoffQueueResponse } from "../../lib/admin-api";
 import { SALON_PILOT_LANDING } from "../../lib/salon-pilot";
 import { waitingLabel } from "./SalonTodayCards";
@@ -47,9 +47,9 @@ type State =
   | { kind: "error"; err: unknown };
 
 export function AdminHandoffQueueScreen() {
-  const navigate = useNavigate();
-  const back = useCallback(() => navigate(SALON_PILOT_LANDING), [navigate]);
-  useBackButton({ onBack: back });
+  // DRF-2368 — одно объявление на обе половины возврата: аппаратную кнопку
+  // MAX заводит хук, видимая стрелка берёт его же обработчик.
+  const back = useScreenBack(backTo(SALON_PILOT_LANDING));
 
   const [state, setState] = useState<State>({ kind: "loading" });
 
