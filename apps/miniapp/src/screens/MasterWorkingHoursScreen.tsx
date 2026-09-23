@@ -46,6 +46,7 @@ import { useScreenBack } from "../hooks/useScreenBack";
 import { backTo } from "../lib/screen-back";
 
 import { SheetChrome } from "../components/PersonalDataSheets";
+import { StudioCallout, notConnectedText } from "../components/StudioCallout";
 import { MasterTabBar } from "../components/MasterTabBar";
 import { Snackbar } from "../components/Snackbar";
 // Загрузка / ошибка загрузки — мастерский SystemState (DRF-2194), не клиентский StateError.
@@ -170,8 +171,7 @@ export const INVALID_INTERVAL = "Начало должно быть раньше
 export const INVALID_BREAK = "Перерыв должен быть внутри рабочего времени.";
 export const CONFLICT_MESSAGE =
   "В это время уже есть записи. Сначала разберитесь с ними.";
-export const NOT_LINKED_MESSAGE =
-  "Профиль ещё не связан с каталогом — сохранить часы пока некуда. Привязку выполнит оператор.";
+export const NOT_LINKED_MESSAGE = notConnectedText("сохранить часы некуда");
 export const REQUEST_FAILED = "Не удалось отправить заявку. Попробуйте ещё раз.";
 
 type Phase =
@@ -569,9 +569,7 @@ export function MasterWorkingHoursScreen() {
   if (phase.kind === "not_linked") {
     return (
       <main className="screen working-hours">
-        <p className="callout" role="status">
-          {NOT_LINKED_MESSAGE}
-        </p>
+        <StudioCallout text={NOT_LINKED_MESSAGE} />
         <MasterTabBar scheduleHasPendingChange={false} />
       </main>
     );

@@ -46,8 +46,8 @@ import { getWorkingHours } from "../lib/master-api";
 import {
   MasterWorkingHoursScreen,
   NOT_LINKED_MESSAGE,
-  WRITE_TO_STUDIO_LABEL,
 } from "./MasterWorkingHoursScreen";
+import { WRITE_TO_STUDIO_LABEL } from "../components/StudioCallout";
 import { stringLiteralsOf } from "../no-person-names.guard.test";
 
 const SOURCES = import.meta.glob("./Master*.tsx", {

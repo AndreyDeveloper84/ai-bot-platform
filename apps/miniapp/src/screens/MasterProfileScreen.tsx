@@ -28,6 +28,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { StudioCallout, notConnectedText } from "../components/StudioCallout";
 import { useNavigate } from "react-router-dom";
 
 import { MasterCard } from "../components/MasterCard";
@@ -127,7 +128,7 @@ export const PROFILE_COPY = {
   reviewsTooltip: "Отзывы появятся позже — мы готовим этот раздел.",
   internalChatHint: "Личный канал общения с админами студии.",
   // Инцидент 20.09: 403 not_linked на карточке — этап жизни, не отказ прав.
-  notLinked: "Профиль ещё не связан с каталогом — фото и текст пока не изменить. Привязку выполнит оператор.",
+  notLinked: notConnectedText("фото и текст пока не изменить"),
   toasts: {
     saved: "✓ Сохранено",
     photoSaved: "✓ Фото обновлено",
@@ -178,6 +179,26 @@ interface ReadyData {
 type Phase = { kind: "loading" } | { kind: "ready"; data: ReadyData } | { kind: "error"; err: unknown };
 
 // --- Компонент -------------------------------------------------------------
+
+/**
+ * Текст отказа сохранения (DRF-2378, текстовая половина DRF-2362).
+ *
+ * 403 — это НЕ «попробуйте ещё раз»: повтор не лечит непривязанный
+ * профиль, а обещает лекарство. Владелец видел здесь общий отказ в живом
+ * проходе 23.09 (17:56 имя, 17:58 «О себе»), и если причина была та самая
+ * непривязанная личность, то человек читал «попробуйте» там, где пробовать
+ * бессмысленно.
+ *
+ * ЧТО ЭТО НЕ ДОКАЗЫВАЕТ: причина отказов 23.09 не установлена — лог стенда
+ * не читан, и лист DRF-2362 прямо запрещает писать диагноз до него. Здесь
+ * правится только ТЕКСТ состояния 403; остальные отказы сохранения говорят
+ * прежними словами, потому что утверждённых формулировок для них нет.
+ */
+function saveErrorText(e: unknown): string {
+  if (e instanceof ApiError && e.status === 403) return PROFILE_COPY.notLinked;
+  if (e instanceof ApiError && e.detail) return e.detail;
+  return PROFILE_COPY.states.saveError;
+}
 
 export function MasterProfileScreen() {
   const navigate = useNavigate();
@@ -283,7 +304,7 @@ export function MasterProfileScreen() {
       setToast(PROFILE_COPY.toasts.saved);
     } catch (e) {
       if (e instanceof ApiError) {
-        setBioEditor({ ...bioEditor, saving: false, err: e.detail || PROFILE_COPY.states.saveError });
+        setBioEditor({ ...bioEditor, saving: false, err: saveErrorText(e) });
       } else {
         setOfflineBanner(true);
         setBioEditor({ ...bioEditor, saving: false, err: "" });
@@ -317,7 +338,7 @@ export function MasterProfileScreen() {
       setToast(PROFILE_COPY.toasts.saved);
     } catch (e) {
       if (e instanceof ApiError) {
-        setNameEditor({ ...nameEditor, saving: false, err: e.detail || PROFILE_COPY.states.saveError });
+        setNameEditor({ ...nameEditor, saving: false, err: saveErrorText(e) });
       } else {
         setOfflineBanner(true);
         setNameEditor({ ...nameEditor, saving: false, err: "" });
@@ -421,7 +442,7 @@ export function MasterProfileScreen() {
         hapticNotify("success");
         setToast(PROFILE_COPY.toasts.workRemoved);
       } catch (e) {
-        setWorkErr(e instanceof ApiError ? e.detail || PROFILE_COPY.states.saveError : PROFILE_COPY.states.saveError);
+        setWorkErr(saveErrorText(e));
         hapticNotify("error");
       } finally {
         setWorkBusy(false);
@@ -484,9 +505,7 @@ export function MasterProfileScreen() {
     return (
       <ProfileFrame>
         {notLinked ? (
-          <p className="callout" role="status">
-            {PROFILE_COPY.notLinked}
-          </p>
+          <StudioCallout text={PROFILE_COPY.notLinked} />
         ) : (
           <SystemState
             kind="load_error"

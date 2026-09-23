@@ -324,7 +324,15 @@ describe("системные состояния через SystemState (DRF-2194
     expect(screen.queryByText(/Недостаточно прав/)).toBeNull();
   });
 
-  it("инцидент 21.09 (DRF-2150): не связан — панель на месте и сказано, кто привяжет", async () => {
+  // Предмет инцидента 21.09 (DRF-2150) — ПАНЕЛЬ: человек не оставался
+  // заперт на экране без навигации. Он и проверяется ниже.
+  //
+  // Вторая половина прежнего узла — «сказано, кто привяжет» — снята
+  // решением владельца (DRF-2378): сказано было про «оператора», роли с
+  // таким именем в системе нет, и обещание исполнителя было обещанием
+  // несуществующего адресата. Теперь названо состояние и дана дверь к
+  // студии, которая существует.
+  it("инцидент 21.09 (DRF-2150): не связан — панель на месте и есть дверь к студии", async () => {
     // Салонный мастер: на /master/* панель рисуется (на /solo/* её несёт соло-каркас).
     mockedGet.mockRejectedValueOnce(new ApiError(403, "not_linked", "…"));
     render(
@@ -336,7 +344,7 @@ describe("системные состояния через SystemState (DRF-2194
       </MemoryRouter>,
     );
     expect(await screen.findByText(NOT_LINKED_MESSAGE)).toBeInTheDocument();
-    expect(NOT_LINKED_MESSAGE).toContain("Привязку выполнит оператор.");
+    expect(screen.getByRole("button", { name: "Написать студии" })).toBeInTheDocument();
     const nav = screen.getByRole("navigation", { name: "Основная навигация" });
     expect(within(nav).getByRole("button", { name: "Сегодня" })).toBeInTheDocument();
   });
