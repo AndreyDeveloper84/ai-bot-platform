@@ -67,6 +67,12 @@ const mockedCreate = vi.mocked(createPlanLite);
 const mockedClose = vi.mocked(closePlanLite);
 const mockedDoc = vi.mocked(fetchDecisionContext);
 
+const GATE_GRANTED = {
+  canonical: true,
+  grantedAt: "2026-09-01T10:00:00Z",
+  currentDocumentVersion: "v1",
+};
+
 const DOC: DecisionContext = {
   version: 1,
   known: { goal: { goal_key: "tone_up", goal_text: null, selected_at: "2026-09-10T10:00:00Z", source_channel: "miniapp" } },
@@ -110,7 +116,7 @@ beforeEach(() => {
   mockedProposal.mockRejectedValue(new ApiError(404, "no_template", "none"));
   mockedCreate.mockResolvedValue(PLAN);
   mockedClose.mockResolvedValue(undefined);
-  vi.mocked(fetchDiaryConsentGate).mockResolvedValue({ grantedAt: "2026-09-01T10:00:00Z" });
+  vi.mocked(fetchDiaryConsentGate).mockResolvedValue(GATE_GRANTED);
 });
 
 
@@ -322,18 +328,18 @@ describe("три исхода гейта согласия (DRF-2354)", () => {
   };
 
   it("согласие есть — дневник включён и уходит в план", async () => {
-    vi.mocked(fetchDiaryConsentGate).mockResolvedValue({ grantedAt: "2026-09-01T10:00:00Z" });
+    vi.mocked(fetchDiaryConsentGate).mockResolvedValue(GATE_GRANTED);
 
     await showProposal();
     fireEvent.click(screen.getByRole("button", { name: PLAN_LITE_COPY.confirm }));
     await settle();
 
-    const actions = mockedCreate.mock.calls[0][0].map((a) => a.action_type);
+    const actions = (mockedCreate.mock.calls[0]?.[0] ?? []).map((a) => a.action_type);
     expect(actions).toContain("log_food");
   });
 
   it("согласия нет — строка не уходит, и человеку сказано почему", async () => {
-    vi.mocked(fetchDiaryConsentGate).mockResolvedValue({ grantedAt: null });
+    vi.mocked(fetchDiaryConsentGate).mockResolvedValue({ ...GATE_GRANTED, grantedAt: null });
 
     await showProposal();
 
@@ -341,7 +347,7 @@ describe("три исхода гейта согласия (DRF-2354)", () => {
     fireEvent.click(screen.getByRole("button", { name: PLAN_LITE_COPY.confirm }));
     await settle();
 
-    const actions = mockedCreate.mock.calls[0][0].map((a) => a.action_type);
+    const actions = (mockedCreate.mock.calls[0]?.[0] ?? []).map((a) => a.action_type);
     expect(actions).not.toContain("log_food");
   });
 
@@ -360,7 +366,7 @@ describe("три исхода гейта согласия (DRF-2354)", () => {
     fireEvent.click(screen.getByRole("button", { name: PLAN_LITE_COPY.confirm }));
     await settle();
 
-    const actions = mockedCreate.mock.calls[0][0].map((a) => a.action_type);
+    const actions = (mockedCreate.mock.calls[0]?.[0] ?? []).map((a) => a.action_type);
     expect(actions).toContain("log_food");
   });
 });
