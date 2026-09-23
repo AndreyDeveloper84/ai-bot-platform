@@ -22,7 +22,7 @@ auditing. This is the desired terminal state.
 import os
 
 from .base import *  # noqa: F401,F403
-from .base import payments_test_mode_from
+from .base import booking_via_ayla_rest_from, payments_test_mode_from
 
 DEBUG = False
 
@@ -36,6 +36,12 @@ STRICT_TENANT_SCOPE = "strict"
 # стенде — решает владелец; эта правка работает при любом его ответе и
 # сама за него ничего не выбирает. Мусорное значение — отказ, не «бой».
 AYLA_PAYMENTS_TEST_MODE = payments_test_mode_from(os.environ.get("AYLA_PAYMENTS_TEST_MODE", "true"))
+
+# DRF-2346 — путь записи объявлен здесь, а не подразумевается умолчанием
+# ``base``. Объявленное значение — ``true``: ровно то, как стенд работает
+# сегодня (замер главного окна 23.09: ``AYLA_REST=[true]``). Значение из
+# окружения бьёт объявленное — контур вправе сказать иначе.
+BOOKING_VIA_AYLA_REST = booking_via_ayla_rest_from(os.environ.get("BOOKING_VIA_AYLA_REST", "true"))
 
 # T-02 / OD-T02-1 — the unconditional
 # ``EVENT_INGEST_TENANT_VERIFY_FAIL_OPEN = True`` that used to live here is

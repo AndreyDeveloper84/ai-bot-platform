@@ -29,7 +29,10 @@ import {
   fetchBooking,
   type BookingItem,
 } from "../lib/api";
-import { CustomerBookingDetailScreen } from "./CustomerBookingDetailScreen";
+import {
+  CANCEL_STARTED_COPY,
+  CustomerBookingDetailScreen,
+} from "./CustomerBookingDetailScreen";
 
 const mockedFetch = vi.mocked(fetchBooking);
 const mockedRequest = vi.mocked(cancelBookingRequest);
@@ -169,7 +172,11 @@ describe("CustomerBookingDetailScreen (real data)", () => {
     await user.click(await screen.findByRole("button", { name: "Отменить" }));
     await user.click(await screen.findByRole("button", { name: "Отменить запись" }));
     expect(mockedRequest).toHaveBeenCalledTimes(1);
-    expect(await screen.findByText("Запись отменена")).toBeInTheDocument();
+    // DRF-2346 — сервер ответил «отмена запрошена»: говорим о запущенном
+    // действии, а не о факте. «Запись отменена» здесь было бы утверждением
+    // выполненного при живой записи.
+    expect(await screen.findByText(CANCEL_STARTED_COPY)).toBeInTheDocument();
+    expect(screen.queryByText("Запись отменена")).not.toBeInTheDocument();
     // Undo — the booking comes back, the final confirm never fires.
     await user.click(screen.getByRole("button", { name: "Отменить" }));
     expect(mockedUndo).toHaveBeenCalledTimes(1);
@@ -213,7 +220,7 @@ describe("CustomerBookingDetailScreen (real data)", () => {
     await act(async () => {});
     fireEvent.click(screen.getByRole("button", { name: "Отменить запись" }));
     await act(async () => {});
-    expect(screen.getByText("Запись отменена")).toBeInTheDocument();
+    expect(screen.getByText(CANCEL_STARTED_COPY)).toBeInTheDocument();
     await act(async () => {
       vi.advanceTimersByTime(5000);
     });

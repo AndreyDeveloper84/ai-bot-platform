@@ -52,6 +52,9 @@ REQUIRED_ENV = {
     "CHROMA_AUTH_TOKEN": "chroma-token-abc",  # pragma: allowlist secret
     "SENTRY_DSN": "https://public@sentry.example.com/1",
     "MYSITE_WEBHOOK_HMAC_SECRET": "hmac-secret-abc",  # pragma: allowlist secret
+    # DRF-2346 — путь записи тоже обязателен в бою: без него импорт падает
+    # раньше, чем сценарий доберётся до своего предмета.
+    "BOOKING_VIA_AYLA_REST": "true",
 }
 
 

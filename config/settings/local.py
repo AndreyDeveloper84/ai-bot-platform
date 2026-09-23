@@ -3,7 +3,7 @@
 from .base import *  # noqa: F401,F403
 import os
 
-from .base import payments_test_mode_from
+from .base import booking_via_ayla_rest_from, payments_test_mode_from
 
 DEBUG = True
 ALLOWED_HOSTS = ["*"]
@@ -35,5 +35,11 @@ PII_TOKENIZER_ENABLED = False
 # здесь означало бы, что такой процесс выдаёт заглушечные ссылки ДАЖЕ когда
 # контур сказал ``false``.
 AYLA_PAYMENTS_TEST_MODE = payments_test_mode_from(  # noqa: F405
-    os.environ.get("AYLA_PAYMENTS_TEST_MODE", "true")  # noqa: F405
+    os.environ.get("AYLA_PAYMENTS_TEST_MODE", "true")
 )
+
+# DRF-2346 — путь записи называется в контуре. Умолчание ``false`` для
+# местной разработки верно по существу: локальные таблицы, Ayla рядом нет.
+# Важно, что оно объявлено: именно при ``false`` работает двухшаговая отмена
+# с окном возврата, и её теперь добивает подметание, а не вкладка браузера.
+BOOKING_VIA_AYLA_REST = booking_via_ayla_rest_from(os.environ.get("BOOKING_VIA_AYLA_REST", "false"))

@@ -81,6 +81,12 @@ from apps.bookings.escalation import escalate_stale_reminders  # noqa: F401
 # Re-export R3's post-visit follow-up task — same autodiscover rationale.
 from apps.bookings.followups import send_post_visit_followups  # noqa: F401
 
+# DRF-2346 — подметание просроченных окон возврата живёт у владельца строки
+# (``apps/booking/``): читать ``BookingRequest`` из соседнего приложения
+# запрещает сторож границ G9, и запрещает по делу. Здесь только ввоз, чтобы
+# имя задачи нашлось там же, где остальные беты записи.
+from apps.booking.expired_cancels import commit_expired_cancels  # noqa: F401
+
 logger = logging.getLogger(__name__)
 
 

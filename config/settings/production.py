@@ -17,7 +17,7 @@ import os
 from django.core.exceptions import ImproperlyConfigured
 
 from .base import *  # noqa: F401,F403
-from .base import payments_test_mode_from
+from .base import booking_via_ayla_rest_from, payments_test_mode_from
 
 DEBUG = False
 
@@ -105,6 +105,24 @@ if _PAYMENTS_MODE_RAW is None or not _PAYMENTS_MODE_RAW.strip():
 # именем в тексте. Здесь остаётся то, чего base знать не может: в бою у
 # режима нет умолчания вообще.
 AYLA_PAYMENTS_TEST_MODE = payments_test_mode_from(_PAYMENTS_MODE_RAW)
+
+
+# DRF-2346 — путь записи в бою называется явно, умолчания здесь нет.
+# Незаданная переменная означала «false», то есть местный двухшаговый путь
+# отмены в контуре, где записи принадлежат Ayla: человек слышал «Запись
+# отменена», а запись оставалась в состоянии «отмена запрошена», пока её не
+# добьёт подметание, — и всё это при живой записи у источника. Та же цена
+# неверного ответа, что у режима оплаты: выкладка, которая не стартует,
+# дешевле человека, отменившего запись в никуда.
+_BOOKING_PATH_RAW = os.environ.get("BOOKING_VIA_AYLA_REST")
+if _BOOKING_PATH_RAW is None or not _BOOKING_PATH_RAW.strip():
+    raise ImproperlyConfigured(
+        "BOOKING_VIA_AYLA_REST is required in production and has no default. "
+        "Set it to 'true' when bookings live in Ayla (ADR-0009), or to "
+        "'false' deliberately for a contour on local tables. Unset used to "
+        "mean 'false' silently."
+    )
+BOOKING_VIA_AYLA_REST = booking_via_ayla_rest_from(_BOOKING_PATH_RAW)
 
 
 # Phase 2.2 — domain bus subscriber registry. Production activates

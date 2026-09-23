@@ -72,6 +72,8 @@ class TestProductionFailFast:
         monkeypatch.setenv("MYSITE_WEBHOOK_HMAC_SECRET", "hmac-secret-abc")  # noqa: S105
         # DRF-2340 — режим оплаты обязателен в бою, как и токены выше.
         monkeypatch.setenv("AYLA_PAYMENTS_TEST_MODE", "false")
+        # DRF-2346 — путь записи обязателен в бою, как и режим оплаты выше.
+        monkeypatch.setenv("BOOKING_VIA_AYLA_REST", "true")
         with pytest.raises(ImproperlyConfigured) as exc_info:
             importlib.import_module("config.settings.production")
         assert "AYLA_INTERNAL_API_TOKEN" in str(exc_info.value)
@@ -86,6 +88,8 @@ class TestProductionFailFast:
         monkeypatch.setenv("MYSITE_WEBHOOK_HMAC_SECRET", "hmac-secret-abc")  # noqa: S105
         # DRF-2340 — режим оплаты обязателен в бою, как и токены выше.
         monkeypatch.setenv("AYLA_PAYMENTS_TEST_MODE", "false")
+        # DRF-2346 — путь записи обязателен в бою, как и режим оплаты выше.
+        monkeypatch.setenv("BOOKING_VIA_AYLA_REST", "true")
         monkeypatch.delenv("CHROMA_AUTH_TOKEN", raising=False)
         with pytest.raises(ImproperlyConfigured) as exc_info:
             importlib.import_module("config.settings.production")
@@ -101,6 +105,8 @@ class TestProductionFailFast:
         monkeypatch.setenv("MYSITE_WEBHOOK_HMAC_SECRET", "hmac-secret-abc")  # noqa: S105
         # DRF-2340 — режим оплаты обязателен в бою, как и токены выше.
         monkeypatch.setenv("AYLA_PAYMENTS_TEST_MODE", "false")
+        # DRF-2346 — путь записи обязателен в бою, как и режим оплаты выше.
+        monkeypatch.setenv("BOOKING_VIA_AYLA_REST", "true")
         monkeypatch.delenv("SENTRY_DSN", raising=False)
         with pytest.raises(ImproperlyConfigured) as exc_info:
             importlib.import_module("config.settings.production")
@@ -131,6 +137,8 @@ class TestProductionFailFast:
         monkeypatch.setenv("MYSITE_WEBHOOK_HMAC_SECRET", "hmac-secret-abc")  # noqa: S105
         # DRF-2340 — режим оплаты обязателен в бою, как и токены выше.
         monkeypatch.setenv("AYLA_PAYMENTS_TEST_MODE", "false")
+        # DRF-2346 — путь записи обязателен в бою, как и режим оплаты выше.
+        monkeypatch.setenv("BOOKING_VIA_AYLA_REST", "true")
         module = importlib.import_module("config.settings.production")
         assert module.DEBUG is False
         assert module.AYLA_INTERNAL_API_TOKEN == "ayla-token-abc"  # noqa: S105
