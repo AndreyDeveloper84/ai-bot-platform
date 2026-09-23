@@ -97,6 +97,9 @@ logger = logging.getLogger(__name__)
 REPLY_CONFIRMED = "Подтверждено, ждём вас!"
 REPLY_CANCELLED = "Запись отменена, надеемся увидеть вас позже."
 REPLY_RESCHEDULE = "Передал администратору, скоро напишут."
+#: DRF-2341 — что именно утверждает ответ как СДЕЛАННОЕ (``meta["claims_done"]``).
+#: Имя одно на весь бот: сторож класса ищет его, а не текст.
+CLAIM_HANDED_TO_OPERATOR = "handed_to_operator"
 
 # DRF-2337 — исходы отмены записи, принадлежащей Ayla. Слова НЕ новые: их
 # уже говорит карточка визита (`apps.orchestrator.visits`, DRF-1547) на тот
@@ -769,7 +772,7 @@ class BookingReminderCallbackSkill:
             # MANUAL, as the outbound-DLQ path does (pipeline §Phase 0): the
             # operator acts out of band — reaches the person and rebooks in
             # YClients — rather than continuing this dialogue as the bot.
-            create_admin_task(
+            task = create_admin_task(
                 conversation,
                 task_type=AdminTask.TaskType.MANUAL,
                 reason=_reschedule_reason(reminder),
@@ -791,7 +794,19 @@ class BookingReminderCallbackSkill:
             distinct_id=str(reminder.bot_user_id),
         )
         return SkillResult(
-            reply_text=REPLY_RESCHEDULE, action_data=_my_bookings_and_menu_keyboard()
+            reply_text=REPLY_RESCHEDULE,
+            action_data=_my_bookings_and_menu_keyboard(),
+            # DRF-2341 — ответ утверждает выполненное действие, и говорит об
+            # этом признаком, а не только словами: по тексту такую ветку не
+            # отличить, а без признака она для сторожа невидима.
+            # Доказательство — ключ задачи, который вернул исполнитель
+            # передачи, а не что-то собранное здесь: «позвали передачу» — не
+            # доказательство. Сбой передачи сюда не доходит (см. выше):
+            # ответа не будет вовсе, а значит и утверждения тоже.
+            meta={
+                "claims_done": CLAIM_HANDED_TO_OPERATOR,
+                "claims_done_evidence": {"admin_task_id": str(task.pk)},
+            },
         )
 
 

@@ -27,6 +27,7 @@ from django.utils import timezone
 
 from apps.booking.models import BookingReminder
 from apps.bookings.callbacks import (
+    CLAIM_HANDED_TO_OPERATOR,
     REPLY_ALREADY_HANDLED,
     REPLY_RESCHEDULE,
     BookingReminderCallbackSkill,
@@ -205,6 +206,33 @@ class TestTheTaskTypeKeepsTheMuteNarrow:
         assert RECORD_ID in task.reason  # наличие: строка та самая
         assert "+79995550111" not in task.reason
         assert "9995550111" not in task.reason
+
+
+class TestTheReplyDeclaresWhatItClaims:
+    """DRF-2341 — ответ об уже сделанном объявляет это признаком, не только словами."""
+
+    def test_the_reply_carries_the_claim_and_its_evidence(
+        self, tenant: Tenant, bot_user: BotUser, conversation: Conversation, reminder
+    ) -> None:
+        with tenant_scope(tenant):
+            result = _press_reschedule(reminder, bot_user, conversation)
+
+        (task,) = _tasks(conversation)
+        assert result.meta["claims_done"] == CLAIM_HANDED_TO_OPERATOR
+        # Доказательство — ключ задачи от исполнителя передачи, а не «позвали».
+        assert result.meta["claims_done_evidence"] == {"admin_task_id": str(task.pk)}
+
+    def test_a_replay_claims_nothing(
+        self, tenant: Tenant, bot_user: BotUser, conversation: Conversation, reminder
+    ) -> None:
+        """Повтор отвечает «уже обработано» — и ничего о сделанном не утверждает."""
+        with tenant_scope(tenant):
+            first = _press_reschedule(reminder, bot_user, conversation)
+            again = _press_reschedule(reminder, bot_user, conversation)
+
+        assert first.meta["claims_done"] == CLAIM_HANDED_TO_OPERATOR  # наличие
+        assert again.reply_text == REPLY_ALREADY_HANDLED
+        assert "claims_done" not in again.meta
 
 
 class TestTheTextIsUnchanged:
