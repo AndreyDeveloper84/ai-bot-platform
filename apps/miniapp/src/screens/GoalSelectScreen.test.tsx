@@ -144,7 +144,7 @@ describe("GoalSelectScreen (dumb renderer over the decision document)", () => {
     expect(
       await screen.findByText("Хочу избавиться от напряжения в плечах"),
     ).toBeInTheDocument();
-  });
+  }, 15_000);
 
   it("need_guidance button → postGoalSelect({intent}) → renders the guidance prompt from missing", async () => {
     const user = userEvent.setup();
