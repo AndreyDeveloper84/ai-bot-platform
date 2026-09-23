@@ -34,9 +34,13 @@
 
 ### «Не сейчас»
 
-Маркер ``plan_proposal_declined_at`` в ``skill_state["plan_lite"]`` — для
-недельного возврата A4 (DRF-2126): в тот же день не дёргать. Повторный «мой
-план» в тот же день предложение показывает — это явный запрос.
+Ответ человеку и ничего больше. Маркер ``plan_proposal_declined_at``
+больше НЕ пишется — DRF-2356: он писался для недельного возврата A4
+(DRF-2126), которого нет, и никто его не читал. Пометка, которую никто не
+читает, хуже отсутствия пометки: она выглядит работающим механизмом.
+Правило возврата — вопрос владельца; когда он ответит, маркер заводится
+заново (полчаса работы). Уже записанные значения остаются в строках: не
+писать новые и стирать старые — разные решения, второе не наше.
 
 ### Матчер и маршрутизация
 
@@ -57,7 +61,6 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import Any
 
 from django.conf import settings
@@ -107,7 +110,6 @@ OPEN_CATALOG_SLUG = "open_catalog"
 
 #: Ключ в ``conversation.skill_state`` — маркер «Не сейчас» для A4 (DRF-2126).
 STATE_KEY = "plan_lite"
-DECLINED_AT = "plan_proposal_declined_at"
 
 
 @dataclass(frozen=True)
@@ -338,57 +340,12 @@ def plan_buttons() -> dict[str, Any] | None:
     )
 
 
-# ─── состояние «Не сейчас» ────────────────────────────────────────────────
-
-
-def _mark_declined(conversation: Any) -> None:
-    """Маркер для A4 (DRF-2126): в этот день предложение не дёргать.
-
-    Read-merge-write внутри ведра ``plan_lite`` — соседние ключи (их добавит
-    A4) не затираются. Глобальный путь идёт при ``current_tenant()=None`` по
-    замыслу, а ``write_skill_state`` требует область — она входится на время
-    одной записи и берётся у самого разговора (тот же приём, что
-    ``open_question._write``; ветка «внутри навыка» её уже держит).
-    """
-    raw = getattr(conversation, "skill_state", None)
-    bucket = dict(raw.get(STATE_KEY) or {}) if isinstance(raw, dict) else {}
-    bucket[DECLINED_AT] = datetime.now(UTC).isoformat()
-    try:
-        from apps.conversations.models import Conversation
-
-        if isinstance(conversation, Conversation):
-            from apps.conversations.services import write_skill_state
-            from apps.tenancy.context import current_tenant, tenant_scope
-
-            if current_tenant() is not None:
-                write_skill_state(conversation, STATE_KEY, bucket)
-            else:
-                with tenant_scope(conversation.tenant):
-                    write_skill_state(conversation, STATE_KEY, bucket)
-            return
-    except Exception:  # noqa: BLE001 — потеря маркера стоит одного лишнего напоминания A4
-        logger.warning(
-            "plan_lite.state_write_failed conversation=%s",
-            getattr(conversation, "id", None),
-            exc_info=True,
-        )
-        return
-    if isinstance(raw, dict):
-        raw[STATE_KEY] = bucket
-
-
-def declined_at(conversation: Any) -> datetime | None:
-    """Когда человек нажал «Не сейчас»; ``None`` — не нажимал / маркер стёрт."""
-    raw = getattr(conversation, "skill_state", None)
-    bucket = raw.get(STATE_KEY) if isinstance(raw, dict) else None
-    stamped = bucket.get(DECLINED_AT) if isinstance(bucket, dict) else None
-    if not isinstance(stamped, str):
-        return None
-    try:
-        at = datetime.fromisoformat(stamped)
-    except ValueError:
-        return None
-    return at if at.tzinfo else at.replace(tzinfo=UTC)
+# ─── «Не сейчас» ──────────────────────────────────────────────────────────
+#
+# DRF-2356: писателя и читателя маркера ``plan_proposal_declined_at`` здесь
+# больше нет. Он писался для недельного возврата A4 (DRF-2126), который не
+# реализован, и читателей вне тестов не имел. Вернуть его — вместе с
+# правилом возврата, которое называет владелец.
 
 
 # ─── результаты ───────────────────────────────────────────────────────────
@@ -635,7 +592,6 @@ def try_handle_plan_callback(
     external_id = external_user_id_for(bot_user)
     client = WellnessContextHttpClient()
     if stripped == CB_LATER:
-        _mark_declined(conversation)
         logger.info(
             "orchestrator.plan_lite.declined bot_user=%s trace=%s",
             getattr(bot_user, "pk", None),
@@ -662,13 +618,11 @@ __all__ = [
     "CB_DIARY",
     "CB_LATER",
     "CB_PREFIX",
-    "DECLINED_AT",
     "MY_PLAN_TRIGGERS",
     "OPEN_PLAN_SLUG",
     "PLAN_CALLBACK_RE",
     "PLAN_LITE_COPY",
     "STATE_KEY",
-    "declined_at",
     "goal_label",
     "is_plan_callback",
     "looks_like_my_plan_request",

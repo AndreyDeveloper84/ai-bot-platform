@@ -326,42 +326,47 @@ class TestConfirmOnlyByButton:
 
 
 class TestLater:
-    def test_later_marks_declined_at_for_a4_and_my_plan_still_answers(self) -> None:
+    def test_later_answers_and_writes_no_marker(self) -> None:
+        """DRF-2356 — «Не сейчас» отвечает человеку и ничего не копит.
+
+        Прежде здесь писался `plan_proposal_declined_at` для недельного
+        возврата A4 (DRF-2126), которого нет, и читателей вне тестов у него
+        не было. Пометка, которую никто не читает, выглядит работающим
+        механизмом — поэтому её не стало. Вернётся вместе с правилом
+        возврата, которое называет владелец.
+        """
         conversation = SimpleNamespace(id="c", skill_state={})
         result = _turn("cb:plan:later", _fake(), conversation=conversation)
         assert result.reply_text == PLAN_LITE_COPY.later
         assert result.meta["reply_kind"] == "plan_lite_later"
-        assert card.declined_at(conversation) is not None
-        assert conversation.skill_state["plan_lite"]["plan_proposal_declined_at"]
+        assert conversation.skill_state == {}
         again = _turn("мой план", _fake(), conversation=conversation)
         assert again.meta["reply_kind"] == "plan_lite_proposal"  # явный запрос — показываем
 
-    def test_later_persists_the_marker_on_a_real_conversation_outside_a_tenant_scope(self) -> None:
-        """Глобальный путь идёт при current_tenant()=None; write_skill_state требует
-        область — маркер обязан долететь до строки, не до DEBUG-лога."""
+    def test_later_leaves_an_existing_marker_alone(self) -> None:
+        """Уже записанные значения остаются: не писать новые и стирать
+        старые — разные решения, и второе не наше."""
         from apps.conversations.models import Conversation
         from apps.identity.models import BotUser
         from apps.identity.services.global_tenant import get_global_bot_tenant
-        from apps.tenancy.context import current_tenant
 
         tenant = get_global_bot_tenant()
         bot_user = BotUser.all_tenants.create(
-            tenant=tenant, channel="max", channel_user_id="2125-l", chat_id="2125-l"
+            tenant=tenant, channel="max", channel_user_id="2356-l", chat_id="2356-l"
         )
         conversation = Conversation.all_tenants.create(
-            tenant=tenant, bot_user=bot_user, skill_state={"plan_lite": {"other": 1}}
+            tenant=tenant,
+            bot_user=bot_user,
+            skill_state={"plan_lite": {"plan_proposal_declined_at": "2026-09-01T10:00:00+00:00"}},
         )
-        assert current_tenant() is None
-        _turn("cb:plan:later", _fake(), conversation=conversation)
-        conversation.refresh_from_db()
-        bucket = conversation.skill_state["plan_lite"]
-        assert bucket["plan_proposal_declined_at"]
-        assert bucket["other"] == 1  # read-merge-write: соседние ключи ведра целы
-        assert card.declined_at(conversation) is not None
 
-    def test_declined_at_reads_none_without_a_marker(self) -> None:
-        assert card.declined_at(SimpleNamespace(skill_state={})) is None
-        assert card.declined_at(SimpleNamespace(skill_state={"plan_lite": {"x": 1}})) is None
+        _turn("cb:plan:later", _fake(), conversation=conversation)
+
+        conversation.refresh_from_db()
+        assert (
+            conversation.skill_state["plan_lite"]["plan_proposal_declined_at"]
+            == "2026-09-01T10:00:00+00:00"
+        )
 
 
 # ─── p6: «Записаться» — подбор по ключу цели ─────────────────────────────────
