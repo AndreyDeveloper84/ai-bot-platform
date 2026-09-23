@@ -8,21 +8,33 @@
  *
  * Узлы держат:
  *
- * * список приходит и читается (имя, причина);
+ * * список приходит и читается (имя, причина), и экран спрашивает **тот**
+ *   статус, который выбран, — иначе «Ожидают» молча показывало бы всё;
  * * **пусто отличимо от ошибки** — «все рассмотрены» и «не смогли спросить»
  *   выглядят одинаково спокойно, а значат противоположное;
- * * «Одобрить» **доезжает до сервера** тем самым `request_id`, и строка
- *   уходит из «Ожидают»;
- * * отказ сервера остаётся отказом: строка на месте, человеку сказано;
+ * * «Одобрить» доезжает до сервера с id **нажатой** строки (в списке их две,
+ *   иначе «тем самым id» доказывалось бы совпадением с единственным);
+ * * до подтверждения на сервер не уходит ничего;
+ * * отказ сервера остаётся отказом, и человеку сказано **то, что ответил
+ *   сервер**, а не заготовка экрана;
  * * ресепшен списка не получает — запрос вообще не уходит.
+ *
+ * Список отвечает изменяемым состоянием, а не одной готовой страницей:
+ * сегодня экран убирает решённую строку без перезапроса, но перезапрос был бы
+ * не хуже, и узел не должен краснеть на **улучшение**.
  *
  * Чего узлы НЕ держат (границы DRF-2367 — поведение не менять):
  *
  * * **числа на фильтрах** (`Ожидают (N)` / `Решены (N)`): их предмет прямо
  *   сейчас меняется в DRF-2366 — «не знаю» против нуля, — и узел на
  *   сегодняшнее число закрепил бы то, что решено переделать;
- * * ветки 409 (`already_decided`, `overlap_conflict`), отклонение с
- *   причиной, «показать ещё», разворачивание длинной причины, формат дат.
+ * * ветки 409 (`already_decided`, `overlap_conflict`), отклонение с причиной,
+ *   «показать ещё», разворачивание длинной причины, формат дат, состояние
+ *   загрузки (экран наблюдается только в конечных состояниях).
+ *
+ * Подписи здесь сверяются со строками, а не с общей таблицей: у этого экрана,
+ * в отличие от очереди передач, нет экспортированного `COPY` — заводить его
+ * значило бы менять экран, а это вне границ листа.
  */
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -101,9 +113,38 @@ const OLGA: AvailabilityRequestItem = {
   resolution_note: "",
 };
 
-/** Список и счётчики читаются одной и той же ручкой — отвечаем на все заходы. */
-function listReturns(items: AvailabilityRequestItem[]) {
-  mockedList.mockResolvedValue({ items, next_cursor: null });
+const MARINA: AvailabilityRequestItem = {
+  ...OLGA,
+  request_id: "r-2",
+  master_id: "m-2",
+  master_name: "Марина",
+  reason_class: "sick",
+};
+
+/**
+ * Список и счётчики читаются одной ручкой, поэтому она отвечает состоянием:
+ * решённая заявка исчезает из «Ожидают» и у источника, а не только на экране.
+ * Так узел не краснеет, если экран однажды станет перечитывать список.
+ */
+function salonHas(...pending: AvailabilityRequestItem[]) {
+  let rows = [...pending];
+  mockedList.mockImplementation(async (params) => ({
+    items: params?.status === "decided" ? [] : rows,
+    next_cursor: null,
+  }));
+  mockedApprove.mockImplementation(async (id) => {
+    const decided = rows.find((r) => r.request_id === id);
+    // Падать, а не подставлять первую строку: подстановка сделала бы узел
+    // «уходит id нажатой строки» неотличимым от «уходит хоть что-нибудь».
+    if (!decided) throw new Error(`решают заявку ${id}, которой в салоне нет`);
+    rows = rows.filter((r) => r.request_id !== id);
+    return { ...decided, status: "approved" };
+  });
+}
+
+/** Карточка мастера целиком — чтобы кнопка бралась из нужной строки. */
+function rowOf(name: string): HTMLElement {
+  return screen.getByText(name).closest("li") as HTMLElement;
 }
 
 function open(me: MeResponse = OWNER_ME) {
@@ -120,21 +161,43 @@ beforeEach(() => {
 
 describe("список приходит", () => {
   it("владелец видит, кто и почему просит", async () => {
-    listReturns([OLGA]);
+    salonHas(OLGA);
 
     open();
 
     expect(await screen.findByText("Ольга")).toBeInTheDocument();
     expect(screen.getByText("Отпуск")).toBeInTheDocument();
   });
+
+  it("экран спрашивает тот статус, который выбран", async () => {
+    salonHas(OLGA);
+
+    open();
+    await screen.findByText("Ольга");
+
+    // Без этого «Ожидают» могло бы молча запрашивать «все» — и решённые
+    // заявки выглядели бы ждущими ответа.
+    expect(mockedList).toHaveBeenCalledWith(
+      expect.objectContaining({ status: "pending" }),
+      expect.anything(),
+    );
+    // Одного утверждения выше мало: счётчики зовут ту же ручку с тем же
+    // «pending», и проверка проходила бы, даже если список спрашивает «все».
+    // Поэтому — ни одного захода за «всеми», пока открыта вкладка «Ожидают».
+    expect(mockedList).not.toHaveBeenCalledWith(
+      expect.objectContaining({ status: "all" }),
+      expect.anything(),
+    );
+  });
 });
 
 describe("пусто отличимо от ошибки", () => {
   it("пустой список говорит, что рассматривать нечего", async () => {
-    listReturns([]);
+    salonHas();
 
     open();
 
+    // Подпись принадлежит вкладке «Ожидают» — она открыта по умолчанию.
     expect(await screen.findByText("Все запросы рассмотрены 👍")).toBeInTheDocument();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
@@ -152,51 +215,55 @@ describe("пусто отличимо от ошибки", () => {
 });
 
 describe("решение доезжает до сервера", () => {
-  it("«Одобрить» уходит тем самым request_id, и строка покидает «Ожидают»", async () => {
-    listReturns([OLGA]);
-    mockedApprove.mockResolvedValue({ ...OLGA, status: "approved" });
+  it("«Одобрить» уходит с id нажатой строки, и она покидает «Ожидают»", async () => {
+    salonHas(OLGA, MARINA);
 
     open();
-    await screen.findByText("Ольга");
-    await userEvent.click(screen.getByRole("button", { name: "✓ Одобрить" }));
+    await screen.findByText("Марина");
+    await userEvent.click(within(rowOf("Марина")).getByRole("button", { name: /Одобрить/ }));
 
     const sheet = await screen.findByRole("dialog", { name: "Подтвердить одобрение" });
     await userEvent.click(within(sheet).getByRole("button", { name: "Одобрить" }));
 
-    await waitFor(() => expect(mockedApprove).toHaveBeenCalledWith("r-1"));
-    await waitFor(() => expect(screen.queryByText("Ольга")).not.toBeInTheDocument());
+    await waitFor(() => expect(mockedApprove).toHaveBeenCalledWith("r-2"));
+    await waitFor(() => expect(screen.queryByText("Марина")).not.toBeInTheDocument());
+    expect(screen.getByText("Ольга")).toBeInTheDocument();
   });
 
   it("до подтверждения на сервер не уходит ничего", async () => {
-    listReturns([OLGA]);
+    salonHas(OLGA);
 
     open();
     await screen.findByText("Ольга");
-    await userEvent.click(screen.getByRole("button", { name: "✓ Одобрить" }));
+    await userEvent.click(within(rowOf("Ольга")).getByRole("button", { name: /Одобрить/ }));
     await screen.findByRole("dialog", { name: "Подтвердить одобрение" });
 
     // Положительная пара к узлу выше: кнопка открывает вопрос, а не решает.
     expect(mockedApprove).not.toHaveBeenCalled();
   });
 
-  it("отказ сервера остаётся отказом: строка на месте, человеку сказано", async () => {
-    listReturns([OLGA]);
-    mockedApprove.mockRejectedValue(new ApiError(500, "server_error", "Не получилось одобрить"));
+  it("отказ сервера остаётся отказом: строка на месте, сказано слово сервера", async () => {
+    salonHas(OLGA);
+    // Причина, которую экран не мог бы выдумать: заготовка «Не получилось
+    // одобрить» прошла бы проверку и при полностью проглоченном ответе.
+    mockedApprove.mockRejectedValue(
+      new ApiError(409, "conflict", "Мастер уже в отпуске в эти дни"),
+    );
 
     open();
     await screen.findByText("Ольга");
-    await userEvent.click(screen.getByRole("button", { name: "✓ Одобрить" }));
+    await userEvent.click(within(rowOf("Ольга")).getByRole("button", { name: /Одобрить/ }));
     const sheet = await screen.findByRole("dialog", { name: "Подтвердить одобрение" });
     await userEvent.click(within(sheet).getByRole("button", { name: "Одобрить" }));
 
-    expect(await screen.findByText("Не получилось одобрить")).toBeInTheDocument();
+    expect(await screen.findByText("Мастер уже в отпуске в эти дни")).toBeInTheDocument();
     expect(screen.getByText("Ольга")).toBeInTheDocument();
   });
 });
 
 describe("ресепшен сюда не ходит", () => {
   it("видит отказ и не отправляет запрос вовсе", async () => {
-    listReturns([OLGA]);
+    salonHas(OLGA);
 
     open(DESK_ME);
 
