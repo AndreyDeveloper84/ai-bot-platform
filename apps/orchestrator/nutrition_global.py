@@ -865,6 +865,11 @@ def is_structured_nutrition_turn(
     )
 
 
+def _has_image_attachment(attachments: list[dict[str, Any]] | None) -> bool:
+    """Есть ли среди вложений ``image`` — единственный тип, который сканер еды читает."""
+    return any(isinstance(a, dict) and a.get("type") == "image" for a in attachments or [])
+
+
 def try_handle_structured_nutrition_turn(
     *,
     text: str,
@@ -881,7 +886,11 @@ def try_handle_structured_nutrition_turn(
     degrades to the concierge.
     """
 
-    has_attachments = bool(attachments)
+    # DRF-1942 — «фото без текста → сканер еды» решает ТИП вложения, а не
+    # сам факт вложения: голосовое (``audio``) сюда не относится, ему
+    # отвечает handler. ``video``/``file`` и прочее — как раньше не были
+    # фото, так и остаются: сканер их всё равно не прочитал бы.
+    has_attachments = _has_image_attachment(attachments)
     if not is_structured_nutrition_turn(
         text=text, has_attachments=has_attachments, conversation=conversation
     ):

@@ -2340,6 +2340,35 @@ VOICE_STT_TIMEOUT_S = float(os.environ.get("VOICE_STT_TIMEOUT_S", "15"))
 VOICE_MAX_DURATION_S = float(os.environ.get("VOICE_MAX_DURATION_S", "60"))
 VOICE_STT_MONTHLY_MINUTES_CAP = int(os.environ.get("VOICE_STT_MONTHLY_MINUTES_CAP", "0"))
 
+# DRF-1942 (PR 3) — голосовое как вход бота (apps/channels/max/voice_turn.py).
+# Все флаги выключены по умолчанию; при выключенном VOICE_INPUT_ENABLED
+# поведение байт в байт как у заглушки DRF-1939. Значение флага — явный
+# набор слов (true/1/yes, регистр и пробелы по краям не важны); «on» — выключено.
+#
+# VOICE_INPUT_ENABLED — главный выключатель. Включать людям только словом
+#   владельца после S1-валидации (ТЗ §5, F0).
+# VOICE_CROSS_BORDER_ALLOWED — отдельное разрешение на передачу голоса за
+#   рубеж (провайдер openai). Без него при включённом главном флаге файл
+#   не скачивается и человек получает «сейчас не могу разобрать голосовое».
+# VOICE_ECHO_MODE — never | always: «Я услышала: «…»» перед ответом
+#   (вопрос 4 ТЗ; режим «при неуверенности» невозможен — gpt-transcribe
+#   уверенность не отдаёт).
+# VOICE_GATE_STRIP_PUNCT — K19-Б (решение владельца 22.09): гейту safety
+#   отдаётся копия расшифровки без знаков препинания. Выключить, когда окно
+#   safety поправит исключение гиперболы в pre_check.py (вариант А).
+# VOICE_TURN_BUDGET_S — общий лимит на скачивание + распознавание в одном
+#   ходе; потребитель очереди один на всех, зависший ход задерживает всех.
+_VOICE_TRUE = ("true", "1", "yes")
+VOICE_INPUT_ENABLED = os.environ.get("VOICE_INPUT_ENABLED", "false").strip().lower() in _VOICE_TRUE
+VOICE_CROSS_BORDER_ALLOWED = (
+    os.environ.get("VOICE_CROSS_BORDER_ALLOWED", "false").strip().lower() in _VOICE_TRUE
+)
+VOICE_ECHO_MODE = os.environ.get("VOICE_ECHO_MODE", "never").strip().lower()
+VOICE_GATE_STRIP_PUNCT = (
+    os.environ.get("VOICE_GATE_STRIP_PUNCT", "true").strip().lower() in _VOICE_TRUE
+)
+VOICE_TURN_BUDGET_S = float(os.environ.get("VOICE_TURN_BUDGET_S", "20"))
+
 # DRF-1500 — экран здоровья контура (/admin/health/). Опрос Ayla за
 # полными числами услуг/мастеров: короткий таймаут (экран не ждёт дольше,
 # чем оператор) и кэш (свежесть в минутах достаточна против расхождения
