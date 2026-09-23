@@ -735,7 +735,15 @@ export function CustomerWellnessDashboardScreen() {
             ) : (
               displayName && (
                 <span className="wellness-dash__person-name">
-                  {displayName}
+                  {/* Многоточие живёт на ВНУТРЕННЕЙ строке, а 👋 стоит
+                      рядом с ней: внутри он съедался первым и длинное имя
+                      оставалось без жеста макета, а сразу за пределами
+                      строки имени — отлетал к вордмарку и читался как его
+                      часть (видно на снимке приёмки). */}
+                  <span className="wellness-dash__person-name-text">
+                    {displayName}
+                  </span>
+                  <span aria-hidden="true">👋</span>
                 </span>
               )
             )}
@@ -743,14 +751,6 @@ export function CustomerWellnessDashboardScreen() {
               {HEADER_WELCOME_LINE}
             </span>
           </span>
-          {/* 👋 — сосед строки имени, не её содержимое: внутри он
-              съедался многоточием первым, и длинное имя оставалось без
-              приветственного жеста макета. */}
-          {today.kind !== "loading" && displayName && (
-            <span className="wellness-dash__person-wave" aria-hidden="true">
-              👋
-            </span>
-          )}
         </div>
         <div className="wellness-dash__brand">
           {/* «ayla» = English wordmark per Tau §7 — wrap in lang="en"
