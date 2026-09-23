@@ -402,13 +402,16 @@ class TestAcknowledgementsNowCarryNextSteps:
         assert confirmed.reply_text == REPLY_CONFIRMED
         assert _callbacks(confirmed) == [CALLBACK_MENU_MY_BOOKINGS, CALLBACK_MENU_HELP]
 
-        moved = BookingReminderCallbackSkill().handle(
-            _ctx(
-                f"cb:rem:reschedule:{_reminder(tenant, bot_user, yc_id='903').pk}",
-                bot_user=bot_user,
-                conversation=conversation,
+        # DRF-2338 — перенос передаёт человека оператору; тенант в области
+        # видимости, как его открывает цикл потребителя в бою.
+        with tenant_scope(tenant):
+            moved = BookingReminderCallbackSkill().handle(
+                _ctx(
+                    f"cb:rem:reschedule:{_reminder(tenant, bot_user, yc_id='903').pk}",
+                    bot_user=bot_user,
+                    conversation=conversation,
+                )
             )
-        )
         assert moved.reply_text == REPLY_RESCHEDULE
         assert _callbacks(moved) == [CALLBACK_MENU_MY_BOOKINGS, CALLBACK_MENU_HELP]
 

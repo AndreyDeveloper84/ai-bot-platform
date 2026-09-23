@@ -44,9 +44,10 @@ for "who sent this message" in the platform's identity model.
 from __future__ import annotations
 
 import logging
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 from uuid import UUID
 
+from django.db import transaction
 from django.utils import timezone
 
 from apps.audit.services import write_audit
@@ -68,6 +69,8 @@ from apps.bookings.pending_actions import (
     latest_relevant_pending,
 )
 from apps.events.services import emit
+from apps.handoff.models import AdminTask
+from apps.handoff.services import create_admin_task
 from apps.integrations.ayla.offer_refusal import OFFER_NOT_SELLABLE_SLUG
 from apps.skills.base import SkillContext, SkillResult
 from apps.skills.booking.tools import (
@@ -83,6 +86,9 @@ from apps.skills.menu.matching import (
 )
 from apps.skills.registry import register
 
+if TYPE_CHECKING:
+    from apps.conversations.models import Conversation
+
 logger = logging.getLogger(__name__)
 
 
@@ -91,6 +97,12 @@ logger = logging.getLogger(__name__)
 REPLY_CONFIRMED = "Подтверждено, ждём вас!"
 REPLY_CANCELLED = "Запись отменена, надеемся увидеть вас позже."
 REPLY_RESCHEDULE = "Передал администратору, скоро напишут."
+#: DRF-2341 — чем подтверждается «передал администратору»: ключ созданной
+#: задачи от исполнителя передачи. Форма общая с DRF-2337 (#2012):
+#: ``claims_done`` — булев признак, ``claims_done_evidence`` — строка
+#: «источник:идентификатор», которую читает один общий читатель
+#: ``apps.skills.base.claims_done_of``.
+CLAIM_EVIDENCE_ADMIN_TASK = "handoff.admin_task"
 
 # DRF-2337 — исходы отмены записи, принадлежащей Ayla. Слова НЕ новые: их
 # уже говорит карточка визита (`apps.orchestrator.visits`, DRF-1547) на тот
@@ -514,7 +526,7 @@ class BookingReminderCallbackSkill:
             return self._handle_cancel(reminder)
         # action == "reschedule" (only remaining; _parse_reminder_pk
         # exhausts the namespace)
-        return self._handle_reschedule(reminder)
+        return self._handle_reschedule(reminder, context.conversation)
 
     # ─── per-action handlers ─────────────────────────────────────────────
 
@@ -712,30 +724,62 @@ class BookingReminderCallbackSkill:
             distinct_id=str(reminder.bot_user_id),
         )
 
-    def _handle_reschedule(self, reminder: BookingReminder) -> SkillResult:
-        """SENT_NO_REPLY → RESCHEDULE_REQUESTED. Defer operator-page TODO."""
-        now = timezone.now()
-        rowcount = BookingReminder.all_tenants.filter(
-            pk=reminder.pk,
-            status=BookingReminder.Status.SENT_NO_REPLY,
-        ).update(
-            status=BookingReminder.Status.RESCHEDULE_REQUESTED,
-            replied_at=now,
-        )
-        if rowcount == 0:
-            return SkillResult(
-                reply_text=REPLY_ALREADY_HANDLED, action_data=_my_bookings_and_menu_keyboard()
-            )
+    def _handle_reschedule(
+        self, reminder: BookingReminder, conversation: "Conversation"
+    ) -> SkillResult:
+        """SENT_NO_REPLY → RESCHEDULE_REQUESTED + hand the person to an operator.
 
-        # TODO(Phase 2): notify the operator chat that this reminder
-        # needs manual rebooking. mysite did this via a direct
-        # send_max_message to ADMIN_MAX_CHAT_ID; on the platform side
-        # the same channel exists (settings.ADMIN_MAX_CHAT_ID) but the
-        # "operator notification" lane is a separate skill/service
-        # cross-cutting concern (see apps.handoff). Deferring to a
-        # follow-up ticket — the audit row + canonical event below
-        # are enough for an operator to spot the reschedule request
-        # via the admin console in the meantime.
+        DRF-2338 — the reply says «передал администратору, скоро напишут», and
+        until this ticket nobody was told: the old ``TODO(Phase 2)`` left the
+        audit row and the event as the only trace, and «an operator may spot it
+        in the admin console» is not the same as being handed the person. The
+        handover that works in this repository is
+        :func:`apps.handoff.services.create_admin_task` — it addresses the task
+        (DRF-1488) and moves the conversation to ``HUMAN_HANDOFF``. The words
+        do not change; they become true.
+
+        The status flip and the task live in ONE transaction, in that order.
+        The conditional UPDATE is what makes a second press a replay — and it
+        only works as a lock from INSIDE the transaction: a concurrent press
+        blocks on the row until this one commits, then re-evaluates
+        ``status=SENT_NO_REPLY`` and gets zero rows. Wrapping both also means a
+        failed handover leaves the reminder untouched, so the person can press
+        again — instead of a row marked «requested» with nobody holding it.
+        The cost of that honesty: a failure raises, and a raising callback
+        turn sends no reply at all (the consumer logs it) — silence, not a lie.
+
+        ``MANUAL`` rather than ``HANDOFF`` keeps the mute narrow:
+        ``apps.orchestrator.handoff.global_handoff_muted`` filters on
+        ``HANDOFF``, so the person's global dialogue keeps working while the
+        salon one waits for the operator.
+
+        Requires a tenant in scope — the consumer loop opens it
+        (``apps/workers/consumer.py``), and ``turn_seam`` already refuses a
+        per-tenant turn without one.
+        """
+        now = timezone.now()
+        with transaction.atomic():
+            rowcount = BookingReminder.all_tenants.filter(
+                pk=reminder.pk,
+                status=BookingReminder.Status.SENT_NO_REPLY,
+            ).update(
+                status=BookingReminder.Status.RESCHEDULE_REQUESTED,
+                replied_at=now,
+            )
+            if rowcount == 0:
+                return SkillResult(
+                    reply_text=REPLY_ALREADY_HANDLED,
+                    action_data=_my_bookings_and_menu_keyboard(),
+                )
+
+            # MANUAL, as the outbound-DLQ path does (pipeline §Phase 0): the
+            # operator acts out of band — reaches the person and rebooks in
+            # YClients — rather than continuing this dialogue as the bot.
+            task = create_admin_task(
+                conversation,
+                task_type=AdminTask.TaskType.MANUAL,
+                reason=_reschedule_reason(reminder),
+            )
 
         write_audit(
             action=AUDIT_REMINDER_RESCHEDULE,
@@ -753,8 +797,36 @@ class BookingReminderCallbackSkill:
             distinct_id=str(reminder.bot_user_id),
         )
         return SkillResult(
-            reply_text=REPLY_RESCHEDULE, action_data=_my_bookings_and_menu_keyboard()
+            reply_text=REPLY_RESCHEDULE,
+            action_data=_my_bookings_and_menu_keyboard(),
+            # DRF-2341 — ответ утверждает выполненное действие и говорит об
+            # этом признаком, а не только словами: по тексту такую ветку не
+            # отличить, а без признака она для сторожа невидима. Форма — общая
+            # с DRF-2337, читается одним ``claims_done_of``; здесь признак
+            # лежит в ``meta``, потому что у обратного вызова поля ответа нет.
+            # Подтверждение — ключ задачи, который вернул исполнитель передачи,
+            # а не что-то собранное здесь: «позвали передачу» — не
+            # подтверждение. Сбой передачи сюда не доходит (см. выше): ответа
+            # не будет вовсе, а значит и утверждения тоже.
+            meta={
+                "claims_done": True,
+                "claims_done_evidence": f"{CLAIM_EVIDENCE_ADMIN_TASK}:{task.pk}",
+            },
         )
+
+
+def _reschedule_reason(reminder: BookingReminder) -> str:
+    """What the operator needs to rebook, in one line — no contact details.
+
+    The phone is deliberately absent: an operator opens the person's card for
+    that, and DRF-1039 keeps the client's number off the staff surfaces.
+    """
+    visit = timezone.localtime(reminder.visit_at).strftime("%d.%m %H:%M")
+    return (
+        f"[перенос записи] запись {reminder.yclients_record_id}, визит {visit}, "
+        f"услуга {reminder.service_name}, мастер {reminder.master_name} "
+        f"(напоминание {reminder.pk})"
+    )
 
 
 def _parse_gate_token(callback_text: str) -> tuple[str, UUID] | None:
