@@ -34,6 +34,26 @@
 выкладки, трогает только команда ``purge_webhook_journal``: сухой прогон по
 умолчанию, ``--apply`` — по слову владельца. Иначе первый же запуск свипа
 необратимо стёр бы историю, о которой владелец не решал.
+
+# Ноль обхода обязан называть свой охват (DRF-2426)
+
+Замер 24.09: часовой обход отдавал ``{'payloads': 0, 'rows': 0}`` — правду о
+кромке — а за его окном лежали 581 тело старше объявленного срока. Каждый час
+этот честный ноль подтверждал несуществующую чистоту: величина верна, предмет
+у неё другой. Поэтому :func:`sweep_expired` считает и печатает ТРИ числа:
+
+* ``payloads`` / ``rows`` — что обход взял, всегда внутри своей кромки;
+* ``in_window_*`` — сколько строк лежало в его корзине ДО действия: ноль здесь
+  значит «брать было нечего», а непустая корзина при нулевом действии — дефект,
+  который иначе выглядел бы так же;
+* ``beyond_window_*`` — что лежит ЗА окном и обходу структурно недоступно.
+  Он это только измеряет и никогда не трогает: накопленное — по слову владельца
+  и только командой.
+
+Узел: **пока за окном есть строки, обход не отчитывается чистотой.** Строка
+журнала пишется КАЖДЫЙ раз (прежняя писалась только при непустом действии, и
+ноль уходил в тишину), и она называет либо ``backlog`` за окном, либо пустой
+охват — ноль на пустом скане ничего не доказывает и так и подписан.
 """
 
 from __future__ import annotations
@@ -77,14 +97,85 @@ def erased_event_id(external_event_id: str) -> str:
 
 @dataclass(frozen=True)
 class JournalPurge:
-    """Сколько тел обнулено и строк удалено. Счётчики, никогда не значения."""
+    """Сколько тел обнулено и строк удалено. Счётчики, никогда не значения.
+
+    ``in_window_*`` и ``beyond_window_*`` — охват этих счётчиков (DRF-2426):
+    что лежало в корзине обхода до действия и что лежит за его окном. Без них
+    ноль в ``payloads`` / ``rows`` неотличим от чистоты, которой нет.
+    """
 
     payloads: int = 0
     rows: int = 0
+    in_window_payloads: int = 0
+    in_window_rows: int = 0
+    beyond_window_payloads: int = 0
+    beyond_window_rows: int = 0
+    #: Сколько строк было в журнале вообще — охват скана. Ноль здесь значит
+    #: «мерить было не на чем», и такой ноль не выдаётся за чистоту.
+    scanned: int = 0
+
+    @property
+    def beyond_window(self) -> int:
+        """Сколько всего осталось за окном — то, о чём обход не вправе молчать."""
+
+        return self.beyond_window_payloads + self.beyond_window_rows
+
+    @property
+    def took_its_basket(self) -> bool:
+        """Взято ровно то, что лежало в корзине до действия."""
+
+        return self.payloads == self.in_window_payloads and self.rows == self.in_window_rows
+
+    @property
+    def verdict(self) -> str:
+        """Одно слово о состоянии журнала — не о старательности обхода.
+
+        * ``backlog_outside_window`` — за окном осталось просроченное: чистоты
+          нет, чем бы ни закончилась кромка;
+        * ``scope_empty`` — журнал пуст: ноль верен и ничего не доказывает;
+        * ``incomplete`` — корзина была непуста, а взято меньше: дефект, который
+          без счёта корзины выглядел бы как обычный ноль;
+        * ``clean`` — просроченного не осталось, и это сказано на непустом охвате.
+        """
+
+        if self.beyond_window:
+            return "backlog_outside_window"
+        if not self.took_its_basket:
+            return "incomplete"
+        if self.scanned == 0:
+            return "scope_empty"
+        return "clean"
+
+    @property
+    def clean(self) -> bool:
+        """Правда ли «чисто» — только при непустом охвате (DRF-2426)."""
+
+        return self.verdict == "clean"
 
 
 def _with_body() -> Q:
     return ~Q(raw_payload={})
+
+
+def beyond_window(now: datetime | None = None) -> tuple[int, int]:
+    """Сколько тел и строк лежит ЗА окном обхода — измерение, не чистка.
+
+    Тот же срок, что у :func:`sweep_expired`, минус :data:`SWEEP_LOOKBACK`:
+    ровно то, до чего кромка структурно не достаёт. Тела считаются только у
+    строк, которые сами ещё не просрочены (иначе один и тот же остаток попал
+    бы в оба числа — как в ``backlog``).
+    """
+
+    now = now or timezone.now()
+    body_edge = now - timedelta(hours=payload_hours()) - SWEEP_LOOKBACK
+    row_edge = now - timedelta(days=row_days()) - SWEEP_LOOKBACK
+    bodies = WebhookJournal.objects.filter(
+        _with_body(),
+        received_at__lt=body_edge,
+        received_at__gte=now - timedelta(days=row_days()),
+    ).count()
+    rows = WebhookJournal.objects.filter(received_at__lt=row_edge).count()
+    return bodies, rows
 
 
 def sweep_expired(now: datetime | None = None) -> JournalPurge:
@@ -92,20 +183,64 @@ def sweep_expired(now: datetime | None = None) -> JournalPurge:
 
     Только то, что перешло срок в последние :data:`SWEEP_LOOKBACK` —
     накопленное раньше остаётся команде.
+
+    Отчитывается тремя числами (DRF-2426): взятое, лежавшее в корзине до
+    действия и оставшееся за окном. Журнальная строка пишется всегда: ноль без
+    названного охвата — не «чисто», а неизвестность.
     """
 
     now = now or timezone.now()
     body_cut = now - timedelta(hours=payload_hours())
     row_cut = now - timedelta(days=row_days())
-    payloads = WebhookJournal.objects.filter(
+    body_basket = WebhookJournal.objects.filter(
         _with_body(), received_at__lt=body_cut, received_at__gte=body_cut - SWEEP_LOOKBACK
-    ).update(raw_payload={})
-    rows, _ = WebhookJournal.objects.filter(
+    )
+    row_basket = WebhookJournal.objects.filter(
         received_at__lt=row_cut, received_at__gte=row_cut - SWEEP_LOOKBACK
-    ).delete()
-    if payloads or rows:
-        logger.info("ingress.retention.swept payloads=%d rows=%d", payloads, rows)
-    return JournalPurge(payloads=payloads, rows=rows)
+    )
+    # Корзина считается ДО действия: после ``update`` / ``delete`` те же
+    # запросы вернут ноль, и «брать было нечего» стало бы неотличимо от
+    # «взяли всё» — ровно та подмена предмета, что и была дефектом.
+    in_window_payloads = body_basket.count()
+    in_window_rows = row_basket.count()
+    payloads = body_basket.update(raw_payload={})
+    rows, _ = row_basket.delete()
+    beyond_payloads, beyond_rows = beyond_window(now)
+    result = JournalPurge(
+        payloads=payloads,
+        rows=rows,
+        in_window_payloads=in_window_payloads,
+        in_window_rows=in_window_rows,
+        beyond_window_payloads=beyond_payloads,
+        beyond_window_rows=beyond_rows,
+        # После действия: охват, на котором сказано «чисто». Пустой журнал
+        # честнее назвать пустым, чем чистым.
+        scanned=WebhookJournal.objects.count(),
+    )
+    # Всегда одна строка, и её последнее слово — про охват, а не про действие.
+    logger.info(
+        "ingress.retention.swept payloads=%d rows=%d in_window=%d/%d "
+        "beyond_window=%d/%d scanned=%d verdict=%s",
+        result.payloads,
+        result.rows,
+        result.in_window_payloads,
+        result.in_window_rows,
+        result.beyond_window_payloads,
+        result.beyond_window_rows,
+        result.scanned,
+        result.verdict,
+    )
+    if result.beyond_window:
+        # Накопленное за окном обход не трогает — оно ждёт слова владельца и
+        # команды ``purge_webhook_journal``. Но молчать о нём он не вправе.
+        logger.warning(
+            "ingress.retention.backlog_outside_window payloads=%d rows=%d "
+            "window_days=%d — not swept by design, purge_webhook_journal decides",
+            result.beyond_window_payloads,
+            result.beyond_window_rows,
+            SWEEP_LOOKBACK.days,
+        )
+    return result
 
 
 def backlog(now: datetime | None = None) -> tuple[Any, Any]:
@@ -209,6 +344,7 @@ __all__ = [
     "JournalPurge",
     "SWEEP_LOOKBACK",
     "backlog",
+    "beyond_window",
     "erase_person_rows",
     "erased_event_id",
     "payload_hours",
