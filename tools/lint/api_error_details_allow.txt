@@ -26,5 +26,5 @@
 
 src/lib/admin-api.ts::4
 src/lib/internal-chat-api.ts::1
-src/lib/master-api.ts::2
+src/lib/master-api.ts::1
 src/lib/personal-data.ts::1
