@@ -51,7 +51,10 @@ from apps.integrations.ayla.diet_types import (
 )
 from apps.orchestrator.discovery import DiscoveryReply
 from apps.orchestrator.memory import short_term
-from apps.orchestrator.memory_block import concierge_memory_enabled
+from apps.orchestrator.memory_block import (
+    BACKEND_STATED_SOURCE,
+    concierge_memory_enabled,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -60,15 +63,6 @@ logger = logging.getLogger(__name__)
 _PENDING_TTL_SECONDS = 24 * 3600
 
 _UNPARSED = object()
-
-#: Пометка происхождения для ответа человека на наш вопрос (DRF-2397).
-#: Граница в словаре одна — «сказал сам» против «вывели», — но имён у неё
-#: два: библиотека зовёт эту сторону `stated`, бэкенд каталога — `explicit`,
-#: и на проводе (`_SOURCE_CHOICES` внутреннего PATCH) принимается только
-#: второе. Поэтому значение написано буквой каталога, а имя константы
-#: говорит, ЧТО оно значит: не «явно указано в приложении», а «это слова
-#: человека».
-SOURCE_STATED = "explicit"
 
 _SKIP_MARKERS = (
     "не хочу отвечать",
@@ -199,14 +193,14 @@ def try_handle_answer(
             return None
         result = patch_declared_prefs(
             bot_user,
-            # DRF-2397: `explicit` — это «сказал сам», и здесь так и есть:
-            # мы задали вопрос, человек ответил словами, разбор ответа
-            # детерминированный. `conversational`, стоявший тут раньше,
-            # лежит в словаре на стороне выводов (`ayla_ai_core`:
-            # `STATED_SOURCES` — закрытый список из `stated`/`explicit`), и
+            # DRF-2397: пометка «сказал сам» — и здесь так и есть: мы задали
+            # вопрос, человек ответил словами, разбор ответа детерминированный.
+            # Стоявший тут раньше `conversational` в этом словаре означает
+            # «не слова клиента» (перечень — `memory/food.py`, `STATED_SOURCES`
+            # с документированным fallback под нынешний пин библиотеки), и
             # каталог читал ответ человека как нашу догадку — вплоть до
             # перезаписи `busy_days` ночной инференцией.
-            [{"field": field, "value": value, "source": SOURCE_STATED}],
+            [{"field": field, "value": value, "source": BACKEND_STATED_SOURCE}],
         )
         if result.status is GateStatus.OK:
             _clear_pending(conversation.id)

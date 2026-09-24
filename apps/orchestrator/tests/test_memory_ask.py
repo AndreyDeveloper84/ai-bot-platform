@@ -292,11 +292,13 @@ class TestRollbackFlag:
 class TestAnswerIsThePersonsOwnWord:
     """Ответ на прямой вопрос — слова человека, а не наш вывод (DRF-2397).
 
-    Происхождение в каталоге — одна граница: «сказал сам» против «вывели»
-    (``ayla_ai_core.STATED_SOURCES`` — закрытый список, в нём ``explicit``;
-    ``conversational`` библиотека держит на стороне выводов вместе с
-    ``inferred``). Этот поток спрашивает человека и записывает ЕГО ответ,
-    поэтому пометка выводов здесь ложь — и не безобидная, её читают трое:
+    Происхождение — одна граница: «сказал сам» против «вывели». Перечень
+    стороны «сказал сам» живёт в ``apps/orchestrator/memory/food.py``
+    (``STATED_SOURCES``: значение библиотеки, пока пин её не отдаёт — тот же
+    набор буквами); ``conversational`` в него не входит, то есть означает
+    «не слова клиента». Этот поток спрашивает человека и записывает ЕГО
+    ответ, поэтому пометка выводов здесь ложь — и не безобидная, её читают
+    трое:
 
     * движок молчания каталога (правило 5) не считает ответ ответом и
       задаёт тот же вопрос снова;
@@ -309,15 +311,13 @@ class TestAnswerIsThePersonsOwnWord:
     Мы правим сторону, которая врёт (пишущую), а не трёх читателей.
     """
 
-    #: Пометки, означающие «это не слова клиента». Ни одна не годится для
-    #: ответа на заданный нами вопрос.
-    DERIVED = ("inferred", "behavioral", "conversational", "transactional")
-
     @pytest.mark.parametrize(
         ("field", "text", "value"),
         [
-            ("preferred_time_slots", "мне удобнее вечером", ["evening"]),
             ("diet_type", "я веган", "vegan"),
+            # busy_days — единственное поле, которое каталог и спрашивает у
+            # человека, и выводит из истории броней; на нём пометка решала,
+            # переживёт ли ответ ночь.
             ("busy_days", "по субботам занято", ["sat"]),
         ],
     )
@@ -330,8 +330,16 @@ class TestAnswerIsThePersonsOwnWord:
 
         try_handle_answer(conversation, bot_user, text)
 
+        # Буква провода: каталог принимает ровно `explicit`
+        # (`users/internal_personal_context_api.py`, `_SOURCE_CHOICES`).
         patch.assert_called_once_with(
             bot_user, [{"field": field, "value": value, "source": "explicit"}]
         )
-        (_, updates), _ = patch.call_args
-        assert updates[0]["source"] not in self.DERIVED
+
+    def test_the_written_label_means_the_person_said_it(self) -> None:
+        """Смысл пометки, а не её буква: значение, которым пишет поток, должно
+        лежать на стороне «сказал сам». Узел краснеет и на `conversational`, и
+        на любой другой пометке выводов, включая опечатку."""
+        from apps.orchestrator.memory.food import STATED_SOURCES
+
+        assert memory_ask.BACKEND_STATED_SOURCE in STATED_SOURCES

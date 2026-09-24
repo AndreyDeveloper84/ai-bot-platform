@@ -89,10 +89,17 @@ _DECLARED_CONFIDENCE = 1.0
 _INFERRED_CONFIDENCE = 0.6
 
 # Backend `UserPersonalContext.data_sources` value that means «the person
-# typed this». Everything else the backend can stamp — `inferred` (nightly
-# booking-history inference), `behavioral`, `transactional`, `conversational`
-# — is a derivation, and so is any value we do not recognise.
-_BACKEND_STATED_SOURCE = "explicit"
+# said this themselves». Everything else the backend can stamp — `inferred`
+# (nightly booking-history inference), `behavioral`, `transactional`,
+# `conversational` — is a derivation, and so is any value we do not recognise.
+#
+# ОДИН дом этого значения в боте (DRF-2397): его читает этот блок и ПИШЕТ
+# `memory_ask`, отвечая на вопрос человека. Имя намеренно не `SOURCE_STATED`:
+# так зовётся константа библиотеки со значением `"stated"` (её импорт — выше в
+# этом же модуле), и два имени-близнеца с разными значениями на проводе
+# означали бы 400 от каталога, где принимается только `explicit`
+# (`users/internal_personal_context_api.py`, `_SOURCE_CHOICES`).
+BACKEND_STATED_SOURCE = "explicit"
 
 
 def concierge_memory_enabled() -> bool:
@@ -133,7 +140,7 @@ def build_concierge_memory_block(bot_user: Any) -> str:
         if declared_origins is not None:
             sources[key] = (
                 SOURCE_STATED
-                if declared_origins.get(key, _BACKEND_STATED_SOURCE) == _BACKEND_STATED_SOURCE
+                if declared_origins.get(key, BACKEND_STATED_SOURCE) == BACKEND_STATED_SOURCE
                 else SOURCE_INFERRED
             )
 

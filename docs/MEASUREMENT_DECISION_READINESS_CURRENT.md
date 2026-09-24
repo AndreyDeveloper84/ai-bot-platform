@@ -116,6 +116,12 @@
 | Health screening `skills/health_screening/skill.py:61-65` | Regex classifier | НЕТ (одна константа) | Ответ НЕ хранится | MISSING | Memo 30 мин гасит SOFT | PARTIAL/MISSING |
 | Goal anketa (catalog) `goals/anketa.py:65-88` | Сервер, hardcoded порядок | **step_key slug — EXISTS** | `GoalAnketaAnswer` durable | answered_keys не переспрашиваются | Проход повторяем бесконечно | EXISTS |
 | Профильные 8 полей (catalog) `users/internal_personal_context_api.py:56-65` | Server engine | Field name | `UserPersonalContext` + `last_asked_at`/`skipped_questions` | Наличие значения | 24h cooldown, 2×skip→30d | EXISTS |
+
+> **Поправка 24.09.2026 (DRF-2397), замер 09.09 не переписан:** Memory-ask пишет
+> `source: explicit`, а не `conversational` — ответ на прямой вопрос это слова
+> человека, и пометка выводов закрывала вопрос ложно (правило 5 переспрашивало,
+> подсказка модели помечала «клиент этого не говорил», ночная инференция
+> перезаписывала `busy_days`).
 | Chat `ask_clarification` (catalog) `ai/tools.py:142-164` | **LLM** | **НЕТ** | user-сообщение без привязки | НЕТ | НЕТ | LLM_ONLY |
 | Safety clarification | — | — | — | — | — | **MISSING в обоих runtime repo** |
 | Mini App forms | Ayla API (вне замера) | UNKNOWN | — | — | — | UNKNOWN_NOT_MEASURED |
@@ -163,7 +169,7 @@ DRE §13.4 требует ledger в `Conversation.skill_state["decision_readines
 - Telegram surface: write-path отсутствует. PARTIAL.
 
 Классификация источников:
-- USER_EXPLICIT: extraction write-path; memory_ask answers (`source: conversational`); goal anketa answers.
+- USER_EXPLICIT: extraction write-path; memory_ask answers (`source: conversational`; с 24.09.2026 — `explicit`, DRF-2397); goal anketa answers.
 - USER_CLICK: DRF-990 резолверы тапов (человеческая фраза в историю или None).
 - AUTHORITATIVE_DOMAIN: anketa → Ayla `upsert_profile`; catalog facts.
 - CONFIRMED_MEMORY: memory_block read-side с per-field origin (`memory_block.py:110-245`), declared=1.0/inferred=0.6.
