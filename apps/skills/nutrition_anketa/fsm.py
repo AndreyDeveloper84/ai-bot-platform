@@ -1,9 +1,16 @@
-"""Nutrition anketa FSM — 7 steps, screening before anthropometry.
+"""Nutrition anketa FSM — screening before anthropometry, diet last.
 
 Walks the user through
-``gender → age → screening → height → weight → activity → goal``, then
-signals COMPLETE. The skill (``skill.py``) takes the completed answers, POSTs to
-Ayla ``upsert_profile``, and renders the targets card.
+``gender → age → screening → height → weight → activity → goal → diet``,
+then signals COMPLETE. Two steps are conditional: ``pace`` follows a goal
+that needs one (question 59), and ``diet_note`` follows «другое» — the only
+answer that carries words (DRF-2310). The skill (``skill.py``) takes the
+completed answers, POSTs to Ayla ``upsert_profile``, and renders the targets
+card.
+
+Число шагов в этом докстринге не называется намеренно: оно уже дважды
+становилось неправдой при добавлении шага, а сторож
+``TestScreeningQuestionSitsWhereItSays`` держит порядок точнее любого числа.
 
 ## Why screening sits third, before height and weight
 
@@ -210,7 +217,7 @@ def _validate_diet_note(user_input: str) -> tuple[Any, str | None]:
 
 @dataclass
 class AnketaFSM(SkillFSM):
-    """7-step nutrition profile FSM. Screening precedes anthropometry."""
+    """Анкета питания: скрининг перед антропометрией, тип питания — последним."""
 
     STEPS: ClassVar[dict[str, _Step]] = {
         "gender": _Step(
@@ -300,6 +307,21 @@ class AnketaFSM(SkillFSM):
     answers: dict[str, Any] = field(default_factory=dict)
     is_complete: bool = False
 
+    def _diet_is_answered(self) -> bool:
+        """Назван ли тип питания ПОЛНОСТЬЮ.
+
+        ``other`` сам по себе — не ответ: он лишь обещает слова, и без них
+        сказано ничего. Считай его ответом — и «другое», прерванное правкой
+        прежнего шага, уехало бы в каталог без слов (каталог такое тело
+        отвергает) либо уронило бы сборку тела на отсутствующем ключе.
+        """
+        diet = self.answers.get("diet")
+        if not diet:
+            return False
+        if diet == DIET_OTHER:
+            return bool(str(self.answers.get("diet_note") or "").strip())
+        return True
+
     def transition(self, user_input: str) -> TransitionResult:
         """Two steps are conditional: the pace (question 59) and the words.
 
@@ -310,12 +332,20 @@ class AnketaFSM(SkillFSM):
         """
         answered = self.current_step
         result = super().transition(user_input)
+        if isinstance(result, NextStep) and result.is_validation_error:
+            # Ответ ОТВЕРГНУТ — шаг переспрашивается, и ни одна ветка ниже не
+            # имеет права его дотрагивать. Прежде это условие стояло внутри
+            # проверки «не Completed», а с появлением условных шагов (DRF-2310)
+            # его пришлось назвать отдельно: иначе отвергнутый ввод замыкал
+            # анкету прежним ответом, и человек не слышал «выбери вариант», а
+            # видел карточку норм.
+            return result
         if answered == "diet" and self.answers.get("diet") == DIET_OTHER:
             # «Другое» без слов — не ответ: сказано ничего. Спрашиваем слова.
             self.is_complete = False
             self.current_step = "diet_note"
             return NextStep(prompt=self.STEPS["diet_note"].prompt)
-        if answered in ("goal", "pace") and self.answers.get("diet"):
+        if answered in ("goal", "pace") and self._diet_is_answered():
             # Питание уже названо — второй раз не спрашиваем. Это бывает,
             # когда страж скилла вернул человека к пропущенной активности
             # (состояние сохранено до её появления): цепочка шагов провела бы

@@ -169,16 +169,28 @@ class TestE4SkipSendsNoValue:
 
 
 class TestE5AStateFromBeforeTheStep:
-    def test_completing_without_diet_asks_it_instead_of_sending(self) -> None:
-        """Состояние сериализовано до деплоя: стоит на цели, ответа про
-        питание нет. Тело без него не уходит — иначе человек остался бы с
-        неспрошенным вопросом и прежним значением в столбце."""
-        run = _Run(_state("goal", _BODY))
+    def test_a_state_without_activity_asks_diet_once_not_twice(self) -> None:
+        """Состояние сериализовано до появления шага активности: стоит на цели,
+        активности нет. Страж скилла возвращает к активности ПОСЛЕ завершения,
+        то есть уже за питанием, — и цепочка шагов провела бы человека через
+        питание второй раз, если бы названный ответ не считался названным."""
+        run = _Run(_state("goal", {k: v for k, v in _BODY.items() if k != "activity"}))
 
-        result = run.turn("cb:anketa:choice:goal:maintain")
+        asked_diet = run.turn("cb:anketa:choice:goal:maintain")
+        assert asked_diet.action_type == "anketa_step_diet"
 
-        assert result.action_type == "anketa_step_diet"
-        assert run.captured == []
+        asked_activity = run.turn("cb:anketa:choice:diet:vegan")
+        assert asked_activity.action_type == "anketa_step_activity"
+        assert run.captured == [], "тело без активности не уходит"
+
+        asked_goal = run.turn("cb:anketa:choice:activity:light")
+        assert asked_goal.action_type == "anketa_step_goal"
+
+        done = run.turn("cb:anketa:choice:goal:maintain")
+
+        # Питание НЕ спрашивается второй раз — ответ уже назван.
+        assert done.action_type == "anketa_complete"
+        assert run.captured[0]["data"]["diet_preference"] == "vegan"
 
 
 class TestE6TheVocabularyIsTheCatalogsOwn:
@@ -194,3 +206,106 @@ class TestE6TheVocabularyIsTheCatalogsOwn:
 
         assert [slug for _label, slug in options] == list(DIET_CHOICES)
         assert list(AnketaFSM.STEPS)[-2:] == ["diet", "diet_note"]
+
+
+class TestE7ARejectedAnswerNeverCompletesTheAnketa:
+    def test_free_text_on_the_goal_step_is_re_asked_not_swallowed(self) -> None:
+        """Отвергнутый ответ переспрашивается. Без отдельной проверки на
+        отказ валидации ветка «питание уже названо» замыкала бы анкету
+        ПРЕЖНИМ ответом: человек не слышал «выбери вариант», а видел
+        карточку норм, посчитанную не по тому, что он сказал."""
+        run = _Run(_state("goal", {**_BODY, "goal": "maintain", "diet": "vegan"}))
+
+        result = run.turn("ну давай средний темп")
+
+        assert result.action_type != "anketa_complete"
+        assert run.captured == [], "в каталог ничего не ушло — ответ не принят"
+
+    def test_a_rejected_answer_does_not_drop_the_pace(self) -> None:
+        answers = {**_BODY, "goal": "lose", "pace": "gentle", "diet": "vegan"}
+        run = _Run(_state("goal", answers))
+
+        run.turn("что-то своё")
+
+        assert run.bucket["answers"].get("pace") == "gentle"
+
+
+class TestE8OtherWithoutWordsIsNotAnAnswer:
+    def test_an_edit_before_the_words_asks_them_again(self) -> None:
+        """«Другое» само по себе лишь обещает слова. Прерви человек шаг
+        правкой прежнего ответа — и «другое» без слов уехало бы в каталог
+        (тот такое тело отвергает) либо уронило бы сборку тела."""
+        run = _Run(_state("diet", {**_BODY, "goal": "maintain"}))
+        asked_words = run.turn(f"cb:anketa:choice:diet:{DIET_OTHER}")
+        assert asked_words.action_type == "anketa_step_diet_note"
+
+        run.turn("cb:anketa:edit:weight")
+        run.turn("70")
+        run.turn("cb:anketa:choice:activity:light")
+        result = run.turn("cb:anketa:choice:goal:maintain")
+
+        # Вопрос задаётся заново С САМОГО ТИПА, а не со слов: человек вправе
+        # выбрать другое значение. Важное здесь — тело не ушло и сборка не
+        # упала на отсутствующем ключе слов.
+        assert result.action_type == "anketa_step_diet"
+        assert run.captured == []
+
+    def test_empty_words_are_re_asked(self) -> None:
+        run = _Run(_state("diet_note", {**_BODY, "goal": "maintain", "diet": DIET_OTHER}))
+
+        result = run.turn("   ")
+
+        assert result.action_type != "anketa_complete"
+        assert run.captured == []
+
+
+class TestE9BothSkipsTravelTogether:
+    def test_activity_and_diet_skips_are_both_named(self) -> None:
+        """Пометки складываются в один список: одна затирала бы другую."""
+        run = _Run(_state("activity", _BODY))
+        run.turn("cb:anketa:choice:activity:unknown")
+        run.turn("cb:anketa:choice:goal:maintain")
+
+        done = run.turn(f"cb:anketa:choice:diet:{DIET_SKIP}")
+
+        assert done.action_type == "anketa_complete"
+        data = run.captured[0]["data"]
+        assert data["_skipped_fields"] == ["activity", DIET_SKIP_WIRE_NAME]
+        assert "activity_coefficient" not in data
+        assert "diet_preference" not in data
+
+
+class TestE10TheLabelDoesNotLandInHistory:
+    def test_halal_and_kosher_name_a_belief_and_stay_out_of_the_chat_log(self) -> None:
+        """«Халяль» и «Кошер» называют веру — спецкатегория 152-ФЗ наравне со
+        здоровьем. Метка легла бы в историю как собственная реплика человека,
+        а её на следующих ходах читает промпт консьержа. Тот же вывод, что у
+        скрининга; сам ответ уезжает в каталог своим путём."""
+        from apps.orchestrator.nutrition_global import resolve_anketa_tap
+
+        tap = resolve_anketa_tap("cb:anketa:choice:diet:halal")
+
+        assert tap is not None  # наличие: тап разобран, ветка решена
+        assert tap.history_text is None
+
+    def test_a_step_without_the_carve_out_still_lands(self) -> None:
+        """Пара к предыдущему: без изъятия метка в историю идёт — значит узел
+        проверяет изъятие, а не общую немоту разборщика."""
+        from apps.orchestrator.nutrition_global import resolve_anketa_tap
+
+        tap = resolve_anketa_tap("cb:anketa:choice:activity:light")
+
+        assert tap is not None and tap.history_text == "Лёгкая активность"
+
+
+class TestE11WordsAreNotAShortcut:
+    def test_a_phrase_about_a_doctors_number_is_the_answer_to_the_step(self) -> None:
+        """Ожидаемый ответ шага — фраза про еду и врачей. Вход ручного
+        ориентира ловил её раньше шага и уводил человека из анкеты (тот же
+        довод, что у веса: ревью #1912)."""
+        run = _Run(_state("diet_note", {**_BODY, "goal": "maintain", "diet": DIET_OTHER}))
+
+        done = run.turn("врач сказал без глютена")
+
+        assert done.action_type == "anketa_complete"
+        assert run.captured[0]["data"]["diet_note"] == "врач сказал без глютена"
