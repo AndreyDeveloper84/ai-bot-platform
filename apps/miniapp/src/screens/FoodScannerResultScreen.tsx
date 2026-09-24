@@ -213,7 +213,7 @@ export function FoodScannerResultScreen() {
   // (DRF-2444), «числа есть» перестанет значить «вес назвали».
   // `portionProvenanceOf` — единственное место, где живут строки провода;
   // отсутствие поля и незнакомое значение оба читаются как «не названо».
-  const provenance = portionProvenanceOf(result.portion_source);
+  const provenance = portionProvenanceOf(result.nutrition?.portion_source);
   // Число показываем, только когда вес кто-то назвал. Причину пробела
   // наружу не выводим: форма ответа причиной не является, а «признак
   // наружу» (п. 3 DRF-2335) ждёт слова владельца.
@@ -224,6 +224,20 @@ export function FoodScannerResultScreen() {
   // но веса никто не называл.
   const askForWeight =
     !hideNumbers && (calories == null || portionNeedsConfirmation(provenance));
+  // DRF-2371 — каждый макрос может отсутствовать отдельно от калорий:
+  // «Б null · Ж null · У null г» на экране и «Белки null» в озвучке —
+  // такой же выдуманный ответ, как «~0 ккал», только громче.
+  const macroParts = (
+    [
+      ["Б", proteinG],
+      ["Ж", fatG],
+      ["У", carbsG],
+    ] as Array<[string, number | null]>
+  ).filter(([, value]) => value != null);
+  const macrosLine = macroParts.length
+    ? `${macroParts.map(([label, value]) => `${label} ${value}`).join(" · ")} г`
+    : "";
+  const macrosLabel = macrosLine ? ` ${macrosLine}.` : "";
   const isLowConf = result.confidence < 0.6;
   const leadVerb = isLowConf ? "Похоже на" : "Узнала";
   // DRF-2098 — ключ идемпотентности живёт столько, сколько карточка: повтор
@@ -258,7 +272,10 @@ export function FoodScannerResultScreen() {
         replace: true,
         state: {
           dishName: renamed ? trimmed : result.dish_name,
-          calories,
+          // DRF-2371 — на следующий экран уезжает только то число, которое
+          // эта карточка имела право назвать. Иначе правило держалось бы
+          // один экран: карточка молчит, а «Записано» говорит «~250 ккал».
+          calories: showNumbers ? calories : null,
           edMode: hideNumbers,
           returnTo: state.returnTo,
         },
@@ -452,14 +469,16 @@ export function FoodScannerResultScreen() {
               aria-live="polite"
               aria-label={`Примерно ${
                 portionGrams ?? ""
-              } граммов, ${calories} килокалорий. Белки ${proteinG}, жиры ${fatG}, углеводы ${carbsG} граммов.`}
+              } граммов, ${calories} килокалорий.${macrosLabel}`}
             >
               <p className="food-scanner-result__calories" aria-hidden="true">
                 Калории: ~{calories} ккал
               </p>
-              <p className="food-scanner-result__macros" aria-hidden="true">
-                Б {proteinG} · Ж {fatG} · У {carbsG} г
-              </p>
+              {macrosLine && (
+                <p className="food-scanner-result__macros" aria-hidden="true">
+                  {macrosLine}
+                </p>
+              )}
             </div>
           )}
           {hideNumbers && (

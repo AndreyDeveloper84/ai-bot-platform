@@ -450,7 +450,15 @@ class FoodScannerSkill:
             )
 
         _mark_logged(context, scan_id, log.log_id)
-        if log.calories is None:
+        # DRF-2371 — число называем, только когда вес кто-то назвал. Иначе
+        # правило держалось бы один ход: карточка о числе молчит, а ответ
+        # после тапа говорит «250 ккал», посчитанные по константе каталога.
+        # Ход назвать вес на карточке уже есть — кнопка «✏️ Уточнить»
+        # (``food_recognition_keyboard``) ведёт в вопрос «Сколько граммов?».
+        log_provenance = portion_provenance_of(
+            ((log.raw or {}).get("nutrition") or {}).get("portion_source")
+        )
+        if log.calories is None or not portion_numbers_are_named(log_provenance):
             # DRF-2371 — каталог сохранил запись, а числа в ней нет: порция
             # неизвестна или блюда нет в справочнике. Раньше здесь падал
             # ``int(None)`` — человек не видел ничего, хотя запись легла.
@@ -871,7 +879,9 @@ def _format_scan_card(
     # отсутствие поля и незнакомое значение оба читаются как «не названо».
     # Число, посчитанное по константе каталога, существует — но выдавать
     # его за названное нельзя.
-    provenance = portion_provenance_of((scan.raw or {}).get("portion_source"))
+    # Каталог кладёт признак ВНУТРЬ ``nutrition``, рядом с числами
+    # (``FoodScanResponseSerializer``), а не на верхний уровень ответа.
+    provenance = portion_provenance_of(nutrition.get("portion_source"))
     if kcal is not None and portion_numbers_are_named(provenance):
         macros_line = f"{int(kcal)} ккал"
         if protein is not None:

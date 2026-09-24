@@ -10,6 +10,7 @@
 них называется только тогда, когда вес кто-то назвал; посчитанное по
 константе каталога существует, но названным не является.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -74,16 +75,22 @@ class TestTheScanCardInChat:
         from apps.integrations.ayla.nutrition_client import ScanResponse
         from apps.skills.food_scanner.skill import _format_scan_card
 
-        raw = {} if portion_source is None else {"portion_source": portion_source}
+        # Каталог кладёт признак ВНУТРЬ ``nutrition``
+        # (``FoodScanResponseSerializer``), а не на верхний уровень.
+        # Первая версия этого стенда клала его в ``raw`` — узлы были
+        # зелёными, а по проводу признак до карточки не доезжал.
+        nutrition = {"calories": 147, "protein_g": 5, "fat_g": 7, "carbs_g": 20}
+        if portion_source is not None:
+            nutrition["portion_source"] = portion_source
         return _format_scan_card(
             ScanResponse(
                 scan_id="scan-1",
                 dish_name="Борщ",
                 confidence=0.9,
                 portion_g=300,
-                nutrition={"calories": 147, "protein_g": 5, "fat_g": 7, "carbs_g": 20},
+                nutrition=nutrition,
                 provider="test",
-                raw=raw,
+                raw={"nutrition": nutrition},
             )
         )
 

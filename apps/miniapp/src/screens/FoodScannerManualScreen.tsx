@@ -27,6 +27,10 @@ import { useLocation, useNavigate } from "react-router-dom";
 
 import { Snackbar } from "../components/Snackbar";
 import { useScreenBack } from "../hooks/useScreenBack";
+import {
+  portionNumbersAreNamed,
+  portionProvenanceOf,
+} from "../lib/portion-provenance";
 import { ApiError } from "../lib/api";
 import {
   estimateFoodText,
@@ -94,11 +98,19 @@ export function renderEstimateLines(estimate: FoodTextEstimate): string[] {
     if (value !== null && value !== undefined) macros.push(`${label} ${Math.round(value)}`);
   }
   const rest = macros.length ? ` · ${macros.join(" · ")}` : "";
-  return [
+  const lines = [
     MANUAL_COPY.cardTitle(estimate.matched_dish),
     estimate.portion_estimated ? MANUAL_COPY.portionEstimated(grams) : MANUAL_COPY.portionNamed(grams),
-    MANUAL_COPY.macros(Math.round(estimate.kcal), rest),
   ];
+  // DRF-2371 — числа может не быть вовсе (блюда нет в справочнике), и вес
+  // мог не называть никто. `Math.round(null)` дал бы «Примерно 0 ккал» —
+  // ровно тот выдуманный ноль, ради которого этот лист и заведён, причём
+  // ровно там, куда ведёт кнопка «Написать вручную» с карточки скана.
+  // Строка о числах появляется, только когда число есть И вес назван.
+  if (estimate.kcal != null && portionNumbersAreNamed(portionProvenanceOf(estimate.portion_source))) {
+    lines.push(MANUAL_COPY.macros(Math.round(estimate.kcal), rest));
+  }
+  return lines;
 }
 
 function refusal(e: unknown): { slug: string; status: number } | null {

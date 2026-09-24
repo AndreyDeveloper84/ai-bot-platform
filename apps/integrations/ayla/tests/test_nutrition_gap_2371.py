@@ -45,6 +45,10 @@ def _patch_async_client(monkeypatch: pytest.MonkeyPatch) -> None:
         return original(*args, **kwargs)
 
     monkeypatch.setattr(httpx, "AsyncClient", _factory)
+    yield
+    # Узел, забывший поставить свой транспорт, иначе молча переиспользовал
+    # бы чужой и прошёл бы по неверной причине.
+    _patch_async_client._TRANSPORT = None  # type: ignore[attr-defined]
 
 
 def _set_transport(transport: httpx.MockTransport) -> None:
@@ -140,3 +144,67 @@ class TestEstimateKeepsAbsence:
         assert result.matched_dish == "ризотто с трюфелем"
         assert result.portion_g == 250
         assert result.kcal is None
+
+
+class TestSavedMealKeepsAbsence:
+    """Снимок избранного мог быть сделан с записи без чисел."""
+
+    @pytest.mark.asyncio
+    async def test_null_calories_stay_none(self) -> None:
+        def handler(_: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "data": {
+                        "items": [
+                            {
+                                "id": "meal-1",
+                                "dish_name": "Пирог бабушки",
+                                "portion_g": 150,
+                                "calories": None,
+                                "protein_g": None,
+                                "fat_g": None,
+                                "carbs_g": None,
+                            }
+                        ]
+                    }
+                },
+            )
+
+        client, transport = _client_with_handler(handler)
+        _set_transport(transport)
+
+        rows = await client.list_saved_meals(external_user_id="bot:1")
+
+        assert rows[0].dish_name == "Пирог бабушки"
+        assert rows[0].calories is None
+
+
+class TestEstimateKeepsItsNumbers:
+    """Положительная пара к оценке: число остаётся числом."""
+
+    @pytest.mark.asyncio
+    async def test_a_counted_estimate_is_unchanged(self) -> None:
+        def handler(_: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "data": {
+                        "matched_dish": "борщ",
+                        "portion_g": 300,
+                        "portion_estimated": False,
+                        "kcal": 147.0,
+                        "protein_g": 5.0,
+                        "fat_g": 7.0,
+                        "carbs_g": 20.0,
+                    }
+                },
+            )
+
+        client, transport = _client_with_handler(handler)
+        _set_transport(transport)
+
+        result = await client.estimate_dish(external_user_id="bot:1", dish_name="борщ")
+
+        assert result.kcal == 147.0
+        assert result.portion_g == 300

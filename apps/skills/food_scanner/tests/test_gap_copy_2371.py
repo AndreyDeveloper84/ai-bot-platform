@@ -34,15 +34,18 @@ from apps.skills.food_scanner.tests.test_skill import (  # переисполь�
 pytestmark = pytest.mark.django_db
 
 
-def _to_diary(*, calories: float | None):
+def _to_diary(*, calories: float | None, portion_source: str | None = None):
     """Тап «📔 В дневник» по скану, на который каталог ответил ``calories``."""
     ctx = _context("cb:food:to_diary:scan-1")
     ctx.conversation.skill_state = {"food_scan": {"scan_id": "scan-1", "dish": "Борщ"}}
     client = Mock()
+    raw: dict = {}
+    if portion_source is not None:
+        raw = {"nutrition": {"portion_source": portion_source}}
 
     async def _log(**_kwargs):
         return FoodLogResponse(
-            log_id="log-1", dish_name="Борщ", meal_type="other", calories=calories, raw={}
+            log_id="log-1", dish_name="Борщ", meal_type="other", calories=calories, raw=raw
         )
 
     client.log_meal = _log
@@ -61,9 +64,10 @@ class TestK1EntryWithoutNumbers:
         # и он подтверждает записанное блюдо.
         assert "Записала" in result.reply_text
         assert "Борщ" in result.reply_text
-        # А числа калорий — нет: ни нуля, ни любого другого.
+        # А числа калорий — нет: ни нуля, ни любого другого. Проверка по
+        # слову «ккал», а не по цифре: цифра в названии блюда покраснила бы
+        # узел от постороннего изменения стенда, а не от дефекта.
         assert "ккал" not in result.reply_text
-        assert "0" not in result.reply_text
 
 
 class TestK2CountedEntryUnchanged:
@@ -71,3 +75,29 @@ class TestK2CountedEntryUnchanged:
         result = _to_diary(calories=250.0)
 
         assert result.reply_text == "Записала: Борщ — 250 ккал."
+
+
+class TestK3TheAnswerAsksTheProvenanceToo:
+    """Число записи тоже бывает не названным никем.
+
+    Каталог считает по своей константе, когда веса не назвал никто, — и
+    тогда `calories` в ответе есть, а названным числом не является.
+    Без этой проверки правило держалось бы один ход: карточка о числе
+    молчит, а ответ после тапа говорит «250 ккал».
+    """
+
+    def test_a_weight_nobody_named_is_not_spoken_as_a_number(self) -> None:
+        result = _to_diary(calories=250.0, portion_source="unknown")
+
+        assert "Записала" in result.reply_text
+        assert "ккал" not in result.reply_text
+
+    def test_a_named_weight_is_spoken_as_before(self) -> None:
+        result = _to_diary(calories=250.0, portion_source="provider")
+
+        assert result.reply_text == "Записала: Борщ — 250 ккал."
+
+    def test_an_unknown_provenance_value_is_read_carefully(self) -> None:
+        result = _to_diary(calories=250.0, portion_source="confirmed")
+
+        assert "ккал" not in result.reply_text

@@ -55,6 +55,15 @@ import { ApiError, request } from "./api";
  * подменять нельзя.
  */
 export interface NutritionFacts {
+  /**
+   * DRF-2371/DRF-2402 — откуда взялся вес порции: `provider` (назвал
+   * наблюдавший — распознаватель или сам человек), `typical` (типовая
+   * величина справочника), `unknown` (не назвал никто). Каталог кладёт
+   * признак ИМЕННО СЮДА, рядом с числами, а не на верхний уровень ответа.
+   * Тип нарочно широкий: незнакомое значение и отсутствие поля разбирает
+   * `portionProvenanceOf`, и оба — «не названо».
+   */
+  portion_source?: string | null;
   calories: number | null;
   protein_g: number | null;
   fat_g: number | null;
@@ -74,14 +83,6 @@ export interface ScanResponse {
   /** 0–1; <0.6 → «Похоже на», ≥0.6 → «Узнала». */
   confidence: number;
   portion_g: number | null;
-  /**
-   * DRF-2371 — откуда взялся вес порции: `provider` (назвал наблюдавший —
-   * распознаватель или сам человек), `typical` (типовая величина
-   * справочника), `unknown` (не назвал никто). Тип нарочно широкий:
-   * незнакомое значение и отсутствие поля читает `portionProvenanceOf`,
-   * и оба случая — «не названо», а не «названо».
-   */
-  portion_source?: string | null;
   nutrition: NutritionFacts | null;
   beauty_insights: BeautyInsights | null;
 }
@@ -401,7 +402,10 @@ export interface FoodTextEstimate {
   portion_g: number;
   /** true — граммов в тексте не было, порция — оценка; экран обязан сказать это словами. */
   portion_estimated: boolean;
-  kcal: number;
+  /** DRF-2371 — `null`, когда считать нечем: блюда нет в справочнике. */
+  kcal: number | null;
+  /** DRF-2402 — см. NutritionFacts.portion_source. */
+  portion_source?: string | null;
   protein_g: number | null;
   fat_g: number | null;
   carbs_g: number | null;

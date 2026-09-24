@@ -537,13 +537,13 @@ def render_estimate_card(estimate: Any) -> str:
     # до ответа карточка о числах молчит, а дорога рядом — назвать граммы.
     # DRF-2371 — см. `portion_provenance`: число называем только тогда,
     # когда вес кто-то назвал; подставленное за названное не выдаём.
-    provenance = portion_provenance_of(
-        (getattr(estimate, "raw", None) or {}).get("portion_source")
-    )
+    provenance = portion_provenance_of((getattr(estimate, "raw", None) or {}).get("portion_source"))
     if estimate.kcal is not None and portion_numbers_are_named(provenance):
         macros = [f"Примерно {int(round(estimate.kcal))} ккал"]
         for label, value in (
-            ("Б", estimate.protein_g), ("Ж", estimate.fat_g), ("У", estimate.carbs_g),
+            ("Б", estimate.protein_g),
+            ("Ж", estimate.fat_g),
+            ("У", estimate.carbs_g),
         ):
             if value is not None:
                 macros.append(f"{label} {int(round(value))}")

@@ -64,9 +64,17 @@ describe("что признак разрешает показать", () => {
   });
 
   it("каждое значение разобрано: новое придётся описать здесь", () => {
-    // Сторож полноты: перечень внутренних значений закрыт, и добавление
-    // пятого не пройдёт молча — этот узел покраснеет на несовпадении.
-    const all: PortionProvenance[] = ["named", "typical", "unnamed", "absent"];
+    // Сторож полноты. Литеральный массив здесь ничего не доказывал бы:
+    // подмножество union — законный `PortionProvenance[]`, и пятое
+    // значение прошло бы молча. Карта же обязана покрыть union целиком —
+    // добавление значения ломает `satisfies` ещё на типах.
+    const EVERY = {
+      named: true,
+      typical: true,
+      unnamed: true,
+      absent: true,
+    } satisfies Record<PortionProvenance, true>;
+    const all = Object.keys(EVERY) as PortionProvenance[];
     const decided = all.filter(
       (p) => portionNumbersAreNamed(p) || portionNeedsConfirmation(p),
     );

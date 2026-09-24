@@ -56,6 +56,20 @@ const WITH_NUMBERS: ScanResponse = {
   nutrition: { calories: 250, protein_g: 12, fat_g: 8, carbs_g: 32 },
 };
 
+/**
+ * Признак приходит ВНУТРИ  — так его кладёт каталог
+ * (). Первая версия этих узлов подставляла его
+ * на верхний уровень ответа: узлы были зелёными, а по проводу признак до
+ * экрана не доезжал вовсе. Поэтому стенд собирает ответ здесь, в одном
+ * месте, и повторяет форму каталога.
+ */
+function withProvenance(source: string): ScanResponse {
+  return {
+    ...WITH_NUMBERS,
+    nutrition: { ...WITH_NUMBERS.nutrition!, portion_source: source },
+  };
+}
+
 function renderResult(result: ScanResponse) {
   return render(
     <MemoryRouter
@@ -90,6 +104,12 @@ describe("DRF-2371 — скан без чисел", () => {
     // Утверждение о наличии — раньше утверждения об отсутствии: карточка есть.
     expect(await screen.findByRole("heading", { level: 1, name: "Я распознала так" })).toBeInTheDocument();
     expect(screen.getByText("Ризотто с трюфелем")).toBeInTheDocument();
+    // Якорь на разрешённые флаги: пока `getWellnessToday` не ответил,
+    // числа скрыты режимом показа, и утверждение об отсутствии прошло бы
+    // вхолостую даже с живым дефектом. Кнопка рисуется только при
+    // разрешённых флагах — дождавшись её, мы знаем, что экран дошёл до
+    // решения о числах.
+    await screen.findByRole("button", { name: "Написать вручную" });
     // А числа — нет. Проверка по строке «Калории», а не по «~0»: React
     // печатает число отдельным текстовым узлом, и совпадение по «~0»
     // прошло бы мимо дефекта, ничего не доказав.
@@ -117,7 +137,7 @@ describe("DRF-2371 — скан без чисел", () => {
 
 describe("DRF-2371 — признак происхождения порции решает показ", () => {
   it("«provider»: вес назвали — число показано", async () => {
-    renderResult({ ...WITH_NUMBERS, portion_source: "provider" });
+    renderResult(withProvenance("provider"));
 
     expect(await screen.findByText("Калории: ~250 ккал")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Написать вручную" })).not.toBeInTheDocument();
@@ -126,21 +146,21 @@ describe("DRF-2371 — признак происхождения порции р
   it("«unknown»: числа есть, но веса никто не называл — числа нет, есть ход", async () => {
     // Ровно случай каталога: вес не назван, счёт идёт по базовой константе.
     // Показать такое число как названное — та же ложь, что «~0 ккал».
-    renderResult({ ...WITH_NUMBERS, portion_source: "unknown" });
+    renderResult(withProvenance("unknown"));
 
     expect(await screen.findByRole("button", { name: "Написать вручную" })).toBeInTheDocument();
     expect(screen.queryByText(/Калории/)).not.toBeInTheDocument();
   });
 
   it("«typical»: вес подставлен справочником — числа нет, есть ход подтверждения", async () => {
-    renderResult({ ...WITH_NUMBERS, portion_source: "typical" });
+    renderResult(withProvenance("typical"));
 
     expect(await screen.findByRole("button", { name: "Написать вручную" })).toBeInTheDocument();
     expect(screen.queryByText(/Калории/)).not.toBeInTheDocument();
   });
 
   it("незнакомое значение читается осторожно, а не как названное", async () => {
-    renderResult({ ...WITH_NUMBERS, portion_source: "confirmed" });
+    renderResult(withProvenance("confirmed"));
 
     expect(await screen.findByRole("button", { name: "Написать вручную" })).toBeInTheDocument();
     expect(screen.queryByText(/Калории/)).not.toBeInTheDocument();

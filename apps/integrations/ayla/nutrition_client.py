@@ -324,7 +324,8 @@ class SavedMealRow:
 
     meal_id: str
     dish_name: str
-    portion_g: float
+    #: DRF-2371 — ``None``, когда снимок сделан без веса.
+    portion_g: float | None
     #: DRF-2371 — ``None``, если снимок сделан с записи без чисел.
     calories: float | None
     protein_g: float | None
@@ -367,7 +368,8 @@ class DishEstimate:
     """
 
     matched_dish: str
-    portion_g: float
+    #: DRF-2371 — ``None``, когда веса нет вовсе.
+    portion_g: float | None
     portion_estimated: bool
     #: DRF-2371 — ``None``, когда числа вывести неоткуда (блюда нет в
     #: справочнике, вес неизвестен). Это НЕ ноль: ноль означал бы «съел и
@@ -1098,7 +1100,10 @@ class NutritionClient:
             data = resp.json().get("data", {})
             return DishEstimate(
                 matched_dish=str(data.get("matched_dish") or dish_name),
-                portion_g=float(data.get("portion_g") or 0.0),
+                # DRF-2371 — вес такое же число о еде, как калории:
+                # «Порция — 0 г, по твоим словам» утверждало бы слова,
+                # которых человек не говорил.
+                portion_g=_float_or_none(data.get("portion_g")),
                 portion_estimated=bool(data.get("portion_estimated")),
                 # DRF-2371 — ``or 0.0`` здесь превращал «не посчитано» в
                 # «0 ккал», и ниже отсутствие было уже неотличимо.
@@ -1346,7 +1351,8 @@ class NutritionClient:
         return SavedMealRow(
             meal_id=str(body.get("id") or ""),
             dish_name=str(body.get("dish_name") or ""),
-            portion_g=_num("portion_g") or 0.0,
+            # DRF-2371 — см. выше: ноль граммов никто не называл.
+            portion_g=_num("portion_g"),
             # DRF-2371 — снимок избранного мог быть сделан с записи без
             # чисел; ``or 0.0`` печатал бы «0 ккал» в списке избранного.
             calories=_num("calories"),
