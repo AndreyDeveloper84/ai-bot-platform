@@ -38,9 +38,15 @@ from typing import Any, cast
 from apps.identity.services.personal_context import (
     GateStatus,
     get_ask_eligibility,
+    get_declared_prefs,
     mark_asked,
     patch_declared_prefs,
     skip,
+)
+from apps.integrations.ayla.diet_types import (
+    CATALOG_DIET_TYPES,
+    DIET_OMNIVORE,
+    DIET_OTHER,
 )
 from apps.orchestrator.discovery import DiscoveryReply
 from apps.orchestrator.memory import short_term
@@ -181,6 +187,18 @@ def try_handle_answer(
         if value is _UNPARSED:
             _clear_pending(conversation.id)
             return None
+        if _would_blur_a_named_answer(bot_user, field, value, text):
+            # DRF-2392. Разбор диеты на всё непонятое отвечает ``other`` — это
+            # ЗАГЛУШКА, а не ответ: в анкете ``other`` означает «и я напишу
+            # словами», которых здесь никто не спрашивал. Запись «последний
+            # победил» затирала бы этой заглушкой точное значение, названное
+            # человеком раньше («Веганство» из анкеты), — то есть делала бы
+            # знание о человеке хуже от того, что он что-то сказал.
+            #
+            # Поэтому такой ответ не пишется вовсе, а вопрос остаётся
+            # открытым: пусть человек скажет словом из списка.
+            logger.info("orchestrator.memory_ask.fallback_would_blur field=%s", field)
+            return None
         result = patch_declared_prefs(
             bot_user,
             [{"field": field, "value": value, "source": "conversational"}],
@@ -269,7 +287,37 @@ _DIET_WORDS = (
     ("keto", r"\bкето\b"),
     ("halal", r"халял"),
     ("kosher", r"кошер"),
+    # DRF-2392: ``omnivore`` («без ограничений») здесь ОТСУТСТВОВАЛ, и «ем
+    # всё» ложилось как ``other`` — а ``other`` в анкете означает «и я напишу
+    # словами», которых никто не спрашивал. Словарь значений теперь один на
+    # бот (:mod:`apps.integrations.ayla.diet_types`), и узел держит, что
+    # каждое значение отсюда ему принадлежит.
+    (DIET_OMNIVORE, r"без ограничений|нет ограничений|ем всё|ем все|всё ем|все ем"),
 )
+
+
+def _would_blur_a_named_answer(bot_user: Any, field: str, value: Any, text: str) -> bool:
+    """Затрёт ли этот ответ уже названное ТОЧНОЕ значение заглушкой.
+
+    Только про диету и только про ``other``-заглушку: остальные разборы на
+    непонятое отвечают ``_UNPARSED`` и до записи не доходят.
+
+    Чтение отказало — отвечаем «нет»: терять ответ человека из-за недоступной
+    ручки нельзя, и прежнее поведение (записать) остаётся умолчанием.
+    """
+    if field != "diet_type" or value != DIET_OTHER:
+        return False
+    # Человек мог назвать «другое» СЛОВОМ — это его ответ, а не заглушка.
+    if re.search(r"другое|друг(ая|ую) диет", text.lower()):
+        return False
+    try:
+        declared = get_declared_prefs(bot_user)
+    except Exception:  # noqa: BLE001 — чтение не обязано быть доступным
+        return False
+    if declared.status is not GateStatus.OK or declared.context is None:
+        return False
+    stored = (declared.context.context or {}).get(field)
+    return isinstance(stored, str) and stored in CATALOG_DIET_TYPES and stored != DIET_OTHER
 
 
 def _parse_diet(text: str) -> Any:
@@ -277,7 +325,7 @@ def _parse_diet(text: str) -> Any:
     for value, pattern in _DIET_WORDS:
         if re.search(pattern, low):
             return value
-    return "other" if text.strip() else _UNPARSED
+    return DIET_OTHER if text.strip() else _UNPARSED
 
 
 # Parsers for the bot-askable fields (ask-eligibility priority order from
