@@ -332,7 +332,9 @@ class TestTheLivePathThroughTheSeam:
         uid = "724350"
         with tenant_scope(tenant):
             bot_user = resolve_or_create_bot_user(
-                channel="max", channel_user_id=uid, chat_id=uid,
+                channel="max",
+                channel_user_id=uid,
+                chat_id=uid,
             )
             bot_user.welcomed_at = timezone.now()
             bot_user.save(update_fields=["welcomed_at"])
@@ -340,7 +342,8 @@ class TestTheLivePathThroughTheSeam:
             assert conversation is not None
             # История человека содержит номер, который он сам когда-то написал.
             record_message(
-                conversation, role="user",
+                conversation,
+                role="user",
                 content=f"мастер просила передать {self.PHONE}",
             )
 
