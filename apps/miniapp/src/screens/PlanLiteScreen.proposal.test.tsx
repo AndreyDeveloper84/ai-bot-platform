@@ -302,19 +302,24 @@ describe("дневник без согласия", () => {
     expect(screen.getByTestId("return-to")).toHaveTextContent(PLAN_LITE_ROUTE);
   });
 
-  it("гейт согласия не ответил → как без согласия (в POST не уходит)", async () => {
+  it("гейт согласия не ответил → строка остаётся у человека (DRF-2354)", async () => {
+    // Этот узел держал прежнее поведение: сбой гейта приравнивался к «нет»,
+    // и строка дневника молча выпадала из плана. Решение §77 (23.09) его
+    // меняет: «не знаю» — не «нет». Человек видит строку включённой и
+    // решает сам; если согласия действительно нет, откажет каталог — это
+    // его ответ, а не наша догадка за человека.
     mockedConsent.mockRejectedValue(new ApiError(502, "ayla_unavailable", "down"));
     renderScreen();
     await settle();
 
-    expect(proposalBlock()).toHaveTextContent(PLAN_LITE_COPY.needConsent);
+    // Подсказка «Нужно согласие» — только на явное «нет», а его не было.
+    expect(proposalBlock()).not.toHaveTextContent(PLAN_LITE_COPY.needConsent);
     fireEvent.click(screen.getByRole("button", { name: PLAN_LITE_COPY.confirm }));
     await settle();
 
     expect(mockedCreate).toHaveBeenCalledTimes(1);
     const actions = mockedCreate.mock.calls[0]?.[0] ?? [];
-    expect(actions).toHaveLength(2);
-    expect(actions.map((a) => a.action_type)).not.toContain("log_food");
+    expect(actions.map((a) => a.action_type)).toContain("log_food");
   });
 
   it("предложение без строки «дневник» → гейт согласия не спрашивается", async () => {

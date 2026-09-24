@@ -30,12 +30,17 @@ vi.mock("../lib/customer-goals", async (importOriginal) => {
   const original = await importOriginal<typeof import("../lib/customer-goals")>();
   return { ...original, fetchDecisionContext: vi.fn() };
 });
+vi.mock("../lib/food-scanner", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../lib/food-scanner")>();
+  return { ...original, fetchDiaryConsentGate: vi.fn() };
+});
 vi.mock("../lib/max-sdk", async (importOriginal) => {
   const original = await importOriginal<typeof import("../lib/max-sdk")>();
   return { ...original, setBackButton: vi.fn(), signalReady: vi.fn() };
 });
 
 import { ApiError } from "../lib/api";
+import { fetchDiaryConsentGate } from "../lib/food-scanner";
 import { fetchDecisionContext, type DecisionContext } from "../lib/customer-goals";
 import { closePlanLite, createPlanLite, getPlanLite, getPlanLiteProposal, type PlanLite } from "../lib/plan-lite";
 import { PLAN_LITE_COPY, PLAN_LITE_ROUTE, PlanLiteScreen } from "./PlanLiteScreen";
@@ -61,6 +66,12 @@ const mockedProposal = vi.mocked(getPlanLiteProposal);
 const mockedCreate = vi.mocked(createPlanLite);
 const mockedClose = vi.mocked(closePlanLite);
 const mockedDoc = vi.mocked(fetchDecisionContext);
+
+const GATE_GRANTED = {
+  canonical: true,
+  grantedAt: "2026-09-01T10:00:00Z",
+  currentDocumentVersion: "v1",
+};
 
 const DOC: DecisionContext = {
   version: 1,
@@ -105,6 +116,7 @@ beforeEach(() => {
   mockedProposal.mockRejectedValue(new ApiError(404, "no_template", "none"));
   mockedCreate.mockResolvedValue(PLAN);
   mockedClose.mockResolvedValue(undefined);
+  vi.mocked(fetchDiaryConsentGate).mockResolvedValue(GATE_GRANTED);
 });
 
 
@@ -242,5 +254,119 @@ describe("отказы и флаг", () => {
     expect(mockedGet).toHaveBeenCalledTimes(1);
     expect(screen.queryByText(PLAN_LITE_COPY.unavailable)).toBeNull();
     vi.unstubAllEnvs();
+  });
+});
+
+describe("служебный ключ на экран не попадает (DRF-2355)", () => {
+  // Метка цели тянется ВТОРЫМ запросом. Раньше при его сбое подставлялся
+  // `goal_key` — человеку показывался слаг вида «tone_up». Ключ — адрес
+  // внутри системы, а не слово, которым человек называет свою цель.
+  it("сбой второго запроса не выводит ключ в карточке", async () => {
+    mockedGet.mockResolvedValue(PLAN);
+    mockedDoc.mockRejectedValue(new Error("boom"));
+
+    renderScreen();
+    await settle();
+
+    expect(screen.getByTestId("plan-lite-card")).toBeInTheDocument();
+    expect(screen.queryByText(/tone_up/)).toBeNull();
+    // Заголовок остаётся — просто без имени цели, прежними словами.
+    expect(screen.getAllByText(PLAN_LITE_COPY.title).length).toBeGreaterThan(0);
+  });
+
+  it("сбой второго запроса не выводит ключ в предложении", async () => {
+    mockedGet.mockResolvedValue(null);
+    mockedProposal.mockResolvedValue({
+      goal_key: "tone_up",
+      why: "Под твою цель",
+      template_version: 1,
+      actions: [{ action_type: "log_water", cadence: "per_day", target_count: 7 }],
+    });
+    mockedDoc.mockRejectedValue(new Error("boom"));
+
+    renderScreen();
+    await settle();
+
+    expect(screen.getByTestId("plan-lite-proposal")).toBeInTheDocument();
+    expect(screen.queryByText(/tone_up/)).toBeNull();
+  });
+
+  it("метка есть — цель зовётся словами человека", async () => {
+    mockedGet.mockResolvedValue(PLAN);
+    mockedDoc.mockResolvedValue({
+      ...DOC,
+      known: { goal: { ...DOC.known.goal!, goal_text: "хочу −5 кг к лету" } },
+    });
+
+    renderScreen();
+    await settle();
+
+    expect(screen.getByText(PLAN_LITE_COPY.goalTitle("хочу −5 кг к лету"))).toBeInTheDocument();
+  });
+});
+
+describe("три исхода гейта согласия (DRF-2354)", () => {
+  // «Нет» и «не знаю» — разные ответы. Раньше сбой гейта превращался в
+  // `false`, строка дневника молча выпадала из отправки, и человек
+  // подтверждал план без дневника, не зная почему. Тихое замыкание «в
+  // безопасную сторону» неотличимо от его собственного решения.
+  const PROPOSAL_WITH_FOOD = {
+    goal_key: "tone_up",
+    why: "Под твою цель",
+    template_version: 1,
+    actions: [
+      { action_type: "log_food" as const, cadence: "per_week" as const, target_count: 3 },
+      { action_type: "log_water" as const, cadence: "per_day" as const, target_count: 7 },
+    ],
+  };
+
+  const showProposal = async () => {
+    mockedGet.mockResolvedValue(null);
+    mockedProposal.mockResolvedValue(PROPOSAL_WITH_FOOD);
+    renderScreen();
+    await settle();
+  };
+
+  it("согласие есть — дневник включён и уходит в план", async () => {
+    vi.mocked(fetchDiaryConsentGate).mockResolvedValue(GATE_GRANTED);
+
+    await showProposal();
+    fireEvent.click(screen.getByRole("button", { name: PLAN_LITE_COPY.confirm }));
+    await settle();
+
+    const actions = (mockedCreate.mock.calls[0]?.[0] ?? []).map((a) => a.action_type);
+    expect(actions).toContain("log_food");
+  });
+
+  it("согласия нет — строка не уходит, и человеку сказано почему", async () => {
+    vi.mocked(fetchDiaryConsentGate).mockResolvedValue({ ...GATE_GRANTED, grantedAt: null });
+
+    await showProposal();
+
+    expect(screen.getByRole("button", { name: PLAN_LITE_COPY.needConsent })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: PLAN_LITE_COPY.confirm }));
+    await settle();
+
+    const actions = (mockedCreate.mock.calls[0]?.[0] ?? []).map((a) => a.action_type);
+    expect(actions).not.toContain("log_food");
+  });
+
+  it("ответа нет — строка остаётся, и решает человек, а не сбой", async () => {
+    vi.mocked(fetchDiaryConsentGate).mockRejectedValue(new Error("gate down"));
+
+    await showProposal();
+
+    // Строка видна и включена: «не знаю» не выдаётся за его «нет».
+    const food = screen
+      .getAllByLabelText(PLAN_LITE_COPY.labelFood)
+      .find((el) => el.tagName === "INPUT") as HTMLInputElement;
+    expect(food.checked).toBe(true);
+    expect(food.disabled).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: PLAN_LITE_COPY.confirm }));
+    await settle();
+
+    const actions = (mockedCreate.mock.calls[0]?.[0] ?? []).map((a) => a.action_type);
+    expect(actions).toContain("log_food");
   });
 });

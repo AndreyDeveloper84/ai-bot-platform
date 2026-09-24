@@ -155,6 +155,16 @@ def customer_plan_lite(request: HttpRequest) -> HttpResponse:
             ctx = client.get_wellness_context(external_user_id=external_id)
         except Exception as exc:  # noqa: BLE001 — каждый класс назван в _refusal
             return _refusal(exc, step="get")
+        if ctx.unreadable:
+            # DRF-2356 — документ не собрался. Ответить «плана нет» значило
+            # бы сказать о человеке то, чего мы не знаем: он увидел бы
+            # конструктор и построил второй план поверх первого. Отказ
+            # экран уже умеет показать — строка сбоя и «Повторить».
+            logger.warning(
+                "customer_plan_lite.get.unreadable — документ wellness-context не разобран; "
+                "это не «плана нет»"
+            )
+            return _error("ayla_unavailable", "wellness context unreadable", 502)
         return JsonResponse({"plan_lite": plan_lite_payload(ctx.plan_lite)})
 
     if request.method == "DELETE":
