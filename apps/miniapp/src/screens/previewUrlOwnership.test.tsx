@@ -42,9 +42,10 @@
  *
  * **(а)** Очистка при уходе объявлена с пустыми зависимостями и читает
  * превью из первого рендера, где его ещё нет, — последний адрес не
- * освобождается. Поправка листа: это **один** адрес на посещение экрана, а
- * не «по одному на каждый выбор» — освобождение предыдущего при новом
- * выборе есть и работает.
+ * освобождается. Поправка листа: освобождение СОХРАНЁННОГО адреса при
+ * новом выборе есть и работает. Но и моя первая формулировка («один адрес
+ * на посещение экрана») неточна: под `StrictMode` каждый выбор оставлял
+ * ещё и сироту, см. (б).
  *
  * **(б)** Освобождение стоит ВНУТРИ обновления состояния
  * (`setDraft((prev) => { revoke(prev.…) })`) — побочный эффект в функции,
@@ -78,7 +79,8 @@ vi.mock("../lib/max-sdk", async (importOriginal) => {
 import { getWellnessToday } from "../lib/customer-wellness";
 import { claimInvite } from "../lib/master-api";
 import { MasterOnboardingScreen } from "./MasterOnboardingScreen";
-import { type ScanResponse } from "../lib/food-scanner";
+import { scanPhoto, type ScanResponse } from "../lib/food-scanner";
+import { FoodScannerProcessingScreen } from "./FoodScannerProcessingScreen";
 import { FoodScannerResultScreen } from "./FoodScannerResultScreen";
 
 /** Ответ приглашения по форме контракта — экран доходит до шага с фото. */
@@ -105,23 +107,39 @@ const RESULT: ScanResponse = {
   beauty_insights: null,
 };
 
+/** Исходники экранов — для узла о контракте перехода. */
+const SCREEN_SOURCES = import.meta.glob("./FoodScanner*.tsx", {
+  query: "?raw",
+  import: "default",
+  eager: true,
+}) as Record<string, string>;
+
 /** Счётчик адресов: что создано, что отозвано и что ещё живо. */
 function trackObjectUrls() {
   let n = 0;
   const created: string[] = [];
   const revoked: string[] = [];
-  vi.stubGlobal("URL", {
-    ...URL,
-    createObjectURL: (obj: unknown) => {
+  // Наследник, а не россыпь свойств: разложить `URL` в объект значило бы
+  // отнять конструктор, и любой `new URL(...)` в дереве падал бы с видом
+  // постороннего сбоя (найдено ревью). `vi.unstubAllGlobals` возвращает
+  // всё на место, потому что настоящий `URL` не тронут.
+  class TestURL extends URL {}
+  Object.defineProperty(TestURL, "createObjectURL", {
+    value: (obj: unknown) => {
       void obj;
       const url = `blob:test/${++n}`;
       created.push(url);
       return url;
     },
-    revokeObjectURL: (url: string) => {
+    writable: true,
+  });
+  Object.defineProperty(TestURL, "revokeObjectURL", {
+    value: (url: string) => {
       revoked.push(url);
     },
+    writable: true,
   });
+  vi.stubGlobal("URL", TestURL);
   return {
     created,
     revoked,
@@ -131,6 +149,7 @@ function trackObjectUrls() {
 
 function renderResult(photo: File) {
   return render(
+    <StrictMode>
     <MemoryRouter
       initialEntries={[
         {
@@ -147,7 +166,8 @@ function renderResult(photo: File) {
         />
         <Route path="*" element={<div>другой экран</div>} />
       </Routes>
-    </MemoryRouter>,
+    </MemoryRouter>
+    </StrictMode>,
   );
 }
 
@@ -176,7 +196,11 @@ describe("DRF-2399 — адресом владеет тот, кто рисует
     expect(urls.revoked).not.toContain(src);
   });
 
-  it("ПОВТОРНЫЙ показ: адрес снова живой — этот узел и ловит дефект", async () => {
+  // Узел соответствия, а НЕ регрессии: на старом коде он падал бы оттого,
+  // что картинки нет вовсе (адрес приходил навигацией), а не оттого, что
+  // адрес мёртв. Настоящую регрессию ловит узел передачи ниже — так и
+  // названо, чтобы имя не обещало большего (найдено ревью).
+  it("повторный показ: адрес снова живой", async () => {
     const urls = trackObjectUrls();
     const photo = new File(["x"], "meal.jpg", { type: "image/jpeg" });
 
@@ -205,6 +229,74 @@ describe("DRF-2399 — адресом владеет тот, кто рисует
 
     view.unmount();
     await waitFor(() => expect(urls.alive()).toEqual([]));
+  });
+});
+
+describe("DRF-2399 — передача между экранами: настоящая регрессия", () => {
+  /**
+   * Дефект жил в ПЕРЕХОДЕ, значит узел обязан его пересечь.
+   *
+   * Экран обработки создаёт адрес, уходит — и раньше отзывал адрес,
+   * которым уже рисовал экран результата. Узлы выше этого не ловили: на
+   * старом коде они падали оттого, что картинки нет вовсе, а не оттого,
+   * что адрес мёртв (найдено ревью).
+   */
+  it("картинка на результате живёт после ухода экрана обработки", async () => {
+    const urls = trackObjectUrls();
+    const photo = new File(["x"], "meal.jpg", { type: "image/jpeg" });
+    vi.mocked(scanPhoto).mockResolvedValue(RESULT);
+
+    render(
+      <StrictMode>
+        <MemoryRouter
+          initialEntries={[
+            {
+              pathname: "/customer/food-scanner/processing",
+              state: { photo, mealType: "lunch" },
+            },
+          ]}
+        >
+          <Routes>
+            <Route
+              path="/customer/food-scanner/processing"
+              element={<FoodScannerProcessingScreen />}
+            />
+            <Route
+              path="/customer/food-scanner/result"
+              element={<FoodScannerResultScreen />}
+            />
+            <Route path="*" element={<div>другой экран</div>} />
+          </Routes>
+        </MemoryRouter>
+      </StrictMode>,
+    );
+
+    // Присутствие первым: ПЕРЕХОД СОСТОЯЛСЯ — ждём заголовок результата,
+    // а не картинку. Подпись «Фото блюда» одинакова у обоих экранов, и
+    // первая редакция узла брала картинку ещё не ушедшего экрана
+    // обработки, отчего краснела на верном коде (поймано прогоном).
+    await screen.findByRole("heading", { level: 1, name: "Я распознала так" });
+    const img = await screen.findByAltText("Фото блюда");
+    const src = img.getAttribute("src") ?? "";
+    expect(src).toMatch(/^blob:test\//);
+
+    // ДОЖДАТЬСЯ очистки ушедшего экрана, прежде чем утверждать. Первая
+    // редакция узла этого не делала и проходила даже на подложенной
+    // передаче адреса: пассивные эффекты ушедшего экрана ещё не успели
+    // сработать к моменту утверждения (поймано мутацией).
+    await waitFor(() => expect(urls.revoked.length).toBeGreaterThan(0));
+
+    // И картинка рисуется по ЖИВОМУ адресу, хотя экран обработки уже ушёл.
+    expect(urls.revoked).not.toContain(src);
+  });
+
+  it("экран обработки не передаёт адрес наружу — контракт перехода", async () => {
+    const source = SCREEN_SOURCES["./FoodScannerProcessingScreen.tsx"];
+    // Присутствие первым: файл прочитан и это он.
+    expect(source).toContain("food-scanner/result");
+    // Передача адреса навигацией — то, что убрано; строка не должна
+    // вернуться незамеченной.
+    expect(source).not.toMatch(/state:\s*\{[^}]*previewUrl/);
   });
 });
 
@@ -261,7 +353,11 @@ describe("DRF-2394 — превью мастера освобождается у
     expect(urls.alive()).toHaveLength(1);
   });
 
-  it("второй выбор освобождает первый — это работало и до листа", async () => {
+  // Имя уточнено по ревью: до листа работало освобождение СОХРАНЁННОГО
+  // адреса. Сирота, которую оставлял `StrictMode`, не освобождалась
+  // ничем — поэтому на старом коде этот узел тоже краснел, хоть и по
+  // другой причине.
+  it("второй выбор освобождает сохранённый адрес первого", async () => {
     const urls = trackObjectUrls();
     const { input } = await atPhotoStep();
 

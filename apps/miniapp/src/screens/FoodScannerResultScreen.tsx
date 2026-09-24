@@ -2,7 +2,8 @@
  * F3 Recognition Result + Edit + F3-Clarify Modal — Customer Food Scanner.
  *
  * Route: `/customer/food-scanner/result` (router state from F2 carries
- * `{ result: ScanResponse, photo: File, mealType, previewUrl }`).
+ * `{ result: ScanResponse, photo: File, mealType }`). Адрес превью
+ * сюда НЕ передаётся: экран делает свой из `photo` (DRF-2399).
  *
  * Spec: `docs/screens/customer-food-scanner-flow.md` §4 (F3 high/low
  * conf) + §5 (F3-Clarify modal) + §10 (voice rules).
@@ -43,7 +44,6 @@ interface RouterState {
   result?: ScanResponse;
   photo?: File;
   mealType?: MealType;
-  previewUrl?: string;
   /** DRF-2349 — откуда вошли в поток; здесь поток заканчивается. */
   returnTo?: string;
 }
@@ -66,25 +66,40 @@ export function FoodScannerResultScreen() {
   const result = state.result;
   const photo = state.photo;
   const initialMealType = state.mealType ?? "lunch";
-  // Адрес превью — СВОЙ (DRF-2399). Раньше он приходил навигацией от
-  // экрана обработки, а тот освобождал его при своём уходе: адрес
-  // переживал владельца ровно до первой перерисовки.
+  // Адрес превью — СВОЙ, и создаётся ВНУТРИ эффекта (DRF-2399).
   //
-  // Замер в настоящем Chrome (создать → присвоить `src` → отозвать):
-  // отзыв синхронно сразу после `src` — СЛОМАНО; в микротаске и через
-  // `setTimeout(0)` — ЗАГРУЗИЛОСЬ. Очистка `useEffect` пассивная и бежит
-  // ПОСЛЕ фазы мутации DOM, поэтому на первом показе картинка была видна,
-  // и дефект выглядел отсутствующим. Ломалось ПОВТОРНОЕ обращение —
-  // новый узел, возврат по истории, пересоздание.
-  const previewUrl = useMemo(
-    () => (photo ? URL.createObjectURL(photo) : null),
-    [photo],
-  );
+  // Первая редакция этой правки делала его в `useMemo` — и это был ровно
+  // тот дефект, который соседний лист DRF-2394 (б) вычищает из экрана
+  // мастера: побочное действие в функции, обязанной быть чистой.
+  // `StrictMode` вызывает фабрику `useMemo` дважды, оставляет второе
+  // значение, а очистка пассивного эффекта при имитации размонтирования
+  // отзывает именно его. Замер узлом на моём же коде:
+  //
+  //   created: blob/1, blob/2   revoked: blob/2   img src: blob/2
+  //   то есть адрес в `src` отозван, пока экран смонтирован, а blob/1 утёк
+  //
+  // Создание и освобождение в ОДНОМ эффекте делают это невозможным по
+  // построению: каждая живая подписка создаёт ровно один адрес и сама же
+  // его отзывает. Цена названа: картинка появляется на один коммит позже —
+  // на первом кадре её нет.
+  //
+  // Почему адрес вообще свой: раньше он приходил навигацией от экрана
+  // обработки, а тот освобождал его при своём уходе — адрес переживал
+  // владельца. Замер в настоящем Chrome (создать → присвоить `src` →
+  // отозвать): синхронно после `src` — СЛОМАНО, в микротаске и через
+  // `setTimeout(0)` — ЗАГРУЗИЛОСЬ. Очистка пассивна и бежит после мутации
+  // DOM, поэтому на первом показе картинка была видна и дефект выглядел
+  // отсутствующим; ломалось ПОВТОРНОЕ обращение.
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   useEffect(() => {
-    return () => {
-      if (previewUrl) URL.revokeObjectURL(previewUrl);
-    };
-  }, [previewUrl]);
+    if (!photo) {
+      setPreviewUrl(null);
+      return;
+    }
+    const url = URL.createObjectURL(photo);
+    setPreviewUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [photo]);
 
   const [mealType, setMealType] = useState<MealType>(initialMealType);
   // Возврат (DRF-1493) — к съёмке, с восстановлением уже сделанного
