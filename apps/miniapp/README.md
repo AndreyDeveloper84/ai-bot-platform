@@ -218,6 +218,30 @@ PR пишутся ОБА результата.** Одиночное красно
 число важнее первого: оно измеряет не «правило некому проверить», а «команда
 считала, что проверка есть».
 
+## Зависимости: lock генерировать npm 10, как в CI
+
+CI ставит node из `.nvmrc` (**22**, то есть npm **10**), а локально здесь может
+стоять node 24 с npm **11**. **Разные мажоры npm пишут разный
+`package-lock.json`.** Установка npm 11 на Windows выбрасывает из lock записи,
+нужные Linux (`@emnapi/runtime`, `esbuild`, пакеты `@esbuild/*`), и `npm ci` в
+CI падает с `EUSAGE … Missing: … from lock file` — задание умирает **на
+установке**, до линтера, типов и узлов.
+
+Добавляя зависимость:
+
+```bash
+git checkout origin/dev -- package-lock.json
+npx --yes npm@10 install --package-lock-only --save-dev --save-exact <пакеты>
+npx --yes npm@10 ci --dry-run      # та же ошибка, что в CI, но node_modules цел
+```
+
+**Почему `--dry-run`, а не `npm ci`:** проверять надо ту версию, которой
+проверяет CI, и на **чистом** дереве. Локальный `npm run lint` в уже собранном
+`node_modules` был зелёным, когда lock был сломан: проверка пакетного менеджера
+без чистой установки не проверяет пакетный менеджер. `--dry-run` даёт ту же
+ошибку, не снося `node_modules`, которым в этот момент может пользоваться
+чей-то прогон.
+
 ## Cross-references
 
 - Backend contract: `apps/miniapp_api/views.py`
