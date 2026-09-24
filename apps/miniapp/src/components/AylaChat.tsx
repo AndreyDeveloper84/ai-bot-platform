@@ -57,6 +57,29 @@ import {
 /** Тот же потолок, что у сервера (`views_assistant.MAX_QUESTION_CHARS`). */
 export const MAX_QUESTION_CHARS = 1000;
 
+/**
+ * Жив ли ещё талон подтверждения (DRF-2373).
+ *
+ * Сервер говорит это в `details.retriable` (`master_api/views_assistant.py`,
+ * `admin_api/views_assistant.py` — оба вида, словарь слагов у них общий).
+ * Умолчание здесь — «мёртв», и оно выбрано нарочно: ошибка в эту сторону
+ * стоит человеку лишнего вопроса, ошибка в обратную возвращает кнопку,
+ * которая не может сработать.
+ *
+ * Поэтому `true` требуется буквально: отсутствующее поле (старый сервер,
+ * не-JSON 5xx, сетевой сбой) живучестью не считается.
+ */
+function isOfferStillLive(err: unknown): boolean {
+  return err instanceof ApiError && err.details?.retriable === true;
+}
+
+/** Карточки, приложенные к отказу сервером; их не было — пусто. */
+function refusalCards(err: unknown): AylaCard[] {
+  if (!(err instanceof ApiError)) return [];
+  const cards = err.details?.cards;
+  return Array.isArray(cards) ? (cards as AylaCard[]) : [];
+}
+
 const FAILED_TEXT = "Не получилось отправить. Попробуйте ещё раз.";
 const DECLINED_TEXT = "Хорошо, ничего не меняю.";
 
@@ -313,7 +336,33 @@ export function AylaChat({
     } catch (err) {
       const detail =
         err instanceof ApiError && err.detail ? err.detail : FAILED_TEXT;
-      setError(detail);
+      if (isOfferStillLive(err)) {
+        // Талон цел, отказало исполнение («занято», салон отклонил). Карточка
+        // остаётся — повтор осмыслен, и человек вправе нажать ещё раз.
+        setError(detail);
+      } else {
+        // DRF-2373. Талон мёртв: устарел, не читается или выписан не этому
+        // человеку. Его аргументы лежат внутри подписи, поэтому второй нажим
+        // пошлёт ровно то же самое и получит ровно тот же отказ.
+        //
+        // До этой правки карточка здесь ОСТАВАЛАСЬ, и на экране был виден
+        // единственный обречённый выход. Это не отсутствие выхода, а
+        // нарисованный выход, которого нет, — молчаливая кнопка была бы
+        // честнее.
+        //
+        // Карточку снимаем, текст отказа кладём обычной репликой: он сам
+        // говорит, что делать («спросите заново»), и поле ввода на месте,
+        // так что совет исполним. Заодно FAILED_TEXT («Попробуйте ещё раз»)
+        // перестаёт попадать туда, где повторять нечем.
+        setPending(null);
+        setMessages((prev) => [
+          ...prev,
+          {
+            ...localMessage("assistant", detail),
+            cards: refusalCards(err),
+          },
+        ]);
+      }
     } finally {
       setConfirming(false);
     }

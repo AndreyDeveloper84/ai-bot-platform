@@ -32,8 +32,24 @@ MAX_QUESTION_CHARS = 1000
 ROLE_AT_OPEN = "admin"
 
 
-def _error(slug: str, detail: str, status: int) -> JsonResponse:
-    return JsonResponse({"error": slug, "detail": detail}, status=status)
+def _error(
+    slug: str,
+    detail: str,
+    status: int,
+    *,
+    details: dict[str, Any] | None = None,
+) -> JsonResponse:
+    """Отказ. ``details`` — структурные подробности (DRF-1708), если они есть.
+
+    DRF-2373: через этот же канал едет **живучесть предложения** —
+    ``retriable`` и карточки отказа. Второго канала под это не заводится: у
+    клиента ``details`` уже поднимается в :class:`ApiError`, и параллельное
+    поле верхнего уровня значило бы два места, где живёт одно и то же.
+    """
+    body: dict[str, Any] = {"error": slug, "detail": detail}
+    if details:
+        body["details"] = details
+    return JsonResponse(body, status=status)
 
 
 def _body(request: HttpRequest) -> dict[str, Any] | JsonResponse:
@@ -182,6 +198,7 @@ def assistant_confirm(request: HttpRequest) -> HttpResponse:
     """
 
     from apps.admin_api.services.assistant import ActionError, execute_admin_action
+    from apps.master_api.services.assistant_actions import is_retriable
 
     tenant = request.tenant  # type: ignore[attr-defined]
     bot_user = request.bot_user  # type: ignore[attr-defined]
@@ -198,8 +215,21 @@ def assistant_confirm(request: HttpRequest) -> HttpResponse:
     try:
         done = execute_admin_action(token, tenant=tenant, bot_user=bot_user, role=role)
     except ActionError as exc:
+        # DRF-2373 — тот же отказ, что у мастера, и **тот же экран**:
+        # ``AylaChat.tsx`` обслуживает оба вида. Оставить админский путь без
+        # признака живучести значило бы, что один и тот же компонент ведёт
+        # себя по-разному в зависимости от того, кто ответил, — то самое «два
+        # поведения одной вещи», от которого мы уходим.
+        #
+        # Словарь слагов у них общий: ``ActionError`` импортируется отсюда из
+        # ``master_api.services.assistant_actions``, второго не заводится.
         status = 403 if exc.slug == "action_not_yours" else 400
-        return _error(exc.slug or "action_failed", exc.detail, status)
+        return _error(
+            exc.slug or "action_failed",
+            exc.detail,
+            status,
+            details={"retriable": is_retriable(exc.slug), "cards": list(getattr(exc, "cards", []))},
+        )
 
     thread = _thread(bot_user)
     outbound = _remember(thread, role="assistant", content=done.text, tool_name=done.name)

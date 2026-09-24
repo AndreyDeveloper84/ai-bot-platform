@@ -70,8 +70,24 @@ MAX_QUESTION_CHARS = 1000
 ROLE_AT_OPEN = "master"
 
 
-def _error(slug: str, detail: str, status: int) -> JsonResponse:
-    return JsonResponse({"error": slug, "detail": detail}, status=status)
+def _error(
+    slug: str,
+    detail: str,
+    status: int,
+    *,
+    details: dict[str, Any] | None = None,
+) -> JsonResponse:
+    """Отказ. ``details`` — структурные подробности (DRF-1708), если они есть.
+
+    DRF-2373: через этот же канал едет **живучесть предложения** —
+    ``retriable`` и карточки отказа. Второго канала под это не заводится: у
+    клиента ``details`` уже поднимается в :class:`ApiError`, и параллельное
+    поле верхнего уровня значило бы два места, где живёт одно и то же.
+    """
+    body: dict[str, Any] = {"error": slug, "detail": detail}
+    if details:
+        body["details"] = details
+    return JsonResponse(body, status=status)
 
 
 def _body(request: HttpRequest) -> dict[str, Any] | JsonResponse:
@@ -269,7 +285,11 @@ def assistant_confirm(request: HttpRequest) -> HttpResponse:
     подтверждение стало бы формальностью.
     """
 
-    from apps.master_api.services.assistant_actions import ActionError, execute
+    from apps.master_api.services.assistant_actions import (
+        ActionError,
+        execute,
+        is_retriable,
+    )
 
     master = request.master  # type: ignore[attr-defined]
     bot_user = request.bot_user  # type: ignore[attr-defined]
@@ -285,8 +305,25 @@ def assistant_confirm(request: HttpRequest) -> HttpResponse:
     try:
         done = execute(token, master=master, actor=bot_user)
     except ActionError as exc:
+        # DRF-2373. Отказ обязан сказать экрану ДВЕ вещи, которых здесь не
+        # было: жив ли ещё талон и есть ли к отказу карточки.
+        #
+        # Без первого экран оставлял карточку подтверждения со всеми её
+        # кнопками при **мёртвом** талоне — человек жал «Подтвердить» и
+        # получал тот же отказ, сколько бы ни жал. Это не отсутствие выхода,
+        # а нарисованный выход, которого нет; молчаливая кнопка была бы
+        # честнее.
+        #
+        # Второе — не новое поле, а починка потери: ``ActionError.cards``
+        # существует и заполняется, ``assistant_ask`` их отдаёт
+        # (``services/assistant.py:403``), а этот путь молча ронял.
         status = 403 if exc.slug == "action_not_yours" else 400
-        return _error(exc.slug, exc.detail, status)
+        return _error(
+            exc.slug,
+            exc.detail,
+            status,
+            details={"retriable": is_retriable(exc.slug), "cards": list(exc.cards)},
+        )
 
     thread = _thread(bot_user)
     outbound = _remember(thread, role="assistant", content=done.text, tool_name=done.name)
