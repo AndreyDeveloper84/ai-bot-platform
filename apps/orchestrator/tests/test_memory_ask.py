@@ -153,7 +153,8 @@ class TestAnswer:
     def test_acceptance_flow_answer_patches_memory(
         self, monkeypatch, conversation, bot_user
     ) -> None:
-        """Сквозной сценарий: вопрос задан → ответ → PATCH (source: conversational)."""
+        """Сквозной сценарий: вопрос задан → ответ → PATCH (source: explicit —
+        слова человека, DRF-2397)."""
         self._ask(
             monkeypatch,
             bot_user,
@@ -170,7 +171,7 @@ class TestAnswer:
         assert "Записала" in out.text
         patch.assert_called_once_with(
             bot_user,
-            [{"field": "preferred_time_slots", "value": ["evening"], "source": "conversational"}],
+            [{"field": "preferred_time_slots", "value": ["evening"], "source": "explicit"}],
         )
         assert read_pending(conversation.id) is None
 
