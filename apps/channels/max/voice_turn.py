@@ -96,7 +96,10 @@ REFUSAL_TEXTS: Final[dict[str, str]] = {
 
 ECHO_LINE: Final[str] = "Я услышала: «{text}»"
 
-_PUNCT = re.compile(r"[^\w\s]", re.UNICODE)
+# Только знаки препинания МЕЖДУ словами. Апостроф и дефис внутри слова
+# остаются: «don't want to live» и «self-harm» — шаблоны гейта, и без
+# апострофа кризис по-английски терялся (проба DRF-2423 это поймала).
+_PUNCT = re.compile(r"[,.!?;:…\"«»“”„()\[\]{}<>—–]|(?<!\w)['\-’]|['\-’](?!\w)")
 _WS = re.compile(r"\s+")
 
 
@@ -152,7 +155,11 @@ def turn_budget_s() -> float:
 
 
 def strip_for_gate(text: str) -> str:
-    """Копия текста без знаков препинания для ``evaluate_inbound`` (K19-Б)."""
+    """Копия текста без знаков препинания между словами для ``evaluate_inbound`` (K19-Б).
+
+    Апостроф и дефис внутри слова сохраняются («don't», «self-harm») — иначе
+    английские шаблоны гейта перестают срабатывать.
+    """
     return _WS.sub(" ", _PUNCT.sub(" ", text)).strip()
 
 
