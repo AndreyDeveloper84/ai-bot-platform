@@ -56,7 +56,11 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from apps.integrations.ayla.diet_types import DIET_OMNIVORE
+from apps.integrations.ayla.diet_types import (
+    DIET_EXCLUSION_PATTERN,
+    DIET_NO_EXCLUSION_PATTERN,
+    DIET_OMNIVORE,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +138,10 @@ _CLAUSE_SPLIT_RE = re.compile(r"[,.!?;\n]+|\s+но\s+")
 # «не ем свинину» must NEVER become halal: exclusions are not diet types.
 # «теперь» between the anchor and the keyword is allowed («я теперь на кето»).
 _SELF_NOW = _SELF + r"(?:теперь\s+)?"
+
+#: Общий язык оговорки (см. ``diet_types``): суждение одно на оба разборщика.
+_SHARED_DIET_EXCLUSION_RE = re.compile(DIET_EXCLUSION_PATTERN, re.IGNORECASE)
+_SHARED_DIET_NO_EXCLUSION_RE = re.compile(DIET_NO_EXCLUSION_PATTERN, re.IGNORECASE)
 _NAMED_DIET_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(_SELF_NOW + r"веган", re.IGNORECASE), "vegan"),
     (re.compile(_SELF_NOW + r"вегетариан", re.IGNORECASE), "vegetarian"),
@@ -452,13 +460,25 @@ def extract_user_facts(text: str) -> ExtractionResult:
     if _SESSION_RE.search(text) is not None:
         return ExtractionResult(candidates=[], drops=drops)
 
-    # DRF-2398. Исключение ищется по ВСЕЙ фразе, а не внутри одной части.
-    # «Ем всё, только мясо не ем» распадается на две части: из первой вышло
-    # бы «без ограничений», из второй — громкая потеря исключения, и про
-    # человека осталась бы записана неправда («ограничений нет») ровно в тот
-    # миг, когда он ограничение назвал. Канонический пример этого модуля —
-    # про то же самое.
-    says_exclusion = any(_DIET_EXCLUSION_RE.search(c) is not None for c in clean_clauses)
+    # DRF-2398. Оговорка ищется по ВСЕМУ исходному тексту, а не внутри одной
+    # части и не по очищенным частям.
+    #
+    # Почему по всему тексту: «ем всё, только мясо не ем» распадается на две
+    # части, и из первой вышло бы «без ограничений» — про человека осталась
+    # бы записана неправда ровно в тот миг, когда он ограничение назвал.
+    # Канонический пример этого модуля — про то же самое.
+    #
+    # Почему по ИСХОДНОМУ, а не по ``clean_clauses``: части про аллергию и
+    # непереносимость вырезаются выше (чувствительный периметр), и по
+    # очищенным частям «ем всё, но у меня непереносимость лактозы» дало бы
+    # «ограничений нет». Сам текст аллергии никуда не записывается — здесь он
+    # только ЗАПРЕЩАЕТ утверждение, а не становится фактом.
+    #
+    # Язык оговорки общий с разбором ответа на прямой вопрос: суждение одно,
+    # и две его копии уже разошлись в строгости (этот же лист).
+    says_exclusion = _SHARED_DIET_EXCLUSION_RE.search(text) is not None and (
+        _SHARED_DIET_NO_EXCLUSION_RE.search(text) is None
+    )
 
     candidates: list[GreenFactCandidate] = []
     for clause in clean_clauses:
@@ -471,8 +491,14 @@ def extract_user_facts(text: str) -> ExtractionResult:
             candidates.append(_diet_candidate(None, "none"))
         elif named == DIET_OMNIVORE and says_exclusion:
             # Назвал исключение — «без ограничений» про него неправда. Само
-            # исключение ниже роняется громко, как и раньше.
-            continue
+            # исключение роняется громко там, где оно сказано.
+            #
+            # ``pass``, а не ``continue``: за цепочкой о питании в этом же
+            # витке идут разборы времени, района, цены и мастера. Прерви
+            # виток — и человек, сказавший «ем всё и мне удобно после шести,
+            # но мясо не ем», потерял бы ещё и удобное время. Решение о
+            # питании не вправе распоряжаться чужими фактами.
+            pass
         elif named is not None:
             candidates.append(_diet_candidate(named, named))
         elif _DIET_EXCLUSION_RE.search(clause) is not None:

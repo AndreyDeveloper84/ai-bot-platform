@@ -37,7 +37,7 @@ from apps.persona.memory_extract import extract_user_facts
 from apps.persona.memory_surface import _DECLARED_DIET_PHRASES, _DIET_PHRASES
 
 
-def _diet_candidate(diet_type: str, value: str = "x"):
+def _diet_candidate(diet_type: str | None, value: str = "x"):
     from apps.persona.memory_extract import GreenFactCandidate
 
     return GreenFactCandidate(
@@ -97,6 +97,48 @@ class TestG2SpeechNamesNoRestrictionsButNotAnExclusion:
 
         assert DIET_OMNIVORE in diets
 
+    @pytest.mark.parametrize(
+        "text",
+        [
+            # Каноническая запись примера самого модуля — с ОДНИМ «я». Прежний
+            # узел брал вариант с двумя «я»: он утверждал границу, которой при
+            # узкой оговорке не было.
+            "я ем всё, только мясо не ем",
+            "я ем всё, кроме мяса",
+            "я ем всё кроме мяса",
+            "я ем всё, но без мяса",
+            # Часть про непереносимость вырезается как чувствительная — и
+            # именно поэтому оговорка по ОЧИЩЕННЫМ частям не срабатывала.
+            "я ем всё, но у меня непереносимость лактозы",
+        ],
+    )
+    def test_no_restrictions_is_not_claimed_over_an_exclusion(self, text: str) -> None:
+        """Ложный факт о человеке хуже непонимания — и доезжает до подсказки
+        промпта словами «помню, что ты ешь всё»."""
+        plain = extract_user_facts("я ем всё")
+        assert DIET_OMNIVORE in [  # наличие: без оговорки фраза разбирается
+            c.content.get("diet_type") for c in plain.candidates
+        ]
+
+        result = extract_user_facts(text)
+
+        assert DIET_OMNIVORE not in [c.content.get("diet_type") for c in result.candidates]
+
+    def test_the_veto_does_not_eat_other_facts_in_the_same_clause(self) -> None:
+        """Решение о питании не вправе распоряжаться чужими фактами: прерванный
+        виток уносил и удобное время, названное в той же части фразы. Это была
+        бы чистая потеря — такой факт собирался и ДО правки."""
+        result = extract_user_facts("я ем всё и мне удобно после шести, но мясо я не ем")
+
+        assert "preferred_time_slots" in [c.content.get("key") for c in result.candidates]
+
+    def test_a_named_absence_of_exclusions_is_still_an_answer(self) -> None:
+        """«Ничего не исключаю» — отсутствие исключений, сказанное словами
+        исключения: терять такой ответ нельзя."""
+        result = extract_user_facts("я ем всё, ничего не исключаю")
+
+        assert DIET_OMNIVORE in [c.content.get("diet_type") for c in result.candidates]
+
     def test_an_exclusion_in_any_clause_cancels_it(self) -> None:
         """Фраза распадается на части: из первой вышло бы «без ограничений», из
         второй — потеря исключения, и про человека осталась бы записана
@@ -148,22 +190,46 @@ class TestG3EveryValueHasAPhrase:
 
 class TestG4ForgettingOneFactNotTheWholeTopic:
     @pytest.mark.parametrize(
-        ("target", "value"),
+        ("said", "value"),
         [
-            ("ем всё", DIET_OMNIVORE),
             ("без ограничений", DIET_OMNIVORE),
+            ("я всеядная", DIET_OMNIVORE),
             ("особое питание", DIET_OTHER),
+            ("особую диету", DIET_OTHER),
         ],
     )
-    def test_the_specific_fact_is_matched(self, target: str, value: str) -> None:
-        """Без этих слов «забудь, что я ем всё» уходило в общий стебель «ем » —
-        то есть стирало всю тему питания. Перебор хуже недобора: человек
-        просил забыть одно."""
-        from apps.persona.memory_commands import _FACT_KEYWORDS
+    def test_the_specific_fact_is_matched(self, said: str, value: str) -> None:
+        """Сопоставление идёт через ту же НОРМАЛИЗАЦИЮ, что в бою. Узел, минующий
+        её, проходил через мёртвый стебель «ем всё» (ё сводится к е, и такой
+        стебель не совпадёт никогда) — и удаление ЖИВОГО стебля оставалось
+        зелёным."""
+        from apps.persona.memory_commands import _FACT_KEYWORDS, _normalise
 
         stems = _FACT_KEYWORDS[("diet", value)]
+        target = _normalise(said)
 
         assert any(stem in target for stem in stems), (target, stems)
+
+    @pytest.mark.parametrize("said", ["я ем всегда поздно", "ем всего понемногу"])
+    def test_a_phrase_that_is_not_about_diet_does_not_match(self, said: str) -> None:
+        """Перебор в удалении дороже недобора: стебель «ем все» ловил «ем всегда»
+        и удалял бы строку по фразе не о питании."""
+        from apps.persona.memory_commands import _FACT_KEYWORDS, _normalise
+
+        stems = _FACT_KEYWORDS[("diet", DIET_OMNIVORE)]
+        target = _normalise(said)
+
+        assert stems  # наличие: стебли у значения есть
+        assert not any(stem in target for stem in stems), (target, stems)
+
+    def test_no_stem_is_dead(self) -> None:
+        """Мёртвый стебель хуже отсутствующего: он выглядит работающим.
+        Нормализация сводит ё к е, значит стебля с ё существовать не может."""
+        from apps.persona.memory_commands import _FACT_KEYWORDS, _normalise
+
+        for (key, value), stems in _FACT_KEYWORDS.items():
+            for stem in stems:
+                assert stem == _normalise(stem), (key, value, stem)
 
     def test_every_vocabulary_value_can_be_forgotten_by_name(self) -> None:
         from apps.persona.memory_commands import _FACT_KEYWORDS
