@@ -89,10 +89,22 @@ _DECLARED_CONFIDENCE = 1.0
 _INFERRED_CONFIDENCE = 0.6
 
 # Backend `UserPersonalContext.data_sources` value that means «the person
-# typed this». Everything else the backend can stamp — `inferred` (nightly
-# booking-history inference), `behavioral`, `transactional`, `conversational`
-# — is a derivation, and so is any value we do not recognise.
-_BACKEND_STATED_SOURCE = "explicit"
+# said this themselves». Everything else the backend can stamp — `inferred`
+# (nightly booking-history inference), `behavioral`, `transactional`,
+# `conversational` — is a derivation, and so is any value we do not recognise.
+#
+# Один дом для этого чтения и для записи `memory_ask` (DRF-2397): там этим
+# значением помечается ОТВЕТ человека на заданный нами вопрос. Других домов
+# у самой строки «explicit» в боте хватает (`memory/ayla_bridge.py`,
+# `memory/food.py`, `MemoryEntry.SOURCE_EXPLICIT`) — речь только об этих двух.
+#
+# Имя намеренно не `SOURCE_STATED`: так зовётся константа библиотеки со
+# значением `"stated"` (её импорт — выше в этом же модуле). Из двух имён
+# стороны «сказал сам» каталог принимает только `explicit`; `stated` в его
+# `_SOURCE_CHOICES` отсутствует (`users/internal_personal_context_api.py`) и
+# ответил бы 400 — поэтому два имени-близнеца с разными значениями здесь
+# опасны.
+BACKEND_STATED_SOURCE = "explicit"
 
 
 def concierge_memory_enabled() -> bool:
@@ -133,7 +145,7 @@ def build_concierge_memory_block(bot_user: Any) -> str:
         if declared_origins is not None:
             sources[key] = (
                 SOURCE_STATED
-                if declared_origins.get(key, _BACKEND_STATED_SOURCE) == _BACKEND_STATED_SOURCE
+                if declared_origins.get(key, BACKEND_STATED_SOURCE) == BACKEND_STATED_SOURCE
                 else SOURCE_INFERRED
             )
 

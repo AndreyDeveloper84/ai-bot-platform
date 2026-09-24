@@ -12,7 +12,8 @@ Flow (acceptance #7: «вопрос → ответ → память обнови
 2. :func:`try_handle_answer` — on the next turn, a pending question
    treats the message as its answer: explicit skip → ``POST /skip/``
    (also non-idempotent, exactly once); a parseable answer →
-   ``PATCH personal-context`` with ``source: conversational``; unrelated
+   ``PATCH personal-context`` with ``source: explicit`` — это слова
+   человека, сказанные в ответ на наш вопрос (DRF-2397); unrelated
    text abandons the pending question quietly (helpful restraint —
    the cooldown already prevents an immediate re-ask).
 
@@ -50,7 +51,10 @@ from apps.integrations.ayla.diet_types import (
 )
 from apps.orchestrator.discovery import DiscoveryReply
 from apps.orchestrator.memory import short_term
-from apps.orchestrator.memory_block import concierge_memory_enabled
+from apps.orchestrator.memory_block import (
+    BACKEND_STATED_SOURCE,
+    concierge_memory_enabled,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -189,7 +193,14 @@ def try_handle_answer(
             return None
         result = patch_declared_prefs(
             bot_user,
-            [{"field": field, "value": value, "source": "conversational"}],
+            # DRF-2397: пометка «сказал сам» — и здесь так и есть: мы задали
+            # вопрос, человек ответил словами, разбор ответа детерминированный.
+            # Стоявший тут раньше `conversational` в этом словаре означает
+            # «не слова клиента» (перечень — `memory/food.py`, `STATED_SOURCES`
+            # с документированным fallback под нынешний пин библиотеки), и
+            # каталог читал ответ человека как нашу догадку — вплоть до
+            # перезаписи `busy_days` ночной инференцией.
+            [{"field": field, "value": value, "source": BACKEND_STATED_SOURCE}],
         )
         if result.status is GateStatus.OK:
             _clear_pending(conversation.id)
