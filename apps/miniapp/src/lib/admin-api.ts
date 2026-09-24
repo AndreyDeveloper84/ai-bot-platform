@@ -225,7 +225,13 @@ export const getSalonDay = (
  */
 export interface CreateBookingResult {
   outcome: "committed" | "conflict" | "blocked" | "pending" | "failed";
+  /** Внутренняя причина — нам в журнал, НЕ на экран (DRF-2446, DRF-2453). */
   detail: string;
+  /**
+   * Слова человеку, если у сервера они согласованы (DRF-2453). Нет
+   * подсказки — экран говорит собственную фразу, а не `detail`.
+   */
+  hint?: string;
   appointment_id?: string;
   /** Returned on `pending` so a retry can be the same write, not a new one. */
   idempotency_key?: string;
@@ -304,7 +310,13 @@ export type CancelReasonCode = (typeof CANCEL_REASONS)[number]["code"];
 
 export interface CancelBookingResult {
   outcome: "committed" | "conflict" | "blocked" | "pending" | "failed";
+  /** Внутренняя причина — нам в журнал, НЕ на экран (DRF-2446, DRF-2453). */
   detail: string;
+  /**
+   * Слова человеку, если у сервера они согласованы (DRF-2453). Нет
+   * подсказки — экран говорит собственную фразу, а не `detail`.
+   */
+  hint?: string;
   appointment_id?: string;
 }
 
@@ -377,7 +389,13 @@ export const getBookingVersion = (
 
 export interface CompleteBookingResult {
   outcome: "committed" | "conflict" | "blocked" | "pending" | "failed";
+  /** Внутренняя причина — нам в журнал, НЕ на экран (DRF-2446, DRF-2453). */
   detail: string;
+  /**
+   * Слова человеку, если у сервера они согласованы (DRF-2453). Нет
+   * подсказки — экран говорит собственную фразу, а не `detail`.
+   */
+  hint?: string;
   appointment_id?: string;
 }
 
@@ -1709,18 +1727,23 @@ export interface AvailabilityListResponse {
 }
 
 /**
- * 409 envelope from approve/reject. Backend (PR #521) returns
- * ``{"error": "already_decided" | "overlap_conflict", "detail": "..."}``
- * — there's no structured `dates: [...]` field, conflicting dates are
- * embedded as a stringified Python list inside the detail
- * (e.g. ``"existing exceptions conflict on dates: ['2026-06-11']"``).
- * We parse them client-side; see ``parseOverlapDates`` in the screen.
+ * 409 envelope from approve/reject.
+ *
+ * DRF-2453: конфликтующие даты теперь приходят СТРУКТУРНО —
+ * ``details.dates`` (`admin_api/services/availability.py`). Раньше они
+ * ехали внутри английской фразы, и мы доставали их регуляркой: предложение
+ * не канал данных, перепишут формулировку — даты пропадут молча.
+ *
+ * Разбор фразы оставлен запасным ходом ровно на время выкладки: сервер
+ * старше этого листа структурного поля ещё не шлёт. Когда выложится —
+ * `parseDatesFromDetail` и эта строка убираются вместе.
  */
 export interface AvailabilityConflict {
   __conflict: true;
   conflict: "already_decided" | "overlap_conflict";
+  /** Внутренняя причина — в журнал, не на экран (DRF-2446). */
   detail: string;
-  /** Best-effort parse of dates embedded in the detail string. */
+  /** Конфликтующие даты: `details.dates` сервера (DRF-2453). */
   dates?: string[];
 }
 
@@ -1798,12 +1821,17 @@ async function decisionFetch(
       throw new ApiError(res.status, slug, parsed.detail);
     }
     const detail = parsed.detail || "";
+    const fromServer = (parsed.details?.dates as string[] | undefined) ?? undefined;
     return {
       __conflict: true,
       conflict: slug,
       detail,
       dates:
-        slug === "overlap_conflict" ? parseDatesFromDetail(detail) : undefined,
+        slug === "overlap_conflict"
+          ? // Структурное поле — первым; разбор фразы держится только до
+            // выкладки сервера этого листа (см. докстроку типа).
+            (fromServer ?? parseDatesFromDetail(detail))
+          : undefined,
     };
   }
 

@@ -172,7 +172,12 @@ class TestTheGuardCanActuallyFire:
         assert resp.status_code == 409
         data = resp.json()
         assert data["outcome"] == "conflict"
-        assert "обновите" in data["detail"]
+        # DRF-2453: слова человеку переехали в `hint`, `detail` стал
+        # внутренним. Узел не ослаб — теперь он держит ОБЕ половины:
+        # что человеку сказано «обновите» и что внутреннее не выдаётся
+        # за слова владельца.
+        assert "обновите" in data["hint"]
+        assert "обновите" not in data["detail"]
 
 
 class TestVersionIsRequired:
@@ -433,9 +438,13 @@ class TestReschedule:
         ).json()
 
         assert stale["outcome"] == taken["outcome"] == "conflict"
+        # DRF-2453: два разных исхода по-прежнему различимы — но там, где
+        # эту разницу читает человек, то есть в `hint`. Внутренние причины
+        # тоже разные, и это проверяется отдельной строкой: слить их в одну
+        # значило бы потерять различие в журнале.
         assert stale["detail"] != taken["detail"]
-        assert "перенесли" in stale["detail"]
-        assert "время" in taken["detail"]
+        assert "перенесли" in stale["hint"]
+        assert "время" in taken["hint"]
 
     @pytest.mark.parametrize(
         "body",

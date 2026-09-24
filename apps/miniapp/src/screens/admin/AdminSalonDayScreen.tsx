@@ -544,10 +544,10 @@ export function AdminSalonDayScreen({ me }: { me: MeResponse }) {
           );
           break;
         case "blocked":
-          setNotice(res.detail || "Этот визит нельзя закрыть.");
+          setNotice(res.hint || "Этот визит нельзя закрыть.");
           break;
         default:
-          setNotice(res.detail || "Не удалось закрыть визит.");
+          setNotice(res.hint || "Не удалось закрыть визит.");
       }
       if (res.outcome !== "blocked") await load(date);
     } finally {
@@ -578,10 +578,10 @@ export function AdminSalonDayScreen({ me }: { me: MeResponse }) {
           );
           break;
         case "blocked":
-          setNotice(res.detail || "Для этого визита неявку отметить нельзя.");
+          setNotice(res.hint || "Для этого визита неявку отметить нельзя.");
           break;
         default:
-          setNotice(res.detail || "Не удалось отметить неявку.");
+          setNotice(res.hint || "Не удалось отметить неявку.");
       }
       if (res.outcome !== "blocked") await load(date);
     } finally {
@@ -650,7 +650,7 @@ export function AdminSalonDayScreen({ me }: { me: MeResponse }) {
             setNotice(`Визит перенесён на ${slot.time}.`);
             break;
           case "conflict":
-            setNotice(res.detail);
+            setNotice(res.hint || "Не удалось перенести визит.");
             break;
           case "pending":
             setNotice(
@@ -658,10 +658,10 @@ export function AdminSalonDayScreen({ me }: { me: MeResponse }) {
             );
             break;
           case "blocked":
-            setNotice(res.detail || "Этот визит нельзя перенести.");
+            setNotice(res.hint || "Этот визит нельзя перенести.");
             break;
           default:
-            setNotice(res.detail || "Не удалось перенести визит.");
+            setNotice(res.hint || "Не удалось перенести визит.");
         }
         if (res.outcome !== "blocked") await load(date);
       } finally {
@@ -698,10 +698,10 @@ export function AdminSalonDayScreen({ me }: { me: MeResponse }) {
             );
             break;
           case "blocked":
-            setNotice(res.detail || "Этот визит нельзя отменить.");
+            setNotice(res.hint || "Этот визит нельзя отменить.");
             break;
           default:
-            setNotice(res.detail || "Не удалось отменить.");
+            setNotice(res.hint || "Не удалось отменить.");
         }
         if (res.outcome !== "blocked") await load(date);
       } finally {
