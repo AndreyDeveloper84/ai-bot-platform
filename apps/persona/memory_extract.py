@@ -56,6 +56,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from apps.integrations.ayla.diet_types import DIET_OMNIVORE
+
 logger = logging.getLogger(__name__)
 
 
@@ -143,6 +145,15 @@ _NAMED_DIET_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
     (
         re.compile(_SELF_NOW + r"(?:ем\s+(?:только\s+)?|соблюдаю\s+)кошер", re.IGNORECASE),
         "kosher",
+    ),
+    # DRF-2398. «Без ограничений» — такой же названный человеком тип, как
+    # остальные, и его здесь не было: «я теперь ем всё» терялось, хотя
+    # сказано прямо. Значения берутся из общего словаря
+    # (:mod:`apps.integrations.ayla.diet_types`) — разбор НЕ расширяется за
+    # его пределы, и придумывать типы по исключениям по-прежнему запрещено.
+    (
+        re.compile(_SELF_NOW + r"(?:ем\s+вс[её]|без\s+ограничений|всеядн)", re.IGNORECASE),
+        DIET_OMNIVORE,
     ),
 )
 
@@ -441,6 +452,14 @@ def extract_user_facts(text: str) -> ExtractionResult:
     if _SESSION_RE.search(text) is not None:
         return ExtractionResult(candidates=[], drops=drops)
 
+    # DRF-2398. Исключение ищется по ВСЕЙ фразе, а не внутри одной части.
+    # «Ем всё, только мясо не ем» распадается на две части: из первой вышло
+    # бы «без ограничений», из второй — громкая потеря исключения, и про
+    # человека осталась бы записана неправда («ограничений нет») ровно в тот
+    # миг, когда он ограничение назвал. Канонический пример этого модуля —
+    # про то же самое.
+    says_exclusion = any(_DIET_EXCLUSION_RE.search(c) is not None for c in clean_clauses)
+
     candidates: list[GreenFactCandidate] = []
     for clause in clean_clauses:
         retraction = any(p.search(clause) is not None for p in _DIET_RETRACTION_RULES)
@@ -450,6 +469,10 @@ def extract_user_facts(text: str) -> ExtractionResult:
         )
         if retraction:
             candidates.append(_diet_candidate(None, "none"))
+        elif named == DIET_OMNIVORE and says_exclusion:
+            # Назвал исключение — «без ограничений» про него неправда. Само
+            # исключение ниже роняется громко, как и раньше.
+            continue
         elif named is not None:
             candidates.append(_diet_candidate(named, named))
         elif _DIET_EXCLUSION_RE.search(clause) is not None:
