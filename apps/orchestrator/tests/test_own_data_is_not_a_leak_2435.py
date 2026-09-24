@@ -35,6 +35,7 @@ import json
 import uuid
 
 import pytest
+from django.utils import timezone
 
 from apps.orchestrator.safety.outbound import REPLACEMENT_TEXT, evaluate_outbound
 
@@ -275,3 +276,83 @@ class TestTheExportReachesThePerson:
         assert passed, f"журнал молчит о пропуске своих данных: {messages}"
         assert "contact" in passed[0]
         assert not [m for m in messages if "outbound.blocked" in m], messages
+
+
+# ---------------------------------------------------------------------------
+# Живой путь: через шов хода, а не в обход (требование к слиянию)
+# ---------------------------------------------------------------------------
+
+
+class TestTheLivePathThroughTheSeam:
+    """Один узел обязан идти тем путём, которым идёт живой ход.
+
+    Почему это отдельное требование, а не перестраховка: признак появился у
+    `SkillResult`, а `TurnReply` его не нёс, и единственный читатель —
+    исходящий гейт — стоит ЗА швом (`apps/orchestrator/turn_seam.py`). Узлы
+    выше зовут `evaluate_outbound` напрямую, поэтому шов в их проверке не
+    участвует вовсе: 21 зелёный узел и «0 из 2000» были правдой про функцию и
+    неправдой про продукт. Поймал это сторож шва (`seam_field_loss`), а не мой
+    набор.
+
+    Здесь ход идёт целиком: событие канала → обработчик → шов → навык → шов →
+    гейт → отправка. И проверяется не карта переноса, а ПОВЕДЕНИЕ: человек
+    получил свои данные.
+
+    Телефон в истории нужен затем, что без него маскировки машинных
+    идентификаторов достаточно самой по себе, и узел прошёл бы даже с потерянным
+    на шве признаком — то есть не доказывал бы ничего про признак.
+    """
+
+    PHONE = "8 999 123 45 67"
+
+    @pytest.mark.django_db
+    def test_the_person_gets_their_own_data_through_the_live_path(self, monkeypatch) -> None:
+        from apps.channels.max import handler as max_handler
+        from apps.channels.max import outbound as max_outbound
+        from apps.conversations.services import record_message, resolve_active_conversation
+        from apps.identity.services.resolver import resolve_or_create_bot_user
+        from apps.orchestrator.memory import short_term
+        from apps.orchestrator.memory.tests.test_short_term import _FakeRedis
+        from apps.replay.golden_path import build_max_payload
+        from apps.tenancy.context import tenant_scope
+        from apps.tenancy.models import Tenant
+
+        fake = _FakeRedis()
+        monkeypatch.setattr(short_term, "_redis_client", lambda: fake)
+        monkeypatch.setattr(max_outbound, "send_chat_action", lambda *a, **k: None)
+        sent: list[str] = []
+
+        def fake_send(*, chat_id, text, attachments=None, timeout=10.0):
+            sent.append(text)
+            return {"ok": True}
+
+        monkeypatch.setattr(max_handler, "send_message", fake_send)
+
+        tenant = Tenant.objects.create(slug="own-data-2435", name="Own Data 2435")
+        uid = "724350"
+        with tenant_scope(tenant):
+            bot_user = resolve_or_create_bot_user(
+                channel="max", channel_user_id=uid, chat_id=uid,
+            )
+            bot_user.welcomed_at = timezone.now()
+            bot_user.save(update_fields=["welcomed_at"])
+            conversation = resolve_active_conversation(bot_user, create_if_missing=True)
+            assert conversation is not None
+            # История человека содержит номер, который он сам когда-то написал.
+            record_message(
+                conversation, role="user",
+                content=f"мастер просила передать {self.PHONE}",
+            )
+
+            max_handler.handle_max_event(
+                build_max_payload("выгрузить мои данные", user_id=uid, mid=f"own-{uid}")
+            )
+
+        assert sent, "ход не отправил человеку ничего"
+        reply = "\n".join(sent)
+        # Сначала о НАЛИЧИИ: это именно ответ выгрузки, а не подмена.
+        assert "Ваши данные" in reply, f"вместо выгрузки ушло: {reply[:120]!r}"
+        assert "данные" in reply.casefold()
+        # И телефон из собственной истории дошёл вместе с архивом — то есть
+        # признак пережил шов. Потеряется на шве — здесь будет подмена.
+        assert self.PHONE in reply
