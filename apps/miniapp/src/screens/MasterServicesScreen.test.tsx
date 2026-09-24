@@ -46,7 +46,6 @@ vi.mock("../lib/master-api", async (importOriginal) => {
 });
 
 import { ApiError } from "../lib/api";
-import { SUPPORT_DEEPLINK } from "../lib/customer-profile";
 import {
   createCanonGapRequest,
   getMasterCatalog,
@@ -555,13 +554,27 @@ describe("MasterServicesScreen — экран 04 «Цены и длительн�
     expect(screen.queryByRole("button", { name: "Продолжить" })).not.toBeInTheDocument();
   });
 
-  it("S10: not linked → «Доступ не настроен», operator links, support contact, no editing", async () => {
+  // Узел ПЕРЕВЁРНУТ (DRF-2378) — по решению владельца, не по правке кода.
+  //
+  // Было: текст называл исполнителем «оператора», а дверь вела во ВНЕШНЮЮ
+  // поддержку (`SUPPORT_DEEPLINK`). Роли «оператор» в системе нет вовсе —
+  // одним словом названы группа `Ayla Operations`, флаг
+  // `is_platform_admin` каталога и пустой `HANDOFF_DUTY_OPERATORS`; ни
+  // одна не даёт права привязки. Адресат теперь студия, и чат у неё
+  // существует (`/master/internal-chat`, «Со студией»).
+  //
+  // Что при этом перестало проверяться: внешняя поддержка с этого экрана
+  // больше не достижима — это следствие решения, а не потеря по
+  // недосмотру. Заголовок «Доступ не настроен» остался: он говорит, что
+  // это за блок, и листом про слово не снимается.
+  it("S10: not linked → «Доступ не настроен», дверь к студии, редактирования нет", async () => {
     mockedSelection.mockRejectedValue(new ApiError(403, "not_linked", "…"));
     await renderScreen();
 
     expect(screen.getByRole("heading", { name: "Доступ не настроен" })).toBeInTheDocument();
-    expect(screen.getByText("Профиль ещё не привязан — привязку выполнит оператор.")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Написать в поддержку" })).toHaveAttribute("href", SUPPORT_DEEPLINK);
+    expect(screen.getByText("Профиль пока не подключён — услуги пока не настроить.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Написать студии" })).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Написать в поддержку" })).toBeNull();
     expect(screen.queryByRole("region", { name: "Цены и длительность" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Продолжить" })).not.toBeInTheDocument();
   });
