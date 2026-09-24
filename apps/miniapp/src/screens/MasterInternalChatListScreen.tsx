@@ -354,7 +354,7 @@ export function MasterInternalChatListScreen() {
       hapticNotify("error");
       const msg =
         e instanceof ApiError
-          ? e.detail || COPY.toastCreateError
+          ? COPY.toastCreateError
           : COPY.toastCreateError;
       setSheet({ ...sheet, submitting: false, err: msg });
     }

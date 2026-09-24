@@ -242,12 +242,21 @@ describe("решение доезжает до сервера", () => {
     expect(mockedApprove).not.toHaveBeenCalled();
   });
 
-  it("отказ сервера остаётся отказом: строка на месте, сказано слово сервера", async () => {
+  it("отказ сервера остаётся отказом: строка на месте, внутреннего текста нет", async () => {
     salonHas(OLGA);
-    // Причина, которую экран не мог бы выдумать: заготовка «Не получилось
-    // одобрить» прошла бы проверку и при полностью проглоченном ответе.
+    // DRF-2451. Раньше здесь стояла выдуманная русская причина («Мастер уже
+    // в отпуске в эти дни»), и узел требовал напечатать её. Сервер таких слов
+    // не производит: отказы решения приходят по-английски —
+    // `admin_api/services/availability.py:206` говорит «There are active
+    // bookings in this period…». То есть узел охранял строку, которой нет, и
+    // разрешал ту, которую человек не должен видеть.
+    //
+    // Забота автора узла верна и сохранена: «заготовка прошла бы проверку и
+    // при полностью проглоченном ответе». Поэтому отказ отличается от
+    // молчания двумя фактами сразу — плашка появилась И заявка осталась
+    // неразобранной (при успехе она уходит из списка).
     mockedApprove.mockRejectedValue(
-      new ApiError(409, "conflict", "Мастер уже в отпуске в эти дни"),
+      new ApiError(409, "conflict", "There are active bookings in this period."),
     );
 
     open();
@@ -256,7 +265,9 @@ describe("решение доезжает до сервера", () => {
     const sheet = await screen.findByRole("dialog", { name: "Подтвердить одобрение" });
     await userEvent.click(within(sheet).getByRole("button", { name: "Одобрить" }));
 
-    expect(await screen.findByText("Мастер уже в отпуске в эти дни")).toBeInTheDocument();
+    expect(await screen.findByText("Не получилось одобрить")).toBeInTheDocument();
+    expect(screen.queryByText(/active bookings/)).toBeNull();
+    // Заявка на месте — значит ответ не проглочен и не принят молча.
     expect(screen.getByText("Ольга")).toBeInTheDocument();
   });
 });

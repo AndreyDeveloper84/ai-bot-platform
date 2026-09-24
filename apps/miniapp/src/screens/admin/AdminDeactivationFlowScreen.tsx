@@ -1025,7 +1025,7 @@ export function AdminDeactivationFlowScreen({ me }: Props) {
           role="alert"
           style={{ marginTop: "var(--s-3)" }}
         >
-          {state.submitErr.detail || "Не получилось деактивировать"}
+          {"Не получилось деактивировать"}
         </div>
       )}
 

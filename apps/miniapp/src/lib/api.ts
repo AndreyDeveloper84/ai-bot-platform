@@ -61,6 +61,7 @@ export async function requestWithStatus<T>(
     } catch {
       /* non-JSON 5xx */
     }
+    logApiDetail(res.status, body.error, body.detail);
     throw new ApiError(res.status, body.error, body.detail, body.details);
   }
   if (res.status === 204) return { status: res.status, data: undefined as T };
@@ -917,3 +918,16 @@ export const submitFeedback = (
     method: "POST",
     body: JSON.stringify(body),
   });
+
+/** Журнал вместо экрана: серверный `detail` нужен нам, а не человеку.
+ *
+ * DRF-2446 убрал его с общего хвоста ошибки, DRF-2451 — с экранов, у
+ * которых уже была согласованная фраза. Чтобы диагностика не пропала
+ * вместе с показом, `detail` пишется здесь, в одном месте на клиент: так
+ * не нужно ставить строку журнала на каждый из двадцати пяти экранов, и
+ * следующему не придётся возвращать `detail` на экран, «чтобы было видно».
+ */
+export function logApiDetail(status: number, slug: string, detail: string): void {
+  if (!detail) return;
+  console.warn(`[api-detail] ${status} ${slug}: ${detail}`);
+}

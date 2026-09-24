@@ -300,7 +300,7 @@ export function MasterInternalChatThreadScreen() {
         );
         const detail =
           e instanceof ApiError
-            ? e.detail || COPY.toastSendError
+            ? COPY.toastSendError
             : COPY.toastSendError;
         setToast({
           visible: true,
@@ -384,7 +384,7 @@ export function MasterInternalChatThreadScreen() {
       hapticNotify("error");
       const detail =
         e instanceof ApiError
-          ? e.detail || COPY.escalateErrorToast
+          ? COPY.escalateErrorToast
           : COPY.escalateErrorToast;
       setEscalateSheet({ ...escalateSheet, submitting: false, err: detail });
     }

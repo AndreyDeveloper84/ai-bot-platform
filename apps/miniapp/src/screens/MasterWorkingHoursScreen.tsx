@@ -740,7 +740,7 @@ export function MasterWorkingHoursScreen() {
 function requestErrorText(err: unknown): string {
   if (err instanceof ApiError) {
     if (err.slug === NOT_LINKED_SLUG) return NOT_LINKED_MESSAGE;
-    if (err.status === 400) return err.detail || REQUEST_FAILED;
+    if (err.status === 400) return REQUEST_FAILED;
     if (err.status === 409) return CONFLICT_MESSAGE;
   }
   return REQUEST_FAILED;
@@ -750,7 +750,7 @@ function saveErrorText(err: unknown): string {
   if (err instanceof ApiError) {
     if (err.status === 409) return CONFLICT_MESSAGE;
     if (err.slug === NOT_LINKED_SLUG) return NOT_LINKED_MESSAGE;
-    if (err.status === 400) return err.detail || INVALID_INTERVAL;
+    if (err.status === 400) return INVALID_INTERVAL;
   }
   return "Не удалось сохранить. Попробуйте ещё раз.";
 }

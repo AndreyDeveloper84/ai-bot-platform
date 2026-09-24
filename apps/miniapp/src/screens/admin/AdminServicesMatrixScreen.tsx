@@ -403,7 +403,7 @@ export function AdminServicesMatrixScreen({ me }: Props) {
       } catch (e) {
         hapticNotify("error");
         if (e instanceof ApiError) {
-          setErrBanner(e.detail || "Не получилось сохранить");
+          setErrBanner("Не получилось сохранить");
         } else {
           setErrBanner("Связь пропала. Проверьте интернет.");
         }

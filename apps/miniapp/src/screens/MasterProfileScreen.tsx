@@ -399,7 +399,7 @@ export function MasterProfileScreen() {
         setCropFile(null);
         setToast(PROFILE_COPY.toasts.photoSaved);
       } catch (e) {
-        setPhotoErr(e instanceof ApiError ? e.detail || PROFILE_COPY.states.photoNetwork : PROFILE_COPY.states.photoNetwork);
+        setPhotoErr(PROFILE_COPY.states.photoNetwork);
         hapticNotify("error");
       } finally {
         setPhotoUploading(false);
@@ -433,7 +433,7 @@ export function MasterProfileScreen() {
         hapticNotify("success");
         setToast(PROFILE_COPY.toasts.workAdded);
       } catch (e) {
-        setWorkErr(e instanceof ApiError ? e.detail || PROFILE_COPY.states.photoNetwork : PROFILE_COPY.states.photoNetwork);
+        setWorkErr(PROFILE_COPY.states.photoNetwork);
         hapticNotify("error");
       } finally {
         setWorkBusy(false);

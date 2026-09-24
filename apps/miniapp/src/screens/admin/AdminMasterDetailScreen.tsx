@@ -600,7 +600,7 @@ export function AdminMasterDetailScreen({ me }: Props) {
           setEditor({
             ...editor,
             saving: false,
-            err: e.detail || "Не получилось сохранить",
+            err: "Не получилось сохранить",
           });
         }
       } else {
@@ -637,7 +637,7 @@ export function AdminMasterDetailScreen({ me }: Props) {
         setToast("✓ Фото обновлено");
       } catch (e) {
         if (e instanceof ApiError) {
-          setPhotoErr(e.detail || "Не получилось загрузить фото");
+          setPhotoErr("Не получилось загрузить фото");
         } else {
           setPhotoErr("Связь пропала. Проверьте интернет.");
         }
@@ -665,7 +665,7 @@ export function AdminMasterDetailScreen({ me }: Props) {
     } catch (e) {
       const msg =
         e instanceof ApiError
-          ? e.detail || "Не получилось восстановить"
+          ? "Не получилось восстановить"
           : "Связь пропала — попробуйте ещё раз";
       setToast(msg);
     } finally {

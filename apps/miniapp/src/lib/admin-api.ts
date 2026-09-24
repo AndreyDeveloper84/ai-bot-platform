@@ -16,7 +16,7 @@
  */
 
 import { getInitData } from "./max-sdk";
-import { ApiError } from "./api";
+import { ApiError, logApiDetail } from "./api";
 import { applyDevBypassHeaders } from "./dev-bypass";
 import { applySalonChoiceHeader } from "./salon-choice";
 
@@ -69,6 +69,7 @@ async function requestWithResponse<T>(
     } catch {
       /* non-JSON 5xx */
     }
+    logApiDetail(res.status, parsed.error, parsed.detail);
     throw new ApiError(res.status, parsed.error, parsed.detail, parsed.details);
   }
   if (res.status === 204) {

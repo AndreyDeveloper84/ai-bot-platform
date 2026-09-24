@@ -353,7 +353,7 @@ export function AdminTeamScreen({ me }: Props) {
     } catch (e) {
       const msg =
         e instanceof ApiError
-          ? e.detail || "Не получилось восстановить"
+          ? "Не получилось восстановить"
           : "Сеть недоступна — попробуйте ещё раз";
       setToast(msg);
     } finally {

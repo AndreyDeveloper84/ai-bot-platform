@@ -284,6 +284,11 @@ export function AylaChat({
         }
         setPending(res.pending_action);
       } catch (err) {
+        // DRF-2451: здесь `detail` НЕ снимается. Это намеренный носитель
+        // согласованного русского: отказы действий ассистента пишутся
+        // словами владельца на сервере (`assistant.py`, `assistant_actions.py`
+        // — «подтверждение устарело — спросите заново»), и текст отказа тут
+        // же говорит человеку, что делать (DRF-2373).
         const detail =
           err instanceof ApiError && err.detail ? err.detail : FAILED_TEXT;
         setError(detail);
@@ -334,6 +339,8 @@ export function AylaChat({
         },
       ]);
     } catch (err) {
+      // DRF-2451: `detail` не снимается — носитель согласованного русского
+      // (отказы действий ассистента, DRF-2373). Подробнее — выше по файлу.
       const detail =
         err instanceof ApiError && err.detail ? err.detail : FAILED_TEXT;
       if (isOfferStillLive(err)) {

@@ -162,7 +162,7 @@ export function RescheduleScreen() {
         // Reload slots — the picked one is now gone.
         load();
       } else if (err instanceof ApiError) {
-        setError(err.detail || "Не получилось перенести.");
+        setError("Не получилось перенести.");
       } else {
         setError("Не получилось перенести. Проверьте интернет.");
       }

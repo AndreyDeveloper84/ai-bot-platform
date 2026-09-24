@@ -288,7 +288,7 @@ export function AdminAvailabilityRequestsScreen({ me }: Props) {
         } else {
           const msg =
             e instanceof ApiError
-              ? e.detail || "Не получилось загрузить ещё"
+              ? "Не получилось загрузить ещё"
               : "Сеть недоступна — попробуйте ещё раз";
           setToast(msg);
         }
@@ -417,7 +417,7 @@ export function AdminAvailabilityRequestsScreen({ me }: Props) {
       hapticNotify("error");
       const msg =
         e instanceof ApiError
-          ? e.detail || "Не получилось одобрить"
+          ? "Не получилось одобрить"
           : "Сеть недоступна — попробуйте ещё раз";
       setToast(msg);
       setApproveState((s) => ({ ...s, submitting: false }));
@@ -499,7 +499,7 @@ export function AdminAvailabilityRequestsScreen({ me }: Props) {
       hapticNotify("error");
       const msg =
         e instanceof ApiError
-          ? e.detail || "Не получилось отклонить"
+          ? "Не получилось отклонить"
           : "Сеть недоступна — попробуйте ещё раз";
       // Preserve user's typed reason on failure.
       setRejectState((s) => ({

@@ -350,7 +350,7 @@ export function MasterNotificationSettingsScreen() {
         const msg =
           slug === "time_invalid"
             ? COPY.modal.sameTimeError
-            : e.detail || COPY.toasts.saveError;
+            : COPY.toasts.saveError;
         setEditor({ ...editor, saving: false, err: msg });
       } else {
         setOfflineBanner(true);

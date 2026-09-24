@@ -269,12 +269,12 @@ export function AddPersonNewMasterSection({ me, switcher }: Props) {
           } else if (e.detail.toLowerCase().includes("name")) {
             setFieldErrors({ name: e.detail });
           } else {
-            setBannerError(e.detail || "Не получилось отправить");
+            setBannerError("Не получилось отправить");
           }
         } else if (e.status >= 500) {
           setBannerError("MAX не отвечает — попробуйте позже");
         } else {
-          setBannerError(e.detail || "Не получилось отправить");
+          setBannerError("Не получилось отправить");
         }
       } else {
         setBannerOffline(true);
