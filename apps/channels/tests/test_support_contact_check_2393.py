@@ -86,8 +86,11 @@ def test_check_is_registered() -> None:
 
     from django.core.checks import registry
 
+    # `getattr`, а не прямой доступ: реестр отдаёт обёртки, и у их типа
+    # `__name__`/`__module__` не объявлены — mypy это ловит. Соседний
+    # сторож (`test_payments_mode_declared_2340.py`) написан так же.
     names = {
-        f"{c.__module__}.{c.__name__}"
+        f"{getattr(c, '__module__', '')}.{getattr(c, '__name__', '')}"
         for c in registry.registry.get_checks(include_deployment_checks=False)
     }
     assert "apps.channels.checks.check_support_contact_named" in names
