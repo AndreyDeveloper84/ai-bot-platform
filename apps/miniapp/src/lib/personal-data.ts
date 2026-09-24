@@ -86,6 +86,12 @@ export class PersonalDataPartialDeleteError extends Error {
 interface ErrorBody {
   error: string;
   detail: string;
+  /**
+   * Структурные подробности отказа (DRF-1708). Сегодня выгрузка C5.1 их не
+   * присылает — поле объявлено, чтобы клиент перестал быть местом, где оно
+   * теряется молча, когда сервер начнёт (DRF-2439).
+   */
+  details?: Record<string, unknown>;
 }
 
 function buildAuthHeaders(): Headers {
@@ -104,7 +110,7 @@ async function throwApiError(res: Response): Promise<never> {
   } catch {
     /* non-JSON 5xx */
   }
-  throw new ApiError(res.status, body.error, body.detail);
+  throw new ApiError(res.status, body.error, body.detail, body.details);
 }
 
 /** C5.1 — fetch the aggregated personal-data export as a Blob. */

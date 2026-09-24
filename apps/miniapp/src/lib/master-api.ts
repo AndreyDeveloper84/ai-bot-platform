@@ -918,7 +918,11 @@ export const uploadPortfolioPhoto = async (
     } catch {
       /* non-JSON 5xx */
     }
-    throw new ApiError(res.status, parsed.error, parsed.detail);
+    // DRF-2439: сегодня сервер здесь `details` не присылает — аргумент
+    // добавлен, чтобы поле не потерялось молча, когда начнёт. Правило
+    // живёт в помощнике `request`, а этот `fetch` написан руками — multipart (boundary ставит браузер),
+    // то есть мимо помощника: `POST master/profile/portfolio`.
+    throw new ApiError(res.status, parsed.error, parsed.detail, parsed.details);
   }
   return (await res.json()) as PortfolioItem;
 };

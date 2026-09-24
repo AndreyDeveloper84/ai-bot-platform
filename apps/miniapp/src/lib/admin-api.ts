@@ -1470,7 +1470,11 @@ export const uploadMasterPhoto = async (
     } catch {
       /* non-JSON 5xx */
     }
-    throw new ApiError(res.status, parsed.error, parsed.detail);
+    // DRF-2439: сегодня сервер здесь `details` не присылает — аргумент
+    // добавлен, чтобы поле не потерялось молча, когда начнёт. Правило
+    // живёт в помощнике `requestWithResponse`, а этот `fetch` написан руками — multipart (boundary ставит браузер),
+    // то есть мимо помощника: `POST admin/masters/<id>/photo/`.
+    throw new ApiError(res.status, parsed.error, parsed.detail, parsed.details);
   }
   return (await res.json()) as MasterPhotoUploadResponse;
 };
@@ -1671,7 +1675,11 @@ export const patchServicesMapping = async (
     } catch {
       /* non-JSON 5xx */
     }
-    throw new ApiError(res.status, parsed.error, parsed.detail);
+    // DRF-2439: сегодня сервер здесь `details` не присылает — аргумент
+    // добавлен, чтобы поле не потерялось молча, когда начнёт. Правило
+    // живёт в помощнике `requestWithResponse`, а этот `fetch` написан руками — снимок матрицы посылается целиком,
+    // то есть мимо помощника: `POST admin/services-mapping/bulk/`.
+    throw new ApiError(res.status, parsed.error, parsed.detail, parsed.details);
   }
   return (await res.json()) as ServicesMappingBulkResult;
 };
@@ -1794,7 +1802,13 @@ async function decisionFetch(
     if (slug !== "already_decided" && slug !== "overlap_conflict") {
       // Unknown 409 — surface as ApiError so the caller's generic
       // error path renders it.
-      throw new ApiError(res.status, slug, parsed.detail);
+      //
+      // DRF-2439: сегодня сервер здесь `details` не присылает — аргумент
+      // добавлен, чтобы поле не потерялось молча, когда начнёт. `fetch`
+      // написан руками не из-за multipart, а потому что 409 для этой
+      // операции — ИСХОД («уже решено», «пересечение»), а не ошибка, и
+      // общий помощник бросил бы на нём исключение.
+      throw new ApiError(res.status, slug, parsed.detail, parsed.details);
     }
     const detail = parsed.detail || "";
     return {
@@ -1813,7 +1827,9 @@ async function decisionFetch(
     } catch {
       /* non-JSON 5xx */
     }
-    throw new ApiError(res.status, parsed.error, parsed.detail);
+    // DRF-2439: та же причина, что у 409 выше — эта функция живёт мимо
+    // помощника целиком, поэтому и второй её выход поле доносит.
+    throw new ApiError(res.status, parsed.error, parsed.detail, parsed.details);
   }
   const envelope = (await res.json()) as DecisionEnvelope;
   return envelope.request;
