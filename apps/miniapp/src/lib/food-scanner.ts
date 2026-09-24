@@ -43,11 +43,22 @@
 
 import { ApiError, request } from "./api";
 
+/**
+ * DRF-2371 — числа МОГУТ отсутствовать, и отсутствие — не ноль.
+ *
+ * Каталог отдаёт запись и тогда, когда считать нечем: порция неизвестна
+ * или блюда нет в справочнике. На месте калорий приходит `null`. Ноль
+ * означал бы «съел и не получил калорий» — это другое утверждение, и
+ * произносить его за человека нельзя. Различение причины пробела
+ * («нет блюда» / «нет веса») наружу не выведено — п. 3 DRF-2335 ждёт
+ * слова владельца; форма ответа причиной не является и признаком её
+ * подменять нельзя.
+ */
 export interface NutritionFacts {
-  calories: number;
-  protein_g: number;
-  fat_g: number;
-  carbs_g: number;
+  calories: number | null;
+  protein_g: number | null;
+  fat_g: number | null;
+  carbs_g: number | null;
   vitamins?: Record<string, number | string>;
 }
 
