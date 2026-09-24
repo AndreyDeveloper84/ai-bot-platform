@@ -178,6 +178,40 @@ a {
 }
 
 /* Secondary button used in error / empty / not-found states. */
+/* Главное действие экрана (DRF-2380).
+   ========================================================================
+   Правила первого уровня у `.btn-primary` НЕ БЫЛО, хотя класс стоял в 86
+   местах 33 файлов. Три из них выглядели верно — их накрывали два
+   потомковых островка (`.master-profile .btn-primary`,
+   `.m-notif__sheet .btn-primary`); остальные 83 рисовались глобальным
+   сбросом `button {}` выше, то есть как обычный текст без фона.
+
+   Объявление ниже — это те самые островки, поднятые на первый уровень
+   дословно: ни одного своего решения о виде. Островки после этого стали
+   повтором и сняты; их `:disabled` тоже здесь.
+
+   Чего здесь НЕТ намеренно: `:active`. У соседнего `.btn-secondary` он
+   есть, у островков не было, и добавить его значило бы решить за макет,
+   как главная кнопка отзывается на нажатие. Названо отступлением в PR —
+   владельцу, а не молча.
+   ======================================================================== */
+.btn-primary {
+  background: var(--c-accent);
+  color: var(--c-text-on-accent);
+  border: 0;
+  border-radius: var(--r-md);
+  padding: var(--s-2) var(--s-4);
+  font: inherit;
+  font-weight: 600;
+  min-height: 44px;
+  cursor: pointer;
+}
+
+.btn-primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .btn-secondary {
   display: inline-block;
   padding: var(--s-2) var(--s-4);
@@ -1897,10 +1931,15 @@ a {
 /* ---- «Сегодня»: содержимое главного экрана (DRF-1236) ---- */
 
 /*
- * Главное действие экрана. Своего `.btn-primary` в приложении нет —
- * заливка акцентом живёт только в `.cta-bar__button`, а он приколочен к
- * низу экрана, где уже стоит панель вкладок. Кнопка на макете стоит в
- * потоке, сразу под датой, поэтому правило своё, а токены — те же.
+ * Главное действие экрана. Правило своё, а токены те же: кнопка на макете
+ * стоит В ПОТОКЕ, сразу под датой, тогда как `.cta-bar__button` приколочен
+ * к низу экрана, где уже стоит панель вкладок.
+ *
+ * Прежняя причина («своего `.btn-primary` в приложении нет») с DRF-2380
+ * неверна: он есть и лежит первым уровнем рядом с `.btn-secondary`.
+ * Правило остаётся из-за РАСКЛАДКИ, а не из-за отсутствия класса;
+ * перевести экран на общую кнопку — отдельное решение о виде, и оно не
+ * принимается заодно.
  */
 .salon-today__cta {
   display: block;
@@ -3832,25 +3871,7 @@ a {
   margin-top: var(--s-2);
 }
 
-/* Primary save button — reuse accent treatment. */
-.master-profile__sheet .btn-primary,
-.master-profile .btn-primary {
-  background: var(--c-accent);
-  color: var(--c-text-on-accent);
-  border: 0;
-  border-radius: var(--r-md);
-  padding: var(--s-2) var(--s-4);
-  font: inherit;
-  font-weight: 600;
-  min-height: 44px;
-  cursor: pointer;
-}
-
-.master-profile__sheet .btn-primary:disabled,
-.master-profile .btn-primary:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
+/* Главная кнопка листа профиля — теперь общая `.btn-primary` (DRF-2380). */
 
 /* ===========================================================
    M7 — Master notification settings (Bundle B / item 3)
@@ -4107,22 +4128,7 @@ a {
   gap: var(--s-2);
 }
 
-.m-notif__sheet .btn-primary {
-  background: var(--c-accent);
-  color: var(--c-text-on-accent);
-  border: 0;
-  border-radius: var(--r-md, 8px);
-  padding: var(--s-2) var(--s-4);
-  font: inherit;
-  font-weight: 600;
-  min-height: 44px;
-  cursor: pointer;
-}
-
-.m-notif__sheet .btn-primary:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
+/* Главная кнопка листа уведомлений — теперь общая `.btn-primary` (DRF-2380). */
 
 .m-notif__skeleton-wrap {
   padding: var(--s-3);
@@ -5470,7 +5476,8 @@ a {
  * Карточка цели, один блок согласия, «План на сегодня», карточка записи,
  * «Продолжить разговор с Ayla», компактный ряд быстрых действий.
  * Токены — те же, что у всего экрана; заливка акцентом у главного
- * действия — как `.salon-today__cta` (своего `.btn-primary` нет).
+ * действия — как `.salon-today__cta`. (Оговорка «своего `.btn-primary`
+ * нет» с DRF-2380 устарела: он есть; здесь дело в раскладке.)
  * ────────────────────────────────────────────────────────────────── */
 
 /* Главное действие в потоке: «Продолжить сегодняшний план», «Составить

@@ -50,7 +50,7 @@ def test_a_class_with_no_rule_is_reported(tmp_path: Path) -> None:
         css=".other { color: red; }\n",
     )
 
-    assert guard.scan(root) == ["src/screens/S.tsx::lonely"]
+    assert guard.scan(root)[0] == ["src/screens/S.tsx::lonely"]
 
 
 def test_a_class_with_a_rule_is_not_reported(tmp_path: Path) -> None:
@@ -60,7 +60,7 @@ def test_a_class_with_a_rule_is_not_reported(tmp_path: Path) -> None:
         css=".styled { display: block; }\n",
     )
 
-    assert guard.scan(root) == []
+    assert guard.scan(root)[0] == []
 
 
 def test_every_name_in_a_multi_class_attribute_is_checked(tmp_path: Path) -> None:
@@ -71,7 +71,7 @@ def test_every_name_in_a_multi_class_attribute_is_checked(tmp_path: Path) -> Non
         css=".ok {}\n.also-ok {}\n",
     )
 
-    assert guard.scan(root) == ["src/screens/S.tsx::missing"]
+    assert guard.scan(root)[0] == ["src/screens/S.tsx::missing"]
 
 
 def test_runtime_built_class_names_are_deliberately_ignored(tmp_path: Path) -> None:
@@ -82,7 +82,7 @@ def test_runtime_built_class_names_are_deliberately_ignored(tmp_path: Path) -> N
         css="",
     )
 
-    assert guard.scan(root) == []
+    assert guard.scan(root)[0] == []
 
 
 def test_test_files_are_not_scanned(tmp_path: Path) -> None:
@@ -94,7 +94,7 @@ def test_test_files_are_not_scanned(tmp_path: Path) -> None:
         rel="src/screens/S.test.tsx",
     )
 
-    assert guard.scan(root) == []
+    assert guard.scan(root)[0] == []
 
 
 def test_all_stylesheets_in_the_styles_dir_count(tmp_path: Path) -> None:
@@ -106,7 +106,7 @@ def test_all_stylesheets_in_the_styles_dir_count(tmp_path: Path) -> None:
     )
     (root / "src" / "styles" / "tokens.css").write_text(".from-tokens {}\n", encoding="utf-8")
 
-    assert guard.scan(root) == []
+    assert guard.scan(root)[0] == []
 
 
 def test_a_missing_styles_directory_is_a_refusal_not_a_pass(tmp_path: Path) -> None:
@@ -130,6 +130,11 @@ def test_accepted_debt_passes_and_new_debt_fails(
         css="",
     )
     monkeypatch.setattr(guard, "BASELINE", frozenset({"src/screens/S.tsx::known"}))
+    # Реестров у сторожа два (DRF-2380), и оба описывают НАСТОЯЩЕЕ дерево:
+    # без подмены второго его записи читаются как устаревшие для этого
+    # маленького корня, и `main` вернёт 1 по причине, к предмету теста
+    # отношения не имеющей.
+    monkeypatch.setattr(guard, "DESCENDANT_ONLY", frozenset())
     assert guard.main(["miniapp_style_contract.py", str(root)]) == 0
 
     (root / "src" / "screens" / "S.tsx").write_text(
@@ -148,6 +153,7 @@ def test_a_baseline_entry_that_got_styled_must_be_deleted(
         css=".was-debt { display: block; }\n",
     )
     monkeypatch.setattr(guard, "BASELINE", frozenset({"src/screens/S.tsx::was-debt"}))
+    monkeypatch.setattr(guard, "DESCENDANT_ONLY", frozenset())
 
     assert guard.main(["miniapp_style_contract.py", str(root)]) == 1
 
@@ -212,6 +218,7 @@ def test_a_root_with_no_tab_bars_at_all_is_not_a_problem(
     # without this every entry reads as stale and `main` returns 1 for a
     # reason that has nothing to do with tab bars.
     monkeypatch.setattr(guard, "BASELINE", frozenset())
+    monkeypatch.setattr(guard, "DESCENDANT_ONLY", frozenset())
 
     assert guard.scan_tabbar_columns(root) == []
     assert guard.main(["miniapp_style_contract.py", str(root)]) == 0
@@ -340,7 +347,8 @@ def test_the_real_chip_rows_wrap() -> None:
 
 def test_the_real_miniapp_matches_its_baseline_exactly() -> None:
     app_root = _PROJECT_ROOT / "apps" / "miniapp"
-    found = set(guard.scan(app_root))
+    unstyled, descendant, seen = guard.scan(app_root)
+    found = set(unstyled)
 
     assert sorted(found - guard.BASELINE) == [], "new unstyled classes — add a rule, not an entry"
     assert sorted(guard.BASELINE - found) == [], "stale baseline entries — delete these lines"
@@ -360,3 +368,105 @@ def test_the_booking_confirm_payment_block_is_styled() -> None:
         "customer-confirm__payment-hint",
     ):
         assert f".{name}" in css, f"{name} lost its rule — the payment block runs together again"
+
+
+# --------------------------------------------------------------------------
+# DRF-2380: правило под предком — не то же, что правило.
+# --------------------------------------------------------------------------
+
+
+def test_a_class_styled_only_under_an_ancestor_is_reported(tmp_path: Path) -> None:
+    """Подстрочная проверка считала такой класс определённым.
+
+    Ровно на этом сторож был зелен, пока `.btn-primary` не имел правила
+    первого уровня: `.master-profile .btn-primary` содержит подстроку
+    `.btn-primary`, и проверка отвечала «есть». А в остальных 83 местах
+    класс оставался голым.
+    """
+    root = _app(
+        tmp_path,
+        tsx='export const S = () => <p className="only-inside">x</p>;\n',
+        css=".parent .only-inside { color: red; }\n",
+    )
+
+    unstyled, descendant, _ = guard.scan(root)
+    # Присутствие первым: «правила нет» здесь неверно — оно есть.
+    assert unstyled == []
+    assert descendant == ["src/screens/S.tsx::only-inside"]
+
+
+def test_a_first_level_rule_clears_the_descendant_verdict(tmp_path: Path) -> None:
+    root = _app(
+        tmp_path,
+        tsx='export const S = () => <p className="both">x</p>;\n',
+        css=".parent .both { color: red; }\n.both { display: block; }\n",
+    )
+
+    unstyled, descendant, seen = guard.scan(root)
+    assert seen == 1
+    assert (unstyled, descendant) == ([], [])
+
+
+def test_a_longer_class_name_does_not_cover_a_shorter_one(tmp_path: Path) -> None:
+    """Вторая половина той же болезни, и она страшнее.
+
+    `.working-hours` подстрокой находилось внутри `.working-hours__item`,
+    `.btn` — внутри `.btn-primary`. Сторож считал определённым класс,
+    правила у которого нет ВОВСЕ. Так пряталось 18 мест.
+    """
+    root = _app(
+        tmp_path,
+        tsx='export const S = () => <p className="thing">x</p>;\n',
+        css=".thing__part { color: red; }\n",
+    )
+
+    unstyled, descendant, _ = guard.scan(root)
+    assert unstyled == ["src/screens/S.tsx::thing"]
+    assert descendant == []
+
+
+def test_pseudo_classes_still_count_as_a_first_level_rule(tmp_path: Path) -> None:
+    root = _app(
+        tmp_path,
+        tsx='export const S = () => <p className="pressable">x</p>;\n',
+        css=".pressable:disabled { opacity: 0.5; }\n",
+    )
+
+    assert guard.scan(root)[0] == []
+
+
+def test_a_big_tree_that_yields_no_class_names_is_a_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Пустой вход не должен читаться как «всё хорошо».
+
+    Сломается шаблон `className` или путь к исходникам — прежний сторож
+    отчитался бы «clean». Порог растёт вместе с деревом: фикстура из
+    одного файла проходит, большое дерево без единого имени — нет.
+    """
+    root = tmp_path / "miniapp"
+    (root / "src" / "styles").mkdir(parents=True)
+    (root / "src" / "styles" / "globals.css").write_text(".x {}\n", encoding="utf-8")
+    for i in range(guard.MIN_SCREENS_FOR_FLOOR):
+        screen = root / "src" / "screens" / f"S{i}.tsx"
+        screen.parent.mkdir(parents=True, exist_ok=True)
+        # Имена строятся в рантайме — статический разбор их не видит.
+        screen.write_text("export const S = () => <p className={cx('a')} />;\n", encoding="utf-8")
+    monkeypatch.setattr(guard, "BASELINE", frozenset())
+    monkeypatch.setattr(guard, "DESCENDANT_ONLY", frozenset())
+
+    # Присутствие первым: экраны на месте, значит отказ ниже — про имена.
+    assert len(list((root / "src").rglob("*.tsx"))) == guard.MIN_SCREENS_FOR_FLOOR
+    assert guard.main(["miniapp_style_contract.py", str(root)]) == 1
+
+
+def test_the_real_miniapp_has_a_first_level_rule_for_the_primary_button() -> None:
+    """DRF-2380 поимённо: возврат правила в островки не пройдёт тихо."""
+    app_root = _PROJECT_ROOT / "apps" / "miniapp"
+    _, unconditional = guard.selector_classes(guard.stylesheet_text(app_root))
+
+    assert "btn-secondary" in unconditional, "сосед пропал — проверь разбор селекторов"
+    assert "btn-primary" in unconditional, (
+        "у главной кнопки снова нет правила первого уровня — 83 места "
+        "рисуются глобальным сбросом button {}, то есть как обычный текст"
+    )
