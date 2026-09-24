@@ -122,7 +122,10 @@ export function FoodScannerProcessingScreen() {
         if (controller.signal.aborted) return;
         navigate("/customer/food-scanner/result", {
           replace: true,
-          state: { result, photo, mealType, previewUrl, returnTo: state.returnTo },
+          // `previewUrl` НЕ передаётся (DRF-2399): адресом владеет тот,
+          // кто рисует. Экран результата получает файл и делает свой —
+          // иначе адрес переживал бы владельца и умирал у чужого экрана.
+          state: { result, photo, mealType, returnTo: state.returnTo },
         });
       } catch (err) {
         if (controller.signal.aborted) return;

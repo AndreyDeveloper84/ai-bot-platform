@@ -66,7 +66,25 @@ export function FoodScannerResultScreen() {
   const result = state.result;
   const photo = state.photo;
   const initialMealType = state.mealType ?? "lunch";
-  const previewUrl = state.previewUrl;
+  // Адрес превью — СВОЙ (DRF-2399). Раньше он приходил навигацией от
+  // экрана обработки, а тот освобождал его при своём уходе: адрес
+  // переживал владельца ровно до первой перерисовки.
+  //
+  // Замер в настоящем Chrome (создать → присвоить `src` → отозвать):
+  // отзыв синхронно сразу после `src` — СЛОМАНО; в микротаске и через
+  // `setTimeout(0)` — ЗАГРУЗИЛОСЬ. Очистка `useEffect` пассивная и бежит
+  // ПОСЛЕ фазы мутации DOM, поэтому на первом показе картинка была видна,
+  // и дефект выглядел отсутствующим. Ломалось ПОВТОРНОЕ обращение —
+  // новый узел, возврат по истории, пересоздание.
+  const previewUrl = useMemo(
+    () => (photo ? URL.createObjectURL(photo) : null),
+    [photo],
+  );
+  useEffect(() => {
+    return () => {
+      if (previewUrl) URL.revokeObjectURL(previewUrl);
+    };
+  }, [previewUrl]);
 
   const [mealType, setMealType] = useState<MealType>(initialMealType);
   // Возврат (DRF-1493) — к съёмке, с восстановлением уже сделанного
