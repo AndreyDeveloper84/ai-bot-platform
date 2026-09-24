@@ -23,6 +23,20 @@ const MASTER_API_BASE = "/api/v1/master";
 interface ErrorBody {
   error: string;
   detail: string;
+  /**
+   * Структурные подробности отказа, когда сервер их шлёт. Третий клиент,
+   * который узнаёт об этом поле: `api.ts` его поднимал с DRF-1708,
+   * `admin-api.ts` — с DRF-2273, а мастерский ронял до DRF-2373.
+   *
+   * Цена потери была не косметическая: сервер начинал что-то говорить в
+   * `details`, а на мастерском экране этого просто не существовало —
+   * правка «работала» в виде и не доезжала наружу. Здесь по этому каналу
+   * едет `retriable` — жив ли талон подтверждения.
+   *
+   * Остальные места этого файла поле ещё роняют; они перечислены числом в
+   * `tools/lint/api_error_details_allow.txt` и ждут своего листа.
+   */
+  details?: Record<string, unknown>;
 }
 
 export async function request<T>(
@@ -51,7 +65,7 @@ export async function request<T>(
     } catch {
       /* non-JSON 5xx */
     }
-    throw new ApiError(res.status, parsed.error, parsed.detail);
+    throw new ApiError(res.status, parsed.error, parsed.detail, parsed.details);
   }
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
