@@ -319,6 +319,93 @@ class TestHappyPath:
 # =========================================================================
 
 
+class TestTheRefusalNamesTheFieldByMachine:
+    """Отказ называет ПОЛЕ машинным признаком, а не английской прозой (DRF-2452).
+
+    Экран раскладывал ошибки по полям разбором текста
+    (`e.detail.toLowerCase().includes("contact")`). Признак, которого не
+    видно никому: поправим формулировку здесь — и подпись под полем на
+    экране исчезнет молча, а человек будет смотреть на верную форму и не
+    понимать, что не так.
+
+    Узлы ниже держат ПРИЗНАК, а не слова. Соседи в ``TestValidation``
+    проверяют `«name» in detail` — это прежняя привычка, и она как раз
+    разрешает признаку пропасть: текст остаётся, `details` уезжает.
+    """
+
+    def test_a_missing_name_names_the_name_field(
+        self,
+        client: Client,
+        owner_bot_user: BotUser,
+        tenant: Tenant,
+    ) -> None:
+        body = _valid_body()
+        del body["name"]
+        resp = client.post(
+            _invite_url(),
+            data=body,
+            content_type="application/json",
+            HTTP_AUTHORIZATION=init_data_header("5001"),
+        )
+        assert resp.status_code == 400
+        assert resp.json()["details"] == {"field": "name"}
+
+    def test_a_bad_contact_names_the_contact_field(
+        self,
+        client: Client,
+        owner_bot_user: BotUser,
+        tenant: Tenant,
+    ) -> None:
+        body = _valid_body()
+        del body["contact_value"]
+        resp = client.post(
+            _invite_url(),
+            data=body,
+            content_type="application/json",
+            HTTP_AUTHORIZATION=init_data_header("5001"),
+        )
+        assert resp.status_code == 400
+        assert resp.json()["details"] == {"field": "contact_value"}
+
+    def test_an_oversized_contact_names_the_same_field(
+        self,
+        client: Client,
+        owner_bot_user: BotUser,
+        tenant: Tenant,
+    ) -> None:
+        """Две разные причины у одного поля — признак один и тот же."""
+        resp = client.post(
+            _invite_url(),
+            data=_valid_body(contact_value="@" + "x" * 500),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=init_data_header("5001"),
+        )
+        assert resp.status_code == 400
+        assert resp.json()["details"] == {"field": "contact_value"}
+
+    def test_a_refusal_about_no_field_claims_none(
+        self,
+        client: Client,
+        owner_bot_user: BotUser,
+        tenant: Tenant,
+    ) -> None:
+        """Обратная сторона: где поля нет, там и признака быть не должно.
+
+        Иначе «поле названо» оказалось бы правдой обо всех отказах сразу, и
+        экран пометил бы неверным поле, к которому претензии нет.
+        """
+        body = _valid_body()
+        body["services"] = "not-a-list"
+        resp = client.post(
+            _invite_url(),
+            data=body,
+            content_type="application/json",
+            HTTP_AUTHORIZATION=init_data_header("5001"),
+        )
+        assert resp.status_code == 400
+        assert "details" not in resp.json()
+
+
 class TestValidation:
     def test_missing_name_400(
         self,
