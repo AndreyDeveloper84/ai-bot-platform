@@ -341,7 +341,18 @@ def handle_inbound(payload: dict[str, Any], tenant: "Tenant") -> None:
     # structural guard in ``apps/channels/tests/test_handler_safety_parity.py``
     # would say so. No crisis exemption: the inbound short-circuit returns
     # before this line.
-    _guarded = guard_outbound(reply_text, surface="telegram", bot_user=bot_user)
+    _guarded = guard_outbound(
+        reply_text,
+        surface="telegram",
+        bot_user=bot_user,
+        # DRF-2435 — тот же мозг, что у MAX (`orchestrate_turn`,
+        # `SURFACE_PER_TENANT`), значит выгрузка личных данных достижима и
+        # здесь, и признак «это собственные данные человека» обязан ехать так
+        # же. Без этой строки ответ выгрузки подменялся бы рекомендательной
+        # фразой у каждого, в чьей истории есть похожее на телефон — то есть
+        # починка жила бы в одном канале из двух (найдено ревью).
+        subject_own_data=bool(skill_result is not None and skill_result.subject_own_data),
+    )
     if _guarded.blocked:
         reply_text = _guarded.text
         action_type = OUTBOUND_ACTION_TYPE

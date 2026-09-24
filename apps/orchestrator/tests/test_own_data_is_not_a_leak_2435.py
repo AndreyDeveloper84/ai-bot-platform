@@ -32,7 +32,9 @@
 from __future__ import annotations
 
 import json
-import uuid
+
+from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 from django.utils import timezone
@@ -45,13 +47,19 @@ from apps.orchestrator.safety.outbound import REPLACEMENT_TEXT, evaluate_outboun
 
 #: Настоящие UUID'ы и фрагменты, которые в них принимались за телефон. Не
 #: выдуманные образцы: найдены прогоном (4094 случайных UUID'а → 4 ложных
-#: телефона, 0.098% на один UUID; в архиве их два плюс метки времени, отсюда
-#: измеренные 0.4% на запрос).
+#: телефона, 0.098% на один UUID).
+#:
+#: Фрагменты записаны МАСКОЙ (`85…46`), и это не украшение: сторож личных
+#: данных (`tools/lint/pii_guard.py`) поймал этот файл на строке, где фрагмент
+#: стоял целиком, — потому что он читается как настоящий мобильный номер вне
+#: тестового диапазона. То есть тот же digit-run, который обманывал исходящий
+#: гейт, обманывает и сторожа PII; полная форма при необходимости
+#: восстанавливается из самого UUID'а, который тут же рядом.
 UUIDS_READ_AS_PHONES = (
-    ("1c10a5a0-a48d-e15a-8506-6664946bd2cd", "8506-6664946"),
-    ("c8145173-6936-ef6b-826c-05a43adcfd7b", "8145173-6936"),
-    ("8d78e220-02a2-97f2-6bc1-89816746231c", "89816746231"),
-    ("c66dc2dd-40d3-8c3c-02ec-84043096579d", "84043096579"),
+    ("1c10a5a0-a48d-e15a-8506-6664946bd2cd", "85…46"),
+    ("c8145173-6936-ef6b-826c-05a43adcfd7b", "81…36"),
+    ("8d78e220-02a2-97f2-6bc1-89816746231c", "89…31"),
+    ("c66dc2dd-40d3-8c3c-02ec-84043096579d", "84…79"),
 )
 
 #: Настоящие номера в тех написаниях, которые гейт ловил до правки. Если хоть
@@ -65,9 +73,18 @@ REAL_PHONES = (
 )
 
 
-def _archive_text(seed: int) -> str:
-    """Текст ответа экспорта той же формы, что в CI: 3 согласия, 1 диалог."""
-    rnd = uuid.UUID(int=seed)
+def _archive_text(identifier: str = UUIDS_READ_AS_PHONES[0][0], *, phone_hash: str = "") -> str:
+    """Текст ответа экспорта той же формы, что в CI: 3 согласия, 1 диалог.
+
+    `identifier` по умолчанию — НАСТОЯЩИЙ UUID из замера, тот, чьи цифры гейт
+    принимал за телефон. Прежний вариант строил идентификатор из выдуманного
+    seed, и такой архив не блокировался НИКОГДА: узел «архив проходит» был
+    самоподтверждением (найдено ревью).
+
+    `phone_hash` пуст по умолчанию, как у человека без телефона; настоящий
+    sha256 передаётся отдельным узлом — на нём шаблон ошибался чаще всего.
+    """
+    rnd = identifier
     base = "2026-09-24T10:39:52"
     archive = {
         "bot_user": {
@@ -75,7 +92,7 @@ def _archive_text(seed: int) -> str:
             "channel": "max",
             "channel_user_id": "700037",
             "display_name": "Replay",
-            "phone_hash": "",
+            "phone_hash": phone_hash,
             "first_seen": f"{base}.318000+00:00",
             "last_seen": f"{base}.325000+00:00",
         },
@@ -98,7 +115,7 @@ def _archive_text(seed: int) -> str:
         ],
         "conversations": [
             {
-                "id": str(uuid.UUID(int=seed + 1)),
+                "id": UUIDS_READ_AS_PHONES[1][0],
                 "state": "idle",
                 "outcome": "",
                 "is_active": True,
@@ -141,19 +158,40 @@ class TestWhatStoppedBeingTakenForAPhone:
         )
 
     def test_a_whole_export_archive_passes(self) -> None:
-        """Целый архив той же формы, что в CI, — проходит целиком."""
-        text = _archive_text(0x82824497604ABCDEF1234567890ABCDE)
+        """Целый архив, собранный на НАСТОЯЩИХ идентификаторах из замера.
 
-        verdict = evaluate_outbound(text, subject_own_data=True)
+        Без признака «свои данные»: этот узел проверяет вторую линию, и он
+        краснеет на прежнем поведении, потому что оба UUID'а в архиве — те
+        самые, чьи цифры шаблон принимал за телефон.
+        """
+        text = _archive_text()
+
+        verdict = evaluate_outbound(text)
 
         assert verdict.allowed is True
         assert verdict.text == text
         assert "Ваши данные" in verdict.text
 
-    def test_an_iso_timestamp_is_not_a_phone(self) -> None:
-        text = "Записала 2026-08-24T18:30:45.812345+00:00 — жду тебя."
+    def test_a_sha256_hash_is_not_a_phone(self) -> None:
+        """`phone_hash` — 64 hex-символа, и на них шаблон ошибался ЧАЩЕ всего:
+        80 ложных телефонов на 20000 дайджестов (0.40%). Маскировка канонических
+        UUID'ов этот случай не покрывала вовсе, граница hex-соседства покрывает
+        (найдено ревью)."""
+        digest = "5316e540ee22f6180fb89492904051b3" + "d5316e540ee22f6180fb894929040513"
 
-        assert evaluate_outbound(text).allowed is True
+        verdict = evaluate_outbound('  "phone_hash": "' + digest + '",')
+
+        assert verdict.allowed is True
+
+    def test_an_archive_of_a_person_who_has_a_phone_on_file_passes(self) -> None:
+        """Архив человека, у которого телефон есть: `phone_hash` заполнен.
+
+        Прежняя мера снималась на архиве с ПУСТЫМ хэшем, и это делало число
+        «0 из 2000» правдой только для людей без телефона (найдено ревью).
+        """
+        digest = "88820462180e5c893eff" + "0" * 44
+
+        assert evaluate_outbound(_archive_text(phone_hash=digest)).allowed is True
 
 
 # ---------------------------------------------------------------------------
@@ -178,10 +216,114 @@ class TestTheGuardStillGuards:
         """
         text = "Мастер просила передать: 8 999 123 45 67"
 
-        assert evaluate_outbound(text).allowed is False
-        # И тот же текст не становится разрешённым «за компанию» с выгрузкой:
-        # признак ставит только собирающий архив.
-        assert evaluate_outbound(text).categories == ("contact",)
+        # Сначала о НАЛИЧИИ послабления: с признаком тот же текст проходит…
+        assert evaluate_outbound(text, subject_own_data=True).allowed is True
+        # …а без признака блокируется. Послабление живёт на одном черновике,
+        # а не включается для поверхности.
+        blocked = evaluate_outbound(text)
+        assert blocked.allowed is False
+        assert blocked.categories == ("contact",)
+
+
+class TestTheExemptionIsNarrow:
+    """Послабление снимает ОДИН класс. Остальные — как у всякого текста."""
+
+    @pytest.mark.parametrize(
+        ("draft", "category"),
+        [
+            ("у вас аллергия на этот состав", "medical"),
+            ("гарантирую результат после первой процедуры", "promise"),
+            ("между курсами нужно три-четыре недели", "planning"),
+        ],
+    )
+    def test_other_categories_still_block_under_the_flag(self, draft, category) -> None:
+        verdict = evaluate_outbound(draft, subject_own_data=True)
+
+        assert verdict.allowed is False, f"класс {category} перестал блокировать"
+        assert verdict.own_data_categories == ()
+
+    def test_a_broken_check_still_fails_closed_under_the_flag(self, monkeypatch) -> None:
+        """Сломанная проверка закрывается наглухо и с признаком: решение
+        владельца §111 «safety uncertain → fail closed» послабление не
+        отменяет."""
+        from apps.orchestrator.safety import outbound as ob
+
+        monkeypatch.setattr(ob, "_CATEGORIES", "не-таблица")
+
+        verdict = ob.evaluate_outbound("любой текст", subject_own_data=True)
+
+        assert verdict.allowed is False
+        assert verdict.categories == (ob.CHECK_FAILED_CATEGORY,)
+
+
+class TestTheExportBranchSetsTheFlag:
+    """Цепочка признака начинается у навыка — и проверяется ВЫЗОВОМ навыка, а не
+    чтением поля у пустого `SkillResult` (найдено ревью: прежний узел ветку
+    экспорта не трогал вовсе)."""
+
+    def test_the_export_branch_marks_its_result(self, monkeypatch) -> None:
+        from apps.skills.base import SkillContext
+        from apps.skills.privacy_consent import skill as privacy_skill
+
+        monkeypatch.setattr(
+            privacy_skill,
+            "data_export",
+            lambda bot_user: {"bot_user": {}, "consents": [], "conversations": []},
+        )
+        monkeypatch.setattr(privacy_skill, "emit", lambda *a, **k: None)
+        context = SkillContext(
+            # Навыку нужен только `id` для события; модели здесь не нужны, а
+            # контракт требует их типов — приведение названо явно.
+            bot_user=cast(Any, SimpleNamespace(id="bu-2435")),
+            conversation=cast(Any, SimpleNamespace(id="c-2435")),
+            message_text="выгрузить мои данные",
+        )
+
+        result = privacy_skill.PrivacyConsentSkill().handle(context)
+
+        # Сначала о НАЛИЧИИ: это именно ветка экспорта.
+        assert result.meta["intent"] == "export"
+        assert "Ваши данные" in result.reply_text
+        assert result.subject_own_data is True
+
+    def test_the_delete_branch_does_not_mark_its_result(self, monkeypatch) -> None:
+        """Ветка удаления архива не отдаёт — значит и признак ей не нужен."""
+        from apps.skills.base import SkillContext
+        from apps.skills.privacy_consent import skill as privacy_skill
+
+        monkeypatch.setattr(privacy_skill, "emit", lambda *a, **k: None)
+        context = SkillContext(
+            # Навыку нужен только `id` для события; модели здесь не нужны, а
+            # контракт требует их типов — приведение названо явно.
+            bot_user=cast(Any, SimpleNamespace(id="bu-2435")),
+            conversation=cast(Any, SimpleNamespace(id="c-2435-del")),
+            message_text="удалить мои данные",
+        )
+
+        result = privacy_skill.PrivacyConsentSkill().handle(context)
+
+        assert result.meta["intent"] == "delete"
+        assert result.subject_own_data is False
+
+
+class TestThePriceOfTheHexBoundary:
+    """Цена границы hex-соседства, названная вслух.
+
+    Номер, СПЕЦИАЛЬНО вписанный в hex-подобную обёртку, больше не блокируется.
+    Это неустранимо для любого правила «цифры внутри hex — не телефон», и выбор
+    был между «ломаем выгрузку каждому 250-му» и «крафт проходит». Узел стоит
+    здесь, чтобы цена не превратилась в сюрприз: если владелец решит платить
+    иначе, он меняет знак этого узла осознанно.
+    """
+
+    def test_a_phone_hidden_in_a_uuid_shaped_wrapper_passes(self) -> None:
+        crafted = "11111111-2222-3333-4444-89991234567a"
+
+        assert evaluate_outbound(f"Мастер Мария {crafted}").allowed is True
+
+    def test_the_same_number_written_plainly_is_blocked(self) -> None:
+        """Обратная половина той же цены: без обёртки он блокируется."""
+        assert evaluate_outbound("Мастер Мария 8 999 123 45 67").allowed is False
 
 
 class TestWhatThePersonGetsInTheirOwnArchive:
@@ -208,7 +350,7 @@ class TestWhatThePersonGetsInTheirOwnArchive:
 
     @pytest.mark.parametrize("phone", REAL_PHONES)
     def test_a_phone_inside_the_archive_reaches_the_person(self, phone: str) -> None:
-        text = _archive_text(0x1234).replace(
+        text = _archive_text(UUIDS_READ_AS_PHONES[2][0]).replace(
             "выгрузить мои данные", f"выгрузить мои данные {phone}"
         )
 
@@ -258,7 +400,7 @@ class TestTheExportReachesThePerson:
 
         # Текст, где совпадение ПЕРЕЖИВАЕТ маскировку машинных идентификаторов:
         # иначе снимать нечего и записи о пропуске не будет — и это правильно.
-        text = _archive_text(0x1234).replace(
+        text = _archive_text(UUIDS_READ_AS_PHONES[2][0]).replace(
             "выгрузить мои данные", "выгрузить мои данные 8 999 123 45 67"
         )
         with caplog.at_level(logging.INFO):
@@ -348,7 +490,7 @@ class TestTheLivePathThroughTheSeam:
             )
 
             max_handler.handle_max_event(
-                build_max_payload("выгрузить мои данные", user_id=uid, mid=f"own-{uid}")
+                build_max_payload("выгрузить мои данные", user_id=int(uid), mid=f"own-{uid}")
             )
 
         assert sent, "ход не отправил человеку ничего"

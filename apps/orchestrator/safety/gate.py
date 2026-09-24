@@ -286,18 +286,26 @@ def guard_outbound(
     """
 
     verdict = evaluate_outbound(text, subject_own_data=subject_own_data)
-    if verdict.own_data_categories:
+    own_data = verdict.own_data_categories
+    if verdict.allowed and acted is False:
+        # `evaluate_action_promise` возвращает свой вердикт, у которого поля
+        # про своих данные нет: признак запоминается ДО подмены, иначе запись
+        # в журнал потерялась бы именно на этом пути.
+        verdict = evaluate_action_promise(text)
+    if own_data:
         # DRF-2435 — «заблокировали чужой контакт» и «это собственные данные
         # человека, пропускаем» обязаны читаться в журнале по-разному: иначе мы
         # починим поведение и оставим слепой журнал, а молчал именно он.
+        #
+        # Единственный писатель этого имени в контуре — здесь: у шлюза есть
+        # поверхность и trace, а одно имя события обязано иметь один смысл.
         logger.info(
-            "safety.outbound.own_data_passed surface=%s categories=%s trace=%s",
+            "safety.outbound.own_data_passed surface=%s categories=%s allowed=%s trace=%s",
             surface,
-            ",".join(verdict.own_data_categories),
+            ",".join(own_data),
+            verdict.allowed,
             trace_id,
         )
-    if verdict.allowed and acted is False:
-        verdict = evaluate_action_promise(text)
     if verdict.allowed:
         return OutboundGuardOutcome(allowed=True, text=verdict.text)
 
