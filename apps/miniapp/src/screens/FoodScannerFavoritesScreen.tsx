@@ -215,7 +215,8 @@ export function FoodScannerFavoritesScreen() {
                     {FAVORITES_COPY.portion(meal.portion_g)}
                   </span>
                 </div>
-                {!hideNumbers && (
+                {/* DRF-2371 — снимок мог быть сделан с записи без чисел. */}
+                {!hideNumbers && meal.calories != null && (
                   <span className="food-scanner-diary__entry-cal">
                     {FAVORITES_COPY.kcal(meal.calories)}
                   </span>

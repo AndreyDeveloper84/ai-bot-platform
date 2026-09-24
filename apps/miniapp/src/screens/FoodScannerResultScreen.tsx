@@ -191,18 +191,23 @@ export function FoodScannerResultScreen() {
     result.portion_g != null
       ? Math.round(result.portion_g * portionMultiplier)
       : null;
-  const calories = result.nutrition
-    ? Math.round(result.nutrition.calories * portionMultiplier)
-    : null;
-  const proteinG = result.nutrition
-    ? round1(result.nutrition.protein_g * portionMultiplier)
-    : null;
-  const fatG = result.nutrition
-    ? round1(result.nutrition.fat_g * portionMultiplier)
-    : null;
-  const carbsG = result.nutrition
-    ? round1(result.nutrition.carbs_g * portionMultiplier)
-    : null;
+  // DRF-2371 — каждое число может отсутствовать по отдельности, и
+  // отсутствие НЕ ноль. Прежний код умножал `null` на множитель:
+  // `Math.round(null * 1)` даёт 0, и экран печатал «Калории: ~0 ккал»
+  // о блюде, которого никто не считал. Ноль читается как «посчитано, и
+  // вышло почти ничего» — это утверждение, а не приближение.
+  const scaled = (value: number | null | undefined, round: (n: number) => number) =>
+    value == null ? null : round(value * portionMultiplier);
+  const calories = scaled(result.nutrition?.calories, Math.round);
+  const proteinG = scaled(result.nutrition?.protein_g, round1);
+  const fatG = scaled(result.nutrition?.fat_g, round1);
+  const carbsG = scaled(result.nutrition?.carbs_g, round1);
+  // Числа не пришли, хотя режим показа их не скрывает: считать было нечем —
+  // порция неизвестна или блюда нет в справочнике. Причину наружу не
+  // выводим: форма ответа причиной не является, а «признак наружу» (п. 3
+  // DRF-2335) ждёт слова владельца. Дорога — существующая: «Написать
+  // вручную», где спрашивают «Сколько граммов?» и считают по весу.
+  const numbersMissing = !hideNumbers && calories == null;
   const isLowConf = result.confidence < 0.6;
   const leadVerb = isLowConf ? "Похоже на" : "Узнала";
   // DRF-2098 — ключ идемпотентности живёт столько, сколько карточка: повтор
@@ -541,6 +546,26 @@ export function FoodScannerResultScreen() {
               onClick={openClarify}
             >
               Уточнить
+            </button>
+          )}
+          {numbersMissing && (
+            // DRF-2371 — вместо числа, которого нет, дорога к числу: тот же
+            // ручной ввод, что предлагает экран обработки при отказе. Имя
+            // блюда переносим, чтобы не набирать заново.
+            <button
+              type="button"
+              className="btn-secondary"
+              onClick={() =>
+                navigate("/customer/food-scanner/manual", {
+                  state: {
+                    mealType,
+                    returnTo: state.returnTo,
+                    fromSaved: { dish_name: dishName },
+                  },
+                })
+              }
+            >
+              Написать вручную
             </button>
           )}
           <button

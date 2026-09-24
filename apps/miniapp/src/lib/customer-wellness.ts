@@ -76,7 +76,8 @@ import { ApiError, request } from "./api";
 export interface FoodDiaryEntry {
   id: string;
   dish_name: string;
-  calories: number;
+  /** DRF-2371 — `null`, когда каталог сохранил блюдо без чисел; не ноль. */
+  calories: number | null;
   protein_g: number;
   fat_g: number;
   carbs_g: number;

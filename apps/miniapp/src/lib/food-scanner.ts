@@ -84,14 +84,16 @@ export interface LogMealResponse {
   log_id: string;
   dish_name: string;
   meal_type: MealType;
-  calories: number;
+  /** DRF-2371 — `null`, когда каталог сохранил блюдо без чисел; не ноль. */
+  calories: number | null;
 }
 
 export interface DailySummaryEntry {
   log_id: string;
   meal_type: MealType;
   dish_name: string;
-  calories: number;
+  /** DRF-2371 — `null`, когда каталог сохранил блюдо без чисел; не ноль. */
+  calories: number | null;
   portion_g?: number;
   logged_at_iso: string;
 }
@@ -286,7 +288,8 @@ interface LogMealWire {
   log_id: string;
   dish_name: string;
   meal_type: string;
-  calories: number;
+  /** DRF-2371 — `null`, когда каталог сохранил блюдо без чисел; не ноль. */
+  calories: number | null;
   entry_origin: string | null;
 }
 
@@ -399,7 +402,8 @@ export interface FoodTextEstimate {
 export interface FoodTextLogResult {
   log_id: string;
   dish_name: string;
-  calories: number;
+  /** DRF-2371 — `null`, когда каталог сохранил блюдо без чисел; не ноль. */
+  calories: number | null;
   entry_origin: "text_estimated_confirmed" | "text_user_corrected" | string;
 }
 

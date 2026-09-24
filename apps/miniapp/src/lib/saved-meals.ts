@@ -19,7 +19,8 @@ export interface SavedMeal {
   dish_name: string;
   /** Порция в граммах — как её видит человек, не множитель базовых 100 г. */
   portion_g: number;
-  calories: number;
+  /** DRF-2371 — `null`, когда каталог сохранил блюдо без чисел; не ноль. */
+  calories: number | null;
   protein_g: number | null;
   fat_g: number | null;
   carbs_g: number | null;
