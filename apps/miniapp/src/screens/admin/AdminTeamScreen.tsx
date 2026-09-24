@@ -309,7 +309,7 @@ export function AdminTeamScreen({ me }: Props) {
       const qs = q.toString();
       navigate(`/admin/team${qs ? `?${qs}` : ""}`, { replace: true });
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- DRF-2395: без `location.search` адрес разойдётся с фильтром при возврате извне, но включить его — риск цикла, эффект сам пишет адрес. Нужен живой проход, не правка наугад
   }, [filter]);
 
   const ownerOnlyDisabledLabel = "Только владелец может деактивировать мастера";

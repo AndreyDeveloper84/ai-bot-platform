@@ -76,7 +76,6 @@ export function mapPaymentStatus(
   const rendering = PAYMENT_STATUS_MAP[key];
   if (!rendering) {
     if (import.meta.env.DEV) {
-      // eslint-disable-next-line no-console
       console.warn(
         `[payment-status] unknown capture_state "${state}" — hidden. Add a mapping to PAYMENT_STATUS_MAP.`,
       );

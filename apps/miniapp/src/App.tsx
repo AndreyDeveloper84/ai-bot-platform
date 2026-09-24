@@ -665,7 +665,6 @@ function CatchAllRedirect({ to }: { to: string }) {
   const location = useLocation();
   useEffect(() => {
     if (import.meta.env.DEV) {
-      // eslint-disable-next-line no-console
       console.warn(
         `[App] Unknown route ${location.pathname} — redirecting to ${to}`,
       );

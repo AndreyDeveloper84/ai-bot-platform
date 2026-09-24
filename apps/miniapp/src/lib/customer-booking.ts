@@ -463,7 +463,6 @@ export async function resolveCatalogPicks(
     // Единственный канал, который есть у `apps/miniapp/src` (ни Sentry,
     // ни трекера — заводить их под эту задачу запрещено DRF-1556).
     // Одна строка, одно состояние: что объявляли и что пришло.
-    // eslint-disable-next-line no-console
     console.error(
       "[recommendations] расхождение контракта — источник ответил, но не в " +
         "форме, которую объявляет apps/miniapp/src/lib/api.ts::" +
@@ -493,7 +492,6 @@ export async function resolveCatalogPicks(
       // Источник ответил, кандидаты есть — и ни одного из них полка
       // отрисовать не может. Это НЕ «нечего показать»: это «нам
       // прислали то, чего мы не знаем», и молчать об этом нельзя.
-      // eslint-disable-next-line no-console
       console.error(
         "[recommendations] решение содержит " +
           `${recs.decision.ordered.length} кандидат(ов), и ни один не ` +

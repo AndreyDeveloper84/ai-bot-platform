@@ -79,6 +79,7 @@ export function FoodScannerResultScreen() {
         replace: true,
         state: { photo, mealType, returnTo: state.returnTo },
       }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `state.returnTo` приходит из `location.state` и на монтировании постоянен
     [navigate, photo, mealType],
   );
   const onBack = useScreenBack(backByAction(backToCapture));
@@ -216,6 +217,7 @@ export function FoodScannerResultScreen() {
     } finally {
       setBusy(false);
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- `state.returnTo` приходит из `location.state` и на монтировании постоянен
   }, [
     result,
     mealType,
@@ -273,6 +275,7 @@ export function FoodScannerResultScreen() {
         state: { mealType, photo: null, returnTo: state.returnTo },
       });
     },
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `state.returnTo` приходит из `location.state` и на монтировании постоянен
     [mealType, navigate],
   );
 

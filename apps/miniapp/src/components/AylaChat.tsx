@@ -209,9 +209,7 @@ export function AylaChat({
     return () => {
       alive = false;
     };
-    // `api` — стабильный объект экрана; перезапрашивать историю на каждый
-    // рендер незачем.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `api` — объект экрана, на одном монтировании не меняется; история грузится один раз. Где перезапуск нужен, зависимость стоит: см. `[api, sending]` ниже
   }, []);
 
   useEffect(() => {
