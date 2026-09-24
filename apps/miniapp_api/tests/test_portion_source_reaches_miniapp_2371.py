@@ -69,6 +69,9 @@ class TestTheProvenanceSurvivesTheWhitelist:
             resp = _scan(client, bot_user, image=PHOTO)
 
         assert resp.status_code == 200
+        nutrition = resp.json()["nutrition"]
+        # Сначала о наличии: ответ собран и числа на месте.
+        assert nutrition["calories"] == 250
         # Отсутствие поля экран читает как «вес не назван» — подставлять
         # сюда значение по умолчанию значило бы решать за каталог.
-        assert "portion_source" not in resp.json()["nutrition"]
+        assert "portion_source" not in nutrition
