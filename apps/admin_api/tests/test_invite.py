@@ -403,7 +403,12 @@ class TestTheRefusalNamesTheFieldByMachine:
             HTTP_AUTHORIZATION=init_data_header("5001"),
         )
         assert resp.status_code == 400
-        assert "details" not in resp.json()
+        body = resp.json()
+        # Наличие раньше отсутствия: отказ действительно произошёл и назвал
+        # себя. Иначе «признака нет» было бы правдой и о пустом ответе, и
+        # молчание сервера прошло бы за аккуратность.
+        assert body["error"] == "bad_request"
+        assert "details" not in body
 
 
 class TestValidation:
