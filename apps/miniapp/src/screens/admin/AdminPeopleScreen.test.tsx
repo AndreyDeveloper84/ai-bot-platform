@@ -509,17 +509,25 @@ describe("what actually reaches the server", () => {
 });
 
 describe("a refusal is shown, never swallowed", () => {
-  it("keeps the dialog open and prints what the server said", async () => {
+  it("keeps the dialog open and says so in our own words, not the server's", async () => {
+    // DRF-2446. Узел раньше подставлял русский `detail` и проверял, что
+    // экран печатает «слова сервера». Сервер здесь говорит по-английски:
+    // `staff_revoke.py:149` поднимает «the salon owner's access cannot be
+    // revoked here», и владелец увидел бы эту строку. То есть узел
+    // закреплял ровно тот дефект, ради которого заведён лист.
+    //
+    // Отказ по-прежнему НЕ проглочен — он назван собственной строкой
+    // экрана; внутренний текст уходит в журнал.
     mockedRevoke.mockRejectedValue(
-      new ApiError(409, "owner_revoke_refused", "нельзя отозвать этот доступ"),
+      new ApiError(409, "owner_revoke_refused", "the salon owner's access cannot be revoked here"),
     );
     await openConfirm(ANYA);
     fireEvent.click(confirmButton());
 
     // The outcome, in one line, before any diagnosis.
     expect(await screen.findByText("Доступ не отозван.")).toBeInTheDocument();
-    // And the server's own words, via the shared StateError.
-    expect(screen.getByText("нельзя отозвать этот доступ")).toBeInTheDocument();
+    // И ни слова внутреннего английского на экране.
+    expect(screen.queryByText(/salon owner's access/)).toBeNull();
     // Still open: closing on failure would leave the owner unsure.
     expect(screen.getByRole("dialog")).toBeInTheDocument();
     // And the list was NOT reloaded — nothing changed to re-read.
