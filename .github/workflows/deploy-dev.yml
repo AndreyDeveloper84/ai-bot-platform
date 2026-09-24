@@ -534,6 +534,37 @@ jobs:
             # сервисе подействовал бы и на долгоживущие web/worker/celery,
             # а это смена режима контура, а не починка владельцев файлов.
             #
+            # DRF-2393 — системные проверки спрашиваются ЯВНО, и до миграций.
+            #
+            # Замер: восемь наших сторожей (\`handoff.E001\`, \`payments.W001\`,
+            # \`admin_api.W002\`, дрейф env-файлов и прочие) не выполняются
+            # там, где идёт запрос. Стенд поднят \`uvicorn
+            # config.asgi:application\`, а \`get_asgi_application()\` делает
+            # \`django.setup()\` и \`run_checks()\` не зовёт никогда. Проверки
+            # гоняет management-команда — и в выкладке такая была одна,
+            # \`migrate\` ниже. То есть сторожа держались на побочном
+            # свойстве шага, который заведён ради схемы.
+            #
+            # Почему ДО миграций: при отказе после них часть схемы уже
+            # изменена, и контур остаётся «новая схема, старый код». Здесь
+            # отказ не успевает ничего поменять — встаёт выкладка, а
+            # работающий стенд продолжает обслуживать людей.
+            #
+            # \`--fail-level ERROR\` пишется явно: требование «ошибка
+            # останавливает» должно читаться в команде, а не подразумеваться
+            # умолчанием. \`--deploy\` НЕ берётся — он добавляет шесть чужих
+            # предупреждений Django, и строка «0 silenced», по которой мы
+            # читаем свои проверки, перестанет что-либо значить.
+            #
+            # ПРЕДЕЛ, названный вслух: шаг видит состояние НА МОМЕНТ
+            # выкладки. Правку \`.env.staging\` руками с последующим
+            # перезапуском контейнера он не увидит — между выкладками
+            # проверки не спрашивает никто.
+            sudo -u \"\$OWNER\" -H docker compose --env-file .env.staging \
+              -f docker-compose.yml -f docker-compose.staging.yml \
+              -f docker-compose.staging.local.yml \
+              -p ayla-bot-staging run --rm --user \"\$OWNER_UID:\$OWNER_GID\" \
+              web python manage.py check --fail-level ERROR
             # Migrations MUST land between build and up: the new code may
             # query columns the old schema lacks (additive MemoryEntry
             # migrations 0015-0018). run --rm web uses the freshly built

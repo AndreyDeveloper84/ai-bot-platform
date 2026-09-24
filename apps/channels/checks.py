@@ -1,0 +1,87 @@
+"""Boot-time statement: обещание поддержки названо адресом (DRF-2393).
+
+### Что было молча
+
+Салонный бот рисует кнопку «Обратиться в поддержку», а отвечает на неё
+``_support_text()`` (``apps/channels/max/salon_handler.py``): при пустом
+``AYLA_SUPPORT_CONTACT`` ответ — «Напишите в поддержку Ayla.» То есть на
+вопрос «как связаться с поддержкой» человек получает «свяжитесь с
+поддержкой». Тавтология вместо адреса.
+
+Три обстоятельства делали это невидимым:
+
+* умолчание настройки — пустая строка (``config/settings/base.py``);
+* переменной не было ни в ``.env.example``, ни в
+  ``.env.staging.template`` — поднимающий контур о ней не узнавал;
+* проверки этого вида не выполнялись на стенде вовсе, потому что его
+  ``web`` поднимается ``uvicorn config.asgi:application``, а
+  ``get_asgi_application()`` не зовёт ``run_checks()``. Этот лист
+  добавляет явный шаг ``manage.py check`` в выкладку — иначе сторож
+  родился бы в той же слепой зоне, что и остальные восемь.
+
+Замер стенда 24.09.2026: пусто.
+
+### Warning, а не Error, и это решение
+
+Пустой контакт — законное состояние местной разработки и CI: кнопку там
+никто не нажимает. Ошибка остановила бы выкладку из-за настройки, без
+которой контур работает. Предмет сторожа — **молчание**, а не неверное
+значение: до него никто и нигде не говорил, что обещание осталось без
+адресата.
+
+### Только там, где это не отладка
+
+``DEBUG`` истинен ровно на тех контурах, где тавтология безвредна.
+Предупреждение в каждом зелёном прогоне учит читателя пропускать строку
+``System check identified``, и следующее предупреждение той же формы —
+настоящее — уйдёт тем же путём. Это решение DRF-2021, и ``0 silenced``
+обязано оставаться нулём.
+
+### Чего сторож НЕ проверяет
+
+Что по указанному адресу кто-то отвечает. Он видит строку настройки, а не
+человека за ней. Это предел, названный вслух.
+
+### Одно слово, и ничего больше
+
+Вывод ``manage.py check`` копируется в логи выкладки и в тикеты. Сообщение
+называет настройку и последствие; **самого значения в тексте нет** — адрес
+поддержки не секрет, но привычка печатать значения настроек в логи
+заводится один раз и потом печатает токены.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from django.conf import settings
+from django.core.checks import Warning as CheckWarning, register
+
+#: Идентификатор сторожа — по нему его ищут в логах выкладки.
+SUPPORT_CONTACT_CHECK_ID = "support.W001"
+
+
+@register()
+def check_support_contact_named(app_configs: Any, **kwargs: Any) -> list[CheckWarning]:
+    """support.W001 — контур обещает поддержку, но не называет адреса."""
+
+    contact = str(getattr(settings, "AYLA_SUPPORT_CONTACT", "") or "").strip()
+    if contact:
+        return []
+    if settings.DEBUG:
+        # Местная разработка и CI — см. выше.
+        return []
+    return [
+        CheckWarning(
+            "Support is promised without an address.",
+            hint=(
+                "AYLA_SUPPORT_CONTACT is empty on a contour that is not "
+                "DEBUG. The salon bot's «Обратиться в поддержку» button "
+                "then answers «Напишите в поддержку Ayla.» — the question "
+                "«how do I reach support» gets «reach support» back. Set "
+                "it to the address people should write to, or take the "
+                "promise off the screen."
+            ),
+            id=SUPPORT_CONTACT_CHECK_ID,
+        )
+    ]
