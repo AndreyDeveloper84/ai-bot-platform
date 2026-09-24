@@ -41,7 +41,7 @@
  * прочее — фраза + «Повторить».
  */
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 
 import { useScreenBack } from "../hooks/useScreenBack";
 import { ApiError } from "../lib/api";
@@ -119,12 +119,48 @@ const ACTION_LABELS: Record<PlanLiteActionType, string> = {
   log_water: PLAN_LITE_COPY.labelWater,
 };
 
-/** Куда ведёт обязательство — туда, где оно делается (то, что уже работает). */
+/** Куда ведёт обязательство — туда, где оно делается (то, что уже работает).
+ *
+ * Маршруты проверены и верны: вода отмечается на Главной (там очередь,
+ * тост и отмена стакана), дневник — на своём экране, услуга — в каталоге.
+ * «Ведёт в никуда» (DRF-2441) — про другое: см. `shouldOfferGo`.
+ */
 const ACTION_ROUTES: Record<PlanLiteActionType, string> = {
   book_service: "/customer/catalog",
   log_food: "/customer/food-scanner/diary",
   log_water: "/customer/main",
 };
+
+/** Повторяемо ли обязательство после того, как норма набрана.
+ *
+ * Свойство названо, а не выведено из списка слагов: воду и дневник
+ * отмечают снова и снова (лишний стакан — не ошибка), а запись на услугу
+ * набрана один раз и второй «Перейти» зовёт записаться ещё раз. Добавит
+ * кто-то четвёртое действие — он обязан ответить на этот вопрос здесь, а
+ * не угадать по имени.
+ */
+const ACTION_REPEATABLE: Record<PlanLiteActionType, boolean> = {
+  book_service: false,
+  log_food: true,
+  log_water: true,
+};
+
+/** Предлагать ли «Перейти» у этого обязательства.
+ *
+ * Два правила, оба общие:
+ *   1. никуда не зовём с того экрана, на котором человек уже стоит —
+ *      нажатие без видимого следа и есть «ведёт в никуда»;
+ *   2. выполненное неповторяемое обязательство не зовёт сделать его ещё
+ *      раз; выполненное повторяемое (вода, дневник) — зовёт.
+ */
+export function shouldOfferGo(
+  action: { action_type: PlanLiteActionType; done_count: number; target_count: number },
+  currentPath: string,
+): boolean {
+  if (ACTION_ROUTES[action.action_type] === currentPath) return false;
+  const done = action.done_count >= action.target_count;
+  return !done || ACTION_REPEATABLE[action.action_type];
+}
 
 const CADENCE_PERIOD: Record<PlanLiteCadence, string> = {
   per_day: PLAN_LITE_COPY.perDay,
@@ -171,6 +207,7 @@ function cadenceLabel(row: ProposalRow): string {
 
 export function PlanLiteScreen() {
   const navigate = useNavigate();
+  const { pathname } = useLocation();
   // DRF-2201 — «План» вкладка панели, значит корень: стрелки «назад» у него
   // нет (ни нарисованной, ни системной в MAX), уход — другими вкладками.
   // Прежде стрелка вела на экран цели; такой дороги у корня быть не может —
@@ -581,16 +618,18 @@ export function PlanLiteScreen() {
                       </>
                     )}
                   </span>
-                  <div className="food-scanner-diary__entry-actions">
-                    <button
-                      type="button"
-                      className="food-scanner-diary__entry-action"
-                      aria-label={`${PLAN_LITE_COPY.go}: ${ACTION_LABELS[action.action_type]}`}
-                      onClick={() => navigate(ACTION_ROUTES[action.action_type])}
-                    >
-                      {PLAN_LITE_COPY.go}
-                    </button>
-                  </div>
+                  {shouldOfferGo(action, pathname) && (
+                    <div className="food-scanner-diary__entry-actions">
+                      <button
+                        type="button"
+                        className="food-scanner-diary__entry-action"
+                        aria-label={`${PLAN_LITE_COPY.go}: ${ACTION_LABELS[action.action_type]}`}
+                        onClick={() => navigate(ACTION_ROUTES[action.action_type])}
+                      >
+                        {PLAN_LITE_COPY.go}
+                      </button>
+                    </div>
+                  )}
                 </li>
               ))}
             </ul>
