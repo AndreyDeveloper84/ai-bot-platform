@@ -150,3 +150,21 @@ class TestTheCardCarriesNoLabelOfOurs:
         for ours in ("Твоя цель", "Ваша цель", "Цель:", "Цель —"):
             assert ours not in first, ours
         assert not first.endswith("."), first
+
+
+class TestTheChosenGoalKeepsItsOwnName:
+    """Слов человека нет (цель выбрана чипом) — и подписи всё равно нет.
+
+    Над списком стоит ровно название цели из списка владельца: это выбор
+    человека, а не наша подпись. Прочтение окна, не слово владельца —
+    так и помечено в коде; вопрос владельцу задан.
+    """
+
+    def test_the_curated_name_stands_alone(self, curated_label):
+        text = plan_lite_card.render_plan_lite_card(_plan(), words=None)
+
+        first = text.splitlines()[0]
+        assert first == curated_label, first
+        for ours in ("Твоя цель", "Ваша цель", "Цель:", "Цель —"):
+            assert ours not in first, ours
+        assert not first.endswith("."), first
