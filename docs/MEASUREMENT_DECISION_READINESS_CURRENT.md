@@ -107,7 +107,7 @@
 | Источник | WHO DECIDES | STABLE ID | ANSWER STORAGE | RESOLUTION | RE-ASK POLICY | Class |
 |---|---|---|---|---|---|---|
 | Nutrition anketa (5 шагов, wizard) `skills/nutrition_anketa/fsm.py:44-73` | Код, позиция в wizard | Step name (UI-id) | `skill_state["nutrition_anketa"]` → Ayla `upsert_profile` | Валидатор шага | Неограничен при невалидном вводе | EXISTS; CONTRADICTS_CANON (текст-метка отклоняется) |
-| Memory-ask (1 вопрос) `orchestrator/memory_ask.py` | Внешняя policy (Ayla eligibility) | Field name | Redis pending 24h → PATCH personal-context `source: conversational` | Regex-парсеры per field | Внешний cooldown 24h | EXISTS (external policy) |
+| Memory-ask (1 вопрос) `orchestrator/memory_ask.py` | Внешняя policy (Ayla eligibility) | Field name | Redis pending 24h → PATCH personal-context `source: conversational` (с 24.09.2026 — `explicit`, DRF-2397) | Regex-парсеры per field | Внешний cooldown 24h | EXISTS (external policy) |
 | Discovery `ask_clarification` | **LLM генерирует вопрос и опции** | **НЕТ** | Ответ = обычное user-сообщение, без привязки | Тап=текст, re-resolve | Отсутствует | LLM_ONLY; CONTRADICTS_CANON |
 | Discovery no-criteria | Код, фиксированный текст | НЕТ | — | — | — | EXISTS |
 | Booking pickers (`_MASTER_PICK_PROMPT` и др.) `skills/booking/skill.py:220-267` | Код + LLM | Бизнес-id в callback | `skill_state["booking_flow"]` TTL 600s | Revalidation при тапе | По flow state | EXISTS (PARTIAL) |
@@ -116,15 +116,15 @@
 | Health screening `skills/health_screening/skill.py:61-65` | Regex classifier | НЕТ (одна константа) | Ответ НЕ хранится | MISSING | Memo 30 мин гасит SOFT | PARTIAL/MISSING |
 | Goal anketa (catalog) `goals/anketa.py:65-88` | Сервер, hardcoded порядок | **step_key slug — EXISTS** | `GoalAnketaAnswer` durable | answered_keys не переспрашиваются | Проход повторяем бесконечно | EXISTS |
 | Профильные 8 полей (catalog) `users/internal_personal_context_api.py:56-65` | Server engine | Field name | `UserPersonalContext` + `last_asked_at`/`skipped_questions` | Наличие значения | 24h cooldown, 2×skip→30d | EXISTS |
+| Chat `ask_clarification` (catalog) `ai/tools.py:142-164` | **LLM** | **НЕТ** | user-сообщение без привязки | НЕТ | НЕТ | LLM_ONLY |
+| Safety clarification | — | — | — | — | — | **MISSING в обоих runtime repo** |
+| Mini App forms | Ayla API (вне замера) | UNKNOWN | — | — | — | UNKNOWN_NOT_MEASURED |
 
 > **Поправка 24.09.2026 (DRF-2397), замер 09.09 не переписан:** Memory-ask пишет
 > `source: explicit`, а не `conversational` — ответ на прямой вопрос это слова
 > человека, и пометка выводов закрывала вопрос ложно (правило 5 переспрашивало,
 > подсказка модели помечала «клиент этого не говорил», ночная инференция
 > перезаписывала `busy_days`).
-| Chat `ask_clarification` (catalog) `ai/tools.py:142-164` | **LLM** | **НЕТ** | user-сообщение без привязки | НЕТ | НЕТ | LLM_ONLY |
-| Safety clarification | — | — | — | — | — | **MISSING в обоих runtime repo** |
-| Mini App forms | Ayla API (вне замера) | UNKNOWN | — | — | — | UNKNOWN_NOT_MEASURED |
 
 Вопросы «по позиции в wizard/анкете»: nutrition anketa и goal anketa — оба последовательный перебор полей; goal anketa не переспрашивает отвеченные (EXISTS), nutrition anketa не проверяет «а знаем ли уже» (PARTIAL).
 

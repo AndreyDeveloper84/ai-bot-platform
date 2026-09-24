@@ -93,12 +93,17 @@ _INFERRED_CONFIDENCE = 0.6
 # (nightly booking-history inference), `behavioral`, `transactional`,
 # `conversational` — is a derivation, and so is any value we do not recognise.
 #
-# ОДИН дом этого значения в боте (DRF-2397): его читает этот блок и ПИШЕТ
-# `memory_ask`, отвечая на вопрос человека. Имя намеренно не `SOURCE_STATED`:
-# так зовётся константа библиотеки со значением `"stated"` (её импорт — выше в
-# этом же модуле), и два имени-близнеца с разными значениями на проводе
-# означали бы 400 от каталога, где принимается только `explicit`
-# (`users/internal_personal_context_api.py`, `_SOURCE_CHOICES`).
+# Один дом для этого чтения и для записи `memory_ask` (DRF-2397): там этим
+# значением помечается ОТВЕТ человека на заданный нами вопрос. Других домов
+# у самой строки «explicit» в боте хватает (`memory/ayla_bridge.py`,
+# `memory/food.py`, `MemoryEntry.SOURCE_EXPLICIT`) — речь только об этих двух.
+#
+# Имя намеренно не `SOURCE_STATED`: так зовётся константа библиотеки со
+# значением `"stated"` (её импорт — выше в этом же модуле). Из двух имён
+# стороны «сказал сам» каталог принимает только `explicit`; `stated` в его
+# `_SOURCE_CHOICES` отсутствует (`users/internal_personal_context_api.py`) и
+# ответил бы 400 — поэтому два имени-близнеца с разными значениями здесь
+# опасны.
 BACKEND_STATED_SOURCE = "explicit"
 
 
