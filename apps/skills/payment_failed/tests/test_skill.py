@@ -639,16 +639,30 @@ class TestPaymentRetryCallbackSkill:
         assert skill.matches(callback_context("cb:book:pick_master:11")) is False
         assert skill.matches(callback_context("hello")) is False
 
-    def test_handle_stubbed_pending_endpoint(self, callback_context):
-        """Сейчас (до Alpha task #66) handle отвечает заглушкой —
-        не делает HTTP, возвращает graceful PENDING-text."""
-        from apps.skills.payment_failed import PaymentRetryCallbackSkill
+    def test_handle_calls_the_retry_endpoint(self, callback_context):
+        """DRF-2339: заглушки больше нет — тап зовёт ручку повтора.
 
-        result = PaymentRetryCallbackSkill().handle(
-            callback_context(f"cb:payment:retry:{PAYMENT_ID}"),
+        Этот узел ПЕРЕВЁРНУТ: он пинил отменённый контракт («handle отвечает
+        заглушкой… graceful PENDING-text»). Заглушка и была дефектом листа —
+        кнопка [Оплатить] показывалась человеку, у которого только что не
+        прошёл платёж, и не платила.
+        """
+        from unittest.mock import Mock, patch
+
+        from apps.integrations.ayla_payments import RetryPaymentResult
+        from apps.skills.payment_failed import PaymentRetryCallbackSkill, skill as mod
+
+        client = Mock()
+        client.retry_payment.return_value = RetryPaymentResult(
+            payment_id=PAYMENT_ID,
+            confirmation_url="https://yoomoney.example/checkout/zzz",
         )
-        text = result.reply_text.lower()
-        assert "недоступна" in text or "временно" in text
+        with patch.object(mod, "get_ayla_payments_client", return_value=client):
+            result = PaymentRetryCallbackSkill().handle(
+                callback_context(f"cb:payment:retry:{PAYMENT_ID}"),
+            )
+        assert "https://yoomoney.example/checkout/zzz" in result.reply_text
+        assert client.retry_payment.call_args.kwargs["payment_id"] == PAYMENT_ID
         assert result.should_handoff is False
         assert result.action_type == "payment_retry"
 
