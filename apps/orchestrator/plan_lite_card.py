@@ -13,7 +13,7 @@
 * **Цели нет** — «Сначала выберем цель» + ``open_goal_select``.
 * **Цель есть, шаблона нет** — прежний текст «составить можно в приложении»
   + «Изменить» (конструктор).
-* **План есть** — карточка «Твоя цель: … · На этой неделе: …» (только «N из
+* **План есть** — карточка: слова человека, ниже «На этой неделе: …» (только «N из
   M», В-5: ни процента, ни «достигнута»; у дневника при подтверждённом
   ориентире — ещё «в ориентире N», DRF-2124: второй факт, не оценка) +
   кнопки **«Записаться»**
@@ -114,7 +114,14 @@ STATE_KEY = "plan_lite"
 
 @dataclass(frozen=True)
 class _Copy:
-    title: str = "Твоя цель: {goal}."
+    #: DRF-2283 — над списком действий стоят СЛОВА ЧЕЛОВЕКА, и ничего
+    #: нашего: решение владельца 24.09 (реестр §77) — «пусть будет слова
+    #: собственные клиента». Ни ярлыка, ни подписи, ни «Цель:» — строки,
+    #: которую можно было бы «улучшить», здесь больше нет.
+    #:
+    #: Решение — про ЭТУ карточку. На другие места, где цель упоминается,
+    #: оно без отдельного слова владельца не распространяется.
+    title: str = "{goal}"
     week: str = "На этой неделе: {items}."
     two_weeks: str = "Эти 2 недели: {items}."
     today_suffix: str = " (сегодня)"
@@ -225,6 +232,39 @@ def goal_label(goal_key: str) -> str:
         return goal_key or "—"
 
 
+def goal_words(external_user_id: str) -> str | None:
+    """Цель словами человека, как он её написал (DRF-2283, CD §73).
+
+    Источник — decision-context: документ, обращённый к человеку, из
+    которого те же слова читает экран цели в Mini App. Один источник на
+    две поверхности.
+
+    **Почему не из plan_lite.** `plan_lite` едет внутри документа
+    wellness-context, у которого контракт объявлен прямым текстом
+    (`wellness/context_read.py`, DRF-1344): только коды состояний, **ни
+    одного текста**, потому что это вход решающего слоя, а не экран.
+    Дословная речь человека туда не кладётся — то же свойство, ради
+    которого событие воронки несёт `has_text`, а не сам текст.
+
+    ``None`` — слов нет ИЛИ чтение не удалось. Оба случая читаются
+    одинаково нарочно: у карточки есть прежний выход — курируемая
+    подпись по ключу, и единое состояние ошибки не должно съедать его.
+
+    **Ничего не кэшируем.** Взяли на показ — показали. Кэш пережил бы
+    «забудь всё» в каталоге, и стирание перестало бы быть стиранием.
+    """
+    try:
+        from apps.integrations.ayla.goals_client import fetch_decision_context
+
+        doc = fetch_decision_context(external_user_id=external_user_id)
+        goal = (doc or {}).get("known", {}).get("goal") or {}
+        words = (goal.get("goal_text") or "").strip()
+    except Exception:  # noqa: BLE001 — карточка переживает отказ чтения
+        logger.info("orchestrator.plan_lite.goal_words_unavailable")
+        return None
+    return words or None
+
+
 # ─── карточка плана ───────────────────────────────────────────────────────
 
 
@@ -242,13 +282,24 @@ def _action_line(action: PlanLiteAction) -> str:
     return line
 
 
-def render_plan_lite_card(plan: PlanLite) -> str:
+def render_plan_lite_card(plan: PlanLite, *, words: str | None = None) -> str:
     """Карточка — только форма обязательств и факты «N из M» (и «в ориентире N»
     у дневника, когда ориентир подтверждён — DRF-2124).
 
     ``per_2_weeks`` — своей строкой «Эти 2 недели: …», остальное — «На этой неделе».
     """
-    lines = [PLAN_LITE_COPY.title.format(goal=goal_label(plan.goal_key))]
+    # DRF-2283 — цель зовётся словами человека, когда они есть. Курируемая
+    # подпись по ключу остаётся живым путём: она и ответ на «слов нет», и
+    # ответ на «прочитать не удалось».
+    #
+    # ВНИМАНИЕ, это прочтение окна, а не слово владельца: владелец говорил
+    # про случай, КОГДА СЛОВА ЕСТЬ («пусть будет слова собственные
+    # клиента», §77, 24.09). Для цели, выбранной чипом, слов человека нет,
+    # и здесь стоит её собственное название из списка владельца — тоже не
+    # наш текст, но выбор человека, а не его слова. Вопрос владельцу задан
+    # (OWNER_QUESTIONS §6-эта); скажет «не показывать вовсе» — правка на
+    # одну строку. Ярлыка и точки нет ни в одном из двух случаев.
+    lines = [PLAN_LITE_COPY.title.format(goal=words or goal_label(plan.goal_key))]
     weekly = [a for a in plan.actions if a.cadence != "per_2_weeks"]
     biweekly = [a for a in plan.actions if a.cadence == "per_2_weeks"]
     if weekly:
@@ -360,8 +411,8 @@ def _result(text: str, kind: str, *, buttons: dict[str, Any] | None = None) -> S
     )
 
 
-def _plan_result(plan: PlanLite, *, prefix: str = "") -> SkillResult:
-    text = render_plan_lite_card(plan)
+def _plan_result(plan: PlanLite, *, prefix: str = "", words: str | None = None) -> SkillResult:
+    text = render_plan_lite_card(plan, words=words)
     if prefix:
         text = f"{prefix}\n{text}"
     return _result(text, "plan_lite_card", buttons=plan_buttons())
@@ -448,7 +499,9 @@ def try_handle_my_plan(
         len(ctx.plan_lite.actions),
         trace_id,
     )
-    return _plan_result(ctx.plan_lite)
+    # DRF-2283 — один лишний REST-вызов на ПОКАЗ карточки (событие редкое),
+    # а не на каждый ход. Отказ чтения оставляет карточку прежней.
+    return _plan_result(ctx.plan_lite, words=goal_words(external_id))
 
 
 # ─── вход: тапы cb:plan:* ─────────────────────────────────────────────────
@@ -503,7 +556,9 @@ def _accept(
                 "plan_lite_already_active",
                 buttons=_buttons(_app_button(PLAN_LITE_COPY.button_edit_plan, OPEN_PLAN_SLUG)),
             )
-        return _plan_result(ctx.plan_lite, prefix=PLAN_LITE_COPY.already_active)
+        return _plan_result(
+            ctx.plan_lite, prefix=PLAN_LITE_COPY.already_active, words=goal_words(external_id)
+        )
     except PlanLiteGoalNotFoundError:
         return _no_goal_result()
     except WellnessContextError as exc:
@@ -515,7 +570,7 @@ def _accept(
         len(plan.actions),
         trace_id,
     )
-    return _plan_result(plan, prefix=PLAN_LITE_COPY.accepted)
+    return _plan_result(plan, prefix=PLAN_LITE_COPY.accepted, words=goal_words(external_id))
 
 
 def _book(

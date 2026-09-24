@@ -209,11 +209,16 @@ class TestProposal:
 
 
 class TestPlanCard:
+    """DRF-2283 / §77 (24.09): над списком действий — слова человека, и
+    ничего нашего. Здесь слов человека нет (цель выбрана чипом), поэтому
+    стоит курируемая подпись — без ярлыка «Твоя цель:» и без точки,
+    которых владелец не писал."""
+
     def test_plan_card_with_three_action_buttons(self) -> None:
         result = _turn("мой план", _fake(ctx=WITH_PLAN))
         assert result is not None and result.meta["reply_kind"] == "plan_lite_card"
         assert result.reply_text == (
-            "Твоя цель: Расслабиться.\nНа этой неделе: записаться на услугу —, дневник 1 из 3."
+            "Расслабиться\nНа этой неделе: записаться на услугу —, дневник 1 из 3."
         )
         assert _labels(result) == ["Записаться", "В дневник", "Изменить план"]
         book, diary, edit = _buttons(result)
@@ -226,7 +231,7 @@ class TestPlanCard:
             "мой план", _fake(ctx=WellnessContext(has_plan=False, plan_lite=PLAN_BIWEEKLY))
         )
         assert result.reply_text == (
-            "Твоя цель: Расслабиться.\n"
+            "Расслабиться\n"
             "На этой неделе: вода 2 из 6 (сегодня).\n"
             "Эти 2 недели: записаться на услугу —."
         )
@@ -234,7 +239,7 @@ class TestPlanCard:
     def test_unknown_goal_key_falls_back_to_the_key(self, monkeypatch) -> None:
         monkeypatch.setattr("apps.marketplace.discovery._known_goals", lambda: {})
         result = _turn("мой план", _fake(ctx=WITH_PLAN))
-        assert result.reply_text.startswith("Твоя цель: relax.")
+        assert result.reply_text.startswith("relax\n")
 
 
 # ─── p3: подтверждение кнопкой ──────────────────────────────────────────────
@@ -254,7 +259,7 @@ class TestAccept:
             ],
             "template_version": 3,
         }
-        assert result.reply_text.startswith("План составлен.\nТвоя цель: Расслабиться.")
+        assert result.reply_text.startswith("План составлен.\nРасслабиться\n")
         assert _labels(result) == ["Записаться", "В дневник", "Изменить план"]
 
     def test_changed_template_version_sends_a_fresh_card_and_creates_nothing(self) -> None:
@@ -269,7 +274,7 @@ class TestAccept:
         fake = _fake(ctx=WITH_PLAN, created=PlanLiteAlreadyActiveError("409"))
         result = _turn("cb:plan:accept:3", fake)
         assert result is not None and result.meta["reply_kind"] == "plan_lite_card"
-        assert result.reply_text.startswith("План уже есть — вот он.\nТвоя цель")
+        assert result.reply_text.startswith("План уже есть — вот он.\nРасслабиться")
 
     def test_already_active_without_a_document_does_not_promise_a_card(self) -> None:
         fake = _fake(ctx=NO_PLAN, created=PlanLiteAlreadyActiveError("409"))
