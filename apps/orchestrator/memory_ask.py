@@ -42,7 +42,12 @@ from apps.identity.services.personal_context import (
     patch_declared_prefs,
     skip,
 )
-from apps.integrations.ayla.diet_types import DIET_OMNIVORE, DIET_OTHER
+from apps.integrations.ayla.diet_types import (
+    DIET_EXCLUSION_PATTERN,
+    DIET_NO_EXCLUSION_PATTERN,
+    DIET_OMNIVORE,
+    DIET_OTHER,
+)
 from apps.orchestrator.discovery import DiscoveryReply
 from apps.orchestrator.memory import short_term
 from apps.orchestrator.memory_block import concierge_memory_enabled
@@ -295,16 +300,12 @@ _DIET_WORDS = (
 )
 
 #: Оговорка рядом со «ем всё»: «ем всё, только мясо не ем» — это ИСКЛЮЧЕНИЕ,
-#: а не «без ограничений». Утверждать про такого человека «ограничений нет»
-#: хуже, чем не понять его вовсе: это ложный факт о нём. Тот же пример стоит
-#: каноническим в ``apps.persona.memory_extract`` («НЕ vegetarian»), и то же
-#: правило там: исключения — не типы питания.
-_DIET_EXCLUSION_RE = re.compile(r"не ем|кроме\s+\w|исключ|без мяса|без глютена|без лактоз")
-
-#: …и оговорка к оговорке: «ничего не исключаю» — это ОТСУТСТВИЕ исключений,
-#: сказанное словами исключения. Потерять такой ответ не ложь, но потеря: тот
-#: же человек будет спрошен снова.
-_NO_EXCLUSION_RE = re.compile(r"ничего не исключ|никаких исключен|кроме шуток")
+#: а не «без ограничений». Язык оговорки общий с разбором свободной речи
+#: (:mod:`apps.integrations.ayla.diet_types`): суждение одно, и две его копии
+#: уже разошлись в строгости (DRF-2398). «Что делать при совпадении» у каждого
+#: разборщика своё — здесь это «ответа нет».
+_DIET_EXCLUSION_RE = re.compile(DIET_EXCLUSION_PATTERN, re.IGNORECASE)
+_NO_EXCLUSION_RE = re.compile(DIET_NO_EXCLUSION_PATTERN, re.IGNORECASE)
 
 
 def _parse_diet(text: str) -> Any:

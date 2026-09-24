@@ -57,6 +57,7 @@ from apps.identity.services.personal_context import (
     get_declared_prefs,
     patch_declared_prefs,
 )
+from apps.integrations.ayla.diet_types import CATALOG_DIET_TYPES
 from apps.persona.memory_extract import GreenFactCandidate
 
 logger = logging.getLogger(__name__)
@@ -157,10 +158,26 @@ def bridge_candidates_to_ayla(
                 )
     if diet is not None:
         diet_type = diet.content.get("diet_type")
-        if isinstance(diet_type, str) and diet_type:
+        if isinstance(diet_type, str) and diet_type in CATALOG_DIET_TYPES:
             updates.append({"field": "diet_type", "value": diet_type, "source": "explicit"})
+        elif isinstance(diet_type, str) and diet_type:
+            # DRF-2398. Значение вне словаря каталога на провод НЕ уходит.
+            # Здесь проверки не было вовсе: контракт провода был описан
+            # словами и не исполнялся ни в одном месте, а это единственная
+            # точка, где значение его пересекает. Каталог такое значение
+            # примет (у столбца `choices` нет — там лежат прежние строки
+            # живых людей), и в память о человеке легла бы строка, которой
+            # словарь не знает: ни показать её, ни забыть по имени.
+            #
+            # Молча ронять нельзя — иначе расхождение словарей окажется
+            # невидимым ровно там, где оно и случается.
+            logger.warning(
+                "orchestrator.memory_bridge.diet_type_outside_vocabulary len=%d",
+                len(diet_type),
+            )
         elif diet.content.get("value") == "none":
             # «я теперь снова ем мясо» — the correction must also reach Ayla.
+            # Пустая строка — «не знаем», это НЕ значение словаря.
             updates.append({"field": "diet_type", "value": "", "source": "explicit"})
 
     if not updates:
