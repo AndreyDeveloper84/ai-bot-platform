@@ -914,6 +914,20 @@ DISCOVERY_CLARIFY_MIN_TIER = int(os.environ.get("DISCOVERY_CLARIFY_MIN_TIER", "4
 # request count (one request per day per tenant).
 AYLA_MIRROR_RECONCILE_WINDOW_DAYS = int(os.environ.get("AYLA_MIRROR_RECONCILE_WINDOW_DAYS", "45"))
 
+# DRF-2379 — сколько дней подметальщик добивает привязку мастера к каталогу,
+# считая от ``invited_at``. Предел выражен СРОКОМ, а не числом попыток:
+# счётчику попыток негде жить, кроме кэша, а кэш теряется при перезапуске —
+# предел, который сам себя обнуляет, пределом не является.
+#
+# Что происходит после срока: одна громкая строка ERROR, и строка больше не
+# берётся. Тишиной это не становится — ``catalog_unlinked`` остаётся видимым
+# студии ровно до тех пор, пока привязки нет.
+#
+# Семь дней — не round number: столько же живёт приглашение мастера
+# (``INVITE_TTL_DAYS``). Привязку разумно добивать ровно столько, сколько сам
+# мастер ещё может принять приглашение.
+SALON_CATALOG_LINK_DEADLINE_DAYS = int(os.environ.get("SALON_CATALOG_LINK_DEADLINE_DAYS", "7"))
+
 # DRF-1545 — the booking health-check gate has NO per-tenant override.
 #
 # ``BOOKING_HEALTH_CHECK_GATE_DISABLED_TENANTS`` (DRF-1005) used to name
@@ -1413,6 +1427,17 @@ CELERY_BEAT_SCHEDULE = {
     "catalog_sync_staleness_hourly": {
         "task": "apps.catalog.tasks.alert_stale_catalog_sync",
         "schedule": crontab(minute="7"),
+    },
+    # DRF-2379 — добить привязку мастера к каталогу там, где прямой вызов при
+    # заведении не прошёл. Часовой такт не случаен: «громкая строка один раз»
+    # в подметальщике держится тем, что окно истёкшего срока равно такту.
+    # Меняя такт, поменяйте и окно (`link_unlinked_salon_masters`).
+    # Минута 41 свободна: :00/:15/:30/:45 — синхронизация, :07 — сторож
+    # свежести, :08/:23/:38/:53 — обход подтверждений расписания. Три из
+    # четырёх ходят в Ayla, и бить в одну минуту с ними незачем.
+    "catalog_link_unlinked_masters_hourly": {
+        "task": "apps.catalog.tasks.link_unlinked_salon_masters",
+        "schedule": crontab(minute="41"),
     },
     "cleanup_expired_replay_traces": {
         "task": "apps.replay.tasks.cleanup_expired_traces",

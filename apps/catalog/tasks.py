@@ -1,8 +1,8 @@
 """Catalog Celery tasks (DRF-579 / Sprint 7 / C5).
 
-One periodic beat target — :func:`sync_catalog_for_all_tenants` —
-that fans :class:`apps.catalog.services.sync.CatalogSyncService`
-out across every active tenant.
+The main periodic beat target — :func:`sync_catalog_for_all_tenants` —
+fans :class:`apps.catalog.services.sync.CatalogSyncService` out across
+every active tenant.
 
 ### Why fan-out at the task layer (not inside the service)
 
@@ -27,6 +27,12 @@ Two entries in ``config.settings.base::CELERY_BEAT_SCHEDULE``:
 * ``catalog_sync_staleness_hourly`` → :func:`alert_stale_catalog_sync`.
   Hourly, offset to :07 so it reads a clock the :00/:15/:30/:45 sync has
   just had a chance to advance.
+
+* ``catalog_link_unlinked_masters_hourly`` →
+  :func:`link_unlinked_salon_masters` (DRF-2379). Hourly at :23. The cadence
+  is load-bearing, not cosmetic: the task reports a passed deadline exactly
+  once per row by looking at the last hour's worth of expiries, so changing
+  the tick means changing that window too.
 
 ``apps/catalog/tests/test_beat_schedule.py`` pins both. Before DRF-1494
 neither was covered: the sync could have been dropped from the schedule
@@ -69,11 +75,20 @@ and not the same log event, as *failed*.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from datetime import timedelta
+from typing import Any, Final
 from uuid import UUID
 
 from celery import shared_task  # type: ignore[import-untyped]
+from django.conf import settings
 from django.db.models import F, QuerySet
+
+from apps.catalog.identity import (
+    REASON_CREATION_UNAVAILABLE,
+    REASON_REFUSED,
+    REASON_TOKEN_MISSING,
+    REASON_TRANSPORT_ERROR,
+)
 
 from apps.catalog.services.sync import CatalogSyncService, SyncResult
 from apps.catalog.services.throttle import ThrottleWaitBudget
@@ -540,5 +555,197 @@ def sweep_schedule_confirmations() -> dict[str, int]:
         counters["checked"],
         counters["cleared"],
         counters["unreadable"],
+    )
+    return counters
+
+
+# --- DRF-2379: добить привязку мастера к каталогу ---------------------------
+
+#: Сколько тик подметальщика берёт строк за раз. Предел, а не настройка: при
+#: недоступном каталоге мы не хотим ходить пятьдесят раз подряд за одним и
+#: тем же отказом, а при исправном — сорок строк за час это больше, чем салон
+#: успевает завести мастеров.
+LINK_SWEEP_BATCH: Final = 40
+
+#: Причины, которые говорят про КОНТУР, а не про строку. Повторившись, они
+#: останавливают тик: ходить остальными строками в недоступный каталог —
+#: трата, а не настойчивость. Отказ с ``conflict:`` сюда не входит — он про
+#: эту строку, и следующая может пройти.
+CONTOUR_REASONS: Final[frozenset[str]] = frozenset(
+    {
+        REASON_TOKEN_MISSING,
+        REASON_REFUSED,
+        REASON_TRANSPORT_ERROR,
+        REASON_CREATION_UNAVAILABLE,
+    }
+)
+
+
+def _unlinked_invited(model: Any) -> Any:
+    """Строки, которых каталог не знает, из числа приглашённых салоном.
+
+    ``objects`` внутри скоупа тенанта, а не ``all_tenants``: межсалонное
+    чтение каталога живёт только в ``apps/marketplace`` (MKT1, сторож
+    ``tools/lint/import_boundaries.py``), и подметальщик — не повод его
+    завести. Та же идиома, что у соседнего ``sweep_schedule_confirmations``.
+    """
+    return model.objects.filter(
+        catalog_specialist_id__isnull=True,
+        archived_at__isnull=True,
+        invited_at__isnull=False,
+    )
+
+
+def _link_deadline_days() -> int:
+    return int(getattr(settings, "SALON_CATALOG_LINK_DEADLINE_DAYS", 7))
+
+
+@shared_task(
+    name="apps.catalog.tasks.link_unlinked_salon_masters",
+    soft_time_limit=540,
+    time_limit=600,
+)
+def link_unlinked_salon_masters() -> dict[str, int]:
+    """Добить привязку мастеров, которых каталог ещё не знает (DRF-2379).
+
+    Приглашение зовёт каталог сразу (``views_invite._link_to_catalog``) и
+    **не падает**, когда тот недоступен. Значит кто-то обязан вернуться к
+    таким строкам — иначе «сама привязка» держится на том, что сеть не
+    подводит, а она подводит.
+
+    ### Предел — срок, а не число попыток
+
+    Счётчику попыток негде жить, кроме кэша, а кэш теряется при перезапуске:
+    предел, который сам себя обнуляет, — не предел. Поэтому граница —
+    ``SALON_CATALOG_LINK_DEADLINE_DAYS`` (7 по умолчанию) от ``invited_at``.
+
+    **Что происходит, когда каталог недоступен долго.** Строка ходит по
+    подметальщику, пока не истечёт срок. В тик, когда срок истёк, пишется
+    **одна громкая строка** ``ERROR`` — и больше эта строка не берётся. Это
+    не тишина: состояние ``catalog_unlinked`` остаётся видимым студии
+    (``salon_readiness`` его уже считает), и его видно ровно до тех пор, пока
+    привязки нет. Молчит журнал, а не система.
+
+    «Одна» держится без хранилища: громко сообщается о строках, у которых
+    срок истёк **в последний час**, то есть между прошлым тиком и этим.
+    Часовой такт даёт ровно одно попадание на строку.
+
+    Поэтому же проходов **два**, и громкий идёт первым, отдельно от похода в
+    каталог: рабочий проход умеет остановиться на полпути (контурная причина,
+    исчерпанный бюджет), а крик бывает один раз в жизни строки — пропустив
+    своё окно из-за чужой остановки, она молчала бы уже навсегда.
+
+    ### Названный предел охвата
+
+    Берутся только строки с ``invited_at`` — те, которых салон **пригласил**.
+    У строки ``mode=catalog_only`` и у приехавшей синком даты рождения нет
+    (``synced_at`` — ``auto_now``, он про последнее касание), а срок нельзя
+    отсчитать от того, чего нет. Такая строка получает одну попытку при
+    заведении и в подметальщик не попадает. Завести ей отдельную колонку —
+    отдельное решение, и в этом листе новых колонок нет.
+
+    Returns:
+      ``{candidates, linked, unavailable, expired, stopped}``. ``stopped`` —
+      1, когда тик прерван контурной причиной.
+    """
+    from django.utils import timezone
+
+    from apps.catalog.identity import (
+        CatalogIdentityUnavailable,
+        ensure_catalog_specialist_identity,
+    )
+    from apps.catalog.models import CatalogMaster
+    from apps.tenancy.context import tenant_scope
+
+    now = timezone.now()
+    deadline_days = _link_deadline_days()
+    expired_before = now - timedelta(days=deadline_days)
+    # Нижняя граница «громкого» окна — те, чей срок истёк с прошлого тика.
+    just_expired_after = expired_before - timedelta(hours=1)
+
+    counters = {"candidates": 0, "linked": 0, "unavailable": 0, "expired": 0, "stopped": 0}
+    budget = LINK_SWEEP_BATCH
+    previous_contour_reason: str | None = None
+    stop = False
+
+    tenants = list(tenants_in_sync_order())
+
+    # Проход 1 — громкий, и он ОТДЕЛЬНЫЙ от похода в каталог.
+    #
+    # Слитый со вторым, он терял бы строки: второй умеет остановиться на
+    # полпути (контурная причина, исчерпанный бюджет), а крик о наступившем
+    # сроке бывает ровно один раз в жизни строки. Пропустив своё окно, она
+    # молчала бы уже навсегда. Здесь сети нет — только чтение и запись в
+    # журнал, — поэтому пройти всех дёшево.
+    for tenant in tenants:
+        with tenant_scope(tenant):
+            for master in (
+                _unlinked_invited(CatalogMaster)
+                .filter(invited_at__lt=expired_before, invited_at__gte=just_expired_after)
+                .only("id", "tenant_id", "invited_at")
+            ):
+                counters["expired"] += 1
+                logger.error(
+                    "catalog.link_sweep.deadline_passed master=%s tenant=%s invited_at=%s "
+                    "days=%d — каталог так и не узнал этого мастера; подметальщик его "
+                    "больше не берёт, состояние catalog_unlinked остаётся видимым "
+                    "студии (DRF-2379)",
+                    master.pk,
+                    tenant.id,
+                    master.invited_at,
+                    deadline_days,
+                )
+
+    # Проход 2 — рабочий: он ходит в каталог и потому ограничен бюджетом и
+    # остановкой по контурной причине.
+    for tenant in tenants:
+        if stop or budget <= 0:
+            break
+        with tenant_scope(tenant):
+            candidates = list(
+                _unlinked_invited(CatalogMaster)
+                .filter(invited_at__gte=expired_before)
+                .order_by("invited_at")[:budget]
+            )
+            counters["candidates"] += len(candidates)
+            budget -= len(candidates)
+
+            for master in candidates:
+                try:
+                    ensure_catalog_specialist_identity(master)
+                except CatalogIdentityUnavailable as exc:
+                    counters["unavailable"] += 1
+                    if exc.reason in CONTOUR_REASONS:
+                        if previous_contour_reason == exc.reason:
+                            counters["stopped"] = 1
+                            stop = True
+                            logger.warning(
+                                "catalog.link_sweep.stopped reason=%s after=%d — причина "
+                                "про контур, а не про строку: остальные дадут тот же "
+                                "отказ (DRF-2379)",
+                                exc.reason,
+                                counters["unavailable"],
+                            )
+                            break
+                        previous_contour_reason = exc.reason
+                    else:
+                        previous_contour_reason = None
+                    continue
+                except Exception:  # noqa: BLE001 — одна строка не валит тик
+                    counters["unavailable"] += 1
+                    previous_contour_reason = None
+                    logger.exception("catalog.link_sweep.failed master=%s", master.pk)
+                    continue
+
+                previous_contour_reason = None
+                counters["linked"] += 1
+
+    logger.info(
+        "catalog.link_sweep.done candidates=%d linked=%d unavailable=%d expired=%d stopped=%d",
+        counters["candidates"],
+        counters["linked"],
+        counters["unavailable"],
+        counters["expired"],
+        counters["stopped"],
     )
     return counters
