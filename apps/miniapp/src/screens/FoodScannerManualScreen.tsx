@@ -165,7 +165,7 @@ export function FoodScannerManualScreen() {
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `handleRefusal` пересоздаётся каждый рендер и меняющегося состояния не читает; включить её — перезапускать оценку на каждый рендер
   }, [savedDish, savedPortion]);
 
   // Согласие спрашивается у сервера; отказ ЧТЕНИЯ на гейт не ведёт.
@@ -219,7 +219,7 @@ export function FoodScannerManualScreen() {
         if (alive.current) setBusy("idle");
       }
     },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `handleRefusal` пересоздаётся каждый рендер и меняющегося состояния не читает; включить её — пересобирать обработчик на каждый рендер
     [text],
   );
 

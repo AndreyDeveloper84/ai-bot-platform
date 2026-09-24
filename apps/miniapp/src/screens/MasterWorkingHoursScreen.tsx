@@ -46,6 +46,11 @@ import { useScreenBack } from "../hooks/useScreenBack";
 import { backTo } from "../lib/screen-back";
 
 import { SheetChrome } from "../components/PersonalDataSheets";
+import {
+  NOT_LINKED_SLUG,
+  StudioCallout,
+  notConnectedText,
+} from "../components/StudioCallout";
 import { MasterTabBar } from "../components/MasterTabBar";
 import { Snackbar } from "../components/Snackbar";
 // Загрузка / ошибка загрузки — мастерский SystemState (DRF-2194), не клиентский StateError.
@@ -170,8 +175,7 @@ export const INVALID_INTERVAL = "Начало должно быть раньше
 export const INVALID_BREAK = "Перерыв должен быть внутри рабочего времени.";
 export const CONFLICT_MESSAGE =
   "В это время уже есть записи. Сначала разберитесь с ними.";
-export const NOT_LINKED_MESSAGE =
-  "Профиль ещё не связан с каталогом — сохранить часы пока некуда. Привязку выполнит оператор.";
+export const NOT_LINKED_MESSAGE = notConnectedText("сохранить часы некуда");
 export const REQUEST_FAILED = "Не удалось отправить заявку. Попробуйте ещё раз.";
 
 type Phase =
@@ -375,7 +379,10 @@ export function MasterWorkingHoursScreen() {
     } catch (err) {
       // 403 not_linked на загрузке — свой текст экрана, как на save и как у
       // Place/Directions; иначе общий SystemState прочитал бы его как «Недостаточно прав».
-      if (err instanceof ApiError && err.status === 403) {
+      // По slug, не по коду: 403 носят и `master_inactive`, и
+      // `forbidden` (найдено ревью DRF-2378) — объявлять их непривязкой
+      // значит ставить человеку ложный диагноз.
+      if (err instanceof ApiError && err.slug === NOT_LINKED_SLUG) {
         setPhase({ kind: "not_linked" });
         return;
       }
@@ -569,9 +576,7 @@ export function MasterWorkingHoursScreen() {
   if (phase.kind === "not_linked") {
     return (
       <main className="screen working-hours">
-        <p className="callout" role="status">
-          {NOT_LINKED_MESSAGE}
-        </p>
+        <StudioCallout text={NOT_LINKED_MESSAGE} />
         <MasterTabBar scheduleHasPendingChange={false} />
       </main>
     );
@@ -734,7 +739,7 @@ export function MasterWorkingHoursScreen() {
  */
 function requestErrorText(err: unknown): string {
   if (err instanceof ApiError) {
-    if (err.status === 403) return NOT_LINKED_MESSAGE;
+    if (err.slug === NOT_LINKED_SLUG) return NOT_LINKED_MESSAGE;
     if (err.status === 400) return err.detail || REQUEST_FAILED;
     if (err.status === 409) return CONFLICT_MESSAGE;
   }
@@ -744,7 +749,7 @@ function requestErrorText(err: unknown): string {
 function saveErrorText(err: unknown): string {
   if (err instanceof ApiError) {
     if (err.status === 409) return CONFLICT_MESSAGE;
-    if (err.status === 403) return NOT_LINKED_MESSAGE;
+    if (err.slug === NOT_LINKED_SLUG) return NOT_LINKED_MESSAGE;
     if (err.status === 400) return err.detail || INVALID_INTERVAL;
   }
   return "Не удалось сохранить. Попробуйте ещё раз.";

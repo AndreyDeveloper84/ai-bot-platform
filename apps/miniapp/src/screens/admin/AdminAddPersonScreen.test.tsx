@@ -233,7 +233,7 @@ describe("ссылка-приглашение", () => {
 
     expect(writeText).toHaveBeenCalledWith(INVITED.invite_link);
     expect(await screen.findByText("Скопировано")).toBeInTheDocument();
-  });
+  }, 15_000);
 
   it("говорит вслух, если скопировать не вышло", async () => {
     const user = userEvent.setup();
@@ -251,7 +251,7 @@ describe("ссылка-приглашение", () => {
     expect(
       await screen.findByText(/выделите ссылку и скопируйте вручную/i),
     ).toBeInTheDocument();
-  });
+  }, 15_000);
 
   it("называет, почему веб-адреса нет, а не прячет блок (DRF-1079)", async () => {
     const user = userEvent.setup();

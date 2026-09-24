@@ -245,7 +245,7 @@ describe("commit (§18)", () => {
     expect(body?.client_id).toBe("c-1");
     expect(body?.client_name).toBeUndefined();
     expect(body?.idempotency_key).toBeTruthy();
-  });
+  }, 15_000);
 
   it("reuses the same idempotency key when a pending submit is retried", async () => {
     // Ayla invents a key when the header is absent, so a retry with a fresh

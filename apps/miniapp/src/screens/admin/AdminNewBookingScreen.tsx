@@ -22,6 +22,8 @@
 
 import { useMemo } from "react";
 import { useSearchParams } from "react-router-dom";
+import { useScreenBack } from "../../hooks/useScreenBack";
+import { backTo } from "../../lib/screen-back";
 
 import {
   createSalonBooking,
@@ -102,6 +104,12 @@ export function AdminNewBookingScreen() {
     () => RETURN_TARGETS[searchParams.get("return") ?? ""] ?? RETURN_DEFAULT,
     [searchParams],
   );
+  // DRF-2368 — возврат объявлен ЗДЕСЬ, а не только нарисован формой:
+  // адрес зависит от того, откуда пришли («Сегодня» или «День салона»), и
+  // берётся из того же закрытого списка, что и подпись кнопки. Одно
+  // объявление на экран — форма ниже рисует свою кнопку тем же адресом.
+  useScreenBack(backTo(returnTo.path));
+
   return (
     <NewBookingForm
       subject={{ kind: "salon" }}

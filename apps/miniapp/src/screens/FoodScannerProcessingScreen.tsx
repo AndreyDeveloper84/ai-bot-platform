@@ -142,7 +142,7 @@ export function FoodScannerProcessingScreen() {
       if (timeoutTimerRef.current !== null)
         window.clearTimeout(timeoutTimerRef.current);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- снимок обрабатывается один раз за вход на экран; все пять значений приходят навигацией и на монтировании постоянны
   }, []);
 
   // ── error branches per spec §7 ─────────────────────────────────────

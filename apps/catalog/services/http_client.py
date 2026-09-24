@@ -364,6 +364,39 @@ class CatalogSoloProvisioningRefused(CatalogError):
         self.reason = reason
 
 
+class CatalogSalonSpecialistRefused(CatalogError):
+    """Каталог отказал в заведении специалиста салона (DRF-2379).
+
+    ``reason`` — машинное имя из ``details.reason``: ``tenant_not_found``
+    (404), ``tenant_is_solo`` / ``claim_bound_elsewhere`` /
+    ``invalid_external_user_id`` (409). Это **ответ** каталога, а не наше
+    незавершённое раскатывание, — отличать обязательно, см.
+    :class:`CatalogSalonSpecialistDoorAbsent`.
+    """
+
+    def __init__(self, message: str, *, reason: str) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
+class CatalogSalonSpecialistDoorAbsent(CatalogError):
+    """У каталога нет такого маршрута — 404 БЕЗ нашего тела ошибки (DRF-2379).
+
+    Почему это отдельное имя, а не ``reason="tenant_not_found"``: два 404
+    приходят с одного адреса и означают противоположное. «Салона нет» —
+    ответ каталога, который знает ручку и говорит «адресат не тот», и его
+    чинит тот, кто прислал чужой ``tenant_id``. «Маршрута нет» — наша
+    половина ещё не выложена, каталог такой ручки не знает вовсе, и чинит
+    это выкладка, а не оператор.
+
+    Слитые в одно имя, они через неделю читаются как «у нас всё сломано»:
+    журнал полон «салон не найден» на салонах, которые есть.
+
+    Отличаются по телу: наш отказ несёт ``error.details.reason``, 404
+    маршрутизатора — нет.
+    """
+
+
 class CatalogAdminLinkTokenMissing(CatalogError):
     """``AYLA_SALON_ADMIN_LINK_TOKEN`` пуст НА НАШЕЙ стороне (DRF-2085).
 
@@ -413,6 +446,29 @@ class ProvisionedSoloWorkspaceDTO:
 
     tenant_id: uuid.UUID
     slug: str
+    specialist_id: uuid.UUID
+    user_id: uuid.UUID
+    status: str
+    created: bool
+
+
+@dataclass(frozen=True)
+class ProvisionedSalonSpecialistDTO:
+    """Ответ ``POST /api/v1/internal/tenants/salon-specialists/`` (DRF-2379).
+
+    Специалист в УЖЕ существующем салоне — в отличие от соседнего
+    :class:`ProvisionedSoloWorkspaceDTO`, где каталог заводит тенант целиком.
+    Поэтому здесь нет ``slug``: салон уже есть и своего имени не меняет.
+
+    ``specialist_id`` — то, ради чего ручку звали: ключ, которым каталог
+    знает эту строку (``CatalogMaster.catalog_specialist_id``, DRF-1933), а
+    не «кто этот человек» (``linked_bot_user``, ADR-0008).
+
+    ``created`` — 201 против 200: завёл этот вызов или строка уже была под
+    тем же ``external_user_id`` (идемпотентность каталога по claim).
+    """
+
+    tenant_id: uuid.UUID
     specialist_id: uuid.UUID
     user_id: uuid.UUID
     status: str
@@ -1214,6 +1270,121 @@ class CatalogHttpClient:
                 "Ayla solo-workspaces: response without tenant_id/specialist_id/user_id"
             ) from exc
 
+    def provision_salon_specialist(
+        self,
+        *,
+        tenant_id: uuid.UUID | str,
+        external_user_id: str,
+        display_name: str,
+    ) -> ProvisionedSalonSpecialistDTO:
+        """Специалист в УЖЕ существующем салоне каталога (DRF-2379).
+
+        ``POST /api/v1/internal/tenants/salon-specialists/`` под
+        ``AYLA_TENANT_PROVISIONING_TOKEN`` — тот же секрет и та же сторона
+        ответственности, что у :meth:`provision_solo_workspace`. Отличие по
+        существу: та ручка заводит **тенант целиком**, а у салона он уже
+        есть; здесь каталог тенант ищет, и его отсутствие — отказ.
+
+        ``external_user_id`` — **ключ идемпотентности провижининга, не
+        личность**. Вызывающий шлёт ``bot:master:<CatalogMaster.id>``: на
+        моменте заведения мастера MAX-id ещё нет (приглашение не принято), а
+        ключ строки зеркала есть и не меняется. Каталог кладёт его в
+        ``provisioned_external_user_id`` как провенанс — «для какой строки
+        бота это заведено», — и резолверы личности его не читают. Личность
+        приезжает позже и отдельно, через ``linked_bot_user`` (ADR-0008).
+
+        Повтор с тем же ключом возвращает **того же** специалиста (200
+        вместо 201) и ничего не создаёт: второй специалист в салоне был бы
+        не лишней строкой, а вторым человеком в расписании.
+
+        Без ретраев сверх ``httpx``: это действие, а не выборка. Повтор
+        делает подметальщик по записанной причине.
+
+        Исходы по имени: :class:`CatalogProvisioningTokenMissing`,
+        :class:`CatalogProvisioningRefused` (403),
+        :class:`CatalogSalonSpecialistDoorAbsent` (404 без нашего тела —
+        наша половина ещё не выложена),
+        :class:`CatalogSalonSpecialistRefused` (404 ``tenant_not_found`` и
+        409 с ``reason``), :class:`CatalogClientError` (прочие 4xx),
+        :class:`CatalogTransportError` (сеть / 5xx / кривой ответ).
+        """
+        token = (
+            self._provisioning_token
+            if self._provisioning_token is not None
+            else getattr(settings, "AYLA_TENANT_PROVISIONING_TOKEN", "")
+        )
+        if not token:
+            raise CatalogProvisioningTokenMissing(
+                "AYLA_TENANT_PROVISIONING_TOKEN not configured on the bot side"
+            )
+        try:
+            url = AylaUrlBuilder(self._base_url).build("/internal/tenants/salon-specialists/")
+        except AylaUrlError as exc:
+            raise CatalogTransportError(f"invalid AYLA_BASE_URL: {exc}") from exc
+
+        try:
+            response = self._client().post(
+                url,
+                json={
+                    "tenant_id": str(tenant_id),
+                    "external_user_id": external_user_id,
+                    "display_name": display_name,
+                },
+                headers=with_request_id(
+                    {
+                        "Authorization": f"Bearer {token}",
+                        "Accept": "application/json",
+                    }
+                ),
+                timeout=self._timeout,
+            )
+        except httpx.HTTPError as exc:
+            raise CatalogTransportError(
+                f"Ayla salon-specialists: transport failure on {url}: {exc.__class__.__name__}"
+            ) from exc
+
+        if response.status_code in (401, 403):
+            raise CatalogProvisioningRefused(
+                f"Ayla salon-specialists: provisioning refused with HTTP {response.status_code}"
+            )
+        if response.status_code in (404, 409):
+            reason = _salon_specialist_reason(response)
+            if reason is None:
+                # 404 без нашего тела — маршрутизатор каталога, а не каталог.
+                # «Ручки нет» и «салона нет» приходят с одного адреса и
+                # означают противоположное; слитые в одно имя, они дают
+                # журнал, полный «салон не найден» на салонах, которые есть.
+                raise CatalogSalonSpecialistDoorAbsent(
+                    f"Ayla salon-specialists: no such route on {url} "
+                    f"(HTTP {response.status_code} without an error body)"
+                )
+            raise CatalogSalonSpecialistRefused(
+                f"Ayla salon-specialists: refused ({reason})", reason=reason
+            )
+        if 400 <= response.status_code < 500:
+            raise CatalogClientError(
+                f"Ayla salon-specialists 4xx: HTTP {response.status_code} "
+                f"body={response.text[:200]!r}"
+            )
+        if response.status_code >= 500:
+            raise CatalogTransportError(f"Ayla salon-specialists: HTTP {response.status_code}")
+
+        data = _json_or_empty(response).get("data")
+        if not isinstance(data, dict):
+            raise CatalogTransportError("Ayla salon-specialists: response without data")
+        try:
+            return ProvisionedSalonSpecialistDTO(
+                tenant_id=uuid.UUID(str(data["tenant_id"])),
+                specialist_id=uuid.UUID(str(data["specialist_id"])),
+                user_id=uuid.UUID(str(data["user_id"])),
+                status=str(data.get("status") or ""),
+                created=response.status_code == 201,
+            )
+        except (KeyError, ValueError) as exc:
+            raise CatalogTransportError(
+                "Ayla salon-specialists: response without tenant_id/specialist_id/user_id"
+            ) from exc
+
     def close(self) -> None:
         if self._http is not None:
             self._http.close()
@@ -1237,6 +1408,24 @@ def _json_or_empty(response: httpx.Response) -> dict[str, Any]:
     except ValueError:
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+def _salon_specialist_reason(response: httpx.Response) -> str | None:
+    """Машинная причина отказа каталога — или ``None``, когда её нет (DRF-2379).
+
+    ``None`` значит «ответ пришёл не от нашей ручки»: маршрутизатор каталога
+    отдаёт 404 без ``error.details.reason``, и это **наша невыложенная
+    половина**, а не отказ каталога. Разбор вынесен сюда, чтобы оба 404
+    читались в одном месте и их нельзя было случайно слить.
+    """
+    error = _json_or_empty(response).get("error")
+    if not isinstance(error, dict):
+        return None
+    details = error.get("details")
+    if not isinstance(details, dict):
+        return None
+    reason = details.get("reason")
+    return str(reason) if reason else None
 
 
 def _coerce_positive_seconds(raw: Any) -> float | None:

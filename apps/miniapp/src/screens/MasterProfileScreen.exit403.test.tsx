@@ -76,7 +76,10 @@ describe("профиль при card 403 + portfolio 403 — выход с по�
   it("403 not_linked — доменный текст про привязку, не «Недостаточно прав»", async () => {
     mount();
     await screen.findByRole("button", { name: PROFILE_COPY.buttons.appSettings });
-    expect(screen.getByText(/Профиль ещё не связан с каталогом/)).toBeInTheDocument();
+    // Текст утверждён владельцем (DRF-2378). Предмет узла прежний: 403
+    // говорит ДОМЕННЫМИ словами про состояние профиля, а не «Недостаточно
+    // прав» — менялась формулировка, не правило.
+    expect(screen.getByText(/Профиль пока не подключён/)).toBeInTheDocument();
     expect(screen.queryByText(/Недостаточно прав/)).toBeNull();
     expect(screen.queryByText(/Это действие недоступно/)).toBeNull();
   });

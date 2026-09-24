@@ -52,6 +52,8 @@ import {
   useState,
 } from "react";
 import { useNavigate, useParams } from "react-router-dom";
+import { useScreenBack } from "../../hooks/useScreenBack";
+import { backTo } from "../../lib/screen-back";
 
 import { Snackbar } from "../../components/Snackbar";
 import { StateError } from "../../components/StateError";
@@ -414,6 +416,8 @@ function MasterScheduleSection({ masterId, isOwner }: { masterId: string; isOwne
 /** «9 сентября» — дата подтверждения словами, как в решении владельца. */
 export function AdminMasterDetailScreen({ me }: Props) {
   const navigate = useNavigate();
+  // DRF-2368 — карточка мастера открывается из ростера, туда и возвращает.
+  const onBack = useScreenBack(backTo("/admin/team"));
   const { masterId = "" } = useParams<{ masterId: string }>();
 
   const [master, setMaster] = useState<MasterDetail | null>(null);
@@ -461,7 +465,7 @@ export function AdminMasterDetailScreen({ me }: Props) {
       setBackButton(false);
       setClosingConfirmation(false);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `navigate` нужен только внутри обработчика системной кнопки; привязка делается один раз за монтирование
   }, []);
 
   useEffect(() => {
@@ -696,7 +700,7 @@ export function AdminMasterDetailScreen({ me }: Props) {
           type="button"
           className="btn-secondary"
           style={{ marginTop: "var(--s-3)" }}
-          onClick={() => navigate("/admin/team")}
+          onClick={onBack}
         >
           Вернуться к команде
         </button>
@@ -711,7 +715,7 @@ export function AdminMasterDetailScreen({ me }: Props) {
           <button
             type="button"
             className="admin-flow-back"
-            onClick={() => navigate("/admin/team")}
+            onClick={onBack}
             aria-label="К команде"
           >
             ← Мастера
@@ -729,7 +733,7 @@ export function AdminMasterDetailScreen({ me }: Props) {
           <button
             type="button"
             className="admin-flow-back"
-            onClick={() => navigate("/admin/team")}
+            onClick={onBack}
             aria-label="К команде"
           >
             ← Мастера
@@ -751,7 +755,7 @@ export function AdminMasterDetailScreen({ me }: Props) {
           type="button"
           className="btn-secondary"
           style={{ marginTop: "var(--s-3)" }}
-          onClick={() => navigate("/admin/team")}
+          onClick={onBack}
         >
           Вернуться к команде
         </button>
@@ -777,7 +781,7 @@ export function AdminMasterDetailScreen({ me }: Props) {
         <button
           type="button"
           className="admin-flow-back"
-          onClick={() => navigate("/admin/team")}
+          onClick={onBack}
           aria-label="Назад к команде"
           style={{
             background: "transparent",

@@ -34,8 +34,10 @@ from apps.catalog.identity import (
     ensure_catalog_specialist_identity,
 )
 from apps.catalog.models import CatalogMaster
+from apps.catalog.services import http_client as http_client_mod
 from apps.catalog.services.http_client import (
     CatalogClientError,
+    CatalogSalonSpecialistDoorAbsent,
     CatalogProvisioningRefused,
     CatalogProvisioningTokenMissing,
     CatalogSoloProvisioningRefused,
@@ -81,6 +83,19 @@ class _FakeCatalog:
             status="draft",
             created=True,
         )
+
+
+class _DoorAbsent:
+    """Каталог без салонной ручки — состояние контура до слияния половины."""
+
+    def __enter__(self) -> "_DoorAbsent":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        return None
+
+    def provision_salon_specialist(self, **kwargs: Any) -> Any:
+        raise CatalogSalonSpecialistDoorAbsent("no such route")
 
 
 @pytest.fixture
@@ -201,17 +216,45 @@ class TestCreateTakesTheAnswerFromTheCatalog:
         assert link.catalog_provisioned_at is not None
 
 
-class TestSalonMasterHasNoDoorAtAll:
-    def test_no_link_means_creation_unavailable_not_a_silent_none(
-        self, salon_master: CatalogMaster, catalog: _FakeCatalog
+class TestSalonMasterGoesThroughItsOwnDoor:
+    """DRF-2379 переписал этот класс, и прежнее имя было ``…HasNoDoorAtAll``.
+
+    **Прежняя правда:** у салонного мастера двери создания не было вовсе, и
+    ``creation_unavailable`` был штатным исходом, а не сбоем.
+
+    **Нынешняя:** дверь есть (``POST /internal/tenants/salon-specialists/``),
+    и салонный мастер уходит в неё, а не в соло-провижининг. Здесь
+    доказывается только развилка — что салонная строка **не трогает** соло-
+    путь; сама салонная дверь со всеми исходами живёт в
+    ``test_salon_specialist_identity_2379.py``.
+
+    Отсутствие каталожной половины (404 без нашего тела) по-прежнему даёт
+    ``creation_unavailable`` — то же имя, то же поведение, что были до листа.
+    """
+
+    def test_a_salon_row_never_reaches_the_solo_provisioning(
+        self, salon_master: CatalogMaster, catalog: _FakeCatalog, monkeypatch
     ):
-        """У салонного мастера двери создания нет ПО УСТРОЙСТВУ, и это названо."""
+        monkeypatch.setattr(http_client_mod, "CatalogHttpClient", lambda: _DoorAbsent())
+
+        with pytest.raises(CatalogIdentityUnavailable):
+            ensure_catalog_specialist_identity(salon_master)
+
+        assert catalog.calls == [], "соло-дверь салонной строке не адресована"
+        assert not SoloIdentityLink.objects.filter(master=salon_master).exists()
+
+    def test_an_unshipped_catalog_half_still_reads_as_creation_unavailable(
+        self, salon_master: CatalogMaster, catalog: _FakeCatalog, monkeypatch
+    ):
+        """Свойство выкладки: пока каталожная половина не слита, имя прежнее."""
+        monkeypatch.setattr(http_client_mod, "CatalogHttpClient", lambda: _DoorAbsent())
+
         with pytest.raises(CatalogIdentityUnavailable) as exc:
             ensure_catalog_specialist_identity(salon_master)
 
         assert exc.value.reason == REASON_CREATION_UNAVAILABLE
-        assert catalog.calls == [], "двери нет — звонить некуда"
-        assert not SoloIdentityLink.objects.filter(master=salon_master).exists()
+        salon_master.refresh_from_db(fields=["catalog_specialist_id"])
+        assert salon_master.catalog_specialist_id is None
 
 
 class TestEveryRefusalHasItsOwnName:

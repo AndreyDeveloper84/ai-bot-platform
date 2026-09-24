@@ -68,7 +68,32 @@
 3. **E.3** Run `git diff --staged` and read it line by line. Ask yourself: did I edit anything outside my stream's roots? If yes — STOP, unstage, restart Phase C.5.
 4. **E.4** Invoke skill `simplify` — finds dead code, repeated logic, unnecessary abstractions. Apply or document why you kept the complexity.
 5. **E.5** Invoke skill `superpowers:verification-before-completion` — re-read the GH issue's acceptance checkboxes and verify each one factually (not vibes). If you can't check a box truthfully — back to Phase D.
-6. **E.6** For destructive or hard-to-reverse work (force push, drop table, deleting files, schema downgrades) — invoke `careful` or `guard` skill BEFORE running the command.
+6. **E.6** **Прогон узла на мутанте прежнего поведения.** Верни правку мысленно
+   назад — одной строкой в коде, — прогони свой узел и убедись, что он
+   **краснеет**. Зелёный узел на мутанте не доказывает ничего: он зелёный не
+   потому, что граница держится, а потому что пример попал в щель.
+
+   Это дешевле ревью и находит то же самое. Мерено: в DRF-2392 и DRF-2398 там,
+   где приём применялся, щелей не оставалось; в трёх местах не применялся — и
+   все три нашло ревью, включая **ложный факт о человеке** («ем всё, кроме
+   мяса» → «без ограничений»), который доезжал до подсказки промпта.
+
+   Рядом стоит правило про сам пример: **брать тот, на котором дефект живёт, а
+   не тот, который проходит.** В том же листе узел был зелёным потому, что я
+   взял вариант фразы с двумя «я» — ровно тот, который узкая проверка случайно
+   ловила; канонический пример того же модуля проваливался. Узел выглядел
+   доказательством, а был совпадением, и это опаснее отсутствующего узла:
+   отсутствие видно, а ложное доказательство закрывает вопрос.
+
+   Дешёвая проверка «а нет ли щели»: если узел проходит и на мутанте, и без
+   него — пример выбран не тот.
+7. **E.7** **Проверяй тем инструментом и на том охвате, которыми проверяет CI.**
+   Свои прогоны по списку файлов не равны прогону по дереву: за сутки это
+   поймало трижды — `ruff format --check .` против форматирования названных
+   файлов, `mypy apps/` против двух модулей, и полный прогон против выборки
+   `-k`. Если CI гоняет по дереву — гоняй по дереву, прежде чем говорить
+   «зелёно».
+8. **E.8** For destructive or hard-to-reverse work (force push, drop table, deleting files, schema downgrades) — invoke `careful` or `guard` skill BEFORE running the command.
 
 ## Phase F — Commit
 
@@ -196,7 +221,14 @@
 - ❌ Implement a consumer for an event before the event-contract.md spec for it lands (Phase 0 Bucket 7).
 - ❌ Merge a PR that has unresolved `Request changes` Code Reviewer findings.
 - ❌ Claim a ticket done without verifying each acceptance checkbox factually.
-- ❌ Patch a symptom without finding the root cause.
+- ❌ Patch a symptom without finding the root cause. (Мерено на DRF-2392: заплатка
+  на записи, когда неправду говорил разбор, **расширила окно порчи с одного хода
+  до суток** — заплатка сделала хуже ровно в том измерении, ради которого
+  ставилась.)
+- ❌ Брать для узла пример, который проходит, вместо примера, на котором дефект
+  живёт. Проверяется прогоном на мутанте прежнего поведения (E.6).
+- ❌ Говорить «зелёно» по прогону уже́ инструментом или охватом, чем гоняет CI
+  (E.7).
 - ❌ Skip the end-of-day status post.
 
 ## TL;DR cycle for a typical ticket

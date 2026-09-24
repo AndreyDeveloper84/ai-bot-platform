@@ -26,6 +26,7 @@
  */
 
 import { useEffect, useMemo, useState } from "react";
+import { StudioCallout, notConnectedText } from "../components/StudioCallout";
 import { useNavigate } from "react-router-dom";
 
 import {
@@ -58,7 +59,7 @@ export const DIRECTIONS_COPY = {
   otherCancel: "Отмена",
   directionPrefix: "Направление: ",
   salonManaged: "Услуги салона ведёт владелец салона.",
-  notLinked: "Профиль ещё не привязан — привязку выполнит оператор.",
+  notLinked: notConnectedText("направления пока не выбрать"),
 } as const;
 
 export const DIRECTIONS_PATH = "/solo/directions";
@@ -164,11 +165,7 @@ export function MasterDirectionsScreen() {
             {DIRECTIONS_COPY.salonManaged}
           </p>
         )}
-        {load.kind === "not_linked" && (
-          <p className="callout" role="status">
-            {DIRECTIONS_COPY.notLinked}
-          </p>
-        )}
+        {load.kind === "not_linked" && <StudioCallout text={DIRECTIONS_COPY.notLinked} />}
         {load.kind === "error" && (
           <SystemState
             kind="load_error"

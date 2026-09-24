@@ -86,6 +86,17 @@ export function MasterTabBar({ scheduleHasPendingChange }: TabBarProps) {
   const navigate = useNavigate();
   const location = useLocation();
 
+  // Хук стоит ВЫШЕ раннего возврата ниже: порядок хуков не должен зависеть от
+  // ветки (DRF-2388, `react-hooks/rules-of-hooks`). Перенос ничего не меняет —
+  // `handleTap` нужен только в разметке, до которой ранний возврат не доходит.
+  const handleTap = useCallback(
+    (to: string) => {
+      hapticSelection();
+      navigate(to);
+    },
+    [navigate],
+  );
+
   // Solo unified surface (Tau §5) owns its own bottom nav (`SoloBottomNav`
   // in App.tsx). The solo surface deliberately reuses several master
   // screens — MasterDashboardScreen, MasterScheduleScreen — which
@@ -125,14 +136,6 @@ export function MasterTabBar({ scheduleHasPendingChange }: TabBarProps) {
       icon: <IconAyla />,
     },
   ];
-
-  const handleTap = useCallback(
-    (to: string) => {
-      hapticSelection();
-      navigate(to);
-    },
-    [navigate],
-  );
 
   return (
     <nav className="master-tabbar" aria-label="Основная навигация">

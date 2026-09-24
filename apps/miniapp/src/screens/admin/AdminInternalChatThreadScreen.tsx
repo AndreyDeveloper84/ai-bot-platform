@@ -70,6 +70,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
+import { useScreenBack } from "../../hooks/useScreenBack";
+import { backTo } from "../../lib/screen-back";
 
 import { Snackbar } from "../../components/Snackbar";
 import { ApiError } from "../../lib/api";
@@ -224,6 +226,10 @@ interface Props {
 
 export function AdminInternalChatThreadScreen({ me }: Props) {
   const navigate = useNavigate();
+  // DRF-2368 — возврат объявлен, а не нарисован: ветка чата открывается из
+  // списка, туда же и ведёт. Одно объявление заводит аппаратную кнопку MAX
+  // и отдаёт обработчик видимой кнопке.
+  const onBack = useScreenBack(backTo("/admin/internal-chat"));
   const { threadId } = useParams<{ threadId: string }>();
   const id = threadId ?? "";
 
@@ -257,7 +263,7 @@ export function AdminInternalChatThreadScreen({ me }: Props) {
       setBackButton(false);
       setClosingConfirmation(false);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `navigate` нужен только внутри обработчика системной кнопки; привязка делается один раз за монтирование
   }, []);
 
   // --- Closing confirmation while composer dirty ---
@@ -478,7 +484,7 @@ export function AdminInternalChatThreadScreen({ me }: Props) {
             <button
               type="button"
               className="btn-secondary"
-              onClick={() => navigate("/admin/internal-chat")}
+              onClick={onBack}
             >
               {COPY.goBack}
             </button>

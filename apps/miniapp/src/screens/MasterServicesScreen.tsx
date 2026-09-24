@@ -34,6 +34,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { StudioCallout, notConnectedText } from "../components/StudioCallout";
 import { useNavigate } from "react-router-dom";
 
 import {
@@ -50,7 +51,6 @@ import {
 } from "../components/OwnServiceForm";
 import { SystemState } from "../components/master/SystemState";
 import { ApiError } from "../lib/api";
-import { SUPPORT_DEEPLINK } from "../lib/customer-profile";
 import {
   getOnboardingReadiness,
   getServiceSelection,
@@ -79,8 +79,7 @@ const COPY = {
   directions: "Направления",
   salonManaged: "Услуги салона ведёт владелец салона.",
   notLinkedTitle: "Доступ не настроен",
-  notLinkedText: "Профиль ещё не привязан — привязку выполнит оператор.",
-  support: "Написать в поддержку",
+  notLinkedText: notConnectedText("услуги пока не настроить"),
   durationUnit: "мин",
   priceUnit: "₽",
 };
@@ -591,24 +590,19 @@ export function MasterServicesScreen() {
   };
 
   if (load.kind === "not_linked") {
-    // Привязку выполняет оператор: кнопки регистрации нет, есть связь с поддержкой.
+    // Привязка — не действие мастера: кнопки регистрации нет, есть дверь к студии.
     return (
       <div className="screen master-services">
         <header className="master-services__header">
           <h1>{COPY.title}</h1>
         </header>
-        <div className="callout" role="status">
-          <h2 className="master-services__section-title">{COPY.notLinkedTitle}</h2>
-          <p>{COPY.notLinkedText}</p>
-          <a
-            href={SUPPORT_DEEPLINK}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="btn-secondary"
-          >
-            {COPY.support}
-          </a>
-        </div>
+        {/* Заголовок остаётся: он говорит, ЧТО это за блок, и снимать
+            его листом про слово «оператор» не за что.
+
+            Прежняя кнопка вела во ВНЕШНЮЮ поддержку
+            (`https://max.me/aylasupport`) — другой адресат, чем назвал
+            владелец. Дверь теперь в студию, и тред у неё уже есть. */}
+        <StudioCallout title={COPY.notLinkedTitle} text={COPY.notLinkedText} />
       </div>
     );
   }

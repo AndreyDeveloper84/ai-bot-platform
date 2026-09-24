@@ -57,6 +57,7 @@ from typing import Any, cast
 
 from ayla_ai_core import SOURCE_INFERRED, SOURCE_STATED, build_memory_block
 
+from apps.integrations.ayla.diet_types import CATALOG_DIET_TYPES
 from apps.identity.models import MemoryEntry
 from apps.identity.services.memory_key_policy import CARDINALITY_MULTI, key_cardinality
 from apps.identity.services.personal_context import GateStatus, get_declared_prefs
@@ -80,9 +81,9 @@ _SLOT_DISPLAY = {
 _INFERRED_KEY_MAP = {"diet": "diet_type"}
 
 # Values allowed to reach the block as a diet_type (Ayla contract vocabulary).
-_DIET_TYPE_VOCAB = frozenset(
-    {"omnivore", "vegetarian", "vegan", "keto", "halal", "kosher", "other"}
-)
+#: DRF-2392: словарь ОДИН на бот. Здесь была одна из трёх копий набора; копии
+#: расходятся молча — у копии в ``memory_ask`` не было ``omnivore``.
+_DIET_TYPE_VOCAB = frozenset(CATALOG_DIET_TYPES)
 
 _DECLARED_CONFIDENCE = 1.0
 _INFERRED_CONFIDENCE = 0.6

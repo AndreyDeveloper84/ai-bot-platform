@@ -35,6 +35,11 @@ from apps.audit.models import AuditLog
 from apps.catalog.identity import REASON_CREATION_UNAVAILABLE
 from apps.catalog.master_state import sale_block
 from apps.catalog.models import CatalogMaster
+from apps.catalog.services import http_client as http_client_mod
+from apps.catalog.services.http_client import (
+    CatalogSalonSpecialistDoorAbsent,
+    ProvisionedSalonSpecialistDTO,
+)
 from apps.events.vocabulary import CANONICAL_EVENTS, STAFF_SPECIALIST_ONBOARDED
 from apps.identity.models import BotUser
 from apps.identity.services import solo_catalog_provisioning
@@ -83,10 +88,57 @@ class _CountingCatalog:
         raise AssertionError("catalog must not be called on this path")
 
 
+class _SalonDoorAbsent:
+    """Каталог БЕЗ салонной ручки — состояние контура до слияния половины.
+
+    Умолчание стенда намеренно такое: почти все узлы этого файла — про то,
+    что фасад не прячет отказ identity, и им нужен отказ. Узел, доказывающий
+    обратное (дверь отвечает → успех), ставит свой стенд сам.
+    """
+
+    calls = 0
+
+    def __enter__(self) -> "_SalonDoorAbsent":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        return None
+
+    def provision_salon_specialist(self, **kwargs: Any) -> Any:
+        type(self).calls += 1
+        raise CatalogSalonSpecialistDoorAbsent("no such route")
+
+
+class _SalonDoorAnswers:
+    """Каталог С салонной ручкой (DRF-2379): отвечает подтверждённым id."""
+
+    specialist_id = uuid.UUID("d0a20600-0000-4000-8000-000000000379")
+    calls = 0
+
+    def __enter__(self) -> "_SalonDoorAnswers":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        return None
+
+    def provision_salon_specialist(self, **kwargs: Any) -> ProvisionedSalonSpecialistDTO:
+        type(self).calls += 1
+        return ProvisionedSalonSpecialistDTO(
+            tenant_id=uuid.UUID(str(kwargs["tenant_id"])),
+            specialist_id=self.specialist_id,
+            user_id=uuid.uuid4(),
+            status="draft",
+            created=True,
+        )
+
+
 @pytest.fixture(autouse=True)
 def _no_real_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
     _CountingCatalog.calls = 0
+    _SalonDoorAbsent.calls = 0
+    _SalonDoorAnswers.calls = 0
     monkeypatch.setattr(solo_catalog_provisioning, "CatalogHttpClient", _CountingCatalog)
+    monkeypatch.setattr(http_client_mod, "CatalogHttpClient", _SalonDoorAbsent)
 
 
 @pytest.fixture
@@ -237,6 +289,14 @@ def test_repeat_is_idempotent_already_linked_reuse_no_second_link_write(
 def test_salon_master_without_door_links_but_is_not_success(
     tenant: Tenant, salon_master: CatalogMaster, person: BotUser
 ) -> None:
+    """Дверь не отвечает — связь стоит, успеха нет, причина по имени.
+
+    DRF-2379 поменял, ЧТО означает здесь ``creation_unavailable``. Раньше —
+    «двери у салонного мастера нет вовсе», штатный исход. Теперь — «каталог
+    не знает этой ручки», то есть наша половина ещё не выложена. Само же
+    свойство фасада, ради которого узел писался, не изменилось: отказ
+    identity он **не прячет**, и связь при этом стоит.
+    """
     result = onboard_specialist_to_tenant(
         tenant=tenant, master=salon_master, bot_user=person, actor=_salon_admin(tenant)
     )
@@ -259,6 +319,49 @@ def test_salon_master_without_door_links_but_is_not_success(
     assert rows[0].payload["identity_reason"] == REASON_CREATION_UNAVAILABLE
     assert rows[0].payload["membership_after"] == MEMBERSHIP_LINKED_NOW
     assert rows[0].payload["surface"] == "salon_miniapp"
+
+
+def test_salon_master_with_the_door_reaches_success(
+    tenant: Tenant, salon_master: CatalogMaster, person: BotUser, monkeypatch
+) -> None:
+    """DRF-2379: та же дверь чинит и этот путь, не только приглашение.
+
+    Фасад зовут «Команда» в Mini App салона и Django Admin для Platform Ops.
+    Заперев новую дверь только на путь приглашения, мы завели бы **два
+    поведения одной операции** — ровно то, ради отсутствия чего фасад и
+    писался.
+    """
+    monkeypatch.setattr(http_client_mod, "CatalogHttpClient", _SalonDoorAnswers)
+
+    result = onboard_specialist_to_tenant(
+        tenant=tenant, master=salon_master, bot_user=person, actor=_salon_admin(tenant)
+    )
+
+    assert result.success is True
+    assert result.identity_reason is None
+    assert result.specialist_id == str(_SalonDoorAnswers.specialist_id)
+    row = CatalogMaster.all_tenants.get(pk=salon_master.pk)
+    assert row.catalog_specialist_id == _SalonDoorAnswers.specialist_id
+    assert row.linked_bot_user_id == person.pk
+    assert _CountingCatalog.calls == 0, "соло-дверь тут ни при чём"
+
+
+def test_a_second_onboarding_does_not_provision_twice(
+    tenant: Tenant, salon_master: CatalogMaster, person: BotUser, monkeypatch
+) -> None:
+    """Повтор идемпотентен и на этом пути: колонка полна → reuse."""
+    monkeypatch.setattr(http_client_mod, "CatalogHttpClient", _SalonDoorAnswers)
+
+    onboard_specialist_to_tenant(
+        tenant=tenant, master=salon_master, bot_user=person, actor=_salon_admin(tenant)
+    )
+    second = onboard_specialist_to_tenant(
+        tenant=tenant, master=salon_master, bot_user=person, actor=_salon_admin(tenant)
+    )
+
+    assert _SalonDoorAnswers.calls == 1
+    assert second.identity is not None
+    assert second.identity.created is False
 
 
 def test_after_operator_fills_the_key_the_repeat_becomes_success(

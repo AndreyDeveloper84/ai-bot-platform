@@ -1121,8 +1121,68 @@ def master_invite_create(request: HttpRequest) -> HttpResponse:
     #
     # Остаётся один честный сценарий: ссылка и готовый текст на экране,
     # которые владелец отправляет сам (`InviteMessage`, §44.2).
+    _link_to_catalog(master, tenant=tenant)
+
     payload = _response_payload(master, tenant=tenant)
     return JsonResponse(payload, status=201)
+
+
+def _link_to_catalog(master: CatalogMaster, *, tenant: Any) -> None:
+    """Привязать заведённого мастера к каталогу — сразу и не мешая (DRF-2379).
+
+    Решение владельца §77 п.27 (24.09): привязка должна происходить **сама**,
+    когда салон заводит мастера. До этого она была тремя шагами в двух
+    системах — профиль заводился руками в админке каталога, ключ приезжал
+    синком, действие повторялось в админке бота.
+
+    **Почему вне транзакции.** Это сетевой вызов. Внутри ``atomic`` он держал
+    бы соединение всё время похода в каталог, а обрыв откатывал бы строку
+    мастера — салон не завёл бы человека из-за того, что чужая система
+    недоступна.
+
+    **Почему исход только в журнал.** Заведение мастера не имеет права
+    упасть: у салона на экране появился человек, и отказ каталога этого не
+    отменяет. Строка остаётся ``catalog_unlinked`` — состояние, которое
+    ``salon_readiness`` уже считает и студия уже видит, — а добить привязку
+    обязан подметальщик. То же правило, что у ``solo_link_attempt``:
+    регистрация не падает из-за того, что Ayla лежит.
+
+    Ошибку каталога здесь не различаем по имени: :mod:`apps.catalog.identity`
+    уже разложил её по именам и записал в журнал (в том числе отдельной
+    строкой — «ручки нет» против «каталог отказал»). Второй разбор здесь
+    завёл бы второе место, где эти имена живут.
+    """
+    from apps.catalog.identity import (
+        CatalogIdentityUnavailable,
+        ensure_catalog_specialist_identity,
+    )
+
+    try:
+        identity = ensure_catalog_specialist_identity(master)
+    except CatalogIdentityUnavailable as exc:
+        logger.info(
+            "admin_api.invite.catalog_unlinked tenant=%s master_id=%s reason=%s — "
+            "мастер заведён, привязка к каталогу не состоялась; добивает "
+            "подметальщик (DRF-2379).",
+            tenant.id,
+            master.id,
+            exc.reason,
+        )
+        return
+    except Exception:  # noqa: BLE001 — приглашение не падает ни от чего снаружи
+        logger.exception(
+            "admin_api.invite.catalog_link_failed tenant=%s master_id=%s",
+            tenant.id,
+            master.id,
+        )
+        return
+
+    logger.info(
+        "admin_api.invite.catalog_linked tenant=%s master_id=%s specialist=%s",
+        tenant.id,
+        master.id,
+        identity.specialist_id,
+    )
 
 
 __all__ = ["master_invite_create"]

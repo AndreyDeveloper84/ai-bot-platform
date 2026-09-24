@@ -29,7 +29,6 @@ export function PayoutPreviewCard() {
       })
       .catch((err: unknown) => {
         if (import.meta.env.DEV) {
-          // eslint-disable-next-line no-console
           console.warn("[payout-card] hidden — preview failed", err);
         }
       });

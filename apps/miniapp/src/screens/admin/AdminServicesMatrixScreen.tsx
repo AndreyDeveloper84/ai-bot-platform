@@ -239,7 +239,7 @@ export function AdminServicesMatrixScreen({ me }: Props) {
       setBackButton(false);
       setClosingConfirmation(false);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `navigate` нужен только внутри обработчика системной кнопки; перезапуск нужен лишь при смене `dirtyCount`
   }, [dirtyCount]);
 
   useEffect(() => {

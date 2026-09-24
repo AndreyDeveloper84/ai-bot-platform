@@ -45,7 +45,8 @@
  *   Block 4 — Шаги на сегодня (норма воды из анкеты; иной источник, чем
  *     план) — сразу после дневника: это его числа (Д31 б)
  *   Block 7 — Recommendations embed: СКРЫТ (Д31 г), см.
- *     `SHOW_AYLA_PICKS_SHELF` и ответ 40 (§172)
+ *     `lib/ayla-picks-shelf` и ответ 40 (§172). Тот же выключатель
+ *     снимает и запрос за данными полки (DRF-2348)
  *   Bottom nav — Главная · План · Дневник · Записи · Профиль (§55 б)
  *
  * Снято решением владельца 22.09: кнопка «спросить» из шапки (Д2) и блок
@@ -155,6 +156,8 @@ import {
   getCatalogBrowse,
   type CatalogBrowseData,
 } from "../lib/customer-booking";
+import { aylaPicksShelfOn } from "../lib/ayla-picks-shelf";
+import { avatarInitials } from "../lib/customer-profile";
 import { StatusBadge } from "../components/StatusBadge";
 import { CustomerTabBar } from "../components/CustomerTabBar";
 import { UnbookableBadge } from "../components/UnbookableNote";
@@ -166,22 +169,19 @@ import { screenRoot } from "../lib/screen-back";
 type ActiveGoal = NonNullable<WellnessToday["active_goals"]>[number];
 
 /**
- * Полка «Ayla подобрала тебе» — ОБЕЗДВИЖЕНА решением владельца.
+ * Шапка H01 здоровается словами макета — Д1, дословно (DRF-2331).
  *
- * Д31 (г) 22.09: полка уходит с экрана. **Вопрос 40 отвечен 23.09:
- * оставить обездвиженной, код не удалять** — `docs/OPEN_DECISIONS.md`,
- * §172. То есть это не ожидание ответа, а сам ответ: константа стоит здесь
- * по решению, а не «пока».
+ * Строка вынесена сюда, потому что PR обещает «с макета дословно»: сверять
+ * обещание надо с одним местом, а не с копией в тесте.
  *
- * Дата и номер решения в тексте не для красоты: без них через месяц никто
- * не вспомнит, почему выключено, и константу побоятся трогать.
- *
- * ЗАПРОС К ИСТОЧНИКУ ЭТА КОНСТАНТА НЕ СНИМАЕТ: подбор по-прежнему
- * запрашивается при каждом открытии Главной, хотя показывать нечего.
- * Это отдельный лист главного окна — сюда он не берётся намеренно, иначе
- * таблица «макет → код» отвечала бы на два вопроса разом.
+ * ⚠ С этой строкой экран здоровается ДВАЖДЫ: ниже стоит блок приветствия
+ * «Доброе утро, Анна 🌿» (`docs/screens/customer-main-wellness-dashboard.md`
+ * §7), а макет здоровается один раз — только в шапке. Вопрос у владельца
+ * тремя вариантами (шапка вместо блока / шапка без этой строки / оставить
+ * оба). До его слова не трогаем ни то, ни другое: любой выбор здесь
+ * выдал бы догадку за решение.
  */
-const SHOW_AYLA_PICKS_SHELF = false;
+export const HEADER_WELCOME_LINE = "Рада вас видеть!";
 
 /**
  * Согласие дневника — ОДИН блок на экране (DRF-2144 п.6). Формулировка из
@@ -211,6 +211,16 @@ type Slice<T> =
   | { kind: "loading" }
   | { kind: "ok"; data: T }
   | { kind: "error"; reason: LoadErrorReason };
+
+/**
+ * Подбор для полки «Ayla подобрала тебе» — четыре состояния (DRF-2348).
+ *
+ * `not_requested` — полка обездвижена, за данными не ходили. Отдельное
+ * состояние, потому что остальные три на этот вопрос отвечают неправду:
+ * «грузится», «не ответил» и «ответил, полка построена» — всё это про
+ * источник, которого никто не спрашивал.
+ */
+type RecsSlice = Slice<CatalogBrowseData> | { kind: "not_requested" };
 
 /**
  * План — три состояния: читаем; прочитан (`null` = плана нет); недоступен
@@ -250,9 +260,19 @@ export function CustomerWellnessDashboardScreen() {
   const [activity, setActivity] = useState<Slice<RecentActivity>>({
     kind: "loading",
   });
-  const [recs, setRecs] = useState<Slice<CatalogBrowseData>>({
-    kind: "loading",
-  });
+  // Четвёртое состояние, и оно не роскошь: ни одно из трёх не говорит
+  // «мы не спрашивали». `loading` соврал бы «грузится», `error` — «не
+  // ответил», а `ok` с пустыми списками соврал бы дважды: и на экране
+  // («полка построена»), и в шести исходах `picksOutcome`, которые
+  // заведены ровно для того, чтобы не смешивать отсутствие с нулём
+  // (`customer-booking.ts`, таблица исходов). Полка тёмная — вопроса не
+  // было, и так и записано.
+  const [recs, setRecs] = useState<RecsSlice>(() =>
+    // Ленивое начальное значение, потому что «не спрашивали» — ровно то
+    // утверждение, ради которого это состояние и заведено: при зажжённой
+    // полке первый кадр говорил бы неправду до первого `fetchAll`.
+    aylaPicksShelfOn() ? { kind: "loading" } : { kind: "not_requested" },
+  );
   const [planSlice, setPlanSlice] = useState<PlanSlice>({ kind: "loading" });
   // Тема — `null` и «ручка упала» читаются одинаково: блок нейтральный.
   const [lastTopic, setLastTopic] = useState<LastTopic | null>(null);
@@ -285,19 +305,31 @@ export function CustomerWellnessDashboardScreen() {
     () => isOnboardingDismissed(),
   );
 
+  // Один выключатель на вёрстку полки и на запрос за её данными
+  // (`lib/ayla-picks-shelf`, DRF-2348). Читается при отрисовке, а не на
+  // уровне модуля: так сторож может проверить обе стороны.
+  const shelfOn = aylaPicksShelfOn();
+
   // ── data fetch ────────────────────────────────────────────────────────
   const fetchAll = useCallback(async () => {
     setToday({ kind: "loading" });
     setActivity({ kind: "loading" });
-    setRecs({ kind: "loading" });
+    // Тёмная полка не «грузится» — её просто не спрашивают (DRF-2348).
+    setRecs(shelfOn ? { kind: "loading" } : { kind: "not_requested" });
     setPlanSlice({ kind: "loading" });
 
     // Per-slice isolation — Promise.allSettled so one failure doesn't
     // blank the other blocks. (Tau §5 State 5 partial render.)
+    // `getCatalogBrowse` зовётся ТОЛЬКО при зажжённой полке: решение
+    // владельца гасит полку, а обращение уходило всё равно — при каждом
+    // открытии экрана, хотя показывать нечего (DRF-2348, §172 ответ 40).
+    // Ветка `null` держит форму `allSettled` и порядок распаковки: так
+    // включение полки возвращает запрос одной строкой в `aylaPicksShelfOn`,
+    // а не раскопками.
     const [todayRes, activityRes, recsRes, planRes, topicRes] = await Promise.allSettled([
       getWellnessToday(),
       getRecentActivity(),
-      getCatalogBrowse(),
+      shelfOn ? getCatalogBrowse() : Promise.resolve(null),
       getPlanLite(),
       getLastTopicAndChatLink(),
     ]);
@@ -314,11 +346,20 @@ export function CustomerWellnessDashboardScreen() {
       setActivity({ kind: "error", reason: loadErrorReason(activityRes.reason) });
     }
 
-    if (recsRes.status === "fulfilled") {
-      setRecs({ kind: "ok", data: recsRes.value });
-    } else {
+    if (!shelfOn) {
+      // Вопроса не было — и в срезе стоит именно это, а не пустой ответ.
+      setRecs({ kind: "not_requested" });
+    } else if (recsRes.status === "rejected") {
       // Recommendations errors hide the whole block silently per spec.
       setRecs({ kind: "error", reason: loadErrorReason(recsRes.reason) });
+    } else {
+      // Всё остальное при зажжённой полке — ответ. Ветки «а если `null`»
+      // здесь намеренно нет: `null` кладёт только выключенная полка, её
+      // забрал первый случай. Отдельное условие на `null` выглядело бы
+      // аккуратнее, а на деле оставляло бы срез в «грузится» навсегда,
+      // если `getCatalogBrowse` однажды станет возвращать `null` — то
+      // есть меняло бы тип ошибки на самую тихую (найдено ревью).
+      setRecs({ kind: "ok", data: recsRes.value as CatalogBrowseData });
     }
 
     // План: выключен на сервере (`plan_lite_disabled`) или не ответил —
@@ -328,7 +369,7 @@ export function CustomerWellnessDashboardScreen() {
     );
     setLastTopic(topicRes.status === "fulfilled" ? topicRes.value.topic : null);
     setChatLink(topicRes.status === "fulfilled" ? topicRes.value.chatLink : null);
-  }, []);
+  }, [shelfOn]);
 
   useEffect(() => {
     void fetchAll();
@@ -677,13 +718,65 @@ export function CustomerWellnessDashboardScreen() {
       {/* Header — 56dp. Иконки «Профиль»/«Настройки» сняты (DRF-2144): обе
           вели в профиль, а профиль теперь — вкладка панели.
 
-          Д2 (решение владельца 22.09, DRF-2330): кнопка «спросить» снята —
+          Д2 (решение владельца 22.09, §172): кнопка «спросить» снята —
           «один вход в чат вместо двух». Второй и единственный остаётся
           блоком «Продолжить разговор с Ayla» ниже: он несёт последнюю тему,
           а шапочная кнопка вела в тот же чат без неё.
 
-          Имя и колокольчик макета — Д1, отдельный лист DRF-2331. */}
+          Д1 (DRF-2331): человек слева — аватар, имя, «Рада вас видеть!».
+
+          Колокольчика макета НЕТ, и это решение: ленты уведомлений у
+          клиента не существует — ни ручки на сервере, ни экрана на
+          клиенте (есть только настройки уведомлений, а это не они).
+          Счётчик «2» брать неоткуда вовсе. Мёртвый control запрещён
+          решением владельца (§61, М-4 п. 1) и DRF-1181.
+
+          Вордмарк макет в шапке не рисует, но он ОСТАЁТСЯ и занимает
+          освободившееся справа место: его держат
+          `docs/screens/customer-main-wellness-dashboard.md` §7 и
+          `docs/design/policies/ayla-identity-and-brand.md` §7.1. Снять
+          фирменный знак — решение о бренде, а не правка вёрстки. */}
       <header className="wellness-dash__header" role="banner">
+        <div className="wellness-dash__person">
+          {/* Фотографии клиента нет ни в одном контракте — ни у
+              `wellness/today`, ни у `/me`. Новой сущности под Д1 не
+              заводим: `avatarInitials` уже рисует кружок на профиле
+              клиента, и «·» — его же ответ на «имени нет». */}
+          <span className="wellness-dash__avatar" aria-hidden="true">
+            {avatarInitials(displayName)}
+          </span>
+          <span className="wellness-dash__person-text">
+            {/* Пока день грузится, имени ещё нет — и раньше строка просто
+                отсутствовала, отчего «Рада вас видеть!» прыгала внутри
+                56 px при каждом обновлении (в том числе при «Отменить» у
+                стакана воды, DRF-2331, по ревью). Скелет держит высоту и
+                говорит «грузится», а не «имени нет» — тем же приёмом, что
+                блок приветствия ниже. */}
+            {today.kind === "loading" ? (
+              <span
+                className="skeleton wellness-dash__person-skel"
+                aria-hidden="true"
+              />
+            ) : (
+              displayName && (
+                <span className="wellness-dash__person-name">
+                  {/* Многоточие живёт на ВНУТРЕННЕЙ строке, а 👋 стоит
+                      рядом с ней: внутри он съедался первым и длинное имя
+                      оставалось без жеста макета, а сразу за пределами
+                      строки имени — отлетал к вордмарку и читался как его
+                      часть (видно на снимке приёмки). */}
+                  <span className="wellness-dash__person-name-text">
+                    {displayName}
+                  </span>
+                  <span aria-hidden="true">👋</span>
+                </span>
+              )
+            )}
+            <span className="wellness-dash__person-hi">
+              {HEADER_WELCOME_LINE}
+            </span>
+          </span>
+        </div>
         <div className="wellness-dash__brand">
           {/* «ayla» = English wordmark per Tau §7 — wrap in lang="en"
               to keep RU TTS from pronouncing it «Айла» (WCAG 3.1.2). */}
@@ -1096,7 +1189,13 @@ export function CustomerWellnessDashboardScreen() {
             signature «Ayla подобрала тебе» is gated on the WHY the
             SOURCE sent, not on a flag: the block reappears on its own
             once `POST /recommendations` returns reasons. */}
-        {SHOW_AYLA_PICKS_SHELF && picksWithWhy.length > 0 && (
+        {/* `shelfOn` здесь — пояс поверх подтяжек, и проверить его узлом
+            НЕЛЬЗЯ: при тёмной полке за данными не ходят, `picksWithWhy`
+            всегда пуст, и снятие этого условия ничего не меняет (проверено
+            мутацией на ревью). Условие оставлено на случай, если срез
+            когда-нибудь наполнится из другого места — из кэша, из общего
+            состояния. Настоящие ворота — в `fetchAll`. */}
+        {shelfOn && picksWithWhy.length > 0 && (
             <section
               className="wellness-dash__recos"
               aria-labelledby="recos-header"

@@ -45,6 +45,12 @@ _DIET_PHRASES = {
     "kosher": "ешь кошерное",
     # «я теперь снова ем мясо» — the correction row itself is shown honestly.
     "none": "больше не называешь ограничений по питанию",
+    # DRF-2398: без этих двух локальная строка со значением словаря молча НЕ
+    # показывалась бы — человек не увидел бы, что про него помнят, и не смог
+    # бы это забыть. Слова те же, что в банке ниже: второй формулировки об
+    # одном и том же не заводим (видимый текст утверждает владелец).
+    "omnivore": "ешь всё",
+    "other": "называешь особое питание",
 }
 
 _FACT_RENDERERS = {
@@ -100,13 +106,13 @@ def _render_by_key(key: str, content: dict) -> str | None:
 # rows (silent-remember ruling 2026-08-23: the show/forget loop is what
 # justifies remembering without asking).
 _DECLARED_DIET_PHRASES = {
-    "omnivore": "ешь всё",
+    "omnivore": _DIET_PHRASES["omnivore"],
     "vegetarian": _DIET_PHRASES["vegetarian"],
     "vegan": _DIET_PHRASES["vegan"],
     "keto": _DIET_PHRASES["keto"],
     "halal": _DIET_PHRASES["halal"],
     "kosher": _DIET_PHRASES["kosher"],
-    "other": "называешь особое питание",
+    "other": _DIET_PHRASES["other"],
 }
 
 

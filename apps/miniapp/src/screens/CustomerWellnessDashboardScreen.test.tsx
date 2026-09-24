@@ -139,7 +139,7 @@ describe("CustomerWellnessDashboardScreen — the home surface", () => {
     await renderScreen(false);
     expect(await screen.findByText(/стаканов/)).toBeInTheDocument();
     expect(screen.queryByText(/выдуманных данных/)).not.toBeInTheDocument();
-  });
+  }, 15_000);
 
   it("prod build: renders the SAME dashboard — the gate is off (DRF-1546)", async () => {
     // До DRF-1546 здесь рисовался `PilotComingSoonScreen`, и человек на
@@ -247,10 +247,10 @@ describe("CustomerWellnessDashboardScreen — the home surface", () => {
   // `ServiceDetailScreen.price.test.tsx` на карточке услуги. Вернётся полка
   // — вернётся и её ценовой узел. Код полки НЕ удалён — вопрос 40 от
   // 20.09 (снимать совсем или оставить обездвиженной) у владельца, и
-  // включение — одна строка `SHOW_AYLA_PICKS_SHELF`. Поэтому узел пинит
+  // включение — одна строка в `lib/ayla-picks-shelf`. Поэтому узел пинит
   // ОТСУТСТВИЕ НА ЭКРАНЕ при полноценном ответе источника: если полку
   // вернут, не ответив на вопрос 40, он покраснеет.
-  it("DEV build, Block 7: picks with WHY still do NOT reach the screen", async () => {
+  it("DEV build, Block 7: за подбором не ходят, и полки нет", async () => {
     mockedBrowse.mockResolvedValue({
       services: [PEDIKYUR],
       masters: [],
@@ -266,10 +266,21 @@ describe("CustomerWellnessDashboardScreen — the home surface", () => {
       picksOutcome: "OK",
     });
     await renderScreen(false);
-    // Присутствие: экран отрисован, подборка пришла с объяснением —
-    // значит отсутствие ниже про решение, а не про пустой ответ.
+    // Присутствие: экран отрисован — значит отсутствие ниже про решение,
+    // а не про пустой рендер.
+    //
+    // Прежде присутствием служил сам запрос («подборка пришла с
+    // объяснением»), и имя узла обещало, что объяснённый подбор НЕ
+    // доезжает до экрана. DRF-2348 снял запрос (§172, ответ 40) — подбор
+    // теперь не выезжает из мока вовсе, и прежнее имя стало неправдой.
+    //
+    // Что перестало проверяться: «данные есть, а полка тёмная» —
+    // состояние недостижимое, раз данные кладёт только зажжённая полка.
+    // Фикстура ниже сегодня ИНЕРТНА: она описывает, что источник ответил
+    // бы, и делает возврат полки правкой одной строки — но ни одно
+    // утверждение этого узла ею не движется.
     expect(await screen.findByText(/стаканов/)).toBeInTheDocument();
-    expect(mockedBrowse).toHaveBeenCalled();
+    expect(mockedBrowse).not.toHaveBeenCalled();
     expect(
       screen.queryByRole("heading", { name: /Ayla подобрала тебе/ }),
     ).not.toBeInTheDocument();

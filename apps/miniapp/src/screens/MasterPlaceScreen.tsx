@@ -29,6 +29,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { StudioCallout, notConnectedText } from "../components/StudioCallout";
 import { useNavigate } from "react-router-dom";
 
 import { SystemState } from "../components/master/SystemState";
@@ -88,12 +89,14 @@ export const PLACE_COPY = {
   edit: "Изменить",
   done: "Готово",
   saveError: "Не получилось сохранить.",
-  notLinked: "Профиль ещё не связан с каталогом — сохранить место пока некуда.",
+  // Оба отказа этого экрана — про одно и то же состояние, поэтому и
+  // говорят теперь одной первой половиной (названо строкой в PR).
+  notLinked: notConnectedText("сохранить место некуда"),
   salonManaged: "Место работы мастера салона ведёт владелец салона.",
   refusal: {
     place_already_set: "Место уже указано — измените его, а не добавляйте второе.",
     area_already_set: "Зона выезда уже указана — измените её.",
-    no_workspace_tenant: "У профиля ещё нет рабочего пространства — привязку выполнит оператор.",
+    no_workspace_tenant: notConnectedText("указать место работы некуда"),
     place_outside_workspace: "Это место не из вашего рабочего пространства.",
     validation_error: "Проверьте введённое.",
   } as Record<string, string>,
@@ -307,11 +310,7 @@ export function MasterPlaceScreen() {
             {PLACE_COPY.salonManaged}
           </p>
         )}
-        {load.kind === "not_linked" && (
-          <p className="callout" role="status">
-            {PLACE_COPY.notLinked}
-          </p>
-        )}
+        {load.kind === "not_linked" && <StudioCallout text={PLACE_COPY.notLinked} />}
         {load.kind === "error" && (
           <SystemState
             kind="load_error"
