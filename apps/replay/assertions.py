@@ -69,6 +69,7 @@ The split now is by what the rule is *for*:
 
 from __future__ import annotations
 
+from apps.replay.response_shape import describe
 from typing import Any
 
 
@@ -205,23 +206,33 @@ def _dispatch_check(trace: dict[str, Any], key: str, expected: Any, *, polarity:
         hit = expected in names
         return _polarity_check("tool_called", hit, expected, sorted(names), polarity)
 
+    # DRF-2440 — вместо литерала ``<text>`` в отказ идёт ФОРМА ответа: размер,
+    # какие из ожидаемых подстрок нашлись, совпал ли ответ целиком со служебным
+    # шаблоном. Текст по-прежнему наружу не выносится (сторож —
+    # ``tests/test_failure_shape_2440.py``), но «навык ответил иначе» и «ответ
+    # подменили после навыка» теперь различимы по сообщению, а не по догадке.
     if key == "response_contains_any":
         substrings = _needles(expected)
         haystack = response_text.casefold()
         hit = any(s.casefold() in haystack for s in substrings)
-        return _polarity_check("response_contains_any", hit, substrings, "<text>", polarity)
+        shape = describe(response_text, substrings, case_folded=True)
+        return _polarity_check("response_contains_any", hit, substrings, shape, polarity)
 
     if key == "response_contains_all":
         substrings = _needles(expected)
         haystack = response_text.casefold()
         hit = all(s.casefold() in haystack for s in substrings)
         # response_contains_all on forbidden is unusual but supported.
-        return _polarity_check("response_contains_all", hit, substrings, "<text>", polarity)
+        shape = describe(response_text, substrings, case_folded=True)
+        return _polarity_check("response_contains_all", hit, substrings, shape, polarity)
 
     if key == "response_contains_exact":
         substrings = _needles(expected)
         hit = all(s in response_text for s in substrings)
-        return _polarity_check("response_contains_exact", hit, substrings, "<text>", polarity)
+        # Регистр здесь не складывается — и форма обязана мерить тем же
+        # сравнением, иначе она объяснит не тот промах.
+        shape = describe(response_text, substrings, case_folded=False)
+        return _polarity_check("response_contains_exact", hit, substrings, shape, polarity)
 
     return [f"unknown_assertion_key: {key!r}"]
 
