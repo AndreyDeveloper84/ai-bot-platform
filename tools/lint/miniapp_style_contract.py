@@ -147,14 +147,72 @@ STYLES_DIR = Path("src/styles")
 SOURCE_DIR = Path("src")
 
 
+#: Классы, у которых правило есть, но ТОЛЬКО под предком (DRF-2380).
+#:
+#: Отдельный реестр, а не часть BASELINE, потому что это другая беда.
+#: BASELINE — «правила нет нигде, класс не рисует ничего». Здесь —
+#: «рисует там и не рисует здесь»: под своим предком выглядит верно, а в
+#: любом другом месте остаётся голым. Именно эту разницу подстрочная
+#: проверка не видела: она находила .btn-primary внутри
+#: .master-profile .btn-primary и считала класс определённым.
+#:
+#: Цена вопроса была измерена до правки: 86 использований .btn-primary
+#: в 33 файлах, из них 3 под островками и 83 — голые.
+#:
+#: Реестр ХРАПОВИК, как и BASELINE: строка, у которой появилось
+#: правило первого уровня, сама становится отказом и удаляется. Пополнять
+#: — через тех-лида: запись сюда означает «класс выглядит верно не везде»,
+#: и это должно быть решением, а не привычкой.
+DESCENDANT_ONLY: frozenset[str] = frozenset(
+    (
+        "src/App.tsx::solo-surface",
+        "src/components/SetupProgressCard.tsx::setup-card__item",
+        "src/screens/MasterCustomersScreen.tsx::master-customers__header",
+        "src/screens/MasterDashboardScreen.tsx::master-dashboard__day-part",
+        "src/screens/MasterDirectionsScreen.tsx::master-services__header",
+        "src/screens/MasterPlaceScreen.tsx::master-services__header",
+        "src/screens/MasterScheduleScreen.tsx::schedule-free",
+        "src/screens/MasterServiceSelectScreen.tsx::master-services__header",
+        "src/screens/MasterServicesScreen.tsx::master-services__chip",
+        "src/screens/MasterServicesScreen.tsx::master-services__header",
+        "src/screens/MasterWorkingHoursScreen.tsx::working-hours__item",
+    )
+)
+
+
 # Accepted debt, measured on origin/dev at 647d70c (2026-08-24).
 # "<file relative to apps/miniapp>::<class>". Delete an entry when the
 # rule is written -- a stale entry fails this guard on purpose.
+#
+# 2026-09-24 (DRF-2380): реестр ВЫРОС с 54 до 72, и это не новый долг, а
+# ранее невидимый. Прежняя проверка искала подстроку и находила её внутри
+# ДРУГОГО класса: имя "working-hours" пряталось в "working-hours__item",
+# "btn" — в "btn-primary", "modal" — в "modal-*". Восемнадцать классов
+# рисовались без стилей, а сторож считал их определёнными. Теперь сверка
+# идёт по токену селектора, и они названы.
+#
+# Чинить их этим листом не стал: это чужие экраны и решение о виде, а тихо
+# поправить восемнадцать раскладок внутри правки про кнопку было бы хуже,
+# чем назвать их, — ровно тот довод, по которому здесь заморожены первые 58.
 BASELINE: frozenset[str] = frozenset(
     {
+        "src/components/AlreadyNoted.tsx::already-noted",
+        "src/components/AnketaStepInput.tsx::anketa-scale",
+        "src/components/CatalogEmptyState.tsx::catalog-empty",
+        "src/components/InviteMessage.tsx::invite-message",
         "src/components/MasterCard.tsx::master-card__body",
+        "src/components/OwnServiceForm.tsx::master-services__similar",
         "src/components/Snackbar.tsx::snackbar",
         "src/components/SurfaceSwitch.tsx::surface-switch",
+        "src/components/booking/NewBookingForm.tsx::callout--warning",
+        "src/components/booking/NewBookingForm.tsx::draft-row",
+        "src/components/booking/NewBookingForm.tsx::draft-rows",
+        "src/components/booking/NewBookingForm.tsx::section__title",
+        "src/components/booking/NewBookingForm.tsx::sheet",
+        "src/components/booking/NewBookingForm.tsx::sheet__item",
+        "src/components/booking/NewBookingForm.tsx::sheet__panel",
+        "src/components/booking/NewBookingForm.tsx::sheet__title",
+        "src/screens/CustomerBookingDetailScreen.tsx::modal",
         "src/screens/CustomerBookingDetailScreen.tsx::modal__sheet",
         "src/screens/CustomerBookingSuccessScreen.tsx::customer-success__payment-note",
         "src/screens/CustomerCardsScreen.tsx::profile-cards__brand",
@@ -164,6 +222,8 @@ BASELINE: frozenset[str] = frozenset(
         "src/screens/CustomerCardsScreen.tsx::profile-cards__list",
         "src/screens/CustomerCardsScreen.tsx::profile-cards__revoke-confirm",
         "src/screens/CustomerNotificationSettingsScreen.tsx::profile-notifications__prefs",
+        "src/screens/CustomerWellnessDashboardScreen.tsx::wellness-dash__pulse",
+        "src/screens/FoodScannerResultScreen.tsx::food-scanner-clarify",
         "src/screens/MasterBillingScreen.tsx::profile-billing__payout-sum",
         "src/screens/MasterBillingScreen.tsx::profile-billing__status-line",
         "src/screens/MasterBillingScreen.tsx::profile-cards__brand",
@@ -176,25 +236,25 @@ BASELINE: frozenset[str] = frozenset(
         "src/screens/MasterBillingScreen.tsx::profile-payout__item-state",
         "src/screens/MasterBillingScreen.tsx::profile-payout__list",
         "src/screens/MasterCustomersScreen.tsx::master-customers__body",
+        "src/screens/MasterDashboardScreen.tsx::master-dashboard__day",
+        "src/screens/MasterDirectionsScreen.tsx::master-services__own",
+        "src/screens/MasterInternalChatListScreen.tsx::internal-chat-list__group",
         "src/screens/MasterInternalChatThreadScreen.tsx::internal-chat-bubble__stamp",
+        "src/screens/MasterServiceSelectScreen.tsx::master-services__own",
+        "src/screens/MasterServicesScreen.tsx::master-services__own",
+        "src/screens/MasterServicesScreen.tsx::own-service-card",
         "src/screens/MasterSettingsScreen.tsx::master-settings",
         "src/screens/MasterSettingsScreen.tsx::master-settings__coming-soon",
+        "src/screens/MasterSetupLandingScreen.tsx::setup-landing",
+        "src/screens/MasterWorkingHoursScreen.tsx::working-hours",
         "src/screens/admin/AdminAvailabilityRequestsScreen.tsx::btn-link",
         "src/screens/admin/AdminAvailabilityRequestsScreen.tsx::screen__header",
+        "src/screens/admin/AdminInternalChatListScreen.tsx::internal-chat-list__group",
         "src/screens/admin/AdminInternalChatThreadScreen.tsx::internal-chat-bubble__stamp",
         "src/screens/admin/AdminInternalChatThreadScreen.tsx::internal-chat-thread__sign-helper",
         "src/screens/admin/AdminInternalChatThreadScreen.tsx::internal-chat-thread__sign-toggle",
-        # DRF-2155 (М-3): форма «Новая запись» вынесена из AdminNewBookingScreen
-        # в общий компонент — те же восемь имён, тот же долг, новый адрес.
-        "src/components/booking/NewBookingForm.tsx::callout--warning",
-        "src/components/booking/NewBookingForm.tsx::draft-row",
-        "src/components/booking/NewBookingForm.tsx::draft-rows",
-        "src/components/booking/NewBookingForm.tsx::section__title",
-        "src/components/booking/NewBookingForm.tsx::sheet",
-        "src/components/booking/NewBookingForm.tsx::sheet__item",
-        "src/components/booking/NewBookingForm.tsx::sheet__panel",
-        "src/components/booking/NewBookingForm.tsx::sheet__title",
         "src/screens/admin/AdminSalonDayScreen.tsx::badge",
+        "src/screens/admin/AdminSalonDayScreen.tsx::btn",
         "src/screens/admin/AdminSalonDayScreen.tsx::btn--danger",
         "src/screens/admin/AdminSalonDayScreen.tsx::btn--ghost",
         "src/screens/admin/AdminSalonDayScreen.tsx::btn--primary",
@@ -220,6 +280,70 @@ def stylesheet_text(app_root: Path) -> str:
     return "\n".join(sheet.read_text(encoding="utf-8") for sheet in sheets)
 
 
+#: Селектор без предков: только ``.класс`` и, может быть, псевдо.
+#:
+#: ``.btn-primary`` — да. ``.btn-primary:disabled`` — да. А вот
+#: ``.master-profile .btn-primary`` — НЕТ: такое правило действует только
+#: внутри своего предка, и в остальных 83 местах класс остаётся голым.
+UNCONDITIONAL_SELECTOR = re.compile(r"^\.([A-Za-z0-9_-]+)(?:::?[A-Za-z-]+(?:\([^)]*\))?)*$")
+
+#: Один класс внутри селектора — точным токеном, а не подстрокой.
+CLASS_TOKEN = re.compile(r"\.([A-Za-z0-9_-]+)")
+
+#: Комментарии CSS — вырезаются до разбора: селектор, упомянутый в
+#: комментарии, правилом не является.
+CSS_COMMENT = re.compile(r"/\*[\s\S]*?\*/")
+
+
+def selector_classes(css: str) -> tuple[set[str], set[str]]:
+    """``(все классы селекторов, классы с безусловным правилом)``.
+
+    ОБА множества точные, по токенам — не подстрокой. Подстрока врала в
+    обе стороны: `.btn-primary` находился и внутри
+    `.master-profile .btn-primary` (правило под предком), и внутри
+    `.btn-primary-whatever` (вообще другой класс). Второе — не выдумка:
+    проба подменой переименовала правило в `.btn-primary-REMOVED`, и
+    прежняя проверка продолжала считать класс определённым.
+    """
+
+    every: set[str] = set()
+    unconditional: set[str] = set()
+    for chunk in re.findall(r"([^{}]+)\{", CSS_COMMENT.sub("", css)):
+        head = chunk.strip()
+        if not head or head.startswith("@"):
+            continue
+        for selector in head.split(","):
+            selector = selector.strip()
+            every.update(CLASS_TOKEN.findall(selector))
+            match = UNCONDITIONAL_SELECTOR.match(selector)
+            if match:
+                unconditional.add(match.group(1))
+    return every, unconditional
+
+
+def first_level_classes(css: str) -> set[str]:
+    """Классы, у которых есть БЕЗУСЛОВНОЕ правило.
+
+    Почему это не то же, что «встречается подстрока ``.имя``» — DRF-2380.
+    Подстрочная проверка находила ``.btn-primary`` внутри
+    ``.master-profile .btn-primary`` и считала класс определённым. Сторож
+    был зелен **именно потому**, что правила первого уровня не было: 83
+    кнопки из 86 рисовались глобальным сбросом ``button {}``, то есть как
+    обычный текст, и никто об этом не узнал.
+    """
+
+    classes: set[str] = set()
+    for chunk in re.findall(r"([^{}]+)\{", CSS_COMMENT.sub("", css)):
+        head = chunk.strip()
+        if not head or head.startswith("@"):
+            continue
+        for selector in head.split(","):
+            match = UNCONDITIONAL_SELECTOR.match(selector.strip())
+            if match:
+                classes.add(match.group(1))
+    return classes
+
+
 def used_classes(tsx: str) -> set[str]:
     """Class names from static ``className="..."`` literals only."""
     names: set[str] = set()
@@ -228,18 +352,34 @@ def used_classes(tsx: str) -> set[str]:
     return names
 
 
-def scan(app_root: Path) -> list[str]:
-    """Return sorted ``file::class`` keys for every unstyled class name."""
+def scan(app_root: Path) -> tuple[list[str], list[str], int]:
+    """``(без правила, только под предком, сколько классов просмотрено)``.
+
+    Два разных вердикта, потому что это две разные беды. «Правила нет
+    вовсе» — класс не рисует ничего нигде. «Правило только под предком» —
+    класс рисует там и не рисует здесь, и это ровно тот случай, который
+    подстрочная проверка пропускала (DRF-2380).
+
+    Третье значение — счётчик: пустой разбор не должен читаться как «всё
+    хорошо». Такой пустой вход у нас уже был.
+    """
+
     css = stylesheet_text(app_root)
-    found: list[str] = []
+    every, unconditional = selector_classes(css)
+    unstyled: list[str] = []
+    descendant_only: list[str] = []
+    seen = 0
     for path in sorted((app_root / SOURCE_DIR).rglob("*.tsx")):
         if ".test." in path.name:
             continue
         rel = path.relative_to(app_root).as_posix()
         for name in sorted(used_classes(path.read_text(encoding="utf-8"))):
-            if f".{name}" not in css:
-                found.append(f"{rel}::{name}")
-    return sorted(found)
+            seen += 1
+            if name not in every:
+                unstyled.append(f"{rel}::{name}")
+            elif name not in unconditional:
+                descendant_only.append(f"{rel}::{name}")
+    return sorted(unstyled), sorted(descendant_only), seen
 
 
 def grid_columns(css: str, classes: list[str]) -> int | None:
@@ -352,9 +492,23 @@ def main(argv: list[str]) -> int:
     for message in chip_row_problems:
         print(f"::error::{message}")
 
-    found = set(scan(app_root))
+    unstyled, descendant_only, seen = scan(app_root)
+
+    # Пустой разбор — это отказ, а не чистота. Сломается шаблон
+    # `className` или путь к исходникам — сторож смолчит и отчитается
+    # «clean», а мы прочтём это как «всё хорошо» (DRF-2380).
+    if seen < 100:
+        print(
+            f"::error::miniapp_style_contract: просмотрено всего {seen} имён "
+            "классов — разбор сломан, а не дерево чистое"
+        )
+        return 1
+
+    found = set(unstyled)
     new_debt = sorted(found - BASELINE)
     stale = sorted(BASELINE - found)
+    new_descendant = sorted(set(descendant_only) - DESCENDANT_ONLY)
+    stale_descendant = sorted(DESCENDANT_ONLY - set(descendant_only))
 
     for key in new_debt:
         path, name = key.split("::", 1)
@@ -364,11 +518,31 @@ def main(argv: list[str]) -> int:
             f"::error::BASELINE entry `{key}` is styled now — delete the line "
             "from tools/lint/miniapp_style_contract.py"
         )
+    for key in new_descendant:
+        path, name = key.split("::", 1)
+        print(
+            f"::error file=apps/miniapp/{path}::class `{name}` has a rule only "
+            "under an ancestor — here it renders unstyled (DRF-2380)"
+        )
+    for key in stale_descendant:
+        print(
+            f"::error::DESCENDANT_ONLY entry `{key}` has a first-level rule now "
+            "— delete the line from tools/lint/miniapp_style_contract.py"
+        )
 
-    if new_debt or stale or tabbar_problems or chip_row_problems:
+    if (
+        new_debt
+        or stale
+        or new_descendant
+        or stale_descendant
+        or tabbar_problems
+        or chip_row_problems
+    ):
         print(
             f"\nminiapp_style_contract: {len(new_debt)} unstyled class(es), "
+            f"{len(new_descendant)} class(es) styled only under an ancestor, "
             f"{len(stale)} stale baseline entr(ies), "
+            f"{len(stale_descendant)} stale descendant-only entr(ies), "
             f"{len(tabbar_problems)} tab bar(s) that do not fit one row, "
             f"{len(chip_row_problems)} chip row(s) that cannot wrap. "
             "A class name with no rule renders as nothing — that is DRF-1066. "
@@ -380,7 +554,9 @@ def main(argv: list[str]) -> int:
 
     checked = sum(1 for rel in TABBAR_COMPONENTS if (app_root / rel).is_file())
     print(
-        f"miniapp_style_contract: clean ({len(BASELINE)} accepted, none new; "
+        f"miniapp_style_contract: clean ({seen} class names read; "
+        f"{len(BASELINE)} accepted unstyled, {len(DESCENDANT_ONLY)} accepted "
+        f"descendant-only, none new; "
         f"{checked} tab bar(s) fit one row; every chip row wraps)."
     )
     return 0
