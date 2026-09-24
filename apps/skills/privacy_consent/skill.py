@@ -139,6 +139,12 @@ class PrivacyConsentSkill:
             archive_text = json.dumps(archive, ensure_ascii=False, indent=2)
             return SkillResult(
                 reply_text=("Ваши данные в формате JSON:\n\n" + archive_text),
+                # DRF-2435 — признак ставится ЗДЕСЬ, где архив собран, и не
+                # угадывается гейтом по форме текста. Без него исходящий гейт
+                # читал цифры внутри UUID'ов архива как телефон и подменял
+                # ответ рекомендательной фразой: измерено 0.4% выгрузок, то
+                # есть примерно один запрос доступа из 250 отвечался продажей.
+                subject_own_data=True,
                 meta={
                     "skill": self.name,
                     "intent": "export",
