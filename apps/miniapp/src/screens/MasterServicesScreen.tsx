@@ -602,8 +602,7 @@ export function MasterServicesScreen() {
             Прежняя кнопка вела во ВНЕШНЮЮ поддержку
             (`https://max.me/aylasupport`) — другой адресат, чем назвал
             владелец. Дверь теперь в студию, и тред у неё уже есть. */}
-        <h2 className="master-services__section-title">{COPY.notLinkedTitle}</h2>
-        <StudioCallout text={COPY.notLinkedText} />
+        <StudioCallout title={COPY.notLinkedTitle} text={COPY.notLinkedText} />
       </div>
     );
   }

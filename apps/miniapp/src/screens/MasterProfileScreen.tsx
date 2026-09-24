@@ -28,7 +28,11 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { StudioCallout, notConnectedText } from "../components/StudioCallout";
+import {
+  NOT_LINKED_SLUG,
+  StudioCallout,
+  notConnectedText,
+} from "../components/StudioCallout";
 import { useNavigate } from "react-router-dom";
 
 import { MasterCard } from "../components/MasterCard";
@@ -183,19 +187,26 @@ type Phase = { kind: "loading" } | { kind: "ready"; data: ReadyData } | { kind: 
 /**
  * Текст отказа сохранения (DRF-2378, текстовая половина DRF-2362).
  *
- * 403 — это НЕ «попробуйте ещё раз»: повтор не лечит непривязанный
- * профиль, а обещает лекарство. Владелец видел здесь общий отказ в живом
+ * «Не привязан» — это НЕ «попробуйте ещё раз»: повтор не лечит отсутствие
+ * привязки, а обещает лекарство. Владелец видел здесь общий отказ в живом
  * проходе 23.09 (17:56 имя, 17:58 «О себе»), и если причина была та самая
  * непривязанная личность, то человек читал «попробуйте» там, где пробовать
  * бессмысленно.
  *
+ * Различается по SLUG, а не по коду 403 (найдено ревью). Под тем же кодом
+ * сервер отвечает `master_inactive` (`master_api/auth.py`, декоратор на
+ * КАЖДОЙ ручке мастера) и `forbidden`. Мастерица в архиве прочитала бы
+ * «профиль не подключён» — ложный диагноз — и получила бы дверь к студии,
+ * которая ей тоже откажет. Это ровно тот дефект, ради которого заведён
+ * этот лист: уверенная фраза, указывающая не туда.
+ *
  * ЧТО ЭТО НЕ ДОКАЗЫВАЕТ: причина отказов 23.09 не установлена — лог стенда
  * не читан, и лист DRF-2362 прямо запрещает писать диагноз до него. Здесь
- * правится только ТЕКСТ состояния 403; остальные отказы сохранения говорят
+ * правится только ТЕКСТ состояния «не привязан»; остальные отказы говорят
  * прежними словами, потому что утверждённых формулировок для них нет.
  */
-function saveErrorText(e: unknown): string {
-  if (e instanceof ApiError && e.status === 403) return PROFILE_COPY.notLinked;
+function saveRefusalText(e: unknown): string {
+  if (e instanceof ApiError && e.slug === NOT_LINKED_SLUG) return PROFILE_COPY.notLinked;
   if (e instanceof ApiError && e.detail) return e.detail;
   return PROFILE_COPY.states.saveError;
 }
@@ -304,7 +315,7 @@ export function MasterProfileScreen() {
       setToast(PROFILE_COPY.toasts.saved);
     } catch (e) {
       if (e instanceof ApiError) {
-        setBioEditor({ ...bioEditor, saving: false, err: saveErrorText(e) });
+        setBioEditor({ ...bioEditor, saving: false, err: saveRefusalText(e) });
       } else {
         setOfflineBanner(true);
         setBioEditor({ ...bioEditor, saving: false, err: "" });
@@ -338,7 +349,7 @@ export function MasterProfileScreen() {
       setToast(PROFILE_COPY.toasts.saved);
     } catch (e) {
       if (e instanceof ApiError) {
-        setNameEditor({ ...nameEditor, saving: false, err: saveErrorText(e) });
+        setNameEditor({ ...nameEditor, saving: false, err: saveRefusalText(e) });
       } else {
         setOfflineBanner(true);
         setNameEditor({ ...nameEditor, saving: false, err: "" });
@@ -442,7 +453,7 @@ export function MasterProfileScreen() {
         hapticNotify("success");
         setToast(PROFILE_COPY.toasts.workRemoved);
       } catch (e) {
-        setWorkErr(saveErrorText(e));
+        setWorkErr(saveRefusalText(e));
         hapticNotify("error");
       } finally {
         setWorkBusy(false);
@@ -501,7 +512,10 @@ export function MasterProfileScreen() {
     );
   }
   if (phase.kind === "error") {
-    const notLinked = phase.err instanceof ApiError && phase.err.status === 403;
+    // По slug, не по коду: 403 носят и `master_inactive`, и `forbidden`
+    // (найдено ревью). Прежде здесь любой 403 объявлялся непривязкой.
+    const notLinked =
+      phase.err instanceof ApiError && phase.err.slug === NOT_LINKED_SLUG;
     return (
       <ProfileFrame>
         {notLinked ? (

@@ -23,6 +23,15 @@
  */
 import { useNavigate } from "react-router-dom";
 
+/**
+ * Слаг отказа, который ЗНАЧИТ «профиль не привязан».
+ *
+ * Отличать надо по нему, а не по коду 403: под тем же кодом сервер
+ * отвечает `master_inactive` и `forbidden`, и человеку с архивным
+ * профилем текст про привязку — ложный диагноз (найдено ревью DRF-2378).
+ */
+export const NOT_LINKED_SLUG = "not_linked";
+
 /** Куда ведёт дверь: существующий тред со студией, не новая сущность. */
 export const STUDIO_CHAT_PATH = "/master/internal-chat";
 
@@ -42,11 +51,22 @@ export function notConnectedText(subject: string): string {
   return `${NOT_CONNECTED_PREFIX} — ${subject}.`;
 }
 
-export function StudioCallout({ text }: { text: string }) {
+export function StudioCallout({ text, title }: { text: string; title?: string }) {
   const navigate = useNavigate();
   return (
-    <div className="callout" role="status">
-      <p>{text}</p>
+    // `role="status"` — на тексте, а не на всей коробке (найдено ревью):
+    // иначе любая смена текста заново зачитывала бы вместе с ним и кнопку,
+    // и диктор объявлял бы призыв к действию как часть состояния.
+    <div className="callout">
+      {/* Заголовок — ВНУТРИ коробки, если экран его несёт: снаружи он
+          читался бы отбившейся подписью на фоне страницы. */}
+      {title && <h2 className="master-services__section-title">{title}</h2>}
+      {/* `margin: 0` — как у двух соседних плашек этого же приложения:
+          у абзаца внутри `.callout` иначе остаются поля браузера, и
+          коробка вырастает на пустом месте. */}
+      <p style={{ margin: 0 }} role="status">
+        {text}
+      </p>
       {/* Кнопки «попробовать снова» здесь нет намеренно (решение
           владельца): повтор не лечит отсутствие привязки, а обещает
           лекарство. */}

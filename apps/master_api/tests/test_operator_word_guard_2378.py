@@ -41,14 +41,29 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
 #: Модули, чьи строки доезжают до человека — мастера или салона.
+#:
+#: Сперва здесь стояли три файла из листа. Ревью показало дыру: мастеру
+#: говорит не только ``views.py`` — помощник (``assistant*``), каталог
+#: услуг, клиенты. «Напишите оператору» в ``assistant_actions.py`` прошло
+#: бы зелёным. Охват расширен по ПРИЗНАКУ «этот модуль говорит с
+#: человеком», а не по списку из листа.
 WATCHED = (
     "apps/master_api/views.py",
     "apps/master_api/services/onboarding_readiness.py",
+    "apps/master_api/services/assistant.py",
+    "apps/master_api/services/assistant_actions.py",
+    "apps/master_api/services/assistant_cards.py",
+    "apps/master_api/services/catalog.py",
+    "apps/master_api/services/customers.py",
     "apps/admin_api/services/salon_readiness.py",
 )
 
-#: Слово в любом падеже и числе, отдельным словом, с заглавной или без.
-OPERATOR_RE = re.compile(r"(?<![А-Яа-яЁё])[Оо]ператор[а-яё]*(?![А-Яа-яЁё])")
+#: Слово в любом падеже и числе, отдельным словом, в ЛЮБОМ регистре.
+#:
+#: ``IGNORECASE`` — потому что ``[Оо]ператор`` пропускал «ОПЕРАТОР»
+#: заглавными (найдено ревью). Латинского ``OPERATOR_VERIFIED`` это не
+#: касается: шаблон кириллический.
+OPERATOR_RE = re.compile(r"(?<![А-Яа-яЁё])оператор[а-яё]*(?![А-Яа-яЁё])", re.IGNORECASE)
 
 
 def _visible_strings(source: str) -> list[str]:

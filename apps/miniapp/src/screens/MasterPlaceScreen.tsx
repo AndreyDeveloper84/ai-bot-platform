@@ -96,7 +96,7 @@ export const PLACE_COPY = {
   refusal: {
     place_already_set: "Место уже указано — измените его, а не добавляйте второе.",
     area_already_set: "Зона выезда уже указана — измените её.",
-    no_workspace_tenant: notConnectedText("место работы пока не указать"),
+    no_workspace_tenant: notConnectedText("указать место работы некуда"),
     place_outside_workspace: "Это место не из вашего рабочего пространства.",
     validation_error: "Проверьте введённое.",
   } as Record<string, string>,

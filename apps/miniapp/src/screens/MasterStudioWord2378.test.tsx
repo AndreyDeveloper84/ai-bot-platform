@@ -27,6 +27,17 @@
  *   чинится: прежний запасной путь снят решением владельца 07.09 —
  *   общий канал не несёт тенанта, и переписка всех салонов сходилась в
  *   один диалог. Чем чинить, решает владелец; вопрос у него.
+ *
+ * ПРЕДЕЛЫ ЭТОГО СТОРОЖА, названные, а не спрятанные:
+ *
+ * * читаются только литералы в кавычках. **Голый текст JSX**
+ *   (`<p>Напишите оператору</p>`) сторожу не виден — путь живой, такой
+ *   текст в этих экранах есть (например `×` в карточке профиля);
+ * * строки, собранные в рантайме из кусков, тоже не видны: сторож читает
+ *   исходник, а не результат;
+ * * серверные строки живут под своим сторожем
+ *   (`apps/master_api/tests/test_operator_word_guard_2378.py`) — у него
+ *   свой охват и свои названные пределы.
  */
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
@@ -47,17 +58,37 @@ import {
   MasterWorkingHoursScreen,
   NOT_LINKED_MESSAGE,
 } from "./MasterWorkingHoursScreen";
+import { PROFILE_COPY } from "./MasterProfileScreen";
+import { SELECT_COPY } from "./MasterServiceSelectScreen";
+import { DIRECTIONS_COPY } from "./MasterDirectionsScreen";
+import { PLACE_COPY } from "./MasterPlaceScreen";
 import { WRITE_TO_STUDIO_LABEL } from "../components/StudioCallout";
-import { stringLiteralsOf } from "../no-person-names.guard.test";
+import { stringLiteralsOf } from "../testing/string-literals";
 
-const SOURCES = import.meta.glob("./Master*.tsx", {
+/**
+ * ВЕСЬ `src`, а не экраны мастера.
+ *
+ * Сперва здесь стояло `./Master*.tsx` — и сторож не видел файла, который
+ * этот же лист и создал: утверждённые строки уехали в
+ * `components/StudioCallout.tsx`, а экраны держат только половину про
+ * предмет. Слово в `NOT_CONNECTED_PREFIX` прошло бы мимо обоих сторожей и
+ * встало бы разом на шесть экранов (найдено ревью). Сторож по признаку,
+ * сузившийся до каталога, — это сторож по списку, только незаметнее.
+ */
+const SOURCES = import.meta.glob("../**/*.{ts,tsx}", {
   query: "?raw",
   import: "default",
   eager: true,
 }) as Record<string, string>;
 
-/** Слово в любом падеже и числе, с заглавной или без, отдельным словом. */
-const OPERATOR_RE = /(?<![А-Яа-яЁё])[Оо]ператор[а-яё]*(?![А-Яа-яЁё])/u;
+/**
+ * Слово в любом падеже и числе, отдельным словом, в любом регистре.
+ *
+ * `i` — потому что `[Оо]ператор` пропускал «ОПЕРАТОР» заглавными (найдено
+ * ревью). Латинского `OPERATOR_VERIFIED` это не касается: шаблон
+ * кириллический, и провенанс остаётся невидимым для сторожа.
+ */
+const OPERATOR_RE = /(?<![А-Яа-яЁё])оператор[а-яё]*(?![А-Яа-яЁё])/iu;
 
 /**
  * Экраны, где слово ещё стоит и снимать его НЕЛЬЗЯ без слова владельца.
@@ -72,7 +103,12 @@ const OPERATOR_RE = /(?<![А-Яа-яЁё])[Оо]ператор[а-яё]*(?![А-�
  * не промолчит. Придёт ответ владельца — строки уйдут отсюда, и список
  * опустеет.
  */
-const PENDING_OWNER_WORD = ["./MasterPublicationScreen.tsx", "./MasterSetupLandingScreen.tsx"];
+// Ключи приходят нормализованными относительно этого файла: соседи по
+// каталогу — «./Имя», остальные — «../каталог/Имя».
+const PENDING_OWNER_WORD = [
+  "./MasterPublicationScreen.tsx",
+  "./MasterSetupLandingScreen.tsx",
+];
 
 describe("Сторож класса: на экранах мастера нет слова, за которым нет роли (DRF-2378)", () => {
   const withWord = Object.entries(SOURCES)
@@ -84,7 +120,10 @@ describe("Сторож класса: на экранах мастера нет �
   it("слова нет ни в одной пользовательской строке — кроме названных вслух", () => {
     // Присутствие первым: файлы прочитаны, и их немало. Без этого пустой
     // `SOURCES` (опечатка в шаблоне) дал бы зелёный на ровном месте.
-    expect(Object.keys(SOURCES).length).toBeGreaterThan(10);
+    expect(Object.keys(SOURCES).length).toBeGreaterThan(100);
+    // И охват именно широкий: в переписи есть не только экраны мастера.
+    expect(Object.keys(SOURCES).some((p) => p.includes("/components/"))).toBe(true);
+    expect(Object.keys(SOURCES).some((p) => p.includes("/lib/"))).toBe(true);
     expect(withWord).toEqual([...PENDING_OWNER_WORD].sort());
   });
 
@@ -97,6 +136,48 @@ describe("Сторож класса: на экранах мастера нет �
     // `OPERATOR_VERIFIED` — латиница, шаблон её не берёт. Узел стоит,
     // чтобы правка шаблона «на всякий случай» не утащила провенанс.
     expect(OPERATOR_RE.test("OPERATOR_VERIFIED")).toBe(false);
+  });
+});
+
+/**
+ * Все утверждённые строки — под узлом поимённо.
+ *
+ * Прежде проверялись две из шести: остальные четыре можно было молча
+ * переписать (найдено ревью). А ведь спорная половина — именно вторая, та,
+ * что меняется по предмету экрана: первая половина общая и защищена сама
+ * собой, потому что физически одна.
+ */
+describe("Утверждённые тексты — поимённо (DRF-2378)", () => {
+  it.each([
+    ["Рабочий график", NOT_LINKED_MESSAGE, "Профиль пока не подключён — сохранить часы некуда."],
+    ["Профиль", PROFILE_COPY.notLinked, "Профиль пока не подключён — фото и текст пока не изменить."],
+    ["Выбор услуг", SELECT_COPY.notLinked, "Профиль пока не подключён — выбрать услуги некуда."],
+    ["Направления", DIRECTIONS_COPY.notLinked, "Профиль пока не подключён — направления пока не выбрать."],
+    ["Место работы", PLACE_COPY.notLinked, "Профиль пока не подключён — сохранить место некуда."],
+    [
+      "Место работы, отказ сервера",
+      PLACE_COPY.refusal.no_workspace_tenant,
+      "Профиль пока не подключён — указать место работы некуда.",
+    ],
+  ])("%s говорит ровно утверждённое", (_screen, actual, expected) => {
+    expect(actual).toBe(expected);
+  });
+
+  it("первая половина у всех одна и та же — не «почти такая же»", () => {
+    const halves = [
+      NOT_LINKED_MESSAGE,
+      PROFILE_COPY.notLinked,
+      SELECT_COPY.notLinked,
+      DIRECTIONS_COPY.notLinked,
+      PLACE_COPY.notLinked,
+      PLACE_COPY.refusal.no_workspace_tenant,
+      // `refusal` типизирован как `Record<string, string>`, поэтому по
+      // ключу приходит `string | undefined` — пустая строка здесь не
+      // маскировка, а видимый провал: множество половин станет больше
+      // одной, и узел покраснеет.
+    ].map((t) => (t ?? "").split(" — ")[0] ?? "");
+    expect(new Set(halves).size).toBe(1);
+    expect(halves[0]).toBe("Профиль пока не подключён");
   });
 });
 
