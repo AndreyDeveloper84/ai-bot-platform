@@ -228,15 +228,31 @@ class AvailabilityDecisionError(Exception):
 
     Attributes:
       slug: stable error slug for the JSON envelope.
-      detail: human-readable explanation.
+      detail: internal explanation — for the log, not for a person.
       status: HTTP status code the view should return.
+      details: machine facts for the caller (DRF-2453).
+
+    ``details`` exists because the screen used to MINE ``detail`` for data:
+    conflicting dates rode inside the English sentence and the client
+    pulled them out with a regular expression (``parseDatesFromDetail``).
+    A sentence is not a data channel — rephrase it and the dates vanish
+    with nobody noticing. The shelf is not new: ``views_staff_role.py``
+    already answers with ``details={"hint": ...}``, and the client has
+    declared ``details`` since DRF-2273.
     """
 
-    def __init__(self, slug: str, detail: str, status: int = 400) -> None:
+    def __init__(
+        self,
+        slug: str,
+        detail: str,
+        status: int = 400,
+        details: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__(detail)
         self.slug = slug
         self.detail = detail
         self.status = status
+        self.details = details or {}
 
 
 # --- public helpers -------------------------------------------------------
@@ -705,6 +721,7 @@ def approve_availability_request(
                 "overlap_conflict",
                 f"existing exceptions conflict on dates: {sorted(conflicting_dates)}",
                 status=409,
+                details={"dates": sorted(conflicting_dates)},
             )
 
         # DRF-1062 — Ayla owns the schedule, so the approval lands there

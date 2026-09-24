@@ -474,7 +474,9 @@ export function AdminAvailabilityRequestsScreen({ me }: Props) {
         setRejectState((s) => ({
           ...s,
           submitting: false,
-          errorMsg: result.detail || "Конфликт. Перезагрузите список.",
+          // DRF-2453: внутренняя причина у сервера по-английски и человеку
+          // не показывается; своя согласованная фраза уже есть.
+          errorMsg: "Конфликт. Перезагрузите список.",
         }));
         hapticNotify("error");
         return;
