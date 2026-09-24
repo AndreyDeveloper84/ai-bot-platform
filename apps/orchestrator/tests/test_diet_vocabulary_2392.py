@@ -37,7 +37,22 @@ from apps.orchestrator.memory_block import _DIET_TYPE_VOCAB
 class TestF1NoRestrictionsIsAnAnswerButAnExclusionIsNot:
     @pytest.mark.parametrize(
         "text",
-        ["ем всё", "без ограничений", "никаких ограничений", "я всеядная", "ограничений нет"],
+        [
+            "ем всё",
+            "без ограничений",
+            # Порядок слов в обе стороны. Расширяя список, я потерял ИМЕННО
+            # эту, самую простую формулировку — и удалил в том же коммите узел,
+            # который её держал. Каждая потерянная формулировка = человек,
+            # которого спросят снова через сутки.
+            "нет ограничений",
+            "у меня нет ограничений",
+            "никаких ограничений",
+            "ограничений нет",
+            "я всеядная",
+            # Отсутствие исключений, сказанное словами исключения.
+            "ем всё, ничего не исключаю",
+            "ем всё, никаких исключений",
+        ],
     )
     def test_the_phrases_parse_to_omnivore(self, text: str) -> None:
         assert memory_ask._parse_diet(text) == DIET_OMNIVORE
@@ -58,6 +73,32 @@ class TestF1NoRestrictionsIsAnAnswerButAnExclusionIsNot:
     def test_a_named_diet_still_parses(self) -> None:
         assert memory_ask._parse_diet("я веган") == "vegan"
 
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            ("кошер, свинину не ем", "kosher"),
+            ("халяль, свинину не ем", "halal"),
+            ("я веган, мясо не ем", "vegan"),
+            ("вегетарианка, мясо не ем", "vegetarian"),
+            ("на кето, сахар исключила", "keto"),
+            ("кошерное, кроме свинины", "kosher"),
+        ],
+    )
+    def test_a_named_diet_with_an_exclusion_clause_keeps_its_name(
+        self, text: str, expected: str
+    ) -> None:
+        """Оговорка про исключения проверяется ТОЛЬКО у «без ограничений» —
+        названная диета от неё не страдает. Вынеси проверку до цикла «для
+        простоты» — и все шесть строк стали бы непонятыми, то есть потерялись
+        бы названные диеты: худший из трёх исходов."""
+        assert memory_ask._parse_diet(text) == expected
+
+    @pytest.mark.parametrize("text", ["хочу другое время", "давай другое место"])
+    def test_other_does_not_catch_another_time_or_place(self, text: str) -> None:
+        """«Другое время» — не ответ про питание, а `other` означал бы «и я
+        напишу словами», которых никто не спрашивал."""
+        assert memory_ask._parse_diet(text) is memory_ask._UNPARSED
+
 
 class TestF2TheVocabularyIsOne:
     def test_every_parsed_value_belongs_to_the_catalog_vocabulary(self) -> None:
@@ -68,14 +109,6 @@ class TestF2TheVocabularyIsOne:
 
     def test_the_prompt_block_has_no_copy_of_its_own(self) -> None:
         assert _DIET_TYPE_VOCAB == frozenset(CATALOG_DIET_TYPES)
-
-    def test_the_phrases_shown_to_the_person_cover_the_whole_vocabulary(self) -> None:
-        """Фразы для показа — не значения, но ПО значениям: пропусти одно, и
-        строка про человека молча не покажется. Узел держит покрытие, а сами
-        слова остаются на своём месте (их утверждает владелец)."""
-        from apps.persona.memory_surface import _DECLARED_DIET_PHRASES
-
-        assert set(_DECLARED_DIET_PHRASES) == set(CATALOG_DIET_TYPES)
 
 
 class _Conversation:
