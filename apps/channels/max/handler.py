@@ -160,7 +160,7 @@ from apps.orchestrator.concierge import generate_direct_show_masters_reply
 from apps.integrations.ayla.user_proxy import external_user_id_for
 from apps.orchestrator.fast_path import claims_direct_show_masters
 from apps.orchestrator.goal_capture import (
-    CONFIRMATION_DRAFT,
+    CONFIRMATION,
     capture_goal_from_chat,
     looks_like_goal_statement,
 )
@@ -2459,7 +2459,7 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
                         # (`orchestrator.next_steps`). Состав кнопок под этим
                         # ответом ждёт слова главного окна вместе с текстом.
                         goal_reply = DiscoveryReply(
-                            text=CONFIRMATION_DRAFT.format(goal=captured),
+                            text=CONFIRMATION.format(goal=captured),
                             action_data=_next_step_action_data(_discover_button(), _menu_button()),
                         )
 

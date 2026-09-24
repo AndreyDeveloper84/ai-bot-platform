@@ -18,7 +18,11 @@ from __future__ import annotations
 
 import pytest
 
-from apps.orchestrator.goal_capture import capture_goal_from_chat, looks_like_goal_statement
+from apps.orchestrator.goal_capture import (
+    CONFIRMATION,
+    capture_goal_from_chat,
+    looks_like_goal_statement,
+)
 
 # Цель — только явное заявление о себе: результат, форма, срок.
 GOALS = [
@@ -183,3 +187,23 @@ class TestTheWordsStayOutOfAnalytics:
             )
 
         assert self.SECRET not in caplog.text
+
+
+class TestTheOwnersWords:
+    """Текст владельца, 24.09, реестр §77 — проверяется ЦЕЛИКОМ.
+
+    Не «содержит слово цель»: двоеточие, отсутствие точки в конце и «Твоя»
+    вместо «Ваша» — части формулировки, которую владелец утвердил. Узел на
+    подстроку пропустил бы и точку, и «Ваша», и они вернулись бы сами.
+    """
+
+    def test_the_confirmation_is_the_owners_line_verbatim(self):
+        assert CONFIRMATION == "Твоя цель теперь: {goal}"
+        assert CONFIRMATION.format(goal="хочу −5 кг к лету") == (
+            "Твоя цель теперь: хочу −5 кг к лету"
+        )
+
+    def test_the_line_ends_without_a_full_stop(self):
+        """Точка в конце — отдельная проверка: её возвращают чаще всего."""
+        assert not CONFIRMATION.rstrip("}goal{").endswith(".")
+        assert CONFIRMATION.format(goal="борщ")[-1] != "."

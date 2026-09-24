@@ -129,3 +129,24 @@ class TestTheBotKeepsNoCopy:
 
         assert plan_lite_card.goal_words("ext-1") == WORDS
         assert plan_lite_card.goal_words("ext-1") is None
+
+
+class TestTheCardCarriesNoLabelOfOurs:
+    """Над списком действий — слова человека, и ничего нашего (§77, 24.09).
+
+    Подмена: вернуть ярлык «Твоя цель: {goal}.» — и узел обязан покраснеть.
+    """
+
+    def test_the_first_line_is_exactly_the_persons_words(self):
+        text = plan_lite_card.render_plan_lite_card(_plan(), words=WORDS)
+
+        first = text.splitlines()[0]
+        assert first == WORDS, first
+
+    def test_no_label_of_ours_stands_above_the_list(self):
+        text = plan_lite_card.render_plan_lite_card(_plan(), words=WORDS)
+
+        first = text.splitlines()[0]
+        for ours in ("Твоя цель", "Ваша цель", "Цель:", "Цель —"):
+            assert ours not in first, ours
+        assert not first.endswith("."), first
