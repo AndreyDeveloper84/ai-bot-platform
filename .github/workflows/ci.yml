@@ -1670,8 +1670,13 @@ jobs:
     # есть тихо отключило бы её для всех PR. Состав шагов ниже.
     name: miniapp (typecheck + vitest)
     runs-on: ubuntu-latest
-    # Measured: npm ci ~15s + tsc ~10s + 259 vitest tests ~40s on a warm
-    # cache. 15 min is a generous ceiling that still fails fast on a hang.
+    # Замерено 24.09 на этом раннере: весь job ~2 мин 35 с — npm ci, eslint,
+    # tsc, **2068 узлов в 208 файлах** vitest, vite build и загрузка артефакта.
+    # Прежняя запись («259 vitest tests ~40s») устарела в восемь раз по числу
+    # узлов; потолок 15 мин от неё не зависел и оставлен как был — он ловит
+    # зависание, а не медленность. Если однажды упрётся, сначала измерить, а не
+    # поднимать: локально те же 2068 узлов идут 9 мин, и разрыв с раннером сам
+    # по себе стоит объяснения.
     timeout-minutes: 15
 
     steps:
