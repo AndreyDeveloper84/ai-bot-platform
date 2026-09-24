@@ -143,6 +143,12 @@ TABBAR_COMPONENTS = (
     "src/components/SalonPilotTabBar.tsx",
 )
 
+#: С какого размера дерева ждать осмысленного числа имён — и сколько.
+#: Настоящий `apps/miniapp`: ~300 экранов, 1693 имени. Фикстура сторожа:
+#: один файл. Между ними зазор в два порядка, так что порог не спорный.
+MIN_SCREENS_FOR_FLOOR = 50
+MIN_CLASSES_EXPECTED = 100
+
 STYLES_DIR = Path("src/styles")
 SOURCE_DIR = Path("src")
 
@@ -497,10 +503,17 @@ def main(argv: list[str]) -> int:
     # Пустой разбор — это отказ, а не чистота. Сломается шаблон
     # `className` или путь к исходникам — сторож смолчит и отчитается
     # «clean», а мы прочтём это как «всё хорошо» (DRF-2380).
-    if seen < 100:
+    #
+    # Порог растёт вместе с деревом, а не стоит числом: первая редакция
+    # требовала сотню имён от ЛЮБОГО корня и запрещала собственные
+    # фикстуры сторожа из одного файла (поймано его же тестами). Большое
+    # дерево, не давшее ни одного имени, — сломанный разбор; маленькое —
+    # просто маленькое.
+    screens = sum(1 for path in (app_root / SOURCE_DIR).rglob("*.tsx") if ".test." not in path.name)
+    if screens >= MIN_SCREENS_FOR_FLOOR and seen < MIN_CLASSES_EXPECTED:
         print(
-            f"::error::miniapp_style_contract: просмотрено всего {seen} имён "
-            "классов — разбор сломан, а не дерево чистое"
+            f"::error::miniapp_style_contract: {screens} экранов дали всего "
+            f"{seen} имён классов — разбор сломан, а не дерево чистое"
         )
         return 1
 
