@@ -197,7 +197,10 @@ export function FoodScannerDayScreen() {
                           </span>
                           <span className="food-scanner-diary__entry-dish">{entry.dish_name}</span>
                         </div>
-                        {showNumbers && (
+                        {/* DRF-2371 — запись без чисел не получает числа:
+                            «~0 ккал» или «null ккал» утверждали бы расчёт,
+                            которого не было. Строки просто нет. */}
+                        {showNumbers && entry.calories != null && (
                           <span className="food-scanner-diary__entry-cal">
                             {DAY_COPY.kcal(entry.calories)}
                           </span>

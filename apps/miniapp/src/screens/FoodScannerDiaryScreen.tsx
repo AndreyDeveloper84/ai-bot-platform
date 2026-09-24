@@ -407,7 +407,9 @@ function DiaryReady({
                       {entry.dish_name}
                     </span>
                   </div>
-                  {showNumbers && (
+                  {/* DRF-2371 — без числа строки нет: «~ ккал» и «~0 ккал»
+                      оба говорят о расчёте, которого не было. */}
+                  {showNumbers && entry.calories != null && (
                     <span className="food-scanner-diary__entry-cal">
                       ~{entry.calories} ккал
                     </span>

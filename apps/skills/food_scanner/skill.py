@@ -110,6 +110,10 @@ from apps.integrations.ayla import (
     external_user_id_for,
     get_nutrition_client,
 )
+from apps.integrations.ayla.portion_provenance import (
+    portion_numbers_are_named,
+    portion_provenance_of,
+)
 from apps.orchestrator import food_history
 from apps.orchestrator.memory import food as food_memory
 from apps.orchestrator.ui.keyboards import (
@@ -446,7 +450,25 @@ class FoodScannerSkill:
             )
 
         _mark_logged(context, scan_id, log.log_id)
-        reply = f"Записала: {log.dish_name} — {int(log.calories)} ккал."
+        # DRF-2371 — число называем, только когда вес кто-то назвал. Иначе
+        # правило держалось бы один ход: карточка о числе молчит, а ответ
+        # после тапа говорит «250 ккал», посчитанные по константе каталога.
+        # Ход назвать вес на карточке уже есть — кнопка «✏️ Уточнить»
+        # (``food_recognition_keyboard``) ведёт в вопрос «Сколько граммов?».
+        log_provenance = portion_provenance_of(
+            ((log.raw or {}).get("nutrition") or {}).get("portion_source")
+        )
+        if log.calories is None or not portion_numbers_are_named(log_provenance):
+            # DRF-2371 — каталог сохранил запись, а числа в ней нет: порция
+            # неизвестна или блюда нет в справочнике. Раньше здесь падал
+            # ``int(None)`` — человек не видел ничего, хотя запись легла.
+            # Число не выдумываем и ноль не подставляем: ноль читался бы как
+            # «посчитано, и вышло почти ничего». Текст карточки для случая
+            # «блюда нет в справочнике» ждёт слова владельца
+            # (OWNER_QUESTIONS) — до ответа говорим то же, без числа.
+            reply = f"Записала: {log.dish_name}."
+        else:
+            reply = f"Записала: {log.dish_name} — {int(log.calories)} ккал."
         if extra and (log.raw or {}).get("entry_origin") != PHOTO_ORIGIN_USER_CORRECTED:
             # Ключ повтора вернул ПРЕЖНЮЮ запись (первый тап дошёл, ответ — нет):
             # вес в неё не лёг, и сказать «записала» без оговорки было бы ложью.
@@ -852,7 +874,15 @@ def _format_scan_card(
     parts.append(f"{hedge} {dish}.")
     if portion:
         parts.append(f"Примерно {int(portion)} г.")
-    if kcal is not None:
+    # DRF-2371 — число называем, только когда вес кто-то назвал. Признак
+    # берём из тела ответа каталога через единственный вход перевода:
+    # отсутствие поля и незнакомое значение оба читаются как «не названо».
+    # Число, посчитанное по константе каталога, существует — но выдавать
+    # его за названное нельзя.
+    # Каталог кладёт признак ВНУТРЬ ``nutrition``, рядом с числами
+    # (``FoodScanResponseSerializer``), а не на верхний уровень ответа.
+    provenance = portion_provenance_of(nutrition.get("portion_source"))
+    if kcal is not None and portion_numbers_are_named(provenance):
         macros_line = f"{int(kcal)} ккал"
         if protein is not None:
             macros_line += f" · Б {int(protein)}"

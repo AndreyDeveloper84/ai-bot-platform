@@ -43,11 +43,31 @@
 
 import { ApiError, request } from "./api";
 
+/**
+ * DRF-2371 — числа МОГУТ отсутствовать, и отсутствие — не ноль.
+ *
+ * Каталог отдаёт запись и тогда, когда считать нечем: порция неизвестна
+ * или блюда нет в справочнике. На месте калорий приходит `null`. Ноль
+ * означал бы «съел и не получил калорий» — это другое утверждение, и
+ * произносить его за человека нельзя. Различение причины пробела
+ * («нет блюда» / «нет веса») наружу не выведено — п. 3 DRF-2335 ждёт
+ * слова владельца; форма ответа причиной не является и признаком её
+ * подменять нельзя.
+ */
 export interface NutritionFacts {
-  calories: number;
-  protein_g: number;
-  fat_g: number;
-  carbs_g: number;
+  /**
+   * DRF-2371/DRF-2402 — откуда взялся вес порции: `provider` (назвал
+   * наблюдавший — распознаватель или сам человек), `typical` (типовая
+   * величина справочника), `unknown` (не назвал никто). Каталог кладёт
+   * признак ИМЕННО СЮДА, рядом с числами, а не на верхний уровень ответа.
+   * Тип нарочно широкий: незнакомое значение и отсутствие поля разбирает
+   * `portionProvenanceOf`, и оба — «не названо».
+   */
+  portion_source?: string | null;
+  calories: number | null;
+  protein_g: number | null;
+  fat_g: number | null;
+  carbs_g: number | null;
   vitamins?: Record<string, number | string>;
 }
 
@@ -73,14 +93,16 @@ export interface LogMealResponse {
   log_id: string;
   dish_name: string;
   meal_type: MealType;
-  calories: number;
+  /** DRF-2371 — `null`, когда каталог сохранил блюдо без чисел; не ноль. */
+  calories: number | null;
 }
 
 export interface DailySummaryEntry {
   log_id: string;
   meal_type: MealType;
   dish_name: string;
-  calories: number;
+  /** DRF-2371 — `null`, когда каталог сохранил блюдо без чисел; не ноль. */
+  calories: number | null;
   portion_g?: number;
   logged_at_iso: string;
 }
@@ -275,7 +297,8 @@ interface LogMealWire {
   log_id: string;
   dish_name: string;
   meal_type: string;
-  calories: number;
+  /** DRF-2371 — `null`, когда каталог сохранил блюдо без чисел; не ноль. */
+  calories: number | null;
   entry_origin: string | null;
 }
 
@@ -379,7 +402,10 @@ export interface FoodTextEstimate {
   portion_g: number;
   /** true — граммов в тексте не было, порция — оценка; экран обязан сказать это словами. */
   portion_estimated: boolean;
-  kcal: number;
+  /** DRF-2371 — `null`, когда считать нечем: блюда нет в справочнике. */
+  kcal: number | null;
+  /** DRF-2402 — см. NutritionFacts.portion_source. */
+  portion_source?: string | null;
   protein_g: number | null;
   fat_g: number | null;
   carbs_g: number | null;
@@ -388,7 +414,8 @@ export interface FoodTextEstimate {
 export interface FoodTextLogResult {
   log_id: string;
   dish_name: string;
-  calories: number;
+  /** DRF-2371 — `null`, когда каталог сохранил блюдо без чисел; не ноль. */
+  calories: number | null;
   entry_origin: "text_estimated_confirmed" | "text_user_corrected" | string;
 }
 

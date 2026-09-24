@@ -73,6 +73,10 @@ from apps.integrations.ayla import (
     external_user_id_for,
     get_nutrition_client,
 )
+from apps.integrations.ayla.portion_provenance import (
+    portion_numbers_are_named,
+    portion_provenance_of,
+)
 from apps.orchestrator.ui.keyboards import (
     ENTRY_CALLBACK_RE,
     ENTRY_ID_RE,
@@ -173,9 +177,14 @@ def diary_consent_required_result(reply_kind: str) -> SkillResult:
 NUTRITION_OFF_TEXT = "Дневник еды пока недоступен — функция готовится."
 FIX_GRAMS_PROMPT = "Сколько граммов было на самом деле? Напиши число — пересчитаю запись."
 FIXED_TEXT = "Исправила: {dish} — теперь {kcal} ккал."
+#: DRF-2371 — та же правка, когда числа в записи нет: о числе молчим, а не
+#: подставляем ноль. Текст, называющий сам пробел, ждёт слова владельца.
+FIXED_WITHOUT_NUMBERS_TEXT = "Исправила: {dish}."
 DELETED_TEXT = "Убрала запись из дневника."
 DELETED_WITH_WINDOW_TEXT = "Убрала запись из дневника. Вернуть можно ещё {minutes}."
 RESTORED_TEXT = "Вернула в дневник: {dish} — {kcal} ккал."
+#: DRF-2371 — возврат записи без чисел: см. ``FIXED_WITHOUT_NUMBERS_TEXT``.
+RESTORED_WITHOUT_NUMBERS_TEXT = "Вернула в дневник: {dish}."
 RESTORE_EXPIRED_TEXT = "Уже не вернуть: окно возврата закрылось, запись удалена окончательно."
 ENTRY_GONE_TEXT = "Этой записи уже нет в дневнике."
 ENTRY_WATER_TEXT = "Эту запись ведёт учёт воды — её убирает отмена стакана."
@@ -522,11 +531,23 @@ def render_estimate_card(estimate: Any) -> str:
         lines.append(f"Порция — примерно {grams} г, это оценка: граммов в сообщении не было.")
     else:
         lines.append(f"Порция — {grams} г, по твоим словам.")
-    macros = [f"Примерно {int(round(estimate.kcal))} ккал"]
-    for label, value in (("Б", estimate.protein_g), ("Ж", estimate.fat_g), ("У", estimate.carbs_g)):
-        if value is not None:
-            macros.append(f"{label} {int(round(value))}")
-    lines.append(" · ".join(macros) + " — оценка по справочнику блюд.")
+    # DRF-2371 — числа может не быть вовсе (блюда нет в справочнике). Тогда
+    # строки макросов нет: «Примерно 0 ккал» утверждало бы посчитанное.
+    # Текст, называющий сам пробел, ждёт слова владельца (OWNER_QUESTIONS);
+    # до ответа карточка о числах молчит, а дорога рядом — назвать граммы.
+    # DRF-2371 — см. `portion_provenance`: число называем только тогда,
+    # когда вес кто-то назвал; подставленное за названное не выдаём.
+    provenance = portion_provenance_of((getattr(estimate, "raw", None) or {}).get("portion_source"))
+    if estimate.kcal is not None and portion_numbers_are_named(provenance):
+        macros = [f"Примерно {int(round(estimate.kcal))} ккал"]
+        for label, value in (
+            ("Б", estimate.protein_g),
+            ("Ж", estimate.fat_g),
+            ("У", estimate.carbs_g),
+        ):
+            if value is not None:
+                macros.append(f"{label} {int(round(value))}")
+        lines.append(" · ".join(macros) + " — оценка по справочнику блюд.")
     lines.append("Записать в дневник?")
     return "\n".join(lines)
 
@@ -590,7 +611,13 @@ def _log(context: SkillContext, bucket: dict[str, Any]) -> SkillResult:
     # DRF-2267 (CD §72): и следующий шаг — «Мой дневник», «Меню».
     action_data["buttons"] = [*entry_chips, *_after_entry_buttons()]
     return SkillResult(
-        reply_text=f"Записала в дневник: {log.dish_name} — {int(round(log.calories))} ккал.",
+        reply_text=(
+            # DRF-2371 — запись легла, числа нет: говорим о записи, а число
+            # не выдумываем (ноль читался бы как посчитанный).
+            f"Записала в дневник: {log.dish_name}."
+            if log.calories is None
+            else f"Записала в дневник: {log.dish_name} — {int(round(log.calories))} ккал."
+        ),
         claims_done=True,
         claims_done_evidence="ayla.meals.log:log_id",
         action_type="food_logged",
@@ -759,7 +786,11 @@ def _restore_entry(context: SkillContext, log_id: str) -> SkillResult:
     except NutritionAPIError as exc:
         return _entry_refusal(exc, external_id=external_id, step="restore")
     return SkillResult(
-        reply_text=RESTORED_TEXT.format(dish=log.dish_name, kcal=int(round(log.calories))),
+        reply_text=(
+            RESTORED_WITHOUT_NUMBERS_TEXT.format(dish=log.dish_name)
+            if log.calories is None
+            else RESTORED_TEXT.format(dish=log.dish_name, kcal=int(round(log.calories)))
+        ),
         claims_done=True,
         claims_done_evidence="ayla.meals.restore:log_id",
         action_type="food_entry_restored",
@@ -803,7 +834,11 @@ def _on_fix_grams_answer(context: SkillContext, bucket: dict[str, Any], text: st
         return _entry_refusal(exc, external_id=external_id, step="update")
     forget(context)
     return SkillResult(
-        reply_text=FIXED_TEXT.format(dish=log.dish_name, kcal=int(round(log.calories))),
+        reply_text=(
+            FIXED_WITHOUT_NUMBERS_TEXT.format(dish=log.dish_name)
+            if log.calories is None
+            else FIXED_TEXT.format(dish=log.dish_name, kcal=int(round(log.calories)))
+        ),
         claims_done=True,
         claims_done_evidence="ayla.meals.update:log_id",
         action_type="food_entry_updated",
