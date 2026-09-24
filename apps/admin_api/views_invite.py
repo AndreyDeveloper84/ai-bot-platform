@@ -231,8 +231,27 @@ MAX_CONTACT_VALUE_LEN = 128
 # --- helpers --------------------------------------------------------------
 
 
-def _error(slug: str, detail: str, status: int) -> JsonResponse:
-    return JsonResponse({"error": slug, "detail": detail}, status=status)
+def _error(
+    slug: str,
+    detail: str,
+    status: int,
+    details: dict[str, Any] | None = None,
+) -> JsonResponse:
+    """Отказ. ``detail`` — нам в журнал, ``details`` — машине на клиенте.
+
+    DRF-2452: раскладка ошибок по полям на экране разбирала английскую
+    прозу `detail` (`includes("contact")`). Такой признак не виден никому:
+    поправят формулировку — раскладка молча отвалится. Поэтому поле, к
+    которому относится отказ, называется машинным именем в ``details``.
+
+    Четвёртый параметр — не новый приём: он уже есть у `_error` в
+    ``views_staff_role.py``, а клиент уже читает ``details`` (`retriable`,
+    `cards`, `answer.text`).
+    """
+    body: dict[str, Any] = {"error": slug, "detail": detail}
+    if details:
+        body["details"] = details
+    return JsonResponse(body, status=status)
 
 
 def _parse_json_body(request: HttpRequest) -> dict[str, Any] | JsonResponse:
@@ -391,10 +410,12 @@ def _validate_body(body: dict[str, Any]) -> tuple[dict[str, Any], JsonResponse |
     # name
     name = body.get("name")
     if not isinstance(name, str) or not name.strip():
-        return {}, _error("bad_request", "name is required", 400)
+        return {}, _error("bad_request", "name is required", 400, {"field": "name"})
     name = name.strip()
     if len(name) > MAX_NAME_LEN:
-        return {}, _error("bad_request", f"name exceeds {MAX_NAME_LEN} chars", 400)
+        return {}, _error(
+            "bad_request", f"name exceeds {MAX_NAME_LEN} chars", 400, {"field": "name"}
+        )
 
     # contact_method
     contact_method = body.get("contact_method")
@@ -404,18 +425,22 @@ def _validate_body(body: dict[str, Any]) -> tuple[dict[str, Any], JsonResponse |
             f"contact_method must be one of {sorted(ALLOWED_CONTACT_METHODS)} "
             "(email is deferred to a separate PR)",
             400,
+            {"field": "contact_method"},
         )
 
     # contact_value
     contact_value = body.get("contact_value")
     if not isinstance(contact_value, str) or not contact_value.strip():
-        return {}, _error("bad_request", "contact_value is required", 400)
+        return {}, _error(
+            "bad_request", "contact_value is required", 400, {"field": "contact_value"}
+        )
     contact_value = contact_value.strip()
     if len(contact_value) > MAX_CONTACT_VALUE_LEN:
         return {}, _error(
             "bad_request",
             f"contact_value exceeds {MAX_CONTACT_VALUE_LEN} chars",
             400,
+            {"field": "contact_value"},
         )
 
     # mode (default: invite)

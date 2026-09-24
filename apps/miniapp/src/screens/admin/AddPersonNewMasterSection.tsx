@@ -117,6 +117,31 @@ interface FieldErrors {
   contact_value?: string;
 }
 
+/** Какое поле отказал сервер — машинным именем, а не разбором прозы (DRF-2452).
+ *
+ * `details.field` кладёт `views_invite.py`; конверт `details` не новый —
+ * клиент уже читает из него `retriable`, `cards` и `answer.text`.
+ * Неизвестное имя поля читается как «поле не названо»: пусть лучше
+ * человек увидит общую плашку, чем подпись под чужим полем.
+ */
+function fieldOf(e: ApiError): keyof FieldErrors | null {
+  const field = e.details?.field;
+  if (field === "name") return "name";
+  if (field === "contact_value" || field === "contact_method") return "contact_value";
+  return null;
+}
+
+/** Слова у поля — те же, что уже показывает своя проверка формы.
+ *
+ * Новых текстов лист не заводит (DRF-2446): человек уже видел ровно эти
+ * фразы, когда форма проверяла его ввод сама. Английскую причину отказа
+ * он не видит вовсе — она в журнале.
+ */
+const FIELD_REFUSAL: Record<keyof FieldErrors, string> = {
+  name: "Укажите имя и фамилию",
+  contact_value: "Укажите MAX-аккаунт или телефон",
+};
+
 export function AddPersonNewMasterSection({ me, switcher }: Props) {
   const navigate = useNavigate();
 
@@ -264,10 +289,18 @@ export function AddPersonNewMasterSection({ me, switcher }: Props) {
     } catch (e) {
       if (e instanceof ApiError) {
         if (e.status === 400) {
-          if (e.detail.toLowerCase().includes("contact")) {
-            setFieldErrors({ contact_value: e.detail });
-          } else if (e.detail.toLowerCase().includes("name")) {
-            setFieldErrors({ name: e.detail });
+          // DRF-2452. Здесь стоял разбор английской прозы отказа
+          // (`e.detail.toLowerCase().includes("contact")`). Это признак,
+          // которого не видно никому: сервер поправит формулировку — и
+          // раскладка ошибок по полям молча отвалится, а узел,
+          // подставляющий ту же строку, ничего не заметит.
+          //
+          // Теперь поле называет сам сервер, машинным именем
+          // (`details.field`, `views_invite.py`), а прозу человек не
+          // видит вовсе (DRF-2446): у поля стоит своя фраза.
+          const field = fieldOf(e);
+          if (field) {
+            setFieldErrors({ [field]: FIELD_REFUSAL[field] });
           } else {
             setBannerError("Не получилось отправить");
           }
