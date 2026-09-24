@@ -286,3 +286,51 @@ class TestRollbackFlag:
         monkeypatch.setattr(memory_ask, "patch_declared_prefs", patch)
         assert try_handle_answer(conversation, bot_user, "я веган") is None
         patch.assert_not_called()
+
+
+class TestAnswerIsThePersonsOwnWord:
+    """Ответ на прямой вопрос — слова человека, а не наш вывод (DRF-2397).
+
+    Происхождение в каталоге — одна граница: «сказал сам» против «вывели»
+    (``ayla_ai_core.STATED_SOURCES`` — закрытый список, в нём ``explicit``;
+    ``conversational`` библиотека держит на стороне выводов вместе с
+    ``inferred``). Этот поток спрашивает человека и записывает ЕГО ответ,
+    поэтому пометка выводов здесь ложь — и не безобидная, её читают трое:
+
+    * движок молчания каталога (правило 5) не считает ответ ответом и
+      задаёт тот же вопрос снова;
+    * подсказка модели помечает ответ как «вывод, клиент этого не
+      говорил» — прямая ложь о словах человека;
+    * ночная инференция каталога вправе перезаписать не-субъектное поле
+      догадкой из истории броней, а ``busy_days`` человек называет и
+      здесь — то есть названный ответ молча заменялся догадкой.
+
+    Мы правим сторону, которая врёт (пишущую), а не трёх читателей.
+    """
+
+    #: Пометки, означающие «это не слова клиента». Ни одна не годится для
+    #: ответа на заданный нами вопрос.
+    DERIVED = ("inferred", "behavioral", "conversational", "transactional")
+
+    @pytest.mark.parametrize(
+        ("field", "text", "value"),
+        [
+            ("preferred_time_slots", "мне удобнее вечером", ["evening"]),
+            ("diet_type", "я веган", "vegan"),
+            ("busy_days", "по субботам занято", ["sat"]),
+        ],
+    )
+    def test_the_answer_is_written_as_stated(
+        self, monkeypatch, conversation, bot_user, field, text, value
+    ) -> None:
+        memory_ask._write_pending(conversation.id, {"field": field, "hint": "h"})
+        patch = Mock(return_value=SimpleNamespace(status=memory_ask.GateStatus.OK))
+        monkeypatch.setattr(memory_ask, "patch_declared_prefs", patch)
+
+        try_handle_answer(conversation, bot_user, text)
+
+        patch.assert_called_once_with(
+            bot_user, [{"field": field, "value": value, "source": "explicit"}]
+        )
+        (_, updates), _ = patch.call_args
+        assert updates[0]["source"] not in self.DERIVED
