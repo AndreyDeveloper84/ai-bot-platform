@@ -34,7 +34,6 @@
 import {
   useCallback,
   useEffect,
-  useMemo,
   useState,
 } from "react";
 import { useNavigate } from "react-router-dom";
@@ -530,19 +529,6 @@ export function AdminAvailabilityRequestsScreen({ me }: Props) {
       </div>
     );
   }
-
-  const reasonCount = useMemo(() => {
-    if (!items) return { pending: 0, decided: 0 };
-    let p = 0;
-    let d = 0;
-    for (const it of items) {
-      if (it.status === "pending") p += 1;
-      else d += 1;
-    }
-    return { pending: p, decided: d };
-  }, [items]);
-
-  void reasonCount; // memo retained for future inline counts
 
   return (
     <div className="screen">
