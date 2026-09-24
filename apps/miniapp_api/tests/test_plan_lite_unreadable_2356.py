@@ -32,17 +32,34 @@ from django.urls import reverse
 
 from apps.identity.models import BotUser
 from apps.integrations.ayla.wellness_context_client import WellnessContext, _context_from_wire
-from apps.miniapp_api.tests.test_plan_lite_proxy_2101 import (  # noqa: F401 — fixtures
+from apps.miniapp_api.tests.test_plan_lite_proxy_2101 import (  # noqa: F401 — _settings: autouse
     _auth,
     _FakeClient,
     _settings,
-    bot_user,
-    tenant,
 )
+from apps.tenancy.models import Tenant
 
 
 def _url() -> str:
     return reverse("miniapp_api:customer_plan_lite")
+
+
+# Фикстуры свои, а не импортированные: импортированное имя, названное ещё и
+# параметром теста, ruff читает как переопределение (F811). Прецедент —
+# `test_offer_not_sellable_1989`: из соседнего модуля берут помощников,
+# фикстуры заводят у себя.
+@pytest.fixture
+def tenant(db, settings) -> Tenant:
+    t = Tenant.objects.create(slug="plan-lite-test", name="Plan Lite", timezone="Europe/Moscow")
+    settings.MAX_BOT_TENANT_SLUG = "plan-lite-test"
+    return t
+
+
+@pytest.fixture
+def bot_user(tenant: Tenant) -> BotUser:
+    return BotUser.all_tenants.create(
+        tenant=tenant, channel="max", channel_user_id="21010", display_name="Анна"
+    )
 
 
 class TestTheParserTellsUnreadableFromEmpty:
