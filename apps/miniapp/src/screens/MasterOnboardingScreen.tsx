@@ -209,7 +209,7 @@ export function MasterOnboardingScreen() {
     return () => {
       if (draft.photoPreview) URL.revokeObjectURL(draft.photoPreview);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- DRF-2394: очистка читает `draft.photoPreview` из первого рендера, где превью ещё нет, — адрес не освобождается. Дефект назван листом, правка поведения не входит в DRF-2391
   }, []);
 
   // Initial claim call.

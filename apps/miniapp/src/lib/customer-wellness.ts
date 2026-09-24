@@ -975,7 +975,6 @@ export async function flushWaterQueue(
         synced += 1;
       } catch (err) {
         if (isPermanentRejection(err)) {
-          // eslint-disable-next-line no-console
           console.warn("[customer-wellness] water entry refused, dropping", err);
           if (err instanceof ApiError) {
             if (onRejected) {

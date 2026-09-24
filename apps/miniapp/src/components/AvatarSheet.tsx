@@ -67,6 +67,7 @@ export function AvatarSheet({
     document.addEventListener("keydown", onKeyDown);
     return () => {
       document.removeEventListener("keydown", onKeyDown);
+      // eslint-disable-next-line react-hooks/exhaustive-deps -- совет правила здесь ломает замысел: фокус возвращается тому, кто открыл шторку, и `triggerRef.current` нужен именно на момент очистки
       triggerRef.current?.focus();
     };
   }, [open]);

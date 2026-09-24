@@ -263,7 +263,7 @@ export function AdminInternalChatThreadScreen({ me }: Props) {
       setBackButton(false);
       setClosingConfirmation(false);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `navigate` нужен только внутри обработчика системной кнопки; привязка делается один раз за монтирование
   }, []);
 
   // --- Closing confirmation while composer dirty ---

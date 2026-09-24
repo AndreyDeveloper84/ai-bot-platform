@@ -43,7 +43,6 @@ export function AcceptingBookingsToggle() {
       })
       .catch((err: unknown) => {
         if (import.meta.env.DEV) {
-          // eslint-disable-next-line no-console
           console.warn("[accepting-bookings] hidden — read failed", err);
         }
       });

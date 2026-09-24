@@ -382,6 +382,7 @@ export function AdminDeactivationFlowScreen({ me }: Props) {
   // --- derived ----------------------------------------------------------
 
   const preview = state.preview;
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- DRF-2396: `?? []` даёт новую ссылку на каждый рендер, и память хуков ниже не работает. Это производительность, а не корректность; правка — отдельным листом
   const futureBookings: DeactivationFutureBooking[] = preview?.future_bookings ?? [];
   const hasFutureBookings = futureBookings.length > 0;
 
