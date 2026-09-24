@@ -770,6 +770,13 @@ AYLA_TENANT_PROVISIONING_TOKEN = os.environ.get("AYLA_TENANT_PROVISIONING_TOKEN"
 # строки не пишет — ложного «доступ выдан» без каталожной половины нет.
 # В логи и в клиентский код значение не попадает (узел в тестах).
 AYLA_SALON_ADMIN_LINK_TOKEN = os.environ.get("AYLA_SALON_ADMIN_LINK_TOKEN", "")
+# DRF-2442 — пятый секрет каталога, одна дверь: личность мастера, принявшего
+# приглашение. Пусто — дверь для нас отсутствует: приём приглашения проходит,
+# а связь не ставится (в логе `identity_link_refused reason=token_missing`), и
+# мастер остаётся без кабинета до тех пор, пока секрет не задан в ОБОИХ
+# контурах одним значением. Каталог требует, чтобы оно отличалось от четырёх
+# соседних (users.E005 при его старте).
+AYLA_SPECIALIST_IDENTITY_LINK_TOKEN = os.environ.get("AYLA_SPECIALIST_IDENTITY_LINK_TOKEN", "")
 
 # C7 client-payments: fallback ``return_url`` for the YooKassa confirmation
 # flows (payment create / card setup) when the miniapp request doesn't carry

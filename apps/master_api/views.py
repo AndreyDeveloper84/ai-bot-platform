@@ -755,6 +755,22 @@ def onboarding_accept(request: HttpRequest) -> HttpResponse:
             INVITE_TOKEN_SLUG_TO_STATUS.get(exc.slug, 400),
         )
 
+    # DRF-2442 — сказать КАТАЛОГУ, что эта личность и есть тот мастер.
+    #
+    # Всё выше — бот-сторона: ``linked_bot_user``, погашенный токен, статус.
+    # Каталог об этом не знает, и без связи ``users_user.linked_user_id`` его
+    # сторож субъекта отвечает 403 ``subject_unresolved`` на всех ручках
+    # кабинета. Записать связь мог только человек-оператор, и операторов ноль —
+    # отсюда «мастер принял приглашение и никуда не попал».
+    #
+    # Доказательство владения — ровно то гашение, которое уже случилось выше:
+    # ссылка одноразовая, и открыть её мог только тот, кому её передали.
+    #
+    # ПОСЛЕ коммита и НЕ ломая приём: мастер уже принял, токен уже погашен, и
+    # откат ради недоступного каталога потерял бы одноразовое приглашение. Отказ
+    # уходит в лог по имени; дозвонить можно командой ``link_master_identities``.
+    _link_identity_in_catalog(landed, bot_user)
+
     session_token, exp_ts = issue_master_session_token(
         master_id=landed.id,
         tenant_id=landed.tenant_id,
@@ -766,6 +782,53 @@ def onboarding_accept(request: HttpRequest) -> HttpResponse:
             "session_token": session_token,
             "expires_at": datetime.fromtimestamp(exp_ts, tz=dt_timezone.utc).isoformat(),
         }
+    )
+
+
+def _link_identity_in_catalog(master: CatalogMaster, bot_user: BotUser) -> None:
+    """Связь личности мастера в каталоге — лучшая попытка, приём не рушит (DRF-2442).
+
+    Нет ``catalog_specialist_id`` — связывать не с чем: строка ещё не привязана
+    к каталогу (``apps.catalog.identity``), её дозаводит подметальщик, и уже
+    после этого связь ставит команда ``link_master_identities``. Это отдельная
+    ветвь, а не отказ: у неё своя строка журнала, чтобы «не с чем связывать» не
+    читалось как «каталог отказал».
+    """
+
+    from apps.identity.services.specialist_identity_link import (
+        SpecialistIdentityLinkRefused,
+        bind_master_identity_in_catalog,
+    )
+
+    specialist_id = getattr(master, "catalog_specialist_id", None)
+    if not specialist_id:
+        logger.warning(
+            "master_api.onboarding_accept.identity_link_skipped reason=catalog_unlinked "
+            "master=%s — строка ещё не привязана к каталогу; связь поставит "
+            "link_master_identities после привязки",
+            master.id,
+        )
+        return
+    try:
+        outcome = bind_master_identity_in_catalog(
+            specialist_id=specialist_id,
+            bot_user=bot_user,
+        )
+    except SpecialistIdentityLinkRefused as exc:
+        logger.warning(
+            "master_api.onboarding_accept.identity_link_refused reason=%s master=%s "
+            "correlation_id=%s hint=%s",
+            exc.reason,
+            master.id,
+            exc.correlation_id,
+            exc.hint,
+        )
+        return
+    logger.info(
+        "master_api.onboarding_accept.identity_linked master=%s specialist=%s created=%s",
+        master.id,
+        outcome.specialist_id,
+        outcome.created,
     )
 
 
