@@ -129,6 +129,10 @@ class TestA1TheStepSitsBetweenWeightAndGoal:
             "goal",
             # Вопрос 59: темп — только после «похудеть» / «набрать».
             "pace",
+            # DRF-2310: тип питания замыкает анкету — расчёта он не касается,
+            # поэтому стоит после всего, что в расчёт входит.
+            "diet",
+            "diet_note",
         ]
         assert AnketaFSM.STEPS["weight"].next == "activity"
         assert AnketaFSM.STEPS["activity"].next == "goal"
@@ -158,7 +162,8 @@ class TestA2EachAnswerIsItsOwnCoefficient:
         run = _Run(_state("activity", _BODY))
         asked_goal = run.turn(f"cb:anketa:choice:activity:{slug}")
         assert asked_goal.action_type == "anketa_step_goal"
-        done = run.turn("cb:anketa:choice:goal:maintain")
+        run.turn("cb:anketa:choice:goal:maintain")
+        done = run.turn("cb:anketa:choice:diet:omnivore")  # DRF-2310: анкету замыкает питание
         assert done.action_type == "anketa_complete"
 
         assert len(run.captured) == 1
@@ -173,7 +178,8 @@ class TestA3SkipIsMarkedAndDistinctFromTheSameNumber:
         владелец отменил (CD §72): числа за человека нет."""
         run = _Run(_state("activity", _BODY))
         run.turn(f"cb:anketa:choice:activity:{ACTIVITY_SKIP}")
-        done = run.turn("cb:anketa:choice:goal:maintain")
+        run.turn("cb:anketa:choice:goal:maintain")
+        done = run.turn("cb:anketa:choice:diet:omnivore")  # DRF-2310: анкету замыкает питание
         assert done.action_type == "anketa_complete"
         data = run.captured[0]["data"]
         assert data["_skipped_fields"] == ["activity"]
@@ -186,6 +192,7 @@ class TestA3SkipIsMarkedAndDistinctFromTheSameNumber:
         run = _Run(_state("activity", _BODY))
         run.turn(f"cb:anketa:choice:activity:{light}")
         run.turn("cb:anketa:choice:goal:maintain")
+        run.turn("cb:anketa:choice:diet:omnivore")  # DRF-2310: анкету замыкает питание
         data = run.captured[0]["data"]
         assert data["activity_coefficient"] == 1.375
         assert "_skipped_fields" not in data
@@ -195,7 +202,13 @@ class TestA4AStateFromBeforeTheStepIsAskedNotDefaulted:
     def test_completing_without_activity_asks_activity_then_goal_again(self) -> None:
         # Сериализовано до деплоя: стоит на цели, активности в ответах нет.
         run = _Run(_state("goal", _BODY))
-        result = run.turn("cb:anketa:choice:goal:maintain")
+        asked_diet = run.turn("cb:anketa:choice:goal:maintain")
+        # DRF-2310: анкету теперь замыкает тип питания, поэтому страж пропущенной
+        # активности срабатывает на шаг позже — на завершении, а не на цели.
+        # Утверждение узла от этого не меняется: число НЕ подставляется, его
+        # спрашивают. Питание второй раз не спрашивается (правило FSM).
+        assert asked_diet.action_type == "anketa_step_diet"
+        result = run.turn("cb:anketa:choice:diet:omnivore")
         assert result.action_type == "anketa_step_activity"
         assert run.captured == [], "в каталог ничего не ушло — числа за человека нет"
         assert run.bucket["current_step"] == "activity"
@@ -206,9 +219,11 @@ class TestA4AStateFromBeforeTheStepIsAskedNotDefaulted:
         assert again.action_type == "anketa_step_goal"
         # Вопрос 59: после «похудеть» — темп, затем расчёт.
         assert run.turn("cb:anketa:choice:goal:lose").action_type == "anketa_step_pace"
+        # Питание названо выше и второй раз не спрашивается — темп замыкает.
         done = run.turn("cb:anketa:choice:pace:moderate")
         assert done.action_type == "anketa_complete"
         data = run.captured[0]["data"]
+        assert data["diet_preference"] == "omnivore"
         assert data["activity_coefficient"] == 1.55 and data["goal"] == "lose"
         assert data["pace"] == "moderate"
         assert "_skipped_fields" not in data

@@ -1,9 +1,16 @@
-"""Nutrition anketa FSM — 7 steps, screening before anthropometry.
+"""Nutrition anketa FSM — screening before anthropometry, diet last.
 
 Walks the user through
-``gender → age → screening → height → weight → activity → goal``, then
-signals COMPLETE. The skill (``skill.py``) takes the completed answers, POSTs to
-Ayla ``upsert_profile``, and renders the targets card.
+``gender → age → screening → height → weight → activity → goal → diet``,
+then signals COMPLETE. Two steps are conditional: ``pace`` follows a goal
+that needs one (question 59), and ``diet_note`` follows «другое» — the only
+answer that carries words (DRF-2310). The skill (``skill.py``) takes the
+completed answers, POSTs to Ayla ``upsert_profile``, and renders the targets
+card.
+
+Число шагов в этом докстринге не называется намеренно: оно уже дважды
+становилось неправдой при добавлении шага, а сторож
+``TestScreeningQuestionSitsWhereItSays`` держит порядок точнее любого числа.
 
 ## Why screening sits third, before height and weight
 
@@ -128,6 +135,60 @@ ACTIVITY_COEFFICIENTS: dict[str, float] = {
 #: a number chosen for the person.
 ACTIVITY_SKIP = "unknown"
 
+#: Значения типа питания — СЛОВАРЬ КАТАЛОГА
+#: (``users.UserPersonalContext.DietType``), не свой. Состав назвал владелец
+#: 23.09.2026 (§77 п. 5); словарь один на два репозитория — решение 24.09,
+#: потому что второй разошёлся бы с ним молча. Импортировать нельзя (другой
+#: репозиторий), поэтому значения объявлены здесь как контракт провода, и
+#: узел `test_diet_step_2310` держит их равенство.
+#:
+#: «Без ограничений» зовётся ``omnivore``, а не ``unrestricted`` и не
+#: ``none``: код из каталога, где в нём лежат данные живых людей, а ``none``
+#: там — умолчание столбца, то есть след, а не ответ.
+CATALOG_DIET_TYPES: tuple[str, ...] = (
+    "omnivore",
+    "vegetarian",
+    "vegan",
+    "keto",
+    "halal",
+    "kosher",
+    "other",
+)
+
+#: «Другое словами»: за выбором следует вопрос о самих словах.
+DIET_OTHER = "other"
+
+#: «Пропустить» — НЕ ответ «без ограничений» (решение владельца §77 п. 6):
+#: первое — отсутствие ответа, второе — ответ. Значения каталога этот слаг не
+#: содержат, и в тело он не уходит — уходит пометка пропуска.
+DIET_SKIP = "skip"
+
+#: Имя вопроса в ``_skipped_fields`` — короткое, как у остальных пропусков
+#: (``weight`` при столбце ``weight_kg``, ``activity`` при
+#: ``activity_coefficient``). Пришли сюда имя столбца — каталог пропуск не
+#: запишет, в словаре здоровья завёлся бы неизвестный ключ, а человек молча
+#: лишился бы живого комментария модели.
+DIET_SKIP_WIRE_NAME = "diet"
+
+#: ЧЕРНОВИК ПОДПИСЕЙ. Слова взяты из решения владельца о составе списка;
+#: подписи как ВИДИМЫЙ текст он не утверждал (§60) — ждут его слова.
+_DIET_CHOICES: dict[str, str] = {
+    "omnivore": "Без ограничений",
+    "vegetarian": "Вегетарианство",
+    "vegan": "Веганство",
+    "keto": "Кето",
+    "halal": "Халяль",
+    "kosher": "Кошер",
+    DIET_OTHER: "Другое — напишу словами",
+    DIET_SKIP: "Пропустить",
+}
+
+#: ЧЕРНОВИК ТЕКСТА: ждёт слова владельца.
+DIET_PROMPT = "Есть ли ограничения в еде? Это нужно, чтобы не советовать лишнего."
+
+#: ЧЕРНОВИК ТЕКСТА: ждёт слова владельца.
+DIET_NOTE_PROMPT = "Напиши своими словами, чего избегаешь."
+
 #: Pace answers — the catalogue's ``NutritionProfile.Pace`` choices with its
 #: labels verbatim («Мягкий» / «Средний»); texts not from a ticket, listed
 #: for the owner in the PR.
@@ -145,9 +206,18 @@ PACE_GOALS = frozenset({"lose", "gain", "tone"})
 ADULT_AGE = 18
 
 
+def _validate_diet_note(user_input: str) -> tuple[Any, str | None]:
+    """Слова к «другому»: любой непустой текст. Предела длины здесь нет —
+    его никто не называл, а выдуманный резал бы ответ человека молча."""
+    text = user_input.strip()
+    if not text:
+        return None, "Напиши словами, чего избегаешь, — одной строкой."
+    return text, None
+
+
 @dataclass
 class AnketaFSM(SkillFSM):
-    """7-step nutrition profile FSM. Screening precedes anthropometry."""
+    """Анкета питания: скрининг перед антропометрией, тип питания — последним."""
 
     STEPS: ClassVar[dict[str, _Step]] = {
         "gender": _Step(
@@ -207,12 +277,26 @@ class AnketaFSM(SkillFSM):
         "goal": _Step(
             prompt="Какая у тебя цель?",
             validator=validate_choice(_GOAL_CHOICES),
-            next=COMPLETE,
+            next="diet",
         ),
         # Asked only after «похудеть» / «набрать» — see ``transition``.
         "pace": _Step(
             prompt="В каком темпе идти к цели?",
             validator=validate_choice(_PACE_CHOICES),
+            next="diet",
+        ),
+        # DRF-2310. Замыкает анкету: расчёта не касается, поэтому стоит после
+        # всего, что в расчёт входит, — человек получает ориентир, ответив на
+        # то, что для него нужно, а не наоборот.
+        "diet": _Step(
+            prompt=DIET_PROMPT,
+            validator=validate_choice(_DIET_CHOICES),
+            next=COMPLETE,
+        ),
+        # Asked only after «другое» — see ``transition``.
+        "diet_note": _Step(
+            prompt=DIET_NOTE_PROMPT,
+            validator=_validate_diet_note,
             next=COMPLETE,
         ),
     }
@@ -223,8 +307,23 @@ class AnketaFSM(SkillFSM):
     answers: dict[str, Any] = field(default_factory=dict)
     is_complete: bool = False
 
+    def _diet_is_answered(self) -> bool:
+        """Назван ли тип питания ПОЛНОСТЬЮ.
+
+        ``other`` сам по себе — не ответ: он лишь обещает слова, и без них
+        сказано ничего. Считай его ответом — и «другое», прерванное правкой
+        прежнего шага, уехало бы в каталог без слов (каталог такое тело
+        отвергает) либо уронило бы сборку тела на отсутствующем ключе.
+        """
+        diet = self.answers.get("diet")
+        if not diet:
+            return False
+        if diet == DIET_OTHER:
+            return bool(str(self.answers.get("diet_note") or "").strip())
+        return True
+
     def transition(self, user_input: str) -> TransitionResult:
-        """The goal closes the anketa — unless it needs a pace (question 59).
+        """Two steps are conditional: the pace (question 59) and the words.
 
         After «похудеть» / «набрать» the pace step follows; an earlier pace
         answer (the edit flow re-asks only the goal) is kept. A goal that
@@ -233,7 +332,30 @@ class AnketaFSM(SkillFSM):
         """
         answered = self.current_step
         result = super().transition(user_input)
-        if answered != "goal" or not isinstance(result, Completed):
+        if isinstance(result, NextStep) and result.is_validation_error:
+            # Ответ ОТВЕРГНУТ — шаг переспрашивается, и ни одна ветка ниже не
+            # имеет права его дотрагивать. Прежде это условие стояло внутри
+            # проверки «не Completed», а с появлением условных шагов (DRF-2310)
+            # его пришлось назвать отдельно: иначе отвергнутый ввод замыкал
+            # анкету прежним ответом, и человек не слышал «выбери вариант», а
+            # видел карточку норм.
+            return result
+        if answered == "diet" and self.answers.get("diet") == DIET_OTHER:
+            # «Другое» без слов — не ответ: сказано ничего. Спрашиваем слова.
+            self.is_complete = False
+            self.current_step = "diet_note"
+            return NextStep(prompt=self.STEPS["diet_note"].prompt)
+        if answered in ("goal", "pace") and self._diet_is_answered():
+            # Питание уже названо — второй раз не спрашиваем. Это бывает,
+            # когда страж скилла вернул человека к пропущенной активности
+            # (состояние сохранено до её появления): цепочка шагов провела бы
+            # его через питание снова, и он отвечал бы дважды на один вопрос.
+            self.is_complete = True
+            self.current_step = ""
+            if answered == "goal" and self.answers.get("goal") not in PACE_GOALS:
+                self.answers.pop("pace", None)
+            return Completed(answers=dict(self.answers))
+        if answered != "goal":
             return result
         if self.answers.get("goal") in PACE_GOALS:
             if not self.answers.get("pace"):
@@ -241,8 +363,10 @@ class AnketaFSM(SkillFSM):
                 self.current_step = "pace"
                 return NextStep(prompt=self.STEPS["pace"].prompt)
             return result
+        # Цель, которой темп не нужен, уносит темп от прежнего ответа: он
+        # ушёл бы в расчёт, который его не использует.
         self.answers.pop("pace", None)
-        return Completed(answers=dict(self.answers))
+        return result
 
 
 # ─── public helpers ──────────────────────────────────────────────────────
@@ -253,6 +377,7 @@ GOAL_CHOICES = _GOAL_CHOICES
 SCREENING_CHOICES = _SCREENING_CHOICES
 ACTIVITY_CHOICES = _ACTIVITY_CHOICES
 PACE_CHOICES = _PACE_CHOICES
+DIET_CHOICES = _DIET_CHOICES
 
 
 def choice_keyboard_options(step: str) -> list[tuple[str, str]]:
@@ -264,6 +389,8 @@ def choice_keyboard_options(step: str) -> list[tuple[str, str]]:
     Raises:
         KeyError: step has no choice keyboard (caller should use text input).
     """
+    if step == "diet":
+        return [(label, slug) for slug, label in _DIET_CHOICES.items()]
     if step == "gender":
         return [(label, slug) for slug, label in _GENDER_CHOICES.items()]
     if step == "goal":
@@ -282,5 +409,5 @@ def choice_keyboard_options(step: str) -> list[tuple[str, str]]:
     raise KeyError(f"step {step!r} has no choice keyboard (text-input step)")
 
 
-CHOICE_STEPS = frozenset({"gender", "goal", "screening", "activity", "pace"})
+CHOICE_STEPS = frozenset({"gender", "goal", "screening", "activity", "pace", "diet"})
 """Steps that present a choice keyboard. Text-input steps are the complement."""

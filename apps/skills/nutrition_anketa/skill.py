@@ -1,8 +1,8 @@
-"""Nutrition anketa skill — 7-step nutrition profile FSM.
+"""Nutrition anketa skill — the nutrition profile FSM.
 
 Sprint 9 / P3 (DRF-820). Largest port in Sprint 9: walks the user
-through gender → age → screening → height → weight → activity → goal
-(see ``fsm.py`` for why in that order), persists state in
+through gender → age → screening → height → weight → activity → goal →
+diet (see ``fsm.py`` for why in that order), persists state in
 ``Conversation.skill_state['nutrition_anketa']`` (via D3), POSTs the
 result to Ayla ``upsert_profile``, and renders the computed norms.
 
@@ -225,6 +225,9 @@ from apps.skills.nutrition_anketa.fsm import (
     ACTIVITY_COEFFICIENTS,
     PACE_GOALS,
     ACTIVITY_SKIP,
+    DIET_OTHER,
+    DIET_SKIP,
+    DIET_SKIP_WIRE_NAME,
     ADULT_AGE,
     PACE_CHOICES,
     CHOICE_STEPS,
@@ -1734,6 +1737,14 @@ class NutritionAnketaSkill:
             return self._manual_start(context, kcal=None)
         entry = _manual_target_entry(text)
         if entry is not None:
+            if self._has_active_fsm(context):
+                # DRF-2310: фраза человека на открытом шаге анкеты — ОТВЕТ
+                # шагу, а не короткий путь. Тот же довод, что у веса (ревью
+                # #1912: «вешу 65» на шаге веса — ответ шагу). Пока шага о
+                # словах к «другому» не было, сюда попадали только числа; его
+                # ожидаемый ответ — фраза про еду и врачей, и без этой
+                # проверки она уводила бы человека из анкеты.
+                return None
             return self._manual_start(context, kcal=entry or None)
 
         if text == MANUAL_CANCEL_CALLBACK or text == MANUAL_DEVIATION_NO_CALLBACK:
@@ -1974,8 +1985,29 @@ class NutritionAnketaSkill:
             body["activity_coefficient"] = ACTIVITY_COEFFICIENTS[activity]
         if answers["goal"] in PACE_GOALS:
             body["pace"] = answers["pace"]
+        skipped: list[str] = []
         if activity == ACTIVITY_SKIP:
-            body["_skipped_fields"] = ["activity"]
+            skipped.append("activity")
+
+        # DRF-2310. Тип питания: значение из словаря каталога, слова — только
+        # у «другого». «Пропустить» значения НЕ подставляет: молчание ответом
+        # не становится, уходит пометка с коротким именем вопроса.
+        diet = answers.get("diet")
+        note = str(answers.get("diet_note") or "").strip()
+        if diet == DIET_SKIP:
+            skipped.append(DIET_SKIP_WIRE_NAME)
+        elif diet == DIET_OTHER and not note:
+            # «Другое» без слов — не ответ: сказано ничего. В тело не уходит
+            # ни значение, ни слова (каталог такое тело и так отвергает), и
+            # ключ не читается вслепую: падение сборки — не проверка границы.
+            pass
+        elif diet:
+            body["diet_preference"] = diet
+            if diet == DIET_OTHER:
+                body["diet_note"] = note
+
+        if skipped:
+            body["_skipped_fields"] = skipped
         return attach_consent(body, attestation)
 
 
