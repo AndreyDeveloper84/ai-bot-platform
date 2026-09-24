@@ -70,5 +70,11 @@ def portion_numbers_are_named(provenance: PortionProvenance) -> bool:
 
 
 def portion_needs_confirmation(provenance: PortionProvenance) -> bool:
-    """Нужен ли рядом ход «назови вес»."""
+    """Нужен ли рядом ход «назови вес».
+
+    Пока владелец не дал слов, которыми оговаривается неподтверждённое
+    число (OWNER_QUESTIONS §6-омикрон), такое число не показывается
+    вовсе. **Это ожидание текста, а не решение по существу**: с ответом
+    владельца показ включается одной строкой.
+    """
     return provenance in (PortionProvenance.TYPICAL, PortionProvenance.UNNAMED)
