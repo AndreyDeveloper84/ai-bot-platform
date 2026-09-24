@@ -91,3 +91,37 @@ def test_check_is_registered() -> None:
         for c in registry.registry.get_checks(include_deployment_checks=False)
     }
     assert "apps.channels.checks.check_support_contact_named" in names
+
+
+class TestDeclaredSurfaceMatchesTheLiveOne:
+    """Настройка описана там, где её ищет поднимающий контур.
+
+    Этот узел — предмет самого листа, а не украшение: дефект начался с
+    того, что переменной **не было в шаблонах**, и человек, поднимающий
+    контур, о ней не узнавал. Документация без сторожа удаляется молча —
+    и дефект возвращается ровно туда, откуда пришёл (найдено ревью).
+
+    Образец взят у соседнего листа: `tests/smoke/
+    test_payments_mode_declared_2340.py::TestDeclaredSurfaceMatchesTheLiveOne`.
+    """
+
+    @pytest.mark.parametrize(
+        ("name", "anchor"),
+        [
+            (".env.example", "DJANGO_SETTINGS_MODULE"),
+            (".env.staging.template", "AYLA_BASE_URL"),
+        ],
+    )
+    def test_keys_are_in_the_env_templates(self, name: str, anchor: str) -> None:
+        from pathlib import Path
+
+        repo = Path(__file__).resolve().parents[3]
+        text = (repo / name).read_text(encoding="utf-8")
+        # Присутствие первым, и якорь у каждого файла свой: `.env.example`
+        # про местную разработку, `AYLA_*` там нет.
+        assert anchor in text, name
+        assert "AYLA_SUPPORT_CONTACT" in text, name
+        # Дежурные — там же: `handoff.E001` единственный у нас ошибка, и
+        # обнулить его пару можно только зная, что она существует.
+        assert "HANDOFF_DUTY_OPERATORS" in text, name
+        assert "HANDOFF_DUTY_QUEUE" in text, name
