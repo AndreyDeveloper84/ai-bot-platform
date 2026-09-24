@@ -74,6 +74,14 @@ export interface ScanResponse {
   /** 0–1; <0.6 → «Похоже на», ≥0.6 → «Узнала». */
   confidence: number;
   portion_g: number | null;
+  /**
+   * DRF-2371 — откуда взялся вес порции: `provider` (назвал наблюдавший —
+   * распознаватель или сам человек), `typical` (типовая величина
+   * справочника), `unknown` (не назвал никто). Тип нарочно широкий:
+   * незнакомое значение и отсутствие поля читает `portionProvenanceOf`,
+   * и оба случая — «не названо», а не «названо».
+   */
+  portion_source?: string | null;
   nutrition: NutritionFacts | null;
   beauty_insights: BeautyInsights | null;
 }

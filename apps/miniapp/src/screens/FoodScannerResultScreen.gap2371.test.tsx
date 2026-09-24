@@ -114,3 +114,43 @@ describe("DRF-2371 — скан без чисел", () => {
     expect(screen.queryByRole("button", { name: "Написать вручную" })).not.toBeInTheDocument();
   });
 });
+
+describe("DRF-2371 — признак происхождения порции решает показ", () => {
+  it("«provider»: вес назвали — число показано", async () => {
+    renderResult({ ...WITH_NUMBERS, portion_source: "provider" });
+
+    expect(await screen.findByText("Калории: ~250 ккал")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Написать вручную" })).not.toBeInTheDocument();
+  });
+
+  it("«unknown»: числа есть, но веса никто не называл — числа нет, есть ход", async () => {
+    // Ровно случай каталога: вес не назван, счёт идёт по базовой константе.
+    // Показать такое число как названное — та же ложь, что «~0 ккал».
+    renderResult({ ...WITH_NUMBERS, portion_source: "unknown" });
+
+    expect(await screen.findByRole("button", { name: "Написать вручную" })).toBeInTheDocument();
+    expect(screen.queryByText(/Калории/)).not.toBeInTheDocument();
+  });
+
+  it("«typical»: вес подставлен справочником — числа нет, есть ход подтверждения", async () => {
+    renderResult({ ...WITH_NUMBERS, portion_source: "typical" });
+
+    expect(await screen.findByRole("button", { name: "Написать вручную" })).toBeInTheDocument();
+    expect(screen.queryByText(/Калории/)).not.toBeInTheDocument();
+  });
+
+  it("незнакомое значение читается осторожно, а не как названное", async () => {
+    renderResult({ ...WITH_NUMBERS, portion_source: "confirmed" });
+
+    expect(await screen.findByRole("button", { name: "Написать вручную" })).toBeInTheDocument();
+    expect(screen.queryByText(/Калории/)).not.toBeInTheDocument();
+  });
+
+  it("поля нет (старый ответ): число с названным весом показывается как прежде", async () => {
+    // До половины B (DRF-2444) числа существуют только при названном весе —
+    // регресса на старых ответах быть не должно.
+    renderResult(WITH_NUMBERS);
+
+    expect(await screen.findByText("Калории: ~250 ккал")).toBeInTheDocument();
+  });
+});

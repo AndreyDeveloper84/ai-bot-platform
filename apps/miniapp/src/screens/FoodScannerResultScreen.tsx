@@ -39,6 +39,11 @@ import {
   type MealType,
   type ScanResponse,
 } from "../lib/food-scanner";
+import {
+  portionNeedsConfirmation,
+  portionNumbersAreNamed,
+  portionProvenanceOf,
+} from "../lib/portion-provenance";
 
 interface RouterState {
   result?: ScanResponse;
@@ -202,12 +207,23 @@ export function FoodScannerResultScreen() {
   const proteinG = scaled(result.nutrition?.protein_g, round1);
   const fatG = scaled(result.nutrition?.fat_g, round1);
   const carbsG = scaled(result.nutrition?.carbs_g, round1);
-  // Числа не пришли, хотя режим показа их не скрывает: считать было нечем —
-  // порция неизвестна или блюда нет в справочнике. Причину наружу не
-  // выводим: форма ответа причиной не является, а «признак наружу» (п. 3
-  // DRF-2335) ждёт слова владельца. Дорога — существующая: «Написать
-  // вручную», где спрашивают «Сколько граммов?» и считают по весу.
-  const numbersMissing = !hideNumbers && calories == null;
+  // DRF-2371 — показывать число или спрашивать вес, решает ПРИЗНАК
+  // происхождения порции, а не пустота ответа. Пустота двузначна и скоро
+  // исчезнет: как только типовая порция начнёт закрывать пустые итоги
+  // (DRF-2444), «числа есть» перестанет значить «вес назвали».
+  // `portionProvenanceOf` — единственное место, где живут строки провода;
+  // отсутствие поля и незнакомое значение оба читаются как «не названо».
+  const provenance = portionProvenanceOf(result.portion_source);
+  // Число показываем, только когда вес кто-то назвал. Причину пробела
+  // наружу не выводим: форма ответа причиной не является, а «признак
+  // наружу» (п. 3 DRF-2335) ждёт слова владельца.
+  const showNumbers =
+    !hideNumbers && calories != null && portionNumbersAreNamed(provenance);
+  // Дорога — существующая: «Написать вручную», где спрашивают «Сколько
+  // граммов?» и считают по весу. Нужна и когда числа нет, и когда оно есть,
+  // но веса никто не называл.
+  const askForWeight =
+    !hideNumbers && (calories == null || portionNeedsConfirmation(provenance));
   const isLowConf = result.confidence < 0.6;
   const leadVerb = isLowConf ? "Похоже на" : "Узнала";
   // DRF-2098 — ключ идемпотентности живёт столько, сколько карточка: повтор
@@ -429,7 +445,7 @@ export function FoodScannerResultScreen() {
               </button>
             </div>
           </div>
-          {!hideNumbers && calories != null && (
+          {showNumbers && (
             <div
               className="food-scanner-result__nutrition"
               role="status"
@@ -548,7 +564,7 @@ export function FoodScannerResultScreen() {
               Уточнить
             </button>
           )}
-          {numbersMissing && (
+          {askForWeight && (
             // DRF-2371 — вместо числа, которого нет, дорога к числу: тот же
             // ручной ввод, что предлагает экран обработки при отказе. Имя
             // блюда переносим, чтобы не набирать заново.

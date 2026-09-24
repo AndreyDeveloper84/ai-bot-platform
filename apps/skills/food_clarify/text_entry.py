@@ -73,6 +73,10 @@ from apps.integrations.ayla import (
     external_user_id_for,
     get_nutrition_client,
 )
+from apps.integrations.ayla.portion_provenance import (
+    portion_numbers_are_named,
+    portion_provenance_of,
+)
 from apps.orchestrator.ui.keyboards import (
     ENTRY_CALLBACK_RE,
     ENTRY_ID_RE,
@@ -531,7 +535,12 @@ def render_estimate_card(estimate: Any) -> str:
     # строки макросов нет: «Примерно 0 ккал» утверждало бы посчитанное.
     # Текст, называющий сам пробел, ждёт слова владельца (OWNER_QUESTIONS);
     # до ответа карточка о числах молчит, а дорога рядом — назвать граммы.
-    if estimate.kcal is not None:
+    # DRF-2371 — см. `portion_provenance`: число называем только тогда,
+    # когда вес кто-то назвал; подставленное за названное не выдаём.
+    provenance = portion_provenance_of(
+        (getattr(estimate, "raw", None) or {}).get("portion_source")
+    )
+    if estimate.kcal is not None and portion_numbers_are_named(provenance):
         macros = [f"Примерно {int(round(estimate.kcal))} ккал"]
         for label, value in (
             ("Б", estimate.protein_g), ("Ж", estimate.fat_g), ("У", estimate.carbs_g),

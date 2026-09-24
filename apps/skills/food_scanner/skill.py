@@ -110,6 +110,10 @@ from apps.integrations.ayla import (
     external_user_id_for,
     get_nutrition_client,
 )
+from apps.integrations.ayla.portion_provenance import (
+    portion_numbers_are_named,
+    portion_provenance_of,
+)
 from apps.orchestrator import food_history
 from apps.orchestrator.memory import food as food_memory
 from apps.orchestrator.ui.keyboards import (
@@ -862,7 +866,13 @@ def _format_scan_card(
     parts.append(f"{hedge} {dish}.")
     if portion:
         parts.append(f"Примерно {int(portion)} г.")
-    if kcal is not None:
+    # DRF-2371 — число называем, только когда вес кто-то назвал. Признак
+    # берём из тела ответа каталога через единственный вход перевода:
+    # отсутствие поля и незнакомое значение оба читаются как «не названо».
+    # Число, посчитанное по константе каталога, существует — но выдавать
+    # его за названное нельзя.
+    provenance = portion_provenance_of((scan.raw or {}).get("portion_source"))
+    if kcal is not None and portion_numbers_are_named(provenance):
         macros_line = f"{int(kcal)} ккал"
         if protein is not None:
             macros_line += f" · Б {int(protein)}"
