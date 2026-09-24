@@ -145,7 +145,7 @@ export function CustomerBookingDetailScreen() {
       if (err instanceof ApiError) {
         setSnack({
           visible: true,
-          message: err.detail || "Не получилось отменить.",
+          message: "Не получилось отменить.",
           showUndo: false,
         });
       }

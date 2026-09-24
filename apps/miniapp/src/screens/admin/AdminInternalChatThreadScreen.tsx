@@ -352,7 +352,7 @@ export function AdminInternalChatThreadScreen({ me }: Props) {
         }
         const detail =
           e instanceof ApiError
-            ? e.detail || COPY.toastSendError
+            ? COPY.toastSendError
             : COPY.toastSendError;
         setToast({
           visible: true,
@@ -419,7 +419,7 @@ export function AdminInternalChatThreadScreen({ me }: Props) {
       hapticNotify("error");
       const detail =
         e instanceof ApiError
-          ? e.detail || COPY.toastClosedError
+          ? COPY.toastClosedError
           : COPY.toastClosedError;
       setCloseSheet({ ...closeSheet, submitting: false, err: detail });
     }
