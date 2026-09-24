@@ -14,7 +14,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from typing import Any
 
 import httpx
@@ -34,7 +34,7 @@ def _client_with_handler(
 
 
 @pytest.fixture(autouse=True)
-def _patch_async_client(monkeypatch: pytest.MonkeyPatch) -> None:
+def _patch_async_client(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     original = httpx.AsyncClient
 
     def _factory(*args: Any, **kwargs: Any) -> httpx.AsyncClient:
