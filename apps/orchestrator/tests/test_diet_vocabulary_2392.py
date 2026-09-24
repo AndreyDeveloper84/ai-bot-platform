@@ -1,39 +1,62 @@
-"""Один словарь диет на бот, и заглушка не затирает названное (DRF-2392).
+"""Один словарь диет на бот, и непонятое — не ответ (DRF-2392).
 
-Причина листа одна, следствий было три. Копий словаря типов питания в боте
-оказалось **три**: у разбора ответов консьержа (`memory_ask`), у блока
-промпта (`memory_block`) и у анкеты. Копии разошлись молча — у первой не было
+Причина одна, следствий три. Копий словаря типов питания в боте оказалось
+ТРИ: у разбора ответов консьержу (`memory_ask`), у блока промпта
+(`memory_block`) и у анкеты. Копии разошлись молча — у первой не было
 `omnivore`, и «ем всё, без ограничений» ложилось как `other`, а `other` в
 анкете означает «и я напишу словами», которых никто не спрашивал.
 
-* f1 — «без ограничений» разбирается как ответ, а не как «другое»;
-* f2 — значения разбора принадлежат словарю каталога, и словарь ровно один:
-  у блока промпта своей копии больше нет;
-* f3 — заглушка `other` НЕ затирает точное названное значение: запись «последний
-  победил» иначе делала бы знание о человеке хуже от того, что он что-то
-  сказал;
-* f4 — «другое» СЛОВОМ по-прежнему записывается: это ответ человека, а не
-  заглушка разбора.
+Второй корень — там же: разбор отвечал `other` на ВСЁ непонятое. Запись
+«последний победил» затирала этой заглушкой точное значение, названное
+человеком раньше, — знание о нём становилось хуже от того, что он открыл рот.
+Непонятое теперь `_UNPARSED`, то есть общее для всех полей правило: открытый
+вопрос снимается, ничего не пишется.
+
+* f1 — «без ограничений» разбирается ответом; исключение («только мясо не
+  ем») ответом НЕ становится: утверждать «ограничений нет» про человека,
+  назвавшего ограничение, хуже, чем не понять его;
+* f2 — значения разбора принадлежат словарю каталога, и словарь один: у
+  блока промпта своей копии больше нет;
+* f3 — ПОВЕДЕНИЕ ручки: непонятый ответ ничего не пишет, снимает открытый
+  вопрос и не оставляет человека в ловушке следующих сообщений;
+* f4 — «другое» словом — ответ человека, и он записывается.
 """
 
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
+
+import pytest
 
 from apps.integrations.ayla.diet_types import CATALOG_DIET_TYPES, DIET_OMNIVORE, DIET_OTHER
 from apps.orchestrator import memory_ask
 from apps.orchestrator.memory_block import _DIET_TYPE_VOCAB
 
 
-class TestF1NoRestrictionsIsAnAnswer:
-    def test_the_phrases_parse_to_omnivore(self) -> None:
-        for text in ("ем всё", "без ограничений", "да нет ограничений никаких"):
-            assert memory_ask._parse_diet(text) == DIET_OMNIVORE, text
+class TestF1NoRestrictionsIsAnAnswerButAnExclusionIsNot:
+    @pytest.mark.parametrize(
+        "text",
+        ["ем всё", "без ограничений", "никаких ограничений", "я всеядная", "ограничений нет"],
+    )
+    def test_the_phrases_parse_to_omnivore(self, text: str) -> None:
+        assert memory_ask._parse_diet(text) == DIET_OMNIVORE
 
-    def test_an_unknown_phrase_still_falls_back(self) -> None:
-        """Пара к предыдущему: разбор не стал отвечать `omnivore` на всё."""
-        assert memory_ask._parse_diet("стараюсь есть меньше мяса") == DIET_OTHER
+    @pytest.mark.parametrize(
+        "text",
+        ["ем всё, только мясо не ем", "ем всё кроме свинины", "ем всё, но без мяса"],
+    )
+    def test_an_exclusion_is_not_no_restrictions(self, text: str) -> None:
+        """Тот же пример каноничен в `memory_extract`: исключения — не типы
+        питания. Утверждать «ограничений нет» про назвавшего ограничение —
+        ложный факт о человеке, хуже непонимания."""
+        assert memory_ask._parse_diet(text) is memory_ask._UNPARSED
+
+    def test_an_unknown_phrase_is_not_an_answer(self) -> None:
+        assert memory_ask._parse_diet("стараюсь есть меньше мяса") is memory_ask._UNPARSED
+
+    def test_a_named_diet_still_parses(self) -> None:
+        assert memory_ask._parse_diet("я веган") == "vegan"
 
 
 class TestF2TheVocabularyIsOne:
@@ -46,68 +69,57 @@ class TestF2TheVocabularyIsOne:
     def test_the_prompt_block_has_no_copy_of_its_own(self) -> None:
         assert _DIET_TYPE_VOCAB == frozenset(CATALOG_DIET_TYPES)
 
+    def test_the_phrases_shown_to_the_person_cover_the_whole_vocabulary(self) -> None:
+        """Фразы для показа — не значения, но ПО значениям: пропусти одно, и
+        строка про человека молча не покажется. Узел держит покрытие, а сами
+        слова остаются на своём месте (их утверждает владелец)."""
+        from apps.persona.memory_surface import _DECLARED_DIET_PHRASES
 
-class _Declared:
-    def __init__(self, stored: str | None) -> None:
-        self.status = memory_ask.GateStatus.OK
-        self.context = SimpleNamespace(context={"diet_type": stored} if stored else {})
+        assert set(_DECLARED_DIET_PHRASES) == set(CATALOG_DIET_TYPES)
 
 
-class TestF3TheFallbackDoesNotBlurANamedAnswer:
-    def test_a_precise_stored_value_is_not_overwritten_by_other(self) -> None:
-        """Человек ответил «Веганство» в анкете, а потом сказал консьержу
-        что-то, чего разбор не понял. Записать сюда `other` значило бы сделать
-        знание о человеке ХУЖЕ от того, что он открыл рот."""
-        with patch.object(memory_ask, "get_declared_prefs", return_value=_Declared("vegan")):
-            blurs = memory_ask._would_blur_a_named_answer(
-                object(), "diet_type", DIET_OTHER, "стараюсь есть меньше мяса"
-            )
+class _Conversation:
+    id = "conv-2392"
 
-        assert blurs is True
 
-    def test_nothing_stored_means_the_answer_is_written(self) -> None:
-        with patch.object(memory_ask, "get_declared_prefs", return_value=_Declared(None)):
-            blurs = memory_ask._would_blur_a_named_answer(
-                object(), "diet_type", DIET_OTHER, "стараюсь есть меньше мяса"
-            )
+def _answer(text: str):
+    """Ответ на открытый вопрос о диете — через саму ручку, не через предикат."""
+    patch_mock = Mock(return_value=SimpleNamespace(status=memory_ask.GateStatus.OK))
+    with (
+        patch.object(memory_ask, "concierge_memory_enabled", return_value=True),
+        patch.object(memory_ask, "read_pending", return_value={"field": "diet_type"}),
+        patch.object(memory_ask, "_clear_pending") as clear,
+        patch.object(memory_ask, "patch_declared_prefs", patch_mock),
+    ):
+        reply = memory_ask.try_handle_answer(_Conversation(), object(), text)
+    return reply, patch_mock, clear
 
-        assert blurs is False
 
-    def test_a_precise_answer_is_always_written(self) -> None:
-        with patch.object(memory_ask, "get_declared_prefs", return_value=_Declared("vegan")):
-            blurs = memory_ask._would_blur_a_named_answer(
-                object(), "diet_type", DIET_OMNIVORE, "теперь ем всё"
-            )
+class TestF3AnUnparsedAnswerWritesNothingAndClosesTheQuestion:
+    def test_nothing_is_written_and_the_pending_question_is_cleared(self) -> None:
+        """Оставь вопрос открытым — и он забирал бы КАЖДОЕ следующее сообщение
+        сутки (столько живёт отметка), а любое слово «другое» в нём записало бы
+        заглушку поверх точного ответа. Ловушка была бы хуже той одной записи,
+        против которой её ставили."""
+        reply, patch_mock, clear = _answer("стараюсь есть меньше мяса")
 
-        assert blurs is False
+        assert reply is None
+        patch_mock.assert_not_called()
+        clear.assert_called_once()
 
-    def test_a_read_failure_keeps_the_previous_behaviour(self) -> None:
-        """Терять ответ человека из-за недоступной ручки нельзя."""
+    def test_a_named_answer_is_written(self) -> None:
+        reply, patch_mock, clear = _answer("я веган")
 
-        def _boom(_bot_user):
-            raise RuntimeError("ayla down")
-
-        with patch.object(memory_ask, "get_declared_prefs", _boom):
-            blurs = memory_ask._would_blur_a_named_answer(
-                object(), "diet_type", DIET_OTHER, "что-то своё"
-            )
-
-        assert blurs is False
-
-    def test_another_field_is_never_touched_by_this_rule(self) -> None:
-        blurs = memory_ask._would_blur_a_named_answer(
-            object(), "price_range_max", DIET_OTHER, "как получится"
-        )
-
-        assert blurs is False
+        assert reply is not None  # наличие: человеку ответили
+        patch_mock.assert_called_once()
+        assert patch_mock.call_args[0][1][0]["value"] == "vegan"
+        clear.assert_called_once()
 
 
 class TestF4OtherSaidInWordsIsAnAnswer:
     def test_the_person_naming_other_is_written(self) -> None:
-        """«Другое» словом — ответ человека, а не заглушка разбора."""
-        with patch.object(memory_ask, "get_declared_prefs", return_value=_Declared("vegan")):
-            blurs = memory_ask._would_blur_a_named_answer(
-                object(), "diet_type", DIET_OTHER, "другое, у меня своя диета"
-            )
+        reply, patch_mock, _clear = _answer("другое, у меня своя диета")
 
-        assert blurs is False
+        assert reply is not None
+        patch_mock.assert_called_once()
+        assert patch_mock.call_args[0][1][0]["value"] == DIET_OTHER

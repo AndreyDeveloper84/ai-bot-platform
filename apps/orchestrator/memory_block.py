@@ -81,8 +81,8 @@ _SLOT_DISPLAY = {
 _INFERRED_KEY_MAP = {"diet": "diet_type"}
 
 # Values allowed to reach the block as a diet_type (Ayla contract vocabulary).
-#: DRF-2392: словарь ОДИН на бот. Здесь была третья копия набора; копии
-#: расходятся молча — у четвёртой (``memory_ask``) уже не было ``omnivore``.
+#: DRF-2392: словарь ОДИН на бот. Здесь была одна из трёх копий набора; копии
+#: расходятся молча — у копии в ``memory_ask`` не было ``omnivore``.
 _DIET_TYPE_VOCAB = frozenset(CATALOG_DIET_TYPES)
 
 _DECLARED_CONFIDENCE = 1.0
