@@ -257,6 +257,7 @@ def guard_outbound(
     bot_user: object | None = None,
     trace_id: object | None = None,
     acted: bool | None = None,
+    subject_own_data: bool = False,
 ) -> OutboundGuardOutcome:
     """Check a drafted reply on its way to a person; emit once if it is blocked.
 
@@ -284,7 +285,17 @@ def guard_outbound(
     costs someone their answer.
     """
 
-    verdict = evaluate_outbound(text)
+    verdict = evaluate_outbound(text, subject_own_data=subject_own_data)
+    if verdict.own_data_categories:
+        # DRF-2435 — «заблокировали чужой контакт» и «это собственные данные
+        # человека, пропускаем» обязаны читаться в журнале по-разному: иначе мы
+        # починим поведение и оставим слепой журнал, а молчал именно он.
+        logger.info(
+            "safety.outbound.own_data_passed surface=%s categories=%s trace=%s",
+            surface,
+            ",".join(verdict.own_data_categories),
+            trace_id,
+        )
     if verdict.allowed and acted is False:
         verdict = evaluate_action_promise(text)
     if verdict.allowed:

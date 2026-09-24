@@ -28,6 +28,7 @@
 что охрана осталась**. Поэтому ниже обе половины — и что перестало
 блокироваться, и что блокируется по-прежнему.
 """
+
 from __future__ import annotations
 
 import json
@@ -69,31 +70,50 @@ def _archive_text(seed: int) -> str:
     base = "2026-09-24T10:39:52"
     archive = {
         "bot_user": {
-            "id": str(rnd), "channel": "max", "channel_user_id": "700037",
-            "display_name": "Replay", "phone_hash": "",
-            "first_seen": f"{base}.318000+00:00", "last_seen": f"{base}.325000+00:00",
+            "id": str(rnd),
+            "channel": "max",
+            "channel_user_id": "700037",
+            "display_name": "Replay",
+            "phone_hash": "",
+            "first_seen": f"{base}.318000+00:00",
+            "last_seen": f"{base}.325000+00:00",
         },
         "consents": [
-            {"consent_type": t, "granted": True, "source": "chat",
-             "document_version": v, "captured_at": f"{base}.32{i}000+00:00",
-             "withdrawn_at": None}
-            for i, (t, v) in enumerate((
-                ("food_diary_processing", "food-diary-v1.0"),
-                ("personal_data", ""),
-                ("personal_calculation", "personal-calc-v1.0"),
-            ))
+            {
+                "consent_type": t,
+                "granted": True,
+                "source": "chat",
+                "document_version": v,
+                "captured_at": f"{base}.32{i}000+00:00",
+                "withdrawn_at": None,
+            }
+            for i, (t, v) in enumerate(
+                (
+                    ("food_diary_processing", "food-diary-v1.0"),
+                    ("personal_data", ""),
+                    ("personal_calculation", "personal-calc-v1.0"),
+                )
+            )
         ],
         "conversations": [
-            {"id": str(uuid.UUID(int=seed + 1)), "state": "idle", "outcome": "",
-             "is_active": True, "created_at": f"{base}.321000+00:00",
-             "deleted_at": None,
-             "messages": [{"role": "user", "content": "выгрузить мои данные",
-                           "created_at": f"{base}.322000+00:00"}]},
+            {
+                "id": str(uuid.UUID(int=seed + 1)),
+                "state": "idle",
+                "outcome": "",
+                "is_active": True,
+                "created_at": f"{base}.321000+00:00",
+                "deleted_at": None,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "выгрузить мои данные",
+                        "created_at": f"{base}.322000+00:00",
+                    }
+                ],
+            },
         ],
     }
-    return "Ваши данные в формате JSON:\n\n" + json.dumps(
-        archive, ensure_ascii=False, indent=2
-    )
+    return "Ваши данные в формате JSON:\n\n" + json.dumps(archive, ensure_ascii=False, indent=2)
 
 
 # ---------------------------------------------------------------------------
@@ -149,24 +169,54 @@ class TestTheGuardStillGuards:
         assert "contact" in verdict.categories
         assert verdict.text == REPLACEMENT_TEXT
 
-    @pytest.mark.parametrize("phone", REAL_PHONES)
-    def test_a_real_phone_is_blocked_even_in_the_persons_own_data(self, phone: str) -> None:
-        """Послабление для своих данных НЕ отменяет охрану целиком.
+    def test_the_exemption_does_not_leak_into_ordinary_replies(self) -> None:
+        """Послабление действует ТОЛЬКО на том черновике, который его получил.
 
-        Архив человека может содержать чужой номер — например в тексте его же
-        сообщения, где он переписал телефон мастера. Признак «это свои данные»
-        снимает `contact` с МАШИННЫХ идентификаторов, а не разрешает выдать
-        чужой номер: шаблон, сработавший на человекочитаемом написании,
-        блокирует по-прежнему.
+        Обычный ответ навыка с номером внутри блокируется по-прежнему: признак
+        не глобальный переключатель, а поле одного результата.
         """
+        text = "Мастер просила передать: 8 999 123 45 67"
+
+        assert evaluate_outbound(text).allowed is False
+        # И тот же текст не становится разрешённым «за компанию» с выгрузкой:
+        # признак ставит только собирающий архив.
+        assert evaluate_outbound(text).categories == ("contact",)
+
+
+class TestWhatThePersonGetsInTheirOwnArchive:
+    """Решение объёма, названное вслух, а не спрятанное в коде.
+
+    Номер, написанный человекочитаемо ВНУТРИ собственной выгрузки, уходит
+    человеку вместе с архивом. Это следствие признака «это свои данные», и оно
+    не случайно:
+
+    * прятать такой номер значило бы повторить тот самый дефект, от которого
+      лист, но шире: 0.4% выгрузок ломались из-за UUID'ов, а «в истории есть
+      что-то похожее на телефон» — доля куда больше;
+    * человек получает то, что сам же и написал, и только себе: ответ уходит в
+      его собственный диалог;
+    * решение владельца, на которое ссылается шаблон («телефон клиента
+      исполнителю не передаётся ни в каком виде»), — про передачу МАСТЕРУ, а
+      не про доступ субъекта к своим данным по ст. 14.
+
+    Остаточный вопрос, который я оставляю владельцу и не решаю кодом молча: в
+    выгрузке может оказаться номер ТРЕТЬЕГО лица, который человек когда-то
+    переписал в чат. Он и так у него есть, но если владелец решит прятать — это
+    правка одной строки здесь, и тогда узел ниже поменяет знак.
+    """
+
+    @pytest.mark.parametrize("phone", REAL_PHONES)
+    def test_a_phone_inside_the_archive_reaches_the_person(self, phone: str) -> None:
         text = _archive_text(0x1234).replace(
             "выгрузить мои данные", f"выгрузить мои данные {phone}"
         )
 
         verdict = evaluate_outbound(text, subject_own_data=True)
 
-        assert verdict.allowed is False
-        assert "contact" in verdict.categories
+        assert verdict.allowed is True
+        assert verdict.text == text
+        # И это видно в журнале: не «тишина», а названный пропуск.
+        assert verdict.own_data_categories == ("contact",)
 
     def test_an_email_is_still_blocked(self) -> None:
         verdict = evaluate_outbound("напишите ей на masha@example.com")
@@ -205,10 +255,16 @@ class TestTheExportReachesThePerson:
 
         from apps.orchestrator.safety.gate import guard_outbound
 
-        text = f'  "id": "{UUIDS_READ_AS_PHONES[0][0]}",'
-        with caplog.at_level(logging.INFO, logger="apps.orchestrator.safety.gate"):
+        # Текст, где совпадение ПЕРЕЖИВАЕТ маскировку машинных идентификаторов:
+        # иначе снимать нечего и записи о пропуске не будет — и это правильно.
+        text = _archive_text(0x1234).replace(
+            "выгрузить мои данные", "выгрузить мои данные 8 999 123 45 67"
+        )
+        with caplog.at_level(logging.INFO):
             outcome = guard_outbound(
-                text, surface="max", subject_own_data=True,
+                text,
+                surface="max",
+                subject_own_data=True,
             )
 
         assert outcome.allowed is True

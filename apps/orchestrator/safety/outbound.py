@@ -317,6 +317,41 @@ def replacement_action_data() -> dict:
 CHECK_FAILED_CATEGORY = "check_failed"
 
 
+#: Машинные идентификаторы, которые НЕ являются человеческим текстом: UUID в
+#: каноническом виде и метка времени ISO-8601. Маскируются ДО проверки
+#: шаблонами (DRF-2435).
+#:
+#: Зачем: телефонный шаблон разрешает между группами цифр дефис и пробельные, а
+#: UUID — это шестнадцатеричные группы через дефис. Измерено: 4094 случайных
+#: UUID'а дают 4 ложных телефона (0.098% на UUID), а ответ экспорта личных
+#: данных, который состоит из UUID'ов и меток времени, блокировался в 0.4%
+#: случаев — примерно один запрос человека из 250 получал вместо своих данных
+#: рекомендательную подмену, и в журнале это выглядело как «заблокировали
+#: утечку контакта».
+#:
+#: Это ВТОРАЯ линия, а не замена первой (``subject_own_data`` ниже): даже если
+#: дорожка экспорта когда-нибудь исчезнет, шаблон не должен считать
+#: `8506-6664946` номером.
+_MACHINE_IDENTIFIERS = re.compile(
+    r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"
+    r"|\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?"
+)
+
+#: Чем заменяются: буквенный токен без цифр и без дефисов, чтобы маскировка не
+#: создала нового совпадения на стыке.
+_MASK = "�id�"
+
+#: Категория, которую снимает признак «это собственные данные человека».
+#: Ровно одна: остальные классы к своим данным относятся так же, как к любому
+#: другому тексту, и их послабление было бы не починкой, а дырой.
+_OWN_DATA_EXEMPT = ("contact",)
+
+
+def _machine_free(body: str) -> str:
+    """Тот же текст, но без машинных идентификаторов (DRF-2435)."""
+    return _MACHINE_IDENTIFIERS.sub(_MASK, body)
+
+
 @dataclass(frozen=True)
 class OutboundVerdict:
     """Whether the drafted reply may be sent, and what to send instead."""
@@ -324,18 +359,38 @@ class OutboundVerdict:
     allowed: bool
     text: str
     categories: tuple[str, ...] = field(default_factory=tuple)
+    #: Категории, которые ЗАБЛОКИРОВАЛИ БЫ ответ, но сняты признаком «это
+    #: собственные данные человека» (DRF-2435). Пусто в обычном случае. Нужны
+    #: журналу: «заблокировали чужой контакт» и «это свои данные, пропускаем» —
+    #: разные записи, и различать их обязан тот, кто читает журнал потом.
+    own_data_categories: tuple[str, ...] = field(default_factory=tuple)
 
     @property
     def blocked(self) -> bool:
         return not self.allowed
 
 
-def evaluate_outbound(text: str) -> OutboundVerdict:
+def evaluate_outbound(text: str, *, subject_own_data: bool = False) -> OutboundVerdict:
     """Check a drafted reply before it reaches a person.
 
     Returns the original text when clean, and :data:`REPLACEMENT_TEXT` when
     not — whether "not" means a category matched or the check could not run
     at all. Never raises: a crash here must not propagate into the turn.
+
+    ``subject_own_data`` (DRF-2435) — этот черновик есть собственные данные
+    человека, отданные ему по его же просьбе (ответ выгрузки по ст. 14
+    152-ФЗ). Тогда класс ``contact`` к нему не применяется: его телефон в его
+    выгрузке — не утечка чужого контакта, а предмет запроса.
+
+    Признак приходит ОТ МЕСТА, ГДЕ АРХИВ СОБИРАЕТСЯ
+    (``SkillResult.subject_own_data``), и не выводится из формы текста.
+    Угадывание по форме было бы тем же шаблоном с другой стороны и ошибалось
+    бы так же — этот лист начался именно с такой ошибки.
+
+    Послабление узкое: снимается ровно ``contact`` (см. ``_OWN_DATA_EXEMPT``),
+    и только для этого черновика. Чужой номер, написанный в выгрузке
+    человекочитаемо, блокируется по-прежнему — маскируются лишь машинные
+    идентификаторы.
     """
 
     body = text or ""
@@ -346,9 +401,17 @@ def evaluate_outbound(text: str) -> OutboundVerdict:
         return OutboundVerdict(allowed=True, text=body)
 
     hits: list[str] = []
+    exempt: list[str] = []
     try:
+        # Проверяется текст БЕЗ машинных идентификаторов, а отдаётся исходный:
+        # маскировка — это про то, на что смотрит шаблон, а не про то, что
+        # получит человек.
+        probe = _machine_free(body)
         for label, patterns in _CATEGORIES:
-            if any(re.search(p, body) for p in patterns):
+            if any(re.search(p, probe) for p in patterns):
+                if subject_own_data and label in _OWN_DATA_EXEMPT:
+                    exempt.append(label)
+                    continue
                 hits.append(label)
     except Exception:  # noqa: BLE001 — a crash must not raise into the turn
         # The check did not run, so nothing is known about this draft.
@@ -380,12 +443,31 @@ def evaluate_outbound(text: str) -> OutboundVerdict:
         )
 
     if not hits:
-        return OutboundVerdict(allowed=True, text=body)
+        if exempt:
+            # DRF-2435 — отдельная запись, а не тишина: «заблокировали чужой
+            # контакт» и «это собственные данные человека, пропускаем» должны
+            # различаться в журнале. Слепой журнал — то, что молчало три года,
+            # пока подмена ответа выглядела как сработавшая охрана.
+            logger.info(
+                "safety.outbound.own_data_passed categories=%s len=%d",
+                ",".join(exempt),
+                len(body),
+            )
+        return OutboundVerdict(
+            allowed=True,
+            text=body,
+            own_data_categories=tuple(exempt),
+        )
 
     # Category only. Logging the sentence would copy the thing we just
     # decided not to show anyone.
     logger.warning("safety.outbound.blocked categories=%s len=%d", ",".join(hits), len(body))
-    return OutboundVerdict(allowed=False, text=REPLACEMENT_TEXT, categories=tuple(hits))
+    return OutboundVerdict(
+        allowed=False,
+        text=REPLACEMENT_TEXT,
+        categories=tuple(hits),
+        own_data_categories=tuple(exempt),
+    )
 
 
 # --------------------------------------------------------------------------- #

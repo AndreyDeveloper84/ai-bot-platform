@@ -3607,7 +3607,16 @@ def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | N
     # but the same person on the other end, and a KB-driven answer is model
     # text like any other. No crisis exemption is needed here: the inbound
     # short-circuit above returns before reaching this line.
-    _guarded = guard_outbound(reply_text, surface="max", bot_user=bot_user, trace_id=trace_id)
+    _guarded = guard_outbound(
+        reply_text,
+        surface="max",
+        bot_user=bot_user,
+        trace_id=trace_id,
+        # DRF-2435 — признак едет от навыка, собравшего архив, а не от формы
+        # текста. Ответ выгрузки — собственные данные человека, и класс
+        # `contact` к ним не применяется.
+        subject_own_data=bool(skill_result is not None and skill_result.subject_own_data),
+    )
     if _guarded.blocked:
         reply_text = _guarded.text
         action_type = OUTBOUND_ACTION_TYPE
