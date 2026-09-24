@@ -71,7 +71,14 @@ type FlowState =
 interface ProfileDraft {
   bio: string;
   photo: File | null;
-  /** Local preview URL — set after the user picks a file. Revoked on unmount. */
+  /** Local preview URL — показывается на шаге 3.
+   *
+   * Освобождением ведает НЕ это поле, а `previewUrlRef` (DRF-2394): оно
+   * держит то же значение и переживает рендеры. Инвариант, на котором всё
+   * держится: `photoPreview` пишется ровно в двух местах — `EMPTY_DRAFT`
+   * и `handlePhotoPick`. Появится третье (сброс черновика, очистка после
+   * отправки) — ссылка разойдётся с состоянием, и освобождать станет
+   * нечего. Тогда писать надо оба или убирать поле. */
   photoPreview: string | null;
 }
 
@@ -204,12 +211,37 @@ export function MasterOnboardingScreen() {
       );
   useClosingConfirmation(step3Dirty);
 
-  // Cleanup the local photo-preview blob URL.
+  // Адрес превью: ВЛАДЕЕТ ЭКРАН, и владение названо ссылкой (DRF-2394).
+  //
+  // Было два дефекта, и второй не виден глазами.
+  //
+  // (а) Очистка объявлялась с пустыми зависимостями и читала
+  //     `draft.photoPreview` из ПЕРВОГО рендера, где превью ещё нет.
+  //     Последний выбранный адрес не освобождался никогда.
+  //
+  //     Уточнение, найденное ревью: «один адрес на посещение экрана» —
+  //     тоже неверно, и это была уже МОЯ неточность, не листа. Под
+  //     `StrictMode` каждый выбор оставлял сироту (см. (б)), так что
+  //     терялось по адресу НА ВЫБОР плюс последний удержанный. Верно
+  //     одно: освобождение СОХРАНЁННОГО адреса при новом выборе работало
+  //     и до листа — не работало всё остальное.
+  //
+  // (б) Создание и освобождение стояли ВНУТРИ `setDraft((prev) => …)` —
+  //     побочный эффект в функции, обязанной быть чистой. Приложение
+  //     обёрнуто в `StrictMode` (`main.tsx`), который такие функции зовёт
+  //     дважды: один выбор создавал ДВА адреса и сохранял один. Замер
+  //     узлом: `['blob:test/1', 'blob:test/2']` живыми после одного
+  //     выбора.
+  //
+  // Ссылка чинит обе половины сразу: адрес создаётся один раз снаружи
+  // обновления, а очистка при уходе читает ТЕКУЩЕЕ значение, а не снимок
+  // первого рендера, — поэтому пустые зависимости здесь верны.
+  const previewUrlRef = useRef<string | null>(null);
   useEffect(() => {
     return () => {
-      if (draft.photoPreview) URL.revokeObjectURL(draft.photoPreview);
+      if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
+      previewUrlRef.current = null;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- DRF-2394: очистка читает `draft.photoPreview` из первого рендера, где превью ещё нет, — адрес не освобождается. Дефект назван листом, правка поведения не входит в DRF-2391
   }, []);
 
   // Initial claim call.
@@ -267,14 +299,12 @@ export function MasterOnboardingScreen() {
   // --- Step 3: photo + submit ---------------------------------------------
 
   const handlePhotoPick = useCallback((file: File | null) => {
-    setDraft((prev) => {
-      if (prev.photoPreview) URL.revokeObjectURL(prev.photoPreview);
-      return {
-        ...prev,
-        photo: file,
-        photoPreview: file ? URL.createObjectURL(file) : null,
-      };
-    });
+    // Эффекты — СНАРУЖИ обновления состояния (DRF-2394 б): внутри их
+    // удваивал `StrictMode`.
+    const next = file ? URL.createObjectURL(file) : null;
+    if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
+    previewUrlRef.current = next;
+    setDraft((prev) => ({ ...prev, photo: file, photoPreview: next }));
   }, []);
 
   const onBioChange = useCallback((next: string) => {

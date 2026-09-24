@@ -20,7 +20,7 @@
  * Pulsing dot animation respects `prefers-reduced-motion` via CSS.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
 import {
@@ -72,16 +72,25 @@ export function FoodScannerProcessingScreen() {
   const abortRef = useRef<AbortController | null>(null);
   const cancelTimerRef = useRef<number | null>(null);
   const timeoutTimerRef = useRef<number | null>(null);
-  const previewUrl = useMemo(
-    () => (photo ? URL.createObjectURL(photo) : null),
-    [photo],
-  );
-
+  // Адрес превью создаётся и освобождается В ОДНОМ эффекте (DRF-2399).
+  //
+  // Здесь был `useMemo`, и это та же половина дефекта, что вычищена на
+  // экране результата: `StrictMode` зовёт фабрику дважды, оставляет второе
+  // значение, а очистка отзывает именно его — адрес в `src` мёртв, пока
+  // экран смонтирован, а первый утекает насовсем. Форма ниже делает это
+  // невозможным: одна живая подписка — один адрес, и отзывает его она же.
+  //
+  // Цена названа: превью появляется на один коммит позже.
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   useEffect(() => {
-    return () => {
-      if (previewUrl) URL.revokeObjectURL(previewUrl);
-    };
-  }, [previewUrl]);
+    if (!photo) {
+      setPreviewUrl(null);
+      return;
+    }
+    const url = URL.createObjectURL(photo);
+    setPreviewUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [photo]);
 
   const cancel = useCallback(() => {
     abortRef.current?.abort();
@@ -122,7 +131,10 @@ export function FoodScannerProcessingScreen() {
         if (controller.signal.aborted) return;
         navigate("/customer/food-scanner/result", {
           replace: true,
-          state: { result, photo, mealType, previewUrl, returnTo: state.returnTo },
+          // `previewUrl` НЕ передаётся (DRF-2399): адресом владеет тот,
+          // кто рисует. Экран результата получает файл и делает свой —
+          // иначе адрес переживал бы владельца и умирал у чужого экрана.
+          state: { result, photo, mealType, returnTo: state.returnTo },
         });
       } catch (err) {
         if (controller.signal.aborted) return;
