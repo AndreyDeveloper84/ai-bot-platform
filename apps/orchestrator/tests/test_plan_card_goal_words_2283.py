@@ -147,6 +147,11 @@ class TestTheCardCarriesNoLabelOfOurs:
         text = plan_lite_card.render_plan_lite_card(_plan(), words=WORDS)
 
         first = text.splitlines()[0]
+        # Утверждение о наличии — раньше утверждений об отсутствии: строка
+        # есть и несёт слова человека. Иначе «нашего ярлыка нет» было бы
+        # правдой и о пустой строке, и ноль ярлыков стал бы неотличим от
+        # ноля строки.
+        assert WORDS in first, first
         for ours in ("Твоя цель", "Ваша цель", "Цель:", "Цель —"):
             assert ours not in first, ours
         assert not first.endswith("."), first
