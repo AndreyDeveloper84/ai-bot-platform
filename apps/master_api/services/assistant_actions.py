@@ -55,7 +55,7 @@ import logging
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, Final
 
 from django.core.signing import BadSignature, SignatureExpired, TimestampSigner
 from django.db import transaction
@@ -117,6 +117,33 @@ _MONTHS_RU = (
 
 #: Текст, который видит мастер после успешного подтверждения.
 DONE_TEXT = "Готово. Заявка отправлена администратору салона."
+
+
+#: Слаги, при которых повтор ТОГО ЖЕ подтверждения может пройти (DRF-2373).
+#:
+#: Набор маленький и перечислен явно, потому что **умолчание здесь —
+#: «повторять нечем»**, и это направление выбрано нарочно. Ошибиться можно в
+#: обе стороны, и цены у ошибок разные:
+#:
+#: * назвали временный отказ окончательным — человек спросит заново; досадно,
+#:   но честно;
+#: * назвали окончательный временным — на экране остаётся кнопка, которая
+#:   **не может** сработать ни в этот раз, ни в следующий. Это не отсутствие
+#:   выхода, а нарисованный выход, которого нет.
+#:
+#: Поэтому неизвестный слаг считается окончательным.
+#:
+#: ``action_rejected`` — единственный живой случай: талон цел, отказало само
+#: исполнение (салон отклонил заявку, запись не создалась). Остальные
+#: (``action_expired`` / ``action_invalid`` / ``action_not_yours``) означают,
+#: что **мёртв сам талон**: его аргументы внутри подписи, и второй нажим
+#: пошлёт ровно то же самое.
+RETRIABLE_ACTION_SLUGS: Final[frozenset[str]] = frozenset({"action_rejected"})
+
+
+def is_retriable(slug: str) -> bool:
+    """Может ли повтор этого же подтверждения пройти. Неизвестное — нет."""
+    return slug in RETRIABLE_ACTION_SLUGS
 
 
 class ActionError(Exception):
@@ -825,10 +852,12 @@ __all__ = [
     "ACTION_SPECS",
     "ACTION_TOKEN_TTL_SECONDS",
     "DONE_TEXT",
+    "RETRIABLE_ACTION_SLUGS",
     "ActionError",
     "ExecutedAction",
     "ProposedAction",
     "execute",
     "is_action",
+    "is_retriable",
     "propose",
 ]

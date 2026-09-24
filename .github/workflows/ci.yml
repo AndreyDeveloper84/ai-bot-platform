@@ -550,6 +550,21 @@ jobs:
       - name: Mini App schedule-confirmation vocabulary
         run: uv run python tools/lint/schedule_vocabulary_guard.py apps/miniapp
 
+      # Отказ сервера доезжает до экрана целиком (DRF-2373). `ApiError`
+      # умеет нести `details`, и клиенты его роняли — чинили ТРИЖДЫ
+      # поодиночке: `api.ts` (DRF-1708), `admin-api.ts` (DRF-2273),
+      # `master-api.ts` (DRF-2373). Один дефект, три листа, три года:
+      # каждый раз чинили место, а не правило. Дефект невидим по
+      # построению — уронивший клиент работает, экран просто не знает
+      # того, что сервер сказал, и ни типы, ни прогон этого не ловят.
+      # Сторож судит по РОЛИ вызова: третий аргумент вида `<x>.detail`
+      # значит разобранное тело отказа, и `<x>.details` обязателен;
+      # ошибка, придуманная на месте из литералов, освобождена самим
+      # правилом, а не именем в списке. Непочиненные места перечислены
+      # числом в `api_error_details_allow.txt` и только сокращаются.
+      - name: Mini App ApiError details contract
+        run: uv run python tools/lint/api_error_details_guard.py apps/miniapp
+
       # Personal-field owner guard (DRF-1365). The memory audit of
       # 2026-08-24 returned «C — multiple competing memory systems»: six
       # stores holding facts about the same person, none of them designed
