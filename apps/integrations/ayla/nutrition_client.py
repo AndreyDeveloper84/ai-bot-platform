@@ -1314,6 +1314,12 @@ class NutritionClient:
             )
         raise self._meal_edit_refusal(resp, now=now)
 
+    #: Ниже этого тело не может быть фотографией еды: самый маленький
+    #: настоящий снимок на стенде — 36 КБ, пустышки замера 25.09 — сотни
+    #: байт. Порог грубый намеренно: он отделяет «файл есть» от «файла нет
+    #: по существу», а не сортирует снимки по качеству.
+    MIN_PHOTO_RESPONSE_BYTES = 1024
+
     #: Верхняя граница тела снимка. Вход ограничен 10 MiB
     #: (``MAX_PHOTO_BYTES``), и ответ каталога больше этого — признак
     #: беды, а не большой фотографии.
@@ -1361,10 +1367,20 @@ class NutritionClient:
         if resp.status_code == 200:
             self._circuit.record_success()
             content_type = resp.headers.get("Content-Type", "application/octet-stream")
-            if not resp.content:
-                # Пустое тело с кодом 200 поверхность прочитала бы как
+            if len(resp.content) < self.MIN_PHOTO_RESPONSE_BYTES:
+                # Пустое или почти пустое тело поверхность прочитала бы как
                 # «фото есть, но сломано». Для неё это «снимка нет».
-                logger.warning("nutrition_client.food_photo.empty_body ext=%s", external_user_id)
+                #
+                # Не теория: замер стенда 25.09 нашёл три живые записи из
+                # пятнадцати, чей объект существует и весит несколько сотен
+                # байт. Каталог такие уже не отдаёт, но полагаться на одну
+                # сторону нельзя — байты приходят сюда, и решение о показе
+                # принимается здесь.
+                logger.warning(
+                    "nutrition_client.food_photo.too_small ext=%s size=%d",
+                    external_user_id,
+                    len(resp.content),
+                )
                 return None
             if len(resp.content) > self.MAX_PHOTO_RESPONSE_BYTES:
                 # Размеру, который назвал каталог, не доверяем: один

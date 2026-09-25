@@ -776,8 +776,12 @@ class TestFoodPhoto2455:
     @pytest.mark.asyncio
     async def test_a_photo_comes_back_with_its_type(self) -> None:
         def handler(_: httpx.Request) -> httpx.Response:
+            # Тело правдоподобного размера: сотни байт код считает
+            # пустышкой (замер стенда 25.09), и стенд обязан это повторять.
             return httpx.Response(
-                200, content=b"\x89PNG\r\n\x1a\nbody", headers={"Content-Type": "image/png"}
+                200,
+                content=b"\x89PNG\r\n\x1a\n" + bytes(40_000),
+                headers={"Content-Type": "image/png"},
             )
 
         client, transport = _client_with_handler(handler)
@@ -802,7 +806,12 @@ class TestFoodPhoto2455:
 
     @pytest.mark.asyncio
     async def test_an_empty_body_is_not_a_photo(self) -> None:
-        """200 с пустым телом экран прочитал бы как «фото есть, но сломано»."""
+        """200 с пустым телом экран прочитал бы как «фото есть, но сломано».
+
+        Частный случай порога ``MIN_PHOTO_RESPONSE_BYTES``; оставлен
+        отдельно, потому что нулевое тело приходит по другой причине —
+        объект удалён, а ответ собран.
+        """
 
         def handler(_: httpx.Request) -> httpx.Response:
             return httpx.Response(200, content=b"", headers={"Content-Type": "image/jpeg"})
@@ -811,6 +820,43 @@ class TestFoodPhoto2455:
         _set_transport(transport)
 
         assert await client.food_photo(external_user_id="bot:1", log_id="log-1") is None
+
+    @pytest.mark.asyncio
+    async def test_a_few_hundred_bytes_are_not_a_photo(self) -> None:
+        """Замер стенда 25.09: три живые записи из пятнадцати ссылались на
+        объект в несколько сотен байт. Отдать их — показать битую картинку
+        вместо честного «снимка нет»."""
+
+        def handler(_: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                content=b"x" * 379,
+                headers={"Content-Type": "image/jpeg"},
+            )
+
+        client, transport = _client_with_handler(handler)
+        _set_transport(transport)
+
+        assert await client.food_photo(external_user_id="bot:1", log_id="log-1") is None
+
+    @pytest.mark.asyncio
+    async def test_a_real_sized_body_passes(self) -> None:
+        """Положительная пара: порог не отсекает настоящий снимок."""
+
+        def handler(_: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                content=bytes(40_000),
+                headers={"Content-Type": "image/jpeg"},
+            )
+
+        client, transport = _client_with_handler(handler)
+        _set_transport(transport)
+
+        photo = await client.food_photo(external_user_id="bot:1", log_id="log-1")
+
+        assert photo is not None
+        assert len(photo[0]) == 40_000
 
     @pytest.mark.asyncio
     async def test_an_oversized_body_is_refused(self) -> None:
