@@ -267,19 +267,25 @@ class TestApplyClearsOnlyTheProvenFalse:
     идемпотентность, и довериться устаревшему вердикту переписи.
     """
 
-    def test_a_cancelled_stamp_is_cleared_and_logged_before_after(self, tenant, caplog) -> None:
+    def test_a_cancelled_stamp_is_cleared_and_logged_before_after(
+        self, tenant, caplog, tmp_path
+    ) -> None:
         import logging
 
         booking = _stamped(tenant, _customer(tenant, "clear"), mirror_status="cancelled")
         was_at, was_by = booking.completed_at, booking.completed_by
         assert was_at is not None and was_by == "system"  # положительно: было что снимать
+        # Снятие требует свидетельства КАНОНА — зеркала недостаточно (см. узел
+        # ``test_apply_refuses_to_clear_on_mirror_only_evidence``).
+        canon = tmp_path / "canon.txt"
+        canon.write_text(f"{booking.pk} cancelled\n", encoding="utf-8")
 
         logger_name = "apps.booking.management.commands.audit_false_completions"
         target = logging.getLogger(logger_name)
         target.addHandler(caplog.handler)
         try:
             with caplog.at_level(logging.WARNING, logger=logger_name):
-                text = _run("--apply")
+                text = _run("--canon-file", str(canon), "--apply")
         finally:
             target.removeHandler(caplog.handler)
 
@@ -291,10 +297,12 @@ class TestApplyClearsOnlyTheProvenFalse:
         assert "booking.false_completion.cleared" in caplog.text
         assert "before_completed_by='system'" in caplog.text
 
-    def test_awaiting_payment_is_a_candidate_too(self, tenant) -> None:
+    def test_awaiting_payment_is_a_candidate_too(self, tenant, tmp_path) -> None:
         booking = _stamped(tenant, _customer(tenant, "pay"), mirror_status="pending_payment")
+        canon = tmp_path / "canon.txt"
+        canon.write_text(f"{booking.pk} awaiting_payment\n", encoding="utf-8")
 
-        _run("--apply")
+        _run("--canon-file", str(canon), "--apply")
 
         booking.refresh_from_db()
         assert booking.completed_at is None
@@ -358,11 +366,13 @@ class TestApplyClearsOnlyTheProvenFalse:
         assert event.is_dispatched is False  # очередь не разобрана
         assert DomainEvent.objects.count() == events_before  # и ничего не добавлено
 
-    def test_a_second_apply_is_a_no_op(self, tenant) -> None:
+    def test_a_second_apply_is_a_no_op(self, tenant, tmp_path) -> None:
         booking = _stamped(tenant, _customer(tenant, "idem"), mirror_status="cancelled")
+        canon = tmp_path / "canon.txt"
+        canon.write_text(f"{booking.pk} cancelled\n", encoding="utf-8")
 
-        first = _run("--apply")
-        second = _run("--apply")
+        first = _run("--canon-file", str(canon), "--apply")
+        second = _run("--canon-file", str(canon), "--apply")
 
         booking.refresh_from_db()
         assert "снято штампов: 1" in first
@@ -628,6 +638,44 @@ class TestTheLiveCanonIsTheStrongestEvidence:
         # Файл говорил completed, живой канон говорит cancelled — верх живого.
         assert "false_by_canon:canon_cancelled" in text
         assert "legitimate:canon_completed" not in text
+
+    def test_apply_refuses_to_clear_on_mirror_only_evidence(self, tenant) -> None:
+        """Снимать можно только по канону, даже когда зеркало говорит ПРОТИВ штампа.
+
+        Число, которым это возражается: замер 25.09 нашёл шесть визитов,
+        завершённых каноном, чьи письма ``booking.completed`` мертвы — зеркало у них
+        стоит на ``confirmed``. Правило «зеркало не completed → ложный» сняло бы до
+        шести законных штампов. Плюс ``confirmed`` бот местами пишет себе сам
+        константой, то есть это не свидетельство канона вовсе.
+        """
+        booking = _stamped(tenant, _customer(tenant, "mirror-only"), mirror_status="cancelled")
+
+        text = _run("--apply")
+
+        booking.refresh_from_db()
+        assert "ложных по канону (false_by_canon): 1" in text  # в отчёте назван
+        assert "свидетельство не от канона" in text  # и назван отказ снимать
+        assert booking.completed_at is not None  # штамп на месте
+        assert "снято штампов: 0" in text
+
+    def test_apply_clears_the_same_row_once_the_canon_confirms_the_cancellation(
+        self, tenant, monkeypatch
+    ) -> None:
+        """Положительная половина: с каноном та же строка снимается."""
+        customer = _customer(tenant, "mirror-then-canon")
+        booking = _stamped(tenant, customer, mirror_status="cancelled")
+        appointment_id = str(
+            RemoteBookingProxy.all_tenants.filter(bot_user=customer)
+            .values_list("appointment_id", flat=True)
+            .first()
+        )
+        self._stub(monkeypatch, {appointment_id: "cancelled"})
+
+        text = _run("--canon", "--apply")
+
+        booking.refresh_from_db()
+        assert booking.completed_at is None
+        assert "снято штампов: 1" in text
 
     def test_a_row_with_two_mirrors_is_not_asked_about(self, tenant, monkeypatch) -> None:
         """Ключ неточен — канон не спрашивается, и строка остаётся недоказуемой."""
