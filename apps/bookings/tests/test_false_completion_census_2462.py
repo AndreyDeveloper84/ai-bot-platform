@@ -15,6 +15,11 @@
 * ноль **доказан охватом**: на пустой выборке команда говорит, что нули ничего не
   доказывают;
 * команда **ничего не меняет** — ни штампов, ни статусов, ни очереди.
+
+``event_id`` строится тем же ``new_ulid()``, что и продакшн: колонка — 26 символов,
+и Postgres это требование держит, а локальный SQLite молчит. Первая версия писала
+``uuid4`` (36 символов) и была зелёной локально, красной в CI — предмет проверки
+здесь очередь, и фикстура обязана быть такой же длины, как живая строка.
 """
 
 from __future__ import annotations
@@ -29,6 +34,7 @@ from django.utils import timezone
 
 from apps.booking.models import BookingRequest, RemoteBookingProxy
 from apps.eventbus.models import DomainEvent
+from apps.eventbus.ulid import new_ulid
 from apps.identity.models import BotUser
 from apps.tenancy.models import Tenant
 
@@ -172,7 +178,7 @@ class TestTheQueueIsNamed:
         booking = _stamped(tenant, _customer(tenant, "queued"), mirror_status="cancelled")
         for dispatched in (False, True):
             DomainEvent.objects.create(
-                event_id=str(uuid.uuid4()),
+                event_id=new_ulid(),
                 event_name="booking.completed",
                 event_version="1.0.0",
                 occurred_at=timezone.now(),
@@ -191,7 +197,7 @@ class TestTheQueueIsNamed:
     def test_events_of_legitimate_rows_are_not_counted(self, tenant) -> None:
         booking = _stamped(tenant, _customer(tenant, "ok"), mirror_status="completed")
         DomainEvent.objects.create(
-            event_id=str(uuid.uuid4()),
+            event_id=new_ulid(),
             event_name="booking.completed",
             event_version="1.0.0",
             occurred_at=timezone.now(),
