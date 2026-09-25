@@ -23,6 +23,7 @@
 import { useNavigate } from "react-router-dom";
 
 import { ComingSoonCard } from "../components/ComingSoonCard";
+import { CustomerAvatarEntry } from "../components/CustomerAvatarEntry";
 import { CustomerTabBar, type CustomerTabKey } from "../components/CustomerTabBar";
 import { useScreenBack } from "../hooks/useScreenBack";
 import { screenRoot } from "../lib/screen-back";
@@ -80,6 +81,10 @@ export function PilotComingSoonScreen({ surface }: Props) {
     <div className="profile-screen">
       <header className="records-screen__header">
         <h1 className="records-screen__title">{copy.title}</h1>
+        {/* Вход в профиль — §77 п.60. Стоит на всех экранах нижней
+            панели: вход, который есть не везде, читается как «иногда
+            можно». Имя компонент берёт сам — у этого экрана его нет. */}
+        <CustomerAvatarEntry />
       </header>
 
       <main className="profile-screen__main">

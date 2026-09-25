@@ -157,7 +157,7 @@ import {
   type CatalogBrowseData,
 } from "../lib/customer-booking";
 import { aylaPicksShelfOn } from "../lib/ayla-picks-shelf";
-import { avatarInitials } from "../lib/customer-profile";
+import { CustomerAvatarEntry } from "../components/CustomerAvatarEntry";
 import { StatusBadge } from "../components/StatusBadge";
 import { CustomerTabBar } from "../components/CustomerTabBar";
 import { UnbookableBadge } from "../components/UnbookableNote";
@@ -741,10 +741,13 @@ export function CustomerWellnessDashboardScreen() {
           {/* Фотографии клиента нет ни в одном контракте — ни у
               `wellness/today`, ни у `/me`. Новой сущности под Д1 не
               заводим: `avatarInitials` уже рисует кружок на профиле
-              клиента, и «·» — его же ответ на «имени нет». */}
-          <span className="wellness-dash__avatar" aria-hidden="true">
-            {avatarInitials(displayName)}
-          </span>
+              клиента, и «·» — его же ответ на «имени нет».
+              §77 п.60 — кружок стал ВХОДОМ в профиль и уехал в общий
+              компонент: он должен быть одинаков на всех экранах панели,
+              а не только здесь. Имя передаём своё — оно уже пришло с
+              `wellness/today`, и второй источник того же имени дал бы
+              расхождение в момент загрузки. */}
+          <CustomerAvatarEntry displayName={displayName} />
           <span className="wellness-dash__person-text">
             {/* Пока день грузится, имени ещё нет — и раньше строка просто
                 отсутствовала, отчего «Рада вас видеть!» прыгала внутри

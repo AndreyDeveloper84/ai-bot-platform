@@ -22,6 +22,7 @@
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { primeDisplayName } from "../components/CustomerAvatarEntry";
 
 vi.mock("../lib/customer-wellness", async (importOriginal) => {
   const original =
@@ -46,6 +47,14 @@ import {
 } from "../lib/customer-wellness";
 import { ApiError } from "../lib/api";
 import { FoodScannerDiaryScreen } from "./FoodScannerDiaryScreen";
+
+// Дверь в профиль (`CustomerAvatarEntry`) без пропа спрашивает имя у
+// `/me`. Этот набор ручку не подменяет, поэтому имя засевается явно:
+// иначе в прогоне живёт неподменённый сетевой вызов и асинхронное
+// обновление, которое может прилететь посреди чужого теста (DRF-2523).
+beforeEach(() => {
+  primeDisplayName("Тест Тестов");
+});
 
 const mockedLoad = vi.mocked(loadDiaryToday);
 

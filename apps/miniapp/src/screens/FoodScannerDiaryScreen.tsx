@@ -39,6 +39,7 @@ import { minutesRu, restoreWindowMinutesLeft } from "../lib/restore-window";
 import { saveMealFromEntry } from "../lib/saved-meals";
 import { useScreenBack } from "../hooks/useScreenBack";
 import { screenRoot } from "../lib/screen-back";
+import { CustomerAvatarEntry } from "../components/CustomerAvatarEntry";
 import { CustomerTabBar } from "../components/CustomerTabBar";
 import { FAVORITES_COPY, FAVORITES_ROUTE, favoritesRefusalText } from "./FoodScannerFavoritesScreen";
 import { WEEK_COPY, WEEK_ROUTE } from "./FoodScannerWeekScreen";
@@ -250,6 +251,10 @@ export function FoodScannerDiaryScreen() {
     <div className="food-scanner-screen food-scanner-screen--tab-root">
       <header className="records-screen__header">
         <h1 className="records-screen__title">Питание</h1>
+        {/* Вход в профиль — §77 п.60. Стоит на всех экранах нижней
+            панели: вход, который есть не везде, читается как «иногда
+            можно». Имя компонент берёт сам — у этого экрана его нет. */}
+        <CustomerAvatarEntry />
       </header>
 
       <main className="food-scanner-screen__main">
