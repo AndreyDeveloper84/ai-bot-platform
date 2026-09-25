@@ -3,14 +3,17 @@
 Часовой детектор до DRF-2454 ключевался на ``BookingRequest.status``, которую не
 двигает ни одно входящее событие, и штамповал ``completed_at`` визитам, которые
 канон уже отменил. Производство остановлено (#2072 слит), остались **поставленные**
-штампы. Эта команда их **считает и разбирает по состояниям канона**; она ничего не
-меняет вовсе — ни в сухом прогоне, ни как-либо иначе.
+штампы. Эта команда их **считает и разбирает по состояниям канона**, а по
+отдельному решению владельца — снимает у доказанно ложных.
 
-# Почему только чтение
+# Сухой прогон по умолчанию, ``--apply`` — по слову владельца
 
-Снимать штамп — решение владельца, и скрипт для него готовит главное окно
-(``--apply`` здесь нет намеренно: команда, которая умеет писать, однажды
-запускается с флагом «посмотреть» и без него). Здесь только предъявление факта.
+Умолчание — чтение: числа, разбивка, очередь, ничего не меняется. ``--apply``
+снимает ``completed_at`` и ``completed_by`` **только** у корзины ``false_by_canon``
+и ничего больше. Гейт здесь человеческий, а не технический: это коррекция боевых
+данных, и запускает её владелец своим решением (DRF-2462, этап 7 промпта). Команда
+отвечает за другое — она **не умеет** тронуть законную строку, недоказуемую строку,
+чужое поле или очередь событий.
 
 # Три корзины, и признак законности назван
 
@@ -63,10 +66,13 @@
 
 from __future__ import annotations
 
+import logging
 from collections import Counter
 from typing import Any
 
 from django.core.management.base import BaseCommand
+
+logger = logging.getLogger(__name__)
 
 #: Состояния зеркала, при которых поставленный штамп — ложный.
 from apps.bookings.completion_evidence import MIRROR_REFUSES  # noqa: E402
@@ -113,7 +119,8 @@ def _classify(booking: Any) -> tuple[str, str]:
 class Command(BaseCommand):
     help = (
         "Перепись поставленных ложных штампов завершения: разбивка по состояниям "
-        "канона и по очереди событий. Только чтение — ничего не меняет."
+        "канона и по очереди событий. Сухой прогон по умолчанию; --apply снимает "
+        "штампы ТОЛЬКО у корзины false_by_canon и только по решению владельца."
     )
 
     def add_arguments(self, parser) -> None:
@@ -126,6 +133,14 @@ class Command(BaseCommand):
             "--ids",
             action="store_true",
             help="печатать id строк корзины false_by_canon (для согласования уборки)",
+        )
+        parser.add_argument(
+            "--apply",
+            action="store_true",
+            help=(
+                "снять completed_at/completed_by у строк false_by_canon. Только по "
+                "отдельному решению владельца: это коррекция боевых данных"
+            ),
         )
 
     def handle(self, *args, **options) -> None:
@@ -203,5 +218,83 @@ class Command(BaseCommand):
             w("id строк false_by_canon (для согласования уборки):")
             for booking in false_rows:
                 w(f"  {booking.pk} · {booking.tenant.slug} · визит {booking.visit_at.isoformat()}")
+
+        if not options["apply"]:
+            w("")
+            w(
+                "сухой прогон: ничего не изменено. Снятие — тем же вызовом с --apply, "
+                "и только по отдельному решению владельца."
+            )
+            return
+
+        # Коррекция боевых данных. Число кандидатов напечатано ВЫШЕ, до первой
+        # записи: оператор видит, что берётся, а не узнаёт после.
         w("")
-        w("снятие штампов здесь не делается: это решение владельца и отдельный скрипт.")
+        w(f"ЗАПИСЬ (--apply): кандидатов {len(false_rows)}")
+        cleared, skipped = self._clear(false_rows, w)
+        w("")
+        w(f"снято штампов: {cleared} · пропущено (строка изменилась): {skipped}")
+        w(
+            "производные показатели (счётчик визитов мастера, «последняя услуга») "
+            "пересчитываются из источника сами: они читают completed_at запросом, "
+            "а не хранят копию."
+        )
+
+    @staticmethod
+    def _clear(false_rows: list[Any], w: Any) -> tuple[int, int]:
+        """Снять штамп у названных строк — по одной, под блокировкой, с перепроверкой.
+
+        Три свойства, каждое по своей причине:
+
+        * **перепроверка под блокировкой.** Между переписью и записью строка могла
+          измениться (мастер подтвердил визит, зеркало доехало). Классификация
+          повторяется внутри транзакции на свежей строке, и если она больше не
+          ``false_by_canon`` — строка **пропускается**, а не чистится по устаревшему
+          вердикту;
+        * **идемпотентность по построению.** Область команды — строки со штампом;
+          снятая строка в неё больше не попадает, поэтому повторный прогон ничего
+          не находит и ничего не делает. Это свойство запроса, а не флага;
+        * **before/after в журнал.** Коррекция боевых данных обязана оставлять след:
+          что было, что стало и по какой причине строка признана ложной.
+        """
+
+        from django.db import transaction
+
+        from apps.booking.models import BookingRequest
+
+        cleared = 0
+        skipped = 0
+        for row in false_rows:
+            with transaction.atomic():
+                fresh = (
+                    BookingRequest.all_tenants.select_for_update()
+                    .filter(pk=row.pk, completed_at__isnull=False)
+                    .first()
+                )
+                if fresh is None:
+                    skipped += 1
+                    continue
+                bucket, reason = _classify(fresh)
+                if bucket != BUCKET_FALSE:
+                    w(f"  ПРОПУСК {fresh.pk}: стало {bucket}:{reason}")
+                    skipped += 1
+                    continue
+                before_at = fresh.completed_at.isoformat() if fresh.completed_at else ""
+                before_by = fresh.completed_by
+                BookingRequest.all_tenants.filter(pk=fresh.pk).update(
+                    completed_at=None, completed_by=""
+                )
+                cleared += 1
+                w(
+                    f"  СНЯТО {fresh.pk}: {reason} · было completed_at={before_at} "
+                    f"completed_by={before_by!r} → стало NULL/''"
+                )
+                logger.warning(
+                    "booking.false_completion.cleared booking=%s reason=%s "
+                    "before_completed_at=%s before_completed_by=%r",
+                    fresh.pk,
+                    reason,
+                    before_at,
+                    before_by,
+                )
+        return (cleared, skipped)
