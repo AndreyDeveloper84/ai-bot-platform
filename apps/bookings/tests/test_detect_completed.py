@@ -6,17 +6,26 @@ Tests the Celery task ``apps.bookings.tasks.detect_completed_bookings``:
 - skips cancelled / rescheduled / already-completed rows
 - respects the grace window
 - emit failure rolls back the completed_at stamp (next tick retries)
+
+**DRF-2454.** С этого листа времени и статуса строки НЕДОСТАТОЧНО: перед штампом
+детектор спрашивает зеркало канона, и без положительного свидетельства не
+штампует. Поэтому здешний ``_make_booking`` заводит строку зеркала — это и есть
+живая форма («визит, который канон знает и не отменял»). Отказы без зеркала, с
+отменённым зеркалом и с неоднозначным ключом — в
+``apps/bookings/tests/test_completion_evidence_2454.py``; здесь проверяется всё
+остальное поведение задачи, не изменившееся.
 """
 
 from __future__ import annotations
 
 import datetime as dt
+import uuid
 from unittest.mock import patch
 
 import pytest
 from django.utils import timezone
 
-from apps.booking.models import BookingRequest
+from apps.booking.models import BookingRequest, RemoteBookingProxy
 from apps.bookings.tasks import (
     detect_completed_bookings,
 )
@@ -45,9 +54,24 @@ def _make_booking(
     duration_min: int = 60,
     status: str = BookingRequest.Status.CONFIRMED,
     completed_at: dt.datetime | None = None,
+    mirror_status: str | None = RemoteBookingProxy.Status.CONFIRMED,
 ) -> BookingRequest:
-    """Create a booking whose visit_at is (now + offset) minutes."""
+    """Строка брони и — по умолчанию — зеркало канона на то же время.
+
+    ``mirror_status=None`` оставляет строку без зеркала: с DRF-2454 такая строка
+    штампа не получает, и это проверяется в своём файле.
+    """
     visit_at = timezone.now() + dt.timedelta(minutes=visit_offset_minutes)
+    if mirror_status is not None:
+        RemoteBookingProxy.all_tenants.create(
+            appointment_id=uuid.uuid4(),
+            tenant=tenant,
+            bot_user=customer,
+            start_at=visit_at,
+            end_at=visit_at + dt.timedelta(minutes=duration_min),
+            status=mirror_status,
+            source=RemoteBookingProxy.Source.MOBILE_APP,
+        )
     return BookingRequest.objects.create(
         tenant=tenant,
         bot_user=customer,

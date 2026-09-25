@@ -508,14 +508,31 @@ COMPLETED_BATCH_LIMIT = 200
 
 @shared_task(name="bookings.detect_completed_bookings")
 def detect_completed_bookings() -> dict[str, int]:
-    """Scan CONFIRMED bookings whose visit time has passed; emit
-    ``booking.completed`` and stamp ``completed_at`` exactly once each.
+    """Закрыть визиты, чьё время прошло **и** чей канон не возражает.
+
+    Штамп ``completed_at`` + ``completed_by=system`` и событие
+    ``booking.completed`` — ровно по одному разу на строку.
+
+    ### Чем доказывается «состоялся» (DRF-2454)
+
+    Раньше единственным условием был ``status == CONFIRMED``. Это **не
+    состояние визита**: ни одно входящее событие эту колонку не двигает, а
+    отмены канона доезжают до зеркала ``RemoteBookingProxy``. Стенд 24.09: три
+    отменённых визита и один неоплаченный были объявлены состоявшимися.
+
+    Теперь перед штампом спрашивается зеркало
+    (:func:`apps.bookings.completion_evidence.mirror_evidence`), и **отсутствие
+    свидетельства — отказ**: не поставить штамп обратимо, поставить ложный —
+    нет. Цена этого выбора названа там же: строки без зеркала (устаревший путь
+    YClients) автоматически больше не закрываются.
 
     Returns:
-      Counters: ``{scanned, emitted, raced}``.
+      Counters: ``{scanned, emitted, raced, emit_failed, skipped}``.
       - ``scanned``: rows matched the time predicate
       - ``emitted``: rows where this worker won the CAS and emitted
       - ``raced``: rows another worker had already stamped (lost the CAS)
+      - ``emit_failed``: emit raised, stamp rolled back for the next tick
+      - ``skipped``: свидетельства нет либо оно против; причины — в логе сводки
 
     ### Race-safety
 
@@ -552,6 +569,7 @@ def detect_completed_bookings() -> dict[str, int]:
     """
 
     from apps.booking.models import BookingRequest
+    from apps.bookings.completion_evidence import mirror_evidence
     from apps.eventbus import services as eventbus_services
 
     now = timezone.now()
@@ -570,7 +588,10 @@ def detect_completed_bookings() -> dict[str, int]:
         ).order_by("visit_at")[:COMPLETED_BATCH_LIMIT]
     )
 
-    counters = {"scanned": 0, "emitted": 0, "raced": 0, "emit_failed": 0}
+    counters = {"scanned": 0, "emitted": 0, "raced": 0, "emit_failed": 0, "skipped": 0}
+    # Причины отказов — по имени: «не штамповали» без причины неотличимо от
+    # «нечего было штамповать», и ровно это скрывало дефект DRF-2454.
+    skipped_by_reason: dict[str, int] = {}
 
     for booking in candidates:
         duration = booking.duration_min or default_duration_min
@@ -587,6 +608,22 @@ def detect_completed_bookings() -> dict[str, int]:
             continue
 
         counters["scanned"] += 1
+
+        # DRF-2454 — штамп только по ПОЛОЖИТЕЛЬНОМУ свидетельству канона.
+        #
+        # ``status == CONFIRMED`` в запросе выше — не состояние визита: ни одно
+        # входящее событие эту колонку не двигает (``followups`` говорит это
+        # прямо), а отмены канона доезжают до зеркала. На стенде из-за этого три
+        # ОТМЕНЁННЫХ визита и один НЕОПЛАЧЕННЫЙ оказались «состоявшимися».
+        #
+        # Несимметричность цены: не поставить штамп — обратимо (следующий тик),
+        # поставить ложный — необратимо после разбора очереди. Поэтому
+        # отсутствие свидетельства здесь ОТКАЗ.
+        may_stamp, reason = mirror_evidence(booking)
+        if not may_stamp:
+            counters["skipped"] += 1
+            skipped_by_reason[reason] = skipped_by_reason.get(reason, 0) + 1
+            continue
 
         # CAS: win the right to emit. WHERE completed_at IS NULL guards
         # against two workers stamping the same row twice.
@@ -641,12 +678,17 @@ def detect_completed_bookings() -> dict[str, int]:
             # emit_failed} where scanned == emitted + raced + emit_failed.
             counters["emit_failed"] += 1
 
-    if counters["emitted"] or counters["raced"] or counters["emit_failed"]:
+    if counters["emitted"] or counters["raced"] or counters["emit_failed"] or counters["skipped"]:
         logger.info(
-            "bookings.detect_completed.summary scanned=%d emitted=%d raced=%d emit_failed=%d",
+            "bookings.detect_completed.summary scanned=%d emitted=%d raced=%d "
+            "emit_failed=%d skipped=%d reasons=%s",
             counters["scanned"],
             counters["emitted"],
             counters["raced"],
             counters["emit_failed"],
+            counters["skipped"],
+            # Каждый отказ назван: «пропустили N» без причин — то же молчание,
+            # из которого вырос этот лист.
+            ",".join(f"{k}={v}" for k, v in sorted(skipped_by_reason.items())) or "-",
         )
     return counters
