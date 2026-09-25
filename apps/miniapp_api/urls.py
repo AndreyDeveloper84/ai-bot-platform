@@ -231,6 +231,13 @@ urlpatterns = [
         views_diary_days.customer_diary_day,
         name="customer_diary_day",
     ),
+    # DRF-2455 — снимок записи: файл идёт через бот, а не ссылкой на
+    # хранилище (адрес внутренний, бакет публичный).
+    path(
+        "diary/entry/<uuid:log_id>/photo",
+        views_diary_days.customer_food_photo,
+        name="customer_food_photo",
+    ),
     # Dashboard rollup — next booking + this-week count (bookings-only).
     path(
         "recent-activity",

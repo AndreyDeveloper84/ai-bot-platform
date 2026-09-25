@@ -137,6 +137,54 @@ def customer_diary_days(request: HttpRequest) -> HttpResponse:
 @csrf_exempt
 @require_http_methods(["GET"])
 @require_init_data
+def customer_food_photo(request: HttpRequest, log_id: str) -> HttpResponse:
+    """Снимок записи дневника — сам файл, через бот (DRF-2455, §77 п.40).
+
+    Зачем через бот, а не ссылкой на хранилище: адрес MinIO внутренний для
+    контейнера — телефон его не видит; и бакет создаётся ``public-read``,
+    то есть утёкшая ссылка работала бы у любого, кто её получил. Снимки
+    еды люди делают дома, и цена такой утечки не гипотетическая.
+
+    Владение проверяет каталог (чужая запись — 404). Здесь — та же
+    проверка входа, что у остального дневника: без ``initData`` ручка не
+    отвечает вовсе, иначе знание адреса давало бы доступ к снимку.
+    """
+    from apps.integrations.ayla import (
+        NutritionAPIError,
+        external_user_id_for,
+        get_nutrition_client,
+    )
+
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    refused = _diary_entry_gate(bot_user, needs_consent=True)
+    if refused is not None:
+        return refused
+    external_id = external_user_id_for(bot_user)
+
+    try:
+        photo = asyncio.run(
+            get_nutrition_client().food_photo(
+                external_user_id=external_id,
+                log_id=str(log_id),
+            )
+        )
+    except NutritionAPIError as exc:
+        return _food_entry_refusal(exc, external_id=external_id, step="food_photo")
+
+    if photo is None:
+        # Снимка нет: записана текстом или удалён по сроку (§134). Пустое
+        # тело с кодом 200 экран прочитал бы как «фото есть, но сломано».
+        return _error("not_found", "photo not found", 404)
+
+    content, content_type = photo
+    response = HttpResponse(content, content_type=content_type)
+    # Приватно и ненадолго: снимок принадлежит одному человеку, а через 30
+    # суток его не станет — общий кэш держать его не должен.
+    response["Cache-Control"] = "private, max-age=300"
+    return response
+
+
+@require_init_data
 def customer_diary_day(request: HttpRequest) -> HttpResponse:
     """Записи одного дня — сводка каталога за дату; пустой день — пустой список."""
     from apps.integrations.ayla import (

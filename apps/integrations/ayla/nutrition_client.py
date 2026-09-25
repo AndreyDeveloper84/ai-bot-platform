@@ -1314,6 +1314,58 @@ class NutritionClient:
             )
         raise self._meal_edit_refusal(resp, now=now)
 
+    async def food_photo(
+        self,
+        *,
+        external_user_id: str,
+        log_id: str,
+    ) -> tuple[bytes, str] | None:
+        """GET ``internal/food-log/{log_id}/photo/`` — сам файл снимка.
+
+        DRF-2455. Возвращает ``(байты, тип)`` или ``None``, если снимка
+        нет: записана текстом или удалён по сроку (§134). Владение
+        проверяет каталог — здесь мы только называем человека.
+
+        Прямой адрес хранилища не запрашиваем и наружу не отдаём: он
+        внутренний для контейнера, а бакет публичный, и утёкшая ссылка
+        работала бы у любого.
+        """
+        now = time.monotonic()
+        if self._circuit.is_open(now=now):
+            raise NutritionUnavailableError("circuit_open")
+
+        url = self._urls.build(f"nutrition/internal/food-log/{log_id}/photo/")
+        headers = with_request_id(
+            {
+                "X-Service-Token": self._token,
+                "X-External-User-ID": external_user_id,
+            }
+        )
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout_s) as http:
+                resp = await http.get(url, headers=headers)
+        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+            self._circuit.record_failure(now=now)
+            logger.warning(
+                "nutrition_client.food_photo.network ext=%s err=%s",
+                external_user_id,
+                type(exc).__name__,
+            )
+            raise NutritionUnavailableError(f"network: {type(exc).__name__}") from exc
+
+        if resp.status_code == 200:
+            self._circuit.record_success()
+            content_type = resp.headers.get("Content-Type", "application/octet-stream")
+            return resp.content, content_type
+        if resp.status_code == 404:
+            # Снимка нет — это не отказ и не сбой: штатное состояние записи.
+            self._circuit.record_success()
+            return None
+        if resp.status_code >= 500:
+            self._circuit.record_failure(now=now)
+            raise NutritionUnavailableError(f"http_{resp.status_code}")
+        raise NutritionAPIError(f"http_{resp.status_code}")
+
     async def restore_meal(self, *, external_user_id: str, log_id: str) -> FoodLogResponse:
         """POST ``/api/v1/nutrition/internal/food-log/{log_id}/restore/``.
 
