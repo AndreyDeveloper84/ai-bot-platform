@@ -2759,6 +2759,130 @@ a {
   height: 8px;
 }
 
+/* Лист выбора в форме записи (DRF-2448, остаток).
+   -------------------------------------------------------------------
+   У `.sheet`, `.sheet__panel`, `.sheet__title` и `.sheet__item` не было
+   ни одного правила: диалог с `role="dialog" aria-modal="true"` рисовался
+   прямо в потоке страницы — без затемнения, без панели, без границ.
+   Кнопки выбора клиента, услуги и мастера выглядели обычным текстом.
+
+   ПОЧЕМУ ЭТО НЕ ЗАМЕТИЛИ РАНЬШЕ: поиск по подстроке `sheet__item` в
+   стилях отвечал «есть» — но находил ДРУГОЙ класс, `.avatar-sheet__item`.
+   Проверка по роли (объявление селектора) отвечает «нет».
+
+   НИЧЕГО НЕ ПРИДУМАНО. Взят язык уже работающих листов приложения:
+   затемнение и панель — с `.schedule-sheet-backdrop` / `.schedule-sheet`
+   (:2764, :2774); строка выбора — с `.avatar-sheet__item` (:1802), то есть
+   с того самого класса, который и подменял собой искомый.
+
+   Это МИНИМУМ, делающий диалог диалогом, а не решение о виде: макета на
+   этот лист нет, и как он должен выглядеть — вопрос к владельцу. */
+.sheet {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  z-index: 200;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+}
+
+.sheet__panel {
+  width: 100%;
+  max-width: 480px;
+  max-height: 85vh;
+  overflow-y: auto;
+  background: var(--c-surface-1);
+  border-top-left-radius: var(--r-lg);
+  border-top-right-radius: var(--r-lg);
+  padding: var(--s-4) var(--s-4) calc(var(--s-4) + var(--safe-bottom, 0px));
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+}
+
+.sheet__title {
+  margin: 0;
+  font-size: var(--font-size-300);
+  font-weight: 600;
+}
+
+.sheet__item {
+  width: 100%;
+  min-height: 44px;
+  text-align: left;
+  background: none;
+  border: 0;
+  border-bottom: 1px solid var(--c-divider);
+  padding: var(--s-2) 0;
+  font: inherit;
+  font-size: var(--font-size-300);
+  color: var(--c-text-primary);
+  cursor: pointer;
+}
+
+.sheet__item:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 2px;
+}
+
+/* Строка черновика записи. Вид был задан инлайном на самой кнопке, и там
+   лежала МЁРТВАЯ строка: `border: "none"` стояла ПОСЛЕ `borderBottom` и
+   затирала её сокращённой формой — разделителей между строками не было
+   вовсе, хотя код их объявлял. Перенесено в правило, разделитель ожил. */
+.draft-row {
+  display: flex;
+  width: 100%;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--s-3);
+  min-height: 44px;
+  padding: var(--s-3) 0;
+  border: 0;
+  border-bottom: 1px solid var(--c-divider);
+  background: none;
+  text-align: start;
+  font: inherit;
+  color: var(--c-text-primary);
+  cursor: pointer;
+}
+
+.draft-row__label {
+  color: var(--c-text-secondary);
+}
+
+.draft-row__value {
+  text-align: end;
+}
+
+/* Кнопка, выглядящая ссылкой ВНУТРИ текста («развернуть» в середине абзаца).
+   Правила не было; каждое место повторяло один и тот же инлайн.
+
+   Роль важна: на экране дня салона тот же класс стоял на ОТДЕЛЬНОМ элементе
+   управления под заголовком даты — там вид ссылки и делал кнопку невидимой,
+   и она переодета в обычную (соседний PR). Здесь роль обратная: элемент
+   стоит в потоке предложения, и вид ссылки — правильный. Одно имя, две
+   разные роли — это и была причина путаницы. */
+.btn-link {
+  display: inline;
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  color: var(--c-accent);
+  cursor: pointer;
+  text-align: inherit;
+}
+
+.btn-link:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 2px;
+}
+
+.draft-row__value--set {
+  font-weight: 600;
+}
+
 /* Mark-unavailable bottom sheet ------------------------------------------- */
 
 .schedule-sheet-backdrop {

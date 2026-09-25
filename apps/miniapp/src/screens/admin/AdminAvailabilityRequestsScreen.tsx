@@ -761,14 +761,7 @@ export function AdminAvailabilityRequestsScreen({ me }: Props) {
                           <button
                             type="button"
                             className="btn-link"
-                            style={{
-                              marginLeft: "var(--s-1)",
-                              background: "none",
-                              border: "none",
-                              padding: 0,
-                              color: "var(--c-accent)",
-                              cursor: "pointer",
-                            }}
+                            style={{ marginLeft: "var(--s-1)" }}
                             onClick={() => toggleExpanded(it.request_id)}
                           >
                             {isExpanded ? "свернуть" : "развернуть"}

@@ -201,6 +201,13 @@ DESCENDANT_ONLY: frozenset[str] = frozenset(
 # поправить восемнадцать раскладок внутри правки про кнопку было бы хуже,
 # чем назвать их, — ровно тот довод, по которому здесь заморожены первые 58.
 #
+# 2026-09-25 (DRF-2448, остаток): 66 → 59. Лист выбора формы записи получил
+# правила (`.sheet`, `.sheet__panel`, `.sheet__title`, `.sheet__item`), строка
+# черновика `.draft-row` переехала из инлайна в правило, и `.btn-link` наконец
+# объявлен. Число снято прогоном. `AdminSalonDayScreen::sheet` ушёл не потому,
+# что экран переписан, а потому что правило у общего класса появилось — одна
+# правка гасит записи сразу у двух экранов, и разводить её по двум PR нельзя.
+#
 # 2026-09-25 (DRF-2448, продолжение): 68 → 66 (проверено прогоном, не по
 # комментарию выше — он исторический, о чём сам и предупреждает).
 # Доведены две последние записи
@@ -225,13 +232,8 @@ BASELINE: frozenset[str] = frozenset(
         "src/components/Snackbar.tsx::snackbar",
         "src/components/SurfaceSwitch.tsx::surface-switch",
         "src/components/booking/NewBookingForm.tsx::callout--warning",
-        "src/components/booking/NewBookingForm.tsx::draft-row",
         "src/components/booking/NewBookingForm.tsx::draft-rows",
         "src/components/booking/NewBookingForm.tsx::section__title",
-        "src/components/booking/NewBookingForm.tsx::sheet",
-        "src/components/booking/NewBookingForm.tsx::sheet__item",
-        "src/components/booking/NewBookingForm.tsx::sheet__panel",
-        "src/components/booking/NewBookingForm.tsx::sheet__title",
         "src/screens/CustomerBookingDetailScreen.tsx::modal",
         "src/screens/CustomerBookingDetailScreen.tsx::modal__sheet",
         "src/screens/CustomerBookingSuccessScreen.tsx::customer-success__payment-note",
@@ -267,7 +269,6 @@ BASELINE: frozenset[str] = frozenset(
         "src/screens/MasterSettingsScreen.tsx::master-settings__coming-soon",
         "src/screens/MasterSetupLandingScreen.tsx::setup-landing",
         "src/screens/MasterWorkingHoursScreen.tsx::working-hours",
-        "src/screens/admin/AdminAvailabilityRequestsScreen.tsx::btn-link",
         "src/screens/admin/AdminAvailabilityRequestsScreen.tsx::screen__header",
         "src/screens/admin/AdminInternalChatListScreen.tsx::internal-chat-list__group",
         "src/screens/admin/AdminInternalChatThreadScreen.tsx::internal-chat-bubble__stamp",
@@ -279,7 +280,6 @@ BASELINE: frozenset[str] = frozenset(
         "src/screens/admin/AdminSalonDayScreen.tsx::salon-day__visit",
         "src/screens/admin/AdminSalonDayScreen.tsx::screen__header",
         "src/screens/admin/AdminSalonDayScreen.tsx::section__title",
-        "src/screens/admin/AdminSalonDayScreen.tsx::sheet",
         "src/screens/admin/AdminSettingsPlaceholderScreen.tsx::screen__header",
         "src/screens/admin/AdminTeamScreen.tsx::screen__header",
     }
