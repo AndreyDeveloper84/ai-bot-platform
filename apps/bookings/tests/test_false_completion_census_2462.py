@@ -431,13 +431,23 @@ class TestTheCanonOverridesTheStaleMirror:
         assert "legitimate:mirror_confirmed" not in text
         assert "недоказуемых (unprovable):         1" in text
 
-    def test_the_report_names_what_decided(self, tenant) -> None:
+    def test_the_report_names_what_decided_and_its_limit(self, tenant) -> None:
+        """Число без предела читается как полное, поэтому предел — в той же строке.
+
+        Отмену зеркало знает (это след состоявшегося действия: событие отмены
+        доезжает, и наш ``_mirror_cancel`` пишется ПОСЛЕ того, как канон отмену
+        принял). Неоплату не узнает никогда: события про переход в
+        ``awaiting_payment`` не существует ни на одной стороне.
+        """
         _stamped(tenant, _customer(tenant, "decider"), mirror_status="confirmed")
 
         by_mirror = _run()
 
         assert "решает:  ЗЕРКАЛО" in by_mirror
-        assert "DRF-2519" in by_mirror  # стухание названо в самом отчёте
+        assert "НИЖНЯЯ ГРАНИЦА" in by_mirror
+        assert "неоплат" in by_mirror  # предел назван словами, а не только ссылкой
+        assert "DRF-2519" in by_mirror
+        assert "--canon" in by_mirror  # и сказано, чем получить полное число
 
     def test_canon_awaiting_payment_makes_a_mirror_confirmed_row_false(
         self, tenant, tmp_path
