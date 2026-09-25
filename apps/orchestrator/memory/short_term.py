@@ -29,8 +29,26 @@ audit layer.
 
 `SHORT_TERM_MEMORY_TTL_SECONDS` (default 24h) — the conversation will
 get its TTL bumped on every append. Conversations that go silent for
-a day age out automatically without a cleanup task. Sprint 3+'s
-long-term memory captures the digest before TTL fires.
+a day age out automatically without a cleanup task.
+
+**Это место раньше обещало то, чего нет.** Здесь стояло «Sprint 3+'s
+long-term memory captures the digest before TTL fires» — снимок перед
+истечением не делает никто, и не делал никогда. Обещание, у которого нет
+адресата, хуже молчания: следующий читатель верит ему и не ищет.
+
+### Два выхода, и второй перехватить нечем (DRF-2511)
+
+Сообщение покидает окно **двумя** путями, и они разной природы:
+
+1. **Вытеснение** — двадцать первое сообщение выдавливает первое. Наблюдаемо:
+   в момент `append` уходящее ещё лежит в списке, поэтому `append` его
+   возвращает и просмотр возможен.
+2. **Истечение по TTL** — сутки тишины, и ключ исчезает. **Наблюдать нечего:**
+   истечение происходит в Redis, никакой наш код в этот момент не работает.
+   Перехват потребовал бы либо подписки на keyspace-уведомления, либо обхода
+   ключей по `TTL` — то и другое инфраструктура, и заводить её ради этого —
+   отдельное решение. **Этот выход остаётся неперехваченным, и это названный
+   предел, а не забытый случай.**
 """
 
 from __future__ import annotations
@@ -78,24 +96,59 @@ def _ttl_seconds() -> int:
     return int(getattr(settings, "SHORT_TERM_MEMORY_TTL_SECONDS", 24 * 3600))
 
 
+def _decode_all(raw: Any, conversation_id: UUID | str) -> list[dict[str, Any]]:
+    """Разобрать хранимые строки; кривую — пропустить с логом, не бросать.
+
+    Один разбор на оба чтения (окно и вытесненное): второй разошёлся бы с
+    первым в том, как относится к испорченной записи, и одна из дорог начала
+    бы ронять ход целиком.
+    """
+    out: list[dict[str, Any]] = []
+    for item in cast(list[str], raw or []):
+        try:
+            out.append(json.loads(item))
+        except json.JSONDecodeError:
+            # A malformed value (manual operator edit?) would otherwise
+            # poison the entire read. Skip + log, never raise.
+            logger.warning(
+                "memory.short_term.decode.malformed conversation=%s item=%r",
+                conversation_id,
+                item[:200],
+            )
+    return out
+
+
 def append(
     conversation_id: UUID | str,
     *,
     role: str,
     content: str,
     **extras: Any,
-) -> None:
-    """Append one message to the sliding window for `conversation_id`.
+) -> list[dict[str, Any]]:
+    """Append one message to the sliding window; return what fell off.
 
     Behaviour:
-      1. RPUSH the JSON-encoded message dict at the tail.
-      2. LTRIM to keep at most `SHORT_TERM_MEMORY_DEPTH` items, dropping
+      1. LRANGE reads the items this append is about to push out.
+      2. RPUSH the JSON-encoded message dict at the tail.
+      3. LTRIM to keep at most `SHORT_TERM_MEMORY_DEPTH` items, dropping
          the oldest on overflow.
-      3. EXPIRE refreshes the 24h TTL — silent conversations age out
+      4. EXPIRE refreshes the 24h TTL — silent conversations age out
          automatically.
-      4. write_audit("memory.append") records the append for forensic
+      5. write_audit("memory.append") records the append for forensic
          recovery. Payload contains only message metadata (role, len),
          never the raw content (PII rule from A1).
+
+    DRF-2511 — step 1 is new, and the return value with it. Until then
+    eviction was **unobservable**: the trim dropped the oldest item and
+    nobody could say what it was, so nothing downstream could look at a
+    message on its way out. The read rides in the same pipeline as the
+    write, so it costs one round trip, not two, and returns an empty list
+    for every conversation shorter than the window — which is most of them.
+
+    Deciding what to DO with the dropped items is deliberately not here:
+    this module is storage and knows nothing of consent, identity or
+    extraction. The caller that holds the person decides
+    (:mod:`apps.orchestrator.memory.evicted_review`).
 
     Args:
       conversation_id: UUID of the Conversation row.
@@ -103,6 +156,11 @@ def append(
       content: message body. Not echoed into audit payload.
       **extras: any extra fields to persist alongside (e.g. `trace_id`,
                 `action_type`). Stored as-is in the JSON dict.
+
+    Returns:
+      The messages this append pushed out of the window, oldest first.
+      Empty when the window had room. Callers that ignore it are correct —
+      the value is an offer, not an obligation.
     """
 
     msg: dict[str, Any] = {"role": role, "content": content, **extras}
@@ -113,11 +171,18 @@ def append(
     # Pipeline keeps the three commands atomic in the Redis sense —
     # multi-server clusters with cross-slot constraints don't apply
     # because all three target the same key.
+    depth = _depth()
     pipe = client.pipeline()
+    # `lrange(key, 0, -depth)` BEFORE the push is exactly the set this append
+    # will evict: with L items it returns indices 0..L-depth, and for L < depth
+    # the range is empty. Reading after the trim would be too late — the items
+    # would already be gone.
+    pipe.lrange(key, 0, -depth)
     pipe.rpush(key, encoded)
-    pipe.ltrim(key, -_depth(), -1)
+    pipe.ltrim(key, -depth, -1)
     pipe.expire(key, _ttl_seconds())
-    pipe.execute()
+    results = pipe.execute()
+    dropped = _decode_all(results[0] if results else [], conversation_id)
 
     # Forensic audit row — never includes content body, only metadata.
     write_audit(
@@ -131,11 +196,13 @@ def append(
         },
     )
     logger.debug(
-        "memory.short_term.append conversation=%s role=%s len=%d",
+        "memory.short_term.append conversation=%s role=%s len=%d dropped=%d",
         conversation_id,
         role,
         len(content),
+        len(dropped),
     )
+    return dropped
 
 
 def recall(
@@ -162,19 +229,7 @@ def recall(
     # sync `Redis` class, so this is always `list[str]` at runtime —
     # narrow via cast so the iteration below type-checks.
     raw = cast(list[str], client.lrange(key, start, -1))
-    out: list[dict[str, Any]] = []
-    for item in raw:
-        try:
-            out.append(json.loads(item))
-        except json.JSONDecodeError:
-            # A malformed value (manual operator edit?) would otherwise
-            # poison the entire recall. Skip + log, never raise.
-            logger.warning(
-                "memory.short_term.recall.malformed conversation=%s item=%r",
-                conversation_id,
-                item[:200],
-            )
-    return out
+    return _decode_all(raw, conversation_id)
 
 
 def clear(conversation_id: UUID | str) -> None:

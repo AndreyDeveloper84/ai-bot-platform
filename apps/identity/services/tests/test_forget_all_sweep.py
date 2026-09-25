@@ -467,6 +467,12 @@ class TestTheDialogueHalf:
                 def rpush(self, key, value):
                     self.ops.append((key, value))
 
+                # DRF-2511: `append` читает уходящее тем же конвейером.
+                # Здесь стенд нарочно грубый — предмет файла не окно, а
+                # зачистка, — поэтому `lrange` терпит вызов и отдаёт пусто.
+                def lrange(self, *a):
+                    pass
+
                 def ltrim(self, *a):
                     pass
 
