@@ -186,21 +186,13 @@ function DraftRow({
       className="draft-row"
       onClick={onOpen}
       aria-label={`${label}: ${value ?? "выбрать"}`}
-      style={{
-        display: "flex",
-        width: "100%",
-        justifyContent: "space-between",
-        alignItems: "center",
-        gap: "var(--s-3)",
-        padding: "var(--s-3) 0",
-        borderBottom: "1px solid var(--c-divider)",
-        background: "none",
-        border: "none",
-        textAlign: "start",
-      }}
     >
-      <span style={{ color: "var(--c-text-secondary)" }}>{label}</span>
-      <span style={{ fontWeight: value ? 600 : 400, textAlign: "end" }}>
+      <span className="draft-row__label">{label}</span>
+      <span
+        className={
+          value ? "draft-row__value draft-row__value--set" : "draft-row__value"
+        }
+      >
         {value ?? "выбрать"}
       </span>
     </button>
