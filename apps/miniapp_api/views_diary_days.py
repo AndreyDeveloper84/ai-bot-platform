@@ -31,6 +31,7 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 import datetime as dt
 import logging
 from typing import Any
@@ -164,6 +165,12 @@ def customer_food_photo(request: HttpRequest, log_id: str) -> HttpResponse:
     refused = _diary_entry_gate(bot_user, needs_consent=True)
     if refused is not None:
         return refused
+    try:
+        uuid.UUID(str(log_id))
+    except (ValueError, AttributeError, TypeError):
+        # Тот же отказ, что на чужую запись: по ответу нельзя отличить
+        # «не то имя» от «не твоя запись».
+        return _error("not_found", "photo not found", 404)
     external_id = external_user_id_for(bot_user)
 
     try:
