@@ -127,6 +127,33 @@ def _consent(bot_user, settings) -> None:  # noqa: ANN001
     record_global_consent(bot_user, source="welcome")
 
 
+def _current_diet(bot_user) -> Any:  # noqa: ANN001
+    """Что человек увидит про диету — по политике ключей, а не сырым фильтром.
+
+    Два различия, на которых я споткнулся сам, и оба стоят того, чтобы быть
+    записанными:
+
+    1. **вытеснение — это не мягкое удаление.** `supersede_entries` ставит
+       состояние и `soft_deleted_at` не трогает (`memory_writer.py:231`:
+       «Supersession is NOT deletion»), поэтому фильтр
+       `soft_deleted_at__isnull=True` считает вытесненную строку живой;
+    2. **«живые строки» — это не «текущий факт».** `read_personal_context`
+       отдаёт оба противоречащих значения одного ключа; собирает их в один
+       `read_current_view` → `select_current_facts`, и его же читает подсказка.
+       Победитель выбирается по `_currency` = (explicit, created_at, id), то
+       есть **по времени записи**.
+
+    Второе и делает ловушку порядка настоящей: строка, записанная мостом из
+    старого сообщения, имеет `created_at` = сейчас и потому оказалась бы
+    свежее по-настоящему свежего факта.
+    """
+    from apps.identity.services.memory_key_policy import read_current_view
+
+    facts = read_current_view(bot_user.ayla_user_id).green_facts
+    diets = [f.content.get("value") for f in facts if f.content.get("key") == "diet"]
+    return diets[0] if len(diets) == 1 else diets
+
+
 def _fill(conversation_id, fake: _FakeRedis, *, first: str, depth: int = 20) -> None:  # noqa: ANN001
     """Набить окно ровно до края: первое сообщение — `first`."""
     short_term.append(conversation_id, role="user", content=first)
@@ -357,3 +384,57 @@ class TestСтёртоеПоПросьбеНеВозвращается:
         )
 
         assert review_evicted(bu, [{"role": "user", "content": FACT}]) == 1
+
+
+class TestОбратногоХодаПамятиНеБывает:
+    """Старое сообщение не вытесняет более свежий факт о том же ключе.
+
+    Ловушка тонкая и молчаливая: для ключа единичной кратности запись
+    **вытесняет** прежние живые строки (`supersede`, reason=changed) — верно,
+    когда человек только что поправил себя. Мост читает **старое** сообщение,
+    и без запрета «я веган» из первой реплики победило бы «я вегетарианка» из
+    пятой. Узел «факт записан» при этом остался бы зелёным.
+    """
+
+    OLD = "кстати, я веган"
+    NEW = "я вегетарианка"
+
+    def test_свежее_заявление_побеждает_старое_сообщение(self, settings) -> None:
+        from apps.orchestrator.memory.personal_context import record_explicit_green_facts
+
+        bu = _bot_user("ev-order")
+        _consent(bu, settings)
+        # Так было на живом ходу: первое не записалось (Ayla лежала), пятое
+        # записалось. Положительная стража — свежий факт действительно живой.
+        assert record_explicit_green_facts(bu, self.NEW) == 1
+        assert _current_diet(bu) == "vegetarian"
+
+        # Мост доходит до СТАРОГО сообщения — оно уходит из окна последним.
+        review_evicted(bu, [{"role": "user", "content": self.OLD}])
+
+        assert _current_diet(bu) == "vegetarian", "свежее должно устоять"
+
+    def test_на_живом_ходу_исправление_себя_по_прежнему_работает(self, settings) -> None:
+        """Ложный вход: запрет принадлежит мосту, а не писателю вообще.
+
+        Человек, поправивший себя в разговоре, обязан быть услышан — иначе мы
+        починили бы обратный ход ценой прямого.
+        """
+        from apps.orchestrator.memory.personal_context import record_explicit_green_facts
+
+        bu = _bot_user("ev-correction")
+        _consent(bu, settings)
+        assert record_explicit_green_facts(bu, self.OLD) == 1
+        assert _current_diet(bu) == "vegan"  # стража: сначала было так
+
+        assert record_explicit_green_facts(bu, self.NEW) == 1
+
+        assert _current_diet(bu) == "vegetarian"
+
+    def test_пустой_ключ_мост_заполняет(self, settings) -> None:
+        """Положительная стража к запрету: он не выключил мост целиком."""
+        bu = _bot_user("ev-order-empty")
+        _consent(bu, settings)
+
+        assert review_evicted(bu, [{"role": "user", "content": self.OLD}]) == 1
+        assert _current_diet(bu) == "vegan"
