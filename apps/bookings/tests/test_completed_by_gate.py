@@ -151,7 +151,10 @@ def _make_booking(
     completed_at: dt.datetime | None,
     completed_by: str,
     visit_at: dt.datetime | None = None,
-    mirror_status: str | None = "confirmed",
+    # DRF-2519: свидетельством стало только собственное завершение канона.
+    # Узлы этого файла — про актора закрытия и про гейт, а не про
+    # свидетельство; умолчание им нужно такое, при котором оно ЕСТЬ.
+    mirror_status: str | None = "completed",
 ) -> BookingRequest:
     """Строка брони и — по умолчанию — зеркало канона на то же время.
 

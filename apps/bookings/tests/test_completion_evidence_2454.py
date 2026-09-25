@@ -176,8 +176,11 @@ class TestTheVisitThatHappenedIsStillCompleted:
         assert counters["skipped"] == 0
 
     def test_the_positive_path_stays_exactly_once(self, tenant, customer) -> None:
+        # DRF-2519: свидетельством стал только ``completed``. Прежде здесь
+        # стоял ``CONFIRMED`` — узел про «ровно один раз» не изменился по
+        # предмету, изменился вход, который считается доказательством.
         booking = _booking(tenant, customer)
-        _mirror(tenant, customer, booking, status=RemoteBookingProxy.Status.CONFIRMED)
+        _mirror(tenant, customer, booking, status=RemoteBookingProxy.Status.COMPLETED)
 
         first = detect_completed_bookings()
         second = detect_completed_bookings()

@@ -54,12 +54,18 @@ def _make_booking(
     duration_min: int = 60,
     status: str = BookingRequest.Status.CONFIRMED,
     completed_at: dt.datetime | None = None,
-    mirror_status: str | None = RemoteBookingProxy.Status.CONFIRMED,
+    mirror_status: str | None = RemoteBookingProxy.Status.COMPLETED,
 ) -> BookingRequest:
     """Строка брони и — по умолчанию — зеркало канона на то же время.
 
     ``mirror_status=None`` оставляет строку без зеркала: с DRF-2454 такая строка
     штампа не получает, и это проверяется в своём файле.
+
+    Умолчание — ``COMPLETED``, а не ``CONFIRMED``: с DRF-2519 доказательством
+    состоявшегося визита служит только собственное завершение канона. Узлы
+    этого файла — про откат штампа при сбое отправки и про допуск по времени;
+    умолчание им нужно такое, при котором свидетельство ЕСТЬ, иначе они
+    начинают молча проверять отказ по свидетельству вместо своего предмета.
     """
     visit_at = timezone.now() + dt.timedelta(minutes=visit_offset_minutes)
     if mirror_status is not None:
