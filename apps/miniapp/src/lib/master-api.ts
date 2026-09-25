@@ -821,7 +821,16 @@ export const uploadMasterProfilePhoto = async (
     } catch {
       /* non-JSON 5xx */
     }
-    throw new ApiError(res.status, parsed.error, parsed.detail);
+    // DRF-2439. Единственное из восьми мест, где потеря НЕ пустая: эта же
+    // ручка отвечает через `_profile_refusal` (`master_api/views.py:849`) и
+    // на 400 кладёт в `details` данные каталога о том, ЧТО ИМЕННО не так с
+    // фото — формат, квадрат, размер. Человек видел только общее «Каталог не
+    // принял профиль.», а подробность не доезжала никуда.
+    //
+    // Тот же вид обслуживает и текст, и multipart: текстовый путь идёт через
+    // общего помощника `request` и поле получает (DRF-2373), а этот
+    // самописный `fetch` — нужный из-за multipart — ронял.
+    throw new ApiError(res.status, parsed.error, parsed.detail, parsed.details);
   }
   return (await res.json()) as ProfilePatchResponse;
 };
@@ -909,7 +918,11 @@ export const uploadPortfolioPhoto = async (
     } catch {
       /* non-JSON 5xx */
     }
-    throw new ApiError(res.status, parsed.error, parsed.detail);
+    // DRF-2439: сегодня сервер здесь `details` не присылает — аргумент
+    // добавлен, чтобы поле не потерялось молча, когда начнёт. Правило
+    // живёт в помощнике `request`, а этот `fetch` написан руками — multipart (boundary ставит браузер),
+    // то есть мимо помощника: `POST master/profile/portfolio`.
+    throw new ApiError(res.status, parsed.error, parsed.detail, parsed.details);
   }
   return (await res.json()) as PortfolioItem;
 };
