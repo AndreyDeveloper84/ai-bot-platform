@@ -16,6 +16,7 @@
 вопрос стенда, и подменять его фикстурой нельзя — фикстура даст число про
 фикстуру.
 """
+
 from __future__ import annotations
 
 import re
@@ -24,9 +25,7 @@ from pathlib import Path
 import pytest
 from django.db import connection
 
-SQL_PATH = (
-    Path(__file__).resolve().parents[3] / "docs" / "measurements" / "DRF-2513-before-sql.sql"
-)
+SQL_PATH = Path(__file__).resolve().parents[3] / "docs" / "measurements" / "DRF-2513-before-sql.sql"
 
 #: Слова, которых в запросе быть не должно. Замер не пишет — и это проверяется
 #: текстом, а не обещанием в комментарии.
@@ -104,13 +103,68 @@ def test_the_output_carries_its_own_scope():
 
 
 @pytest.mark.django_db
-def test_the_origin_split_is_present_because_the_bridge_writes_inferred():
-    """Разрез по происхождению — прямая отметка «до» для моста DRF-2511.
+def test_the_origin_split_is_present_but_is_not_the_bridge_marker():
+    """Разрез по происхождению полезен сам по себе — но маркером моста НЕ является.
 
-    Мост пишет факты с `source='inferred'`. Значит после моста доля `inferred`
-    обязана вырасти, и без этого разреза рост будет неотличим от роста по любой
-    другой причине. На пустой базе разреза нет — поэтому проверяется НАЛИЧИЕ
-    разреза в тексте запроса и его исполнимость, а не строка вывода.
+    Так было записано в первой редакции этого файла, и это была ошибка на
+    устаревшей посылке: лист DRF-2511 сначала требовал `SOURCE_INFERRED`, потом
+    требование сняли (оно предписывало нарушить AYLA-DEC-0024). Мост пишет
+    `EXPLICIT`, потому что слова человек произнёс, а опоздание не меняет автора.
+    Значит доля `inferred` после моста НЕ вырастет.
+
+    Разрез оставлен: он отвечает на «чего у нас больше — сказанного или
+    выведенного», и это самостоятельный вопрос. Но приёмку 2511 он не решает.
     """
     assert "происхождение=" in _sql(), "в запросе нет разреза по `source`"
     assert "lg.source" in _sql()
+
+
+@pytest.mark.django_db
+def test_the_before_mark_of_the_bridge_is_in_the_output_and_is_zero_today():
+    """Настоящая отметка «до»: `source_event_id`, и сегодня она ноль.
+
+    Почему именно она. Мосту нужен ключ идемпотентности (требование листа), а
+    `source_event_id` — он и есть по §3.1. Сегодняшний писатель его НИКОГДА не
+    ставит, и это записано в самом коде: «source_event_id / evidence_refs …
+    are never fabricated here» (`apps/identity/services/memory_writer.py`).
+
+    Отсюда свойство, ради которого маркер и выбран: ноль по построению нельзя
+    уничтожить правкой. После моста та же строка станет счётчиком его урожая, и
+    тем же запросом.
+
+    Узел проверяет ДВЕ вещи, и вторая важнее: что строка есть в выводе, и что
+    утверждение про «никогда не ставит» всё ещё верно ПО КОДУ. Если завтра
+    кто-нибудь начнёт писать событийный ключ, маркер молча перестанет быть
+    маркером — а разницу спишут на мост.
+    """
+    writer = (
+        SQL_PATH.parents[2] / "apps" / "identity" / "services" / "memory_writer.py"
+    ).read_text(encoding="utf-8")
+    assert "source_event_id / evidence_refs / derivation_method are never" in writer, (
+        "писатель больше не обещает не ставить `source_event_id` — маркер "
+        "отметки «до» надо выбирать заново"
+    )
+
+    with connection.cursor() as cursor:
+        cursor.execute(_statement())
+        rows = {row[2]: row[3] for row in cursor.fetchall()}
+
+    marker = [m for m in rows if "ОТМЕТКА «ДО»" in m and "source_event_id" in m]
+    assert marker, sorted(rows)
+    assert rows[marker[0]] == "0", f"{marker[0]} = {rows[marker[0]]}, а ожидался 0"
+
+
+@pytest.mark.django_db
+def test_the_output_names_who_took_the_number():
+    """Число без происхождения через неделю станет просто числом.
+
+    Печатается роль в базе, а не человек: роль — не персональные данные, а
+    вопрос «кто снял» она закрывает ровно настолько, насколько нужно.
+    """
+    with connection.cursor() as cursor:
+        cursor.execute(_statement())
+        rows = {row[2]: row[3] for row in cursor.fetchall()}
+
+    who = [m for m in rows if "КТО СНЯЛ" in m]
+    assert who, sorted(rows)
+    assert "UTC" in rows[who[0]], rows[who[0]]

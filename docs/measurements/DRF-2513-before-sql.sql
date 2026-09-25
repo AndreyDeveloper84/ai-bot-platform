@@ -92,6 +92,59 @@ live_green AS (
 SELECT
     w.measured_at,
     w.window_start,
+    'КТО СНЯЛ (роль в базе) и КОГДА' AS metric,
+    current_user || ' @ ' || to_char(w.measured_at, 'YYYY-MM-DD HH24:MI:SS') || ' UTC' AS value
+FROM window_spec w
+
+UNION ALL
+-- ОТМЕТКА «ДО» ДЛЯ МОСТА. `source_event_id` — ключ идемпотентности §3.1;
+-- сегодняшний писатель его НИКОГДА не ставит, и это записано в коде
+-- (`memory_writer.py`: «source_event_id / evidence_refs … are never fabricated
+-- here»). Мост обязан его ставить — идемпотентность у него в требованиях.
+-- Значит здесь ожидается НОЛЬ, и это единственная величина замера, которую
+-- нельзя восстановить задним числом: после моста она станет счётчиком его
+-- урожая. Если тут НЕ ноль — значит кто-то уже пишет событийный ключ, и
+-- маркер надо выбирать заново, а не списывать разницу на мост.
+SELECT w.measured_at, w.window_start,
+       'ОТМЕТКА «ДО»: зелёных фактов с source_event_id (ожидается 0)',
+       (
+           SELECT count(*) FROM identity_memoryentry me
+           WHERE me.sensitivity_zone = 'green'
+             AND me.soft_deleted_at IS NULL
+             AND me.source_event_id IS NOT NULL
+       )::text
+FROM window_spec w
+
+UNION ALL
+-- Спутник того же маркера: `evidence_refs` документирован как «ссылки на
+-- наблюдения, из которых факт подтверждён» — тоже пусто сегодня.
+SELECT w.measured_at, w.window_start,
+       'ОТМЕТКА «ДО»: зелёных фактов с непустым evidence_refs (ожидается 0)',
+       (
+           SELECT count(*) FROM identity_memoryentry me
+           WHERE me.sensitivity_zone = 'green'
+             AND me.soft_deleted_at IS NULL
+             AND me.evidence_refs IS NOT NULL
+             AND me.evidence_refs::text NOT IN ('[]', 'null', '{}')
+       )::text
+FROM window_spec w
+
+UNION ALL
+-- Надгробия: сколько фактов СТЁРТО по просьбе человека. Рядом с отметкой «до»
+-- это не любопытство — мост просматривает старые сообщения, и если он не
+-- смотрит надгробие ключа, стёртое вернётся. Число «до» даёт масштаб риска.
+SELECT w.measured_at, w.window_start,
+       'надгробий: стёрто по просьбе человека, причина=' || COALESCE(me.deletion_reason, '<не указана>'),
+       count(*)::text
+FROM identity_memoryentry me, window_spec w
+WHERE me.sensitivity_zone = 'green'
+  AND me.soft_deleted_at IS NOT NULL
+GROUP BY w.measured_at, w.window_start, me.deletion_reason
+
+UNION ALL
+SELECT
+    w.measured_at,
+    w.window_start,
     'люди, активные за окно (по человеку, не по строке личности)' AS metric,
     (SELECT count(*) FROM people)::text                          AS value
 FROM window_spec w
