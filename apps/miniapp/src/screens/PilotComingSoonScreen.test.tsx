@@ -7,9 +7,18 @@
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
+import { primeDisplayName } from "../components/CustomerAvatarEntry";
 
 import { PilotComingSoonScreen } from "./PilotComingSoonScreen";
+
+// Дверь в профиль (`CustomerAvatarEntry`) без пропа спрашивает имя у
+// `/me`. Этот набор ручку не подменяет, поэтому имя засевается явно:
+// иначе в прогоне живёт неподменённый сетевой вызов и асинхронное
+// обновление, которое может прилететь посреди чужого теста (DRF-2523).
+beforeEach(() => {
+  primeDisplayName("Тест Тестов");
+});
 
 function renderWithRoutes(surface: "home" | "catalog") {
   render(

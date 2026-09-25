@@ -9,6 +9,7 @@ import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes, useParams } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { primeDisplayName } from "../components/CustomerAvatarEntry";
 
 // Домашний экран теперь спрашивает decision-context (приглашение в
 // анкету цели). Мокаем, чтобы юнит-тест не ходил в сеть; отсутствие
@@ -38,6 +39,14 @@ vi.mock("../lib/api", async (importOriginal) => {
 import { ApiError, fetchMyBookings, type BookingItem } from "../lib/api";
 import { authErrorCopy } from "../lib/auth-error-copy";
 import { CustomerRecordsScreen } from "./CustomerRecordsScreen";
+
+// Дверь в профиль (`CustomerAvatarEntry`) без пропа спрашивает имя у
+// `/me`. Этот набор ручку не подменяет, поэтому имя засевается явно:
+// иначе в прогоне живёт неподменённый сетевой вызов и асинхронное
+// обновление, которое может прилететь посреди чужого теста (DRF-2523).
+beforeEach(() => {
+  primeDisplayName("Тест Тестов");
+});
 
 const mockedList = vi.mocked(fetchMyBookings);
 
