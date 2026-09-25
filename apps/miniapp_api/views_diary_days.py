@@ -31,6 +31,7 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 import datetime as dt
 import logging
 from typing import Any
@@ -132,6 +133,76 @@ def customer_diary_days(request: HttpRequest) -> HttpResponse:
     if hidden is not None:
         payload["nutrition_numbers_hidden"] = hidden
     return JsonResponse(payload)
+
+
+#: Типы, которые ручка снимка готова объявить браузеру. Всё остальное
+#: уезжает как поток байтов: см. про один источник в ``customer_food_photo``.
+_PHOTO_TYPES_SHOWN = frozenset({"image/jpeg", "image/png", "image/webp"})
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+@require_init_data
+def customer_food_photo(request: HttpRequest, log_id: str) -> HttpResponse:
+    """Снимок записи дневника — сам файл, через бот (DRF-2455, §77 п.40).
+
+    Зачем через бот, а не ссылкой на хранилище: адрес MinIO внутренний для
+    контейнера — телефон его не видит; и бакет создаётся ``public-read``,
+    то есть утёкшая ссылка работала бы у любого, кто её получил. Снимки
+    еды люди делают дома, и цена такой утечки не гипотетическая.
+
+    Владение проверяет каталог (чужая запись — 404). Здесь — та же
+    проверка входа, что у остального дневника: без ``initData`` ручка не
+    отвечает вовсе, иначе знание адреса давало бы доступ к снимку.
+    """
+    from apps.integrations.ayla import (
+        NutritionAPIError,
+        external_user_id_for,
+        get_nutrition_client,
+    )
+
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    refused = _diary_entry_gate(bot_user, needs_consent=True)
+    if refused is not None:
+        return refused
+    try:
+        uuid.UUID(str(log_id))
+    except (ValueError, AttributeError, TypeError):
+        # Тот же отказ, что на чужую запись: по ответу нельзя отличить
+        # «не то имя» от «не твоя запись».
+        return _error("not_found", "photo not found", 404)
+    external_id = external_user_id_for(bot_user)
+
+    try:
+        photo = asyncio.run(
+            get_nutrition_client().food_photo(
+                external_user_id=external_id,
+                log_id=str(log_id),
+            )
+        )
+    except NutritionAPIError as exc:
+        return _food_entry_refusal(exc, external_id=external_id, step="food_photo")
+
+    if photo is None:
+        # Снимка нет: записана текстом или удалён по сроку (§134). Пустое
+        # тело с кодом 200 экран прочитал бы как «фото есть, но сломано».
+        return _error("not_found", "photo not found", 404)
+
+    content, content_type = photo
+    # DRF-2455 — тип НЕ отражается как пришёл. Mini App и эта ручка живут
+    # в одном источнике (`/` — приложение, `/api/` — бот), поэтому объект,
+    # объявленный `text/html` или `image/svg+xml`, исполнился бы в нём
+    # вместе с initData. `nosniff` закрывает только угадывание типа, а не
+    # объявленный. Перечень — тот же, что на загрузке снимка.
+    safe_type = content_type.split(";")[0].strip().lower()
+    if safe_type not in _PHOTO_TYPES_SHOWN:
+        safe_type = "application/octet-stream"
+    response = HttpResponse(content, content_type=safe_type)
+    response["Content-Disposition"] = "inline"
+    # Приватно и ненадолго: снимок принадлежит одному человеку, а через 30
+    # суток его не станет — общий кэш держать его не должен.
+    response["Cache-Control"] = "private, max-age=300"
+    return response
 
 
 @csrf_exempt

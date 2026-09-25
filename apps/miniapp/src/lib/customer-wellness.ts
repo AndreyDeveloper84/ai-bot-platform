@@ -78,9 +78,15 @@ export interface FoodDiaryEntry {
   dish_name: string;
   /** DRF-2371 — `null`, когда каталог сохранил блюдо без чисел; не ноль. */
   calories: number | null;
-  protein_g: number;
-  fat_g: number;
-  carbs_g: number;
+  /**
+   * DRF-2455 — макросы тоже бывают отсутствующими, и **по отдельности**:
+   * каталог пишет их независимо, так что «калории есть, белка нет» —
+   * не выдумка, а обычная запись. Тип это скрывал, и карточка напечатала
+   * бы «Б null».
+   */
+  protein_g: number | null;
+  fat_g: number | null;
+  carbs_g: number | null;
   meal_type: string;
   logged_at: string;
   /**

@@ -585,6 +585,20 @@ CUSTOMER_ROUTES: dict[str, Entry] = {
             "that date in the wellness/today entry shape; read-only, no edit of past days here"
         ),
     ),
+    "customer_food_photo": own(
+        "the photo file itself (image/*)",
+        via="apps.miniapp_api.views_diary_days:customer_food_photo",
+        note=(
+            "the caller's own food photo, proxied from the catalog under their "
+            "external_user_id — the catalog checks ownership and answers 404 for "
+            "someone else's entry. The file goes through the bot on purpose: the "
+            "storage address is internal to the container AND the bucket is "
+            "public-read, so a leaked link would work for anyone. Nothing about "
+            "the photo is described in the answer — no dish name, no time, no "
+            "EXIF is stripped or read here; the body is the bytes as the catalog "
+            "stored them. Type is declared from a closed list, never reflected"
+        ),
+    ),
     # --- Plan Lite (DRF-2101, own) --------------------------------------
     "customer_plan_lite": own(
         "plan_lite.plan_id",

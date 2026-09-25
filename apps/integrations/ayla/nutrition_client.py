@@ -1314,6 +1314,95 @@ class NutritionClient:
             )
         raise self._meal_edit_refusal(resp, now=now)
 
+    #: Ниже этого тело не может быть фотографией еды: самый маленький
+    #: настоящий снимок на стенде — 36 КБ, пустышки замера 25.09 — сотни
+    #: байт. Порог грубый намеренно: он отделяет «файл есть» от «файла нет
+    #: по существу», а не сортирует снимки по качеству.
+    MIN_PHOTO_RESPONSE_BYTES = 1024
+
+    #: Верхняя граница тела снимка. Вход ограничен 10 MiB
+    #: (``MAX_PHOTO_BYTES``), и ответ каталога больше этого — признак
+    #: беды, а не большой фотографии.
+    MAX_PHOTO_RESPONSE_BYTES = 12 * 1024 * 1024
+
+    async def food_photo(
+        self,
+        *,
+        external_user_id: str,
+        log_id: str,
+    ) -> tuple[bytes, str] | None:
+        """GET ``internal/food-log/{log_id}/photo/`` — сам файл снимка.
+
+        DRF-2455. Возвращает ``(байты, тип)`` или ``None``, если снимка
+        нет: записана текстом или удалён по сроку (§134). Владение
+        проверяет каталог — здесь мы только называем человека.
+
+        Прямой адрес хранилища не запрашиваем и наружу не отдаём: он
+        внутренний для контейнера, а бакет публичный, и утёкшая ссылка
+        работала бы у любого.
+        """
+        now = time.monotonic()
+        if self._circuit.is_open(now=now):
+            raise NutritionUnavailableError("circuit_open")
+
+        url = self._urls.build(f"nutrition/internal/food-log/{log_id}/photo/")
+        headers = with_request_id(
+            {
+                "X-Service-Token": self._token,
+                "X-External-User-ID": external_user_id,
+            }
+        )
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout_s) as http:
+                resp = await http.get(url, headers=headers)
+        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+            self._circuit.record_failure(now=now)
+            logger.warning(
+                "nutrition_client.food_photo.network ext=%s err=%s",
+                external_user_id,
+                type(exc).__name__,
+            )
+            raise NutritionUnavailableError(f"network: {type(exc).__name__}") from exc
+
+        if resp.status_code == 200:
+            self._circuit.record_success()
+            content_type = resp.headers.get("Content-Type", "application/octet-stream")
+            if len(resp.content) < self.MIN_PHOTO_RESPONSE_BYTES:
+                # Пустое или почти пустое тело поверхность прочитала бы как
+                # «фото есть, но сломано». Для неё это «снимка нет».
+                #
+                # Не теория: замер стенда 25.09 нашёл три живые записи из
+                # пятнадцати, чей объект существует и весит несколько сотен
+                # байт. Каталог такие уже не отдаёт, но полагаться на одну
+                # сторону нельзя — байты приходят сюда, и решение о показе
+                # принимается здесь.
+                logger.warning(
+                    "nutrition_client.food_photo.too_small ext=%s size=%d",
+                    external_user_id,
+                    len(resp.content),
+                )
+                return None
+            if len(resp.content) > self.MAX_PHOTO_RESPONSE_BYTES:
+                # Размеру, который назвал каталог, не доверяем: один
+                # неверно сохранённый объект не должен класть воркер.
+                self._circuit.record_failure(now=now)
+                raise NutritionUnavailableError("photo_too_large")
+            return resp.content, content_type
+        if resp.status_code == 404:
+            # Снимка нет — это не отказ и не сбой: штатное состояние записи.
+            self._circuit.record_success()
+            return None
+        if resp.status_code in (401, 403) or 300 <= resp.status_code < 400:
+            # Протухший токен и перенаправление на хранилище — сбой
+            # настройки, а не отказ человеку. И за ``Location`` не идём:
+            # он ведёт внутрь контура.
+            self._circuit.record_failure(now=now)
+            raise NutritionUnavailableError(f"http_{resp.status_code}")
+        if resp.status_code >= 500:
+            self._circuit.record_failure(now=now)
+            raise NutritionUnavailableError(f"http_{resp.status_code}")
+        raise NutritionAPIError(f"http_{resp.status_code}")
+
     async def restore_meal(self, *, external_user_id: str, log_id: str) -> FoodLogResponse:
         """POST ``/api/v1/nutrition/internal/food-log/{log_id}/restore/``.
 

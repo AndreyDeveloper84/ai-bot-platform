@@ -7943,6 +7943,15 @@ a {
   color: var(--c-text-secondary);
   flex: 0 0 auto;
 }
+/* DRF-2455 — БЖУ рядом с калориями: §77 п.40 просит показывать запись
+   целиком. Тише калорий на ступень размером, а цвет тот же: токена
+   «третьего» уровня текста в наборе нет, и выдумывать его здесь значило
+   бы завести цвет мимо палитры. */
+.food-scanner-diary__entry-macros {
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+  flex: 0 0 auto;
+}
 .food-scanner-diary__totals {
   background: var(--c-surface-1);
   border: 1px solid var(--c-divider);

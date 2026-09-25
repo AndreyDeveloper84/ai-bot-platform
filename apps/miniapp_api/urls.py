@@ -231,6 +231,18 @@ urlpatterns = [
         views_diary_days.customer_diary_day,
         name="customer_diary_day",
     ),
+    # DRF-2455 — снимок записи: файл идёт через бот, а не ссылкой на
+    # хранилище (адрес внутренний, бакет публичный).
+    path(
+        # `<str:>`, а не `<uuid:>`, как у соседних ручек записи: при
+        # `<uuid:>` неверный идентификатор даёт HTML-404 от резолвера, а
+        # клиент Mini App разбирает форму `{error, detail}`. Формат
+        # проверяет сама ручка и отвечает тем же отказом, что и на чужую
+        # запись, — по ответу нельзя отличить «не то имя» от «не твоё».
+        "diary/entry/<str:log_id>/photo",
+        views_diary_days.customer_food_photo,
+        name="customer_food_photo",
+    ),
     # Dashboard rollup — next booking + this-week count (bookings-only).
     path(
         "recent-activity",
