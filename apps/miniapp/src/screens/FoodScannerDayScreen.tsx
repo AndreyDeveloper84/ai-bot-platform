@@ -69,7 +69,9 @@ function macroParts(entry: FoodDiaryEntry): string[] {
     ["Ж", entry.fat_g],
     ["У", entry.carbs_g],
   ] as Array<[string, number | null | undefined]>) {
-    if (value != null) parts.push(`${label} ${Math.round(value)}`);
+    // Округление — то же, что на экране результата (один знак): иначе
+    // одно и то же блюдо читается как «Б 11» здесь и «Б 11.4» там.
+    if (value != null) parts.push(`${label} ${Math.round(value * 10) / 10}`);
   }
   return parts;
 }

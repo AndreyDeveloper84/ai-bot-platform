@@ -1314,6 +1314,11 @@ class NutritionClient:
             )
         raise self._meal_edit_refusal(resp, now=now)
 
+    #: Верхняя граница тела снимка. Вход ограничен 10 MiB
+    #: (``MAX_PHOTO_BYTES``), и ответ каталога больше этого — признак
+    #: беды, а не большой фотографии.
+    MAX_PHOTO_RESPONSE_BYTES = 12 * 1024 * 1024
+
     async def food_photo(
         self,
         *,
@@ -1356,11 +1361,27 @@ class NutritionClient:
         if resp.status_code == 200:
             self._circuit.record_success()
             content_type = resp.headers.get("Content-Type", "application/octet-stream")
+            if not resp.content:
+                # Пустое тело с кодом 200 поверхность прочитала бы как
+                # «фото есть, но сломано». Для неё это «снимка нет».
+                logger.warning("nutrition_client.food_photo.empty_body ext=%s", external_user_id)
+                return None
+            if len(resp.content) > self.MAX_PHOTO_RESPONSE_BYTES:
+                # Размеру, который назвал каталог, не доверяем: один
+                # неверно сохранённый объект не должен класть воркер.
+                self._circuit.record_failure(now=now)
+                raise NutritionUnavailableError("photo_too_large")
             return resp.content, content_type
         if resp.status_code == 404:
             # Снимка нет — это не отказ и не сбой: штатное состояние записи.
             self._circuit.record_success()
             return None
+        if resp.status_code in (401, 403) or 300 <= resp.status_code < 400:
+            # Протухший токен и перенаправление на хранилище — сбой
+            # настройки, а не отказ человеку. И за ``Location`` не идём:
+            # он ведёт внутрь контура.
+            self._circuit.record_failure(now=now)
+            raise NutritionUnavailableError(f"http_{resp.status_code}")
         if resp.status_code >= 500:
             self._circuit.record_failure(now=now)
             raise NutritionUnavailableError(f"http_{resp.status_code}")

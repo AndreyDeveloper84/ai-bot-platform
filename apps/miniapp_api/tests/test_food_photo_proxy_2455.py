@@ -16,9 +16,24 @@
 * k2 — каталог ответил «нет такого»: 404, и тела нет;
 * k3 — каталог не отвечает: отказ, а не пустая картинка;
 * k4 — **без initData ручка не отвечает вовсе**: снимок еды не должен
-  доставаться тому, кто просто знает адрес.
+  доставаться тому, кто просто знает адрес;
+* k5 — признак `has_photo` доезжает до экрана тем же значением;
+* k6 — каталог спрошен **под тем же человеком**: владение проверяет он, но
+  только по имени, которое назвал бот;
+* k7 — «снимка нет» и «каталог молчит» отвечают по-разному, иначе экран
+  перестанет их различать;
+* k8 — тип объявляется из перечня, а не отражается: Mini App и эта ручка
+  живут в одном источнике, и `text/html` исполнился бы в нём;
+* k9 — читающие ручки отвечают только на GET. Узел заведён не впрок: при
+  первой сборке этого листа новая функция встала между декораторами и
+  соседней ручкой, и та молча потеряла ограничение метода.
 
-Подмена для k4: снять `@require_init_data` — узел обязан покраснеть.
+Каталожная половина — `nutrition/tests/test_food_photo_endpoint_2455.py`
+в репозитории каталога; отсюда она не проверяется.
+
+Подмены проверены: снять `@require_init_data` — краснеют четыре узла;
+подставить чужой идентификатор человека — краснеет k6; отражать тип как
+пришёл — краснеют три узла k8.
 """
 
 from __future__ import annotations
@@ -149,3 +164,95 @@ class TestK5TheFlagReachesTheScreen:
         # И признак у каждой — тем же значением, без перевода по дороге.
         assert entries["fl-1"]["has_photo"] is True
         assert entries["fl-2"]["has_photo"] is False
+
+
+class TestK6AskedForTheRightPerson:
+    """Несущая посылка бот-половины: спрошено под ТЕМ ЖЕ человеком.
+
+    Владение проверяет каталог, но только по тому идентификатору, который
+    назвал бот. Подстановка любого другого сделала бы проверку каталога
+    бессмысленной, а узлы выше этого не замечали: k1 сверял только
+    `log_id`.
+    """
+
+    def test_the_catalog_is_asked_under_this_person(self, client, bot_user, consent) -> None:  # noqa: F811
+        from apps.integrations.ayla import external_user_id_for
+
+        patcher, catalog = _client_returning(photo=(PNG_BYTES, "image/png"))
+        with patcher:
+            resp = _photo(client, bot_user.channel_user_id)
+
+        assert resp.status_code == 200
+        assert catalog.food_photo.await_args.kwargs["external_user_id"] == (
+            external_user_id_for(bot_user)
+        )
+
+
+class TestK7RefusalsAreToldApart:
+    """404 «снимка нет» и сбой каталога — разные ответы, а не «всё 404».
+
+    Без этого узла подмена «отвечать 404 на любой отказ» проходила молча:
+    экран перестал бы отличать «фото нет» от «дневник не отвечает».
+    """
+
+    def test_absent_photo_says_not_found(self, client, bot_user, consent) -> None:  # noqa: F811
+        patcher, _ = _client_returning(photo=None)
+        with patcher:
+            resp = _photo(client, bot_user.channel_user_id)
+
+        assert resp.status_code == 404
+        assert resp.json()["error"] == "not_found"
+
+    def test_a_silent_catalog_says_unavailable(self, client, bot_user, consent) -> None:  # noqa: F811
+        from apps.integrations.ayla import NutritionUnavailableError
+
+        patcher, _ = _client_returning(exc=NutritionUnavailableError("timeout"))
+        with patcher:
+            resp = _photo(client, bot_user.channel_user_id)
+
+        assert resp.status_code == 502
+        assert resp.json()["error"] == "ayla_unavailable"
+
+
+class TestK8TheTypeIsNotReflected:
+    """Тип объявляем из перечня, а не как отдал каталог.
+
+    Mini App и эта ручка живут в одном источнике, поэтому объект,
+    объявленный `text/html`, исполнился бы в нём вместе с initData.
+    """
+
+    def test_an_image_type_passes(self, client, bot_user, consent) -> None:  # noqa: F811
+        patcher, _ = _client_returning(photo=(PNG_BYTES, "image/png"))
+        with patcher:
+            resp = _photo(client, bot_user.channel_user_id)
+
+        assert resp["Content-Type"] == "image/png"
+
+    @pytest.mark.parametrize("wire_type", ["text/html", "image/svg+xml", "application/javascript"])
+    def test_an_executable_type_is_downgraded(self, client, bot_user, consent, wire_type) -> None:  # noqa: F811
+        patcher, _ = _client_returning(photo=(b"<svg onload=alert(1)>", wire_type))
+        with patcher:
+            resp = _photo(client, bot_user.channel_user_id)
+
+        assert resp.status_code == 200
+        assert resp["Content-Type"] == "application/octet-stream"
+        assert resp["Content-Disposition"] == "inline"
+
+
+class TestK9OnlyGet:
+    """Соседняя ручка дня однажды уже потеряла ограничение метода.
+
+    Оно потерялось молча — новая функция встала между декораторами и той,
+    которой они принадлежали. Узел ниже ловит именно это.
+    """
+
+    @pytest.mark.parametrize("route", ["customer_diary_day", "customer_food_photo"])
+    def test_a_post_is_not_a_read(self, client, bot_user, consent, route) -> None:  # noqa: F811
+        from django.urls import reverse
+
+        kwargs = {"log_id": LOG_ID} if route == "customer_food_photo" else {}
+        url = reverse(f"miniapp_api:{route}", kwargs=kwargs)
+
+        resp = client.post(url, HTTP_AUTHORIZATION=_auth(bot_user.channel_user_id))
+
+        assert resp.status_code == 405

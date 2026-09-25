@@ -764,3 +764,88 @@ class TestProposedNormsAndConfirm:
         with pytest.raises(nc.NothingToConfirmError) as exc:
             await client.confirm_targets(external_user_id="bot:1")
         assert exc.value.source == "user_entered"
+
+
+class TestFoodPhoto2455:
+    """DRF-2455 — ветки самого клиента: до этого они не исполнялись нигде.
+
+    Ручка бота их разбирает, но проверялась через `AsyncMock`, то есть
+    поведение клиента никем не доказано.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_photo_comes_back_with_its_type(self) -> None:
+        def handler(_: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200, content=b"\x89PNG\r\n\x1a\nbody", headers={"Content-Type": "image/png"}
+            )
+
+        client, transport = _client_with_handler(handler)
+        _set_transport(transport)
+
+        photo = await client.food_photo(external_user_id="bot:1", log_id="log-1")
+
+        assert photo is not None
+        content, content_type = photo
+        assert content.startswith(b"\x89PNG")
+        assert content_type == "image/png"
+
+    @pytest.mark.asyncio
+    async def test_404_means_no_photo_and_is_not_a_failure(self) -> None:
+        def handler(_: httpx.Request) -> httpx.Response:
+            return httpx.Response(404, json={"error": {"code": "NOT_FOUND"}})
+
+        client, transport = _client_with_handler(handler)
+        _set_transport(transport)
+
+        assert await client.food_photo(external_user_id="bot:1", log_id="log-1") is None
+
+    @pytest.mark.asyncio
+    async def test_an_empty_body_is_not_a_photo(self) -> None:
+        """200 с пустым телом экран прочитал бы как «фото есть, но сломано»."""
+
+        def handler(_: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=b"", headers={"Content-Type": "image/jpeg"})
+
+        client, transport = _client_with_handler(handler)
+        _set_transport(transport)
+
+        assert await client.food_photo(external_user_id="bot:1", log_id="log-1") is None
+
+    @pytest.mark.asyncio
+    async def test_an_oversized_body_is_refused(self) -> None:
+        """Размеру, названному каталогом, не доверяем: воркер дороже снимка."""
+        big = b"x" * (nc.NutritionClient.MAX_PHOTO_RESPONSE_BYTES + 1)
+
+        def handler(_: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=big, headers={"Content-Type": "image/jpeg"})
+
+        client, transport = _client_with_handler(handler)
+        _set_transport(transport)
+
+        with pytest.raises(nc.NutritionUnavailableError):
+            await client.food_photo(external_user_id="bot:1", log_id="log-1")
+
+    @pytest.mark.asyncio
+    async def test_a_redirect_is_a_failure_not_a_refusal(self) -> None:
+        """Перенаправление ведёт внутрь контура — за ним не идём."""
+
+        def handler(_: httpx.Request) -> httpx.Response:
+            return httpx.Response(302, headers={"Location": "http://minio:9000/x.jpg"})
+
+        client, transport = _client_with_handler(handler)
+        _set_transport(transport)
+
+        with pytest.raises(nc.NutritionUnavailableError):
+            await client.food_photo(external_user_id="bot:1", log_id="log-1")
+
+    @pytest.mark.asyncio
+    async def test_5xx_is_a_failure(self) -> None:
+        def handler(_: httpx.Request) -> httpx.Response:
+            return httpx.Response(503)
+
+        client, transport = _client_with_handler(handler)
+        _set_transport(transport)
+
+        with pytest.raises(nc.NutritionUnavailableError):
+            await client.food_photo(external_user_id="bot:1", log_id="log-1")

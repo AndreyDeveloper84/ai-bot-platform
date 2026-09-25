@@ -134,6 +134,11 @@ def customer_diary_days(request: HttpRequest) -> HttpResponse:
     return JsonResponse(payload)
 
 
+#: Типы, которые ручка снимка готова объявить браузеру. Всё остальное
+#: уезжает как поток байтов: см. про один источник в ``customer_food_photo``.
+_PHOTO_TYPES_SHOWN = frozenset({"image/jpeg", "image/png", "image/webp"})
+
+
 @csrf_exempt
 @require_http_methods(["GET"])
 @require_init_data
@@ -177,13 +182,24 @@ def customer_food_photo(request: HttpRequest, log_id: str) -> HttpResponse:
         return _error("not_found", "photo not found", 404)
 
     content, content_type = photo
-    response = HttpResponse(content, content_type=content_type)
+    # DRF-2455 — тип НЕ отражается как пришёл. Mini App и эта ручка живут
+    # в одном источнике (`/` — приложение, `/api/` — бот), поэтому объект,
+    # объявленный `text/html` или `image/svg+xml`, исполнился бы в нём
+    # вместе с initData. `nosniff` закрывает только угадывание типа, а не
+    # объявленный. Перечень — тот же, что на загрузке снимка.
+    safe_type = content_type.split(";")[0].strip().lower()
+    if safe_type not in _PHOTO_TYPES_SHOWN:
+        safe_type = "application/octet-stream"
+    response = HttpResponse(content, content_type=safe_type)
+    response["Content-Disposition"] = "inline"
     # Приватно и ненадолго: снимок принадлежит одному человеку, а через 30
     # суток его не станет — общий кэш держать его не должен.
     response["Cache-Control"] = "private, max-age=300"
     return response
 
 
+@csrf_exempt
+@require_http_methods(["GET"])
 @require_init_data
 def customer_diary_day(request: HttpRequest) -> HttpResponse:
     """Записи одного дня — сводка каталога за дату; пустой день — пустой список."""
