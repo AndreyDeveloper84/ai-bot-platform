@@ -36,6 +36,12 @@ const INTERNAL_CHAT_API_BASE = "/api/v1/internal-chat";
 interface ErrorBody {
   error: string;
   detail: string;
+  /**
+   * Структурные подробности отказа (DRF-1708). Сегодня внутренний чат их не
+   * присылает — поле объявлено, чтобы клиент перестал быть местом, где оно
+   * теряется молча, когда сервер начнёт (DRF-2439).
+   */
+  details?: Record<string, unknown>;
 }
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -59,7 +65,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     } catch {
       /* non-JSON 5xx */
     }
-    throw new ApiError(res.status, parsed.error, parsed.detail);
+    throw new ApiError(res.status, parsed.error, parsed.detail, parsed.details);
   }
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
