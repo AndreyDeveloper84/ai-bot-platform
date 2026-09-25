@@ -200,6 +200,11 @@ DESCENDANT_ONLY: frozenset[str] = frozenset(
 # Чинить их этим листом не стал: это чужие экраны и решение о виде, а тихо
 # поправить восемнадцать раскладок внутри правки про кнопку было бы хуже,
 # чем назвать их, — ровно тот довод, по которому здесь заморожены первые 58.
+#
+# 2026-09-25 (DRF-2448): 72 → 70. Экран дня салона перешёл на живой словарь
+# кнопок там, где у него есть точная пара, и две записи стали устаревшими.
+# Число выше — историческое: оно про рост от DRF-2380, не про сегодняшнюю
+# длину листа. Текущую длину смотреть по len(BASELINE), а не по комментарию.
 BASELINE: frozenset[str] = frozenset(
     {
         "src/components/AlreadyNoted.tsx::already-noted",
@@ -262,8 +267,6 @@ BASELINE: frozenset[str] = frozenset(
         "src/screens/admin/AdminSalonDayScreen.tsx::badge",
         "src/screens/admin/AdminSalonDayScreen.tsx::btn",
         "src/screens/admin/AdminSalonDayScreen.tsx::btn--danger",
-        "src/screens/admin/AdminSalonDayScreen.tsx::btn--ghost",
-        "src/screens/admin/AdminSalonDayScreen.tsx::btn--primary",
         "src/screens/admin/AdminSalonDayScreen.tsx::btn-link",
         "src/screens/admin/AdminSalonDayScreen.tsx::callout--warning",
         "src/screens/admin/AdminSalonDayScreen.tsx::muted",

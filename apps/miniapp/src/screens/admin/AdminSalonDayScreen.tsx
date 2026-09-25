@@ -190,7 +190,7 @@ function VisitRow({
       {closable && (
         <button
           type="button"
-          className="btn btn--ghost"
+          className="ayla-btn ayla-btn--ghost"
           style={{ padding: "0 var(--s-2)", fontSize: "0.85em" }}
           onClick={() => onComplete(visit)}
           aria-label={`Визит состоялся: ${clientLabel(visit)}, ${formatTime(
@@ -204,7 +204,7 @@ function VisitRow({
       {movable && (
         <button
           type="button"
-          className="btn btn--ghost"
+          className="ayla-btn ayla-btn--ghost"
           style={{ padding: "0 var(--s-2)", fontSize: "0.85em" }}
           onClick={() => onMove(visit, masterId as string)}
           aria-label={`Перенести визит: ${clientLabel(visit)}, ${formatTime(
@@ -218,7 +218,7 @@ function VisitRow({
       {cancellable && (
         <button
           type="button"
-          className="btn btn--ghost"
+          className="ayla-btn ayla-btn--ghost"
           style={{ padding: "0 var(--s-2)", fontSize: "0.85em" }}
           onClick={() => onCancel(visit)}
           aria-label={`Отменить визит: ${clientLabel(visit)}, ${formatTime(
@@ -348,7 +348,7 @@ function CompleteDialog({
         </button>
         <button
           type="button"
-          className="btn btn--primary"
+          className="ayla-btn ayla-btn--primary"
           onClick={onConfirm}
           // Nothing to send until the canonical version has arrived —
           // and it is never invented locally.
