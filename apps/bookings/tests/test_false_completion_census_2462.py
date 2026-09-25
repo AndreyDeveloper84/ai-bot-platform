@@ -247,3 +247,406 @@ class TestTheZeroAndTheReadOnlyPromise:
 
         assert str(false_row.pk) in text
         assert str(legit_row.pk) not in text
+
+    def test_the_dry_run_says_it_changed_nothing(self, tenant) -> None:
+        _stamped(tenant, _customer(tenant, "dry"), mirror_status="cancelled")
+
+        text = _run()
+
+        assert "сухой прогон: ничего не изменено" in text
+
+
+# ─── --apply: снимает только доказанно ложное ──────────────────────────────
+
+
+class TestApplyClearsOnlyTheProvenFalse:
+    """Этап 7 промпта владельца: механизм подготовлен, запускает его владелец.
+
+    Узлы держат то, чем такая коррекция опасна: снять законное, снять
+    недоказуемое, тронуть чужое поле или чужую строку, тронуть очередь, потерять
+    идемпотентность, и довериться устаревшему вердикту переписи.
+    """
+
+    def test_a_cancelled_stamp_is_cleared_and_logged_before_after(self, tenant, caplog) -> None:
+        import logging
+
+        booking = _stamped(tenant, _customer(tenant, "clear"), mirror_status="cancelled")
+        was_at, was_by = booking.completed_at, booking.completed_by
+        assert was_at is not None and was_by == "system"  # положительно: было что снимать
+
+        logger_name = "apps.booking.management.commands.audit_false_completions"
+        target = logging.getLogger(logger_name)
+        target.addHandler(caplog.handler)
+        try:
+            with caplog.at_level(logging.WARNING, logger=logger_name):
+                text = _run("--apply")
+        finally:
+            target.removeHandler(caplog.handler)
+
+        booking.refresh_from_db()
+        assert booking.completed_at is None
+        assert booking.completed_by == ""
+        assert "ЗАПИСЬ (--apply): кандидатов 1" in text  # число показано ДО записи
+        assert "снято штампов: 1" in text
+        assert "booking.false_completion.cleared" in caplog.text
+        assert "before_completed_by='system'" in caplog.text
+
+    def test_awaiting_payment_is_a_candidate_too(self, tenant) -> None:
+        booking = _stamped(tenant, _customer(tenant, "pay"), mirror_status="pending_payment")
+
+        _run("--apply")
+
+        booking.refresh_from_db()
+        assert booking.completed_at is None
+
+    @pytest.mark.parametrize(
+        ("mirror_status", "completed_by"),
+        (
+            ("completed", "system"),
+            ("cancelled", "master:42"),
+            ("confirmed", "system"),
+            (None, "system"),
+        ),
+    )
+    def test_a_legitimate_or_unprovable_stamp_survives_apply(
+        self, tenant, mirror_status: str | None, completed_by: str
+    ) -> None:
+        """Узел B промпта: законное завершение сохраняется. И недоказуемое тоже."""
+        booking = _stamped(
+            tenant,
+            _customer(tenant, f"keep-{mirror_status}-{completed_by}"),
+            mirror_status=mirror_status,
+            completed_by=completed_by,
+        )
+
+        _run("--apply")
+
+        booking.refresh_from_db()
+        assert booking.completed_at is not None, "законное/недоказуемое завершение снято"
+        assert booking.completed_by == completed_by
+
+    def test_apply_touches_no_other_field_and_no_other_row(self, tenant) -> None:
+        false_row = _stamped(tenant, _customer(tenant, "apply-f"), mirror_status="cancelled")
+        other = _stamped(tenant, _customer(tenant, "apply-o"), mirror_status="completed")
+        before_status, before_visit = false_row.status, false_row.visit_at
+
+        _run("--apply")
+
+        false_row.refresh_from_db()
+        other.refresh_from_db()
+        assert false_row.status == before_status  # статус не наш предмет
+        assert false_row.visit_at == before_visit
+        assert other.completed_at is not None  # соседняя строка не тронута
+
+    def test_apply_dispatches_nothing_and_emits_nothing(self, tenant) -> None:
+        booking = _stamped(tenant, _customer(tenant, "queue"), mirror_status="cancelled")
+        event = DomainEvent.objects.create(
+            event_id=new_ulid(),
+            event_name="booking.completed",
+            event_version="1.0.0",
+            occurred_at=timezone.now(),
+            tenant=tenant,
+            actor={"type": "system"},
+            data={"booking_id": str(booking.pk)},
+            is_dispatched=False,
+        )
+        events_before = DomainEvent.objects.count()
+
+        _run("--apply")
+
+        event.refresh_from_db()
+        assert event.is_dispatched is False  # очередь не разобрана
+        assert DomainEvent.objects.count() == events_before  # и ничего не добавлено
+
+    def test_a_second_apply_is_a_no_op(self, tenant) -> None:
+        booking = _stamped(tenant, _customer(tenant, "idem"), mirror_status="cancelled")
+
+        first = _run("--apply")
+        second = _run("--apply")
+
+        booking.refresh_from_db()
+        assert "снято штампов: 1" in first
+        assert "снято штампов: 0" in second  # область — строки со штампом, её больше нет
+        assert booking.completed_at is None
+
+    def test_a_row_that_became_legitimate_between_census_and_write_is_skipped(
+        self, tenant, monkeypatch
+    ) -> None:
+        """Перепроверка под блокировкой: вердикт переписи не переживает изменение строки."""
+        booking = _stamped(tenant, _customer(tenant, "race"), mirror_status="cancelled")
+        from apps.booking.management.commands import audit_false_completions as mod
+
+        real_classify = mod._classify
+        calls = {"n": 0}
+
+        def _flaky(row, canon=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return real_classify(row, canon)  # перепись: ложный
+            return (mod.BUCKET_LEGITIMATE, "human_closer")  # к записи стал законным
+
+        monkeypatch.setattr(mod, "_classify", _flaky)
+
+        text = _run("--apply")
+
+        booking.refresh_from_db()
+        assert booking.completed_at is not None  # штамп сохранён
+        assert "ПРОПУСК" in text
+        assert "снято штампов: 0" in text
+        assert "пропущено (строка изменилась): 1" in text
+
+
+# ─── канон сильнее зеркала (DRF-2519) ──────────────────────────────────────
+
+
+class TestTheCanonOverridesTheStaleMirror:
+    """Замер 25.09: зеркало расходится с каноном на 5 строках из 10, и всегда так,
+    что зеркало стоит на ``confirmed``, а канон ушёл дальше. У зеркала нет даже
+    ``updated_at``: строка пишется один раз. Значит ``mirror_confirmed`` — не
+    доказательство, а корзину надо считать по источнику.
+    """
+
+    def test_mirror_confirmed_is_unprovable_not_legitimate(self, tenant) -> None:
+        """Имя корзины закреплено узлом.
+
+        Прежний докстринг обещал ``legitimate``, код давал ``unprovable``, и ни один
+        узел этого не ловил: оба исхода защищают строку, поэтому проверка следствия
+        («штамп выжил») пропускала неверное имя. Теперь проверяется имя.
+        """
+        _stamped(tenant, _customer(tenant, "conf"), mirror_status="confirmed")
+
+        text = _run()
+
+        assert "unprovable:mirror_confirmed" in text
+        assert "legitimate:mirror_confirmed" not in text
+        assert "недоказуемых (unprovable):         1" in text
+
+    def test_the_report_names_what_decided(self, tenant) -> None:
+        _stamped(tenant, _customer(tenant, "decider"), mirror_status="confirmed")
+
+        by_mirror = _run()
+
+        assert "решает:  ЗЕРКАЛО" in by_mirror
+        assert "DRF-2519" in by_mirror  # стухание названо в самом отчёте
+
+    def test_canon_awaiting_payment_makes_a_mirror_confirmed_row_false(
+        self, tenant, tmp_path
+    ) -> None:
+        """Живой случай: зеркало confirmed, канон awaiting_payment."""
+        booking = _stamped(tenant, _customer(tenant, "unpaid"), mirror_status="confirmed")
+        canon = tmp_path / "canon.txt"
+        canon.write_text(f"# сверка\n{booking.pk} awaiting_payment\n", encoding="utf-8")
+
+        text = _run("--canon-file", str(canon))
+
+        assert "решает:  КАНОН" in text
+        assert "false_by_canon:canon_awaiting_payment" in text
+        assert "ложных по канону (false_by_canon): 1" in text
+
+    def test_canon_completed_protects_a_row_the_mirror_calls_cancelled(
+        self, tenant, tmp_path
+    ) -> None:
+        """Канон сильнее и когда он ЗАЩИЩАЕТ строку, а не только когда обвиняет."""
+        booking = _stamped(tenant, _customer(tenant, "done-canon"), mirror_status="cancelled")
+        canon = tmp_path / "canon.txt"
+        canon.write_text(f"{booking.pk} completed\n", encoding="utf-8")
+
+        text = _run("--canon-file", str(canon), "--apply")
+
+        booking.refresh_from_db()
+        assert "legitimate:canon_completed" in text
+        assert booking.completed_at is not None  # снять законное канон не позволил
+        assert "снято штампов: 0" in text
+
+    def test_canon_confirmed_stays_unprovable(self, tenant, tmp_path) -> None:
+        booking = _stamped(tenant, _customer(tenant, "canon-conf"), mirror_status="cancelled")
+        canon = tmp_path / "canon.txt"
+        canon.write_text(f"{booking.pk} confirmed\n", encoding="utf-8")
+
+        text = _run("--canon-file", str(canon))
+
+        assert "unprovable:canon_confirmed" in text
+        assert "ложных по канону (false_by_canon): 0" in text
+
+    def test_apply_with_canon_clears_the_unpaid_row(self, tenant, tmp_path) -> None:
+        booking = _stamped(tenant, _customer(tenant, "unpaid-apply"), mirror_status="confirmed")
+        canon = tmp_path / "canon.txt"
+        canon.write_text(f"{booking.pk} awaiting_payment\n", encoding="utf-8")
+
+        text = _run("--canon-file", str(canon), "--apply")
+
+        booking.refresh_from_db()
+        assert booking.completed_at is None
+        assert booking.completed_by == ""
+        assert "снято штампов: 1" in text
+
+    def test_a_row_absent_from_the_canon_file_falls_back_to_the_mirror(
+        self, tenant, tmp_path
+    ) -> None:
+        """Отсутствие строки в сверке — не «канон подтвердил»."""
+        listed = _stamped(tenant, _customer(tenant, "listed"), mirror_status="confirmed")
+        _stamped(tenant, _customer(tenant, "missing"), mirror_status="cancelled")
+        canon = tmp_path / "canon.txt"
+        canon.write_text(f"{listed.pk} awaiting_payment\n", encoding="utf-8")
+
+        text = _run("--canon-file", str(canon))
+
+        assert "false_by_canon:canon_awaiting_payment" in text  # решил канон
+        assert "false_by_canon:mirror_cancelled" in text  # решило зеркало
+        assert "ложных по канону (false_by_canon): 2" in text
+
+    @pytest.mark.parametrize(
+        "content",
+        (
+            "не-два-поля\n",
+            "id status лишнее\n",
+            "# только комментарий\n",
+            "",
+        ),
+    )
+    def test_a_broken_or_empty_canon_file_is_refused_whole(
+        self, tenant, tmp_path, content: str
+    ) -> None:
+        """Половина сверки хуже её отсутствия: она выглядит как сверка."""
+        from django.core.management.base import CommandError
+
+        _stamped(tenant, _customer(tenant, "broken"), mirror_status="cancelled")
+        canon = tmp_path / "canon.txt"
+        canon.write_text(content, encoding="utf-8")
+
+        with pytest.raises(CommandError):
+            _run("--canon-file", str(canon))
+
+    def test_a_missing_canon_file_is_refused(self, tenant, tmp_path) -> None:
+        from django.core.management.base import CommandError
+
+        with pytest.raises(CommandError):
+            _run("--canon-file", str(tmp_path / "nope.txt"))
+
+
+# ─── живой канон: --canon (DRF-2519) ───────────────────────────────────────
+
+
+class TestTheLiveCanonIsTheStrongestEvidence:
+    """Идентификатор зеркала не стухает, статус стухает — значит спрашиваем канон
+    по ``appointment_id``. Вызов уже был в репозитории (``get_appointment_version``).
+    """
+
+    @staticmethod
+    def _stub(monkeypatch, answers: dict[str, str] | None = None, raises: bool = False):
+        """Подменить каноничный клиент: словарь «appointment_id → статус»."""
+        from apps.integrations.ayla import booking_client as bc
+
+        class _Stub:
+            calls: list[tuple[str, str]] = []
+
+            def get_appointment_version(self, *, external_user_id: str, booking_id: str):
+                self.calls.append((external_user_id, booking_id))
+                if raises:
+                    raise bc.BookingUnavailableError("stub_outage")
+                status = (answers or {}).get(booking_id, "confirmed")
+                return bc.AylaAppointmentVersion(
+                    id=booking_id, version=1, status=status, start_datetime="2026-09-25T06:00:00Z"
+                )
+
+        stub = _Stub()
+        monkeypatch.setattr(
+            "apps.integrations.ayla.booking_client.get_ayla_booking_client", lambda: stub
+        )
+        return stub
+
+    def test_canon_says_awaiting_payment_where_the_mirror_said_confirmed(
+        self, tenant, monkeypatch
+    ) -> None:
+        customer = _customer(tenant, "live-unpaid")
+        booking = _stamped(tenant, customer, mirror_status="confirmed")
+        appointment_id = str(
+            RemoteBookingProxy.all_tenants.filter(bot_user=customer)
+            .values_list("appointment_id", flat=True)
+            .first()
+        )
+        stub = self._stub(monkeypatch, {appointment_id: "awaiting_payment"})
+
+        text = _run("--canon")
+
+        assert "решает:  КАНОН (живой опрос" in text
+        assert "false_by_canon:canon_awaiting_payment" in text
+        assert stub.calls and stub.calls[0][1] == appointment_id  # спрошено по id зеркала
+        booking.refresh_from_db()
+        assert booking.completed_at is not None  # сухой прогон ничего не снял
+
+    def test_canon_completed_keeps_the_stamp_even_with_a_cancelled_mirror(
+        self, tenant, monkeypatch
+    ) -> None:
+        customer = _customer(tenant, "live-done")
+        booking = _stamped(tenant, customer, mirror_status="cancelled")
+        appointment_id = str(
+            RemoteBookingProxy.all_tenants.filter(bot_user=customer)
+            .values_list("appointment_id", flat=True)
+            .first()
+        )
+        self._stub(monkeypatch, {appointment_id: "completed"})
+
+        text = _run("--canon", "--apply")
+
+        booking.refresh_from_db()
+        assert "legitimate:canon_completed" in text
+        assert booking.completed_at is not None  # канон защитил строку
+        assert "снято штампов: 0" in text
+
+    def test_an_unreachable_canon_is_unprovable_and_never_cleared(
+        self, tenant, monkeypatch
+    ) -> None:
+        """«Не знаем» — не повод чистить, и зеркало вместо канона не подставляется."""
+        booking = _stamped(tenant, _customer(tenant, "live-outage"), mirror_status="cancelled")
+        self._stub(monkeypatch, raises=True)
+
+        text = _run("--canon", "--apply")
+
+        booking.refresh_from_db()
+        assert "unprovable:canon_unavailable" in text
+        assert "не ответил по 1" in text  # число названо в строке «решает»
+        assert booking.completed_at is not None
+        assert "снято штампов: 0" in text
+
+    def test_the_live_canon_overrides_the_file_snapshot(
+        self, tenant, monkeypatch, tmp_path
+    ) -> None:
+        customer = _customer(tenant, "live-over-file")
+        booking = _stamped(tenant, customer, mirror_status="confirmed")
+        appointment_id = str(
+            RemoteBookingProxy.all_tenants.filter(bot_user=customer)
+            .values_list("appointment_id", flat=True)
+            .first()
+        )
+        canon_file = tmp_path / "canon.txt"
+        canon_file.write_text(f"{booking.pk} completed\n", encoding="utf-8")
+        self._stub(monkeypatch, {appointment_id: "cancelled"})
+
+        text = _run("--canon", "--canon-file", str(canon_file))
+
+        # Файл говорил completed, живой канон говорит cancelled — верх живого.
+        assert "false_by_canon:canon_cancelled" in text
+        assert "legitimate:canon_completed" not in text
+
+    def test_a_row_with_two_mirrors_is_not_asked_about(self, tenant, monkeypatch) -> None:
+        """Ключ неточен — канон не спрашивается, и строка остаётся недоказуемой."""
+        customer = _customer(tenant, "live-ambig")
+        booking = _stamped(tenant, customer, mirror_status="cancelled")
+        visit_at = booking.visit_at
+        assert visit_at is not None
+        RemoteBookingProxy.all_tenants.create(
+            appointment_id=uuid.uuid4(),
+            tenant=tenant,
+            bot_user=customer,
+            start_at=visit_at,
+            end_at=visit_at + dt.timedelta(minutes=60),
+            status="confirmed",
+            source=RemoteBookingProxy.Source.MOBILE_APP,
+        )
+        stub = self._stub(monkeypatch, {})
+
+        text = _run("--canon")
+
+        assert stub.calls == []  # по неточному ключу канон не спрашивают
+        assert "unprovable:ambiguous" in text
