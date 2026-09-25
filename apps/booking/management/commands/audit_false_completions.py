@@ -23,34 +23,45 @@
 * ``false_by_canon`` — штамп поставлен часами (``completed_by=system``), а зеркало
   канона говорит, что визита не было: ``cancelled`` · ``no_show`` ·
   ``pending_payment`` · ``tentative``. Это и есть предмет уборки;
-* ``legitimate`` — есть положительное доказательство: зеркало ``completed``
-  **или** закрывал человек (``completed_by`` не ``system``). Такую строку не
-  трогают: «зеркало отстало, а визит был» — живой случай, и снять штамп значило бы
-  отнять у мастера состоявшийся визит;
+* ``legitimate`` — есть положительное доказательство: канон ``completed``, зеркало
+  ``completed`` **или** закрывал человек (``completed_by`` не ``system``). Такую
+  строку не трогают: снять штамп значило бы отнять у мастера состоявшийся визит;
 * ``unprovable`` — зеркала нет (``no_mirror``), их два на один ключ
-  (``ambiguous``) или в строке нет человека (``no_key``). Доказательства нет **ни
-  в одну сторону**, и обнулять здесь — та же ошибка, что штамповать: решение
-  требует id визита рядом со строкой (DRF-2461), а не догадки по времени.
+  (``ambiguous``), в строке нет человека (``no_key``) **или зеркало говорит
+  ``confirmed``**. Последнее важно: ``confirmed`` в копии значит лишь «на момент
+  заведения канон не спорил», и доказательством визита он не является.
+  Доказательства нет ни в одну сторону, и обнулять здесь — та же ошибка, что
+  штамповать.
 
 Ключ сопоставления со зеркалом — тот же, что у детектора
 (:func:`apps.bookings.completion_evidence.mirror_evidence`): одно правило, один
 дом. Две копии одного сопоставления разошлись бы молча, и уборка чистила бы не то,
 что производил детектор.
 
-# Предел, который надо знать ДО ``--apply``: зеркало — копия, а не канон
+# Зеркало стухает, поэтому решает канон: ``--canon-file`` (DRF-2519)
 
-Всё выше читает ``RemoteBookingProxy`` — **зеркало** канона в базе бота. У копии
-есть **измеренное** расхождение с источником: DRF-2437, визит ``f3deff6f…`` (бот) /
-``186a7d50…`` (каталог) — бот и зеркало говорят ``confirmed``, а каталожная
-``appointments_appointment`` — ``awaiting_payment``. Отсюда:
+Зеркало (``RemoteBookingProxy``) — копия канона, и копия **односнимочная**: у неё
+нет даже ``updated_at``, строка пишется при заведении и последующие канонические
+переходы в неё не приезжают. Замер 25.09 (read-only, обе базы): из десяти строк со
+штампом зеркало расходится с каноном на **пяти**, и всегда в одну сторону —
+зеркало стоит на ``confirmed``, канон ушёл дальше (``completed`` у трёх,
+``awaiting_payment`` у двух).
 
-* ``legitimate`` означает «зеркало не возражает», а **не** «канон подтвердил»:
-  неоплаченный визит может попасть в эту корзину, пока копия отстаёт;
-* ``false_by_canon`` от этого не страдает: там зеркало говорит ПРОТИВ штампа, и
-  ошибка возможна только в сторону отказа от уборки, а не лишней уборки;
-* поэтому перед снятием штампов состояние каждой строки-кандидата читается у
-  **источника**: ``docs/drf2462_canon_crosscheck.sql`` (read-only, база каталога).
-  Без этой сверки ``--apply`` не готов — так и сказано владельцу.
+Что это значит для чисел: **по зеркалу ложных 3, по канону 5.** Два неоплаченных
+визита зеркало прячет, показывая ``confirmed``; оба штампа поставлены НОВЫМ
+детектором после #2072 — он спросил копию, а копия не знала. Это не отменяет
+#2072 (тот убрал ключевание на локальном ``status``), но его презумпция «канон не
+спорил» на деле означает «копия, снятая при заведении, не спорит».
+
+Отсюда порядок работы:
+
+* ``--canon-file`` — сверка с источником (``docs/drf2462_canon_crosscheck.sql``,
+  read-only в базе каталога). Когда файл передан, решает **канон**;
+* без файла решает зеркало, и отчёт об этом **говорит строкой** ``решает: ЗЕРКАЛО``
+  с предупреждением: неоплаченные визиты в ложные не попадут;
+* ``false_by_canon`` по зеркалу не бывает лишним (там копия говорит ПРОТИВ
+  штампа) — он бывает **неполным**, и именно поэтому одно число без другого
+  показывать оператору нельзя.
 
 # Очередь событий — часть переписи, а не отдельный вопрос
 
@@ -100,18 +111,51 @@ BUCKET_LEGITIMATE = "legitimate"
 BUCKET_UNPROVABLE = "unprovable"
 
 
-def _classify(booking: Any) -> tuple[str, str]:
+#: Канонические состояния, при которых визит НЕ состоялся (написание каталога).
+CANON_FALSE: tuple[str, ...] = ("cancelled", "awaiting_payment", "no_show", "pending_payment")
+#: Канонические состояния, подтверждающие визит.
+CANON_TRUE: tuple[str, ...] = ("completed",)
+
+
+def _classify(booking: Any, canon: dict[str, str] | None = None) -> tuple[str, str]:
     """(корзина, причина) для одной строки со штампом.
 
-    Причина — машинное имя: ``mirror_cancelled``, ``human_closer``,
-    ``mirror_completed``, ``no_mirror``, ``ambiguous``, ``no_key``.
+    ``canon`` — сверка с ИСТОЧНИКОМ: ``{booking_request_id: канонический статус}``
+    из ``docs/drf2462_canon_crosscheck.sql``. Когда канон известен, он **сильнее
+    зеркала**, и вот почему это не украшение: замер 25.09 показал, что зеркало
+    расходится с каноном на пяти строках из десяти и всегда в одну сторону —
+    зеркало стоит на ``confirmed``, снятом при заведении строки, а канон ушёл
+    дальше (``completed`` либо ``awaiting_payment``). У ``RemoteBookingProxy`` нет
+    даже ``updated_at``: строка пишется один раз (DRF-2519).
+
+    Порядок доказательств, от сильного к слабому:
+
+    1. **канон** (если передан) — источник по ADR-0009;
+    2. **подпись человека** в ``completed_by`` — сильнее отставшей копии;
+    3. **зеркало** — копия, и её ``confirmed`` НЕ доказательство: он значит лишь
+       «на момент заведения канон не спорил». Поэтому ``mirror_confirmed``
+       попадает в ``unprovable``, а не в ``legitimate``. Прежняя редакция этого
+       докстринга обещала ``legitimate`` — код так не делал ни дня (ветка была
+       недостижима), и прав был код: по канону из семи таких строк ``completed``
+       оказался только у трёх.
     """
 
     from apps.bookings.completion_evidence import mirror_evidence
 
+    if canon:
+        canon_status = canon.get(str(booking.pk))
+        if canon_status in CANON_TRUE:
+            return (BUCKET_LEGITIMATE, f"canon_{canon_status}")
+        if canon_status in CANON_FALSE:
+            return (BUCKET_FALSE, f"canon_{canon_status}")
+        if canon_status:
+            # Канон знает строку, но его состояние не говорит ни «было», ни «не
+            # было» (``confirmed``, незнакомое): решать нечем.
+            return (BUCKET_UNPROVABLE, f"canon_{canon_status}")
+        # Канона по этой строке в файле нет — падаем к слабым доказательствам,
+        # и причина это назовёт.
+
     if booking.completed_by and booking.completed_by != SYSTEM_CLOSER:
-        # Человек назвал себя закрывающим — это положительное доказательство,
-        # и оно сильнее отставшего зеркала.
         return (BUCKET_LEGITIMATE, "human_closer")
 
     may_stamp, reason = mirror_evidence(booking)
@@ -121,14 +165,43 @@ def _classify(booking: Any) -> tuple[str, str]:
         state = reason.removeprefix("mirror_")
         if state in MIRROR_REFUSES:
             return (BUCKET_FALSE, reason)
-        # Незнакомое состояние канона: не объявляем ложным по незнанию.
+        # ``confirmed`` и незнакомые состояния: не ложный и не законный.
         return (BUCKET_UNPROVABLE, reason)
-    if may_stamp:
-        # ``mirror_confirmed`` — зеркало не возражает, но и не подтверждает
-        # приход. Штамп по нему поставлен по правилу детектора, и уборке он не
-        # принадлежит: это состояние «часы досчитали, канон не спорил».
-        return (BUCKET_LEGITIMATE, reason)
     return (BUCKET_UNPROVABLE, reason)
+
+
+def _read_canon(path: str) -> dict[str, str]:
+    """Прочитать сверку с каноном: «<booking_request_id> <статус>» по строке.
+
+    Пустой путь — пустой словарь, и это НЕ «канон подтвердил»: без файла решает
+    зеркало, а оно стухает. Битая строка — отказ целиком: половина сверки хуже
+    её отсутствия, потому что выглядит как сверка.
+    """
+
+    from pathlib import Path
+
+    from django.core.management.base import CommandError
+
+    if not path:
+        return {}
+    source = Path(path)
+    if not source.exists():
+        raise CommandError(f"файла сверки с каноном нет: {path}")
+    canon: dict[str, str] = {}
+    for number, raw in enumerate(source.read_text(encoding="utf-8").splitlines(), start=1):
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split()
+        if len(parts) != 2:
+            raise CommandError(
+                f"{path}:{number}: ожидались два поля «<booking_request_id> <статус>», "
+                f"получено {len(parts)}"
+            )
+        canon[parts[0]] = parts[1]
+    if not canon:
+        raise CommandError(f"{path}: ни одной строки сверки — пустой файл не сверка")
+    return canon
 
 
 class Command(BaseCommand):
@@ -150,6 +223,15 @@ class Command(BaseCommand):
             help="печатать id строк корзины false_by_canon (для согласования уборки)",
         )
         parser.add_argument(
+            "--canon-file",
+            default="",
+            help=(
+                "файл сверки с каноном: строки «<booking_request_id> <канонический "
+                "статус>». Канон сильнее зеркала; без файла считается по зеркалу, и "
+                "тогда неоплаченные визиты в ложные НЕ попадут (DRF-2519)"
+            ),
+        )
+        parser.add_argument(
             "--apply",
             action="store_true",
             help=(
@@ -167,6 +249,7 @@ class Command(BaseCommand):
         from apps.eventbus.models import DomainEvent
 
         slug = options["tenant"].strip()
+        canon = _read_canon(options["canon_file"])
         rows = BookingRequest.all_tenants.filter(completed_at__isnull=False)
         if slug:
             rows = rows.filter(tenant__slug=slug)
@@ -177,7 +260,7 @@ class Command(BaseCommand):
         reasons: Counter[str] = Counter()
         false_rows: list[Any] = []
         for booking in stamped:
-            bucket, reason = _classify(booking)
+            bucket, reason = _classify(booking, canon)
             buckets[bucket] += 1
             reasons[f"{bucket}:{reason}"] += 1
             if bucket == BUCKET_FALSE:
@@ -202,7 +285,16 @@ class Command(BaseCommand):
         )
         w(f"снято:   {timezone.now().isoformat(timespec='seconds')}")
         w(f"область: BookingRequest со штампом completed_at · салон {slug or 'все'}")
-        w("режим:   только чтение, ничего не меняется")
+        w("режим:   " + ("ЗАПИСЬ (--apply)" if options["apply"] else "только чтение"))
+        # Чем решалось — сильным доказательством или слабым. Без этой строки
+        # «ложных 3» и «ложных 5» выглядят одним числом о одном предмете.
+        if canon:
+            w(f"решает:  КАНОН (сверка из файла, строк {len(canon)}) · зеркало вторично")
+        else:
+            w(
+                "решает:  ЗЕРКАЛО (файла сверки нет) — ВНИМАНИЕ: зеркало стухает "
+                "(DRF-2519), неоплаченные визиты в ложные не попадут"
+            )
         w("")
         # Охват — ПЕРВЫМ числом: ноль ниже честен только на непустом охвате.
         w(f"охват (строк со штампом): {len(stamped)}")
@@ -246,7 +338,7 @@ class Command(BaseCommand):
         # записи: оператор видит, что берётся, а не узнаёт после.
         w("")
         w(f"ЗАПИСЬ (--apply): кандидатов {len(false_rows)}")
-        cleared, skipped = self._clear(false_rows, w)
+        cleared, skipped = self._clear(false_rows, w, canon)
         w("")
         w(f"снято штампов: {cleared} · пропущено (строка изменилась): {skipped}")
         w(
@@ -256,7 +348,9 @@ class Command(BaseCommand):
         )
 
     @staticmethod
-    def _clear(false_rows: list[Any], w: Any) -> tuple[int, int]:
+    def _clear(
+        false_rows: list[Any], w: Any, canon: dict[str, str] | None = None
+    ) -> tuple[int, int]:
         """Снять штамп у названных строк — по одной, под блокировкой, с перепроверкой.
 
         Три свойства, каждое по своей причине:
@@ -289,7 +383,7 @@ class Command(BaseCommand):
                 if fresh is None:
                     skipped += 1
                     continue
-                bucket, reason = _classify(fresh)
+                bucket, reason = _classify(fresh, canon)
                 if bucket != BUCKET_FALSE:
                     w(f"  ПРОПУСК {fresh.pk}: стало {bucket}:{reason}")
                     skipped += 1

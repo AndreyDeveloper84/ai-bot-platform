@@ -7,11 +7,21 @@
 -- Что в выводе: количества, разрезы и ИДЕНТИФИКАТОРЫ записей. Ни имён, ни
 -- телефонов, ни текстов — ни один столбец с персональными данными не выбирается.
 --
--- Правило классификации (то же, что в коде):
+-- Правило классификации — то же, что в коде. ИСПРАВЛЕНО 25.09: первая редакция
+-- этого файла считала `mirror_confirmed` ЗАКОННЫМ, а команда кладёт его в
+-- `unprovable`. Расхождение было на 7 строках из 10 — ровно там, где решается,
+-- трогать строку или нет. Прав оказался код: сверка с каноном показала, что из
+-- тех семи `completed` только три (DRF-2519).
 --   зеркало ищется по ключу (tenant_id, bot_user_id, start_at = visit_at);
---   legitimate  = completed_by НЕ 'system'  ИЛИ mirror_status IN ('completed','confirmed');
---   false       = completed_by = 'system'   И  mirror_status IN ('cancelled','no_show','pending_payment','tentative');
---   unprovable  = зеркала нет · зеркал больше одного · bot_user пуст · состояние зеркала незнакомое.
+--   legitimate  = completed_by НЕ 'system' и не пусто  ИЛИ  mirror_status = 'completed';
+--   false       = mirror_status IN ('cancelled','no_show','pending_payment','tentative');
+--   unprovable  = зеркала нет · зеркал больше одного · bot_user пуст ·
+--                 mirror_status = 'confirmed' · незнакомое состояние зеркала.
+--
+-- ГЛАВНОЕ: зеркало — копия без `updated_at`, и она стухает. Числа отсюда —
+-- НИЖНЯЯ граница множества ложных штампов (по замеру 25.09: 3 против 5 по
+-- канону). Окончательная разбивка — по канону: `docs/drf2462_canon_crosscheck.sql`
+-- и затем команда с `--canon-file`.
 --
 -- ЗАПУСКАТЬ ЦЕЛИКОМ В ОДНОЙ ТРАНЗАКЦИИ:
 --   BEGIN READ ONLY;  \i этот_файл  ROLLBACK;
@@ -57,7 +67,8 @@ classified AS (
              WHEN m.bot_user_id IS NULL THEN 'unprovable:no_key'
              WHEN m.mirror_count = 0 THEN 'unprovable:no_mirror'
              WHEN m.mirror_count > 1 THEN 'unprovable:ambiguous'
-             WHEN m.mirror_status IN ('completed', 'confirmed') THEN 'legitimate:mirror_' || m.mirror_status
+             WHEN m.mirror_status = 'completed' THEN 'legitimate:mirror_completed'
+             WHEN m.mirror_status = 'confirmed' THEN 'unprovable:mirror_confirmed'
              WHEN m.mirror_status IN ('cancelled', 'no_show', 'pending_payment', 'tentative')
                   THEN 'false_by_canon:mirror_' || m.mirror_status
              ELSE 'unprovable:mirror_' || coalesce(m.mirror_status, 'null')

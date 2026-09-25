@@ -379,10 +379,10 @@ class TestApplyClearsOnlyTheProvenFalse:
         real_classify = mod._classify
         calls = {"n": 0}
 
-        def _flaky(row):
+        def _flaky(row, canon=None):
             calls["n"] += 1
             if calls["n"] == 1:
-                return real_classify(row)  # перепись: ложный
+                return real_classify(row, canon)  # перепись: ложный
             return (mod.BUCKET_LEGITIMATE, "human_closer")  # к записи стал законным
 
         monkeypatch.setattr(mod, "_classify", _flaky)
@@ -394,3 +394,131 @@ class TestApplyClearsOnlyTheProvenFalse:
         assert "ПРОПУСК" in text
         assert "снято штампов: 0" in text
         assert "пропущено (строка изменилась): 1" in text
+
+
+# ─── канон сильнее зеркала (DRF-2519) ──────────────────────────────────────
+
+
+class TestTheCanonOverridesTheStaleMirror:
+    """Замер 25.09: зеркало расходится с каноном на 5 строках из 10, и всегда так,
+    что зеркало стоит на ``confirmed``, а канон ушёл дальше. У зеркала нет даже
+    ``updated_at``: строка пишется один раз. Значит ``mirror_confirmed`` — не
+    доказательство, а корзину надо считать по источнику.
+    """
+
+    def test_mirror_confirmed_is_unprovable_not_legitimate(self, tenant) -> None:
+        """Имя корзины закреплено узлом.
+
+        Прежний докстринг обещал ``legitimate``, код давал ``unprovable``, и ни один
+        узел этого не ловил: оба исхода защищают строку, поэтому проверка следствия
+        («штамп выжил») пропускала неверное имя. Теперь проверяется имя.
+        """
+        _stamped(tenant, _customer(tenant, "conf"), mirror_status="confirmed")
+
+        text = _run()
+
+        assert "unprovable:mirror_confirmed" in text
+        assert "legitimate:mirror_confirmed" not in text
+        assert "недоказуемых (unprovable):         1" in text
+
+    def test_the_report_names_what_decided(self, tenant) -> None:
+        _stamped(tenant, _customer(tenant, "decider"), mirror_status="confirmed")
+
+        by_mirror = _run()
+
+        assert "решает:  ЗЕРКАЛО" in by_mirror
+        assert "DRF-2519" in by_mirror  # стухание названо в самом отчёте
+
+    def test_canon_awaiting_payment_makes_a_mirror_confirmed_row_false(
+        self, tenant, tmp_path
+    ) -> None:
+        """Живой случай: зеркало confirmed, канон awaiting_payment."""
+        booking = _stamped(tenant, _customer(tenant, "unpaid"), mirror_status="confirmed")
+        canon = tmp_path / "canon.txt"
+        canon.write_text(f"# сверка\n{booking.pk} awaiting_payment\n", encoding="utf-8")
+
+        text = _run("--canon-file", str(canon))
+
+        assert "решает:  КАНОН" in text
+        assert "false_by_canon:canon_awaiting_payment" in text
+        assert "ложных по канону (false_by_canon): 1" in text
+
+    def test_canon_completed_protects_a_row_the_mirror_calls_cancelled(
+        self, tenant, tmp_path
+    ) -> None:
+        """Канон сильнее и когда он ЗАЩИЩАЕТ строку, а не только когда обвиняет."""
+        booking = _stamped(tenant, _customer(tenant, "done-canon"), mirror_status="cancelled")
+        canon = tmp_path / "canon.txt"
+        canon.write_text(f"{booking.pk} completed\n", encoding="utf-8")
+
+        text = _run("--canon-file", str(canon), "--apply")
+
+        booking.refresh_from_db()
+        assert "legitimate:canon_completed" in text
+        assert booking.completed_at is not None  # снять законное канон не позволил
+        assert "снято штампов: 0" in text
+
+    def test_canon_confirmed_stays_unprovable(self, tenant, tmp_path) -> None:
+        booking = _stamped(tenant, _customer(tenant, "canon-conf"), mirror_status="cancelled")
+        canon = tmp_path / "canon.txt"
+        canon.write_text(f"{booking.pk} confirmed\n", encoding="utf-8")
+
+        text = _run("--canon-file", str(canon))
+
+        assert "unprovable:canon_confirmed" in text
+        assert "ложных по канону (false_by_canon): 0" in text
+
+    def test_apply_with_canon_clears_the_unpaid_row(self, tenant, tmp_path) -> None:
+        booking = _stamped(tenant, _customer(tenant, "unpaid-apply"), mirror_status="confirmed")
+        canon = tmp_path / "canon.txt"
+        canon.write_text(f"{booking.pk} awaiting_payment\n", encoding="utf-8")
+
+        text = _run("--canon-file", str(canon), "--apply")
+
+        booking.refresh_from_db()
+        assert booking.completed_at is None
+        assert booking.completed_by == ""
+        assert "снято штампов: 1" in text
+
+    def test_a_row_absent_from_the_canon_file_falls_back_to_the_mirror(
+        self, tenant, tmp_path
+    ) -> None:
+        """Отсутствие строки в сверке — не «канон подтвердил»."""
+        listed = _stamped(tenant, _customer(tenant, "listed"), mirror_status="confirmed")
+        _stamped(tenant, _customer(tenant, "missing"), mirror_status="cancelled")
+        canon = tmp_path / "canon.txt"
+        canon.write_text(f"{listed.pk} awaiting_payment\n", encoding="utf-8")
+
+        text = _run("--canon-file", str(canon))
+
+        assert "false_by_canon:canon_awaiting_payment" in text  # решил канон
+        assert "false_by_canon:mirror_cancelled" in text  # решило зеркало
+        assert "ложных по канону (false_by_canon): 2" in text
+
+    @pytest.mark.parametrize(
+        "content",
+        (
+            "не-два-поля\n",
+            "id status лишнее\n",
+            "# только комментарий\n",
+            "",
+        ),
+    )
+    def test_a_broken_or_empty_canon_file_is_refused_whole(
+        self, tenant, tmp_path, content: str
+    ) -> None:
+        """Половина сверки хуже её отсутствия: она выглядит как сверка."""
+        from django.core.management.base import CommandError
+
+        _stamped(tenant, _customer(tenant, "broken"), mirror_status="cancelled")
+        canon = tmp_path / "canon.txt"
+        canon.write_text(content, encoding="utf-8")
+
+        with pytest.raises(CommandError):
+            _run("--canon-file", str(canon))
+
+    def test_a_missing_canon_file_is_refused(self, tenant, tmp_path) -> None:
+        from django.core.management.base import CommandError
+
+        with pytest.raises(CommandError):
+            _run("--canon-file", str(tmp_path / "nope.txt"))
