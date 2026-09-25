@@ -89,9 +89,15 @@ describe("экран дня салона больше не выдумывает 
     expect(buttons(SALON_DAY).length).toBeGreaterThan(10);
   });
 
-  it("ни одна кнопка не задаёт себе padding или fontSize", () => {
-    const guilty = buttons(SALON_DAY).filter((b) =>
-      /style=\{\{[^}]*\b(padding|fontSize)\b/.test(b),
+  it("ни одна кнопка СЛОВАРЯ не задаёт себе padding или fontSize", () => {
+    // Спрошено только про семью `ayla-btn`: компактный вид — её модификатор.
+    // На экране остаётся `btn-link` со своим `fontSize` (`:757`), но он не
+    // из словаря вовсе и назван остатком в теле PR — расширять на него
+    // значило бы требовать от этого листа чужого решения о виде.
+    const guilty = buttons(SALON_DAY).filter(
+      (b) =>
+        /className="[^"]*ayla-btn/.test(b) &&
+        /style=\{\{[^}]*\b(padding|fontSize)\b/.test(b),
     );
     expect(guilty).toEqual([]);
   });
@@ -99,14 +105,23 @@ describe("экран дня салона больше не выдумывает 
 
 describe("кнопки экрана дня салона написаны живым словарём", () => {
   it("мёртвых имён не осталось ни одного", () => {
+    // `(^|\s)` без флага `m` — ловушка: `^` совпадает только с началом
+    // ВСЕЙ строки, а мы всегда внутри неё, после `className="`. Ветка
+    // сводилась к `\s`, то есть узел требовал пробела ПЕРЕД мёртвым
+    // именем и не видел одиночного `className="btn"` — формы четырёх из
+    // пяти кнопок, которые этот лист переодевает. Краснел он только
+    // благодаря пятой, `btn btn--danger`.
     const dead = buttons(SALON_DAY).filter((b) =>
-      /className="[^"]*(^|\s)(btn|btn--danger|btn--ghost|btn--primary)(\s|")/.test(b),
+      /className="(?:[^"]*\s)?(btn|btn--danger|btn--ghost|btn--primary)(?=\s|")/.test(b),
     );
     expect(dead).toEqual([]);
   });
 
   it("«Отменить визит» одет опасным видом", () => {
-    const cancel = buttons(SALON_DAY).find((b) => b.includes("Отменить визит"));
+    // Искать по подстроке нельзя: `aria-label` кнопки строки визита тоже
+    // начинается с «Отменить визит: …», и первый же find возвращал ЕЁ —
+    // узел краснел на верном коде. Ищем подпись, а не любое вхождение.
+    const cancel = buttons(SALON_DAY).find((b) => b.includes('"Отменить визит"}'));
     expect(cancel).toBeDefined();
     expect(cancel).toMatch(/className="[^"]*ayla-btn--danger/);
   });

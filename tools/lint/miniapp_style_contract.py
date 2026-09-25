@@ -265,8 +265,6 @@ BASELINE: frozenset[str] = frozenset(
         "src/screens/admin/AdminInternalChatThreadScreen.tsx::internal-chat-thread__sign-helper",
         "src/screens/admin/AdminInternalChatThreadScreen.tsx::internal-chat-thread__sign-toggle",
         "src/screens/admin/AdminSalonDayScreen.tsx::badge",
-        "src/screens/admin/AdminSalonDayScreen.tsx::btn",
-        "src/screens/admin/AdminSalonDayScreen.tsx::btn--danger",
         "src/screens/admin/AdminSalonDayScreen.tsx::btn-link",
         "src/screens/admin/AdminSalonDayScreen.tsx::callout--warning",
         "src/screens/admin/AdminSalonDayScreen.tsx::muted",

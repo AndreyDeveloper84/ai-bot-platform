@@ -190,8 +190,7 @@ function VisitRow({
       {closable && (
         <button
           type="button"
-          className="ayla-btn ayla-btn--ghost"
-          style={{ padding: "0 var(--s-2)", fontSize: "0.85em" }}
+          className="ayla-btn ayla-btn--ghost ayla-btn--compact"
           onClick={() => onComplete(visit)}
           aria-label={`Визит состоялся: ${clientLabel(visit)}, ${formatTime(
             visit.start_at,
@@ -204,8 +203,7 @@ function VisitRow({
       {movable && (
         <button
           type="button"
-          className="ayla-btn ayla-btn--ghost"
-          style={{ padding: "0 var(--s-2)", fontSize: "0.85em" }}
+          className="ayla-btn ayla-btn--ghost ayla-btn--compact"
           onClick={() => onMove(visit, masterId as string)}
           aria-label={`Перенести визит: ${clientLabel(visit)}, ${formatTime(
             visit.start_at,
@@ -218,8 +216,7 @@ function VisitRow({
       {cancellable && (
         <button
           type="button"
-          className="ayla-btn ayla-btn--ghost"
-          style={{ padding: "0 var(--s-2)", fontSize: "0.85em" }}
+          className="ayla-btn ayla-btn--ghost ayla-btn--compact"
           onClick={() => onCancel(visit)}
           aria-label={`Отменить визит: ${clientLabel(visit)}, ${formatTime(
             visit.start_at,
@@ -281,12 +278,12 @@ function CancelDialog({
       </fieldset>
 
       <div style={{ display: "flex", gap: "var(--s-2)" }}>
-        <button type="button" className="btn" onClick={onDismiss} disabled={busy}>
+        <button type="button" className="ayla-btn ayla-btn--secondary" onClick={onDismiss} disabled={busy}>
           Не отменять
         </button>
         <button
           type="button"
-          className="btn btn--danger"
+          className="ayla-btn ayla-btn--danger"
           onClick={() => onConfirm(code)}
           disabled={busy}
         >
@@ -343,7 +340,7 @@ function CompleteDialog({
       )}
 
       <div style={{ display: "flex", gap: "var(--s-2)" }}>
-        <button type="button" className="btn" onClick={onDismiss} disabled={busy}>
+        <button type="button" className="ayla-btn ayla-btn--secondary" onClick={onDismiss} disabled={busy}>
           Не сейчас
         </button>
         <button
@@ -358,7 +355,7 @@ function CompleteDialog({
         </button>
         <button
           type="button"
-          className="btn"
+          className="ayla-btn ayla-btn--secondary"
           onClick={onNoShow}
           // The same version travels back: never invented locally.
           disabled={busy || version === null}
@@ -440,7 +437,7 @@ function MoveDialog({
         </ul>
       )}
 
-      <button type="button" className="btn" onClick={onDismiss} disabled={busy}>
+      <button type="button" className="ayla-btn ayla-btn--secondary" onClick={onDismiss} disabled={busy}>
         Не переносить
       </button>
     </div>
