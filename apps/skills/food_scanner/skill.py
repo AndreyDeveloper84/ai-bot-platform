@@ -111,6 +111,7 @@ from apps.integrations.ayla import (
     get_nutrition_client,
 )
 from apps.integrations.ayla.portion_provenance import (
+    PortionProvenance,
     portion_numbers_are_named,
     portion_provenance_of,
 )
@@ -411,6 +412,42 @@ class FoodScannerSkill:
             # порции; число исправлено человеком (§136).
             extra = {"portion_multiplier": corrected}
             entry_origin = PHOTO_ORIGIN_USER_CORRECTED
+        # DRF-2444 — ТИПОВАЯ порция в дневник без подтверждения не идёт.
+        #
+        # Подтверждение стоит ДО записи, а не пометкой после, и причина не в
+        # удобстве: число из дневника попадает в сводки — «за день», «за
+        # неделю», подсказку модели, озвучку, — а там оно **растворяется в
+        # сумме**, и места для оговорки «обычно 300 г» не существует по
+        # построению. Пометить его вниз по течению нечем; значит правило
+        # ставится на входе.
+        #
+        # Слов лист не добавляет: спрашиваем существующим `CLARIFY_PROMPT` —
+        # тем же, что и кнопка «✏️ Уточнить».
+        #
+        # Сегодня эта ветка НЕ СРАБАТЫВАЕТ: каталог `typical` ещё не выдаёт
+        # (половина A, DRF-2402, оставила значение зарезервированным). Она
+        # написана раньше значения намеренно — «читатели раньше поведения»
+        # и есть содержание разделения половин.
+        if (
+            portion_provenance_of(_stashed_portion_source(context, scan_id))
+            is PortionProvenance.TYPICAL
+            and correction is None
+        ):
+            # Кнопки — существующие, и ведут ровно туда, куда просит вопрос:
+            # «⚖️ Грамм» открывает ввод веса. Ответ без кнопок был бы тупиком
+            # (§72, DRF-2267): человек услышал бы вопрос и не увидел хода.
+            from apps.orchestrator.ui.keyboards import correction_choice_keyboard
+
+            return SkillResult(
+                reply_text=CLARIFY_PROMPT,
+                action_type="food_scan_needs_weight",
+                action_data={
+                    "scan_id": scan_id,
+                    "buttons": correction_choice_keyboard(scan_id),
+                },
+                meta={"reply_kind": "food_scanner_log_needs_weight"},
+            )
+
         # «В полёте» ДО сетевого вызова: ответ про граммы, пришедший, пока запись
         # летит, не пообещает вес, который в неё уже не попадёт.
         # Уже записанный скан не понижается: повтор ключа вернёт ту же запись.
@@ -739,6 +776,20 @@ def _correction_for(context: SkillContext, scan_id: str) -> dict | None:
     return entry if isinstance(entry, dict) else None
 
 
+def _stashed_portion_source(context: SkillContext, scan_id: str) -> Any:
+    """Происхождение порции этого скана из заначки карточки, или ``None``.
+
+    Заначка уже везёт сюда ``portion_g`` ровно затем же: на тапе «В дневник»
+    карточки нет, а решение принимается по её фактам (DRF-1579, DRF-2444).
+    Чужой ``scan_id`` читается как «не знаем» — молчаливо, потому что
+    заначка best-effort по построению и её отсутствие не должно стоить ответа.
+    """
+    card = _state(context).get(LAST_CARD_STATE_KEY)
+    if not isinstance(card, dict) or card.get("scan_id") != scan_id:
+        return None
+    return card.get("portion_source")
+
+
 def _logged_id(context: SkillContext, scan_id: str) -> str | None:
     """``log_id`` уже записанного скана, или ``None`` (не записан / «в полёте»)."""
     logged = _state(context).get(LOGGED_STATE_KEY)
@@ -779,6 +830,26 @@ def _write_logged(context: SkillContext, logged: dict) -> None:
         )
 
 
+def _card_stash(scan) -> dict:
+    """Факты карточки, которые нужны на тапе «В дневник».
+
+    ``portion_source`` кладётся ТОЛЬКО когда он есть: пустой ключ поменял бы
+    форму заначки у всех прежних сканов, а её форму держит соседний узел
+    (``test_the_card_keeps_the_scan_portion``) — и держит по делу, там своя
+    цена. Отсутствие ключа читается разборщиком как «признака нет», то есть
+    как раньше (DRF-2444).
+    """
+    stash = {
+        "scan_id": scan.scan_id,
+        "dish": scan.dish_name or "",
+        "portion_g": getattr(scan, "portion_g", None),
+    }
+    source = (getattr(scan, "nutrition", None) or {}).get("portion_source")
+    if source:
+        stash["portion_source"] = source
+    return stash
+
+
 def _stash_last_card(context: SkillContext, scan) -> None:
     """Tie ``scan_id`` → dish in ``Conversation.skill_state``. Best-effort.
 
@@ -798,11 +869,7 @@ def _stash_last_card(context: SkillContext, scan) -> None:
             LAST_CARD_STATE_KEY,
             # DRF-1579: порция, которую распознал скан, — от неё считается
             # множитель, если человек поправит вес до «В дневник».
-            {
-                "scan_id": scan.scan_id,
-                "dish": scan.dish_name or "",
-                "portion_g": getattr(scan, "portion_g", None),
-            },
+            _card_stash(scan),
         )
     except Exception:  # noqa: BLE001 — degraded memory beats a lost reply
         logger.debug(
