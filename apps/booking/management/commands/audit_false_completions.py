@@ -55,8 +55,15 @@
 
 Отсюда порядок работы:
 
-* ``--canon-file`` — сверка с источником (``docs/drf2462_canon_crosscheck.sql``,
-  read-only в базе каталога). Когда файл передан, решает **канон**;
+* ``--canon`` — **живой опрос канона** по каждой строке: ``GET appointments/{id}/``
+  через :meth:`…booking_client.AylaBookingHTTPClient.get_appointment_version`.
+  Ключ запроса — ``appointment_id`` зеркала: **идентификатор не стухает**, стухает
+  только статус (находка окна DRF-2519). Канон не ответил → строка
+  ``unprovable:canon_unavailable``, и зеркало вместо него НЕ подставляется:
+  направление его ошибки уже известно;
+* ``--canon-file`` — тот же ответ, но снимком: сверка из
+  ``docs/drf2462_canon_crosscheck.sql`` (read-only в базе каталога), для случая,
+  когда REST недоступен. Живой опрос сильнее файла и перекрывает его;
 * без файла решает зеркало, и отчёт об этом **говорит строкой** ``решает: ЗЕРКАЛО``
   с предупреждением: неоплаченные визиты в ложные не попадут;
 * ``false_by_canon`` по зеркалу не бывает лишним (там копия говорит ПРОТИВ
@@ -144,6 +151,11 @@ def _classify(booking: Any, canon: dict[str, str] | None = None) -> tuple[str, s
 
     if canon:
         canon_status = canon.get(str(booking.pk))
+        if canon_status == REASON_CANON_UNAVAILABLE:
+            # Канон спрошен и не ответил: «не знаем» — не повод чистить и не
+            # повод молчать. Зеркало здесь НЕ подставляется: оно стухает, а мы
+            # уже знаем, в какую сторону.
+            return (BUCKET_UNPROVABLE, REASON_CANON_UNAVAILABLE)
         if canon_status in CANON_TRUE:
             return (BUCKET_LEGITIMATE, f"canon_{canon_status}")
         if canon_status in CANON_FALSE:
@@ -168,6 +180,65 @@ def _classify(booking: Any, canon: dict[str, str] | None = None) -> tuple[str, s
         # ``confirmed`` и незнакомые состояния: не ложный и не законный.
         return (BUCKET_UNPROVABLE, reason)
     return (BUCKET_UNPROVABLE, reason)
+
+
+#: Причина, когда канон спросили и он не ответил. Это НЕ «состояния нет» —
+#: это «мы не знаем», и потому строка уходит в ``unprovable``, а не чистится.
+REASON_CANON_UNAVAILABLE = "canon_unavailable"
+
+
+def _read_canon_live(rows: list[Any]) -> dict[str, str]:
+    """Спросить КАНОН по каждой строке: ``GET appointments/{id}/`` (DRF-2519).
+
+    Ключ запроса — ``appointment_id`` **зеркала**: идентификатор, в отличие от
+    статуса, не стухает (зеркало пишется один раз, статусные переходы в него не
+    приезжают). Вызов уже есть в репозитории и уже отдаёт статус:
+    :meth:`apps.integrations.ayla.booking_client.AylaBookingHTTPClient.get_appointment_version`.
+
+    Канон недоступен или строка ему неизвестна → в словаре появляется
+    :data:`REASON_CANON_UNAVAILABLE`, и такая строка НЕ становится кандидатом на
+    уборку. Асимметрия та же: не снять штамп обратимо, снять не тот — нет.
+    """
+
+    from apps.booking.models import RemoteBookingProxy
+    from apps.integrations.ayla.booking_client import (
+        BookingAPIError,
+        BookingUnavailableError,
+        get_ayla_booking_client,
+    )
+    from apps.integrations.ayla.user_proxy import external_user_id_for
+
+    client = get_ayla_booking_client()
+    canon: dict[str, str] = {}
+    for row in rows:
+        if row.bot_user_id is None or row.visit_at is None:
+            continue
+        appointment_ids = list(
+            RemoteBookingProxy.all_tenants.filter(
+                tenant_id=row.tenant_id,
+                bot_user_id=row.bot_user_id,
+                start_at=row.visit_at,
+            ).values_list("appointment_id", flat=True)[:2]
+        )
+        if len(appointment_ids) != 1:
+            # Нет пары или их две — спрашивать канон не о чем (ключ неточен).
+            continue
+        try:
+            record = client.get_appointment_version(
+                external_user_id=external_user_id_for(row.bot_user),
+                booking_id=str(appointment_ids[0]),
+            )
+        except (BookingAPIError, BookingUnavailableError) as exc:
+            logger.warning(
+                "booking.false_completion.canon_unavailable booking=%s appointment=%s error=%s",
+                row.pk,
+                appointment_ids[0],
+                type(exc).__name__,
+            )
+            canon[str(row.pk)] = REASON_CANON_UNAVAILABLE
+            continue
+        canon[str(row.pk)] = str(record.status)
+    return canon
 
 
 def _read_canon(path: str) -> dict[str, str]:
@@ -223,6 +294,15 @@ class Command(BaseCommand):
             help="печатать id строк корзины false_by_canon (для согласования уборки)",
         )
         parser.add_argument(
+            "--canon",
+            action="store_true",
+            help=(
+                "спросить КАНОН по каждой строке (GET appointments/{id}/ по "
+                "appointment_id зеркала) — предпочтительный способ: статус зеркала "
+                "стухает, идентификатор нет (DRF-2519)"
+            ),
+        )
+        parser.add_argument(
             "--canon-file",
             default="",
             help=(
@@ -253,9 +333,12 @@ class Command(BaseCommand):
         rows = BookingRequest.all_tenants.filter(completed_at__isnull=False)
         if slug:
             rows = rows.filter(tenant__slug=slug)
-        rows = rows.select_related("tenant").order_by("visit_at")
+        rows = rows.select_related("tenant", "bot_user").order_by("visit_at")
 
         stamped = list(rows)
+        if options["canon"]:
+            # Живой канон сильнее файла: файл — снимок, сделанный когда-то.
+            canon = {**canon, **_read_canon_live(stamped)}
         buckets: Counter[str] = Counter()
         reasons: Counter[str] = Counter()
         false_rows: list[Any] = []
@@ -289,7 +372,13 @@ class Command(BaseCommand):
         # Чем решалось — сильным доказательством или слабым. Без этой строки
         # «ложных 3» и «ложных 5» выглядят одним числом о одном предмете.
         if canon:
-            w(f"решает:  КАНОН (сверка из файла, строк {len(canon)}) · зеркало вторично")
+            source = "живой опрос" if options["canon"] else "сверка из файла"
+            unknown = sum(1 for v in canon.values() if v == REASON_CANON_UNAVAILABLE)
+            w(
+                f"решает:  КАНОН ({source}, строк {len(canon)}"
+                + (f", не ответил по {unknown}" if unknown else "")
+                + ") · зеркало вторично"
+            )
         else:
             w(
                 "решает:  ЗЕРКАЛО (файла сверки нет) — ВНИМАНИЕ: зеркало стухает "
