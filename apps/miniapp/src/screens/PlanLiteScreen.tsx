@@ -60,6 +60,7 @@ import {
   type PlanLiteProposal,
 } from "../lib/plan-lite";
 import { screenRoot } from "../lib/screen-back";
+import { CustomerAvatarEntry } from "../components/CustomerAvatarEntry";
 import { CustomerTabBar } from "../components/CustomerTabBar";
 
 export const PLAN_LITE_ROUTE = "/customer/plan";
@@ -425,6 +426,10 @@ export function PlanLiteScreen() {
     <div className="food-scanner-screen food-scanner-screen--tab-root">
       <header className="records-screen__header">
         <h1 className="records-screen__title">{PLAN_LITE_COPY.title}</h1>
+        {/* Вход в профиль — §77 п.60. Стоит на всех экранах нижней
+            панели: вход, который есть не везде, читается как «иногда
+            можно». Имя компонент берёт сам — у этого экрана его нет. */}
+        <CustomerAvatarEntry />
       </header>
 
       <main className="food-scanner-screen__main">
