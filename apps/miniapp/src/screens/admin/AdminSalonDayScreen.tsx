@@ -420,12 +420,27 @@ function MoveDialog({
       )}
 
       {slotsState === "ready" && slots.length > 0 && (
-        <ul style={{ listStyle: "none", padding: 0, margin: "var(--s-2) 0" }}>
+        <ul
+          style={{
+            listStyle: "none",
+            padding: 0,
+            margin: "var(--s-2) 0",
+            display: "flex",
+            flexWrap: "wrap",
+            columnGap: "var(--s-2)",
+            // Ряды разводятся НА 12px, а не на 8: у компактной кнопки
+            // видимая высота 32px, а цель нажатия — невидимые 44px
+            // (`.ayla-btn--compact::after`). При зазоре 8px шаг ряда
+            // выходит 40px, и цели соседних рядов перекрываются на 4px —
+            // в выборе времени это промах по чужому слоту. 12 + 32 = 44.
+            rowGap: "var(--s-3)",
+          }}
+        >
           {slots.map((slot) => (
             <li key={slot.time}>
               <button
                 type="button"
-                className="sheet__item"
+                className="ayla-btn ayla-btn--ghost ayla-btn--compact"
                 // Nothing to send until the canonical version arrives.
                 disabled={busy || version === null}
                 onClick={() => onPick(slot)}
@@ -752,9 +767,8 @@ export function AdminSalonDayScreen({ me }: { me: MeResponse }) {
           {date !== today && (
             <button
               type="button"
-              className="btn-link"
+              className="ayla-btn ayla-btn--ghost ayla-btn--compact"
               onClick={() => setDate(today)}
-              style={{ fontSize: "var(--font-size-100)" }}
             >
               Вернуться к сегодня
             </button>

@@ -201,6 +201,15 @@ DESCENDANT_ONLY: frozenset[str] = frozenset(
 # поправить восемнадцать раскладок внутри правки про кнопку было бы хуже,
 # чем назвать их, — ровно тот довод, по которому здесь заморожены первые 58.
 #
+# 2026-09-25 (DRF-2448, продолжение): 68 → 66 (проверено прогоном, не по
+# комментарию выше — он исторический, о чём сам и предупреждает).
+# Доведены две последние записи
+# экрана дня салона — `sheet__item` (время слота в листе переноса, в цикле:
+# кнопок столько, сколько свободных окон, и это ГЛАВНОЕ действие листа) и
+# `btn-link` («вернуться к сегодня»). Правила у обоих не было вовсе — ни у
+# самого класса, ни у контейнера `.sheet`; два «совпадения» `sheet__item` в
+# стилях принадлежат другому классу, `.avatar-sheet__item`.
+#
 # 2026-09-25 (DRF-2448): 72 → 70. Экран дня салона перешёл на живой словарь
 # кнопок там, где у него есть точная пара, и две записи стали устаревшими.
 # Число выше — историческое: оно про рост от DRF-2380, не про сегодняшнюю
@@ -265,14 +274,12 @@ BASELINE: frozenset[str] = frozenset(
         "src/screens/admin/AdminInternalChatThreadScreen.tsx::internal-chat-thread__sign-helper",
         "src/screens/admin/AdminInternalChatThreadScreen.tsx::internal-chat-thread__sign-toggle",
         "src/screens/admin/AdminSalonDayScreen.tsx::badge",
-        "src/screens/admin/AdminSalonDayScreen.tsx::btn-link",
         "src/screens/admin/AdminSalonDayScreen.tsx::callout--warning",
         "src/screens/admin/AdminSalonDayScreen.tsx::muted",
         "src/screens/admin/AdminSalonDayScreen.tsx::salon-day__visit",
         "src/screens/admin/AdminSalonDayScreen.tsx::screen__header",
         "src/screens/admin/AdminSalonDayScreen.tsx::section__title",
         "src/screens/admin/AdminSalonDayScreen.tsx::sheet",
-        "src/screens/admin/AdminSalonDayScreen.tsx::sheet__item",
         "src/screens/admin/AdminSettingsPlaceholderScreen.tsx::screen__header",
         "src/screens/admin/AdminTeamScreen.tsx::screen__header",
     }
