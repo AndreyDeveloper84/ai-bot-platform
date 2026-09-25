@@ -5211,25 +5211,7 @@ a {
   /* Длинное имя ужимается, знак справа не выдавливается за край. */
   min-width: 0;
 }
-.wellness-dash__avatar {
-  flex: none;
-  width: 36px;
-  height: 36px;
-  border-radius: 50%;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  /* Те же краски, что у кружка на профиле клиента (`.profile-header__
-     avatar`): один человек — один узнаваемый кружок на обоих экранах.
-     Прежняя пара `--c-surface-2` на `--c-surface-1` давала контраст
-     ~1.05:1, то есть кружка не было видно вовсе, а инициалы читались
-     как две отбившиеся серые буквы (найдено ревью DRF-2331). */
-  background: var(--c-success);
-  color: var(--c-text-on-accent);
-  font-size: var(--font-size-100);
-  font-weight: 600;
-  letter-spacing: 0.04em;
-}
+
 /* Вход в профиль клиента — аватарка в шапке (решение владельца §77 п.60).
    Кружок 36 px, как на Главной, а цель нажатия 44×44 (WCAG 2.5.8) — за
    счёт обрамляющей кнопки, тем же приёмом, что стрелка возврата
@@ -5248,6 +5230,9 @@ a {
   justify-content: center;
   cursor: pointer;
 }
+.customer-avatar-entry:active .customer-avatar-entry__circle {
+  transform: scale(0.94);
+}
 .customer-avatar-entry:focus-visible {
   outline: 2px solid var(--c-accent);
   outline-offset: 2px;
@@ -5265,8 +5250,12 @@ a {
 .records-screen__header .customer-avatar-entry {
   margin-left: auto;
 }
-/* Краски и размер — дословно у `.wellness-dash__avatar`: один человек
-   остаётся одним узнаваемым кружком на всех экранах панели. */
+/* Краски и размер — те же, что у кружка на профиле клиента
+   (`.profile-header__avatar`, он 56 px и в другом месте): один человек —
+   один узнаваемый кружок. Прежнее правило Главной (`.wellness-dash__avatar`)
+   снято вместе с его разметкой: полное правило без потребителя — семя
+   второй реализации, а сторож стиля ходит только от класса к правилу и
+   такого не видит. */
 .customer-avatar-entry__circle {
   width: 36px;
   height: 36px;
@@ -6189,6 +6178,14 @@ a {
 }
 .records-screen__title {
   margin: 0;
+  /* Правый край шапки теперь зависит от ширины заголовка (`margin-left: auto`
+     у двери в профиль). Без сжатия длинный заголовок схлопнулся бы до
+     min-content и полез из фиксированных 56 px, уводя цель нажатия за
+     отступ. Сегодня все заголовки короткие — правило на будущее. */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: var(--font-size-300);
   font-weight: 600;
 }

@@ -14,11 +14,23 @@
  * диска, а `node:fs` в этом пакете не типизирован — `tsconfig` исключает
  * из проверки типов именно `*.build.test.ts`.
  */
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
-import { beforeEach, describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { CustomerAvatarEntry, primeDisplayName } from "./CustomerAvatarEntry";
+
+/**
+ * Ручка подменяется по-настоящему: узел об отказе обязан исполнять
+ * производственный `.catch`, а не свой собственный. Иначе он проверяет тест.
+ */
+vi.mock("../lib/customer-profile", async (importOriginal) => {
+  const real = await importOriginal<typeof import("../lib/customer-profile")>();
+  return { ...real, fetchMe: vi.fn() };
+});
+
+const { fetchMe } = await import("../lib/customer-profile");
+const fetchMeMock = fetchMe as unknown as ReturnType<typeof vi.fn>;
 
 const SOURCES = import.meta.glob(["../screens/**/*.tsx", "../components/**/*.tsx", "../App.tsx"], {
   query: "?raw",
@@ -56,6 +68,7 @@ function renderEntry(props: { displayName?: string } = {}) {
 beforeEach(() => {
   // Мемо имени — модульное: без сброса второй тест получил бы имя первого.
   primeDisplayName(null);
+  fetchMeMock.mockReset();
 });
 
 describe("дверь в профиль — на каждом экране панели", () => {
@@ -111,15 +124,48 @@ describe("дверь ведёт в профиль и работает без и�
   });
 
   it("имя приходит из общего источника, когда экран его не передал", async () => {
-    primeDisplayName(Promise.resolve("Мария Иванова"));
+    fetchMeMock.mockResolvedValueOnce({ display_name: "Мария Иванова" });
     renderEntry();
     expect(await screen.findByText("МИ")).toBeInTheDocument();
+    expect(fetchMeMock).toHaveBeenCalledTimes(1);
   });
 
-  it("отказ общего источника не снимает дверь", async () => {
-    primeDisplayName(Promise.reject(new Error("нет сети")).catch(() => ""));
+  it("экран, у которого имя есть, отдаёт его в общий источник", async () => {
+    // Иначе первый переход Главная → Дневник рисует «·» на целый круг к
+    // `/me`, хотя имя было в руках экраном раньше.
+    render(
+      <MemoryRouter>
+        <CustomerAvatarEntry displayName="Анна Петрова" />
+        <CustomerAvatarEntry />
+      </MemoryRouter>,
+    );
+    // `findAllByText` отдаёт результат по ПЕРВОМУ совпадению и второго не
+    // ждёт — ждать надо длину, иначе узел зеленел бы на одном кружке.
+    await waitFor(() => expect(screen.getAllByText("АП")).toHaveLength(2));
+    expect(fetchMeMock).not.toHaveBeenCalled();
+  });
+
+  it("отказ ручки не снимает дверь", async () => {
+    // Отказ обрабатывает КОД, а не тест. Прежняя редакция этого узла
+    // подсовывала уже обработанное обещание, поэтому производственный
+    // `.catch` не исполнялся вовсе: сними его — и ничего не краснело.
+    fetchMeMock.mockRejectedValueOnce(new Error("нет сети"));
     renderEntry();
     expect(await screen.findByText("·")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Мой профиль" })).toBeEnabled();
+  });
+
+  it("отказ не запоминается — следующий монтаж спрашивает снова", async () => {
+    // Иначе один офлайн прибивал «·» до перезапуска приложения, уже после
+    // того как сеть вернулась.
+    fetchMeMock.mockRejectedValueOnce(new Error("нет сети"));
+    const first = renderEntry();
+    expect(await screen.findByText("·")).toBeInTheDocument();
+    first.unmount();
+
+    fetchMeMock.mockResolvedValueOnce({ display_name: "Мария Иванова" });
+    renderEntry();
+    expect(await screen.findByText("МИ")).toBeInTheDocument();
+    expect(fetchMeMock).toHaveBeenCalledTimes(2);
   });
 });
