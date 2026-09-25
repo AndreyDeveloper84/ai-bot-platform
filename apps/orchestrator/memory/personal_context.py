@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 import time
 import uuid
+from typing import Any
 
 from apps.consent.memory import can_store_green_memory
 from apps.identity.models import MemoryEntry
@@ -49,6 +50,7 @@ def record_explicit_green_facts(
     sink: WriteSink | None = None,
     link_timeout_s: float | None = None,
     bridge: bool = True,
+    blocked_dedup_keys: frozenset[tuple[str, Any, Any]] | None = None,
 ) -> int:
     """Extract + persist explicit green facts from a user turn. Returns count written.
 
@@ -63,6 +65,19 @@ def record_explicit_green_facts(
     the client's 5 s timeout each) — the pre-send caller runs it after the
     send through :func:`bridge_explicit_candidates`; the mirror is idempotent
     LWW and owes the reply nothing.
+
+    DRF-2511 — ``blocked_dedup_keys`` перечисляет факты, которые ЭТОМУ вызову
+    писать нельзя, даже если живой строки с ними нет. Нужен моста ради:
+    поштучное стирание («забудь, что я веган») помечает строку удалённой, и
+    дедуп по живым её не видит — значит факт, подобранный из СТАРОГО
+    сообщения, вернулся бы **без нового заявления человека**. Это возврат
+    стёртых персональных данных.
+
+    Почему не безусловный запрет внутри писателя: различие здесь настоящее.
+    Человек, сказавший «я веган» **снова**, вправе быть услышанным — это
+    новое заявление, и блокировать его навсегда было бы неверно. Мост же
+    дочитывает то, чего никто не повторял. Поэтому запрет — свойство вызова,
+    а не правило хранилища.
 
     DRF-1035 — gate order is deliberate: consent, then extraction, then identity.
     Persisting memory needs a permanent Ayla subject, so this is an
@@ -123,9 +138,20 @@ def record_explicit_green_facts(
         if upc.soft_deleted_at is not None or upc.forget_all_requested_at is not None:
             return 0
 
+        blocked = blocked_dedup_keys or frozenset()
         written = 0
         for candidate in candidates:
             if candidate.dedup_key in seen:
+                continue
+            if candidate.dedup_key in blocked:
+                # Стёрто поштучно и не заявлено заново — возвращать нельзя.
+                logger.info(
+                    "orchestrator.memory.blocked_erased bot_user=%s kind=%s — "
+                    "факт был стёрт по просьбе человека и не повторён им "
+                    "(DRF-2511)",
+                    bot_user.id,
+                    candidate.kind,
+                )
                 continue
             entry = write_entry(
                 user_id=user_id,

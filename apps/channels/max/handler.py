@@ -218,6 +218,7 @@ from apps.orchestrator.visits import (
     route_visits,
 )
 from apps.orchestrator.memory import short_term
+from apps.orchestrator.memory.evicted_review import review_evicted
 from apps.orchestrator.said_memory import (
     OTHER_QUESTIONS as SAID_OTHER_QUESTIONS,
 )
@@ -3288,11 +3289,19 @@ def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | N
         content=event.text,
         trace_id=trace_id,
     )
-    short_term.append(
+    # DRF-2511 — то, что этот ход выдавил из окна, просматривается перед
+    # тем как исчезнуть. Чинится не «память на двадцати сообщениях», а
+    # потеря при недоступности Ayla: `record_explicit_green_facts` вернул
+    # ноль, а «следующий ход» — уже другой текст, и повтора для того
+    # сообщения не существует. Провенанс остаётся `explicit`: слова человек
+    # произнёс, опоздание не меняет автора. Гейты (согласие, дедуп,
+    # forget-all) — внутри писателя, второй копии здесь нет.
+    evicted = short_term.append(
         conversation.id,
         role="user",
         content=event.text,
     )
+    review_evicted(bot_user, evicted)
 
     # --- Safety pre-check (#1053) — BEFORE photo download + skill dispatch ---
     # A red-flag (suicide / self-harm / acute emergency) or a BLOCK phrase (drugs
