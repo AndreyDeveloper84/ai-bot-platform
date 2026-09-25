@@ -247,3 +247,150 @@ class TestTheZeroAndTheReadOnlyPromise:
 
         assert str(false_row.pk) in text
         assert str(legit_row.pk) not in text
+
+    def test_the_dry_run_says_it_changed_nothing(self, tenant) -> None:
+        _stamped(tenant, _customer(tenant, "dry"), mirror_status="cancelled")
+
+        text = _run()
+
+        assert "сухой прогон: ничего не изменено" in text
+
+
+# ─── --apply: снимает только доказанно ложное ──────────────────────────────
+
+
+class TestApplyClearsOnlyTheProvenFalse:
+    """Этап 7 промпта владельца: механизм подготовлен, запускает его владелец.
+
+    Узлы держат то, чем такая коррекция опасна: снять законное, снять
+    недоказуемое, тронуть чужое поле или чужую строку, тронуть очередь, потерять
+    идемпотентность, и довериться устаревшему вердикту переписи.
+    """
+
+    def test_a_cancelled_stamp_is_cleared_and_logged_before_after(self, tenant, caplog) -> None:
+        import logging
+
+        booking = _stamped(tenant, _customer(tenant, "clear"), mirror_status="cancelled")
+        was_at, was_by = booking.completed_at, booking.completed_by
+        assert was_at is not None and was_by == "system"  # положительно: было что снимать
+
+        logger_name = "apps.booking.management.commands.audit_false_completions"
+        target = logging.getLogger(logger_name)
+        target.addHandler(caplog.handler)
+        try:
+            with caplog.at_level(logging.WARNING, logger=logger_name):
+                text = _run("--apply")
+        finally:
+            target.removeHandler(caplog.handler)
+
+        booking.refresh_from_db()
+        assert booking.completed_at is None
+        assert booking.completed_by == ""
+        assert "ЗАПИСЬ (--apply): кандидатов 1" in text  # число показано ДО записи
+        assert "снято штампов: 1" in text
+        assert "booking.false_completion.cleared" in caplog.text
+        assert "before_completed_by='system'" in caplog.text
+
+    def test_awaiting_payment_is_a_candidate_too(self, tenant) -> None:
+        booking = _stamped(tenant, _customer(tenant, "pay"), mirror_status="pending_payment")
+
+        _run("--apply")
+
+        booking.refresh_from_db()
+        assert booking.completed_at is None
+
+    @pytest.mark.parametrize(
+        ("mirror_status", "completed_by"),
+        (
+            ("completed", "system"),
+            ("cancelled", "master:42"),
+            ("confirmed", "system"),
+            (None, "system"),
+        ),
+    )
+    def test_a_legitimate_or_unprovable_stamp_survives_apply(
+        self, tenant, mirror_status: str | None, completed_by: str
+    ) -> None:
+        """Узел B промпта: законное завершение сохраняется. И недоказуемое тоже."""
+        booking = _stamped(
+            tenant,
+            _customer(tenant, f"keep-{mirror_status}-{completed_by}"),
+            mirror_status=mirror_status,
+            completed_by=completed_by,
+        )
+
+        _run("--apply")
+
+        booking.refresh_from_db()
+        assert booking.completed_at is not None, "законное/недоказуемое завершение снято"
+        assert booking.completed_by == completed_by
+
+    def test_apply_touches_no_other_field_and_no_other_row(self, tenant) -> None:
+        false_row = _stamped(tenant, _customer(tenant, "apply-f"), mirror_status="cancelled")
+        other = _stamped(tenant, _customer(tenant, "apply-o"), mirror_status="completed")
+        before_status, before_visit = false_row.status, false_row.visit_at
+
+        _run("--apply")
+
+        false_row.refresh_from_db()
+        other.refresh_from_db()
+        assert false_row.status == before_status  # статус не наш предмет
+        assert false_row.visit_at == before_visit
+        assert other.completed_at is not None  # соседняя строка не тронута
+
+    def test_apply_dispatches_nothing_and_emits_nothing(self, tenant) -> None:
+        booking = _stamped(tenant, _customer(tenant, "queue"), mirror_status="cancelled")
+        event = DomainEvent.objects.create(
+            event_id=new_ulid(),
+            event_name="booking.completed",
+            event_version="1.0.0",
+            occurred_at=timezone.now(),
+            tenant=tenant,
+            actor={"type": "system"},
+            data={"booking_id": str(booking.pk)},
+            is_dispatched=False,
+        )
+        events_before = DomainEvent.objects.count()
+
+        _run("--apply")
+
+        event.refresh_from_db()
+        assert event.is_dispatched is False  # очередь не разобрана
+        assert DomainEvent.objects.count() == events_before  # и ничего не добавлено
+
+    def test_a_second_apply_is_a_no_op(self, tenant) -> None:
+        booking = _stamped(tenant, _customer(tenant, "idem"), mirror_status="cancelled")
+
+        first = _run("--apply")
+        second = _run("--apply")
+
+        booking.refresh_from_db()
+        assert "снято штампов: 1" in first
+        assert "снято штампов: 0" in second  # область — строки со штампом, её больше нет
+        assert booking.completed_at is None
+
+    def test_a_row_that_became_legitimate_between_census_and_write_is_skipped(
+        self, tenant, monkeypatch
+    ) -> None:
+        """Перепроверка под блокировкой: вердикт переписи не переживает изменение строки."""
+        booking = _stamped(tenant, _customer(tenant, "race"), mirror_status="cancelled")
+        from apps.booking.management.commands import audit_false_completions as mod
+
+        real_classify = mod._classify
+        calls = {"n": 0}
+
+        def _flaky(row):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return real_classify(row)  # перепись: ложный
+            return (mod.BUCKET_LEGITIMATE, "human_closer")  # к записи стал законным
+
+        monkeypatch.setattr(mod, "_classify", _flaky)
+
+        text = _run("--apply")
+
+        booking.refresh_from_db()
+        assert booking.completed_at is not None  # штамп сохранён
+        assert "ПРОПУСК" in text
+        assert "снято штампов: 0" in text
+        assert "пропущено (строка изменилась): 1" in text
