@@ -253,6 +253,102 @@ class TestThePersonSeesTheirOwnValues:
         assert "card-" not in text
 
 
+# --- the count is what Ayla remembers (DRF-2541) ------------------------------
+
+
+def _entry(ayla: uuid.UUID, *, deleted: bool = False) -> MemoryEntry:
+    upc = UserPersonalContext.objects.get(user_id=ayla)
+    extra = {}
+    if deleted:
+        extra = {
+            "soft_deleted_at": timezone.now(),
+            "deletion_reason": MemoryEntry.DELETION_REASON_USER_DELETE,
+            "status": MemoryEntry.STATUS_DELETED,
+        }
+    return MemoryEntry.objects.create(
+        user_id=ayla,
+        personal_context=upc,
+        sensitivity_zone=MemoryEntry.SENSITIVITY_GREEN,
+        source=MemoryEntry.SOURCE_EXPLICIT,
+        provenance=MemoryEntry.PROVENANCE_USER_STATED,
+        consent_at=timezone.now(),
+        content={"likes": "педикюр"},
+        **extra,
+    )
+
+
+def _both_readings(count: int) -> None:
+    card = build_card("max", CID)
+    assert card.memory_entries == count
+    # Two readers of one number: the person (/whoami) and the operator.
+    assert f"записей в памяти: {count}" in render_for_person(card, tenant_slug=None)
+    assert f"записей памяти: {count}" in render_for_operator(card)
+
+
+class TestTheCountIsWhatAylaRemembers:
+    def test_the_count_is_the_live_rows_not_the_table(self, salon, other, third):
+        """Reverse control: a non-zero count equal to the LIVE rows.
+
+        Without it a zero after «забудь всё» could be an empty table. A
+        tombstone from an earlier «забудь» is a row, not a memory.
+        """
+        home = _person(salon, other, third)
+        _entry(home.ayla_user_id)
+        _entry(home.ayla_user_id, deleted=True)
+
+        assert MemoryEntry.objects.filter(user_id=home.ayla_user_id).count() == 3
+        _both_readings(2)
+
+    def test_forget_all_through_the_command_brings_both_readings_to_zero(
+        self, salon, other, third, monkeypatch
+    ):
+        """The product path: «забудь всё» → «удалить», then the sweep's memory step.
+
+        The command only files the request; the hourly sweep soft-deletes
+        later. The person must see 0 in BOTH windows — before the sweep
+        (request filed, rows still unmarked) and after it (tombstones). The
+        memory step is the exact call the sweep makes
+        (``forget_all_sweep.sweep_forget_all`` →
+        ``soft_delete_all_zones_for_forget_all``); the sweep's dialogue and
+        Redis halves are not this leaf's subject.
+        """
+        from apps.identity.services.memory_deleter import (
+            soft_delete_all_zones_for_forget_all,
+        )
+        from apps.persona import memory_commands
+
+        home = _person(salon, other, third)
+        # The memory door opens for a linked customer (person_context_gate);
+        # that is who says «забудь всё» in the product.
+        BotUser.all_tenants.filter(pk=home.pk).update(customer_status=BotUser.CustomerStatus.LINKED)
+        home.refresh_from_db()
+        _entry(home.ayla_user_id)
+        _both_readings(2)
+
+        # Not this leaf's subject: the catalog half and the dialogue half.
+        monkeypatch.setattr(memory_commands, "_bridge_erase", lambda bot_user: "erased")
+        monkeypatch.setattr(memory_commands, "_anonymize_dialogue", lambda bot_user: None)
+
+        res = memory_commands.handle_memory_command(
+            user_id=home.ayla_user_id,
+            text="удалить",
+            last_assistant_text=memory_commands._FORGET_ALL_MARKER,
+            bot_user=home,
+        )
+        assert res is not None and res.claims_done
+
+        _both_readings(0)
+
+        soft_delete_all_zones_for_forget_all(home.ayla_user_id, request_id=uuid.uuid4())
+        assert (
+            MemoryEntry.objects.filter(
+                user_id=home.ayla_user_id, soft_deleted_at__isnull=False
+            ).count()
+            == 2
+        )
+        _both_readings(0)
+
+
 # --- the doors ---------------------------------------------------------------------
 
 
