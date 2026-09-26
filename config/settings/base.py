@@ -57,6 +57,26 @@ SECRET_KEY = os.environ.get(
     "django-insecure-sprint0-scaffold-only-replace-before-staging",
 )
 
+# DRF-2555 — ключ шифрования полей (`encrypt(...)`: память, секреты тенантов).
+#
+# ⚠ SECRET_KEY НА СЕРВЕРЕ С ДАННЫМИ НЕ РОТИРУЕТСЯ. Сегодня это потеря всей
+# зашифрованной памяти, и эта настройка этого НЕ меняет. У каждого
+# зашифрованного значения две зависимости от SECRET_KEY:
+#   1. ключ AES — PBKDF2(CRYPTOGRAPHY_KEY or SECRET_KEY)
+#      (django_cryptography/conf.py). Эту снимает настройка ниже;
+#   2. подпись HMAC — FernetSigner, key = settings.SECRET_KEY, сырой
+#      (django_cryptography/core/signing.py). decrypt() проверяет её ПЕРВОЙ.
+#      Настройкой не развязывается; развязка — DRF-2562.
+# Узлы на обе: apps/identity/tests/test_crypto_key_from_env_2555.py.
+#
+# Переменная — DJANGO_CRYPTOGRAPHY_KEY (соглашение проекта: DJANGO_SECRET_KEY
+# → SECRET_KEY); имя настройки CRYPTOGRAPHY_KEY диктует библиотека, в
+# окружении оно не читается. Не задана или пуста → None → прежний вывод из
+# SECRET_KEY, существующие данные читаются. Первое значение на сервере с
+# данными — ТЕКУЩЕЕ значение SECRET_KEY: производный ключ AES совпадёт байт
+# в байт.
+CRYPTOGRAPHY_KEY = os.environ.get("DJANGO_CRYPTOGRAPHY_KEY") or None
+
 DEBUG = os.environ.get("DJANGO_DEBUG", "False").lower() == "true"
 
 ALLOWED_HOSTS: list[str] = os.environ.get("DJANGO_ALLOWED_HOSTS", "").split(",")
