@@ -19,7 +19,9 @@
 
 from __future__ import annotations
 
+import inspect
 import re
+import uuid
 from pathlib import Path
 
 import pytest
@@ -119,39 +121,100 @@ def test_the_origin_split_is_present_but_is_not_the_bridge_marker():
     assert "lg.source" in _sql()
 
 
-@pytest.mark.django_db
-def test_the_before_mark_of_the_bridge_is_in_the_output_and_is_zero_today():
-    """Настоящая отметка «до»: `source_event_id`, и сегодня она ноль.
-
-    Почему именно она. Мосту нужен ключ идемпотентности (требование листа), а
-    `source_event_id` — он и есть по §3.1. Сегодняшний писатель его НИКОГДА не
-    ставит, и это записано в самом коде: «source_event_id / evidence_refs …
-    are never fabricated here» (`apps/identity/services/memory_writer.py`).
-
-    Отсюда свойство, ради которого маркер и выбран: ноль по построению нельзя
-    уничтожить правкой. После моста та же строка станет счётчиком его урожая, и
-    тем же запросом.
-
-    Узел проверяет ДВЕ вещи, и вторая важнее: что строка есть в выводе, и что
-    утверждение про «никогда не ставит» всё ещё верно ПО КОДУ. Если завтра
-    кто-нибудь начнёт писать событийный ключ, маркер молча перестанет быть
-    маркером — а разницу спишут на мост.
-    """
-    writer = (
-        SQL_PATH.parents[2] / "apps" / "identity" / "services" / "memory_writer.py"
-    ).read_text(encoding="utf-8")
-    assert "source_event_id / evidence_refs / derivation_method are never" in writer, (
-        "писатель больше не обещает не ставить `source_event_id` — маркер "
-        "отметки «до» надо выбирать заново"
-    )
-
+def _metrics() -> dict[str, str]:
     with connection.cursor() as cursor:
         cursor.execute(_statement())
-        rows = {row[2]: row[3] for row in cursor.fetchall()}
+        return {row[2]: row[3] for row in cursor.fetchall()}
 
-    marker = [m for m in rows if "ОТМЕТКА «ДО»" in m and "source_event_id" in m]
-    assert marker, sorted(rows)
-    assert rows[marker[0]] == "0", f"{marker[0]} = {rows[marker[0]]}, а ожидался 0"
+
+def _one(rows: dict[str, str], *needles: str) -> str:
+    found = [m for m in rows if all(n in m for n in needles)]
+    assert len(found) == 1, (needles, sorted(rows))
+    return found[0]
+
+
+#: Боевой код, в котором ищется писатель событийного ключа: всё под `apps/`,
+#: кроме узлов и миграций. Модель поле объявляет, писатель о нём молчит вслух.
+_KNOWN_MENTIONS = {
+    "apps/identity/models.py",
+    "apps/identity/services/memory_writer.py",
+}
+
+
+def test_nobody_writes_the_event_key():
+    """Ноль сторожа держится на том, что событийный ключ не пишет НИКТО.
+
+    Первая редакция опиралась на фразу в комментарии писателя — это охрана
+    прозы: фраза переживает и дефект, и починку. Здесь перепись носителей по
+    всему боевому коду: любое новое упоминание `source_event_id` вне двух
+    известных мест — сигнал, что ноль в выводе перестал значить «никто».
+
+    Первая редакция называла ноль «отметкой до» для моста DRF-2511 и ждала, что
+    мост начнёт ставить ключ. Мост (#2080) пишет через `write_entry`, у которого
+    такого параметра нет, — это и проверяется вторым утверждением.
+    """
+    from apps.identity.services.memory_writer import write_entry
+
+    assert "source_event_id" not in inspect.signature(write_entry).parameters
+
+    apps_dir = SQL_PATH.parents[2] / "apps"
+    scanned = 0
+    mentions = set()
+    for path in apps_dir.rglob("*.py"):
+        rel = path.relative_to(SQL_PATH.parents[2]).as_posix()
+        if "/tests/" in rel or "/migrations/" in rel or path.name.startswith("test_"):
+            continue
+        scanned += 1
+        if "source_event_id" in path.read_text(encoding="utf-8"):
+            mentions.add(rel)
+
+    assert scanned > 300, f"просмотрено {scanned} файлов — перепись не туда смотрит"
+    assert mentions == _KNOWN_MENTIONS, (
+        f"просмотрено {scanned} файлов; новые носители `source_event_id`: "
+        f"{sorted(mentions - _KNOWN_MENTIONS)}, пропавшие: {sorted(_KNOWN_MENTIONS - mentions)}"
+    )
+
+
+@pytest.mark.django_db(transaction=True)
+def test_the_guard_zero_is_read_over_rows_written_by_the_product(settings):
+    """Ноль сторожа снят на НЕПУСТОМ охвате, и сторож умеет не быть нулём.
+
+    На пустой базе «0» дал бы и запрос, считающий не то (проверено подменой:
+    `IS NOT NULL` → `IS NULL` на пустой базе проходил зелёным). Поэтому строки
+    пишет продуктовый путь входа — `record_explicit_green_facts`, тот же, через
+    который пишет и мост, — а не прямой `create`.
+    """
+    from apps.consent.services import record_global_consent
+    from apps.identity.models import MemoryEntry
+    from apps.identity.services import resolve_or_create_global_bot_user
+    from apps.orchestrator.memory.personal_context import record_explicit_green_facts
+
+    settings.STRICT_TENANT_SCOPE = "strict"
+
+    written = 0
+    for uid in ("mem-2513-a", "mem-2513-b"):
+        bu = resolve_or_create_global_bot_user(
+            channel="max", channel_user_id=uid, ayla_user_id=uuid.uuid4()
+        )
+        record_global_consent(bu, source="welcome")
+        # bridge=False: зеркало в Ayla — REST наружу, к локальной строке отношения не имеет.
+        written += record_explicit_green_facts(bu, "кстати, я веган", bridge=False)
+
+    live = MemoryEntry.objects.filter(sensitivity_zone="green", soft_deleted_at__isnull=True)
+    assert written == 2 and live.count() == 2, (written, live.count())
+
+    rows = _metrics()
+    coverage = _one(rows, "ОХВАТ СТОРОЖА")
+    guard = _one(rows, "СТОРОЖ:", "source_event_id")
+    assert rows[coverage] == "2", f"{coverage} = {rows[coverage]}"
+    assert rows[guard] == "0", f"{guard} = {rows[guard]} при охвате {rows[coverage]}"
+
+    # Подмена: одна строка получает событийный ключ — сторож обязан это увидеть,
+    # а охват не сдвинуться.
+    live.filter(pk=live.first().pk).update(source_event_id=uuid.uuid4())
+    rows = _metrics()
+    assert rows[guard] == "1", f"{guard} = {rows[guard]} после подмены"
+    assert rows[coverage] == "2", f"{coverage} = {rows[coverage]} после подмены"
 
 
 @pytest.mark.django_db
