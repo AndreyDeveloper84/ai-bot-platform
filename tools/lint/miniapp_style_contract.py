@@ -366,6 +366,35 @@ def used_classes(tsx: str) -> set[str]:
     return names
 
 
+def class_lines(tsx: str, name: str) -> list[int]:
+    """Номер строки КАЖДОГО статического ``className="..."``, где стоит ``name``.
+
+    DRF-2550: сторож называл файл и класс, но не строку, и место искали
+    глазами. Номер — строки, на которой начинается ``className=``; если
+    литерал переносится на следующие строки, названа первая.
+    """
+    return [
+        tsx.count("\n", 0, match.start()) + 1
+        for match in CLASS_ATTR.finditer(tsx)
+        if name in match.group(1).split()
+    ]
+
+
+def annotate(app_root: Path, key: str, message: str) -> list[str]:
+    """Одна аннотация ``::error`` на каждое место класса, с ``line=``.
+
+    GitHub ставит аннотацию на строку дифа только при ``line=``; без него
+    она висит на файле целиком. Мест у класса бывает несколько — названо
+    каждое, а не первое.
+    """
+    path, name = key.split("::", 1)
+    tsx = (app_root / path).read_text(encoding="utf-8")
+    return [
+        f"::error file=apps/miniapp/{path},line={line}::{message}"
+        for line in class_lines(tsx, name)
+    ]
+
+
 def scan(app_root: Path) -> tuple[list[str], list[str], int]:
     """``(без правила, только под предком, сколько классов просмотрено)``.
 
@@ -532,19 +561,22 @@ def main(argv: list[str]) -> int:
     stale_descendant = sorted(DESCENDANT_ONLY - set(descendant_only))
 
     for key in new_debt:
-        path, name = key.split("::", 1)
-        print(f"::error file=apps/miniapp/{path}::class `{name}` has no rule in src/styles/")
+        name = key.split("::", 1)[1]
+        for line in annotate(app_root, key, f"class `{name}` has no rule in src/styles/"):
+            print(line)
     for key in stale:
         print(
             f"::error::BASELINE entry `{key}` is styled now — delete the line "
             "from tools/lint/miniapp_style_contract.py"
         )
     for key in new_descendant:
-        path, name = key.split("::", 1)
-        print(
-            f"::error file=apps/miniapp/{path}::class `{name}` has a rule only "
-            "under an ancestor — here it renders unstyled (DRF-2380)"
+        name = key.split("::", 1)[1]
+        message = (
+            f"class `{name}` has a rule only under an ancestor — "
+            "here it renders unstyled (DRF-2380)"
         )
+        for line in annotate(app_root, key, message):
+            print(line)
     for key in stale_descendant:
         print(
             f"::error::DESCENDANT_ONLY entry `{key}` has a first-level rule now "
