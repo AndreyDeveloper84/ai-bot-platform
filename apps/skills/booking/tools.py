@@ -3715,6 +3715,14 @@ def _as_uuid(value: Any) -> Any:
         return None
 
 
+#: DRF-2537 — отметка «последнее событие канона неизвестно». Её ставят записи
+#: зеркала, которые делает сам бот (не применение события канона).
+_UNKNOWN_CANON_EVENT: dict[str, Any] = {
+    "last_applied_event_name": "",
+    "last_applied_event_at": None,
+}
+
+
 def _upsert_remote_booking_proxy(
     *,
     tenant: Any,
@@ -3752,6 +3760,11 @@ def _upsert_remote_booking_proxy(
             "end_at": end_at,
             "status": RemoteBookingProxy.Status.CONFIRMED,
             "source": RemoteBookingProxy.Source.AUTOMATION,
+            # DRF-2537: бот пишет статус сам (константой), а не применяет
+            # событие канона, — отметка последнего события становится
+            # «неизвестно». Оставить прежнюю значило бы подписать константу
+            # чужим событием: правдоподобно и неверно.
+            **_UNKNOWN_CANON_EVENT,
         }
         # Only write what we actually know. Ayla's appointment payload does
         # not expose the salon service at all, so a reschedule whose
@@ -3834,6 +3847,7 @@ def _mirror_cancel(*, tenant: Any, record_id: int | str) -> None:
 
         RemoteBookingProxy.all_tenants.filter(tenant=tenant, appointment_id=appt).update(
             status=RemoteBookingProxy.Status.CANCELLED,
+            **_UNKNOWN_CANON_EVENT,  # DRF-2537: запись бота, не событие канона
         )
     except Exception:  # noqa: BLE001 — mirror write is best-effort
         logger.exception("booking.proxy.cancel_failed appt=%s", record_id)
