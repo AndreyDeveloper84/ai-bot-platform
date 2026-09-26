@@ -46,6 +46,19 @@ _ERASURE = (
 )
 
 
+def _writes_in(tree: ast.AST, rel: str, attr_writes: list[str], kw_writes: list) -> None:
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                if isinstance(target, ast.Attribute) and target.attr == "summary":
+                    attr_writes.append(f"{rel}:{node.lineno}")
+        if isinstance(node, ast.Call):
+            for keyword in node.keywords:
+                if keyword.arg == "summary":
+                    kw_writes.append((rel, ast.unparse(node.func), keyword.value))
+
+
 def _census() -> tuple[int, list[str], list[tuple[str, str, ast.expr]]]:
     scanned = 0
     attr_writes: list[str] = []
@@ -55,18 +68,25 @@ def _census() -> tuple[int, list[str], list[tuple[str, str, ast.expr]]]:
         if "/tests/" in rel or "/migrations/" in rel or path.name.startswith("test_"):
             continue
         scanned += 1
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign)):
-                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-                for target in targets:
-                    if isinstance(target, ast.Attribute) and target.attr == "summary":
-                        attr_writes.append(f"{rel}:{node.lineno}")
-            if isinstance(node, ast.Call):
-                for keyword in node.keywords:
-                    if keyword.arg == "summary":
-                        kw_writes.append((rel, ast.unparse(node.func), keyword.value))
+        _writes_in(ast.parse(path.read_text(encoding="utf-8")), rel, attr_writes, kw_writes)
     return scanned, attr_writes, kw_writes
+
+
+def test_the_census_sees_a_writer_when_there_is_one():
+    """Калибровка: тот же обход находит присваивание, которого в боевом коде нет.
+
+    Ноль присваиваний ниже осмыслен только рядом с этим: иначе «никто не
+    пишет» и «обход не умеет видеть присваивание» неотличимы.
+    """
+    attr_writes: list[str] = []
+    kw_writes: list = []
+    snippet = (
+        "upc.summary = 'x'\nctx.summary += 'y'\nUserPersonalContext.objects.create(summary='z')\n"
+    )
+    _writes_in(ast.parse(snippet), "calibration.py", attr_writes, kw_writes)
+
+    assert attr_writes == ["calibration.py:1", "calibration.py:2"], attr_writes
+    assert [func for _, func, _ in kw_writes] == ["UserPersonalContext.objects.create"]
 
 
 def test_nobody_writes_the_summary():
@@ -82,6 +102,13 @@ def test_nobody_writes_the_summary():
     assert len(erasure) == 1, f"обнуление в forget_all_sweep не найдено: {kw_writes}"
     value = erasure[0][2]
     assert isinstance(value, ast.Constant) and value.value is None, ast.unparse(value)
+
+    # Находимость: обход обязан увидеть каждый известный вызов с summary= —
+    # тогда «новых нет» доказано прибором, который видит существующее.
+    seen = {(rel, func.rsplit(".", 1)[-1]) for rel, func, _ in kw_writes}
+    assert _NOT_THE_FIELD <= seen, f"не найдены известные вызовы: {sorted(_NOT_THE_FIELD - seen)}"
+    # 5 известных вызовов не про поле + 1 обнуление: прибор видит все шесть.
+    assert len(kw_writes) >= 6, kw_writes
 
     unknown = sorted(
         f"{rel}: {func}(summary=…)"
