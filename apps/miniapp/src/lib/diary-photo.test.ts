@@ -62,7 +62,10 @@ afterEach(() => {
 });
 
 function photoResponse(): Response {
-  return new Response(new Blob(["jpeg"], { type: "image/jpeg" }), { status: 200 });
+  return new Response(new Uint8Array([0xff, 0xd8, 0xff]), {
+    status: 200,
+    headers: { "Content-Type": "image/jpeg" },
+  });
 }
 
 describe("к прокси ходим только за снимком, который есть", () => {
@@ -77,7 +80,10 @@ describe("к прокси ходим только за снимком, кото�
 
   it("has_photo=true → один запрос к прокси с initData, картинке — blob-адрес", async () => {
     fetchMock.mockResolvedValueOnce(
-      new Response(new Blob(["jpeg-bytes"], { type: "image/jpeg" }), { status: 200 }),
+      new Response(new Uint8Array([0xff, 0xd8, 0xff]), {
+    status: 200,
+    headers: { "Content-Type": "image/jpeg" },
+  }),
     );
 
     const src = await loadDiaryEntryPhoto(WITH_PHOTO);

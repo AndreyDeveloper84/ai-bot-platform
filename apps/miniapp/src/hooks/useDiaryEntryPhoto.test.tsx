@@ -42,7 +42,10 @@ function trackObjectUrls() {
 }
 
 function photoResponse(): Response {
-  return new Response(new Blob(["jpeg"], { type: "image/jpeg" }), { status: 200 });
+  return new Response(new Uint8Array([0xff, 0xd8, 0xff]), {
+    status: 200,
+    headers: { "Content-Type": "image/jpeg" },
+  });
 }
 
 const strict = ({ children }: { children: ReactNode }) => <StrictMode>{children}</StrictMode>;
