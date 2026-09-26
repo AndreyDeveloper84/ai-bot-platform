@@ -1,0 +1,111 @@
+registry: ayla.dietary-pattern-catalog
+version: "1.0-draft"
+status: DRAFT
+owner_review_required: true
+professional_review_required: true
+
+model:
+  base_pattern: balanced
+  goal_strategy:
+    - lose
+    - maintain
+    - gain
+  preference_overlay:
+    - omnivore
+    - vegetarian
+    - vegan
+  note: >-
+    Goal strategy and preference overlay are independent. “Vegan” is not
+    inferred from foods in the diary and does not by itself define calories.
+
+supported_v1:
+  base_patterns:
+    balanced:
+      status: CANDIDATE
+      authority: backend_rules_only
+      principles:
+        - adequacy
+        - balance
+        - moderation
+        - diversity
+      required_validators:
+        - energy_range
+        - macro_range
+        - food_constraints
+        - allergen_exclusion
+        - diversity
+        - meal_feasibility
+        - provenance
+
+  goal_strategies:
+    lose:
+      status: CANDIDATE
+      meaning: moderate energy reduction through an approved target method
+      result_guaranteed: false
+    maintain:
+      status: CANDIDATE
+      meaning: energy target without a goal correction
+      result_guaranteed: false
+    gain:
+      status: CANDIDATE
+      meaning: moderate energy increase through an approved target method
+      result_guaranteed: false
+
+  preference_overlays:
+    omnivore:
+      status: CANDIDATE
+      required_fields: []
+    vegetarian:
+      status: CANDIDATE
+      required_fields:
+        - eggs_allowed
+        - dairy_allowed
+      required_review:
+        - iron
+        - vitamin_b12
+        - protein_coverage
+    vegan:
+      status: CANDIDATE
+      required_fields: []
+      required_review:
+        - iron
+        - vitamin_b12
+        - calcium
+        - vitamin_d
+        - omega3
+        - protein_coverage
+      supplement_advice_allowed: false
+
+unsupported_v1:
+  wellness_patterns:
+    - mediterranean
+    - dash
+    - low_carb
+    - ketogenic
+    - paleo
+    - intermittent_fasting
+    - high_protein_protocol
+  clinical_patterns:
+    - diabetes
+    - renal
+    - hepatic
+    - cardiovascular
+    - low_fodmap
+    - gluten_free_for_celiac_disease
+    - elimination
+    - pregnancy
+    - breastfeeding
+    - paediatric
+    - eating_disorder
+  handling:
+    decision: BLOCKED_OR_HANDOFF
+    reason: no_approved_runtime_protocol
+    never_generate_by_llm: true
+
+composition_rules:
+  no_hidden_defaults: true
+  no_inferred_preferences: true
+  no_inferred_allergies: true
+  no_result_guarantees: true
+  backend_recalculates_totals: true
+  llm_may_render_only: true
