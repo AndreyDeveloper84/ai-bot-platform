@@ -27,11 +27,9 @@
  * заново. Между сессиями не хранится ничего: чужие снимки в хранилище
  * браузера не кладём.
  */
+import { applyIdentityHeaders } from "./auth-headers";
 import { ApiError } from "./api";
 import type { FoodDiaryEntry } from "./customer-wellness";
-import { applyDevBypassHeaders } from "./dev-bypass";
-import { getInitData } from "./max-sdk";
-import { applySalonChoiceHeader } from "./salon-choice";
 
 const API_BASE = "/api/v1/customer";
 
@@ -48,10 +46,7 @@ interface ErrorBody {
 
 function buildAuthHeaders(): Headers {
   const headers = new Headers();
-  const initData = getInitData();
-  if (initData) headers.set("Authorization", `MaxInitData ${initData}`);
-  applyDevBypassHeaders(headers);
-  applySalonChoiceHeader(headers);
+  applyIdentityHeaders(headers);
   return headers;
 }
 

@@ -1,7 +1,5 @@
-import { getInitData } from "./max-sdk";
+import { applyIdentityHeaders } from "./auth-headers";
 import { markRead } from "./claims";
-import { applyDevBypassHeaders } from "./dev-bypass";
-import { applySalonChoiceHeader } from "./salon-choice";
 
 const API_BASE = "/api/v1/customer";
 
@@ -41,11 +39,8 @@ export async function requestWithStatus<T>(
   path: string,
   init: RequestInit = {},
 ): Promise<{ status: number; data: T }> {
-  const initData = getInitData();
   const headers = new Headers(init.headers);
-  if (initData) headers.set("Authorization", `MaxInitData ${initData}`);
-  applyDevBypassHeaders(headers);
-  applySalonChoiceHeader(headers);
+  applyIdentityHeaders(headers);
   // Multipart (DRF-2098 — фото еды) идёт `FormData`: заголовок пишет
   // браузер вместе с boundary, и выставленный вручную `application/json`
   // сломал бы разбор на сервере. То же правило — в `master-api.ts`.
