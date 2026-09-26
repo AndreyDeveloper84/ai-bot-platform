@@ -19,7 +19,7 @@ from __future__ import annotations
 import ast
 import datetime as dt
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, cast
 from uuid import UUID
 
 import pytest
@@ -292,7 +292,8 @@ class TestBotOwnWritesMarkUnknown:
         _upsert_remote_booking_proxy(
             tenant=tenant,
             bot_user=None,
-            record=_Record({"ayla_appointment_id": APPOINTMENT_ID}),
+            # Стаб записи: функции нужен только ``record.raw``.
+            record=cast(Any, _Record({"ayla_appointment_id": APPOINTMENT_ID})),
             start_at=dt.datetime(2026, 5, 22, 15, 0, tzinfo=dt.UTC),
         )
 
