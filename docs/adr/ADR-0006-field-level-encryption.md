@@ -31,7 +31,7 @@ The original draft (PHASE0_DESIGN.md v1) named the package `django-cryptography=
 ## Consequences
 
 - **Easier:** ORM stays ergonomic — fields look like normal `JSONField`.
-- **Easier:** key rotation is supported via Fernet's multi-key bundle.
+- ~~**Easier:** key rotation is supported via Fernet's multi-key bundle.~~ **Not true** (DRF-2555): `django-cryptography` holds a single key and signs with the raw `SECRET_KEY`; neither key can be rotated without losing data today. See the warning above and DRF-2562.
 - **Acceptable:** small CPU overhead per read/write (~microseconds per field).
 - **Harder:** backup/restore must include the key material — without it, the data is unrecoverable. Mitigated by storing the key in the secret manager + a documented runbook.
 - **Harder:** tests do not set `DJANGO_CRYPTOGRAPHY_KEY`; the key is then derived from the test `SECRET_KEY`, which is deterministic, so this is invisible day-to-day. (Corrected in DRF-2555: there is no separate test-fixture key.) `apps/identity/tests/test_crypto_key_from_env_2555.py` pins both paths — with and without the variable.

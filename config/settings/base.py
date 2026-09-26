@@ -57,7 +57,7 @@ SECRET_KEY = os.environ.get(
     "django-insecure-sprint0-scaffold-only-replace-before-staging",
 )
 
-# DRF-2555 — ключ шифрования полей (`encrypt(...)`: память, секреты тенантов).
+# DRF-2555 — ключ шифрования полей (`encrypt(...)`; сегодня одно поле — MemoryEntry.content).
 #
 # ⚠ SECRET_KEY НА СЕРВЕРЕ С ДАННЫМИ НЕ РОТИРУЕТСЯ. Сегодня это потеря всей
 # зашифрованной памяти, и эта настройка этого НЕ меняет. У каждого

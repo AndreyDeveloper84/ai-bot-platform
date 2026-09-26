@@ -144,11 +144,11 @@ class TestDependencyTwoIsAlive:
     def test_rotating_secret_key_breaks_reading_even_with_the_variable_set(self) -> None:
         token = _encrypt(secret=SECRET_A, crypto=KEY_K)
 
-        assert _decrypt(token, secret=SECRET_B, crypto=KEY_K).startswith("<refused:")
+        assert _decrypt(token, secret=SECRET_B, crypto=KEY_K) == "<refused:BadSignature>"
 
     def test_rotating_secret_key_breaks_reading_on_the_owners_plan_too(self) -> None:
         """Ровно тот порядок, который казался безопасным: ключ = прежний
         SECRET_KEY, затем ротация SECRET_KEY → записанное до не читается."""
         before = _encrypt(secret=SECRET_A, crypto=None)
 
-        assert _decrypt(before, secret=SECRET_B, crypto=SECRET_A).startswith("<refused:")
+        assert _decrypt(before, secret=SECRET_B, crypto=SECRET_A) == "<refused:BadSignature>"

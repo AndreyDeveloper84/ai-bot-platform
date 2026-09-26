@@ -107,8 +107,8 @@ sudo vi /etc/ai-bot-platform/prod.env
 
 **Critical fills:**
 - `DJANGO_SECRET_KEY` → `python -c "import secrets; print(secrets.token_urlsafe(64))"` — **only on a fresh server with an empty database.**
-  > ⚠ **DRF-2555: on a server that already has data, never generate a new `DJANGO_SECRET_KEY` — keep the current value.** Every encrypted field (memory, tenant secrets) is signed with the raw `SECRET_KEY`; a new value makes all of it unreadable. `DJANGO_CRYPTOGRAPHY_KEY` does not lift this (it decouples only the AES key); decoupling the signature is DRF-2562. See ADR-0006.
-- `DJANGO_CRYPTOGRAPHY_KEY` → on a server with data: the **current** `DJANGO_SECRET_KEY` value (keeps existing rows readable); on a fresh server: a new random value. The name `CRYPTOGRAPHY_KEY` in the environment is **not** read.
+  > ⚠ **DRF-2555: on a server that already has data, never generate a new `DJANGO_SECRET_KEY` — keep the current value.** Every encrypted field (today: memory, `MemoryEntry.content`) is signed with the raw `SECRET_KEY`; a new value makes all of it unreadable. `DJANGO_CRYPTOGRAPHY_KEY` does not lift this (it decouples only the AES key); decoupling the signature is DRF-2562. See ADR-0006.
+- `DJANGO_CRYPTOGRAPHY_KEY` → on a server with data: the **current** `DJANGO_SECRET_KEY` value (keeps existing rows readable) — if the server has been running on the fallback `django-insecure-…` string from `config/settings/base.py`, *that* string is the current value; on a fresh server: a new random value. The name `CRYPTOGRAPHY_KEY` in the environment is **not** read. **The same value in every process** — web, celery worker, beat (each loads the env file): if they differ, the worker writes rows the web cannot read.
 - `DB_PASSWORD` → from §2.2 step
 - `MAX_BOT_TOKEN` → copy from existing `/home/taximeter/mysite/formula_tela{,_dev}/.env`
 - `MAX_WEBHOOK_SECRET` → keep current (cutover reuses)
