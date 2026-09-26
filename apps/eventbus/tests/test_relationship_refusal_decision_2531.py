@@ -212,6 +212,9 @@ class TestSubstitution:
     def test_decision_matching_code_is_green(self, model_shipped) -> None:
         # Положительная пара: запись, совпадающая с кодом, проходит — иначе
         # сторож краснел бы на любом решении, и решение было бы невозможно.
+        # Сначала наличие на тех же данных: без записи прибор видит обе причины —
+        # значит пустой список ниже означает «решено», а не «прибор слеп».
+        assert len(_problems({})) == len(RELATIONSHIP_REFUSAL_REASONS) == 2
         assert _problems(dict.fromkeys(RELATIONSHIP_REFUSAL_REASONS, "transient")) == []
 
     def test_recorded_decisions_match_code(self, model_shipped) -> None:
