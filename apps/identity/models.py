@@ -748,6 +748,17 @@ class UserPersonalContext(models.Model):
         blank=True,
         help_text="ISO-639-1 language code, e.g. 'ru'. NULL until user sets a preference.",
     )
+    # DRF-2526 — the help_text below promises a «running summary», and nothing
+    # has ever written one: the only write in production code is the NULL of
+    # forget-all (`forget_all_sweep`). It cannot be written today either — a
+    # prose «who this user is» is inference by definition (POLICY_DEBT in
+    # `personal_fields.py`), and inference reaches persistent memory only via
+    # MemoryProposal (AYLA-DEC-0024), which does not exist. The field stays
+    # empty; readers turn blank into None, so the prompt never gets it.
+    # Known debt: should a writer appear, `memory_surface.render_personal_context`
+    # puts this text in the prompt verbatim — no provenance, no per-salon rule.
+    # `test_summary_has_no_writer_2526` catches the writer, not that hole.
+    # help_text is corrected in its own migration PR, not here.
     summary = models.TextField(
         null=True,
         blank=True,
