@@ -63,6 +63,28 @@ from apps.identity.services.exceptions import (
 )
 
 
+#: DRF-2542 — условия, которые обязаны быть закрыты ДО первого писателя жёлтой
+#: и красной зоны, то есть до снятия заглушки ``_check_minor_protection`` (#597).
+#: Ключ — машинное имя, значение — адрес в листе. Код эту запись НЕ читает: её
+#: сверяет сторож ``apps/identity/tests/test_zone_writer_conditions_2542.py``,
+#: который краснеет, как только у жёлтой или красной зоны появится писатель,
+#: а хоть одно условие не закрыто.
+ZONE_WRITER_CONDITIONS: dict[str, str] = {
+    "consent_check_in_write_entry": "DRF-2542 §1 — проверка согласия в write_entry",
+    "targeted_integrity_error": "DRF-2542 §2 — адресный IntegrityError вместо общего except",
+    "export_152fz_covers_zones": "DRF-2542 §3 — выгрузка 152-ФЗ покрывает зоны",
+    "ttl_purge_sweep": "DRF-2542 §4 — свип срока TTL_PURGE",
+    "withdrawal_deletes_zone_rows": "DRF-2542 §5 — отзыв согласия удаляет строки с причиной WITHDRAWAL",
+    "minor_lock_spec_decision": "DRF-2542 §6 — решение спеки по minor_lock и уже лежащим строкам",
+    "account_reset_red_zone_rls": "DRF-2542 §7 — узел на Postgres: account_reset при скрытой RLS красной зоне",
+}
+
+#: Закрытые условия: исполнены или названы решением владельца как сознательно
+#: отложенные. ПУСТО по построению — закрывает их не сторож и не исполнитель
+#: сторожа. Имя, которого нет в ``ZONE_WRITER_CONDITIONS``, — ошибка записи.
+ZONE_WRITER_CONDITIONS_CLOSED: frozenset[str] = frozenset()
+
+
 def _check_minor_protection(user_id: uuid.UUID) -> None:
     """Verify the user is not a minor before allowing yellow/red writes.
 
