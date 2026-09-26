@@ -232,10 +232,13 @@ def render_personal_context(view: PersonalContextView) -> str | None:
     parts: list[str] = []
     derived: list[str] = []
     if view.summary:
-        # Происхождение summary не хранится ни в каком виде — оставляем его
-        # там, где оно было. Это осознанный долг, а не недосмотр: тащить
-        # сюда «неизвестно» без источника было бы догадкой о догадке.
-        parts.append(view.summary.strip())
+        # Происхождение summary не хранится ни в каком виде, но его ПРИРОДА
+        # записана: проза «кто этот человек» — вывод по определению
+        # (POLICY_DEBT, apps/identity/personal_fields.py). Здесь она стояла в
+        # группе сказанного, то есть модель получила бы вывод как слова
+        # клиента. Место ей — среди выведенного; без «возможно, ты» — это
+        # свободный текст, а не фраза банка. Писателя у поля нет (DRF-2526). DRF-2548.
+        derived.append(view.summary.strip())
     for fact in view.green_facts:
         if not _prompt_visible(fact):
             continue
