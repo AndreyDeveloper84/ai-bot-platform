@@ -16,12 +16,17 @@
 
 Узлы:
 
-* салон назван, но не последний — задача всё равно у последнего, названный
-  салон не тронут;
-* простое упоминание сотрудника («я сам администратор») — не просьба, но
-  диалог последнего салона всё равно уходит в ``HUMAN_HANDOFF``;
+* настоящая просьба с названным салоном, который не последний, — задача всё
+  равно у последнего, названный салон не тронут;
+* простое упоминание сотрудника («я сам администратор») — не просьба и салон
+  не будит. До сужения триггера (DRF-2545) будило: правило искало подстроку.
+  Рядом стоит узел выше — настоящая просьба будит, — иначе «не будит»
+  доказывалось бы и правилом, которое не срабатывает никогда;
 * текст сообщения в уведомление салона не попадает, но лежит в ``reason``
   задачи ПОСЛЕДНЕГО салона — то есть жалоба на салон Б хранится у салона А.
+
+Фразы узлов адресации — настоящие просьбы, а не жалобы: узел краснеет по
+своему предмету (адресации), а не по триггеру.
 
 Уже закреплено в ``test_global_human_handoff.py`` и здесь не повторяется:
 салон не назван — задача у последнего (``test_task_goes_to_most_recent_tenant_context``);
@@ -122,7 +127,7 @@ class TestAddressingIsByTimeNotBySubject:
     ):
         salon_a, salon_b = two_salons
 
-        _run_global("администратор салона Бета нагрубил, хочу пожаловаться", mid="n1")
+        _run_global("позовите администратора, в салоне Бета мне нагрубили", mid="n1")
 
         task = AdminTask.all_tenants.get()
         # Присутствие: задача создана и человеку ответили строкой передачи.
@@ -135,19 +140,21 @@ class TestAddressingIsByTimeNotBySubject:
         assert salon_a.state == Conversation.State.HUMAN_HANDOFF
         assert salon_b.state != Conversation.State.HUMAN_HANDOFF
 
-    def test_a_mention_of_staff_mutes_the_latest_salon(
+    def test_a_mention_of_staff_does_not_wake_a_salon(
         self, two_salons, mock_send, fake_redis, spy_concierge
     ):
-        """«я сам администратор» — не просьба, но триггер ищет подстроку."""
-        salon_a, salon_b = two_salons
+        """«я сам администратор» — упоминание, не просьба (DRF-2545)."""
+        salon_a, _ = two_salons
 
         _run_global("я сам администратор", mid="n2")
 
-        task = AdminTask.all_tenants.get()
-        assert task.tenant_id == salon_a.tenant_id
+        # Присутствие: сообщение обработано — ответил консьерж.
+        spy_concierge.assert_called_once()
+        assert len(mock_send) == 1
+        # Задачи нет, салон не усыплён.
+        assert AdminTask.all_tenants.count() == 0
         salon_a.refresh_from_db()
-        assert salon_a.state == Conversation.State.HUMAN_HANDOFF
-        spy_concierge.assert_not_called()
+        assert salon_a.state != Conversation.State.HUMAN_HANDOFF
 
 
 class TestWhereTheComplaintTextGoes:
@@ -157,7 +164,7 @@ class TestWhereTheComplaintTextGoes:
         from apps.channels.max.salon_notify import handoff_waiting_notice
 
         salon_a, _ = two_salons
-        complaint = "администратор салона Бета нагрубил"
+        complaint = "позовите администратора, в салоне Бета мне нагрубили"
 
         _run_global(complaint, mid="n3")
 
