@@ -751,10 +751,11 @@ class UserPersonalContext(models.Model):
     summary = models.TextField(
         null=True,
         blank=True,
-        help_text="Ayla's running summary of who this user is. "
-        "Application-side capped at 8 KB. NOT encrypted at storage layer "
-        "because it's intentionally retrievable in plaintext by the LLM "
-        "context-building path on every conversation.",
+        help_text="Reserved; nothing writes it (DRF-2526). A prose summary of "
+        "the person is inference, and inference reaches persistent memory "
+        "only via MemoryProposal (AYLA-DEC-0024). Forget-all sets it to NULL. "
+        "Readers treat blank as absent; if ever filled, the prompt builder "
+        "reads it in plaintext, verbatim, with no provenance.",
     )
 
     # DRF-1370 — this column records the user-intent MOMENT and nothing else.
