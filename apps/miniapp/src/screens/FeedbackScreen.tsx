@@ -4,8 +4,10 @@
  * OR a tap on the "Оценить" button in MyVisits. The booking ID arrives
  * via the URL. 5-star picker + optional comment + Save. Low ratings
  * (≤3) swap copy to a calm "we'll reach out" panel — the rating still
- * persists, the backend has already fired the HUMAN_LOCKED handoff
- * (see apps/booking/services/feedback.py).
+ * persists, the backend has already opened a handoff — an AdminTask with
+ * Conversation.state = HUMAN_HANDOFF (see apps/booking/services/feedback.py).
+ * NOT the HUMAN_LOCKED tier: that is a different mechanism, and nothing sets
+ * it since DRF-1528 (DRF-2557).
  *
  * Закрытие «К моим записям» ведёт в КАНОНИЧЕСКОЕ `/customer/records`
  * (`CustomerRecordsScreen`), а не в старое `/my-visits` (DRF-1480).
