@@ -1247,6 +1247,10 @@ class RedZoneAccessLog(models.Model):
     ACCESS_PURGE = "purge"
     ACCESS_WITHDRAWAL = "withdrawal"
     ACCESS_WRITE_REJECTED_DOB = "write_rejected_dob_lookup"
+    # DRF-2542 §2 — база отказала жёлтой/красной записи без согласия
+    # (CHECK memory_entry_yellow_red_requires_consent). Отдельное значение, а
+    # не «dob»: причина другая, и сторож читает её по значению, не по тексту.
+    ACCESS_WRITE_REJECTED_NO_CONSENT = "write_rejected_no_consent"
     # DRF-2133 — soft-delete по просьбе субъекта (tombstone, не purge).
     ACCESS_DELETE = "delete"
     ACCESS_TYPE_CHOICES = [
@@ -1258,6 +1262,10 @@ class RedZoneAccessLog(models.Model):
         (
             ACCESS_WRITE_REJECTED_DOB,
             "Write rejected — DOB lookup failed (Ayla REST outage)",
+        ),
+        (
+            ACCESS_WRITE_REJECTED_NO_CONSENT,
+            "Write rejected — yellow/red without consent (DB CHECK)",
         ),
     ]
 
