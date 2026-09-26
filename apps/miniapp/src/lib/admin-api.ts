@@ -15,10 +15,8 @@
  *       §MM1 (roster list) + §MM5 (deactivation cascade).
  */
 
-import { getInitData } from "./max-sdk";
+import { applyIdentityHeaders } from "./auth-headers";
 import { ApiError, logApiDetail } from "./api";
-import { applyDevBypassHeaders } from "./dev-bypass";
-import { applySalonChoiceHeader } from "./salon-choice";
 
 interface ErrorBody {
   error: string;
@@ -52,11 +50,8 @@ async function requestWithResponse<T>(
   path: string,
   init: RequestInit = {},
 ): Promise<ResponseEnvelope<T>> {
-  const initData = getInitData();
   const headers = new Headers(init.headers);
-  if (initData) headers.set("Authorization", `MaxInitData ${initData}`);
-  applyDevBypassHeaders(headers);
-  applySalonChoiceHeader(headers);
+  applyIdentityHeaders(headers);
   if (init.body && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
@@ -261,11 +256,8 @@ export interface CreateBookingBody {
 export const createSalonBooking = async (
   body: CreateBookingBody,
 ): Promise<CreateBookingResult> => {
-  const initData = getInitData();
   const headers = new Headers({ "Content-Type": "application/json" });
-  if (initData) headers.set("Authorization", `MaxInitData ${initData}`);
-  applyDevBypassHeaders(headers);
-  applySalonChoiceHeader(headers);
+  applyIdentityHeaders(headers);
 
   let res: Response;
   try {
@@ -333,11 +325,8 @@ export const cancelSalonBooking = async (
   appointmentId: string,
   body: { reason_code?: CancelReasonCode; reason?: string } = {},
 ): Promise<CancelBookingResult> => {
-  const initData = getInitData();
   const headers = new Headers({ "Content-Type": "application/json" });
-  if (initData) headers.set("Authorization", `MaxInitData ${initData}`);
-  applyDevBypassHeaders(headers);
-  applySalonChoiceHeader(headers);
+  applyIdentityHeaders(headers);
 
   let res: Response;
   try {
@@ -429,11 +418,8 @@ const settleSalonBooking = async (
   action: "complete" | "no-show",
   expectedVersion: number,
 ): Promise<CompleteBookingResult> => {
-  const initData = getInitData();
   const headers = new Headers({ "Content-Type": "application/json" });
-  if (initData) headers.set("Authorization", `MaxInitData ${initData}`);
-  applyDevBypassHeaders(headers);
-  applySalonChoiceHeader(headers);
+  applyIdentityHeaders(headers);
 
   let res: Response;
   try {
@@ -470,11 +456,8 @@ export const rescheduleSalonBooking = async (
   expectedVersion: number,
   newStartAt: string,
 ): Promise<CompleteBookingResult> => {
-  const initData = getInitData();
   const headers = new Headers({ "Content-Type": "application/json" });
-  if (initData) headers.set("Authorization", `MaxInitData ${initData}`);
-  applyDevBypassHeaders(headers);
-  applySalonChoiceHeader(headers);
+  applyIdentityHeaders(headers);
 
   let res: Response;
   try {
@@ -1471,11 +1454,8 @@ export const uploadMasterPhoto = async (
 ): Promise<MasterPhotoUploadResponse> => {
   const formData = new FormData();
   formData.append("photo", file);
-  const initData = getInitData();
   const headers = new Headers();
-  if (initData) headers.set("Authorization", `MaxInitData ${initData}`);
-  applyDevBypassHeaders(headers);
-  applySalonChoiceHeader(headers);
+  applyIdentityHeaders(headers);
   // No Content-Type — let fetch set the multipart boundary.
   const res = await fetch(`/api/v1/admin/masters/${masterId}/photo/`, {
     method: "POST",
@@ -1670,12 +1650,9 @@ export interface ServicesMappingConflictEnvelope extends ServicesMappingConflict
 export const patchServicesMapping = async (
   body: ServicesMappingBulkBody,
 ): Promise<ServicesMappingBulkResult | ServicesMappingConflictEnvelope> => {
-  const initData = getInitData();
   const headers = new Headers();
   headers.set("Content-Type", "application/json");
-  if (initData) headers.set("Authorization", `MaxInitData ${initData}`);
-  applyDevBypassHeaders(headers);
-  applySalonChoiceHeader(headers);
+  applyIdentityHeaders(headers);
 
   const res = await fetch("/api/v1/admin/services-mapping/bulk/", {
     method: "POST",
@@ -1802,12 +1779,9 @@ async function decisionFetch(
   url: string,
   body: Record<string, unknown>,
 ): Promise<AvailabilityRequestItem | AvailabilityConflict> {
-  const initData = getInitData();
   const headers = new Headers();
   headers.set("Content-Type", "application/json");
-  if (initData) headers.set("Authorization", `MaxInitData ${initData}`);
-  applyDevBypassHeaders(headers);
-  applySalonChoiceHeader(headers);
+  applyIdentityHeaders(headers);
 
   const res = await fetch(url, {
     method: "POST",
