@@ -143,18 +143,37 @@ class BotUser(models.Model):
     # event-contract.md §3.12). Mirror-only — Ayla owns the canonical
     # value per ADR-0009 §Hard rule #1. Refresh via REST GET
     # /api/v1/users/{ayla_user_id} on event receipt OR re-sync from event
-    # payload. Used by bot-platform UI surfaces (mini app, conversation
-    # thread, master-side internal-chat) for visual rendering only.
-    # Empty string default for backward compat with rows that pre-date
-    # the bridge / for users with no avatar set in Ayla.
+    # payload. Empty string default for backward compat with rows that
+    # pre-date the bridge / for users with no avatar set in Ayla.
+    #
+    # NOT SHOWN ANYWHERE (DRF-2520). No miniapp_api endpoint returns this
+    # field and no screen renders it: the customer's circle is initials
+    # from ``display_name``, and every <img> in the Mini App is a MASTER
+    # photo from other fields. The field is kept for personal-data
+    # accounting and erasure (privacy ``_PII_FIELDS``, ``soft_delete_user``,
+    # export coverage) — not for rendering. An earlier comment here said
+    # it was «used by UI surfaces (mini app, conversation thread,
+    # master-side internal-chat)»; that was never true.
+    #
+    # Do NOT put it on the wire as-is. The value is the catalog storage
+    # URL (``profile.avatar.url``): MinIO behind the container's internal
+    # address, in a ``public-read`` bucket — measured on the stand
+    # 26.09.2026: prod settings, no storage override in the environment,
+    # so ``endpoint_url = http://minio:9000``, ``custom_domain = None``.
+    # The phone cannot load it, and a URL that did load would publish a
+    # person's face to anyone holding it. Showing it means a proxy through
+    # the bot with an ownership check — the shape DRF-2455 built for food
+    # photos; the proxy for every catalog photo is DRF-2539. ``tests/contracts/test_avatar_url_not_on_wire_2520.py`` fails
+    # if an endpoint starts returning it.
     avatar_url = models.URLField(
         max_length=500,
         blank=True,
         default="",
         help_text="Avatar URL mirrored from Ayla user.profile.updated event "
-        "(per event-contract.md §3.12). Used by bot-platform for UI "
-        "rendering (mini app, conversation thread). NOT a canonical "
-        "store — Ayla djangoproject is. Refresh via REST GET "
+        "(per event-contract.md §3.12). Kept for personal-data accounting "
+        "and erasure only — NOT returned by any endpoint and NOT rendered "
+        "(DRF-2520): it is an internal public-read storage URL. NOT a "
+        "canonical store — Ayla djangoproject is. Refresh via REST GET "
         "/api/v1/users/{ayla_user_id} on event receipt. Empty string "
         "default for backward compat.",
     )
