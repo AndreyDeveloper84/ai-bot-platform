@@ -11,13 +11,29 @@
  *
  * Класс: переменная без запасного значения, не заявленная на `:root`, — это
  * отступ/цвет, который работает только там, где случайно оказался предок.
+ *
+ * DRF-2468 (26.09) расширил охват. Прежний сторож читал только
+ * `styles/*.css` и только `var(--x)` без запасного значения, поэтому не видел:
+ *  - инлайн-стилей в `.tsx` (`style={{ fontSize: "var(--text-h3-size, …)" }}`);
+ *  - имени, спрятанного за запасным значением: `var(--нет, 18px)` рисуется
+ *    запасным, и опечатка в имени не видна никому;
+ *  - нового употребления уже известного имени — список держал имя, а не счёт;
+ *  - токена, заявленного только в тёмной ветке: в светлой его нет.
+ * Теперь каждый `var(--…)` в `apps/miniapp/src` обязан разрешаться в
+ * заявление на `:root` светлой ветки, а нарушение называет файл и строку.
+ *
+ * Пределы: файлы тестов не читаются (в них нарочно живут выдуманные имена);
+ * имя, собранное во время исполнения (`var(--s-${n})`), не видно тексту;
+ * переменная, заявленная инлайном на элементе (`style={{ "--x": … }}`),
+ * считается незаявленной — ровно то, от чего предостерегает DRF-2150.
  */
 import { readFileSync, readdirSync } from "node:fs";
-import { resolve } from "node:path";
+import { relative, resolve } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
 const STYLES = resolve(__dirname);
+const SRC = resolve(__dirname, "..");
 const CSS = readdirSync(STYLES)
   .filter((f) => f.endsWith(".css"))
   .map((f) => readFileSync(resolve(STYLES, f), "utf-8"))
@@ -27,69 +43,180 @@ const AYLA_CHAT = readFileSync(
   "utf-8",
 );
 
-/** Незаявленные переменные, найденные этим сторожем 21.09, — вне рамок микро-PR.
- *  Красный в обе стороны: заявили переменную или убрали её употребление —
- *  строку отсюда снять. */
-const KNOWN_UNDECLARED: Record<string, string> = {
-  "--c-surface":
-    "2 места; фон кнопок сейчас прозрачный — перекраска = решение по макету",
-  "--leading-normal":
-    "14 мест; межстрочный наследуется — замена меняет вёрстку",
+/** Незаявленные имена, известные поимённо и ПОСЧИТАННЫЕ. Счёт заморожен:
+ *  новое употребление красное и названо строкой; заявили имя или убрали
+ *  употребления — счёт не сойдётся, запись отсюда снять. */
+const KNOWN_UNDECLARED: Record<string, { uses: number; why: string }> = {
+  "--c-surface": {
+    uses: 2,
+    why:
+      "globals.css .ayla-card__option и .ayla-btn--secondary, 14 элементов; " +
+      "сегодня фон прозрачный, а --c-surface-1 перекрасил бы их поверх " +
+      "--c-surface-2 карточки — решение владельца (DRF-2468, DRF-2469)",
+  },
+  "--leading-normal": {
+    uses: 14,
+    why: "межстрочный наследуется — замена меняет вёрстку (DRF-2150)",
+  },
+  "--text-body-size": {
+    uses: 9,
+    why: "за запасным значением; рисуется запасным (DRF-2468)",
+  },
+  "--text-h3-size": {
+    uses: 7,
+    why: "за запасным значением; рисуется запасным (DRF-2468)",
+  },
+  "--text-caption-size": {
+    uses: 1,
+    why: "за запасным значением; рисуется запасным (DRF-2468)",
+  },
+  "--fs-h2": {
+    uses: 1,
+    why: "за запасным значением; рисуется запасным (DRF-2468)",
+  },
 };
 
-function rootDeclared(css: string): Set<string> {
-  const blocks = [...css.matchAll(/:root[^{]*\{([^}]*)\}/g)].map(
-    (m) => m[1] ?? "",
-  );
-  return new Set(
-    blocks.flatMap((b) =>
-      [...b.matchAll(/(--[\w-]+)\s*:/g)].map((m) => m[1] ?? ""),
-    ),
-  );
+type Use = { name: string; where: string };
+
+/** Комментарии гасятся с сохранением переводов строк — номера строк верны. */
+function stripComments(css: string): string {
+  return css.replace(/\/\*[\s\S]*?\*\//g, (c) => c.replace(/[^\n]/g, " "));
 }
 
-function usedWithoutFallback(css: string): Set<string> {
-  return new Set(
-    [...css.matchAll(/var\(\s*(--[\w-]+)\s*\)/g)].map((m) => m[1] ?? ""),
-  );
+const DARK = /prefers-color-scheme:\s*dark|data-theme=["']dark["']/;
+
+/** Заявления на `:root` по веткам: `light` — вне тёмного условия,
+ *  `dark` — внутри `@media (prefers-color-scheme: dark)` или
+ *  `[data-theme="dark"]`. Тёмная ветка наследует светлую, но не наоборот. */
+function rootDeclarations(css: string): {
+  light: Set<string>;
+  dark: Set<string>;
+} {
+  const light = new Set<string>();
+  const dark = new Set<string>();
+  const stack: string[] = [];
+  let buf = "";
+  for (const ch of stripComments(css)) {
+    if (ch === "{") {
+      stack.push(buf.trim());
+      buf = "";
+    } else if (ch === "}") {
+      stack.pop();
+      buf = "";
+    } else if (ch === ";") {
+      const m = /^(--[\w-]+)\s*:/.exec(buf.trim());
+      const selector = stack[stack.length - 1] ?? "";
+      if (m?.[1] && selector.startsWith(":root")) {
+        (stack.some((p) => DARK.test(p)) ? dark : light).add(m[1]);
+      }
+      buf = "";
+    } else {
+      buf += ch;
+    }
+  }
+  return { light, dark };
 }
 
-function block(selector: string): string {
-  return CSS.split(`${selector} {`)[1]?.split("}")[0] ?? "";
+/** Каждое `var(--имя` в тексте, с запасным значением или без.
+ *  `(?![\w$-])` отсекает имя, достраиваемое шаблоном: `var(--s-${n})`. */
+function varUses(text: string, file: string): Use[] {
+  return [...text.matchAll(/var\(\s*(--[\w-]+)(?![\w$-])/g)].map((m) => ({
+    name: m[1] ?? "",
+    where: `${file}:${text.slice(0, m.index).split("\n").length}`,
+  }));
 }
 
-describe("переменная без запасного значения заявлена на :root", () => {
-  const root = rootDeclared(CSS);
-  const used = usedWithoutFallback(CSS);
+function sourceFiles(dir: string): string[] {
+  return readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
+    const path = resolve(dir, e.name);
+    if (e.isDirectory()) return e.name === "__tests__" ? [] : sourceFiles(path);
+    if (!/\.(css|tsx?)$/.test(e.name) || /\.test\.tsx?$/.test(e.name)) return [];
+    return [path];
+  });
+}
+
+const FILES = sourceFiles(SRC);
+const USES = FILES.flatMap((path) => {
+  const raw = readFileSync(path, "utf-8");
+  const text = path.endsWith(".css") ? stripComments(raw) : raw;
+  return varUses(text, relative(SRC, path).replace(/\\/g, "/"));
+});
+const ROOT = rootDeclarations(CSS);
+
+/** Нарушения в виде «файл:строка var(--имя) — почему». */
+function unresolved(
+  uses: Use[],
+  root: { light: Set<string>; dark: Set<string> },
+  known: Record<string, unknown>,
+): string[] {
+  return uses
+    .filter((u) => !root.light.has(u.name) && !(u.name in known))
+    .map((u) =>
+      root.dark.has(u.name)
+        ? `${u.where} var(${u.name}) — заявлена только в тёмной ветке`
+        : `${u.where} var(${u.name}) — не заявлена на :root`,
+    );
+}
+
+describe("каждый var(--…) в apps/miniapp/src разрешается в :root", () => {
+  it("положительная пара: охват непустой и токены видны", () => {
+    // «0 нарушений» и «ничего не прочитано» иначе неразличимы.
+    expect(FILES.length).toBeGreaterThan(150);
+    expect(USES.length).toBeGreaterThan(3000);
+    expect(FILES.some((f) => f.endsWith(".tsx"))).toBe(true);
+    expect(ROOT.light.has("--safe-bottom")).toBe(true);
+    expect(USES.some((u) => u.name === "--safe-bottom")).toBe(true);
+    // Тёмная ветка распознана: поверхности переопределены в ней.
+    expect(ROOT.dark.has("--c-surface-1")).toBe(true);
+  });
 
   it("новых незаявленных нет", () => {
-    const undeclared = [...used]
-      .filter((v) => !root.has(v) && !(v in KNOWN_UNDECLARED))
-      .sort();
     expect(
-      undeclared,
-      "var(--x) без :root — работает только под случайным предком",
+      unresolved(USES, ROOT, KNOWN_UNDECLARED),
+      "var(--x) без :root — работает только под случайным предком или никогда",
     ).toEqual([]);
   });
 
-  it("список известных не устарел", () => {
-    for (const name of Object.keys(KNOWN_UNDECLARED)) {
+  it("известные посчитаны: не разрослись и не устарели", () => {
+    for (const [name, { uses }] of Object.entries(KNOWN_UNDECLARED)) {
+      const here = USES.filter((u) => u.name === name).map((u) => u.where);
       expect(
-        used.has(name),
-        `${name} больше не используется — снять из списка`,
-      ).toBe(true);
+        here.length,
+        `${name}: счёт заморожен на ${uses}, сейчас — ${here.join(", ")}`,
+      ).toBe(uses);
       expect(
-        root.has(name),
+        ROOT.light.has(name) || ROOT.dark.has(name),
         `${name} заявлена на :root — снять из списка`,
       ).toBe(false);
     }
   });
 
-  it("положительная пара: сторож видит заявленные токены", () => {
-    expect(root.has("--safe-bottom")).toBe(true);
-    expect(used.has("--safe-bottom")).toBe(true);
+  it("сторож умеет покраснеть: выдуманное имя, тёмная ветка, запасное значение", () => {
+    const css = [
+      ":root { --only-light: 1px; }",
+      "@media (prefers-color-scheme: dark) { :root { --only-dark: 1px; } }",
+      ':root[data-theme="dark"] { --themed-dark: 1px; }',
+      ".a { margin: var(--only-light); }",
+      ".b { color: var(--c-surface-nonexistent); }",
+      ".c { color: var(--only-dark); }",
+      ".d { color: var(--themed-dark); }",
+      ".e { font-size: var(--typo-name, 16px); }",
+      "/* var(--in-comment) */",
+    ].join("\n");
+    const root = rootDeclarations(css);
+    expect(unresolved(varUses(stripComments(css), "x.css"), root, {})).toEqual([
+      "x.css:5 var(--c-surface-nonexistent) — не заявлена на :root",
+      "x.css:6 var(--only-dark) — заявлена только в тёмной ветке",
+      "x.css:7 var(--themed-dark) — заявлена только в тёмной ветке",
+      "x.css:8 var(--typo-name) — не заявлена на :root",
+    ]);
+    expect(varUses('style={{ gap: `var(--s-${n})` }}', "x.tsx")).toEqual([]);
   });
 });
+
+function block(selector: string): string {
+  return CSS.split(`${selector} {`)[1]?.split("}")[0] ?? "";
+}
 
 describe("«Ayla»: композер и последняя реплика над нижней панелью", () => {
   it("высота панели — токен :root, ненулевой", () => {
