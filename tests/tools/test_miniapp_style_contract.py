@@ -143,6 +143,90 @@ def test_accepted_debt_passes_and_new_debt_fails(
     assert guard.main(["miniapp_style_contract.py", str(root)]) == 1
 
 
+# --------------------------------------------------------------------------
+# DRF-2550 — аннотация называет строку, и каждое место, а не первое.
+# --------------------------------------------------------------------------
+
+_THREE_PLACES = (
+    "export const S = () => (\n"  # 1
+    "  <div>\n"  # 2
+    '    <p className="styled">a</p>\n'  # 3
+    '    <p className="styled fresh">b</p>\n'  # 4
+    '    <p className="styled">c</p>\n'  # 5
+    '    <span className="fresh">d</span>\n'  # 6
+    '    <p className="styled">e</p>\n'  # 7
+    '    <i className="fresh" />\n'  # 8
+    "  </div>\n"  # 9
+    ");\n"  # 10
+)
+
+
+def _errors(capsys: pytest.CaptureFixture[str]) -> list[str]:
+    return [line for line in capsys.readouterr().out.splitlines() if line.startswith("::error")]
+
+
+def test_the_annotation_names_the_line_of_the_class_not_the_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Номер — той строки, где класс, а не первой и не последней строки файла."""
+    root = _app(
+        tmp_path,
+        tsx=(
+            "export const S = () => (\n"
+            "  <div>\n"
+            '    <p className="styled">a</p>\n'
+            '    <p className="styled fresh">b</p>\n'
+            '    <p className="styled">c</p>\n'
+            "  </div>\n"
+            ");\n"
+        ),
+        css=".styled {}\n",
+    )
+    monkeypatch.setattr(guard, "BASELINE", frozenset())
+    monkeypatch.setattr(guard, "DESCENDANT_ONLY", frozenset())
+
+    assert guard.main(["miniapp_style_contract.py", str(root)]) == 1
+    assert _errors(capsys) == [
+        "::error file=apps/miniapp/src/screens/S.tsx,line=4::"
+        "class `fresh` has no rule in src/styles/"
+    ]
+
+
+def test_every_place_of_the_class_is_annotated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Три места в файле — три аннотации, а не одна на первое."""
+    root = _app(tmp_path, tsx=_THREE_PLACES, css=".styled {}\n")
+    monkeypatch.setattr(guard, "BASELINE", frozenset())
+    monkeypatch.setattr(guard, "DESCENDANT_ONLY", frozenset())
+
+    assert guard.main(["miniapp_style_contract.py", str(root)]) == 1
+    assert [e.split("::")[1] for e in _errors(capsys)] == [
+        "error file=apps/miniapp/src/screens/S.tsx,line=4",
+        "error file=apps/miniapp/src/screens/S.tsx,line=6",
+        "error file=apps/miniapp/src/screens/S.tsx,line=8",
+    ]
+
+
+def test_a_descendant_only_class_is_annotated_on_its_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _app(tmp_path, tsx=_THREE_PLACES, css=".styled {}\n.island .fresh {}\n")
+    monkeypatch.setattr(guard, "BASELINE", frozenset())
+    monkeypatch.setattr(guard, "DESCENDANT_ONLY", frozenset())
+
+    assert guard.main(["miniapp_style_contract.py", str(root)]) == 1
+    lines = [e.split(",line=")[1].split("::")[0] for e in _errors(capsys)]
+    assert lines == ["4", "6", "8"]
+
+
+def test_a_class_literal_broken_over_lines_is_named_by_its_first_line() -> None:
+    """Названный предел: литерал с переносом назван строкой `className=`."""
+    tsx = 'const a = 1;\n<p className="one\n  fresh">x</p>\n'
+    assert guard.class_lines(tsx, "fresh") == [2]
+    assert guard.class_lines(tsx, "absent") == []
+
+
 def test_a_baseline_entry_that_got_styled_must_be_deleted(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
