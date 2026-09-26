@@ -1571,14 +1571,25 @@ def execute_confirm(
             record=record,
             start_at=visit_at_dt,
         )
-        _schedule_reminders(
-            tenant=tenant,
-            bot_user=bot_user,
-            yc_id=yc_id,
-            visit_at_dt=visit_at_dt,
-            master_name=master_name,
-            service_name=service_name,
-        )
+        # DRF-2547: напоминание — только визиту, который канон ПОДТВЕРДИЛ. При
+        # предоплате канон создаёт ``awaiting_payment``; напоминание по нему
+        # звало клиента на неоплаченный визит. Подтверждение приедет событием
+        # ``booking.confirmed``, и напоминания поставит его обработчик.
+        if not _booking_via_ayla() or _canon_status_of(record) == _CANON_CONFIRMED:
+            _schedule_reminders(
+                tenant=tenant,
+                bot_user=bot_user,
+                yc_id=yc_id,
+                visit_at_dt=visit_at_dt,
+                master_name=master_name,
+                service_name=service_name,
+            )
+        else:
+            logger.info(
+                "booking.confirm.reminders_deferred appt=%s canon_status=%s",
+                yc_id,
+                _canon_status_of(record) or "unknown",
+            )
 
     _audit_tool(tenant_id=tenant_id, tool="execute_confirm", outcome="ok")
     write_audit(
@@ -3715,6 +3726,31 @@ def _as_uuid(value: Any) -> Any:
         return None
 
 
+#: Значение зеркала для визита, который канон подтвердил.
+_CANON_CONFIRMED = "confirmed"
+
+
+def _canon_status_of(record: BookingRecord) -> str | None:
+    """Статус визита, который вернул КАНОН, в словаре зеркала (DRF-2547).
+
+    Ответ Ayla на создание и перенос — ``AppointmentDetailSerializer``, в нём
+    есть ``status``; ``provider._mirror_raw`` переносит его в ``record.raw``.
+    Нормализация — та же, что у ``booking.created``
+    (:func:`apps.eventbus.consumers.booking.normalize_booking_created_status`):
+    одно правило, иначе запись бота и событие разошлись бы молча.
+    ``None`` — статуса нет или он незнаком: «не знаем», а не «подтверждён».
+    """
+    from apps.eventbus.consumers.booking import normalize_booking_created_status
+
+    raw_status = (record.raw or {}).get("status")
+    if not raw_status:
+        return None
+    try:
+        return normalize_booking_created_status(raw_status)
+    except ValueError:
+        return None
+
+
 def _upsert_remote_booking_proxy(
     *,
     tenant: Any,
@@ -3722,11 +3758,13 @@ def _upsert_remote_booking_proxy(
     record: BookingRecord,
     start_at: datetime | None,
 ) -> None:
-    """Mirror a CONFIRMED Ayla appointment onto :class:`RemoteBookingProxy`.
+    """Mirror an Ayla appointment onto :class:`RemoteBookingProxy`.
 
     ADR-0009: Ayla owns the canonical booking; bot-platform keeps this thin
     mirror for reminder math + RFM/sentiment fan-out. Used by confirm and
-    (native) reschedule — both land the appointment in CONFIRMED. Best-effort:
+    (native) reschedule. The status is the one Ayla RETURNED (DRF-2547) —
+    with prepayment a fresh booking is ``awaiting_payment``, not CONFIRMED,
+    and a constant here overwrote that for good. Best-effort:
     the canonical row already exists in Ayla, so a mirror-write failure must
     NOT fail the customer-facing action (the next ``booking.*`` event from
     Ayla reconciles it). No-op on the flag-OFF (YClients) path.
@@ -3750,9 +3788,27 @@ def _upsert_remote_booking_proxy(
             "bot_user": bot_user,
             "start_at": start_at,
             "end_at": end_at,
-            "status": RemoteBookingProxy.Status.CONFIRMED,
             "source": RemoteBookingProxy.Source.AUTOMATION,
         }
+        # DRF-2547: статус — тот, что вернул КАНОН, а не константа CONFIRMED.
+        # Константа затирала ``awaiting_payment`` брони с предоплатой, а
+        # пришедший следом ``booking.created`` видел «уже confirmed» и молчал
+        # (advanced-state no-op) — зеркало врало навсегда. Статуса в ответе нет
+        # или он незнаком: существующую строку не трогаем по статусу («нет
+        # вестей», как с услугой ниже), новую не заводим — её заведёт
+        # ``booking.created`` с правильным статусом.
+        canon_status = _canon_status_of(record)
+        if canon_status is not None:
+            defaults["status"] = canon_status
+        elif not RemoteBookingProxy.all_tenants.filter(
+            appointment_id=_as_uuid(appt), tenant=tenant
+        ).exists():
+            logger.warning(
+                "booking.proxy.upsert_skipped_unknown_status appt=%s status=%r",
+                appt,
+                raw.get("status"),
+            )
+            return
         # Only write what we actually know. Ayla's appointment payload does
         # not expose the salon service at all, so a reschedule whose
         # response omits it used to overwrite a good service_id with NULL —

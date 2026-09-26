@@ -54,7 +54,9 @@ def test_a_reschedule_without_a_service_keeps_the_one_on_the_row(
     _call(
         tenant,
         bot_user,
-        {"ayla_appointment_id": str(appt), "service_id": str(service)},
+        # DRF-2547: ответ Ayla всегда несёт status (AppointmentDetailSerializer);
+        # без него запись зеркала новую строку не заводит.
+        {"ayla_appointment_id": str(appt), "service_id": str(service), "status": "confirmed"},
         start,
     )
     row = RemoteBookingProxy.all_tenants.get(appointment_id=appt)
@@ -64,7 +66,7 @@ def test_a_reschedule_without_a_service_keeps_the_one_on_the_row(
     _call(
         tenant,
         bot_user,
-        {"ayla_appointment_id": str(appt)},
+        {"ayla_appointment_id": str(appt), "status": "confirmed"},
         start + timedelta(hours=2),
     )
 
