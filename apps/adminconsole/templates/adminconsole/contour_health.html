@@ -102,6 +102,27 @@
   {% endfor %}
 </table>
 
+{% if report.booking_marks %}
+<h2>Зеркало броней: последнее событие канона</h2>
+<p class="muted">
+  Незакрытые визиты зеркала (confirmed / pending_payment / tentative).
+  «Известно» — зеркало знает, какое событие канона применило последним и когда
+  канон его выпустил. «Неизвестно» — строка до DRF-2537 или записанная самим
+  ботом; это не «старое», а «нет сведений».
+  <strong>Это не свежесть:</strong> возраст — давность последнего пришедшего
+  события, а не отставание от канона. Пропущенное (мёртвое) событие отметку не
+  двигает, поэтому протухшую копию отсюда не видно — сверять с каноном и с
+  мёртвыми письмами каталога (<code>/api/v1/health/ready/</code>, ключ <code>outbox</code>).
+</p>
+<p>
+  Незакрытых: <strong>{{ report.booking_marks.open_total }}</strong>,
+  с отметкой: <strong>{{ report.booking_marks.known }}</strong>,
+  без отметки: <strong>{{ report.booking_marks.unknown }}</strong>,
+  старейшая отметка: <strong>{{ report.booking_marks.oldest_known_age_human }}</strong>
+  {% if report.booking_marks.oldest_known_event %}<span class="muted">({{ report.booking_marks.oldest_known_event }})</span>{% endif %}.
+</p>
+{% endif %}
+
 <h2>Очередь handoff</h2>
 <p>
   Открыто: <strong>{{ report.handoff.open_count }}</strong>,

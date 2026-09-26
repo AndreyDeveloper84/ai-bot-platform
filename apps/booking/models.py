@@ -1051,6 +1051,34 @@ class RemoteBookingProxy(models.Model):
         help_text="When the platform last updated this row.",
         verbose_name="Синхронизировано",
     )
+    # DRF-2537 — отметка последнего применённого события КАНОНА. Пишут ВСЕ
+    # пути потребителя (``apps.eventbus.consumers.booking``) через одну
+    # функцию; собственные записи бота (``skills/booking/tools.py``) ставят
+    # «неизвестно». NULL/"" — «неизвестно», а не «старое»: строки до DRF-2537
+    # и строки, которые бот записал сам, эту отметку не получили и получить
+    # задним числом не могут (время выпуска события нигде не сохранено).
+    #
+    # Предел: это НЕ свежесть. Возраст — давность последнего ПРИШЕДШЕГО
+    # события, а не отставание от канона: пропущенное (мёртвое) событие
+    # отметку не сдвигает и отсюда не видно. Свежесть — вопрос к канону и к
+    # мёртвым письмам каталога. ``last_applied_appointment_version`` —
+    # другой счётчик (переносы, блокировка переноса), он не заменяет этот.
+    last_applied_event_name = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        help_text="Имя последнего применённого события канона (DRF-2537). "
+        "Пусто — неизвестно: строка до DRF-2537 или записана самим ботом.",
+        verbose_name="Последнее событие канона",
+    )
+    last_applied_event_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Когда канон выпустил последнее применённое событие "
+        "(``occurred_at`` конверта, DRF-2537). NULL — неизвестно, обратно не "
+        "заполняется. Не свежесть: пропущенное событие эту отметку не двигает.",
+        verbose_name="Время события канона",
+    )
     created_at = models.DateTimeField(auto_now_add=True, verbose_name="Создан")
     last_applied_appointment_version = models.PositiveIntegerField(
         null=True,
