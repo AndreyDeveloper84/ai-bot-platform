@@ -16,6 +16,7 @@ vi.mock("../lib/max-sdk", () => ({
   getInitData: () => "test-init-data",
 }));
 
+import { resetDiaryPhotoCacheForTests } from "../lib/diary-photo";
 import { useDiaryEntryPhoto } from "./useDiaryEntryPhoto";
 
 const fetchMock = vi.fn();
@@ -64,8 +65,9 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
-  // Узлы не делят кэш: каждый уходит, отдав всё.
   await flushSweep();
+  // Каждый узел уходит, отдав всё: остаток кэша — утечка, а не «чужая забота».
+  expect(resetDiaryPhotoCacheForTests()).toBe(0);
 });
 
 describe("без снимка — ни запроса, ни адреса", () => {
@@ -150,20 +152,49 @@ describe("со снимком", () => {
     expect(urls.live()).toEqual([]);
   });
 
-  it("404 — «фото нет»: адреса нет, ошибки нет", async () => {
-    fetchMock.mockResolvedValueOnce(
-      new Response(JSON.stringify({ error: "not_found", detail: "" }), { status: 404 }),
-    );
+  it("404 — «фото нет»: ответ пришёл, адреса нет, ошибки нет", async () => {
+    let answered = false;
+    fetchMock.mockImplementationOnce(async () => {
+      answered = true;
+      return new Response(JSON.stringify({ error: "not_found", detail: "" }), { status: 404 });
+    });
 
     const { result, unmount } = renderHook(() => useDiaryEntryPhoto({ id: "log-4", has_photo: true }), {
       wrapper: strict,
     });
 
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(answered).toBe(true));
     await flushSweep();
+    // Ответ разобран (иначе null был бы просто «ещё грузится»): адрес не создан.
+    expect(urls.created).toEqual([]);
     expect(result.current).toBeNull();
     unmount();
+  });
+
+  it("карточка сменила запись — ни кадра чужого снимка", async () => {
+    let second!: (r: Response) => void;
+    fetchMock
+      .mockResolvedValueOnce(photoResponse())
+      .mockImplementationOnce(() => new Promise<Response>((res) => (second = res)));
+
+    const { result, rerender, unmount } = renderHook(
+      ({ id }: { id: string }) => useDiaryEntryPhoto({ id, has_photo: true }),
+      { wrapper: strict, initialProps: { id: "log-5" } },
+    );
+    await waitFor(() => expect(result.current).toBe("blob:ayla/1"));
+
+    rerender({ id: "log-6" });
+    // Снимок log-6 ещё не пришёл — карточка пуста, а не показывает log-5.
+    expect(result.current).toBeNull();
+
+    await act(async () => {
+      second(photoResponse());
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    await waitFor(() => expect(result.current).toBe("blob:ayla/2"));
+
+    unmount();
     await flushSweep();
-    expect(urls.created).toEqual([]);
+    expect(urls.live()).toEqual([]);
   });
 });

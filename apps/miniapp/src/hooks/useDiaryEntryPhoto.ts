@@ -10,25 +10,27 @@ import { acquireDiaryEntryPhoto } from "../lib/diary-photo";
  * «ещё грузится», и «прокси ответил 404» (удалён по сроку). Для карточки
  * это одно состояние: строка без картинки (решение главного окна, Б(а)).
  *
+ * Адрес привязан к id записи, для которой он пришёл: карточка, получившая
+ * другую запись, не покажет ни кадра чужого снимка, пока грузится свой.
+ *
  * Уход карточки отдаёт аренду; когда уходит последняя, незавершённые
  * запросы отменяются, адреса освобождаются (`lib/diary-photo.ts`).
  */
 export function useDiaryEntryPhoto(entry: Pick<FoodDiaryEntry, "id" | "has_photo">): string | null {
-  const [src, setSrc] = useState<string | null>(null);
+  const [loaded, setLoaded] = useState<{ id: string; src: string | null } | null>(null);
   const id = entry.id;
   const hasPhoto = entry.has_photo === true;
 
   useEffect(() => {
-    setSrc(null);
     if (!hasPhoto) return;
     let live = true;
     const lease = acquireDiaryEntryPhoto({ id, has_photo: true });
     lease.promise.then(
-      (value) => {
-        if (live) setSrc(value);
+      (src) => {
+        if (live) setLoaded({ id, src });
       },
       () => {
-        if (live) setSrc(null);
+        if (live) setLoaded({ id, src: null });
       },
     );
     return () => {
@@ -37,5 +39,5 @@ export function useDiaryEntryPhoto(entry: Pick<FoodDiaryEntry, "id" | "has_photo
     };
   }, [id, hasPhoto]);
 
-  return hasPhoto ? src : null;
+  return hasPhoto && loaded?.id === id ? loaded.src : null;
 }

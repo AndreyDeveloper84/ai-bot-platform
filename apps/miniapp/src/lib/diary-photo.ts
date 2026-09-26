@@ -61,6 +61,9 @@ function buildAuthHeaders(): Headers {
  */
 export function diaryEntryPhotoPath(entry: PhotoEntry): string | null {
   if (entry.has_photo !== true) return null;
+  // id приходит с сервера (UUID); «.» и «..» сегментом пути нормализовались
+  // бы браузером в другой адрес, поэтому такой id — «снимка нет».
+  if (!entry.id || entry.id === "." || entry.id === "..") return null;
   return `/diary/entry/${encodeURIComponent(entry.id)}/photo`;
 }
 
@@ -197,4 +200,15 @@ export function acquireDiaryEntryPhoto(entry: PhotoEntry): PhotoLease {
       scheduleSweep();
     },
   };
+}
+
+/**
+ * Только для узлов: сколько слотов было, и убрать всё (отменить, освободить).
+ * Узел, упавший до ухода карточек, не должен оставлять кэш следующему.
+ */
+export function resetDiaryPhotoCacheForTests(): number {
+  const n = slots.size;
+  for (const [id, slot] of [...slots]) drop(id, slot);
+  sweepScheduled = false;
+  return n;
 }

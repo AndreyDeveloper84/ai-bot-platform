@@ -11,7 +11,7 @@
  *   `/wellness/today?surface=diary`), получают признак одинаково: поле,
  *   поднятое в одном клиенте и потерянное в другом, у нас уже было.
  */
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ApiError } from "./api";
 
@@ -21,10 +21,15 @@ vi.mock("./max-sdk", () => ({
 
 import { getWellnessToday } from "./customer-wellness";
 import { getDiaryDay } from "./diary-days";
-import { diaryEntryPhotoPath, loadDiaryEntryPhoto } from "./diary-photo";
+import {
+  acquireDiaryEntryPhoto,
+  diaryEntryPhotoPath,
+  loadDiaryEntryPhoto,
+  MAX_CACHED_PHOTOS,
+  resetDiaryPhotoCacheForTests,
+} from "./diary-photo";
 
 const fetchMock = vi.fn();
-const createObjectURL = vi.fn(() => "blob:ayla/photo-1");
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -37,14 +42,28 @@ const WITH_PHOTO = { id: "log-1", has_photo: true };
 const WITHOUT_PHOTO = { id: "log-2", has_photo: false };
 const LEGACY = { id: "log-3" };
 
+let createObjectURL: ReturnType<typeof vi.spyOn>;
+let revokeObjectURL: ReturnType<typeof vi.spyOn>;
+
 beforeEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
   fetchMock.mockReset();
-  createObjectURL.mockClear();
   vi.stubGlobal("fetch", fetchMock);
-  vi.stubGlobal("URL", Object.assign(URL, { createObjectURL }));
+  let n = 0;
+  createObjectURL = vi
+    .spyOn(URL, "createObjectURL")
+    .mockImplementation(() => (++n === 1 ? "blob:ayla/photo-1" : `blob:ayla/photo-${n}`));
+  revokeObjectURL = vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => undefined);
 });
+
+afterEach(() => {
+  resetDiaryPhotoCacheForTests();
+});
+
+function photoResponse(): Response {
+  return new Response(new Blob(["jpeg"], { type: "image/jpeg" }), { status: 200 });
+}
 
 describe("к прокси ходим только за снимком, который есть", () => {
   it.each([
@@ -84,6 +103,10 @@ describe("к прокси ходим только за снимком, кото�
     await expect(loadDiaryEntryPhoto(WITH_PHOTO)).rejects.toBeInstanceOf(ApiError);
   });
 
+  it.each([".", "..", ""])("id %j — «снимка нет», путь не строится", (id) => {
+    expect(diaryEntryPhotoPath({ id, has_photo: true })).toBeNull();
+  });
+
   it("никакого адреса хранилища: путь строится только из id записи", () => {
     const path = diaryEntryPhotoPath({ id: "a/b?c", has_photo: true });
     expect(path).toBe("/diary/entry/a%2Fb%3Fc/photo");
@@ -114,5 +137,59 @@ describe("оба экрана дневника получают признак �
       ["log-2", false, null],
     ]);
     expect(paths(today.entries)).toEqual(paths(day.entries));
+  });
+});
+
+describe("аренда: ветки кэша", () => {
+  it("сверх предела вытесняются самые давние свободные, их адреса освобождаются", async () => {
+    fetchMock.mockImplementation(() => Promise.resolve(photoResponse()));
+    // Якорь держит аренду: без него отложенная уборка убрала бы всё разом.
+    const anchor = acquireDiaryEntryPhoto({ id: "anchor", has_photo: true });
+    await anchor.promise;
+
+    const idle: string[] = [];
+    for (let i = 0; i < MAX_CACHED_PHOTOS - 1; i++) {
+      const lease = acquireDiaryEntryPhoto({ id: `idle-${i}`, has_photo: true });
+      idle.push((await lease.promise) as string);
+      lease.release();
+    }
+    expect(revokeObjectURL).not.toHaveBeenCalled();
+
+    // 64 слота заняты; 65-й и 66-й вытесняют два самых давних свободных.
+    await acquireDiaryEntryPhoto({ id: "new-1", has_photo: true }).promise;
+    await acquireDiaryEntryPhoto({ id: "new-2", has_photo: true }).promise;
+
+    expect(revokeObjectURL.mock.calls.map((c: unknown[]) => c[0])).toEqual([idle[0], idle[1]]);
+    anchor.release();
+  });
+
+  it("после отказа 502 слот не залипает: повторная аренда идёт заново", async () => {
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse({ error: "boom", detail: "" }, 502))
+      .mockResolvedValueOnce(photoResponse());
+
+    const first = acquireDiaryEntryPhoto(WITH_PHOTO);
+    await expect(first.promise).rejects.toBeInstanceOf(ApiError);
+    first.release();
+
+    const second = acquireDiaryEntryPhoto(WITH_PHOTO);
+    await expect(second.promise).resolves.toBe("blob:ayla/photo-1");
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    second.release();
+  });
+
+  it("адрес, пришедший после уборки слота, освобождается сразу", async () => {
+    fetchMock.mockResolvedValueOnce(photoResponse());
+    // Уборка случается ровно между созданием адреса и его выдачей слоту.
+    createObjectURL.mockImplementationOnce(() => {
+      resetDiaryPhotoCacheForTests();
+      return "blob:ayla/late";
+    });
+
+    const lease = acquireDiaryEntryPhoto(WITH_PHOTO);
+
+    await expect(lease.promise).resolves.toBeNull();
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:ayla/late");
+    lease.release();
   });
 });
