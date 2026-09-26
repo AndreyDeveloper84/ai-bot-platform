@@ -95,7 +95,7 @@ export function Snackbar({
         zIndex: 100,
       }}
     >
-      <span className="drf2550-probe" style={{ flex: 1 }}>{message}</span>
+      <span style={{ flex: 1 }}>{message}</span>
       {actionLabel && onAction && (
         <button
           type="button"
