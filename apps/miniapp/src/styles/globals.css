@@ -4714,7 +4714,8 @@ a {
  *   - 2.5.8 — cards / suggestion chips ≥ 44dp, primary CTA ≥ 48dp
  *     (already inherited from .cta-bar__button).
  *   - 1.4.3 — body ≥ 4.5:1; reasoning text uses --c-text-secondary
- *     which is tokenised to 4.6:1 on --c-surface-0.
+ *     which is tokenised to ≥ 4.5:1 on --c-surface-2, the darkest
+ *     light surface (tokens.css:47; 4.52:1 measured 2026-09-26).
  *   - 1.3.1 — layer sections use <section> + <h2>; slot lists are
  *     <ul> per day; slot cells are <button>.
  * ──────────────────────────────────────────────────────────────────── */
