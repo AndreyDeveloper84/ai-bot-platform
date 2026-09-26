@@ -145,6 +145,26 @@ PERMANENT_ALLOWLIST_REASONS: frozenset[str] = frozenset(
     {"tenant_not_found", "tenant_not_allowed", "event_not_allowed", "relationship_unavailable"}
 )
 
+#: Два отказа канонической проверки связи пользователь↔салон (DRF-2531).
+#: Сегодня недостижимы: их ветки открываются только при
+#: :func:`_tenant_user_relationship_available`, а определения класса
+#: ``TenantUserRelationship`` в боте нет (#246). Обе поднимают голый
+#: :class:`TenantAuthorizationError`, то есть 500 и 4,5 ч повторов.
+RELATIONSHIP_REFUSAL_REASONS: tuple[str, ...] = (
+    "no_active_relationship_user_scope",
+    "no_active_relationship",
+)
+
+#: Решение по каждой причине из :data:`RELATIONSHIP_REFUSAL_REASONS`:
+#: ``"permanent"`` — 422 (:class:`TenantRejectedError`), ``"transient"`` — 500
+#: (голый :class:`TenantAuthorizationError`). Пусто — решения нет: вопрос
+#: «постоянен ли отказ по смыслу» открыт (связь может доехать позже события).
+#: Код этот словарь НЕ читает — он запись решения, которую сверяет сторож
+#: ``apps/eventbus/tests/test_relationship_refusal_decision_2531.py``: как только
+#: модель появится, пустая запись краснеет, а запись, расходящаяся с тем, что
+#: ветка реально поднимает, краснеет всегда.
+RELATIONSHIP_REFUSAL_DECISIONS: dict[str, str] = {}
+
 
 def _tenant_user_relationship_available() -> bool:
     """True iff the canonical TenantUserRelationship model can be imported.
