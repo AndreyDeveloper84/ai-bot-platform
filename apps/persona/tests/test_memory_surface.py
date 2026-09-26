@@ -11,10 +11,14 @@ class TestRenderPersonalContext:
         assert render_personal_context(PersonalContextView()) is None
 
     def test_renders_summary(self):
+        # summary — вывод по определению (POLICY_DEBT): он едет под рамкой
+        # выведенного, а не под «помню, что ты» (прежняя редакция узла
+        # закрепляла именно эту ошибку).
         out = render_personal_context(PersonalContextView(summary="Любит вечерние слоты"))
         assert out is not None
         assert "Любит вечерние слоты" in out
-        assert "помню, что ты" in out  # the natural-surfacing instruction
+        assert "клиент этого НЕ говорил" in out
+        assert "помню, что ты" not in out
 
     def test_renders_known_diet_fact(self):
         view = PersonalContextView(
@@ -120,12 +124,17 @@ class TestProvenanceInTheSurfacedParagraph:
         assert out is not None
         stated, _, derived = out.partition(self._DERIVED_LEAD)
         assert "веганск" in stated and "веганск" not in derived
-        assert "любит тишину" in stated
+        # summary — вывод по определению: только в группе выведенного.
+        assert "любит тишину" in derived and "любит тишину" not in stated
 
     def test_all_stated_paragraph_is_byte_identical_to_the_old_one(self) -> None:
-        """Отрицательный: то, что уже помечено верно, не изменилось."""
+        """Отрицательный: то, что уже помечено верно, не изменилось.
+
+        Прежняя редакция держала здесь и summary — в группе сказанного, то
+        есть закрепляла ошибку провенанса. summary отсюда убран: абзац из
+        одних сказанных фактов байт-в-байт прежний.
+        """
         view = PersonalContextView(
-            summary="любит тишину",
             green_facts=[
                 GreenFact(
                     kind="lifestyle",
@@ -137,7 +146,7 @@ class TestProvenanceInTheSurfacedParagraph:
         assert render_personal_context(view) == (
             "Что ты уже знаешь об этом клиенте — в форме обращения к нему, повторяй "
             "естественно и только когда уместно, например «помню, что ты…»; НЕ "
-            "перечисляй списком и НЕ придумывай ничего сверх этого: любит тишину; ты "
+            "перечисляй списком и НЕ придумывай ничего сверх этого: ты "
             "придерживаешься веганского питания."
         )
 
