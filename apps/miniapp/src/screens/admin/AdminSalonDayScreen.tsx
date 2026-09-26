@@ -254,41 +254,47 @@ function CancelDialog({
   const [code, setCode] = useState<CancelReasonCode>("master_unavailable");
   return (
     <div className="sheet" role="dialog" aria-modal="true" aria-label="Отмена визита">
-      <h3 className="section__title">Отменить визит?</h3>
-      <p>
-        {clientLabel(visit)} · {formatTime(visit.start_at, timeZone)}
-        {visit.service_name ? ` · ${visit.service_name}` : ""}
-      </p>
-      <p className="muted">Клиент получит уведомление об отмене.</p>
+      {/* Содержимое — на панели, как у всех шторок приложения. Без неё
+          `.sheet` (flex, ряд) раскладывал детей в столбцы по нижнему краю
+          на затемнении — с 25.09, когда у общего класса появилось правило
+          (DRF-2448, #2077). DRF-2528. */}
+      <div className="sheet__panel">
+        <h3 className="section__title">Отменить визит?</h3>
+        <p>
+          {clientLabel(visit)} · {formatTime(visit.start_at, timeZone)}
+          {visit.service_name ? ` · ${visit.service_name}` : ""}
+        </p>
+        <p className="muted">Клиент получит уведомление об отмене.</p>
 
-      <fieldset style={{ border: 0, padding: 0, margin: "var(--s-3) 0" }}>
-        <legend className="muted">Причина</legend>
-        {CANCEL_REASONS.map((r) => (
-          <label key={r.code} style={{ display: "block", padding: "var(--s-1) 0" }}>
-            <input
-              type="radio"
-              name="cancel-reason"
-              value={r.code}
-              checked={code === r.code}
-              onChange={() => setCode(r.code)}
-            />{" "}
-            {r.label}
-          </label>
-        ))}
-      </fieldset>
+        <fieldset style={{ border: 0, padding: 0, margin: "var(--s-3) 0" }}>
+          <legend className="muted">Причина</legend>
+          {CANCEL_REASONS.map((r) => (
+            <label key={r.code} style={{ display: "block", padding: "var(--s-1) 0" }}>
+              <input
+                type="radio"
+                name="cancel-reason"
+                value={r.code}
+                checked={code === r.code}
+                onChange={() => setCode(r.code)}
+              />{" "}
+              {r.label}
+            </label>
+          ))}
+        </fieldset>
 
-      <div style={{ display: "flex", gap: "var(--s-2)" }}>
-        <button type="button" className="ayla-btn ayla-btn--secondary" onClick={onDismiss} disabled={busy}>
-          Не отменять
-        </button>
-        <button
-          type="button"
-          className="ayla-btn ayla-btn--danger"
-          onClick={() => onConfirm(code)}
-          disabled={busy}
-        >
-          {busy ? "Отменяем…" : "Отменить визит"}
-        </button>
+        <div style={{ display: "flex", gap: "var(--s-2)" }}>
+          <button type="button" className="ayla-btn ayla-btn--secondary" onClick={onDismiss} disabled={busy}>
+            Не отменять
+          </button>
+          <button
+            type="button"
+            className="ayla-btn ayla-btn--danger"
+            onClick={() => onConfirm(code)}
+            disabled={busy}
+          >
+            {busy ? "Отменяем…" : "Отменить визит"}
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -323,45 +329,47 @@ function CompleteDialog({
 }) {
   return (
     <div className="sheet" role="dialog" aria-modal="true" aria-label="Закрытие визита">
-      <h3 className="section__title">Визит состоялся?</h3>
-      <p>
-        {clientLabel(visit)} · {formatTime(visit.start_at, timeZone)}
-        {visit.service_name ? ` · ${visit.service_name}` : ""}
-      </p>
-
-      {version === null ? (
-        <p className="muted">Читаем запись в расписании…</p>
-      ) : (
-        <p className="muted">
-          {version.status === "confirmed"
-            ? "После закрытия визит уйдёт в историю, а клиенту придёт запрос отзыва."
-            : `Расписание считает эту запись «${version.status}». Проверьте, прежде чем закрывать.`}
+      <div className="sheet__panel">
+        <h3 className="section__title">Визит состоялся?</h3>
+        <p>
+          {clientLabel(visit)} · {formatTime(visit.start_at, timeZone)}
+          {visit.service_name ? ` · ${visit.service_name}` : ""}
         </p>
-      )}
 
-      <div style={{ display: "flex", gap: "var(--s-2)" }}>
-        <button type="button" className="ayla-btn ayla-btn--secondary" onClick={onDismiss} disabled={busy}>
-          Не сейчас
-        </button>
-        <button
-          type="button"
-          className="ayla-btn ayla-btn--primary"
-          onClick={onConfirm}
-          // Nothing to send until the canonical version has arrived —
-          // and it is never invented locally.
-          disabled={busy || version === null}
-        >
-          {busy ? "Закрываем…" : "Да, состоялся"}
-        </button>
-        <button
-          type="button"
-          className="ayla-btn ayla-btn--secondary"
-          onClick={onNoShow}
-          // The same version travels back: never invented locally.
-          disabled={busy || version === null}
-        >
-          Не пришёл
-        </button>
+        {version === null ? (
+          <p className="muted">Читаем запись в расписании…</p>
+        ) : (
+          <p className="muted">
+            {version.status === "confirmed"
+              ? "После закрытия визит уйдёт в историю, а клиенту придёт запрос отзыва."
+              : `Расписание считает эту запись «${version.status}». Проверьте, прежде чем закрывать.`}
+          </p>
+        )}
+
+        <div style={{ display: "flex", gap: "var(--s-2)" }}>
+          <button type="button" className="ayla-btn ayla-btn--secondary" onClick={onDismiss} disabled={busy}>
+            Не сейчас
+          </button>
+          <button
+            type="button"
+            className="ayla-btn ayla-btn--primary"
+            onClick={onConfirm}
+            // Nothing to send until the canonical version has arrived —
+            // and it is never invented locally.
+            disabled={busy || version === null}
+          >
+            {busy ? "Закрываем…" : "Да, состоялся"}
+          </button>
+          <button
+            type="button"
+            className="ayla-btn ayla-btn--secondary"
+            onClick={onNoShow}
+            // The same version travels back: never invented locally.
+            disabled={busy || version === null}
+          >
+            Не пришёл
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -399,62 +407,64 @@ function MoveDialog({
 }) {
   return (
     <div className="sheet" role="dialog" aria-modal="true" aria-label="Перенос визита">
-      <h3 className="section__title">Перенести визит</h3>
-      <p>
-        {clientLabel(visit)} · сейчас {formatTime(visit.start_at, timeZone)}
-        {visit.service_name ? ` · ${visit.service_name}` : ""}
-      </p>
-      <p className="muted">{formatDayTitle(date)} — свободное время того же мастера</p>
-
-      {slotsState === "loading" && <p className="muted">Спрашиваем расписание…</p>}
-
-      {slotsState === "unavailable" && (
-        <p className="muted">
-          Не смогли спросить расписание. Это не значит, что времени нет —
-          попробуйте ещё раз.
+      <div className="sheet__panel">
+        <h3 className="section__title">Перенести визит</h3>
+        <p>
+          {clientLabel(visit)} · сейчас {formatTime(visit.start_at, timeZone)}
+          {visit.service_name ? ` · ${visit.service_name}` : ""}
         </p>
-      )}
+        <p className="muted">{formatDayTitle(date)} — свободное время того же мастера</p>
 
-      {slotsState === "ready" && slots.length === 0 && (
-        <p className="muted">В этот день у мастера нет свободного времени.</p>
-      )}
+        {slotsState === "loading" && <p className="muted">Спрашиваем расписание…</p>}
 
-      {slotsState === "ready" && slots.length > 0 && (
-        <ul
-          style={{
-            listStyle: "none",
-            padding: 0,
-            margin: "var(--s-2) 0",
-            display: "flex",
-            flexWrap: "wrap",
-            columnGap: "var(--s-2)",
-            // Ряды разводятся НА 12px, а не на 8: у компактной кнопки
-            // видимая высота 32px, а цель нажатия — невидимые 44px
-            // (`.ayla-btn--compact::after`). При зазоре 8px шаг ряда
-            // выходит 40px, и цели соседних рядов перекрываются на 4px —
-            // в выборе времени это промах по чужому слоту. 12 + 32 = 44.
-            rowGap: "var(--s-3)",
-          }}
-        >
-          {slots.map((slot) => (
-            <li key={slot.time}>
-              <button
-                type="button"
-                className="ayla-btn ayla-btn--ghost ayla-btn--compact"
-                // Nothing to send until the canonical version arrives.
-                disabled={busy || version === null}
-                onClick={() => onPick(slot)}
-              >
-                {slot.time}
-              </button>
-            </li>
-          ))}
-        </ul>
-      )}
+        {slotsState === "unavailable" && (
+          <p className="muted">
+            Не смогли спросить расписание. Это не значит, что времени нет —
+            попробуйте ещё раз.
+          </p>
+        )}
 
-      <button type="button" className="ayla-btn ayla-btn--secondary" onClick={onDismiss} disabled={busy}>
-        Не переносить
-      </button>
+        {slotsState === "ready" && slots.length === 0 && (
+          <p className="muted">В этот день у мастера нет свободного времени.</p>
+        )}
+
+        {slotsState === "ready" && slots.length > 0 && (
+          <ul
+            style={{
+              listStyle: "none",
+              padding: 0,
+              margin: "var(--s-2) 0",
+              display: "flex",
+              flexWrap: "wrap",
+              columnGap: "var(--s-2)",
+              // Ряды разводятся НА 12px, а не на 8: у компактной кнопки
+              // видимая высота 32px, а цель нажатия — невидимые 44px
+              // (`.ayla-btn--compact::after`). При зазоре 8px шаг ряда
+              // выходит 40px, и цели соседних рядов перекрываются на 4px —
+              // в выборе времени это промах по чужому слоту. 12 + 32 = 44.
+              rowGap: "var(--s-3)",
+            }}
+          >
+            {slots.map((slot) => (
+              <li key={slot.time}>
+                <button
+                  type="button"
+                  className="ayla-btn ayla-btn--ghost ayla-btn--compact"
+                  // Nothing to send until the canonical version arrives.
+                  disabled={busy || version === null}
+                  onClick={() => onPick(slot)}
+                >
+                  {slot.time}
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+
+        <button type="button" className="ayla-btn ayla-btn--secondary" onClick={onDismiss} disabled={busy}>
+          Не переносить
+        </button>
+      </div>
     </div>
   );
 }
