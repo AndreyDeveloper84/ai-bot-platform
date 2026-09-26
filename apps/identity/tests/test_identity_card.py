@@ -348,6 +348,46 @@ class TestTheCountIsWhatAylaRemembers:
         )
         _both_readings(0)
 
+    @pytest.mark.parametrize(
+        ("flag", "expected"),
+        [
+            ("entry.soft_deleted_at", 1),
+            ("entry.delete_requested_at", 1),
+            ("context.soft_deleted_at", 0),
+            ("context.forget_all_requested_at", 0),
+            ("context.deletion_requested_at", 0),
+        ],
+    )
+    def test_each_condition_of_the_threshold_is_load_bearing(
+        self, salon, other, third, flag, expected
+    ):
+        """One flag at a time, two live rows. Every condition must move the
+        count on its own — a condition no test pins can be dropped silently.
+        Row flags remove one of two; context flags remove the person.
+        """
+        home = _person(salon, other, third)
+        _entry(home.ayla_user_id)
+        _both_readings(2)
+
+        now = timezone.now()
+        where, field = flag.split(".")
+        if where == "entry":
+            row = MemoryEntry.objects.filter(user_id=home.ayla_user_id).first()
+            MemoryEntry.objects.filter(pk=row.pk).update(
+                **{field: now},
+                deletion_reason=MemoryEntry.DELETION_REASON_USER_DELETE,
+                **({"status": MemoryEntry.STATUS_DELETED} if field == "soft_deleted_at" else {}),
+            )
+        else:
+            extra = (
+                {"deletion_request_id": uuid.uuid4()} if field == "deletion_requested_at" else {}
+            )
+            UserPersonalContext.objects.filter(user_id=home.ayla_user_id).update(
+                **{field: now}, **extra
+            )
+
+        _both_readings(expected)
+
 
 # --- the doors ---------------------------------------------------------------------
 
