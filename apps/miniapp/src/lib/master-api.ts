@@ -395,8 +395,22 @@ export interface ReadinessItem {
 export type IdentityState = "linked" | "pending" | "rejected" | "unlinked";
 
 export interface OnboardingReadiness {
+  /**
+   * DRF-2350: «закрыто всё, что мастер может закрыть САМ» — НЕ «настроено
+   * всё». Недоступные шаги отправку больше не держат и переехали в
+   * `managed_elsewhere`. Имя поля на проводе осталось прежним; смысл — нет.
+   */
   ready: boolean;
   blocking: string[];
+  /**
+   * Требуемые шаги, которых у мастера сейчас нет, — `ключ:причина`.
+   *
+   * Необязательное намеренно: поле новое, и в раскатке Mini App может
+   * какое-то время говорить с сервером, который его ещё не отдаёт. Экран
+   * читает его через `?? []` — отсутствие значит «недоступных шагов нет»,
+   * то есть прежнее поведение, а не пустой экран.
+   */
+  managed_elsewhere?: string[];
   items: ReadinessItem[];
   identity: { state: IdentityState | string; link_status: string | null };
   setup_state: "READY" | "SETUP_PENDING" | string;

@@ -88,12 +88,13 @@ class TestItemsAreComputedFromRows:
         # Несуществующая возможность — не «не сделано».
         assert items["location"]["state"] == "unavailable"
         assert items["location"]["reason"] == "capability_not_built"
+        # DRF-2350: недоступный пункт не в blocking — он в managed_elsewhere.
         assert set(body["blocking"]) == {
             "services:missing",
-            "location:unavailable",
             "hours:missing",
             "profile:missing",
         }
+        assert body["managed_elsewhere"] == ["location:capability_not_built"]
         # Каждый пункт ведёт куда-то — экран 01 без тупиков.
         for item in body["items"]:
             assert item["deep_link"].startswith("/solo/")
@@ -249,6 +250,10 @@ class TestPublicationStateIsTheOneSaleGate:
             "profile": "done",
             "location": "unavailable",
         }
-        assert readiness.ready is False
-        assert readiness.blocking == ["location:unavailable"]
+        # ПЕРЕВЁРНУТО DRF-2350 (§77 п. 1): возможности всё ещё нет, но
+        # держать отправку из-за неё владелец запретил — пункт переехал
+        # в managed_elsewhere и остался требуемым.
+        assert readiness.ready_to_submit is True
+        assert readiness.blocking == []
+        assert readiness.managed_elsewhere == ["location:capability_not_built"]
         assert "location" in REQUIRED_ITEMS

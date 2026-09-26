@@ -90,6 +90,31 @@ export const START_LABEL = "Начать настройку";
 export const CONTINUE_LABEL = "Продолжить настройку";
 export const LATER_LABEL = "Продолжить позже";
 export const ALL_DONE_TITLE = "Всё настроено";
+
+/**
+ * Заголовок, когда от мастера больше ничего не ждут, НО часть шагов ведётся
+ * не здесь (DRF-2350). «Всё настроено» в этом положении — неправда в другую
+ * сторону: два шага не настроены и настроены здесь не будут.
+ *
+ * ЧЕРНОВИК ТЕКСТА: формулировки в решении владельца нет (§60), ждёт его слова.
+ */
+export const NOTHING_LEFT_HERE_TITLE = "Здесь всё готово";
+
+/**
+ * Чем полоса готовности объявляется вслух, когда настроено всё достижимое,
+ * а часть шагов недоступна (DRF-2350). Знаменатель полосы — достижимые
+ * шаги, поэтому диктор читал «сто процентов», хотя настроено не всё:
+ * видящий хотя бы прочтёт строки «Недоступно» рядом, слышащий — нет.
+ *
+ * Причина здесь НЕ называется. Недоступность бывает двух родов —
+ * «возможности ещё нет» и «ведётся не в приложении», — и одна строка на оба
+ * соврала бы одному из них; род причины стоит в самой строке пункта.
+ * Без чисел: счётчик «N из M» на этом экране запрещён макетом.
+ *
+ * ЧЕРНОВИК ТЕКСТА: ждёт слова владельца, как и заголовок выше.
+ */
+export const BAR_PARTLY_ELSEWHERE_TEXT =
+  "Настроено всё, что настраивается здесь. Остальные шаги сейчас недоступны.";
 export const PUBLISH_ENTRY_LABEL = "Отправить профиль на проверку";
 export const IDENTITY_PENDING_NOTE = "Подтверждение личности — ожидает оператора.";
 export const IDENTITY_UNLINKED_NOTE =
@@ -168,6 +193,15 @@ export function MasterSetupLandingScreen() {
   const next = firstOpenItem(readiness.items);
   const note = identityNote(readiness.identity.state);
   const greeting = name ? `${name}, всё готово 👋` : "Всё готово 👋";
+  // DRF-2350: «готов» больше не значит «настроено всё» — оно значит «от
+  // мастера больше ничего не ждут». Когда часть шагов ведётся не здесь,
+  // заголовок это и говорит, иначе экран солгал бы в другую сторону.
+  const elsewhere = readiness.managed_elsewhere ?? [];
+  const title = readiness.ready
+    ? elsewhere.length > 0
+      ? NOTHING_LEFT_HERE_TITLE
+      : ALL_DONE_TITLE
+    : greeting;
   // Отправить на проверку можно только связанному мастеру (ruling 6): `ready` бота
   // считает пункты настройки, а личность — отдельной строкой ниже.
   const canSubmit = readiness.ready && readiness.identity.state === "linked";
@@ -175,7 +209,7 @@ export function MasterSetupLandingScreen() {
   return (
     <main className="screen setup-landing" aria-labelledby="setup-landing-title">
       <h1 id="setup-landing-title" className="setup-landing__title">
-        {readiness.ready ? ALL_DONE_TITLE : greeting}
+        {title}
       </h1>
       {!readiness.ready && (
         <>
@@ -191,6 +225,9 @@ export function MasterSetupLandingScreen() {
         aria-valuemin={0}
         aria-valuemax={fill.total}
         aria-valuenow={fill.done}
+        {...(readiness.ready && elsewhere.length > 0
+          ? { "aria-valuetext": BAR_PARTLY_ELSEWHERE_TEXT }
+          : {})}
         data-testid="setup-bar"
       >
         <div

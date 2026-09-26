@@ -41,6 +41,8 @@ import {
   REASON_TEXT,
   MasterSetupLandingScreen,
   PUBLICATION_ROUTE,
+  BAR_PARTLY_ELSEWHERE_TEXT,
+  NOTHING_LEFT_HERE_TITLE,
   PUBLISH_ENTRY_LABEL,
   SETUP_EXPLAIN,
   SETUP_RESUME_NOTE,
@@ -62,13 +64,18 @@ function item(key: string, state: string, extra: Partial<ReadinessItem> = {}): R
 }
 
 function readiness(items: ReadinessItem[], identity = "linked"): OnboardingReadiness {
+  // DRF-2350: недоступный пункт отправку не держит — он в managed_elsewhere.
   const blocking = items
-    .filter((i) => i.state !== "done")
+    .filter((i) => i.state !== "done" && i.state !== "unavailable")
     .map((i) => `${i.key}:${i.state}`);
+  const managed_elsewhere = items
+    .filter((i) => i.state === "unavailable")
+    .map((i) => `${i.key}:${i.reason ?? i.state}`);
   return {
     ready: blocking.length === 0,
     blocking,
     items,
+    managed_elsewhere,
     identity: { state: identity, link_status: null },
     setup_state: blocking.length === 0 ? "READY" : "SETUP_PENDING",
     sale_block: blocking.length === 0 ? null : "SETUP_PENDING",
@@ -187,14 +194,12 @@ describe("экран 01", () => {
     expect(row.textContent).toBe(`—Услуги и цены${ITEM_STATE_TEXT.unavailable}`);
   });
 
-  it("салонный мастер: оба недоступных пункта названы; бар полон, кнопки нет", async () => {
-    // Замер, а не одобрение. У салонного мастера сервер помечает недоступными
-    // И услуги, И место (workspace_kind == "salon", DRF-2254). Когда остальное
-    // настроено, экран показывает полный бар, не даёт ни одной кнопки действия
-    // и не объясняет, почему нельзя отправить профиль: `ready` ложно, оба
-    // пункта остались в blocking. Тикет DRF-2326 этот тупик не чинит — он
-    // называет пункты; узел держит нынешнее поведение, чтобы молчание было
-    // записанным, а не случайным.
+  it("салонный мастер: оба пункта названы, и профиль можно отправить", async () => {
+    // ПЕРЕВЁРНУТО DRF-2350 (§77 п. 1, решение владельца 23.09.2026).
+    // Здесь был ЗАМЕР тупика: полный бар, ни одной кнопки действия и ни слова
+    // о том, почему профиль не отправить. Замер был верным и на него владелец
+    // и отвечал — блокировку снять. Узел не удалён: он показывает, что тупик
+    // был записан и отменён решением, а не размыт правкой.
     mockedReadiness.mockResolvedValue(
       readiness([
         item("services", "unavailable", { reason: "managed_outside_app", deep_link: null }),
@@ -214,13 +219,56 @@ describe("экран 01", () => {
     // кнопка звалась бы «Продолжить настройку», и проверка на START_LABEL не
     // могла бы упасть — ровно та вакуумность, против которой этот узел.
     const actions = screen.getAllByRole("button").filter((b) => !list.contains(b));
-    expect(actions.map((b) => b.textContent)).toEqual(["Открыть кабинет"]);
-    // Самое громкое в тупике — слова: заголовок по-прежнему «всё готово», а
-    // лид обещает подготовку профиля, которой мастеру негде сделать.
-    expect(
-      screen.getByRole("heading", { name: "Андрей, всё готово 👋" }),
-    ).toBeInTheDocument();
-    expect(screen.getByText(SETUP_EXPLAIN)).toBeInTheDocument();
+    expect(actions.map((b) => b.textContent)).toEqual([
+      PUBLISH_ENTRY_LABEL,
+      "Открыть кабинет",
+    ]);
+    // И слова больше не лгут в другую сторону: «Всё настроено» неправда, когда
+    // два шага ведутся не здесь, — заголовок называет то, что верно.
+    expect(screen.getByRole("heading", { name: NOTHING_LEFT_HERE_TITLE })).toBeInTheDocument();
+    expect(screen.queryByText(SETUP_EXPLAIN)).toBeNull();
+  });
+
+  it("полоса объявляется словами, когда часть шагов ведётся не здесь", async () => {
+    // Незрячий слышал «сто процентов» при двух недоступных пунктах: у полосы
+    // знаменатель — достижимые шаги, и диктор читает долю, а не положение дел.
+    mockedReadiness.mockResolvedValue(
+      readiness([
+        item("services", "unavailable", { reason: "managed_outside_app", deep_link: null }),
+        item("location", "unavailable", { reason: "managed_outside_app", deep_link: null }),
+        item("hours", "done"),
+        item("profile", "done"),
+      ]),
+    );
+    renderScreen();
+    expect(await screen.findByTestId("setup-bar")).toHaveAttribute(
+      "aria-valuetext",
+      BAR_PARTLY_ELSEWHERE_TEXT,
+    );
+  });
+
+  it("пока настроено не всё, полоса молчит: объявить «готово» было бы ложью", async () => {
+    // Недоступный пункт есть у КАЖДОГО мастера (место работы), поэтому
+    // условие только по нему объявляло бы «настроено всё, что настраивается
+    // здесь» на первом же visit'е при нуле закрытых шагов. `aria-valuetext`
+    // не дополняет число, а ЗАМЕНЯЕТ его — соврал бы вместо «ноль процентов».
+    mockedReadiness.mockResolvedValue(
+      readiness([
+        item("location", "unavailable", { reason: "capability_not_built", deep_link: null }),
+        item("hours", "missing"),
+        item("profile", "missing"),
+      ]),
+    );
+    renderScreen();
+    expect(await screen.findByTestId("setup-bar")).not.toHaveAttribute("aria-valuetext");
+  });
+
+  it("когда недоступных шагов нет, полоса ничего лишнего не объявляет", async () => {
+    mockedReadiness.mockResolvedValue(
+      readiness([item("services", "done"), item("hours", "missing")]),
+    );
+    renderScreen();
+    expect(await screen.findByTestId("setup-bar")).not.toHaveAttribute("aria-valuetext");
   });
 
   it("недоступный пункт не становится следующим шагом", async () => {

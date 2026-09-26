@@ -291,7 +291,7 @@ def _states(readiness) -> dict[str, tuple[str, str | None]]:
 
 
 class TestR1Readiness:
-    def test_case_a_services_and_location_are_managed_outside_and_still_block(
+    def test_case_a_services_and_location_are_managed_outside_and_no_longer_block(
         self, master, settings
     ) -> None:
         settings.BOOKING_VIA_AYLA_REST = False
@@ -314,16 +314,28 @@ class TestR1Readiness:
         links = {item["key"]: item["deep_link"] for item in r.as_dict()["items"]}
         assert links["hours"] == "/solo/working-hours"
         assert links["services"] is None and links["location"] is None
-        # Смысл ready не меняется: достижимость «готово» — решение владельца.
-        assert r.blocking == ["services:unavailable", "location:unavailable"]
-        assert r.ready is False
+        # ПЕРЕВЁРНУТО DRF-2350 (§77 п. 1, 23.09.2026). Здесь стояло
+        # «смысл ready не меняется: достижимость „готово“ — решение
+        # владельца», и это было верно ровно до того, как владелец решил:
+        # недоступные пункты отправку больше НЕ держат. Узел не удалён —
+        # он показывает, что прежнее поведение было записано и отменено
+        # решением, а не размыто правкой.
+        assert r.blocking == []
+        assert r.managed_elsewhere == [
+            "services:managed_outside_app",
+            "location:managed_outside_app",
+        ]
+        assert r.ready_to_submit is True
 
     @pytest.mark.parametrize("kind", ["solo", None])
-    def test_solo_and_unknown_are_as_before(self, master, kind, settings) -> None:
+    def test_solo_and_unknown_keep_their_states(self, master, kind, settings) -> None:
         settings.BOOKING_VIA_AYLA_REST = False
         r = _readiness(master, kind)
         states = _states(r)
         assert states["services"][0] == "missing"
         assert states["location"] == ("unavailable", "capability_not_built")
-        assert "location:unavailable" in r.blocking
+        # DRF-2350: недоступное ушло из blocking в managed_elsewhere, а
+        # ненастроенное держит отправку как держало.
         assert "services:missing" in r.blocking
+        assert "location:unavailable" not in r.blocking
+        assert r.managed_elsewhere == ["location:capability_not_built"]
