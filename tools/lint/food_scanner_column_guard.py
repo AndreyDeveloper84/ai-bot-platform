@@ -74,6 +74,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+import lint_parse  # DRF-2538: нечитаемый вход — отдельный исход, не ноль
+
 #: The column this guard keeps dead.
 _COLUMN = "food_scanner_consent_at"
 
@@ -161,11 +163,11 @@ def scan_file(file_path: Path, repo_root: Path | None = None) -> list[Violation]
         return []
     try:
         source = file_path.read_text(encoding="utf-8")
-    except OSError:
+    except OSError as exc:
+        lint_parse.unreadable(file_path, exc)
         return []
-    try:
-        tree = ast.parse(source, filename=str(file_path))
-    except SyntaxError:
+    tree = lint_parse.parse_or_report(source, file_path)
+    if tree is None:
         return []
     visitor = _ColumnVisitor(file_path=file_path)
     visitor.visit(tree)
@@ -192,7 +194,7 @@ def _detect_repo_root(start: Path) -> Path:
     return current
 
 
-def main(argv: list[str]) -> int:
+def _run(argv: list[str]) -> int:
     if len(argv) < 2:
         print("usage: food_scanner_column_guard.py <path> [<path> ...]", file=sys.stderr)
         return 2
@@ -217,6 +219,14 @@ def main(argv: list[str]) -> int:
         file=sys.stderr,
     )
     return 1
+
+
+def main(argv: list[str]) -> int:
+    lint_parse.reset()
+    code = _run(argv)
+    if code not in (0, 1):  # ошибка вызова — охват не о чем печатать
+        return code
+    return max(code, lint_parse.finish("food_scanner_column_guard"))
 
 
 if __name__ == "__main__":
