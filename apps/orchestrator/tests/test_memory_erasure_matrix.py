@@ -422,7 +422,10 @@ class TestBackendDeclaredContext:
         assert ayla.context["home_district"] == "Сокол"
         block = build_concierge_memory_block(bu)
         assert "Диета" not in block
-        assert "Любимые мастера" in block
+        # Чужой домен уцелел. Маркером здесь были «Любимые мастера», но с
+        # DRF-2553 выведенный каталогом список в подсказку не идёт вовсе —
+        # маркер взят у поля, которое блок по-прежнему несёт.
+        assert "Избегает" in block
         assert "Ищет рядом с домом" in block
 
     def test_forget_all_clears_the_price_the_contract_cannot_clear(self, settings, ayla):
@@ -858,7 +861,9 @@ class TestConsentWithdrawal:
 
         block = build_concierge_memory_block(bu)
         assert "Диета" in block
-        assert "Любимые мастера" in block
+        # Маркер «вернулось всё» — не «Любимые мастера»: с DRF-2553 этот
+        # ключ каталога в подсказку не идёт.
+        assert "Избегает" in block
 
 
 # ---------------------------------------------------------------------------
