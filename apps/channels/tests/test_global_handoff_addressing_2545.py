@@ -104,7 +104,9 @@ def _salon_dialog(slug: str, name: str, *, day: int, user_id: int = 2545) -> Con
     """Прежний разговор того же человека с салоном; ``day`` задаёт давность."""
     tenant = Tenant.objects.create(slug=slug, name=name)
     with tenant_scope(tenant):
-        bot_user = BotUser.objects.create(tenant=tenant, channel="max", channel_user_id=str(user_id))
+        bot_user = BotUser.objects.create(
+            tenant=tenant, channel="max", channel_user_id=str(user_id)
+        )
         conv = Conversation.all_tenants.create(tenant=tenant, bot_user=bot_user)
     Conversation.all_tenants.filter(pk=conv.pk).update(
         last_message_at=datetime(2026, 9, day, tzinfo=dt_timezone.utc)
