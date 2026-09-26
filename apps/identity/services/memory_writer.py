@@ -53,7 +53,7 @@ from collections.abc import Iterable
 from datetime import timedelta
 from typing import Any, Optional
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 from apps.identity.models import MemoryEntry, RedZoneAccessLog, UserPersonalContext
@@ -96,8 +96,13 @@ def _audit_write_rejected(
     user_id: uuid.UUID,
     request_id: uuid.UUID,
     purpose: str,
+    access_type: str = RedZoneAccessLog.ACCESS_WRITE_REJECTED_DOB,
 ) -> None:
-    """Append a write_rejected_dob_lookup audit row — durable per ADR-0011 §11.3.
+    """Append a write-rejected audit row — durable per ADR-0011 §11.3.
+
+    ``access_type`` names WHY the write was refused: the DOB lookup (the
+    default, and the only reason before DRF-2542) or the database refusing a
+    yellow/red row without consent.
 
     Called from the fail-closed paths (DOB lookup failed OR minor_lock
     set). No MemoryEntry row was created, so `memory_entry_id` uses a
@@ -122,10 +127,29 @@ def _audit_write_rejected(
             user_id=user_id,
             accessor_role=RedZoneAccessLog.ACCESSOR_SYSTEM_JOB,
             accessor_principal=_writer_principal(),
-            access_type=RedZoneAccessLog.ACCESS_WRITE_REJECTED_DOB,
+            access_type=access_type,
             request_id=request_id,
             purpose=purpose,
         )
+
+
+#: DRF-2542 §2 — CHECK из миграции 0007: жёлтая/красная строка требует
+#: ``consent_at`` (или надгробия).
+_CONSENT_CONSTRAINT = "memory_entry_yellow_red_requires_consent"
+
+
+def _is_consent_violation(exc: IntegrityError) -> bool:
+    """Это отказ именно CHECK согласия, а не любое другое нарушение целостности.
+
+    Сначала — имя констрейнта из диагностики драйвера (psycopg:
+    ``exc.__cause__.diag.constraint_name``); если драйвер его не дал — по тексту
+    ошибки, где Postgres называет констрейнт.
+    """
+    diag = getattr(exc.__cause__, "diag", None)
+    name = getattr(diag, "constraint_name", None)
+    if name:
+        return name == _CONSENT_CONSTRAINT
+    return _CONSENT_CONSTRAINT in str(exc)
 
 
 def write_entry(
@@ -203,19 +227,37 @@ def write_entry(
             "expires_at": (write_ts + timedelta(days=ttl_days) if ttl_days is not None else None),
         }
 
-    return MemoryEntry.objects.create(
-        user_id=user_id,
-        personal_context=personal_context,
-        sensitivity_zone=sensitivity_zone,
-        source=source,
-        kind=kind,
-        content=content,
-        consent_at=consent_at,
-        source_tenant_id=source_tenant_id,
-        last_inferred_at=last_inferred_at,
-        ttl_days=ttl_days,
-        **canonical,
-    )
+    # DRF-2542 §2 — отказ базы по согласию ловится ЗДЕСЬ, где он рождается, и
+    # называется: durable-строкой аудита, как отказ по возрасту. Не выше: у
+    # всех вызывающих широкий ``except Exception`` («память не ломает ход»), и
+    # безымянный IntegrityError превратился бы у них в тихий пропуск. Savepoint
+    # — чтобы отказ не отравил транзакцию вызывающего. Любое ДРУГОЕ нарушение
+    # целостности пробрасывается как было.
+    try:
+        with transaction.atomic():
+            return MemoryEntry.objects.create(
+                user_id=user_id,
+                personal_context=personal_context,
+                sensitivity_zone=sensitivity_zone,
+                source=source,
+                kind=kind,
+                content=content,
+                consent_at=consent_at,
+                source_tenant_id=source_tenant_id,
+                last_inferred_at=last_inferred_at,
+                ttl_days=ttl_days,
+                **canonical,
+            )
+    except IntegrityError as exc:
+        if not _is_consent_violation(exc):
+            raise
+        _audit_write_rejected(
+            user_id,
+            request_id,
+            purpose,
+            access_type=RedZoneAccessLog.ACCESS_WRITE_REJECTED_NO_CONSENT,
+        )
+        return None
 
 
 def supersede_entries(
