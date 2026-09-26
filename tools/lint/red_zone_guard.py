@@ -87,6 +87,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+import lint_parse  # DRF-2538: нечитаемый вход — отдельный исход, не ноль
+
 # Path fragments (forward-slash form — we normalise via PurePath) that
 # are allowed to query red rows directly. The accessor + writer ARE
 # the audited path; tests + migrations need fixture access.
@@ -228,13 +230,17 @@ def scan_file(file_path: Path, repo_root: Path | None = None) -> list[Violation]
 
     try:
         source = file_path.read_text(encoding="utf-8")
-    except OSError:
+    except OSError as exc:
+        lint_parse.unreadable(file_path, exc)
         return []
 
-    try:
-        tree = ast.parse(source, filename=str(file_path))
-    except SyntaxError:
-        # Don't block the lint on broken syntax — that's ruff's job.
+    # DRF-2538. Здесь стояло «Don't block the lint on broken syntax — that's ruff's job». Это верно про
+    # красноту `dev` — ruff в том же джобе краснеет на той же ошибке — и
+    # неверно про смысл зелени этого сторожа: «0 нарушений» что-то говорит
+    # о коде, только если код прочитан. Нечитаемый файл теперь отдельный
+    # исход (`lint_parse.finish`), а не ноль.
+    tree = lint_parse.parse_or_report(source, file_path)
+    if tree is None:
         return []
 
     visitor = _RedZoneVisitor(file_path=file_path)
@@ -267,7 +273,7 @@ def _detect_repo_root(start: Path) -> Path:
     return current
 
 
-def main(argv: list[str]) -> int:
+def _run(argv: list[str]) -> int:
     if len(argv) < 2:
         print("usage: red_zone_guard.py <path> [<path> ...]", file=sys.stderr)
         return 2
@@ -295,6 +301,14 @@ def main(argv: list[str]) -> int:
         file=sys.stderr,
     )
     return 1
+
+
+def main(argv: list[str]) -> int:
+    lint_parse.reset()
+    code = _run(argv)
+    if code not in (0, 1):  # ошибка вызова — охват не о чем печатать
+        return code
+    return max(code, lint_parse.finish("red_zone_guard"))
 
 
 if __name__ == "__main__":

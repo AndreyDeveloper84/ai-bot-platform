@@ -79,6 +79,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+import lint_parse  # DRF-2538: нечитаемый вход — отдельный исход, не ноль
+
 
 #: Имена, несущие ОРИЕНТИР. Имён факта (`calories_eaten`,
 #: `calories_total`, `water_ml`, `today_total_ml`) здесь нет намеренно.
@@ -149,9 +151,8 @@ def _names_of(target: ast.AST) -> set[str]:
 
 def scan_source(source: str, *, path: str) -> list[Violation]:
     out: list[Violation] = []
-    try:
-        tree = ast.parse(source)
-    except SyntaxError:
+    tree = lint_parse.parse_or_report(source, path)
+    if tree is None:
         return out
 
     for node in ast.walk(tree):
@@ -234,7 +235,7 @@ def scan_file(path: Path, *, repo_root: Path) -> list[Violation]:
     return scan_source(path.read_text(encoding="utf-8"), path=rel)
 
 
-def main(argv: list[str]) -> int:
+def _run(argv: list[str]) -> int:
     if len(argv) < 2:
         print("usage: nutrition_target_guard.py <path> [<path> ...]", file=sys.stderr)
         return 2
@@ -265,6 +266,14 @@ def main(argv: list[str]) -> int:
         file=sys.stderr,
     )
     return 1
+
+
+def main(argv: list[str]) -> int:
+    lint_parse.reset()
+    code = _run(argv)
+    if code not in (0, 1):  # ошибка вызова — охват не о чем печатать
+        return code
+    return max(code, lint_parse.finish("nutrition_target_guard"))
 
 
 if __name__ == "__main__":
