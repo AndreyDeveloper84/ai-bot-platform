@@ -23,15 +23,14 @@
  * retained per legal retention and anonymised post-pilot — the delete
  * sheet copy says exactly that, nothing more.
  *
- * Auth mirrors `api.ts` (`MaxInitData` header + dev bypass) — duplicated
- * here rather than exported from `api.ts` because the export endpoint
- * answers a Blob, not JSON, and `api.ts::request` is JSON-typed.
+ * Auth: the same envelope as every client, from `auth-headers.ts`
+ * (DRF-2549). The request itself stays a local `fetch` rather than
+ * `api.ts::request` because the export endpoint answers a Blob, not JSON,
+ * and `api.ts::request` is JSON-typed.
  */
 
+import { applyIdentityHeaders } from "./auth-headers";
 import { ApiError } from "./api";
-import { applyDevBypassHeaders } from "./dev-bypass";
-import { applySalonChoiceHeader } from "./salon-choice";
-import { getInitData } from "./max-sdk";
 
 const API_BASE = "/api/v1/customer";
 const EXPORT_PATH = "/me/personal-data/export/";
@@ -96,10 +95,7 @@ interface ErrorBody {
 
 function buildAuthHeaders(): Headers {
   const headers = new Headers();
-  const initData = getInitData();
-  if (initData) headers.set("Authorization", `MaxInitData ${initData}`);
-  applyDevBypassHeaders(headers);
-  applySalonChoiceHeader(headers);
+  applyIdentityHeaders(headers);
   return headers;
 }
 

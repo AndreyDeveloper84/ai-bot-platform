@@ -13,10 +13,8 @@
  * apps/miniapp_api/auth.verify_init_data.
  */
 
-import { getInitData } from "./max-sdk";
+import { applyIdentityHeaders } from "./auth-headers";
 import { ApiError } from "./api";
-import { applyDevBypassHeaders } from "./dev-bypass";
-import { applySalonChoiceHeader } from "./salon-choice";
 
 const MASTER_API_BASE = "/api/v1/master";
 
@@ -43,11 +41,8 @@ export async function request<T>(
   path: string,
   init: RequestInit = {},
 ): Promise<T> {
-  const initData = getInitData();
   const headers = new Headers(init.headers);
-  if (initData) headers.set("Authorization", `MaxInitData ${initData}`);
-  applyDevBypassHeaders(headers);
-  applySalonChoiceHeader(headers);
+  applyIdentityHeaders(headers);
   // Don't auto-set Content-Type for FormData (the browser writes the
   // boundary string). JSON callers explicitly set it.
   const body = init.body;
@@ -803,11 +798,8 @@ export const uploadMasterProfilePhoto = async (
 ): Promise<ProfilePatchResponse> => {
   const fd = new FormData();
   fd.set("photo", file);
-  const initData = getInitData();
   const headers = new Headers();
-  if (initData) headers.set("Authorization", `MaxInitData ${initData}`);
-  applyDevBypassHeaders(headers);
-  applySalonChoiceHeader(headers);
+  applyIdentityHeaders(headers);
   // No Content-Type — let fetch set the multipart boundary.
   const res = await fetch(`${MASTER_API_BASE}/profile`, {
     method: "PATCH",
@@ -901,11 +893,8 @@ export const uploadPortfolioPhoto = async (
 ): Promise<PortfolioItem> => {
   const fd = new FormData();
   fd.set("image", file);
-  const initData = getInitData();
   const headers = new Headers();
-  if (initData) headers.set("Authorization", `MaxInitData ${initData}`);
-  applyDevBypassHeaders(headers);
-  applySalonChoiceHeader(headers);
+  applyIdentityHeaders(headers);
   const res = await fetch(`${MASTER_API_BASE}/profile/portfolio`, {
     method: "POST",
     headers,
@@ -1645,11 +1634,8 @@ export interface MasterCreateBookingResult {
 export const createMasterBooking = async (
   body: MasterCreateBookingBody,
 ): Promise<MasterCreateBookingResult> => {
-  const initData = getInitData();
   const headers = new Headers({ "Content-Type": "application/json" });
-  if (initData) headers.set("Authorization", `MaxInitData ${initData}`);
-  applyDevBypassHeaders(headers);
-  applySalonChoiceHeader(headers);
+  applyIdentityHeaders(headers);
 
   let res: Response;
   try {
