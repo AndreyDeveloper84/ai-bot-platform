@@ -36,7 +36,7 @@ _LOCK_FIELDS = {"tier_locked_at", "tier_locked_by_master"}
 _EVENT = "CONVERSATION_TIER_PROMOTED_TO_HUMAN_LOCKED"
 
 
-def _is_tier_value(node: ast.AST) -> bool:
+def _is_tier_value(node: ast.AST | None) -> bool:
     """``Conversation.Tier.X`` / ``Tier.X`` / строковый литерал значения."""
     if isinstance(node, ast.Attribute) and node.attr in _TIER_VALUES:
         return "Tier" in ast.unparse(node.value)
