@@ -775,12 +775,6 @@ function Composer({
       />
       <label
         className="internal-chat-thread__sign-toggle"
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: "var(--s-2)",
-          margin: "var(--s-2) 0",
-        }}
       >
         <input
           type="checkbox"
@@ -796,11 +790,6 @@ function Composer({
       <div
         className="internal-chat-thread__sign-helper"
         role="note"
-        style={{
-          fontSize: "0.85em",
-          color: "var(--c-text-secondary)",
-          marginBottom: "var(--s-2)",
-        }}
       >
         {signatureHelper}
       </div>

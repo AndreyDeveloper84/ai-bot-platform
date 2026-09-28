@@ -369,15 +369,6 @@ export function CustomerBookingDetailScreen() {
           aria-modal="true"
           aria-label="Отменить запись"
           className="modal"
-          style={{
-            position: "fixed",
-            inset: 0,
-            background: "rgba(0,0,0,0.4)",
-            display: "flex",
-            alignItems: "flex-end",
-            justifyContent: "center",
-            zIndex: 50,
-          }}
           onClick={(e) => {
             if (e.target === e.currentTarget) {
               setModalOpen(false);
@@ -388,13 +379,6 @@ export function CustomerBookingDetailScreen() {
           <div
             ref={modalRef}
             className="modal__sheet"
-            style={{
-              background: "var(--c-surface-1)",
-              padding: "var(--s-4)",
-              borderRadius: "var(--r-lg) var(--r-lg) 0 0",
-              width: "100%",
-              maxWidth: 480,
-            }}
           >
             <h2 style={{ margin: 0 }}>Отменить запись?</h2>
             <p style={{ marginTop: "var(--s-2)", marginBottom: "var(--s-2)" }}>

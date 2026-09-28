@@ -70,7 +70,7 @@ export function SurfaceSwitchButton() {
   const { canSwitch, requestChooser } = useSurfaceMode();
   if (!canSwitch) return null;
   return (
-    <div className="surface-switch" style={{ margin: "var(--s-4) 0" }}>
+    <div className="surface-switch">
       <button
         type="button"
         className="btn-secondary"

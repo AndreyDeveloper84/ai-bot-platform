@@ -133,13 +133,7 @@ export function MasterSettingsScreen() {
     <div className="screen master-settings">
       <h1 className="screen__title">{COPY.header}</h1>
 
-      <p
-        className="master-settings__coming-soon"
-        style={{
-          color: "var(--c-text-secondary)",
-          margin: "var(--s-3) 0",
-        }}
-      >
+      <p className="master-settings__coming-soon">
         {COPY.comingSoon}
       </p>
 

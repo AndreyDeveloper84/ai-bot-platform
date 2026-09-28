@@ -2302,6 +2302,54 @@ a {
   margin: var(--s-4) 0;
 }
 
+/* DRF-2550 — имена из BASELINE стилевого контракта, у которых вид жил
+   инлайном: перенесены сюда ДОСЛОВНО, записи BASELINE сняты. Правила нет
+   ни у кого другого — у каждого имени один носитель (перепись 28.09). */
+
+/* Окно отмены записи (CustomerBookingDetailScreen.tsx). */
+.modal {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  z-index: 50;
+}
+
+.modal__sheet {
+  background: var(--c-surface-1);
+  padding: var(--s-4);
+  border-radius: var(--r-lg) var(--r-lg) 0 0;
+  width: 100%;
+  max-width: 480px;
+}
+
+/* Кнопка «сменить режим» (SurfaceSwitch.tsx). */
+.surface-switch {
+  margin: var(--s-4) 0;
+}
+
+/* «Скоро» в настройках мастера (MasterSettingsScreen.tsx). */
+.master-settings__coming-soon {
+  color: var(--c-text-secondary);
+  margin: var(--s-3) 0;
+}
+
+/* Подпись сообщения во внутреннем чате (AdminInternalChatThreadScreen.tsx). */
+.internal-chat-thread__sign-toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  margin: var(--s-2) 0;
+}
+
+.internal-chat-thread__sign-helper {
+  font-size: 0.85em;
+  color: var(--c-text-secondary);
+  margin-bottom: var(--s-2);
+}
+
 /* ---- «Ещё» bottom sheet (Tau §3) ------------------------------------ */
 
 /* ---- Tier 2 Клиенты / Услуги read-only cards (Tau §4.3 / §4.4) ------- */
