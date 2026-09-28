@@ -49,6 +49,7 @@ import {
 } from "../lib/api";
 import { formatDateLabel, formatDayStrip, formatSlotTime, formatVisitFull } from "../lib/format";
 import { resetBooking } from "../state/booking";
+import { CLIENT_RESCHEDULE_REFUSAL } from "../lib/refusal-canon";
 import { backTo } from "../lib/screen-back";
 
 function isoDateNDaysAhead(offset: number): string {
@@ -160,13 +161,13 @@ export function RescheduleScreen() {
       });
     } catch (err) {
       if (err instanceof ApiError && err.slug === "slot_unavailable") {
-        setError("Этот слот только что заняли. Выберите другое время.");
+        setError(CLIENT_RESCHEDULE_REFUSAL.slotTaken);
         // Reload slots — the picked one is now gone.
         load();
-      } else if (err instanceof ApiError) {
-        setError("Не получилось перенести.");
       } else {
-        setError("Не получилось перенести. Проверьте интернет.");
+        // Решение владельца 28.09, п.10: «перенос не удался по другой
+        // причине» — одна фраза клиентского регистра, в том числе без сети.
+        setError(CLIENT_RESCHEDULE_REFUSAL.failed);
       }
       setConfirming(false);
     }
