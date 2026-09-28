@@ -180,7 +180,7 @@ describe("CustomerRecordsScreen (real data)", () => {
 
   it("DRF-2436 B / п.15: у каждой записи в строке — мастер и салон; два салона различимы", async () => {
     // Пара, которая обязана различаться: записи одного человека из двух
-    // салонов в одном списке. Без салона строка прежняя — «у {мастер}».
+    // салонов в одном списке. Без салона — «мастер {Имя}» (слова владельца 28.09, п.2).
     mockLists([
       booking({ id: "b-s1", master_name: "Ольга", salon_name: "Формула тела", visit_at: isoInHours(20) }),
       booking({ id: "b-s2", master_name: "Марина", salon_name: "Люмина", visit_at: isoInHours(40) }),
@@ -188,10 +188,10 @@ describe("CustomerRecordsScreen (real data)", () => {
     ]);
     renderScreen();
 
-    expect(await screen.findByText("у Ольга · Формула тела")).toBeInTheDocument();
-    expect(screen.getByText("у Марина · Люмина")).toBeInTheDocument();
-    // Без салона в проводе — без хвоста « · », не «у Анна · ».
-    expect(screen.getByText("у Анна")).toBeInTheDocument();
+    expect(await screen.findByText("мастер Ольга · Формула тела")).toBeInTheDocument();
+    expect(screen.getByText("мастер Марина · Люмина")).toBeInTheDocument();
+    // Без салона в проводе — без хвоста « · ».
+    expect(screen.getByText("мастер Анна")).toBeInTheDocument();
     expect(screen.queryByText(/ · $/)).not.toBeInTheDocument();
   });
 
@@ -381,7 +381,7 @@ describe("офлайн: действия выключены вместе с пр
     // Сами записи никуда не делись — офлайн выключает действия, не показ.
     expect(await screen.findByText("Маникюр")).toBeInTheDocument();
     expect(screen.getByText("Массаж")).toBeInTheDocument();
-    expect(screen.getAllByText(/у Анна Соколова/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/мастер Анна Соколова/).length).toBeGreaterThan(0);
     // Чтение уже показанной записи остаётся доступным.
     const open = screen.getAllByRole("button", { name: "Открыть запись" })[0];
     expect(open).toBeEnabled();

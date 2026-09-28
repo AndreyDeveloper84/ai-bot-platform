@@ -616,20 +616,27 @@ def _render_visits(visits: tuple[Visit, ...]) -> str:
 
 
 def _visit_line(visit: Visit) -> str:
-    """One line per visit, joined by «·» rather than by prepositions.
+    """Строка визита — слова владельца 28.09, п.1–2 (DRF-2569).
 
-    Deliberately no «у {мастер}»: the name arrives in the nominative case and
-    Russian would need the genitive («у Инны», not «у Инна»). Declension is
-    not something to guess at on someone's name — the separator says the same
-    thing and cannot be wrong.
+    «Массаж — мастер Марина · Формула тела, 19.08.2026 в 14:00 — 3 200 ₽».
+    Форма одна с навыком записи (дом — ``booking.visit_words``): та же шапка
+    «Ваши предстоящие записи:» не может давать две разные строки. «мастер
+    {Имя}» без склонения — падеж по имени не угадывается. Цена остаётся в
+    конце: владелец её не снимал, его образец — про предстоящую запись.
+
+    Пояс — салона записи (``Visit.salon_tz`` по локальному ``Tenant``). ПРЕДЕЛ,
+    названный: салон не опознан локально — пилотный ``_DISPLAY_TZ``. Это не
+    выбор, а нехватка данных: ответ канона называет салон, но не его пояс.
     """
-    parts = [visit.service_name or "услуга"]
-    if visit.master_name:
-        parts.append(visit.master_name)
-    when = _format_when(visit.start_at)
-    if when:
-        parts.append(when)
-    line = " · ".join(parts)
+    from apps.booking.visit_words import booking_line, visit_time_words
+
+    when = visit_time_words(visit.start_at, visit.salon_tz, fallback_tz=_DISPLAY_TZ)
+    line = booking_line(
+        service=visit.service_name or "услуга",
+        master=visit.master_name,
+        salon=visit.salon_name,
+        when=when,
+    )
     if visit.price is not None:
         line = f"{line} — {_format_money(visit.price)}"
     return line

@@ -524,6 +524,10 @@ class BookingRow:
     master_name: str
     service_name: str
     status: str
+    #: DRF-2569 / решение владельца 28.09 п.1–2: салон записи (``Tenant.name``)
+    #: и его пояс — время человеку показывается в поясе салона, не в UTC.
+    salon_name: str = ""
+    salon_tz: str = ""
 
 
 @dataclass(frozen=True)
@@ -2998,6 +3002,9 @@ def _show_my_bookings_ayla(
                 master_name=row.master_name,
                 service_name=row.service_name,
                 status="CONFIRMED",
+                # Салон — ЗАПИСИ (с DRF-2436 B чат читает все салоны человека).
+                salon_name=proxy.tenant.name,
+                salon_tz=_salon_tz_key(proxy.tenant),
             )
         )
 
@@ -3090,6 +3097,8 @@ def show_my_bookings(
                 master_name=row.master_name,
                 service_name=row.service_name,
                 status="CONFIRMED",
+                salon_name=getattr(tenant, "name", "") or "",
+                salon_tz=_salon_tz_key(tenant),
             )
         )
 
@@ -3103,17 +3112,28 @@ def show_my_bookings(
     return BookingToolResult(text=text, bookings=bookings)
 
 
+def _salon_tz_key(tenant: Any) -> str:
+    """Пояс салона — тем же правилом, что «✅ Вы записаны» (``tenant_timezone``)."""
+    from apps.booking.client_notify import tenant_timezone
+
+    return tenant_timezone(tenant).key
+
+
+def _format_booking_line(b: BookingRow) -> str:
+    """Строка записи — слова владельца 28.09, п.1–2 (дом: ``booking.visit_words``)."""
+    from apps.booking.visit_words import booking_line, visit_time_words
+
+    when = visit_time_words(b.visit_at, b.salon_tz)
+    return "• " + booking_line(
+        service=b.service_name, master=b.master_name, salon=b.salon_name, when=when
+    )
+
+
 def _format_bookings_text(bookings: list[BookingRow]) -> str:
     if not bookings:
         return "У вас пока нет предстоящих записей."
     lines = ["Ваши предстоящие записи:"]
-    for b in bookings[:5]:
-        parts = [b.service_name or "—"]
-        if b.master_name:
-            parts.append(f"с {b.master_name}")
-        if b.visit_at:
-            parts.append(f"в {b.visit_at}")
-        lines.append("• " + " ".join(parts))
+    lines += [_format_booking_line(b) for b in bookings[:5]]
     return "\n".join(lines)
 
 

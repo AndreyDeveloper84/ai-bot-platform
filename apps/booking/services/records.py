@@ -32,6 +32,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
 
+from django.core.exceptions import ValidationError
 from django.utils import timezone
 
 from apps.integrations.ayla.booking_client import (
@@ -129,6 +130,11 @@ class Visit:
     start_at: str
     price: Decimal | None
     closed_by: str | None = None
+    #: DRF-2569 / слова владельца 28.09 п.1–2: салон записи (из ответа
+    #: канона) и его пояс. Пояс пустой — салон не опознан локально (см.
+    #: ``_salon_tz_of``); показ тогда называет это пределом.
+    salon_name: str = ""
+    salon_tz: str = ""
 
 
 @dataclass(frozen=True)
@@ -553,8 +559,33 @@ def _offer_details(edge: dict[str, Any] | None) -> dict[str, Any]:
     return {"reason": reason_from_edge(edge) if edge else None}
 
 
+def _salon_tz_of(tenant: dict[str, Any]) -> str:
+    """Пояс салона записи — по локальному ``Tenant`` с тем же id (или slug).
+
+    Ответ канона называет салон (``id``/``slug``/``name``), но не его пояс.
+    Локальная строка салона несёт ``timezone``, и правило то же, что у
+    «✅ Вы записаны» (``tenant_timezone``). Салон не опознан — пустая строка,
+    а не догадка: показ назовёт это пределом.
+    """
+    from apps.booking.client_notify import tenant_timezone
+    from apps.tenancy.models import Tenant
+
+    ident, slug = str(tenant.get("id") or ""), str(tenant.get("slug") or "")
+    row = None
+    try:
+        if ident:
+            row = Tenant.objects.filter(id=ident).first()
+        if row is None and slug:
+            row = Tenant.objects.filter(slug=slug).first()
+    except (ValueError, ValidationError):
+        row = None
+    return tenant_timezone(row).key if row is not None else ""
+
+
 def _visit_from_record(record: AylaUserRecord) -> Visit:
     service = record.services[0] if record.services else {}
+    raw_tenant = record.raw.get("tenant")
+    tenant: dict[str, Any] = raw_tenant if isinstance(raw_tenant, dict) else {}
     return Visit(
         appointment_id=record.appointment_id,
         service_name=str(service.get("name") or ""),
@@ -563,6 +594,8 @@ def _visit_from_record(record: AylaUserRecord) -> Visit:
         price=_as_decimal(record.price),
         # OD-V1: reserved. The backend carries no close-source field yet.
         closed_by=None,
+        salon_name=str(tenant.get("name") or ""),
+        salon_tz=_salon_tz_of(tenant) if tenant else "",
     )
 
 
