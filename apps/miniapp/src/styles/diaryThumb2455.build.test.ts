@@ -71,6 +71,17 @@ describe("миниатюра блюда в строке дневника", () =>
     expect(placed).toMatch(/position:\s*absolute/);
     expect(placed).toMatch(/inset-inline-start:\s*0/);
   });
+
+  it("кнопки под модификатором переносятся и не шире места справа от снимка", () => {
+    // Замер в Chrome: без этого блок «Граммы / В избранное / Убрать» (227 px)
+    // вылезал за строку на 31 px (экран 360) и на 1 px (390); одного
+    // переноса мало — блок с `flex: 0 0 auto` держит ширину содержимого.
+    const actions = block(
+      ".food-scanner-diary__entry--with-thumb .food-scanner-diary__entry-actions",
+    );
+    expect(actions).toMatch(/flex-wrap:\s*wrap/);
+    expect(actions).toMatch(/max-width:\s*100%/);
+  });
 });
 
 describe("строка без снимка — прежняя пиксель в пиксель (п.10)", () => {
