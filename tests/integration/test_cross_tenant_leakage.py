@@ -20,6 +20,8 @@ must pick up the contract automatically — there's no opt-in.
 
 from __future__ import annotations
 
+import hashlib
+
 import pytest
 from django.apps import apps as django_apps
 from django.db import models
@@ -391,6 +393,17 @@ _MODEL_REQUIRED_FIELDS: dict[str, dict[str, object]] = {
         "bot_user": lambda tenant, suffix: _make_bot_user_for_scanner(tenant, suffix),
         "role": "admin",
     },
+    # DRF-2587: записи не было — фабрика не давала ни ``expires_at`` (NOT NULL
+    # без умолчания: NotNullViolation на Postgres и SQLite), ни ``code_hash``
+    # (unique без умолчания: две строки одного теста столкнулись бы на "").
+    # role=admin — роли без ``catalog_master``.
+    "StaffInvite": {
+        "role": "admin",
+        "code_hash": lambda tenant, suffix: hashlib.sha256(
+            f"scanner-{suffix or 'x'}".encode()
+        ).hexdigest(),
+        "expires_at": lambda tenant, suffix: _future_datetime(days=7),
+    },
     # Phase 3 / F4: OneToOne(BotUser) PK — same shape as ClientProfile,
     # but no post_save auto-create exists for preferences, so a plain
     # create with a fresh BotUser per row is enough.
@@ -633,6 +646,49 @@ def _make_archived_message_pair(tenant, suffix: str):
     return conversation, message
 
 
+def _takes_part_in_uniqueness(model: type[models.Model], field_name: str) -> bool:
+    """Поле входит в какое-либо правило уникальности модели.
+
+    Только таким полям нужен суффикс: он существует, чтобы две строки одного
+    теста не столкнулись. Остальным он вредит (DRF-2587).
+    """
+    field = model._meta.get_field(field_name)
+    if getattr(field, "unique", False):
+        return True
+    if any(field_name in group for group in model._meta.unique_together):
+        return True
+    return any(
+        isinstance(constraint, models.UniqueConstraint) and field_name in (constraint.fields or ())
+        for constraint in model._meta.constraints
+    )
+
+
+def _string_for(model: type[models.Model], field_name: str, base: str, suffix: str) -> str:
+    """Строковое значение поля для строки сканера (DRF-2587).
+
+    Было: ``f"{base}-{suffix}"`` для ЛЮБОЙ строки. На Postgres это давало
+    ``StringDataRightTruncation`` (``TenantStaff.role`` — varchar(16) — получал
+    «admin-TenantStaff-1», 19 символов) и выводило поле с ``choices`` за
+    пределы допустимых значений. SQLite не держит длину, поэтому файл
+    зеленел локально, а в CI 31 случай из 34 выключенных был выключен
+    именно этим. Случай падал на ПОДГОТОВКЕ и до утверждения об утечке не
+    доходил.
+
+    Теперь суффикс — только полям, входящим в правило уникальности; значение,
+    не влезающее в ``max_length``, укорачивается с хешем полного значения, чтобы
+    разные строки остались разными.
+    """
+    if not _takes_part_in_uniqueness(model, field_name):
+        return base or suffix
+    value = f"{base}-{suffix}" if base else suffix
+    max_length = getattr(model._meta.get_field(field_name), "max_length", None)
+    if max_length and len(value) > max_length:
+        digest = hashlib.sha256(value.encode()).hexdigest()
+        head = max(max_length - 9, 0)
+        value = f"{value[:head]}-{digest}"[:max_length] if head else digest[:max_length]
+    return value
+
+
 def _create_row(model: type[models.Model], *, tenant, suffix: str = "") -> models.Model:
     """Create one row for ``model`` under ``tenant``, satisfying required fields.
 
@@ -646,7 +702,7 @@ def _create_row(model: type[models.Model], *, tenant, suffix: str = "") -> model
         if callable(base_value):
             kwargs[field_name] = base_value(tenant, suffix)
         elif isinstance(base_value, str) and suffix:
-            kwargs[field_name] = f"{base_value}-{suffix}" if base_value else suffix
+            kwargs[field_name] = _string_for(model, field_name, base_value, suffix)
         else:
             kwargs[field_name] = base_value
     # ClientProfile is auto-created by a BotUser post_save signal (P1).
