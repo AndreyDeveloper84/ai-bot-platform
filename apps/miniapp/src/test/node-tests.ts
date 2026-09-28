@@ -38,6 +38,7 @@
 export const NODE_ENVIRONMENT_TESTS: readonly string[] = [
   "src/App.legacyRoutes.test.ts",
   "src/App.recommendationRoute1769.test.tsx",
+  "src/components/customerAvatarEntry.build.test.ts",
   "src/components/master/systemStateVocabulary.test.ts",
   "src/lib/admin-api.staff-role.test.ts",
   "src/lib/admin-tabs.test.ts",

@@ -15,6 +15,7 @@
 import { act, configure, fireEvent, getConfig, render, screen, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { primeDisplayName } from "../components/CustomerAvatarEntry";
 
 vi.mock("../lib/plan-lite", async (importOriginal) => {
   const original = await importOriginal<typeof import("../lib/plan-lite")>();
@@ -44,6 +45,14 @@ import { fetchDiaryConsentGate } from "../lib/food-scanner";
 import { fetchDecisionContext, type DecisionContext } from "../lib/customer-goals";
 import { closePlanLite, createPlanLite, getPlanLite, getPlanLiteProposal, type PlanLite } from "../lib/plan-lite";
 import { PLAN_LITE_COPY, PLAN_LITE_ROUTE, PlanLiteScreen } from "./PlanLiteScreen";
+
+// Дверь в профиль (`CustomerAvatarEntry`) без пропа спрашивает имя у
+// `/me`. Этот набор ручку не подменяет, поэтому имя засевается явно:
+// иначе в прогоне живёт неподменённый сетевой вызов и асинхронное
+// обновление, которое может прилететь посреди чужого теста (DRF-2523).
+beforeEach(() => {
+  primeDisplayName("Тест Тестов");
+});
 
 const GUARD_ASYNC_TIMEOUT_MS = 20;
 let previousAsyncUtilTimeout = 1000;
