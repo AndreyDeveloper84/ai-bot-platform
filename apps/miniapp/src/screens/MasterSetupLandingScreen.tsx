@@ -90,6 +90,27 @@ export const START_LABEL = "Начать настройку";
 export const CONTINUE_LABEL = "Продолжить настройку";
 export const LATER_LABEL = "Продолжить позже";
 export const ALL_DONE_TITLE = "Всё настроено";
+
+/**
+ * Решение владельца 28.09 (слова, п.7; DRF-2582) — дословно. Когда мастер
+ * закрыл всё, что зависит от него, а остальное ведёт салон: полоса и озвучка
+ * не должны читаться как «вам ещё заполнять» — ни «полна» без слов (диктор
+ * читал 100 % при ненастроенных услугах и месте), ни «подготовим профиль».
+ */
+export const SALON_REST_TEXT = "С вашей стороны всё готово. Остальное настроит салон.";
+
+/**
+ * Своё закрыто, остальное — салона: не готово, достижимых незакрытых нет
+ * (`unknown` — незакрытый: незнание сюда не попадает), и есть пункт, который
+ * ведёт салон (`managed_outside_app`).
+ */
+export function restIsSalons(readiness: OnboardingReadiness): boolean {
+  return (
+    !readiness.ready &&
+    firstOpenItem(readiness.items) === null &&
+    readiness.items.some((item) => item.state === "unavailable" && item.reason === "managed_outside_app")
+  );
+}
 export const PUBLISH_ENTRY_LABEL = "Отправить профиль на проверку";
 
 /**
@@ -178,6 +199,7 @@ export function MasterSetupLandingScreen() {
   const note = identityNote(readiness.identity.state);
   const greeting = name ? `${name}, всё готово 👋` : "Всё готово 👋";
   const canSubmit = canSubmitProfile(readiness);
+  const salonRest = restIsSalons(readiness);
 
   return (
     <main className="screen setup-landing" aria-labelledby="setup-landing-title">
@@ -187,7 +209,7 @@ export function MasterSetupLandingScreen() {
       {!readiness.ready && (
         <>
           <p className="setup-landing__lead">{SETUP_LEAD}</p>
-          <p className="setup-landing__lead">{SETUP_EXPLAIN}</p>
+          <p className="setup-landing__lead">{salonRest ? SALON_REST_TEXT : SETUP_EXPLAIN}</p>
         </>
       )}
 
@@ -198,6 +220,7 @@ export function MasterSetupLandingScreen() {
         aria-valuemin={0}
         aria-valuemax={fill.total}
         aria-valuenow={fill.done}
+        {...(salonRest ? { "aria-valuetext": SALON_REST_TEXT } : {})}
         data-testid="setup-bar"
       >
         <div
