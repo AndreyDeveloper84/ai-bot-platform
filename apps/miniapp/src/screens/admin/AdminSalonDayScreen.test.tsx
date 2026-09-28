@@ -36,6 +36,7 @@ import {
   type MeResponse,
   type SalonDayResponse,
 } from "../../lib/admin-api";
+import { REFUSAL_CANON } from "../../lib/refusal-canon";
 import { AdminSalonDayScreen } from "./AdminSalonDayScreen";
 
 const mockedDay = vi.mocked(getSalonDay);
@@ -724,6 +725,32 @@ describe("moving a visit", () => {
       expect(mockedMove).toHaveBeenCalledWith("v-1", 4, "2026-08-20T11:00:00+00:00"),
     );
   });
+
+  it.each([
+    ["conflict", "это время успели занять — выберите другое"],
+    ["failed", undefined],
+  ] as const)(
+    "перенос не прошёл (%s) — ровно фраза владельца (§6-кси п.6, DRF-2577)",
+    async (outcome, hint) => {
+      const user = userEvent.setup();
+      mockedDay.mockResolvedValue(dayWith());
+      mockedVersion.mockResolvedValue(okVersion);
+      mockedSlots.mockResolvedValue(
+        slotsPayload([
+          { time: "14:00", start_at: "2026-08-20T11:00:00+00:00", duration_min: 60 },
+        ]) as never,
+      );
+      mockedMove.mockResolvedValue({ outcome, detail: "slot conflict", ...(hint ? { hint } : {}) });
+      vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      renderScreen();
+
+      await user.click(await screen.findByRole("button", { name: /Перенести визит: Мария/ }));
+      await user.click(await screen.findByRole("button", { name: "14:00" }));
+
+      expect(await screen.findByText(REFUSAL_CANON.visitMove)).toBeInTheDocument();
+      expect(screen.queryByText(/успели занять|slot conflict/)).toBeNull();
+    },
+  );
 
   it("never renders an unreachable slot list as «no free time»", async () => {
     const user = userEvent.setup();

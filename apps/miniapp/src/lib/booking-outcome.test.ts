@@ -41,6 +41,7 @@ import {
   type SubmitOutcome,
 } from "./booking-draft";
 import { CUSTOMER_OUTCOME, RECOVERY, type RecoveryKind } from "./booking-outcome";
+import { REFUSAL_CANON } from "./refusal-canon";
 
 const ALL_OUTCOMES: SubmitOutcome[] = [
   "committed",
@@ -77,10 +78,11 @@ describe("у каждого исхода свои слова и своё дей�
 
   it("положительная пара: слова М-3 на мастерской поверхности не тронуты", () => {
     // Клиентский голос заведён РЯДОМ, а не вместо: форма записи мастера
-    // говорит с персоналом по-прежнему. Правка, которая «причесала бы»
-    // админку заодно, упала бы здесь.
-    expect(SUBMIT_OUTCOME_COPY.conflict).toContain("выберите");
-    expect(SUBMIT_OUTCOME_COPY.conflict).toContain("Клиент и услуга сохранены");
+    // говорит с персоналом своими словами. С 28.09 слова персонала на
+    // «время занято» — фраза владельца дословно (§6-кси п.3, DRF-2577), и
+    // клиентский голос ею не становится.
+    expect(SUBMIT_OUTCOME_COPY.conflict).toBe(REFUSAL_CANON.slotTaken);
+    expect(CUSTOMER_OUTCOME.conflict.text).not.toBe(REFUSAL_CANON.slotTaken);
     expect(SUBMIT_OUTCOME_COPY.blocked).toContain("владельцу салона");
   });
 

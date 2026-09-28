@@ -40,6 +40,12 @@ import {
   type SalonDayVisit,
 } from "../../lib/admin-api";
 import { setBackButton } from "../../lib/max-sdk";
+import { REFUSAL_CANON } from "../../lib/refusal-canon";
+
+/** Перенос не прошёл: человеку — фраза владельца, уточнение — нам (DRF-2577). */
+function logMoveRefusal(outcome: string, hint?: string, detail?: string): void {
+  console.warn(`[api-detail] reschedule ${outcome}: ${hint ?? ""} ${detail ?? ""}`.trim());
+}
 
 /** `YYYY-MM-DD` for a Date, in that Date's own local fields. */
 function toIsoDate(d: Date): string {
@@ -672,7 +678,9 @@ export function AdminSalonDayScreen({ me }: { me: MeResponse }) {
             setNotice(`Визит перенесён на ${slot.time}.`);
             break;
           case "conflict":
-            setNotice(res.hint || "Не удалось перенести визит.");
+            // §6-кси п.6 (DRF-2577) — дословно; уточнение сервера — в журнал.
+            logMoveRefusal(res.outcome, res.hint, res.detail);
+            setNotice(REFUSAL_CANON.visitMove);
             break;
           case "pending":
             setNotice(
@@ -683,7 +691,8 @@ export function AdminSalonDayScreen({ me }: { me: MeResponse }) {
             setNotice(res.hint || "Этот визит нельзя перенести.");
             break;
           default:
-            setNotice(res.hint || "Не удалось перенести визит.");
+            logMoveRefusal(res.outcome, res.hint, res.detail);
+            setNotice(REFUSAL_CANON.visitMove);
         }
         if (res.outcome !== "blocked") await load(date);
       } finally {

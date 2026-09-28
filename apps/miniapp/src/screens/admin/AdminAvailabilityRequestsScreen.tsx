@@ -43,6 +43,7 @@ import { Snackbar } from "../../components/Snackbar";
 import { StateError } from "../../components/StateError";
 import { ApiError } from "../../lib/api";
 import { countLabel, type MaybeCount } from "../../lib/format";
+import { REFUSAL_CANON } from "../../lib/refusal-canon";
 import {
   approveAvailabilityRequest,
   getAvailabilityRequests,
@@ -199,7 +200,6 @@ const EMPTY_APPROVE_STATE: ConfirmApproveState = {
 
 interface OverlapBannerState {
   dates: string[];
-  detail: string;
 }
 
 const MAX_REJECTION_REASON_LEN = 500;
@@ -381,10 +381,9 @@ export function AdminAvailabilityRequestsScreen({ me }: Props) {
       if ("__conflict" in result) {
         // 409 — branch on slug.
         if (result.conflict === "overlap_conflict") {
-          setOverlapBanner({
-            dates: result.dates || [],
-            detail: result.detail,
-          });
+          // `detail` — нам в журнал, не на экран (DRF-2446, DRF-2577).
+          if (result.detail) console.warn(`[api-detail] 409 overlap_conflict: ${result.detail}`);
+          setOverlapBanner({ dates: result.dates || [] });
           hapticNotify("error");
           setApproveState(EMPTY_APPROVE_STATE);
           return;
@@ -623,14 +622,11 @@ export function AdminAvailabilityRequestsScreen({ me }: Props) {
           role="alert"
           style={{ marginTop: "var(--s-3)" }}
         >
-          <p style={{ margin: 0 }}>
-            Не удалось одобрить — на этих датах уже есть другие изменения:
-            {" "}
-            {overlapBanner.dates.length > 0
-              ? overlapBanner.dates.join(", ")
-              : overlapBanner.detail}
-            .
-          </p>
+          {/* §6-кси п.5 (DRF-2577) — дословно. Даты — данные, не фраза. */}
+          <p style={{ margin: 0 }}>{REFUSAL_CANON.scheduleOverlap}</p>
+          {overlapBanner.dates.length > 0 && (
+            <p style={{ margin: "var(--s-1) 0 0" }}>{overlapBanner.dates.join(", ")}</p>
+          )}
           <div style={{ marginTop: "var(--s-2)" }}>
             <button
               type="button"

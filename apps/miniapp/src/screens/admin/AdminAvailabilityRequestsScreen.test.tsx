@@ -72,6 +72,7 @@ import {
   type MeResponse,
 } from "../../lib/admin-api";
 import { ApiError } from "../../lib/api";
+import { REFUSAL_CANON } from "../../lib/refusal-canon";
 import { AdminAvailabilityRequestsScreen } from "./AdminAvailabilityRequestsScreen";
 
 const mockedList = vi.mocked(getAvailabilityRequests);
@@ -282,5 +283,41 @@ describe("ресепшен сюда не ходит", () => {
       await screen.findByText("Эта страница только для администраторов."),
     ).toBeInTheDocument();
     expect(mockedList).not.toHaveBeenCalled();
+  });
+});
+
+describe("пересечение с расписанием — фраза владельца (§6-кси п.5, DRF-2577)", () => {
+  // Раньше без дат баннер печатал серверный `detail` — английский текст,
+  // написанный для нас. Теперь — фраза владельца дословно, `detail` — в журнал.
+  const DETAIL = "overlaps approved override on 2026-10-06";
+
+  async function approveOlgaGets(dates: string[] | undefined) {
+    mockedList.mockResolvedValue({ items: [OLGA], next_cursor: null });
+    mockedApprove.mockResolvedValue({
+      __conflict: true,
+      conflict: "overlap_conflict",
+      detail: DETAIL,
+      ...(dates ? { dates } : {}),
+    });
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    open();
+    await screen.findByText("Ольга");
+    await userEvent.click(within(rowOf("Ольга")).getByRole("button", { name: /Одобрить/ }));
+    const sheet = await screen.findByRole("dialog", { name: "Подтвердить одобрение" });
+    await userEvent.click(within(sheet).getByRole("button", { name: "Одобрить" }));
+    return screen.findByRole("alert");
+  }
+
+  it("дат нет — ровно фраза владельца, серверный detail не показан", async () => {
+    const alert = await approveOlgaGets(undefined);
+    expect(within(alert).getByText(REFUSAL_CANON.scheduleOverlap)).toBeInTheDocument();
+    expect(alert).not.toHaveTextContent(DETAIL);
+  });
+
+  it("даты есть — та же фраза, даты отдельной строкой", async () => {
+    const alert = await approveOlgaGets(["06.10", "07.10"]);
+    expect(within(alert).getByText(REFUSAL_CANON.scheduleOverlap)).toBeInTheDocument();
+    expect(within(alert).getByText("06.10, 07.10")).toBeInTheDocument();
+    expect(alert).not.toHaveTextContent(DETAIL);
   });
 });

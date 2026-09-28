@@ -279,7 +279,6 @@ export function NewBookingForm({
   // §18 — the outcome of a submit. `null` means «not submitted», which is a
   // different thing from every value it can hold.
   const [outcome, setOutcome] = useState<SubmitOutcome | null>(null);
-  const [outcomeDetail, setOutcomeDetail] = useState("");
   // Мастер: варианты из ответа «занято» и id созданной записи для двери.
   const [alternatives, setAlternatives] = useState<BookingSlot[] | null>(null);
   const [createdId, setCreatedId] = useState<string>("");
@@ -497,7 +496,11 @@ export function NewBookingForm({
             }),
       });
       setOutcome(res.outcome);
-      setOutcomeDetail(res.detail);
+      // `detail` — внутренняя причина: нам в журнал, НЕ на экран (DRF-2446,
+      // DRF-2577). Человеку — фраза исхода из словаря.
+      if (res.outcome !== "committed" && res.detail) {
+        console.warn(`[api-detail] booking ${res.outcome}: ${res.detail}`);
+      }
       if (res.outcome === "conflict") setAlternatives(res.alternatives ?? null);
       if (res.outcome === "committed") {
         setCreatedId(res.appointment_id ?? "");
@@ -728,16 +731,6 @@ export function NewBookingForm({
           {(outcome === "blocked" || outcome === "failed") && (
             <div className="callout callout--warning">
               <p style={{ margin: 0 }}>{SUBMIT_OUTCOME_COPY[outcome]}</p>
-              {outcomeDetail && (
-                <p
-                  style={{
-                    margin: "var(--s-1) 0 0",
-                    color: "var(--c-text-secondary)",
-                  }}
-                >
-                  {outcomeDetail}
-                </p>
-              )}
             </div>
           )}
         </section>
@@ -757,17 +750,6 @@ export function NewBookingForm({
           style={{ marginTop: "var(--s-3)" }}
         >
           <p style={{ margin: 0 }}>{SUBMIT_OUTCOME_COPY[outcome]}</p>
-          {outcomeDetail && (
-            <p
-              style={{
-                margin: "var(--s-1) 0 0",
-                color: "var(--c-text-secondary)",
-                fontSize: "var(--font-size-100)",
-              }}
-            >
-              {outcomeDetail}
-            </p>
-          )}
           {outcomeKeepsDraft(outcome) && (
             <p
               style={{
