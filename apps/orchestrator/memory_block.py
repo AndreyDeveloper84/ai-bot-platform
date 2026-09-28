@@ -120,6 +120,29 @@ def concierge_memory_enabled() -> bool:
     return bool(getattr(settings, "CONCIERGE_MEMORY_ENABLED", True))
 
 
+#: Ключи заявленного контекста каталога, которые в подсказку не идут, хотя
+#: каталог их присылает. Контракт не меняется: каталог хранит поле, отдаёт его
+#: во внутреннем API и в выгрузке 152-ФЗ — не читает его только подсказка.
+#:
+#: ``favorite_masters`` (DRF-2553, из замера DRF-2551). Доводов два, и нужны
+#: оба — по отдельности каждый опровергается:
+#:
+#: 1. агрегация сама пересекает салоны: каталог выводит список ночью из
+#:    завершённых визитов человека во ВСЕХ салонах и без окна по времени
+#:    (``users/personal_context_inference.py``). Это «узнали о нём», собранное
+#:    из данных нескольких салонов, — решение владельца 24.08 (OD_MEMORY §3)
+#:    называет любимых мастеров отношением с конкретным салоном;
+#: 2. пользы ноль: сюда приходили голые UUID («Любимые мастера: id=…»), а
+#:    единственный инструмент, которому нужен мастер, ``start_booking``,
+#:    принимает имя так, как оно прозвучало.
+#:
+#: Местный факт «называешь любимым мастером «…»» (``memory_surface``) не
+#: тронут, и довод тут — область, а не «сказал сам»: реестр ``NEVER_CROSSES``
+#: говорит о чтении, собранном для салона, а такого чтения сегодня нет;
+#: глобальная поверхность салоном не является.
+DECLARED_KEYS_NOT_IN_PROMPT: frozenset[str] = frozenset({"favorite_masters"})
+
+
 def build_concierge_memory_block(bot_user: Any) -> str:
     """Return the system-prompt memory block, or "" when nothing may surface.
 
@@ -138,6 +161,8 @@ def build_concierge_memory_block(bot_user: Any) -> str:
     sources: dict[str, str] = {}
     declared_origins = _declared_origins(declared.context)
     for key, value in (declared.context.context or {}).items():
+        if key in DECLARED_KEYS_NOT_IN_PROMPT:
+            continue
         if key == "preferred_time_slots" and isinstance(value, list):
             value = [_SLOT_DISPLAY.get(s, s) for s in value]
         facts[key] = value
