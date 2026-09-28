@@ -16,6 +16,7 @@
  * недоступен; `consent_required` — гейт согласия с возвратом сюда;
  * остальное — фраза и «Повторить».
  */
+import { DiaryEntryPhoto } from "../components/DiaryEntryPhoto";
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 
@@ -216,6 +217,7 @@ export function FoodScannerDayScreen() {
                   <ul className="food-scanner-diary__list">
                     {items.map((entry) => (
                       <li key={entry.id} className="food-scanner-diary__entry">
+                        <DiaryEntryPhoto entry={entry} />
                         <div className="food-scanner-diary__entry-main">
                           <span className="food-scanner-diary__entry-time">
                             {formatTimeShort(entry.logged_at)}

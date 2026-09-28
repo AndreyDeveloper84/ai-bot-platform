@@ -11,6 +11,7 @@
  * (per spec §10 Appendix ED Mode).
  */
 
+import { DiaryEntryPhoto } from "../components/DiaryEntryPhoto";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
@@ -404,6 +405,7 @@ function DiaryReady({
             <ul className="food-scanner-diary__list">
               {items.map((entry) => (
                 <li key={entry.id} className="food-scanner-diary__entry">
+                  <DiaryEntryPhoto entry={entry} />
                   <div className="food-scanner-diary__entry-main">
                     <span className="food-scanner-diary__entry-time">
                       {formatTimeShort(entry.logged_at)}
