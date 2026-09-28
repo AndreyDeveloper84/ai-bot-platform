@@ -727,10 +727,10 @@ describe("moving a visit", () => {
   });
 
   it.each([
-    ["conflict", "это время успели занять — выберите другое"],
+    ["conflict", "запись уже перенесли — обновите день и посмотрите заново"],
     ["failed", undefined],
   ] as const)(
-    "перенос не прошёл (%s) — ровно фраза владельца (§6-кси п.6, DRF-2577)",
+    "перенос не прошёл (%s) — фраза владельца, под ней шаг сервера, detail не виден (§6-кси п.6, DRF-2577)",
     async (outcome, hint) => {
       const user = userEvent.setup();
       mockedDay.mockResolvedValue(dayWith());
@@ -747,8 +747,14 @@ describe("moving a visit", () => {
       await user.click(await screen.findByRole("button", { name: /Перенести визит: Мария/ }));
       await user.click(await screen.findByRole("button", { name: "14:00" }));
 
-      expect(await screen.findByText(REFUSAL_CANON.visitMove)).toBeInTheDocument();
-      expect(screen.queryByText(/успели занять|slot conflict/)).toBeNull();
+      // Фраза отказа — владельца, дословно, первой строкой; под ней — что
+      // делать дальше (`hint`), если сервер его назвал. `detail` — нигде.
+      const status = await screen.findByText((_, el) =>
+        el?.getAttribute("role") === "status" && (el.textContent ?? "").startsWith(REFUSAL_CANON.visitMove),
+      );
+      const step = hint ? "Запись уже перенесли — обновите день и посмотрите заново" : "";
+      expect(status.textContent).toBe(REFUSAL_CANON.visitMove + step);
+      expect(screen.queryByText(/slot conflict/)).toBeNull();
     },
   );
 
