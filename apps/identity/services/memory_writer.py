@@ -201,8 +201,10 @@ def write_entry(
         request_id: audit reference (UUID).
         purpose: human-readable purpose for the audit log.
         consent_at: REQUIRED for yellow/red (CHECK 2 enforces it).
-        source_tenant_id: tenant the fact originated at. None for
-            cross-tenant / platform-level facts.
+        source_tenant_id: tenant the fact originated at. Not passed →
+            resolved HERE by :func:`memory_origin.resolve_source_tenant_id`
+            (DRF-2544): global surface → ``global_bot`` sentinel, salon in
+            scope → that salon, neither → ``ORIGIN_UNKNOWN`` (None).
         last_inferred_at: REQUIRED when source IN ('inferred','signal'),
             MUST be NULL when source='explicit' (CHECK 1 enforces it).
         ttl_days: per-zone retention cap. None = no auto-TTL (green).
@@ -248,6 +250,14 @@ def write_entry(
             "updated_at": write_ts,
             "expires_at": (write_ts + timedelta(days=ttl_days) if ttl_days is not None else None),
         }
+
+    # DRF-2544 — происхождение решается в момент записи и в одном месте:
+    # иначе поле честно ровно у тех вызывающих, кто вспомнил его передать
+    # (до правки — ни у одного из 13 мест записи).
+    if source_tenant_id is None:
+        from apps.identity.services.memory_origin import resolve_source_tenant_id
+
+        source_tenant_id = resolve_source_tenant_id()
 
     # DRF-2542 §2 — отказ базы по согласию ловится ЗДЕСЬ, где он рождается, и
     # называется: durable-строкой аудита, как отказ по возрасту. Не выше: у
