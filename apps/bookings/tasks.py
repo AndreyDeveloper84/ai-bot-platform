@@ -225,6 +225,58 @@ def _reminders_muted(row: Any) -> bool:
     return value is False
 
 
+#: Окно, за которое страница называет число недоставленных напоминаний.
+FAILED_WINDOW_DAYS = 7
+
+
+def _page_failed_reminders(*, failed_this_run: int, now: Any) -> None:
+    """Недоставленное напоминание — число операторам, а не находка замера (DRF-2584).
+
+    ``FAILED`` — не норма: человек не узнал о своём визите. До этого листа
+    число жило только в строке ``bookings.dispatch.summary`` и в аудите, и
+    двенадцать недоставленных нашлись разовым замером через полтора месяца.
+
+    Страница — тем же рельсом, что прочие операционные (``alerting.page``,
+    MAX): два числа и где искать причину. Числа — СТРОК, а не событий: одна
+    строка может упасть несколько раз, потому что фабрика
+    (``reminders_factory``) при повторном подтверждении или переносе
+    перевзводит её в ``PENDING``. Поэтому второе число — строки, которые в
+    ``failed`` СЕЙЧАС, со сроком отправки за :data:`FAILED_WINDOW_DAYS` суток, а
+    не счёт событий ``bookings.reminder.send_failed``. Людей в тексте нет по построению: ни имён, ни id.
+    Одна страница на UTC-час — прогоны идут каждые 15 минут, и затяжной сбой
+    канала давал бы четыре страницы в час.
+
+    Лучшая попытка: сбой страницы не ломает прогон — напоминания уже
+    обработаны, и их статусы записаны.
+    """
+    try:
+        from datetime import timedelta
+
+        from apps.observability.alerting import page
+
+        # Окно по ``scheduled_at``: отказ случается при отправке, то есть сразу
+        # после срока. ``updated_at`` у строки нет, а ``.update()`` его и не
+        # трогал бы.
+        window = BookingReminder.all_tenants.filter(
+            status=BookingReminder.Status.FAILED,
+            scheduled_at__gte=now - timedelta(days=FAILED_WINDOW_DAYS),
+        ).count()
+        page(
+            "warning",
+            "Напоминания о визите не доставлены",
+            (
+                f"за этот прогон не ушло: {failed_this_run}; "
+                f"напоминаний в статусе failed сейчас, со сроком за "
+                f"{FAILED_WINDOW_DAYS} суток: {window}. "
+                "Причина по каждому — аудит bookings.reminder.send_failed "
+                "(status_code / exception_type). Сами не переотправляются."
+            ),
+            dedup_key=f"bookings.reminder.failed:{now:%Y-%m-%dT%H}",
+        )
+    except Exception:  # noqa: BLE001 — страница не должна ронять прогон
+        logger.exception("bookings.dispatch.failed_page_error")
+
+
 @shared_task(name="bookings.send_due_reminders")
 def send_due_reminders() -> dict[str, int]:
     """Dispatch every reminder whose ``scheduled_at`` has passed.
@@ -486,6 +538,8 @@ def send_due_reminders() -> dict[str, int]:
             deferred,
             muted,
         )
+    if failed:
+        _page_failed_reminders(failed_this_run=failed, now=now)
     return {
         "sent": sent,
         "failed": failed,
