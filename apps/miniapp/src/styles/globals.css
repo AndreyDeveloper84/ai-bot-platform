@@ -190,10 +190,14 @@ a {
    дословно: ни одного своего решения о виде. Островки после этого стали
    повтором и сняты; их `:disabled` тоже здесь.
 
-   Чего здесь НЕТ намеренно: `:active`. У соседнего `.btn-secondary` он
-   есть, у островков не было, и добавить его значило бы решить за макет,
-   как главная кнопка отзывается на нажатие. Названо отступлением в PR —
-   владельцу, а не молча.
+   `:active` сюда сперва НЕ ставили: у островков его не было, и решать за
+   макет, как главная кнопка отзывается на нажатие, было нельзя. Владелец
+   решил 28.09 (§6-йота): «главная кнопка должна иметь такой же визуальный
+   отклик на нажатие, как второстепенная». Род отклика — тот же, что у
+   `.btn-secondary:active` (смена фона при нажатии); значение — то, каким
+   в словаре уже отзываются все остальные главные кнопки
+   (`.cta-bar__button`, `.ayla-btn--primary`, `.wellness-dash__cta`,
+   `.m6-btn-primary`, `.salon-today__cta`): `--c-accent-pressed`.
    ======================================================================== */
 .btn-primary {
   background: var(--c-accent);
@@ -205,6 +209,10 @@ a {
   font-weight: 600;
   min-height: 44px;
   cursor: pointer;
+}
+
+.btn-primary:active {
+  background: var(--c-accent-pressed);
 }
 
 .btn-primary:disabled {
@@ -227,6 +235,19 @@ a {
 
 .btn-secondary:active {
   background: var(--c-accent-subtle);
+}
+
+/* §6-йота (28.09) — тот же отклик у главных кнопок экранов, которые
+   собраны своими классами, а не `.btn-primary`. Стоит ПОСЛЕ
+   `.btn-secondary:active` намеренно: `.records-card__action--primary`
+   сидит на `.btn-secondary`, специфичность равная, и раньше при нажатии
+   побеждал второстепенный почти белый фон под белым текстом. */
+.records-card__action--primary:active,
+.records-empty__cta-primary:active,
+.schedule-sheet__primary:active,
+.catalog-empty__cta-primary:active,
+.ayla-compose__send:active {
+  background: var(--c-accent-pressed);
 }
 
 /* Skeleton placeholders — spec §7.1 + §9. */
