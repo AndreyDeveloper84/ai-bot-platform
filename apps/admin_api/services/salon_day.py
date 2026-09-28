@@ -52,6 +52,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date as date_cls
 from datetime import datetime, time, timedelta
+import logging
 from typing import Iterable
 from uuid import UUID
 from zoneinfo import ZoneInfo
@@ -73,6 +74,8 @@ from apps.master_api.services.visit_source import (
     UPCOMING_STATUSES,
 )
 
+logger = logging.getLogger(__name__)
+
 DEFAULT_TZ = "Europe/Moscow"
 
 
@@ -84,9 +87,13 @@ def tenant_tz(tenant) -> ZoneInfo:
     previous UTC date.
     """
 
+    name = getattr(tenant, "timezone", "") or DEFAULT_TZ
     try:
-        return ZoneInfo(getattr(tenant, "timezone", "") or DEFAULT_TZ)
+        return ZoneInfo(name)
     except Exception:  # noqa: BLE001 — a bad tz string must not 500 the day
+        # DRF-2595: этим правилом теперь режут сутки и расписание мастера —
+        # оператор должен узнать о битом поясе салона, а не угадывать.
+        logger.warning("salon_day.bad_tenant_tz tenant=%s tz=%r", getattr(tenant, "pk", None), name)
         return ZoneInfo(DEFAULT_TZ)
 
 

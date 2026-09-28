@@ -78,3 +78,14 @@ def test_a_real_zone_is_still_honoured(tenant: Tenant) -> None:
     # И запасной не подменяет настоящий пояс: момент тот же, день тот же.
     moment = datetime(2026, 5, 20, 22, 30, tzinfo=ZoneInfo("UTC"))
     assert moment.astimezone(sched.get_tenant_tz(tenant)).date() == date(2026, 5, 21)
+
+
+def test_a_broken_zone_falls_back_to_the_named_one_and_says_so(tenant: Tenant, caplog) -> None:
+    """Ревью: битый пояс раньше писал предупреждение — сигнал оператору
+    не должен пропасть вместе со старым правилом."""
+    Tenant.objects.filter(pk=tenant.pk).update(timezone="Not/AZone")
+    tenant.refresh_from_db()
+    with caplog.at_level("WARNING"):
+        zone = sched.get_tenant_tz(tenant)
+    assert str(zone) == "Europe/Moscow"
+    assert any("bad_tenant_tz" in r.getMessage() for r in caplog.records)
