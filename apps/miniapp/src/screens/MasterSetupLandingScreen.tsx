@@ -41,6 +41,7 @@ import {
   type ReadinessItem,
 } from "../lib/master-api";
 import { setBackButton, signalReady } from "../lib/max-sdk";
+import { SALON_PLACE_TEXT } from "./MasterPlaceScreen";
 
 export const SETUP_ROUTE = "/solo/setup";
 export const HOME_ROUTE = "/solo/my-day";
@@ -78,8 +79,10 @@ export const REASON_TEXT = {
 } as const;
 
 /** Текст причины по коду сервера; незнакомый код — без текста, не сырым кодом. */
-export function reasonText(reason: string | null): string | undefined {
+export function reasonText(reason: string | null, key?: string): string | undefined {
   if (!reason) return undefined;
+  // П.6 решений 28.09 (DRF-2581): место салонного мастера — фраза владельца.
+  if (key === "location" && reason === "managed_outside_app") return SALON_PLACE_TEXT;
   return (REASON_TEXT as Record<string, string | undefined>)[reason];
 }
 
@@ -259,7 +262,7 @@ function ItemRow({ item, onOpen }: { item: ReadinessItem; onOpen: () => void }) 
   if (item.state === "unavailable") {
     // Шага у мастера сейчас нет: показываем и называем причину, но вести
     // некуда — `deep_link` у таких пунктов пуст.
-    const reason = reasonText(item.reason);
+    const reason = reasonText(item.reason, item.key);
     return (
       <div className="setup-landing__row" data-testid={`setup-item-${item.key}`}>
         <span className="setup-landing__mark" aria-hidden="true">

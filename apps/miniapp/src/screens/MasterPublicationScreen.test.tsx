@@ -284,6 +284,9 @@ describe("экран 08 — состояния из ответа каталог�
     const place = screen.getByTestId("publication-section-location");
     expect(place).toHaveTextContent(missing("location_not_assigned"));
     expect(place).toHaveTextContent(PUBLICATION_COPY.locationUnavailable);
+    // П.6 решений 28.09 (DRF-2581): дословно фраза владельца, без «поддержки».
+    expect(place).toHaveTextContent("Место работы определяется салоном.");
+    expect(place).not.toHaveTextContent(/поддержк/);
     expect(within(place).queryByRole("button")).toBeNull();
     expect(screen.queryByRole("button", { name: PUBLICATION_COPY.submit })).toBeNull();
 

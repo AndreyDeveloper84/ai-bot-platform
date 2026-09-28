@@ -27,12 +27,14 @@ vi.mock("../lib/master-api", async (importOriginal) => {
     createServiceLocation: vi.fn(),
     patchServiceLocation: vi.fn(),
     suggestAddress: vi.fn(),
+    getMasterMe: vi.fn(),
   };
 });
 
 import { ApiError } from "../lib/api";
 import {
   createServiceLocation,
+  getMasterMe,
   getServiceLocations,
   patchServiceLocation,
   suggestAddress,
@@ -40,7 +42,7 @@ import {
   type ServiceLocationsState,
   type ServicePlace,
 } from "../lib/master-api";
-import { MasterPlaceScreen, NOTE_MAX, PLACE_COPY, mapLink } from "./MasterPlaceScreen";
+import { MasterPlaceScreen, NOTE_MAX, PLACE_COPY, SALON_PLACE_TEXT, mapLink } from "./MasterPlaceScreen";
 
 const GUARD_ASYNC_TIMEOUT_MS = 20;
 let previousAsyncUtilTimeout = 1000;
@@ -331,5 +333,49 @@ describe("системные состояния через SystemState (М-6b)",
     expect(screen.queryByRole("button", { name: "Повторить" })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Попробовать снова" }));
     await waitFor(() => expect(mockedGet).toHaveBeenCalledTimes(2));
+  });
+});
+
+describe("салонный мастер — место определяется салоном (п.6 решений 28.09, DRF-2581)", () => {
+  // Владелец: место салонного мастера — не его настройка; название салона и
+  // адрес без действия редактирования; пояснение — «Место работы определяется
+  // салоном.»; в поддержку не отправлять.
+  const salonRefusal = () =>
+    mockedGet.mockRejectedValue(new ApiError(403, "salon_place_owner_managed", "owner managed"));
+  const ME = {
+    master: { id: "m-1", name: "Анна", specialization: "", bio: "", photo_url: "", services: [] },
+    salon: { tenant_id: "t-1", name: "Формула тела" },
+    permissions: { can_edit_schedule: false, can_edit_services: false, can_message_customers: false },
+  };
+
+  it("название салона и фраза владельца, ни одного поля и ни одной кнопки", async () => {
+    salonRefusal();
+    vi.mocked(getMasterMe).mockResolvedValue(ME as never);
+    renderScreen();
+
+    const box = await screen.findByTestId("place-salon-managed");
+    expect(await within(box).findByText("Формула тела")).toBeInTheDocument();
+    expect(within(box).getByText(SALON_PLACE_TEXT)).toBeInTheDocument();
+    expect(SALON_PLACE_TEXT).toBe("Место работы определяется салоном.");
+    expect(screen.queryByRole("textbox")).toBeNull();
+    expect(screen.queryByRole("checkbox")).toBeNull();
+    expect(within(box).queryByRole("button")).toBeNull();
+    expect(box).not.toHaveTextContent(/поддержк/);
+  });
+
+  it("название не прочитано — фраза остаётся, названия не выдумываем", async () => {
+    salonRefusal();
+    vi.mocked(getMasterMe).mockRejectedValue(new Error("down"));
+    renderScreen();
+
+    const box = await screen.findByTestId("place-salon-managed");
+    await waitFor(() => expect(getMasterMe).toHaveBeenCalledTimes(1));
+    expect(box.textContent).toBe(SALON_PLACE_TEXT);
+  });
+
+  it("соло-мастер — название салона не спрашивается", async () => {
+    renderScreen();
+    await screen.findByRole("heading", { name: PLACE_COPY.title });
+    expect(getMasterMe).not.toHaveBeenCalled();
   });
 });
