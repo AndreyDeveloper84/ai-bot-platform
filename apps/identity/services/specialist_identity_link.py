@@ -55,6 +55,8 @@ _IDEMPOTENCY_NAMESPACE = uuid.UUID("9f3b71c4-2442-4c8a-bd11-6e5a0d7c9e42")
 #: Метка вызывающего для аудита каталога: не имя человека, а место в коде.
 ACTOR_INVITE_ACCEPT = "bot:onboarding_accept"
 ACTOR_BACKFILL = "bot:link_master_identities"
+#: DRF-2450 (А): соло-мастер связывается сразу после провижининга, в том же ходе.
+ACTOR_SOLO_PROVISIONING = "bot:solo_provisioning"
 
 #: Слова человеку/оператору по причине — «что сделать», не «что сломалось».
 HINTS: dict[str, str] = {
@@ -84,6 +86,13 @@ HINTS: dict[str, str] = {
     "identity_already_bound": (
         "эта MAX-личность уже связана с другой учётной записью каталога — "
         "перепривязку решает оператор каталога"
+    ),
+    "claim_mismatch": (
+        "личность не совпала с той, для которой каталог завёл кабинет соло-мастера — "
+        "перепривязку решает оператор (fraud_suspected / duplicate_person)"
+    ),
+    "identity_unreachable": (
+        "каталог не ответил на представление личности — повторить регистрацию позже"
     ),
     "idempotency_key_reused": "ключ повтора занят другим запросом — написать в техподдержку",
     "bind_refused": "каталог отказал в связывании — смотреть его лог по correlation_id",
@@ -200,11 +209,64 @@ def bind_master_identity_in_catalog(
     )
 
 
+def bind_solo_identity_after_provisioning(link: Any, *, bot_user: Any) -> str | None:
+    """DRF-2450 (А): связать личность соло-мастера сразу после провижининга.
+
+    У соло-мастера приглашения нет; доказательство владения — сам провижининг:
+    каталог завёл профиль для ``external_user_id_for(bot_user)`` (claim) и
+    дверь сверяет с ним присланную личность (каталожный #591,
+    ``claim_mismatch``). Это путь по умолчанию; ``confirm_by_operator`` и
+    ``SoloIdentityLink`` остаются запасным ходом.
+
+    Лучшая попытка: возвращает причину по имени или ``None``, исключений не
+    выпускает — регистрация не падает из-за каталога (правило
+    ``solo_link_attempt``).
+
+    Порядок внутри не случаен: дверь не создаёт прокси-строку и на незнакомую
+    личность отвечает ``identity_unknown``. Прокси каталог заводит лениво на
+    первом представлении (``resolve_identity``), поэтому личность сначала
+    представляется, потом связывается.
+    """
+
+    import httpx
+
+    from apps.integrations.ayla.identity_client import IdentityResolveError, resolve_identity
+    from apps.integrations.ayla.user_proxy import external_user_id_for
+
+    specialist_id = getattr(link, "catalog_specialist_id", None)
+    if not specialist_id:
+        return "not_provisioned"
+    try:
+        resolve_identity(external_user_id_for(bot_user))
+    # ``resolve_identity`` оборачивает только таймаут и сетевую ошибку;
+    # ``RemoteProtocolError`` («сервер закрыл соединение» — рестарт воркера
+    # каталога) и прочие ``httpx.HTTPError`` выходят сырыми. Обещание «не
+    # выпускает исключений» держится здесь, а не в чужом клиенте.
+    except (IdentityResolveError, httpx.HTTPError):
+        logger.info(
+            "identity.specialist_identity_link.solo_resolve_failed specialist=%s person=%s",
+            specialist_id,
+            getattr(bot_user, "pk", None),
+        )
+        return "identity_unreachable"
+    try:
+        bind_master_identity_in_catalog(
+            specialist_id=specialist_id,
+            bot_user=bot_user,
+            actor_label=ACTOR_SOLO_PROVISIONING,
+        )
+    except SpecialistIdentityLinkRefused as exc:
+        return exc.reason
+    return None
+
+
 __all__ = [
     "ACTOR_BACKFILL",
     "ACTOR_INVITE_ACCEPT",
+    "ACTOR_SOLO_PROVISIONING",
     "SpecialistIdentityLinkOutcome",
     "SpecialistIdentityLinkRefused",
     "bind_master_identity_in_catalog",
+    "bind_solo_identity_after_provisioning",
     "idempotency_key_for",
 ]
