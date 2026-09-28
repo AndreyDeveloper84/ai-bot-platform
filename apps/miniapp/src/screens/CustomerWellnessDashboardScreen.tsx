@@ -1530,6 +1530,7 @@ function GoalCard({
 
   return (
     <section className="wellness-dash__goal-card" aria-labelledby="goal-header">
+      {/* Названный предел п.7 (28.09, DRF-2576): «Активная цель» — заголовок блока по макету H01, не подпись «Твоя цель:» перед целью; п.7 называет карточку плана и экран «План», Главную — нет. Не снимать без решения владельца. */}
       <p id="goal-header" className="wellness-dash__goal-eyebrow">
         Активная цель
       </p>

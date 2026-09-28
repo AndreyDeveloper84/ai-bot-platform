@@ -343,6 +343,42 @@ describe("служебный ключ на экран не попадает (DRF
   });
 });
 
+describe("цель без подписи — пары, которых узел выше не держит (п.7 решений 28.09, DRF-2576)", () => {
+  // Узел выше держит карточку × свободную цель. Замер на a02fc651: подпись
+  // «Твоя цель: » в обоих местах экрана краснила только его — карточку с
+  // готовой целью держала проверка по подстроке, конструктор не держал никто.
+  const FREE = "хочу −5 кг к лету";
+  const READY = "Подтянуть фигуру"; // suggestions[tone_up] в DOC
+
+  it("карточка, готовая цель — заголовок ровно выбранное название", async () => {
+    mockedGet.mockResolvedValue(PLAN);
+    renderScreen();
+    await settle();
+
+    const card = screen.getByTestId("plan-lite-card");
+    expect(within(card).getByRole("heading", { level: 2, name: READY })).toBeInTheDocument();
+  });
+
+  it("конструктор, свободная цель — ровно слова человека", async () => {
+    mockedDoc.mockResolvedValue({
+      ...DOC,
+      known: { goal: { ...DOC.known.goal!, goal_text: FREE } },
+    });
+    renderScreen();
+    await settle();
+
+    expect(screen.getByText(FREE)).toBeInTheDocument();
+    expect(screen.queryByText(READY)).toBeNull();
+  });
+
+  it("конструктор, готовая цель — ровно выбранное название", async () => {
+    renderScreen();
+    await settle();
+
+    expect(screen.getByText(READY)).toBeInTheDocument();
+  });
+});
+
 describe("три исхода гейта согласия (DRF-2354)", () => {
   // «Нет» и «не знаю» — разные ответы. Раньше сбой гейта превращался в
   // `false`, строка дневника молча выпадала из отправки, и человек
