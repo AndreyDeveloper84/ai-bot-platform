@@ -310,7 +310,11 @@ describe("служебный ключ на экран не попадает (DRF
     renderScreen();
     await settle();
 
-    expect(screen.getByText(PLAN_LITE_COPY.goalTitle("хочу −5 кг к лету"))).toBeInTheDocument();
+    // DRF-2576 (п. 7 решений 28.09): заголовок — слова человека целиком, без
+    // подписи. Подмена: вернуть «Твоя цель: …» — точное совпадение краснеет.
+    expect(
+      screen.getByRole("heading", { level: 2, name: "хочу −5 кг к лету" }),
+    ).toBeInTheDocument();
   });
 });
 
