@@ -181,9 +181,11 @@ class TestAVisitIsWhatAHumanClosed:
 
         roster = _roster(accepted_master)
 
+        # Состав целиком: Анна есть, Веры (закрыта часами) нет — одним
+        # равенством, а не голым «нет», которое прошло бы на пустом списке.
+        assert set(roster) == {"Анна"}
         assert roster["Анна"]["is_returning"] is True
         assert roster["Анна"]["at_risk"] is True
-        assert "Вера" not in roster
 
     def test_cancelled_by_canon_is_not_a_visit_even_if_closed_by_someone(
         self, tenant: Tenant, accepted_master: CatalogMaster
