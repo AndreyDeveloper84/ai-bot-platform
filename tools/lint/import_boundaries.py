@@ -565,12 +565,6 @@ BASELINE: frozenset[BaselineKey] = frozenset(
             "LoyaltySubscriber._revoke_visit",
             "apps.booking.models.BookingRequest",
         ),
-        (
-            "G9-booking-request-outside-owner",
-            "apps/master_api/services/customers.py",
-            "<module>",
-            "apps.booking.models.BookingRequest",
-        ),
         # dashboard.py and schedule.py stood here until DRF-1085 (869285c,
         # 205f2dd) moved both surfaces onto the RemoteBookingProxy mirror
         # and the BookingRequest import left the files entirely. The
@@ -580,6 +574,8 @@ BASELINE: frozenset[BaselineKey] = frozenset(
         # Тем же порядком DRF-1528 снял записи переписки мастер↔клиент
         # (`services/conversations.py`, `services/conversation_detail.py`)
         # и автотриггера черновиков (`tasks.py`): файлов нет — записи ушли.
+        # `services/customers.py` — DRF-1138: список «Клиенты» читает зеркало
+        # (`visit_source.attended_visits`), импорт BookingRequest ушёл.
     }
 )
 
@@ -1240,15 +1236,6 @@ BASELINE_NOTES: dict[BaselineKey, BaselineNote] = {
         "G9-booking-request-outside-owner",
         "apps/loyalty/subscribers.py",
         "LoyaltySubscriber._revoke_visit",
-        "apps.booking.models.BookingRequest",
-    ): BaselineNote(
-        "UNTRIAGED",
-        "Zero BOOKING_VIA_AYLA_REST references in the file (DRF-1109 sweep, 2026-08-15). Neither confirmed safe nor confirmed broken - nobody has looked at this surface since the contract first surfaced it.",
-    ),
-    (
-        "G9-booking-request-outside-owner",
-        "apps/master_api/services/customers.py",
-        "<module>",
         "apps.booking.models.BookingRequest",
     ): BaselineNote(
         "UNTRIAGED",
