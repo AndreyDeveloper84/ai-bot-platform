@@ -669,9 +669,10 @@ jobs:
       # below type-checked them, which is exactly the trap: they looked
       # covered and defended nothing.
       #
-      # Measured against Postgres 16 (NOT SQLite — see cause (a) below
-      # for why that distinction is the whole story): 440 passed, 9
-      # skipped, 38 deselected. Four runs before merge — three locally
+      # Measured 22.08 (DRF-1253) against Postgres 16 (NOT SQLite — see
+      # cause (a) below for why that distinction is the whole story): 440
+      # passed, 9 skipped, 38 deselected — 34 of those re-enabled 28.09
+      # (DRF-2588), so these counts are history, not today's run. Four runs before merge — three locally
       # on Windows (~2.5 min each) and one on this runner (57.77s) —
       # all with identical counts. 21 of the 26 files are green as-is.
       #
@@ -693,12 +694,13 @@ jobs:
       # a success. (The `pytest apps/ -q` step below has exactly that
       # problem today. Out of scope for this ticket, worth its own.)
       #
-      # ─── Deselected: 4 tests, 3 root causes, none introduced here ───
+      # ─── Deselected: 3 tests, 2 root causes, none introduced here ───
       # Every one reproduced on Postgres and filed separately. Deselects
-      # are node-ID-scoped, not file-scoped, so the 206 passing tests
-      # that live *inside* those five files still run — above all the
-      # 186 green cases of the cross-tenant leakage scanner, which
-      # guards a security invariant and is worth keeping in CI.
+      # are node-ID-scoped, not file-scoped, so the passing tests that
+      # live *inside* those files still run. Since DRF-2588 the
+      # cross-tenant leakage scanner has NO deselects — keep it that way:
+      # it guards a security invariant, and a deselected case there was
+      # a leak check nobody ran for five weeks.
       #
       # (a) REMOVED (DRF-2588, 28.09): 34 x TestEveryScopedModel in
       #     tests/integration/test_cross_tenant_leakage.py were deselected
