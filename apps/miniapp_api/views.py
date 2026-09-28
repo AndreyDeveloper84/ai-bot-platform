@@ -1994,33 +1994,63 @@ def _bookings_list_ayla(request: HttpRequest, bot_user) -> HttpResponse:
     )
 
 
-def _booking_detail_ayla(bot_user, booking_id: str) -> HttpResponse:
-    """Booking detail from RemoteBookingProxy (Ayla path). 404 on a
-    missing row AND on any ownership mismatch (foreign / orphan proxy)."""
+def _person_bot_users(bot_user):
+    """Все личности человека, чей ``initData`` подписан (DRF-2436).
+
+    Личность бота — «channel-scoped identity inside a tenant»: глобальный бот
+    держит одну под служебным салоном, переход к записи в салон T заводит ещё
+    одну в T (``orchestrator/handoff.py``). Mini App узнаёт человека под ОДНИМ
+    салоном (``MAX_BOT_TENANT_SLUG``), а запись лежит в зеркале под личностью
+    своего салона — поэтому чтение по одной личности не находило записей в
+    других салонах.
+
+    Множество выводится ТОЛЬКО из ``bot_user``, которого ``require_init_data``
+    получил из подписи: тот же канал и тот же внешний id. Из параметров запроса
+    — ничего, иначе это стало бы способом посмотреть чужое. Тем же правилом
+    человека видит и Ayla: ``external_user_id_for`` = ``bot:{channel}:{id}``,
+    одинаковый у всех его личностей.
+    """
+    return BotUser.all_tenants.filter(
+        channel=bot_user.channel, channel_user_id=bot_user.channel_user_id
+    )
+
+
+def _person_owned_proxy(bot_user, appointment_id: str):
+    """Строка зеркала этого визита, если она принадлежит этому человеку, иначе None."""
     from apps.booking.models import RemoteBookingProxy
 
-    proxy = RemoteBookingProxy.all_tenants.filter(
-        tenant=bot_user.tenant,
-        appointment_id=booking_id,
-        bot_user=bot_user,
-    ).first()
+    return (
+        RemoteBookingProxy.all_tenants.select_related("tenant")
+        .filter(appointment_id=appointment_id, bot_user__in=_person_bot_users(bot_user))
+        .first()
+    )
+
+
+def _booking_detail_ayla(bot_user, booking_id: str) -> HttpResponse:
+    """Booking detail from RemoteBookingProxy (Ayla path). 404 on a
+    missing row AND on any ownership mismatch (foreign / orphan proxy).
+
+    DRF-2436: ownership is the PERSON (all identities of the signed account),
+    not the one identity Mini App resolved — a booking in another salon lives
+    under that salon's identity. The salon on the card (address) is the
+    booking's own, not the Mini App's configured one."""
+    proxy = _person_owned_proxy(bot_user, booking_id)
     if proxy is None:
         return _error("not_found", "booking not found", 404)
-    return JsonResponse({"booking": _proxy_booking_to_dict(proxy, tenant=bot_user.tenant)})
+    return JsonResponse({"booking": _proxy_booking_to_dict(proxy, tenant=proxy.tenant)})
 
 
 def _cancel_via_ayla(bot_user, booking_id: str) -> HttpResponse:
     """Cancel through the Ayla seam (BOOKING_VIA_AYLA_REST ON).
 
-    Ownership is proven against the RemoteBookingProxy mirror (tenant +
-    bot_user); the seam call cancels in Ayla and the proxy row flips to
+    Ownership is proven against the RemoteBookingProxy mirror by the PERSON
+    (all identities of the signed account, DRF-2436); the seam call cancels in Ayla and the proxy row flips to
     ``cancelled`` ONLY via the booking.cancelled round-trip event — this
     view never mutates the proxy directly (no dual-write). Cancel is
     immediate: there is no two-step confirm/undo on the Ayla path.
     """
     import hashlib
 
-    from apps.booking.models import RemoteBookingProxy
     from apps.integrations.ayla.booking_client import (
         BookingAPIError,
         BookingBadRequestError,
@@ -2029,11 +2059,10 @@ def _cancel_via_ayla(bot_user, booking_id: str) -> HttpResponse:
     )
     from apps.integrations.ayla.user_proxy import external_user_id_for
 
-    proxy = RemoteBookingProxy.all_tenants.filter(
-        tenant=bot_user.tenant,
-        appointment_id=booking_id,
-        bot_user=bot_user,
-    ).first()
+    # DRF-2436: владение — человеком (все личности подписанного аккаунта), а
+    # не одной личностью Mini App: запись в другом салоне лежит под личностью
+    # того салона. Ayla видит человека так же (external_user_id одинаков).
+    proxy = _person_owned_proxy(bot_user, booking_id)
     if proxy is None:
         # Covers foreign and orphan proxies alike — no existence leak.
         return _error("not_found", "booking not found", 404)
@@ -2076,7 +2105,7 @@ def _cancel_via_ayla(bot_user, booking_id: str) -> HttpResponse:
 
     # The proxy stays untouched: the booking.cancelled round-trip event
     # flips the status. The response mirrors the current row verbatim.
-    return JsonResponse({"booking": _proxy_booking_to_dict(proxy, tenant=bot_user.tenant)})
+    return JsonResponse({"booking": _proxy_booking_to_dict(proxy, tenant=proxy.tenant)})
 
 
 @require_http_methods(["GET"])
@@ -5365,14 +5394,15 @@ def _c7_upstream_error(exc: Exception, *, not_found_slug: str = "not_found") -> 
     return _error("upstream_unavailable", "payments upstream is temporarily unavailable", 502)
 
 
-def _customer_owns_appointment(*, bot_user, tenant, appointment_id: str) -> bool:
-    """Ownership check (C7.6): the appointment must belong to THIS user —
-    via the Ayla-path proxy mirror or a local BookingRequest link."""
-    from apps.booking.models import RemoteBookingProxy
+def _customer_owns_appointment(*, bot_user, appointment_id: str) -> bool:
+    """Ownership check (C7.6): the appointment must belong to THIS person —
+    via the Ayla-path proxy mirror.
 
-    return RemoteBookingProxy.all_tenants.filter(
-        tenant=tenant, appointment_id=appointment_id, bot_user=bot_user
-    ).exists()
+    DRF-2436: the person is every identity of the signed account
+    (:func:`_person_bot_users`), not the one identity Mini App resolved — a
+    visit booked in another salon lives under that salon's identity, and
+    paying for it answered «not found»."""
+    return _person_owned_proxy(bot_user, appointment_id) is not None
 
 
 def _c7_return_url(body: dict) -> str:
@@ -5426,7 +5456,6 @@ def create_payment(request: HttpRequest) -> HttpResponse:
 
     if not _customer_owns_appointment(
         bot_user=request.bot_user,  # type: ignore[attr-defined]
-        tenant=request.tenant,  # type: ignore[attr-defined]
         appointment_id=appointment_id,
     ):
         # 404, not 403 — do not leak that the appointment exists at all.
