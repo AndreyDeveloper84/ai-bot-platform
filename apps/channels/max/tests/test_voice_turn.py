@@ -275,9 +275,27 @@ class TestHelpers:
     def test_strip_for_gate(self, src, expected):
         assert strip_for_gate(src) == expected
 
-    def test_echo_never_by_default(self, settings):
+    def test_echo_never(self, settings):
         settings.VOICE_ECHO_MODE = "never"
         assert with_voice_echo("Ответ", "привет") == "Ответ"
+
+    def test_echo_always_when_setting_absent(self, settings):
+        # DRF-2425: решение владельца 28.09 — эхо по умолчанию «всегда».
+        del settings.VOICE_ECHO_MODE
+        assert with_voice_echo("Ответ", "привет") == "Я услышала: «привет»\n\nОтвет"
+
+    def test_settings_default_is_always(self, monkeypatch):
+        # Дефолт в settings, а не только в getattr: стенд без строки в .env
+        # получает эхо (DRF-2425).
+        import importlib
+
+        import config.settings.base as base
+
+        monkeypatch.delenv("VOICE_ECHO_MODE", raising=False)
+        try:
+            assert importlib.reload(base).VOICE_ECHO_MODE == "always"
+        finally:
+            importlib.reload(base)
 
     def test_echo_always(self, settings):
         settings.VOICE_ECHO_MODE = "always"

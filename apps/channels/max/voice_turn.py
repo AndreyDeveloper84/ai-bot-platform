@@ -28,12 +28,13 @@
 * ``VOICE_CROSS_BORDER_ALLOWED`` — отдельное разрешение на передачу за
   рубеж: без него провайдер ``openai`` не вызывается и файл даже не
   скачивается.
-* ``VOICE_ECHO_MODE`` — «Я услышала: …» перед ответом (``always``) или
-  нет (``never``); режим «при неуверенности» невозможен, провайдер
-  уверенность не отдаёт.
+* ``VOICE_ECHO_MODE`` — «Я услышала: …» перед ответом (``always``, по
+  умолчанию — решение владельца 28.09, DRF-2425) или нет (``never``); режим
+  «при неуверенности» невозможен, провайдер уверенность не отдаёт.
 
-Тексты отказов — **черновики на утверждение владельца** (вопрос 9 ТЗ),
-кроме ``voice_disabled``: он утверждён в DRF-1349, раздел P.
+Тексты отказов утверждены владельцем 28.09 как есть (DRF-2425), кроме
+``voice_consent_missing`` — слот этапа 2, черновик; ``voice_disabled``
+утверждён раньше (DRF-1349, раздел P).
 """
 
 from __future__ import annotations
@@ -74,8 +75,9 @@ CODE_TOO_LARGE: Final[str] = "voice_too_large"
 CODE_DOWNLOAD_FAILED: Final[str] = "voice_download_failed"
 CODE_UNSUPPORTED_FORMAT: Final[str] = "voice_unsupported_format"
 
-#: Фразы человеку по коду отказа. ЧЕРНОВИКИ на утверждение владельца
-#: (вопрос 9 ТЗ), кроме ``voice_disabled`` — утверждён (DRF-1349, раздел P).
+#: Фразы человеку по коду отказа. Утверждены владельцем 28.09 как есть
+#: (DRF-2425); ``voice_disabled`` — раньше (DRF-1349, раздел P);
+#: ``voice_consent_missing`` — черновик этапа 2. Правка текста — слово владельца.
 REFUSAL_TEXTS: Final[dict[str, str]] = {
     CODE_DISABLED: VOICE_NOT_SUPPORTED_TEXT,
     CODE_CONSENT_MISSING: "Чтобы разбирать голосовые, мне нужно твоё согласие. Пока напиши, пожалуйста, текстом.",
@@ -145,7 +147,7 @@ def gate_strip_punct() -> bool:
 
 
 def echo_mode() -> str:
-    return str(getattr(settings, "VOICE_ECHO_MODE", "never") or "never").strip().lower()
+    return str(getattr(settings, "VOICE_ECHO_MODE", "always") or "always").strip().lower()
 
 
 def turn_budget_s() -> float:
