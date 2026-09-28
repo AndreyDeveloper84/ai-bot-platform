@@ -156,6 +156,7 @@ from apps.identity.services import (
     resolve_or_create_global_bot_user,
 )
 from apps.identity.services.global_tenant import get_global_bot_tenant
+from apps.identity.services.memory_origin import global_surface_scope
 from apps.identity.services.identity_card import WHOAMI_COMMAND, build_card, render_for_person
 from apps.observability.ai_metrics import record_ai_request
 from apps.observability.models import AIRequestMetric
@@ -1345,7 +1346,9 @@ def handle_global_max_event(payload: dict, trace_id: str | uuid.UUID | None = No
     else:
         idempotency_key = f"webhook:max_global:{event.channel_message_id or event.channel_user_id}"
     try:
-        with with_idempotency(idempotency_key, ttl_seconds=86_400):
+        # DRF-2544: факты памяти этого хода сказаны глобальной Ayla, не салону —
+        # писатель ставит им сентинел ``global_bot``, а не «неизвестно».
+        with with_idempotency(idempotency_key, ttl_seconds=86_400), global_surface_scope():
             _handle_global_max_event_inner(event, trace_id)
     except AlreadyClaimed:
         logger.info(

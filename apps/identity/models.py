@@ -714,8 +714,10 @@ class ClientProfile(models.Model):
 # modulator + zone semantics».
 #
 # Tenant relationship that a MemoryEntry was sourced FROM is captured by
-# the nullable MemoryEntry.source_tenant_id field — informational, not a
-# scoping boundary.
+# the nullable MemoryEntry.source_tenant_id field, written at write time
+# (DRF-2544, apps.identity.services.memory_origin). Not a storage boundary;
+# the read rule for it is personal_fields.NEVER_CROSSES +
+# UNKNOWN_ORIGIN_NEVER_CROSSES, owed by the first salon-scoped reader.
 
 
 class UserPersonalContext(models.Model):
@@ -1001,10 +1003,11 @@ class MemoryEntry(models.Model):
     source_tenant_id = models.UUIDField(
         null=True,
         blank=True,
-        help_text="Tenant the fact originated at. NULL if cross-tenant "
-        "or platform-level. Informational — NOT a scoping boundary; "
-        "tenant scoping is enforced at the app-layer voice modulator + "
-        "cross-tenant reuse rule per ADR-0011 §9.",
+        help_text="Tenant the fact was said at, resolved at write time "
+        "(DRF-2544): the salon in scope, or the global_bot sentinel for the "
+        "global surface. NULL = origin UNKNOWN (rows before DRF-2544, or a "
+        "path that declared neither) — NOT «platform-level». Read rule: "
+        "personal_fields.UNKNOWN_ORIGIN_NEVER_CROSSES.",
     )
     kind = models.CharField(
         max_length=20,
