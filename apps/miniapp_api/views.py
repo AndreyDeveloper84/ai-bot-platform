@@ -1854,18 +1854,24 @@ def _proxy_catalog_refs(proxy) -> tuple[Any, Any]:
     absent. Closing it means fixing catalog sync, not inventing a name
     here.
 
-    Lookups go through the tenant-scoped manager (``with_request_tenant``
-    sets the context; the proxy row itself was fetched under the same
-    tenant) — no ``all_tenants`` carve-out here (MKT1, #1018).
+    Lookups go through the tenant-scoped manager — no ``all_tenants``
+    carve-out here (MKT1, #1018) — but scoped to the BOOKING's salon, not the
+    request's (DRF-2566). Mini App resolves the person under one configured
+    salon (``MAX_BOT_TENANT_SLUG``); since DRF-2436 a booking in another salon
+    is readable, and its master and service live in THAT salon's catalog —
+    under the request's scope they were «not found», and the card came back
+    with an empty master and service.
     """
     from apps.catalog.models import CatalogMaster, CatalogService
+    from apps.tenancy.context import tenant_scope
 
     service = None
-    if proxy.service_id:
-        service = CatalogService.objects.filter(ayla_service_id=proxy.service_id).first()
     master = None
-    if proxy.specialist_id:
-        master = CatalogMaster.objects.filter(catalog_specialist_id=proxy.specialist_id).first()
+    with tenant_scope(proxy.tenant):
+        if proxy.service_id:
+            service = CatalogService.objects.filter(ayla_service_id=proxy.service_id).first()
+        if proxy.specialist_id:
+            master = CatalogMaster.objects.filter(catalog_specialist_id=proxy.specialist_id).first()
     return service, master
 
 
