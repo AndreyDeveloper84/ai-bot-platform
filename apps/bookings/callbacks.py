@@ -52,6 +52,7 @@ from django.utils import timezone
 
 from apps.audit.services import write_audit
 from apps.booking.models import BookingReminder, PendingBookingAction
+from apps.booking.reminder_lookup import ayla_appointment_id_of
 from apps.channels.max.staff_outbound import MANAGER, send_to_staff
 from apps.bookings.keyboards import (
     CALLBACK_BOOK_CANCEL_PREFIX,
@@ -604,11 +605,18 @@ class BookingReminderCallbackSkill:
         была осмысленным решением (локальная отмена не должна висеть на
         чужом простое), и оно осталось при своём случае.
         """
-        if reminder.ayla_appointment_id is not None:
-            return self._cancel_ayla_booking(reminder)
+        # Запись Ayla узнаётся не по одной колонке: строку записи из ДИАЛОГА
+        # бота (основной путь, DRF-1069) пишет reminders_factory, и UUID
+        # записи Ayla лежит у неё в ``yclients_record_id`` строкой, а
+        # ``ayla_appointment_id`` пуст (apps/booking/reminder_lookup.py,
+        # DRF-1144). Проверка одной колонки отправляла такую строку в ветку
+        # YClients: вызова не было, а человек слышал «отменена».
+        appointment_id = ayla_appointment_id_of(reminder)
+        if appointment_id is not None:
+            return self._cancel_ayla_booking(reminder, appointment_id)
         return self._cancel_yclients_booking(reminder)
 
-    def _cancel_ayla_booking(self, reminder: BookingReminder) -> SkillResult:
+    def _cancel_ayla_booking(self, reminder: BookingReminder, appointment_id: UUID) -> SkillResult:
         """Отмена в Ayla, затем — наша строка. Порядок не косметический.
 
         Строка закрывается только после того, как отмена состоялась: иначе
@@ -623,12 +631,12 @@ class BookingReminderCallbackSkill:
 
         status = cancel_booking(
             bot_user=reminder.bot_user,
-            appointment_id=str(reminder.ayla_appointment_id),
+            appointment_id=str(appointment_id),
         )
         logger.info(
             "bookings.reminder.cancel.ayla reminder=%s appointment=%s status=%s",
             reminder.pk,
-            reminder.ayla_appointment_id,
+            appointment_id,
             status,
         )
         if status not in _CANCEL_SETTLED:
