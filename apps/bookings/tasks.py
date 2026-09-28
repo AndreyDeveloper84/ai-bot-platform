@@ -225,6 +225,84 @@ def _reminders_muted(row: Any) -> bool:
     return value is False
 
 
+#: Окно, за которое страница называет число недоставленных напоминаний.
+FAILED_WINDOW_DAYS = 7
+
+_FAILED_PAGE_CLAIM_PREFIX = "bookings.reminder.failed"
+#: Двое суток: час зашит в ключ, TTL лишь переживает опоздавший прогон.
+_FAILED_PAGE_CLAIM_TTL_SECONDS = 48 * 60 * 60
+
+
+def _page_failed_reminders(*, failed_this_run: int, now: Any) -> None:
+    """Недоставленное напоминание — число операторам, а не находка замера (DRF-2584).
+
+    ``FAILED`` — не норма: человек не узнал о своём визите. До этого листа
+    число жило только в строке ``bookings.dispatch.summary`` и в аудите, и
+    двенадцать недоставленных нашлись разовым замером через полтора месяца.
+
+    Страница — тем же рельсом, что прочие операционные (``alerting.page``,
+    MAX): два числа и где искать причину. Числа — СТРОК, а не событий: одна
+    строка может упасть несколько раз, потому что фабрика
+    (``reminders_factory``) при повторном подтверждении или переносе
+    перевзводит её в ``PENDING``. Поэтому второе число — строки, которые в
+    ``failed`` СЕЙЧАС, со сроком отправки за :data:`FAILED_WINDOW_DAYS` суток, а
+    не счёт событий ``bookings.reminder.send_failed``. Людей в тексте нет по
+    построению: ни имён, ни id. Первое число может быть больше второго: после
+    простоя прогон отправляет и строки со сроком старше окна.
+
+    Одна страница на UTC-час — прогоны идут каждые 15 минут, и затяжной сбой
+    канала давал бы четыре страницы в час. Час занимается ЗДЕСЬ, своим ключом
+    кэша на :data:`_FAILED_PAGE_CLAIM_TTL_SECONDS`: окно дедупа самого
+    ``alerting.page`` — ``ALERTS_DEDUP_TTL_SECONDS`` (300 с), и час в его ключе
+    лишь выбирает корзину, а через пять минут страница прозвучала бы снова
+    (тот же предел назван в ``scan_budget_alert``; образец —
+    ``outbox_dead_alert._claim``). Недоставленная страница час возвращает —
+    следующий прогон попробует снова. Потеря кэша — молчание, а не шквал.
+
+    Лучшая попытка: сбой страницы не ломает прогон — напоминания уже
+    обработаны, и их статусы записаны.
+    """
+    try:
+        from datetime import timedelta
+
+        from django.core.cache import cache
+
+        from apps.observability.alerting import page
+
+        claim = f"{_FAILED_PAGE_CLAIM_PREFIX}:{now:%Y-%m-%dT%H}"
+        try:
+            claimed = bool(cache.add(claim, 1, timeout=_FAILED_PAGE_CLAIM_TTL_SECONDS))
+        except Exception:  # noqa: BLE001 — без кэша молчим, а не шлём каждый прогон
+            logger.warning("bookings.dispatch.failed_page_dedup_unavailable")
+            return
+        if not claimed:
+            return
+
+        # Окно по ``scheduled_at``: отказ случается при отправке, то есть сразу
+        # после срока. ``updated_at`` у строки нет, а ``.update()`` его и не
+        # трогал бы.
+        window = BookingReminder.all_tenants.filter(
+            status=BookingReminder.Status.FAILED,
+            scheduled_at__gte=now - timedelta(days=FAILED_WINDOW_DAYS),
+        ).count()
+        delivered = page(
+            "warning",
+            "Напоминания о визите не доставлены",
+            (
+                f"за этот прогон не ушло: {failed_this_run}; "
+                f"напоминаний в статусе failed сейчас, со сроком за "
+                f"{FAILED_WINDOW_DAYS} суток: {window}. "
+                "Причина по каждому — аудит bookings.reminder.send_failed "
+                "(status_code / exception_type). Диспетчер их не переотправляет."
+            ),
+            dedup_key=claim,
+        )
+        if not delivered:
+            cache.delete(claim)
+    except Exception:  # noqa: BLE001 — страница не должна ронять прогон
+        logger.exception("bookings.dispatch.failed_page_error")
+
+
 @shared_task(name="bookings.send_due_reminders")
 def send_due_reminders() -> dict[str, int]:
     """Dispatch every reminder whose ``scheduled_at`` has passed.
@@ -486,6 +564,8 @@ def send_due_reminders() -> dict[str, int]:
             deferred,
             muted,
         )
+    if failed:
+        _page_failed_reminders(failed_this_run=failed, now=now)
     return {
         "sent": sent,
         "failed": failed,
