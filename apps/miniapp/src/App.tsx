@@ -750,19 +750,8 @@ function SurfaceCard({
   return (
     <button
       type="button"
+      className="surface-card"
       onClick={onClick}
-      style={{
-        display: "flex",
-        flexDirection: "column",
-        alignItems: "flex-start",
-        gap: "var(--s-1)",
-        padding: "var(--s-4)",
-        minHeight: 88,
-        background: "var(--c-surface-1)",
-        border: "1px solid var(--c-divider)",
-        borderRadius: "var(--r-md)",
-        textAlign: "left",
-      }}
       aria-label={ariaLabel}
     >
       <span style={{ fontSize: "var(--font-size-300)", fontWeight: 600 }}>

@@ -37,10 +37,7 @@ const SURFACE = /\b(background|backgroundColor|border|borderRadius|boxShadow)\s*
 
 /** Известные носители по файлам. Счёт — точный. */
 const KNOWN: Record<string, { count: number; what: string }> = {
-  "App.tsx": {
-    count: 1,
-    what: "SurfaceCard — карточка выбора режима (DRF-2465, §6-фи)",
-  },
+  // App.tsx SurfaceCard одет классом .surface-card (DRF-2465, 28.09) — снят.
   "components/Snackbar.tsx": {
     count: 1,
     what: "кнопка действия снекбара (DRF-2527)",
@@ -142,7 +139,7 @@ describe("элементов без класса с видом поверхно�
       }
     }
     expect(problems, "неодетый элемент прибавился или одет без правки списка").toEqual([]);
-    expect(HITS.length).toBe(7);
+    expect(HITS.length).toBe(6);
   });
 
   it("узел умеет покраснеть: ловит неодетый и не ловит одетый", () => {
