@@ -126,14 +126,13 @@ function VisitRow({
   const movable = cancellable && Boolean(visit.service_id) && Boolean(masterId);
   return (
     <li
-      className="salon-day__visit"
-      style={{
-        display: "flex",
-        gap: "var(--s-2)",
-        padding: "var(--s-2) 0",
-        opacity: released || closed ? 0.55 : 1,
-        textDecoration: released ? "line-through" : "none",
-      }}
+      className={
+        released
+          ? "salon-day__visit salon-day__visit--released"
+          : closed
+            ? "salon-day__visit salon-day__visit--closed"
+            : "salon-day__visit"
+      }
     >
       {/* Start time, and under it the length of the visit — the mockup's
        * time column («09:00» / «60 мин»). `duration_min` has always been

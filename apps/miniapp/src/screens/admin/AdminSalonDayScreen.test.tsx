@@ -38,6 +38,17 @@ import {
 } from "../../lib/admin-api";
 import { AdminSalonDayScreen } from "./AdminSalonDayScreen";
 
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
+/** Правило модификатора строки визита, прочитанное с диска (jsdom CSS не грузит). */
+function visitRule(modifier: string): string {
+  const css = readFileSync(resolve(__dirname, "../../styles/globals.css"), "utf-8");
+  const body = css.split(`\n.salon-day__visit${modifier} {`)[1]?.split("}")[0] ?? "";
+  expect(body, `правило .salon-day__visit${modifier} не найдено`).not.toBe("");
+  return body;
+}
+
 const mockedDay = vi.mocked(getSalonDay);
 const mockedCancel = vi.mocked(cancelSalonBooking);
 const mockedVersion = vi.mocked(getBookingVersion);
@@ -627,7 +638,13 @@ describe("a closed visit reads as closed, not as cancelled", () => {
     const row = (await screen.findByText("Мария И.")).closest("li");
     // Struck through on this board means «the slot was freed». A closed
     // visit is the opposite claim: the customer came and was served.
-    expect(row).toHaveStyle({ textDecoration: "none" });
+    // DRF-2550: вид строки живёт в правилах, а jsdom стилей не грузит —
+    // держим обе половины: строка несёт свой модификатор, а правило этого
+    // модификатора (с диска) не зачёркивает.
+    expect(row).toHaveClass("salon-day__visit--closed");
+    expect(row).not.toHaveClass("salon-day__visit--released");
+    expect(visitRule("--closed")).not.toMatch(/text-decoration:\s*line-through/);
+    expect(visitRule("--closed")).toMatch(/opacity:\s*0\.55/);
   });
 
   it("still strikes a cancelled one through", async () => {
@@ -635,7 +652,8 @@ describe("a closed visit reads as closed, not as cancelled", () => {
     renderScreen();
 
     const row = (await screen.findByText("Мария И.")).closest("li");
-    expect(row).toHaveStyle({ textDecoration: "line-through" });
+    expect(row).toHaveClass("salon-day__visit--released");
+    expect(visitRule("--released")).toMatch(/text-decoration:\s*line-through/);
     expect(screen.queryByLabelText("Визит закрыт")).not.toBeInTheDocument();
   });
 

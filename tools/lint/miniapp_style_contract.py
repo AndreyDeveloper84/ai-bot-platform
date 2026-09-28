@@ -270,7 +270,6 @@ BASELINE: frozenset[str] = frozenset(
         "src/screens/admin/AdminSalonDayScreen.tsx::badge",
         "src/screens/admin/AdminSalonDayScreen.tsx::callout--warning",
         "src/screens/admin/AdminSalonDayScreen.tsx::muted",
-        "src/screens/admin/AdminSalonDayScreen.tsx::salon-day__visit",
         "src/screens/admin/AdminSalonDayScreen.tsx::screen__header",
         "src/screens/admin/AdminSalonDayScreen.tsx::section__title",
         "src/screens/admin/AdminSettingsPlaceholderScreen.tsx::screen__header",
