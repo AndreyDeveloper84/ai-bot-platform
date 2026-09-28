@@ -26,29 +26,38 @@ const SOURCES = Object.fromEntries(
   ).map(([path, text]) => [path.replace(/^\.\//, "../lib/"), text]),
 );
 
-/** Часы из строки ISO: регулярка с `T(\d{2}` или срез `slice(11, 16)`. */
-const WALL_CLOCK = [/T\(\\d\{2\}/, /\.slice\(\s*11\s*,\s*16\s*\)/, /\.substring\(\s*11\b/];
+/**
+ * Часы из строки ISO. Шире литерала (ревью 28.09): `T(\d{2}`, `T(\d\d`,
+ * срез с 11-го символа любой длины, `substring(11`, `split("T")`.
+ */
+const WALL_CLOCK = [
+  /T\(\\d\{2\}/,
+  /T\(\\d\\d/,
+  /\.slice\(\s*11\s*,/,
+  /\.substring\(\s*11/,
+  /\.split\(\s*["'`]T["'`]\s*\)/,
+];
 
 const HOME = "../lib/format.ts";
 
-/** Чужие провода — названы с причиной, не чинятся здесь. */
-const KNOWN: Record<string, string> = {
-  "../lib/booking-time.ts":
-    "час СЛОТА: /customer/slots отдаёт начало в поясе салона (views.slots — local.isoformat()), опора названа в докстринге файла",
-  "../components/booking/NewBookingForm.tsx":
-    "время, предложенное ассистентом сотруднику (провод master_api/assistant), вне DRF-2589",
-  "../screens/admin/SalonPilotScheduleScreen.tsx":
-    "день салона администратора — провод admin_api, вне DRF-2589; проверить пояс отдельно",
-  "../screens/MasterWorkingHoursScreen.tsx":
-    "часы работы мастера — провод master_api (время смены, не визита), вне DRF-2589",
-};
+/**
+ * Исключение — по ПРИЗНАКУ, а не по имени файла: строка разбора (или строка
+ * над ней) несёт пометку `wall-clock-ok: <причина>`. Признак разрешения —
+ * «читает время суток из расписания или время уже в поясе салона, а не
+ * метку времени визита». Следующее такое место попадает в исключения по
+ * правилу и с причиной, видимой на ревью; место без пометки — красное.
+ */
+const MARK = /wall-clock-ok:\s*\S.{9,}/;
 
 function hits(): string[] {
   const out: string[] = [];
   for (const [path, text] of Object.entries(SOURCES)) {
     if (/\.test\.(ts|tsx)$/.test(path) || path === HOME) continue;
-    text.split("\n").forEach((line, i) => {
-      if (WALL_CLOCK.some((re) => re.test(line))) out.push(`${path}:${i + 1}`);
+    const lines = text.split("\n");
+    lines.forEach((line, i) => {
+      if (!WALL_CLOCK.some((re) => re.test(line))) return;
+      if (MARK.test(line) || MARK.test(lines[i - 1] ?? "")) return;
+      out.push(`${path}:${i + 1}`);
     });
   }
   return out;
@@ -62,8 +71,14 @@ describe("часы из строки ISO — только в lib/format.ts (DRF-
     expect(WALL_CLOCK.some((re) => home.split("\n").some((l) => re.test(l)))).toBe(true);
   });
 
-  it("вне дома — только названные чужие провода", () => {
-    const files = [...new Set(hits().map((h) => h.replace(/:\d+$/, "")))].sort();
-    expect(files).toEqual(Object.keys(KNOWN).sort());
+  it("вне дома — только места с пометкой причины", () => {
+    expect(hits()).toEqual([]);
+  });
+
+  it("пометки есть и несут причину (иначе ноль исключений — не вердикт)", () => {
+    const marked = Object.entries(SOURCES).filter(
+      ([p, t]) => !/\.test\.(ts|tsx)$/.test(p) && MARK.test(t),
+    );
+    expect(marked.length).toBeGreaterThanOrEqual(4);
   });
 });

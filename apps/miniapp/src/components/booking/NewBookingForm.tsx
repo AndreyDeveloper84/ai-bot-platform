@@ -372,6 +372,7 @@ export function NewBookingForm({
         customer: { kind: "new", name: clientName, phone: "" },
       });
     }
+    // wall-clock-ok: время, предложенное ассистентом сотруднику, — провод master_api, не визит клиента
     const wishTime = /T(\d{2}:\d{2})/.exec(startAt)?.[1];
     if (wishTime) {
       setPrefillHint(

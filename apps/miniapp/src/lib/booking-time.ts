@@ -75,6 +75,7 @@ const AFTERNOON_FROM = 12;
 const EVENING_FROM = 17;
 
 function hourOf(startIso: string): number {
+  // wall-clock-ok: час слота — провод слотов уже в поясе салона (см. докстринг файла)
   const match = startIso.match(/T(\d{2}):/);
   return match ? Number(match[1]) : 0;
 }

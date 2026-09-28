@@ -317,6 +317,7 @@ export function humanDate(date: Date): string {
 
 /** «2026-08-26T14:30:00+03:00» → «14:30». Срез, а не `Date`: пояс уже в строке. */
 export function hhmm(iso: string): string {
+  // wall-clock-ok: время суток из расписания (часы смены), не метка времени визита
   return typeof iso === "string" && iso.length >= 16 ? iso.slice(11, 16) : "";
 }
 

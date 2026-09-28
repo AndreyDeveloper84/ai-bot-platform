@@ -100,3 +100,43 @@ def test_home_next_booking_is_worded_in_the_bookings_salon_zone(client, home, ek
 
     assert "11:00" in nb["date_human"]
     assert "09:00" not in nb["date_human"]
+
+
+def test_naive_time_is_the_salons_not_the_servers(home, ekb, settings) -> None:
+    """Ревью: время без пояса ``astimezone`` принял бы за пояс сервера."""
+    from apps.miniapp_api.views import _salon_iso
+
+    settings.TIME_ZONE = "UTC"
+    naive = datetime(2026, 9, 30, 9, 0)
+    assert _salon_iso(naive, home) == "2026-09-30T09:00:00+03:00"
+    assert _salon_iso(naive, ekb) == "2026-09-30T09:00:00+05:00"
+
+
+def test_reschedule_answer_carries_the_salons_hour(client, home, ekb, monkeypatch) -> None:
+    from apps.integrations.ayla.booking_client import AylaBookingRecord
+
+    class _Stub:
+        def reschedule_appointment(self, **kw):
+            return AylaBookingRecord(
+                appointment_id=kw["appointment_id"],
+                raw={"start_datetime": kw["new_start_datetime"]},
+            )
+
+    monkeypatch.setattr(
+        "apps.integrations.ayla.booking_client.get_ayla_booking_client", lambda: _Stub()
+    )
+    _identity(home, ME, AYLA_UID)
+    mine = _proxy(ekb, _identity(ekb, ME, AYLA_UID), _visit_at_utc(3))
+    new_utc = _visit_at_utc(5)
+
+    from apps.miniapp_api.tests.test_person_owns_booking_2436 import _post
+
+    resp = _post(
+        client,
+        f"/api/v1/customer/bookings/{mine.appointment_id}/reschedule/confirm",
+        {"new_visit_at": new_utc.isoformat()},
+    )
+
+    assert resp.status_code == 200, resp.content[:300]
+    assert _hhmm(resp.json()["new_booking"]["visit_at"]) == "11:00"
+    assert _hhmm(resp.json()["old_booking"]["visit_at"]) == "11:00"

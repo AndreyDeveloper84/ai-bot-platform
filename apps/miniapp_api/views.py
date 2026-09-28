@@ -2086,7 +2086,13 @@ def _salon_iso(moment, tenant) -> str:
         return ""
     from apps.booking.client_notify import tenant_timezone
 
-    return moment.astimezone(tenant_timezone(tenant)).isoformat()
+    zone = tenant_timezone(tenant)
+    if moment.tzinfo is None:
+        # Время без пояса (канон без смещения, тело запроса без смещения) —
+        # время салона: ``astimezone`` принял бы его за пояс СЕРВЕРА и сдвинул
+        # час заново. Пришиваем пояс салона, не пересчитывая.
+        return moment.replace(tzinfo=zone).isoformat()
+    return moment.astimezone(zone).isoformat()
 
 
 def _proxy_booking_to_dict(proxy, *, tenant) -> dict[str, Any]:
