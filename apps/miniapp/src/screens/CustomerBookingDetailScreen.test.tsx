@@ -109,37 +109,6 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-describe("подтверждение переноса «было → стало» (DRF-2585, слова владельца п.8)", () => {
-  function renderMoved(state: unknown) {
-    render(
-      <MemoryRouter initialEntries={[{ pathname: "/customer/records/b-m", state }]}>
-        <Routes>
-          <Route path="/customer/records/:bookingId" element={<CustomerBookingDetailScreen />} />
-        </Routes>
-      </MemoryRouter>,
-    );
-  }
-
-  it("после переноса — «Перенесла запись», было и стало", async () => {
-    mockedFetch.mockResolvedValue({
-      booking: booking({ id: "b-m", visit_at: "2026-09-27T11:00:00+03:00" }),
-    });
-    renderMoved({ justRescheduled: true, oldVisit: "2026-09-25T09:00:00+03:00" });
-
-    const box = await screen.findByRole("status");
-    expect(box).toHaveTextContent("Перенесла запись");
-    expect(box).toHaveTextContent("Было: 25 сентября в 09:00");
-    expect(box).toHaveTextContent("Стало: 27 сентября в 11:00");
-  });
-
-  it("без переноса блока нет — карточка открыта не после переноса", async () => {
-    mockedFetch.mockResolvedValue({ booking: booking({ id: "b-m" }) });
-    renderMoved(null);
-    expect(await screen.findByText("Маникюр")).toBeInTheDocument();
-    expect(screen.queryByText("Перенесла запись")).toBeNull();
-  });
-});
-
 describe("CustomerBookingDetailScreen (real data)", () => {
   it("renders the real booking fields", async () => {
     mockedFetch.mockResolvedValue({ booking: FUTURE });

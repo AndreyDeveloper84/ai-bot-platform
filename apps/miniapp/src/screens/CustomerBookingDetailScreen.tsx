@@ -26,7 +26,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useLocation, useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams } from "react-router-dom";
 import { Snackbar } from "../components/Snackbar";
 import { StateError } from "../components/StateError";
 import { PaymentStatusBadge } from "../components/PaymentStatusBadge";
@@ -41,13 +41,7 @@ import {
   type CancelReasonClass,
 } from "../lib/api";
 import { displayStatusFor, getBookingDetail, renderStatus } from "../lib/customer-records";
-import {
-  formatDayMonthTime,
-  formatDuration,
-  formatMoney,
-  formatVisitFull,
-  priceFromLabel,
-} from "../lib/format";
+import { formatDuration, formatMoney, formatVisitFull, priceFromLabel } from "../lib/format";
 import { visitAddressText } from "../lib/visit-address";
 import { useScreenBack } from "../hooks/useScreenBack";
 import { backTo } from "../lib/screen-back";
@@ -90,10 +84,6 @@ export function CustomerBookingDetailScreen() {
   // нельзя.
   const onBack = useScreenBack(backTo("/customer/records"));
   const { bookingId } = useParams<{ bookingId: string }>();
-  // DRF-2585: экран переноса передаёт сюда, откуда перенесли. Читателя у
-  // этого состояния не было с 19.05 — подтверждение «было → стало» не
-  // рисовалось нигде.
-  const moved = useLocation().state as { justRescheduled?: boolean; oldVisit?: string } | null;
   const [state, setState] = useState<State>({ kind: "loading" });
   const [modalOpen, setModalOpen] = useState(false);
   const [reasonClass, setReasonClass] = useState<CancelReasonClass | null>(null);
@@ -266,20 +256,6 @@ export function CustomerBookingDetailScreen() {
           {/* C7.3 — payment status when the passthrough ships it. */}
           <PaymentStatusBadge state={b.payment?.capture_state} />
         </div>
-
-        {/* DRF-2585 — слова владельца 28.09, п.8: «Перенесла запись» +
-            «Было / Стало». «Стало» — время самой записи, не состояние экрана. */}
-        {moved?.justRescheduled && moved.oldVisit && (
-          <div className="confirm-card" role="status">
-            <p>Перенесла запись</p>
-            <p>
-              <strong>Было:</strong> {formatDayMonthTime(moved.oldVisit)}
-            </p>
-            <p>
-              <strong>Стало:</strong> {formatDayMonthTime(b.visit_at)}
-            </p>
-          </div>
-        )}
 
         <div className="confirm-card">
           <dl>

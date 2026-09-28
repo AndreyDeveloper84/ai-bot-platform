@@ -83,3 +83,30 @@ def test_price_is_kept_after_the_canonical_part() -> None:
     visit = _visit_from_record(_record(None))
     assert visit.price == Decimal("3200.0")
     assert _visit_line(visit).endswith(" — 3200 ₽")
+
+
+def test_a_bad_id_does_not_cancel_the_slug_lookup() -> None:
+    """Ревью: невалидный id раньше обрывал и поиск по slug."""
+    Tenant.objects.create(slug="lumina-ekb", name="Люмина", timezone="Asia/Yekaterinburg")
+    visit = _visit_from_record(
+        _record({"id": "not-a-uuid", "slug": "lumina-ekb", "name": "Люмина"})
+    )
+    assert visit.salon_tz == "Asia/Yekaterinburg"
+
+
+def test_a_deactivated_salon_keeps_its_zone_for_history() -> None:
+    Tenant.all_objects.create(
+        slug="closed-ekb", name="Закрытый", timezone="Asia/Yekaterinburg", is_active=False
+    )
+    visit = _visit_from_record(_record({"slug": "closed-ekb", "name": "Закрытый"}))
+    assert visit.salon_tz == "Asia/Yekaterinburg"
+
+
+def test_one_visit_one_time_in_the_list_and_in_the_card_prompts() -> None:
+    """Ревью: карточка/отмена/отзыв брали пилотный пояс, список — салона."""
+    from apps.orchestrator.visits import _format_when
+
+    Tenant.objects.create(slug="lumina-ekb", name="Люмина", timezone="Asia/Yekaterinburg")
+    visit = _visit_from_record(_record({"slug": "lumina-ekb", "name": "Люмина"}))
+    assert "в 11:00" in _visit_line(visit)
+    assert _format_when(visit.start_at, visit.salon_tz).endswith("11:00")
