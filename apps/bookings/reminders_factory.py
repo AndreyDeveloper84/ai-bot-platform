@@ -193,34 +193,65 @@ def create_reminders_for_ayla_appointment(
         )
         return []
 
+    from apps.booking.reminder_lookup import reminders_for_appointment
+
     now = timezone.now()
     saved: list[BookingReminder] = []
     for kind, offset in _REMINDER_OFFSETS:
         scheduled_at = visit_at - offset
+        of_kind = reminders_for_appointment(appointment_id).filter(kind=kind)
         if scheduled_at <= now:
+            # Срок прошёл — не заводим и не перевзводим. Но строка того же вида
+            # про ПРЕЖНЕЕ время, ещё ждущая (PENDING) или ответа
+            # (SENT_NO_REPLY), закрывается: иначе эскалация сообщит менеджеру
+            # «клиент не подтвердил визит <прежнее время>» о перенесённой
+            # записи. Прежняя фабрика перевзводила её и отправляла сразу —
+            # это и был дефект #1146.
+            of_kind.filter(
+                status__in=(
+                    BookingReminder.Status.PENDING,
+                    BookingReminder.Status.SENT_NO_REPLY,
+                )
+            ).exclude(visit_at=visit_at).update(status=BookingReminder.Status.STALE_DROPPED)
             logger.info(
                 "bookings.factory.ayla.skip_backdated appointment_id=%s kind=%s",
                 appointment_id,
                 kind,
             )
             continue
+        fields = {
+            "tenant": tenant,
+            "bot_user": bot_user,
+            "chat_id": chat_id,
+            "visit_at": visit_at,
+            "status": BookingReminder.Status.PENDING,
+            "scheduled_at": scheduled_at,
+            "master_name": master_name,
+            "service_name": service_name,
+            "sent_at": None,
+            "replied_at": None,
+        }
+        # Запись из диалога, заведённая ДО DRF-2586, держит строку в колонке
+        # ``yclients_record_id``. Её перевзводим на месте — как делала прежняя
+        # фабрика, — а не заводим рядом новую: иначе старая строка про прежнее
+        # время осталась бы (ушедшая — ``SENT_NO_REPLY``) и её подобрала бы
+        # эскалация. Строка остаётся в старой колонке, поэтому потребитель
+        # событий пары к ней не заведёт.
+        legacy = of_kind.filter(ayla_appointment_id__isnull=True).first()
+        if legacy is not None:
+            BookingReminder.all_tenants.filter(pk=legacy.pk).update(**fields)
+            legacy.refresh_from_db()
+            saved.append(legacy)
+            continue
         row, _created = BookingReminder.all_tenants.update_or_create(
             ayla_appointment_id=appointment_id,
             tenant=tenant,
             kind=kind,
             defaults={
-                "bot_user": bot_user,
+                **fields,
                 # NULL, не "": иначе старый unique_together
                 # (yclients_record_id, kind) столкнул бы разные записи Ayla.
                 "yclients_record_id": None,
-                "chat_id": chat_id,
-                "visit_at": visit_at,
-                "status": BookingReminder.Status.PENDING,
-                "scheduled_at": scheduled_at,
-                "master_name": master_name,
-                "service_name": service_name,
-                "sent_at": None,
-                "replied_at": None,
             },
         )
         saved.append(row)

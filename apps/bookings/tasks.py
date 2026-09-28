@@ -52,6 +52,7 @@ from django.utils import timezone
 
 from apps.audit.services import write_audit
 from apps.booking.models import BookingReminder
+from apps.booking.reminder_lookup import appointment_ref
 from apps.channels.max.outbound import MaxAPIError, send_message
 from apps.bookings.keyboards import day_before_keyboard
 
@@ -323,6 +324,7 @@ def send_due_reminders() -> dict[str, int]:
                     payload={
                         "kind": row.kind,
                         "yclients_record_id": row.yclients_record_id,
+                        "appointment_ref": appointment_ref(row),
                         "reason": reason,
                         "booking_request_id": (
                             str(row.booking_request_id) if row.booking_request_id else None
@@ -376,6 +378,7 @@ def send_due_reminders() -> dict[str, int]:
                 payload={
                     "kind": row.kind,
                     "yclients_record_id": row.yclients_record_id,
+                    "appointment_ref": appointment_ref(row),
                     "reason": "notify_reminders_off",
                 },
             )
@@ -429,6 +432,7 @@ def send_due_reminders() -> dict[str, int]:
                 payload={
                     "kind": row.kind,
                     "yclients_record_id": row.yclients_record_id,
+                    "appointment_ref": appointment_ref(row),
                     "status_code": exc.status_code,
                 },
             )
@@ -451,6 +455,7 @@ def send_due_reminders() -> dict[str, int]:
                 payload={
                     "kind": row.kind,
                     "yclients_record_id": row.yclients_record_id,
+                    "appointment_ref": appointment_ref(row),
                     "exception_type": type(exc).__name__,
                 },
             )
@@ -466,6 +471,7 @@ def send_due_reminders() -> dict[str, int]:
             payload={
                 "kind": row.kind,
                 "yclients_record_id": row.yclients_record_id,
+                "appointment_ref": appointment_ref(row),
             },
         )
         sent += 1

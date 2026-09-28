@@ -495,7 +495,6 @@ def _schedule_reminders(
             # collide across multiple Ayla appointments.
             "yclients_record_id": None,
             "chat_id": chat_id,
-            "visit_at": start_at,
         }
         BookingReminder.all_tenants.update_or_create(
             ayla_appointment_id=appointment_id,
@@ -506,6 +505,13 @@ def _schedule_reminders(
                 **common_defaults,
                 "status": BookingReminder.Status.PENDING,
                 "scheduled_at": scheduled_at,
+                # DRF-2586: время визита — только при создании, как и
+                # ``scheduled_at``. Строка теперь общая с диалогом, и опоздавшее
+                # или повторное событие с прежним ``start_at`` вернуло бы
+                # ``visit_at`` к старому времени после переноса в диалоге, при
+                # новом ``scheduled_at``. Перенос по событию делает
+                # ``_reschedule_reminders``.
+                "visit_at": start_at,
                 # Names are looked up via the catalog mirror on send. Only on
                 # INSERT (DRF-2586): the dialog writes the same row with the
                 # names snapshot, and an event must not blank it.

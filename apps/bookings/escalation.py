@@ -92,6 +92,7 @@ from datetime import timedelta
 
 from apps.audit.services import write_audit
 from apps.booking.models import BookingReminder
+from apps.booking.reminder_lookup import appointment_ref
 from apps.channels.max.staff_outbound import MANAGER, send_to_staff
 
 # E0 #6 — send-time booking-state recheck. The same helper governs
@@ -250,6 +251,7 @@ def escalate_stale_reminders() -> dict[str, int]:
                 payload={
                     "kind": row.kind,
                     "yclients_record_id": row.yclients_record_id,
+                    "appointment_ref": appointment_ref(row),
                     "reason": reason,
                 },
             )
@@ -309,6 +311,7 @@ def escalate_stale_reminders() -> dict[str, int]:
                 payload={
                     "kind": row.kind,
                     "yclients_record_id": row.yclients_record_id,
+                    "appointment_ref": appointment_ref(row),
                     "exception_type": type(exc).__name__,
                 },
             )
@@ -328,6 +331,7 @@ def escalate_stale_reminders() -> dict[str, int]:
                 payload={
                     "kind": row.kind,
                     "yclients_record_id": row.yclients_record_id,
+                    "appointment_ref": appointment_ref(row),
                     "delivered": False,
                     "reason": "no_manager_chat_id",
                 },
@@ -356,6 +360,7 @@ def escalate_stale_reminders() -> dict[str, int]:
                 payload={
                     "kind": row.kind,
                     "yclients_record_id": row.yclients_record_id,
+                    "appointment_ref": appointment_ref(row),
                     "recipients": outcome.recipients,
                     "failed": outcome.failed,
                 },
@@ -371,6 +376,7 @@ def escalate_stale_reminders() -> dict[str, int]:
             payload={
                 "kind": row.kind,
                 "yclients_record_id": row.yclients_record_id,
+                "appointment_ref": appointment_ref(row),
                 "delivered": True,
             },
         )

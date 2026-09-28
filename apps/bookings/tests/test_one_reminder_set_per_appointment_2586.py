@@ -20,7 +20,10 @@ import pytest
 from django.utils import timezone
 
 from apps.booking.models import BookingReminder
-from apps.bookings.reminders_factory import create_reminders_for_booking
+from apps.bookings.reminders_factory import (
+    create_reminders_for_ayla_appointment,
+    create_reminders_for_booking,
+)
 from apps.eventbus.consumers.booking import _schedule_reminders as event_schedules
 from apps.identity.models import BotUser
 from apps.skills.booking.tools import _reminders_for_record
@@ -83,6 +86,20 @@ def _rows_per_kind(appointment_id) -> dict[str, int]:
     return {kind: rows.filter(kind=kind).count() for kind in KINDS}
 
 
+def _dialog_direct(tenant, bot_user, appointment_id, visit_at) -> None:
+    """Писатель диалога напрямую: ``tools._schedule_reminders`` глотает любое
+    исключение, и узел порядка прошёл бы и при упавшем писателе — один набор
+    завело бы событие."""
+    create_reminders_for_ayla_appointment(
+        tenant=tenant,
+        bot_user=bot_user,
+        appointment_id=appointment_id,
+        visit_at=visit_at,
+        master_name="Лера",
+        service_name="Массаж",
+    )
+
+
 class TestOneSetWhicheverArrivesFirst:
     def test_dialog_then_event_is_one_set(self, tenant, bot_user, appointment_id, visit_at):
         _dialog(tenant, bot_user, appointment_id, visit_at)
@@ -95,6 +112,26 @@ class TestOneSetWhicheverArrivesFirst:
         _dialog(tenant, bot_user, appointment_id, visit_at)
 
         assert _rows_per_kind(appointment_id) == {kind: 1 for kind in KINDS}
+        # Присутствие писателя диалога: имена — его снимок. Без этого узел
+        # прошёл бы и при упавшем писателе (``_schedule_reminders`` глотает
+        # исключения, а один набор заводит событие).
+        names = set(
+            BookingReminder.all_tenants.filter(ayla_appointment_id=appointment_id).values_list(
+                "master_name", "service_name"
+            )
+        )
+        assert names == {("Лера", "Массаж")}
+
+    def test_the_writers_directly_in_both_orders(self, tenant, bot_user, visit_at):
+        first, second = uuid.uuid4(), uuid.uuid4()
+
+        _dialog_direct(tenant, bot_user, first, visit_at)
+        _event(tenant, bot_user, first, visit_at)
+        _event(tenant, bot_user, second, visit_at)
+        _dialog_direct(tenant, bot_user, second, visit_at)
+
+        assert _rows_per_kind(first) == {kind: 1 for kind in KINDS}
+        assert _rows_per_kind(second) == {kind: 1 for kind in KINDS}
 
     def test_the_dialog_now_writes_the_ayla_column(
         self, tenant, bot_user, appointment_id, visit_at
@@ -183,6 +220,88 @@ class TestStatusRules:
             )
         )
         assert kinds == {BookingReminder.Kind.TWO_HOURS}
+
+
+class TestNoStaleRowAfterReschedule:
+    """Ревью DRF-2586: строка про ПРЕЖНЕЕ время, оставшаяся после переноса,
+    попадает в эскалацию — менеджеру «клиент не подтвердил визит <старое время>»."""
+
+    def test_an_old_dialog_row_is_rearmed_in_place_not_duplicated(
+        self, tenant, bot_user, appointment_id, visit_at
+    ):
+        create_reminders_for_booking(
+            tenant=tenant,
+            bot_user=bot_user,
+            yclients_record_id=str(appointment_id),
+            visit_at=visit_at,
+            master_name="Лера",
+            service_name="Массаж",
+        )
+        BookingReminder.all_tenants.filter(
+            yclients_record_id=str(appointment_id), kind=BookingReminder.Kind.DAY_BEFORE
+        ).update(status=BookingReminder.Status.SENT_NO_REPLY)
+        later = visit_at + timedelta(days=1)
+
+        _dialog(tenant, bot_user, appointment_id, later)
+
+        assert _rows_per_kind(appointment_id) == {kind: 1 for kind in KINDS}
+        rows = BookingReminder.all_tenants.filter(yclients_record_id=str(appointment_id))
+        assert set(rows.values_list("status", "visit_at")) == {
+            (BookingReminder.Status.PENDING, later)
+        }
+
+    def test_a_reschedule_into_the_last_day_closes_the_stale_day_before(
+        self, tenant, bot_user, appointment_id, visit_at
+    ):
+        _dialog(tenant, bot_user, appointment_id, visit_at)
+        BookingReminder.all_tenants.filter(
+            ayla_appointment_id=appointment_id, kind=BookingReminder.Kind.DAY_BEFORE
+        ).update(status=BookingReminder.Status.SENT_NO_REPLY)
+        soon = timezone.now() + timedelta(hours=5)
+
+        _dialog(tenant, bot_user, appointment_id, soon)
+
+        rows = {
+            r.kind: r
+            for r in BookingReminder.all_tenants.filter(ayla_appointment_id=appointment_id)
+        }
+        assert rows[BookingReminder.Kind.DAY_BEFORE].status == (
+            BookingReminder.Status.STALE_DROPPED
+        )
+        assert rows[BookingReminder.Kind.TWO_HOURS].status == BookingReminder.Status.PENDING
+        assert rows[BookingReminder.Kind.TWO_HOURS].visit_at == soon
+
+    def test_a_late_event_does_not_move_the_visit_back(
+        self, tenant, bot_user, appointment_id, visit_at
+    ):
+        _dialog(tenant, bot_user, appointment_id, visit_at)
+        later = visit_at + timedelta(days=1)
+        _dialog(tenant, bot_user, appointment_id, later)
+
+        _event(tenant, bot_user, appointment_id, visit_at)  # опоздавшее, прежнее время
+
+        visits = set(
+            BookingReminder.all_tenants.filter(ayla_appointment_id=appointment_id).values_list(
+                "visit_at", flat=True
+            )
+        )
+        assert visits == {later}
+
+
+class TestTheOperatorSeesTheRecord:
+    def test_the_reschedule_task_names_the_ayla_record(
+        self, tenant, bot_user, appointment_id, visit_at
+    ):
+        """Было бы «запись None»: у строк диалога ``yclients_record_id`` пуст."""
+        from apps.bookings.callbacks import _reschedule_reason
+
+        _dialog(tenant, bot_user, appointment_id, visit_at)
+        reminder = BookingReminder.all_tenants.filter(ayla_appointment_id=appointment_id).first()
+
+        text = _reschedule_reason(reminder)
+
+        assert str(appointment_id) in text
+        assert "None" not in text
 
 
 class TestCancelFindsBothColumns:
