@@ -256,6 +256,11 @@ class TestVisitShape:
             "start_at",
             "price",
             "closed_by",
+            # DRF-2569 / слова владельца 28.09 п.2: салон — клиентское имя
+            # (как на витрине), не id; пояс — имя зоны для показа времени,
+            # не привязка к арендатору и на экран не выводится.
+            "salon_name",
+            "salon_tz",
         }
 
     def test_close_source_is_reserved_not_assumed(self, patch_client) -> None:
