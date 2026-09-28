@@ -725,7 +725,9 @@ jobs:
       #     cannot express a confirmation step and Pilot was not the
       #     place to invent one. The test asserts the behaviour that
       #     ticket removed on purpose. Test-side fix.
-      # (d) 1 x tests/contracts/test_event_idempotency.py — its autouse
+      # (d) RESOLVED 28.09 (DRF-2588) — re-enabled: passes on Postgres 16
+      #     against dev d4ccc25a. Was: 1 x
+      #     tests/contracts/test_event_idempotency.py — its autouse
       #     fixture sets EVENT_INGEST_TENANT_VERIFY_FAIL_OPEN but never
       #     EVENT_INGEST_ALLOWED_TENANTS / _ALLOWED_EVENTS, so
       #     booking.created is denied with
@@ -735,8 +737,8 @@ jobs:
       #     (apps/eventbus/tests/test_booking_consumer.py:137 and five
       #     others). One-line fixture fix.
       #
-      # The node IDs are single-quoted, unlike the apps/ deselects
-      # below: parametrized IDs end in `[ModelName]`, and an unquoted
+      # The node IDs are single-quoted (and any future apps/ deselect
+      # should be too): a parametrized ID ends in `[...]`, and an unquoted
       # `[...]` is a bash glob character class. It happens to survive
       # today only because nothing matches and nullglob/failglob are
       # off — which is a property of the shell, not of this file.
@@ -749,7 +751,6 @@ jobs:
       - name: pytest tests/ (cross-cutting suite, minus smoke)
         run: |
           uv run pytest tests/ --ignore=tests/smoke \
-            --deselect 'tests/contracts/test_event_idempotency.py::TestBookingIdempotency::test_booking_created_idempotent' \
             --deselect 'tests/e2e/test_handoff_skill.py::test_handoff_flow_creates_task_silences_followup_resumes_on_resolve' \
             --deselect 'tests/e2e/test_max_echo.py::test_max_webhook_to_echo_happy_path' \
             --deselect 'tests/e2e/test_privacy_skill.py::test_delete_data_triggers_privacy_skill_and_wipes_user' \
@@ -830,8 +831,8 @@ jobs:
       # a shard that lost half of them, and it does not catch a path that
       # fell out of every shard's selector at once.
       #
-      # So: collect the WHOLE of apps/ once, here, with the same deselect
-      # list the shards use, and write the number down. `test` below sums
+      # So: collect the WHOLE of apps/ once, here, with the same selection
+      # the shards use, and write the number down. `test` below sums
       # the five shard junits and refuses to be green unless the sum equals
       # this number. Recomputed every run, so unlike a hard-coded expected
       # count it cannot go stale and start lying.
@@ -839,13 +840,16 @@ jobs:
       # `--collect-only` needs no database and no services: ~1 min of
       # imports, on a job that is not the critical path.
       #
-      # The deselect list below is the SAME list as in the shard job. Two
-      # copies is a known hazard, and the rule is the one the
-      # detect-secrets exclusions already carry: if you touch one, touch
-      # the other in the same commit. They are also checked against each
-      # other on every run by construction — a deselect present here and
-      # missing there makes the shard sum exceed the census, and `test`
-      # goes red naming both numbers.
+      # Since DRF-2588 (28.09) there is NO apps/ deselect: the last 26
+      # passed on Postgres against dev and were re-enabled. If one ever has
+      # to be added, it goes into BOTH this step and the shard job in the
+      # same commit — two copies is a known hazard, the rule is the one
+      # the detect-secrets exclusions already carry. They are checked
+      # against each other on every run by construction: a deselect
+      # present here and missing there makes the shard sum exceed the
+      # census, and `test` goes red naming both numbers. And it needs a
+      # Linear leaf next to it — 23 of the last 26 had none ("Candidate
+      # for Linear, not fixed here") and outlived their cause by weeks.
       # ------------------------------------------------------------------
       - name: apps/ collection census (sentinel for the shard layout)
         run: |
@@ -862,32 +866,6 @@ jobs:
           # census is the exact silent-green failure this sentinel exists to
           # catch. Do not add `-q` back.
           uv run pytest apps/ --collect-only \
-            --deselect apps/miniapp_api/tests/test_c7_payments.py::TestPaymentMirrorReadModel::test_booking_confirmed_with_payment_id_stamps_hold \
-            --deselect apps/miniapp_api/tests/test_c7_payments.py::TestPaymentMirrorReadModel::test_booking_confirmed_without_payment_id_no_mirror \
-            --deselect apps/miniapp_api/tests/test_create_booking_ayla.py::TestLocalPathUnchanged::test_flag_off_keeps_local_path \
-            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_happy_path \
-            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_q12a_over_90d_breaks_chain \
-            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_not_owned_rejected \
-            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_already_cancelled_rejected \
-            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_q12a_cancel_requested_rejected \
-            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_not_found_rejected \
-            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_q12a_541_price_hike_breaks_chain_end_to_end \
-            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_q12a_541_identity_unchanged_preserves_chain_and_root_snapshot \
-            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_q12a_616_root_snapshot_read_uses_select_for_update \
-            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_q12a_616_root_snapshot_read_calls_select_for_update_with_of_self \
-            --deselect apps/bookings/tests/test_booking_callbacks.py::TestConfirmTapReschedule::test_happy_path_notifies_manager \
-            --deselect apps/skills/booking/tests/test_tools_q12a.py::TestQ12aContinuationLLMPath::test_within_90d_same_service_continuation_chain \
-            --deselect apps/skills/booking/tests/test_tools_q12a.py::TestQ12aContinuationLLMPath::test_over_90d_breaks_chain_billable_fresh_sale \
-            --deselect apps/skills/booking/tests/test_tools_q12a.py::TestQ12aContinuationLLMPath::test_b1_null_service_id_does_not_falsely_flag_swap \
-            --deselect apps/skills/booking/tests/test_tools_reschedule.py::TestExecuteReschedule::test_happy_path \
-            --deselect apps/skills/booking/tests/test_tools_reschedule.py::TestExecuteReschedule::test_new_row_carries_ai_direct_attribution \
-            --deselect apps/skills/booking/tests/test_tools_reschedule.py::TestIdempotencyMarkerAnchored::test_spoofed_substring_does_not_short_circuit_reschedule \
-            --deselect apps/skills/booking/tests/test_tools_reschedule.py::TestLocalCreateSplitBrainRecovery::test_local_create_fails_compensate_succeeds_recovers_cleanly \
-            --deselect apps/skills/booking/tests/test_tools_reschedule.py::TestLocalCreateSplitBrainRecovery::test_local_create_fails_compensate_fails_alerts_critical \
-            --deselect apps/skills/booking/tests/test_flow_continuation.py::TestSequenceA::test_full_reschedule_flow \
-            --deselect apps/skills/booking/tests/test_flow_continuation.py::TestSequenceB::test_combined_selection_slot_turn \
-            --deselect apps/skills/booking/tests/test_flow_continuation.py::TestSequenceC::test_callback_confirm_executes \
-            --deselect apps/skills/booking/tests/test_flow_continuation.py::TestNegatives::test_duplicate_text_confirm_no_double_mutation \
             > census-raw.txt 2>&1 || { tail -30 census-raw.txt; echo "CENSUS FAILED — apps/ did not collect."; exit 1; }
           tail -3 census-raw.txt
           # Parser lives in .github/scripts/census_count.py so it can be tested:
@@ -964,7 +942,8 @@ jobs:
   # the other in the same edit; the census in `checks` above will catch
   # you if it does not.
   #
-  # EVERY SHARD GETS THE WHOLE DESELECT LIST. `--deselect` in pytest is
+  # IF A DESELECT LIST EVER RETURNS (none today, DRF-2588), EVERY SHARD
+  # GETS THE WHOLE OF IT. `--deselect` in pytest is
   # prefix matching over already-collected items (`_pytest/main.py`,
   # `pytest_collection_modifyitems`): an id that matches nothing in this
   # shard is a silent no-op, not an error. So the list is not partitioned
@@ -1245,13 +1224,23 @@ jobs:
       # green locally and defended nothing in CI. Full apps/ (7246 tests,
       # measured against Postgres — the SQLite default that most of
       # `dev` runs locally hides real failures, see
-      # project_test_db_sqlite_vs_postgres) is clean EXCEPT the 26 tests
-      # deselected below, grouped by root cause so the excluded set is
-      # legible instead of a wall of paths:
+      # project_test_db_sqlite_vs_postgres) was clean EXCEPT 26 tests
+      # deselected here, grouped by root cause below. All 26 re-enabled
+      # 28.09 (DRF-2588) — the causes are kept as history:
       #
-      # (a) DRF-1044 — 3 pre-existing miniapp_api failures, same on
+      # (a) RESOLVED 28.09 (DRF-2588) — re-enabled: all 3 pass on
+      #     Postgres 16 against dev d4ccc25a. Was: DRF-1044 — 3
+      #     pre-existing miniapp_api failures, same on
       #     SQLite and Postgres, known before this ticket.
-      # (b) NEW (2026-08-15, DRF-1121 investigation) — 23 failures, ALL
+      # (b) RESOLVED 28.09 (DRF-2588) — re-enabled: 22 of 23 pass on
+      #     Postgres 16 against dev d4ccc25a; the 23rd
+      #     (test_q12a_616_root_snapshot_read_uses_select_for_update)
+      #     looked for table "apps_booking_bookingrequest" while the
+      #     table is booking_bookingrequest — the lock it pins IS there
+      #     (apps/booking/services/reschedule.py select_for_update on the
+      #     old row and on the chain root); test fixed to read the name
+      #     from the model. No Linear leaf ever existed for this entry.
+      #     Was: NEW (2026-08-15, DRF-1121 investigation) — 23 failures, ALL
       #     the same root cause: `BookingRequest.all_tenants
       #     .select_for_update().select_related("service")` in
       #     apps/skills/booking/tools.py's execute_reschedule (the
@@ -1304,8 +1293,8 @@ jobs:
       # two workers ever share a schema.
       #
       # DRF-1349 — the invocation below is the one described above, with
-      # `apps/` replaced by this shard's selector. `-n 4 --dist load` and
-      # the deselect list are unchanged.
+      # `apps/` replaced by this shard's selector and `-n 4` (the
+      # distribution mode is `worksteal`, DRF-2205, see the step).
       - name: pytest apps/ (shard ${{ matrix.shard.id }})
         env:
           # Via env, not interpolated into the script: the value is a
@@ -1326,33 +1315,7 @@ jobs:
           # Это прячет неравномерность, а не устраняет её причину;
           # причину лечит перераспределение шардов в матрице выше.
           uv run pytest $SHARD_ARGS -q -n 4 --dist worksteal \
-            --junitxml="$JUNIT_FILE" \
-            --deselect apps/miniapp_api/tests/test_c7_payments.py::TestPaymentMirrorReadModel::test_booking_confirmed_with_payment_id_stamps_hold \
-            --deselect apps/miniapp_api/tests/test_c7_payments.py::TestPaymentMirrorReadModel::test_booking_confirmed_without_payment_id_no_mirror \
-            --deselect apps/miniapp_api/tests/test_create_booking_ayla.py::TestLocalPathUnchanged::test_flag_off_keeps_local_path \
-            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_happy_path \
-            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_q12a_over_90d_breaks_chain \
-            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_not_owned_rejected \
-            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_already_cancelled_rejected \
-            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_q12a_cancel_requested_rejected \
-            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_not_found_rejected \
-            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_q12a_541_price_hike_breaks_chain_end_to_end \
-            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_q12a_541_identity_unchanged_preserves_chain_and_root_snapshot \
-            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_q12a_616_root_snapshot_read_uses_select_for_update \
-            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_q12a_616_root_snapshot_read_calls_select_for_update_with_of_self \
-            --deselect apps/bookings/tests/test_booking_callbacks.py::TestConfirmTapReschedule::test_happy_path_notifies_manager \
-            --deselect apps/skills/booking/tests/test_tools_q12a.py::TestQ12aContinuationLLMPath::test_within_90d_same_service_continuation_chain \
-            --deselect apps/skills/booking/tests/test_tools_q12a.py::TestQ12aContinuationLLMPath::test_over_90d_breaks_chain_billable_fresh_sale \
-            --deselect apps/skills/booking/tests/test_tools_q12a.py::TestQ12aContinuationLLMPath::test_b1_null_service_id_does_not_falsely_flag_swap \
-            --deselect apps/skills/booking/tests/test_tools_reschedule.py::TestExecuteReschedule::test_happy_path \
-            --deselect apps/skills/booking/tests/test_tools_reschedule.py::TestExecuteReschedule::test_new_row_carries_ai_direct_attribution \
-            --deselect apps/skills/booking/tests/test_tools_reschedule.py::TestIdempotencyMarkerAnchored::test_spoofed_substring_does_not_short_circuit_reschedule \
-            --deselect apps/skills/booking/tests/test_tools_reschedule.py::TestLocalCreateSplitBrainRecovery::test_local_create_fails_compensate_succeeds_recovers_cleanly \
-            --deselect apps/skills/booking/tests/test_tools_reschedule.py::TestLocalCreateSplitBrainRecovery::test_local_create_fails_compensate_fails_alerts_critical \
-            --deselect apps/skills/booking/tests/test_flow_continuation.py::TestSequenceA::test_full_reschedule_flow \
-            --deselect apps/skills/booking/tests/test_flow_continuation.py::TestSequenceB::test_combined_selection_slot_turn \
-            --deselect apps/skills/booking/tests/test_flow_continuation.py::TestSequenceC::test_callback_confirm_executes \
-            --deselect apps/skills/booking/tests/test_flow_continuation.py::TestNegatives::test_duplicate_text_confirm_no_double_mutation
+            --junitxml="$JUNIT_FILE"
 
       # DRF-1349 — the test counts, read from junit rather than from the
       # exit code. Before this step a red full-suite run printed no test
