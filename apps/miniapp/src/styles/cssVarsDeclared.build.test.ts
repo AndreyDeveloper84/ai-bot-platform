@@ -47,13 +47,8 @@ const AYLA_CHAT = readFileSync(
  *  новое употребление красное и названо строкой; заявили имя или убрали
  *  употребления — счёт не сойдётся, запись отсюда снять. */
 const KNOWN_UNDECLARED: Record<string, { uses: number; why: string }> = {
-  "--c-surface": {
-    uses: 2,
-    why:
-      "globals.css .ayla-card__option и .ayla-btn--secondary, 14 элементов; " +
-      "сегодня фон прозрачный, а --c-surface-1 перекрасил бы их поверх " +
-      "--c-surface-2 карточки — решение владельца (DRF-2468, DRF-2469)",
-  },
+  // `--c-surface` снят 28.09 (§6-хи): два правила объявляют `transparent`
+  // явно, имени больше нет — любое новое `var(--c-surface)` теперь красное.
   "--leading-normal": {
     uses: 14,
     why: "межстрочный наследуется — замена меняет вёрстку (DRF-2150)",

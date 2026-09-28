@@ -9949,7 +9949,10 @@ a {
   padding: var(--s-2) var(--s-3);
   border: 1px solid var(--c-divider);
   border-radius: var(--r-md);
-  background: var(--c-surface);
+  /* §6-хи (28.09): прозрачный — так он и рисовался, пока здесь стояло
+     несуществующее --c-surface (объявление недействительно → transparent).
+     Заливка — отдельное UI-решение, не побочный эффект правки CSS. */
+  background: transparent;
   color: var(--c-text-primary);
   font-size: var(--font-size-200);
   text-align: start;
@@ -9977,7 +9980,8 @@ a {
 
 .ayla-btn--secondary {
   border: 1px solid var(--c-accent);
-  background: var(--c-surface);
+  /* §6-хи (28.09): прозрачный явно — см. .ayla-card__option. */
+  background: transparent;
   color: var(--c-accent);
 }
 
