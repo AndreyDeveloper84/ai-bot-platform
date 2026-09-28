@@ -665,6 +665,10 @@ a {
 .btn-secondary--danger {
   color: var(--c-warning);
   border-color: var(--c-warning);
+  /* §6-упсилон (28.09): опасное — контурное, но с рамкой толще обычной
+     (1 px): цвет больше не единственный признак. Сторож — пара
+     «опасное × обычное» в dangerBorder2469.build.test.ts. */
+  border-width: 2px;
 }
 
 .btn-danger {
@@ -6441,6 +6445,10 @@ a {
 }
 .records-card__action--danger {
   color: var(--c-danger);
+  /* §6-упсилон (28.09): опасное — контурное, но с рамкой толще обычной
+     (1 px): цвет больше не единственный признак. Сторож — пара
+     «опасное × обычное» в dangerBorder2469.build.test.ts. */
+  border-width: 2px;
 }
 @media (max-width: 320px) {
   /* WCAG 1.4.4 — at small viewport / 200% zoom, actions stack. */
@@ -8691,7 +8699,10 @@ a {
 .ayla-btn--danger {
   background: transparent;
   color: var(--c-danger);
-  border: 1px solid var(--c-danger);
+  /* §6-упсилон (28.09): опасное — контурное, но с рамкой толще обычной
+     (1 px): цвет больше не единственный признак. Сторож — пара
+     «опасное × обычное» в dangerBorder2469.build.test.ts. */
+  border: 2px solid var(--c-danger);
 }
 
 /* Компактный вид — ЗАВЕСТИ модификатор, а не снимать инлайн (решение
