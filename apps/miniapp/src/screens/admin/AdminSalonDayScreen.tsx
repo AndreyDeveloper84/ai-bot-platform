@@ -40,6 +40,18 @@ import {
   type SalonDayVisit,
 } from "../../lib/admin-api";
 import { setBackButton } from "../../lib/max-sdk";
+import { REFUSAL_CANON } from "../../lib/refusal-canon";
+
+/** Перенос не прошёл: `detail` — нам в журнал, не на экран (DRF-2577). */
+function logMoveRefusal(outcome: string, detail?: string): void {
+  if (detail) console.warn(`[api-detail] reschedule ${outcome}: ${detail}`);
+}
+
+/** Строка следующего шага под фразой отказа: `hint` сервера с заглавной. */
+function stepLine(hint?: string): string | null {
+  const h = hint?.trim();
+  return h ? h.charAt(0).toUpperCase() + h.slice(1) : null;
+}
 
 /** `YYYY-MM-DD` for a Date, in that Date's own local fields. */
 function toIsoDate(d: Date): string {
@@ -497,6 +509,9 @@ export function AdminSalonDayScreen({ me }: { me: MeResponse }) {
   >("loading");
   const [moveBusy, setMoveBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  // Следующий шаг под отказом переноса («обновите день»). Привязан к тексту
+  // уведомления, к которому пришёл: другое уведомление его не наследует.
+  const [noticeStep, setNoticeStep] = useState<{ for: string; text: string } | null>(null);
 
   useEffect(() => {
     setBackButton(false);
@@ -647,6 +662,12 @@ export function AdminSalonDayScreen({ me }: { me: MeResponse }) {
     [date],
   );
 
+  const showMoveRefusal = useCallback((hint?: string) => {
+    const step = stepLine(hint);
+    setNoticeStep(step ? { for: REFUSAL_CANON.visitMove, text: step } : null);
+    setNotice(REFUSAL_CANON.visitMove);
+  }, []);
+
   const pickNewSlot = useCallback(
     async (slot: BookingSlot) => {
       const visit = moving;
@@ -672,7 +693,11 @@ export function AdminSalonDayScreen({ me }: { me: MeResponse }) {
             setNotice(`Визит перенесён на ${slot.time}.`);
             break;
           case "conflict":
-            setNotice(res.hint || "Не удалось перенести визит.");
+            // §6-кси п.6 (DRF-2577): фраза отказа — владельца, дословно; под
+            // ней строка следующего шага (`hint`) — это не отказ, а что делать
+            // дальше, как даты под фразой пересечения (п.5).
+            logMoveRefusal(res.outcome, res.detail);
+            showMoveRefusal(res.hint);
             break;
           case "pending":
             setNotice(
@@ -683,14 +708,15 @@ export function AdminSalonDayScreen({ me }: { me: MeResponse }) {
             setNotice(res.hint || "Этот визит нельзя перенести.");
             break;
           default:
-            setNotice(res.hint || "Не удалось перенести визит.");
+            logMoveRefusal(res.outcome, res.detail);
+            showMoveRefusal(res.hint);
         }
         if (res.outcome !== "blocked") await load(date);
       } finally {
         setMoveBusy(false);
       }
     },
-    [moving, moveVersion, moveBusy, date, load],
+    [moving, moveVersion, moveBusy, date, load, showMoveRefusal],
   );
 
   const confirmCancel = useCallback(
@@ -886,6 +912,12 @@ export function AdminSalonDayScreen({ me }: { me: MeResponse }) {
           style={{ marginTop: "var(--s-3)", color: "var(--c-text-secondary)" }}
         >
           {notice}
+          {noticeStep && noticeStep.for === notice && (
+            <>
+              <br />
+              {noticeStep.text}
+            </>
+          )}
         </p>
       )}
 

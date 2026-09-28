@@ -89,6 +89,7 @@ import {
   useBookingDraft,
 } from "../state/booking";
 import { backTo } from "../lib/screen-back";
+import { REFUSAL_CANON } from "../lib/refusal-canon";
 
 type ErrState =
   | { kind: "slot_unavailable"; substituteName?: string; substituteTime?: string }
@@ -103,7 +104,7 @@ type ErrState =
   | { kind: "salon_suspended" }
   | { kind: "server" }
   | { kind: "network" }
-  | { kind: "other"; detail: string };
+  | { kind: "other" };
 
 /**
  * DRF-1614 — the health-check handoff. Its own type, not a member of
@@ -416,7 +417,9 @@ export function CustomerBookingConfirmScreen() {
       } else if (e instanceof ApiError && e.status >= 500) {
         setErr({ kind: "server" });
       } else if (e instanceof ApiError) {
-        setErr({ kind: "other", detail: e.detail });
+        // §6-кси п.2 (DRF-2577): причина не названа — фраза владельца;
+        // `detail` уже в журнале (logApiDetail), на экран не идёт.
+        setErr({ kind: "other" });
       } else {
         setErr({ kind: "network" });
       }
@@ -849,7 +852,7 @@ export function CustomerBookingConfirmScreen() {
       )}
       {err?.kind === "other" && (
         <div className="callout callout--danger" role="alert">
-          <p style={{ margin: 0 }}>{err.detail}</p>
+          <p style={{ margin: 0 }}>{REFUSAL_CANON.bookingCreate}</p>
         </div>
       )}
     </ScreenLayout>

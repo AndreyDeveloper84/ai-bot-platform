@@ -46,6 +46,7 @@ vi.mock("../lib/master-api", async (importOriginal) => {
 });
 
 import { ApiError } from "../lib/api";
+import { REFUSAL_CANON } from "../lib/refusal-canon";
 import {
   createCanonGapRequest,
   getMasterCatalog,
@@ -687,6 +688,23 @@ describe("MasterServicesScreen — «Свои услуги»", () => {
 
     expect(mockedCreate).toHaveBeenCalledTimes(1);
     expect(mockedCreate).toHaveBeenCalledWith(expect.objectContaining({ name: "Ламинирование", duration_minutes: 60, price: "2000.50" }));
+  });
+
+  it.each([
+    ["слаг без detail", new ApiError(400, "canon_gap_duplicate", "")],
+    ["английский detail", new ApiError(400, "invalid", "price: must be positive")],
+  ])("отказ сервера (%s) — ровно «Не удалось сохранить услугу.» (§6-кси п.1, DRF-2577)", async (_, refusal) => {
+    mockedCreate.mockRejectedValue(refusal);
+    await renderScreen();
+    fireEvent.click(within(ownSection()).getByRole("button", { name: ADD_OWN_LABEL }));
+    fill(FIELD_NAME, "Ламинирование");
+    fill(FIELD_DURATION, "60");
+    fill(FIELD_PRICE, "2000");
+    fireEvent.click(within(ownSection()).getByRole("button", { name: ADD_OWN_LABEL }));
+    await settle();
+
+    expect(within(ownSection()).getByText(REFUSAL_CANON.serviceSave)).toBeInTheDocument();
+    expect(within(ownSection()).queryByText(/canon_gap_duplicate|must be positive/)).toBeNull();
   });
 
   it("K: a new submission clears the previous message — an invalid one included", async () => {
