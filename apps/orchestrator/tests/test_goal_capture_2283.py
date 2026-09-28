@@ -190,17 +190,22 @@ class TestTheWordsStayOutOfAnalytics:
 
 
 class TestTheOwnersWords:
-    """Решение владельца 28.09 (п. 7, DRF-2576) — проверяется ЦЕЛИКОМ.
+    """Слова владельца 28.09 (OWNER_WORDS_DECISIONS, п. 4) — проверяются ЦЕЛИКОМ.
 
-    «Никаких „Твоя цель:“»: подтверждение — слова человека и ничего нашего.
-    Узел сверяет строку целиком, а не «нет ли слова цель»: иначе вернулась
-    бы любая другая подпись — «Цель:», «Ваша цель», точка в конце.
-    Подмена: вернуть «Твоя цель теперь: {goal}» — узел обязан покраснеть.
+    «Поняла. Буду учитывать: {цель словами пользователя}» — рамка говорит,
+    что цель принята в работу; подписи «Твоя цель» нет (п. 7, DRF-2576).
+    Узел сверяет строку целиком: обе подмены — голое «{goal}» и возврат
+    «Твоя цель теперь: {goal}» — обязаны покраснеть.
     """
 
-    def test_the_confirmation_is_the_persons_words_verbatim(self):
-        assert CONFIRMATION == "{goal}"
-        assert CONFIRMATION.format(goal="хочу −5 кг к лету") == "хочу −5 кг к лету"
+    def test_the_confirmation_is_the_owners_frame_around_the_persons_words(self):
+        assert CONFIRMATION == "Поняла. Буду учитывать: {goal}"
+        # Пример владельца, дословно: слова человека не переиначены.
+        said = "хочу −5 кг к лету"
+        reply = CONFIRMATION.format(goal=said)
+        assert reply == "Поняла. Буду учитывать: хочу −5 кг к лету"
+        assert reply.endswith(said)
+        assert "Твоя цель" not in reply
 
     def test_the_line_ends_without_a_full_stop(self):
         """Точка в конце — отдельная проверка: её возвращают чаще всего."""
