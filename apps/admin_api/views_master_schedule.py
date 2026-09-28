@@ -52,6 +52,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+from datetime import datetime
 from typing import Any
 
 from django.http import HttpRequest, HttpResponse, JsonResponse
@@ -318,6 +319,7 @@ def master_day_schedule(request: HttpRequest, master_id: str) -> HttpResponse:
         DEFAULT_RANGE_DAYS,
         MAX_RANGE_DAYS,
         build_schedule,
+        get_tenant_tz,
     )
 
     def _parse(name: str) -> date_cls | None:
@@ -357,4 +359,37 @@ def master_day_schedule(request: HttpRequest, master_id: str) -> HttpResponse:
     except SalonUnavailable as exc:
         return _error("schedule_unavailable", str(exc), 503)
 
-    return JsonResponse(payload.to_dict())
+    return JsonResponse(_in_salon_zone(payload.to_dict(), get_tenant_tz(master.tenant)))
+
+
+def _moment_in_zone(raw: Any, tz: Any) -> Any:
+    """Момент (ISO) — тот же, но со смещением салона; не момент — как есть."""
+    if not isinstance(raw, str) or not raw:
+        return raw
+    try:
+        moment = datetime.fromisoformat(raw)
+    except ValueError:
+        return raw
+    if moment.tzinfo is None:
+        return moment.replace(tzinfo=tz).isoformat()
+    return moment.astimezone(tz).isoformat()
+
+
+def _in_salon_zone(body: dict[str, Any], tz: Any) -> dict[str, Any]:
+    """Записи и блоки дня — в поясе салона на проводе (DRF-2591).
+
+    ``build_schedule`` отдаёт ``visit_at`` записей и ``start``/``end`` блоков
+    в UTC (``ScheduleBooking.visit_at: str  # iso utc``). Экран дня салона
+    берёт часы из строки и показывал администратору визит на 3 часа раньше.
+    Здесь — тот же момент в поясе, которым ``build_schedule`` сам делит дни
+    (``get_tenant_tz``), чтобы запись не читалась в одном поясе, а день — в
+    другом. Расчёт мастера (``master_api``) не трогается: экран мастера
+    разбирает время через ``Date`` и от смещения не зависит.
+    """
+    for day in body.get("days", []):
+        for booking in day.get("bookings", []):
+            booking["visit_at"] = _moment_in_zone(booking.get("visit_at"), tz)
+        for block in day.get("blocks", []):
+            block["start"] = _moment_in_zone(block.get("start"), tz)
+            block["end"] = _moment_in_zone(block.get("end"), tz)
+    return body

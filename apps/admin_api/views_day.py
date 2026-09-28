@@ -24,6 +24,7 @@ import logging
 from datetime import date as date_cls
 from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.utils import timezone as dj_timezone
@@ -44,11 +45,29 @@ def _error(slug: str, detail: str, status: int) -> JsonResponse:
     return JsonResponse({"error": slug, "detail": detail}, status=status)
 
 
-def _visit_payload(v: DayVisit) -> dict[str, Any]:
+def _salon_iso(moment: datetime | None, tz: ZoneInfo) -> str | None:
+    """Момент визита на проводе — в поясе САЛОНА, тот же момент (DRF-2591).
+
+    База отдаёт ``DateTimeField`` в UTC, и ``isoformat()`` уезжал как
+    ``06:00+00:00`` при визите в 09:00 по салону. Экран дня берёт часы из
+    строки и показывал администратору «06:00» — он по этому экрану ведёт
+    день. Пояс — тот же, которым посчитан сам день и который назван в поле
+    ``timezone`` ответа: провод не противоречит сам себе. Приём тот же, что у
+    клиентского провода (DRF-2589, ``miniapp_api._salon_iso``): момент без
+    пояса — время салона, пояс пришивается без пересчёта.
+    """
+    if moment is None:
+        return None
+    if moment.tzinfo is None:
+        return moment.replace(tzinfo=tz).isoformat()
+    return moment.astimezone(tz).isoformat()
+
+
+def _visit_payload(v: DayVisit, tz: ZoneInfo) -> dict[str, Any]:
     return {
         "id": v.id,
-        "start_at": v.start_at.isoformat() if v.start_at else None,
-        "end_at": v.end_at.isoformat() if v.end_at else None,
+        "start_at": _salon_iso(v.start_at, tz),
+        "end_at": _salon_iso(v.end_at, tz),
         "duration_min": v.duration_min,
         "status": v.status,
         "service_id": v.service_id,
@@ -63,6 +82,7 @@ def _visit_payload(v: DayVisit) -> dict[str, Any]:
 
 
 def _day_payload(day: SalonDay) -> dict[str, Any]:
+    tz = ZoneInfo(day.timezone_name)
     return {
         "date": day.date.isoformat(),
         "timezone": day.timezone_name,
@@ -77,13 +97,13 @@ def _day_payload(day: SalonDay) -> dict[str, Any]:
                 "master_id": m.master_id,
                 "name": m.name,
                 "is_active": m.is_active,
-                "visits": [_visit_payload(v) for v in m.visits],
+                "visits": [_visit_payload(v, tz) for v in m.visits],
             }
             for m in day.masters
         ],
         # Present even when empty so the frontend never has to guess
         # whether the key is missing or the list is.
-        "orphan_visits": [_visit_payload(v) for v in day.orphan_visits],
+        "orphan_visits": [_visit_payload(v, tz) for v in day.orphan_visits],
     }
 
 
