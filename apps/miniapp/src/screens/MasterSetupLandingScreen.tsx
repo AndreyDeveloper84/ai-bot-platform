@@ -91,6 +91,15 @@ export const CONTINUE_LABEL = "Продолжить настройку";
 export const LATER_LABEL = "Продолжить позже";
 export const ALL_DONE_TITLE = "Всё настроено";
 export const PUBLISH_ENTRY_LABEL = "Отправить профиль на проверку";
+
+/**
+ * Отправить на проверку можно только связанному мастеру (ruling 6): `ready`
+ * бота считает пункты настройки, а личность — отдельной строкой. Одно
+ * правило на оба входа — экран 01 и карточку «Моего дня» (§6-квартер).
+ */
+export function canSubmitProfile(readiness: OnboardingReadiness): boolean {
+  return readiness.ready && readiness.identity.state === "linked";
+}
 export const IDENTITY_PENDING_NOTE = "Подтверждение личности — ожидает оператора.";
 export const IDENTITY_UNLINKED_NOTE =
   "Отправить профиль на проверку можно будет после подтверждения личности.";
@@ -168,9 +177,7 @@ export function MasterSetupLandingScreen() {
   const next = firstOpenItem(readiness.items);
   const note = identityNote(readiness.identity.state);
   const greeting = name ? `${name}, всё готово 👋` : "Всё готово 👋";
-  // Отправить на проверку можно только связанному мастеру (ruling 6): `ready` бота
-  // считает пункты настройки, а личность — отдельной строкой ниже.
-  const canSubmit = readiness.ready && readiness.identity.state === "linked";
+  const canSubmit = canSubmitProfile(readiness);
 
   return (
     <main className="screen setup-landing" aria-labelledby="setup-landing-title">
