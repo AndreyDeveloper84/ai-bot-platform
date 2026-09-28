@@ -545,11 +545,18 @@ class TestRescheduleOnTheAylaPath:
         assert datetime.fromisoformat(body["new_booking"]["visit_at"]) == new_at
         assert datetime.fromisoformat(body["old_booking"]["visit_at"]) == _visit_at()
 
-        # 4. Зеркало view не трогает — прежнее время до события.
+        # 4. Зеркало на новом времени СРАЗУ — названное исключение (вариант А):
+        #    иначе деталь показала бы старое время и «Перенести» ещё раз.
+        #    Статус прежний: его двигает только событие.
         proxy = RemoteBookingProxy.all_tenants.get(appointment_id=appointment_id)
-        assert proxy.start_at == _visit_at(), "view переписал прокси мимо события"
+        assert proxy.start_at == new_at
+        assert proxy.status == "confirmed"
+        assert (
+            datetime.fromisoformat(_detail(client, appointment_id).json()["booking"]["visit_at"])
+            == new_at
+        )
 
-        # 5. booking.rescheduled — и только теперь зеркало на новом времени.
+        # 5. booking.rescheduled приносит то же время — потребитель идемпотентен.
         ev = _ingest(
             client,
             _envelope("booking.rescheduled", appointment_id, {"new_start_at": new_at.isoformat()}),

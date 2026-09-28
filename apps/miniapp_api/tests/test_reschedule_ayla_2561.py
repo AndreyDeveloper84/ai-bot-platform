@@ -143,19 +143,33 @@ class TestConfirmOutcomes:
         assert (past.status_code, past.json()["error"]) == (400, "visit_in_past")
         assert stub.calls == []
 
-    def test_idempotency_key_repeats_for_the_same_time_and_differs_for_another(
+    def test_a_retry_after_a_failure_repeats_the_key(self, client, home, monkeypatch) -> None:
+        """Сбой канона → зеркало не сдвинуто → повтор того же нажатия несёт
+        тот же ключ: если канон всё-таки перенёс, он ответит сохранённым."""
+        mine = _proxy(home, _identity(home, ME, AYLA_UID))
+        failing = _stub(monkeypatch, BookingUnavailableError("down"))
+        assert _confirm(client, mine, _when(9)).status_code == 502
+        ok = _stub(monkeypatch)
+        assert _confirm(client, mine, _when(9)).status_code == 200
+        assert _confirm(client, mine, _when(10)).status_code == 200
+
+        first = failing.calls[0]["idempotency_key"]
+        assert ok.calls[0]["idempotency_key"] == first
+        assert ok.calls[1]["idempotency_key"] != first
+
+    def test_a_repeat_after_success_does_not_reach_the_canon_again(
         self, client, home, monkeypatch
     ) -> None:
         stub = _stub(monkeypatch)
         mine = _proxy(home, _identity(home, ME, AYLA_UID))
-        first = _when(9)
+        when = _when(9)
 
-        for when in (first, first, _when(10)):
-            assert _confirm(client, mine, when).status_code == 200
+        assert _confirm(client, mine, when).status_code == 200
+        again = _confirm(client, mine, when)
 
-        keys = [c["idempotency_key"] for c in stub.calls]
-        assert keys[0] == keys[1]
-        assert keys[0] != keys[2]
+        assert again.status_code == 200
+        assert len(stub.calls) == 1
+        assert datetime.fromisoformat(again.json()["new_booking"]["visit_at"]) == when
 
     def test_moving_back_to_an_earlier_time_is_a_new_key(self, client, home, monkeypatch) -> None:
         """«10:00 → 12:00 → снова 10:00»: третий перенос — не повтор первого.
@@ -178,15 +192,15 @@ class TestConfirmOutcomes:
     def test_same_instant_in_another_offset_is_the_same_key(
         self, client, home, monkeypatch
     ) -> None:
-        stub = _stub(monkeypatch)
-        mine = _proxy(home, _identity(home, ME, AYLA_UID))
-        at = _when(9)
         from zoneinfo import ZoneInfo
 
+        mine = _proxy(home, _identity(home, ME, AYLA_UID))
+        at = _when(9)
+        failing = _stub(monkeypatch, BookingUnavailableError("down"))
         for when in (at, at.astimezone(ZoneInfo("Europe/Moscow"))):
-            assert _confirm(client, mine, when).status_code == 200
+            assert _confirm(client, mine, when).status_code == 502
 
-        assert stub.calls[0]["idempotency_key"] == stub.calls[1]["idempotency_key"]
+        assert failing.calls[0]["idempotency_key"] == failing.calls[1]["idempotency_key"]
 
     def test_non_string_time_is_400_not_500(self, client, home, monkeypatch) -> None:
         stub = _stub(monkeypatch)
@@ -195,3 +209,49 @@ class TestConfirmOutcomes:
 
         assert _post(client, url, {"new_visit_at": 123}).status_code == 400
         assert stub.calls == []
+
+
+class TestTheMirrorMovesOnlyTheTime:
+    """Вариант А (главное окно, 28.09): после 200 канона зеркало сдвигается
+    сразу — иначе экран покажет старое время и «Перенести» ещё раз. Но
+    двигается ТОЛЬКО время: запись статуса или отметки события константой —
+    дефект DRF-2537."""
+
+    def test_only_start_and_end_move_everything_else_is_untouched(
+        self, client, home, monkeypatch
+    ) -> None:
+        from django.forms.models import model_to_dict
+
+        _stub(monkeypatch)
+        mine = _proxy(home, _identity(home, ME, AYLA_UID))
+        # Непустые значения там, где чат пишет константы: подмена «записать как
+        # чат» (источник, отметка события) обязана здесь краснеть.
+        RemoteBookingProxy.all_tenants.filter(pk=mine.pk).update(
+            source="mobile_app",
+            last_applied_event_name="booking.created",
+            last_applied_event_at=timezone.now() - timedelta(days=1),
+            service_id=uuid.uuid4(),
+        )
+        mine.refresh_from_db()
+        before = model_to_dict(mine)
+        duration = mine.end_at - mine.start_at
+        when = _when(9)
+
+        assert _confirm(client, mine, when).status_code == 200
+
+        mine.refresh_from_db()
+        after = model_to_dict(mine)
+        assert mine.start_at == when
+        assert mine.end_at == when + duration
+        changed = {k for k in before if before[k] != after[k]}
+        assert changed == {"start_at", "end_at"}
+
+    def test_a_refused_move_leaves_the_mirror_alone(self, client, home, monkeypatch) -> None:
+        _stub(monkeypatch, BookingBadRequestError("x", status_code=409, code="SLOT_UNAVAILABLE"))
+        mine = _proxy(home, _identity(home, ME, AYLA_UID))
+        start = mine.start_at
+
+        assert _confirm(client, mine, _when(9)).status_code == 409
+
+        mine.refresh_from_db()
+        assert mine.start_at == start

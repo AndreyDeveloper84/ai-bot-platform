@@ -1883,11 +1883,10 @@ def _reschedule_confirm_via_ayla(bot_user, booking_id: str, raw_body: bytes) -> 
     обязательно: без него «10:00 → 12:00 → снова 10:00» повторил бы первый
     ключ, и канон вправе ответить сохранённым 200, не двинув запись.
 
-    Зеркало эти ручки не пишут (правило раздела выше): строку переведёт
-    событие ``booking.rescheduled``. Поэтому ``new_booking`` — строка зеркала
-    с временем, которое **ответил канон**, а не с тем, что прислал экран.
-    Предел, названный сразу: пока событие не пришло, деталь записи читает
-    зеркало и может показать прежнее время.
+    После 200 канона ручка сдвигает в зеркале ТОЛЬКО время — названное
+    исключение из правила «зеркало пишут потребители событий», по прецеденту
+    чата (комментарий у места записи). ``new_booking`` — строка зеркала с
+    временем, которое **ответил канон**, а не с тем, что прислал экран.
     """
     import hashlib
 
@@ -1903,6 +1902,13 @@ def _reschedule_confirm_via_ayla(bot_user, booking_id: str, raw_body: bytes) -> 
     if isinstance(target, HttpResponse):
         return target
     proxy, new_visit_at = target
+
+    if proxy.start_at == new_visit_at:
+        # Повтор уже прошедшего переноса: зеркало сдвинуто этой же ручкой
+        # (исключение ниже), и новый ключ ушёл бы в канон как «ещё один
+        # перенос». Запись уже там, куда просят, — отвечаем как есть.
+        same = _proxy_booking_to_dict(proxy, tenant=proxy.tenant)
+        return JsonResponse({"old_booking": same, "new_booking": same})
 
     new_iso = new_visit_at.isoformat()
     from_utc = proxy.start_at.astimezone(UTC).isoformat() if proxy.start_at else ""
@@ -1949,8 +1955,37 @@ def _reschedule_confirm_via_ayla(bot_user, booking_id: str, raw_body: bytes) -> 
     moved_to = _parse_iso_datetime(
         str(record.raw.get("start_datetime") or record.raw.get("start_at") or "")
     )
+    moved_start = moved_to or new_visit_at
+
+    # ИСКЛЮЧЕНИЕ из правила раздела «зеркало пишут только потребители
+    # событий» — названное, а не нарушение (DRF-2561, решение главного окна
+    # 28.09, вариант А). Без него экран после успешного переноса перечитывает
+    # зеркало и до прихода ``booking.rescheduled`` показывает СТАРОЕ время с
+    # той же кнопкой «Перенести»: человек видит «не перенеслось». Прецедент —
+    # чат, который после того же нативного переноса пишет зеркало сам
+    # (``skills/booking/tools.py::_upsert_remote_booking_proxy``).
+    #
+    # Двигается ТОЛЬКО время, по ответу канона и с прежней длительностью —
+    # как делает потребитель события. Статус, личность и закрывающий не
+    # трогаются: запись статуса константой вместо события — ровно дефект
+    # DRF-2537. Событие потом доведёт то же значение (потребитель
+    # идемпотентен). Не удалось записать — перенос в каноне уже состоялся,
+    # ответ не меняется, зеркало догонит событием.
+    if proxy.start_at and proxy.end_at:
+        moved_end = moved_start + (proxy.end_at - proxy.start_at)
+        try:
+            from apps.booking.models import RemoteBookingProxy
+
+            RemoteBookingProxy.all_tenants.filter(pk=proxy.pk).update(
+                start_at=moved_start, end_at=moved_end
+            )
+        except Exception:  # noqa: BLE001 — зеркало best-effort, см. выше
+            logger.exception(
+                "miniapp_api.reschedule_booking.mirror_move_failed appt=%s", booking_id
+            )
+
     new["id"] = record.appointment_id
-    new["visit_at"] = (moved_to or new_visit_at).isoformat()
+    new["visit_at"] = moved_start.isoformat()
     return JsonResponse({"old_booking": old, "new_booking": new})
 
 
@@ -1959,7 +1994,10 @@ def _reschedule_confirm_via_ayla(bot_user, booking_id: str, raw_body: bytes) -> 
 # BOOKING_VIA_AYLA_REST ON: the Ayla-first create never writes
 # BookingRequest (no dual-write, by design), so list/detail/cancel read
 # the proxy mirror instead. The proxy itself is written ONLY by event
-# consumers (booking.* round-trip) — never by these views.
+# consumers (booking.* round-trip) — never by these views. ONE named
+# exception: a successful reschedule moves start_at/end_at (and nothing else)
+# right away, as the chat does after the same native reschedule — DRF-2561,
+# see ``_reschedule_confirm_via_ayla``.
 
 # Statuses the customer considers "upcoming" on the Ayla path (analog of
 # CONFIRMED + RESCHEDULE_REQUESTED on the local path). ``pending_payment``
