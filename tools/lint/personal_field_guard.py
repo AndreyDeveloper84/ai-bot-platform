@@ -130,6 +130,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Protocol, Sequence
 
+import lint_parse  # DRF-2538: нечитаемый вход — отдельный исход, не ноль
+
 #: The one model that IS a customer in this repo. Everything else becomes
 #: person-keyed by pointing at it. Named rather than guessed: a structural
 #: rule («any OneToOne target») would drag in staff and catalog mirrors,
@@ -249,8 +251,10 @@ class _Model:
 
 
 def _models_in(path: Path, app: str) -> list[_Model]:
-    tree = ast.parse(path.read_text(encoding="utf-8"))
+    tree = lint_parse.parse_or_report(path.read_text(encoding="utf-8"), path)
     found: list[_Model] = []
+    if tree is None:
+        return found
     for node in tree.body:
         if not isinstance(node, ast.ClassDef):
             continue
@@ -362,7 +366,9 @@ def scan_memory_keys(apps_root: Path) -> list[Site]:
         posix = path.as_posix()
         if "/tests/" in posix or "/migrations/" in posix or path.name.startswith("test_"):
             continue
-        tree = ast.parse(path.read_text(encoding="utf-8"))
+        tree = lint_parse.parse_or_report(path.read_text(encoding="utf-8"), path)
+        if tree is None:
+            continue
         for node in ast.walk(tree):
             found: list[tuple[str, int]] = []
             if isinstance(node, ast.Call):
@@ -401,7 +407,9 @@ def read_cardinality_keys(apps_root: Path) -> set[str]:
             "sees only what the writers spell out as literals. Point "
             "CARDINALITY_MODULE at wherever the read policy lives now."
         )
-    tree = ast.parse(path.read_text(encoding="utf-8"))
+    tree = lint_parse.parse_or_report(path.read_text(encoding="utf-8"), path)
+    if tree is None:
+        return set()
     for node in ast.walk(tree):
         target: ast.expr | None = None
         if isinstance(node, ast.AnnAssign):
@@ -602,7 +610,7 @@ def _load_registry(apps_root: Path) -> Registry:
     return module  # type: ignore[return-value]
 
 
-def main(argv: list[str]) -> int:
+def _run(argv: list[str]) -> int:
     if len(argv) != 2:
         print("usage: personal_field_guard.py <apps/>", file=sys.stderr)
         return 2
@@ -634,6 +642,14 @@ def main(argv: list[str]) -> int:
         f"{declared_personal} personal, {len(registry.POLICY_DEBT)} in debt)."
     )
     return 0
+
+
+def main(argv: list[str]) -> int:
+    lint_parse.reset()
+    code = _run(argv)
+    if code not in (0, 1):  # ошибка вызова — охват не о чем печатать
+        return code
+    return max(code, lint_parse.finish("personal_field_guard"))
 
 
 if __name__ == "__main__":
