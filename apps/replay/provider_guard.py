@@ -43,6 +43,10 @@ address first, and the gate asserts on the record, not on an exception.
 * **Only these SDKs.** A new provider SDK, or raw HTTP to a model host, would
   pass. The census above is the reason it is complete today; the test
   ``test_census_every_sdk_import_is_covered`` re-counts on every run.
+* **SDK bypasses our code does not use.** openai ``Completions.parse`` and
+  anthropic ``stream``/``parse`` call ``_post`` directly; a ``with_raw_response``
+  built BEFORE the guard keeps the original ``create``. The census test turns
+  red if a module importing the SDK starts using any of them.
 * An empty ``OPENAI_API_KEY`` / ``ANTHROPIC_API_KEY`` is a second layer (it
   turns a paid call into a 401), never a replacement: the call still leaves.
 """

@@ -17,20 +17,24 @@ from __future__ import annotations
 import ast
 import asyncio
 import pathlib
-from unittest.mock import MagicMock
 
 import pytest
 from anthropic import AsyncAnthropic
 from openai import AsyncOpenAI, OpenAI
 
 from apps.replay.provider_guard import BLOCKED, ProviderCallForbidden, forbid_provider_calls
+from apps.replay.tests.test_live_path_gate import fake_redis, live_run  # noqa: F401
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
+
+#: Not a key. One constant, one pragma: a formatter that splits a call can
+#: no longer separate the value from its allowlist marker.
+FAKE_KEY = "sk-test-not-a-key"  # pragma: allowlist secret
 
 
 def _bound_at_import_call() -> None:
     """Like intent_resolution: a client from a name bound at import time."""
-    client = AsyncOpenAI(api_key="sk-test-not-a-key")  # pragma: allowlist secret
+    client = AsyncOpenAI(api_key=FAKE_KEY)
     asyncio.run(client.chat.completions.create(model="x", messages=[]))
 
 
@@ -42,14 +46,19 @@ class TestEveryRouteIsBlockedAndNamed:
         assert [c.sdk_method for c in guard.calls] == ["AsyncCompletions.create"]
         assert guard.calls[0].caller.startswith("apps/replay/tests/test_provider_guard_2599.py:")
 
-    def test_the_regular_stub_is_not_recorded(self):
-        """Pair: the canary concierge is our stub, not a provider — no record."""
-        stub = MagicMock(return_value="canary")
-        with forbid_provider_calls() as guard:
-            stub("text")
+    @pytest.mark.django_db
+    def test_a_deterministic_turn_records_no_provider_call(self, live_run):  # noqa: F811 — pytest fixture
+        """Pair: the same guard, the live gate's own run, a red-flag input that
+        our code answers itself — a reply is sent, and nothing is recorded.
+        Against the bound-at-import call above, which IS recorded."""
+        from apps.replay.tests.test_live_path_gate import ALL_FIXTURES, _fixture_expects_block
 
-        assert stub.called
-        assert guard.calls == []
+        fixture = next(f for f in ALL_FIXTURES if _fixture_expects_block(f))
+        result = live_run(fixture)
+
+        assert result.sent_count >= 1  # presence: the turn ran and answered
+        assert result.provider_calls == []
+        assert result.llm_called is False
 
     def test_a_swallowed_call_is_still_recorded(self):
         with forbid_provider_calls() as guard:
@@ -63,21 +72,15 @@ class TestEveryRouteIsBlockedAndNamed:
     @pytest.mark.parametrize(
         "call",
         [
-            lambda: OpenAI(api_key="sk-test").chat.completions.create(  # pragma: allowlist secret
-                model="x", messages=[]
-            ),
+            lambda: OpenAI(api_key=FAKE_KEY).chat.completions.create(model="x", messages=[]),
             lambda: asyncio.run(
-                AsyncOpenAI(api_key="sk-test").embeddings.create(  # pragma: allowlist secret
-                    model="x", input="t"
-                )
+                AsyncOpenAI(api_key=FAKE_KEY).embeddings.create(model="x", input="t")
             ),
-            lambda: OpenAI(
-                api_key="sk-test"
-            ).audio.transcriptions.create(  # pragma: allowlist secret
+            lambda: OpenAI(api_key=FAKE_KEY).audio.transcriptions.create(
                 model="whisper-1", file=b""
             ),
             lambda: asyncio.run(
-                AsyncAnthropic(api_key="sk-test").messages.create(  # pragma: allowlist secret
+                AsyncAnthropic(api_key=FAKE_KEY).messages.create(
                     model="x", max_tokens=1, messages=[]
                 )
             ),
@@ -90,40 +93,119 @@ class TestEveryRouteIsBlockedAndNamed:
 
         assert len(guard.calls) == 1
 
-    def test_the_patch_is_undone_after_the_block(self):
-        from openai.resources.chat.completions.completions import AsyncCompletions
+    @pytest.mark.parametrize("raise_inside", [False, True], ids=["clean-exit", "exception"])
+    def test_every_patch_is_undone(self, raise_inside):
+        import importlib
 
-        before = AsyncCompletions.__dict__["create"]
-        with forbid_provider_calls():
-            assert AsyncCompletions.__dict__["create"] is not before
-        assert AsyncCompletions.__dict__["create"] is before
+        classes = [getattr(importlib.import_module(m), c) for m, c in BLOCKED]
+        before = [cls.__dict__["create"] for cls in classes]
+
+        try:
+            with forbid_provider_calls():
+                assert all(cls.__dict__["create"] is not b for cls, b in zip(classes, before))
+                if raise_inside:
+                    raise RuntimeError("boom")
+        except RuntimeError:
+            pass
+
+        assert [cls.__dict__["create"] for cls in classes] == before
 
 
-def test_census_every_sdk_import_is_covered():
-    """Every module that imports a provider SDK uses classes the guard blocks.
+#: SDK entry points that do NOT go through a blocked ``create`` (openai
+#: ``Completions.parse`` and anthropic ``stream``/``parse`` call ``_post``
+#: directly; ``responses`` / legacy ``completions`` are separate resources).
+UNBLOCKED_ENTRY_POINTS = frozenset(
+    {"responses", "with_raw_response", "with_streaming_response", "parse", "stream", "beta"}
+)
+FOREIGN_SDKS = frozenset(
+    {
+        "mistralai",
+        "cohere",
+        "groq",
+        "together",
+        "ollama",
+        "litellm",
+        "langchain",
+        "langchain_openai",
+        "langchain_anthropic",
+        "llama_index",
+        "vertexai",
+        "google",
+    }
+)
 
-    Counted by construction (AST), not by name. A new SDK (not openai /
-    anthropic) imported under apps/ turns this red: the guard would not know it.
-    """
+
+def _sdk_census() -> tuple[set[str], list[str], list[str]]:
     known_sdks = {m.split(".")[0] for m, _ in BLOCKED}
-    importers: list[str] = []
+    importers: set[str] = set()
     foreign: list[str] = []
+    unblocked: list[str] = []
     for path in (ROOT / "apps").rglob("*.py"):
         rel = path.relative_to(ROOT).as_posix()
         if "/tests/" in rel or "/migrations/" in rel:
             continue
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8-sig"))):
+        tree = ast.parse(path.read_text(encoding="utf-8-sig"))
+        tops: list[str] = []
+        for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom) and node.module:
-                top = node.module.split(".")[0]
+                tops.append(node.module.split(".")[0])
             elif isinstance(node, ast.Import):
-                top = node.names[0].name.split(".")[0]
-            else:
-                continue
-            if top in known_sdks:
-                importers.append(rel)
-            elif top in {"mistralai", "cohere", "google", "groq", "together", "ollama"}:
-                foreign.append(f"{rel}: {top}")
+                tops.extend(a.name.split(".")[0] for a in node.names)  # EVERY name
+        if any(t in known_sdks for t in tops):
+            importers.add(rel)
+            for node in ast.walk(tree):
+                if isinstance(node, ast.Attribute) and node.attr in UNBLOCKED_ENTRY_POINTS:
+                    unblocked.append(f"{rel}:{node.lineno}: .{node.attr}")
+                # legacy text completions: `.completions` NOT preceded by `.chat`
+                if (
+                    isinstance(node, ast.Attribute)
+                    and node.attr == "completions"
+                    and not (isinstance(node.value, ast.Attribute) and node.value.attr == "chat")
+                ):
+                    unblocked.append(f"{rel}:{node.lineno}: .completions (legacy)")
+        foreign.extend(f"{rel}: {t}" for t in tops if t in FOREIGN_SDKS)
+    return importers, foreign, unblocked
+
+
+def test_census_every_sdk_import_is_covered():
+    """Every module that imports a provider SDK reaches it only through
+    classes the guard blocks — counted by construction (AST).
+
+    Red on: a foreign model SDK imported under apps/; an SDK entry point that
+    bypasses the blocked ``create`` (``responses``, legacy ``completions``,
+    ``with_raw_response``, ``parse``, ``stream``, ``beta``) used in a module
+    that imports openai/anthropic.
+    """
+    importers, foreign, unblocked = _sdk_census()
     # Presence: the known importers are seen (the census is not blind).
-    assert "apps/orchestrator/llm/openai_provider.py" in importers
-    assert "apps/speech/providers/openai_stt.py" in importers
+    assert {
+        "apps/llm/providers/openai_provider.py",
+        "apps/llm/providers/anthropic_provider.py",
+        "apps/orchestrator/llm/openai_provider.py",
+        "apps/speech/providers/openai_stt.py",
+    } <= importers, sorted(importers)
     assert foreign == [], foreign
+    assert unblocked == [], unblocked
+
+
+def test_the_census_sees_an_unblocked_entry_point():
+    """Self-check: the census recognises the bypasses it claims to catch."""
+    tree = ast.parse(
+        "import os, openai\n"
+        "client.responses.create()\n"
+        "client.completions.create()\n"
+        "client.chat.completions.create()\n"
+    )
+    found = [
+        n.attr
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Attribute)
+        and (
+            n.attr in UNBLOCKED_ENTRY_POINTS
+            or (
+                n.attr == "completions"
+                and not (isinstance(n.value, ast.Attribute) and n.value.attr == "chat")
+            )
+        )
+    ]
+    assert sorted(found) == ["completions", "responses"]
