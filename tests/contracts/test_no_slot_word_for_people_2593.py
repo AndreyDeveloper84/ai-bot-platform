@@ -121,25 +121,41 @@ def python_hits(source: str) -> list[tuple[int, str]]:
     ]
 
 
-_TS_COMMENT = re.compile(r"/\*.*?\*/|//[^\n]*", re.DOTALL)
+#: Строка раньше комментария: «/*» в ``accept="image/*"`` или ``path="/x/*"`` —
+#: не начало комментария. Без этого до следующего «*/» пропадал живой JSX
+#: (ревью DRF-2593: ~28 строк FoodScannerCaptureScreen, маршруты App.tsx).
+_TS_STRING_OR_COMMENT = re.compile(
+    r"(\"(?:\\.|[^\"\\\n])*\"|'(?:\\.|[^'\\\n])*'|`(?:\\.|[^`\\])*`)"
+    r"|(/\*.*?\*/|//[^\n]*)",
+    re.DOTALL,
+)
+
+
+def _blank_comments(source: str) -> str:
+    def repl(m: re.Match[str]) -> str:
+        if m.group(1) is not None:
+            return m.group(1)
+        return re.sub(r"[^\n]", " ", m.group(2))
+
+    return _TS_STRING_OR_COMMENT.sub(repl, source)
 
 
 def ts_hits(source: str) -> list[tuple[int, str]]:
     """Строки TS/TSX со словом вне комментариев; номера строк сохраняются."""
-    blanked = _TS_COMMENT.sub(lambda m: re.sub(r"[^\n]", " ", m.group(0)), source)
+    blanked = _blank_comments(source)
     return [
         (n, line.strip()) for n, line in enumerate(blanked.splitlines(), 1) if WORD.search(line)
     ]
 
 
-def _scan() -> tuple[list[tuple[str, int, str]], int]:
+def _scan() -> tuple[list[tuple[str, int, str]], dict[str, int]]:
     found: list[tuple[str, int, str]] = []
-    scanned = 0
+    scanned = {"py": 0, "ts": 0}
     for path in (ROOT / "apps").rglob("*.py"):
         rel = path.relative_to(ROOT).as_posix()
         if _skipped(rel):
             continue
-        scanned += 1
+        scanned["py"] += 1
         for line, text in python_hits(path.read_text(encoding="utf-8-sig")):
             found.append((rel, line, text))
     for pattern in ("*.ts", "*.tsx"):
@@ -147,7 +163,7 @@ def _scan() -> tuple[list[tuple[str, int, str]], int]:
             rel = path.relative_to(ROOT).as_posix()
             if _skipped(rel):
                 continue
-            scanned += 1
+            scanned["ts"] += 1
             for line, text in ts_hits(path.read_text(encoding="utf-8")):
                 found.append((rel, line, text))
     return found, scanned
@@ -159,8 +175,10 @@ def _covered(rel: str, text: str) -> bool:
 
 def test_no_slot_word_reaches_a_person():
     found, scanned = _scan()
-    # Нижняя граница: обход действительно прошёл по коду.
-    assert scanned > 500, scanned
+    # Нижние границы — ПОРОЗНЬ: Python один перекрывал общую, и пустой обход
+    # TS (сломанный glob, переезд src/) зеленел бы молча (ревью DRF-2593).
+    assert scanned["py"] > 500, scanned
+    assert scanned["ts"] > 150, scanned
     speech = [
         f"{rel}:{line}: {text.strip()[:90]}" for rel, line, text in found if not _covered(rel, text)
     ]
@@ -209,6 +227,14 @@ class TestTheGuardSeesWhatAPersonSees:
         # Присутствие: видимая строка найдена — сторож не слепой; комментарии и
         # латинское имя рядом с ней — нет.
         assert [line for line, _ in ts_hits(src)] == [5]
+
+    def test_a_slash_star_inside_a_string_does_not_open_a_comment(self):
+        src = (
+            '<input type="file" accept="image/*" />\n'
+            "<b>Выберите слот</b>\n"
+            "{/* закрывающий комментарий */}\n"
+        )
+        assert [line for line, _ in ts_hits(src)] == [2]
 
     def test_a_python_reply_is_seen_and_a_docstring_is_not(self):
         src = (

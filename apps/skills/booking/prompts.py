@@ -220,7 +220,7 @@ def _render_system_prompt(
 
     # Live-data rendering rule. The skill's two-call loop already
     # invoked a tool and is splicing the result into the prompt below
-    # (КАНДИДАТЫ-МАСТЕРА / СЛОТЫ / ВАШИ ЗАПИСИ / ...). Without an
+    # (КАНДИДАТЫ-МАСТЕРА / СВОБОДНОЕ ВРЕМЯ / ВАШИ ЗАПИСИ / ...). Without an
     # explicit instruction, gpt-4o-mini treats those blocks as future
     # tool context and replies with placeholder filler — observed live
     # 2026-05-21 ("Один момент!" after `хочу записаться на массаж`,
