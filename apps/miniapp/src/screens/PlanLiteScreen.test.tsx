@@ -241,6 +241,31 @@ describe("отказы и флаг", () => {
     expect(screen.queryByRole("checkbox")).toBeNull();
   });
 
+  it("DRF-2351: «недоступно» — не тупик: панель на месте, «Главная» уводит с экрана", async () => {
+    // Лист заявлял стену без выхода. Выход — нижняя панель: она стоит вне
+    // веток состояния (#1927, #1918). До этого узла её присутствие именно
+    // в состоянии «недоступно» держал только комментарий в коде.
+    mockedGet.mockRejectedValue(new ApiError(404, "plan_lite_disabled", "off"));
+    renderScreen();
+    await settle();
+
+    expect(screen.getByText(PLAN_LITE_COPY.unavailable)).toBeInTheDocument();
+    const nav = screen.getByRole("navigation", { name: "Основная навигация" });
+    fireEvent.click(within(nav).getByRole("button", { name: "Главная" }));
+    expect(screen.getByTestId("location")).toHaveTextContent("/customer/main");
+  });
+
+  it("DRF-2351: включено — та же панель и на экране с планом", async () => {
+    // Пара к узлу выше: панель не выдумана для «недоступно», она одна на
+    // все состояния экрана.
+    mockedGet.mockResolvedValue(PLAN);
+    renderScreen();
+    await settle();
+
+    expect(screen.queryByText(PLAN_LITE_COPY.unavailable)).toBeNull();
+    expect(screen.getByRole("navigation", { name: "Основная навигация" })).toBeInTheDocument();
+  });
+
   it("ayla_unavailable → фраза и «Повторить», который повторяет запрос", async () => {
     mockedGet.mockRejectedValueOnce(new ApiError(502, "ayla_unavailable", "down"));
     renderScreen();
