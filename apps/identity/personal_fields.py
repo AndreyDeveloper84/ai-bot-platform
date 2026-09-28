@@ -88,10 +88,18 @@ class PersonalField:
 
 #: Slots the owner's ruling of 2026-08-24 (decision 3) names as a salon's
 #: own observation, which therefore never follow the person out — even
-#: when the person stated them out loud. The ruling's third item,
+#: when the person stated them out loud. Canonical text:
+#: ``docs/OD_MEMORY.md`` §3 «Переход между салонами — только самосообщённое».
+#: The ruling's third item,
 #: ``skin_sensitivities``, has no slot in this repository: it is a column
 #: on the backend's ``users.UserPersonalContext`` and is invisible from
 #: here (see the guard's KNOWN LIMITATIONS).
+#:
+#: DRF-2544: the ruling also names the mechanism — ``source_tenant_id``
+#: «проверяемым при чтении». It is not built, because no reader assembles
+#: memory FOR a tenant today (every prompt that carries personal memory is
+#: the global surface). ``apps/identity/tests/test_never_crosses_readers_2544.py``
+#: turns red the day such a reader appears, naming these keys.
 NEVER_CROSSES: frozenset[str] = frozenset(
     {
         "memory_key:favorite_masters",
