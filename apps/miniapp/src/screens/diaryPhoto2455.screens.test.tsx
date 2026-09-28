@@ -41,6 +41,12 @@ import { DAY_ROUTE_PATTERN, FoodScannerDayScreen, dayRoute } from "./FoodScanner
 import { FoodScannerDiaryScreen } from "./FoodScannerDiaryScreen";
 
 const PHOTO_PATH = (id: string) => `/api/v1/customer/diary/entry/${id}/photo`;
+const WITH_THUMB = "food-scanner-diary__entry--with-thumb";
+
+/** Строки дневника с модификатором «со снимком». */
+function thumbRows(container: HTMLElement): Element[] {
+  return Array.from(container.querySelectorAll("li")).filter((li) => li.classList.contains(WITH_THUMB));
+}
 
 const WITH_PHOTO: FoodDiaryEntry = {
   id: "fl-photo",
@@ -176,6 +182,8 @@ describe.each(SCREENS)("$name", (s) => {
     expect(img.getAttribute("src")).toMatch(/^blob:/);
     // Класс по макету — от окна mini (DRF-2455, #2118).
     expect(img.className).toBe("food-scanner-diary__entry-thumb");
+    // Модификатор строки — по факту картинки: без него данные уходят под снимок.
+    expect(img.closest("li")?.classList.contains(WITH_THUMB)).toBe(true);
     // Слева: первый ребёнок строки.
     expect(img.closest("li")?.firstElementChild).toBe(img);
     expect(photoCalls()).toEqual([PHOTO_PATH("fl-photo")]);
@@ -190,6 +198,8 @@ describe.each(SCREENS)("$name", (s) => {
     await flush();
     expect(container.querySelectorAll("img")).toHaveLength(0);
     expect(photoCalls()).toEqual([]);
+    // Строка без снимка — прежняя: ни картинки, ни модификатора.
+    expect(thumbRows(container)).toHaveLength(0);
   });
 
   it("чисел нет → миниатюра на месте, калорий нет (два пустых состояния независимы)", async () => {
@@ -211,12 +221,16 @@ describe.each(SCREENS)("$name", (s) => {
     await flush();
     expect(container.querySelectorAll("img")).toHaveLength(0);
     expect(created).toEqual([]);
+    // has_photo=true, но снимка нет: модификатор ставится по факту, не по сводке —
+    // иначе пустое место слева и сдвинутый текст без причины.
+    expect(thumbRows(container)).toHaveLength(0);
   });
 
   it("смешанный день: картинка ровно у записи со снимком; уход освобождает всё", async () => {
     const { container, unmount } = s.render([WITH_PHOTO, WITHOUT_PHOTO, NO_NUMBERS_WITH_PHOTO]);
 
     await waitFor(() => expect(container.querySelectorAll("img")).toHaveLength(2));
+    expect(thumbRows(container)).toHaveLength(2);
     expect(photoCalls().sort()).toEqual([PHOTO_PATH("fl-photo"), PHOTO_PATH("fl-risotto")].sort());
 
     unmount();
