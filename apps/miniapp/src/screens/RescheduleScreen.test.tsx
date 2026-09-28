@@ -121,6 +121,22 @@ beforeEach(() => {
   });
 });
 
+describe("подтверждение несёт выбранное время (DRF-2561)", () => {
+  it("confirm получает то же тело, что request: мастер, услуга и слот", async () => {
+    renderReschedule();
+    await rescheduleThrough();
+    await screen.findByText(`НОВАЯ КАРТОЧКА:${NEW_ID}`);
+
+    // На пути Ayla кандидата отложить некуда — без тела подтверждению
+    // нечего переносить. Одно и то же тело на обоих шагах.
+    const sent = mockedRequest.mock.calls[0]?.[1];
+    expect(sent).toEqual(
+      expect.objectContaining({ new_visit_at: "2026-09-10T12:00:00+03:00" }),
+    );
+    expect(mockedConfirm).toHaveBeenCalledWith(OLD_ID, sent);
+  });
+});
+
 describe("успешный перенос приземляет в новое поколение (DRF-1480)", () => {
   it("после переноса открыта НОВАЯ карточка с id новой записи", async () => {
     renderReschedule();

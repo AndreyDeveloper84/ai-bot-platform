@@ -230,14 +230,19 @@ class TestPayment:
         assert len(stub_pay.calls) == 1
 
 
-class TestRescheduleStillHasNoSeam:
-    def test_reschedule_answers_409_for_own_and_other_salon_alike(
-        self, client, me_home, me_lumina, home, lumina
+class TestRescheduleOwnershipIsThePerson:
+    def test_own_bookings_in_both_salons_answer_alike_a_strangers_is_404(
+        self, client, me_home, me_lumina, stranger_lumina, home, lumina
     ) -> None:
-        # DRF-2561: шва переноса на пути Ayla нет. После починки детали ответ
-        # не должен стать «не найдено» для одной из записей и «409» для другой.
-        answers = []
-        for proxy in (_proxy(home, me_home), _proxy(lumina, me_lumina)):
-            resp = _post(client, f"{_detail(proxy)}/reschedule", {})
-            answers.append((resp.status_code, resp.json()["error"]))
-        assert answers == [(409, "invalid_state"), (409, "invalid_state")]
+        # DRF-2561: перенос на пути Ayla подключён. Владение — как у отмены
+        # (DRF-2436): своя запись в любом салоне проходит заявку одинаково,
+        # чужая — «не найдено», без утечки существования.
+        body = {"new_visit_at": (timezone.now() + timedelta(days=9)).isoformat()}
+        answers = [
+            _post(client, f"{_detail(p)}/reschedule", body).status_code
+            for p in (_proxy(home, me_home), _proxy(lumina, me_lumina))
+        ]
+        assert answers == [200, 200]
+        theirs = _post(client, f"{_detail(_proxy(lumina, stranger_lumina))}/reschedule", body)
+        assert theirs.status_code == 404
+        assert theirs.json()["error"] == "not_found"

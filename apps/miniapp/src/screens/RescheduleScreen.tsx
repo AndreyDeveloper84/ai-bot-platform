@@ -142,14 +142,16 @@ export function RescheduleScreen() {
     setConfirming(true);
     setError(null);
     try {
-      // request → stash candidate.
-      await rescheduleBookingRequest(bookingId, {
+      const candidate = {
         new_master_id: b.master_id,
         new_service_id: b.service_id,
         new_visit_at: pickedSlot,
-      });
-      // confirm → commit (creates new booking).
-      const { new_booking } = await rescheduleBookingConfirm(bookingId);
+      };
+      // request → stash candidate (local path) / check it (Ayla path).
+      await rescheduleBookingRequest(bookingId, candidate);
+      // confirm → commit. DRF-2561: the Ayla path has nowhere to stash the
+      // candidate, so the confirm carries it too.
+      const { new_booking } = await rescheduleBookingConfirm(bookingId, candidate);
       resetBooking();
       // Spec §5.3 confirmation: "Перенесена — было … стало …".
       navigate(`/customer/records/${new_booking.id}`, {

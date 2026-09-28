@@ -1805,22 +1805,146 @@ def _get_booking_owned(bot_user: BotUser, booking_id: str):
         return None
 
 
-def _reschedule_unavailable_on_ayla_path() -> HttpResponse:
-    """409 for the reschedule pair when BOOKING_VIA_AYLA_REST is ON.
+def _ayla_reschedule_target(
+    bot_user, booking_id: str, raw_body: bytes
+) -> tuple[Any, datetime] | HttpResponse:
+    """Проверить перенос на пути Ayla: чья запись, можно ли, куда (DRF-2561).
 
-    ``_get_booking_owned`` reads ``BookingRequest``, which the Ayla path
-    does not write, so without this gate both reschedule endpoints answer
-    404 «booking not found» for a visit the customer is looking at in her
-    own list — the same shape of lie the cancel pair already gates against
-    two functions up. The seam itself is genuinely absent, not merely
-    unrouted: ``_proxy_booking_to_dict`` reports ``reschedulable: False``.
-    DRF-1349.
+    Возвращает ``(строка зеркала, новое начало)`` или готовый отказ.
+
+    До DRF-2561 обе ручки переноса на этом пути отвечали 409 безусловно, с
+    докстрингом «шва нет совсем». Шов был: ``AylaBookingHTTPClient.
+    reschedule_appointment`` (``POST appointments/{id}/reschedule/``) — тот
+    же, которым переносит чат (``provider.reschedule_record``). Его не
+    подключили к Mini App, потому что ручки держались на строке
+    ``BookingRequest``, которую путь Ayla не пишет.
+
+    Нативный перенос Ayla двигает **только время**: мастер и услуга те же,
+    ``appointment_id`` сохраняется. Экран присылает мастера и услугу записи;
+    другие — отказ, а не молчаливое «перенесли, но не к тому».
     """
-    return _error(
-        "invalid_state",
-        "reschedule is not available on the Ayla path",
-        409,
+    import json
+
+    proxy = _person_owned_proxy(bot_user, booking_id)
+    if proxy is None:
+        # Чужая и сиротская строка — одинаково, без утечки существования.
+        return _error("not_found", "booking not found", 404)
+    try:
+        body = json.loads(raw_body or b"{}")
+    except json.JSONDecodeError:
+        return _error("bad_request", "invalid JSON body", 400)
+    if not isinstance(body, dict):
+        return _error("bad_request", "invalid JSON body", 400)
+    new_visit_at = _parse_iso_datetime(body.get("new_visit_at"))
+    if new_visit_at is None or new_visit_at.tzinfo is None:
+        return _error("bad_request", "new_visit_at (ISO 8601 with offset) is required", 400)
+    if new_visit_at <= timezone.now():
+        return _error("visit_in_past", "new_visit_at must be in the future", 400)
+    if proxy.status != "confirmed":
+        return _error("invalid_state", "booking cannot be rescheduled in its current state", 409)
+
+    service, master = _proxy_catalog_refs(proxy)
+    same_master = not body.get("new_master_id") or (
+        master is not None and str(body["new_master_id"]) == str(master.id)
     )
+    same_service = not body.get("new_service_id") or (
+        proxy.service_id is not None and str(body["new_service_id"]) == str(proxy.service_id)
+    )
+    if not (same_master and same_service):
+        return _error(
+            "invalid_state",
+            "reschedule keeps the master and the service on the Ayla path",
+            409,
+        )
+    return proxy, new_visit_at
+
+
+def _reschedule_request_via_ayla(bot_user, booking_id: str, raw_body: bytes) -> HttpResponse:
+    """POST /reschedule на пути Ayla — проверка и эхо, без записи.
+
+    Локальный путь здесь откладывает кандидата в свою строку. На пути Ayla
+    откладывать некуда и незачем: подтверждение приносит время само, а
+    канон проверит слот под своей блокировкой.
+    """
+    target = _ayla_reschedule_target(bot_user, booking_id, raw_body)
+    if isinstance(target, HttpResponse):
+        return target
+    proxy, _new_visit_at = target
+    return JsonResponse({"booking": _proxy_booking_to_dict(proxy, tenant=proxy.tenant)})
+
+
+def _reschedule_confirm_via_ayla(bot_user, booking_id: str, raw_body: bytes) -> HttpResponse:
+    """POST /reschedule/confirm на пути Ayla — перенос в каноне (DRF-2561).
+
+    Владение — человеком, как у отмены (DRF-2436). Ключ идемпотентности —
+    человек, запись и новое время: повтор того же нажатия не двигает запись
+    дважды, другое время — другой перенос.
+
+    Зеркало эти ручки не пишут (правило раздела выше): строку переведёт
+    событие ``booking.rescheduled``. Поэтому ``new_booking`` — строка зеркала
+    с временем, которое **ответил канон**, а не с тем, что прислал экран.
+    Предел, названный сразу: пока событие не пришло, деталь записи читает
+    зеркало и может показать прежнее время.
+    """
+    import hashlib
+
+    from apps.integrations.ayla.booking_client import (
+        BookingAPIError,
+        BookingBadRequestError,
+        BookingUnavailableError,
+        get_ayla_booking_client,
+    )
+    from apps.integrations.ayla.user_proxy import external_user_id_for
+
+    target = _ayla_reschedule_target(bot_user, booking_id, raw_body)
+    if isinstance(target, HttpResponse):
+        return target
+    proxy, new_visit_at = target
+
+    new_iso = new_visit_at.isoformat()
+    seed = "|".join([external_user_id_for(bot_user), "reschedule", str(booking_id), new_iso])
+    idempotency_key = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:32]
+
+    try:
+        record = get_ayla_booking_client().reschedule_appointment(
+            external_user_id=external_user_id_for(bot_user),
+            appointment_id=str(booking_id),
+            new_start_datetime=new_iso,
+            idempotency_key=idempotency_key,
+            specialist_id=str(proxy.specialist_id) if proxy.specialist_id else None,
+            service_id=str(proxy.service_id) if proxy.service_id else None,
+            old_date=proxy.start_at.date().isoformat() if proxy.start_at else None,
+        )
+    except BookingBadRequestError as exc:
+        code = (exc.code or "").lower()
+        if exc.status_code == 404 or code == "not_found":
+            return _error("not_found", "booking not found", 404)
+        logger.info("miniapp_api.reschedule_booking.ayla_bad_request err=%s", exc)
+        if "slot" in code:
+            return _error("slot_unavailable", "the new time is no longer free", 409)
+        return _error(
+            "invalid_state",
+            "booking cannot be rescheduled in its current state",
+            409,
+        )
+    except BookingUnavailableError:
+        logger.warning("miniapp_api.reschedule_booking.ayla_unavailable")
+        return _error("upstream_unavailable", "booking upstream is temporarily unavailable", 502)
+    except BookingAPIError:
+        logger.exception("miniapp_api.reschedule_booking.ayla_error")
+        return _error("upstream_unavailable", "booking upstream is temporarily unavailable", 502)
+
+    old = _proxy_booking_to_dict(proxy, tenant=proxy.tenant)
+    new = dict(old)
+    # Время — из ответа канона (``start_datetime``, как читает и
+    # ``provider.py``). Канон его не прислал — значит 200 и есть «перенесено
+    # на запрошенное»: другого времени у переноса быть не может.
+    moved_to = _parse_iso_datetime(
+        str(record.raw.get("start_datetime") or record.raw.get("start_at") or "")
+    )
+    new["id"] = record.appointment_id
+    new["visit_at"] = (moved_to or new_visit_at).isoformat()
+    return JsonResponse({"old_booking": old, "new_booking": new})
 
 
 # ── Ayla-path read model (RemoteBookingProxy) — W4 escalation №3 ────────────
@@ -1913,8 +2037,12 @@ def _proxy_booking_to_dict(proxy, *, tenant) -> dict[str, Any]:
         "cancel_requested_at": None,
         "undo_window_seconds": 0,
         "cancellable": proxy.status in _AYLA_UPCOMING_STATUSES,
-        # Reschedule seam is out of the W4 №3 scope — keep it hidden.
-        "reschedulable": False,
+        # DRF-2561 — нативный перенос Ayla (то же время → другое, мастер и
+        # услуга те же). Как у локального пути: живая запись И известны
+        # мастер и услуга — без них экран не найдёт свободного времени.
+        "reschedulable": (
+            proxy.status == "confirmed" and service is not None and master is not None
+        ),
         # No rating read model on the Ayla path in pilot.
         "rating": None,
         "can_rate": False,
@@ -2297,7 +2425,7 @@ def booking_reschedule_request(request: HttpRequest, booking_id: str) -> HttpRes
 
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
     if getattr(settings, "BOOKING_VIA_AYLA_REST", False):
-        return _reschedule_unavailable_on_ayla_path()
+        return _reschedule_request_via_ayla(bot_user, booking_id, request.body)
     booking = _get_booking_owned(bot_user, booking_id)
     if booking is None:
         return _error("not_found", "booking not found", 404)
@@ -2353,7 +2481,7 @@ def booking_reschedule_confirm(request: HttpRequest, booking_id: str) -> HttpRes
 
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
     if getattr(settings, "BOOKING_VIA_AYLA_REST", False):
-        return _reschedule_unavailable_on_ayla_path()
+        return _reschedule_confirm_via_ayla(bot_user, booking_id, request.body)
     booking = _get_booking_owned(bot_user, booking_id)
     if booking is None:
         return _error("not_found", "booking not found", 404)
