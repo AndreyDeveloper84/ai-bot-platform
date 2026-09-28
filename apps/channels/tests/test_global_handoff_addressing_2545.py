@@ -26,6 +26,9 @@
   рядом с основным в том же салоне — он не делает салонов больше и задачу
   не получает (прежняя выборка его не исключала, и свежая теневая строка
   выигрывала по давности);
+* выключенный салон (``Tenant.is_active=False``) не адресат и не второй
+  салон: живой рядом с ним получает задачу, один выключенный — очередь
+  платформы;
 * названный салон, который не последний, — больше не адресат по давности:
   задача у платформы, оба салона не тронуты;
 * упоминание сотрудника («я сам администратор») — не просьба, салон не будит
@@ -213,6 +216,33 @@ class TestSalonsAreCountedNotConversations:
         task = AdminTask.all_tenants.get()
         assert task.tenant.slug == GLOBAL_BOT_TENANT_SLUG
         assert _muted(a, a_shadow, b) == [False, False, False]
+
+
+class TestADeactivatedSalonIsNotAnAddressee:
+    def test_a_live_salon_next_to_a_deactivated_one_gets_the_task(
+        self, mock_send, fake_redis, spy_concierge
+    ):
+        live = _salon_dialog("salon-live-2545", "Салон Живой", day=5)
+        dead = _salon_dialog("salon-dead-2545", "Салон Выключен", day=20)
+        Tenant.objects.filter(pk=dead.tenant_id).update(is_active=False)
+
+        _run_global(REQUEST, mid="d1")
+
+        task = AdminTask.all_tenants.get()
+        assert task.tenant_id == live.tenant_id
+        assert _muted(live, dead) == [True, False]
+
+    def test_only_a_deactivated_salon_goes_to_the_platform(
+        self, mock_send, fake_redis, spy_concierge
+    ):
+        dead = _salon_dialog("salon-dead2-2545", "Салон Выключен", day=20)
+        Tenant.objects.filter(pk=dead.tenant_id).update(is_active=False)
+
+        _run_global(REQUEST, mid="d2")
+
+        task = AdminTask.all_tenants.get()
+        assert task.tenant.slug == GLOBAL_BOT_TENANT_SLUG
+        assert _muted(dead) == [False]
 
 
 class TestTheNamedSalonIsNoLongerOverruledByTime:

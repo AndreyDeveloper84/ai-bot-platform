@@ -1491,6 +1491,10 @@ def _unambiguous_tenant_conversation(global_bot_user):
         is_active=True,
         is_shadow=False,
         deleted_at__isnull=True,
+        # Выключенный салон ответить не может: он не адресат и не второй
+        # салон. Иначе единственный живой салон рядом с мёртвым уходил бы
+        # в очередь платформы, а один мёртвый — замолкал бы впустую.
+        tenant__is_active=True,
     ).exclude(tenant_id=sentinel.id)
     # Множество по строкам, без DISTINCT: салонов у одного человека единицы.
     tenant_ids = set(salon_dialogs.values_list("tenant_id", flat=True))
