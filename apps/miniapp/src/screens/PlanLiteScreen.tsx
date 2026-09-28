@@ -18,8 +18,10 @@
  *     цель», «Вести дневник N дней в неделю», «Пить воду N раз в день»),
  *     выбрать 1–3 → «Составить план» → POST только `actions` (активную
  *     цель знает каталог);
- *   - план есть → карточка: «Твоя цель: {метка}» (метка — из
- *     decision-context, как на экране цели; иначе ключ) и по обязательству
+ *   - план есть → карточка: заголовок — сама цель, без подписи перед ней
+ *     (решение владельца 28.09 п.7, DRF-2576): свободная цель — слова
+ *     человека, готовая — выбранное название (метка — из decision-context,
+ *     как на экране цели; иначе ключ) и по обязательству
  *     «N из M» за текущее ведро — и ничего о результате: ни процента цели,
  *     ни шкалы, ни «ты пропустил» (В-5, DRF-1332); у дневника при
  *     подтверждённом ориентире — ещё «в ориентире N» (DRF-2124: второй
@@ -82,7 +84,6 @@ export const PLAN_LITE_COPY = {
   more: "больше",
   compose: "Составить план",
   composing: "Составляю…",
-  goalTitle: (goal: string) => `Твоя цель: ${goal}`,
   thisWeek: "На этой неделе",
   today: "Сегодня",
   twoWeeks: "Эти 2 недели",
@@ -546,7 +547,7 @@ export function PlanLiteScreen() {
 
         {status.kind === "builder" && (
           <section aria-label={PLAN_LITE_COPY.builderTitle}>
-            {goalLabel && <p className="food-scanner-diary__caption">{PLAN_LITE_COPY.goalTitle(goalLabel)}</p>}
+            {goalLabel && <p className="food-scanner-diary__caption">{goalLabel}</p>}
             <h2 className="food-scanner-diary__caption">{PLAN_LITE_COPY.builderTitle}</h2>
             <p className="food-scanner-diary__unreadable-hint">{PLAN_LITE_COPY.builderHint}</p>
             <div className="chip-row" role="group" aria-label={PLAN_LITE_COPY.builderTitle}>
@@ -605,7 +606,7 @@ export function PlanLiteScreen() {
         {status.kind === "card" && (
           <section data-testid="plan-lite-card" aria-label={PLAN_LITE_COPY.title}>
             <h2 className="food-scanner-diary__caption">
-              {goalLabel ? PLAN_LITE_COPY.goalTitle(goalLabel) : PLAN_LITE_COPY.title}
+              {goalLabel ?? PLAN_LITE_COPY.title}
             </h2>
             <ul className="food-scanner-diary__list">
               {status.plan.actions.map((action) => (

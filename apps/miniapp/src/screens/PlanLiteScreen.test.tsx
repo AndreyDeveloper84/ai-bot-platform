@@ -300,17 +300,55 @@ describe("служебный ключ на экран не попадает (DRF
     expect(screen.queryByText(/tone_up/)).toBeNull();
   });
 
-  it("метка есть — цель зовётся словами человека", async () => {
-    mockedGet.mockResolvedValue(PLAN);
+});
+
+describe("цель без подписи (решение владельца 28.09 п.7, DRF-2576)", () => {
+  // «Свободная цель → слова самого человека. Готовая цель → выбранное
+  // название. Никаких „Твоя цель:“ перед ней ни в карточке, ни на экране
+  // „План“». getByText сравнивает текст элемента целиком: подпись перед
+  // целью — и узел красный.
+  const FREE = "хочу −5 кг к лету";
+  const READY = "Подтянуть фигуру"; // suggestions[tone_up] в DOC
+  const freeGoal = () =>
     mockedDoc.mockResolvedValue({
       ...DOC,
-      known: { goal: { ...DOC.known.goal!, goal_text: "хочу −5 кг к лету" } },
+      known: { goal: { ...DOC.known.goal!, goal_text: FREE } },
     });
 
+  it("карточка плана, свободная цель — ровно слова человека", async () => {
+    mockedGet.mockResolvedValue(PLAN);
+    freeGoal();
     renderScreen();
     await settle();
 
-    expect(screen.getByText(PLAN_LITE_COPY.goalTitle("хочу −5 кг к лету"))).toBeInTheDocument();
+    const card = screen.getByTestId("plan-lite-card");
+    expect(within(card).getByRole("heading", { name: FREE })).toBeInTheDocument();
+    expect(within(card).queryByText(READY)).toBeNull();
+  });
+
+  it("карточка плана, готовая цель — ровно выбранное название", async () => {
+    mockedGet.mockResolvedValue(PLAN);
+    renderScreen();
+    await settle();
+
+    const card = screen.getByTestId("plan-lite-card");
+    expect(within(card).getByRole("heading", { name: READY })).toBeInTheDocument();
+  });
+
+  it("конструктор, свободная цель — ровно слова человека", async () => {
+    freeGoal();
+    renderScreen();
+    await settle();
+
+    expect(screen.getByText(FREE)).toBeInTheDocument();
+    expect(screen.queryByText(READY)).toBeNull();
+  });
+
+  it("конструктор, готовая цель — ровно выбранное название", async () => {
+    renderScreen();
+    await settle();
+
+    expect(screen.getByText(READY)).toBeInTheDocument();
   });
 });
 
