@@ -161,7 +161,25 @@ def build_card(channel: str, channel_user_id: str) -> IdentityCard:
             }
         )
     )
-    memory = MemoryEntry.objects.filter(user_id__in=ayla_ids).count() if ayla_ids else 0
+    # DRF-2541: «записей в памяти» — это то, что Ayla ПОМНИТ, а не строки
+    # таблицы. Тот же порог, что у ``memory_reader`` (``read_green_entries`` /
+    # ``get_personal_context`` / ``deletion_gate``): запись не удалена и не в
+    # заявке, контекст не забыт (ни свипом, ни заявкой «забудь всё» до
+    # свипа), по человеку нет заявки на удаление аккаунта. Без этого после
+    # «забудь всё» человек видел прежнее число — надгробия считались живыми.
+    # Зона не фильтруется: red скрыта политикой RLS 0008, и так и должно быть.
+    memory = (
+        MemoryEntry.objects.filter(
+            user_id__in=ayla_ids,
+            soft_deleted_at__isnull=True,
+            delete_requested_at__isnull=True,
+            personal_context__soft_deleted_at__isnull=True,
+            personal_context__forget_all_requested_at__isnull=True,
+            personal_context__deletion_requested_at__isnull=True,
+        ).count()
+        if ayla_ids
+        else 0
+    )
     return IdentityCard(
         channel=channel,
         channel_user_id=channel_user_id,
