@@ -229,7 +229,6 @@ BASELINE: frozenset[str] = frozenset(
         "src/components/InviteMessage.tsx::invite-message",
         "src/components/MasterCard.tsx::master-card__body",
         "src/components/OwnServiceForm.tsx::master-services__similar",
-        "src/components/Snackbar.tsx::snackbar",
         "src/components/SurfaceSwitch.tsx::surface-switch",
         "src/components/booking/NewBookingForm.tsx::callout--warning",
         "src/components/booking/NewBookingForm.tsx::draft-rows",

@@ -184,13 +184,7 @@ export function MasterSettingsScreen() {
       */}
       <SurfaceSwitchButton />
 
-      <hr
-        style={{
-          border: 0,
-          borderTop: "1px solid var(--c-divider)",
-          margin: "var(--s-4) 0",
-        }}
-      />
+      <hr className="master-settings__divider" />
 
       <button
         type="button"
