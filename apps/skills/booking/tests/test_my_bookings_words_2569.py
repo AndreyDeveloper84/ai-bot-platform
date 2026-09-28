@@ -46,9 +46,13 @@ def test_time_is_the_salons_not_utc_two_salons_two_zones() -> None:
 
 def test_no_raw_iso_and_no_declined_preposition() -> None:
     text = _format_bookings_text([_row()])
-    assert "2026-09-25T" not in text
-    assert "+00:00" not in text
-    assert " с Марина" not in text
+    # Присутствие впереди: строка собрана словами владельца. Без неё «нет
+    # сырого ISO» прошло бы и на пустом ответе.
+    line = text.splitlines()[1]
+    assert line == "• Массаж — мастер Марина · Формула тела, 25.09.2026 в 09:00"
+    assert "2026-09-25T" not in line
+    assert "+00:00" not in line
+    assert " с Марина" not in line
 
 
 def test_unparseable_time_is_dropped_not_printed() -> None:
