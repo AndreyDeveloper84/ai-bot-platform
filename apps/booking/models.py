@@ -403,9 +403,12 @@ class BookingRequest(models.Model):
     # ``apps/booking/services/feedback.py``.
     #
     # Ярус ``Conversation.tier`` этот путь НЕ трогает. ``HUMAN_LOCKED`` —
-    # значение ЯРУСА, которым мастер вручную выключает бота и compose; у
+    # значение ЯРУСА, которым мастер вручную выключал бота и compose; у
     # него своя атрибуция (``tier_locked_at`` / ``tier_locked_by``) и своё
-    # событие. Прежняя редакция комментария называла эскалацию по оценке
+    # событие. Писатель снят вместе с перепиской мастер↔клиент (DRF-1528,
+    # 21.09): ярус сегодня не ставит никто (DRF-2557, сторож
+    # ``apps/conversations/tests/test_tier_has_no_writer_2557.py``).
+    # Прежняя редакция комментария называла эскалацию по оценке
     # «HUMAN_LOCKED handoff» и склеивала два разных механизма в один —
     # читавший models.py, чтобы понять эскалацию, уходил не туда.
     rating = models.PositiveSmallIntegerField(
