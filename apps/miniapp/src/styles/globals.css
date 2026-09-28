@@ -2189,6 +2189,25 @@ a {
   padding-bottom: calc(96px + var(--safe-bottom));
 }
 
+/* DRF-2465 — карточка выбора режима («Салон» / «Мастер» / «Клиент»,
+   `SurfaceCard` в App.tsx). Вид был собран инлайном целиком; перенесён
+   сюда ДОСЛОВНО, ни одного своего решения — рефакторинг ≠ редизайн
+   (решение владельца 28.09, п.10). Равенство вида до/после снято полным
+   getComputedStyle в Chrome, обе темы. Похожий `.wellness-dash__qa-btn`
+   не подобран: у него другой отступ и свой отклик. */
+.surface-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--s-1);
+  padding: var(--s-4);
+  min-height: 88px;
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+  text-align: left;
+}
+
 /* ---- «Ещё» bottom sheet (Tau §3) ------------------------------------ */
 
 /* ---- Tier 2 Клиенты / Услуги read-only cards (Tau §4.3 / §4.4) ------- */
