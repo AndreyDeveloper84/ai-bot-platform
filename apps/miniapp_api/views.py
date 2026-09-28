@@ -4601,6 +4601,55 @@ _FOOD_TEXT_BASELINE_G = 100.0
 @require_http_methods(["POST"])
 @require_init_data
 def customer_food_log(request: HttpRequest) -> HttpResponse:
+    """Запись в дневник: исход КАЖДОГО вызова назван в логе (DRF-2554).
+
+    До DRF-2554 лог видел два отказа из тринадцати (``rejected`` и
+    ``unavailable`` каталога): ворота, ``malformed`` и ``food_not_recognized``
+    уходили молча, и жалобу «не получилось сохранить» нельзя было разобрать
+    ни по экрану, ни по логу. Теперь исход пишется здесь, в одном месте,
+    машинным ключом: ``food_log_ma.refused class=<слаг ответа> status=<код>``,
+    ``food_log_ma.logged`` — на успех (жалоба при записанном успехе — это
+    клиент, а не сервер), ``class=unhandled`` — на исключение. Новый отказ
+    в теле ручки попадает в лог сам: обходить эту обёртку ему некуда.
+
+    Отказы транспорта (``require_init_data``) пишет сам транспорт (DRF-1893).
+    """
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    try:
+        response = _customer_food_log(request)
+    except Exception as exc:
+        # Статус здесь не известен: его назначит Django по типу исключения.
+        logger.exception(
+            "food_log_ma.refused class=unhandled exc=%s bot_user=%s",
+            type(exc).__name__,
+            bot_user.id,
+        )
+        raise
+    if 200 <= response.status_code < 300:
+        logger.info("food_log_ma.logged status=%d bot_user=%s", response.status_code, bot_user.id)
+    else:
+        logger.info(
+            "food_log_ma.refused class=%s status=%d bot_user=%s",
+            _error_slug(response),
+            response.status_code,
+            bot_user.id,
+        )
+    return response
+
+
+def _error_slug(response: HttpResponse) -> str:
+    """Слаг отказа из тела ``_error`` — тот же, что читает экран."""
+    import json
+
+    try:
+        body = json.loads(response.content)
+    except ValueError:
+        return "unreadable"
+    slug = body.get("error") if isinstance(body, dict) else None
+    return slug if isinstance(slug, str) and slug else "unnamed"
+
+
+def _customer_food_log(request: HttpRequest) -> HttpResponse:
     """Запись — только по подтверждению показанной оценки (§109 шаг 6).
 
     Тело: ``{"dish_name", "portion_g", "corrected": bool, "idempotency_key"}``.
