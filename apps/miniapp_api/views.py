@@ -1835,7 +1835,8 @@ def _ayla_reschedule_target(
         return _error("bad_request", "invalid JSON body", 400)
     if not isinstance(body, dict):
         return _error("bad_request", "invalid JSON body", 400)
-    new_visit_at = _parse_iso_datetime(body.get("new_visit_at"))
+    raw_visit_at = body.get("new_visit_at")
+    new_visit_at = _parse_iso_datetime(raw_visit_at) if isinstance(raw_visit_at, str) else None
     if new_visit_at is None or new_visit_at.tzinfo is None:
         return _error("bad_request", "new_visit_at (ISO 8601 with offset) is required", 400)
     if new_visit_at <= timezone.now():
@@ -1877,8 +1878,10 @@ def _reschedule_confirm_via_ayla(bot_user, booking_id: str, raw_body: bytes) -> 
     """POST /reschedule/confirm на пути Ayla — перенос в каноне (DRF-2561).
 
     Владение — человеком, как у отмены (DRF-2436). Ключ идемпотентности —
-    человек, запись и новое время: повтор того же нажатия не двигает запись
-    дважды, другое время — другой перенос.
+    человек, запись, ОТКУДА и КУДА (оба — в UTC): повтор того же нажатия не
+    двигает запись дважды, другое время — другой перенос. «Откуда» в ключе
+    обязательно: без него «10:00 → 12:00 → снова 10:00» повторил бы первый
+    ключ, и канон вправе ответить сохранённым 200, не двинув запись.
 
     Зеркало эти ручки не пишут (правило раздела выше): строку переведёт
     событие ``booking.rescheduled``. Поэтому ``new_booking`` — строка зеркала
@@ -1902,7 +1905,11 @@ def _reschedule_confirm_via_ayla(bot_user, booking_id: str, raw_body: bytes) -> 
     proxy, new_visit_at = target
 
     new_iso = new_visit_at.isoformat()
-    seed = "|".join([external_user_id_for(bot_user), "reschedule", str(booking_id), new_iso])
+    from_utc = proxy.start_at.astimezone(UTC).isoformat() if proxy.start_at else ""
+    to_utc = new_visit_at.astimezone(UTC).isoformat()
+    seed = "|".join(
+        [external_user_id_for(bot_user), "reschedule", str(booking_id), from_utc, to_utc]
+    )
     idempotency_key = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:32]
 
     try:

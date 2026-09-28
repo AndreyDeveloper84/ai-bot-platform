@@ -156,3 +156,42 @@ class TestConfirmOutcomes:
         keys = [c["idempotency_key"] for c in stub.calls]
         assert keys[0] == keys[1]
         assert keys[0] != keys[2]
+
+    def test_moving_back_to_an_earlier_time_is_a_new_key(self, client, home, monkeypatch) -> None:
+        """«10:00 → 12:00 → снова 10:00»: третий перенос — не повтор первого.
+        Ключ помнит, ОТКУДА переносят; иначе канон вправе ответить
+        сохранённым 200 и не двинуть запись."""
+        stub = _stub(monkeypatch)
+        mine = _proxy(home, _identity(home, ME, AYLA_UID))
+        ten, noon = _when(9), _when(10)
+
+        assert _confirm(client, mine, ten).status_code == 200
+        # Событие booking.rescheduled сдвинуло зеркало на 10:00; теперь — в 12:00.
+        RemoteBookingProxy.all_tenants.filter(pk=mine.pk).update(start_at=ten)
+        assert _confirm(client, mine, noon).status_code == 200
+        RemoteBookingProxy.all_tenants.filter(pk=mine.pk).update(start_at=noon)
+        assert _confirm(client, mine, ten).status_code == 200
+
+        keys = [c["idempotency_key"] for c in stub.calls]
+        assert len(set(keys)) == 3
+
+    def test_same_instant_in_another_offset_is_the_same_key(
+        self, client, home, monkeypatch
+    ) -> None:
+        stub = _stub(monkeypatch)
+        mine = _proxy(home, _identity(home, ME, AYLA_UID))
+        at = _when(9)
+        from zoneinfo import ZoneInfo
+
+        for when in (at, at.astimezone(ZoneInfo("Europe/Moscow"))):
+            assert _confirm(client, mine, when).status_code == 200
+
+        assert stub.calls[0]["idempotency_key"] == stub.calls[1]["idempotency_key"]
+
+    def test_non_string_time_is_400_not_500(self, client, home, monkeypatch) -> None:
+        stub = _stub(monkeypatch)
+        mine = _proxy(home, _identity(home, ME, AYLA_UID))
+        url = f"/api/v1/customer/bookings/{mine.appointment_id}/reschedule/confirm"
+
+        assert _post(client, url, {"new_visit_at": 123}).status_code == 400
+        assert stub.calls == []
