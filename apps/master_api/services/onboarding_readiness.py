@@ -13,7 +13,7 @@
 ``services``     активные строки ``MasterService`` с ценой и длительностью   —
 ``hours``        недельный шаблон из ``load_day_frame`` (Ayla при флаге)     канон не читается (DRF-1111)
 ``profile``      ``name`` и ``photo_url`` у ``CatalogMaster``                —
-``location``     места работы — возможности ещё нет (M11/M19)                всегда ``unavailable``
+``location``     своё место мастера в каталоге (``service-locations``)       нет субъекта / каталог молчит
 ``identity``     ``SoloIdentityLink.status`` соло-мастера / столбец ключа    —
 ===============  ==========================================================  ==========================
 
@@ -23,12 +23,17 @@
   ``state="unknown"`` с именем причины, а не ``missing``: «настройте
   расписание» человеку, который его настроил, — ложь, и та же ложь в
   обратную сторону (DRF-1111: отказываться, а не гадать).
-* **Несуществующая возможность — не «сделано» и не «не сделано».** Пункт
-  ``location`` отвечает ``unavailable`` с ``capability_not_built``, а
-  ``ready`` не становится истиной по умолчанию — ``blocking`` называет
-  причину. Экран с DRF-2326 такой пункт РИСУЕТ — названным недоступным и с
-  причиной, без тапа: спрятанный пункт мастер читал как «у меня всё», хотя
-  профиль всё равно не отправлялся. До того экран его не рисовал вовсе.
+* **Место работы — по правилу каталога, не своему** (DRF-2370). До DRF-2370
+  пункт ``location`` отвечал ``unavailable``/``capability_not_built``
+  безусловно, хотя способ указать место был построен целиком (каталог #502,
+  клиент и ручка ``/service-locations``, экран 05) — и ``ready`` не бывал
+  истиной ни у кого. Теперь «готово» = то, что каталог требует для ОТПРАВКИ
+  профиля (``users/publication.py``, этап «к проверке»): место есть и оно не
+  ``inactive``. ``review_required`` — уже готово к отправке; ``confirmed``
+  ставит модератор при одобрении, и условием готовности он не является. Зона
+  выезда место не заменяет (у каталога ``location_area_unavailable``).
+  Разойтись с каталогом значило бы снова пообещать «всё готово» и вернуть
+  мастера отказом «Место работы ещё не указано».
 * **Один гейт продажи.** ``setup_state``/``sale_block`` берутся из
   :func:`apps.catalog.master_state.sale_block` — того же, что читают
   витрина, ростер и бронь; второго определения «опубликован» здесь нет.
@@ -50,7 +55,13 @@ from django.utils import timezone
 
 from apps.catalog.master_state import IDENTITY_LINKED, SaleBlock, sale_block
 from apps.catalog.models import CatalogMaster
+from apps.catalog.specialist_ref import CatalogSpecialistUnresolved, catalog_specialist_id
 from apps.identity.services.workspace_kind import workspace_kind
+from apps.integrations.ayla.booking_client import (
+    BookingBadRequestError,
+    BookingUnavailableError,
+    get_ayla_booking_client,
+)
 from apps.integrations.ayla.salon_client import SalonAPIError, SalonNotConfigured, SalonUnavailable
 from apps.master_api.services.catalog import list_master_services
 from apps.master_api.services.schedule_frame import load_day_frame
@@ -64,6 +75,17 @@ ItemState = Literal["done", "missing", "unknown", "unavailable"]
 #: отдаётся отдельным полем, чтобы экран показал «ожидает оператора», не
 #: смешивая с тем, что мастер может сделать сам.
 REQUIRED_ITEMS: tuple[str, ...] = ("services", "location", "hours", "profile")
+
+#: Причины пункта ``location`` — те же слаги, что у каталога
+#: (``users/publication.py``), чтобы экран и ответ отправки говорили одно.
+LOCATION_NOT_ASSIGNED = "location_not_assigned"
+LOCATION_INACTIVE = "location_inactive"
+#: Статус места «недействительно» у каталога (``LocationStatus.INACTIVE``).
+PLACE_INACTIVE = "inactive"
+#: Места нельзя спросить без субъекта: каталог отдаёт его только мастеру.
+NO_SUBJECT = "no_subject"
+#: Клиент каталога не настроен (нет ``AYLA_BASE_URL``) — спросить нельзя.
+CLIENT_NOT_CONFIGURED = "booking_client_not_configured"
 
 #: Куда ведёт каждый пункт — маршруты соло-поверхности (``App.tsx`` /solo/*).
 DEEP_LINKS: dict[str, str] = {
@@ -151,8 +173,13 @@ class Readiness:
         }
 
 
-def build_readiness(master: CatalogMaster) -> Readiness:
+def build_readiness(master: CatalogMaster, *, actor: str | None = None) -> Readiness:
     """Собрать проекцию по живым фактам. Ничего не пишет.
+
+    ``actor`` — внешний идентификатор мастера (``external_user_id_for``): место
+    работы каталог отдаёт только под субъектом. Без него пункт ``location`` —
+    ``unknown`` с причиной ``no_subject`` (карточка в админке оператора), а не
+    догадка.
 
     DRF-2254: вид рабочего пространства — из каталога (``workspace_kind``).
     ``salon`` — место и услуги ведутся вне приложения; ``solo`` и «не знаю» —
@@ -163,7 +190,7 @@ def build_readiness(master: CatalogMaster) -> Readiness:
     return Readiness(
         items=(
             _managed_outside("services") if salon_managed else _services_item(master),
-            _managed_outside("location") if salon_managed else _location_item(),
+            _managed_outside("location") if salon_managed else _location_item(master, actor),
             _hours_item(master),
             _profile_item(master),
         ),
@@ -197,11 +224,36 @@ def _managed_outside(key: str) -> ReadinessItem:
     return ReadinessItem(key, "unavailable", {}, reason=MANAGED_OUTSIDE_APP)
 
 
-def _location_item() -> ReadinessItem:
-    # M11/M19: мест работы у мастера из бота пока некуда сохранить — ни
-    # ручки, ни зеркала. Это не «не настроено» (мастер ничего не мог
-    # сделать) и не «настроено».
-    return ReadinessItem("location", "unavailable", {}, reason="capability_not_built")
+def _location_item(master: CatalogMaster, actor: str | None) -> ReadinessItem:
+    """Своё место мастера — по правилу каталога для отправки профиля (DRF-2370)."""
+    if actor is None:
+        return ReadinessItem("location", "unknown", {}, reason=NO_SUBJECT)
+    try:
+        client = get_ayla_booking_client()
+    except ValueError:
+        # Клиент не собирается без AYLA_BASE_URL — это «не спросить», а не
+        # «места нет»; и уж точно не 500 на весь чек-лист.
+        return ReadinessItem("location", "unknown", {}, reason=CLIENT_NOT_CONFIGURED)
+    try:
+        data = client.get_service_locations(
+            specialist_id=catalog_specialist_id(master), external_user_id=actor
+        )
+    except (BookingBadRequestError, BookingUnavailableError, CatalogSpecialistUnresolved) as exc:
+        reason = type(exc).__name__
+        logger.info("master.readiness.location_unknown master=%s reason=%s", master.id, reason)
+        return ReadinessItem("location", "unknown", {}, reason=reason)
+
+    places = data.get("places") or []
+    areas = data.get("areas") or []
+    detail = {"place_status": None, "areas": len(areas)}
+    if not places:
+        # Зона выезда место не заменяет — у каталога так же.
+        return ReadinessItem("location", "missing", detail, reason=LOCATION_NOT_ASSIGNED)
+    status = places[0].get("status")
+    detail["place_status"] = status
+    if status == PLACE_INACTIVE:
+        return ReadinessItem("location", "missing", detail, reason=LOCATION_INACTIVE)
+    return ReadinessItem("location", "done", detail)
 
 
 def _hours_item(master: CatalogMaster) -> ReadinessItem:
