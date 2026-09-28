@@ -51,7 +51,11 @@ describe("опасный вид — обводка, а не заливка", () 
 
   it("рисуется рамкой и цветом текста", () => {
     const rule = block(".ayla-btn--danger");
-    expect(rule).toMatch(/border:\s*1px solid/);
+    // 2px — решение владельца 28.09, п.9 (§6-упсилон): «более выраженная
+    // рамка», docs/OWNER_DECISIONS_2026-09-28.md; было 1px по решению 09.09.
+    // Толщина прибита, а не ослаблена до «любой»: этот узел держит, что вид
+    // — именно обводка решённой толщины.
+    expect(rule).toMatch(/border:\s*2px solid/);
     expect(rule).toMatch(/color:/);
   });
 
