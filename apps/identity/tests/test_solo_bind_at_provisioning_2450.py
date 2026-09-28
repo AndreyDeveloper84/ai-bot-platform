@@ -237,9 +237,10 @@ class TestTheDoorsRefusalIsSurvived:
         assert _link().status == SoloIdentityLink.Status.PENDING
 
     def test_a_dropped_connection_is_named_not_raised(self, catalog) -> None:
-        """``resolve_identity`` пропускает ``RemoteProtocolError`` сырым (рестарт
-        воркера каталога). Помощник обещает не выпускать исключений — и держит
-        это сам; до правки исключение уходило из регистрации."""
+        """Сырой ``RemoteProtocolError`` из подставленного клиента (рестарт
+        воркера каталога). С DRF-2579 настоящий ``resolve_identity`` сам называет
+        его отказом; помощник держит обещание «не выпускает исключений» и без
+        этого — узел проверяет вторую линию, а не клиент."""
         import httpx
 
         from apps.identity.services.specialist_identity_link import (
