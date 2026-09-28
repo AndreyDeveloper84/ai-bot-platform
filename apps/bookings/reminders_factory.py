@@ -43,6 +43,8 @@ from typing import TYPE_CHECKING, Any
 from apps.booking.models import BookingReminder
 
 if TYPE_CHECKING:
+    from uuid import UUID
+
     from apps.booking.models import BookingRequest
     from apps.identity.models import BotUser
     from apps.tenancy.models import Tenant
@@ -137,6 +139,95 @@ def create_reminders_for_booking(
     logger.info(
         "bookings.factory.scheduled yc_id=%s rows=%d visit_at=%s",
         yclients_record_id,
+        len(saved),
+        visit_at.isoformat(),
+    )
+    return saved
+
+
+def create_reminders_for_ayla_appointment(
+    *,
+    tenant: "Tenant",
+    bot_user: "BotUser",
+    appointment_id: "UUID",
+    visit_at: datetime,
+    master_name: str,
+    service_name: str,
+) -> list[BookingReminder]:
+    """Напоминания записи Ayla из диалога — тем же ключом, что у потребителя событий (DRF-2586).
+
+    Раньше диалог (``tools._schedule_reminders`` под ``BOOKING_VIA_AYLA_REST``)
+    писал через :func:`create_reminders_for_booking`, то есть клал UUID записи
+    Ayla в ``yclients_record_id``, а потребитель ``booking.created`` /
+    ``booking.confirmed`` — в ``ayla_appointment_id``. Ключи разные, и у одной
+    записи оказывалось ДВЕ пары напоминаний; на пилоте 13 пар, 4 доставлены
+    обеими строками — человек получил одно и то же дважды.
+
+    Теперь оба пишут ключом ``(ayla_appointment_id, tenant, kind)``, и двойника
+    исключает частичный уникальный индекс ``unique_ayla_booking_reminder``
+    (миграция 0012) — в базе, а не проверкой «есть ли уже» в двух воркерах, у
+    которой гонка остаётся: событие может прийти раньше, чем диалог допишет.
+
+    Два отличия от потребителя — намеренные, это разные поводы:
+
+    * **Статус перевзводится.** Сюда приходят действия человека —
+      подтверждение, перенос; перенос сначала гасит ``PENDING`` и заводит пару
+      на новое время. Потребитель статус не трогает: повторная доставка события
+      не должна воскрешать уже ушедшее напоминание.
+    * **Имена мастера и услуги — снимок.** Потребитель пишет их только при
+      создании строки и не затирает (``_schedule_reminders`` в
+      ``apps/eventbus/consumers/booking.py``).
+
+    Общее с потребителем: напоминание, чей срок уже прошёл, не заводится и не
+    перевзводится (#1146) — иначе диспетчер отправил бы «завтра ваш визит»
+    сразу, за час до визита.
+    """
+    from django.utils import timezone
+
+    chat_id = getattr(bot_user, "chat_id", "") or ""
+    if not chat_id:
+        logger.info(
+            "bookings.factory.ayla.skip_no_chat_id appointment_id=%s bot_user=%s",
+            appointment_id,
+            getattr(bot_user, "id", None),
+        )
+        return []
+
+    now = timezone.now()
+    saved: list[BookingReminder] = []
+    for kind, offset in _REMINDER_OFFSETS:
+        scheduled_at = visit_at - offset
+        if scheduled_at <= now:
+            logger.info(
+                "bookings.factory.ayla.skip_backdated appointment_id=%s kind=%s",
+                appointment_id,
+                kind,
+            )
+            continue
+        row, _created = BookingReminder.all_tenants.update_or_create(
+            ayla_appointment_id=appointment_id,
+            tenant=tenant,
+            kind=kind,
+            defaults={
+                "bot_user": bot_user,
+                # NULL, не "": иначе старый unique_together
+                # (yclients_record_id, kind) столкнул бы разные записи Ayla.
+                "yclients_record_id": None,
+                "chat_id": chat_id,
+                "visit_at": visit_at,
+                "status": BookingReminder.Status.PENDING,
+                "scheduled_at": scheduled_at,
+                "master_name": master_name,
+                "service_name": service_name,
+                "sent_at": None,
+                "replied_at": None,
+            },
+        )
+        saved.append(row)
+
+    logger.info(
+        "bookings.factory.ayla.scheduled appointment_id=%s rows=%d visit_at=%s",
+        appointment_id,
         len(saved),
         visit_at.isoformat(),
     )
