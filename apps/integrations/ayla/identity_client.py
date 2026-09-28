@@ -132,7 +132,7 @@ _circuit = _Circuit()
 
 
 class IdentityResolveError(Exception):
-    """Identity read-back failed (timeout, 5xx, auth, circuit, malformed).
+    """Identity read-back failed (timeout, any transport failure, 5xx, auth, circuit, malformed).
 
     Callers MUST degrade rather than propagate: `ensure_ayla_link` turns
     this into ``None`` so the caller falls through to its pre-existing
@@ -237,6 +237,17 @@ def resolve_identity(external_user_id: str, *, timeout_s: float | None = None) -
         _circuit.record_failure(now=time.monotonic())
         logger.warning("identity_client.network_failure exc=%s", type(exc).__name__)
         raise IdentityResolveError(f"network: {type(exc).__name__}") from exc
+    except httpx.HTTPError as exc:
+        # DRF-2579: всё остальное, что выпускает ``httpx`` до ответа, —
+        # ``RemoteProtocolError`` (сервер закрыл соединение на полуслове:
+        # рестарт воркера каталога), ``ProxyError``, ``UnsupportedProtocol``…
+        # — раньше выходило сырым и роняло вызывающих, которые по контракту
+        # класса ловят только ``IdentityResolveError`` (регистрация
+        # соло-мастера). Имя отказа одно и постоянное; тип исключения — только
+        # в журнал, не в причину.
+        _circuit.record_failure(now=time.monotonic())
+        logger.warning("identity_client.transport_failure exc=%s", type(exc).__name__)
+        raise IdentityResolveError("network: transport_failure") from exc
 
     if resp.status_code >= 500:
         _circuit.record_failure(now=time.monotonic())
