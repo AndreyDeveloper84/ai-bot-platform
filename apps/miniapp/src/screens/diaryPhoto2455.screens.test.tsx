@@ -239,3 +239,31 @@ describe.each(SCREENS)("$name", (s) => {
     expect([...revoked].sort()).toEqual([...created].sort());
   });
 });
+
+/**
+ * Строка БЕЗ фото — прежняя целиком, а не «без двух признаков».
+ *
+ * `<li>` теперь рождает `DiaryEntryItem`, а не экран: это рефакторинг, и
+ * решение владельца п.10 требует, чтобы принятый вид им не менялся. Эталон
+ * снят РЕНДЕРОМ `dev` `ebfe80ce` (экраны до DRF-2455) и заморожен литералом;
+ * сравнивается `outerHTML` строки целиком — классы, атрибуты, порядок и
+ * вложенность детей. Текст времени заменён меткой: он зависит от часового
+ * пояса машины (09:05Z → «12:05» при UTC+3, «09:05» в CI).
+ */
+const ROW_WITHOUT_PHOTO_AT_DEV_EBFE80CE: Record<string, string> = {
+  "день (FoodScannerDayScreen)": "<li class=\"food-scanner-diary__entry\"><div class=\"food-scanner-diary__entry-main\"><span class=\"food-scanner-diary__entry-time\"><TIME></span><span class=\"food-scanner-diary__entry-dish\">Борщ</span></div></li>",
+  "главная дневника (FoodScannerDiaryScreen)": "<li class=\"food-scanner-diary__entry\"><div class=\"food-scanner-diary__entry-main\"><span class=\"food-scanner-diary__entry-time\"><TIME></span><span class=\"food-scanner-diary__entry-dish\">Борщ</span></div><span class=\"food-scanner-diary__entry-cal\">~320 ккал</span><div class=\"food-scanner-diary__entry-actions\"><button type=\"button\" class=\"food-scanner-diary__entry-action\" aria-label=\"В избранное: Борщ\">В избранное</button><button type=\"button\" class=\"food-scanner-diary__entry-action\" aria-label=\"Удалить: Борщ\">Удалить</button></div></li>"
+};
+
+function normalizedRow(li: Element): string {
+  return li.outerHTML.replace(/(food-scanner-diary__entry-time">)[^<]*/, "$1<TIME>");
+}
+
+describe.each(SCREENS)("$name — строка без фото прежняя целиком", (s) => {
+  it("outerHTML строки без снимка равен рендеру dev ebfe80ce", async () => {
+    const { findByText } = s.render([WITHOUT_PHOTO]);
+    const dish = await findByText("Борщ");
+    await flush();
+    expect(normalizedRow(dish.closest("li")!)).toBe(ROW_WITHOUT_PHOTO_AT_DEV_EBFE80CE[s.name]);
+  });
+});
