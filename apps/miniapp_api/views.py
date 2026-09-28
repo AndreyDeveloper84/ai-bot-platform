@@ -1308,7 +1308,7 @@ def _create_booking_via_ayla(
                 "id": record.appointment_id,
                 "service_name": service.name,
                 "master_name": master.name,
-                "visit_at": visit_at.isoformat(),
+                "visit_at": _salon_iso(visit_at, tenant),
                 "duration_min": service.duration_min,
                 # DRF-1952 — адрес салона записи, тот же источник, что у карточки
                 # записи (зеркало ``Tenant.address``); ``None`` — зеркало молчит,
@@ -1573,7 +1573,7 @@ def create_booking(request: HttpRequest) -> HttpResponse:
                 "id": str(booking.id),
                 "service_name": booking.service_name,
                 "master_name": booking.master_name,
-                "visit_at": booking.visit_at.isoformat() if booking.visit_at else "",
+                "visit_at": _salon_iso(booking.visit_at, tenant),
                 "duration_min": booking.duration_min,
                 "status": booking.status,
                 # DRF-1952 — см. ветку Ayla выше.
@@ -1630,7 +1630,7 @@ def _booking_to_dict(b, *, tenant, now=None) -> dict[str, Any]:
     """
     from apps.booking.services.transitions import UNDO_WINDOW_SECONDS
 
-    visit_at_iso = b.visit_at.isoformat() if b.visit_at else ""
+    visit_at_iso = _salon_iso(b.visit_at, tenant)
     cancel_requested_iso = b.cancel_requested_at.isoformat() if b.cancel_requested_at else None
     # Cancellable + reschedulable derived flags. Action buttons in the
     # Mini App use these directly — spec §3.4 + §5.3.
@@ -1995,7 +1995,7 @@ def _reschedule_confirm_via_ayla(bot_user, booking_id: str, raw_body: bytes) -> 
             )
 
     new["id"] = record.appointment_id
-    new["visit_at"] = moved_start.isoformat()
+    new["visit_at"] = _salon_iso(moved_start, proxy.tenant)
     return JsonResponse({"old_booking": old, "new_booking": new})
 
 
@@ -2065,6 +2065,30 @@ def _proxy_duration_min(proxy) -> int:
     return 0
 
 
+def _salon_zone(tenant) -> ZoneInfo:
+    """Пояс салона — тем же правилом, что «✅ Вы записаны» (DRF-2589)."""
+    from apps.booking.client_notify import tenant_timezone
+
+    return tenant_timezone(tenant)
+
+
+def _salon_iso(moment, tenant) -> str:
+    """Время визита на проводе — в поясе САЛОНА записи (DRF-2589).
+
+    Django отдаёт ``DateTimeField`` в UTC, и ``isoformat()`` уезжал как
+    ``06:00+00:00`` при визите в 09:00 по салону. Экраны Mini App берут часы
+    из строки (``formatVisitFull``), и человек видел «в 06:00». Тот же момент
+    в поясе салона: ``new Date()`` на фронте не меняется, а часы в строке
+    становятся часами салона — правило владельца (28.09, п.1) и прецедент
+    «✅ Вы записаны» (``tenant_timezone``). Пусто — пустая строка.
+    """
+    if moment is None:
+        return ""
+    from apps.booking.client_notify import tenant_timezone
+
+    return moment.astimezone(tenant_timezone(tenant)).isoformat()
+
+
 def _proxy_booking_to_dict(proxy, *, tenant) -> dict[str, Any]:
     """BookingItem shape from a RemoteBookingProxy row.
 
@@ -2086,7 +2110,7 @@ def _proxy_booking_to_dict(proxy, *, tenant) -> dict[str, Any]:
         # DRF-2436 / решение владельца п.15: у каждой записи видно, в каком
         # салоне она создана. Имя — клиентское имя салона (как у витрины), не ID.
         "salon_name": proxy.tenant.name,
-        "visit_at": proxy.start_at.isoformat() if proxy.start_at else "",
+        "visit_at": _salon_iso(proxy.start_at, proxy.tenant),
         "duration_min": duration_min,
         # Immediate-cancel path — no two-step undo flow on the Ayla path.
         "cancel_requested_at": None,
@@ -5268,6 +5292,9 @@ class _ActivityRow(NamedTuple):
     #: запись может быть в любом салоне человека: салон запроса здесь солгал бы.
     salon_name: str
     salon_address: str | None
+    #: DRF-2589 — пояс салона записи: «ближайшая» может быть в любом салоне
+    #: человека, и пояс салона запроса показал бы чужой час.
+    salon_tz: ZoneInfo | None = None
 
 
 def _recent_activity_from_mirror(
@@ -5308,6 +5335,7 @@ def _recent_activity_from_mirror(
             price_amount=proxy.price_amount,
             salon_name=proxy.tenant.name,
             salon_address=proxy.tenant.address,
+            salon_tz=_salon_zone(proxy.tenant),
         )
 
     this_week_count = owned.filter(
@@ -5352,6 +5380,7 @@ def _recent_activity_from_local(
             price_amount=None,
             salon_name=booking.tenant.name,
             salon_address=booking.tenant.address,
+            salon_tz=_salon_zone(booking.tenant),
         )
 
     this_week_count = owned.filter(
@@ -5496,7 +5525,7 @@ def customer_recent_activity(request: HttpRequest) -> HttpResponse:
     next_booking: dict[str, Any] | None = None
     if next_row is not None:
         next_booking = {
-            "date_human": _format_visit_human(next_row.visit_at, tz, now=now),
+            "date_human": _format_visit_human(next_row.visit_at, next_row.salon_tz or tz, now=now),
             "service_name": next_row.service_name,
             "duration_min": next_row.duration_min,
             "master_name": next_row.master_name,

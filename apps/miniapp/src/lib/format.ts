@@ -55,6 +55,13 @@ export function formatSlotTime(isoWithOffset: string): string {
   return match?.[1] ?? isoWithOffset;
 }
 
+/**
+ * Часы берутся ИЗ СТРОКИ, не из часов браузера: время визита — время
+ * салона. Опора — сервер отдаёт `visit_at` в поясе салона записи
+ * (DRF-2589, `miniapp_api.views._salon_iso`); до этого провод нёс UTC, и
+ * человек видел «в 06:00» при визите в 09:00. Сторож
+ * `wallClockParse2589.test.ts` держит такой разбор только здесь.
+ */
 export function formatVisitFull(isoWithOffset: string): string {
   const match = isoWithOffset.match(/^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})/);
   if (!match) return isoWithOffset;
