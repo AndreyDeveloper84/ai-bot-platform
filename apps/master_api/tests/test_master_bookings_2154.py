@@ -104,6 +104,8 @@ def _visit(
         start_at=start,
         end_at=end if end is not None else start + timedelta(minutes=minutes),
         status=status,
+        # DRF-2462: завершённый визит засчитывается, только если закрыл человек.
+        completed_by="master" if status == "completed" else "",
         bot_user=bot_user,
         service_id=service.ayla_service_id if service else None,
     )
@@ -858,6 +860,7 @@ class TestSoloMaster:
             start_at=_now() - timedelta(days=9),
             end_at=_now() - timedelta(days=9) + timedelta(hours=1),
             status="completed",
+            completed_by="master",  # DRF-2462: «была» — визит, закрытый человеком
             bot_user=anna,
         )
         stub_salon(_StubSalon(rows=[{"id": str(CUSTOMER_AYLA_ID), "name": "Анна Петрова"}]))

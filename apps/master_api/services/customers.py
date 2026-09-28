@@ -225,7 +225,9 @@ def list_master_customers(
     last_service_id_by_user: dict[Any, Any] = {}
     last_visit_rows = (
         visits.filter(bot_user_id__in=bot_user_ids)
-        .order_by("bot_user_id", "-start_at")
+        # ``-appointment_id`` — два визита в одну минуту: без него «последняя
+        # услуга» выбиралась бы базой как придётся.
+        .order_by("bot_user_id", "-start_at", "-appointment_id")
         .values("bot_user_id", "service_id")
     )
     for row in last_visit_rows:

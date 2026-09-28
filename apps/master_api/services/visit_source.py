@@ -282,9 +282,12 @@ def attended_visits(master) -> QuerySet[RemoteBookingProxy]:
       ничего не говорит о том, пришёл ли клиент: чип значит «приходил
       больше одного раза» (DRF-1146), а не «часы досчитали дважды».
 
-    Сравнение повторяет ``normalize_actor`` в базе — нижний регистр, пробелы
-    сняты, — и тот же чёрный список ``SYSTEM_COMPLETION_ACTORS`` (в нём и
-    пустая строка: неизвестность не подтверждение).
+    Решает САМ :func:`confirmed_by_human`, а не его пересказ на SQL: сперва
+    читаются различные значения ``completed_by`` у завершённых визитов
+    мастера (их единицы), Python отбирает человеческие, и запрос берёт строки
+    ровно с этими значениями. Пересказ через ``LOWER(TRIM(...))`` расходился
+    с ``str.strip()``: ``TRIM`` снимает только пробелы, и ``"system\\n"``
+    прошёл бы как «закрыл человек» — ошибка в опасную сторону.
 
     Цена, названная сразу: зеркало стухает (DRF-2519, мёртвые письма
     ``booking.completed``), и визит, закрытый каноном, может ещё стоять в
@@ -292,21 +295,16 @@ def attended_visits(master) -> QuerySet[RemoteBookingProxy]:
     не засчитать визит, которого не было.
     """
 
-    from django.db.models.functions import Lower, Trim
+    from apps.booking.completion import confirmed_by_human
 
-    from apps.booking.completion import SYSTEM_COMPLETION_ACTORS
-
-    return (
-        RemoteBookingProxy.all_tenants.filter(
-            tenant_id=master.tenant_id,
-            specialist_id__in=specialist_keys(master),
-            status="completed",
-        )
-        # ``alias``, а не ``annotate``: колонка нужна только в WHERE и не
-        # должна попасть в SELECT/GROUP BY группирующих запросов выше.
-        .alias(_actor=Lower(Trim("completed_by")))
-        .exclude(_actor__in=sorted(SYSTEM_COMPLETION_ACTORS))
+    completed = RemoteBookingProxy.all_tenants.filter(
+        tenant_id=master.tenant_id,
+        specialist_id__in=specialist_keys(master),
+        status="completed",
     )
+    actors = completed.order_by().values_list("completed_by", flat=True).distinct()
+    human = [actor for actor in actors if confirmed_by_human(actor)]
+    return completed.filter(completed_by__in=human)
 
 
 def occupied_intervals(

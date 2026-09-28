@@ -154,7 +154,10 @@ class TestAVisitIsWhatAHumanClosed:
         # Последний визит — последний ЗАСЧИТАННЫЙ, а не тот, что закрыли часы.
         assert row["last_visit_at"] == (NOW - timedelta(days=5)).isoformat()
 
-    @pytest.mark.parametrize("actor", ["system", " System ", "", "auto_close", "cron"])
+    # "system\n" и "\tsystem" — SQL TRIM их не снимает; решает confirmed_by_human.
+    @pytest.mark.parametrize(
+        "actor", ["system", " System ", "", "auto_close", "cron", "system\n", "\tsystem"]
+    )
     def test_every_machine_actor_is_refused_as_in_confirmed_by_human(
         self, tenant: Tenant, accepted_master: CatalogMaster, actor: str
     ) -> None:
