@@ -166,7 +166,11 @@ describe("соло-панель — ровно три и ровно одна (DR
   it("«Ayla» на соло — диалог с ассистентом (OD-7), не переписка с клиентами", async () => {
     renderAppAt("/solo/ayla");
     expect(await screen.findByRole("heading", { name: "Ayla" })).toBeInTheDocument();
-    expect(mockedAyla).toHaveBeenCalled();
+    // DRF-2596: историю зовёт пассивный эффект монтирования AylaChat, а экран
+    // монтируется после `await getMe()` — вне act, эффект уходит в setImmediate.
+    // findBy отпускает по setTimeout(0); их порядок в Node не определён. Ждём
+    // событие (вызов), а не время.
+    await waitFor(() => expect(mockedAyla).toHaveBeenCalled());
     expect(navBars()).toHaveLength(1);
   });
 
