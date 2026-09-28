@@ -4617,8 +4617,13 @@ def customer_food_log(request: HttpRequest) -> HttpResponse:
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
     try:
         response = _customer_food_log(request)
-    except Exception:
-        logger.exception("food_log_ma.refused class=unhandled status=500 bot_user=%s", bot_user.id)
+    except Exception as exc:
+        # Статус здесь не известен: его назначит Django по типу исключения.
+        logger.exception(
+            "food_log_ma.refused class=unhandled exc=%s bot_user=%s",
+            type(exc).__name__,
+            bot_user.id,
+        )
         raise
     if 200 <= response.status_code < 300:
         logger.info("food_log_ma.logged status=%d bot_user=%s", response.status_code, bot_user.id)

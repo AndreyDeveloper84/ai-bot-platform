@@ -65,6 +65,7 @@ describe("logMeal — каждый отказ бота своим классом
     [401, "no_init_data", "auth"],
     [500, "http_error", "server_error"],
     [418, "something_new", "unknown"],
+    [400, "constructor", "unknown"],
   ])("%i %s → %s", async (status, slug, kind) => {
     fetchMock.mockResolvedValue(reply(JSON.stringify({ error: slug, detail: "x" }), status));
     const err = await refusalOf();

@@ -252,9 +252,15 @@ export function foodLogRefusalOf(
       ayla_bad_request: "catalog_rejected",
       nutrition_unavailable: "nutrition_unavailable",
     };
-    const kind =
-      bySlug[err.slug] ??
-      (err.status === 401 ? "auth" : err.status >= 500 ? "server_error" : "unknown");
+    // `Object.hasOwn`, а не `bySlug[slug]`: слаг приходит с провода, и
+    // «constructor» из прототипа не должен стать классом.
+    const kind = Object.hasOwn(bySlug, err.slug)
+      ? (bySlug[err.slug] as FoodLogRefusalKind)
+      : err.status === 401
+        ? "auth"
+        : err.status >= 500
+          ? "server_error"
+          : "unknown";
     return new FoodLogRefusedError(kind, err.status);
   }
   // `fetch` отказывает TypeError, когда ответа нет вовсе (сеть, DNS, CORS).

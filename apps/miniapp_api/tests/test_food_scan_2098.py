@@ -515,5 +515,5 @@ class TestEveryOutcomeIsNamedInTheLog:
             resp = _log(Client(raise_request_exception=False), bot_user, SCAN_LOG)
         assert resp.status_code == 500
         assert self._outcome_lines(caplog) == [
-            f"food_log_ma.refused class=unhandled status=500 bot_user={bot_user.id}"
+            f"food_log_ma.refused class=unhandled exc=ValueError bot_user={bot_user.id}"
         ]
