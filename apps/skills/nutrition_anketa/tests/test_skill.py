@@ -1062,6 +1062,65 @@ class TestConfirmTargetsHandler:
         assert "заданы тобой вручную" in result.reply_text
         assert (result.action_data or {})["targets_source"] == "user_entered"
 
+    def test_legacy_default_refusal_names_the_inputs_and_leads_to_their_questions(self) -> None:
+        """DRF-2332: причина словами и следующий шаг — не «подтверждать нечего»."""
+        from apps.integrations.ayla.nutrition_client import LegacyDefaultUnconfirmedError
+        from apps.skills.nutrition_anketa.skill import UPDATE_WEIGHT_CALLBACK
+
+        async def _confirm(**kwargs):
+            # Порядок присланного списка — не порядок фразы: слова идут как в анкете.
+            raise LegacyDefaultUnconfirmedError(["pace", "activity_coefficient"])
+
+        result = self._run(_confirm)
+        assert result.action_type == "anketa_confirm_targets_legacy_default"
+        assert result.reply_text == (
+            "Подтвердить пока нельзя: активность и темп в расчёте — прежние значения "
+            "по умолчанию, а не твои ответы. Давай сначала их уточним."
+        )
+        callbacks = [b["callback"] for b in (result.action_data or {})["buttons"]]
+        # Следующий шаг — путь, который спрашивает помеченные входы (DRF-2279).
+        assert UPDATE_WEIGHT_CALLBACK in callbacks
+        assert not result.claims_done
+
+    def test_the_two_409s_never_answer_alike(self) -> None:
+        """Пара, которая обязана различаться: legacy-отказ и «нечего»."""
+        from apps.integrations.ayla.nutrition_client import (
+            LegacyDefaultUnconfirmedError,
+            NothingToConfirmError,
+        )
+
+        async def _legacy(**kwargs):
+            raise LegacyDefaultUnconfirmedError(["pace"])
+
+        async def _nothing(**kwargs):
+            raise NothingToConfirmError("")
+
+        legacy, nothing = self._run(_legacy), self._run(_nothing)
+        assert legacy.reply_text != nothing.reply_text
+        assert legacy.action_type != nothing.action_type
+        assert "темп" in legacy.reply_text and "активность" not in legacy.reply_text
+
+    def test_legacy_refusal_without_known_names_still_tells_the_truth(self) -> None:
+        """DRF-2332, третий случай: пустой/незнакомый список — нарушение
+        контракта каталога. Человек видит ту же фразу без перечисления и ту
+        же кнопку, а не «Айла недоступна» и не выдуманные слова."""
+        from apps.integrations.ayla.nutrition_client import LegacyDefaultUnconfirmedError
+        from apps.skills.nutrition_anketa.skill import (
+            LEGACY_DEFAULT_UNCONFIRMED_UNNAMED_TEXT,
+            UPDATE_WEIGHT_CALLBACK,
+        )
+
+        for fields in ([], ["unexpected_input"]):
+
+            async def _confirm(_fields=fields, **kwargs):
+                raise LegacyDefaultUnconfirmedError(_fields)
+
+            result = self._run(_confirm)
+            assert result.reply_text == LEGACY_DEFAULT_UNCONFIRMED_UNNAMED_TEXT, fields
+            assert result.action_type == "anketa_confirm_targets_legacy_default"
+            callbacks = [b["callback"] for b in (result.action_data or {})["buttons"]]
+            assert UPDATE_WEIGHT_CALLBACK in callbacks
+
     def test_ayla_down_is_the_common_fallback(self) -> None:
         from apps.integrations.ayla import NutritionUnavailableError
 
