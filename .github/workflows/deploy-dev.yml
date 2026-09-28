@@ -98,7 +98,11 @@ jobs:
   deploy:
     name: deploy-dev
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # 15 → 25 (DRF-2574, 28.09): шаги до отправки Mini App съедают 2–3 мин
+    # (прогон 13:14:50 → отправка 13:17), отправка без карты ~1,1 МБ при
+    # ~4,5 КБ/с — ≈4 мин, но скорость канала переменная. Зависание держит
+    # предел САМОГО шага отправки (8); этот даёт место остальным шагам.
+    timeout-minutes: 25
     needs: preflight
     if: needs.preflight.outputs.ready == 'true'
     # actions: write — ради ОДНОГО вызова: страж поздней выкладки (DRF-2073)
@@ -392,6 +396,7 @@ jobs:
           esac
 
       - name: Pull + rebuild + restart dev services
+        id: rebuild
         env:
           DEPLOY_SHA: ${{ steps.verified.outputs.sha }}
           EVENT_NAME: ${{ github.event_name }}
@@ -683,6 +688,17 @@ jobs:
           test "$(ls -1 dist/assets | wc -l)" -gt 0
           echo "::notice::собрано файлов в assets: $(ls -1 dist/assets | wc -l)"
 
+      # Карта кода (`*.js.map`) — 4,29 МБ из 5,2 МБ сборки (замер 28.09). Она
+      # нужна для разбора ошибок, но не человеку на машине: на машину её не
+      # везём (см. шаг отправки), а сохраняем здесь, артефактом прогона.
+      - name: Keep the source map as a run artifact (not shipped)
+        uses: actions/upload-artifact@v7
+        with:
+          name: miniapp-sourcemap-${{ steps.verified.outputs.sha }}
+          path: apps/miniapp/dist/assets/*.map
+          if-no-files-found: warn
+          retention-days: 14
+
       # Везём готовое tar'ом по ssh: rsync на хосте может не быть, tar есть
       # всегда. Кладём в dist.new, проверяем, и только потом подменяем двумя mv.
       #
@@ -691,7 +707,13 @@ jobs:
       # нечего отдавать. Здесь живой dist не трогается вовсе, пока новая сборка
       # не лежит на диске целиком. Прежний остаётся в dist.prev для отката:
       #   mv dist dist.broken && mv dist.prev dist
+      # Свой предел, меньше предела задания (15): 28.09 отправка трижды
+      # умирала на канале ~4,5 КБ/с, задание упиралось в свой предел и прогон
+      # кончался «отменён» — без тревоги, как шум очереди. Теперь падает ШАГ,
+      # и следующий шаг успевает назвать исход.
       - name: Ship Mini App to the box and swap
+        id: ship
+        timeout-minutes: 8
         env:
           DEV_HOST: ${{ secrets.DEV_HOST }}
           DEV_USER: ${{ secrets.DEV_USER }}
@@ -734,6 +756,12 @@ jobs:
           # владельцу не отдан. Вопрос задаётся тому, кто будет писать.
           $SSH "$OWN for d in '$MA/dist' '$MA/dist.prev'; do [ ! -e \"\$d\" ] || sudo -u \"\$OWNER\" test -w \"\$d\" || { echo \"::error::\$d не на запись владельцу дерева (\$(stat -c %U \"\$d\")) — каталоги не переданы владельцу, см. DRF-1646\"; exit 1; }; done"
 
+          # Опись того, что ОБЯЗАНО доехать: число файлов и сумма байт сборки
+          # без *.map — ровно то, что пакует tar ниже. Считается ДО передачи.
+          EXPECT_FILES="$(find apps/miniapp/dist -type f ! -name '*.map' | wc -l)"
+          EXPECT_BYTES="$(find apps/miniapp/dist -type f ! -name '*.map' -printf '%s\n' | awk '{s+=$1} END {print s+0}')"
+          echo "::notice::к отправке: ${EXPECT_FILES} файлов, ${EXPECT_BYTES} байт (без *.map)"
+
           $SSH "$OWN sudo -u \"\$OWNER\" rm -rf '$MA/dist.new' && sudo -u \"\$OWNER\" mkdir -p '$MA/dist.new'"
           # --no-same-owner: не восстанавливать владельцев ИЗ АРХИВА.
           #
@@ -745,9 +773,39 @@ jobs:
           #
           # docker здесь не участвует, tar идёт прямо по ssh, поэтому
           # --user на этот шаг не влияет по построению: у него своя правка.
-          tar -C apps/miniapp/dist -cf - . | $SSH "$OWN sudo -u \"\$OWNER\" tar --no-same-owner -C '$MA/dist.new' -xf -"
+          #
+          # --exclude='*.map': карта кода — 4,29 МБ из 5,2 МБ, передача падает
+          # впятеро (~1,1 МБ). Карта не выброшена: она в артефакте прогона.
+          tar --exclude='*.map' -C apps/miniapp/dist -cf - . | $SSH "$OWN sudo -u \"\$OWNER\" tar --no-same-owner -C '$MA/dist.new' -xf -"
           $SSH "cd '$MA' && test -s dist.new/index.html && test -d dist.new/assets && ls -A dist.new/assets | grep -q ."
+          # Полнота, а не «что-то есть». Проверка выше отвечает «index.html
+          # непуст и в assets хоть один файл» — частично переданная сборка её
+          # проходит, если файлы пришли в удачном порядке (28.09 спас случай:
+          # не дошёл сам index.html). Подмена ниже — только если на машине
+          # ровно то число файлов и та сумма байт, что собраны на раннере.
+          GOT="$($SSH "cd '$MA/dist.new' && find . -type f | wc -l && find . -type f -printf '%s\n' | awk '{s+=\$1} END {print s+0}'")"
+          GOT_FILES="$(printf '%s\n' "$GOT" | sed -n 1p | tr -d '[:space:]')"
+          GOT_BYTES="$(printf '%s\n' "$GOT" | sed -n 2p | tr -d '[:space:]')"
+          if [ "$GOT_FILES" != "$(echo "$EXPECT_FILES" | tr -d '[:space:]')" ] || [ "$GOT_BYTES" != "$EXPECT_BYTES" ]; then
+            echo "::error::dist.new неполон: на машине ${GOT_FILES} файлов / ${GOT_BYTES} байт, собрано ${EXPECT_FILES} / ${EXPECT_BYTES}. Подмена не выполнена, живой dist не тронут."
+            exit 1
+          fi
+          echo "::notice::dist.new полон: ${GOT_FILES} файлов, ${GOT_BYTES} байт"
           $SSH "$OWN cd '$MA' && sudo -u \"\$OWNER\" rm -rf dist.prev && { [ -d dist ] && sudo -u \"\$OWNER\" mv dist dist.prev || true; } && sudo -u \"\$OWNER\" mv dist.new dist && stat -c '%y %n' dist/index.html"
+
+      # Отправка упала или не уложилась в свой предел — назвать исход словами.
+      # Живой dist при этом цел: подмена (mv dist.new dist) идёт только после
+      # полной передачи и проверки dist.new, а до неё шаг не дошёл.
+      - name: Report — Mini App was not delivered
+        if: failure() && steps.ship.outcome == 'failure'
+        run: |
+          echo "::error::Mini App не доставлена: шаг отправки упал или превысил свой предел. Живой dist не тронут — подмена идёт только после полной передачи."
+          {
+            echo "### Mini App не доставлена"
+            echo ""
+            echo "Шаг «Ship Mini App to the box and swap» упал или превысил свой предел."
+            echo "Живой \`dist\` на машине не тронут: подмена идёт только после полной передачи."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       # Проверка снаружи, а не по диску: свежая дата файла обновится и при
       # сборке старого дерева. Достаём имя бандла из отданного по https
@@ -804,7 +862,13 @@ jobs:
       #
       # Все три SHA печатаются РЯДОМ: совпадение видно глазом в логе, а не
       # выводится из того, что шаг не упал.
+      # Читает дерево БЭКЕНДА на машине — от Mini App не зависит. До DRF-2574
+      # шёл за успехом всех шагов и был пропущен четыре раза подряд: умирала
+      # отправка Mini App, и мы ни разу не подтвердили, что на машине лежит
+      # проверенный SHA. Теперь идёт, если пересборка прошла, что бы ни
+      # случилось с Mini App (но не при отмене прогона).
       - name: Readback — deployed tree is the verified SHA, not a rollback (DRF-2073)
+        if: ${{ !cancelled() && steps.rebuild.outcome == 'success' }}
         env:
           DEV_HOST: ${{ secrets.DEV_HOST }}
           DEV_USER: ${{ secrets.DEV_USER }}
