@@ -255,3 +255,43 @@ class TestTheMirrorMovesOnlyTheTime:
 
         mine.refresh_from_db()
         assert mine.start_at == start
+
+    def test_a_late_racer_does_not_overwrite_the_winner(self, client, home, monkeypatch) -> None:
+        """Сравнить-и-поставить: пока канон переносил, строку уже сдвинули
+        (другой перенос или событие). Опоздавший её не перезаписывает."""
+        stub = _stub(monkeypatch)
+        mine = _proxy(home, _identity(home, ME, AYLA_UID))
+        winner = _when(11)
+        original = stub.reschedule_appointment
+
+        def moved_meanwhile(**kwargs):
+            RemoteBookingProxy.all_tenants.filter(pk=mine.pk).update(start_at=winner)
+            return original(**kwargs)
+
+        stub.reschedule_appointment = moved_meanwhile  # type: ignore[method-assign]
+
+        assert _confirm(client, mine, _when(9)).status_code == 200
+
+        mine.refresh_from_db()
+        assert mine.start_at == winner
+
+
+class TestTheVersionRuleIsTheChats:
+    def test_the_mirrors_version_goes_to_the_canon_none_stays_none(
+        self, client, home, monkeypatch
+    ) -> None:
+        """Одно правило с чатом (_proxy_expected_version). NULL — сегодняшнее
+        состояние всех строк (DRF-2537) — уходит как None, и клиент тогда
+        поле не шлёт: «не проверять», а не «отказать»."""
+        stub = _stub(monkeypatch)
+        me = _identity(home, ME, AYLA_UID)
+        known = _proxy(home, me)
+        RemoteBookingProxy.all_tenants.filter(pk=known.pk).update(
+            last_applied_appointment_version=3
+        )
+        unknown = _proxy(home, me)
+
+        assert _confirm(client, known, _when(9)).status_code == 200
+        assert _confirm(client, unknown, _when(9)).status_code == 200
+
+        assert [c["expected_version"] for c in stub.calls] == [3, None]

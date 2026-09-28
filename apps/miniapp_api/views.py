@@ -1923,6 +1923,12 @@ def _reschedule_confirm_via_ayla(bot_user, booking_id: str, raw_body: bytes) -> 
             external_user_id=external_user_id_for(bot_user),
             appointment_id=str(booking_id),
             new_start_datetime=new_iso,
+            # То же правило, что у чата (tools.py, _proxy_expected_version):
+            # версия, которую зеркало знает. Сегодня она NULL у всех строк
+            # (DRF-2537) — тогда поле не отправляется вовсе
+            # (booking_client: ``if expected_version is not None``), то есть
+            # это «не проверять», а не «отказать».
+            expected_version=proxy.last_applied_appointment_version,
             idempotency_key=idempotency_key,
             specialist_id=str(proxy.specialist_id) if proxy.specialist_id else None,
             service_id=str(proxy.service_id) if proxy.service_id else None,
@@ -1976,7 +1982,11 @@ def _reschedule_confirm_via_ayla(bot_user, booking_id: str, raw_body: bytes) -> 
         try:
             from apps.booking.models import RemoteBookingProxy
 
-            RemoteBookingProxy.all_tenants.filter(pk=proxy.pk).update(
+            # Сравнить-и-поставить: пишем, только если строка стоит там, откуда
+            # переносили. Опоздавший из двух одновременных переносов прочёл
+            # устаревшее «откуда» и победителя не перезапишет — правду
+            # доведёт событие.
+            RemoteBookingProxy.all_tenants.filter(pk=proxy.pk, start_at=proxy.start_at).update(
                 start_at=moved_start, end_at=moved_end
             )
         except Exception:  # noqa: BLE001 — зеркало best-effort, см. выше
