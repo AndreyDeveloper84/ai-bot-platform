@@ -384,17 +384,30 @@ class TestRescheduleCustomerBooking:
         # Behavioural sanity — chain still continues to the original root.
         assert link3.original_booking_event_id == existing_booking.id
 
-        # Contract assertion: at least one query against
-        # apps_booking_bookingrequest is issued with FOR UPDATE OF.
-        # Postgres emits ``FOR UPDATE OF "apps_booking_bookingrequest"``;
-        # SQLite silently no-ops the FOR UPDATE (Django warning, no SQL
-        # appended). Skip the SQL assertion on SQLite; trust the patch-
-        # based assertion below.
+        # Contract assertion: at least one query against the BookingRequest
+        # table is issued with FOR UPDATE. SQLite silently no-ops the FOR
+        # UPDATE (Django warning, no SQL appended). Skip the SQL assertion on
+        # SQLite; trust the patch-based assertion below.
+        #
+        # DRF-2588: the table name comes from the model. The literal
+        # "apps_booking_bookingrequest" matched no query — the table is
+        # ``booking_bookingrequest`` — so this node was red on Postgres with
+        # the lock present (reschedule.py select_for_update on the old row
+        # and on the chain root), and deselected in CI as if the lock had
+        # gone.
+        #
+        # And it pins the ROOT row, not "some" BookingRequest: the old-row lock
+        # (reschedule.py, the link being moved) also emits FOR UPDATE on this
+        # table, so a table-only match stayed green with the root lock removed
+        # — measured by substitution under DRF-2588. The root here is
+        # ``existing_booking``; Postgres renders its id as 32 hex digits.
         if connection.vendor == "postgresql":
+            table = BookingRequest._meta.db_table
+            root_id = existing_booking.id.hex
             queries_with_lock = [
                 q["sql"]
                 for q in ctx.captured_queries
-                if "FOR UPDATE" in q["sql"] and "apps_booking_bookingrequest" in q["sql"]
+                if "FOR UPDATE" in q["sql"] and f'"{table}"' in q["sql"] and root_id in q["sql"]
             ]
             assert queries_with_lock, (
                 "Expected at least one BookingRequest SELECT with FOR UPDATE; "
