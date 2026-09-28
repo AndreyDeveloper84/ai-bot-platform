@@ -47,6 +47,12 @@ EXCEPTIONS: tuple[tuple[str, str, str], ...] = (
         "сигнал РАСПОЗНАВАНИЯ слов человека («какие слоты»), не наша речь",
     ),
     (
+        "apps/persona/voice.py",
+        "в том числе слово",
+        "запрет модели называет слово, которое запрещает (NO_INTERNAL_TERMS_RULE) — "
+        "человеку не показывается",
+    ),
+    (
         "apps/orchestrator/intent_resolution.py",
         "resolver намерений Ayla",
         "промпт классификатора; «слот» там — поле разбора намерения, выход — "
@@ -244,6 +250,41 @@ class TestTheGuardSeesWhatAPersonSees:
             '    return "Свободные слоты на завтра:"\n'
         )
         assert [line for line, _ in python_hits(src)] == [4]
+
+
+class TestTheModelIsToldNotToSayIt:
+    """Строка запрета стоит в обоих промптах, которые отвечают о времени записи.
+
+    ПРЕДЕЛ, и он главный: узел охраняет ОБЕЩАНИЕ от удаления, но не его
+    ИСПОЛНЕНИЕ. Модель может ослушаться, а в CI модели нет.
+
+    Замер 28.09 через обвязку ``apps/replay/tests/test_live_path_gate.py``
+    (канареечная модель): «есть свободные слоты?» на живом пути —
+    ``llm_called=True``, ответ даёт консьерж, детерминированной ветки нет.
+    Replay-фикстуры для этого входа НЕТ намеренно: контракт набора требует,
+    чтобы запрещённое не пересекалось со словами человека (сверка с эхом), а
+    здесь запрещено именно слово человека. Да и гейт на ходе модели лишь
+    пропускает фикстуру по имени. Голос модели проверяется прогоном на
+    стенде, не здесь.
+    """
+
+    def test_the_concierge_prompt_carries_the_rule(self):
+        from apps.orchestrator.concierge import build_concierge_system_prompt
+        from apps.persona.voice import NO_INTERNAL_TERMS_RULE
+
+        prompt = build_concierge_system_prompt()
+
+        assert NO_INTERNAL_TERMS_RULE in prompt
+
+    def test_the_booking_prompt_carries_the_rule(self):
+        from apps.persona.voice import NO_INTERNAL_TERMS_RULE
+        from apps.skills.booking.prompts import BrandVoiceConfig, build_booking_prompt
+
+        messages = build_booking_prompt(
+            brand_voice=BrandVoiceConfig(persona="Алина"), query="есть свободные слоты?"
+        )
+
+        assert NO_INTERNAL_TERMS_RULE in messages[0]["content"]
 
 
 class TestUnderstoodButNotSaid:

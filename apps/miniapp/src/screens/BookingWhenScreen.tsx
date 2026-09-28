@@ -136,7 +136,7 @@ export function BookingWhenScreen() {
       title="Выберите время"
       cta={
         <StickyCta onClick={onContinue} disabled={!draft.visitAt}>
-          {draft.visitAt ? "Дальше" : "Выберите время"}
+          {draft.visitAt ? "Дальше" : "Выбрать время"}
         </StickyCta>
       }
     >
