@@ -272,9 +272,10 @@ class TestSpecialistKeys:
 MIRROR_KEY_EXCEPTIONS: dict[tuple[str, int], str] = {}
 
 #: Сколько вызовов через ``specialist_keys`` гард обязан видеть — фактическое
-#: число после правки (visit_source ×3, schedule, master_deactivation,
-#: bookings ×2), не «≥1»: пустой скан не читается как «нарушителей нет».
-EXPECTED_RESOLVED_SITES = 7
+#: число после правки (visit_source ×4 — четвёртое ``attended_visits``,
+#: DRF-1138; schedule, master_deactivation, bookings ×2), не «≥1»: пустой
+#: скан не читается как «нарушителей нет».
+EXPECTED_RESOLVED_SITES = 8
 
 _QUERY_ATTRS = {"filter", "exclude", "get"}
 _KEYS = {"specialist_id", "specialist_id__in"}
