@@ -2208,6 +2208,75 @@ a {
   text-align: left;
 }
 
+/* DRF-2527 — элементы, собранные инлайном ЦЕЛИКОМ, одеты классами.
+   Объявления перенесены из `style={{…}}` ДОСЛОВНО (число JSX → px),
+   ни одного своего решения о виде — рефакторинг ≠ редизайн (решение
+   владельца 28.09, п.10). Равенство вида до/после снято полным
+   getComputedStyle в Chrome, обе темы. */
+
+/* Всплывающее уведомление (Snackbar.tsx): класс стоял, правила не было —
+   запись BASELINE стилевого контракта снята. */
+.snackbar {
+  position: fixed;
+  left: var(--s-3);
+  right: var(--s-3);
+  bottom: calc(var(--s-6) + var(--safe-bottom, 0px));
+  background: var(--c-text-primary);
+  color: var(--c-bg);
+  padding: var(--s-3) var(--s-4);
+  border-radius: var(--r-md);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
+  z-index: 100;
+}
+
+.snackbar__action {
+  background: transparent;
+  color: var(--c-accent-subtle);
+  border: none;
+  font: inherit;
+  font-weight: 600;
+  padding: var(--s-1) var(--s-2);
+  cursor: pointer;
+}
+
+/* Матрица услуг мастеров (AdminServicesMatrixScreen.tsx). */
+.services-matrix__dirty-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--c-accent);
+  flex-shrink: 0;
+}
+
+.services-matrix__master-services {
+  padding: var(--s-2) var(--s-3) var(--s-3);
+  background: var(--c-surface-1);
+}
+
+.services-matrix__save-bar {
+  position: fixed;
+  inset-inline: 0;
+  bottom: 0;
+  padding: var(--s-2) var(--s-3) calc(var(--s-3) + env(safe-area-inset-bottom, 0px));
+  background: var(--c-surface-1);
+  border-top: 1px solid var(--c-divider);
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  z-index: 5;
+}
+
+/* Разделитель в настройках мастера (MasterSettingsScreen.tsx). */
+.master-settings__divider {
+  border: 0;
+  border-top: 1px solid var(--c-divider);
+  margin: var(--s-4) 0;
+}
+
 /* ---- «Ещё» bottom sheet (Tau §3) ------------------------------------ */
 
 /* ---- Tier 2 Клиенты / Услуги read-only cards (Tau §4.3 / §4.4) ------- */
