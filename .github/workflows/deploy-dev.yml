@@ -876,8 +876,19 @@ jobs:
           DEPLOY_SHA: ${{ steps.verified.outputs.sha }}
           HEAD_AT_GUARD: ${{ steps.head_guard.outputs.dev_head }}
           EVENT_NAME: ${{ github.event_name }}
+        # DRF-2592: у красного здесь ДВА смысла, и слова у них разные.
+        # «Выкладке нельзя верить» — три ::error:: ниже, по прочитанному дереву.
+        # «Посмотреть не удалось» — ssh вернул 255 (код самого ssh: отказ
+        # транспорта, не ответ удалённой команды) или упала команда чтения на
+        # хосте. До DRF-2592 второй случай обрывал шаг под `bash -e` без единого
+        # слова и читался как первый: 28.09 выкладка 2fb6a50c прошла и жила, а
+        # красным стал только этот шаг — «Connection closed … port 22», 255.
+        # Непроверенная выкладка не зелёная, поэтому и второй исход красный, но
+        # называет себя. Повтор — только на 255: проверка входит на хост в
+        # момент пика, который создала сама выкладка (2 vCPU), и одного входа
+        # мало. Сравнение SHA не ослаблено ни на символ.
         run: |
-          DEPLOYED="$(ssh -i ~/.ssh/dev_deploy "${DEV_USER}@${DEV_HOST}" bash -lc "
+          READBACK_REMOTE="
             set -euo pipefail
             # Актор — в лог (DRF-1646); в stderr, потому что stdout этого
             # блока разбирается построчно ниже.
@@ -888,7 +899,23 @@ jobs:
             sudo -u \"\$OWNER\" -H git rev-parse HEAD
             sudo -u \"\$OWNER\" -H git rev-parse origin/dev
             sudo -u \"\$OWNER\" -H git merge-base --is-ancestor HEAD origin/dev && echo ancestor || echo NOT-ancestor
-          ")"
+          "
+          ATTEMPTS=3
+          for attempt in $(seq 1 "${ATTEMPTS}"); do
+            RC=0
+            DEPLOYED="$(ssh -i ~/.ssh/dev_deploy "${DEV_USER}@${DEV_HOST}" bash -lc "${READBACK_REMOTE}")" || RC=$?
+            [ "${RC}" -ne 255 ] && break
+            echo "::warning::readback: ssh не ответил (код 255), попытка ${attempt} из ${ATTEMPTS}"
+            if [ "${attempt}" -lt "${ATTEMPTS}" ]; then sleep 20; fi
+          done
+          if [ "${RC}" -eq 255 ]; then
+            echo "::error::ПРОВЕРКА НЕ ВЫПОЛНЕНА, выкладка не опровергнута: ssh к стенду не ответил ${ATTEMPTS} раза подряд (код 255 — отказ транспорта, а не ответ хоста). Дерево хоста не прочитано, проверенный ${DEPLOY_SHA} не подтверждён и не опровергнут — это не откат; смотреть стенд напрямую"
+            exit 1
+          fi
+          if [ "${RC}" -ne 0 ]; then
+            echo "::error::ПРОВЕРКА НЕ ВЫПОЛНЕНА, выкладка не опровергнута: команда чтения дерева на хосте завершилась с кодом ${RC}. Дерево хоста не прочитано, проверенный ${DEPLOY_SHA} не подтверждён и не опровергнут — это не откат"
+            exit 1
+          fi
           TREE="$(printf '%s\n' "$DEPLOYED" | sed -n 1p)"
           DEV_NOW="$(printf '%s\n' "$DEPLOYED" | sed -n 2p)"
           ANCESTRY="$(printf '%s\n' "$DEPLOYED" | sed -n 3p)"
