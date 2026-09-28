@@ -178,6 +178,23 @@ describe("CustomerRecordsScreen (real data)", () => {
     ]);
   });
 
+  it("DRF-2436 B / п.15: у каждой записи в строке — мастер и салон; два салона различимы", async () => {
+    // Пара, которая обязана различаться: записи одного человека из двух
+    // салонов в одном списке. Без салона строка прежняя — «у {мастер}».
+    mockLists([
+      booking({ id: "b-s1", master_name: "Ольга", salon_name: "Формула тела", visit_at: isoInHours(20) }),
+      booking({ id: "b-s2", master_name: "Марина", salon_name: "Люмина", visit_at: isoInHours(40) }),
+      booking({ id: "b-s3", master_name: "Анна", visit_at: isoInHours(60) }),
+    ]);
+    renderScreen();
+
+    expect(await screen.findByText("у Ольга · Формула тела")).toBeInTheDocument();
+    expect(screen.getByText("у Марина · Люмина")).toBeInTheDocument();
+    // Без салона в проводе — без хвоста « · », не «у Анна · ».
+    expect(screen.getByText("у Анна")).toBeInTheDocument();
+    expect(screen.queryByText(/ · $/)).not.toBeInTheDocument();
+  });
+
   it("DRF-2172: цена записи «3 200 ₽» на карточке; без цены строки нет, не «0 ₽»", async () => {
     mockLists([
       booking({ id: "b-p1", service_name: "Лимфодренаж", price: "3200.00", visit_at: isoInHours(20) }),

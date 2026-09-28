@@ -1904,6 +1904,9 @@ def _proxy_booking_to_dict(proxy, *, tenant) -> dict[str, Any]:
         "service_name": service.name if service else "",
         "master_id": str(master.id) if master else None,
         "master_name": master.name if master else "",
+        # DRF-2436 / решение владельца п.15: у каждой записи видно, в каком
+        # салоне она создана. Имя — клиентское имя салона (как у витрины), не ID.
+        "salon_name": proxy.tenant.name,
         "visit_at": proxy.start_at.isoformat() if proxy.start_at else "",
         "duration_min": duration_min,
         # Immediate-cancel path — no two-step undo flow on the Ayla path.
@@ -1967,9 +1970,11 @@ def _bookings_list_ayla(request: HttpRequest, bot_user) -> HttpResponse:
 
     before = _parse_iso_datetime(request.GET.get("before"))
 
-    qs = RemoteBookingProxy.all_tenants.filter(
-        tenant=bot_user.tenant,
-        bot_user=bot_user,
+    # DRF-2436 B / решение владельца п.15: «Мои записи» — единый личный список
+    # по ВСЕМ салонам. Отбор по салону ушёл; владение — человек (все личности
+    # подписанного аккаунта), как у детали, отмены и оплаты.
+    qs = RemoteBookingProxy.all_tenants.select_related("tenant").filter(
+        bot_user__in=_person_bot_users(bot_user),
     )
     now = timezone.now()
     if is_past_view:
@@ -1994,31 +1999,18 @@ def _bookings_list_ayla(request: HttpRequest, bot_user) -> HttpResponse:
 
     return JsonResponse(
         {
-            "items": [_proxy_booking_to_dict(p, tenant=bot_user.tenant) for p in rows],
+            "items": [_proxy_booking_to_dict(p, tenant=p.tenant) for p in rows],
             "next_cursor": next_cursor,
         }
     )
 
 
 def _person_bot_users(bot_user):
-    """Все личности человека, чей ``initData`` подписан (DRF-2436).
+    """Все личности подписанного аккаунта — одно правило для всех поверхностей
+    (:func:`apps.identity.services.bot_user_resolver.person_bot_users`, DRF-2436)."""
+    from apps.identity.services.bot_user_resolver import person_bot_users
 
-    Личность бота — «channel-scoped identity inside a tenant»: глобальный бот
-    держит одну под служебным салоном, переход к записи в салон T заводит ещё
-    одну в T (``orchestrator/handoff.py``). Mini App узнаёт человека под ОДНИМ
-    салоном (``MAX_BOT_TENANT_SLUG``), а запись лежит в зеркале под личностью
-    своего салона — поэтому чтение по одной личности не находило записей в
-    других салонах.
-
-    Множество выводится ТОЛЬКО из ``bot_user``, которого ``require_init_data``
-    получил из подписи: тот же канал и тот же внешний id. Из параметров запроса
-    — ничего, иначе это стало бы способом посмотреть чужое. Тем же правилом
-    человека видит и Ayla: ``external_user_id_for`` = ``bot:{channel}:{id}``,
-    одинаковый у всех его личностей.
-    """
-    return BotUser.all_tenants.filter(
-        channel=bot_user.channel, channel_user_id=bot_user.channel_user_id
-    )
+    return person_bot_users(bot_user)
 
 
 def _person_owned_proxy(bot_user, appointment_id: str):
@@ -5089,6 +5081,10 @@ class _ActivityRow(NamedTuple):
     status: str
     #: Booking-time price snapshot (DRF-2172); None when the source has none.
     price_amount: Decimal | None
+    #: DRF-2436 B — салон САМОЙ записи (имя и адрес). После п.15 ближайшая
+    #: запись может быть в любом салоне человека: салон запроса здесь солгал бы.
+    salon_name: str
+    salon_address: str | None
 
 
 def _recent_activity_from_mirror(
@@ -5109,9 +5105,9 @@ def _recent_activity_from_mirror(
     """
     from apps.booking.models import RemoteBookingProxy
 
-    owned = RemoteBookingProxy.all_tenants.filter(
-        tenant=bot_user.tenant,
-        bot_user=bot_user,
+    # DRF-2436 B / п.15: ближайшая запись — по человеку, из любого салона.
+    owned = RemoteBookingProxy.all_tenants.select_related("tenant").filter(
+        bot_user__in=_person_bot_users(bot_user),
         status__in=_AYLA_UPCOMING_STATUSES,
     )
 
@@ -5127,6 +5123,8 @@ def _recent_activity_from_mirror(
             booking_id=str(proxy.appointment_id),
             status=str(proxy.status),
             price_amount=proxy.price_amount,
+            salon_name=proxy.tenant.name,
+            salon_address=proxy.tenant.address,
         )
 
     this_week_count = owned.filter(
@@ -5169,6 +5167,8 @@ def _recent_activity_from_local(
             status=str(booking.status),
             # The local BookingRequest keeps no price (DRF-2172) — null, honestly.
             price_amount=None,
+            salon_name=booking.tenant.name,
+            salon_address=booking.tenant.address,
         )
 
     this_week_count = owned.filter(
@@ -5317,12 +5317,12 @@ def customer_recent_activity(request: HttpRequest) -> HttpResponse:
             "service_name": next_row.service_name,
             "duration_min": next_row.duration_min,
             "master_name": next_row.master_name,
-            "salon_name": tenant.name,
+            "salon_name": next_row.salon_name,
             # Дословно как в колонке: `None` уезжает как `null`, `""` —
             # как `""`. Ни `or ""`, ни `?? ""` здесь быть не может: они
             # схлопнули бы «источник промолчал» в «адреса нет», то есть
             # выдали бы наш пробел за ответ салона.
-            "address": tenant.address,
+            "address": next_row.salon_address,
             "booking_id": next_row.booking_id,
             # DRF-2172 — цена записи «3 200 ₽» (макет DRF-1321): снимок из
             # зеркала (`price_total` события); локальный путь цены не хранит
