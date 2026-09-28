@@ -21,7 +21,6 @@ routed back through the global bot is a follow-up (after the P0 Ayla reground).
 from __future__ import annotations
 
 import logging
-import re
 import uuid
 
 from django.conf import settings
@@ -1327,38 +1326,20 @@ def route_booking_callback(
 # (brief §3) and the mute guard that keeps the bot silent while an operator
 # drives ANY of the user's dialogs.
 
-# A keyword occurrence is rejected when a standalone negation particle sits
-# within this many characters before it («мне не нужен оператор»). Word-boundary
-# matching: Cyrillic letters are word chars, so «ненужен» does not false-trip.
-_NEGATION_WINDOW = 15
-_NEGATION_RE = re.compile(r"\b(?:не|без)\b")
-
 
 def matches_human_handoff_request(text: str) -> bool:
     """Deterministic «user asks for a human» check for the global path (DRF-1015).
 
-    Reuses the tenant skill's ``_HANDOFF_KEYWORDS`` — imported, NEVER
-    duplicated, so DRF-972's dictionary extension lands on both paths at once.
-    Plain substring matching would fire on «мне не нужен оператор», so an
-    occurrence is rejected when a standalone «не»/«без» appears in the short
-    window before it; the text counts as a request when at least one
-    occurrence is NOT negated. Deliberately a small deterministic filter, not
-    a classifier — the pilot needs a working exit to a human, not perfect NLU.
+    Delegates to the tenant skill's rule — ONE rule for both paths
+    (DRF-2545). Before that the two paths answered the same question
+    differently: the skill by bare substring, this function by the same
+    substring plus a 15-character negation window. Measured on the
+    DRF-2545 corpora they fired on 24/24 and 21/24 non-requests; the rule,
+    its limits and the numbers live in ``apps.skills.human_handoff.skill``.
     """
-    from apps.skills.human_handoff.skill import _HANDOFF_KEYWORDS
+    from apps.skills.human_handoff.skill import is_handoff_request
 
-    lower = text.lower()
-    for keyword in _HANDOFF_KEYWORDS:
-        start = 0
-        while True:
-            idx = lower.find(keyword, start)
-            if idx < 0:
-                break
-            window = lower[max(0, idx - _NEGATION_WINDOW) : idx]
-            if not _NEGATION_RE.search(window):
-                return True
-            start = idx + len(keyword)
-    return False
+    return is_handoff_request(text)
 
 
 def person_handoff_muted(*, channel: str, channel_user_id: str) -> bool:
