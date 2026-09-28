@@ -228,6 +228,8 @@ def bind_solo_identity_after_provisioning(link: Any, *, bot_user: Any) -> str | 
     представляется, потом связывается.
     """
 
+    import httpx
+
     from apps.integrations.ayla.identity_client import IdentityResolveError, resolve_identity
     from apps.integrations.ayla.user_proxy import external_user_id_for
 
@@ -236,7 +238,11 @@ def bind_solo_identity_after_provisioning(link: Any, *, bot_user: Any) -> str | 
         return "not_provisioned"
     try:
         resolve_identity(external_user_id_for(bot_user))
-    except IdentityResolveError:
+    # ``resolve_identity`` оборачивает только таймаут и сетевую ошибку;
+    # ``RemoteProtocolError`` («сервер закрыл соединение» — рестарт воркера
+    # каталога) и прочие ``httpx.HTTPError`` выходят сырыми. Обещание «не
+    # выпускает исключений» держится здесь, а не в чужом клиенте.
+    except (IdentityResolveError, httpx.HTTPError):
         logger.info(
             "identity.specialist_identity_link.solo_resolve_failed specialist=%s person=%s",
             specialist_id,

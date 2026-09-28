@@ -71,6 +71,7 @@ class _FakeCatalog:
         self.door_specialists: list = []
         self.provisioning_refusal: str | None = None
         self.resolve_fails = False
+        self.resolve_raises: Exception | None = None
         self.door_refusal: str | None = None
 
     def provision(self, link, *, tenant, bot_user, display_name, http_client=None):
@@ -90,6 +91,8 @@ class _FakeCatalog:
 
     def resolve(self, external_user_id, *, timeout_s=None):
         self.calls.append("resolve")
+        if self.resolve_raises is not None:
+            raise self.resolve_raises
         if self.resolve_fails:
             raise IdentityResolveError("catalog down")
         self.seen.add(external_user_id)
@@ -232,6 +235,31 @@ class TestTheDoorsRefusalIsSurvived:
         assert "door" not in catalog.calls
         assert _registered(emitted)["identity_link_refusal"] == "identity_unreachable"
         assert _link().status == SoloIdentityLink.Status.PENDING
+
+    def test_a_dropped_connection_is_named_not_raised(self, catalog) -> None:
+        """``resolve_identity`` пропускает ``RemoteProtocolError`` сырым (рестарт
+        воркера каталога). Помощник обещает не выпускать исключений — и держит
+        это сам; до правки исключение уходило из регистрации."""
+        import httpx
+
+        from apps.identity.services.specialist_identity_link import (
+            bind_solo_identity_after_provisioning,
+        )
+
+        catalog.resolve_raises = httpx.RemoteProtocolError("Server disconnected")
+
+        class _Link:
+            catalog_specialist_id = SPECIALIST_ID
+
+        class _BotUser:
+            pk = 1
+            channel = "max"
+            channel_user_id = "solo-2450-1"
+
+        reason = bind_solo_identity_after_provisioning(_Link(), bot_user=_BotUser())
+
+        assert reason == "identity_unreachable"
+        assert "door" not in catalog.calls
 
     def test_an_unprovisioned_workspace_is_not_linked(self, catalog, said, emitted) -> None:
         """Без подтверждённого профиля дверь сверять не с чем — её не зовут."""
