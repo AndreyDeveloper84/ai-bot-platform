@@ -7,20 +7,27 @@
  * - корень `/`: не готово → экран 01, готово → «Мой день», сеть упала —
  *   «Мой день».
  */
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../lib/master-api", async (importOriginal) => {
   const original = await importOriginal<typeof import("../lib/master-api")>();
-  return { ...original, getOnboardingReadiness: vi.fn() };
+  return { ...original, getOnboardingReadiness: vi.fn(), getPublicationStatus: vi.fn() };
 });
 
-import { getOnboardingReadiness, type OnboardingReadiness } from "../lib/master-api";
+import {
+  getOnboardingReadiness,
+  getPublicationStatus,
+  type OnboardingReadiness,
+  type PublicationStatus,
+} from "../lib/master-api";
+import { PUBLICATION_COPY } from "../screens/MasterPublicationScreen";
 import { SETUP_CARD_CTA, SETUP_CARD_TITLE, SetupProgressCard } from "./SetupProgressCard";
 import { SoloSetupGate } from "./SoloSetupGate";
 
 const mocked = vi.mocked(getOnboardingReadiness);
+const mockedPublication = vi.mocked(getPublicationStatus);
 
 const NOT_READY: OnboardingReadiness = {
   ready: false,
@@ -99,6 +106,77 @@ describe("SetupProgressCard", () => {
     renderCard();
     await waitFor(() => expect(mocked).toHaveBeenCalledTimes(1));
     expect(screen.queryByTestId("setup-card")).toBeNull();
+  });
+});
+
+describe("вход на отправку на «Моём дне» (§6-квартер, вопрос 1)", () => {
+  // Экран 01 при «готов» не открывается, и карточка настройки пряталась —
+  // вход на отправку был недостижим. Теперь он здесь, но только для профиля,
+  // который ещё не отправлен, и только связанному мастеру.
+  const READY_LINKED: OnboardingReadiness = {
+    ...READY,
+    identity: { state: "linked", link_status: "LINKED" },
+  };
+  const status = (profile_status: string): PublicationStatus => ({
+    specialist_id: "s-1",
+    profile_status,
+    readiness: { status: "READY", missing: [] },
+    last_request: null,
+  });
+
+  function renderCard() {
+    render(
+      <MemoryRouter initialEntries={["/solo/my-day"]}>
+        <Routes>
+          <Route path="/solo/my-day" element={<SetupProgressCard />} />
+          <Route path="*" element={<LocationProbe />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+  }
+
+  it("готово, связан, профиль draft — зовёт отправить и ведёт на экран отправки", async () => {
+    mocked.mockResolvedValue(READY_LINKED);
+    mockedPublication.mockResolvedValue(status("draft"));
+    renderCard();
+
+    const card = await screen.findByTestId("submit-card");
+    expect(within(card).getByRole("heading", { name: PUBLICATION_COPY.readyTitle })).toBeInTheDocument();
+    expect(screen.queryByTestId("setup-card")).toBeNull();
+    fireEvent.click(within(card).getByRole("button", { name: PUBLICATION_COPY.submit }));
+    expect(screen.getByTestId("location")).toHaveTextContent("/solo/publication");
+  });
+
+  it.each(["pending", "active"])("профиль %s — уже отправлен, не зовём", async (profileStatus) => {
+    mocked.mockResolvedValue(READY_LINKED);
+    mockedPublication.mockResolvedValue(status(profileStatus));
+    renderCard();
+    await waitFor(() => expect(mockedPublication).toHaveBeenCalledTimes(1));
+    expect(screen.queryByTestId("submit-card")).toBeNull();
+  });
+
+  it("статус не прочитан — не знаем, отправлен ли, карточки нет", async () => {
+    mocked.mockResolvedValue(READY_LINKED);
+    mockedPublication.mockRejectedValue(new Error("down"));
+    renderCard();
+    await waitFor(() => expect(mockedPublication).toHaveBeenCalledTimes(1));
+    expect(screen.queryByTestId("submit-card")).toBeNull();
+  });
+
+  it("готово, но личность не связана — отправить нельзя, статус не спрашиваем", async () => {
+    mocked.mockResolvedValue(READY);
+    renderCard();
+    await waitFor(() => expect(mocked).toHaveBeenCalledTimes(1));
+    expect(mockedPublication).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("submit-card")).toBeNull();
+  });
+
+  it("не готово — прежняя карточка настройки, входа на отправку нет", async () => {
+    mocked.mockResolvedValue(NOT_READY);
+    renderCard();
+    await screen.findByTestId("setup-card");
+    expect(screen.queryByTestId("submit-card")).toBeNull();
+    expect(mockedPublication).not.toHaveBeenCalled();
   });
 });
 

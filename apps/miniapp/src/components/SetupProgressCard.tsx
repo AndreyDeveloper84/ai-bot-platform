@@ -6,6 +6,14 @@
  * настройка не закрыта: перечисляет незакрытые пункты (как факт, не как
  * счётчик времени — ни процентов, ни «N из M») и ведёт на экран 01.
  * Ручка недоступна — карточки нет: чек-лист не важнее кабинета.
+ *
+ * §6-квартер, вопрос 1 (решение 28.09): когда настройка закрыта, вход на
+ * отправку профиля живёт здесь. Раньше он был только на экране 01, а экран 01
+ * при «готов» не открывается (корень уводит на «Мой день», эта карточка
+ * пряталась) — кнопка, чьё условие включения прячет её носителя, недостижима.
+ * Зовём отправлять только профиль в `draft` по ответу каталога: отправленный
+ * (`pending`) или опубликованный (`active`) не зовём; статус не прочитан —
+ * карточки нет (не знаем — не утверждаем). Слова — экрана отправки.
  */
 import { useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
@@ -13,9 +21,16 @@ import { useLocation, useNavigate } from "react-router-dom";
 import {
   actionableReadinessItems,
   getOnboardingReadiness,
+  getPublicationStatus,
   type OnboardingReadiness,
 } from "../lib/master-api";
-import { itemLabel, SETUP_ROUTE } from "../screens/MasterSetupLandingScreen";
+import { PUBLICATION_COPY } from "../screens/MasterPublicationScreen";
+import {
+  canSubmitProfile,
+  itemLabel,
+  PUBLICATION_ROUTE,
+  SETUP_ROUTE,
+} from "../screens/MasterSetupLandingScreen";
 
 export const SETUP_CARD_TITLE = "Продолжить настройку";
 export const SETUP_CARD_CTA = "Открыть чек-лист";
@@ -30,13 +45,19 @@ export function SetupProgressCard() {
   // владельцу, а не пункт самонастройки.
   const onSoloSurface = location.pathname.startsWith("/solo/");
   const [readiness, setReadiness] = useState<OnboardingReadiness | null>(null);
+  // Профиль ещё не отправлен (`draft` по ответу каталога) — только тогда зовём.
+  const [draft, setDraft] = useState(false);
 
   useEffect(() => {
     if (!onSoloSurface) return;
     let cancelled = false;
     getOnboardingReadiness()
-      .then((data) => {
-        if (!cancelled) setReadiness(data);
+      .then(async (data) => {
+        if (cancelled) return;
+        setReadiness(data);
+        if (!canSubmitProfile(data)) return;
+        const publication = await getPublicationStatus();
+        if (!cancelled) setDraft(publication.profile_status === "draft");
       })
       .catch(() => {
         /* без карточки — кабинет важнее */
@@ -46,7 +67,31 @@ export function SetupProgressCard() {
     };
   }, [onSoloSurface]);
 
-  if (!onSoloSurface || !readiness || readiness.ready) return null;
+  if (!onSoloSurface || !readiness) return null;
+  if (readiness.ready) {
+    if (!canSubmitProfile(readiness) || !draft) return null;
+    return (
+      <section
+        className="master-dashboard__section"
+        aria-labelledby="submit-card-title"
+      >
+        <div className="setup-card" data-testid="submit-card">
+          <h2 id="submit-card-title" className="setup-card__title">
+            {PUBLICATION_COPY.readyTitle}
+          </h2>
+          {/* Вид — тот же, что у действия карточки «Продолжить настройку»:
+              новая главная кнопка на «Моём дне» была бы решением о виде. */}
+          <button
+            type="button"
+            className="btn-secondary"
+            onClick={() => navigate(PUBLICATION_ROUTE)}
+          >
+            {PUBLICATION_COPY.submit}
+          </button>
+        </div>
+      </section>
+    );
+  }
   const open = actionableReadinessItems(readiness.items).filter(
     (item) => item.state !== "done",
   );
