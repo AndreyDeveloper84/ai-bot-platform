@@ -5,6 +5,7 @@
 реестра моделей; дальше — текст исходников из `git ls-files`, без тестов
 и миграций. Один проход по строкам строит индекс, поля ищутся в нём.
 """
+
 from __future__ import annotations
 
 import json
@@ -27,22 +28,29 @@ ROOT = os.path.normcase(os.getcwd())
 
 
 def tracked_py() -> list[str]:
-    out = subprocess.run(["git", "ls-files", "*.py"], capture_output=True, text=True, check=True).stdout
+    out = subprocess.run(
+        ["git", "ls-files", "*.py"], capture_output=True, text=True, check=True
+    ).stdout
     keep = []
     for p in out.splitlines():
         lp = p.replace("\\", "/")
         base = lp.split("/")[-1]
-        if "/migrations/" in lp or "/tests/" in lp or base.startswith("test_") or base == "conftest.py":
+        if (
+            "/migrations/" in lp
+            or "/tests/" in lp
+            or base.startswith("test_")
+            or base == "conftest.py"
+        ):
             continue
         keep.append(lp)
     return keep
 
 
 FILES = tracked_py()
-WRITE = defaultdict(list)   # имя -> места присваивания / kwarg / ключа словаря
+WRITE = defaultdict(list)  # имя -> места присваивания / kwarg / ключа словаря
 QUOTED = defaultdict(list)  # строка в кавычках -> места
-CONST = defaultdict(list)   # .CONST -> места
-DECL = set()                # (path, line, name) — объявления полей
+CONST = defaultdict(list)  # .CONST -> места
+DECL = set()  # (path, line, name) — объявления полей
 ALLTEXT = {}
 
 RX_ASSIGN = re.compile(r"(?<![\w.])\.?(\w+)\s*(?<![=!<>+\-*/%&|^:])=(?!=)")
@@ -78,9 +86,20 @@ def own(model) -> bool:
     return os.path.normcase(os.path.abspath(f)).startswith(ROOT)
 
 
-result = {"root": ROOT, "files_scanned": len(ALLTEXT), "models": 0, "fields": 0, "choices": 0,
-          "fields_no_writer": [], "fields_quoted_only": [], "choices_unassigned": [], "choices_not_assigned_inline": [],
-          "prose": [], "tasks_unwired": [], "settings_unread": []}
+result = {
+    "root": ROOT,
+    "files_scanned": len(ALLTEXT),
+    "models": 0,
+    "fields": 0,
+    "choices": 0,
+    "fields_no_writer": [],
+    "fields_quoted_only": [],
+    "choices_unassigned": [],
+    "choices_not_assigned_inline": [],
+    "prose": [],
+    "tasks_unwired": [],
+    "settings_unread": [],
+}
 
 for model in apps.get_models():
     if not own(model):
@@ -96,15 +115,26 @@ for model in apps.get_models():
             for member in v:
                 consts[str(member.value)].append(member.name)
     for f in model._meta.concrete_fields:
-        if f.primary_key or f.auto_created or getattr(f, "auto_now", False) or getattr(f, "auto_now_add", False):
+        if (
+            f.primary_key
+            or f.auto_created
+            or getattr(f, "auto_now", False)
+            or getattr(f, "auto_now_add", False)
+        ):
             continue
         result["fields"] += 1
         names = {f.name, f.attname}
         writes = [f"{p}:{i}" for n in names for (p, i) in WRITE.get(n, []) if (p, i, n) not in DECL]
         quoted = [loc for n in names for loc in QUOTED.get(n, [])]
-        entry = {"field": f"{label}.{f.name}", "type": type(f).__name__, "null": f.null,
-                 "default": f.has_default(), "writes": len(writes), "quoted": len(quoted),
-                 "sample": (writes or quoted)[:4]}
+        entry = {
+            "field": f"{label}.{f.name}",
+            "type": type(f).__name__,
+            "null": f.null,
+            "default": f.has_default(),
+            "writes": len(writes),
+            "quoted": len(quoted),
+            "sample": (writes or quoted)[:4],
+        }
         if not writes and not quoted:
             result["fields_no_writer"].append(entry)
         elif not writes:
@@ -118,17 +148,29 @@ for model in apps.get_models():
                 sval = str(value)
                 lit = QUOTED.get(sval, [])
                 # объявления: CONST = "value" и строки кортежа choices сами не «присваивание»
-                lit = [loc for loc in lit if not re.match(
-                    rf"^\s*([A-Z_0-9]+\s*=\s*|\(\s*)[\"']{re.escape(sval)}[\"']",
-                    ALLTEXT[loc.rsplit(":", 1)[0]].splitlines()[int(loc.rsplit(":", 1)[1]) - 1])]
+                lit = [
+                    loc
+                    for loc in lit
+                    if not re.match(
+                        rf"^\s*([A-Z_0-9]+\s*=\s*|\(\s*)[\"']{re.escape(sval)}[\"']",
+                        ALLTEXT[loc.rsplit(":", 1)[0]].splitlines()[int(loc.rsplit(":", 1)[1]) - 1],
+                    )
+                ]
                 cref = [loc for c in consts.get(sval, []) for loc in CONST.get(c, [])]
                 if not lit and not cref:
-                    result["choices_unassigned"].append({"field": f"{label}.{f.name}", "value": sval,
-                                                         "consts": consts.get(sval, [])})
+                    result["choices_unassigned"].append(
+                        {
+                            "field": f"{label}.{f.name}",
+                            "value": sval,
+                            "consts": consts.get(sval, []),
+                        }
+                    )
                 else:
                     # второй уровень: есть ли хоть одна строка, где значение стоит рядом
                     # с присваиванием ЭТОГО поля (field=…, .field = …, "field": …)
-                    arx = re.compile(rf"{re.escape(f.name)}s*(=(?!=)|[\"']s*:)|[\"']{re.escape(f.name)}[\"']s*:")
+                    arx = re.compile(
+                        rf"{re.escape(f.name)}s*(=(?!=)|[\"']s*:)|[\"']{re.escape(f.name)}[\"']s*:"
+                    )
                     inline = []
                     for loc in lit + cref:
                         pth, ln = loc.rsplit(":", 1)
@@ -136,12 +178,20 @@ for model in apps.get_models():
                         if arx.search(line):
                             inline.append(loc)
                     if not inline:
-                        result["choices_not_assigned_inline"].append({
-                            "field": f"{label}.{f.name}", "value": sval,
-                            "consts": consts.get(sval, []), "mentions": (lit + cref)[:5]})
+                        result["choices_not_assigned_inline"].append(
+                            {
+                                "field": f"{label}.{f.name}",
+                                "value": sval,
+                                "consts": consts.get(sval, []),
+                                "mentions": (lit + cref)[:5],
+                            }
+                        )
 
-PROSE = re.compile(r"used by|boosts?\b|capped|retrievable|consumed by|read by|feeds (the|into)|drives the|"
-                   r"показыва|ограничен|используется (в|для|кросс)|кросс-доменн", re.I)
+PROSE = re.compile(
+    r"used by|boosts?\b|capped|retrievable|consumed by|read by|feeds (the|into)|drives the|"
+    r"показыва|ограничен|используется (в|для|кросс)|кросс-доменн",
+    re.I,
+)
 for path, text in ALLTEXT.items():
     for i, line in enumerate(text.splitlines(), 1):
         if PROSE.search(line):
@@ -151,7 +201,9 @@ WORDS = defaultdict(int)
 for text in ALLTEXT.values():
     for w in re.findall(r"\b\w+\b", text):
         WORDS[w] += 1
-beat = str(getattr(settings, "CELERY_BEAT_SCHEDULE", {})) + str(getattr(settings, "CELERY_BEAT_SCHEDULE_EXTRA", {}))
+beat = str(getattr(settings, "CELERY_BEAT_SCHEDULE", {})) + str(
+    getattr(settings, "CELERY_BEAT_SCHEDULE_EXTRA", {})
+)
 task_rx = re.compile(r"@(shared_task|app\.task|celery_app\.task|\w+\.task)\b")
 for path, text in ALLTEXT.items():
     lines = text.splitlines()
@@ -177,4 +229,8 @@ for n in sorted(x for x in dir(settings) if x.isupper()):
 
 with open(sys.argv[1], "w", encoding="utf-8") as fh:
     json.dump(result, fh, ensure_ascii=False, indent=1)
-print(json.dumps({k: (len(v) if isinstance(v, list) else v) for k, v in result.items()}, ensure_ascii=False))
+print(
+    json.dumps(
+        {k: (len(v) if isinstance(v, list) else v) for k, v in result.items()}, ensure_ascii=False
+    )
+)
