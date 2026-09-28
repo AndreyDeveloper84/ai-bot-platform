@@ -1412,14 +1412,26 @@ def route_global_human_handoff(
 ) -> DiscoveryReply:
     """Escalate a tenant-less «нужен человек» turn to a human (DRF-1015).
 
-    Queue addressing (brief §3): when the channel identity has active
-    per-tenant conversation(s), the task lands on the MOST RECENT tenant's
-    conversation — that salon is the side that can actually help, and
-    ``create_admin_task`` mutes the tenant dialog for free. Without a tenant
-    context the task lands on the GLOBAL conversation under the sentinel
-    tenant — the platform queue. Either way the user gets the same
-    confirmation line the tenant skill uses (``_HANDOFF_REPLY`` — reused, not
-    reworded).
+    Queue addressing (DRF-2545, решение главного окна 28.09, вариант B): задача
+    ложится на салонный разговор, только когда салон у этой личности ОДИН —
+    адресат тогда однозначен, и ``create_admin_task`` усыпляет его диалог
+    законно. Салонов два и больше — сообщение с глобальной поверхности предмета
+    не называет (или называет не того, кого выбрала бы давность), и задача
+    идёт в очередь платформы: GLOBAL-разговор под сентинел-тенантом. Ни один
+    салонный диалог при этом не замолкает.
+
+    Было (brief §3): последний по ``last_message_at`` салонный разговор. Так
+    «в салоне Б нагрубили, позовите администратора» будило салон А — его бот
+    молчал, персоналу приходило «клиент ждёт», а жалоба на Б ложилась в
+    ``reason`` задачи А (буква (в): видит чужое).
+
+    Цена ошибки односторонняя, и выбор сделан по ней: лишняя переадресация
+    внутренней командой дешевле ложного молчания у салона, о котором речь не
+    шла. Спросить «о каком салоне речь?» — видимый текст, он ждёт слова
+    владельца.
+
+    Человек в любом случае получает ту же строку, что и в навыке салона
+    (``_HANDOFF_REPLY`` — повторно используется, не переписывается).
     """
     from apps.handoff.models import AdminTask
     from apps.handoff.services import create_admin_task
@@ -1428,7 +1440,7 @@ def route_global_human_handoff(
     from apps.tenancy.context import tenant_scope
 
     reason = f"Global-path trigger phrase: {message_text[:80]}"
-    target = _latest_tenant_conversation(global_bot_user)
+    target = _unambiguous_tenant_conversation(global_bot_user)
     if target is not None:
         with tenant_scope(target.tenant):
             task = create_admin_task(
@@ -1454,30 +1466,42 @@ def route_global_human_handoff(
     return DiscoveryReply(text=_HANDOFF_REPLY)
 
 
-def _latest_tenant_conversation(global_bot_user):
-    """Most recently active per-tenant Conversation for this channel identity.
+def _unambiguous_tenant_conversation(global_bot_user):
+    """Салонный разговор этой личности — только если салон у неё ОДИН (DRF-2545, B).
 
-    ``None`` when the user has never talked to a salon — the caller then falls
-    back to the platform queue (sentinel). «Most recent» = latest
-    ``last_message_at`` (tie-break ``created_at``): the salon the user spoke
-    with last is the most plausible addressee, and asking «which salon?» would
-    add a round-trip to the emergency path.
+    ``None`` — салонов нет или их больше одного: вызывающий кладёт задачу в
+    очередь платформы (сентинел), и ни один салон не замолкает.
+
+    Считаются САЛОНЫ, а не разговоры. Основной активный разговор у пары
+    (личность, салон) один — это держит ``conversation_one_active_per_bot_user_tenant``,
+    — но её условие исключает теневые строки (``is_shadow``), и теневой
+    разговор живёт параллельно основному. Здесь теневые исключены: это
+    артефакты наблюдаемости с подавленной отправкой, задача на них не
+    усыпила бы настоящий диалог салона и легла бы туда, где её никто не
+    увидит. Прежняя выборка их не исключала, и более свежая теневая строка
+    выигрывала по давности.
     """
     from apps.conversations.models import Conversation
     from apps.identity.services.global_tenant import get_global_bot_tenant
 
     sentinel = get_global_bot_tenant()
+    salon_dialogs = Conversation.all_tenants.filter(
+        bot_user__channel=global_bot_user.channel,
+        bot_user__channel_user_id=global_bot_user.channel_user_id,
+        is_active=True,
+        is_shadow=False,
+        deleted_at__isnull=True,
+        # Выключенный салон ответить не может: он не адресат и не второй
+        # салон. Иначе единственный живой салон рядом с мёртвым уходил бы
+        # в очередь платформы, а один мёртвый — замолкал бы впустую.
+        tenant__is_active=True,
+    ).exclude(tenant_id=sentinel.id)
+    # Множество по строкам, без DISTINCT: салонов у одного человека единицы.
+    tenant_ids = set(salon_dialogs.values_list("tenant_id", flat=True))
+    if len(tenant_ids) != 1:
+        return None
     return (
-        Conversation.all_tenants.filter(
-            bot_user__channel=global_bot_user.channel,
-            bot_user__channel_user_id=global_bot_user.channel_user_id,
-            is_active=True,
-            deleted_at__isnull=True,
-        )
-        .exclude(tenant_id=sentinel.id)
-        .order_by("-last_message_at", "-created_at")
-        .select_related("tenant")
-        .first()
+        salon_dialogs.order_by("-last_message_at", "-created_at").select_related("tenant").first()
     )
 
 
