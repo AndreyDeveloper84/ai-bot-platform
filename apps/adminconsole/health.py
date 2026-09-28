@@ -328,16 +328,7 @@ class HandoffSummary:
 
     @property
     def oldest_age_human(self) -> str:
-        if self.oldest_open_age_seconds is None:
-            return "—"
-        minutes = int(self.oldest_open_age_seconds // 60)
-        if minutes < 60:
-            return f"{minutes}м"
-        hours, minutes = divmod(minutes, 60)
-        if hours < 24:
-            return f"{hours}ч{minutes:02d}м"
-        days, hours = divmod(hours, 24)
-        return f"{days}д{hours:02d}ч"
+        return _age_human(self.oldest_open_age_seconds)
 
 
 def handoff_summary(*, now: datetime | None = None) -> HandoffSummary:
@@ -355,6 +346,79 @@ def handoff_summary(*, now: datetime | None = None) -> HandoffSummary:
 
 
 # ---------------------------------------------------------------------------
+# Зеркало броней: отметка последнего события канона (DRF-2537)
+# ---------------------------------------------------------------------------
+
+#: Состояния зеркала, в которых визит ещё не закончен — о них вопрос «когда
+#: канон последний раз что-то сказал» имеет смысл.
+_OPEN_BOOKING_STATUSES: tuple[str, ...] = ("confirmed", "pending_payment", "tentative")
+
+
+@dataclass(frozen=True)
+class BookingMirrorMarks:
+    """Сколько незакрытых визитов зеркала несут отметку события канона.
+
+    ``known`` — отметка есть: известно, какое событие канона применено
+    последним и когда канон его выпустил. ``unknown`` — отметки нет: строка до
+    DRF-2537 или записанная самим ботом; «неизвестно», а НЕ «старое».
+
+    Предел, который экран обязан говорить вслух: возраст — давность последнего
+    ПРИШЕДШЕГО события, а не отставание от канона. Мёртвое письмо отметку не
+    двигает, поэтому «свежая или протухшая копия» отсюда не видно — это вопрос
+    к канону и к мёртвым письмам каталога.
+    """
+
+    open_total: int
+    known: int
+    unknown: int
+    oldest_known_age_seconds: float | None
+    oldest_known_event: str
+
+    @property
+    def oldest_known_age_human(self) -> str:
+        return _age_human(self.oldest_known_age_seconds)
+
+
+def _age_human(seconds: float | None) -> str:
+    if seconds is None:
+        return "—"
+    minutes = int(seconds // 60)
+    if minutes < 60:
+        return f"{minutes}м"
+    hours, minutes = divmod(minutes, 60)
+    if hours < 24:
+        return f"{hours}ч{minutes:02d}м"
+    days, hours = divmod(hours, 24)
+    return f"{days}д{hours:02d}ч"
+
+
+def booking_mirror_marks(*, now: datetime | None = None) -> BookingMirrorMarks:
+    """Незакрытые визиты зеркала: с отметкой события канона и без — и возраст старейшей."""
+    from apps.booking.models import RemoteBookingProxy
+
+    moment = now or timezone.now()
+    open_rows = RemoteBookingProxy.all_tenants.filter(status__in=_OPEN_BOOKING_STATUSES)
+    known_rows = open_rows.filter(last_applied_event_at__isnull=False)
+    oldest = (
+        known_rows.order_by("last_applied_event_at")
+        .values_list("last_applied_event_at", "last_applied_event_name")
+        .first()
+    )
+    open_total = open_rows.count()
+    known = known_rows.count()
+    oldest_at, oldest_event = oldest if oldest is not None else (None, "")
+    return BookingMirrorMarks(
+        open_total=open_total,
+        known=known,
+        unknown=open_total - known,
+        oldest_known_age_seconds=(
+            None if oldest_at is None else (moment - oldest_at).total_seconds()
+        ),
+        oldest_known_event=oldest_event,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Сводный отчёт
 # ---------------------------------------------------------------------------
 
@@ -368,6 +432,7 @@ class ContourHealthReport:
     flags: list[SurfaceFlag]
     threshold_seconds: int
     upstream_queried: bool
+    booking_marks: BookingMirrorMarks | None = None
     problems: list[str] = field(default_factory=list)
 
     @property
@@ -424,6 +489,9 @@ def collect_report(
         flags=flags,
         threshold_seconds=stale_after_seconds(),
         upstream_queried=any(d.upstream_seen for d in divergences),
+        # Не крик в ``problems``: порога «слишком давно» нет и выдумывать его
+        # здесь нельзя — возраст не равен отставанию (см. BookingMirrorMarks).
+        booking_marks=booking_mirror_marks(now=moment),
         problems=problems,
     )
 

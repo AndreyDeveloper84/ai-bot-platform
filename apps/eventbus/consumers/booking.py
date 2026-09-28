@@ -352,6 +352,23 @@ def _resolve_bot_user(*, user_id: UUID, tenant: Tenant) -> BotUser | None:
     )
 
 
+def _applied_event_marks(envelope: IngestEnvelope) -> dict[str, Any]:
+    """Отметка применённого события — ОДНА на все пути, пишущие зеркало (DRF-2537).
+
+    Какое событие канона применено последним и когда канон его выпустил.
+    Каждый путь, который пишет ``last_synced_event_id``, пишет её целиком
+    через эту функцию: отдельная копия трёх полей в одном из путей однажды
+    разошлась бы молча, и узел на этот путь это ловит.
+
+    Это не свежесть: пропущенное (мёртвое) событие отметку не сдвигает.
+    """
+    return {
+        "last_synced_event_id": envelope.event_id,
+        "last_applied_event_name": envelope.event_name,
+        "last_applied_event_at": envelope.occurred_at,
+    }
+
+
 def _assert_proxy_tenant(
     *,
     proxy: RemoteBookingProxy | None,
@@ -944,7 +961,7 @@ def handle_booking_created(envelope: IngestEnvelope) -> None:
         "service_id": service_uuid,
         "specialist_id": specialist_uuid,
         "price_amount": price_amount,
-        "last_synced_event_id": envelope.event_id,
+        **_applied_event_marks(envelope),
     }
 
     # Round-6 Path B: delegate the race-safe INSERT-or-GET to Django.
@@ -1161,8 +1178,10 @@ def handle_booking_cancelled(envelope: IngestEnvelope) -> None:
         )
 
     proxy.status = RemoteBookingProxy.Status.CANCELLED
-    proxy.last_synced_event_id = envelope.event_id
-    proxy.save(update_fields=["status", "last_synced_event_id", "synced_at"])
+    marks = _applied_event_marks(envelope)
+    for name, value in marks.items():
+        setattr(proxy, name, value)
+    proxy.save(update_fields=["status", *marks, "synced_at"])
 
     _cancel_reminders(appointment_id=appointment_id)
 
@@ -1256,7 +1275,7 @@ def handle_booking_rescheduled(envelope: IngestEnvelope) -> None:
     RemoteBookingProxy.all_tenants.filter(appointment_id=appointment_id).update(
         start_at=new_start_at,
         end_at=new_end_at,
-        last_synced_event_id=envelope.event_id,
+        **_applied_event_marks(envelope),
     )
 
     _reschedule_reminders(appointment_id=appointment_id, new_start_at=new_start_at)
@@ -1611,7 +1630,7 @@ def handle_appointment_rescheduled_canonical(envelope: IngestEnvelope) -> None:
 
     update_fields: dict[str, Any] = {
         "last_applied_appointment_version": canonical.version,
-        "last_synced_event_id": envelope.event_id,
+        **_applied_event_marks(envelope),
     }
 
     new_start_at: dt.datetime | None = None
@@ -1726,7 +1745,7 @@ def handle_booking_completed(envelope: IngestEnvelope) -> None:
     RemoteBookingProxy.all_tenants.filter(appointment_id=appointment_id).update(
         status=RemoteBookingProxy.Status.COMPLETED,
         completed_by=completed_by[:64],
-        last_synced_event_id=envelope.event_id,
+        **_applied_event_marks(envelope),
     )
 
     emit_internal_event(
@@ -1818,8 +1837,10 @@ def handle_booking_confirmed(envelope: IngestEnvelope) -> None:
     was_confirmed = proxy.status == RemoteBookingProxy.Status.CONFIRMED
 
     proxy.status = RemoteBookingProxy.Status.CONFIRMED
-    proxy.last_synced_event_id = envelope.event_id
-    proxy.save(update_fields=["status", "last_synced_event_id", "synced_at"])
+    marks = _applied_event_marks(envelope)
+    for name, value in marks.items():
+        setattr(proxy, name, value)
+    proxy.save(update_fields=["status", *marks, "synced_at"])
 
     bot_user = _resolve_bot_user(user_id=UUID(envelope.require_user_id()), tenant=tenant)
     if bot_user is not None:
@@ -1927,7 +1948,7 @@ def handle_booking_no_show(envelope: IngestEnvelope) -> None:
 
     RemoteBookingProxy.all_tenants.filter(appointment_id=appointment_id).update(
         status=RemoteBookingProxy.Status.NO_SHOW,
-        last_synced_event_id=envelope.event_id,
+        **_applied_event_marks(envelope),
     )
     _cancel_reminders(appointment_id=appointment_id)
     # DRF-2118 тип 5 — неявка: салону решать, что с записью и клиентом.
