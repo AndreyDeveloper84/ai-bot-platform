@@ -30,6 +30,16 @@ pytestmark = pytest.mark.django_db
 PAGE = "apps.observability.alerting.page"
 
 
+@pytest.fixture(autouse=True)
+def _fresh_hour_claim():
+    """Час страницы занят в кэше — узлы не делят его друг с другом."""
+    from django.core.cache import cache
+
+    cache.clear()
+    yield
+    cache.clear()
+
+
 @pytest.fixture
 def tenant(db) -> Tenant:
     return Tenant.objects.create(slug="rem-2584", name="Salon 2584")
@@ -141,18 +151,36 @@ class TestTheNumbers:
         for value in ("Вера", "79990002584", "chat-2584", "bu-2584", "yc-2584-d"):
             assert value not in shown
 
-    def test_one_page_per_utc_hour(self, tenant, bot_user) -> None:
-        _due(tenant, bot_user, "yc-2584-e")
+    def test_two_failing_runs_in_one_hour_page_once(self, tenant, bot_user) -> None:
+        """Ревью DRF-2584: окно дедупа ``alerting.page`` — 300 с, час в его
+        ключе лишь выбирает корзину. Час занимает сама задача — две страницы за
+        час здесь были бы четырьмя за час на стенде (прогон раз в 15 минут)."""
+        _due(tenant, bot_user, "yc-2584-e1")
 
         with (
-            patch("apps.bookings.tasks.send_message", side_effect=MaxAPIError(403, "blocked")),
-            patch(PAGE) as page,
+            patch("apps.bookings.tasks.send_message", side_effect=MaxAPIError(400, "bad")),
+            patch(PAGE, return_value=True) as page,
         ):
             send_due_reminders()
+            _due(tenant, bot_user, "yc-2584-e2")
+            send_due_reminders()
 
+        assert page.call_count == 1
         key = page.call_args.kwargs["dedup_key"]
-        # Час, а не минута и не прогон: прогоны идут раз в 15 минут.
         assert re.fullmatch(r"bookings\.reminder\.failed:\d{4}-\d{2}-\d{2}T\d{2}", key)
+
+    def test_an_undelivered_page_gives_the_hour_back(self, tenant, bot_user) -> None:
+        _due(tenant, bot_user, "yc-2584-g1")
+
+        with (
+            patch("apps.bookings.tasks.send_message", side_effect=MaxAPIError(400, "bad")),
+            patch(PAGE, return_value=False) as page,
+        ):
+            send_due_reminders()
+            _due(tenant, bot_user, "yc-2584-g2")
+            send_due_reminders()
+
+        assert page.call_count == 2
 
 
 class TestThePageIsBestEffort:
