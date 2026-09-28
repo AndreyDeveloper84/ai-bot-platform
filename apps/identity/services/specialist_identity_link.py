@@ -238,10 +238,10 @@ def bind_solo_identity_after_provisioning(link: Any, *, bot_user: Any) -> str | 
         return "not_provisioned"
     try:
         resolve_identity(external_user_id_for(bot_user))
-    # ``resolve_identity`` оборачивает только таймаут и сетевую ошибку;
-    # ``RemoteProtocolError`` («сервер закрыл соединение» — рестарт воркера
-    # каталога) и прочие ``httpx.HTTPError`` выходят сырыми. Обещание «не
-    # выпускает исключений» держится здесь, а не в чужом клиенте.
+    # С DRF-2579 ``resolve_identity`` сам называет каждый ``httpx.HTTPError``
+    # (обрыв соединения — «network: transport_failure»). ``httpx.HTTPError``
+    # здесь — вторая линия: обещание «не выпускает исключений» этот помощник
+    # держит сам, а не только доверяя клиенту.
     except (IdentityResolveError, httpx.HTTPError):
         logger.info(
             "identity.specialist_identity_link.solo_resolve_failed specialist=%s person=%s",
