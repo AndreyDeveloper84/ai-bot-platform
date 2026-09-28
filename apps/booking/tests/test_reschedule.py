@@ -400,14 +400,18 @@ class TestRescheduleCustomerBooking:
         # (reschedule.py, the link being moved) also emits FOR UPDATE on this
         # table, so a table-only match stayed green with the root lock removed
         # — measured by substitution under DRF-2588. The root here is
-        # ``existing_booking``; Postgres renders its id as 32 hex digits.
+        # ``existing_booking``. psycopg 3 renders its id as 32 hex digits,
+        # psycopg2 with dashes — accept both, so a driver change cannot turn
+        # this into a false red.
         if connection.vendor == "postgresql":
             table = BookingRequest._meta.db_table
-            root_id = existing_booking.id.hex
+            root_spellings = (existing_booking.id.hex, str(existing_booking.id))
             queries_with_lock = [
                 q["sql"]
                 for q in ctx.captured_queries
-                if "FOR UPDATE" in q["sql"] and f'"{table}"' in q["sql"] and root_id in q["sql"]
+                if "FOR UPDATE" in q["sql"]
+                and f'"{table}"' in q["sql"]
+                and any(spelling in q["sql"] for spelling in root_spellings)
             ]
             assert queries_with_lock, (
                 "Expected at least one BookingRequest SELECT with FOR UPDATE; "

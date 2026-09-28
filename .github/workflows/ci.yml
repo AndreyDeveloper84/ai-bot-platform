@@ -737,8 +737,8 @@ jobs:
       #     (apps/eventbus/tests/test_booking_consumer.py:137 and five
       #     others). One-line fixture fix.
       #
-      # The node IDs are single-quoted, unlike the apps/ deselects
-      # below: parametrized IDs end in `[ModelName]`, and an unquoted
+      # The node IDs are single-quoted (and any future apps/ deselect
+      # should be too): a parametrized ID ends in `[...]`, and an unquoted
       # `[...]` is a bash glob character class. It happens to survive
       # today only because nothing matches and nullglob/failglob are
       # off — which is a property of the shell, not of this file.
@@ -831,8 +831,8 @@ jobs:
       # a shard that lost half of them, and it does not catch a path that
       # fell out of every shard's selector at once.
       #
-      # So: collect the WHOLE of apps/ once, here, with the same deselect
-      # list the shards use, and write the number down. `test` below sums
+      # So: collect the WHOLE of apps/ once, here, with the same selection
+      # the shards use, and write the number down. `test` below sums
       # the five shard junits and refuses to be green unless the sum equals
       # this number. Recomputed every run, so unlike a hard-coded expected
       # count it cannot go stale and start lying.
@@ -840,13 +840,16 @@ jobs:
       # `--collect-only` needs no database and no services: ~1 min of
       # imports, on a job that is not the critical path.
       #
-      # The deselect list below is the SAME list as in the shard job. Two
-      # copies is a known hazard, and the rule is the one the
-      # detect-secrets exclusions already carry: if you touch one, touch
-      # the other in the same commit. They are also checked against each
-      # other on every run by construction — a deselect present here and
-      # missing there makes the shard sum exceed the census, and `test`
-      # goes red naming both numbers.
+      # Since DRF-2588 (28.09) there is NO apps/ deselect: the last 26
+      # passed on Postgres against dev and were re-enabled. If one ever has
+      # to be added, it goes into BOTH this step and the shard job in the
+      # same commit — two copies is a known hazard, the rule is the one
+      # the detect-secrets exclusions already carry. They are checked
+      # against each other on every run by construction: a deselect
+      # present here and missing there makes the shard sum exceed the
+      # census, and `test` goes red naming both numbers. And it needs a
+      # Linear leaf next to it — 23 of the last 26 had none ("Candidate
+      # for Linear, not fixed here") and outlived their cause by weeks.
       # ------------------------------------------------------------------
       - name: apps/ collection census (sentinel for the shard layout)
         run: |
@@ -939,7 +942,8 @@ jobs:
   # the other in the same edit; the census in `checks` above will catch
   # you if it does not.
   #
-  # EVERY SHARD GETS THE WHOLE DESELECT LIST. `--deselect` in pytest is
+  # IF A DESELECT LIST EVER RETURNS (none today, DRF-2588), EVERY SHARD
+  # GETS THE WHOLE OF IT. `--deselect` in pytest is
   # prefix matching over already-collected items (`_pytest/main.py`,
   # `pytest_collection_modifyitems`): an id that matches nothing in this
   # shard is a silent no-op, not an error. So the list is not partitioned
@@ -1220,9 +1224,9 @@ jobs:
       # green locally and defended nothing in CI. Full apps/ (7246 tests,
       # measured against Postgres — the SQLite default that most of
       # `dev` runs locally hides real failures, see
-      # project_test_db_sqlite_vs_postgres) is clean EXCEPT the 26 tests
-      # deselected below, grouped by root cause so the excluded set is
-      # legible instead of a wall of paths:
+      # project_test_db_sqlite_vs_postgres) was clean EXCEPT 26 tests
+      # deselected here, grouped by root cause below. All 26 re-enabled
+      # 28.09 (DRF-2588) — the causes are kept as history:
       #
       # (a) RESOLVED 28.09 (DRF-2588) — re-enabled: all 3 pass on
       #     Postgres 16 against dev d4ccc25a. Was: DRF-1044 — 3
@@ -1289,8 +1293,8 @@ jobs:
       # two workers ever share a schema.
       #
       # DRF-1349 — the invocation below is the one described above, with
-      # `apps/` replaced by this shard's selector. `-n 4 --dist load` and
-      # the deselect list are unchanged.
+      # `apps/` replaced by this shard's selector and `-n 4` (the
+      # distribution mode is `worksteal`, DRF-2205, see the step).
       - name: pytest apps/ (shard ${{ matrix.shard.id }})
         env:
           # Via env, not interpolated into the script: the value is a
