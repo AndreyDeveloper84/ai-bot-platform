@@ -2909,17 +2909,22 @@ def _show_my_bookings_ayla(
     """
     from apps.booking.mirror_status import LIVE_STATUSES
     from apps.booking.models import RemoteBookingProxy
+    from apps.identity.services.bot_user_resolver import person_bot_users
 
+    # DRF-2436 B / решение владельца п.15: «мои записи» — единый список по ВСЕМ
+    # салонам человека, как в Mini App. Учётная строка и зеркало одной записи
+    # лежат в одном салоне (обе пишутся под его личностью), поэтому оба чтения
+    # идут по всем личностям подписанного аккаунта, а склейка — по id визита.
+    persons = person_bot_users(bot_user)
     rows = list(
         BookingRequest.all_tenants.filter(
-            tenant=tenant,
-            bot_user=bot_user,
+            bot_user__in=persons,
             status=BookingRequest.Status.CONFIRMED,
         ).order_by("-created_at")[:20]
     )
     proxies = {
         str(p.appointment_id): p
-        for p in RemoteBookingProxy.all_tenants.filter(tenant=tenant, bot_user=bot_user)
+        for p in RemoteBookingProxy.all_tenants.filter(bot_user__in=persons)
     }
 
     bookings: list[BookingRow] = []

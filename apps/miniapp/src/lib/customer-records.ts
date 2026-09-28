@@ -78,6 +78,8 @@ export interface RecordItem {
   durationMin: number | null;
   serviceName: string;
   masterName: string;
+  /** DRF-2436 B / п.15 — салон записи; `""`, когда провод его не несёт. */
+  salonName: string;
   /** First upcoming item with the visit within 24h (Tau §4.1). */
   isNearest: boolean;
   actions: BookingAction[];
@@ -151,6 +153,7 @@ function toRecordItem(
     durationMin: item.duration_min,
     serviceName: item.service_name,
     masterName: item.master_name,
+    salonName: item.salon_name ?? "",
     isNearest,
     actions: actionsFor(item, section),
     rating: item.rating,

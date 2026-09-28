@@ -778,6 +778,13 @@ export interface BookingItem {
   service_name: string;
   master_id: string | null;
   master_name: string;
+  /**
+   * DRF-2436 B / решение владельца п.15 — клиентское имя салона записи
+   * (`Tenant.name`, как у витрины). «Мои записи» — единый список по всем
+   * салонам, и у каждой строки должно быть видно, в каком салоне она. Ключа
+   * нет (локальный путь, сервер старше) — `undefined`: строка без салона.
+   */
+  salon_name?: string;
   visit_at: string;
   duration_min: number | null;
   cancel_requested_at: string | null;
