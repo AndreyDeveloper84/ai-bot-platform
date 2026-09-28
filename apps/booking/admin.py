@@ -354,8 +354,9 @@ class BookingReminderAdmin(AylaAdminMedia, admin.ModelAdmin):
         "tenant",
     )
     list_filter = ("status", "kind", "tenant")
-    search_fields = ("yclients_record_id", "master_name", "service_name")
-    search_help_text = "Ищет по номеру записи в YClients, имени мастера и названию услуги."
+    # DRF-2586: напоминания записи из диалога лежат в ``ayla_appointment_id``.
+    search_fields = ("yclients_record_id", "ayla_appointment_id", "master_name", "service_name")
+    search_help_text = "Ищет по номеру записи (YClients или Ayla), имени мастера и названию услуги."
     empty_value_display = "нет данных"
     readonly_fields = tuple(f.name for f in BookingReminder._meta.fields)
     ordering = ("scheduled_at",)

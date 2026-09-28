@@ -105,7 +105,10 @@ from apps.integrations.ayla.health_check import text_for as health_check_text_fo
 from apps.integrations.ayla.offer_refusal import OFFER_NOT_SELLABLE_SLUG, client_text_for
 from apps.bookings.keyboards import confirm_2_button
 from apps.bookings.pending_actions import create_pending
-from apps.bookings.reminders_factory import create_reminders_for_booking
+from apps.bookings.reminders_factory import (
+    create_reminders_for_ayla_appointment,
+    create_reminders_for_booking,
+)
 from apps.integrations.yclients import (
     AvailableTime,
     BookingRecord,
@@ -1627,6 +1630,20 @@ def _schedule_reminders(
     if visit_at_dt is None:
         return
     try:
+        # DRF-2586: под флагом ``yc_id`` — UUID записи Ayla, и напоминания
+        # пишутся тем же ключом, что у потребителя событий: одна пара на
+        # запись, двойника исключает уникальный индекс.
+        appointment_id = _as_uuid(yc_id) if _booking_via_ayla() else None
+        if appointment_id is not None:
+            create_reminders_for_ayla_appointment(
+                tenant=tenant,
+                bot_user=bot_user,
+                appointment_id=appointment_id,
+                visit_at=visit_at_dt,
+                master_name=master_name,
+                service_name=service_name,
+            )
+            return
         create_reminders_for_booking(
             tenant=tenant,
             bot_user=bot_user,
@@ -1637,6 +1654,26 @@ def _schedule_reminders(
         )
     except Exception:  # noqa: BLE001 — reminder is best-effort
         logger.exception("booking.reminder.schedule_failed yc_id=%s", yc_id)
+
+
+def _reminders_for_record(record_id: Any) -> Any:
+    """Напоминания записи, в какой бы колонке они ни лежали (DRF-2586).
+
+    Под флагом запись — UUID Ayla: её напоминания лежат в
+    ``ayla_appointment_id`` (новые, из диалога и из событий) или в
+    ``yclients_record_id`` (записи из диалога до DRF-2586). Прежний фильтр
+    только по ``yclients_record_id`` не видел бы новых строк, и отмена или
+    перенос оставляли бы их ``PENDING`` — напоминание об отменённом визите.
+    Без флага — прежний фильтр по номеру YClients.
+    """
+    from apps.booking.models import BookingReminder
+
+    appointment_id = _as_uuid(record_id) if _booking_via_ayla() else None
+    if appointment_id is not None:
+        from apps.booking.reminder_lookup import reminders_for_appointment
+
+        return reminders_for_appointment(appointment_id)
+    return BookingReminder.all_tenants.filter(yclients_record_id=str(record_id))
 
 
 def _format_confirmation_text(confirmation: ConfirmationResult, *, address_line: str) -> str:
@@ -1852,8 +1889,7 @@ def execute_cancel(
     # keep). Import lazily to avoid the top-level cycle.
     from apps.booking.models import BookingReminder
 
-    BookingReminder.all_tenants.filter(
-        yclients_record_id=str(record_id),
+    _reminders_for_record(record_id).filter(
         status=BookingReminder.Status.PENDING,
     ).update(status=BookingReminder.Status.CANCELLED)
 
@@ -2171,8 +2207,7 @@ def _execute_reschedule_ayla(
     # Re-point reminders at the new time, same canonical id (best-effort).
     from apps.booking.models import BookingReminder
 
-    BookingReminder.all_tenants.filter(
-        yclients_record_id=str(record_id),
+    _reminders_for_record(record_id).filter(
         status=BookingReminder.Status.PENDING,
     ).update(status=BookingReminder.Status.CANCELLED)
     _schedule_reminders(
@@ -2420,8 +2455,7 @@ def execute_reschedule(
     BookingRequest.all_tenants.filter(pk=booking.pk).update(
         status=BookingRequest.Status.RESCHEDULED,
     )
-    BookingReminder.all_tenants.filter(
-        yclients_record_id=str(record_id),
+    _reminders_for_record(record_id).filter(
         status=BookingReminder.Status.PENDING,
     ).update(status=BookingReminder.Status.CANCELLED)
 
