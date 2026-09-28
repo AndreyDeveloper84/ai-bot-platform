@@ -521,14 +521,17 @@ class TestAylaPathGatesOnBookingRequestReaders:
         assert resp.json()["error"] == "invalid_state"
 
     def test_reschedule_confirm_is_gated(self, client: Client, tenant: Tenant, bot_user: BotUser):
+        # DRF-2561: перенос на пути Ayla подключён, и подтверждение без
+        # времени — это 400 «нужно время», а не 409. Предмет узла прежний:
+        # о записи, которую человек видит, — не 404.
         booking_id = self._proxy_id(tenant, bot_user)
         resp = client.post(
             reverse("miniapp_api:booking_reschedule_confirm", args=[booking_id]),
             content_type="application/json",
             HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id),
         )
-        assert resp.status_code == 409
-        assert resp.json()["error"] == "invalid_state"
+        assert resp.status_code == 400
+        assert resp.json()["error"] == "bad_request"
 
     def test_submit_feedback_is_gated(self, client: Client, tenant: Tenant, bot_user: BotUser):
         booking_id = self._proxy_id(tenant, bot_user)
