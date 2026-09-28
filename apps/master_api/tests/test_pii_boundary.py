@@ -487,7 +487,11 @@ SWEPT_READ_ROUTES: dict[str, SweptRoute] = {
     ),
     "onboarding_readiness": SweptRoute(
         lambda: reverse("master_api:onboarding_readiness"),
-        witness="capability_not_built",
+        # DRF-2370: прежний маркер «capability_not_built» пункт больше не
+        # отдаёт. Ссылка пункта места постоянна и от env не зависит — в
+        # отличие от причины «booking_client_not_configured», которая есть
+        # только при пустом AYLA_BASE_URL.
+        witness="/solo/place",
         why="the master's own setup checklist (DRF-1794): items, identity, sale_block",
         carries_customer_data=False,
     ),

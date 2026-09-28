@@ -53,6 +53,9 @@ CONVERTED = {
     # DRF-1814 (часть A): карточка профиля (профиль, слоты на сегодня, выбор
     # услуг) + портфолио (список, загрузка, удаление) — все шесть через колонку.
     ("apps/master_api/views_profile_card.py", 6),
+    # DRF-2370: пункт «Место работы» готовности читает service-locations
+    # каталога под субъектом мастера — один вызов через колонку.
+    ("apps/master_api/services/onboarding_readiness.py", 1),
 }
 
 PENDING_1933B: dict[tuple[str, str], int] = {}
