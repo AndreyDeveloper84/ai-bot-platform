@@ -73,6 +73,9 @@ const NOT_BUTTONS = new Set([
   ".ayla-bubble--mine",
   ".setup-landing__bar-fill",
   ".system-state__dot",
+  // DRF-2527: точка «несохранено» матрицы услуг вынесена из инлайна в класс —
+  // та же отметка, что `.booking-detail__dot`, не кнопка.
+  ".services-matrix__dirty-dot",
 ]);
 
 describe("главная кнопка отзывается на нажатие, как второстепенная (§6-йота)", () => {
