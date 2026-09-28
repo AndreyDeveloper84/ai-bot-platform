@@ -34,6 +34,7 @@ import {
   MEAL_TYPE_ICON,
   MEAL_TYPE_LABEL,
   PORTION_STEPS,
+  FoodLogAnswerUnreadableError,
   logMeal,
   nextPortion,
   type MealType,
@@ -259,6 +260,19 @@ export function FoodScannerResultScreen() {
     const renamed =
       trimmed.length > 0 && trimmed !== result.dish_name;
     setBusy(true);
+    const toSaved = (namedCalories: number | null) =>
+      navigate("/customer/food-scanner/saved", {
+        replace: true,
+        state: {
+          dishName: renamed ? trimmed : result.dish_name,
+          // DRF-2371 — на следующий экран уезжает только то число, которое
+          // эта карточка имела право назвать. Иначе правило держалось бы
+          // один экран: карточка молчит, а «Записано» говорит «~250 ккал».
+          calories: namedCalories,
+          edMode: hideNumbers,
+          returnTo: state.returnTo,
+        },
+      });
     try {
       await logMeal({
         scan_id: result.scan_id,
@@ -268,19 +282,17 @@ export function FoodScannerResultScreen() {
         idempotency_key: idempotencyKey,
         note: note.trim() || undefined,
       });
-      navigate("/customer/food-scanner/saved", {
-        replace: true,
-        state: {
-          dishName: renamed ? trimmed : result.dish_name,
-          // DRF-2371 — на следующий экран уезжает только то число, которое
-          // эта карточка имела право назвать. Иначе правило держалось бы
-          // один экран: карточка молчит, а «Записано» говорит «~250 ккал».
-          calories: showNumbers ? calories : null,
-          edMode: hideNumbers,
-          returnTo: state.returnTo,
-        },
-      });
-    } catch {
+      toSaved(showNumbers ? calories : null);
+    } catch (err) {
+      // DRF-2554 — сервер ответил успехом, но тело не читается: запись
+      // СДЕЛАНА. «Не получилось» толкнуло бы человека записать второй раз.
+      // Числа не называем: подтверждения каталога мы не прочли.
+      if (err instanceof FoodLogAnswerUnreadableError) {
+        toSaved(null);
+        return;
+      }
+      // Остальные классы (`FoodLogRefusedError.kind`) различимы в коде и в
+      // логе бота; своя фраза у каждого — слово владельца, до него общая.
       setSnack({
         visible: true,
         message: "Не получилось сохранить. Попробуй ещё раз.",

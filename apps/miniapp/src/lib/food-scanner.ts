@@ -183,6 +183,86 @@ export class ScanBudgetExhaustedError extends Error {
 }
 
 /**
+ * DRF-2554 — отказ ЗАПИСИ в дневник, названный классом.
+ *
+ * До листа `logMeal` не разбирал ошибок вовсе, и экран отвечал одной фразой
+ * на тринадцать разных причин: ни по экрану, ни по рассказу человека отказ
+ * было не различить. Класс здесь — для кода и тестов; видимые фразы по
+ * классам — слова владельца, пока экран показывает общую.
+ */
+export type FoodLogRefusalKind =
+  | "timeout"
+  | "network"
+  | "auth"
+  | "nutrition_disabled"
+  | "consent"
+  | "malformed"
+  | "food_not_recognized"
+  | "catalog_rejected"
+  | "nutrition_unavailable"
+  | "server_error"
+  | "unknown";
+
+export class FoodLogRefusedError extends Error {
+  constructor(
+    readonly kind: FoodLogRefusalKind,
+    readonly status: number | null,
+  ) {
+    super(`food log refused: ${kind}${status === null ? "" : ` (${status})`}`);
+    this.name = "FoodLogRefusedError";
+  }
+}
+
+/**
+ * DRF-2554 — сервер ответил успехом (2xx), но тело не читается. Это НЕ
+ * отказ: запись сделана, и сказать человеку «не получилось» значит толкнуть
+ * его записать второй раз.
+ */
+export class FoodLogAnswerUnreadableError extends Error {
+  constructor() {
+    super("food log succeeded but the answer body is unreadable");
+    this.name = "FoodLogAnswerUnreadableError";
+  }
+}
+
+/**
+ * Сколько ждать ответа записи. Бот ждёт каталог 10 с
+ * (`nutrition_client.DEFAULT_TIMEOUT_S`) и сам отвечает
+ * `nutrition_unavailable` — клиент ждёт дольше, чтобы получить этот
+ * названный отказ, а не собственный таймаут поверх него.
+ */
+export const LOG_MEAL_TIMEOUT_MS = 20_000;
+
+/** Ошибка вызова записи → названный класс (DRF-2554). */
+export function foodLogRefusalOf(
+  err: unknown,
+  timedOut: boolean,
+): FoodLogRefusedError | FoodLogAnswerUnreadableError {
+  if (timedOut) return new FoodLogRefusedError("timeout", null);
+  // `request` читает тело только у ответа `ok` (у отказа разбор тела
+  // защищён), поэтому SyntaxError здесь значит «2xx с не-JSON телом».
+  if (err instanceof SyntaxError) return new FoodLogAnswerUnreadableError();
+  if (err instanceof ApiError) {
+    const bySlug: Record<string, FoodLogRefusalKind> = {
+      consent_required: "consent",
+      food_diary_consent_required: "consent",
+      nutrition_disabled: "nutrition_disabled",
+      malformed: "malformed",
+      food_not_recognized: "food_not_recognized",
+      ayla_bad_request: "catalog_rejected",
+      nutrition_unavailable: "nutrition_unavailable",
+    };
+    const kind =
+      bySlug[err.slug] ??
+      (err.status === 401 ? "auth" : err.status >= 500 ? "server_error" : "unknown");
+    return new FoodLogRefusedError(kind, err.status);
+  }
+  // `fetch` отказывает TypeError, когда ответа нет вовсе (сеть, DNS, CORS).
+  if (err instanceof TypeError) return new FoodLogRefusedError("network", null);
+  return new FoodLogRefusedError("unknown", null);
+}
+
+/**
  * Legacy (DRF-2106): nothing in this module throws it any more — the last
  * stub is gone. The class stays exported because the Processing screen
  * still maps it to its «пока не подключено» state; that branch is dead
@@ -306,6 +386,11 @@ interface LogMealWire {
  * `POST /food/log` с `scan_id`. Возвращает запись, как её записал каталог;
  * `meal_type` в ответе — как каталог её назвал (unnamed, если экран не
  * назвал приём).
+ *
+ * DRF-2554: любой отказ приходит как `FoodLogRefusedError` со своим классом;
+ * 2xx с нечитаемым телом — `FoodLogAnswerUnreadableError` (запись сделана);
+ * ответа дольше `LOG_MEAL_TIMEOUT_MS` не ждём. Повтор после таймаута
+ * безопасен: тот же ключ идемпотентности вернёт уже сделанную запись.
  */
 export async function logMeal(req: LogMealRequest): Promise<LogMealResponse> {
   const body: Record<string, unknown> = {
@@ -315,10 +400,24 @@ export async function logMeal(req: LogMealRequest): Promise<LogMealResponse> {
     idempotency_key: req.idempotency_key,
   };
   if (req.dish_name !== undefined) body.dish_name = req.dish_name;
-  const wire = await request<LogMealWire>("/food/log", {
-    method: "POST",
-    body: JSON.stringify(body),
-  });
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, LOG_MEAL_TIMEOUT_MS);
+  let wire: LogMealWire;
+  try {
+    wire = await request<LogMealWire>("/food/log", {
+      method: "POST",
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    throw foodLogRefusalOf(err, timedOut);
+  } finally {
+    clearTimeout(timer);
+  }
   return {
     log_id: wire.log_id,
     dish_name: wire.dish_name,

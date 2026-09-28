@@ -23,7 +23,12 @@ vi.mock("../lib/customer-wellness", async (importOriginal) => {
 vi.mock("../hooks/useScreenBack", () => ({ useScreenBack: () => vi.fn() }));
 
 import { getWellnessToday } from "../lib/customer-wellness";
-import { logMeal, type ScanResponse } from "../lib/food-scanner";
+import {
+  FoodLogAnswerUnreadableError,
+  FoodLogRefusedError,
+  logMeal,
+  type ScanResponse,
+} from "../lib/food-scanner";
 import { FoodScannerResultScreen } from "./FoodScannerResultScreen";
 
 const mockedLog = vi.mocked(logMeal);
@@ -110,5 +115,23 @@ describe("FoodScannerResultScreen — запись по скану", () => {
     fireEvent.click(save);
     await waitFor(() => expect(mockedLog).toHaveBeenCalledTimes(2));
     expect(mockedLog.mock.calls[0]?.[0].idempotency_key).toBe(mockedLog.mock.calls[1]?.[0].idempotency_key);
+  });
+});
+
+describe("FoodScannerResultScreen — исход записи по классу (DRF-2554)", () => {
+  it("2xx с нечитаемым телом — это запись: экран «Записано», а не «не получилось»", async () => {
+    mockedLog.mockRejectedValueOnce(new FoodLogAnswerUnreadableError());
+    renderResult();
+    fireEvent.click(await screen.findByRole("button", { name: /Записать в дневник/ }));
+    expect(await screen.findByText("saved-screen")).toBeInTheDocument();
+    expect(screen.queryByText("Не получилось сохранить. Попробуй ещё раз.")).not.toBeInTheDocument();
+  });
+
+  it("названный отказ — прежняя общая фраза (своя у класса ждёт владельца), и экран остаётся", async () => {
+    mockedLog.mockRejectedValueOnce(new FoodLogRefusedError("timeout", null));
+    renderResult();
+    fireEvent.click(await screen.findByRole("button", { name: /Записать в дневник/ }));
+    expect(await screen.findByText("Не получилось сохранить. Попробуй ещё раз.")).toBeInTheDocument();
+    expect(screen.queryByText("saved-screen")).not.toBeInTheDocument();
   });
 });
