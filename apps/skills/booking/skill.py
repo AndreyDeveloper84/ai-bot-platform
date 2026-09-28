@@ -327,7 +327,7 @@ _CONTEXT_GONE_TEXT = (
 )
 _SLOT_TAKEN_PROMPT = "Это время уже занято. Выберите другое:"
 _SLOT_TAKEN_NO_ALTERNATIVES = (
-    "Это время уже занято, и на эту дату свободных слотов больше нет. Выберите другую дату:"
+    "Это время уже занято, и на эту дату свободного времени больше нет. Выберите другую дату:"
 )
 # DRF-1490 / OPEN_DECISIONS §25 п.5 — «выберите другую дату» without a date
 # picker is an instruction the person cannot follow: the free-text branch of

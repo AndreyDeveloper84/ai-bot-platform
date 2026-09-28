@@ -136,7 +136,7 @@ export function BookingWhenScreen() {
       title="Выберите время"
       cta={
         <StickyCta onClick={onContinue} disabled={!draft.visitAt}>
-          {draft.visitAt ? "Дальше" : "Выберите слот"}
+          {draft.visitAt ? "Дальше" : "Выберите время"}
         </StickyCta>
       }
     >
@@ -163,7 +163,7 @@ export function BookingWhenScreen() {
         })}
       </div>
 
-      <div className="slot-grid" role="radiogroup" aria-label="Свободные слоты">
+      <div className="slot-grid" role="radiogroup" aria-label="Свободное время">
         {slotsForDay.length === 0 ? (
           <div className="slot-grid__empty">{emptyDayCopy}</div>
         ) : (

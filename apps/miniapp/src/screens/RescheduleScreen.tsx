@@ -225,7 +225,7 @@ export function RescheduleScreen() {
       title="Перенести"
       cta={
         <StickyCta onClick={onConfirm} disabled={!pickedSlot || confirming}>
-          {confirming ? "Переношу…" : pickedSlot ? "Подтвердить перенос" : "Выберите слот"}
+          {confirming ? "Переношу…" : pickedSlot ? "Подтвердить перенос" : "Выберите время"}
         </StickyCta>
       }
     >
@@ -291,7 +291,7 @@ export function RescheduleScreen() {
             })}
           </div>
 
-          <div className="slot-grid" role="radiogroup" aria-label="Свободные слоты">
+          <div className="slot-grid" role="radiogroup" aria-label="Свободное время">
             {slotsForDay.length === 0 ? (
               <div className="slot-grid__empty">
                 {selectedDate

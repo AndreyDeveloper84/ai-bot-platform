@@ -153,7 +153,7 @@ def _render_system_prompt(
 
     tool_lines = [
         "• show_masters — список мастеров для услуги.",
-        "• show_slots — свободные слоты для мастера.",
+        "• show_slots — свободное время мастера.",
         "• confirm_booking — показать карточку подтверждения новой "
         "записи (НЕ создаёт запись напрямую — ждёт нажатия ✅).",
         "• cancel_booking — показать карточку подтверждения отмены "
@@ -480,7 +480,7 @@ def _format_masters_block(masters: list[dict[str, Any]]) -> str:
 
 
 def _format_slots_block(slots: list[dict[str, Any]]) -> str:
-    lines = ["СВОБОДНЫЕ СЛОТЫ:"]
+    lines = ["СВОБОДНОЕ ВРЕМЯ:"]
     for s in slots:
         dur = s.get("duration_minutes")
         dur_part = f" ({dur} мин)" if dur else ""
