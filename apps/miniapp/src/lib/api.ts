@@ -858,10 +858,19 @@ export const rescheduleBookingRequest = (
     body: JSON.stringify(body),
   });
 
+/**
+ * DRF-2561 — на пути Ayla откладывать кандидата некуда: подтверждение
+ * приносит время само, поэтому шлёт то же тело, что и запрос. Локальный
+ * путь тело подтверждения не читает.
+ */
 export const rescheduleBookingConfirm = (
   id: string,
+  body: { new_master_id: string; new_service_id: string; new_visit_at: string },
 ): Promise<{ old_booking: BookingItem; new_booking: BookingItem }> =>
-  request(`/bookings/${id}/reschedule/confirm`, { method: "POST" });
+  request(`/bookings/${id}/reschedule/confirm`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
 
 // --- profile (Phase 3 / F4) ---
 export interface Preferences {

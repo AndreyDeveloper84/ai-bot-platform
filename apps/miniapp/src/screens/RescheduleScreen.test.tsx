@@ -37,6 +37,7 @@ vi.mock("../lib/api", async (importOriginal) => {
 });
 
 import {
+  ApiError,
   fetchBooking,
   fetchSlots,
   rescheduleBookingConfirm,
@@ -118,6 +119,39 @@ beforeEach(() => {
   mockedConfirm.mockResolvedValue({
     old_booking: booking({ id: OLD_ID }),
     new_booking: booking({ id: NEW_ID }),
+  });
+});
+
+describe("подтверждение несёт выбранное время (DRF-2561)", () => {
+  it("confirm получает то же тело, что request: мастер, услуга и слот", async () => {
+    renderReschedule();
+    await rescheduleThrough();
+    await screen.findByText(`НОВАЯ КАРТОЧКА:${NEW_ID}`);
+
+    // На пути Ayla кандидата отложить некуда — без тела подтверждению
+    // нечего переносить. Одно и то же тело на обоих шагах.
+    const sent = mockedRequest.mock.calls[0]?.[1];
+    expect(sent).toEqual(
+      expect.objectContaining({ new_visit_at: "2026-09-10T12:00:00+03:00" }),
+    );
+    expect(mockedConfirm).toHaveBeenCalledWith(OLD_ID, sent);
+  });
+});
+
+describe("слова отказа — клиентский регистр владельца (28.09, п.10)", () => {
+  it("время заняли и прочий сбой — две разные фразы владельца, без «слота»", async () => {
+    mockedConfirm.mockRejectedValueOnce(new ApiError(409, "slot_unavailable", "x"));
+    renderReschedule();
+    await rescheduleThrough();
+    // Пара, которая обязана различаться: занятое время против прочего сбоя.
+    expect(
+      await screen.findByText("Это время только что заняли. Выберите другое."),
+    ).toBeInTheDocument();
+
+    mockedConfirm.mockRejectedValueOnce(new ApiError(502, "upstream_unavailable", "x"));
+    await rescheduleThrough();
+    expect(await screen.findByText("Не получилось перенести запись.")).toBeInTheDocument();
+    expect(screen.queryByText(/слот/i)).toBeNull();
   });
 });
 

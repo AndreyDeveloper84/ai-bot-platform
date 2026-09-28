@@ -71,6 +71,11 @@ NOT_A_MIRROR_ROW: dict[tuple[str, str], tuple[int, str]] = {
         1,
         "RemoteBookingProxy.specialist_id — из каталога",
     ),
+    # DRF-2561 — перенос в Mini App, та же строка зеркала, что у отмены.
+    ("apps/miniapp_api/views.py", "reschedule_appointment"): (
+        1,
+        "RemoteBookingProxy.specialist_id — из каталога",
+    ),
     ("apps/skills/booking/provider.py", "get_masters"): (
         1,
         "фильтр get_staff: id из ответа каталога или None",
@@ -140,7 +145,8 @@ def test_the_scan_sees_the_class():
     sites = _sites()
     assert len(sites) >= 43, len(sites)
     listed = sum(PENDING_1933B.values()) + sum(n for n, _ in NOT_A_MIRROR_ROW.values())
-    assert listed == 8
+    # 9: восьмёрка + перенос в Mini App (DRF-2561), та же строка зеркала, что у отмены.
+    assert listed == 9
 
 
 def test_every_catalog_call_sends_the_catalog_id_or_is_named():

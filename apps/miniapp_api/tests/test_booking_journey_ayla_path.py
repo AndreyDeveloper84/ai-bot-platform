@@ -158,6 +158,7 @@ class _JourneyAylaClient:
     def __init__(self) -> None:
         self.created: list[dict] = []
         self.cancelled: list[dict] = []
+        self.rescheduled: list[dict] = []
 
     def create_appointment(self, **kwargs):
         self.created.append(kwargs)
@@ -170,6 +171,17 @@ class _JourneyAylaClient:
     def cancel_appointment(self, **kwargs):
         self.cancelled.append(kwargs)
         return True
+
+    def reschedule_appointment(self, **kwargs):
+        # DRF-2561: нативный перенос — тот же id, новое время в ответе.
+        self.rescheduled.append(kwargs)
+        return AylaBookingRecord(
+            appointment_id=kwargs["appointment_id"],
+            raw={
+                "id": kwargs["appointment_id"],
+                "start_datetime": kwargs["new_start_datetime"],
+            },
+        )
 
 
 # ── фикстуры ──────────────────────────────────────────────────────────────────
@@ -331,14 +343,21 @@ def _cancel(client: Client, appointment_id: str):
 
 
 def _reschedule(
-    client: Client, appointment_id: str, master: CatalogMaster, service: CatalogService
+    client: Client,
+    appointment_id: str,
+    master: CatalogMaster,
+    service: CatalogService,
+    *,
+    step: str = "",
 ):
+    """Тело — как шлёт экран: мастер и услуга записи (``service_id`` провода
+    — id услуги в Ayla), новое время со смещением."""
     return client.post(
-        f"/api/v1/customer/bookings/{appointment_id}/reschedule",
+        f"/api/v1/customer/bookings/{appointment_id}/reschedule{step}",
         data=json.dumps(
             {
                 "new_master_id": str(master.id),
-                "new_service_id": str(service.id),
+                "new_service_id": str(service.ayla_service_id),
                 "new_visit_at": (_visit_at() + timedelta(days=1)).isoformat(),
             }
         ),
@@ -370,7 +389,10 @@ def _walk_to_visible(client: Client, ayla: _JourneyAylaClient, service, master) 
             "booking.created",
             appointment_id,
             {
-                "specialist_id": str(MASTER_AYLA_ID),
+                # id профиля в каталоге, как шлёт канон, — по нему деталь
+                # находит мастера записи (``_proxy_catalog_refs``). Перенос
+                # (DRF-2561) без мастера недоступен: не найти свободное время.
+                "specialist_id": str(master.catalog_specialist_id),
                 "service_id": str(SERVICE_AYLA_ID),
                 "start_at": _visit_at().isoformat(),
                 "end_at": (_visit_at() + timedelta(hours=1)).isoformat(),
@@ -482,8 +504,8 @@ class TestTheJourney:
         assert proxy.status == RemoteBookingProxy.Status.CANCELLED
 
 
-class TestRescheduleIsHonestlyAbsentOnTheAylaPath:
-    def test_reschedule_answers_409_not_404(
+class TestRescheduleOnTheAylaPath:
+    def test_visible_booking_moves_in_ayla_and_the_mirror_follows_the_event(
         self,
         client: Client,
         ayla: _JourneyAylaClient,
@@ -492,22 +514,84 @@ class TestRescheduleIsHonestlyAbsentOnTheAylaPath:
         service: CatalogService,
         master: CatalogMaster,
     ) -> None:
-        """Перенос на пути Ayla отвечает 409 invalid_state — DRF-1349.
+        """DRF-2561: перенос на пути Ayla — через шов, которым переносит чат.
 
-        Отдельный узел, а не четвёртый шаг пути: мок, «умеющий» перенос,
-        которого нет, узаконил бы ложь. Проверяется не просто «не 200», а
-        именно 409 против 404: докстринг гейта говорит, что без него оба
-        endpoint'а отвечали бы «booking not found» на запись, которую
-        человек видит в своём списке, — ложь того же рода, от которой
-        закрыт cancel.
+        До DRF-2561 здесь стоял узел «переноса честно нет» (409, DRF-1349):
+        мок, умеющий перенос, которого нет, узаконил бы ложь. Шов был —
+        ``reschedule_appointment`` клиента Ayla; не было проводки в Mini App.
+        Теперь узел проходит перенос целиком и держит тот же запрет на
+        двойную запись, что и отмена: зеркало двигает только событие.
         """
         appointment_id = _walk_to_visible(client, ayla, service, master)
 
-        # ПРИСУТСТВИЕ: запись видна человеку — значит 404 был бы ложью.
-        assert _detail(client, appointment_id).status_code == 200
+        # 1. Клиенту сказано заранее: перенос доступен.
+        assert _detail(client, appointment_id).json()["booking"]["reschedulable"] is True
 
-        resp = _reschedule(client, appointment_id, master, service)
-        assert resp.status_code == 409, resp.content[:300]
-        assert resp.json()["error"] == "invalid_state"
-        # И клиенту это сказано заранее, а не только на попытке.
-        assert _detail(client, appointment_id).json()["booking"]["reschedulable"] is False
+        # 2. Заявка — проверка и эхо: в Ayla ничего не уходит.
+        req = _reschedule(client, appointment_id, master, service)
+        assert req.status_code == 200, req.content[:300]
+        assert ayla.rescheduled == []
+
+        # 3. Подтверждение — перенос в Ayla той же записи на новое время.
+        new_at = _visit_at() + timedelta(days=1)
+        done = _reschedule(client, appointment_id, master, service, step="/confirm")
+        assert done.status_code == 200, done.content[:300]
+        assert len(ayla.rescheduled) == 1
+        call = ayla.rescheduled[0]
+        assert call["appointment_id"] == appointment_id
+        assert datetime.fromisoformat(call["new_start_datetime"]) == new_at
+        body = done.json()
+        assert body["new_booking"]["id"] == appointment_id
+        assert datetime.fromisoformat(body["new_booking"]["visit_at"]) == new_at
+        assert datetime.fromisoformat(body["old_booking"]["visit_at"]) == _visit_at()
+
+        # 4. Зеркало на новом времени СРАЗУ — названное исключение (вариант А):
+        #    иначе деталь показала бы старое время и «Перенести» ещё раз.
+        #    Статус прежний: его двигает только событие.
+        proxy = RemoteBookingProxy.all_tenants.get(appointment_id=appointment_id)
+        assert proxy.start_at == new_at
+        assert proxy.status == "confirmed"
+        assert (
+            datetime.fromisoformat(_detail(client, appointment_id).json()["booking"]["visit_at"])
+            == new_at
+        )
+
+        # 5. booking.rescheduled приносит то же время — потребитель идемпотентен.
+        ev = _ingest(
+            client,
+            _envelope("booking.rescheduled", appointment_id, {"new_start_at": new_at.isoformat()}),
+        )
+        assert ev.status_code in (200, 202), ev.content[:300]
+        proxy.refresh_from_db()
+        assert proxy.start_at == new_at
+
+    def test_another_master_or_service_is_refused_not_silently_ignored(
+        self,
+        client: Client,
+        ayla: _JourneyAylaClient,
+        stub_resolve: None,
+        bot_user: BotUser,
+        service: CatalogService,
+        master: CatalogMaster,
+    ) -> None:
+        """Нативный перенос двигает только время. Экран, приславший другого
+        мастера, получает отказ — а не «перенесли» к прежнему мастеру."""
+        appointment_id = _walk_to_visible(client, ayla, service, master)
+        # Положительная сторона впереди: своё — проходит.
+        assert _reschedule(client, appointment_id, master, service).status_code == 200
+
+        other = client.post(
+            f"/api/v1/customer/bookings/{appointment_id}/reschedule/confirm",
+            data=json.dumps(
+                {
+                    "new_master_id": str(uuid.uuid4()),
+                    "new_service_id": str(service.ayla_service_id),
+                    "new_visit_at": (_visit_at() + timedelta(days=1)).isoformat(),
+                }
+            ),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=_init_data_header(),
+        )
+        assert other.status_code == 409
+        assert other.json()["error"] == "invalid_state"
+        assert ayla.rescheduled == []

@@ -49,6 +49,7 @@ import {
 } from "../lib/api";
 import { formatDateLabel, formatDayStrip, formatSlotTime, formatVisitFull } from "../lib/format";
 import { resetBooking } from "../state/booking";
+import { CLIENT_RESCHEDULE_REFUSAL } from "../lib/refusal-canon";
 import { backTo } from "../lib/screen-back";
 
 function isoDateNDaysAhead(offset: number): string {
@@ -142,14 +143,16 @@ export function RescheduleScreen() {
     setConfirming(true);
     setError(null);
     try {
-      // request → stash candidate.
-      await rescheduleBookingRequest(bookingId, {
+      const candidate = {
         new_master_id: b.master_id,
         new_service_id: b.service_id,
         new_visit_at: pickedSlot,
-      });
-      // confirm → commit (creates new booking).
-      const { new_booking } = await rescheduleBookingConfirm(bookingId);
+      };
+      // request → stash candidate (local path) / check it (Ayla path).
+      await rescheduleBookingRequest(bookingId, candidate);
+      // confirm → commit. DRF-2561: the Ayla path has nowhere to stash the
+      // candidate, so the confirm carries it too.
+      const { new_booking } = await rescheduleBookingConfirm(bookingId, candidate);
       resetBooking();
       // Spec §5.3 confirmation: "Перенесена — было … стало …".
       navigate(`/customer/records/${new_booking.id}`, {
@@ -158,13 +161,13 @@ export function RescheduleScreen() {
       });
     } catch (err) {
       if (err instanceof ApiError && err.slug === "slot_unavailable") {
-        setError("Этот слот только что заняли. Выберите другое время.");
+        setError(CLIENT_RESCHEDULE_REFUSAL.slotTaken);
         // Reload slots — the picked one is now gone.
         load();
-      } else if (err instanceof ApiError) {
-        setError("Не получилось перенести.");
       } else {
-        setError("Не получилось перенести. Проверьте интернет.");
+        // Решение владельца 28.09, п.10: «перенос не удался по другой
+        // причине» — одна фраза клиентского регистра, в том числе без сети.
+        setError(CLIENT_RESCHEDULE_REFUSAL.failed);
       }
       setConfirming(false);
     }
