@@ -152,6 +152,24 @@ class NothingToConfirmError(NutritionAPIError):
         super().__init__(f"nothing_to_confirm:{source or 'unknown'}")
 
 
+class LegacyDefaultUnconfirmedError(NutritionAPIError):
+    """Каталог ответил ``409 LEGACY_DEFAULT_UNCONFIRMED`` (DRF-2279, DRF-2332).
+
+    Предложение есть, но посчитано на входах, которые подставила прежняя
+    анкета (``legacy_default_inputs``), — подтвердить его значило бы выдать
+    старое умолчание за ответ человека. ``fields`` — имена входов, как их
+    назвал каталог (``activity_coefficient``, ``pace``).
+
+    Отдельный класс, а не ``NothingToConfirmError``: до DRF-2332 любой 409
+    читался как «подтверждать нечего», и человеку с живым предложением бот
+    отвечал «Подтверждать пока нечего.» — неверная причина вместо верной.
+    """
+
+    def __init__(self, fields: list[str]) -> None:
+        self.fields = [str(f) for f in fields]
+        super().__init__(f"legacy_default_unconfirmed:{','.join(self.fields)}")
+
+
 class ManualTargetsRefusedError(NutritionAPIError):
     """Каталог отказал в ручном ориентире ``422`` (DRF-2138, режим 3 §82):
     ``CALORIES_BELOW_FLOOR`` — значение не сохранено. ``details`` — ответ
@@ -1849,7 +1867,11 @@ class NutritionClient:
                 err = resp.json().get("error") or {}
             except ValueError:
                 err = {}
-            source = str(((err.get("details") or {}).get("targets_source")) or "")
+            details = err.get("details") or {}
+            # DRF-2332: у 409 два смысла, и различает их код, а не статус.
+            if err.get("code") == "LEGACY_DEFAULT_UNCONFIRMED":
+                raise LegacyDefaultUnconfirmedError(list(details.get("fields") or []))
+            source = str(details.get("targets_source") or "")
             raise NothingToConfirmError(source)
 
         result = self._parse_profile_response(resp, allow_404=False)
