@@ -324,6 +324,11 @@ class TestR1Readiness:
         r = _readiness(master, kind)
         states = _states(r)
         assert states["services"][0] == "missing"
-        assert states["location"] == ("unavailable", "capability_not_built")
-        assert "location:unavailable" in r.blocking
+        # DRF-2370: было ("unavailable", "capability_not_built"), пока место
+        # считалось непостроенной возможностью. Решение главного окна по
+        # §6-квартер от 28.09 (docs/OWNER_QUESTIONS_2026-09-23.md, раздел
+        # «Ответы главного окна по поручению владельца — 28.09»): пункт читает
+        # каталог под субъектом мастера. Здесь субъекта нет → «не спрошено».
+        assert states["location"] == ("unknown", "no_subject")
+        assert "location:unknown" in r.blocking
         assert "services:missing" in r.blocking

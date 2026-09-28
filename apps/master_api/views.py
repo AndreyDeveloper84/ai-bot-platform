@@ -1739,7 +1739,9 @@ def onboarding_readiness(request: HttpRequest) -> HttpResponse:
     """
 
     master: CatalogMaster = request.master  # type: ignore[attr-defined]
-    return JsonResponse(build_readiness(master).as_dict())
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    # DRF-2370: место работы каталог отдаёт только под субъектом мастера.
+    return JsonResponse(build_readiness(master, actor=external_user_id_for(bot_user)).as_dict())
 
 
 # --- /publication/readiness, /publication, /publication/status (DRF-1797, M5) ---
