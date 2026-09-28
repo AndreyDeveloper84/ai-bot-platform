@@ -57,9 +57,9 @@ print("RESULT " + json.dumps(out))
 """
 
 # Только для узла — не настоящие секреты.
-SECRET_A = "test-only-secret-key-A-" + "x" * 40
-SECRET_B = "test-only-secret-key-B-" + "y" * 40
-KEY_K = "test-only-crypto-key-K-" + "z" * 40
+SECRET_A = "test-only-secret-key-A-" + "x" * 40  # pragma: allowlist secret
+SECRET_B = "test-only-secret-key-B-" + "y" * 40  # pragma: allowlist secret
+KEY_K = "test-only-crypto-key-K-" + "z" * 40  # pragma: allowlist secret
 
 
 def _run(op: str, payload: str, *, secret: str, crypto: str | None) -> str:
