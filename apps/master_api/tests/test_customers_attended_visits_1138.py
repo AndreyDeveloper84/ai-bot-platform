@@ -198,21 +198,52 @@ class TestAVisitIsWhatAHumanClosed:
         assert set(_roster(accepted_master)) == {"Анна"}
 
 
+def _booking(tenant: Tenant, master: CatalogMaster, customer: BotUser, start: datetime) -> None:
+    RemoteBookingProxy.all_tenants.create(
+        appointment_id=uuid.uuid4(),
+        tenant=tenant,
+        bot_user=customer,
+        start_at=start,
+        end_at=start + timedelta(hours=1),
+        status="confirmed",
+        specialist_id=master.id,
+    )
+
+
+class TestTheNextVisitIsTodayInTheSalonZone:
+    """Правило продукта, из-за которого узел ниже краснел вечерами: ближайший
+    визит — «в пределах сегодняшнего дня в зоне салона» (``get_next_visit``).
+    Пара, чтобы следующий не «исправил» границу: визит до полуночи салона
+    находится, визит за полуночью салона — нет, и это верное поведение."""
+
+    def test_before_the_salons_midnight_it_is_found_after_it_it_is_not(
+        self, tenant: Tenant, accepted_master: CatalogMaster
+    ) -> None:
+        assert str(ds.salon_zone(accepted_master.tenant)) == "Europe/Moscow"
+        anna = _client(tenant, "Анна")
+        evening = datetime(2026, 9, 28, 18, 0, tzinfo=timezone.utc)  # 21:00 МСК
+        _booking(tenant, accepted_master, anna, evening + timedelta(minutes=30))  # 21:30 МСК
+        found = ds.get_next_visit(accepted_master, evening)
+
+        late = datetime(2026, 9, 29, 20, 0, tzinfo=timezone.utc)  # 23:00 МСК
+        _booking(tenant, accepted_master, anna, late + timedelta(hours=2))  # 01:00 МСК завтра
+        tomorrow = ds.get_next_visit(accepted_master, late)
+
+        assert found is not None
+        assert tomorrow is None
+
+
 class TestTheDayChipUsesTheSameRule:
     """Чип «постоянный клиент» на ближайшем визите — то же правило, что список."""
 
     def _upcoming(self, tenant: Tenant, master: CatalogMaster, customer: BotUser):
-        start = dj_timezone.now() + timedelta(hours=2)
-        RemoteBookingProxy.all_tenants.create(
-            appointment_id=uuid.uuid4(),
-            tenant=tenant,
-            bot_user=customer,
-            start_at=start,
-            end_at=start + timedelta(hours=1),
-            status="confirmed",
-            specialist_id=master.id,
-        )
-        return ds.get_next_visit(master, dj_timezone.now())
+        # Часы файла — ``NOW`` (15:00 МСК), как у всех визитов выше. Раньше
+        # здесь стояли настоящие часы: ``get_next_visit`` ищет «сегодня в зоне
+        # салона», и визит ``now + 2h`` уезжал за полночь МСК каждый вечер с
+        # 19:00 до 21:00 UTC — узел краснел два часа в сутки (dev 29.09).
+        start = NOW + timedelta(hours=2)
+        _booking(tenant, master, customer, start)
+        return ds.get_next_visit(master, NOW)
 
     def test_two_human_closed_visits_light_the_chip(
         self, tenant: Tenant, accepted_master: CatalogMaster
