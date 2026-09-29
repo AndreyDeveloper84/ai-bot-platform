@@ -195,6 +195,11 @@ def staff_invite_create(request: HttpRequest) -> HttpResponse:
             403,
         )
 
+    # DRF-2666: свободный текст из тела хранится или уходит наружу — нестроковое
+    # значение получает отказ этой двери, а не становится текстом "{'a': 1}".
+    for field in ("note",):
+        if body.get(field) is not None and not isinstance(body.get(field), str):
+            return _error("bad_request", f"{field} must be a string", 400)
     note = str(body.get("note") or "").strip()[:MAX_NOTE_LEN]
 
     catalog_master = None

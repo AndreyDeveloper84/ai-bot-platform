@@ -145,6 +145,11 @@ def create_booking(request: HttpRequest) -> HttpResponse:
     if not isinstance(body, dict):
         return _error("bad_request", "body must be a JSON object", 400)
 
+    # DRF-2666: свободный текст из тела хранится или уходит наружу — нестроковое
+    # значение получает отказ этой двери, а не становится текстом "{'a': 1}".
+    for field in ("client_name", "client_phone", "idempotency_key"):
+        if body.get(field) is not None and not isinstance(body.get(field), str):
+            return _error("bad_request", f"{field} must be a string", 400)
     service_id = str(body.get("service_id") or "").strip()
     start_at = str(body.get("start_at") or "").strip()
     idempotency_key = str(body.get("idempotency_key") or "").strip()

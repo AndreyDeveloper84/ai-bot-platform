@@ -99,6 +99,11 @@ def cancel_booking(request: HttpRequest, appointment_id: str) -> HttpResponse:
     if not isinstance(body, dict):
         return _error("bad_request", "body must be a JSON object", 400)
 
+    # DRF-2666: свободный текст из тела хранится или уходит наружу — нестроковое
+    # значение получает отказ этой двери, а не становится текстом "{'a': 1}".
+    for field in ("reason",):
+        if body.get(field) is not None and not isinstance(body.get(field), str):
+            return _error("bad_request", f"{field} must be a string", 400)
     reason = str(body.get("reason") or "").strip()
     if len(reason) > MAX_REASON_LEN:
         return _error("bad_request", "reason too long", 400)

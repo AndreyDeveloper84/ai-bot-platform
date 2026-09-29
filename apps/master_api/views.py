@@ -1482,6 +1482,12 @@ def canon_gap_requests(request: HttpRequest) -> HttpResponse:
         return _error("invalid_json", "Body must be JSON.", 400)
     if not isinstance(body, dict):
         return _error("validation_error", "Body must be an object.", 400)
+    # DRF-2666: название и описание уходят в каталог как чужие данные —
+    # нестроковое значение не превращается в текст ``"{'a': 1}"``, а
+    # получает отказ этой же двери, до вызова каталога.
+    for field in ("name", "description"):
+        if body.get(field) is not None and not isinstance(body.get(field), str):
+            return _error("validation_error", f"{field} must be a string.", 400)
     name = str(body.get("name") or "").strip()
     duration = body.get("duration_minutes")
     price = body.get("price")
