@@ -119,15 +119,21 @@ def _body(request: HttpRequest) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
-def _write(
+def salon_person_write(
     request: HttpRequest,
     master_id: str,
     op: str,
     call: Callable[[Any, str, str, CatalogMaster], dict[str, Any]],
     *,
     success_status: int,
+    on_success: Callable[[CatalogMaster, dict[str, Any]], HttpResponse] | None = None,
 ) -> HttpResponse:
-    """Token → write → journal. Every refusal of the person answers the same."""
+    """Token → write → journal. Every refusal of the person answers the same.
+
+    ``on_success`` — for a write whose answer the bot must mirror before
+    replying (DRF-2619: the master's photo address). Without it the catalog's
+    ``data`` goes back as is.
+    """
 
     tenant = request.tenant  # type: ignore[attr-defined]
     actor = request.bot_user.pk  # type: ignore[attr-defined]
@@ -235,7 +241,11 @@ def _write(
         )
         return _refused()
     except SalonValidationError as exc:
-        return JsonResponse({"error": "validation", "detail": str(exc)}, status=400)
+        body: dict[str, Any] = {"error": "validation", "detail": str(exc)}
+        if exc.details:
+            # Which rule refused (``not_square`` …) — the screen's words hang on it.
+            body["details"] = exc.details
+        return JsonResponse(body, status=400)
     except SalonNotFound:
         return JsonResponse({"error": "not_found"}, status=404)
     except SalonSlotTaken as exc:
@@ -265,6 +275,8 @@ def _write(
     if success_status == 204:
         return HttpResponse(status=204)
     data = result.get("data", result) if isinstance(result, dict) else result
+    if on_success is not None:
+        return on_success(master, data if isinstance(data, dict) else {})
     return JsonResponse({"data": data}, status=success_status)
 
 
@@ -277,7 +289,7 @@ def master_time_off(request: HttpRequest, master_id: str) -> HttpResponse:
         return JsonResponse(
             {"error": "validation", "detail": "start_at and end_at are required"}, status=400
         )
-    return _write(
+    return salon_person_write(
         request,
         master_id,
         "time_off_create",
@@ -299,7 +311,7 @@ def master_time_off(request: HttpRequest, master_id: str) -> HttpResponse:
 def master_time_off_detail(request: HttpRequest, master_id: str, time_off_id: str) -> HttpResponse:
     if not _is_uuid(time_off_id):
         return JsonResponse({"error": "not_found"}, status=404)
-    return _write(
+    return salon_person_write(
         request,
         master_id,
         "time_off_delete",
@@ -323,7 +335,7 @@ def master_date_exception(request: HttpRequest, master_id: str) -> HttpResponse:
             {"error": "validation", "detail": "date and a boolean is_working_day are required"},
             status=400,
         )
-    return _write(
+    return salon_person_write(
         request,
         master_id,
         "date_exception_set",
@@ -349,7 +361,7 @@ def master_date_exception_detail(request: HttpRequest, master_id: str, date: str
         return JsonResponse(
             {"error": "validation", "detail": "date must be YYYY-MM-DD"}, status=400
         )
-    return _write(
+    return salon_person_write(
         request,
         master_id,
         "date_exception_delete",

@@ -183,8 +183,8 @@ ADMIN_ROUTES: dict[str, Entry] = {
         via=A + "views:master_photo_upload",
         whose="the master whose photo was just uploaded",
         why=(
-            "the response is the public URL of the file the operator uploaded for that "
-            "master's card; the file itself is stored under MEDIA_ROOT/master_photos"
+            "the response is our proxy path to the photo the operator uploaded for that "
+            "master's card; the bytes are stored by the catalog (DRF-2619), not the bot"
         ),
     ),
     "master_schedule": _MASTER_SCHEDULE,
@@ -221,7 +221,7 @@ ADMIN_ROUTES: dict[str, Entry] = {
     # answered about the one row just written.
     "master_time_off": third_party(
         "data (the time-off row Ayla stored: id, start_at, end_at, reason)",
-        via=A + "views_salon_schedule_writes:_write",
+        via=A + "views_salon_schedule_writes:salon_person_write",
         whose="the master whose absence was just recorded",
         why=(
             "the operator who created the absence gets back the row as stored, including the "
@@ -234,7 +234,7 @@ ADMIN_ROUTES: dict[str, Entry] = {
     ),
     "master_date_exception": third_party(
         "data (the per-date exception row: date, is_working_day, hours, note)",
-        via=A + "views_salon_schedule_writes:_write",
+        via=A + "views_salon_schedule_writes:salon_person_write",
         whose="the master whose hours on one date were changed",
         why=(
             "the operator sees the exception exactly as Ayla saved it, so the screen shows the "

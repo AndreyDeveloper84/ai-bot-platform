@@ -97,7 +97,18 @@ class SalonNotConfigured(SalonAPIError):
 
 
 class SalonValidationError(SalonAPIError):
-    """400 — Ayla rejected the payload (e.g. booking window)."""
+    """400 — Ayla rejected the payload (e.g. booking window).
+
+    ``details`` — Ayla's ``error.details`` as sent (DRF-2619): a refused photo
+    says WHICH rule refused it (``not_square``, ``file_too_large``, …), and the
+    screen needs that, not the prose. ``None`` when Ayla sent none.
+    """
+
+    def __init__(
+        self, detail: str = "", *, code: str = "", details: dict[str, Any] | None = None
+    ) -> None:
+        super().__init__(detail, code=code)
+        self.details = details
 
 
 class SalonUnauthorized(SalonAPIError):
@@ -306,7 +317,9 @@ class AylaSalonClient:
     # ── Writes as the PERSON (DRF-2607) ─────────────────────────────────────
 
     @staticmethod
-    def _person_headers(*, person_token: str, tenant_slug: str) -> dict[str, str]:
+    def _person_headers(
+        *, person_token: str, tenant_slug: str, json_body: bool = True
+    ) -> dict[str, str]:
         """The administrator's own token — and nothing of the service's.
 
         No ``X-External-User-ID``: the token already says who, and a second
@@ -316,15 +329,16 @@ class AylaSalonClient:
         refuse.
         """
 
-        return with_request_id(
-            {
-                "Authorization": f"Bearer {person_token}",
-                "X-Tenant": tenant_slug,
-                "X-App-Type": "pro",
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-            }
-        )
+        headers = {
+            "Authorization": f"Bearer {person_token}",
+            "X-Tenant": tenant_slug,
+            "X-App-Type": "pro",
+            "Accept": "application/json",
+        }
+        if json_body:
+            # Multipart sets its own Content-Type with the boundary.
+            headers["Content-Type"] = "application/json"
+        return with_request_id(headers)
 
     def _send_as_person(
         self,
@@ -334,6 +348,7 @@ class AylaSalonClient:
         person_token: str,
         tenant_slug: str,
         json_body: dict[str, Any] | None = None,
+        files: dict[str, tuple[str, bytes, str]] | None = None,
     ) -> dict[str, Any]:
         """One write on the person's token. Without a token — refused here,
         never re-sent under the service credential."""
@@ -348,9 +363,12 @@ class AylaSalonClient:
                     method,
                     url,
                     headers=self._person_headers(
-                        person_token=person_token, tenant_slug=tenant_slug
+                        person_token=person_token,
+                        tenant_slug=tenant_slug,
+                        json_body=files is None,
                     ),
                     json=json_body,
+                    files=files,
                 )
         except (httpx.TimeoutException, httpx.NetworkError) as exc:
             logger.warning("salon_client.%s.network err=%s", endpoint, type(exc).__name__)
@@ -444,6 +462,35 @@ class AylaSalonClient:
             json_body=body,
         )
 
+    def upload_master_avatar(
+        self,
+        *,
+        person_token: str,
+        tenant_slug: str,
+        specialist_id: str,
+        filename: str,
+        content: bytes,
+        content_type: str,
+    ) -> dict[str, Any]:
+        """``POST tenants/me/masters/{specialist_id}/media/avatar/`` as the person (DRF-2619).
+
+        Multipart ``image``. The catalog owns the bytes and the rules —
+        JPEG / PNG / WebP by content, size, square — and answers with the
+        master's profile state, ``avatar_url`` included. A master of another
+        salon is 404, like every master route here.
+        """
+
+        _require_id(specialist_id, field="specialist_id")
+        return self._send_as_person(
+            "POST",
+            f"masters/{specialist_id}/media/avatar/",
+            person_token=person_token,
+            tenant_slug=tenant_slug,
+            files={
+                "image": (filename or "photo", content, content_type or "application/octet-stream")
+            },
+        )
+
     def delete_schedule_exception(
         self, *, person_token: str, tenant_slug: str, specialist_id: str, date: str
     ) -> dict[str, Any]:
@@ -469,7 +516,7 @@ class AylaSalonClient:
         detail = _detail(resp)
         code = _error_code(resp)
         if resp.status_code == 400:
-            raise SalonValidationError(detail)
+            raise SalonValidationError(detail, code=code, details=_error_details(resp))
         if resp.status_code == 401:
             raise SalonUnauthorized(detail)
         if resp.status_code == 403:
