@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Iterator
+from typing import Any, cast
 
 import anthropic
 import httpx
@@ -69,7 +70,7 @@ def _anthropic_reply(request: httpx.Request) -> httpx.Response:
 
 def _call_openai() -> None:
     client = openai.OpenAI(
-        api_key="test",
+        api_key="test",  # pragma: allowlist secret — заглушка клиента, не ключ
         max_retries=0,
         http_client=openai.DefaultHttpxClient(transport=httpx.MockTransport(_openai_reply)),
     )
@@ -78,7 +79,7 @@ def _call_openai() -> None:
 
 def _call_anthropic() -> None:
     client = anthropic.Anthropic(
-        api_key="test",
+        api_key="test",  # pragma: allowlist secret — заглушка клиента, не ключ
         max_retries=0,
         http_client=anthropic.DefaultHttpxClient(transport=httpx.MockTransport(_anthropic_reply)),
     )
@@ -116,7 +117,7 @@ def _logged(caplog, call: Callable[[], None]) -> tuple[str, list[str]]:
 
 
 def test_logging_pins_the_body_writers_at_info() -> None:
-    loggers = settings.LOGGING["loggers"]
+    loggers = cast(dict[str, dict[str, Any]], settings.LOGGING["loggers"])
     assert {name: loggers[name]["level"] for name in PINNED} == dict.fromkeys(PINNED, "INFO")
     # Пин применён к живым логгерам, а не только лежит в словаре.
     assert [logging.getLogger(name).level for name in PINNED] == [logging.INFO] * len(PINNED)
@@ -130,6 +131,11 @@ def test_logging_pins_the_body_writers_at_info() -> None:
 def test_request_body_stays_out_of_the_log_at_debug(caplog, sdk_debug, pinned, call) -> None:
     caplog.set_level(logging.DEBUG)
     logger = logging.getLogger(pinned)
+    # Уровень, который поставила САМА конфигурация (``LOGGING`` при загрузке
+    # Django), — его и проверяем. Проверка с ``setLevel(INFO)`` руками прошла
+    # бы и без пина в настройках: доказывала бы «INFO не пишет тело», а не
+    # «настройки его прибили» (DRF-2634, разбор #2190).
+    configured = logger.level
 
     # Контроль: без пина тело запроса с текстом человека уходит в лог.
     logger.setLevel(logging.NOTSET)
@@ -137,8 +143,8 @@ def test_request_body_stays_out_of_the_log_at_debug(caplog, sdk_debug, pinned, c
     assert WORD in text
     assert "Request options" in text
 
-    # С пином — строка httpx о запросе есть, тела нет.
-    logger.setLevel(logging.INFO)
+    # С уровнем из настроек — строка httpx о запросе есть, тела нет.
+    logger.setLevel(configured)
     text, httpx_lines = _logged(caplog, call)
     assert any(line.startswith("HTTP Request: POST") for line in httpx_lines)
     assert "Request options" not in text
