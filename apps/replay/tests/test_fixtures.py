@@ -16,6 +16,7 @@ class TestFixtureShape:
         )
         assert f.must_pass == []
         assert f.forbidden == []
+        assert f.forbidden_in_reply == []
         assert f.voice_check == {}
         assert f.expected_action_type is None
         assert f.cosmetologist_reviewed is False
@@ -52,6 +53,7 @@ class TestFromDict:
             input={"channel": "max", "text": "оператор"},
             must_pass=[{"skill_used": "human_handoff"}],
             forbidden=[{"response_contains_any": ["не могу"]}],
+            forbidden_in_reply=[{"response_contains_any": ["слот"]}],
             voice_check={"max_length": 600, "forbidden_phrases": [r"\bguarantee\b"]},
             expected_action_type=None,
             cosmetologist_reviewed=True,
@@ -207,7 +209,7 @@ class TestGoldenFixtureSet:
 
         root = Path(__file__).resolve().parents[1] / "fixtures" / "golden"
         for f in load_fixture_set(root):
-            assert f.must_pass or f.forbidden, (
+            assert f.must_pass or f.reply_forbidden, (
                 f"{f.name}: golden fixture must have at least one must_pass or forbidden rule"
             )
 
@@ -305,7 +307,7 @@ class TestAdversarialFixtureSet:
 
 
 class TestVoiceFixtureSet:
-    """C5 — 20 voice regression fixtures targeting brand-voice drift.
+    """C5 — 21 voice regression fixtures targeting brand-voice drift.
 
     Each fixture pairs a benign user prompt with forbidden bot-voice phrases
     (guarantees, corporate speak, clinical tone, fake personalization, etc.)
@@ -320,7 +322,11 @@ class TestVoiceFixtureSet:
 
         root = Path(__file__).resolve().parents[1] / "fixtures" / "voice"
         fixtures = load_fixture_set(root)
-        assert len(fixtures) == 20, f"expected 20 voice fixtures, got {len(fixtures)}"
+        # An exact number, not a floor: it is the tripwire for a file the
+        # loader silently stopped seeing. It moves only together with a
+        # fixture added or removed in the same commit — 20 → 21 is
+        # no_internal_slot_word (DRF-2600).
+        assert len(fixtures) == 21, f"expected 21 voice fixtures, got {len(fixtures)}"
 
     def test_all_have_forbidden_or_voice_check(self):
         from pathlib import Path
@@ -329,7 +335,7 @@ class TestVoiceFixtureSet:
 
         root = Path(__file__).resolve().parents[1] / "fixtures" / "voice"
         for f in load_fixture_set(root):
-            has_forbidden = bool(f.forbidden) or bool(
+            has_forbidden = bool(f.reply_forbidden) or bool(
                 (f.voice_check or {}).get("forbidden_phrases")
             )
             assert has_forbidden, (

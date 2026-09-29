@@ -70,7 +70,7 @@ def canary_reply_for(fixture: Fixture) -> str:
     """
 
     phrases: list[str] = []
-    for constraint in fixture.forbidden:
+    for constraint in fixture.reply_forbidden:
         for key, expected in constraint.items():
             if key not in ("response_contains_any", "response_contains_all"):
                 continue

@@ -40,11 +40,31 @@ class Fixture:
     input: dict[str, Any]
     must_pass: list[dict[str, Any]] = field(default_factory=list)
     forbidden: list[dict[str, Any]] = field(default_factory=list)
+    # DRF-2600. Words the PERSON may say and the REPLY must not. ``forbidden``
+    # carries a contract (test_fixtures, echo baseline): its phrases never
+    # overlap the input, so a reply that echoes the person cannot trip it.
+    # A word like «слот» breaks that contract by nature — people write it,
+    # Ayla must not answer with it. This field carries the inverse contract:
+    # every phrase here MUST occur in ``input.text``, otherwise it belongs in
+    # ``forbidden``. Evaluated on the reply exactly like ``forbidden``.
+    # Limit: substring rules only (``response_contains_any``/``_all``); a
+    # regex in ``voice_check.forbidden_phrases`` has no reply-side twin yet —
+    # the echo baselines run it against the input too.
+    forbidden_in_reply: list[dict[str, Any]] = field(default_factory=list)
     voice_check: dict[str, Any] = field(default_factory=dict)
     expected_action_type: str | None = None
     # Per Sprint 5 plan #7 — adversarial fixtures ship false; Phase-1
     # expert audit flips per YAML.
     cosmetologist_reviewed: bool = False
+
+    @property
+    def reply_forbidden(self) -> list[dict[str, Any]]:
+        """Everything the reply must not carry — both sides of the prohibition.
+
+        Every place that judges a REPLY reads this; only the echo-baseline
+        contract reads the two fields apart.
+        """
+        return [*self.forbidden, *self.forbidden_in_reply]
 
 
 # Top-level YAML keys we recognise. C2 loader rejects unknown keys.
@@ -55,6 +75,7 @@ _KNOWN_KEYS = frozenset(
         "input",
         "must_pass",
         "forbidden",
+        "forbidden_in_reply",
         "voice_check",
         "expected_action_type",
         "cosmetologist_reviewed",
@@ -100,6 +121,7 @@ def from_dict(data: dict[str, Any], *, source: str = "<dict>") -> Fixture:
         input=dict(inp),
         must_pass=list(data.get("must_pass") or []),
         forbidden=list(data.get("forbidden") or []),
+        forbidden_in_reply=list(data.get("forbidden_in_reply") or []),
         voice_check=dict(data.get("voice_check") or {}),
         expected_action_type=data.get("expected_action_type"),
         cosmetologist_reviewed=bool(data.get("cosmetologist_reviewed", False)),
@@ -115,6 +137,7 @@ def to_dict(fixture: Fixture) -> dict[str, Any]:
         "input": dict(fixture.input),
         "must_pass": list(fixture.must_pass),
         "forbidden": list(fixture.forbidden),
+        "forbidden_in_reply": list(fixture.forbidden_in_reply),
         "voice_check": dict(fixture.voice_check),
         "expected_action_type": fixture.expected_action_type,
         "cosmetologist_reviewed": fixture.cosmetologist_reviewed,
