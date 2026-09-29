@@ -14,7 +14,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { settleScenario } from "./settleScenario";
 
-type Via = "microtasks" | "nestedTimers" | "effectAfterLoad" | "timer500";
+type Via = "microtasks" | "nestedTimers" | "effectAfterLoad" | "longTimer";
 
 function LateCaller({ call, via }: { call: () => void; via: Via }) {
   const [loaded, setLoaded] = useState(false);
@@ -25,8 +25,12 @@ function LateCaller({ call, via }: { call: () => void; via: Via }) {
         .then(call);
     } else if (via === "nestedTimers") {
       setTimeout(() => setTimeout(() => setTimeout(call, 0), 0), 0);
-    } else if (via === "timer500") {
-      setTimeout(call, 500);
+    } else if (via === "longTimer") {
+      // 60 с — за жизнь теста не наступит ни при какой нагрузке; снимается при
+      // размонтировании. Прежние 500 мс держались на допущении «помощник
+      // успевает быстрее» и под нагрузкой краснели без дефекта (DRF-2597).
+      const id = setTimeout(call, 60_000);
+      return () => clearTimeout(id);
     } else {
       setTimeout(() => setTimeout(() => setLoaded(true), 0), 0);
     }
@@ -72,7 +76,7 @@ describe("settleScenario — запоздавший запрещённый вы�
 
   it("предел: вызов с настоящей задержкой по часам помощник не дожидается", async () => {
     const call = vi.fn();
-    render(<LateCaller call={call} via="timer500" />);
+    render(<LateCaller call={call} via="longTimer" />);
     expect(screen.getByRole("heading", { name: "Экран" })).toBeInTheDocument();
 
     await settleScenario();
