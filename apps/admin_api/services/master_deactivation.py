@@ -69,8 +69,12 @@ from apps.booking.services.transitions import (
     commit_cancel,
     request_cancel,
 )
+from apps.catalog.master_state import is_available
 from apps.catalog.models import CatalogMaster, MasterService
+from apps.catalog.specialist_ref import specialist_keys
+from apps.channels.max.addressing import MaxAddress
 from apps.channels.max.outbound import MaxAPIError, send_message
+from apps.channels.max.staff_outbound import send_to_staff
 from apps.events.services import emit
 from apps.events.vocabulary import (
     MASTER_BOOKINGS_CANCELLED,
@@ -112,8 +116,8 @@ DEFAULT_CUSTOMER_NOTIFICATION_TEMPLATE = (
     "{new_master_last_initial} — {she_he} тоже делает {service_name}.\n"
     "Если так не подходит — напишите, я предложу другие варианты. 🙏\n\n"
     "[CANCEL BRANCH]\n"
-    "Запись на это время отменим. Если хотите, могу предложить другие "
-    "свободные слоты — напишите."
+    "Запись на это время отменим. Если хотите, могу предложить другое "
+    "свободное время — напишите."
 )
 """Default per-spec §770-783. Owner can override via ``custom_template``."""
 
@@ -254,7 +258,10 @@ class _PendingNotification:
     operator finds out who that is and why.
     """
 
-    chat_id: str | None
+    #: MAX ``user_id`` — ``BotUser.channel_user_id``. The person, not the
+    #: dialog: these DMs are written first, and a stored ``chat_id`` names
+    #: a dialog with whichever bot opened one (DRF-1558).
+    user_id: str | None
     text: str
     hash_: str
     booking_id: str
@@ -264,7 +271,8 @@ class _PendingNotification:
 
 @dataclass
 class _PendingMasterNotification:
-    chat_id: str
+    #: MAX ``user_id`` — see :class:`_PendingNotification` (DRF-1558).
+    user_id: str
     text: str
     master_id: str
     blocked_reason: str | None = None
@@ -315,8 +323,16 @@ def _render_customer_notification(
     tpl = template if template is not None else DEFAULT_CUSTOMER_NOTIFICATION_TEMPLATE
     visit_at_human = ""
     if booking.visit_at is not None:
-        # Tenant-local stringification: keep ISO-ish but readable.
-        visit_at_human = booking.visit_at.strftime("%d.%m.%Y %H:%M")
+        # Час салона, не UTC (DRF-2591). Здесь стоял комментарий «tenant-local
+        # stringification», а код печатал `visit_at` как есть — UTC из базы:
+        # клиент читал в сообщении визит на 3 часа раньше. Пояс — одно правило
+        # на бот (`apps.tenancy.timezones.salon_zone`, DRF-2595).
+        from apps.tenancy.timezones import salon_zone
+
+        zone = salon_zone(old_master.tenant)
+        moment = booking.visit_at
+        local = moment.replace(tzinfo=zone) if moment.tzinfo is None else moment.astimezone(zone)
+        visit_at_human = local.strftime("%d.%m.%Y %H:%M")
 
     fields = {
         "client_first_name": _first_name(booking.client_name),
@@ -538,9 +554,11 @@ def _count_future_mirror_bookings(master: CatalogMaster) -> int:
     anything coming up».
     """
 
+    # DRF-2185: у соло/склеенного мастера зеркало ключится каталожным id,
+    # не pk — по одному pk счётчик отвечал 0 при живых записях.
     return RemoteBookingProxy.all_tenants.filter(
         tenant_id=master.tenant_id,
-        specialist_id=master.id,
+        specialist_id__in=specialist_keys(master),
         status__in=MIRROR_LIVE_STATUSES,
         start_at__gte=timezone.now(),
     ).count()
@@ -590,12 +608,15 @@ def _find_fallback_masters(
         .exclude(master_id=deactivating_master_id)
         .select_related("master")
     )
+    # DRF-1506 — «кому можно передать запись» это вопрос о продаже, не о
+    # личности: подхватить клиента может и синхронизированная мастер, у
+    # которой нет ``linked_bot_user`` (на пилоте таких все девять).
+    # Поэтому здесь ``is_available``, а не ``is_landed`` — но предикат
+    # тот же самый, из одного модуля, а не три условия, набранные заново.
     candidates: dict[UUID, CatalogMaster] = {}
     for ms in ms_rows:
         m = ms.master
-        if not m.is_active or m.archived_at is not None:
-            continue
-        if m.invite_status != CatalogMaster.InviteStatus.ACCEPTED:
+        if not is_available(m):
             continue
         candidates[m.id] = m
 
@@ -986,7 +1007,7 @@ def execute_deactivation(
 
                 pending_customer_notifications.append(
                     _PendingNotification(
-                        chat_id=bu.chat_id if bu else None,
+                        user_id=bu.channel_user_id if bu else None,
                         text=rendered,
                         hash_=msg_hash,
                         booking_id=str(booking.id),
@@ -1058,7 +1079,7 @@ def execute_deactivation(
 
                 pending_customer_notifications.append(
                     _PendingNotification(
-                        chat_id=bu.chat_id if bu else None,
+                        user_id=bu.channel_user_id if bu else None,
                         text=rendered,
                         hash_=msg_hash,
                         booking_id=str(booking.id),
@@ -1105,7 +1126,7 @@ def execute_deactivation(
                 if target.linked_bot_user_id is None:
                     continue
                 bu = BotUser.all_tenants.filter(pk=target.linked_bot_user_id).first()
-                if bu is None or not bu.chat_id:
+                if bu is None or not bu.channel_user_id:
                     continue
                 n_inherited = counts.get(target_id, 0)
                 text = (
@@ -1116,7 +1137,7 @@ def execute_deactivation(
                 )
                 pending_master_notifications.append(
                     _PendingMasterNotification(
-                        chat_id=bu.chat_id,
+                        user_id=bu.channel_user_id,
                         text=text,
                         master_id=target_id,
                         blocked_reason=_master_notification_blocker(bu),
@@ -1141,11 +1162,12 @@ def execute_deactivation(
                     pn.blocked_reason,
                 )
                 continue
-            if not pn.chat_id:
+            if not pn.user_id:
+                # Slug ``no_chat_id`` — эмитируемый ключ, оставлен как был.
                 logger.info("mm5.notify.skip booking=%s reason=no_chat_id", pn.booking_id)
                 continue
             try:
-                send_message(chat_id=pn.chat_id, text=pn.text)
+                send_message(user_id=pn.user_id, text=pn.text)
                 customer_dispatched += 1
             except MaxAPIError as exc:
                 logger.warning(
@@ -1164,14 +1186,16 @@ def execute_deactivation(
                     pn.blocked_reason,
                 )
                 continue
-            try:
-                send_message(chat_id=pn.chat_id, text=pn.text)
+            # DRF-2128 — мастеру от салонного бота; сбой провода
+            # именован в логе отправителя, здесь — счётчик и slug как был.
+            outcome = send_to_staff(master.tenant, MaxAddress(user_id=pn.user_id), pn.text)
+            if outcome.delivered:
                 master_dispatched += 1
-            except MaxAPIError as exc:
+            else:
                 logger.warning(
-                    "mm5.notify.master_failed master=%s status=%s",
+                    "mm5.notify.master_failed master=%s failed=%s",
                     pn.master_id,
-                    exc.status_code,
+                    outcome.failed,
                 )
 
     # Hook AFTER the transaction is committed. For tests not in a
@@ -1237,10 +1261,10 @@ def reactivate_master(
         }
         if notify_master and master.linked_bot_user_id is not None:
             bu = BotUser.all_tenants.filter(pk=master.linked_bot_user_id).first()
-            if bu is not None and bu.chat_id:
+            if bu is not None and bu.channel_user_id:
                 blocked = _master_notification_blocker(bu)
                 pending_master_dm = _PendingMasterNotification(
-                    chat_id=bu.chat_id,
+                    user_id=bu.channel_user_id,
                     text=REACTIVATION_NOTIFICATION_TEXT,
                     master_id=str(master.id),
                     blocked_reason=blocked,
@@ -1270,14 +1294,17 @@ def reactivate_master(
                 pending_master_dm.blocked_reason,
             )
             return
-        try:
-            send_message(chat_id=pending_master_dm.chat_id, text=pending_master_dm.text)
+        # DRF-2128 — мастеру от салонного бота.
+        outcome = send_to_staff(
+            master.tenant, MaxAddress(user_id=pending_master_dm.user_id), pending_master_dm.text
+        )
+        if outcome.delivered:
             notified = True
-        except MaxAPIError as exc:
+        else:
             logger.warning(
-                "mm5.reactivate.notify_failed master=%s status=%s",
+                "mm5.reactivate.notify_failed master=%s failed=%s",
                 pending_master_dm.master_id,
-                exc.status_code,
+                outcome.failed,
             )
 
     transaction.on_commit(_dispatch)

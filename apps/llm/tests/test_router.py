@@ -22,7 +22,7 @@ def _isolated_router(settings: pytest.FixtureRequest):
     # DRF-1437: these tests assert the RAW resolved provider — its
     # identity, its caching, its PII wrapper. Pin the quota-fallback
     # wrapper off, or a developer machine with an ANTHROPIC_API_KEY in
-    # its environment would resolve a QuotaFallbackProvider here and the
+    # its environment would resolve a FallbackProvider here and the
     # assertions would fail for a reason that has nothing to do with
     # what they test. Hop behaviour has its own file
     # (``test_vendor_quota_exhaustion.py``).

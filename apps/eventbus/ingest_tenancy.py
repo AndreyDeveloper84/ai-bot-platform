@@ -79,6 +79,8 @@ from typing import Any
 
 from django.conf import settings
 
+from apps.eventbus.ingest_envelope import SYSTEM_EVENT_NAMES
+from apps.eventbus.ingest_rejection import IngestRejection
 from apps.eventbus.ingest_allowlist import (
     AllowlistConfigurationError,
     resolve_allowed_events,
@@ -100,6 +102,10 @@ _TENANT_NULLABLE_EVENT_NAMES: frozenset[str] = frozenset(
         "subscription.activated",
         "subscription.past_due",
         "billing.fee_charged",
+        # DRF-2196 (а1, §64) — системный сигнал. Идёт своей веткой в
+        # `assert_envelope_tenant_authorized` ДО tenant-null карвинга:
+        # карвинг проверяет пользователя, а у системного события его нет.
+        "system.module.health.degraded",
     }
 )
 
@@ -111,7 +117,53 @@ class TenantAuthorizationError(Exception):
     :attr:`apps.eventbus.ingest_dispatcher.DispatchOutcome.HANDLER_EXCEPTION`
     per `event-contract.md` §8.1. The publisher's retry budget will
     expend and the event will dead-letter — operator triage required.
+
+    DRF-2302: this bare class is the TRANSIENT refusal — a probe or DB
+    error, an import race, a relationship that may still arrive (retry can
+    help, so 500). A refusal no retry can fix raises
+    :class:`TenantRejectedError` instead.
     """
+
+
+class TenantRejectedError(TenantAuthorizationError, IngestRejection):
+    """Постоянный отказ по тенанту (DRF-2302, §8.12): 422 + DLQ, без повтора.
+
+    Наследует :class:`TenantAuthorizationError`, чтобы прежние ``except`` и
+    линт-мандат потребителей работали как были; ``reason`` — slug для DLQ.
+    """
+
+    def __init__(self, message: str, *, reason: str) -> None:
+        super().__init__(message, reason=reason)
+
+
+#: Причины отказа pilot allowlist, которые повтор не исправит — только
+#: правка конфигурации или заведение тенанта, после чего событие повторяют
+#: вручную (DRF-2302). ``tenant_lookup_error`` (сбой БД) и
+#: ``malformed_configuration`` (наша конфигурация сломана — 4,5 ч повторов
+#: дают время починить) остаются временными.
+PERMANENT_ALLOWLIST_REASONS: frozenset[str] = frozenset(
+    {"tenant_not_found", "tenant_not_allowed", "event_not_allowed", "relationship_unavailable"}
+)
+
+#: Два отказа канонической проверки связи пользователь↔салон (DRF-2531).
+#: Сегодня недостижимы: их ветки открываются только при
+#: :func:`_tenant_user_relationship_available`, а определения класса
+#: ``TenantUserRelationship`` в боте нет (#246). Обе поднимают голый
+#: :class:`TenantAuthorizationError`, то есть 500 и 4,5 ч повторов.
+RELATIONSHIP_REFUSAL_REASONS: tuple[str, ...] = (
+    "no_active_relationship_user_scope",
+    "no_active_relationship",
+)
+
+#: Решение по каждой причине из :data:`RELATIONSHIP_REFUSAL_REASONS`:
+#: ``"permanent"`` — 422 (:class:`TenantRejectedError`), ``"transient"`` — 500
+#: (голый :class:`TenantAuthorizationError`). Пусто — решения нет: вопрос
+#: «постоянен ли отказ по смыслу» открыт (связь может доехать позже события).
+#: Код этот словарь НЕ читает — он запись решения, которую сверяет сторож
+#: ``apps/eventbus/tests/test_relationship_refusal_decision_2531.py``: как только
+#: модель появится, пустая запись краснеет, а запись, расходящаяся с тем, что
+#: ветка реально поднимает, краснеет всегда.
+RELATIONSHIP_REFUSAL_DECISIONS: dict[str, str] = {}
 
 
 def _tenant_user_relationship_available() -> bool:
@@ -423,6 +475,45 @@ def _authorize_tenant_null_envelope(
     )
 
 
+def _authorize_system_envelope(
+    *,
+    event_id: str,
+    event_name: str,
+    user_id: Any,
+    tenant_id: Any,
+    correlation_id: str | None,
+) -> None:
+    """Третий путь авторизации — системное событие без субъекта (DRF-2196, §64).
+
+    Разбор конверта (``parse_envelope``) уже потребовал, чтобы у события из
+    закрытого набора не было ни пользователя, ни тенанта, а ``actor`` был
+    ``system``; HMAC проверен вью раньше разбора. Проверять здесь по
+    ``TenantUserRelationship`` нечего — субъекта нет.
+
+    Повтор тех же условий — защита для вызывающего, который соберёт конверт
+    мимо ``parse_envelope``: системное событие, называющее пользователя или
+    тенанта, отвергается и здесь, а не проходит в потребителя с чужим
+    субъектом.
+
+    Путь ``tenant_id=null`` обходит allowlist событий целиком — для
+    системного события остаются только HMAC и закрытый набор имён. Принято
+    владельцем сознательно (§64); строка журнала ниже — единственный
+    детективный контроль этой поверхности.
+    """
+    if user_id is not None or tenant_id is not None:
+        raise TenantRejectedError(
+            f"system_event_has_subject event_name={_safe_log_value(event_name)}",
+            reason="system_event_has_subject",
+        )
+    logger.info(
+        "eventbus.ingest.tenant_verify_accepted "
+        "verification_mode=system_event event_id=%s event_name=%s correlation_id=%s",
+        _safe_log_value(event_id),
+        _safe_log_value(event_name),
+        _safe_log_value(correlation_id),
+    )
+
+
 def assert_envelope_tenant_authorized(envelope: Any) -> None:
     """Verify ``(envelope.user_id, envelope.tenant_id)`` authorization.
 
@@ -457,6 +548,7 @@ def assert_envelope_tenant_authorized(envelope: Any) -> None:
 
     | tenant_id state | model available | pilot allowlist | flag  | outcome    |
     |-----------------|-----------------|-----------------|-------|------------|
+    | system.* name   | n/a             | not consulted   | n/a   | system path (DRF-2196) |
     | None + nullable | no              | n/a             | n/a   | log + pass |
     | None + nullable | yes             | n/a             | n/a   | user check |
     | None + others   | n/a             | n/a             | n/a   | RAISE      |
@@ -475,10 +567,31 @@ def assert_envelope_tenant_authorized(envelope: Any) -> None:
     event_id = getattr(envelope, "event_id", "")
     correlation_id = getattr(envelope, "correlation_id", None)
 
+    if event_name in SYSTEM_EVENT_NAMES:
+        _authorize_system_envelope(
+            event_id=event_id,
+            event_name=event_name,
+            user_id=user_id,
+            tenant_id=tenant_id,
+            correlation_id=correlation_id,
+        )
+        return
+
+    # Симметрия с системной веткой (DRF-2196): несистемное событие без
+    # субъекта отвергается и здесь, а не только на разборе. Иначе конверт,
+    # собранный мимо `parse_envelope`, прошёл бы через pilot allowlist,
+    # который пользователя не смотрит вовсе.
+    if user_id is None:
+        raise TenantRejectedError(
+            f"missing_subject_for_non_system_event event_name={_safe_log_value(event_name)}",
+            reason="missing_subject",
+        )
+
     if tenant_id is None:
         if event_name not in _TENANT_NULLABLE_EVENT_NAMES:
-            raise TenantAuthorizationError(
-                f"tenant_id is null for non-nullable event {_safe_log_value(event_name)!r}"
+            raise TenantRejectedError(
+                f"tenant_id is null for non-nullable event {_safe_log_value(event_name)!r}",
+                reason="tenant_id_null",
             )
         _authorize_tenant_null_envelope(
             event_id=event_id,
@@ -555,7 +668,10 @@ def assert_envelope_tenant_authorized(envelope: Any) -> None:
     # the global escape hatch.
     fail_open = bool(getattr(settings, "EVENT_INGEST_TENANT_VERIFY_FAIL_OPEN", False))
     if not fail_open:
-        raise TenantAuthorizationError(
+        # DRF-2302 — отказ, который исправит только правка конфига или
+        # заведение тенанта, — постоянный (422); сбой поиска и сломанная
+        # конфигурация — временные (500, повтор).
+        message = (
             f"tenant_authorization_denied reason={reason} "
             f"event_name={_safe_log_value(event_name)} "
             f"tenant_id={_safe_log_value(tenant_id)}. "
@@ -565,6 +681,9 @@ def assert_envelope_tenant_authorized(envelope: Any) -> None:
             "EVENT_INGEST_ALLOWED_TENANTS and the event to "
             "EVENT_INGEST_ALLOWED_EVENTS if this delivery is expected."
         )
+        if reason in PERMANENT_ALLOWLIST_REASONS:
+            raise TenantRejectedError(message, reason=reason)
+        raise TenantAuthorizationError(message)
 
     # Opt-in fall-through. Round-3 NEW-5 + Round-4 R3-2 — log +
     # audit row (sampled per (user_id, tenant_id)) per fall-through.

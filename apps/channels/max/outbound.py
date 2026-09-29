@@ -16,6 +16,34 @@ running in prod since 2026-04). Body is JSON::
 `chat_id` is a *query parameter*, not a body field — MAX-specific
 quirk that we preserve until Sprint 3+ rewrites this path.
 
+### Two addresses, and which one a caller owes us (DRF-1558)
+
+`chat_id` in MAX is the id of a **dialog**, i.e. a value that only means
+anything together with **one particular bot**. `BotUser` has no bot
+column: the address sits on a row keyed by tenant, so all three rows of
+one person carry the **same** `chat_id` — the dialog they hold with
+whichever bot happened to write first. Sending that to a second bot is
+a 404 `dialog.not.found`, measured on the pilot 2026-09-07 with one
+person and one salon bot::
+
+    POST /messages?user_id=260237491   → 200, delivered
+    POST /messages?chat_id=518410834   → 404 dialog.not.found
+
+`user_id` is the **person**, is bot-independent, and is the same number
+we already store as `BotUser.channel_user_id` — MAX hands it back in
+every success envelope as `recipient.user_id`. So:
+
+* **replying to an inbound event** → `chat_id=event.chat_id`. That
+  dialog id arrived from the very bot that is about to answer in it, so
+  it is correct by construction and stays.
+* **writing to somebody first** (reminders, follow-ups, master
+  notifications, operator DMs) → `user_id=bot_user.channel_user_id`.
+  A stored `chat_id` cannot be trusted here: it belongs to a *different*
+  pair of «bot + person» than the one sending.
+
+Exactly one of the two must be passed; :func:`send_message` refuses both
+and neither, because a silent default is how the wrong one gets picked.
+
 ### Error contract
 
 - 2xx → returns parsed JSON response dict.
@@ -85,20 +113,129 @@ def _token(bot: "BotEntry | None" = None) -> str:
     return getattr(settings, "MAX_BOT_TOKEN", "")
 
 
+def keyboard_trace(attachments: list[dict[str, Any]] | None) -> str:
+    """«клавиатура=4[«Ничего из этого»|«Беременность или кормление»|…]» — или «клавиатура=нет».
+
+    DRF-1781. Диалог владельца 12.09 01:33: у реплики ``anketa_step_screening``
+    в базе лежали четыре кнопки, на экране вариантов не было, а что ушло
+    на провод к MAX — не знал никто: след отправки не писался ни в базу,
+    ни в лог, и лог контейнера не переживает выкладку. Эта строка — тот
+    самый след: что было В ТЕЛЕ ЗАПРОСА к MAX, а не в ``action_data``.
+
+    Подписи кнопок — продуктовый текст, не персональные данные; текст
+    сообщения сюда НЕ попадает (DRF-1039: лог не расширяется о человеке).
+    Считаются только ``inline_keyboard``-вложения; прочие (медиа) — числом.
+    """
+    if not attachments:
+        return "клавиатура=нет"
+    labels: list[str] = []
+    keyboards = 0
+    for attachment in attachments:
+        if not isinstance(attachment, dict) or attachment.get("type") != "inline_keyboard":
+            continue
+        keyboards += 1
+        rows = (attachment.get("payload") or {}).get("buttons") or []
+        for row in rows:
+            for button in row if isinstance(row, list) else []:
+                if isinstance(button, dict):
+                    labels.append(f"«{button.get('text', '')}»")
+    if keyboards == 0:
+        return f"клавиатура=нет вложений_без_клавиатуры={len(attachments)}"
+    return f"клавиатура={len(labels)}[{'|'.join(labels)}]"
+
+
+def _created_message_id(payload: Any) -> str:
+    """``mid`` созданного сообщения из конверта MAX — или пустая строка."""
+    if not isinstance(payload, dict):
+        return ""
+    message = payload.get("message")
+    body = message.get("body") if isinstance(message, dict) else None
+    if not isinstance(body, dict):
+        return ""
+    return str(body.get("mid") or body.get("seq") or "")
+
+
+def _addressed(*, chat_id: str | None = None, user_id: str | None = None) -> str:
+    """``"chat_id=…"`` or ``"user_id=…"`` — the address, for a log line.
+
+    One identifier per line either way: DRF-1039 forbids *widening* what
+    a log carries about a person, and the recipient address was already
+    there before this function existed. This only renames the key so the
+    line says which of the two was actually on the wire.
+    """
+    return f"user_id={user_id}" if user_id is not None else f"chat_id={chat_id}"
+
+
+def _recipient_blocked(*, chat_id: str | None = None, user_id: str | None = None) -> bool:
+    """Заблокирован ли получатель этой отправки (DRF-1497).
+
+    **Ключ проверки идёт за ключом отправки (DRF-1558).** Проверка ищет
+    ту же строку ``BotUser``, по адресу которой сообщение сейчас уйдёт:
+    по ``channel_user_id``, когда адресуемся по ``user_id``, и по
+    ``chat_id``, когда отвечаем в диалог входящего события. Развести их
+    нельзя: проверка по ``chat_id`` при отправке по ``user_id`` перестала
+    бы находить кого бы то ни было и **молча отменила бы блокировку
+    целиком** — без ошибки, без лога, обнаружением по случаю.
+
+    Ветка ``user_id`` дополнительно сужена до ``channel="max"``:
+    ``channel_user_id`` уникален внутри канала, а не между каналами, и
+    без сужения телеграмный идентификатор с тем же числом заблокировал бы
+    постороннего человека. Ветка ``chat_id`` оставлена как была — её
+    поведение не предмет этой правки.
+
+    Сбой самой проверки (база легла) fail-open: блокировка — рабочее
+    действие поддержки, а не контур безопасности, и остановить из-за неё
+    ВСЮ отправку платформы было бы худшим исходом.
+    """
+    from apps.identity.models import BotUser
+
+    if user_id is not None:
+        lookup: dict[str, Any] = {"channel": "max", "channel_user_id": str(user_id)}
+    else:
+        lookup = {"chat_id": str(chat_id)}
+
+    try:
+        return BotUser.all_tenants.filter(blocked_at__isnull=False, **lookup).exists()
+    except Exception:  # noqa: BLE001 — см. docstring: fail-open, но с криком в лог
+        logger.exception(
+            "channels.max.outbound.blocked_check_failed %s",
+            _addressed(chat_id=chat_id, user_id=user_id),
+        )
+        return False
+
+
+#: Кому забор блокировки уступает (DRF-2276). Ответ безопасности — N-1
+#: (CD §67): кризис и неотложка отвечаются всем, заблокированным тоже.
+#: Фраза блокировки — единственное, что заблокированный слышит сверх этого.
+BLOCK_BYPASS_REASONS: frozenset[str] = frozenset({"safety", "block_notice"})
+
+
 def send_message(
     *,
-    chat_id: str,
+    chat_id: str | None = None,
+    user_id: str | None = None,
     text: str,
     attachments: list[dict[str, Any]] | None = None,
     timeout: float = 10.0,
     bot: "BotEntry | None" = None,
+    bypass_block: str | None = None,
 ) -> dict[str, Any]:
-    """POST a message to a MAX chat.
+    """POST a message to a MAX dialog (``chat_id``) or person (``user_id``).
+
+    Exactly one address must be given — see the module docstring for why
+    they are not interchangeable and which one each kind of caller owes.
 
     Args:
       chat_id: stringified `recipient.chat_id` from the inbound event
                (D1 normalises ints to str). MAX accepts ints in the
                query parameter; we send the string and httpx URL-encodes.
+               **Only valid when replying inside the dialog the event
+               came from** — a stored `chat_id` belongs to whichever bot
+               opened that dialog, not necessarily to this one.
+      user_id: stringified `BotUser.channel_user_id` — the person, not
+               the dialog. This is what every bot-initiated send must
+               use (DRF-1558); MAX resolves the right dialog itself and
+               opens one when the bot has never written to them before.
       text: message body. Empty allowed (a "typing" or attachment-only
             send), but D3 should always pass non-empty for Sprint 2 echo.
       attachments: pass-through list of dicts in MAX wire format. Full
@@ -109,13 +246,35 @@ def send_message(
            ``bot_scope``, then the single configured bot. Pass it explicitly
            only when the sender is not implied by the context — otherwise
            prefer scoping, so intermediate layers cannot forget to forward it.
+      bypass_block: send even to a blocked recipient (DRF-2276). Only a
+           name from :data:`BLOCK_BYPASS_REASONS` — ``"safety"`` for the
+           crisis / medical reply (N-1), ``"block_notice"`` for the block
+           notice itself. Named at the call site on purpose: a bypass must be
+           visible where it happens, not carried by ambient context.
 
     Returns:
       Parsed JSON response (typically the created message envelope).
 
     Raises:
+      ValueError: neither address given, or both. A programming error,
+        not a delivery failure — raised before the token check so the
+        mistake surfaces in tests rather than as a wrong-address 404.
       MaxAPIError: non-2xx OR network error.
     """
+
+    if bypass_block is not None and bypass_block not in BLOCK_BYPASS_REASONS:
+        raise ValueError(
+            f"bypass_block={bypass_block!r} is not a known reason — only "
+            f"{sorted(BLOCK_BYPASS_REASONS)} may pass the block fence (DRF-2276)"
+        )
+
+    if (chat_id is None) == (user_id is None):
+        raise ValueError(
+            "send_message needs exactly one of chat_id= (reply inside the "
+            "dialog an event arrived from) or user_id= (write to a person "
+            "first, BotUser.channel_user_id) — see DRF-1558; got "
+            f"chat_id={chat_id!r} user_id={user_id!r}"
+        )
 
     token = _token(bot)
     if not token:
@@ -124,6 +283,25 @@ def send_message(
         # surface this via an exception so the handler emits a clear
         # `channels.max.outbound.no_token` audit.
         raise MaxAPIError(0, "MAX_BOT_TOKEN is not configured")
+
+    if bypass_block is not None and _recipient_blocked(chat_id=chat_id, user_id=user_id):
+        # DRF-2276 — забор уступает ответу безопасности и фразе блокировки.
+        # Отметка в логе — чтобы обход был виден так же, как подавление.
+        logger.info(
+            "channels.max.outbound.recipient_blocked_bypassed %s reason=%s",
+            _addressed(chat_id=chat_id, user_id=user_id),
+            bypass_block,
+        )
+    elif _recipient_blocked(chat_id=chat_id, user_id=user_id):
+        # DRF-1497 — заблокированный из админки клиент не получает ничего:
+        # ни ответы, ни напоминания, ни проактив. Это не сбой доставки,
+        # поэтому не raise (иначе PEL уйдёт в вечный retry), а подавленная
+        # отправка с отметкой в логе. Снятие блокировки возвращает всё как было.
+        logger.info(
+            "channels.max.outbound.recipient_blocked %s — отправка подавлена",
+            _addressed(chat_id=chat_id, user_id=user_id),
+        )
+        return {"blocked": True}
 
     body: dict[str, Any] = {"text": text}
     if attachments:
@@ -134,7 +312,10 @@ def send_message(
         "Authorization": token,  # MAX uses raw token, not Bearer
         "Content-Type": "application/json",
     }
-    params = {"chat_id": chat_id}
+    # The address MAX is asked to resolve. One key or the other, never both:
+    # MAX picks whichever it sees first and we would never learn which.
+    params = {"chat_id": chat_id} if user_id is None else {"user_id": user_id}
+    addressed = _addressed(chat_id=chat_id, user_id=user_id)
 
     try:
         response = httpx.post(
@@ -147,32 +328,47 @@ def send_message(
     except httpx.RequestError as exc:
         # Connection refused, DNS failure, timeout, etc.
         logger.warning(
-            "channels.max.outbound.network_error chat_id=%s exc=%s",
-            chat_id,
+            "channels.max.outbound.network_error %s exc=%s",
+            addressed,
             exc,
         )
         raise MaxAPIError(0, str(exc)) from exc
 
     if response.status_code >= 400:
+        # DRF-1781: отвергнутая клавиатура должна быть видна КАК клавиатура —
+        # иначе «MAX отверг кнопки» и «MAX отверг текст» неразличимы в логе.
         logger.warning(
-            "channels.max.outbound.http_error chat_id=%s status=%s body=%r",
-            chat_id,
+            "channels.max.outbound.http_error %s status=%s %s body=%r",
+            addressed,
             response.status_code,
+            keyboard_trace(attachments),
             response.text[:200],
         )
         raise MaxAPIError(response.status_code, response.text)
 
     # 2xx — parse JSON. MAX returns the created-message envelope.
     try:
-        return response.json()
+        payload = response.json()
     except ValueError:
         # 2xx with non-JSON body shouldn't happen, but don't crash.
         logger.warning(
-            "channels.max.outbound.non_json_2xx chat_id=%s status=%s",
-            chat_id,
+            "channels.max.outbound.non_json_2xx %s status=%s %s",
+            addressed,
             response.status_code,
+            keyboard_trace(attachments),
         )
         return {}
+    # DRF-1781: след отправки — что ушло на провод и под каким mid легло.
+    # Единственное место, где это известно; база хранит action_data ДО
+    # сборки вложений, лог контейнера не переживает выкладку.
+    logger.info(
+        "channels.max.outbound.sent %s status=%s mid=%s %s",
+        addressed,
+        response.status_code,
+        _created_message_id(payload) or "-",
+        keyboard_trace(attachments),
+    )
+    return payload
 
 
 # ─── in-place message edit ────────────────────────────────────────────────

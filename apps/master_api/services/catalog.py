@@ -118,9 +118,12 @@ def _price_rub(raw: Decimal | None) -> int | None:
     if raw is None:
         return None
     try:
-        return int(raw.to_integral_value())
+        rub = int(raw.to_integral_value())
     except (ArithmeticError, ValueError, TypeError):
         return None
+    # DRF-1989: меньше 1 ₽ — не цена, а незаполненное поле (каталог такое не
+    # продаёт); ``None`` — «цена не указана», а не «0 ₽».
+    return rub if raw >= 1 else None
 
 
 # Public API --------------------------------------------------------------
@@ -146,6 +149,8 @@ def list_master_services(*, master: CatalogMaster) -> list[dict[str, Any]]:
             "description": "Базовый маникюр + покрытие гель-лак",
             "category": "Маникюр",
             "is_active": True,
+            "sellable": True,              # DRF-1989: False — не продаётся
+            "unsellable_reason": None,     # причина, когда не продаётся
         }
 
     ### Filtering rules
@@ -157,11 +162,16 @@ def list_master_services(*, master: CatalogMaster) -> list[dict[str, Any]]:
       :class:`MasterService` and :class:`CatalogService` queries.
     """
 
-    mapping_rows = MasterService.all_tenants.filter(
-        tenant_id=master.tenant_id,
-        master_id=master.id,
-    ).values_list("service_id", flat=True)
-    service_ids = list(mapping_rows)
+    # DRF-1989 — служебный экран: непродаваемое не скрывается, а показывается
+    # с причиной, иначе мастеру некому её исправить.
+    sale_state = {
+        service_id: (sellable, unsellable_reason or None)
+        for service_id, sellable, unsellable_reason in MasterService.all_tenants.filter(
+            tenant_id=master.tenant_id,
+            master_id=master.id,
+        ).values_list("service_id", "sellable", "unsellable_reason")
+    }
+    service_ids = list(sale_state)
     if not service_ids:
         return []
 
@@ -194,6 +204,8 @@ def list_master_services(*, master: CatalogMaster) -> list[dict[str, Any]]:
                 "description": description,
                 "category": category,
                 "is_active": bool(svc.is_active),
+                "sellable": sale_state[svc.id][0],
+                "unsellable_reason": sale_state[svc.id][1],
             }
         )
 

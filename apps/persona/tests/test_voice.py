@@ -206,26 +206,23 @@ class TestTheCallersUseIt:
             "Выберите раздел:"
         )
 
-    @pytest.mark.django_db
-    def test_the_master_draft_prompt_carries_the_salon_name(self):
-        from django.utils import timezone
+    def test_the_master_facing_prompt_carries_the_salon_name(self):
+        """DRF-1528: промпт черновика ответа клиенту снят вместе с перепиской.
 
-        from apps.catalog.models import CatalogMaster
-        from apps.master_api.services.ai_drafts import _build_prompt_messages
-        from apps.tenancy.models import Tenant
+        Утверждение осталось тем же и держится на живой поверхности,
+        обращённой к мастеру, — системном промпте его помощника
+        (``master_api.services.assistant._system_prompt``). Убрать ячейку
+        значило бы отпустить правило «имя маркетплейса не течёт в салон».
+        """
 
-        tenant = Tenant.objects.create(slug="voice-salon", name="Формула тела")
-        master = CatalogMaster.all_tenants.create(
-            tenant=tenant,
-            name="Ольга",
-            external_id=None,
-            external_updated_at=timezone.now(),
-            invite_status=CatalogMaster.InviteStatus.ACCEPTED,
-            is_active=True,
-        )
+        from datetime import date
 
-        messages = _build_prompt_messages(master=master, history=[])
-        system = messages[0]["content"]
+        from apps.master_api.services.assistant import _system_prompt
+
+        class _Master:
+            name = "Ольга"
+
+        system = _system_prompt(_Master(), today=date(2026, 9, 21), tz_label="Europe/Moscow")
 
         assert assistant_identity(SURFACE_SALON).name in system
         # And the marketplace name must NOT leak into a salon reply.

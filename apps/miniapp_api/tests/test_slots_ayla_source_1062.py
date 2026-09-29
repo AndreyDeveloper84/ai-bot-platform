@@ -31,6 +31,7 @@ from apps.catalog.models import CatalogMaster, CatalogService, MasterService
 from apps.identity.models import BotUser
 from apps.scheduling.models import Weekday, WorkingHours
 from apps.tenancy.models import Tenant
+from tests.support.catalog_mirror import sync_shaped
 
 BOT_TOKEN = "test-bot-token-xyz"
 CLIENT_PATH = "apps.integrations.ayla.booking_client.get_ayla_booking_client"
@@ -85,16 +86,21 @@ def bot_user(tenant: Tenant) -> BotUser:
 
 @pytest.fixture
 def master(tenant: Tenant) -> CatalogMaster:
-    return CatalogMaster.all_tenants.create(
-        tenant=tenant,
-        external_id=1,
-        external_updated_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
-        name="Ольга",
-        is_active=True,
-        # The Ayla User id — deliberately different from the row id, which
-        # is what the slots endpoint actually takes. Mixing these up gives
-        # a silently empty picker.
-        ayla_user_id=uuid.uuid4(),
+    return sync_shaped(
+        CatalogMaster.all_tenants.create(
+            tenant=tenant,
+            external_id=1,
+            external_updated_at=datetime(2026, 8, 1, tzinfo=timezone.utc),
+            name="Ольга",
+            is_active=True,
+            # DRF-1496: умолчание invite_status теперь PENDING — бронируемость
+            # декларируем явно, а не побочным эффектом умолчания.
+            invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+            # The Ayla User id — deliberately different from the row id, which
+            # is what the slots endpoint actually takes. Mixing these up gives
+            # a silently empty picker.
+            ayla_user_id=uuid.uuid4(),
+        )
     )
 
 
@@ -346,3 +352,33 @@ class TestFlagOffKeepsLocalComputation:
         assert resp.status_code == 200
         assert resp.json()["slots"], "local WorkingHours still drive this path"
         assert calls == []
+
+
+class TestABrokenSalonZoneShowsNoWindows:
+    """DRF-2595 (часть Б): слоты при битом поясе салона — отказ, а не окна по
+    московскому часу; каталог при этом не спрашивается вовсе. Пара с тем же
+    запросом после починки пояса."""
+
+    def test_refused_while_broken_then_shown_once_fixed(
+        self, client, bot_user, master, service, master_service, open_every_day, sunday, caplog
+    ):
+        from zoneinfo import ZoneInfoNotFoundError
+
+        from apps.tenancy.models import Tenant
+
+        fake, calls = _fake_client({sunday.isoformat(): [f"{sunday.isoformat()}T12:00:00+03:00"]})
+        Tenant.objects.filter(pk=bot_user.tenant_id).update(timezone="Not/AZone")
+        with patch(CLIENT_PATH, return_value=fake), caplog.at_level("WARNING"):
+            with pytest.raises(ZoneInfoNotFoundError):
+                _get(client, master, service, sunday)
+        assert any("tenancy.bad_tenant_tz" in r.getMessage() for r in caplog.records)
+        assert len(calls) == 0
+
+        Tenant.objects.filter(pk=bot_user.tenant_id).update(timezone="Europe/Moscow")
+        with patch(CLIENT_PATH, return_value=fake):
+            resp = _get(client, master, service, sunday)
+        assert resp.status_code == 200
+        assert [s["start"] for s in resp.json()["slots"]] == [
+            f"{sunday.isoformat()}T12:00:00+03:00"
+        ]
+        assert len(calls) >= 1

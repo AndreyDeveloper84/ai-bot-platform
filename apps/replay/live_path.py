@@ -70,7 +70,7 @@ def canary_reply_for(fixture: Fixture) -> str:
     """
 
     phrases: list[str] = []
-    for constraint in fixture.forbidden:
+    for constraint in fixture.reply_forbidden:
         for key, expected in constraint.items():
             if key not in ("response_contains_any", "response_contains_all"):
                 continue
@@ -124,6 +124,10 @@ class LivePathResult:
     safety_blocked: bool
     sent_count: int = 0
     notes: list[str] = field(default_factory=list)
+    #: DRF-2599 — every attempt to reach a model provider during the run, by
+    #: caller address (``apps.replay.provider_guard``). Not only the concierge:
+    #: any SDK ``create`` counts, including ones a caller swallowed.
+    provider_calls: list[str] = field(default_factory=list)
 
     @property
     def deterministic(self) -> bool:

@@ -55,6 +55,7 @@ import datetime as dt
 import logging
 from dataclasses import dataclass
 from datetime import timedelta
+from decimal import Decimal, InvalidOperation
 from typing import Any, Final, Literal
 from uuid import UUID
 
@@ -68,12 +69,14 @@ from apps.booking.client_notify import (
 from apps.booking.completion import actor_from_event
 from apps.booking.master_notify import (
     CHAT_ORIGIN_SOURCE,
+    schedule_booking_attention_notification,
     schedule_booking_created_notification,
 )
 from apps.booking.models import BookingReminder, RemoteBookingProxy
 from apps.booking.reminder_lookup import reminders_for_appointment
 from apps.booking.services.attribution import compute_assist_score, compute_billable
 from apps.conversations.models import Conversation
+from apps.eventbus.ingest_rejection import IngestRejection
 from apps.events.services import emit as emit_internal_event
 from apps.eventbus import vocabulary as V
 from apps.eventbus.ingest_dispatcher import register
@@ -145,7 +148,13 @@ _CREATED_ADVANCED_STATUSES: Final[frozenset[str]] = frozenset(
 # holds a value is left exactly as it is, including when it disagrees with
 # the event. Deciding WHICH value wins would be a reconciliation policy, and
 # this is not the place to invent one (the sweep DRF-1111 is).
-_CREATED_REFERENCE_FIELDS: Final[tuple[str, ...]] = ("service_id", "specialist_id")
+#
+# DRF-2172: ``price_amount`` is the third member of this family. It is the
+# booking-time snapshot (``price_total``), carried by ``booking.created`` and
+# by nothing after it, and the dialog path writes its mirror row without a
+# price — so for the majority of real bookings this backfill is the ONLY
+# way the price ever lands. Same rule: fill NULL, never overwrite.
+_CREATED_REFERENCE_FIELDS: Final[tuple[str, ...]] = ("service_id", "specialist_id", "price_amount")
 
 
 def _backfill_created_references(
@@ -155,6 +164,7 @@ def _backfill_created_references(
     service_uuid: UUID | None,
     specialist_uuid: UUID | None,
     envelope: Any,
+    price_amount: Decimal | None = None,
 ) -> list[str]:
     """Fill NULL reference columns from a ``booking.created`` payload.
 
@@ -169,7 +179,11 @@ def _backfill_created_references(
     else just filled cannot block the other one.
     """
     filled: list[str] = []
-    for field, value in (("service_id", service_uuid), ("specialist_id", specialist_uuid)):
+    for field, value in (
+        ("service_id", service_uuid),
+        ("specialist_id", specialist_uuid),
+        ("price_amount", price_amount),
+    ):
         if value is None or getattr(proxy, field) is not None:
             continue
         updated = RemoteBookingProxy.all_tenants.filter(
@@ -203,8 +217,13 @@ _ANNOUNCEMENT_BLOCKED_STATUSES: Final[frozenset[str]] = frozenset(
 )
 
 
-class UnknownBookingStatusError(ValueError):
-    """``booking.created`` carried a status outside the closed enum."""
+class UnknownBookingStatusError(ValueError, IngestRejection):
+    """``booking.created`` carried a status outside the closed enum.
+
+    DRF-2302 — постоянный отказ: повтор того же статуса не исправит (422 + DLQ).
+    """
+
+    reason = "unknown_booking_status"
 
 
 class BookingConfirmedPendingProxyError(ValueError):
@@ -256,6 +275,38 @@ def _parse_iso(value: str) -> dt.datetime:
     return dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
+def _parse_price_total(data: dict[str, Any], *, appointment_id: Any) -> Decimal | None:
+    """``data.price_total`` → Decimal, or ``None`` when absent / unreadable (DRF-2172).
+
+    The contract (§3.1) sends a decimal string. A missing or malformed value
+    must not fail the event — the booking itself matters more than its
+    price tag — so it is logged and stored as NULL, which the surfaces
+    render as «no price line», never as «0».
+    """
+    raw = data.get("price_total")
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return None
+    try:
+        value = Decimal(str(raw).strip())
+    except (InvalidOperation, ValueError, TypeError):
+        logger.warning(
+            "eventbus.consumer.booking.created.price_unreadable appointment_id=%s",
+            appointment_id,
+        )
+        return None
+    # Bounds: the column is numeric(10,2). Postgres raises DataError on
+    # overflow inside get_or_create — that would fail the whole event, which
+    # this parser exists to prevent (sqlite in tests would not notice).
+    if not value.is_finite() or value < 0 or value >= Decimal("1e8"):
+        logger.warning(
+            "eventbus.consumer.booking.created.price_unreadable appointment_id=%s",
+            appointment_id,
+        )
+        return None
+    value = value.quantize(Decimal("0.01"))
+    return value.copy_abs() if value.is_zero() else value  # «-0.00» → «0.00»
+
+
 def _resolve_bot_user(*, user_id: UUID, tenant: Tenant) -> BotUser | None:
     """Look up the channel-side ``BotUser`` for an Ayla canonical user.
 
@@ -273,12 +324,49 @@ def _resolve_bot_user(*, user_id: UUID, tenant: Tenant) -> BotUser | None:
     matches user expectation ("send the reminder where I last opened
     the bot") and aligns with the model's default ``ordering =
     ["-last_seen"]`` (apps/identity/models.py:169).
+
+    ### Why the second sort key (DRF-1653)
+
+    The paragraph above was right about the defect and half-right about the
+    cure. ``-last_seen`` removes arbitrariness only while the values differ.
+    ``last_seen`` is ``auto_now=True``, so two rows touched in the same clock
+    tick hold the identical value — and this query's filter is
+    ``(tenant, ayla_user_id)``, which the model does **not** make unique. Ties
+    here are not a corner case; multiple channels for one Ayla user is the
+    stated reason the ordering exists at all.
+
+    On a tie Postgres is free to return either row, and free to return a
+    different one next time: an ``UPDATE`` relocates a row within the heap.
+    So the reminder could go to MAX today and Telegram tomorrow with nothing
+    having changed.
+
+    ``pk`` decides the tie. It claims nothing about which channel is better —
+    recency is still the rule, and this only says what happens when recency
+    has no opinion. Removing it restores the non-determinism the docstring
+    above promises to have removed.
     """
     return (
         BotUser.all_tenants.filter(tenant=tenant, ayla_user_id=user_id)
-        .order_by("-last_seen")
+        .order_by("-last_seen", "pk")
         .first()
     )
+
+
+def _applied_event_marks(envelope: IngestEnvelope) -> dict[str, Any]:
+    """Отметка применённого события — ОДНА на все пути, пишущие зеркало (DRF-2537).
+
+    Какое событие канона применено последним и когда канон его выпустил.
+    Каждый путь, который пишет ``last_synced_event_id``, пишет её целиком
+    через эту функцию: отдельная копия трёх полей в одном из путей однажды
+    разошлась бы молча, и узел на этот путь это ловит.
+
+    Это не свежесть: пропущенное (мёртвое) событие отметку не сдвигает.
+    """
+    return {
+        "last_synced_event_id": envelope.event_id,
+        "last_applied_event_name": envelope.event_name,
+        "last_applied_event_at": envelope.occurred_at,
+    }
 
 
 def _assert_proxy_tenant(
@@ -307,7 +395,7 @@ def _assert_proxy_tenant(
     if proxy is None:
         return
     if proxy.tenant_id != expected_tenant.id:
-        from apps.eventbus.ingest_tenancy import TenantAuthorizationError
+        from apps.eventbus.ingest_tenancy import TenantRejectedError
 
         logger.error(
             "eventbus.consumer.booking.cross_tenant_spoof_blocked "
@@ -317,9 +405,12 @@ def _assert_proxy_tenant(
             proxy.tenant_id,
             envelope.event_id,
         )
-        raise TenantAuthorizationError(
+        # DRF-2302 — повтор не сделает запись своей: 422 + DLQ, а ERROR-строка
+        # выше остаётся сигналом оператору.
+        raise TenantRejectedError(
             f"appointment_id {proxy.appointment_id} belongs to tenant "
-            f"{proxy.tenant_id}; envelope claims tenant {expected_tenant.id}"
+            f"{proxy.tenant_id}; envelope claims tenant {expected_tenant.id}",
+            reason="cross_tenant_appointment",
         )
 
 
@@ -375,6 +466,24 @@ def _schedule_reminders(
             )
             continue
 
+        # DRF-2586: запись, сделанная в диалоге ДО этой правки, держит свои
+        # напоминания в ``yclients_record_id`` (UUID строкой). Новая строка
+        # здесь была бы вторым набором того же визита — человек получил бы
+        # напоминание дважды (на пилоте 13 пар, 4 доставлены обеими). Новые
+        # записи диалога пишут тем же ключом, что и здесь, и двойника
+        # исключает уникальный индекс; эта проверка — только для старых строк.
+        if (
+            reminders_for_appointment(appointment_id)
+            .filter(kind=kind, ayla_appointment_id__isnull=True)
+            .exists()
+        ):
+            logger.info(
+                "eventbus.consumer.booking.skip_reminder_dialog_owns appointment_id=%s kind=%s",
+                appointment_id,
+                kind,
+            )
+            continue
+
         # ``defaults`` are applied on UPDATE; ``create_defaults`` are
         # applied on INSERT. Keeping ``status``/``scheduled_at`` out of
         # ``defaults`` prevents a late/redelivered event from resurrecting
@@ -386,10 +495,6 @@ def _schedule_reminders(
             # collide across multiple Ayla appointments.
             "yclients_record_id": None,
             "chat_id": chat_id,
-            "visit_at": start_at,
-            # Names are looked up via the catalog mirror on send.
-            "master_name": "",
-            "service_name": "",
         }
         BookingReminder.all_tenants.update_or_create(
             ayla_appointment_id=appointment_id,
@@ -400,6 +505,18 @@ def _schedule_reminders(
                 **common_defaults,
                 "status": BookingReminder.Status.PENDING,
                 "scheduled_at": scheduled_at,
+                # DRF-2586: время визита — только при создании, как и
+                # ``scheduled_at``. Строка теперь общая с диалогом, и опоздавшее
+                # или повторное событие с прежним ``start_at`` вернуло бы
+                # ``visit_at`` к старому времени после переноса в диалоге, при
+                # новом ``scheduled_at``. Перенос по событию делает
+                # ``_reschedule_reminders``.
+                "visit_at": start_at,
+                # Names are looked up via the catalog mirror on send. Only on
+                # INSERT (DRF-2586): the dialog writes the same row with the
+                # names snapshot, and an event must not blank it.
+                "master_name": "",
+                "service_name": "",
             },
         )
 
@@ -848,11 +965,17 @@ def handle_booking_created(envelope: IngestEnvelope) -> None:
 
     # Resolve channel-side BotUser so we know whether the proxy is
     # linked or orphan before the upsert fires.
-    bot_user = _resolve_bot_user(user_id=UUID(envelope.user_id), tenant=tenant)
+    bot_user = _resolve_bot_user(user_id=UUID(envelope.require_user_id()), tenant=tenant)
 
     service_uuid = UUID(data["service_id"]) if data.get("service_id") else None
     specialist_uuid = UUID(data["specialist_id"]) if data.get("specialist_id") else None
     raw_source = data.get("source", "")
+
+    # DRF-2172 — the booking-time price snapshot. Later events never carry it;
+    # a later booking.created may only FILL a NULL, never overwrite (see
+    # _backfill_created_references) — a salon price change cannot rewrite
+    # what was agreed.
+    price_amount = _parse_price_total(data, appointment_id=appointment_id)
 
     create_defaults = {
         "tenant": tenant,
@@ -863,7 +986,8 @@ def handle_booking_created(envelope: IngestEnvelope) -> None:
         "source": raw_source,
         "service_id": service_uuid,
         "specialist_id": specialist_uuid,
-        "last_synced_event_id": envelope.event_id,
+        "price_amount": price_amount,
+        **_applied_event_marks(envelope),
     }
 
     # Round-6 Path B: delegate the race-safe INSERT-or-GET to Django.
@@ -913,6 +1037,7 @@ def handle_booking_created(envelope: IngestEnvelope) -> None:
                 service_uuid=service_uuid,
                 specialist_uuid=specialist_uuid,
                 envelope=envelope,
+                price_amount=price_amount,
             )
             # DRF-1140: the advanced-state no-op is where a DIALOG booking
             # lands — the internal-bus pair must fire here too, or bot
@@ -948,6 +1073,11 @@ def handle_booking_created(envelope: IngestEnvelope) -> None:
             )
             return
         update_fields = {k: v for k, v in create_defaults.items() if k != "tenant"}
+        if price_amount is None:
+            # DRF-2172: «absent means no news, never “it is gone”» — a redelivered
+            # booking.created without price_total must not erase the snapshot
+            # an earlier one stored (same rule as service_id in tools.py).
+            update_fields.pop("price_amount", None)
         RemoteBookingProxy.all_tenants.filter(appointment_id=appointment_id).update(**update_fields)
 
     # DRF-1140: the appointment is now known locally — announce it to the
@@ -1074,10 +1204,22 @@ def handle_booking_cancelled(envelope: IngestEnvelope) -> None:
         )
 
     proxy.status = RemoteBookingProxy.Status.CANCELLED
-    proxy.last_synced_event_id = envelope.event_id
-    proxy.save(update_fields=["status", "last_synced_event_id", "synced_at"])
+    marks = _applied_event_marks(envelope)
+    for name, value in marks.items():
+        setattr(proxy, name, value)
+    proxy.save(update_fields=["status", *marks, "synced_at"])
 
     _cancel_reminders(appointment_id=appointment_id)
+
+    # DRF-2118 тип 5 — салон узнаёт об отмене не своей рукой: «запись
+    # требует вмешательства». Отмена самим салоном — его же решение,
+    # уведомлять не о чем.
+    cancelled_by = str(data.get("cancelled_by", "") or "").lower()
+    if cancelled_by not in ("salon", "admin", "staff"):
+        schedule_booking_attention_notification(
+            proxy_pk=proxy.pk,
+            reason="cancelled_by_client" if cancelled_by in ("client", "customer") else "cancelled",
+        )
 
     emit_internal_event(
         "booking_cancelled",
@@ -1159,7 +1301,7 @@ def handle_booking_rescheduled(envelope: IngestEnvelope) -> None:
     RemoteBookingProxy.all_tenants.filter(appointment_id=appointment_id).update(
         start_at=new_start_at,
         end_at=new_end_at,
-        last_synced_event_id=envelope.event_id,
+        **_applied_event_marks(envelope),
     )
 
     _reschedule_reminders(appointment_id=appointment_id, new_start_at=new_start_at)
@@ -1167,7 +1309,7 @@ def handle_booking_rescheduled(envelope: IngestEnvelope) -> None:
     # Conversation context update (§3.3 step 3) — refresh
     # last_booking_at to the new time so AI references the
     # rescheduled slot.
-    bot_user = _resolve_bot_user(user_id=UUID(envelope.user_id), tenant=tenant)
+    bot_user = _resolve_bot_user(user_id=UUID(envelope.require_user_id()), tenant=tenant)
     if bot_user is not None:
         _touch_conversation_last_booking(
             bot_user=bot_user,
@@ -1189,16 +1331,18 @@ def handle_booking_rescheduled(envelope: IngestEnvelope) -> None:
 # ─── canonical appointment.rescheduled (AYLA-DEC-0022, AYLA-DEC-0036) ──────
 
 
-class CanonicalReschedulePayloadError(ValueError):
+class CanonicalReschedulePayloadError(ValueError, IngestRejection):
     """``appointment.rescheduled`` DER payload fails required-field or
     shape validation.
 
     A *controlled* failure — raised deliberately instead of letting a
     missing/malformed field surface as a raw ``KeyError``/``TypeError``.
-    Propagates to the dispatcher's handler-exception path like any
-    other handler error (HANDLER_EXCEPTION → Ayla retry → DLQ on
-    threshold, #433) — no new dispatcher outcome is introduced.
+
+    DRF-2302 — постоянный отказ: тот же payload на повторе так же битый,
+    поэтому ``REJECTED`` → 422 + DLQ сразу, а не 500 → 9 повторов за 4,5 ч.
     """
+
+    reason = "invalid_payload"
 
 
 class CanonicalRescheduleVersionGapError(RuntimeError):
@@ -1512,7 +1656,7 @@ def handle_appointment_rescheduled_canonical(envelope: IngestEnvelope) -> None:
 
     update_fields: dict[str, Any] = {
         "last_applied_appointment_version": canonical.version,
-        "last_synced_event_id": envelope.event_id,
+        **_applied_event_marks(envelope),
     }
 
     new_start_at: dt.datetime | None = None
@@ -1545,7 +1689,7 @@ def handle_appointment_rescheduled_canonical(envelope: IngestEnvelope) -> None:
     if new_start_at is not None:
         _reschedule_reminders(appointment_id=canonical.appointment_id, new_start_at=new_start_at)
 
-        bot_user = _resolve_bot_user(user_id=UUID(envelope.user_id), tenant=tenant)
+        bot_user = _resolve_bot_user(user_id=UUID(envelope.require_user_id()), tenant=tenant)
         if bot_user is not None:
             _touch_conversation_last_booking(
                 bot_user=bot_user,
@@ -1627,7 +1771,7 @@ def handle_booking_completed(envelope: IngestEnvelope) -> None:
     RemoteBookingProxy.all_tenants.filter(appointment_id=appointment_id).update(
         status=RemoteBookingProxy.Status.COMPLETED,
         completed_by=completed_by[:64],
-        last_synced_event_id=envelope.event_id,
+        **_applied_event_marks(envelope),
     )
 
     emit_internal_event(
@@ -1719,10 +1863,12 @@ def handle_booking_confirmed(envelope: IngestEnvelope) -> None:
     was_confirmed = proxy.status == RemoteBookingProxy.Status.CONFIRMED
 
     proxy.status = RemoteBookingProxy.Status.CONFIRMED
-    proxy.last_synced_event_id = envelope.event_id
-    proxy.save(update_fields=["status", "last_synced_event_id", "synced_at"])
+    marks = _applied_event_marks(envelope)
+    for name, value in marks.items():
+        setattr(proxy, name, value)
+    proxy.save(update_fields=["status", *marks, "synced_at"])
 
-    bot_user = _resolve_bot_user(user_id=UUID(envelope.user_id), tenant=tenant)
+    bot_user = _resolve_bot_user(user_id=UUID(envelope.require_user_id()), tenant=tenant)
     if bot_user is not None:
         _schedule_reminders(
             tenant=tenant,
@@ -1828,9 +1974,12 @@ def handle_booking_no_show(envelope: IngestEnvelope) -> None:
 
     RemoteBookingProxy.all_tenants.filter(appointment_id=appointment_id).update(
         status=RemoteBookingProxy.Status.NO_SHOW,
-        last_synced_event_id=envelope.event_id,
+        **_applied_event_marks(envelope),
     )
     _cancel_reminders(appointment_id=appointment_id)
+    # DRF-2118 тип 5 — неявка: салону решать, что с записью и клиентом.
+    if proxy is not None:
+        schedule_booking_attention_notification(proxy_pk=proxy.pk, reason="no_show")
 
 
 # ─── registration ──────────────────────────────────────────────────────────

@@ -44,18 +44,15 @@ from django.core.signing import BadSignature, SignatureExpired, TimestampSigner
 from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.utils import timezone
 
+from apps.catalog.master_state import is_enrolled
 from apps.catalog.models import CatalogMaster
 from apps.identity.models import BotUser
-from apps.identity.services.bot_user_resolver import resolve_bot_user
-from apps.miniapp_api.auth import (
-    InitDataBadSignature,
-    InitDataError,
-    InitDataMalformed,
-    InitDataNotConfigured,
-    InitDataStale,
-    extract_init_data,
-    verify_init_data,
+from apps.identity.services.bot_user_resolver import (
+    SalonChoiceRequired,
+    resolve_bot_user,
+    salon_choice_from,
 )
+from apps.miniapp_api.transport_refusal import GUARD_ATTR, verify_request_init_data
 from apps.miniapp_api.dev_bypass import try_dev_bypass
 from apps.tenancy.context import tenant_scope
 
@@ -222,13 +219,20 @@ def generate_invite_token() -> uuid.UUID:
 
 def validate_invite_token(
     token: str | uuid.UUID,
-    tenant: Any,
+    tenant: Any = None,
 ) -> CatalogMaster:
     """Atomic invite-token validation with row lock.
 
+    ``tenant=None`` (DRF-1784, 12.09.2026) — resolve by the token alone and
+    let the row say which salon it belongs to. The salon bot opens
+    invitation links for every salon and holds no tenant before the link is
+    read; a UUIDv4 token is unguessable, so the tenant filter never added
+    security here — it only encoded «the bot belongs to one salon». Mini App
+    callers still pass their verified tenant and keep the filter.
+
     Returns the :class:`CatalogMaster` row when the token is:
 
-    * resolvable in the given tenant
+    * resolvable in the given tenant (or in any, when ``tenant`` is None)
     * status PENDING
     * not past ``invite_expires_at``
 
@@ -251,11 +255,10 @@ def validate_invite_token(
     # ``select_for_update`` locks the row for the duration of the enclosing
     # transaction. Combined with the unique constraint on invite_token, this
     # serializes any concurrent accept/reject/claim against the same token.
-    qs = CatalogMaster.all_tenants.select_for_update().filter(
-        invite_token=token_uuid,
-        tenant=tenant,
-    )
-    master = qs.first()
+    qs = CatalogMaster.all_tenants.select_for_update().filter(invite_token=token_uuid)
+    if tenant is not None:
+        qs = qs.filter(tenant=tenant)
+    master = qs.select_related("tenant").first()
     if master is None:
         raise InvalidInviteToken("token not found for this tenant")
 
@@ -283,7 +286,22 @@ def _error(slug: str, detail: str, status: int) -> JsonResponse:
     return JsonResponse({"error": slug, "detail": detail}, status=status)
 
 
-def _resolve_bot_user(verified) -> BotUser | None:
+def _salon_choice_response(exc: "SalonChoiceRequired") -> JsonResponse:
+    """409 — the identity holds a role in several salons; the person chooses (DRF-1766)."""
+
+    return JsonResponse(
+        {
+            "error": "salon_choice_required",
+            "detail": "this account holds a role in several salons — choose one",
+            "details": {
+                "tenants": [{"slug": t.slug, "name": t.name or t.slug} for t in exc.tenants]
+            },
+        },
+        status=409,
+    )
+
+
+def _resolve_bot_user(verified, *, chosen_slug: str | None = None) -> BotUser | None:
     """Find the BotUser this Mini App request belongs to (DRF-1083).
 
     The rule itself now lives in
@@ -294,7 +312,7 @@ def _resolve_bot_user(verified) -> BotUser | None:
     point so call sites and tests keep their name.
     """
 
-    return resolve_bot_user(verified, surface="master_api")
+    return resolve_bot_user(verified, surface="master_api", chosen_slug=chosen_slug)
 
 
 def require_master_init_data(
@@ -327,23 +345,17 @@ def require_master_init_data(
         if bypass is not None:
             bot_user, _bypass_tenant = bypass
         else:
-            header = request.headers.get("Authorization", "")
-            try:
-                raw = extract_init_data(header)
-                verified = verify_init_data(raw)
-            except InitDataNotConfigured:
-                logger.error("master_api.auth.not_configured")
-                return _error("server_misconfigured", "MAX bot token not configured", 500)
-            except InitDataBadSignature:
-                return _error("bad_signature", "initData signature mismatch", 401)
-            except InitDataStale:
-                return _error("stale", "initData expired — reopen the Mini App", 401)
-            except InitDataMalformed as exc:
-                return _error("malformed", str(exc), 400)
-            except InitDataError as exc:
-                return _error("unauthorized", str(exc), 401)
+            # DRF-1893 — один отказ транспорта: 401 no_init_data, причина в логе.
+            verified, refusal = verify_request_init_data(request, surface="master_api")
+            if refusal is not None:
+                return refusal
 
-            bot_user = _resolve_bot_user(verified)
+            try:
+                bot_user = _resolve_bot_user(verified, chosen_slug=salon_choice_from(request))
+            except SalonChoiceRequired as exc:
+                # DRF-1766: several salons, the person decides — the Mini App
+                # shows the chooser and repeats with X-Salon-Choice.
+                return _salon_choice_response(exc)
         if bot_user is None:
             return _error(
                 "user_not_registered",
@@ -366,10 +378,32 @@ def require_master_init_data(
                 "this account is not linked to a master",
                 401,
             )
-        if not master.is_active or master.archived_at is not None:
+        # DRF-1506 — одни ворота вместо трёх столбцов на глаз.
+        #
+        # Раньше здесь проверялись ``is_active`` и ``archived_at``, а
+        # ``invite_status`` — нет; ``resolve_role`` двумя модулями ниже
+        # проверял ``invite_status``, но не ``is_active``. Из этой пары
+        # и вырос DRF-1080: принявшая приглашение мастер была мастером
+        # для одного и «неактивной» для другого. Теперь оба спрашивают
+        # ``is_landed``.
+        #
+        # DRF-1521 — те же одни ворота, но предикат третий:
+        # ``is_enrolled``. Он отличается от ``is_landed`` ровно тем, что
+        # не спрашивает ``is_active``, и в этом вся задача: мастер,
+        # снятая с витрины, — это человек, которому НУЖНО войти и
+        # починить то, из-за чего её сняли. Закрытая здесь дверь
+        # оставляла её без способа что-либо изменить — это и был
+        # DRF-1080, только приходивший теперь с другой стороны.
+        # По-настоящему закрывает дверь архив: он означает «ушла».
+        # Витрину этот предикат НЕ трогает — там ``is_available``.
+        #
+        # Код ответа остаётся ``master_inactive``: это единственные
+        # ворота в мастер-приложение, и дробить их на коды значило бы
+        # рассказывать вызывающему, какой именно столбец не сошёлся.
+        if not is_enrolled(master):
             return _error(
                 "master_inactive",
-                "master account is inactive or archived",
+                "master account is inactive, archived or has not completed onboarding",
                 403,
             )
 
@@ -380,6 +414,7 @@ def require_master_init_data(
         with tenant_scope(bot_user.tenant):
             return view_func(request, *args, **kwargs)
 
+    setattr(wrapper, GUARD_ATTR, "master")
     return wrapper
 
 
@@ -407,23 +442,17 @@ def require_init_data_only(
         if bypass is not None:
             bot_user, _bypass_tenant = bypass
         else:
-            header = request.headers.get("Authorization", "")
-            try:
-                raw = extract_init_data(header)
-                verified = verify_init_data(raw)
-            except InitDataNotConfigured:
-                logger.error("master_api.auth.not_configured")
-                return _error("server_misconfigured", "MAX bot token not configured", 500)
-            except InitDataBadSignature:
-                return _error("bad_signature", "initData signature mismatch", 401)
-            except InitDataStale:
-                return _error("stale", "initData expired — reopen the Mini App", 401)
-            except InitDataMalformed as exc:
-                return _error("malformed", str(exc), 400)
-            except InitDataError as exc:
-                return _error("unauthorized", str(exc), 401)
+            # DRF-1893 — один отказ транспорта: 401 no_init_data, причина в логе.
+            verified, refusal = verify_request_init_data(request, surface="master_api")
+            if refusal is not None:
+                return refusal
 
-            bot_user = _resolve_bot_user(verified)
+            try:
+                bot_user = _resolve_bot_user(verified, chosen_slug=salon_choice_from(request))
+            except SalonChoiceRequired as exc:
+                # DRF-1766: several salons, the person decides — the Mini App
+                # shows the chooser and repeats with X-Salon-Choice.
+                return _salon_choice_response(exc)
         if bot_user is None:
             return _error(
                 "user_not_registered",
@@ -437,6 +466,7 @@ def require_init_data_only(
         with tenant_scope(bot_user.tenant):
             return view_func(request, *args, **kwargs)
 
+    setattr(wrapper, GUARD_ATTR, "master_onboarding")
     return wrapper
 
 

@@ -21,6 +21,7 @@ from unittest.mock import patch
 import pytest
 from django.utils import timezone
 
+from apps.catalog.models import CatalogMaster
 from apps.channels.bot_registry import BotEntry
 from apps.channels.max.salon_handler import _extract_code, handle_salon_max_event
 from apps.identity.models import BotUser
@@ -29,6 +30,31 @@ from apps.tenancy.context import tenant_scope
 from apps.tenancy.models import StaffInvite, Tenant, TenantStaff
 
 pytestmark = pytest.mark.django_db
+
+
+@pytest.fixture(autouse=True)
+def _fresh_stranger_counter():
+    """DRF-2113: после трёх ответов незнакомцу бот молчит (счётчик в cache по
+    личности). Тесты этого файла говорят от одной личности много раз — счётчик
+    между тестами обнуляется, иначе четвёртый тест слышал бы молчание."""
+    from django.core.cache import cache
+
+    cache.clear()
+    yield
+    cache.clear()
+
+
+@pytest.fixture(autouse=True)
+def _staff_are_linked(monkeypatch):
+    """DRF-2113: связь с каталогом — не предмет этого файла.
+
+    Пре-чек входа (``salon_entry``) показывает меню только связанным с
+    каталогом; строки здесь строятся без ключа личности, и без этой
+    оговорки каждый персонал получал бы «Доступ ещё не подключён».
+    Связь стережётся в ``test_salon_entry_2113``.
+    """
+    monkeypatch.setattr("apps.channels.max.salon_entry.unlinked_reason", lambda *a, **kw: "")
+
 
 CHANNEL_USER_ID = "700700"
 CHAT_ID = "555"
@@ -128,7 +154,8 @@ class TestOnboarding:
     def test_a_stranger_is_asked_for_a_code(self, tenant, sent):
         _handle("привет", tenant)
 
-        assert "код приглашения" in sent.call_args.kwargs["text"]
+        # DRF-2113: незнакомцу — «рабочий бот салона … код сотрудника или ссылка-приглашение».
+        assert "код сотрудника" in sent.call_args.kwargs["text"]
         assert not TenantStaff.all_tenants.exists()
 
     def test_a_bad_code_is_refused_without_detail(self, tenant, sent):
@@ -154,8 +181,96 @@ class TestOnboarding:
         _handle("привет", tenant, update_id=2)
 
         text = sent.call_args.kwargs["text"]
-        assert "код приглашения" not in text
+        assert "код сотрудника" not in text and "код приглашения" not in text
         assert "Формула тела" in text
+
+
+def _master_card(tenant: Tenant, name: str, **kwargs) -> CatalogMaster:
+    defaults = dict(
+        name=name,
+        external_id=None,
+        external_updated_at=timezone.now(),
+        invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+        mode=CatalogMaster.Mode.CATALOG_ONLY,
+        is_active=True,
+    )
+    defaults.update(kwargs)
+    return CatalogMaster.all_tenants.create(tenant=tenant, **defaults)
+
+
+class TestMasterCodeCannotTakeSomeoneElsesCard:
+    """DRF-1647 seen from the chat, not from the service.
+
+    The service-level proof lives in
+    ``apps/identity/tests/test_staff_invites.py``. What is asserted here is
+    the part the master would have noticed: her card stays hers, and the
+    person who typed the code is told something rather than welcomed in.
+    """
+
+    def test_the_card_stays_with_its_master_and_the_bearer_is_answered(self, tenant, sent):
+        real_master = BotUser.all_tenants.create(
+            tenant=tenant, channel="max", channel_user_id="700111", display_name="Ольга"
+        )
+        card = _master_card(tenant, "Тихонова Ольга")
+        card.linked_bot_user = real_master
+        card.save(update_fields=["linked_bot_user"])
+        invite, code = issue_staff_invite(
+            tenant=tenant, role=StaffInvite.Role.MASTER, catalog_master=card
+        )
+
+        _handle(code, tenant)
+
+        card.refresh_from_db()
+        invite.refresh_from_db()
+        assert card.linked_bot_user_id == real_master.id, "her card was taken"
+        # Answered, not welcomed: no greeting, and the code survives for the
+        # person it was issued to.
+        assert sent.call_count == 1
+        assert "вы мастер" not in sent.call_args.kwargs["text"].lower()
+        assert invite.used_at is None
+
+
+class TestAPersonWhoAlreadyHoldsACardIsNotIgnored:
+    """DRF-1650 seen from the chat: the reply that was not sent.
+
+    Before the fix this exact sequence produced zero outbound messages and
+    an ``IntegrityError`` out of ``handle_salon_max_event`` — the person sat
+    looking at a bot that had stopped talking to them.
+
+    The card has to be archived for the bot to reach the code branch at all:
+    ``resolve_role`` calls a linked-but-archived person a customer (ENROLLED
+    asks ``archived_at IS NULL``), while ``CatalogMaster.linked_bot_user``
+    is a OneToOneField and still remembers her. The disagreement between
+    those two is the whole defect.
+    """
+
+    def test_the_bot_answers_instead_of_going_silent(self, tenant, sent):
+        person = BotUser.all_tenants.create(
+            tenant=tenant,
+            channel="max",
+            channel_user_id=CHANNEL_USER_ID,
+            display_name="Мастер",
+        )
+        old_card = _master_card(
+            tenant, "Прежняя карточка", is_active=False, archived_at=timezone.now()
+        )
+        old_card.linked_bot_user = person
+        old_card.save(update_fields=["linked_bot_user"])
+        fresh_card = _master_card(tenant, "Новая карточка")
+        invite, code = issue_staff_invite(
+            tenant=tenant, role=StaffInvite.Role.MASTER, catalog_master=fresh_card
+        )
+
+        # No exception may escape the handler, and no silence may either.
+        _handle(code, tenant)
+
+        assert sent.call_count == 1, "the person got no reply at all"
+        assert sent.call_args.kwargs["text"].strip() != ""
+
+        fresh_card.refresh_from_db()
+        invite.refresh_from_db()
+        assert fresh_card.linked_bot_user_id is None
+        assert invite.used_at is None, "the code was burned by someone else's mistake"
 
 
 class TestSenderIdentity:
@@ -196,11 +311,19 @@ class TestDefensive:
         # Tolerate-and-skip: a lifecycle update must not retry-storm the PEL.
         sent.assert_not_called()
 
-    def test_without_tenant_scope_it_refuses_to_guess(self, sent):
-        # Attaching a person to the wrong salon is worse than not answering.
+    def test_without_tenant_scope_it_answers_without_guessing_2026_09_12(self, sent):
+        """Эталон ПЕРЕВЁРНУТ 12.09.2026 (DRF-1784, срез 4b).
+
+        Раньше: без тенанта записи — молчание, «привязать человека к
+        неверному салону хуже, чем не ответить». Теперь незнакомцу не
+        нужен тенант, чтобы получить ответ: строки не создаётся вовсе,
+        салон решает код, который он введёт. Что осталось от прежнего
+        эталона — вторая строка: никого ни к какому салону не привязали.
+        """
         handle_salon_max_event(_payload("привет"))
 
-        sent.assert_not_called()
+        sent.assert_called()
+        assert "код" in sent.call_args.kwargs["text"].lower()
         assert not BotUser.all_tenants.filter(channel_user_id=CHANNEL_USER_ID).exists()
 
 
@@ -213,8 +336,18 @@ class TestWrongBotGuard:
     customer-facing avatar: invisible in logs, alarming to the recipient.
     """
 
-    def test_no_registry_entry_means_silence_not_a_wrong_sender(self, tenant, settings, sent):
-        # Registry declares a bot for a DIFFERENT salon.
+    def test_the_salon_bot_answers_a_tenant_not_named_in_its_entry_2026_09_12(
+        self, tenant, settings, sent
+    ):
+        """Эталон ПЕРЕВЁРНУТ 12.09.2026 (DRF-1705, срез 1 — DRF-1726).
+
+        Раньше запись реестра с чужим ``tenant_slug`` читалась как «бот
+        другого салона», и обработчик молчал — «refuse to answer rather than
+        answer as the wrong bot». Для соло-мастера это означало: салонный бот
+        не отвечает ему никогда, потому что его тенант в реестре не стоит.
+        Решение владельца: бот один на инсталляцию и не принадлежит салону.
+        Запись найдена по потоку, ответ уходит.
+        """
         settings.MAX_BOT_REGISTRY = (
             BotEntry(
                 slug="other",
@@ -224,6 +357,15 @@ class TestWrongBotGuard:
                 stream="max_salon",
             ),
         )
+
+        _handle("привет", tenant)
+
+        sent.assert_called()
+
+    def test_no_salon_bot_at_all_still_means_silence(self, tenant, settings, sent):
+        """Что осталось от прежнего эталона: без записи на потоке max_salon
+        отвечать некому — молчание, а не клиентский токен."""
+        settings.MAX_BOT_REGISTRY = ()
 
         _handle("привет", tenant)
 
@@ -443,7 +585,9 @@ class TestTheMasterAssistant:
 
         _handle("что у меня завтра", tenant)
 
-        assert "Салон" in sent.call_args.kwargs["text"]
+        # DRF-2114: владелец / администратор без ассистента слышит приветствие
+        # с живой сводкой, не «Салон «X».».
+        assert "Вы вошли в Ayla для салона" in sent.call_args.kwargs["text"]
 
     def test_a_failing_assistant_falls_back_to_the_menu(self, tenant, sent):
         """A broken assistant must not leave a master with silence."""

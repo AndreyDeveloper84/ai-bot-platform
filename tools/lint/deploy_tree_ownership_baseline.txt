@@ -1,0 +1,97 @@
+# Objects in the pilot deploy tree NOT owned by the deploy user (DRF-1646).
+#
+# ─── WHICH BOX ──────────────────────────────────────────────────────────────
+#
+#   host       ruvds-o1mqo / 176.119.159.141   ← api-dev.gobeauty.site
+#   tree       /home/taximeter/ai-bot-platform-dev
+#   owner      taximeter, uid 1000
+#   measured   2026-09-11T05:12:25Z at HEAD 64014365, by ssh, 12527 objects
+#              walked, 0 unreadable
+#
+# The host is named because the first version of this file did not name it and
+# was measured on the WRONG BOX — ruvds-l2wyz / 194.87.99.126 carries an
+# abandoned checkout at the same path with the same compose project names. The
+# path is not an address. What settles it is asking the live contour where it
+# was launched from (`docker inspect ... project.working_dir`) plus DNS.
+#
+# ─── PROVISIONAL. These numbers are scheduled to become wrong. ──────────────
+#
+# Measured while the cause is still live. DRF-1646's source fix (#1581 — derive
+# the container uid from the tree instead of from the caller) has not landed
+# here yet. When it does, and the leftover root-owned files are removed, this
+# count drops and MUST be re-measured — after that deploy, not before.
+#
+# Do not read 298 as a target or as "the normal amount". It is the size of a
+# leak that is being closed. A ratchet frozen on a number we are actively
+# removing would read as a repair, which is the opposite of what it is.
+#
+# Until re-measured, a shrinking count here is expected and means the fix is
+# working — not that someone should quietly lower the numbers and move on.
+#
+# ─── THIS IS A RATE, NOT A BACKLOG. Read before comparing. ──────────────────
+#
+# The numbers below are NOT accumulated damage. The tree was repaired to clean
+# at ~04:30 UTC on 2026-09-11; ONE deploy at 05:04 produced all 298. A later
+# run rewrites mostly the same paths, so the count stays roughly flat while the
+# cause persists — it does not climb, and a flat count is therefore NOT
+# evidence that nothing is wrong.
+#
+# So a green check here means "this deploy wrote no more foreign objects than
+# the last one did". It will read zero only when the deploy stops writing as
+# root. Until then the guard is watching a leak, not a puddle.
+#
+# ─── THE CAUSE, and why the first fix was void ──────────────────────────────
+#
+# The deploy logs in as **root**, not as the tree owner. Proof by elimination:
+# `sudo -n -l` as taximeter answers "a password is required" — no NOPASSWD
+# entries at all — yet the deploy step runs `sudo docker compose` four times
+# and is green. Files are owned by uid 0, and the only account with uid >= 1000
+# on the box is taximeter.
+#
+# Therefore `--user "$(id -u):$(id -g)"`, added to stop containers writing as
+# root, expands under root to `--user 0:0`. The flag is escaped correctly,
+# placed correctly, reaches docker, and faithfully says "run as whoever called
+# me". Root called it. A measure that works exactly as written and changes
+# nothing.
+#
+# The cure is to derive the uid from the TREE rather than from the caller:
+# `stat -c %u "$DEV_DEPLOY_PATH"`. `id -u` was a proxy for "owner of the tree",
+# true only while caller and owner coincide.
+#
+# ─── THERE IS ONE ACTOR, NOT THREE ──────────────────────────────────────────
+#
+#   uid 0     292  written by root, by creation-and-rename (git index, HEAD,
+#                  refs, new working-tree files) or by collectstatic
+#   uid 1001    6  apps/miniapp/dist/** — a uid with NO passwd entry on this
+#                  box. It is proof the extractor was root: GNU tar restores
+#                  owners from the archive when run as root (--same-owner is
+#                  root's default) and ignores them otherwise. These are the
+#                  runner's uids, carried in by root's tar.
+#   taximeter      files git rewrites IN PLACE (FETCH_HEAD) keep their old
+#                  owner — root can write any file, and an in-place write does
+#                  not change ownership. This is what made one process look
+#                  like two owners writing in the same second.
+#
+# The difference between the three is not who wrote, but HOW: in place, or by
+# replacement.
+#
+# ─── WHY THE REPAIR IS NOT IN THIS PR ───────────────────────────────────────
+#
+# `sudo -n true` as taximeter: "a password is required". Changing ownership
+# needs root, and this window has taximeter only. Measuring was possible;
+# repairing is not. Named here rather than left as an unfinished checkbox.
+#
+# ─── THE NUMBERS ────────────────────────────────────────────────────────────
+#
+#   .git/         67   index, HEAD, refs, loose objects — created by rename
+#   staticfiles/ 154   exactly the "154 static files copied" the deploy log
+#                      reports: collectstatic wrote every file it copied, as
+#                      root, with --user in place and pointing at 0:0
+#   other         77   working-tree files created by the checkout, e.g.
+#                      tests/contracts/test_master_address_has_no_readers.py
+#   __pycache__/   0   measured, not assumed
+
+.git/ = 67
+staticfiles/ = 154
+__pycache__/ = 0
+other = 77

@@ -15,7 +15,7 @@
  *     (captured_pending_settlement); wording «ожидается», never
  *     «гарантированно».
  */
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -414,5 +414,24 @@ describe("MasterBillingScreen — pay debt CTA (past_due)", () => {
     expect(
       await screen.findByText(/Не получилось списать долг/),
     ).toBeInTheDocument();
+  });
+});
+
+describe("MasterBillingScreen — системные состояния через SystemState (М-6b)", () => {
+  it("подписка не загрузилась (не sync) — «Не удалось загрузить подписку» + «Попробовать снова»", async () => {
+    mockedStatus.mockRejectedValueOnce(new Error("boom")).mockResolvedValueOnce(STATUS_ACTIVE);
+    renderScreen();
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("Не удалось загрузить подписку");
+    expect(screen.queryByText(/Не получилось загрузить/)).toBeNull();
+    await userEvent.click(within(alert).getByRole("button", { name: "Попробовать снова" }));
+    expect(await screen.findByText("Активна")).toBeInTheDocument();
+  });
+
+  it("выплаты не загрузились — «Не удалось загрузить выплаты»; синхронизация биллинга — свой текст, как была", async () => {
+    mockedPayout.mockRejectedValue(new Error("boom"));
+    renderScreen();
+    expect(await screen.findByText("Не удалось загрузить выплаты")).toBeInTheDocument();
+    expect(screen.queryByText(/Не получилось загрузить/)).toBeNull();
   });
 });

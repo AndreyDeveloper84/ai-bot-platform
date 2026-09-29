@@ -111,7 +111,9 @@ class BookingRequest(models.Model):
     * ``(tenant, bot_user)`` — "all bookings by this client" drill-down
     """
 
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    id = models.UUIDField(
+        primary_key=True, default=uuid.uuid4, editable=False, verbose_name="Идентификатор записи"
+    )
     tenant = models.ForeignKey(
         "tenancy.Tenant",
         on_delete=models.PROTECT,
@@ -119,6 +121,7 @@ class BookingRequest(models.Model):
         help_text="Owning tenant. PROTECT — bookings are a forensic / "
         "billing artefact; deleting a tenant requires explicit data "
         "purge first (audit retention requirement).",
+        verbose_name="Салон",
     )
     bot_user = models.ForeignKey(
         "identity.BotUser",
@@ -129,6 +132,7 @@ class BookingRequest(models.Model):
         help_text="Linked channel identity. SET_NULL — the booking row "
         "is still a valuable analytics record after the BotUser is "
         "purged (GDPR right-to-erasure scenario).",
+        verbose_name="Аккаунт клиента в мессенджере",
     )
 
     # ── Snapshot fields (denormalised at write time, never edited) ────────
@@ -136,23 +140,29 @@ class BookingRequest(models.Model):
     # the booking is a self-contained audit artefact: rename a service
     # or a master in the catalog and historic bookings still say what
     # the client actually saw at booking time.
-    category_name = models.CharField(max_length=200, blank=True, default="")
-    service_name = models.CharField(max_length=200)
-    master_name = models.CharField(max_length=150, blank=True, default="")
-    client_name = models.CharField(max_length=150)
-    client_phone = models.CharField(max_length=30)
+    category_name = models.CharField(
+        max_length=200, blank=True, default="", verbose_name="Категория (как было при записи)"
+    )
+    service_name = models.CharField(max_length=200, verbose_name="Услуга (как было при записи)")
+    master_name = models.CharField(
+        max_length=150, blank=True, default="", verbose_name="Мастер (как было при записи)"
+    )
+    client_name = models.CharField(max_length=150, verbose_name="Имя клиента")
+    client_phone = models.CharField(max_length=30, verbose_name="Телефон клиента")
 
-    comment = models.TextField(blank=True, default="")
+    comment = models.TextField(blank=True, default="", verbose_name="Комментарий")
     is_processed = models.BooleanField(
         default=False,
         help_text="Admin-side flag. Wizard rows start False (operator "
         "calls back); yclients_admin webhook rows start True (the "
         "admin already booked it in YClients).",
+        verbose_name="Обработана оператором",
     )
     source = models.CharField(
         max_length=20,
         choices=BOOKING_SOURCE_CHOICES,
         default="wizard",
+        verbose_name="Откуда пришла запись",
     )
 
     class Status(models.TextChoices):
@@ -200,6 +210,7 @@ class BookingRequest(models.Model):
         "the task SET ... WHERE completed_at IS NULL — rowcount tells "
         "whether we won the race. NULL on rows where the visit hasn't "
         "happened yet, was cancelled, or where the producer hasn't run yet.",
+        verbose_name="Визит завершён",
     )
     completed_by = models.CharField(
         max_length=64,
@@ -214,6 +225,7 @@ class BookingRequest(models.Model):
         "наступают только на человеческом значении — решение владельца "
         "30.08. ``completed_at`` отвечает «визит закрыт?», это поле — "
         "«человек пришёл?»; до 30.08 первый ответ выдавали за второй.",
+        verbose_name="Кто отметил завершение",
     )
     status = models.CharField(
         max_length=24,
@@ -226,6 +238,7 @@ class BookingRequest(models.Model):
             "cancel_requested and reschedule_requested are interim "
             "states reversible by the customer."
         ),
+        verbose_name="Состояние записи",
     )
     cancel_requested_at = models.DateTimeField(
         null=True,
@@ -235,6 +248,7 @@ class BookingRequest(models.Model):
             "the undo window expiry (5s per customer-cancellation-"
             "reschedule-spec §3.4 / Q-CR1)."
         ),
+        verbose_name="Отмена запрошена",
     )
     rescheduled_from = models.ForeignKey(
         "self",
@@ -247,6 +261,7 @@ class BookingRequest(models.Model):
             "customer-initiated reschedule. PROTECT so the audit linkage "
             "cannot be silently broken by deleting the old row."
         ),
+        verbose_name="Перенесена из записи",
     )
     commercial_identity_snapshot = models.JSONField(
         null=True,
@@ -263,6 +278,7 @@ class BookingRequest(models.Model):
             "→ chain check skipped per memory "
             "q12a-billing-founder-gate (legacy chains preserved)."
         ),
+        verbose_name="Снимок коммерческих признаков",
     )
     original_booking_event = models.ForeignKey(
         "self",
@@ -288,6 +304,7 @@ class BookingRequest(models.Model):
             "see apps/booking/services/attribution.py::"
             "compute_reschedule_continuation."
         ),
+        verbose_name="Исходное событие записи",
     )
     reschedule_candidate = models.JSONField(
         default=dict,
@@ -297,8 +314,9 @@ class BookingRequest(models.Model):
             "{'new_master_id', 'new_service_id', 'new_visit_at'}. "
             "Cleared on commit/abandon."
         ),
+        verbose_name="Кандидат на перенос",
     )
-    created_at = models.DateTimeField(auto_now_add=True)
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="Создана")
 
     # --- 4a additions: visit time + catalog FKs + attribution ----------
     visit_at = models.DateTimeField(
@@ -307,11 +325,13 @@ class BookingRequest(models.Model):
         db_index=True,
         help_text="When the appointment is scheduled. Required for new "
         "(non-external) rows; legacy backfilled rows have NULL.",
+        verbose_name="Время визита",
     )
     duration_min = models.PositiveIntegerField(
         null=True,
         blank=True,
         help_text="Service duration at booking time (snapshot).",
+        verbose_name="Длительность, мин",
     )
     service = models.ForeignKey(
         "catalog.CatalogService",
@@ -319,6 +339,7 @@ class BookingRequest(models.Model):
         null=True,
         blank=True,
         related_name="booking_requests",
+        verbose_name="Услуга (связь с каталогом)",
     )
     master = models.ForeignKey(
         "catalog.CatalogMaster",
@@ -326,6 +347,7 @@ class BookingRequest(models.Model):
         null=True,
         blank=True,
         related_name="booking_requests",
+        verbose_name="Мастер (связь с каталогом)",
     )
     booking_source = models.CharField(
         max_length=20,
@@ -333,29 +355,34 @@ class BookingRequest(models.Model):
         default="external",
         db_index=True,
         help_text="Per attribution-policy. ai_direct only is billable.",
+        verbose_name="Канал записи",
     )
     ai_assist_score = models.DecimalField(
         max_digits=3,
         decimal_places=2,
         default=0,
         help_text="0.00–1.00 internal analytics estimate of AI contribution.",
+        verbose_name="Вклад ассистента",
     )
     billable = models.BooleanField(
         default=False,
         db_index=True,
         help_text="Locked rule: True iff booking_source='ai_direct' AND "
         "status=='confirmed'. Set once, never recomputed.",
+        verbose_name="Тарифицируется",
     )
     billing_reason = models.CharField(
         max_length=200,
         blank=True,
         default="",
         help_text="Required when billable=True (audit trail).",
+        verbose_name="Причина тарификации",
     )
     attribution_metadata = models.JSONField(
         default=dict,
         blank=True,
         help_text="Audit context. Required key: actor_type (validator).",
+        verbose_name="Данные атрибуции",
     )
     conversation = models.ForeignKey(
         "conversations.Conversation",
@@ -363,29 +390,46 @@ class BookingRequest(models.Model):
         null=True,
         blank=True,
         related_name="bookings",
+        verbose_name="Диалог",
     )
 
     # Phase 4 / F5 — post-visit feedback. Filled when the customer
     # submits the rating form; before that all four fields are NULL.
-    # ``rating <= 3`` triggers a HUMAN_LOCKED handoff (apps.handoff
-    # AdminTask + Conversation.state=HUMAN_HANDOFF), see
-    # apps/booking/services/feedback.py.
+    #
+    # ``rating <= 3`` заводит AdminTask через
+    # ``apps.handoff.services.create_admin_task``; он же одной
+    # транзакцией с задачей переводит разговор в
+    # ``Conversation.state = HUMAN_HANDOFF``. Точка входа —
+    # ``apps/booking/services/feedback.py``.
+    #
+    # Ярус ``Conversation.tier`` этот путь НЕ трогает. ``HUMAN_LOCKED`` —
+    # значение ЯРУСА, которым мастер вручную выключал бота и compose; у
+    # него своя атрибуция (``tier_locked_at`` / ``tier_locked_by``) и своё
+    # событие. Писатель снят вместе с перепиской мастер↔клиент (DRF-1528,
+    # 21.09): ярус сегодня не ставит никто (DRF-2557, сторож
+    # ``apps/conversations/tests/test_tier_has_no_writer_2557.py``).
+    # Прежняя редакция комментария называла эскалацию по оценке
+    # «HUMAN_LOCKED handoff» и склеивала два разных механизма в один —
+    # читавший models.py, чтобы понять эскалацию, уходил не туда.
     rating = models.PositiveSmallIntegerField(
         null=True,
         blank=True,
         help_text="Customer rating 1-5. NULL until they submit the F5 form. "
         "Values <= 3 fire the handoff flow.",
+        verbose_name="Оценка клиента",
     )
     feedback_comment = models.TextField(
         blank=True,
         default="",
         help_text="Optional free-text comment from the F5 form (≤500 chars enforced at the API).",
+        verbose_name="Отзыв клиента",
     )
     feedback_at = models.DateTimeField(
         null=True,
         blank=True,
         help_text="Wall-clock when the rating was submitted. Idempotency anchor: "
         "submit_feedback raises 'already_rated' when this is non-NULL.",
+        verbose_name="Отзыв оставлен",
     )
     feedback_prompt_sent_at = models.DateTimeField(
         null=True,
@@ -393,6 +437,7 @@ class BookingRequest(models.Model):
         db_index=True,
         help_text="When the post-visit DM prompt was dispatched. NULL = not yet sent. "
         "Phase 4b will scan WHERE NULL and visit_at < now()-1h.",
+        verbose_name="Просьба об отзыве отправлена",
     )
 
     def save(self, *args, **kwargs):
@@ -433,8 +478,8 @@ class BookingRequest(models.Model):
     all_tenants = models.Manager()
 
     class Meta:
-        verbose_name = "Booking request"
-        verbose_name_plural = "Booking requests"
+        verbose_name = "Запись клиента"
+        verbose_name_plural = "Записи клиентов"
         ordering = ["-created_at"]
         indexes = [
             models.Index(fields=["tenant", "-created_at"]),
@@ -501,6 +546,16 @@ class BookingReminder(models.Model):
     reminder's send target must stay stable to the booking-time value.
     Same rationale as mysite.
 
+    **The dispatcher no longer sends to this snapshot (DRF-1558).** A
+    reminder writes to the person first, so it addresses
+    ``bot_user.channel_user_id`` — the person — rather than a dialog id
+    that is only valid for whichever bot opened that dialog. The column
+    stays: it is the booking-time forensic record of where we would have
+    written, and dropping it would cost a migration to erase evidence.
+    The stability argument above survives the change intact — it argued
+    for pinning the *address*, and the person id is the more stable of
+    the two identifiers, not the less.
+
     ### Delete semantics
 
     ``record.delete`` events transition existing reminders to
@@ -530,13 +585,24 @@ class BookingReminder(models.Model):
         # отдельный signal для post-pilot analytics (stale-rate spike
         # detection per master / service / time-of-day).
         STALE_DROPPED = "stale_dropped", "Dropped at dispatch (booking changed)"
+        # DRF-1731 замер 12.09: ``UserPreferences.notify_reminders``
+        # обещал «only soft reminders mute», а напоминания его не читали
+        # (0 hits в apps/bookings/). MUTED — «человек выключил напоминания»:
+        # запись цела, подтверждение цело, ушло только напоминание.
+        # Отдельно от STALE_DROPPED (запись изменилась) и CANCELLED
+        # (отменил вебхук), чтобы аналитика не читала выключенный тумблер
+        # как испорченную запись.
+        MUTED = "muted", "Muted by the person (notify_reminders off)"
 
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    id = models.UUIDField(
+        primary_key=True, default=uuid.uuid4, editable=False, verbose_name="Идентификатор"
+    )
     tenant = models.ForeignKey(
         "tenancy.Tenant",
         on_delete=models.PROTECT,
         related_name="booking_reminders",
         help_text="Owning tenant. PROTECT mirrors BookingRequest.",
+        verbose_name="Салон",
     )
     bot_user = models.ForeignKey(
         "identity.BotUser",
@@ -545,6 +611,7 @@ class BookingReminder(models.Model):
         help_text="The recipient. CASCADE: if the BotUser is purged "
         "(GDPR erasure), the reminders for that person must go too — "
         "an orphaned reminder would have nowhere to send.",
+        verbose_name="Аккаунт клиента в мессенджере",
     )
     booking_request = models.ForeignKey(
         "BookingRequest",
@@ -554,6 +621,7 @@ class BookingReminder(models.Model):
         related_name="reminders",
         help_text="Optional link to the source BookingRequest row "
         "(present when the reminder was created by our admin webhook).",
+        verbose_name="Запись",
     )
     yclients_record_id = models.CharField(
         max_length=64,
@@ -567,11 +635,13 @@ class BookingReminder(models.Model):
         "(yclients_record_id, kind) stays non-conflicting — NULL ≠ NULL "
         "in Postgres uniqueness, so two Ayla appointments with the same "
         "kind don't collide.",
+        verbose_name="Идентификатор записи в YClients",
     )
     chat_id = models.CharField(
         max_length=128,
         help_text="Snapshot of BotUser.chat_id at write time. "
         "Snapshot — chat_id may change in BotUser later.",
+        verbose_name="Идентификатор диалога",
     )
     ayla_appointment_id = models.UUIDField(
         null=True,
@@ -583,32 +653,35 @@ class BookingReminder(models.Model):
         "the YClients legacy path: rows from the YClients webhook keep "
         "yclients_record_id + leave this nullable; rows from the Ayla "
         "consumer set this + leave yclients_record_id blank.",
+        verbose_name="Идентификатор визита в Ayla",
     )
     visit_at = models.DateTimeField(
-        help_text="When the actual salon visit is scheduled.",
+        help_text="When the actual salon visit is scheduled.", verbose_name="Время визита"
     )
-    kind = models.CharField(max_length=16, choices=Kind.choices)
+    kind = models.CharField(max_length=16, choices=Kind.choices, verbose_name="Вид напоминания")
     status = models.CharField(
         max_length=16,
         choices=Status.choices,
         default=Status.PENDING,
         db_index=True,
+        verbose_name="Состояние напоминания",
     )
     scheduled_at = models.DateTimeField(
         help_text="When this reminder should fire (visit_at minus 24h or 2h depending on `kind`).",
+        verbose_name="Отправить в",
     )
-    sent_at = models.DateTimeField(null=True, blank=True)
-    replied_at = models.DateTimeField(null=True, blank=True)
-    master_name = models.CharField(max_length=120, blank=True, default="")
-    service_name = models.CharField(max_length=200, blank=True, default="")
-    created_at = models.DateTimeField(auto_now_add=True)
+    sent_at = models.DateTimeField(null=True, blank=True, verbose_name="Отправлено")
+    replied_at = models.DateTimeField(null=True, blank=True, verbose_name="Клиент ответил")
+    master_name = models.CharField(max_length=120, blank=True, default="", verbose_name="Мастер")
+    service_name = models.CharField(max_length=200, blank=True, default="", verbose_name="Услуга")
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="Создано")
 
     objects = TenantScopedManager()
     all_tenants = models.Manager()
 
     class Meta:
-        verbose_name = "Booking reminder"
-        verbose_name_plural = "Booking reminders"
+        verbose_name = "Напоминание о записи"
+        verbose_name_plural = "Напоминания о записях"
         ordering = ["scheduled_at"]
         # The cornerstone of webhook idempotency. Same pair from a
         # re-delivered YClients event hits update_or_create cleanly.
@@ -695,13 +768,16 @@ class PendingBookingAction(models.Model):
         CANCEL = "cancel", "Cancel booking (preview → cancel)"
         RESCHEDULE = "reschedule", "Reschedule booking (preview → cancel+create)"
 
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    id = models.UUIDField(
+        primary_key=True, default=uuid.uuid4, editable=False, verbose_name="Идентификатор"
+    )
     tenant = models.ForeignKey(
         "tenancy.Tenant",
         on_delete=models.CASCADE,
         related_name="pending_booking_actions",
         help_text="Owning tenant. CASCADE — pending rows are ephemeral "
         "(10-min TTL), no audit value in keeping after tenant deletion.",
+        verbose_name="Салон",
     )
     bot_user = models.ForeignKey(
         "identity.BotUser",
@@ -711,18 +787,21 @@ class PendingBookingAction(models.Model):
         "in the callback handler compares the tapping user's BotUser pk "
         "to this FK — prevents a leaked callback id from being executed "
         "by a different user.",
+        verbose_name="Аккаунт клиента в мессенджере",
     )
-    kind = models.CharField(max_length=16, choices=Kind.choices)
+    kind = models.CharField(max_length=16, choices=Kind.choices, verbose_name="Вид действия")
     payload = models.JSONField(
         default=dict,
         help_text="Per-kind argument bundle captured at preview time. "
         "See model docstring for the shape per kind.",
+        verbose_name="Данные действия",
     )
-    created_at = models.DateTimeField(auto_now_add=True)
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="Создано")
     expires_at = models.DateTimeField(
         db_index=True,
         help_text="Tap-after-expiry returns a polite 'too much time' "
         "reply and does NOT execute. 10-minute window per spec.",
+        verbose_name="Действует до",
     )
     consumed_at = models.DateTimeField(
         null=True,
@@ -730,14 +809,15 @@ class PendingBookingAction(models.Model):
         help_text="Set inside the consume CAS. Non-null → already "
         "executed (or cancelled by user tap on ❌). A second tap "
         "on the same token short-circuits to 'already handled'.",
+        verbose_name="Использовано",
     )
 
     objects = TenantScopedManager()
     all_tenants = models.Manager()
 
     class Meta:
-        verbose_name = "Pending booking action"
-        verbose_name_plural = "Pending booking actions"
+        verbose_name = "Отложенное действие по записи"
+        verbose_name_plural = "Отложенные действия по записям"
         ordering = ["-created_at"]
         indexes = [
             models.Index(fields=["tenant", "bot_user"]),
@@ -817,6 +897,7 @@ class RemoteBookingProxy(models.Model):
         primary_key=True,
         editable=False,
         help_text="Canonical Ayla djangoproject Appointment.id (UUID).",
+        verbose_name="Идентификатор визита в Ayla",
     )
     tenant = models.ForeignKey(
         "tenancy.Tenant",
@@ -824,6 +905,7 @@ class RemoteBookingProxy(models.Model):
         related_name="remote_booking_proxies",
         help_text="Owning tenant. CASCADE — the proxy is derived data; "
         "if the tenant goes, the local mirror goes too.",
+        verbose_name="Салон",
     )
     bot_user = models.ForeignKey(
         "identity.BotUser",
@@ -838,6 +920,7 @@ class RemoteBookingProxy(models.Model):
         "via any channel. CASCADE applies only to the linked case: "
         "if the BotUser is purged (GDPR erasure), linked mirrors go "
         "too — orphan rows are unaffected (no link to cascade through).",
+        verbose_name="Аккаунт клиента в мессенджере",
     )
 
     # ── Schedule window (for reminders + reschedule math) ──────────
@@ -845,19 +928,19 @@ class RemoteBookingProxy(models.Model):
         db_index=True,
         help_text="Appointment start, salon-local timezone. Reminder "
         "math (T-24h / T-2h) computes against this.",
+        verbose_name="Начало визита",
     )
     end_at = models.DateTimeField(
         help_text="Appointment end. Round-3 spec §3.3: reschedule "
         "preserves duration via "
         "``new_end_at = new_start_at + (old_end_at - old_start_at)`` — "
         "this field is what the math reads.",
+        verbose_name="Окончание визита",
     )
 
     # ── Status + source (mirrors §3 enums) ─────────────────────────
     status = models.CharField(
-        max_length=20,
-        choices=Status.choices,
-        db_index=True,
+        max_length=20, choices=Status.choices, db_index=True, verbose_name="Состояние визита"
     )
     source = models.CharField(
         max_length=20,
@@ -867,6 +950,7 @@ class RemoteBookingProxy(models.Model):
         help_text="Where the booking originated. Empty when source isn't "
         "carried in the event (booking.cancelled / .rescheduled / "
         ".completed don't repeat the source).",
+        verbose_name="Откуда визит",
     )
     completed_by = models.CharField(
         max_length=64,
@@ -881,6 +965,7 @@ class RemoteBookingProxy(models.Model):
         "подтвердил»: ``status=completed`` одинаков для обоих. "
         "Последствия, требующие подтверждения визита, гейтятся по нему "
         "(решение владельца 30.08) — см. apps.booking.completion.",
+        verbose_name="Кто отметил завершение",
     )
 
     # ── Opaque references (catalog mirror does the name lookup) ────
@@ -893,12 +978,31 @@ class RemoteBookingProxy(models.Model):
         "events (cancelled / rescheduled / completed) don't repeat "
         "the service reference; the row keeps the value set at "
         "creation time.",
+        verbose_name="Услуга (идентификатор в Ayla)",
     )
     specialist_id = models.UUIDField(
         null=True,
         blank=True,
         db_index=True,
         help_text="Ayla Master.id — analogous to ``service_id``.",
+        verbose_name="Мастер (идентификатор в Ayla)",
+    )
+    # DRF-2172 — цена записи как снимок на момент записи: ``price_total`` из
+    # ``booking.created`` (event-contract §3.1 — поле там с v1, консьюмер его
+    # до этого выбрасывал). Последующие события цену не несут; повторный
+    # ``booking.created`` может лишь ЗАПОЛНИТЬ NULL (запись из диалога пишет
+    # зеркало раньше события, без цены), но не перезаписать — смена прайса у
+    # салона на записанное не влияет. ``NULL`` — цена не
+    # доехала (событие без поля / нечисло / строка старше этого столбца):
+    # экран строку не рисует (§103), «0» не выдумывается. Валюта — не
+    # хранится: в каталоге её нет нигде (решение владельца, Phase 5).
+    price_amount = models.DecimalField(
+        max_digits=10,
+        decimal_places=2,
+        null=True,
+        blank=True,
+        help_text="Snapshot of booking.created.price_total; NULL when the event carried none.",
+        verbose_name="Цена записи (снимок)",
     )
 
     # ── Announcement claims (DRF-1069) ─────────────────────────────
@@ -920,6 +1024,7 @@ class RemoteBookingProxy(models.Model):
         "ingest releases the claim, a re-delivered event finds it taken. "
         "Records the claim, not delivery — the send itself is "
         "best-effort and may still find no reachable recipient.",
+        verbose_name="Салон уведомлён",
     )
     client_notified_at = models.DateTimeField(
         null=True,
@@ -930,6 +1035,7 @@ class RemoteBookingProxy(models.Model):
         "dialog: there ``execute_confirm`` already answered in chat, "
         "this channel deliberately says nothing, and the chat-origin "
         "marker — not this column — is what keeps it silent.",
+        verbose_name="Клиент уведомлён",
     )
 
     # ── Audit / observability ──────────────────────────────────────
@@ -941,12 +1047,42 @@ class RemoteBookingProxy(models.Model):
         "uuid4 36 chars, #1058) of the last event that touched this row. "
         "Forensic trace, not the primary idempotency key (that's the "
         "IngestDedupe table on the ingest side).",
+        verbose_name="Последнее применённое событие",
     )
     synced_at = models.DateTimeField(
         auto_now=True,
         help_text="When the platform last updated this row.",
+        verbose_name="Синхронизировано",
     )
-    created_at = models.DateTimeField(auto_now_add=True)
+    # DRF-2537 — отметка последнего применённого события КАНОНА. Пишут ВСЕ
+    # пути потребителя (``apps.eventbus.consumers.booking``) через одну
+    # функцию; собственные записи бота (``skills/booking/tools.py``) ставят
+    # «неизвестно». NULL/"" — «неизвестно», а не «старое»: строки до DRF-2537
+    # и строки, которые бот записал сам, эту отметку не получили и получить
+    # задним числом не могут (время выпуска события нигде не сохранено).
+    #
+    # Предел: это НЕ свежесть. Возраст — давность последнего ПРИШЕДШЕГО
+    # события, а не отставание от канона: пропущенное (мёртвое) событие
+    # отметку не сдвигает и отсюда не видно. Свежесть — вопрос к канону и к
+    # мёртвым письмам каталога. ``last_applied_appointment_version`` —
+    # другой счётчик (переносы, блокировка переноса), он не заменяет этот.
+    last_applied_event_name = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        help_text="Имя последнего применённого события канона (DRF-2537). "
+        "Пусто — неизвестно: строка до DRF-2537 или записана самим ботом.",
+        verbose_name="Последнее событие канона",
+    )
+    last_applied_event_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Когда канон выпустил последнее применённое событие "
+        "(``occurred_at`` конверта, DRF-2537). NULL — неизвестно, обратно не "
+        "заполняется. Не свежесть: пропущенное событие эту отметку не двигает.",
+        verbose_name="Время события канона",
+    )
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="Создан")
     last_applied_appointment_version = models.PositiveIntegerField(
         null=True,
         blank=True,
@@ -958,14 +1094,15 @@ class RemoteBookingProxy(models.Model):
         "never set this field. See "
         "apps.eventbus.consumers.booking.handle_appointment_rescheduled_canonical "
         "for the ordering state machine (bootstrap / skip / apply / gap).",
+        verbose_name="Версия визита",
     )
 
     objects = TenantScopedManager()
     all_tenants = models.Manager()
 
     class Meta:
-        verbose_name = "Remote booking proxy"
-        verbose_name_plural = "Remote booking proxies"
+        verbose_name = "Визит в Ayla (зеркало)"
+        verbose_name_plural = "Визиты в Ayla (зеркало)"
         ordering = ["-start_at"]
         indexes = [
             # «Next booking for this user» — hot read path for the AI.
@@ -1008,21 +1145,25 @@ class PaymentMirror(models.Model):
         on_delete=models.CASCADE,
         related_name="payment_mirrors",
         help_text="Owning tenant. CASCADE — mirror is derived data.",
+        verbose_name="Салон",
     )
     appointment_id = models.UUIDField(
         db_index=True,
         help_text="Canonical Ayla Appointment.id the payment belongs to.",
+        verbose_name="Идентификатор визита в Ayla",
     )
     payment_id = models.UUIDField(
         null=True,
         blank=True,
         help_text="Ayla Payment.id. Null for the hold signal when the "
         "booking.confirmed payload omits it.",
+        verbose_name="Идентификатор платежа в Ayla",
     )
     capture_state = models.CharField(
         max_length=16,
         choices=CaptureState.choices,
         help_text="Last known capture state from the event stream.",
+        verbose_name="Состояние платежа",
     )
     amount = models.DecimalField(
         max_digits=10,
@@ -1030,6 +1171,7 @@ class PaymentMirror(models.Model):
         null=True,
         blank=True,
         help_text="Payment amount (Decimal, 2dp per §1).",
+        verbose_name="Сумма",
     )
     last_synced_event_id = models.CharField(
         max_length=36,
@@ -1037,16 +1179,17 @@ class PaymentMirror(models.Model):
         default="",
         help_text="event_id of the last event that touched this row "
         "(forensic trace; IngestDedupe is the primary idempotency).",
+        verbose_name="Последнее применённое событие",
     )
-    updated_at = models.DateTimeField(auto_now=True)
-    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True, verbose_name="Изменено")
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="Создано")
 
     objects = TenantScopedManager()
     all_tenants = models.Manager()
 
     class Meta:
-        verbose_name = "Payment mirror"
-        verbose_name_plural = "Payment mirrors"
+        verbose_name = "Платёж (зеркало)"
+        verbose_name_plural = "Платежи (зеркало)"
         ordering = ["-updated_at"]
         constraints = [
             models.UniqueConstraint(

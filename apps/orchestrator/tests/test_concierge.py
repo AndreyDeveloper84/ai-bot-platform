@@ -328,7 +328,11 @@ class TestGenerateConciergeReply:
 
         assert reply.text == discovery.NO_CRITERIA_QUESTION
         assert "Вот мастера" not in reply.text
-        assert reply.action_data is None
+        assert reply.action_data is not None
+        assert [b["callback"] for b in reply.action_data["buttons"]] == [
+            "cb:catalog:salons",
+            "cb:menu:help",
+        ]  # DRF-2267 (§72): канон + выход
         # Still persisted by the concierge store, like every other turn it owns.
         assert reply.persisted is True
 

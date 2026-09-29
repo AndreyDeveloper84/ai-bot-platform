@@ -46,8 +46,47 @@ a {
    ref Part 6 Pattern 1). */
 .screen {
   min-height: 100dvh;
-  padding: var(--s-4) var(--s-4)
-    calc(var(--cta-clearance) + var(--safe-bottom));
+  padding: var(--s-4) var(--s-4) calc(var(--cta-clearance) + var(--safe-bottom));
+}
+
+/* Панель в два ряда — под ней надо освободить на ряд больше
+   (DRF-1469). Флаг ставит экран, положивший в панель второе действие;
+   у всех остальных отступ прежний. */
+.screen--tall-cta {
+  padding-bottom: calc(
+    var(--cta-clearance) + var(--cta-exit-height) + var(--safe-bottom)
+  );
+}
+
+/* Возврат в общем каркасе (DRF-1493). Раньше стрелку рисовал себе
+   каждый экран сам — и половина клиентских экранов не рисовала. Теперь
+   она живёт здесь, а экран лишь объявляет, куда она ведёт.
+   Отрицательный отступ слева выравнивает саму стрелку по левому краю
+   текста: цель нажатия остаётся 44x44 (WCAG 2.5.8). */
+.screen__back {
+  background: transparent;
+  border: none;
+  min-width: 44px;
+  min-height: 44px;
+  margin-left: calc(var(--s-4) * -1);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--font-size-400);
+  line-height: 1;
+  color: var(--c-text-primary);
+  cursor: pointer;
+}
+
+.screen__back:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 2px;
+  border-radius: var(--r-sm);
+}
+
+/* Заголовок под стрелкой не отбивается сверху второй раз. */
+.screen__back + .screen__title {
+  margin-top: var(--s-1);
 }
 
 .screen__title {
@@ -67,8 +106,7 @@ a {
   position: fixed;
   inset-inline: 0;
   bottom: 0;
-  padding: var(--s-3) var(--s-4)
-    calc(var(--s-3) + var(--safe-bottom));
+  padding: var(--s-3) var(--s-4) calc(var(--s-3) + var(--safe-bottom));
   background: var(--c-surface-1);
   border-top: 1px solid var(--c-divider);
   z-index: 10;
@@ -98,6 +136,24 @@ a {
   cursor: not-allowed;
 }
 
+/* Выход с поверхности в той же панели (DRF-1469) — «Сменить режим».
+   Стоит рядом с главным действием, но нарочно тише его: уйти отсюда
+   не то, зачем человек пришёл, и всё же требовать ради этого прокрутки
+   нельзя — ровно так поверхность и становилась ловушкой. */
+.cta-bar__exit {
+  display: block;
+  width: 100%;
+  min-height: 44px; /* a11y — handoff §16 */
+  margin-top: var(--s-2);
+  background: none;
+  border: 0;
+  color: var(--c-text-secondary);
+  font-size: var(--font-size-200);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
 /* Status callouts. */
 .callout {
   border-radius: var(--r-md);
@@ -108,11 +164,62 @@ a {
 }
 
 .callout--danger {
-  background: color-mix(in srgb, var(--c-danger) 14%, var(--c-surface-2));
+  background: color-mix(in srgb, var(--c-danger) 10%, var(--c-surface-2));
   color: var(--c-danger);
 }
 
+/* Успех сохранения. Пара к `--danger`: до DRF-1435 отказ имел голос, а
+   успех не имел никакого — ни цвета, ни `aria-live`. Токен `--c-success`
+   объявлен в `tokens.css` в обеих темах и сведён к 4.5:1; литерал рядом с
+   токеном линт `miniapp_token_contrast.py` не примет, и правильно. */
+.callout--success {
+  background: color-mix(in srgb, var(--c-success) 10%, var(--c-surface-2));
+  color: var(--c-success);
+}
+
 /* Secondary button used in error / empty / not-found states. */
+/* Главное действие экрана (DRF-2380).
+   ========================================================================
+   Правила первого уровня у `.btn-primary` НЕ БЫЛО, хотя класс стоял в 86
+   местах 33 файлов. Три из них выглядели верно — их накрывали два
+   потомковых островка (`.master-profile .btn-primary`,
+   `.m-notif__sheet .btn-primary`); остальные 83 рисовались глобальным
+   сбросом `button {}` выше, то есть как обычный текст без фона.
+
+   Объявление ниже — это те самые островки, поднятые на первый уровень
+   дословно: ни одного своего решения о виде. Островки после этого стали
+   повтором и сняты; их `:disabled` тоже здесь.
+
+   `:active` сюда сперва НЕ ставили: у островков его не было, и решать за
+   макет, как главная кнопка отзывается на нажатие, было нельзя. Владелец
+   решил 28.09 (§6-йота): «главная кнопка должна иметь такой же визуальный
+   отклик на нажатие, как второстепенная». Род отклика — тот же, что у
+   `.btn-secondary:active` (смена фона при нажатии); значение — то, каким
+   в словаре уже отзываются все остальные главные кнопки
+   (`.cta-bar__button`, `.ayla-btn--primary`, `.wellness-dash__cta`,
+   `.m6-btn-primary`, `.salon-today__cta`): `--c-accent-pressed`.
+   ======================================================================== */
+.btn-primary {
+  background: var(--c-accent);
+  color: var(--c-text-on-accent);
+  border: 0;
+  border-radius: var(--r-md);
+  padding: var(--s-2) var(--s-4);
+  font: inherit;
+  font-weight: 600;
+  min-height: 44px;
+  cursor: pointer;
+}
+
+.btn-primary:active {
+  background: var(--c-accent-pressed);
+}
+
+.btn-primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .btn-secondary {
   display: inline-block;
   padding: var(--s-2) var(--s-4);
@@ -130,11 +237,30 @@ a {
   background: var(--c-accent-subtle);
 }
 
+/* §6-йота (28.09) — тот же отклик у главных кнопок экранов, которые
+   собраны своими классами, а не `.btn-primary`. Стоит ПОСЛЕ
+   `.btn-secondary:active` намеренно: `.records-card__action--primary`
+   сидит на `.btn-secondary`, специфичность равная, и раньше при нажатии
+   побеждал второстепенный почти белый фон под белым текстом. */
+.records-card__action--primary:active,
+.records-empty__cta-primary:active,
+.schedule-sheet__primary:active,
+.catalog-empty__cta-primary:active,
+.ayla-compose__send:active {
+  background: var(--c-accent-pressed);
+}
+
 /* Skeleton placeholders — spec §7.1 + §9. */
 @keyframes skeleton-shimmer {
-  0% { opacity: 0.6; }
-  50% { opacity: 1; }
-  100% { opacity: 0.6; }
+  0% {
+    opacity: 0.6;
+  }
+  50% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0.6;
+  }
 }
 
 .skeleton {
@@ -155,7 +281,8 @@ a {
   padding: var(--s-3) var(--s-4);
   margin-bottom: var(--s-2);
   min-height: 48px;
-  transition: border-color var(--dur-fast) var(--ease-out),
+  transition:
+    border-color var(--dur-fast) var(--ease-out),
     background-color var(--dur-fast) var(--ease-out);
 }
 
@@ -172,7 +299,7 @@ a {
    hit target. `--c-warning` has a literal fallback because the token is
    not defined in every theme file (same fallback as .customer-card--at-risk). */
 .service-card--unbookable {
-  border-color: color-mix(in srgb, var(--c-warning, #d97706) 40%, var(--c-divider));
+  border-color: color-mix(in srgb, var(--c-warning) 40%, var(--c-divider));
 }
 
 .unbookable-badge {
@@ -180,8 +307,8 @@ a {
   margin-top: var(--s-1);
   padding: 2px var(--s-2);
   border-radius: var(--r-sm, 6px);
-  background: color-mix(in srgb, var(--c-warning, #d97706) 14%, transparent);
-  color: var(--c-warning, #d97706);
+  background: color-mix(in srgb, var(--c-warning) 10%, transparent);
+  color: var(--c-warning);
   font-size: var(--font-size-100);
   font-weight: 600;
   line-height: 1.4;
@@ -478,6 +605,16 @@ a {
   cursor: pointer;
 }
 
+/* Бегунок переключателя. Был зашит `#fff`; теперь берётся из токена —
+   в светлой теме это ровно тот же белый, пиксель в пиксель.
+
+   Названная слабость тёмной темы (DRF-1462, вопрос владельцу №1): дорожка
+   в положении «выкл» это `--c-divider` #4b5563, бегунок — `--c-surface-1`
+   #1f2937, между ними 1.94:1, а WCAG 1.4.11 просит 3:1. Токена, который
+   светлый в обеих темах, в наборе нет, а заводить его — это уже решение о
+   виде, а не о цвете. Состояние читается по положению бегунка и по цвету
+   дорожки во «вкл», так что признак не единственный. Тёмная тема целиком
+   выведена и не утверждена; чинить вместе с ответом на вопрос №1. */
 .profile-toggle__input::before {
   content: "";
   position: absolute;
@@ -485,7 +622,7 @@ a {
   left: 2px;
   width: 24px;
   height: 24px;
-  background: #fff;
+  background: var(--c-surface-1);
   border-radius: 50%;
   transition: transform 0.18s ease;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.18);
@@ -528,7 +665,7 @@ a {
   font-size: var(--font-size-300);
   border: 1px solid var(--c-divider);
   border-radius: var(--r-sm);
-  background: #fff;
+  background: var(--c-surface-1);
   color: var(--c-text-primary);
   min-height: 44px;
   box-sizing: border-box;
@@ -549,11 +686,15 @@ a {
 .btn-secondary--danger {
   color: var(--c-warning);
   border-color: var(--c-warning);
+  /* §6-упсилон (28.09): опасное — контурное, но с рамкой толще обычной
+     (1 px): цвет больше не единственный признак. Сторож — пара
+     «опасное × обычное» в dangerBorder2469.build.test.ts. */
+  border-width: 2px;
 }
 
 .btn-danger {
   background: var(--c-warning);
-  color: #fff;
+  color: var(--c-text-on-accent);
   border: 0;
   padding: var(--s-2) var(--s-4);
   border-radius: var(--r-sm);
@@ -640,7 +781,9 @@ a {
   padding: var(--s-1);
   min-width: 56px;
   min-height: 56px;
-  transition: transform 0.12s ease, color 0.12s ease;
+  transition:
+    transform 0.12s ease,
+    color 0.12s ease;
 }
 
 .star-picker__star:active {
@@ -676,13 +819,6 @@ a {
   margin: 0;
 }
 
-/* Rating badge on visit cards. */
-.visit-rating {
-  color: var(--c-accent);
-  letter-spacing: 2px;
-  font-size: var(--font-size-300);
-}
-
 /* HelloScreen error panel — warmer than the generic .callout--danger. */
 .hello-error {
   background: var(--c-surface-1);
@@ -697,23 +833,26 @@ a {
   line-height: 1.5;
 }
 
-/* My-visits row wrapper — card + inline "Оценить" CTA. */
-.visit-row {
-  display: flex;
-  flex-direction: column;
-  gap: var(--s-2);
-  margin-bottom: var(--s-3);
-}
+/* Filter chips (My visits §3.4).
 
-
-/* Filter chips (My visits §3.4). */
+   Chip rows hold a list whose length the client does not know: options
+   and suggestions arrive from the server. A non-wrapping flex row of an
+   unknown-length list is horizontal overflow by construction — seven
+   suggestions in the MAX panel showed three and a half plus a sideways
+   scrollbar nobody thinks to drag (DRF-1458). Wrapping is not a nicety
+   here, it is the only layout that survives an arbitrary list.
+   `tools/lint/miniapp_style_contract.py` keeps this declaration. */
 .chip-row {
   display: flex;
+  flex-wrap: wrap;
   gap: var(--s-2);
   margin-bottom: var(--s-3);
 }
 
 .chip {
+  /* A single chip cannot be wider than the row: a long server label
+     wraps inside its own pill instead of pushing the page sideways. */
+  max-width: 100%;
   padding: var(--s-1) var(--s-3);
   background: var(--c-surface-2);
   border: 1px solid var(--c-divider);
@@ -732,11 +871,19 @@ a {
 }
 
 /* Goal select screen (DRF-1190) — dumb renderer over the decision doc. */
+
+/* DRF-1458 — three weights, not four equal buttons in a column:
+     1. the way out (`next`) is the sticky CTA, always on screen;
+     2. «Отправить» is a bordered secondary, welded to its textarea;
+     3. the server's side intents are quiet text buttons in one row.
+   The layout says which action is the main one; the document still says
+   which actions exist. */
+
 .goal-select__section-title {
   font-size: var(--font-size-300);
   font-weight: 600;
   color: var(--c-text-primary);
-  margin: var(--s-4) 0 var(--s-2);
+  margin: var(--s-3) 0 var(--s-2);
 }
 
 .goal-select__current {
@@ -746,6 +893,102 @@ a {
   border-radius: var(--r-md);
   color: var(--c-text-primary);
   line-height: 1.5;
+}
+
+/* C03.5 (DRF-2177, макет DRF-1178): контекст собран — галочка и одна
+   фраза по центру, ничего кликабельного: уход авто-переходом. */
+.goal-select__done {
+  text-align: center;
+  padding: var(--s-6) var(--s-3);
+}
+
+.goal-select__done-mark {
+  margin: 0 0 var(--s-3);
+  font-size: var(--font-size-500);
+  color: var(--c-accent);
+}
+
+.goal-select__done-text {
+  margin: 0;
+  font-size: var(--font-size-400);
+  font-weight: 600;
+  color: var(--c-text-primary);
+  line-height: 1.4;
+}
+
+/* «Уже учла» (DRF-1744): память заметна, но не спорит с вопросом —
+   тот же тихий фон, что у «Текущей цели», строки в один ряд, действие
+   «Изменить» — тихая текстовая кнопка, как у побочных намерений. */
+.already-noted__list {
+  list-style: none;
+  margin: 0;
+  padding: var(--s-2) var(--s-3);
+  background: var(--c-surface-2);
+  border-radius: var(--r-md);
+}
+
+.already-noted__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-2);
+  padding: var(--s-1) 0;
+  color: var(--c-text-primary);
+  line-height: 1.5;
+}
+
+.already-noted__label {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* DRF-2173 — срок цели под «Уже учла»: «До 1 ноября 2026» и, при прошедшем
+   сроке, тихое действие «Срок прошёл — обновить?» в том же ряду. */
+.goal-select__deadline {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-2);
+  margin: var(--s-2) 0 0;
+  padding: 0 var(--s-3);
+  color: var(--c-text-secondary);
+  font-size: var(--font-size-200);
+}
+.goal-select__deadline-date {
+  min-width: 0;
+}
+
+/* «Рядом со мной» (DRF-1707): пояснение стоит до кнопки — D3 «понятно,
+   зачем location нужна» — тихим текстом; расстояние на карточке — рядом
+   с рейтингом, тем же вторичным цветом. */
+.customer-catalog__nearby {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  margin: 0 0 var(--s-3);
+}
+
+.customer-catalog__nearby-note {
+  margin: 0;
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
+.master-card__distance {
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
+/* DRF-1778 — «Другие специалисты» с карточки мастера: тихая ссылка под
+   блоком слотов; число отзывов — тем же вторичным цветом, что рейтинг. */
+.customer-master__others {
+  margin: var(--s-3) 0;
+}
+
+.customer-master__reviews,
+.master-card__reviews {
+  color: var(--c-text-secondary);
+  font-weight: 400;
 }
 
 .goal-select__prompt {
@@ -772,8 +1015,81 @@ a {
   color: var(--c-text-secondary);
 }
 
+/* DRF-1763 — вопросы safety-стопа: список под признанием, тем же тихим
+   фоном, что и «Текущая цель»; поле ответа — тот же textarea ниже. */
+.goal-select__safety-questions {
+  margin: var(--s-2) 0 var(--s-3);
+  padding: var(--s-3) var(--s-3) var(--s-3) var(--s-5);
+  background: var(--c-surface-2);
+  border-radius: var(--r-md);
+  color: var(--c-text-primary);
+  line-height: 1.5;
+}
+
+/* DRF-2282 [OD-BOT §170] — три структурированных ответа вопроса G7: столбец
+   кнопок во всю ширину, по одной на строку (подписи — длинные фразы владельца).
+   Макета для этого кадра нет — отступление названо в PR. */
+.goal-select__safety-options {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  margin: var(--s-2) 0 var(--s-3);
+}
+
+.goal-select__safety-option {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  padding: var(--s-3);
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+  font-size: var(--font-size-200);
+  color: var(--c-text-primary);
+  text-align: left;
+  line-height: 1.4;
+  /* владелец, решения по PR #1982: длинный текст переносится */
+  white-space: normal;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+.goal-select__safety-option:disabled {
+  background: var(--c-surface-2);
+  color: var(--c-text-secondary);
+  cursor: default;
+}
+
 .goal-select__actions {
-  margin-top: var(--s-3);
+  margin-top: var(--s-2);
+}
+
+/* Side intents the server offered — «не понимаю, чего хочу», «пройти
+   анкету заново». They lead deeper into questions, not forward, so they
+   are the quietest thing on the surface and share one wrapping row
+   instead of a button each on its own line. */
+.goal-select__minor {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-1) var(--s-3);
+  margin-top: var(--s-4);
+}
+
+.goal-select__minor-action {
+  padding: var(--s-2) 0;
+  min-height: 44px; /* a11y — handoff §16 */
+  background: none;
+  border: 0;
+  color: var(--c-text-secondary);
+  font-size: var(--font-size-200);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+.goal-select__minor-action:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 /* Позиция вопроса в анкете (DRF-1451). Число приходит с сервера —
@@ -785,25 +1101,13 @@ a {
   color: var(--c-text-secondary);
 }
 
-/* «Куда дальше», когда спрашивать нечего. Залита акцентом, в отличие
-   от соседних кнопок поверхности: это единственное действие, которое
-   ведёт человека ВПЕРЁД, а не вглубь вопросов. */
-.goal-select__next {
-  background: var(--c-accent);
-  color: var(--c-text-on-accent);
-  border-color: var(--c-accent);
-}
-
-/* Inline action row under each visit card. */
-.visit-row__actions {
-  display: flex;
-  gap: var(--s-2);
-  flex-wrap: wrap;
-}
-
-.visit-row__actions .btn-secondary {
-  flex: 0 1 auto;
-}
+/* «Куда дальше» — единственное действие, которое ведёт человека ВПЕРЁД,
+   а не вглубь вопросов. До DRF-1458 оно было последней кнопкой в общем
+   столбце и уезжало за нижний край: самое важное на экране оказалось
+   самым незаметным. Теперь это `StickyCta` — та же кнопка, что несёт
+   главное действие на остальных экранах, и она на виду независимо от
+   длины документа. Условие C-2 («анкета — не ворота») от этого только
+   крепче: выход виден не прокручивая. */
 
 /* ===========================================================================
    Master M1 dashboard (master-mobile §M1).
@@ -876,6 +1180,82 @@ a {
   font-variant-numeric: tabular-nums;
 }
 
+/* DRF-1848 — имя мастера текстом, значок диалогов, аватар в одну строку. */
+.master-dashboard__who {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+}
+
+.master-dashboard__name {
+  max-width: 12ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--font-size-200);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+
+/* DRF-1845 — переключатель «Принимаю записи». */
+.accepting-bookings__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
+}
+
+.accepting-bookings__label {
+  font-size: var(--font-size-300);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+
+.accepting-bookings__switch {
+  position: relative;
+  flex: none;
+  width: 48px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: 14px;
+  background: var(--c-surface-2);
+  cursor: pointer;
+}
+
+.accepting-bookings__switch--on {
+  background: var(--c-accent);
+}
+
+.accepting-bookings__knob {
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--c-text-on-accent);
+  transition: transform 0.15s ease;
+}
+
+.accepting-bookings__switch--on .accepting-bookings__knob {
+  transform: translateX(20px);
+}
+
+.master-dashboard__inbox {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--c-text-secondary);
+  cursor: pointer;
+}
+
 .master-dashboard__section {
   margin-bottom: var(--s-4);
 }
@@ -922,7 +1302,7 @@ a {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  background: color-mix(in srgb, var(--c-warning) 14%, var(--c-surface-2));
+  background: color-mix(in srgb, var(--c-warning) 10%, var(--c-surface-2));
   border-radius: var(--r-md);
   padding: var(--s-2) var(--s-3);
   color: var(--c-text-primary);
@@ -959,8 +1339,166 @@ a {
   min-height: 56px;
   color: inherit;
   font: inherit;
-  transition: border-color var(--dur-fast) var(--ease-out),
+  /* Карточка бывает и <a> (DRF-2156: запись → детали) — без подчёркивания. */
+  text-decoration: none;
+  transition:
+    border-color var(--dur-fast) var(--ease-out),
     background-color var(--dur-fast) var(--ease-out);
+}
+
+/* DRF-2152 — блок дня на «Сегодня» мастера (макет DRF-1182) */
+.master-dashboard__day-part + .master-dashboard__day-part {
+  margin-top: var(--s-3);
+}
+.master-dashboard__day-label {
+  margin: 0 0 var(--s-1);
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+.master-dashboard__day-until {
+  margin: var(--s-1) 0 0;
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+.master-dashboard__day-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+/* «Следующие спокойнее»: те же три поля, тише по тону. */
+.m-card--quiet {
+  background: color-mix(in srgb, var(--c-divider) 30%, var(--c-surface-1));
+}
+.m-card--quiet .m-card__title {
+  font-weight: 500;
+}
+
+/* DRF-2156 — «Детали записи» мастера (макет DRF-1185): постоянная часть +
+   один контекстный блок состояния. Тона блока: accent (до/сейчас/проверяем),
+   success (завершено), нейтральный (после окончания). */
+.booking-detail__main {
+  display: block;
+}
+.booking-detail__client {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  padding: var(--s-2) 0 var(--s-4);
+}
+.booking-detail__avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  background: var(--c-accent-subtle);
+  color: var(--c-accent);
+  flex-shrink: 0;
+}
+.booking-detail__name {
+  margin: 0;
+  font-size: var(--font-size-400);
+  font-weight: 600;
+  line-height: var(--leading-tight);
+  color: var(--c-text-primary);
+}
+.booking-detail__facts {
+  list-style: none;
+  margin: 0 0 var(--s-4);
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+.booking-detail__fact {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s-3);
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+  padding: var(--s-3) var(--s-4);
+}
+.booking-detail__fact-icon {
+  display: inline-flex;
+  color: var(--c-accent);
+  margin-top: 2px;
+  flex-shrink: 0;
+}
+.booking-detail__fact-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.booking-detail__fact-title {
+  font-size: var(--font-size-300);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+.booking-detail__fact-sub {
+  font-size: var(--font-size-200);
+  color: var(--c-text-secondary);
+}
+.booking-detail__state {
+  border-radius: var(--r-lg);
+  padding: var(--s-4);
+  background: var(--c-surface-2);
+  color: var(--c-text-primary);
+}
+.booking-detail__state--accent {
+  background: color-mix(
+    in srgb,
+    var(--c-accent-subtle) 60%,
+    var(--c-surface-1)
+  );
+}
+.booking-detail__state--success {
+  background: color-mix(in srgb, var(--c-success) 10%, var(--c-surface-2));
+  color: var(--c-success);
+}
+.booking-detail__state-title {
+  margin: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  font-size: var(--font-size-300);
+  font-weight: 600;
+  line-height: var(--leading-tight);
+}
+.booking-detail__state-line {
+  margin: var(--s-2) 0 0;
+  font-size: var(--font-size-200);
+  line-height: var(--leading-base);
+  color: var(--c-text-primary);
+}
+.booking-detail__state-rule {
+  border: 0;
+  border-top: 1px solid var(--c-divider);
+  margin: var(--s-3) 0;
+}
+.booking-detail__dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--c-accent);
+}
+.booking-detail__recheck {
+  margin-top: var(--s-3);
+  width: 100%;
+}
+.booking-detail__cancelled {
+  margin: 0;
+  padding: var(--s-4);
+  border-radius: var(--r-lg);
+  background: var(--c-surface-2);
+  color: var(--c-text-secondary);
+  text-align: center;
 }
 
 .m-card--tappable {
@@ -973,7 +1511,11 @@ a {
 
 .m-card--active {
   border-color: var(--c-accent-subtle);
-  background: color-mix(in srgb, var(--c-accent-subtle) 50%, var(--c-surface-1));
+  background: color-mix(
+    in srgb,
+    var(--c-accent-subtle) 50%,
+    var(--c-surface-1)
+  );
 }
 
 .m-card--skel {
@@ -1031,7 +1573,7 @@ a {
 }
 
 .m-card__chip--warning {
-  background: color-mix(in srgb, var(--c-warning) 18%, var(--c-surface-1));
+  background: color-mix(in srgb, var(--c-warning) 10%, var(--c-surface-1));
   color: var(--c-warning);
 }
 
@@ -1076,7 +1618,8 @@ a {
   inset-inline: 0;
   bottom: 0;
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  /* DRF-2121: ровно три вкладки (§28 п.2) — колонок столько же. */
+  grid-template-columns: repeat(3, 1fr);
   background: var(--c-surface-1);
   border-top: 1px solid var(--c-divider);
   padding: var(--s-2) 0 calc(var(--s-2) + var(--safe-bottom));
@@ -1084,16 +1627,17 @@ a {
 }
 
 /*
- * AdminTabBar renders FIVE tabs (День / Команда / Услуги / Чаты /
- * Настройки) but reuses this block for tab, icon and label styling.
+ * AdminTabBar reuses this block for tab, icon and label styling.
  * `.master-tabbar` itself is a four-column grid because MasterTabBar
  * has exactly four tabs — so the admin bar's fifth tab wrapped onto a
- * second row and ate the bottom of every admin screen. This modifier
- * carries the only declaration that differs: the column count.
+ * second row and ate the bottom of every admin screen.
  *
- * The column count must equal the number of tabs the component
- * renders. `AdminTabBar.test.tsx` asserts exactly that for both bars,
- * so adding a sixth tab without widening the grid fails the build.
+ * Пять колонок здесь — запасной вариант на случай, если стиль элемента
+ * не применился. Настоящее число колонок ставит сам компонент через
+ * `style={{ gridTemplateColumns: repeat(N, 1fr) }}`: у владельца и
+ * администратора вкладок пять, у ресепшн — три (DRF-1522), и жёсткая
+ * пятёрка сжала бы её панель в левые три пятых экрана. Число колонок
+ * теперь не может разъехаться с числом вкладок — оно из него и берётся.
  */
 .master-tabbar--admin {
   grid-template-columns: repeat(5, 1fr);
@@ -1135,7 +1679,7 @@ a {
   height: 18px;
   border-radius: 9px;
   background: var(--c-danger);
-  color: #fff;
+  color: var(--c-text-on-accent);
   font-size: 11px;
   font-weight: 600;
   padding: 0 4px;
@@ -1156,6 +1700,459 @@ a {
   border: 1.5px solid var(--c-surface-1);
 }
 
+/* ---- Пилотная салонная админка: три вкладки (DRF-1235) ---- */
+
+/*
+ * Панель пилота переиспользует `.master-tabbar` целиком — позицию,
+ * фон, границу, отступы — и переопределяет только число колонок.
+ * Правило стоит ПОСЛЕ `.master-tabbar` и `.master-tabbar--admin`
+ * намеренно: селекторы односоставные, специфичность у них одинаковая,
+ * и решает порядок в файле.
+ *
+ * Настоящее число колонок ставит сам компонент (`style=
+ * {{ gridTemplateColumns }}`); тройка здесь — запасной вариант и то,
+ * что читает `tools/lint/miniapp_style_contract.py`, сверяя колонки с
+ * числом вкладок в `SalonPilotTabBar.tsx`.
+ */
+.salon-pilot-tabbar {
+  grid-template-columns: repeat(3, 1fr);
+}
+
+/*
+ * Название салона над заголовком раздела — подпись, а не кнопка:
+ * выбор салона из макета убран, пока multi-salon не входит в P0
+ * (DRF-1235).
+ */
+.salon-pilot__brand {
+  margin: 0;
+  font-size: var(--font-size-200);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+
+/* DRF-2115 — шапка рамки: имя салона слева, аватар справа. */
+.salon-pilot__topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
+  margin-bottom: var(--s-2);
+}
+
+/* Аватар-кнопка → лист разделов (DRF-2115). ≥44dp по 2.5.8. */
+.avatar-sheet__trigger {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  border: 1px solid var(--c-divider);
+  background: var(--c-surface-1);
+  color: var(--c-text-primary);
+  font: inherit;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.avatar-sheet__trigger {
+  position: relative;
+  overflow: hidden;
+}
+.avatar-sheet__photo {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 50%;
+}
+.avatar-sheet__dot {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--c-accent);
+  border: 2px solid var(--c-surface-1);
+}
+.avatar-sheet {
+  position: fixed;
+  inset: 0;
+  /* DRF-2150 (инцидент 20.09): лист лежал под .master-tabbar (z-index 100) —
+     на iPhone видна была одна строка из трёх. Лист — поверх панели. */
+  z-index: 200;
+}
+.avatar-sheet__backdrop {
+  position: absolute;
+  inset: 0;
+  border: 0;
+  padding: 0;
+  background: rgba(0, 0, 0, 0.4);
+}
+.avatar-sheet__panel {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: var(--c-surface-1);
+  border-radius: var(--r-md) var(--r-md) 0 0;
+  /* Нижний отступ учитывает home-индикатор iPhone (safe-area). */
+  padding: var(--s-2) var(--s-4) calc(var(--s-5) + var(--safe-bottom));
+}
+.avatar-sheet__grip {
+  width: 36px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--c-divider);
+  margin: 0 auto var(--s-3);
+}
+.avatar-sheet__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+}
+.avatar-sheet__list--nested {
+  padding-left: var(--s-3);
+}
+.avatar-sheet__group {
+  padding: var(--s-1) 0;
+}
+.avatar-sheet__group-title {
+  margin: 0 0 var(--s-1);
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+  text-transform: none;
+}
+.avatar-sheet__item {
+  width: 100%;
+  min-height: 44px;
+  text-align: left;
+  background: none;
+  border: 0;
+  padding: var(--s-2) 0;
+  font: inherit;
+  font-size: var(--font-size-300);
+  color: var(--c-text-primary);
+}
+.avatar-sheet__item:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 2px;
+}
+
+/* DRF-2121 — шапка «Ayla» мастера: заголовок слева, аватар справа. */
+.ayla-header__top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
+}
+
+/* Карточки на «Сегодня» (DRF-2115): Диалоги / График. */
+.salon-today__cards {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--s-2);
+  margin: var(--s-3) 0;
+}
+.salon-today__card {
+  display: block;
+  min-height: 44px;
+  padding: var(--s-3);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+  background: var(--c-surface-1);
+  color: var(--c-text-primary);
+  text-decoration: none;
+  font-size: var(--font-size-200);
+}
+
+/* Очередь диалогов (DRF-2115). */
+.handoff-queue__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+.handoff-queue__row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+  align-items: baseline;
+  padding: var(--s-2) 0;
+  border-bottom: 1px solid var(--c-divider);
+}
+.handoff-queue__age {
+  font-weight: 600;
+}
+.handoff-queue__who {
+  color: var(--c-text-secondary);
+}
+.handoff-queue__flag {
+  color: var(--c-danger);
+  font-size: var(--font-size-100);
+}
+
+/* Готовность салона поимённо (DRF-2117) */
+.readiness__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.readiness__row {
+  padding: var(--s-2) 0;
+  border-bottom: 1px solid var(--c-divider);
+  font-size: var(--font-size-200);
+  color: var(--c-text-primary);
+  line-height: var(--leading-normal);
+}
+.readiness__row:last-child {
+  border-bottom: 0;
+}
+.readiness__limits {
+  margin-top: var(--s-4);
+}
+.readiness__limits-head {
+  margin: 0 0 var(--s-1);
+  font-size: var(--font-size-100);
+  font-weight: 600;
+  color: var(--c-text-secondary);
+}
+.readiness__limits-list {
+  margin: 0;
+  padding-left: var(--s-4);
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+.readiness__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  margin-top: var(--s-4);
+}
+.readiness__recheck {
+  min-height: 44px;
+}
+.readiness__updated {
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
+/* Дата под заголовком «Сегодня» — приходит с сервера, в поясе салона. */
+.salon-pilot__subtitle {
+  margin: calc(var(--s-3) * -1) 0 var(--s-3);
+  font-size: var(--font-size-300);
+  color: var(--c-text-secondary);
+}
+
+/* Строка ожидания: экран уже пошёл за данными, ответа ещё нет. */
+.salon-pilot__note {
+  margin: 0;
+  color: var(--c-text-secondary);
+}
+
+/* ---- «Сегодня»: содержимое главного экрана (DRF-1236) ---- */
+
+/*
+ * Главное действие экрана. Правило своё, а токены те же: кнопка на макете
+ * стоит В ПОТОКЕ, сразу под датой, тогда как `.cta-bar__button` приколочен
+ * к низу экрана, где уже стоит панель вкладок.
+ *
+ * Прежняя причина («своего `.btn-primary` в приложении нет») с DRF-2380
+ * неверна: он есть и лежит первым уровнем рядом с `.btn-secondary`.
+ * Правило остаётся из-за РАСКЛАДКИ, а не из-за отсутствия класса;
+ * перевести экран на общую кнопку — отдельное решение о виде, и оно не
+ * принимается заодно.
+ */
+.salon-today__cta {
+  display: block;
+  width: 100%;
+  min-height: 48px; /* главное действие — как `.cta-bar__button` */
+  margin: 0 0 var(--s-4);
+  padding: 0 var(--s-4);
+  background: var(--c-accent);
+  color: var(--c-text-on-accent);
+  font-size: var(--font-size-300);
+  font-weight: 600;
+  border-radius: var(--r-md);
+  transition: background-color var(--dur-fast) var(--ease-out);
+}
+
+.salon-today__cta:active {
+  background: var(--c-accent-pressed);
+}
+
+.salon-today__section {
+  margin: 0 0 var(--s-5);
+}
+
+.salon-today__heading {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  margin: 0 0 var(--s-2);
+  font-size: var(--font-size-300);
+  font-weight: 700;
+  color: var(--c-text-primary);
+}
+
+/* Счётчик у «Сейчас» — сколько записей идёт в этот момент. */
+.salon-today__count {
+  min-width: 24px;
+  padding: 0 var(--s-2);
+  border-radius: var(--r-md);
+  background: var(--c-accent-subtle);
+  color: var(--c-accent-pressed);
+  font-size: var(--font-size-100);
+  font-weight: 600;
+  text-align: center;
+}
+
+/* Подпись под заголовком блока — то, что известно про блок наверняка. */
+.salon-today__section-note {
+  margin: calc(var(--s-1) * -1) 0 var(--s-3);
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
+.salon-today__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+  overflow: hidden;
+}
+
+.salon-today__visit {
+  display: flex;
+  gap: var(--s-3);
+  padding: var(--s-3);
+  border-bottom: 1px solid var(--c-divider);
+}
+
+.salon-today__list .salon-today__visit:last-child {
+  border-bottom: 0;
+}
+
+/*
+ * Зелёная полоса идущей записи. Цвет ВСПОМОГАТЕЛЬНЫЙ: смысл несёт
+ * заголовок блока «Сейчас», и человек, не различающий зелёное, ничего
+ * не теряет (DRF-1236: «цвет не является единственным носителем
+ * смысла»).
+ */
+.salon-today__visit--now {
+  border-left: 3px solid var(--c-success);
+}
+
+.salon-today__visit-time {
+  display: flex;
+  flex-direction: column;
+  min-width: 6.5em;
+  font-variant-numeric: tabular-nums;
+}
+
+.salon-today__visit-clock {
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+
+.salon-today__visit-duration {
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
+.salon-today__visit-body {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--s-1);
+}
+
+.salon-today__visit-client {
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+
+.salon-today__visit-service {
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
+.salon-today__visit-master {
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
+/* Запись, чей специалист не сошёлся ни с одним мастером каталога. */
+.salon-today__visit-orphan {
+  font-size: var(--font-size-100);
+  color: var(--c-warning);
+}
+
+/* Раскрыть остаток дня на месте — см. комментарий экрана про «Расписание». */
+.salon-today__more {
+  display: block;
+  width: 100%;
+  min-height: 44px; /* второстепенное действие — как `.btn-secondary` */
+  margin-top: var(--s-2);
+  color: var(--c-accent);
+  font-size: var(--font-size-200);
+  font-weight: 600;
+  text-align: center;
+}
+
+.salon-today__masters {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+}
+
+.salon-today__master {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+}
+
+/*
+ * Кружок с буквой имени. Фотографий мастеров в ответе дня нет — буква
+ * выведена из имени, которое есть, а не подставлена вместо неизвестного
+ * фото.
+ */
+.salon-today__avatar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  flex: 0 0 40px;
+  border-radius: 50%;
+  background: var(--c-accent-subtle);
+  color: var(--c-accent-pressed);
+  font-weight: 700;
+}
+
+.salon-today__master-body {
+  display: flex;
+  flex-direction: column;
+}
+
+.salon-today__master-name {
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+
+.salon-today__master-count {
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
 /* ---- Solo provider 8-tab bottom nav (Tau §5.1) ---- */
 
 /*
@@ -1170,7 +2167,8 @@ a {
   inset-inline: 0;
   bottom: 0;
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  /* DRF-2127: ровно три вкладки (§28 п.2) — колонок столько же. */
+  grid-template-columns: repeat(3, 1fr);
   background: var(--c-surface-1);
   border-top: 1px solid var(--c-divider);
   padding: var(--s-2) 0 calc(var(--s-2) + var(--safe-bottom));
@@ -1216,115 +2214,95 @@ a {
   padding-bottom: calc(96px + var(--safe-bottom));
 }
 
-/* ---- «Ещё» bottom sheet (Tau §3) ------------------------------------ */
-
-.solo-more-sheet {
-  position: fixed;
-  inset: 0;
-  z-index: 200;
+/* DRF-2465 — карточка выбора режима («Салон» / «Мастер» / «Клиент»,
+   `SurfaceCard` в App.tsx). Вид был собран инлайном целиком; перенесён
+   сюда ДОСЛОВНО, ни одного своего решения — рефакторинг ≠ редизайн
+   (решение владельца 28.09, п.10). Равенство вида до/после снято полным
+   getComputedStyle в Chrome, обе темы. Похожий `.wellness-dash__qa-btn`
+   не подобран: у него другой отступ и свой отклик. */
+.surface-card {
   display: flex;
-  align-items: flex-end;
-  justify-content: center;
-}
-
-.solo-more-sheet__backdrop {
-  position: absolute;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.4);
-  border: 0;
-  cursor: pointer;
-  padding: 0;
-  margin: 0;
-}
-
-.solo-more-sheet__panel {
-  position: relative;
-  width: 100%;
-  max-width: 540px;
-  /* Round-1 amendment (adversarial Code Reviewer): the previous
-   * `max-height: 60vh` would clip the bottom of the sheet in landscape
-   * (~360pt-tall viewport × 60% = ~216pt — only 3 of 6 sheet items fit
-   * comfortably with no scroll affordance). `100dvh` (dynamic viewport
-   * height) accounts for the mobile URL bar; subtracting 96px reserves
-   * space for the bottom tabbar above the safe-area. `min(70vh, ...)`
-   * caps the panel on tall portrait viewports so the sheet never feels
-   * like a full-screen takeover. */
-  max-height: min(70vh, calc(100dvh - 96px));
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--s-1);
+  padding: var(--s-4);
+  min-height: 88px;
   background: var(--c-surface-1);
-  border-radius: var(--r-lg) var(--r-lg) 0 0;
-  padding: var(--s-3) var(--s-4) calc(var(--s-3) + var(--safe-bottom));
-  /* Round-1 amendment: inner shadow at the bottom edge hints «more
-   * content below» when the sheet is scrollable. Cheap visual
-   * affordance — no JS required. */
-  box-shadow:
-    0 -8px 24px rgba(0, 0, 0, 0.15),
-    inset 0 -16px 8px -8px rgba(0, 0, 0, 0.08);
-  overflow-y: auto;
-  display: flex;
-  flex-direction: column;
-  gap: var(--s-2);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+  text-align: left;
 }
 
-.solo-more-sheet__grip {
-  width: 36px;
-  height: 4px;
-  border-radius: 2px;
-  background: var(--c-divider);
-  margin: 0 auto var(--s-2);
-}
+/* DRF-2527 — элементы, собранные инлайном ЦЕЛИКОМ, одеты классами.
+   Объявления перенесены из `style={{…}}` ДОСЛОВНО (число JSX → px),
+   ни одного своего решения о виде — рефакторинг ≠ редизайн (решение
+   владельца 28.09, п.10). Равенство вида до/после снято полным
+   getComputedStyle в Chrome, обе темы. */
 
-.solo-more-sheet__title {
-  margin: 0 0 var(--s-2);
-  font-size: var(--font-size-300);
-  font-weight: 600;
-}
-
-.solo-more-sheet__list {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-}
-
-.solo-more-sheet__item {
-  width: 100%;
+/* Всплывающее уведомление (Snackbar.tsx): класс стоял, правила не было —
+   запись BASELINE стилевого контракта снята. */
+.snackbar {
+  position: fixed;
+  left: var(--s-3);
+  right: var(--s-3);
+  bottom: calc(var(--s-6) + var(--safe-bottom, 0px));
+  background: var(--c-text-primary);
+  color: var(--c-bg);
+  padding: var(--s-3) var(--s-4);
+  border-radius: var(--r-md);
   display: flex;
   align-items: center;
+  justify-content: space-between;
   gap: var(--s-3);
-  /* WCAG 2.5.8 — minimum 48dp height per item is generous; 56dp gives
-   * room for icon + label without crowding. */
-  min-height: 56px;
-  padding: var(--s-2) var(--s-2);
-  background: none;
-  border: 0;
-  cursor: pointer;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
+  z-index: 100;
+}
+
+.snackbar__action {
+  background: transparent;
+  color: var(--c-accent-subtle);
+  border: none;
   font: inherit;
-  text-align: start;
-  color: var(--c-text-primary);
+  font-weight: 600;
+  padding: var(--s-1) var(--s-2);
+  cursor: pointer;
 }
 
-.solo-more-sheet__item:hover,
-.solo-more-sheet__item:focus-visible {
-  background: var(--c-surface-2, rgba(0, 0, 0, 0.04));
+/* Матрица услуг мастеров (AdminServicesMatrixScreen.tsx). */
+.services-matrix__dirty-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--c-accent);
+  flex-shrink: 0;
 }
 
-.solo-more-sheet__item-icon {
-  font-size: 20px;
-  line-height: 1;
-  flex: 0 0 28px;
-  text-align: center;
+.services-matrix__master-services {
+  padding: var(--s-2) var(--s-3) var(--s-3);
+  background: var(--c-surface-1);
 }
 
-.solo-more-sheet__item-label {
-  font-size: var(--font-size-200);
+.services-matrix__save-bar {
+  position: fixed;
+  inset-inline: 0;
+  bottom: 0;
+  padding: var(--s-2) var(--s-3) calc(var(--s-3) + env(safe-area-inset-bottom, 0px));
+  background: var(--c-surface-1);
+  border-top: 1px solid var(--c-divider);
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  z-index: 5;
 }
 
-.solo-more-sheet__divider {
+/* Разделитель в настройках мастера (MasterSettingsScreen.tsx). */
+.master-settings__divider {
   border: 0;
   border-top: 1px solid var(--c-divider);
-  margin: var(--s-2) 0;
+  margin: var(--s-4) 0;
 }
+
+/* ---- «Ещё» bottom sheet (Tau §3) ------------------------------------ */
 
 /* ---- Tier 2 Клиенты / Услуги read-only cards (Tau §4.3 / §4.4) ------- */
 
@@ -1408,7 +2386,7 @@ a {
 }
 
 .customer-card--at-risk {
-  border-color: var(--c-warning, #d97706);
+  border-color: var(--c-warning);
 }
 
 .customer-card--skel,
@@ -1442,7 +2420,7 @@ a {
 }
 
 .customer-card__lost-hint {
-  color: var(--c-warning, #d97706);
+  color: var(--c-warning);
   font-size: var(--font-size-100);
 }
 
@@ -1451,14 +2429,153 @@ a {
   font-size: var(--font-size-100);
 }
 
-.master-services__locked-edit-note {
-  margin: var(--s-4) 0 0;
-  padding: var(--s-3);
+/* Экран 04 «Цены и длительность» (DRF-1810) — направления, шторка 4.2. */
+.master-services__progress {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--s-2);
   color: var(--c-text-secondary);
   font-size: var(--font-size-100);
-  background: var(--c-surface-2, rgba(0, 0, 0, 0.03));
-  border-radius: var(--r-md);
+}
+
+.master-services__progress p {
+  margin: 0;
+}
+
+.master-services__direction {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
+.master-services__direction-title {
+  margin: var(--s-2) 0 0;
+  font-size: var(--font-size-200);
+}
+
+.master-services__direction-toggle {
+  width: 100%;
+  min-height: 44px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-weight: 600;
+  text-align: left;
+}
+
+.master-services__row {
+  width: 100%;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.master-services__row-pending {
+  color: var(--c-warning);
+}
+
+.master-services__actions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
+.master-services__actions-hint {
+  margin: 0;
+  color: var(--c-text-secondary);
+  font-size: var(--font-size-100);
   text-align: center;
+}
+
+.master-services__sheet {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 50;
+  max-height: 90vh;
+  overflow-y: auto;
+  padding: var(--s-4);
+  background: var(--c-surface-1);
+  border-radius: var(--r-md) var(--r-md) 0 0;
+  box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.12);
+}
+
+.master-services__sheet-title {
+  margin: 0 0 var(--s-3);
+  font-size: var(--font-size-200);
+}
+
+.master-services__offer-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.master-services__offer-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.master-services__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+}
+
+.master-services__offer-form .master-services__chip {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  min-height: 44px;
+  padding: 0 var(--s-3);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+}
+
+/* M18a «Свои услуги» (DRF-1896) — заявки о разрыве канона, отдельно от каталога. */
+.master-services__own-note,
+.master-services__similar-later {
+  font-size: var(--font-size-100);
+  opacity: 0.7;
+}
+
+.own-service-card__status {
+  font-size: var(--font-size-100);
+  font-weight: 600;
+}
+
+.own-service-card__note {
+  font-size: var(--font-size-100);
+}
+
+.master-services__own-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.master-services__own-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.master-services__field-error {
+  margin: 0;
+  color: var(--c-danger);
+  font-size: var(--font-size-100);
+}
+
+.master-services__similar-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
 }
 
 /* ---- Solo «Скоро» placeholder screen (Tau §5.4 empty-state voice) ---- */
@@ -1610,7 +2727,11 @@ a {
 
 .schedule-week-cell--today {
   border-color: var(--c-accent);
-  background: color-mix(in srgb, var(--c-accent-subtle) 40%, var(--c-surface-1));
+  background: color-mix(
+    in srgb,
+    var(--c-accent-subtle) 40%,
+    var(--c-surface-1)
+  );
 }
 
 .schedule-week-cell--off {
@@ -1711,7 +2832,11 @@ a {
 
 .schedule-month-cell--today {
   border-color: var(--c-accent);
-  background: color-mix(in srgb, var(--c-accent-subtle) 40%, var(--c-surface-1));
+  background: color-mix(
+    in srgb,
+    var(--c-accent-subtle) 40%,
+    var(--c-surface-1)
+  );
 }
 
 .schedule-month-cell__date {
@@ -1747,6 +2872,130 @@ a {
   height: 8px;
 }
 
+/* Лист выбора в форме записи (DRF-2448, остаток).
+   -------------------------------------------------------------------
+   У `.sheet`, `.sheet__panel`, `.sheet__title` и `.sheet__item` не было
+   ни одного правила: диалог с `role="dialog" aria-modal="true"` рисовался
+   прямо в потоке страницы — без затемнения, без панели, без границ.
+   Кнопки выбора клиента, услуги и мастера выглядели обычным текстом.
+
+   ПОЧЕМУ ЭТО НЕ ЗАМЕТИЛИ РАНЬШЕ: поиск по подстроке `sheet__item` в
+   стилях отвечал «есть» — но находил ДРУГОЙ класс, `.avatar-sheet__item`.
+   Проверка по роли (объявление селектора) отвечает «нет».
+
+   НИЧЕГО НЕ ПРИДУМАНО. Взят язык уже работающих листов приложения:
+   затемнение и панель — с `.schedule-sheet-backdrop` / `.schedule-sheet`
+   (:2764, :2774); строка выбора — с `.avatar-sheet__item` (:1802), то есть
+   с того самого класса, который и подменял собой искомый.
+
+   Это МИНИМУМ, делающий диалог диалогом, а не решение о виде: макета на
+   этот лист нет, и как он должен выглядеть — вопрос к владельцу. */
+.sheet {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  z-index: 200;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+}
+
+.sheet__panel {
+  width: 100%;
+  max-width: 480px;
+  max-height: 85vh;
+  overflow-y: auto;
+  background: var(--c-surface-1);
+  border-top-left-radius: var(--r-lg);
+  border-top-right-radius: var(--r-lg);
+  padding: var(--s-4) var(--s-4) calc(var(--s-4) + var(--safe-bottom, 0px));
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+}
+
+.sheet__title {
+  margin: 0;
+  font-size: var(--font-size-300);
+  font-weight: 600;
+}
+
+.sheet__item {
+  width: 100%;
+  min-height: 44px;
+  text-align: left;
+  background: none;
+  border: 0;
+  border-bottom: 1px solid var(--c-divider);
+  padding: var(--s-2) 0;
+  font: inherit;
+  font-size: var(--font-size-300);
+  color: var(--c-text-primary);
+  cursor: pointer;
+}
+
+.sheet__item:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 2px;
+}
+
+/* Строка черновика записи. Вид был задан инлайном на самой кнопке, и там
+   лежала МЁРТВАЯ строка: `border: "none"` стояла ПОСЛЕ `borderBottom` и
+   затирала её сокращённой формой — разделителей между строками не было
+   вовсе, хотя код их объявлял. Перенесено в правило, разделитель ожил. */
+.draft-row {
+  display: flex;
+  width: 100%;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--s-3);
+  min-height: 44px;
+  padding: var(--s-3) 0;
+  border: 0;
+  border-bottom: 1px solid var(--c-divider);
+  background: none;
+  text-align: start;
+  font: inherit;
+  color: var(--c-text-primary);
+  cursor: pointer;
+}
+
+.draft-row__label {
+  color: var(--c-text-secondary);
+}
+
+.draft-row__value {
+  text-align: end;
+}
+
+/* Кнопка, выглядящая ссылкой ВНУТРИ текста («развернуть» в середине абзаца).
+   Правила не было; каждое место повторяло один и тот же инлайн.
+
+   Роль важна: на экране дня салона тот же класс стоял на ОТДЕЛЬНОМ элементе
+   управления под заголовком даты — там вид ссылки и делал кнопку невидимой,
+   и она переодета в обычную (соседний PR). Здесь роль обратная: элемент
+   стоит в потоке предложения, и вид ссылки — правильный. Одно имя, две
+   разные роли — это и была причина путаницы. */
+.btn-link {
+  display: inline;
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  color: var(--c-accent);
+  cursor: pointer;
+  text-align: inherit;
+}
+
+.btn-link:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 2px;
+}
+
+.draft-row__value--set {
+  font-weight: 600;
+}
+
 /* Mark-unavailable bottom sheet ------------------------------------------- */
 
 .schedule-sheet-backdrop {
@@ -1765,8 +3014,7 @@ a {
   background: var(--c-surface-1);
   border-top-left-radius: var(--r-lg);
   border-top-right-radius: var(--r-lg);
-  padding: var(--s-4) var(--s-4)
-    calc(var(--s-4) + var(--safe-bottom, 0px));
+  padding: var(--s-4) var(--s-4) calc(var(--s-4) + var(--safe-bottom, 0px));
   display: flex;
   flex-direction: column;
   gap: var(--s-3);
@@ -1908,7 +3156,7 @@ a {
 
 .m6-locked-banner {
   margin: 0 0 var(--s-3);
-  background: color-mix(in srgb, var(--c-warning) 14%, var(--c-surface-2));
+  background: color-mix(in srgb, var(--c-warning) 10%, var(--c-surface-2));
   color: var(--c-text-primary);
 }
 
@@ -1993,7 +3241,7 @@ a {
 }
 
 .m6-bubble--failed {
-  background: color-mix(in srgb, var(--c-danger) 18%, var(--c-surface-2));
+  background: color-mix(in srgb, var(--c-danger) 10%, var(--c-surface-2));
   color: var(--c-danger);
 }
 
@@ -2003,8 +3251,8 @@ a {
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  background: color-mix(in srgb, var(--c-accent) 20%, transparent);
-  color: var(--c-accent);
+  background: var(--c-accent-subtle);
+  color: var(--c-accent-pressed);
   padding: 1px 6px;
   border-radius: var(--r-pill);
   margin-bottom: 4px;
@@ -2046,7 +3294,11 @@ a {
 .m6-draft-card {
   margin: var(--s-3) 0;
   padding: var(--s-3);
-  background: color-mix(in srgb, var(--c-accent-subtle) 50%, var(--c-surface-1));
+  background: color-mix(
+    in srgb,
+    var(--c-accent-subtle) 50%,
+    var(--c-surface-1)
+  );
   border: 1px solid var(--c-accent-subtle);
   border-radius: var(--r-md);
 }
@@ -2107,8 +3359,13 @@ a {
 }
 
 @keyframes m6-draft-pulse {
-  0%, 100% { opacity: 0.55; }
-  50% { opacity: 1; }
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+  50% {
+    opacity: 1;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -2388,7 +3645,7 @@ a {
 }
 
 .admin-chip--warn {
-  background: color-mix(in srgb, var(--c-warning) 14%, var(--c-surface-2));
+  background: color-mix(in srgb, var(--c-warning) 10%, var(--c-surface-2));
   color: var(--c-warning);
 }
 
@@ -2401,8 +3658,21 @@ a {
 .admin-chip--revoked {
   background: transparent;
   color: var(--c-text-secondary);
-  border: 1px dashed var(--c-border, #e0e0e3);
+  border: 1px dashed var(--c-divider);
   opacity: 0.75;
+}
+
+/*
+  DRF-1540 — a master the platform could not link to Ayla. Unlike
+  `--revoked` this IS an alarm: nobody chose it, it keeps a working
+  master off the storefront, and the fix is on our side, not the
+  salon's. `--danger` rather than `--warn` for exactly that reason —
+  `--warn` is «приглашение не принято», a nudge with an obvious next
+  move.
+*/
+.admin-chip--fault {
+  background: color-mix(in srgb, var(--c-danger) 10%, var(--c-surface-2));
+  color: var(--c-danger);
 }
 
 .admin-filter-tabs {
@@ -2590,6 +3860,29 @@ a {
   border-radius: var(--r-md);
   font-size: var(--font-size-200);
   color: var(--c-text-secondary);
+}
+
+/*
+  DRF-1597 — блок «клиент не видит N мастеров» на «Команде».
+
+  Не `--danger`: сломанного ничего нет, мастер заведён верно и ждёт
+  осознанного шага владелицы. И не нейтральная сводка: пока шага нет,
+  салон недосчитывается людей на витрине, и блок обязан читаться как
+  требующий действия. Отсюда та же семантика предупреждения, что у
+  `admin-chip--warn`, — один язык цвета на экран.
+*/
+.admin-notice {
+  margin-top: var(--s-3);
+  padding: var(--s-3);
+  border-radius: var(--r-md);
+  font-size: var(--font-size-200);
+  background: var(--c-surface-2);
+  color: var(--c-text-primary);
+}
+
+.admin-notice--warn {
+  background: color-mix(in srgb, var(--c-warning) 10%, var(--c-surface-2));
+  border: 1px solid color-mix(in srgb, var(--c-warning) 35%, transparent);
 }
 
 .admin-template-preview {
@@ -2815,25 +4108,7 @@ a {
   margin-top: var(--s-2);
 }
 
-/* Primary save button — reuse accent treatment. */
-.master-profile__sheet .btn-primary,
-.master-profile .btn-primary {
-  background: var(--c-accent);
-  color: #fff;
-  border: 0;
-  border-radius: var(--r-md);
-  padding: var(--s-2) var(--s-4);
-  font: inherit;
-  font-weight: 600;
-  min-height: 44px;
-  cursor: pointer;
-}
-
-.master-profile__sheet .btn-primary:disabled,
-.master-profile .btn-primary:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
+/* Главная кнопка листа профиля — теперь общая `.btn-primary` (DRF-2380). */
 
 /* ===========================================================
    M7 — Master notification settings (Bundle B / item 3)
@@ -2856,7 +4131,7 @@ a {
 
 .m-notif__section {
   padding: var(--s-2) var(--s-3) var(--s-3);
-  border-top: 1px solid var(--c-divider, #e5e5ea);
+  border-top: 1px solid var(--c-divider);
 }
 
 .m-notif__section:first-of-type {
@@ -2867,7 +4142,7 @@ a {
   margin: 0 0 var(--s-2);
   font-size: 0.85rem;
   letter-spacing: 0.04em;
-  color: var(--c-fg-muted, #6e6e73);
+  color: var(--c-text-secondary);
   text-transform: none;
   font-weight: 600;
 }
@@ -2882,7 +4157,7 @@ a {
 }
 
 .m-notif__switch-row + .m-notif__switch-row {
-  border-top: 1px solid var(--c-divider, #e5e5ea);
+  border-top: 1px solid var(--c-divider);
 }
 
 .m-notif__row-text {
@@ -2898,7 +4173,7 @@ a {
 .m-notif__row-subtitle {
   margin-top: 2px;
   font-size: 0.875rem;
-  color: var(--c-fg-muted, #6e6e73);
+  color: var(--c-text-secondary);
 }
 
 .m-notif__lock {
@@ -2927,25 +4202,35 @@ a {
 .m-notif__switch-track {
   position: absolute;
   inset: 0;
-  background: var(--c-switch-off, #d1d1d6);
+  background: var(--c-divider);
   border-radius: 999px;
   transition: background-color 160ms ease;
 }
 
+/* Бегунок переключателя. Был зашит `#fff`; теперь берётся из токена —
+   в светлой теме это ровно тот же белый, пиксель в пиксель.
+
+   Названная слабость тёмной темы (DRF-1462, вопрос владельцу №1): дорожка
+   в положении «выкл» это `--c-divider` #4b5563, бегунок — `--c-surface-1`
+   #1f2937, между ними 1.94:1, а WCAG 1.4.11 просит 3:1. Токена, который
+   светлый в обеих темах, в наборе нет, а заводить его — это уже решение о
+   виде, а не о цвете. Состояние читается по положению бегунка и по цвету
+   дорожки во «вкл», так что признак не единственный. Тёмная тема целиком
+   выведена и не утверждена; чинить вместе с ответом на вопрос №1. */
 .m-notif__switch-thumb {
   position: absolute;
   top: 2px;
   left: 2px;
   width: 27px;
   height: 27px;
-  background: #fff;
+  background: var(--c-surface-1);
   border-radius: 50%;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
   transition: transform 160ms ease;
 }
 
 .m-notif__switch input:checked + .m-notif__switch-track {
-  background: var(--c-accent, #007aff);
+  background: var(--c-accent);
 }
 
 .m-notif__switch input:checked + .m-notif__switch-track .m-notif__switch-thumb {
@@ -2982,15 +4267,15 @@ a {
 .m-notif__helper {
   margin: var(--s-1) 0 0;
   font-size: 0.85rem;
-  color: var(--c-fg-muted, #6e6e73);
+  color: var(--c-text-secondary);
 }
 
 /* All-disabled warning banner — yellow per spec. */
 .m-notif__banner-warning {
   margin: var(--s-2) var(--s-3);
-  background: var(--c-warning-bg, #fff4d6);
-  border: 1px solid var(--c-warning-border, #ffd966);
-  color: var(--c-warning-fg, #5a4400);
+  background: color-mix(in srgb, var(--c-warning) 10%, var(--c-surface-1));
+  border: 1px solid color-mix(in srgb, var(--c-warning) 40%, var(--c-divider));
+  color: var(--c-warning);
   border-radius: var(--r-md, 8px);
   padding: var(--s-2) var(--s-3);
 }
@@ -3013,7 +4298,7 @@ a {
 }
 
 .m-notif__sheet-card {
-  background: var(--c-bg, #fff);
+  background: var(--c-bg);
   border-radius: var(--r-lg, 16px) var(--r-lg, 16px) 0 0;
   padding: var(--s-4) var(--s-3) var(--s-3);
   width: 100%;
@@ -3047,29 +4332,29 @@ a {
 
 .m-notif__time-label {
   font-size: 0.85rem;
-  color: var(--c-fg-muted, #6e6e73);
+  color: var(--c-text-secondary);
 }
 
 .m-notif__time-field input[type="time"] {
   font: inherit;
   font-size: 1.1rem;
   padding: var(--s-2);
-  border: 1px solid var(--c-divider, #e5e5ea);
+  border: 1px solid var(--c-divider);
   border-radius: var(--r-md, 8px);
   min-height: 44px;
-  background: var(--c-bg, #fff);
+  background: var(--c-bg);
   color: inherit;
 }
 
 .m-notif__overnight-hint {
   margin: var(--s-2) 0 0;
   font-size: 0.8rem;
-  color: var(--c-fg-muted, #6e6e73);
+  color: var(--c-text-secondary);
 }
 
 .m-notif__error {
   margin: var(--s-2) 0 0;
-  color: var(--c-danger, #c62828);
+  color: var(--c-danger);
   font-size: 0.9rem;
 }
 
@@ -3080,22 +4365,7 @@ a {
   gap: var(--s-2);
 }
 
-.m-notif__sheet .btn-primary {
-  background: var(--c-accent, #007aff);
-  color: #fff;
-  border: 0;
-  border-radius: var(--r-md, 8px);
-  padding: var(--s-2) var(--s-4);
-  font: inherit;
-  font-weight: 600;
-  min-height: 44px;
-  cursor: pointer;
-}
-
-.m-notif__sheet .btn-primary:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
+/* Главная кнопка листа уведомлений — теперь общая `.btn-primary` (DRF-2380). */
 
 .m-notif__skeleton-wrap {
   padding: var(--s-3);
@@ -3106,7 +4376,7 @@ a {
 
 .m-notif__loading-label {
   margin: 0 0 var(--s-2);
-  color: var(--c-fg-muted, #6e6e73);
+  color: var(--c-text-secondary);
 }
 
 /* ==========================================================================
@@ -3134,9 +4404,9 @@ a {
 }
 
 .internal-chat-list__filter {
-  border: 1px solid var(--c-border, #e0e0e3);
+  border: 1px solid var(--c-divider);
   background: transparent;
-  color: var(--c-text, inherit);
+  color: var(--c-text-primary);
   padding: var(--s-1) var(--s-3);
   border-radius: 999px;
   font: inherit;
@@ -3146,9 +4416,9 @@ a {
 }
 
 .internal-chat-list__filter--active {
-  background: var(--c-accent, #2a7);
-  color: var(--c-on-accent, #fff);
-  border-color: var(--c-accent, #2a7);
+  background: var(--c-accent);
+  color: var(--c-text-on-accent);
+  border-color: var(--c-accent);
 }
 
 .internal-chat-list__rows {
@@ -3161,7 +4431,7 @@ a {
 .internal-chat-list__group-title {
   font-size: 0.85em;
   letter-spacing: 0.04em;
-  color: var(--c-text-secondary, #6e6e73);
+  color: var(--c-text-secondary);
   margin: var(--s-3) 0 var(--s-2);
   text-transform: uppercase;
 }
@@ -3183,8 +4453,8 @@ a {
   gap: var(--s-1);
   padding: var(--s-3);
   border-radius: var(--r-md, 12px);
-  border: 1px solid var(--c-border, #e0e0e3);
-  background: var(--c-surface, #fff);
+  border: 1px solid var(--c-divider);
+  background: var(--c-surface-1);
 }
 
 .internal-chat-list__card-top {
@@ -3203,7 +4473,7 @@ a {
 .internal-chat-list__card-master {
   font-weight: 700;
   font-size: 1em;
-  color: var(--c-text-primary, inherit);
+  color: var(--c-text-primary);
   margin-right: var(--s-2);
 }
 
@@ -3218,7 +4488,7 @@ a {
 }
 
 .internal-chat-list__card-meta {
-  color: var(--c-text-secondary, #6e6e73);
+  color: var(--c-text-secondary);
   font-size: 0.85em;
 }
 
@@ -3233,11 +4503,11 @@ a {
   align-items: stretch;
   gap: var(--s-2);
   margin-top: var(--s-4);
-  border-top: 1px solid var(--c-border, #e0e0e3);
+  border-top: 1px solid var(--c-divider);
 }
 
 .internal-chat-list__new-thread-helper {
-  color: var(--c-text-secondary, #6e6e73);
+  color: var(--c-text-secondary);
   margin: 0;
 }
 
@@ -3254,7 +4524,7 @@ a {
 
 .internal-chat-list__loading {
   margin: 0 0 var(--s-2);
-  color: var(--c-text-secondary, #6e6e73);
+  color: var(--c-text-secondary);
 }
 
 /* --- Bottom sheet (topic picker + compose) --- */
@@ -3270,7 +4540,7 @@ a {
 }
 
 .internal-chat-sheet__card {
-  background: var(--c-surface, #fff);
+  background: var(--c-surface-1);
   width: 100%;
   max-width: 480px;
   padding: var(--s-4) var(--s-3) calc(var(--s-4) + var(--safe-bottom, 0px));
@@ -3290,7 +4560,7 @@ a {
 
 .internal-chat-sheet__helper {
   margin: 0;
-  color: var(--c-text-secondary, #6e6e73);
+  color: var(--c-text-secondary);
 }
 
 .internal-chat-sheet__topics {
@@ -3307,20 +4577,20 @@ a {
   align-items: center;
   gap: var(--s-2);
   background: transparent;
-  border: 1px solid var(--c-border, #e0e0e3);
+  border: 1px solid var(--c-divider);
   border-radius: var(--r-md, 12px);
   padding: var(--s-2) var(--s-3);
   width: 100%;
   text-align: left;
   font: inherit;
-  color: var(--c-text, inherit);
+  color: var(--c-text-primary);
   min-height: 44px;
   cursor: pointer;
 }
 
 .internal-chat-sheet__topic--selected {
-  border-color: var(--c-accent, #2a7);
-  background: var(--c-accent-soft, rgba(34, 119, 90, 0.08));
+  border-color: var(--c-accent);
+  background: color-mix(in srgb, var(--c-accent) 8%, var(--c-surface-1));
 }
 
 .internal-chat-sheet__topic-radio {
@@ -3346,10 +4616,10 @@ a {
   width: 100%;
   padding: var(--s-2);
   border-radius: var(--r-md, 12px);
-  border: 1px solid var(--c-border, #e0e0e3);
+  border: 1px solid var(--c-divider);
   font: inherit;
-  background: var(--c-surface, #fff);
-  color: var(--c-text, inherit);
+  background: var(--c-surface-1);
+  color: var(--c-text-primary);
   resize: vertical;
 }
 
@@ -3359,16 +4629,16 @@ a {
 
 .internal-chat-sheet__counter {
   font-size: 0.8em;
-  color: var(--c-text-secondary, #6e6e73);
+  color: var(--c-text-secondary);
   text-align: right;
 }
 
 .internal-chat-sheet__counter--bad {
-  color: var(--c-danger, #c83232);
+  color: var(--c-danger);
 }
 
 .internal-chat-sheet__error {
-  color: var(--c-danger, #c83232);
+  color: var(--c-danger);
   margin: 0;
 }
 
@@ -3392,7 +4662,7 @@ a {
 
 .internal-chat-thread__header {
   padding: var(--s-3);
-  border-bottom: 1px solid var(--c-border, #e0e0e3);
+  border-bottom: 1px solid var(--c-divider);
   display: flex;
   flex-direction: column;
   gap: var(--s-1);
@@ -3407,14 +4677,14 @@ a {
   display: flex;
   flex-wrap: wrap;
   gap: var(--s-2);
-  color: var(--c-text-secondary, #6e6e73);
+  color: var(--c-text-secondary);
   font-size: 0.9em;
 }
 
 .internal-chat-thread__loading {
   padding: var(--s-4);
   text-align: center;
-  color: var(--c-text-secondary, #6e6e73);
+  color: var(--c-text-secondary);
 }
 
 .internal-chat-thread__messages {
@@ -3428,7 +4698,7 @@ a {
 .internal-chat-thread__empty {
   padding: var(--s-4) var(--s-3);
   text-align: center;
-  color: var(--c-text-secondary, #6e6e73);
+  color: var(--c-text-secondary);
 }
 
 .internal-chat-bubble {
@@ -3442,18 +4712,18 @@ a {
 
 .internal-chat-bubble--master {
   align-self: flex-end;
-  background: var(--c-accent-soft, #e8f1ec);
+  background: var(--c-accent-subtle);
 }
 
 .internal-chat-bubble--admin {
   align-self: flex-start;
-  background: var(--c-surface-2, #f5f5f7);
+  background: var(--c-surface-2);
 }
 
 .internal-chat-bubble--system {
   align-self: center;
   background: transparent;
-  color: var(--c-text-secondary, #6e6e73);
+  color: var(--c-text-secondary);
   font-size: 0.9em;
 }
 
@@ -3462,7 +4732,7 @@ a {
 }
 
 .internal-chat-bubble--failed {
-  border: 1px dashed var(--c-danger, #c83232);
+  border: 1px dashed var(--c-danger);
 }
 
 .internal-chat-bubble__header {
@@ -3470,7 +4740,7 @@ a {
   justify-content: space-between;
   gap: var(--s-2);
   font-size: 0.8em;
-  color: var(--c-text-secondary, #6e6e73);
+  color: var(--c-text-secondary);
 }
 
 .internal-chat-bubble__sender {
@@ -3496,7 +4766,7 @@ a {
 }
 
 .internal-chat-thread__footer {
-  border-top: 1px solid var(--c-border, #e0e0e3);
+  border-top: 1px solid var(--c-divider);
   padding: var(--s-3);
   display: flex;
   flex-direction: column;
@@ -3516,11 +4786,11 @@ a {
 .internal-chat-thread__textarea {
   width: 100%;
   border-radius: var(--r-md, 12px);
-  border: 1px solid var(--c-border, #e0e0e3);
+  border: 1px solid var(--c-divider);
   padding: var(--s-2);
   font: inherit;
-  background: var(--c-surface, #fff);
-  color: var(--c-text, inherit);
+  background: var(--c-surface-1);
+  color: var(--c-text-primary);
   resize: vertical;
   min-height: 4em;
 }
@@ -3534,17 +4804,17 @@ a {
 
 .internal-chat-thread__counter {
   font-size: 0.8em;
-  color: var(--c-text-secondary, #6e6e73);
+  color: var(--c-text-secondary);
 }
 
 .internal-chat-thread__counter--bad {
-  color: var(--c-danger, #c83232);
+  color: var(--c-danger);
 }
 
 .internal-chat-thread__locked-helper {
   margin: 0;
   text-align: center;
-  color: var(--c-text-secondary, #6e6e73);
+  color: var(--c-text-secondary);
 }
 
 /* ────────────────────────────────────────────────────────────────────
@@ -3557,7 +4827,8 @@ a {
  *   - 2.5.8 — cards / suggestion chips ≥ 44dp, primary CTA ≥ 48dp
  *     (already inherited from .cta-bar__button).
  *   - 1.4.3 — body ≥ 4.5:1; reasoning text uses --c-text-secondary
- *     which is tokenised to 4.6:1 on --c-surface-0.
+ *     which is tokenised to ≥ 4.5:1 on --c-surface-2, the darkest
+ *     light surface (tokens.css:47; 4.52:1 measured 2026-09-26).
  *   - 1.3.1 — layer sections use <section> + <h2>; slot lists are
  *     <ul> per day; slot cells are <button>.
  * ──────────────────────────────────────────────────────────────────── */
@@ -3565,6 +4836,19 @@ a {
 /* F1 — Catalog. */
 .customer-catalog__search {
   margin: var(--s-2) 0 var(--s-3);
+}
+/* DRF-1482 — contextual empty states (spec §1). Same CTA geometry as
+   the records empty state: primary action filled, neighbours outlined. */
+.catalog-empty__ctas {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+  margin-top: var(--s-3);
+}
+.catalog-empty__cta-primary {
+  background: var(--c-accent);
+  color: var(--c-text-on-accent);
+  border-color: var(--c-accent);
 }
 .customer-catalog__search-input {
   width: 100%;
@@ -3618,7 +4902,7 @@ a {
   cursor: pointer;
 }
 .customer-catalog__card-btn:focus-visible {
-  outline: 2px solid var(--c-accent, #0a84ff);
+  outline: 2px solid var(--c-accent);
   outline-offset: -2px;
 }
 .customer-catalog__card-title {
@@ -3697,6 +4981,13 @@ a {
 }
 
 /* F3 — Slots. */
+/* DRF-1776 — окно «на две недели позже»: тихая строка над списком. */
+.customer-slots__window-note {
+  margin: 0 0 var(--s-2);
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
 .customer-slots__section-title {
   font-size: var(--font-size-300);
   font-weight: 600;
@@ -3724,9 +5015,9 @@ a {
   cursor: pointer;
 }
 .customer-slots__suggestion--active {
-  background: var(--c-accent, #0a84ff);
-  color: #fff;
-  border-color: var(--c-accent, #0a84ff);
+  background: var(--c-accent);
+  color: var(--c-text-on-accent);
+  border-color: var(--c-accent);
 }
 .customer-slots__suggestion-day {
   font-size: var(--font-size-100);
@@ -3764,9 +5055,67 @@ a {
   cursor: pointer;
 }
 .customer-slots__cell--active {
-  background: var(--c-accent, #0a84ff);
-  color: #fff;
-  border-color: var(--c-accent, #0a84ff);
+  background: var(--c-accent);
+  color: var(--c-text-on-accent);
+  border-color: var(--c-accent);
+}
+
+/* Полоса дней кадра 3 макета DRF-1320 (DRF-2178).
+
+   Горизонтальная лента с прокруткой: дней в окне четырнадцать, и
+   переносить их в сетку значило бы отдать полэкрана под выбор дня.
+   Прокрутка по X, а не перенос — поэтому `flex` без `wrap`. */
+.customer-slots__day-strip {
+  list-style: none;
+  padding: 0 0 var(--s-1);
+  margin: 0 0 var(--s-3);
+  display: flex;
+  gap: var(--s-2);
+  overflow-x: auto;
+  scroll-snap-type: x proximity;
+  -webkit-overflow-scrolling: touch;
+}
+.customer-slots__day-chip {
+  min-width: 80px;
+  min-height: 56px;
+  padding: var(--s-2);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  scroll-snap-align: start;
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-sm, 8px);
+  color: inherit;
+  cursor: pointer;
+}
+/* День без окон остаётся в полосе и виден — но нажать его нечем.
+   Гасим яркость, а не прячем: «нет мест» это ответ, а не пустота. */
+.customer-slots__day-chip:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+.customer-slots__day-chip--active {
+  background: var(--c-accent);
+  color: var(--c-text-on-accent);
+  border-color: var(--c-accent);
+}
+.customer-slots__day-chip-date {
+  font-size: var(--font-size-200);
+  font-weight: 500;
+}
+.customer-slots__day-chip-count {
+  font-size: var(--font-size-100);
+  opacity: 0.8;
+}
+/* «★ Подходит под твоё обычное время» — пояснение под группой. */
+.customer-slots__suggested-note {
+  margin: var(--s-2) 0 0;
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
 }
 
 /* F4 — Confirm. */
@@ -3790,6 +5139,20 @@ a {
   padding: 0;
   font-size: var(--font-size-200);
   color: var(--c-text-secondary);
+}
+/* «Изменить …» у строки сводки (DRF-2178, кадр 4 макета DRF-1320).
+
+   Ссылка рядом со значением, а не кнопка в ряду действий: правит эта
+   строка, и стоять она должна при ней. Цель нажатия — 44px по высоте
+   через отступы, иначе на телефоне в неё не попасть. */
+.customer-confirm__change {
+  margin-left: var(--s-2);
+  padding: var(--s-2) 0;
+  background: none;
+  border: 0;
+  color: var(--c-accent);
+  font-size: var(--font-size-100);
+  cursor: pointer;
 }
 .customer-confirm__payment-option {
   display: flex;
@@ -3824,18 +5187,13 @@ a {
   color: var(--c-text-secondary);
 }
 
-.customer-confirm__policy {
-  margin: var(--s-2) 0;
-  font-size: var(--font-size-200);
-  color: var(--c-text-secondary);
-}
 .customer-confirm__notes {
   margin-top: var(--s-3);
 }
 .customer-confirm__notes-toggle {
   background: transparent;
   border: 0;
-  color: var(--c-accent, #0a84ff);
+  color: var(--c-accent);
   font-size: var(--font-size-200);
   padding: var(--s-2) 0;
   min-height: 44px;
@@ -3873,7 +5231,8 @@ a {
 }
 
 /* F4 anonymous-gate OAuth pending placeholder (round-1) — shown
-   when VITE_MAX_OAUTH_ENABLED !== "true". Replaces the prior
+   when VITE_MAX_OAUTH_URL is empty (DRF-1319: выключателем служит сам
+   адрес, а не булев флаг без установщика). Replaces the prior
    dead-end «Зарегистрироваться» CTA with a soft «coming soon»
    message + a fallback nav back to catalog. */
 .customer-confirm__oauth-pending {
@@ -3916,10 +5275,11 @@ a {
  * WCAG 2.2 AA notes (Tau §8 BLOCKERS addressed):
  *   - All tap targets ≥44×44dp (icon buttons use padding to reach the
  *     hit area without enlarging the visible glyph).
- *   - Progress bar track + borders use existing `--c-divider` token
- *     which is verified ≥3:1 against `--c-surface-1` per tokens.css.
- *   - Body text uses `--c-text-primary` (#1f1812 / #f3ece4) — well
- *     above 4.5:1 against bg.
+ *   - Progress bar track + borders use the `--c-divider` token. It is
+ *     a hairline (1.24:1 on `--c-surface-1`), so it is decorative
+ *     reinforcement only — never the sole boundary of a control.
+ *   - Body text uses `--c-text-primary` — 16.96:1 against `--c-bg`
+ *     in the light theme, 16.96:1 in the dark one.
  *   - Skeleton shimmer is via the existing `.skeleton` class which
  *     respects `prefers-reduced-motion` (handled there).
  * ────────────────────────────────────────────────────────────────── */
@@ -3947,11 +5307,117 @@ a {
 .wellness-dash__header {
   display: flex;
   align-items: center;
+  /* Человек слева, фирменный знак справа (Д1, DRF-2331). Знак занял
+     место, где макет держал колокольчик: колокольчик не рисуется — за
+     ним нет ленты уведомлений. */
+  justify-content: space-between;
   gap: var(--s-3);
   height: 56px;
   padding: 0 var(--s-3);
   border-bottom: 1px solid var(--c-divider);
   background: var(--c-surface-1);
+}
+/* Д1 — аватар, имя, «Рада вас видеть!». */
+.wellness-dash__person {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  /* Длинное имя ужимается, знак справа не выдавливается за край. */
+  min-width: 0;
+}
+
+/* Вход в профиль клиента — аватарка в шапке (решение владельца §77 п.60).
+   Кружок 36 px, как на Главной, а цель нажатия 44×44 (WCAG 2.5.8) — за
+   счёт обрамляющей кнопки, тем же приёмом, что стрелка возврата
+   (`.screen__back` выше): размером, не `::after`. Отрицательных отступов
+   тут нет намеренно — кнопка стоит в правом верхнем углу и выравнивать её
+   по краю текста не надо. */
+.customer-avatar-entry {
+  background: transparent;
+  border: none;
+  padding: 0;
+  min-width: 44px;
+  min-height: 44px;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+.customer-avatar-entry:active .customer-avatar-entry__circle {
+  transform: scale(0.94);
+}
+.customer-avatar-entry:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 2px;
+  border-radius: 50%;
+}
+/* На Главной кружок стоит слева, рядом с именем (так его поставил
+   DRF-2331, и фирменный знак занимает правый край). На остальных экранах
+   панели шапка — `records-screen__header`, флекс с заголовком слева, и
+   дверь уходит к правому краю — как аватарка админской поверхности
+   (`lib/avatar-sheet.ts`, «аватар справа вверху»).
+   Размещение задано КОНТЕКСТОМ, а не модификатором на кнопке: модификатор
+   пришлось бы собирать в рантайме (`className={...}`), а сторож
+   `miniapp_style_contract` намеренно не видит собранные имена — я бы своими
+   руками сделал его слепым на этой кнопке. */
+.records-screen__header .customer-avatar-entry {
+  margin-left: auto;
+}
+/* Краски и размер — те же, что у кружка на профиле клиента
+   (`.profile-header__avatar`, он 56 px и в другом месте): один человек —
+   один узнаваемый кружок. Прежнее правило Главной (`.wellness-dash__avatar`)
+   снято вместе с его разметкой: полное правило без потребителя — семя
+   второй реализации, а сторож стиля ходит только от класса к правилу и
+   такого не видит. */
+.customer-avatar-entry__circle {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--c-success);
+  color: var(--c-text-on-accent);
+  font-size: var(--font-size-100);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+/* Держит высоту строки имени, пока день грузится. */
+.wellness-dash__person-skel {
+  width: 96px;
+  height: 15px;
+  border-radius: var(--r-sm);
+}
+.wellness-dash__person-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.wellness-dash__person-name {
+  display: flex;
+  align-items: baseline;
+  /* Зазор стилем, а не пробелом в вёрстке: флекс обрезает пробел между
+     своими детьми, и 👋 прилипал к имени. */
+  gap: var(--s-1);
+  min-width: 0;
+  font-size: var(--font-size-200);
+  font-weight: 600;
+}
+/* Обрезается имя; 👋 рядом с многоточием, а не вместо него. */
+.wellness-dash__person-name-text {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.wellness-dash__person-hi {
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .wellness-dash__brand {
   display: flex;
@@ -4050,6 +5516,11 @@ a {
   color: var(--c-text-secondary);
   padding-right: 44px;
 }
+/* DRF-2091 — вход в запись текстом с карточки-подсказки. */
+.wellness-dash__onboarding-cta {
+  margin-top: var(--s-2);
+}
+
 .wellness-dash__onboarding-dismiss {
   position: absolute;
   top: var(--s-1);
@@ -4191,6 +5662,20 @@ a {
   font-size: var(--font-size-200);
   align-self: flex-start;
 }
+/* DRF-1842 — «Отменить» внутри тоста воды. Цвет наследуется от тоста
+   (токены --c-text-primary / --c-surface-1 выше), своих литералов нет:
+   кнопка обязана оставаться читаемой на той же подложке при смене палитры. */
+.wellness-dash__toast-action {
+  margin-left: var(--s-2);
+  padding: 0 var(--s-2);
+  background: none;
+  color: inherit;
+  border: 1px solid currentColor;
+  border-radius: var(--r-sm);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
 .wellness-dash__today-goals,
 .wellness-dash__booking,
 .wellness-dash__weekly,
@@ -4262,6 +5747,308 @@ a {
 .wellness-dash__booking-empty {
   margin: 0 0 var(--s-2);
   color: var(--c-text-primary);
+}
+
+/* ──────────────────────────────────────────────────────────────────
+ * H01 — главный экран клиента по макету DRF-1321 v1.2 (DRF-2144).
+ * Карточка цели, один блок согласия, «План на сегодня», карточка записи,
+ * «Продолжить разговор с Ayla», компактный ряд быстрых действий.
+ * Токены — те же, что у всего экрана; заливка акцентом у главного
+ * действия — как `.salon-today__cta`. (Оговорка «своего `.btn-primary`
+ * нет» с DRF-2380 устарела: он есть; здесь дело в раскладке.)
+ * ────────────────────────────────────────────────────────────────── */
+
+/* Главное действие в потоке: «Продолжить сегодняшний план», «Составить
+   план», «Выбери цель», «Продолжить разговор». */
+.wellness-dash__cta {
+  display: block;
+  width: 100%;
+  min-height: 48px;
+  margin: var(--s-2) 0 0;
+  padding: 0 var(--s-4);
+  background: var(--c-accent);
+  color: var(--c-text-on-accent);
+  border: none;
+  border-radius: var(--r-md);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-300);
+  font-weight: 600;
+  cursor: pointer;
+}
+.wellness-dash__cta:active {
+  background: var(--c-accent-pressed);
+}
+.wellness-dash__cta:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 2px;
+}
+
+/* Вторичное действие-ссылка: «Посмотреть детали цели», «Смотреть весь
+   план», «Задать новый вопрос». ≥44dp по высоте (WCAG 2.5.8). */
+.wellness-dash__link-btn {
+  display: inline-block;
+  background: transparent;
+  border: none;
+  color: var(--c-accent);
+  padding: var(--s-2) var(--s-1);
+  min-height: 44px;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-200);
+  font-weight: 500;
+  cursor: pointer;
+  text-align: center;
+}
+.wellness-dash__link-btn:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 2px;
+  border-radius: var(--r-sm);
+}
+
+/* Карточка активной цели. */
+.wellness-dash__goal-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  padding: var(--s-4);
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-lg);
+}
+.wellness-dash__goal-eyebrow {
+  align-self: flex-start;
+  margin: 0;
+  padding: 2px var(--s-2);
+  border-radius: var(--r-pill);
+  background: var(--c-accent-subtle);
+  color: var(--c-accent);
+  font-size: var(--font-size-100);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+.wellness-dash__goal-title {
+  margin: var(--s-1) 0 0;
+  font-size: var(--font-size-400);
+  font-weight: 700;
+  color: var(--c-text-primary);
+}
+.wellness-dash__goal-due,
+.wellness-dash__goal-status,
+.wellness-dash__goal-hint {
+  margin: 0;
+  font-size: var(--font-size-200);
+  color: var(--c-text-secondary);
+}
+.wellness-dash__goal-card .wellness-dash__link-btn {
+  align-self: center;
+}
+
+/* Один блок согласия дневника. */
+.wellness-dash__consent {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  padding: var(--s-3);
+  background: var(--c-surface-2);
+  border-radius: var(--r-md);
+}
+.wellness-dash__consent-text {
+  margin: 0;
+  color: var(--c-text-primary);
+  font-size: var(--font-size-200);
+}
+
+/* DRF-2230 — приглашение в чат не ушло: сказано вслух, экран не закрыт. */
+.wellness-dash__consent-error {
+  margin: 0;
+  color: var(--c-danger);
+  font-size: var(--font-size-200);
+}
+
+/* «План на сегодня». */
+.wellness-dash__plan-today {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+.wellness-dash__plan-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-2);
+}
+.wellness-dash__plan-head .wellness-dash__section-header {
+  margin: 0;
+}
+.wellness-dash__plan-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+.wellness-dash__plan-item {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  grid-template-areas:
+    "icon main state"
+    "icon chip chip";
+  column-gap: var(--s-3);
+  row-gap: var(--s-1);
+  align-items: center;
+  padding: var(--s-3);
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+}
+.wellness-dash__plan-icon {
+  grid-area: icon;
+  font-size: var(--font-size-400);
+  line-height: 1;
+}
+.wellness-dash__plan-main {
+  grid-area: main;
+  min-width: 0;
+}
+.wellness-dash__plan-label {
+  font-size: var(--font-size-200);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+.wellness-dash__plan-period {
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+.wellness-dash__plan-state {
+  grid-area: state;
+  font-size: var(--font-size-200);
+  font-weight: 600;
+  color: var(--c-text-primary);
+  white-space: nowrap;
+}
+.wellness-dash__plan-done {
+  color: var(--c-success);
+}
+.wellness-dash__plan-chip {
+  grid-area: chip;
+  justify-self: start;
+  padding: 1px var(--s-2);
+  border-radius: var(--r-pill);
+  background: var(--c-accent-subtle);
+  color: var(--c-accent);
+  font-size: var(--font-size-100);
+}
+.wellness-dash__plan-attention {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-2);
+  padding: var(--s-3);
+  border-radius: var(--r-md);
+  background: color-mix(in srgb, var(--c-warning) 10%, var(--c-surface-2));
+}
+.wellness-dash__plan-attention-text {
+  margin: 0;
+  font-size: var(--font-size-200);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+
+/* Карточка ближайшей записи — по макету: услуга + статус, мастер, когда +
+   цена (место под DRF-2172), адрес. */
+.wellness-dash__booking-top,
+.wellness-dash__booking-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--s-2);
+}
+.wellness-dash__booking-top .wellness-dash__booking-what {
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+.wellness-dash__booking-price {
+  font-weight: 600;
+  color: var(--c-text-primary);
+  white-space: nowrap;
+}
+
+/* Быстрые действия — компактный ряд из пяти (макет H01). Flex, а не сетка
+   на пять колонок: при выключенном контуре питания кнопок три (DRF-2071), и
+   они делят ряд поровну, а не оставляют две пустые ячейки. */
+.wellness-dash__qa-grid--row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-1);
+}
+.wellness-dash__qa-btn--compact {
+  flex: 1 1 0;
+  min-width: 56px;
+  align-items: center;
+  justify-content: flex-start;
+  min-height: 76px;
+  padding: var(--s-2) var(--s-1);
+  text-align: center;
+}
+@media (max-width: 360px) {
+  .wellness-dash__qa-btn--compact {
+    flex-basis: calc(33% - var(--s-1));
+  }
+}
+.wellness-dash__qa-btn--compact .wellness-dash__qa-label {
+  font-size: var(--font-size-100);
+  line-height: 1.2;
+  /* DRF-2266 (скрин владельца 21.09): «Скорректировать» — одно слово длиннее
+     плитки ряда (min-width 56px); без переноса оно рисовалось поверх соседа. */
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  hyphens: auto;
+}
+
+/* DRF-2266 — вернуться в чат не вышло: подсказка вместо тишины. */
+.wellness-dash__chat-hint {
+  margin: 0;
+  color: var(--c-text-secondary);
+  font-size: var(--font-size-100);
+}
+
+/* «Продолжить разговор с Ayla». */
+.wellness-dash__ayla {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+.wellness-dash__ayla-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  padding: var(--s-3);
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-lg);
+}
+.wellness-dash__ayla-topic-head {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--s-2);
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+.wellness-dash__ayla-when {
+  white-space: nowrap;
+}
+.wellness-dash__ayla-topic {
+  margin: 0;
+  padding: var(--s-2) var(--s-3);
+  border-radius: var(--r-md);
+  background: var(--c-surface-2);
+  color: var(--c-text-primary);
+  font-size: var(--font-size-200);
+}
+.wellness-dash__ayla-card .wellness-dash__link-btn {
+  align-self: center;
 }
 .wellness-dash__weekly-list li {
   font-size: var(--font-size-200);
@@ -4349,7 +6136,12 @@ a {
   left: 0;
   right: 0;
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  /* Равные колонки по числу вкладок, а не жёсткие пять (DRF-1546):
+     на «Главной» вкладки «День» нет — поверхности «День» не
+     существует, — и при `repeat(5, 1fr)` там оставалась пустая
+     колонка. Экраны с пятью вкладками выглядят ровно как раньше. */
+  grid-auto-flow: column;
+  grid-auto-columns: 1fr;
   height: calc(56px + var(--safe-bottom));
   padding-bottom: var(--safe-bottom);
   background: var(--c-surface-1);
@@ -4500,6 +6292,14 @@ a {
 }
 .records-screen__title {
   margin: 0;
+  /* Правый край шапки теперь зависит от ширины заголовка (`margin-left: auto`
+     у двери в профиль). Без сжатия длинный заголовок схлопнулся бы до
+     min-content и полез из фиксированных 56 px, уводя цель нажатия за
+     отступ. Сегодня все заголовки короткие — правило на будущее. */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: var(--font-size-300);
   font-weight: 600;
 }
@@ -4509,6 +6309,21 @@ a {
   padding: var(--s-2) var(--s-3);
   font-size: var(--font-size-200);
   text-align: center;
+}
+/* Та же полоса на экранах воронки записи (см. OfflineBanner.tsx). */
+.offline-banner {
+  background: var(--c-warning);
+  color: var(--c-text-on-accent);
+  padding: var(--s-2) var(--s-3);
+  margin-bottom: var(--s-3);
+  border-radius: var(--r-md);
+  font-size: var(--font-size-200);
+  text-align: center;
+}
+/* Действие, которого без сети не будет, читается выключенным. */
+.records-card__action:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 .records-screen__tabs {
   display: flex;
@@ -4688,7 +6503,7 @@ a {
 }
 .records-card--nearest {
   /* Slightly stronger emphasis for the next booking. */
-  box-shadow: 0 1px 4px rgb(20 12 6 / 0.05);
+  box-shadow: 0 1px 4px rgb(17 24 39 / 0.05);
 }
 .records-card--skeleton {
   gap: var(--s-2);
@@ -4739,6 +6554,10 @@ a {
 }
 .records-card__action--danger {
   color: var(--c-danger);
+  /* §6-упсилон (28.09): опасное — контурное, но с рамкой толще обычной
+     (1 px): цвет больше не единственный признак. Сторож — пара
+     «опасное × обычное» в dangerBorder2469.build.test.ts. */
+  border-width: 2px;
 }
 @media (max-width: 320px) {
   /* WCAG 1.4.4 — at small viewport / 200% zoom, actions stack. */
@@ -5144,7 +6963,7 @@ a {
   height: 56px;
   border-radius: 50%;
   background: var(--c-success);
-  color: var(--c-text-on-accent, #fff);
+  color: var(--c-text-on-accent);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -5204,8 +7023,8 @@ a {
   margin-top: var(--s-3);
 }
 .profile-section__cta--cautious {
-  color: var(--c-warning, var(--c-text-primary));
-  border-color: var(--c-warning, var(--c-divider));
+  color: var(--c-warning);
+  border-color: var(--c-warning);
 }
 .profile-section--skeleton {
   display: flex;
@@ -5305,7 +7124,7 @@ a {
   left: 10px;
   width: 24px;
   height: 24px;
-  background: var(--c-surface-1, #fff);
+  background: var(--c-surface-1);
   border-radius: 50%;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.18);
   transition: transform 160ms ease;
@@ -5463,6 +7282,36 @@ a {
   line-height: var(--leading-normal);
 }
 
+/* Выбор часового пояса (DRF-1477). Список кнопок, а не `select`:
+   родной селект в MAX-вебвью открывает системное колесо, где не видно
+   ни текущего значения, ни того, сколько всего вариантов — а их здесь
+   намеренно немного. */
+.timezone-sheet__list {
+  margin: var(--s-3) 0 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  max-height: 46vh;
+  overflow-y: auto;
+}
+.timezone-sheet__option {
+  width: 100%;
+  text-align: left;
+  padding: var(--s-3) var(--s-4);
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+  font-size: var(--font-size-300);
+  color: var(--c-text-primary);
+  cursor: pointer;
+}
+.timezone-sheet__option[aria-current="true"] {
+  border-color: var(--c-accent);
+  font-weight: 600;
+}
+
 /* Destructive-confirmation input (C5 erasure, DRF-956). Mirrors the
    typed-token field on the legacy profile delete card. */
 .profile-support-sheet__input {
@@ -5510,6 +7359,85 @@ a {
   font-size: var(--font-size-200);
   color: var(--c-text-secondary);
   line-height: var(--leading-normal);
+}
+
+/* R3 memory card (DRF-2133) */
+.profile-memory {
+  background: color-mix(in srgb, var(--c-divider) 30%, var(--c-surface-1));
+  border-radius: var(--r-md);
+  padding: var(--s-4);
+}
+.profile-memory__muted {
+  margin: 0;
+  font-size: var(--font-size-200);
+  color: var(--c-text-secondary);
+  line-height: var(--leading-normal);
+}
+.profile-memory__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.profile-memory__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
+  padding: var(--s-2) 0;
+  border-bottom: 1px solid var(--c-divider);
+}
+.profile-memory__row:last-child {
+  border-bottom: 0;
+}
+.profile-memory__body {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.profile-memory__text {
+  margin: 0;
+  font-size: var(--font-size-200);
+  color: var(--c-text-primary);
+  line-height: var(--leading-normal);
+}
+.profile-memory__meta {
+  margin: var(--s-1) 0 0;
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+.profile-memory__meta--inferred {
+  font-style: italic;
+}
+.profile-memory__subheading {
+  margin: var(--s-3) 0 var(--s-1);
+  font-size: var(--font-size-200);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+.profile-memory__forget,
+.profile-memory__retry,
+.profile-memory__forget-all {
+  min-height: 44px;
+  flex: 0 0 auto;
+}
+.profile-memory__forget-all {
+  width: 100%;
+  margin-top: var(--s-3);
+}
+.profile-memory__error {
+  margin: var(--s-2) 0 0;
+  font-size: var(--font-size-100);
+  color: var(--c-danger);
+}
+.profile-memory__sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 /* R4 proactive row */
@@ -5593,6 +7521,18 @@ a {
   background: var(--c-bg);
   color: var(--c-text-primary);
 }
+/* DRF-2201 — экран-корень вкладки несёт нижнюю панель: контент не должен
+   уезжать под неё. Высота панели — та же, что у `.wellness-dash__nav`, и та
+   же запись, что у `.records-screen` / `.profile-screen`. */
+.food-scanner-screen--tab-root {
+  padding-bottom: calc(56px + var(--safe-bottom) + var(--s-3));
+}
+/* Отступ под панель уже дан выше; у `__main` он тогда лишний — иначе
+   `--safe-bottom` считается дважды и под последним элементом остаётся
+   пустая полоса (на экранах без панели `__main` свой отступ сохраняет). */
+.food-scanner-screen--tab-root .food-scanner-screen__main {
+  padding-bottom: var(--s-4);
+}
 .food-scanner-screen__main {
   padding: var(--s-3) var(--s-4) calc(var(--s-6) + var(--safe-bottom));
   display: flex;
@@ -5614,6 +7554,31 @@ a {
   flex-direction: column;
   gap: var(--s-2);
 }
+/* DRF-2091 — запись еды текстом: карточка «Я распознала так». */
+.food-text-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+}
+
+.food-text-card__line {
+  margin: 0;
+  font-size: var(--font-size-200);
+  color: var(--c-text-primary);
+}
+
+.food-text-card__grams {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
+.food-scanner-screen__hint {
+  margin: var(--s-1) 0 0;
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
 .food-scanner-screen__section-heading {
   margin: 0;
   font-size: var(--font-size-200);
@@ -5624,6 +7589,28 @@ a {
 }
 .food-scanner-screen__error {
   margin: 0;
+}
+/* DRF-2289 — «Записать текстом» под съёмкой: ссылка, не третья кнопка. */
+.food-scanner-screen__text-link {
+  align-self: center;
+  background: transparent;
+  border: none;
+  color: var(--c-accent);
+  padding: var(--s-2) var(--s-1);
+  min-height: 44px;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-200);
+  font-weight: 500;
+  cursor: pointer;
+}
+.food-scanner-screen__text-link:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 2px;
+  border-radius: var(--r-sm);
+}
+.food-scanner-screen__text-link:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 .food-scanner-screen__privacy {
   margin: 0;
@@ -5656,7 +7643,7 @@ a {
   gap: 4px;
   padding: var(--s-2);
   min-height: 64px;
-  background: var(--c-surface-2, var(--c-surface-1));
+  background: var(--c-surface-2);
   border: 1px solid var(--c-divider);
   border-radius: var(--r-md);
   color: var(--c-text-primary);
@@ -5719,6 +7706,15 @@ a {
   color: var(--c-text-secondary);
   line-height: var(--leading-normal);
 }
+/* Версия раскрытия под текстом согласия — Z9. Строка служебная: человек
+   читает её, только если ищет, ПОЭТОМУ она приглушена и мельче тела. Но
+   она обязана быть видимой и контрастной — это единственное место, где
+   видно, на какой именно текст человек согласился. */
+.food-scanner-consent__version {
+  margin: 0;
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
 .food-scanner-consent__actions {
   display: flex;
   flex-direction: column;
@@ -5739,7 +7735,7 @@ a {
   height: 140px;
   border-radius: var(--r-md);
   overflow: hidden;
-  background: var(--c-surface-2, var(--c-surface-1));
+  background: var(--c-surface-2);
   border: 1px solid var(--c-divider);
   display: flex;
   align-items: center;
@@ -5863,7 +7859,7 @@ a {
   width: 44px;
   height: 44px;
   border-radius: var(--r-md);
-  background: var(--c-surface-2, var(--c-surface-1));
+  background: var(--c-surface-2);
   border: 1px solid var(--c-divider);
   font-size: var(--font-size-300);
   font-weight: 600;
@@ -6032,6 +8028,28 @@ a {
   font-size: var(--font-size-200);
   color: var(--c-text-secondary);
 }
+/* «Ответ пришёл, но записей в нём нет» — своё состояние, не ошибка и
+   не пустой день. Выглядит как карточка соседних групп, чтобы человек
+   читал это как часть дневника, а не как сломанный экран. */
+.food-scanner-diary__unreadable {
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+  padding: var(--s-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  align-items: flex-start;
+}
+.food-scanner-diary__unreadable p {
+  margin: 0;
+  font-size: var(--font-size-200);
+  color: var(--c-text-primary);
+}
+.food-scanner-diary__unreadable-hint {
+  color: var(--c-text-secondary);
+}
+
 .food-scanner-diary__group {
   background: var(--c-surface-1);
   border: 1px solid var(--c-divider);
@@ -6057,6 +8075,7 @@ a {
 }
 .food-scanner-diary__entry {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: var(--s-2);
@@ -6073,6 +8092,57 @@ a {
   flex: 1 1 auto;
   min-width: 0;
 }
+/* DRF-2455 — миниатюра блюда слева в строке дневника (решение владельца
+   28.09, п.14: «небольшая миниатюра слева, данные справа, дневник остаётся
+   компактным списком»). Вида в словаре не было. С макета (экран 2
+   «Ближайшая запись» презентации клиента) взяты ПРОПОРЦИЯ снимка
+   116:68 = 1,71 и зазор до текста 16 pt; высота — по списку (решение
+   главного окна 28.09, §6-омега-кватер): 82×48, строка растёт с 36 до 64 px, а не вдвое.
+   Отступление от буквальной геометрии экрана 2 вынесено владельцу.
+
+   Раскладка — МОДИФИКАТОР строки, а не `:has(> img)`: нижний порог движка
+   вебвью MAX не измерен, а модификатор проверяем без этого знания. Строка
+   без модификатора (записи без фото и старше 30 суток) не получает ни
+   одного нового объявления — рефакторинг ≠ редизайн (п.10).
+
+   Снимок вынесен из потока, данные строки остаются тем же flex-рядом с
+   переносом, только правее снимка: перенесённый хвост не уезжает под
+   картинку. */
+.food-scanner-diary__entry--with-thumb {
+  position: relative;
+  min-height: calc(48px + 2 * var(--s-2));
+  padding-inline-start: calc(82px + var(--s-4));
+}
+
+.food-scanner-diary__entry--with-thumb > .food-scanner-diary__entry-thumb {
+  position: absolute;
+  inset-inline-start: 0;
+  top: 50%;
+  transform: translateY(-50%);
+}
+
+/* Кнопки строки (`flex: 0 0 auto`, без переноса) в месте справа от
+   снимка не помещаются: блок «Граммы / В избранное / Убрать» 227 px против
+   196 (строка 294 при экране 360) и 226 (390). Под модификатором им
+   разрешён перенос, а блоку — ширина не больше места справа: одного
+   переноса мало, блок с `flex: 0 0 auto` держит ширину содержимого и
+   вылезал бы по-прежнему (замер: 31 и 1 px). Кнопки остаются справа,
+   строка растёт до 90 px (решение главного окна 28.09, буква «а»; плата
+   вынесена владельцу, §6-омега-кватер). */
+.food-scanner-diary__entry--with-thumb .food-scanner-diary__entry-actions {
+  flex-wrap: wrap;
+  max-width: 100%;
+}
+
+.food-scanner-diary__entry-thumb {
+  width: 82px;
+  height: 48px;
+  border-radius: var(--r-md);
+  object-fit: cover;
+  display: block;
+  background: var(--c-surface-2);
+}
+
 .food-scanner-diary__entry-time {
   font-size: var(--font-size-100);
   color: var(--c-text-secondary);
@@ -6090,6 +8160,15 @@ a {
   color: var(--c-text-secondary);
   flex: 0 0 auto;
 }
+/* DRF-2455 — БЖУ рядом с калориями: §77 п.40 просит показывать запись
+   целиком. Тише калорий на ступень размером, а цвет тот же: токена
+   «третьего» уровня текста в наборе нет, и выдумывать его здесь значило
+   бы завести цвет мимо палитры. */
+.food-scanner-diary__entry-macros {
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+  flex: 0 0 auto;
+}
 .food-scanner-diary__totals {
   background: var(--c-surface-1);
   border: 1px solid var(--c-divider);
@@ -6098,6 +8177,115 @@ a {
   display: flex;
   flex-direction: column;
   gap: var(--s-2);
+}
+/* DRF-1897 — строка диетолога под итогами. Карточкой, как соседние группы:
+   это часть дневника, а не всплывающая подсказка. */
+.food-scanner-diary__observation {
+  margin: 0;
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+  padding: var(--s-3) var(--s-4);
+  font-size: var(--font-size-200);
+  color: var(--c-text-primary);
+}
+/* DRF-1838 — правка и удаление записи в дневнике. Кнопки строки — тихие,
+   как подпись времени; форма граммов — на всю ширину строки под записью. */
+.food-scanner-diary__entry-actions {
+  display: flex;
+  gap: var(--s-1);
+  flex: 0 0 auto;
+}
+/* DRF-2099 — неделя дневника: стрелки и строка дня как кнопка. */
+.food-scanner-week__nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-2);
+}
+.food-scanner-week__period {
+  font-size: var(--font-size-200);
+  color: var(--c-text-secondary);
+}
+.food-scanner-week__day {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-2);
+  padding: var(--s-2) 0;
+  background: none;
+  border: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+}
+.food-scanner-diary__entry-action:disabled {
+  opacity: 0.4;
+}
+.food-scanner-diary__entry-action {
+  padding: 0 var(--s-2);
+  background: none;
+  color: var(--c-text-secondary);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-sm);
+  font: inherit;
+  font-size: var(--font-size-100);
+}
+.food-scanner-diary__grams {
+  flex-basis: 100%;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2);
+}
+.food-scanner-diary__grams-label {
+  flex-basis: 100%;
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+.food-scanner-diary__grams-input {
+  width: 6em;
+  padding: var(--s-1) var(--s-2);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-sm);
+  background: var(--c-surface-1);
+  color: var(--c-text-primary);
+  font: inherit;
+}
+.food-scanner-diary__grams-error {
+  flex-basis: 100%;
+  margin: 0;
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+/* Живая область уведомлений дневника — всегда в дереве, в раскладке не
+   участвует (DRF-1838, ревью: область, вставленная вместе с текстом,
+   часть экранных дикторов пропускает). */
+.food-scanner-diary__notice-slot {
+  display: contents;
+}
+/* Уведомление о действии над записью — та же пара цветов, что у тоста
+   воды на главной (wellness-dash__toast): контраст уже проверен. */
+.food-scanner-diary__notice {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s-2);
+  background: var(--c-text-primary);
+  color: var(--c-surface-1);
+  padding: var(--s-2) var(--s-3);
+  border-radius: var(--r-sm);
+  font-size: var(--font-size-200);
+}
+.food-scanner-diary__notice-action {
+  padding: 0 var(--s-2);
+  background: none;
+  color: inherit;
+  border: 1px solid currentColor;
+  border-radius: var(--r-sm);
+  font: inherit;
+  font-weight: 600;
 }
 .food-scanner-diary__comment {
   margin: var(--s-2) 0 0;
@@ -6243,4 +8431,1789 @@ a {
   font-size: var(--font-size-100);
   line-height: 1.4;
   color: var(--c-text-secondary);
+}
+
+/* DRF-1505 — «Добавить человека»: один экран, две ветки, и ссылка,
+   которую владелец салона передаёт человеку.
+
+   Вопрос «кого добавляете?» стоит первым в теле обеих веток и выглядит
+   одинаково в обеих — иначе переключение читается как переход на другой
+   экран, а вся задача была в том, чтобы экран был один. */
+.add-person__tracks {
+  border: 0;
+  padding: 0;
+  margin: 0 0 var(--s-4);
+}
+
+.add-person__legend {
+  padding: 0;
+  margin-bottom: var(--s-1);
+  font-size: var(--font-size-200);
+  color: var(--c-text-secondary);
+}
+
+.add-person__track {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s-2);
+  min-height: 44px;
+  padding: var(--s-1) 0;
+  cursor: pointer;
+}
+
+.add-person__track input[type="radio"] {
+  /* Подпись начинается на первой строке, поэтому кружок подтягивается к
+     ней, а не центрируется по двухстрочному блоку. */
+  margin-top: 2px;
+  width: 20px;
+  height: 20px;
+  flex: none;
+  accent-color: var(--c-accent);
+}
+
+.add-person__track-text {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+}
+
+.add-person__track-label {
+  font-size: var(--font-size-300);
+}
+
+.add-person__track-effect {
+  font-size: var(--font-size-200);
+  line-height: 1.4;
+  color: var(--c-text-secondary);
+}
+
+/* Ссылка, которую отдают другому человеку.
+
+   Адрес показан целиком и выделяем целиком: буфер обмена — удобство, и
+   он вправе отказать (старый webview, запрещённое разрешение). Кнопка
+   лежит ПОД адресом, а не вместо него, чтобы отказ стоил одного лишнего
+   движения, а не потерянных учётных данных. */
+.shareable {
+  margin: var(--s-3) 0;
+  padding: var(--s-3);
+  border-radius: var(--r-md);
+  background: var(--c-surface-2);
+}
+
+.shareable__label {
+  margin: 0;
+  font-weight: 600;
+}
+
+.shareable__hint {
+  margin: var(--s-1) 0 0;
+  font-size: var(--font-size-200);
+  line-height: 1.4;
+  color: var(--c-text-secondary);
+}
+
+.shareable__url {
+  display: block;
+  margin: var(--s-2) 0;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: var(--font-size-200);
+  line-height: 1.4;
+  word-break: break-all;
+  user-select: all;
+  -webkit-user-select: all;
+}
+
+.shareable__copy {
+  width: 100%;
+}
+
+/* Готовый текст приглашения (DRF-1505, решение владельца §44.2).
+
+   Поле правится: владелец копирует то, что видит, а не исходную
+   заготовку. Моноширинного шрифта здесь нет намеренно — это не адрес,
+   а сообщение, и читать его надо так же, как его прочтёт мастер. */
+.invite-message__text {
+  margin: var(--s-2) 0;
+  background: var(--c-surface-1);
+  font-size: var(--font-size-200);
+  line-height: 1.4;
+}
+
+.shareable__failed {
+  margin: var(--s-2) 0 0;
+  font-size: var(--font-size-200);
+  line-height: 1.4;
+  color: var(--c-danger);
+}
+
+/* Отказ, который владелец может исправить сам, — предупреждение, а не
+   поломка: «MAX не нашёл аккаунт» правится в поле выше, и красный цвет
+   тут врал бы о серьёзности.
+
+   Без запасного литерала: `--c-warning` объявлен в `tokens.css` в обеих
+   темах (светлая #8f5c06, тёмная #f7ad30, обе подписаны как сведённые к
+   4.5:1). Литерал рядом с токеном — вторая палитра, и линт
+   `miniapp_token_contrast.py` отказывается его принимать, потому что
+   пересчитать контраст он может только у того, что объявлено. */
+.callout--warn {
+  background: color-mix(in srgb, var(--c-warning) 10%, var(--c-surface-2));
+  color: var(--c-warning);
+}
+
+/* Общие поля админских форм — прежде каждое несло свой inline-стиль. */
+.admin-fieldset {
+  border: 0;
+  padding: 0;
+  margin: 0 0 var(--s-4);
+}
+
+.admin-fieldset__legend {
+  padding: 0;
+  margin-bottom: var(--s-1);
+  font-size: var(--font-size-200);
+  color: var(--c-text-secondary);
+}
+
+.admin-choice {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s-2);
+  min-height: 44px;
+  padding: var(--s-1) 0;
+  cursor: pointer;
+}
+
+.admin-choice input {
+  margin-top: 2px;
+  width: 20px;
+  height: 20px;
+  flex: none;
+  accent-color: var(--c-accent);
+}
+
+.admin-choice--disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.admin-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  margin-bottom: var(--s-3);
+}
+
+.admin-field__title {
+  font-size: var(--font-size-200);
+  color: var(--c-text-secondary);
+}
+
+.admin-hint {
+  margin: var(--s-1) 0 0;
+  font-size: var(--font-size-100);
+  line-height: 1.4;
+  color: var(--c-text-secondary);
+}
+
+.admin-details {
+  margin: var(--s-3) 0;
+  font-size: var(--font-size-200);
+  line-height: 1.4;
+  color: var(--c-text-secondary);
+}
+
+.admin-details summary {
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+}
+
+/* Слышимый итог копирования (DRF-1505). Виден и глазами: подпись кнопки
+   меняется на «Скопировано», но кнопка может уехать из поля зрения на
+   узком экране, а строка стоит там, где читатель смотрел. */
+.shareable__copied {
+  margin: var(--s-2) 0 0;
+  font-size: var(--font-size-200);
+  line-height: 1.4;
+  color: var(--c-text-secondary);
+}
+
+/* ===========================================================================
+   Раздел «Ayla» — диалог мастера с ассистентом (DRF-1180, OD-MASTER-IA).
+
+   Свой блок, а не переиспользование `.m6-*`: те классы принадлежат
+   экрану переписки мастера с КЛИЕНТОМ, который по решению владельца от
+   05.09 удаляется целиком (DRF-1255). Опереться на них значило бы
+   поставить новый раздел на фундамент, который сносят.
+   =========================================================================== */
+
+.ayla-screen {
+  display: flex;
+  flex-direction: column;
+  min-height: 100dvh;
+  /* Композер — sticky и стоит в потоке, его высота уже внутри документа;
+     прибавлять её сюда ещё раз — пустая полоса между ним и панелью. Отступ
+     нужен ровно под фиксированную панель: в конце прокрутки композер
+     ложится прямо над ней (инцидент 21.09, DRF-2150). */
+  padding-bottom: calc(var(--tabbar-height) + var(--safe-bottom));
+}
+
+/* DRF-2119 — тот же диалог внутри рамки салонной админки: рамка уже
+   даёт экран и нижнюю панель, поэтому высота — от содержимого, а не
+   на весь вьюпорт, и отступ снизу только под поле ввода. */
+.ayla-screen--salon {
+  min-height: 0;
+  padding-bottom: var(--s-4);
+}
+
+.ayla-header {
+  padding: var(--s-3) 0 var(--s-2);
+}
+
+.ayla-header__title {
+  margin: 0;
+  font-size: var(--font-size-500);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+
+.ayla-header__sub {
+  margin: 2px 0 0;
+  font-size: var(--font-size-200);
+  color: var(--c-text-secondary);
+}
+
+.ayla-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  flex: 1;
+}
+
+/* Метка конца ленты: `scrollIntoView({ block: "end" })` ставит её к низу
+   вьюпорта — а там композер и панель. Поля прокрутки поднимают последнюю
+   реплику над ними (инцидент 21.09, DRF-2150). */
+.ayla-list__end {
+  scroll-margin-bottom: calc(
+    var(--tabbar-height) + var(--ayla-compose-height) + var(--safe-bottom)
+  );
+}
+
+.ayla-empty,
+.ayla-typing {
+  color: var(--c-text-secondary);
+  font-size: var(--font-size-200);
+  padding: var(--s-3) 0;
+  margin: 0;
+}
+
+.ayla-bubble {
+  max-width: 82%;
+  border-radius: var(--r-md);
+  padding: var(--s-2) var(--s-3);
+  font-size: var(--font-size-300);
+  line-height: var(--leading-base);
+  word-wrap: break-word;
+  overflow-wrap: anywhere;
+}
+
+.ayla-bubble--ayla {
+  align-self: flex-start;
+  background: var(--c-surface-2);
+  color: var(--c-text-primary);
+  border-bottom-left-radius: 4px;
+}
+
+.ayla-bubble--mine {
+  align-self: flex-end;
+  background: var(--c-accent);
+  color: var(--c-text-on-accent);
+  border-bottom-right-radius: 4px;
+}
+
+.ayla-bubble__content {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+/* Карточка подтверждения. Намеренно НЕ пузырь: это не реплика, а
+   развилка — человек читает, что именно будет сделано, и решает. */
+.ayla-confirm {
+  align-self: stretch;
+  border: 1px solid var(--c-accent);
+  background: var(--c-accent-subtle);
+  border-radius: var(--r-md);
+  padding: var(--s-3);
+  margin-top: var(--s-2);
+}
+
+.ayla-confirm__title {
+  margin: 0 0 var(--s-1);
+  font-size: var(--font-size-200);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--c-accent-pressed);
+}
+
+.ayla-confirm__summary {
+  margin: 0 0 var(--s-3);
+  font-size: var(--font-size-300);
+  line-height: var(--leading-base);
+  color: var(--c-text-primary);
+}
+
+.ayla-confirm__actions {
+  display: flex;
+  gap: var(--s-2);
+  flex-wrap: wrap;
+}
+
+.ayla-btn {
+  min-height: 44px;
+  padding: 0 var(--s-4);
+  border-radius: var(--r-md);
+  border: 0;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.ayla-btn--primary {
+  background: var(--c-accent);
+  color: var(--c-text-on-accent);
+}
+
+.ayla-btn--primary:active {
+  background: var(--c-accent-pressed);
+}
+
+.ayla-btn--ghost {
+  background: transparent;
+  color: var(--c-text-secondary);
+  border: 1px solid var(--c-divider);
+}
+
+/* Опасное действие — ОБВОДКОЙ, не заливкой (решение владельца, §77 п.51).
+   Довод: в строке визита рядом стоят ещё две кнопки, и заливка перетянула
+   бы глаз на самое редкое действие.
+
+   ОТКЛОНЕНИЕ, названное в PR: цвет владелец не называл, вопрос открыт.
+   Взят `--c-danger` — тот же токен, на котором в этой семье уже стоит
+   `.ayla-error`. Соседние `.btn-danger` и `.btn-secondary--danger` из
+   дефисной семьи красятся `--c-warning`, то есть цветом ПРЕДУПРЕЖДЕНИЯ;
+   тянуть его в семью `ayla` значило бы закрепить это расхождение. Если
+   владелец решит иначе — правка на одну строку. */
+.ayla-btn--danger {
+  background: transparent;
+  color: var(--c-danger);
+  /* §6-упсилон (28.09): опасное — контурное, но с рамкой толще обычной
+     (1 px): цвет больше не единственный признак. Сторож — пара
+     «опасное × обычное» в dangerBorder2469.build.test.ts. */
+  border: 2px solid var(--c-danger);
+}
+
+/* Компактный вид — ЗАВЕСТИ модификатор, а не снимать инлайн (решение
+   владельца там же). Довод замерен, а не предположен — но считать надо от
+   СЕГОДНЯШНЕГО состояния, а не от того, что было до DRF-2448. На HEAD обе
+   строки визита уже по 60px: база `.ayla-btn` держит 44px, а инлайн
+   перебивал только `padding` и `font-size`. Модификатор их УМЕНЬШАЕТ:
+   строка без длительности 60 → 48px, строка с длительностью 60 → 55px,
+   то есть возвращается ровно к тому, чем была до 2448. Число 37px — это
+   контрфакт «если бы порога не было вовсе», а не то, что восстановится.
+
+   Заменяет инлайновые рецепты, выдуманные экранами порознь; кегль берётся
+   токеном, а не сырым `0.85em`, как было на строке визита.
+
+   ЦЕЛЬ НАЖАТИЯ ОСТАЁТСЯ 44px. Политика (`docs/design/policies/
+   information-architecture.md:625`) требует 44dp от всякого управляющего
+   элемента, и уменьшить кнопку до 32px значило бы её нарушить. Поэтому
+   уменьшается ВИДИМАЯ коробка, а область нажатия возвращается накладкой
+   `::after`: она не занимает места в раскладке, и строка от неё не растёт.
+
+   Высота накладки задана ЧИСЛОМ, а не отрицательными отступами. Первая
+   версия писала `inset: -6px 0` и обещала 44px арифметикой 32 + 6 + 6.
+   Замер показал другое: содержащий блок для абсолютного потомка — это
+   padding-box, то есть без рамки. У `--ghost` рамка 1px с каждой стороны,
+   и накладка выходила 42px; у `--primary` (рамки нет) — 44px; в
+   растянутой строке визита, где кнопка тянется до 39px, — 49px. Обещание,
+   которое меняется от соседнего модификатора и от содержимого соседней
+   ячейки, обещанием не является. */
+.ayla-btn--compact {
+  position: relative;
+  min-height: 32px;
+  padding: 0 var(--s-2);
+  font-size: var(--font-size-100);
+}
+
+.ayla-btn--compact::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 44px;
+  transform: translateY(-50%);
+}
+
+.ayla-btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.ayla-error {
+  color: var(--c-danger);
+  font-size: var(--font-size-200);
+  margin: var(--s-2) 0 0;
+}
+
+.ayla-compose {
+  position: sticky;
+  bottom: calc(var(--tabbar-height) + var(--safe-bottom));
+  background: var(--c-bg);
+  border-top: 1px solid var(--c-divider);
+  padding: var(--s-2) 0;
+  margin-top: auto;
+}
+
+.ayla-compose__row {
+  display: flex;
+  gap: var(--s-2);
+  align-items: flex-end;
+}
+
+.ayla-compose__textarea {
+  flex: 1;
+  resize: none;
+  min-height: 44px;
+  max-height: 140px;
+  padding: var(--s-2) var(--s-3);
+  border-radius: var(--r-md);
+  border: 1px solid var(--c-divider);
+  background: var(--c-surface-1);
+  color: var(--c-text-primary);
+  font: inherit;
+  line-height: var(--leading-base);
+}
+
+.ayla-compose__textarea:focus {
+  outline: 2px solid var(--c-accent-subtle);
+  outline-offset: 1px;
+  border-color: var(--c-accent);
+}
+
+.ayla-compose__send {
+  min-width: 44px;
+  min-height: 44px;
+  border-radius: var(--r-md);
+  background: var(--c-accent);
+  color: var(--c-text-on-accent);
+  border: 0;
+  cursor: pointer;
+}
+
+.ayla-compose__send:disabled {
+  background: var(--c-surface-2);
+  color: var(--c-text-secondary);
+  cursor: not-allowed;
+}
+
+.ayla-compose__counter {
+  margin: var(--s-1) 0 0;
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+  text-align: end;
+}
+
+.ayla-compose__counter--over {
+  color: var(--c-danger);
+}
+
+/* Вход в раздел с «Сегодня». Временный, пока нижняя навигация
+   четырёхразделная: перевод 4 → 3 идёт вместе с DRF-1255. */
+.ayla-entry {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
+  padding: var(--s-3);
+  border-radius: var(--r-md);
+  border: 1px solid var(--c-divider);
+  background: var(--c-surface-1);
+  color: var(--c-text-primary);
+  font: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+
+.ayla-entry__title {
+  display: block;
+  font-weight: 600;
+}
+
+.ayla-entry__sub {
+  display: block;
+  font-size: var(--font-size-200);
+  color: var(--c-text-secondary);
+}
+
+.ayla-entry__chevron {
+  color: var(--c-text-secondary);
+  flex: none;
+}
+
+/* DRF-1746 — типы ответа на шаге анкеты (макет C03 P11): шкала с
+   подписями концов и короткое текстовое поле со счётчиком лимита. Фишки
+   и кнопки — общие классы выше. */
+.anketa-scale__ends {
+  display: flex;
+  justify-content: space-between;
+  margin-top: calc(-1 * var(--s-2));
+  margin-bottom: var(--s-3);
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
+.anketa-text__limit {
+  margin: var(--s-1) 0 0;
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+  text-align: right;
+}
+
+/* DRF-1745 — подтверждение известного (макет C03.3): два ответа в ряд,
+   «Да, всё так» главным. Переносится на узком экране. */
+.anketa-confirm {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+}
+
+/* DRF-1807 — экран 01 «всё готово»: чек-лист readiness и бар без
+   процентов. Нижней навигации на экране нет (макет §7). */
+.setup-landing__title {
+  margin: 0 0 var(--s-2);
+  font-size: var(--font-size-400);
+  font-weight: 700;
+  color: var(--c-text-primary);
+}
+
+.setup-landing__lead {
+  margin: 0 0 var(--s-2);
+  font-size: var(--font-size-200);
+  color: var(--c-text-secondary);
+}
+
+.setup-landing__bar {
+  height: 6px;
+  margin: var(--s-4) 0;
+  background: var(--c-surface-2);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.setup-landing__bar-fill {
+  height: 100%;
+  background: var(--c-accent);
+  border-radius: 999px;
+}
+
+.setup-landing__section-title {
+  margin: 0 0 var(--s-2);
+  font-size: var(--font-size-100);
+  font-weight: 600;
+  color: var(--c-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.setup-landing__list {
+  list-style: none;
+  margin: 0 0 var(--s-4);
+  padding: 0;
+}
+
+.setup-landing__item + .setup-landing__item {
+  border-top: 1px solid var(--c-divider);
+}
+
+.setup-landing__row {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  width: 100%;
+  min-height: 44px;
+  padding: var(--s-3) 0;
+  background: none;
+  border: 0;
+  text-align: left;
+  font-size: var(--font-size-200);
+  color: var(--c-text-primary);
+}
+
+.setup-landing__row--tappable {
+  cursor: pointer;
+}
+
+.setup-landing__mark {
+  flex: 0 0 auto;
+  width: 24px;
+  text-align: center;
+  color: var(--c-accent);
+}
+
+.setup-landing__label {
+  flex: 1 1 auto;
+}
+
+.setup-landing__state {
+  flex: 0 0 auto;
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
+.setup-landing__item--missing .setup-landing__state {
+  color: var(--c-accent-pressed);
+  font-weight: 600;
+}
+
+/* DRF-2326: недоступный шаг виден, но приглушён и с причиной на своей
+   строке — он не зовёт тапать, а объясняет, почему тапать некуда. */
+.setup-landing__item--unavailable .setup-landing__row {
+  flex-wrap: wrap;
+}
+
+.setup-landing__item--unavailable .setup-landing__mark,
+.setup-landing__item--unavailable .setup-landing__label,
+.setup-landing__item--unavailable .setup-landing__state {
+  color: var(--c-text-secondary);
+}
+
+.setup-landing__reason {
+  flex: 1 0 100%;
+  padding-left: calc(24px + var(--s-3));
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
+.setup-landing__identity,
+.setup-landing__note {
+  margin: 0 0 var(--s-3);
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
+.setup-landing__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+  margin-top: var(--s-4);
+}
+
+/* DRF-1807 — карточка «Продолжить настройку» в «Моём дне». */
+.setup-card {
+  padding: var(--s-3);
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+}
+
+.setup-card__title {
+  margin: 0 0 var(--s-2);
+  font-size: var(--font-size-200);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+
+.setup-card__list {
+  margin: 0 0 var(--s-3);
+  padding-left: var(--s-4);
+  font-size: var(--font-size-200);
+  color: var(--c-text-secondary);
+}
+
+.setup-card__item + .setup-card__item {
+  margin-top: var(--s-1);
+}
+
+/* DRF-1817 — экран 06 «Рабочие часы»: дни-чекбоксы (общие фишки), одно
+   время на все, неделя списком, редактор дня в листе. */
+.working-hours__title {
+  margin: 0 0 var(--s-2);
+  font-size: var(--font-size-400);
+  font-weight: 700;
+  color: var(--c-text-primary);
+}
+
+.working-hours__note,
+.working-hours__tz {
+  margin: 0 0 var(--s-3);
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
+.working-hours__times {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-3);
+  margin-bottom: var(--s-3);
+}
+
+.working-hours__time {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  font-size: var(--font-size-200);
+  color: var(--c-text-primary);
+}
+
+.working-hours__input {
+  min-height: 44px;
+  padding: var(--s-1) var(--s-2);
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+  font-size: var(--font-size-200);
+  color: var(--c-text-primary);
+}
+
+.working-hours__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.working-hours__item + .working-hours__item {
+  border-top: 1px solid var(--c-divider);
+}
+
+.working-hours__row {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--s-3);
+  width: 100%;
+  min-height: 44px;
+  padding: var(--s-3) 0;
+  background: none;
+  border: 0;
+  text-align: left;
+  font-size: var(--font-size-200);
+  color: var(--c-text-primary);
+  cursor: pointer;
+}
+
+.working-hours__day {
+  flex: 1 1 auto;
+}
+
+.working-hours__summary {
+  flex: 0 0 auto;
+  color: var(--c-text-secondary);
+}
+
+.working-hours__summary--error,
+.working-hours__error {
+  color: var(--c-danger);
+}
+
+.working-hours__error {
+  margin: 0 0 var(--s-3);
+  font-size: var(--font-size-100);
+}
+
+.working-hours__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+  margin-top: var(--s-4);
+}
+
+/* DRF-2200 (М-7) — «Рабочий график» по макету DRF-1186: подпись недели,
+   три варианта дня, «недоступно (часть дня)» и карточка конфликта. */
+.working-hours__lead {
+  margin: 0 0 var(--s-1);
+  font-size: var(--font-size-200);
+  color: var(--c-text-primary);
+}
+
+.working-hours__scope {
+  margin: 0 0 var(--s-3);
+  font-size: var(--font-size-100);
+  font-weight: 600;
+  color: var(--c-text-secondary);
+}
+
+.working-hours__hint {
+  margin: var(--s-3) 0;
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
+.working-hours__options {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
+.working-hours__option {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  gap: 0 var(--s-2);
+  min-height: 44px;
+  padding: var(--s-2) 0;
+  cursor: pointer;
+}
+
+.working-hours__option-input {
+  grid-row: span 2;
+  width: 20px;
+  height: 20px;
+  accent-color: var(--c-accent);
+}
+
+.working-hours__option-name {
+  font-size: var(--font-size-200);
+  color: var(--c-text-primary);
+}
+
+.working-hours__option-hint {
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
+.working-hours__field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  margin-bottom: var(--s-3);
+}
+
+.working-hours__field-label {
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
+.working-hours__reason {
+  min-height: 44px;
+  padding: var(--s-1) var(--s-2);
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+  font-size: var(--font-size-200);
+  color: var(--c-text-primary);
+}
+
+.working-hours__conflict-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  padding: var(--s-3);
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+}
+
+.working-hours__conflict-card + .working-hours__conflict-card {
+  margin-top: var(--s-2);
+}
+
+.working-hours__conflict-who {
+  margin: 0;
+  font-size: var(--font-size-200);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+
+.working-hours__conflict-when,
+.working-hours__conflict-what {
+  margin: 0;
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
+.working-hours__conflict-link {
+  margin-top: var(--s-1);
+  font-size: var(--font-size-200);
+  color: var(--c-accent);
+}
+
+.schedule-week__setup {
+  display: inline-flex;
+  margin-top: var(--s-2);
+  text-decoration: none;
+}
+
+/* DRF-1857 — «Мои отзывы» мастера. */
+.master-reviews {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+}
+
+.master-reviews__title {
+  font-size: var(--font-size-400);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+
+.master-reviews__status,
+.master-reviews__empty-hint,
+.master-reviews__meta {
+  font-size: var(--font-size-200);
+  color: var(--c-text-secondary);
+}
+
+.master-reviews__summary {
+  font-size: var(--font-size-300);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+
+.master-reviews__empty {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  padding: var(--s-4);
+  border-radius: var(--r-md);
+  background: var(--c-surface-1);
+}
+
+.master-reviews__empty-title {
+  font-size: var(--font-size-300);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+
+.master-reviews__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.master-reviews__item {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  padding: var(--s-3);
+  border-radius: var(--r-md);
+  background: var(--c-surface-1);
+}
+
+.master-reviews__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-2);
+}
+
+.master-reviews__client {
+  font-size: var(--font-size-300);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+
+.master-reviews__stars {
+  flex: none;
+  font-size: var(--font-size-200);
+  color: var(--c-accent);
+  letter-spacing: 1px;
+}
+
+.master-reviews__text {
+  font-size: var(--font-size-300);
+  color: var(--c-text-primary);
+  white-space: pre-line;
+}
+
+/* DRF-1809 (M17) — экран 03: выбор услуг из каталога по направлению. */
+.service-select__counter {
+  margin: 0;
+  font-size: var(--font-size-200);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+
+.service-select__directions,
+.service-select__direction,
+.service-select__done {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
+.service-select__direction-row {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+  text-align: left;
+  cursor: pointer;
+}
+
+.service-select__search {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
+.service-select__group {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.service-select__group-title {
+  padding: 0;
+  font-size: var(--font-size-100);
+  font-weight: 600;
+  color: var(--c-text-secondary);
+}
+
+.service-select__item {
+  flex-direction: row;
+  align-items: center;
+  gap: var(--s-2);
+  cursor: pointer;
+}
+
+/* DRF-1808 (M16) — экран 02: направления как карточки-чекбоксы, «Другое
+   направление» как уточнение перед формой своей услуги; вход с экрана 04. */
+.master-services__note {
+  margin: 0;
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
+.service-card__icon {
+  font-size: var(--font-size-300);
+  line-height: 1;
+}
+
+.service-select__other {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+
+.master-services__directions-entry {
+  margin: 0;
+  display: flex;
+}
+
+/* DRF-1811 (M19) — экран 05: место работы. Карта — ссылка по координатам,
+   без встраивания и без фото фасада. */
+.place__suggestions {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+}
+
+.place__suggestion {
+  width: 100%;
+  justify-content: flex-start;
+  text-align: left;
+}
+
+.place__card {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--s-1);
+}
+
+.place__badge {
+  font-size: var(--font-size-100);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+
+.place__map-link {
+  font-size: var(--font-size-100);
+  color: var(--c-accent);
+  text-decoration: underline;
+}
+
+/* DRF-1818 — экран 08 «отправка профиля на проверку»: чек-лист по кодам
+   каталога, услуги на проверке, текстовая сводка вместо карточки до M22. */
+.publication {
+  display: block;
+}
+
+.publication__title {
+  margin: 0 0 var(--s-2);
+  font-size: var(--font-size-400);
+  font-weight: 700;
+  color: var(--c-text-primary);
+}
+
+.publication__lead {
+  margin: 0 0 var(--s-3);
+  font-size: var(--font-size-200);
+  color: var(--c-text-secondary);
+}
+
+.publication__list,
+.publication__services,
+.publication__days {
+  list-style: none;
+  margin: 0 0 var(--s-4);
+  padding: 0;
+}
+
+.publication__item {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s-3);
+  padding: var(--s-3) 0;
+}
+
+.publication__item + .publication__item {
+  border-top: 1px solid var(--c-divider);
+}
+
+.publication__item--missing .publication__mark {
+  color: var(--c-accent-pressed);
+  font-weight: 700;
+}
+
+.publication__mark {
+  flex: 0 0 auto;
+  width: 24px;
+  text-align: center;
+  color: var(--c-accent);
+}
+
+.publication__body {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--s-1);
+}
+
+.publication__label,
+.publication__name {
+  margin: 0;
+  font-size: var(--font-size-200);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+
+.publication__detail {
+  margin: 0;
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
+.publication__detail--missing {
+  color: var(--c-accent-pressed);
+  font-weight: 600;
+}
+
+.publication__action {
+  align-self: flex-start;
+  margin-top: var(--s-1);
+}
+
+.publication__review,
+.publication__summary,
+.publication__uncertain {
+  margin: 0 0 var(--s-4);
+  padding: var(--s-3);
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+}
+
+.publication__section-title {
+  margin: 0 0 var(--s-2);
+  font-size: var(--font-size-100);
+  font-weight: 600;
+  color: var(--c-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.publication__service,
+.publication__day {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-2);
+  padding: var(--s-1) 0;
+  font-size: var(--font-size-200);
+  color: var(--c-text-primary);
+}
+
+.publication__chip {
+  flex: 0 0 auto;
+  padding: 2px var(--s-2);
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+  background: var(--c-surface-2);
+  border-radius: 999px;
+}
+
+.publication__note {
+  margin: 0 0 var(--s-3);
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
+.publication__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+  margin-top: var(--s-4);
+}
+
+/* --- DRF-1814 (экран 07): бейдж и чипы карточки мастера --------------------
+   Бейдж рисуется только при accepts_today === true с сервера (реальный слот);
+   чипы — категории выбранных шаблонов. Цвета — токены, свои значения не
+   вводятся. */
+.master-card__badge {
+  display: inline-block;
+  margin-top: var(--s-1);
+  padding: 2px var(--s-2);
+  border-radius: 999px;
+  background: var(--c-accent-subtle);
+  color: var(--c-accent);
+  font-size: var(--font-size-200);
+}
+
+.master-card__chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-1);
+  margin: var(--s-1) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.master-card__chip {
+  max-width: 100%;
+  padding: 2px var(--s-2);
+  border: 1px solid var(--c-divider);
+  border-radius: 999px;
+  background: var(--c-surface-2);
+  color: var(--c-text-primary);
+  font-size: var(--font-size-200);
+}
+
+/* --- DRF-1814 (экран 07): профиль — имя с «Изменить», подсказки, работы,
+   предпросмотр, кроп ------------------------------------------------------ */
+.master-profile__name-row {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s-2);
+  flex-wrap: wrap;
+}
+
+.master-profile__link-btn {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--c-accent);
+  font: inherit;
+  font-size: var(--font-size-200);
+  cursor: pointer;
+}
+
+.master-profile__hints {
+  margin: var(--s-2) 0 0;
+  padding-left: var(--s-4);
+  color: var(--c-text-secondary);
+  font-size: var(--font-size-200);
+}
+
+.master-profile__input {
+  width: 100%;
+  padding: var(--s-2) var(--s-3);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+  background: var(--c-surface-1);
+  color: var(--c-text-primary);
+  font: inherit;
+}
+
+.master-profile__input:focus {
+  outline: 2px solid var(--c-accent);
+  outline-offset: -1px;
+}
+
+.master-profile__portfolio-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s-2);
+  flex-wrap: wrap;
+}
+
+.master-profile__portfolio {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--s-2);
+  margin: var(--s-2) 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.master-profile__work {
+  position: relative;
+  aspect-ratio: 1 / 1;
+  overflow: hidden;
+  border-radius: var(--r-md);
+  background: var(--c-surface-2);
+}
+
+.master-profile__work img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.master-profile__work-remove {
+  position: absolute;
+  top: var(--s-1);
+  right: var(--s-1);
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--c-surface-1);
+  color: var(--c-text-primary);
+  font: inherit;
+  line-height: 28px;
+  text-align: center;
+  cursor: pointer;
+}
+
+.master-profile__preview {
+  margin-top: var(--s-2);
+}
+
+.master-profile__preview .master-card {
+  pointer-events: none;
+}
+
+.photo-crop__frame {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 1 / 1;
+  overflow: hidden;
+  margin-top: var(--s-2);
+  border-radius: var(--r-md);
+  background: var(--c-surface-2);
+}
+
+.photo-crop__image {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  transform-origin: center;
+  transition: transform 120ms ease-out;
+}
+
+.photo-crop__zoom {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  margin-top: var(--s-2);
+  color: var(--c-text-secondary);
+  font-size: var(--font-size-200);
+}
+
+.photo-crop__zoom input[type="range"] {
+  flex: 1;
+}
+
+/* DRF-2157 (М-6) — универсальные системные состояния мастерских экранов
+   (макет DRF-1181 п.10). Карточка (loading/empty/forbidden/pending/conflict/
+   первичная ошибка), полоса (offline/stale/ошибка при данных), строка
+   (refreshing). Появляются на любом экране /master|solo — одним видом. */
+.system-state {
+  color: var(--c-text-primary);
+}
+.system-state--skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+.system-state--inline {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-2);
+  font-size: var(--font-size-200);
+  color: var(--c-text-secondary);
+  padding: var(--s-1) 0 var(--s-2);
+}
+.system-state--card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: var(--s-2);
+  padding: var(--s-5) var(--s-4);
+  border-radius: var(--r-lg);
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  margin: var(--s-3) 0;
+}
+.system-state--accent {
+  background: color-mix(
+    in srgb,
+    var(--c-accent-subtle) 60%,
+    var(--c-surface-1)
+  );
+}
+.system-state--danger {
+  background: color-mix(in srgb, var(--c-danger) 8%, var(--c-surface-1));
+}
+.system-state--banner {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  padding: var(--s-2) var(--s-3);
+  border-radius: var(--r-md);
+  background: var(--c-surface-2);
+  margin-bottom: var(--s-3);
+}
+.system-state__icon {
+  display: inline-flex;
+  color: var(--c-text-secondary);
+  flex-shrink: 0;
+}
+.system-state--danger .system-state__icon {
+  color: var(--c-danger);
+}
+.system-state--accent .system-state__icon {
+  color: var(--c-accent);
+}
+.system-state__dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--c-accent);
+}
+.system-state__text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+.system-state__title {
+  margin: 0;
+  font-size: var(--font-size-300);
+  font-weight: 600;
+  line-height: var(--leading-tight);
+}
+.system-state--banner .system-state__title,
+.system-state--inline .system-state__title {
+  font-size: var(--font-size-200);
+}
+.system-state__body {
+  margin: 0;
+  font-size: var(--font-size-200);
+  color: var(--c-text-secondary);
+  line-height: var(--leading-base);
+}
+.system-state__cta {
+  margin-top: var(--s-2);
+}
+.system-state__link {
+  background: none;
+  border: 0;
+  color: var(--c-accent);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  padding: var(--s-1) var(--s-2);
+  min-height: 32px;
+}
+.system-state__link:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* DRF-2157 (М-6) — карточка записи мастера (макет DRF-1181 п.5): крупная на
+   «Сегодня», компактная в «Расписании». Ссылка на «Детали записи». */
+.master-booking-card {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-left: 3px solid var(--c-accent);
+  border-radius: var(--r-md);
+  padding: var(--s-3) var(--s-4);
+  color: inherit;
+  text-decoration: none;
+  transition: background-color var(--dur-fast) var(--ease-out);
+}
+.master-booking-card:active {
+  background: var(--c-surface-2);
+}
+.master-booking-card--quiet {
+  border-left-color: var(--c-divider);
+  background: color-mix(in srgb, var(--c-divider) 30%, var(--c-surface-1));
+}
+.master-booking-card__main {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+.master-booking-card__time {
+  font-size: var(--font-size-300);
+  font-weight: 600;
+  color: var(--c-text-primary);
+  white-space: nowrap;
+}
+.master-booking-card--today .master-booking-card__time {
+  font-size: var(--font-size-400);
+}
+.master-booking-card__name {
+  font-size: var(--font-size-300);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+.master-booking-card--quiet .master-booking-card__name {
+  font-weight: 500;
+}
+.master-booking-card__service {
+  font-size: var(--font-size-200);
+  color: var(--c-text-secondary);
+}
+.master-booking-card__duration {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s-1);
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+  margin-top: var(--s-1);
+}
+.master-booking-card__chevron {
+  color: var(--c-text-secondary);
+  font-size: var(--font-size-400);
+  line-height: 1;
+  flex-shrink: 0;
+}
+/* Блок unknown на «Деталях записи» — общий SystemState внутри региона состояния. */
+.booking-detail__state--bare {
+  margin: 0;
+}
+
+/* DRF-2194 — линия текущего времени на шкале «Расписания» (макет DRF-1183:
+   тонкая красная линия с подписью времени; «всегда видно, но не отвлекает»). */
+.schedule-now {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  margin: var(--s-1) 0;
+  color: var(--c-danger);
+}
+.schedule-now__time {
+  font-size: var(--font-size-100);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.schedule-now__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  flex-shrink: 0;
+}
+.schedule-now__line {
+  flex: 1;
+  height: 1px;
+  background: currentColor;
+  opacity: 0.8;
+}
+
+/* ---------------------------------------------------------------------------
+   Ayla для мастера — карточки макета DRF-1187 (DRF-2153, М-5).
+   Стартовый экран (контекст дня + чипы), окна свободного времени, день,
+   «Проверьте запись», ✓ «Запись создана», ⚠ «Это время занято»,
+   «последние известные данные». Токены — те же, что у SystemState.
+   ------------------------------------------------------------------------- */
+
+.ayla-card {
+  border: 1px solid var(--c-divider);
+  background: var(--c-surface-2);
+  border-radius: var(--r-md);
+  padding: var(--s-3);
+  margin-top: var(--s-2);
+}
+
+.ayla-card--danger {
+  border-color: color-mix(in srgb, var(--c-danger) 40%, var(--c-divider));
+  background: color-mix(in srgb, var(--c-danger) 8%, var(--c-surface-2));
+}
+
+.ayla-card--warning {
+  border-color: color-mix(in srgb, var(--c-warning) 40%, var(--c-divider));
+  background: color-mix(in srgb, var(--c-warning) 8%, var(--c-surface-2));
+}
+
+.ayla-card--success {
+  border-color: color-mix(in srgb, var(--c-success) 40%, var(--c-divider));
+  background: color-mix(in srgb, var(--c-success) 8%, var(--c-surface-2));
+}
+
+.ayla-card__title {
+  margin: 0 0 var(--s-1);
+  font-size: var(--font-size-300);
+  font-weight: 600;
+  color: var(--c-text-primary);
+}
+
+.ayla-card--danger .ayla-card__title {
+  color: var(--c-danger);
+}
+
+.ayla-card--success .ayla-card__title {
+  color: var(--c-success);
+}
+
+.ayla-card__row {
+  margin: 0 0 var(--s-1);
+  font-size: var(--font-size-200);
+  color: var(--c-text-primary);
+}
+
+.ayla-card__row--muted {
+  color: var(--c-text-secondary);
+}
+
+.ayla-card__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-1);
+}
+
+.ayla-card__option {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  width: 100%;
+  min-height: 44px;
+  padding: var(--s-2) var(--s-3);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+  /* §6-хи (28.09): прозрачный — так он и рисовался, пока здесь стояло
+     несуществующее --c-surface (объявление недействительно → transparent).
+     Заливка — отдельное UI-решение, не побочный эффект правки CSS. */
+  background: transparent;
+  color: var(--c-text-primary);
+  font-size: var(--font-size-200);
+  text-align: start;
+  text-decoration: none;
+}
+
+.ayla-card__row-main {
+  flex: 1;
+  font-weight: 600;
+}
+
+.ayla-card__row-meta {
+  color: var(--c-text-secondary);
+  font-size: var(--font-size-100);
+}
+
+.ayla-card__cta {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  margin-top: var(--s-2);
+  text-decoration: none;
+}
+
+.ayla-btn--secondary {
+  border: 1px solid var(--c-accent);
+  /* §6-хи (28.09): прозрачный явно — см. .ayla-card__option. */
+  background: transparent;
+  color: var(--c-accent);
+}
+
+.ayla-card__hint {
+  margin: var(--s-2) 0 0;
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+}
+
+.ayla-review {
+  margin-bottom: var(--s-3);
+}
+
+.ayla-review__row {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  font-size: var(--font-size-200);
+  color: var(--c-text-primary);
+}
+
+.ayla-start {
+  padding: var(--s-2) 0;
+}
+
+.ayla-start__context {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s-2);
+  margin-top: 0;
+}
+
+.ayla-start__context-body {
+  flex: 1;
+}
+
+.ayla-start__icon {
+  font-size: var(--font-size-400);
+}
+
+.ayla-start__label {
+  margin: var(--s-3) 0 var(--s-2);
+  font-size: var(--font-size-200);
+  color: var(--c-text-secondary);
+}
+
+.ayla-start__chips {
+  gap: var(--s-2);
+}
+
+.ayla-start__chip {
+  flex-wrap: wrap;
+}
+
+.ayla-start__chip .ayla-card__row-main {
+  flex-basis: 100%;
+}
+
+/* DRF-2268 — вернуться в чат не вышло: подсказка рядом с кнопкой. */
+.return-to-chat-hint {
+  margin: var(--s-2) 0 0;
+  color: var(--c-text-secondary);
+  font-size: var(--font-size-100);
 }

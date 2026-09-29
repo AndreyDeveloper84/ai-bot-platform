@@ -301,6 +301,11 @@ class TestProfile:
                             "daily_water_ml": 2100,
                             "bmr": 1450,
                         },
+                        # Каталог объявляет блок обязательным с #316; без
+                        # него DTO читает ориентиры как не настроенные
+                        # (DRF-1686, §6) — этот тест про разбор чисел, а
+                        # не про отсутствие происхождения.
+                        "targets_provenance": {"source": "ayla_calculated"},
                     }
                 },
             )
@@ -334,6 +339,187 @@ class TestProfile:
         _set_transport(transport)
 
         assert await client.get_profile(external_user_id="bot:1") is None
+
+
+# ─── profile: происхождение ориентира (DRF-1623 N-b) ──────────────────────
+
+
+def _profile_body(**over: Any) -> dict[str, Any]:
+    body: dict[str, Any] = {
+        "gender": "female",
+        "age": 32,
+        "height_cm": 168,
+        "weight_kg": 62,
+        "goal": "maintain",
+        "norms": {},
+    }
+    body.update(over)
+    return body
+
+
+class TestProfileTargetsSource:
+    """``targets_provenance.source`` доезжает до ``ProfileResponse``.
+
+    Каталог с #316 отдаёт этот ключ ОБЯЗАТЕЛЬНЫМ (значения ``none |
+    unknown_legacy | ayla_calculated | user_entered``). Бот обязан отличать
+    «прислали „нет“» от «не прислали»: второе — нарушение контракта, а не
+    отсутствие ориентира, и изготовить из него ``"none"`` нельзя.
+    """
+
+    @staticmethod
+    async def _fetch(body: dict[str, Any]) -> nc.ProfileResponse:
+        def handler(_: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"data": body})
+
+        client, transport = _client_with_handler(handler)
+        _set_transport(transport)
+        profile = await client.get_profile(external_user_id="bot:1")
+        assert profile is not None
+        return profile
+
+    @pytest.mark.asyncio
+    async def test_source_none_arrives_as_none(self) -> None:
+        body = _profile_body(targets_provenance={"source": "none", "method_versions": {}})
+        profile = await self._fetch(body)
+        assert profile.targets_source == "none"
+        assert profile.protein_g is None
+
+    @pytest.mark.asyncio
+    async def test_source_ayla_calculated_arrives_verbatim(self) -> None:
+        body = _profile_body(
+            norms={"daily_kcal": 1900, "daily_protein_g": 95},
+            targets_provenance={"source": "ayla_calculated"},
+        )
+        profile = await self._fetch(body)
+        assert profile.targets_source == "ayla_calculated"
+        assert profile.protein_g == 95
+
+    @pytest.mark.asyncio
+    async def test_missing_key_is_empty_not_none(self) -> None:
+        """«Не прислали» ≠ «прислали „нет“»: у отсутствия своё имя — ``""``."""
+        profile = await self._fetch(_profile_body())
+        assert profile.targets_source == ""
+
+    @pytest.mark.asyncio
+    async def test_provenance_without_source_is_empty_too(self) -> None:
+        profile = await self._fetch(_profile_body(targets_provenance={"method_versions": {}}))
+        assert profile.targets_source == ""
+
+    @pytest.mark.asyncio
+    async def test_by_kind_arrives_per_kind(self) -> None:
+        """DRF-1929 (F1(б)): каталог подписывает виды порознь — бот их различает."""
+        body = _profile_body(
+            norms={"daily_kcal": 1900, "daily_protein_g": 95, "daily_water_ml": 2200},
+            targets_provenance={
+                "source": "user_entered",
+                "by_kind": {
+                    "calories": {"source": "user_entered"},
+                    "fluids": {"source": "ayla_proposed"},
+                },
+            },
+        )
+        profile = await self._fetch(body)
+
+        assert profile.calories_source == "user_entered"
+        assert profile.fluids_source == "ayla_proposed"
+        # Калории человек назвал — едут; вода только предложена — не едет.
+        assert profile.daily_kcal == 1900
+        assert profile.water_ml is None
+
+    @pytest.mark.asyncio
+    async def test_without_by_kind_both_kinds_take_the_whole_set_source(self) -> None:
+        """Мост на время, пока каталог не выложен, — и он обязателен.
+
+        Этот PR может слиться раньше каталожного (#498) и точно раньше
+        выкладки. Пока ``by_kind`` не приходит, единственная правда о видах
+        — общая подпись; прочти бот пустоту как «не настроено», он снял бы
+        ориентиры у КАЖДОГО живого клиента.
+        """
+        body = _profile_body(
+            norms={"daily_kcal": 1900, "daily_water_ml": 2200},
+            targets_provenance={"source": "ayla_calculated"},
+        )
+        profile = await self._fetch(body)
+
+        assert profile.calories_source == "ayla_calculated"
+        assert profile.fluids_source == "ayla_calculated"
+        assert (profile.daily_kcal, profile.water_ml) == (1900, 2200)
+
+    @pytest.mark.asyncio
+    async def test_null_inside_by_kind_falls_back_too(self) -> None:
+        """Строка каталога до миграции данных: ключ есть, значение ``None``.
+
+        Это «по видам не устанавливалось», а не «ориентира нет», и
+        подставлять ``none`` здесь нельзя — иначе бот изготовил бы
+        состояние, которого каталог не присылал.
+        """
+        body = _profile_body(
+            norms={"daily_kcal": 1900},
+            targets_provenance={
+                "source": "ayla_calculated",
+                "by_kind": {"calories": {"source": None}, "fluids": {"source": None}},
+            },
+        )
+        profile = await self._fetch(body)
+
+        assert profile.calories_source == "ayla_calculated"
+        assert profile.daily_kcal == 1900
+
+
+class TestProfileMethodAndInputsArrive:
+    """Методика и снимок входов доезжают до ``ProfileResponse`` (§5.1 11.09.2026).
+
+    Каталог с PR #362 шлёт ``targets_provenance.input_snapshot`` владельцу
+    данных: «методика и использованные данные показываются человеку».
+    Бот обязан довезти их до карточки как есть — и не изготавливать,
+    когда их нет.
+    """
+
+    _fetch = staticmethod(TestProfileTargetsSource._fetch)
+
+    @pytest.mark.asyncio
+    async def test_method_versions_and_snapshot_arrive_verbatim(self) -> None:
+        snapshot = {
+            "gender": "female",
+            "age": 32,
+            "height_cm": 168,
+            "weight_kg": 62.0,
+            "activity_coefficient": 1.375,
+            "goal": "maintain",
+            "pace": "moderate",
+        }
+        profile = await self._fetch(
+            _profile_body(
+                targets_provenance={
+                    "source": "ayla_calculated",
+                    "method_versions": {"calories": "mifflin_st_jeor_v1"},
+                    "computed_at": "2026-09-11T10:00:00.000Z",
+                    "input_snapshot": snapshot,
+                }
+            )
+        )
+        assert profile.targets_method_versions == {"calories": "mifflin_st_jeor_v1"}
+        assert profile.targets_input_snapshot == snapshot
+
+    @pytest.mark.asyncio
+    async def test_absent_snapshot_is_empty_dict_not_invented(self) -> None:
+        profile = await self._fetch(
+            _profile_body(
+                targets_provenance={
+                    "source": "none",
+                    "method_versions": {},
+                    "computed_at": None,
+                }
+            )
+        )
+        assert profile.targets_method_versions == {}
+        assert profile.targets_input_snapshot == {}
+
+    @pytest.mark.asyncio
+    async def test_no_provenance_block_gives_empty_dicts(self) -> None:
+        profile = await self._fetch(_profile_body())
+        assert profile.targets_method_versions == {}
+        assert profile.targets_input_snapshot == {}
 
 
 # ─── water envelope ────────────────────────────────────────────────────────
@@ -458,3 +644,293 @@ class TestSingleton:
         nc.reset_nutrition_client()
         with pytest.raises(ValueError, match="AYLA_BASE_URL"):
             nc.get_nutrition_client()
+
+
+# ─── §5.1: предложение и подтверждение ────────────────────────────────────
+
+
+class TestProposedNormsAndConfirm:
+    """``ayla_proposed`` показывается как предложение и подтверждается кнопкой.
+
+    Инвариант DTO (§6) обнуляет числа у не настроенного источника — и
+    ``ayla_proposed`` не настроен по построению. Единственный санкционированный
+    путь к числам предложения — ``proposed_norms`` из ``raw``; для любого
+    другого источника он пуст.
+    """
+
+    _fetch = staticmethod(TestProfileTargetsSource._fetch)
+
+    _NORMS = {"daily_kcal": 1650, "daily_protein_g": 100, "daily_fat_g": 55, "daily_carbs_g": 190}
+
+    @pytest.mark.asyncio
+    async def test_proposed_numbers_are_nulled_on_the_dto_but_readable_as_a_proposal(
+        self,
+    ) -> None:
+        profile = await self._fetch(
+            _profile_body(
+                norms=self._NORMS,
+                targets_provenance={
+                    "source": "ayla_proposed",
+                    "method_versions": {},
+                    "confirmed_at": None,
+                },
+            )
+        )
+        assert profile.daily_kcal is None  # инвариант §6 держится
+        assert profile.targets_state == nc.TARGETS_NOT_CONFIGURED
+        assert nc.proposed_norms(profile) == {
+            "daily_kcal": 1650,
+            "protein_g": 100,
+            "fat_g": 55,
+            "carbs_g": 190,
+            "water_ml": None,
+        }
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "source", ["ayla_calculated", "user_entered", "none", "unknown_legacy", ""]
+    )
+    async def test_other_sources_are_not_a_proposal(self, source: str) -> None:
+        provenance = (
+            {"source": source, "method_versions": {}} if source else {"method_versions": {}}
+        )
+        profile = await self._fetch(_profile_body(norms=self._NORMS, targets_provenance=provenance))
+        # POSITIVE впереди: числа в ответе ЕСТЬ (в raw) — иначе «не
+        # предложение» доказывало бы пустоту, а не источник.
+        assert profile.raw["norms"]["daily_kcal"] == 1650
+        assert profile.targets_source == source
+        assert nc.proposed_norms(profile) == {}
+
+    @pytest.mark.asyncio
+    async def test_health_factor_refusals_are_read_by_name(self) -> None:
+        profile = await self._fetch(
+            _profile_body(
+                norms={},
+                overrides_applied=[
+                    {"reason": "health_factor_pregnant"},
+                    {"reason": "bmr_floor", "from": {}, "to": {}},
+                    {"reason": "health_factor_minor"},
+                ],
+                targets_provenance={"source": "none", "method_versions": {}},
+            )
+        )
+        assert nc.health_factor_refusals(profile) == ["pregnant", "minor"]
+
+    @pytest.mark.asyncio
+    async def test_confirm_targets_posts_without_a_body_and_returns_the_outcome(self) -> None:
+        seen: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request)
+            body = _profile_body(
+                norms=self._NORMS,
+                targets_provenance={
+                    "source": "ayla_calculated",
+                    "method_versions": {},
+                    "confirmed_at": "2026-09-11T10:00:00.000Z",
+                },
+            )
+            body["confirmation"] = {"outcome": "confirmed"}
+            return httpx.Response(200, json={"data": body})
+
+        client, transport = _client_with_handler(handler)
+        _set_transport(transport)
+        profile, outcome = await client.confirm_targets(external_user_id="bot:1")
+
+        assert outcome == "confirmed"
+        assert profile.targets_source == "ayla_calculated"
+        assert profile.daily_kcal == 1650  # подтверждённое — действует, DTO числа не прячет
+        req = seen[0]
+        assert req.url.path.endswith("/nutrition/internal/profile/targets/confirm/")
+        assert req.headers["X-External-User-ID"] == "bot:1"
+        assert req.content in (b"{}", b"")
+
+    @pytest.mark.asyncio
+    async def test_nothing_to_confirm_carries_the_source(self) -> None:
+        def handler(_: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                409,
+                json={
+                    "error": {
+                        "code": "NOTHING_TO_CONFIRM",
+                        "message": "…",
+                        "details": {"targets_source": "user_entered"},
+                    }
+                },
+            )
+
+        client, transport = _client_with_handler(handler)
+        _set_transport(transport)
+        with pytest.raises(nc.NothingToConfirmError) as exc:
+            await client.confirm_targets(external_user_id="bot:1")
+        assert exc.value.source == "user_entered"
+
+    @staticmethod
+    def _refusal(code: str, details: dict[str, Any]) -> Callable[[httpx.Request], httpx.Response]:
+        def handler(_: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                409, json={"error": {"code": code, "message": "…", "details": details}}
+            )
+
+        return handler
+
+    @pytest.mark.asyncio
+    async def test_legacy_default_refusal_is_its_own_error_with_the_fields(self) -> None:
+        """DRF-2332: у 409 два смысла, и различает их код, а не статус.
+
+        До правки этот отказ читался как «подтверждать нечего» с пустым
+        источником — и человеку с живым предложением бот отвечал неправдой.
+        """
+        client, transport = _client_with_handler(
+            self._refusal(
+                "LEGACY_DEFAULT_UNCONFIRMED", {"fields": ["activity_coefficient", "pace"]}
+            )
+        )
+        _set_transport(transport)
+        with pytest.raises(nc.LegacyDefaultUnconfirmedError) as exc:
+            await client.confirm_targets(external_user_id="bot:1")
+        assert exc.value.fields == ["activity_coefficient", "pace"]
+        assert not isinstance(exc.value, nc.NothingToConfirmError)
+
+    @pytest.mark.asyncio
+    async def test_nothing_to_confirm_is_not_read_as_legacy(self) -> None:
+        """Пара с узлом выше: прежний отказ остался прежним классом."""
+        client, transport = _client_with_handler(
+            self._refusal("NOTHING_TO_CONFIRM", {"targets_source": "none"})
+        )
+        _set_transport(transport)
+        with pytest.raises(nc.NothingToConfirmError) as exc:
+            await client.confirm_targets(external_user_id="bot:1")
+        assert exc.value.source == "none"
+        assert not isinstance(exc.value, nc.LegacyDefaultUnconfirmedError)
+
+
+class TestFoodPhoto2455:
+    """DRF-2455 — ветки самого клиента: до этого они не исполнялись нигде.
+
+    Ручка бота их разбирает, но проверялась через `AsyncMock`, то есть
+    поведение клиента никем не доказано.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_photo_comes_back_with_its_type(self) -> None:
+        def handler(_: httpx.Request) -> httpx.Response:
+            # Тело правдоподобного размера: сотни байт код считает
+            # пустышкой (замер стенда 25.09), и стенд обязан это повторять.
+            return httpx.Response(
+                200,
+                content=b"\x89PNG\r\n\x1a\n" + bytes(40_000),
+                headers={"Content-Type": "image/png"},
+            )
+
+        client, transport = _client_with_handler(handler)
+        _set_transport(transport)
+
+        photo = await client.food_photo(external_user_id="bot:1", log_id="log-1")
+
+        assert photo is not None
+        content, content_type = photo
+        assert content.startswith(b"\x89PNG")
+        assert content_type == "image/png"
+
+    @pytest.mark.asyncio
+    async def test_404_means_no_photo_and_is_not_a_failure(self) -> None:
+        def handler(_: httpx.Request) -> httpx.Response:
+            return httpx.Response(404, json={"error": {"code": "NOT_FOUND"}})
+
+        client, transport = _client_with_handler(handler)
+        _set_transport(transport)
+
+        assert await client.food_photo(external_user_id="bot:1", log_id="log-1") is None
+
+    @pytest.mark.asyncio
+    async def test_an_empty_body_is_not_a_photo(self) -> None:
+        """200 с пустым телом экран прочитал бы как «фото есть, но сломано».
+
+        Частный случай порога ``MIN_PHOTO_RESPONSE_BYTES``; оставлен
+        отдельно, потому что нулевое тело приходит по другой причине —
+        объект удалён, а ответ собран.
+        """
+
+        def handler(_: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=b"", headers={"Content-Type": "image/jpeg"})
+
+        client, transport = _client_with_handler(handler)
+        _set_transport(transport)
+
+        assert await client.food_photo(external_user_id="bot:1", log_id="log-1") is None
+
+    @pytest.mark.asyncio
+    async def test_a_few_hundred_bytes_are_not_a_photo(self) -> None:
+        """Замер стенда 25.09: три живые записи из пятнадцати ссылались на
+        объект в несколько сотен байт. Отдать их — показать битую картинку
+        вместо честного «снимка нет»."""
+
+        def handler(_: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                content=b"x" * 379,
+                headers={"Content-Type": "image/jpeg"},
+            )
+
+        client, transport = _client_with_handler(handler)
+        _set_transport(transport)
+
+        assert await client.food_photo(external_user_id="bot:1", log_id="log-1") is None
+
+    @pytest.mark.asyncio
+    async def test_a_real_sized_body_passes(self) -> None:
+        """Положительная пара: порог не отсекает настоящий снимок."""
+
+        def handler(_: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                content=bytes(40_000),
+                headers={"Content-Type": "image/jpeg"},
+            )
+
+        client, transport = _client_with_handler(handler)
+        _set_transport(transport)
+
+        photo = await client.food_photo(external_user_id="bot:1", log_id="log-1")
+
+        assert photo is not None
+        assert len(photo[0]) == 40_000
+
+    @pytest.mark.asyncio
+    async def test_an_oversized_body_is_refused(self) -> None:
+        """Размеру, названному каталогом, не доверяем: воркер дороже снимка."""
+        big = b"x" * (nc.NutritionClient.MAX_PHOTO_RESPONSE_BYTES + 1)
+
+        def handler(_: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=big, headers={"Content-Type": "image/jpeg"})
+
+        client, transport = _client_with_handler(handler)
+        _set_transport(transport)
+
+        with pytest.raises(nc.NutritionUnavailableError):
+            await client.food_photo(external_user_id="bot:1", log_id="log-1")
+
+    @pytest.mark.asyncio
+    async def test_a_redirect_is_a_failure_not_a_refusal(self) -> None:
+        """Перенаправление ведёт внутрь контура — за ним не идём."""
+
+        def handler(_: httpx.Request) -> httpx.Response:
+            return httpx.Response(302, headers={"Location": "http://minio:9000/x.jpg"})
+
+        client, transport = _client_with_handler(handler)
+        _set_transport(transport)
+
+        with pytest.raises(nc.NutritionUnavailableError):
+            await client.food_photo(external_user_id="bot:1", log_id="log-1")
+
+    @pytest.mark.asyncio
+    async def test_5xx_is_a_failure(self) -> None:
+        def handler(_: httpx.Request) -> httpx.Response:
+            return httpx.Response(503)
+
+        client, transport = _client_with_handler(handler)
+        _set_transport(transport)
+
+        with pytest.raises(nc.NutritionUnavailableError):
+            await client.food_photo(external_user_id="bot:1", log_id="log-1")

@@ -86,11 +86,14 @@ show (revoked grants, archived and pending masters), carries neither
 ``source`` nor ``since``, and would turn three queries into two per head.
 
 What must NOT be re-derived is the semantics, and it is not: the identity
-rule is ``is_solo_provider``'s, and ``test_the_roster_and_the_resolver_
-agree_on_who_is_a_master`` pins this module's answer to the resolver's on
-the case where the two could drift (a PENDING catalog row, which has
-``is_active=True, archived_at=None`` and would otherwise read as an
-active master here while the resolver calls that person a customer).
+rule is ``is_solo_provider``'s, the three-word state comes from
+:func:`apps.catalog.master_state.master_state` (DRF-1506 — one definition
+for five sites), and ``test_the_roster_and_the_resolver_agree_on_who_is_
+a_master`` pins this module's answer to the resolver's on the case where
+the two could drift (a PENDING catalog row, which the invite path writes
+with ``is_active=False, archived_at=None`` and which would otherwise read
+as «доступ отозван» here while the resolver calls that person a customer
+who is simply still expected).
 
 ``MAX_ROSTER_PEOPLE`` bounds the RESPONSE, not the read: every row is
 still fetched and sorted before the slice. Bounding the read would cost
@@ -106,6 +109,9 @@ from datetime import datetime, timedelta
 from typing import Any, Literal
 from uuid import UUID
 
+from apps.admin_api.services.staff_restore import restorable_masters, restorable_staff_roles
+from apps.catalog.master_state import RoleState as _RoleState
+from apps.catalog.master_state import master_state
 from apps.catalog.models import CatalogMaster
 from apps.tenancy.context import tenant_scope
 from apps.tenancy.models import StaffInvite, TenantStaff
@@ -147,7 +153,23 @@ RoleSource = Literal["access_code", "master_invite", "direct"]
 #: ``TenantStaff`` row exists, so an unredeemed admin code does not appear
 #: in this roster at all. That gap is real and deliberately not closed
 #: here; see the module docstring.
-RoleState = Literal["active", "pending", "revoked"]
+#: Re-exported, not redefined: the vocabulary and the rule that picks
+#: between its words live in :mod:`apps.catalog.master_state` (DRF-1506),
+#: so the roster and the booking surface cannot drift on what «active»
+#: means. ``Literal`` is still spelled out in the import there.
+#:
+#: DRF-1540 added a fourth word, ``ayla_unlinked``. Deliberately not
+#: folded into ``revoked``: «доступ отозван» sends the owner looking for
+#: whoever revoked it, and nobody did — the link to Ayla is ours to fix,
+#: not hers. Two refusals, two actions, two words.
+#:
+#: DRF-1521 added a fifth, ``profile_incomplete``, splitting the other
+#: half of ``revoked``: the owner switching a master off the storefront
+#: and a master who accepted the invite and stopped halfway write the
+#: same columns, and the second one is not a revoke either. Unreachable
+#: on live data until DRF-1521 пп. 4-6 land — see
+#: :func:`apps.catalog.master_state.sale_block`.
+RoleState = _RoleState
 
 
 @dataclass
@@ -191,6 +213,12 @@ class Person:
     master_id: UUID | None
     name: str
     roles: list[RoleGrant] = field(default_factory=list)
+    #: DRF-2274. What ``staff/restore/`` would give back on this row —
+    #: computed by ``services/staff_restore.py``, the same rule the endpoint
+    #: applies, so the button can never be offered where the server refuses.
+    #: The screen cannot derive it: a role change closes rows too and reads
+    #: as «revoked», and a revoked master card looks like one nobody held.
+    restorable_roles: list[str] = field(default_factory=list)
 
     @property
     def is_active(self) -> bool:
@@ -224,6 +252,7 @@ class Person:
             "has_account": self.has_account,
             "is_active": self.is_active,
             "roles": [r.to_payload() for r in self.effective_roles()],
+            "restorable_roles": list(self.restorable_roles),
         }
 
     def effective_roles(self) -> list[RoleGrant]:
@@ -291,25 +320,6 @@ def _staff_source(created_at: datetime, code_moments: list[datetime] | None) -> 
         if abs(created_at - moment) <= _CODE_MATCH_WINDOW:
             return "access_code"
     return "direct"
-
-
-def _master_state(
-    *, archived_at: datetime | None, is_active: bool, invite_status: str
-) -> RoleState:
-    """Where a catalog row sits between «приглашена» and «в архиве».
-
-    Archived or deactivated is ``revoked`` first — a master who was
-    archived while her invite was still outstanding is gone, not waiting.
-    Otherwise anything short of ACCEPTED is ``pending``: EXPIRED and
-    CANCELLED invites are people who never arrived, and «pending» is the
-    honest word for a row that is in the catalog with nobody behind it.
-    """
-
-    if archived_at is not None or not is_active:
-        return "revoked"
-    if invite_status != CatalogMaster.InviteStatus.ACCEPTED:
-        return "pending"
-    return "active"
 
 
 def _role_sort_key(grant: RoleGrant) -> tuple[int, int, str]:
@@ -462,13 +472,27 @@ def _build(tenant: Any) -> tuple[list[Person], int, bool]:
     # are.
     #
     # ``invite_status`` is read because without it this roster contradicts
-    # the auth layer. ``resolve_role`` grants the master role only on
-    # ACCEPTED + not archived; a PENDING row — the state the invite-create
-    # path writes — has ``is_active=True, archived_at=None``, so judging by
-    # those two columns alone would print «Мастер · активна» for somebody
-    # the platform treats as a plain customer and who cannot open the
-    # master surface at all. Agreeing with ``resolve_role`` on who is a
-    # master is the whole point of a screen that answers «кто здесь кто».
+    # the auth layer. ``resolve_role`` grants the master role only on the
+    # landed predicate; a PENDING row — the state the invite-create path
+    # writes, with ``is_active=False, archived_at=None`` — would read as
+    # «доступ отозван» if judged by the other two columns first, which is
+    # the lie DRF-1506 fixed: nobody revoked anything, and the owner's
+    # next move is to resend the invite. Agreeing with ``resolve_role``
+    # on who is a master is the whole point of a screen that answers
+    # «кто здесь кто».
+    #
+    # ``ayla_user_id`` — DRF-1540. Столбец читается не ради показа, а
+    # потому что без него ростер назвал бы «активной» мастера, которую
+    # витрина уже не продаёт: гейт один, и вопрос он задаёт по четырём
+    # колонкам, а не по трём.
+    #
+    # ``accepted_at`` — DRF-1521, и по той же причине. Гейт спрашивает
+    # его, чтобы отличить «я сама сняла её с витрины» от «она приняла
+    # приглашение и не дозаполнила профиль»: у второй есть личность, у
+    # первой её может не быть вовсе. Забытый здесь столбец не дал бы
+    # тихого умолчания — ``sale_block`` читает строку строго и упал бы
+    # ``KeyError``, что и есть замысел: молчаливое умолчание читалось бы
+    # как «условие не применилось».
     master_rows = CatalogMaster.objects.filter(tenant=tenant).values(
         "id",
         "name",
@@ -477,10 +501,29 @@ def _build(tenant: Any) -> tuple[list[Person], int, bool]:
         "archived_at",
         "invited_at",
         "invite_status",
+        "ayla_user_id",
+        "accepted_at",
+        # Гейт спрашивает его, когда включён флаг личности в каталоге.
+        # Столбец заведён здесь ДО включения намеренно: иначе включение
+        # флага упало бы ``KeyError`` в проде вместо отказа на витрине.
+        "catalog_specialist_id",
+        # §83 — гейт спрашивает его, когда включён флаг. Забытый здесь
+        # столбец не дал бы тихого умолчания: ``sale_block`` читает строку
+        # строго и упал бы ``KeyError``, и это замысел.
+        "schedule_confirmed_at",
+        # DRF-1795 — статус связи соло-мастера (ruling 6): ключ в столбце
+        # ещё не ``LINKED``. У мастера салона строки связи нет — NULL, и
+        # гейт читает это как «вопрос решает столбец». Забытый здесь
+        # столбец — ``KeyError`` в гейте, и это замысел.
+        "identity_link__status",
         "linked_bot_user__display_name",
         "linked_bot_user__client_name",
     )
-    for row in master_rows:
+    # DRF-2274 — which unlinked cards a revoke took, and from whom.
+    master_list = list(master_rows)
+    restorable_cards = restorable_masters(tenant.id, master_list)
+
+    for row in master_list:
         linked_id = row["linked_bot_user_id"]
         # The bridge: a linked master lands on the SAME key as her staff
         # rows, which is the whole reason an owner-master appears once.
@@ -496,6 +539,8 @@ def _build(tenant: Any) -> tuple[list[Person], int, bool]:
             people[key] = person
         else:
             person.master_id = row["id"]
+        if linked_id is None and str(row["id"]) in restorable_cards:
+            person.restorable_roles.append("master")
         # The catalog name wins over the channel-reported display name:
         # it is what the salon calls this person on every other screen.
         #
@@ -527,15 +572,23 @@ def _build(tenant: Any) -> tuple[list[Person], int, bool]:
         person.roles.append(
             RoleGrant(
                 role="master",
-                state=_master_state(
-                    archived_at=row["archived_at"],
-                    is_active=bool(row["is_active"]),
-                    invite_status=row["invite_status"],
-                ),
+                # Строка целиком, а не перечисленные столбцы: гейт растёт
+                # (DRF-1540 добавил ``ayla_user_id``, DRF-1521 добавит
+                # своё), и список аргументов здесь пришлось бы дописывать
+                # каждый раз — а забытый аргумент выглядел бы как «условие
+                # не применилось», то есть ровно как молчаливый отказ.
+                state=master_state(row),
                 source=source,
                 since=since,
             )
         )
+
+    # DRF-2274 — staff roles a revoke took and nothing has replaced.
+    bot_ids = [p.bot_user_id for p in people.values() if p.bot_user_id is not None]
+    for pid, roles in restorable_staff_roles(tenant.id, bot_ids).items():
+        person = people.get(f"bot:{pid}")
+        if person is not None:
+            person.restorable_roles = sorted(roles) + person.restorable_roles
 
     ordered = sorted(people.values(), key=_person_sort_key)
     total = len(ordered)

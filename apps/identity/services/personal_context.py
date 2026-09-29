@@ -29,6 +29,7 @@ from enum import Enum
 from typing import Any
 
 from apps.consent.services import has_memory_consent
+from apps.integrations.ayla.user_proxy import external_user_id_for
 from apps.integrations.ayla.personal_context_client import (
     AskEligibility,
     DeclaredContext,
@@ -44,6 +45,8 @@ class GateStatus(str, Enum):
     OK = "ok"
     BLOCKED_CONSENT = "blocked_consent"  # gate closed or no ayla_user_id
     ERROR = "error"  # upstream/transport failure (logged)
+    # DRF-1950: удаление в Ayla поставлено в задание; readback ещё не подтвердил.
+    STARTED = "started"
 
 
 @dataclass(frozen=True)
@@ -62,6 +65,27 @@ def _resolve_ayla_user_id(bot_user) -> uuid.UUID | None:
     if not raw:
         return None
     return raw if isinstance(raw, uuid.UUID) else uuid.UUID(str(raw))
+
+
+def _erasure_subject(bot_user) -> uuid.UUID | None:
+    """Ключ субъекта для стирания — актуальный, а не ключ прокси до привязки.
+
+    DRF-2309. Когда каталог привязал прокси к аккаунту, заголовок
+    ``bot:<канал>:<id>`` он разрешает в аккаунт, и запрос с ключом прокси в URL
+    получает 403 — «забудь всё» не проходит, пока бот не узнает новый ключ
+    (DRF-1790 узнаёт его только при следующем «зависимом действии»).
+
+    Поэтому известный ключ прокси переспрашивается (``ensure_ayla_link``) перед
+    стиранием. Личность при этом НЕ создаётся: без ключа — ``None``, как и
+    раньше (переспрос только следует уже существующей привязке); реальный ключ
+    — без сети; сбой переспроса — прежний ключ.
+    """
+    stored = _resolve_ayla_user_id(bot_user)
+    if stored is None or getattr(bot_user, "ayla_user_id_is_proxy", None) is not True:
+        return stored
+    from apps.identity.services.ayla_link import ensure_ayla_link
+
+    return ensure_ayla_link(bot_user, trigger="erasure") or stored
 
 
 def _gate(bot_user) -> uuid.UUID | None:
@@ -102,7 +126,10 @@ def get_declared_prefs(
     try:
         return GatedResult(
             status=GateStatus.OK,
-            context=client.get_context(ayla_user_id=str(ayla_user_id)),
+            context=client.get_context(
+                ayla_user_id=str(ayla_user_id),
+                external_user_id=external_user_id_for(bot_user),
+            ),
         )
     except PersonalContextError:
         logger.exception("identity.personal_context.get_failed")
@@ -127,7 +154,11 @@ def patch_declared_prefs(
     try:
         return GatedResult(
             status=GateStatus.OK,
-            context=client.patch_context(ayla_user_id=str(ayla_user_id), updates=updates),
+            context=client.patch_context(
+                ayla_user_id=str(ayla_user_id),
+                external_user_id=external_user_id_for(bot_user),
+                updates=updates,
+            ),
         )
     except PersonalContextError:
         logger.exception("identity.personal_context.patch_failed")
@@ -151,7 +182,10 @@ def get_ask_eligibility(
     try:
         return GatedResult(
             status=GateStatus.OK,
-            eligibility=client.get_ask_eligibility(ayla_user_id=str(ayla_user_id)),
+            eligibility=client.get_ask_eligibility(
+                ayla_user_id=str(ayla_user_id),
+                external_user_id=external_user_id_for(bot_user),
+            ),
         )
     except PersonalContextError:
         logger.exception("identity.personal_context.ask_eligibility_failed")
@@ -174,7 +208,11 @@ def mark_asked(
     owns = client is None
     client = client or PersonalContextHttpClient()
     try:
-        client.mark_asked(ayla_user_id=str(ayla_user_id), field=field)
+        client.mark_asked(
+            ayla_user_id=str(ayla_user_id),
+            external_user_id=external_user_id_for(bot_user),
+            field=field,
+        )
         return GatedResult(status=GateStatus.OK)
     except PersonalContextError:
         logger.exception("identity.personal_context.mark_asked_failed")
@@ -199,7 +237,11 @@ def skip(
     try:
         return GatedResult(
             status=GateStatus.OK,
-            skip_count=client.skip(ayla_user_id=str(ayla_user_id), field=field),
+            skip_count=client.skip(
+                ayla_user_id=str(ayla_user_id),
+                external_user_id=external_user_id_for(bot_user),
+                field=field,
+            ),
         )
     except PersonalContextError:
         logger.exception("identity.personal_context.skip_failed")
@@ -213,6 +255,7 @@ def erase_declared_prefs(
     bot_user,
     *,
     client: PersonalContextHttpClient | None = None,
+    retry_source: str | None = None,
 ) -> GatedResult:
     """The ONE erase verb: ``DELETE /internal/users/{id}/personal-data/``.
 
@@ -242,7 +285,7 @@ def erase_declared_prefs(
     row upstream is a tombstone — including the idempotent 404 case, where
     it is already gone.
     """
-    ayla_user_id = _resolve_ayla_user_id(bot_user)
+    ayla_user_id = _erasure_subject(bot_user)
     if ayla_user_id is None:
         logger.info(
             "identity.personal_context.erase_unaddressable reason=unlinked bot_user=%s",
@@ -251,8 +294,41 @@ def erase_declared_prefs(
         return GatedResult(status=GateStatus.BLOCKED_CONSENT)
     owns = client is None
     client = client or PersonalContextHttpClient()
+    if retry_source is not None:
+        from apps.identity.services import ayla_erasure
+
+        if ayla_erasure.retry_enabled():
+            # DRF-1950 (M3): OK — только после readback каталога. Синхронная
+            # попытка — короткий клиент: остальное повторит задание.
+            if owns:
+                client.close()
+                client = PersonalContextHttpClient(
+                    retries=ayla_erasure.SYNC_RETRIES, timeout=ayla_erasure.SYNC_TIMEOUT_SECONDS
+                )
+            try:
+                outcome = ayla_erasure.erase_with_readback(
+                    bot_user=bot_user,
+                    ayla_user_id=ayla_user_id,
+                    external_user_id=external_user_id_for(bot_user),
+                    source=retry_source,
+                    client=client,
+                )
+            except Exception:  # noqa: BLE001 — сбой механики задания: честный отказ, не «запущено»
+                logger.exception("identity.personal_context.erase_job_failed")
+                return GatedResult(status=GateStatus.ERROR)
+            finally:
+                if owns:
+                    client.close()
+            if outcome.state == ayla_erasure.CONFIRMED:
+                return GatedResult(status=GateStatus.OK)
+            if outcome.state == ayla_erasure.FAILED:
+                return GatedResult(status=GateStatus.ERROR)
+            return GatedResult(status=GateStatus.STARTED)
     try:
-        client.delete_personal_data(ayla_user_id=str(ayla_user_id))
+        client.delete_personal_data(
+            ayla_user_id=str(ayla_user_id),
+            external_user_id=external_user_id_for(bot_user),
+        )
         return GatedResult(status=GateStatus.OK)
     except PersonalContextNotFoundError:
         # Already gone upstream (or never existed) — the erasure contract is

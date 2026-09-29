@@ -101,11 +101,19 @@ RUN pip install --upgrade pip && pip install "uv==0.11.12"
 
 WORKDIR /app
 
-# Build-time secret for cloning private GitHub repos (ayla-ai-core).
-# Pattern from beautygo_backend/Dockerfile: pass via
-# `docker build --build-arg GH_DEPLOY_TOKEN=...`. The URL-rewrite makes
+# OPTIONAL build-time credential for the ayla-ai-core dep.
+#
+# ayla-ai-core is PUBLIC (owner's decision 04.09.2026, recorded in
+# OPEN_DECISIONS.md §22 in the workspace root, outside this repo), so this
+# build needs no token: with the ARG empty the `if` below is skipped and
+# `uv sync` fetches the pinned SHA anonymously. Verified 04.09.2026 by an
+# unauthenticated fetch of the pin.
+#
+# The token path is kept for the day the visibility is closed again (the
+# decision says public "for now"): pass via
+# `docker build --build-arg GH_DEPLOY_TOKEN=...` and the URL-rewrite makes
 # git clone authenticate transparently. Consumed at build time only — not
-# baked into the runtime image (empty default = public repos build fine).
+# baked into the runtime image.
 ARG GH_DEPLOY_TOKEN=""
 RUN if [ -n "$GH_DEPLOY_TOKEN" ]; then \
       git config --global url."https://${GH_DEPLOY_TOKEN}@github.com/".insteadOf "https://github.com/"; \
@@ -149,6 +157,15 @@ RUN uv sync --locked --extra dev --extra ai-core
 # The same command audits an already-running container:
 #   docker exec <container> python /app/tools/env_guard.py --against-lock
 RUN python tools/env_guard.py --against-lock
+
+# Planning rules registry (D-1, owner's decision 2026-09-08): the artifact is
+# vendored into apps/planning_rules/data/ by scripts/sync_planning_rules_registry.py.
+# This check is offline (hash pin + contract form + major-version rejection) and
+# fails the build if the artifact is missing, tampered with or carries an
+# unknown major — a silent deploy on a stale/forged registry is worse than a
+# failed build. Freshness against ayla-knowledge is enforced separately by the
+# planning-rules-sync workflow (network drift check), not here.
+RUN python apps/planning_rules/check.py
 
 EXPOSE 8000
 CMD ["python", "manage.py", "runserver", "0.0.0.0:8000"]

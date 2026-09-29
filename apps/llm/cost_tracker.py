@@ -54,11 +54,14 @@ brief said "don't add Lua/locking", so we don't.
 ### Alerting
 
 After every ``record_usage`` we compute the previous-vs-new percent of
-each cap. Crossing 80% → one warning to ``tenant.manager_chat_id``;
-crossing 100% → one "exhausted" alert. Both deduplicated via
-``warned_80`` / ``warned_100`` Redis flags so subsequent calls don't
-re-spam the manager. Empty manager_chat_id → log + skip the outbound
-(cap is still enforced, telemetry still written).
+each cap. Crossing 80% → one ``warning`` page; crossing 100% → one
+``error`` page — both into the operators' channel
+(:func:`apps.observability.alerting.page`, Telegram + Sentry). Both
+deduplicated via ``warned_80`` / ``warned_100`` Redis flags so
+subsequent calls don't re-page. The salon manager gets nothing
+(DRF-2130, §50 п.8): the budget is an engineering fact, not a decision
+the salon has to take, and the page does not depend on the salon having
+a manager address at all.
 
 ### Exception contract
 
@@ -112,17 +115,19 @@ EVENT_PROVIDER_QUOTA_EXCEEDED = "llm.provider_quota_exceeded"
 AUDIT_QUOTA_FALLBACK = "llm.quota_exhausted_fallback"
 
 
-# Russian-language alert templates. Sent via the existing MAX outbound
-# channel to ``tenant.manager_chat_id`` when a daily threshold is
-# crossed. Both lines fit a single MAX message body (no media).
-_ALERT_80_TEMPLATE = (
-    "⚠️ LLM-расходы за сегодня дошли до 80% дневного лимита "
-    "(tokens={tokens_used}/{token_cap} или ${cost_used}/${cost_cap}). "
+# Operators' page (DRF-2130): title is the Telegram first line + Sentry
+# event message, body carries the numbers. Not sent to the salon.
+_PAGE_80_TITLE = "LLM-бюджет салона {slug}: 80% дневного лимита"
+_PAGE_80_BODY = (
+    "tenant={slug} (id={tenant_id})\n"
+    "tokens={tokens_used}/{token_cap}, cost=${cost_used}/${cost_cap}\n"
     "При необходимости пересмотрите cap в админке."
 )
-_ALERT_100_TEMPLATE = (
-    "🚨 LLM-расходы исчерпали дневной лимит. Бот переключился на "
-    'fallback "Извините, лимит на сегодня исчерпан". Сброс в 00:00 UTC.'
+_PAGE_100_TITLE = "LLM-бюджет салона {slug} исчерпан: 100% дневного лимита"
+_PAGE_100_BODY = (
+    "tenant={slug} (id={tenant_id})\n"
+    "tokens={tokens_used}/{token_cap}, cost=${cost_used}/${cost_cap}\n"
+    'Бот отвечает fallback "Извините, лимит на сегодня исчерпан". Сброс в 00:00 UTC.'
 )
 
 
@@ -424,12 +429,13 @@ async def record_usage(
     Behaviour:
       - Increments ``tokens`` and ``cost_microcents`` keys; sets TTL on
         first write of the day per tenant.
-      - Reads ``Tenant.manager_chat_id`` + caps via sync ORM.
-      - If the new usage crossed 80% or 100% on EITHER cap, sends one
-        outbound MAX message (deduplicated via the warned_* flags).
-      - Telegram alert failure (no token, network error) logs WARN
-        and returns — the accounting write succeeded; cap enforcement
-        is unaffected.
+      - Reads caps + tenant slug via sync ORM.
+      - If the new usage crossed 80% or 100% on EITHER cap, pages the
+        operators' channel once (deduplicated via the warned_* flags).
+        The salon manager is not addressed (DRF-2130).
+      - Page failure (no sink configured, network error) is absorbed by
+        ``alerting.page`` — the accounting write succeeded; cap
+        enforcement is unaffected.
     """
     from asgiref.sync import sync_to_async
 
@@ -490,9 +496,9 @@ async def record_usage(
 
     new_tokens = new_tokens_post
 
-    # Read caps + manager_chat_id for the alert path.
+    # Read caps + tenant slug for the alert path.
     try:
-        token_cap, cost_cap_usd, manager_chat_id = await sync_to_async(
+        token_cap, cost_cap_usd, slug = await sync_to_async(
             _read_tenant_alert_context, thread_sensitive=False
         )(tenant_id)
     except Exception:  # noqa: BLE001 — alerting must not break accounting
@@ -522,7 +528,7 @@ async def record_usage(
     if crossed_80 and not _flag_set(_warned_80_key(tenant_id)):
         await sync_to_async(_send_threshold_alert, thread_sensitive=False)(
             tenant_id=tenant_id,
-            manager_chat_id=manager_chat_id,
+            slug=slug,
             level=80,
             tokens_used=new_tokens,
             token_cap=token_cap,
@@ -534,7 +540,7 @@ async def record_usage(
     if crossed_100 and not _flag_set(_warned_100_key(tenant_id)):
         await sync_to_async(_send_threshold_alert, thread_sensitive=False)(
             tenant_id=tenant_id,
-            manager_chat_id=manager_chat_id,
+            slug=slug,
             level=100,
             tokens_used=new_tokens,
             token_cap=token_cap,
@@ -729,10 +735,11 @@ def _read_tenant_caps(tenant_id: str) -> tuple[int, Decimal]:
 
 
 def _read_tenant_alert_context(tenant_id: str) -> tuple[int, Decimal, str]:
-    """Read caps + manager_chat_id in a single ORM hop.
+    """Read caps + the tenant slug in a single ORM hop.
 
     Separate from :func:`_read_tenant_caps` so the hot enforce-caps
-    path doesn't pay for ``manager_chat_id`` it never uses.
+    path doesn't pay for a slug it never uses. The slug goes into the
+    operators' page so the channel names the salon, not a UUID.
 
     Same Y3 contract as :func:`_read_tenant_caps`: raises
     :class:`UnknownTenantError` on missing tenant, propagating to the
@@ -742,9 +749,9 @@ def _read_tenant_alert_context(tenant_id: str) -> tuple[int, Decimal, str]:
     from apps.tenancy.models import Tenant
 
     try:
-        row = Tenant.all_objects.values(
-            "daily_token_cap", "daily_cost_cap_usd", "manager_chat_id"
-        ).get(id=tenant_id)
+        row = Tenant.all_objects.values("daily_token_cap", "daily_cost_cap_usd", "slug").get(
+            id=tenant_id
+        )
     except Tenant.DoesNotExist as exc:
         logger.error(
             "cost_tracker.alert_context.tenant_not_found tenant=%s raising_unknown_tenant_error",
@@ -759,7 +766,7 @@ def _read_tenant_alert_context(tenant_id: str) -> tuple[int, Decimal, str]:
     cost_cap = row.get("daily_cost_cap_usd") or Decimal("0")
     if not isinstance(cost_cap, Decimal):
         cost_cap = Decimal(str(cost_cap))
-    return (token_cap, cost_cap, str(row.get("manager_chat_id") or ""))
+    return (token_cap, cost_cap, str(row.get("slug") or ""))
 
 
 def _write_quota_telemetry(
@@ -801,51 +808,67 @@ def _write_quota_telemetry(
 def _send_threshold_alert(
     *,
     tenant_id: str,
-    manager_chat_id: str,
+    slug: str,
     level: int,
     tokens_used: int,
     token_cap: int,
     cost_used_usd: Decimal,
     cost_cap_usd: Decimal,
 ) -> None:
-    """Send a 80% or 100% alert to the salon manager via MAX outbound.
+    """Page the operators' channel on the 80% / 100% crossing (DRF-2130).
 
-    Empty ``manager_chat_id`` → log WARN, skip the send. The cap is
-    still enforced and telemetry still written — alerting is a courtesy
-    layer, not a precondition.
+    80% → ``warning`` (muted line: headroom, not an outage); 100% →
+    ``error`` (unmuted: the bot is answering every client with the
+    quota fallback). The salon manager is not addressed — an LLM budget
+    is not a decision the salon takes in its staff chat (§50 п.8).
+
+    ``dedup_key`` is explicit and carries the level: a single
+    ``record_usage`` that jumps 0 → 110% fires both pages, and
+    :func:`page`'s content dedup must not swallow the second one. The
+    day is in the key so the 5-minute page dedup and the daily
+    ``warned_*`` flags agree on what "the same alert" is.
+
+    Best-effort: alerting must never break accounting. :func:`page`
+    already never raises; the guard is against the import path.
     """
-    if not manager_chat_id:
-        logger.warning(
-            "cost_tracker.alert_skipped_no_manager_chat_id "
-            "tenant=%s level=%d tokens=%d/%d cost=$%s/$%s",
-            tenant_id,
-            level,
-            tokens_used,
-            token_cap,
-            cost_used_usd,
-            cost_cap_usd,
-        )
-        return
-
     cost_used_str = _format_usd(cost_used_usd)
     cost_cap_str = _format_usd(cost_cap_usd)
+    fields = {
+        "slug": slug,
+        "tenant_id": tenant_id,
+        "tokens_used": tokens_used,
+        "token_cap": token_cap,
+        "cost_used": cost_used_str,
+        "cost_cap": cost_cap_str,
+    }
+    severity: Literal["warning", "error"]
     if level == 80:
-        text = _ALERT_80_TEMPLATE.format(
-            tokens_used=tokens_used,
-            token_cap=token_cap,
-            cost_used=cost_used_str,
-            cost_cap=cost_cap_str,
-        )
+        severity = "warning"
+        title = _PAGE_80_TITLE.format(**fields)
+        body = _PAGE_80_BODY.format(**fields)
     else:
-        text = _ALERT_100_TEMPLATE
+        severity = "error"
+        title = _PAGE_100_TITLE.format(**fields)
+        body = _PAGE_100_BODY.format(**fields)
 
     try:
-        from apps.channels.max.outbound import send_message
+        from apps.observability import alerting
 
-        send_message(chat_id=manager_chat_id, text=text)
+        sent = alerting.page(
+            severity,
+            title,
+            body,
+            dedup_key=f"llm_cost_cap:{tenant_id}:{_today_utc()}:{level}",
+        )
+        logger.info(
+            "cost_tracker.alert_paged tenant=%s level=%d sent=%s",
+            tenant_id,
+            level,
+            sent,
+        )
     except Exception:  # noqa: BLE001 — alerting must never break accounting
         logger.warning(
-            "cost_tracker.alert_send_failed tenant=%s level=%d",
+            "cost_tracker.alert_page_failed tenant=%s level=%d",
             tenant_id,
             level,
             exc_info=True,

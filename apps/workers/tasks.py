@@ -15,6 +15,7 @@ import logging
 
 from celery import shared_task  # type: ignore[import-untyped]
 
+from apps.ingress.streams import trim_expired
 from apps.workers.reaper import reap_pel_streams
 
 logger = logging.getLogger(__name__)
@@ -32,3 +33,18 @@ def reap_pel() -> int:
     if reaped:
         logger.info("workers.tasks.reap_pel reaped=%d", reaped)
     return reaped
+
+
+@shared_task(name="apps.workers.tasks.trim_ingress_streams")
+def trim_ingress_streams() -> int:
+    """Hourly retention trim of raw webhook bodies (DRF-2220).
+
+    Returns:
+      Total entries removed across every ingress stream and its DLQ.
+    """
+
+    trimmed = trim_expired()
+    total = sum(trimmed.values())
+    if total:
+        logger.info("workers.tasks.trim_ingress_streams removed=%d", total)
+    return total

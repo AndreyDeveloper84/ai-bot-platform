@@ -42,6 +42,12 @@ Failure surface:
 * :class:`WellnessContextClientError` — прочие 4xx (баг контракта).
 * :class:`WellnessContextUnavailableError` — сеть / 5xx / битый JSON;
   планировщик маппит в пропуск тика (``ayla_unavailable``).
+
+Plan Lite (DRF-2101, DRF-2123) живёт рядом тем же auth: ``create_plan_lite``
+/ ``close_plan_lite`` — писатели, ``get_plan_lite_proposal`` — предложение из
+шаблона активной цели (План-A); отказы каталога — по имени
+(:class:`PlanLiteDisabledError`, :class:`PlanLiteAlreadyActiveError`,
+:class:`PlanLiteGoalNotFoundError`, :class:`PlanLiteNoTemplateError`).
 """
 
 from __future__ import annotations
@@ -54,6 +60,7 @@ import httpx
 from django.conf import settings
 
 from apps.integrations.ayla.url_builder import AylaUrlBuilder, AylaUrlError
+from apps.integrations.ayla.request_id import with_request_id
 
 logger = logging.getLogger(__name__)
 
@@ -62,6 +69,10 @@ logger = logging.getLogger(__name__)
 DEFAULT_TIMEOUT_S: Final[float] = 10.0
 
 _PATH: Final[str] = "internal/me/wellness-context/"
+#: DRF-2101 — писатель Plan Lite (тот же auth, что у чтения).
+_PLAN_LITE_PATH: Final[str] = "internal/me/plan-lite/"
+#: DRF-2123 (План-A) — предложение из шаблона цели; ничего не создаёт.
+_PLAN_LITE_PROPOSAL_PATH: Final[str] = "internal/me/plan-lite/proposal/"
 
 
 # ---------------------------------------------------------------------------
@@ -86,6 +97,68 @@ class OutcomeState:
 
 
 @dataclass(frozen=True)
+class PlanLiteAction:
+    """Одно обязательство Plan Lite (DRF-2101) — форма и факт, ничего о результате.
+
+    ``done_count`` ≤ ``target_count`` за текущее ведро ``[bucket_start,
+    bucket_end)``; процентов и «достигнуто» у DTO нет полей — В-5.
+
+    ``within_target_count`` (DRF-2124) — второй факт: дни ведра, когда сумма
+    калорий ≤ подтверждённому ориентиру; ``None`` — ориентира нет (§103: не 0)
+    или каталог ключа не прислал (старый каталог). Парсер несёт его у любого
+    действия, печатают его (карточка, экран, прокси) только у ``log_food`` —
+    у воды и брони такого факта нет. Факт, не оценка: рядом с «N из M» и
+    ничего из него не выводится.
+    """
+
+    action_type: str
+    cadence: str
+    target_count: int
+    done_count: int
+    bucket_start: str
+    bucket_end: str
+    within_target_count: int | None = None
+
+
+@dataclass(frozen=True)
+class PlanLite:
+    """Активный Plan Lite человека — ключ цели и обязательства с фактами."""
+
+    plan_id: str
+    goal_key: str
+    actions: tuple[PlanLiteAction, ...] = ()
+
+
+@dataclass(frozen=True)
+class PlanLiteProposalAction:
+    """Одно действие из шаблона (DRF-2123) — только форма: тип, каденс, сколько.
+
+    Фактов (``done_count``, ведро) у предложения нет по построению: план
+    ещё не создан. Каденс — код каталога (``per_day`` / ``per_week`` /
+    ``per_2_weeks``), не валидируется: каталог добавляет значения аддитивно.
+    """
+
+    action_type: str
+    cadence: str
+    target_count: int
+
+
+@dataclass(frozen=True)
+class PlanLiteProposal:
+    """Предложение Plan Lite из шаблона активной цели (DRF-2123, План-A).
+
+    ``why`` — текст шаблона (курируемый, не про человека), ``template_version``
+    уходит обратно в ``create_plan_lite`` как провенанс плана. Процентов и
+    шкал у DTO нет полей — В-5.
+    """
+
+    goal_key: str
+    why: str
+    template_version: int
+    actions: tuple[PlanLiteProposalAction, ...] = ()
+
+
+@dataclass(frozen=True)
 class WellnessContext:
     """Документ ``wellness-context`` одного получателя.
 
@@ -99,6 +172,15 @@ class WellnessContext:
     has_plan: bool
     outcomes: tuple[OutcomeState, ...] = ()
     gated: bool = False
+    #: DRF-2101 — Plan Lite стоит рядом с гейтами, не за ними: факты
+    #: действий за текущее ведро. ``None`` — плана нет или флаг выключен.
+    plan_lite: PlanLite | None = None
+    #: DRF-2356 — документ не разобрался: конверт не объект или блок плана
+    #: битый. Это НЕ «плана нет»: там ответ о человеке, здесь — о нас.
+    #: Признаком, а не исключением, потому что читателей двое: ручка Mini
+    #: App отвечает отказом, запертая проактивность пропускает тик как
+    #: прежде. Бросок поменял бы ей поведение молча.
+    unreadable: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -124,6 +206,25 @@ class WellnessContextClientError(WellnessContextError):
 
 class WellnessContextUnavailableError(WellnessContextError):
     """Network / timeout / 5xx / malformed JSON — skip this tick."""
+
+
+class PlanLiteDisabledError(WellnessContextClientError):
+    """404 ``PLAN_LITE_DISABLED`` — каталог держит Plan Lite выключенным (DRF-2101)."""
+
+
+class PlanLiteAlreadyActiveError(WellnessContextClientError):
+    """409 ``PLAN_LITE_ALREADY_ACTIVE`` — активный план уже есть; сперва закрыть."""
+
+
+class PlanLiteGoalNotFoundError(WellnessContextClientError):
+    """404 ``NOT_FOUND`` — цель не у этого человека / не активна, или нет
+    активного плана при закрытии; у предложения — ``details.reason=no_active_goal``."""
+
+
+class PlanLiteNoTemplateError(WellnessContextClientError):
+    """404 ``NOT_FOUND`` с ``details.reason=no_template`` — у активной цели нет
+    шаблона плана (DRF-2123). Не подкласс :class:`PlanLiteGoalNotFoundError`:
+    экран на этих двух 404 расходится (конструктор vs «сначала выбери цель»)."""
 
 
 # ---------------------------------------------------------------------------
@@ -173,11 +274,13 @@ class WellnessContextHttpClient:
         try:
             response = self._client().get(
                 url,
-                headers={
-                    "Authorization": f"Bearer {self._token}",
-                    "X-External-User-ID": external_user_id,
-                    "Accept": "application/json",
-                },
+                headers=with_request_id(
+                    {
+                        "Authorization": f"Bearer {self._token}",
+                        "X-External-User-ID": external_user_id,
+                        "Accept": "application/json",
+                    }
+                ),
                 timeout=self._timeout,
             )
         except httpx.HTTPError as exc:
@@ -217,6 +320,127 @@ class WellnessContextHttpClient:
             self._http = httpx.Client(timeout=self._timeout)
         return self._http
 
+    # ─── Plan Lite — DRF-2101 ─────────────────────────────────────────────
+
+    def _plan_lite_request(
+        self,
+        method: str,
+        *,
+        external_user_id: str,
+        body: dict[str, Any] | None = None,
+        path: str = _PLAN_LITE_PATH,
+    ) -> httpx.Response:
+        try:
+            url = AylaUrlBuilder(self._base_url).build(path)
+        except AylaUrlError as exc:
+            raise WellnessContextConfigError(f"invalid AYLA_BASE_URL: {exc}") from exc
+        if not self._token:
+            raise WellnessContextConfigError("AYLA_INTERNAL_API_TOKEN not configured")
+        try:
+            response = self._client().request(
+                method,
+                url,
+                headers=with_request_id(
+                    {
+                        "Authorization": f"Bearer {self._token}",
+                        "X-External-User-ID": external_user_id,
+                        "Accept": "application/json",
+                    }
+                ),
+                json=body,
+                timeout=self._timeout,
+            )
+        except httpx.HTTPError as exc:
+            # Тела и id не логируются: статус и класс — всё, что нужно (DRF-2009).
+            logger.warning(
+                "wellness_context.plan_lite.network_failure method=%s exc=%s",
+                method,
+                type(exc).__name__,
+            )
+            raise WellnessContextUnavailableError(f"network: {type(exc).__name__}") from exc
+        if response.status_code in (401, 403):
+            raise WellnessContextAuthError(
+                f"Ayla plan-lite auth failed: HTTP {response.status_code}"
+            )
+        if response.status_code >= 500:
+            logger.warning(
+                "wellness_context.plan_lite.server_error method=%s status=%d",
+                method,
+                response.status_code,
+            )
+            raise WellnessContextUnavailableError(f"server: HTTP {response.status_code}")
+        if 400 <= response.status_code < 500:
+            raise _plan_lite_refusal(response)
+        return response
+
+    def create_plan_lite(
+        self,
+        *,
+        external_user_id: str,
+        actions: list[dict[str, Any]],
+        goal_id: str | None = None,
+        template_version: int | None = None,
+    ) -> PlanLite:
+        """``POST /internal/me/plan-lite/`` — составить план; 201 → документ.
+
+        ``goal_id`` необязателен: без него каталог строит план от активной
+        цели вызывающего (нет активной → :class:`PlanLiteGoalNotFoundError`).
+        ``template_version`` (DRF-2123) — версия шаблона, по которому человек
+        подтвердил предложение; каталог пишет провенанс
+        ``source=template:<goal_key>:v<N>``. Без него ключа в теле нет.
+
+        Raises :class:`PlanLiteDisabledError`, :class:`PlanLiteAlreadyActiveError`,
+        :class:`PlanLiteGoalNotFoundError`, :class:`WellnessContextClientError` (400).
+        """
+        # goal_id и template_version необязательны: отсутствующий ключ в тело
+        # не кладётся, чтобы не слать null (PR-1b/2b, DRF-2123).
+        body: dict[str, Any] = {"actions": actions}
+        if goal_id is not None:
+            body = {"goal_id": goal_id, **body}
+        if template_version is not None:
+            body["template_version"] = template_version
+        response = self._plan_lite_request("POST", external_user_id=external_user_id, body=body)
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise WellnessContextUnavailableError("malformed_json") from exc
+        data = payload.get("data") if isinstance(payload, dict) else None
+        plan = _plan_lite_from_wire(data)
+        if plan is None:
+            raise WellnessContextUnavailableError("plan_lite_malformed_body")
+        return plan
+
+    def get_plan_lite_proposal(self, *, external_user_id: str) -> PlanLiteProposal:
+        """``GET /internal/me/plan-lite/proposal/`` — предложение из шаблона
+        активной цели (DRF-2123); ничего не создаёт.
+
+        Raises :class:`PlanLiteDisabledError` (404 ``PLAN_LITE_DISABLED``),
+        :class:`PlanLiteGoalNotFoundError` (404 ``no_active_goal``),
+        :class:`PlanLiteNoTemplateError` (404 ``no_template``),
+        :class:`WellnessContextUnavailableError` (сеть / 5xx / битое тело).
+        """
+        response = self._plan_lite_request(
+            "GET", external_user_id=external_user_id, path=_PLAN_LITE_PROPOSAL_PATH
+        )
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise WellnessContextUnavailableError("malformed_json") from exc
+        data = payload.get("data") if isinstance(payload, dict) else None
+        proposal = _proposal_from_wire(data)
+        if proposal is None:
+            raise WellnessContextUnavailableError("plan_lite_proposal_malformed_body")
+        return proposal
+
+    def close_plan_lite(self, *, external_user_id: str) -> bool:
+        """``DELETE /internal/me/plan-lite/`` — закрыть активный план (append-only).
+
+        Raises :class:`PlanLiteDisabledError`, :class:`PlanLiteGoalNotFoundError`
+        (активного плана нет).
+        """
+        self._plan_lite_request("DELETE", external_user_id=external_user_id)
+        return True
+
     def close(self) -> None:
         if self._http is not None:
             self._http.close()
@@ -240,10 +464,14 @@ def _context_from_wire(payload: Any) -> WellnessContext:
     Толерантность к форме намеренная: документ сегодня приходит в
     gated-виде, и его контракт дорежеутся на стороне Ayla. Отсутствующие
     поля читаются как «нет плана / нет outcomes», а не как ошибка.
+
+    DRF-2356 — но «не разобралось» теперь ОТЛИЧИМО от «нет плана»:
+    ``unreadable`` несёт этот факт вызывающему, не меняя поведения
+    толерантных читателей.
     """
     data = payload.get("data") if isinstance(payload, dict) else None
     if not isinstance(data, dict):
-        return WellnessContext(has_plan=False)
+        return WellnessContext(has_plan=False, unreadable=True)
 
     outcomes_raw = data.get("outcomes")
     outcomes: list[OutcomeState] = []
@@ -259,11 +487,117 @@ def _context_from_wire(payload: Any) -> WellnessContext:
                     progress_state=_code(item.get("progress_state")),
                 )
             )
+    raw_plan_lite = data.get("plan_lite")
+    plan_lite = _plan_lite_from_wire(raw_plan_lite)
+    # Блок пришёл, но разобрать его не вышло — это не «плана нет» (DRF-2356).
+    # `null` и отсутствие ключа — честное «плана нет»; всё остальное битое.
+    plan_lite_broken = plan_lite is None and raw_plan_lite is not None
     return WellnessContext(
         has_plan=isinstance(data.get("plan"), dict),
         outcomes=tuple(outcomes),
         gated=isinstance(data.get("gated"), dict),
+        plan_lite=plan_lite,
+        unreadable=plan_lite_broken,
     )
+
+
+def _plan_lite_from_wire(raw: Any) -> PlanLite | None:
+    """``plan_lite`` документа → DTO фактов; всё, чего в DTO нет полей
+    (проценты, тексты), умирает здесь. Битая форма — ``None``."""
+    if not isinstance(raw, dict):
+        return None
+    actions: list[PlanLiteAction] = []
+    for item in raw.get("actions") or []:
+        if not isinstance(item, dict):
+            continue
+        raw_bucket = item.get("bucket")
+        bucket: dict[str, Any] = raw_bucket if isinstance(raw_bucket, dict) else {}
+        actions.append(
+            PlanLiteAction(
+                action_type=_code(item.get("action_type")),
+                cadence=_code(item.get("cadence")),
+                target_count=_count(item.get("target_count")),
+                done_count=_count(item.get("done_count")),
+                bucket_start=_code(bucket.get("start")),
+                bucket_end=_code(bucket.get("end")),
+                within_target_count=_count_or_none(item.get("within_target_count")),
+            )
+        )
+    return PlanLite(
+        plan_id=_code(raw.get("plan_id")),
+        goal_key=_code(raw.get("goal_key")),
+        actions=tuple(actions),
+    )
+
+
+def _proposal_from_wire(raw: Any) -> PlanLiteProposal | None:
+    """``data`` предложения → DTO формы; всё, чего в DTO нет полей, умирает
+    здесь. Битая форма (не объект / нет версии шаблона ≥ 1) — ``None``."""
+    if not isinstance(raw, dict):
+        return None
+    version = raw.get("template_version")
+    if not isinstance(version, int) or isinstance(version, bool) or version < 1:
+        return None
+    actions: list[PlanLiteProposalAction] = []
+    for item in raw.get("actions") or []:
+        if not isinstance(item, dict):
+            continue
+        actions.append(
+            PlanLiteProposalAction(
+                action_type=_code(item.get("action_type")),
+                cadence=_code(item.get("cadence")),
+                target_count=_count(item.get("target_count")),
+            )
+        )
+    return PlanLiteProposal(
+        goal_key=_code(raw.get("goal_key")),
+        why=_code(raw.get("why")),
+        template_version=version,
+        actions=tuple(actions),
+    )
+
+
+def _count(value: Any) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+
+def _count_or_none(value: Any) -> int | None:
+    """Факт, которого может не быть: целое ≥ 0 — оно, всё остальное (``null``,
+    ключа нет, мусор) — ``None``. Отличие от :func:`_count` — «нет» здесь не
+    равно нулю (§103, DRF-2124)."""
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+
+def _plan_lite_refusal(response: httpx.Response) -> WellnessContextClientError:
+    """4xx Plan Lite → исключение по коду каталога; тело в лог не идёт.
+
+    404 различаются кодом и ``details.reason`` (DRF-2123): ``no_template`` —
+    свой класс, прочие ``NOT_FOUND`` (в т.ч. ``no_active_goal``) — цель.
+    """
+    code, reason = _error_code_and_reason(response)
+    if response.status_code == 404 and code == "PLAN_LITE_DISABLED":
+        return PlanLiteDisabledError("plan_lite_disabled")
+    if response.status_code == 409 and code == "PLAN_LITE_ALREADY_ACTIVE":
+        return PlanLiteAlreadyActiveError("already_active")
+    if response.status_code == 404 and reason == "no_template":
+        return PlanLiteNoTemplateError("no_template")
+    if response.status_code == 404:
+        return PlanLiteGoalNotFoundError(reason or code or "not_found")
+    return WellnessContextClientError(f"Ayla plan-lite 4xx: HTTP {response.status_code} {code}")
+
+
+def _error_code_and_reason(response: httpx.Response) -> tuple[str, str]:
+    """``error.code`` и ``error.details.reason`` конверта отказа; чего нет — ``""``."""
+    try:
+        payload = response.json()
+    except ValueError:
+        return "", ""
+    error = payload.get("error") if isinstance(payload, dict) else None
+    if not isinstance(error, dict):
+        return "", ""
+    details = error.get("details")
+    reason = details.get("reason") if isinstance(details, dict) else None
+    return _code(error.get("code")), _code(reason)
 
 
 def _code(value: Any) -> str:

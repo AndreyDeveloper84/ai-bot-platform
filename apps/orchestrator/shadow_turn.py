@@ -226,7 +226,8 @@ def compute_shadow_turn(
     control: str | None
     if verdict == SafetyVerdict.HANDOFF:
         control = CONTROL_HANDOFF
-    elif verdict in (SafetyVerdict.BLOCK, SafetyVerdict.CLARIFY):
+    # DRF-2000: MEDICAL is a canned send (103 / 112), not an operator handoff.
+    elif verdict in (SafetyVerdict.MEDICAL, SafetyVerdict.BLOCK, SafetyVerdict.CLARIFY):
         control = CONTROL_SEND
     else:
         control = None  # would require step-10 dispatch to decide

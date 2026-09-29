@@ -1,7 +1,7 @@
 /** Russian-locale formatting per assistant-persona.md voice rules. */
 
 const WEEKDAYS = ["вс", "пн", "вт", "ср", "чт", "пт", "сб"];
-const MONTHS_GEN = [
+export const MONTHS_GEN = [
   "января", "февраля", "марта", "апреля", "мая", "июня",
   "июля", "августа", "сентября", "октября", "ноября", "декабря",
 ];
@@ -11,6 +11,18 @@ export function formatMoney(p: string | number | null): string {
   const n = Math.round(Number(p));
   if (!Number.isFinite(n)) return "—";
   return `${n.toString().replace(/\B(?=(\d{3})+(?!\d))/g, " ")} ₽`;
+}
+
+/**
+ * Цена «от» для витрины (DRF-1989): ниже 1 ₽ — пустая строка.
+ *
+ * Каталог не продаёт предложение дешевле 1 ₽: такая цена — незаполненное
+ * поле, и «0 ₽» читалось бы как «бесплатно». `null` остаётся «—», как у
+ * {@link formatMoney}. Только показ: значение в ответе не меняется.
+ */
+export function priceFromLabel(p: string | number | null): string {
+  if (p !== null && p !== undefined && Number(p) < 1) return "";
+  return formatMoney(p);
 }
 
 export function formatDuration(min: number | null): string {
@@ -43,8 +55,53 @@ export function formatSlotTime(isoWithOffset: string): string {
   return match?.[1] ?? isoWithOffset;
 }
 
+/**
+ * «25 сентября в 09:00» — слова владельца 28.09, п.8 (DRF-2585), для
+ * подтверждения переноса «Было / Стало». Часы — из строки, как у
+ * {@link formatVisitFull}: пояс задаёт сервер. Не разобралось — «—».
+ */
+export function formatDayMonthTime(isoWithOffset: string): string {
+  const match = isoWithOffset.match(/^\d{4}-(\d{2})-(\d{2})T(\d{2}:\d{2})/);
+  if (!match) return UNKNOWN_MARK;
+  const month = MONTHS_GEN[Number(match[1]) - 1];
+  if (!month) return UNKNOWN_MARK;
+  return `${Number(match[2])} ${month} в ${match[3]}`;
+}
+
+/**
+ * Часы берутся ИЗ СТРОКИ, не из часов браузера: время визита — время
+ * салона. Опора — сервер отдаёт `visit_at` в поясе салона записи
+ * (DRF-2589, `miniapp_api.views._salon_iso`); до этого провод нёс UTC, и
+ * человек видел «в 06:00» при визите в 09:00. Сторож
+ * `wallClockParse2589.test.ts` держит такой разбор только здесь.
+ */
 export function formatVisitFull(isoWithOffset: string): string {
   const match = isoWithOffset.match(/^(\d{4}-\d{2}-\d{2})T(\d{2}:\d{2})/);
   if (!match) return isoWithOffset;
   return `${formatDateLabel(match[1] ?? "")} в ${match[2]}`;
+}
+
+/**
+ * Знак «значения нет» — тот же, что у {@link formatMoney} и у дат по всему
+ * приложению. Заведён именем, чтобы «не знаю» нельзя было написать нулём
+ * (DRF-2366).
+ */
+export const UNKNOWN_MARK = "—";
+
+/**
+ * Счётчик, у которого «ноль» и «не удалось узнать» — РАЗНЫЕ значения.
+ *
+ * До DRF-2366 значки и чипы кабинета хранили счётчик числом с умолчанием
+ * `0`, а неудачный запрос молча оставлял его нулём. Человек читал ноль как
+ * факт: «запросов нет», — и запрос мастера на изменение графика ждал
+ * ответа, которого администратор не видел. Отсутствие ответа обязано быть
+ * отдельным значением, а не тем же числом.
+ *
+ * `null` — «не удалось узнать»: и до первого ответа, и после отказа.
+ */
+export type MaybeCount = number | null;
+
+/** Число как есть; неизвестность — знаком, а не нулём. */
+export function countLabel(count: MaybeCount): string {
+  return count === null ? UNKNOWN_MARK : String(count);
 }

@@ -7,6 +7,9 @@ contraindication warnings — policy §8.4).
 
 Two operations, both append the 152-ФЗ audit trail:
 
+- :func:`soft_delete_all_zones_for_forget_all` — mass erasure for the
+  forget-all sweep, zone-agnostic (DRF-2180). Reports the red ids it
+  buried so the caller can append the access-log rows.
 - :func:`soft_delete_green_entries` — per-entry erasure. Sets
   ``delete_requested_at`` + ``soft_deleted_at`` + ``deletion_reason='user_delete'``
   + ``status='deleted'`` + ``updated_at`` in one UPDATE (ADR-0011 §11.3
@@ -32,7 +35,12 @@ from django.db import transaction
 from django.utils import timezone
 
 from apps.audit.services import write_audit
-from apps.identity.models import MemoryEntry, UserPersonalContext
+from apps.identity.models import MemoryEntry, RedZoneAccessLog, UserPersonalContext
+from apps.identity.services.red_zone_guc import (
+    _reset_red_zone_guc,
+    _set_red_zone_guc,
+    red_zone_principal,
+)
 
 
 def soft_delete_green_entries(
@@ -97,6 +105,145 @@ def soft_delete_green_entries(
             },
         )
     return deleted
+
+
+def soft_delete_all_zones_for_forget_all(
+    user_id: uuid.UUID,
+    *,
+    request_id: uuid.UUID,
+) -> tuple[int, int]:
+    """Снять ВСЕ живые строки субъекта, любой зоны. Только для «забудь всё».
+
+    Отдельная функция, а не флаг у :func:`soft_delete_green_entries` — и это
+    не вкусовщина. Зелёный удалитель зовут ещё три места: чатовая команда
+    «забудь про веганство», экран памяти Mini App и путь стирания Ayla. Там
+    строку называет ЧЕЛОВЕК по идентификатору, и жёсткая привязка к зелёной
+    зоне — защита: назвать красную строку по id и снять её мимо журнала
+    доступа нельзя. Расширить зону там значило бы открыть эту дверь всем
+    четверым разом ради одного вызывающего.
+
+    Здесь зона не сужается потому, что запрос другой: человек попросил
+    забыть ВСЁ, и матрица удаления (DRF-2134) объявляет для красной строки
+    ``DELETE`` с причиной «специальная категория (152-ФЗ ст. 10) не должна
+    переживать „забудь всё"».
+
+    # GUC обязателен, хотя сегодня работает и без него
+
+    Политика ``memory_entry_non_red_visible`` (миграция 0008) прячет красные
+    строки от любого SELECT без ``ayla.red_zone_access_context``, а **WHERE
+    у UPDATE подчиняется той же политике SELECT** (это дословно сказано в
+    ``red_zone_reader`` там, где он ставит GUC перед надгробием). Сегодня
+    приложение ходит под ``platform`` — суперпользователем контейнера, он
+    RLS обходит, — и без GUC всё работает. В день перехода на ``ayla_app``
+    (ADR-0011 §16, фаза 2, шаг 5) отказ был бы худшего сорта: красные
+    строки молча не попали бы в выборку, счёт занизился бы, журнал не
+    написался бы, а свип вернул бы зелёный результат. Поэтому GUC ставится
+    здесь, а не «когда понадобится».
+
+    # Надгробие и журнал — одна транзакция
+
+    Тот же инвариант, что у ``RedZoneReader`` («no orphan log»): либо есть
+    и надгробие, и строка журнала, либо нет ни того, ни другого. Если
+    писать журнал после коммита UPDATE, падение между ними даёт снятые
+    красные строки без единой строки журнала — и **повторный прогон этого
+    не чинит**: живых красных уже нет, второй свип их не увидит. Потеря
+    доказательства по 152-ФЗ гл. 3 была бы молчаливой и навсегда.
+
+    # Почему отбор строк живёт ЗДЕСЬ, а не у вызывающего
+
+    Обречённые id выбирает эта функция, а не свип. Иначе GUC накрывал бы
+    только половину пути: SELECT свипа шёл бы без него, красные id до
+    делетера не доехали бы вовсе, и его собственный GUC оказался бы
+    бесполезен. Граница «кто ставит GUC» должна совпадать с границей «кто
+    трогает красное» — иначе она не граница.
+
+    Args:
+      request_id: один на прогон свипа — одна просьба «забудь всё» это одно
+        обращение к зоне, разбитое на строки. Он же уходит в GUC, потому что
+        политика требует канонический UUID.
+
+    Returns:
+      ``(сколько сняли всего, сколько из них красных)``.
+    """
+    now = timezone.now()
+    red_count = 0
+    deleted = 0
+    with transaction.atomic():
+        _set_red_zone_guc(request_id)
+        try:
+            live = MemoryEntry.objects.filter(
+                user_id=user_id,
+                soft_deleted_at__isnull=True,
+                delete_requested_at__isnull=True,
+            )
+            # Красные id читаются ДО UPDATE: после него зона на месте, но
+            # «живых» строк уже нет, и выборка по тому же условию вернёт пусто.
+            red_ids = list(
+                live.filter(sensitivity_zone=MemoryEntry.SENSITIVITY_RED).values_list(
+                    "id", flat=True
+                )
+            )
+            deleted = live.update(
+                delete_requested_at=now,
+                soft_deleted_at=now,
+                deletion_reason=MemoryEntry.DELETION_REASON_FORGET_ALL,
+                status=MemoryEntry.STATUS_DELETED,
+                updated_at=now,
+            )
+            _log_red_zone_erasure(user_id, red_ids, request_id=request_id)
+            red_count = len(red_ids)
+        finally:
+            _reset_red_zone_guc()
+
+    if deleted:
+        write_audit(
+            "memory.forget_entry",
+            target="MemoryEntry",
+            payload={
+                "user_id": str(user_id),
+                "count": deleted,
+                "red_count": red_count,
+                "reason": MemoryEntry.DELETION_REASON_FORGET_ALL,
+            },
+        )
+    return deleted, red_count
+
+
+def _log_red_zone_erasure(
+    user_id: uuid.UUID,
+    red_ids: list[uuid.UUID],
+    *,
+    request_id: uuid.UUID,
+) -> None:
+    """Строка журнала на КАЖДУЮ снятую красную строку (DRF-2180).
+
+    Правило красной зоны: доступ к строке — строка журнала. Свип снимает их
+    в обход :class:`RedZoneReader` (он умеет по одной и под своим GUC),
+    поэтому вести журнал обязан сам путь свипа — иначе массовое снятие
+    специальной категории проходит без следа, а это ровно то, что 152-ФЗ
+    гл. 3 просит доказывать.
+
+    Зовётся ТОЛЬКО изнутри ``soft_delete_all_zones_for_forget_all``, внутри
+    его транзакции: осиротевшее надгробие неисправимо (см. там же).
+    """
+    if not red_ids:
+        return
+
+    principal = red_zone_principal(RedZoneAccessLog.ACCESSOR_SYSTEM_JOB, "forget_all_sweep")
+    RedZoneAccessLog.objects.bulk_create(
+        [
+            RedZoneAccessLog(
+                memory_entry_id=entry_id,
+                user_id=user_id,
+                accessor_role=RedZoneAccessLog.ACCESSOR_SYSTEM_JOB,
+                accessor_principal=principal,
+                access_type=RedZoneAccessLog.ACCESS_DELETE,
+                request_id=request_id,
+                purpose="forget_all sweep — субъект попросил забыть всё",
+            )
+            for entry_id in red_ids
+        ]
+    )
 
 
 def request_forget_all(user_id: uuid.UUID) -> bool:

@@ -246,7 +246,8 @@ class TestCanonicalPayloadHandling:
                 omit_fields=(omit,),
             )
         )
-        assert result.outcome is DispatchOutcome.HANDLER_EXCEPTION
+        # DRF-2302 — битый payload на повторе так же битый: постоянный отказ.
+        assert result.outcome is DispatchOutcome.REJECTED
         assert isinstance(result.exception, CanonicalReschedulePayloadError)
 
         # No side effect — proxy untouched.

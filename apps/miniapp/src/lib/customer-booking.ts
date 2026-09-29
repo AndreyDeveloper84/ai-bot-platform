@@ -1,158 +1,532 @@
 /**
- * Customer booking-flow client lib — real mirror data (pilot phase 3.1).
+ * Клиентская библиотека воронки записи — реальные данные зеркала.
  *
- * Spec: `docs/screens/customer-booking-flow.md` §1–§10 (Ayla 3-layer
- * trust ethos + 5-screen F1-F5 + anonymous gate §6.2).
+ * Спека экранов: `docs/screens/customer-booking-flow.md` §1–§10.
+ * Спека подбора: `docs/specs/RECOMMENDATION_RESOLVER_CONTRACT_v1.0.md`.
  *
- * # What changed in phase 3.1 (stub removal, orchestrator GO 2026-07-19)
+ * # Что этот файл перестал делать 08.09.2026 (DRF-1568, T7)
  *
- * The Tau §10.1 3-layer catalog stub (layer_1 your-places /
- * layer_2 ayla-picks with reasoning_text / layer_3 explore categories)
- * was deleted: NO backend ever produced that shape — the Ayla
- * recommendations endpoint (`POST /internal/me/catalog/recommendations/`,
- * proxied by the bot) returns `{service_id, score}` rows only, and the
- * fields the old cards rendered (reasoning_text, next_available_slot,
- * last_visit_date, category counts) have no source. Inventing them
- * client-side was exactly the "fake data in prod" the pilot forbids.
+ * Он перестал быть третьим авторитетом ранжирования.
  *
- * The catalog now composes what genuinely exists:
+ * Прежняя версия получала `{service_id, score}`, **сортировала сама**
+ * по убыванию балла и склеивала WHY из строк, которые присылал
+ * источник. Каждое из трёх — политика: порядок, отбор и формулировка
+ * причины. Контракт (§2) отнимает политику у потребителя целиком, и
+ * взамен даёт `ordered[]` — уже упорядоченный, с `tier`, кодами причин
+ * и свидетельствами. Сырых баллов в ответе больше нет вовсе (§4.3),
+ * так что собрать свой порядок здесь физически не из чего — это
+ * сделано намеренно, а не по забывчивости источника.
  *
- *   - `fetchServices()` / `fetchMasters()` — bot-mirror catalog
- *     (`apps/miniapp_api` `GET /services`, `GET /masters`; real data
- *     after the W3 link_ayla_service_ids sync);
- *   - `fetchRecommendations()` — Ayla scorer proxy
- *     (`POST /recommendations` → `{service_id, score}`), joined onto
- *     the mirror services HERE (client-side, by id).
+ * Прежний докстринг этого файла утверждал: «NO backend ever produced
+ * that shape … endpoint returns `{service_id, score}` rows only».
+ * **С 07.09.2026 это неверно**, и неверность обошлась дорого: источник
+ * отдавал `{data:{layer_1_your_places, layer_2_ayla_picks,
+ * layer_3_explore}}`, потребитель звал `.slice()` на `undefined`,
+ * `TypeError` улетал в пустой `catch {}`, и блок «Ayla подобрала» не
+ * рендерился **вовсе** — при том, что эндпоинт отвечал 200 и месяц
+ * считался работающим. Замер эндпоинта не является замером экрана.
  *
- * Picks rule: the scorer is optional chrome. When it is unavailable
- * (502/503/network) the lib returns `picks: []` and the screens hide
- * the picks section silently — never an error screen, never fabricated
- * picks. The founder cut #1 cap (≤3 picks) stays a RENDER-side concern
- * (screens slice), so this lib deliberately does not truncate.
+ * # Три исхода, и делить ветку им нельзя (§9.4, DRF-1556)
  *
- * # WHY gate (owner ruling 25.08)
+ * `OK` / `UNAVAILABLE` / `CONTRACT_VIOLATION` разводятся не эвристикой,
+ * а устройством: `try` накрывает **ровно транспорт**, проверка формы
+ * стоит после него и по определению видит только доставленные ответы.
+ * Ложного `CONTRACT_VIOLATION` при обычном отказе не может быть не
+ * потому, что мы стараемся, а потому что состояние туда не доходит.
  *
- * > «Нет displayable WHY → нет блока „Ayla подобрала".»
+ * У молчания в этих двух состояниях противоположная цена:
  *
- * `Recommendation = WHAT + WHY + WHAT NEXT`. A pick the source did not
- * explain is not a branded Ayla pick, so it never leaves this lib:
- * {@link getCatalogBrowse} keeps only the recommendations that carry
- * display-ready WHY (`reasons[]` per the ruling, or `reasoning_text`
- * per `docs/screens/customer-booking-flow.md` §10.3). Today
- * `POST /recommendations` answers `{service_id, score}` and nothing
- * else, so `picks` comes back empty and both branded sections hide
- * themselves. Nothing is flagged off and no code is deleted: the day
- * the scorer starts sending WHY, the same filter lets it through and
- * the blocks come back on their own.
+ * * `UNAVAILABLE` — подбор есть необязательное украшение, молчание
+ *   законно, а детектор, кричащий на каждый мёртвый источник, глушат
+ *   за неделю, и он молчит ровно тогда, когда нужен;
+ * * `CONTRACT_VIOLATION` — «мы и они разошлись в том, о чём
+ *   договорились», и это обязано быть громким.
  *
- * What this lib will NOT do: invent WHY, translate reason codes into
- * prose, or substitute a generic line («подходит тебе», «выбрано по
- * твоей цели», «Ayla рекомендует»). Text is rendered exactly as the
- * source sent it, or the pick is dropped.
+ * `picks` остаётся пустым в обоих: рекомендация не подделывается.
+ *
+ * # WHY собирается из утверждённых кодов, а не из присланной фразы
+ *
+ * Граница отдаёт `reason_codes` (закрытый реестр §7.2) и `evidence`;
+ * строки для показа человеку в ответе нет и быть не должно — её
+ * наличие само по себе нарушение формы (§8.4 E1). Фразу собирает
+ * представление, и собирает **только** по коду, который источник
+ * утвердил.
+ *
+ * Гейт владельца 25.08 сохраняется дословно: «Нет displayable WHY →
+ * нет блока „Ayla подобрала"». Разница в том, откуда берётся WHY:
+ * раньше — из строки источника, теперь — из кода. Общая фраза
+ * («подходит тебе», «Ayla рекомендует») не подставляется никогда:
+ * §73 — имя производной не доказывает происхождение, и объяснение
+ * допускается только за утверждённым кодом.
+ *
+ * # Ярусы: равные кандидаты остаются равными
+ *
+ * `tier` доезжает до экрана нетронутым. Равный `tier` означает
+ * НЕРАЗЛИЧЁННЫХ кандидатов, и поверхность не вправе называть первого
+ * из яруса лучшим (§4.3, решение владельца §29.3). Эта библиотека не
+ * переставляет и не помечает никого: порядок — как прислали, признака
+ * «лучший» в {@link ServicePick} нет вовсе, и завести его нечем.
  */
 
 import {
+  ApiError,
   fetchMaster,
   fetchMasters,
   fetchRecommendations,
   fetchServices,
   fetchSlots,
   createBooking,
+  decisionContractViolation,
+  request,
+  NOT_CAPABLE_CODE,
+  NOT_RECOMMENDABLE_CODE,
+  SAFETY_EXCLUDED_CODE,
 } from "./api";
 import type {
   Master,
   MasterDetail,
   FreeSlot,
   CreatedBooking,
-  RecommendationScore,
+  RankedCandidate,
+  RecommendationDecision,
   Service,
 } from "./api";
 
 // ---------------------------------------------------------------------------
-// Catalog browse — mirror + scorer composition.
+// Catalog browse — зеркало каталога + решение резолвера.
 // ---------------------------------------------------------------------------
 
 /**
- * One branded Ayla pick: WHAT (the mirror service id) + WHY (the
- * display-ready lines the SOURCE sent). `reasons` is guaranteed
- * non-empty — a pick without WHY is dropped before it gets here.
+ * Словарь отрисовки: утверждённый код → фраза человеку.
+ *
+ * Это та самая «заглушка, возвращающая шаблон по коду», которой §7.3
+ * проверяет, что отрисовка не порождает утверждений о мире: подмена
+ * модели на этот словарь не меняет ни одного семантического
+ * утверждения на экране, потому что все утверждения уже выбраны
+ * детерминированно и переданы закрытым перечислением.
+ *
+ * `null` означает «код есть, но человеку он не причина». Таких два
+ * рода, и оба намеренные:
+ *
+ * * **механика и внутренние состояния** — `TIE_*`, `*_UNKNOWN`,
+ *   `*_UNCONFIRMED`, `MATCH_UNDETERMINED`, `CONTEXT_NOT_APPLICABLE`:
+ *   превратить их во фразу значило бы выдать отсутствие сведений за
+ *   довод;
+ * * **коды исключения** — `ELIG_EXCLUDED_*`, `SCOPE_EXCLUDED_*`: их
+ *   место в `excluded[]` (§4.4), и в `ordered[]` они не появляются.
+ *   Перечислены здесь ради полноты: словарь обязан покрывать реестр
+ *   целиком, иначе «нет фразы» перестанет отличаться от «нет кода».
+ *
+ * Отдельно `QUALITY_RATING_SUBSTANTIATED`: фразы у него нет не по
+ * недосмотру. Порог `N_substantiated` владельцем не назван, поэтому
+ * `CONFIRMED` не выдаётся вовсе и стадия качества молчит для всех
+ * (§8.3). Придумывать формулировку до решения по DRF-1527 значило бы
+ * снова сделать рейтинг основанием — то самое, чего в реестре нет и
+ * не будет (§7.2).
+ *
+ * Код вне реестра фразы не даёт и нарушением формы **не** считается:
+ * реестр версионируется, и «мы отстали от источника» — не повод
+ * подставить человеку выдуманную причину.
+ */
+const REASON_PHRASES: Readonly<Record<string, string | null>> = {
+  // — область поиска
+  SCOPE_WITHIN_CITY: "В твоём городе",
+  SCOPE_WITHIN_REQUESTED_AREA: "В районе, который ты назвала",
+  SCOPE_WITHIN_TENANT: null,
+  SCOPE_CROSS_TENANT_ALLOWED: null,
+  SCOPE_GEO_UNKNOWN_EXCLUDED: null,
+  SCOPE_EXCLUDED_OUT_OF_CITY: null,
+  SCOPE_EXCLUDED_OUT_OF_TENANT: null,
+  SCOPE_EXCLUDED_OUT_OF_AREA: null,
+
+  // — допустимость
+  ELIG_CAPABILITY_VERIFIED: "Делает именно это",
+  ELIG_ACTIVE_OFFER: "Услуга сейчас доступна",
+  ELIG_WITHIN_STATED_BUDGET: "Укладывается в названный бюджет",
+  ELIG_SAFETY_CLEARED: null,
+  ELIG_EXCLUDED_INACTIVE: null,
+  ELIG_EXCLUDED_NOT_CAPABLE: null,
+  ELIG_EXCLUDED_SAFETY: null,
+  ELIG_EXCLUDED_BUDGET: null,
+  ELIG_EXCLUDED_NOT_RECOMMENDABLE: null,
+
+  // — соответствие нужде
+  MATCH_SERVICE_EXACT: "Это та услуга, которую ты искала",
+  MATCH_SERVICE_PARTIAL: "Близко к тому, что ты искала",
+  MATCH_CAPABILITY_ONLY: "Делает такие услуги",
+  MATCH_GOAL_CATEGORY: "Подходит под твою цель",
+  MATCH_UNDETERMINED: null,
+
+  // — исполнимость
+  EXEC_BOOKABLE: "Можно записаться",
+  EXEC_SLOT_CONFIRMED_IN_WINDOW: "Есть свободное время в нужном окне",
+  EXEC_PRICE_INTENT_APPLIED: "Цена учтена по твоему запросу",
+  EXEC_SCHEDULE_UNCONFIRMED: null,
+  EXEC_PRICE_UNKNOWN: null,
+
+  // — личный контекст
+  CONTEXT_PRIOR_COMPLETED_VISIT: "Ты уже здесь была",
+  CONTEXT_PRIOR_SAME_CATEGORY: "Ты уже брала такие услуги",
+  CONTEXT_NOT_APPLICABLE: null,
+
+  // — качество
+  QUALITY_RATING_SUBSTANTIATED: null,
+  QUALITY_RATING_UNSUBSTANTIATED_IGNORED: null,
+  QUALITY_NO_EVIDENCE: null,
+
+  // — ничьи
+  TIE_ROTATION_APPLIED: null,
+  TIE_TIER_SHARED: null,
+};
+
+/** Решение владельца 25.08: WHY — «2–3 коротких», не стена текста. */
+const MAX_REASONS = 3;
+
+/**
+ * Одна рекомендация, доведённая до экрана.
+ *
+ * Признака «лучший» здесь нет и не будет: превосходство выражается
+ * ярусом, а не пометкой, и решает его резолвер, а не эта библиотека.
  */
 export interface ServicePick {
-  /** Mirror service id — joined onto `services` by the screens. */
+  /** Идентификатор услуги в зеркале — экраны склеивают по нему. */
   serviceId: string;
-  /** Display-ready WHY, verbatim from the source, 1–3 lines. */
+  /**
+   * Ярус §4.3. Равный `tier` — НЕРАЗЛИЧЁННЫЕ кандидаты, которых
+   * поверхность обязана показать равноправными.
+   */
+  tier: number;
+  /** Позиция в `ordered[]`, начиная с 1. Порядок, а не превосходство. */
+  rank: number;
+  /** Коды как прислал источник — по ним ключуется аналитика, не по фразам. */
+  reasonCodes: string[];
+  /** Фразы, собранные из кодов. Непусто: без WHY кандидат сюда не доходит. */
+  reasons: string[];
+}
+
+/**
+ * Одна рекомендация МАСТЕРА, доведённая до экрана (DRF-2174).
+ *
+ * Резолвер рекомендует людей (решение владельца §81), контракт объявляет
+ * это явно — `candidate.kind = PROVIDER` (§5, K1), транзит переводит ключ
+ * Ayla в ключ зеркала мастеров (`apps/marketplace/resolver_keys.py`).
+ * До этого среза полка умела только услуги, и первый же живой ответ
+ * резолвера (стенд 20.09: `ordered=1`, PROVIDER) она называла
+ * `UNRENDERABLE_CANDIDATES` — то есть отказом источника с кнопкой
+ * повтора, который детерминированно давал то же самое.
+ *
+ * Отдельный тип, а не `kind` внутри {@link ServicePick}: у пика мастера
+ * другой ключ и другая карточка, и потребители, знающие только услуги
+ * (главный экран, DRF-2144), не должны узнать о мастерах случайно — блок
+ * «Ayla подобрала» там без флага полки, а OD-PILOT-9 для Mini App никто
+ * не снимал (§60 снял его только для C04 в чате).
+ */
+export interface ProviderPick {
+  /** Идентификатор мастера в зеркале — экраны склеивают по нему. */
+  masterId: string;
+  /** Ярус §4.3 — см. {@link ServicePick.tier}. */
+  tier: number;
+  /** Позиция в `ordered[]`, начиная с 1. */
+  rank: number;
+  reasonCodes: string[];
+  /** Непусто: без WHY кандидат сюда не доходит (гейт владельца 25.08). */
   reasons: string[];
 }
 
 export interface CatalogBrowseData {
-  /** Active services from the bot mirror (verbatim). */
+  /** Активные услуги из зеркала бота (дословно). */
   services: Service[];
-  /** Bookable masters from the bot mirror (verbatim). */
+  /** Мастера из зеркала бота (дословно). */
   masters: Master[];
   /**
-   * Picks ranked by the Ayla scorer (score desc), filtered to ids
-   * present in the mirror AND to the ones the source explained. Empty
-   * when the scorer is unavailable, returns nothing usable, or sends no
-   * WHY — branded picks sections hide silently then.
+   * Рекомендации-УСЛУГИ в порядке резолвера, суженные до тех, что есть
+   * в зеркале и которым нашлась хоть одна фраза WHY. Пусто, когда
+   * источник недоступен, разошёлся с контрактом или объяснить ему
+   * нечего — во всех трёх случаях блок скрывается.
    */
   picks: ServicePick[];
+  /**
+   * Рекомендации-МАСТЕРА, тем же порядком и под тем же гейтом WHY.
+   * Сегодня резолвер производит только их ({@link ProviderPick}).
+   * Два списка вместо одного с `kind` — намеренно, см. там же.
+   *
+   * Необязательное — ПЕРЕХОДНО (DRF-2174 → снять после DRF-2144):
+   * `getCatalogBrowse` отдаёт поле всегда; `?` держится ради 19 фикстур
+   * главного экрана, который параллельно переписывается под H01, — новое
+   * обязательное поле резало бы ту ветку. Потребитель читает `?? []`.
+   */
+  providerPicks?: ProviderPick[];
+  /**
+   * Почему `picks` именно такой — ШЕСТЬ различимых исходов, и свести
+   * любые два значило бы вернуть то самое смешение отсутствия с нулём.
+   *
+   * | исход | что произошло | повтор | что чинить |
+   * |---|---|---|---|
+   * | `OK` | источник ответил, полка построена | — | — |
+   * | `UNAVAILABLE` | источник не ответил | осмыслен | ждать |
+   * | `CONTRACT_VIOLATION` | ответил не в той форме | бессмыслен | источник |
+   * | `NO_VERIFIED_CANDIDATES` | связи не подтверждены (§76) | бессмыслен | разметку каталога |
+   * | `SAFETY_BLOCKED` | гейт безопасности закрыл выдачу | бессмыслен | **ничего** |
+   * | `NO_CAPABLE_CANDIDATES` | нужда названа, никто не совпал | бессмыслен | запрос |
+   * | `UNRENDERABLE_CANDIDATES` | кандидаты есть, зеркало их не знает | осмыслен позже | **зеркало** |
+   *
+   * Последний существует потому, что замер 08.09 показал: источник
+   * отдаёт `kind=PROVIDER` с ключами Ayla
+   * (`users/recommendation_source.py:209`), а полка умела `kind=SERVICE`
+   * с ключами зеркала. Без имени это состояние выглядело бы как `OK` с
+   * пустой полкой. Имя сработало ровно так, как задумано, — на первом
+   * живом ответе (стенд 20.09), — но кадр у него был чужой: «попробуй
+   * ещё раз» на детерминированном расхождении. С DRF-2174 полка умеет
+   * оба вида, и `UNRENDERABLE` остаётся за одним случаем: ключ кандидата
+   * (услуги или мастера) неизвестен зеркалу — оно отстало, и повтор
+   * позже действительно осмыслен.
+   *
+   * Последние три — пустая полка, и снаружи они **неразличимы**: 200 и
+   * пустой `ordered[]` у всех трёх. Различает их только код исключения,
+   * а цена путаницы разная: `SAFETY_BLOCKED`, названный «нет
+   * подтверждённых связей», отправил бы человека чинить разметку там,
+   * где гейт сработал верно.
+   *
+   * Все четыре пустоты — **штатные результаты, а не ошибки** (решение
+   * владельца §76). Человеку во всех показывается предусмотренное
+   * НЕперсонализированное состояние: каталог и запись по прямому
+   * выбору, без слова «подходит» (§10.2). Экран вправе развести их
+   * по-разному; сводить обратно — нельзя.
+   */
+  picksOutcome: PicksOutcome;
+  /**
+   * DRF-1482 — `empty_reason` ровно как прислал `GET /services`
+   * (`null`, когда каталогу есть что предложить или бэкенд старее
+   * поля). Проходит НЕПРОВЕРЕННЫМ: сопоставление значений состояниям —
+   * дело `lib/customer-catalog-empty.ts`, поэтому новая причина от
+   * сервера доезжает до экрана нетронутой.
+   */
+  emptyReason?: string | null;
 }
 
-/** Owner ruling 25.08: WHY is «2–3 коротких» — never a wall of text. */
-const MAX_REASONS = 3;
-
 /**
- * Extract the display-ready WHY lines a single recommendation carries.
+ * Собрать фразы WHY одного кандидата из его утверждённых кодов.
  *
- * Accepts both canon shapes (`reasons[]` / `reasoning_text`), keeps the
- * strings verbatim apart from trimming, drops blanks, and caps the
- * count. Returns `[]` when the source explained nothing — the caller
- * treats that as «not a branded pick».
+ * Ничего не сочиняет и ничего не переводит вольно: код без фразы
+ * просто не даёт строки. Пустой результат означает «показать нечего»,
+ * и гейт владельца 25.08 отсекает такого кандидата — это тот же гейт,
+ * что стоял здесь до контракта, а не новый фильтр.
  */
-function displayableReasons(rec: RecommendationScore): string[] {
-  const raw: unknown[] = Array.isArray(rec.reasons)
-    ? rec.reasons
-    : typeof rec.reasoning_text === "string"
-      ? [rec.reasoning_text]
-      : [];
-  return raw
-    .filter((r): r is string => typeof r === "string")
-    .map((r) => r.trim())
-    .filter((r) => r.length > 0)
-    .slice(0, MAX_REASONS);
+function displayableReasons(candidate: RankedCandidate): string[] {
+  const phrases: string[] = [];
+  for (const code of candidate.reason_codes) {
+    const phrase = REASON_PHRASES[code];
+    if (typeof phrase === "string" && !phrases.includes(phrase)) {
+      phrases.push(phrase);
+    }
+    if (phrases.length === MAX_REASONS) break;
+  }
+  return phrases;
 }
 
 /**
- * Load everything the catalog screen needs. Mirror failures reject
- * (the screen renders its error state); scorer failure is swallowed
- * into `picks: []` per the picks rule above.
+ * Исходы границы §9.4 — именами контракта, а не своими.
+ *
+ * Три первых объявлены §9.4; четвёртый пришёл решением владельца §76 и
+ * лежит НЕ рядом с ними, а внутри `OK`: на проводе это конформный
+ * ответ, а не отказ. Именно поэтому он появляется после проверки формы,
+ * а не вместо неё.
+ */
+type RecommendationsOutcome =
+  | { state: "UNAVAILABLE" }
+  | { state: "CONTRACT_VIOLATION"; violation: string }
+  | { state: "OK"; decision: RecommendationDecision };
+
+export type PicksOutcome =
+  | "OK"
+  | "UNAVAILABLE"
+  | "CONTRACT_VIOLATION"
+  | "NO_VERIFIED_CANDIDATES"
+  | "SAFETY_BLOCKED"
+  | "NO_CAPABLE_CANDIDATES"
+  | "UNRENDERABLE_CANDIDATES";
+
+/**
+ * Три пустоты, неразличимые снаружи, и почему их всё же три.
+ *
+ * `200` и пустой `ordered[]` выглядят одинаково во всех трёх случаях.
+ * Различает их только код — и цена путаницы разная у каждой пары:
+ *
+ * | код | причина | что чинить |
+ * |---|---|---|
+ * | `ELIG_EXCLUDED_NOT_RECOMMENDABLE` | связь не подтверждена (§76) | разметку каталога |
+ * | `ELIG_EXCLUDED_SAFETY` | заявление `NOT_APPLICABLE` отвергнуто содержанием | **ничего: гейт сработал** |
+ * | `ELIG_EXCLUDED_NOT_CAPABLE` | нужда названа, никто не совпал | запрос, не систему |
+ *
+ * Назвать безопасность «нет подтверждённых связей» значило бы послать
+ * человека чинить разметку там, где сработал медицинский гейт, — одно
+ * имя на два состояния, то самое, против чего эти исходы и заведены.
+ *
+ * **Читаются ДВА места, и это не перестраховка.** Реализация резолвера
+ * (`recommendation/_pipeline.py::_decision_codes`) поднимает на уровень
+ * решения только первые два кода; `ELIG_EXCLUDED_NOT_CAPABLE` живёт
+ * исключительно в `excluded[]`. Потребитель, читающий одни лишь коды
+ * решения, превратил бы третью пустоту обратно в `OK` с пустой полкой.
+ *
+ * **Старшинство при нескольких кодах сразу** (решение отвергло часть
+ * кандидатов по безопасности, а часть — по неподтверждённой связи):
+ * безопасность старше. Она — единственная из трёх, про которую верно
+ * «чинить нечего», и потерять её за более громким соседом опаснее, чем
+ * наоборот. Это выбор потребителя, а не буква контракта: контракт
+ * допускает оба кода одновременно и старшинства не назначает.
+ */
+function classifyEmptiness(decision: RecommendationDecision): PicksOutcome {
+  if (decision.ordered.length > 0) return "OK";
+  const decisionCodes = decision.reason_codes ?? [];
+  const excludedCodes = (decision.excluded ?? []).map((e) => e.reason_code);
+  if (decisionCodes.includes(SAFETY_EXCLUDED_CODE)) return "SAFETY_BLOCKED";
+  if (decisionCodes.includes(NOT_RECOMMENDABLE_CODE)) return "NO_VERIFIED_CANDIDATES";
+  if (excludedCodes.includes(SAFETY_EXCLUDED_CODE)) return "SAFETY_BLOCKED";
+  if (excludedCodes.includes(NOT_RECOMMENDABLE_CODE)) return "NO_VERIFIED_CANDIDATES";
+  if (excludedCodes.includes(NOT_CAPABLE_CODE)) return "NO_CAPABLE_CANDIDATES";
+  // Пустота без единого кода — «никто не подошёл» без объяснения.
+  // Приписать ей чужое имя значило бы выдумать причину.
+  return "OK";
+}
+
+/**
+ * Сходить за решением и классифицировать результат.
+ *
+ * Различие структурно, а не эвристично: `try` накрывает ТРАНСПОРТ и
+ * ничего кроме, поэтому всё, что отвергается, — по построению «источник
+ * не ответил», а проверка формы видит только доставленные ответы.
+ * Внутри `catch` тоже не живёт ничего лишнего, так что спрятать в той
+ * же ветке уже наш собственный дефект — как прятался `TypeError` от
+ * `undefined.slice()` — здесь больше нечем.
+ */
+async function loadRecommendations(): Promise<RecommendationsOutcome> {
+  let payload: unknown;
+  try {
+    payload = await fetchRecommendations();
+  } catch {
+    /* Источник недоступен — необязательное украшение; не подделываем и
+       не шумим: это состояние, чьё молчание законно. */
+    return { state: "UNAVAILABLE" };
+  }
+  const violation = decisionContractViolation(payload);
+  if (violation !== null) return { state: "CONTRACT_VIOLATION", violation };
+  return {
+    state: "OK",
+    decision: (payload as { data: RecommendationDecision }).data,
+  };
+}
+
+/**
+ * Собрать всё, что нужно экрану каталога.
+ *
+ * Отказ зеркала отвергается (экран рисует своё состояние ошибки);
+ * недоступный источник подбора уходит в `picks: []` молча, расхождение
+ * контракта — в `picks: []` громко.
  */
 export async function getCatalogBrowse(): Promise<CatalogBrowseData> {
   const [servicesRes, mastersRes] = await Promise.all([
     fetchServices(),
     fetchMasters(),
   ]);
-  let picks: ServicePick[] = [];
-  try {
-    const recs = await fetchRecommendations();
-    const known = new Set(servicesRes.services.map((s) => s.id));
-    picks = recs.recommendations
-      .slice()
-      .sort((a, b) => b.score - a.score)
-      .filter((r) => known.has(r.service_id))
-      .map((r) => ({ serviceId: r.service_id, reasons: displayableReasons(r) }))
-      // Owner ruling 25.08 — a pick the source did not explain is not a
-      // branded Ayla pick. This single line is the whole gate: it lets
-      // WHY through the moment the scorer starts sending it.
-      .filter((p) => p.reasons.length > 0);
-  } catch {
-    /* Ayla scorer unavailable — optional chrome, never fake it. */
-  }
+  const { picks, providerPicks, picksOutcome } = await resolveCatalogPicks(
+    servicesRes.services,
+    mastersRes.masters,
+  );
   return {
     services: servicesRes.services,
     masters: mastersRes.masters,
     picks,
+    providerPicks,
+    picksOutcome,
+    emptyReason: servicesRes.empty_reason ?? null,
   };
+}
+
+/**
+ * Только подбор — без повторного чтения услуг и мастеров (DRF-1768).
+ *
+ * «Попробовать снова» на отказе источника обязано повторять именно
+ * запрос рекомендаций, а не перезагружать экран: услуги и мастера
+ * пришли из зеркала и ни в чём не виноваты. Вынесено из
+ * :func:`getCatalogBrowse`, чтобы у экрана не было второго способа
+ * посчитать picks — один код, два вызывающих.
+ */
+export async function resolveCatalogPicks(
+  services: Service[],
+  masters: Master[],
+): Promise<{ picks: ServicePick[]; providerPicks: ProviderPick[]; picksOutcome: PicksOutcome }> {
+  let picks: ServicePick[] = [];
+  let providerPicks: ProviderPick[] = [];
+  const recs = await loadRecommendations();
+  let picksOutcome: PicksOutcome = recs.state;
+  if (recs.state === "CONTRACT_VIOLATION") {
+    // Единственный канал, который есть у `apps/miniapp/src` (ни Sentry,
+    // ни трекера — заводить их под эту задачу запрещено DRF-1556).
+    // Одна строка, одно состояние: что объявляли и что пришло.
+    console.error(
+      "[recommendations] расхождение контракта — источник ответил, но не в " +
+        "форме, которую объявляет apps/miniapp/src/lib/api.ts::" +
+        "RecommendationDecision: " +
+        recs.violation +
+        ". Подбор остаётся пустым (никогда не подделывается); см. docs/specs/" +
+        "RECOMMENDATION_RESOLVER_CONTRACT_v1.0.md §9.4 (DRF-1568).",
+    );
+  } else if (recs.state === "OK" && recs.decision.ordered.length === 0) {
+    // Штатные состояния с именами, а не дефект и не пустота по ошибке.
+    // Ни строчки в журнал: шум здесь обесценил бы детектор расхождения,
+    // стоящий рядом.
+    picksOutcome = classifyEmptiness(recs.decision);
+  } else if (recs.state === "OK") {
+    const knownServices = new Set(services.map((s) => s.id));
+    const knownMasters = new Set(masters.map((m) => m.id));
+    // Кандидаты, которые эта поверхность способна показать: услуга или
+    // мастер (§81 / K1 — то, что резолвер производит), и притом с ключом,
+    // который зеркало знает. `OFFER` и `SLOT` карточки здесь не имеют.
+    const renderableServices = recs.decision.ordered.filter(
+      (c) => c.candidate.kind === "SERVICE" && knownServices.has(c.candidate.id),
+    );
+    const renderableProviders = recs.decision.ordered.filter(
+      (c) => c.candidate.kind === "PROVIDER" && knownMasters.has(c.candidate.id),
+    );
+    if (renderableServices.length === 0 && renderableProviders.length === 0) {
+      // Источник ответил, кандидаты есть — и ни одного из них полка
+      // отрисовать не может. Это НЕ «нечего показать»: это «нам
+      // прислали то, чего мы не знаем», и молчать об этом нельзя.
+      console.error(
+        "[recommendations] решение содержит " +
+          `${recs.decision.ordered.length} кандидат(ов), и ни один не ` +
+          "отрисуем этой полкой: она умеет kind=SERVICE и kind=PROVIDER " +
+          "с ключами зеркала " +
+          `(kinds: ${[...new Set(recs.decision.ordered.map((c) => c.candidate.kind))].join(",")}). ` +
+          "Подбор остаётся пустым; ключи не переведены транзитом " +
+          "(apps/marketplace/resolver_keys.py) или зеркало отстало.",
+      );
+      picksOutcome = "UNRENDERABLE_CANDIDATES";
+    }
+    // Порядок НЕ трогается: он пришёл готовым, и пересобрать его не
+    // из чего — баллов в ответе нет (§4.3).
+    // Гейт владельца 25.08 — кандидат, которого нечем объяснить, не
+    // является рекомендацией Ayla. Одна строка на список, весь гейт.
+    picks = renderableServices
+      .map((c) => ({
+        serviceId: c.candidate.id,
+        tier: c.tier,
+        rank: c.rank,
+        reasonCodes: c.reason_codes,
+        reasons: displayableReasons(c),
+      }))
+      .filter((p) => p.reasons.length > 0);
+    providerPicks = renderableProviders
+      .map((c) => ({
+        masterId: c.candidate.id,
+        tier: c.tier,
+        rank: c.rank,
+        reasonCodes: c.reason_codes,
+        reasons: displayableReasons(c),
+      }))
+      .filter((p) => p.reasons.length > 0);
+  }
+  return { picks, providerPicks, picksOutcome };
 }
 
 // ---------------------------------------------------------------------------
@@ -177,6 +551,69 @@ export interface BookingCreatePayload {
   visit_at: string;
   /** AMD-002 / C7.4 — user's payment choice from the summary screen. */
   payment_required?: boolean;
+  /** DRF-1773 — провенанс пути (`resolveEntryPoint`); см. `api.ts`. */
+  entry_point?: string;
+  /**
+   * DRF-1708 (решение владельца, пакет 2, D4): ровно то, что человек
+   * ВИДЕЛ на подтверждении. Цена — десятичной строкой как пришла из
+   * котировки, не числом: сравнение по значению делает сервер, написание
+   * наше и должно быть точным. Без котировки поля не шлются — прежний
+   * контракт.
+   */
+  quoted_price?: string;
+  quoted_duration_minutes?: number;
+}
+
+/**
+ * Что будет стоить и сколько займёт НОВАЯ запись к этому мастеру на эту
+ * услугу (DRF-1708). `null` — значение неизвестно: экран его не рисует и
+ * ничего не выдумывает. `source` — откуда число: ребро мастер+услуга (то,
+ * что штампуется на запись) или значения услуги из зеркала.
+ */
+export interface BookingQuote {
+  price: string | null;
+  duration_minutes: number | null;
+  source: "edge" | "service";
+}
+
+export const getBookingQuote = async (
+  masterId: string,
+  serviceId: string,
+): Promise<BookingQuote> => {
+  const params = new URLSearchParams({ master_id: masterId, service_id: serviceId });
+  const res = await request<{ quote: BookingQuote }>(`/quote?${params.toString()}`, {
+    method: "GET",
+  });
+  return res.quote;
+};
+
+/**
+ * Наружное имя отказа «каталог не продаёт это предложение» (DRF-1989).
+ * Приходит и на котировку, и на создание записи; `detail` — слова для человека.
+ */
+export const OFFER_NOT_SELLABLE_SLUG = "offer_not_sellable";
+
+/** Наружное имя отказа «то, что ты видел, уже не действует» (DRF-1708). */
+export const QUOTE_CHANGED_SLUG = "quote_changed";
+
+/** Подробности `quote_changed`, как их прислал сервер — обе пары. */
+export interface QuoteChange {
+  field: "price" | "duration_minutes";
+  quoted: string | number;
+  applied: string | number;
+}
+
+/** Разобрать `ApiError.details` в {@link QuoteChange}; `null` — не тот отказ. */
+export function quoteChangeOf(e: ApiError): QuoteChange | null {
+  if (e.slug !== QUOTE_CHANGED_SLUG) return null;
+  const d = e.details ?? {};
+  const field = d.field;
+  if (field !== "price" && field !== "duration_minutes") return null;
+  const quoted = d.quoted;
+  const applied = d.applied;
+  const ok = (v: unknown): v is string | number => typeof v === "string" || typeof v === "number";
+  if (!ok(quoted) || !ok(applied)) return null;
+  return { field, quoted, applied };
 }
 export interface BookingCreateResponse {
   booking: CreatedBooking;
@@ -196,19 +633,31 @@ export const getCustomerSlots = (params: {
   masterId: string;
   serviceId: string;
   days?: number;
-}): Promise<SlotsResponse> => {
+  /**
+   * DRF-1776 — «Другие даты»: окно сдвигается на N дней вперёд, размер
+   * окна прежний (сервер держит потолок 14 дней на запрос).
+   */
+  offsetDays?: number;
+}): Promise<SlotsResponse & { dateFrom: string; dateTo: string }> => {
   const days = params.days ?? 14;
   const today = new Date();
+  today.setDate(today.getDate() + (params.offsetDays ?? 0));
   const future = new Date(today);
   future.setDate(today.getDate() + days);
   const isoDate = (d: Date): string =>
     `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  const dateFrom = isoDate(today);
+  const dateTo = isoDate(future);
+  // DRF-2178 — окно возвращается вместе со слотами. Полосе дней нужно
+  // знать, ЧТО спросили: сервер шлёт только свободное, и день без окон
+  // в ответе отсутствует. Посчитай экран границы сам — это был бы
+  // второй расчёт того же окна, и однажды он разошёлся бы с запросом.
   return fetchSlots({
     masterId: params.masterId,
     serviceId: params.serviceId,
-    dateFrom: isoDate(today),
-    dateTo: isoDate(future),
-  });
+    dateFrom,
+    dateTo,
+  }).then((response) => ({ ...response, dateFrom, dateTo }));
 };
 
 export const createCustomerBooking = (

@@ -39,11 +39,20 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date
 from typing import Any
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from django.db import transaction
 from django.utils import timezone
 
 from apps.identity.models import BotUser, UserPreferences
+
+#: Имя ключа ``/me`` с датой согласия на дневник/сканер. Совпадает с именем
+#: снятой с учёта колонки ``BotUser`` — это ключ ответа, а не колонка: значение
+#: берётся из реестра (DRF-1963, D5), и ключ живёт ради закешированного бандла
+#: мини-приложения до второй половины листа. Пишется ровно здесь — единственный
+#: модуль, которому сторож ``tools/lint/food_scanner_column_guard.py`` это
+#: разрешает.
+LEGACY_ME_CONSENT_KEY = "food_scanner_consent_at"
 
 
 @dataclass(frozen=True)
@@ -61,6 +70,12 @@ class ProfileSnapshot:
     # Favourites — top-N derived; computed elsewhere, populated here for F4
     favorite_master_name: str | None
     favorite_service_name: str | None
+    # DRF-1564 — момент согласия на дневник/сканер, ISO 8601 либо None.
+    # DRF-1963 (M1, D5): имя ключа прежнее ради закешированного бандла
+    # мини-приложения, но значение — дата действующей строки реестра
+    # ``food_diary_processing``, той же, которую видит гейт навыка. Ключ
+    # удаляется второй половиной листа вместе с колонкой.
+    food_diary_consent_at: str | None
 
 
 def _mask_phone(phone: str) -> str:
@@ -84,10 +99,13 @@ def get_profile(bot_user: BotUser) -> ProfileSnapshot:
     Favourites are stubbed to ``None`` for now; v1.1 will compute from
     booking history.
     """
+    from apps.consent.nutrition import diary_current_record
+
     prefs, _ = UserPreferences.all_tenants.get_or_create(
         bot_user=bot_user,
         defaults={"tenant": bot_user.tenant},
     )
+    diary_consent = diary_current_record(bot_user)
     return ProfileSnapshot(
         bot_user_id=str(bot_user.id),
         display_name=bot_user.display_name,
@@ -104,17 +122,69 @@ def get_profile(bot_user: BotUser) -> ProfileSnapshot:
         },
         favorite_master_name=None,
         favorite_service_name=None,
+        food_diary_consent_at=(
+            diary_consent.captured_at.isoformat() if diary_consent is not None else None
+        ),
     )
 
 
 _EDITABLE_USER_FIELDS = {"client_name", "timezone"}
+
+
+def _validated_timezone(value: str) -> str:
+    """Пропустить только настоящий IANA-пояс либо пустоту (DRF-1477).
+
+    До этой проверки колонку принимала ЛЮБАЯ строка: она обрезалась до
+    64 символов и уходила в базу. Значит `«не знаю»` доезжало до
+    `nutrition_proactive.prefs.resolve_timezone`, где
+    `_safe_zoneinfo` возвращал `None`, и человек **молча** уезжал на
+    пояс салона. Ошибка не сообщалась никому и никогда: ни тому, кто
+    прислал, ни тому, кто читает.
+
+    Пустая строка разрешена намеренно — это «не задано» (DRF-1606),
+    единственный способ сказать «ответа нет». Отклонять её значило бы
+    запретить снимать ответ, однажды данный по ошибке.
+
+    Проверка идёт через `ZoneInfo`, а не по списку: список пришлось бы
+    поддерживать, а база tz обновляется без нас. Неизвестный пояс
+    отвергается ЯВНО — 400 с именем причины вместо тихого сползания на
+    салон.
+    """
+    if not value:
+        return ""
+    try:
+        ZoneInfo(value)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        # Сообщаем, что именно не так, но НЕ подставляем «правильное»
+        # значение: догадка о поясе человека — это ровно то, что
+        # DRF-1606 только что вычистил из умолчания колонки.
+        raise ProfileUpdateError(
+            f"timezone must be a valid IANA zone (e.g. Europe/Moscow); got {value!r}"
+        ) from exc
+    return value
+
+
+#: Поля, которые ``update_profile`` присваивает ``UserPreferences`` сам.
+#: ``notify_promo`` сюда НЕ входит: он зеркало реестра согласий, см.
+#: :data:`_CONSENT_BACKED_PREF_FIELDS`.
 _EDITABLE_PREF_FIELDS = {
     "notify_reminders",
     "notify_retention",
-    "notify_promo",
     "notify_birthday",
     "birthday_date",
 }
+#: Поля профиля, за которыми стоит ``ConsentRecord``, а не колонка (DRF-1520).
+#:
+#: ``notify_promo`` — маркетинговое согласие. Оно жило в двух местах сразу:
+#: булева колонка, которую этот PATCH присваивал молча, и append-only реестр
+#: ``ConsentRecord(MARKETING)``, в который не писал никто. Два источника
+#: правды об одном согласии, ничем не связанные. Главным признан реестр —
+#: только он отвечает, кто и когда согласие дал и когда отозвал; булев флаг
+#: этого не хранит. Колонка осталась зеркалом, и пишет её теперь ровно один
+#: путь — :func:`apps.consent.customer.set_marketing`, куда этот PATCH и
+#: делегирует. Контракт ручки не меняется: тело с ``notify_promo``
+#: принимается как раньше, ответ отдаёт фактическое состояние.
+_CONSENT_BACKED_PREF_FIELDS = {"notify_promo"}
 
 
 class ProfileUpdateError(ValueError):
@@ -130,21 +200,44 @@ def update_profile(bot_user: BotUser, payload: dict[str, Any]) -> ProfileSnapsho
     :class:`ProfileUpdateError` so the API responds with 400 + slug,
     rather than silently dropping a typo.
     """
-    unknown = set(payload) - _EDITABLE_USER_FIELDS - _EDITABLE_PREF_FIELDS
+    unknown = (
+        set(payload) - _EDITABLE_USER_FIELDS - _EDITABLE_PREF_FIELDS - _CONSENT_BACKED_PREF_FIELDS
+    )
     if unknown:
         raise ProfileUpdateError(f"unknown fields: {sorted(unknown)}")
+
+    # Согласия — до колонок: если тело просит и согласие, и обычную
+    # настройку, а согласие невалидно, не должно записаться ничего.
+    for key in _CONSENT_BACKED_PREF_FIELDS & payload.keys():
+        value = payload[key]
+        if not isinstance(value, bool):
+            raise ProfileUpdateError(f"{key} must be a boolean")
 
     # Field max_lengths mirror apps/identity/models.py: BotUser.client_name(150) +
     # BotUser.timezone(64). Hardcoded to avoid runtime _meta walks on every
     # PATCH (and to keep mypy happy with the Field | ForeignObjectRel union).
     _USER_MAX_LEN = {"client_name": 150, "timezone": 64}
-    user_dirty = False
+    # СНАЧАЛА проверяем всё, потом пишем хоть что-то.
+    #
+    # Проверка внутри цикла записи оставляла бы наполовину применённую
+    # правку: `{"client_name": ..., "timezone": "мусор"}` успевал бы
+    # присвоить имя экземпляру и только затем упасть. Сегодня это не
+    # доезжало до базы лишь потому, что `save()` стоит НИЖЕ цикла —
+    # то есть гарантия держалась на порядке строк, а не на устройстве,
+    # и первая же перестановка `save()` внутрь сломала бы её молча.
+    cleaned_user: dict[str, str] = {}
     for key in _EDITABLE_USER_FIELDS & payload.keys():
         value = payload[key]
         if not isinstance(value, str):
             raise ProfileUpdateError(f"{key} must be a string")
-        setattr(bot_user, key, value.strip()[: _USER_MAX_LEN[key]])
-        user_dirty = True
+        cleaned = value.strip()[: _USER_MAX_LEN[key]]
+        if key == "timezone":
+            cleaned = _validated_timezone(cleaned)
+        cleaned_user[key] = cleaned
+
+    user_dirty = bool(cleaned_user)
+    for key, cleaned in cleaned_user.items():
+        setattr(bot_user, key, cleaned)
     if user_dirty:
         bot_user.save(update_fields=[*(_EDITABLE_USER_FIELDS & payload.keys()), "last_seen"])
 
@@ -165,6 +258,13 @@ def update_profile(bot_user: BotUser, payload: dict[str, Any]) -> ProfileSnapsho
         prefs_dirty.append(key)
     if prefs_dirty:
         prefs.save(update_fields=[*prefs_dirty, "updated_at"])
+
+    if "notify_promo" in payload:
+        # Локальный импорт: apps.consent читает identity-модели, и импорт на
+        # уровне модуля замкнул бы кольцо при загрузке приложений.
+        from apps.consent.customer import set_marketing
+
+        set_marketing(bot_user, granted=bool(payload["notify_promo"]))
 
     return get_profile(bot_user)
 

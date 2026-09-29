@@ -128,29 +128,36 @@ class WorkingHours(models.Model):
     lunch break — the resolver splits the working block around them.
     """
 
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    id = models.UUIDField(
+        primary_key=True, default=uuid.uuid4, editable=False, verbose_name="Идентификатор"
+    )
     tenant = models.ForeignKey(
         "tenancy.Tenant",
         on_delete=models.CASCADE,
         related_name="working_hours",
+        verbose_name="Салон",
     )
     master = models.ForeignKey(
         "catalog.CatalogMaster",
         on_delete=models.CASCADE,
         related_name="working_hours",
+        verbose_name="Мастер",
     )
     day_of_week = models.SmallIntegerField(
         choices=Weekday.choices,
         help_text="0=Monday … 6=Sunday — matches Python date.weekday().",
+        verbose_name="День недели",
     )
     is_working = models.BooleanField(
         default=True,
         help_text="False = recurring weekly day off. When False, all time fields must be null.",
+        verbose_name="Рабочий день",
     )
     start_time = models.TimeField(
         null=True,
         blank=True,
         help_text="Block start in tenant-local TZ. Inclusive. Required when is_working=True.",
+        verbose_name="Начало смены",
     )
     end_time = models.TimeField(
         null=True,
@@ -158,17 +165,20 @@ class WorkingHours(models.Model):
         help_text="Block end in tenant-local TZ. Exclusive (last bookable "
         "start is end_time minus service duration). Required when "
         "is_working=True.",
+        verbose_name="Конец смены",
     )
     lunch_start = models.TimeField(
         null=True,
         blank=True,
         help_text="Optional recurring lunch start. The resolver splits "
         "the working block around lunch_start..lunch_end.",
+        verbose_name="Начало перерыва",
     )
     lunch_end = models.TimeField(
         null=True,
         blank=True,
         help_text="Optional recurring lunch end. Must be set together with lunch_start.",
+        verbose_name="Конец перерыва",
     )
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -177,16 +187,17 @@ class WorkingHours(models.Model):
         blank=True,
         related_name="+",
         help_text="Admin who created this row. Null for system / migration backfills.",
+        verbose_name="Кем задано",
     )
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="Создано")
+    updated_at = models.DateTimeField(auto_now=True, verbose_name="Изменено")
 
     objects = TenantScopedManager()
     all_tenants = models.Manager()
 
     class Meta:
-        verbose_name = "Working hours"
-        verbose_name_plural = "Working hours"
+        verbose_name = "Рабочие часы мастера"
+        verbose_name_plural = "Рабочие часы мастеров"
         ordering = ["master_id", "day_of_week"]
         # Handoff §1 line 82: unique (master, day_of_week).
         constraints = [
@@ -261,39 +272,47 @@ class ScheduleException(models.Model):
     # Full-day types — start_time / end_time MUST be null.
     FULL_DAY_TYPES = {Type.VACATION, Type.SICK_LEAVE, Type.DAY_OFF, Type.EVENT}
 
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    id = models.UUIDField(
+        primary_key=True, default=uuid.uuid4, editable=False, verbose_name="Идентификатор"
+    )
     tenant = models.ForeignKey(
         "tenancy.Tenant",
         on_delete=models.CASCADE,
         related_name="schedule_exceptions",
+        verbose_name="Салон",
     )
     master = models.ForeignKey(
         "catalog.CatalogMaster",
         on_delete=models.CASCADE,
         related_name="schedule_exceptions",
+        verbose_name="Мастер",
     )
     date = models.DateField(
-        help_text="Calendar date in tenant-local timezone.",
+        help_text="Calendar date in tenant-local timezone.", verbose_name="Дата"
     )
     type = models.CharField(
         max_length=16,
         choices=Type.choices,
         help_text="5-value enum per schedule-management handoff §1.",
+        verbose_name="Вид исключения",
     )
     start_time = models.TimeField(
         null=True,
         blank=True,
         help_text="Required for type=custom_hours, must be NULL for all other types.",
+        verbose_name="Начало",
     )
     end_time = models.TimeField(
         null=True,
         blank=True,
         help_text="Required for type=custom_hours, must be NULL for all other types.",
+        verbose_name="Окончание",
     )
     reason = models.TextField(
         blank=True,
         default="",
         help_text="Free-form note visible to the salon team only.",
+        verbose_name="Причина",
     )
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -301,16 +320,17 @@ class ScheduleException(models.Model):
         null=True,
         blank=True,
         related_name="+",
+        verbose_name="Кем задано",
     )
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="Создано")
+    updated_at = models.DateTimeField(auto_now=True, verbose_name="Изменено")
 
     objects = TenantScopedManager()
     all_tenants = models.Manager()
 
     class Meta:
-        verbose_name = "Schedule exception"
-        verbose_name_plural = "Schedule exceptions"
+        verbose_name = "Исключение в расписании"
+        verbose_name_plural = "Исключения в расписании"
         ordering = ["-date", "master_id"]
         indexes = [
             models.Index(fields=["tenant", "master", "date"]),
@@ -367,29 +387,33 @@ class TimeBlock(models.Model):
     date+master pair.
     """
 
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    id = models.UUIDField(
+        primary_key=True, default=uuid.uuid4, editable=False, verbose_name="Идентификатор"
+    )
     tenant = models.ForeignKey(
-        "tenancy.Tenant",
-        on_delete=models.CASCADE,
-        related_name="time_blocks",
+        "tenancy.Tenant", on_delete=models.CASCADE, related_name="time_blocks", verbose_name="Салон"
     )
     master = models.ForeignKey(
         "catalog.CatalogMaster",
         on_delete=models.CASCADE,
         related_name="time_blocks",
+        verbose_name="Мастер",
     )
     start_at = models.DateTimeField(
         help_text="Block start instant (timezone-aware, stored UTC).",
+        verbose_name="Начало блокировки",
     )
     end_at = models.DateTimeField(
         help_text="Block end instant (timezone-aware, stored UTC). "
         "Exclusive — a candidate slot starting exactly at end_at is "
         "allowed.",
+        verbose_name="Конец блокировки",
     )
     reason = models.CharField(
         max_length=200,
         help_text="Human-readable note for the salon team. Common: "
         "«обед», «уборка», «подготовка», «просто занято».",
+        verbose_name="Причина",
     )
     created_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -397,16 +421,17 @@ class TimeBlock(models.Model):
         null=True,
         blank=True,
         related_name="+",
+        verbose_name="Кем задан",
     )
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="Создан")
+    updated_at = models.DateTimeField(auto_now=True, verbose_name="Изменён")
 
     objects = TenantScopedManager()
     all_tenants = models.Manager()
 
     class Meta:
-        verbose_name = "Time block"
-        verbose_name_plural = "Time blocks"
+        verbose_name = "Блокировка времени"
+        verbose_name_plural = "Блокировки времени"
         ordering = ["master_id", "start_at"]
         indexes = [
             models.Index(fields=["tenant", "master", "start_at"]),
@@ -476,23 +501,28 @@ class ScheduleChangeRequest(models.Model):
         PERSONAL = "personal", "Личные дела"
         OTHER = "other", "Другое"
 
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    id = models.UUIDField(
+        primary_key=True, default=uuid.uuid4, editable=False, verbose_name="Идентификатор"
+    )
     tenant = models.ForeignKey(
         "tenancy.Tenant",
         on_delete=models.CASCADE,
         related_name="schedule_change_requests",
+        verbose_name="Салон",
     )
     master = models.ForeignKey(
         "catalog.CatalogMaster",
         on_delete=models.CASCADE,
         related_name="schedule_change_requests",
         help_text="Master who submitted the request.",
+        verbose_name="Мастер",
     )
     requested_change = models.JSONField(
         default=dict,
         help_text="Diff structure — writer-defined shape. Common keys: "
         "type (working_hours_change / exception_add), day_of_week, "
         "new_start, new_end, date, exception_type, reason.",
+        verbose_name="Что просят изменить",
     )
     # M3 typed columns (PR Tier1.2 / master-mobile §M3 line 475). Nullable
     # so legacy ``requested_change``-only rows still validate.
@@ -502,6 +532,7 @@ class ScheduleChangeRequest(models.Model):
         help_text="Start of the proposed off-time window (UTC). Set by "
         "M3 POST /api/master/availability; null for legacy "
         "requested_change-only rows.",
+        verbose_name="Желаемое начало",
     )
     requested_end = models.DateTimeField(
         null=True,
@@ -509,6 +540,7 @@ class ScheduleChangeRequest(models.Model):
         help_text="End of the proposed off-time window (UTC). Set by "
         "M3 POST /api/master/availability; null for legacy rows. Always "
         "> requested_start when both are set.",
+        verbose_name="Желаемое окончание",
     )
     reason_class = models.CharField(
         max_length=16,
@@ -517,6 +549,7 @@ class ScheduleChangeRequest(models.Model):
         default="",
         help_text="Closed-set classification of the master's reason. "
         "Empty for legacy rows that pre-date the M3 typed endpoint.",
+        verbose_name="Класс причины",
     )
     reason_text = models.CharField(
         max_length=200,
@@ -525,22 +558,26 @@ class ScheduleChangeRequest(models.Model):
         help_text="Short free-form note from the master (≤200 chars). "
         "The longer ``reason`` text field stays as the legacy free-form "
         "fallback for callers that pre-date the M3 endpoint.",
+        verbose_name="Причина словами мастера",
     )
     reason = models.TextField(
         blank=True,
         default="",
         help_text="Master's free-form rationale (e.g. «утренние йога»).",
+        verbose_name="Причина",
     )
     status = models.CharField(
         max_length=16,
         choices=Status.choices,
         default=Status.PENDING,
         db_index=True,
+        verbose_name="Состояние заявки",
     )
     resolution_note = models.TextField(
         blank=True,
         default="",
         help_text="Owner's note on approval/rejection.",
+        verbose_name="Решение",
     )
     resolved_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -548,6 +585,7 @@ class ScheduleChangeRequest(models.Model):
         null=True,
         blank=True,
         related_name="+",
+        verbose_name="Кто решил",
     )
     # M3-admin follow-up (PR #521 adversarial blocker #3): a direct
     # BotUser id of the decider, populated when no Django User row is
@@ -563,8 +601,9 @@ class ScheduleChangeRequest(models.Model):
         blank=True,
         help_text="BotUser.id of the admin/owner who decided this "
         "request. Populated even when ``resolved_by`` FK is NULL.",
+        verbose_name="Кто решил (аккаунт в мессенджере)",
     )
-    resolved_at = models.DateTimeField(null=True, blank=True)
+    resolved_at = models.DateTimeField(null=True, blank=True, verbose_name="Решено")
     # Snapshot of the BotUser who submitted the request. Distinct from
     # ``master`` (the CatalogMaster row) and from ``resolved_by`` (the
     # Django User who approved/rejected). Lets the admin endpoint render
@@ -578,15 +617,16 @@ class ScheduleChangeRequest(models.Model):
         related_name="+",
         help_text="BotUser who submitted via the M3 endpoint. NULL for "
         "system-generated or legacy rows.",
+        verbose_name="Кто попросил",
     )
-    created_at = models.DateTimeField(auto_now_add=True)
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="Создана")
 
     objects = TenantScopedManager()
     all_tenants = models.Manager()
 
     class Meta:
-        verbose_name = "Schedule change request"
-        verbose_name_plural = "Schedule change requests"
+        verbose_name = "Заявка на изменение расписания"
+        verbose_name_plural = "Заявки на изменение расписания"
         ordering = ["-created_at"]
         indexes = [
             models.Index(fields=["tenant", "status", "-created_at"]),
@@ -621,39 +661,43 @@ class SlotConfig(models.Model):
     UI surfaces this row explicitly so the salon can tune.
     """
 
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    id = models.UUIDField(
+        primary_key=True, default=uuid.uuid4, editable=False, verbose_name="Идентификатор"
+    )
     tenant = models.OneToOneField(
-        "tenancy.Tenant",
-        on_delete=models.CASCADE,
-        related_name="slot_config",
+        "tenancy.Tenant", on_delete=models.CASCADE, related_name="slot_config", verbose_name="Салон"
     )
     slot_granularity_min = models.PositiveSmallIntegerField(
         default=DEFAULT_SLOT_GRANULARITY_MIN,
         help_text="Grid step in minutes for candidate slot starts. Default 15. Range 5–60.",
+        verbose_name="Шаг сетки записи, мин",
     )
     buffer_min = models.PositiveSmallIntegerField(
         default=DEFAULT_BUFFER_MIN,
         help_text="Minimum gap (minutes) before AND after every "
         "occupied interval. Lets the master prep / clean the station. "
         "Default 5. Range 0–60.",
+        verbose_name="Буфер между записями, мин",
     )
     lead_time_min = models.PositiveSmallIntegerField(
         default=DEFAULT_LEAD_TIME_MIN,
         help_text="Minimum minutes between now and the earliest "
         "bookable start. Default 60. Range 0–2880 (48h).",
+        verbose_name="Минимальный запас до визита, мин",
     )
     max_advance_days = models.PositiveSmallIntegerField(
         default=DEFAULT_MAX_ADVANCE_DAYS,
         help_text="Don't surface slots farther than this many days ahead. Default 60. Range 7–180.",
+        verbose_name="На сколько дней вперёд можно записаться",
     )
-    updated_at = models.DateTimeField(auto_now=True)
+    updated_at = models.DateTimeField(auto_now=True, verbose_name="Изменено")
 
     objects = TenantScopedManager()
     all_tenants = models.Manager()
 
     class Meta:
-        verbose_name = "Slot config"
-        verbose_name_plural = "Slot configs"
+        verbose_name = "Настройка сетки записи"
+        verbose_name_plural = "Настройки сетки записи"
 
     def __str__(self) -> str:
         return f"SlotConfig[tenant={self.tenant_id}]"

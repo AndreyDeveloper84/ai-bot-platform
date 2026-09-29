@@ -96,6 +96,18 @@ MASTER_PROFILE_INITIALIZED = "master.profile_initialized"
 MASTER_PROFILE_UPDATED_BY_ADMIN = "master.profile_updated_by_admin"
 MASTER_PHOTO_UPDATED_BY_ADMIN = "master.photo_updated_by_admin"
 
+# --- Подтверждение расписания (§83, DRF-1521 п. 6) -----------------------
+# Две записи, а не одна, потому что вопросов два и задаёт их один человек
+# в разное время: «кто и когда допустил этого мастера к продаже» и
+# «почему он с продажи ушёл». Ответить на второй молчанием нельзя — для
+# владелицы салона мастер исчезнет с витрины без объяснения.
+#   master.schedule_confirmed:
+#     {master_id, actor_role, source, fingerprint}
+#   master.schedule_confirmation_cleared:
+#     {master_id, reason, previous_fingerprint}  — актора нет, снимает машина
+MASTER_SCHEDULE_CONFIRMED = "master.schedule_confirmed"
+MASTER_SCHEDULE_CONFIRMATION_CLEARED = "master.schedule_confirmation_cleared"
+
 # --- Admin master invite flow (master-management MM2 backend / PR 3) -----
 # Emitted from apps.admin_api when an owner/admin issues a fresh
 # CatalogMaster invite. Payload contract:
@@ -105,9 +117,15 @@ MASTER_PHOTO_UPDATED_BY_ADMIN = "master.photo_updated_by_admin"
 #   master.invite_dispatched:
 #     {master_id, channel: "max", delivery: "queued"|"failed"|"skipped",
 #      error?: str}
-# The two events are paired: ``invited`` records the admin's intent +
-# the DB row creation, ``invite_dispatched`` records the side-channel
-# delivery attempt (queued post-commit via ``transaction.on_commit``).
+#
+# ``invite_dispatched`` НЕ ПИШЕТСЯ БОЛЬШЕ НИКЕМ (решение владельца §44.4
+# от 07.09.2026): оно описывало исход личного сообщения, которое
+# приглашение больше не отправляет. Имя оставлено в словаре ради строк,
+# уже лежащих в базе, — их читает лента в карточке мастера
+# (``apps/miniapp/src/screens/admin/AdminMasterDetailScreen.tsx``), и
+# без имени они рисовались бы сырым слагом. Новых таких строк не
+# появляется; если через год их не останется, имя можно снять вместе с
+# веткой ленты.
 MASTER_INVITED = "master.invited"
 MASTER_INVITE_DISPATCHED = "master.invite_dispatched"
 
@@ -126,6 +144,38 @@ STAFF_INVITE_ISSUED = "staff.invite_issued"
 # Written inside the same transaction as the revoke itself — an audit row
 # describing a rollback would be a lie.
 STAFF_ACCESS_REVOKED = "staff.access_revoked"
+
+# --- Staff role management from Django Admin (DRF-2082) -------------------
+# Emitted from apps.identity.services.staff_roles when a platform operator
+# grants or changes a salon role by hand (no invite code). One row per
+# call, after the result. Payload: {surface, actor_label, person_id, role,
+# previous_roles?, already_had_role?}. Names only — never a phone or a MAX id.
+STAFF_ROLE_GRANTED = "staff.role_granted"
+STAFF_ROLE_CHANGED = "staff.role_changed"
+# Invite code revoked by an operator before its expiry (DRF-2082, PR-2).
+# Payload: {surface, actor_label, role, reason}. Neither the code nor its
+# hash — same rule as STAFF_INVITE_ISSUED.
+STAFF_INVITE_REVOKED = "staff.invite_revoked"
+# DRF-2085 (OWNER RULING 18.09): the catalog created a fresh salon-admin
+# account + TUR and bound this person's MAX identity to it — written in the
+# same transaction as the TenantStaff admin row. Payload: {surface,
+# actor_label, tenant_id, person_id, ayla_user_id, relationship_id,
+# correlation_id, idempotency_key, created}. No MAX id, no secret.
+STAFF_SALON_ADMIN_LINKED = "staff.salon_admin_linked"
+# The catalog (or the missing credential) refused the link; the admin role
+# was NOT granted. Written after the rollback by the caller. Payload:
+# {surface, actor_label, tenant_id, person_id, reason, correlation_id}.
+STAFF_SALON_ADMIN_LINK_REFUSED = "staff.salon_admin_link_refused"
+
+# --- Specialist onboarded into a salon (поток A, п. 3) --------------------
+# Emitted from apps.identity.services.specialist_onboarding when an operator
+# (Django Admin / operations tool) or a salon admin (Mini App «Команда»)
+# runs the one onboarding path for a master. One row PER CALL, written
+# after the result is known — it records the outcome, not the attempt.
+# Payload: {surface, actor_label, capability, cross_tenant, person_id,
+# membership_before, membership_after, identity_status, identity_reason?,
+# specialist_id?, sale_block?}. Names only — never a phone or a MAX id.
+STAFF_SPECIALIST_ONBOARDED = "staff.specialist_onboarded"
 
 # --- Admin services ↔ masters mapping (master-management MM4 / PR 4) -----
 # Emitted from apps.admin_api when an owner/admin toggles the M2M between
@@ -329,6 +379,15 @@ VISITS_LISTED = "marketplace.visits.listed"
 VISIT_CARD_OPENED = "marketplace.visit_card.opened"
 REPEAT_CHECKED = "marketplace.repeat.checked"
 
+# DRF-1547 / §37 п.1 — отмена записи С КАРТОЧКИ, в чате.
+#
+# Своё имя, а не ``BOOKING_CANCELLED``: то событие пишет БЭКЕНД по
+# круговому ходу, а это — ход ЧЕЛОВЕКА на клиентской поверхности. Слить
+# их в одно значило бы потерять ровно тот вопрос, ради которого действие
+# переехало на карточку: пользуются ли отменой из чата и чем она
+# заканчивается.
+VISIT_CANCELLED = "marketplace.visit.cancelled"
+
 
 CANONICAL_EVENTS: frozenset[str] = frozenset(
     {
@@ -359,10 +418,18 @@ CANONICAL_EVENTS: frozenset[str] = frozenset(
         PAYMENT_FAILED_SKILL_TRIGGERED,
         MASTER_PROFILE_UPDATED_BY_ADMIN,
         MASTER_PHOTO_UPDATED_BY_ADMIN,
+        MASTER_SCHEDULE_CONFIRMED,
+        MASTER_SCHEDULE_CONFIRMATION_CLEARED,
         MASTER_INVITED,
         MASTER_INVITE_DISPATCHED,
         STAFF_INVITE_ISSUED,
         STAFF_ACCESS_REVOKED,
+        STAFF_SPECIALIST_ONBOARDED,
+        STAFF_ROLE_GRANTED,
+        STAFF_ROLE_CHANGED,
+        STAFF_INVITE_REVOKED,
+        STAFF_SALON_ADMIN_LINKED,
+        STAFF_SALON_ADMIN_LINK_REFUSED,
         MASTER_SERVICES_CHANGED,
         MASTER_SERVICE_EDGE_CREATED,
         MASTER_SERVICE_EDGE_DELETED,
@@ -394,6 +461,7 @@ CANONICAL_EVENTS: frozenset[str] = frozenset(
         VISITS_LISTED,
         VISIT_CARD_OPENED,
         REPEAT_CHECKED,
+        VISIT_CANCELLED,
     }
 )
 

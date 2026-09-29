@@ -56,6 +56,7 @@ import httpx
 from django.conf import settings
 
 from apps.integrations.ayla.url_builder import AylaUrlBuilder, AylaUrlError
+from apps.integrations.ayla.request_id import with_request_id
 
 
 logger = logging.getLogger(__name__)
@@ -131,7 +132,7 @@ _circuit = _Circuit()
 
 
 class IdentityResolveError(Exception):
-    """Identity read-back failed (timeout, 5xx, auth, circuit, malformed).
+    """Identity read-back failed (timeout, any transport failure, 5xx, auth, circuit, malformed).
 
     Callers MUST degrade rather than propagate: `ensure_ayla_link` turns
     this into ``None`` so the caller falls through to its pre-existing
@@ -184,8 +185,12 @@ def _parse(payload: Any) -> ResolvedIdentity:
     return ResolvedIdentity(ayla_user_id=user_id, is_proxy=bool(body.get("is_proxy", True)))
 
 
-def resolve_identity(external_user_id: str) -> ResolvedIdentity:
+def resolve_identity(external_user_id: str, *, timeout_s: float | None = None) -> ResolvedIdentity:
     """Ask Ayla which user it resolves ``external_user_id`` to.
+
+    ``timeout_s`` — a caller's tighter budget (DRF-1292: the memory write that
+    now runs BEFORE the reply is sent gives Ayla ≤ 1 s); ``None`` — the
+    module default :data:`TIMEOUT_S`. Never longer than the default.
 
     The call is a pure read from the bot's perspective, but it is not
     side-effect-free on Ayla: ``resolve_external_user`` lazily creates the
@@ -213,21 +218,36 @@ def resolve_identity(external_user_id: str) -> ResolvedIdentity:
     except AylaUrlError as exc:
         raise IdentityResolveError(f"invalid AYLA_BASE_URL: {exc}") from exc
 
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/json",
-        # The ONLY place the subject is named. No request body exists, so
-        # a caller cannot substitute a different subject (DRF-1035 §E.4).
-        "X-External-User-ID": external_user_id,
-    }
+    headers = with_request_id(
+        {
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/json",
+            # The ONLY place the subject is named. No request body exists, so
+            # a caller cannot substitute a different subject (DRF-1035 §E.4).
+            "X-External-User-ID": external_user_id,
+        }
+    )
 
     try:
-        with httpx.Client(timeout=TIMEOUT_S) as http:
+        with httpx.Client(
+            timeout=min(timeout_s, TIMEOUT_S) if timeout_s is not None else TIMEOUT_S
+        ) as http:
             resp = http.get(url, headers=headers)
     except (httpx.TimeoutException, httpx.NetworkError) as exc:
         _circuit.record_failure(now=time.monotonic())
         logger.warning("identity_client.network_failure exc=%s", type(exc).__name__)
         raise IdentityResolveError(f"network: {type(exc).__name__}") from exc
+    except httpx.HTTPError as exc:
+        # DRF-2579: всё остальное, что выпускает ``httpx`` до ответа, —
+        # ``RemoteProtocolError`` (сервер закрыл соединение на полуслове:
+        # рестарт воркера каталога), ``ProxyError``, ``UnsupportedProtocol``…
+        # — раньше выходило сырым и роняло вызывающих, которые по контракту
+        # класса ловят только ``IdentityResolveError`` (регистрация
+        # соло-мастера). Имя отказа одно и постоянное; тип исключения — только
+        # в журнал, не в причину.
+        _circuit.record_failure(now=time.monotonic())
+        logger.warning("identity_client.transport_failure exc=%s", type(exc).__name__)
+        raise IdentityResolveError("network: transport_failure") from exc
 
     if resp.status_code >= 500:
         _circuit.record_failure(now=time.monotonic())

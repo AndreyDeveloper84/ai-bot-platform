@@ -152,6 +152,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+import lint_parse  # DRF-2538: нечитаемый вход — отдельный исход, не ноль
+
 # ── Contract registry ────────────────────────────────────────────────
 
 
@@ -183,6 +185,40 @@ class Contract:
     # entry" in the module docstring (DRF-1159).
     triage_note_required: bool = False
 
+
+# ── S2.6 (DRF-1700, owner 11.09 §2.6) — what a SALON surface is, and what it
+# may not read. Prefixes are files and directories; `startswith` matching,
+# so a single file is a valid prefix.
+SALON_SURFACE_PREFIXES: tuple[str, ...] = (
+    "apps/channels/max/salon_handler.py",
+    "apps/channels/max/staff_menu.py",
+    "apps/admin_api/",
+    "apps/master_api/",
+    "apps/internal_chat/",
+)
+
+# The person's memory, goals, nutrition, wellness and health — the readers,
+# the models and the Ayla clients. Named by module so that a new reader in
+# one of these packages is covered without editing this list; a new PACKAGE
+# is not, and that is the named blind spot of this contract.
+PERSONAL_CONTEXT_MODULES: tuple[str, ...] = (
+    "apps.identity.models.UserPersonalContext",
+    "apps.identity.models.MemoryEntry",
+    "apps.identity.models.RedZoneAccessLog",
+    "apps.identity.services.personal_context",
+    "apps.identity.services.memory_reader",
+    "apps.identity.services.memory_inferred",
+    "apps.identity.services.red_zone_reader",
+    "apps.orchestrator.memory.personal_context",
+    "apps.orchestrator.personal_surface",
+    "apps.persona.memory_surface",
+    "apps.persona.memory_commands",
+    "apps.nutrition_proactive",
+    "apps.integrations.ayla.personal_context_client",
+    "apps.integrations.ayla.nutrition_client",
+    "apps.integrations.ayla.goals_client",
+    "apps.integrations.ayla.wellness_context_client",
+)
 
 CONTRACTS: tuple[Contract, ...] = (
     Contract(
@@ -252,6 +288,25 @@ CONTRACTS: tuple[Contract, ...] = (
             "historical read, add it to BASELINE with that note and a tracking "
             "issue; if not, route through apps/booking/ or Ayla REST."
         ),
+    ),
+    Contract(
+        id="S2.6-salon-surfaces-no-personal-context",
+        issue="DRF-1700",
+        source_prefixes=SALON_SURFACE_PREFIXES,
+        forbidden_modules=PERSONAL_CONTEXT_MODULES,
+        message=(
+            "owner decision 11.09 §2.6: «салон не видит цели, домашний/рабочий "
+            "адрес, питание и историю других салонов». A salon-facing surface "
+            "(salon bot, staff menu, admin/master API, internal chat) must not "
+            "import the person's memory, goals, nutrition, wellness or health "
+            "readers — those belong to the client contour and to Ayla. "
+            "Measured 11.09: zero such imports on dev; this contract keeps the "
+            "zero a rule rather than a coincidence. If a salon feature needs a "
+            "FACT (not the content) — e.g. «has an active goal» — route it "
+            "through a reader that returns the fact only, and pin it here with "
+            "a BaselineNote naming what leaves and to whom."
+        ),
+        triage_note_required=True,
     ),
 )
 
@@ -510,36 +565,17 @@ BASELINE: frozenset[BaselineKey] = frozenset(
             "LoyaltySubscriber._revoke_visit",
             "apps.booking.models.BookingRequest",
         ),
-        (
-            "G9-booking-request-outside-owner",
-            "apps/master_api/services/conversation_detail.py",
-            "<module>",
-            "apps.booking.models.BookingRequest",
-        ),
-        (
-            "G9-booking-request-outside-owner",
-            "apps/master_api/services/conversations.py",
-            "<module>",
-            "apps.booking.models.BookingRequest",
-        ),
-        (
-            "G9-booking-request-outside-owner",
-            "apps/master_api/services/customers.py",
-            "<module>",
-            "apps.booking.models.BookingRequest",
-        ),
         # dashboard.py and schedule.py stood here until DRF-1085 (869285c,
         # 205f2dd) moved both surfaces onto the RemoteBookingProxy mirror
         # and the BookingRequest import left the files entirely. The
         # ratchet then demanded the entries be deleted — debt paid, line
         # removed. This is the baseline working as designed, not a
         # relaxation: a stale entry is a lie about the shape of the code.
-        (
-            "G9-booking-request-outside-owner",
-            "apps/master_api/tasks.py",
-            "auto_generate_draft_for_inbound",
-            "apps.booking.models.BookingRequest",
-        ),
+        # Тем же порядком DRF-1528 снял записи переписки мастер↔клиент
+        # (`services/conversations.py`, `services/conversation_detail.py`)
+        # и автотриггера черновиков (`tasks.py`): файлов нет — записи ушли.
+        # `services/customers.py` — DRF-1138: список «Клиенты» читает зеркало
+        # (`visit_source.attended_visits`), импорт BookingRequest ушёл.
     }
 )
 
@@ -636,12 +672,26 @@ CATALOG_CROSS_TENANT_BASELINE: frozenset[BaselineKey] = frozenset(
         # is unavailable for the same reason — revocation must also work from
         # a command, where no tenant ContextVar is set.
         "apps/identity/services/staff_revoke.py",
+        # §12 (11.09) — the read-only identity card is PERSON-level: one
+        # messenger identity across every salon it appears in, master cards
+        # looked up by that identity's own BotUser ids — never by tenant,
+        # never discovery. Read-only; the operator rendering masks every
+        # personal value and the person rendering never names another salon.
+        "apps/identity/services/identity_card.py",
+        # B-R (DRF-1617) — the test-account reset is PERSON-level by
+        # construction: one (channel, channel_user_id) has a BotUser per
+        # tenant, and the command frees all of them, so it reads the master
+        # cards linked to THOSE BotUser ids / ayla_user_id — a lookup by the
+        # person's own keys, never by tenant, never discovery. `.objects`
+        # would see one tenant and miss the rest, which is the half-reset
+        # this command exists to prevent. Writes are behind
+        # ACCOUNT_RESET_ALLOWLIST (empty on the pilot).
+        "apps/identity/services/account_reset.py",
         # DRF-1061 — operator command listing and picking a master to invite.
         # Every query is filtered on the --tenant the operator named, and it
         # runs at a terminal with no request and therefore no tenant
         # ContextVar. Same posture as the other management commands above.
         "apps/identity/management/commands/issue_staff_invite.py",
-        "apps/master_api/tasks.py",
         "apps/master_api/views.py",
         # booking write paths (S1) — explicit-id reads before canonical write
         "apps/booking/services/create.py",
@@ -658,6 +708,97 @@ CATALOG_CROSS_TENANT_BASELINE: frozenset[BaselineKey] = frozenset(
         "apps/skills/booking/skill.py",
         "apps/skills/booking/tools.py",
         "apps/skills/payment_failed/skill.py",
+    )
+)
+
+
+# ── Cross-tenant scheduling-access rule (SCH1, DRF-2022) ─────────────
+#
+# Same posture as MKT1 above, different tables — and the gap it closes was
+# WRITTEN DOWN before it was held: CATALOG_CROSS_TENANT_BASELINE lists
+# apps/master_api/services/schedule.py as an accepted cross-tenant site,
+# but CATALOG_CROSS_TENANT_MODELS never contained a scheduling model. So
+# `ScheduleException.all_tenants` in that very file passed in silence. The
+# stance was recorded; the guard did not hold it.
+#
+# The message says ACCESS, not "read", deliberately: `all_tenants` bypasses
+# the tenant-scoped manager in BOTH directions, and one accepted site below
+# is a write (`ScheduleChangeRequest.all_tenants.create`). A contract whose
+# text needs a caveat to cover its own scope gets read without the caveat
+# the first time somebody copies it.
+#
+# No apps/marketplace/ carve-out: cross-tenant DISCOVERY is marketplace's
+# sanctioned job and a schedule is not discovery. Pinned by a test, not by
+# this comment — a comment is not a guard.
+#
+# Detection shares MKT1's visitor and therefore MKT1's honest limit: the
+# model reference must be a literal bare Name. `apps/scheduling/admin.py`
+# holds 5 `self.model.all_tenants` accesses whose model name is COMPUTED;
+# they are invisible to this rule and always will be. They are excluded
+# from the floor below rather than silently counted as covered.
+SCHEDULING_CROSS_TENANT_CONTRACT_ID = "SCH1-scheduling-cross-tenant-access"
+SCHEDULING_CROSS_TENANT_ISSUE = "DRF-2022"
+SCHEDULING_CROSS_TENANT_MODELS = frozenset(
+    {"WorkingHours", "ScheduleException", "TimeBlock", "ScheduleChangeRequest", "SlotConfig"}
+)
+# Same manager as MKT1 — the carve-out is the manager, not the app.
+SCHEDULING_CROSS_TENANT_MANAGER = CATALOG_CROSS_TENANT_MANAGER
+_SCHEDULING_ROOT = "<scheduling.all_tenants>"
+
+# Floor for "an empty scan must not read as a clean scan". Measured before
+# the rule existed: 19 sites in 7 files on dev 8bf99f7c, 16 sites in the
+# same 7 files once #1791 and #1794 land (both already proven green). The
+# floor is the MINIMUM across those states — a floor of 19 would turn red
+# the day #1794 merges, with nothing broken.
+#
+# MAINTENANCE: when a site is legitimately removed, lower this number IN
+# THE SAME CHANGE, on purpose. Never edit the floor after seeing red to get
+# back to green — a floor fitted to the result is not a guard any more.
+MIN_SCHEDULING_SITES = 17
+MIN_SCHEDULING_BASELINE_FILES = 8
+
+# Accepted pre-existing sites. Every entry is a VERDICT, and each one below
+# was reached by reading the query, not by trusting the file's neighbours:
+# all 19 accesses pin the tenant explicitly in the query itself. Had one of
+# them not been scoped, it would have gone to a separate ticket — putting an
+# unscoped access in here would legitimise a live cross-tenant hole and set
+# this guard to defend it.
+SCHEDULING_CROSS_TENANT_BASELINE: frozenset[BaselineKey] = frozenset(
+    (SCHEDULING_CROSS_TENANT_CONTRACT_ID, _f, FILE_QUALNAME, _SCHEDULING_ROOT)
+    for _f in (
+        # 5 sites. Every query pins `tenant_id=tenant_id` from the admin
+        # request, including both `select_for_update().get(id=…, tenant_id=…)`.
+        # Admin authority over ONE named tenant; no discovery.
+        "apps/admin_api/services/availability.py",
+        # 1 site (DRF-2129). Worker task without a tenant in kwargs: the
+        # request row is pinned by `master_id` (the master the DM goes to);
+        # the decider is then read by that row's `tenant_id`.
+        "apps/admin_api/tasks.py",
+        # 1 site. `update_or_create(tenant=tenant, master=mst, …)` in a dev
+        # bootstrap command, run at a terminal where no tenant ContextVar exists.
+        "apps/catalog/management/commands/seed_dev_formula_tela.py",
+        # 1 site. `filter(tenant_id=master.tenant_id, master_id=master.id)` —
+        # scoped to the master being confirmed; runs from the consumer.
+        "apps/catalog/services/schedule_confirmation.py",
+        # 1 site (DRF-2118). `ScheduleChangeRequest.all_tenants.filter(id=…,
+        # tenant=tenant)` — «Подробнее» по кнопке уведомления: тенант — тот,
+        # чью кнопку нажали, закреплён в запросе.
+        "apps/channels/max/salon_notify_actions.py",
+        # 3 sites on dev, 1 after #1791. The master's own cabinet: every query
+        # pins tenant_id AND master_id taken from the master being viewed.
+        "apps/master_api/services/dashboard.py",
+        # 3 sites on dev, 2 after #1794 — and one of them is a WRITE:
+        # `ScheduleChangeRequest.all_tenants.create(tenant=master.tenant, …)`.
+        # Listed under the same verdict because this contract covers access in
+        # both directions, so the write needs no exception clause.
+        "apps/master_api/services/schedule.py",
+        # 2 sites. The one flag-aware frame loader; both queries pin tenant_id
+        # and master_id.
+        "apps/master_api/services/schedule_frame.py",
+        # 4 sites. The resolver receives the tenant as an argument and pins it
+        # on every query (`tenant=tenant, master=master`); it runs outside a
+        # request, where `.objects` would have no ContextVar to read.
+        "apps/scheduling/services/resolver.py",
     )
 )
 
@@ -1100,42 +1241,6 @@ BASELINE_NOTES: dict[BaselineKey, BaselineNote] = {
         "UNTRIAGED",
         "Zero BOOKING_VIA_AYLA_REST references in the file (DRF-1109 sweep, 2026-08-15). Neither confirmed safe nor confirmed broken - nobody has looked at this surface since the contract first surfaced it.",
     ),
-    (
-        "G9-booking-request-outside-owner",
-        "apps/master_api/services/conversation_detail.py",
-        "<module>",
-        "apps.booking.models.BookingRequest",
-    ): BaselineNote(
-        "UNTRIAGED",
-        "Zero BOOKING_VIA_AYLA_REST references in the file (DRF-1109 sweep, 2026-08-15). Neither confirmed safe nor confirmed broken - nobody has looked at this surface since the contract first surfaced it.",
-    ),
-    (
-        "G9-booking-request-outside-owner",
-        "apps/master_api/services/conversations.py",
-        "<module>",
-        "apps.booking.models.BookingRequest",
-    ): BaselineNote(
-        "UNTRIAGED",
-        "Zero BOOKING_VIA_AYLA_REST references in the file (DRF-1109 sweep, 2026-08-15). Neither confirmed safe nor confirmed broken - nobody has looked at this surface since the contract first surfaced it.",
-    ),
-    (
-        "G9-booking-request-outside-owner",
-        "apps/master_api/services/customers.py",
-        "<module>",
-        "apps.booking.models.BookingRequest",
-    ): BaselineNote(
-        "UNTRIAGED",
-        "Zero BOOKING_VIA_AYLA_REST references in the file (DRF-1109 sweep, 2026-08-15). Neither confirmed safe nor confirmed broken - nobody has looked at this surface since the contract first surfaced it.",
-    ),
-    (
-        "G9-booking-request-outside-owner",
-        "apps/master_api/tasks.py",
-        "auto_generate_draft_for_inbound",
-        "apps.booking.models.BookingRequest",
-    ): BaselineNote(
-        "UNTRIAGED",
-        "Zero BOOKING_VIA_AYLA_REST references in the file (DRF-1109 sweep, 2026-08-15). Neither confirmed safe nor confirmed broken - nobody has looked at this surface since the contract first surfaced it.",
-    ),
     # -- DRF-1130: the joined FK is NOT NULL, declared elsewhere ------
     (
         "DRF1130-no-join-under-row-lock",
@@ -1215,7 +1320,11 @@ BASELINE_NOTES: dict[BaselineKey, BaselineNote] = {
 
 # Every accepted entry this module ships, for the report + the tests.
 ALL_BASELINES: frozenset[BaselineKey] = frozenset(
-    BASELINE | CATALOG_CROSS_TENANT_BASELINE | ROW_LOCK_JOIN_BASELINE | HASH_SINK_BASELINE
+    BASELINE
+    | CATALOG_CROSS_TENANT_BASELINE
+    | SCHEDULING_CROSS_TENANT_BASELINE
+    | ROW_LOCK_JOIN_BASELINE
+    | HASH_SINK_BASELINE
 )
 
 
@@ -1619,6 +1728,8 @@ def evaluate_file(
     catalog_baseline: frozenset[BaselineKey] = CATALOG_CROSS_TENANT_BASELINE,
     catalog_models: frozenset[str] = CATALOG_CROSS_TENANT_MODELS,
     marketplace_prefix: str = MARKETPLACE_PREFIX,
+    scheduling_baseline: frozenset[BaselineKey] = SCHEDULING_CROSS_TENANT_BASELINE,
+    scheduling_models: frozenset[str] = SCHEDULING_CROSS_TENANT_MODELS,
     row_lock_baseline: frozenset[BaselineKey] = ROW_LOCK_JOIN_BASELINE,
     hash_baseline: frozenset[BaselineKey] = HASH_SINK_BASELINE,
 ) -> tuple[list[Violation], set[BaselineKey]]:
@@ -1664,9 +1775,17 @@ def evaluate_file(
     # every such file is parsed.
 
     try:
-        tree = ast.parse(file_path.read_text(encoding="utf-8"), filename=str(file_path))
-    except (OSError, SyntaxError):
-        # Broken syntax / unreadable is ruff's job, not ours.
+        source = file_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        lint_parse.unreadable(file_path, exc)
+        return [], set()
+    # DRF-2538. Здесь стояло «Broken syntax / unreadable is ruff's job, not ours». Это верно про
+    # красноту `dev` — ruff в том же джобе краснеет на той же ошибке — и
+    # неверно про смысл зелени этого сторожа: «0 нарушений» что-то говорит
+    # о коде, только если код прочитан. Нечитаемый файл теперь отдельный
+    # исход (`lint_parse.finish`), а не ноль.
+    tree = lint_parse.parse_or_report(source, file_path)
+    if tree is None:
         return [], set()
 
     # De-dupe identical (contract, root, scope) crossings on the same line.
@@ -1741,6 +1860,41 @@ def evaluate_file(
                     )
                 )
 
+    # ── Cross-tenant scheduling-access rule (SCH1) ────────────────────
+    # No marketplace exemption: unlike MKT1 this rule applies everywhere in
+    # production scope, because a schedule is never discovery.
+    if production_scope:
+        sch_visitor = _CatalogAllTenantsVisitor(scheduling_models, SCHEDULING_CROSS_TENANT_MANAGER)
+        sch_visitor.visit(tree)
+        # File-granular for the same reason as MKT1: the verdict is about
+        # the file's posture, not about one line.
+        sch_key: BaselineKey = (
+            SCHEDULING_CROSS_TENANT_CONTRACT_ID,
+            rel_posix,
+            FILE_QUALNAME,
+            _SCHEDULING_ROOT,
+        )
+        if sch_visitor.hits and sch_key in scheduling_baseline:
+            satisfied.add(sch_key)
+        else:
+            for hit in sch_visitor.hits[:1]:
+                violations.append(
+                    Violation(
+                        file=file_path,
+                        lineno=hit.lineno,
+                        col_offset=hit.col_offset,
+                        message=(
+                            f"[{SCHEDULING_CROSS_TENANT_CONTRACT_ID}] {hit.module} — "
+                            "cross-tenant scheduling access (read OR write): the "
+                            "all_tenants manager bypasses tenant scoping in both "
+                            "directions. Use .objects, or pin an explicit tenant_id and "
+                            "add this file to SCHEDULING_CROSS_TENANT_BASELINE with a "
+                            f"verdict saying why (tracked {SCHEDULING_CROSS_TENANT_ISSUE})."
+                        ),
+                        key=sch_key,
+                    )
+                )
+
     # ── Shape rules (DRF-1130 row-lock join, DRF-1158 hash sink) ──────
     def _run_shape_rule(
         rule: ShapeRule,
@@ -1781,6 +1935,8 @@ def scan_paths(
     contracts: tuple[Contract, ...] = CONTRACTS,
     baseline: frozenset[BaselineKey] = BASELINE,
     catalog_baseline: frozenset[BaselineKey] = CATALOG_CROSS_TENANT_BASELINE,
+    scheduling_baseline: frozenset[BaselineKey] = SCHEDULING_CROSS_TENANT_BASELINE,
+    scheduling_models: frozenset[str] = SCHEDULING_CROSS_TENANT_MODELS,
     row_lock_baseline: frozenset[BaselineKey] = ROW_LOCK_JOIN_BASELINE,
     hash_baseline: frozenset[BaselineKey] = HASH_SINK_BASELINE,
 ) -> list[Violation]:
@@ -1812,13 +1968,17 @@ def scan_paths(
                 contracts=contracts,
                 baseline=baseline,
                 catalog_baseline=catalog_baseline,
+                scheduling_baseline=scheduling_baseline,
+                scheduling_models=scheduling_models,
                 row_lock_baseline=row_lock_baseline,
                 hash_baseline=hash_baseline,
             )
             violations.extend(v)
             satisfied |= s
 
-    all_baselines = baseline | catalog_baseline | row_lock_baseline | hash_baseline
+    all_baselines = (
+        baseline | catalog_baseline | scheduling_baseline | row_lock_baseline | hash_baseline
+    )
     for key in sorted(all_baselines - satisfied):
         contract_id, rel_posix, qualname, root = key
         if rel_posix not in scanned_rel:
@@ -1846,6 +2006,43 @@ def scan_paths(
     return violations
 
 
+def count_scheduling_all_tenants_sites(
+    paths: list[Path],
+    repo_root: Path,
+    *,
+    scheduling_models: frozenset[str] = SCHEDULING_CROSS_TENANT_MODELS,
+) -> int:
+    """Count INDIVIDUAL `<SchedulingModel>.all_tenants` accesses.
+
+    ``scan_paths`` reports one violation per FILE, so it cannot answer "how
+    many places are there" — and the floor needs exactly that: the 7 files
+    could each stay while the accesses inside them collapsed to one, and a
+    file-only floor would call that clean.
+    """
+    total = 0
+    for path in paths:
+        files = [path] if path.is_file() else sorted(path.rglob("*.py"))
+        for py_file in files:
+            try:
+                rel_posix = py_file.resolve().relative_to(repo_root.resolve()).as_posix()
+            except ValueError:
+                continue
+            if _is_skipped(rel_posix):
+                continue
+            try:
+                source = py_file.read_text(encoding="utf-8")
+            except OSError as exc:
+                lint_parse.unreadable(py_file, exc)
+                continue
+            tree = lint_parse.parse_or_report(source, py_file)
+            if tree is None:
+                continue
+            visitor = _CatalogAllTenantsVisitor(scheduling_models, SCHEDULING_CROSS_TENANT_MANAGER)
+            visitor.visit(tree)
+            total += len(visitor.hits)
+    return total
+
+
 def _detect_repo_root(start: Path) -> Path:
     """Walk upward from `start` to the dir holding `apps/` + `pyproject.toml`."""
     current = start.resolve() if start.is_absolute() else (Path.cwd() / start).resolve()
@@ -1857,7 +2054,7 @@ def _detect_repo_root(start: Path) -> Path:
     return current
 
 
-def main(argv: list[str]) -> int:
+def _run(argv: list[str]) -> int:
     if len(argv) < 2:
         print(
             "usage: import_boundaries.py <path> [<path> ...]\n"
@@ -1892,6 +2089,14 @@ def main(argv: list[str]) -> int:
         file=sys.stderr,
     )
     return 1
+
+
+def main(argv: list[str]) -> int:
+    lint_parse.reset()
+    code = _run(argv)
+    if code not in (0, 1):  # ошибка вызова — охват не о чем печатать
+        return code
+    return max(code, lint_parse.finish("import_boundaries"))
 
 
 if __name__ == "__main__":

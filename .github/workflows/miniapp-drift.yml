@@ -1,9 +1,10 @@
 # miniapp-drift — go red when the Mini App people receive is not the Mini App in `dev`.
 #
 # DRF-1257. The Mini App is static files on the pilot host, not a container.
-# The bot deploy rebuilds four Python services and never touches
-# `apps/miniapp/`, so merging a front-end change publishes nothing. On
-# 2026-08-20 the built `dist` on the pilot turned out to be dated 8 August:
+# It used to be published by hand: the bot deploy rebuilt four Python services
+# and never touched `apps/miniapp/`, so merging a front-end change published
+# nothing. On 2026-08-20 the built `dist` on the pilot turned out to be dated
+# 8 August:
 # twelve days in which the owner reviewed screenshots of an August interface
 # sitting on top of a backend rebuilt that morning, and nobody could tell,
 # because nothing anywhere was comparing the two.
@@ -27,39 +28,92 @@
 # experience.
 #
 # ### Expected behaviour after a Mini App change merges
-# This goes RED and stays red until someone publishes
-# (`infra/deploy/miniapp-release.sh`). That is the intended design, not noise:
-# a merged front-end change that has not been published IS a defect, and this
-# is the only place it is visible.
+# Publication is no longer manual: `deploy-dev.yml` builds the Mini App on the
+# runner and ships it to the box on every green `ci` on `dev` (DRF-1538).
+#
+# This paragraph used to end differently, and the difference is DRF-1605. It
+# said the normal case was "a red for the minutes between the two runs, going
+# green on its own", and that only a PERSISTING red was the real signal. That
+# concession is what killed the workflow's usefulness: the window was not
+# minutes but 25-40, every merge opened one, and nothing re-ran the guard when
+# it closed — so the transient red never went green on its own and eleven of
+# twelve runs were red. A guard whose normal state is red is not read.
+#
+# There is no such window any more, because the guard no longer runs during it.
+# It runs when the deploy is finished and only when the deploy succeeded, so
+# **every** red here now means what a red was always supposed to mean: the
+# deploy claims it published, and the pilot says otherwise — the deploy's ship
+# step failed silently, or the box is serving something nobody built from
+# `dev`. That is the defect this workflow exists to make visible, and it is
+# still the only place it is visible.
 
 name: miniapp-drift
 
 # ### Which of these triggers actually fires — read before trusting one
 #
-# `push` is evaluated against the workflow file **on the branch being pushed**,
-# so this one works the moment it lands on `dev`. It is the trigger that
-# carries the guarantee, and it covers the case that caused this ticket: a Mini
-# App change merged to `dev` and never published.
+# DRF-1605. This used to be `push: branches: [dev]`, and that was the whole
+# defect: the guard fired at the moment the pilot is GUARANTEED to be behind.
+# Publication happens after a green `ci`, which on this repository takes 25-40
+# minutes, so a push-triggered run asks "is the pilot serving this commit?"
+# while the commit is still being tested. Measured on 2026-09-08, commit
+# fa37302c: the merge landed 11:16:57, this workflow answered red 11:17:46
+# (run 34219861014), and `deploy-dev` (run 34222210402) did not start until
+# 11:43:41 — the guard was red twenty-eight minutes before the deploy it was
+# judging even began, and nothing re-ran it afterwards. Eleven of the last
+# twelve runs were red that way. It had stopped reporting drift and started
+# reporting merges, and a signal that is red on every merge is a signal nobody
+# reads on the day it matters.
 #
-# `schedule` and `workflow_dispatch` are read **only from the default branch**.
-# The default branch here is `main`, 885 commits behind, so until this file
-# reaches it BOTH are inert — the cron will not fire and the workflow will not
-# appear in the Actions dispatch list. This is stated rather than quietly
-# accepted because it is exactly how `deploy-dev.yml` died: commit ab2d164
-# moved it to a `workflow_run` trigger that only the default branch is read
-# for, and it has not auto-run since 2026-06-10. They are kept here so they
-# start working by themselves when `main` catches up; do not read a silent
-# `miniapp-drift` as a clean pilot until `gh run list --workflow=miniapp-drift.yml`
-# shows scheduled runs.
+# So it now runs AFTER the deploy, not after the push. `workflow_run` fires
+# when `deploy-dev` completes; the job's `if` then throws away everything that
+# is not a successful deploy, so a deploy that was skipped (red `ci`) or that
+# refused to run (deploy target not configured) does not produce a red guard
+# for a publication that never happened.
+#
+# ### On `workflow_run`, `schedule` and `workflow_dispatch` being read only
+# ### from the default branch
+#
+# True, and harmless here: **the default branch of this repository is `dev`**
+# (`GET /repos/AndreyDeveloper84/ai-bot-platform` -> `defaultBranchRef: dev`;
+# there is no `main` branch at all). The previous version of this comment said
+# the default branch was `main`, 885 commits behind, and that `schedule` and
+# `workflow_dispatch` were therefore inert. That was already false when it was
+# written: runs 34122285699 and 34219941064 are `event: schedule` on
+# `headBranch: dev`, and `deploy-dev` has been auto-running on `workflow_run`
+# all along. `docs/runbooks/miniapp-deploy.md` §6.1 records the same
+# correction from the deploy side.
+#
+# That also disposes of the obvious worry about this change: moving to
+# `workflow_run` is NOT a repeat of how `deploy-dev` died in commit ab2d164.
+# It died because the default branch was `main` back then. It is `dev` now, and
+# `deploy-dev` itself is the standing proof that `workflow_run` fires.
+#
+# ### The chain length, checked before relying on it
+# `workflow_run` chains are capped: "You can't use `workflow_run` to chain
+# together more than three levels of workflows" (GitHub Actions docs, "Events
+# that trigger workflows"). The chain here is exactly three and therefore
+# inside the cap:
+#
+#   1. `ci`             — push to `dev`
+#   2. `deploy-dev`     — workflow_run on `ci`
+#   3. `miniapp-drift`  — workflow_run on `deploy-dev`   <- this file
+#
+# There is no room left. A fourth workflow hung off this one would not run, and
+# it would not announce that it did not run — it would simply be silent, which
+# is the failure mode this whole workflow exists to prevent. Anything that needs
+# to happen after a drift check belongs INSIDE this workflow as another job, not
+# behind another `workflow_run`.
 on:
-  push:
+  workflow_run:
+    workflows: ["deploy-dev"]
+    types: [completed]
     branches: [dev]
-    paths:
-      - "apps/miniapp/**"
   # Catches the drift no commit causes: a host rebuilt from a stale checkout,
   # a release rolled back and never rolled forward, a directory restored from
-  # a backup. Nothing in the repository moves in those cases, so only a
-  # wall-clock trigger can notice. Inert until this file is on `main` — see above.
+  # a backup. Nothing in the repository moves in those cases and no deploy
+  # runs, so only a wall-clock trigger can notice. This is the trigger that
+  # carries the guarantee stated in the header above, and it is why that header
+  # is still true once the `push` trigger is gone.
   schedule:
     - cron: "17 6 * * *"
   workflow_dispatch:
@@ -71,6 +125,9 @@ on:
 
 permissions:
   contents: read
+  # DRF-2621: the source map is an artifact of the deploy-dev run, not a file
+  # on the host; reading another run's artifacts needs `actions: read`.
+  actions: read
 
 concurrency:
   group: miniapp-drift-${{ github.ref }}
@@ -81,23 +138,40 @@ jobs:
     name: served bundle matches sources
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # A deploy that did not happen must not produce a red guard. `deploy-dev`
+    # ends in exactly three ways and only one of them published anything:
+    #   success  — it deployed. Check the pilot.
+    #   skipped  — `ci` was red, so every job was gated off. Nothing shipped.
+    #   failure  — it tried and could not, including the named
+    #              "deploy target not configured" job (DRF-1605). Nothing shipped.
+    # Comparing the pilot against `dev` after the last two would report drift
+    # the deploy pipeline has already reported itself, in a workflow whose whole
+    # job is to be believed when it goes red.
+    if: >-
+      github.event_name != 'workflow_run'
+      || github.event.workflow_run.conclusion == 'success'
 
     steps:
       # `dev` is the branch the pilot deploys from, so that is what the live
-      # site must be compared against. A scheduled run would otherwise check
-      # out the default branch — `main`, 885 commits behind — and diff the
-      # pilot against ancient sources.
+      # site must be compared against. `workflow_run` and `schedule` runs are
+      # attributed to the default branch and a `workflow_dispatch` can come from
+      # anywhere, so the ref is pinned explicitly rather than inherited.
+      #
+      # `workflow_dispatch` is the deliberate exception: it checks out the ref it
+      # was dispatched on, which is what makes it possible to exercise a change
+      # to this workflow from a branch before merging it (that is how DRF-1605
+      # was proved). Dispatching from a feature branch therefore compares the
+      # pilot against THAT branch — intended, and worth knowing before reading
+      # the result.
       #
       # Resolving this with a `git checkout dev` step instead was tried and is
       # wrong: it replaces the whole working tree, including
-      # tools/ci/miniapp_bundle_drift.py, which on a pull_request run does not
-      # exist on `dev` yet. The checkout action's `ref` selects the commit
-      # without ever discarding the code being run.
-      - uses: actions/checkout@v4
+      # tools/ci/miniapp_bundle_drift.py. The checkout action's `ref` selects the
+      # commit without ever discarding the code being run.
+      - uses: actions/checkout@v7
         with:
           ref: >-
-            ${{ (github.event_name == 'push' || github.event_name == 'pull_request')
-                && github.ref || 'dev' }}
+            ${{ github.event_name == 'workflow_dispatch' && github.ref || 'dev' }}
 
       - name: Show what is being compared
         run: echo "::notice::comparing the pilot against $(git rev-parse --short HEAD)"
@@ -110,7 +184,7 @@ jobs:
       # Node 24 build and the pilot's Node 20 build were verified to emit a
       # byte-identical index-foET4UYR.css.
       - name: Set up Node (from apps/miniapp/.nvmrc)
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version-file: apps/miniapp/.nvmrc
           cache: npm
@@ -124,11 +198,78 @@ jobs:
         working-directory: apps/miniapp
         run: npx vite build
 
+      # DRF-2621. The deploy does not ship `*.map` to the host (deploy-dev.yml:
+      # 4.29 MB of 5.2, the transfer kept failing) and keeps it as the run
+      # artifact `miniapp-sourcemap-<sha>` for 14 days. Until this step the
+      # guard asked the host for the map over HTTP, got 404, and was red
+      # "could not run" from 2026-09-28 11:30 -- red without naming anything.
+      #
+      # Which run: the deploy that published what is served. On workflow_run
+      # that is exactly the triggering run; on schedule/dispatch it is the last
+      # successful deploy-dev on dev. Either way the guard then requires
+      # `<served js name>.map` inside the artifact -- the name carries the
+      # bundle's content hash -- so an artifact of any other build is refused
+      # with both names, never compared.
+      - name: Locate the deploy run that published the served bundle
+        id: deploy
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_RUN_ID: ${{ github.event.workflow_run.id }}
+          EVENT_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_run" ]; then
+            RUN_ID="$EVENT_RUN_ID"
+            SHA="$EVENT_SHA"
+          else
+            # Newest by createdAt, sorted HERE. `--limit 1` trusted the API's
+            # order, and on the runner it returned a run from 2026-09-11
+            # (34570842718) while a same-day success existed -- dispatch run
+            # 36569037350. The guard refused correctly (that artifact had
+            # expired), but it judged the wrong deploy.
+            gh run list -R "$GITHUB_REPOSITORY" --workflow deploy-dev.yml \
+              --branch dev --status success --limit 50 \
+              --json databaseId,createdAt \
+              -q 'sort_by(.createdAt) | reverse | .[:3][] | "\(.databaseId) \(.createdAt)"'
+            LAST="$(gh run list -R "$GITHUB_REPOSITORY" --workflow deploy-dev.yml \
+              --branch dev --status success --limit 50 \
+              --json databaseId,headSha,createdAt \
+              -q 'sort_by(.createdAt) | last | "\(.databaseId) \(.headSha)"')"
+            RUN_ID="${LAST%% *}"
+            SHA="${LAST##* }"
+          fi
+          echo "run_id=${RUN_ID}" >> "$GITHUB_OUTPUT"
+          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
+          echo "::notice::source map from deploy-dev run ${RUN_ID:-<none>} (sha ${SHA:-<none>})"
+
+      # A missing artifact is NOT handled here: the guard refuses on an empty
+      # directory and says why (retention passed, or never uploaded). Failing
+      # this step instead would hide that reason behind a download error.
+      - name: Download that run's source map artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ steps.deploy.outputs.run_id }}
+          SHA: ${{ steps.deploy.outputs.sha }}
+        run: |
+          mkdir -p sourcemap
+          if [ -n "$RUN_ID" ] && [ -n "$SHA" ]; then
+            gh run download "$RUN_ID" -R "$GITHUB_REPOSITORY" \
+              -n "miniapp-sourcemap-${SHA}" -D sourcemap \
+              || echo "::warning::artifact miniapp-sourcemap-${SHA} of run ${RUN_ID} is not downloadable"
+          else
+            echo "::warning::no successful deploy-dev run found on dev"
+          fi
+          ls -la sourcemap
+
       - name: Compare the served bundle against these sources
         env:
           URL: ${{ inputs.url || 'https://miniapp-dev.gobeauty.site' }}
+          RUN_ID: ${{ steps.deploy.outputs.run_id }}
+          SHA: ${{ steps.deploy.outputs.sha }}
         run: |
           python3 tools/ci/miniapp_bundle_drift.py \
             --url "$URL" \
             --src apps/miniapp/src \
-            --dist apps/miniapp/dist
+            --dist apps/miniapp/dist \
+            --map-dir sourcemap \
+            --map-origin "artifact miniapp-sourcemap-${SHA:-?} of deploy-dev run ${RUN_ID:-?}"

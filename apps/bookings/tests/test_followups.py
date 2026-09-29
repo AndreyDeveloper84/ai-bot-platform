@@ -112,8 +112,15 @@ def grant_consent(bot_user: BotUser, *, consent_type: str | None = None) -> Cons
     )
 
 
-def make_consented_user(tenant: Tenant, **kwargs) -> BotUser:
-    """A BotUser that clears the consent gate unless a kwarg says otherwise."""
+def make_consented_user(tenant: Tenant, *, marketing: bool = True, **kwargs) -> BotUser:
+    """A BotUser that clears the consent gate unless a kwarg says otherwise.
+
+    Two records, not one: the beat is PROMO class (DRF-1731,
+    ``apps.notifications.proactive.PROACTIVE_SENDERS``), so a person who
+    only gave the 152-ФЗ baseline is *not* somebody it may write to. The
+    delivery suite below needs recipients who flipped «Акции и
+    предложения» as well; ``marketing=False`` builds the one who did not.
+    """
     kwargs.setdefault("channel", "max")
     kwargs.setdefault("channel_user_id", "bu-fu-1")
     kwargs.setdefault("chat_id", "chat-fu-1")
@@ -122,6 +129,8 @@ def make_consented_user(tenant: Tenant, **kwargs) -> BotUser:
     user = BotUser.all_tenants.create(tenant=tenant, **kwargs)
     if user.consent_at is not None:
         grant_consent(user)
+        if marketing:
+            grant_consent(user, consent_type=ConsentRecord.ConsentType.MARKETING.value)
     return user
 
 
@@ -196,7 +205,11 @@ class TestHappyPath:
 
         assert mock_send.call_count == 1
         kwargs = mock_send.call_args.kwargs
-        assert kwargs["chat_id"] == "chat-fu-1"
+        # DRF-1558 — follow-up пишет первым: адрес это человек, не диалог.
+        # ``chat_id`` строки специально другой, поэтому регрессия на него
+        # даст другое значение, а не то же самое.
+        assert kwargs["user_id"] == "bu-fu-1"
+        assert "chat_id" not in kwargs
         assert kwargs["attachments"] is None
         text = kwargs["text"]
         # Copy should mention "вчерашний визит" + the master name.
@@ -534,15 +547,13 @@ class TestMultiTenant:
         t2 = Tenant.objects.create(slug="salon-fu-b", name="Salon B")
         bu1 = make_consented_user(
             t1,
-            channel_user_id="bu-fu-a",
-            chat_id="cli-A",
+            channel_user_id="cli-A",
             phone="79990000001",
             client_name="Alice",
         )
         bu2 = make_consented_user(
             t2,
-            channel_user_id="bu-fu-b",
-            chat_id="cli-B",
+            channel_user_id="cli-B",
             phone="79990000002",
             client_name="Bob",
         )
@@ -564,8 +575,8 @@ class TestMultiTenant:
 
         assert result["sent"] == 2
         assert mock_send.call_count == 2
-        chat_ids = {call.kwargs["chat_id"] for call in mock_send.call_args_list}
-        assert chat_ids == {"cli-A", "cli-B"}
+        user_ids = {call.kwargs["user_id"] for call in mock_send.call_args_list}
+        assert user_ids == {"cli-A", "cli-B"}
 
         bu1.refresh_from_db()
         bu2.refresh_from_db()
@@ -577,11 +588,11 @@ class TestMultiTenant:
 # 12. No chat_id → skip + WARN
 # ────────────────────────────────────────────────────────────────────
 class TestNoChatId:
-    def test_empty_chat_id_skipped(self, tenant: Tenant, caplog) -> None:
+    def test_empty_address_skipped(self, tenant: Tenant, caplog) -> None:
         bu = make_consented_user(
             tenant,
-            channel_user_id="bu-no-chat",
-            chat_id="",  # empty — can't reach them
+            channel_user_id="",  # empty — can't reach them (DRF-1558: адрес=user_id)
+            chat_id="chat-no-reach",
             phone="79990000099",
             client_name="No Reach",
         )
@@ -604,11 +615,11 @@ class TestNoChatId:
         bu.refresh_from_db()
         assert CONTEXT_KEY not in (bu.context or {})
 
-    def test_whitespace_only_chat_id_treated_as_empty(self, tenant: Tenant) -> None:
+    def test_whitespace_only_address_treated_as_empty(self, tenant: Tenant) -> None:
         bu = make_consented_user(
             tenant,
-            channel_user_id="bu-ws-chat",
-            chat_id="   ",
+            channel_user_id="   ",
+            chat_id="chat-ws",
             phone="79990000098",
             client_name="WS",
         )
@@ -1255,6 +1266,60 @@ class TestConsentGate:
             result = send_post_visit_followups()
         mock_send.assert_not_called()
         assert result["skipped_blocked"] == 1
+        assert [d.reason for d in followups_mod.plan_post_visit_followups()] == [
+            "consent_withdrawn"
+        ]
+
+    def test_withdrawn_marketing_consent_is_not_written_to(
+        self, tenant: Tenant, bot_user: BotUser
+    ) -> None:
+        """DRF-1731, 38-ФЗ ст. 18: the toggle went off → zero sends, this tick.
+
+        PERSONAL_DATA stays active and ``consent_at`` stays set — only the
+        MARKETING record carries ``withdrawn_at``. A gate that read the
+        152-ФЗ baseline alone (the beat until DRF-1731) would still send.
+        Run through the TASK to the ``send_message`` mock, not through
+        the predicate: the proof is «no message», not «a False».
+        """
+        ConsentRecord.all_tenants.filter(
+            bot_user=bot_user, consent_type=ConsentRecord.ConsentType.MARKETING.value
+        ).update(withdrawn_at=NOW_UTC)
+        bot_user.refresh_from_db()
+        assert bot_user.consent_at is not None
+        # POSITIVE control: the same person WITH the toggle is written to.
+        self._remind(tenant, bot_user)
+        with patch("apps.bookings.followups.send_message") as mock_send:
+            result = send_post_visit_followups()
+        mock_send.assert_not_called()
+        assert result["skipped_blocked"] == 1
+        assert [d.reason for d in followups_mod.plan_post_visit_followups()] == [
+            "no_marketing_consent"
+        ]
+
+    def test_never_granted_marketing_consent_is_not_written_to(self, tenant: Tenant) -> None:
+        """§35 п.17: an unproven marketing consent is an absent one."""
+        user = make_consented_user(tenant, marketing=False)
+        self._remind(tenant, user)
+        with patch("apps.bookings.followups.send_message") as mock_send:
+            result = send_post_visit_followups()
+        mock_send.assert_not_called()
+        assert result["skipped_blocked"] == 1
+        assert [d.reason for d in followups_mod.plan_post_visit_followups()] == [
+            "no_marketing_consent"
+        ]
+
+    def test_marketing_consent_alone_does_not_outrank_the_152fz_baseline(
+        self, tenant: Tenant, bot_user: BotUser
+    ) -> None:
+        """Order of grounds: baseline first. With PERSONAL_DATA withdrawn
+        and MARKETING active the slug is still ``consent_withdrawn``."""
+        ConsentRecord.all_tenants.filter(
+            bot_user=bot_user, consent_type=ConsentRecord.ConsentType.PERSONAL_DATA.value
+        ).update(withdrawn_at=NOW_UTC)
+        self._remind(tenant, bot_user)
+        with patch("apps.bookings.followups.send_message") as mock_send:
+            send_post_visit_followups()
+        mock_send.assert_not_called()
         assert [d.reason for d in followups_mod.plan_post_visit_followups()] == [
             "consent_withdrawn"
         ]

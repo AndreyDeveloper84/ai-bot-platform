@@ -30,6 +30,17 @@ person. Guessing at 5 attempts an hour needs ~14 years for a 50% chance.
 * ``master`` → links ``CatalogMaster.linked_bot_user`` on the **existing**
   catalog row and flips it to accepted+active.
 
+The master link is one-to-one in both directions, and both directions
+refuse rather than overwrite:
+
+* the card already belongs to someone else → ``MasterAlreadyLinked``
+  (DRF-1647), the same ``wrong_recipient`` answer the Mini App door gives;
+* the person already holds another card → ``PersonAlreadyMaster``
+  (DRF-1650), which used to escape as a bare ``IntegrityError`` and
+  therefore as no answer at all.
+
+Neither consumes the code.
+
 The master path never creates a catalog row. All four pilot masters already
 exist, and a duplicate would be invisible to the booking mirror (whose
 ``specialist_id`` points at the original), leaving the master staring at an
@@ -43,13 +54,14 @@ import logging
 import secrets
 from dataclasses import dataclass
 from datetime import timedelta
+from typing import Any
 
 from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 from apps.catalog.models import CatalogMaster
 from apps.identity.models import BotUser
-from apps.tenancy.models import StaffInvite, TenantStaff
+from apps.tenancy.models import StaffInvite, Tenant, TenantStaff
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +107,67 @@ class InviteMasterMissing(InviteError):
     slug = "invite_master_missing"
 
 
+class InviteAlreadyUsed(InviteError):
+    """Revoking a code that was already redeemed (DRF-2082).
+
+    Nothing to revoke: the access it granted lives in ``TenantStaff`` / the
+    master link now and is taken away by ``revoke_staff_access``, not by
+    touching the spent code. Named so the operator is sent to the right
+    action instead of seeing a silent no-op.
+    """
+
+    slug = "invite_already_used"
+
+
+class MasterAlreadyLinked(InviteError):
+    """The catalog row this code points at already belongs to someone else.
+
+    DRF-1647. The slug is deliberately the one the Mini App path already
+    answers with — ``apps/master_api/views.py`` returns ``wrong_recipient``
+    403 for exactly this situation, and the two doors into the same card
+    must not disagree about what happened. It is an identity mismatch, not
+    a retry: the bearer is simply not the person this invite was for.
+
+    The code is NOT consumed. Raising from inside ``redeem_staff_invite``'s
+    ``transaction.atomic`` rolls the whole redemption back, ``used_at``
+    included, so the master it was actually issued to can still use it.
+    """
+
+    slug = "wrong_recipient"
+
+
+class PersonAlreadyMaster(InviteError):
+    """This person is already the linked account of another master row.
+
+    DRF-1650. ``CatalogMaster.linked_bot_user`` is a ``OneToOneField``: one
+    person, one card. Before this class existed the second link attempt
+    surfaced as a raw ``IntegrityError``, which no caller catches — the
+    person got no answer at all, while eleven other refusal branches
+    answered in words.
+
+    Distinct from :class:`MasterAlreadyLinked` because the cure is
+    different. There the person needs their own code; here no code helps —
+    the existing link has to be released first (the usual cause is a card
+    that was archived without unlinking, which leaves the person looking
+    like a customer to ``resolve_role`` and like a master to the database).
+
+    **A deliberate divergence from the Mini App door, recorded here so it
+    is not mistaken for drift.** ``master_api.views.onboarding_accept``
+    answers this same shape with ``wrong_recipient`` too (DRF-1507,
+    #1412 — "Слуг переиспользован намеренно"), and its reason is a
+    front-end one: ``MasterOnboardingScreen`` already renders that slug,
+    and a second slug would mean teaching it a second text. The owner's
+    call for DRF-1650 is the opposite: these two need different words
+    because they need different actions — «нужен свой код» against «снять
+    прежнюю связь». Reconciling the two doors on this second case is a
+    decision for the owner, not something to settle here.
+
+    The code is NOT consumed, for the same reason.
+    """
+
+    slug = "person_already_master"
+
+
 class OwnerAlreadyExists(InviteError):
     """The tenant already has an active owner.
 
@@ -107,12 +180,19 @@ class OwnerAlreadyExists(InviteError):
 
 @dataclass(frozen=True)
 class RedeemResult:
-    """Outcome of a successful redemption."""
+    """Outcome of a successful redemption.
+
+    ``bot_user`` / ``tenant`` are filled by :func:`redeem_staff_invite_by_identity`
+    (DRF-1784): the caller had no row before the code, so the row the code
+    created — and the salon the code belonged to — are the answer.
+    """
 
     role: str
     tenant_id: str
     already_had_role: bool
     catalog_master_id: str | None = None
+    bot_user: BotUser | None = None
+    tenant: "Tenant | None" = None
 
 
 def normalize_code(raw: str) -> str:
@@ -211,7 +291,13 @@ def issue_staff_invite(
 
 
 def _attempt_key(bot_user: BotUser) -> str:
-    return f"staff_invite:attempts:{bot_user.channel}:{bot_user.channel_user_id}"
+    return _attempt_key_for(bot_user.channel, bot_user.channel_user_id)
+
+
+def _attempt_key_for(channel: str, channel_user_id: str) -> str:
+    # Keyed on the messenger IDENTITY, not on a row (DRF-1784): the salon
+    # bot counts a stranger's guesses before any row of theirs exists.
+    return f"staff_invite:attempts:{channel}:{channel_user_id}"
 
 
 def _check_rate_limit(bot_user: BotUser) -> None:
@@ -232,9 +318,15 @@ def _check_rate_limit(bot_user: BotUser) -> None:
     single-use codes plus a 7-day expiry are the actual bounds.
     """
 
+    _check_rate_limit_for(bot_user.channel, bot_user.channel_user_id)
+
+
+def _check_rate_limit_for(channel: str, channel_user_id: str) -> None:
+    """Same brake, keyed on the identity (see :func:`_check_rate_limit`)."""
+
     from django.core.cache import cache
 
-    key = _attempt_key(bot_user)
+    key = _attempt_key_for(channel, channel_user_id)
     try:
         if cache.add(key, 1, timeout=ATTEMPT_WINDOW_SECONDS):
             return  # First attempt in this window.
@@ -247,9 +339,10 @@ def _check_rate_limit(bot_user: BotUser) -> None:
         return
 
     if attempts > MAX_ATTEMPTS:
+        # DRF-2009: тормоз по личности, строки нет — id человека в лог не пишется.
         logger.warning(
-            "identity.staff_invite.rate_limited channel_user_id=%s attempts=%s",
-            bot_user.channel_user_id,
+            "identity.staff_invite.rate_limited channel=%s attempts=%s",
+            channel,
             attempts,
         )
         raise InviteRateLimited("too many attempts")
@@ -266,8 +359,109 @@ def _clear_rate_limit(bot_user: BotUser) -> None:
         pass
 
 
+def redeem_staff_invite_by_identity(
+    *,
+    code: str,
+    channel: str,
+    channel_user_id: str,
+    display_name: str = "",
+    chat_id: str = "",
+) -> RedeemResult:
+    """Turn a code into staff access for a person who has NO row yet (DRF-1784).
+
+    Owner 12.09.2026 (DRF-1705 / D2 → б): the salon bot does not belong to
+    a salon, and a stranger gets no ``BotUser`` until they prove a path.
+    So the tenant comes **from the code** — ``StaffInvite`` is looked up by
+    hash across tenants — and the person's row is created **in the code's
+    tenant**, inside the same transaction, right before the role. There is
+    no state where the row exists and the role does not, or the code is
+    spent and the row is not.
+
+    The older :func:`redeem_staff_invite` required the caller's tenant as a
+    filter, on the reasoning that a code for salon B typed into salon A's
+    bot must not be found. That reasoning presumed a bot per salon; with one
+    bot for every salon there is no «salon A's bot» to type it into. The
+    remaining guards are unchanged: single use, expiry, and the per-identity
+    attempt brake.
+
+    Raises the same family as :func:`redeem_staff_invite`.
+    """
+
+    from apps.identity.services.resolver import resolve_or_create_bot_user
+    from apps.tenancy.context import tenant_scope
+
+    _check_rate_limit_for(channel, channel_user_id)
+    normalized = normalize_code(code)
+    code_hash = _hash_code(normalized)
+    now = timezone.now()
+
+    with transaction.atomic():
+        # No select_related under the row lock (DRF-1130 guard): the tenant
+        # is read lazily below, one extra query, no LEFT OUTER JOIN under
+        # FOR UPDATE.
+        invite = StaffInvite.all_tenants.select_for_update().filter(code_hash=code_hash).first()
+        if invite is None:
+            logger.info("identity.staff_invite.miss channel=%s", channel)  # DRF-2009: без id
+            raise InviteNotFound("no such invite")
+        if invite.used_at is not None:
+            logger.info("identity.staff_invite.already_used invite=%s", invite.id)
+            raise InviteNotFound("already used")
+        if invite.revoked_at is not None:
+            # DRF-2082 — revoked by an operator. Same answer as used/expired
+            # for the person typing (DRF-1061: a guesser learns nothing);
+            # the log keeps the real reason.
+            logger.info("identity.staff_invite.revoked invite=%s", invite.id)
+            raise InviteNotFound("revoked")
+        if invite.expires_at <= now:
+            logger.info("identity.staff_invite.expired invite=%s", invite.id)
+            raise InviteNotFound("expired")
+
+        # The row is born HERE, in the code's tenant — the first thing the
+        # person has proven about themselves. Idempotent for a person who
+        # already has a row there (resolve_or_create).
+        with tenant_scope(invite.tenant):
+            bot_user = resolve_or_create_bot_user(
+                channel=channel,
+                channel_user_id=channel_user_id,
+                display_name=display_name,
+                chat_id=chat_id,
+            )
+
+        if invite.role == StaffInvite.Role.MASTER:
+            result = _link_master(invite, bot_user)
+        else:
+            result = _grant_staff_role(invite, bot_user)
+
+        invite.used_at = now
+        invite.used_by = bot_user
+        invite.save(update_fields=["used_at", "used_by"])
+
+    _clear_rate_limit(bot_user)
+    logger.info(
+        "identity.staff_invite.redeemed invite=%s role=%s tenant=%s by_identity=1",
+        invite.id,
+        invite.role,
+        invite.tenant.slug,
+    )
+    return RedeemResult(
+        role=result.role,
+        tenant_id=result.tenant_id,
+        already_had_role=result.already_had_role,
+        catalog_master_id=result.catalog_master_id,
+        bot_user=bot_user,
+        tenant=invite.tenant,
+    )
+
+
 def redeem_staff_invite(*, code: str, bot_user: BotUser, tenant) -> RedeemResult:
     """Turn a code into staff access for ``bot_user`` in ``tenant``.
+
+    **12.09.2026 (DRF-1784):** the salon bot no longer calls this — it has
+    no row for a stranger and takes the tenant from the code
+    (:func:`redeem_staff_invite_by_identity`). This form stays for callers
+    that already hold a row AND a tenant (a Mini App session, an operator
+    command); the tenant-filter argument below described a bot per salon
+    and is kept only as that caller's own assertion of where it stands.
 
     ``tenant`` is required, and it is the salon whose bot the person is
     talking to — not a hint taken from the invite. A code issued for
@@ -293,7 +487,13 @@ def redeem_staff_invite(*, code: str, bot_user: BotUser, tenant) -> RedeemResult
 
     Raises:
       InviteRateLimited, InviteNotFound, InviteMasterMissing,
-      OwnerAlreadyExists — all with a stable ``.slug``.
+      MasterAlreadyLinked, PersonAlreadyMaster, OwnerAlreadyExists — all
+      with a stable ``.slug``.
+
+      The last three leave the code unspent: they are raised inside the
+      atomic block, before ``used_at`` is written, and the rollback takes
+      the write with it. Burning a code because the wrong person typed it
+      would punish the person it was issued to.
     """
 
     _check_rate_limit(bot_user)
@@ -327,11 +527,14 @@ def redeem_staff_invite(*, code: str, bot_user: BotUser, tenant) -> RedeemResult
         # person cannot distinguish them and neither should a guesser; the
         # log keeps the truth.
         if invite is None:
-            logger.info("identity.staff_invite.miss channel_user_id=%s", bot_user.channel_user_id)
+            logger.info("identity.staff_invite.miss bot_user=%s", bot_user.pk)  # DRF-2009
             raise InviteNotFound("no such invite")
         if invite.used_at is not None:
             logger.info("identity.staff_invite.already_used invite=%s", invite.id)
             raise InviteNotFound("already used")
+        if invite.revoked_at is not None:
+            logger.info("identity.staff_invite.revoked invite=%s", invite.id)
+            raise InviteNotFound("revoked")
         if invite.expires_at <= now:
             logger.info("identity.staff_invite.expired invite=%s", invite.id)
             raise InviteNotFound("expired")
@@ -355,118 +558,359 @@ def redeem_staff_invite(*, code: str, bot_user: BotUser, tenant) -> RedeemResult
     return result
 
 
-def _grant_staff_role(invite: StaffInvite, bot_user: BotUser) -> RedeemResult:
-    """Create (or find) the TenantStaff row this invite grants."""
+@dataclass(frozen=True)
+class RevokeInviteResult:
+    """``changed=False`` — код уже был отозван; повтор не ошибка."""
 
-    existing = TenantStaff.all_tenants.filter(
+    invite_id: Any
+    changed: bool
+
+
+def revoke_staff_invite(
+    invite: StaffInvite,
+    *,
+    surface: str,
+    actor_label: str,
+    actor_id: Any = None,
+    reason: str = "",
+) -> RevokeInviteResult:
+    """Отозвать код приглашения до срока (DRF-2082) — то, чего не было.
+
+    До этого листа приглашение гасилось только пассивно: сроком
+    (``expires_at``) и однократностью (``used_at``); «отозвано оператором» и
+    «истекло» были неразличимы, а отозвать до срока было нечем (замер ayla-5f,
+    #1802). Здесь — ``revoked_at``, и оба пути погашения отвечают на такой код
+    ``InviteNotFound`` — тем же словом, что на использованный и истёкший:
+    набирающий чужой код не должен узнать, ЧТО с ним не так (DRF-1061), а
+    оператор видит правду в карточке и в аудите.
+
+    Использованный код не отзывается — ``InviteAlreadyUsed``: выданный им
+    доступ живёт уже в ``TenantStaff``/связи мастера и снимается
+    ``revoke_staff_access``. Повторный отзыв — ``changed=False``, не ошибка.
+
+    Кто отозвал — в аудите (``surface``/``actor_label``): оператор платформы
+    ``BotUser`` не имеет, поэтому колонки «кем» на модели нет намеренно.
+    """
+    from apps.audit.services import write_audit
+    from apps.events.vocabulary import STAFF_INVITE_REVOKED
+    from apps.tenancy.context import tenant_scope
+
+    with transaction.atomic():
+        row = StaffInvite.all_tenants.select_for_update().get(pk=invite.pk)
+        if row.used_at is not None:
+            raise InviteAlreadyUsed("the code was already redeemed — revoke the access instead")
+        if row.revoked_at is not None:
+            return RevokeInviteResult(invite_id=row.pk, changed=False)
+        row.revoked_at = timezone.now()
+        row.save(update_fields=["revoked_at"])
+        with tenant_scope(row.tenant):
+            write_audit(
+                STAFF_INVITE_REVOKED,
+                target="tenancy.StaffInvite",
+                target_id=row.pk,
+                payload={
+                    "surface": surface,
+                    "actor_label": actor_label,
+                    "role": row.role,
+                    "reason": (reason or "").strip()[:200],
+                },
+                actor_id=actor_id,
+            )
+
+    logger.info(
+        "identity.staff_invite.revoked_by_operator invite=%s tenant=%s surface=%s",
+        row.pk,
+        row.tenant_id,
+        surface,
+    )
+    return RevokeInviteResult(invite_id=row.pk, changed=True)
+
+
+def _grant_staff_role(invite: StaffInvite, bot_user: BotUser) -> RedeemResult:
+    """Create (or find) the TenantStaff row this invite grants.
+
+    The invite-specific half is only *what* to grant and *who* issued it;
+    the row, the two partial-unique refusals and the race answer are
+    :func:`grant_staff_role`, shared with the operator's «выдать роль» in
+    Django Admin (DRF-2082) so a role granted by code and a role granted by
+    hand cannot drift apart.
+    """
+
+    return grant_staff_role(
         tenant_id=invite.tenant_id,
         bot_user=bot_user,
         role=invite.role,
+        created_by=invite.created_by,
+        invite_id=invite.id,
+        # DRF-2085, ruling п.1 читается строго (главное окно 18.09): ввод
+        # кода — действие приглашённого, и артефакт оператора его полномочие
+        # не переносит. Каталожную половину admin делает только оператор —
+        # «Выдать роль» в Django Admin, повторно после кода (тот же ключ
+        # идемпотентности дозаводит её без дублей).
+        link_catalog=False,
+    )
+
+
+def grant_staff_role(
+    *,
+    tenant_id: Any,
+    bot_user: BotUser,
+    role: str,
+    created_by: BotUser | None = None,
+    invite_id: Any = None,
+    actor_label: str = "",
+    link_catalog: bool = True,
+) -> RedeemResult:
+    """Grant ``role`` to ``bot_user`` in ``tenant_id`` — the one authority.
+
+    Idempotent in the way that matters to a human: a person who already
+    holds the role gets ``already_had_role=True``, never a duplicate row —
+    and that answer is what the operator's «повтор выдачи» reads as
+    «уже есть». The database holds the line under a race (two operators,
+    or an operator and a code, at once): the partial unique index
+    ``unique_active_staff_role`` fires, and the loser gets the same
+    ``already_had_role`` answer instead of a 500.
+
+    ``created_by`` is the ``BotUser`` who issued the grant when there is one
+    (a code's issuer); a platform operator has no ``BotUser`` and passes
+    ``None`` — authorship then lives in the audit row's ``actor_label``,
+    not here. ``invite_id`` — log lines only.
+
+    Must run inside ``transaction.atomic`` (the savepoint below needs an
+    enclosing transaction to roll back into).
+
+    **DRF-2085 — the catalog half of ``admin``.** For ``role=admin`` the
+    catalog is asked FIRST (``salon_admin_link.ensure_catalog_salon_admin``:
+    fresh salon-administrator account + TUR + MAX link, idempotent per
+    (tenant, person)) and only then is ``TenantStaff`` written. A refusal
+    raises :class:`salon_admin_link.CatalogAdminLinkRefused` out of the
+    enclosing transaction — no row, named reason, «что сделать» in the
+    text. The call happens even when the row already exists: administrators
+    granted before this rule have no catalog half, and a repeat grant is the
+    operator's way to add it. ``actor_label`` names the operator in both
+    audits. ``link_catalog=False`` is the invite-code door
+    (:func:`_grant_staff_role`): the ruling's capability is operator-only,
+    so a redeemed admin code grants the bot role and leaves the catalog
+    half to the operator's «Выдать роль».
+
+    Raises:
+      OwnerAlreadyExists — the tenant already has an active owner.
+      CatalogAdminLinkRefused — role=admin, the catalog half was refused.
+    """
+
+    link_outcome = None
+    if role == StaffInvite.Role.ADMIN and link_catalog:
+        from apps.identity.services import salon_admin_link
+
+        tenant = Tenant.all_objects.get(pk=tenant_id)
+        link_outcome = salon_admin_link.ensure_catalog_salon_admin(
+            tenant=tenant, bot_user=bot_user, actor_label=actor_label
+        )
+        if link_outcome.created:
+            salon_admin_link.audit_linked(
+                link_outcome, tenant=tenant, bot_user=bot_user, actor_label=actor_label
+            )
+
+    existing = TenantStaff.all_tenants.filter(
+        tenant_id=tenant_id,
+        bot_user=bot_user,
+        role=role,
         deactivated_at__isnull=True,
     ).first()
     if existing is not None:
-        return RedeemResult(
-            role=invite.role,
-            tenant_id=str(invite.tenant_id),
-            already_had_role=True,
-        )
+        return RedeemResult(role=role, tenant_id=str(tenant_id), already_had_role=True)
 
     try:
         # Savepoint: an IntegrityError poisons the enclosing transaction,
         # and the non-owner branch below wants to carry on afterwards.
         with transaction.atomic():
             TenantStaff.all_tenants.create(
-                tenant_id=invite.tenant_id,
+                tenant_id=tenant_id,
                 bot_user=bot_user,
-                role=invite.role,
-                created_by=invite.created_by,
+                role=role,
+                created_by=created_by,
             )
     except IntegrityError as exc:
         # Two partial unique indexes can fire here (DRF-1227 added the
         # second): one active owner per tenant, and one active row per
         # (tenant, person, role).
-        if invite.role == StaffInvite.Role.OWNER:
+        if role == StaffInvite.Role.OWNER:
             # Surfacing this as a 500 would be wrong: the operator issued a
             # second owner code, and that is an answerable situation.
             logger.warning(
                 "identity.staff_invite.owner_conflict tenant=%s invite=%s",
-                invite.tenant_id,
-                invite.id,
+                tenant_id,
+                invite_id,
             )
             raise OwnerAlreadyExists("tenant already has an active owner") from exc
-        # Otherwise we lost a race with a concurrent redemption granting the
-        # same role to the same person. The grant the caller wanted now
-        # exists, so this is the "already had it" answer, not a failure.
+        # Otherwise we lost a race with a concurrent grant of the same role
+        # to the same person. The grant the caller wanted now exists, so
+        # this is the "already had it" answer, not a failure.
         logger.info(
             "identity.staff_invite.grant_race tenant=%s invite=%s role=%s",
-            invite.tenant_id,
-            invite.id,
-            invite.role,
+            tenant_id,
+            invite_id,
+            role,
         )
-        return RedeemResult(
-            role=invite.role,
-            tenant_id=str(invite.tenant_id),
-            already_had_role=True,
-        )
+        return RedeemResult(role=role, tenant_id=str(tenant_id), already_had_role=True)
 
-    return RedeemResult(
-        role=invite.role,
-        tenant_id=str(invite.tenant_id),
-        already_had_role=False,
-    )
+    return RedeemResult(role=role, tenant_id=str(tenant_id), already_had_role=False)
 
 
 def _link_master(invite: StaffInvite, bot_user: BotUser) -> RedeemResult:
+    """Attach a person to the master row an invite code points at.
+
+    The code-specific half is only *which* row: a CHECK constraint
+    guarantees master invites carry a catalog row, but the column is
+    nullable for the other roles, so it is narrowed explicitly rather than
+    asserted away. Everything else — the lock, the two refusals, the
+    activation — is :func:`link_master_to_person`, shared with the
+    onboarding facade so the two doors into one card cannot drift.
+    """
+
+    return link_master_to_person(
+        master_id=invite.catalog_master_id,
+        tenant_id=invite.tenant_id,
+        bot_user=bot_user,
+        invite_id=invite.id,
+    )
+
+
+def link_master_to_person(
+    *,
+    master_id: Any,
+    tenant_id: Any,
+    bot_user: BotUser,
+    invite_id: Any = None,
+) -> RedeemResult:
     """Attach a person to the master row that already exists.
+
+    The one authority for «this person is this master» (ADR-0008 decision
+    2: the master role lives on ``CatalogMaster.linked_bot_user``). Two
+    callers: :func:`_link_master` for a redeemed code, and
+    :func:`apps.identity.services.specialist_onboarding.onboard_specialist_to_tenant`
+    for an operator or a salon admin acting without a code. ``invite_id`` is
+    only for the log lines — ``None`` means «no code was involved».
+
+    **Must run inside ``transaction.atomic``**: the row is taken under
+    ``select_for_update`` and the savepoint below needs an enclosing
+    transaction to roll back into.
 
     Sets ``is_active=True`` alongside the link on purpose. The pre-existing
     admin invite path leaves invited masters at ``is_active=False`` and
     nothing ever flips it, so ``resolve_role`` reports them as masters while
     every master endpoint answers 403 ``master_inactive`` (DRF-1080). A
-    person who just proved they hold a valid code is active by definition.
+    person who just proved they hold a valid code — or whom an operator
+    linked by hand — is active by definition.
+
+    Raises:
+      InviteMasterMissing, MasterAlreadyLinked, PersonAlreadyMaster — same
+      slugs whichever door the caller came through.
     """
 
-    # A CHECK constraint guarantees master invites carry a catalog row, but
-    # the column is nullable for the other roles — narrow it explicitly
-    # rather than asserting it away.
-    master_id = invite.catalog_master_id
     master = (
         CatalogMaster.all_tenants.select_for_update()
-        .filter(pk=master_id, tenant_id=invite.tenant_id)
+        .filter(pk=master_id, tenant_id=tenant_id)
         .first()
         if master_id is not None
         else None
     )
     if master is None or master.archived_at is not None:
-        logger.warning("identity.staff_invite.master_missing invite=%s", invite.id)
+        logger.warning("identity.staff_invite.master_missing invite=%s", invite_id)
         raise InviteMasterMissing("catalog master is gone or archived")
 
     if master.linked_bot_user_id == bot_user.id:
         return RedeemResult(
             role=StaffInvite.Role.MASTER,
-            tenant_id=str(invite.tenant_id),
+            tenant_id=str(tenant_id),
             already_had_role=True,
             catalog_master_id=str(master.id),
         )
+
+    # DRF-1647 — the card already belongs to SOMEONE ELSE.
+    #
+    # Until this guard existed the assignment below was unconditional, so a
+    # freshly issued code handed the card to whoever typed it: the master
+    # who was actually working lost her appointments, her schedule and her
+    # notifications, and learned about it from silence. A code being valid
+    # says the operator meant to invite somebody; it does not say the
+    # bearer is that somebody.
+    #
+    # The Mini App door (``apps/master_api/views.py``, onboarding_claim /
+    # onboarding_accept) has answered this case since 3d5dfd95 (M0
+    # onboarding, PR 1) and had it reinforced by DRF-1507 (#1401, #1412):
+    # 403 ``wrong_recipient``, token left unconsumed, with the note that it
+    # is "расхождение личности, а не ретрай". This is the same answer
+    # through the bot door, not a third behaviour — and the condition is
+    # the same one, ``linked_bot_user_id is not None and != bot_user.id``;
+    # the equality half already returned above.
+    if master.linked_bot_user_id is not None:
+        logger.warning(
+            "identity.staff_invite.wrong_recipient invite=%s master=%s "
+            "linked_to=%s presented_by=%s",
+            invite_id,
+            master.id,
+            master.linked_bot_user_id,
+            bot_user.id,
+        )
+        raise MasterAlreadyLinked("catalog master is linked to a different person")
 
     master.linked_bot_user = bot_user
     master.invite_status = CatalogMaster.InviteStatus.ACCEPTED
     master.mode = CatalogMaster.Mode.INVITE
     master.invite_token = None
     master.is_active = True
-    master.save(
-        update_fields=[
-            "linked_bot_user",
-            "invite_status",
-            "mode",
-            "invite_token",
-            "is_active",
-        ]
-    )
+
+    # DRF-1650 — the PERSON is already somebody's master.
+    #
+    # ``linked_bot_user`` is a OneToOneField, so this UPDATE can violate its
+    # unique index even though the row we are writing is free: the conflict
+    # is on the other side of the link. Nothing up the call chain catches
+    # ``IntegrityError`` — not ``_redeem_and_greet``, not
+    # ``handle_salon_max_event`` — so it used to leave the person with no
+    # answer whatsoever while every other refusal said something.
+    #
+    # The savepoint is what makes the diagnosis possible: an IntegrityError
+    # poisons the enclosing transaction, and the query below would die with
+    # TransactionManagementError without one. It rolls back only the failed
+    # UPDATE; the outer atomic (which still has to roll back the whole
+    # redemption) is untouched.
+    #
+    # An IntegrityError we cannot explain is re-raised unchanged. Answering
+    # "you are already a master" to an unrelated constraint failure would
+    # be a lie that hides a real defect.
+    try:
+        with transaction.atomic():
+            master.save(
+                update_fields=[
+                    "linked_bot_user",
+                    "invite_status",
+                    "mode",
+                    "invite_token",
+                    "is_active",
+                ]
+            )
+    except IntegrityError as exc:
+        held = (
+            CatalogMaster.all_tenants.filter(linked_bot_user_id=bot_user.id)
+            .exclude(pk=master.pk)
+            .first()
+        )
+        if held is None:
+            raise
+        logger.warning(
+            "identity.staff_invite.person_already_master invite=%s master=%s "
+            "already_holds=%s bot_user=%s",
+            invite_id,
+            master.id,
+            held.id,
+            bot_user.id,
+        )
+        raise PersonAlreadyMaster("person is already linked to another master row") from exc
 
     return RedeemResult(
         role=StaffInvite.Role.MASTER,
-        tenant_id=str(invite.tenant_id),
+        tenant_id=str(tenant_id),
         already_had_role=False,
         catalog_master_id=str(master.id),
     )

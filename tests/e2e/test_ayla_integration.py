@@ -40,6 +40,8 @@ from collections.abc import Generator
 
 import pytest
 
+from apps.consent.personal_calculation import ConsentAttestation
+from apps.consent.personal_calculation import attach as attach_consent
 from apps.integrations.ayla import (
     FoodNotRecognizedError,
     NutritionUnavailableError,
@@ -57,6 +59,11 @@ _BASE_URL = os.environ.get("AYLA_BASE_URL")
 _SERVICE_TOKEN = os.environ.get("NUTRITION_SERVICE_TOKEN") or os.environ.get("AYLA_SERVICE_TOKEN")
 _INTERNAL_TOKEN = os.environ.get("AYLA_INTERNAL_API_TOKEN")
 _PROFILE_USER_ID = os.environ.get("AYLA_E2E_PROFILE_USER_ID")
+# DRF-1709 (12.09.2026): the profile route is subject-bound — the caller names
+# the person it acts for, and the catalog checks that name against the URL.
+# For the 200 round-trip the two must belong to one person: the external id
+# (``bot:max:<id>``) bound to that staging user.
+_PROFILE_EXTERNAL_USER_ID = os.environ.get("AYLA_E2E_PROFILE_EXTERNAL_USER_ID")
 
 # Module-level gate: skip everything unless a base URL + at least one Ayla
 # credential is present. Each test class below adds a skipif for the specific
@@ -131,25 +138,38 @@ class TestNutritionClient:
         """Round-trip: write a profile, fetch it, assert the norms
         envelope shape (DRF-270 ``data.norms.*``)."""
         client = get_nutrition_client()
+        # DRF-1658: параметры тела граница каталога (#324) принимает
+        # только с утверждением о согласии — оно часть ВАЛИДНОГО запроса,
+        # а не предмет этого теста. Форма — та же, что шлёт анкета.
+        attestation = ConsentAttestation(
+            type="personal_calculation", document_version="e2e-personal-calculation-v1"
+        )
         await client.upsert_profile(
             external_user_id=external_user_id,
-            data={
-                "gender": "female",
-                "age": 30,
-                "height_cm": 168,
-                "weight_kg": 62,
-                "goal": "maintain",
-                "activity_coefficient": 1.4,
-            },
+            data=attach_consent(
+                {
+                    "gender": "female",
+                    "age": 30,
+                    "height_cm": 168,
+                    "weight_kg": 62,
+                    "goal": "maintain",
+                    "activity_coefficient": 1.4,
+                },
+                attestation,
+            ),
         )
 
         profile = await client.get_profile(external_user_id=external_user_id)
         assert profile is not None
-        # Norms envelope unwrapped correctly.
-        assert profile.daily_kcal > 0
-        assert profile.protein_g > 0
-        assert profile.water_ml > 0
-        assert profile.bmr > 0
+        # Norms envelope unwrapped correctly. Каждый ориентир сперва
+        # проверяется на присутствие: с DRF-1623 N-c его отсутствие
+        # приезжает `None`, и `> 0` на `None` — падение типа, а не
+        # проверка. Присутствие здесь и есть предмет: контур обязан
+        # ПОСЧИТАТЬ на этих входах.
+        assert profile.daily_kcal is not None and profile.daily_kcal > 0
+        assert profile.protein_g is not None and profile.protein_g > 0
+        assert profile.water_ml is not None and profile.water_ml > 0
+        assert profile.bmr is not None and profile.bmr > 0
 
     @pytest.mark.asyncio
     async def test_water_log_round_trip(self, external_user_id: str) -> None:
@@ -248,22 +268,24 @@ class TestProfileClient:
         )
 
         with pytest.raises(ProfileFetchError) as exc:
-            fetch_profile_fields(uuid.uuid4())
+            fetch_profile_fields(uuid.uuid4(), on_behalf_of=f"bot:e2e:{uuid.uuid4().hex[:12]}")
         msg = str(exc.value)
-        # Assumption: Ayla's internal by-id lookup returns 404 for an unknown
-        # user (not a 403 existence-hiding response). If a future Ayla build
-        # 403s here instead, this asserts 'auth' and fails loudly — which is
-        # itself worth investigating, so the assumption fails safe.
-        assert "not_found" in msg, (
-            f"expected a 404 'not_found' (route + Bearer OK, user absent); "
-            f"got {msg!r} — 'auth' would mean the token was rejected (401/403)."
+        # Two regimes, both healthy (DRF-1709, 12.09.2026): a catalog before
+        # beautygo_backend#411 answers 404 'not_found' for an unknown user; a
+        # catalog after it answers 403 — an unknown UUID is a FOREIGN subject
+        # and the route no longer says whether such a user exists. Either way
+        # the route resolved and the Bearer was accepted; what would be
+        # unhealthy is a timeout/5xx or a malformed body.
+        assert "not_found" in msg or "auth" in msg, (
+            f"expected 'not_found' (pre-#411) or 'auth' (post-#411, foreign subject); got {msg!r}"
         )
 
     @pytest.mark.skipif(
-        not _PROFILE_USER_ID,
+        not (_PROFILE_USER_ID and _PROFILE_EXTERNAL_USER_ID),
         reason=(
-            "Set AYLA_E2E_PROFILE_USER_ID to a real staging user UUID for the "
-            "full 200 body-shape round-trip."
+            "Set AYLA_E2E_PROFILE_USER_ID to a real staging user UUID and "
+            "AYLA_E2E_PROFILE_EXTERNAL_USER_ID to the external identity bound to it "
+            "(bot:max:<id>) for the full 200 body-shape round-trip."
         ),
     )
     def test_known_user_returns_pii_subset(self) -> None:
@@ -273,7 +295,10 @@ class TestProfileClient:
         """
         from apps.integrations.ayla.profile_client import fetch_profile_fields
 
-        fields = fetch_profile_fields(uuid.UUID(_PROFILE_USER_ID))
+        assert _PROFILE_USER_ID and _PROFILE_EXTERNAL_USER_ID  # narrowed for mypy
+        fields = fetch_profile_fields(
+            uuid.UUID(_PROFILE_USER_ID), on_behalf_of=_PROFILE_EXTERNAL_USER_ID
+        )
         assert isinstance(fields.display_name, str)
         assert isinstance(fields.avatar_url, str)
 
@@ -320,3 +345,46 @@ class TestRecommendationsClient:
             )
         else:
             assert isinstance(body, dict)
+
+
+# ─── C5.1 personal-data export sections (DRF-2307) ────────────────────────
+
+
+@_needs_internal_token
+@pytest.mark.skipif(
+    not (_PROFILE_USER_ID and _PROFILE_EXTERNAL_USER_ID),
+    reason=(
+        "Set AYLA_E2E_PROFILE_USER_ID and AYLA_E2E_PROFILE_EXTERNAL_USER_ID "
+        "(the same subject pair as the profile round-trip) to read C5.1."
+    ),
+)
+class TestPersonalDataExportSections:
+    """DRF-2307 — the other half of ``test_catalog_sections_declared_2307``.
+
+    The static guard proves the bot's mirror of C5.1 keys
+    (``export_coverage.CATALOG_EXPORT_SECTIONS``) is declared everywhere; only
+    the real catalog can prove the mirror matches it. A section the catalog
+    added and the mirror lacks — or one the mirror keeps after the catalog
+    dropped it — turns this red. Each read writes one access-journal row on
+    the catalog side (``PersonalDataAccessLog``, operation ``export``) for the
+    staging subject — the same cost as any C5.1 read.
+    """
+
+    def test_the_real_export_carries_exactly_the_mirrored_sections(self) -> None:
+        from apps.identity.export_coverage import CATALOG_EXPORT_SECTIONS
+        from apps.integrations.ayla.personal_context_client import PersonalContextHttpClient
+
+        assert _PROFILE_USER_ID and _PROFILE_EXTERNAL_USER_ID  # narrowed for mypy
+        client = PersonalContextHttpClient()
+        try:
+            payload = client.get_personal_data_export(
+                ayla_user_id=_PROFILE_USER_ID, external_user_id=_PROFILE_EXTERNAL_USER_ID
+            )
+        finally:
+            client.close()
+
+        assert "profile" in payload  # наличие: это ответ C5.1
+        assert set(payload) == set(CATALOG_EXPORT_SECTIONS), (
+            sorted(set(payload) - set(CATALOG_EXPORT_SECTIONS)),
+            sorted(set(CATALOG_EXPORT_SECTIONS) - set(payload)),
+        )

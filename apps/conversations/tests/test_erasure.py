@@ -32,7 +32,12 @@ from apps.conversations.tasks import purge_expired_archived_messages
 from apps.identity.models import BotUser
 from apps.tenancy.models import Tenant
 
-pytestmark = pytest.mark.django_db(transaction=True)
+# DRF-2220 — erasure also purges the ingress streams; this file is not
+# about them, so they are empty and need no Redis (apps/conftest.py).
+pytestmark = [
+    pytest.mark.django_db(transaction=True),
+    pytest.mark.usefixtures("ingress_streams_empty"),
+]
 
 FORGET_ALL = ArchivedMessage.Reason.FORGET_ALL
 
@@ -52,6 +57,12 @@ class _FakeRedis:
             def rpush(self, key, value):
                 self.ops.append(("rpush", key, value))
 
+            # DRF-2511: `append` читает уходящее тем же конвейером, поэтому
+            # модель Redis обязана знать `lrange`. Без него стенд краснел на
+            # отсутствии метода — то есть на себе, а не на предмете.
+            def lrange(self, key, start, end):
+                self.ops.append(("lrange", key, start, end))
+
             def ltrim(self, key, start, end):
                 self.ops.append(("ltrim", key, start, end))
 
@@ -59,10 +70,17 @@ class _FakeRedis:
                 self.ops.append(("expire", key, ttl))
 
             def execute(self):
+                out: list = []
                 for op in self.ops:
                     if op[0] == "rpush":
                         outer.store.setdefault(op[1], []).append(op[2])
+                        out.append(None)
+                    elif op[0] == "lrange":
+                        out.append(outer.lrange(op[1], op[2], op[3]))
+                    else:
+                        out.append(None)
                 self.ops = []
+                return out
 
         return _Pipe()
 
@@ -78,9 +96,11 @@ class _FakeRedis:
 @pytest.fixture()
 def fake_redis(monkeypatch) -> _FakeRedis:
     from apps.llm import pii_tokenizer
+    from apps.orchestrator.decision_readiness import state as dre_state
     from apps.orchestrator.memory import short_term
 
     fake = _FakeRedis()
+    monkeypatch.setattr(dre_state, "_redis_client", lambda: fake)
     monkeypatch.setattr(short_term, "_redis_client", lambda: fake)
     monkeypatch.setattr(pii_tokenizer, "_redis_client", lambda: fake)
     return fake
@@ -214,7 +234,7 @@ class TestIdempotence:
 
         assert fake_redis.deleted == []
 
-    def test_both_redis_stores_go_on_the_first_run(self, person, fake_redis):
+    def test_every_redis_store_goes_on_the_first_run(self, person, fake_redis):
         conversation = _conversation(person)
         _message(conversation, "я веган")
 
@@ -223,6 +243,8 @@ class TestIdempotence:
         assert fake_redis.deleted == [
             f"conv:{conversation.id}:msgs",
             f"pii_tokenmap:{conversation.id}",
+            # DRF-2214 — состояние движка готовности: слоты со сказанным.
+            f"dre:state:{conversation.id}",
         ]
 
 

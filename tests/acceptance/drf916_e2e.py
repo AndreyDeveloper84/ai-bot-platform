@@ -10,25 +10,44 @@ Drives the REAL deployed product paths on the Controlled Pilot baseline:
 Usage:
   python drf916_e2e.py                 # full run (create+lookup+reschedule+cancel)
   python drf916_e2e.py <appt_uuid>     # resume: skip create/lookup, run reschedule+cancel
+  python drf916_e2e.py --tenant <slug> --master <uuid|name> --service <uuid|name>
+                                       # named fixture: the master/service an operator
+                                       # set up by hand, not the first pair by name
+
+Without --master/--service the harness picks the first grounded master/service
+pair of the tenant (alphabetical by service name). With them, each admission
+filter (active, invite accepted, grounded in Ayla, sellable, linked) is checked
+one by one and the FIRST failing filter is named in the FAIL line, so "master
+not set up" is distinguishable from "set up, invite not accepted".
+
+Host layout (env files, DB containers, base URLs) is overridable via
+DRF916_BOT_ENV, DRF916_BE_ENV, DRF916_BOT_DB, DRF916_BE_DB, DRF916_BOT_URL,
+DRF916_AYLA_URL; defaults are the pilot host layout.
 
 Secrets are read from env files and never printed.
 """
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import hmac
 import json
+import os
 import subprocess
 import sys
 import time
 import uuid
+from datetime import date, timedelta
 from urllib.parse import urlencode
 
 import requests
 
-BOT = "https://api-dev.gobeauty.site"
-AYLA = "https://dev.gobeauty.site"
+BOT = os.environ.get("DRF916_BOT_URL", "https://api-dev.gobeauty.site")
+AYLA = os.environ.get("DRF916_AYLA_URL", "https://dev.gobeauty.site")
+# Fixture tenant (formula-tela). Overridden by --tenant in main(): the id is then
+# resolved from the BOT mirror by slug, so a typo in the slug fails at "tenant",
+# not three phases later inside a foreign-tenant probe.
 TENANT = "b32a057a-56c7-4bf0-ae50-e11e76ab44be"
 TENANT_SLUG = "formula-tela"
 CH_UID = "drf954-test-001"
@@ -66,8 +85,10 @@ def load_env(path: str) -> dict[str, str]:
     return env
 
 
-BOT_ENV = load_env("/home/taximeter/ai-bot-platform-dev/.env.staging")
-BE_ENV = load_env("/home/taximeter/beautygo/dev/.env")
+BOT_ENV = load_env(
+    os.environ.get("DRF916_BOT_ENV", "/home/taximeter/ai-bot-platform-dev/.env.staging")
+)
+BE_ENV = load_env(os.environ.get("DRF916_BE_ENV", "/home/taximeter/beautygo/dev/.env"))
 MAX_BOT_TOKEN = BOT_ENV["MAX_BOT_TOKEN"]
 INTERNAL_TOKEN = BE_ENV.get("AYLA_INTERNAL_API_TOKEN") or BOT_ENV.get("AYLA_INTERNAL_API_TOKEN", "")
 
@@ -109,11 +130,12 @@ def psql(container: str, db: str, user: str, sql: str) -> str:
 
 
 def bot_sql(sql: str) -> str:
-    return psql("ayla-bot-staging-postgres-1", "ai_bot_platform", "platform", sql)
+    container = os.environ.get("DRF916_BOT_DB", "ayla-bot-staging-postgres-1")
+    return psql(container, "ai_bot_platform", "platform", sql)
 
 
 def be_sql(sql: str) -> str:
-    return psql("dev-db-1", "beautygo", "beautygo", sql)
+    return psql(os.environ.get("DRF916_BE_DB", "dev-db-1"), "beautygo", "beautygo", sql)
 
 
 def be_appointment(appt: str) -> dict:
@@ -176,6 +198,76 @@ def wait_proxy(appt: str, want_status: str | None = None, timeout: int = 120) ->
     return bot_proxy(appt)
 
 
+def _sql_str(value: str) -> str:
+    return "'" + value.replace("'", "''") + "'"
+
+
+def _is_uuid(value: str) -> bool:
+    try:
+        uuid.UUID(value)
+    except ValueError:
+        return False
+    return True
+
+
+def resolve_tenant(slug: str) -> str:
+    """Tenant id by slug from the BOT mirror; FAIL at step "tenant" if unknown."""
+    tid = bot_sql(f"SELECT id FROM tenancy_tenant WHERE slug={_sql_str(slug)} LIMIT 1")
+    if not tid:
+        fail("tenant", f"no tenant with slug={slug!r} in BOT mirror")
+    report("tenant", "PASS", f"slug={slug} id={tid}")
+    return tid
+
+
+def pick_named_fixture(master: str, service: str) -> tuple[str, str, str, str, str]:
+    """Named master/service (uuid or exact name), admission filters checked ONE BY ONE.
+
+    The FAIL line names the first filter that did not pass, so "master not set up"
+    reads differently from "set up, invite not accepted" or "not linked to service".
+    """
+    m_where = f"m.id={_sql_str(master)}" if _is_uuid(master) else f"m.name={_sql_str(master)}"
+    m_row = bot_sql(
+        "SELECT m.id, m.name, m.is_active, m.invite_status, coalesce(m.ayla_user_id::text,'') "
+        f"FROM catalog_catalogmaster m WHERE m.tenant_id='{TENANT}' AND {m_where} LIMIT 1"
+    )
+    if not m_row:
+        fail("fixture-master", f"master {master!r} not found in tenant {TENANT_SLUG}")
+    mst_id, mst_name, m_active, m_invite, m_ayla = m_row.split("|")[:5]
+    who = f"master={mst_name}({mst_id})"
+    if m_active != "t":
+        fail("fixture-master", f"{who} is_active={m_active} — inactive by sync")
+    if m_invite != "accepted":
+        fail("fixture-master", f"{who} invite_status={m_invite!r} — invite not accepted")
+    if not m_ayla:
+        fail("fixture-master", f"{who} ayla_user_id is NULL — not grounded in Ayla")
+
+    s_where = f"s.id={_sql_str(service)}" if _is_uuid(service) else f"s.name={_sql_str(service)}"
+    s_row = bot_sql(
+        "SELECT s.id, s.name, s.is_active, coalesce(s.ayla_service_id::text,''), "
+        "coalesce(s.duration_min,0) "
+        f"FROM catalog_catalogservice s WHERE s.tenant_id='{TENANT}' AND {s_where} LIMIT 1"
+    )
+    if not s_row:
+        fail("fixture-service", f"service {service!r} not found in tenant {TENANT_SLUG}")
+    svc_id, svc_name, s_active, ayla_svc_id, s_dur = s_row.split("|")[:5]
+    what = f"service={svc_name}({svc_id})"
+    if s_active != "t":
+        fail("fixture-service", f"{what} is_active={s_active} — not sellable")
+    if not ayla_svc_id:
+        fail("fixture-service", f"{what} ayla_service_id is NULL — not grounded in Ayla")
+    if int(s_dur) <= 0:
+        fail("fixture-service", f"{what} duration_min={s_dur} — no duration")
+
+    link = bot_sql(
+        "SELECT count(*) FROM catalog_masterservice ms "
+        f"WHERE ms.master_id='{mst_id}' AND ms.service_id='{svc_id}'"
+    )
+    if link != "1":
+        fail("fixture-link", f"{who} does not perform {what} (masterservice rows={link})")
+    report("fixture", "PASS", f"{what} {who} [named]")
+    return svc_id, ayla_svc_id, svc_name, mst_id, mst_name
+
+
 def pick_fixture() -> tuple[str, str, str, str, str]:
     row = bot_sql(
         "SELECT s.id, s.ayla_service_id, s.name, m.id, m.name "
@@ -197,7 +289,8 @@ def pick_slots(mst_id: str, ayla_svc_id: str, count: int = 3) -> list[str]:
     r = bot_get(
         f"/api/v1/customer/slots?master_id={mst_id}&service_id="
         f"{bot_sql(f"SELECT id FROM catalog_catalogservice WHERE ayla_service_id='{ayla_svc_id}' LIMIT 1")}"
-        "&date_from=2026-08-09&date_to=2026-08-16"
+        f"&date_from={date.today() + timedelta(days=1)}"
+        f"&date_to={date.today() + timedelta(days=7)}"
     )
     if r.status_code != 200:
         fail("slots", f"HTTP {r.status_code} {r.text[:200]}")
@@ -499,12 +592,37 @@ def phase_reschedule_cancel(appt: str, slot2: str, slot3: str) -> None:
     report("reminders", "INFO", rem)
 
 
+def parse_args() -> argparse.Namespace:
+    ap = argparse.ArgumentParser(
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
+    )
+    ap.add_argument("resume", nargs="?", default="", help="appointment uuid: skip create/lookup")
+    ap.add_argument("--tenant", default=TENANT_SLUG, help=f"tenant slug (default {TENANT_SLUG})")
+    ap.add_argument("--master", default="", help="master uuid or exact name (with --service)")
+    ap.add_argument("--service", default="", help="service uuid or exact name (with --master)")
+    args = ap.parse_args()
+    if bool(args.master) != bool(args.service):
+        ap.error("--master and --service go together")
+    return args
+
+
 def main() -> None:
+    global TENANT, TENANT_SLUG
+    args = parse_args()
     corr = str(uuid.uuid4())
     print(f"correlation_id={corr}", flush=True)
-    resume = sys.argv[1] if len(sys.argv) > 1 else ""
+    resume = args.resume
 
-    svc_id, ayla_svc_id, svc_name, mst_id, mst_name = pick_fixture()
+    if args.tenant != TENANT_SLUG:
+        TENANT_SLUG = args.tenant
+        TENANT = resolve_tenant(args.tenant)
+
+    if args.master:
+        svc_id, ayla_svc_id, svc_name, mst_id, mst_name = pick_named_fixture(
+            args.master, args.service
+        )
+    else:
+        svc_id, ayla_svc_id, svc_name, mst_id, mst_name = pick_fixture()
     slots = pick_slots(mst_id, ayla_svc_id)
     report("slots", "PASS", f"candidates={len(slots)} first={slots[0]}")
 

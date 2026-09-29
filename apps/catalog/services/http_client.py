@@ -37,29 +37,54 @@ Ayla list responses use DRF ``PageNumberPagination``:
 Each ``fetch_*`` follows the ``next`` chain (absolute URLs) until exhausted.
 The catalog is small (one pilot salon); in-memory buffering is fine.
 
+Every walk asks for ``page_size=100`` (``_PAGE_SIZE``) on its first request;
+Ayla's ``next`` links carry the parameter forward, so the whole chain runs at
+that width. See ``_PAGE_SIZE`` for why the width is a quota question rather
+than a latency one.
+
 ### Retry policy
 
 Three attempts, exponential backoff (0.5s, 1s, 2s), on 5xx + network
 errors. 4xx raise immediately — retrying an auth/shape failure is wasted.
 
+``429`` is the one 4xx that is NOT wasted to retry, and since DRF-1595 it
+is handled apart from its neighbours: Ayla answers over-quota reads with
+``{"error":{"code":"THROTTLED","details":{"wait_seconds":54}}}``, i.e. it
+tells us exactly when to come back. Before DRF-1595 that number was parsed
+by nobody and the response fell into the generic 4xx branch below, so the
+pilot's head salon went three days without a catalog refresh while the bot
+told clients its services do not exist. We now sleep the time Ayla asked
+for and retry — but only as far as a shared
+:class:`~apps.catalog.services.throttle.ThrottleWaitBudget` allows, because
+the beat that drives this has a soft time limit and sleeping per request is
+how one broken salon becomes ten.
+
 * :class:`CatalogAuthError` — 401/403. Token mismatch or missing.
 * :class:`CatalogTransportError` — 5xx after retries exhausted / config gap.
-* :class:`CatalogClientError` — 4xx other than auth. Bug on either side.
+* :class:`CatalogClientError` — 4xx other than auth/throttle. Bug either side.
+* :class:`CatalogThrottledError` — 429 we could not wait out. Not a failure
+  of the salon: the caller records it as *skipped*, and the next beat puts
+  that salon first.
 """
 
 from __future__ import annotations
 
 import logging
 import time
+import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any
+from typing import Any, TypeVar
 
 import httpx
 from django.conf import settings
 
+from apps.catalog.services.throttle import ThrottleWaitBudget
 from apps.integrations.ayla.url_builder import AylaUrlBuilder, AylaUrlError
+from apps.integrations.ayla.offer_refusal import KNOWN_REASONS
+from apps.integrations.ayla.request_id import with_request_id
 
 logger = logging.getLogger(__name__)
 
@@ -107,8 +132,16 @@ class CatalogSpecialistDTO:
     ``CatalogMaster.ayla_user_id`` (event/booking bridge, AMD-005).
     ``is_active`` mirrors status==active AND is_available upstream; the
     feed's queryset already filters to those, but the mapping stays
-    explicit for forward-compat. Platform-owned fields (invite_status,
-    photo_url, archived_at…) never ride here — sync must not touch them.
+    explicit for forward-compat. DRF-1845: AND is_booking_enabled — the
+    catalog keeps a master whose bookings are paused IN the feed (this sync
+    never deactivates rows that stop arriving), so the pause is read here. Platform-owned fields (invite_status,
+    archived_at…) never ride here — sync must not touch them.
+
+    ``avatar_url`` (DRF-1812, M20) — фото мастера, владелец которого каталог
+    (``SpecialistProfile.avatar``). Трёхзначно, как ``address``: ``None`` —
+    ключа ``avatar`` в строке не было (старая Ayla, не знаем), ``""`` — ключ
+    был и пуст (фото в каталоге нет), строка — URL. ``photo_url`` у
+    ``CatalogMaster`` с этого среза зеркальное поле (см. upserter).
 
     ``tenant`` is the owning salon as Ayla states it (DRF-1313). It exists so
     the upsert can check the scope it asked for instead of trusting that the
@@ -127,6 +160,25 @@ class CatalogSpecialistDTO:
     rating: Decimal | None = None
     review_count: int = 0
     is_active: bool = True
+    # DRF-1588 — гео. ``address`` трёхзначен и обязан таким остаться:
+    # ``None`` — ключа в строке НЕ БЫЛО (не знаем), ``""`` — ключ был и нёс
+    # пустое (источник ответил «адреса нет»), строка — адрес. Ровно тот же
+    # приём, что у ``resolved_requires_health_check`` ниже, и по той же
+    # причине: отсутствие, свёрнутое в значение, читается как факт.
+    # Координаты — ``None`` при любом отсутствии и НИКОГДА не ``0``.
+    address: str | None = None
+    location_lat: Decimal | None = None
+    location_lng: Decimal | None = None
+    # DRF-1588 — адрес САЛОНА, отдельным ключом ``tenant_address``, а не тем
+    # же ``address``, что у мастера: в одной строке приезжают оба. Складывать
+    # их здесь нечем и незачем — правило старшинства это DRF-1589. Каталог
+    # отдаёт ключ с DRF-1587 (каталог dbf14409: ``users/internal_catalog_api.py``
+    # ``get_tenant_address`` → ``_blank_to_none`` — пустой адрес уходит как
+    # ``null``, не пустой строкой). ``None`` здесь — у салона адрес не заполнен
+    # или ключа нет в строке. Upserter пишет значение в ``Tenant.address``,
+    # только когда все строки салона согласны (DRF-1954).
+    tenant_address: str | None = None
+    avatar_url: str | None = None
     raw: dict[str, Any] = field(default_factory=dict)
 
 
@@ -145,7 +197,10 @@ class CatalogSpecialistServiceDTO:
       mirror on the same id (``/internal/specialists/`` ``row["id"]``).
     * ``salon_service`` — ``SalonService.id`` → ``CatalogService.ayla_service_id``.
     * ``user_id`` — Ayla ``User.id``. Deliberately NOT the same as
-      ``specialist``; carried for cross-checks only, never as a join key.
+      ``specialist``; a cross-check first and a join key of last resort
+      (DRF-1507): the edge upsert reaches for it only when ``specialist``
+      resolves to no ``CatalogMaster`` at all, which is the invite-born row
+      that lives under its own ``uuid4`` primary key.
 
     ``resolved_duration`` still rides in ``raw`` only — it belongs to the
     booking gate, not to discovery.
@@ -153,9 +208,28 @@ class CatalogSpecialistServiceDTO:
     ``resolved_requires_health_check`` (DRF-1353) is now a first-class field
     because the gate finally has a reader for it
     (``apps.skills.booking.skill._service_requires_health_check``). It is
-    ``bool | None``: ``None`` means the upstream row did not carry the key at
-    all — an older Ayla — and MUST NOT be read as "no screening needed". Only
-    an explicit ``False`` opens the gate; ``None`` keeps it closed.
+    ``bool | None``: ``None`` means "no readable value" and MUST NOT be read
+    as "no screening needed". Only an explicit ``False`` opens the gate.
+
+    ``health_check_key_present`` splits that ``None`` in two, and the split
+    is load-bearing:
+
+    * **key absent** (``False``) — this payload does not speak about the
+      field at all: an older Ayla, a partial serializer, a transport hiccup.
+      The mirror must KEEP what it already knows. Overwriting a known
+      verdict with "unknown" on that basis would make a medical gate
+      flicker on every upstream wobble.
+    * **key present, value ``null``** (``True``, value ``None``) — the
+      catalog is speaking, and what it says is *"I do not know"*. That is an
+      answer, and the mirror must record it as ``NULL``, which the booking
+      gate reads as "screening required".
+
+    Before this split both arrived as the same Python ``None``, so the
+    upserter could only pick one behaviour for both — and it picked "keep",
+    correctly, to protect against the hiccup. The price was that an explicit
+    "unknown" could never reach the mirror at all. The catalog only started
+    sending one once ``SpecialistService.resolved_requires_health_check``
+    stopped turning a missing template into ``False``.
     """
 
     ayla_specialist_service_id: str
@@ -168,6 +242,17 @@ class CatalogSpecialistServiceDTO:
     category_slug: str = ""
     is_active: bool = True
     resolved_requires_health_check: bool | None = None
+    #: Нёс ли ключ сам ответ. См. докстринг выше: отличает «поле не
+    #: прислали» от «прислали null». Умолчание `False` — консервативное:
+    #: вызывающий, собравший DTO руками и про поле не сказавший, получает
+    #: прежнее поведение «сохранить, что было».
+    health_check_key_present: bool = False
+    #: DRF-1964a — продаётся ли ребро (контракт DRF-1962). Та же развилка, что у
+    #: проверки здоровья: ``sellable_key_present=False`` — ответ о продаже молчит
+    #: (каталог до DRF-1962), и зеркало не меняется.
+    sellable: bool = True
+    unsellable_reason: str | None = None
+    sellable_key_present: bool = False
     raw: dict[str, Any] = field(default_factory=dict)
 
 
@@ -202,8 +287,295 @@ class CatalogClientError(CatalogError):
     """4xx other than auth. Misshapen request — operator/code bug."""
 
 
+class CatalogThrottledError(CatalogError):
+    """429 from Ayla that this run could not wait out (DRF-1595).
+
+    Deliberately a sibling of :class:`CatalogClientError`, not a subclass,
+    even though 429 *is* a 4xx. The whole point of the ticket is that this
+    condition is not the same fact as "we sent a misshapen request": the
+    salon is healthy, our request was fine, and the correct response is to
+    stand down and come back — which the caller can only do if it can tell
+    the two apart with an ``except`` clause. Sub-classing would have made
+    every existing ``except CatalogClientError`` swallow it silently.
+
+    ``wait_seconds`` is what Ayla asked for (``None`` when it did not say).
+    ``budget_exhausted`` distinguishes "we ran out of permission to wait"
+    from "we waited the full number of attempts and Ayla is still closed".
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        wait_seconds: float | None = None,
+        budget_exhausted: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.wait_seconds = wait_seconds
+        self.budget_exhausted = budget_exhausted
+
+
 class CatalogTransportError(CatalogError):
     """5xx / network failure after retries exhausted, or a config gap."""
+
+
+class CatalogProvisioningTokenMissing(CatalogError):
+    """``AYLA_TENANT_PROVISIONING_TOKEN`` пуст НА НАШЕЙ стороне (DRF-1525).
+
+    Отдельно от :class:`CatalogProvisioningRefused`: там токен был послан
+    и отвергнут каталогом, здесь его не с чем посылать. Оба — «токен не
+    настроен», но чинятся в разных контейнерах, и одно имя на двоих
+    отправило бы оператора искать не там.
+    """
+
+
+class CatalogProvisioningRefused(CatalogError):
+    """Каталог ответил 403 на провижининг (DRF-1525).
+
+    На стороне каталога токен пуст или не совпадает с нашим. Не
+    :class:`CatalogAuthError`: тот означает «общий Bearer зеркала не
+    подошёл», и его перехватывают как сбой синхронизации; здесь же —
+    ожидаемый исход «контур не донастроен», который экран обязан назвать
+    ``SETUP_PENDING``, а не ошибкой.
+    """
+
+
+class CatalogSlugTaken(CatalogError):
+    """Каталог ответил 409: slug занят салоном с другим названием."""
+
+    def __init__(self, message: str, *, slug: str, existing_name: str, requested_name: str) -> None:
+        super().__init__(message)
+        self.slug = slug
+        self.existing_name = existing_name
+        self.requested_name = requested_name
+
+
+class CatalogSoloProvisioningRefused(CatalogError):
+    """Каталог ответил 409 на provisioning solo-workspace (DRF-1830, M29).
+
+    ``reason`` — машинное имя причины из ``details.reason`` каталога
+    (``slug_taken`` / ``tenant_id_taken`` / ``claim_bound_elsewhere`` /
+    ``invalid_external_user_id``). Ничего не создано ни там, ни здесь;
+    чинит оператор, не повтор.
+    """
+
+    def __init__(self, message: str, *, reason: str) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
+class CatalogSalonSpecialistRefused(CatalogError):
+    """Каталог отказал в заведении специалиста салона (DRF-2379).
+
+    ``reason`` — машинное имя из ``details.reason``: ``tenant_not_found``
+    (404), ``tenant_is_solo`` / ``claim_bound_elsewhere`` /
+    ``invalid_external_user_id`` (409). Это **ответ** каталога, а не наше
+    незавершённое раскатывание, — отличать обязательно, см.
+    :class:`CatalogSalonSpecialistDoorAbsent`.
+    """
+
+    def __init__(self, message: str, *, reason: str) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
+class CatalogSalonSpecialistDoorAbsent(CatalogError):
+    """У каталога нет такого маршрута — 404 БЕЗ нашего тела ошибки (DRF-2379).
+
+    Почему это отдельное имя, а не ``reason="tenant_not_found"``: два 404
+    приходят с одного адреса и означают противоположное. «Салона нет» —
+    ответ каталога, который знает ручку и говорит «адресат не тот», и его
+    чинит тот, кто прислал чужой ``tenant_id``. «Маршрута нет» — наша
+    половина ещё не выложена, каталог такой ручки не знает вовсе, и чинит
+    это выкладка, а не оператор.
+
+    Слитые в одно имя, они через неделю читаются как «у нас всё сломано»:
+    журнал полон «салон не найден» на салонах, которые есть.
+
+    Отличаются по телу: наш отказ несёт ``error.details.reason``, 404
+    маршрутизатора — нет.
+    """
+
+
+class CatalogAdminLinkTokenMissing(CatalogError):
+    """``AYLA_SALON_ADMIN_LINK_TOKEN`` пуст НА НАШЕЙ стороне (DRF-2085).
+
+    Тот же раздел, что у :class:`CatalogProvisioningTokenMissing`: чинится в
+    контейнере бота, а не каталога, и потому названо отдельно.
+    """
+
+
+class CatalogSpecialistIdentityTokenMissing(CatalogError):
+    """``AYLA_SPECIALIST_IDENTITY_LINK_TOKEN`` пуст НА НАШЕЙ стороне (DRF-2442).
+
+    Тот же раздел, что у соседей: чинится в контейнере бота, а не каталога, и
+    потому названо отдельно. Пока секрета нет, дверь личности мастера для нас
+    просто отсутствует — и приём приглашения об этом говорит по имени, а не
+    молча оставляет мастера без кабинета.
+    """
+
+
+class CatalogSpecialistIdentityRefused(CatalogError):
+    """Каталог отказал двери личности мастера, назвав причину (DRF-2442)."""
+
+    def __init__(self, message: str, *, reason: str, status_code: int) -> None:
+        super().__init__(message)
+        self.reason = reason
+        self.status_code = status_code
+
+
+class CatalogAdminLinkRefused(CatalogError):
+    """Каталог не связал администратора салона (DRF-2085).
+
+    ``reason`` — машинное имя: ``credential_refused`` (401/403 — у каталога
+    секрет пуст или не наш), ``rate_limited`` (429), либо ``details.reason``
+    каталога (``tenant_not_found`` / ``tenant_inactive`` /
+    ``identity_already_bound`` / ``identity_not_proxy`` /
+    ``idempotency_key_reused`` / ``bind_refused`` / ``readback_failed``).
+    Ничего не создано ни там, ни здесь.
+    """
+
+    def __init__(self, message: str, *, reason: str, status_code: int) -> None:
+        super().__init__(message)
+        self.reason = reason
+        self.status_code = status_code
+
+
+@dataclass(frozen=True)
+class LinkedSalonAdminDTO:
+    """Ответ ``POST /api/v1/internal/tenants/<slug>/salon-admins/`` (DRF-2085).
+
+    ``created`` — 201 против 200 (повтор с тем же ключом идемпотентности).
+    """
+
+    tenant_id: uuid.UUID
+    ayla_user_id: uuid.UUID
+    relationship_id: uuid.UUID
+    created: bool
+
+
+@dataclass(frozen=True)
+class LinkedSpecialistIdentityDTO:
+    """Ответ ``POST /api/v1/internal/specialists/<uuid>/identity/`` (DRF-2442).
+
+    ``created`` — 201 против 200 (повтор: тот же ключ либо личность уже
+    связана с этим же мастером).
+    """
+
+    specialist_id: uuid.UUID
+    ayla_user_id: uuid.UUID
+    created: bool
+
+
+@dataclass(frozen=True)
+class ProvisionedSoloWorkspaceDTO:
+    """Ответ ``POST /api/v1/internal/tenants/solo-workspaces/`` (DRF-1828/1830).
+
+    ``created`` — 201 против 200: workspace заведён этим вызовом или уже был
+    заведён для той же личности (идемпотентность по claim на стороне
+    каталога).
+    """
+
+    tenant_id: uuid.UUID
+    slug: str
+    specialist_id: uuid.UUID
+    user_id: uuid.UUID
+    status: str
+    created: bool
+
+
+@dataclass(frozen=True)
+class ProvisionedSalonSpecialistDTO:
+    """Ответ ``POST /api/v1/internal/tenants/salon-specialists/`` (DRF-2379).
+
+    Специалист в УЖЕ существующем салоне — в отличие от соседнего
+    :class:`ProvisionedSoloWorkspaceDTO`, где каталог заводит тенант целиком.
+    Поэтому здесь нет ``slug``: салон уже есть и своего имени не меняет.
+
+    ``specialist_id`` — то, ради чего ручку звали: ключ, которым каталог
+    знает эту строку (``CatalogMaster.catalog_specialist_id``, DRF-1933), а
+    не «кто этот человек» (``linked_bot_user``, ADR-0008).
+
+    ``created`` — 201 против 200: завёл этот вызов или строка уже была под
+    тем же ``external_user_id`` (идемпотентность каталога по claim).
+    """
+
+    tenant_id: uuid.UUID
+    specialist_id: uuid.UUID
+    user_id: uuid.UUID
+    status: str
+    created: bool
+
+
+@dataclass(frozen=True)
+class EnsuredTenantDTO:
+    """Ответ ``POST /api/v1/internal/tenants/`` (DRF-1525).
+
+    ``created`` — 201 против 200: салон только что заведён в каталоге или
+    уже был там. Экран говорит человеку разное, а строка бота в обоих
+    случаях одна и та же.
+    """
+
+    id: uuid.UUID
+    slug: str
+    name: str
+    city: str | None
+    is_active: bool
+    created: bool
+
+
+class CatalogNotConfigured(CatalogTransportError):
+    """Наша сторона не настроена: пустой ``AYLA_INTERNAL_API_TOKEN`` или кривой
+    ``AYLA_BASE_URL`` (DRF-2117). Подкласс transport-ошибки, чтобы старые
+    ловцы не разъехались, но с собственным именем: «попробуйте ещё раз» здесь
+    не поможет — чинится в контейнере бота."""
+
+
+class CatalogReadinessRefused(CatalogError):
+    """Каталог не отдал готовность салона: 401/403/404 (DRF-2117).
+
+    ``reason`` — ``credential_refused`` (401/403: общий Bearer не подошёл,
+    заголовок актора отвергнут или актор неизвестен/неактивен) или
+    ``salon_not_confirmed`` (404: слаг чужой, салон выключен или актор не
+    администратор этого салона в каталоге — связь администратора DRF-2085).
+    Оба — не сбой сети: повтор не поможет, нужен оператор.
+    """
+
+    def __init__(self, message: str, *, reason: str, status_code: int) -> None:
+        super().__init__(message)
+        self.reason = reason
+        self.status_code = status_code
+
+
+@dataclass(frozen=True)
+class SalonReadinessMasterDTO:
+    """Один мастер из ответа readiness: id каталога (= ``catalog_specialist_id``
+    зеркала), ``user_id`` (= ``ayla_user_id``), имя, проверки и проблемы."""
+
+    id: str
+    user_id: str | None
+    name: str
+    checks: dict[str, str]
+    problems: tuple[dict[str, str], ...]
+
+
+@dataclass(frozen=True)
+class SalonReadinessDTO:
+    """Ответ ``GET /api/v1/internal/salons/<slug>/readiness/`` (DRF-2117).
+
+    Половина ответа, которую знает каталог; §83 / ``catalog_specialist_id`` /
+    ``sellable`` зеркала накладывает :mod:`apps.admin_api.services.salon_readiness`.
+    ``ready`` каталога — «каталог не видит препятствий», не вердикт.
+    """
+
+    ready: bool
+    checked_at: str
+    horizon_days: int
+    masters: tuple[SalonReadinessMasterDTO, ...]
+    #: Проблемы уровня салона (``problems[].master == null`` в контракте §2b —
+    #: сегодня одна, ``no_masters``); в ``masters[]`` их нет по построению.
+    salon_problems: tuple[dict[str, str], ...]
+    limits: tuple[str, ...]
 
 
 # ---------------------------------------------------------------------------
@@ -212,6 +584,20 @@ class CatalogTransportError(CatalogError):
 
 
 _BACKOFF_SECONDS = (0.5, 1.0, 2.0)
+
+# Rows per page to ask Ayla for. 100 is ``core.pagination.DefaultPagination
+# .max_page_size`` upstream — the documented ceiling, not a guess — and the
+# parameter name is that class's ``page_size_query_param``.
+#
+# Sending it on ALL THREE walks is a DRF-1595 change. Only the edge walk had
+# it; the other two ran at Ayla's ``PAGE_SIZE = 20`` default and therefore
+# spent five requests per hundred rows where they could spend one. That
+# multiplier lands on a quota far tighter than it looks: the internal catalog
+# viewsets carry ``authentication_classes = []`` (bot Bearer is not a JWT), so
+# ``request.user`` is anonymous and the throttle that fires is ``anon`` at
+# 30/min — not the 120/min ``user`` rate. Halving our own request count is the
+# cheapest lever we own on the limit that caused this ticket.
+_PAGE_SIZE = 100
 
 
 class CatalogHttpClient:
@@ -230,6 +616,10 @@ class CatalogHttpClient:
         timeout: int | None = None,
         retries: int | None = None,
         http_client: httpx.Client | None = None,
+        wait_budget: ThrottleWaitBudget | None = None,
+        provisioning_token: str | None = None,
+        salon_admin_link_token: str | None = None,
+        specialist_identity_link_token: str | None = None,
     ) -> None:
         self._base_url = (
             base_url if base_url is not None else getattr(settings, "AYLA_BASE_URL", "")
@@ -237,11 +627,31 @@ class CatalogHttpClient:
         self._token = (
             token if token is not None else getattr(settings, "AYLA_INTERNAL_API_TOKEN", "")
         )
+        # Второй секрет, другая сила (DRF-1525, §11 свода владельца): общий
+        # Bearer читает зеркало, провижининг-токен заводит салоны. Читается
+        # лениво в :meth:`ensure_tenant`, а не здесь: клиент синхронизации
+        # не должен падать оттого, что токен для другой операции не задан.
+        self._provisioning_token = provisioning_token
+        # Четвёртый секрет (DRF-2085): только ручка «администратор салона».
+        # Тоже лениво — см. :meth:`link_salon_admin`.
+        self._salon_admin_link_token = salon_admin_link_token
+        # Пятый секрет (DRF-2442): только дверь личности мастера. Лениво по той
+        # же причине — клиент синхронизации не должен падать из-за секрета,
+        # который нужен другой операции.
+        self._specialist_identity_link_token = specialist_identity_link_token
         self._timeout = (
             timeout if timeout is not None else getattr(settings, "CATALOG_SYNC_HTTP_TIMEOUT", 30)
         )
         self._retries = (
             retries if retries is not None else getattr(settings, "CATALOG_SYNC_HTTP_RETRIES", 3)
+        )
+        # One wait budget per RUN, not per request (DRF-1595). The beat hands
+        # the same object to every client it builds so ten salons cannot each
+        # sleep out their own 429 and blow the task's soft time limit between
+        # them. A caller that passes none (one-shot `manage.py sync_catalog`,
+        # onboarding) still gets a ceiling rather than an unbounded one.
+        self._wait_budget = (
+            wait_budget if wait_budget is not None else ThrottleWaitBudget.from_settings()
         )
         # Injected client for tests (pytest-httpx). Real callers leave this
         # None — we build a session on first use.
@@ -260,9 +670,16 @@ class CatalogHttpClient:
         """
         rows = self._fetch_all(
             "internal/catalog/salon-services/",
-            params={"tenant": tenant_id},
+            # page_size=100 — see PAGE_SIZE note on the class. Omitting it
+            # here (until DRF-1595) meant this walk ran at Ayla's PAGE_SIZE=20
+            # default, i.e. five requests where one would do, against a quota
+            # that turns out to be the anonymous one.
+            params={"tenant": tenant_id, "page_size": _PAGE_SIZE},
         )
-        return [_parse_salon_service(row) for row in rows]
+        dtos, _failed = _parse_rows(
+            rows, _parse_salon_service, path="internal/catalog/salon-services/"
+        )
+        return dtos
 
     def fetch_specialists(self, *, tenant_id: str) -> list[CatalogSpecialistDTO]:
         """Specialists for one tenant (→ ``CatalogMaster``) — S3B masters mirror.
@@ -283,9 +700,11 @@ class CatalogHttpClient:
         """
         rows = self._fetch_all(
             "internal/specialists/",
-            params={"tenant": tenant_id},
+            # page_size=100 — see PAGE_SIZE note on the class (DRF-1595).
+            params={"tenant": tenant_id, "page_size": _PAGE_SIZE},
         )
-        return [_parse_specialist(row) for row in rows]
+        dtos, _failed = _parse_rows(rows, _parse_specialist, path="internal/specialists/")
+        return dtos
 
     def fetch_specialist_services(self, *, tenant_id: str) -> EdgeSnapshot:
         """Bookable master↔service edges for one tenant (→ ``MasterService``).
@@ -308,16 +727,111 @@ class CatalogHttpClient:
             # tie or a concurrent insert between page fetches can drop a row
             # from the snapshot, which would read as "deleted upstream".
             # Fewer pages ⇒ fewer seams where that can happen.
-            params={"tenant": tenant_id, "page_size": 100},
+            params={"tenant": tenant_id, "page_size": _PAGE_SIZE},
+        )
+        edges, failed = _parse_rows(
+            rows, _parse_specialist_service, path="internal/catalog/specialist-services/"
         )
         return EdgeSnapshot(
-            edges=[_parse_specialist_service(row) for row in rows],
-            complete=complete,
+            edges=edges,
+            # An edge this side could not read is not an edge upstream deleted.
+            # Reconciliation deletes on absence, so a dropped row must downgrade
+            # the run to additive-only exactly as a shifted page window does --
+            # otherwise skipping one malformed edge would unbook a real master.
+            complete=complete and failed == 0,
         )
 
     # ------------------------------------------------------------------
     # Plumbing
     # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # Provisioning (DRF-1525)
+    # ------------------------------------------------------------------
+
+    def ensure_tenant(self, *, slug: str, name: str, city: str = "") -> EnsuredTenantDTO:
+        """Салон по slug в каталоге: найти или завести, вернуть его UUID.
+
+        ``POST /api/v1/internal/tenants/`` под ``AYLA_TENANT_PROVISIONING_TOKEN``
+        (не под общим Bearer — см. ``_provisioning_token``). Идемпотентно
+        по slug на стороне каталога: 201 завёл / 200 уже был.
+
+        Без ретраев, кроме тех, что и так внутри ``httpx``: это не выборка,
+        которую можно повторить бесплатно, а действие, и повторять его
+        вслепую после таймаута значило бы не знать, случилось ли оно.
+        Каталог идемпотентен, так что оператор повторит нажатием сам.
+
+        Исходы по имени: :class:`CatalogProvisioningTokenMissing` (у нас
+        пусто), :class:`CatalogProvisioningRefused` (403 — пусто или не
+        совпадает у них), :class:`CatalogSlugTaken` (409),
+        :class:`CatalogClientError` (прочие 4xx),
+        :class:`CatalogTransportError` (сеть / 5xx / кривой ответ).
+        """
+        token = (
+            self._provisioning_token
+            if self._provisioning_token is not None
+            else getattr(settings, "AYLA_TENANT_PROVISIONING_TOKEN", "")
+        )
+        if not token:
+            raise CatalogProvisioningTokenMissing(
+                "AYLA_TENANT_PROVISIONING_TOKEN not configured on the bot side"
+            )
+        try:
+            url = AylaUrlBuilder(self._base_url).build("/internal/tenants/")
+        except AylaUrlError as exc:
+            raise CatalogTransportError(f"invalid AYLA_BASE_URL: {exc}") from exc
+
+        try:
+            response = self._client().post(
+                url,
+                json={"slug": slug, "name": name, "city": city or ""},
+                headers=with_request_id(
+                    {
+                        "Authorization": f"Bearer {token}",
+                        "Accept": "application/json",
+                    }
+                ),
+                timeout=self._timeout,
+            )
+        except httpx.HTTPError as exc:
+            raise CatalogTransportError(
+                f"Ayla tenants: transport failure on {url}: {exc.__class__.__name__}"
+            ) from exc
+
+        if response.status_code in (401, 403):
+            raise CatalogProvisioningRefused(
+                f"Ayla tenants: provisioning refused with HTTP {response.status_code}"
+            )
+        if response.status_code == 409:
+            details = _json_or_empty(response).get("error", {}).get("details", {}) or {}
+            raise CatalogSlugTaken(
+                f"Ayla tenants: slug {slug!r} taken by {details.get('existing_name')!r}",
+                slug=slug,
+                existing_name=str(details.get("existing_name") or ""),
+                requested_name=str(details.get("requested_name") or name),
+            )
+        if 400 <= response.status_code < 500:
+            raise CatalogClientError(
+                f"Ayla tenants 4xx: HTTP {response.status_code} body={response.text[:200]!r}"
+            )
+        if response.status_code >= 500:
+            raise CatalogTransportError(f"Ayla tenants: HTTP {response.status_code}")
+
+        data = _json_or_empty(response).get("data")
+        if not isinstance(data, dict):
+            raise CatalogTransportError("Ayla tenants: response without data")
+        try:
+            tenant_id = uuid.UUID(str(data["id"]))
+        except (KeyError, ValueError) as exc:
+            raise CatalogTransportError("Ayla tenants: response without a UUID id") from exc
+        return EnsuredTenantDTO(
+            id=tenant_id,
+            slug=str(data.get("slug") or slug),
+            name=str(data.get("name") or name),
+            city=str(data["city"]) if data.get("city") else None,
+            is_active=bool(data.get("is_active", True)),
+            created=response.status_code == 201,
+        )
 
     def _fetch_all(self, path: str, *, params: dict[str, Any]) -> list[dict[str, Any]]:
         """Walk the pagination chain. Returns a flat list of raw row dicts."""
@@ -384,10 +898,12 @@ class CatalogHttpClient:
                 response = client.get(
                     url,
                     params=params,
-                    headers={
-                        "Authorization": f"Bearer {self._token}",
-                        "Accept": "application/json",
-                    },
+                    headers=with_request_id(
+                        {
+                            "Authorization": f"Bearer {self._token}",
+                            "Accept": "application/json",
+                        }
+                    ),
                     timeout=self._timeout,
                 )
                 if response.status_code in (401, 403):
@@ -395,6 +911,13 @@ class CatalogHttpClient:
                         f"Ayla catalog auth failed: HTTP {response.status_code} "
                         f"(token prefix={self._token[:4]!r}…)"
                     )
+                # 429 is checked BEFORE the generic 4xx branch below, and the
+                # order is the whole fix (DRF-1595). It used to fall through to
+                # that branch, which raises terminally — so the one 4xx that
+                # tells us how to succeed was the one we threw away.
+                if response.status_code == 429:
+                    self._wait_for_throttle(url, response, attempt=attempt, attempts=attempts)
+                    continue
                 if 400 <= response.status_code < 500:
                     raise CatalogClientError(
                         f"Ayla catalog 4xx: HTTP {response.status_code} url={url} "
@@ -406,6 +929,8 @@ class CatalogHttpClient:
             except CatalogAuthError:
                 raise
             except CatalogClientError:
+                raise
+            except CatalogThrottledError:
                 raise
             except (httpx.HTTPError, httpx.HTTPStatusError) as exc:
                 last_exc = exc
@@ -424,10 +949,588 @@ class CatalogHttpClient:
             f"Ayla catalog: exhausted {attempts} retries on {url}"
         ) from last_exc
 
+    def _wait_for_throttle(
+        self, url: str, response: httpx.Response, *, attempt: int, attempts: int
+    ) -> None:
+        """Sleep off one ``429``, or raise :class:`CatalogThrottledError`.
+
+        Returns normally only when the caller should retry immediately after
+        the sleep. Two ways it refuses instead, each a different fact:
+
+        * this was the last attempt — Ayla is still closed and we are out of
+          tries (``budget_exhausted=False``);
+        * the run's wait budget will not cover what Ayla asked for — we are
+          out of *permission* to wait (``budget_exhausted=True``, which the
+          beat reads to stand down for the rest of the cycle).
+
+        Both surface as the same exception type because both mean "this salon
+        did not sync and it is not the salon's fault". Neither is a
+        :class:`CatalogClientError` — see that class for why the distinction
+        has to survive as far as the caller.
+        """
+        wait = _throttle_wait_seconds(response)
+        if wait is None:
+            # Ayla returned 429 without saying when to come back. We are not
+            # entitled to invent a number, so fall back to the same backoff
+            # ladder a 5xx would get — cheap, and if it is still closed the
+            # next pass hits the "out of tries" branch above with the truth.
+            wait = _BACKOFF_SECONDS[min(attempt, len(_BACKOFF_SECONDS) - 1)]
+        if attempt == attempts - 1:
+            raise CatalogThrottledError(
+                f"Ayla catalog throttled: HTTP 429 url={url} — still limited after "
+                f"{attempts} attempts (last wait_seconds={wait})",
+                wait_seconds=wait,
+            )
+        if not self._wait_budget.consume(wait):
+            raise CatalogThrottledError(
+                f"Ayla catalog throttled: HTTP 429 url={url} — asked to wait {wait}s, "
+                f"run budget has {self._wait_budget.remaining_seconds}s of "
+                f"{self._wait_budget.total_seconds}s left",
+                wait_seconds=wait,
+                budget_exhausted=True,
+            )
+        logger.warning(
+            "catalog.http.throttled attempt=%s wait_seconds=%s budget_remaining=%s url=%s",
+            attempt + 1,
+            wait,
+            self._wait_budget.remaining_seconds,
+            url,
+        )
+        time.sleep(wait)
+
     def _client(self) -> httpx.Client:
         if self._http is None:
             self._http = httpx.Client(timeout=self._timeout)
         return self._http
+
+    def link_salon_admin(
+        self,
+        *,
+        tenant_slug: str,
+        external_user_id: str,
+        actor: str,
+        correlation_id: str,
+        idempotency_key: str,
+    ) -> LinkedSalonAdminDTO:
+        """Свежий администратор салона в каталоге + связь с MAX-личностью (DRF-2085).
+
+        ``POST /api/v1/internal/tenants/<slug>/salon-admins/`` под
+        ``AYLA_SALON_ADMIN_LINK_TOKEN`` — не под общим Bearer и не под
+        provisioning-токеном: у каталога это ручка ОДНОЙ силы со своим
+        сторожем (``IsSalonAdminLinkBearer``).
+
+        Без ретраев: это действие, и повтор вслепую после таймаута значил
+        бы не знать, случилось ли оно. Каталог идемпотентен по
+        ``idempotency_key`` — вызывающий повторяет с тем же ключом.
+
+        Исходы по имени: :class:`CatalogAdminLinkTokenMissing` (у нас пусто),
+        :class:`CatalogAdminLinkRefused` (401/403/404/409/429/500 с
+        причиной), :class:`CatalogClientError` (прочие 4xx),
+        :class:`CatalogTransportError` (сеть / 5xx без причины / кривой
+        ответ). Секрет в сообщения исключений и в лог не попадает.
+        """
+        token = (
+            self._salon_admin_link_token
+            if self._salon_admin_link_token is not None
+            else getattr(settings, "AYLA_SALON_ADMIN_LINK_TOKEN", "")
+        )
+        if not token:
+            raise CatalogAdminLinkTokenMissing(
+                "AYLA_SALON_ADMIN_LINK_TOKEN not configured on the bot side"
+            )
+        try:
+            url = AylaUrlBuilder(self._base_url).build(
+                f"/internal/tenants/{tenant_slug}/salon-admins/"
+            )
+        except AylaUrlError as exc:
+            raise CatalogTransportError(f"invalid AYLA_BASE_URL: {exc}") from exc
+
+        try:
+            response = self._client().post(
+                url,
+                json={
+                    "external_user_id": external_user_id,
+                    "actor": actor,
+                    "correlation_id": correlation_id,
+                    "idempotency_key": idempotency_key,
+                },
+                headers=with_request_id(
+                    {
+                        "Authorization": f"Bearer {token}",
+                        "Accept": "application/json",
+                    }
+                ),
+                # Короче общего таймаута синхронизации: вызывающий держит
+                # строку приглашения под блокировкой, пока ждёт ответа.
+                timeout=min(float(self._timeout), 10.0),
+            )
+        except httpx.HTTPError as exc:
+            raise CatalogTransportError(
+                f"Ayla salon-admins: transport failure on {url}: {exc.__class__.__name__}"
+            ) from exc
+
+        if response.status_code in (401, 403):
+            raise CatalogAdminLinkRefused(
+                f"Ayla salon-admins: credential refused with HTTP {response.status_code}",
+                reason="credential_refused",
+                status_code=response.status_code,
+            )
+        if response.status_code == 429:
+            raise CatalogAdminLinkRefused(
+                "Ayla salon-admins: rate limited",
+                reason="rate_limited",
+                status_code=429,
+            )
+        if response.status_code in (404, 409, 500):
+            details = _json_or_empty(response).get("error", {}).get("details", {}) or {}
+            reason = str(details.get("reason") or "")
+            if reason:
+                raise CatalogAdminLinkRefused(
+                    f"Ayla salon-admins: refused with HTTP {response.status_code} reason={reason}",
+                    reason=reason,
+                    status_code=response.status_code,
+                )
+        if 400 <= response.status_code < 500:
+            raise CatalogClientError(
+                f"Ayla salon-admins 4xx: HTTP {response.status_code} body={response.text[:200]!r}"
+            )
+        if response.status_code >= 500:
+            raise CatalogTransportError(f"Ayla salon-admins: HTTP {response.status_code}")
+
+        data = _json_or_empty(response).get("data")
+        if not isinstance(data, dict):
+            raise CatalogTransportError("Ayla salon-admins: response without data")
+        try:
+            return LinkedSalonAdminDTO(
+                tenant_id=uuid.UUID(str(data["tenant_id"])),
+                ayla_user_id=uuid.UUID(str(data["ayla_user_id"])),
+                relationship_id=uuid.UUID(str(data["relationship_id"])),
+                created=response.status_code == 201,
+            )
+        except (KeyError, ValueError) as exc:
+            raise CatalogTransportError(
+                "Ayla salon-admins: response without the three ids"
+            ) from exc
+
+    def link_specialist_identity(
+        self,
+        *,
+        specialist_id: Any,
+        external_user_id: str,
+        actor: str,
+        correlation_id: str,
+        idempotency_key: str,
+    ) -> LinkedSpecialistIdentityDTO:
+        """Личность мастера, принявшего приглашение, — связь в каталоге (DRF-2442).
+
+        ``POST /api/v1/internal/specialists/<uuid>/identity/`` под
+        ``AYLA_SPECIALIST_IDENTITY_LINK_TOKEN`` — своя сила со своим сторожем на
+        стороне каталога (``IsSpecialistIdentityLinkBearer``): ни общий Bearer,
+        ни provisioning-токены, ни секрет ``salon-admins`` её не открывают.
+
+        Без ретраев: это действие, и повтор вслепую после таймаута значил бы не
+        знать, случилось ли оно. Каталог идемпотентен по ``idempotency_key`` и
+        по состоянию — вызывающий повторяет с тем же ключом.
+
+        Исходы по имени: :class:`CatalogSpecialistIdentityTokenMissing` (у нас
+        пусто), :class:`CatalogSpecialistIdentityRefused` (401/403/404/409/429/500
+        с причиной), :class:`CatalogClientError` (прочие 4xx),
+        :class:`CatalogTransportError` (сеть / 5xx без причины / кривой ответ).
+        Секрет в сообщения исключений и в лог не попадает.
+        """
+        token = (
+            self._specialist_identity_link_token
+            if self._specialist_identity_link_token is not None
+            else getattr(settings, "AYLA_SPECIALIST_IDENTITY_LINK_TOKEN", "")
+        )
+        if not token:
+            raise CatalogSpecialistIdentityTokenMissing(
+                "AYLA_SPECIALIST_IDENTITY_LINK_TOKEN not configured on the bot side"
+            )
+        try:
+            url = AylaUrlBuilder(self._base_url).build(
+                f"/internal/specialists/{specialist_id}/identity/"
+            )
+        except AylaUrlError as exc:
+            raise CatalogTransportError(f"invalid AYLA_BASE_URL: {exc}") from exc
+
+        try:
+            response = self._client().post(
+                url,
+                json={
+                    "external_user_id": external_user_id,
+                    "actor": actor,
+                    "correlation_id": correlation_id,
+                    "idempotency_key": idempotency_key,
+                },
+                headers=with_request_id(
+                    {
+                        "Authorization": f"Bearer {token}",
+                        "Accept": "application/json",
+                    }
+                ),
+                # Короче общего таймаута: вызывающий держит человека на экране
+                # приёма приглашения, пока ждёт ответа.
+                timeout=min(float(self._timeout), 10.0),
+            )
+        except httpx.HTTPError as exc:
+            raise CatalogTransportError(
+                f"Ayla specialist-identity: transport failure on {url}: {exc.__class__.__name__}"
+            ) from exc
+
+        if response.status_code in (401, 403):
+            raise CatalogSpecialistIdentityRefused(
+                f"Ayla specialist-identity: credential refused with HTTP {response.status_code}",
+                reason="credential_refused",
+                status_code=response.status_code,
+            )
+        if response.status_code == 429:
+            raise CatalogSpecialistIdentityRefused(
+                "Ayla specialist-identity: rate limited",
+                reason="rate_limited",
+                status_code=429,
+            )
+        if response.status_code in (400, 404, 409, 500):
+            details = _json_or_empty(response).get("error", {}).get("details", {}) or {}
+            reason = str(details.get("reason") or "")
+            if reason:
+                raise CatalogSpecialistIdentityRefused(
+                    f"Ayla specialist-identity: refused with HTTP {response.status_code} "
+                    f"reason={reason}",
+                    reason=reason,
+                    status_code=response.status_code,
+                )
+        if 400 <= response.status_code < 500:
+            raise CatalogClientError(
+                f"Ayla specialist-identity 4xx: HTTP {response.status_code} "
+                f"body={response.text[:200]!r}"
+            )
+        if response.status_code >= 500:
+            raise CatalogTransportError(f"Ayla specialist-identity: HTTP {response.status_code}")
+
+        data = _json_or_empty(response).get("data")
+        if not isinstance(data, dict):
+            raise CatalogTransportError("Ayla specialist-identity: response without data")
+        try:
+            return LinkedSpecialistIdentityDTO(
+                specialist_id=uuid.UUID(str(data["specialist_id"])),
+                ayla_user_id=uuid.UUID(str(data["ayla_user_id"])),
+                created=response.status_code == 201,
+            )
+        except (KeyError, ValueError) as exc:
+            raise CatalogTransportError(
+                "Ayla specialist-identity: response without the two ids"
+            ) from exc
+
+    def fetch_salon_readiness(
+        self,
+        *,
+        tenant_slug: str,
+        actor_external_id: str,
+    ) -> SalonReadinessDTO:
+        """Салонная готовность поимённо, как её видит каталог (DRF-2117).
+
+        ``GET /api/v1/internal/salons/<slug>/readiness/`` под общим Bearer
+        + ``X-External-User-ID`` владельца / администратора, от чьего имени
+        салон читает (та же пара, что на ``/tenants/me/…``, OD-B5-1):
+        каталог подтверждает slug по TUR ``admin`` актора, чужой салон —
+        404 без подтверждения существования.
+
+        Чтение без ретраев по 4xx и с одной попыткой по сети: ответ идёт
+        человеку на кнопку, и ждать три бэкоффа он не будет; отказ сети —
+        :class:`CatalogTransportError`, и вызывающий говорит «не удалось
+        проверить», а не «готов».
+        """
+        if not self._token:
+            raise CatalogNotConfigured("AYLA_INTERNAL_API_TOKEN not configured on the bot side")
+        try:
+            url = AylaUrlBuilder(self._base_url).build(f"/internal/salons/{tenant_slug}/readiness/")
+        except AylaUrlError as exc:
+            raise CatalogNotConfigured(f"invalid AYLA_BASE_URL: {exc}") from exc
+
+        try:
+            response = self._client().get(
+                url,
+                headers=with_request_id(
+                    {
+                        "Authorization": f"Bearer {self._token}",
+                        "X-External-User-ID": actor_external_id,
+                        "Accept": "application/json",
+                    }
+                ),
+                timeout=min(float(self._timeout), 15.0),
+            )
+        except httpx.HTTPError as exc:
+            raise CatalogTransportError(
+                f"Ayla salon readiness: transport failure on {url}: {exc.__class__.__name__}"
+            ) from exc
+
+        if response.status_code in (401, 403):
+            raise CatalogReadinessRefused(
+                f"Ayla salon readiness: credential refused with HTTP {response.status_code}",
+                reason="credential_refused",
+                status_code=response.status_code,
+            )
+        if response.status_code == 404:
+            raise CatalogReadinessRefused(
+                "Ayla salon readiness: salon not confirmed for this actor (HTTP 404)",
+                reason="salon_not_confirmed",
+                status_code=404,
+            )
+        if 400 <= response.status_code < 500:
+            raise CatalogClientError(
+                f"Ayla salon readiness 4xx: HTTP {response.status_code} body={response.text[:200]!r}"
+            )
+        if response.status_code >= 500:
+            raise CatalogTransportError(f"Ayla salon readiness: HTTP {response.status_code}")
+
+        data = _json_or_empty(response).get("data")
+        if not isinstance(data, dict):
+            raise CatalogTransportError("Ayla salon readiness: response without data")
+        try:
+            masters = tuple(
+                SalonReadinessMasterDTO(
+                    id=str(row["id"]),
+                    user_id=(str(row["user_id"]) if row.get("user_id") else None),
+                    name=str(row.get("name") or ""),
+                    checks={str(k): str(v) for k, v in dict(row.get("checks") or {}).items()},
+                    problems=tuple(
+                        {"code": str(p.get("code") or ""), "text": str(p.get("text") or "")}
+                        for p in list(row.get("problems") or [])
+                    ),
+                )
+                for row in list(data.get("masters") or [])
+            )
+            salon_problems = tuple(
+                {"code": str(p.get("code") or ""), "text": str(p.get("text") or "")}
+                for p in list(data.get("problems") or [])
+                if p.get("master") is None
+            )
+            return SalonReadinessDTO(
+                ready=bool(data["ready"]),
+                checked_at=str(data.get("checked_at") or ""),
+                horizon_days=int(data.get("horizon_days") or 0),
+                masters=masters,
+                salon_problems=salon_problems,
+                limits=tuple(str(x) for x in list(data.get("limits") or [])),
+            )
+        except (KeyError, TypeError, ValueError, AttributeError) as exc:
+            raise CatalogTransportError(
+                "Ayla salon readiness: response shape not understood"
+            ) from exc
+
+    def provision_solo_workspace(
+        self,
+        *,
+        tenant_id: uuid.UUID | str,
+        slug: str,
+        name: str,
+        city: str,
+        external_user_id: str,
+        display_name: str,
+    ) -> ProvisionedSoloWorkspaceDTO:
+        """Каталожный workspace соло-мастера: Tenant с тем же UUID + DRAFT-профиль (DRF-1830).
+
+        ``POST /api/v1/internal/tenants/solo-workspaces/`` под
+        ``AYLA_TENANT_PROVISIONING_TOKEN`` — тот же секрет и та же сторона
+        ответственности, что у :meth:`ensure_tenant`. Идемпотентно на
+        стороне каталога по ``external_user_id``: 201 завёл / 200 уже был.
+
+        Без ретраев сверх ``httpx``: это действие, а не выборка; повтор
+        делает вызывающий (регистрация, оператор) по записанной причине.
+
+        Исходы по имени: :class:`CatalogProvisioningTokenMissing`,
+        :class:`CatalogProvisioningRefused` (403), :class:`CatalogSoloProvisioningRefused`
+        (409 с ``reason``), :class:`CatalogClientError` (прочие 4xx),
+        :class:`CatalogTransportError` (сеть / 5xx / кривой ответ).
+        """
+        token = (
+            self._provisioning_token
+            if self._provisioning_token is not None
+            else getattr(settings, "AYLA_TENANT_PROVISIONING_TOKEN", "")
+        )
+        if not token:
+            raise CatalogProvisioningTokenMissing(
+                "AYLA_TENANT_PROVISIONING_TOKEN not configured on the bot side"
+            )
+        try:
+            url = AylaUrlBuilder(self._base_url).build("/internal/tenants/solo-workspaces/")
+        except AylaUrlError as exc:
+            raise CatalogTransportError(f"invalid AYLA_BASE_URL: {exc}") from exc
+
+        try:
+            response = self._client().post(
+                url,
+                json={
+                    "tenant_id": str(tenant_id),
+                    "slug": slug,
+                    "name": name,
+                    "city": city or "",
+                    "external_user_id": external_user_id,
+                    "display_name": display_name,
+                },
+                headers=with_request_id(
+                    {
+                        "Authorization": f"Bearer {token}",
+                        "Accept": "application/json",
+                    }
+                ),
+                timeout=self._timeout,
+            )
+        except httpx.HTTPError as exc:
+            raise CatalogTransportError(
+                f"Ayla solo-workspaces: transport failure on {url}: {exc.__class__.__name__}"
+            ) from exc
+
+        if response.status_code in (401, 403):
+            raise CatalogProvisioningRefused(
+                f"Ayla solo-workspaces: provisioning refused with HTTP {response.status_code}"
+            )
+        if response.status_code == 409:
+            details = _json_or_empty(response).get("error", {}).get("details", {}) or {}
+            reason = str(details.get("reason") or "conflict")
+            raise CatalogSoloProvisioningRefused(
+                f"Ayla solo-workspaces: refused ({reason})", reason=reason
+            )
+        if 400 <= response.status_code < 500:
+            raise CatalogClientError(
+                f"Ayla solo-workspaces 4xx: HTTP {response.status_code} "
+                f"body={response.text[:200]!r}"
+            )
+        if response.status_code >= 500:
+            raise CatalogTransportError(f"Ayla solo-workspaces: HTTP {response.status_code}")
+
+        data = _json_or_empty(response).get("data")
+        if not isinstance(data, dict):
+            raise CatalogTransportError("Ayla solo-workspaces: response without data")
+        try:
+            return ProvisionedSoloWorkspaceDTO(
+                tenant_id=uuid.UUID(str(data["tenant_id"])),
+                slug=str(data.get("slug") or slug),
+                specialist_id=uuid.UUID(str(data["specialist_id"])),
+                user_id=uuid.UUID(str(data["user_id"])),
+                status=str(data.get("status") or ""),
+                created=response.status_code == 201,
+            )
+        except (KeyError, ValueError) as exc:
+            raise CatalogTransportError(
+                "Ayla solo-workspaces: response without tenant_id/specialist_id/user_id"
+            ) from exc
+
+    def provision_salon_specialist(
+        self,
+        *,
+        tenant_id: uuid.UUID | str,
+        external_user_id: str,
+        display_name: str,
+    ) -> ProvisionedSalonSpecialistDTO:
+        """Специалист в УЖЕ существующем салоне каталога (DRF-2379).
+
+        ``POST /api/v1/internal/tenants/salon-specialists/`` под
+        ``AYLA_TENANT_PROVISIONING_TOKEN`` — тот же секрет и та же сторона
+        ответственности, что у :meth:`provision_solo_workspace`. Отличие по
+        существу: та ручка заводит **тенант целиком**, а у салона он уже
+        есть; здесь каталог тенант ищет, и его отсутствие — отказ.
+
+        ``external_user_id`` — **ключ идемпотентности провижининга, не
+        личность**. Вызывающий шлёт ``bot:master:<CatalogMaster.id>``: на
+        моменте заведения мастера MAX-id ещё нет (приглашение не принято), а
+        ключ строки зеркала есть и не меняется. Каталог кладёт его в
+        ``provisioned_external_user_id`` как провенанс — «для какой строки
+        бота это заведено», — и резолверы личности его не читают. Личность
+        приезжает позже и отдельно, через ``linked_bot_user`` (ADR-0008).
+
+        Повтор с тем же ключом возвращает **того же** специалиста (200
+        вместо 201) и ничего не создаёт: второй специалист в салоне был бы
+        не лишней строкой, а вторым человеком в расписании.
+
+        Без ретраев сверх ``httpx``: это действие, а не выборка. Повтор
+        делает подметальщик по записанной причине.
+
+        Исходы по имени: :class:`CatalogProvisioningTokenMissing`,
+        :class:`CatalogProvisioningRefused` (403),
+        :class:`CatalogSalonSpecialistDoorAbsent` (404 без нашего тела —
+        наша половина ещё не выложена),
+        :class:`CatalogSalonSpecialistRefused` (404 ``tenant_not_found`` и
+        409 с ``reason``), :class:`CatalogClientError` (прочие 4xx),
+        :class:`CatalogTransportError` (сеть / 5xx / кривой ответ).
+        """
+        token = (
+            self._provisioning_token
+            if self._provisioning_token is not None
+            else getattr(settings, "AYLA_TENANT_PROVISIONING_TOKEN", "")
+        )
+        if not token:
+            raise CatalogProvisioningTokenMissing(
+                "AYLA_TENANT_PROVISIONING_TOKEN not configured on the bot side"
+            )
+        try:
+            url = AylaUrlBuilder(self._base_url).build("/internal/tenants/salon-specialists/")
+        except AylaUrlError as exc:
+            raise CatalogTransportError(f"invalid AYLA_BASE_URL: {exc}") from exc
+
+        try:
+            response = self._client().post(
+                url,
+                json={
+                    "tenant_id": str(tenant_id),
+                    "external_user_id": external_user_id,
+                    "display_name": display_name,
+                },
+                headers=with_request_id(
+                    {
+                        "Authorization": f"Bearer {token}",
+                        "Accept": "application/json",
+                    }
+                ),
+                timeout=self._timeout,
+            )
+        except httpx.HTTPError as exc:
+            raise CatalogTransportError(
+                f"Ayla salon-specialists: transport failure on {url}: {exc.__class__.__name__}"
+            ) from exc
+
+        if response.status_code in (401, 403):
+            raise CatalogProvisioningRefused(
+                f"Ayla salon-specialists: provisioning refused with HTTP {response.status_code}"
+            )
+        if response.status_code in (404, 409):
+            reason = _salon_specialist_reason(response)
+            if reason is None:
+                # 404 без нашего тела — маршрутизатор каталога, а не каталог.
+                # «Ручки нет» и «салона нет» приходят с одного адреса и
+                # означают противоположное; слитые в одно имя, они дают
+                # журнал, полный «салон не найден» на салонах, которые есть.
+                raise CatalogSalonSpecialistDoorAbsent(
+                    f"Ayla salon-specialists: no such route on {url} "
+                    f"(HTTP {response.status_code} without an error body)"
+                )
+            raise CatalogSalonSpecialistRefused(
+                f"Ayla salon-specialists: refused ({reason})", reason=reason
+            )
+        if 400 <= response.status_code < 500:
+            raise CatalogClientError(
+                f"Ayla salon-specialists 4xx: HTTP {response.status_code} "
+                f"body={response.text[:200]!r}"
+            )
+        if response.status_code >= 500:
+            raise CatalogTransportError(f"Ayla salon-specialists: HTTP {response.status_code}")
+
+        data = _json_or_empty(response).get("data")
+        if not isinstance(data, dict):
+            raise CatalogTransportError("Ayla salon-specialists: response without data")
+        try:
+            return ProvisionedSalonSpecialistDTO(
+                tenant_id=uuid.UUID(str(data["tenant_id"])),
+                specialist_id=uuid.UUID(str(data["specialist_id"])),
+                user_id=uuid.UUID(str(data["user_id"])),
+                status=str(data.get("status") or ""),
+                created=response.status_code == 201,
+            )
+        except (KeyError, ValueError) as exc:
+            raise CatalogTransportError(
+                "Ayla salon-specialists: response without tenant_id/specialist_id/user_id"
+            ) from exc
 
     def close(self) -> None:
         if self._http is not None:
@@ -442,13 +1545,184 @@ class CatalogHttpClient:
 
 
 # ---------------------------------------------------------------------------
+# Throttle parsing
+# ---------------------------------------------------------------------------
+
+
+def _json_or_empty(response: httpx.Response) -> dict[str, Any]:
+    try:
+        payload = response.json()
+    except ValueError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _salon_specialist_reason(response: httpx.Response) -> str | None:
+    """Машинная причина отказа каталога — или ``None``, когда её нет (DRF-2379).
+
+    ``None`` значит «ответ пришёл не от нашей ручки»: маршрутизатор каталога
+    отдаёт 404 без ``error.details.reason``, и это **наша невыложенная
+    половина**, а не отказ каталога. Разбор вынесен сюда, чтобы оба 404
+    читались в одном месте и их нельзя было случайно слить.
+    """
+    error = _json_or_empty(response).get("error")
+    if not isinstance(error, dict):
+        return None
+    details = error.get("details")
+    if not isinstance(details, dict):
+        return None
+    reason = details.get("reason")
+    return str(reason) if reason else None
+
+
+def _coerce_positive_seconds(raw: Any) -> float | None:
+    """``raw`` → a usable sleep duration, or ``None``.
+
+    Rejects the unusable rather than clamping it: a negative or
+    unparseable ``wait_seconds`` is upstream telling us nothing, and
+    silently turning nothing into ``0`` would spin the retry loop against a
+    limiter that is still closed.
+    """
+    if isinstance(raw, bool) or raw is None:
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if value <= 0 or value != value or value == float("inf"):
+        return None
+    return value
+
+
+def _throttle_wait_seconds(response: httpx.Response) -> float | None:
+    """How long Ayla asked us to wait, per its 429 envelope (DRF-1595).
+
+    The contract (Ayla ``djangoProject/exception_handler.py``, DRF
+    ``Throttled`` branch)::
+
+        {"error": {"code": "THROTTLED", "message": "Expected available in
+         54 seconds", "details": {"wait_seconds": 54}}}
+
+    ``details`` is omitted entirely when DRF's ``Throttled.wait`` is falsy,
+    so its absence is normal and means "unknown", not "zero".
+
+    ``Retry-After`` is read as a fallback because it is the standard header
+    for this and costs three lines — only its numeric form, since the
+    HTTP-date form would need a clock we do not trust more than the body we
+    already have.
+    """
+    try:
+        payload = response.json()
+    except Exception:  # noqa: BLE001 — a 429 with a non-JSON body is still a 429
+        payload = None
+    if isinstance(payload, dict):
+        error = payload.get("error")
+        if isinstance(error, dict):
+            details = error.get("details")
+            if isinstance(details, dict):
+                seconds = _coerce_positive_seconds(details.get("wait_seconds"))
+                if seconds is not None:
+                    return seconds
+    return _coerce_positive_seconds(response.headers.get("Retry-After"))
+
+
+# ---------------------------------------------------------------------------
 # DTO parsers
 # ---------------------------------------------------------------------------
+
+
+_RowT = TypeVar("_RowT")
+
+
+def _parse_rows(
+    rows: list[dict[str, Any]],
+    parser: Callable[[dict[str, Any]], _RowT],
+    *,
+    path: str,
+) -> tuple[list[_RowT], int]:
+    """Parse a page-walk row by row. Returns ``(parsed, failed_count)``.
+
+    ### The defect this exists for (DRF-1494)
+
+    The three fetchers used to parse their rows in a bare list
+    comprehension. One unreadable row therefore raised out of the whole
+    fetch, and :meth:`CatalogSyncService._run_locked` turned that into
+    ``SyncResult(ran=True, error=...)``: no cursor advance, no upsert, no
+    mirror. A single upstream row with a ``base_price`` of ``"от 1500"``
+    or a ``duration_minutes`` of ``"60 мин"`` was enough to freeze an
+    entire salon's catalog -- every fifteen minutes, indefinitely, while
+    the bot went on telling clients that services it had merely failed to
+    fetch do not exist.
+
+    ### Why isolation belongs on this rung specifically
+
+    This file already isolates one level below (a malformed ``goals``
+    entry is dropped rather than failing its row -- :func:`_parse_goals`),
+    and ``apps.catalog.services.upserter`` isolates one level above (a row
+    that will not upsert is counted, not raised). Only the rung between
+    them -- parsing the row -- was all-or-nothing, so the blast radius of
+    one bad field was the whole salon rather than the field.
+
+    A dropped row is a real loss and is logged at ERROR with its id --
+    the level Sentry captures -- so the operator learns *which* row Ayla
+    is serving badly. Losing that one row is strictly better than losing
+    the hundreds beside it.
+    """
+    parsed: list[_RowT] = []
+    failed = 0
+    for row in rows:
+        try:
+            parsed.append(parser(row))
+        except Exception as exc:  # noqa: BLE001 — one bad row must not cost the rest
+            failed += 1
+            logger.error(
+                "catalog.http.row_unparseable path=%s row_id=%s exc=%s: %s",
+                path,
+                row.get("id", "?"),
+                exc.__class__.__name__,
+                exc,
+            )
+    if failed:
+        logger.error(
+            "catalog.http.rows_dropped path=%s dropped=%d of=%d — these rows stay "
+            "absent from the mirror until Ayla serves them readably.",
+            path,
+            failed,
+            len(rows),
+        )
+    return parsed, failed
 
 
 def _parse_dt(raw: str) -> datetime:
     """ISO 8601 with optional trailing ``Z`` → aware datetime."""
     return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+
+
+def _optional_str(row: dict[str, Any], key: str) -> str | None:
+    """Строка из ``row[key]`` так, чтобы ОТСУТСТВИЕ не стало ПУСТЫМ (DRF-1588).
+
+    Три исхода, и все три различимы у вызывающего:
+
+    * ключа в строке нет      → ``None``  («источник не сказал ничего»);
+    * ключ есть и это ``null``→ ``None``  (то же самое молчание, явным словом);
+    * ключ есть и это строка  → она сама, ДОСЛОВНО, включая ``""``.
+
+    Дословно — то есть без ``.strip()`` и без нормализации: ``raw`` это
+    сырой слепок чужой системы, и выводить из него что-либо, кроме того,
+    что там лежит буквально, — способ получить значение, неотличимое от
+    настоящего. Обрезкой и разбором занимается читатель, у которого есть
+    на это основание; у зеркала основания нет.
+
+    Привычное ``row.get(key) or ""`` делает ровно обратное: сворачивает
+    все три исхода в один и печатает «адреса нет» там, где верный ответ —
+    «не знаем».
+    """
+    if key not in row:
+        return None
+    value = row[key]
+    if value is None:
+        return None
+    return str(value)
 
 
 def _parse_decimal(raw: Any) -> Decimal | None:
@@ -524,19 +1798,48 @@ def _parse_salon_service(row: dict[str, Any]) -> CatalogSalonServiceDTO:
     )
 
 
+#: Причины, которые каталог называет (``services/offer_sellable.py``, DRF-1962) —
+#: один словарь с чтением ребра и отказа записи (DRF-1989).
+KNOWN_UNSELLABLE_REASONS = KNOWN_REASONS
+
+
+def _parse_sellable(row: dict[str, Any]) -> dict[str, Any]:
+    """``sellable`` / ``unsellable_reason`` ребра (DRF-1964a), fail-closed.
+
+    Ключа нет → ``sellable_key_present=False``: зеркало ничего не пишет. Ключ
+    есть → продаётся только явное ``true``; у непродаваемого ребра причина из
+    закрытого словаря, иначе ``unknown`` (ребро остаётся непродаваемым).
+    """
+    if "sellable" not in row:
+        return {"sellable": True, "unsellable_reason": None, "sellable_key_present": False}
+    if row["sellable"] is True:
+        return {"sellable": True, "unsellable_reason": None, "sellable_key_present": True}
+    reason = row.get("unsellable_reason")
+    if reason not in KNOWN_UNSELLABLE_REASONS:
+        logger.warning(
+            "catalog.parse.unsellable_reason_unknown edge=%s sellable=%r reason=%r",
+            row.get("id"),
+            row["sellable"],
+            reason,
+        )
+        reason = "unknown"
+    return {"sellable": False, "unsellable_reason": reason, "sellable_key_present": True}
+
+
 def _parse_specialist_service(row: dict[str, Any]) -> CatalogSpecialistServiceDTO:
     """Parse one bookable-edge row. Raises ``KeyError`` on a missing join key.
 
     ``id`` / ``salon_service`` / ``specialist`` are mandatory — an edge without
     them cannot be mirrored at all.
 
-    Note this raises out of ``fetch_specialist_services`` and therefore aborts
-    the whole tenant's edge batch, NOT just the offending row: parsing happens
-    before the upserter's per-row savepoints. That is deliberate — it fails
-    *safe* (nothing written, reconciliation never runs, the other two mirrors
-    still land), and a malformed join key means the snapshot can no longer be
-    trusted to prove absence, which is exactly when deleting rows is most
-    dangerous. Loud and inert beats silent and destructive.
+    Since DRF-1494 this raise is caught by :func:`_parse_rows`, which drops
+    the row and marks the snapshot ``complete=False``. The safety property
+    the previous behaviour bought — a malformed join key must never license
+    a delete — is preserved exactly: an incomplete snapshot downgrades the
+    run to additive-only, so reconciliation still cannot act on it. What
+    changes is that the edges Ayla DID serve readably now land instead of
+    being discarded alongside the one it did not. Loud and inert was better
+    than silent and destructive; loud and partial is better than both.
 
     ``updated_at`` is optional upstream; falls back to now (same policy as
     :func:`_parse_specialist`).
@@ -556,6 +1859,11 @@ def _parse_specialist_service(row: dict[str, Any]) -> CatalogSpecialistServiceDT
         resolved_requires_health_check=_parse_optional_bool(
             row.get("resolved_requires_health_check")
         ),
+        # `in`, а не `.get() is not None`: присланный `null` — это ОТВЕТ
+        # «не знаю», и он обязан отличаться от «ключа не было». Оба дают
+        # питоновский `None`, и до этой строки различить их было нечем.
+        health_check_key_present="resolved_requires_health_check" in row,
+        **_parse_sellable(row),
         raw=row,
     )
 
@@ -575,7 +1883,24 @@ def _parse_specialist(row: dict[str, Any]) -> CatalogSpecialistDTO:
         rating=_parse_decimal(row.get("rating")),
         review_count=int(row.get("reviews_count") or 0),
         is_active=bool(
-            str(row.get("status", "")).lower() == "active" and row.get("is_available", True)
+            str(row.get("status", "")).lower() == "active"
+            and row.get("is_available", True)
+            # DRF-1845 — «не принимаю записи». Absent key = an older catalog
+            # that never sent it = today's behaviour, not a pause.
+            and row.get("is_booking_enabled", True)
         ),
+        # DRF-1588 — ``_optional_str``/``_parse_decimal``, а не ``or ""`` /
+        # ``or 0``: последние стирают ровно ту разницу, ради которой поле
+        # заводилось. ``row.get("address") or ""`` превратил бы отсутствие
+        # ключа в пустой адрес, а ``or 0`` — отсутствие координаты в точку
+        # в Гвинейском заливе.
+        address=_optional_str(row, "address"),
+        location_lat=_parse_decimal(row.get("location_lat")),
+        location_lng=_parse_decimal(row.get("location_lng")),
+        tenant_address=_optional_str(row, "tenant_address"),
+        # DRF-1812 — ``avatar`` каталога: ImageField сериализуется абсолютным
+        # URL (в контексте запроса); относительный — тоже URL, только без
+        # хоста, и подменять его здесь нечем, поэтому берётся дословно.
+        avatar_url=_optional_str(row, "avatar"),
         raw=row,
     )

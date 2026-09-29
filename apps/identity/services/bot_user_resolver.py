@@ -20,6 +20,18 @@ both call it.
 
 Resolution order:
 
+0. **The one row that carries a working role** (DRF-1755, срез 2 DRF-1705).
+   Among every row of this identity, «working» means: an active
+   ``TenantStaff`` in its tenant, or a live ``CatalogMaster`` linked to it.
+   Exactly one such row → that row, whichever bot signed. This is what
+   lets a solo master into the cabinet from the salon bot: the salon
+   bot's own tenant holds a ``customer`` row for them (their first
+   message created it), and steps 1–3 below never looked past it — the
+   fallback in step 3 needs the bot-tenant row to be ABSENT, and on the
+   solo path it is always present. Zero working rows → steps 1–3, so a
+   plain customer keeps today's answer. Two or more → DRF-1766 (salon
+   chooser); until then the oldest tenant wins deterministically, with a
+   WARNING naming all of them. See :func:`resolve_working_bot_user`.
 1. **The tenant of the bot whose token signed this initData.** A Mini App
    is opened from a bot, and the signature is the only trustworthy
    statement of which one (DRF-1061) — the URL cannot say, and the
@@ -49,6 +61,11 @@ def resolve_tenant_slug_for_init_data(verified: Any) -> str:
 
     Returns ``""`` when neither source is configured; callers then fall
     back to a cross-tenant lookup.
+
+    DRF-1785 (срез 4c, решение владельца R4 а): подпись САЛОННОГО бота → ``""``.
+    Салонный бот не принадлежит салону, и ``MAX_BOT_TENANT_SLUG`` — настройка
+    клиентского бота, а не запасной тенант для мастеров (на пилоте 15.09 —
+    ``formula-tela``).
     """
 
     bot_slug = getattr(verified, "bot_slug", "") or ""
@@ -56,21 +73,169 @@ def resolve_tenant_slug_for_init_data(verified: Any) -> str:
         # Local import: the bot registry reads settings at call time, and
         # importing it at module load would pull channels into identity's
         # import graph for every process that touches a BotUser.
-        from apps.channels.bot_registry import effective_registry, resolve_by_slug
+        from apps.channels.bot_registry import SALON_STREAM, effective_registry, resolve_by_slug
 
         entry = resolve_by_slug(bot_slug, effective_registry())
+        if entry is not None and entry.stream == SALON_STREAM:
+            return ""
         if entry is not None and entry.tenant_slug:
             return entry.tenant_slug
 
     return getattr(settings, "MAX_BOT_TENANT_SLUG", "") or ""
 
 
-def resolve_bot_user(verified: Any, *, surface: str = "miniapp") -> BotUser | None:
+#: ``X-Salon-Choice: <tenant slug>`` — the Mini App's answer to
+#: :class:`SalonChoiceRequired`, remembered client-side for the session.
+SALON_CHOICE_HEADER = "HTTP_X_SALON_CHOICE"
+
+
+class SalonChoiceRequired(Exception):
+    """This identity holds a working role in several tenants — a person must choose (DRF-1766).
+
+    Owner (DRF-1705): «выбор салона, не страж». Carries the candidate tenants
+    in a stable order (oldest first) so every surface shows the same list;
+    the answer comes back as ``X-Salon-Choice`` (Mini App) or a button tap
+    the bot remembers per identity, and is honoured ONLY when it names one
+    of these tenants — a header cannot pick a salon the person has no role in.
+    """
+
+    def __init__(self, tenants: list) -> None:
+        self.tenants = tenants
+        super().__init__("salon choice required: " + ", ".join(t.slug for t in tenants))
+
+
+def salon_choice_from(request) -> str | None:
+    """The slug named in ``X-Salon-Choice``, or ``None``. Read only; validated by the resolver."""
+
+    value = (request.META.get(SALON_CHOICE_HEADER, "") or "").strip()
+    return value or None
+
+
+def resolve_working_bot_user(
+    channel_user_id: str, *, surface: str = "miniapp", chosen_slug: str | None = None
+) -> BotUser | None:
+    """The row of this MAX identity that carries a working role, or ``None``.
+
+    «Working» is what :func:`apps.identity.services.role_resolver.resolve_role`
+    already answers for one row: any primary role above ``customer`` — an
+    active ``TenantStaff`` in the row's own tenant, or a live master card
+    linked to it (archived cards and revoked staff resolve to ``customer``
+    there, so they are not working here either). The question is asked
+    per row, in that row's own tenant, through the one reader the
+    import-boundary guard sanctions for it (MKT1: no new cross-tenant
+    catalog read outside ``apps/marketplace/``; an identity has a handful
+    of rows at most, so a query pair per row is the honest cost).
+    Soft-deleted rows are never working — a deleted account cannot be
+    somebody's staff answer.
+
+    Returns:
+
+    * ``None`` — no row, or no working row. The caller falls back to the
+      signing-bot rule; nothing about a plain customer changes.
+    * the single working row — regardless of which bot signed.
+    * with several working rows (0 identities on the pilot, 12.09.2026):
+      the one whose tenant ``chosen_slug`` names, when the caller carries a
+      choice — otherwise :class:`SalonChoiceRequired` with the candidates,
+      oldest tenant first (DRF-1766). Never a silent pick: until this slice
+      the oldest tenant won with a WARNING, which decided for the person
+      exactly what the owner ruled a person decides.
+
+    Raises:
+        SalonChoiceRequired: several working rows and no valid choice.
+    """
+
+    if not channel_user_id:
+        return None
+
+    rows = list(
+        BotUser.all_tenants.filter(
+            channel="max", channel_user_id=channel_user_id, deleted_at__isnull=True
+        ).select_related("tenant")
+    )
+    if not rows:
+        return None
+
+    # Local import: role_resolver pulls catalog/tenancy models lazily itself;
+    # importing it at module load would drag them into every process that
+    # touches a BotUser.
+    from apps.identity.services.role_resolver import resolve_role
+
+    working = [row for row in rows if resolve_role(row).primary_role != "customer"]
+    if not working:
+        return None
+    if len(working) == 1:
+        return working[0]
+
+    # The order is the tenants' — a full key, the same as the candidates are shown
+    # in: a created_at tie is broken by the tenant pk, not the row pk (DRF-1907).
+    working.sort(key=lambda row: (row.tenant.created_at, str(row.tenant.pk)))
+    if chosen_slug:
+        for row in working:
+            if row.tenant.slug == chosen_slug:
+                return row
+        # DRF-2009: внутренние ключи вместо MAX id и slug'ов (slug соло-кабинета выведен
+        # из личности человека).
+        logger.info(
+            "%s.auth.salon_choice_not_working bot_users=%s tenants=%s",
+            surface,
+            [str(row.pk) for row in working],
+            [str(row.tenant_id) for row in working],
+        )
+    logger.info(
+        "%s.auth.salon_choice_required bot_users=%s tenants=%s",
+        surface,
+        [str(row.pk) for row in working],
+        [str(row.tenant_id) for row in working],
+    )
+    raise SalonChoiceRequired([row.tenant for row in working])
+
+
+def is_staff_surface(verified: Any) -> bool:
+    """Did the SALON bot sign this initData — i.e. is this the masters' surface?
+
+    The customer surface asks «who are you as a client» and must keep
+    answering with the signing bot's tenant: a solo master booking a
+    haircut somewhere is a customer there. Only the staff surface asks
+    «which of your rows is staff». The signature is the one trustworthy
+    statement of which bot opened the Mini App (DRF-1061).
+    """
+
+    bot_slug = getattr(verified, "bot_slug", "") or ""
+    if not bot_slug:
+        return False
+    from apps.channels.bot_registry import SALON_STREAM, effective_registry, resolve_by_slug
+
+    entry = resolve_by_slug(bot_slug, effective_registry())
+    return entry is not None and entry.stream == SALON_STREAM
+
+
+def resolve_bot_user(
+    verified: Any, *, surface: str = "miniapp", chosen_slug: str | None = None
+) -> BotUser | None:
     """Find the BotUser this request belongs to, or ``None``.
+
+    Raises :class:`SalonChoiceRequired` when the identity has several
+    working rows and ``chosen_slug`` names none of them (DRF-1766).
 
     ``surface`` only labels the log line — the resolution rule is
     identical for every Mini App surface, and that is the point.
+
+    Callers are the STAFF surfaces (``master_api``, ``admin_api``), so
+    step 0 — the working row — applies unconditionally here. ``/api/v1/me``
+    serves both audiences and applies it only behind :func:`is_staff_surface`.
     """
+
+    working = resolve_working_bot_user(verified.user_id, surface=surface, chosen_slug=chosen_slug)
+    if working is not None:
+        return working
+
+    if is_staff_surface(verified):
+        # DRF-1785 (R4 а, главное окно Q1 15.09): подпись салонного бота без рабочей
+        # строки — никто. Ни тенант подписи / MAX_BOT_TENANT_SLUG, ни «последняя строка
+        # любого тенанта»: оба шага подставили бы строку, где у человека нет роли.
+        # DRF-2009: идентификатор канала в лог не пишется — только поверхность.
+        logger.info("%s.auth.salon_signature_without_working_row", surface)
+        return None
 
     tenant_slug = resolve_tenant_slug_for_init_data(verified)
 
@@ -83,13 +248,57 @@ def resolve_bot_user(verified: Any, *, surface: str = "miniapp") -> BotUser | No
         # under a different tenant and linked there. Better to answer with
         # the row we can find than to deny someone who is genuinely staff.
         logger.info(
-            "%s.auth.no_bot_user_in_bot_tenant tenant=%s channel_user_id=%s",
+            "%s.auth.no_bot_user_in_bot_tenant tenant=%s",  # DRF-2009: без MAX id
             surface,
             tenant_slug,
-            verified.user_id,
         )
 
-    return qs.select_related("tenant").order_by("-last_seen").first()
+    # DRF-1653 — `-last_seen` alone is not a total order, and the third step
+    # is the one place where that matters.
+    #
+    # `last_seen` is `auto_now=True` (apps/identity/models.py:167), so two rows
+    # touched in the same clock tick carry the identical value. On a tie
+    # Postgres returns whichever row it reaches first, and "whichever" is not
+    # stable: an `UPDATE` moves a row within the heap, so the same person, the
+    # same two rows and the same query can resolve to a different tenant on two
+    # consecutive requests. This is authentication — the answer decides whether
+    # someone is an owner or a stranger — and an answer that changes without an
+    # input changing is worse than a wrong one, because it cannot be
+    # reproduced, reported, or tested.
+    #
+    # `pk` as the tie-break makes no claim about which row is better. It claims
+    # only that the same data yields the same answer. Choosing by recency is
+    # step 3's stated rule; when recency does not distinguish, nothing here
+    # knows more, and the honest fix is determinism rather than a new
+    # preference invented at the bottom of the fallback chain.
+    return qs.select_related("tenant").order_by("-last_seen", "pk").first()
 
 
-__all__ = ["resolve_bot_user", "resolve_tenant_slug_for_init_data"]
+def person_bot_users(bot_user: BotUser):
+    """Все личности человека, чья подпись дала ``bot_user`` (DRF-2436).
+
+    Тот же аккаунт мессенджера — ``(channel, channel_user_id)`` — во всех
+    салонах: глобальный бот держит одну личность под служебным салоном,
+    переход к записи в салон T заводит ещё одну в T (``orchestrator/handoff.py``).
+    «Человек» здесь — этот аккаунт мессенджера, а не человек в Ayla: личности
+    не склеиваются, их просто читают вместе. Тем же правилом человека видит
+    Ayla: ``external_user_id_for`` = ``bot:{channel}:{id}``.
+
+    Множество выводится ТОЛЬКО из ``bot_user``, полученного из подписи; вызывающий
+    не передаёт сюда ничего из параметров запроса.
+    """
+    return BotUser.all_tenants.filter(
+        channel=bot_user.channel, channel_user_id=bot_user.channel_user_id
+    )
+
+
+__all__ = [
+    "SALON_CHOICE_HEADER",
+    "SalonChoiceRequired",
+    "is_staff_surface",
+    "person_bot_users",
+    "resolve_bot_user",
+    "resolve_tenant_slug_for_init_data",
+    "resolve_working_bot_user",
+    "salon_choice_from",
+]

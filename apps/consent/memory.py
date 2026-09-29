@@ -39,6 +39,7 @@ from typing import TYPE_CHECKING
 
 from apps.consent.models import ConsentRecord
 from apps.consent.services import has_global_consent
+from apps.identity.services.person_context_gate import person_context_access
 
 if TYPE_CHECKING:
     from apps.identity.models import BotUser
@@ -52,4 +53,9 @@ def can_store_green_memory(bot_user: "BotUser") -> bool:
     tenant-less global path (memory runs there).
     """
 
+    # Owner 11.09 §2.4 (S2-2): a SHADOW — or an UNRESOLVED — salon shell has
+    # no memory to store into, consent or not. Asked BEFORE consent so the
+    # refusal is named by the gate, not read as «no consent».
+    if person_context_access(bot_user) is not None:
+        return False
     return has_global_consent(bot_user, ConsentRecord.ConsentType.PERSONAL_DATA.value)

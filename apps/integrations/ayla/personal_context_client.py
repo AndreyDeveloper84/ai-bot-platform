@@ -57,6 +57,7 @@ import httpx
 from django.conf import settings
 
 from apps.integrations.ayla.url_builder import AylaUrlBuilder, AylaUrlError
+from apps.integrations.ayla.request_id import with_request_id
 
 logger = logging.getLogger(__name__)
 
@@ -180,15 +181,20 @@ class PersonalContextHttpClient:
     # Public API (contract §1–§5)
     # ------------------------------------------------------------------
 
-    def get_context(self, *, ayla_user_id: str) -> DeclaredContext:
+    def get_context(self, *, ayla_user_id: str, external_user_id: str) -> DeclaredContext:
         """``GET /personal-context/`` — full declared catalogue (lazy-create)."""
-        payload = self._send_with_retry("GET", f"internal/users/{ayla_user_id}/personal-context/")
+        payload = self._send_with_retry(
+            "GET",
+            f"internal/users/{ayla_user_id}/personal-context/",
+            external_user_id=external_user_id,
+        )
         return _declared_from_wire(payload, ayla_user_id=ayla_user_id)
 
     def patch_context(
         self,
         *,
         ayla_user_id: str,
+        external_user_id: str,
         updates: list[dict[str, Any]],
     ) -> DeclaredContext:
         """``PATCH /personal-context/`` — batch LWW update (idempotent).
@@ -206,14 +212,17 @@ class PersonalContextHttpClient:
         payload = self._send_with_retry(
             "PATCH",
             f"internal/users/{ayla_user_id}/personal-context/",
+            external_user_id=external_user_id,
             json_body={"updates": updates},
         )
         return _declared_from_wire(payload, ayla_user_id=ayla_user_id)
 
-    def get_ask_eligibility(self, *, ayla_user_id: str) -> AskEligibility:
+    def get_ask_eligibility(self, *, ayla_user_id: str, external_user_id: str) -> AskEligibility:
         """``GET ask-eligibility/`` — the ONE field Ayla allows asking now."""
         payload = self._send_with_retry(
-            "GET", f"internal/users/{ayla_user_id}/personal-context/ask-eligibility/"
+            "GET",
+            f"internal/users/{ayla_user_id}/personal-context/ask-eligibility/",
+            external_user_id=external_user_id,
         )
         data = _unwrap_data(payload)
         return AskEligibility(
@@ -225,15 +234,16 @@ class PersonalContextHttpClient:
             raw=data if isinstance(data, dict) else {},
         )
 
-    def mark_asked(self, *, ayla_user_id: str, field: str) -> None:
+    def mark_asked(self, *, ayla_user_id: str, external_user_id: str, field: str) -> None:
         """``POST mark-asked/`` — stamp the 24h cooldown. NOT retried."""
         self._send_single_attempt(
             "POST",
             f"internal/users/{ayla_user_id}/personal-context/mark-asked/",
+            external_user_id=external_user_id,
             json_body={"field": field},
         )
 
-    def skip(self, *, ayla_user_id: str, field: str) -> int:
+    def skip(self, *, ayla_user_id: str, external_user_id: str, field: str) -> int:
         """``POST skip/`` — increment the skip counter. NOT retried.
 
         Returns the server's ``skip_count`` (0 when the body omits it).
@@ -241,6 +251,7 @@ class PersonalContextHttpClient:
         payload = self._send_single_attempt(
             "POST",
             f"internal/users/{ayla_user_id}/personal-context/skip/",
+            external_user_id=external_user_id,
             json_body={"field": field},
         )
         data = _unwrap_data(payload)
@@ -258,7 +269,9 @@ class PersonalContextHttpClient:
     # the contract paths ahead of the upstream landing.
     # ------------------------------------------------------------------
 
-    def get_personal_data_export(self, *, ayla_user_id: str) -> dict[str, Any]:
+    def get_personal_data_export(
+        self, *, ayla_user_id: str, external_user_id: str
+    ) -> dict[str, Any]:
         """C5.1: ``GET /internal/users/{id}/personal-data/export/``.
 
         Synchronous JSON (profile subset + full declared-prefs
@@ -266,11 +279,13 @@ class PersonalContextHttpClient:
         read-only.
         """
         payload = self._send_with_retry(
-            "GET", f"internal/users/{ayla_user_id}/personal-data/export/"
+            "GET",
+            f"internal/users/{ayla_user_id}/personal-data/export/",
+            external_user_id=external_user_id,
         )
         return _unwrap_data(payload)
 
-    def delete_personal_data(self, *, ayla_user_id: str) -> None:
+    def delete_personal_data(self, *, ayla_user_id: str, external_user_id: str) -> None:
         """C5.2: ``DELETE /internal/users/{id}/personal-data/``.
 
         Idempotent server-side per C5 (repeat → 200/204), so transport
@@ -285,14 +300,77 @@ class PersonalContextHttpClient:
         ``data_sources[*] = "erased"``, deriving the field list from the
         model rather than from a caller's enumeration.
 
-        404 (``PersonalContextNotFoundError``) means the subject is not
-        addressable — either unknown or already soft-deleted upstream, which
-        the C5.2 view collapses into one status. Callers treat it as an
-        idempotent success; note that «already soft-deleted» leaves the
-        context row in place upstream (backend matrix cell
-        ``test_...delete_after_account_delete``), a gap owned by the backend.
+        Upstream answers 200 on every success, repeats included; ``deleted: []``
+        does not tell «already erased» from «nothing was there» (catalog AMD-020,
+        DRF-1984). A soft-deleted account is erased too (DRF-1368). 404 is kept
+        as an idempotent success for older upstreams. After account deletion
+        (D3) the subject header no longer resolves and upstream answers 403
+        (``PersonalContextAuthError``) — even before the catalog marks the
+        request COMPLETED. Whether the erasure happened is answered by
+        :meth:`get_erasure_status`, never by this call's status.
         """
-        self._send_with_retry("DELETE", f"internal/users/{ayla_user_id}/personal-data/")
+        self._send_with_retry(
+            "DELETE",
+            f"internal/users/{ayla_user_id}/personal-data/",
+            external_user_id=external_user_id,
+        )
+
+    def get_erasure_status(self, *, ayla_user_id: str, external_user_id: str) -> dict[str, Any]:
+        """C5.3 / AMD-020: ``GET /internal/users/{id}/personal-data/erasure-status/``.
+
+        Authoritative readback of the C5.2 erasure (DRF-1950, catalog DRF-1984):
+        ``{"user_id", "erased": bool, "identities": [{"kind", "context_row",
+        "erased"}]}`` — no personal values, no external ids; creates nothing
+        upstream. Read-only, retried.
+        """
+        payload = self._send_with_retry(
+            "GET",
+            f"internal/users/{ayla_user_id}/personal-data/erasure-status/",
+            external_user_id=external_user_id,
+        )
+        return _unwrap_data(payload)
+
+    # ------------------------------------------------------------------
+    # DRF-1699 — заявка на удаление аккаунта (§7 свода владельца)
+    # ------------------------------------------------------------------
+
+    def create_deletion_request(
+        self, *, ayla_user_id: str, external_user_id: str, initiator: str = "bot"
+    ) -> dict[str, Any]:
+        """``POST /internal/users/{id}/deletion-requests/`` → заявка.
+
+        Идемпотентно на стороне каталога (открытая заявка возвращается той
+        же, 200 против 201), поэтому транспортные повторы безопасны и ходят
+        через ``_send_with_retry``. Возвращает ``data`` как есть:
+        ``{request_id, status, requested_at, deadline_at, completed_at,
+        is_open}``. Ничего не стирает — это заявка, а не действие.
+        """
+        payload = self._send_with_retry(
+            "POST",
+            f"internal/users/{ayla_user_id}/deletion-requests/",
+            external_user_id=external_user_id,
+            json_body={"initiator": initiator},
+        )
+        return _unwrap_data(payload)
+
+    def get_current_deletion_request(
+        self, *, ayla_user_id: str, external_user_id: str
+    ) -> dict[str, Any] | None:
+        """``GET /internal/users/{id}/deletion-requests/`` → текущая или ``None``.
+
+        404 здесь — «заявок не было», не «человек не найден»: каталог
+        отвечает одним кодом на оба, и различать их профилю незачем — в
+        обоих случаях показывать нечего.
+        """
+        try:
+            payload = self._send_with_retry(
+                "GET",
+                f"internal/users/{ayla_user_id}/deletion-requests/",
+                external_user_id=external_user_id,
+            )
+        except PersonalContextNotFoundError:
+            return None
+        return _unwrap_data(payload)
 
     # ------------------------------------------------------------------
     # Plumbing
@@ -303,6 +381,7 @@ class PersonalContextHttpClient:
         method: str,
         path: str,
         *,
+        external_user_id: str,
         json_body: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Idempotent verbs (GET/PATCH): up to ``retries`` attempts.
@@ -313,7 +392,12 @@ class PersonalContextHttpClient:
         last_exc: Exception | None = None
         for attempt in range(self._retries):
             try:
-                return self._send(method, path, json_body=json_body)
+                return self._send(
+                    method,
+                    path,
+                    external_user_id=external_user_id,
+                    json_body=json_body,
+                )
             except PersonalContextConfigError:
                 raise
             except PersonalContextTransportError as exc:
@@ -337,18 +421,36 @@ class PersonalContextHttpClient:
         method: str,
         path: str,
         *,
+        external_user_id: str,
         json_body: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Non-idempotent verbs (mark-asked/skip): exactly one attempt."""
-        return self._send(method, path, json_body=json_body)
+        return self._send(
+            method,
+            path,
+            external_user_id=external_user_id,
+            json_body=json_body,
+        )
 
     def _send(
         self,
         method: str,
         path: str,
         *,
+        external_user_id: str,
         json_body: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        if not external_user_id:
+            # An empty header would be indistinguishable on the wire from
+            # not sending one at all, and upstream that is precisely the
+            # difference between "the caller named itself" and "the caller
+            # named nobody". Fail here, where the caller is still visible in
+            # the traceback, rather than turn it into an upstream 403 whose
+            # cause is two services away.
+            raise PersonalContextConfigError(
+                "external_user_id is required: this surface names the acting "
+                "subject in X-External-User-ID"
+            )
         try:
             url = AylaUrlBuilder(self._base_url).build(path)
         except AylaUrlError as exc:
@@ -361,11 +463,24 @@ class PersonalContextHttpClient:
                 method,
                 url,
                 json=json_body,
-                headers={
-                    "Authorization": f"Bearer {self._token}",
-                    "Accept": "application/json",
-                    "Content-Type": "application/json",
-                },
+                headers=with_request_id(
+                    {
+                        "Authorization": f"Bearer {self._token}",
+                        # CP-2 / DRF-1617. The token says WHICH SERVICE called;
+                        # this says WHICH SUBJECT it is acting for. Upstream
+                        # resolves it — without creating a row — and refuses when
+                        # it does not resolve to the subject in the path, so a
+                        # leaked token can no longer reach an arbitrary person.
+                        #
+                        # This client was the only one of ten Ayla clients that
+                        # named no subject, and it happens to carry every
+                        # personal-data route: export, erasure, and the declared
+                        # profile the erasure empties.
+                        "X-External-User-ID": external_user_id,
+                        "Accept": "application/json",
+                        "Content-Type": "application/json",
+                    }
+                ),
                 timeout=self._timeout,
             )
         except httpx.HTTPError as exc:

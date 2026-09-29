@@ -96,7 +96,8 @@ class Command(BaseCommand):
             self.stdout.write(
                 self.style.SUCCESS(
                     "page() returned True — at least one sink accepted the "
-                    "event. Check your Telegram channel + Sentry within 60s."
+                    "event. Check your Telegram channel + Sentry + the operators' "
+                    "MAX chat (HANDOFF_NOTIFY_MAX_CHAT_IDS) within 60s."
                 )
             )
             return
@@ -105,7 +106,8 @@ class Command(BaseCommand):
             self.style.ERROR(
                 "page() returned False — no sink delivered. Likely causes:\n"
                 "  * TELEGRAM_BOT_TOKEN or ALERTS_TELEGRAM_CHAT_ID unset\n"
-                "  * SENTRY_DSN unset AND Telegram unset\n"
+                "  * SENTRY_DSN unset AND Telegram unset AND "
+                "HANDOFF_NOTIFY_MAX_CHAT_IDS / _USER_IDS empty (DRF-2158)\n"
                 "  * api.telegram.org unreachable (RU prod needs TELEGRAM_PROXY/OPENAI_PROXY)\n"
                 "  * Telegram bot not added to the alert channel as admin\n"
                 "Check apps/observability/alerting.py logs for the underlying error."
@@ -119,7 +121,7 @@ def _default_body() -> str:
     ts = _dt.datetime.now(tz=_dt.timezone.utc).isoformat()
     return (
         f"Smoke test from {host} at {ts}.\n"
-        "If you see this in Telegram, the alerting pipeline works "
-        "end-to-end. If you also see this in Sentry, the dual-sink "
-        "fan-out is fine."
+        "If you see this in Telegram or in the operators' MAX chat, the "
+        "alerting pipeline works end-to-end. If you also see this in "
+        "Sentry, the multi-sink fan-out is fine."
     )

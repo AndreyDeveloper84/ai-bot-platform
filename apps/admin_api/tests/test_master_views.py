@@ -34,6 +34,7 @@ from apps.audit.models import AuditLog
 from apps.catalog.models import CatalogMaster
 from apps.identity.models import BotUser
 from apps.tenancy.models import Tenant
+from apps.miniapp_api.master_media import master_photo_path
 
 
 # --- URL helpers ----------------------------------------------------------
@@ -68,8 +69,9 @@ class TestAdminAuth:
     for defence-in-depth on the destructive paths."""
 
     def test_missing_header_400(self, client: Client, tenant: Tenant) -> None:
+        # 15.09.2026 UTC (DRF-1893): отказ транспорта — один код 401 no_init_data (было 400 malformed / 401 bad_signature).
         resp = client.get(_list_url())
-        assert resp.status_code == 400
+        assert resp.status_code == 401
 
     def test_bad_signature_401(self, client: Client, tenant: Tenant) -> None:
         resp = client.get(_list_url(), HTTP_AUTHORIZATION="MaxInitData user=foo&hash=deadbeef")
@@ -308,7 +310,12 @@ class TestMasterDetail:
         assert "linked_bot_user" in m  # may be None but key present
         assert isinstance(m["services"], list)
         assert m["services"][0]["name"] == "Маникюр гель-лак"
-        assert "working_hours_summary" in m
+        # §83 — карточка больше НЕ несёт ``working_hours_summary``: та
+        # строка описывала локальное зеркало, а не то расписание, по
+        # которому продают. Часы отдаёт ``masters/<id>/schedule/``.
+        # Проверка на отсутствие стоит здесь нарочно: вернуть поле обратно
+        # значило бы вернуть на экран второе, неверное расписание.
+        assert "working_hours_summary" not in m
 
     def test_404_on_bad_uuid(self, client: Client, owner_bot_user: BotUser) -> None:
         resp = client.get(
@@ -572,9 +579,10 @@ class TestMasterPhotoUpload:
         assert resp.status_code == 200, resp.content
         body = resp.json()
         assert "photo_url" in body
-        assert "master_photos" in body["photo_url"]
         master.refresh_from_db()
-        assert master.photo_url == body["photo_url"]
+        # Зеркало хранит сырой адрес, на провод — наш путь к байтам (DRF-2539).
+        assert "master_photos" in master.photo_url
+        assert body["photo_url"] == master_photo_path(master.id, master.photo_url)
         # File on disk.
         assert (tmp_path / "master_photos").exists()
 

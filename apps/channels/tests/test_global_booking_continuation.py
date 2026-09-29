@@ -20,11 +20,13 @@ them the turn reaches.
 from __future__ import annotations
 
 import json
+import time
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import pytest
+from _pytest import timing as pytest_timing
 from freezegun import freeze_time
 
 from apps.catalog.models import CatalogMaster, CatalogService, MasterService
@@ -79,9 +81,38 @@ def _salon_clock():
     ``time.monotonic``, and a monotonic clock that never advances is a
     deadline that never arrives. Without the ignore the suite hangs forever
     inside ``windows_events._poll`` rather than failing — leave it in.
+
+    ``_pytest.timing`` is the other entry, and it is about the MEASUREMENT,
+    not the test (DRF-2208). pytest times each phase through that module's
+    own ``perf_counter``; frozen, a setup that began before the freeze and
+    ended inside it reported ~1 787 482 000 s — ``FROZEN_NOW`` as an epoch
+    stamp — and every ``--durations`` table of a shard holding this file was
+    filled by it. Only that module, not ``_pytest``: freezegun hands the
+    REAL clock to a ``time.*`` read with an ignored module in its five
+    nearest frames, and a test body runs one frame below ``_pytest.python``
+    — the whole prefix unfroze ``time.time()`` in the test body (measured;
+    ``datetime.now`` stayed frozen, freezegun does not stack-check it).
+    ``TestTheClockItself`` holds all three readers.
     """
-    with freeze_time(FROZEN_NOW, ignore=["asyncio"]):
+    with freeze_time(FROZEN_NOW, ignore=["asyncio", "_pytest.timing"]):
         yield
+
+
+class TestTheClockItself:
+    """The freeze reaches the test and stops short of pytest (DRF-2208)."""
+
+    def test_the_test_body_reads_the_frozen_moment(self):
+        assert datetime.now(timezone.utc) == datetime.fromisoformat(FROZEN_NOW)
+
+    def test_the_test_body_reads_the_frozen_epoch_through_time(self):
+        # The ``time`` module is the reader the stack check governs; the
+        # ``datetime`` read above is frozen whatever ``ignore`` says.
+        assert time.time() == datetime.fromisoformat(FROZEN_NOW).timestamp()
+
+    def test_pytest_times_the_test_by_the_real_clock(self):
+        # Frozen, this reads exactly the FROZEN_NOW stamp. The real clock is
+        # past it for good — FROZEN_NOW is a moment already behind us.
+        assert pytest_timing.time() > datetime.fromisoformat(FROZEN_NOW).timestamp()
 
 
 _USER_ID = 900

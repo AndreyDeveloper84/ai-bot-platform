@@ -93,9 +93,25 @@ SERVICE_ID = "3d5f7e1c-8a2d-4e6f-b9c0-1d2e3f4a5b6c"
 START_AT = "2026-05-22T15:00:00+03:00"
 END_AT = "2026-05-22T16:00:00+03:00"
 
-# The salon's rung and the client's chat are distinct ids so one
+# The salon's rung and the client's address are distinct ids so one
 # recorder can separate the two audiences.
+#
+# They are also addressed by DIFFERENT KEYS (DRF-1558), and that is the
+# point of keeping three constants here rather than two:
+#
+# * the salon rung is a DIALOG id an operator typed into
+#   ``Tenant.manager_chat_id`` — we hold no person id for it, so it stays
+#   ``chat_id=`` (DRF-1559 is where that changes, if it changes);
+# * the client is resolved from our own ``BotUser`` row and is written to
+#   FIRST, so it is addressed ``user_id=`` — the stored ``chat_id`` names
+#   that person's dialog with whichever bot opened one.
+#
+# ``CLIENT_USER_ID`` and ``CLIENT_CHAT_ID`` are deliberately different
+# values: a regression back to the dialog id makes ``send.client`` come
+# out EMPTY rather than merely differently-keyed, which is what turns a
+# silent wrong-address into a red test.
 MANAGER_CHAT_ID = "manager-chat-1"
+CLIENT_USER_ID = "client-1"
 CLIENT_CHAT_ID = "client-chat-1"
 
 EVENT_ID = "01J9HXKM8Z2T4V6R8Q1P3D5F7E"  # pragma: allowlist secret
@@ -119,16 +135,29 @@ class SendRecorder:
     def __call__(
         self,
         *,
-        chat_id: str,
+        chat_id: str | None = None,
+        user_id: str | None = None,
         text: str,
         attachments: Any = None,
         timeout: float = 10.0,
     ) -> dict[str, Any]:
-        self.calls.append({"chat_id": chat_id, "text": text})
+        # Both keys accepted (DRF-1558). A recorder that knows only one of
+        # them does not report «wrong key» — it raises TypeError inside the
+        # caller's best-effort ``except`` and reports «nothing was sent»,
+        # which reads as a different defect entirely.
+        self.calls.append(
+            {
+                "chat_id": chat_id,
+                "user_id": user_id,
+                "addr": user_id if user_id is not None else chat_id,
+                "key": "user_id" if user_id is not None else "chat_id",
+                "text": text,
+            }
+        )
         return {}
 
-    def to(self, chat_id: str) -> list[dict[str, Any]]:
-        return [call for call in self.calls if call["chat_id"] == chat_id]
+    def to(self, addr: str) -> list[dict[str, Any]]:
+        return [call for call in self.calls if call["addr"] == addr]
 
     @property
     def salon(self) -> list[dict[str, Any]]:
@@ -136,7 +165,7 @@ class SendRecorder:
 
     @property
     def client(self) -> list[dict[str, Any]]:
-        return self.to(CLIENT_CHAT_ID)
+        return self.to(CLIENT_USER_ID)
 
 
 # ─── fixtures ──────────────────────────────────────────────────────────────
@@ -166,7 +195,7 @@ def client_bot_user(tenant: Tenant) -> BotUser:
     return BotUser.all_tenants.create(
         tenant=tenant,
         channel="max",
-        channel_user_id="client-1",
+        channel_user_id=CLIENT_USER_ID,
         chat_id=CLIENT_CHAT_ID,
         display_name="Иван Клиентов",
         client_name="Иван Клиентов",

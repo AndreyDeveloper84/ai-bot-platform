@@ -44,6 +44,52 @@ export interface PendingBookingIntent {
   /** Auxiliary display fields preserved for context restoration. */
   service_name?: string;
   master_name?: string;
+  /**
+   * Optional provenance — where the flow that produced this intent
+   * started (DRF-1484 / OPEN_DECISIONS §24.5). Values are grounded in
+   * the actual miniapp code, see `resolveEntryPoint`:
+   *   - `"catalog"`            — service picked from the catalog
+   *   - `"master"`             — flow started from a master's profile
+   *   - `"deep_link:<payload>"`— app session opened via a bot deep link
+   *   - `"direct"`             — anything else (fallback)
+   *
+   * Attribution only: validated loosely (any string passes), bounded
+   * by {@link MAX_ENTRY_POINT_LEN}, and never required.
+   *
+   * `tenant_id` is deliberately ABSENT here (§24.5 owner decision):
+   * tenant is a property of the current execution/request context
+   * (server-resolved from the bot that signed the initData), not of
+   * the durable user intent. Cross-tenant safety lives at the
+   * create-booking boundary (tenant-scoped lookups, regression-locked
+   * by `test_views_create_booking_tenant_guard.py`), not in this
+   * snapshot.
+   */
+  entry_point?: string;
+}
+
+/** Bound for the provenance string (backend truncates to the same). */
+export const MAX_ENTRY_POINT_LEN = 64;
+
+/**
+ * Resolve the intent's provenance at save time. Priority:
+ *   1. explicit upstream value (`BookingDraft.entryPoint`) — set by the
+ *      screen where the booking draft originated;
+ *   2. the MAX `start_param` payload — the app session itself arrived
+ *      via a bot deep link;
+ *   3. `"direct"` fallback.
+ * The payload is attacker-influenceable, so the composed value is
+ * truncated to {@link MAX_ENTRY_POINT_LEN}; it is stored as inert
+ * provenance text and never parsed back into a route.
+ */
+export function resolveEntryPoint(
+  draftEntryPoint: string | null,
+  startPayload: string,
+): string {
+  if (draftEntryPoint) return draftEntryPoint;
+  if (startPayload) {
+    return `deep_link:${startPayload}`.slice(0, MAX_ENTRY_POINT_LEN);
+  }
+  return "direct";
 }
 
 /**
@@ -144,6 +190,9 @@ function isValidIntent(v: unknown): v is PendingBookingIntent {
   if (o.service_name !== undefined && typeof o.service_name !== "string")
     return false;
   if (o.master_name !== undefined && typeof o.master_name !== "string")
+    return false;
+  // entry_point optional + string when present (provenance, loose values)
+  if (o.entry_point !== undefined && typeof o.entry_point !== "string")
     return false;
   return true;
 }

@@ -266,6 +266,44 @@ class TestReadRoundTrip:
         assert by_id["svc-new"].price_min == 2800.0
         assert by_id["svc-old"].price_min == 1500.0
 
+    def test_get_services_no_price_is_none_not_zero(self, db) -> None:
+        """DRF-1727 (§103 class): ``base_price: null`` with no legacy ``price``
+        is ABSENCE — ``None`` — not a zero-rouble service. A numeric ``"0.00"``
+        stays ``0.0``: zero is a price, absence is not. Found by golden P1
+        through the real boundary: the edge cost 1500, the list said 0."""
+        tenant = Tenant.objects.create(slug="svc-noprice", name="T")
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "count": 3,
+                    "next": None,
+                    "results": [
+                        {
+                            "id": "svc-null",
+                            "name": "Null",
+                            "base_price": None,
+                            "duration_minutes": 45,
+                        },
+                        {"id": "svc-absent", "name": "Absent", "duration_minutes": 45},
+                        {
+                            "id": "svc-zero",
+                            "name": "Zero",
+                            "base_price": "0.00",
+                            "duration_minutes": 45,
+                        },
+                    ],
+                },
+            )
+
+        with tenant_scope(tenant):
+            out = _client_with(handler).get_services()
+        by_id = {s.id: s for s in out}
+        assert (by_id["svc-null"].price_min, by_id["svc-null"].price_max) == (None, None)
+        assert (by_id["svc-absent"].price_min, by_id["svc-absent"].price_max) == (None, None)
+        assert (by_id["svc-zero"].price_min, by_id["svc-zero"].price_max) == (0.0, 0.0)
+
     def test_get_services_requires_tenant_scope(self) -> None:
         """DRF-1004: no tenant in scope is a call error, not an empty catalog."""
 
@@ -275,7 +313,9 @@ class TestReadRoundTrip:
         with pytest.raises(bc.BookingBadRequestError, match="tenant_scope_required"):
             _client_with(handler).get_services()
 
-    def test_get_masters_paginated_results(self) -> None:
+    def test_get_masters_paginated_results(self, db) -> None:
+        tenant = Tenant.objects.create(slug="m-one", name="T")
+
         def handler(req: httpx.Request) -> httpx.Response:
             return httpx.Response(
                 200,
@@ -287,8 +327,108 @@ class TestReadRoundTrip:
                 },
             )
 
-        out = _client_with(handler).get_masters()
+        with tenant_scope(tenant):
+            out = _client_with(handler).get_masters()
         assert (out[0].id, out[0].name, out[0].rating) == ("m1", "Ольга", 4.5)
+
+    # ── DRF-1473: the roster read that broke the pilot's last step ─────────
+    #
+    # ``internal/specialists/`` is a paginated DRF list. The client read page
+    # one and stopped, so the booking skill's ``allowed_master_ids`` allow-set
+    # held at most one page — and every specialist past it was answered, on
+    # the slot tap, with «Контекст записи устарел». Live 04.09.2026: the feed
+    # advertised 31 specialists over two pages, the refusal logged an allow-set
+    # of exactly 20, and both masters people were trying to book («Сазонова
+    # Инна», «SPAtrium») were on page 2.
+
+    def test_get_masters_walks_every_page(self, db) -> None:
+        """The whole roster, not the first page of it (DRF-1473).
+
+        Shaped exactly like the pilot feed: 31 specialists, page size 20, the
+        master we care about last. Reading one page loses him; the flow then
+        draws his card, his dates and his slots and refuses the tap.
+        """
+        tenant = Tenant.objects.create(slug="m-pages", name="T")
+        page_size = 20
+        total = 31
+        requested_pages: list[str] = []
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            page = int(req.url.params.get("page", "1"))
+            requested_pages.append(str(page))
+            start = (page - 1) * page_size
+            batch = [
+                {"id": f"spec-{i}", "display_name": f"Мастер {i}", "rating": 5.0}
+                for i in range(start, min(start + page_size, total))
+            ]
+            return httpx.Response(
+                200,
+                json={
+                    "count": total,
+                    "next": (
+                        f"https://ayla.test/...?page={page + 1}"
+                        if start + page_size < total
+                        else None
+                    ),
+                    "results": batch,
+                },
+            )
+
+        with tenant_scope(tenant):
+            out = _client_with(handler).get_masters()
+        assert requested_pages == ["1", "2"]
+        assert len(out) == total
+        # The last specialist on the feed is the one page-1-only lost.
+        assert f"spec-{total - 1}" in {m.id for m in out}
+
+    def test_get_masters_is_scoped_to_the_active_tenant(self, db) -> None:
+        """The allow-set this feeds is documented as the tenant-ownership
+        check (``_handle_pick_slot_callback``); unscoped it was not one, and
+        the other tenants' specialists are also what filled up page 1."""
+        tenant = Tenant.objects.create(slug="m-scope", name="T")
+        captured: list[httpx.Request] = []
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            captured.append(req)
+            return httpx.Response(200, json={"count": 0, "next": None, "results": []})
+
+        with tenant_scope(tenant):
+            _client_with(handler).get_masters()
+        assert captured[0].url.path == "/api/v1/internal/specialists/"
+        assert captured[0].url.params["tenant"] == str(tenant.id)
+
+    def test_get_masters_incomplete_roster_raises(self, db) -> None:
+        """A short roster must fail loudly, exactly as a short catalog does.
+
+        This is the whole point of routing the read through the same walker:
+        a silently truncated allow-set does not look like an outage, it looks
+        like the user's own context going stale.
+        """
+        tenant = Tenant.objects.create(slug="m-short", name="T")
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                json={
+                    "count": 31,
+                    "next": None,
+                    "results": [{"id": "spec-0", "display_name": "Один", "rating": 5.0}],
+                },
+            )
+
+        with tenant_scope(tenant):
+            with pytest.raises(bc.BookingUnavailableError, match="catalog_incomplete"):
+                _client_with(handler).get_masters()
+
+    def test_get_masters_by_id_needs_no_tenant_scope(self) -> None:
+        """The detail route is a single addressed read — unchanged."""
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            assert req.url.path == "/api/v1/internal/specialists/spec-7/"
+            return httpx.Response(200, json={"id": "spec-7", "display_name": "Инна", "rating": 5.0})
+
+        out = _client_with(handler).get_masters(specialist_id="spec-7")
+        assert [m.id for m in out] == ["spec-7"]
 
     def test_get_available_times_parses_iso_slots(self) -> None:
         captured: list[httpx.Request] = []
@@ -1053,3 +1193,58 @@ class TestCanonicalVersionRead:
 
         with pytest.raises(bc.BookingAPIError):
             client.get_appointment_version(external_user_id="bot:max:1", booking_id="a")
+
+
+class TestTimeOffCarriesTheActingHuman:
+    """§117, attribution — на проводе, а не на границе метода.
+
+    Первая версия сторожа стояла в сервисном тесте и подменяла ВЕСЬ метод
+    клиента подделкой. Подмена «клиент выбрасывает имя человека по дороге»
+    на ней промолчала — и это не дефект теста и не половина предмета, а
+    третий случай: **шов теста лежал выше подменяемого кода**, внутренности
+    метода подделка просто заменила собой.
+
+    Поэтому проверка здесь, на транспорте: заголовок либо ушёл, либо нет.
+
+    Замер 10.09.2026: из четырёх записывающих вызовов этого клиента три
+    несли ``X-External-User-ID``, а закрытие графика — единственное — не
+    несло. Ayla видела «сервис» там, где закрыли чужой рабочий день.
+    """
+
+    def _capture(self):
+        captured: list[httpx.Request] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured.append(request)
+            return httpx.Response(201, json={"id": "off-1"})
+
+        return handler, captured
+
+    def test_the_header_names_the_person_who_approved(self) -> None:
+        handler, captured = self._capture()
+
+        _client_with(handler).create_specialist_time_off(
+            specialist_id="sp-1",
+            tenant_id="t-1",
+            start_at="2026-09-13T10:00:00+03:00",
+            end_at="2026-09-13T14:00:00+03:00",
+            external_user_id="bot:max:7788",
+        )
+
+        assert captured[0].url.path == "/api/v1/internal/specialists/sp-1/time-off/"
+        assert captured[0].headers["X-External-User-ID"] == "bot:max:7788"
+
+    def test_without_a_person_the_header_is_absent_not_invented(self) -> None:
+        # Положительный контроль к тесту выше: без него утверждение «заголовок
+        # ставится» зеленело бы и на клиенте, который ставит его всегда и
+        # чем попало.
+        handler, captured = self._capture()
+
+        _client_with(handler).create_specialist_time_off(
+            specialist_id="sp-1",
+            tenant_id="t-1",
+            start_at="2026-09-13T10:00:00+03:00",
+            end_at="2026-09-13T14:00:00+03:00",
+        )
+
+        assert "X-External-User-ID" not in captured[0].headers

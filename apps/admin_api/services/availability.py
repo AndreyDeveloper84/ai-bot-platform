@@ -70,6 +70,7 @@ from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone as dj_timezone
 
+from apps.catalog.specialist_ref import CatalogSpecialistUnresolved, catalog_specialist_id
 from apps.audit.services import write_audit
 from apps.catalog.models import CatalogMaster
 from apps.events.services import emit
@@ -77,7 +78,7 @@ from apps.events.vocabulary import (
     ADMIN_AVAILABILITY_APPROVED,
     ADMIN_AVAILABILITY_REJECTED,
 )
-from apps.master_api.services.schedule import get_tenant_tz
+from apps.tenancy.timezones import salon_zone
 from apps.scheduling.models import ScheduleChangeRequest, ScheduleException
 
 logger = logging.getLogger(__name__)
@@ -109,6 +110,7 @@ def _block_time_in_ayla(
     start_at,
     end_at,
     reason: str,
+    actor_bot_user=None,
 ) -> None:
     """Write the approved absence into Ayla, the system of record (DRF-1062).
 
@@ -136,14 +138,66 @@ def _block_time_in_ayla(
         ScheduleBlockConflictError,
         get_ayla_booking_client,
     )
+    from apps.integrations.ayla.user_proxy import external_user_id_for
 
     try:
+        # §117, attribution. Закрытие графика — операция с последствиями, и
+        # на той стороне она обязана быть приписана ЧЕЛОВЕКУ, а не боту.
+        # Три из четырёх записей этого клиента уже несут X-External-User-ID
+        # (создание записи, отмена, перенос); эта была единственной без него,
+        # и Ayla видела «сервис» там, где закрыли чужой рабочий день.
+        #
+        # Раз человека не передавали, никакая проверка ЕГО прав наверху была
+        # невозможна в принципе — не потому, что там её не написали, а
+        # потому, что проверять было нечего.
+        external_actor = (
+            external_user_id_for(actor_bot_user) if actor_bot_user is not None else None
+        )
+        if external_actor is None:
+            # §143 (решение владельца 11.09.2026): для чувствительной
+            # операции действует fail-closed — «если автора нельзя надёжно
+            # определить, операция НЕ ВЫПОЛНЯЕТСЯ», и «запись "автор
+            # неизвестен" недопустима, потому что создаёт ложную видимость
+            # полноценного аудита».
+            #
+            # Первая редакция этой правки писала с неназванным автором и
+            # оставляла предупреждение в логе, а вопрос «отказывать ли»
+            # выносила владельцу. Владелец ответил: отказывать. Здесь
+            # остаётся исполнение ответа, а не продолжение спора.
+            #
+            # Закрытие рабочего времени мастера — именно чувствительная
+            # операция: оно делает клиентов незаписываемыми и, если время
+            # занято, ведёт к переносам и отменам. Журнал, в котором такое
+            # действие числится без автора, хуже отсутствующего: он
+            # выглядит полным.
+            logger.warning(
+                "availability.ayla_block_refused_no_actor master=%s tenant=%s",
+                master.id,
+                tenant_id,
+            )
+            raise AvailabilityDecisionError(
+                "actor_required",
+                "Cannot close a master's time without a named actor: the audit "
+                "record would claim an unknown author (§143).",
+                status=409,
+            )
+        # DRF-1933: у строки зеркала нет id профиля в каталоге — звать каталог
+        # не с чем; первичный ключ зеркала туда не уходит.
+        try:
+            catalog_specialist_id(master)
+        except CatalogSpecialistUnresolved:
+            raise AvailabilityDecisionError(
+                "catalog_profile_unresolved",
+                "The master is not set up in the catalog yet — time off cannot be closed there.",
+                status=409,
+            ) from None
         get_ayla_booking_client().create_specialist_time_off(
-            specialist_id=str(master.id),
+            specialist_id=catalog_specialist_id(master),
             tenant_id=str(tenant_id),
             start_at=start_at.isoformat(),
             end_at=end_at.isoformat(),
             reason=reason,
+            external_user_id=external_actor,
         )
     except ScheduleBlockConflictError as exc:
         # Not a failure of the approval — the time is booked. Say so, so
@@ -174,15 +228,31 @@ class AvailabilityDecisionError(Exception):
 
     Attributes:
       slug: stable error slug for the JSON envelope.
-      detail: human-readable explanation.
+      detail: internal explanation — for the log, not for a person.
       status: HTTP status code the view should return.
+      details: machine facts for the caller (DRF-2453).
+
+    ``details`` exists because the screen used to MINE ``detail`` for data:
+    conflicting dates rode inside the English sentence and the client
+    pulled them out with a regular expression (``parseDatesFromDetail``).
+    A sentence is not a data channel — rephrase it and the dates vanish
+    with nobody noticing. The shelf is not new: ``views_staff_role.py``
+    already answers with ``details={"hint": ...}``, and the client has
+    declared ``details`` since DRF-2273.
     """
 
-    def __init__(self, slug: str, detail: str, status: int = 400) -> None:
+    def __init__(
+        self,
+        slug: str,
+        detail: str,
+        status: int = 400,
+        details: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__(detail)
         self.slug = slug
         self.detail = detail
         self.status = status
+        self.details = details or {}
 
 
 # --- public helpers -------------------------------------------------------
@@ -458,9 +528,9 @@ def _enqueue_master_dm_post_commit(
     """
 
     linked = master.linked_bot_user
-    if linked is None or not (linked.chat_id or "").strip():
+    if linked is None or not (linked.channel_user_id or "").strip():
         logger.info(
-            "admin_api.availability.no_master_chat_id master=%s request=%s",
+            "admin_api.availability.no_master_user_id master=%s request=%s",
             master.id,
             request_id,
         )
@@ -478,7 +548,7 @@ def _enqueue_master_dm_post_commit(
     # broker outage is an ops-visible event, not an API-caller error.
     try:
         dispatch_master_decision_dm.delay(
-            chat_id=linked.chat_id.strip(),
+            user_id=linked.channel_user_id.strip(),
             decision=decision,
             date_range_human=date_range_human,
             request_id=str(request_id),
@@ -512,6 +582,7 @@ def approve_availability_request(
     tenant_id: UUID,
     actor: Any,
     actor_bot_user_id: UUID | None = None,
+    actor_bot_user: Any = None,
     actor_role: str = "",
     now: datetime | None = None,
 ) -> DecisionResult:
@@ -547,6 +618,31 @@ def approve_availability_request(
 
     if now is None:
         now = dj_timezone.now()
+
+    # §143 (решение владельца 11.09.2026), fail-closed: «если автора нельзя
+    # надёжно определить, операция НЕ ВЫПОЛНЯЕТСЯ».
+    #
+    # Проверка стоит ЗДЕСЬ, а не только перед записью в Ayla, и это не
+    # перестраховка. Одобрение закрывает рабочее время мастера при ЛЮБОМ
+    # состоянии флага: при включённом — в Ayla, при выключенном — локально,
+    # и в обоих случаях пишет строку аудита. Проверка внутри одной из двух
+    # веток оставила бы вторую открытой — тот же дефект «починили запись,
+    # оставили чтение», за который я сегодня трижды цеплялся в чужом коде.
+    #
+    # Отказ ДО транзакции: ничего не изменено, заявка остаётся PENDING,
+    # человек видит названную причину, а не молчаливый успех.
+    if actor_bot_user is None:
+        logger.warning(
+            "availability.approve_refused_no_actor request=%s tenant=%s",
+            request_id,
+            tenant_id,
+        )
+        raise AvailabilityDecisionError(
+            "actor_required",
+            "Cannot approve time off without a named actor: the audit record "
+            "would claim an unknown author (§143).",
+            status=409,
+        )
 
     with transaction.atomic():
         try:
@@ -598,7 +694,7 @@ def approve_availability_request(
             raise AvailabilityDecisionError("not_found", "master not found", status=404) from exc
 
         master: CatalogMaster = req.master
-        tz = get_tenant_tz(master.tenant)
+        tz = salon_zone(master.tenant)
         dates = _covered_dates(req.requested_start, req.requested_end, tz)
 
         # Overlap re-check: any pre-existing ScheduleException on one of
@@ -625,6 +721,7 @@ def approve_availability_request(
                 "overlap_conflict",
                 f"existing exceptions conflict on dates: {sorted(conflicting_dates)}",
                 status=409,
+                details={"dates": sorted(conflicting_dates)},
             )
 
         # DRF-1062 — Ayla owns the schedule, so the approval lands there
@@ -647,6 +744,7 @@ def approve_availability_request(
             start_at=req.requested_start,
             end_at=req.requested_end,
             reason=req.reason_text or "",
+            actor_bot_user=actor_bot_user,
         )
 
         # Materialise — one ScheduleException per covered date.
@@ -831,7 +929,7 @@ def reject_availability_request(
         # Human date range for the DM. If both endpoints are present,
         # compute covered dates; else fall back to a generic phrase.
         if req.requested_start and req.requested_end:
-            tz = get_tenant_tz(master.tenant)
+            tz = salon_zone(master.tenant)
             dates = _covered_dates(req.requested_start, req.requested_end, tz)
             date_range_human = _format_date_range_human(dates[0], dates[-1])
         else:

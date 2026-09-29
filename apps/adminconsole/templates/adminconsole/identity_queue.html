@@ -1,0 +1,90 @@
+{% extends "admin/base_site.html" %}
+{# Очередь идентичности (S2-4, §6/§7): PENDING-привязки соло-мастеров и живые
+   заявки на удаление — в одном месте. Метаданные; телефона нет (DRF-1039).
+   Решения принимаются не здесь: привязка — действиями на карточке мастера,
+   удаление — исполнителем каталога. #}
+
+{% block breadcrumbs %}
+  <div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">Админка</a>
+    &rsaquo; <a href="{{ search_url }}">Клиенты</a>
+    &rsaquo; Очередь идентичности
+  </div>
+{% endblock %}
+
+{% block content %}
+  <div id="content-main">
+    <h1>Очередь идентичности</h1>
+
+    <ul class="object-tools" style="float: none; margin: 0 0 1.5em 0;">
+      <li><a href="{{ search_url }}">Клиенты</a></li>
+      <li><a href="{{ queue_url }}">Очередь обращений</a></li>
+    </ul>
+
+    <fieldset class="module aligned">
+      <h2>Привязки соло-мастеров, ждущие оператора (§6)</h2>
+      <p style="max-width: 46em; color: var(--body-quiet-color, #666);">
+        Мастер зарегистрировался, публикация закрыта до решения. Решение —
+        «Подтвердить привязку» / «Отклонить привязку» на карточке мастера:
+        с провенансом и следом в аудите. Здесь ничего не подтверждается.
+      </p>
+      {% if pending_links is None %}
+        <p>Нет права просматривать привязки (identity.view_soloidentitylink).</p>
+      {% elif pending_links %}
+        <table style="width: 100%;">
+          <thead>
+            <tr><th>Мастер</th><th>Канал</th><th>Идентификатор в канале</th>
+                <th>Ждёт с</th><th>Последний отказ резолвера</th></tr>
+          </thead>
+          <tbody>
+            {% for row in pending_links %}
+              <tr>
+                <td><a href="{{ row.master_url }}">{{ row.link.master.name }}</a></td>
+                <td>{{ row.link.channel }}</td>
+                <td>{{ row.link.channel_user_id }}</td>
+                <td>{{ row.link.requested_at|date:"d.m.Y H:i" }}</td>
+                <td>{{ row.link.last_attempt_refusal|default:"—" }}</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% else %}
+        <p>Ждущих привязок нет.</p>
+      {% endif %}
+    </fieldset>
+
+    <fieldset class="module aligned">
+      <h2>Живые заявки на удаление аккаунта (§7)</h2>
+      <p style="max-width: 46em; color: var(--body-quiet-color, #666);">
+        Персонализация у этих людей остановлена с момента приёма заявки.
+        Исполняет каталог (срок — 30 дней с приёма); отменить заявку нельзя.
+        Номер — тот же, что человек видит у себя на экране.
+      </p>
+      {% if deletion_flags %}
+        <table style="width: 100%;">
+          <thead>
+            <tr><th>Номер заявки</th><th>С какого момента</th><th>Оболочки в боте</th></tr>
+          </thead>
+          <tbody>
+            {% for row in deletion_flags %}
+              <tr>
+                <td>{{ row.request_id|default:"—" }}</td>
+                <td>{{ row.since|date:"d.m.Y H:i" }}</td>
+                <td>
+                  {% for item in row.shells %}
+                    <a href="{{ item.card_url }}">{{ item.shell.display_name|default:item.shell.channel_user_id }}</a>
+                    ({{ item.shell.tenant.name }}){% if not forloop.last %}, {% endif %}
+                  {% empty %}
+                    оболочек с ключом Ayla нет — ayla_user_id {{ row.ayla_user_id }}
+                  {% endfor %}
+                </td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% else %}
+        <p>Живых заявок нет.</p>
+      {% endif %}
+    </fieldset>
+  </div>
+{% endblock %}

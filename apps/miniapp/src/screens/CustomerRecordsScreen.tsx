@@ -50,10 +50,13 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { BookingCard, BookingCardSkeleton } from "../components/BookingCard";
+import { CustomerAvatarEntry } from "../components/CustomerAvatarEntry";
+import { CustomerTabBar } from "../components/CustomerTabBar";
 import { EmptyRecordsState } from "../components/EmptyRecordsState";
 import { GoalInviteCard } from "../components/GoalInviteCard";
 import { TimeGroupHeader } from "../components/TimeGroupHeader";
-import { ApiError } from "../lib/api";
+import { useOnline } from "../hooks/useOnline";
+import { authErrorCopy, loadErrorReason, type LoadErrorReason } from "../lib/auth-error-copy";
 import {
   annotateItems,
   getMyBookings,
@@ -62,6 +65,8 @@ import {
   type RecordItem,
   type RecordsPage,
 } from "../lib/customer-records";
+import { useScreenBack } from "../hooks/useScreenBack";
+import { screenRoot } from "../lib/screen-back";
 
 // ---------------------------------------------------------------------------
 // State model — per-section isolation so flipping tabs doesn't blank the
@@ -71,12 +76,7 @@ import {
 type Slice<T> =
   | { kind: "loading" }
   | { kind: "ok"; data: T }
-  | { kind: "error"; reason: "network" | "server" | "other" };
-
-function isOnline(): boolean {
-  if (typeof navigator === "undefined") return true;
-  return navigator.onLine !== false;
-}
+  | { kind: "error"; reason: LoadErrorReason };
 
 const FILTER_ALL = "__all__";
 
@@ -87,6 +87,18 @@ const FILTER_ALL = "__all__";
 export function CustomerRecordsScreen() {
   const navigate = useNavigate();
 
+  // Вид экрана (DRF-1493): корень. «Записи» — дом клиентской
+  // поверхности (`/customer/main` и `/customer/records`), и у экрана
+  // есть собственная нижняя навигация: выход отсюда — соседняя
+  // вкладка, а не «назад». Объявление обязательно даже здесь — молчать
+  // о виде нельзя, иначе следующий экран промолчит по недосмотру.
+  useScreenBack(
+    screenRoot(
+      "«Записи» — дом клиентской поверхности и корневая вкладка; " +
+        "выход отсюда через нижнюю навигацию.",
+    ),
+  );
+
   const [activeTab, setActiveTab] = useState<BookingSection>("upcoming");
   const [upcoming, setUpcoming] = useState<Slice<RecordsPage>>({
     kind: "loading",
@@ -94,7 +106,7 @@ export function CustomerRecordsScreen() {
   const [history, setHistory] = useState<Slice<RecordsPage>>({
     kind: "loading",
   });
-  const [online, setOnline] = useState<boolean>(isOnline());
+  const online = useOnline();
   const [filter, setFilter] = useState<{ active: string }>({ active: FILTER_ALL });
   const [loadingMore, setLoadingMore] = useState(false);
 
@@ -106,15 +118,7 @@ export function CustomerRecordsScreen() {
       const data = await getMyBookings(section);
       setSlice({ kind: "ok", data });
     } catch (e) {
-      setSlice({
-        kind: "error",
-        reason:
-          e instanceof ApiError && e.status >= 500
-            ? "server"
-            : e instanceof ApiError
-              ? "other"
-              : "network",
-      });
+      setSlice({ kind: "error", reason: loadErrorReason(e) });
     }
   }, []);
 
@@ -151,19 +155,6 @@ export function CustomerRecordsScreen() {
       setLoadingMore(false);
     }
   }, [activeTab, upcoming, history]);
-
-  // ── online / offline transitions ─────────────────────────────────────
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    const onOnline = () => setOnline(true);
-    const onOffline = () => setOnline(false);
-    window.addEventListener("online", onOnline);
-    window.addEventListener("offline", onOffline);
-    return () => {
-      window.removeEventListener("online", onOnline);
-      window.removeEventListener("offline", onOffline);
-    };
-  }, []);
 
   // Reset filter when switching tabs.
   useEffect(() => {
@@ -233,8 +224,9 @@ export function CustomerRecordsScreen() {
 
   const handleReschedule = useCallback(
     (b: RecordItem) => {
-      // Real reschedule flow (existing screen, /my-visits namespace).
-      navigate(`/my-visits/${b.bookingId}/reschedule`);
+      // Real reschedule flow (единственный экран переноса; канонический
+      // адрес — `/customer/records/:id/reschedule`, DRF-1481).
+      navigate(`/customer/records/${b.bookingId}/reschedule`);
     },
     [navigate],
   );
@@ -278,6 +270,10 @@ export function CustomerRecordsScreen() {
 
       <header className="records-screen__header" role="banner">
         <h1 className="records-screen__title">Записи</h1>
+        {/* Вход в профиль — §77 п.60. Стоит на всех экранах нижней
+            панели: вход, который есть не везде, читается как «иногда
+            можно». Имя компонент берёт сам — у этого экрана его нет. */}
+        <CustomerAvatarEntry />
       </header>
 
       {!online && (
@@ -286,7 +282,8 @@ export function CustomerRecordsScreen() {
           role="status"
           aria-live="polite"
         >
-          Записи могут быть устаревшими — нет сети.
+          Записи могут быть устаревшими — нет сети. Перенос, отмена и
+          новая запись сейчас недоступны.
         </div>
       )}
 
@@ -384,10 +381,16 @@ export function CustomerRecordsScreen() {
         {/* Error. */}
         {slice.kind === "error" && (
           <div className="records-screen__error" role="status" aria-live="polite">
+            {/* DRF-1319 D-1: отказ входа — своим именем, как на Hello и в StateError. */}
+            {slice.reason.kind === "auth" && (
+              <p style={{ fontWeight: 600 }}>{authErrorCopy(slice.reason.slug).title}</p>
+            )}
             <p>
-              {slice.reason === "network"
-                ? "Не получилось загрузить. Проверь интернет."
-                : "Что-то пошло не так. Попробуй ещё раз через минуту."}
+              {slice.reason.kind === "auth"
+                ? authErrorCopy(slice.reason.slug).body
+                : slice.reason.kind === "network"
+                  ? "Не получилось загрузить. Проверь интернет."
+                  : "Что-то пошло не так. Попробуй ещё раз через минуту."}
             </p>
             <button
               type="button"
@@ -441,6 +444,7 @@ export function CustomerRecordsScreen() {
               onCancel: handleCancel,
               onRepeat: handleRepeat,
               onReview: handleReview,
+              offline: !online,
             })}
 
             {/* Real cursor pagination. */}
@@ -459,63 +463,7 @@ export function CustomerRecordsScreen() {
       </main>
 
       {/* Bottom nav — records is home, the «Записи» tab is selected. */}
-      <nav className="wellness-dash__nav" aria-label="Основная навигация">
-        <button
-          type="button"
-          className="wellness-dash__nav-tab"
-          aria-label="Главная"
-          onClick={() => navigate("/customer/main")}
-        >
-          <span className="wellness-dash__nav-icon" aria-hidden="true">
-            🏠
-          </span>
-          <span className="wellness-dash__nav-label">Главная</span>
-        </button>
-        <button
-          type="button"
-          className="wellness-dash__nav-tab"
-          aria-label="День"
-          onClick={() => navigate("/customer/wellness")}
-        >
-          <span className="wellness-dash__nav-icon" aria-hidden="true">
-            ☀
-          </span>
-          <span className="wellness-dash__nav-label">День</span>
-        </button>
-        <button
-          type="button"
-          className="wellness-dash__nav-tab wellness-dash__nav-tab--active"
-          aria-current="page"
-          aria-label="Записи"
-        >
-          <span className="wellness-dash__nav-icon" aria-hidden="true">
-            📅
-          </span>
-          <span className="wellness-dash__nav-label">Записи</span>
-        </button>
-        <button
-          type="button"
-          className="wellness-dash__nav-tab"
-          aria-label="Услуги"
-          onClick={() => navigate("/customer/catalog")}
-        >
-          <span className="wellness-dash__nav-icon" aria-hidden="true">
-            💅
-          </span>
-          <span className="wellness-dash__nav-label">Услуги</span>
-        </button>
-        <button
-          type="button"
-          className="wellness-dash__nav-tab"
-          aria-label="Я"
-          onClick={() => navigate("/customer/profile")}
-        >
-          <span className="wellness-dash__nav-icon" aria-hidden="true">
-            👤
-          </span>
-          <span className="wellness-dash__nav-label">Я</span>
-        </button>
-      </nav>
+      <CustomerTabBar active="records" />
     </div>
   );
 }
@@ -532,11 +480,21 @@ interface BucketProps {
   onCancel: (b: RecordItem) => void;
   onRepeat: () => void;
   onReview: (b: RecordItem) => void;
+  /** Сети нет — карточки выключают действия, которые без неё не пройдут. */
+  offline: boolean;
 }
 
 function renderTimeBuckets(props: BucketProps) {
-  const { items, activeTab, onOpen, onReschedule, onCancel, onRepeat, onReview } =
-    props;
+  const {
+    items,
+    activeTab,
+    onOpen,
+    onReschedule,
+    onCancel,
+    onRepeat,
+    onReview,
+    offline,
+  } = props;
 
   // Stable bucket order — preserves the order in which buckets first
   // appear in the data (backend already sorted rows by visit_at).
@@ -568,6 +526,7 @@ function renderTimeBuckets(props: BucketProps) {
                 onCancel={() => onCancel(b)}
                 onRepeat={onRepeat}
                 onReview={() => onReview(b)}
+                offline={offline}
               />
             </li>
           );

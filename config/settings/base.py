@@ -57,6 +57,26 @@ SECRET_KEY = os.environ.get(
     "django-insecure-sprint0-scaffold-only-replace-before-staging",
 )
 
+# DRF-2555 — ключ шифрования полей (`encrypt(...)`; сегодня одно поле — MemoryEntry.content).
+#
+# ⚠ SECRET_KEY НА СЕРВЕРЕ С ДАННЫМИ НЕ РОТИРУЕТСЯ. Сегодня это потеря всей
+# зашифрованной памяти, и эта настройка этого НЕ меняет. У каждого
+# зашифрованного значения две зависимости от SECRET_KEY:
+#   1. ключ AES — PBKDF2(CRYPTOGRAPHY_KEY or SECRET_KEY)
+#      (django_cryptography/conf.py). Эту снимает настройка ниже;
+#   2. подпись HMAC — FernetSigner, key = settings.SECRET_KEY, сырой
+#      (django_cryptography/core/signing.py). decrypt() проверяет её ПЕРВОЙ.
+#      Настройкой не развязывается; развязка — DRF-2562.
+# Узлы на обе: apps/identity/tests/test_crypto_key_from_env_2555.py.
+#
+# Переменная — DJANGO_CRYPTOGRAPHY_KEY (соглашение проекта: DJANGO_SECRET_KEY
+# → SECRET_KEY); имя настройки CRYPTOGRAPHY_KEY диктует библиотека, в
+# окружении оно не читается. Не задана или пуста → None → прежний вывод из
+# SECRET_KEY, существующие данные читаются. Первое значение на сервере с
+# данными — ТЕКУЩЕЕ значение SECRET_KEY: производный ключ AES совпадёт байт
+# в байт.
+CRYPTOGRAPHY_KEY = os.environ.get("DJANGO_CRYPTOGRAPHY_KEY") or None
+
 DEBUG = os.environ.get("DJANGO_DEBUG", "False").lower() == "true"
 
 ALLOWED_HOSTS: list[str] = os.environ.get("DJANGO_ALLOWED_HOSTS", "").split(",")
@@ -135,6 +155,8 @@ LOCAL_APPS = [
     "apps.voice",
     "apps.catalog",
     "apps.marketplace",
+    # К-3 (DRF-1772): запись Recommendation и карточка C04 в DM.
+    "apps.recommendation",
     "apps.replay",
     "apps.promptreg",
     "apps.adminconsole",
@@ -203,6 +225,11 @@ LOCAL_APPS = [
     # ``BotUser.context["nutrition_proactive"]``. Both beat tasks no-op
     # while ``NUTRITION_PROACTIVE_ENABLED`` is False (the default).
     "apps.nutrition_proactive",
+    # DRF-1464 — ИИ-диетолог: флаги, ридер цели, картина недели,
+    # триггеры и тексты подсказок. No models, so no migrations; every
+    # surface stays silent while NUTRITION_COACH_ENABLED is False
+    # (the default).
+    "apps.nutrition_coach",
     # DRF-1344 — повод OBSERVE от Personal Plan: конвейер до гейтов, без
     # текстов. No models, no migrations; the task evaluates the wellness
     # context document, runs both gates and records the trace — nothing
@@ -319,6 +346,27 @@ PEL_REAPER_IDLE_SECONDS = int(os.environ.get("PEL_REAPER_IDLE_SECONDS", "3600"))
 # DoS the audit pipeline if 100K entries are stuck.
 PEL_REAPER_BATCH_SIZE = int(os.environ.get("PEL_REAPER_BATCH_SIZE", "100"))
 
+# DRF-2220 — the longest a raw inbound webhook body (message text, name, a
+# shared contact) may stay in an ``ingress:*`` stream or its ``:dlq``. A
+# processed entry is deleted at once (consumer XACK+XDEL); this bounds the
+# rest — entries that failed and wait in the PEL, and the reaper's DLQ copies.
+# 72 h is the main window's proposal, not a measured figure: redelivery is
+# never automatic (the group reads ">" only), the reaper claims after
+# PEL_REAPER_IDLE_SECONDS, and past that only manual triage remains. The
+# retention period is the owner's question and has been put to them; if the
+# answer differs, this one value changes.
+INGRESS_RAW_RETENTION_HOURS = int(os.environ.get("INGRESS_RAW_RETENTION_HOURS", "72"))
+
+# DRF-2242 — how long a ``WebhookJournal`` row outlives its body. The body goes
+# after INGRESS_RAW_RETENTION_HOURS (the same raw copy as the stream entry);
+# the row stays for MAX retry dedup and the service trace. 90 days — the main
+# window's call by analogy with the ArchivedMessage audit tier (a trace_id is
+# joined to AuditLog during incident review); put to the owner, one number.
+# A body-less row is still pseudonymous personal data (trace_id → Message →
+# BotUser.channel_user_id), so «забудь всё» severs it at once — see
+# apps.ingress.retention.
+WEBHOOK_JOURNAL_ROW_RETENTION_DAYS = int(os.environ.get("WEBHOOK_JOURNAL_ROW_RETENTION_DAYS", "90"))
+
 # Sprint 8 / F2 (DRF-731) — STRICT_TENANT_SCOPE post-flip monitor armed.
 # Operator sets this to the ISO 8601 flip timestamp at the same moment
 # they roll STRICT_TENANT_SCOPE=strict in /etc/ai-bot-platform/.env.
@@ -429,7 +477,7 @@ LIVE_PATH_AI_METRIC_ENABLED = os.environ.get("LIVE_PATH_AI_METRIC_ENABLED", "fal
 # callers outside docstrings/tests) and the offline replay runner — the
 # path that actually answers people wrote no traces, so live behaviour
 # could not be replayed/diffed. This flag ports the SAME recorder (same
-# sampling via REPLAY_SAMPLE_RATE_*, same regex_v2 redaction before
+# sampling via REPLAY_SAMPLE_RATE_*, same regex_v3 redaction before
 # persist) onto the live handler: global concierge/deterministic turns
 # and per-tenant skill-dispatch turns. Default OFF = zero new rows,
 # byte-identical behaviour; rollback is env-only, no redeploy. Capture is
@@ -440,6 +488,16 @@ REPLAY_LIVE_CAPTURE_ENABLED = os.environ.get("REPLAY_LIVE_CAPTURE_ENABLED", "fal
     "true",
     "1",
 )
+
+# Теневой режим DecisionReadiness (решение владельца C1; DRF-1882 — провод,
+# этот блок — чтение из окружения). Ключ настройки существует ТОЛЬКО если
+# переменная задана, и значение передаётся СЫРОЙ строкой: `shadow_flag()`
+# (`apps/orchestrator/decision_readiness/shadow.py`) сам различает три
+# «выкл» — ключа нет (read_default), выключено словом (settings), значение не
+# из словаря (malformed). `bool(...)` здесь превратил бы "false" в True, а
+# умолчание False стёрло бы разницу между «не настроено» и «выключено».
+if "DRE_SHADOW_ENABLED" in os.environ:
+    DRE_SHADOW_ENABLED = os.environ["DRE_SHADOW_ENABLED"]
 
 # #433 umbrella — HANDLER_EXCEPTION → DLQ threshold. A handler that
 # raises gets retried by Ayla per §6.3; after this many failed
@@ -486,6 +544,18 @@ PII_TOKENIZER_ENABLED = os.environ.get("PII_TOKENIZER_ENABLED", "1").lower() not
 # separated env var; B3 implements lookup.
 REPLAY_REDACTION_ALLOWLIST: list[str] = [
     p.strip() for p in os.environ.get("REPLAY_REDACTION_ALLOWLIST", "").split(",") if p.strip()
+]
+
+# B-R (DRF-1617) — accounts `reset_test_account` may free, as
+# `channel:channel_user_id`. Empty means the command refuses EVERY account:
+# there is no confirmation flag and no environment check, because a
+# confirmation protects against inattention and this list protects against a
+# wrong identifier — the command can delete what the law says to keep, and
+# «are you sure» does not check who you are pointing at. Getting onto this
+# list is a deliberate, separate act on the host; it is never a side effect
+# of anything else. The pilot's list is empty.
+ACCOUNT_RESET_ALLOWLIST: list[str] = [
+    p.strip() for p in os.environ.get("ACCOUNT_RESET_ALLOWLIST", "").split(",") if p.strip()
 ]
 
 # Sprint 3 / B4 — event fanout adapter registry. Each entry is the
@@ -535,7 +605,53 @@ MAX_WEBHOOK_SECRET = os.environ.get("MAX_WEBHOOK_SECRET", "")
 HANDOFF_NOTIFY_MAX_CHAT_IDS = [
     p.strip() for p in os.environ.get("HANDOFF_NOTIFY_MAX_CHAT_IDS", "").split(",") if p.strip()
 ]
+
+# DRF-1559 — тот же список получателей, но как ЛЮДИ, а не как диалоги.
+#
+# chat_id в MAX — идентификатор ДИАЛОГА: он верен только для того бота, из
+# переписки с которым его скопировали. Пока бот был один, разницы не было;
+# с салонным ботом отправка по чужому диалогу отвечает 404 dialog.not.found
+# (замер 07.09.2026, docs/OPEN_DECISIONS.md §55, §56 — там упал и
+# channel=fallback, который адресуется ровно отсюда).
+#
+# Непустой HANDOFF_NOTIFY_MAX_USER_IDS ВЫТЕСНЯЕТ HANDOFF_NOTIFY_MAX_CHAT_IDS
+# целиком, а не дополняет: на время переноса это один и тот же человек,
+# записанный дважды, и объединение слало бы ему всё по два раза. Пусто —
+# читается старая настройка, то есть вчерашнее поведение со вчерашним же
+# ограничением. Выбор живёт в apps/channels/max/addressing.py, здесь только
+# значения.
+HANDOFF_NOTIFY_MAX_USER_IDS = [
+    p.strip() for p in os.environ.get("HANDOFF_NOTIFY_MAX_USER_IDS", "").split(",") if p.strip()
+]
 HANDOFF_ADMIN_BASE_URL = os.environ.get("HANDOFF_ADMIN_BASE_URL", "")
+
+# DRF-1488 — every handoff task gets an addressee and a deadline.
+#
+# All ten AdminTasks the pilot produced between 11.08 and 04.09.2026 carried
+# `assigned_to = None`. A task nobody owns is a task nobody is late on, and
+# the mute (DRF-1015) lifts only when the task closes — one of those ten sat
+# open for 20 hours.
+#
+# HANDOFF_DUTY_OPERATORS: comma-separated Django usernames of the operators
+# on duty. A fresh task is assigned to the least-loaded ACTIVE one, so the
+# admin's «assigned to» column answers «who is late» without a meeting.
+# Empty (the CI / local default) → queue addressing below.
+# HANDOFF_DUTY_QUEUE: the explicit duty queue a task is addressed to when no
+# roster is configured. Assignment then happens on pickup (the operator sets
+# `assigned_to` in the admin, which stamps `claimed_at`). It is deliberately
+# NON-empty by default: `apps.handoff.checks` refuses to boot when both this
+# and the roster are empty, because that combination silently reproduces the
+# defect — a task addressed to nobody at all.
+# HANDOFF_PICKUP_SLA_MINUTES: how long a task may sit unclaimed before the
+# sweep escalates it (once). Default 15 — half of the «ответят в течение 30
+# минут» the client is promised at handoff, so the nudge lands while the
+# promise can still be kept. WHAT the escalation should do beyond re-pinging
+# the operator chat is an owner decision, deliberately not taken here.
+HANDOFF_DUTY_OPERATORS = [
+    p.strip() for p in os.environ.get("HANDOFF_DUTY_OPERATORS", "").split(",") if p.strip()
+]
+HANDOFF_DUTY_QUEUE = os.environ.get("HANDOFF_DUTY_QUEUE", "duty")
+HANDOFF_PICKUP_SLA_MINUTES = int(os.environ.get("HANDOFF_PICKUP_SLA_MINUTES", "15"))
 
 # Phase 5 lazy-onboarding (apps/miniapp_api/views.py:require_init_data).
 # Single-bot mode binds the bot's HMAC token to exactly one tenant; this
@@ -564,6 +680,11 @@ MAX_BOT_TENANT_SLUG = os.environ.get("MAX_BOT_TENANT_SLUG", "")
 MAX_BOT_WEB_APP = os.environ.get("MAX_BOT_WEB_APP", "")
 MAX_MINIAPP_URL = os.environ.get("MAX_MINIAPP_URL", "")
 
+# DRF-2113 — контакт поддержки, который салонный бот называет по кнопке
+# «Обратиться в поддержку» (NOT_LINKED / неактивный салон / незнакомец).
+# Пусто → «Напишите в поддержку Ayla.» без контакта. Не секрет; в лог не пишется.
+AYLA_SUPPORT_CONTACT = os.environ.get("AYLA_SUPPORT_CONTACT", "")
+
 # Master Mini App session token (PR 1 / M0 onboarding).
 #
 # Issued by POST /api/v1/master/onboarding/accept. The Mini App stores it
@@ -579,6 +700,20 @@ MAX_MINIAPP_URL = os.environ.get("MAX_MINIAPP_URL", "")
 # the rest of the platform's session-data signing pattern.
 MASTER_SESSION_SECRET = os.environ.get("MASTER_SESSION_SECRET", "")
 MASTER_SESSION_TTL_DAYS = int(os.environ.get("MASTER_SESSION_TTL_DAYS", "30"))
+
+# Solo registration in the salon bot (DRF-1793, M1; owner's word 12.09
+# PROMPT §12): the city is chosen from a CONTROLLED list of cities we
+# serve, never typed as free text. Stored spellings, comma-separated;
+# the default is the pilot city (the same one migration 0010 backfilled).
+# An empty list fails closed: the dialog refuses at the city step with a
+# named reason instead of accepting anything.
+SOLO_REGISTRATION_CITIES: list[str] = [
+    c.strip() for c in os.environ.get("SOLO_REGISTRATION_CITIES", "Пенза").split(",") if c.strip()
+]
+# How long a half-finished registration draft is kept (hours). Long
+# enough to survive a chat TTL and a night's sleep, short enough that a
+# stale name/city is not confirmed a month later without a fresh look.
+SOLO_REGISTRATION_DRAFT_TTL_HOURS = int(os.environ.get("SOLO_REGISTRATION_DRAFT_TTL_HOURS", "72"))
 
 # Master invite flow (PR 3 / MM2). The admin invite endpoint
 # (`apps/admin_api/views_invite.py`) renders a web fallback URL that
@@ -600,63 +735,12 @@ MASTER_SESSION_TTL_DAYS = int(os.environ.get("MASTER_SESSION_TTL_DAYS", "30"))
 SITE_DOMAIN = os.environ.get("SITE_DOMAIN", "http://localhost:5173")
 MASTER_BOT_USERNAME = os.environ.get("MASTER_BOT_USERNAME", "")
 
-# M6 AI drafts auto-trigger (deferred follow-up from PR #535 / #540).
-#
-# When True, every inbound customer Message (``role=USER``) on a
-# conversation that involves a master enqueues a Celery task that
-# generates an :class:`apps.conversations.models.AiDraft` proactively —
-# so the master sees «✨ Предложен ответ» on M5 list refresh without
-# tapping «✨ Предложить ответ» first (spec §M6 line 660 «— помощник
-# готовит ответ —»).
-#
-# Default False keeps the pilot launch ramp conservative. Operators
-# flip per-environment via env var once cost / rate telemetry is
-# stable. The Celery task is enqueued unconditionally from the hook;
-# the flag is re-checked inside the worker as a cheap short-circuit
-# so an LLM call NEVER happens with the flag off.
-AI_DRAFTS_AUTO_TRIGGER_ENABLED = os.environ.get(
-    "AI_DRAFTS_AUTO_TRIGGER_ENABLED", "false"
-).lower() in ("true", "1")
-
-
-# M6 auto-trigger idle-active-draft suppress window (issue #659).
-# If an ACTIVE draft on a conversation is younger than this many seconds,
-# skip auto-trigger regeneration — the master is probably still viewing
-# the existing draft. Prevents the documented #659 collision race:
-#
-#   1. Customer message arrives → auto-trigger task starts LLM call
-#      (1-3s under Conversation row lock).
-#   2. Master taps «Отправить от себя» on the ACTIVE draft visible in UI.
-#   3. send_draft_as_master returns 429 conversation_busy (PR #551 lock).
-#   4. Frontend retries after Retry-After: 3 — by then auto-trigger has
-#      REPLACED the visible draft with a fresh one.
-#   5. send-as-me targets REPLACED draft → 400 draft_already_acted.
-#
-# Suppressing auto-trigger while the master likely still has the draft
-# on-screen breaks the race at step 1. Setting this to 0 disables the
-# suppress (regression escape hatch for ops).
-#
-# Issue #693 (follow-up from #659 review): wrap ``int()`` parsing in a
-# try/except so a non-integer env value (operator typo, e.g.
-# ``IDLE_ACTIVE_DRAFT_SUPPRESS_WINDOW_SECONDS=abc``) does NOT crash
-# Django boot on every worker.  Fall back to the 60s default and log a
-# WARNING so the misconfiguration is visible without taking the service
-# down — module-load ValueErrors take out ALL workers simultaneously.
-def _parse_idle_active_draft_suppress_window() -> int:
-    raw = os.environ.get("IDLE_ACTIVE_DRAFT_SUPPRESS_WINDOW_SECONDS", "60")
-    try:
-        return int(raw)
-    except ValueError:
-        import logging
-
-        logging.getLogger(__name__).warning(
-            "Invalid IDLE_ACTIVE_DRAFT_SUPPRESS_WINDOW_SECONDS=%r — falling back to 60",
-            raw,
-        )
-        return 60
-
-
-IDLE_ACTIVE_DRAFT_SUPPRESS_WINDOW_SECONDS = _parse_idle_active_draft_suppress_window()
+# DRF-1528: две настройки M6-автотриггера сняты вместе со своим таском —
+# `AI_DRAFTS_AUTO_TRIGGER_ENABLED` и `IDLE_ACTIVE_DRAFT_SUPPRESS_WINDOW_SECONDS`.
+# Черновики ответа клиенту генерировать некуда: переписка мастер↔клиент
+# снята (OD-7). Рубильник, который ничего не выключает, хуже отсутствия
+# рубильника — оператор считает поверхность управляемой. Значения из env
+# просто игнорируются; удалять их из окружений не требуется.
 
 # Sprint 9 / I1 (DRF-825) — Ayla nutrition backend.
 # Empty defaults make the lazy singleton fail loudly on first use rather
@@ -682,6 +766,37 @@ AYLA_BASE_URL = os.environ.get("AYLA_BASE_URL", "")
 #    also requires ``X-External-User-ID``). Used by payments + booking today;
 #    recommendations + profile move onto it in S0-B.
 AYLA_INTERNAL_API_TOKEN = os.environ.get("AYLA_INTERNAL_API_TOKEN", "")
+
+# DRF-1525 / DRF-1695 (C1) — второй секрет, другая сила. Общий Bearer выше
+# читает зеркало и пишет записи; этот — заводит салон в каталоге
+# (``POST /api/v1/internal/tenants/``, сторож ``IsTenantProvisioningBearer``).
+# НЕ identity-токен: право присваивать личность (bind-external) боту не
+# выдаётся — OPEN_DECISIONS §151 «запрещено явно», и в окружении бота
+# ``AYLA_IDENTITY_PROVISIONING_TOKEN`` лежать не должен. Каталог требует,
+# чтобы этот секрет отличался и от общего Bearer, и от identity-токена
+# (users.E002/E003 при его старте). Пусто = экран «подключить салон»
+# отвечает ``SETUP_PENDING`` с именем причины, а не ложным успехом.
+AYLA_TENANT_PROVISIONING_TOKEN = os.environ.get("AYLA_TENANT_PROVISIONING_TOKEN", "")
+
+# DRF-2085 (OWNER RULING 18.09, вариант А) — четвёртый секрет, одна ручка.
+# ``POST /api/v1/internal/tenants/<slug>/salon-admins/`` в каталоге заводит
+# СВЕЖУЮ учётку администратора салона, TUR admin и связывает с ней
+# MAX-личность. Запускает её только операторское действие
+# ``platform_operations`` в Django Admin бота (ядро ``grant_staff_role``
+# при role=admin, до записи TenantStaff). Не общий Bearer, не
+# provisioning-токен, не identity-токен (§151/§153 п.6 в силе): каталог
+# требует, чтобы все четыре различались (users.E004 при его старте).
+# Пусто = выдача роли admin отказывает ПО ИМЕНИ (``token_missing``) и
+# строки не пишет — ложного «доступ выдан» без каталожной половины нет.
+# В логи и в клиентский код значение не попадает (узел в тестах).
+AYLA_SALON_ADMIN_LINK_TOKEN = os.environ.get("AYLA_SALON_ADMIN_LINK_TOKEN", "")
+# DRF-2442 — пятый секрет каталога, одна дверь: личность мастера, принявшего
+# приглашение. Пусто — дверь для нас отсутствует: приём приглашения проходит,
+# а связь не ставится (в логе `identity_link_refused reason=token_missing`), и
+# мастер остаётся без кабинета до тех пор, пока секрет не задан в ОБОИХ
+# контурах одним значением. Каталог требует, чтобы оно отличалось от четырёх
+# соседних (users.E005 при его старте).
+AYLA_SPECIALIST_IDENTITY_LINK_TOKEN = os.environ.get("AYLA_SPECIALIST_IDENTITY_LINK_TOKEN", "")
 
 # C7 client-payments: fallback ``return_url`` for the YooKassa confirmation
 # flows (payment create / card setup) when the miniapp request doesn't carry
@@ -711,13 +826,113 @@ NUTRITION_SERVICE_TOKEN = (
     else os.environ.get("AYLA_SERVICE_TOKEN", "")
 )
 
+
 # Feature flag: route the booking skill through the Ayla canonical REST bridge
 # instead of direct YClients calls. DEFAULT OFF — the flip (#1041) is gated on
 # the ayla_service_id coverage report (#1016/#1034, command:
 # link_ayla_service_ids) and is executed by the orchestrator. The flag-ON path
 # (real HTTP client + RemoteBookingProxy mirror) is implemented and tested;
 # production flips deliberately, never ad-hoc.
-BOOKING_VIA_AYLA_REST = os.environ.get("BOOKING_VIA_AYLA_REST", "false").lower() == "true"
+# DRF-2346 — ПУТЬ ЗАПИСИ ОБЪЯВЛЕН В КАЖДОМ КОНТУРЕ, а не подразумевается.
+#
+# Значение решает, какой отменой пользуется человек. При ``true`` отмена идёт
+# в Ayla и завершается сразу. При ``false`` работает местный двухшаговый путь
+# с пятисекундным окном возврата, и до DRF-2346 его завершал ТОЛЬКО таймер на
+# странице: закрыл приложение — запись зависала навсегда. Подметание эту дыру
+# закрыло, но умолчание всё равно называется явно: «забыли задать» не должно
+# означать «выбрали за нас».
+#
+# Разбор общий с режимом оплаты и по той же причине: мусорное значение —
+# отказ при загрузке, а не молчаливое «false».
+def booking_via_ayla_rest_from(raw: str) -> bool:
+    """``"true"/"1"`` → True, ``"false"/"0"`` → False, всё прочее — отказ."""
+    from django.core.exceptions import ImproperlyConfigured
+
+    value = (raw or "").strip().lower()
+    if value in {"true", "1"}:
+        return True
+    if value in {"false", "0"}:
+        return False
+    raise ImproperlyConfigured(
+        "BOOKING_VIA_AYLA_REST must be one of true/false/1/0 "
+        f"(got {raw!r}). Путь записи не угадывают: прочитанное по ошибке "
+        "«false» включает местный двухшаговый путь отмены там, где записи "
+        "принадлежат Ayla."
+    )
+
+
+BOOKING_VIA_AYLA_REST = booking_via_ayla_rest_from(os.environ.get("BOOKING_VIA_AYLA_REST", "false"))
+
+
+# DRF-2340 — РЕЖИМ ОПЛАТЫ ОБЪЯВЛЕН, а не спрятан третьим аргументом getattr.
+#
+# До этой правки имя не встречалось ни в одном файле настроек: единственным
+# чтением было ``getattr(settings, "AYLA_PAYMENTS_TEST_MODE", True)`` внутри
+# клиента платежей. Снаружи режим не был виден ничем — ни в settings, ни в
+# env-шаблонах. Опасность не в стенде (там заглушка ожидаема), а в бою: не
+# задал — человек получает ПОДДЕЛЬНУЮ ссылку, «оплачивает», денег нет, и
+# узнать об этом неоткуда. Поэтому: в бою умолчания нет совсем
+# (``production.py`` падает на импорте), здесь — объявленное ``true`` для
+# разработки и тестов.
+#
+# Мусор отказом, а не ложью: «maybe», пустая строка, «0 1» не должны молча
+# стать «боем». Один такой раз — и деньги идут мимо.
+def payments_test_mode_from(raw: str) -> bool:
+    """``"true"/"1"`` → True, ``"false"/"0"`` → False, всё прочее — отказ."""
+    from django.core.exceptions import ImproperlyConfigured
+
+    value = (raw or "").strip().lower()
+    if value in {"true", "1"}:
+        return True
+    if value in {"false", "0"}:
+        return False
+    raise ImproperlyConfigured(
+        "AYLA_PAYMENTS_TEST_MODE must be one of true/false/1/0 "
+        f"(got {raw!r}). Payments mode is never guessed: a value read as "
+        "«live» by accident sends people to a checkout that takes no money, "
+        "and a value read as «test» by accident hands them a fake link."
+    )
+
+
+AYLA_PAYMENTS_TEST_MODE = payments_test_mode_from(os.environ.get("AYLA_PAYMENTS_TEST_MODE", "true"))
+
+# §83 — требовать ли АКТУАЛЬНОЕ подтверждение расписания для продажи мастера.
+#
+# DEFAULT OFF, и умолчание здесь несёт цену, а не осторожность. В момент
+# включения с витрины уходят ВСЕ мастера без актуального подтверждения — по
+# правилу 1 решения владельца («по умолчанию расписание не подтверждено») это
+# верно, но это видимое изменение продукта. Порядок работ записан в DRF-1521
+# п. 7: сперва признак и способ его поставить, потом кампания подтверждения по
+# уже подключённым мастерам, и только потом гейт.
+#
+# Поэтому флаг переключает не «фичу», а МОМЕНТ, когда условие начинает снимать
+# людей с продажи, и нажать это должен владелец, увидев число, а не обнаружить
+# постфактум.
+MASTER_SCHEDULE_CONFIRMATION_REQUIRED = (
+    os.environ.get("MASTER_SCHEDULE_CONFIRMATION_REQUIRED", "false").lower() == "true"
+)
+
+# DRF-1531 — the size a top TIER of indistinguishable candidates has to reach
+# before Ayla stops sorting it and asks ONE distinguishing question instead
+# (owner decision §29.2). The tier is the set of masters sharing the best
+# match precision; below this many, the ranking told them apart well enough
+# to answer and asking would be asking for its own sake.
+#
+# FOUR, and the number is deliberately crude. §29.2 measures distinguishability
+# properly — the gap between first and second, context completeness, conflicts
+# — and that is a SEPARATE task that comes after this one. Until it lands the
+# threshold is a plain count, named here so the measurement can REPLACE it
+# without rewriting the logic around it.
+#
+# Why four: the paired positive guard is «спортивный массаж», where the ticket
+# reports a top tier of three under the old counter and match precision now
+# cuts it to one. A person who said which massage they want must not be asked
+# again, so the threshold sits above that tier, not on it.
+#
+# 0 (or any value below 2) disables the question entirely — a kill switch that
+# restores the pre-DRF-1531 behaviour without a deploy. Two candidates is the
+# arithmetic floor: a question needs at least two answers.
+DISCOVERY_CLARIFY_MIN_TIER = int(os.environ.get("DISCOVERY_CLARIFY_MIN_TIER", "4"))
 
 # DRF-1111 / DRF-1161 — mirror ↔ canon reconciliation sweep. How many
 # tenant-local days ahead the ``tenants/me/day/`` fan-out reads. Rows
@@ -726,46 +941,36 @@ BOOKING_VIA_AYLA_REST = os.environ.get("BOOKING_VIA_AYLA_REST", "false").lower()
 # request count (one request per day per tenant).
 AYLA_MIRROR_RECONCILE_WINDOW_DAYS = int(os.environ.get("AYLA_MIRROR_RECONCILE_WINDOW_DAYS", "45"))
 
-# DRF-1005 — Controlled Pilot: per-tenant fallback for the booking
-# health-check gate. DEMOTED by DRF-1353 — read the note below before
-# adding a tenant here.
+# DRF-2379 — сколько дней подметальщик добивает привязку мастера к каталогу,
+# считая от ``invited_at``. Предел выражен СРОКОМ, а не числом попыток:
+# счётчику попыток негде жить, кроме кэша, а кэш теряется при перезапуске —
+# предел, который сам себя обнуляет, пределом не является.
 #
-# Originally this was the ONLY way through the gate: under
-# ``BOOKING_VIA_AYLA_REST`` it failed CLOSED unconditionally
-# (#1034 / #1121) because the resolved (master×service)
-# requires-health-check source was believed not to exist, which made
-# automatic booking impossible for every tenant. Owner decision
-# 2026-08-12 (variant 3): an explicit, empty-by-default allowlist of
-# tenant UUIDs, with an audit record on every gate-disabled evaluation.
+# Что происходит после срока: одна громкая строка ERROR, и строка больше не
+# берётся. Тишиной это не становится — ``catalog_unlinked`` остаётся видимым
+# студии ровно до тех пор, пока привязки нет.
 #
-# DRF-1353 found that source: it exists on Ayla
-# (``SpecialistService.resolved_requires_health_check``, escalate-only OR
-# across template floor → salon service → specialist) and is served by
-# ``/internal/catalog/specialist-services/``. It is now mirrored onto
-# ``MasterService.resolved_requires_health_check`` and the gate reads it
-# FIRST. This allowlist only decides edges whose resolved flag is
-# UNKNOWN — operator-owned MM4 rows, or a tenant catalog sync has not
-# reached. It can never override an explicit "screening required".
+# Семь дней — не round number: столько же живёт приглашение мастера
+# (``INVITE_TTL_DAYS``). Привязку разумно добивать ровно столько, сколько сам
+# мастер ещё может принять приглашение.
+SALON_CATALOG_LINK_DEADLINE_DAYS = int(os.environ.get("SALON_CATALOG_LINK_DEADLINE_DAYS", "7"))
+
+# DRF-1545 — the booking health-check gate has NO per-tenant override.
 #
-# Adding a tenant here is therefore no longer the way to unblock a salon:
-# run catalog sync for it. Reach for the allowlist only when the edges
-# genuinely cannot be mirrored.
+# ``BOOKING_HEALTH_CHECK_GATE_DISABLED_TENANTS`` (DRF-1005) used to name
+# tenants whose UNKNOWN master×service edges opened instead of failing
+# closed. Owner decision 06.09.2026 (``docs/OPEN_DECISIONS.md`` §36)
+# removed the mechanism, not just the salon on it: the duty to ask about
+# contraindications belongs to the procedure, not to the venue — a salon
+# cannot cancel a contraindication.
 #
-# Empty/unset = gate closed for every unknown edge (behaviour unchanged).
-# Parsing reuses the strict T-02 allowlist parser: malformed input raises
-# ImproperlyConfigured at settings load — a process must not boot with a
-# half-parsed allowlist whose operator believes a tenant is listed when
-# it is not.
-try:
-    BOOKING_HEALTH_CHECK_GATE_DISABLED_TENANTS = _parse_ingest_tenant_allowlist(
-        os.environ.get("BOOKING_HEALTH_CHECK_GATE_DISABLED_TENANTS", ""),
-        setting_name="BOOKING_HEALTH_CHECK_GATE_DISABLED_TENANTS",
-    )
-except _IngestAllowlistConfigurationError as exc:
-    # Same fail-safe as the ingest allowlists below: refuse to boot.
-    raise ImproperlyConfigured(
-        f"Invalid booking health-check gate allowlist configuration: {exc}"
-    ) from exc
+# It cost nothing to remove: all 387 pilot edges carried a synced verdict,
+# which the gate reads first, so the allowlist decided nothing on the day
+# it went. That is also why it was dangerous — it did nothing visible and
+# would have opened silently the first time its salon got a screened
+# service. The setting is deliberately NOT re-declared here: an operator
+# setting the old env var must get no behaviour at all, not a half-wired
+# switch. See ``apps/skills/booking/skill.py``.
 
 # DRF-1007 — Controlled Pilot runs WITHOUT prepayment: per-tenant switch
 # for the ``payment_required`` flag on bot-created bookings.
@@ -831,7 +1036,28 @@ except _IngestAllowlistConfigurationError as exc:
 # runtime overrides in tests work. Pilot-env config sets the live
 # values via env vars — the import-time read here is the boot-time
 # snapshot used by the skill + endpoints.
-NUTRITION_ENABLED = os.environ.get("NUTRITION_ENABLED", "false").lower() in ("true", "1")
+NUTRITION_ENABLED = os.environ.get("NUTRITION_ENABLED", "false").lower() in (
+    "true",
+    "1",
+)
+# 3. ``FOOD_DIARY_CANONICAL_CONSENT`` — каноническое согласие на дневник
+#    питания (F10/Z9, решение владельца). Пока ВЫКЛЮЧЕН: текст раскрытия
+#    имеет статус WORKING PRODUCT COPY до Privacy/Legal review, и
+#    обязательное согласие живым людям на нём не включается. Снятие
+#    ограничения — решение владельца, не исполнителя.
+#
+#    Флаг решает только, КАКОЙ ТЕКСТ показывает экран согласия. Основание
+#    права одно в любом положении — строка реестра ``food_diary_processing``
+#    (половина 1 DRF-1963) через ручку ``me/food-scanner-consent/``, и
+#    версия одна — ``FOOD_DIARY_CONSENT_DOCUMENT_VERSION``.
+#    False → ``/me`` не несёт ``food_diary_consent_canonical``, экран
+#    показывает нынешний короткий текст. True → ``/me`` объявляет канон,
+#    экран показывает раскрытие Z9 (``apps/consent/food_diary_disclosure.py``).
+FOOD_DIARY_CANONICAL_CONSENT = os.environ.get("FOOD_DIARY_CANONICAL_CONSENT", "false").lower() in (
+    "true",
+    "1",
+)
+
 FOOD_PHOTO_SCAN_ENABLED = os.environ.get("FOOD_PHOTO_SCAN_ENABLED", "false").lower() in (
     "true",
     "1",
@@ -1116,6 +1342,10 @@ CELERY_RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND", "")
 CELERY_TASK_ACKS_LATE = True
 CELERY_TASK_REJECT_ON_WORKER_LOST = True
 CELERY_WORKER_PREFETCH_MULTIPLIER = 1
+# DRF-2272 — Celery 5 по умолчанию снимает root-обработчики и ставит свой: в
+# воркере пропадали и фильтр ПДн, и JSON. Логи уходят в постоянный журнал —
+# root остаётся нашим (``LOGGING`` ниже).
+CELERY_WORKER_HIJACK_ROOT_LOGGER = False
 
 # Modules whose tasks Celery autodiscover_tasks() misses because the
 # package isn't a Django app in INSTALLED_APPS. Producer-side imports
@@ -1125,9 +1355,13 @@ CELERY_WORKER_PREFETCH_MULTIPLIER = 1
 # DRF-1054/1056: apps.llm holds no models and is deliberately not a
 # Django app (see apps/llm/__init__.py), so its beat task needs the same
 # explicit registration.
+# DRF-2118: «утренний итог» салонного бота живёт рядом с рендерером
+# уведомлений (apps.channels.max.salon_digest), не в tasks.py — воркеру
+# нужна та же явная регистрация.
 CELERY_IMPORTS = (
     "apps.integrations.yclients.tasks",
     "apps.llm.tasks",
+    "apps.channels.max.salon_digest",
 )
 
 # Live Shadow Activation (Stage 1 pre-flight) — dedicated queue for the
@@ -1186,6 +1420,52 @@ CELERY_BEAT_SCHEDULE = {
         "task": "apps.catalog.tasks.sync_catalog_for_all_tenants",
         "schedule": crontab(minute="*/15"),
     },
+    "schedule_confirmation_sweep_every_15min": {
+        # §83 — сторожит СУЩЕСТВУЮЩИЕ подтверждения расписания: снимает те,
+        # под которыми часы в Ayla уже изменились.
+        #
+        # Обход, а не событие, потому что события нет: замер 09.09.2026 —
+        # топик ``master.schedule.updated`` не приходил ни разу за всю
+        # историю. Консьюмер для него написан и верен, но сегодня молчит.
+        #
+        # Цена, которую этот интервал назначает: до 15 минут между
+        # изменением часов и снятием подтверждения. В это окно мастер
+        # продаётся по часам, которые владелица подтверждала не глядя на
+        # нынешние. Правило 4 исполняется как «не позднее чем через цикл»,
+        # и короче цикл — короче окно.
+        #
+        # Смещение на :08 — чтобы не бить в одну минуту с фан-аутом
+        # синхронизации на :00/:15/:30/:45: обе задачи ходят в Ayla.
+        "task": "apps.catalog.tasks.sweep_schedule_confirmations",
+        "schedule": crontab(minute="8,23,38,53"),
+    },
+    # DRF-1494 — the watchdog on the entry above. Scheduling a job is not
+    # the same as knowing it ran: this entry has been here since 2026-05-13
+    # and the pilot mirror still sat twelve days stale, because nothing read
+    # the outcome. Pages the on-call channel when any tenant's
+    # `last_catalog_sync_ok_at` is older than
+    # CATALOG_SYNC_STALE_AFTER_SECONDS.
+    #
+    # Hourly at :07 — offset past the :00/:15/:30/:45 sync ticks so it reads
+    # a clock the sync has just had its chance to advance, and hourly rather
+    # than per-cycle because `alerting.page` dedups on a 5-minute TTL and
+    # four lines an hour per stale salon is how an operator learns to mute
+    # the channel. Rationale in apps/catalog/staleness.py.
+    "catalog_sync_staleness_hourly": {
+        "task": "apps.catalog.tasks.alert_stale_catalog_sync",
+        "schedule": crontab(minute="7"),
+    },
+    # DRF-2379 — добить привязку мастера к каталогу там, где прямой вызов при
+    # заведении не прошёл. Часовой такт не случаен: «громкая строка один раз»
+    # в подметальщике держится тем, что окно истёкшего срока равно такту.
+    # Меняя такт, поменяйте и окно (`link_unlinked_salon_masters`).
+    # Минута 41 свободна: :00/:15/:30/:45 — синхронизация, :07 — сторож
+    # свежести, :08/:23/:38/:53 — обход подтверждений расписания. Три из
+    # четырёх ходят в Ayla, и бить в одну минуту с ними незачем.
+    "catalog_link_unlinked_masters_hourly": {
+        "task": "apps.catalog.tasks.link_unlinked_salon_masters",
+        "schedule": crontab(minute="41"),
+    },
     "cleanup_expired_replay_traces": {
         "task": "apps.replay.tasks.cleanup_expired_traces",
         # Daily 04:00 UTC — offset from the 03:00 audit cleanup so the
@@ -1203,6 +1483,16 @@ CELERY_BEAT_SCHEDULE = {
         # 04:00 replay cleanup; spike absorbed in tiers across the worker pool.
         "schedule": crontab(hour="3", minute="30"),
     },
+    # DRF-1488 — chase handoff tasks nobody picked up. Every 5 minutes: the
+    # SLA it guards is 15 minutes by default, so a coarser tick would spend a
+    # third of the budget waiting for the sweep itself. The job scans OPEN,
+    # unclaimed, not-yet-escalated tasks only — on the pilot that is a handful
+    # of rows a month — and the `pickup_escalated_at` stamp makes a re-run a
+    # no-op, so an overlapping tick cannot double-notify.
+    "handoff_sweep_unclaimed_tasks": {
+        "task": "handoff.sweep_unclaimed_tasks",
+        "schedule": crontab(minute="*/5"),
+    },
     # DRF-1370 — execute the pending «забудь всё» erasures. Hourly at :50,
     # NOT daily: the read gate already silences memory the moment the person
     # asks, so this cadence governs only how long the rows stay physically
@@ -1210,6 +1500,13 @@ CELERY_BEAT_SCHEDULE = {
     # scans one row per user who ever asked to be forgotten, so hourly is
     # cheap; :50 keeps it clear of the :15 idempotency cleanup and the :00 /
     # :30 booking sweeps.
+    # DRF-1950 — повтор удаления в Ayla по расписанию заданий (1м…24ч, 10 попыток).
+    # Каждые 5 минут: ближайшая пауза — минута, подметальщик берёт просроченные.
+    # Задача инертна, пока AYLA_ERASURE_RETRY_ENABLED не открыт.
+    "identity_ayla_erasure_sweep": {
+        "task": "apps.identity.tasks.ayla_erasure_sweep",
+        "schedule": crontab(minute="*/5"),
+    },
     "identity_forget_all_sweep": {
         "task": "apps.identity.tasks.forget_all_sweep",
         "schedule": crontab(minute="50"),
@@ -1245,6 +1542,17 @@ CELERY_BEAT_SCHEDULE = {
         "task": "bookings.escalate_stale_reminders",
         "schedule": crontab(minute="0"),
     },
+    # DRF-2346 — добить отмены, чьё окно возврата истекло. Отмену из Mini App
+    # завершает таймер на СТРАНИЦЕ, а страницу человек закрывает: до этой
+    # задачи такая запись оставалась «отмена запрошена» навсегда —
+    # напоминания не сняты, администратор видит «клиент попросил отменить»,
+    # слот занят. Минута — не «почаще на всякий случай»: окно возврата пять
+    # секунд, и человек, закрывший приложение, не должен ждать час, пока
+    # его слот освободится для других.
+    "bookings.commit_expired_cancels": {
+        "task": "bookings.commit_expired_cancels",
+        "schedule": crontab(minute="*"),
+    },
     # Phase 1 / R3 (DRF-846) — post-visit follow-up nudge. Runs once
     # daily at 19:00 МСК (= 16:00 UTC) and sends a low-pressure
     # "как прошёл вчерашний визит?" message to every client whose
@@ -1270,6 +1578,20 @@ CELERY_BEAT_SCHEDULE = {
     "workers.reap_pel": {
         "task": "apps.workers.tasks.reap_pel",
         "schedule": crontab(minute="*/5"),
+    },
+    # DRF-2220 — raw webhook bodies older than INGRESS_RAW_RETENTION_HOURS
+    # leave every ``ingress:*`` stream and its ``:dlq``. Not gated on the
+    # reaper flag: with the reaper off, failed entries have no other exit.
+    "workers.trim_ingress_streams": {
+        "task": "apps.workers.tasks.trim_ingress_streams",
+        "schedule": crontab(minute="17"),
+    },
+    # DRF-2242 — WebhookJournal: bodies past INGRESS_RAW_RETENTION_HOURS and
+    # rows past WEBHOOK_JOURNAL_ROW_RETENTION_DAYS, rolling edge only; the
+    # backlog is the `purge_webhook_journal` command's, on the owner's word.
+    "ingress.sweep_webhook_journal": {
+        "task": "apps.ingress.tasks.sweep_webhook_journal",
+        "schedule": crontab(minute="23"),
     },
     # PR #507 adversarial A8 — bound the cross-service event-ingest
     # tables' retention. DLQ persists envelope.data per §6.4 (PII
@@ -1301,10 +1623,11 @@ CELERY_BEAT_SCHEDULE = {
     # PR #535 follow-up Blocker #5 Layer 2 — AI draft retention sweep.
     # Hard-deletes terminal AiDraft rows (SENT_AS_MASTER / RELEASED_TO_AI
     # / REPLACED / DISMISSED) older than 30 days. Layer 1 (immediate
-    # content clear on status flip) lives in
-    # apps/master_api/services/ai_drafts.py — that closes the at-rest
-    # PII window. Layer 2 sweeps the metadata stubs after the finance
-    # reconciliation window closes. Daily 03:15 UTC — slotted between
+    # content clear on status flip) жил в apps/master_api/services/
+    # ai_drafts.py и снят вместе с перепиской мастер↔клиент (DRF-1528):
+    # новых черновиков не появляется, а слова из старых чистит стирание
+    # (apps/conversations/erasure.py). Эта — Layer 2 — выметает
+    # метаданные после финансового окна сверки. Daily 03:15 UTC — slotted between
     # the 03:00 audit cleanup and the 03:30 profile recompute to keep
     # worker pool spikes staggered.
     "purge_old_ai_drafts": {
@@ -1378,6 +1701,35 @@ CELERY_BEAT_SCHEDULE = {
         "task": "nutrition_proactive.send_water_reminders",
         "schedule": crontab(minute="20", hour="*/4"),
     },
+    # DRF-1464 (T5) — проактивная подсказка диетолога. Listed in advance
+    # for the same reason as the pair above: enabling is then an env
+    # change, not a deploy. No-ops while NUTRITION_COACH_ENABLED is
+    # False (the default) and only logs while NUTRITION_COACH_DRY_RUN
+    # is True (also the default).
+    #
+    # Once a day at 07:40 UTC = 10:40 MSK: waking hours for every pilot
+    # recipient (all on the default timezone, DRF-1477), late enough
+    # that the week's breakfasts and yesterday's dinner are already
+    # logged. The quiet-hours gate makes the tick a no-op for anyone it
+    # would wake, and the first non-quiet tick with a fired trigger
+    # spends the weekly budget (one hint a week, the DRF-1468 default
+    # for unlisted surfaces). :40 sits clear of the :00 / :05 / :20 /
+    # :37 beats.
+    "nutrition_proactive.send_coach_hints": {
+        "task": "nutrition_proactive.send_coach_hints",
+        "schedule": crontab(minute="40", hour="7"),
+    },
+    # DRF-2118 (тип 6) — «утренний итог» владельцу/админу салона от
+    # салонного бота. Ежечасно в :50 — свободно от :00 / :05 / :20 / :37 /
+    # :40; планировщик сверяет МЕСТНЫЙ час каждого салона
+    # (Tenant.features["morning_digest_hour"], иначе 09:00 по
+    # Tenant.timezone) и отбрасывает остальные 23 тика; квота 1/день на
+    # салон — дедуп по местной дате. No-op, пока SALON_MORNING_DIGEST_ENABLED
+    # (ниже) False — включение на стенде через env, не деплой.
+    "salon_notify.send_morning_digests": {
+        "task": "salon_notify.send_morning_digests",
+        "schedule": crontab(minute="50"),
+    },
     # DRF-1111 + DRF-1161 — mirror ↔ canon reconciliation detector.
     # Compares live bookings in Ayla against RemoteBookingProxy per
     # tenant, identifier by identifier; divergence logs every tick and
@@ -1396,7 +1748,60 @@ CELERY_BEAT_SCHEDULE = {
         "task": "apps.booking.tasks.reconcile_ayla_mirror",
         "schedule": crontab(minute="37"),
     },
+    # DRF-1616, блокер B-7 (наблюдаемость). Две задачи, написанные весной и
+    # ни разу не стоявшие в расписании (замер 11.09.2026: grep пуст). Обе
+    # входят через beat-обёртки с рубильником и DRY_RUN — как
+    # nutrition_proactive: запись безопасна до решения владельца включить.
+    # Порядок открытия ниже, у самих флагов.
+    "aggregate_ai_metrics_daily": {
+        # 03:05 UTC — докстринг задачи говорит «03:00, как Sprint 8»; пять
+        # минут после cleanup_old_audit_logs (03:00), чтобы два ночных
+        # прохода по всем тенантам не шли бок о бок.
+        "task": "apps.observability.tasks.aggregate_ai_metrics_daily_beat",
+        "schedule": crontab(hour="3", minute="5"),
+    },
+    "dispatch_pending_events_every_minute": {
+        # Диспетчер исходящего ящика. Минута — потому что ящик это доставка,
+        # и тревога о застрявшем ящике живёт внутри него: пока его никто не
+        # зовёт, она молчит (§23). DRY_RUN только считает pending.
+        "task": "apps.eventbus.dispatch_pending_events_beat",
+        "schedule": crontab(minute="*"),
+    },
 }
+
+# DRF-1616, блокер B-7 — четыре флага перед двумя beat-задачами
+# наблюдаемости. Та же форма, что у nutrition_proactive ниже, и тот же
+# порядок открытия: ENABLED=True + DRY_RUN=True первым, читать
+# `*.beat.dry_run` строки лога против ожидаемых чисел, потом DRY_RUN=False.
+#
+# AI_METRICS_BEAT_ENABLED: False — обёртка возвращает {"mode": "disabled"},
+#   не касаясь базы. DRY_RUN=True — считает тенантов и строки метрик за
+#   вчера, пишет в лог, сводок не создаёт, порогов не проверяет.
+# EVENTBUS_DISPATCH_BEAT_ENABLED: False — то же. DRY_RUN=True — считает
+#   pending в ящике, ничего не берёт под select_for_update и не помечает.
+#   ВНИМАНИЕ: DRY_RUN=False здесь означает настоящую доставку событий
+#   подписчикам — уведомления, аудит, биллинг. Это не «включить метрику».
+# Та же форма разбора, что у NUTRITION_PROACTIVE_* ниже: ENABLED открывается
+# только явным «да», DRY_RUN закрывается только явным «нет».
+_TRUTHY = ("true", "1")
+_FALSY = ("false", "0")
+AI_METRICS_BEAT_ENABLED = os.environ.get("AI_METRICS_BEAT_ENABLED", "false").lower() in _TRUTHY
+AI_METRICS_BEAT_DRY_RUN = os.environ.get("AI_METRICS_BEAT_DRY_RUN", "true").lower() not in _FALSY
+EVENTBUS_DISPATCH_BEAT_ENABLED = (
+    os.environ.get("EVENTBUS_DISPATCH_BEAT_ENABLED", "false").lower() in _TRUTHY
+)
+EVENTBUS_DISPATCH_BEAT_DRY_RUN = (
+    os.environ.get("EVENTBUS_DISPATCH_BEAT_DRY_RUN", "true").lower() not in _FALSY
+)
+
+# DRF-1950 (M3) — durable-удаление в Ayla: задание, повтор, readback каталога
+# (C5.3 / AMD-020, DRF-1984). Открывается только явным «да» и ТОЛЬКО после
+# выкладки каталожной ручки erasure-status: без неё каждое задание исчерпало бы
+# повторы и подняло алерт. Выключено — сегодняшнее поведение: «…удалены.» без
+# readback — названный долг против правила владельца, гасится этим флагом.
+AYLA_ERASURE_RETRY_ENABLED = (
+    os.environ.get("AYLA_ERASURE_RETRY_ENABLED", "false").lower() in _TRUTHY
+)
 
 # DRF-1285 - the two switches in front of every bot-initiated nutrition
 # message. Both are closed by default and both must be opened, in order,
@@ -1427,6 +1832,56 @@ NUTRITION_PROACTIVE_DRY_RUN = os.environ.get("NUTRITION_PROACTIVE_DRY_RUN", "tru
     "0",
 )
 
+# DRF-2118 (тип 6): выключатель «утреннего итога» салонного бота. False по
+# умолчанию — beat-тик отвечает {"disabled": 1}; включение на стенде — env,
+# по слову владельца. Час и пояс — у салона (см. apps.channels.max.salon_digest).
+SALON_MORNING_DIGEST_ENABLED = os.environ.get("SALON_MORNING_DIGEST_ENABLED", "false").lower() in (
+    "true",
+    "1",
+)
+
+# DRF-1464 - the two switches in front of the AI dietologist
+# (apps/nutrition_coach).
+#
+# NUTRITION_COACH_ENABLED: master switch. False - every coach surface
+#   stays silent without touching the database or Ayla. True opens THREE
+#   of them, and only one of the three is held by anything else:
+#     * the reactive answer (apps/channels/max/handler.py) - live at
+#       once, though it stays blind until CONCIERGE_NUTRITION_CONTEXT_
+#       ENABLED is on too, since the picture is what it answers from;
+#     * the diary observation line (apps/orchestrator/coach_observation)
+#       - live at once;
+#     * the weekly coach_hint push (T5) - held by DRY_RUN below.
+# NUTRITION_COACH_DRY_RUN: the safety inside the switch, and it covers
+#   the PUSH ONLY. True - the beat runs its full read path (goal reader,
+#   week picture) and logs exactly what it would have said and to whom,
+#   and says nothing. Its sole reader is
+#   nutrition_proactive.tasks.send_coach_hints, via flags.dry_run.
+#
+# So the ramp is: ENABLED=True first (the two solicited surfaces go live
+# to real people at that moment - that is the decision this flag IS),
+# read the ``nutrition_coach.*.dry_run`` lines the beat writes, and only
+# then DRY_RUN=False for the push. Dry-run is the LAST switch to open:
+# flipping both at once skips the only step that can catch a wording or
+# selection bug before a stranger gets an UNSOLICITED message about what
+# they eat.
+#
+# The earlier wording here promised «two conscious operator acts before a
+# single coach line reaches a real person». That was true of the push and
+# false of the other two, and an operator reading it would think nothing
+# was visible until the second act. Corrected 07.09.2026; the open
+# question about which order to actually open them in is
+# docs/OPEN_DECISIONS.md §59. Runtime readers:
+# apps/nutrition_coach/flags.py (getattr with these defaults).
+NUTRITION_COACH_ENABLED = os.environ.get("NUTRITION_COACH_ENABLED", "false").lower() in (
+    "true",
+    "1",
+)
+NUTRITION_COACH_DRY_RUN = os.environ.get("NUTRITION_COACH_DRY_RUN", "true").lower() not in (
+    "false",
+    "0",
+)
+
 # DRF-1344 — the single switch in front of the OBSERVE-occasion pipeline
 # (apps/wellness_proactive). False - the task returns immediately without
 # touching the database or Ayla. There is deliberately no DRY_RUN twin:
@@ -1436,6 +1891,15 @@ NUTRITION_PROACTIVE_DRY_RUN = os.environ.get("NUTRITION_PROACTIVE_DRY_RUN", "tru
 # decision about delivery, and delivery is out of scope — when texts land,
 # the tick reuses the DRF-1285 beat/quiet-hours infrastructure.
 WELLNESS_PROACTIVE_ENABLED = os.environ.get("WELLNESS_PROACTIVE_ENABLED", "false").lower() in (
+    "true",
+    "1",
+)
+
+# DRF-2101 — Plan Lite (§49): тот же ключ, что в каталоге. Default CLOSED:
+# включает главное окно на стенде после проверки владельцем. Выключен →
+# прокси customer/plan-lite отвечает 404 plan_lite_disabled ДО вызова
+# каталога, «мой план» в чате — не наш текст (уходит модели, как раньше).
+PLAN_LITE_ENABLED = os.environ.get("PLAN_LITE_ENABLED", "false").lower() in (
     "true",
     "1",
 )
@@ -1531,9 +1995,13 @@ ANTHROPIC_PROXY = os.environ.get("ANTHROPIC_PROXY", "")
 
 # LLM_QUOTA_FALLBACK_ENABLED — master switch for the router's one-hop
 # fallback onto another vendor when the chosen one reports its quota or
-# credit balance exhausted. On by default; the off switch exists so an
-# operator can pin traffic to a single vendor during a cost incident
-# without editing code.
+# credit balance exhausted — and, since DRF-2147, when it is unavailable
+# (timeout / connection failure / 5xx after the provider's own retries,
+# or an open breaker; never a 400 / 422). The name predates the widening
+# and is kept so existing deployments keep their switch. On by default;
+# the off switch exists so an operator can pin traffic to a single vendor
+# during a cost incident without editing code. Every switch pages the
+# operators («llm fallback», warning, deduplicated ALERTS_DEDUP_TTL_SECONDS).
 LLM_QUOTA_FALLBACK_ENABLED = os.environ.get("LLM_QUOTA_FALLBACK_ENABLED", "1") not in {
     "0",
     "false",
@@ -1643,6 +2111,11 @@ LLM_WARMUP_PROVIDERS = [
 # LLM_HEALTH_STATE_TTL_S: how long the Redis state keys live. A week —
 #   comfortably longer than any plausible gap between ticks. Losing the
 #   state costs at most one duplicate alert on the next transition.
+# LLM_HEALTH_PATH_STALE_S (DRF-2065): сколько секунд последний тик пробы
+#   считается знанием для readyz (``checks.llm.state``). 900 = три тика по
+#   5 минут; дольше — ``unknown`` с ``detail="stale"``: умерший beat не
+#   должен вечно показывать последний зелёный тик.
+LLM_HEALTH_PATH_STALE_S = int(os.environ.get("LLM_HEALTH_PATH_STALE_S", "900"))
 LLM_HEALTH_PROBE_ENABLED = os.environ.get("LLM_HEALTH_PROBE_ENABLED", "1") not in {
     "0",
     "false",
@@ -1684,7 +2157,7 @@ GLOBAL_BOT_TOKENS = os.environ.get("GLOBAL_BOT_TOKENS", "")
 #   MAX_BOTS=client,salon
 #   MAX_BOT_CLIENT_WEBHOOK_SECRET=...   MAX_BOT_SALON_WEBHOOK_SECRET=...
 #   MAX_BOT_CLIENT_API_TOKEN=...        MAX_BOT_SALON_API_TOKEN=...
-#   MAX_BOT_CLIENT_TENANT_SLUG=...      MAX_BOT_SALON_TENANT_SLUG=formula-tela
+#   MAX_BOT_CLIENT_TENANT_SLUG=...      (salon: no TENANT_SLUG — DRF-1785, tenant from the person)
 #   MAX_BOT_CLIENT_STREAM=max_global    MAX_BOT_SALON_STREAM=max_salon
 #   MAX_BOT_CLIENT_MINIAPP_URL=...      MAX_BOT_SALON_MINIAPP_URL=...
 #
@@ -1741,6 +2214,24 @@ GLOBAL_BOT_ONBOARDING = os.environ.get("GLOBAL_BOT_ONBOARDING", "false").lower()
 # (ask-eligibility → question → PATCH) is bypassed entirely — the W3 gated
 # services are not even called. The concierge dialog itself keeps working.
 CONCIERGE_MEMORY_ENABLED = os.environ.get("CONCIERGE_MEMORY_ENABLED", "true").lower() == "true"
+
+# DRF-1454 — deploy-free rollback for the food-scanner's own memory: the green
+# clarification write, the «Помню с прошлого раза» line on the recognition card,
+# and the routing change that lets a pending «✏️ Уточнить» claim the plain-text
+# answer. False restores the pre-DRF-1454 behaviour exactly — the scanner still
+# scans, it just forgets again.
+#
+# Default ON, following CONCIERGE_MEMORY_ENABLED (the other memory rollback
+# switch) rather than CONCIERGE_NUTRITION_CONTEXT_ENABLED. That one ships OFF
+# because it was measured to change no reply while costing ~200 input tokens a
+# turn; this one costs no LLM tokens at all and its whole observable effect is
+# the behaviour the ticket asked for — a switch that ships off would ship the
+# feature off. The surface it rides is itself already dark by default
+# (NUTRITION_ENABLED / FOOD_PHOTO_SCAN_ENABLED both default False), so ON here
+# cannot turn anything on that an operator has not already turned on.
+FOOD_SCANNER_MEMORY_ENABLED = (
+    os.environ.get("FOOD_SCANNER_MEMORY_ENABLED", "true").lower() == "true"
+)
 
 # DRF-1266 (slice 1, multi-pass concierge) — cap on LLM passes per concierge
 # turn. Pass 1 is the primary call; each further pass feeds the executed
@@ -1828,11 +2319,11 @@ CHROMA_HTTP_HOST = os.environ.get("CHROMA_HTTP_HOST", "").strip()
 CHROMA_HTTP_PORT = int(os.environ.get("CHROMA_HTTP_PORT", "8001"))
 CHROMA_AUTH_TOKEN = os.environ.get("CHROMA_AUTH_TOKEN", "").strip()
 
-# S3/minio endpoint — exposed as a settings attribute so the readyz
-# minio probe (apps/orchestrator/views.py) checks the configured
-# endpoint instead of its getattr localhost default. Replay/S3 writers
-# read env directly today; this is the single attribute probes rely on.
-S3_ENDPOINT_URL = os.environ.get("S3_ENDPOINT_URL", "http://localhost:9000")
+# DRF-2611: no S3_ENDPOINT_URL setting. Its only reader was the readyz MinIO
+# ping — nothing in the bot writes to object storage, so MinIO left the stack.
+# The backup scripts' S3_* variables are a DIFFERENT configuration read from
+# /etc/formula_tela/backup.env (scripts/backup/**) and are not touched here;
+# tests/test_no_minio_in_bot_stack_2611.py keeps the two apart.
 
 # Catalog sync (Ayla internal catalog → CatalogService mirror). S3B (#1044):
 # the sync service pulls `salon-services` from Ayla's internal Bearer catalog
@@ -1844,6 +2335,103 @@ S3_ENDPOINT_URL = os.environ.get("S3_ENDPOINT_URL", "http://localhost:9000")
 CATALOG_SYNC_LOCK_TTL_SECONDS = int(os.environ.get("CATALOG_SYNC_LOCK_TTL_SECONDS", str(25 * 60)))
 CATALOG_SYNC_HTTP_TIMEOUT = int(os.environ.get("CATALOG_SYNC_HTTP_TIMEOUT", "30"))
 CATALOG_SYNC_HTTP_RETRIES = int(os.environ.get("CATALOG_SYNC_HTTP_RETRIES", "3"))
+
+# DRF-1595 — ceiling, in seconds, on the wall-clock ONE catalog sync run may
+# spend asleep waiting out Ayla's `429 THROTTLED` (its body carries the
+# `wait_seconds` to honour). Spent only on 429s: a healthy run never touches
+# it.
+#
+# 240 is one third of `sync_catalog_for_all_tenants`'s soft_time_limit=720,
+# which is itself under the 900s beat cadence. The budget has to exist at all
+# because the honest response to a 429 — sleep the time upstream asked for —
+# multiplied by tenants × three catalog surfaces would overrun that limit and
+# get the whole fan-out killed mid-cycle: every salon unsynced instead of the
+# two at the tail. 240 leaves ~480s for the actual fetch/upsert work while
+# still admitting roughly four waits at the wait_seconds=54 the pilot
+# observed. There is deliberately NO separate per-wait cap — the remaining
+# budget is itself the cap, so an upstream asking for ten minutes is refused
+# without a second knob to keep in sync.
+CATALOG_SYNC_THROTTLE_WAIT_BUDGET_SECONDS = int(
+    os.environ.get("CATALOG_SYNC_THROTTLE_WAIT_BUDGET_SECONDS", "240")
+)
+
+# DRF-1494 — age of `Tenant.last_catalog_sync_ok_at` above which
+# `apps.catalog.tasks.alert_stale_catalog_sync` pages the on-call channel.
+#
+# One hour = four beat cycles. The floor is what a HEALTHY contour can
+# produce: 15-min cadence, a lock TTL of 25 min bounding a legal skip pair
+# at ~30 min, and a 12-min soft limit on the run behind it — worst honest
+# case ~45 min. An hour is the first round number outside that envelope, so
+# crossing it cannot be normal behaviour and a page is always actionable.
+# The ceiling is the client: a stale mirror does not degrade the bot, it
+# makes it confidently deny services the salon sells. Full reasoning lives
+# in apps/catalog/staleness.py, next to the code that applies it.
+CATALOG_SYNC_STALE_AFTER_SECONDS = int(os.environ.get("CATALOG_SYNC_STALE_AFTER_SECONDS", "3600"))
+
+# DRF-1942 — распознавание голосовых (apps/speech), этап 1 голосового ввода.
+# Здесь только настройки самого распознавания. Включение голоса людям
+# (VOICE_INPUT_ENABLED, флаг трансграничной передачи, эхо, гейт без
+# знаков) — PR 3 того же этапа; без них ничего из этого не вызывается.
+#
+# VOICE_STT_PROVIDER — `openai` (решение владельца, K1 18.09.2026) или
+#   `fake` (тесты, локальная работа без сети). Неизвестное имя → отказ
+#   `voice_provider_unavailable`, не падение.
+# VOICE_STT_MODEL — `gpt-transcribe`: whisper-1 и gpt-4o-*-transcribe
+#   OpenAI отключает 26.02.2027. Ключ и прокси — общие с текстовым
+#   провайдером: OPENAI_API_KEY / OPENAI_PROXY.
+# VOICE_STT_TIMEOUT_S — бюджет одного вызова провайдера (замер этапа 0:
+#   норма 1–2 с, один из 198 запросов повис). Вызывающий может передать
+#   меньше — остаток общего лимита хода.
+# VOICE_MAX_DURATION_S — длиннее не отправляем (отказ `voice_too_long`
+#   до траты денег); рекомендация ТЗ — 60 с, решение владельца открыто.
+# VOICE_STT_MONTHLY_MINUTES_CAP — потолок минут аудио в календарный месяц
+#   (вопрос 7 ТЗ); 0 = без потолка. Счётчик в кэше, best-effort.
+VOICE_STT_PROVIDER = os.environ.get("VOICE_STT_PROVIDER", "openai")
+VOICE_STT_MODEL = os.environ.get("VOICE_STT_MODEL", "gpt-transcribe")
+VOICE_STT_TIMEOUT_S = float(os.environ.get("VOICE_STT_TIMEOUT_S", "15"))
+VOICE_MAX_DURATION_S = float(os.environ.get("VOICE_MAX_DURATION_S", "60"))
+VOICE_STT_MONTHLY_MINUTES_CAP = int(os.environ.get("VOICE_STT_MONTHLY_MINUTES_CAP", "0"))
+
+# DRF-1942 (PR 3) — голосовое как вход бота (apps/channels/max/voice_turn.py).
+# Все флаги выключены по умолчанию; при выключенном VOICE_INPUT_ENABLED
+# поведение байт в байт как у заглушки DRF-1939. Значение флага — явный
+# набор слов (true/1/yes, регистр и пробелы по краям не важны); «on» — выключено.
+#
+# VOICE_INPUT_ENABLED — главный выключатель. Включать людям только словом
+#   владельца после S1-валидации (ТЗ §5, F0).
+# VOICE_CROSS_BORDER_ALLOWED — отдельное разрешение на передачу голоса за
+#   рубеж (провайдер openai). Без него при включённом главном флаге файл
+#   не скачивается и человек получает «сейчас не могу разобрать голосовое».
+# VOICE_ECHO_MODE — never | always: «Я услышала: «…»» перед ответом
+#   (вопрос 4 ТЗ; режим «при неуверенности» невозможен — gpt-transcribe
+#   уверенность не отдаёт). По умолчанию always — решение владельца 28.09
+#   (DRF-2425): ошибка распознавания видна до того, как уедет в дневник.
+# VOICE_GATE_STRIP_PUNCT — K19-Б (решение владельца 22.09): гейту safety
+#   отдаётся копия расшифровки без знаков препинания. Выключить, когда окно
+#   safety поправит исключение гиперболы в pre_check.py (вариант А).
+# VOICE_TURN_BUDGET_S — общий лимит на скачивание + распознавание в одном
+#   ходе; потребитель очереди один на всех, зависший ход задерживает всех.
+_VOICE_TRUE = ("true", "1", "yes")
+VOICE_INPUT_ENABLED = os.environ.get("VOICE_INPUT_ENABLED", "false").strip().lower() in _VOICE_TRUE
+VOICE_CROSS_BORDER_ALLOWED = (
+    os.environ.get("VOICE_CROSS_BORDER_ALLOWED", "false").strip().lower() in _VOICE_TRUE
+)
+VOICE_ECHO_MODE = os.environ.get("VOICE_ECHO_MODE", "always").strip().lower()
+VOICE_GATE_STRIP_PUNCT = (
+    os.environ.get("VOICE_GATE_STRIP_PUNCT", "true").strip().lower() in _VOICE_TRUE
+)
+VOICE_TURN_BUDGET_S = float(os.environ.get("VOICE_TURN_BUDGET_S", "20"))
+
+# DRF-1500 — экран здоровья контура (/admin/health/). Опрос Ayla за
+# полными числами услуг/мастеров: короткий таймаут (экран не ждёт дольше,
+# чем оператор) и кэш (свежесть в минутах достаточна против расхождения
+# в дни; бэкенд не бьём на каждое обновление страницы).
+CONTOUR_HEALTH_UPSTREAM_TIMEOUT_SECONDS = int(
+    os.environ.get("CONTOUR_HEALTH_UPSTREAM_TIMEOUT_SECONDS", "5")
+)
+CONTOUR_HEALTH_UPSTREAM_CACHE_SECONDS = int(
+    os.environ.get("CONTOUR_HEALTH_UPSTREAM_CACHE_SECONDS", "300")
+)
 
 # KB-RAG Sub-4b (GH #128) — Google Docs read-only client takes NO
 # credentials. It fetches source docs via the public Markdown export
@@ -2123,6 +2711,14 @@ LOGGING = {
     "root": {
         "level": "INFO",
         "handlers": ["console"],
+    },
+    # DRF-2272 — uvicorn ставит свои обработчики (``propagate=False``), и
+    # access-строка «метод путь?query статус» шла на диск мимо фильтра ПДн.
+    # Django применяет этот конфиг при загрузке приложения — ПОСЛЕ uvicorn,
+    # поэтому здесь его логгеры переводятся на тот же ``console``.
+    "loggers": {
+        name: {"handlers": ["console"], "level": "INFO", "propagate": False}
+        for name in ("uvicorn", "uvicorn.error", "uvicorn.access")
     },
 }
 

@@ -52,21 +52,31 @@ import {
   useState,
 } from "react";
 import { useNavigate, useParams } from "react-router-dom";
+import { useScreenBack } from "../../hooks/useScreenBack";
+import { backTo } from "../../lib/screen-back";
 
 import { Snackbar } from "../../components/Snackbar";
 import { StateError } from "../../components/StateError";
+import {
+  confirmationLabel,
+  confirmationState,
+} from "../../lib/schedule-confirmation-state";
 import { ApiError } from "../../lib/api";
 import {
+  confirmMasterSchedule,
   getMasterAudit,
   getMasterDetail,
+  getMasterSchedule,
   patchMaster,
   reactivateMaster,
   uploadMasterPhoto,
   type AuditEvent,
   type MasterDetail,
   type MasterPatchPayload,
+  type MasterSchedule,
   type MeResponse,
 } from "../../lib/admin-api";
+import { MasterPhoto } from "../../components/MasterPhoto";
 import {
   hapticNotify,
   hapticSelection,
@@ -184,6 +194,9 @@ function actionToHuman(ev: AuditEvent): string {
       return "обновил(а) фото";
     case "master.invited":
       return "пригласил(а) мастера";
+    // Новых таких строк не появляется с §44.4 — приглашение больше не
+    // шлёт личных сообщений. Ветка остаётся ради тех, что уже лежат в
+    // аудите: без неё лента нарисовала бы им сырой слаг.
     case "master.invite_dispatched":
       return "выслал(а) приглашение";
     case "master.onboarding_accepted":
@@ -248,8 +261,164 @@ function statusChip(master: MasterDetail): { label: string; cls: string } {
   return { label: "● Активен", cls: "admin-chip" };
 }
 
+const WEEKDAYS_SHORT = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"];
+
+/**
+ * «График» — часы мастера и кнопка «Расписание верно» (§83).
+ *
+ * Отдельный компонент со своей загрузкой, а не поле карточки: чтение ходит
+ * в источник по сети, и его недоступность не должна ронять имя, услуги и
+ * состояние мастера. Здесь она рисует названную причину, и только здесь.
+ *
+ * Три вещи, которые экран обязан различать, и все три — разные подписи:
+ *   - подтверждения нет вовсе;
+ *   - подтверждение есть и оно про ЭТИ часы;
+ *   - подтверждение есть, но часы изменились после него.
+ * Третье не имеет права выглядеть как второе: мастер в этом состоянии с
+ * витрины уйдёт, и владелица должна понимать почему.
+ */
+function MasterScheduleSection({ masterId, isOwner }: { masterId: string; isOwner: boolean }) {
+  const [schedule, setSchedule] = useState<MasterSchedule | null>(null);
+  const [loading, setLoading] = useState<boolean>(false);
+  const [err, setErr] = useState<unknown>(null);
+  const [confirming, setConfirming] = useState<boolean>(false);
+  const [confirmErr, setConfirmErr] = useState<string>("");
+
+  const load = useCallback(
+    async (signal?: AbortSignal) => {
+      if (!masterId) return;
+      setLoading(true);
+      setErr(null);
+      try {
+        const s = await getMasterSchedule(masterId, { signal });
+        if (signal?.aborted) return;
+        setSchedule(s);
+      } catch (e) {
+        if ((e as DOMException | undefined)?.name === "AbortError") return;
+        setErr(e);
+      } finally {
+        if (!signal?.aborted) setLoading(false);
+      }
+    },
+    [masterId],
+  );
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void load(controller.signal);
+    return () => controller.abort();
+  }, [load]);
+
+  const onConfirm = useCallback(async () => {
+    if (!schedule) return;
+    setConfirming(true);
+    setConfirmErr("");
+    try {
+      setSchedule(await confirmMasterSchedule(masterId, schedule.confirmation.fingerprint));
+    } catch (e) {
+      // Часы изменились, пока владелица смотрела. Это не сбой и не отказ
+      // в праве — экран устарел, и честный ответ один: показать заново.
+      const slug = e instanceof ApiError ? e.slug : "";
+      if (slug === "stale_view") {
+        setConfirmErr("Часы изменились, пока вы смотрели. Проверьте их заново.");
+        void load();
+      } else if (slug === "no_working_day") {
+        setConfirmErr("В расписании нет ни одного рабочего дня — подтверждать нечего.");
+      } else {
+        setConfirmErr("Не удалось подтвердить. Попробуйте ещё раз.");
+      }
+    } finally {
+      setConfirming(false);
+    }
+  }, [schedule, masterId, load]);
+
+  const confirmation = schedule?.confirmation;
+  const state = confirmationState(confirmation);
+
+  return (
+    <section style={{ marginBottom: "var(--s-4)" }}>
+      <h2 style={{ fontSize: "var(--text-h3-size, 18px)", margin: "0 0 var(--s-2)" }}>График</h2>
+
+      {loading && !schedule && <p style={{ margin: "0 0 var(--s-2)" }}>Загружаю часы…</p>}
+
+      {err != null && (
+        // Причина названа, а не подменена пустым расписанием: пустой
+        // список читался бы как «мастер не работает никогда», и владелица
+        // пошла бы чинить график, с которым всё в порядке.
+        <p style={{ margin: "0 0 var(--s-2)", color: "var(--c-text-secondary)" }}>
+          Часы сейчас не прочитать — расписание отдаёт другая система, и она не
+          ответила. Попробуйте обновить позже.
+        </p>
+      )}
+
+      {schedule && (
+        <>
+          <ul style={{ listStyle: "none", padding: 0, margin: "0 0 var(--s-3)" }}>
+            {schedule.days.map((day) => (
+              <li
+                key={day.day_of_week}
+                style={{ display: "flex", gap: "var(--s-2)", padding: "2px 0" }}
+              >
+                <span style={{ minWidth: "2.5em" }}>{WEEKDAYS_SHORT[day.day_of_week]}</span>
+                <span>
+                  {day.is_working_day && day.start_time && day.end_time
+                    ? `${day.start_time}–${day.end_time}`
+                    : "выходной"}
+                </span>
+                {day.break_start && day.break_end && (
+                  <span style={{ color: "var(--c-text-secondary)" }}>
+                    {`перерыв ${day.break_start}–${day.break_end}`}
+                  </span>
+                )}
+              </li>
+            ))}
+          </ul>
+
+          {state === "confirmed" ? (
+            <p style={{ margin: "0 0 var(--s-2)" }}>
+              {confirmationLabel(confirmation)}
+            </p>
+          ) : (
+            <>
+              <p style={{ margin: "0 0 var(--s-1)", fontWeight: 600 }}>
+                {confirmationLabel(confirmation)}
+              </p>
+              <p style={{ margin: "0 0 var(--s-2)", color: "var(--c-text-secondary)" }}>
+                {confirmation?.block === "no_working_day"
+                  ? "В расписании нет ни одного рабочего дня — подтверждать нечего."
+                  : "Проверьте рабочие часы мастера"}
+              </p>
+            </>
+          )}
+
+          {state !== "confirmed" && (
+            <button
+              type="button"
+              className="btn-secondary"
+              onClick={() => void onConfirm()}
+              disabled={!isOwner || confirming || confirmation?.block != null}
+              title={isOwner ? undefined : "Подтвердить расписание может только владелец"}
+            >
+              {confirming ? "Подтверждаю…" : "Расписание верно"}
+            </button>
+          )}
+
+          {confirmErr && (
+            <p style={{ margin: "var(--s-1) 0 0", color: "var(--c-text-secondary)" }}>
+              {confirmErr}
+            </p>
+          )}
+        </>
+      )}
+    </section>
+  );
+}
+
+/** «9 сентября» — дата подтверждения словами, как в решении владельца. */
 export function AdminMasterDetailScreen({ me }: Props) {
   const navigate = useNavigate();
+  // DRF-2368 — карточка мастера открывается из ростера, туда и возвращает.
+  const onBack = useScreenBack(backTo("/admin/team"));
   const { masterId = "" } = useParams<{ masterId: string }>();
 
   const [master, setMaster] = useState<MasterDetail | null>(null);
@@ -297,7 +466,7 @@ export function AdminMasterDetailScreen({ me }: Props) {
       setBackButton(false);
       setClosingConfirmation(false);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `navigate` нужен только внутри обработчика системной кнопки; привязка делается один раз за монтирование
   }, []);
 
   useEffect(() => {
@@ -432,7 +601,7 @@ export function AdminMasterDetailScreen({ me }: Props) {
           setEditor({
             ...editor,
             saving: false,
-            err: e.detail || "Не получилось сохранить",
+            err: "Не получилось сохранить",
           });
         }
       } else {
@@ -469,7 +638,7 @@ export function AdminMasterDetailScreen({ me }: Props) {
         setToast("✓ Фото обновлено");
       } catch (e) {
         if (e instanceof ApiError) {
-          setPhotoErr(e.detail || "Не получилось загрузить фото");
+          setPhotoErr("Не получилось загрузить фото");
         } else {
           setPhotoErr("Связь пропала. Проверьте интернет.");
         }
@@ -497,7 +666,7 @@ export function AdminMasterDetailScreen({ me }: Props) {
     } catch (e) {
       const msg =
         e instanceof ApiError
-          ? e.detail || "Не получилось восстановить"
+          ? "Не получилось восстановить"
           : "Связь пропала — попробуйте ещё раз";
       setToast(msg);
     } finally {
@@ -532,7 +701,7 @@ export function AdminMasterDetailScreen({ me }: Props) {
           type="button"
           className="btn-secondary"
           style={{ marginTop: "var(--s-3)" }}
-          onClick={() => navigate("/admin/team")}
+          onClick={onBack}
         >
           Вернуться к команде
         </button>
@@ -547,7 +716,7 @@ export function AdminMasterDetailScreen({ me }: Props) {
           <button
             type="button"
             className="admin-flow-back"
-            onClick={() => navigate("/admin/team")}
+            onClick={onBack}
             aria-label="К команде"
           >
             ← Мастера
@@ -565,7 +734,7 @@ export function AdminMasterDetailScreen({ me }: Props) {
           <button
             type="button"
             className="admin-flow-back"
-            onClick={() => navigate("/admin/team")}
+            onClick={onBack}
             aria-label="К команде"
           >
             ← Мастера
@@ -587,7 +756,7 @@ export function AdminMasterDetailScreen({ me }: Props) {
           type="button"
           className="btn-secondary"
           style={{ marginTop: "var(--s-3)" }}
-          onClick={() => navigate("/admin/team")}
+          onClick={onBack}
         >
           Вернуться к команде
         </button>
@@ -613,7 +782,7 @@ export function AdminMasterDetailScreen({ me }: Props) {
         <button
           type="button"
           className="admin-flow-back"
-          onClick={() => navigate("/admin/team")}
+          onClick={onBack}
           aria-label="Назад к команде"
           style={{
             background: "transparent",
@@ -790,15 +959,12 @@ export function AdminMasterDetailScreen({ me }: Props) {
               fontWeight: 600,
             }}
           >
-            {master.photo_url ? (
-              <img
-                src={master.photo_url}
-                alt={`Фото ${master.name}`}
-                style={{ width: "100%", height: "100%", objectFit: "cover" }}
-              />
-            ) : (
-              <span aria-hidden="true">{initials(master.name)}</span>
-            )}
+            <MasterPhoto
+              src={master.photo_url}
+              alt={`Фото ${master.name}`}
+              style={{ width: "100%", height: "100%", objectFit: "cover" }}
+              fallback={<span aria-hidden="true">{initials(master.name)}</span>}
+            />
           </span>
           <div style={{ display: "flex", flexDirection: "column", gap: "var(--s-2)" }}>
             <input
@@ -998,22 +1164,7 @@ export function AdminMasterDetailScreen({ me }: Props) {
         </button>
       </section>
 
-      <section style={{ marginBottom: "var(--s-4)" }}>
-        <h2 style={{ fontSize: "var(--text-h3-size, 18px)", margin: "0 0 var(--s-2)" }}>
-          График
-        </h2>
-        <p style={{ margin: "0 0 var(--s-2)" }}>
-          {master.working_hours_summary || "Расписание уточнит салон"}
-        </p>
-        <button
-          type="button"
-          className="btn-secondary"
-          disabled
-          title="Скоро"
-        >
-          Редактировать график →
-        </button>
-      </section>
+      <MasterScheduleSection masterId={master.id} isOwner={me.is_owner} />
 
       <section style={{ marginBottom: "var(--s-4)" }}>
         <h2 style={{ fontSize: "var(--text-h3-size, 18px)", margin: "0 0 var(--s-2)" }}>
@@ -1066,7 +1217,7 @@ export function AdminMasterDetailScreen({ me }: Props) {
                 key={ev.id}
                 style={{
                   padding: "var(--s-2) 0",
-                  borderBottom: "1px solid var(--c-border, rgba(0,0,0,0.08))",
+                  borderBottom: "1px solid var(--c-divider)",
                 }}
               >
                 <span style={{ color: "var(--c-text-secondary)" }}>

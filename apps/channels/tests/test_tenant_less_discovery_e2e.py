@@ -139,6 +139,10 @@ def massage_master():
         is_active=True,
         invite_status=CatalogMaster.InviteStatus.ACCEPTED,
         external_updated_at=dj_timezone.now(),
+        # DRF-1540/1544 — синхронизированная строка несёт канонический ключ.
+        # Без него мастер не продаётся, и клиентские поверхности отвечали бы
+        # пустотой не потому, что сломаны.
+        ayla_user_id=uuid.uuid4(),
     )
     service = CatalogService.all_tenants.create(
         tenant=tenant,

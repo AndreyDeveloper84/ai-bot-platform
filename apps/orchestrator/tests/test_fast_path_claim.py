@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
@@ -71,6 +72,20 @@ from apps.orchestrator.fast_path import (
 #: degrade to «nothing recognised» rather than failing, so an unmarked test
 #: here would pass for the wrong reason.
 pytestmark = pytest.mark.django_db
+
+
+@pytest.fixture(autouse=True)
+def _nutrition_contour_on(settings):
+    """DRF-1994 — этот модуль проверяет контур питания ВКЛЮЧЁННЫМ.
+
+    До единого выключателя пути анкеты/дневника/воды флаг не читали, и
+    модуль работал при любом его значении. Теперь умолчание ``False``
+    (fail-closed по решению владельца) даёт заглушку — и то, что модуль
+    всегда предполагал, названо явно. Выключенное поведение живёт в
+    ``test_nutrition_single_switch_1994``.
+    """
+    settings.NUTRITION_ENABLED = True
+
 
 _CONCIERGE_PY = Path(fast_path.__file__).resolve().parent / "concierge.py"
 
@@ -98,6 +113,10 @@ def penza() -> None:
         is_active=True,
         invite_status=CatalogMaster.InviteStatus.ACCEPTED,
         external_updated_at=datetime(2026, 8, 24, 12, 0, tzinfo=timezone.utc),
+        # DRF-1540/1544 — синхронизированная строка несёт канонический ключ.
+        # Без него мастер не продаётся, и клиентские поверхности отвечали бы
+        # пустотой не потому, что сломаны.
+        ayla_user_id=uuid4(),
     )
 
 
@@ -163,17 +182,60 @@ class TestRosterIsCovered:
 
 
 class TestRosterIsTheRealOne:
-    """The constant this file reads is the one the concierge actually passes."""
+    """The constant this file reads is the one the concierge actually passes.
 
-    def test_tool_definitions_is_the_constant(self) -> None:
+    DRF-1779 changed the shape: the roster handed to the model is no longer
+    the constant itself but ``_tools_offered(text, conversation)`` — the
+    constant MINUS the tools whose executor would deterministically refuse
+    the call (today: ``health_screening`` when no symptom is named or the
+    screening questions were already asked; DRF-1878: ``confirm_said_fact``
+    when the person has no said facts to confirm). The guard therefore checks two
+    things: the call site hands over ``_tools_offered``, and ``_tools_offered``
+    subtracts from THIS constant — the same spec objects, in the same order —
+    rather than from a private copy that could drift.
+    """
+
+    def test_tool_definitions_is_the_computed_roster(self) -> None:
         src = _CONCIERGE_PY.read_text(encoding="utf-8")
-        assert re.search(r"tool_definitions\s*=\s*CONCIERGE_TOOL_SPECS\b", src), (
-            f"{_CONCIERGE_PY} no longer hands `tool_definitions` the "
-            "CONCIERGE_TOOL_SPECS constant. Whatever it hands over instead is "
-            "the real roster, and this file is no longer guarding it — point "
-            "the concierge back at the constant, or teach this reader the new "
+        assert re.search(r"tool_definitions\s*=\s*_tools_offered\(", src), (
+            f"{_CONCIERGE_PY} no longer hands `tool_definitions` to "
+            "`_tools_offered(...)`. Whatever it hands over instead is the real "
+            "roster, and this file is no longer guarding it — point the "
+            "concierge back at `_tools_offered`, or teach this reader the new "
             "shape. Do not delete the test (DRF-1328)."
         )
+
+    def test_full_roster_is_the_constant_itself(self, monkeypatch) -> None:
+        """A symptom with no prior screening and a person with said facts →
+        nothing subtracted: the very same spec objects, in the constant's order."""
+        from apps.orchestrator import concierge
+        from apps.orchestrator.concierge import _tools_offered
+
+        monkeypatch.setattr(concierge, "_has_said_facts", lambda _conversation: True)
+        # DRF-1923: и ход C05 — иначе confirm_said_fact отнимается по стадии.
+        monkeypatch.setattr(concierge, "execution_stage_turn", lambda _text, _conversation: True)
+        offered = _tools_offered("болит спина", conversation=None)
+        assert [id(spec) for spec in offered] == [id(spec) for spec in CONCIERGE_TOOL_SPECS]
+
+    def test_reduced_roster_is_the_constant_minus_the_refused_tool(self) -> None:
+        """No symptom and no said facts → ``health_screening`` and
+        ``confirm_said_fact`` are the ONLY tools withheld, and every remaining
+        spec IS an element of the constant (not a copy)."""
+        from apps.orchestrator.concierge import _tools_offered
+
+        offered = _tools_offered("привет", conversation=None)
+        constant_ids = {id(spec): spec for spec in CONCIERGE_TOOL_SPECS}
+        assert all(id(spec) in constant_ids for spec in offered)
+        withheld = sorted(_roster() - {str(spec["name"]) for spec in offered})
+        assert withheld == ["confirm_said_fact", "health_screening"], withheld
+
+    def test_subtraction_reads_the_constant_not_a_copy(self) -> None:
+        """Source-level: the helper's body names CONCIERGE_TOOL_SPECS and no
+        other list literal of specs."""
+        src = _CONCIERGE_PY.read_text(encoding="utf-8")
+        start = src.index("def _tools_offered(")
+        body = src[start : src.index("\n\n\n", start)]
+        assert body.count("CONCIERGE_TOOL_SPECS") >= 2, body
 
 
 class TestSampleTurnsRouteAsDeclared:

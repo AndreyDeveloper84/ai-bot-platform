@@ -1,0 +1,12 @@
+{% extends "admin/change_list.html" %}
+{% load i18n %}
+{# DRF-2082: выдача кода — своя страница (get_urls): код показывается один раз, в базе только хеш. #}
+
+{% block object-tools-items %}
+  {{ block.super }}
+  {% if perms.tenancy.platform_operations %}
+  <li>
+    <a href="issue/" class="addlink">Выдать код приглашения</a>
+  </li>
+  {% endif %}
+{% endblock %}

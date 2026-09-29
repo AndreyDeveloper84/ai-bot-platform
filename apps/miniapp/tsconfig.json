@@ -24,5 +24,8 @@
     }
   },
   "include": ["src"],
+  // DRF-1893: node-тест прод-сборки (`// @vitest-environment node`) использует
+  // node:fs / process — типов node в пакете нет; vitest его запускает, tsc — нет.
+  "exclude": ["src/**/*.build.test.ts"],
   "references": [{ "path": "./tsconfig.node.json" }]
 }

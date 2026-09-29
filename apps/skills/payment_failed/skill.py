@@ -42,7 +42,7 @@ Master DM **actively fires** via local mirror lookup chain:
     → .specialist_id (Ayla Master UUID)
     → CatalogMaster.ayla_user_id == specialist_id
     → .linked_bot_user (OneToOne к BotUser)
-    → BotUser.chat_id → send_message
+    → BotUser.channel_user_id → send_message(user_id=…)  ← DRF-1558
 
 All hops are bot-platform mirror tables — no cross-repo DB / REST call
 per ADR-0009 §Hard rule #2. Mirror staleness gap (Ayla canonical may be
@@ -55,14 +55,22 @@ stale docstring assumption that W1's CatalogMaster.ayla_user_id +
 linked_bot_user fields hadn't shipped yet. They have; α-mode is
 removed.
 
-### Retry endpoint — pending Alpha task #66
+### Retry endpoint — дописан (DRF-2339)
 
-Tech-lead 2026-05-24: Alpha расширяет ``POST /payments/<id>/retry/``
-с новым permission class ``IsBotServiceWithVerifiedClient`` (defense-
-in-depth — bearer token + ``X-External-User-ID`` + body.client_id
-cross-check). Тот PR — task #66. Этот skill пока имеет TODO-заглушку
-в callback handler; финальная integration в task #67 (расширение
-``apps/integrations/ayla_payments/client.py`` с ``retry_payment()``).
+Ручка каталога — ``POST /api/v1/payments/internal/<id>/retry/``,
+permission ``IsBotServiceWithVerifiedClient`` (bearer + ``X-External-User-ID``
++ перекрёстная проверка ``body.client_id``) — существует с task #66. Половина
+бота (task #67) дописана не была: ``_try_call_ayla_retry`` безусловно
+возвращал заглушку «оплата временно недоступна через бот», а у клиента
+платежей не было метода повтора. Человек, у которого только что не прошёл
+платёж, получал кнопку, которая не платит.
+
+Теперь тап зовёт ``AylaPaymentsClient.retry_payment`` и разводит
+ЗАДОКУМЕНТИРОВАННЫЕ ответы ручки на тексты, которые в этом файле уже были:
+201 → ссылка, 409 → «оплата уже неактуальна», 502/503/таймаут → «провайдер
+недоступен», 401/403/404 → «эта кнопка не для тебя». Новых слов правка не
+сочиняет. Ключ идемпотентности ``payment_retry:<payment_id>`` — повторный
+тап не создаёт второй платёж.
 
 ### Security focus (per §H.3)
 
@@ -83,6 +91,7 @@ import logging
 from typing import Any, ClassVar
 
 from apps.events.services import emit
+from apps.integrations.ayla_payments import get_ayla_payments_client
 from apps.skills.base import SkillContext, SkillResult
 from apps.skills.registry import register
 
@@ -129,12 +138,6 @@ _CLIENT_RETRY_BUTTON_LABEL = "Оплатить"
 
 # Ответ клиенту когда retry успешен.
 _CLIENT_RETRY_SUCCESS_TEMPLATE = "Готово! Открой ссылку для оплаты:\n{confirmation_url}"
-
-# Заглушка пока Alpha task #66 не закроет endpoint extension.
-_CLIENT_RETRY_PENDING_TEMPLATE = (
-    "Сейчас оплата временно недоступна для повторной попытки через бот. "
-    "Свяжись с салоном напрямую — администратор оформит новую ссылку."
-)
 
 # Ответ когда payment уже не в retry-eligible state (409 от Ayla).
 _CLIENT_RETRY_OBSOLETE_TEMPLATE = (
@@ -259,7 +262,10 @@ def _try_send_master_dm(data: dict[str, Any], payment_id: str) -> None:
         → .specialist_id (Ayla Master UUID)
         → CatalogMaster.ayla_user_id == specialist_id
         → .linked_bot_user (OneToOne к BotUser, lazy-onboarded)
-        → BotUser.chat_id → send_message(chat_id, text)
+        → BotUser.channel_user_id → send_message(user_id=…, text)
+
+    Адрес — ЧЕЛОВЕК, а не диалог (DRF-1558): этот DM пишется первым,
+    а сохранённый ``chat_id`` принадлежит паре «другой бот + человек».
 
     Enrichment fields from local mirror (Phase 1 envelope is Option C
     minimum — only payment/appointment/client ids + counter):
@@ -333,14 +339,16 @@ def _try_send_master_dm(data: dict[str, Any], payment_id: str) -> None:
         return
 
     master_bot_user = master.linked_bot_user
-    chat_id = (master_bot_user.chat_id or "").strip()
-    if not chat_id:
+    # DRF-1558 — DM мастеру пишется первым, адрес = человек, не диалог.
+    # Slug причины (``master_no_chat_id``) оставлен: это ключ аудита.
+    user_id = (master_bot_user.channel_user_id or "").strip()
+    if not user_id:
         _audit_master_dm_skip(data, payment_id, "master_no_chat_id")
         return
 
     # Step 4: enrichment from mirror.
     service_name = _resolve_service_name(proxy.service_id, tenant_id) or "услугу"
-    appointment_date = _format_appointment_date(proxy.start_at)
+    appointment_date = _format_appointment_date(proxy.start_at, master.tenant)
 
     # CR #881 M1: coerce consecutive_failures defensively before passing
     # к _format_master_dm_text. Raw payload value comes from JSON / event
@@ -367,7 +375,7 @@ def _try_send_master_dm(data: dict[str, Any], payment_id: str) -> None:
     )
 
     _send_dm(
-        chat_id=chat_id,
+        user_id=user_id,
         text=text,
         attachments=None,  # info-only, no buttons per Variant C scope
         log_context={
@@ -445,12 +453,12 @@ def _resolve_service_name(service_id: Any, tenant_id: Any) -> str | None:
     return service.name or None
 
 
-def _format_appointment_date(start_at: Any) -> str:
-    """Render appointment start в MSK timezone for the master DM.
+def _format_appointment_date(start_at: Any, tenant: Any) -> str:
+    """Render appointment start in the SALON's timezone for the master DM.
 
     Format: ``DD.MM в HH:MM`` (same convention as
-    ``apps/bookings/tasks.py::_format_day_before_text``). MSK because
-    the master operates on salon-local time, not UTC.
+    ``apps/bookings/tasks.py::_format_day_before_text``). Salon time, not
+    UTC: the master operates on salon-local time.
 
     **Invariant:** ``RemoteBookingProxy.start_at`` is ``db_index=True``
     + non-nullable (``apps/booking/models.py``). Callers always pass a
@@ -458,14 +466,14 @@ def _format_appointment_date(start_at: Any) -> str:
     None-check dropped — would mask a real model invariant violation
     if it ever fires.
 
-    TODO Phase 2 multi-region: hardcoded MSK works для pilot (Penza =
-    MSK); future tenants в other timezones would read ``tenant.timezone``
-    field (CR #881 F1).
+    Zone — ``apps.tenancy.timezones.salon_zone`` (DRF-2595). Until then this
+    was hardcoded MSK (CR #881 F1 TODO): right for the Penza pilot, three
+    hours off for a salon in Yekaterinburg.
     """
-    from zoneinfo import ZoneInfo
+    from apps.tenancy.timezones import salon_zone
 
-    msk = start_at.astimezone(ZoneInfo("Europe/Moscow"))
-    return msk.strftime("%d.%m в %H:%M")
+    local = start_at.astimezone(salon_zone(tenant))
+    return local.strftime("%d.%m в %H:%M")
 
 
 def _format_master_dm_text(
@@ -604,7 +612,7 @@ def _try_send_client_dm(data: dict[str, Any], payment_id: str) -> None:
     )
     action_data = _build_retry_button_envelope(payment_id)
     _send_dm(
-        bot_user.chat_id,
+        bot_user.channel_user_id,
         text,
         attachments=action_data,
         log_context={
@@ -623,13 +631,10 @@ def _try_send_client_dm(data: dict[str, Any], payment_id: str) -> None:
 class PaymentRetryCallbackSkill:
     """Inline-button callback handler для ``cb:payment:retry:<payment_id>``.
 
-    Срабатывает когда клиент тапает [Оплатить] в client DM. Делает HTTP
-    к Ayla retry endpoint (через ``apps/integrations/ayla_payments/``
-    после Alpha task #66) и шлёт обновлённую confirmation URL.
-
-    Сейчас (до Alpha task #66 merged) — TODO-заглушка с graceful reply.
-    Поведение, которое будет после интеграции, описано в docstring
-    :meth:`handle`.
+    Срабатывает когда клиент тапает [Оплатить] в client DM: зовёт ручку
+    повтора каталога через ``apps/integrations/ayla_payments`` и шлёт новую
+    confirmation URL (DRF-2339). Каждый задокументированный отказ ручки —
+    свой текст; «недоступно через бот» больше нет ни на одном пути.
     """
 
     name: ClassVar[str] = "payment_failed_retry"
@@ -651,10 +656,12 @@ class PaymentRetryCallbackSkill:
             )
             return _build_reply(_CALLBACK_MALFORMED)
 
-        # 2. Authorization — bot_user из текущего context должен быть
-        #    клиентом (`ayla_user_id` соответствует Ayla payment.appointment.client).
-        #    Без этой проверки можно было бы дёрнуть чужой retry через
-        #    скопированный callback (forwarded chat, screenshot, web share).
+        # 2. Здесь проверяется ТОЛЬКО то, что человека вообще можно назвать
+        #    каталогу: есть ли у него ``ayla_user_id``. Что платёж именно
+        #    его — решает каталог: ``PaymentRetryService.execute`` ищет
+        #    ``Payment.objects.get(pk=…, appointment__client=user)``, и на
+        #    чужой платёж отвечает 404 → «эта кнопка не для тебя». Поэтому
+        #    пересланный callback (forwarded chat, screenshot) ссылки не даёт.
         bot_user = context.bot_user
         if not getattr(bot_user, "ayla_user_id", None):
             # Bot_user ещё не bridge-нут к Ayla User. Authorization невозможна;
@@ -666,11 +673,15 @@ class PaymentRetryCallbackSkill:
             )
             return _build_reply(_CALLBACK_NOT_AUTHORIZED)
 
-        # 3. Вызов Ayla retry endpoint — TODO после Alpha task #66.
-        #    Финальная integration — task #67. Сейчас отвечаем заглушкой.
+        # 3. Вызов ручки повтора. ``external_user_id`` — тот же вид, что у
+        #    остальных клиентов каталога (``bot:<channel>:<id>``); каталог по
+        #    нему находит человека и сверяет его с ``client_id`` в теле.
+        from apps.integrations.ayla.user_proxy import external_user_id_for
+
         return _try_call_ayla_retry(
             payment_id=raw_payment_id,
             ayla_user_id=str(bot_user.ayla_user_id),
+            external_user_id=external_user_id_for(bot_user),
         )
 
 
@@ -737,7 +748,7 @@ def _build_retry_button_envelope(payment_id: str) -> list[dict[str, Any]]:
 
 
 def _send_dm(
-    chat_id: str,
+    user_id: str,
     text: str,
     *,
     attachments: list[dict[str, Any]] | None,
@@ -748,7 +759,9 @@ def _send_dm(
     Не raise — лог-и-уходи: payment_failed flow никогда не должен сломать
     consumer-цикл Gamma's #443.
     """
-    if not chat_id:
+    if not user_id:
+        # Slug ``empty_chat_id`` сохранён — это ключ, по которому логи
+        # уже грепают; адрес под ним теперь ``user_id`` (DRF-1558).
         logger.warning(
             "payment_failed.send_dm.empty_chat_id ctx=%s",
             log_context,
@@ -758,7 +771,7 @@ def _send_dm(
     try:
         from apps.channels.max.outbound import send_message
 
-        send_message(chat_id=chat_id, text=text, attachments=attachments)
+        send_message(user_id=user_id, text=text, attachments=attachments)
         logger.info(
             "payment_failed.dm_sent ctx=%s text_len=%d",
             log_context,
@@ -772,49 +785,59 @@ def _send_dm(
         )
 
 
-def _try_call_ayla_retry(*, payment_id: str, ayla_user_id: str) -> SkillResult:
-    """Вызов Ayla retry endpoint.
+def _try_call_ayla_retry(
+    *, payment_id: str, ayla_user_id: str, external_user_id: str
+) -> SkillResult:
+    """Повтор платежа: ссылка — или отказ, который звучит как он есть.
 
-    **Сейчас (Alpha task #66 в работе):** заглушка — отвечает клиенту
-    что retry временно недоступен через бот.
+    Разводка по задокументированным ответам ручки каталога:
 
-    **После Alpha task #66 + W2 task #67:** делает POST к Ayla
-    через расширенный ``apps/integrations/ayla_payments/client.py
-    ::retry_payment(payment_id, ayla_user_id, idempotency_key)``.
+    * 201 → :data:`_CLIENT_RETRY_SUCCESS_TEMPLATE` с новой ссылкой;
+    * 409 → :data:`_CLIENT_RETRY_OBSOLETE_TEMPLATE`: платёж прошёл или запись
+      отменена — повторять нечего;
+    * 502 / 503 / таймаут / предохранитель → :data:`_CLIENT_RETRY_TRANSIENT_ERROR`:
+      повторить СТОИТ, и это другое слово, чем у 409;
+    * 401 / 403 / 404 → :data:`_CALLBACK_NOT_AUTHORIZED`: платёж не этого
+      человека (пересланный чат, скриншот);
+    * нечитаемый ответ (нет ссылки, битый JSON) → тот же «попробуй позже»:
+      ссылки нет, значит и «готово» говорить нельзя.
 
-    Обработка ответов:
-
-    * 201 → :data:`_CLIENT_RETRY_SUCCESS_TEMPLATE` + URL
-    * 409 (INVALID_STATUS) → :data:`_CLIENT_RETRY_OBSOLETE_TEMPLATE`
-    * 502/503 → :data:`_CLIENT_RETRY_TRANSIENT_ERROR`
-    * 404 / other auth/permission → :data:`_CALLBACK_NOT_AUTHORIZED`
+    Ключ идемпотентности детерминирован — ``payment_retry:<payment_id>``:
+    второй тап возвращает тот же платёж, а не второй счёт.
     """
-    # TODO(#67): после merge Alpha task #66 заменить на реальный вызов:
-    #
-    #   from apps.integrations.ayla_payments import get_ayla_payments_client
-    #   client = get_ayla_payments_client()
-    #   try:
-    #       result = client.retry_payment(
-    #           payment_id=payment_id,
-    #           ayla_user_id=ayla_user_id,
-    #           idempotency_key=f"payment_retry:{payment_id}",
-    #       )
-    #   except AylaInvalidStatus:
-    #       return _build_reply(_CLIENT_RETRY_OBSOLETE_TEMPLATE)
-    #   except AylaTransientError:
-    #       return _build_reply(_CLIENT_RETRY_TRANSIENT_ERROR)
-    #   except AylaAuthError:
-    #       return _build_reply(_CALLBACK_NOT_AUTHORIZED)
-    #   return _build_reply(_CLIENT_RETRY_SUCCESS_TEMPLATE.format(
-    #       confirmation_url=result.confirmation_url,
-    #   ))
-    logger.info(
-        "payment_retry.stubbed payment_id=%s ayla_user=%s "
-        "(awaiting Alpha task #66 endpoint extension)",
-        payment_id,
-        ayla_user_id,
+    from apps.integrations.ayla_payments import (
+        AylaPaymentsAPIError,
+        AylaPaymentsNotAuthorized,
+        AylaPaymentsRetryRefused,
+        AylaPaymentsUnavailableError,
     )
-    return _build_reply(_CLIENT_RETRY_PENDING_TEMPLATE)
+
+    try:
+        result = get_ayla_payments_client().retry_payment(
+            payment_id=payment_id,
+            ayla_user_id=ayla_user_id,
+            external_user_id=external_user_id,
+            idempotency_key=f"payment_retry:{payment_id}",
+        )
+    except AylaPaymentsRetryRefused:
+        logger.info("payment_retry.not_eligible payment_id=%s", payment_id)
+        return _build_reply(_CLIENT_RETRY_OBSOLETE_TEMPLATE)
+    except AylaPaymentsNotAuthorized:
+        logger.info("payment_retry.not_authorized payment_id=%s", payment_id)
+        return _build_reply(_CALLBACK_NOT_AUTHORIZED)
+    except AylaPaymentsUnavailableError as exc:
+        logger.warning("payment_retry.unavailable payment_id=%s err=%s", payment_id, exc)
+        return _build_reply(_CLIENT_RETRY_TRANSIENT_ERROR)
+    except AylaPaymentsAPIError as exc:
+        # Всё прочее (битый JSON, ответ без ссылки, неожиданный 4xx): ссылки
+        # нет — «готово» было бы обещанием, которого никто не выполнил.
+        logger.warning("payment_retry.unreadable payment_id=%s err=%s", payment_id, exc)
+        return _build_reply(_CLIENT_RETRY_TRANSIENT_ERROR)
+
+    logger.info("payment_retry.link_issued payment_id=%s", payment_id)
+    return _build_reply(
+        _CLIENT_RETRY_SUCCESS_TEMPLATE.format(confirmation_url=result.confirmation_url)
+    )
 
 
 def _build_reply(text: str) -> SkillResult:

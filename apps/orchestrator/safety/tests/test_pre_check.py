@@ -48,9 +48,11 @@ class TestHandoff:
         r = pre_check("I want to kill myself")
         assert r.verdict == SafetyVerdict.HANDOFF
 
-    def test_acute_emergency(self):
+    def test_acute_emergency_is_medical_not_crisis(self):
+        # DRF-2000 (S-2): the cardiac group left the crisis bucket — 103 / 112,
+        # not the helpline. HANDOFF above still holds for self-harm.
         r = pre_check("у меня сердечный приступ, что делать")
-        assert r.verdict == SafetyVerdict.HANDOFF
+        assert r.verdict == SafetyVerdict.MEDICAL
 
     def test_abuse_signal(self):
         r = pre_check("меня избивает муж")
@@ -69,6 +71,71 @@ class TestBlock:
     def test_legal_advice_request(self):
         r = pre_check("хочу подать в суд")
         assert r.verdict == SafetyVerdict.BLOCK
+
+
+class TestDrugMentionIsNotStop:
+    """Owner 11.09 §3: a bare mention is not STOP; asking to pick/dose/schedule is.
+
+    Both sides of the same phrase, on purpose: a rule that only had the STOP
+    side would pass with the old bare-word pattern, and a rule that only had
+    the NORMAL side would pass with no pattern at all.
+    """
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "вчера выпила ибупрофен, можно сегодня на массаж?",
+            "принимаю парацетамол, это помешает процедуре?",
+            "у меня сейчас курс антибиотиков, записаться можно?",
+            "после кеторола голова прошла, спасибо",
+            "I took a painkiller this morning, is a facial ok?",
+        ],
+    )
+    def test_a_bare_mention_passes(self, text):
+        r = pre_check(text)
+        assert r.verdict == SafetyVerdict.ALLOW, (text, r.matched_patterns)
+        assert r.matched_patterns == []
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "посоветуйте ибупрофен перед массажем",
+            "подберите мне обезболивающее",
+            "сколько таблеток парацетамола можно выпить?",
+            "какую дозу кеторола принимать?",
+            "какая схема приёма антибиотика?",
+            "дайте анальгин",
+            "what painkiller should I take before waxing?",
+            "recommend a dosage of ibuprofen — tramadol?",
+        ],
+    )
+    def test_asking_to_pick_or_dose_is_stop(self, text):
+        r = pre_check(text)
+        assert r.verdict == SafetyVerdict.BLOCK, (text, r.matched_patterns)
+        assert len(r.matched_patterns) == 1
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "посоветуйте хорошего мастера по маникюру",
+            "дайте адрес салона",
+            "подберите мне время на массаж",
+            "сколько стоит стрижка?",
+            "recommend a good stylist for a bob",
+        ],
+    )
+    def test_an_ask_without_a_drug_is_the_bots_ordinary_work(self, text):
+        """The ask-half alone must not fire: «посоветуйте мастера» is what
+        this bot is for. Found by substitution — with the drug-lookahead
+        loosened to any word, nothing here went red until this test."""
+        r = pre_check(text)
+        assert r.verdict == SafetyVerdict.ALLOW, (text, r.matched_patterns)
+        assert r.matched_patterns == []
+
+    def test_the_two_sides_differ_by_the_ask_alone(self):
+        """Same drug, same words otherwise — only the asking changes the verdict."""
+        assert pre_check("ибупрофен перед массажем — нормально?").verdict == SafetyVerdict.ALLOW
+        assert pre_check("посоветуйте ибупрофен перед массажем").verdict == SafetyVerdict.BLOCK
 
 
 class TestClarify:
@@ -93,6 +160,39 @@ class TestVerdictPriority:
         r = pre_check("почему болит, дайте парацетамол")
         assert r.verdict == SafetyVerdict.BLOCK
 
+    def test_the_order_is_the_owners_order_by_name(self):
+        """Owner 11.09 §3: `STOP > CLARIFY > CAUTION > NORMAL`.
+
+        The two phrase tests above hold the order by example; this one holds
+        it by name, so a reorder reddens with the decision in the message
+        rather than with a sentence about ibuprofen. Both STOPs (BLOCK,
+        HANDOFF) sit above CLARIFY; HANDOFF above BLOCK is §127, not §3.
+        CAUTION is absent here because `pre_check` has no bucket for it
+        (0 rules, §126) — that absence is the point, not an omission.
+        """
+        from apps.orchestrator.safety.pre_check import _VERDICT_PRIORITY
+
+        # DRF-2000 (S-2, owner 20.09): MEDICAL sits between BLOCK and HANDOFF —
+        # a STOP with a required next step (103 / 112), below self-harm so a
+        # person who writes both keeps the helpline.
+        assert _VERDICT_PRIORITY == [
+            SafetyVerdict.ALLOW.value,
+            SafetyVerdict.CLARIFY.value,
+            SafetyVerdict.BLOCK.value,
+            SafetyVerdict.MEDICAL.value,
+            SafetyVerdict.HANDOFF.value,
+        ], "priority list changed — §3 / §127 / DRF-2000 say which way it may"
+        assert "caution" not in _VERDICT_PRIORITY
+
+    def test_every_pair_of_buckets_reduces_to_the_higher(self):
+        """Not two hand-picked phrases: every ordered pair of buckets."""
+        from apps.orchestrator.safety.pre_check import _VERDICT_PRIORITY, _reduce_verdict
+
+        for i, lower in enumerate(_VERDICT_PRIORITY):
+            for higher in _VERDICT_PRIORITY[i + 1 :]:
+                assert _reduce_verdict({lower, higher}) == SafetyVerdict(higher), (lower, higher)
+                assert _reduce_verdict({higher, lower}) == SafetyVerdict(higher), (higher, lower)
+
 
 class TestRiskElevation:
     def test_high_risk_decision_elevates_to_handoff(self):
@@ -109,13 +209,20 @@ class TestRiskElevation:
 
 
 class TestBrandVoice:
-    def test_brand_voice_forbidden_phrase_blocks(self):
+    def test_brand_phrase_in_the_persons_input_does_not_block_drf2608(self):
+        """ПЕРЕВЁРНУТО DRF-2608. Здесь стояло «вход "интим…" блокируется
+        фразой бренда»: один список служил и запретом для Ayla, и
+        операторским фильтром грубых запросов клиента. Фразы бренда — слова,
+        которые Ayla не говорит; они проверяются на ОТВЕТЕ (``post_check``).
+        Фильтр входа не отменён нами, а вынесен владельцу отдельным вопросом
+        (нужен ли и отдельным ли списком). На 29.09 в боевой базе
+        ``persona_brandvoiceconfig`` — 0 строк, живое поведение не меняется."""
         r = pre_check(
             "обсудим интим за доплату",
             brand_voice={"forbidden_phrases": [r"(?i)интим"]},
         )
-        assert r.verdict == SafetyVerdict.BLOCK
-        assert any("интим" in p for p in r.matched_patterns)
+        assert r.verdict == SafetyVerdict.ALLOW
+        assert not any("интим" in p for p in r.matched_patterns)
 
     def test_bad_brand_voice_regex_ignored(self):
         # Bad regex shouldn't crash; just gets skipped.

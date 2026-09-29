@@ -157,8 +157,10 @@ def parse_tenant_allowlist(
     when the typo landed elsewhere).
 
     ``setting_name`` only labels error messages; the default keeps the
-    original ``EVENT_INGEST_ALLOWED_TENANTS`` wording. DRF-1005 reuses this
-    parser for ``BOOKING_HEALTH_CHECK_GATE_DISABLED_TENANTS``.
+    original ``EVENT_INGEST_ALLOWED_TENANTS`` wording. Other per-tenant
+    allowlists reuse this parser under their own name (currently
+    ``BOOKING_NO_PREPAYMENT_TENANTS``; DRF-1005's health-check-gate
+    allowlist was removed by DRF-1545).
     """
     normalized: set[str] = set()
     for element in _split_raw(raw):

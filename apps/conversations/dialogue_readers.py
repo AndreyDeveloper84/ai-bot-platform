@@ -294,24 +294,6 @@ def discover_read_sites(apps_root: Path) -> dict[str, ReadSite]:
 #: erased person's words fails loudest of all.
 DIALOGUE_READERS: dict[str, DialogueReader] = {
     # ── Prompt-bound ────────────────────────────────────────────────────
-    "apps.master_api.services.ai_drafts:_recent_history": DialogueReader(
-        storage="db_message",
-        reaches_prompt=True,
-        why=(
-            "The master's AI draft is assembled from these rows — the route "
-            "the audit missed while looking at the concierge. Anonymisation "
-            "empties content/rendered_text, and this reader also drops every "
-            "row at or before Conversation.anonymized_through."
-        ),
-    ),
-    "apps.master_api.services.ai_drafts:_latest_customer_message": DialogueReader(
-        storage="db_message",
-        reaches_prompt=True,
-        why=(
-            "The row the draft is answering. Its body is empty after "
-            "anonymisation; the id it is mostly used for is not personal data."
-        ),
-    ),
     "apps.channels.max.handler:_last_user_content": DialogueReader(
         storage="db_message",
         reaches_prompt=True,
@@ -379,6 +361,25 @@ DIALOGUE_READERS: dict[str, DialogueReader] = {
             "Mandatory `purpose`, one audit row per read, never a prompt."
         ),
     ),
+    "apps.channels.max.handler:_health_already_declined": DialogueReader(
+        storage="db_message",
+        reaches_prompt=False,
+        why=(
+            "Спрашивает у переписки один факт: отказывался ли человек в ЭТОМ "
+            "диалоге давать согласие на медданные (DRF-1491, §25 п.6). Текст "
+            "никуда не передаётся — сравнивается с константой «Не сейчас» и "
+            "превращается в булево, которым решается, показать ли экран "
+            "запроса. В промпт не идёт ни строкой.\n"
+            "\n"
+            "После обезличивания колонка пуста, и вырождение здесь идёт в "
+            "безопасную сторону дважды. Обезличивание запускает сам человек, "
+            "стирая свои данные, — то есть тот же человек, чей отказ мы "
+            "помним; забыть отказ вместе с перепиской не значит начать "
+            "выпрашивать согласие: второй след, метка ``action_type`` ответа "
+            "бота, обезличиванием не трогается и продолжает держать обещание "
+            "«больше не спрошу»."
+        ),
+    ),
     "apps.conversations.admin:MessageAdmin.get_queryset": DialogueReader(
         storage="db_message",
         reaches_prompt=False,
@@ -392,16 +393,6 @@ DIALOGUE_READERS: dict[str, DialogueReader] = {
             "conversation over. Not a prompt; and after anonymisation the "
             "bodies it copies are empty."
         ),
-    ),
-    "apps.master_api.services.conversations:list_master_conversations": DialogueReader(
-        storage="db_message",
-        reaches_prompt=False,
-        why="Master inbox list — last-message preview and SLA timestamps, rendered to a human.",
-    ),
-    "apps.master_api.services.conversation_detail:get_conversation_detail": DialogueReader(
-        storage="db_message",
-        reaches_prompt=False,
-        why="The master's chat screen — a human surface, already PII-redacted for the master.",
     ),
     "apps.observability.delta:_load_shadow_rows": DialogueReader(
         storage="db_message",
@@ -420,15 +411,6 @@ DIALOGUE_READERS: dict[str, DialogueReader] = {
         storage="db_message",
         reaches_prompt=False,
         why="Returning-customer detection — row counts split by conversation, not bodies.",
-    ),
-    "apps.master_api.services.conversation_detail:mark_conversation_read": DialogueReader(
-        storage="db_message",
-        reaches_prompt=False,
-        why=(
-            "Counts unread rows to stamp last_read_by_master_at. The chain "
-            "ends in .count() on a variable the scanner cannot follow, so it "
-            "surfaces here rather than being skipped — no body is read."
-        ),
     ),
     "apps.master_api.services.dashboard:_customer_intent_hint": DialogueReader(
         storage="db_message",
@@ -451,6 +433,44 @@ DIALOGUE_READERS: dict[str, DialogueReader] = {
             "rather than by intention: an empty body cannot start with «cb:»."
         ),
     ),
+    "apps.conversations.management.commands.dialog_transcript:Command._transcript": DialogueReader(
+        storage="db_message",
+        reaches_prompt=False,
+        why=(
+            "DRF-1754 — расшифровка диалога с пилота для оператора: реплики и "
+            "служебный след каждого ответа бота печатаются в терминал или в "
+            "файл вне репозитория (docs/dialogs/ в .gitignore). Ни одна строка "
+            "не собирается в промпт: команда только читает и печатает, и её "
+            "тест ловит любой не-SELECT. Текст проходит через Redactor "
+            "regex_v3 (телефоны, почта, карты), идентификаторы — восемь знаков "
+            "md5. После «удалить всё» колонка пуста, и расшифровка честно "
+            "печатает пустые реплики: команда читает Message, не "
+            "ArchivedMessage, и к архиву не обращается."
+        ),
+    ),
+    "apps.orchestrator.search_recap:_path_user_turns": DialogueReader(
+        storage="db_message",
+        reaches_prompt=False,
+        why=(
+            "DRF-1908: реплики человека за два часа нужны только чтобы узнать, "
+            "назвал ли он САМ город поиска; слова сравниваются со списком городов "
+            "с мастерами, наружу уходит только хранимое написание города, текст "
+            "реплик — нигде и не в промпт. После «удалить всё» колонка пуста, "
+            "город не находится, и строка «по твоим словам» его не называет."
+        ),
+    ),
+    "apps.orchestrator.said_memory:_person_named_cities": DialogueReader(
+        storage="db_message",
+        reaches_prompt=False,
+        why=(
+            "Бриф «Мозг» п.4: проверяет, назвал ли САМ человек город, в котором "
+            "модель искала мастеров. Реплики роли user разбиваются на слова и "
+            "сравниваются со списком городов, где есть мастера; наружу уходит "
+            "только хранимое написание города, текст реплик — нигде, в промпт "
+            "тоже. После «удалить всё» колонка пуста, город не находится, и "
+            "факт не пишется — это безопасное направление."
+        ),
+    ),
     "apps.master_api.services.dashboard:get_inbox_preview": DialogueReader(
         storage="db_message",
         reaches_prompt=False,
@@ -460,5 +480,16 @@ DIALOGUE_READERS: dict[str, DialogueReader] = {
         storage="db_message",
         reaches_prompt=False,
         why="Unread badge counters — timestamps and roles, not bodies.",
+    ),
+    "apps.miniapp_api.views_last_topic:_recent_assistant_turns": DialogueReader(
+        storage="db_message",
+        reaches_prompt=False,
+        why=(
+            "DRF-2144: «Последняя тема» на Главной Mini App — первые 80 знаков "
+            "последнего хода АССИСТЕНТА, показанные самому человеку (rendered_text, "
+            "иначе content). Человеческая поверхность, не промпт. После «удалить "
+            "всё» ходы не позже anonymized_through отфильтрованы запросом, а "
+            "колонка у них пуста — экран говорит нейтрально «Продолжить разговор»."
+        ),
     ),
 }

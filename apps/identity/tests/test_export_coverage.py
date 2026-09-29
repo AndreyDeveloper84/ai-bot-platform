@@ -133,7 +133,18 @@ class TestTheCoverageBlock:
 
     def test_every_registry_slot_appears_exactly_once(self):
         section = build_coverage_section()
-        listed = [site for sites in section["included"].values() for site in sites]
+        # DRF-2183 — в `included` теперь есть и хранилища вне реестра
+        # (`NON_REGISTRY_SECTIONS`). Вычитаются ЯВНО, а не фильтром «по
+        # реестру»: посторонний элемент в `included`, пришедший любым будущим
+        # путём, обязан уронить узел, а не тихо из него выпасть.
+        from apps.identity.export_coverage import NON_REGISTRY_SECTIONS
+
+        listed = [
+            site
+            for sites in section["included"].values()
+            for site in sites
+            if site not in NON_REGISTRY_SECTIONS
+        ]
         listed += [row["field"] for row in section["withheld"] if row["field"] in _registry_sites()]
         assert sorted(listed) == sorted(_registry_sites())
         assert len(listed) == len(set(listed))
@@ -233,10 +244,12 @@ class TestTheExportSaysWhatItHolds:
 class _NoAyla:
     """Upstream stub — an empty Ayla export, so the bot half is what is asserted."""
 
-    def get_personal_data_export(self, *, ayla_user_id: str) -> dict:
+    def get_personal_data_export(self, *, ayla_user_id: str, external_user_id: str) -> dict:
         return {}
 
-    def delete_personal_data(self, *, ayla_user_id: str) -> None:  # pragma: no cover
+    def delete_personal_data(
+        self, *, ayla_user_id: str, external_user_id: str
+    ) -> None:  # pragma: no cover
         return None
 
     def close(self) -> None:

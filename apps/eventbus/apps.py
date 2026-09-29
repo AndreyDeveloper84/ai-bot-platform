@@ -5,7 +5,7 @@ from django.core.signals import setting_changed
 class EventBusConfig(AppConfig):
     default_auto_field = "django.db.models.BigAutoField"
     name = "apps.eventbus"
-    verbose_name = "Domain event bus"
+    verbose_name = "Служебное: шина событий"
 
     def ready(self) -> None:
         from apps.eventbus import signals  # noqa: F401  — register post_save handlers
@@ -71,6 +71,12 @@ class EventBusConfig(AppConfig):
         from apps.eventbus.consumers.schedule import register_schedule_handlers
 
         register_schedule_handlers()
+
+        # DRF-2196 (а1, §64) — системные события без субъекта
+        # (`system.module.health.degraded` → ядро страницы в MAX).
+        from apps.eventbus.consumers.system import register_system_handlers
+
+        register_system_handlers()
 
         # #445 — Register reviews (review.created) consumer.
         from apps.eventbus.consumers.reviews import register_reviews_handlers

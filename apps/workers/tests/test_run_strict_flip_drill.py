@@ -108,6 +108,25 @@ def fake_redis():
     return _FakeRedis()
 
 
+@pytest.fixture(autouse=True)
+def _no_real_redis(monkeypatch):
+    """DRF-1916: ни один тест drill не ходит в настоящий Redis.
+
+    Команда берёт SETNX-блокировку в общем Redis (``_acquire_drill_lock``), а CI
+    гоняет шард в 4 процесса (``-n 4 --dist load``): тест без подделки держал ключ
+    соседнего процесса и падал «Drill уже запущен» (job 104249143725). Поэтому по
+    умолчанию клиент падает. Тест, которому Redis нужен, ставит ``_FakeRedis``
+    сам — его ``monkeypatch.setattr`` перекрывает этот.
+    """
+
+    def _refuse():
+        raise AssertionError(
+            "test_run_strict_flip_drill: тест пошёл в настоящий Redis — подставь _FakeRedis"
+        )
+
+    monkeypatch.setattr("apps.ingress.streams._client", _refuse)
+
+
 def _run_command(*args, **kwargs):
     """Запускает command, ловит SystemExit, возвращает (stdout, stderr, exit_code)."""
     out, err = StringIO(), StringIO()
@@ -129,6 +148,7 @@ class TestPreCheckFailures:
         # pgrep returns rc=1 + empty stdout → "no match" в Unix-смысле.
         proc = MagicMock(returncode=1, stdout="", stderr="")
         monkeypatch.setattr("subprocess.run", lambda *a, **k: proc)
+        monkeypatch.setattr("apps.ingress.streams._client", lambda: _FakeRedis())
 
         _, err, exit_code = _run_command("--target-count", "10", "--duration", "1")
         assert exit_code == 1
@@ -140,6 +160,7 @@ class TestPreCheckFailures:
             raise FileNotFoundError("pgrep")
 
         monkeypatch.setattr("subprocess.run", _raise)
+        monkeypatch.setattr("apps.ingress.streams._client", lambda: _FakeRedis())
         _, err, exit_code = _run_command("--target-count", "10", "--duration", "1")
         assert exit_code == 1
         assert "pgrep" in err.lower() or "windows" in err.lower()

@@ -1,0 +1,40 @@
+{
+  "_comment": "Золотой образец формы на проводе, §9.4 контракта резолвера (DRF-1626). Живёт на стороне ПОТРЕБИТЕЛЯ намеренно: форму диктует тот, кто её читает, а не тот, кто её шлёт. Читается двумя тестами — vitest на этой стороне и pytest на серверной; расхождение половин краснит билд, а не доезжает до человека. Ключи с подчёркиванием игнорируются валидаторами и служат только чтению.",
+  "data": {
+    "decision_id": "01J9F0T5S7C2Q8M4V6ZKX1N3PB",
+    "request_id": "req-golden-0001",
+    "resolver_spec_version": "1.0.0",
+    "policy_versions": {
+      "resolver_spec_version": "1.0.0",
+      "ranking_policy_version": "1.4.0",
+      "eligibility_policy_version": "1.2.0",
+      "safety_policy_version": "1.1.0"
+    },
+    "ordered": [
+      {
+        "candidate": { "kind": "PROVIDER", "id": "11111111-1111-4111-8111-111111111111" },
+        "rank": 1,
+        "tier": 1,
+        "reason_codes": ["MATCH_SERVICE_EXACT", "PROXIMITY_NEAR"],
+        "evidence": [
+          { "code": "MATCH_SERVICE_EXACT", "strength": "STRONG" },
+          { "code": "PROXIMITY_NEAR", "strength": "MEDIUM" }
+        ]
+      },
+      {
+        "candidate": { "kind": "PROVIDER", "id": "22222222-2222-4222-8222-222222222222" },
+        "rank": 2,
+        "tier": 2,
+        "reason_codes": ["MATCH_SERVICE_EXACT"],
+        "evidence": []
+      }
+    ],
+    "excluded": [
+      {
+        "candidate": { "kind": "PROVIDER", "id": "33333333-3333-4333-8333-333333333333" },
+        "stage": "S1",
+        "reason_code": "ELIG_EXCLUDED_NOT_BOOKABLE"
+      }
+    ]
+  }
+}

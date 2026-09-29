@@ -1,4 +1,10 @@
-/** F1-detail — single service. CTA «Подобрать время». */
+/** F1-detail — single service. CTA «Подобрать время».
+ *
+ * DRF-1481 — канонический адрес `/customer/catalog/:serviceId`; старый
+ * `/catalog/:serviceId` остаётся смонтирован compatibility-алиасом на
+ * тот же компонент (страховка для внешних ссылок, ушедших наружу
+ * ранее). Все внутренние переходы ведут на канонический адрес.
+ */
 
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
@@ -7,11 +13,15 @@ import { ScreenLayout } from "../components/ScreenLayout";
 import { StickyCta } from "../components/StickyCta";
 import { DelayedSkeleton, Skeleton } from "../components/Skeleton";
 import { StateError } from "../components/StateError";
-import { useBackButton } from "../hooks/useBackButton";
 import { useHaptics } from "../hooks/useHaptics";
-import { formatDuration, formatMoney } from "../lib/format";
+import { formatDuration, priceFromLabel } from "../lib/format";
 import { UNBOOKABLE_DETAIL } from "../components/UnbookableNote";
 import { setService } from "../state/booking";
+import { backTo } from "../lib/screen-back";
+
+/** Возврат (DRF-1493): к списку услуг, откуда открывают карточку.
+ * Канонический список — `/customer/catalog` (DRF-1481). */
+const BACK = backTo("/customer/catalog");
 
 type State =
   | { kind: "loading" }
@@ -25,7 +35,6 @@ export function ServiceDetailScreen() {
   const haptics = useHaptics();
   const [state, setState] = useState<State>({ kind: "loading" });
 
-  useBackButton({ onBack: () => navigate(-1) });
 
   const load = useCallback(() => {
     if (!serviceId) return;
@@ -58,12 +67,12 @@ export function ServiceDetailScreen() {
     if (!state.service.is_bookable) return;
     haptics.selection();
     setService(state.service.id, state.service.name);
-    navigate("/book/master");
+    navigate("/customer/book/master");
   }
 
   if (state.kind === "loading") {
     return (
-      <ScreenLayout title="Услуга">
+      <ScreenLayout back={BACK} title="Услуга">
         <DelayedSkeleton loading>
           <Skeleton width="70%" height="1.6em" />
           <div style={{ marginTop: "var(--s-3)" }}>
@@ -79,14 +88,14 @@ export function ServiceDetailScreen() {
 
   if (state.kind === "notfound") {
     return (
-      <ScreenLayout title="Услуга">
+      <ScreenLayout back={BACK} title="Услуга">
         <div className="callout">
           <p style={{ margin: 0 }}>Не нашлось. Возможно, удалили.</p>
           <button
             type="button"
             className="btn-secondary"
             style={{ marginTop: "var(--s-3)" }}
-            onClick={() => navigate("/catalog", { replace: true })}
+            onClick={() => navigate("/customer/catalog", { replace: true })}
           >
             К услугам
           </button>
@@ -97,7 +106,7 @@ export function ServiceDetailScreen() {
 
   if (state.kind === "error") {
     return (
-      <ScreenLayout title="Услуга">
+      <ScreenLayout back={BACK} title="Услуга">
         <StateError err={state.err} onRetry={load} screenId="service-detail" />
       </ScreenLayout>
     );
@@ -105,9 +114,10 @@ export function ServiceDetailScreen() {
 
   const s = state.service;
   // DRF-1164 — this screen is the ONE door into the booking flow for a
-  // service (`/catalog/:serviceId` is where both catalog surfaces and the
-  // wellness picks land, and a bot deep-link by service id arrives here
-  // too). So the CTA is withheld here rather than only greyed out on the
+  // service (`/customer/catalog/:serviceId` is where both catalog
+  // surfaces and the wellness picks land, and a bot deep-link by
+  // service id arrives here too). So the CTA is withheld here rather
+  // than only greyed out on the
   // card: no CTA, no `setService()`, no `/book/master` — the dead end the
   // customer used to fall into is unreachable from the service side.
   // The page itself stays — description and contraindications are still
@@ -115,6 +125,7 @@ export function ServiceDetailScreen() {
   const unbookable = !s.is_bookable;
   return (
     <ScreenLayout
+      back={BACK}
       title={s.name}
       cta={
         unbookable ? undefined : (
@@ -129,7 +140,7 @@ export function ServiceDetailScreen() {
             type="button"
             className="btn-secondary"
             style={{ marginTop: "var(--s-3)" }}
-            onClick={() => navigate("/catalog")}
+            onClick={() => navigate("/customer/catalog")}
           >
             Другие услуги
           </button>
@@ -140,8 +151,9 @@ export function ServiceDetailScreen() {
           <dt>Длительность и цена</dt>
           <dd>
             {formatDuration(s.duration_min)}
-            {s.duration_min && s.price_from ? " • " : ""}
-            {formatMoney(s.price_from)}
+            {/* DRF-1989 — цена ниже 1 ₽ не рисуется. */}
+            {s.duration_min && s.price_from && priceFromLabel(s.price_from) ? " • " : ""}
+            {priceFromLabel(s.price_from)}
           </dd>
           {s.short_description && (
             <>

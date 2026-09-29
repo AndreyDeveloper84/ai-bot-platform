@@ -10,6 +10,9 @@ the webhook.
 """
 
 from apps.integrations.ayla_payments.client import (
+    AylaPaymentsNotAuthorized,
+    AylaPaymentsRetryRefused,
+    RetryPaymentResult,
     AylaPaymentsAPIError,
     AylaPaymentsClient,
     AylaPaymentsUnavailableError,
@@ -21,8 +24,11 @@ from apps.integrations.ayla_payments.client import (
 __all__ = [
     "AylaPaymentsAPIError",
     "AylaPaymentsClient",
+    "AylaPaymentsNotAuthorized",
+    "AylaPaymentsRetryRefused",
     "AylaPaymentsUnavailableError",
     "CreatePaymentResult",
+    "RetryPaymentResult",
     "get_ayla_payments_client",
     "reset_ayla_payments_client",
 ]

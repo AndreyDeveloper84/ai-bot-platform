@@ -93,7 +93,13 @@ class FakeAylaBooking:
         self._maybe_raise()
         return list(self.services_rows)
 
-    def get_masters(self, *, specialist_id: str | None = None) -> list[AylaMaster]:
+    def get_masters(
+        self,
+        *,
+        specialist_id: str | None = None,
+        lat: float | None = None,
+        lon: float | None = None,
+    ) -> list[AylaMaster]:
         self._maybe_raise()
         return list(self.masters_rows)
 
@@ -123,6 +129,8 @@ class FakeAylaBooking:
         start_datetime: str,
         idempotency_key: str | None = None,
         payment_required: bool = True,
+        quoted_price: str | None = None,
+        quoted_duration_minutes: int | None = None,
     ) -> AylaBookingRecord:
         self.calls.append(
             {

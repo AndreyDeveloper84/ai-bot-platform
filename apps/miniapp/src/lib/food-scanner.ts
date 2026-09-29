@@ -1,5 +1,5 @@
 /**
- * Customer food scanner stub lib — Tier 1 Priority 7 Phase B.
+ * Customer food scanner lib — Tier 1 Priority 7 Phase B; scan/log — боевые с DRF-2098.
  *
  * Spec: `docs/screens/customer-food-scanner-flow.md` (Variant A — Wizard,
  * 4 screens with MAX BackButton navigation) + memory
@@ -13,42 +13,27 @@
  *   POST /api/v1/customer/food/log       → LogMealResponse
  *   GET  /api/v1/customer/food/daily     → DailySummaryResponse
  *
- * Mini App calls bot-platform `miniapp_api` proxy (W4 ownership);
- * proxy talks to Ayla `nutrition_client.{scan_photo,log_meal,
- * daily_summary}`. Exact paths TBD by W4. Until W4 ships, frontend
- * stubs serve dev — production calls throw `StubNotWiredError`
- * (Profile precedent PR #954 M1 inline fix).
+ * Mini App calls bot-platform `miniapp_api` proxy; the proxy talks to
+ * Ayla `nutrition_client.{scan_photo,log_meal}`. Everything here is a
+ * real request since DRF-2098 / DRF-2106 — the last stub
+ * (`fetchHealthFlags`, behind `guardProd`) threw in the production
+ * build and hid the numbers on the result card for everyone.
  *
  * # ED-mode rendering — critical voice rule
  *
- * If `MeResponse.health_flags.eating_disorder === true`, Ayla does
- * NOT return calorie numbers (spec §10 Appendix ED Mode). UI MUST
- * hide all numeric nutrition values (calories, macros). Render text
- * only: «Примерно · 150 г · записала». Portion ± buttons still
- * function locally but display no updated numbers.
+ * The ED flag is the same `nutrition_numbers_hidden` the diary reads
+ * (`wellness/today`, `customer-wellness.ts::getWellnessToday`),
+ * fail-closed: an absent key HIDES the numbers (spec §10 Appendix ED
+ * Mode). UI MUST hide all numeric nutrition values (calories, macros)
+ * while it is not explicitly `false`. Render text only: «Примерно ·
+ * 150 г · записала».
  *
  * # 152-ФЗ consent gate
  *
  * Per spec §2 — first scan requires explicit consent (accept/decline
- * sheet). Persisted via DeviceStorage key
- * `food_scanner_consent_at` (ISO timestamp). Real backend persist
- * via `/me` field deferred to W4 follow-up.
+ * sheet). Stored server-side in the consent registry as
+ * `food_diary_processing` (DRF-1963) via `me/food-scanner-consent/`.
  *
- * # Stub variants for dev QA
- *
- *   ?stub=default        — happy path (гречка с курицей, conf 0.85)
- *   ?stub=low_confidence — F3 low-conf branch (conf 0.42 → «Похоже на»)
- *   ?stub=not_recognized — FoodNotRecognizedError
- *   ?stub=api_down       — NutritionUnavailableError
- *   ?stub=photo_failed   — PhotoBytesMissingError
- *   ?stub=ed_mode        — eating_disorder=true (hides numbers)
- *
- * # Voice + factual-only rule (per spec §10)
- *
- *   - «примерно» / «похоже на» / «можно уточнить» / «записала» — OK
- *   - «вредно» / «много» / «слишком» — FORBIDDEN (medical/judgmental)
- *   - «~» literal as visual approximate signal
- *   - No gamification / streaks / badges (founder anti-pattern)
  */
 
 // ---------------------------------------------------------------------------
@@ -56,11 +41,33 @@
 // — frontend must null-safe; UI never crashes.
 // ---------------------------------------------------------------------------
 
+import { ApiError, request } from "./api";
+
+/**
+ * DRF-2371 — числа МОГУТ отсутствовать, и отсутствие — не ноль.
+ *
+ * Каталог отдаёт запись и тогда, когда считать нечем: порция неизвестна
+ * или блюда нет в справочнике. На месте калорий приходит `null`. Ноль
+ * означал бы «съел и не получил калорий» — это другое утверждение, и
+ * произносить его за человека нельзя. Различение причины пробела
+ * («нет блюда» / «нет веса») наружу не выведено — п. 3 DRF-2335 ждёт
+ * слова владельца; форма ответа причиной не является и признаком её
+ * подменять нельзя.
+ */
 export interface NutritionFacts {
-  calories: number;
-  protein_g: number;
-  fat_g: number;
-  carbs_g: number;
+  /**
+   * DRF-2371/DRF-2402 — откуда взялся вес порции: `provider` (назвал
+   * наблюдавший — распознаватель или сам человек), `typical` (типовая
+   * величина справочника), `unknown` (не назвал никто). Каталог кладёт
+   * признак ИМЕННО СЮДА, рядом с числами, а не на верхний уровень ответа.
+   * Тип нарочно широкий: незнакомое значение и отсутствие поля разбирает
+   * `portionProvenanceOf`, и оба — «не названо».
+   */
+  portion_source?: string | null;
+  calories: number | null;
+  protein_g: number | null;
+  fat_g: number | null;
+  carbs_g: number | null;
   vitamins?: Record<string, number | string>;
 }
 
@@ -82,28 +89,20 @@ export interface ScanResponse {
 
 export type MealType = "breakfast" | "lunch" | "dinner" | "snack";
 
-export interface LogMealRequest {
-  scan_id?: string;
-  dish_name?: string;
-  meal_type: MealType;
-  /** 1.0 default; portion ± buttons multiply this. */
-  portion_multiplier: number;
-  /** Optional free-text customer note. */
-  note?: string;
-}
-
 export interface LogMealResponse {
   log_id: string;
   dish_name: string;
   meal_type: MealType;
-  calories: number;
+  /** DRF-2371 — `null`, когда каталог сохранил блюдо без чисел; не ноль. */
+  calories: number | null;
 }
 
 export interface DailySummaryEntry {
   log_id: string;
   meal_type: MealType;
   dish_name: string;
-  calories: number;
+  /** DRF-2371 — `null`, когда каталог сохранил блюдо без чисел; не ноль. */
+  calories: number | null;
   portion_g?: number;
   logged_at_iso: string;
 }
@@ -111,31 +110,22 @@ export interface DailySummaryEntry {
 export interface DailySummaryResponse {
   date: string; // YYYY-MM-DD
   calories_total: number;
-  calories_goal: number;
+  /**
+   * `calories_goal` СНЯТО. Ayla ключ больше не присылает: плоскую норму
+   * 2000 ккал для всех владелец удалил 09.09.2026 (§82), а
+   * версионированный расчёт (§85) — отдельный срез. Обязательное поле
+   * здесь заставляло бы выдумать значение при любой попытке собрать
+   * этот объект — что стаб ниже и делал, подставляя 2100.
+   *
+   * Когда ориентир появится, он придёт НЕОБЯЗАТЕЛЬНЫМ (`?:`), как
+   * `calories_target` в `customer-wellness.ts`: экран обязан уметь
+   * его отсутствие, а не полагаться на то, что число всегда есть.
+   */
   protein_g: number;
   fat_g: number;
   carbs_g: number;
   entries: DailySummaryEntry[];
   ai_comment?: string;
-}
-
-/**
- * Stub MeResponse extension — health_flags exposure (Q2 blocker per
- * Phase A recon). Real shape lives in `apps/miniapp/src/lib/admin-api.ts
- * ::MeResponse`; this typed subset is what food scanner consumes.
- * Until W4 wires `health_flags` into the canonical /me payload, the
- * stub here drives the ED-mode toggle.
- */
-export interface FoodHealthFlags {
-  eating_disorder?: boolean;
-  pregnancy?: boolean;
-  breastfeeding?: boolean;
-  diabetes?: boolean;
-  hypertension?: boolean;
-}
-
-export interface MeHealthFlagsResponse {
-  health_flags: FoodHealthFlags;
 }
 
 // ---------------------------------------------------------------------------
@@ -163,307 +153,492 @@ export class PhotoBytesMissingError extends Error {
   }
 }
 
-/**
- * Production guard — Profile PR #954 M1 precedent. If real W4 endpoint
- * is not wired, prod-mode calls throw → `StateError` renders. NEVER
- * ship fake recognition results / fake daily totals to a real customer.
- */
-class StubNotWiredError extends Error {
+/** 413 `photo_too_large` — лимит один на бота (тот же, что у фото из чата). */
+export class PhotoTooLargeError extends Error {
   constructor() {
-    super(
-      "Скан еды ещё не подключён. Загрузка временно недоступна. Попробуй позже.",
-    );
+    super("Фото слишком большое — попробуй сжать или снять ещё раз.");
+    this.name = "PhotoTooLargeError";
+  }
+}
+
+/**
+ * DRF-2195 — штатные отказы каталога по бюджету распознавания. Ни один из
+ * них не «временно недоступен»: каталог работает и отвечает осознанно.
+ * Отдельные классы нужны ровно затем, чтобы экран мог сказать человеку
+ * «сегодня» и увести писать словами вместо «попробуй через минуту».
+ */
+export class ScanDailyLimitError extends Error {
+  constructor() {
+    super("Сегодня фото больше не распознаю.");
+    this.name = "ScanDailyLimitError";
+  }
+}
+
+/** 503 `food_scan_budget_exhausted` — общий дневной бюджет распознавания. */
+export class ScanBudgetExhaustedError extends Error {
+  constructor() {
+    super("Распознавание фото сейчас недоступно.");
+    this.name = "ScanBudgetExhaustedError";
+  }
+}
+
+/**
+ * DRF-2554 — отказ ЗАПИСИ в дневник, названный классом.
+ *
+ * До листа `logMeal` не разбирал ошибок вовсе, и экран отвечал одной фразой
+ * на тринадцать разных причин: ни по экрану, ни по рассказу человека отказ
+ * было не различить. Класс здесь — для кода и тестов; видимые фразы по
+ * классам — слова владельца, пока экран показывает общую.
+ */
+export type FoodLogRefusalKind =
+  | "timeout"
+  | "network"
+  | "auth"
+  | "nutrition_disabled"
+  | "consent"
+  | "malformed"
+  | "food_not_recognized"
+  | "catalog_rejected"
+  | "nutrition_unavailable"
+  | "server_error"
+  | "unknown";
+
+export class FoodLogRefusedError extends Error {
+  constructor(
+    readonly kind: FoodLogRefusalKind,
+    readonly status: number | null,
+  ) {
+    super(`food log refused: ${kind}${status === null ? "" : ` (${status})`}`);
+    this.name = "FoodLogRefusedError";
+  }
+}
+
+/**
+ * DRF-2554 — сервер ответил успехом (2xx), но тело не читается. Это НЕ
+ * отказ: запись сделана, и сказать человеку «не получилось» значит толкнуть
+ * его записать второй раз.
+ */
+export class FoodLogAnswerUnreadableError extends Error {
+  constructor() {
+    super("food log succeeded but the answer body is unreadable");
+    this.name = "FoodLogAnswerUnreadableError";
+  }
+}
+
+/**
+ * Сколько ждать ответа записи. Бот ждёт каталог 10 с
+ * (`nutrition_client.DEFAULT_TIMEOUT_S`) и сам отвечает
+ * `nutrition_unavailable` — клиент ждёт дольше, чтобы получить этот
+ * названный отказ, а не собственный таймаут поверх него.
+ */
+export const LOG_MEAL_TIMEOUT_MS = 20_000;
+
+/** Ошибка вызова записи → названный класс (DRF-2554). */
+export function foodLogRefusalOf(
+  err: unknown,
+  timedOut: boolean,
+): FoodLogRefusedError | FoodLogAnswerUnreadableError {
+  if (timedOut) return new FoodLogRefusedError("timeout", null);
+  // `request` читает тело только у ответа `ok` (у отказа разбор тела
+  // защищён), поэтому SyntaxError здесь значит «2xx с не-JSON телом».
+  if (err instanceof SyntaxError) return new FoodLogAnswerUnreadableError();
+  if (err instanceof ApiError) {
+    const bySlug: Record<string, FoodLogRefusalKind> = {
+      consent_required: "consent",
+      food_diary_consent_required: "consent",
+      nutrition_disabled: "nutrition_disabled",
+      malformed: "malformed",
+      food_not_recognized: "food_not_recognized",
+      ayla_bad_request: "catalog_rejected",
+      nutrition_unavailable: "nutrition_unavailable",
+    };
+    // `Object.hasOwn`, а не `bySlug[slug]`: слаг приходит с провода, и
+    // «constructor» из прототипа не должен стать классом.
+    const kind = Object.hasOwn(bySlug, err.slug)
+      ? (bySlug[err.slug] as FoodLogRefusalKind)
+      : err.status === 401
+        ? "auth"
+        : err.status >= 500
+          ? "server_error"
+          : "unknown";
+    return new FoodLogRefusedError(kind, err.status);
+  }
+  // `fetch` отказывает TypeError, когда ответа нет вовсе (сеть, DNS, CORS).
+  if (err instanceof TypeError) return new FoodLogRefusedError("network", null);
+  return new FoodLogRefusedError("unknown", null);
+}
+
+/**
+ * Legacy (DRF-2106): nothing in this module throws it any more — the last
+ * stub is gone. The class stays exported because the Processing screen
+ * still maps it to its «пока не подключено» state; that branch is dead
+ * and can go with the screen's next edit.
+ */
+export class StubNotWiredError extends Error {
+  constructor() {
+    super("Распознавание еды по фото ещё не подключено.");
     this.name = "StubNotWiredError";
   }
 }
 
-function guardProd(endpoint: string): void {
-  if (!import.meta.env.DEV) {
-    // eslint-disable-next-line no-console
-    console.error(
-      `[food-scanner] ${endpoint} called in production with no W4 wire-up. ` +
-        "See docs/screens/customer-food-scanner-flow.md §13 + W4 follow-up issue.",
-    );
-    throw new StubNotWiredError();
-  }
-}
-
 // ---------------------------------------------------------------------------
-// Stub variant picker.
-// ---------------------------------------------------------------------------
-
-type StubVariant =
-  | "default"
-  | "low_confidence"
-  | "not_recognized"
-  | "api_down"
-  | "photo_failed"
-  | "ed_mode";
-
-function pickStubVariant(): StubVariant {
-  if (!import.meta.env.DEV) return "default";
-  if (typeof window === "undefined") return "default";
-  try {
-    const sp = new URLSearchParams(window.location.search);
-    const v = sp.get("stub");
-    if (
-      v === "low_confidence" ||
-      v === "not_recognized" ||
-      v === "api_down" ||
-      v === "photo_failed" ||
-      v === "ed_mode"
-    ) {
-      return v;
-    }
-  } catch {
-    /* SSR / parse failure */
-  }
-  return "default";
-}
-
-// ---------------------------------------------------------------------------
-// In-memory dev state (mirrors Profile pattern). Diary entries accumulate
-// across `log_meal` calls in dev so QA can see them in the diary screen.
-// ---------------------------------------------------------------------------
-
-const SCAN_STUB: Record<StubVariant, ScanResponse> = {
-  default: {
-    scan_id: "scan-stub-001",
-    dish_name: "Гречка с курицей",
-    confidence: 0.85,
-    portion_g: 150,
-    nutrition: {
-      calories: 480,
-      protein_g: 35,
-      fat_g: 8,
-      carbs_g: 50,
-      vitamins: { B6: 0.4, Fe: 3.2 },
-    },
-    beauty_insights: null,
-  },
-  low_confidence: {
-    scan_id: "scan-stub-002",
-    dish_name: "Гречка с курицей",
-    confidence: 0.42,
-    portion_g: 150,
-    nutrition: {
-      calories: 480,
-      protein_g: 35,
-      fat_g: 8,
-      carbs_g: 50,
-    },
-    beauty_insights: null,
-  },
-  not_recognized: {
-    scan_id: "",
-    dish_name: "",
-    confidence: 0,
-    portion_g: null,
-    nutrition: null,
-    beauty_insights: null,
-  },
-  api_down: {
-    scan_id: "",
-    dish_name: "",
-    confidence: 0,
-    portion_g: null,
-    nutrition: null,
-    beauty_insights: null,
-  },
-  photo_failed: {
-    scan_id: "",
-    dish_name: "",
-    confidence: 0,
-    portion_g: null,
-    nutrition: null,
-    beauty_insights: null,
-  },
-  ed_mode: {
-    scan_id: "scan-stub-ed",
-    dish_name: "Гречка с курицей",
-    confidence: 0.85,
-    portion_g: 150,
-    nutrition: null, // ED mode: Ayla returns no numbers
-    beauty_insights: null,
-  },
-};
-
-interface DiaryState {
-  entries: DailySummaryEntry[];
-  calories_goal: number;
-}
-
-const DIARY_STATE: { byDate: Map<string, DiaryState> } = {
-  byDate: new Map(),
-};
-
-function todayKey(): string {
-  const now = new Date();
-  const y = now.getFullYear();
-  const m = String(now.getMonth() + 1).padStart(2, "0");
-  const d = String(now.getDate()).padStart(2, "0");
-  return `${y}-${m}-${d}`;
-}
-
-function ensureDiaryDay(date: string): DiaryState {
-  let state = DIARY_STATE.byDate.get(date);
-  if (!state) {
-    state = { entries: [], calories_goal: 2100 };
-    DIARY_STATE.byDate.set(date, state);
-  }
-  return state;
-}
-
-function devWarn(msg: string): void {
-  if (import.meta.env.DEV && typeof console !== "undefined") {
-    // eslint-disable-next-line no-console
-    console.warn(`[food-scanner stub] ${msg}`);
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Fetch wrappers — stubs in DEV; throw in prod until W4 wires.
+// Фото-половина F8 (DRF-2098) — настоящий провод. Решение владельца 18.09
+// (§48 п.4): «food-diary-v1 покрывает фото из Mini App» — отдельного
+// согласия на фото нет, ворота у `POST /food/scan` те же, что у текста
+// (`fetchDiaryConsentGate` спрашивают до снимка; 403 в полёте — тот же
+// экран согласия). Stub-сторожа `guardProd` в модуле больше нет (DRF-2098/2106).
 // ---------------------------------------------------------------------------
 
 export interface ScanPhotoOptions {
   caption?: string;
   /**
-   * AbortSignal plumbed from `AbortController` on F2 — friendly CR
-   * follow-up. On stub this controls only the simulated-latency
-   * setTimeout so QA can verify cancel UX; on swap-day W4 must wire
-   * the signal into the real `fetch`/`httpx` request so an inflight
-   * upload is cancelled when the customer taps «Отменить» or
-   * navigates away.
+   * AbortSignal from F2's `AbortController` — passed straight into
+   * `fetch`, so «Отменить» aborts the upload in flight, not a timer.
    */
   signal?: AbortSignal;
 }
 
-export async function scanPhoto(
-  _photo: File,
-  opts?: ScanPhotoOptions,
-): Promise<ScanResponse> {
-  guardProd("POST /api/v1/customer/food/scan");
-  devWarn("scanPhoto served from stub — W4 follow-up");
-  const v = pickStubVariant();
-  // Simulate network latency so the F2 loading card actually shows.
-  // The signal aborts the wait early to mirror prod cancel behaviour.
-  await new Promise<void>((resolve, reject) => {
-    const timer = window.setTimeout(resolve, 1200);
-    if (opts?.signal) {
-      const onAbort = () => {
-        window.clearTimeout(timer);
-        reject(new DOMException("Aborted", "AbortError"));
-      };
-      if (opts.signal.aborted) {
-        onAbort();
-      } else {
-        opts.signal.addEventListener("abort", onAbort, { once: true });
-      }
-    }
-  });
-  if (v === "not_recognized") throw new FoodNotRecognizedError();
-  if (v === "api_down") throw new NutritionUnavailableError();
-  if (v === "photo_failed") throw new PhotoBytesMissingError();
-  return SCAN_STUB[v];
-}
-
-export async function logMeal(
-  req: LogMealRequest,
-): Promise<LogMealResponse> {
-  guardProd("POST /api/v1/customer/food/log");
-  devWarn("logMeal served from stub — W4 follow-up");
-  const dishName = req.dish_name ?? "Запись";
-  // Resolve calories from the most recent scan stub of the active
-  // variant (so the diary reflects what the user just saw on F3).
-  const v = pickStubVariant();
-  const baseCalories =
-    SCAN_STUB[v].nutrition?.calories ?? 0;
-  const calories = Math.round(baseCalories * (req.portion_multiplier ?? 1));
-  const logId = `log-${Date.now()}`;
-  const day = ensureDiaryDay(todayKey());
-  day.entries.push({
-    log_id: logId,
-    meal_type: req.meal_type,
-    dish_name: dishName,
-    calories,
-    portion_g:
-      SCAN_STUB[v].portion_g != null
-        ? Math.round((SCAN_STUB[v].portion_g as number) * (req.portion_multiplier ?? 1))
-        : undefined,
-    logged_at_iso: new Date().toISOString(),
-  });
-  return { log_id: logId, dish_name: dishName, meal_type: req.meal_type, calories };
-}
-
-export async function fetchDailySummary(
-  date?: string,
-): Promise<DailySummaryResponse> {
-  guardProd("GET /api/v1/customer/food/daily");
-  devWarn("fetchDailySummary served from stub — W4 follow-up");
-  const d = date ?? todayKey();
-  const day = ensureDiaryDay(d);
-  let calTotal = 0;
-  let pTotal = 0;
-  let fTotal = 0;
-  let cTotal = 0;
-  for (const e of day.entries) {
-    calTotal += e.calories;
-    // Approximate macros split when not available per-entry.
-    pTotal += Math.round(e.calories * 0.075);
-    fTotal += Math.round(e.calories * 0.018);
-    cTotal += Math.round(e.calories * 0.105);
-  }
-  return {
-    date: d,
-    calories_total: calTotal,
-    calories_goal: day.calories_goal,
-    protein_g: pTotal,
-    fat_g: fTotal,
-    carbs_g: cTotal,
-    entries: day.entries.slice(),
-  };
+/** Ответ прокси `POST /food/scan` (бот отдаёт подмножество каталога). */
+interface ScanWire {
+  scan_id: string;
+  dish_name: string;
+  confidence: number;
+  portion_g: number | null;
+  nutrition: NutritionFacts | null;
 }
 
 /**
- * Read the customer's health_flags. Production swap: read from
- * canonical `/api/v1/me` response once W4 adds the `health_flags`
- * field (P2 follow-up).
+ * Multipart `POST /food/scan`: поле `image` — сам файл. Ошибки бота
+ * приводятся к таксономии §7: `food_not_recognized` → FoodNotRecognizedError,
+ * `food_scan_daily_limit` (429) → ScanDailyLimitError,
+ * `food_scan_budget_exhausted` (503) → ScanBudgetExhaustedError,
+ * `nutrition_unavailable` (503) → NutritionUnavailableError, `photo_too_large`
+ * (413) → PhotoTooLargeError. Отказы гейта (403/404) пробрасываются как
+ * `ApiError` — Capture-экран ведёт на согласие по слагу.
  */
-export async function fetchHealthFlags(): Promise<MeHealthFlagsResponse> {
-  guardProd("GET /api/v1/me (health_flags)");
-  devWarn("health_flags served from stub — W4 follow-up");
-  const v = pickStubVariant();
+export async function scanPhoto(
+  photo: File,
+  opts?: ScanPhotoOptions,
+): Promise<ScanResponse> {
+  const form = new FormData();
+  form.append("image", photo, photo.name || "meal.jpg");
+  let wire: ScanWire;
+  try {
+    wire = await request<ScanWire>("/food/scan", {
+      method: "POST",
+      body: form,
+      signal: opts?.signal,
+    });
+  } catch (err) {
+    if (err instanceof ApiError) {
+      if (err.slug === "food_not_recognized")
+        throw new FoodNotRecognizedError();
+      // DRF-2195 — бюджет читается ДО `nutrition_unavailable`, как и на
+      // стороне бота: у обоих отказов свои слаги, и 503 бюджета не должен
+      // попасть в «сервис лёг».
+      if (err.slug === "food_scan_daily_limit") throw new ScanDailyLimitError();
+      if (err.slug === "food_scan_budget_exhausted")
+        throw new ScanBudgetExhaustedError();
+      // DRF-2318 — стойкий отказ распознавателя (счёт, ключ, квота): тот же
+      // честный экран «сейчас недоступно — напиши словами», без «через минуту».
+      if (err.slug === "food_scan_provider_down")
+        throw new ScanBudgetExhaustedError();
+      if (err.slug === "nutrition_unavailable")
+        throw new NutritionUnavailableError();
+      if (err.slug === "photo_too_large") throw new PhotoTooLargeError();
+    }
+    throw err;
+  }
   return {
-    health_flags: { eating_disorder: v === "ed_mode" },
+    scan_id: wire.scan_id,
+    dish_name: wire.dish_name,
+    confidence: wire.confidence,
+    portion_g: wire.portion_g,
+    nutrition: wire.nutrition,
+    // Каталог не отдаёт beauty-инсайты на этой ручке; экран рисует
+    // блок только когда он есть.
+    beauty_insights: null,
   };
 }
 
-// ---------------------------------------------------------------------------
-// 152-ФЗ consent gate persistence — DeviceStorage MVP, server-side
-// persist (`food_scanner_consent_at` field) deferred to W4 follow-up.
-// ---------------------------------------------------------------------------
-
-const CONSENT_STORAGE_KEY = "ayla.food_scanner_consent_at";
-
-export function readConsentAt(): string | null {
-  if (typeof window === "undefined") return null;
-  try {
-    return window.localStorage.getItem(CONSENT_STORAGE_KEY);
-  } catch {
-    return null;
-  }
+/** Тело записи по скану — ветка `scan_id` в `POST /food/log` (DRF-2098). */
+export interface LogMealRequest {
+  /** Провенанс фото (§136 `photo_*`) — остаётся и при переименовании. */
+  scan_id: string;
+  /** Только когда человек переименовал блюдо на карточке. */
+  dish_name?: string;
+  meal_type: MealType;
+  /** 1.0 default; portion ± buttons multiply this. */
+  portion_multiplier: number;
+  /** Ключ идемпотентности — от экрана; повтор после потерянного ответа не пишет вторую запись. */
+  idempotency_key: string;
+  /**
+   * Заметка карточки. НЕ пересылается: у `log_meal` каталога нет такого
+   * поля, чат её тоже не шлёт (предел, назван в DRF-2098).
+   */
+  note?: string;
 }
 
-export function saveConsentAccepted(): string {
-  const now = new Date().toISOString();
-  if (typeof window !== "undefined") {
-    try {
-      window.localStorage.setItem(CONSENT_STORAGE_KEY, now);
-    } catch {
-      /* private mode / quota — UI still proceeds for this session */
-    }
+interface LogMealWire {
+  log_id: string;
+  dish_name: string;
+  meal_type: string;
+  /** DRF-2371 — `null`, когда каталог сохранил блюдо без чисел; не ноль. */
+  calories: number | null;
+  entry_origin: string | null;
+}
+
+/**
+ * `POST /food/log` с `scan_id`. Возвращает запись, как её записал каталог;
+ * `meal_type` в ответе — как каталог её назвал (unnamed, если экран не
+ * назвал приём).
+ *
+ * DRF-2554: любой отказ приходит как `FoodLogRefusedError` со своим классом;
+ * 2xx с нечитаемым телом — `FoodLogAnswerUnreadableError` (запись сделана);
+ * ответа дольше `LOG_MEAL_TIMEOUT_MS` не ждём. Повтор после таймаута
+ * безопасен: тот же ключ идемпотентности вернёт уже сделанную запись.
+ */
+export async function logMeal(req: LogMealRequest): Promise<LogMealResponse> {
+  const body: Record<string, unknown> = {
+    scan_id: req.scan_id,
+    meal_type: req.meal_type,
+    portion_multiplier: req.portion_multiplier,
+    idempotency_key: req.idempotency_key,
+  };
+  if (req.dish_name !== undefined) body.dish_name = req.dish_name;
+  const controller = new AbortController();
+  let timedOut = false;
+  const timer = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, LOG_MEAL_TIMEOUT_MS);
+  let wire: LogMealWire;
+  try {
+    wire = await request<LogMealWire>("/food/log", {
+      method: "POST",
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    });
+  } catch (err) {
+    throw foodLogRefusalOf(err, timedOut);
+  } finally {
+    clearTimeout(timer);
   }
-  return now;
+  return {
+    log_id: wire.log_id,
+    dish_name: wire.dish_name,
+    meal_type: (wire.meal_type as MealType) ?? req.meal_type,
+    calories: wire.calories,
+  };
+}
+
+/*
+ * `fetchDailySummary` УДАЛЕНА 08.09.2026 вместе с выдуманным числом.
+ *
+ * Она читала `localStorage` и вычисляла БЖУ из калорий постоянными
+ * коэффициентами:
+ *
+ *     pTotal += Math.round(e.calories * 0.075);
+ *     fTotal += Math.round(e.calories * 0.018);
+ *     cTotal += Math.round(e.calories * 0.105);
+ *
+ * — и показывала это человеку как его белки, жиры и углеводы за день.
+ *
+ * До сих пор в этом контуре вычищали выдуманные НОРМЫ (§65): плоские
+ * 2000 ккал, восемь стаканов. Норма — выдуманная мишень, она врёт про
+ * то, к чему идти, и её можно оспорить. Здесь был выдуманный ФАКТ О
+ * ЧЕЛОВЕКЕ — про то, что он уже съел; свой факт о себе человек
+ * оспаривать не станет.
+ *
+ * Приближение было ещё и не нужно: настоящие `protein_g / fat_g /
+ * carbs_g` приходят НА КАЖДУЮ ЗАПИСЬ от источника
+ * (`nutrition/serializers.py::FoodLogEntrySerializer`).
+ *
+ * Снято тем же коммитом, которым подключены настоящие записи: до него
+ * выдумку закрывал `guardProd`, и одно лишь подключение данных само
+ * открыло бы ей дорогу к человеку.
+ *
+ * Настоящее чтение — `customer-wellness.ts::loadDiaryToday`.
+ */
+
+// ---------------------------------------------------------------------------
+// Согласие на сканирование еды (152-ФЗ) — источник правды СЕРВЕР.
+// ---------------------------------------------------------------------------
+//
+// Здесь стоял `localStorage`, и это был не «MVP-компромисс», а петля.
+//
+// Здесь когда-то стоял `localStorage`, потом — колонка
+// `BotUser.food_scanner_consent_at`. С DRF-1963 (M1, владелец 15.09) согласие
+// — строка единого реестра согласий `food_diary_processing`: с версией
+// текста, источником и отзывом, который не стирает факт выдачи. Экран и гейт
+// бота читают одну и ту же строку через `me/food-scanner-consent/`.
+
+/**
+ * Версия текста согласия, который показывает экран. КОПИЯ константы
+ * `FOOD_DIARY_CONSENT_DOCUMENT_VERSION` из `apps/consent/nutrition.py` —
+ * источник там, паритет держит тест `test_food_diary_disclosure.py`.
+ * Сервер отвергает выдачу под версией, которой не знает (409).
+ *
+ * `food-diary-v1` — решение владельца 17.09: текст v1 = раскрытие Z9
+ * (`food-diary-disclosure.ts`), с этого момента неизменяем; содержательное
+ * изменение текста = `food-diary-v2` новой константой, без перезаписи v1.
+ * `food-diary-v0` — черновой контракт, не используется.
+ */
+export const FOOD_DIARY_CONSENT_DOCUMENT_VERSION = "food-diary-v1";
+
+/**
+ * Прочитать согласие у СЕРВЕРА.
+ *
+ * `null` — согласия нет, и экран обязан спросить. Отсутствие ключа
+ * читается так же: fail-closed, отсутствие доезжает отсутствием.
+ */
+// ---------------------------------------------------------------------------
+// Запись еды ТЕКСТОМ — F8, текстовая половина (DRF-2091).
+//
+// Настоящий провод, не stub: `POST /food/estimate` (оценка без записи) и
+// `POST /food/log` (запись по подтверждению) — те же ручки бота, что ведут
+// в ту же тропу каталога, что и текст в чате (F2). Это боевые ручки, как и
+// фото-половина (`scanPhoto`/`logMeal` выше) с DRF-2098: решение владельца
+// D26 = «food-diary-v1 покрывает фото из Mini App».
+// ---------------------------------------------------------------------------
+
+export interface FoodTextEstimate {
+  matched_dish: string;
+  portion_g: number;
+  /** true — граммов в тексте не было, порция — оценка; экран обязан сказать это словами. */
+  portion_estimated: boolean;
+  /** DRF-2371 — `null`, когда считать нечем: блюда нет в справочнике. */
+  kcal: number | null;
+  /** DRF-2402 — см. NutritionFacts.portion_source. */
+  portion_source?: string | null;
+  protein_g: number | null;
+  fat_g: number | null;
+  carbs_g: number | null;
+}
+
+export interface FoodTextLogResult {
+  log_id: string;
+  dish_name: string;
+  /** DRF-2371 — `null`, когда каталог сохранил блюдо без чисел; не ноль. */
+  calories: number | null;
+  entry_origin: "text_estimated_confirmed" | "text_user_corrected" | string;
+}
+
+/** Оценка без записи. `portionG` — поправка граммов с карточки, сильнее числа в тексте. */
+export async function estimateFoodText(
+  text: string,
+  portionG?: number,
+): Promise<FoodTextEstimate> {
+  const body: { text: string; portion_g?: number } = { text };
+  if (portionG !== undefined) body.portion_g = portionG;
+  return request<FoodTextEstimate>("/food/estimate", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+/**
+ * Запись — только по подтверждению показанной оценки. `corrected` решается
+ * на карточке («Поправить граммы» → true), не задним числом: от него
+ * зависит код происхождения записи (§136). Ключ идемпотентности минтится
+ * экраном один раз на карточку и переживает повтор запроса.
+ */
+export async function logFoodText(req: {
+  dish_name: string;
+  portion_g: number;
+  corrected: boolean;
+  idempotency_key: string;
+}): Promise<FoodTextLogResult> {
+  return request<FoodTextLogResult>("/food/log", {
+    method: "POST",
+    body: JSON.stringify(req),
+  });
+}
+
+export async function fetchConsentAt(): Promise<string | null> {
+  const res = await request<{ granted?: boolean; granted_at?: string | null }>(
+    "/me/food-scanner-consent/",
+    { method: "GET" },
+  );
+  return res.granted ? (res.granted_at ?? null) : null;
+}
+
+/**
+ * Дать согласие. Возвращает момент выдачи, записанный СЕРВЕРОМ.
+ *
+ * Момент берётся из ответа, а не из часов браузера: у гейта и у экрана
+ * должно быть одно значение, а часы на устройстве человека могут
+ * показывать что угодно. Версия текста уезжает в теле — без неё сервер
+ * согласие не запишет.
+ */
+export async function grantConsent(): Promise<string | null> {
+  const res = await request<{ granted_at?: string | null }>(
+    "/me/food-scanner-consent/",
+    {
+      method: "POST",
+      body: JSON.stringify({
+        document_version: FOOD_DIARY_CONSENT_DOCUMENT_VERSION,
+      }),
+    },
+  );
+  return res.granted_at ?? null;
+}
+
+/**
+ * Отозвать согласие. Отзыв доступен тем же способом, что и выдача, —
+ * иначе это была бы новая строка «право на отзыв недостижимо из
+ * приложения» (DRF-1520) в день закрытия старой.
+ */
+export async function withdrawConsent(): Promise<null> {
+  await request("/me/food-scanner-consent/", { method: "DELETE" });
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Каноническое раскрытие дневника питания — F10 / Z9 (DRF-2038).
+//
+// Согласие одно и ручка одна — `me/food-scanner-consent/` выше: строка
+// реестра `food_diary_processing` покрывает дневник и текстом, и фотографией.
+// Здесь НЕ второй путь согласия, а ответ на один вопрос экрана: КАКОЙ текст
+// показывать — нынешний короткий или каноническое раскрытие Z9. Пока текст
+// раскрытия имеет статус WORKING PRODUCT COPY, сервер объявляет канон только
+// под флагом `FOOD_DIARY_CANONICAL_CONSENT`, и экран узнаёт об этом из `/me`.
+// ---------------------------------------------------------------------------
+
+/**
+ * Что экрану нужно знать про согласие — одним вызовом.
+ *
+ * `canonical` — КАКОЙ текст показывать, а не «дано ли согласие». Отсутствие
+ * поля в `/me` читается как старый путь: сборка, не знающая про канон, и
+ * ответ без поля обязаны вести себя одинаково.
+ */
+export type DiaryConsentGate = {
+  canonical: boolean;
+  grantedAt: string | null;
+  /** Версия текста, под которой согласие выдаётся, — та же для обоих текстов. */
+  currentDocumentVersion: string;
+};
+
+/**
+ * Прочитать, какой текст показывать и стоит ли согласие.
+ *
+ * Развилка живёт ЗДЕСЬ, а не в компоненте, ровно по одной причине: правило
+ * «нет поля — старый путь» должно существовать в единственном месте.
+ * Размазанное по экрану, оно разошлось бы с собой при первой же правке.
+ *
+ * Момент выдачи — из той же ручки, что и у гейта (`fetchConsentAt`): у
+ * экрана и у гейта одно значение, а не два.
+ */
+export async function fetchDiaryConsentGate(): Promise<DiaryConsentGate> {
+  const me = await request<{ food_diary_consent_canonical?: boolean }>("/me", {
+    method: "GET",
+  });
+  const grantedAt = await fetchConsentAt();
+  return {
+    canonical: me.food_diary_consent_canonical === true,
+    grantedAt,
+    currentDocumentVersion: FOOD_DIARY_CONSENT_DOCUMENT_VERSION,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -507,10 +682,7 @@ export const PORTION_STEPS: ReadonlyArray<number> = [
   0.5, 0.75, 1.0, 1.25, 1.5, 1.75, 2.0,
 ];
 
-export function nextPortion(
-  current: number,
-  direction: "up" | "down",
-): number {
+export function nextPortion(current: number, direction: "up" | "down"): number {
   const idx = PORTION_STEPS.findIndex((s) => Math.abs(s - current) < 0.001);
   if (idx < 0) return 1.0;
   if (direction === "up") {
@@ -558,10 +730,7 @@ export function nextPortion(
  */
 export class ImageStripUnsupportedError extends Error {
   readonly reason:
-    | "no_browser_api"
-    | "decode_failed"
-    | "no_canvas_context"
-    | "encode_failed";
+    "no_browser_api" | "decode_failed" | "no_canvas_context" | "encode_failed";
   constructor(
     reason:
       | "no_browser_api"

@@ -46,6 +46,7 @@ from apps.identity.services.profile import (
     update_profile,
 )
 from apps.tenancy.models import Tenant
+from tests.support.migration_graph import restore_migration_head
 
 
 pytestmark = pytest.mark.django_db
@@ -196,7 +197,16 @@ class TestMiniAppSources:
     """
 
     def test_profile_screen_has_no_allergies_input(self) -> None:
-        src = _read("apps", "miniapp", "src", "screens", "ProfileScreen.tsx")
+        # Читается ЖИВОЙ профиль клиента. Легаси-`ProfileScreen.tsx`
+        # (адрес `/me`), на который эта проверка была наведена, снят
+        # вместе с двумя другими мёртвыми экранами (DRF-1485) — и
+        # вопрос «не вернулась ли подпись» относится теперь к тому
+        # единственному экрану, где человек правит свой профиль.
+        src = _read("apps", "miniapp", "src", "screens", "CustomerProfileScreen.tsx")
+        # Положительная стража на тех же данных (negative_assert_guard,
+        # DRF-1411): без неё переименованный или снятый файл читался бы
+        # как «подписи нет», и три утверждения ниже стали бы пустыми.
+        assert "Профиль клиента" in src
         assert "Аллергии" not in src
         assert "Передадим мастеру" not in src
         assert "preferences.allergies" not in src
@@ -204,9 +214,9 @@ class TestMiniAppSources:
     def test_no_screen_references_preferences_allergies(self) -> None:
         # Property access / object key / type member — not the word inside a
         # comment or a filename, which is how this very test is referenced.
-        # `*.test.tsx` is out of scope on purpose: ProfileScreen.test.tsx
-        # asserts the key is never sent, and a fixture that re-added it
-        # would fail `tsc --noEmit` against the `Preferences` type anyway.
+        # `*.test.tsx` is out of scope on purpose: a fixture that re-added
+        # the key would fail `tsc --noEmit` against the `Preferences`
+        # type anyway.
         needles = (
             ".allergies",
             "allergies:",
@@ -263,8 +273,10 @@ class TestMigration:
     def test_rollback_and_reapply(self) -> None:
         # Fresh executor per migrate(): the loader caches applied state at
         # init, so a reused one mis-plans the second leg. The finally always
-        # returns the test DB to head — later tests write through the
-        # runtime model, which has no `allergies`.
+        # restores the WHOLE graph, not `_HEAD`: handoff/0002 and
+        # catalog/0016 depend on identity/0020, so the rollback to 0019 takes
+        # them down too and re-applying 0020 alone leaves them off for every
+        # later test on this xdist worker (DRF-1551).
         try:
             executor = MigrationExecutor(connection)
             executor.migrate([self._PREV])
@@ -283,7 +295,7 @@ class TestMigration:
             )
             assert "allergies" not in {f.name for f in new._meta.fields}
         finally:
-            MigrationExecutor(connection).migrate([self._HEAD])
+            restore_migration_head()
 
     def test_no_model_changes_left_unmigrated(self) -> None:
         """`makemigrations --check` for identity, in-process."""

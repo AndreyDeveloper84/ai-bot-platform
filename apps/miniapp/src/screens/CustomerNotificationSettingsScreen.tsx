@@ -23,11 +23,12 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
 import { Snackbar } from "../components/Snackbar";
 import { StateError } from "../components/StateError";
 import { ToggleSwitch } from "../components/ToggleSwitch";
 import { fetchProfile, updateProfile, type Preferences } from "../lib/api";
+import { useScreenBack } from "../hooks/useScreenBack";
+import { backTo } from "../lib/screen-back";
 
 type State =
   | { kind: "loading" }
@@ -67,7 +68,9 @@ const TOGGLES: ToggleDef[] = [
 ];
 
 export function CustomerNotificationSettingsScreen() {
-  const navigate = useNavigate();
+
+  // Возврат (DRF-1493) — в профиль: настройки открывают только оттуда.
+  const onBack = useScreenBack(backTo("/customer/profile"));
   const [state, setState] = useState<State>({ kind: "loading" });
   const [busyKey, setBusyKey] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
@@ -117,7 +120,7 @@ export function CustomerNotificationSettingsScreen() {
           type="button"
           className="records-screen__back"
           aria-label="Назад"
-          onClick={() => navigate(-1)}
+          onClick={onBack}
         >
           <span aria-hidden="true">←</span>
         </button>

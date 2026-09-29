@@ -24,10 +24,14 @@
 
 import type { RecordItem } from "../lib/customer-records";
 import { renderStatus } from "../lib/customer-records";
+import { priceFromLabel } from "../lib/format";
 import { PaymentStatusBadge } from "./PaymentStatusBadge";
 import { StatusBadge, tintColourVar } from "./StatusBadge";
 
 export type BookingCardVariant = "nearest" | "future" | "past";
+
+/** Причина, по которой действие выключено — одна и та же на всех кнопках. */
+const OFFLINE_HINT = "Нет сети";
 
 interface Props {
   item: RecordItem;
@@ -37,6 +41,20 @@ interface Props {
   onCancel?: () => void;
   onRepeat?: () => void;
   onReview?: () => void;
+  /**
+   * Сети нет — действия, которые без неё не произойдут, выключены.
+   *
+   * Экран записей рисовал честную полосу «нет сети», а кнопки под ней
+   * оставались живыми: «Перенести» и «Отменить» уводили на экраны,
+   * которые ничего не загрузят и ничего не отправят, «Записаться ещё» —
+   * в каталог, который не придёт. Полоса без этого — предупреждение,
+   * которое приложение само же и опровергает следующим касанием.
+   *
+   * «Открыть запись» остаётся живой: это чтение уже показанной записи,
+   * у экрана детали есть собственное состояние ошибки, и запирать
+   * человека без выхода незачем.
+   */
+  offline?: boolean;
 }
 
 export function BookingCard({
@@ -47,11 +65,13 @@ export function BookingCard({
   onCancel,
   onRepeat,
   onReview,
+  offline = false,
 }: Props) {
   const { rendering } = renderStatus(item.status);
   const accent = tintColourVar(rendering.tint);
   const actions = new Set(item.actions);
   const reviewPending = variant === "past" && actions.has("review");
+  const priceLabel = item.price ? priceFromLabel(item.price) : "";
 
   return (
     <article
@@ -81,7 +101,18 @@ export function BookingCard({
         )}
       </div>
 
-      <div className="records-card__who">у {item.masterName}</div>
+      {/* DRF-2436 B / п.15: салон — в той же строке, через «·». Слова
+          владельца 28.09, п.2: «мастер {Имя}» без склонения — «у Ольга»
+          ломало падеж. */}
+      <div className="records-card__who">
+        мастер {item.masterName}
+        {item.salonName ? ` · ${item.salonName}` : ""}
+      </div>
+
+      {/* DRF-2172 — цена записи «3 200 ₽» (снимок на момент записи), в
+          той же форме, что в карточке на Главной. null / ниже 1 ₽ →
+          строки нет (§103, DRF-1989) — «0 ₽» не рисуется. */}
+      {priceLabel && <div className="records-card__price">{priceLabel}</div>}
 
       {reviewPending && (
         <p className="records-card__review-hint" aria-live="polite">
@@ -108,6 +139,8 @@ export function BookingCard({
               type="button"
               className="btn-secondary records-card__action"
               onClick={onReschedule}
+              disabled={offline}
+              title={offline ? OFFLINE_HINT : undefined}
             >
               Перенести
             </button>
@@ -117,6 +150,8 @@ export function BookingCard({
             type="button"
             className="btn-secondary records-card__action records-card__action--danger"
             onClick={onCancel}
+            disabled={offline}
+            title={offline ? OFFLINE_HINT : undefined}
           >
             Отменить
           </button>
@@ -128,6 +163,8 @@ export function BookingCard({
             type="button"
             className="btn-secondary records-card__action"
             onClick={onRepeat}
+            disabled={offline}
+            title={offline ? OFFLINE_HINT : undefined}
           >
             Записаться ещё
           </button>
@@ -137,6 +174,8 @@ export function BookingCard({
             type="button"
             className="btn-secondary records-card__action"
             onClick={onReview}
+            disabled={offline}
+            title={offline ? OFFLINE_HINT : undefined}
           >
             Оставить отзыв
           </button>

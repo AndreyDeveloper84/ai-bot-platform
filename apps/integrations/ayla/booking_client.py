@@ -37,16 +37,18 @@ import math
 import random
 import time
 import uuid
+import weakref
 from dataclasses import dataclass, field
 from datetime import date as date_cls
 from datetime import timedelta, timezone as tz
-from typing import Any, NoReturn, Protocol, runtime_checkable
+from typing import Any, Literal, NoReturn, Protocol, runtime_checkable
 
 import httpx
 from django.conf import settings
 from django.core.cache import cache
 
 from apps.integrations.ayla.url_builder import AylaUrlBuilder
+from apps.integrations.ayla.request_id import with_request_id
 
 
 logger = logging.getLogger(__name__)
@@ -58,6 +60,24 @@ CIRCUIT_FAILURE_WINDOW_S = 60.0
 CIRCUIT_FAILURE_THRESHOLD = 5
 CIRCUIT_OPEN_DURATION_S = 30.0
 _BREAKER_NAME = "ayla.booking"
+#: DRF-2618 — свой автомат у картинок мастера (фото и портфолио). Картинок на
+#: экране десятки, запись — одна: общий автомат давал дешёвой поверхности
+#: погасить самую дорогую.
+_MEDIA_BREAKER_NAME = "ayla.booking.media"
+
+#: DRF-2627 — автоматы по НАЗНАЧЕНИЮ, а не по методу. До DRF-2627 все 44 пути
+#: клиента (кроме картинок, DRF-2618) делили один автомат с записью: серия
+#: таймаутов на правке профиля мастера, списке портфолио или публикации
+#: открывала автомат ЗАПИСИ и гасила самую дорогую поверхность продукта, а
+#: пока он был открыт из-за чтения, запись отказывала по чужой причине.
+#: ``booking`` — путь клиента к записи (13 методов), ``read`` — чтения и правки
+#: каталога и кабинета мастера (31), медиа — свой (DRF-2618).
+_READ_BREAKER_NAME = "ayla.booking.read"
+
+#: Назначение вызова — какой автомат его стережёт. Обязательный параметр
+#: ``_request``/``_get_all_rows`` БЕЗ умолчания: новый метод не ляжет молча на
+#: чужой автомат — без назначения его не пропустит проверка типов.
+Purpose = Literal["booking", "read"]
 
 # DRF-997: bounded retry for transient 429 responses. Retry-After is respected
 # up to a cap so a single slow backend header cannot block the worker forever.
@@ -95,7 +115,7 @@ MAX_AVAILABLE_DATES_WINDOW_DAYS = 31
 MAX_CATALOG_PAGES = 100
 
 
-def _fire_breaker_alert(transition: str, failures: int) -> None:
+def _fire_breaker_alert(transition: str, failures: int, *, name: str = _BREAKER_NAME) -> None:
     """Borrow the CR-3 Telegram alert path on a breaker state transition.
 
     Lazy-imports the alert helper and swallows every exception — alerting is
@@ -106,7 +126,7 @@ def _fire_breaker_alert(transition: str, failures: int) -> None:
         from apps.orchestrator.llm.telegram_alert import send_breaker_alert
 
         send_breaker_alert(
-            provider=_BREAKER_NAME,
+            provider=name,
             transition=transition,
             details={"failures": failures},
         )
@@ -124,6 +144,8 @@ class _Circuit:
 
     failures: list[float] = field(default_factory=list)
     opened_at: float | None = None
+    #: Имя в журнале и тревоге: у записи и у картинок автоматы разные (DRF-2618).
+    name: str = _BREAKER_NAME
 
     def is_open(self, *, now: float) -> bool:
         if self.opened_at is None:
@@ -132,7 +154,7 @@ class _Circuit:
             failures_before = len(self.failures)
             self.opened_at = None
             self.failures = []
-            _fire_breaker_alert("open → closed", failures_before)
+            _fire_breaker_alert("open → closed", failures_before, name=self.name)
             return False
         return True
 
@@ -143,11 +165,12 @@ class _Circuit:
         if len(self.failures) >= CIRCUIT_FAILURE_THRESHOLD and self.opened_at is None:
             self.opened_at = now
             logger.warning(
-                "booking_client.circuit_opened failures=%d window_s=%.0f",
+                "booking_client.circuit_opened breaker=%s failures=%d window_s=%.0f",
+                self.name,
                 len(self.failures),
                 CIRCUIT_FAILURE_WINDOW_S,
             )
-            _fire_breaker_alert("closed → open", len(self.failures))
+            _fire_breaker_alert("closed → open", len(self.failures), name=self.name)
 
     def record_success(self) -> None:
         self.failures = []
@@ -188,6 +211,13 @@ class BookingBadRequestError(BookingAPIError):
     e.g. C1's ``SUBSCRIPTION_PAST_DUE``) so callers can branch on the
     reason without parsing the message string. Both default to None for
     legacy raise sites.
+
+    ``handoff`` is Ayla's own ``error.details.handoff`` boolean
+    (DRF-1614): «somebody will get back to this person». It rides along
+    instead of being derived, because deriving it means taking the code
+    string apart, and string surgery on a contract breaks silently the
+    first time a code is renamed. ``None`` means the field was absent —
+    which is not the same as ``False``.
     """
 
     def __init__(
@@ -196,10 +226,18 @@ class BookingBadRequestError(BookingAPIError):
         *,
         status_code: int | None = None,
         code: str | None = None,
+        handoff: bool | None = None,
+        details: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
         self.code = code
+        self.handoff = handoff
+        # DRF-1708: ``error.details`` as Ayla sent it. ``QUOTE_CHANGED``
+        # carries ``{field, quoted, applied}`` — the two numbers the
+        # person must see (owner package 2, D4: show what was and what
+        # became; no silent normalisation). ``None`` = absent on the wire.
+        self.details = details
 
 
 class ScheduleBlockConflictError(BookingBadRequestError):
@@ -259,8 +297,11 @@ class AylaService:
 
     id: str
     title: str
-    price_min: float
-    price_max: float
+    # ``None`` = the catalog carries no price for this row (``base_price``
+    # is null on ``salon-services``; the price lives on the master×service
+    # edge). Not ``0.0``: zero is a price, absence is not (DRF-1727, §103).
+    price_min: float | None
+    price_max: float | None
     duration_s: int
     category_id: str | None
     raw: dict[str, Any] = field(default_factory=dict)
@@ -276,6 +317,12 @@ class AylaMaster:
     rating: float
     position: str
     raw: dict[str, Any] = field(default_factory=dict)
+    #: DRF-1707 / OD-PILOT-9: метры до точки предложения, как их посчитал
+    #: каталог (`tenants.distance`); ``None`` = DISTANCE_UNKNOWN — нет
+    #: координаты клиента или у мастера нет подтверждённого места. Бот
+    #: расстояние не считает: координаты профиля в зеркале принадлежат
+    #: человеку (§9), а не месту оказания услуги.
+    distance_meters: int | None = None
 
 
 @dataclass(frozen=True)
@@ -375,6 +422,16 @@ class AylaRepeatIntent:
     raw: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class AylaReview:
+    """A review Ayla stored for a client's own completed visit (DRF-1855)."""
+
+    id: str
+    appointment_id: str
+    rating: int
+    raw: dict[str, Any] = field(default_factory=dict)
+
+
 # ─── protocol ────────────────────────────────────────────────────────────────
 
 
@@ -393,7 +450,13 @@ class AylaBookingClient(Protocol):
 
     def get_services(self) -> list[AylaService]: ...
 
-    def get_masters(self, *, specialist_id: str | None = ...) -> list[AylaMaster]: ...
+    def get_masters(
+        self,
+        *,
+        specialist_id: str | None = ...,
+        lat: float | None = ...,
+        lon: float | None = ...,
+    ) -> list[AylaMaster]: ...
 
     def get_available_dates(
         self,
@@ -421,6 +484,8 @@ class AylaBookingClient(Protocol):
         start_datetime: str,
         idempotency_key: str | None = ...,
         payment_required: bool = ...,
+        quoted_price: str | None = ...,
+        quoted_duration_minutes: int | None = ...,
     ) -> AylaBookingRecord: ...
 
     def cancel_appointment(
@@ -509,7 +574,9 @@ def _service_from_wire(d: dict[str, Any]) -> AylaService:
     raw_price = d.get("base_price")
     if raw_price is None:
         raw_price = d.get("price")
-    price = float(raw_price or 0.0)
+    # DRF-1727: no price on either field is absence, not a zero-rouble
+    # service. A numeric ``"0.00"`` stays ``0.0`` — that one is a real price.
+    price = None if raw_price is None or raw_price == "" else float(raw_price)
     dur_min = int(d.get("duration_minutes") or 0)
     category = d.get("category")
     return AylaService(
@@ -523,6 +590,17 @@ def _service_from_wire(d: dict[str, Any]) -> AylaService:
     )
 
 
+def _distance_meters_from_wire(value: Any) -> int | None:
+    """``distance_meters`` с провода: целое или ``None``; всё иное — ``None``.
+
+    Каталог шлёт целое либо ``null`` (DISTANCE_UNKNOWN). Строка, дробь или
+    отрицательное число — не «примерно столько», а не-расстояние.
+    """
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return None
+    return value
+
+
 def _master_from_wire(d: dict[str, Any]) -> AylaMaster:
     return AylaMaster(
         id=str(d.get("id") or ""),
@@ -531,6 +609,7 @@ def _master_from_wire(d: dict[str, Any]) -> AylaMaster:
         rating=float(d.get("rating") or 0.0),
         position=str(d.get("position") or ""),
         raw=d,
+        distance_meters=_distance_meters_from_wire(d.get("distance_meters")),
     )
 
 
@@ -657,13 +736,30 @@ class AylaBookingHTTPClient:
         self._token = api_token
         self._timeout_s = timeout_s
         self._transport = transport
+        #: Автомат ЗАПИСИ (DRF-2627): только путь клиента к записи.
         self._circuit = _Circuit()
+        #: Автомат чтений и правок каталога и кабинета мастера (DRF-2627): их
+        #: таймауты не открывают автомат записи и его состояния не читают.
+        self._read_circuit = _Circuit(name=_READ_BREAKER_NAME)
+        #: Каким автоматом ``_request`` пропустил ответ: 5xx и успех засчитывают
+        #: ``_fail_status``/``_ok`` уже ПОСЛЕ ``_request``, и назначения вызова
+        #: они не знают. Слабые ключи — ответ не живёт дольше разбора.
+        self._circuit_of: weakref.WeakKeyDictionary[httpx.Response, _Circuit] = (
+            weakref.WeakKeyDictionary()
+        )
+        # DRF-2618 — картинки мастера ходят мимо ``_circuit``: их таймауты и 5xx
+        # не открывают автомат записи (см. ``specialist_media_file``).
+        self._media_circuit = _Circuit(name=_MEDIA_BREAKER_NAME)
         # CR-SF1: one persistent httpx.Client reused across calls so the
         # ``get_available_dates`` fan-out (one request per day) shares a
         # connection pool instead of building/tearing one client per HTTP
         # call. The client is a singleton (``get_ayla_booking_client``), so
         # the pool lives for the process lifetime.
         self._http: httpx.Client | None = None
+
+    def _breaker(self, purpose: Purpose) -> _Circuit:
+        """Автомат по назначению вызова — единственное место выбора (DRF-2627)."""
+        return self._circuit if purpose == "booking" else self._read_circuit
 
     def _client(self) -> httpx.Client:
         """Lazily build + reuse the connection-pooled HTTP client (CR-SF1)."""
@@ -684,11 +780,13 @@ class AylaBookingHTTPClient:
         added for writes / ``me`` reads so Ayla binds the action to the
         consenting client (``IsBotServiceWithVerifiedClient``).
         """
-        headers = {
-            "Authorization": f"Bearer {self._token}",
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-        }
+        headers = with_request_id(
+            {
+                "Authorization": f"Bearer {self._token}",
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            }
+        )
         if external_user_id is not None:
             headers["X-External-User-ID"] = external_user_id
         return headers
@@ -702,6 +800,8 @@ class AylaBookingHTTPClient:
         params: dict[str, Any] | None = None,
         json_body: dict[str, Any] | None = None,
         idempotency_key: str | None = None,
+        files: dict[str, Any] | None = None,
+        purpose: Purpose,
     ) -> httpx.Response:
         """Issue one request through the breaker. Maps network/timeout to
         :class:`BookingUnavailableError`; 429 is retried with backoff.
@@ -721,11 +821,18 @@ class AylaBookingHTTPClient:
             refactor is out of scope for DRF-997.
         """
         now = time.monotonic()
-        if self._circuit.is_open(now=now):
-            raise BookingUnavailableError("circuit_open")
+        circuit = self._breaker(purpose)
+        if circuit.is_open(now=now):
+            raise BookingUnavailableError(
+                "circuit_open" if purpose == "booking" else "read_circuit_open"
+            )
 
         url = self._urls.build(f"internal/{endpoint.lstrip('/')}")
         headers = self._headers(external_user_id=external_user_id)
+        if files is not None:
+            # DRF-1813: multipart — границу ставит httpx; навязанный JSON-тип
+            # сделал бы тело неразборчивым для каталога.
+            headers.pop("Content-Type", None)
         if idempotency_key:
             headers["X-Idempotency-Key"] = idempotency_key
 
@@ -733,19 +840,22 @@ class AylaBookingHTTPClient:
             http = self._client()
         except (httpx.TimeoutException, httpx.NetworkError) as exc:
             # Client construction only touches local state; treat as network.
-            self._circuit.record_failure(now=now)
+            circuit.record_failure(now=now)
             logger.warning("booking_client.%s.network err=%s", endpoint, type(exc).__name__)
             raise BookingUnavailableError(f"network: {type(exc).__name__}") from exc
 
         for attempt in range(RATE_LIMIT_MAX_RETRIES + 1):
             try:
-                resp = http.request(method, url, headers=headers, params=params, json=json_body)
+                resp = http.request(
+                    method, url, headers=headers, params=params, json=json_body, files=files
+                )
             except (httpx.TimeoutException, httpx.NetworkError) as exc:
-                self._circuit.record_failure(now=now)
+                circuit.record_failure(now=now)
                 logger.warning("booking_client.%s.network err=%s", endpoint, type(exc).__name__)
                 raise BookingUnavailableError(f"network: {type(exc).__name__}") from exc
 
             if resp.status_code != 429:
+                self._circuit_of[resp] = circuit
                 return resp
 
             retry_after = _parse_retry_after(resp.headers.get("retry-after"))
@@ -779,8 +889,9 @@ class AylaBookingHTTPClient:
         (4xx) → :class:`BookingBadRequestError` (no trip). Shared by
         :meth:`_ok` and :meth:`cancel_appointment` so the mapping can't drift.
         """
+        circuit = self._circuit_of_response(resp)
         if resp.status_code >= 500:
-            self._circuit.record_failure(now=now)
+            circuit.record_failure(now=now)
             logger.warning("booking_client.5xx status=%d", resp.status_code)
             raise BookingUnavailableError(f"http_{resp.status_code}")
         # Structured status_code/code ride along (dev C1 — the provider
@@ -790,16 +901,24 @@ class AylaBookingHTTPClient:
             f"http_{resp.status_code}_{_err_code(resp)}",
             status_code=resp.status_code,
             code=_err_code(resp),
+            handoff=_err_handoff(resp),
+            details=_err_details(resp),
         )
+
+    def _circuit_of_response(self, resp: httpx.Response) -> _Circuit:
+        """Автомат, которым ``_request`` пропустил ответ (DRF-2627). Ответ не
+        из ``_request`` — автомат записи: прежнее поведение, а не догадка."""
+        return self._circuit_of.get(resp, self._circuit)
 
     def _ok(self, resp: httpx.Response, *, success: tuple[int, ...] = (200, 201)) -> Any:
         """Validate status + unwrap the body. Maps 5xx→Unavailable (trips),
         4xx→BadRequest (no trip). A successful status with unparseable JSON
         is treated as unavailable so it can never be silently read as "empty".
         """
+        circuit = self._circuit_of_response(resp)
         now = time.monotonic()
         if resp.status_code in success:
-            self._circuit.record_success()
+            circuit.record_success()
             try:
                 return _unwrap(resp.json())
             except ValueError as exc:
@@ -838,10 +957,13 @@ class AylaBookingHTTPClient:
         rows = self._get_all_rows(
             "catalog/salon-services/",
             params={"tenant": tenant_id, "is_active": "true"},
+            purpose="booking",
         )
         return [_service_from_wire(r) for r in rows]
 
-    def _get_all_rows(self, endpoint: str, *, params: dict[str, Any]) -> list[dict[str, Any]]:
+    def _get_all_rows(
+        self, endpoint: str, *, params: dict[str, Any], purpose: Purpose
+    ) -> list[dict[str, Any]]:
         """Walk a paginated DRF list endpoint to completion.
 
         Never returns a partial catalog silently: when the envelope advertises
@@ -854,7 +976,9 @@ class AylaBookingHTTPClient:
         advertised: int | None = None
         page = 1
         for _ in range(MAX_CATALOG_PAGES):
-            payload = self._ok(self._request("GET", endpoint, params={**params, "page": page}))
+            payload = self._ok(
+                self._request("GET", endpoint, params={**params, "page": page}, purpose=purpose)
+            )
             if not (isinstance(payload, dict) and "results" in payload):
                 # Non-paginated payload (raw list) — nothing to walk.
                 return _as_rows(payload)
@@ -882,13 +1006,55 @@ class AylaBookingHTTPClient:
             raise BookingUnavailableError("catalog_incomplete")
         return rows
 
-    def get_masters(self, *, specialist_id: str | None = None) -> list[AylaMaster]:
+    def get_masters(
+        self,
+        *,
+        specialist_id: str | None = None,
+        lat: float | None = None,
+        lon: float | None = None,
+    ) -> list[AylaMaster]:
+        """One specialist by id, or the ACTIVE TENANT's whole roster (DRF-1473).
+
+        ``lat``/``lon`` (DRF-1707): одноразовые координаты клиента, только
+        для этого запроса — каталог считает по ним ``distance_meters`` до
+        точки предложения. Здесь они не сохраняются и не пишутся в журнал
+        (решение владельца D3: координаты не хранятся).
+
+        The roster read is the origin of the pilot's «Контекст записи
+        устарел» dead-end. ``internal/specialists/`` is a paginated DRF list
+        (page size 20 on the pilot contour, 31 specialists on the feed) and
+        this method used to read page ONE and stop. The booking skill builds
+        its ``allowed_master_ids`` allow-set from exactly this list, so every
+        specialist past row 20 was invisible to the guard: the flow drew
+        their cards, drew their dates, drew their free slots — and then
+        refused the slot tap as unknown. Live evidence 04.09.2026: «Сазонова
+        Инна» (``d66b5a6f…``) and «SPAtrium» (``2398e6b9…``) are both on
+        page 2; the refusal logged ``allowed=[…]`` with exactly 20 ids.
+
+        Two changes, and the second is why the first is cheap:
+
+        * the walk is now :meth:`_get_all_rows`, the same reader
+          ``get_services`` uses — so a partial page-walk raises
+          ``catalog_incomplete`` (a handoff) instead of silently shrinking
+          the allow-set into a lie about the user's context;
+        * the walk is scoped to the active tenant. Unscoped, the feed mixes
+          every tenant's specialists into one list, which is both the reason
+          the page filled up and a false ownership check: the skill
+          documents this lookup as «tenant-scoped, so this is also the
+          tenant-ownership check» (``_handle_pick_slot_callback``) and it
+          was not. ``get_services`` has always scoped its read this way.
+        """
         if specialist_id:
-            resp = self._request("GET", f"specialists/{specialist_id}/")
+            resp = self._request("GET", f"specialists/{specialist_id}/", purpose="booking")
             payload = self._ok(resp)
             return [_master_from_wire(payload)] if isinstance(payload, dict) and payload else []
-        resp = self._request("GET", "specialists/")
-        return [_master_from_wire(r) for r in _as_rows(self._ok(resp))]
+        tenant_id = _require_tenant_id()
+        params: dict[str, Any] = {"tenant": tenant_id}
+        if lat is not None and lon is not None:
+            params["lat"] = f"{lat:.6f}"
+            params["lon"] = f"{lon:.6f}"
+        rows = self._get_all_rows("specialists/", params=params, purpose="booking")
+        return [_master_from_wire(r) for r in rows]
 
     def get_available_times(
         self,
@@ -914,7 +1080,9 @@ class AylaBookingHTTPClient:
             return cached
 
         params: dict[str, Any] = {"date": date, "service_id": service_id}
-        resp = self._request("GET", f"specialists/{specialist_id}/slots/", params=params)
+        resp = self._request(
+            "GET", f"specialists/{specialist_id}/slots/", params=params, purpose="booking"
+        )
         payload = self._ok(resp)
         slots = payload.get("slots") if isinstance(payload, dict) else payload
         result = [_slot_from_wire(s) for s in slots] if isinstance(slots, list) else []
@@ -976,23 +1144,34 @@ class AylaBookingHTTPClient:
         start_datetime: str,
         idempotency_key: str | None = None,
         payment_required: bool = True,
+        quoted_price: str | None = None,
+        quoted_duration_minutes: int | None = None,
     ) -> AylaBookingRecord:
         # AMD-002 (D6): payment_required=false → запись без предоплаты,
         # Ayla подтверждает сразу (CONFIRMED + booking.confirmed), Payment
         # не создаётся. default true — обратная совместимость контракта.
-        body = {
+        body: dict[str, Any] = {
             "client_id": client_id,
             "specialist_id": specialist_id,
             "service_id": service_id,
             "start_datetime": start_datetime,
             "payment_required": payment_required,
         }
+        # DRF-1708: what the person SAW rides to the create; Ayla compares
+        # it with what would apply inside the transaction and refuses with
+        # 409 QUOTE_CHANGED on a mismatch. Absent = the old contract (no
+        # comparison) — callers that never quoted are untouched.
+        if quoted_price is not None:
+            body["quoted_price"] = quoted_price
+        if quoted_duration_minutes is not None:
+            body["quoted_duration_minutes"] = quoted_duration_minutes
         resp = self._request(
             "POST",
             "appointments/",
             external_user_id=external_user_id,
             json_body=body,
             idempotency_key=idempotency_key,
+            purpose="booking",
         )
         data = self._ok(resp, success=(200, 201))
         # DRF-997: a successful write may consume the slot we cached, so
@@ -1024,6 +1203,7 @@ class AylaBookingHTTPClient:
             external_user_id=external_user_id,
             json_body={},
             idempotency_key=idempotency_key,
+            purpose="booking",
         )
         now = time.monotonic()
         if resp.status_code in (200, 204):
@@ -1068,6 +1248,7 @@ class AylaBookingHTTPClient:
             external_user_id=external_user_id,
             json_body=json_body,
             idempotency_key=idempotency_key,
+            purpose="booking",
         )
         data = self._ok(resp, success=(200, 201))
         # DRF-997: both the old and new dates may have changed occupancy.
@@ -1096,6 +1277,7 @@ class AylaBookingHTTPClient:
         start_at: str,
         end_at: str,
         reason: str = "",
+        external_user_id: str | None = None,
     ) -> dict[str, Any]:
         """Block a specialist's time in Ayla (DRF-1062).
 
@@ -1120,12 +1302,379 @@ class AylaBookingHTTPClient:
                 "end_at": end_at,
                 "reason": reason,
             },
+            # §117, attribution. Закрытие графика — операция с последствиями,
+            # и она обязана быть приписана человеку: три остальные записи
+            # этого клиента (создание, отмена, перенос) человека несут, эта
+            # была единственной без него.
+            external_user_id=external_user_id,
+            purpose="read",
         )
         if resp.status_code == 409:
             # Distinct from a generic 4xx: the request was well-formed and
             # the caller is allowed — the time simply is not free.
             raise ScheduleBlockConflictError("has_active_appointments")
         return self._ok(resp, success=(200, 201))
+
+    # ── DRF-1816 (M24): the master's own weekly hours, written by the master ─
+
+    def get_working_hours(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+    ) -> dict[str, Any]:
+        """``GET internal/specialists/{id}/working-hours/`` — the subject's
+        own weekly template (7 rows) plus the profile ``timezone``.
+
+        ``external_user_id`` names the SUBJECT, not an administrator: the
+        route is guarded by the catalog's subject check (DRF-1815) — the
+        profile in the URL must be the caller's own. A master whose bot
+        identity is not yet linked in the catalog gets 403 there, and it
+        surfaces here as :class:`BookingBadRequestError` with status 403.
+        """
+        resp = self._request(
+            "GET",
+            f"specialists/{specialist_id}/working-hours/",
+            external_user_id=external_user_id,
+            purpose="read",
+        )
+        return self._ok(resp, success=(200,))
+
+    def put_working_hours(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+        schedule: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """``PUT internal/specialists/{id}/working-hours/`` — replace all 7 days.
+
+        The catalog validates (``start < end``, break inside the shift, all
+        seven days) and refuses to shrink over live bookings with 409
+        ``HAS_ACTIVE_APPOINTMENTS`` — raised here as
+        :class:`ScheduleBlockConflictError`, the same class the time-off
+        write uses for the same situation. The response is the catalog's
+        readback of what it stored, not an echo of the request.
+        """
+        resp = self._request(
+            "PUT",
+            f"specialists/{specialist_id}/working-hours/",
+            json_body={"schedule": schedule},
+            external_user_id=external_user_id,
+            purpose="read",
+        )
+        if resp.status_code == 409:
+            raise ScheduleBlockConflictError("has_active_appointments")
+        return self._ok(resp, success=(200,))
+
+    # ── DRF-2254: вид тенанта — единственный источник «чьё место и кто ведёт услуги»
+
+    def get_tenant_kind(
+        self,
+        *,
+        tenant_id: Any,
+        timeout: httpx.Timeout | float | None = None,
+        feeds_circuit: bool = True,
+    ) -> str | None:
+        """``GET internal/tenants/{id}/kind/`` — ``salon`` | ``solo`` каталога.
+
+        ``None`` — тенанта в каталоге нет (404). ``timeout`` — свой таймаут
+        вызова (``httpx.Timeout`` с долями фаз или число — на КАЖДУЮ фазу);
+        ``feeds_circuit=False`` — ТАЙМАУТ этого вызова не пишется в автомат.
+        После DRF-2627 вызов стережёт автомат ЧТЕНИЙ (``ayla.booking.read``),
+        и первая причина флага — «не открывать breaker для всей брони» —
+        снята разводом. Вторая остаётся: единственный вызывающий (``/me``,
+        ``identity.services.workspace_kind``) ставит НАРОЧНО короткий таймаут
+        (read 1 с, connect 0,5 с), и его таймаут говорит о нетерпении пробы, а
+        не о болезни каталога. Без флага медленный, но живой каталог открывал
+        бы автомат чтений и на 30 с гасил профиль, портфолио и публикацию
+        мастера. Прочие сетевые отказы и 5xx считаются как обычно.
+
+        Raises:
+            BookingUnavailableError: circuit / таймаут / сеть / 5xx.
+            BookingBadRequestError: прочие 4xx.
+        """
+        now = time.monotonic()
+        if self._read_circuit.is_open(now=now):
+            raise BookingUnavailableError("read_circuit_open")
+
+        url = self._urls.build(f"internal/tenants/{tenant_id}/kind/")
+        per_call = self._timeout_s if timeout is None else timeout
+        try:
+            resp = self._client().get(url, headers=self._headers(), timeout=per_call)
+        except httpx.TimeoutException as exc:
+            if feeds_circuit:
+                self._read_circuit.record_failure(now=now)
+            raise BookingUnavailableError(f"network: {type(exc).__name__}") from exc
+        except httpx.NetworkError as exc:
+            self._read_circuit.record_failure(now=now)
+            raise BookingUnavailableError(f"network: {type(exc).__name__}") from exc
+
+        if resp.status_code == 404:
+            return None
+        data = self._ok(resp, success=(200,))
+        kind = data.get("kind") if isinstance(data, dict) else None
+        return kind if isinstance(kind, str) else None
+
+    # ── DRF-1811 (M19): место работы соло-мастера — прокси к M11 (#502) и M12 (#476)
+
+    def get_service_locations(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+    ) -> dict[str, Any]:
+        """``GET internal/specialists/{id}/service-locations/`` — своё место и зоны.
+
+        Субъект — мастер (как у часов): профиль в URL обязан быть его
+        собственным, иначе каталог отвечает 403 → :class:`BookingBadRequestError`.
+        Ответ — ``{specialist_id, city, places[], areas[]}`` каталога как есть.
+        """
+        resp = self._request(
+            "GET",
+            f"specialists/{specialist_id}/service-locations/",
+            external_user_id=external_user_id,
+            purpose="read",
+        )
+        return self._ok(resp, success=(200,))
+
+    def create_service_location(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+        fields: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``POST internal/specialists/{id}/service-locations/`` — место или зона.
+
+        Тело — как ввёл мастер (``kind`` + ``address``/``label``/``note_for_client``
+        для места, ``kind=mobile`` + ``coverage`` для зоны); проверяет каталог,
+        а не бот — лишнее поле, ``tenant_id`` или ``status`` он отвергает 400 по
+        имени. 409 (второе место, чужой workspace, мастер салона) — по коду
+        каталога в ``BookingBadRequestError.code``.
+        """
+        resp = self._request(
+            "POST",
+            f"specialists/{specialist_id}/service-locations/",
+            json_body=fields,
+            external_user_id=external_user_id,
+            purpose="read",
+        )
+        return self._ok(resp, success=(200, 201))
+
+    def patch_service_location(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+        item_id: str,
+        fields: dict[str, Any],
+    ) -> dict[str, Any]:
+        """``PATCH internal/specialists/{id}/service-locations/{item_id}/``."""
+        resp = self._request(
+            "PATCH",
+            f"specialists/{specialist_id}/service-locations/{item_id}/",
+            json_body=fields,
+            external_user_id=external_user_id,
+            purpose="read",
+        )
+        return self._ok(resp, success=(200,))
+
+    def suggest_address(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+        q: str,
+    ) -> dict[str, Any]:
+        """``POST internal/specialists/{id}/geocoding/suggest/`` — подсказки адреса.
+
+        Строка — в теле, не в URL (M12a, #476): адрес мастера не должен оседать
+        в журналах доступа. Здесь она тоже не логируется.
+
+        Каталог отвечает 503 (``misconfigured`` / ``suggest_not_supported`` /
+        ``unavailable``), когда геокодер не настроен или лёг — на стенде
+        пилота это ПОСТОЯННОЕ состояние (ключ пуст). Такой 503 — не падение
+        каталога, и выключатель :class:`BookingUnavailableError` он не
+        дёргает: иначе один ввод адреса гасил бы весь клиент бронирования.
+        Возвращается ``{"available": False, "reason": <код>, "suggestions": []}``;
+        экран падает в ручной ввод. 409 ``no_city`` — тем же способом.
+        """
+        resp = self._request(
+            "POST",
+            f"specialists/{specialist_id}/geocoding/suggest/",
+            json_body={"q": q},
+            external_user_id=external_user_id,
+            purpose="read",
+        )
+        if resp.status_code in (503, 409):
+            # Причина — в ``error.details.reason`` (misconfigured / no_city / …),
+            # ``error.code`` там общий (SERVICE_UNAVAILABLE / CONFLICT).
+            details = _err_details(resp) or {}
+            reason = str(details.get("reason") or "") or _err_code(resp).lower()
+            logger.info("booking_client.suggest_address.unavailable reason=%s", reason)
+            return {"available": False, "reason": reason, "suggestions": []}
+        data = self._ok(resp, success=(200,))
+        return {
+            "available": True,
+            "reason": None,
+            "city": data.get("city") if isinstance(data, dict) else None,
+            "suggestions": data.get("suggestions", []) if isinstance(data, dict) else [],
+        }
+
+    # ── DRF-1802 (M10): «своя услуга» мастера = заявка о разрыве канона (M9) ─
+
+    def list_canon_gap_requests(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+    ) -> dict[str, Any]:
+        """``GET internal/specialists/{id}/canon-gap-requests/`` — свои заявки.
+
+        Субъект — мастер (как у часов, DRF-1815): профиль в URL обязан быть
+        его собственным, иначе каталог отвечает 403 → :class:`BookingBadRequestError`.
+        """
+        resp = self._request(
+            "GET",
+            f"specialists/{specialist_id}/canon-gap-requests/",
+            external_user_id=external_user_id,
+            purpose="read",
+        )
+        return self._ok(resp, success=(200,))
+
+    def create_canon_gap_request(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+        name: str,
+        description: str,
+        duration_minutes: int,
+        price: str,
+    ) -> dict[str, Any]:
+        """``POST internal/specialists/{id}/canon-gap-requests/`` — завести PENDING.
+
+        Каталог ничего не создаёт в каноне и возвращает заявку плюс подсказку
+        «похожая услуга» без связи. Решения из бота нет — только владелец в
+        Django-admin каталога.
+        """
+        resp = self._request(
+            "POST",
+            f"specialists/{specialist_id}/canon-gap-requests/",
+            json_body={
+                "name": name,
+                "description": description,
+                "duration_minutes": duration_minutes,
+                "price": price,
+            },
+            external_user_id=external_user_id,
+            purpose="read",
+        )
+        return self._ok(resp, success=(201,))
+
+    def similar_canon_templates(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+        name: str,
+    ) -> dict[str, Any]:
+        """``GET internal/specialists/{id}/canon-gap-requests/similar/?name=`` — только чтение."""
+        resp = self._request(
+            "GET",
+            f"specialists/{specialist_id}/canon-gap-requests/similar/",
+            params={"name": name},
+            external_user_id=external_user_id,
+            purpose="read",
+        )
+        return self._ok(resp, success=(200,))
+
+    def get_canon_gap_request(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+        request_id: str,
+    ) -> dict[str, Any]:
+        """``GET internal/specialists/{id}/canon-gap-requests/{request_id}/``.
+
+        Чужая заявка неотличима от несуществующей: 404 приходит как
+        :class:`BookingBadRequestError` со ``status_code=404``.
+        """
+        resp = self._request(
+            "GET",
+            f"specialists/{specialist_id}/canon-gap-requests/{request_id}/",
+            external_user_id=external_user_id,
+            purpose="read",
+        )
+        return self._ok(resp, success=(200,))
+
+    def get_accepting_bookings(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+    ) -> dict[str, Any]:
+        """``GET internal/specialists/{id}/availability/`` — «Принимаю записи».
+
+        DRF-1845. ``external_user_id`` names the SUBJECT: the catalog lets a
+        master read only their own profile's flag, as with working hours.
+        """
+        resp = self._request(
+            "GET",
+            f"specialists/{specialist_id}/availability/",
+            external_user_id=external_user_id,
+            purpose="booking",
+        )
+        return self._ok(resp, success=(200,))
+
+    def set_accepting_bookings(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+        accepting: bool,
+    ) -> dict[str, Any]:
+        """``PATCH internal/specialists/{id}/availability/`` — pause or resume.
+
+        DRF-1845. The catalog writes ``SpecialistProfile.is_booking_enabled``
+        and answers with its readback. A profile that is not published is
+        refused with 409 ``PROFILE_NOT_ACTIVE`` — raised here as
+        :class:`BookingBadRequestError` with that code; 403 = not the subject.
+        """
+        if not isinstance(accepting, bool):
+            raise ValueError(f"accepting must be a bool, got {accepting!r}")
+        resp = self._request(
+            "PATCH",
+            f"specialists/{specialist_id}/availability/",
+            json_body={"accepting_bookings": accepting},
+            external_user_id=external_user_id,
+            purpose="read",
+        )
+        return self._ok(resp, success=(200,))
+
+    def get_specialist_reviews(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+    ) -> dict[str, Any]:
+        """``GET internal/specialists/{id}/reviews/`` — «Мои отзывы».
+
+        DRF-1857. ``external_user_id`` names the SUBJECT: the catalog lets a
+        master read only reviews of their own profile (403 otherwise). The
+        answer carries visible reviews only, the client as «Имя Ф.» / «Клиент»
+        / ``null`` for an anonymous review, and a rating only when a review
+        exists; the catalog journals the read.
+        """
+        resp = self._request(
+            "GET",
+            f"specialists/{specialist_id}/reviews/",
+            external_user_id=external_user_id,
+            purpose="read",
+        )
+        return self._ok(resp, success=(200,))
 
     def get_specialist_service_edges(
         self,
@@ -1155,7 +1704,353 @@ class AylaBookingHTTPClient:
                 "salon_service": service_id,
                 "is_active": "true",
             },
+            purpose="read",
         )
+
+    # ── M21 профиль мастера (DRF-1813; каталог #455) ─────────────────────────
+    # Субъект — сам мастер. Лимиты и отказы — у каталога: имя ≥ 2 символов,
+    # «о себе» ≤ 500, аватар JPEG/PNG/WebP ≤ 5 МБ и квадрат ±2 %.
+
+    def patch_specialist_profile(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+        display_name: str | None = None,
+        bio: str | None = None,
+    ) -> dict[str, Any]:
+        """``PATCH internal/specialists/{id}/profile/`` — только переданные поля."""
+        body: dict[str, Any] = {}
+        if display_name is not None:
+            body["display_name"] = display_name
+        if bio is not None:
+            body["bio"] = bio
+        resp = self._request(
+            "PATCH",
+            f"specialists/{specialist_id}/profile/",
+            json_body=body,
+            external_user_id=external_user_id,
+            purpose="read",
+        )
+        return self._ok(resp, success=(200,))
+
+    def upload_specialist_avatar(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+        filename: str,
+        content: bytes,
+        content_type: str,
+    ) -> dict[str, Any]:
+        """``POST internal/specialists/{id}/media/avatar/`` — multipart ``image``."""
+        resp = self._request(
+            "POST",
+            f"specialists/{specialist_id}/media/avatar/",
+            files={"image": (filename, content, content_type)},
+            external_user_id=external_user_id,
+            purpose="read",
+        )
+        return self._ok(resp, success=(200,))
+
+    def specialist_media_file(
+        self,
+        *,
+        specialist_id: str,
+        item_id: str | None = None,
+    ) -> tuple[bytes, str] | None:
+        """Байты фото мастера (или работы портфолио) — ``None``, если их нет.
+
+        DRF-2539, вариант 3 владельца: каталог отдаёт файл, а не адрес
+        хранилища. ``GET internal/specialists/{id}/media/avatar/file/`` или
+        ``…/portfolio/{item}/file/``. Субъекта нет: это публичное лицо мастера,
+        каталог пускает сервисный токен (``IsInternalBearer``). 404 — «фото
+        нет» (мастера нет, файла нет, объект пропал или пуст — каталог
+        отвечает одинаково).
+
+        DRF-2618 — мимо ``_request`` и мимо автомата записи:
+
+        * свой автомат ``_media_circuit``: таймаут, сеть и 5xx картинок его
+          открывают, автомат записи (``_circuit``) не трогают и его
+          состояния не читают;
+        * 429 каталога — сразу :class:`BookingRateLimitedError`, без
+          повторов и без ``time.sleep``: картинок на экране десятки, и поток
+          воркера спал бы до ~3 с за каждую, пока ждёт запись.
+
+        Raises:
+            BookingUnavailableError: автомат картинок открыт / таймаут / сеть / 5xx.
+            BookingRateLimitedError: каталог ответил 429.
+            BookingBadRequestError: прочие 4xx.
+        """
+        endpoint = (
+            f"specialists/{specialist_id}/media/avatar/file/"
+            if item_id is None
+            else f"specialists/{specialist_id}/portfolio/{item_id}/file/"
+        )
+        now = time.monotonic()
+        if self._media_circuit.is_open(now=now):
+            raise BookingUnavailableError("media_circuit_open")
+        url = self._urls.build(f"internal/{endpoint}")
+        try:
+            resp = self._client().get(url, headers=self._headers())
+        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+            self._media_circuit.record_failure(now=now)
+            logger.warning("booking_client.media.network err=%s", type(exc).__name__)
+            raise BookingUnavailableError(f"network: {type(exc).__name__}") from exc
+        if resp.status_code == 429:
+            raise BookingRateLimitedError("media_rate_limited_429")
+        if resp.status_code >= 500:
+            self._media_circuit.record_failure(now=now)
+            logger.warning("booking_client.media.5xx status=%d", resp.status_code)
+            raise BookingUnavailableError(f"http_{resp.status_code}")
+        if resp.status_code not in (200, 404):
+            raise BookingBadRequestError(
+                f"http_{resp.status_code}_{_err_code(resp)}",
+                status_code=resp.status_code,
+                code=_err_code(resp),
+            )
+        self._media_circuit.record_success()
+        if resp.status_code == 404:
+            return None
+        return resp.content, resp.headers.get("content-type", "")
+
+    # ── M22 карточка профиля и портфолио (DRF-1814; каталог #471, #455) ────────
+    # Тот же субъект и тот же bearer, что у PATCH выше. Лимиты (``limits``)
+    # приходят из каталога и нигде здесь не повторяются: один источник для
+    # экрана профиля (DRF-1960). Портфолио: до ``limit`` фото — число тоже
+    # каталога; 11-е он отклоняет 400 ``portfolio_limit_exceeded``.
+
+    def get_specialist_profile(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+    ) -> dict[str, Any]:
+        """``GET internal/specialists/{id}/profile/`` — состояние + ``limits``."""
+        resp = self._request(
+            "GET",
+            f"specialists/{specialist_id}/profile/",
+            external_user_id=external_user_id,
+            purpose="read",
+        )
+        return self._ok(resp, success=(200,))
+
+    def list_specialist_portfolio(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+    ) -> dict[str, Any]:
+        """``GET internal/specialists/{id}/portfolio/`` — ``{items, count, limit}``."""
+        resp = self._request(
+            "GET",
+            f"specialists/{specialist_id}/portfolio/",
+            external_user_id=external_user_id,
+            purpose="read",
+        )
+        return self._ok(resp, success=(200,))
+
+    def upload_specialist_portfolio_item(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+        filename: str,
+        content: bytes,
+        content_type: str,
+    ) -> dict[str, Any]:
+        """``POST internal/specialists/{id}/portfolio/`` — multipart ``image``, 201."""
+        resp = self._request(
+            "POST",
+            f"specialists/{specialist_id}/portfolio/",
+            files={"image": (filename, content, content_type)},
+            external_user_id=external_user_id,
+            purpose="read",
+        )
+        return self._ok(resp, success=(201,))
+
+    def delete_specialist_portfolio_item(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+        item_id: str,
+    ) -> dict[str, Any]:
+        """``DELETE internal/specialists/{id}/portfolio/{item}/`` — ``{count, limit}``."""
+        resp = self._request(
+            "DELETE",
+            f"specialists/{specialist_id}/portfolio/{item_id}/",
+            external_user_id=external_user_id,
+            purpose="read",
+        )
+        return self._ok(resp, success=(200,))
+
+    # ── M8 выбор услуг мастера и его цена (DRF-1895; каталог #443 / #444) ─────
+    # Субъект — сам мастер: профиль в URL обязан быть его собственным, иначе
+    # каталог отвечает 403 → BookingBadRequestError. Счётчики selected /
+    # configured считает каталог; клиент их не трогает.
+
+    def get_service_selection(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+    ) -> dict[str, Any]:
+        """``GET internal/specialists/{id}/services/selection/`` — состояние выбора."""
+        resp = self._request(
+            "GET",
+            f"specialists/{specialist_id}/services/selection/",
+            external_user_id=external_user_id,
+            purpose="read",
+        )
+        return self._ok(resp, success=(200,))
+
+    def select_services(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+        template_ids: list[str],
+    ) -> dict[str, Any]:
+        """``POST internal/specialists/{id}/services/selection/`` — выбрать канон.
+
+        Всё или ничего: неизвестный шаблон — 404 с ``template_ids``. 201 —
+        создана хотя бы одна строка, 200 — всё уже было; число — в ``created``.
+        """
+        resp = self._request(
+            "POST",
+            f"specialists/{specialist_id}/services/selection/",
+            json_body={"template_ids": list(template_ids)},
+            external_user_id=external_user_id,
+            purpose="read",
+        )
+        return self._ok(resp, success=(200, 201))
+
+    def put_service_offer(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+        salon_service_id: str,
+        price: str,
+        duration_minutes: int,
+    ) -> dict[str, Any]:
+        """``PUT internal/specialists/{id}/services/{salon_service_id}/offer/``.
+
+        Первая цена создаёт предложение мастера (201), повтор обновляет его
+        (200). Этот факт у каталога есть только в статусе ответа, поэтому он
+        возвращается рядом с телом как ``created``.
+        """
+        resp = self._request(
+            "PUT",
+            f"specialists/{specialist_id}/services/{salon_service_id}/offer/",
+            json_body={"price": price, "duration_minutes": duration_minutes},
+            external_user_id=external_user_id,
+            purpose="read",
+        )
+        data = self._ok(resp, success=(200, 201))
+        return {**data, "created": resp.status_code == 201}
+
+    def remove_service(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+        salon_service_id: str,
+    ) -> dict[str, Any]:
+        """``DELETE internal/specialists/{id}/services/{salon_service_id}/`` — убрать.
+
+        Будущая запись — 409 ``HAS_APPOINTMENTS`` с ``count``; иначе строка
+        удалена или выключена (``removal``).
+        """
+        resp = self._request(
+            "DELETE",
+            f"specialists/{specialist_id}/services/{salon_service_id}/",
+            external_user_id=external_user_id,
+            purpose="read",
+        )
+        return self._ok(resp, success=(200,))
+
+    # ── M4 публикация соло-мастера (DRF-1797; каталог #453) ──────────────────
+    # Субъект — сам мастер: профиль в URL обязан быть его собственным, иначе
+    # каталог отвечает 403 → BookingBadRequestError. Готовность считает
+    # каталог; клиент её не трогает.
+
+    def get_publication_readiness(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+    ) -> dict[str, Any]:
+        """``GET internal/specialists/{id}/publication/readiness/`` — READY / NOT_READY."""
+        resp = self._request(
+            "GET",
+            f"specialists/{specialist_id}/publication/readiness/",
+            external_user_id=external_user_id,
+            purpose="read",
+        )
+        return self._ok(resp, success=(200,))
+
+    def publish(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+        command_id: str,
+    ) -> dict[str, Any]:
+        """``POST internal/specialists/{id}/publication/`` ``{command_id}`` — «Опубликовать».
+
+        201 — каталог сделал переход DRAFT → PENDING; 200 — повтор той же
+        команды или «уже на проверке / опубликован». Факт перехода у каталога
+        есть только в статусе ответа, поэтому он возвращается рядом с телом
+        как ``created``.
+        """
+        resp = self._request(
+            "POST",
+            f"specialists/{specialist_id}/publication/",
+            json_body={"command_id": command_id},
+            external_user_id=external_user_id,
+            purpose="read",
+        )
+        data = self._ok(resp, success=(200, 201))
+        return {**data, "created": resp.status_code == 201}
+
+    def get_publication_status(
+        self,
+        *,
+        specialist_id: str,
+        external_user_id: str,
+    ) -> dict[str, Any]:
+        """``GET internal/specialists/{id}/publication/status/`` — статус, готовность, последняя команда."""
+        resp = self._request(
+            "GET",
+            f"specialists/{specialist_id}/publication/status/",
+            external_user_id=external_user_id,
+            purpose="read",
+        )
+        return self._ok(resp, success=(200,))
+
+    def get_service_directions(self) -> Any:
+        """``GET internal/services/directions/`` — направления канона (DRF-1799, M7).
+
+        Корни глобальной таксономии (каталог M6). Общий Bearer, субъекта нет:
+        канон не принадлежит мастеру. Форму ответа проверяет вызывающий —
+        пустой список вместо непрочитанного ответа был бы выдуманной пустотой.
+        """
+        resp = self._request("GET", "services/directions/", purpose="read")
+        return self._ok(resp, success=(200,))
+
+    def get_service_templates(self, *, direction_id: str) -> Any:
+        """``GET internal/services/templates/?direction_id=`` — шаблоны направления (DRF-1799, M7).
+
+        Всё поддерево корня на любой глубине, у каждого шаблона — его
+        подкатегория. Не корень — 400 ``NOT_A_DIRECTION``, неизвестный — 404,
+        оба как :class:`BookingBadRequestError` со своим кодом.
+        """
+        resp = self._request(
+            "GET", "services/templates/", params={"direction_id": direction_id}, purpose="read"
+        )
+        return self._ok(resp, success=(200,))
 
     def get_user_bookings_page(
         self,
@@ -1193,7 +2088,11 @@ class AylaBookingHTTPClient:
         if cursor:
             params["cursor"] = cursor
         resp = self._request(
-            "GET", "me/bookings/", external_user_id=external_user_id, params=params
+            "GET",
+            "me/bookings/",
+            external_user_id=external_user_id,
+            params=params,
+            purpose="booking",
         )
         payload = self._ok(resp)
         # Canonical shape after the ``{"data": ...}`` envelope is stripped:
@@ -1279,7 +2178,12 @@ class AylaBookingHTTPClient:
         A booking belonging to someone else answers 404, identically to one
         that does not exist (info-hidden), and surfaces as a 4xx error here.
         """
-        resp = self._request("GET", f"me/bookings/{booking_id}/", external_user_id=external_user_id)
+        resp = self._request(
+            "GET",
+            f"me/bookings/{booking_id}/",
+            external_user_id=external_user_id,
+            purpose="booking",
+        )
         payload = self._ok(resp)
         if not isinstance(payload, dict):
             # Same rule as the list read: a 200 we cannot read is an outage,
@@ -1321,7 +2225,10 @@ class AylaBookingHTTPClient:
         does not exist (info-hidden upstream), surfacing here as a 4xx.
         """
         resp = self._request(
-            "GET", f"appointments/{booking_id}/", external_user_id=external_user_id
+            "GET",
+            f"appointments/{booking_id}/",
+            external_user_id=external_user_id,
+            purpose="booking",
         )
         payload = self._ok(resp)
         if not isinstance(payload, dict):
@@ -1364,7 +2271,10 @@ class AylaBookingHTTPClient:
         caller that got an object back may trust its ids.
         """
         resp = self._request(
-            "POST", f"me/bookings/{booking_id}/repeat-intent/", external_user_id=external_user_id
+            "POST",
+            f"me/bookings/{booking_id}/repeat-intent/",
+            external_user_id=external_user_id,
+            purpose="booking",
         )
         payload = self._ok(resp)
         data = payload if isinstance(payload, dict) else {}
@@ -1398,6 +2308,71 @@ class AylaBookingHTTPClient:
             raw=data,
         )
 
+    # ── reviews ──────────────────────────────────────────────────────────────
+
+    def create_review(
+        self,
+        *,
+        external_user_id: str,
+        ayla_user_id: str,
+        appointment_id: str,
+        rating: int,
+        text: str = "",
+        is_anonymous: bool = False,
+    ) -> AylaReview:
+        """A client's review of their own visit (``POST users/{id}/reviews/``).
+
+        DRF-1855. Until this route the only door to a review was the client
+        app with the person's own JWT, so an answer given to Ayla in the chat
+        had nowhere to go. Upstream applies the app door's rules through the
+        same service: the visit must be this client's and ``completed``; one
+        review per visit.
+
+        **Subject.** The path names the Ayla user; ``X-External-User-ID``
+        names who is acting; upstream refuses (403) unless they are the same
+        person. The review is written *as* that person, so there is no body
+        field through which a caller could name somebody else.
+
+        **Refusals** surface as :class:`BookingBadRequestError` with the wire
+        code: ``REVIEW_EXISTS`` (409) — already reviewed, which a caller may
+        treat as done; ``APPOINTMENT_NOT_COMPLETED`` (400); ``NOT_FOUND``
+        (404) — not this client's visit, indistinguishable from none.
+
+        **No idempotency key.** The one-review-per-visit rule is the dedup:
+        a repeat after a lost response answers ``REVIEW_EXISTS`` and never
+        creates a second row.
+        """
+        # A caller bug fails before the wire: bool is an int in Python, and
+        # ``True`` would otherwise travel as a one-star review.
+        if isinstance(rating, bool) or not isinstance(rating, int) or not 1 <= rating <= 5:
+            raise ValueError(f"rating must be an int in 1..5, got {rating!r}")
+        resp = self._request(
+            "POST",
+            f"users/{ayla_user_id}/reviews/",
+            external_user_id=external_user_id,
+            json_body={
+                "appointment_id": appointment_id,
+                "rating": rating,
+                "text": text,
+                "is_anonymous": is_anonymous,
+            },
+            purpose="read",
+        )
+        payload = self._ok(resp, success=(201,))
+        data = payload if isinstance(payload, dict) else {}
+        review_id = str(data.get("id") or "")
+        if not review_id:
+            # A 201 we cannot read is not «saved»: the caller would tell the
+            # person their review is in while nobody can point at it.
+            logger.warning("booking_client.review_unexpected_shape type=%s", type(payload).__name__)
+            raise BookingUnavailableError("malformed_response")
+        return AylaReview(
+            id=review_id,
+            appointment_id=appointment_id,
+            rating=rating,
+            raw=data,
+        )
+
 
 def _err_code(resp: httpx.Response) -> str:
     """Pull the ``error.code`` from a 4xx body, best-effort."""
@@ -1405,6 +2380,31 @@ def _err_code(resp: httpx.Response) -> str:
         return (resp.json().get("error") or {}).get("code", "") or "unknown"
     except (ValueError, AttributeError):
         return "unknown"
+
+
+def _err_details(resp: httpx.Response) -> dict[str, Any] | None:
+    """Pull ``error.details`` from a 4xx body verbatim, or None if absent."""
+    try:
+        details = (resp.json().get("error") or {}).get("details")
+    except (ValueError, AttributeError):
+        return None
+    return details if isinstance(details, dict) else None
+
+
+def _err_handoff(resp: httpx.Response) -> bool | None:
+    """Pull ``error.details.handoff`` from a 4xx body, or None if absent.
+
+    Three-valued on purpose (DRF-1614). ``True``/``False`` are Ayla's
+    answer to «will somebody get back to this person»; ``None`` means the
+    field was not there at all, and a caller that collapsed it to
+    ``False`` would turn our silence into Ayla's «no».
+    """
+    try:
+        details = ((resp.json().get("error") or {}).get("details")) or {}
+        value = details.get("handoff")
+    except (ValueError, AttributeError):
+        return None
+    return value if isinstance(value, bool) else None
 
 
 def _parse_retry_after(value: str | None) -> float:

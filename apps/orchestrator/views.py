@@ -4,7 +4,7 @@ Split per review revision 4A:
 - ``/healthz/`` is the k8s liveness probe — 200-OK unconditional, no
   external calls. Cheap, runs every few seconds.
 - ``/readyz/`` is the k8s readiness probe — checks every backing
-  service in parallel (postgres, redis, chromadb, MinIO). Returns 200
+  service in parallel (postgres, redis, chromadb). Returns 200
   with per-check status when all healthy, 503 with which-failed body
   when any are down. Used by Sprint 8 shadow + Sprint 9 canary cutover.
 
@@ -59,7 +59,6 @@ async def readyz(request) -> JsonResponse:
         _check("postgres", _ping_postgres),
         _check("redis", _ping_redis),
         _check("chromadb", _ping_chromadb),
-        _check("minio", _ping_minio),
         return_exceptions=False,
     )
     # Pipeline component health (Sprint 6 / G3). pipeline_health() is
@@ -146,18 +145,6 @@ async def _ping_chromadb() -> None:
 
     port = getattr(settings, "CHROMA_HTTP_PORT", 8000)
     url = f"http://{host}:{port}/api/v2/heartbeat"
-    async with httpx.AsyncClient(timeout=1.0) as client:
-        response = await client.get(url)
-        response.raise_for_status()
-
-
-async def _ping_minio() -> None:
-    """HTTP /minio/health/live check."""
-
-    import httpx
-
-    endpoint = getattr(settings, "S3_ENDPOINT_URL", "http://localhost:9000")
-    url = f"{endpoint.rstrip('/')}/minio/health/live"
     async with httpx.AsyncClient(timeout=1.0) as client:
         response = await client.get(url)
         response.raise_for_status()

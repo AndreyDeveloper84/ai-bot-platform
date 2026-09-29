@@ -4,8 +4,17 @@
  * OR a tap on the "Оценить" button in MyVisits. The booking ID arrives
  * via the URL. 5-star picker + optional comment + Save. Low ratings
  * (≤3) swap copy to a calm "we'll reach out" panel — the rating still
- * persists, the backend has already fired the HUMAN_LOCKED handoff
- * (see apps/booking/services/feedback.py).
+ * persists, the backend has already opened a handoff — an AdminTask with
+ * Conversation.state = HUMAN_HANDOFF (see apps/booking/services/feedback.py).
+ * NOT the HUMAN_LOCKED tier: that is a different mechanism, and nothing sets
+ * it since DRF-1528 (DRF-2557).
+ *
+ * Закрытие «К моим записям» ведёт в КАНОНИЧЕСКОЕ `/customer/records`
+ * (`CustomerRecordsScreen`), а не в старое `/my-visits` (DRF-1480).
+ * Прежний переход возвращал человека сразу после оценки в старое
+ * поколение экранов. Образец перевода — `CustomerBookingSuccessScreen`.
+ * Старый маршрут остаётся смонтирован для внешних ссылок; уборка
+ * поколений — отдельная задача (DRF-1481).
  */
 
 import { useCallback, useMemo, useState } from "react";
@@ -13,9 +22,12 @@ import { useNavigate, useParams } from "react-router-dom";
 import { ScreenLayout } from "../components/ScreenLayout";
 import { StateError } from "../components/StateError";
 import { StickyCta } from "../components/StickyCta";
-import { useBackButton } from "../hooks/useBackButton";
 import { useHaptics } from "../hooks/useHaptics";
 import { submitFeedback, type FeedbackResult } from "../lib/api";
+import { backTo } from "../lib/screen-back";
+
+/** Возврат (DRF-1493): к списку записей — отзыв открывают оттуда. */
+const BACK = backTo("/customer/records");
 
 const COMMENT_MAX = 500;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -28,7 +40,6 @@ export function FeedbackScreen() {
   const { bookingId } = useParams<{ bookingId: string }>();
   const navigate = useNavigate();
   const haptics = useHaptics();
-  useBackButton({ onBack: () => navigate(-1) });
 
   const validId = useMemo(() => !!bookingId && UUID_RE.test(bookingId), [bookingId]);
 
@@ -57,7 +68,7 @@ export function FeedbackScreen() {
 
   if (!validId) {
     return (
-      <ScreenLayout title="Оценить визит">
+      <ScreenLayout back={BACK} title="Оценить визит">
         <div className="callout callout--danger" role="alert">
           Ссылка повреждена — не получилось определить визит.
         </div>
@@ -66,13 +77,14 @@ export function FeedbackScreen() {
   }
 
   if (phase.kind === "thanks") {
-    return <ThankYou result={phase.result} onClose={() => navigate("/my-visits")} />;
+    return <ThankYou result={phase.result} onClose={() => navigate("/customer/records")} />;
   }
 
   const canSubmit = phase.rating > 0 && !phase.submitting;
 
   return (
     <ScreenLayout
+      back={BACK}
       title="Оцените визит"
       cta={
         <StickyCta onClick={onSubmit} disabled={!canSubmit}>
@@ -182,6 +194,7 @@ function ThankYou({ result, onClose }: { result: FeedbackResult; onClose: () => 
   const lowRating = result.rating <= 3;
   return (
     <ScreenLayout
+      back={BACK}
       title={lowRating ? "Спасибо за честность" : "Спасибо за оценку!"}
       cta={<StickyCta onClick={onClose}>К моим записям</StickyCta>}
     >

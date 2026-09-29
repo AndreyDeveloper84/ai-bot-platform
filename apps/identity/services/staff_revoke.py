@@ -104,11 +104,18 @@ def revoke_staff_access(
     bot_user: BotUser,
     actor: BotUser | None = None,
     reason: str = "",
+    surface: str = "",
+    actor_label: str = "",
 ) -> RevokeResult:
     """Take away every salon-side capability ``bot_user`` holds in ``tenant``.
 
     Idempotent: a second call finds nothing active and returns a result
     with ``changed=False``.
+
+    ``surface`` / ``actor_label`` (DRF-2082): who revoked and from where when
+    the actor has no ``BotUser`` — a platform operator in Django Admin. Both
+    land in the audit payload as they are; ``actor`` stays the salon-side
+    person for the Mini App path. Empty strings are not written.
 
     Raises:
         OwnerRevokeRefused — the person is this salon's active owner.
@@ -177,6 +184,8 @@ def revoke_staff_access(
                         "master_id": str(master.id) if master is not None else None,
                         "actor_id": str(actor.id) if actor is not None else None,
                         "reason": reason,
+                        **({"surface": surface} if surface else {}),
+                        **({"actor_label": actor_label} if actor_label else {}),
                     },
                     actor_id=actor.id if actor is not None else None,
                 )

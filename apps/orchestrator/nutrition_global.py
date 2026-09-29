@@ -55,9 +55,25 @@ Execution details:
 - The tools only SELECT the skill; side effects run in the concierge
   wrapper's sync scope after ``asyncio.run`` returns — the same shape
   as ``show_masters`` (ai-core dispatchers stay I/O-free).
-- Free-text tools pass the user's own phrase through as
-  ``message_text`` — the skills' parsers stay the single source of
-  truth instead of teaching the model the beverage/food grammars.
+- Free-text tools run the skills' own parsers rather than teaching the
+  model the beverage/food grammars. ``log_water`` is executed on the
+  phrase the MODEL passed — its normalisation («и водички дёрнул
+  стакан» → «стакан воды») is what the beverage grammar can read.
+  ``health_screening`` is executed on the phrase the PERSON typed
+  (DRF-1542): it has no grammar to normalise, only a symptom
+  classifier, and a paraphrased red flag would decay to soft pain.
+  ``clarify_food_entry`` is executed on the PERSON's phrase too
+  (DRF-2078): the phrase it remembers is what «📔 В дневник» later
+  estimates, and the model's paraphrase drops the one thing the food
+  grammar cannot recover — the portion («борщ 250» → «борщ» → 100 g).
+  See :func:`execute_nutrition_tool`.
+
+- **A dish with a portion skips the model altogether (DRF-2078)** —
+  :func:`_try_handle_food_with_grams` claims «борщ 250» / «гречка
+  200 г» deterministically and shows the estimate card straight away:
+  one confirmation instead of «это про еду?» → tap → card → confirm.
+  Drinks are never claimed there (DRF-819: «кофе 200 мл» stays with
+  the model and ``log_water``).
 """
 
 from __future__ import annotations
@@ -127,7 +143,14 @@ CLARIFY_FOOD_ENTRY_TOOL_SPEC: dict[str, Any] = {
     "description": (
         "Пользователь написал что-то похожее на еду («борщ 300г») — "
         "не напиток. Показывает карточку уточнения: записать в дневник "
-        "или это опечатка. Напитки — только через log_water."
+        "или это опечатка. Напитки — только через log_water. "
+        # DRF-2287 (живой проход 22.09): вопрос принимали за запись.
+        "Вопрос о справочнике блюд или о том, что ты умеешь («а торт в "
+        "справочнике есть?»), — не запись: этот инструмент не вызывай, ответь "
+        "словами."
+        # DRF-2285: про фото здесь НЕ говорим — фото распознаётся только при
+        # FOOD_PHOTO_SCAN_ENABLED, и строку об этом даёт флаг-зависимый блок
+        # промпта (concierge._nutrition_tools_prompt_block), а не описание.
     ),
     "parameters": {
         "type": "object",
@@ -163,6 +186,31 @@ NUTRITION_TOOL_SPECS: list[dict[str, Any]] = [
 
 #: action_type values the concierge wrapper must execute after the LLM pass.
 NUTRITION_TOOL_ACTIONS = frozenset(spec["name"] for spec in NUTRITION_TOOL_SPECS)
+
+#: DRF-1994 (решение U) / DRF-1295 — инструменты, которые гасит единый
+#: выключатель ``NUTRITION_ENABLED``. Это ТРИ из четырёх. ``health_screening``
+#: сюда не входит намеренно и не по забывчивости: на ``RED_FLAG`` он отвечает
+#: «сначала к врачу» до чтения памятки (§35 п.5 владельца) — это грубая
+#: защита второго слоя, а владелец постановил, что «safety coarse guard
+#: remains mandatory even in Core Pilot». Гасить её флагом ПИТАНИЯ значило бы
+#: снять защитную реплику ради выключения еды. Положительный контроль —
+#: ``test_nutrition_single_switch_1994``: скрининг жив при выключенном флаге.
+NUTRITION_ONLY_TOOL_NAMES: frozenset[str] = frozenset(
+    {"log_water", "clarify_food_entry", "start_nutrition_anketa"}
+)
+
+
+def _nutrition_enabled() -> bool:
+    """Тот же читатель, что у меню, анкеты и воды — один флаг, одно место."""
+    from apps.skills.menu.marketplace import nutrition_enabled
+
+    return nutrition_enabled()
+
+
+def _nutrition_unavailable_text() -> str:
+    from apps.skills.menu.marketplace import NUTRITION_UNAVAILABLE_TEXT
+
+    return NUTRITION_UNAVAILABLE_TEXT
 
 
 # ---------------------------------------------------------------------------
@@ -225,13 +273,30 @@ def execute_nutrition_tool(
     bot_user: Any,
     conversation: Any,
     trace_id: str,
+    message_text: str,
 ) -> SkillResult | None:
     """Run the skill behind a model-called nutrition tool.
 
     Returns ``None`` for an unknown tool name (the caller falls back to
-    the safe generic line, same as an unknown tool today). The user's
-    own phrase is passed through as ``message_text`` — the skills'
-    parsers remain the single source of truth.
+    the safe generic line, same as an unknown tool today).
+
+    ``message_text`` — реплика ЧЕЛОВЕКА на этом ходу (DRF-1542).
+    **Обязателен намеренно, без умолчания.** Пустая строка — законное
+    значение (ход без текста, например одно фото), и по ней скрининг
+    честно воздерживается. Но умолчание сделало бы ровно это же
+    воздержание молчаливой ценой забытого аргумента: новый вызывающий
+    выключил бы скрининг симптомов, ничего не заметив, и гарантия
+    DRF-358 T04 отвалилась бы без единого падения. Забыть обязательный
+    аргумент нельзя — это ``TypeError`` на месте вызова. До
+    этого тикета её здесь не было, и докстринг обещал ровно то, чего код
+    не делал: «*The user's own phrase is passed through as
+    ``message_text``*». Передавался пересказ МОДЕЛИ, а вето
+    (``skill.matches``) считалось по нему же — то есть модель проверяла
+    себя собой и всегда соглашалась. На живом диалоге владельца 06.09
+    классификатор на трёх ходах из пяти честно вернул ``NONE``, а
+    скрининг ответил всё равно: вето не может наложить вето на того, кто
+    его породил. Здесь код возвращается к своему собственному описанию —
+    это не новое поведение.
     """
 
     skill_name_by_tool = {
@@ -243,6 +308,23 @@ def execute_nutrition_tool(
     skill_name = skill_name_by_tool.get(name)
     if skill_name is None:
         return None
+
+    # DRF-1994 — ворота на уровне инструмента, ДО навыка, и не ``None``.
+    # Навыки анкеты/воды/еды гасят себя сами в ``handle``, но между
+    # инструментом и ``handle`` стоит ``skill.matches`` с правом вето, а
+    # вето здесь возвращает ``None`` — и ``None`` отдаёт ход МОДЕЛИ, которая
+    # может заговорить о питании сама (DRF-1295). Заглушка отсюда закрывает
+    # и этот путь. ``health_screening`` не в ``NUTRITION_ONLY_TOOL_NAMES`` —
+    # см. комментарий у константы.
+    if name in NUTRITION_ONLY_TOOL_NAMES and not _nutrition_enabled():
+        logger.info(
+            "orchestrator.nutrition_global.tool_nutrition_off tool=%s trace=%s", name, trace_id
+        )
+        return SkillResult(
+            reply_text=_nutrition_unavailable_text(),
+            meta={"reply_kind": f"{skill_name}_nutrition_off"},
+        )
+
     skill = _skill_by_name(skill_name)
     if skill is None:
         logger.warning(
@@ -266,6 +348,80 @@ def execute_nutrition_tool(
 
     if not text:
         return None
+
+    if name == "clarify_food_entry":
+        # DRF-2078 — фраза еды тоже берётся у ЧЕЛОВЕКА, и вот почему это
+        # не то же, что у `log_water`. Навык еды на этом ходу ничего не
+        # разбирает: он ЗАПОМИНАЕТ фразу (`text_entry.remember_source`) и
+        # рисует карточку «Это про еду?», а разбирать её будет тап
+        # «📔 В дневник» на следующем ходу. Пересказ модели («борщ 250» →
+        # «борщ») грамматике не помогает — наполнители парсер снимает
+        # сам, — а порцию теряет, и потерянное не восстановить: тап несёт
+        # только payload. Диалог владельца: «борщ 250» → «В дневник» →
+        # запись на 100 г. До этого тикета докстринг модуля защищал
+        # пересказ как «нормализацию, которую грамматика может прочесть»;
+        # для еды это было верно про грамматику и ложно про число.
+        #
+        # Пересказ модели остаётся ТОЛЬКО запасным входом — ход без текста
+        # (одно фото с подписью в аргументе инструмента): там фразы
+        # человека нет, и терять нечего.
+        human_text = str(message_text or "").strip()
+        if human_text:
+            # Без вето `skill.matches`: его детектор (`looks_like_food_drink`,
+            # ≤30 символов) — дешёвая ДО-модельная эвристика «похоже на еду».
+            # Здесь модель уже решила, что это еда, и вето сказало бы «нет»
+            # ровно длинным фразам («на обед съела борщ 250 и котлету») —
+            # тем, где пересказ терял бы больше всего. Что из фразы
+            # читается, решит тап: `parse_food_text` не разберёт — спросит
+            # «что было» словами, а не подставит 100 г.
+            context = _build_context(
+                message_text=human_text,
+                bot_user=bot_user,
+                conversation=conversation,
+                trace_id=trace_id,
+            )
+            return _run_skill(skill, context)
+
+    if name == "health_screening":
+        # DRF-1542 — половина Б. Скрининг судится по словам ЧЕЛОВЕКА, а
+        # не по пересказу модели, и по ним же исполняется.
+        #
+        # `log_water` остаётся на пересказе модели, намеренно: он
+        # разбирает ГРАММАТИКУ напитка («стакан воды»), и там пересказ —
+        # нормализация, которая парсеру помогает: человек говорит «и
+        # водички дёрнул стакан», модель отдаёт «стакан воды», парсер
+        # матчит второе и не матчит первое. Подставить ему реплику
+        # человека значило бы сузить его там, где он работает. У
+        # скрининга грамматики нет — есть классификатор симптомов, и он
+        # обязан читать симптом из уст человека: перефразированный
+        # моделью красный флаг («онемела рука» → «болит рука»)
+        # деградировал бы до SOFT.
+        human_text = str(message_text or "").strip()
+        if not human_text:
+            logger.info(
+                "orchestrator.nutrition_global.screening_veto_no_user_text trace=%s",
+                trace_id,
+            )
+            return None
+        context = _build_context(
+            message_text=human_text,
+            bot_user=bot_user,
+            conversation=conversation,
+            trace_id=trace_id,
+        )
+        if not skill.matches(context):
+            # Либо человек симптома на этом ходу не называл («Что ты
+            # понимаешь?»), либо те же вопросы уже заданы (памятка,
+            # apps.skills.health_screening.memo). И то и другое — повод
+            # вернуть ход модели, а не выдать константу в шестой раз.
+            logger.info(
+                "orchestrator.nutrition_global.screening_veto tool=%s trace=%s",
+                name,
+                trace_id,
+            )
+            return None
+        return _run_skill(skill, context)
+
     context = _build_context(
         message_text=text,
         bot_user=bot_user,
@@ -291,7 +447,22 @@ def execute_nutrition_tool(
 # photo-only turns).
 # ---------------------------------------------------------------------------
 
-_STRUCTURED_CALLBACK_PREFIXES = ("cb:anketa:", "cb:food:")
+#: Семейства ``cb:``, чьи тапы ДЕТЕРМИНИРОВАННО принадлежат навыкам питания.
+#:
+#: Это список исключений, и он разъезжается ровно одним способом: новая
+#: клавиатура — новое семейство — забытый префикс. Так и вышло с
+#: ``cb:pc_consent:`` (DRF-2074): экран согласия анкеты (#1664) выписывал
+#: кнопки, ``NutritionAnketaSkill.matches`` их ловил, а сюда семейство не
+#: попало — и тап «согласен» с экрана, который бот сам нарисовал, уезжал в
+#: ветку «Я пока не поняла» (``handler.py``, DRF-1491). Поэтому список
+#: держит сторож класса ``test_pc_consent_callbacks_structured_2074``:
+#: перепись ``cb:``-констант клавиатур навыков питания с самих модулей, и
+#: каждая обязана быть структурной. Новое семейство без строки здесь —
+#: красный тест, а не жалоба владельца из MAX.
+#: ``cb:plan:`` — DRF-2125: тапы карточки плана («Подтвердить план» /
+#: «Не сейчас» / «Записаться») разбираются детерминированно до навыков
+#: (:func:`apps.orchestrator.plan_lite_card.try_handle_plan_callback`).
+_STRUCTURED_CALLBACK_PREFIXES = ("cb:anketa:", "cb:food:", "cb:pc_consent:", "cb:plan:")
 
 
 # ---------------------------------------------------------------------------
@@ -375,6 +546,37 @@ def resolve_anketa_tap(text: str) -> AnketaTap | None:
 
     ref = parsed.get("ref") or ""
     step, _, value = ref.partition(":")
+
+    if step == "diet":
+        # DRF-2310. Второй шаг, чья метка НЕ идёт в историю, и по той же
+        # причине, что скрининг: «Халяль» и «Кошер» называют веру человека,
+        # а это спецкатегория 152-ФЗ наравне со здоровьем. Метка легла бы в
+        # ``record_global_message(role="user")`` — в постоянное хранилище,
+        # которое на следующих ходах читает промпт консьержа.
+        #
+        # Сам ответ от этого не теряется: он уезжает в каталог как значение
+        # профиля, с согласием и по своему пути. В историю чата копия не
+        # нужна, и раздел 9 решения владельца её прямо запрещает.
+        return AnketaTap(history_text=None)
+
+    if step == "screening":
+        # Единственный шаг анкеты, чья метка НЕ идёт в историю.
+        #
+        # Ответы скрининга §7.1 — беременность, кормление, расстройство
+        # пищевого поведения, заболевание — это спецкатегория 152-ФЗ, и
+        # анкета их намеренно не хранит: решила ветку и забыла
+        # (``apps.skills.nutrition_anketa.skill``). Подстановка метки здесь
+        # свела бы это на нет: «Беременность или кормление» легла бы в
+        # ``record_global_message(role="user")`` как собственная реплика
+        # человека — то есть в постоянное хранилище, — и историю читает
+        # промпт консьержа на следующих ходах. Раздел 9 решения владельца
+        # это запрещает прямо: чувствительные поля не попадают в общую
+        # память и промпт без отдельного назначения.
+        #
+        # Поэтому тап считается навигацией: ответ по-прежнему решает ветку,
+        # но копии за собой не оставляет.
+        return AnketaTap(history_text=None)
+
     try:
         # Ровно та таблица, из которой построена клавиатура
         # (``skill._render_step`` -> ``anketa_choice_keyboard``): человек
@@ -430,6 +632,9 @@ def food_tap_labels(scan_id: str) -> dict[str, str]:
         correction_choice_keyboard,
         food_drink_clarify_keyboard,
         food_recognition_keyboard,
+        food_text_deleted_keyboard,
+        food_text_estimate_keyboard,
+        food_text_logged_keyboard,
     )
 
     return {
@@ -438,8 +643,39 @@ def food_tap_labels(scan_id: str) -> dict[str, str]:
             *food_drink_clarify_keyboard(),
             *food_recognition_keyboard(scan_id),
             *correction_choice_keyboard(scan_id),
+            *food_text_estimate_keyboard(),
+            *food_text_logged_keyboard(scan_id),
+            *food_text_deleted_keyboard(scan_id),
         )
     }
+
+
+#: OD-WATER-TAP-HISTORY (H2, ``docs/OWNER_QUESTIONS_2026-09-12.md``) — как тап
+#: правки/отмены СВОЕГО действия ложится в историю диалога. Владелец не ответил;
+#: решение 15.09 распространено и на чипы записи дневника (DRF-1838). ЕДИНСТВЕННАЯ
+#: точка выбора:
+#:
+#: * ``"silence"`` — вариант (б), рекомендован окном питания и главным окном:
+#:   в историю ничего, ход виден по ответу бота (как «Не присылать», DRF-1468);
+#: * ``"phrase"``  — вариант (а): подпись кнопки ложится репликой человека.
+#:
+#: Любое другое значение читается как молчание. Сырой payload — никогда: тап
+#: распознаётся всегда, иначе обработчик канала записал бы ``cb:…`` (DRF-988).
+EDIT_TAP_HISTORY = "silence"
+
+
+def _food_entry_tap(text: str) -> bool:
+    """Тап под сохранённой записью — по тому же шаблону, что маршрут скилла."""
+    from apps.orchestrator.ui.keyboards import ENTRY_CALLBACK_RE
+
+    return bool(ENTRY_CALLBACK_RE.match(text))
+
+
+def edit_tap_history_text(label: str | None) -> str | None:
+    """Текст истории для тапа правки своей записи — по :data:`EDIT_TAP_HISTORY`."""
+    if EDIT_TAP_HISTORY == "phrase" and label:
+        return label
+    return None
 
 
 def resolve_food_tap(text: str) -> AnketaTap | None:
@@ -456,12 +692,157 @@ def resolve_food_tap(text: str) -> AnketaTap | None:
     # имени действия у тех, что нет (``cb:food:diary``). Оба случая
     # разрешаются одинаково: строим таблицу с ним и ищем ТОЧНОЕ совпадение.
     scan_id = stripped.rsplit(":", 1)[-1]
+    if _food_entry_tap(stripped):
+        # DRF-1838 / H2 — правка своей записи: фраза или молчание, одной точкой.
+        return AnketaTap(history_text=edit_tap_history_text(food_tap_labels(scan_id).get(stripped)))
     return AnketaTap(history_text=food_tap_labels(scan_id).get(stripped))
+
+
+# ---------------------------------------------------------------------------
+# DRF-1468 — тап «Не присылать» (``cb:nutri:stop:*``) глазами ИСТОРИИ
+# ---------------------------------------------------------------------------
+#
+# Кнопка отписки на каждом proactive-исходящем. Это высказывание кнопкой,
+# но фразы за ней нет: метка одна на все поверхности («Не присылать»), а
+# смысл тапа целиком в payload'е. Подставлять метку в историю значило бы
+# записать за человека слова, которых он не говорил (тап ≠ «написал
+# „Не присылать"»), а сырой ``cb:`` в истории — ровно дефект DRF-988.
+# Поэтому в историю не идёт НИЧЕГО: ход остаётся виден по ответу-
+# подтверждению бота, как у навигационных тапов анкеты и ``cb:catalog:*``.
+#
+# Форма строгая, по тому же правилу C01: «cb:nutri:stop:вода», набранное
+# руками, тапом не является и истории не касается.
+
+#: Строгая форма payload'а кнопки отписки: латиница/подчёркивания, без
+#: пробелов. Покрывает и поверхности из будущего — неизвестная поверхность
+#: это вопрос ОТВЕТА (stale-подтверждение), а не персистенса.
+_NUTRI_STOP_CALLBACK_RE = re.compile(r"^cb:nutri:stop:[a-z_]+$")
+
+
+def resolve_plan_tap(text: str) -> AnketaTap | None:
+    """Разобрать тап карточки плана (``cb:plan:*``, DRF-2125); ``None`` — не наш.
+
+    ФРАЗА — «Подтвердить план» / «Не сейчас» / «Записаться» — это
+    высказывания человека о своём плане, как «✅ В дневник» у еды: человек
+    сам спросил «мой план» текстом, и молчание оставило бы в истории вопрос
+    без его ответа. Версия шаблона из payload'а в фразу не попадает —
+    человек её не видел. Форма строгая (``PLAN_CALLBACK_RE``): набранное
+    руками «cb:plan: …» тапом не является и истории не касается.
+    """
+    from apps.orchestrator.plan_lite_card import is_plan_callback, tap_history_text
+
+    stripped = (text or "").strip()
+    if not is_plan_callback(stripped):
+        return None
+    return AnketaTap(history_text=tap_history_text(stripped))
+
+
+def resolve_nutri_stop_tap(text: str) -> AnketaTap | None:
+    """Разобрать тап «Не присылать»; ``None`` — «это не тап отписки».
+
+    Возвращает тот же :class:`AnketaTap`: вопрос один — «чем этот тап был
+    как реплика», — и ответ здесь всегда «ничем»: ``history_text=None``.
+    """
+
+    stripped = (text or "").strip()
+    if not _NUTRI_STOP_CALLBACK_RE.match(stripped):
+        return None
+    return AnketaTap(history_text=None)
 
 
 def _anketa_fsm_active(conversation: Any) -> bool:
     state = getattr(conversation, "skill_state", None)
     return bool(isinstance(state, dict) and state.get("nutrition_anketa"))
+
+
+def _manual_target_pending(conversation: Any) -> bool:
+    """Ждёт ли бот число / подтверждение ручного ориентира (DRF-2138)?
+
+    Та же форма, что у :func:`_food_correction_pending`, и та же причина:
+    вопрос, который бот задал сам, владеет ответом. Свежесть решает навык.
+    """
+
+    try:
+        from apps.skills.nutrition_anketa.skill import manual_target_pending
+
+        return manual_target_pending(conversation)
+    except Exception:  # noqa: BLE001 — a predicate must never break the turn
+        logger.exception("orchestrator.nutrition_global.manual_target_pending_check_failed")
+        return False
+
+
+def _update_weight_pending(conversation: Any) -> bool:
+    """Ждёт ли бот вес — «обнови вес» (DRF-2139)? Та же форма, что выше."""
+
+    try:
+        from apps.skills.nutrition_anketa.skill import update_weight_pending
+
+        return update_weight_pending(conversation)
+    except Exception:  # noqa: BLE001 — a predicate must never break the turn
+        logger.exception("orchestrator.nutrition_global.update_weight_pending_check_failed")
+        return False
+
+
+def _update_weight_phrase(text: str) -> bool:
+    """Детерминированный вход «мой вес 65» / «обнови вес» (DRF-2139)."""
+
+    try:
+        from apps.skills.nutrition_anketa.skill import update_weight_phrase
+
+        return update_weight_phrase(text)
+    except Exception:  # noqa: BLE001 — a predicate must never break the turn
+        logger.exception("orchestrator.nutrition_global.update_weight_phrase_check_failed")
+        return False
+
+
+def _manual_target_phrase(text: str) -> bool:
+    """Детерминированный вход «мне врач назначил 1800 ккал» (DRF-2138)."""
+
+    try:
+        from apps.skills.nutrition_anketa.skill import manual_target_phrase
+
+        return manual_target_phrase(text)
+    except Exception:  # noqa: BLE001 — a predicate must never break the turn
+        logger.exception("orchestrator.nutrition_global.manual_target_phrase_check_failed")
+        return False
+
+
+def _food_correction_pending(conversation: Any) -> bool:
+    """Is a fresh «✏️ Уточнить» prompt still waiting for its answer? (DRF-1454)
+
+    Same shape as :func:`_anketa_fsm_active` and for the same reason: a question
+    the bot asked on the previous turn owns the answer that follows it. Without
+    this the correction the person types falls through to the concierge and is
+    forgotten — which was the whole reason the scanner kept re-asking.
+
+    Delegated to the skill so freshness is decided in one place: the skill
+    expires an unanswered prompt, and a stale record must not keep plain text
+    away from the concierge and the diary-request handler for good.
+    """
+
+    try:
+        from apps.skills.food_correction.skill import has_pending_correction
+
+        return has_pending_correction(conversation)
+    except Exception:  # noqa: BLE001 — a predicate must never break the turn
+        logger.exception("orchestrator.nutrition_global.correction_pending_check_failed")
+        return False
+
+
+def _food_text_pending(conversation: Any) -> bool:
+    """Ждёт ли текстовый ввод еды ответа — граммов или «что было»? (DRF-1837)
+
+    Тот же вопрос, что у анкеты и поправки скана: бот спросил — ответ его.
+    Свежесть решает сам навык; ошибка чтения — «не ждёт», ход уходит дальше.
+    """
+
+    try:
+        from apps.skills.food_clarify.text_entry import has_pending_text_entry
+
+        return has_pending_text_entry(conversation)
+    except Exception:  # noqa: BLE001 — a routing hint must never break the turn
+        logger.exception("orchestrator.nutrition_global.food_text_pending_check_failed")
+        return False
 
 
 def is_structured_nutrition_turn(
@@ -473,7 +854,11 @@ def is_structured_nutrition_turn(
     """Cheap predicate: is this turn owned by a nutrition skill deterministically?
 
     Free text is NEVER structured — it belongs to the concierge model
-    with the nutrition tools above.
+    with the nutrition tools above — with one exception per open question the
+    bot itself asked: an in-flight anketa step, a pending food correction, a
+    pending manual target (DRF-2138) — and one deterministic phrase, «мне врач
+    назначил 1800 ккал», which is a number the person carries, not a question
+    for the model.
     """
 
     stripped = text.strip()
@@ -481,7 +866,20 @@ def is_structured_nutrition_turn(
         return True  # photo-only turn → food scanner
     if stripped == "/anketa" or stripped.startswith(_STRUCTURED_CALLBACK_PREFIXES):
         return True
-    return _anketa_fsm_active(conversation)
+    return (
+        _anketa_fsm_active(conversation)
+        or _food_correction_pending(conversation)
+        or _food_text_pending(conversation)
+        or _manual_target_pending(conversation)
+        or _manual_target_phrase(stripped)
+        or _update_weight_pending(conversation)
+        or _update_weight_phrase(stripped)
+    )
+
+
+def _has_image_attachment(attachments: list[dict[str, Any]] | None) -> bool:
+    """Есть ли среди вложений ``image`` — единственный тип, который сканер еды читает."""
+    return any(isinstance(a, dict) and a.get("type") == "image" for a in attachments or [])
 
 
 def try_handle_structured_nutrition_turn(
@@ -500,7 +898,11 @@ def try_handle_structured_nutrition_turn(
     degrades to the concierge.
     """
 
-    has_attachments = bool(attachments)
+    # DRF-1942 — «фото без текста → сканер еды» решает ТИП вложения, а не
+    # сам факт вложения: голосовое (``audio``) сюда не относится, ему
+    # отвечает handler. ``video``/``file`` и прочее — как раньше не были
+    # фото, так и остаются: сканер их всё равно не прочитал бы.
+    has_attachments = _has_image_attachment(attachments)
     if not is_structured_nutrition_turn(
         text=text, has_attachments=has_attachments, conversation=conversation
     ):
@@ -515,9 +917,52 @@ def try_handle_structured_nutrition_turn(
         # Placed AFTER the structured check so an active anketa FSM keeps
         # first claim on the turn: mid-anketa, «что я ел» is an answer to the
         # question on screen before it is a request for the diary.
-        return _try_handle_diary_request(
+        diary = _try_handle_diary_request(
             text=text, has_attachments=has_attachments, bot_user=bot_user, trace_id=trace_id
         )
+        if diary is not None:
+            return diary
+        # DRF-2101 — «мой план»: карточка Plan Lite из wellness-context, тем же
+        # приёмом, что чтение дневника; под флагом, иначе текст — модели.
+        if not has_attachments:
+            from apps.orchestrator.plan_lite_card import try_handle_my_plan
+
+            try:
+                plan = try_handle_my_plan(
+                    text=text, bot_user=bot_user, trace_id=trace_id, conversation=conversation
+                )
+            except Exception:  # noqa: BLE001 — план не должен ломать глобальный ход
+                logger.exception(
+                    "orchestrator.nutrition_global.plan_lite_failed trace=%s", trace_id
+                )
+                plan = None
+            if plan is not None:
+                return plan
+        # DRF-2078 — «борщ 250»: блюдо с порцией не нуждается в модели.
+        return _try_handle_food_with_grams(
+            text=text,
+            has_attachments=has_attachments,
+            bot_user=bot_user,
+            conversation=conversation,
+            trace_id=trace_id,
+        )
+
+    if text.strip().startswith("cb:plan:"):
+        # DRF-2125 — тапы карточки плана: не навык, а детерминированный
+        # разбор рядом с самой карточкой. Выключенный флаг — честный ответ
+        # там же («кнопка не действует»); неверная форма — ``None``, и ход
+        # идёт дальше, как у остальных семейств (fallback канала).
+        from apps.orchestrator.plan_lite_card import try_handle_plan_callback
+
+        try:
+            return try_handle_plan_callback(
+                text=text, bot_user=bot_user, trace_id=trace_id, conversation=conversation
+            )
+        except Exception:  # noqa: BLE001 — план не должен ломать глобальный ход
+            logger.exception(
+                "orchestrator.nutrition_global.plan_callback_failed trace=%s", trace_id
+            )
+            return None
 
     context = _build_context(
         message_text=text,
@@ -535,7 +980,18 @@ def try_handle_structured_nutrition_turn(
     candidates = [s for s in (_skill_by_name(n) for n in candidate_names) if s is not None]
     skill = next((s for s in candidates if s.matches(context)), None)
     if skill is None:
-        return None
+        # The predicate said «structured» and no skill claimed it after all.
+        # Before DRF-1454 that combination was impossible for plain text (an
+        # in-flight anketa claims ANY text), and returning None was right. A
+        # pending food correction is different: it claims only text shaped like
+        # its answer, so «что я ел сегодня» typed while a correction is open is
+        # structured-but-unclaimed — and used to skip the deterministic diary
+        # handler entirely for the ten minutes the prompt stayed open. A chip
+        # that leads to nothing is worse than no chip (DRF-1302), so the turn
+        # continues down the same ladder the non-structured branch uses.
+        return _try_handle_diary_request(
+            text=text, has_attachments=has_attachments, bot_user=bot_user, trace_id=trace_id
+        )
 
     if has_attachments and not text.strip() and getattr(skill, "name", None) == "food_scanner":
         # Photo turn: the scanner reads the bytes from a runtime attribute
@@ -596,3 +1052,86 @@ def _try_handle_diary_request(
         action_data=reply.action_data,
         meta={"reply_kind": "nutrition_diary"},
     )
+
+
+#: DRF-2078 — верхняя граница фразы для ярлыка «блюдо + порция». Длиннее —
+#: это рассказ, а не запись, и он идёт модели, как и раньше. Та же
+#: величина, что у детектора ``looks_like_food_drink`` (``hints._MAX_LEN``),
+#: не импорт: два детектора с одним числом — совпадение, а не связь.
+_FOOD_WITH_GRAMS_MAX_LEN = 30
+
+
+def _try_handle_food_with_grams(
+    *,
+    text: str,
+    has_attachments: bool,
+    bot_user: Any,
+    conversation: Any,
+    trace_id: str,
+) -> SkillResult | None:
+    """«борщ 250» → карточка оценки сразу, детерминированно. ``None`` — не наше.
+
+    Диалог владельца (DRF-2078): «борщ 250» → модель → «Это про еду?» → «В
+    дневник» → оценка → подтверждение. Два подтверждения, и на первом же
+    шаге пересказ модели терял порцию. Блюдо с НАЗВАННОЙ порцией не
+    нуждается ни в вопросе «это еда?», ни в модели: человек уже сказал и
+    что, и сколько. Ярлык ведёт прямо к шагу 3 §109 — «Я распознала так» с
+    одним подтверждением (``cb:food:text_log``), запись только после него.
+
+    Границы, каждая — намеренно:
+
+    * только с порцией: «борщ» без числа идёт модели и получает карточку
+      «Это про еду?» как раньше — ярлык не отменяет защиту от опечаток
+      (DRF-358), он обходит её там, где число делает опечатку невероятной;
+    * напитки не берутся: «кофе 200 мл» — ``log_water`` через модель
+      (DRF-819), и грамматика напитков (``parse_beverage``) решает это ДО
+      нас; иначе ярлык завёл бы кофе в дневник еды;
+    * не в :func:`is_structured_nutrition_turn`: свободный текст остаётся
+      неструктурным для внешнего предиката (сторож «free text never
+      claimed»), ярлык живёт рядом с чтением дневника (DRF-1302) — тот же
+      двухслойный приём;
+    * контур питания выключен — ``None``: ход уходит модели, где заглушку
+      даёт ``execute_nutrition_tool``; ярлык при выключенном флаге не
+      меняет ни строки поведения;
+    * с фото — не наше: фото без подписи читает сканер, фото с подписью
+      уходит модели (:meth:`FoodScannerSkill.matches` требует пустой текст;
+      подпись до распознавателя не доходит — DRF-2110, решение: не
+      передавать, маршрутизация фото+подпись — отдельный лист).
+
+    Никогда не бросает: отказ дневника не должен ломать глобальный ход —
+    как у чтения дневника, ход продолжается к модели.
+    """
+
+    if has_attachments:
+        return None
+    stripped = text.strip()
+    if not stripped or len(stripped) > _FOOD_WITH_GRAMS_MAX_LEN:
+        return None
+    if not _nutrition_enabled():
+        return None
+    try:
+        from apps.skills.food_clarify import text_entry
+        from apps.skills.water.parser import BeverageMatch, parse_beverage
+
+        parsed = text_entry.parse_food_text(stripped)
+        if parsed is None or parsed.grams is None:
+            return None
+        if isinstance(parse_beverage(stripped), BeverageMatch):
+            return None
+        context = _build_context(
+            message_text=stripped,
+            bot_user=bot_user,
+            conversation=conversation,
+            trace_id=trace_id,
+        )
+        with tenant_scope(get_global_bot_tenant()):
+            result = text_entry.show_estimate(context, parsed.dish, parsed.grams, corrected=False)
+    except Exception:  # noqa: BLE001 — nutrition must never break the global turn
+        logger.exception("orchestrator.nutrition_global.food_with_grams_failed trace=%s", trace_id)
+        return None
+    logger.info(
+        "orchestrator.nutrition_global.food_with_grams_shortcut kind=%s trace=%s",
+        (result.meta or {}).get("reply_kind"),
+        trace_id,
+    )
+    return result

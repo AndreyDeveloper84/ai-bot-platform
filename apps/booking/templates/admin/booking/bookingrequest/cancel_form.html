@@ -1,0 +1,52 @@
+{% extends "admin/base_site.html" %}
+{% load i18n %}
+
+{% block breadcrumbs %}
+<div class="breadcrumbs">
+  <a href="{% url 'admin:index' %}">{% translate 'Home' %}</a>
+  &rsaquo; <a href="{% url 'admin:booking_bookingrequest_changelist' %}">Записи</a>
+  &rsaquo; Отмена записи
+</div>
+{% endblock %}
+
+{% block content %}
+<h1>Отмена записи</h1>
+
+<p>
+  <strong>{{ original.client_name }}</strong> — {{ original.service_name }},
+  мастер {{ original.master_name }},
+  {{ original.visit_at|date:"d.m.Y H:i" }} ({{ original.get_status_display }}).
+</p>
+
+{% if cancellable %}
+<p>
+  Отмена пройдёт через ту же машину состояний, что и отмена клиентом в
+  приложении: клиент получит уведомление, события уйдут на шину,
+  ожидающие напоминания будут сняты. Сотрудник и причина попадут в журнал.
+</p>
+<form method="post" action="">
+  {% csrf_token %}
+  <fieldset class="module aligned">
+    <div class="form-row">
+      <label for="id_reason"><strong>Причина отмены (обязательно):</strong></label>
+      <textarea id="id_reason" name="reason" rows="3" cols="60" required
+                placeholder="Например: клиент позвонил и попросил отменить"></textarea>
+    </div>
+  </fieldset>
+  <div class="submit-row">
+    <input type="submit" class="default" value="Отменить запись">
+    <a href="{% url 'admin:booking_bookingrequest_changelist' %}" class="button cancel-link">
+      Не отменять
+    </a>
+  </div>
+</form>
+{% else %}
+<p class="errornote">
+  Запись в состоянии «{{ original.get_status_display }}» — машина состояний
+  отмену из него не разрешает.
+</p>
+<p>
+  <a href="{% url 'admin:booking_bookingrequest_changelist' %}">Вернуться к списку записей</a>
+</p>
+{% endif %}
+{% endblock %}

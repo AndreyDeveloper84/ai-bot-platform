@@ -20,7 +20,9 @@ Guarantees:
 from __future__ import annotations
 
 import logging
+import time
 import uuid
+from typing import Any
 
 from apps.consent.memory import can_store_green_memory
 from apps.identity.models import MemoryEntry
@@ -32,6 +34,7 @@ from apps.identity.services.memory_reader import (
     read_personal_context,
 )
 from apps.identity.services.memory_writer import supersede_entries, write_entry
+from apps.orchestrator.memory.write_sink import WriteSink, link_within_budget
 from apps.persona.memory_extract import extract_user_facts
 
 logger = logging.getLogger(__name__)
@@ -40,11 +43,66 @@ logger = logging.getLogger(__name__)
 _WRITE_PURPOSE = "discovery:explicit_green_fact"
 
 
-def record_explicit_green_facts(bot_user, text: str) -> int:
+def _key_is_live(candidate: Any, live_rows: list[Any]) -> bool:
+    """Есть ли у ключа кандидата живая строка — любая, не только такая же.
+
+    Сравнение по КЛЮЧУ, а не по значению: предмет не «это уже записано»
+    (на то дедуп), а «этот ключ уже кем-то занят», и занявший может быть
+    свежее нас.
+    """
+    key = candidate.content.get("key")
+    return any(isinstance(row.content, dict) and row.content.get("key") == key for row in live_rows)
+
+
+def record_explicit_green_facts(
+    bot_user,
+    text: str,
+    *,
+    sink: WriteSink | None = None,
+    link_timeout_s: float | None = None,
+    bridge: bool = True,
+    blocked_dedup_keys: frozenset[tuple[str, Any, Any]] | None = None,
+    recover_only: bool = False,
+) -> int:
     """Extract + persist explicit green facts from a user turn. Returns count written.
 
     No-op (returns 0) when: no active PERSONAL_DATA consent, nothing extracted,
     identity could not be resolved, or every extracted fact already exists live.
+
+    DRF-1292 — ``sink`` collects the rows actually written (the announce line
+    is built from them); ``link_timeout_s`` bounds the Ayla identity call when
+    this runs BEFORE the reply is sent. A link that ran out the budget is noted
+    on the sink and nothing is written here — the handler retries post-send.
+    ``bridge=False`` skips the Ayla declared-prefs mirror (two REST calls with
+    the client's 5 s timeout each) — the pre-send caller runs it after the
+    send through :func:`bridge_explicit_candidates`; the mirror is idempotent
+    LWW and owes the reply nothing.
+
+    DRF-2511 — ``blocked_dedup_keys`` перечисляет факты, которые ЭТОМУ вызову
+    писать нельзя, даже если живой строки с ними нет. Нужен моста ради:
+    поштучное стирание («забудь, что я веган») помечает строку удалённой, и
+    дедуп по живым её не видит — значит факт, подобранный из СТАРОГО
+    сообщения, вернулся бы **без нового заявления человека**. Это возврат
+    стёртых персональных данных.
+
+    Почему не безусловный запрет внутри писателя: различие здесь настоящее.
+    Человек, сказавший «я веган» **снова**, вправе быть услышанным — это
+    новое заявление, и блокировать его навсегда было бы неверно. Мост же
+    дочитывает то, чего никто не повторял. Поэтому запрет — свойство вызова,
+    а не правило хранилища.
+
+    DRF-2511 — ``recover_only`` запрещает вытеснять живое. Для ключа единичной
+    кратности обычная запись **вытесняет** прежние живые строки (``supersede``,
+    reason=changed, DRF-1261) — и это правильно, когда человек только что
+    поправил себя. Но мост читает **старое** сообщение: «я веган» из первой
+    реплики вытеснило бы «я вегетарианка» из пятой, то есть **испортило бы
+    память обратным ходом**, и молча — узел «факт записан» остался бы зелёным.
+
+    Починка выбрана не порядком, а так, чтобы **порядок перестал иметь
+    значение**: если у ключа уже есть живая строка, восстанавливать нечего —
+    либо это то же значение (его снимет дедуп), либо более свежее, и оно
+    обязано победить. Водяной знак и строгая сортировка решали бы ту же задачу
+    состоянием, которое можно однажды сбить; здесь сбивать нечего.
 
     DRF-1035 — gate order is deliberate: consent, then extraction, then identity.
     Persisting memory needs a permanent Ayla subject, so this is an
@@ -55,6 +113,10 @@ def record_explicit_green_facts(bot_user, text: str) -> int:
     """
 
     if not can_store_green_memory(bot_user):
+        return 0
+    if sink is not None and sink.link_timed_out:
+        # A sibling writer already ran the budget out this turn — one more
+        # 1 s wait would compound it; the post-send retry covers this writer too.
         return 0
 
     try:
@@ -71,7 +133,9 @@ def record_explicit_green_facts(bot_user, text: str) -> int:
         if not candidates:
             return 0
 
-        user_id = ensure_ayla_link(bot_user, trigger="memory_write")
+        link_started = time.monotonic()
+        user_id = ensure_ayla_link(bot_user, trigger="memory_write", timeout_s=link_timeout_s)
+        link_within_budget(sink, link_started, link_timeout_s, user_id)
         if user_id is None:
             # Ayla unreachable, or resolution failed. Dropping the fact is the
             # correct degradation: memory is keyed on this id, so there is no
@@ -99,9 +163,31 @@ def record_explicit_green_facts(bot_user, text: str) -> int:
         if upc.soft_deleted_at is not None or upc.forget_all_requested_at is not None:
             return 0
 
+        blocked = blocked_dedup_keys or frozenset()
         written = 0
         for candidate in candidates:
             if candidate.dedup_key in seen:
+                continue
+            if recover_only and _key_is_live(candidate, live_rows):
+                # Восстанавливать нечего: у ключа есть живая строка, и она
+                # либо та же, либо свежее. Обратный ход памяти не делаем.
+                logger.info(
+                    "orchestrator.memory.recover_skipped_live bot_user=%s kind=%s — "
+                    "ключ уже занят живым фактом; старое сообщение его не "
+                    "вытесняет (DRF-2511)",
+                    bot_user.id,
+                    candidate.kind,
+                )
+                continue
+            if candidate.dedup_key in blocked:
+                # Стёрто поштучно и не заявлено заново — возвращать нельзя.
+                logger.info(
+                    "orchestrator.memory.blocked_erased bot_user=%s kind=%s — "
+                    "факт был стёрт по просьбе человека и не повторён им "
+                    "(DRF-2511)",
+                    bot_user.id,
+                    candidate.kind,
+                )
                 continue
             entry = write_entry(
                 user_id=user_id,
@@ -116,6 +202,8 @@ def record_explicit_green_facts(bot_user, text: str) -> int:
             )
             if entry is not None:
                 written += 1
+                if sink is not None:
+                    sink.add(entry)
                 seen.add(candidate.dedup_key)
                 key = candidate.content.get("key")
                 if key_cardinality(key) == CARDINALITY_SINGLE:
@@ -145,15 +233,8 @@ def record_explicit_green_facts(bot_user, text: str) -> int:
         # Ayla declared prefs. ALL extracted candidates are offered (not only
         # newly written rows) — PATCH is idempotent LWW, so a repeated
         # statement heals a transient upstream failure. Best-effort inside.
-        try:
-            from apps.orchestrator.memory.ayla_bridge import bridge_candidates_to_ayla
-
-            bridge_candidates_to_ayla(bot_user, candidates)
-        except Exception:  # noqa: BLE001 — the bridge must never break the turn
-            logger.exception(
-                "orchestrator.memory.bridge_failed bot_user=%s",
-                getattr(bot_user, "id", "?"),
-            )
+        if bridge:
+            _bridge(bot_user, candidates)
         return written
     except Exception:  # noqa: BLE001 — memory write must never break the turn
         logger.exception(
@@ -161,3 +242,34 @@ def record_explicit_green_facts(bot_user, text: str) -> int:
             getattr(bot_user, "id", "?"),
         )
         return 0
+
+
+def _bridge(bot_user, candidates) -> None:
+    try:
+        from apps.orchestrator.memory.ayla_bridge import bridge_candidates_to_ayla
+
+        bridge_candidates_to_ayla(bot_user, candidates)
+    except Exception:  # noqa: BLE001 — the bridge must never break the turn
+        logger.exception(
+            "orchestrator.memory.bridge_failed bot_user=%s",
+            getattr(bot_user, "id", "?"),
+        )
+
+
+def bridge_explicit_candidates(bot_user, text: str) -> None:
+    """The Ayla mirror for this turn's stated facts, run AFTER the send (DRF-1292).
+
+    Same extraction and same bridge as :func:`record_explicit_green_facts`
+    with ``bridge=True`` — only the moment differs: the pre-send write must
+    fit a 1 s budget and the mirror's two REST calls (5 s each) do not. Gate
+    order as in the writer: consent first, nothing extracted → nothing sent.
+    """
+    if not can_store_green_memory(bot_user):
+        return
+    try:
+        candidates = extract_user_facts(text).candidates
+    except Exception:  # noqa: BLE001 — extraction must never break the turn
+        logger.exception("orchestrator.memory.bridge_extract_failed")
+        return
+    if candidates:
+        _bridge(bot_user, candidates)

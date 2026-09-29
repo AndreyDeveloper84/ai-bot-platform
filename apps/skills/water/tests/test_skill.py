@@ -8,12 +8,35 @@ from __future__ import annotations
 
 from unittest.mock import Mock, patch
 
+import pytest
+
 from apps.integrations.ayla import (
     NutritionUnavailableError,
     WaterEntryResponse,
 )
 from apps.skills.base import SkillContext
+from apps.skills.food_clarify.text_entry import CONSENT_TEXT
 from apps.skills.water.skill import WaterSkill
+
+#: Настоящий предикат PERSONAL_DATA — до подмены фикстурой ниже.
+from apps.orchestrator.personal_surface import (  # noqa: E402
+    personal_records_consent_open as _REAL_PERSONAL_DATA_PREDICATE,
+)
+
+
+@pytest.fixture(autouse=True)
+def _consent_open(monkeypatch):
+    """DRF-1926 / DRF-2093: тесты ниже — про запись с согласием; отказ — в своём классе.
+
+    Подмена — по каноническим адресам предикатов (PERSONAL_DATA и реестр
+    дневника): ворота воды зовут единый ``diary_write_refusal``, а тот читает
+    оба через модули. Без подмены ``Mock``-пользователь уходил бы в настоящие
+    предикаты, те отказывали бы (fail-closed), и каждый прежний тест мерил бы отказ.
+    """
+    monkeypatch.setattr(
+        "apps.orchestrator.personal_surface.personal_records_consent_open", lambda _u: True
+    )
+    monkeypatch.setattr("apps.consent.nutrition.diary_is_granted", lambda _u: True)
 
 
 def _context(text: str, channel: str = "max", channel_user_id: str = "12345") -> SkillContext:
@@ -35,7 +58,8 @@ def _ayla_response(ml: int = 250, water_ml: int = 250) -> WaterEntryResponse:
         kcal=0,
         milestone_text=None,
         today_total_ml=1500,
-        today_norm_ml=2000,
+        # Ориентира нет ни у кого до утверждения методики (§82, §85).
+        today_norm_ml=None,
         alcohol_recovery_hint=False,
         raw={},
     )
@@ -75,7 +99,14 @@ class TestHandleHappyPath:
             result = WaterSkill().handle(_context("стакан воды"))
 
         assert "Записала 250 мл" in result.reply_text
-        assert "Сегодня: 1500 из 2000" in result.reply_text
+        # Строки «Сегодня: 1500 из 2000 мл» больше нет: ориентира по
+        # жидкости нет ни у кого до утверждения методики (§82, §85).
+        # Второе число было выходом формулы 30 мл × вес — оно называло
+        # человеку его вес, а знаменатель, делящийся на 30 нацело, —
+        # ещё и состояние (§35 п.10).
+        #
+        # Записанное при этом на месте: снимается ориентир, не факт.
+        assert "из" not in result.reply_text
         assert result.action_type == "water_logged"
         assert result.action_data is not None
         assert result.action_data["slug"] == "voda"
@@ -107,7 +138,8 @@ class TestHandleHappyPath:
                 kcal=120,
                 milestone_text=None,
                 today_total_ml=1500,
-                today_norm_ml=2000,
+                # Ориентира нет ни у кого до утверждения методики (§82, §85).
+                today_norm_ml=None,
                 alcohol_recovery_hint=True,
                 raw={},
             )
@@ -171,3 +203,77 @@ class TestRegistration:
         assert names.index("water") < names.index("food_clarify"), (
             f"water must precede food_clarify; got order {names}"
         )
+
+
+# ─── consent gate (DRF-1926) ─────────────────────────────────────────────
+
+
+class TestConsentGate:
+    """Запись воды — по тому же правилу, что запись еды в чате."""
+
+    def _client(self, writes: list[dict]) -> Mock:
+        async def _add_water(**kwargs):
+            writes.append(kwargs)
+            return _ayla_response()
+
+        client = Mock()
+        client.add_water = _add_water
+        return client
+
+    def test_no_consent_no_write_and_the_food_sentence(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            "apps.orchestrator.personal_surface.personal_records_consent_open", lambda _u: False
+        )
+        writes: list[dict] = []
+        with patch(
+            "apps.skills.water.skill.get_nutrition_client", return_value=self._client(writes)
+        ):
+            result = WaterSkill().handle(_context("стакан воды"))
+
+        assert writes == []
+        assert result.reply_text == CONSENT_TEXT
+        assert result.meta == {"reply_kind": "water_consent_required"}
+        assert result.action_type == ""
+        # DRF-1968 (M2+): у отказа есть вход в согласие — кнопка «Дать согласие»
+        # с исходным входом. Решение владельца: отказ → объяснение → «Дать
+        # согласие» → канонический поток → возврат в свой поток.
+        assert result.action_data == {
+            "buttons": [{"label": "Дать согласие", "callback": "cb:welcome:consent_offer_water"}],
+            "button_columns": 1,
+        }
+
+    def test_a_consent_read_that_raises_reads_as_no_consent(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            "apps.orchestrator.personal_surface.personal_records_consent_open",
+            _REAL_PERSONAL_DATA_PREDICATE,
+        )
+
+        def _boom(*_args, **_kwargs):
+            raise RuntimeError("consent store down")
+
+        monkeypatch.setattr("apps.consent.services.has_global_consent", _boom)
+        writes: list[dict] = []
+        with patch(
+            "apps.skills.water.skill.get_nutrition_client", return_value=self._client(writes)
+        ):
+            result = WaterSkill().handle(_context("стакан воды"))
+
+        assert writes == []
+        assert result.reply_text == CONSENT_TEXT
+
+    def test_the_gate_is_the_food_predicate(self, monkeypatch) -> None:
+        """Одно правило на еду и воду: ворота зовут тот же предикат, что еда."""
+        seen: list[object] = []
+
+        def _predicate(bot_user):
+            seen.append(bot_user)
+            return False
+
+        monkeypatch.setattr(
+            "apps.orchestrator.personal_surface.personal_records_consent_open", _predicate
+        )
+        context = _context("стакан воды")
+        with patch("apps.skills.water.skill.get_nutrition_client", return_value=self._client([])):
+            WaterSkill().handle(context)
+
+        assert seen == [context.bot_user]

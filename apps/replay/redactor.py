@@ -6,7 +6,7 @@ Russian NER layer (natasha) deferred to Phase 1.
 ### Why pinned regex constants
 
 The patterns + placeholder tokens are part of the persistence
-contract: a row stamped `redaction_method="regex_v2"` is committing
+contract: a row stamped `redaction_method="regex_v3"` is committing
 that *exactly these patterns* ran on it. If we change a pattern, we
 must bump the version string so a future migration can re-redact
 older rows (with raw-text access from another source if available).
@@ -17,11 +17,23 @@ gate. The version string is bumped because this file says it must be:
 a v1 row ran under patterns that sliced 3.12% / 2.20% of identifiers,
 and that is a different contract from what a v2 row committed to.
 
-Re-redaction cannot repair v1 rows — the removed digits are gone and
-this file never saw the raw text twice — so the stamp's only job here
-is to let a reader tell "this trace_id is intact" from "this trace_id
-may have had its middle cut out". That distinction is exactly what a
-row-level version string is for.
+**v2 -> v3 (DRF-1389 / DRF-1390).** Two boundary defects, both of them
+named in v2's own comments and left for their own tickets, are closed:
+
+* ``OTP_RE`` no longer redacts the middle group of a canonical UUID.
+  A v2 row carries UUIDs that were damaged 43.91% of the time; a v3
+  row does not. This is the difference the stamp exists to record.
+* ``CC_RE`` matches that fail the Luhn gate are re-searched for a card
+  welded to a short neighbouring number. A v2 row could carry an
+  unredacted card number in that shape (67.15% of them, measured); a
+  v3 row cannot.
+
+Re-redaction cannot repair v1 or v2 rows — the removed digits are gone
+and this file never saw the raw text twice — so the stamp's only job
+here is to let a reader tell "this trace_id is intact" from "this
+trace_id may have had its middle cut out", and "this row was scanned
+for welded cards" from "this row was not". That distinction is exactly
+what a row-level version string is for.
 
 ### Why a class, not free functions
 
@@ -70,9 +82,9 @@ from django.conf import settings
 
 logger = logging.getLogger(__name__)
 
-# --- Pinned patterns (redaction_method = "regex_v2") ----------------------
+# --- Pinned patterns (redaction_method = "regex_v3") ----------------------
 
-REDACTION_METHOD = "regex_v2"
+REDACTION_METHOD = "regex_v3"
 
 # Phone: +7/8/+anything followed by 10 digits, optionally with spaces / dashes
 # / parens. Catches:
@@ -128,29 +140,54 @@ CC_RE = re.compile(
 # Negative lookbehind+lookahead prevent matching the inside of phone numbers
 # (those are already matched by PHONE_RE).
 #
-# MEASURED AND DELIBERATELY NOT CHANGED HERE (DRF-1382).
-#
-# ``\w`` already excludes letters on both sides, so this pattern never
-# opened inside a hex run the way PHONE_RE and CC_RE did. It has a
-# different hole: a dash is not ``\w``, and the middle groups of a
-# canonical UUID are exactly four characters long between two dashes.
-# Whenever such a group happens to be all digits, it is redacted:
+# CLOSED HERE (DRF-1389). Measured before: **43.91%** of canonical UUIDs
+# came out of this file damaged, 43.72% of them by this pattern alone
+# (200 000 random uuid4, 0% of dash-free 32-char hex ids — the shape was
+# the whole cause). ``\w`` already excluded letters on both sides, so
+# this pattern never opened inside a hex run the way PHONE_RE and CC_RE
+# did; it had a different hole. A dash is not ``\w``, and the middle
+# groups of a canonical UUID are exactly four characters long between
+# two dashes, so an all-digit group looked like a standalone code:
 #
 #   c4202567-6706-417c-...  ->  c4202567-[OTP]-417c-...
 #
-# Measured on 200 000 random identifiers: **44.07%** of canonical UUIDs
-# (0% of dash-free 32-char hex ids — the shape is the whole cause). That
-# is an order of magnitude worse than the 3.12% / 2.20% this ticket was
-# opened for, and it is the dominant remaining reason a replay trace_id
-# comes out of this file unsearchable.
+# ### Why not simply add ``-`` to the boundary class
 #
-# It is left alone on purpose. Closing it means adding ``-`` to the
-# boundary class, and unlike the ASCII-letter guard above that is NOT
-# free: it stops redacting a code written as ``код-1234`` and it drops
-# both numbers in a dash-joined pair. That is a decision about which
-# direction of error to accept, not a mechanical tightening, so it gets
-# its own ticket and its own measurement rather than riding along here.
-OTP_RE = re.compile(r"(?<![\w\d])\d{4}(?![\w\d])|(?<![\w\d])\d{6}(?![\w\d])")
+# That is the wide fix, and it is not free: it stops redacting a code
+# written as ``код-1234`` or ``OTP-123456``, and it drops both numbers
+# in a dash-joined pair. This file's own rule is that a missed number in
+# a trace is worse than a mangled id (see PHONE_RE above), so buying an
+# id back with a leaked code is the wrong trade.
+#
+# The narrow fix rejects one shape instead: four digits standing between
+# two dashes that each have **four hex characters** on their far side —
+# which is what a canonical UUID puts around every one of its middle
+# groups, and what ordinary prose essentially never produces.
+#
+#   ...aaaa-1234-bbbb...   rejected (UUID-shaped neighbourhood)
+#   код-1234              redacted (nothing after the digits)
+#   OTP-123456             redacted (six digits, and "OTP" is not hex)
+#   code-1234-ab           redacted ("code" has a non-hex "o"; "ab" is
+#                          two characters, not four)
+#
+# ### What the narrow fix does NOT catch, named
+#
+# A genuine four-digit code written between two dashes with four hex
+# characters on either side -- ``face-1234-beef``, ``abcd-1234-ef01`` --
+# is no longer redacted. That is identifier-shaped text, not prose, and
+# it is the whole price: the corpus in
+# ``TestNoOtpFormStoppedBeingRedacted`` (код 1234 / код: 1234 /
+# код-1234 / OTP-123456 / code=1234 / (1234) / [1234] / bare 1234 and
+# 123456) is redacted 20 of 20 before this change and 20 of 20 after.
+#
+# The ``\d{6}`` alternative is left untouched: a canonical UUID has no
+# six-character group, so it was never part of this defect.
+_UUID_MIDDLE_GROUP = r"(?<=[0-9a-fA-F]{4}-)\d{4}-[0-9a-fA-F]{4}"
+
+OTP_RE = re.compile(
+    r"(?<![\w\d])(?!" + _UUID_MIDDLE_GROUP + r")\d{4}(?![\w\d])"
+    r"|(?<![\w\d])\d{6}(?![\w\d])"
+)
 
 # URLs with sensitive query params: ?token= / ?key= / ?secret= / ?auth=
 # Captures the URL up to the next whitespace.
@@ -236,42 +273,160 @@ def _is_card_number(matched: str) -> bool:
     reader. The Luhn gate does not reach that case and is not claimed
     to; it is pinned in ``TestLuhnGate`` so the claim stays honest.
 
-    ### The price, named
+    ### The price this gate used to charge — paid off in DRF-1390
 
-    Luhn is not free of risk, and the risk is not CPU. ``re.sub`` does
-    not retry a shorter match after the callback declines one, so a card
-    welded to a short neighbouring number by **exactly one** space or
-    dash is now missed where the blanket redaction caught it:
+    ``re.sub`` does not retry a shorter match after the callback
+    declines one, so a card welded to a short neighbouring number by
+    **exactly one** space or dash used to be missed entirely where the
+    blanket redaction caught it:
 
         заказ 99 4111111111111111   ->  unredacted  (was "заказ [CC]")
 
-    It is confined to that shape. The neighbour must be **1-3 digits**,
-    so the combined run is 17-19 digits and still inside ``{13,19}``. At
-    4 or more the combined run overflows the quantifier, the engine
-    backtracks onto the card alone, and it is redacted normally — as it
-    is with any two separators, a comma, or a word in between.
+    Measured on 2 000 synthetic welded lines (13-16 digit Luhn-valid
+    card + a 1-3 digit neighbour, one space or dash between):
+    **67.15%** of the cards reached the trace with every digit intact.
 
-    This is a real step in the direction the ticket calls the worse one
-    (a missed number beats no mangled id), and it is taken deliberately:
-    the loss it removes is certain and systematic (every timestamp,
-    every long id, on every trace), the loss it adds is rare and
-    characterised. Closing it needs a different mechanism than a
-    checksum — re-testing card-length windows inside a rejected run —
-    which costs on the *failure* path, i.e. the common one. Tracked
-    separately rather than papered over; pinned in
-    ``TestLuhnGateKnownMiss`` so it cannot change silently.
+    :func:`_find_card_span` closes it — see there for the mechanism and
+    for what it costs.
     """
 
     return _luhn_valid(_NON_DIGIT_RE.sub("", matched))
 
 
-# (pattern, placeholder, guard). ``guard`` is an optional predicate over the
-# matched text: return False to leave the match alone. Only CC uses one.
-_PATTERNS: list[tuple[re.Pattern[str], str, Callable[[str], bool] | None]] = [
+_DIGIT_RUN_RE = re.compile(r"\d+")
+
+
+def _find_card_span(matched: str) -> tuple[int, int] | None:
+    """Character span of a Luhn-valid card welded inside a rejected run.
+
+    DRF-1390. :func:`_is_card_number` answers yes/no about the **whole**
+    match, and ``re.sub`` never offers the callback a shorter one. A
+    card joined to a 1-3 digit neighbour by a single space or dash lands
+    inside one ``CC_RE`` match, fails Luhn as a whole, and is returned to
+    the trace untouched.
+
+    ### The search, and why it is this narrow
+
+    The run is cut at its separators into digit groups, and only
+    **contiguous spans of whole groups** are re-tested. Nothing else:
+    not every 13-19 digit window, which is the mechanism the DRF-1382
+    docstring named and rejected for costing on the failure path.
+
+    That bound is what makes it cheap where it runs most:
+
+    * one group (``record_id=1234567890123456``, ``ts_ns=...``) — the
+      overwhelmingly common rejected shape — returns ``None`` after one
+      scan for digit groups and without a single extra checksum. That
+      scan is the whole cost measured below.
+    * g groups cost at most g²/2 spans, and the ``{13,19}`` quantifier
+      caps g at 19 in the worst case and at 4-5 for anything a human
+      wrote. A card written ``4111 1111 1111 1111`` never reaches here
+      at all: it passes Luhn whole.
+
+    Measured rather than argued, because "costs on the failure path"
+    is exactly why DRF-1382 declined to write this. Arms interleaved in
+    one process over 1 500 replay step lines, every one of them
+    carrying a 16-digit ``order=`` that the gate rejects and this
+    function then declines: :meth:`Redactor.redact_text` costs **+4.2%**
+    against the plain bool gate. The OTP_RE change shipped alongside it
+    pays that back and more — v2 to v3 end-to-end is **-2.9%** on the
+    same corpus, because a UUID that is no longer substituted is a
+    string no longer rebuilt. Read the ratios, not the absolutes: the
+    host was running four other test suites at the time.
+
+    The longest valid span wins, leftmost on a tie — a longer Luhn-valid
+    run is the likelier card, and only one span is taken. A second card
+    welded into the same run is not searched for; that shape has never
+    been seen and adding it would widen the false-positive surface for
+    nothing.
+
+    ### The false positives this adds, named and measured
+
+    Luhn passes one random digit string in ten, so every extra span
+    tested is another chance to call an order number a card. Measured
+    over 20 000 synthetic lines per shape, ``[CC]`` on text with no
+    card in it:
+
+    ==========================================  =======  =======
+    shape                                       before   after
+    ==========================================  =======  =======
+    ``order=<14-19 digits>`` (one group)          9.98%    9.98%
+    ``заказ NN <14-19 digits>`` (two groups)      9.68%   14.37%
+    ==========================================  =======  =======
+
+    Single-group runs — the overwhelming majority of long ids in a
+    trace — are untouched, because the search declines them before the
+    first checksum. A long id written next to a short number goes from
+    90.3% surviving to 85.6%: real, bounded, and the price of the card
+    in that same shape going from 32.9% caught to 100%.
+
+    Returns:
+      ``(start, end)`` character offsets into ``matched``, or ``None``
+      when no proper sub-span passes Luhn.
+    """
+
+    groups = [(m.start(), m.end()) for m in _DIGIT_RUN_RE.finditer(matched)]
+    if len(groups) < 2:
+        # Single digit run: the only span is the whole match, and the
+        # caller has already rejected it.
+        return None
+
+    lengths = [end - start for start, end in groups]
+    last = len(groups) - 1
+    best: tuple[int, int] | None = None
+    best_len = 0
+    for i in range(len(groups)):
+        total = 0
+        for j in range(i, len(groups)):
+            total += lengths[j]
+            if total > 19:
+                break
+            if total < 13 or (i == 0 and j == last):
+                continue
+            if total <= best_len:
+                continue
+            start, end = groups[i][0], groups[j][1]
+            if _luhn_valid(_NON_DIGIT_RE.sub("", matched[start:end])):
+                best = (start, end)
+                best_len = total
+    return best
+
+
+def _redact_card_match(matched: str, placeholder: str) -> str:
+    """Replacement text for one ``CC_RE`` match (DRF-1382 / DRF-1390).
+
+    Whole run passes Luhn → the placeholder. Otherwise a welded card is
+    looked for and only **it** is replaced, so the neighbour the card was
+    stuck to stays readable in the trace:
+
+        заказ 99 4111111111111111  ->  заказ 99 [CC]
+
+    Note the allowlist is applied by the caller to the whole match only.
+    An allowlist entry equal to a welded card's inner span is not
+    honoured — nobody allowlists a card number, and honouring it would
+    mean handing the allowlist down into the span search.
+    """
+
+    if _is_card_number(matched):
+        return placeholder
+    span = _find_card_span(matched)
+    if span is None:
+        return matched
+    start, end = span
+    return matched[:start] + placeholder + matched[end:]
+
+
+# (pattern, placeholder, refine). ``refine`` is an optional
+# ``(matched, placeholder) -> replacement`` hook: return ``matched`` to leave
+# the match alone, the placeholder to redact it whole, or anything in between
+# to redact part of it. Only CC uses one. It replaced a plain ``bool`` guard
+# in DRF-1390, because "leave it alone entirely" was not a rich enough answer
+# for a card welded to a neighbouring number.
+_PATTERNS: list[tuple[re.Pattern[str], str, Callable[[str, str], str] | None]] = [
     # Order matters: URL_TOKEN first (contains everything else), then CC
     # (greedy on digit sequences), then PHONE, then EMAIL, then OTP.
     (URL_TOKEN_RE, "[URL_TOKEN]", None),
-    (CC_RE, "[CC]", _is_card_number),
+    (CC_RE, "[CC]", _redact_card_match),
     (PHONE_RE, "[PHONE]", None),
     (EMAIL_RE, "[EMAIL]", None),
     (OTP_RE, "[OTP]", None),
@@ -322,8 +477,8 @@ class Redactor:
             return text
 
         result = text
-        for pattern, placeholder, guard in _PATTERNS:
-            result = self._replace_with_allowlist(pattern, placeholder, result, guard)
+        for pattern, placeholder, refine in _PATTERNS:
+            result = self._replace_with_allowlist(pattern, placeholder, result, refine)
         return result
 
     def redact_steps(self, steps: list[Any]) -> list[Any]:
@@ -354,20 +509,21 @@ class Redactor:
         pattern: re.Pattern[str],
         placeholder: str,
         text: str,
-        guard: Callable[[str], bool] | None = None,
+        refine: Callable[[str, str], str] | None = None,
     ) -> str:
-        """Apply `pattern` replacement honoring `guard` and the allowlist.
+        """Apply `pattern` replacement honoring the allowlist and `refine`.
 
-        `guard` runs first and is the cheap bail-out: a match it rejects
-        is left untouched without allocating a replacement.
+        The allowlist is checked first and wins outright: an exact
+        allowlist entry is returned as-is and `refine` never sees it, so
+        a partial redaction cannot reach inside an allowlisted span.
         """
 
         def _sub(match: re.Match[str]) -> str:
             original = match.group(0)
-            if guard is not None and not guard(original):
-                return original
             if original in self._allowlist:
                 return original
+            if refine is not None:
+                return refine(original, placeholder)
             return placeholder
 
         return pattern.sub(_sub, text)

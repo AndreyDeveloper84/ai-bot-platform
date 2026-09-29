@@ -92,17 +92,26 @@ class SalonMaxHandler(TenantAwareTask):
     separate MAX bot with its own token, and the registry entry that
     matched the secret names both this stream and the tenant.
 
-    ``requires_tenant`` stays True, unlike the global handler. The salon
-    bot is tenant-bound by construction — it belongs to one salon, and its
-    registry entry carries that tenant — so the base class enters
-    ``tenant_scope(tenant)`` and every read below is scoped normally.
-    That is the point of the separation: staff of one salon cannot reach
-    another's data even by accident.
+    ``requires_tenant = False`` since DRF-1783 (12.09.2026). Until that day
+    it stayed True: the salon bot was «tenant-bound by construction — it
+    belongs to one salon, and its registry entry carries that tenant». The
+    owner reversed the premise (DRF-1705: the salon bot does not belong to
+    a salon; it serves the masters of every salon and the solo masters), so
+    the tenant is now decided by the PERSON — ``salon_handler`` finds the
+    identity's working row and enters ``tenant_scope`` of that row itself.
+    The isolation argument still holds, one level down: every read runs in
+    the scope of the row being served, and a person with no working row
+    reaches nobody's data. Since DRF-1785 (15.09.2026) ingress puts no
+    tenant on the ``max_salon`` stream — not even where the environment
+    still names one for the entry — and the base class does not refuse an
+    entry without a tenant.
 
     Deliberately NOT the conversational pipeline. The handler runs no LLM
     and dispatches no skills — staff get a control panel, not a chat
     partner. See ``apps/channels/max/salon_handler.py``.
     """
+
+    requires_tenant = False
 
     def handle(self, payload: dict[str, Any]) -> None:
         from apps.channels.max import salon_handler

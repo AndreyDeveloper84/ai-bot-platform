@@ -197,3 +197,92 @@ class TestBookingCompletedSignal:
             assert received[0]["bot_user"] == bot_user
         finally:
             booking_completed.disconnect(handler)
+
+
+@pytest.mark.django_db
+class TestTimezoneValidation:
+    """`PATCH /me` перестаёт принимать что попало за часовой пояс (DRF-1477).
+
+    До этой проверки колонку принимала ЛЮБАЯ строка: она обрезалась до
+    64 символов и уходила в базу. Значит `«не знаю»` доезжало до
+    `nutrition_proactive.prefs.resolve_timezone`, где `_safe_zoneinfo`
+    возвращал `None`, и человек **молча** уезжал на пояс салона.
+
+    Ошибка не сообщалась никому и никогда: ни тому, кто прислал, ни
+    тому, кто читает. Теперь она сообщается тому, кто прислал.
+    """
+
+    def test_a_real_zone_is_stored(self, bot_user):
+        from apps.identity.services.profile import update_profile
+
+        # Положительная стража впереди: до записи пояса нет.
+        assert bot_user.timezone == ""
+
+        snap = update_profile(bot_user, {"timezone": "Asia/Yekaterinburg"})
+
+        assert snap.timezone == "Asia/Yekaterinburg"
+        bot_user.refresh_from_db()
+        assert bot_user.timezone == "Asia/Yekaterinburg"
+
+    def test_garbage_is_refused_loudly_instead_of_sliding_to_the_salon(self, bot_user):
+        from apps.identity.services.profile import ProfileUpdateError, update_profile
+
+        with pytest.raises(ProfileUpdateError) as exc:
+            update_profile(bot_user, {"timezone": "не знаю"})
+
+        # Причина названа, а не спрятана: чинит тот, кто прислал.
+        assert "IANA" in str(exc.value)
+        bot_user.refresh_from_db()
+        # И колонка НЕ тронута — отказ не оставляет половины записи.
+        assert bot_user.timezone == ""
+
+    def test_a_plausible_but_nonexistent_zone_is_refused_too(self, bot_user):
+        """`Europe/Moskva` выглядит как пояс и им не является."""
+        from apps.identity.services.profile import ProfileUpdateError, update_profile
+
+        with pytest.raises(ProfileUpdateError):
+            update_profile(bot_user, {"timezone": "Europe/Moskva"})
+
+    def test_empty_is_allowed_because_it_means_unset(self, bot_user):
+        """Пустота — законный ответ «не задано» (DRF-1606).
+
+        Отклонять её значило бы запретить СНЯТЬ пояс, однажды
+        поставленный по ошибке.
+        """
+        from apps.identity.services.profile import update_profile
+
+        update_profile(bot_user, {"timezone": "Europe/Moscow"})
+        bot_user.refresh_from_db()
+        # Положительная стража впереди: было что снимать.
+        assert bot_user.timezone == "Europe/Moscow"
+
+        snap = update_profile(bot_user, {"timezone": ""})
+
+        assert snap.timezone == ""
+        bot_user.refresh_from_db()
+        assert bot_user.timezone == ""
+
+    def test_the_refusal_does_not_touch_the_neighbouring_field(self, bot_user):
+        """Отказ по поясу не должен записать имя из того же запроса.
+
+        `client_name` и `timezone` приходят одним запросом. Пока
+        проверка стояла ВНУТРИ цикла записи, имя успевало присвоиться
+        экземпляру до того, как пояс отвергнут: до базы это не доезжало
+        только потому, что `save()` стоит ниже цикла — гарантия держалась
+        на порядке строк, а не на устройстве.
+
+        Проверка вынесена вперёд записи, и тест сторожит именно это:
+        отказ не оставляет НИ отправленной половины, НИ испорченного
+        экземпляра в памяти.
+        """
+        from apps.identity.services.profile import ProfileUpdateError, update_profile
+
+        with pytest.raises(ProfileUpdateError):
+            update_profile(bot_user, {"client_name": "Аня", "timezone": "мусор"})
+
+        # Экземпляр в памяти чист — проверяем ДО `refresh_from_db()`,
+        # иначе перечитывание скрыло бы порчу, которую мы и сторожим.
+        assert bot_user.client_name != "Аня"
+        bot_user.refresh_from_db()
+        assert bot_user.client_name != "Аня"
+        assert bot_user.timezone == ""

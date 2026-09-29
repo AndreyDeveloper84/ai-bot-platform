@@ -5,10 +5,11 @@
  * rows. Home = records: the screen is a tab root (no back button) and
  * renders identically in DEV and prod builds.
  */
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes, useParams } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { primeDisplayName } from "../components/CustomerAvatarEntry";
 
 // Домашний экран теперь спрашивает decision-context (приглашение в
 // анкету цели). Мокаем, чтобы юнит-тест не ходил в сеть; отсутствие
@@ -35,8 +36,17 @@ vi.mock("../lib/api", async (importOriginal) => {
   };
 });
 
-import { fetchMyBookings, type BookingItem } from "../lib/api";
+import { ApiError, fetchMyBookings, type BookingItem } from "../lib/api";
+import { authErrorCopy } from "../lib/auth-error-copy";
 import { CustomerRecordsScreen } from "./CustomerRecordsScreen";
+
+// Дверь в профиль (`CustomerAvatarEntry`) без пропа спрашивает имя у
+// `/me`. Этот набор ручку не подменяет, поэтому имя засевается явно:
+// иначе в прогоне живёт неподменённый сетевой вызов и асинхронное
+// обновление, которое может прилететь посреди чужого теста (DRF-2523).
+beforeEach(() => {
+  primeDisplayName("Тест Тестов");
+});
 
 const mockedList = vi.mocked(fetchMyBookings);
 
@@ -59,6 +69,10 @@ function booking(partial: Partial<BookingItem> & Pick<BookingItem, "id">): Booki
     reschedulable: true,
     rating: null,
     can_rate: false,
+    // DRF-1652 — умолчание `null`, то есть «источник промолчал».
+    // НЕ `""`: это сказало бы, что салон ответил «адреса нет», и
+    // фикстура утверждала бы за салон то, чего он не говорил.
+    address: null,
     ...partial,
   };
 }
@@ -121,12 +135,80 @@ function renderScreen() {
   );
 }
 
+/** Переключить `navigator.onLine`, вернув прежнее значение обратно. */
+function setOnLine(value: boolean) {
+  Object.defineProperty(window.navigator, "onLine", {
+    value,
+    configurable: true,
+  });
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   vi.unstubAllEnvs();
+  setOnLine(true);
 });
 
 describe("CustomerRecordsScreen (real data)", () => {
+  it("bottom nav: та же панель, что на Главной — пять вкладок, «Записи» активна (DRF-2191)", async () => {
+    // DRF-1546 снял «День»; DRF-2191 — одна панель на всех клиентских экранах
+    // по макету DRF-1321: «Услуги»/«Я» ушли, вход в каталог — с Главной.
+    mockLists();
+    renderScreen();
+    const nav = within(
+      await screen.findByRole("navigation", { name: "Основная навигация" }),
+    );
+    expect(nav.queryByRole("button", { name: "День" })).not.toBeInTheDocument();
+    expect(nav.getAllByRole("button").map((b) => b.getAttribute("aria-label"))).toEqual([
+      "Главная", "План", "Дневник", "Записи", "Профиль",
+    ]);
+    expect(nav.getByRole("button", { name: "Записи" })).toHaveAttribute("aria-current", "page");
+    expect(nav.queryByRole("button", { name: "Услуги" })).toBeNull();
+  });
+
+  it("DRF-2191: при отказе ручки панель остаётся — выход с экрана есть в любом состоянии", async () => {
+    // Правило класса из инцидента 20.09 (#1918): состояние ошибки не убирает
+    // навигацию. Положительная пара — сам отказ на экране виден.
+    mockedList.mockRejectedValue(new Error("network down"));
+    renderScreen();
+    expect(await screen.findByText(/Не получилось загрузить/)).toBeInTheDocument();
+    const nav = within(screen.getByRole("navigation", { name: "Основная навигация" }));
+    expect(nav.getAllByRole("button").map((b) => b.getAttribute("aria-label"))).toEqual([
+      "Главная", "План", "Дневник", "Записи", "Профиль",
+    ]);
+  });
+
+  it("DRF-2436 B / п.15: у каждой записи в строке — мастер и салон; два салона различимы", async () => {
+    // Пара, которая обязана различаться: записи одного человека из двух
+    // салонов в одном списке. Без салона — «мастер {Имя}» (слова владельца 28.09, п.2).
+    mockLists([
+      booking({ id: "b-s1", master_name: "Ольга", salon_name: "Формула тела", visit_at: isoInHours(20) }),
+      booking({ id: "b-s2", master_name: "Марина", salon_name: "Люмина", visit_at: isoInHours(40) }),
+      booking({ id: "b-s3", master_name: "Анна", visit_at: isoInHours(60) }),
+    ]);
+    renderScreen();
+
+    expect(await screen.findByText("мастер Ольга · Формула тела")).toBeInTheDocument();
+    expect(screen.getByText("мастер Марина · Люмина")).toBeInTheDocument();
+    // Без салона в проводе — без хвоста « · ».
+    expect(screen.getByText("мастер Анна")).toBeInTheDocument();
+    expect(screen.queryByText(/ · $/)).not.toBeInTheDocument();
+  });
+
+  it("DRF-2172: цена записи «3 200 ₽» на карточке; без цены строки нет, не «0 ₽»", async () => {
+    mockLists([
+      booking({ id: "b-p1", service_name: "Лимфодренаж", price: "3200.00", visit_at: isoInHours(20) }),
+      booking({ id: "b-p2", service_name: "Пилинг", price: null, visit_at: isoInHours(40) }),
+      booking({ id: "b-p3", service_name: "Консультация", price: "0.00", visit_at: isoInHours(60) }),
+    ]);
+    renderScreen();
+
+    expect(await screen.findByText("3 200 ₽")).toBeInTheDocument();
+    // Ровно одна строка с ₽ — у той записи, где цена есть.
+    expect(screen.getAllByText(/₽/)).toHaveLength(1);
+    expect(screen.queryByText(/^0 ₽$/)).not.toBeInTheDocument(); // «3 200 ₽» содержит «0 ₽» — якорим
+  });
+
   it("renders real upcoming bookings with tab counts and status badges", async () => {
     mockLists();
     renderScreen();
@@ -184,6 +266,22 @@ describe("CustomerRecordsScreen (real data)", () => {
     expect(await screen.findByRole("tab", { name: "Ближайшие (2)" })).toBeInTheDocument();
   });
 
+  it("DRF-1319 D-1: отказ входа (400 malformed) назван своим именем, не «через минуту»", async () => {
+    mockedList.mockRejectedValueOnce(new ApiError(400, "malformed", "missing Authorization header"));
+    renderScreen();
+    expect(await screen.findByText(authErrorCopy("malformed").title)).toBeInTheDocument();
+    expect(screen.getByText(authErrorCopy("malformed").body)).toBeInTheDocument();
+    expect(screen.queryByText(/через минуту/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/missing Authorization header/)).not.toBeInTheDocument();
+  });
+
+  it("DRF-1319 D-1: прочий 4xx — по-прежнему «попробуй через минуту» (положительная стража)", async () => {
+    mockedList.mockRejectedValueOnce(new ApiError(422, "validation_error", "bad section"));
+    renderScreen();
+    expect(await screen.findByText(/через минуту/)).toBeInTheDocument();
+    expect(screen.queryByText(authErrorCopy("malformed").title)).not.toBeInTheDocument();
+  });
+
   it("opens the booking detail from a card", async () => {
     const user = userEvent.setup();
     mockLists();
@@ -222,5 +320,82 @@ describe("CustomerRecordsScreen (real data)", () => {
       "aria-current",
       "page",
     );
+  });
+});
+
+/**
+ * Офлайн: полоса и кнопки говорят одно и то же.
+ *
+ * До правки экран рисовал честную полосу «Записи могут быть
+ * устаревшими — нет сети», а кнопки под ней оставались живыми:
+ * «Перенести» и «Отменить» уводили на экраны, которые без сети ничего
+ * не загрузят и ничего не отправят, «Записаться ещё» — в каталог,
+ * который не придёт. Предупреждение, которое приложение само же
+ * опровергает следующим касанием, хуже отсутствия предупреждения.
+ *
+ * Стража парная (`negative_assert_guard`, DRF-1411): к «действия
+ * выключены» приложены положительные проверки на тех же данных — сами
+ * записи, их время и мастер на месте, «Открыть запись» работает
+ * (чтение уже показанного, у экрана детали своё состояние ошибки), и
+ * при живой сети ВСЕ кнопки снова активны. Правка, которая выключила бы
+ * карточку целиком или выключила бы её навсегда, упала бы на них.
+ *
+ * Тест умеет падать: снимите `disabled={offline}` с кнопок
+ * `BookingCard` — покраснеет первый случай; перестаньте передавать
+ * `offline: !online` в `renderTimeBuckets` — покраснеет он же.
+ */
+describe("офлайн: действия выключены вместе с предупреждением", () => {
+  it("перенос, отмена и повтор недоступны, пока нет сети", async () => {
+    setOnLine(false);
+    mockLists();
+    renderScreen();
+    await screen.findByText("Маникюр");
+    expect(screen.getByRole("button", { name: "Перенести" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Отменить" })).toBeDisabled();
+    // Полоса объясняет, почему.
+    expect(
+      screen.getByText(/Перенос, отмена и\s+новая запись сейчас недоступны/),
+    ).toBeInTheDocument();
+  });
+
+  it("история: «Записаться ещё» и «Оставить отзыв» тоже выключены", async () => {
+    setOnLine(false);
+    mockLists();
+    renderScreen();
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole("tab", { name: /История/ }));
+    const repeats = await screen.findAllByRole("button", {
+      name: "Записаться ещё",
+    });
+    for (const b of repeats) expect(b).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "Оставить отзыв" }),
+    ).toBeDisabled();
+  });
+
+  it("положительная стража: записи видны и «Открыть запись» работает", async () => {
+    setOnLine(false);
+    mockLists();
+    renderScreen();
+    const user = userEvent.setup();
+    // Сами записи никуда не делись — офлайн выключает действия, не показ.
+    expect(await screen.findByText("Маникюр")).toBeInTheDocument();
+    expect(screen.getByText("Массаж")).toBeInTheDocument();
+    expect(screen.getAllByText(/мастер Анна Соколова/).length).toBeGreaterThan(0);
+    // Чтение уже показанной записи остаётся доступным.
+    const open = screen.getAllByRole("button", { name: "Открыть запись" })[0];
+    expect(open).toBeEnabled();
+    await user.click(open!);
+    expect(await screen.findByText("BOOKING-b-1")).toBeInTheDocument();
+  });
+
+  it("положительная стража: с сетью все действия снова активны", async () => {
+    setOnLine(true);
+    mockLists();
+    renderScreen();
+    await screen.findByText("Маникюр");
+    expect(screen.getByRole("button", { name: "Перенести" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "Отменить" })).toBeEnabled();
+    expect(screen.queryByText(/нет сети/i)).not.toBeInTheDocument();
   });
 });

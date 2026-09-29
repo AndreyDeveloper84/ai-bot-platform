@@ -33,8 +33,21 @@ from apps.integrations.ayla.booking_client import (
     AylaBookingRecord,
     BookingBadRequestError,
 )
+from apps.integrations.ayla.health_check import (
+    HEALTH_CHECK_NOT_APPLICABLE,
+    HEALTH_CHECK_REQUIRED,
+    HEALTH_CHECK_UNKNOWN,
+    OUTWARD_HANDOFF,
+    OUTWARD_UNAVAILABLE,
+)
 from apps.integrations.ayla.identity_client import IdentityResolveError, ResolvedIdentity
 from apps.tenancy.models import Tenant
+from tests.support.catalog_mirror import sync_shaped
+
+#: Три кода отказа гейта здоровья и два имени, под которыми они выходят
+#: наружу (§98: REQUIRED и UNKNOWN — одно имя для человека).
+ALL_HEALTH_CODES = [HEALTH_CHECK_REQUIRED, HEALTH_CHECK_UNKNOWN, HEALTH_CHECK_NOT_APPLICABLE]
+HEALTH_SLUGS = {OUTWARD_HANDOFF, OUTWARD_UNAVAILABLE}
 
 
 pytestmark = pytest.mark.django_db
@@ -103,7 +116,10 @@ def bot_user(tenant) -> BotUser:
         channel="max",
         channel_user_id="12345",
         chat_id="12345",
+        # A LINKED person: a real key, of known real sort (DRF-1790,
+        # 12.09.2026). A key without a sort is «unknown» and is asked again.
         ayla_user_id=AYLA_UID,
+        ayla_user_id_is_proxy=False,
     )
 
 
@@ -111,14 +127,16 @@ def bot_user(tenant) -> BotUser:
 def master(tenant) -> CatalogMaster:
     from django.utils import timezone as tz
 
-    return CatalogMaster.all_tenants.create(
-        tenant=tenant,
-        external_updated_at=tz.now(),
-        name="Ольга",
-        specialization="Маникюр",
-        is_active=True,
-        invite_status=CatalogMaster.InviteStatus.ACCEPTED,
-        ayla_user_id=MASTER_AYLA_ID,
+    return sync_shaped(
+        CatalogMaster.all_tenants.create(
+            tenant=tenant,
+            external_updated_at=tz.now(),
+            name="Ольга",
+            specialization="Маникюр",
+            is_active=True,
+            invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+            ayla_user_id=MASTER_AYLA_ID,
+        )
     )
 
 
@@ -181,13 +199,13 @@ def stub_resolve(monkeypatch) -> Any:
     """
 
     calls: list[str] = []
-    state: dict[str, Any] = {"uuid": uuid.uuid4(), "error": None}
+    state: dict[str, Any] = {"uuid": uuid.uuid4(), "error": None, "is_proxy": True}
 
     def _fake(external_user_id: str) -> ResolvedIdentity:
         calls.append(external_user_id)
         if state["error"] is not None:
             raise state["error"]
-        return ResolvedIdentity(ayla_user_id=state["uuid"], is_proxy=True)
+        return ResolvedIdentity(ayla_user_id=state["uuid"], is_proxy=state["is_proxy"])
 
     monkeypatch.setattr(
         "apps.integrations.ayla.identity_client.resolve_identity", _fake, raising=True
@@ -353,15 +371,39 @@ class TestIdentityResolve:
     def test_second_booking_costs_no_network(
         self, client, tenant, service, master, stub_client, stub_resolve
     ) -> None:
+        """J-O3: a linked person does not go to Ayla twice.
+
+        12.09.2026 (DRF-1790): «linked» means the catalog answered a REAL
+        key. The stub used to answer a proxy here and the test still passed
+        — because a proxy key was cached forever, which is the hole
+        DRF-1790 closes. A proxy answer is now asked again (next test).
+        """
         BotUser.all_tenants.create(
             tenant=tenant, channel="max", channel_user_id="777", ayla_user_id=None
         )
+        stub_resolve.state["is_proxy"] = False
 
         _post_as(client, service, master, user_id="777")
         _post_as(client, service, master, user_id="777", extra={"payment_required": True})
 
         assert len(stub_client.calls) == 2
         assert len(stub_resolve.calls) == 1  # resolved once, then cache_hit
+
+    def test_a_proxy_answer_is_asked_again_on_the_next_booking(
+        self, client, tenant, service, master, stub_client, stub_resolve
+    ) -> None:
+        """The other side of J-O3 (DRF-1790): a proxy key is not a link, so the
+        second dependent action asks the catalog again — one call per
+        dependent action, never on «hello»."""
+        BotUser.all_tenants.create(
+            tenant=tenant, channel="max", channel_user_id="778", ayla_user_id=None
+        )
+
+        _post_as(client, service, master, user_id="778")
+        _post_as(client, service, master, user_id="778", extra={"payment_required": True})
+
+        assert len(stub_client.calls) == 2
+        assert len(stub_resolve.calls) == 2
 
     def test_already_linked_user_never_resolves(
         self, client, bot_user, service, master, stub_client, stub_resolve
@@ -436,3 +478,148 @@ class TestLocalPathUnchanged:
         assert resp.status_code == 201
         assert stub_client.calls == []
         assert resp.json()["booking"]["status"] == "confirmed"
+
+
+class TestHealthCheckHandoff:
+    """Медицинская передача на клиентской поверхности — §98 / §100.
+
+    Шесть утверждений владельца. До DRF-1614 все три кода уезжали сюда
+    как `_error("bad_request", "booking rejected", 400)`: человек читал
+    «что-то пошло не так» про систему, которая только что приняла о нём
+    решение намеренно.
+    """
+
+    @staticmethod
+    def _refuse(stub_client, code: str) -> None:
+        stub_client.exc = BookingBadRequestError(
+            f"http_422_{code.lower()}",
+            status_code=422,
+            code=code,
+        )
+
+    @pytest.mark.parametrize("code", ALL_HEALTH_CODES)
+    def test_the_refusal_keeps_ayla_status_and_names_the_code(
+        self, client, bot_user, service, master, stub_client, code: str
+    ) -> None:
+        """422 зеркалится, слаг несёт машинный код (§98 п.1–3).
+
+        Статус не выводится заново, а слаг не проза: §100 требует, чтобы
+        причину не приходилось восстанавливать по тексту или статусу.
+        Заодно это то, на чём стоит ветвление SPA.
+        """
+        self._refuse(stub_client, code)
+        resp = _post(client, service, master)
+
+        assert resp.status_code == 422, f"{code}: статус должен зеркалить отказ Ayla"
+        assert resp.json()["error"] in HEALTH_SLUGS, f"{code}: получен {resp.json()['error']!r}"
+        assert resp.json()["error"] != "bad_request"
+
+    @pytest.mark.parametrize("code", ALL_HEALTH_CODES)
+    def test_nothing_claims_a_booking_was_created(
+        self, client, bot_user, service, master, stub_client, code: str
+    ) -> None:
+        """«Не обещать, что запись создана» (§98 п.4).
+
+        Положительная стража впереди: успешный ответ этой поверхности
+        действительно кладёт идентификатор в `booking.id`, иначе
+        «идентификатора нет» было бы верно и при переименованном ключе.
+        """
+        ok = _post(client, service, master)
+        assert ok.status_code == 201 and ok.json()["booking"]["id"], (
+            "успешный ответ перестал нести идентификатор — проверка ниже потеряла предмет"
+        )
+
+        self._refuse(stub_client, code)
+        body = _post(client, service, master).json()
+
+        # Стража присутствия на тех же данных: в теле есть ключ отказа,
+        # значит «брони нет» сказано про разобранный непустой ответ, а не
+        # про пустой словарь.
+        assert "error" in body, "ответ не тот — проверка ниже была бы про пустоту"
+        assert body["error"] in HEALTH_SLUGS
+        assert "booking" not in body, f"{code}: поверхность вернула запись"
+        assert "Вы записаны" not in json.dumps(body, ensure_ascii=False)
+
+    @pytest.mark.parametrize("code", ALL_HEALTH_CODES)
+    def test_the_person_reads_no_technical_text(
+        self, client, bot_user, service, master, stub_client, code: str
+    ) -> None:
+        """Человеку не показывается машинное (§98 п.5).
+
+        `detail` — единственное поле, которое видит человек. Код живёт в
+        слаге, для экрана, и в журнале, для нас.
+        """
+        self._refuse(stub_client, code)
+        detail = _post(client, service, master).json()["detail"]
+
+        assert detail, "поверхность не дала человеку ни слова — проверять нечего"
+        assert "HEALTH_CHECK" not in detail
+        assert "http_422" not in detail
+        assert "booking rejected" != detail
+
+    def test_not_applicable_promises_no_specialist(
+        self, client, bot_user, service, master, stub_client
+    ) -> None:
+        """Отказ, которому некого назначить, ничего не обещает (§100.A)."""
+        self._refuse(stub_client, HEALTH_CHECK_REQUIRED)
+        promised = _post(client, service, master).json()["detail"]
+        assert "специалист" in promised.lower(), (
+            "фраза передачи перестала обещать специалиста — сравнение ниже потеряло предмет"
+        )
+
+        self._refuse(stub_client, HEALTH_CHECK_NOT_APPLICABLE)
+        refused = _post(client, service, master).json()["detail"]
+
+        assert refused, "второй отказ пуст — сравнение ниже без предмета"
+        assert "специалист" not in refused.lower()
+        assert refused != promised
+
+    def test_unknown_is_countable_apart_from_required(
+        self, client, bot_user, service, master, stub_client, caplog
+    ) -> None:
+        """Счётчик UNKNOWN отделим от REQUIRED (§98 п.6).
+
+        Очередь разметки услуг приоритизируется числом UNKNOWN; слитый
+        счётчик оставляет её без критерия. Проверяется различимость двух
+        строк журнала, а не факт записи.
+        """
+        import logging
+
+        def _lines(code: str) -> list[str]:
+            self._refuse(stub_client, code)
+            caplog.clear()
+            with caplog.at_level(logging.INFO, logger="apps.miniapp_api.views"):
+                _post(client, service, master)
+            return [
+                r.getMessage() for r in caplog.records if "health_check_handoff" in r.getMessage()
+            ]
+
+        required = _lines(HEALTH_CHECK_REQUIRED)
+        unknown = _lines(HEALTH_CHECK_UNKNOWN)
+
+        assert required, "передача не оставила следа в журнале — считать нечего"
+        assert unknown, "передача не оставила следа в журнале — считать нечего"
+        assert any(HEALTH_CHECK_UNKNOWN in m for m in unknown)
+        assert not any(HEALTH_CHECK_UNKNOWN in m for m in required), (
+            "REQUIRED пишется как UNKNOWN — счётчик разметки будет завышен"
+        )
+
+
+class TestSalonAddressInResponse:
+    """DRF-1952: ответ создания записи несёт адрес салона — экран успеха его показывает."""
+
+    def test_the_created_booking_carries_the_salon_address(
+        self, client, tenant, bot_user, service, master, stub_client
+    ) -> None:
+        Tenant.objects.filter(pk=tenant.pk).update(address="ул. Карпинского, 33А")
+        resp = _post(client, service, master)
+        assert resp.status_code == 201
+        assert resp.json()["booking"]["address"] == "ул. Карпинского, 33А"
+
+    def test_the_created_booking_carries_none_when_the_mirror_is_silent(
+        self, client, tenant, bot_user, service, master, stub_client
+    ) -> None:
+        assert Tenant.objects.get(pk=tenant.pk).address is None
+        resp = _post(client, service, master)
+        assert resp.status_code == 201
+        assert resp.json()["booking"]["address"] is None

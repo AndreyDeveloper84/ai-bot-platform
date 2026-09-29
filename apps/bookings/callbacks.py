@@ -44,16 +44,20 @@ for "who sent this message" in the platform's identity model.
 from __future__ import annotations
 
 import logging
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
 from uuid import UUID
 
+from django.db import transaction
 from django.utils import timezone
 
 from apps.audit.services import write_audit
 from apps.booking.models import BookingReminder, PendingBookingAction
+from apps.booking.reminder_lookup import appointment_ref, ayla_appointment_id_of
+from apps.channels.max.staff_outbound import MANAGER, send_to_staff
 from apps.bookings.keyboards import (
     CALLBACK_BOOK_CANCEL_PREFIX,
     CALLBACK_BOOK_CONFIRM_PREFIX,
+    CALLBACK_BOOK_PICK_MASTER_PREFIX,
     CALLBACK_CANCEL_PREFIX,
     CALLBACK_CONFIRM_PREFIX,
     CALLBACK_RESCHEDULE_PREFIX,
@@ -66,13 +70,25 @@ from apps.bookings.pending_actions import (
     latest_relevant_pending,
 )
 from apps.events.services import emit
+from apps.handoff.models import AdminTask
+from apps.handoff.services import create_admin_task
+from apps.integrations.ayla.offer_refusal import OFFER_NOT_SELLABLE_SLUG
 from apps.skills.base import SkillContext, SkillResult
 from apps.skills.booking.tools import (
     execute_cancel,
     execute_confirm,
     execute_reschedule,
 )
+from apps.skills.menu.matching import (
+    CALLBACK_MENU_BOOK,
+    CALLBACK_MENU_HELP,
+    CALLBACK_MENU_MY_BOOKINGS,
+    pilot_ux_enabled,
+)
 from apps.skills.registry import register
+
+if TYPE_CHECKING:
+    from apps.conversations.models import Conversation
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +98,53 @@ logger = logging.getLogger(__name__)
 REPLY_CONFIRMED = "Подтверждено, ждём вас!"
 REPLY_CANCELLED = "Запись отменена, надеемся увидеть вас позже."
 REPLY_RESCHEDULE = "Передал администратору, скоро напишут."
+#: DRF-2341 — чем подтверждается «передал администратору»: ключ созданной
+#: задачи от исполнителя передачи. Форма общая с DRF-2337 (#2012):
+#: ``claims_done`` — булев признак, ``claims_done_evidence`` — строка
+#: «источник:идентификатор», которую читает один общий читатель
+#: ``apps.skills.base.claims_done_of``.
+CLAIM_EVIDENCE_ADMIN_TASK = "handoff.admin_task"
+
+#: DRF-2341 — чем подтверждается действие ворот записи. Источник у ворот
+#: один и тот же по смыслу, но РАЗНЫЙ по исполнителю: под флагом
+#: ``BOOKING_VIA_AYLA_REST`` действует Ayla, без него — YClients, и выбор
+#: делается на ходу. Поэтому префикс называет роль («каталог записи»), а не
+#: систему: соврать он не может, а различать две системы здесь нечем и
+#: незачем — идентификатор записи приходит от той, что действовала.
+CLAIM_EVIDENCE_BOOKING_CREATE = "catalogue.appointments.create"
+CLAIM_EVIDENCE_BOOKING_CANCEL = "catalogue.appointments.cancel"
+CLAIM_EVIDENCE_BOOKING_RESCHEDULE = "catalogue.appointments.reschedule"
+
+# DRF-2337 — исходы отмены записи, принадлежащей Ayla. Слова НЕ новые: их
+# уже говорит карточка визита (`apps.orchestrator.visits`, DRF-1547) на тот
+# же набор исходов. Два входа в одну и ту же отмену должны отвечать человеку
+# одинаково, иначе «салон её уже не отдаёт» из карточки и «отменена» из
+# напоминания были бы двумя правдами об одной записи.
+#
+# ``_CANCEL_SETTLED`` — исходы, после которых записи в Ayla точно нет, и
+# только они закрывают нашу строку. Всё прочее оставляет её открытой:
+# человек должен иметь возможность нажать ещё раз.
+_CANCEL_SETTLED = frozenset({"ok", "already_gone", "not_found"})
+
+
+def _cancel_outcome_text(status: str) -> str:
+    """Слово на исход отмены — из карточки визита, не своё.
+
+    Импорт ленивый: `apps.orchestrator.visits` тянет за собой половину
+    оркестратора, а этот модуль грузится обработчиком каждого нажатия.
+    """
+    from apps.orchestrator.visits import (
+        _CANCEL_GONE_TEXT,
+        _CANCEL_REFUSED_TEXT,
+        _CANCEL_UNAVAILABLE_TEXT,
+    )
+
+    return {
+        "already_gone": _CANCEL_GONE_TEXT,
+        "not_found": _CANCEL_GONE_TEXT,
+        "refused": _CANCEL_REFUSED_TEXT,
+    }.get(status, _CANCEL_UNAVAILABLE_TEXT)
+
 
 # Idempotency replies — when the user re-clicks after the row's
 # already been transitioned out of SENT_NO_REPLY.
@@ -94,8 +157,23 @@ REPLY_NOT_FOUND = "Не нашла эту запись — возможно, о�
 REPLY_FORBIDDEN = "Эта запись не для этого профиля."
 
 # B5 / DRF-841 — replies for the 2-button preview gate.
-REPLY_BOOK_EXPIRED = "Слишком много времени прошло — давайте подберём слот заново."
+REPLY_BOOK_EXPIRED = "Слишком много времени прошло — давайте подберём время заново."
+# DRF-1492 — the same timeout over a CANCEL or RESCHEDULE preview. Nothing was
+# booked and nothing was changed, so «подберём слот заново» is about the wrong
+# verb: the honest fact is that the existing booking is exactly where it was.
+REPLY_BOOK_EXPIRED_UNCHANGED = (
+    "Слишком много времени прошло — ничего не изменила, запись осталась прежней. "
+    "Откройте актуальные записи и попробуйте ещё раз."
+)
 REPLY_BOOK_CANCELLED_PREVIEW = "Ок, не записываю."
+# DRF-1492 — the ❌ button aborts whatever preview it hangs under, and there
+# are three of them. «Ок, не записываю» is true of exactly one: said over an
+# aborted CANCEL preview it tells a person who just declined to cancel that
+# their booking will not be made, which is both false and alarming. Each verb
+# now says what it actually did, and each carries the step that follows from
+# it — a booking still standing is something you can look at, an abandoned
+# booking is something you can restart.
+REPLY_BOOK_KEPT_PREVIEW = "Хорошо, ничего не меняю — запись остаётся как есть."
 REPLY_BOOK_ALREADY_HANDLED = "Это действие уже выполнено."
 REPLY_BOOK_PARTIAL_FAILURE = "Не удалось завершить перенос — передал администратору, он свяжется."
 REPLY_BOOK_CANCEL_FAILED = "Не получилось отменить запись — передал администратору, скоро уточнит."
@@ -103,6 +181,232 @@ REPLY_BOOK_STALE_VERSION = (
     "Запись уже изменилась с момента выбора времени. "
     "Откройте актуальные записи и попробуйте перенести снова."
 )
+
+
+# ─── DRF-1492: an answer that names a move carries the move ────────────────
+#
+# This module answered every one of its taps with bare text — 960 lines and
+# not one ``action_data``. Three of those texts are the ends of a funnel
+# («Готово! Записала…», «Запись отменена…», «Ок, не записываю.») and two more
+# name a next step in words («давайте подберём слот заново», «откройте
+# актуальные записи»). The owner's ruling of 04.09 (OPEN_DECISIONS §25 п.3) is
+# that the end of a booking must not be a dead end; the rest follow from the
+# same principle.
+#
+# ### Why the menu callbacks and not new ones
+#
+# This skill answers on TWO surfaces — the tenant's own bot (skill registry)
+# and the global Ayla bot (``apps.orchestrator.handoff.route_booking_callback``
+# routes ``cb:book:confirm|cancel`` into the same dispatch). A chip is only
+# worth anything if it executes on both, and ``cb:menu:*`` is the one family
+# that does: the global handler translates it to a canonical phrase
+# (``apps.channels.max.quick_actions.resolve_tap_text``) and the per-tenant
+# ``MenuSkill`` translates it to the identical phrase
+# (``apps.skills.menu.matching.MENU_CALLBACK_TEXT``). Inventing a
+# ``cb:booking:done:*`` grammar would have meant a button that works in one
+# chat and lands in «я вас не понял» in the other — worse than no button,
+# because the trust was already spent.
+#
+# ``cb:book:pick_master:{master}:{service}`` is used where the pending row
+# still names both ids: it re-enters the date picker for the SAME pair, which
+# is literally «выбрать другое время». It routes on both surfaces too (the
+# booking skill's deterministic short-circuit per tenant,
+# ``BOOKING_CALLBACK_PREFIXES`` globally).
+
+LABEL_MY_BOOKINGS = "📋 Мои записи"
+LABEL_BOOK_AGAIN = "📅 Записаться"
+LABEL_ANOTHER_TIME = "🔄 Выбрать другое время"
+
+#: Telegram rejects a ``callback_data`` longer than this, and the platform's
+#: adapter turns that into a ``ValueError``
+#: (``apps.channels.telegram.keyboards._to_button``) which nothing in the send
+#: path catches — an over-long payload therefore costs the WHOLE reply, not
+#: one button. This module is a per-tenant surface and does reach Telegram, so
+#: every callback it emits is measured before it is offered.
+_MAX_CALLBACK_BYTES = 64
+
+
+#: DRF-2012 — confirm outcomes that keep today's sentence but stop being
+#: filed as a provider outage. Both reasons are NEW; the shape follows the
+#: existing ``booking_reschedule_partial_failure`` in :meth:`_dispatch_reschedule`.
+_CONFIRM_FAILURE_REASONS = {
+    "invalid_payload": "booking_invalid_payload",
+    "booking_confirm_partial_failure": "booking_confirm_partial_failure",
+}
+
+
+def _keyboard(buttons: list[dict[str, str]]) -> dict | None:
+    """The platform-canonical keyboard envelope, or ``None`` for no buttons.
+
+    ``attachments`` → ``inline_keyboard``, the ONLY shape the Telegram adapter
+    reads (``apps.channels.telegram.handler._extract_keyboard``) and one MAX
+    accepts too — the same reasoning
+    ``apps.skills.menu.matching.main_menu_action_data`` records.
+
+    ``None`` rather than an empty attachment: a keyboard widget with nothing
+    in it renders as a broken message, not as a message without buttons.
+
+    A button whose callback does not fit :data:`_MAX_CALLBACK_BYTES` is
+    dropped rather than offered. Dropping it costs the affordance; keeping it
+    costs the message, because the Telegram adapter raises on conversion and
+    the caller has already persisted the assistant turn — the person would
+    read nothing at all where they used to read the plain text.
+    """
+    fitting = [
+        b for b in buttons if len(str(b.get("callback", "")).encode("utf-8")) <= _MAX_CALLBACK_BYTES
+    ]
+    if len(fitting) != len(buttons):
+        logger.warning(
+            "bookings.keyboard.callback_too_long dropped=%d",
+            len(buttons) - len(fitting),
+        )
+    if not fitting:
+        return None
+    return {"attachments": [{"type": "inline_keyboard", "payload": {"buttons": fitting}}]}
+
+
+def _menu_keyboard(label: str, callback: str) -> dict | None:
+    """A ``cb:menu:*`` chip — or nothing, when that family is switched off.
+
+    ``PILOT_CONVERSATIONAL_UX`` is the documented rollback for the whole
+    DRF-963 surface, and ``MenuSkill.matches`` stands down when it is off
+    (``apps/skills/menu/skill.py``). Every pre-existing tenant-side emitter of
+    these callbacks is guarded by the same flag; this one has to be too, or
+    flipping the rollback would leave chips on screen that no skill claims and
+    a raw ``cb:menu:…`` payload reaching the model — the DRF-1051 defect the
+    rollback exists to restore away FROM.
+    """
+    if not pilot_ux_enabled():
+        return None
+    return _keyboard([{"label": label, "callback": callback}])
+
+
+def _my_bookings_keyboard() -> dict | None:
+    return _menu_keyboard(LABEL_MY_BOOKINGS, CALLBACK_MENU_MY_BOOKINGS)
+
+
+#: DRF-2267 (CD §72) — «Меню» под подтверждением и переносом.
+LABEL_MENU = "Меню"
+
+
+def _my_bookings_and_menu_keyboard() -> dict | None:
+    """«Мои записи» + «Меню» — под «Подтверждено» и «Передал администратору».
+
+    Решение владельца CD §72 переворачивает прежнее (DRF-1411: «подтверждение
+    не называет шага»): после каждого завершённого действия — следующий шаг
+    и «Меню». Тот же выключатель, что у остальных ``cb:menu:*`` кнопок.
+    """
+    if not pilot_ux_enabled():
+        return None
+    return _keyboard(
+        [
+            {"label": LABEL_MY_BOOKINGS, "callback": CALLBACK_MENU_MY_BOOKINGS},
+            {"label": LABEL_MENU, "callback": CALLBACK_MENU_HELP},
+        ]
+    )
+
+
+def _book_again_keyboard() -> dict | None:
+    return _menu_keyboard(LABEL_BOOK_AGAIN, CALLBACK_MENU_BOOK)
+
+
+def _menu_only_keyboard() -> dict | None:
+    """Один нейтральный выход — «Меню» (DRF-2267).
+
+    Для отказов, которые НЕ называют следующего шага и после которых звать
+    обратно к записи нельзя (медицинская ветка §100.A): человеку сказали,
+    что этой дорогой нельзя, и выход ко всему остальному — всё, что здесь
+    честно предложить.
+    """
+    return _menu_keyboard(LABEL_MENU, CALLBACK_MENU_HELP)
+
+
+def _book_again_and_menu_keyboard() -> dict | None:
+    """«📅 Записаться» и «Меню» — когда каталог не продаёт предложение.
+
+    DRF-2267: текст отказа зовёт написать администратору салона, но такого
+    входа у клиентского бота нет; настоящий выход — начать подбор заново.
+    ``cb:menu:book`` выбран вместо «Подобрать услугу»/«Найти салон»
+    сознательно: ворота отвечают на двух поверхностях, а те две фразы живут
+    только на глобальной — на салонном боте они ответили бы «не понял»
+    (DRF-1492).
+    """
+    if not pilot_ux_enabled():
+        return None
+    return _keyboard(
+        [
+            {"label": LABEL_BOOK_AGAIN, "callback": CALLBACK_MENU_BOOK},
+            {"label": LABEL_MENU, "callback": CALLBACK_MENU_HELP},
+        ]
+    )
+
+
+def _another_time_and_menu_keyboard(payload: dict) -> dict | None:
+    """«🔄 Выбрать другое время» для той же пары + «Меню» (DRF-2267).
+
+    Чип строится тем же :func:`_another_time_keyboard` — со всеми его
+    оговорками про длину колбэка и запасное «Записаться», — а «Меню»
+    добавляется рядом как общий выход.
+    """
+    same_pair = _another_time_keyboard(payload) or {}
+    buttons = [
+        b
+        for att in same_pair.get("attachments") or []
+        for b in (att.get("payload") or {}).get("buttons") or []
+    ]
+    if not pilot_ux_enabled():
+        return _another_time_keyboard(payload)
+    return _keyboard([*buttons, {"label": LABEL_MENU, "callback": CALLBACK_MENU_HELP}])
+
+
+def _another_time_keyboard(payload: dict) -> dict | None:
+    """«Выбрать другое время» for the pair the abandoned preview named.
+
+    Falls back to the plain «Записаться» chip when the payload does not carry
+    both ids: ``cb:book:pick_master:`` without a service is refused by the
+    booking skill's incomplete-callback guard (RB1.1-D05), which on this path
+    would be a guaranteed dead end — the very defect this ticket is about.
+
+    The ids ride VERBATIM from the payload, which is the same id family the
+    preview was built from — canonical Ayla UUIDs under
+    ``BOOKING_VIA_AYLA_REST`` (the pilot), native YClients ints with the flag
+    off. The tenant bot's booking skill takes either.
+
+    The global path is narrower and the reason matters, because a wrong one
+    written down here would invite someone to remove the wrong guard. It is
+    NOT that the global handoff avoids native ids — it stamps them
+    (``apps.orchestrator.handoff`` builds ``cb:book:pick_master:{int}:{int}``
+    with the flag off). The single barrier is
+    ``_resolve_booking_callback_tenant``, which refuses any master id that is
+    not a UUID: with the flag off the whole global ``cb:book:pick_*`` family
+    dies at the first tap, long before a ``PendingBookingAction`` exists to
+    put behind this chip. So the combination «flag off + global bot» is
+    unreachable through this function, and under the pilot flag the ids are
+    UUIDs and resolve.
+
+    Under that same pilot flag the payload is 20 + 36 + 1 + 36 = 93 bytes,
+    which does NOT fit Telegram's 64-byte ``callback_data`` cap. ``_keyboard``
+    drops such a button, so this returns an empty keyboard rather than a
+    keyboard that would cost the whole message — and the caller must therefore
+    treat ``None`` as possible. See :data:`_MAX_CALLBACK_BYTES`; a compact ref
+    scheme for this callback family is a separate ticket (it is emitted from
+    ``apps/skills/booking/skill.py`` too).
+    """
+    master_id = str(payload.get("master_id") or "").strip()
+    service_id = str(payload.get("service_id") or "").strip()
+    if not master_id or not service_id:
+        return _book_again_keyboard()
+    callback = f"{CALLBACK_BOOK_PICK_MASTER_PREFIX}{master_id}:{service_id}"
+    if len(callback.encode("utf-8")) > _MAX_CALLBACK_BYTES:
+        # Under the pilot flag this is the NORMAL case (93 bytes), so the
+        # branch is not a corner: falling through to ``_keyboard``'s drop
+        # would leave the reply with no keyboard at all, i.e. the dead end
+        # this ticket removes, restored for the very contour it ships to.
+        # «Записаться» is a weaker offer than «то же время у того же мастера»
+        # — it starts the search over — but it is an offer, it fits, and it
+        # executes on both surfaces.
+        return _book_again_keyboard()
+    return _keyboard([{"label": LABEL_ANOTHER_TIME, "callback": callback}])
 
 
 # Audit slugs. Out-of-canonical-vocab; the audit subsystem accepts
@@ -168,7 +472,9 @@ class BookingReminderCallbackSkill:
         parsed = _parse_reminder_pk(text)
         if parsed is None:
             logger.info("bookings.callback.malformed text=%r", text)
-            return SkillResult(reply_text=REPLY_NOT_FOUND)
+            return SkillResult(
+                reply_text=REPLY_NOT_FOUND, action_data=_my_bookings_and_menu_keyboard()
+            )
 
         action, pk = parsed
         # ``all_tenants`` because the conversation handler may not
@@ -184,7 +490,9 @@ class BookingReminderCallbackSkill:
             ).get(pk=pk)
         except BookingReminder.DoesNotExist:
             logger.info("bookings.callback.not_found pk=%s action=%s", pk, action)
-            return SkillResult(reply_text=REPLY_NOT_FOUND)
+            return SkillResult(
+                reply_text=REPLY_NOT_FOUND, action_data=_my_bookings_and_menu_keyboard()
+            )
 
         if not _sender_matches(reminder, context.bot_user.pk):
             logger.warning(
@@ -199,7 +507,9 @@ class BookingReminderCallbackSkill:
                 target_id=reminder.pk,
                 payload={"action": action, "sender_id": str(context.bot_user.pk)},
             )
-            return SkillResult(reply_text=REPLY_FORBIDDEN)
+            return SkillResult(
+                reply_text=REPLY_FORBIDDEN, action_data=_my_bookings_and_menu_keyboard()
+            )
 
         if reminder.status != BookingReminder.Status.SENT_NO_REPLY:
             # Idempotent replay — user re-clicked after the first
@@ -217,7 +527,9 @@ class BookingReminderCallbackSkill:
                 target_id=reminder.pk,
                 payload={"action": action, "current_status": reminder.status},
             )
-            return SkillResult(reply_text=REPLY_ALREADY_HANDLED)
+            return SkillResult(
+                reply_text=REPLY_ALREADY_HANDLED, action_data=_my_bookings_and_menu_keyboard()
+            )
 
         if action == "confirm":
             return self._handle_confirm(reminder)
@@ -225,7 +537,7 @@ class BookingReminderCallbackSkill:
             return self._handle_cancel(reminder)
         # action == "reschedule" (only remaining; _parse_reminder_pk
         # exhausts the namespace)
-        return self._handle_reschedule(reminder)
+        return self._handle_reschedule(reminder, context.conversation)
 
     # ─── per-action handlers ─────────────────────────────────────────────
 
@@ -242,26 +554,148 @@ class BookingReminderCallbackSkill:
         if rowcount == 0:
             # Concurrent click — the other branch won. Mirror the
             # replay path.
-            return SkillResult(reply_text=REPLY_ALREADY_HANDLED)
+            return SkillResult(
+                reply_text=REPLY_ALREADY_HANDLED, action_data=_my_bookings_and_menu_keyboard()
+            )
 
         write_audit(
             action=AUDIT_REMINDER_CONFIRMED,
             target="BookingReminder",
             target_id=reminder.pk,
-            payload={"yclients_record_id": reminder.yclients_record_id},
+            payload={
+                "yclients_record_id": reminder.yclients_record_id,
+                "appointment_ref": appointment_ref(reminder),
+            },
         )
         emit(
             AUDIT_REMINDER_CONFIRMED,
             properties={
                 "yclients_record_id": reminder.yclients_record_id,
+                "appointment_ref": appointment_ref(reminder),
                 "reminder_id": str(reminder.pk),
                 "bot_user_id": str(reminder.bot_user_id),
             },
             distinct_id=str(reminder.bot_user_id),
         )
-        return SkillResult(reply_text=REPLY_CONFIRMED)
+        # DRF-2341 + DRF-2344: ветка утверждает выполненное («ждём вас» —
+        # читается как «салон знает»), и подтверждения у неё НЕТ: исходящего
+        # вызова здесь нет вовсе, меняется только наша строка напоминания.
+        # ``claims_done_evidence`` пуст не по недосмотру, а по факту —
+        # подтверждать нечем. Признак поставлен, чтобы ветка не была
+        # невидимой сторожу класса: когда тот появится, она станет красной,
+        # и это верно. Чинить её здесь нельзя — некуда слать: ручки
+        # «клиент подтвердил визит» у источника нет (замер DRF-2344).
+        return SkillResult(
+            reply_text=REPLY_CONFIRMED,
+            action_data=_my_bookings_and_menu_keyboard(),
+            claims_done=True,
+            claims_done_evidence="",
+        )
 
     def _handle_cancel(self, reminder: BookingReminder) -> SkillResult:
+        """Отмена. Путь зависит от того, кто владеет записью.
+
+        Запись, пришедшая событием из Ayla, отменяется ТОЛЬКО REST-вызовом
+        Ayla (ADR-0009: её состояние меняет она). До DRF-2337 эта ветка
+        смотрела лишь на ``yclients_record_id``, на пустом коротко замыкалась
+        и отвечала человеку «Запись отменена» — при живой записи в Ayla.
+        Мастер ждал, слот стоял занятым, человек не приходил.
+
+        Успех сообщается по факту: не дозвонились или салон отказал — не
+        говорим «отменена» и НЕ закрываем свою строку, иначе повтор упрётся
+        в «эта запись уже обработана».
+
+        Запись из YClients идёт прежним путём: там отмена «по возможности»
+        была осмысленным решением (локальная отмена не должна висеть на
+        чужом простое), и оно осталось при своём случае.
+        """
+        # Запись Ayla узнаётся не по одной колонке: строку записи из ДИАЛОГА
+        # бота (основной путь, DRF-1069) пишет reminders_factory, и UUID
+        # записи Ayla лежит у неё в ``yclients_record_id`` строкой, а
+        # ``ayla_appointment_id`` пуст (apps/booking/reminder_lookup.py,
+        # DRF-1144). Проверка одной колонки отправляла такую строку в ветку
+        # YClients: вызова не было, а человек слышал «отменена».
+        appointment_id = ayla_appointment_id_of(reminder)
+        if appointment_id is not None:
+            return self._cancel_ayla_booking(reminder, appointment_id)
+        return self._cancel_yclients_booking(reminder)
+
+    def _cancel_ayla_booking(self, reminder: BookingReminder, appointment_id: UUID) -> SkillResult:
+        """Отмена в Ayla, затем — наша строка. Порядок не косметический.
+
+        Строка закрывается только после того, как отмена состоялась: иначе
+        неудачный вызов оставил бы человека с закрытой строкой и живой
+        записью, без способа повторить.
+
+        Двойной тап при этом не опасен: ключ идемпотентности
+        ``cancel_booking`` выводит из (человек, «cancel», запись), так что
+        два быстрых нажатия наверху — одно намерение, а не два.
+        """
+        from apps.booking.services.records import cancel_booking
+
+        status = cancel_booking(
+            bot_user=reminder.bot_user,
+            appointment_id=str(appointment_id),
+        )
+        logger.info(
+            "bookings.reminder.cancel.ayla reminder=%s appointment=%s status=%s",
+            reminder.pk,
+            appointment_id,
+            status,
+        )
+        if status not in _CANCEL_SETTLED:
+            # Запись жива. Слова на каждый исход уже названы карточкой визита
+            # (DRF-1547) — тот же набор исходов, те же слова, чтобы два входа
+            # в одну отмену не говорили человеку разное.
+            #
+            # Кнопки обязательны (§72): «не получилось» без следующего шага —
+            # тупик. «Мои записи» и есть следующий шаг: с карточки визита
+            # отмену можно повторить, а при отказе — увидеть, что запись жива.
+            return SkillResult(
+                reply_text=_cancel_outcome_text(status),
+                action_data=_my_bookings_and_menu_keyboard(),
+            )
+
+        rowcount = BookingReminder.all_tenants.filter(
+            pk=reminder.pk,
+            status=BookingReminder.Status.SENT_NO_REPLY,
+        ).update(
+            status=BookingReminder.Status.CANCELLED,
+            replied_at=timezone.now(),
+        )
+        if rowcount == 0:
+            # §72: «уже обработана» без кнопок — тупик; долг снят, а не
+            # перенесён на новое имя функции после разделения ветки.
+            return SkillResult(
+                reply_text=REPLY_ALREADY_HANDLED,
+                action_data=_my_bookings_and_menu_keyboard(),
+            )
+
+        self._write_cancel_trail(reminder, upstream_ok=True)
+        if status == "ok":
+            # DRF-2341: единственная ветка отмены из Ayla, которая утверждает
+            # выполненное. Право на это даёт ответ каталога на его же ручку
+            # отмены, прочитанный ПОСЛЕ вызова, — не факт отправки.
+            #
+            # Предел назван честно: подтверждение — это 2xx на
+            # ``appointments/{id}/cancel/``; тела у 204 нет, идентификатора
+            # отменённой записи в ответе не приходит, и отдельного
+            # перечитывания статуса записи мы НЕ делаем. Источник действовал
+            # и ответил — это статус от источника; но если он ответит 2xx, не
+            # отменив, мы этого не увидим.
+            return SkillResult(
+                reply_text=REPLY_CANCELLED,
+                action_data=_book_again_keyboard(),
+                claims_done=True,
+                claims_done_evidence="ayla.appointments.cancel:2xx",
+            )
+        # Записи уже не было — человек получил то, чего хотел, но «я отменила»
+        # было бы приписыванием себе чужого результата.
+        return SkillResult(
+            reply_text=_cancel_outcome_text(status), action_data=_book_again_keyboard()
+        )
+
+    def _cancel_yclients_booking(self, reminder: BookingReminder) -> SkillResult:
         """SENT_NO_REPLY → CANCELLED. Best-effort YClients cancel."""
         now = timezone.now()
         rowcount = BookingReminder.all_tenants.filter(
@@ -272,7 +706,10 @@ class BookingReminderCallbackSkill:
             replied_at=now,
         )
         if rowcount == 0:
-            return SkillResult(reply_text=REPLY_ALREADY_HANDLED)
+            return SkillResult(
+                reply_text=REPLY_ALREADY_HANDLED,
+                action_data=_my_bookings_and_menu_keyboard(),
+            )
 
         # Best-effort upstream cancel. The B1 YClients client exposes
         # ``delete_record`` (per the integration's published shape);
@@ -280,66 +717,156 @@ class BookingReminderCallbackSkill:
         # client doesn't break local cancel.
         upstream_ok = _try_yclients_cancel(reminder.yclients_record_id)
 
+        self._write_cancel_trail(reminder, upstream_ok=upstream_ok)
+        # DRF-1492 — «надеемся увидеть вас позже» with no way to come back is
+        # a wish, not an offer. The chip is that way back.
+        #
+        # DRF-2341: ветка утверждает выполненное — и объявляет это честно,
+        # хотя подтверждения от YClients здесь нет: отмена «по возможности»,
+        # и при ``upstream_ok=False`` человеку всё равно говорится «отменена».
+        # Поэтому ``claims_done_evidence`` ПУСТ — не забыт, а пуст по факту:
+        # подтверждать нечем. Признак поставлен не потому, что ветка права, а
+        # потому, что без него она была бы невидима сторожу класса; когда тот
+        # появится, эта ветка станет его первым красным. Сужать её или
+        # признать исключением — вопрос владельцу, не этот лист.
+        return SkillResult(
+            reply_text=REPLY_CANCELLED,
+            action_data=_book_again_keyboard(),
+            claims_done=True,
+            claims_done_evidence="",
+        )
+
+    @staticmethod
+    def _write_cancel_trail(reminder: BookingReminder, *, upstream_ok: bool) -> None:
+        """Аудит и событие отмены — один след на оба пути."""
+        payload = {
+            "yclients_record_id": reminder.yclients_record_id,
+            "appointment_ref": appointment_ref(reminder),
+            "yclients_cancel_ok": upstream_ok,
+        }
         write_audit(
             action=AUDIT_REMINDER_CANCELLED,
             target="BookingReminder",
             target_id=reminder.pk,
-            payload={
-                "yclients_record_id": reminder.yclients_record_id,
-                "yclients_cancel_ok": upstream_ok,
-            },
+            payload=payload,
         )
         emit(
             AUDIT_REMINDER_CANCELLED,
             properties={
-                "yclients_record_id": reminder.yclients_record_id,
+                **payload,
                 "reminder_id": str(reminder.pk),
                 "bot_user_id": str(reminder.bot_user_id),
-                "yclients_cancel_ok": upstream_ok,
             },
             distinct_id=str(reminder.bot_user_id),
         )
-        return SkillResult(reply_text=REPLY_CANCELLED)
 
-    def _handle_reschedule(self, reminder: BookingReminder) -> SkillResult:
-        """SENT_NO_REPLY → RESCHEDULE_REQUESTED. Defer operator-page TODO."""
+    def _handle_reschedule(
+        self, reminder: BookingReminder, conversation: "Conversation"
+    ) -> SkillResult:
+        """SENT_NO_REPLY → RESCHEDULE_REQUESTED + hand the person to an operator.
+
+        DRF-2338 — the reply says «передал администратору, скоро напишут», and
+        until this ticket nobody was told: the old ``TODO(Phase 2)`` left the
+        audit row and the event as the only trace, and «an operator may spot it
+        in the admin console» is not the same as being handed the person. The
+        handover that works in this repository is
+        :func:`apps.handoff.services.create_admin_task` — it addresses the task
+        (DRF-1488) and moves the conversation to ``HUMAN_HANDOFF``. The words
+        do not change; they become true.
+
+        The status flip and the task live in ONE transaction, in that order.
+        The conditional UPDATE is what makes a second press a replay — and it
+        only works as a lock from INSIDE the transaction: a concurrent press
+        blocks on the row until this one commits, then re-evaluates
+        ``status=SENT_NO_REPLY`` and gets zero rows. Wrapping both also means a
+        failed handover leaves the reminder untouched, so the person can press
+        again — instead of a row marked «requested» with nobody holding it.
+        The cost of that honesty: a failure raises, and a raising callback
+        turn sends no reply at all (the consumer logs it) — silence, not a lie.
+
+        ``MANUAL`` rather than ``HANDOFF`` keeps the mute narrow:
+        ``apps.orchestrator.handoff.global_handoff_muted`` filters on
+        ``HANDOFF``, so the person's global dialogue keeps working while the
+        salon one waits for the operator.
+
+        Requires a tenant in scope — the consumer loop opens it
+        (``apps/workers/consumer.py``), and ``turn_seam`` already refuses a
+        per-tenant turn without one.
+        """
         now = timezone.now()
-        rowcount = BookingReminder.all_tenants.filter(
-            pk=reminder.pk,
-            status=BookingReminder.Status.SENT_NO_REPLY,
-        ).update(
-            status=BookingReminder.Status.RESCHEDULE_REQUESTED,
-            replied_at=now,
-        )
-        if rowcount == 0:
-            return SkillResult(reply_text=REPLY_ALREADY_HANDLED)
+        with transaction.atomic():
+            rowcount = BookingReminder.all_tenants.filter(
+                pk=reminder.pk,
+                status=BookingReminder.Status.SENT_NO_REPLY,
+            ).update(
+                status=BookingReminder.Status.RESCHEDULE_REQUESTED,
+                replied_at=now,
+            )
+            if rowcount == 0:
+                return SkillResult(
+                    reply_text=REPLY_ALREADY_HANDLED,
+                    action_data=_my_bookings_and_menu_keyboard(),
+                )
 
-        # TODO(Phase 2): notify the operator chat that this reminder
-        # needs manual rebooking. mysite did this via a direct
-        # send_max_message to ADMIN_MAX_CHAT_ID; on the platform side
-        # the same channel exists (settings.ADMIN_MAX_CHAT_ID) but the
-        # "operator notification" lane is a separate skill/service
-        # cross-cutting concern (see apps.handoff). Deferring to a
-        # follow-up ticket — the audit row + canonical event below
-        # are enough for an operator to spot the reschedule request
-        # via the admin console in the meantime.
+            # MANUAL, as the outbound-DLQ path does (pipeline §Phase 0): the
+            # operator acts out of band — reaches the person and rebooks in
+            # YClients — rather than continuing this dialogue as the bot.
+            task = create_admin_task(
+                conversation,
+                task_type=AdminTask.TaskType.MANUAL,
+                reason=_reschedule_reason(reminder),
+            )
 
         write_audit(
             action=AUDIT_REMINDER_RESCHEDULE,
             target="BookingReminder",
             target_id=reminder.pk,
-            payload={"yclients_record_id": reminder.yclients_record_id},
+            payload={
+                "yclients_record_id": reminder.yclients_record_id,
+                "appointment_ref": appointment_ref(reminder),
+            },
         )
         emit(
             AUDIT_REMINDER_RESCHEDULE,
             properties={
                 "yclients_record_id": reminder.yclients_record_id,
+                "appointment_ref": appointment_ref(reminder),
                 "reminder_id": str(reminder.pk),
                 "bot_user_id": str(reminder.bot_user_id),
             },
             distinct_id=str(reminder.bot_user_id),
         )
-        return SkillResult(reply_text=REPLY_RESCHEDULE)
+        return SkillResult(
+            reply_text=REPLY_RESCHEDULE,
+            action_data=_my_bookings_and_menu_keyboard(),
+            # DRF-2341 — ответ утверждает выполненное действие и говорит об
+            # этом признаком, а не только словами: по тексту такую ветку не
+            # отличить, а без признака она для сторожа невидима. Форма — общая
+            # с DRF-2337, читается одним ``claims_done_of``; здесь признак
+            # лежит в ``meta``, потому что у обратного вызова поля ответа нет.
+            # Подтверждение — ключ задачи, который вернул исполнитель передачи,
+            # а не что-то собранное здесь: «позвали передачу» — не
+            # подтверждение. Сбой передачи сюда не доходит (см. выше): ответа
+            # не будет вовсе, а значит и утверждения тоже.
+            meta={
+                "claims_done": True,
+                "claims_done_evidence": f"{CLAIM_EVIDENCE_ADMIN_TASK}:{task.pk}",
+            },
+        )
+
+
+def _reschedule_reason(reminder: BookingReminder) -> str:
+    """What the operator needs to rebook, in one line — no contact details.
+
+    The phone is deliberately absent: an operator opens the person's card for
+    that, and DRF-1039 keeps the client's number off the staff surfaces.
+    """
+    visit = timezone.localtime(reminder.visit_at).strftime("%d.%m %H:%M")
+    return (
+        f"[перенос записи] запись {appointment_ref(reminder)}, визит {visit}, "
+        f"услуга {reminder.service_name}, мастер {reminder.master_name} "
+        f"(напоминание {reminder.pk})"
+    )
 
 
 def _parse_gate_token(callback_text: str) -> tuple[str, UUID] | None:
@@ -474,7 +1001,10 @@ class BookingGateCallbackSkill:
             if row is None:
                 # matches() and handle() disagree only when the row was
                 # consumed/expired between the two calls — fail closed.
-                return SkillResult(reply_text=REPLY_BOOK_ALREADY_HANDLED)
+                return SkillResult(
+                    reply_text=REPLY_BOOK_ALREADY_HANDLED,
+                    action_data=_my_bookings_and_menu_keyboard(),
+                )
             clear_booking_flow(context.conversation)
             if is_confirm_text(text):
                 logger.info(
@@ -501,7 +1031,7 @@ class BookingGateCallbackSkill:
             return self._handle_cancel_tap(context, row.pk)
 
         logger.info("bookings.gate.malformed text=%r", text)
-        return SkillResult(reply_text=REPLY_NOT_FOUND)
+        return SkillResult(reply_text=REPLY_NOT_FOUND, action_data=_my_bookings_and_menu_keyboard())
 
     # ─── confirm-tap (executes the destructive verb) ─────────────────────
 
@@ -527,7 +1057,9 @@ class BookingGateCallbackSkill:
         try:
             row = PendingBookingAction.all_tenants.get(pk=token)
         except PendingBookingAction.DoesNotExist:
-            return SkillResult(reply_text=REPLY_NOT_FOUND)
+            return SkillResult(
+                reply_text=REPLY_NOT_FOUND, action_data=_my_bookings_and_menu_keyboard()
+            )
 
         if not _gate_tenant_matches(row, context.bot_user):
             # Bookings/callbacks retro #3: defence-in-depth tenant guard.
@@ -548,7 +1080,9 @@ class BookingGateCallbackSkill:
                     "sender_tenant_id": str(context.bot_user.tenant_id),
                 },
             )
-            return SkillResult(reply_text=REPLY_FORBIDDEN)
+            return SkillResult(
+                reply_text=REPLY_FORBIDDEN, action_data=_my_bookings_and_menu_keyboard()
+            )
 
         if not _gate_sender_matches(row, context.bot_user.pk):
             write_audit(
@@ -557,11 +1091,15 @@ class BookingGateCallbackSkill:
                 target_id=row.pk,
                 payload={"sender_id": str(context.bot_user.pk)},
             )
-            return SkillResult(reply_text=REPLY_FORBIDDEN)
+            return SkillResult(
+                reply_text=REPLY_FORBIDDEN, action_data=_my_bookings_and_menu_keyboard()
+            )
 
         lookup = consume_pending(token)
         if lookup.row is None:
-            return SkillResult(reply_text=REPLY_NOT_FOUND)
+            return SkillResult(
+                reply_text=REPLY_NOT_FOUND, action_data=_my_bookings_and_menu_keyboard()
+            )
 
         if lookup.expired:
             write_audit(
@@ -570,7 +1108,23 @@ class BookingGateCallbackSkill:
                 target_id=lookup.row.pk,
                 payload={"kind": lookup.row.kind},
             )
-            return SkillResult(reply_text=REPLY_BOOK_EXPIRED)
+            # DRF-1492 — the reply names a move, so it carries one. WHICH
+            # move depends on the verb that expired, and this branch used to
+            # answer all three with the confirm wording. «Слишком много
+            # времени прошло — давайте подберём слот заново» said to someone
+            # whose CANCEL preview timed out offers to book them, one tap,
+            # when they were trying to un-book; and a reschedule payload does
+            # carry master + service, so the confirm chip would have opened a
+            # NEW booking beside the live one it failed to move.
+            if lookup.row.kind == PendingBookingAction.Kind.CONFIRM:
+                return SkillResult(
+                    reply_text=REPLY_BOOK_EXPIRED,
+                    action_data=_another_time_keyboard(lookup.row.payload or {}),
+                )
+            return SkillResult(
+                reply_text=REPLY_BOOK_EXPIRED_UNCHANGED,
+                action_data=_my_bookings_keyboard(),
+            )
 
         if lookup.already_consumed:
             write_audit(
@@ -579,7 +1133,9 @@ class BookingGateCallbackSkill:
                 target_id=lookup.row.pk,
                 payload={"kind": lookup.row.kind},
             )
-            return SkillResult(reply_text=REPLY_BOOK_ALREADY_HANDLED)
+            return SkillResult(
+                reply_text=REPLY_BOOK_ALREADY_HANDLED, action_data=_my_bookings_and_menu_keyboard()
+            )
 
         # We claimed the row. Execute the matching verb.
         row = lookup.row
@@ -620,6 +1176,55 @@ class BookingGateCallbackSkill:
             tenant=row.tenant,
             bot_user=row.bot_user,
         )
+        if result.error == OFFER_NOT_SELLABLE_SLUG:
+            # DRF-1989: каталог не продаёт предложение и назвал причину — у
+            # отказа свои слова, передавать менеджеру нечего. Остальные ошибки
+            # (в том числе health_check_handoff) — как были, см. DRF-2012.
+            return SkillResult(reply_text=result.text, action_data=_book_again_and_menu_keyboard())
+        if result.error == "health_check_handoff":
+            # DRF-2012: the refusal already carries the owner's sentence
+            # (§98) and Ayla's own decision about a specialist. Sending the
+            # breakdown copy replaced the words; naming it
+            # ``booking_yclients_failure`` filed a medical decision as a bus
+            # failure, which later lies to whoever counts why people reach an
+            # operator. ``handoff`` is the decision, not the prose — see
+            # ``promises_a_specialist``: a refusal that promises nobody must
+            # not open a handoff, or it becomes a promise nobody keeps.
+            # DRF-2267: у ветки БЕЗ передачи следующего шага нет — ни один
+            # текст его не называет, и звать обратно к записи, которую только
+            # что закрыли, нельзя (происхождение медицинское). Остаётся
+            # нейтральный выход. С передачей кнопок нет: бот молчит, пока
+            # задача открыта, и тап упал бы в тишину.
+            return SkillResult(
+                reply_text=result.text,
+                action_data=None if result.handoff else _menu_only_keyboard(),
+                should_handoff=result.handoff,
+                handoff_reason="booking_health_check_required" if result.handoff else "",
+            )
+        if result.error == "quote_changed":
+            # The quote moved while the person was choosing. The result
+            # carries a fresh preview AND the buttons of the new pending row;
+            # the breakdown copy dropped the one next step that existed.
+            return SkillResult(
+                reply_text=result.text,
+                action_data=_keyboard(result.pending.keyboard) if result.pending else None,
+            )
+        if result.error == "schedule_unavailable":
+            # The schedule is down, not the booking: its own sentence says so,
+            # and there is nothing for an operator to do about it.
+            # DRF-2267: «попробуйте через минуту» — и чип, который пробует:
+            # та же пара мастер+услуга из заявки, то есть тот же поток.
+            return SkillResult(
+                reply_text=result.text,
+                action_data=_another_time_and_menu_keyboard(row.payload or {}),
+            )
+        named_reason = _CONFIRM_FAILURE_REASONS.get(result.error)
+        if named_reason:
+            return SkillResult(
+                reply_text="Не удалось создать запись — переключаю на менеджера.",
+                should_handoff=True,
+                handoff_reason=named_reason,
+            )
         if result.error in {"yclients_unavailable", "yclients_api_error"}:
             return SkillResult(
                 reply_text="Не удалось создать запись — переключаю на менеджера.",
@@ -638,7 +1243,22 @@ class BookingGateCallbackSkill:
             target_id=row.pk,
             payload={"kind": "confirm"},
         )
-        return SkillResult(reply_text=result.text)
+        # OPEN_DECISIONS §25 п.3 — «Готово! Записала…» was the end of the
+        # funnel AND the end of the conversation: the person had just been
+        # told a fact about a booking and had no way to look at it. «Мои
+        # записи» is the one next step that is true right after a confirm —
+        # it reads the backend and shows the row that was just created.
+        #
+        # DRF-2341: подтверждение — идентификатор записи, который вернул
+        # каталог (``confirmation.record_id`` при ``ok=True``), а не факт
+        # вызова: ветки выше отвечают на каждый исход отдельно и сюда
+        # доходят только с успехом.
+        return SkillResult(
+            reply_text=result.text,
+            action_data=_my_bookings_keyboard(),
+            claims_done=True,
+            claims_done_evidence=f"{CLAIM_EVIDENCE_BOOKING_CREATE}:record_id",
+        )
 
     def _dispatch_cancel(
         self,
@@ -659,6 +1279,8 @@ class BookingGateCallbackSkill:
             )
         if result.error == "invalid_record_id":
             return SkillResult(
+                # DRF-2267: кнопок нет намеренно — ход передаётся оператору
+                # (B24/F5), и после передачи бот молчит: тап упал бы в тишину.
                 reply_text=REPLY_NOT_FOUND,
                 should_handoff=True,
                 handoff_reason="booking_invalid_record_id",
@@ -675,7 +1297,18 @@ class BookingGateCallbackSkill:
             target_id=row.pk,
             payload={"kind": "cancel"},
         )
-        return SkillResult(reply_text=result.text)
+        # Same end, same rule as the confirm above: a cancellation is where a
+        # rebooking most often starts.
+        #
+        # DRF-2341: сюда ход доходит, только когда исполнитель отмены вернул
+        # успех — каждый отказ каталога разобран ветками выше и отвечает
+        # своим текстом. Подтверждение — этот прочитанный исход.
+        return SkillResult(
+            reply_text=result.text,
+            action_data=_book_again_keyboard(),
+            claims_done=True,
+            claims_done_evidence=f"{CLAIM_EVIDENCE_BOOKING_CANCEL}:ok",
+        )
 
     def _dispatch_reschedule(
         self,
@@ -704,13 +1337,18 @@ class BookingGateCallbackSkill:
                 handoff_reason="booking_cancel_yclients_failure",
             )
         if result.error == "stale_version":
+            # DRF-1492 — the text says «откройте актуальные записи», so it
+            # carries the button that opens them.
             return SkillResult(
                 reply_text=REPLY_BOOK_STALE_VERSION,
+                action_data=_my_bookings_keyboard(),
                 should_handoff=False,
                 handoff_reason="",
             )
         if result.error == "invalid_record_id":
             return SkillResult(
+                # DRF-2267: кнопок нет намеренно — ход передаётся оператору
+                # (B24/F5), и после передачи бот молчит: тап упал бы в тишину.
                 reply_text=REPLY_NOT_FOUND,
                 should_handoff=True,
                 handoff_reason="booking_invalid_record_id",
@@ -731,7 +1369,18 @@ class BookingGateCallbackSkill:
             target_id=row.pk,
             payload={"kind": "reschedule"},
         )
-        return SkillResult(reply_text=result.text)
+        # DRF-2267 (CD §72): перенос удался — дальше то же, что после
+        # подтверждения: свои записи и «Меню». До этого успешный перенос
+        # был единственным завершённым действием ворот без единой кнопки.
+        #
+        # DRF-2341: подтверждение — идентификатор перенесённой записи от
+        # каталога (``confirmation.record_id``), а не факт вызова.
+        return SkillResult(
+            reply_text=result.text,
+            action_data=_my_bookings_and_menu_keyboard(),
+            claims_done=True,
+            claims_done_evidence=f"{CLAIM_EVIDENCE_BOOKING_RESCHEDULE}:record_id",
+        )
 
     # ─── cancel-tap (discard preview, no destructive call) ───────────────
 
@@ -746,7 +1395,9 @@ class BookingGateCallbackSkill:
         try:
             row = PendingBookingAction.all_tenants.get(pk=token)
         except PendingBookingAction.DoesNotExist:
-            return SkillResult(reply_text=REPLY_NOT_FOUND)
+            return SkillResult(
+                reply_text=REPLY_NOT_FOUND, action_data=_my_bookings_and_menu_keyboard()
+            )
 
         # Symmetric tenant guard (see retro #3 note in _handle_confirm_tap).
         if not _gate_tenant_matches(row, context.bot_user):
@@ -761,7 +1412,9 @@ class BookingGateCallbackSkill:
                     "sender_tenant_id": str(context.bot_user.tenant_id),
                 },
             )
-            return SkillResult(reply_text=REPLY_FORBIDDEN)
+            return SkillResult(
+                reply_text=REPLY_FORBIDDEN, action_data=_my_bookings_and_menu_keyboard()
+            )
 
         if not _gate_sender_matches(row, context.bot_user.pk):
             write_audit(
@@ -770,17 +1423,23 @@ class BookingGateCallbackSkill:
                 target_id=row.pk,
                 payload={"sender_id": str(context.bot_user.pk)},
             )
-            return SkillResult(reply_text=REPLY_FORBIDDEN)
+            return SkillResult(
+                reply_text=REPLY_FORBIDDEN, action_data=_my_bookings_and_menu_keyboard()
+            )
 
         if row.consumed_at is not None:
-            return SkillResult(reply_text=REPLY_BOOK_ALREADY_HANDLED)
+            return SkillResult(
+                reply_text=REPLY_BOOK_ALREADY_HANDLED, action_data=_my_bookings_and_menu_keyboard()
+            )
 
         ok = discard_pending(token)
         if not ok:
             # Either expired between the lookup and the discard CAS,
             # or another tap raced and already consumed it. Either
             # way, "already handled" is the right message.
-            return SkillResult(reply_text=REPLY_BOOK_ALREADY_HANDLED)
+            return SkillResult(
+                reply_text=REPLY_BOOK_ALREADY_HANDLED, action_data=_my_bookings_and_menu_keyboard()
+            )
 
         write_audit(
             action=AUDIT_BOOK_GATE_CANCELLED,
@@ -788,7 +1447,20 @@ class BookingGateCallbackSkill:
             target_id=row.pk,
             payload={"kind": row.kind},
         )
-        return SkillResult(reply_text=REPLY_BOOK_CANCELLED_PREVIEW)
+        if row.kind == PendingBookingAction.Kind.CONFIRM:
+            # A booking that was never made. The pair is still on the row, so
+            # the chip re-opens the picker for it instead of starting over.
+            return SkillResult(
+                reply_text=REPLY_BOOK_CANCELLED_PREVIEW,
+                action_data=_another_time_keyboard(row.payload or {}),
+            )
+        # An aborted cancel or reschedule: the booking is untouched, so the
+        # honest sentence is «ничего не меняю» and the honest next step is to
+        # look at it.
+        return SkillResult(
+            reply_text=REPLY_BOOK_KEPT_PREVIEW,
+            action_data=_my_bookings_keyboard(),
+        )
 
 
 def _gate_tenant_matches(
@@ -837,26 +1509,25 @@ def _gate_sender_matches(
 def _notify_manager_partial_reschedule(row: PendingBookingAction) -> None:
     """Tell the salon manager about a reschedule partial failure.
 
-    Best-effort outbound to ``tenant.manager_chat_id``; failure to send
-    must NOT raise from the callback path (the destructive operation
-    already happened, the user's reply is already on the line).
+    Best-effort outbound to the salon manager; failure to send must NOT
+    raise from the callback path (the destructive operation already
+    happened, the user's reply is already on the line).
+
+    Адресаты и отправитель — :func:`~apps.channels.max.staff_outbound.send_to_staff`
+    (DRF-2128): активные владелец/админ салона плюс адрес менеджера, от
+    салонного бота. Никого — пропуск с именем (``no_manager_chat``).
     """
     tenant = row.tenant
-    chat_id = (tenant.manager_chat_id or "").strip()
-    if not chat_id:
+    text = _render_partial_failure_text(row)
+    result = send_to_staff(tenant, MANAGER, text)
+    if result.recipients == 0:
         logger.warning(
             "bookings.gate.partial.no_manager_chat tenant=%s pk=%s",
             tenant.slug,
             row.pk,
         )
-        return
-    text = _render_partial_failure_text(row)
-    try:
-        from apps.channels.max.outbound import send_message
-
-        send_message(chat_id=chat_id, text=text, attachments=None)
-    except Exception:  # noqa: BLE001 — manager-notification is best-effort
-        logger.exception("bookings.gate.partial.notify_failed pk=%s", row.pk)
+    elif not result.delivered:  # manager-notification is best-effort
+        logger.error("bookings.gate.partial.notify_failed pk=%s", row.pk)
 
 
 def _notify_manager_reschedule_success(
@@ -869,30 +1540,39 @@ def _notify_manager_reschedule_success(
     notification.
     """
     tenant = row.tenant
-    chat_id = (tenant.manager_chat_id or "").strip()
-    if not chat_id:
-        return
     text = _render_reschedule_success_text(row, result)
-    try:
-        from apps.channels.max.outbound import send_message
-
-        send_message(chat_id=chat_id, text=text, attachments=None)
-    except Exception:  # noqa: BLE001 — best-effort
-        logger.exception("bookings.gate.reschedule.notify_failed pk=%s", row.pk)
+    sent = send_to_staff(tenant, MANAGER, text)  # DRF-2128 — от салонного бота
+    if sent.recipients and not sent.delivered:  # best-effort
+        logger.error("bookings.gate.reschedule.notify_failed pk=%s", row.pk)
 
 
 def _render_partial_failure_text(row: PendingBookingAction) -> str:
+    """Менеджеру: перенос не завершён. Без телефона клиента (DRF-2129, DRF-1039)."""
     payload = row.payload or {}
+    link = _salon_day_link_for(payload.get("new_datetime"))
     return (
         "⚠️ Перенос записи не завершён.\n"
         f"Старая запись (record_id={payload.get('record_id', '—')}) отменена, "
         f"новая на {payload.get('new_datetime', '—')} НЕ создана.\n"
         f"Услуга: {payload.get('service_name', '—')}\n"
         f"Мастер: {payload.get('master_name', '—')}\n"
-        f"Клиент: {payload.get('client_name', '—')} "
-        f"({payload.get('client_phone', '—')})\n"
-        "Пожалуйста, перезапишите клиента вручную."
+        f"Клиент: {payload.get('client_name', '—')}\n"
+        "Пожалуйста, перезапишите клиента вручную." + (f" День салона: {link}" if link else "")
     )
+
+
+def _salon_day_link_for(iso_datetime: object) -> str:
+    """Ссылка на день салона по ISO-дате из payload; нет даты / Mini App — пусто."""
+    from datetime import date
+
+    from apps.channels.max.salon_links import salon_day_link
+
+    raw = str(iso_datetime or "")[:10]
+    try:
+        day = date.fromisoformat(raw)
+    except ValueError:
+        return ""
+    return salon_day_link(day)
 
 
 def _render_reschedule_success_text(
@@ -902,6 +1582,8 @@ def _render_reschedule_success_text(
     payload = row.payload or {}
     confirmation = getattr(result, "confirmation", None)
     new_record_id = getattr(confirmation, "record_id", "") if confirmation else ""
+    # DRF-2129 — пара «переноса не завершён», тот же класс: телефона клиента нет.
+    link = _salon_day_link_for(payload.get("new_datetime"))
     return (
         "🔄 Клиент перенёс запись.\n"
         f"Старый record_id: {payload.get('record_id', '—')}\n"
@@ -909,8 +1591,7 @@ def _render_reschedule_success_text(
         f"Услуга: {payload.get('service_name', '—')}\n"
         f"Мастер: {payload.get('master_name', '—')}\n"
         f"Новое время: {payload.get('new_datetime', '—')}\n"
-        f"Клиент: {payload.get('client_name', '—')} "
-        f"({payload.get('client_phone', '—')})"
+        f"Клиент: {payload.get('client_name', '—')}" + (f"\nДень салона: {link}" if link else "")
     )
 
 

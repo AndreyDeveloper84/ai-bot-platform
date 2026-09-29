@@ -12,17 +12,18 @@
  * Voice rules (founder F2 + §6 + §8 F4):
  *   - Title: «Подтверди запись» (registered) / «Чтобы записаться»
  *     (anonymous gate, founder-locked).
- *   - Cancellation policy: «Можно отменить за 4 часа до визита.»
- *     (compact, no scary preamble.)
+ *   - Cancellation policy: НЕ РИСУЕТСЯ — источника нет (см. блок 3
+ *     ниже по коду). Прежняя строка «Можно отменить за 4 часа до
+ *     визита.» была константой без ручки.
  *   - Notes label: «+ Добавить заметку мастеру» — collapsed by
  *     default per founder cut #3.
- *   - Primary CTA: «Записаться» (registered) / «Зарегистрироваться»
- *     (anonymous gate). NEVER «Подтвердить» / «Окей» / «Готово».
+ *   - Primary CTA: «Записаться» (no initData → «Открой Ayla из MAX», DRF-1893)
+ *     NEVER «Подтвердить» / «Окей» / «Готово».
  *
  * Founder priority order (§6.1, locked):
  *   1. Что / где / когда / цена  (the visit summary)
  *   2. Button «Записаться»
- *   3. Cancellation policy (compact)
+ *   3. Cancellation policy (compact) — снята до появления источника
  *   4. Loyalty block (graceful — hide on 404 / no balance per TL Q3)
  *   5. «+ Добавить заметку мастеру» (collapsed default)
  *
@@ -35,15 +36,12 @@
  *   is plumbed by backend; absent → fall back to the generic
  *   «Выбрать другое время» CTA returning to F3.
  *
- * Anonymous gate:
- *   Detection: `getInitData()` empty → anonymous. When user is
- *   anonymous AND a slot has been picked, the screen renders the
- *   `<AnonymousGateOverlay>` panel instead of the registered card.
- *   The overlay's «Зарегистрироваться» button:
- *     1. Calls `savePendingIntent({...})` (sessionStorage).
- *     2. Triggers MAX OAuth via `maxBridge().openLink(...)`. The
- *        OAuth callback returns to `/customer/booking/confirm`,
- *        where `restorePendingIntent()` rehydrates the draft.
+ * No initData (DRF-1893, owner ruling U):
+ *   Detection: `channelIdentity() === "no_init_data"` (one definition in
+ *   `lib/identity.ts`). The screen renders «Открой Ayla из MAX» with a
+ *   return to MAX — no registration, no OAuth, no booking call. In practice
+ *   App's pre-check stops this state before any route; the branch here is
+ *   the screen's own fail-closed floor.
  *
  *   W4 backend round-trip (TL Q4 — defence in depth): the `/auth/verify`
  *   response MAY include a server-side `pending_booking_intent` field.
@@ -54,20 +52,35 @@
 
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { ApiError, authVerify } from "../lib/api";
+import { ApiError, authVerify, isHealthCheckSlug } from "../lib/api";
+import {
+  CHANGE_PROVIDER,
+  CHANGE_SERVICE,
+  CHANGE_TIME,
+  CREATING_ALSO_IN_CHAT,
+  CREATING_HEAD,
+  CREATING_HINT,
+} from "../lib/booking-outcome";
+import { channelIdentity } from "../lib/identity";
+import { OpenFromMaxScreen } from "../components/OpenFromMaxScreen";
+import { OfflineBanner } from "../components/OfflineBanner";
 import { ScreenLayout } from "../components/ScreenLayout";
 import { StickyCta } from "../components/StickyCta";
-import { useBackButton } from "../hooks/useBackButton";
 import { useClosingConfirmation } from "../hooks/useClosingConfirmation";
 import { useHaptics } from "../hooks/useHaptics";
-import { createCustomerBooking } from "../lib/customer-booking";
-import { formatMoney, formatVisitFull } from "../lib/format";
-import { getInitData, openPaymentConfirmation } from "../lib/max-sdk";
-import { createPayment } from "../lib/payments";
+import { useOnline } from "../hooks/useOnline";
 import {
-  restorePendingIntent,
-  savePendingIntent,
-} from "../lib/pending-booking-intent";
+  createCustomerBooking,
+  OFFER_NOT_SELLABLE_SLUG,
+  getBookingQuote,
+  quoteChangeOf,
+  type BookingQuote,
+  type QuoteChange,
+} from "../lib/customer-booking";
+import { formatDuration, formatMoney, formatVisitFull, priceFromLabel } from "../lib/format";
+import { getStartPayload, openPaymentConfirmation } from "../lib/max-sdk";
+import { createPayment } from "../lib/payments";
+import { resolveEntryPoint, restorePendingIntent } from "../lib/pending-booking-intent";
 import {
   resetBooking,
   setMaster,
@@ -75,15 +88,39 @@ import {
   setVisitAt,
   useBookingDraft,
 } from "../state/booking";
+import { backTo } from "../lib/screen-back";
+import { REFUSAL_CANON } from "../lib/refusal-canon";
 
 type ErrState =
   | { kind: "slot_unavailable"; substituteName?: string; substituteTime?: string }
+  /**
+   * DRF-1708 (решение владельца, пакет 2, D4): показанное уже не действует.
+   * Не поломка и не занятый слот — MATERIAL_CHANGE: человек видит, что
+   * было и что стало, и подтверждает заново. Молчаливой подмены нет.
+   */
+  | { kind: "quote_changed"; change: QuoteChange }
   | { kind: "master_unavailable" }
   | { kind: "not_bookable" }
   | { kind: "salon_suspended" }
   | { kind: "server" }
   | { kind: "network" }
-  | { kind: "other"; detail: string };
+  | { kind: "other" };
+
+/**
+ * DRF-1614 — the health-check handoff. Its own type, not a member of
+ * {@link ErrState}: nothing was broken and nothing needs retrying.
+ *
+ * `text` is the server's sentence, rendered verbatim. It is NOT composed
+ * here: the wording is the owner's, one copy lives in
+ * `apps/integrations/ayla/health_check.py`, and a second copy in the SPA
+ * would be a second contract to keep in sync.
+ *
+ * There is deliberately no second field for «does this promise a
+ * specialist». That distinction is real, but it lives entirely in the
+ * sentence the server sends, and a copy of it here would be a second
+ * place to keep in sync — and the first place the two could disagree.
+ */
+type HandoffState = { text: string };
 
 /**
  * C1 (billing eligibility) → client-facing slug. Frozen contract
@@ -106,32 +143,66 @@ const NOT_BOOKABLE_SLUGS = new Set([
   "service_not_offered",
   "service_unbookable",
   "master_archived",
+  // DRF-1548 — мастер без канонической связи с Ayla. Для клиента исход
+  // тот же, что у `master_not_bookable`: записаться к этому мастеру
+  // нельзя. Без этой строки слаг падал бы в ветку `other`, а она рисует
+  // `detail` бэкенда как есть — то есть английскую служебную фразу.
+  "master_ayla_unlinked",
+  // DRF-1521 — мастер приняла приглашение, но профиль не готов к
+  // продаже. Для клиента исход тот же: записаться нельзя. Без этой
+  // строки слаг падал бы в ветку `other`, а она рисует `detail`
+  // бэкенда как есть — служебную английскую фразу.
+  "master_profile_incomplete",
+  // §83 — владелец салона не подтвердил рабочие часы мастера (или они
+  // изменились после подтверждения). Клиенту исход тот же: записаться
+  // нельзя. Без этой строки слаг падал бы в ветку `other`, а она рисует
+  // `detail` бэкенда как есть — служебную английскую фразу.
+  "master_schedule_unconfirmed",
+  // Каталог не знает эту строку: первый же шаг брони кончился бы
+  // исключением. Клиенту исход тот же, что у соседей выше: записаться
+  // нельзя. Без этой строки слаг падал бы в ветку `other`, а она рисует
+  // `detail` бэкенда как есть — служебную английскую фразу.
+  "master_catalog_unlinked",
 ]);
 
 /** Payment choice per C7.4 / AMD-002 — online is optional (D6). */
 type PaymentChoice = "onsite" | "online";
 
-/**
- * Anonymous == no MAX initData available. In dev mode with a VITE
- * override, initData is non-empty so we treat the user as registered
- * for parity with the booking endpoint behaviour.
- */
-function isAnonymous(): boolean {
-  return getInitData() === "";
-}
+// DRF-1319 B. Здесь стояло второе, независимое определение «анонима»
+// (`getInitData() === ""`) — см. `lib/identity.ts`, теперь оно одно.
+// Ветка ниже по-прежнему называется «gate»: что показывать человеку, у
+// которого канал не передал initData, — срез 1319-D, заперт решением о
+// MAX OAuth. Меняется только имя состояния, не экран.
 
 export function CustomerBookingConfirmScreen() {
+  const online = useOnline();
   const navigate = useNavigate();
   const draft = useBookingDraft();
   const haptics = useHaptics();
   const [submitting, setSubmitting] = useState(false);
   const [err, setErr] = useState<ErrState | null>(null);
+  // DRF-1614 — kept apart from `err` on purpose. A handoff is an outcome,
+  // not a failure; sharing the error state would put it in the branch the
+  // contract test forbids, and the next person adding an error kind would
+  // have no way to see that one member of the union is not an error.
+  const [handoff, setHandoff] = useState<HandoffState | null>(null);
   const [notesOpen, setNotesOpen] = useState(false);
   const [note, setNote] = useState("");
   const [paymentChoice, setPaymentChoice] = useState<PaymentChoice>("onsite");
-  const [anonymous] = useState<boolean>(() => isAnonymous());
+  // DRF-1708 — что человек ВИДИТ и что уедет как quoted_*. `null` до
+  // ответа или когда котировка недоступна: тогда строки не рисуются и
+  // поля не шлются — прежнее поведение, а не выдуманное число.
+  const [quote, setQuote] = useState<BookingQuote | null>(null);
+  const [noInitData] = useState<boolean>(() => channelIdentity() === "no_init_data");
 
-  useBackButton({ onBack: () => navigate(-1) });
+  // Возврат (DRF-1493) — к выбору времени у того же мастера, то есть к
+  // предыдущему шагу сценария, а не к предыдущей странице истории:
+  // сюда возвращаются и после входа по OAuth, где истории уже нет.
+  const back = backTo(
+    draft.masterId
+      ? `/customer/masters/${draft.masterId}/slots`
+      : "/customer/catalog",
+  );
   useClosingConfirmation(true);
 
   // W4 #844 anonymous gate round-trip restore.
@@ -202,6 +273,36 @@ export function CustomerBookingConfirmScreen() {
     };
   }, []);
 
+  // DRF-1708 — котировка ребра мастер+услуга: цена и длительность, которые
+  // Ayla поставит на запись. Fail-soft: без ответа экран прежний.
+  const quoteMasterId = draft.masterId;
+  const quoteServiceId = draft.serviceId;
+  useEffect(() => {
+    if (!quoteMasterId || !quoteServiceId) return;
+    let cancelled = false;
+    getBookingQuote(quoteMasterId, quoteServiceId)
+      .then((q) => {
+        if (!cancelled) setQuote(q);
+      })
+      .catch((e: unknown) => {
+        if (cancelled) return;
+        setQuote(null);
+        // DRF-1989 — не сбой котировки, а ответ: предложение не продаётся.
+        // Та же спокойная плашка, что у отказа создания, — до нажатия.
+        if (e instanceof ApiError && e.slug === OFFER_NOT_SELLABLE_SLUG) {
+          setHandoff({ text: e.detail });
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [quoteMasterId, quoteServiceId]);
+
+  // DRF-1708 + DRF-1989 — показанная цена и есть отправленная; цена ниже
+  // 1 ₽ не цена (каталог такое не продаёт): не рисуется и не уезжает.
+  const shownPrice =
+    quote?.price != null && priceFromLabel(quote.price) !== "" ? quote.price : null;
+
   // Missing prerequisites — bounce back to catalog (founder cut #1
   // graceful degradation).
   if (!draft.serviceId || !draft.masterId || !draft.visitAt) {
@@ -213,6 +314,7 @@ export function CustomerBookingConfirmScreen() {
     if (!draft.serviceId || !draft.masterId || !draft.visitAt) return;
     setSubmitting(true);
     setErr(null);
+    setHandoff(null);
     try {
       const { booking } = await createCustomerBooking({
         service_id: draft.serviceId,
@@ -220,6 +322,17 @@ export function CustomerBookingConfirmScreen() {
         visit_at: draft.visitAt,
         // AMD-002 / C7.4 — user's payment choice rides the create call.
         payment_required: paymentChoice === "online",
+        // DRF-1773 — чем начался этот путь. `deep_link:reco_<id>` — запись
+        // выросла из карточки C04, и бронь будет с ней связана; все
+        // прежние значения (`catalog` / `master` / `direct`) едут как есть
+        // и ничего не меняют.
+        entry_point: resolveEntryPoint(draft.entryPoint, getStartPayload()),
+        // DRF-1708 / D4 — ровно то, что показано в карточке выше; сервер
+        // сверит с применяемым внутри транзакции создания.
+        ...(shownPrice != null ? { quoted_price: shownPrice } : {}),
+        ...(quote?.duration_minutes != null
+          ? { quoted_duration_minutes: quote.duration_minutes }
+          : {}),
       });
       // C7.4 — online choice: create the two-stage payment right after
       // the booking and open the checkout webview. A payment-create
@@ -246,12 +359,45 @@ export function CustomerBookingConfirmScreen() {
           service_name: booking.service_name,
           master_name: booking.master_name,
           visit_at: booking.visit_at,
+          // DRF-1952 — адрес салона на экран успеха.
+          address: booking.address,
           payment_start_failed: paymentStartFailed,
           payment_capture_state: paymentCaptureState,
         },
         replace: true,
       });
     } catch (e: unknown) {
+      // DRF-1989 — «не продаётся» — такой же исход, не ошибка: слова
+      // сервера спокойной плашкой, без error-хаптики и без повтора.
+      if (
+        e instanceof ApiError &&
+        (isHealthCheckSlug(e.slug) || e.slug === OFFER_NOT_SELLABLE_SLUG)
+      ) {
+        // DRF-1614 — NOT an error state, and deliberately not `setErr`.
+        // Ayla refused the booking because the service needs a screening
+        // question first; that is a decision somebody took about this
+        // person on purpose. Rendering it in the failure branch told them
+        // «что-то пошло не так» about a system working exactly as
+        // designed — and an error haptic would say the same thing again
+        // without words, which is why the buzz below moved into the
+        // branch that really is a failure.
+        //
+        // The text comes from the server verbatim: the wording is the
+        // owner's and lives in one place (`health_check.py`), so the two
+        // surfaces cannot drift apart. We branch on the slug only —
+        // never on the prose, never on the status.
+        setHandoff({ text: e.detail });
+        setSubmitting(false);
+        return;
+      }
+      const change = e instanceof ApiError ? quoteChangeOf(e) : null;
+      if (change) {
+        // DRF-1708 — не поломка: то, что человек видел, уже не действует.
+        // Без error-haптики — здесь ему предстоит решить, а не чинить.
+        setErr({ kind: "quote_changed", change });
+        setSubmitting(false);
+        return;
+      }
       haptics.notify("error");
       if (e instanceof ApiError && e.slug === "slot_unavailable") {
         // Backend MAY return substitute candidate in the 409 body
@@ -271,7 +417,9 @@ export function CustomerBookingConfirmScreen() {
       } else if (e instanceof ApiError && e.status >= 500) {
         setErr({ kind: "server" });
       } else if (e instanceof ApiError) {
-        setErr({ kind: "other", detail: e.detail });
+        // §6-кси п.2 (DRF-2577): причина не названа — фраза владельца;
+        // `detail` уже в журнале (logApiDetail), на экран не идёт.
+        setErr({ kind: "other" });
       } else {
         setErr({ kind: "network" });
       }
@@ -279,130 +427,132 @@ export function CustomerBookingConfirmScreen() {
     }
   }
 
-  function onStartRegistration() {
-    // Spec §6.2 — P0 context preservation. Save BEFORE redirect to
-    // OAuth; the callback restores from sessionStorage on mount.
-    if (!draft.serviceId || !draft.masterId || !draft.visitAt) return;
-    savePendingIntent({
-      master_id: draft.masterId,
-      service_id: draft.serviceId,
-      slot_iso: draft.visitAt,
-      // price_rub is optional now (post-round-1) — real price will
-      // arrive via service detail once F1 surfaces a price field per
-      // Alpha endpoint. We omit it rather than ship a 0 sentinel,
-      // which violated the P0 contract («price preserved as known»).
-      note: note || undefined,
-      service_name: draft.serviceName ?? undefined,
-      master_name: draft.masterName ?? undefined,
-    });
-    // W4 #844 defence-in-depth — also push the intent to the server
-    // cache. Survives sessionStorage eviction + multi-device flows.
-    // Best-effort: failure is non-fatal (sessionStorage stays primary).
-    //
-    // Field-name conversion: backend uses `price_quoted` (not
-    // `price_rub`) and does NOT accept the display-only `service_name`
-    // / `master_name` strings — `_ALLOWED_FIELDS` whitelist drops them
-    // silently. We only send the identifying triplet + optional note.
-    //
-    // Anonymous users have no BotUser.id yet (the cache key) — the
-    // backend handles this by treating the request as «no body»; the
-    // call is safe to issue regardless of auth state.
-    void authVerify({
-      intent: {
-        master_id: draft.masterId,
-        service_id: draft.serviceId,
-        slot_iso: draft.visitAt,
-        ...(note ? { note } : {}),
-      },
-    }).catch(() => {
-      // Swallow — server-side caching is supplementary. sessionStorage
-      // already has the draft.
-    });
-    // OAuth deep-link — bot DM redirect. Real MAX OAuth URL TBD by
-    // backend; until then we open the bot DM (matches existing
-    // «Доступ не настроен» screen). Gate the console.info behind
-    // import.meta.env.DEV to avoid leaking flow telemetry in prod.
-    if (import.meta.env.DEV) {
-      // eslint-disable-next-line no-console
-      console.info(
-        "[customer-booking-confirm] saved intent + entering OAuth flow",
-      );
-    }
-    // Best-effort: open bot DM to drive registration. Will be
-    // replaced with the canonical MAX OAuth endpoint when W4 ships.
-    navigate("/", { replace: true });
-  }
+  // ── Канал не передал initData (DRF-1893, раздел U) ────────────────────
+  // Регистрации и OAuth в пилоте нет: пустой initData — отказ транспорта.
+  if (noInitData) return <OpenFromMaxScreen />;
 
-  // ── Anonymous gate branch (§6.2) ─────────────────────────────────────
-  if (anonymous) {
-    // VITE_MAX_OAUTH_ENABLED gates the *functional* registration CTA.
-    // Until W4 ships /auth/verify + the canonical MAX OAuth URL, the
-    // «Зарегистрироваться» button strands a sessionStorage intent + a
-    // navigate("/") — a UX dead-end (round-1 PRE_MERGE blocker #1).
-    // Acceptable degradation: render an «OAuth pending» placeholder
-    // that lets the user keep exploring the catalog. Flip the env
-    // flag when W4 lands.
-    const oauthEnabled = import.meta.env.VITE_MAX_OAUTH_ENABLED === "true";
-    if (!oauthEnabled) {
-      return (
-        <ScreenLayout title="Чтобы записаться">
-          <section className="customer-confirm__oauth-pending">
-            <p className="customer-confirm__oauth-soon">
-              Регистрация через MAX скоро будет доступна. Сейчас можно
-              посмотреть мастеров и услуги.
-            </p>
-            <button
-              type="button"
-              className="btn-secondary"
-              onClick={() => navigate("/customer/catalog")}
-            >
-              Посмотреть мастеров
-            </button>
-          </section>
-        </ScreenLayout>
-      );
-    }
-    return (
-      <ScreenLayout
-        title="Чтобы записаться"
-        cta={
-          <StickyCta onClick={onStartRegistration}>
-            Зарегистрироваться
-          </StickyCta>
-        }
-      >
-        <AnonymousGateBody
-          serviceName={draft.serviceName}
-          masterName={draft.masterName}
-          visitAt={draft.visitAt}
-        />
-      </ScreenLayout>
-    );
-  }
+  // DRF-1776 — «подтверждение устарело»: выбранное время уже прошло
+  // (долгий возврат из OAuth, восстановленное намерение, сон телефона).
+  // Не ошибка и не «слот заняли» — время просто миновало; единственное
+  // честное действие — выбрать время заново, здесь же, не с C01.
+  const stale = new Date(draft.visitAt).getTime() < Date.now();
 
   // ── Registered branch (§6.1) — founder priority order ─────────────────
   return (
     <ScreenLayout
+      back={back}
       title="Подтверди запись"
       cta={
-        <StickyCta onClick={onConfirm} disabled={submitting}>
-          {submitting ? "Записываю…" : "Записаться"}
-        </StickyCta>
+        stale ? (
+          <StickyCta onClick={() => navigate(`/customer/masters/${draft.masterId}/slots`)}>
+            Выбрать время заново
+          </StickyCta>
+        ) : (
+          <StickyCta onClick={onConfirm} disabled={submitting || !online}>
+            {submitting ? "Записываю…" : "Записаться"}
+          </StickyCta>
+        )
       }
     >
-      {/* 1. Visit summary — что / где / когда / цена */}
+      {stale && (
+        <div className="callout" role="status" data-testid="confirm-stale">
+          <p style={{ margin: 0 }}>
+            Подтверждение устарело — выбранное время уже прошло. Проверь время заново.
+          </p>
+        </div>
+      )}
+      {/* Сети нет — сказать до нажатия. Кнопка «Записаться» здесь ЕДИНСТВЕННОЕ
+          действие, которое меняет мир, и без сети оно не произойдёт: раньше
+          человек жал её и получал ошибку сети вместо записи. */}
+      <OfflineBanner online={online} />
+
+      {/* Кадр 5 макета DRF-1320 — «Создаю запись…».
+
+          Пока запись создаётся, прежняя форма человеку не нужна: её
+          поля уже ничего не решают, а кнопка под ними приглашает нажать
+          второй раз. Кадр говорит, что происходит, сколько это обычно
+          длится и где ещё появится результат (ПРАВКА 4) — именно
+          неуверенность «прошло или нет» и рождает дубли.
+
+          Повторный submit невозможен по построению: действия на кадре
+          нет вовсе, а ключ идемпотентности всё равно считает сервер. */}
+      {submitting ? (
+        <section className="callout" role="status" aria-live="polite">
+          <h2>{CREATING_HEAD}</h2>
+          <p>{CREATING_HINT}</p>
+          <p>{CREATING_ALSO_IN_CHAT}</p>
+        </section>
+      ) : null}
+
+      {/* 1. Visit summary — что / где / когда / цена.
+
+          DRF-2178, кадр 4 макета DRF-1320: у каждой строки своё действие
+          «Изменить …». Кнопка «назад» этого не заменяет — она возвращает
+          на предыдущий шаг, а человеку нужно поправить КОНКРЕТНУЮ строку
+          и знать заранее, какую. Уход не стирает остальное: черновик
+          живёт в своём хранилище и переживает переход (правило М-3
+          «ничего не сдвигается молча»). */}
       <div className="confirm-card">
         <dl>
           <dt>Услуга</dt>
-          <dd>{draft.serviceName || "—"}</dd>
+          <dd>
+            {draft.serviceName || "—"}
+            <button
+              type="button"
+              className="customer-confirm__change"
+              onClick={() => navigate("/customer/booking/option")}
+            >
+              {CHANGE_SERVICE}
+            </button>
+          </dd>
           <dt>Мастер</dt>
-          <dd>{draft.masterName || "—"}</dd>
+          <dd>
+            {draft.masterName || "—"}
+            <button
+              type="button"
+              className="customer-confirm__change"
+              onClick={() =>
+                navigate(
+                  draft.serviceId
+                    ? `/customer/booking/provider?service=${draft.serviceId}`
+                    : "/customer/booking/provider",
+                )
+              }
+            >
+              {CHANGE_PROVIDER}
+            </button>
+          </dd>
           <dt>Время</dt>
-          <dd>{formatVisitFull(draft.visitAt)}</dd>
-          {/* Price omitted until backend supplies a per-slot price
-              snapshot. Founder cut #2: pricing transparency
-              expansion is post-pilot — strict «что/где/когда/цена»
-              is preserved by rendering the value when present. */}
+          <dd>
+            {formatVisitFull(draft.visitAt)}
+            {/* Время меняют там же, где выбирали: у того же мастера.
+                Без мастера адреса нет — и действия тоже. */}
+            {draft.masterId ? (
+              <button
+                type="button"
+                className="customer-confirm__change"
+                onClick={() => navigate(`/customer/masters/${draft.masterId}/slots`)}
+              >
+                {CHANGE_TIME}
+              </button>
+            ) : null}
+          </dd>
+          {/* DRF-1708 — длительность и цена из котировки ребра: то, что
+              здесь показано, уезжает как quoted_* и сверяется сервером.
+              Неизвестное не рисуется — никакого числа из воздуха.
+              Прежнее «post-pilot» отменено доктриной 12.09. */}
+          {quote?.duration_minutes != null && (
+            <>
+              <dt>Длительность</dt>
+              <dd data-testid="confirm-duration">{formatDuration(quote.duration_minutes)}</dd>
+            </>
+          )}
+          {shownPrice != null && (
+            <>
+              <dt>Цена</dt>
+              <dd data-testid="confirm-price">{formatMoney(shownPrice)}</dd>
+            </>
+          )}
         </dl>
       </div>
 
@@ -448,10 +598,26 @@ export function CustomerBookingConfirmScreen() {
         </label>
       </fieldset>
 
-      {/* 3. Cancellation policy — compact */}
-      <p className="customer-confirm__policy">
-        Можно отменить за 4 часа до визита.
-      </p>
+      {/* 3. Условия отмены — БЛОКА НЕТ.
+
+          Здесь стояла строка «Можно отменить за 4 часа до визита.»,
+          нарисованная как authoritative. Источника у неё не было ни
+          одного: политику отмены не отдаёт ни `GET /bookings/<id>`, ни
+          ответ создания записи, ни каталог. Число «4 часа» не совпадало
+          даже с макетом §6.1 самого репозитория («12+ часов — без
+          штрафа»), то есть было выдумано на месте.
+
+          Обещание про деньги и сроки человеку — не косметика: по нему
+          планируют. Показывать то, чего мы не знаем и что не подтвердит
+          ни одна ручка, нельзя (тот же признак, что §35 п.3 «выдуманные
+          адреса» и п.11 «выдуманные отзывы»).
+
+          Заглушки взамен нет намеренно: ни «скоро», ни «уточните в
+          салоне» — второе тоже утверждение, которого мы не проверяли.
+
+          Вернуть блок — когда бэкенд начнёт отдавать политику отмены в
+          ответе бронирования; тогда он рисуется по данным ручки, а не
+          по константе, и закрывает §6.1 Q-BF-7 по-настоящему. */}
 
       {/* 4. Loyalty block — graceful degradation (TL Q3).
           Hidden when no balance / 404. No render means no error UI.
@@ -488,6 +654,70 @@ export function CustomerBookingConfirmScreen() {
         )}
       </div>
 
+      {/* DRF-1614 — an outcome, above the error states and outside them.
+          `callout` without `--danger`: the neutral face the surface
+          already uses for «this cannot be booked, here is what now», and
+          `role="status"` rather than `role="alert"` because a screen
+          reader should hear this politely — an alert interrupts, and
+          nothing here is urgent. */}
+      {handoff && (
+        <div className="callout" role="status">
+          <p style={{ margin: 0 }}>{handoff.text}</p>
+          <button
+            type="button"
+            className="btn-secondary"
+            style={{ marginTop: "var(--s-3)" }}
+            onClick={() => navigate("/customer/catalog")}
+          >
+            {/* No «попробовать ещё раз» on either path: repeating the
+                request cannot change a screening decision, and offering
+                it would invite the person to hammer a closed door. */}
+            Посмотреть другие услуги
+          </button>
+        </div>
+      )}
+
+      {/* DRF-1708 / D4 — MATERIAL_CHANGE: показать, что было и что стало,
+          и попросить новое подтверждение. `role="status"`, не alert:
+          ничего не сломалось — человеку предстоит решить. «Подтвердить с
+          новыми условиями» переписывает карточку применяемым значением;
+          сама запись создаётся только следующим явным «Записаться». */}
+      {err?.kind === "quote_changed" && (
+        <div className="callout" role="status" data-testid="quote-changed">
+          <p style={{ margin: 0 }}>
+            {err.change.field === "price"
+              ? `Пока ты выбирала, цена изменилась: было ${formatMoney(err.change.quoted)}, стало ${formatMoney(err.change.applied)}.`
+              : `Пока ты выбирала, длительность изменилась: было ${formatDuration(Number(err.change.quoted))}, стало ${formatDuration(Number(err.change.applied))}.`}
+            {" "}Запись не создана.
+          </p>
+          <div style={{ display: "flex", gap: "var(--s-2)", marginTop: "var(--s-3)", flexWrap: "wrap" }}>
+            <button
+              type="button"
+              className="btn-secondary"
+              onClick={() => {
+                const c = err.change;
+                setQuote((q) => ({
+                  price: c.field === "price" ? String(c.applied) : (q?.price ?? null),
+                  duration_minutes:
+                    c.field === "duration_minutes" ? Number(c.applied) : (q?.duration_minutes ?? null),
+                  source: q?.source ?? "edge",
+                }));
+                setErr(null);
+              }}
+            >
+              Подтвердить с новыми условиями
+            </button>
+            <button
+              type="button"
+              className="btn-secondary"
+              onClick={() => navigate(`/customer/masters/${draft.masterId}/slots`)}
+            >
+              Выбрать другое время
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Error states — §6.3 */}
       {err?.kind === "slot_unavailable" && (
         <div className="callout callout--danger" role="alert">
@@ -504,7 +734,11 @@ export function CustomerBookingConfirmScreen() {
             className="btn-secondary"
             style={{ marginTop: "var(--s-3)" }}
             onClick={() =>
-              navigate(`/customer/masters/${draft.masterId}/slots`)
+              // DRF-1776: экран слотов называет занятый слот, а не
+              // показывает тот же список молча.
+              navigate(`/customer/masters/${draft.masterId}/slots`, {
+                state: { unavailableSlot: draft.visitAt },
+              })
             }
           >
             Выбрать другое время
@@ -618,50 +852,10 @@ export function CustomerBookingConfirmScreen() {
       )}
       {err?.kind === "other" && (
         <div className="callout callout--danger" role="alert">
-          <p style={{ margin: 0 }}>{err.detail}</p>
+          <p style={{ margin: 0 }}>{REFUSAL_CANON.bookingCreate}</p>
         </div>
       )}
     </ScreenLayout>
-  );
-}
-
-/**
- * Anonymous gate body — §6.2 verbatim founder copy.
- *
- * The OAuth round-trip is initiated by the StickyCta button in the
- * parent. This component shows WHAT the user is about to lock in
- * (so they understand why they're registering), followed by the
- * trust block (compact: «Только МАХ авторизация, без e-mail»).
- */
-function AnonymousGateBody({
-  serviceName,
-  masterName,
-  visitAt,
-}: {
-  serviceName: string | null;
-  masterName: string | null;
-  visitAt: string | null;
-}) {
-  return (
-    <>
-      <p className="customer-confirm__gate-lead">
-        Сохраню запись после регистрации — всё, что ты выбрала,
-        останется на месте.
-      </p>
-      <div className="confirm-card">
-        <dl>
-          <dt>Услуга</dt>
-          <dd>{serviceName || "—"}</dd>
-          <dt>Мастер</dt>
-          <dd>{masterName || "—"}</dd>
-          <dt>Время</dt>
-          <dd>{visitAt ? formatVisitFull(visitAt) : "—"}</dd>
-        </dl>
-      </div>
-      <p className="customer-confirm__gate-trust">
-        Только авторизация через MAX. Email не нужен.
-      </p>
-    </>
   );
 }
 

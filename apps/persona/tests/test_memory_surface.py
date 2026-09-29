@@ -11,10 +11,14 @@ class TestRenderPersonalContext:
         assert render_personal_context(PersonalContextView()) is None
 
     def test_renders_summary(self):
+        # summary — вывод по определению (POLICY_DEBT): он едет под рамкой
+        # выведенного, а не под «помню, что ты» (прежняя редакция узла
+        # закрепляла именно эту ошибку).
         out = render_personal_context(PersonalContextView(summary="Любит вечерние слоты"))
         assert out is not None
         assert "Любит вечерние слоты" in out
-        assert "помню, что ты" in out  # the natural-surfacing instruction
+        assert "клиент этого НЕ говорил" in out
+        assert "помню, что ты" not in out
 
     def test_renders_known_diet_fact(self):
         view = PersonalContextView(
@@ -120,12 +124,17 @@ class TestProvenanceInTheSurfacedParagraph:
         assert out is not None
         stated, _, derived = out.partition(self._DERIVED_LEAD)
         assert "веганск" in stated and "веганск" not in derived
-        assert "любит тишину" in stated
+        # summary — вывод по определению: только в группе выведенного.
+        assert "любит тишину" in derived and "любит тишину" not in stated
 
     def test_all_stated_paragraph_is_byte_identical_to_the_old_one(self) -> None:
-        """Отрицательный: то, что уже помечено верно, не изменилось."""
+        """Отрицательный: то, что уже помечено верно, не изменилось.
+
+        Прежняя редакция держала здесь и summary — в группе сказанного, то
+        есть закрепляла ошибку провенанса. summary отсюда убран: абзац из
+        одних сказанных фактов байт-в-байт прежний.
+        """
         view = PersonalContextView(
-            summary="любит тишину",
             green_facts=[
                 GreenFact(
                     kind="lifestyle",
@@ -135,8 +144,73 @@ class TestProvenanceInTheSurfacedParagraph:
             ],
         )
         assert render_personal_context(view) == (
-            "Что ты уже знаешь об этом клиенте (используй естественно и только когда "
-            "уместно — например «помню, что ты…»; НЕ перечисляй списком и НЕ "
-            "придумывай ничего сверх этого): любит тишину; придерживается веганского "
-            "питания."
+            "Что ты уже знаешь об этом клиенте — в форме обращения к нему, повторяй "
+            "естественно и только когда уместно, например «помню, что ты…»; НЕ "
+            "перечисляй списком и НЕ придумывай ничего сверх этого: ты "
+            "придерживаешься веганского питания."
+        )
+
+
+class TestFoodScannerRowsStayOutOfTheConciergePrompt:
+    """Ревью DRF-1454, оси architecture + persistence (найдено независимо
+    двумя осями): запомненные правки еды попадали в системный промпт консьержа
+    на каждом ходе любого разговора — до 20 фраз вида «блюдо „борщ“
+    называет „свекольник“», включая разговоры, где еды нет вовсе. Их читает
+    карточка сканера через recall_corrections; в списке «покажи, что помнишь»
+    они остаются — эта поверхность модели, та — человека.
+
+    Сегодня пишется только ``food_dish_name:*`` (вариант А, 04.09.2026); строки
+    с порцией и БЖУ оставлены в тестах стражами на префиксы — то, что вернёт
+    DRF-825, обязано быть исключено из промпта с первой же строки."""
+
+    def test_food_rows_are_not_surfaced_in_the_prompt(self):
+        view = PersonalContextView(
+            green_facts=[
+                GreenFact(
+                    kind="preference",
+                    content={
+                        "key": "food_portion:борщ",
+                        "value": 500,
+                        "display": "порция «борщ» — 500 г",
+                    },
+                    source="explicit",
+                ),
+                GreenFact(
+                    kind="lifestyle",
+                    content={"key": "diet", "value": "vegan"},
+                    source="explicit",
+                ),
+            ]
+        )
+        out = render_personal_context(view)
+        assert out is not None
+        assert "веганского питания" in out  # соседние домены не тронуты
+        assert "борщ" not in out
+
+    def test_a_view_with_only_food_rows_renders_nothing(self):
+        view = PersonalContextView(
+            green_facts=[
+                GreenFact(
+                    kind="preference",
+                    content={
+                        "key": "food_dish_name:борщ",
+                        "value": "Свекольник",
+                        "display": "блюдо «борщ» называет «Свекольник»",
+                    },
+                    source="explicit",
+                ),
+            ]
+        )
+        assert render_personal_context(view) is None
+
+    def test_food_rows_still_render_in_the_show_list(self):
+        """«Покажи, что помнишь» — поверхность человека: там строки видимы,
+        иначе это запись, которую мы не имели права писать."""
+        from apps.persona.memory_surface import describe_green_content
+
+        assert (
+            describe_green_content(
+                {"key": "food_portion:борщ", "value": 500, "display": "порция «борщ» — 500 г"}
+            )
+            == "порция «борщ» — 500 г"
         )

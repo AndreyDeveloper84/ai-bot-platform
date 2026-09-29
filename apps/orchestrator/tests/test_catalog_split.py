@@ -48,6 +48,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
+from uuid import uuid4
 
 import pytest
 
@@ -70,18 +71,29 @@ def _ts() -> datetime:
     return datetime(2026, 8, 24, 7, 51, tzinfo=timezone.utc)
 
 
-def _salon(slug: str, name: str, *, city: str = "Пенза", address: str = ""):
+def _salon(slug: str, name: str, *, city: str = "Пенза", address: str | None = None):
+    """``address`` — в ``Tenant.address``, колонку САЛОНА (DRF-1587/1609).
+
+    Держать его в мастерском ``raw``, как было здесь, значит описывать мир,
+    которого больше нет: ``discover_salons`` мастерские адреса не читает.
+    Фикстура, тихо разошедшаяся с системой, хуже красного теста — красный
+    чинят, а эта живёт и врёт следующему.
+    """
     from apps.catalog.models import CatalogMaster
     from apps.tenancy.models import Tenant
 
-    tenant = Tenant.objects.create(slug=slug, name=name, city=city)
+    tenant = Tenant.objects.create(slug=slug, name=name, city=city, address=address)
     CatalogMaster.all_tenants.create(
         tenant=tenant,
         external_updated_at=_ts(),
         name=f"Мастер {name}",
         is_active=True,
         invite_status=CatalogMaster.InviteStatus.ACCEPTED,
-        raw={"address": address} if address else {},
+        raw={},
+        # DRF-1540/1544 — синхронизированная строка несёт канонический ключ.
+        # Без него мастер не продаётся, и клиентские поверхности отвечали бы
+        # пустотой не потому, что сломаны.
+        ayla_user_id=uuid4(),
     )
     return tenant
 

@@ -14,11 +14,31 @@ should read like prose, not a database dump. Sprint 8 may add a
 "retrieval format" registry per doc_type if the format diverges
 across tenants; Sprint 7 keeps the projectors as pure functions.
 
-### Source URI contract
+### Source URI contract — DRF-2626
 
-The KB ``source_uri`` couples mirror rows back to the original mysite
-PK via ``mysite://<resource>/<external_id>``. Same scheme the catalog
-HTTP client uses for traceability.
+``source_uri`` is the document's KEY: :func:`_project_one_mirror` finds the
+document by ``(tenant, source_uri, version=1)``. It used to be
+``mysite://<resource>/<external_id>`` for every mirror. Since S3B (#1044,
+#1122) the sync keys the service mirror on the Ayla UUID and leaves
+``external_id`` NULL, and the same holds for Ayla-synced masters, so every
+such row projected to ``mysite://services/None``: the first service created
+the document, each next one overwrote its body, and the salon's knowledge held
+ONE service -- the last in iteration order -- while every write reported
+success. A key assembled from a value nobody writes collapses to a constant.
+
+:func:`_source_uri` builds the key from the first identity the row really has,
+each form under its own scheme so they cannot collide:
+
+1. ``ayla://<resource>/<uuid>`` -- the canonical Ayla id (``ayla_service_id``
+   for services, ``catalog_specialist_id`` for masters);
+2. ``mysite://<resource>/<int>`` -- the legacy mysite pk, still written by the
+   mysite webhook, invitations and solo onboarding; kept byte-identical so
+   documents projected under it keep their key;
+3. ``mirror://<resource>/<uuid>`` -- the mirror row's own primary key, which is
+   never NULL.
+
+No branch can yield ``None``. Nothing parses ``source_uri`` (census DRF-2626:
+admin display/search and the writers only), so the new schemes need no reader.
 
 ### Idempotency
 
@@ -106,7 +126,8 @@ def service_to_body(row: "CatalogService") -> str:
         parts.append(row.short_description)
     if row.description:
         parts.append(row.description)
-    if row.price_from is not None:
+    # DRF-1989: ниже 1 ₽ — незаполненное поле, а не «бесплатно».
+    if row.price_from is not None and row.price_from >= 1:
         parts.append(f"Цена от: {row.price_from}")
     if row.duration_min is not None:
         parts.append(f"Длительность: {row.duration_min} мин")
@@ -150,25 +171,38 @@ def help_article_to_body(row: "CatalogHelpArticle") -> str:
 # ---------------------------------------------------------------------------
 
 
+def _source_uri(resource: str, row: Any, canonical_field: str | None = None) -> str:
+    """The document key for one mirror row -- never built from an empty value.
+
+    See "Source URI contract" above for the order and why each scheme is its own.
+    """
+    canonical = getattr(row, canonical_field, None) if canonical_field else None
+    if canonical is not None:
+        return f"ayla://{resource}/{canonical}"
+    if row.external_id is not None:
+        return f"mysite://{resource}/{row.external_id}"
+    return f"mirror://{resource}/{row.pk}"
+
+
 _PROJECTORS = (
     (
         KbDocType.SERVICE,
-        lambda row: f"mysite://services/{row.external_id}",
+        lambda row: _source_uri("services", row, "ayla_service_id"),
         service_to_body,
     ),
     (
         KbDocType.MASTER,
-        lambda row: f"mysite://masters/{row.external_id}",
+        lambda row: _source_uri("masters", row, "catalog_specialist_id"),
         master_to_body,
     ),
     (
         KbDocType.FAQ,
-        lambda row: f"mysite://faqs/{row.external_id}",
+        lambda row: _source_uri("faqs", row),
         faq_to_body,
     ),
     (
         KbDocType.HELP_ARTICLE,
-        lambda row: f"mysite://help-articles/{row.external_id}",
+        lambda row: _source_uri("help-articles", row),
         help_article_to_body,
     ),
 )

@@ -68,7 +68,7 @@ uv run python manage.py migrate
 uv run pytest tests/smoke/
 ```
 
-Full Postgres / Redis / chromadb / MinIO stack lives in Sprint 0 / A2 (`docker compose up`). The host-side flow above uses SQLite.
+Full Postgres / Redis / chromadb stack lives in Sprint 0 / A2 (`docker compose up`). The host-side flow above uses SQLite.
 
 ### One command per worktree — and why it matters
 

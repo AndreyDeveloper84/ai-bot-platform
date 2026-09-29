@@ -598,7 +598,11 @@ class TestApprove:
             assert resp.status_code == 200, resp.content
             assert enqueue.called
             kwargs = enqueue.call_args.kwargs
-            assert kwargs["chat_id"] == "9001-chat"
+            # DRF-1558 — задача получает ЧЕЛОВЕКА, а не его диалог с
+            # каким-то из ботов: «9001-chat» на строке тоже лежит, и без
+            # этой проверки возврат на chat_id прошёл бы зелёным.
+            assert kwargs["user_id"] == "9001"
+            assert "chat_id" not in kwargs
             assert kwargs["decision"] == "approved"
             assert kwargs["master_id"] == str(m.id)
 
@@ -807,7 +811,8 @@ class TestReject:
             assert resp.status_code == 200, resp.content
             assert enqueue.called
             kwargs = enqueue.call_args.kwargs
-            assert kwargs["chat_id"] == "9003-chat"
+            assert kwargs["user_id"] == "9003"
+            assert "chat_id" not in kwargs
             assert kwargs["decision"] == "rejected"
             assert kwargs["rejection_reason"] == "уже есть выходной"
 

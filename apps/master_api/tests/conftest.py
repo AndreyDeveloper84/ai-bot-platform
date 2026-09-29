@@ -117,7 +117,11 @@ def make_master(
     if external_id is None:
         # ensure uniqueness per (tenant, external_id)
         external_id = CatalogMaster.all_tenants.filter(tenant=tenant).count() + 1
+    # DRF-1933: строка как у синка — id каталога равен первичному ключу.
+    row_id = uuid.uuid4()
     return CatalogMaster.all_tenants.create(
+        id=row_id,
+        catalog_specialist_id=row_id,
         tenant=tenant,
         external_id=external_id,
         external_updated_at=now,

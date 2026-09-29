@@ -13,6 +13,7 @@ from django.urls import path
 
 from apps.admin_api import (
     views,
+    views_assistant,
     views_availability,
     views_availability_slots,
     views_booking_cancel,
@@ -20,9 +21,19 @@ from apps.admin_api import (
     views_booking_create,
     views_customers,
     views_day,
+    views_handoff_queue,
+    views_readiness,
     views_invite,
+    views_master_exceptions,
+    views_schedule_impact,
+    views_master_schedule,
+    views_master_verify,
+    views_salon_frame,
+    views_salon_schedule_writes,
     views_staff_invite,
+    views_staff_invites,
     views_staff_revoke,
+    views_staff_role,
     views_staff_roster,
     views_master_deactivation,
     views_services_mapping,
@@ -35,6 +46,11 @@ urlpatterns = [
     # the front desk opens most often; ordering is cosmetic here (no
     # wildcard can swallow a literal "day" segment at this level).
     path("day/", views_day.salon_day, name="salon_day"),
+    # DRF-1237 A2 — кадр того же дня: смены, перерывы и отсутствия ВСЕХ
+    # мастеров одним вызовом Ayla. Соседствует с ``day/`` намеренно: это
+    # вторая половина одного экрана, визиты берутся из ``day/`` и только
+    # оттуда (см. докстринг ``views_salon_frame``).
+    path("day/frame/", views_salon_frame.salon_day_frame, name="salon_day_frame"),
     # Phase 2 — bookable starts for the manual-booking flow. Wraps Ayla's
     # canonical slots read; see the module docstring for why it refuses
     # rather than returning an empty list on upstream failure.
@@ -62,6 +78,12 @@ urlpatterns = [
         views_booking_complete.complete_booking,
         name="complete_booking",
     ),
+    # DRF-1851 — «не пришёл», the same version rule as closure.
+    path(
+        "bookings/<uuid:appointment_id>/no-show/",
+        views_booking_complete.no_show_booking,
+        name="no_show_booking",
+    ),
     path(
         "bookings/<uuid:appointment_id>/reschedule/",
         views_booking_complete.reschedule_booking,
@@ -78,6 +100,14 @@ urlpatterns = [
         name="booking_slots",
     ),
     path("masters/", views.masters_list, name="masters_list"),
+    # DRF-1597 — очередь «ждут подтверждения» и само подтверждение.
+    # Перед masters/<id>/ по той же причине, что masters/invite/ ниже:
+    # ``str``-конвертер Django съел бы литерал как master_id.
+    path(
+        "masters/awaiting-verification/",
+        views_master_verify.masters_awaiting_verification,
+        name="masters_awaiting_verification",
+    ),
     # PR 3 / MM2 — must precede masters/<id>/ so the literal "invite"
     # segment is not consumed as a master_id. Django's path resolver is
     # order-sensitive for ``str`` converters (greedy match).
@@ -100,6 +130,35 @@ urlpatterns = [
         "staff/revoke/",
         views_staff_revoke.staff_revoke,
         name="staff_revoke",
+    ),
+    # DRF-2273 — changing a person's role. Owner-only; see the view.
+    path(
+        "staff/role/",
+        views_staff_role.staff_role_change,
+        name="staff_role_change",
+    ),
+    # DRF-2274 — giving back a revoked role. Owner-only; see the view.
+    path(
+        "staff/restore/",
+        views_staff_role.staff_restore,
+        name="staff_restore",
+    ),
+    # DRF-2275 — issued codes: list, cancel, resend. Owner and admin; an
+    # owner code is the owner's alone. See the view.
+    path(
+        "staff/invites/",
+        views_staff_invites.staff_invites_list,
+        name="staff_invites_list",
+    ),
+    path(
+        "staff/invites/<str:invite_id>/cancel/",
+        views_staff_invites.staff_invite_cancel,
+        name="staff_invite_cancel",
+    ),
+    path(
+        "staff/invites/<str:invite_id>/resend/",
+        views_staff_invites.staff_invite_resend,
+        name="staff_invite_resend",
     ),
     # The list nothing produced: every person of the salon with every
     # role they hold, merged across TenantStaff and CatalogMaster
@@ -124,6 +183,64 @@ urlpatterns = [
         "masters/<str:master_id>/photo/",
         views.master_photo_upload,
         name="master_photo_upload",
+    ),
+    # §83 — просмотр часов и «Расписание верно». Отдельно от карточки
+    # мастера намеренно: чтение ходит в Ayla по сети, и недоступность
+    # источника не должна ронять имя, услуги и состояние.
+    path(
+        "masters/<str:master_id>/schedule/",
+        views_master_schedule.master_schedule,
+        name="master_schedule",
+    ),
+    # DRF-1237, срез A1 — рабочий день мастера глазами салона. Тонкий вид
+    # поверх ``master_api.services.schedule.build_schedule``: четвёртого
+    # вычислителя «свободного времени» в продукте заводить нельзя.
+    path(
+        "masters/<str:master_id>/day-schedule/",
+        views_master_schedule.master_day_schedule,
+        name="master_day_schedule",
+    ),
+    # DRF-1240 (чтение) — что уже назначено мастеру: исключения по датам,
+    # недоступность и закрытия салона. Записи нет: все записывающие маршруты
+    # салонной поверхности SERVICE_READ_ONLY, а §117 разрешает креденшел
+    # условно — сначала три проверки, потом использование.
+    path(
+        "masters/<str:master_id>/exceptions/",
+        views_master_exceptions.master_exceptions,
+        name="master_exceptions",
+    ),
+    path(
+        "masters/<str:master_id>/schedule/impact/",
+        views_schedule_impact.master_schedule_impact,
+        name="master_schedule_impact",
+    ),
+    # DRF-2607 — отгул и изменение на дату на СОБСТВЕННОМ токене
+    # администратора (подпись MAX); служебный ключ в записи не участвует.
+    # Недельный шаблон и закрытия не открыты.
+    path(
+        "masters/<str:master_id>/time-off/",
+        views_salon_schedule_writes.master_time_off,
+        name="master_time_off",
+    ),
+    path(
+        "masters/<str:master_id>/time-off/<str:time_off_id>/",
+        views_salon_schedule_writes.master_time_off_detail,
+        name="master_time_off_detail",
+    ),
+    path(
+        "masters/<str:master_id>/date-exceptions/",
+        views_salon_schedule_writes.master_date_exception,
+        name="master_date_exception",
+    ),
+    path(
+        "masters/<str:master_id>/date-exceptions/<str:date>/",
+        views_salon_schedule_writes.master_date_exception_detail,
+        name="master_date_exception_detail",
+    ),
+    path(
+        "masters/<str:master_id>/schedule/confirm/",
+        views_master_schedule.master_schedule_confirm,
+        name="master_schedule_confirm",
     ),
     path(
         "masters/<str:master_id>/audit/",
@@ -180,4 +297,25 @@ urlpatterns = [
         views_availability.availability_requests_list,
         name="availability_requests_list",
     ),
+    # DRF-2115 — карточка «Диалоги — N ждут ответа» на «Сегодня»: очередь
+    # handoff этого салона, только чтение (взять/закрыть — в Django-админке).
+    path(
+        "handoff-queue/",
+        views_handoff_queue.handoff_queue,
+        name="handoff_queue",
+    ),
+    # DRF-2117 — карточка «Готовность — N проблем» на «Сегодня» (ayla-85):
+    # каталог + зеркало, только владелец / администратор (ресепшну — нет, DRF-2115).
+    path(
+        "readiness/",
+        views_readiness.salon_readiness,
+        name="salon_readiness",
+    ),
+    # DRF-2119 — раздел «Ayla» для администратора: тройка ассистента
+    # (история / вопрос / подтверждение) под require_admin_role; ресепшну —
+    # 403 (DRF-2115). Пишущие действия только предлагаются (талон) или
+    # открывают форму в Mini App; модель ничего не пишет сама.
+    path("assistant/history", views_assistant.assistant_history, name="assistant_history"),
+    path("assistant/ask", views_assistant.assistant_ask, name="assistant_ask"),
+    path("assistant/confirm", views_assistant.assistant_confirm, name="assistant_confirm"),
 ]

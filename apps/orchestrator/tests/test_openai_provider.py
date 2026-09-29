@@ -15,9 +15,13 @@ from asgiref.sync import sync_to_async
 
 from apps.audit.models import AuditLog
 from apps.orchestrator.llm.breaker import BreakerOpenError, reset_breaker
-from apps.orchestrator.llm.openai_provider import LLMResponse, OpenAIProvider
+from apps.orchestrator.llm.openai_provider import (
+    LLMOutageError,
+    LLMResponse,
+    OpenAIProvider,
+)
 
-# transaction=True: the provider's fallback path writes its audit row via
+# transaction=True: the provider's outage path writes its audit row via
 # sync_to_async(thread_sensitive=False), which COMMITS on a separate
 # connection outside the wrapping test transaction. Under plain django_db
 # those rows leak into later modules (the audit_cleanup health probes in
@@ -46,7 +50,20 @@ class TestHappyPath:
 
 
 class TestBreakerOpen:
-    async def test_returns_fallback_when_breaker_open(self):
+    """DRF-1512 — an open breaker is a failure, not an answer.
+
+    Until this ticket the branch below returned
+    ``LLMResponse(content=<«отвечу через минуту»>, is_fallback=True)``: a
+    dead upstream reaching the caller in the shape of a working one, and
+    carrying the one sentence in the product that promises the bot will
+    come back. Nothing in an ``LLMResponse`` can carry the flag that puts
+    «Повторить» under that sentence (DRF-1489), so the promise would have
+    been made with no way to keep it.
+
+    It refuses now, and the refusal is typed and carries ``outage=True``.
+    """
+
+    async def test_refuses_with_a_typed_outage_when_breaker_open(self):
         provider = OpenAIProvider(api_key="fake")
         # Trip the breaker via 5 _call_openai failures.
         with patch.object(
@@ -58,8 +75,8 @@ class TestBreakerOpen:
                 with pytest.raises(RuntimeError):
                     await provider.complete(messages=[{"role": "user", "content": "hi"}])
 
-        # Now breaker is open — next call must return fallback without
-        # invoking _call_openai again.
+        # Now the breaker is open — the next call must refuse without
+        # invoking _call_openai again, and must not hand back a reply.
         call_marker: list[bool] = []
 
         async def must_not_call(*args, **kwargs):
@@ -67,14 +84,26 @@ class TestBreakerOpen:
             raise RuntimeError("should not be called")
 
         with patch.object(provider, "_call_openai", must_not_call):
-            response = await provider.complete(messages=[{"role": "user", "content": "hi"}])
+            with pytest.raises(LLMOutageError) as excinfo:
+                await provider.complete(messages=[{"role": "user", "content": "hi"}])
 
         assert call_marker == []  # _call_openai was not invoked
-        assert response.is_fallback is True
-        assert "технический сбой" in response.content  # Russian fallback by default
-        assert response.model == "gpt-4o-mini"
+        assert excinfo.value.outage is True
+        assert excinfo.value.reason == "breaker_open"
+        assert excinfo.value.model == "gpt-4o-mini"
+        # Still a BreakerOpenError, so a caller that already catches the
+        # breaker's own refusal keeps catching this one — and so does the
+        # production router's, which raises the base class.
+        assert isinstance(excinfo.value, BreakerOpenError)
 
-    async def test_fallback_writes_audit(self):
+    async def test_outage_writes_audit(self):
+        """The refusal is journalled.
+
+        DRF-1512 renamed the action from ``llm.openai.fallback_served``:
+        nothing is served any more, and the old name told anyone reading
+        the journal that a person had been given a reply.
+        """
+
         provider = OpenAIProvider(api_key="fake")
         with patch.object(
             provider,
@@ -85,42 +114,42 @@ class TestBreakerOpen:
                 with pytest.raises(RuntimeError):
                     await provider.complete(messages=[{"role": "user", "content": "x"}])
 
-        # Trigger the fallback path.
+        # Trigger the refusal path.
         async def must_not_call(*args, **kwargs):
             raise RuntimeError("not called")
 
         with patch.object(provider, "_call_openai", must_not_call):
-            await provider.complete(messages=[{"role": "user", "content": "x"}])
+            with pytest.raises(LLMOutageError):
+                await provider.complete(messages=[{"role": "user", "content": "x"}])
 
         # ORM reads from async test code go through sync_to_async.
         rows = await sync_to_async(
-            lambda: list(AuditLog.all_tenants.filter(action="llm.openai.fallback_served")),
+            lambda: list(AuditLog.all_tenants.filter(action="llm.openai.outage_refused")),
             thread_sensitive=False,
         )()
         assert rows
         assert rows[0].payload["reason"] == "breaker_open"
+        assert rows[0].payload["model"] == "gpt-4o-mini"
 
-    async def test_breaker_open_raised_internally_does_not_propagate(self):
+    async def test_breaker_open_becomes_a_typed_outage(self):
+        """The plain ``BreakerOpenError`` never escapes untyped.
+
+        Whatever the breaker itself raises, what leaves ``complete()``
+        carries the ``outage`` fact — that is the whole contract the
+        layer above depends on.
+        """
+
         provider = OpenAIProvider(api_key="fake")
         # Manually patch with_circuit_breaker to raise BreakerOpenError directly.
         with patch(
             "apps.orchestrator.llm.openai_provider.with_circuit_breaker",
             AsyncMock(side_effect=BreakerOpenError("test")),
         ):
-            response = await provider.complete(messages=[{"role": "user", "content": "x"}])
-        assert response.is_fallback is True
+            with pytest.raises(LLMOutageError) as excinfo:
+                await provider.complete(messages=[{"role": "user", "content": "x"}])
 
-
-class TestLanguageOverride:
-    async def test_english_fallback(self):
-        provider = OpenAIProvider(api_key="fake", fallback_lang="en")
-        with patch(
-            "apps.orchestrator.llm.openai_provider.with_circuit_breaker",
-            AsyncMock(side_effect=BreakerOpenError("test")),
-        ):
-            response = await provider.complete(messages=[{"role": "user", "content": "x"}])
-        assert "brief technical issue" in response.content
-        assert response.is_fallback is True
+        assert excinfo.value.outage is True
+        assert excinfo.value.__cause__ is not None
 
 
 # ---------------------------------------------------------------------------

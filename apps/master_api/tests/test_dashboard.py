@@ -68,6 +68,7 @@ def _make_booking(
     client_name: str = "Мария Иванова",
     bot_user: BotUser | None = None,
     completed_at: datetime | None = None,
+    completed_by: str = "master",
     conversation: Conversation | None = None,
 ) -> RemoteBookingProxy:
     """Create a visit the way the pilot actually has them (DRF-1085).
@@ -84,7 +85,9 @@ def _make_booking(
       ``ayla_service_id``, which is how the name is resolved for real;
     * ``client_name``  → written onto the ``BotUser``, same as production;
     * ``completed_at`` → ``status="completed"``; the mirror has a status,
-      not a completion timestamp.
+      not a completion timestamp. ``completed_by`` (default — a human) goes
+      with it: a clock-closed visit is not a visit for the «постоянный
+      клиент» chip (DRF-2462), pass ``completed_by="system"`` to model one.
 
     ``conversation`` is accepted and ignored: the mirror has no
     conversation FK, and the intent hint now finds the conversation via the
@@ -131,6 +134,7 @@ def _make_booking(
         start_at=_utc(visit_local),
         end_at=end_at,
         status="completed" if completed_at is not None else status,
+        completed_by=completed_by if completed_at is not None else "",
     )
 
 
@@ -162,6 +166,7 @@ class TestDashboardAuth:
             "today_summary",
             "tab_badges",
             "states",
+            "week_summary",
         }
 
     def test_no_linked_master_returns_401(
@@ -200,15 +205,22 @@ class TestDashboardAuth:
         assert resp.status_code == 403
         assert resp.json()["error"] == "master_inactive"
 
-    def test_inactive_master_returns_403(
+    def test_inactive_master_still_reaches_the_dashboard(
         self,
         client: Client,
         bot_user: BotUser,
         tenant: Tenant,
     ) -> None:
+        """DRF-1521 — снятие с витрины больше не закрывает кабинет.
+
+        Обе половины на одних данных: та же строка, заархивированная,
+        по-прежнему получает 403. Одного «пустили» здесь мало — ворота,
+        которые пускают всех, дали бы ту же зелень.
+        """
+
         from apps.master_api.tests.conftest import make_master
 
-        make_master(
+        master = make_master(
             tenant,
             invite_status=CatalogMaster.InviteStatus.ACCEPTED,
             invite_token=None,
@@ -220,7 +232,15 @@ class TestDashboardAuth:
             reverse("master_api:dashboard"),
             HTTP_AUTHORIZATION=init_data_header("12345"),
         )
-        assert resp.status_code == 403
+        assert resp.status_code == 200
+
+        master.archived_at = dj_timezone.now()
+        master.save(update_fields=["archived_at"])
+        archived_resp = client.get(
+            reverse("master_api:dashboard"),
+            HTTP_AUTHORIZATION=init_data_header("12345"),
+        )
+        assert archived_resp.status_code == 403
 
 
 # --- active visit ---------------------------------------------------------

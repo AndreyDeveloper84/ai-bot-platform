@@ -1,0 +1,43 @@
+{% extends "admin/base_site.html" %}
+{# Промежуточная страница «Сменить роль» (DRF-2082): старая строка закрывается
+   датой (история), новая выдаётся — одной транзакцией в сервисе. Роль
+   владельца этим путём не меняется. #}
+
+{% block breadcrumbs %}
+  <div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">Админка</a>
+    &rsaquo; <a href="{% url 'admin:tenancy_tenantstaff_changelist' %}">Доступы</a>
+    &rsaquo; Сменить роль
+  </div>
+{% endblock %}
+
+{% block content %}
+  <div id="content-main">
+    <h1>{{ title }}</h1>
+    <p style="max-width: 46em;">
+      {{ row.bot_user }} — {{ row.tenant }}, сейчас <strong>{{ row.role }}</strong>.
+      Старая строка останется в истории с датой отзыва; новая появится сразу.
+      Роль действующего владельца здесь не меняется — передача владения идёт
+      через отзыв и выдачу.
+    </p>
+    <form method="post">
+      {% csrf_token %}
+      <fieldset class="module aligned">
+        <div class="form-row">
+          <label for="id_role"><strong>Новая роль</strong></label>
+          <select id="id_role" name="role" style="display: block; margin-top: .5em;">
+            {% for value, label in roles %}
+              <option value="{{ value }}" {% if value == row.role %}selected{% endif %}>{{ label }} ({{ value }})</option>
+            {% endfor %}
+          </select>
+        </div>
+      </fieldset>
+      <input type="hidden" name="{{ action_checkbox_name }}" value="{{ row.pk }}">
+      <input type="hidden" name="action" value="change_staff_role">
+      <div class="submit-row">
+        <input type="submit" name="apply" value="Сменить роль" class="default">
+        <a href="{% url 'admin:tenancy_tenantstaff_changelist' %}" class="button cancel-link">Отмена</a>
+      </div>
+    </form>
+  </div>
+{% endblock %}

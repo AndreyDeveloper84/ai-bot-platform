@@ -136,7 +136,6 @@ from __future__ import annotations
 import datetime as dt
 import logging
 from uuid import UUID
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from django.db import transaction
 
@@ -144,6 +143,7 @@ from apps.booking.master_notify import resolve_master, resolve_service_name
 from apps.handoff.notify import send_max_notification
 from apps.identity.models import BotUser
 from apps.tenancy.models import Tenant
+from apps.tenancy.timezones import salon_zone
 
 logger = logging.getLogger(__name__)
 
@@ -153,8 +153,6 @@ logger = logging.getLogger(__name__)
 # already tells the customer the tap worked.
 _UNKNOWN = "—"
 
-_DEFAULT_TZ = "Europe/Moscow"
-
 # Comment prefix stamped by ``apps.skills.booking.tools.execute_confirm``
 # (and ``execute_reschedule``) on every ``BookingRequest`` the bot
 # creates from the dialog. Under ``BOOKING_VIA_AYLA_REST`` the id in it
@@ -163,31 +161,10 @@ _DEFAULT_TZ = "Europe/Moscow"
 _CHAT_BOOKING_COMMENT_PREFIX = "Bot booking | yclients_record_id="
 
 
-def tenant_timezone(tenant: Tenant) -> ZoneInfo:
-    """Tenant-local timezone, degrading to MSK and then UTC.
-
-    A confirmation rendered in the wrong timezone is worse than none:
-    the customer would arrive at the wrong hour, which is precisely the
-    confusion this ticket is meant to end. An unusable tenant value
-    therefore falls back to the pilot's real timezone, not to UTC.
-
-    Deliberately a local copy of the salon message's private helper
-    rather than an import of it: ``master_notify`` is merged and in
-    production, and this ticket does not touch it.
-    """
-
-    for candidate in (getattr(tenant, "timezone", "") or "", _DEFAULT_TZ):
-        try:
-            return ZoneInfo(candidate)
-        except (ZoneInfoNotFoundError, ValueError):
-            continue
-    return ZoneInfo("UTC")
-
-
-def resolve_client_chat_id(bot_user: BotUser | None) -> str:
+def resolve_client_user_id(bot_user: BotUser | None) -> str:
     """Channel chat id to answer in, or ``""`` when there is none."""
 
-    return str(getattr(bot_user, "chat_id", "") or "").strip()
+    return str(getattr(bot_user, "channel_user_id", "") or "").strip()
 
 
 def was_confirmed_in_chat(*, tenant: Tenant, appointment_id: UUID) -> bool:
@@ -243,7 +220,7 @@ def build_booking_confirmation(
     tenant's timezone — no other person's data, no internal ids.
     """
 
-    when = start_at.astimezone(tenant_timezone(tenant)).strftime("%d.%m.%Y в %H:%M")
+    when = start_at.astimezone(salon_zone(tenant)).strftime("%d.%m.%Y в %H:%M")
     lines = [
         "✅ Вы записаны",
         f"Услуга: {service_name or _UNKNOWN}",
@@ -253,6 +230,11 @@ def build_booking_confirmation(
     salon = (getattr(tenant, "name", "") or "").strip()
     if salon:
         lines.append(f"Салон: {salon}")
+    # DRF-1952 — куда идти: адрес салона записи (зеркало ``Tenant.address``);
+    # пустой — фраза ``visit-address.ts``, не выдуманный адрес и не «—».
+    from apps.tenancy.visit_address import tenant_address_line
+
+    lines.append(tenant_address_line(tenant))
     return "\n".join(lines)
 
 
@@ -272,13 +254,14 @@ def notify_client_booking_confirmed(
     """
 
     try:
-        chat_id = resolve_client_chat_id(bot_user)
-        if not chat_id:
+        user_id = resolve_client_user_id(bot_user)
+        if not user_id:
             # Normal, not a defect: the customer books in the Ayla
             # mobile app / Mini App and has never opened the bot, so
             # there is no conversation to answer in. INFO, because a
             # WARNING here would fire on ordinary traffic and drown the
-            # salon-side no_recipients warning that does mean something.
+            # booking.notify.specialist_unreachable warning that does
+            # mean something.
             logger.info(
                 "booking.client_notify.no_chat tenant=%s appointment_id=%s",
                 tenant.slug,
@@ -303,7 +286,7 @@ def notify_client_booking_confirmed(
             master_name=(getattr(master, "name", "") or "").strip() or _UNKNOWN,
         )
 
-        failures = send_max_notification(text=text, chat_ids=(chat_id,))
+        failures = send_max_notification(text=text, user_ids=(user_id,))
         if failures == 0:
             logger.info(
                 "booking.client_notify.sent tenant=%s appointment_id=%s",

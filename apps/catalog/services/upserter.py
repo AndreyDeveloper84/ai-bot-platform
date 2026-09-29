@@ -40,6 +40,7 @@ from typing import TYPE_CHECKING, Any
 
 from django.db import IntegrityError, transaction
 
+from apps.catalog.master_state import sale_block
 from apps.catalog.models import CatalogService
 from apps.tenancy.context import tenant_scope
 
@@ -149,11 +150,31 @@ def _service_fields(dto: "CatalogSalonServiceDTO") -> dict[str, Any]:
 def upsert_specialists(tenant: "Tenant", dtos: list["CatalogSpecialistDTO"]) -> UpsertResult:
     """Upsert Ayla specialists into ``CatalogMaster`` for one tenant (S3B masters).
 
-    Keyed by the canonical Ayla SpecialistProfile.id (``CatalogMaster.id``).
+    Keyed by the canonical Ayla SpecialistProfile.id (``CatalogMaster.id``),
+    then — DRF-1507 — by the glue key ``(tenant, ayla_user_id)``. The second
+    lookup is what stops one person from owning two master rows: the
+    invite-create path mints its own ``uuid4`` primary key, so the canonical
+    key never finds that row and sync used to add a second one next to it.
     Update overwrites ONLY mirror fields (name, bio, experience, rating,
-    review_count, is_active, ayla_user_id, external_updated_at, raw) —
-    platform-owned fields (invite_status, mode, photo_url, archived_at,
-    invited_at, max_handle, linked_bot_user) are NEVER touched by sync.
+    review_count, is_active, ayla_user_id, external_updated_at, raw, and
+    the DRF-1588 geo trio address / location_lat / location_lng) —
+    platform-owned fields (invite_status, mode, archived_at, invited_at,
+    max_handle, linked_bot_user) are NEVER touched by sync.
+
+    ### Фото и «о себе» — один владелец, каталог (DRF-1812, M20)
+
+    ``bio`` зеркальное давно; ``photo_url`` с этого среза — тоже: значение
+    ``avatar`` каталога переписывает платформенное. Два хранилища фото
+    (``CatalogMaster.photo_url`` бот против ``SpecialistProfile.avatar``
+    каталог) давали два разных «фото для публикации»; решение — каталог
+    (§16 «Source of truth»: никаких параллельных моделей в боте, если
+    каталог уже authority).
+
+    С M21 (DRF-1813) фото пишется в каталог (кабинет — прокси в
+    ``…/media/avatar/``), и переходное правило «у каталога фото нет →
+    оставить платформенное» снято: ``photo_url`` — зеркало без оговорок,
+    пустое фото каталога стирает платформенное. Ключа ``avatar`` в ответе
+    нет (каталог без поля) — поле не трогается: отсутствие не стирание.
 
     Missing-from-feed rows are kept as-is (same policy as salon-services:
     upsert-only, no proactive deactivation — documented in the S3B PR
@@ -189,27 +210,91 @@ def upsert_specialists(tenant: "Tenant", dtos: list["CatalogSpecialistDTO"]) -> 
                     tenant.id,
                 )
                 continue
+            mirror = {
+                "name": dto.name,
+                "bio": dto.bio,
+                "experience": dto.experience,
+                "rating": dto.rating,
+                "review_count": dto.review_count,
+                "is_active": dto.is_active,
+                "ayla_user_id": dto.user_id,
+                # DRF-1933: id каталога — и на новой строке (== pk), и на
+                # склеенной строке приглашения (pk остаётся uuid4).
+                "catalog_specialist_id": dto.ayla_master_id,
+                # DRF-1588 — гео едет в колонки. Раньше оно доезжало только
+                # внутрь ``raw`` (ниже), то есть было, но было недоступно:
+                # по JSON-ключу нельзя ни искать, ни фильтровать, ни
+                # сортировать. Значения переносятся КАК ЕСТЬ — ``None``
+                # остаётся ``None``, пустая строка остаётся пустой строкой,
+                # и ни одно из двух не подменяется другим.
+                "address": dto.address,
+                "location_lat": dto.location_lat,
+                "location_lng": dto.location_lng,
+                "external_updated_at": dto.external_updated_at,
+                "raw": dto.raw,
+            }
+            if dto.avatar_url is not None:
+                # DRF-1812 → DRF-1813 (M21): фото пишется в каталог, зеркало без
+                # оговорок — пустое фото каталога стирает платформенное. Ключа
+                # ``avatar`` нет (``None``, каталог без поля) — поле не трогается.
+                mirror["photo_url"] = dto.avatar_url
             try:
                 with transaction.atomic():
-                    _obj, created = CatalogMaster.objects.update_or_create(
-                        tenant=tenant,
-                        id=dto.ayla_master_id,
-                        defaults={
-                            "name": dto.name,
-                            "bio": dto.bio,
-                            "experience": dto.experience,
-                            "rating": dto.rating,
-                            "review_count": dto.review_count,
-                            "is_active": dto.is_active,
-                            "ayla_user_id": dto.user_id,
-                            "external_updated_at": dto.external_updated_at,
-                            "raw": dto.raw,
-                        },
-                    )
-                    if created:
+                    # DRF-1507 — сначала канонический ключ, потом ключ склейки.
+                    #
+                    # Канонический ключ мирового порядка не меняет: строка,
+                    # заведённая синхронизацией, имеет ``id`` == Ayla
+                    # ``SpecialistProfile.id``, и все девять пилотных мастеров
+                    # находятся именно им. Ветка ниже для них не выполняется.
+                    #
+                    # Вторая попытка — по ``ayla_user_id``. Её адресат — строка,
+                    # заведённая приглашением: у неё ``uuid4`` в ``id``, поэтому
+                    # первый поиск её не видит, и до этой правки синхронизация
+                    # заводила на того же человека вторую. Дальше расходились
+                    # два следствия: ``resolve_master`` искал уведомления по
+                    # инвайт-строке и не находил её, а биллинг возвращал
+                    # ``None``.
+                    #
+                    # Строка НЕ перекладывается на канонический ``id``: на
+                    # ``CatalogMaster`` смотрят внешние ключи из booking,
+                    # scheduling, conversations, notifications и internal_chat,
+                    # и смена первичного ключа — это слияние дублей, отдельный
+                    # обоснованный шаг, а не побочный эффект синхронизации.
+                    # Здесь строка ровно одна, и она та, к которой привязан
+                    # живой ``BotUser``.
+                    obj = CatalogMaster.objects.filter(pk=dto.ayla_master_id).first()
+                    if obj is None and dto.user_id:
+                        obj = CatalogMaster.objects.filter(ayla_user_id=dto.user_id).first()
+                        if obj is not None:
+                            logger.info(
+                                "catalog.upsert.master_deduped model=CatalogMaster "
+                                "ayla_master_id=%s matched_row=%s ayla_user_id=%s "
+                                "tenant_id=%s — строка того же человека уже есть под "
+                                "другим первичным ключом (заведена приглашением). "
+                                "Обновляю её вместо создания второй (DRF-1507).",
+                                dto.ayla_master_id,
+                                obj.pk,
+                                dto.user_id,
+                                tenant.id,
+                            )
+                    if obj is None:
+                        CatalogMaster.objects.create(
+                            tenant=tenant,
+                            id=dto.ayla_master_id,
+                            **mirror,
+                        )
                         result.created += 1
                     else:
+                        block_before = sale_block(obj)
+                        for field_name, value in mirror.items():
+                            setattr(obj, field_name, value)
+                        # ``synced_at`` — ``auto_now``, а ``auto_now`` пишется
+                        # только если поле названо в ``update_fields``. Без
+                        # него «когда платформа последний раз трогала строку»
+                        # молча замерло бы на дате создания.
+                        obj.save(update_fields=[*mirror, "synced_at"])
                         result.updated += 1
+                        _note_sale_block_transition(obj, before=block_before)
             except IntegrityError as exc:
                 # ``CatalogMaster.id`` is the global PK, so one Ayla master can
                 # exist under exactly one tenant at a time. Rows mis-attributed
@@ -259,7 +344,85 @@ def upsert_specialists(tenant: "Tenant", dtos: list["CatalogSpecialistDTO"]) -> 
                     "catalog.upsert.row_failed model=CatalogMaster ayla_master_id=%s",
                     ayla_id,
                 )
+        _write_tenant_address(tenant, dtos)
     return result
+
+
+def _note_sale_block_transition(master: Any, *, before: str | None) -> None:
+    """Тип 4 DRF-2118: мастер продавалась — и перестала. Никогда не бросает.
+
+    Сравнивается ответ :func:`~apps.catalog.master_state.sale_block` до и
+    после записи зеркала: единственное место, где живёт «почему не
+    продаётся». Переход ``None → причина`` — событие для владельца/админа
+    (и для самой мастера); тот же ответ на следующем синке — не событие,
+    и дедуп рендерера его не пропустит.
+    """
+
+    try:
+        after = sale_block(master)
+        if before is not None or after is None:
+            return
+        from apps.channels.max import salon_notify
+
+        salon_notify.notify(salon_notify.master_unavailable_notice(master, block=after))
+    except Exception:  # noqa: BLE001 — синк не должен падать из-за уведомления
+        logger.exception(
+            "catalog.upsert.sale_block_notice_failed master=%s", getattr(master, "pk", None)
+        )
+
+
+def _write_tenant_address(tenant: "Tenant", dtos: list["CatalogSpecialistDTO"]) -> None:
+    """Довезти адрес САЛОНА из фида специалистов в ``Tenant.address`` (DRF-1588).
+
+    Салонный адрес приезжает денормализованным ключом ``tenant_address`` на
+    каждой строке специалиста — отдельным от мастерского ``address``, так что
+    в одном слепке лежат оба. Складывать их здесь нечем: правило старшинства
+    «салон против мастера» — DRF-1589. Здесь только перенос.
+
+    ### Почему это не «первый непустой среди мастеров»
+
+    Потому что ровно это уже однажды сделали, и OPEN_DECISIONS §45 назвал
+    результат лотереей: ``discover_salons`` брала первый непустой адрес среди
+    мастеров салона, и стоило смениться составу мастеров — менялся адрес
+    салона. Здесь ключ салонный, то есть все строки одного салона обязаны
+    нести ОДНО значение. Поэтому:
+
+    * ни одна строка ключа не несёт → ``Tenant.address`` не трогаем вовсе.
+      Источник промолчал, и молчание не повод что-то записать. Каталог отдаёт
+      ключ с DRF-1587, а пустой адрес салона шлёт как ``null`` — это молчание,
+      не ответ (DRF-1954);
+    * все несущие строки согласны → пишем это значение (в т.ч. ``""``:
+      «адреса нет» — ответ источника, а не наше умолчание);
+    * строки РАСХОДЯТСЯ → не пишем ничего и кричим в лог. Выбрать одно из
+      двух означало бы завести лотерею заново, только на этаж ниже, а
+      выбранное значение было бы неотличимо от подтверждённого.
+
+    Идемпотентно: совпадающее значение не перезаписывается, чтобы каждый
+    пятнадцатиминутный удар не двигал ``updated_at`` на пустом месте.
+    """
+    stated = {dto.tenant_address for dto in dtos if dto.tenant_address is not None}
+    if not stated:
+        return
+    if len(stated) > 1:
+        logger.error(
+            "catalog.upsert.tenant_address_disagreement tenant_id=%s values=%r — "
+            "строки одного салона несут разный tenant_address. Адрес салона не "
+            "записан: выбор одного из нескольких — это лотерея (OPEN_DECISIONS "
+            "§45), а записанное значение было бы неотличимо от подтверждённого.",
+            tenant.id,
+            sorted(stated),
+        )
+        return
+    value = stated.pop()
+    if tenant.address == value:
+        return
+    tenant.address = value
+    tenant.save(update_fields=["address", "updated_at"])
+    logger.info(
+        "catalog.upsert.tenant_address_written tenant_id=%s — адрес салона "
+        "приехал ключом tenant_address (DRF-1588).",
+        tenant.id,
+    )
 
 
 def upsert_master_services(
@@ -375,6 +538,19 @@ def upsert_master_services(
     return result
 
 
+def _sellable_fields(dto: "CatalogSpecialistServiceDTO") -> dict[str, Any]:
+    """Что синк пишет в ``sellable`` / ``unsellable_reason`` (DRF-1964a).
+
+    Пусто, когда ключа в ответе не было: каталог до DRF-1962 не меняет в зеркале
+    ничего — это и делает безопасным порядок «бот раньше каталога».
+    """
+    if not dto.sellable_key_present:
+        return {}
+    if dto.sellable:
+        return {"sellable": True, "unsellable_reason": ""}
+    return {"sellable": False, "unsellable_reason": dto.unsellable_reason or "unknown"}
+
+
 def _upsert_one_master_service(
     *,
     tenant: "Tenant",
@@ -422,7 +598,33 @@ def _upsert_one_master_service(
     # first place. Guard #1 stays regardless — the edge asserting its own
     # tenant is the check that does not depend on any other mirror having been
     # correct first.
-    master = master_model.objects.filter(id=dto.specialist).first()
+    # DRF-1933: ``dto.specialist`` — id каталога; строка зеркала находится по
+    # колонке (у склеенного приглашения и соло первичный ключ — uuid4).
+    master = master_model.objects.filter(catalog_specialist_id=dto.specialist).first()
+    if master is None and dto.user_id:
+        # DRF-1507 — тот же ключ склейки, что и в ``upsert_specialists``.
+        #
+        # После дедупа человек, заведённый приглашением, живёт под своим
+        # ``uuid4``, а не под Ayla ``SpecialistProfile.id``. Рёбра приезжают
+        # с ``specialist`` == каноническим id, и поиск по первичному ключу их
+        # больше не находит — мастер остался бы без единой услуги, то есть
+        # небронируемым, ровно после того, как мы починили ему уведомления.
+        #
+        # ``user_id`` здесь — ключ последней надежды, а не основной: он
+        # трогается только когда канонический id не разрешился ни во что.
+        # Столбец уникален в пределах салона (частичное ограничение на
+        # ``CatalogMaster``), поэтому совпадение не может быть
+        # многозначным, а ``.objects`` под ``tenant_scope`` не выпустит
+        # поиск за пределы салона.
+        master = master_model.objects.filter(ayla_user_id=dto.user_id).first()
+        if master is not None:
+            logger.info(
+                "catalog.upsert.master_resolved_by_user_id model=MasterService "
+                "specialist=%s matched_row=%s tenant_id=%s (DRF-1507)",
+                dto.specialist,
+                master.pk,
+                tenant.id,
+            )
     if master is None:
         result.skipped += 1
         logger.info(
@@ -504,6 +706,7 @@ def _upsert_one_master_service(
             # the model's tri-state NULL means "unknown", and the booking
             # gate keeps such an edge closed.
             resolved_requires_health_check=dto.resolved_requires_health_check,
+            **_sellable_fields(dto),
         )
         result.created += 1
         return True
@@ -520,17 +723,37 @@ def _upsert_one_master_service(
     if str(existing.ayla_specialist_service_id) != dto.ayla_specialist_service_id:
         existing.ayla_specialist_service_id = dto.ayla_specialist_service_id
         changed.append("ayla_specialist_service_id")
-    # DRF-1353 — only an EXPLICIT upstream value is written. ``None`` means
-    # the payload did not carry the key, and downgrading a known True/False
-    # to "unknown" on that basis would flip the gate on an upstream hiccup.
-    # A real upstream False does overwrite a stale True: the flag is
-    # escalate-only on Ayla's side, so a False there is a deliberate answer.
+    # DRF-1353 — only an EXPLICIT upstream ANSWER is written, and the test
+    # for "explicit" is now the presence of the KEY, not the non-nullness of
+    # the value.
+    #
+    # Прежнее условие (`is not None`) защищало от настоящей опасности:
+    # понизить известный True/False до «неизвестно» из-за того, что выгрузка
+    # не донесла поле, значит заставить медицинский гейт мигать на каждой
+    # икоте канала. Защита остаётся — но она больше не съедает вместе
+    # с икотой и осмысленный ответ.
+    #
+    # Каталог теперь умеет сказать «я не знаю» (услуга без канонической
+    # связи, `SpecialistService.resolved_requires_health_check` → `None`),
+    # и по проводу это едет ключом со значением `null`. Ключ есть — ответ
+    # прислали, и его надо записать: `NULL` в колонке, который гейт брони
+    # читает как «нужен скрининг». Ключа нет — прежнее поведение, сохранить
+    # что было.
+    #
+    # Настоящий upstream `False` по-прежнему перекрывает устаревший `True`:
+    # флаг на стороне Ayla escalate-only, значит `False` там — намеренный
+    # ответ, а не умолчание.
     if (
-        dto.resolved_requires_health_check is not None
+        dto.health_check_key_present
         and existing.resolved_requires_health_check is not dto.resolved_requires_health_check
     ):
         existing.resolved_requires_health_check = dto.resolved_requires_health_check
         changed.append("resolved_requires_health_check")
+    # DRF-1964a — только при присланном ключе, только изменившееся поле.
+    for name, value in _sellable_fields(dto).items():
+        if getattr(existing, name) != value:
+            setattr(existing, name, value)
+            changed.append(name)
     if changed:
         existing.save(update_fields=[*changed, "updated_at"])
     result.updated += 1

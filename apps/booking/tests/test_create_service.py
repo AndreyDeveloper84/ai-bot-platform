@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta, timezone
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -53,6 +54,11 @@ def master(tenant: Tenant) -> CatalogMaster:
         name="Анна",
         is_active=True,
         invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+        # DRF-1540/1548 — синхронизированная строка всегда несёт
+        # канонический ключ; без него мастер не продаётся и брони не
+        # получает. ``None`` здесь был бы формой, которой у боевой
+        # строки не бывает.
+        ayla_user_id=uuid4(),
     )
 
 
@@ -122,6 +128,63 @@ class TestCreateCustomerBooking:
         assert booking.billable is True
         assert booking.service_id == service.id
         assert booking.master_id == master.id
+
+    def test_a_booking_from_a_recommendation_card_is_attributed_to_it(
+        self, tenant, bot_user, master, service, master_service, working_hours
+    ) -> None:
+        """DRF-1773 — «какая рекомендация привела к этой брони» (B13).
+
+        Сквозной случай: карточка C04 → провенанс интента → атрибуция
+        брони и обратная ссылка на карточке.
+        """
+        from apps.recommendation.models import Recommendation
+        from apps.recommendation.provenance import RECO_PAYLOAD_PREFIX
+
+        card = Recommendation.objects.create(
+            bot_user=bot_user,
+            goal_id="goal-1",
+            kind=Recommendation.Kind.DIRECTION,
+            what="Уменьшить утреннюю отёчность",
+            why=["Ты сказала, что хочешь привести себя в порядок"],
+            fingerprint="fp-create-service",
+        )
+
+        booking = create_customer_booking(
+            inp=CreateBookingInput(
+                tenant=tenant,
+                bot_user=bot_user,
+                service_id=str(service.id),
+                master_id=str(master.id),
+                visit_at=_far_future_monday_noon(),
+                entry_point=f"deep_link:{RECO_PAYLOAD_PREFIX}{card.id}",
+            ),
+            correlation_id="corr-reco",
+        )
+
+        assert booking.attribution_metadata["recommendation_id"] == str(card.id)
+        # Прежние ключи атрибуции на месте — добавка, не замена.
+        assert booking.attribution_metadata["actor_type"] == "customer"
+        card.refresh_from_db()
+        assert card.booking_id == str(booking.id)
+        assert card.booked_at is not None
+
+    def test_a_booking_without_a_card_keeps_the_old_attribution(
+        self, tenant, bot_user, master, service, master_service, working_hours
+    ) -> None:
+        """Отрицательная пара: прежний провенанс ничего не добавляет."""
+        booking = create_customer_booking(
+            inp=CreateBookingInput(
+                tenant=tenant,
+                bot_user=bot_user,
+                service_id=str(service.id),
+                master_id=str(master.id),
+                visit_at=_far_future_monday_noon(),
+                entry_point="catalog",
+            ),
+            correlation_id="corr-plain",
+        )
+        assert booking.attribution_metadata["actor_type"] == "customer"
+        assert "recommendation_id" not in booking.attribution_metadata
 
     def test_visit_in_past(
         self, tenant, bot_user, master, service, master_service, working_hours
@@ -339,3 +402,81 @@ class TestVisitAtValidator:
             client_phone="+71112223344",
             # booking_source defaults to 'external' → validator skipped.
         )
+
+
+class TestABrokenSalonZoneRefusesInsteadOfGuessing:
+    """DRF-2595 (часть Б): битый пояс салона на пути создания — отказ.
+
+    Подмена «МСК + журнал» создала бы запись по московскому часу: в салоне не
+    в Москве это неверный час визита, которого никто не заметит. Отказ громок.
+    Пара: тот же вход с битым поясом — отказ без записи; с починенным — запись.
+    """
+
+    def test_refused_while_broken_then_booked_once_fixed(
+        self, tenant, bot_user, master, service, master_service, working_hours, caplog
+    ) -> None:
+        from zoneinfo import ZoneInfoNotFoundError
+
+        def _book():
+            tenant.refresh_from_db()
+            return create_customer_booking(
+                inp=CreateBookingInput(
+                    tenant=tenant,
+                    bot_user=bot_user,
+                    service_id=str(service.id),
+                    master_id=str(master.id),
+                    visit_at=_far_future_monday_noon(),
+                ),
+                correlation_id="corr-2595",
+            )
+
+        before = BookingRequest.all_tenants.count()
+        Tenant.objects.filter(pk=tenant.pk).update(timezone="Not/AZone")
+        with caplog.at_level("WARNING"), pytest.raises(ZoneInfoNotFoundError):
+            _book()
+        assert any("tenancy.bad_tenant_tz" in r.getMessage() for r in caplog.records)
+        assert BookingRequest.all_tenants.count() == before
+
+        Tenant.objects.filter(pk=tenant.pk).update(timezone="Europe/Moscow")
+        booking = _book()
+        assert booking.master_id == master.id
+        assert BookingRequest.all_tenants.count() == before + 1
+
+    def test_empty_and_broken_both_refuse_and_say_different_things(
+        self, tenant, bot_user, master, service, master_service, working_hours, caplog
+    ) -> None:
+        """Пусто и битое — оба отказ (так было до сведения: ``ZoneInfo("")``
+        бросал), но причины в журнале разные: стёрли против опечатки — разное
+        лечение. Подмена «МСК при пустом» создала бы запись — краснеет."""
+        from zoneinfo import ZoneInfoNotFoundError
+
+        from apps.tenancy.timezones import EmptyTenantTimezone
+
+        def _book():
+            tenant.refresh_from_db()
+            return create_customer_booking(
+                inp=CreateBookingInput(
+                    tenant=tenant,
+                    bot_user=bot_user,
+                    service_id=str(service.id),
+                    master_id=str(master.id),
+                    visit_at=_far_future_monday_noon(),
+                ),
+                correlation_id="corr-2595-empty",
+            )
+
+        before = BookingRequest.all_tenants.count()
+        outcomes: dict[str, list[str]] = {}
+        for zone, exc in (("", EmptyTenantTimezone), ("Not/AZone", ZoneInfoNotFoundError)):
+            Tenant.objects.filter(pk=tenant.pk).update(timezone=zone)
+            caplog.clear()
+            with caplog.at_level("WARNING"), pytest.raises(exc):
+                _book()
+            outcomes[zone] = [
+                m for m in (r.getMessage() for r in caplog.records) if "_tenant_tz" in m
+            ]
+        assert BookingRequest.all_tenants.count() == before
+        assert any("tenancy.empty_tenant_tz" in m for m in outcomes[""])
+        assert any("tenancy.bad_tenant_tz" in m for m in outcomes["Not/AZone"])
+        assert not any("bad_tenant_tz" in m for m in outcomes[""])
+        assert not any("empty_tenant_tz" in m for m in outcomes["Not/AZone"])

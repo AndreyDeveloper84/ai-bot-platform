@@ -7,7 +7,12 @@
  * endpoints (`apps/miniapp_api`):
  *
  *   GET    /api/v1/customer/me/personal-data/export/  → JSON attachment
- *   DELETE /api/v1/customer/me/personal-data/         → {status:"deleted"}
+ *   POST   /api/v1/customer/me/deletion-request/      → {status:"accepted", request}
+ *
+ * DRF-1699 (§7 свода владельца, 11.09.2026): удаление — не синхронный
+ * каскад, а ЗАЯВКА. Лист заводит `DeletionRequest` в каталоге и показывает
+ * человеку, что запрос принят, точную крайнюю дату, номер и статус.
+ * Стирание делает исполнитель на сервере (срез D3), не этот лист.
  *
  * DRF-1453 добавляет сюда третий лист — согласие на медданные
  * ({@link HealthConsentSheet}). Он живёт в этом же файле, а не рядом, чтобы
@@ -20,13 +25,18 @@
  * - **UI idempotency** — while a request is in flight both actions are
  *   disabled and Escape/backdrop are ignored, so repeat taps never spawn
  *   repeat requests. Backend repeats stay safe regardless (C5.2).
- * - **Honest partial** — a 502 `{status:"partial", failed_steps}` maps to
- *   humanised step labels (raw backend slugs never render) + retry +
- *   support deeplink (#949 fallback on every failure view).
- * - **Retention boundary** — delete copy states what the pilot cascade
- *   covers (memory, personal context, consents) and that bookings /
- *   payments may be retained per law. No timeframe promises, no 30-day
- *   grace wording (founder-locked anti-patterns, spec §14).
+ * - **Honest refusal** — the server says ONE thing about the data on
+ *   failure: `not_started` (§7). No «partial»: the sheet never has to
+ *   explain which half happened. Retry only when the server says it can
+ *   help; support deeplink on every failure view (#949).
+ * - **Retention boundary and the 30-day deadline** — the confirmation
+ *   lists exactly what §7 lists: account off, profile / goals / plans /
+ *   diaries / addresses / personal context erased, done within 30 days,
+ *   bookings and payments possibly kept limited or anonymised where the
+ *   law requires, irreversible once started. The former rule «no 30-day
+ *   grace wording» (spec §14) is RETIRED by the owner's §7 decision of
+ *   11.09.2026 — the decision is newer than the spec, and a screen that
+ *   kept obeying the old rule would be wrong by the new one.
  *
  * # A11y (mirrors SupportEntrySheet, WCAG 2.2 AA)
  *
@@ -36,23 +46,39 @@
  * backdrop click closes (same guard); focus restores to the opener.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState } from "react";
 
-import { SUPPORT_DEEPLINK } from "../lib/customer-profile";
+import {
+  DATA_STORAGE_DELETION_STARTED_NOTE,
+  DATA_STORAGE_PARTIAL_PROCESSING_NOTE,
+  DATA_STORAGE_REVOCATION_DISCLOSURE_TEXT,
+  DataStorageRevocationFailedError,
+  revokeDataStorage,
+  StaleDisclosureError as DataStorageStaleDisclosureError,
+  SUPPORT_DEEPLINK,
+  type ConsentsResponse,
+} from "../lib/customer-profile";
 import {
   DELETE_CONFIRMATION_TOKEN,
-  deletePersonalData,
+  DELETION_STATUS_LABELS,
+  DeletionNotStartedError,
   exportPersonalData,
-  PersonalDataPartialDeleteError,
+  formatDeadline,
+  getCurrentDeletionRequest,
+  requestAccountDeletion,
   triggerDownload,
+  type DeletionRequestInfo,
 } from "../lib/personal-data";
 import {
   grantHealthConsent,
-  HEALTH_CONSENT_DOCUMENT_VERSION,
   StaleDisclosureError,
   withdrawHealthConsent,
   type HealthConsentState,
 } from "../lib/health-consent";
+import {
+  DISCLOSURE_BODY as FOOD_DIARY_DISCLOSURE_BODY,
+  FOOD_DIARY_DISCLOSURE_VERSION,
+} from "../lib/food-diary-disclosure";
 import { useSheetKeyNav } from "../hooks/useSheetKeyNav";
 
 // ---------------------------------------------------------------------------
@@ -69,7 +95,16 @@ interface SheetChromeProps {
   children: React.ReactNode;
 }
 
-function SheetChrome({
+/**
+ * Общая обёртка листа: заголовок, ловушка фокуса, возврат фокуса на
+ * триггер, закрытие по Esc.
+ *
+ * Экспортируется (DRF-1477), потому что лист часового пояса —
+ * `TimezoneSheet.tsx` — обязан вести себя так же. Скопировать эту
+ * обёртку значило бы завести вторую реализацию ловушки фокуса и второе
+ * поведение Esc: они разойдутся не сразу и молча, а починят их порознь.
+ */
+export function SheetChrome({
   headlineId,
   headline,
   closeDisabled,
@@ -270,44 +305,101 @@ export function PersonalDataExportSheet({ open, triggerRef, onClose }: SheetProp
 }
 
 // ---------------------------------------------------------------------------
-// C5.2 — Delete
+// DRF-1699 — Заявка на удаление аккаунта и личных данных (§7)
 // ---------------------------------------------------------------------------
 
 type DeleteView =
   | "confirm"
   | "busy"
-  | "done"
-  | "partial"
-  // Structural failure (no Ayla linkage): local erasure succeeded, the
-  // remote leg is impossible, so we say so instead of offering a retry
-  // that can never work.
-  | "unretryable"
+  | "accepted"
+  // Сервер сказал единственное, что вправе сказать при отказе: удаление
+  // НЕ НАЧАЛОСЬ. Данные в прежнем состоянии. Повтор — только если сервер
+  // сказал, что он поможет.
+  | "not_started"
   | "error";
 
-/** Backend cascade slugs → human copy (raw slugs never render). */
-const FAILED_STEP_LABELS: Record<string, string> = {
-  ayla_delete: "удалить данные в основной системе",
-  memory_delete: "очистить память",
-  consent_withdraw: "отозвать согласия",
-  profile_pii_erase: "очистить контакты и имя в профиле",
-};
+/**
+ * Пять пунктов подтверждения — §7 свода дословно, ни одним меньше и ни
+ * одним больше. Экспортированы, чтобы тест сверял состав, а не угадывал
+ * по обрывкам фраз.
+ */
+export const DELETION_CONFIRMATION_POINTS: readonly string[] = [
+  "аккаунт будет отключён;",
+  "профиль, цели, планы, дневники, адреса и персональный контекст будут удалены;",
+  "срок завершения — не позднее 30 дней;",
+  "состоявшиеся записи и оплаты могут сохраняться ограниченно или обезличенно, если этого требует закон;",
+  "после начала удаления действие нельзя отменить.",
+];
 
-function humanizeFailedSteps(steps: string[]): string {
-  return steps
-    .map((s) => FAILED_STEP_LABELS[s] ?? "завершить один из шагов")
-    .join(", ");
+/** «Принято» — с датой, номером и статусом словами; сырые слаги не выходят. */
+export function DeletionRequestSummary({
+  request,
+  created,
+}: {
+  request: DeletionRequestInfo;
+  created: boolean;
+}) {
+  return (
+    <>
+      <p className="profile-support-sheet__body">
+        {created ? "Запрос принят." : "Запрос уже был принят раньше."} Удаление будет
+        завершено не позднее <b>{formatDeadline(request.deadline_at)}</b>.
+      </p>
+      <p className="profile-support-sheet__body">
+        Номер запроса: <code>{request.request_id}</code>
+        <br />
+        Статус: {DELETION_STATUS_LABELS[request.status] ?? "в работе"}
+      </p>
+    </>
+  );
+}
+
+/**
+ * Строка состояния в профиле: у человека уже есть заявка → он видит номер,
+ * срок и статус при каждом заходе, а не только в момент нажатия (§7:
+ * «текущий статус»). Ничего нет или не удалось прочитать — ничего не
+ * рисуется: отсутствие строки — не ошибка экрана.
+ */
+export function DeletionRequestStatus() {
+  const [request, setRequest] = useState<DeletionRequestInfo | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    getCurrentDeletionRequest()
+      .then((r) => {
+        if (alive) setRequest(r);
+      })
+      .catch(() => {
+        /* профиль без сведений о заявке — не ошибка экрана */
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  if (!request) return null;
+  return (
+    <div className="profile-section__caption" role="status" data-testid="deletion-request-status">
+      <DeletionRequestSummary request={request} created={false} />
+    </div>
+  );
 }
 
 export function PersonalDataDeleteSheet({ open, triggerRef, onClose }: SheetProps) {
   const [view, setView] = useState<DeleteView>("confirm");
-  const [failedSteps, setFailedSteps] = useState<string[]>([]);
   const [typed, setTyped] = useState("");
+  const [accepted, setAccepted] = useState<{
+    request: DeletionRequestInfo;
+    created: boolean;
+  } | null>(null);
+  const [refusal, setRefusal] = useState<DeletionNotStartedError | null>(null);
 
   useEffect(() => {
     if (open) {
       setView("confirm");
-      setFailedSteps([]);
       setTyped("");
+      setAccepted(null);
+      setRefusal(null);
     }
   }, [open]);
 
@@ -319,12 +411,13 @@ export function PersonalDataDeleteSheet({ open, triggerRef, onClose }: SheetProp
     if (!confirmed) return;
     setView("busy");
     try {
-      await deletePersonalData(typed.trim());
-      setView("done");
+      const result = await requestAccountDeletion(typed.trim());
+      setAccepted(result);
+      setView("accepted");
     } catch (err) {
-      if (err instanceof PersonalDataPartialDeleteError) {
-        setFailedSteps(err.failedSteps);
-        setView(err.isUnretryable ? "unretryable" : "partial");
+      if (err instanceof DeletionNotStartedError) {
+        setRefusal(err);
+        setView("not_started");
       } else {
         setView("error");
       }
@@ -337,22 +430,19 @@ export function PersonalDataDeleteSheet({ open, triggerRef, onClose }: SheetProp
   return (
     <SheetChrome
       headlineId="personal-data-delete-headline"
-      headline="Удалить мои данные?"
+      headline="Удалить аккаунт и личные данные?"
       closeDisabled={busy}
       triggerRef={triggerRef}
       onClose={onClose}
     >
       {view === "confirm" && (
         <>
-          <p className="profile-support-sheet__body">
-            Удалю во всех наших системах: что <span lang="en">Ayla</span>{" "}
-            помнит о тебе, твои персональные настройки и согласия. Это
-            действие нельзя отменить.
-          </p>
-          <p className="profile-support-sheet__body">
-            Записи и оплаты могут храниться дольше, если этого требует
-            закон.
-          </p>
+          <p className="profile-support-sheet__body">Что произойдёт:</p>
+          <ul className="profile-support-sheet__list">
+            {DELETION_CONFIRMATION_POINTS.map((point) => (
+              <li key={point}>{point}</li>
+            ))}
+          </ul>
           <label
             className="profile-support-sheet__body"
             htmlFor="personal-data-delete-confirm"
@@ -386,29 +476,30 @@ export function PersonalDataDeleteSheet({ open, triggerRef, onClose }: SheetProp
               disabled={!confirmed}
               onClick={start}
             >
-              Удалить данные
+              Удалить аккаунт
             </button>
           </div>
         </>
       )}
       {view === "busy" && (
         <>
-          <p className="profile-support-sheet__body">Удаляю…</p>
+          <p className="profile-support-sheet__body">Отправляю запрос…</p>
           <div className="profile-support-sheet__actions">
             <button type="button" disabled className="btn-secondary">
               Отмена
             </button>
             <button type="button" disabled className="btn-primary">
-              Удаляю…
+              Отправляю…
             </button>
           </div>
         </>
       )}
-      {view === "done" && (
+      {view === "accepted" && accepted && (
         <>
+          <DeletionRequestSummary request={accepted.request} created={accepted.created} />
           <p className="profile-support-sheet__body">
-            Данные удалены. <span lang="en">Ayla</span> больше не
-            использует твою память, настройки и согласия.
+            Персонализация и новая обработка твоих данных прекращаются
+            сразу. Отменить удаление нельзя.
           </p>
           <div className="profile-support-sheet__actions">
             <button
@@ -421,35 +512,16 @@ export function PersonalDataDeleteSheet({ open, triggerRef, onClose }: SheetProp
           </div>
         </>
       )}
-      {view === "unretryable" && (
+      {view === "not_started" && (
         <>
           <p className="profile-support-sheet__body">
-            Здесь, в боте, я всё удалила: что помню о тебе, твои настройки и
-            согласия.
+            Удаление не началось. Твои данные в прежнем состоянии — ничего
+            не удалено и не изменено.
           </p>
           <p className="profile-support-sheet__body">
-            А вот {humanizeFailedSteps(failedSteps)} автоматически не вышло.
-            Напиши в поддержку — мы доведём это вручную. Повторная попытка
-            здесь не поможет.
-          </p>
-          <div className="profile-support-sheet__actions">
-            <button
-              type="button"
-              className="btn-primary profile-support-sheet__primary"
-              onClick={onClose}
-            >
-              Закрыть
-            </button>
-            <SupportLink />
-          </div>
-        </>
-      )}
-      {view === "partial" && (
-        <>
-          <p className="profile-support-sheet__body">
-            Не всё удалено. Не получилось {humanizeFailedSteps(failedSteps)}.
-            Повторное удаление безопасно — попробуй ещё раз, а если снова
-            не выйдет, напиши в поддержку.
+            {refusal?.retryable
+              ? "Попробуй ещё раз. Если снова не выйдет — напиши в поддержку."
+              : "Повторная попытка здесь не поможет — напиши в поддержку, мы примем запрос вручную."}
           </p>
           <div className="profile-support-sheet__actions">
             <button
@@ -459,13 +531,15 @@ export function PersonalDataDeleteSheet({ open, triggerRef, onClose }: SheetProp
             >
               Отмена
             </button>
-            <button
-              type="button"
-              className="btn-primary profile-support-sheet__primary"
-              onClick={start}
-            >
-              Попробовать ещё раз
-            </button>
+            {refusal?.retryable && (
+              <button
+                type="button"
+                className="btn-primary profile-support-sheet__primary"
+                onClick={start}
+              >
+                Попробовать ещё раз
+              </button>
+            )}
             <SupportLink />
           </div>
         </>
@@ -473,8 +547,8 @@ export function PersonalDataDeleteSheet({ open, triggerRef, onClose }: SheetProp
       {view === "error" && (
         <>
           <p className="profile-support-sheet__body">
-            Не получилось удалить данные. Попробуй ещё раз — если снова
-            не выйдет, напиши в поддержку, мы удалим вручную.
+            Удаление не началось: не удалось отправить запрос. Попробуй ещё
+            раз — если снова не выйдет, напиши в поддержку.
           </p>
           <div className="profile-support-sheet__actions">
             <button
@@ -512,8 +586,11 @@ export function PersonalDataDeleteSheet({ open, triggerRef, onClose }: SheetProp
 //
 // * раскрытие перед подтверждением — CTA лежит ПОД перечнем, а не над ним,
 //   и перечень не сворачивается: согласие подписывают после текста;
-// * версия — выдача уходит с HEALTH_CONSENT_DOCUMENT_VERSION, то есть в
-//   журнал попадает то, что человеку показали. Если сервер тем временем
+// * версия — выдача уходит с FOOD_DIARY_DISCLOSURE_VERSION, то есть в
+//   журнал попадает то, что человеку показали (DRF-2100: показывается
+//   раскрытие дневника Z9 — согласие на данные о питании одно, и это оно;
+//   свой текст «Что передаётся/Зачем» лист больше не несёт, иначе в журнал
+//   попадала бы версия одного текста под показом другого). Если сервер тем временем
 //   обновил раскрытие (409 stale_disclosure), лист НЕ дожимает выдачу, а
 //   честно говорит, что текст изменился и его надо перечитать;
 // * симметрия — отзыв живёт в том же листе и тем же весом: разрешение,
@@ -531,17 +608,6 @@ interface HealthConsentSheetProps extends SheetProps {
   /** Успешная запись: экран обновляет строку согласия и показывает снекбар. */
   onSettled: (next: HealthConsentState) => void;
 }
-
-/** Что именно уходит в обработку. Формулировки — по факту, без обещаний. */
-const HEALTH_DATA_SCOPE: readonly string[] = [
-  "Что ты записываешь в дневник питания: блюда, порции, время",
-  "Недельная картина по белку, воде и целям — в сводном виде",
-];
-
-const HEALTH_DATA_PURPOSE: readonly string[] = [
-  "Ayla учитывает питание в разговоре и в подсказках",
-  "Без этого разрешения дневник остаётся у тебя, а в разговоре не участвует",
-];
 
 export function HealthConsentSheet({
   open,
@@ -561,7 +627,7 @@ export function HealthConsentSheet({
     try {
       const next = granted
         ? await withdrawHealthConsent()
-        : await grantHealthConsent(HEALTH_CONSENT_DOCUMENT_VERSION);
+        : await grantHealthConsent(FOOD_DIARY_DISCLOSURE_VERSION);
       onSettled(next);
       onClose();
     } catch (err) {
@@ -602,20 +668,13 @@ export function HealthConsentSheet({
                 разрешение на них отдельное — и его не бывает «заодно» с
                 остальными.
               </p>
-              <p className="profile-support-sheet__sub-heading">
-                Что передаётся:
-              </p>
-              <ul className="profile-support-sheet__list">
-                {HEALTH_DATA_SCOPE.map((item) => (
-                  <li key={item}>{item}</li>
-                ))}
-              </ul>
-              <p className="profile-support-sheet__sub-heading">Зачем:</p>
-              <ul className="profile-support-sheet__list">
-                {HEALTH_DATA_PURPOSE.map((item) => (
-                  <li key={item}>{item}</li>
-                ))}
-              </ul>
+              {/* DRF-2100 — то же раскрытие дневника (Z9), что и на экране
+                  сканера: согласие одно, текст один, версия одна. */}
+              {FOOD_DIARY_DISCLOSURE_BODY.map((paragraph) => (
+                <p key={paragraph} className="profile-support-sheet__body">
+                  {paragraph}
+                </p>
+              ))}
               <p className="profile-support-sheet__body">
                 Отозвать можно в любой момент — здесь же, одним действием.
               </p>
@@ -676,6 +735,308 @@ export function HealthConsentSheet({
         <>
           <p className="profile-support-sheet__body">
             Не получилось сохранить. Ничего не изменилось.
+          </p>
+          <div className="profile-support-sheet__actions">
+            <button
+              type="button"
+              data-initial-focus
+              className="btn-secondary profile-support-sheet__cancel"
+              onClick={onClose}
+            >
+              Закрыть
+            </button>
+            <button
+              type="button"
+              className="btn-primary profile-support-sheet__primary"
+              onClick={submit}
+            >
+              Попробовать ещё раз
+            </button>
+            <SupportLink />
+          </div>
+        </>
+      )}
+    </SheetChrome>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Отзыв согласия на хранение данных (§35 п.6-п.9, п.16) — DRF-1475
+//
+// Не тумблер. Отзыв согласия необратим по последствиям, и переключатель,
+// который снимает его одним касанием, показал бы последствия ПОСЛЕ
+// действия — то есть никогда. Поэтому тот же жанр, что у соседей по
+// файлу: строка `ConsentRow variant="action"` ведёт в лист, человек
+// читает утверждённый текст последствий и подтверждает отдельным
+// нажатием.
+//
+// Три вещи, которые лист держит и которые легко потерять:
+//
+// * текст последствий — УТВЕРЖДЁН ВЛАДЕЛЬЦЕМ ДОСЛОВНО (§35 п.7) и живёт
+//   одной константой в `lib/customer-profile.ts`. Здесь он только
+//   рисуется; слова не меняются. Разметка не текст: `Ayla` оборачивается
+//   в lang="en" (WCAG 3.1.1), состав и порядок слов остаются те же;
+// * версия раскрытия — ИЗ ОТВЕТА СЕРВЕРА, не из константы на клиенте.
+//   Смысл проверки в том, что человек нажал под тем текстом, который
+//   сервер считает актуальным. На 409 лист не «дожимает» отзыв тем же
+//   телом, а просит перечитать раскрытие (и экран его перечитывает);
+// * §35 п.16 — при `revoked_partial_processing` лист говорит ТОЛЬКО
+//   «Согласие отозвано» и не делает ни одного утверждения о полноте
+//   удаления. Ни «всё удалено», ни «часть данных осталась»: второе тоже
+//   формулировка, которой у нас нет. Место для будущей —
+//   `DATA_STORAGE_PARTIAL_PROCESSING_NOTE` с TODO(Q-CLIENT-03).
+//
+// §35 п.6: отзыв НЕ закрывает аккаунт. Об этом сказано и в строке
+// профиля, и здесь — рядом с «Удалить аккаунт» два действия не должны
+// сливаться ни визуально, ни словами.
+// ---------------------------------------------------------------------------
+
+type DataStorageRevokeView =
+  | "confirm"
+  | "busy"
+  // Отзыв состоялся полностью.
+  | "revoked"
+  // Отзыв состоялся, удаление в Ayla в задании — readback ещё не подтвердил (DRF-1950).
+  | "started"
+  // Отзыв состоялся, часть обработки накопленного не отработала.
+  | "partial"
+  // 409: сервер обновил текст последствий — повтор тем же телом не пройдёт.
+  | "stale"
+  // 502: не состоялся сам отзыв, согласие осталось действующим.
+  | "failed"
+  // Ответа не было или он не про отзыв — исход неизвестен, и так и сказано.
+  | "unknown";
+
+interface DataStorageRevokeSheetProps extends SheetProps {
+  /** Версия раскрытия из последнего ответа сервера. Не константа клиента. */
+  disclosureVersion: string;
+  /** Токен подтверждения — общий с C5-удалением, второй копии нет. */
+  confirmationToken: string;
+  /** Отзыв состоялся: экран перечитывает состояние из ЭТОГО ответа. */
+  onRevoked: (next: ConsentsResponse) => void;
+  /** 409: экран обязан перечитать `me/consents/` и показать раскрытие заново. */
+  onStaleDisclosure: () => void;
+}
+
+/**
+ * Утверждённый текст последствий. Слова берутся из константы как есть;
+ * единственное, что добавляет эта функция, — разметка языка для `Ayla`.
+ */
+function ApprovedRevocationDisclosure() {
+  const parts = DATA_STORAGE_REVOCATION_DISCLOSURE_TEXT.split("Ayla");
+  return (
+    <p className="profile-support-sheet__body">
+      {parts.map((part, i) => (
+        <Fragment key={i}>
+          {i > 0 && <span lang="en">Ayla</span>}
+          {part}
+        </Fragment>
+      ))}
+    </p>
+  );
+}
+
+export function DataStorageRevokeSheet({
+  open,
+  triggerRef,
+  onClose,
+  disclosureVersion,
+  confirmationToken,
+  onRevoked,
+  onStaleDisclosure,
+}: DataStorageRevokeSheetProps) {
+  const [view, setView] = useState<DataStorageRevokeView>("confirm");
+
+  useEffect(() => {
+    if (open) setView("confirm");
+  }, [open]);
+
+  const submit = useCallback(async () => {
+    setView("busy");
+    try {
+      const result = await revokeDataStorage(
+        confirmationToken,
+        disclosureVersion,
+      );
+      // §35 п.9: состояние берётся из ответа сервера, а не достраивается
+      // из решения. Что сервер сказал, то экран и покажет.
+      onRevoked(result.consents);
+      setView(
+        result.status === "revoked"
+          ? "revoked"
+          : result.status === "revoked_deletion_started"
+            ? "started"
+            : "partial",
+      );
+    } catch (err) {
+      if (err instanceof DataStorageStaleDisclosureError) {
+        onStaleDisclosure();
+        setView("stale");
+        return;
+      }
+      setView(
+        err instanceof DataStorageRevocationFailedError ? "failed" : "unknown",
+      );
+    }
+  }, [confirmationToken, disclosureVersion, onRevoked, onStaleDisclosure]);
+
+  if (!open) return null;
+  const busy = view === "busy";
+
+  return (
+    <SheetChrome
+      headlineId="data-storage-revoke-headline"
+      headline="Отозвать согласие на хранение данных?"
+      closeDisabled={busy}
+      triggerRef={triggerRef}
+      onClose={onClose}
+    >
+      {view === "confirm" && (
+        <>
+          <ApprovedRevocationDisclosure />
+          <p className="profile-support-sheet__body">
+            Это не удаление аккаунта. Аккаунт останется, записаться снова
+            можно будет как обычно. Удалить аккаунт — отдельное действие в
+            профиле.
+          </p>
+          <div className="profile-support-sheet__actions">
+            <button
+              type="button"
+              data-initial-focus
+              className="btn-secondary profile-support-sheet__cancel"
+              onClick={onClose}
+            >
+              Не отзывать
+            </button>
+            <button
+              type="button"
+              className="btn-primary profile-support-sheet__primary"
+              onClick={submit}
+            >
+              Отозвать согласие
+            </button>
+          </div>
+        </>
+      )}
+      {view === "busy" && (
+        <>
+          <p className="profile-support-sheet__body">Отзываю…</p>
+          <div className="profile-support-sheet__actions">
+            <button type="button" disabled className="btn-secondary">
+              Не отзывать
+            </button>
+            <button type="button" disabled className="btn-primary">
+              Отзываю…
+            </button>
+          </div>
+        </>
+      )}
+      {view === "revoked" && (
+        <>
+          <p className="profile-support-sheet__body">
+            Согласие отозвано. Данные, которые можно удалить, удалены.
+          </p>
+          <div className="profile-support-sheet__actions">
+            <button
+              type="button"
+              className="btn-primary profile-support-sheet__primary"
+              onClick={onClose}
+            >
+              Закрыть
+            </button>
+          </div>
+        </>
+      )}
+      {view === "started" && (
+        <>
+          <p className="profile-support-sheet__body">Согласие отозвано.</p>
+          <p className="profile-support-sheet__body">
+            {DATA_STORAGE_DELETION_STARTED_NOTE}
+          </p>
+          <div className="profile-support-sheet__actions">
+            <button
+              type="button"
+              className="btn-primary profile-support-sheet__primary"
+              onClick={onClose}
+            >
+              Закрыть
+            </button>
+          </div>
+        </>
+      )}
+      {view === "partial" && (
+        <>
+          {/* §35 п.16: одно проверенное утверждение и ни одного лишнего.
+              Про возможное сохранение части сведений человек прочитал в
+              утверждённом тексте до нажатия. */}
+          <p className="profile-support-sheet__body">Согласие отозвано.</p>
+          {DATA_STORAGE_PARTIAL_PROCESSING_NOTE && (
+            <p className="profile-support-sheet__body">
+              {DATA_STORAGE_PARTIAL_PROCESSING_NOTE}
+            </p>
+          )}
+          <div className="profile-support-sheet__actions">
+            <button
+              type="button"
+              className="btn-primary profile-support-sheet__primary"
+              onClick={onClose}
+            >
+              Закрыть
+            </button>
+          </div>
+        </>
+      )}
+      {view === "stale" && (
+        <>
+          <p className="profile-support-sheet__body">
+            Текст про последствия обновился, пока лист был открыт. Открой
+            его заново и прочитай — отзыв записывается на тот текст,
+            который ты видела.
+          </p>
+          <div className="profile-support-sheet__actions">
+            <button
+              type="button"
+              data-initial-focus
+              className="btn-primary profile-support-sheet__primary"
+              onClick={onClose}
+            >
+              Понятно
+            </button>
+          </div>
+        </>
+      )}
+      {view === "failed" && (
+        <>
+          <p className="profile-support-sheet__body">
+            Не получилось отозвать согласие. Оно осталось действующим.
+          </p>
+          <div className="profile-support-sheet__actions">
+            <button
+              type="button"
+              data-initial-focus
+              className="btn-secondary profile-support-sheet__cancel"
+              onClick={onClose}
+            >
+              Закрыть
+            </button>
+            <button
+              type="button"
+              className="btn-primary profile-support-sheet__primary"
+              onClick={submit}
+            >
+              Попробовать ещё раз
+            </button>
+            <SupportLink />
+          </div>
+        </>
+      )}
+      {view === "unknown" && (
+        <>
+          <p className="profile-support-sheet__body">
+            Не получилось дозвониться до сервера, и я не знаю, дошёл ли
+            отзыв. Открой профиль заново и посмотри строку «Хранение
+            данных» — там будет текущее состояние. Повторный отзыв
+            безопасен.
           </p>
           <div className="profile-support-sheet__actions">
             <button

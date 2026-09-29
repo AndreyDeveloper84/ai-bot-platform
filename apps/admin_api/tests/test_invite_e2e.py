@@ -20,7 +20,6 @@ This test exists ONLY to prove the wire formats match across PR boundaries.
 from __future__ import annotations
 
 import json
-from unittest.mock import patch
 
 from django.test import Client
 from django.urls import reverse
@@ -70,36 +69,34 @@ class TestAdminInviteToMasterAcceptE2E:
 
         # 1. Owner POSTs the invite.
         #
-        # DRF-1349 — the loop is run on a *configured* contour. The invite
-        # DM enters the Mini App through an `open_app` button, which needs
-        # the bot's Mini App name; with neither that nor a usable
-        # SITE_DOMAIN the dispatch now reports `failed` instead of sending
-        # a message the invited master could not act on. Leaving both
-        # unset here would have this end-to-end test assert `queued`
-        # against a contour where nothing can be opened.
+        # DRF-1349 — the loop is run on a *configured* contour: the
+        # entry into the Mini App is an `open_app` button, and that
+        # needs the bot's Mini App name.
+        #
+        # §44.4 — no message goes out from here at all any more, so the
+        # dispatch mock and its `queued` verdict are gone. The owner
+        # forwards the link himself; steps 2-4 below are what the person
+        # who receives it does, and they are unchanged.
         settings.MAX_BOT_WEB_APP = "id583_bot"
-        with patch("apps.admin_api.views_invite.max_outbound.send_message") as mock_dm:
-            mock_dm.return_value = {"ok": True}
-            resp_invite = client.post(
-                reverse("admin_api:master_invite_create"),
-                data=json.dumps(
-                    {
-                        "name": "Анна Invitee",
-                        "contact_method": "max_username",
-                        "contact_value": "@anna_e2e",
-                        "schedule_preset": "default_mon_fri_10_19",
-                        "mode": "invite",
-                    }
-                ),
-                content_type="application/json",
-                HTTP_AUTHORIZATION=admin_header("5001"),
-            )
+        resp_invite = client.post(
+            reverse("admin_api:master_invite_create"),
+            data=json.dumps(
+                {
+                    "name": "Анна Invitee",
+                    "contact_method": "max_username",
+                    "contact_value": "@anna_e2e",
+                    "schedule_preset": "default_mon_fri_10_19",
+                    "mode": "invite",
+                }
+            ),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=admin_header("5001"),
+        )
         assert resp_invite.status_code == 201, resp_invite.content
         invite_body = resp_invite.json()
         token = invite_body["invite_token"]
         master_id = invite_body["master_id"]
         assert token  # non-null
-        assert invite_body["max_dm_delivery"] == "queued"
 
         # 2. Invitee opens the Mini App and calls /onboarding/claim.
         master_header = _master_init_data_header(bot_token=ADMIN_BOT_TOKEN)

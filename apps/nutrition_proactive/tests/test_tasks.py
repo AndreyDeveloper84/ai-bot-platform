@@ -21,8 +21,9 @@ import pytest
 from django.core.management import call_command
 
 from apps.consent.models import ConsentRecord
+from apps.consent.nutrition import FOOD_DIARY_CONSENT_DOCUMENT_VERSION
 from apps.identity.models import BotUser
-from apps.integrations.ayla import SummaryResponse, WaterTodayResponse
+from apps.integrations.ayla import ProfileResponse, SummaryResponse, WaterTodayResponse
 from apps.nutrition_proactive import prefs, selection, tasks
 from apps.tenancy.models import Tenant
 
@@ -55,6 +56,20 @@ def grant_consent(bot_user: BotUser) -> ConsentRecord:
     )
 
 
+def grant_food_diary(bot_user: BotUser) -> ConsentRecord:
+    """The diary/scanner consent — a registry row since DRF-1963 (M1)."""
+    return ConsentRecord.all_tenants.create(
+        tenant=bot_user.tenant,
+        bot_user=bot_user,
+        consent_type=ConsentRecord.ConsentType.FOOD_DIARY_PROCESSING.value,
+        granted=True,
+        source="test:fixture",
+        # Текущая версия, не литерал: фикстура «согласие есть» обязана
+        # стоять под тем текстом, который признаёт предикат (D3).
+        document_version=FOOD_DIARY_CONSENT_DOCUMENT_VERSION,
+    )
+
+
 def make_user(
     tenant: Tenant,
     *,
@@ -82,20 +97,52 @@ def make_user(
     user = BotUser.all_tenants.create(
         tenant=tenant,
         channel="max",
-        channel_user_id=f"np-{suffix}",
-        chat_id="chat-np-1" if chat_id is None else chat_id,
+        # S2-2 (owner §2.4): these tests model a person the client contour
+        # knows — a LINKED shell. A SHADOW gets nothing, and that is proven
+        # in ``TestShadowIsClosed`` against a shell built without this line.
+        customer_status=BotUser.CustomerStatus.LINKED,
+        # DRF-1558 — адрес проактивной отправки это ``channel_user_id``.
+        # ``chat_id`` намеренно другой: совпадение прятало бы регрессию.
+        channel_user_id=f"np-{suffix}" if chat_id is None else chat_id,
+        chat_id=f"dialog-of-np-{suffix}",
         proactive_messages_opt_out=opt_out,
         consent_at=now if consented else None,
-        food_scanner_consent_at=now if consented else None,
         context={prefs.CONTEXT_KEY: user_prefs},
     )
     if consented:
         grant_consent(user)
+        grant_food_diary(user)
     return user
 
 
 def water_reader(total_ml: int, norm_ml: int = 2000):
     return lambda _ext: WaterTodayResponse(total_ml=total_ml, norm_ml=norm_ml, entries=[])
+
+
+def configured_profile(source: str = "ayla_calculated") -> ProfileResponse:
+    """Профиль с НАЗВАННЫМ происхождением ориентиров (DRF-1686, §6).
+
+    Без него ``ProfileResponse`` обнуляет ориентиры, а отчёт печатает
+    только факт — «Калории: 1500 ккал.» без «из». Тесты, которым нужен
+    отчёт С ориентирами, берут этот профиль; тесты про отчёт без них
+    передают ``None`` или ``unknown_legacy`` явно.
+    """
+    return ProfileResponse(
+        gender="female",
+        age=32,
+        height_cm=168,
+        weight_kg=64,
+        goal="maintain",
+        daily_kcal=1900,
+        protein_g=95,
+        fat_g=60,
+        carbs_g=210,
+        water_ml=2000,
+        bmr=1400,
+        health_flags={},
+        disclaimer_acked=None,
+        targets_source=source,
+    )
 
 
 def summary_reader(profile=None):
@@ -250,13 +297,14 @@ class TestDefaultsAreOff:
         user = BotUser.all_tenants.create(
             tenant=tenant,
             channel="max",
+            customer_status=BotUser.CustomerStatus.LINKED,
             channel_user_id="np-virgin",
             chat_id="chat-virgin",
             consent_at=datetime(2026, 5, 1, tzinfo=dt_timezone.utc),
-            food_scanner_consent_at=datetime(2026, 5, 1, tzinfo=dt_timezone.utc),
             context={},
         )
         grant_consent(user)
+        grant_food_diary(user)
         water = tasks.plan_water_reminders(now_utc=NOON, fetch=water_reader(0))
         report = tasks.plan_daily_reports(now_utc=NOON, fetch=summary_reader())
         assert only(water, user).reason == "water_off"
@@ -267,7 +315,7 @@ class TestDefaultsAreOff:
         decisions = tasks.plan_water_reminders(now_utc=NOON, fetch=water_reader(0))
         assert only(decisions, user).reason == "no_consent"
 
-    def test_no_chat_id_is_not_even_a_candidate(self, tenant: Tenant) -> None:
+    def test_no_address_is_not_even_a_candidate(self, tenant: Tenant) -> None:
         user = make_user(tenant, chat_id="")
         decisions = tasks.plan_water_reminders(now_utc=NOON, fetch=water_reader(0))
         assert all(d.bot_user_id != user.pk for d in decisions)
@@ -307,11 +355,32 @@ class TestDailyReportSchedule:
 
     def test_report_body_carries_no_scolding(self, tenant: Tenant) -> None:
         make_user(tenant, report="19:00")
-        decisions = tasks.plan_daily_reports(now_utc=at_msk(19), fetch=summary_reader())
+        decisions = tasks.plan_daily_reports(
+            now_utc=at_msk(19), fetch=summary_reader(profile=configured_profile())
+        )
         text = next(d.text for d in decisions if d.send)
         assert "Калории: 1500 из 1900 ккал." in text
         assert "Вода: 1200 из 2000 мл." in text
         assert "не пиши мне" in text
+
+    def test_report_without_configured_targets_prints_facts_only(self, tenant: Tenant) -> None:
+        """§6 свода 11.09 (DRF-1686): суточный отчёт — пятая поверхность.
+
+        Без профиля и при ``unknown_legacy`` (все шесть профилей пилота)
+        в отчёт не попадает ни одно число ориентира — ни из профиля, ни из
+        сводки, ни из ответа по воде. Факт остаётся: съедено, выпито.
+        Нашлось не чтением, а красным шардом CI на этом самом файле.
+        """
+        make_user(tenant, report="19:00")
+        for profile in (None, configured_profile("unknown_legacy")):
+            decisions = tasks.plan_daily_reports(
+                now_utc=at_msk(19), fetch=summary_reader(profile=profile)
+            )
+            text = next(d.text for d in decisions if d.send)
+            assert "Калории: 1500 ккал." in text, profile
+            assert "Вода: 1200 мл." in text, profile
+            assert " из " not in text, profile
+            assert "1900" not in text and "2000" not in text, profile
 
 
 class TestQuotaAndAutoDisable:
@@ -433,6 +502,22 @@ class TestOutboundSafety:
         assert decision.send is True
         assert "много овощей" in decision.text
 
+    def test_a_nagging_comment_from_ayla_stops_the_send(self, tenant: Tenant) -> None:
+        """DRF-1468 — the pressure category bites on the proactive path too.
+
+        The report passes ``ai_comment`` through verbatim; a streak-counter
+        sentence from upstream is blocked exactly like a medical claim:
+        silence plus a log, never a replacement.
+        """
+        user = make_user(tenant, report="19:00")
+        decisions = tasks.plan_daily_reports(
+            now_utc=at_msk(19),
+            fetch=self._reader_with_comment("Ты держишь серию — 7 дней подряд!"),
+        )
+        decision = only(decisions, user)
+        assert decision.send is False
+        assert decision.reason == "outbound_safety_nag"
+
     def test_our_own_copy_passes_the_gate(self, tenant: Tenant) -> None:
         """Regression guard on the copy this module writes: if a future
         edit puts a blocked shape into the report or the nudge, this fails
@@ -488,7 +573,8 @@ class TestSwitches:
             result = tasks.send_water_reminders()
         assert result["sent"] == 1
         send.assert_called_once()
-        assert send.call_args.kwargs["chat_id"] == "chat-np-1"
+        assert send.call_args.kwargs["user_id"] == "np-1"
+        assert "chat_id" not in send.call_args.kwargs
 
         stored = prefs.get_prefs(BotUser.all_tenants.get(pk=user.pk))
         assert stored["water"]["sent"] == 1
@@ -520,6 +606,37 @@ class TestSwitches:
 # ────────────────────────────────────────────────────────────────────
 # DRF-1314 — who may be written to first
 # ────────────────────────────────────────────────────────────────────
+
+
+class TestShadowIsClosed:
+    """Owner 11.09 §2.4 (S2-2): nutrition is closed to a SHADOW salon shell.
+
+    Same shape as ``TestConsentGate``: one person differs from
+    :func:`make_user` in exactly one respect — the standing of the shell —
+    and both planners name that respect. ``unresolved`` has its own name:
+    «the rule was not applied» and «the rule said shadow» need different
+    people to act.
+    """
+
+    def _both(self, user: BotUser):
+        water = tasks.plan_water_reminders(now_utc=NOON, fetch=water_reader(0))
+        report = tasks.plan_daily_reports(now_utc=NOON, fetch=summary_reader())
+        return [d for d in [*water, *report] if d.bot_user_id == user.pk]
+
+    @pytest.mark.parametrize("status", ["shadow", "unresolved"])
+    def test_a_shadow_gets_nothing_and_the_reason_says_so(
+        self, tenant: Tenant, status: str
+    ) -> None:
+        # Presence first: the LINKED twin, built the same way, is written to.
+        linked = make_user(tenant, water=True, report="12:00", suffix="twin")
+        assert {d.reason for d in self._both(linked)} == {"behind_proportional_norm", "due"}
+
+        user = make_user(tenant, water=True, report="12:00", suffix=status)
+        BotUser.all_tenants.filter(pk=user.pk).update(customer_status=status)
+        decisions = self._both(user)
+        assert len(decisions) == 2
+        assert [d.reason for d in decisions] == [status] * 2
+        assert all(d.send is False for d in decisions)
 
 
 class TestConsentGate:
@@ -584,7 +701,7 @@ class TestConsentGate:
         assert [d.reason for d in decisions] == ["no_consent"] * 2
 
     def test_erased_user_is_not_written_to(self, tenant: Tenant) -> None:
-        """``soft_delete_user()`` does not clear ``chat_id``.
+        """``soft_delete_user()`` does not clear the address.
 
         An erased row stays addressable, which is the whole reason this
         condition is in the gate rather than left to the queryset. One
@@ -593,7 +710,9 @@ class TestConsentGate:
         user = make_user(tenant, water=True, report="12:00")
         BotUser.all_tenants.filter(pk=user.pk).update(deleted_at=NOON)
         user.refresh_from_db()
-        assert (user.chat_id or "").strip(), "still addressable — that is why this gate exists"
+        assert (user.channel_user_id or "").strip(), (
+            "still addressable — that is why this gate exists"
+        )
 
         assert self._both(tenant, user) == []
         assert selection.check_common(user) == "deleted"
@@ -611,14 +730,22 @@ class TestConsentGate:
     def test_missing_food_consent_blocks_a_fully_consenting_person(self, tenant: Tenant) -> None:
         """The nutrition-specific condition survived the delegation.
 
-        ``food_scanner_consent_at`` has no ``ConsentRecord`` behind it —
-        ``ConsentType`` has no food-scanner member — so it is still read
-        from the column, and it must still bite for somebody who cleared
-        the shared gate completely.
+        Since DRF-1963 (M1) the diary/scanner consent is a registry row,
+        ``food_diary_processing``. A WITHDRAWN row must bite for somebody who
+        cleared the shared gate completely — withdrawn, not deleted: the
+        grant stays on record, and the layer still says no.
         """
+        from django.utils import timezone
+
         user = make_user(tenant, water=True, report="12:00")
-        BotUser.all_tenants.filter(pk=user.pk).update(food_scanner_consent_at=None)
-        user.refresh_from_db()
+        diary = ConsentRecord.all_tenants.filter(
+            bot_user=user,
+            consent_type=ConsentRecord.ConsentType.FOOD_DIARY_PROCESSING.value,
+            granted=True,
+            withdrawn_at__isnull=True,
+        )
+        assert diary.count() == 1  # presence first: there is a grant to withdraw
+        diary.update(withdrawn_at=timezone.now())
 
         decisions = self._both(tenant, user)
         assert [d.reason for d in decisions] == ["no_food_consent"] * 2

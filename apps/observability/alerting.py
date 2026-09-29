@@ -1,16 +1,17 @@
-"""Page-out alerting (Sprint 10 / O2 / DRF-863).
+"""Page-out alerting (Sprint 10 / O2 / DRF-863; MAX sink — DRF-2158).
 
 Single entry point :func:`page` routes critical operational alerts to
-a dedicated Telegram channel + Sentry. PagerDuty was evaluated and
-explicitly skipped — see `docs/runbooks/on-call.md` § Decision.
+a dedicated Telegram channel + Sentry + the operators' MAX chat.
+PagerDuty was evaluated and explicitly skipped — see
+`docs/runbooks/on-call.md` § Decision.
 
 ## Severity matrix
 
-| Severity   | Telegram channel | Sentry capture | Use case                                |
-|------------|------------------|----------------|------------------------------------------|
-| critical   | ✅ + loud prefix | ✅ fatal-level | F2 scope violations, X-criteria breach, P0 events |
-| error      | ✅               | ✅ error-level | Skill dispatch failures, sync errors    |
-| warning    | ✅ + muted       | —              | Capacity headroom, slow catalogs        |
+| Severity   | Telegram channel | Sentry capture | MAX chat          | Use case                                |
+|------------|------------------|----------------|-------------------|------------------------------------------|
+| critical   | ✅ + loud prefix | ✅ fatal-level | ✅ ``[CRITICAL]`` | F2 scope violations, X-criteria breach, P0 events |
+| error      | ✅               | ✅ error-level | ✅ ``[ERROR]``    | Skill dispatch failures, sync errors    |
+| warning    | ✅ + muted       | —              | ✅ ``[WARNING]``  | Capacity headroom, slow catalogs        |
 
 `critical` prefixes the body with `🚨🚨🚨` so the channel notification
 sound + visual treatment overrides DND on the operator's phone (the
@@ -35,13 +36,38 @@ operational alerting; a page-handler that itself throws inside the
 critical path is worse than a missed page. Every failure mode writes
 an audit row + a logger.warning so the missing page is debuggable.
 
-## Why Telegram, not MAX
+## Telegram, Sentry — and MAX (DRF-2158)
 
-Operators don't have MAX installed; MAX is the channel where customers
-chat with the bot. Mixing alert noise with customer signal would
-degrade both. Telegram is universally installed in the team, has
-per-channel notification priorities, and was already paid for by the
-``TELEGRAM_BOT_TOKEN`` env var used elsewhere in the platform.
+The original design (Sprint 10) sent to Telegram + Sentry only: MAX was
+the customers' channel and operators were expected to live in Telegram.
+Fact of the pilot host on 2026-09-20: ``ALERTS_TELEGRAM_CHAT_ID``,
+``TELEGRAM_BOT_TOKEN`` and ``SENTRY_DSN`` are all unset, so every
+``page(...)`` ended in ``alerting.telegram.skipped reason=no_credentials``
+— silence. The one operator channel that does work is the MAX chat in
+``HANDOFF_NOTIFY_MAX_CHAT_IDS`` (the DRF-1029 escalation recipients,
+where «LLM доступна/недоступна» already lands). So :func:`_send_max` is
+the third sink: same dedup, same audit row (``max_sent``), one line
+«⚠️ [LEVEL] {title} — {body}» capped at 1000 characters with phone /
+e-mail / card masked via :func:`apps.observability.pii_filter.redact_pii`.
+Telegram and Sentry stay as sinks whenever they are configured.
+
+### Limits of the MAX sink (owner-visible, not fixable here)
+
+* **The recipient is a personal dialog with the bot, not a group.**
+  ``HANDOFF_NOTIFY_MAX_CHAT_IDS`` holds ``chat_id`` values copied out of a
+  dialog; they only work for the bot whose dialog they were copied from.
+  ``HANDOFF_NOTIFY_MAX_USER_IDS`` (people) replaces the list when set —
+  see :func:`apps.handoff.notify.get_notify_addresses`.
+* **The sender is the legacy token** (``MAX_BOT_TOKEN``) — on the pilot
+  that is the client bot, so the alert arrives in the same dialog a
+  client conversation would.
+* **Nobody may be sitting in that dialog.** 2026-09-15 the LLM-down
+  message reached the chat and went unnoticed for 45 minutes
+  (DRF-1938). Delivery here means «accepted by the MAX API», not «seen».
+* **Sentry is counted as delivered only when the SDK is initialised**
+  (``SENTRY_DSN`` set). Before DRF-2158 ``_send_sentry`` returned True
+  whenever ``sentry_sdk`` merely imported, so ``page`` reported a
+  delivery into nothing.
 """
 
 from __future__ import annotations
@@ -55,6 +81,7 @@ from django.conf import settings
 from django.core.cache import cache
 
 from apps.audit.services import write_audit
+from apps.observability.pii_filter import redact_pii
 
 logger = logging.getLogger(__name__)
 
@@ -95,8 +122,16 @@ def page(
       dedup_key: Optional explicit dedup key. None → hash of content.
 
     Returns:
-      True if the page was sent (Telegram OR Sentry succeeded), False
-      if dedup'd OR both sinks failed. Best-effort — never raises.
+      True if at least one sink delivered (Telegram OR Sentry OR MAX),
+      False if dedup'd OR no sink is configured OR every configured sink
+      failed. Best-effort — never raises.
+
+    MAX (DRF-2158): recipients come from ``HANDOFF_NOTIFY_MAX_CHAT_IDS``
+    (or ``HANDOFF_NOTIFY_MAX_USER_IDS`` when set — people replace
+    dialogs), the text is one line «⚠️ [LEVEL] {title} — {body}» ≤ 1000
+    chars with phone / e-mail / card masked. See the module docstring
+    for the limits (personal dialog, legacy token, «nobody in the
+    dialog»).
     """
     if severity not in _SEVERITY_PREFIX:
         # Don't crash — degrade. Caller passed bad data; treat as error.
@@ -113,6 +148,7 @@ def page(
 
     telegram_ok = _send_telegram(severity, title, body)
     sentry_ok = _send_sentry(severity, title, body)
+    max_ok = _send_max(severity, title, body)
 
     write_audit(
         "observability.alert.paged",
@@ -122,10 +158,20 @@ def page(
             "title": title[:200],
             "telegram_sent": telegram_ok,
             "sentry_sent": sentry_ok,
+            "max_sent": max_ok,
         },
     )
 
-    return telegram_ok or sentry_ok
+    sent = telegram_ok or sentry_ok or max_ok
+    if not sent:
+        logger.warning(
+            "alerting.page.no_sinks severity=%s telegram_sent=%s sentry_sent=%s max_sent=%s",
+            severity,
+            telegram_ok,
+            sentry_ok,
+            max_ok,
+        )
+    return sent
 
 
 # ─── dedup ────────────────────────────────────────────────────────────────
@@ -244,6 +290,12 @@ def _send_sentry(severity: Severity, title: str, body: str) -> bool:
     except ImportError:
         return False
 
+    if not sentry_sdk.is_initialized():
+        # No SENTRY_DSN → the SDK is a no-op client. Counting that as a
+        # delivery is how the pilot ran silent (DRF-2158).
+        logger.info("alerting.sentry.skipped reason=not_initialized severity=%s", severity)
+        return False
+
     try:
         with sentry_sdk.new_scope() as scope:
             scope.set_tag("alert.severity", severity)
@@ -257,3 +309,88 @@ def _send_sentry(severity: Severity, title: str, body: str) -> bool:
     except Exception:  # noqa: BLE001 — best-effort
         logger.exception("alerting.sentry.failed severity=%s", severity)
         return False
+
+
+# ─── MAX (DRF-2158) ───────────────────────────────────────────────────────
+
+_MAX_TEXT_LIMIT: Final = 1000
+_MAX_SEVERITY_LABEL: Final[dict[Severity, str]] = {
+    "critical": "⚠️ [CRITICAL]",
+    "error": "⚠️ [ERROR]",
+    "warning": "⚠️ [WARNING]",
+}
+_MAX_LINE_JOINER: Final = " · "
+
+
+def _send_max(severity: Severity, title: str, body: str) -> bool:
+    """Fan the alert out to the operators' MAX recipients. Never raises.
+
+    Recipients: :func:`apps.handoff.notify.get_notify_addresses` —
+    ``HANDOFF_NOTIFY_MAX_USER_IDS`` (people) when set, otherwise
+    ``HANDOFF_NOTIFY_MAX_CHAT_IDS`` (dialogs). Empty list = sink off,
+    logged as ``alerting.max.skipped reason=no_recipients``.
+
+    Returns True when at least one recipient accepted the message.
+    Imports lazily: ``apps.handoff.notify`` pulls in models and the MAX
+    outbound client, and this module is imported at boot by channel
+    handlers.
+    """
+    try:
+        from apps.handoff.notify import (  # noqa: PLC0415 — see docstring
+            get_notify_addresses,
+            send_max_notification,
+        )
+
+        recipients = get_notify_addresses()
+    except Exception:  # noqa: BLE001 — best-effort
+        logger.exception("alerting.max.failed stage=recipients severity=%s", severity)
+        return False
+
+    if not recipients:
+        logger.info("alerting.max.skipped reason=no_recipients severity=%s", severity)
+        return False
+
+    text = _max_text(severity, title, body)
+    try:
+        failures = int(send_max_notification(text=text, addresses=recipients))
+    except Exception:  # noqa: BLE001 — best-effort
+        logger.exception("alerting.max.failed stage=send severity=%s", severity)
+        return False
+
+    delivered = len(recipients) - failures
+    if delivered <= 0:
+        logger.warning(
+            "alerting.max.all_failed severity=%s recipients=%d", severity, len(recipients)
+        )
+        return False
+    logger.info(
+        "alerting.max.sent severity=%s recipients=%d failures=%d",
+        severity,
+        len(recipients),
+        failures,
+    )
+    return True
+
+
+def _max_text(severity: Severity, title: str, body: str) -> str:
+    """One line «⚠️ [LEVEL] {title} — {body}», masked, ≤ 1000 chars.
+
+    Lines of a multi-line body are joined with « · » so the health
+    probe's «🔴 LLM недоступна / Причина: … / Ошибка: …» stays readable
+    in a chat bubble. Masking runs BEFORE the cut so a phone number on
+    the 1000-character boundary cannot leave half its digits behind.
+    """
+    label = _MAX_SEVERITY_LABEL[severity]
+    head = _one_line(title)
+    tail = _one_line(body)
+    text = f"{label} {head} — {tail}" if tail else f"{label} {head}"
+    text = redact_pii(text)
+    if len(text) > _MAX_TEXT_LIMIT:
+        text = text[: _MAX_TEXT_LIMIT - 1] + "…"
+    return text
+
+
+def _one_line(s: str) -> str:
+    """Collapse newlines into « · » and runs of whitespace into one space."""
+    lines = [" ".join(line.split()) for line in s.splitlines()]
+    return _MAX_LINE_JOINER.join(line for line in lines if line)

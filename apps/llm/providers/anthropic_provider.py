@@ -72,6 +72,7 @@ built against, so the injected client is of the type that SDK's own
 
 from __future__ import annotations
 
+import inspect
 import logging
 from datetime import datetime, timezone
 from typing import Any
@@ -142,6 +143,19 @@ class AnthropicProvider:
 
     name = "anthropic"
 
+    @classmethod
+    def configured_proxy(cls) -> str:
+        """Прокси, через который пойдёт вызов без явного ``proxy=``.
+
+        Пустой ``ANTHROPIC_PROXY`` молча уступает ``OPENAI_PROXY`` — один
+        туннель обычно обслуживает обоих. Единственное место правила:
+        ``__init__`` и проба пути (DRF-2065) читают его отсюда, иначе
+        диагностика проверяла бы не тот прокси, по которому ходит бот.
+        """
+        return (
+            getattr(settings, "ANTHROPIC_PROXY", "") or getattr(settings, "OPENAI_PROXY", "") or ""
+        )
+
     def __init__(
         self,
         *,
@@ -152,14 +166,7 @@ class AnthropicProvider:
         retry_policy: RetryPolicy | None = None,
     ) -> None:
         self._api_key = api_key or getattr(settings, "ANTHROPIC_API_KEY", "") or ""
-        if proxy is not None:
-            self._proxy = proxy
-        else:
-            self._proxy = (
-                getattr(settings, "ANTHROPIC_PROXY", "")
-                or getattr(settings, "OPENAI_PROXY", "")
-                or ""
-            )
+        self._proxy = proxy if proxy is not None else self.configured_proxy()
         self.default_completion_model = default_completion_model
         # DRF-1443 — ``_DEFAULT_INTENT_MODEL`` was declared by Decision 18
         # and then never reachable: nothing read it, so every Anthropic
@@ -417,6 +424,37 @@ class AnthropicProvider:
             kwargs["http_client"] = DefaultAsyncHttpxClient(proxy=self._proxy, timeout=timeout)
         self._client = AsyncAnthropic(**kwargs)
         return self._client
+
+    async def aclose(self) -> None:
+        """Close the cached SDK client (and its httpx pool), if built.
+
+        DRF-1631. Mirror of :meth:`OpenAIProvider.aclose`, and it exists
+        for the same caller: the availability probe builds a FRESH
+        provider every tick, deliberately, so that each tick exercises a
+        fresh proxy ``CONNECT``. Until DRF-1631 that probe could only
+        ever build an ``OpenAIProvider`` — so this method had no caller
+        and was never written. The moment the probe started following
+        ``LLM_PROVIDER`` its absence became a leaked
+        ``httpx.AsyncClient`` per tick (288 a day at the 5-minute
+        cadence) inside the Celery worker.
+
+        Best-effort and idempotent: never raises, safe on an unbuilt or
+        already-closed client. Long-lived callers (web, consumer) hold
+        one provider per process and never call it.
+        """
+        client = self._client
+        if client is None:
+            return
+        self._client = None
+        close = getattr(client, "close", None)
+        if close is None:
+            return
+        try:
+            result = close()
+            if inspect.isawaitable(result):
+                await result
+        except Exception:  # noqa: BLE001 — teardown must never break the caller
+            logger.warning("llm.anthropic.aclose_failed", exc_info=True)
 
     def _reraise_as_llm_error(self, exc: Exception, *, op: str, model: str) -> None:
         """Map Anthropic SDK exceptions onto the L1 LLM* hierarchy.

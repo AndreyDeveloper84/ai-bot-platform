@@ -50,7 +50,7 @@ def test_a_class_with_no_rule_is_reported(tmp_path: Path) -> None:
         css=".other { color: red; }\n",
     )
 
-    assert guard.scan(root) == ["src/screens/S.tsx::lonely"]
+    assert guard.scan(root)[0] == ["src/screens/S.tsx::lonely"]
 
 
 def test_a_class_with_a_rule_is_not_reported(tmp_path: Path) -> None:
@@ -60,7 +60,7 @@ def test_a_class_with_a_rule_is_not_reported(tmp_path: Path) -> None:
         css=".styled { display: block; }\n",
     )
 
-    assert guard.scan(root) == []
+    assert guard.scan(root)[0] == []
 
 
 def test_every_name_in_a_multi_class_attribute_is_checked(tmp_path: Path) -> None:
@@ -71,7 +71,7 @@ def test_every_name_in_a_multi_class_attribute_is_checked(tmp_path: Path) -> Non
         css=".ok {}\n.also-ok {}\n",
     )
 
-    assert guard.scan(root) == ["src/screens/S.tsx::missing"]
+    assert guard.scan(root)[0] == ["src/screens/S.tsx::missing"]
 
 
 def test_runtime_built_class_names_are_deliberately_ignored(tmp_path: Path) -> None:
@@ -82,7 +82,7 @@ def test_runtime_built_class_names_are_deliberately_ignored(tmp_path: Path) -> N
         css="",
     )
 
-    assert guard.scan(root) == []
+    assert guard.scan(root)[0] == []
 
 
 def test_test_files_are_not_scanned(tmp_path: Path) -> None:
@@ -94,7 +94,7 @@ def test_test_files_are_not_scanned(tmp_path: Path) -> None:
         rel="src/screens/S.test.tsx",
     )
 
-    assert guard.scan(root) == []
+    assert guard.scan(root)[0] == []
 
 
 def test_all_stylesheets_in_the_styles_dir_count(tmp_path: Path) -> None:
@@ -106,7 +106,7 @@ def test_all_stylesheets_in_the_styles_dir_count(tmp_path: Path) -> None:
     )
     (root / "src" / "styles" / "tokens.css").write_text(".from-tokens {}\n", encoding="utf-8")
 
-    assert guard.scan(root) == []
+    assert guard.scan(root)[0] == []
 
 
 def test_a_missing_styles_directory_is_a_refusal_not_a_pass(tmp_path: Path) -> None:
@@ -130,12 +130,101 @@ def test_accepted_debt_passes_and_new_debt_fails(
         css="",
     )
     monkeypatch.setattr(guard, "BASELINE", frozenset({"src/screens/S.tsx::known"}))
+    # Реестров у сторожа два (DRF-2380), и оба описывают НАСТОЯЩЕЕ дерево:
+    # без подмены второго его записи читаются как устаревшие для этого
+    # маленького корня, и `main` вернёт 1 по причине, к предмету теста
+    # отношения не имеющей.
+    monkeypatch.setattr(guard, "DESCENDANT_ONLY", frozenset())
     assert guard.main(["miniapp_style_contract.py", str(root)]) == 0
 
     (root / "src" / "screens" / "S.tsx").write_text(
         'export const S = () => <p className="known fresh">x</p>;\n', encoding="utf-8"
     )
     assert guard.main(["miniapp_style_contract.py", str(root)]) == 1
+
+
+# --------------------------------------------------------------------------
+# DRF-2550 — аннотация называет строку, и каждое место, а не первое.
+# --------------------------------------------------------------------------
+
+_THREE_PLACES = (
+    "export const S = () => (\n"  # 1
+    "  <div>\n"  # 2
+    '    <p className="styled">a</p>\n'  # 3
+    '    <p className="styled fresh">b</p>\n'  # 4
+    '    <p className="styled">c</p>\n'  # 5
+    '    <span className="fresh">d</span>\n'  # 6
+    '    <p className="styled">e</p>\n'  # 7
+    '    <i className="fresh" />\n'  # 8
+    "  </div>\n"  # 9
+    ");\n"  # 10
+)
+
+
+def _errors(capsys: pytest.CaptureFixture[str]) -> list[str]:
+    return [line for line in capsys.readouterr().out.splitlines() if line.startswith("::error")]
+
+
+def test_the_annotation_names_the_line_of_the_class_not_the_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Номер — той строки, где класс, а не первой и не последней строки файла."""
+    root = _app(
+        tmp_path,
+        tsx=(
+            "export const S = () => (\n"
+            "  <div>\n"
+            '    <p className="styled">a</p>\n'
+            '    <p className="styled fresh">b</p>\n'
+            '    <p className="styled">c</p>\n'
+            "  </div>\n"
+            ");\n"
+        ),
+        css=".styled {}\n",
+    )
+    monkeypatch.setattr(guard, "BASELINE", frozenset())
+    monkeypatch.setattr(guard, "DESCENDANT_ONLY", frozenset())
+
+    assert guard.main(["miniapp_style_contract.py", str(root)]) == 1
+    assert _errors(capsys) == [
+        "::error file=apps/miniapp/src/screens/S.tsx,line=4::"
+        "class `fresh` has no rule in src/styles/"
+    ]
+
+
+def test_every_place_of_the_class_is_annotated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Три места в файле — три аннотации, а не одна на первое."""
+    root = _app(tmp_path, tsx=_THREE_PLACES, css=".styled {}\n")
+    monkeypatch.setattr(guard, "BASELINE", frozenset())
+    monkeypatch.setattr(guard, "DESCENDANT_ONLY", frozenset())
+
+    assert guard.main(["miniapp_style_contract.py", str(root)]) == 1
+    assert [e.split("::")[1] for e in _errors(capsys)] == [
+        "error file=apps/miniapp/src/screens/S.tsx,line=4",
+        "error file=apps/miniapp/src/screens/S.tsx,line=6",
+        "error file=apps/miniapp/src/screens/S.tsx,line=8",
+    ]
+
+
+def test_a_descendant_only_class_is_annotated_on_its_line(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    root = _app(tmp_path, tsx=_THREE_PLACES, css=".styled {}\n.island .fresh {}\n")
+    monkeypatch.setattr(guard, "BASELINE", frozenset())
+    monkeypatch.setattr(guard, "DESCENDANT_ONLY", frozenset())
+
+    assert guard.main(["miniapp_style_contract.py", str(root)]) == 1
+    lines = [e.split(",line=")[1].split("::")[0] for e in _errors(capsys)]
+    assert lines == ["4", "6", "8"]
+
+
+def test_a_class_literal_broken_over_lines_is_named_by_its_first_line() -> None:
+    """Названный предел: литерал с переносом назван строкой `className=`."""
+    tsx = 'const a = 1;\n<p className="one\n  fresh">x</p>\n'
+    assert guard.class_lines(tsx, "fresh") == [2]
+    assert guard.class_lines(tsx, "absent") == []
 
 
 def test_a_baseline_entry_that_got_styled_must_be_deleted(
@@ -148,6 +237,7 @@ def test_a_baseline_entry_that_got_styled_must_be_deleted(
         css=".was-debt { display: block; }\n",
     )
     monkeypatch.setattr(guard, "BASELINE", frozenset({"src/screens/S.tsx::was-debt"}))
+    monkeypatch.setattr(guard, "DESCENDANT_ONLY", frozenset())
 
     assert guard.main(["miniapp_style_contract.py", str(root)]) == 1
 
@@ -212,9 +302,82 @@ def test_a_root_with_no_tab_bars_at_all_is_not_a_problem(
     # without this every entry reads as stale and `main` returns 1 for a
     # reason that has nothing to do with tab bars.
     monkeypatch.setattr(guard, "BASELINE", frozenset())
+    monkeypatch.setattr(guard, "DESCENDANT_ONLY", frozenset())
 
     assert guard.scan_tabbar_columns(root) == []
     assert guard.main(["miniapp_style_contract.py", str(root)]) == 0
+
+
+def _chip_row_app(tmp_path: Path, *, css: str) -> Path:
+    return _app(
+        tmp_path,
+        tsx='export const S = () => <div className="chip-row" />;' + NL,
+        css=css,
+    )
+
+
+_UNWRAPPED = ".chip-row { display: flex; gap: 8px; }" + NL
+
+
+def test_a_chip_row_that_cannot_wrap_is_reported(tmp_path: Path) -> None:
+    """The DRF-1458 defect: seven suggestions, three and a half on screen."""
+    root = _chip_row_app(tmp_path, css=_UNWRAPPED)
+
+    problems = guard.scan_chip_rows(root)
+
+    assert len(problems) == 1
+    assert "`.chip-row` is a flex row without `flex-wrap: wrap`" in problems[0]
+
+
+def test_a_chip_row_that_wraps_is_not_reported(tmp_path: Path) -> None:
+    """Presence first, then absence — on the same fixture minus one line.
+
+    An empty result is only worth reading once the same shape is known to
+    produce a non-empty one. So the unwrapped rule is measured first: it
+    IS reported. Adding `flex-wrap: wrap` and nothing else silences it.
+    """
+    unwrapped = _chip_row_app(tmp_path / "a", css=_UNWRAPPED)
+    wrapped = _chip_row_app(
+        tmp_path / "b",
+        css=".chip-row { display: flex; flex-wrap: wrap; gap: 8px; }" + NL,
+    )
+
+    assert guard.scan_chip_rows(unwrapped) != []
+    assert guard.scan_chip_rows(wrapped) == []
+
+
+def test_the_flex_flow_shorthand_counts_as_wrapping(tmp_path: Path) -> None:
+    """`flex-flow: row wrap` says the same thing in one declaration."""
+    unwrapped = _chip_row_app(tmp_path / "a", css=_UNWRAPPED)
+    shorthand = _chip_row_app(
+        tmp_path / "b",
+        css=".chip-row { display: flex; flex-flow: row wrap; }" + NL,
+    )
+
+    assert guard.scan_chip_rows(unwrapped) != []
+    assert guard.scan_chip_rows(shorthand) == []
+
+
+def test_a_bem_variant_of_a_chip_row_is_checked_too(tmp_path: Path) -> None:
+    root = _chip_row_app(tmp_path, css=".goal-select__chip-row { display: flex; }" + NL)
+
+    problems = guard.scan_chip_rows(root)
+
+    assert len(problems) == 1
+    assert "`.goal-select__chip-row`" in problems[0]
+
+
+def test_a_chip_row_that_is_not_a_flex_container_is_left_alone(tmp_path: Path) -> None:
+    """Only a flex row can lay an unknown-length list out on one line.
+
+    Same pairing as above: the flex spelling of this fixture is reported,
+    so the silence on the block spelling is a decision, not a blind spot.
+    """
+    unwrapped = _chip_row_app(tmp_path / "a", css=_UNWRAPPED)
+    block = _chip_row_app(tmp_path / "b", css=".chip-row { display: block; margin: 8px; }" + NL)
+
+    assert guard.scan_chip_rows(unwrapped) != []
+    assert guard.scan_chip_rows(block) == []
 
 
 # --------------------------------------------------------------------------
@@ -246,9 +409,30 @@ def test_the_real_tab_bars_fit_one_row() -> None:
     assert guard.scan_tabbar_columns(app_root) == []
 
 
+def test_the_real_chip_rows_wrap() -> None:
+    """The 2026-09-03 regression (DRF-1458), named so a revert cannot pass quietly.
+
+    The goal surface renders one chip per server-supplied suggestion and
+    one per anketa option. Drop the wrap and the owner's screenshot comes
+    back: seven suggestions, three and a half of them reachable.
+
+    The presence assertion is the point of the first two lines: a scan
+    that found no chip-row rules at all would also return `[]`, and that
+    silence would mean the check had stopped looking — a renamed class,
+    a moved stylesheet — not that the real rows wrap.
+    """
+    app_root = _PROJECT_ROOT / "apps" / "miniapp"
+
+    assert guard.CHIP_ROW_RULE.findall(guard.stylesheet_text(app_root)) != [], (
+        "no chip-row rule left in src/styles/ — this check has gone blind"
+    )
+    assert guard.scan_chip_rows(app_root) == []
+
+
 def test_the_real_miniapp_matches_its_baseline_exactly() -> None:
     app_root = _PROJECT_ROOT / "apps" / "miniapp"
-    found = set(guard.scan(app_root))
+    unstyled, descendant, seen = guard.scan(app_root)
+    found = set(unstyled)
 
     assert sorted(found - guard.BASELINE) == [], "new unstyled classes — add a rule, not an entry"
     assert sorted(guard.BASELINE - found) == [], "stale baseline entries — delete these lines"
@@ -268,3 +452,105 @@ def test_the_booking_confirm_payment_block_is_styled() -> None:
         "customer-confirm__payment-hint",
     ):
         assert f".{name}" in css, f"{name} lost its rule — the payment block runs together again"
+
+
+# --------------------------------------------------------------------------
+# DRF-2380: правило под предком — не то же, что правило.
+# --------------------------------------------------------------------------
+
+
+def test_a_class_styled_only_under_an_ancestor_is_reported(tmp_path: Path) -> None:
+    """Подстрочная проверка считала такой класс определённым.
+
+    Ровно на этом сторож был зелен, пока `.btn-primary` не имел правила
+    первого уровня: `.master-profile .btn-primary` содержит подстроку
+    `.btn-primary`, и проверка отвечала «есть». А в остальных 83 местах
+    класс оставался голым.
+    """
+    root = _app(
+        tmp_path,
+        tsx='export const S = () => <p className="only-inside">x</p>;\n',
+        css=".parent .only-inside { color: red; }\n",
+    )
+
+    unstyled, descendant, _ = guard.scan(root)
+    # Присутствие первым: «правила нет» здесь неверно — оно есть.
+    assert unstyled == []
+    assert descendant == ["src/screens/S.tsx::only-inside"]
+
+
+def test_a_first_level_rule_clears_the_descendant_verdict(tmp_path: Path) -> None:
+    root = _app(
+        tmp_path,
+        tsx='export const S = () => <p className="both">x</p>;\n',
+        css=".parent .both { color: red; }\n.both { display: block; }\n",
+    )
+
+    unstyled, descendant, seen = guard.scan(root)
+    assert seen == 1
+    assert (unstyled, descendant) == ([], [])
+
+
+def test_a_longer_class_name_does_not_cover_a_shorter_one(tmp_path: Path) -> None:
+    """Вторая половина той же болезни, и она страшнее.
+
+    `.working-hours` подстрокой находилось внутри `.working-hours__item`,
+    `.btn` — внутри `.btn-primary`. Сторож считал определённым класс,
+    правила у которого нет ВОВСЕ. Так пряталось 18 мест.
+    """
+    root = _app(
+        tmp_path,
+        tsx='export const S = () => <p className="thing">x</p>;\n',
+        css=".thing__part { color: red; }\n",
+    )
+
+    unstyled, descendant, _ = guard.scan(root)
+    assert unstyled == ["src/screens/S.tsx::thing"]
+    assert descendant == []
+
+
+def test_pseudo_classes_still_count_as_a_first_level_rule(tmp_path: Path) -> None:
+    root = _app(
+        tmp_path,
+        tsx='export const S = () => <p className="pressable">x</p>;\n',
+        css=".pressable:disabled { opacity: 0.5; }\n",
+    )
+
+    assert guard.scan(root)[0] == []
+
+
+def test_a_big_tree_that_yields_no_class_names_is_a_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Пустой вход не должен читаться как «всё хорошо».
+
+    Сломается шаблон `className` или путь к исходникам — прежний сторож
+    отчитался бы «clean». Порог растёт вместе с деревом: фикстура из
+    одного файла проходит, большое дерево без единого имени — нет.
+    """
+    root = tmp_path / "miniapp"
+    (root / "src" / "styles").mkdir(parents=True)
+    (root / "src" / "styles" / "globals.css").write_text(".x {}\n", encoding="utf-8")
+    for i in range(guard.MIN_SCREENS_FOR_FLOOR):
+        screen = root / "src" / "screens" / f"S{i}.tsx"
+        screen.parent.mkdir(parents=True, exist_ok=True)
+        # Имена строятся в рантайме — статический разбор их не видит.
+        screen.write_text("export const S = () => <p className={cx('a')} />;\n", encoding="utf-8")
+    monkeypatch.setattr(guard, "BASELINE", frozenset())
+    monkeypatch.setattr(guard, "DESCENDANT_ONLY", frozenset())
+
+    # Присутствие первым: экраны на месте, значит отказ ниже — про имена.
+    assert len(list((root / "src").rglob("*.tsx"))) == guard.MIN_SCREENS_FOR_FLOOR
+    assert guard.main(["miniapp_style_contract.py", str(root)]) == 1
+
+
+def test_the_real_miniapp_has_a_first_level_rule_for_the_primary_button() -> None:
+    """DRF-2380 поимённо: возврат правила в островки не пройдёт тихо."""
+    app_root = _PROJECT_ROOT / "apps" / "miniapp"
+    _, unconditional = guard.selector_classes(guard.stylesheet_text(app_root))
+
+    assert "btn-secondary" in unconditional, "сосед пропал — проверь разбор селекторов"
+    assert "btn-primary" in unconditional, (
+        "у главной кнопки снова нет правила первого уровня — 83 места "
+        "рисуются глобальным сбросом button {}, то есть как обычный текст"
+    )

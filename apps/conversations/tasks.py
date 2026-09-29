@@ -4,10 +4,11 @@ Hosts two tasks:
 
 * :func:`purge_old_ai_drafts` — Blocker #5 Layer 2 of the PR #535 (M6
   AI drafts) follow-up. Hard-deletes terminal :class:`AiDraft` rows
-  older than :data:`AI_DRAFT_RETENTION_DAYS`. Layer 1 (content
-  clearing at status-flip time) lives in
-  :mod:`apps.master_api.services.ai_drafts`; Layer 2 sweeps the
-  metadata-only stubs after the finance reconciliation window closes.
+  older than :data:`AI_DRAFT_RETENTION_DAYS`. Layer 1 (очистка текста
+  при переходе в терминальный статус) жил в
+  ``master_api.services.ai_drafts`` и снят вместе с перепиской
+  мастер↔клиент (DRF-1528): новых черновиков никто не создаёт, а Layer 2
+  по-прежнему подметает оставшиеся строки после окна сверки.
 * :func:`purge_expired_archived_messages` — DRF-1369 / ``OD_MEMORY.md``
   §4. Hard-deletes anonymised dialogue bodies past the named retention
   term. See :mod:`apps.conversations.erasure` for the term and its

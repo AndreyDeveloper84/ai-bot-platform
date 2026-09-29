@@ -41,15 +41,17 @@ import {
   type ClaimResponse,
 } from "../lib/master-api";
 import {
-  closeApp,
+  returnToChat,
   hapticNotify,
   setDeviceStorage,
   signalReady,
 } from "../lib/max-sdk";
+import { SystemState } from "../components/master/SystemState";
+import { ReturnToChatHint } from "../components/ReturnToChatHint";
 import { ScreenLayout } from "../components/ScreenLayout";
 import { useReloadMe } from "../state/boot";
 import { StickyCta } from "../components/StickyCta";
-import { useBackButton } from "../hooks/useBackButton";
+import { backByAction, screenRoot, type BackIntent } from "../lib/screen-back";
 import { useClosingConfirmation } from "../hooks/useClosingConfirmation";
 
 const BIO_MAX = 280;
@@ -69,7 +71,14 @@ type FlowState =
 interface ProfileDraft {
   bio: string;
   photo: File | null;
-  /** Local preview URL — set after the user picks a file. Revoked on unmount. */
+  /** Local preview URL — показывается на шаге 3.
+   *
+   * Освобождением ведает НЕ это поле, а `previewUrlRef` (DRF-2394): оно
+   * держит то же значение и переживает рендеры. Инвариант, на котором всё
+   * держится: `photoPreview` пишется ровно в двух местах — `EMPTY_DRAFT`
+   * и `handlePhotoPick`. Появится третье (сброс черновика, очистка после
+   * отправки) — ссылка разойдётся с состоянием, и освобождать станет
+   * нечего. Тогда писать надо оба или убирать поле. */
   photoPreview: string | null;
 }
 
@@ -78,7 +87,7 @@ const EMPTY_DRAFT: ProfileDraft = { bio: "", photo: null, photoPreview: null };
 // --- Russian copy (VERBATIM from §M0) -------------------------------------
 
 const COPY = {
-  loading: "Загружаем ваш профиль…",
+  // Загрузка / ошибка сети — SystemState (DRF-2190, словарь DRF-1181 п.10).
   step1: {
     greeting: (firstName: string) => `Здравствуйте, ${firstName}!`,
     body: (salonName: string) =>
@@ -121,22 +130,20 @@ const COPY = {
     bioMaxHint: "Максимум 280 символов",
     servicesLabel: "Услуги",
     servicesIntro: (services: string) =>
-      `Сейчас Карина указала: ${services}.`,
-    servicesFooter: "Если что-то не так — напишите ей.",
+      `Сейчас администратор салона указал: ${services}.`,
+    servicesFooter: "Если что-то не так — сообщите администратору салона.",
     cta: "Сохранить и продолжить",
     later: "Заполнить позже",
   },
   errors: {
     missing_token: "Откройте ссылку из приглашения от вашей студии.",
     invalid:
-      "Ссылка устарела. Попросите Карину прислать новую.",
+      "Ссылка устарела. Попросите администратора салона прислать новую.",
     copyDeeplink: "Скопировать ссылку на бота",
     used: "Вы уже подключены — открыть рабочий стол",
     wrong_recipient:
-      "Сообщите Карине — возможно, ссылку отправили не туда.",
+      "Сообщите администратору салона — возможно, ссылку отправили не туда.",
     close: "Закрыть",
-    network: "Связь пропала. Попробуйте ещё раз.",
-    retry: "Попробовать снова",
   },
 };
 
@@ -192,15 +199,49 @@ export function MasterOnboardingScreen() {
       return () => setState({ kind: "ready", data: state.data, step: 2 });
     return undefined;
   }, [state]);
-  useBackButton({ onBack });
+  // Вид экрана (DRF-1493). Возврат здесь никуда не уводит с адреса —
+  // это шаг назад внутри мастера. На первом шаге и на всех экранах
+  // ошибок возвращаться некуда: приглашение открывают по ссылке из
+  // бота, истории за ним нет.
+  const back: BackIntent = onBack
+    ? backByAction(onBack)
+    : screenRoot(
+        "Первый шаг мастера онбординга и его экраны ошибок — вход по " +
+          "ссылке-приглашению из бота; предыдущего экрана не существует.",
+      );
   useClosingConfirmation(step3Dirty);
 
-  // Cleanup the local photo-preview blob URL.
+  // Адрес превью: ВЛАДЕЕТ ЭКРАН, и владение названо ссылкой (DRF-2394).
+  //
+  // Было два дефекта, и второй не виден глазами.
+  //
+  // (а) Очистка объявлялась с пустыми зависимостями и читала
+  //     `draft.photoPreview` из ПЕРВОГО рендера, где превью ещё нет.
+  //     Последний выбранный адрес не освобождался никогда.
+  //
+  //     Уточнение, найденное ревью: «один адрес на посещение экрана» —
+  //     тоже неверно, и это была уже МОЯ неточность, не листа. Под
+  //     `StrictMode` каждый выбор оставлял сироту (см. (б)), так что
+  //     терялось по адресу НА ВЫБОР плюс последний удержанный. Верно
+  //     одно: освобождение СОХРАНЁННОГО адреса при новом выборе работало
+  //     и до листа — не работало всё остальное.
+  //
+  // (б) Создание и освобождение стояли ВНУТРИ `setDraft((prev) => …)` —
+  //     побочный эффект в функции, обязанной быть чистой. Приложение
+  //     обёрнуто в `StrictMode` (`main.tsx`), который такие функции зовёт
+  //     дважды: один выбор создавал ДВА адреса и сохранял один. Замер
+  //     узлом: `['blob:test/1', 'blob:test/2']` живыми после одного
+  //     выбора.
+  //
+  // Ссылка чинит обе половины сразу: адрес создаётся один раз снаружи
+  // обновления, а очистка при уходе читает ТЕКУЩЕЕ значение, а не снимок
+  // первого рендера, — поэтому пустые зависимости здесь верны.
+  const previewUrlRef = useRef<string | null>(null);
   useEffect(() => {
     return () => {
-      if (draft.photoPreview) URL.revokeObjectURL(draft.photoPreview);
+      if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
+      previewUrlRef.current = null;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Initial claim call.
@@ -258,14 +299,12 @@ export function MasterOnboardingScreen() {
   // --- Step 3: photo + submit ---------------------------------------------
 
   const handlePhotoPick = useCallback((file: File | null) => {
-    setDraft((prev) => {
-      if (prev.photoPreview) URL.revokeObjectURL(prev.photoPreview);
-      return {
-        ...prev,
-        photo: file,
-        photoPreview: file ? URL.createObjectURL(file) : null,
-      };
-    });
+    // Эффекты — СНАРУЖИ обновления состояния (DRF-2394 б): внутри их
+    // удваивал `StrictMode`.
+    const next = file ? URL.createObjectURL(file) : null;
+    if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
+    previewUrlRef.current = next;
+    setDraft((prev) => ({ ...prev, photo: file, photoPreview: next }));
   }, []);
 
   const onBioChange = useCallback((next: string) => {
@@ -340,15 +379,15 @@ export function MasterOnboardingScreen() {
 
   if (state.kind === "loading") {
     return (
-      <ScreenLayout>
-        <p>{COPY.loading}</p>
+      <ScreenLayout back={back}>
+        <SystemState kind="loading" />
       </ScreenLayout>
     );
   }
 
   if (state.kind === "missing_token") {
     return (
-      <ScreenLayout title="Не получилось войти">
+      <ScreenLayout back={back} title="Не получилось войти">
         <p>{COPY.errors.missing_token}</p>
       </ScreenLayout>
     );
@@ -376,6 +415,7 @@ export function MasterOnboardingScreen() {
   if (step === 1) {
     return (
       <Step1Identity
+        back={back}
         data={data}
         onConfirm={handleConfirmIdentity}
         onNotMe={handleNotMe}
@@ -385,11 +425,12 @@ export function MasterOnboardingScreen() {
   }
   if (step === 2) {
     return (
-      <Step2Permissions data={data} onContinue={handleStep2Continue} />
+      <Step2Permissions back={back} data={data} onContinue={handleStep2Continue} />
     );
   }
   return (
     <Step3Profile
+      back={back}
       data={data}
       draft={draft}
       onBioChange={onBioChange}
@@ -405,6 +446,7 @@ export function MasterOnboardingScreen() {
 // --- Step 1 ---------------------------------------------------------------
 
 function Step1Identity({
+  back,
   data,
   onConfirm,
   onNotMe,
@@ -414,6 +456,7 @@ function Step1Identity({
   onConfirm: () => void;
   onNotMe: () => void;
   disabled: boolean;
+  back: BackIntent;
 }) {
   // DRF-1434 — на пилоте этот экран показывал два разных имени: в
   // заголовке «Здравствуйте, Иван!» (из профиля MAX), а в карточке под
@@ -445,6 +488,7 @@ function Step1Identity({
     : "";
   return (
     <ScreenLayout
+      back={back}
       title={COPY.step1.greeting(greetingName)}
       cta={
         <StickyCta onClick={onConfirm} disabled={disabled}>
@@ -488,11 +532,13 @@ function Step1Identity({
 // --- Step 2 ---------------------------------------------------------------
 
 function Step2Permissions({
+  back,
   data,
   onContinue,
 }: {
   data: ClaimResponse;
   onContinue: () => void;
+  back: BackIntent;
 }) {
   // Spec line 219-221 references "Карина" by name. That is a spec example, not
   // data: the backend surfaces no owner first name, only `salon.name`. Step 1
@@ -501,6 +547,7 @@ function Step2Permissions({
   const ownerHint = salonOwnerHint(data.salon.name);
   return (
     <ScreenLayout
+      back={back}
       cta={<StickyCta onClick={onContinue}>{COPY.step2.cta}</StickyCta>}
     >
       <h1 className="screen__title">{COPY.step2.seeTitle}</h1>
@@ -530,6 +577,7 @@ function Step2Permissions({
 // --- Step 3 ---------------------------------------------------------------
 
 function Step3Profile({
+  back,
   data,
   draft,
   onBioChange,
@@ -547,6 +595,7 @@ function Step3Profile({
   onSubmit: () => void;
   onLater: () => void;
   submitting: boolean;
+  back: BackIntent;
 }) {
   const services = data.master.services
     .map((s) => s.name)
@@ -560,6 +609,7 @@ function Step3Profile({
     .join("");
   return (
     <ScreenLayout
+      back={back}
       cta={
         <StickyCta onClick={onSubmit} disabled={submitting}>
           {COPY.step3.cta}
@@ -657,9 +707,17 @@ function Step3Profile({
 
 // --- Error sub-screens ----------------------------------------------------
 
+/**
+ * Вид экранов ошибок приглашения (DRF-1493): вход по ссылке из бота,
+ * истории за ним нет — возвращаться некуда.
+ */
+const INVITE_ERROR_BACK = screenRoot(
+  "Экран ошибки приглашения открыт по ссылке из бота напрямую.",
+);
+
 function InviteInvalidScreen() {
   return (
-    <ScreenLayout title="Ссылка не работает">
+    <ScreenLayout back={INVITE_ERROR_BACK} title="Ссылка не работает">
       <div className="callout callout--danger" role="alert">
         <p style={{ margin: 0 }}>{COPY.errors.invalid}</p>
       </div>
@@ -670,6 +728,7 @@ function InviteInvalidScreen() {
 function InviteUsedScreen({ onOpen }: { onOpen: () => void }) {
   return (
     <ScreenLayout
+      back={INVITE_ERROR_BACK}
       title="Уже подключены"
       cta={<StickyCta onClick={onOpen}>{COPY.errors.used}</StickyCta>}
     >
@@ -678,12 +737,20 @@ function InviteUsedScreen({ onOpen }: { onOpen: () => void }) {
   );
 }
 
-function WrongRecipientScreen() {
+export function WrongRecipientScreen() {
+  // DRF-2268: «Закрыть» не молчит — «застрял» → подсказка.
+  const [stuck, setStuck] = useState(false);
   return (
     <ScreenLayout
+      back={INVITE_ERROR_BACK}
       title="Не тот получатель"
-      cta={<StickyCta onClick={closeApp}>{COPY.errors.close}</StickyCta>}
+      cta={
+        <StickyCta onClick={() => setStuck(returnToChat() === "stuck")}>
+          {COPY.errors.close}
+        </StickyCta>
+      }
     >
+      {stuck && <ReturnToChatHint />}
       <div className="callout callout--danger" role="alert">
         <p style={{ margin: 0 }}>{COPY.errors.wrong_recipient}</p>
       </div>
@@ -698,18 +765,13 @@ function NetworkErrorScreen({
   onRetry: () => void;
   err: unknown;
 }) {
-  // Surface 5xx vs offline differently per spec §M0 + customer-first-touch.
-  const isServer = err instanceof ApiError && err.status >= 500;
+  // Сеть / 5xx — общая ошибка загрузки с предметом «приглашение» (DRF-2190;
+  // ruling §61 б — шаблон «Не удалось загрузить <предмет>», альтернатива у
+  // владельца). Заголовки «Нет связи» / «Сервис временно недоступен» сняты —
+  // второй словарь состояний.
   return (
-    <ScreenLayout title={isServer ? "Сервис временно недоступен" : "Нет связи"}>
-      <div className="callout callout--danger" role="alert">
-        <p style={{ margin: 0 }}>{COPY.errors.network}</p>
-        <div style={{ marginTop: "var(--s-3)" }}>
-          <button type="button" className="btn-secondary" onClick={onRetry}>
-            {COPY.errors.retry}
-          </button>
-        </div>
-      </div>
+    <ScreenLayout back={INVITE_ERROR_BACK} title="Приглашение">
+      <SystemState kind="load_error" what="invite" err={err} onRetry={onRetry} />
     </ScreenLayout>
   );
 }

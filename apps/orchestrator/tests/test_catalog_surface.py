@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
+from uuid import uuid4
 
 import pytest
 
@@ -29,6 +30,7 @@ from apps.orchestrator import concierge, discovery
 from apps.orchestrator.concierge import _dispatch_tool, generate_concierge_reply
 from apps.orchestrator.discovery import (
     CALLBACK_CATALOG_MASTERS_PREFIX,
+    CALLBACK_CATALOG_SALONS,
     CALLBACK_CATALOG_SERVICES_PREFIX,
     CALLBACK_DISCOVER_BOOK_PREFIX,
     CATALOG_STALE_CARD_TEXT,
@@ -48,21 +50,35 @@ def _ts() -> datetime:
     return datetime(2026, 8, 23, 12, 0, tzinfo=timezone.utc)
 
 
-def _salon(slug: str, name: str, *, city: str = "", address: str = ""):
+def _salon(slug: str, name: str, *, city: str = "", address: str | None = None):
     """One salon: tenant + one bookable master (the platform's definition of
-    «салон на витрине»). ``address`` rides in the master's mirrored raw —
-    exactly where the Ayla specialists feed puts it."""
+    «салон на витрине»).
+
+    ``address`` goes into ``Tenant.address`` — the salon's OWN column (DRF-1587),
+    where the sync writes it (``_write_tenant_address``) and where
+    ``discover_salons`` reads it since DRF-1609. It used to ride in the master's
+    mirrored ``raw``, which made a salon's address a function of its roster —
+    OPEN_DECISIONS §45 called that a lottery.
+
+    The default is ``None``, not "" — «источник ничего не сказал», today's state
+    of every real salon. Pass ``address=""`` for the other empty: «источник
+    сказал, что адреса нет».
+    """
     from apps.catalog.models import CatalogMaster
     from apps.tenancy.models import Tenant
 
-    tenant = Tenant.objects.create(slug=slug, name=name, city=city)
+    tenant = Tenant.objects.create(slug=slug, name=name, city=city, address=address)
     CatalogMaster.all_tenants.create(
         tenant=tenant,
         external_updated_at=_ts(),
         name=f"Мастер {name}",
         is_active=True,
         invite_status=CatalogMaster.InviteStatus.ACCEPTED,
-        raw={"address": address} if address else {},
+        raw={},
+        # DRF-1540/1544 — синхронизированная строка несёт канонический ключ.
+        # Без него мастер не продаётся, и клиентские поверхности отвечали бы
+        # пустотой не потому, что сломаны.
+        ayla_user_id=uuid4(),
     )
     return tenant
 
@@ -173,8 +189,17 @@ class TestExecuteCatalogTool:
 
     def test_show_salons_renders_real_mirror_rows(self):
         _salon("s1", "BodyFormula", city="Пенза", address="Пенза, ул. Леонова, 15а")
-        t2 = _salon("s2", "Безадресный", city="Пенза")  # address empty — pilot shape
+        t2 = _salon("s2", "Безадресный", city="Пенза")  # address is None — pilot shape
         _service(t2, "Массаж спины")
+        # DRF-1609 — пустот ДВЕ, и обе обязаны дойти до человека одинаково
+        # пустыми. Раньше отличить их было нечем: мастерский raw умел только
+        # "". Теперь ``None`` («источник промолчал») и ``""`` («источник
+        # сказал: адреса нет») — разные значения на DTO, и проверять надо оба,
+        # иначе сторож ловит половину случаев.
+        # Без услуг — намеренно: этот салон здесь ради адреса, и добавлять
+        # ему чип значило бы попутно переписать соседнее утверждение про
+        # состав кнопок, которое к DRF-1609 отношения не имеет.
+        _salon("s3", "Сказали-что-нет", city="Пенза", address="")
 
         reply = execute_catalog_tool("show_salons", {"city": "Пенза"})
 
@@ -182,8 +207,12 @@ class TestExecuteCatalogTool:
         assert "BodyFormula" in reply.text
         assert "ул. Леонова, 15а" in reply.text
         assert "Безадресный" in reply.text
-        # An empty address must not leak as «None».
+        assert "Сказали-что-нет" in reply.text
+        # Neither empty may leak as «None» — nor as any other placeholder.
         assert "None" not in reply.text
+        # И обе строки выглядят ОДИНАКОВО: город без адреса и без хвоста.
+        assert "• Безадресный — Пенза\n" in reply.text
+        assert "• Сказали-что-нет — Пенза\n" in reply.text
         # Owner's call 23.08: a chip per salon that has something to show.
         # BodyFormula has no services here, so it gets a line and no chip —
         # the tap would open «услуги пока не загружены».
@@ -462,7 +491,10 @@ class TestCatalogChips:
 
         assert reply is not None
         assert "не к кому" in reply.text
-        assert _buttons(reply) == []
+        # DRF-1492 — the refusal is still honest AND no longer a dead end: it
+        # used to end at «спросите, что ещё есть в этом салоне», which named a
+        # salon this branch can no longer identify and left the person typing.
+        assert [b["callback"] for b in _buttons(reply)] == [CALLBACK_CATALOG_SALONS]
 
     def test_salon_with_an_empty_catalog_says_so_on_tap(self):
         tenant = _salon("s1", "BodyFormula", city="Пенза")
@@ -527,6 +559,59 @@ class TestCatalogChips:
     def test_no_chips_means_no_empty_keyboard(self):
         # An inline_keyboard attachment with an empty button list renders as a
         # broken message, not as a message without buttons.
-        reply = execute_catalog_tool("show_salons", {"city": "Сочи"})
+        #
+        # The positive half first (DRF-1411): the same call with a chippable
+        # salon DOES draw a keyboard, so an empty one below means «no chips»
+        # and not «this renderer stopped drawing anything».
+        chippable = _salon("s0", "BodyFormula", city="Пенза")
+        _service(chippable, "Массаж спины")
+        assert _buttons(execute_catalog_tool("show_salons", {"city": "Пенза"}))
 
+        # A salon whose mirror carries no active service: its line renders,
+        # its chip does not — the tap would open an empty list.
+        _salon("s1", "Пустой", city="Саранск")
+        reply = execute_catalog_tool("show_salons", {"city": "Саранск"})
+
+        assert "Пустой" in reply.text
         assert reply.action_data is None
+
+    def test_empty_salon_list_without_a_city_offers_no_loop(self):
+        # DRF-1492's other half. «В городе X салонов нет» gets a «Показать
+        # салоны» chip — it drops the filter and answers «а где вы есть».
+        # The city-LESS refusal must NOT: its tap would redraw this very
+        # sentence, and a button that loops is worse than a full stop.
+        with_city = execute_catalog_tool("show_salons", {"city": "Сочи"})
+        assert [b["callback"] for b in _buttons(with_city)] == [CALLBACK_CATALOG_SALONS]
+
+        without_city = execute_catalog_tool("show_salons", {})
+        assert "Подключённых салонов пока нет" in without_city.text
+        assert without_city.action_data is None
+
+    def test_show_salons_chip_answers_with_the_salon_list(self):
+        # The chip DRF-1492 added — the entry point of the catalog chain as a
+        # button. Refless: nothing to go stale, and the same renderer the
+        # model-called tool uses.
+        tenant = _salon("s1", "BodyFormula", city="Пенза")
+        _service(tenant, "Массаж спины")
+
+        reply = execute_catalog_callback(CALLBACK_CATALOG_SALONS)
+
+        assert reply is not None
+        assert "BodyFormula" in reply.text
+        # And the tap chain continues: the salon chip it renders opens that
+        # salon's services, exactly as the typed question does.
+        services = execute_catalog_callback(_buttons(reply)[0]["callback"])
+        assert services is not None
+        assert "Массаж спины" in services.text
+
+    def test_stale_card_line_carries_the_move_it_names(self):
+        # DRF-1492 — the line used to read «Спросите "какие салоны у вас
+        # есть", и я покажу заново»: the bot knew the move, named the move,
+        # and handed over the typing.
+        import uuid as _uuid
+
+        reply = execute_catalog_callback(f"{CALLBACK_CATALOG_SERVICES_PREFIX}{_uuid.uuid4()}")
+
+        assert reply is not None
+        assert reply.text == CATALOG_STALE_CARD_TEXT
+        assert [b["callback"] for b in _buttons(reply)] == [CALLBACK_CATALOG_SALONS]

@@ -124,6 +124,7 @@ class TestPickup:
             "skipped": 0,
             "stale": 0,
             "deferred": 0,
+            "muted": 0,
         }
         mock_send.assert_not_called()
 
@@ -593,3 +594,89 @@ class TestRecheckAdversarial:
         assert result["stale"] == 1
         reminder.refresh_from_db()
         assert reminder.status == BookingReminder.Status.STALE_DROPPED
+
+
+class TestNotifyRemindersSwitch:
+    """DRF-1833 замер 12.09: ``UserPreferences.notify_reminders`` обещал
+    «only soft reminders mute», а ``send_due_reminders`` его не читал.
+    Напоминание — сервисное (о СВОЕЙ записи), гейта согласия у него нет;
+    но собственное «нет» человека обязано действовать.
+
+    Три положения: тумблер выключен → 0 отправок, строка MUTED, аудит;
+    тумблер включён явно → отправка; строки предпочтений нет вовсе
+    (человек тумблер не трогал) → отправка. Без двух последних первое
+    доказывало бы и «никому ничего», как и любой отказ.
+    """
+
+    @staticmethod
+    def _due(tenant: Tenant, bot_user: BotUser, yc_id: str) -> BookingReminder:
+        return _make_reminder(
+            tenant=tenant,
+            bot_user=bot_user,
+            kind=BookingReminder.Kind.DAY_BEFORE,
+            yc_id=yc_id,
+            scheduled_at=timezone.now() - timedelta(minutes=1),
+        )
+
+    def test_switch_off_means_zero_sends_and_a_named_row(
+        self, tenant: Tenant, bot_user: BotUser
+    ) -> None:
+        from apps.audit.models import AuditLog
+        from apps.identity.models import UserPreferences
+
+        UserPreferences.all_tenants.create(tenant=tenant, bot_user=bot_user, notify_reminders=False)
+        row = self._due(tenant, bot_user, "yc-mute-1")
+
+        with patch("apps.bookings.tasks.send_message") as mock_send:
+            result = send_due_reminders()
+
+        mock_send.assert_not_called()
+        assert result["muted"] == 1 and result["sent"] == 0
+        row.refresh_from_db()
+        assert row.status == BookingReminder.Status.MUTED
+        assert row.sent_at is None
+        audit = AuditLog.all_tenants.filter(action="bookings.reminder.muted", target_id=row.pk)
+        assert audit.exists()
+        first = audit.first()
+        assert first is not None
+        assert first.payload["reason"] == "notify_reminders_off"
+
+    def test_switch_on_sends(self, tenant: Tenant, bot_user: BotUser) -> None:
+        from apps.identity.models import UserPreferences
+
+        UserPreferences.all_tenants.create(tenant=tenant, bot_user=bot_user, notify_reminders=True)
+        row = self._due(tenant, bot_user, "yc-mute-2")
+        with patch("apps.bookings.tasks.send_message") as mock_send:
+            result = send_due_reminders()
+        assert mock_send.call_count == 1
+        assert result["sent"] == 1 and result["muted"] == 0
+        row.refresh_from_db()
+        assert row.status == BookingReminder.Status.SENT_NO_REPLY
+
+    def test_no_preferences_row_means_not_muted(self, tenant: Tenant, bot_user: BotUser) -> None:
+        from apps.identity.models import UserPreferences
+
+        assert not UserPreferences.all_tenants.filter(bot_user=bot_user).exists()
+        self._due(tenant, bot_user, "yc-mute-3")
+        with patch("apps.bookings.tasks.send_message") as mock_send:
+            result = send_due_reminders()
+        assert mock_send.call_count == 1
+        assert result["muted"] == 0
+
+    def test_the_switch_is_read_at_send_time_not_schedule_time(
+        self, tenant: Tenant, bot_user: BotUser
+    ) -> None:
+        """Строка напоминания создана при включённом тумблере; человек
+        выключил его до тика — тик обязан это увидеть."""
+        from apps.identity.models import UserPreferences
+
+        prefs = UserPreferences.all_tenants.create(
+            tenant=tenant, bot_user=bot_user, notify_reminders=True
+        )
+        self._due(tenant, bot_user, "yc-mute-4")  # scheduled while ON
+        prefs.notify_reminders = False
+        prefs.save(update_fields=["notify_reminders"])
+        with patch("apps.bookings.tasks.send_message") as mock_send:
+            result = send_due_reminders()
+        mock_send.assert_not_called()
+        assert result["muted"] == 1

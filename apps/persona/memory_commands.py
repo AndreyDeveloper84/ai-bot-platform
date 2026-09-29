@@ -63,18 +63,28 @@ _FORGET_ALL_MARKER = "напиши одним словом: удалить"
 # apps.identity.services.forget_all_sweep) and the Ayla-side declared profile.
 # What still stands is now visible: the export carries the preferences and
 # declares its own composition (apps.identity.export_coverage).
+#
+# DRF-2214 (CD §76, №30) — the erasure is now wider than «what I remembered
+# from our conversations»: goals, the plan, the nutrition profile, the food
+# diary, recommendation cards (#526/#530/#541/#1980). The owner's text names
+# what stays instead: bookings and payments; favourite masters, which live in
+# the BeautyGO mobile app (``FavoriteSpecialist``) and are kept; the settings
+# on the profile screen. Pinned verbatim by
+# ``apps/persona/tests/test_forget_all_texts_2214.py``.
 FORGET_ALL_PROMPT = (
-    "Это серьёзный шаг: я забуду всё, что запомнила о тебе из наших разговоров, "
-    "и анкету предпочтений — вернуть будет нельзя.\n"
+    "Это серьёзный шаг: я забуду всё, что знаю о тебе, кроме бронирований и оплат, "
+    "— вернуть будет нельзя.\n"
     "Саму переписку я обезличу: текст останется без твоих контактов — только на "
     "случай спора о записи, и удалится через 90 дней.\n"
-    "Останутся бронирования и оплаты (это по закону) и настройки уведомлений "
-    "с датой рождения — ими ты управляешь сам на экране профиля.\n"
+    "Останутся бронирования и оплаты (это по закону), избранные мастера — они в "
+    "приложении BeautyGO, а также настройки уведомлений с датой рождения — их ты "
+    "меняешь сам на экране профиля.\n"
     f"Чтобы подтвердить — {_FORGET_ALL_MARKER}"
 )
 _FORGET_ALL_DONE = (
-    "Готово — я забыла всё, что о тебе помнила. Настройки уведомлений и дата "
-    "рождения остались на экране профиля: их меняешь ты, не я 🙂"
+    "Готово — я забыла всё, что о тебе помнила. Избранные мастера остались в "
+    "приложении BeautyGO, настройки уведомлений и дата рождения — на экране "
+    "профиля: их меняешь ты, не я 🙂"
 )
 
 # DRF-1367: said when the bot-side memory is gone but Ayla — the owner of the
@@ -86,6 +96,15 @@ _FORGET_ALL_PARTIAL = (
     "Я забыла всё, что помнила сама, но до анкеты в профиле сейчас не достучалась — "
     "там ещё остались твои предпочтения. Напиши «забудь всё» ещё раз чуть позже, "
     "и я доведу до конца."
+)
+
+# DRF-1950 (M3): удаление в Ayla поставлено в задание, readback каталога ещё
+# не подтвердил. Первая фраза — правда: память бота и переписка уже обработаны
+# выше; «забыла всё, что о тебе помнила» и «напиши ещё раз» здесь неправда —
+# анкета в Ayla ещё не подтверждена, повтор делает задание, а не человек.
+# Вторая половина — решение владельца дословно; склейка — черновик на утверждение.
+_FORGET_ALL_STARTED = (
+    "Я забыла всё, что помнила сама. Удаление запущено. Оно завершится в установленный срок."
 )
 
 _CONFIRM_WORD = "удалить"
@@ -139,6 +158,28 @@ _FACT_KEYWORDS: dict[tuple[str, str], tuple[str, ...]] = {
     ("diet", "keto"): ("кето",),
     ("diet", "halal"): ("халял",),
     ("diet", "kosher"): ("кошер",),
+    # DRF-2398: без этих двух «забудь что я ем все» не попадало в конкретный
+    # факт и уходило в общий стебель «ем » — то есть стирало ВСЮ тему питания
+    # вместо одной строки. Перебор хуже недобора: человек просил забыть одно.
+    #
+    # Стебля «ем всё» здесь НЕТ намеренно: ``_normalise`` сводит ё к е, и такой
+    # стебель не совпал бы никогда — мёртвый стебель хуже отсутствующего, он
+    # выглядит работающим. «Ем все» тоже не берём: он ловит «ем всегда» и
+    # «ем всего», то есть удалял бы строку по фразе не о питании, а перебор в
+    # удалении дороже недобора. Остаются однозначные слова.
+    ("diet", "omnivore"): ("без ограничений", "всеядн"),
+    # Падежи закрыты формами, а не обрубком: стебель «диет» совпал бы и с
+    # «забудь всё про диеты» — и тогда человек, просивший забыть ТЕМУ, потерял
+    # бы только одну строку. Недоудаление по прямой просьбе «всё» хуже, чем
+    # промах по падежу: промах уйдёт в тему целиком, то есть сделает больше,
+    # чем просили, но просили-то именно это.
+    ("diet", "other"): (
+        "особое питани",
+        "особого питани",
+        "особая диет",
+        "особую диет",
+        "особой диет",
+    ),
 }
 _KEY_KEYWORDS: dict[str, tuple[str, ...]] = {
     "diet": ("диет", "питани", "пищ", "еда", "ем "),
@@ -146,7 +187,30 @@ _KEY_KEYWORDS: dict[str, tuple[str, ...]] = {
     "preferred_districts": ("район", "метро", "округ", "географ"),
     "price_range": ("бюджет", "цен", "стоимост", "деньг", "рубл"),
     "favorite_masters": ("мастер",),
+    "city": ("город",),
+    "visit_context": ("когда прихож", "после работ", "вечер", "выходн"),
 }
+
+# Scanner-correction keys (DRF-1454) carry the dish in the key itself
+# («food_dish_name:борщ»), so they cannot be listed in _KEY_KEYWORDS verbatim —
+# and unlisted they were unforgettable: «забудь всё про питание» removed only
+# the diet rows, answered «Готово — забыла всё, что знала: питание», and left
+# the food_* rows alive (review, architecture axis: 152-ФЗ + ADR-0011 §8).
+# They ARE the «питание» domain: one person, one word, one erasure.
+#
+# Only ``food_dish_name:`` is written today (owner decision 2026-09-04, variant
+# А — see ``food_memory.REMEMBERED_FIELDS``); the other two stay listed as
+# guards, so that whatever DRF-825 revives is erasable from its first row.
+_FOOD_KEY_PREFIXES = ("food_portion:", "food_dish_name:", "food_macros:")
+
+
+def _domain_of(key: str) -> str:
+    """The forget-domain a memory key belongs to (food_* keys → «diet»)."""
+
+    if key.startswith(_FOOD_KEY_PREFIXES):
+        return "diet"
+    return key
+
 
 # Human label per domain for the domain-forget acknowledgement — naming the
 # DOMAIN, not a stored row (the first live row may be a superseded value and
@@ -157,6 +221,8 @@ _DOMAIN_LABELS: dict[str, str] = {
     "preferred_districts": "районы",
     "price_range": "бюджет",
     "favorite_masters": "любимых мастеров",
+    "city": "город",
+    "visit_context": "когда приходишь",
 }
 
 
@@ -175,6 +241,13 @@ class MemoryCommandResult:
     text: str
     action_type: str = ""
     action_data: dict | None = None
+    #: DRF-2341 — см. ``apps.orchestrator.done_claims``.
+    #: DRF-2341 — те же имена и та же форма, что у ``SkillResult``: булев
+    #: признак плюс подтверждение «источник:что он ответил». ``meta`` у
+    #: этого класса нет, поэтому носитель — поле; читатель общий,
+    #: ``apps.skills.base.claims_done_of``.
+    claims_done: bool = False
+    claims_done_evidence: str = ""
 
 
 def _normalise(text: str) -> str:
@@ -264,6 +337,15 @@ def _user_id_of(bot_user) -> uuid.UUID | None:
         return None
 
 
+def _closed_to(bot_user) -> bool:
+    """§2.4 (S2-2): a shell the gate refuses gets the honest empty answer, never a fact."""
+    if bot_user is None:
+        return False
+    from apps.identity.services.person_context_gate import person_context_access
+
+    return person_context_access(bot_user) is not None
+
+
 def render_memory_summary(bot_user, *, user_id: uuid.UUID | None = None) -> str:
     """The «помню, что ты …» line, as a PUBLIC entry point (DRF-1305).
 
@@ -276,6 +358,8 @@ def render_memory_summary(bot_user, *, user_id: uuid.UUID | None = None) -> str:
     Empty memory returns the honest line, never a placeholder fact.
     """
 
+    if _closed_to(bot_user):
+        return _summary_line([], None)
     resolved = user_id or _user_id_of(bot_user)
     if resolved is None:
         return _summary_line([], None)
@@ -311,6 +395,8 @@ def memory_show_chips(bot_user, *, user_id: uuid.UUID | None = None) -> list[dic
     :mod:`apps.orchestrator.personal_surface` prints instead.
     """
 
+    if _closed_to(bot_user):
+        return []
     resolved = user_id or _user_id_of(bot_user)
     if resolved is None:
         return []
@@ -318,8 +404,10 @@ def memory_show_chips(bot_user, *, user_id: uuid.UUID | None = None) -> list[dic
     for fact in read_current_view(resolved).green_facts:
         content = fact.content if isinstance(fact.content, dict) else {}
         key = content.get("key")
-        if isinstance(key, str) and key in _DOMAIN_LABELS and key not in keys:
-            keys.append(key)
+        if isinstance(key, str):
+            domain = _domain_of(key)
+            if domain in _DOMAIN_LABELS and domain not in keys:
+                keys.append(domain)
     return [
         {"label": f"Забыть: {_DOMAIN_LABELS[key]}", "callback": f"забудь {_DOMAIN_LABELS[key]}"}
         for key in keys[:MAX_FORGET_CHIPS]
@@ -364,7 +452,7 @@ def _bridge_clear(bot_user, memory_keys: list[str]) -> None:
         logger.exception("persona.memory_commands.bridge_clear_failed")
 
 
-def _bridge_erase(bot_user) -> bool:
+def _bridge_erase(bot_user) -> str:
     """«Забудь всё» → ask Ayla to erase the profile it owns. Erased?
 
     DRF-1367: the previous implementation walked ``_KEY_KEYWORDS`` and asked
@@ -380,14 +468,20 @@ def _bridge_erase(bot_user) -> bool:
     if bot_user is None:
         # Bot-local command (no channel user passed): there is no Ayla side to
         # erase and nothing upstream was ever written under this call path.
-        return True
+        return "erased"
     try:
-        from apps.orchestrator.memory.ayla_bridge import erase_declared_profile
+        from apps.identity.services.personal_context import GateStatus
+        from apps.orchestrator.memory.ayla_bridge import erase_declared_profile_status
 
-        return erase_declared_profile(bot_user)
+        status = erase_declared_profile_status(bot_user)
     except Exception:  # noqa: BLE001 — forget must never break the turn
         logger.exception("persona.memory_commands.bridge_erase_failed")
-        return False
+        return "failed"
+    if status is GateStatus.OK:
+        return "erased"
+    if status is GateStatus.STARTED:
+        return "started"
+    return "failed"
 
 
 def _anonymize_dialogue(bot_user) -> None:
@@ -443,6 +537,10 @@ def handle_memory_command(
     norm = _normalise(text)
     if not norm:
         return None
+    if _closed_to(bot_user):
+        # §2.4 (S2-2): no memory to show or forget — the turn falls through to
+        # discovery exactly as it does while memory is dormant.
+        return None
 
     # 1. «забудь всё» confirmation — the single word «удалить» right after we
     #    asked for it. Highest priority so it can't be mistaken for a field.
@@ -458,13 +556,22 @@ def handle_memory_command(
             # fields is the DRF-1367 defect: it emptied three of twelve and
             # could not clear the price at all.
             erased = _bridge_erase(bot_user)
-            if not erased:
+            if erased == "started":
+                return MemoryCommandResult(text=_FORGET_ALL_STARTED)
+            if erased != "erased":
                 # The upstream profile survived. Saying «я забыла всё» here
                 # would be a false statement about a 152-ФЗ erasure — and the
                 # person would catch us out on the next turn, when the prompt
                 # still names their budget.
                 return MemoryCommandResult(text=_FORGET_ALL_PARTIAL)
-            return MemoryCommandResult(text=_FORGET_ALL_DONE)
+            return MemoryCommandResult(
+                text=_FORGET_ALL_DONE,
+                # Наше действие: доказательство — прочитанный исход стирания
+                # («erased»), а не факт вызова; «started» и «partial» выше
+                # отвечают другим текстом.
+                claims_done=True,
+                claims_done_evidence="bridge.erase:erased",
+            )
         return None  # bare «удалить» with no pending prompt → not a command
 
     # 2. «забудь всё» request → the confirmation prompt (does NOT delete yet).
@@ -500,18 +607,24 @@ def handle_memory_command(
             soft_delete_green_entries(user_id, [e.id for e in fact_matched])
             _bridge_clear(bot_user, keys)
             label = describe_green_content(fact_matched[0].content) or "это"
-            return MemoryCommandResult(text=f"Готово — забыла: {label}.")
+            # Фраза факта — во 2-м лице (DRF-1292), поэтому «забыла, что ты …».
+            return MemoryCommandResult(text=f"Готово — забыла, что ты {label}.")
 
-        domain_keys = sorted(
-            {
-                k
-                for e in entries
-                if (k := _entry_key(e)) is not None
-                and any(kw in target for kw in _KEY_KEYWORDS.get(k, ()))
-            }
-        )
+        matched_domains: set[str] = set()
+        for e in entries:
+            entry_key = _entry_key(e)
+            if entry_key is None:
+                continue
+            domain = _domain_of(entry_key)
+            if any(kw in target for kw in _KEY_KEYWORDS.get(domain, ())):
+                matched_domains.add(domain)
+        domain_keys = sorted(matched_domains)
         if len(domain_keys) == 1:
-            doomed = [e for e in entries if _entry_key(e) == domain_keys[0]]
+            doomed = [
+                e
+                for e in entries
+                if (k := _entry_key(e)) is not None and _domain_of(k) == domain_keys[0]
+            ]
             soft_delete_green_entries(user_id, [e.id for e in doomed])
             _bridge_clear(bot_user, domain_keys)
             label = _DOMAIN_LABELS.get(domain_keys[0], domain_keys[0])

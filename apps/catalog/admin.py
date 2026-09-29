@@ -3,15 +3,30 @@
 Catalog mirrors are derived state — the source of truth lives in mysite,
 the platform writes only through the catalog sync (C-track). Manual
 edits would silently rot on the next sync overwrite. Admin is view-only
-for forensics; controlled mutation (force resync) lands in C6 (DRF-576)
-as an admin action.
+for forensics; the single controlled mutation is the force-resync admin
+action (DRF-1581) on ``CatalogServiceAdmin``, which enqueues
+``apps.catalog.tasks.sync_catalog_for_tenant`` per selected tenant.
+
+(The paragraph above used to promise the button "lands in C6 (DRF-576)".
+DRF-576 was the read-only admin; the button itself had been specced in
+DRF-667, closed as its duplicate — and half the subject left with the
+dupe. DRF-1581 is the number that actually shipped it.)
 """
 
 from __future__ import annotations
 
-from django.contrib import admin
-from django.http import HttpRequest
+import uuid
+from typing import ClassVar
 
+from django.contrib import admin, messages
+from django.contrib.admin.helpers import ACTION_CHECKBOX_NAME
+from django.http import HttpRequest
+from django.shortcuts import render
+from django.utils import timezone
+from django.utils.html import format_html, format_html_join
+
+from apps.adminconsole.theme import AylaAdminMedia, BadgeMap, absent, badge
+from apps.catalog.master_state import is_available, sale_block
 from apps.catalog.models import (
     CatalogFaq,
     CatalogHelpArticle,
@@ -20,12 +35,23 @@ from apps.catalog.models import (
     MasterService,
 )
 from apps.catalog.provenance import MasterServiceSource, master_service_write
+from apps.catalog.services import verification
+from apps.catalog.tasks import sync_catalog_for_tenant
 
 
-class _MirrorAdminBase(admin.ModelAdmin):
+#: Как выглядит отсутствие значения на экранах каталога.
+#:
+#: Не «—» и не «0»: прочерк в колонке чисел читается как ноль, а ноль —
+#: как измеренный ноль. Ни то, ни другое не правда, когда значения просто
+#: нет (OPEN_DECISIONS §65 — «не подставлять значение вместо отсутствия»).
+_ABSENT = "нет данных"
+
+
+class _MirrorAdminBase(AylaAdminMedia, admin.ModelAdmin):
     list_filter = ("tenant", "external_updated_at")
     date_hierarchy = "external_updated_at"
     ordering = ("-external_updated_at",)
+    empty_value_display = _ABSENT
 
     def get_queryset(self, request):
         return self.model.all_tenants.all()
@@ -42,27 +68,924 @@ class _MirrorAdminBase(admin.ModelAdmin):
 
 @admin.register(CatalogService)
 class CatalogServiceAdmin(_MirrorAdminBase):
-    list_display = ("slug", "name", "tenant", "is_active", "is_popular", "synced_at")
+    list_display = ("name", "slug", "tenant", "is_active", "is_popular", "synced_at")
     search_fields = ("slug", "name", "external_id")
+    search_help_text = "Ищет по названию услуги, её коду и идентификатору в источнике."
+    # Экран и так только для чтения (``_MirrorAdminBase`` отказывает в
+    # change). Перечисление здесь ничего не открывает и ничего не
+    # закрывает — оно позволяет Django нарисовать в карточке поля,
+    # которые не редактируемы в принципе (``id``, ``synced_at``,
+    # ``external_updated_at``): без явного readonly Django отказывается
+    # включать их в fieldsets.
+    readonly_fields = tuple(f.name for f in CatalogService._meta.fields)
+    actions = ("force_resync_selected_tenants",)
+    fieldsets = (
+        (
+            "Услуга",
+            {
+                "fields": ("name", "slug", "tenant", "short_description", "description"),
+                "description": (
+                    "Так услуга называется у клиента. Экран только для "
+                    "чтения: каталог — зеркало, правку затрёт следующий "
+                    "прогон синхронизации."
+                ),
+            },
+        ),
+        (
+            "Продажа",
+            {
+                "fields": (
+                    "price_from",
+                    "duration_min",
+                    "is_active",
+                    "is_popular",
+                    "goals",
+                ),
+                "description": (
+                    "«Продаётся» — то же поле, по которому услуга попадает клиенту в выдачу."
+                ),
+            },
+        ),
+        (
+            "Здоровье и противопоказания",
+            {"fields": ("requires_health_check", "contraindications")},
+        ),
+        (
+            "Служебное: синхронизация и SEO",
+            {
+                "classes": ("collapse",),
+                "fields": (
+                    "id",
+                    "external_id",
+                    "ayla_service_id",
+                    "external_updated_at",
+                    "synced_at",
+                    "cache_version",
+                    "seo_title",
+                    "seo_description",
+                    "raw",
+                ),
+                "description": (
+                    "Технические поля зеркала. Нужны, когда разбираешься, "
+                    "почему услуга приехала не такой, какой ждали."
+                ),
+            },
+        ),
+    )
+
+    # DRF-1581, образец — DRF-1495 у зеркала KB: без ``permissions=``
+    # Django отдаёт действие всякому, кто открыл экран, включая роль
+    # «смотрящий». ``permissions=("change",)`` не годится:
+    # ``has_change_permission`` в базовом классе безусловно False, и
+    # действие умерло бы вместе с ролями. Отдельный предикат спрашивает
+    # право на модель: владелец и «правящий» кнопку получают,
+    # «смотрящий» — нет.
+    def has_resync_permission(self, request: HttpRequest) -> bool:
+        return request.user.has_perm("catalog.change_catalogservice")
+
+    @admin.action(
+        permissions=("resync",),
+        description="Пересинхронизировать каталог выбранных салонов",
+    )
+    def force_resync_selected_tenants(self, request: HttpRequest, queryset) -> None:  # type: ignore[no-untyped-def]
+        """Enqueue :func:`sync_catalog_for_tenant` per distinct tenant (DRF-1581).
+
+        Дедуп по тенанту, не по строкам: сколько бы услуг салона ни было
+        выбрано, задание одно — прогон пересинхронизирует все три зеркала
+        (услуги, мастера, связи) этого салона целиком.
+
+        Веера по всем салонам здесь нет нарочно: ставится ровно то, что
+        выбрал оператор. Анонимный лимит Ayla (~30/мин, замер окна
+        DRF-1595) веер по каждому тенанту разом не пережил бы.
+
+        Защита от двойного запуска — не в этом методе, а в сервисе:
+        Redis-замок ``CatalogSyncService`` отвечает повторному прогону
+        ``skipped``, поэтому двойное нажатие не запускает двух
+        синхронизаций одного салона.
+
+        Синхронно из админ-запроса не гоняем (причина расписана у K9,
+        ``apps/kb/admin.py``): фетч из Ayla по сети заблокировал бы
+        воркер админки на минуты. Оператор видит принятие в message,
+        завершение — по обновившейся колонке ``synced_at``.
+        """
+        tenants = sorted(
+            {
+                row.tenant.slug: str(row.tenant_id) for row in queryset.select_related("tenant")
+            }.items()
+        )
+        if not tenants:
+            self.message_user(
+                request,
+                "В выборке нет салонов — пересинхронизация не поставлена.",
+                level=messages.WARNING,
+            )
+            return
+
+        for _slug, tenant_id in tenants:
+            # ``.delay`` ставит задание и возвращается сразу; результат
+            # (AsyncResult) здесь не ждём — завершение видно по synced_at.
+            sync_catalog_for_tenant.delay(tenant_id)
+
+        slugs = ", ".join(slug for slug, _ in tenants)
+        self.message_user(
+            request,
+            f"Пересинхронизация поставлена для {len(tenants)} салон(а/ов): {slugs}. "
+            "Прогон стартует в течение минуты; завершение смотрите по колонке "
+            "synced_at — она обновится, когда синхронизация закончится. "
+            "Повторное нажатие, пока идёт прогон, пропускается замком.",
+            level=messages.SUCCESS,
+        )
+
+
+class MasterArchivedFilter(admin.SimpleListFilter):
+    """«В архиве / не в архиве» — по NULL в ``archived_at`` (DRF-1496)."""
+
+    title = "архив мастера"
+    parameter_name = "archived"
+
+    def lookups(self, request, model_admin):  # type: ignore[no-untyped-def]
+        return (("live", "Не в архиве"), ("archived", "В архиве"))
+
+    def queryset(self, request, queryset):  # type: ignore[no-untyped-def]
+        if self.value() == "live":
+            return queryset.filter(archived_at__isnull=True)
+        if self.value() == "archived":
+            return queryset.filter(archived_at__isnull=False)
+        return queryset
+
+
+#: Поля, которые перезаписывает синхронизация каталога. Править их руками
+#: бессмысленно — затрёт следующий прогон, — поэтому карточка отдаёт их
+#: только на чтение, а не «временно, с предупреждением».
+_SYNC_MANAGED_FIELDS = (
+    "name",
+    "specialization",
+    "bio",
+    "experience",
+    "rating",
+    "review_count",
+    "is_active",
+    "yclients_staff_id",
+    "ayla_user_id",
+    # DRF-1933: id профиля в каталоге — пишут синк и провижининг соло.
+    "catalog_specialist_id",
+    "external_id",
+    "external_updated_at",
+    "synced_at",
+    "cache_version",
+)
+
+#: Платформенные поля. Меняются только действиями со страницы списка —
+#: каждое действие пишет в журнал с автором, поэтому свободной правки
+#: этих полей в карточке тоже нет: правка через форму обязана иметь
+#: причину (архив) или быть осознанным жестом (верификация).
+_PLATFORM_FIELDS = (
+    "tenant",
+    "invite_status",
+    "mode",
+    "photo_url",
+    "max_handle",
+    "linked_bot_user",
+    "invited_at",
+    "invite_expires_at",
+    "accepted_at",
+    "archived_at",
+    "archive_reason",
+    # §83 — подтверждение расписания. Только для чтения, и это не
+    # осторожность: правимый отпечаток означал бы, что подтверждение
+    # можно ВПИСАТЬ, а не выдать. Ставит его один писатель —
+    # ``catalog.services.schedule_confirmation.confirm_schedule``, с
+    # живым чтением часов и автором (правило 6).
+    "schedule_confirmed_at",
+    "schedule_confirmed_by",
+    "schedule_fingerprint",
+)
+
+
+def _looks_like_uuid(value: str) -> bool:
+    """Отсев до запроса: кривой id — «не найден», а не 500 из ``UUIDField``."""
+    try:
+        uuid.UUID(value)
+    except (ValueError, AttributeError, TypeError):
+        return False
+    return True
 
 
 @admin.register(CatalogMaster)
 class CatalogMasterAdmin(_MirrorAdminBase):
+    """Мастера: карточка, верификация приглашения, архив (DRF-1496).
+
+    В отличие от остальных зеркал каталога, этот экран не полностью
+    read-only: у мастера есть платформенные поля, которых синхронизация
+    никогда не касается (см. докстринг ``CatalogMaster``). Ими управляет
+    оператор — но только действиями, потому что:
+
+    * верификация (перевод ``invite_status`` вручную) обязана оставить
+      след с автором — ``log_change`` пишет ``LogEntry``, который
+      ``apps.adminconsole.journal`` разворачивает в ``AuditLog``;
+    * архив обязан иметь причину — «архивировал молча» не допускается,
+      поэтому действие ведёт через промежуточную страницу с обязательным
+      полем причины, а поля ``archived_at``/``archive_reason`` в карточке
+      только для чтения.
+
+    ``invite_token`` и ``raw`` в карточку не попадают вовсе: первый —
+    одноразовый секрет привязки, второй — сырой зеркальный JSON, в
+    котором могут лежать контакты мастера.
+
+    Право на действия — ``catalog.change_catalogmaster``: оно есть у
+    владельца и у роли «правящий», у «смотрящего» его нет, и Django сам
+    не отдаст ему действия (``permissions=("change",)``).
+    """
+
     list_display = (
         "name",
-        "specialization",
+        "tenant",
+        "invite_state",
+        "work_mode",
+        "bookable",
+        "bookable_note",
+        "synced_at",
+    )
+    list_filter = (  # type: ignore[assignment]
         "tenant",
         "is_active",
         "invite_status",
         "mode",
-        "synced_at",
+        MasterArchivedFilter,
+        "external_updated_at",
     )
-    list_filter = ("tenant", "is_active", "invite_status", "mode", "external_updated_at")  # type: ignore[assignment]
     search_fields = ("name", "specialization", "external_id", "max_handle")
+    search_help_text = (
+        "Ищет по имени мастера, специализации, нику в MAX и идентификатору в источнике."
+    )
+    # DRF-1515: invite_token — действующий одноразовый ключ привязки мастера
+    # (apps/master_api/auth.py → validate_invite_token). Экран read-only для
+    # всех, значит значение печаталось бы каждому открывшему форму. Поле не
+    # попадает в форму вовсе: показывать его здесь некому и незачем.
+    exclude = ("invite_token",)
+    actions = (
+        "verify_masters",
+        "revoke_invite_masters",
+        "archive_masters",
+        "unarchive_masters",
+        "confirm_solo_identity_link",
+        "reject_solo_identity_link",
+        "onboard_person",
+    )
+    fieldsets = (
+        (
+            "Мастер",
+            {
+                "description": (
+                    "Как мастера видит клиент. Эти поля перезаписывает "
+                    "каждый прогон синхронизации каталога — правка здесь "
+                    "была бы временной, поэтому они только для чтения."
+                ),
+                "fields": ("name", "specialization", "bio", "experience"),
+            },
+        ),
+        (
+            "Репутация и активность",
+            {
+                "description": (
+                    "Тоже приезжает синхронизацией. «Активна по данным "
+                    "синхронизации» — это ответ источника, а не решение "
+                    "оператора: снятую активность чинят в источнике, не здесь."
+                ),
+                "fields": ("rating", "review_count", "is_active"),
+            },
+        ),
+        (
+            "Приглашение и доступ",
+            {
+                "description": (
+                    "Платформенная часть: её синхронизация не трогает "
+                    "никогда. Меняется действиями со страницы списка — "
+                    "верификацией и отзывом приглашения. Каждое действие "
+                    "пишется в журнал с автором."
+                ),
+                "fields": (
+                    "invite_status",
+                    "mode",
+                    "max_handle",
+                    "linked_bot_user",
+                    "invited_at",
+                    "invite_expires_at",
+                    "accepted_at",
+                ),
+            },
+        ),
+        (
+            "Подтверждение расписания",
+            {
+                "description": (
+                    "Допуск мастера к продаже (§83). Проставляет владелец "
+                    "салона в салонной поверхности, а не форма: отпечаток "
+                    "снимается с живых часов в момент подтверждения. Любое "
+                    "изменение часов отменяет подтверждение автоматически."
+                ),
+                "fields": (
+                    "schedule_confirmed_at",
+                    "schedule_confirmed_by",
+                    "schedule_fingerprint",
+                ),
+            },
+        ),
+        (
+            "Архив",
+            {
+                "description": (
+                    "Архив обязан иметь причину — «архивировал молча» не "
+                    "допускается, поэтому поля заполняет действие, а не форма."
+                ),
+                "fields": ("archived_at", "archive_reason"),
+            },
+        ),
+        (
+            "Служебное: связь с источниками",
+            {
+                "classes": ("collapse",),
+                "description": (
+                    "Технические идентификаторы и отметки синхронизации. "
+                    "Нужны, когда разбираешься, откуда приехало значение."
+                ),
+                "fields": (
+                    "tenant",
+                    "photo_url",
+                    "yclients_staff_id",
+                    "ayla_user_id",
+                    "catalog_specialist_id",
+                    "external_id",
+                    "external_updated_at",
+                    "synced_at",
+                    "cache_version",
+                ),
+            },
+        ),
+        (
+            "Готовность к работе",
+            {
+                "description": (
+                    "Проекция по живым фактам, ничего не хранится. Показана "
+                    "ПОПУНКТНО и намеренно без общего слова «готов»: пункт "
+                    "«места работы» отвечает «возможности ещё нет», и "
+                    "совокупное «готов» было бы истинным ИЗ-ЗА отсутствующей "
+                    "возможности — то есть врало бы устойчиво, а не изредка."
+                ),
+                "fields": ("setup_readiness",),
+            },
+        ),
+    )
+    # Вычисляемое поле дописано ЗДЕСЬ, а не внутрь кортежей: обе части
+    # перечисляют поля модели, а это отображение.
+    readonly_fields = _SYNC_MANAGED_FIELDS + _PLATFORM_FIELDS + ("setup_readiness",)
+
+    #: Состояния пункта готовности словами оператора. Ключи ровно из
+    #: ``ItemState`` (``apps.master_api.services.onboarding_readiness``), и
+    #: полнота держится тестом: забытый ключ печатал бы машинное имя.
+    #:
+    #: ``unavailable`` — то, ради чего попунктный показ и заведён. Это НЕ
+    #: «не настроено»: мастер ничего не мог сделать, возможности нет в
+    #: продукте. Слить его с ``missing`` значит отправить оператора чинить
+    #: то, что не чинится.
+    _READINESS_BADGES: ClassVar[BadgeMap] = {
+        "done": ("ok", "готово"),
+        "missing": ("stop", "не настроено"),
+        "unknown": ("off", "не удалось спросить"),
+        "unavailable": ("off", "возможности ещё нет"),
+    }
+
+    #: Подписи пунктов. Ключи — ``ReadinessItem.key``.
+    _READINESS_ITEM_LABELS: ClassVar[dict[str, str]] = {
+        "services": "Услуги",
+        "location": "Места работы",
+        "hours": "Расписание",
+        "profile": "Профиль",
+    }
+
+    @admin.display(description="Готовность по пунктам")
+    def setup_readiness(self, obj: CatalogMaster):  # type: ignore[no-untyped-def]
+        """Попунктная готовность мастера — без совокупного «готов».
+
+        Спрашивает ``build_readiness``, а не пересобирает пункты заново:
+        своя копия стала бы четвёртым словарём готовности (уже есть
+        проекция онбординга, ``READY``/``NOT_READY`` у каталога и гейт
+        продажи) и разошлась бы с ними при первой же правке.
+
+        ``ready`` намеренно НЕ показывается. Место работы каталог отдаёт
+        только под субъектом самого мастера, у оператора его нет — пункт
+        ``location`` здесь всегда ``unknown``/``no_subject`` (DRF-2370), и
+        одно слово на экране оператора подменило бы «не спрошено» итогом.
+
+        ``sale_block`` тоже не показывается: его уже печатает соседняя
+        колонка «Почему не бронируется», и второе изображение одного факта
+        разошлось бы с первым.
+
+        Сетевой вызов здесь есть (пункт «расписание» спрашивает канон), и
+        поэтому поле живёт на КАРТОЧКЕ, а не в списке: один запрос на
+        строку превратил бы список в минуту ожидания.
+        """
+        from apps.master_api.services.onboarding_readiness import build_readiness
+
+        # Без actor намеренно: оператор — не мастер, «no_subject» здесь значит
+        # «не спрошено», а не «у мастера нет места» (DRF-2370).
+        readiness = build_readiness(obj)
+
+        rows = []
+        for item in readiness.items:
+            tone, label = self._READINESS_BADGES.get(item.state, ("off", item.state))
+            name = self._READINESS_ITEM_LABELS.get(item.key, item.key)
+            # Причина показывается рядом с состоянием, когда она есть:
+            # «не удалось спросить» без причины оператору не помогает.
+            suffix = f" ({item.reason})" if item.reason else ""
+            rows.append((name, badge(tone, label + suffix, item.state)))
+
+        identity_state = readiness.identity.get("state") or "unknown"
+        # Распаковка пары через ``*`` работала бы ровно до первой карты с
+        # тремя элементами и сломалась бы молча. Пишем как у соседей.
+        identity_tone, identity_label = self._IDENTITY_BADGES.get(
+            identity_state, ("off", identity_state)
+        )
+        rows.append(("Связь с Ayla", badge(identity_tone, identity_label, identity_state)))
+
+        return format_html(
+            "<ul class='ayla-readiness'>{}</ul>",
+            format_html_join("", "<li>{}: {}</li>", rows),
+        )
+
+    #: Состояния связи — из ``identity_facts``.
+    _IDENTITY_BADGES: ClassVar[BadgeMap] = {
+        "linked": ("ok", "связан"),
+        "unlinked": ("stop", "не связан"),
+        "pending": ("off", "ждёт подтверждения"),
+        "rejected": ("stop", "отклонена"),
+    }
+
+    def get_queryset(self, request):  # type: ignore[no-untyped-def]
+        return self.model.all_tenants.select_related("tenant", "identity_link")
+
+    def has_change_permission(self, request: HttpRequest, obj=None) -> bool:
+        # Единственный из зеркал, где право на change живое: без него
+        # Django не отдаст действия даже владельцу. Форма при этом
+        # пустая — все поля readonly, изменить строку можно только
+        # журналируемым действием.
+        return request.user.has_perm("catalog.change_catalogmaster")
+
+    #: Состояние приглашения словами — и код рядом.
+    #:
+    #: Оба имени обязательны. Одного человеческого мало: оператор
+    #: прочитает «Ждёт мастера», а спросить о нём не сможет — в задачах,
+    #: логах и в разговоре с нами живёт строка ``pending``. Одного
+    #: машинного тоже мало — это и есть сегодняшняя болезнь экрана.
+    #:
+    #: Ключи ровно из :class:`CatalogMaster.InviteStatus`; полноту
+    #: держит тест: добавится состояние — забытый ключ напечатает код
+    #: без подписи, и тест это поймает.
+    _INVITE_BADGES: ClassVar[BadgeMap] = {
+        CatalogMaster.InviteStatus.PENDING: ("wait", "Приглашение не принято"),
+        CatalogMaster.InviteStatus.ACCEPTED: ("ok", "Приглашение принято"),
+        CatalogMaster.InviteStatus.EXPIRED: ("stop", "Приглашение просрочено"),
+        CatalogMaster.InviteStatus.CANCELLED: ("stop", "Приглашение отозвано"),
+    }
+
+    @admin.display(description="Приглашение", ordering="invite_status")
+    def invite_state(self, obj: CatalogMaster):  # type: ignore[no-untyped-def]
+        tone, label = self._INVITE_BADGES.get(obj.invite_status, ("off", "Неизвестное состояние"))
+        return badge(tone, label, obj.invite_status)
+
+    _MODE_BADGES: ClassVar[BadgeMap] = {
+        CatalogMaster.Mode.INVITE: ("ok", "Заходит в приложение"),
+        CatalogMaster.Mode.CATALOG_ONLY: ("off", "Только в каталоге, без входа"),
+    }
+
+    @admin.display(description="Режим", ordering="mode")
+    def work_mode(self, obj: CatalogMaster):  # type: ignore[no-untyped-def]
+        tone, label = self._MODE_BADGES.get(obj.mode, ("off", "Неизвестный режим"))
+        return badge(tone, label, obj.mode)
+
+    @admin.display(description="Бронируется", boolean=True)
+    def bookable(self, obj: CatalogMaster) -> bool:
+        """Тот же предикат, что ``CatalogMaster.objects.bookable()``."""
+        return is_available(obj)
+
+    #: Причина отказа словами оператора — по коду из ``sale_block``.
+    #:
+    #: Ключи ровно из :data:`apps.catalog.master_state.SaleBlock`, и
+    #: полнота держится тестом: гейт продажи расширяется (DRF-1521
+    #: добавила ``profile_incomplete``), и забытый ключ печатал бы
+    #: оператору «нет данных» вместо причины.
+    _BOOKABLE_NOTES = {
+        "revoked": "в архиве или снята синхронизацией",
+        "pending": "приглашение не принято",
+        "ayla_unlinked": "не удалось связать профиль с Ayla",
+        # Каталог не знает эту строку: ``catalog_specialist_id`` пуст.
+        # Оператору важно, что чинится это НЕ здесь и НЕ у мастера:
+        # столбец пишет синхронизация (провижининг профиля), а путь
+        # приглашения его не заполняет вовсе. Пойти к мастеру за
+        # «дозаполнением профиля» — ровно тот промах, ради которого
+        # ``bookable_note`` перестал пересобирать лестницу условий.
+        "catalog_unlinked": "нет профиля в каталоге",
+        # DRF-1521. Оператору важно ровно одно: чинить это не здесь и не
+        # в источнике синхронизации, а у самого мастера — профиль
+        # заполняет она. Текст для владелицы салона живёт отдельно, в
+        # ``AdminPeopleScreen.tsx``.
+        "profile_incomplete": "профиль не заполнен",
+        # §83. Чинится не здесь и не в источнике синхронизации: часы
+        # подтверждает владелец салона в салонной поверхности.
+        "schedule_unconfirmed": "расписание не подтверждено",
+    }
+
+    @admin.display(description="Почему не бронируется")
+    def bookable_note(self, obj: CatalogMaster) -> str:
+        """Причина, а не только факт — требование задачи к списку.
+
+        Спрашивает ``sale_block``, а не пересобирает лестницу условий
+        заново. Своя копия здесь была бы четвёртой (докстринг
+        ``apps/catalog/master_state.py`` заводить новые запрещает) и уже
+        врала бы: после DRF-1540 гейт спрашивает про ``ayla_user_id``, и
+        несвязанный мастер по прежней лестнице подписывался как
+        «неактивна по данным синхронизации» — оператор шёл бы чинить
+        активность, которая в порядке.
+        """
+        block = sale_block(obj)
+        if block is None:
+            # Причины нет — и это факт, а не отсутствие данных. Называем
+            # словами, чтобы прочерк не читался как «не посчитали».
+            return absent("причин нет, продаётся")
+        if block == "revoked" and obj.archived_at is not None:
+            # Архив и снятая активность — одно значение гейта, но разные
+            # действия оператора: из архива достают отсюда, активность
+            # чинят в источнике синхронизации.
+            return "в архиве"
+        return self._BOOKABLE_NOTES.get(block, block)
+
+    # ─── §6 пакета 12.09 — operator-assisted identity linking (Phase 0) ────
+    #
+    # Identity-токен боту не выдаётся. Оператор связывает личность в
+    # КАТАЛОГЕ (действие «Связать с Ayla», beautygo_backend#339), а здесь
+    # ПОДТВЕРЖДАЕТ: бот перечитывает ответ каталога тем же сторожем, что
+    # при регистрации, и записывает LINKED с провенансом OPERATOR_VERIFIED
+    # и operator_id. Ни одно из действий не правит БД руками и не
+    # присваивает личность: ключ пишет единственная дверь
+    # `link_solo_provider_to_ayla`, и только настоящий.
+
+    @admin.action(
+        permissions=["change"],
+        description="Соло: проверить связь с Ayla и подтвердить (§6)",
+    )
+    def confirm_solo_identity_link(self, request, queryset) -> None:  # type: ignore[no-untyped-def]
+        from apps.identity.models import BotUser, SoloIdentityLink
+        from apps.identity.services.solo_identity_link import confirm_by_operator
+
+        linked, pending, skipped = 0, [], 0
+        for master in queryset:
+            link = SoloIdentityLink.objects.filter(master=master).first()
+            if link is None:
+                skipped += 1
+                continue
+            bot_user = BotUser.all_tenants.filter(
+                channel=link.channel,
+                channel_user_id=link.channel_user_id,
+                tenant_id=link.tenant_id_snapshot,
+            ).first()
+            if bot_user is None:
+                skipped += 1
+                continue
+            outcome = confirm_by_operator(link, bot_user=bot_user, operator=request.user)
+            if outcome.linked:
+                linked += 1
+            else:
+                pending.append(f"{master.name}: {outcome.refusal}")
+        text = f"Связано: {linked}. Не соло-мастера или без заявки: {skipped}."
+        if pending:
+            text += (
+                " Остались в ожидании — " + "; ".join(pending) + ". "
+                "Причина proxy_identity значит: личность ещё не связана в каталоге — "
+                "сначала действие «Связать с Ayla» в админке Ayla, затем сюда."
+            )
+        self.message_user(request, text, level=messages.SUCCESS if linked else messages.WARNING)
+
+    @admin.action(
+        permissions=["change"],
+        description="Соло: отклонить связь с Ayla (причина — identity_unverifiable)",
+    )
+    def reject_solo_identity_link(self, request, queryset) -> None:  # type: ignore[no-untyped-def]
+        """Отказ с причиной из таксономии. В списке действий Django нет
+        формы для выбора причины — по умолчанию ``identity_unverifiable``;
+        другую причину и комментарий оператор ставит на карточке связи
+        (`identity.SoloIdentityLink`), где они доступны как поля."""
+        from apps.identity.models import SoloIdentityLink
+        from apps.identity.services.solo_identity_link import reject_by_operator
+
+        rejected, skipped = 0, 0
+        for master in queryset:
+            link = SoloIdentityLink.objects.filter(master=master).first()
+            if link is None or link.status == SoloIdentityLink.Status.LINKED:
+                skipped += 1
+                continue
+            reject_by_operator(
+                link,
+                operator=request.user,
+                reason=SoloIdentityLink.RejectReason.IDENTITY_UNVERIFIABLE,
+            )
+            rejected += 1
+        self.message_user(
+            request,
+            f"Отклонено: {rejected}. Пропущено (нет заявки или уже связан): {skipped}. "
+            "Человек получит безопасное сообщение без причины при следующем обращении.",
+            level=messages.WARNING,
+        )
+
+    @admin.action(
+        permissions=["change"],
+        description="Верифицировать: приглашение принято (вручную)",
+    )
+    def verify_masters(self, request, queryset) -> None:  # type: ignore[no-untyped-def]
+        """Тонкая обёртка над сервисом верификации (DRF-1553).
+
+        Тело действия переехало в
+        ``apps.catalog.services.verification.verify_masters``: то же
+        действие понадобилось экрану подключения салона (DRF-1553,
+        OPEN_DECISIONS §51.1), а позвать метод админки с ``request`` и
+        ``queryset`` оттуда нельзя. Копия была бы второй реализацией
+        верификации — и вторым текстом в журнале.
+
+        Здесь осталось ровно то, что принадлежит админке: какие строки
+        выбраны и что сказать оператору. Журнал пишет сервис — см. его
+        докстринг, почему не вызывающий.
+        """
+        outcome = verification.verify_masters(queryset, user=request.user)
+        text = f"Верифицировано: {outcome.verified}. Уже принятых пропущено: {outcome.skipped}."
+        if outcome.blocked:
+            # DRF-1597. Молчать об этих строках нельзя: оператор выбрал их
+            # руками и вправе узнать, что действие их НЕ коснулось —
+            # иначе «верифицировано: 0» читается как сбой, а не как
+            # граница согласия. Причина названа словами, а не кодом:
+            # экран читает человек.
+            text += (
+                f" Не подтверждено — ждут нажатия самого мастера: {outcome.blocked}. "
+                "Этим мастерам приглашение реально выписано; принять его "
+                "может только сама мастер."
+            )
+        self.message_user(request, text, level=messages.SUCCESS)
+
+    @admin.action(
+        permissions=["change"],
+        description="Отозвать приглашение (cancelled)",
+    )
+    def revoke_invite_masters(self, request, queryset) -> None:  # type: ignore[no-untyped-def]
+        changed = 0
+        for master in queryset:
+            if master.invite_status == CatalogMaster.InviteStatus.CANCELLED:
+                continue
+            old = master.get_invite_status_display()
+            master.invite_status = CatalogMaster.InviteStatus.CANCELLED
+            master.save(update_fields=["invite_status"])
+            self.log_change(
+                request,
+                master,
+                f"Приглашение отозвано вручную: «{old}» → «отменено».",
+            )
+            changed += 1
+        self.message_user(
+            request,
+            f"Отозвано: {changed}. Уже отменённых пропущено: {len(queryset) - changed}.",
+            level=messages.SUCCESS,
+        )
+
+    @admin.action(
+        permissions=["change"],
+        description="Отправить в архив (причина обязательна)",
+    )
+    def archive_masters(self, request, queryset):  # type: ignore[no-untyped-def]
+        """Архив только с причиной — промежуточная страница обязательна.
+
+        Пустая причина не «проставляет пустую строку», а возвращает
+        оператора на форму: без причины архив не случается вовсе.
+        """
+        if request.POST.get("apply"):
+            reason = request.POST.get("archive_reason", "").strip()
+            if reason:
+                archived = 0
+                for master in queryset:
+                    if master.archived_at is not None:
+                        continue
+                    master.archived_at = timezone.now()
+                    master.archive_reason = reason
+                    master.save(update_fields=["archived_at", "archive_reason"])
+                    self.log_change(request, master, f"Архив. Причина: {reason}")
+                    archived += 1
+                self.message_user(
+                    request,
+                    f"В архив отправлено: {archived}. Уже в архиве "
+                    f"пропущено: {len(queryset) - archived}.",
+                    level=messages.SUCCESS,
+                )
+                return None
+            self.message_user(
+                request,
+                "Архив без причины не допускается — укажите причину.",
+                level=messages.ERROR,
+            )
+        return render(
+            request,
+            "admin/catalog/master_archive.html",
+            context={
+                "title": "Отправить в архив",
+                "masters": queryset,
+                "action_checkbox_name": ACTION_CHECKBOX_NAME,
+                "opts": self.model._meta,  # noqa: SLF001
+            },
+        )
+
+    @admin.action(
+        permissions=["change"],
+        description="Извлечь из архива",
+    )
+    def unarchive_masters(self, request, queryset) -> None:  # type: ignore[no-untyped-def]
+        restored = 0
+        for master in queryset:
+            if master.archived_at is None:
+                continue
+            master.archived_at = None
+            master.archive_reason = ""
+            master.save(update_fields=["archived_at", "archive_reason"])
+            self.log_change(request, master, "Извлечён из архива.")
+            restored += 1
+        self.message_user(
+            request,
+            f"Извлечено из архива: {restored}. Не были в архиве: {len(queryset) - restored}.",
+            level=messages.SUCCESS,
+        )
+
+    # --- «Подключить человека» — один путь, тем же правом, что карточки -------
+
+    #: Право оператора платформы — то же, которым #1802 закрыл карточки
+    #: доступов (``apps/tenancy/admin.py::_ReadOnlyStaffAdmin``). Строкой,
+    #: как там: Django сверяет право по имени. Подключение человека к
+    #: мастеру — cross-tenant операция (оператор выбирает любой салон), а
+    #: ``catalog.change_catalogmaster`` есть и у «правящего» — этого мало.
+    PLATFORM_OPERATIONS_PERM: ClassVar[str] = "tenancy.platform_operations"
+
+    #: Сколько людей показывать на промежуточной странице. Кандидаты — строки
+    #: ``BotUser`` салона мастера; у живого салона их сотни (клиенты), а
+    #: нужен один. Сначала — недавно активные; для остальных есть поле с id.
+    ONBOARD_CANDIDATE_LIMIT: ClassVar[int] = 200
+
+    #: Слово оператору на каждый слуг отказа — фасада и ядра связи. Ключи —
+    #: ``.slug`` классов исключений, полноту держит тест
+    #: ``test_every_refusal_slug_has_a_word_for_the_operator``: новый отказ
+    #: без слова напечатал бы код, а экран читает человек.
+    ONBOARD_REFUSAL_WORDS: ClassVar[dict[str, str]] = {
+        "foreign_tenant": "Оператор не может действовать в этом салоне.",
+        "tenant_inactive": (
+            "Салон выключен — подключать мастеров нельзя. Сначала явно "
+            "включите салон, потом повторите."
+        ),
+        "person_in_other_tenant": "Этот человек принадлежит другому салону.",
+        "master_in_other_tenant": "Карточка мастера принадлежит другому салону.",
+        "invite_master_missing": "Карточка мастера удалена или в архиве.",
+        "wrong_recipient": (
+            "Карточка уже принадлежит другому человеку. Связь не переписана: "
+            "сначала отзовите прежнюю."
+        ),
+        "person_already_master": (
+            "Этот человек уже связан с другой карточкой мастера. Сначала снимите прежнюю связь."
+        ),
+    }
+
+    def has_onboard_permission(self, request: HttpRequest) -> bool:
+        """Django зовёт это для ``permissions=["onboard"]`` — действие не
+        появится в списке без права, а не только откажет при нажатии."""
+        return request.user.has_perm(self.PLATFORM_OPERATIONS_PERM) and self.has_change_permission(
+            request
+        )
+
+    @admin.action(
+        permissions=["onboard"],
+        description="Подключить человека к мастеру (один путь: связь → identity)",
+    )
+    def onboard_person(self, request, queryset):  # type: ignore[no-untyped-def]
+        """Тонкая обёртка над фасадом ``onboard_specialist_to_tenant``.
+
+        Здесь только то, что принадлежит админке: одна выбранная строка,
+        выбор человека из салона мастера, слова оператору и ``LogEntry`` с
+        автором. Всё остальное — контекст актора, отказы по имени, связь,
+        identity, гейт продажи, строка аудита — делает фасад, и повторять
+        его логику здесь значило бы завести вторую реализацию той самой
+        операции, ради единственности которой он написан.
+
+        Исход фасада — двумя половинами: связь есть/была, identity есть/нет
+        и почему. ``identity_unavailable`` — предупреждение, не ошибка:
+        человек подключён, а текст восстановления говорит «заводится
+        оператором в админке каталога», а не «никогда».
+        """
+        from apps.identity.models import BotUser
+        from apps.identity.services import specialist_onboarding as facade
+        from apps.identity.services.staff_invites import InviteError
+
+        if queryset.count() != 1:
+            self.message_user(
+                request,
+                "Подключить человека можно к одному мастеру за раз — выберите ровно одну строку.",
+                level=messages.ERROR,
+            )
+            return None
+        master = queryset.select_related("tenant").first()
+
+        if request.POST.get("apply"):
+            # Выбор из списка или id руками — вписанный id важнее: он
+            # означает, что нужного человека в списке не было.
+            raw_id = (
+                request.POST.get("bot_user_id_manual") or request.POST.get("bot_user_id") or ""
+            ).strip()
+            person = (
+                BotUser.all_tenants.filter(
+                    pk=raw_id, tenant_id=master.tenant_id, deleted_at__isnull=True
+                ).first()
+                if _looks_like_uuid(raw_id)
+                else None
+            )
+            if person is None:
+                # Чужой салон, удалённая строка и пустое поле — один ответ:
+                # человека, которого можно подключить, здесь нет.
+                self.message_user(
+                    request,
+                    "Человек не найден в салоне этого мастера — выберите из списка "
+                    "или укажите id строки BotUser этого салона.",
+                    level=messages.ERROR,
+                )
+                return None
+
+            actor = facade.OnboardingActor(
+                surface="django_admin",
+                audit_label=f"django_admin:user={request.user.pk}",
+                cross_tenant=True,
+                capability="platform_operations",
+            )
+            try:
+                result = facade.onboard_specialist_to_tenant(
+                    tenant=master.tenant, master=master, bot_user=person, actor=actor
+                )
+            except (facade.OnboardingRefused, InviteError) as exc:
+                word = self.ONBOARD_REFUSAL_WORDS.get(exc.slug, f"Отказ: {exc.slug}.")
+                self.message_user(request, word, level=messages.ERROR)
+                return None
+
+            self.log_change(
+                request,
+                master,
+                f"Подключение человека {person.pk}: membership={result.membership}, "
+                f"status={result.status}, identity_reason={result.identity_reason or '-'}, "
+                f"sale_block={result.sale_block or '-'}.",
+            )
+            membership_word = (
+                "уже была связана"
+                if result.membership == facade.MEMBERSHIP_ALREADY_LINKED
+                else "связана"
+            )
+            if result.success:
+                self.message_user(
+                    request,
+                    f"Карточка {membership_word} с человеком, identity подтверждена "
+                    f"(specialist_id {result.specialist_id}). "
+                    f"Продажа: {result.sale_block or 'открыта'}.",
+                    level=messages.SUCCESS,
+                )
+            else:
+                self.message_user(
+                    request,
+                    f"Карточка {membership_word} с человеком, но identity в каталоге "
+                    f"НЕ подтверждена: {result.identity_reason}. Мастер не продаётся, "
+                    "пока ключа нет. Не этим путём: профиль специалиста заводится "
+                    "оператором в админке каталога, ключ приезжает синком — затем "
+                    "повторите действие. "
+                    f"Продажа: {result.sale_block or '-'}.",
+                    level=messages.WARNING,
+                )
+            return None
+
+        candidates = (
+            BotUser.all_tenants.filter(tenant_id=master.tenant_id, deleted_at__isnull=True)
+            .only("id", "display_name", "channel", "last_seen")
+            .order_by("-last_seen")[: self.ONBOARD_CANDIDATE_LIMIT]
+        )
+        return render(
+            request,
+            "admin/catalog/master_onboard.html",
+            context={
+                "title": "Подключить человека к мастеру",
+                "master": master,
+                "candidates": candidates,
+                "candidate_limit": self.ONBOARD_CANDIDATE_LIMIT,
+                "action_checkbox_name": ACTION_CHECKBOX_NAME,
+                "opts": self.model._meta,  # noqa: SLF001
+            },
+        )
 
 
 @admin.register(MasterService)
-class MasterServiceAdmin(admin.ModelAdmin):
+class MasterServiceAdmin(AylaAdminMedia, admin.ModelAdmin):
     """The one catalog admin that is NOT read-only -- and, until DRF-975, the
     second unaudited write path into ``catalog_masterservice``.
 
@@ -88,14 +1011,87 @@ class MasterServiceAdmin(admin.ModelAdmin):
     instead, which is honest about what we actually know.
     """
 
-    list_display = ("master", "service", "tenant", "source", "created_at")
+    list_display = ("master", "service", "tenant", "origin", "created_at")
     list_filter = ("tenant", "source")
     search_fields = ("master__name", "service__name")
+    search_help_text = "Ищет по имени мастера и названию услуги."
+    empty_value_display = _ABSENT
     raw_id_fields = ("master", "service", "created_by")
+    fieldsets = (
+        (
+            "Связь",
+            {
+                "fields": ("master", "service", "tenant"),
+                "description": (
+                    "Одна строка = «эта мастер делает эту услугу». Именно "
+                    "из этих строк собирается выбор мастера у клиента."
+                ),
+            },
+        ),
+        (
+            "Откуда взялась",
+            {
+                "fields": ("source", "created_by", "created_by_actor_id", "created_at"),
+                "description": (
+                    "Происхождение пишет платформа, руками его не набирают: "
+                    "иначе рукотворную строку можно было бы переклеить в "
+                    "«приехала синхронизацией» и потерять след."
+                ),
+            },
+        ),
+        (
+            "Служебное",
+            {
+                "classes": ("collapse",),
+                "fields": (
+                    "id",
+                    "ayla_specialist_service_id",
+                    "resolved_requires_health_check",
+                    "sellable",
+                    "unsellable_reason",
+                    "updated_at",
+                ),
+            },
+        ),
+    )
+
+    #: Происхождение связи словами — и код рядом.
+    #:
+    #: Ключи ровно из :class:`MasterServiceSource`. Тон здесь не «плохо
+    #: / хорошо», а «насколько строка объяснима»: приехавшая
+    #: синхронизацией объяснима сама собой, рукотворная требует того,
+    #: кто её сделал.
+    _SOURCE_BADGES: ClassVar[BadgeMap] = {
+        MasterServiceSource.CATALOG_SYNC: ("ok", "Синхронизация каталога"),
+        MasterServiceSource.MM4_MATRIX: ("ok", "Матрица услуг в приложении"),
+        MasterServiceSource.INVITE_SEED: ("off", "Заведена при приглашении"),
+        MasterServiceSource.DEV_SEED: ("off", "Тестовые данные"),
+        MasterServiceSource.MANUAL_SCRIPT: ("wait", "Скрипт вручную"),
+        MasterServiceSource.DJANGO_ADMIN: ("wait", "Заведена в этой админке"),
+        MasterServiceSource.ORPHAN_CLEANUP: ("off", "Уборка осиротевших строк"),
+        MasterServiceSource.TEST_FIXTURE: ("off", "Фикстура теста"),
+    }
+
+    @admin.display(description="Откуда взялась", ordering="source")
+    def origin(self, obj: MasterService):  # type: ignore[no-untyped-def]
+        if not obj.source:
+            # NULL здесь — настоящее отсутствие, а не «прочее»: строка
+            # заведена до DRF-975, автор невосстановим (см. help_text
+            # поля). Подставить сюда бейдж «неизвестное происхождение»
+            # значило бы выдать отсутствие за значение — ровно то, что
+            # запрещает OPEN_DECISIONS §65.
+            return absent("происхождение не записано")
+        tone, label = self._SOURCE_BADGES.get(obj.source, ("off", "Незнакомое происхождение"))
+        return badge(tone, label, obj.source)
+
     # Provenance is written by the platform, never typed by a human -- an
     # editable ``source`` would let an admin relabel a hand-made row as
     # ``catalog_sync`` and undo the whole point.
-    readonly_fields = ("source", "created_by_actor_id", "created_at", "updated_at")
+    # ``id`` добавлен к прежней четвёрке не ради прав, а ради показа:
+    # он ``editable=False``, и без явного readonly Django отказывается
+    # рисовать его в fieldsets. Ничьих прав это не меняет — поле не было
+    # правимым и раньше.
+    readonly_fields = ("id", "source", "created_by_actor_id", "created_at", "updated_at")
 
     def get_queryset(self, request):
         return self.model.all_tenants.all().select_related("master", "service", "tenant")
@@ -123,9 +1119,11 @@ class MasterServiceAdmin(admin.ModelAdmin):
 class CatalogFaqAdmin(_MirrorAdminBase):
     list_display = ("question", "category_slug", "tenant", "synced_at")
     search_fields = ("question", "answer", "external_id")
+    search_help_text = "Ищет по тексту вопроса и ответа."
 
 
 @admin.register(CatalogHelpArticle)
 class CatalogHelpArticleAdmin(_MirrorAdminBase):
     list_display = ("question", "tenant", "is_active", "order", "synced_at")
     search_fields = ("question", "answer", "external_id")
+    search_help_text = "Ищет по заголовку и тексту статьи."

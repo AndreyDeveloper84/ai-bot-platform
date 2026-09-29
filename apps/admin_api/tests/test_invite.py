@@ -6,16 +6,20 @@ Covers:
   Customer 403.
 * Validation — missing name, bad contact_method, oversized fields,
   cross-tenant service UUID, role!=master.
-* Side effects — CatalogMaster created with token + TTL, WorkingHours
-  seeded, MasterService rows seeded, audit rows for
-  ``master.invited`` + ``master.invite_dispatched``.
+* Side effects — CatalogMaster created with token + TTL, MasterService
+  rows seeded, ONE audit row (``master.invited``).
 * Idempotency — same (name, contact_value) returns existing row +
   ``X-Idempotent`` header; expired invite creates fresh; different
   contact_value creates fresh.
-* MAX DM dispatch — success path = queued; raise = failed + audit
-  reflects failure.
-* Atomic — WorkingHours seed failure rolls back master row.
-* Modes — ``catalog_only`` skips token + dispatch.
+* Atomic — service seed failure rolls back master row.
+* Modes — ``catalog_only`` skips the token.
+
+Личного сообщения этот эндпоинт больше не шлёт (решение владельца §44.4
+от 07.09.2026), поэтому здесь нет ни `patched_send_message`, ни класса
+про доставку. Стража, что попытка не вернулась, стоит рядом — в
+``test_invite_no_dm.py``: она бьёт по ``max_outbound``, а не по
+отсутствию строки в ответе, потому что вернуть отправку можно и не
+трогая ответ вовсе.
 """
 
 from __future__ import annotations
@@ -32,7 +36,6 @@ from django.urls import reverse
 from apps.admin_api.tests.conftest import init_data_header
 from apps.audit.models import AuditLog
 from apps.catalog.models import CatalogMaster, CatalogService, MasterService
-from apps.channels.max.outbound import MaxAPIError
 from apps.identity.models import BotUser
 from apps.scheduling.models import WorkingHours
 from apps.tenancy.models import Tenant
@@ -71,24 +74,6 @@ def _valid_body(
     return out
 
 
-@pytest.fixture
-def patched_send_message():
-    """Default — MAX send_message returns OK (response ignored)."""
-
-    with patch("apps.admin_api.views_invite.max_outbound.send_message") as mock:
-        mock.return_value = {"ok": True}
-        yield mock
-
-
-@pytest.fixture
-def patched_send_message_fails():
-    """MAX send_message raises a MaxAPIError → delivery=failed."""
-
-    with patch("apps.admin_api.views_invite.max_outbound.send_message") as mock:
-        mock.side_effect = MaxAPIError(503, "service unavailable")
-        yield mock
-
-
 # =========================================================================
 # AUTH MATRIX
 # =========================================================================
@@ -96,8 +81,9 @@ def patched_send_message_fails():
 
 class TestAuth:
     def test_missing_auth_header_400(self, client: Client, tenant: Tenant) -> None:
+        # 15.09.2026 UTC (DRF-1893): отказ транспорта — один код 401 no_init_data (было 400 malformed / 401 bad_signature).
         resp = client.post(_invite_url(), data=_valid_body(), content_type="application/json")
-        assert resp.status_code == 400
+        assert resp.status_code == 401
 
     def test_customer_403(
         self,
@@ -133,7 +119,6 @@ class TestAuth:
         client: Client,
         admin_bot_user: BotUser,
         tenant: Tenant,
-        patched_send_message,
     ) -> None:
         resp = client.post(
             _invite_url(),
@@ -148,7 +133,6 @@ class TestAuth:
         client: Client,
         owner_bot_user: BotUser,
         tenant: Tenant,
-        patched_send_message,
     ) -> None:
         resp = client.post(
             _invite_url(),
@@ -170,7 +154,6 @@ class TestHappyPath:
         client: Client,
         owner_bot_user: BotUser,
         tenant: Tenant,
-        patched_send_message,
         settings,
     ) -> None:
         # DRF-1079 — the assertion below says «uses configured
@@ -213,7 +196,6 @@ class TestHappyPath:
         client: Client,
         owner_bot_user: BotUser,
         tenant: Tenant,
-        patched_send_message,
     ) -> None:
         """DRF-1062: the invite must not manufacture a schedule.
 
@@ -245,7 +227,6 @@ class TestHappyPath:
         client: Client,
         owner_bot_user: BotUser,
         tenant: Tenant,
-        patched_send_message,
     ) -> None:
         resp = client.post(
             _invite_url(),
@@ -263,7 +244,6 @@ class TestHappyPath:
         owner_bot_user: BotUser,
         tenant: Tenant,
         service: CatalogService,
-        patched_send_message,
     ) -> None:
         resp = client.post(
             _invite_url(),
@@ -283,13 +263,19 @@ class TestHappyPath:
         assert rows[0].source == "invite_seed"
         assert rows[0].created_by_actor_id == owner_bot_user.id
 
-    def test_two_audit_rows_emitted(
+    def test_one_audit_row_emitted(
         self,
         client: Client,
         owner_bot_user: BotUser,
         tenant: Tenant,
-        patched_send_message,
     ) -> None:
+        """Одна строка, а не две.
+
+        Вторая была ``master.invite_dispatched`` — исход отправки
+        личного сообщения. Отправки нет (§44.4), и записи о ней тоже:
+        аудит-строка «skipped» описывала бы событие, которого не бывает.
+        """
+
         resp = client.post(
             _invite_url(),
             data=_valid_body(),
@@ -301,7 +287,7 @@ class TestHappyPath:
         actions = sorted(
             AuditLog.all_tenants.filter(target_id=master_id).values_list("action", flat=True)
         )
-        assert actions == ["master.invite_dispatched", "master.invited"]
+        assert actions == ["master.invited"]
 
     def test_audit_payload_shape_invited(
         self,
@@ -309,7 +295,6 @@ class TestHappyPath:
         owner_bot_user: BotUser,
         tenant: Tenant,
         service: CatalogService,
-        patched_send_message,
     ) -> None:
         resp = client.post(
             _invite_url(),
@@ -332,6 +317,98 @@ class TestHappyPath:
 # =========================================================================
 # VALIDATION
 # =========================================================================
+
+
+class TestTheRefusalNamesTheFieldByMachine:
+    """Отказ называет ПОЛЕ машинным признаком, а не английской прозой (DRF-2452).
+
+    Экран раскладывал ошибки по полям разбором текста
+    (`e.detail.toLowerCase().includes("contact")`). Признак, которого не
+    видно никому: поправим формулировку здесь — и подпись под полем на
+    экране исчезнет молча, а человек будет смотреть на верную форму и не
+    понимать, что не так.
+
+    Узлы ниже держат ПРИЗНАК, а не слова. Соседи в ``TestValidation``
+    проверяют `«name» in detail` — это прежняя привычка, и она как раз
+    разрешает признаку пропасть: текст остаётся, `details` уезжает.
+    """
+
+    def test_a_missing_name_names_the_name_field(
+        self,
+        client: Client,
+        owner_bot_user: BotUser,
+        tenant: Tenant,
+    ) -> None:
+        body = _valid_body()
+        del body["name"]
+        resp = client.post(
+            _invite_url(),
+            data=body,
+            content_type="application/json",
+            HTTP_AUTHORIZATION=init_data_header("5001"),
+        )
+        assert resp.status_code == 400
+        assert resp.json()["details"] == {"field": "name"}
+
+    def test_a_bad_contact_names_the_contact_field(
+        self,
+        client: Client,
+        owner_bot_user: BotUser,
+        tenant: Tenant,
+    ) -> None:
+        body = _valid_body()
+        del body["contact_value"]
+        resp = client.post(
+            _invite_url(),
+            data=body,
+            content_type="application/json",
+            HTTP_AUTHORIZATION=init_data_header("5001"),
+        )
+        assert resp.status_code == 400
+        assert resp.json()["details"] == {"field": "contact_value"}
+
+    def test_an_oversized_contact_names_the_same_field(
+        self,
+        client: Client,
+        owner_bot_user: BotUser,
+        tenant: Tenant,
+    ) -> None:
+        """Две разные причины у одного поля — признак один и тот же."""
+        resp = client.post(
+            _invite_url(),
+            data=_valid_body(contact_value="@" + "x" * 500),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=init_data_header("5001"),
+        )
+        assert resp.status_code == 400
+        assert resp.json()["details"] == {"field": "contact_value"}
+
+    def test_a_refusal_about_no_field_claims_none(
+        self,
+        client: Client,
+        owner_bot_user: BotUser,
+        tenant: Tenant,
+    ) -> None:
+        """Обратная сторона: где поля нет, там и признака быть не должно.
+
+        Иначе «поле названо» оказалось бы правдой обо всех отказах сразу, и
+        экран пометил бы неверным поле, к которому претензии нет.
+        """
+        body = _valid_body()
+        body["services"] = "not-a-list"
+        resp = client.post(
+            _invite_url(),
+            data=body,
+            content_type="application/json",
+            HTTP_AUTHORIZATION=init_data_header("5001"),
+        )
+        assert resp.status_code == 400
+        body = resp.json()
+        # Наличие раньше отсутствия: отказ действительно произошёл и назвал
+        # себя. Иначе «признака нет» было бы правдой и о пустом ответе, и
+        # молчание сервера прошло бы за аккуратность.
+        assert body["error"] == "bad_request"
+        assert "details" not in body
 
 
 class TestValidation:
@@ -387,7 +464,6 @@ class TestValidation:
         client: Client,
         owner_bot_user: BotUser,
         tenant: Tenant,
-        patched_send_message,
     ) -> None:
         """CatalogMaster has no phone column; we stash phone in raw["invite_phone"]."""
 
@@ -401,26 +477,6 @@ class TestValidation:
         master = CatalogMaster.all_tenants.get(id=resp.json()["master_id"])
         assert master.raw.get("invite_phone") == "+79161234567"
         assert master.max_handle == ""  # max_phone does NOT populate max_handle
-
-    def test_max_phone_dm_delivery_skipped(
-        self,
-        client: Client,
-        owner_bot_user: BotUser,
-        tenant: Tenant,
-        patched_send_message,
-    ) -> None:
-        """max_phone has no phone→chat lookup yet — dispatch is skipped."""
-
-        resp = client.post(
-            _invite_url(),
-            data=_valid_body(contact_method="max_phone", contact_value="+79161234567"),
-            content_type="application/json",
-            HTTP_AUTHORIZATION=init_data_header("5001"),
-        )
-        assert resp.status_code == 201
-        assert resp.json()["max_dm_delivery"] == "skipped"
-        # send_message must not have been called.
-        patched_send_message.assert_not_called()
 
     def test_cross_tenant_service_400(
         self,
@@ -493,12 +549,11 @@ class TestValidation:
         )
         assert resp.status_code == 400
 
-    def test_catalog_only_mode_no_token_no_dispatch(
+    def test_catalog_only_mode_issues_no_token(
         self,
         client: Client,
         owner_bot_user: BotUser,
         tenant: Tenant,
-        patched_send_message,
     ) -> None:
         resp = client.post(
             _invite_url(),
@@ -510,7 +565,6 @@ class TestValidation:
         body = resp.json()
         assert body["invite_token"] is None
         assert body["invite_expires_at"] is None
-        assert body["max_dm_delivery"] == "skipped"
         assert body["fallback_link"] == ""
 
         master = CatalogMaster.all_tenants.get(id=body["master_id"])
@@ -518,8 +572,6 @@ class TestValidation:
         assert master.invite_token is None
         assert master.invite_status == CatalogMaster.InviteStatus.ACCEPTED
         assert master.is_active is False
-        # send_message NOT called for catalog_only.
-        patched_send_message.assert_not_called()
 
 
 # =========================================================================
@@ -533,7 +585,6 @@ class TestIdempotency:
         client: Client,
         owner_bot_user: BotUser,
         tenant: Tenant,
-        patched_send_message,
     ) -> None:
         # First call — 201
         first = client.post(
@@ -562,14 +613,80 @@ class TestIdempotency:
         # Only one CatalogMaster row.
         assert CatalogMaster.all_tenants.filter(tenant=tenant).count() == 1
 
-    def test_expired_invite_creates_new_row(
+    def test_expired_invite_reissues_on_the_same_row(
         self,
         client: Client,
         owner_bot_user: BotUser,
         tenant: Tenant,
-        patched_send_message,
     ) -> None:
-        # Fabricate an EXPIRED pending invite directly.
+        """DRF-1507 — повторное приглашение работает и НЕ заводит вторую строку.
+
+        Ожидание этого теста изменено намеренно. До DRF-1507 он назывался
+        ``test_expired_invite_creates_new_row`` и требовал «Now 2 rows in
+        catalog»: путь заводил вторую строку с тем же ``max_handle``, и это
+        считалось контрактом, пока дубли считались приемлемыми. Смысл всей
+        задачи — «один человек, одна строка», поэтому вторая строка стала
+        дефектом.
+
+        Что НЕ изменилось и проверяется здесь же: владелец по-прежнему
+        получает 201 и рабочий свежий токен с новым семидневным сроком.
+        Что этот токен доводит мастера до кабинета — проверяет
+        ``apps/master_api/tests/test_onboarding.py``.
+        """
+
+        now = datetime.now(tz=timezone.utc)
+        stale = CatalogMaster.all_tenants.create(
+            tenant=tenant,
+            external_id=11111,
+            external_updated_at=now,
+            name="Анна Петрова",
+            invite_status=CatalogMaster.InviteStatus.PENDING,
+            invite_token=uuid.uuid4(),
+            invite_expires_at=now - timedelta(hours=1),
+            invited_at=now - timedelta(days=8),
+            max_handle="@anna_styl",
+            mode=CatalogMaster.Mode.INVITE,
+            is_active=False,
+        )
+        stale_token = stale.invite_token
+
+        resp = client.post(
+            _invite_url(),
+            data=_valid_body(),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=init_data_header("5001"),
+        )
+        # Свежее приглашение выписано — 201, не 200: это новое приглашение,
+        # а не повтор того же запроса.
+        assert resp.status_code == 201
+        # Присутствие прежде отсутствия (DRF-1411): тело есть и оно про
+        # ту же строку — только после этого «заголовка нет» что-то значит.
+        assert resp.json()["master_id"] == str(stale.id)
+        assert "X-Idempotent" not in resp
+        # И выписано оно НА ТУ ЖЕ строку.
+        assert CatalogMaster.all_tenants.filter(tenant=tenant).count() == 1
+
+        stale.refresh_from_db()
+        assert stale.invite_status == CatalogMaster.InviteStatus.PENDING
+        assert stale.invite_token is not None
+        assert stale.invite_token != stale_token
+        assert stale.invite_expires_at is not None
+        assert stale.invite_expires_at > now
+        assert str(stale.invite_token) == resp.json()["invite_token"]
+
+    def test_different_person_still_gets_their_own_row(
+        self,
+        client: Client,
+        owner_bot_user: BotUser,
+        tenant: Tenant,
+    ) -> None:
+        """Положительная стража к тесту выше (DRF-1411).
+
+        Переиспользование строки обязано срабатывать на ТОМ ЖЕ человеке и
+        не срабатывать на другом: иначе «одна строка на человека»
+        превратилась бы в «один мастер на салон».
+        """
+
         now = datetime.now(tz=timezone.utc)
         CatalogMaster.all_tenants.create(
             tenant=tenant,
@@ -587,22 +704,138 @@ class TestIdempotency:
 
         resp = client.post(
             _invite_url(),
+            data=_valid_body(name="Мария Иванова", contact_value="@maria_nails"),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=init_data_header("5001"),
+        )
+        assert resp.status_code == 201
+        assert CatalogMaster.all_tenants.filter(tenant=tenant).count() == 2
+
+    def test_handle_written_without_at_is_the_same_person(
+        self,
+        client: Client,
+        owner_bot_user: BotUser,
+        tenant: Tenant,
+    ) -> None:
+        """«anna_styl» и «@Anna_Styl» — один аккаунт MAX, а не два мастера."""
+
+        now = datetime.now(tz=timezone.utc)
+        stale = CatalogMaster.all_tenants.create(
+            tenant=tenant,
+            external_id=11111,
+            external_updated_at=now,
+            name="Анна Петрова",
+            invite_status=CatalogMaster.InviteStatus.PENDING,
+            invite_token=uuid.uuid4(),
+            invite_expires_at=now - timedelta(hours=1),
+            invited_at=now - timedelta(days=8),
+            max_handle="@Anna_Styl",
+            mode=CatalogMaster.Mode.INVITE,
+            is_active=False,
+        )
+
+        resp = client.post(
+            _invite_url(),
+            data=_valid_body(contact_value="anna_styl"),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=init_data_header("5001"),
+        )
+        assert resp.status_code == 201
+        assert resp.json()["master_id"] == str(stale.id)
+        assert CatalogMaster.all_tenants.filter(tenant=tenant).count() == 1
+
+    def test_synced_row_is_not_turned_back_into_a_pending_invite(
+        self,
+        client: Client,
+        owner_bot_user: BotUser,
+        tenant: Tenant,
+    ) -> None:
+        """Отбор на перевыпуск узкий — синхронизированная строка не трогается.
+
+        Положительная стража к переиспользованию: если бы отбор шёл по
+        «есть handle и нет связи», приглашение мастера, приехавшего
+        синхронизацией, перевело бы его строку в PENDING — и он выпал бы
+        из записи (``booking/services/create.py`` требует ACCEPTED) до
+        того, как откроет ссылку.
+        """
+
+        now = datetime.now(tz=timezone.utc)
+        synced = CatalogMaster.all_tenants.create(
+            tenant=tenant,
+            external_id=7,
+            external_updated_at=now,
+            name="Анна Петрова",
+            is_active=True,
+            ayla_user_id=uuid.uuid4(),
+            max_handle="@anna_styl",
+            invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+            mode=CatalogMaster.Mode.CATALOG_ONLY,
+        )
+
+        resp = client.post(
+            _invite_url(),
             data=_valid_body(),
             content_type="application/json",
             HTTP_AUTHORIZATION=init_data_header("5001"),
         )
-        # Fresh PENDING row issued — 201, not 200.
-        assert resp.status_code == 201
-        assert "X-Idempotent" not in resp
-        # Now 2 rows in catalog (1 expired, 1 fresh).
+        assert resp.status_code == 201, resp.content
+        assert resp.json()["master_id"] != str(synced.id)
+
+        synced.refresh_from_db()
+        assert synced.invite_status == CatalogMaster.InviteStatus.ACCEPTED
+        assert synced.invite_token is None
         assert CatalogMaster.all_tenants.filter(tenant=tenant).count() == 2
+
+    def test_already_landed_master_is_not_invited_twice(
+        self,
+        client: Client,
+        owner_bot_user: BotUser,
+        tenant: Tenant,
+    ) -> None:
+        """Приглашение уже приземлившегося мастера сводится в его строку.
+
+        Второй токен на того же человека — это вторая строка, которая
+        останется PENDING навсегда: ``onboarding_accept`` вернёт ему сессию
+        первой (разрыв Р5). Поэтому 200 и существующая строка.
+        """
+
+        now = datetime.now(tz=timezone.utc)
+        landed_bot_user = BotUser.all_tenants.create(
+            tenant=tenant,
+            channel="max",
+            channel_user_id="777001",
+            chat_id="777001",
+        )
+        landed = CatalogMaster.all_tenants.create(
+            tenant=tenant,
+            external_id=11111,
+            external_updated_at=now,
+            name="Анна Петрова",
+            invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+            invite_token=None,
+            max_handle="@anna_styl",
+            mode=CatalogMaster.Mode.INVITE,
+            is_active=True,
+            linked_bot_user=landed_bot_user,
+        )
+
+        resp = client.post(
+            _invite_url(),
+            data=_valid_body(),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=init_data_header("5001"),
+        )
+        assert resp.status_code == 200
+        assert resp["X-Idempotent"] == "true"
+        assert resp.json()["master_id"] == str(landed.id)
+        assert resp.json()["invite_token"] is None
+        assert CatalogMaster.all_tenants.filter(tenant=tenant).count() == 1
 
     def test_different_contact_value_same_name_creates_new(
         self,
         client: Client,
         owner_bot_user: BotUser,
         tenant: Tenant,
-        patched_send_message,
     ) -> None:
         resp1 = client.post(
             _invite_url(),
@@ -623,62 +856,6 @@ class TestIdempotency:
 
 
 # =========================================================================
-# MAX DM DISPATCH
-# =========================================================================
-
-
-class TestDispatch:
-    def test_dispatch_success_queued(
-        self,
-        client: Client,
-        owner_bot_user: BotUser,
-        tenant: Tenant,
-        patched_send_message,
-        settings,
-    ) -> None:
-        settings.SITE_DOMAIN = "https://miniapp-dev.gobeauty.site"  # DRF-1079
-        resp = client.post(
-            _invite_url(),
-            data=_valid_body(),
-            content_type="application/json",
-            HTTP_AUTHORIZATION=init_data_header("5001"),
-        )
-        assert resp.status_code == 201
-        assert resp.json()["max_dm_delivery"] == "queued"
-        patched_send_message.assert_called_once()
-        # The dispatch text should mention the master name + carry the
-        # web URL fallback (defence-in-depth message-shape check).
-        kwargs = patched_send_message.call_args.kwargs
-        assert "Анна" in kwargs["text"]
-        assert "/onboarding/master?token=" in kwargs["text"]
-        assert kwargs["chat_id"] == "anna_styl"  # leading @ stripped
-
-    def test_dispatch_failure_marks_failed(
-        self,
-        client: Client,
-        owner_bot_user: BotUser,
-        tenant: Tenant,
-        patched_send_message_fails,
-    ) -> None:
-        resp = client.post(
-            _invite_url(),
-            data=_valid_body(),
-            content_type="application/json",
-            HTTP_AUTHORIZATION=init_data_header("5001"),
-        )
-        assert resp.status_code == 201
-        assert resp.json()["max_dm_delivery"] == "failed"
-        # Master row still created (dispatch is observable, not blocking).
-        master = CatalogMaster.all_tenants.get(id=resp.json()["master_id"])
-        assert master.invite_status == CatalogMaster.InviteStatus.PENDING
-
-        # Audit row reflects the failure.
-        audit = AuditLog.all_tenants.get(target_id=master.id, action="master.invite_dispatched")
-        assert audit.payload["delivery"] == "failed"
-        assert "error" in audit.payload
-
-
-# =========================================================================
 # ATOMICITY
 # =========================================================================
 
@@ -690,7 +867,6 @@ class TestAtomicity:
         owner_bot_user: BotUser,
         tenant: Tenant,
         service: CatalogService,
-        patched_send_message,
     ) -> None:
         """A failure inside the transaction must not leave a half-made master.
 
@@ -737,7 +913,6 @@ class TestSiteDomainFallback:
         client: Client,
         owner_bot_user: BotUser,
         tenant: Tenant,
-        patched_send_message,
         settings,
     ) -> None:
         settings.SITE_DOMAIN = "https://miniapp-dev.gobeauty.site"
@@ -750,14 +925,12 @@ class TestSiteDomainFallback:
         assert resp.status_code == 201, resp.content
         link = resp.json()["fallback_link"]
         assert link.startswith("https://miniapp-dev.gobeauty.site/onboarding/master?token=")
-        assert link in patched_send_message.call_args.kwargs["text"]
 
     def test_bare_host_gets_https(
         self,
         client: Client,
         owner_bot_user: BotUser,
         tenant: Tenant,
-        patched_send_message,
         settings,
     ) -> None:
         """A value written without a scheme must not become a relative URL."""
@@ -779,24 +952,20 @@ class TestSiteDomainFallback:
         client: Client,
         owner_bot_user: BotUser,
         tenant: Tenant,
-        patched_send_message,
         settings,
     ) -> None:
         """The pilot's actual state: SITE_DOMAIN unset, DEBUG off.
 
-        DRF-1349 amended what «degraded» means here. This test used to
-        end on ``assert "max://bot/" in text`` — «the deeplink still
-        goes, the invite is degraded, not cancelled». The deeplink never
-        went anywhere: MAX does not implement the ``max://`` scheme, and
-        the owner's phone answered «Не удалось открыть ссылку» on the
-        first live invitation. So with neither a Mini App name nor a
-        usable domain there is no entry left to degrade *to*, and the
-        dispatch says so instead of reporting a message nobody can act
-        on as delivered.
+        Отдаётся пустая строка, а не ссылка на ``localhost:5173``:
+        правдоподобный мёртвый адрес хуже отсутствия — владелец
+        отправит его мастеру и узнает об этом от мастера.
 
-        The companion below is what keeps this from being «the invite
-        is just broken now»: the same unset SITE_DOMAIN with the Mini
-        App configured still sends a working button.
+        Раньше этот тест кончался на ``max_dm_delivery == "failed"``:
+        без Mini App и без домена личному сообщению нечего было нести,
+        и оно не уходило. Личного сообщения больше нет вовсе (§44.4),
+        так что проверять здесь осталось ровно одно — какой адрес
+        видит владелец. Спутник ниже держит вторую половину: пустой
+        ``SITE_DOMAIN`` сам по себе приглашение не ломает.
         """
 
         settings.SITE_DOMAIN = ""
@@ -808,29 +977,45 @@ class TestSiteDomainFallback:
             HTTP_AUTHORIZATION=init_data_header("5001"),
         )
         assert resp.status_code == 201, resp.content
-        assert resp.json()["fallback_link"] == ""
-        assert resp.json()["max_dm_delivery"] == "failed"
-        patched_send_message.assert_not_called()
+        body = resp.json()
+        # Присутствие на тех же данных: строка мастера выписана и токен
+        # у неё есть — иначе «ссылки нет» доказывало бы только то, что
+        # приглашение вообще не создалось.
+        assert body["invite_token"]
+        assert body["fallback_link"] == ""
+        # DRF-1079 (12.09.2026): withheld BY NAME — the screen can say what
+        # is missing instead of hiding a block. Красный до правки: KeyError.
+        assert body["fallback_unavailable"] == "site_domain_unset"
 
     def test_unset_domain_is_harmless_when_the_mini_app_is_configured(
         self,
         client: Client,
         owner_bot_user: BotUser,
         tenant: Tenant,
-        patched_send_message,
         settings,
     ) -> None:
-        """SITE_DOMAIN is the *admin screen's* artefact, not the DM's.
+        """SITE_DOMAIN is the *web fallback's* artefact, not the invite's.
 
-        The positive guard for the test above. Once the invite DM enters
-        through a button, an unset SITE_DOMAIN costs the invited master
-        nothing at all — it only leaves the owner's screen without an
-        address to copy. Without this check the previous test would read
-        as «no domain ⇒ no invite», which is exactly the wrong lesson.
+        The positive guard for the test above. Приглашение живёт в
+        ``invite_link`` — ссылке на салонного бота, которая от
+        ``SITE_DOMAIN`` не зависит вовсе. Без этой проверки предыдущий
+        тест читался бы как «нет домена ⇒ нет приглашения», а это ровно
+        обратный вывод.
         """
 
+        from apps.channels.bot_registry import BotEntry
+
         settings.SITE_DOMAIN = ""
-        settings.MAX_BOT_WEB_APP = "id583_bot"
+        settings.MAX_BOT_REGISTRY = (
+            BotEntry(
+                slug="salon",
+                webhook_secret="wh-salon",  # pragma: allowlist secret
+                api_token="token-salon",  # pragma: allowlist secret
+                tenant_slug="admin-api-test",
+                stream="max_salon",
+                web_app="id583403546770_3_bot",
+            ),
+        )
         resp = client.post(
             _invite_url(),
             data=_valid_body(),
@@ -838,27 +1023,20 @@ class TestSiteDomainFallback:
             HTTP_AUTHORIZATION=init_data_header("5001"),
         )
         assert resp.status_code == 201, resp.content
-        assert resp.json()["max_dm_delivery"] == "queued"
-        kwargs = patched_send_message.call_args.kwargs
-        assert "localhost" not in kwargs["text"]
-        buttons = [
-            b
-            for att in kwargs["attachments"]
-            for row in att["payload"]["buttons"]
-            for b in row
-            if b["type"] == "open_app"
-        ]
-        assert buttons, "no open_app button — the invite has no entry at all"
-        assert buttons[0]["payload"].startswith("master_invite_")
-        # And no orphan heading left behind by the removed block.
-        assert "веб-версию" not in kwargs["text"]
+        body = resp.json()
+        assert body["invite_link"].startswith("https://max.ru/")
+        assert "master_invite_" in body["invite_link"]
+        # Ни одного адреса, который открывается только на машине
+        # разработчика: пустой SITE_DOMAIN гасит веб-запасной путь, а не
+        # подменяет его localhost-ом.
+        assert "localhost" not in body["invite_link"]
+        assert body["fallback_link"] == ""
 
     def test_debug_keeps_the_localhost_link(
         self,
         client: Client,
         owner_bot_user: BotUser,
         tenant: Tenant,
-        patched_send_message,
         settings,
     ) -> None:
         """Local dev is the one place the Vite URL is the right answer."""
@@ -936,3 +1114,164 @@ class TestSiteDomainFallback:
         with caplog.at_level(logging.ERROR, logger="apps.admin_api.views_invite"):
             assert _fallback_link(_uuid.uuid4()) == ""
         assert PILOT_SITE_DOMAIN in caplog.text
+
+
+# =========================================================================
+# EXTERNAL_ID — гонка (DRF-1507, пункт 3 / разрыв Р7)
+# =========================================================================
+
+
+class TestExternalIdRace:
+    """``external_id`` больше не считается ``count()`` и умеет повторяться.
+
+    Было: ``external_id = count(мастеров тенанта) + 1_000_000`` и общий
+    ``except Exception`` → **500 без ретрая**. Два одновременных
+    приглашения в одном салоне считают одно и то же число; хуже,
+    ``count()`` совпадает и НЕ одновременно — достаточно, чтобы строку
+    удалили.
+    """
+
+    def test_deleted_row_does_not_make_the_next_invite_collide(
+        self,
+        client: Client,
+        owner_bot_user: BotUser,
+        tenant: Tenant,
+    ) -> None:
+        """Детерминированное воспроизведение той же гонки, без потоков.
+
+        Со старым ``count()+1_000_000`` третье приглашение получало номер,
+        который уже занят вторым, ловило ``unique_together (tenant,
+        external_id)`` и отвечало 500. Здесь оно обязано ответить 201.
+        """
+
+        first = client.post(
+            _invite_url(),
+            data=_valid_body(name="Анна Петрова", contact_value="@anna_styl"),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=init_data_header("5001"),
+        )
+        second = client.post(
+            _invite_url(),
+            data=_valid_body(name="Мария Иванова", contact_value="@maria_nails"),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=init_data_header("5001"),
+        )
+        assert first.status_code == 201, first.content
+        assert second.status_code == 201, second.content
+
+        CatalogMaster.all_tenants.filter(id=first.json()["master_id"]).delete()
+
+        third = client.post(
+            _invite_url(),
+            data=_valid_body(name="Ольга Смирнова", contact_value="@olga_brows"),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=init_data_header("5001"),
+        )
+        assert third.status_code == 201, third.content
+
+        ids = set(
+            CatalogMaster.all_tenants.filter(tenant=tenant).values_list("external_id", flat=True)
+        )
+        assert len(ids) == CatalogMaster.all_tenants.filter(tenant=tenant).count()
+
+    def test_collision_is_retried_and_answers_201(
+        self,
+        client: Client,
+        owner_bot_user: BotUser,
+        tenant: Tenant,
+    ) -> None:
+        """Собственно гонка: номер занят между чтением и вставкой.
+
+        Уникальность держит база; проверяется здесь ответ на её
+        срабатывание — пересчитать и повторить, а не 500.
+        """
+
+        now = datetime.now(tz=timezone.utc)
+        CatalogMaster.all_tenants.create(
+            tenant=tenant,
+            external_id=1_000_000,
+            external_updated_at=now,
+            name="Уже занятый номер",
+            invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+            max_handle="",
+        )
+
+        with patch(
+            "apps.admin_api.views_invite._next_external_id",
+            side_effect=[1_000_000, 1_000_001],
+        ) as spy:
+            resp = client.post(
+                _invite_url(),
+                data=_valid_body(),
+                content_type="application/json",
+                HTTP_AUTHORIZATION=init_data_header("5001"),
+            )
+
+        assert resp.status_code == 201, resp.content
+        assert spy.call_count == 2
+        created = CatalogMaster.all_tenants.get(id=resp.json()["master_id"])
+        assert created.external_id == 1_000_001
+
+    def test_collision_that_never_clears_answers_500_not_a_loop(
+        self,
+        client: Client,
+        owner_bot_user: BotUser,
+        tenant: Tenant,
+    ) -> None:
+        """Положительная стража к ретраю: он ограничен, а не бесконечен."""
+
+        now = datetime.now(tz=timezone.utc)
+        CatalogMaster.all_tenants.create(
+            tenant=tenant,
+            external_id=1_000_000,
+            external_updated_at=now,
+            name="Уже занятый номер",
+            invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+            max_handle="",
+        )
+
+        with patch(
+            "apps.admin_api.views_invite._next_external_id",
+            return_value=1_000_000,
+        ) as spy:
+            resp = client.post(
+                _invite_url(),
+                data=_valid_body(),
+                content_type="application/json",
+                HTTP_AUTHORIZATION=init_data_header("5001"),
+            )
+
+        assert resp.status_code == 500
+        assert spy.call_count == 5
+
+    def test_invite_numbering_ignores_the_synced_range(
+        self,
+        client: Client,
+        owner_bot_user: BotUser,
+        tenant: Tenant,
+    ) -> None:
+        """Номера Ayla не втягиваются в нашу нумерацию.
+
+        Синхронизированная строка с ``external_id=42`` не должна ни
+        сдвигать наш счётчик, ни быть им затронутой.
+        """
+
+        now = datetime.now(tz=timezone.utc)
+        CatalogMaster.all_tenants.create(
+            tenant=tenant,
+            external_id=42,
+            external_updated_at=now,
+            name="Синхронизированная",
+            invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+            max_handle="",
+        )
+
+        resp = client.post(
+            _invite_url(),
+            data=_valid_body(),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=init_data_header("5001"),
+        )
+        assert resp.status_code == 201, resp.content
+        created = CatalogMaster.all_tenants.get(id=resp.json()["master_id"])
+        assert created.external_id == 1_000_000

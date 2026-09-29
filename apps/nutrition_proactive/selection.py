@@ -24,21 +24,25 @@ it asks anything of its own (DRF-1314):
 
 Then two conditions only this surface has:
 
-* ``chat_id`` -- no address, no message. Also applied as a queryset filter
+* ``channel_user_id`` -- no address, no message. This is the address a
+  proactive send uses (DRF-1558): a stored ``chat_id`` names a dialog with
+  whichever bot opened one, so it is not an address for writing first.
+  The reason slug stays ``no_chat_id`` -- it is an emitted key. Also
+  applied as a queryset filter
   in :func:`base_queryset`, so in production this per-row check is
   belt-and-braces; it exists for callers that hand :func:`check_common` a
   row they built themselves.
-* ``food_scanner_consent_at`` -- the feature-specific 152-FZ consent for the
-  nutrition diary surface. Reading someone's food diary back to them,
-  unprompted, is processing that data; the same consent that gates writing
-  it gates volunteering it.
+* ``food_diary_processing`` -- the diary/scanner consent (DRF-1963, M1).
+  Reading someone's food diary back to them, unprompted, is processing that
+  data; the same consent that gates writing it gates volunteering it.
 
-  Unlike ``consent_at``, this column has **no** ``ConsentRecord`` behind it:
-  ``ConsentRecord.ConsentType`` has no food-scanner member, so there is no
-  second source to reconcile it against and no withdrawal that could leave
-  it stale. The column *is* the record. That is precisely why reading it
-  directly is correct and why reading ``consent_at`` directly was not --
-  the two look alike and are not alike.
+  It lives in the consent registry and is asked through
+  :func:`apps.consent.nutrition.diary_is_granted` -- the predicate the scanner
+  gate and the Mini App screen use. Until M1 this line read
+  ``BotUser.food_scanner_consent_at`` directly, on the argument that the
+  column *was* the record. It was not a record: no document version, no
+  source, and a withdrawal wiped the grant instead of stamping it. The owner
+  ruled (15.09, §6 M1) that it goes into the registry like every other consent.
 
 The per-feature opt-in (``daily_report_time`` / ``water_reminders``), which
 is OFF for everyone until they ask, is checked in
@@ -130,8 +134,8 @@ def base_queryset():
     return (
         BotUser.all_tenants.filter(proactive_messages_opt_out=False)
         .filter(deleted_at__isnull=True)
-        .exclude(chat_id="")
-        .exclude(chat_id__isnull=True)
+        .exclude(channel_user_id="")
+        .exclude(channel_user_id__isnull=True)
         .select_related("tenant")
         .order_by("pk")[:BATCH_LIMIT]
     )
@@ -153,8 +157,19 @@ def check_common(bot_user: Any) -> str | None:
     blocked = consent_blocker(bot_user)
     if blocked:
         return blocked
-    if not (getattr(bot_user, "chat_id", "") or "").strip():
+    # Owner 11.09 §2.4 (S2-2): nutrition is closed to a SHADOW — and to an
+    # UNRESOLVED — salon shell. Asked here, by name, so the planner's reason
+    # says «shadow», not «water_off»: `prefs.get_prefs` answers empty for the
+    # same shell, and an empty answer would name the wrong cause.
+    from apps.identity.services.person_context_gate import person_context_access
+
+    refused = person_context_access(bot_user)
+    if refused is not None:
+        return refused.reason
+    if not (getattr(bot_user, "channel_user_id", "") or "").strip():
         return "no_chat_id"
-    if getattr(bot_user, "food_scanner_consent_at", None) is None:
+    from apps.consent.nutrition import diary_is_granted
+
+    if not diary_is_granted(bot_user):
         return "no_food_consent"
     return None

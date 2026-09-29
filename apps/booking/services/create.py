@@ -21,12 +21,23 @@ human-readable ``detail``. View layer maps ``slug`` to HTTP status:
 
 * ``service_not_found`` → 404
 * ``service_unbookable`` → 409
-* ``master_not_bookable`` → 404 (covers archive + invite_status filter)
+* ``master_not_bookable`` → 404 (invite is not accepted)
+* ``master_ayla_unlinked`` → 404 (DRF-1548: no canonical Ayla link, so
+  the booking notification would never reach the master)
 * ``service_not_offered`` → 404
 * ``visit_in_past`` → 400
 * ``slot_unavailable`` → 409
 * ``master_archived`` → 409 (race: deactivated after we resolved id)
+* ``master_catalog_unlinked`` → 404 (the catalog does not know this row —
+  ``catalog_specialist_id`` is empty, so every booking path would raise
+  instead of booking)
 * ``tenant_mismatch`` → 403
+
+Every master refusal comes from one place —
+``apps.booking.services.master_gate.master_sale_refusal`` — which asks
+the product-wide sale gate (``apps.catalog.master_state.sale_block``)
+instead of re-assembling its columns here. ``transitions.commit_reschedule``
+asks the same function; the slug is what ties the two sites together.
 
 ### Why a separate exception class instead of ValidationError
 
@@ -41,7 +52,6 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import datetime
-from zoneinfo import ZoneInfo
 
 from django.db import transaction
 from django.utils import timezone
@@ -54,7 +64,9 @@ from apps.booking.services.attribution import (
     compute_assist_score,
     compute_billable,
 )
+from apps.booking.services.master_gate import master_sale_refusal
 from apps.catalog.models import CatalogMaster, CatalogService, MasterService
+from apps.integrations.ayla.offer_refusal import OFFER_NOT_SELLABLE_SLUG, client_text_for
 from apps.events.services import emit
 from apps.identity.models import BotUser
 from apps.scheduling.services.resolver import (
@@ -96,6 +108,12 @@ class CreateBookingInput:
     master_id: str
     visit_at: datetime  # timezone-aware, in the future
     created_by: str = "execute_confirm"
+    #: DRF-1773 — провенанс пути (`PendingBookingIntent.entry_point`).
+    #: `deep_link:reco_<id>` связывает бронь с карточкой C04, из которой
+    #: она выросла; принадлежность карточки проверяется здесь же, потому
+    #: что значение приходит от клиента. Прочие значения (`catalog` /
+    #: `master` / `direct`) в атрибуции ничего не меняют.
+    entry_point: str = ""
     """Attribution tag — 'execute_confirm' (default) or 'execute_reschedule'.
 
     The reschedule service (apps.booking.services.reschedule) passes
@@ -152,6 +170,22 @@ def _occupied_intervals(*, tenant, master, on_date, tz):
         tz=tz,
     )
     return intervals
+
+
+def _stamp_recommendation(inp: "CreateBookingInput", booking: BookingRequest) -> None:
+    """Отметить на карточке C04 бронь, к которой она привела (DRF-1773)."""
+    from apps.recommendation.provenance import (
+        mark_booked,
+        recommendation_id_from_entry_point,
+    )
+
+    recommendation_id = recommendation_id_from_entry_point(inp.entry_point)
+    if recommendation_id is None:
+        return
+    try:
+        mark_booked(inp.bot_user, recommendation_id, booking.id)
+    except Exception:  # noqa: BLE001 — атрибуция не отменяет бронь
+        logger.exception("booking.recommendation_stamp_failed booking=%s", booking.id)
 
 
 def create_customer_booking(
@@ -212,7 +246,11 @@ def create_customer_booking(
     7. Emit ``booking.created`` event.
     """
 
-    tz = ZoneInfo(inp.tenant.timezone)
+    # DRF-2595: битый или пустой пояс — отказ, а не запись по московскому часу:
+    # в салоне не в Москве это неверный час визита, которого никто не заметит.
+    from apps.tenancy.timezones import salon_zone
+
+    tz = salon_zone(inp.tenant, refuse_broken=True, refuse_empty=True)
 
     if inp.visit_at <= timezone.now():
         raise BookingCreateError("visit_in_past", "visit_at must be in the future")
@@ -240,26 +278,38 @@ def create_customer_booking(
             # Under-lock re-check: master may have been archived /
             # invite revoked / tenant mismatched between view lookup
             # and lock acquisition.
+            #
+            # DRF-1548. Гейт продажи спрашивается целиком
+            # (``master_sale_refusal`` → ``sale_block``), а не набирается
+            # здесь по столбцам: своя копия не знала ни про
+            # ``archived_at``, ни про ``ayla_user_id``, и мастер без
+            # канонической связи с Ayla бронь получал — а уведомление о
+            # ней не доходило. Порядок шагов под локом не изменился:
+            # проверка стоит там же, до ``MasterService``, до резолвера
+            # и до вставки.
             if master.tenant_id != inp.tenant.id:
                 raise BookingCreateError("tenant_mismatch", "master belongs to a different tenant")
-            if not master.is_active:
-                raise BookingCreateError(
-                    "master_archived", "master deactivated before booking confirmed"
-                )
-            if master.invite_status != CatalogMaster.InviteStatus.ACCEPTED:
-                raise BookingCreateError(
-                    "master_not_bookable",
-                    f"master invite_status={master.invite_status}",
-                )
+            refusal = master_sale_refusal(master)
+            if refusal is not None:
+                raise BookingCreateError(*refusal)
 
-            if not MasterService.all_tenants.filter(
+            offered = MasterService.all_tenants.filter(
                 tenant_id=inp.tenant.id,
                 master_id=master.id,
                 service_id=service.id,
-            ).exists():
-                raise BookingCreateError(
-                    "service_not_offered", "master does not perform this service"
-                )
+            )
+            # DRF-1989 — новая запись только на продаваемое ребро (один запрос на
+            # обычном пути, как раньше). Перенос через эту функцию не
+            # спрашивает: решение владельца R6 — перенос существующей записи
+            # цену не перепроверяет.
+            if not offered.sellable().exists():
+                if not offered.exists():
+                    raise BookingCreateError(
+                        "service_not_offered", "master does not perform this service"
+                    )
+                if inp.created_by != "execute_reschedule":
+                    reason = offered.values_list("unsellable_reason", flat=True).first()
+                    raise BookingCreateError(OFFER_NOT_SELLABLE_SLUG, client_text_for(reason))
 
             local_visit = inp.visit_at.astimezone(tz)
             blocks = resolve_working_blocks(
@@ -305,6 +355,12 @@ def create_customer_booking(
                 test_mode=False,
                 created_by=inp.created_by,
             )
+            # DRF-1773 — какая рекомендация привела к этой брони (B13:
+            # доказать это через два часа иначе нечем). Чужая или
+            # несуществующая карточка ключа не добавляет и бронь не ломает.
+            from apps.recommendation.provenance import attribution_for
+
+            attribution_metadata.update(attribution_for(inp.bot_user, inp.entry_point))
             billable, billing_reason = compute_billable(
                 booking_source="ai_direct",
                 status=BookingRequest.Status.CONFIRMED,
@@ -337,6 +393,11 @@ def create_customer_booking(
             )
 
     # Emit AFTER commit so consumers see the row.
+    # DRF-1773 — обратная ссылка: карточка знает, к какой брони привела
+    # (`shown ≠ engaged ≠ booked`, R17). Отмечается ПОСЛЕ транзакции: сбой
+    # отметки не должен отменять состоявшуюся бронь.
+    _stamp_recommendation(inp, booking)
+
     emit(
         "booking.created",
         properties={

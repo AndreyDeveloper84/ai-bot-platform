@@ -21,7 +21,8 @@ killer.
          "slot_iso": "2026-07-15T14:00:00+03:00",
          "price_quoted": 1800,
          "note": "массаж лица",
-         "loyalty_apply": true
+         "loyalty_apply": true,
+         "entry_point": "catalog"
        }
      }
      ```
@@ -62,6 +63,14 @@ PENDING_INTENT_TTL_SECONDS = 600  # 10 minutes
 # Whitelist of fields the cache will accept. Anything else is dropped
 # silently — defensive vs frontend schema drift (extra fields don't
 # break the contract; missing fields are tolerated).
+#
+# DRF-1484 / OPEN_DECISIONS §24.5: `entry_point` (provenance) is part
+# of the contract; `tenant_id` deliberately is NOT — tenant is a
+# property of the current execution/request context (server-resolved
+# from the bot that signed the initData), not of the durable user
+# intent. Cross-tenant safety lives at the create-booking boundary
+# (tenant-scoped catalog lookups, regression-locked by
+# `tests/test_views_create_booking_tenant_guard.py`).
 _ALLOWED_FIELDS: dict[str, type] = {
     "master_id": str,
     "service_id": str,
@@ -69,11 +78,13 @@ _ALLOWED_FIELDS: dict[str, type] = {
     "price_quoted": (int, float),  # type: ignore[dict-item]
     "note": str,
     "loyalty_apply": bool,
+    "entry_point": str,
 }
 
 # Bounds (defensive — keep the cache value small + sane).
 _MAX_NOTE_LEN = 500
 _MAX_PRICE = 10_000_000  # 10M roubles ceiling
+_MAX_ENTRY_POINT_LEN = 64
 
 
 class PendingIntentInvalid(ValueError):
@@ -120,6 +131,8 @@ def validate_intent(payload: Any) -> dict[str, Any]:
             )
         if field == "note" and isinstance(value, str) and len(value) > _MAX_NOTE_LEN:
             value = value[:_MAX_NOTE_LEN]
+        if field == "entry_point" and isinstance(value, str) and len(value) > _MAX_ENTRY_POINT_LEN:
+            value = value[:_MAX_ENTRY_POINT_LEN]
         if (
             field == "price_quoted"
             and isinstance(value, (int, float))

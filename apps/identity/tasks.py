@@ -186,3 +186,18 @@ def forget_all_sweep() -> dict:
     from apps.identity.services.forget_all_sweep import sweep_pending_forget_all
 
     return sweep_pending_forget_all()
+
+
+@shared_task(name="apps.identity.tasks.ayla_erasure_sweep")
+def ayla_erasure_sweep() -> dict:
+    """Повторить просроченные задания удаления в Ayla (DRF-1950).
+
+    Инертна, пока ``AYLA_ERASURE_RETRY_ENABLED`` закрыт: до выкладки каталожной
+    ручки readback каждое задание исчерпало бы повторы. Кросс-тенантная, без
+    ``tenant_scope``: задание ключуется субъектом Ayla.
+    """
+    from apps.identity.services import ayla_erasure
+
+    if not ayla_erasure.retry_enabled():
+        return {"mode": "disabled"}
+    return ayla_erasure.sweep_due_jobs()

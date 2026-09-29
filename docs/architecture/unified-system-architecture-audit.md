@@ -82,15 +82,51 @@ Because of this, the system can become unstable even when each repository works 
 
 **Date:** 2026-05-28
 
+> ### ⚠️ ПОПРАВКА 09.09.2026 — пять строк таблицы ниже устарели
+>
+> Аудит датирован **28.05.2026**. За три с половиной месяца контракт изменился,
+> а таблица — нет. Ниже проверено **у источника**, а не по документу.
+>
+> **Поля `booking_id` в теле события не существует.** Все эмиттеры каталога
+> кладут `appointment_id`, ровно то имя, которое читает бот:
+>
+> | событие | эмиттер каталога | ключ в теле |
+> |---|---|---|
+> | `booking.created` | `create_booking_service.py:577,619` | `"appointment_id"` |
+> | `booking.cancelled` | `cancel_reschedule_service.py:220` | `"appointment_id"` |
+> | `booking.rescheduled` / `appointment.rescheduled` | `cancel_reschedule_service.py:506,542` | `"appointment_id"` |
+> | `booking.completed` | `completion.py:44` | `"appointment_id"` |
+>
+> `booking_id` в каталоге — это **имя переменной и поля DTO**, а также поле в
+> строках лога. Ключом полезной нагрузки оно не является нигде.
+>
+> **`booking.confirmed` бот принимает.** Строка «bot-platform accepts: No»
+> неверна с решения владельца OD-T02-5: имя стоит в аллоулисте пилота,
+> обработчик зарегистрирован, живьём принято 29 событий.
+>
+> **Что в таблице осталось верным:** отсутствие эмиттера у `master.schedule.updated`
+> (за всё время не пришло ни одного события) и расхождение словаря платежей.
+>
+> **Почему поправка, а не правка.** Таблица — снимок на 28.05, и переписать её
+> значило бы стереть запись о том, что тогда было верно. Но и оставить без
+> пометки нельзя: 09.09 исполнитель, готовясь расширять аллоулист, прочитал
+> строку `booking.completed` как факт и едва не остановил выкладку — а «починка»
+> по ней означала бы переименование работающего поля. **Документ звучал
+> увереннее кода: код описывает, что происходит, документ — что автор думал,
+> когда писал.**
+>
+> Правило: у утверждения о чужом контракте обязан быть возраст и способ
+> перепроверки. Здесь способ такой — `git grep '"appointment_id"'` по
+> `appointments/application/services/` в `beautygo_backend`.
 **Simple conclusion:** services use similar words, but they do not speak the same contract. Some events have the same lifecycle meaning, but different names. Some events have the same name, but different payload fields. This is worse than having no integration, because it can fail only after real user actions.
 
 | Flow | Ayla currently emits | bot-platform accepts | bot-platform handler | Payload compatible | Priority |
 | --- | --- | --- | --- | --- | --- |
-| Booking created | `booking.created` | Yes | Yes | No: Ayla sends `booking_id`; bot expects `appointment_id` and uses `status` | P0 |
-| Booking cancelled | `booking.cancelled` | Yes | Yes | No: Ayla sends `booking_id`; bot expects `appointment_id`; actor/user semantics are unclear | P0 |
-| Booking rescheduled | `booking.rescheduled` | Yes | Yes | No: Ayla sends `booking_id` and `start_at`; bot expects `appointment_id` and `new_start_at` | P0 |
-| Booking completed | `booking.completed` | Yes | Yes | No: Ayla sends `booking_id`; bot expects `appointment_id` | P0 |
-| Booking confirmed | `booking.confirmed` | No | No | Not applicable | P0 |
+| Booking created | `booking.created` | Yes | Yes | ~~No: Ayla sends `booking_id`~~ — **неверно с 09.09.2026, см. поправку выше: каталог кладёт `appointment_id`** | ~~P0~~ снято |
+| Booking cancelled | `booking.cancelled` | Yes | Yes | ~~No: Ayla sends `booking_id`~~ — **неверно, см. поправку выше.** Про семантику actor/user не перепроверялось | ~~P0~~ снято по полю |
+| Booking rescheduled | `booking.rescheduled` (+ канонический `appointment.rescheduled`) | Yes | Yes | ~~No: Ayla sends `booking_id`~~ — **неверно, см. поправку выше.** Каталог пишет оба события в одной транзакции, оба с `appointment_id` | ~~P0~~ снято по полю |
+| Booking completed | `booking.completed` | Yes | Yes | ~~No: Ayla sends `booking_id`~~ — **неверно, см. поправку выше: `completion.py:44` кладёт `appointment_id`** | ~~P0~~ снято |
+| Booking confirmed | `booking.confirmed` | ~~No~~ **Yes** — в аллоулисте пилота с OD-T02-5 | ~~No~~ **Yes** | Принято живьём 29 событий | ~~P0~~ снято |
 | Booking no-show | `booking.no_show` | No | No | Not applicable | P1 |
 | Payment authorized/hold | Ayla emits `booking.confirmed` on `waiting_for_capture` | bot expects `payment.authorized` | Yes | No: lifecycle vocabulary is different | P0 |
 | Payment captured/succeeded | Ayla emits `payment.confirmed` | bot expects `payment.captured` | Yes | No: event name is different | P0 |

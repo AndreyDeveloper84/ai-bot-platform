@@ -1,48 +1,65 @@
 /**
- * Customer profile stub lib — Tier 1 Priority 6 Phase B (deferred Variant 3).
+ * Customer profile lib — Tier 1 Priority 6 Phase B.
  *
  * Spec: `docs/screens/customer-profile-flow.md` (current dev: deferred
  * version post commit `376784e`, NOT Tau #843 original).
  *
- * # Pilot scope (per §0 tech-lead recon 2026-06-01)
+ * # Что здесь подключено
  *
- * ## IN scope (built):
- *   - R1 header read: display_name + max_handle + tenant_names
- *   - R2 consent toggles read/write (marketing only — 3 other rows
- *     are locked info rows, not toggles per spec §4.1)
- *   - R4 proactive on/off read/write
+ *   - R1 header read: имя из реального `/customer/me`
+ *   - R2 согласия: чтение всех, маркетинг на запись, отзыв согласия на
+ *     хранение данных (не тумблер — сценарий с подтверждением)
+ *   - R4 «Подсказки от Ayla» на чтение и запись
  *
- * ## DEFERRED for pilot (NOT wired):
- *   - R2 export endpoint (`/me/export`) — bot-platform data only, no
- *     Ayla data, no unified cross-service export → routes to support
- *   - R2 delete endpoint (`/me/delete`) — bot-platform hard-delete vs
- *     beautygo soft-delete + Appointments/Payments FK PROTECT, no
- *     cross-service hook (ADR-0015 not ratified) → routes to support
- *   - R3 memory summary + clear — backend layer not built
- *     (no `UserPersonalContext`/`MemoryEntry` tables) → coming-soon
- *     card per spec §5
+ * Отложено по-прежнему: R3 «что Ayla помнит» — backend-слоя нет
+ * (`UserPersonalContext`/`MemoryEntry` не существует), на экране
+ * coming-soon карточка по spec §5. Экспорт и удаление данных живут в
+ * `lib/personal-data.ts` и подключены с C5.
  *
- * # Contracts (W4 follow-ups per spec §12.2 / §12.3 P-1)
+ * # Contracts (DRF-1520 — ручки живые, снято с кода, а не с тикета)
  *
- *   GET  /api/v1/me                       → MeProfileResponse
- *   GET  /api/v1/me/consents              → ConsentsResponse
- *   POST /api/v1/me/consents/marketing    → ConsentsResponse (toggle)
- *   GET  /api/v1/me/proactive_opt_out     → ProactivePrefsResponse
- *   POST /api/v1/me/proactive_opt_out     → ProactivePrefsResponse (toggle)
+ *   GET    /api/v1/customer/me                          → Profile (lib/api.ts)
+ *   GET    /api/v1/customer/me/consents/                → документ согласий
+ *   POST   /api/v1/customer/me/consents/proactive-hints/
+ *          тело `{"enabled": bool}`                     → документ согласий
+ *   POST   /api/v1/customer/me/consents/marketing/      → документ (выдача)
+ *   DELETE /api/v1/customer/me/consents/marketing/      → документ (отзыв)
+ *   DELETE /api/v1/customer/me/consents/data-storage/
+ *          тело `{"confirmation", "disclosure_version"}` → документ + `revocation`
  *
- * WIRING NOTE: this module ships STUBS only. W4 owns the proxy
- * endpoints; swap stub function bodies to `request(...)` calls when
- * W4 ships. Function signatures DO NOT change. See FOLLOW_UP P-1.
+ * WIRING NOTE (DRF-1475, §24, решение владельца 05.09 + DRF-1520):
+ * заглушек здесь больше нет. Все четыре функции ходят в настоящие
+ * ручки `apps/miniapp_api/views.py` (`customer_consents`,
+ * `customer_proactive_hints`, `customer_marketing_consent`,
+ * `customer_data_storage_consent`), логика — `apps/consent/customer.py`.
+ *
+ * Главный источник правды для маркетингового согласия — реестр
+ * `ConsentRecord(MARKETING)`, а не `UserPreferences.notify_promo`:
+ * колонка осталась зеркалом с единственным пишущим путём. Поэтому и
+ * чтение, и запись маркетинга идут через `me/consents/`, а не через
+ * `PATCH /me` — иначе экран показывал бы зеркало вместо факта.
+ *
+ * Дата согласия берётся из `granted_at` реестра. `BotUser.consent_at`
+ * сервер наружу не отдаёт сознательно: приветственный поток её ставит,
+ * а отзыв никогда не снимает, и на пилоте четыре строки из пяти с
+ * непустой `consent_at` уже отозвали согласие.
+ *
+ * Function signatures DO NOT change; `ConsentsResponse` дополнен полями,
+ * которых у зеркала не было (состояние хранения данных, версия
+ * раскрытия, состояние подсказок).
  *
  * # Stub variants for dev QA (Records / Wellness pattern reuse)
  *
- *   ?stub=default — multi-tenant happy path (Анна Петрова, 3 салона)
+ *   ?stub=default — multi-tenant happy path (клиент с 3 салонами)
  *   ?stub=new_user — first-time, single tenant, all consents at default
  *   ?stub=multi   — same as default (alias kept for explicit naming)
  *
- * Production bundle aliases all variants to default via `import.meta
- * .env.DEV` guard (Wellness PR #886 lesson — the `?stub=` query was a
- * phishing vector when read in prod).
+ * Заглушки отдаются ТОЛЬКО при явном `?stub=<variant>` в DEV-сборке —
+ * без параметра и в проде всегда ходим в настоящие ручки. Они дают QA
+ * варианты и в проде не читаются. Production bundle aliases all
+ * variants to default via `import.meta.env.DEV` guard (Wellness
+ * PR #886 lesson — the `?stub=` query was a phishing vector when
+ * read in prod).
  *
  * # Voice + factual-only rule
  *
@@ -55,16 +72,39 @@
  *   - «ты» canonical (per memory `project_ayla_personal_ai`)
  *   - No fake grace promises (NO «через 30 дней можно отменить»)
  *   - No promises which backend cannot deliver
+ *
+ * Единственное исключение из голоса экрана — утверждённый владельцем
+ * юридический текст последствий отзыва (§35 п.7), см.
+ * {@link DATA_STORAGE_REVOCATION_DISCLOSURE_TEXT}.
  */
 
 // ---------------------------------------------------------------------------
-// Contract types — verbatim per spec §12. Marketing toggle is the ONLY
-// editable consent in R2; the other 3 rows render as locked info rows.
+// Contract types — verbatim per spec §12. Управляемых строк в R2 две:
+// маркетинговый тумблер и отзыв согласия на хранение (не тумблер —
+// действие с подтверждением); остальные строки — locked info rows.
 // ---------------------------------------------------------------------------
+
+import {
+  ApiError,
+  fetchProfile,
+  request,
+  updateProfile,
+  type Profile,
+} from "./api";
 
 export interface MeProfileResponse {
   display_name: string;
   max_handle: string;
+  /**
+   * Часовой пояс человека. **Пусто означает «не задано»** (DRF-1606):
+   * умолчанием колонки стоял настоящий пояс, и молчание было неотличимо
+   * от осознанного выбора москвича.
+   *
+   * Пустота доезжает до экрана пустотой и НЕ превращается по дороге в
+   * подставленное значение — иначе мы вылечили бы колонку и завели ту же
+   * болезнь на экране.
+   */
+  timezone: string;
   /**
    * Variant C multi-tenant scope hint (per spec §3.1 + memory
    * `project_cross_tenant_invisible_relationship`). Nearest tenant is
@@ -78,10 +118,27 @@ export interface ConsentsResponse {
   is_booking_pii_locked: boolean;
   /** Always true for pilot — info row, not toggle. */
   is_master_data_locked: boolean;
-  /** OFF default per spec §4.1 — opt-in only. The single editable toggle. */
+  /**
+   * OFF default per spec §4.1 — opt-in only. Правда живёт в реестре
+   * `ConsentRecord(MARKETING)`, а не в зеркале `notify_promo`.
+   */
   marketing_consent: boolean;
-  /** ISO timestamp of overall 152-ФЗ consent (from onboarding). */
+  /**
+   * ISO-момент ДЕЙСТВУЮЩЕГО согласия на хранение данных (`granted_at`
+   * реестра). Пустая строка, когда действующего согласия нет — это
+   * правда, а не пробел: у отозвавшего даты выдачи не существует.
+   */
   data_storage_consent_at: string;
+  /** Действует ли согласие на хранение данных прямо сейчас. */
+  data_storage_granted: boolean;
+  /**
+   * Версия раскрытия последствий отзыва — ТОЛЬКО из ответа сервера.
+   * Смысл проверки в том, что человек нажал под тем текстом, который
+   * сервер считает актуальным; клиентская константа этого не докажет.
+   */
+  data_storage_disclosure_version: string;
+  /** «Подсказки от Ayla» — включены ли (не opt-out, а прямое «да»). */
+  proactive_hints_enabled: boolean;
 }
 
 export interface ProactivePrefsResponse {
@@ -91,6 +148,138 @@ export interface ProactivePrefsResponse {
    * on this; transactional B5/B6 bypass (see spec §6.1).
    */
   proactive_messages_opt_out: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Документ согласий — форма ответа сервера, снята с
+// `apps/consent/customer.py::read_consents` и
+// `apps/miniapp_api/views.py::customer_data_storage_consent`.
+//
+// Типы согласий сервер строит обходом `ConsentRecord.ConsentType`, то
+// есть набор ключей растёт сам. Клиент поэтому читает его как словарь и
+// НЕ перечисляет типы: список, продублированный здесь, разошёлся бы с
+// сервером молча.
+// ---------------------------------------------------------------------------
+
+interface ConsentStateDoc {
+  granted: boolean;
+  granted_at: string | null;
+  document_version: string;
+}
+
+interface ConsentsDocument {
+  consents: Record<string, ConsentStateDoc | undefined>;
+  proactive_hints: { enabled: boolean };
+  data_storage: ConsentStateDoc & {
+    revocation: {
+      disclosure_version: string;
+      consequences: string[];
+      retained: string[];
+    };
+  };
+  /**
+   * Есть только в ответе на отзыв (`DELETE me/consents/data-storage/`).
+   * Лежит в КОРНЕ документа, а не внутри `data_storage`: внутри —
+   * раскрытие, которое показывают ДО нажатия, снаружи — исход того
+   * нажатия. Две разные вещи с одинаковым именем на разных уровнях.
+   */
+  revocation?: {
+    status: string;
+    failed_steps?: string[];
+    failed_details?: Record<string, string>;
+  };
+}
+
+const CONSENTS_PATH = "/me/consents/";
+const PROACTIVE_HINTS_PATH = "/me/consents/proactive-hints/";
+const MARKETING_PATH = "/me/consents/marketing/";
+const DATA_STORAGE_PATH = "/me/consents/data-storage/";
+
+/**
+ * Последствия отзыва согласия на хранение данных.
+ *
+ * УТВЕРЖДЕНО ВЛАДЕЛЬЦЕМ §35 п.7 ДОСЛОВНО. Правка только с новым
+ * решением владельца: ни сокращений, ни «вы» → «ты» ради голоса
+ * экрана, ни перестановки предложений. Это юридический текст, он
+ * проходит согласование перед выпуском, и «причесать» его под тон
+ * приложения — значит выпустить не то, что согласовано.
+ *
+ * Показывается ДО подтверждения; кнопки под ним — «Не отзывать» и
+ * «Отозвать согласие», ровно эти подписи.
+ */
+export const DATA_STORAGE_REVOCATION_DISCLOSURE_TEXT =
+  "После подтверждения Ayla перестанет сохранять и использовать ваши " +
+  "данные, основанные на этом согласии. Доступные для удаления данные " +
+  "будут удалены. Сведения, которые мы обязаны хранить по закону или " +
+  "для исполнения ваших действующих записей, могут сохраниться на " +
+  "необходимый срок. Сам аккаунт и доступ к записям останутся. Вернуть " +
+  "удалённые данные будет нельзя.";
+
+/**
+ * Что экран говорит после исхода `revoked_partial_processing`.
+ *
+ * TODO(Q-CLIENT-03): формулировка частичного исхода — юридическая и
+ * решается владельцем. Пока ответа нет, значение `null`, и экран не
+ * делает НИ ОДНОГО утверждения о полноте удаления: ни «всё удалено»,
+ * ни «часть данных осталась» — второе тоже формулировка, которой у нас
+ * нет. Умолчание, а не выдумка: про возможное сохранение части
+ * сведений человек уже прочитал в утверждённом тексте выше, до
+ * нажатия. Ответ владельца вставляется сюда одной правкой.
+ *
+ * На пилоте это ОСНОВНОЙ исход: замер 07.09 — 13 из 26 человек не
+ * связаны с Ayla, у них шаг `ayla_delete` вернёт `not_linked`.
+ */
+export const DATA_STORAGE_PARTIAL_PROCESSING_NOTE: string | null = null;
+
+/**
+ * DRF-1950 (решение владельца M3, дословно): удаление в Ayla поставлено в
+ * задание, и каталог ещё не подтвердил стирание чтением. До readback —
+ * никакого «удалено». Показывается ТОЛЬКО при `revoked_deletion_started`:
+ * у несвязанного с Ayla (`revoked_partial_processing`) удаления там не было
+ * и не будет — «запущено» было бы ложью.
+ */
+export const DATA_STORAGE_DELETION_STARTED_NOTE =
+  "Удаление запущено. Оно завершится в установленный срок.";
+
+/**
+ * Исход отзыва — три значения, которые отдаёт сервер на 200 (DRF-1950).
+ * Незнакомое значение (сервер новее экрана) читается как частичный исход:
+ * безопасный текст «Согласие отозвано.», без утверждений о полноте.
+ */
+export type DataStorageRevocationStatus =
+  | "revoked"
+  | "revoked_deletion_started"
+  | "revoked_partial_processing";
+
+export interface DataStorageRevocationResult {
+  status: DataStorageRevocationStatus;
+  /** Перечитанное из ответа состояние — не то, каким оно было до нажатия. */
+  consents: ConsentsResponse;
+}
+
+/**
+ * Сервер не знает версию раскрытия, под которой человек нажал (409).
+ * Не ошибка ввода и не повод «дожать» отзыв тем же телом: текст
+ * последствий обновился, и его надо прочитать заново.
+ */
+export class StaleDisclosureError extends Error {
+  constructor() {
+    super("data-storage revocation disclosure version is stale");
+    this.name = "StaleDisclosureError";
+  }
+}
+
+/**
+ * Сам отзыв не состоялся — сервер ответил 502 и в перечитанном
+ * документе согласие всё ещё действует. Отдельный тип, потому что это
+ * единственный исход, про который экран вправе сказать «согласие
+ * осталось действующим».
+ */
+export class DataStorageRevocationFailedError extends Error {
+  constructor() {
+    super("data-storage revocation did not happen");
+    this.name = "DataStorageRevocationFailedError";
+  }
 }
 
 /**
@@ -111,33 +300,89 @@ export const SUPPORT_DEEPLINK =
 
 type StubVariant = "default" | "new_user" | "multi";
 
-function pickStubVariant(): StubVariant {
-  if (!import.meta.env.DEV) return "default";
-  if (typeof window === "undefined") return "default";
+/**
+ * Явный dev-override для ПОДКЛЮЧЁННЫХ функций (DRF-1475): заглушка
+ * отдаётся только когда разработчик сам попросил `?stub=<variant>` в
+ * DEV-сборке. Без параметра — реальный `/customer/me`, иначе dev и
+ * прод расходились бы поведением, а экран снова показывал бы выдумку.
+ */
+function explicitStubVariant(): StubVariant | null {
+  if (!import.meta.env.DEV) return null;
+  if (typeof window === "undefined") return null;
   try {
     const sp = new URLSearchParams(window.location.search);
     const v = sp.get("stub");
-    if (v === "new_user" || v === "multi") return v;
+    if (v === "default" || v === "new_user" || v === "multi") return v;
   } catch {
     /* SSR / parse failure */
   }
-  return "default";
+  return null;
 }
 
 // ---------------------------------------------------------------------------
-// Stub data — voice-audited per spec §10. Anna Petrova default mirrors
-// the spec §3 illustration verbatim.
+// Маппинг реального `GET /customer/me` (lib/api.ts::Profile) на контракты
+// экрана. Ручка не отдаёт `max_handle` и `tenant_names` — соответствующие
+// строки экран скрывает, поэтому здесь честные пустые значения, а не
+// выдуманные. Имя — то, которое человек назвал сам (`client_name`), с
+// отступлением на канальное `display_name`.
+// ---------------------------------------------------------------------------
+
+function toMeProfile(p: Profile): MeProfileResponse {
+  return {
+    display_name: p.client_name || p.display_name,
+    max_handle: "",
+    // Как пришло: пусто остаётся пустым. Ни `?? "Europe/Moscow"`, ни
+    // определения браузером здесь — определяет и предлагает лист, а
+    // записывает человек (DRF-1477).
+    timezone: p.timezone ?? "",
+    tenant_names: [],
+  };
+}
+
+/**
+ * Документ согласий → контракт экрана. Ничего не достраивает: чего в
+ * ответе нет, того нет и здесь.
+ */
+function toConsents(doc: ConsentsDocument): ConsentsResponse {
+  const marketing = doc.consents?.marketing;
+  const storage = doc.data_storage;
+  return {
+    is_booking_pii_locked: true,
+    is_master_data_locked: true,
+    marketing_consent: Boolean(marketing?.granted),
+    data_storage_consent_at: storage?.granted_at ?? "",
+    data_storage_granted: Boolean(storage?.granted),
+    data_storage_disclosure_version:
+      storage?.revocation?.disclosure_version ?? "",
+    proactive_hints_enabled: Boolean(doc.proactive_hints?.enabled),
+  };
+}
+
+function toProactivePrefs(doc: ConsentsDocument): ProactivePrefsResponse {
+  return { proactive_messages_opt_out: !doc.proactive_hints?.enabled };
+}
+
+// ---------------------------------------------------------------------------
+// Stub data — voice-audited per spec §10. The default mirrors the spec §3
+// illustration; the person is named by ROLE, not by a name (DRF-1961): a
+// stub name is still a person's name in a string literal of the UI code.
 // ---------------------------------------------------------------------------
 
 const DEFAULT_ME: MeProfileResponse = {
-  display_name: "Анна Петрова",
-  max_handle: "@anna_petrova",
+  display_name: "Клиент",
+  max_handle: "@client_stub",
+  // Пояс задан — заглушка «человек уже ответил».
+  timezone: "Europe/Moscow",
   tenant_names: ["Beauty Place", "Casa Bella", "Студия Натали"],
 };
 
 const NEW_USER_ME: MeProfileResponse = {
-  display_name: "Мария",
-  max_handle: "@maria_k",
+  display_name: "Новый клиент",
+  max_handle: "@new_client_stub",
+  // Новый человек: пояс НЕ задан. Пусто, а не «Europe/Moscow» —
+  // заглушка обязана уметь показывать то состояние, ради которого
+  // DRF-1606 и делался.
+  timezone: "",
   tenant_names: ["Beauty Place"],
 };
 
@@ -147,27 +392,40 @@ const ME_STUB: Record<StubVariant, MeProfileResponse> = import.meta.env.DEV
   ? { default: DEFAULT_ME, new_user: NEW_USER_ME, multi: MULTI_ME }
   : { default: DEFAULT_ME, new_user: DEFAULT_ME, multi: DEFAULT_ME };
 
-// In-memory mutable consent state (per-session). Production swap will
-// persist server-side; for dev QA the toggle change must be visibly
-// reflected on subsequent reads.
+// In-memory mutable consent state (per-session), только для явного
+// `?stub=` в DEV: переключение тумблера должно быть видно при повторном
+// чтении. Без `?stub=` состояние живёт на сервере (`notify_promo`).
+//
+// `data_storage_disclosure_version` здесь — это ИМИТАЦИЯ ответа сервера
+// для QA, а не источник правды: боевой отзыв уходит с той версией,
+// которую вернул сервер в этой же сессии.
 const CONSENTS_STATE: Record<StubVariant, ConsentsResponse> = {
   default: {
     is_booking_pii_locked: true,
     is_master_data_locked: true,
     marketing_consent: false,
     data_storage_consent_at: "2026-05-14T10:30:00+03:00",
+    data_storage_granted: true,
+    data_storage_disclosure_version: "data-storage-revocation-v1",
+    proactive_hints_enabled: true,
   },
   new_user: {
     is_booking_pii_locked: true,
     is_master_data_locked: true,
     marketing_consent: false,
     data_storage_consent_at: "2026-05-30T12:00:00+03:00",
+    data_storage_granted: true,
+    data_storage_disclosure_version: "data-storage-revocation-v1",
+    proactive_hints_enabled: true,
   },
   multi: {
     is_booking_pii_locked: true,
     is_master_data_locked: true,
     marketing_consent: false,
     data_storage_consent_at: "2026-05-14T10:30:00+03:00",
+    data_storage_granted: true,
+    data_storage_disclosure_version: "data-storage-revocation-v1",
+    proactive_hints_enabled: true,
   },
 };
 
@@ -178,101 +436,157 @@ const PROACTIVE_STATE: Record<StubVariant, ProactivePrefsResponse> = {
 };
 
 // ---------------------------------------------------------------------------
-// Fetch wrappers — stubs in DEV; production must swap to real endpoints
-// once W4 ships. Function signatures DO NOT change.
+// Fetch wrappers — все четыре ходят в настоящие ручки (DRF-1520).
+// Prod-гарды `guardProd` / `StubNotWiredError` сняты: они существовали
+// ровно про «ручек нет», и держать их дальше значило бы ронять экран на
+// работающем эндпоинте. DEV-заглушки `?stub=` остались — они дают QA
+// варианты и в проде не читаются.
+//
+// Function signatures DO NOT change.
 // ---------------------------------------------------------------------------
 
 function devWarn(msg: string): void {
   if (import.meta.env.DEV && typeof console !== "undefined") {
-    // eslint-disable-next-line no-console
     console.warn(`[customer-profile stub] ${msg}`);
   }
 }
 
-/**
- * Production guard — if this module ships to prod BEFORE W4 wires the
- * real endpoints (per spec §12.2 + follow-up P-1), every customer
- * would see «Анна Петрова» as their own profile, plus a hardcoded
- * `data_storage_consent_at` they never gave, plus a marketing toggle
- * that persists fake «saved» without a server record. That's a
- * 152-ФЗ truthfulness violation against the founder-locked Variant 3
- * rule («Profile NEVER promises an in-app action it cannot complete»).
- *
- * Until W4 swaps stub bodies to real `request(...)` calls, prod-mode
- * fetch must surface an explicit error → `StateError` renders, NOT
- * fake identity. Adversarial CR caught this as «M1 stub leak in
- * production» (ship gate, addressed inline).
- */
-class StubNotWiredError extends Error {
-  constructor() {
-    super(
-      "Профиль ещё не подключён. Загрузка временно недоступна. Попробуй позже.",
-    );
-    this.name = "StubNotWiredError";
-  }
-}
-
-function guardProd(endpoint: string): void {
-  if (!import.meta.env.DEV) {
-    // eslint-disable-next-line no-console
-    console.error(
-      `[customer-profile] ${endpoint} called in production with no W4 wire-up. ` +
-        "See docs/screens/customer-profile-flow.md §12.2 (P-1).",
-    );
-    throw new StubNotWiredError();
-  }
-}
-
 export async function fetchMe(): Promise<MeProfileResponse> {
-  guardProd("GET /api/v1/me");
-  devWarn(
-    "GET /api/v1/me served from stub — swap when W4 ships canonical proxy",
-  );
-  const v = pickStubVariant();
-  return ME_STUB[v];
+  const stub = explicitStubVariant();
+  if (stub) {
+    devWarn("GET /customer/me served from explicit ?stub= override");
+    return ME_STUB[stub];
+  }
+  return toMeProfile(await fetchProfile());
+}
+
+/**
+ * Всё состояние согласий одним запросом. Экран читает его целиком, а не
+ * по кусочкам: сервер отдаёт один документ, и три запроса за одним и
+ * тем же документом отличались бы только моментом съёмки.
+ */
+/**
+ * Записать часовой пояс, названный человеком (DRF-1477).
+ *
+ * Значение проверяется НА СЕРВЕРЕ (`update_profile` требует настоящий
+ * IANA-пояс): до этого колонку принимала любая строка, `«не знаю»`
+ * доезжало до планировщика и молча сваливалось на пояс салона.
+ */
+export async function saveTimezone(zone: string): Promise<string> {
+  const updated = await updateProfile({ timezone: zone });
+  return updated.timezone ?? "";
 }
 
 export async function fetchConsents(): Promise<ConsentsResponse> {
-  guardProd("GET /api/v1/me/consents");
-  devWarn(
-    "GET /api/v1/me/consents served from stub — W4 follow-up P-1",
-  );
-  const v = pickStubVariant();
-  // Return a copy so callers cannot mutate stub state directly.
-  return { ...CONSENTS_STATE[v] };
+  const stub = explicitStubVariant();
+  if (stub) {
+    devWarn("consents served from explicit ?stub= override");
+    // Return a copy so callers cannot mutate stub state directly.
+    return { ...CONSENTS_STATE[stub] };
+  }
+  return toConsents(await request<ConsentsDocument>(CONSENTS_PATH));
 }
 
+/**
+ * Маркетинговое согласие: `POST` — выдать, `DELETE` — отозвать.
+ *
+ * Не `PATCH /me` с `notify_promo`: колонка — зеркало, правду держит
+ * реестр. Сервер отвечает пересчитанным документом, из которого и
+ * перечитывается факт, а не то, что просили.
+ */
 export async function setMarketingConsent(
   next: boolean,
 ): Promise<ConsentsResponse> {
-  guardProd("POST /api/v1/me/consents/marketing");
-  devWarn(
-    "POST /api/v1/me/consents/marketing served from stub — W4 follow-up P-1",
-  );
-  const v = pickStubVariant();
-  CONSENTS_STATE[v] = { ...CONSENTS_STATE[v], marketing_consent: next };
-  return { ...CONSENTS_STATE[v] };
+  const stub = explicitStubVariant();
+  if (stub) {
+    devWarn("marketing consent served from explicit ?stub= override");
+    CONSENTS_STATE[stub] = { ...CONSENTS_STATE[stub], marketing_consent: next };
+    return { ...CONSENTS_STATE[stub] };
+  }
+  const doc = await request<ConsentsDocument>(MARKETING_PATH, {
+    method: next ? "POST" : "DELETE",
+  });
+  return toConsents(doc);
 }
 
+/**
+ * Узкое чтение «Подсказок Ayla» из того же документа согласий.
+ * Сигнатура прежняя (`proactive_messages_opt_out`), потому что в этих
+ * терминах о колонке говорит и сервер, и сторож рассылок.
+ */
 export async function fetchProactivePrefs(): Promise<ProactivePrefsResponse> {
-  guardProd("GET /api/v1/me/proactive_opt_out");
-  devWarn(
-    "GET /api/v1/me/proactive_opt_out served from stub — W4 follow-up P-1",
-  );
-  const v = pickStubVariant();
-  return { ...PROACTIVE_STATE[v] };
+  const stub = explicitStubVariant();
+  if (stub) {
+    devWarn("proactive hints served from explicit ?stub= override");
+    return { ...PROACTIVE_STATE[stub] };
+  }
+  return toProactivePrefs(await request<ConsentsDocument>(CONSENTS_PATH));
 }
 
 export async function setProactiveOptOut(
   optOut: boolean,
 ): Promise<ProactivePrefsResponse> {
-  guardProd("POST /api/v1/me/proactive_opt_out");
-  devWarn(
-    "POST /api/v1/me/proactive_opt_out served from stub — W4 follow-up P-1",
-  );
-  const v = pickStubVariant();
-  PROACTIVE_STATE[v] = { proactive_messages_opt_out: optOut };
-  return { ...PROACTIVE_STATE[v] };
+  const stub = explicitStubVariant();
+  if (stub) {
+    devWarn("proactive hints served from explicit ?stub= override");
+    PROACTIVE_STATE[stub] = { proactive_messages_opt_out: optOut };
+    return { ...PROACTIVE_STATE[stub] };
+  }
+  // Ручка думает в положительных терминах («включено»), клиентский
+  // контракт — в отрицательных («opt out»). Инверсия ровно здесь, в
+  // одном месте, чтобы не разъехаться по экранам.
+  const doc = await request<ConsentsDocument>(PROACTIVE_HINTS_PATH, {
+    method: "POST",
+    body: JSON.stringify({ enabled: !optOut }),
+  });
+  return toProactivePrefs(doc);
+}
+
+/**
+ * Отзыв согласия на хранение данных — двойное подтверждение.
+ *
+ * `confirmation` — тот же токен, что у соседнего удаления данных
+ * ({@link DELETE_CONFIRMATION_TOKEN} в `lib/personal-data.ts`; второй
+ * копии здесь заводить нельзя). `disclosureVersion` — версия ИЗ ОТВЕТА
+ * СЕРВЕРА: проверяется, что человек нажал под тем текстом последствий,
+ * который сервер считает актуальным.
+ *
+ * Исходы:
+ *   - 200 `revoked` / `revoked_partial_processing` — отзыв состоялся,
+ *     состояние перечитывается из этого же ответа (§35 п.9);
+ *   - 409 `stale_disclosure` → {@link StaleDisclosureError}: тело чинить
+ *     нечего, надо перечитать `me/consents/` и показать раскрытие заново;
+ *   - 502 → {@link DataStorageRevocationFailedError}: не состоялся сам
+ *     отзыв, согласие осталось действующим;
+ *   - остальное — общий {@link ApiError}.
+ */
+export async function revokeDataStorage(
+  confirmation: string,
+  disclosureVersion: string,
+): Promise<DataStorageRevocationResult> {
+  try {
+    const doc = await request<ConsentsDocument>(DATA_STORAGE_PATH, {
+      method: "DELETE",
+      body: JSON.stringify({
+        confirmation,
+        disclosure_version: disclosureVersion,
+      }),
+    });
+    // Сервер называет исход сам. Выводить его из `failed_steps` значило
+    // бы решать за сервер, что считать полным успехом.
+    const raw = doc.revocation?.status;
+    const status: DataStorageRevocationStatus =
+      raw === "revoked" || raw === "revoked_deletion_started"
+        ? raw
+        : "revoked_partial_processing";
+    return { status, consents: toConsents(doc) };
+  } catch (err) {
+    if (err instanceof ApiError) {
+      if (err.status === 409) throw new StaleDisclosureError();
+      if (err.status === 502) throw new DataStorageRevocationFailedError();
+    }
+    throw err;
+  }
 }
 
 // ---------------------------------------------------------------------------

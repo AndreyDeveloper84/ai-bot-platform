@@ -63,6 +63,10 @@ def _master(tenant: Tenant, name: str) -> CatalogMaster:
         is_active=True,
         invite_status=CatalogMaster.InviteStatus.ACCEPTED,
         external_updated_at=_ts(),
+        # DRF-1540/1544 — синхронизированная строка несёт канонический ключ.
+        # Без него мастер не продаётся, и клиентские поверхности отвечали бы
+        # пустотой не потому, что сломаны.
+        ayla_user_id=uuid4(),
     )
 
 

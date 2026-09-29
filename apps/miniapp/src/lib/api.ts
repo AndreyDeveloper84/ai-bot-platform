@@ -1,10 +1,20 @@
-import { getInitData } from "./max-sdk";
-import { applyDevBypassHeaders } from "./dev-bypass";
+import { applyIdentityHeaders } from "./auth-headers";
+import { markRead } from "./claims";
 
 const API_BASE = "/api/v1/customer";
 
 export class ApiError extends Error {
-  constructor(readonly status: number, readonly slug: string, readonly detail: string) {
+  constructor(
+    readonly status: number,
+    readonly slug: string,
+    readonly detail: string,
+    /**
+     * Структурные подробности отказа, если сервер их прислал (DRF-1708:
+     * `quote_changed` несёт `{field, quoted, applied}` — две пары, которые
+     * человек обязан увидеть). Отсутствуют у прежних отказов.
+     */
+    readonly details?: Record<string, unknown>,
+  ) {
     super(`[${status}] ${slug}: ${detail}`);
     this.name = "ApiError";
   }
@@ -13,14 +23,30 @@ export class ApiError extends Error {
 interface ErrorBody {
   error: string;
   detail: string;
+  details?: Record<string, unknown>;
 }
 
 export async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const initData = getInitData();
+  return (await requestWithStatus<T>(path, init)).data;
+}
+
+/**
+ * То же, что `request`, но со статусом успешного ответа. Нужен там, где
+ * сервер различает исходы статусом при одинаковом теле — избранное
+ * (DRF-2092): 201 «сохранила» / 200 «уже в избранном».
+ */
+export async function requestWithStatus<T>(
+  path: string,
+  init: RequestInit = {},
+): Promise<{ status: number; data: T }> {
   const headers = new Headers(init.headers);
-  if (initData) headers.set("Authorization", `MaxInitData ${initData}`);
-  applyDevBypassHeaders(headers);
-  if (init.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+  applyIdentityHeaders(headers);
+  // Multipart (DRF-2098 — фото еды) идёт `FormData`: заголовок пишет
+  // браузер вместе с boundary, и выставленный вручную `application/json`
+  // сломал бы разбор на сервере. То же правило — в `master-api.ts`.
+  if (init.body && !(init.body instanceof FormData) && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
+  }
 
   const res = await fetch(`${API_BASE}${path}`, { ...init, headers });
   if (!res.ok) {
@@ -30,10 +56,15 @@ export async function request<T>(path: string, init: RequestInit = {}): Promise<
     } catch {
       /* non-JSON 5xx */
     }
-    throw new ApiError(res.status, body.error, body.detail);
+    logApiDetail(res.status, body.error, body.detail);
+    throw new ApiError(res.status, body.error, body.detail, body.details);
   }
-  if (res.status === 204) return undefined as T;
-  return (await res.json()) as T;
+  if (res.status === 204) return { status: res.status, data: undefined as T };
+  // DRF-2347 — метка прочитанного. Доказательство утверждения экрана можно
+  // поставить только здесь, внутри клиента: символ метки наружу не вывозится.
+  // Метка неперечислимая — тело ответа остаётся тем же телом.
+  const body = markRead((await res.json()) as T, { source: path, status: res.status });
+  return { status: res.status, data: body };
 }
 
 // --- auth ---
@@ -49,12 +80,18 @@ export async function request<T>(path: string, init: RequestInit = {}): Promise<
  *   - `price_quoted`  : int | float  (NOTE: not `price_rub`)
  *   - `note`          : str  (truncated to 500 chars server-side)
  *   - `loyalty_apply` : bool (NOTE: not `loyalty_choice`)
+ *   - `entry_point`   : str  (provenance, DRF-1484 §24.5; truncated to
+ *                             64 chars server-side)
  *
  * Field-name mismatch with the frontend sessionStorage shape
  * (`PendingBookingIntent` in `pending-booking-intent.ts`) is by
  * design — the backend cache schema is the source of truth and the
  * sessionStorage fallback was specced earlier; the booking-confirm
  * screen normalises both shapes when restoring.
+ *
+ * `tenant_id` is deliberately NOT part of this contract (§24.5 owner
+ * decision): tenant belongs to the execution/request context and is
+ * server-resolved, never a property of the durable intent snapshot.
  */
 export interface ServerPendingBookingIntent {
   master_id: string;
@@ -63,6 +100,7 @@ export interface ServerPendingBookingIntent {
   price_quoted?: number;
   note?: string;
   loyalty_apply?: boolean;
+  entry_point?: string;
 }
 
 export interface AuthVerifyResponse {
@@ -76,6 +114,20 @@ export interface AuthVerifyResponse {
    * multi-device — sessionStorage stays the PRIMARY restore path).
    */
   pending_booking_intent?: ServerPendingBookingIntent | null;
+  /**
+   * DRF-1319 B+E (§124) — единственное серверное утверждение о том, кто
+   * перед нами. `channel`: как человек опознан (`identified` — MAX
+   * initData; `dev_bypass` — DEBUG-обход, канал его не называл).
+   * `subject`: есть ли доменный субъект в Ayla — привязка делается на
+   * сервере при входе (`ensure_ayla_link`), клиент её не вычисляет.
+   * Необязательное поле только ради совместимости с сервером старой
+   * версии; читать через `lib/identity.ts::subjectIdentity`.
+   */
+  identity?: {
+    channel: "identified" | "dev_bypass";
+    subject: "linked" | "unlinked";
+    ayla_user_id: string | null;
+  };
 }
 
 /**
@@ -129,7 +181,19 @@ export interface Service {
    */
   is_bookable: boolean;
 }
-export const fetchServices = (): Promise<{ services: Service[] }> =>
+export const fetchServices = (): Promise<{
+  services: Service[];
+  /**
+   * DRF-1482 — WHY the catalog has nothing to offer, server-computed
+   * (`apps/miniapp_api/views.py::services_list`), per
+   * `docs/screens/customer-catalog-empty-states-spec.md` §2:
+   * `empty_reason ∈ {search_no_match, region_empty, booking_unavailable}`.
+   * The server never sends `search_no_match` (free-text search never
+   * leaves the Mini App — the client derives that one). Optional while
+   * older backends roll out; `null`/absent means "no empty state".
+   */
+  empty_reason?: string | null;
+}> =>
   request("/services", { method: "GET" });
 export const fetchService = (id: string): Promise<{ service: Service }> =>
   request(`/services/${id}`, { method: "GET" });
@@ -143,61 +207,472 @@ export interface Master {
   experience: string;
   rating: string | null;
   photo_url: string;
+  /**
+   * DRF-1707 / OD-PILOT-9: метры до места оказания услуги, как их посчитал
+   * каталог. Присутствует только в ответе на запрос с координатами;
+   * `null` = неизвестно (DISTANCE_UNKNOWN) — не ноль и не «далеко».
+   */
+  distance_meters?: number | null;
+  /**
+   * DRF-1778 — число отзывов из зеркала; `0`/отсутствие — скобок нет.
+   * Trust signal только из фактических данных (тело C05, C05.3).
+   */
+  review_count?: number;
 }
 export interface MasterDetail extends Master {
   service_ids: string[];
 }
 export const fetchMasters = (params?: {
   serviceId?: string;
+  /** DRF-1707: одноразовые координаты — только в этот запрос, не хранятся. */
+  coords?: { lat: number; lon: number };
 }): Promise<{ masters: Master[] }> => {
   const q = new URLSearchParams();
   if (params?.serviceId) q.set("service_id", params.serviceId);
+  if (params?.coords) {
+    q.set("lat", params.coords.lat.toFixed(6));
+    q.set("lon", params.coords.lon.toFixed(6));
+  }
   const qs = q.toString();
   return request(`/masters${qs ? `?${qs}` : ""}`, { method: "GET" });
 };
 export const fetchMaster = (id: string): Promise<{ master: MasterDetail }> =>
   request(`/masters/${id}`, { method: "GET" });
 
-// --- catalog: recommendations (Ayla scorer proxy) ---
+// --- catalog: recommendations (граница резолвера, §9.4) ---
 /**
- * POST /recommendations — proxies onto Ayla's catalog scoring
- * (`apps/miniapp_api/views.py::customer_recommendations`). Empty body →
- * Ayla's default ranking. The Ayla response is passed through verbatim
- * by the proxy (that view builds no translation layer), so ANY field
- * Ayla starts sending arrives here untouched. Failures (502/503) are
- * the caller's to isolate — picks are optional chrome, never an error
- * screen.
+ * `POST /recommendations` — проекция границы резолвера рекомендаций
+ * на клиентскую поверхность.
  *
- * # WHY fields (owner ruling 25.08)
+ * # Что здесь изменилось и почему (DRF-1568, T7)
  *
- * «Нет displayable WHY → нет блока „Ayla подобрала"». The branded
- * sections may only render a pick the SOURCE explained, so the WHY
- * fields are declared optional here and consumed in
- * `customer-booking.ts::getCatalogBrowse`. Today Ayla sends neither —
- * both stay `undefined` and every branded section hides itself.
+ * До 07.09.2026 этот модуль объявлял `{recommendations: [{service_id,
+ * score}]}` и утверждал в докстринге, что «NO backend ever produced»
+ * трёхслойную форму. Второе перестало быть правдой в тот же день:
+ * источник отдаёт трёхслойный ответ с мастерами и `reasoning_text`,
+ * а комментарий продолжал описывать состояние, которого больше нет —
+ * ровно тот класс дефекта, из-за которого замер эндпоинта месяц
+ * подменял собой замер экрана.
  *
- * Two accepted shapes, because the canon names both:
+ * Форму ответа теперь описывает не эта поверхность и не источник, а
+ * договор: `docs/specs/RECOMMENDATION_RESOLVER_CONTRACT_v1.0.md`.
+ * Клиент написан **против документа**, а не против чужой реализации:
+ * расхождение реализации с контрактом — находка, которую несут
+ * владельцу контракта, а не подгоняют молча под факт.
  *
- *   - `reasons: string[]` — owner ruling 25.08, «2–3 коротких
- *     displayable reason»;
- *   - `reasoning_text: string` — `docs/screens/customer-booking-flow.md`
- *     §10.3, one backend-generated line per item.
+ * # Что запрещено этому файлу
  *
- * Both must arrive DISPLAY-READY. The frontend never generates,
- * translates or decorates WHY: no internal reason codes, no confidence
- * numbers, no chain-of-thought, no generic stand-ins.
+ * * **Не адаптировать.** Переименование, доклейка умолчаний и починка
+ *   «почти правильного» ответа означали бы, что форму держит
+ *   потребитель (§2.1 C3). Здесь только ответ на один вопрос: та ли
+ *   это форма, о которой договорились.
+ * * **Не решать за человека.** `ordered[]` приходит уже упорядоченным;
+ *   сырых баллов в ответе нет вовсе (§4.3), и собрать свой порядок
+ *   не из чего — это сделано намеренно.
+ * * **Не сочинять WHY.** Наружу идут `reason_codes` и `evidence`;
+ *   фразу собирает представление (§7.1), и строки для показа в ответе
+ *   быть не должно — её наличие само по себе нарушение.
  */
-export interface RecommendationScore {
-  service_id: string;
-  score: number;
-  /** Owner ruling 25.08 — display-ready WHY lines, 2–3 short ones. */
-  reasons?: string[] | null;
-  /** May spec §10.3 — a single display-ready WHY line. */
-  reasoning_text?: string | null;
+
+/**
+ * Мажорная версия контракта, которую этот клиент умеет разбирать.
+ *
+ * Ответ другой мажорной версии — `CONTRACT_VIOLATION`, а не «попробуем
+ * разобрать»: попытка разобрать неизвестное и есть тот способ, которым
+ * расхождение доезжает до человека молча. Та же константа стоит на
+ * второй половине границы — `apps/integrations/ayla/
+ * recommendation_resolver_client.py::SUPPORTED_SPEC_MAJOR`.
+ */
+export const SUPPORTED_RESOLVER_SPEC_MAJOR = 1;
+
+/**
+ * §10.3 — код решения В ЦЕЛОМ (не про кандидата), которым источник
+ * говорит: видимых услуг больше нуля, пригодных к рекомендации — ноль.
+ *
+ * Решение владельца §76 дало этому состоянию имя —
+ * `NO_VERIFIED_CANDIDATES` — и статус ШТАТНОГО результата, а не ошибки:
+ * `VERIFIED` выдаётся только после подтверждения, 206 существующих
+ * связей становятся `REVIEW_REQUIRED`, и ноль `VERIFIED` не разрешает
+ * fallback. Пустая полка перестаёт быть дефектом и становится
+ * состоянием с именем.
+ */
+export const NOT_RECOMMENDABLE_CODE = "ELIG_EXCLUDED_NOT_RECOMMENDABLE";
+
+/**
+ * §7.2 / §4.4 — пустота по безопасности.
+ *
+ * Снаружи она выглядит ТОЧНО ТАК ЖЕ, как §10.3: те же 200, тот же
+ * пустой `ordered[]`. Различает их только код, и путать эти два
+ * состояния особенно дорого: первое означает «почини разметку
+ * каталога», второе — «не чини ничего, гейт сработал верно».
+ *
+ * Заявление поверхности `NOT_APPLICABLE` отвергается СОДЕРЖАНИЕМ
+ * решения, а не мнением о вызывающем (§4.1, решение владельца §72):
+ * кандидат, требующий проверки здоровья, делает выдачу fail-closed
+ * так же, как `UNKNOWN`.
+ */
+export const SAFETY_EXCLUDED_CODE = "ELIG_EXCLUDED_SAFETY";
+
+/**
+ * §4.4 — нужда названа явно, но никто ей не отвечает
+ * (`need.is_stated ∧ MATCH_UNDETERMINED` → исключение на S1).
+ *
+ * Третья пустота, и она отличается от двух других тем, что чинить в
+ * системе нечего: показать кого-то другого значило бы молча подставить
+ * не ту услугу, что канон §14.4 запрещает прямо.
+ *
+ * На уровень решения этот код НЕ поднимается — он живёт только в
+ * `excluded[]`. Потому потребитель обязан читать оба места: чтение
+ * одних только кодов решения превратило бы это состояние в `OK`
+ * с пустой полкой, то есть снова в безымянную пустоту.
+ */
+export const NOT_CAPABLE_CODE = "ELIG_EXCLUDED_NOT_CAPABLE";
+
+/**
+ * §4.3 — что именно рекомендовано. `kind` нормативен: без него
+ * поверхность не знает, услуга это или мастер, и «молча подставить
+ * другое» становится делом одной строки.
+ */
+export type CandidateKind = "SERVICE" | "OFFER" | "PROVIDER" | "SLOT";
+export const CANDIDATE_KINDS: readonly CandidateKind[] = [
+  "SERVICE",
+  "OFFER",
+  "PROVIDER",
+  "SLOT",
+];
+
+export interface CandidateRef {
+  kind: CandidateKind;
+  id: string;
 }
-export const fetchRecommendations = (): Promise<{
-  recommendations: RecommendationScore[];
-}> => request("/recommendations", { method: "POST" });
+
+/**
+ * §8.2 — свидетельство. Передаётся вместе с оценкой: `rating` без
+ * `review_count` не приходит никогда, чтобы потребитель физически не
+ * мог повторить ошибку «Рейтинг 4.9» как причину.
+ *
+ * `strength` и `origin` читаются, но не пересчитываются: смягчение или
+ * усиление силы свидетельства при отрисовке — `LLM_FORBIDDEN`, и
+ * человеку оно запрещено тем же пунктом (§7.3).
+ */
+export interface EvidenceItem {
+  kind: string;
+  value: unknown;
+  strength: "CONFIRMED" | "WEAK" | "UNSUBSTANTIATED" | "UNKNOWN";
+  origin: "DOMAIN_FACT" | "USER_EXPLICIT" | "USER_CLICK" | "CURATED_KNOWLEDGE";
+  observed_at?: string;
+  source_ref?: string;
+}
+
+/**
+ * §4.3 — один упорядоченный кандидат.
+ *
+ * `tier` **нормативен**: равный `tier` означает НЕРАЗЛИЧЁННЫХ
+ * кандидатов, и поверхность не вправе называть первого из яруса лучшим
+ * (решение владельца §29.3). `rank` — позиция, а не превосходство.
+ */
+export interface RankedCandidate {
+  candidate: CandidateRef;
+  rank: number;
+  tier: number;
+  /** Закрытый реестр §7.2, лексикографически. Минимум один. */
+  reason_codes: string[];
+  evidence?: EvidenceItem[];
+  stage_verdicts?: Record<string, string>;
+}
+
+/** §4.4 — почему кандидата нет. Только S0/S1: стадии допустимости. */
+export interface ExcludedCandidate {
+  candidate: CandidateRef;
+  stage: string;
+  reason_code: string;
+}
+
+/** §6.3 — без версий решение невоспроизводимо задним числом. */
+export interface PolicyVersions {
+  resolver_spec_version?: string;
+  stage_policy_version?: string;
+  reason_code_registry_version?: string;
+  catalog_mapping_version?: string;
+  safety_policy_version?: string;
+  tie_break_policy_version?: string;
+}
+
+/**
+ * §4.2 — неизменяемое решение резолвера.
+ *
+ * `resolver_spec_version` лежит здесь **дважды** — отдельным полем и
+ * внутри `policy_versions`. Отдельное поле существует затем, чтобы
+ * потребитель мог отвергнуть неизвестную мажорную версию, не разбирая
+ * остального.
+ */
+export interface RecommendationDecision {
+  decision_id: string;
+  request_id: string;
+  resolver_spec_version: string;
+  ordered: RankedCandidate[];
+  excluded?: ExcludedCandidate[];
+  policy_versions: PolicyVersions;
+  reason_codes?: string[];
+  stage_activity?: Record<string, string>;
+  context_snapshot_ref?: string;
+  computed_at?: string;
+}
+
+/**
+ * Конверт репозитория. Проверяется наравне с остальным: именно его
+ * неразворачивание было половиной DEFECT-C-02 (§9.4).
+ */
+export interface RecommendationDecisionEnvelope {
+  data: RecommendationDecision;
+}
+
+/**
+ * Возвращает `unknown`, и это не небрежность.
+ *
+ * Типы TypeScript стираются в рантайме: типизированный промис
+ * доказывает лишь то, что мы **намеревались** получить, и никогда —
+ * что пришло. Прошлая подпись обещала `{recommendations: […]}`,
+ * поэтому потребитель звал `.slice()` на `undefined`, `TypeError`
+ * улетал в `catch`, написанный про «скорер недоступен», и блок
+ * исчезал молча (`docs/OPEN_DECISIONS.md` §52). Единственный вход в
+ * типизированный мир — {@link decisionContractViolation}.
+ */
+export const fetchRecommendations = (): Promise<unknown> =>
+  request("/recommendations", { method: "POST" });
+
+/**
+ * Вернуть описание нарушения формы или `null`, если ответ конформен.
+ *
+ * # Конформность — целиком (§9.4.1, OD §53.1)
+ *
+ * > Ответ конформен целиком или не конформен. Один битый элемент из
+ * > двадцати делает невалидным **ответ**, а не элемент.
+ *
+ * «Пропустить годные» запрещено прямо: это означало бы, что потребитель
+ * решает, какие из присланных рекомендаций увидит человек, — то есть
+ * ведёт отбор, то есть держит политику, которую §2 у него отнимает.
+ * Так возвращается четвёртый авторитет ранжирования, самый незаметный:
+ * он живёт в фильтре и никогда не назовёт себя ранжированием.
+ *
+ * Указание на конкретный элемент в тексте — **диагностика**, а не
+ * исключение из правила: чинить по этому сигналу будут источник, а не
+ * экран, и ему нужно знать, где именно он нарушил.
+ *
+ * # Чего эта функция не делает
+ *
+ * Она не применяется к отказу транспорта: сеть, не-2xx и неразбираемое
+ * тело отвергаются до того, как появится тело, поэтому недоступный
+ * источник сюда не доходит и шуметь не может. Устройство, а не
+ * старательность: см. `customer-booking.ts::loadRecommendations`.
+ *
+ * Порядок проверок повторяет вторую половину границы
+ * (`recommendation_resolver_client.py::decision_contract_violation`),
+ * чтобы на одном и том же ответе оба конца называли **одно и то же**
+ * первое нарушение.
+ */
+export function decisionContractViolation(payload: unknown): string | null {
+  if (!isPlainObject(payload)) {
+    return `ожидался объект, получено ${describeShape(payload)}`;
+  }
+  const data = payload.data;
+  if (!isPlainObject(data)) {
+    return `ожидался конверт {data: {…}}, получено data=${describeShape(data)}`;
+  }
+  const version = data.resolver_spec_version;
+  if (typeof version !== "string") {
+    return `resolver_spec_version отсутствует или не строка: ${describeShape(version)}`;
+  }
+  const major = version.split(".", 1)[0] ?? "";
+  if (!/^\d+$/.test(major) || Number(major) !== SUPPORTED_RESOLVER_SPEC_MAJOR) {
+    return (
+      `неизвестная мажорная версия контракта ${describeShape(version)}; клиент ` +
+      `умеет ${SUPPORTED_RESOLVER_SPEC_MAJOR}.x. Разбирать неизвестное запрещено (§9.4)`
+    );
+  }
+  const ordered = data.ordered;
+  if (!Array.isArray(ordered)) {
+    return `ordered отсутствует или не список: ${describeShape(ordered)}`;
+  }
+  for (let i = 0; i < ordered.length; i += 1) {
+    const problem = candidateViolation(ordered[i], i);
+    if (problem !== null) {
+      return `ответ невалиден целиком; первое нарушение — ${problem}`;
+    }
+  }
+  // `excluded[]` проверяется потому, что потребитель его ЧИТАЕТ: по нему
+  // различаются три причины пустой полки (§4.4). Разбирать непроверенное
+  // — тот же дефект, что разбирать неизвестную версию.
+  if (data.excluded !== undefined) {
+    if (!Array.isArray(data.excluded)) {
+      return `excluded: ожидался список, получено ${describeShape(data.excluded)}`;
+    }
+    for (let i = 0; i < data.excluded.length; i += 1) {
+      const problem = excludedViolation(data.excluded[i], i);
+      if (problem !== null) {
+        return `ответ невалиден целиком; первое нарушение — ${problem}`;
+      }
+    }
+  }
+  for (const field of ["decision_id", "request_id", "policy_versions"] as const) {
+    if (!(field in data)) return `обязательное поле ${field} отсутствует`;
+  }
+  if (hasDisplayString(data)) {
+    return (
+      "ответ несёт строку для показа человеку — граница отдаёт reason_codes " +
+      "и evidence, фразу собирает представление (§7)"
+    );
+  }
+  return null;
+}
+
+function candidateViolation(item: unknown, index: number): string | null {
+  if (!isPlainObject(item)) {
+    return `ordered[${index}]: ожидался объект, получено ${describeShape(item)}`;
+  }
+  const candidate = item.candidate;
+  if (!isPlainObject(candidate) || typeof candidate.id !== "string") {
+    return `ordered[${index}].candidate: нет идентификатора кандидата`;
+  }
+  // `kind` проверяется здесь, а не только на второй половине границы:
+  // без него «услуга» и «мастер» неразличимы, а полка услуг, молча
+  // принявшая мастера, и есть подстановка другого предмета (§14.4).
+  if (
+    typeof candidate.kind !== "string" ||
+    !CANDIDATE_KINDS.includes(candidate.kind as CandidateKind)
+  ) {
+    return (
+      `ordered[${index}].candidate.kind: ожидалось одно из ` +
+      `${CANDIDATE_KINDS.join("|")}, получено ${describeShape(candidate.kind)}`
+    );
+  }
+  for (const field of ["rank", "tier"] as const) {
+    if (!Number.isInteger(item[field])) {
+      return (
+        `ordered[${index}].${field}: ожидалось целое, получено ` +
+        `${describeShape(item[field])}`
+      );
+    }
+  }
+  const codes = item.reason_codes;
+  if (
+    !Array.isArray(codes) ||
+    codes.length === 0 ||
+    !codes.every((c) => typeof c === "string")
+  ) {
+    // Кандидат без кодов — строка, про которую нельзя сказать, почему
+    // она здесь. Гейт WHY владельца (25.08) не пропустил бы её дальше,
+    // но здесь она уже нарушение формы, а не «нечего показать».
+    return (
+      `ordered[${index}].reason_codes: ожидался непустой список строк, ` +
+      `получено ${describeShape(codes)}`
+    );
+  }
+  // Код исключения внутри `ordered[]` — нарушение, а не странность.
+  // Исключения фиксируются только на S0/S1 и живут в `excluded[]`
+  // (§4.4); в упорядоченном множестве им места нет, а `REVIEW_REQUIRED`
+  // и `UNMAPPED` там запрещены прямо (§10.2 и решение владельца §76:
+  // «клиенту нельзя сообщать, что такая услуга или мастер подходит»).
+  const excluding = (codes as string[]).find((c) => EXCLUSION_CODE_RE.test(c));
+  if (excluding !== undefined) {
+    return (
+      `ordered[${index}].reason_codes: код исключения ${excluding} в ` +
+      "упорядоченном множестве; его место в excluded[] (§4.4, §10.2)"
+    );
+  }
+  // `mapping_status` контракт у кандидата не объявляет, но решение
+  // владельца §76 однозначно: рекомендуется только `VERIFIED`. Если
+  // источник это поле всё же прислал — оно обязано быть `VERIFIED`.
+  // Молча отрисовать непроверенную связь нельзя.
+  const mapping = item.mapping_status;
+  if (mapping !== undefined && mapping !== "VERIFIED") {
+    return (
+      `ordered[${index}].mapping_status: рекомендуется только VERIFIED, ` +
+      `получено ${describeShape(mapping)} (§10.1, решение владельца §76)`
+    );
+  }
+  if (item.evidence !== undefined && !Array.isArray(item.evidence)) {
+    return (
+      `ordered[${index}].evidence: ожидался список, получено ` +
+      `${describeShape(item.evidence)}`
+    );
+  }
+  return null;
+}
+
+function excludedViolation(item: unknown, index: number): string | null {
+  if (!isPlainObject(item)) {
+    return `excluded[${index}]: ожидался объект, получено ${describeShape(item)}`;
+  }
+  const candidate = item.candidate;
+  if (!isPlainObject(candidate) || typeof candidate.id !== "string") {
+    return `excluded[${index}].candidate: нет идентификатора кандидата`;
+  }
+  if (typeof item.reason_code !== "string") {
+    return (
+      `excluded[${index}].reason_code: ожидалась строка, получено ` +
+      `${describeShape(item.reason_code)}`
+    );
+  }
+  // §4.4: исключения фиксируются ТОЛЬКО на стадиях допустимости. Код не
+  // из семейства исключения здесь означал бы, что упорядочивание тайком
+  // стало фильтром, — а §4.4 существует ровно затем, чтобы этого не было.
+  if (!EXCLUSION_CODE_RE.test(item.reason_code)) {
+    return (
+      `excluded[${index}].reason_code: ожидался код исключения, получено ` +
+      `${describeShape(item.reason_code)} (§4.4)`
+    );
+  }
+  if (typeof item.stage !== "string") {
+    return `excluded[${index}].stage: ожидалась строка, получено ${describeShape(item.stage)}`;
+  }
+  return null;
+}
+
+/**
+ * Семейства кодов исключения §7.2 — `ELIG_EXCLUDED_*`, `SCOPE_EXCLUDED_*`
+ * и `SCOPE_GEO_UNKNOWN_EXCLUDED`. Проверяется формой имени, а не
+ * перечислением: реестр версионируется, и новый код исключения обязан
+ * ловиться сторожем в день своего появления, а не в день, когда мы про
+ * него узнаем.
+ */
+const EXCLUSION_CODE_RE = /^(ELIG_EXCLUDED_|SCOPE_EXCLUDED_)|_EXCLUDED$/;
+
+/**
+ * Поля, наличие которых означает, что источник снова собрал фразу за
+ * потребителя (§8.4 E1). Проверяется рекурсивно: «Рейтинг 4.9» пришёл
+ * человеку именно такой строкой, и пришла она вложенной.
+ */
+const DISPLAY_FIELDS = ["reasoning_text", "reason_text", "why_text"];
+
+function hasDisplayString(node: unknown): boolean {
+  if (Array.isArray(node)) return node.some(hasDisplayString);
+  if (isPlainObject(node)) {
+    if (DISPLAY_FIELDS.some((f) => f in node)) return true;
+    return Object.values(node).some(hasDisplayString);
+  }
+  return false;
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Описывает значение по ФОРМЕ и никогда по содержимому — имена ключей и
+ * типы опознают разошедшийся контракт, и они не могут унести данные
+ * человека в строку журнала. Вторая половина границы описывает форму
+ * подробнее (там журнал серверный); здесь журнал — консоль браузера
+ * того самого человека, поэтому значений в ней нет вовсе.
+ */
+function describeShape(value: unknown): string {
+  if (value === null) return "null";
+  if (Array.isArray(value)) return `array(${value.length})`;
+  if (typeof value === "object") {
+    return `object{${Object.keys(value as object).join(",")}}`;
+  }
+  return typeof value;
+}
 
 // --- slots ---
 export interface FreeSlot {
@@ -220,6 +695,39 @@ export const fetchSlots = (params: {
 };
 
 // --- bookings ---
+
+/**
+ * Health-check handoff slugs (DRF-1614) — mirrored from
+ * `apps/integrations/ayla/health_check.py`.
+ *
+ * Ayla answers 422 when a service may not be booked without a screening
+ * question first. That is a medical decision taken on purpose upstream,
+ * not a rejected payload and not a broken server, so the surface must
+ * NOT render it as a failure.
+ *
+ * Two slugs, not three. `HEALTH_CHECK_REQUIRED` and
+ * `HEALTH_CHECK_UNKNOWN` arrive here merged into
+ * `health_check_handoff`, because the difference between «we know you
+ * must be asked» and «nobody has annotated this service yet» is our
+ * bookkeeping and explaining it to a person who came to book would tell
+ * them about our filing system. The exact code stays in the backend log,
+ * where the annotation queue counts it.
+ *
+ * `health_check_unavailable` is separate because its sentence differs:
+ * it promises NOTHING. Nobody is assigned on that path, and a promise of
+ * a consultation that no one will hold is the same family of defect as a
+ * link to a screen that does not exist — a refusal is understood, a
+ * non-existent door is searched for.
+ *
+ * The slug is read, never the prose: the reason must not be
+ * reconstructed from text or from an HTTP status.
+ */
+export const HEALTH_CHECK_HANDOFF_SLUG = "health_check_handoff";
+export const HEALTH_CHECK_UNAVAILABLE_SLUG = "health_check_unavailable";
+
+export const isHealthCheckSlug = (slug: string): boolean =>
+  slug === HEALTH_CHECK_HANDOFF_SLUG || slug === HEALTH_CHECK_UNAVAILABLE_SLUG;
+
 export interface CreatedBooking {
   id: string;
   service_name: string;
@@ -227,6 +735,12 @@ export interface CreatedBooking {
   visit_at: string;
   duration_min: number;
   status: string;
+  /**
+   * DRF-1952 — адрес салона записи (зеркало `Tenant.address`). `null` —
+   * источник промолчал; ключа нет (сервер старше DRF-1952) — `undefined`.
+   * Показывать только через `visitAddressText`.
+   */
+  address?: string | null;
 }
 export const createBooking = (body: {
   service_id: string;
@@ -234,6 +748,16 @@ export const createBooking = (body: {
   visit_at: string;
   /** AMD-002: user-chosen online payment (C7). */
   payment_required?: boolean;
+  /** DRF-1708: what the confirmation screen showed — see customer-booking.ts. */
+  quoted_price?: string;
+  quoted_duration_minutes?: number;
+  /**
+   * DRF-1773 — откуда пришёл этот путь (`resolveEntryPoint`): то же
+   * значение, что у `PendingBookingIntent.entry_point`. Нужно ровно для
+   * атрибуции: `deep_link:reco_<id>` связывает бронь с карточкой C04.
+   * Необязательное; сервер проверяет принадлежность карточки сам.
+   */
+  entry_point?: string;
 }): Promise<{ booking: CreatedBooking }> =>
   request("/bookings", { method: "POST", body: JSON.stringify(body) });
 
@@ -254,15 +778,36 @@ export interface BookingItem {
   service_name: string;
   master_id: string | null;
   master_name: string;
+  /**
+   * DRF-2436 B / решение владельца п.15 — клиентское имя салона записи
+   * (`Tenant.name`, как у витрины). «Мои записи» — единый список по всем
+   * салонам, и у каждой строки должно быть видно, в каком салоне она. Ключа
+   * нет (локальный путь, сервер старше) — `undefined`: строка без салона.
+   */
+  salon_name?: string;
   visit_at: string;
   duration_min: number | null;
   cancel_requested_at: string | null;
   undo_window_seconds: number;
   cancellable: boolean;
   reschedulable: boolean;
+  /**
+   * Адрес салона, дословно как в колонке (DRF-1652). Три состояния:
+   * строка — известен; `""` — салон сказал, что адреса нет; `null` —
+   * источник промолчал. Разбор один на все экраны —
+   * `lib/visit-address.ts`; собирать фразу на месте нельзя.
+   */
+  address: string | null;
   // Phase 4 — post-visit feedback. NULL until customer rates.
   rating: number | null;
   can_rate: boolean;
+  /**
+   * DRF-2172 — цена записи как снимок на момент записи (зеркало
+   * `booking.created.price_total`), Decimal-строка «3200.00» или `null`,
+   * когда источник цены не нёс (локальный путь; строки старше столбца).
+   * `null` → строки нет (§103), не «0 ₽». Ключа нет — старый сервер.
+   */
+  price?: string | null;
   /**
    * C7.3 payment read model — present only when the event stream
    * produced a mirror row (hold signal or a payment.* event).
@@ -313,10 +858,19 @@ export const rescheduleBookingRequest = (
     body: JSON.stringify(body),
   });
 
+/**
+ * DRF-2561 — на пути Ayla откладывать кандидата некуда: подтверждение
+ * приносит время само, поэтому шлёт то же тело, что и запрос. Локальный
+ * путь тело подтверждения не читает.
+ */
 export const rescheduleBookingConfirm = (
   id: string,
+  body: { new_master_id: string; new_service_id: string; new_visit_at: string },
 ): Promise<{ old_booking: BookingItem; new_booking: BookingItem }> =>
-  request(`/bookings/${id}/reschedule/confirm`, { method: "POST" });
+  request(`/bookings/${id}/reschedule/confirm`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
 
 // --- profile (Phase 3 / F4) ---
 export interface Preferences {
@@ -375,3 +929,16 @@ export const submitFeedback = (
     method: "POST",
     body: JSON.stringify(body),
   });
+
+/** Журнал вместо экрана: серверный `detail` нужен нам, а не человеку.
+ *
+ * DRF-2446 убрал его с общего хвоста ошибки, DRF-2451 — с экранов, у
+ * которых уже была согласованная фраза. Чтобы диагностика не пропала
+ * вместе с показом, `detail` пишется здесь, в одном месте на клиент: так
+ * не нужно ставить строку журнала на каждый из двадцати пяти экранов, и
+ * следующему не придётся возвращать `detail` на экран, «чтобы было видно».
+ */
+export function logApiDetail(status: number, slug: string, detail: string): void {
+  if (!detail) return;
+  console.warn(`[api-detail] ${status} ${slug}: ${detail}`);
+}

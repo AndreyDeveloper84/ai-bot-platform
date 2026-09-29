@@ -88,14 +88,39 @@ class PersonalField:
 
 #: Slots the owner's ruling of 2026-08-24 (decision 3) names as a salon's
 #: own observation, which therefore never follow the person out — even
-#: when the person stated them out loud. The ruling's third item,
+#: when the person stated them out loud. Canonical text:
+#: ``docs/OD_MEMORY.md`` §3 «Переход между салонами — только самосообщённое».
+#: The ruling's third item,
 #: ``skin_sensitivities``, has no slot in this repository: it is a column
 #: on the backend's ``users.UserPersonalContext`` and is invisible from
 #: here (see the guard's KNOWN LIMITATIONS).
+#:
+#: DRF-2544: the ruling also names the mechanism — ``source_tenant_id``
+#: «проверяемым при чтении». The WRITE half is built: every MemoryEntry gets
+#: its origin at write time (``apps.identity.services.memory_origin``). The
+#: READ half is not, because no reader assembles memory FOR a tenant today
+#: (every prompt that carries personal memory is the global surface, and the
+#: global surface is not a salon). ``apps/identity/tests/test_never_crosses_readers_2544.py``
+#: turns red the day such a reader appears, naming these keys AND
+#: :data:`UNKNOWN_ORIGIN_NEVER_CROSSES` — that reader must obey both.
 NEVER_CROSSES: frozenset[str] = frozenset(
     {
         "memory_key:favorite_masters",
     }
+)
+
+
+#: DRF-2544 — обязательство первому читателю, который соберёт память ДЛЯ
+#: салона. Запись с ``source_tenant_id`` = ``memory_origin.ORIGIN_UNKNOWN``
+#: (NULL) в чужой салон НЕ переходит: происхождение неизвестно, значит
+#: «сказано здесь же» не доказано. Так лежат все записи до DRF-2544 (на
+#: стенде 28.09 — пять из пяти) и всё, что запишет путь, не объявивший ни
+#: салон, ни глобальную поверхность. Выбор — самый безопасный из трёх
+#: (глобальные / салонные / неизвестные), совет главного окна 28.09.
+#: Глобальный факт отличим: он несёт id сентинела ``global_bot``.
+UNKNOWN_ORIGIN_NEVER_CROSSES: str = (
+    "source_tenant_id IS NULL means origin unknown: a salon-scoped reader "
+    "treats such a row as another salon's fact and does not show it"
 )
 
 
@@ -107,15 +132,21 @@ NEVER_CROSSES: frozenset[str] = frozenset(
 #: baseline is a way of not looking at them.
 POLICY_DEBT: Mapping[str, str] = {
     "memory_key:favorite_masters": (
-        "The person names a master out loud, so «сказал сам» would let it "
-        "travel — but the ruling of 2026-08-24 overrides that for masters "
-        "specifically: a favourite master is a relationship with one salon, "
-        "and salon B learning it is salon A's commercial observation leaking. "
-        "Today it travels: apps/persona/memory_extract.py:396 writes it as a "
-        "green MemoryEntry and apps/identity/services/memory_reader.py:100 "
-        "reads green rows by user_id with no tenant predicate. Fixing it is a "
-        "read-path change (source_tenant_id stops being informational), which "
-        "is not this change."
+        "The ruling of 2026-08-24 makes a favourite master a relationship with "
+        "one salon: salon B must not learn it, even when the person said it. "
+        "What is NOT debt any more: the global surface knowing it. Owner "
+        "decision 2026-09-28 (docs/OWNER_DECISIONS_2026-09-28.md п. 12): «Пользователь "
+        "сам отметил мастера любимым → Ayla может это знать. Передаём имя "
+        "мастера, а не внутренний ID»; the global surface is not a salon. "
+        "Measured 28.09 (DRF-2544): what reaches the prompt is only the stated "
+        "fact, as a NAME (apps/persona/memory_surface.py «называешь любимым "
+        "мастером «…»»); the catalog's inferred UUID list is kept out "
+        "(apps/orchestrator/memory_block.py DECLARED_KEYS_NOT_IN_PROMPT, DRF-2553). "
+        "What remains is the salon half: the row lives in a store read by "
+        "user_id, and the tenant predicate is not built because no salon-scoped "
+        "reader exists. Since DRF-2544 source_tenant_id is written honestly, and "
+        "apps/identity/tests/test_never_crosses_readers_2544.py turns red when "
+        "the first such reader appears. That reader closes this line."
     ),
     "identity.UserPersonalContext.summary": (
         "Ayla's running prose summary of who the user is — INFERRED by "
@@ -212,14 +243,19 @@ PERSONAL_FIELDS: tuple[PersonalField, ...] = (
     ),
     PersonalField(
         site="identity.BotUser.timezone",
-        origin="SYSTEM",
+        origin="USER_STATED",
         owner="BOT",
         crosses_salons=False,
         why=(
-            "IANA zone for rendering times in messages. No runtime path "
-            "writes it today (it is only read, at "
-            "apps/identity/services/profile.py:96) — a personal slot standing "
-            "at its default."
+            "IANA-пояс человека для отрисовки времени в сообщениях. "
+            "Происхождение сменилось с SYSTEM на USER_STATED (DRF-1477): "
+            "здесь стояло «no runtime path writes it today — a personal slot "
+            "standing at its default», и это перестало быть правдой. Экран "
+            "профиля определяет пояс браузером, ПОКАЗЫВАЕТ его человеку "
+            "видимым значением и записывает только по подтверждению, через "
+            "`PATCH /me`. Значение с этого момента — ответ человека, а не "
+            "умолчание колонки: пусто означает «не задано» (DRF-1606), и "
+            "непустое означает, что его назвали."
         ),
     ),
     # -----------------------------------------------------------------
@@ -603,6 +639,29 @@ PERSONAL_FIELDS: tuple[PersonalField, ...] = (
             "contract wants. See POLICY_DEBT — it must not cross, and does."
         ),
     ),
+    PersonalField(
+        site="memory_key:city",
+        origin="USER_STATED",
+        owner="BOT",
+        crosses_salons=True,
+        why=(
+            "The city the person named while asking for masters — written only "
+            "when the search city is in the person's own words and is a city we "
+            "serve (apps/orchestrator/said_memory.py). Where the person looks, not "
+            "a relationship with one salon, so crossing salons is the point."
+        ),
+    ),
+    PersonalField(
+        site="memory_key:visit_context",
+        origin="USER_STATED",
+        owner="BOT",
+        crosses_salons=True,
+        why=(
+            "«after work / evening / weekend» from a want-to-come sentence, closed "
+            "vocabulary; a clause with any health meaning yields nothing and "
+            "answers to screening questions are never read (DRF-1729)."
+        ),
+    ),
 )
 
 
@@ -617,12 +676,36 @@ NOT_PERSONAL: Mapping[str, str] = {
     "identity.BotUser.id": "Row identity.",
     "identity.BotUser.tenant": "Scoping — which salon this shell of the person belongs to.",
     "identity.BotUser.ayla_user_id": "Identity bridge to the canonical Ayla user; an address, not a fact.",
+    "identity.BotUser.ayla_user_id_is_proxy": (
+        "A property of that address, not of the person: which sort of Ayla "
+        "account it points at (False real, True Ayla's isolated proxy, NULL "
+        "unknown). It says nothing about who the person is or what they want "
+        "— it tells a consumer whether the address is usable outside Ayla "
+        "(DRF-1649). Same class as ayla_user_id above, and it must travel "
+        "wherever that does, because a key without its sort is what forced "
+        "consumers to guess."
+    ),
     "identity.BotUser.channel": "Routing — which messenger this shell speaks over.",
     "identity.BotUser.channel_user_id": "Routing — the person's id inside that messenger.",
     "identity.BotUser.chat_id": "Routing — where outbound sends land. Decides where, never what.",
     "identity.BotUser.first_seen": "Row bookkeeping.",
     "identity.BotUser.last_seen": "Row bookkeeping; activity recency for the profile is a separate derived field.",
     "identity.BotUser.welcomed_at": "Onboarding bookkeeping — whether S1 welcome already ran.",
+    # Owner 11.09 §2 (DRF-1700, S2-1). Three columns about the RELATIONSHIP's
+    # standing with Ayla, not about the person: whether this salon shell was
+    # matched to the client contour (by identifiers, never by name), where
+    # the relationship came from, and when that was decided. They carry no
+    # fact anyone told us; a SHADOW is what a reader must refuse to enrich
+    # (§2.4), and that refusal is the point of the column.
+    "identity.BotUser.customer_status": (
+        "§2 standing of this shell — UNRESOLVED / LINKED / SHADOW. A verdict "
+        "of the matching rule over identifiers, not a fact about the person."
+    ),
+    "identity.BotUser.customer_source": (
+        "§2.3 provenance of the relationship — client bot or salon assistant. "
+        "Which door the shell came through, not who came through it."
+    ),
+    "identity.BotUser.customer_status_at": "When customer_status was decided; NULL while UNRESOLVED.",
     "identity.BotUser.consent_at": (
         "A permission record, not a fact about the person. Note DRF-1314: it "
         "answers «ever consented», never «may we write to them», and is "
@@ -630,6 +713,22 @@ NOT_PERSONAL: Mapping[str, str] = {
     ),
     "identity.BotUser.food_scanner_consent_at": "Permission record for the food scanner surface.",
     "identity.BotUser.deleted_at": "Erasure bookkeeping — when deletion was requested.",
+    "identity.BotUser.blocked_at": (
+        "Block bookkeeping (DRF-1497) — when an admin blocked the person. It "
+        "decides only whether outbound sends are delivered, never what they say."
+    ),
+    "identity.BotUser.blocked_reason": (
+        "Block bookkeeping — the reason the admin typed. Shown back to staff, "
+        "never fed into what Ayla says to the person."
+    ),
+    "identity.BotUser.blocked_by_username": (
+        "Block bookkeeping — which admin account blocked. Audit duplicate, not a "
+        "fact about the person."
+    ),
+    "identity.BotUser.block_notice_at": (
+        "Block bookkeeping (DRF-2276) — when the block notice was last said to "
+        "this row; the «once per episode» stamp, not a fact about the person."
+    ),
     # identity.UserPreferences
     "identity.UserPreferences.bot_user": "Row identity — the person this row is.",
     "identity.UserPreferences.tenant": "Scoping.",
@@ -645,6 +744,14 @@ NOT_PERSONAL: Mapping[str, str] = {
     "identity.UserPersonalContext.updated_at": "Row bookkeeping.",
     "identity.UserPersonalContext.soft_deleted_at": "Erasure bookkeeping — the forget-all tombstone.",
     "identity.UserPersonalContext.forget_all_requested_at": "Erasure bookkeeping — when the person asked.",
+    "identity.UserPersonalContext.deletion_requested_at": (
+        "Erasure bookkeeping (DRF-1699 D2) — when the account-deletion request was accepted; "
+        "the personalisation stop-gate reads it."
+    ),
+    "identity.UserPersonalContext.deletion_request_id": (
+        "Erasure bookkeeping (DRF-1699 D2) — the catalog DeletionRequest number the person saw; "
+        "named in every refusal."
+    ),
     # loyalty.LoyaltyAccount
     "loyalty.LoyaltyAccount.id": "Row identity.",
     "loyalty.LoyaltyAccount.tenant": "Scoping.",

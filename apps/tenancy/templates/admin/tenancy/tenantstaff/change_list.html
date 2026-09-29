@@ -1,0 +1,12 @@
+{% extends "admin/change_list.html" %}
+{% load i18n %}
+{# DRF-2082: выдача роли — своя страница (get_urls), не форма модели: строку пишет сервис. #}
+
+{% block object-tools-items %}
+  {{ block.super }}
+  {% if perms.tenancy.platform_operations %}
+  <li>
+    <a href="grant/" class="addlink">Выдать роль в салоне</a>
+  </li>
+  {% endif %}
+{% endblock %}

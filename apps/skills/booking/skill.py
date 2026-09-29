@@ -35,6 +35,38 @@ the Ayla REST path reads the RESOLVED per-edge
 from Ayla's escalate-only OR of template floor → salon service →
 specialist. Unknown → gate closed.
 
+**DRF-1545 (owner, 06.09.2026 — ``docs/OPEN_DECISIONS.md`` §36).** Two
+things are settled here and are not tuning knobs:
+
+* **No salon can switch the gate off.** The per-tenant allowlist
+  ``BOOKING_HEALTH_CHECK_GATE_DISABLED_TENANTS`` is gone as a mechanism.
+  The duty to ask belongs to the procedure, not to the venue.
+* **A gate that fires hands the person to a human — it does not ask.**
+  The gate is one boolean; it never reads the contraindication text, and
+  on 06.09.2026 not one of 265 mirrored services had any. Asking "any
+  contraindications?" with nothing behind it buys a tick-box, not a
+  safety check — «видимость защиты, а не защита».
+
+  This is not a special case invented for the health gate. It is the
+  conversation canon's general admission rule (v1.1 §8, read in
+  ``docs/OPEN_DECISIONS.md`` §40.2 п.1): **a question is permitted only
+  when the answer can change admissibility, ranking, or a required
+  execution parameter.** With no text to ask about and no branch the
+  answer could move, the question is not merely useless — it is not
+  admissible. Handing over is what the rule leaves.
+
+  The handover is the escalation that already exists (DRF-1015):
+  ``should_handoff=True`` → ``_dispatch_skill_handoff`` →
+  ``apps.handoff.services.create_admin_task`` → the operator queue, the
+  ``HUMAN_HANDOFF`` flip and its silence notices. Canon §40.3 (а)
+  forbids building a second one, and ``task_type`` must stay
+  ``HANDOFF``: ``orchestrator.handoff.global_handoff_muted`` filters on
+  it, so any other type would silently drop the cross-dialog mute the
+  person depends on (DRF-1486).
+
+  The handoff log line records whether contraindication text existed, so
+  the day Ayla starts sending it shows up instead of being guessed at.
+
 Scope, stated plainly: this is the conversational channel's routing
 policy, not a platform-wide interlock. No other booking entry point
 reads the flag.
@@ -97,6 +129,7 @@ from apps.bookings.pending_actions import (
 )
 from apps.events.services import emit
 from apps.events.vocabulary import BOOKING_FLOW_STATE_WRITE_FAILED, SKILL_DISPATCHED
+from apps.integrations.ayla.health_check import HANDOFF_TEXT
 from apps.integrations.yclients import YClientsAPIError, YClientsUnavailableError
 from apps.llm.protocol import CompletionResult, LLMError, ToolCall
 from apps.persona.voice import DEFAULT_SALON_PERSONA
@@ -121,6 +154,7 @@ from apps.orchestrator.time_preference import (
     part_of_iso_datetime,
     resolve_date,
 )
+from apps.integrations.ayla.offer_refusal import OFFER_NOT_SELLABLE_SLUG, client_text_for
 from apps.skills.booking.provider import YClientsScheduleUnavailableError
 from apps.skills.booking.prompts import BrandVoiceConfig, build_booking_prompt
 from apps.skills.booking.tools import (
@@ -139,6 +173,7 @@ from apps.skills.booking.tools import (
     _booking_via_ayla,
     _coerce_id,
     _format_confirm_preview,
+    _salon_address_line,
     _id_key,
     _to_slot_candidate,
     build_master_lookup,
@@ -177,9 +212,15 @@ _FALLBACK_HANDOFF_TEXT = "Не получилось оформить запис�
 # DRF-1005 §3.3: the health-check handoff is a POLICY (the service needs a
 # consultation before booking), not a failure — the generic failure text
 # above would mislead the user into thinking something broke.
-_HEALTH_CHECK_HANDOFF_TEXT = (
-    "Для этой услуги нужна консультация — передаю менеджеру, он поможет с записью."
-)
+#
+# DRF-1614 / §98: the sentence itself now comes from the shared module.
+# It used to read «Для этой услуги нужна консультация — передаю менеджеру,
+# он поможет с записью.» — same meaning, different words from the other
+# two surfaces. §98 requires all three (Mini App, admin console, internal
+# REST) to say ONE calm sentence, and one sentence cannot live in three
+# files. The local name is kept so the two call sites below read the same
+# as before.
+_HEALTH_CHECK_HANDOFF_TEXT = HANDOFF_TEXT
 
 # Deterministic prompt shown when the master-cards keyboard is sent.
 # Buttons carry the data — text only frames the choice. Kept short
@@ -192,6 +233,19 @@ _SLOT_PICK_PROMPT = "Выберите время:"
 
 # Date picker — shown after master pick, before slot listing.
 _DATE_PICK_PROMPT = "Выберите дату:"
+
+# DRF-1474 — the SAME picker, expanded. Live pilot 04.09:
+#
+#     12:15:13  бот  Выберите дату:          [Сегодня · Завтра · 7 сен · Выбрать дату]
+#     12:15:17  бот  Выберите дату:          [Сегодня … 17 сен — двенадцать кнопок]
+#
+# The owner read that as the bot saying the same thing twice, four seconds
+# apart, and it is hard to read any other way: nothing was sent twice — the
+# person tapped «Выбрать дату» and the expansion re-used the collapsed
+# picker's header, so the only thing that changed was a keyboard the
+# transcript does not show. A second message must not be able to arrive
+# wearing the first one's words; the header now says which of the two it is.
+_DATE_PICK_ALL_PROMPT = "Все свободные даты:"
 _DATE_PICKER_FALLBACK_NO_DATES = "У выбранного мастера нет свободных дат в ближайшее время."
 
 # ── DRF-1325: the human-time half of the flow ─────────────────────────────
@@ -208,6 +262,16 @@ _PART_PICK_PROMPT = "Когда удобно {day}?"
 _PART_SLOT_PROMPT = "{day}, {part} — выберите время:"
 _HEARD_SLOT_PROMPT = "Вы просили {heard} — вот что есть:"
 _DAY_UNAVAILABLE_PROMPT = "На {day} у мастера свободного времени нет. Вот ближайшие дни:"
+# DRF-1490 — the same sentence, for the case where there is nothing to put
+# under it. «Вот ближайшие дни:» ends in a colon and promises a list; a
+# message that ends on that colon with no keyboard is the bot pointing at
+# something that is not there. When the schedule read comes back with no
+# other free day (or does not come back at all), the reply has to stop
+# promising instead of promising and not delivering.
+_DAY_UNAVAILABLE_NO_DATES = (
+    "На {day} у мастера свободного времени нет, "
+    "других свободных дней у него сейчас не вижу. Выберите другого мастера."
+)
 _PART_UNAVAILABLE_PROMPT = "{day} {part} у мастера свободного времени нет. Есть так:"
 _PART_EMPTY_PROMPT = "Свободного времени на {part} в этот день нет. Вот весь день:"
 
@@ -226,18 +290,86 @@ _LABEL_PICK_DATE = "Выбрать дату"
 # is what the full picker already is.
 _MAX_DAY_CHIPS = 3
 
-# pick_slot deterministic short-circuit (RB1.1-D05) — safe local replies.
-# Stale/invalid callback context never reaches the backend; the user is
-# asked to restart the service selection instead.
+# ── Deterministic booking-callback refusals (DRF-1473) ────────────────────
+#
+# The guard below is right to refuse an incomplete tap; what it was wrong
+# about was WHY. Every refusal on this path used to answer «Контекст записи
+# устарел», whatever had actually happened, and three of the four things that
+# reach it have nothing to do with time. On 04.09.2026 the owner tapped a slot
+# ELEVEN SECONDS after it was drawn and was told his context had expired; the
+# real cause was a specialist roster truncated at page 1 of a paginated feed
+# (fixed in ``apps.integrations.ayla.booking_client.get_masters``). The lie
+# cost twice: the person could not tell what to do next, and the engineer
+# reading the journal was sent to look at expiry windows.
+#
+# So the refusals are split by cause, in the text AND in the log, and each
+# text says only what is true of its own branch:
+#
+# * ``_STALE_CONTEXT_TEXT`` — something genuinely ran out of time. The ONLY
+#   branch that may say «устарел»: a tapped slot that is now in the past.
+# * ``_BROKEN_CALLBACK_TEXT`` — the payload did not carry what the step
+#   needs (no service id, unparsable id, malformed datetime). Nothing
+#   expired; the button itself is unusable.
+# * ``_CONTEXT_GONE_TEXT`` — the payload parsed fine, but the master or the
+#   service it names is not in the tenant's live data. Either the salon
+#   changed under the keyboard, or — the pilot's case — the flow could not
+#   see the whole roster.
+#
+# Every one of them exits through :func:`_refuse_callback`, which is what
+# guarantees the journal line and the user's line agree.
 _STALE_CONTEXT_TEXT = "Контекст записи устарел. Начните выбор услуги заново."
+_BROKEN_CALLBACK_TEXT = (
+    "Эта кнопка пришла без части данных — не вижу, что было выбрано. "
+    "Выберите услугу ещё раз, пожалуйста."
+)
+_CONTEXT_GONE_TEXT = (
+    "Не нахожу этого мастера или эту услугу в расписании салона. Выберите услугу заново."
+)
 _SLOT_TAKEN_PROMPT = "Это время уже занято. Выберите другое:"
 _SLOT_TAKEN_NO_ALTERNATIVES = (
-    "Это время уже занято, и на эту дату свободных слотов больше нет. Выберите другую дату."
+    "Это время уже занято, и на эту дату свободного времени больше нет. Выберите другую дату:"
+)
+# DRF-1490 / OPEN_DECISIONS §25 п.5 — «выберите другую дату» without a date
+# picker is an instruction the person cannot follow: the free-text branch of
+# the flow does not know which master they were on. The line above now ships
+# with the picker; this one is what is said when the master genuinely has no
+# other free day, and it names a step that exists.
+_SLOT_TAKEN_NO_DATES = (
+    "Это время уже занято, и других свободных дат у этого мастера сейчас не вижу. "
+    "Выберите другого мастера."
 )
 
 # How many dates to render in the picker. YClients usually returns
 # a 30-day window; trimming keeps the keyboard tappable on mobile.
 _MAX_DATE_BUTTONS = 14
+
+# ── DRF-1490: the same ceiling, for slots ─────────────────────────────────
+#
+# The date picker has had a cap since it was written; the slot picker never
+# did. It renders one row per slot with no upper bound, and the only thing
+# standing between it and MAX's hard limit of 29 rows
+# (``apps.channels.max.outbound.MAX_KEYBOARD_ROWS``) is a truncation that
+# happens on the transport: the tail is dropped, one WARNING is logged, and
+# the person is shown a keyboard that looks complete. They cannot tell that
+# slots were withheld, so they read the list as «это всё, что есть» — the
+# bot lying by omission about a salon's availability.
+#
+# 24 is a full twelve-hour day at half-hour granularity (09:00–21:00), i.e.
+# every list a normal salon day produces still renders whole. It bites where
+# the transport cap used to: fifteen-minute grids, where an unfiltered day
+# is 40-48 rows. And it leaves five rows of headroom under MAX's 29, so a
+# capped keyboard can never reach the limit that drops the message wholesale.
+#
+# The cap alone would only move the silent truncation one layer up, so it
+# never travels alone: :func:`_slot_pick_reply` appends
+# :data:`_SLOT_OVERFLOW_SUFFIX` whenever it bites, and the person is told
+# both that the list is partial and how to reach the rest.
+_MAX_SLOT_BUTTONS = 24
+
+_SLOT_OVERFLOW_SUFFIX = (
+    "\n\nПоказываю первые {shown} из {total}. "
+    "Если нужного времени в списке нет — напишите, во сколько вам удобно."
+)
 
 # E0#1 Variant A (founder verdict 2026-06-02) — cap on pre-injected
 # master roster size. Pilot salons have 5-15 masters; larger tenants
@@ -269,8 +401,17 @@ _FLOW_ABORT_REPLIES = {
 # Audit / event slugs.
 EVENT_BOOKING_HANDLED = "booking.handled"
 EVENT_BOOKING_HANDOFF = "booking.handoff"
-# DRF-1005: owner-required trace for every evaluation where the pilot
-# allowlist disabled the health-check gate for a tenant.
+# DRF-1005: owner-required trace for every evaluation where something
+# disabled the health-check gate for a tenant — "отключение медицинской
+# проверки должно быть прослеживаемым, а не невидимым".
+#
+# DRF-1545 removed the only thing that could disable it, so nothing writes
+# this action today and no booking path may start writing one without a
+# switch to name. The slug is kept deliberately: the requirement that a
+# disabling be auditable outlives the switch that was audited, and a future
+# override that appears without this row would be exactly the invisible
+# disabling the owner ruled out. ``TestHealthGateNoTenantOverride`` guards
+# both halves — the name survives, no writer does.
 EVENT_BOOKING_HEALTH_GATE_DISABLED = "booking.health_check_gate_disabled"
 
 
@@ -506,11 +647,13 @@ class BookingSkill:
                     confidence=None,
                 )
             if service_id is None:
-                return _build_skill_result(
-                    text=_STALE_CONTEXT_TEXT,
-                    tool_calls_made=[],
-                    confidence=_CONFIDENCE_OK,
+                return _refuse_callback(
+                    step="pick_master",
+                    reason=REFUSAL_MALFORMED_CALLBACK,
+                    text=_BROKEN_CALLBACK_TEXT,
+                    detail=f"field=service_id raw={raw_payload!r}",
                 )
+            # CD §69 (DRF-2265): запись, начатая в боте, в боте и заканчивается — не уводить в приложение.
             return _render_date_picker(
                 master_id=master_id,
                 service_id=service_id,
@@ -530,11 +673,11 @@ class BookingSkill:
             master_id = _coerce_id(raw_master)
             service_id = _coerce_id(raw_service)
             if master_id is None or service_id is None:
-                logger.warning("booking.more_dates.bad_payload raw=%r", payload)
-                return _build_skill_result(
-                    text=_STALE_CONTEXT_TEXT,
-                    tool_calls_made=[],
-                    confidence=_CONFIDENCE_OK,
+                return _refuse_callback(
+                    step="more_dates",
+                    reason=REFUSAL_MALFORMED_CALLBACK,
+                    text=_BROKEN_CALLBACK_TEXT,
+                    detail=f"raw={payload!r}",
                 )
             return _render_date_picker(
                 master_id=master_id,
@@ -597,10 +740,11 @@ class BookingSkill:
                     confidence=None,
                 )
             if service_id is None:
-                return _build_skill_result(
-                    text=_STALE_CONTEXT_TEXT,
-                    tool_calls_made=[],
-                    confidence=_CONFIDENCE_OK,
+                return _refuse_callback(
+                    step="pick_date",
+                    reason=REFUSAL_MALFORMED_CALLBACK,
+                    text=_BROKEN_CALLBACK_TEXT,
+                    detail=f"field=service_id raw={payload!r}",
                 )
             return _render_part_picker(
                 master_id=master_id,
@@ -623,20 +767,20 @@ class BookingSkill:
             try:
                 raw_master, raw_date, raw_part, raw_service = payload.split(":", 3)
             except (TypeError, ValueError):
-                logger.warning("booking.pick_part.bad_payload raw=%r", payload)
-                return _build_skill_result(
-                    text=_STALE_CONTEXT_TEXT,
-                    tool_calls_made=[],
-                    confidence=_CONFIDENCE_OK,
+                return _refuse_callback(
+                    step="pick_part",
+                    reason=REFUSAL_MALFORMED_CALLBACK,
+                    text=_BROKEN_CALLBACK_TEXT,
+                    detail=f"field=shape raw={payload!r}",
                 )
             master_id = _coerce_id(raw_master)
             service_id = _coerce_id(raw_service)
             if master_id is None or service_id is None:
-                logger.warning("booking.pick_part.bad_payload raw=%r", payload)
-                return _build_skill_result(
-                    text=_STALE_CONTEXT_TEXT,
-                    tool_calls_made=[],
-                    confidence=_CONFIDENCE_OK,
+                return _refuse_callback(
+                    step="pick_part",
+                    reason=REFUSAL_MALFORMED_CALLBACK,
+                    text=_BROKEN_CALLBACK_TEXT,
+                    detail=f"field=ids raw={payload!r}",
                 )
             part_filter = raw_part if raw_part in PART_ORDER else None
             first = CompletionResult(
@@ -802,7 +946,9 @@ class BookingSkill:
 
         # DRF-997: transient schedule-service outage is surfaced as a
         # deterministic retry message. Do NOT hand off to a manager.
-        if tool_result.error == "schedule_unavailable":
+        # DRF-1989: непродаваемое предложение — тоже детерминированный ответ
+        # своими словами: не передача менеджеру и не перефраз моделью.
+        if tool_result.error in {"schedule_unavailable", OFFER_NOT_SELLABLE_SLUG}:
             return _build_skill_result(
                 text=tool_result.text,
                 tool_calls_made=tool_calls_made,
@@ -879,25 +1025,19 @@ class BookingSkill:
             slots = tool_result.slots
             narrowed = _slots_in_part(slots, part_filter) if part_filter else slots
             if part_filter and not narrowed:
-                return _build_skill_result(
+                return _slot_pick_reply(
                     text=_PART_EMPTY_PROMPT.format(part=PART_CHIP_LABELS[part_filter].lower()),
-                    tool_calls_made=tool_calls_made,
-                    confidence=_CONFIDENCE_OK,
-                    action_data=_action_data_for_slot_pick(
-                        slots,
-                        master_id=master_id,
-                        service_id=service_id,
-                    ),
-                )
-            return _build_skill_result(
-                text=_SLOT_PICK_PROMPT,
-                tool_calls_made=tool_calls_made,
-                confidence=_CONFIDENCE_OK,
-                action_data=_action_data_for_slot_pick(
-                    narrowed,
+                    slots=slots,
                     master_id=master_id,
                     service_id=service_id,
-                ),
+                    tool_calls_made=tool_calls_made,
+                )
+            return _slot_pick_reply(
+                text=_SLOT_PICK_PROMPT,
+                slots=narrowed,
+                master_id=master_id,
+                service_id=service_id,
+                tool_calls_made=tool_calls_made,
             )
 
         # Health-check gate — only relevant for confirm_booking.
@@ -906,16 +1046,37 @@ class BookingSkill:
             # DRF-1353: the resolved verdict is per (master × service), so the
             # master the LLM grounded must travel with the service id.
             gate_master_id = _coerce_id(first_call.arguments.get("master_id"))
+            offer_reason = (
+                _offer_refusal_for_edge(tenant, gate_master_id, service_id)
+                if service_id is not None
+                else None
+            )
+            if offer_reason is not None:
+                # DRF-1989: непродаваемое ребро — отказ с причиной до ворот
+                # здоровья: «консультация» по предложению, которое нельзя
+                # купить, была бы обещанием, которого никто не выполнит.
+                return _build_skill_result(
+                    text=client_text_for(offer_reason),
+                    tool_calls_made=tool_calls_made,
+                    confidence=_CONFIDENCE_OK,
+                )
             if service_id is not None and _service_requires_health_check(
                 tenant, service_id, gate_master_id
             ):
                 # DRF-1005: this branch used to hand off without a single
                 # log line — log the policy decision, and use the policy
                 # text (consultation), not the failure fallback.
+                #
+                # DRF-1545: hand the person over, never ask a hollow
+                # question. ``contraindications`` is logged, not consulted
+                # — the escalation is unconditional either way, and the
+                # field is what will show the day Ayla starts sending it.
                 logger.info(
-                    "booking.confirm.health_check_required tenant=%s service=%s",
+                    "booking.confirm.health_check_required tenant=%s service=%s "
+                    "contraindications=%s",
                     tenant_id,
                     service_id,
+                    "present" if _has_contraindication_text(tenant, service_id) else "absent",
                 )
                 return _handoff(
                     tool_calls_made=tool_calls_made,
@@ -1096,6 +1257,9 @@ def _dispatch_tool(
         # user as a retry message, not a manager handoff.
         if result.error == "schedule_unavailable":
             return result, ""
+        if result.error == OFFER_NOT_SELLABLE_SLUG:
+            # DRF-1989: именованный отказ со своими словами — не передача.
+            return result, ""
         if result.error in {"yclients_unavailable", "yclients_api_error"}:
             return result, "booking_yclients_failure"
         if result.error:
@@ -1215,40 +1379,71 @@ def _fetch_master_lookup(yclients: Any) -> dict[int | str, str]:
 # ---------------------------------------------------------------------------
 
 
-def _health_check_gate_disabled_for_tenant() -> bool:
-    """DRF-1005: True when the ACTIVE tenant is in the pilot allowlist.
+def _has_contraindication_text(tenant: Any, service_id: int | str) -> bool:
+    """Whether the mirrored service carries any contraindication TEXT.
 
-    The tenant identity comes from the active ``tenant_scope`` (same
-    lazy-import pattern as ``apps/integrations/ayla/booking_client.py``,
-    DRF-997/1004) — never from caller-supplied data.
+    DRF-1545 / ``docs/OPEN_DECISIONS.md`` §36. Observability only — this
+    never decides anything. The gate is one boolean and reads no text;
+    on 06.09.2026 all 265 mirrored services had an empty
+    ``contraindications`` column, which is precisely why a gated booking
+    is handed to a human instead of being covered with a generic "any
+    contraindications?" question the bot could not follow up on.
 
-    Fail-closed on every doubt: no tenant in scope, or a malformed
-    setting value injected past settings load (``override_settings`` /
-    live reload), keeps the gate CLOSED. A malformed value can never
-    silently widen access, and a settings-load-time malformed value never
-    boots at all (``config/settings/base.py`` raises
-    ``ImproperlyConfigured``).
+    The value is logged at the handoff so the day Ayla starts sending the
+    text is visible in the logs rather than guessed at. Any doubt reads
+    as "absent": no row, an id that names nothing, a catalog that is not
+    importable. Absent is the status quo and the safe answer, since both
+    answers lead to the same handoff.
     """
-    from django.conf import settings
-
-    from apps.eventbus.ingest_allowlist import (
-        AllowlistConfigurationError,
-        parse_tenant_allowlist,
-    )
-    from apps.tenancy.context import current_tenant
-
-    tenant = current_tenant()
-    if tenant is None:
-        return False
-    raw: Any = getattr(settings, "BOOKING_HEALTH_CHECK_GATE_DISABLED_TENANTS", frozenset())
     try:
-        allowed = parse_tenant_allowlist(
-            raw, setting_name="BOOKING_HEALTH_CHECK_GATE_DISABLED_TENANTS"
-        )
-    except AllowlistConfigurationError as exc:
-        logger.warning("booking.health_gate.allowlist_malformed err=%s", exc)
+        from apps.catalog.models import CatalogService
+    except ImportError:  # pragma: no cover — catalog always available
         return False
-    return str(tenant.id).lower() in allowed
+    rows = CatalogService.all_tenants.filter(tenant=tenant)
+    try:
+        rows = rows.filter(ayla_service_id=uuid.UUID(str(service_id)))
+    except (ValueError, AttributeError, TypeError):
+        if _booking_via_ayla():
+            # DRF-2630: on the Ayla path a service is its UUID and nothing
+            # else — the legacy int ``external_id`` belongs to the flag-OFF
+            # (YClients) contour, as in the two neighbours
+            # (``_service_requires_health_check``, ``calc_price``). A non-UUID
+            # here is not a service we know: «absent», not a guess by int.
+            return False
+        try:
+            rows = rows.filter(external_id=int(service_id))
+        except (ValueError, TypeError):
+            return False
+    text = rows.values_list("contraindications", flat=True).first()
+    return bool(text and text.strip())
+
+
+def _offer_refusal_for_edge(
+    tenant: Any,
+    master_id: int | str | None,
+    service_id: int | str,
+) -> str | None:
+    """Почему (мастер × услуга) не продаётся, или ``None`` (DRF-1989).
+
+    То же зеркальное ребро, что у ворот здоровья, но через предикат
+    продаваемости. ``None`` — продаётся, ребра нет или id не читается: тогда
+    решают прежние ворота, как до DRF-1989.
+    """
+    if master_id is None:
+        return None
+    try:
+        master_key = uuid.UUID(str(master_id))
+        service_key = uuid.UUID(str(service_id))
+    except (ValueError, AttributeError, TypeError):
+        return None
+    from apps.catalog.models import MasterService
+
+    edge = MasterService.all_tenants.filter(
+        tenant=tenant, master_id=master_key, service__ayla_service_id=service_key
+    )
+    if edge.sellable().exists() or not edge.exists():
+        return None
+    return edge.values_list("unsellable_reason", flat=True).first() or "unknown"
 
 
 def _resolved_health_check_for_edge(
@@ -1318,16 +1513,22 @@ def _service_requires_health_check(
     source that #1034/#1121 called missing now exists and is mirrored:
     ``MasterService.resolved_requires_health_check``. Precedence:
 
-    1. **The resolved verdict wins, in both directions.** ``True`` gates,
-       ``False`` opens. It wins over the DRF-1005 allowlist too — an
-       allowlisted tenant must not be able to book a service Ayla says
-       needs screening. That ordering is a tightening, not a loosening:
-       before DRF-1353 the single allowlisted pilot tenant was the one
-       tenant for which the gate could never fire at all.
-    2. **Unknown (``None``) falls back to the DRF-1005 allowlist**, which
-       keeps its original job: unblock a pilot tenant whose edges are not
-       mirrored (operator-owned MM4 rows, sync not yet run).
-    3. **Otherwise fail closed** — unchanged from #1034.
+    1. **The resolved verdict decides, in both directions.** ``True``
+       gates, ``False`` opens.
+    2. **Unknown (``None``) fails closed** — unchanged from #1034.
+       Absence of evidence is not evidence of safety for a medical check.
+
+    **DRF-1545: there is no per-tenant override, by design.** DRF-1005 had
+    one (``BOOKING_HEALTH_CHECK_GATE_DISABLED_TENANTS``, an allowlist of
+    tenants whose unknown edges opened instead of closing) and the owner
+    removed the mechanism outright on 06.09.2026, not merely the one salon
+    on it: "требование расспросить человека принадлежит процедуре, а не
+    площадке" — a salon cannot cancel a contraindication. The measurement
+    that made the removal free is in ``docs/OPEN_DECISIONS.md`` §36: all
+    387 pilot edges carried a synced verdict, so the allowlist (which only
+    ever spoke for UNKNOWN edges) decided nothing on the day it was
+    deleted, and the one salon holding it had no screened service — it
+    would have opened silently the day it got one.
 
     Note what this gate is and is not. No other booking entry point in this
     codebase consults it — ``apps/booking/services/create.py``,
@@ -1348,26 +1549,14 @@ def _service_requires_health_check(
                 resolved,
             )
             return bool(resolved)
-        if _health_check_gate_disabled_for_tenant():
-            # DRF-1005: owner-mandated audit trail — disabling a medical
-            # screening check must be traceable, never invisible.
-            logger.info(
-                "booking.health_check_gate.disabled tenant=%s service=%s",
-                getattr(tenant, "id", "?"),
-                service_id,
-            )
-            write_audit(
-                EVENT_BOOKING_HEALTH_GATE_DISABLED,
-                target="BookingSkill",
-                payload={
-                    "tenant_id": str(getattr(tenant, "id", "")),
-                    "service_id": str(service_id),
-                    "master_id": str(master_id or ""),
-                    "reason": "resolved_flag_unknown",
-                },
-            )
-            return False
-        # Edge not mirrored and tenant not allowlisted → fail closed. See #1034.
+        # Edge not mirrored → fail closed. See #1034. Nothing may open it:
+        # DRF-1545 removed the last override that could (see docstring).
+        logger.info(
+            "booking.health_gate.unknown_edge_closed tenant=%s master=%s service=%s",
+            getattr(tenant, "id", "?"),
+            master_id,
+            service_id,
+        )
         return True
 
     try:
@@ -1512,16 +1701,25 @@ def _action_data_for_slot_pick(
 ) -> dict[str, Any]:
     """Build the slot-cards keyboard from a show_slots result.
 
-    One button per slot. Callback carries master, service and slot so
-    the tap can ground confirm_booking deterministically:
+    One button per slot, at most :data:`_MAX_SLOT_BUTTONS` of them. Callback
+    carries master, service and slot so the tap can ground confirm_booking
+    deterministically:
     ``cb:book:pick_slot:<master_id>:<service_id>:<iso_datetime>``.
+
+    DRF-1490 — the cap is enforced HERE, not only in
+    :func:`_slot_pick_reply`, so that no present or future caller can hand
+    the transport a keyboard longer than it accepts. Capping in the builder
+    is what makes the promise structural; :func:`_slot_pick_reply` is what
+    makes it honest, by saying out loud when it bites. Neither is enough
+    alone: a silent cap here is the transport's silent truncation moved one
+    layer up, and a note without a cap is a note nothing enforces.
     """
     buttons = [
         {
             "label": _slot_button_label(s),
             "callback": f"{CALLBACK_BOOK_PICK_SLOT_PREFIX}{master_id}:{service_id}:{s.datetime}",
         }
-        for s in slots
+        for s in slots[:_MAX_SLOT_BUTTONS]
     ]
     return {
         "attachments": [
@@ -1532,6 +1730,108 @@ def _action_data_for_slot_pick(
         ],
         "kind": "slot_pick",
     }
+
+
+def _slot_pick_reply(
+    *,
+    text: str,
+    slots: list,
+    master_id: int | str,
+    service_id: int | str,
+    tool_calls_made: list | None = None,
+) -> SkillResult:
+    """One place where a slot list becomes a reply — text and keyboard together.
+
+    DRF-1490. Every branch that draws slots used to build the keyboard and
+    the sentence above it independently, which is exactly how the two came
+    to disagree: the keyboard was capped downstream by the MAX transport and
+    the sentence went on describing a list that no longer existed. Composing
+    both here makes the overflow note structurally impossible to forget —
+    the caller cannot render a truncated keyboard without the line that
+    admits it.
+
+    Below the cap this is the old behaviour byte for byte: same text, same
+    buttons, no note.
+    """
+    total = len(slots)
+    if total > _MAX_SLOT_BUTTONS:
+        logger.info(
+            "booking.slot_pick.capped master=%s service=%s total=%d shown=%d",
+            master_id,
+            service_id,
+            total,
+            _MAX_SLOT_BUTTONS,
+        )
+        text = text + _SLOT_OVERFLOW_SUFFIX.format(shown=_MAX_SLOT_BUTTONS, total=total)
+    return _build_skill_result(
+        text=text,
+        tool_calls_made=tool_calls_made if tool_calls_made is not None else [],
+        confidence=_CONFIDENCE_OK,
+        action_data=_action_data_for_slot_pick(
+            slots,
+            master_id=master_id,
+            service_id=service_id,
+        ),
+    )
+
+
+def _render_other_dates(
+    *,
+    master_id: int | str,
+    service_id: int | str,
+    exclude_date: str,
+    yclients: Any,
+    tenant: Any,
+    prompt: str,
+    empty_prompt: str,
+    log_slug: str,
+) -> SkillResult:
+    """Answer a dead-ended day with the master's OTHER free days.
+
+    DRF-1490. Two branches end on a day that turned out to hold nothing —
+    a day the user named that the master does not work, and a slot that was
+    taken between the draw and the tap — and both say a sentence that
+    promises a choice of days. Until now neither attached one: the person
+    read «Вот ближайшие дни:» / «Выберите другую дату» and got a message
+    that ended there.
+
+    ``exclude_date`` is the day just found empty. It is dropped from the
+    keyboard because offering it back is a loop: the tap lands on the branch
+    that produced this reply.
+
+    A failed schedule read is not an error page here — the reply about the
+    day is already true and worth sending. It degrades to ``empty_prompt``,
+    which says only what is known («не вижу») and names a step that exists.
+    """
+    try:
+        service_ids = [service_id] if service_id is not None else None
+        dates = yclients.get_available_dates(staff_id=master_id, service_ids=service_ids)
+    except (
+        YClientsScheduleUnavailableError,
+        YClientsAPIError,
+        YClientsUnavailableError,
+    ) as exc:
+        logger.warning("booking.%s.dates_failed master=%s err=%s", log_slug, master_id, exc)
+        dates = []
+    others = [d for d in sorted(dates or []) if d != exclude_date]
+    if not others:
+        return _build_skill_result(
+            text=empty_prompt,
+            tool_calls_made=[],
+            confidence=_CONFIDENCE_OK,
+        )
+    return _build_skill_result(
+        text=prompt,
+        tool_calls_made=[],
+        confidence=_CONFIDENCE_OK,
+        action_data=_action_data_for_date_pick(
+            master_id,
+            others[:_MAX_DATE_BUTTONS],
+            service_id,
+            today=local_today(tenant),
+            collapse=True,
+        ),
+    )
 
 
 # Russian weekday abbreviations for slot button labels.
@@ -1583,8 +1883,11 @@ def _handle_pick_slot_callback(
        the LLM path uses. The ✅ tap then executes through
        :mod:`apps.bookings.callbacks` as usual.
 
-    Invalid/stale context is recovered locally (no handoff, no backend
-    call, no pending row) — the user is asked to restart the selection.
+    A refused tap is recovered locally (no handoff, no backend call, no
+    pending row) — the user is asked to restart the selection. Which
+    refusal it was is now said out loud, in the reply and in the journal
+    both: see :func:`_refuse_callback` and the ``REFUSAL_*`` vocabulary.
+    Only step 5's past-slot branch is allowed to call it «устарел».
     """
     raw_payload = text[len(CALLBACK_BOOK_PICK_SLOT_PREFIX) :].strip()
     parts = raw_payload.split(":", 2)
@@ -1599,19 +1902,31 @@ def _handle_pick_slot_callback(
     master_id = _coerce_id(raw_master)
     service_id = _coerce_id(raw_service)
     if master_id is None or service_id is None or not raw_dt or not _is_iso_datetime(raw_dt):
-        return _build_skill_result(
-            text=_STALE_CONTEXT_TEXT,
-            tool_calls_made=[],
-            confidence=_CONFIDENCE_OK,
+        # Nothing expired here — the button is simply unreadable. Naming
+        # which of the three fields failed is the whole point (DRF-1473).
+        bad = [
+            name
+            for name, ok in (
+                ("master_id", master_id is not None),
+                ("service_id", service_id is not None),
+                ("slot_datetime", bool(raw_dt) and _is_iso_datetime(raw_dt)),
+            )
+            if not ok
+        ]
+        return _refuse_callback(
+            step="pick_slot",
+            reason=REFUSAL_MALFORMED_CALLBACK,
+            text=_BROKEN_CALLBACK_TEXT,
+            detail=f"fields={','.join(bad)} raw={raw_payload!r}",
         )
 
     # Service must exist in the tenant catalog (prefetched in handle()).
     if service_id not in allowed_service_ids:
-        logger.info("booking.pick_slot.unknown_service service=%s", service_id)
-        return _build_skill_result(
-            text=_STALE_CONTEXT_TEXT,
-            tool_calls_made=[],
-            confidence=_CONFIDENCE_OK,
+        return _refuse_callback(
+            step="pick_slot",
+            reason=REFUSAL_UNKNOWN_SERVICE,
+            text=_CONTEXT_GONE_TEXT,
+            detail=f"service={service_id} catalog_size={len(allowed_service_ids)}",
         )
     # Specialist must be on the live tenant roster. One staff fetch feeds
     # both the membership check and the display-name lookup; a provider
@@ -1630,11 +1945,18 @@ def _handle_pick_slot_callback(
     allowed_master_ids = {_id_key(s.id) for s in staff_rows}
     master_lookup = build_master_lookup(staff_rows)
     if master_id not in allowed_master_ids:
-        logger.info("booking.pick_slot.unknown_master master=%s", master_id)
+        return _refuse_callback(
+            step="pick_slot",
+            reason=REFUSAL_UNKNOWN_MASTER,
+            text=_CONTEXT_GONE_TEXT,
+            detail=f"master={master_id} roster_size={len(allowed_master_ids)}",
+        )
+
+    # DRF-1989: непродаваемое ребро — отказ с причиной, до ворот здоровья.
+    offer_reason = _offer_refusal_for_edge(tenant, master_id, service_id)
+    if offer_reason is not None:
         return _build_skill_result(
-            text=_STALE_CONTEXT_TEXT,
-            tool_calls_made=[],
-            confidence=_CONFIDENCE_OK,
+            text=client_text_for(offer_reason), tool_calls_made=[], confidence=_CONFIDENCE_OK
         )
 
     # Health-check gate — same rule as the LLM confirm path: gated
@@ -1642,11 +1964,15 @@ def _handle_pick_slot_callback(
     if _service_requires_health_check(tenant, service_id, master_id):
         # DRF-1005: log the policy decision (this branch used to hand off
         # silently) and use the policy text, not the failure fallback.
+        # DRF-1545: same handover, same reason to log the text — see the
+        # confirm path above.
         logger.info(
-            "booking.pick_slot.health_check_required tenant=%s master=%s service=%s",
+            "booking.pick_slot.health_check_required tenant=%s master=%s service=%s "
+            "contraindications=%s",
             tenant_id,
             master_id,
             service_id,
+            "present" if _has_contraindication_text(tenant, service_id) else "absent",
         )
         return _handoff(
             tool_calls_made=[],
@@ -1662,11 +1988,11 @@ def _handle_pick_slot_callback(
     if tapped_dt.tzinfo is None:
         now = now.replace(tzinfo=None)
     if tapped_dt < now:
-        logger.info("booking.pick_slot.past_slot slot=%s", raw_dt)
-        return _build_skill_result(
+        return _refuse_callback(
+            step="pick_slot",
+            reason=REFUSAL_EXPIRED_SLOT,
             text=_STALE_CONTEXT_TEXT,
-            tool_calls_made=[],
-            confidence=_CONFIDENCE_OK,
+            detail=f"slot={raw_dt} now={now.isoformat()}",
         )
 
     # Duplicate tap on the same slot button: reuse the identical active
@@ -1682,6 +2008,7 @@ def _handle_pick_slot_callback(
         return _skill_result_for_existing_pending(
             existing,
             context=context,
+            tenant=tenant,
             tenant_id=tenant_id,
         )
 
@@ -1714,20 +2041,26 @@ def _handle_pick_slot_callback(
     if not any(_same_slot_instant(c.datetime, raw_dt) for c in slots):
         logger.info("booking.pick_slot.slot_gone master=%s slot=%s", master_id, raw_dt)
         if slots:
-            return _build_skill_result(
+            return _slot_pick_reply(
                 text=_SLOT_TAKEN_PROMPT,
-                tool_calls_made=[],
-                confidence=_CONFIDENCE_OK,
-                action_data=_action_data_for_slot_pick(
-                    slots,
-                    master_id=master_id,
-                    service_id=service_id,
-                ),
+                slots=slots,
+                master_id=master_id,
+                service_id=service_id,
             )
-        return _build_skill_result(
-            text=_SLOT_TAKEN_NO_ALTERNATIVES,
-            tool_calls_made=[],
-            confidence=_CONFIDENCE_OK,
+        # OPEN_DECISIONS §25 п.5 (owner, 04.09.2026) — «выберите другую
+        # дату» has to come with the dates. The old reply ended on that
+        # instruction with no keyboard and no way back to this master's
+        # calendar; the test that pinned the missing keyboard was pinning
+        # the defect, not a decision.
+        return _render_other_dates(
+            master_id=master_id,
+            service_id=service_id,
+            exclude_date=target_date,
+            yclients=yclients,
+            tenant=tenant,
+            prompt=_SLOT_TAKEN_NO_ALTERNATIVES,
+            empty_prompt=_SLOT_TAKEN_NO_DATES,
+            log_slug="pick_slot",
         )
 
     # Deterministic preview — confirm_booking validates + persists the
@@ -1756,11 +2089,11 @@ def _handle_pick_slot_callback(
     if result.error in {"invalid_master_id", "invalid_service_id", "missing_slot"}:
         # Pre-validated above; a roster/catalog race mid-flow lands here.
         # Recoverable locally — no handoff, no pending row.
-        logger.info("booking.pick_slot.validation_race err=%s", result.error)
-        return _build_skill_result(
-            text=_STALE_CONTEXT_TEXT,
-            tool_calls_made=[],
-            confidence=_CONFIDENCE_OK,
+        return _refuse_callback(
+            step="pick_slot",
+            reason=REFUSAL_VALIDATION_RACE,
+            text=_CONTEXT_GONE_TEXT,
+            detail=f"err={result.error}",
         )
     if result.error:
         # DRF-1005: was a silent handoff — log the confirm_booking error.
@@ -1850,6 +2183,7 @@ def _skill_result_for_existing_pending(
     row: PendingBookingAction,
     *,
     context: SkillContext,
+    tenant: Any,
     tenant_id: str,
 ) -> SkillResult:
     """Rebuild the preview card for an already-active pending row.
@@ -1862,9 +2196,15 @@ def _skill_result_for_existing_pending(
     """
     payload = row.payload or {}
     preview_text = _format_confirm_preview(
+        # DRF-1952 — адрес тенанта записи: строка отобрана по этому ``tenant``
+        # (``_find_identical_active_confirm_pending``), без лишнего запроса.
+        address_line=_salon_address_line(tenant),
         master_name=str(payload.get("master_name") or ""),
         service_name=str(payload.get("service_name") or ""),
         slot_datetime=str(payload.get("slot_datetime") or ""),
+        # DRF-1708: тот же снимок, та же цена — превью не пересчитывается.
+        quoted_price=payload.get("quoted_price"),
+        quoted_duration_minutes=payload.get("quoted_duration_minutes"),
     )
     result = BookingToolResult(
         text=preview_text,
@@ -1996,7 +2336,8 @@ def _render_date_picker(
 
     capped = ordered[:_MAX_DATE_BUTTONS]
     return _build_skill_result(
-        text=_DATE_PICK_PROMPT,
+        # The expansion is a different answer to a different tap and says so.
+        text=_DATE_PICK_ALL_PROMPT if expand_all else _DATE_PICK_PROMPT,
         tool_calls_made=[],
         confidence=_CONFIDENCE_OK,
         action_data=_action_data_for_date_pick(
@@ -2053,10 +2394,22 @@ def _render_part_picker(
     slots = [c for c in (_to_slot_candidate(t, date) for t in times) if c is not None]
     today = local_today(tenant)
     if not slots:
-        return _build_skill_result(
-            text=_DAY_UNAVAILABLE_PROMPT.format(day=day_label(date, today).lower()),
-            tool_calls_made=[],
-            confidence=_CONFIDENCE_OK,
+        # DRF-1490 — the sibling branch in :func:`_render_date_picker` says
+        # this exact sentence WITH the picker under it; this one said it
+        # with nothing. The sentence is right and the keyboard was missing,
+        # not the other way round: «Вот ближайшие дни:» is the honest answer
+        # to a day that holds nothing, and the days are one schedule read
+        # away. The other branch is the one that was already correct.
+        logger.info("booking.pick_date.day_empty master=%s date=%s", master_id, date)
+        return _render_other_dates(
+            master_id=master_id,
+            service_id=service_id,
+            exclude_date=date,
+            yclients=yclients,
+            tenant=tenant,
+            prompt=_DAY_UNAVAILABLE_PROMPT.format(day=day_label(date, today).lower()),
+            empty_prompt=_DAY_UNAVAILABLE_NO_DATES.format(day=day_label(date, today).lower()),
+            log_slug="pick_date",
         )
 
     present = [p for p in PART_ORDER if _slots_in_part(slots, p)]
@@ -2068,15 +2421,11 @@ def _render_part_picker(
         # be written here — a rendered slot list must be visible in the audit
         # trail no matter which code path produced it.
         _audit_handled(tenant_id=tenant_id, tool=SHOW_SLOTS_TOOL_SPEC["name"])
-        return _build_skill_result(
+        return _slot_pick_reply(
             text=_slot_prompt(date, wanted_part, today, heard=heard),
-            tool_calls_made=[],
-            confidence=_CONFIDENCE_OK,
-            action_data=_action_data_for_slot_pick(
-                _slots_in_part(slots, wanted_part),
-                master_id=master_id,
-                service_id=service_id,
-            ),
+            slots=_slots_in_part(slots, wanted_part),
+            master_id=master_id,
+            service_id=service_id,
         )
 
     if wanted_part is not None and present:
@@ -2101,15 +2450,11 @@ def _render_part_picker(
     if len(present) == 1:
         only = present[0]
         _audit_handled(tenant_id=tenant_id, tool=SHOW_SLOTS_TOOL_SPEC["name"])
-        return _build_skill_result(
+        return _slot_pick_reply(
             text=_slot_prompt(date, only, today, heard=heard),
-            tool_calls_made=[],
-            confidence=_CONFIDENCE_OK,
-            action_data=_action_data_for_slot_pick(
-                _slots_in_part(slots, only),
-                master_id=master_id,
-                service_id=service_id,
-            ),
+            slots=_slots_in_part(slots, only),
+            master_id=master_id,
+            service_id=service_id,
         )
 
     return _build_skill_result(
@@ -2414,6 +2759,54 @@ def _build_skill_result(
     )
 
 
+# ── The single exit for a refused booking-callback tap (DRF-1473) ─────────
+#
+# Refusal reason vocabulary. Locked, like the handoff reasons above, and for
+# the same purpose: a name that means one thing is what makes six lines in a
+# journal answer «why» without a bisect.
+#
+#: The payload could not be read — a missing service id, an id that is
+#: neither int nor UUID, a datetime that does not parse.
+REFUSAL_MALFORMED_CALLBACK = "malformed_callback"
+#: The payload named a service the tenant's live catalog does not have.
+REFUSAL_UNKNOWN_SERVICE = "unknown_service"
+#: The payload named a specialist the tenant's live roster does not have.
+#: The pilot defect (DRF-1473) landed here through a truncated roster read.
+REFUSAL_UNKNOWN_MASTER = "unknown_master"
+#: Master and service passed the pre-checks, then lost a race against a
+#: catalog / roster change inside ``confirm_booking``.
+REFUSAL_VALIDATION_RACE = "validation_race"
+#: The one refusal that is genuinely about time: the tapped slot is past.
+REFUSAL_EXPIRED_SLOT = "expired_slot"
+
+
+def _refuse_callback(
+    *,
+    step: str,
+    reason: str,
+    text: str,
+    detail: str = "",
+) -> SkillResult:
+    """Refuse a booking-callback tap, saying the SAME thing twice.
+
+    Once to the person (``text``) and once to the journal (``reason``), so
+    the two can never drift apart the way they had before DRF-1473 — where
+    five different causes shared one sentence and two of them logged nothing
+    at all. ``step`` is the callback being handled (``pick_slot``,
+    ``pick_master``…), ``detail`` any ids worth carrying.
+
+    Not a handoff and not an error: these are recoverable locally, exactly
+    as before. Only the wording and the log line changed.
+    """
+    logger.info(
+        "booking.%s.refused reason=%s%s",
+        step,
+        reason,
+        f" {detail}" if detail else "",
+    )
+    return _build_skill_result(text=text, tool_calls_made=[], confidence=_CONFIDENCE_OK)
+
+
 def _handoff(
     *,
     tool_calls_made: list[ToolCall],
@@ -2457,12 +2850,18 @@ def _load_tenant_master_roster(tenant: Any) -> tuple[list[dict[str, str]], bool]
 
     **Adversarial CR #955 changes:**
 
-    * **F2** — filter `is_active=True AND invite_status=ACCEPTED`
-      matching the model's canonical ``bookable()`` predicate. The
-      previous `is_active`-only gate surfaced PENDING / EXPIRED /
+    * **F2** — bookability is asked of the canonical predicate instead
+      of an `is_active`-only gate, which surfaced PENDING / EXPIRED /
       CANCELLED invite masters (M0 invite-flow rows with `is_active=
-      True` by default until accepted), creating a false-positive
+      True` by default until accepted) and created a false-positive
       roster vs the YClients-grounded ``show_masters`` tool result.
+      Since DRF-1544 the predicate is read from
+      :data:`apps.catalog.master_state.AVAILABLE` rather than spelled
+      out here, so the roster the model is told about and the shelf the
+      customer can actually book from cannot drift apart. That matters
+      more here than anywhere else: a name in this roster is a name the
+      assistant will confirm as bookable, so a master the predicate
+      excludes must never reach the prompt.
     * **F3** — return a `(roster, is_truncated)` tuple так prompt
       renderer can weaken the «такого мастера нет» rule when the cap
       fired. Without this, alphabetically-late masters get false
@@ -2480,14 +2879,11 @@ def _load_tenant_master_roster(tenant: Any) -> tuple[list[dict[str, str]], bool]
     MUST NOT raise (would 500 the customer turn).
     """
     try:
+        from apps.catalog.master_state import AVAILABLE
         from apps.catalog.models import CatalogMaster
 
         rows = list(
-            CatalogMaster.all_tenants.filter(
-                tenant=tenant,
-                is_active=True,
-                invite_status=CatalogMaster.InviteStatus.ACCEPTED,
-            )
+            CatalogMaster.all_tenants.filter(AVAILABLE, tenant=tenant)
             .order_by("name")
             .values("name", "specialization")[: _KNOWN_MASTERS_ROSTER_CAP + 1]
         )

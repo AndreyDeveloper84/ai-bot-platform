@@ -15,7 +15,7 @@ from apps.events.models import Event
 from apps.ingress import streams
 from apps.workers import reaper
 from apps.workers.base import TenantAwareTask
-from apps.workers.registry import clear_registry, register
+from apps.workers.registry import emptied_registry_for_tests, register
 from apps.workers.tasks import reap_pel
 from apps.workers.tests.test_consumer import _FakeStreamRedis
 
@@ -31,9 +31,9 @@ def fake_redis(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _clean_registry():
-    clear_registry()
-    yield
-    clear_registry()
+    # DRF-2220 — empty for the test, the production handlers back after.
+    with emptied_registry_for_tests():
+        yield
 
 
 # ---------------------------------------------------------------------------
@@ -96,6 +96,8 @@ class TestReaperTerminalPath:
             "resolved_tenant_id": "",
         }
 
+        assert [eid for eid, _ in fake_redis.xrange("ingress:max")] == [entry_id]
+
         # ``@shared_task`` always exposes ``.run`` — call the underlying
         # function directly (Celery wrapper is the production entry point).
         reaped = reap_pel.run()
@@ -103,6 +105,9 @@ class TestReaperTerminalPath:
 
         # Source PEL: empty (entry XACK'd by reaper).
         assert fake_redis.pel.get(("ingress:max", "consumers"), {}) == {}
+        # DRF-2220 — and the source stream: the body now lives in the DLQ
+        # only, not in both (the entry was asserted present above).
+        assert fake_redis.xrange("ingress:max") == []  # empty-assert-ok: presence asserted above
 
         # DLQ stream: now contains the migrated entry with forensic headers.
         dlq_entries = fake_redis.xrange("ingress:max:dlq")

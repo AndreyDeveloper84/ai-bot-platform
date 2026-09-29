@@ -41,6 +41,7 @@ import hmac
 import json
 import time as time_module
 from datetime import date, datetime, timedelta, timezone
+from uuid import uuid4
 from urllib.parse import urlencode
 
 import pytest
@@ -130,6 +131,11 @@ def home_master(tenant: Tenant) -> CatalogMaster:
         name="Анна",
         is_active=True,
         invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+        # DRF-1540/1548 — синхронизированная строка всегда несёт
+        # канонический ключ; без него мастер не продаётся и брони не
+        # получает. ``None`` здесь был бы формой, которой у боевой
+        # строки не бывает.
+        ayla_user_id=uuid4(),
     )
 
 
@@ -184,6 +190,11 @@ def foreign_master(foreign_tenant: Tenant) -> CatalogMaster:
         external_updated_at=datetime(2026, 5, 18, tzinfo=timezone.utc),
         name="Чужой мастер",
         is_active=True,
+        # DRF-1540/1548 — синхронизированная строка всегда несёт
+        # канонический ключ; без него мастер не продаётся и брони не
+        # получает. ``None`` здесь был бы формой, которой у боевой
+        # строки не бывает.
+        ayla_user_id=uuid4(),
     )
 
 

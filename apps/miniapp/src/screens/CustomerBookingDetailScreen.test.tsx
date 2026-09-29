@@ -7,7 +7,7 @@
  */
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter, Route, Routes, useParams } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useLocation, useParams } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../lib/api", async (importOriginal) => {
@@ -29,7 +29,11 @@ import {
   fetchBooking,
   type BookingItem,
 } from "../lib/api";
-import { CustomerBookingDetailScreen } from "./CustomerBookingDetailScreen";
+import {
+  CANCEL_STARTED_COPY,
+  CustomerBookingDetailScreen,
+} from "./CustomerBookingDetailScreen";
+import { settleScenario } from "../test/settleScenario";
 
 const mockedFetch = vi.mocked(fetchBooking);
 const mockedRequest = vi.mocked(cancelBookingRequest);
@@ -55,6 +59,10 @@ function booking(partial: Partial<BookingItem> & Pick<BookingItem, "id">): Booki
     reschedulable: true,
     rating: null,
     can_rate: false,
+    // DRF-1652 — умолчание `null`, то есть «источник промолчал».
+    // НЕ `""`: это сказало бы, что салон ответил «адреса нет», и
+    // фикстура утверждала бы за салон то, чего он не говорил.
+    address: null,
     ...partial,
   };
 }
@@ -86,7 +94,7 @@ function renderScreen(bookingId: string) {
     <MemoryRouter initialEntries={[`/customer/records/${bookingId}`]}>
       <Routes>
         <Route path="/customer/records/:bookingId" element={<CustomerBookingDetailScreen />} />
-        <Route path="/my-visits/:bookingId/reschedule" element={<Probe />} />
+        <Route path="/customer/records/:bookingId/reschedule" element={<Probe />} />
         <Route path="/feedback/:bookingId" element={<Probe />} />
         <Route path="/customer/catalog" element={<div>CATALOG-PROBE</div>} />
       </Routes>
@@ -102,6 +110,52 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+describe("подтверждение переноса «было → стало» (DRF-2585, слова владельца п.8)", () => {
+  // Проба истории: какое состояние у текущей записи истории сейчас.
+  let historyState: unknown = "не прочитано";
+  function HistoryProbe() {
+    historyState = useLocation().state;
+    return null;
+  }
+
+  function renderMoved(state: unknown) {
+    render(
+      <MemoryRouter initialEntries={[{ pathname: "/customer/records/b-m", state }]}>
+        <HistoryProbe />
+        <Routes>
+          <Route path="/customer/records/:bookingId" element={<CustomerBookingDetailScreen />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+  }
+
+  it("после переноса — «Перенесла запись», было и стало", async () => {
+    mockedFetch.mockResolvedValue({
+      booking: booking({ id: "b-m", visit_at: "2026-09-27T11:00:00+03:00" }),
+    });
+    renderMoved({ justRescheduled: true, oldVisit: "2026-09-25T09:00:00+03:00" });
+
+    const box = await screen.findByRole("status");
+    expect(box).toHaveTextContent("Перенесла запись");
+    expect(box).toHaveTextContent("Было: 25 сентября в 09:00");
+    expect(box).toHaveTextContent("Стало: 27 сентября в 11:00");
+    // Состояние стёрто из истории (чтобы блок не всплыл при возврате), а
+    // показанный блок остаётся — экран его запомнил. DRF-2616: стирание делает
+    // эффект — ждём, пока он улёгся, а не один оборот таймера.
+    await settleScenario();
+    expect(screen.getByText("Перенесла запись")).toBeInTheDocument();
+    // Ревью: без этой строки узел оставался зелёным и без стирания.
+    expect(historyState).toBeNull();
+  });
+
+  it("без переноса блока нет — карточка открыта не после переноса", async () => {
+    mockedFetch.mockResolvedValue({ booking: booking({ id: "b-m" }) });
+    renderMoved(null);
+    expect(await screen.findByText("Маникюр")).toBeInTheDocument();
+    expect(screen.queryByText("Перенесла запись")).toBeNull();
+  });
+});
+
 describe("CustomerBookingDetailScreen (real data)", () => {
   it("renders the real booking fields", async () => {
     mockedFetch.mockResolvedValue({ booking: FUTURE });
@@ -110,6 +164,48 @@ describe("CustomerBookingDetailScreen (real data)", () => {
     expect(screen.getByText(/Анна Соколова/)).toBeInTheDocument();
     expect(screen.getByText("Подтверждена")).toBeInTheDocument();
     expect(screen.getByText(/1 ч 30 мин/)).toBeInTheDocument();
+  });
+
+  // DRF-1652 — «клиент записался и не видит, куда ехать».
+  //
+  // Три состояния проверяются порознь и вместе с положительным
+  // контролем: сначала убеждаемся, что адрес вообще доезжает до экрана,
+  // иначе «показано „уточните"» было бы верно и для экрана, который не
+  // умеет показывать адрес вовсе.
+  it("адрес известен — показан дословно", async () => {
+    mockedFetch.mockResolvedValue({
+      booking: booking({ id: "b-addr", address: "ул. Тверская 12" }),
+    });
+    renderScreen("b-addr");
+    expect(await screen.findByText("ул. Тверская 12")).toBeInTheDocument();
+  });
+
+  it("салон сказал «адреса нет» — это ОТВЕТ, а не молчание", async () => {
+    mockedFetch.mockResolvedValue({ booking: booking({ id: "b-addr", address: "" }) });
+    renderScreen("b-addr");
+    expect(await screen.findByText("Адрес не указан")).toBeInTheDocument();
+    // Не «уточните в салоне»: спрашивать некого, салон уже ответил.
+    expect(screen.queryByText("Уточните адрес в салоне")).not.toBeInTheDocument();
+  });
+
+  it("источник промолчал — человеку сказано, у кого спросить", async () => {
+    mockedFetch.mockResolvedValue({ booking: booking({ id: "b-addr", address: null }) });
+    renderScreen("b-addr");
+    expect(await screen.findByText("Уточните адрес в салоне")).toBeInTheDocument();
+    expect(screen.queryByText("Адрес не указан")).not.toBeInTheDocument();
+  });
+
+  it("строка адреса безусловна — в отличие от мастера и длительности", async () => {
+    // Соседи по списку прячут себя, когда значения нет, и для них это
+    // верно. Адрес — нет: «куда ехать» у записавшегося уже возник, и
+    // молчание оставило бы вопрос без ответа вместо указания, где ответ.
+    mockedFetch.mockResolvedValue({
+      booking: booking({ id: "b-addr", address: null, master_name: "", duration_min: null }),
+    });
+    renderScreen("b-addr");
+    expect(await screen.findByText("Адрес")).toBeInTheDocument();
+    expect(screen.queryByText("Мастер")).not.toBeInTheDocument();
+    expect(screen.queryByText("Длительность")).not.toBeInTheDocument();
   });
 
   it("runs the 2-step cancel with an undo window", async () => {
@@ -123,7 +219,11 @@ describe("CustomerBookingDetailScreen (real data)", () => {
     await user.click(await screen.findByRole("button", { name: "Отменить" }));
     await user.click(await screen.findByRole("button", { name: "Отменить запись" }));
     expect(mockedRequest).toHaveBeenCalledTimes(1);
-    expect(await screen.findByText("Запись отменена")).toBeInTheDocument();
+    // DRF-2346 — сервер ответил «отмена запрошена»: говорим о запущенном
+    // действии, а не о факте. «Запись отменена» здесь было бы утверждением
+    // выполненного при живой записи.
+    expect(await screen.findByText(CANCEL_STARTED_COPY)).toBeInTheDocument();
+    expect(screen.queryByText("Запись отменена")).not.toBeInTheDocument();
     // Undo — the booking comes back, the final confirm never fires.
     await user.click(screen.getByRole("button", { name: "Отменить" }));
     expect(mockedUndo).toHaveBeenCalledTimes(1);
@@ -167,7 +267,7 @@ describe("CustomerBookingDetailScreen (real data)", () => {
     await act(async () => {});
     fireEvent.click(screen.getByRole("button", { name: "Отменить запись" }));
     await act(async () => {});
-    expect(screen.getByText("Запись отменена")).toBeInTheDocument();
+    expect(screen.getByText(CANCEL_STARTED_COPY)).toBeInTheDocument();
     await act(async () => {
       vi.advanceTimersByTime(5000);
     });

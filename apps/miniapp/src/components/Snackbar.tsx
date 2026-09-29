@@ -14,9 +14,17 @@
 
 import { useEffect, useRef } from "react";
 
+import { assertClaim, type Claim } from "../lib/claims";
+
 interface Props {
   visible: boolean;
   message: string;
+  /**
+   * DRF-2347 — что сообщение утверждает выполненным и чем это подтверждено.
+   * Обязательно для сообщений о СДЕЛАННОМ; сообщения о запросе, ошибке и
+   * ходе дела его не несут — им нечего доказывать.
+   */
+  claim?: Claim<unknown>;
   actionLabel?: string;
   onAction?: () => void;
   durationMs?: number;
@@ -27,6 +35,7 @@ interface Props {
 export function Snackbar({
   visible,
   message,
+  claim,
   actionLabel,
   onAction,
   durationMs = 5000,
@@ -34,6 +43,13 @@ export function Snackbar({
   onDismiss,
 }: Props) {
   const timerRef = useRef<number | null>(null);
+
+  // Сверка утверждения с прочитанным (DRF-2347) — при отрисовке, а не в
+  // эффекте: несоответствие обязано останавливать ТАМ ЖЕ, где сообщение
+  // рождается, и быть поймано обычным `expect(...).toThrow()`. В отладочной
+  // и тестовой сборке бросает; перед человеком сторож молчит — он проверяет
+  // наши слова, а не его действия.
+  if (visible && claim) assertClaim(claim);
 
   useEffect(() => {
     if (!visible) {
@@ -58,43 +74,15 @@ export function Snackbar({
   if (!visible) return null;
 
   return (
-    <div
-      className="snackbar"
-      role="status"
-      aria-live="polite"
-      style={{
-        position: "fixed",
-        left: "var(--s-3)",
-        right: "var(--s-3)",
-        bottom: "calc(var(--s-6) + var(--safe-bottom, 0px))",
-        background: "var(--surface-3, #1f1f1f)",
-        color: "var(--on-surface-3, #fff)",
-        padding: "var(--s-3) var(--s-4)",
-        borderRadius: "var(--r-md)",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "space-between",
-        gap: "var(--s-3)",
-        boxShadow: "0 4px 16px rgba(0,0,0,0.18)",
-        zIndex: 100,
-      }}
-    >
+    <div className="snackbar" role="status" aria-live="polite">
       <span style={{ flex: 1 }}>{message}</span>
       {actionLabel && onAction && (
         <button
           type="button"
+          className="snackbar__action"
           onClick={() => {
             onAction();
             onDismiss?.();
-          }}
-          style={{
-            background: "transparent",
-            color: "var(--accent, #6ad)",
-            border: "none",
-            font: "inherit",
-            fontWeight: 600,
-            padding: "var(--s-1) var(--s-2)",
-            cursor: "pointer",
           }}
         >
           {actionLabel}

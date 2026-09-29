@@ -1,0 +1,376 @@
+"""Раздел «Ayla» мастерского Mini App — HTTP поверх готового ассистента.
+
+Решение владельца (OD-7 от 21.08, повторено 05.09 в DRF-1180):
+
+    «Раздел «Ayla» — это диалог мастера с Ayla, тот же, что в боте, но
+    через Mini App. Не список клиентских переписок.»
+
+Слово «тот же» здесь буквальное. Экран не заводит своей истории: он
+читает и пишет ту же :class:`~apps.conversations.models.StaffAssistantThread`,
+в которую пишет салонный бот
+(`apps/channels/max/salon_handler.py::_handle_talk`). Мастер спрашивает
+в боте по дороге и дочитывает ответ в приложении, а не начинает
+разговор заново, потому что сменил окно.
+
+### Три ручки
+
+* ``GET  /assistant/history``  — что уже сказано, чтобы экран открылся
+  не пустым.
+* ``POST /assistant/ask``      — вопрос и ответ. Ответ может нести
+  ``pending_action`` — предложение, которое НЕ выполнено.
+* ``POST /assistant/confirm``  — исполнение предложения по талону.
+
+### Почему исполнение — отдельная ручка, а не флаг в ответе
+
+Эпик DRF-1180 требует показать, что именно будет сделано, получить
+подтверждение и только потом выполнять. Ручка `ask` физически не умеет
+писать: пишущее действие возвращается из
+:mod:`apps.master_api.services.assistant_actions` предложением, а
+исполнение живёт за вторым HTTP-запросом, который делает нажатие
+человека. Немого пути от ответа модели к записи в базе здесь нет.
+
+### Своя вьюха, а не строчка в ``views.py``
+
+``apps/master_api/views.py`` в этот момент правит соседняя задача
+(DRF-1507). Отдельный модуль — не стилистика, а способ не устроить
+конфликт в файле на 1700 строк.
+
+### Новый модуль под тем же PII-запретом
+
+Сканер литералов в ``tests/test_pii_boundary.py`` читает весь пакет
+``master_api``, включая этот файл: поле с телефоном клиента здесь так
+же невозможно, как в ростере (DRF-1039 / DRF-1360). Расшифровки
+дополнительно просматриваются в ``tests/test_assistant_api.py``.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from typing import Any
+
+from django.http import HttpRequest, HttpResponse, JsonResponse
+from django.views.decorators.csrf import csrf_exempt
+from django.views.decorators.http import require_http_methods
+
+from apps.master_api.auth import require_master_init_data
+
+logger = logging.getLogger(__name__)
+
+#: Сколько реплик отдаёт `history`. Совпадает с окном, которое видит
+#: модель (`staff_assistant.DEFAULT_HISTORY_LIMIT` = 10), удвоенным:
+#: человеку полезно видеть чуть больше, чем помнит собеседник.
+DEFAULT_HISTORY_LIMIT = 20
+MAX_HISTORY_LIMIT = 50
+
+#: Длиннее вопроса на телефоне между клиентами не набирают, а длинный
+#: ввод — это вставленный лог, за который платит tenant.
+MAX_QUESTION_CHARS = 1000
+
+ROLE_AT_OPEN = "master"
+
+
+def _error(
+    slug: str,
+    detail: str,
+    status: int,
+    *,
+    details: dict[str, Any] | None = None,
+) -> JsonResponse:
+    """Отказ. ``details`` — структурные подробности (DRF-1708), если они есть.
+
+    DRF-2373: через этот же канал едет **живучесть предложения** —
+    ``retriable`` и карточки отказа. Второго канала под это не заводится: у
+    клиента ``details`` уже поднимается в :class:`ApiError`, и параллельное
+    поле верхнего уровня значило бы два места, где живёт одно и то же.
+    """
+    body: dict[str, Any] = {"error": slug, "detail": detail}
+    if details:
+        body["details"] = details
+    return JsonResponse(body, status=status)
+
+
+def _body(request: HttpRequest) -> dict[str, Any] | JsonResponse:
+    if not request.body:
+        return {}
+    try:
+        parsed = json.loads(request.body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return _error("bad_request", "body must be valid JSON", 400)
+    if not isinstance(parsed, dict):
+        return _error("bad_request", "body must be a JSON object", 400)
+    return parsed
+
+
+def _thread(bot_user):
+    """Рабочая нить этого человека — та же, что у салонного бота.
+
+    Никогда не бросает: история — место, куда записывают ответ, а не
+    условие, без которого на вопрос нельзя ответить.
+    """
+
+    from apps.conversations.staff_assistant import resolve_active_staff_thread
+
+    try:
+        return resolve_active_staff_thread(bot_user, role_at_open=ROLE_AT_OPEN)
+    except Exception:  # noqa: BLE001 — история не должна стоить ответа
+        logger.exception("master_api.assistant.thread_open_failed bot_user=%s", bot_user.id)
+        return None
+
+
+def _remember(thread, *, role: str, content: str, **telemetry):
+    if thread is None:
+        return None
+
+    from apps.conversations.staff_assistant import record_staff_message
+
+    try:
+        return record_staff_message(thread, role=role, content=content, **telemetry)
+    except Exception:  # noqa: BLE001
+        logger.exception("master_api.assistant.thread_write_failed role=%s", role)
+        return None
+
+
+def _message_dict(row) -> dict[str, Any]:
+    return {
+        "id": str(row.id),
+        "role": row.role,
+        "content": row.content or "",
+        "tool": row.tool_name or "",
+        "created_at": row.created_at.isoformat() if row.created_at else "",
+    }
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+@require_master_init_data
+def assistant_history(request: HttpRequest) -> HttpResponse:
+    """Последние реплики диалога мастера с Ayla, старые первыми.
+
+    DRF-2151: только ходы ассистента — команды («/start …»), токены
+    приглашений, ответы входа и tool-строки на экран не попадают
+    (:func:`apps.conversations.staff_assistant.visible_staff_history`).
+    """
+
+    from apps.conversations.staff_assistant import visible_staff_history
+
+    bot_user = request.bot_user  # type: ignore[attr-defined]
+
+    raw_limit = request.GET.get("limit", "")
+    try:
+        limit = int(raw_limit) if raw_limit else DEFAULT_HISTORY_LIMIT
+    except ValueError:
+        return _error("bad_request", "limit must be an integer", 400)
+    limit = max(1, min(limit, MAX_HISTORY_LIMIT))
+
+    thread = _thread(bot_user)
+    if thread is None:
+        return JsonResponse({"messages": []})
+
+    rows = visible_staff_history(thread, limit=limit)
+    return JsonResponse({"messages": [_message_dict(r) for r in rows]})
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_master_init_data
+def assistant_ask(request: HttpRequest) -> HttpResponse:
+    """Один вопрос — один ответ. Пишущее действие только предлагается."""
+
+    from apps.master_api.services.assistant import SELECT_HINT_PREFIX, answer_master_question
+
+    master = request.master  # type: ignore[attr-defined]
+    bot_user = request.bot_user  # type: ignore[attr-defined]
+
+    body = _body(request)
+    if isinstance(body, JsonResponse):
+        return body
+
+    text = str(body.get("text") or "").strip()
+    if not text:
+        return _error("bad_request", "text is required", 400)
+    if len(text) > MAX_QUESTION_CHARS:
+        return _error("bad_request", f"text must be ≤ {MAX_QUESTION_CHARS} chars", 400)
+
+    from apps.conversations.staff_assistant import (
+        is_entry_reply,
+        is_hidden_staff_turn,
+        recent_staff_history,
+    )
+
+    # DRF-2153: выбор из карточки (клиент из «Кого вы имеете в виду?», время
+    # из «Свободно рядом») уходит модели уточнением — в нить пишется только
+    # то, что мастер видел на кнопке.
+    raw_select = body.get("select")
+    select: dict[str, Any] = raw_select if isinstance(raw_select, dict) else {}
+    hints: list[str] = []
+    # Значения из карточки — короткие id/метки; предел, чтобы тело не
+    # раздувало запрос к модели мимо лимита на text.
+    client_id = str(select.get("client_id") or "").strip()[:64]
+    start_at = str(select.get("start_at") or "").strip()[:64]
+    if client_id:
+        hints.append(f"клиент выбран — client_id={client_id}")
+    if start_at:
+        hints.append(f"время выбрано — start_at={start_at}")
+    model_text = text
+    if hints:
+        joined = "; ".join(hints)
+        model_text = f"{text}\n({SELECT_HINT_PREFIX} {joined})"
+
+    thread = _thread(bot_user)
+    # DRF-2151: вставленная команда / токен приглашения отвечается, но в
+    # нить как реплика не ложится — ей нечего делать на экране и в памяти.
+    hidden = is_hidden_staff_turn("user", text)
+    inbound = None if hidden else _remember(thread, role="user", content=text)
+    history = (
+        recent_staff_history(thread, exclude_id=getattr(inbound, "id", None))
+        if thread is not None
+        else []
+    )
+    if hints and inbound is not None:
+        # Выбор из карточки живёт в нити скрытой tool-строкой: экран её не
+        # рисует, а модель помнит клиента на следующем ходе («Запиши на 14:30»
+        # после «Кого вы имеете в виду?» не спрашивает заново). Пишется после
+        # чтения истории — в этом ходе уточнение уже приклеено к вопросу.
+        _remember(thread, role="tool", content=f"{SELECT_HINT_PREFIX} {'; '.join(hints)}")
+
+    reply = answer_master_question(
+        master=master,
+        text=model_text,
+        history=history,
+        allow_actions=True,
+    )
+
+    # Ответ входа на скрытую команду без вопроса стал бы сиротой на экране
+    # (парное правило читателя опирается на вопрос, которого теперь нет);
+    # содержательный ответ пишется.
+    outbound = (
+        None
+        if hidden and is_entry_reply(reply.text)
+        else _remember(
+            thread,
+            role="assistant",
+            content=reply.text,
+            tool_name=reply.tool_name,
+            tokens_in=reply.tokens_in,
+            tokens_out=reply.tokens_out,
+            llm_provider=reply.llm_provider,
+            llm_model=reply.llm_model,
+            llm_cost_usd=reply.llm_cost_usd,
+        )
+    )
+
+    from apps.master_api.services.assistant_cards import cards_for_tool
+
+    cards = list(reply.cards) + cards_for_tool(master, reply.tool_name, reply.tool_data)
+    return JsonResponse(
+        {
+            "answer": reply.text,
+            "tool": reply.tool_name,
+            "pending_action": reply.pending_action,
+            "cards": cards,
+            "message_id": str(outbound.id) if outbound is not None else "",
+        }
+    )
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_master_init_data
+def assistant_confirm(request: HttpRequest) -> HttpResponse:
+    """Выполнить предложенное действие — по талону и только по нему.
+
+    Аргументы берутся ИЗ талона, а не из тела запроса. Иначе клиент мог
+    бы показать одну сводку, а прислать на исполнение другие числа — и
+    подтверждение стало бы формальностью.
+    """
+
+    from apps.master_api.services.assistant_actions import (
+        ActionError,
+        execute,
+        is_retriable,
+    )
+
+    master = request.master  # type: ignore[attr-defined]
+    bot_user = request.bot_user  # type: ignore[attr-defined]
+
+    body = _body(request)
+    if isinstance(body, JsonResponse):
+        return body
+
+    token = str(body.get("token") or "").strip()
+    if not token:
+        return _error("bad_request", "token is required", 400)
+
+    try:
+        done = execute(token, master=master, actor=bot_user)
+    except ActionError as exc:
+        # DRF-2373. Отказ обязан сказать экрану ДВЕ вещи, которых здесь не
+        # было: жив ли ещё талон и есть ли к отказу карточки.
+        #
+        # Без первого экран оставлял карточку подтверждения со всеми её
+        # кнопками при **мёртвом** талоне — человек жал «Подтвердить» и
+        # получал тот же отказ, сколько бы ни жал. Это не отсутствие выхода,
+        # а нарисованный выход, которого нет; молчаливая кнопка была бы
+        # честнее.
+        #
+        # Второе — не новое поле, а починка потери: ``ActionError.cards``
+        # существует и заполняется, ``assistant_ask`` их отдаёт
+        # (``services/assistant.py:403``), а этот путь молча ронял.
+        status = 403 if exc.slug == "action_not_yours" else 400
+        return _error(
+            exc.slug,
+            exc.detail,
+            status,
+            details={"retriable": is_retriable(exc.slug), "cards": list(exc.cards)},
+        )
+
+    thread = _thread(bot_user)
+    outbound = _remember(thread, role="assistant", content=done.text, tool_name=done.name)
+
+    return JsonResponse(
+        {
+            "answer": done.text,
+            "action": done.name,
+            "executed": done.executed,
+            "open": done.open,
+            "cards": list(done.cards),
+            "details": done.details,
+            "message_id": str(outbound.id) if outbound is not None else "",
+        }
+    )
+
+
+@require_http_methods(["GET"])
+@require_master_init_data
+def assistant_context(request: HttpRequest) -> HttpResponse:
+    """Стартовый экран Ayla (DRF-2153, макет DRF-1187): контекст дня и чипы.
+
+    «Сегодня N записей · Следующая — Анна П. в 10:30 · Классический массаж ·
+    60 мин» — из тех же источников, что «Сегодня»; телефона нет по
+    построению. Чипы — четыре фразы макета; чип = отправка фразы в ``ask``.
+    """
+
+    from django.utils import timezone as dj_timezone
+
+    from apps.master_api.services.assistant_cards import CHIPS, today_context
+
+    master = request.master  # type: ignore[attr-defined]
+    return JsonResponse(
+        {
+            "today": today_context(master, now=dj_timezone.now()),
+            "chips": [c["text"] for c in CHIPS],
+            "chip_hints": {c["text"]: c["hint"] for c in CHIPS},
+        }
+    )
+
+
+__all__ = [
+    "DEFAULT_HISTORY_LIMIT",
+    "MAX_HISTORY_LIMIT",
+    "MAX_QUESTION_CHARS",
+    "assistant_ask",
+    "assistant_confirm",
+    "assistant_context",
+    "assistant_history",
+]

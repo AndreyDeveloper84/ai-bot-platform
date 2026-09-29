@@ -65,6 +65,7 @@ from apps.events.vocabulary import (
     MASTER_PROFILE_UPDATED_BY_ADMIN,
 )
 from apps.identity.models import BotUser
+from apps.miniapp_api.master_media import master_photo_path
 
 logger = logging.getLogger(__name__)
 
@@ -212,7 +213,7 @@ def _row_to_list_item(master: CatalogMaster, services_count: int) -> dict[str, A
         "id": str(master.id),
         "name": master.name,
         "specialization": master.specialization,
-        "photo_url": master.photo_url,
+        "photo_url": master_photo_path(master.id, master.photo_url),
         "is_active": master.is_active,
         "invite_status": master.invite_status,
         "last_seen_at": bot_user_last_seen,
@@ -242,17 +243,27 @@ def _detail_payload(master: CatalogMaster, *, include_audit: bool = False) -> di
 
     # Services list — read MasterService mapping (M2M editing is MM4 / a
     # later PR; we only READ here).
-    service_ids = list(
-        MasterService.all_tenants.filter(tenant=master.tenant_id, master=master).values_list(
-            "service_id", flat=True
-        )
-    )
+    # DRF-1989 — салонная админка показывает непродаваемое с причиной.
+    sale_state = {
+        service_id: (sellable, unsellable_reason or None)
+        for service_id, sellable, unsellable_reason in MasterService.all_tenants.filter(
+            tenant=master.tenant_id, master=master
+        ).values_list("service_id", "sellable", "unsellable_reason")
+    }
     services = list(
         CatalogService.all_tenants.filter(
-            tenant=master.tenant_id, id__in=service_ids, is_active=True
+            tenant=master.tenant_id, id__in=list(sale_state), is_active=True
         ).values("id", "name")
     )
-    services_payload = [{"id": str(s["id"]), "name": s["name"]} for s in services]
+    services_payload = [
+        {
+            "id": str(s["id"]),
+            "name": s["name"],
+            "sellable": sale_state[s["id"]][0],
+            "unsellable_reason": sale_state[s["id"]][1],
+        }
+        for s in services
+    ]
 
     return {
         "id": str(master.id),
@@ -264,67 +275,28 @@ def _detail_payload(master: CatalogMaster, *, include_audit: bool = False) -> di
         "is_active": master.is_active,
         "invite_status": master.invite_status,
         "mode": master.mode,
-        "photo_url": master.photo_url,
+        "photo_url": master_photo_path(master.id, master.photo_url),
         "max_handle": master.max_handle,
         "yclients_staff_id": master.yclients_staff_id,
         "invited_at": master.invited_at.isoformat() if master.invited_at else None,
         "archived_at": master.archived_at.isoformat() if master.archived_at else None,
         "linked_bot_user": linked_bot_user,
         "services": services_payload,
-        "working_hours_summary": _working_hours_summary(master),
     }
 
 
-def _working_hours_summary(master: CatalogMaster) -> str:
-    """Compact one-liner for the detail screen. Empty when unknown.
-
-    Reads :class:`apps.scheduling.models.WorkingHours` when present.
-    Phase 1 keeps this string-only — the proper structured payload lives
-    in the Schedule Management API (separate handoff).
-
-    DRF-1062: no rows now returns an empty string instead of «Расписание
-    уточнит салон». Since the invite stopped manufacturing a Mon-Fri
-    10:00-19:00 preset, a freshly invited master genuinely has no
-    schedule, and a reassuring sentence in that slot is a claim we cannot
-    back — the salon has not undertaken to clarify anything. Blank is the
-    honest rendering of "not set yet"; the screen can say so in its own
-    voice if it wants to.
-
-    Worth knowing when reading this value: `apps.scheduling` is NOT what
-    serves bookable slots on the pilot. With ``BOOKING_VIA_AYLA_REST`` the
-    backend answers, so this line describes the bot's local mirror, not
-    what a customer is offered.
-    """
-
-    try:
-        from apps.scheduling.models import WorkingHours
-    except ImportError:
-        return ""
-
-    rows = list(
-        WorkingHours.all_tenants.filter(tenant=master.tenant_id, master=master).order_by(
-            "day_of_week"
-        )
-    )
-    if not rows:
-        return ""
-
-    working = [r for r in rows if r.is_working]
-    if not working:
-        return "Выходной"
-
-    # Compact "Пн-Пт 10:00–19:00" — render the most common start/end pair.
-    weekday_short = ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
-    days = [weekday_short[r.day_of_week] for r in working if 0 <= r.day_of_week < 7]
-    if not days:
-        return ""
-    first, last = working[0], working[-1]
-    # mypy: TimeField may be None on the model; narrow before strftime.
-    start_t = first.start_time
-    end_t = last.end_time
-    if start_t is None or end_t is None:
-        return ""
-    return f"{days[0]}-{days[-1]} {start_t.strftime('%H:%M')}–{end_t.strftime('%H:%M')}"
+# §83 — здесь БЫЛА строка ``working_hours_summary``, собранная из
+# локальной ``scheduling.WorkingHours``. Её собственный докстринг признавал:
+# «this line describes the bot's local mirror, not what a customer is
+# offered». Под ``BOOKING_VIA_AYLA_REST`` (на пилоте включён, замер
+# 09.09.2026) часы клиенту продаёт Ayla, и эта строка описывала не то
+# расписание, по которому продают.
+#
+# Убрана, а не поправлена на месте: чтение источника ходит по сети, и вшитое
+# в карточку оно роняло бы имя, услуги и состояние при недоступной Ayla.
+# Часы теперь отдаёт отдельная ручка ``masters/<id>/schedule/``
+# (``views_master_schedule``) — тот же источник, с которого снимается
+# отпечаток подтверждения.
 
 
 # --- GET /api/v1/admin/masters/ ------------------------------------------
@@ -744,7 +716,7 @@ def master_photo_upload(request: HttpRequest, master_id: str) -> HttpResponse:
             actor_id=bot_user.id,
         )
 
-    return JsonResponse({"photo_url": photo_url})
+    return JsonResponse({"photo_url": master_photo_path(master.id, photo_url)})
 
 
 # --- GET /api/v1/admin/masters/<master_id>/audit/ ------------------------

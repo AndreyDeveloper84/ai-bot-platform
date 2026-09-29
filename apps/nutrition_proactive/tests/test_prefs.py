@@ -113,3 +113,91 @@ class TestWaterCounters:
         counters = prefs.water_counters(stored, date(2026, 8, 23))
         assert counters["sent"] == 2
         assert counters["last_total_ml"] == 400
+
+
+class TestTimezoneSourceAfterUnsetBecameEmpty:
+    """«Не задано» перестало выглядеть как Москва (DRF-1606).
+
+    До этой правки умолчанием колонки стоял настоящий пояс, и
+    ``resolve_timezone`` сравнивал строку с ``Europe/Moscow``, чтобы
+    догадаться, выбирал ли человек хоть что-то. Значит **явный
+    московский ответ был неотличим от молчания** и уезжал на пояс
+    тенанта с источником ``"tenant"``.
+
+    Теперь молчание пусто, и разница выразима. Тест держит именно её:
+    два человека с одинаковым итоговым поясом, но разным источником.
+    """
+
+    class _Tenant:
+        timezone = "Europe/Moscow"
+
+    class _User:
+        def __init__(self, tz: str) -> None:
+            self.timezone = tz
+            self.tenant = TestTimezoneSourceAfterUnsetBecameEmpty._Tenant()
+
+    def test_silence_and_an_explicit_moscow_are_now_different(self) -> None:
+        silent = self._User("")
+        chose_moscow = self._User("Europe/Moscow")
+
+        tz_silent, source_silent = prefs.resolve_timezone(silent)
+        tz_chosen, source_chosen = prefs.resolve_timezone(chose_moscow)
+
+        # Пояс у обоих один — и это НЕ то, что различает случаи.
+        assert str(tz_silent) == str(tz_chosen) == "Europe/Moscow"
+        # А вот происхождение разное, и раньше оно было одинаковым.
+        assert source_silent == "tenant"
+        assert source_chosen == "botuser"
+
+    def test_an_explicit_zone_wins_over_the_salon(self) -> None:
+        user = self._User("Asia/Yekaterinburg")
+        tz, source = prefs.resolve_timezone(user)
+        assert str(tz) == "Asia/Yekaterinburg"
+        assert source == "botuser"
+
+    def test_empty_falls_through_to_the_salon(self) -> None:
+        tz, source = prefs.resolve_timezone(self._User(""))
+        assert str(tz) == "Europe/Moscow"
+        assert source == "tenant"
+
+    def test_whitespace_is_silence_too(self) -> None:
+        # Пробел — не ответ. Иначе «не задано» получило бы второе
+        # написание, а два способа сказать одно — это два способа
+        # разойтись.
+        tz, source = prefs.resolve_timezone(self._User("   "))
+        assert source == "tenant"
+        assert str(tz) == "Europe/Moscow"
+
+    def test_garbage_does_not_pass_as_a_zone(self) -> None:
+        """Мусор в колонке не становится поясом человека.
+
+        Пока `PATCH /me` не проверяет значение (DRF-1477, пункт 3), сюда
+        может доехать что угодно. Оно обязано провалиться на салон, а не
+        уронить рассылку.
+        """
+        tz, source = prefs.resolve_timezone(self._User("не знаю"))
+        assert source == "tenant"
+        assert str(tz) == "Europe/Moscow"
+
+    def test_no_tenant_and_no_choice_lands_on_the_fallback(self) -> None:
+        class _Orphan:
+            timezone = ""
+            tenant = None
+
+        tz, source = prefs.resolve_timezone(_Orphan())
+        assert str(tz) == prefs.FALLBACK_TZ
+        assert source == "fallback"
+
+    def test_the_sentinel_is_gone_not_parked_next_to_the_new_check(self) -> None:
+        """§79 — лучшее имя пропуска это отсутствие пропуска.
+
+        Оставить `UNSET_TZ_SENTINEL` рядом с новой проверкой значило бы
+        завести второй способ сказать «не задано».
+        """
+        # Положительная стража ВПЕРЕДИ и на тех же данных: `hasattr` на
+        # этом модуле умеет находить имена. Без неё «имени нет» было бы
+        # верно и для переименованного модуля, и для опечатки в самой
+        # проверке — то есть доказывало бы что угодно.
+        assert hasattr(prefs, "FALLBACK_TZ")
+        assert hasattr(prefs, "resolve_timezone")
+        assert not hasattr(prefs, "UNSET_TZ_SENTINEL")

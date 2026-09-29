@@ -47,6 +47,7 @@ vi.mock("../lib/payments", async (importOriginal) => {
 });
 
 import { ApiError, authVerify } from "../lib/api";
+import { REFUSAL_CANON } from "../lib/refusal-canon";
 import { createCustomerBooking } from "../lib/customer-booking";
 import { openPaymentConfirmation } from "../lib/max-sdk";
 import { createPayment } from "../lib/payments";
@@ -75,11 +76,19 @@ const CREATED = {
   },
 };
 
+/**
+ * Время визита — в будущем ОТНОСИТЕЛЬНО часов теста (DRF-1776): экран
+ * подтверждения считает прошедшее время «устаревшим подтверждением» и
+ * прячет «Записаться». Прибитая дата «2026-08-01» стала прошлым 02.08 и
+ * уронила бы весь файл в один день, никого не спросив.
+ */
+const FUTURE_VISIT = new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString();
+
 function seedDraft() {
   resetBooking();
   setService("svc-1", "Маникюр");
   setMaster("mst-1", "Анна Соколова");
-  setVisitAt("2026-08-01T16:00:00+03:00");
+  setVisitAt(FUTURE_VISIT);
 }
 
 function renderScreen() {
@@ -114,6 +123,116 @@ beforeEach(() => {
   });
   mockedCreate.mockResolvedValue(CREATED);
   seedDraft();
+  setOnLine(true);
+});
+
+/** Переключить `navigator.onLine` — jsdom позволяет переопределить свойство. */
+function setOnLine(value: boolean) {
+  Object.defineProperty(window.navigator, "onLine", {
+    value,
+    configurable: true,
+  });
+}
+
+/**
+ * Офлайн на экране воронки: сказать до нажатия, а не после.
+ *
+ * Баннера «нет сети» на экранах воронки записи не было вовсе: человек
+ * доходил до «Записаться», жал и получал ошибку сети вместо записи.
+ *
+ * Стража парная (`negative_assert_guard`, DRF-1411): к «CTA выключен и
+ * запись не создаётся» приложены положительные проверки на тех же
+ * данных — карточка визита на месте, выбор оплаты на месте, а при живой
+ * сети кнопка снова активна и создаёт запись.
+ *
+ * Тест умеет падать: уберите `|| !online` из `disabled` у `StickyCta` —
+ * покраснеет первый случай; снимите `<OfflineBanner />` — второй.
+ */
+describe("офлайн на экране подтверждения", () => {
+  it("не даёт нажать «Записаться» и не зовёт ручку", async () => {
+    setOnLine(false);
+    renderScreen();
+    const cta = screen.getByRole("button", { name: "Записаться" });
+    expect(cta).toBeDisabled();
+    await userEvent.click(cta);
+    expect(mockedCreate).not.toHaveBeenCalled();
+  });
+
+  it("объясняет, почему", () => {
+    setOnLine(false);
+    renderScreen();
+    expect(
+      screen.getByText("Нет сети — записаться сейчас не получится."),
+    ).toBeInTheDocument();
+  });
+
+  it("положительная стража: сам экран цел и с сетью запись создаётся", async () => {
+    setOnLine(false);
+    renderScreen();
+    // Карточка визита и выбор оплаты никуда не делись.
+    expect(screen.getByText("Анна Соколова")).toBeInTheDocument();
+    expect(
+      screen.getByRole("radio", { name: /Оплатить на месте/ }),
+    ).toBeInTheDocument();
+  });
+
+  it("положительная стража: с сетью кнопка активна и создаёт запись", async () => {
+    setOnLine(true);
+    renderScreen();
+    const cta = screen.getByRole("button", { name: "Записаться" });
+    expect(cta).toBeEnabled();
+    await userEvent.click(cta);
+    expect(mockedCreate).toHaveBeenCalledTimes(1);
+    expect(
+      screen.queryByText("Нет сети — записаться сейчас не получится."),
+    ).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * Условия отмены — блока нет, пока нет источника.
+ *
+ * До правки экран рисовал «Можно отменить за 4 часа до визита.» как
+ * утверждение. Политику отмены не отдаёт ни `GET /bookings/<id>`, ни
+ * ответ создания записи — число было константой в разметке.
+ *
+ * Стража парная (`negative_assert_guard`, DRF-1411): рядом с
+ * отрицательной проверкой стоят положительные на ТЕХ ЖЕ данных — выбор
+ * оплаты, заметка мастеру и кнопка «Записаться» никуда не делись.
+ * Правка, которая вычистила бы блок вместе с соседями, прошла бы
+ * отрицательную проверку и упала на положительных.
+ *
+ * Тест умеет падать: верните
+ * `<p className="customer-confirm__policy">Можно отменить за 4 часа до
+ * визита.</p>` в `CustomerBookingConfirmScreen` — покраснеет первый
+ * случай.
+ */
+describe("условия отмены (DRF — правдивость экрана подтверждения)", () => {
+  it("не обещает срок отмены, которого не отдаёт ни одна ручка", () => {
+    seedDraft();
+    renderScreen();
+    expect(screen.queryByText(/Можно отменить за/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/отменить за 4 часа/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/без штрафа/i)).not.toBeInTheDocument();
+  });
+
+  it("положительная стража: соседние блоки экрана на месте", () => {
+    seedDraft();
+    renderScreen();
+    // Выбор оплаты (C7.4) — соседний блок сверху.
+    expect(
+      screen.getByRole("radio", { name: /Оплатить на месте/ }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("radio", { name: /Оплатить онлайн/ }),
+    ).toBeInTheDocument();
+    // Заметка мастеру (§6.1 п.5) — соседний блок снизу.
+    expect(
+      screen.getByRole("button", { name: /Добавить заметку мастеру/ }),
+    ).toBeInTheDocument();
+    // И сама запись — то, ради чего экран существует.
+    expect(screen.getByRole("button", { name: "Записаться" })).toBeInTheDocument();
+  });
 });
 
 describe("payment choice (C7.4 / AMD-002)", () => {
@@ -133,7 +252,7 @@ describe("payment choice (C7.4 / AMD-002)", () => {
       expect.objectContaining({
         service_id: "svc-1",
         master_id: "mst-1",
-        visit_at: "2026-08-01T16:00:00+03:00",
+        visit_at: FUTURE_VISIT,
         payment_required: false,
       }),
     );
@@ -239,6 +358,17 @@ describe("C1 neutral unavailable message (contract §2)", () => {
 });
 
 describe("error matrix + idempotency (Wave 0 booking GO)", () => {
+  it("4xx без названной причины — ровно «Не удалось создать запись.» (§6-кси п.2, DRF-2577)", async () => {
+    // Раньше ветка `other` печатала серверный `detail` — английский текст.
+    const user = userEvent.setup();
+    mockedCreate.mockRejectedValue(new ApiError(400, "invalid_request", "start_at: invalid datetime"));
+    renderScreen();
+    await user.click(screen.getByRole("button", { name: "Записаться" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent?.trim()).toBe(REFUSAL_CANON.bookingCreate);
+    expect(screen.queryByText(/invalid datetime/)).not.toBeInTheDocument();
+  });
+
   it("not-bookable 404 → neutral message + catalog alternative", async () => {
     const user = userEvent.setup();
     mockedCreate.mockRejectedValue(
@@ -256,6 +386,45 @@ describe("error matrix + idempotency (Wave 0 booking GO)", () => {
     expect(screen.queryByText(/not_bookable/)).not.toBeInTheDocument();
   });
 
+  it("DRF-1548 — master without an Ayla link reads as not-bookable, not as a raw detail", async () => {
+    const user = userEvent.setup();
+    mockedCreate.mockRejectedValue(
+      new ApiError(
+        404,
+        "master_ayla_unlinked",
+        "master has no canonical ayla_user_id; booking notification would not arrive",
+      ),
+    );
+    renderScreen();
+    await user.click(screen.getByRole("button", { name: "Записаться" }));
+    expect(
+      await screen.findByText(/Эта услуга или специалист сейчас недоступны/),
+    ).toBeInTheDocument();
+    // Без записи слага в NOT_BOOKABLE_SLUGS ветка `other` нарисовала бы
+    // `detail` бэкенда как есть — служебную английскую фразу.
+    expect(screen.queryByText(/ayla_user_id/)).not.toBeInTheDocument();
+  });
+
+  it("DRF-1521 — an unfinished master profile reads as not-bookable, not as a raw detail", async () => {
+    const user = userEvent.setup();
+    mockedCreate.mockRejectedValue(
+      new ApiError(
+        404,
+        "master_profile_incomplete",
+        "master accepted the invite but her profile is not ready for sale",
+      ),
+    );
+    renderScreen();
+    await user.click(screen.getByRole("button", { name: "Записаться" }));
+    expect(
+      await screen.findByText(/Эта услуга или специалист сейчас недоступны/),
+    ).toBeInTheDocument();
+    // Без записи слага в NOT_BOOKABLE_SLUGS ветка `other` нарисовала бы
+    // `detail` бэкенда как есть — служебную английскую фразу. Клиенту
+    // причина не показывается вовсе: она для владелицы салона.
+    expect(screen.queryByText(/profile is not ready/)).not.toBeInTheDocument();
+  });
+
   it("double-tap on «Записаться» creates the booking exactly once", async () => {
     const user = userEvent.setup();
     let resolveCreate: ((v: typeof CREATED) => void) | undefined;
@@ -271,6 +440,17 @@ describe("error matrix + idempotency (Wave 0 booking GO)", () => {
     await user.click(cta);
     expect(mockedCreate).toHaveBeenCalledTimes(1);
     resolveCreate!(CREATED);
+  });
+});
+
+describe("DRF-1952 — адрес салона доезжает до экрана успеха", () => {
+  it("передаёт адрес из ответа создания записи на экран успеха", async () => {
+    mockedCreate.mockResolvedValue({ booking: { ...CREATED.booking, address: "ул. Карпинского, 33А" } });
+    const user = userEvent.setup();
+    renderScreen();
+    await user.click(screen.getByRole("button", { name: "Записаться" }));
+    expect(await screen.findByText(/Записала тебя/)).toBeInTheDocument();
+    expect(screen.getByText(/Карпинского, 33А/)).toBeInTheDocument();
   });
 });
 

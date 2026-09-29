@@ -1,5 +1,14 @@
 # Runbook — M6 auto-draft suppress tuning + observability
 
+> **СНЯТ (DRF-1528, 2026-09-21). Настраивать нечего.**
+> Переписка мастер↔клиент снята целиком (ruling владельца 06.09, OD-7):
+> вместе с ней ушли `apps/master_api/tasks.py`, флаги
+> `AI_DRAFTS_AUTO_TRIGGER_ENABLED` и
+> `IDLE_ACTIVE_DRAFT_SUPPRESS_WINDOW_SECONDS` и сам supress-механизм.
+> Текст ниже оставлен как след решения: он объясняет, почему окно было
+> 60 секунд и какую гонку (#659) закрывало. Ни один его шаг больше не
+> исполним — env-переменные ничего не включают.
+
 > Status: **draft** — pre-pilot setup; activate week-1 of pilot.
 > Last exercised: _never (pre-pilot)_.
 > Target completion sprint: pilot week-2 (post-2026-07-22) — promote to **complete** after first tuning cycle.

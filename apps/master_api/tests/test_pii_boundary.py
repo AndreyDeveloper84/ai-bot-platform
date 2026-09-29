@@ -109,6 +109,8 @@ CUSTOMER_DIGITS = "79997775544"
 #: Pinned so the assertions below never depend on random UUID digits.
 CUSTOMER_ID = uuid.UUID("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee")
 CONVERSATION_ID = uuid.UUID("bbbbbbbb-cccc-dddd-eeee-ffffffffffff")
+#: The upcoming mirror row — what ``booking_detail`` (DRF-2154) renders.
+UPCOMING_APPOINTMENT_ID = uuid.UUID("aaaaaaaa-2154-4000-8000-000000002154")
 
 #: What the master surface renders for :data:`CUSTOMER_ID` — the first
 #: name, which is as much of the customer as OD-W2-2 permits. Every route
@@ -175,9 +177,33 @@ _UUID_RE = re.compile(
 #: what happened on PR #1289, a branch that touches no master surface.
 #:
 #: What this hides, stated plainly: sub-second clock noise, nothing
-#: else. The date, the time down to the second, and every other digit in
-#: the body remain under the assertion, in both passes.
+#: else. In the RAW pass the date, the time down to the second, and every
+#: other digit in the body remain under the assertion.
 _SUBSECOND_RE = re.compile(r"(?<=\d\d:\d\d:\d\d)\.\d{1,9}")
+
+#: DRF-2095 — the collapsed (per-value) pass strips separators, and an ISO
+#: timestamp collapses into a digit run that can contain a phone window:
+#: ``2026-09-18T17:55:49+00:00`` → ``…17554900…`` → ``7554``. That is what
+#: happened on PR #1835 shard 5 at 17:55:49 UTC. Measured: with the date
+#: 2026-09-18, 64 clock seconds per day collide (every ``HH:55:44`` gives
+#: ``5544``; ``05:54:40``, ``17:55:49`` …); other dates add their own. The
+#: clock was a silent parameter of this test.
+#:
+#: So the collapsed pass masks whole timestamp-shaped tokens BY FORM —
+#: ``YYYY-MM-DD``, optionally ``THH:MM[:SS[.ffffff]]`` and ``Z``/``±HH:MM``,
+#: and a bare ``HH:MM:SS`` — before collapsing, the way it already masks
+#: UUIDs. The form is strict (two-digit month/day/hour…): a phone dressed
+#: as ``2026-99-97T77:55:44`` does not parse as a date and stays under the
+#: assertion. What this hides, stated plainly: digits of the customer's
+#: number that happen to be written INSIDE a well-formed timestamp — a
+#: field a server renders from a datetime, not from a phone. The raw pass
+#: still sees every timestamp digit, colons and all.
+_ISO_DATETIME_RE = re.compile(
+    r"(?<!\d)\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])"
+    r"(?:[T ](?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d{1,9})?)?"
+    r"(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)?)?(?!\d)"
+    r"|(?<!\d)(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?!\d)"
+)
 
 
 def _utc(dt_local: datetime) -> datetime:
@@ -236,23 +262,6 @@ def _iter_string_values(payload: object) -> list[str]:
     return out
 
 
-def _assert_excerpt_survived(body: object, *, where: str, witness: str) -> None:
-    """The redacted text must still be in the response.
-
-    Same rule as :func:`_assert_body_is_worth_sweeping`, applied to the
-    redaction tests: «the number is gone» proves nothing about redaction
-    if the *message* is gone too. Redaction that ate the whole excerpt —
-    or a fixture that stopped producing one — would clear every
-    assertion in this class.
-    """
-
-    assert any(witness in value for value in _iter_string_values(body)), (
-        f"{where}: the redacted message is not in the response at all "
-        f"({witness!r} is absent), so «no phone digits here» is vacuous. "
-        "Redaction is supposed to remove the number, not the message."
-    )
-
-
 def _assert_no_customer_phone(raw: str, *, where: str, body: object = None) -> None:
     """No fragment of the customer's number survives anywhere in the response.
 
@@ -283,7 +292,7 @@ def _assert_no_customer_phone(raw: str, *, where: str, body: object = None) -> N
     if body is None:
         body = json.loads(raw)
     for value in _iter_string_values(body):
-        digits = re.sub(r"\D", "", _SUBSECOND_RE.sub("", _UUID_RE.sub("", value)))
+        digits = re.sub(r"\D", "", _ISO_DATETIME_RE.sub("", _UUID_RE.sub("", value)))
         if not digits:
             continue
         for window in windows:
@@ -335,8 +344,11 @@ def seeded_surface(
     a sweep over an empty list passes without looking at anything. What
     each route needs:
 
-    * **roster / conversations** — completed :class:`BookingRequest` rows
-      in the past, and an active conversation with messages.
+    * **roster** — past :class:`RemoteBookingProxy` rows the canon closed
+      and a human closed (``completed_by``): since DRF-1138 the roster reads
+      the mirror, and since DRF-2462 a clock-closed visit is not a visit.
+    * **conversations** — completed :class:`BookingRequest` rows in the
+      past, and an active conversation with messages.
     * **schedule / dashboard** — :class:`RemoteBookingProxy` rows. These
       readers moved to the Ayla mirror in DRF-1085 and no longer see
       ``BookingRequest`` at all, so the mirror is seeded alongside it:
@@ -370,9 +382,11 @@ def seeded_surface(
     service.ayla_service_id = uuid.uuid4()
     service.save(update_fields=["ayla_service_id"])
 
-    def _seed_mirror(visit_at: datetime, status: str) -> None:
+    def _seed_mirror(
+        visit_at: datetime, status: str, *, appointment_id: uuid.UUID | None = None
+    ) -> None:
         RemoteBookingProxy.all_tenants.create(
-            appointment_id=uuid.uuid4(),
+            appointment_id=appointment_id or uuid.uuid4(),
             tenant=tenant,
             bot_user=customer,
             specialist_id=accepted_master.id,
@@ -380,6 +394,9 @@ def seeded_surface(
             start_at=visit_at,
             end_at=visit_at + timedelta(minutes=60),
             status=status,
+            # Закрыл человек — иначе список «Клиенты» (DRF-2462) визит не
+            # засчитает, и обход упрётся в пустой ответ.
+            completed_by="master" if status == RemoteBookingProxy.Status.COMPLETED else "",
         )
 
     for days_ago in PAST_VISIT_DAYS_AGO:
@@ -405,6 +422,7 @@ def seeded_surface(
     _seed_mirror(
         _visit_at(days_offset=FUTURE_VISIT_DAYS_AHEAD),
         RemoteBookingProxy.Status.CONFIRMED,
+        appointment_id=UPCOMING_APPOINTMENT_ID,
     )
 
     ScheduleChangeRequest.all_tenants.create(
@@ -473,6 +491,16 @@ SWEPT_READ_ROUTES: dict[str, SweptRoute] = {
         why="the master's own service list",
         carries_customer_data=False,
     ),
+    "onboarding_readiness": SweptRoute(
+        lambda: reverse("master_api:onboarding_readiness"),
+        # DRF-2370: прежний маркер «capability_not_built» пункт больше не
+        # отдаёт. Ссылка пункта места постоянна и от env не зависит — в
+        # отличие от причины «booking_client_not_configured», которая есть
+        # только при пустом AYLA_BASE_URL.
+        witness="/solo/place",
+        why="the master's own setup checklist (DRF-1794): items, identity, sale_block",
+        carries_customer_data=False,
+    ),
     "dashboard": SweptRoute(
         lambda: reverse("master_api:dashboard"),
         witness=CUSTOMER_FIRST_NAME,
@@ -491,22 +519,20 @@ SWEPT_READ_ROUTES: dict[str, SweptRoute] = {
         why="the master's own pending schedule-change request",
         carries_customer_data=False,
     ),
-    "conversations_list": SweptRoute(
-        lambda: reverse("master_api:conversations_list"),
-        witness=CUSTOMER_FIRST_NAME,
-        why="items[].client_first_name",
-        carries_customer_data=True,
-    ),
-    "conversation_detail": SweptRoute(
-        lambda: reverse("master_api:conversation_detail", args=[CONVERSATION_ID]),
-        witness=CUSTOMER_FIRST_NAME,
-        why="client_first_name on the conversation header",
-        carries_customer_data=True,
-    ),
     "customers_list": SweptRoute(
         lambda: reverse("master_api:customers_list"),
         witness=CUSTOMER_FIRST_NAME,
-        why="customers[].first_name",
+        why=(
+            "customers[].first_name; with ?q= the same route answers the booking-flow "
+            "search (DRF-2154) — {id, name «Имя Ф.», last_visit_date, named} from a "
+            "stubbed Ayla lookup, swept in test_master_bookings_2154"
+        ),
+        carries_customer_data=True,
+    ),
+    "booking_detail": SweptRoute(
+        lambda: reverse("master_api:booking_detail", args=[UPCOMING_APPOINTMENT_ID]),
+        witness=CUSTOMER_FIRST_NAME,
+        why="client.name_initial on the master's own booking (DRF-2154 / DRF-1185)",
         carries_customer_data=True,
     ),
     "catalog_list": SweptRoute(
@@ -609,18 +635,25 @@ class TestLiveResponseSweep:
         client: Client,
         seeded_surface: Conversation,
     ) -> None:
-        """At least five routes must render the seeded customer.
+        """At least four routes must render the seeded customer.
 
         The per-route witness catches one route going quiet. This catches
         the fixture going quiet everywhere at once — the shape DRF-1406
         actually had, where the sweep still «covered nine routes» but
         only three of them had ever seen the customer.
+
+        Порог был пять и опущен до четырёх ровно один раз, с причиной:
+        DRF-1528 снял ``conversations_list`` и ``conversation_detail``
+        вместе с перепиской мастер↔клиент, поэтому клиента показывают
+        четыре маршрута — dashboard, schedule, booking_detail,
+        customers_list. Порог здесь только против тихого усыхания; в обе
+        стороны держит утверждение ``reached == expected`` ниже.
         """
 
         expected = {
             name for name, route in SWEPT_READ_ROUTES.items() if route.carries_customer_data
         }
-        assert len(expected) >= 5, "the customer-facing half of the surface shrank — why?"
+        assert len(expected) >= 4, "the customer-facing half of the surface shrank — why?"
 
         reached = set()
         for name in sorted(SWEPT_READ_ROUTES):
@@ -705,11 +738,23 @@ class TestCustomerTypedContactsAreRedacted:
     OD-W2-2 says «телефон клиента исполнителю не передаётся ни в каком
     виде». A number the customer typed is a form.
 
-    The formats below are the ones a person actually types. The bare
-    ten digits matter in particular: ``apps/observability/pii_filter.py``
-    requires a literal ``+7``/``8`` prefix and would sail past it.
+    **DRF-1528: половина этого класса снята вместе со своей поверхностью.**
+    Ячейки, звавшие ``conversations_list`` / ``conversation_detail``,
+    удалены — не потому, что правило ослабло, а потому, что маршрутов
+    нет: свободный текст клиента мастеру больше не echo-ится ниоткуда, и
+    тест, зовущий снятую ручку, проверял бы 410, а не редактуру. Сам
+    запрет на месте и держится двумя уровнями выше: любой новый маршрут
+    попадает в :data:`SWEPT_READ_ROUTES` или в :data:`NOT_SWEPT_ROUTES`
+    под присмотром :class:`TestRouteCoverage`, а поле с запретным именем
+    ловит :class:`TestSourceLiterals`.
+
+    Что осталось здесь — утверждения о самой редактуре и о маске этого
+    файла: они чистые (не ходят по HTTP) и переживают снятие поверхности.
     """
 
+    #: Форматы, которыми номер пишет живой человек. Голые десять цифр важны
+    #: отдельно: ``apps/observability/pii_filter.py`` требует буквального
+    #: ``+7``/``8`` и мимо них проходит — а редактура обязана поймать.
     TYPED_FORMS = [
         "+79997775544",
         "8 999 777 55 44",
@@ -719,88 +764,68 @@ class TestCustomerTypedContactsAreRedacted:
     ]
 
     @pytest.mark.parametrize("typed", TYPED_FORMS)
-    def test_list_excerpt_carries_no_typed_number(
-        self,
-        client: Client,
-        tenant: Tenant,
-        seeded_surface: Conversation,
-        typed: str,
-    ) -> None:
-        Message.all_tenants.create(
-            tenant=tenant,
-            conversation=seeded_surface,
-            role=Message.Role.USER,
-            content=f"Мой номер {typed}, перезвоните пожалуйста",
-        )
-        resp = client.get(
-            reverse("master_api:conversations_list"),
-            HTTP_AUTHORIZATION=init_data_header("12345"),
-        )
-        assert resp.status_code == 200, resp.content[:400]
-        _assert_excerpt_survived(resp.json(), where="conversations_list", witness="перезвоните")
-        _assert_no_customer_phone(
-            resp.content.decode("utf-8"), where="conversations_list", body=resp.json()
-        )
+    def test_every_typed_form_is_redacted(self, typed: str) -> None:
+        """Утверждение пережило снятие поверхности — здесь оно о функции.
 
-    @pytest.mark.parametrize("typed", TYPED_FORMS)
-    def test_detail_message_body_carries_no_typed_number(
-        self,
-        client: Client,
-        tenant: Tenant,
-        seeded_surface: Conversation,
-        typed: str,
-    ) -> None:
-        Message.all_tenants.create(
-            tenant=tenant,
-            conversation=seeded_surface,
-            role=Message.Role.USER,
-            content=f"Мой номер {typed}, перезвоните пожалуйста",
-        )
-        resp = client.get(
-            reverse("master_api:conversation_detail", args=[CONVERSATION_ID]),
-            HTTP_AUTHORIZATION=init_data_header("12345"),
-        )
-        assert resp.status_code == 200, resp.content[:400]
-        _assert_excerpt_survived(resp.json(), where="conversation_detail", witness="перезвоните")
-        _assert_no_customer_phone(
-            resp.content.decode("utf-8"), where="conversation_detail", body=resp.json()
-        )
-
-    def test_truncation_cannot_leave_a_four_digit_tail(
-        self,
-        client: Client,
-        tenant: Tenant,
-        seeded_surface: Conversation,
-    ) -> None:
-        """Redaction must run BEFORE the 100-char excerpt truncation.
-
-        Truncating first and redacting the excerpt afterwards leaves the
-        head of a sliced number in the excerpt — and a four-digit head is
-        a phone under OD-W2-2 just as a four-digit tail is. The number is
-        placed so the cut lands inside it.
+        Раньше те же пять форматов проверялись через ответ снятых ручек.
+        Маршрутов нет, правило есть: текст клиента, где бы он ни всплыл
+        дальше, проходит через :func:`redact_contacts`.
         """
 
-        from apps.master_api.services.conversations import EXCERPT_MAX_LEN
+        from apps.master_api.pii import PHONE_PLACEHOLDER, redact_contacts
 
-        padding = "а" * (EXCERPT_MAX_LEN - 12)
-        Message.all_tenants.create(
-            tenant=tenant,
-            conversation=seeded_surface,
-            role=Message.Role.USER,
-            content=f"{padding} {CUSTOMER_PHONE} хвост",
-        )
-        resp = client.get(
-            reverse("master_api:conversations_list"),
-            HTTP_AUTHORIZATION=init_data_header("12345"),
-        )
-        assert resp.status_code == 200, resp.content[:400]
-        # The excerpt must actually be the one just written — an empty or
-        # stale excerpt would clear the assertion below without the sliced
-        # number ever having been in the response.
-        _assert_excerpt_survived(resp.json(), where="conversations_list", witness=padding[:40])
+        out = redact_contacts(f"Мой номер {typed}, перезвоните пожалуйста")
+        assert PHONE_PLACEHOLDER in out, out
+        # Положительная пара: сообщение осталось сообщением, а не пустотой.
+        assert "перезвоните" in out, out
+        _assert_no_customer_phone(out, where="redact_contacts", body={"text": out})
+
+    # --- DRF-2095: the clock is not a parameter of this test any more ------
+
+    #: Clock times whose HH:MM:SS collapse into a window of CUSTOMER_DIGITS —
+    #: independent of the date (the window sits inside the six time digits).
+    #: Measured by brute force over a day: 64 such seconds. 17:55:49 is the
+    #: one that went red on PR #1835 shard 5.
+    COLLIDING_TIMES = (
+        time(17, 55, 49, 890712),  # ‥17554900‥ → 7554
+        time(10, 55, 44, 123456),  # ‥10554400‥ → 5544
+        time(5, 54, 40, 0),  # ‥0554400‥ → 5544
+    )
+
+    @staticmethod
+    def _colliding_instant(clock: time) -> datetime:
+        """Tomorrow at ``clock`` (UTC) — newest message on the thread, whatever today is."""
+
+        tomorrow = (dj_timezone.now() + timedelta(days=1)).date()
+        return datetime.combine(tomorrow, clock, tzinfo=timezone.utc)
+
+    def test_a_real_leak_next_to_a_colliding_timestamp_is_still_caught(self) -> None:
+        """The mask hides the timestamp, not the number beside it."""
+
+        stamp = self._colliding_instant(self.COLLIDING_TIMES[0]).isoformat()
+        clean = {"items": [{"last_message_at": stamp, "last_message_excerpt": "перезвоните"}]}
         _assert_no_customer_phone(
-            resp.content.decode("utf-8"), where="conversations_list", body=resp.json()
-        )
+            json.dumps(clean), where="probe", body=clean
+        )  # timestamp alone passes
+        leaking = {
+            "items": [
+                {"last_message_at": stamp, "last_message_excerpt": "мой номер +7 (999) 777-55-44"}
+            ]
+        }
+        with pytest.raises(AssertionError, match="4 digits of the customer's phone"):
+            _assert_no_customer_phone(json.dumps(leaking), where="probe", body=leaking)
+
+    def test_the_mask_is_by_form_not_by_punctuation(self) -> None:
+        """A phone dressed as a timestamp does not parse as a date and stays under the assertion."""
+
+        assert _ISO_DATETIME_RE.sub("", "2026-09-18T17:55:49.890712+00:00") == ""
+        assert _ISO_DATETIME_RE.sub("", "17:55:49") == ""
+        # Invalid month/day/hour: not a timestamp, not masked.
+        dressed = "2026-99-97T77:55:44"
+        assert _ISO_DATETIME_RE.sub("", dressed) == dressed
+        body = {"note": dressed}
+        with pytest.raises(AssertionError, match="4 digits of the customer's phone"):
+            _assert_no_customer_phone(json.dumps(body), where="probe", body=body)
 
     def test_redaction_leaves_canonical_uuids_alone(self) -> None:
         """The UUID trap in ``apps/replay/redactor.py``, not repeated here.
@@ -872,22 +897,154 @@ class TestSelfPiiExemption:
 #: must be added to :data:`SWEPT_READ_ROUTES` or to this map — forcing that
 #: choice is the point of :class:`TestRouteCoverage`.
 NOT_SWEPT_ROUTES: dict[str, str] = {
+    "conversations_retired": (
+        "DRF-1528: девять ручек переписки мастер↔клиент сняты (OD-7); маршрут "
+        "отвечает постоянным 410 с причиной и не читает ни одной строки — "
+        "подметать в нём нечего, см. test_conversations_retired"
+    ),
     "onboarding_claim": "swept by TestSelfPiiExemption (carries the one exemption)",
     "onboarding_accept": "POST mutation; response is {master_id, session_token, expires_at}",
     "onboarding_reject": "POST mutation; response carries no customer data",
     "onboarding_profile": "PATCH mutation; response is the master's own profile card",
     "profile": "alias of onboarding_profile — same view function",
+    "profile_card": (
+        "GET proxy to the catalog's specialist profile (DRF-1814, part A): the master's "
+        "own name/bio/photo, the catalog's limits, the badge flag and category chips — "
+        "no customer record; shape pinned in test_profile_card_portfolio_1814"
+    ),
+    "profile_portfolio": (
+        "GET/POST proxy to the catalog's portfolio of the signed master (DRF-1814): "
+        "the master's own photos, no customer record — test_profile_card_portfolio_1814"
+    ),
+    "profile_portfolio_item": (
+        "DELETE proxy to the catalog's portfolio item (DRF-1814); response is {count, limit}"
+    ),
     "availability_request": "POST mutation; response is the master's own request id/status",
-    "conversation_send_message": "POST mutation; body is the master's own outbound message",
-    "conversation_mark_read": "POST mutation; response is an ack",
-    "conversation_promote": "POST mutation; response is the conversation tier",
-    "conversation_draft_generate": "POST mutation; calls the LLM — covered by test_ai_drafts",
-    "conversation_draft_send_as_me": "POST mutation; covered by test_ai_drafts",
-    "conversation_draft_release_to_ai": "POST mutation; covered by test_ai_drafts",
     "billing_status": "proxy to the external billing service; shape is the provider's",
     "billing_card_setup": "proxy to the external billing service",
     "billing_pay_debt": "proxy to the external billing service",
     "payout_preview": "proxy to the external billing service",
+    "service_selection": (
+        "GET/POST proxy to the catalog's service selection (DRF-1895): the master's own "
+        "selected canon services and two server counters, no customer record — shape "
+        "pinned in test_service_selection_1895"
+    ),
+    "service_offer": (
+        "PUT proxy (DRF-1895): the master's own price/duration; response is the "
+        "selection state — pinned in test_service_selection_1895"
+    ),
+    "selected_service": (
+        "DELETE proxy (DRF-1895): removes the master's own selected service; response "
+        "is the selection state — pinned in test_service_selection_1895"
+    ),
+    "publication_readiness": (
+        "GET proxy to the catalog's publication readiness (DRF-1797): the master's own "
+        "checklist codes, no customer record — pinned in test_publication_proxy_1797"
+    ),
+    "publication": (
+        "POST proxy (DRF-1797): the master's own publish command; response is the "
+        "catalog's command record — pinned in test_publication_proxy_1797"
+    ),
+    "publication_status": (
+        "GET proxy (DRF-1797): the master's own profile status and readiness, no "
+        "customer record — pinned in test_publication_proxy_1797"
+    ),
+    "service_directions": (
+        "GET proxy to the catalog's canon directions (DRF-1799): roots of the global "
+        "taxonomy, rows whitelisted to id/name/slug/icon/sort_order, no customer record — "
+        "pinned in test_service_canon_proxy_1799"
+    ),
+    "service_templates": (
+        "GET proxy to the catalog's templates of one direction (DRF-1799): canon service "
+        "names and their category, whitelisted, no prices and no customer record — "
+        "pinned in test_service_canon_proxy_1799"
+    ),
+    "assistant_history": (
+        "the master's own transcript with Ayla — no customer record is "
+        "rendered as fields; swept for forbidden keys and for the "
+        "customer's phone digits by test_assistant_api.TestNoCustomerPii, "
+        "which seeds a transcript first (a sweep here would run on an "
+        "empty thread and prove nothing — DRF-1406)"
+    ),
+    "assistant_ask": "POST; calls the LLM — covered by test_assistant_api",
+    "assistant_context": (
+        "GET (DRF-2153): the master's own day context for the Ayla start screen — "
+        "{today: {count, next: {client_name_initial «Анна П.», time, service_name, "
+        "duration_min}}, chips}; the customer reaches it as first name + initial only, "
+        "swept for the customer's phone in test_assistant_context_2153"
+    ),
+    "assistant_confirm": "POST mutation; body is a signed action token only",
+    "working_hours": (
+        "GET/PUT proxy to the catalog's working-hours route (DRF-1816): the "
+        "response is the master's own weekly template + timezone — swept with a "
+        "stubbed client in test_working_hours_1816. Отказ 409 (DRF-2200, макет "
+        "DRF-1186 экран 4) несёт конфликтующие записи, и клиент в них назван "
+        "именем с инициалом («Анна П.»), как на «Расписании»: телефона нет, "
+        "сметено в test_hours_conflicts_2200.TestConflictsKeepThePiiBoundary"
+    ),
+    # DRF-1802 (M10) — «своя услуга» мастера: прокси заявок о разрыве канона
+    # в каталог. Отдают только собственные заявки мастера (название, цена,
+    # длительность, статус) — клиентских данных там нет по построению; ответ
+    # приходит из каталога, поэтому свип живым клиентом не собрать — покрыты
+    # подменённым клиентом в test_canon_gap_requests_1802.
+    "canon_gap_requests": (
+        "proxy of the master's own canon-gap requests to the catalog; no customer "
+        "record — covered with a stubbed client in test_canon_gap_requests_1802"
+    ),
+    "canon_gap_similar": (
+        "canonical-template name hint from the catalog; no customer record — covered "
+        "with a stubbed client in test_canon_gap_requests_1802"
+    ),
+    "canon_gap_request_detail": (
+        "one own canon-gap request from the catalog; no customer record — covered "
+        "with a stubbed client in test_canon_gap_requests_1802"
+    ),
+    # DRF-2154 (М-2) — записи мастера: создание и слоты идут через тот же
+    # сервис, что салонная стойка (admin_api/services/booking); ответы —
+    # исход §18 / окна времени, клиентских полей в них нет по построению.
+    # Телефон нового гостя — только ВХОД (DRF-1184 «имя + телефон»), в ответ
+    # не эхом — пришпилено в test_master_bookings_2154 (_assert_no_customer_phone).
+    "create_booking": (
+        "POST; the §18 outcome envelope {outcome, detail, appointment_id | reason_code, "
+        "alternatives, idempotency_key} — a verdict about the action, never the customer; "
+        "the new guest's phone is input only and is pinned as never echoed in "
+        "test_master_bookings_2154"
+    ),
+    "booking_slots": (
+        "GET proxy of Ayla's bookable starts for the master's own day and one service: "
+        "{date, timezone, service_id, duration_min, slots[]} — no customer record; swept "
+        "with a stubbed client in test_master_bookings_2154"
+    ),
+    "accepting_bookings": (
+        "GET/PATCH proxy to the catalog's availability route (DRF-1845): the "
+        "response is exactly {accepting_bookings: bool, status} of the master's "
+        "own profile, no customer record — shape pinned in test_accepting_bookings_1845"
+    ),
+    # DRF-1811 (M19) — место работы соло-мастера: прокси в каталог. Ответ —
+    # своё место (адрес мастера, подпись клиенту, статус, координаты) и зоны
+    # выезда; клиентских данных нет по построению; ответ приходит из каталога,
+    # поэтому свип живым клиентом не собрать — покрыты подменённым клиентом
+    # в test_service_locations_1811 (shown_to_clients — слово каталога).
+    "service_locations": (
+        "GET/POST proxy to the catalog's service-locations route (DRF-1811): the "
+        "master's own place and travel areas, no customer record — covered with a "
+        "stubbed client in test_service_locations_1811"
+    ),
+    "service_location_detail": (
+        "PATCH proxy to one own place/area in the catalog (DRF-1811); no customer "
+        "record — covered with a stubbed client in test_service_locations_1811"
+    ),
+    "address_suggest": (
+        "POST; address suggestions from the catalog's geocoder for the master's OWN "
+        "address (q in the body, never logged); no customer record — covered with a "
+        "stubbed client in test_service_locations_1811"
+    ),
+    "reviews": (
+        "GET proxy to the catalog's own-reviews route (DRF-1857): lives in the "
+        "catalog, so a live sweep cannot build it; the client is «Имя Ф.» / «Клиент» / "
+        "null, rows whitelisted to id/rating/text/client_name/service_name/created_at — "
+        "no phone, surname or username pinned with a stubbed client in test_master_reviews_1857"
+    ),
 }
 
 

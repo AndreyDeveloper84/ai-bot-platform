@@ -21,7 +21,6 @@ routed back through the global bot is a follow-up (after the P0 Ayla reground).
 from __future__ import annotations
 
 import logging
-import re
 import uuid
 
 from django.conf import settings
@@ -34,25 +33,69 @@ from apps.marketplace.discovery import (
     service_rows_score,
 )
 from apps.orchestrator.discovery import (
+    CALLBACK_CATALOG_SERVICES_PREFIX,
     CALLBACK_DISCOVER_BOOK_PREFIX,
     DiscoveryReply,
     decode_query_ref,
     encode_query_ref,
+    keyboard_envelope,
+    rotation_seed,
+    show_salons_button,
 )
 
 logger = logging.getLogger(__name__)
 
 # Booking skill's stable master-pick callback contract (apps/skills/booking —
 # S1 anti-touch). Format ``cb:book:pick_master:<master>:<service>`` — the
-# service part is REQUIRED: without it the skill's stale-context guard
-# (deliberately, RB1.1-D05) refuses the tap with «Контекст записи устарел»,
-# which on this path was a guaranteed dead-end (DRF-962). Under the YClients
-# path both ids are native ints; under Ayla REST both are canonical UUIDs.
+# service part is REQUIRED: without it the skill's incomplete-callback guard
+# (deliberately, RB1.1-D05) refuses the tap, which on this path was a
+# guaranteed dead-end (DRF-962). Under the YClients path both ids are native
+# ints; under Ayla REST both are canonical UUIDs.
 _CALLBACK_BOOK_PICK_MASTER = "cb:book:pick_master:"
 
+# DRF-1492 — «попробуйте выбрать другого» named the move and left the person
+# to find it. Which chip performs it depends on what the failing branch still
+# knows: inside tenant T the salon's own catalog is one tap away (and its
+# service chips lead to its other masters); with T unresolved the only true
+# thing left is the salon list. The two wordings differ because the two
+# offers differ — one sentence covering both would have to be vague enough to
+# fit the weaker one.
 _UNAVAILABLE_REPLY = (
-    "К сожалению, запись к этому мастеру сейчас недоступна — попробуйте выбрать другого."
+    "К сожалению, запись к этому мастеру сейчас недоступна — "
+    "посмотрите, что ещё есть в этом салоне."
 )
+_UNAVAILABLE_REPLY_NO_TENANT = (
+    "К сожалению, запись к этому мастеру сейчас недоступна — посмотрите наши салоны."
+)
+
+_SALON_CATALOG_LABEL = "Что есть в этом салоне"
+
+
+def _salon_catalog_button(tenant_id: uuid.UUID) -> dict[str, str]:
+    """The «open this salon's catalog» chip — ``cb:catalog:services:{tenant}``.
+
+    Reuses the DRF-1304 grammar verbatim rather than inventing a «show me
+    other masters» callback: that chain (услуги → мастера → запись) is already
+    tappable end to end and already answered by a by-id read, so the offer
+    this module makes is one somebody else keeps working.
+    """
+    return {
+        "label": _SALON_CATALOG_LABEL,
+        "callback": f"{CALLBACK_CATALOG_SERVICES_PREFIX}{tenant_id}",
+    }
+
+
+def _chips(text: str, buttons: list[dict[str, str]]) -> DiscoveryReply:
+    """Reply + keyboard, through the one envelope builder this surface has."""
+    return DiscoveryReply(text=text, action_data=keyboard_envelope(buttons))
+
+
+def _unavailable_reply(tenant_id: uuid.UUID | None = None) -> DiscoveryReply:
+    """«Запись к этому мастеру недоступна» — with the way out attached."""
+    if tenant_id is None:
+        return _chips(_UNAVAILABLE_REPLY_NO_TENANT, [show_salons_button()])
+    return _chips(_UNAVAILABLE_REPLY, [_salon_catalog_button(tenant_id)])
+
 
 # The tap carried no bookable service (pre-DRF-962 keyboard, an ambiguous
 # query like bare «массаж», or a service that went inactive between render and
@@ -82,10 +125,11 @@ _ASK_SERVICE_PICK = "Выберите услугу мастера {name}:"
 _ASK_SERVICE_NOT_OFFERED = "У мастера {name} нет услуги «{service}». Вот что можно выбрать:"
 _ASK_SERVICE_NOT_OFFERED_BARE = (
     "У мастера {name} нет услуги «{service}», а других доступных услуг у него сейчас нет — "
-    "попробуйте выбрать другого мастера."
+    "посмотрите, что ещё есть в этом салоне."
 )
 _ASK_SERVICE_REPLY_BARE = (
-    "Чтобы записаться к мастеру {name}, напишите, какая услуга вас интересует."
+    "Чтобы записаться к мастеру {name}, напишите, какая услуга вас интересует — "
+    "или посмотрите, что есть в этом салоне."
 )
 # Shown when the master offers more services than the keyboard carries. Typing
 # stays available as the escape hatch — it is a worse path (that is this
@@ -113,6 +157,38 @@ _ASK_SERVICE_FILTERED_NOTE = (
 # keeps the keyboard scannable. Ordered by name — a stable, explainable order
 # (there is no popularity signal in the catalog mirror to rank by).
 _ASK_SERVICE_BUTTON_LIMIT = 10
+
+#: Сколько строк меню набирается ДО среза. Ротации нужен весь ничейный
+#: пласт: срез в SQL оставлял бы ей нечего переставлять — та же причина, по
+#: которой DRF-1530 ничего не переупорядочила. Потолок с запасом больше
+#: кнопочного бюджета и ограничен, чтобы у мастера с длинным прайсом чтение
+#: не разрослось.
+_ASK_SERVICE_SCAN_CAP = 200
+
+
+def _menu_rows(qs, *, seed: str | None) -> list[tuple[uuid.UUID, str]]:
+    """Строки меню услуг: набрать до потолка, развести ничьи, срезать.
+
+    C-01. До этой правки ничьи разводились алфавитом, а срез в кнопочный
+    бюджет делал SQL — значит услуги, чьё имя стоит дальше по алфавиту, не
+    показывались НИКОГДА, и кто именно выпал, решала первая буква. Канон §9
+    запрещает алфавитный fallback именно при отсечении top-N: отсечение
+    превращает порядок в систематическое смещение показов.
+
+    Ротация — та же, что у списка мастеров
+    (:func:`apps.marketplace.discovery.rotate_ties`), а не вторая своя.
+    Второй ключ означал бы второй контракт «стабильно внутри человека,
+    равномерно между людьми», и разойтись им — вопрос времени.
+
+    ``seed`` ``None`` — прежний детерминированный порядок: вызывающий без
+    разговора поведения не меняет.
+    """
+    from apps.marketplace.discovery import rotate_ties
+
+    rows = list(qs[:_ASK_SERVICE_SCAN_CAP])
+    if seed:
+        rows = rotate_ties(rows, seed)
+    return [(row.id, row.name) for row in rows[: _ASK_SERVICE_BUTTON_LIMIT + 1]]
 
 
 def _ask_service_reply(
@@ -142,9 +218,17 @@ def _ask_service_reply(
     path that works today — and the bullets give the user that exact spelling
     to copy instead of reconstructing it from memory.
 
-    Empty ``rows`` means there is nothing to offer, so no keyboard is built:
-    an empty ``buttons`` list is dropped by ``_build_attachments`` anyway, and
-    a header promising a list nobody can see would repeat this ticket's bug.
+    Empty ``rows`` means there is no SERVICE list to offer, so no service
+    keyboard is built: an empty ``buttons`` list is dropped by
+    ``_build_attachments`` anyway, and a header promising a list nobody can
+    see would repeat this ticket's bug.
+
+    DRF-1492 does not reopen that decision: the branch still refuses to draw a
+    service menu it does not have. What it adds is the ONE chip that is not a
+    service menu — the salon's own catalog — because both bare wordings name a
+    move («попробуйте выбрать другого мастера», «напишите, какая услуга вас
+    интересует») and neither gave the reader anything to press. The rule being
+    kept is «no EMPTY keyboard», not «no keyboard».
     """
     if not rows:
         text = (
@@ -152,7 +236,7 @@ def _ask_service_reply(
             if not_offered_name is not None
             else _ASK_SERVICE_REPLY_BARE.format(name=master_name)
         )
-        return DiscoveryReply(text=text)
+        return _chips(text, [_salon_catalog_button(tenant_id)])
 
     header = (
         _ASK_SERVICE_NOT_OFFERED.format(name=master_name, service=not_offered_name)
@@ -216,7 +300,7 @@ def handoff_to_booking(
     """
     # Local imports keep app-load order clean + the tenant-scoped models out of
     # module import time.
-    from apps.catalog.models import CatalogMaster, CatalogService, MasterService
+    from apps.catalog.models import CatalogMaster, CatalogService, MasterService, sellable_edge_q
     from apps.conversations.services import resolve_active_conversation
     from apps.identity.services import resolve_or_create_bot_user
     from apps.skills.base import SkillContext
@@ -227,7 +311,7 @@ def handoff_to_booking(
     tenant = Tenant.objects.filter(id=tenant_id).first()
     if tenant is None:
         logger.warning("marketplace.handoff.unknown_tenant tenant=%s trace=%s", tenant_id, trace_id)
-        return DiscoveryReply(text=_UNAVAILABLE_REPLY)
+        return _unavailable_reply()
 
     # ── Enter T's scope. Everything below is correctly scoped to T; this is the
     # ── ONLY place commercial state is read for this handoff. ───────────────
@@ -250,7 +334,7 @@ def handoff_to_booking(
                 master_id,
                 trace_id,
             )
-            return DiscoveryReply(text=_UNAVAILABLE_REPLY)
+            return _unavailable_reply(tenant_id)
 
         # Resolve the native master id the booking entrypoint expects, per the
         # BOOKING_VIA_AYLA_REST flag. yclients_staff_id is NULLABLE (master not
@@ -265,7 +349,7 @@ def handoff_to_booking(
                 master_id,
                 trace_id,
             )
-            return DiscoveryReply(text=_UNAVAILABLE_REPLY)
+            return _unavailable_reply(tenant_id)
         else:
             native_master_id = str(master.yclients_staff_id)
 
@@ -292,7 +376,9 @@ def handoff_to_booking(
             edge_exists = service is not None and (
                 MasterService.all_tenants.filter(
                     tenant=tenant, master_id=master.id, service_id=service.id
-                ).exists()
+                )
+                .sellable()
+                .exists()
             )
             if service is not None and edge_exists and service.ayla_service_id is not None:
                 native_service_id = str(service.ayla_service_id)
@@ -321,7 +407,9 @@ def handoff_to_booking(
                     tapped is not None
                     and not MasterService.all_tenants.filter(
                         tenant=tenant, master_id=master.id, service_id=service_id
-                    ).exists()
+                    )
+                    .sellable()
+                    .exists()
                 ):
                     not_offered_name = tapped
             # Funnel visibility (review): without an event, a cohort whose
@@ -364,6 +452,7 @@ def handoff_to_booking(
             filtered = False
             if flag_on:
                 menu_qs = CatalogService.objects.filter(
+                    sellable_edge_q("masters_offering__"),
                     masters_offering__master=master,
                     is_active=True,
                     ayla_service_id__isnull=False,
@@ -385,6 +474,11 @@ def handoff_to_booking(
                 # rendering must not. Same functions, same order, so a request
                 # read off a button means what it meant when it produced the
                 # card.
+                # C-01 — сид ротации меню. Разговор, а не случайность:
+                # два тапа по одной кнопке в одном диалоге обязаны дать один
+                # порядок, разные люди — разный. ``None`` (разговора ещё нет)
+                # оставляет прежний алфавитный порядок и ничего не ломает.
+                menu_seed = rotation_seed(_global_conversation(global_bot_user))
                 parsed = parse_stems(decode_query_ref(query_ref))
                 if not parsed.is_empty:
                     narrowed = menu_qs.filter(service_rows_match_q(parsed))
@@ -394,25 +488,30 @@ def handoff_to_booking(
                         # service that merely shares one stem. A goal query
                         # has no score (carrying a goal is not a matter of
                         # degree) and keeps the name order.
-                        narrowed = narrowed.annotate(menu_score=score).order_by(
-                            "-menu_score", "name"
+                        #
+                        # DRF-1530 moved that score from a stem COUNT to
+                        # match precision, in step with the master list this
+                        # menu sits one tap behind: two screens ordering the
+                        # same catalog two different ways is the failure the
+                        # ticket asked to be decided rather than left.
+                        # Аннотация зовётся ``match_score``, как на
+                        # соседних поверхностях: это одно и то же выражение
+                        # (DRF-1530), и ротация читает именно его. Своё имя
+                        # здесь означало бы, что ничьи разводит не тот же
+                        # механизм, что у мастеров.
+                        narrowed = narrowed.annotate(match_score=score).order_by(
+                            "-match_score", "name"
                         )
                     else:
                         narrowed = narrowed.order_by("name")
-                    narrowed_rows = list(
-                        narrowed.values_list("id", "name")[: _ASK_SERVICE_BUTTON_LIMIT + 1]
-                    )
+                    narrowed_rows = _menu_rows(narrowed, seed=menu_seed)
                     if narrowed_rows:
                         rows, filtered = narrowed_rows, True
                 if not filtered:
                     # +1 row to detect truncation without a second COUNT query
                     # (the narrowed read above takes the same +1 for the same
                     # reason).
-                    rows = list(
-                        menu_qs.order_by("name").values_list("id", "name")[
-                            : _ASK_SERVICE_BUTTON_LIMIT + 1
-                        ]
-                    )
+                    rows = _menu_rows(menu_qs.order_by("name"), seed=menu_seed)
                 truncated = len(rows) > _ASK_SERVICE_BUTTON_LIMIT
                 rows = rows[:_ASK_SERVICE_BUTTON_LIMIT]
             logger.info(
@@ -453,7 +552,7 @@ def handoff_to_booking(
                 master_id,
                 trace_id,
             )
-            return DiscoveryReply(text=_UNAVAILABLE_REPLY)
+            return _unavailable_reply(tenant_id)
 
         carry_time_preference(global_bot_user, conversation)
 
@@ -551,10 +650,24 @@ BOOKING_CALLBACK_PREFIXES = (
     "cb:book:cancel:",
 )
 
-# Deterministic reply when the tap's tenant can no longer be resolved (stale
-# keyboard after pending-row cleanup, forged id, flag-off int ids). Mirrors
-# the booking skill's own stale-context reply — the user restarts selection.
-_STALE_BOOKING_CALLBACK_REPLY = "Контекст записи устарел. Начните выбор услуги заново."
+# Deterministic replies when a routed ``cb:book:*`` tap cannot reach tenant T
+# at all. Mirrors the booking skill's split (DRF-1473): none of the three
+# branches below is about time, so none of them says «устарел» any more. The
+# tenant of a tap is resolved from the master id it carries, so «не нахожу
+# мастера» is the literal truth in the first two, and each branch names itself
+# in the journal.
+_UNRESOLVED_BOOKING_CALLBACK_REPLY = (
+    "Не нахожу этого мастера в каталоге — записаться по этой кнопке не получится. "
+    "Посмотрите наши салоны и выберите заново."
+)
+
+# The skill ran but produced nothing to say. Never observed in the pilot; it
+# exists so an empty reply can never reach the user as a blank message, and it
+# is logged (it used to be the one silent branch on this path).
+_EMPTY_BOOKING_CALLBACK_REPLY = (
+    "Не получилось продолжить запись по этой кнопке. "
+    "Посмотрите, что есть в этом салоне, и выберите заново."
+)
 
 
 def carry_time_preference(global_bot_user, conversation) -> None:
@@ -723,12 +836,13 @@ def _groundable_service_rows(master, parsed) -> list[tuple[uuid.UUID, str, int]]
 
     Caller must already be inside ``tenant_scope(tenant)``.
     """
-    from apps.catalog.models import CatalogService
+    from apps.catalog.models import CatalogService, sellable_edge_q
 
     if parsed.is_empty:
         return []
     rows = (
         CatalogService.objects.filter(
+            sellable_edge_q("masters_offering__"),
             masters_offering__master=master,
             is_active=True,
             ayla_service_id__isnull=False,
@@ -1127,11 +1241,11 @@ def route_booking_callback(
     tenant = _resolve_booking_callback_tenant(callback_text)
     if tenant is None:
         logger.info(
-            "marketplace.booking_callback.unresolved callback=%r trace=%s",
+            "marketplace.booking_callback.refused reason=tenant_unresolved callback=%r trace=%s",
             callback_text[:60],
             trace_id,
         )
-        return DiscoveryReply(text=_STALE_BOOKING_CALLBACK_REPLY)
+        return _chips(_UNRESOLVED_BOOKING_CALLBACK_REPLY, [show_salons_button()])
 
     with tenant_scope(tenant):
         per_tenant_bot_user = resolve_or_create_bot_user(
@@ -1144,11 +1258,11 @@ def route_booking_callback(
         conversation = resolve_active_conversation(per_tenant_bot_user)
         if conversation is None:
             logger.warning(
-                "marketplace.booking_callback.no_conversation tenant=%s trace=%s",
+                "marketplace.booking_callback.refused reason=no_conversation tenant=%s trace=%s",
                 tenant.id,
                 trace_id,
             )
-            return DiscoveryReply(text=_STALE_BOOKING_CALLBACK_REPLY)
+            return _chips(_UNRESOLVED_BOOKING_CALLBACK_REPLY, [show_salons_button()])
 
         # Re-carry on every tap: the day / part chips are separate turns and
         # each of them has to know what the user asked for out loud.
@@ -1188,7 +1302,17 @@ def route_booking_callback(
                 reason=result.handoff_reason or "booking_handoff",
             )
 
-    reply_text = (result.reply_text if result is not None else "") or _STALE_BOOKING_CALLBACK_REPLY
+    reply_text = result.reply_text if result is not None else ""
+    if not reply_text:
+        logger.warning(
+            "marketplace.booking_callback.refused reason=empty_skill_reply tenant=%s trace=%s",
+            tenant.id,
+            trace_id,
+        )
+        # DRF-1492 — the fallback names a move («выберите заново»), so it
+        # carries one. The tenant IS resolved on this branch, so the chip can
+        # be that salon's catalog rather than the whole marketplace.
+        return _chips(_EMPTY_BOOKING_CALLBACK_REPLY, [_salon_catalog_button(tenant.id)])
     action_data = result.action_data if result is not None else None
     return DiscoveryReply(text=reply_text, action_data=action_data)
 
@@ -1202,38 +1326,53 @@ def route_booking_callback(
 # (brief §3) and the mute guard that keeps the bot silent while an operator
 # drives ANY of the user's dialogs.
 
-# A keyword occurrence is rejected when a standalone negation particle sits
-# within this many characters before it («мне не нужен оператор»). Word-boundary
-# matching: Cyrillic letters are word chars, so «ненужен» does not false-trip.
-_NEGATION_WINDOW = 15
-_NEGATION_RE = re.compile(r"\b(?:не|без)\b")
-
 
 def matches_human_handoff_request(text: str) -> bool:
     """Deterministic «user asks for a human» check for the global path (DRF-1015).
 
-    Reuses the tenant skill's ``_HANDOFF_KEYWORDS`` — imported, NEVER
-    duplicated, so DRF-972's dictionary extension lands on both paths at once.
-    Plain substring matching would fire on «мне не нужен оператор», so an
-    occurrence is rejected when a standalone «не»/«без» appears in the short
-    window before it; the text counts as a request when at least one
-    occurrence is NOT negated. Deliberately a small deterministic filter, not
-    a classifier — the pilot needs a working exit to a human, not perfect NLU.
+    Delegates to the tenant skill's rule — ONE rule for both paths
+    (DRF-2545). Before that the two paths answered the same question
+    differently: the skill by bare substring, this function by the same
+    substring plus a 15-character negation window. Measured on the
+    DRF-2545 corpora they fired on 24/24 and 21/24 non-requests; the rule,
+    its limits and the numbers live in ``apps.skills.human_handoff.skill``.
     """
-    from apps.skills.human_handoff.skill import _HANDOFF_KEYWORDS
+    from apps.skills.human_handoff.skill import is_handoff_request
 
-    lower = text.lower()
-    for keyword in _HANDOFF_KEYWORDS:
-        start = 0
-        while True:
-            idx = lower.find(keyword, start)
-            if idx < 0:
-                break
-            window = lower[max(0, idx - _NEGATION_WINDOW) : idx]
-            if not _NEGATION_RE.search(window):
-                return True
-            start = idx + len(keyword)
-    return False
+    return is_handoff_request(text)
+
+
+def person_handoff_muted(*, channel: str, channel_user_id: str) -> bool:
+    """True, пока человеком занят живой оператор — БЕЗ привязки к диалогу.
+
+    Тот же радиус, что у :func:`global_handoff_muted` (DRF-1015: мьют ходит
+    за человеком, а не за диалогом), но спрашивать можно оттуда, где текущего
+    диалога нет вовсе, — например из проактивной задачи (DRF-2342).
+
+    Две половины, и вторая не лишняя: задача может быть заведена на одной
+    оболочке личности, а диалог в ``HUMAN_HANDOFF`` — другой; проверять
+    только задачи значило бы пропустить путь, который состояние диалога
+    ставит сам.
+
+    Один источник у обоих читателей: :func:`global_handoff_muted` зовёт эту
+    же функцию, поэтому спискам статусов и типов задач разойтись нечем.
+    """
+    from apps.conversations.models import Conversation
+    from apps.handoff.models import AdminTask
+    from apps.identity.models import BotUser
+
+    shells = BotUser.all_tenants.filter(channel=channel, channel_user_id=channel_user_id).values(
+        "id"
+    )
+    if AdminTask.all_tenants.filter(
+        bot_user_id__in=shells,
+        task_type=AdminTask.TaskType.HANDOFF,
+        status__in=(AdminTask.Status.OPEN, AdminTask.Status.IN_PROGRESS),
+    ).exists():
+        return True
+    return Conversation.all_tenants.filter(
+        bot_user_id__in=shells, state=Conversation.State.HUMAN_HANDOFF
+    ).exists()
 
 
 def global_handoff_muted(*, conversation, channel: str, channel_user_id: str) -> bool:
@@ -1256,18 +1395,12 @@ def global_handoff_muted(*, conversation, channel: str, channel_user_id: str) ->
     filtered by ``task_type``/``status`` (``status`` is db_indexed).
     """
     from apps.conversations.models import Conversation
-    from apps.handoff.models import AdminTask
-    from apps.identity.models import BotUser
 
     if conversation.state == Conversation.State.HUMAN_HANDOFF:
         return True
-    return AdminTask.all_tenants.filter(
-        bot_user_id__in=BotUser.all_tenants.filter(
-            channel=channel, channel_user_id=channel_user_id
-        ).values("id"),
-        task_type=AdminTask.TaskType.HANDOFF,
-        status__in=(AdminTask.Status.OPEN, AdminTask.Status.IN_PROGRESS),
-    ).exists()
+    # Вторая половина — одна на обоих читателей (DRF-2342): список статусов
+    # и тип задачи живут в одном месте, копии разойтись нечему.
+    return person_handoff_muted(channel=channel, channel_user_id=channel_user_id)
 
 
 def route_global_human_handoff(
@@ -1279,14 +1412,26 @@ def route_global_human_handoff(
 ) -> DiscoveryReply:
     """Escalate a tenant-less «нужен человек» turn to a human (DRF-1015).
 
-    Queue addressing (brief §3): when the channel identity has active
-    per-tenant conversation(s), the task lands on the MOST RECENT tenant's
-    conversation — that salon is the side that can actually help, and
-    ``create_admin_task`` mutes the tenant dialog for free. Without a tenant
-    context the task lands on the GLOBAL conversation under the sentinel
-    tenant — the platform queue. Either way the user gets the same
-    confirmation line the tenant skill uses (``_HANDOFF_REPLY`` — reused, not
-    reworded).
+    Queue addressing (DRF-2545, решение главного окна 28.09, вариант B): задача
+    ложится на салонный разговор, только когда салон у этой личности ОДИН —
+    адресат тогда однозначен, и ``create_admin_task`` усыпляет его диалог
+    законно. Салонов два и больше — сообщение с глобальной поверхности предмета
+    не называет (или называет не того, кого выбрала бы давность), и задача
+    идёт в очередь платформы: GLOBAL-разговор под сентинел-тенантом. Ни один
+    салонный диалог при этом не замолкает.
+
+    Было (brief §3): последний по ``last_message_at`` салонный разговор. Так
+    «в салоне Б нагрубили, позовите администратора» будило салон А — его бот
+    молчал, персоналу приходило «клиент ждёт», а жалоба на Б ложилась в
+    ``reason`` задачи А (буква (в): видит чужое).
+
+    Цена ошибки односторонняя, и выбор сделан по ней: лишняя переадресация
+    внутренней командой дешевле ложного молчания у салона, о котором речь не
+    шла. Спросить «о каком салоне речь?» — видимый текст, он ждёт слова
+    владельца.
+
+    Человек в любом случае получает ту же строку, что и в навыке салона
+    (``_HANDOFF_REPLY`` — повторно используется, не переписывается).
     """
     from apps.handoff.models import AdminTask
     from apps.handoff.services import create_admin_task
@@ -1295,7 +1440,7 @@ def route_global_human_handoff(
     from apps.tenancy.context import tenant_scope
 
     reason = f"Global-path trigger phrase: {message_text[:80]}"
-    target = _latest_tenant_conversation(global_bot_user)
+    target = _unambiguous_tenant_conversation(global_bot_user)
     if target is not None:
         with tenant_scope(target.tenant):
             task = create_admin_task(
@@ -1321,30 +1466,42 @@ def route_global_human_handoff(
     return DiscoveryReply(text=_HANDOFF_REPLY)
 
 
-def _latest_tenant_conversation(global_bot_user):
-    """Most recently active per-tenant Conversation for this channel identity.
+def _unambiguous_tenant_conversation(global_bot_user):
+    """Салонный разговор этой личности — только если салон у неё ОДИН (DRF-2545, B).
 
-    ``None`` when the user has never talked to a salon — the caller then falls
-    back to the platform queue (sentinel). «Most recent» = latest
-    ``last_message_at`` (tie-break ``created_at``): the salon the user spoke
-    with last is the most plausible addressee, and asking «which salon?» would
-    add a round-trip to the emergency path.
+    ``None`` — салонов нет или их больше одного: вызывающий кладёт задачу в
+    очередь платформы (сентинел), и ни один салон не замолкает.
+
+    Считаются САЛОНЫ, а не разговоры. Основной активный разговор у пары
+    (личность, салон) один — это держит ``conversation_one_active_per_bot_user_tenant``,
+    — но её условие исключает теневые строки (``is_shadow``), и теневой
+    разговор живёт параллельно основному. Здесь теневые исключены: это
+    артефакты наблюдаемости с подавленной отправкой, задача на них не
+    усыпила бы настоящий диалог салона и легла бы туда, где её никто не
+    увидит. Прежняя выборка их не исключала, и более свежая теневая строка
+    выигрывала по давности.
     """
     from apps.conversations.models import Conversation
     from apps.identity.services.global_tenant import get_global_bot_tenant
 
     sentinel = get_global_bot_tenant()
+    salon_dialogs = Conversation.all_tenants.filter(
+        bot_user__channel=global_bot_user.channel,
+        bot_user__channel_user_id=global_bot_user.channel_user_id,
+        is_active=True,
+        is_shadow=False,
+        deleted_at__isnull=True,
+        # Выключенный салон ответить не может: он не адресат и не второй
+        # салон. Иначе единственный живой салон рядом с мёртвым уходил бы
+        # в очередь платформы, а один мёртвый — замолкал бы впустую.
+        tenant__is_active=True,
+    ).exclude(tenant_id=sentinel.id)
+    # Множество по строкам, без DISTINCT: салонов у одного человека единицы.
+    tenant_ids = set(salon_dialogs.values_list("tenant_id", flat=True))
+    if len(tenant_ids) != 1:
+        return None
     return (
-        Conversation.all_tenants.filter(
-            bot_user__channel=global_bot_user.channel,
-            bot_user__channel_user_id=global_bot_user.channel_user_id,
-            is_active=True,
-            deleted_at__isnull=True,
-        )
-        .exclude(tenant_id=sentinel.id)
-        .order_by("-last_message_at", "-created_at")
-        .select_related("tenant")
-        .first()
+        salon_dialogs.order_by("-last_message_at", "-created_at").select_related("tenant").first()
     )
 
 

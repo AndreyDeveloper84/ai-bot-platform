@@ -23,6 +23,10 @@
 import { useNavigate } from "react-router-dom";
 
 import { ComingSoonCard } from "../components/ComingSoonCard";
+import { CustomerAvatarEntry } from "../components/CustomerAvatarEntry";
+import { CustomerTabBar, type CustomerTabKey } from "../components/CustomerTabBar";
+import { useScreenBack } from "../hooks/useScreenBack";
+import { screenRoot } from "../lib/screen-back";
 
 type Surface = "home" | "catalog";
 
@@ -48,20 +52,39 @@ interface Props {
 
 export function PilotComingSoonScreen({ surface }: Props) {
   const navigate = useNavigate();
+
+  // Вид экрана (DRF-1493): корень. Это то, что видно в prod-сборке на
+  // месте закрытой поверхности, и у него та же нижняя навигация из
+  // пяти вкладок — выход отсюда через неё, а не «назад». Объявление
+  // стоит здесь, а не только у вызывающего экрана: в prod до тела
+  // `CustomerWellnessDashboardScreen` дело не доходит вовсе.
+  useScreenBack(
+    screenRoot(
+      "Честная заглушка закрытой вкладки: своя нижняя навигация, " +
+        "родителя нет.",
+    ),
+  );
+
   const copy = COPY[surface];
-  const activeTab = surface === "home" ? "Главная" : "Услуги";
-  const tabs: Array<{ label: string; icon: string; path: string }> = [
-    { label: "Главная", icon: "🏠", path: "/customer/main" },
-    { label: "День", icon: "☀", path: "/customer/wellness" },
-    { label: "Записи", icon: "📅", path: "/customer/records" },
-    { label: "Услуги", icon: "💅", path: "/customer/catalog" },
-    { label: "Я", icon: "👤", path: "/customer/profile" },
-  ];
+  // Таблицей, а не тернаром: новая поверхность без вкладки не проскочит молча
+  // — TypeScript потребует строку в этой записи.
+  const activeTab: Record<Surface, CustomerTabKey | undefined> = {
+    home: "home",
+    catalog: undefined,
+  };
+  // DRF-2191 — панель одна на всех клиентских экранах (`CustomerTabBar`).
+  // «Услуги» из неё ушли (§55 б, макет DRF-1321), поэтому заглушка каталога
+  // рисует панель без подсвеченной вкладки: подсветить нечего, и врать
+  // «ты в Записях» нельзя.
 
   return (
     <div className="profile-screen">
       <header className="records-screen__header">
         <h1 className="records-screen__title">{copy.title}</h1>
+        {/* Вход в профиль — §77 п.60. Стоит на всех экранах нижней
+            панели: вход, который есть не везде, читается как «иногда
+            можно». Имя компонент берёт сам — у этого экрана его нет. */}
+        <CustomerAvatarEntry />
       </header>
 
       <main className="profile-screen__main">
@@ -82,32 +105,9 @@ export function PilotComingSoonScreen({ surface }: Props) {
         </section>
       </main>
 
-      {/* Bottom nav — mirrors the other tab screens; the active tab is
-          the gated surface itself. */}
-      <nav className="wellness-dash__nav" aria-label="Основная навигация">
-        {tabs.map((tab) => {
-          const active = tab.label === activeTab;
-          return (
-            <button
-              key={tab.label}
-              type="button"
-              className={`wellness-dash__nav-tab${
-                active ? " wellness-dash__nav-tab--active" : ""
-              }`}
-              aria-label={tab.label}
-              aria-current={active ? "page" : undefined}
-              onClick={() => {
-                if (!active) navigate(tab.path);
-              }}
-            >
-              <span className="wellness-dash__nav-icon" aria-hidden="true">
-                {tab.icon}
-              </span>
-              <span className="wellness-dash__nav-label">{tab.label}</span>
-            </button>
-          );
-        })}
-      </nav>
+      {/* Панель — общая; активная вкладка только у «Главной» (каталог
+          вкладкой больше не является). */}
+      <CustomerTabBar active={activeTab[surface]} />
     </div>
   );
 }

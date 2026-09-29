@@ -56,6 +56,20 @@ def ayla_appointment_id_of(reminder: BookingReminder) -> UUID | None:
         return None
 
 
+def appointment_ref(reminder: BookingReminder) -> str:
+    """Чем назвать запись напоминания человеку-оператору и в аудите (DRF-2586).
+
+    С DRF-2586 напоминания записи из диалога лежат в ``ayla_appointment_id``, и
+    ``yclients_record_id`` у них пуст: текст «запись None» ничего не говорит
+    оператору. Здесь — UUID записи Ayla, если он есть в любой из колонок,
+    иначе номер YClients, иначе пустая строка.
+    """
+    appointment_id = ayla_appointment_id_of(reminder)
+    if appointment_id is not None:
+        return str(appointment_id)
+    return reminder.yclients_record_id or ""
+
+
 def _appointment_id_spellings(appointment_id: UUID) -> list[str]:
     """String forms a writer may have stored in ``yclients_record_id``.
 

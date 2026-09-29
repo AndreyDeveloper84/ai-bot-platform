@@ -57,6 +57,7 @@ from apps.integrations.ayla.salon_surface import (
     SalonRouteAccess,
     callable_client_methods,
     capability,
+    person_token_client_methods,
     route_for,
     routes_by_access,
 )
@@ -65,6 +66,7 @@ REPO_ROOT = Path(__file__).resolve().parents[4]
 CLIENT_SOURCE = REPO_ROOT / "apps" / "integrations" / "ayla" / "salon_client.py"
 
 TOKEN = "surface-token-under-test"  # pragma: allowlist secret
+PERSON_TOKEN = "person-token-under-test"  # pragma: allowlist secret
 ACTOR = "bot:max:83146139"
 TENANT = "formula-tela"
 
@@ -130,9 +132,9 @@ class TestRegistryShape:
 
     def test_a_callable_row_names_a_method_and_a_blocked_row_does_not(self) -> None:
         for route in SALON_ROUTES:
-            if route.access is SalonRouteAccess.CALLABLE:
+            if route.access in (SalonRouteAccess.CALLABLE, SalonRouteAccess.PERSON_TOKEN):
                 assert route.client_method, (
-                    f"{route.method} {route.path} is CALLABLE with no method"
+                    f"{route.method} {route.path} is {route.access.value} with no method"
                 )
             else:
                 assert route.client_method is None, (
@@ -166,7 +168,26 @@ class TestRegistryShape:
         assert route_for("no_such_method") is None
         assert len(routes_by_access(SalonRouteAccess.CALLABLE)) + len(
             routes_by_access(SalonRouteAccess.SERVICE_READ_ONLY)
-        ) + len(routes_by_access(SalonRouteAccess.JWT_ONLY)) == len(SALON_ROUTES)
+        ) + len(routes_by_access(SalonRouteAccess.JWT_ONLY)) + len(
+            routes_by_access(SalonRouteAccess.PERSON_TOKEN)
+        ) == len(SALON_ROUTES)
+
+    def test_the_person_token_opens_exactly_time_off_and_date_exceptions(self) -> None:
+        """DRF-2607: the owner opened these four, and nothing else. The
+        weekly template waits for the shrink guard; closures stay closed."""
+
+        opened = {(r.method, r.name) for r in routes_by_access(SalonRouteAccess.PERSON_TOKEN)}
+        assert opened == {
+            ("POST", "tenants-master-time-off"),
+            ("DELETE", "tenants-master-time-off-detail"),
+            ("PUT", "tenants-master-schedule-exceptions"),
+            ("DELETE", "tenants-master-schedule-exception-detail"),
+        }
+        weekly = capability("tenants-master-schedule", "PUT")
+        closures = capability("tenants-closures", "POST")
+        assert weekly is not None and closures is not None
+        assert weekly.access is SalonRouteAccess.SERVICE_READ_ONLY
+        assert closures.access is SalonRouteAccess.SERVICE_READ_ONLY
 
 
 # ── 2. the table and the client agree, both ways ─────────────────────────
@@ -195,7 +216,7 @@ class TestClientParity:
     def test_every_callable_row_binds_a_real_method(self) -> None:
         missing = [
             name
-            for name in callable_client_methods()
+            for name in (*callable_client_methods(), *person_token_client_methods())
             if not callable(getattr(AylaSalonClient, name, None))
         ]
         assert not missing, (
@@ -309,6 +330,12 @@ CALLS: dict[str, Any] = {
         appointment_id="APPOINTMENT-ARG",
         expected_version=3,
     ),
+    "mark_no_show": lambda c: c.mark_no_show(
+        actor_external_id=ACTOR,
+        tenant_slug=TENANT,
+        appointment_id="APPOINTMENT-ARG",
+        expected_version=3,
+    ),
     "get_master_schedule": lambda c: c.get_master_schedule(
         actor_external_id=ACTOR, tenant_slug=TENANT, specialist_id="SPECIALIST-ARG"
     ),
@@ -404,6 +431,102 @@ class TestWireShape:
                 continue
             headers = {k.lower() for k in _drive(route).headers}
             assert "x-idempotency-key" not in headers, route.name
+
+
+# ── 3b. the person's own token (DRF-2607) ────────────────────────────────
+
+#: One call per PERSON_TOKEN row. The token is the person's; nothing of the
+#: service's may ride along.
+#: A date the client accepts (it validates ``YYYY-MM-DD`` before sending).
+EXCEPTION_DATE = "2026-08-25"
+
+PERSON_CALLS: dict[str, Any] = {
+    "create_time_off": lambda c: c.create_time_off(
+        person_token=PERSON_TOKEN,
+        tenant_slug=TENANT,
+        specialist_id="SPECIALIST-ARG",
+        start_at="2026-08-25T09:00:00+03:00",
+        end_at="2026-08-25T18:00:00+03:00",
+    ),
+    "delete_time_off": lambda c: c.delete_time_off(
+        person_token=PERSON_TOKEN,
+        tenant_slug=TENANT,
+        specialist_id="SPECIALIST-ARG",
+        time_off_id="PK-ARG",
+    ),
+    "set_schedule_exception": lambda c: c.set_schedule_exception(
+        person_token=PERSON_TOKEN,
+        tenant_slug=TENANT,
+        specialist_id="SPECIALIST-ARG",
+        date="2026-08-25",
+        is_working_day=False,
+    ),
+    "delete_schedule_exception": lambda c: c.delete_schedule_exception(
+        person_token=PERSON_TOKEN,
+        tenant_slug=TENANT,
+        specialist_id="SPECIALIST-ARG",
+        date=EXCEPTION_DATE,
+    ),
+}
+
+
+def _drive_as_person(route: SalonRoute) -> httpx.Request:
+    sink: list[httpx.Request] = []
+    try:
+        PERSON_CALLS[route.client_method or ""](_client(sink))
+    except Exception:  # noqa: BLE001 — the recorded request is the assertion
+        pass
+    assert sink, f"{route.client_method} opened no request"
+    return sink[0]
+
+
+class TestPersonTokenWireShape:
+    def test_every_person_row_has_an_exerciser(self) -> None:
+        assert set(PERSON_CALLS) == set(person_token_client_methods())
+
+    @pytest.mark.parametrize(
+        "route",
+        routes_by_access(SalonRouteAccess.PERSON_TOKEN),
+        ids=lambda r: f"{r.method}-{r.name}",
+    )
+    def test_request_matches_the_declared_route(self, route: SalonRoute) -> None:
+        request = _drive_as_person(route)
+        assert request.method == route.method
+        assert request.url.path == _concrete(route.full_path).replace("DATE-ARG", EXCEPTION_DATE)
+
+    @pytest.mark.parametrize(
+        "route",
+        routes_by_access(SalonRouteAccess.PERSON_TOKEN),
+        ids=lambda r: f"{r.method}-{r.name}",
+    )
+    def test_the_person_token_and_nothing_of_the_service(self, route: SalonRoute) -> None:
+        """Pair with ``test_every_call_carries_the_four_headers``: the same
+        client object, the same salon — the service rows carry the service
+        Bearer and an actor; these carry the person's token and neither."""
+
+        headers = {k.lower(): v for k, v in _drive_as_person(route).headers.items()}
+        assert headers.get("authorization") == f"Bearer {PERSON_TOKEN}"
+        assert "x-external-user-id" not in headers
+        assert TOKEN not in " ".join(headers.values())
+        assert headers.get("x-tenant") == TENANT
+        assert headers.get("x-app-type") == "pro"
+
+    def test_without_a_person_token_nothing_is_sent(self) -> None:
+        """No token → refused here. Not «then the service key»: no request
+        leaves at all."""
+
+        from apps.integrations.ayla.salon_client import SalonForbidden
+
+        sink: list[httpx.Request] = []
+        with pytest.raises(SalonForbidden):
+            _client(sink).create_time_off(
+                person_token="",
+                tenant_slug=TENANT,
+                specialist_id="SPECIALIST-ARG",
+                start_at="2026-08-25T09:00:00+03:00",
+                end_at="2026-08-25T18:00:00+03:00",
+            )
+        assert sink == []
 
 
 # ── 4. the live half: is the table still the surface? ────────────────────

@@ -34,6 +34,7 @@
  * from the canonical owner and this module only tracks which one is
  * selected and when that selection stops being trustworthy.
  */
+import { REFUSAL_CANON } from "./refusal-canon";
 
 /** An existing customer, as returned by search. */
 export interface DraftExistingCustomer {
@@ -144,7 +145,8 @@ export type DraftAction =
  * silently, and a cleared selection with no explanation is the same
  * failure wearing a different hat.
  */
-export type SlotInvalidationReason = "service_changed" | "master_changed" | "window_changed";
+export type SlotInvalidationReason =
+  "service_changed" | "master_changed" | "window_changed";
 
 export interface DraftTransition {
   draft: BookingDraft;
@@ -244,16 +246,32 @@ export function applyDraftAction(
  * and the assignment context (which master). Without both, any list we
  * render is a guess, and §17 forbids the client from guessing.
  */
-export function canQueryAvailability(draft: BookingDraft): boolean {
-  return draft.service !== null && draft.master !== null;
+export function canQueryAvailability(
+  draft: BookingDraft,
+  { requiresMaster = true }: DraftRules = {},
+): boolean {
+  return draft.service !== null && (!requiresMaster || draft.master !== null);
+}
+
+/**
+ * Who the draft is for (DRF-2155, М-3). The salon books *to somebody*, so
+ * the master is a step; on the master's own surface the master is the
+ * subject of initData and never a choice. Default keeps the salon
+ * behaviour byte for byte.
+ */
+export interface DraftRules {
+  requiresMaster?: boolean;
 }
 
 /** Everything the review screen needs is present (§18). */
-export function canReview(draft: BookingDraft): boolean {
+export function canReview(
+  draft: BookingDraft,
+  { requiresMaster = true }: DraftRules = {},
+): boolean {
   return (
     draft.customer !== null &&
     draft.service !== null &&
-    draft.master !== null &&
+    (!requiresMaster || draft.master !== null) &&
     draft.slot !== null
   );
 }
@@ -265,11 +283,14 @@ export function canReview(draft: BookingDraft): boolean {
  * position, so the prompt always names the step the user should take
  * next rather than the first empty box on screen.
  */
-export function missingSteps(draft: BookingDraft): string[] {
+export function missingSteps(
+  draft: BookingDraft,
+  { requiresMaster = true }: DraftRules = {},
+): string[] {
   const out: string[] = [];
   if (draft.customer === null) out.push("клиента");
   if (draft.service === null) out.push("услугу");
-  if (draft.master === null) out.push("мастера");
+  if (requiresMaster && draft.master === null) out.push("мастера");
   if (draft.slot === null) out.push("время");
   return out;
 }
@@ -284,21 +305,18 @@ export function missingSteps(draft: BookingDraft): string[] {
  * that looks like an answer.
  */
 export type SubmitOutcome =
-  | "committed"
-  | "conflict"
-  | "blocked"
-  | "pending"
-  | "failed";
+  "committed" | "conflict" | "blocked" | "pending" | "failed";
 
 /** Copy for each outcome. Kept beside the enum so none can go unhandled. */
 export const SUBMIT_OUTCOME_COPY: Record<SubmitOutcome, string> = {
   committed: "Запись создана.",
-  conflict:
-    "Это время уже занято — выберите другое. Клиент и услуга сохранены.",
+  // §6-кси п.3 и п.2 (DRF-2577) — дословно. Что черновик цел, форма
+  // говорит своей строкой («Введённые данные сохранены.»).
+  conflict: REFUSAL_CANON.slotTaken,
   blocked: "Недостаточно прав для записи. Обратитесь к владельцу салона.",
   pending:
     "Ответ от расписания не пришёл. Запись могла быть создана — обновите день, прежде чем пробовать снова.",
-  failed: "Не удалось создать запись. Попробуйте ещё раз.",
+  failed: REFUSAL_CANON.bookingCreate,
 };
 
 /** True when the outcome must preserve what the user entered (§18). */

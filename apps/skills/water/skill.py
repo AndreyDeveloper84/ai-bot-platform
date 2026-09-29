@@ -51,6 +51,7 @@ from apps.integrations.ayla import (
     get_nutrition_client,
 )
 from apps.skills.base import SkillContext, SkillResult
+from apps.skills.food_clarify.text_entry import CONSENT_TEXT, diary_consent_required_result
 from apps.skills.registry import register
 from apps.skills.water.parser import REFUSED, BeverageMatch, parse_beverage
 
@@ -62,6 +63,19 @@ _MAX_LEN = 30
 
 
 _AYLA_DOWN_FALLBACK = "Не получилось записать прямо сейчас — попробуй через минуту."
+
+
+def _nutrition_enabled() -> bool:
+    """DRF-1994 — тот же читатель флага, что у меню, анкеты и хендлера."""
+    from apps.skills.menu.marketplace import nutrition_enabled
+
+    return nutrition_enabled()
+
+
+def _nutrition_unavailable_text() -> str:
+    from apps.skills.menu.marketplace import NUTRITION_UNAVAILABLE_TEXT
+
+    return NUTRITION_UNAVAILABLE_TEXT
 
 
 @register
@@ -78,6 +92,23 @@ class WaterSkill:
         return isinstance(result, BeverageMatch)
 
     def handle(self, context: SkillContext) -> SkillResult:
+        # DRF-1994 (решение U) / DRF-1295 — вода ПИШЕТ в дневник, значит
+        # это вход в дневник, и он под тем же единым выключателем. Ворота
+        # в ``handle``, не в ``matches``: иначе «стакан воды» ушёл бы
+        # дальше по лестнице (food_clarify → модель) вместо честной
+        # заглушки. Сюда же приходит инструмент ``log_water`` через
+        # ``nutrition_global._run_skill``.
+        if not _nutrition_enabled():
+            # DRF-2267 (CD §72): отказ — тоже завершённый шаг. Повторять
+            # воду незачем (функции нет), но выход в меню есть.
+            from apps.orchestrator.next_steps import menu_button, next_step_action_data
+
+            return SkillResult(
+                reply_text=_nutrition_unavailable_text(),
+                action_data=next_step_action_data(menu_button()),
+                meta={"reply_kind": "water_nutrition_off"},
+            )
+
         text = context.message_text.strip()
         parsed = parse_beverage(text)
 
@@ -92,6 +123,30 @@ class WaterSkill:
             )
 
         assert isinstance(parsed, BeverageMatch)
+
+        # DRF-1926 / DRF-2093: без согласия на обработку личных данных И без
+        # действующего согласия дневника (реестр) стакан не записывается — тем
+        # же предикатом, что еда текстом и фото. ``matches`` ворота не видит
+        # намеренно: иначе ход ушёл бы в food_clarify и получил карточку «еда
+        # или опечатка» вместо честного отказа.
+        from apps.consent.diary_gate import (
+            CONSENT_REQUIRED,
+            FOOD_DIARY_CONSENT_REQUIRED,
+            diary_write_refusal,
+        )
+
+        reason = diary_write_refusal(context.bot_user)
+        if reason == CONSENT_REQUIRED:
+            from apps.skills.welcome.skill import consent_offer_action_data
+
+            return SkillResult(
+                reply_text=CONSENT_TEXT,
+                action_data=consent_offer_action_data("water"),
+                meta={"reply_kind": "water_consent_required"},
+            )
+        if reason == FOOD_DIARY_CONSENT_REQUIRED:
+            # DRF-2096 — тот же отказ и та же кнопка, что у текста и фото.
+            return diary_consent_required_result("water_diary_consent_required")
 
         external_id = external_user_id_for(context.bot_user)
         try:
@@ -110,27 +165,49 @@ class WaterSkill:
             )
             return SkillResult(
                 reply_text=_AYLA_DOWN_FALLBACK,
+                action_data=_retry_water_action_data(),
                 meta={"reply_kind": "water_ayla_down"},
             )
         except NutritionAPIError:
             logger.exception("water.ayla_api_error user=%s", external_id)
             return SkillResult(
                 reply_text=_AYLA_DOWN_FALLBACK,
+                action_data=_retry_water_action_data(),
                 meta={"reply_kind": "water_ayla_error"},
             )
 
         reply = _format_reply(entry, parsed)
+        # DRF-2267 (CD §72): записанное — завершённый шаг; следующий —
+        # «Мой дневник» (где тап дойдёт до дневника) и «Меню».
+        from apps.orchestrator.next_steps import after_entry_buttons
+
         return SkillResult(
             reply_text=reply,
+            claims_done=True,
+            claims_done_evidence="ayla.water.add:entry_id",
             action_type="water_logged",
             action_data={
                 "entry_id": entry.entry_id,
                 "slug": parsed.slug,
                 "ml": parsed.ml,
                 "water_ml": entry.water_ml,
+                "buttons": after_entry_buttons(),
             },
-            meta={"reply_kind": "water_logged"},
+            meta={
+                "reply_kind": "water_logged",
+            },
         )
+
+
+def _retry_water_action_data() -> dict:
+    """DRF-2267 (CD §72) — «попробуй через минуту» и кнопка, которая пробует.
+
+    «Записать стакан воды» — та же фраза, что чип дневника: повтор того же
+    действия одним тапом. Плюс «Меню» — выход, если повторять не хочется.
+    """
+    from apps.orchestrator.next_steps import menu_button, next_step_action_data, water_button
+
+    return next_step_action_data(water_button(), menu_button())
 
 
 def _format_reply(entry, parsed: BeverageMatch) -> str:

@@ -8,15 +8,20 @@
  * screen renders only what the bot mirror + Ayla scorer actually
  * provide:
  *
- *   «✨ Ayla подобрала» — top-3 services by scorer rank (founder cut
+ *   честное отсутствие (OD-PILOT-9, 12.09) — когда резолвер отвергает
+ *     кандидатов как неподтверждённые, показывается текст владельца и
+ *     два действия («Посмотреть услуги» / «Уточнить запрос»);
+ *   «✨ Ayla рекомендует» — полка, за флагом `RECOMMENDATION_SHELF_ENABLED`
+ *     до Stage 2 gate; top-3 services by resolver order (founder cut
  *     #1 cap), each with the WHY the source sent. Owner ruling 25.08:
- *     «Нет displayable WHY → нет блока „Ayla подобрала"» — the section
- *     renders only while `data.picks` is non-empty, and the lib puts a
- *     pick there only when the SOURCE explained it. Today the scorer
- *     sends `{service_id, score}` only, so the branded block is
- *     silently absent; «Услуги» and «Мастера» below are untouched;
- *   «Услуги» — all active services (mirror) → service detail
- *     (`/catalog/:serviceId`, real screen continuing the booking flow);
+ *     «Нет displayable WHY → нет блока» — the section renders only
+ *     while `data.picks` is non-empty, and the lib puts a pick there
+ *     only when the SOURCE explained it. Термин «Ayla рекомендует» —
+ *     только за canonical Recommendation;
+ *   «Доступные услуги» — all active services (mirror) → service detail
+ *     (`/customer/catalog/:serviceId` — canonical address of the shared
+ *     ServiceDetailScreen (DRF-1481), real screen continuing the
+ *     booking flow);
  *   «Мастера» — bookable masters (mirror) → master detail
  *     (`/customer/masters/:masterId`, real F2 screen).
  *
@@ -32,13 +37,64 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { CatalogEmptyState } from "../components/CatalogEmptyState";
 import { MasterCard } from "../components/MasterCard";
 import { ScreenLayout } from "../components/ScreenLayout";
 import { ServiceCard } from "../components/ServiceCard";
 import { DelayedSkeleton, ServiceCardSkeleton } from "../components/Skeleton";
+import { OfflineBanner } from "../components/OfflineBanner";
+import { recommendationShelfEnabled } from "../lib/feature-flags";
+import {
+  ACTION_CLARIFY_REQUEST,
+  ACTION_RETRY,
+  ACTION_SHOW_SERVICES,
+  ACTION_WRITE_AYLA,
+  CANONICAL_SHELF_TITLE,
+  NO_CAPABLE_TEXT,
+  NO_VERIFIED_EVIDENCE_TEXT,
+  SAFETY_BOUNDARY_TEXT,
+  SOURCE_FAILURE_TEXT,
+  absenceFrame,
+  SURFACE_AVAILABLE_SERVICES,
+  SURFACE_NEARBY,
+} from "../lib/recommendation-absence";
 import { StateError } from "../components/StateError";
-import type { Service } from "../lib/api";
-import { getCatalogBrowse, type CatalogBrowseData } from "../lib/customer-booking";
+import { useOnline } from "../hooks/useOnline";
+import type { Master, Service } from "../lib/api";
+import {
+  getCatalogBrowse,
+  resolveCatalogPicks,
+  type CatalogBrowseData,
+} from "../lib/customer-booking";
+import { maxBridge, returnToChat } from "../lib/max-sdk";
+import { ReturnToChatHint } from "../components/ReturnToChatHint";
+import {
+  NEARBY_BUTTON,
+  NEARBY_DENIED,
+  NEARBY_EXPLANATION,
+  NEARBY_LOCATING,
+  hasKnownDistance,
+  locateOnce,
+} from "../lib/nearby";
+import { fetchMasters } from "../lib/api";
+import { resolveCatalogEmpty } from "../lib/customer-catalog-empty";
+import { backTo } from "../lib/screen-back";
+
+/**
+ * Возврат (DRF-1493) — экран со скриншота владельца («Нету кнопки
+ * назад»).
+ *
+ * Каталог НЕ корень, хотя в него и ведёт deep link из бота
+ * (`open_catalog` → `/customer/catalog`). Deep link делает
+ * `history.back()` бесполезным, но родителя не отменяет: внутри
+ * приложения сюда приходят только с дома, из профиля, со «Дня» и из
+ * тупиков сценария записи. Дом клиентской поверхности — «Записи»
+ * (`/customer/main`), туда и ведёт возврат при любом входе.
+ *
+ * Нижней навигации этот экран не рисует (её рисуют только `Записи` и
+ * `День`), поэтому без стрелки он был настоящим тупиком.
+ */
+const BACK = backTo("/customer/main");
 
 type State =
   | { kind: "loading" }
@@ -48,7 +104,13 @@ type State =
 /** Founder cut #1: never more than 3 picks, whatever the scorer sends. */
 const PICKS_CAP = 3;
 
+/** Одна карточка полки: что показать и чем объяснить. Показ — из зеркала, WHY — от границы. */
+type ShelfEntry =
+  | { kind: "service"; rank: number; service: Service; reasons: string[] }
+  | { kind: "master"; rank: number; master: Master; reasons: string[] };
+
 export function CustomerCatalogScreen() {
+  const online = useOnline();
   const navigate = useNavigate();
   const [state, setState] = useState<State>({ kind: "loading" });
   const [search, setSearch] = useState("");
@@ -86,20 +148,80 @@ export function CustomerCatalogScreen() {
    * ruling 25.08). So an empty list means exactly one thing: Ayla has
    * nothing it can explain right now.
    */
-  const picksWithWhy = useMemo(() => {
+  const picksOutcome = state.kind === "ok" ? state.data.picksOutcome : "UNAVAILABLE";
+  const [retryingPicks, setRetryingPicks] = useState(false);
+
+  // DRF-1707 / D3 — «Показать рядом со мной». Координаты не хранятся:
+  // они уходят одним запросом за мастерами и забываются; в состоянии
+  // экрана остаётся только исход («идёт» / «не удалось»).
+  const [nearby, setNearby] = useState<"idle" | "locating" | "denied">("idle");
+  const showNearby = useCallback(async () => {
+    if (state.kind !== "ok" || nearby === "locating") return;
+    setNearby("locating");
+    const coords = await locateOnce();
+    if (!coords) {
+      setNearby("denied");
+      return;
+    }
+    try {
+      const { masters: withDistance } = await fetchMasters({ coords });
+      setState((prev) =>
+        prev.kind === "ok" ? { kind: "ok", data: { ...prev.data, masters: withDistance } } : prev,
+      );
+      setNearby("idle");
+    } catch {
+      setNearby("denied");
+    }
+  }, [state, nearby]);
+
+  // «Попробовать снова» на отказе источника (DRF-1768): повторяется ТОЛЬКО
+  // запрос подбора; услуги и мастера остаются как есть. Пока идёт повтор,
+  // кнопка заблокирована — второй тап не плодит второй запрос.
+  const retryPicks = useCallback(() => {
+    if (state.kind !== "ok" || retryingPicks) return;
+    const { services, masters } = state.data;
+    setRetryingPicks(true);
+    resolveCatalogPicks(services, masters)
+      .then(({ picks, providerPicks, picksOutcome: outcome }) => {
+        setState((prev) =>
+          prev.kind === "ok"
+            ? { kind: "ok", data: { ...prev.data, picks, providerPicks, picksOutcome: outcome } }
+            : prev,
+        );
+      })
+      .finally(() => setRetryingPicks(false));
+  }, [state, retryingPicks]);
+
+  const scrollToServices = () =>
+    document
+      .getElementById("catalog-services")
+      ?.scrollIntoView({ behavior: "smooth", block: "start" });
+  const frame = !query ? absenceFrame(picksOutcome) : null;
+  const insideMax = maxBridge() !== null;
+  // DRF-2268: «Написать Ayla» не молчит — «застрял» → подсказка.
+  const [chatStuck, setChatStuck] = useState(false);
+
+  const picksWithWhy = useMemo((): ShelfEntry[] => {
     if (state.kind !== "ok") return [];
-    const byId = new Map(state.data.services.map((s) => [s.id, s]));
-    return state.data.picks
-      .map((pick) => ({ service: byId.get(pick.serviceId), reasons: pick.reasons }))
-      .filter(
-        (p): p is { service: Service; reasons: string[] } => p.service != null,
-      )
-      .slice(0, PICKS_CAP);
+    const serviceById = new Map(state.data.services.map((s) => [s.id, s]));
+    const masterById = new Map(state.data.masters.map((m) => [m.id, m]));
+    // Услуги и мастера — одной полкой, порядком резолвера (`rank`, §4.3).
+    // Сегодня резолвер производит только мастеров (§81 / K1, DRF-2174);
+    // услуги здесь — на случай, когда он начнёт производить и их.
+    const services = state.data.picks.flatMap((pick): ShelfEntry[] => {
+      const service = serviceById.get(pick.serviceId);
+      return service ? [{ kind: "service", rank: pick.rank, service, reasons: pick.reasons }] : [];
+    });
+    const masters = (state.data.providerPicks ?? []).flatMap((pick): ShelfEntry[] => {
+      const master = masterById.get(pick.masterId);
+      return master ? [{ kind: "master", rank: pick.rank, master, reasons: pick.reasons }] : [];
+    });
+    return [...services, ...masters].sort((a, b) => a.rank - b.rank).slice(0, PICKS_CAP);
   }, [state]);
 
   if (state.kind === "loading") {
     return (
-      <ScreenLayout title="Найди мастера">
+      <ScreenLayout back={BACK} title="Найди мастера">
         <DelayedSkeleton loading>
           <ServiceCardSkeleton />
           <ServiceCardSkeleton />
@@ -111,17 +233,40 @@ export function CustomerCatalogScreen() {
 
   if (state.kind === "error") {
     return (
-      <ScreenLayout title="Найди мастера">
+      <ScreenLayout back={BACK} title="Найди мастера">
         <StateError err={state.err} onRetry={load} screenId="customer-catalog" />
       </ScreenLayout>
     );
   }
 
   const { masters } = state.data;
-  const allEmpty = visibleServices.length === 0 && masters.length === 0;
+
+  /**
+   * DRF-1482 — every empty situation resolves to a reason with its own
+   * message and recovery action (spec §1). This replaces the old
+   * `visibleServices === 0 && masters === 0` gate, under which a search
+   * that matched nothing rendered a blank screen with no explanation
+   * whenever masters were present.
+   */
+  const emptyReason = resolveCatalogEmpty({
+    query,
+    visibleServices: visibleServices.length,
+    services: state.data.services,
+    mastersCount: masters.length,
+    serverReason: state.data.emptyReason,
+  });
+
+  /** «Посмотреть/Смотреть все услуги» — drop the search, show the full
+      catalog at its canonical address (DRF-1481). */
+  const handleShowAllServices = () => {
+    setSearch("");
+    navigate("/customer/catalog");
+  };
 
   return (
-    <ScreenLayout title="Найди мастера">
+    <ScreenLayout back={BACK} title="Найди мастера">
+      {/* Воронка записи говорит про сеть ДО нажатия, а не после. */}
+      <OfflineBanner online={online} />
       <div className="customer-catalog__search">
         <input
           type="search"
@@ -133,33 +278,154 @@ export function CustomerCatalogScreen() {
         />
       </div>
 
-      {allEmpty && (
-        <div className="callout">
-          <p style={{ margin: 0 }}>
-            Пока здесь пусто. Загляни позже — покажу варианты.
-          </p>
-        </div>
+      {emptyReason && (
+        <CatalogEmptyState
+          reason={emptyReason}
+          onShowAllServices={handleShowAllServices}
+          onRetry={load}
+        />
       )}
 
-      {/* Owner ruling 25.08 — «Нет displayable WHY → нет блока „Ayla
-          подобрала"». The gate is the DATA, not a feature flag: the
-          section shows exactly while the source sent picks it can
-          explain, so it revives by itself when `POST /recommendations`
-          starts returning reasons. Never render a stand-in WHY here. */}
-      {picksWithWhy.length > 0 && (
+      {/* OD-PILOT-9 (12.09) — первый пилот без полки: когда резолвер
+          ответил «связи не подтверждены», человеку это говорится словами
+          владельца и даются два действия, которые работают сегодня.
+          Только этот исход — остальные пустоты остаются молчаливыми
+          (см. `recommendation-absence.ts`). Не показывается поверх
+          поиска: с запросом человек уже делает то, что ему предлагают. */}
+      {frame === "no_verified" && (
+        <section
+          className="callout"
+          role="status"
+          aria-labelledby="catalog-no-verified"
+        >
+          <p id="catalog-no-verified" style={{ margin: 0 }}>
+            {NO_VERIFIED_EVIDENCE_TEXT}
+          </p>
+          <div className="chip-row" style={{ marginTop: "var(--s-3)" }}>
+            <button type="button" className="btn-secondary" onClick={scrollToServices}>
+              {ACTION_SHOW_SERVICES}
+            </button>
+            <button
+              type="button"
+              className="btn-secondary"
+              onClick={() => navigate("/customer/goal-select")}
+            >
+              {ACTION_CLARIFY_REQUEST}
+            </button>
+          </div>
+        </section>
+      )}
+
+      {/* C04.5 (DRF-1767): медицинский гейт закрыл совет — говорим это
+          словами гейта, без диагноза, и даём разрешённое действие.
+          Ни одной кнопки записи: CTA на заблокированное запрещён. */}
+      {frame === "safety_boundary" && (
+        <section
+          className="callout"
+          role="status"
+          aria-labelledby="catalog-safety-boundary"
+        >
+          <p id="catalog-safety-boundary" style={{ margin: 0 }}>
+            {SAFETY_BOUNDARY_TEXT}
+          </p>
+          <div className="chip-row" style={{ marginTop: "var(--s-3)" }}>
+            <button type="button" className="btn-secondary" onClick={scrollToServices}>
+              {ACTION_SHOW_SERVICES}
+            </button>
+            {insideMax && (
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => setChatStuck(returnToChat() === "stuck")}
+              >
+                {ACTION_WRITE_AYLA}
+              </button>
+            )}
+          </div>
+          {chatStuck && <ReturnToChatHint />}
+        </section>
+      )}
+
+      {/* DRF-1768: нужда названа, никто не совпал — вопрос к запросу. */}
+      {frame === "no_capable" && (
+        <section
+          className="callout"
+          role="status"
+          aria-labelledby="catalog-no-capable"
+        >
+          <p id="catalog-no-capable" style={{ margin: 0 }}>
+            {NO_CAPABLE_TEXT}
+          </p>
+          <div className="chip-row" style={{ marginTop: "var(--s-3)" }}>
+            <button
+              type="button"
+              className="btn-secondary"
+              onClick={() => navigate("/customer/goal-select")}
+            >
+              {ACTION_CLARIFY_REQUEST}
+            </button>
+            <button type="button" className="btn-secondary" onClick={scrollToServices}>
+              {ACTION_SHOW_SERVICES}
+            </button>
+          </div>
+        </section>
+      )}
+
+      {/* DRF-1768: отказ источника — не состояние знания. Повтор — только
+          запроса подбора, каталог под кадром не трогается. */}
+      {frame === "source_failure" && (
+        <section
+          className="callout"
+          role="status"
+          aria-labelledby="catalog-source-failure"
+        >
+          <p id="catalog-source-failure" style={{ margin: 0 }}>
+            {SOURCE_FAILURE_TEXT}
+          </p>
+          <div className="chip-row" style={{ marginTop: "var(--s-3)" }}>
+            <button
+              type="button"
+              className="btn-secondary"
+              disabled={retryingPicks}
+              onClick={retryPicks}
+            >
+              {ACTION_RETRY}
+            </button>
+          </div>
+        </section>
+      )}
+
+      {/* Полка за флагом до Stage 2 gate (OD-PILOT-9); второе условие —
+          owner ruling 25.08 «Нет displayable WHY → нет блока»: the gate
+          on DATA stays — the section shows only while the source sent
+          picks it can explain. Never render a stand-in WHY here. Имя —
+          «Ayla рекомендует»: источник блока — canonical resolver (#1529),
+          и только за ним владелец закрепил этот термин. */}
+      {recommendationShelfEnabled() && picksWithWhy.length > 0 && (
         <section aria-labelledby="catalog-picks">
           <h2 id="catalog-picks" className="customer-catalog__section-title">
-            <span aria-hidden="true">✨ </span>Ayla подобрала
+            <span aria-hidden="true">✨ </span>
+            {CANONICAL_SHELF_TITLE}
           </h2>
-          {picksWithWhy.map(({ service, reasons }) => (
-            <article key={service.id} className="customer-catalog__card-l2">
-              <ServiceCard
-                service={service}
-                onSelect={() => navigate(`/catalog/${service.id}`)}
-              />
+          {picksWithWhy.map((entry) => (
+            <article
+              key={entry.kind === "service" ? `s:${entry.service.id}` : `m:${entry.master.id}`}
+              className="customer-catalog__card-l2"
+            >
+              {entry.kind === "service" ? (
+                <ServiceCard
+                  service={entry.service}
+                  onSelect={() => navigate(`/customer/catalog/${entry.service.id}`)}
+                />
+              ) : (
+                <MasterCard
+                  master={entry.master}
+                  onSelect={() => navigate(`/customer/masters/${entry.master.id}`)}
+                />
+              )}
               {/* WHY — verbatim from the source, never composed here. */}
               <ul className="customer-catalog__why">
-                {reasons.map((reason) => (
+                {entry.reasons.map((reason) => (
                   <li key={reason} className="customer-catalog__why-item">
                     {reason}
                   </li>
@@ -173,13 +439,13 @@ export function CustomerCatalogScreen() {
       {visibleServices.length > 0 && (
         <section aria-labelledby="catalog-services">
           <h2 id="catalog-services" className="customer-catalog__section-title">
-            Услуги
+            {SURFACE_AVAILABLE_SERVICES}
           </h2>
           {visibleServices.map((service) => (
             <article key={service.id}>
               <ServiceCard
                 service={service}
-                onSelect={() => navigate(`/catalog/${service.id}`)}
+                onSelect={() => navigate(`/customer/catalog/${service.id}`)}
               />
             </article>
           ))}
@@ -189,8 +455,29 @@ export function CustomerCatalogScreen() {
       {masters.length > 0 && (
         <section aria-labelledby="catalog-masters">
           <h2 id="catalog-masters" className="customer-catalog__section-title">
-            Мастера
+            {/* «Рядом с вами» — только когда в данных есть расстояние
+                (#1653): имя обещает сортировку по близости. */}
+            {hasKnownDistance(masters) ? SURFACE_NEARBY : "Мастера"}
           </h2>
+          {/* D3: пояснение стоит ДО вызова ОС, на самой кнопке. */}
+          {!hasKnownDistance(masters) && (
+            <div className="customer-catalog__nearby">
+              <p className="customer-catalog__nearby-note">{NEARBY_EXPLANATION}</p>
+              <button
+                type="button"
+                className="btn-secondary"
+                disabled={nearby === "locating"}
+                onClick={() => void showNearby()}
+              >
+                {nearby === "locating" ? NEARBY_LOCATING : NEARBY_BUTTON}
+              </button>
+              {nearby === "denied" && (
+                <p className="customer-catalog__nearby-note" role="status">
+                  {NEARBY_DENIED}
+                </p>
+              )}
+            </div>
+          )}
           {masters.map((master) => (
             <article key={master.id}>
               <MasterCard

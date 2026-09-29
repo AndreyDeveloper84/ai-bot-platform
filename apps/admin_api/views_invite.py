@@ -17,13 +17,27 @@ response envelope. This module implements the master-role-only subset:
 
     Response 201: {
       "master_id", "invite_token", "invite_expires_at",
-      "max_dm_delivery", "fallback_link", "invite_link"
+      "fallback_link", "invite_link"
     }
 
 ``invite_link`` (DRF-1424) is the addition to that envelope: a
 ``https://max.ru/<bot>?start=master_invite_<token>`` link the owner can
-hand over by any route at all. The DM above it can only reach a MAX
-username the salon already knows.
+hand over by any route at all.
+
+### This endpoint sends nobody anything (решение владельца §44.4)
+
+It used to also attempt a personal MAX message to the invited master,
+and the envelope carried ``max_dm_delivery`` / ``max_dm_error`` so the
+owner's screen could report the outcome. The message went out through
+the CLIENT bot, which can only reach a chat that already exists — so it
+never arrived for the one case invitations exist for, a person the salon
+has not written to before. The report was therefore honest and useless:
+«не дошло», on almost every invite.
+
+On 07.09.2026 the owner ruled it out entirely — not sent, not reported.
+The endpoint now only issues the row and hands back the link; delivery
+is the owner's own move, with the prepared text the screen builds
+(``apps/miniapp/src/components/InviteMessage.tsx``).
 
 ### Scope cuts (separate PRs)
 
@@ -45,11 +59,28 @@ second call returns the EXISTING row (200, not 201) with header
 twice in 5 seconds (network glitch) does NOT get two PENDING rows in
 the roster.
 
-Cancelled or accepted invites do NOT block a fresh invite — the
-contact may have been re-hired or the previous invite mis-sent.
-Expired invites also DON'T block: re-issuing intentionally creates a
-new PENDING row (the old one stays around as historical audit; the new
-token is what gets dispatched).
+DRF-1507 — «повторно приглашённый» больше не означает «вторая
+строка». Формулировка выше («re-issuing intentionally creates a new
+PENDING row») описывала поведение до этой правки и была верна ровно до
+неё:
+
+* приглашение того же человека с ПРОТУХШИМ или отменённым токеном
+  перевыпускается **на существующей строке** — свежий токен, свежие
+  семь дней, тот же ``master_id``. Владелец получает рабочую ссылку,
+  мастер по ней доходит до кабинета; растёт число приглашений, а не
+  число мастеров в ростере;
+* приглашение человека, который в салон уже приземлился, отвечает 200
+  ``X-Idempotent`` его же строкой и НЕ выписывает второго токена: этот
+  токен всё равно привёл бы к сессии первой строки (``onboarding_accept``,
+  идемпотентная проба), а выписанная строка осталась бы PENDING навсегда;
+* «тот же человек» определяется по нормализованному MAX-хэндлу
+  (:mod:`apps.catalog.handles`) или по ``raw["invite_phone"]``. До
+  нормализации ``anna_styl`` и ``@anna_styl`` были разными людьми, и
+  вторая строка появлялась просто оттого, что владелец в этот раз не
+  поставил собаку.
+
+Ограничения уникальности на ``max_handle`` при этом НЕТ — почему,
+написано в ``apps/catalog/models.py`` над ``constraints``.
 
 ### Side effects (all inside one transaction.atomic)
 
@@ -57,20 +88,12 @@ token is what gets dispatched).
 2. ``MasterService`` rows seeded — one per id in ``services[]``.
 3. Audit row ``master.invited`` written.
 
-Then, **after the atomic block has committed** (not via
-``transaction.on_commit`` — see below): the MAX bot DM is dispatched
-with an ``open_app`` button carrying the invite token, and audit row
-``master.invite_dispatched`` is written.
-
-Two corrections to what this list used to say, both of which had gone
-stale under it: ``WorkingHours`` seeding was removed by DRF-1062, and
-the dispatch is a plain synchronous call after the block, not an
-``on_commit`` callback — deliberately, so the response can carry the
-authoritative dispatch outcome (the inline comment at the call site
-explains the trade). What is true either way is that the network call
-stays outside the atomic block: inside, it would hold the row lock for
-the length of the request and could roll the master row back on a
-transient MAX 5xx.
+That is the whole list, and there is nothing after the atomic block any
+more. Two things used to stand under it and are gone: ``WorkingHours``
+seeding (removed by DRF-1062) and the post-commit MAX DM with its second
+audit row ``master.invite_dispatched`` (removed by §44.4 — see above).
+With the DM went the only network call this endpoint made, so the
+request no longer carries MAX's timeout budget.
 
 ### CatalogMaster.phone — not stored
 
@@ -79,9 +102,7 @@ has no ``phone`` field today; the phone value lives only in the
 :class:`apps.identity.models.BotUser` table once the master accepts.
 For Phase 1 we accept ``max_phone`` and store the value in
 ``raw["invite_phone"]`` so it's recoverable for ops + the future re-
-invite endpoint can use it. The MAX DM dispatch path for
-``max_phone`` is also DEFERRED (we don't have a phone→chat lookup
-yet) and the response carries ``max_dm_delivery="skipped"``.
+invite endpoint can use it.
 """
 
 from __future__ import annotations
@@ -89,12 +110,13 @@ from __future__ import annotations
 import json
 import logging
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 from urllib.parse import urlsplit
 
 from django.conf import settings
-from django.db import transaction
+from django.db import IntegrityError, transaction
+from django.db.models import Max
 from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.utils import timezone
 from django.views.decorators.csrf import csrf_exempt
@@ -103,11 +125,11 @@ from django.views.decorators.http import require_http_methods
 from apps.admin_api.auth import RoleContext, require_admin_role
 from apps.audit.services import write_audit
 from apps.catalog.provenance import MasterServiceSource, master_service_write
+from apps.catalog.handles import canonical_handle, normalize_handle
 from apps.catalog.models import CatalogMaster, CatalogService, MasterService
 from apps.channels.bot_context import current_bot
-from apps.channels.max import outbound as max_outbound
 from apps.events.services import emit
-from apps.events.vocabulary import MASTER_INVITE_DISPATCHED, MASTER_INVITED
+from apps.events.vocabulary import MASTER_INVITED
 from apps.identity.models import BotUser
 from apps.master_api.auth import generate_invite_token
 
@@ -115,6 +137,23 @@ logger = logging.getLogger(__name__)
 
 
 INVITE_TTL_DAYS = 7
+
+INVITE_EXTERNAL_ID_FLOOR = 1_000_000
+"""Начало диапазона синтетических ``external_id`` для приглашённых мастеров.
+
+``external_id`` у синхронизированных строк принадлежит Ayla; приглашение
+своего номера от Ayla не получает и обязано его выдумать, не заняв чужой.
+Миллион — граница, ниже которой номера Ayla, выше — наши.
+"""
+
+EXTERNAL_ID_MAX_ATTEMPTS = 5
+"""Сколько раз повторить вставку, проигравшую гонку за ``external_id``.
+
+Пять, а не один: столько же одновременных приглашений в ОДНОМ салоне
+должно совпасть по секунде, чтобы исчерпать попытки. Не бесконечность —
+неснимаемый ``IntegrityError`` (например, по другому ограничению) обязан
+закончиться ответом, а не циклом внутри запроса.
+"""
 """Q-MM2 lock — invite tokens expire 7 days after issuance."""
 
 DEFAULT_SITE_DOMAIN = "http://localhost:5173"
@@ -192,8 +231,27 @@ MAX_CONTACT_VALUE_LEN = 128
 # --- helpers --------------------------------------------------------------
 
 
-def _error(slug: str, detail: str, status: int) -> JsonResponse:
-    return JsonResponse({"error": slug, "detail": detail}, status=status)
+def _error(
+    slug: str,
+    detail: str,
+    status: int,
+    details: dict[str, Any] | None = None,
+) -> JsonResponse:
+    """Отказ. ``detail`` — нам в журнал, ``details`` — машине на клиенте.
+
+    DRF-2452: раскладка ошибок по полям на экране разбирала английскую
+    прозу `detail` (`includes("contact")`). Такой признак не виден никому:
+    поправят формулировку — раскладка молча отвалится. Поэтому поле, к
+    которому относится отказ, называется машинным именем в ``details``.
+
+    Четвёртый параметр — не новый приём: он уже есть у `_error` в
+    ``views_staff_role.py``, а клиент уже читает ``details`` (`retriable`,
+    `cards`, `answer.text`).
+    """
+    body: dict[str, Any] = {"error": slug, "detail": detail}
+    if details:
+        body["details"] = details
+    return JsonResponse(body, status=status)
 
 
 def _parse_json_body(request: HttpRequest) -> dict[str, Any] | JsonResponse:
@@ -222,21 +280,40 @@ def _site_domain_is_loopback() -> bool:
     return host.lower() in LOOPBACK_HOSTS
 
 
+FALLBACK_UNAVAILABLE_SITE_DOMAIN_UNSET = "site_domain_unset"
+"""Machine name of the one reason the web fallback is withheld (DRF-1079).
+
+An empty ``fallback_link`` alone is a blank: the owner's screen hid the
+block and nobody on that side could tell «withheld on purpose» from
+«never existed». The name travels in the envelope so the screen can say
+what is missing and the deploy log, the ERROR line and the response all
+speak the same word.
+"""
+
+
+def _fallback_unavailable_reason() -> str | None:
+    """Why :func:`_fallback_link` returns ``""`` — or ``None`` when it does not."""
+
+    if not settings.DEBUG and _site_domain_is_loopback():
+        return FALLBACK_UNAVAILABLE_SITE_DOMAIN_UNSET
+    return None
+
+
 def _fallback_link(token: uuid.UUID) -> str:
     """Web fallback URL, or ``""`` when it would point at localhost.
 
     DRF-1079 — on the pilot ``SITE_DOMAIN`` is not set at all, so the
     repository default (``http://localhost:5173``,
     ``config/settings/base.py:537``) is what got embedded into every
-    invite DM and every API response. That link opens nothing on the
-    phone of the person it was sent to.
+    API response. That link opens nothing on the phone of the person it
+    was forwarded to.
 
     Returning an empty string rather than the localhost URL is the
     point of the fix: a missing fallback is a visible gap, a fallback
     to localhost is a working-looking link that wastes the invited
     master's attempt and tells nobody. The ERROR line names the exact
     variable to set, because the failure is otherwise silent — it lives
-    in a DM the platform team never sees.
+    in a chat the platform team never sees.
 
     In DEBUG the localhost link is the correct answer and is returned
     unchanged; the whole guard is off there.
@@ -246,7 +323,8 @@ def _fallback_link(token: uuid.UUID) -> str:
         logger.error(
             "admin_api.invite.site_domain_unset — web fallback suppressed: "
             "SITE_DOMAIN resolves to %s. %s Until then the admin screen has "
-            "no address to show and the invite DM has only its button.",
+            "no web address to show; the start link it hands over is "
+            "unaffected.",
             _site_domain(),
             SITE_DOMAIN_HINT,
         )
@@ -278,145 +356,48 @@ def _invite_payload(token: uuid.UUID) -> str:
     return f"{MASTER_INVITE_PAYLOAD_PREFIX}{token}"
 
 
-MAX_START_LINK_TEMPLATE = "https://max.ru/{bot}?start={payload}"
-"""A link that starts the bot with a payload — the handover form (DRF-1424).
-
-Observed live on the pilot 30.08: the owner opened
-``https://max.ru/id583403546770_3_bot?start=master_invite_test`` and the
-consumer received, on ``ingress:max_salon``::
-
-    {"update_type": "bot_started", "chat_id": 315714313,
-     "user": {"user_id": 83146139, ...},
-     "payload": "master_invite_test", "user_locale": "ru"}
-
-So MAX delivers ``?start=`` as ``bot_started.payload``, and the bot side
-reads it in :func:`apps.channels.max.salon_handler._extract_invite_token`.
-
-### ``<bot>`` is the registry entry's ``web_app``
-
-Not an inference from the URL's shape. The pilot's own configuration
-names the salon bot ``MAX_BOT_SALON_WEB_APP=id583403546770_3_bot``, and
-``id583403546770_3_bot`` is character-for-character the handle in the
-link the owner opened above. The value MAX wants in an ``open_app``
-button's ``web_app`` and the value that addresses the bot in a
-``max.ru`` URL are the same string.
-
-### Why this exists next to the DM
-
-:func:`_dispatch_max_dm` can only reach a MAX username the salon already
-knows, in a chat that already exists. An owner who has the person's
-phone number, or their Telegram, or who simply wants to paste something
-into a group has nothing to hand over. This link opens anywhere, needs
-no authentication to follow, and lands the invitee in a chat with the
-bot — after which the button is delivered into a chat that now exists,
-which is what makes the delivery guaranteed rather than hopeful.
-
-**Not** ``max://bot/<slug>?start=…``. That scheme is unimplemented; the
-phone answers «Не удалось открыть ссылку» (#1332 removed it for exactly
-that reason, and it is not coming back through this door).
-"""
-
-
 def _bot_start_link(tenant, token: uuid.UUID) -> str:
     """The shareable start link for this salon's staff bot, or ``""``.
 
-    Names the **salon** bot, not the client bot. Which bot the link opens
-    decides which stream the resulting ``bot_started`` lands on, and only
-    ``ingress:max_salon`` reaches the handler that reads invitations
-    (``apps/channels/max/salon_handler.py``). The customer-facing bot
-    would deliver the same payload to the conversational pipeline, which
-    has no opinion about invitations — the token would arrive and be
-    dropped, silently, which is the failure mode this ticket exists to
-    remove.
+    Thin wrapper over :func:`apps.channels.max.start_links.salon_start_link`
+    — the rule about *which* bot a start link may name, and what to do
+    when there is none, is shared with the staff access code
+    (``views_staff_invite``) and lives in one module so the two cannot
+    drift. What stays here is only the payload this endpoint issues.
 
-    Empty string when the deployment has no salon bot for this tenant, or
-    it has one with no Mini App name: without ``web_app`` there is no bot
-    handle to build the URL from *and* the bot could not build the button
-    on arrival either, so the link would open a conversation that has to
-    apologise. A missing link is a visible gap; a link that leads to an
-    apology is the working-looking dead end #1332 spent a whole PR
-    removing.
+    Kept as a named function rather than inlined at the call site:
+    ``apps/channels/tests/test_salon_web_app_enablement.py`` calls it
+    directly to prove the pilot's own configuration produces a link.
     """
 
-    from apps.channels.bot_registry import effective_registry, resolve_by_tenant_stream
-    from apps.channels.max.salon_handler import SALON_STREAM
+    from apps.channels.max.start_links import salon_start_link
 
-    entry = resolve_by_tenant_stream(tenant.slug, SALON_STREAM, effective_registry())
-    if entry is None or not entry.web_app:
-        logger.warning(
-            "admin_api.invite.no_start_link tenant=%s — no salon bot with a Mini App "
-            "name (MAX_BOT_<SLUG>_WEB_APP on the entry whose stream is %s), so the "
-            "invitation has no shareable link and can only be delivered by DM.",
-            tenant.slug,
-            SALON_STREAM,
-        )
-        return ""
-    return MAX_START_LINK_TEMPLATE.format(bot=entry.web_app, payload=_invite_payload(token))
+    return salon_start_link(tenant, _invite_payload(token))
 
 
 def _sender_web_app() -> str:
-    """Mini App name of the bot this DM will actually be sent as.
+    """Mini App name of the bot in scope — the deploy check's reader.
 
-    Must be resolved the same way ``max_outbound.send_message`` resolves
-    the API token, or the button points at one bot's Mini App while the
-    message arrives from another. So this mirrors ``outbound._token()``
-    rung for rung: the surrounding ``bot_scope`` first, the legacy global
-    second.
-
-    ``admin_api`` enters no ``bot_scope`` today, so in practice this is
-    ``MAX_BOT_WEB_APP`` — the same global whose token
-    (``MAX_BOT_TOKEN``) actually sends the message. Reading the global
-    directly would give the same answer today and the wrong one the day
-    the master DM moves to the salon bot: ``.env.staging.template``
+    This endpoint no longer sends anything (§44.4), so nothing here
+    consumes the value. Its one caller is
+    :func:`apps.admin_api.checks.check_bot_web_app`, and it stays a
+    function rather than a ``getattr`` at the check because the
+    resolution is not a plain global read: the surrounding ``bot_scope``
+    wins over the legacy ``MAX_BOT_WEB_APP``. ``.env.staging.template``
     already instructs operators to set ``MAX_BOT_SALON_WEB_APP`` per bot
-    rather than the global, so a contour can already be configured where
-    the global is empty and the per-bot value is not.
+    rather than the global, so a contour can be configured where the
+    global is empty and the per-bot value is not — and a check that read
+    the global alone would warn about a contour that is fine.
+
+    Kept here rather than moved next to the check: moving it is a
+    rename across a module boundary with no behaviour attached, and this
+    change is about removing a message, not about where a helper lives.
     """
 
     scoped = current_bot()
     if scoped is not None and scoped.web_app:
         return scoped.web_app
     return getattr(settings, "MAX_BOT_WEB_APP", "")
-
-
-def _last_dispatch_delivery(master: CatalogMaster) -> str:
-    """What the *previous* dispatch for ``master`` actually reported.
-
-    The idempotent replay used to answer a hardcoded ``"queued"``. That
-    was a white lie while every dispatch attempted a send; it stopped
-    being one when a dispatch became able to fail without sending at all
-    (``no_entry_configured``). The failure mode it would create is the
-    one this module is being fixed for: the operator sets the missing
-    variable, the owner taps «Пригласить» again, the idempotency probe
-    matches the still-PENDING row, and the reply says ``queued`` about a
-    message that was never sent and is not being sent now. The only exit
-    would be waiting out the 7-day TTL.
-
-    So the replay reports the stored outcome instead of inventing one.
-    ``master.invite_dispatched`` is written on every dispatch, successful
-    or not, and is the only durable record of what happened — the
-    response of the original call is long gone.
-
-    Falls back to ``"queued"`` when no audit row is found, which keeps
-    the historical answer for rows created before the audit existed
-    rather than inventing a failure.
-    """
-
-    from apps.audit.models import AuditLog
-
-    row = (
-        AuditLog.all_tenants.filter(
-            tenant_id=master.tenant_id,
-            target_id=master.id,
-            action=MASTER_INVITE_DISPATCHED,
-        )
-        .order_by("-created_at")
-        .values_list("payload", flat=True)
-        .first()
-    )
-    if isinstance(row, dict) and isinstance(row.get("delivery"), str):
-        return row["delivery"]
-    return "queued"
 
 
 def _validate_body(body: dict[str, Any]) -> tuple[dict[str, Any], JsonResponse | None]:
@@ -429,10 +410,12 @@ def _validate_body(body: dict[str, Any]) -> tuple[dict[str, Any], JsonResponse |
     # name
     name = body.get("name")
     if not isinstance(name, str) or not name.strip():
-        return {}, _error("bad_request", "name is required", 400)
+        return {}, _error("bad_request", "name is required", 400, {"field": "name"})
     name = name.strip()
     if len(name) > MAX_NAME_LEN:
-        return {}, _error("bad_request", f"name exceeds {MAX_NAME_LEN} chars", 400)
+        return {}, _error(
+            "bad_request", f"name exceeds {MAX_NAME_LEN} chars", 400, {"field": "name"}
+        )
 
     # contact_method
     contact_method = body.get("contact_method")
@@ -442,18 +425,22 @@ def _validate_body(body: dict[str, Any]) -> tuple[dict[str, Any], JsonResponse |
             f"contact_method must be one of {sorted(ALLOWED_CONTACT_METHODS)} "
             "(email is deferred to a separate PR)",
             400,
+            {"field": "contact_method"},
         )
 
     # contact_value
     contact_value = body.get("contact_value")
     if not isinstance(contact_value, str) or not contact_value.strip():
-        return {}, _error("bad_request", "contact_value is required", 400)
+        return {}, _error(
+            "bad_request", "contact_value is required", 400, {"field": "contact_value"}
+        )
     contact_value = contact_value.strip()
     if len(contact_value) > MAX_CONTACT_VALUE_LEN:
         return {}, _error(
             "bad_request",
             f"contact_value exceeds {MAX_CONTACT_VALUE_LEN} chars",
             400,
+            {"field": "contact_value"},
         )
 
     # mode (default: invite)
@@ -569,195 +556,51 @@ def _seed_services(
 
     if not service_ids:
         return
-    rows = [
-        MasterService(tenant_id=tenant_id, master=master, service_id=sid) for sid in service_ids
-    ]
+    # DRF-1507 — приглашение теперь умеет перевыпускаться на существующей
+    # строке, и на ней часть услуг уже есть. ``bulk_create`` без этого
+    # фильтра положил бы вторую копию каждой связки: у ``MasterService``
+    # нет ограничения уникальности по ``(master, service)``, так что
+    # дубль был бы не отказом, а тихой парой одинаковых строк.
+    already = set(
+        MasterService.all_tenants.filter(master=master, service_id__in=service_ids).values_list(
+            "service_id", flat=True
+        )
+    )
+    missing = [sid for sid in service_ids if sid not in already]
+    if not missing:
+        return
+    rows = [MasterService(tenant_id=tenant_id, master=master, service_id=sid) for sid in missing]
     with master_service_write(MasterServiceSource.INVITE_SEED, actor_id=actor_id):
         MasterService.all_tenants.bulk_create(rows)
 
 
-def _dispatch_max_dm(
+def _response_payload(
+    master: CatalogMaster,
     *,
-    master_id: uuid.UUID,
-    contact_value: str,
-    contact_method: str,
-    token: uuid.UUID,
-    master_name: str,
-    salon_name: str,
+    tenant,
 ) -> dict[str, Any]:
-    """Send the invite DM via MAX. Returns dispatch outcome dict.
-
-    The outcome dict has keys ``delivery`` (``queued`` / ``failed`` /
-    ``skipped``) and optionally ``error`` (str).
-
-    ``skipped`` covers the ``max_phone`` case — we don't have a
-    phone→chat lookup pipeline in Phase 1, so we acknowledge the
-    spec contract but punt the actual delivery to the follow-up PR.
-
-    ### DRF-1349 — why this is a button and not a link
-
-    Until 30.08 this DM carried two addresses and no button, and the
-    owner's first live invitation of the pilot went nowhere. Both
-    addresses were unreachable *by construction*, not by accident:
-
-    * ``max://bot/<slug>?start=…`` — MAX does not implement the scheme.
-      The device answered «Не удалось открыть ссылку. Установите
-      браузер на устройстве».
-    * ``https://<miniapp>/onboarding/master?token=…`` — opens the
-      external browser, and MAX gives a browser no ``initData``. The
-      Mini App says «MAX не передал данные для входа», and the backend
-      agrees: :func:`apps.master_api.auth.validate_invite_token`
-      resolves the token through the tenant of the session's
-      ``BotUser``, so with no session there is no tenant to look in.
-
-    A MAX Mini App is entered from a button **on the message** —
-    ``{"type": "open_app", "web_app": <bot Mini App name>, "payload":
-    <flat slug>}``. That is how the welcome grid already works
-    (:mod:`apps.skills.welcome.skill`); the invite simply never built
-    one.
-
-    ### The ladder, and why the bottom rung reports failure
-
-    1. ``MAX_BOT_WEB_APP`` set → the button. Nothing else; an https
-       address underneath it would just re-offer the path that fails,
-       and in a chat any address is one tap away from the browser.
-    2. No Mini App name, but a usable ``SITE_DOMAIN`` → the address
-       alone, captioned without any promise, plus an ERROR line naming
-       the variable to set.
-    3. Neither → **``failed``**, and nothing is sent. A message with no
-       way into the onboarding is not a delivered invitation, and
-       reporting it as ``queued`` would leave the owner reading
-       «получит сообщение в течение минуты» about a message that can do
-       nothing. Silence indistinguishable from success is the defect
-       this whole change exists to remove.
-
-    The text no longer says «Не открывается в MAX? Используйте
-    веб-версию». That sentence pointed at the one path that cannot
-    work, and on 30.08 the owner followed it.
-    """
-
-    if contact_method == "max_phone":
-        return {"delivery": "skipped", "reason": "max_phone_lookup_deferred"}
-
-    # max_username — strip leading @ for the MAX REST chat_id param.
-    chat_id = contact_value.lstrip("@")
-    web_app = _sender_web_app()
-    web_url = _fallback_link(token)
-
-    if not web_app and not web_url:
-        # Neither a button nor an address: whatever we send, the invited
-        # master has no way to act on it. Sending it anyway and reporting
-        # `queued` is the failure mode this whole change exists to remove
-        # — silence indistinguishable from success.
-        #
-        # NOTE — the owner does NOT see this yet. The admin screen renders
-        # its failure callout only when `max_dm_delivery == "failed"` AND
-        # `fallback_link` is non-empty (AdminInviteMasterScreen.tsx), and
-        # here `fallback_link` is empty by construction: this branch runs
-        # precisely because `_fallback_link` returned "". So today the
-        # honest outcome reaches the audit row and this log line, not the
-        # screen. Un-gating that callout belongs to the screen's own PR —
-        # #1330 is editing exactly those lines — so it is filed rather
-        # than fixed here, instead of two branches rewriting one block.
-        logger.error(
-            "admin_api.invite.no_entry_configured — invite NOT sent: neither "
-            "MAX_BOT_WEB_APP (open_app button) nor a usable SITE_DOMAIN (web "
-            "address) is configured, so the message would contain no way into "
-            "the onboarding at all. %s",
-            SITE_DOMAIN_HINT,
-        )
-        return {"delivery": "failed", "error": "no_entry_configured"}
-
-    parts = [
-        f"Здравствуйте, {master_name}!\n\n",
-        f"Салон «{salon_name}» приглашает вас как мастера.\n\n",
-    ]
-    attachments: list[dict[str, Any]] | None = None
-
-    try:
-        if web_app:
-            # The only entry that works. A MAX Mini App opens from a
-            # button ON the message; an address in the text cannot open
-            # it at all.
-            #
-            # Built inside the try on purpose.
-            # `make_inline_keyboard_attachment` raises `ValueError` for a
-            # payload MAX would reject (Guard 3 — `=`, `&`, `?`). A UUID
-            # cannot trip it today, but this runs AFTER the atomic block
-            # committed the master row, so an escape here would answer
-            # 500 with a PENDING invite already in the roster and no
-            # `master.invite_dispatched` row to say what happened — which
-            # then feeds the idempotency probe a token nobody will ever
-            # dispatch. One `?src=…` appended to the payload is all it
-            # would take.
-            attachments = [
-                max_outbound.make_inline_keyboard_attachment(
-                    [
-                        {
-                            "label": "Принять приглашение",
-                            "callback": _invite_payload(token),
-                            "web_app": web_app,
-                        }
-                    ]
-                )
-            ]
-            parts.append("Нажмите кнопку ниже — анкета откроется прямо здесь, в MAX.\n\n")
-        else:
-            # Degraded branch — no Mini App name for the sending bot, so
-            # no button can be built. The address is all that is left,
-            # and it is offered without any promise: opened outside MAX
-            # it cannot work, because the Mini App is entered through
-            # `initData` that MAX hands only to its own webview, and
-            # `validate_invite_token` resolves the token through the
-            # tenant of the session's BotUser.
-            parts.append(f"Откройте ссылку, не выходя из MAX:\n{web_url}\n\n")
-            if not settings.DEBUG:
-                # In DEBUG this branch IS the expected local setup — the
-                # Vite URL is the right answer and there is no Mini App
-                # name to have. An ERROR on every dev invite would train
-                # the reader to skip the line on the one contour where it
-                # means something.
-                logger.error(
-                    "admin_api.invite.web_app_unset — invite sent without an "
-                    "open_app button: no Mini App name for the sending bot "
-                    "(the bot registry entry's `web_app`, else the global "
-                    "MAX_BOT_WEB_APP), so the DM carries only a web address, "
-                    "and an address opened outside MAX gets no initData."
-                )
-
-        parts.append("Приглашение действительно 7 дней.")
-        text = "".join(parts)
-
-        max_outbound.send_message(chat_id=chat_id, text=text, attachments=attachments)
-    except max_outbound.MaxAPIError as exc:
-        logger.warning(
-            "admin_api.invite.max_dispatch_failed master_id=%s status=%s",
-            master_id,
-            exc.status_code,
-        )
-        return {"delivery": "failed", "error": f"max_status_{exc.status_code}"}
-    except Exception as exc:  # noqa: BLE001 — DM dispatch must not crash the request
-        logger.exception(
-            "admin_api.invite.max_dispatch_unexpected master_id=%s",
-            master_id,
-        )
-        return {"delivery": "failed", "error": str(exc)[:200]}
-    return {"delivery": "queued"}
-
-
-def _response_payload(master: CatalogMaster, *, tenant, dispatch_delivery: str) -> dict[str, Any]:
     """Build the 201/200 JSON envelope.
 
     For ``mode=catalog_only`` (no invite_token) ``invite_token`` and
-    ``invite_expires_at`` are null in the response, ``fallback_link``
-    and ``invite_link`` are empty, and the caller passes
-    ``dispatch_delivery="skipped"``.
+    ``invite_expires_at`` are null in the response and ``fallback_link``
+    and ``invite_link`` are empty.
 
     ``invite_link`` (DRF-1424) is the one the owner can hand over by any
-    route — see :data:`MAX_START_LINK_TEMPLATE`. It is a sibling of
-    ``fallback_link``, not a replacement: ``fallback_link`` is the web
-    address of the Mini App and works only inside MAX's own webview,
-    while ``invite_link`` starts the bot from anywhere.
+    route — see
+    :data:`apps.channels.max.start_links.MAX_START_LINK_TEMPLATE`. It is
+    a sibling of ``fallback_link``, not a replacement: ``fallback_link``
+    is the web address of the Mini App and works only inside MAX's own
+    webview, while ``invite_link`` starts the bot from anywhere.
+
+    ``max_dm_delivery`` / ``max_dm_error`` are GONE (решение владельца
+    §44.4, 07.09.2026). They described a personal message this endpoint
+    used to attempt through the CLIENT bot, which reaches only a chat
+    that already exists — never a master the salon has not written to
+    before. The envelope carried the outcome so the screen could show
+    it; the screen showed «не дошло» on nearly every invite. Both the
+    attempt and its report are removed, and the fields with them: an
+    always-empty verdict about a thing that no longer happens is worse
+    than no field, because it invites a reader to act on it.
 
     ``tenant`` is passed rather than read off ``master.tenant``: the
     idempotency path hands us a row fetched without ``select_related``,
@@ -771,8 +614,8 @@ def _response_payload(master: CatalogMaster, *, tenant, dispatch_delivery: str) 
             "master_id": str(master.id),
             "invite_token": None,
             "invite_expires_at": None,
-            "max_dm_delivery": dispatch_delivery,
             "fallback_link": "",
+            "fallback_unavailable": None,
             "invite_link": "",
         }
     return {
@@ -781,10 +624,141 @@ def _response_payload(master: CatalogMaster, *, tenant, dispatch_delivery: str) 
         "invite_expires_at": master.invite_expires_at.isoformat()
         if master.invite_expires_at is not None
         else None,
-        "max_dm_delivery": dispatch_delivery,
         "fallback_link": _fallback_link(master.invite_token),
+        # DRF-1079: withheld on purpose — and said so, by name.
+        "fallback_unavailable": _fallback_unavailable_reason(),
         "invite_link": _bot_start_link(tenant, master.invite_token),
     }
+
+
+def _contact_matches(master: CatalogMaster, *, contact_method: str, contact_value: str) -> bool:
+    """Тот ли это человек, которого сейчас приглашают.
+
+    Для ``max_username`` сравнение идёт по нормализованному хэндлу
+    (:func:`apps.catalog.handles.normalize_handle`), а не по сырой строке.
+    До DRF-1507 сравнивалось сырое: владелец, набравший во второй раз
+    ``anna_styl`` вместо ``@anna_styl``, получал вторую строку на того же
+    мастера — и это выглядело как «идемпотентность не сработала», хотя
+    сработала ровно так, как написана.
+
+    Для ``max_phone`` ключ лежит в ``raw["invite_phone"]``: колонки
+    телефона у ``CatalogMaster`` нет (пробел назван в докстринге модуля).
+    Телефон сравнивается как есть — его нормализацию делает валидатор
+    тела запроса, и придумывать здесь вторую значило бы завести два
+    разных представления одного номера.
+    """
+
+    if contact_method == "max_username":
+        key = normalize_handle(contact_value)
+        return bool(key) and normalize_handle(master.max_handle) == key
+    return bool(contact_value) and (master.raw or {}).get("invite_phone") == contact_value
+
+
+def _is_superseded(master: CatalogMaster) -> bool:
+    """Строка, погашенная приземлением в другую строку того же человека.
+
+    Ставит метку ``apps/master_api/views.py::_land_on_glue_row``. Такая
+    строка — надгробие: переиспользовать её нельзя, иначе приглашение
+    поедет в отменённую половину склейки.
+    """
+
+    return bool((master.raw or {}).get("superseded_by_master_id"))
+
+
+def _person_rows(
+    *,
+    tenant_id: uuid.UUID,
+    contact_method: str,
+    contact_value: str,
+) -> list[CatalogMaster]:
+    """Все строки этого салона, относящиеся к приглашаемому человеку.
+
+    Выборка сужается в базе настолько, насколько ключ это позволяет, а
+    нормализованное сравнение доделывается в Python: индекса по
+    ``lower(ltrim(max_handle, '@'))`` нет и ради салона на десятки строк
+    он не нужен. Порядок — стабильный, чтобы выбор строки не зависел от
+    того, как база решила вернуть страницу.
+    """
+
+    qs = CatalogMaster.all_tenants.filter(tenant_id=tenant_id)
+    if contact_method == "max_username":
+        qs = qs.exclude(max_handle="")
+    else:
+        qs = qs.filter(raw__invite_phone=contact_value)
+    rows = [
+        m
+        for m in qs.order_by("invited_at", "external_id")
+        if _contact_matches(m, contact_method=contact_method, contact_value=contact_value)
+    ]
+    return [m for m in rows if not _is_superseded(m)]
+
+
+def _already_a_master(rows: list[CatalogMaster]) -> CatalogMaster | None:
+    """Строка, в которую этот человек уже приземлился.
+
+    Приглашать её повторно нечем: ``linked_bot_user`` стоит, доступ у
+    мастера есть, а второй токен на того же человека — это ровно вторая
+    строка, которую задача и запрещает.
+
+    Признак ровно один — ``linked_bot_user``. НЕ ``invite_status ==
+    ACCEPTED``: этот статус по умолчанию стоит и у синхронизированных
+    строк, и у зеркал ``mode=catalog_only`` (см. ``help_text`` поля —
+    иначе они не были бы записываемыми). За ними человека в боте нет, и
+    считать их «уже приземлившимися» значило бы отказать владельцу в
+    приглашении мастера, которого он видит в каталоге.
+    """
+
+    for master in rows:
+        if master.linked_bot_user_id is not None:
+            return master
+    return None
+
+
+def _reusable_row(rows: list[CatalogMaster]) -> CatalogMaster | None:
+    """Строка, на которой можно перевыпустить приглашение.
+
+    DRF-1507 — половина «писателя» ключа ``(tenant, max_handle)``.
+
+    Было: ``master_invite_create`` на протухшем приглашении заводил ВТОРУЮ
+    строку с тем же ``max_handle`` намеренно, и это было закреплено тестом
+    ``test_expired_invite_creates_new_row`` («Now 2 rows in catalog»).
+    Поведение для человека при этом правильное — повторное приглашение
+    должно работать; неправильным был способ: новая строка вместо нового
+    токена на старой. Через неделю неотвеченных приглашений салон получал
+    столько же фантомов в ростере, сколько раз владелец нажал «Пригласить
+    ещё раз», и ``resolve_master`` выбирал из них по случайному признаку.
+
+    Стало: перевыпуск на существующей строке. Пользовательское поведение
+    сохранено дословно — владелец получает рабочую ссылку, мастер по ней
+    доходит до кабинета; изменилось только то, что строка остаётся одна.
+
+    Отбор узкий намеренно: перевыпуск допустим только на строке, которую
+    завёл этот же путь и которая никого в бот не пустила —
+    ``mode=invite``, ``linked_bot_user`` пуст, приглашение не принято.
+
+    Что сюда НЕ попадает и почему:
+
+    * ``linked_bot_user`` стоит — человек уже в салоне, случай выше;
+    * ``mode=catalog_only`` — зеркало каталога, а не приглашение;
+      перевыпуск на нём подменил бы смысл строки;
+    * ``invite_status=ACCEPTED`` без связи — так выглядит СИНХРОНИЗИРОВАННАЯ
+      строка. Перевести её в ``PENDING`` значило бы вынуть работающего
+      мастера из записи (``booking/services/create.py`` требует ACCEPTED)
+      на всё время, пока он не откроет ссылку. Приглашение такого мастера
+      по-прежнему заводит свою строку; сводит их приземление
+      (``master_api/views.py::_land_on_glue_row``), когда становится
+      известен ``ayla_user_id``.
+    """
+
+    for master in rows:
+        if master.linked_bot_user_id is not None:
+            continue
+        if master.mode != CatalogMaster.Mode.INVITE:
+            continue
+        if master.invite_status == CatalogMaster.InviteStatus.ACCEPTED:
+            continue
+        return master
+    return None
 
 
 def _idempotency_lookup(
@@ -792,14 +766,18 @@ def _idempotency_lookup(
     tenant_id: uuid.UUID,
     name: str,
     contact_value: str,
+    contact_method: str,
 ) -> CatalogMaster | None:
     """Find an existing PENDING invite within the 7-day TTL window.
 
-    Idempotency key = ``(tenant, name, contact_value, status=PENDING,
-    invite_expires_at > now())``. We match on ``max_handle`` because
-    that's where ``max_username`` contact_values are stored. For
-    ``max_phone`` we also match via ``raw["invite_phone"]`` (set when
-    the original row was created).
+    Idempotency key = ``(tenant, name, contact, status=PENDING,
+    invite_expires_at > now())`` — «владелец нажал дважды за пять
+    секунд», и ответ обязан быть тем же самым, включая тот же токен.
+
+    Отличается от :func:`_reusable_row` тем, что здесь НИЧЕГО не пишется:
+    живое приглашение возвращается как есть, с прежним токеном и прежним
+    сроком. Перевыпуск — соседний случай, и он не должен молча сбрасывать
+    отсчёт семи дней у приглашения, которое ещё действует.
 
     Two rows with the same key but different ``contact_method`` are
     treated as separate invites — re-sending via phone after a
@@ -807,18 +785,120 @@ def _idempotency_lookup(
     """
 
     now = timezone.now()
-    qs = CatalogMaster.all_tenants.filter(
+    candidates = CatalogMaster.all_tenants.filter(
         tenant_id=tenant_id,
         name=name,
         invite_status=CatalogMaster.InviteStatus.PENDING,
         invite_expires_at__gt=now,
+    ).order_by("invited_at", "external_id")
+    for master in candidates:
+        if _is_superseded(master):
+            continue
+        if _contact_matches(master, contact_method=contact_method, contact_value=contact_value):
+            return master
+    return None
+
+
+def _next_external_id(tenant_id: uuid.UUID) -> int:
+    """Следующий синтетический ``external_id`` для этого салона.
+
+    DRF-1507, пункт 3 — разрыв Р7.
+
+    Было: ``count(мастеров тенанта) + 1_000_000``. Два одновременных
+    приглашения в одном салоне считают одно и то же число, вторая вставка
+    ловит ``unique_together (tenant, external_id)``, и вид ловил её общим
+    ``except Exception`` — **500 без ретрая**. Хуже: ``count()`` даёт
+    одинаковый результат и НЕ одновременно — достаточно удалить строку,
+    чтобы следующий номер совпал с уже занятым.
+
+    Стало: ``max`` по нашему же диапазону плюс один, и повтор вставки в
+    :func:`master_invite_create`. Уникальность по-прежнему держит база —
+    ограничение ``unique_together (tenant, external_id)`` не менялось;
+    убран источник гарантированного столкновения и добавлен ответ на
+    столкновение случайное.
+
+    ``max`` берётся только по диапазону ``>= INVITE_EXTERNAL_ID_FLOOR``:
+    номера синхронизированных строк принадлежат Ayla, и втягивать их в
+    свою нумерацию значило бы уезжать вверх на чужой рост.
+    """
+
+    highest = CatalogMaster.all_tenants.filter(
+        tenant_id=tenant_id,
+        external_id__gte=INVITE_EXTERNAL_ID_FLOOR,
+    ).aggregate(top=Max("external_id"))["top"]
+    if highest is None:
+        return INVITE_EXTERNAL_ID_FLOOR
+    return int(highest) + 1
+
+
+def _reissue_invite(
+    *,
+    master: CatalogMaster,
+    name: str,
+    max_handle: str,
+    raw: dict[str, Any],
+    mode: str,
+    token: uuid.UUID | None,
+    expires: datetime | None,
+    invite_status: str,
+    now: datetime,
+) -> CatalogMaster:
+    """Выписать новое приглашение НА СУЩЕСТВУЮЩУЮ строку.
+
+    DRF-1507 — писатель ключа ``(tenant, max_handle)``.
+
+    Пользовательское поведение сохраняется дословно: владелец получает
+    свежий токен и рабочую ссылку, мастер по ней доходит до кабинета.
+    Меняется только то, что строка остаётся одна — вместо второй с тем же
+    ``max_handle``, которую заводил старый путь.
+
+    ``is_active`` не трогается сознательно: строка, на которую
+    перевыпускают, доступа не имела (``linked_bot_user`` пуст — это
+    условие отбора в :func:`_reusable_row`), а значит уже неактивна;
+    решение о том, кто и когда её включает, живёт в DRF-1521 и здесь ему
+    не место.
+
+    ``external_id`` не трогается: он уже занят этой строкой, и менять
+    номер существующего мастера значит ломать ключ, по которому его
+    находит всё остальное.
+
+    ``raw`` сливается, а не заменяется: там могут лежать поля,
+    поставленные не этим путём (``invite_phone`` предыдущего
+    приглашения, диагностика). Ключи нового приглашения перекрывают
+    старые, остальное остаётся.
+    """
+
+    master.name = name
+    master.mode = CatalogMaster.Mode(mode)
+    master.invite_status = invite_status
+    master.invite_token = token
+    master.invite_expires_at = expires
+    master.invited_at = now if token is not None else master.invited_at
+    master.external_updated_at = now
+    if max_handle:
+        master.max_handle = max_handle
+    master.raw = {**(master.raw or {}), **raw}
+    master.save(
+        update_fields=[
+            "name",
+            "mode",
+            "invite_status",
+            "invite_token",
+            "invite_expires_at",
+            "invited_at",
+            "external_updated_at",
+            "max_handle",
+            "raw",
+        ]
     )
-    by_handle = qs.filter(max_handle=contact_value).first()
-    if by_handle is not None:
-        return by_handle
-    # Phone-stored case — `raw["invite_phone"]`. SQLite (test) accepts
-    # the JSON lookup the same as Postgres.
-    return qs.filter(raw__invite_phone=contact_value).first()
+    logger.info(
+        "admin_api.invite.reissued tenant=%s master_id=%s — повторное "
+        "приглашение выписано на существующую строку, вторая не заведена "
+        "(DRF-1507).",
+        master.tenant_id,
+        master.id,
+    )
+    return master
 
 
 # --- POST /api/v1/admin/masters/invite ------------------------------------
@@ -859,21 +939,57 @@ def master_invite_create(request: HttpRequest) -> HttpResponse:
     # ``catalog_only`` row has no token + carries different semantics
     # (the spec allows multiple "catalog-only mirror" rows per same
     # name); we skip idempotency lookup for it.
+    reused: CatalogMaster | None = None
     if mode == "invite":
-        existing = _idempotency_lookup(tenant_id=tenant.id, name=name, contact_value=contact_value)
+        existing = _idempotency_lookup(
+            tenant_id=tenant.id,
+            name=name,
+            contact_value=contact_value,
+            contact_method=contact_method,
+        )
         if existing is not None:
-            payload = _response_payload(
-                existing,
-                tenant=tenant,
-                dispatch_delivery=_last_dispatch_delivery(existing),
-            )
+            payload = _response_payload(existing, tenant=tenant)
             response = JsonResponse(payload, status=200)
             response["X-Idempotent"] = "true"
             return response
 
+        # DRF-1507 — «один человек, одна строка» держит писатель.
+        #
+        # Живого приглашения нет, но человек в салоне может уже быть: с
+        # протухшим приглашением, с отклонённым, или уже приземлившийся.
+        # До этой правки все три случая давали ВТОРУЮ строку с тем же
+        # ``max_handle``, и ростер салона распухал ровно на число нажатий
+        # «Пригласить ещё раз».
+        rows = _person_rows(
+            tenant_id=tenant.id,
+            contact_method=contact_method,
+            contact_value=contact_value,
+        )
+        landed = _already_a_master(rows)
+        if landed is not None:
+            # Мастер уже в салоне и уже с доступом. Выписывать второй
+            # токен не на что: ``onboarding_accept`` вернёт ему сессию
+            # ЭТОЙ строки (идемпотентная проба), а выписанная вторая
+            # осталась бы PENDING навсегда — фантом из разрыва Р5.
+            # ``invite_token`` у неё пуст, поэтому ответ честно несёт
+            # ``null`` вместо ссылки: посылать нечего.
+            logger.info(
+                "admin_api.invite.already_a_master tenant=%s master_id=%s "
+                "contact_method=%s — повторное приглашение сведено в "
+                "существующую строку вместо второй (DRF-1507).",
+                tenant.id,
+                landed.id,
+                contact_method,
+            )
+            payload = _response_payload(landed, tenant=tenant)
+            response = JsonResponse(payload, status=200)
+            response["X-Idempotent"] = "true"
+            return response
+
+        reused = _reusable_row(rows)
+
     now = timezone.now()
     expires_at = now + timedelta(days=INVITE_TTL_DAYS)
-    next_external_id = CatalogMaster.all_tenants.filter(tenant=tenant).count() + 1_000_000
 
     # Build the master row. ``max_handle`` carries the value for
     # ``max_username`` contact_method; for ``max_phone`` we stash the
@@ -883,7 +999,10 @@ def master_invite_create(request: HttpRequest) -> HttpResponse:
     raw: dict[str, Any] = {}
     max_handle = ""
     if contact_method == "max_username":
-        max_handle = contact_value
+        # ``canonical_handle`` — форма хранения, одна на обоих писателей
+        # (DRF-1507). Раньше сюда клалось дословно набранное владельцем,
+        # и «anna_styl» со «@anna_styl» были разными людьми для проб выше.
+        max_handle = canonical_handle(contact_value)
     elif contact_method == "max_phone":
         raw["invite_phone"] = contact_value
 
@@ -894,130 +1013,201 @@ def master_invite_create(request: HttpRequest) -> HttpResponse:
         CatalogMaster.InviteStatus.PENDING if issue_token else CatalogMaster.InviteStatus.ACCEPTED
     )
 
-    try:
-        with transaction.atomic():
-            master = CatalogMaster.all_tenants.create(
-                tenant=tenant,
-                external_id=next_external_id,
-                external_updated_at=now,
-                name=name,
-                is_active=False,
-                invite_status=invite_status,
-                invite_token=token,
-                invite_expires_at=expires,
-                invited_at=now if issue_token else None,
-                max_handle=max_handle,
-                mode=CatalogMaster.Mode(mode),
-                raw=raw,
-            )
+    # DRF-1507, пункт 3 — вставка повторяется, а не падает 500.
+    #
+    # ``_next_external_id`` больше не даёт гарантированного столкновения,
+    # но два запроса, прочитавшие ``max`` до вставки друг друга, всё ещё
+    # получат одно число: гонку нельзя убрать чтением, её можно только
+    # разрешить. Уникальность держит база (``unique_together (tenant,
+    # external_id)``), а здесь — ответ на её срабатывание: пересчитать и
+    # повторить. Каждая попытка в своём ``atomic``: транзакция, поймавшая
+    # ``IntegrityError``, дальше непригодна, и повтор внутри неё был бы
+    # вторым отказом на том же месте.
+    master: CatalogMaster | None = None
+    for attempt in range(EXTERNAL_ID_MAX_ATTEMPTS):
+        try:
+            with transaction.atomic():
+                if reused is not None:
+                    master = _reissue_invite(
+                        master=reused,
+                        name=name,
+                        max_handle=max_handle,
+                        raw=raw,
+                        mode=mode,
+                        token=token,
+                        expires=expires,
+                        invite_status=invite_status,
+                        now=now,
+                    )
+                else:
+                    master = CatalogMaster.all_tenants.create(
+                        tenant=tenant,
+                        external_id=_next_external_id(tenant.id),
+                        external_updated_at=now,
+                        name=name,
+                        is_active=False,
+                        invite_status=invite_status,
+                        invite_token=token,
+                        invite_expires_at=expires,
+                        invited_at=now if issue_token else None,
+                        max_handle=max_handle,
+                        mode=CatalogMaster.Mode(mode),
+                        raw=raw,
+                    )
 
-            # DRF-1062: no working-hours seeding here any more.
-            #
-            # This branch manufactured the 10:00-19:00 stub that all four
-            # pilot masters now carry — a schedule the salon never set,
-            # indistinguishable from one it did. Worse, `apps.scheduling`
-            # is not what serves slots: with BOOKING_VIA_AYLA_REST the
-            # backend answers, so the rows shaped nothing except the
-            # summary line in the master card.
-            #
-            # `schedule_preset` stays in the invite contract on purpose —
-            # it is part of the request shape the admin screen sends. It
-            # simply no longer has a side effect. Where a new master's
-            # schedule comes from is the schedule window's call.
-            _seed_services(
-                tenant_id=tenant.id,
-                master=master,
-                service_ids=service_ids,
-                actor_id=bot_user.id,
-            )
+                # DRF-1062: no working-hours seeding here any more.
+                #
+                # This branch manufactured the 10:00-19:00 stub that all
+                # four pilot masters now carry — a schedule the salon
+                # never set, indistinguishable from one it did. Worse,
+                # `apps.scheduling` is not what serves slots: with
+                # BOOKING_VIA_AYLA_REST the backend answers, so the rows
+                # shaped nothing except the summary line in the master
+                # card.
+                #
+                # `schedule_preset` stays in the invite contract on
+                # purpose — it is part of the request shape the admin
+                # screen sends. It simply no longer has a side effect.
+                # Where a new master's schedule comes from is the
+                # schedule window's call.
+                _seed_services(
+                    tenant_id=tenant.id,
+                    master=master,
+                    service_ids=service_ids,
+                    actor_id=bot_user.id,
+                )
 
-            write_audit(
-                MASTER_INVITED,
-                target="catalog.CatalogMaster",
-                target_id=master.id,
-                payload={
-                    "master_id": str(master.id),
-                    "actor_id": str(bot_user.id),
-                    "actor_role": role_ctx.primary_role,
-                    "role": "master",
-                    "contact_method": contact_method,
-                    "mode": mode,
-                    "services_count": len(service_ids),
-                    "idempotent": False,
-                },
-                actor_id=bot_user.id,
-            )
+                write_audit(
+                    MASTER_INVITED,
+                    target="catalog.CatalogMaster",
+                    target_id=master.id,
+                    payload={
+                        "master_id": str(master.id),
+                        "actor_id": str(bot_user.id),
+                        "actor_role": role_ctx.primary_role,
+                        "role": "master",
+                        "contact_method": contact_method,
+                        "mode": mode,
+                        "services_count": len(service_ids),
+                        "idempotent": False,
+                        "reused_row": reused is not None,
+                    },
+                    actor_id=bot_user.id,
+                )
 
-            emit(
-                MASTER_INVITED,
-                properties={
-                    "master_id": str(master.id),
-                    "actor_role": role_ctx.primary_role,
-                    "contact_method": contact_method,
-                    "mode": mode,
-                    "services_count": len(service_ids),
-                },
+                emit(
+                    MASTER_INVITED,
+                    properties={
+                        "master_id": str(master.id),
+                        "actor_role": role_ctx.primary_role,
+                        "contact_method": contact_method,
+                        "mode": mode,
+                        "services_count": len(service_ids),
+                        "reused_row": reused is not None,
+                    },
+                )
+            break
+        except IntegrityError:
+            master = None
+            if attempt + 1 >= EXTERNAL_ID_MAX_ATTEMPTS:
+                logger.exception("admin_api.invite.external_id_exhausted tenant=%s", tenant.id)
+                return _error("server_error", "failed to create invite", 500)
+            logger.warning(
+                "admin_api.invite.external_id_retry tenant=%s attempt=%d — "
+                "одновременное приглашение в этом салоне заняло номер; "
+                "пересчитываю и повторяю (DRF-1507).",
+                tenant.id,
+                attempt + 1,
             )
-    except Exception:  # noqa: BLE001 — any error inside atomic → 500 + rollback
-        logger.exception("admin_api.invite.create_failed")
+        except Exception:  # noqa: BLE001 — any other error inside atomic → 500 + rollback
+            logger.exception("admin_api.invite.create_failed")
+            return _error("server_error", "failed to create invite", 500)
+
+    if master is None:  # pragma: no cover — цикл выходит либо break, либо return
+        logger.error("admin_api.invite.create_failed tenant=%s — no row after retries", tenant.id)
         return _error("server_error", "failed to create invite", 500)
 
-    # Dispatch the MAX DM AFTER the atomic block has committed the
-    # master + side-effect rows. Failure here MUST NOT roll back the
-    # master row (it exists, the dispatch is observable via the audit
-    # row + response). The dispatch helper already swallows MAX errors
-    # via ``MaxAPIError``. We then write the second audit row +
-    # event so the dispatch outcome is forensically attached to the
-    # same master_id.
+    # Личного сообщения здесь больше нет (решение владельца §44.4,
+    # 07.09.2026).
     #
-    # Note: doing this synchronously (rather than via ``on_commit``
-    # which would fire AFTER the view return) lets the response
-    # carry the authoritative dispatch outcome. The cost is an extra
-    # ~10s timeout budget on the request — acceptable for a "create
-    # invite" admin action that the owner is actively waiting on.
-    if not issue_token:
-        # mode=catalog_only — no dispatch attempt; audit as skipped.
-        outcome: dict[str, Any] = {"delivery": "skipped", "reason": "catalog_only_mode"}
-    else:
-        assert token is not None  # narrow for type-checker
-        outcome = _dispatch_max_dm(
-            master_id=master.id,
-            contact_value=contact_value,
-            contact_method=contact_method,
-            token=token,
-            master_name=master.name,
-            salon_name=tenant.name,
-        )
+    # Оно уходило КЛИЕНТСКИМ ботом (`send_message` без `bot=`) и потому
+    # достигало только тот чат, который уже существует. Незнакомому
+    # мастеру — которого и приглашают — не доходило никогда, сколько ни
+    # чини настройки: это тупик по конструкции, а не дефект контура.
+    # Владелец салона видел про него строку, которая почти всегда
+    # говорила «не дошло».
+    #
+    # Вместе с попыткой ушла и вторая аудит-строка
+    # ``master.invite_dispatched``: она описывала исход отправки, а
+    # отправки нет. Писать её со значением «skipped» значило бы завести
+    # запись о событии, которого не бывает. Прежние строки в базе
+    # остаются и по-прежнему рисуются в карточке мастера — событие в
+    # словаре сохранено ради них.
+    #
+    # Остаётся один честный сценарий: ссылка и готовый текст на экране,
+    # которые владелец отправляет сам (`InviteMessage`, §44.2).
+    _link_to_catalog(master, tenant=tenant)
 
-    dispatch_audit_payload: dict[str, Any] = {
-        "master_id": str(master.id),
-        "channel": "max",
-        "delivery": outcome["delivery"],
-    }
-    if "error" in outcome:
-        dispatch_audit_payload["error"] = outcome["error"]
-    if "reason" in outcome:
-        dispatch_audit_payload["reason"] = outcome["reason"]
-    # Re-enter tenant_scope is unnecessary — require_admin_role wraps
-    # the entire view in tenant_scope. write_audit reads it.
-    write_audit(
-        MASTER_INVITE_DISPATCHED,
-        target="catalog.CatalogMaster",
-        target_id=master.id,
-        payload=dispatch_audit_payload,
-        actor_id=bot_user.id,
-    )
-    emit(
-        MASTER_INVITE_DISPATCHED,
-        properties={
-            "master_id": str(master.id),
-            "channel": "max",
-            "delivery": outcome["delivery"],
-        },
-    )
-
-    payload = _response_payload(master, tenant=tenant, dispatch_delivery=outcome["delivery"])
+    payload = _response_payload(master, tenant=tenant)
     return JsonResponse(payload, status=201)
+
+
+def _link_to_catalog(master: CatalogMaster, *, tenant: Any) -> None:
+    """Привязать заведённого мастера к каталогу — сразу и не мешая (DRF-2379).
+
+    Решение владельца §77 п.27 (24.09): привязка должна происходить **сама**,
+    когда салон заводит мастера. До этого она была тремя шагами в двух
+    системах — профиль заводился руками в админке каталога, ключ приезжал
+    синком, действие повторялось в админке бота.
+
+    **Почему вне транзакции.** Это сетевой вызов. Внутри ``atomic`` он держал
+    бы соединение всё время похода в каталог, а обрыв откатывал бы строку
+    мастера — салон не завёл бы человека из-за того, что чужая система
+    недоступна.
+
+    **Почему исход только в журнал.** Заведение мастера не имеет права
+    упасть: у салона на экране появился человек, и отказ каталога этого не
+    отменяет. Строка остаётся ``catalog_unlinked`` — состояние, которое
+    ``salon_readiness`` уже считает и студия уже видит, — а добить привязку
+    обязан подметальщик. То же правило, что у ``solo_link_attempt``:
+    регистрация не падает из-за того, что Ayla лежит.
+
+    Ошибку каталога здесь не различаем по имени: :mod:`apps.catalog.identity`
+    уже разложил её по именам и записал в журнал (в том числе отдельной
+    строкой — «ручки нет» против «каталог отказал»). Второй разбор здесь
+    завёл бы второе место, где эти имена живут.
+    """
+    from apps.catalog.identity import (
+        CatalogIdentityUnavailable,
+        ensure_catalog_specialist_identity,
+    )
+
+    try:
+        identity = ensure_catalog_specialist_identity(master)
+    except CatalogIdentityUnavailable as exc:
+        logger.info(
+            "admin_api.invite.catalog_unlinked tenant=%s master_id=%s reason=%s — "
+            "мастер заведён, привязка к каталогу не состоялась; добивает "
+            "подметальщик (DRF-2379).",
+            tenant.id,
+            master.id,
+            exc.reason,
+        )
+        return
+    except Exception:  # noqa: BLE001 — приглашение не падает ни от чего снаружи
+        logger.exception(
+            "admin_api.invite.catalog_link_failed tenant=%s master_id=%s",
+            tenant.id,
+            master.id,
+        )
+        return
+
+    logger.info(
+        "admin_api.invite.catalog_linked tenant=%s master_id=%s specialist=%s",
+        tenant.id,
+        master.id,
+        identity.specialist_id,
+    )
 
 
 __all__ = ["master_invite_create"]

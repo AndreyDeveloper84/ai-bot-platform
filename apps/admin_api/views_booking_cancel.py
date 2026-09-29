@@ -55,8 +55,32 @@ def _error(slug: str, detail: str, status: int) -> JsonResponse:
     return JsonResponse({"error": slug, "detail": detail}, status=status)
 
 
-def _outcome(outcome: str, detail: str, status: int, **extra: Any) -> JsonResponse:
-    return JsonResponse({"outcome": outcome, "detail": detail, **extra}, status=status)
+def _outcome(
+    outcome: str,
+    detail: str,
+    status: int,
+    *,
+    hint: str | None = None,
+    **extra: Any,
+) -> JsonResponse:
+    """Исход операции. ``detail`` — нам в журнал, ``hint`` — слова человеку.
+
+    DRF-2453. Раньше в ``detail`` лежало и то и другое: согласованная
+    русская фраза владельца, внутренний английский и ``str(exc)``. Экран
+    печатал этот канал целиком — значит показывал человеку и внутреннее
+    тоже; а перестать печатать было нельзя, не потеряв слова владельца.
+
+    Разрез не новый: ``hint`` рядом с внутренней причиной уже отдаёт
+    ``views_staff_role.py`` (``details={"hint": exc.hint}``), и клиент
+    объявляет это поле с DRF-2273. Здесь та же пара в конверте исхода.
+
+    Нет ``hint`` — экран скажет собственную согласованную фразу; выдумывать
+    её на сервере не нужно и нельзя.
+    """
+    body: dict[str, Any] = {"outcome": outcome, "detail": detail, **extra}
+    if hint:
+        body["hint"] = hint
+    return JsonResponse(body, status=status)
 
 
 @csrf_exempt
@@ -124,7 +148,12 @@ def cancel_booking(request: HttpRequest, appointment_id: str) -> HttpResponse:
             tenant.id,
             exc,
         )
-        return _outcome("blocked", "отмена сейчас недоступна — обратитесь к поддержке", 503)
+        return _outcome(
+            "blocked",
+            "salon rejected the cancel call as unauthorized",
+            503,
+            hint="отмена сейчас недоступна — обратитесь к поддержке",
+        )
     except SalonForbidden as exc:
         logger.warning(
             "admin_api.cancel_booking.forbidden actor=%s tenant=%s err=%s",
@@ -150,14 +179,20 @@ def cancel_booking(request: HttpRequest, appointment_id: str) -> HttpResponse:
             appointment_id,
             exc,
         )
-        return _outcome("conflict", "запись не найдена в расписании — обновите день", 409)
+        return _outcome(
+            "conflict",
+            "mirror diverged: appointment missing upstream",
+            409,
+            hint="запись не найдена в расписании — обновите день",
+        )
     except SalonUnavailable as exc:
         # May well have been applied. Never call this a failure.
         logger.warning("admin_api.cancel_booking.unknown actor=%s err=%s", actor, exc)
         return _outcome(
             "pending",
-            "расписание не ответило — обновите день, прежде чем повторять",
+            "salon did not answer; the write may already have applied",
             504,
+            hint="расписание не ответило — обновите день, прежде чем повторять",
         )
     except SalonAPIError as exc:
         logger.warning("admin_api.cancel_booking.error actor=%s err=%s", actor, exc)

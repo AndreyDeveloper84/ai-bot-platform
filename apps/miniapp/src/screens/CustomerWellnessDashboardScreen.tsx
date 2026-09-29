@@ -13,21 +13,69 @@
  *   - `project_ayla_personal_ai` — first-person Ayla voice, «ты»,
  *     lowercase «ayla» wordmark
  *
- * # Layout (TL extension to Tau §3 — block re-numbering)
+ * # Layout — H01 по макету DRF-1321 v1.2 (UX FREEZE 25.08), DRF-2144
  *
- *   Block 1 — Greeting + human one-liner (Tau §3 / §11.9 + §11.10)
- *   Block 2 — Pulse strip (Питание + Вода + Цель)  — Tau §3 + §11.1
- *   Block 3 — Quick actions 2×2 (📸 + 💧 + 🎯 + 📅) — Tau §3 + §11.5+§11.7+§11.8
- *   Block 4 — Цели сегодня (text actions, no progress bars) — Tau §3
- *   Block 5 — Ближайшая запись (multi-record indicator) — Tau §3 + §11.3
- *   Block 6 — Прогресс недели (cold-start ≥3 days) — Tau §3 + §11.4
- *   Block 7 — Recommendations embed (TL extension; phase 3.1: real
- *     scorer picks onto mirror services, no reasoning_text)
- *   Bottom nav — 5 tabs (🏠 Главная / ☀ День / 📅 Записи / 💅 Услуги / 👤 Я)
+ * Решение владельца 20.09 (§55): строить по макету в рамках §49/§82 — без
+ * веса, «−2,4 кг», процентов, графиков прогресса, «Добавить замер» и
+ * «Самочувствие». Порядок сверху вниз:
  *
- * NOTE: Tau's literal Block 7 is the bottom nav. TL re-numbering treats
- * the bottom nav as separate and adds a new Block 7 (Recommendations
- * embed) above it. Implemented per TL ticket; deviation documented.
+ * Порядок по макету — решение владельца 22.09 (Д32, DRF-2330):
+ * цель → план → запись → быстрые действия → Ayla → дневник.
+ *
+ *   Block 1 — Greeting + human one-liner (Tau §3 / §11.9 + §11.10);
+ *     внутри — карточка «Начнём с малого?» (Д31 а): подсказка первого шага
+ *     человеку с пустым днём, поэтому наверху, а не в конце экрана
+ *   Block G — карточка активной цели: «Активная цель», название,
+ *     «Неделя N · выполнено N из M действий» (adherence Plan Lite),
+ *     primary «Продолжить сегодняшний план →» / «Составить план»,
+ *     вторичное «Посмотреть детали цели»; без цели — «Выбери цель»
+ *   Block P — «План на сегодня» из Plan Lite (тот же источник, что у
+ *     PlanLiteScreen); без плана блока нет
+ *   Block 5 — Ближайшая запись: карточка (услуга, мастер, когда, адрес,
+ *     статус, «Открыть запись»); «Все мои записи» — справа от заголовка
+ *     (Д11); нет записи — «Записей нет» + «Записаться»
+ *   Block 3 — Быстрые действия по фризу: записать питание / стакан воды /
+ *     новая запись / скорректировать план / профиль
+ *   Block A — «Продолжить разговор с Ayla» с последней темой
+ *     (`customer/last-topic/`); без темы — нейтрально. ЕДИНСТВЕННЫЙ вход в
+ *     чат с этого экрана (Д2)
+ *   Block C — ОДИН блок согласия дневника (вместо двух абзацев); стоит над
+ *     полосой дневника, которую и закрывает
+ *   Block 2 — Pulse strip (Питание + Вода) — Tau §3 + §11.1
+ *   Block 4 — Шаги на сегодня (норма воды из анкеты; иной источник, чем
+ *     план) — сразу после дневника: это его числа (Д31 б)
+ *   Block 7 — Recommendations embed: СКРЫТ (Д31 г), см.
+ *     `lib/ayla-picks-shelf` и ответ 40 (§172). Тот же выключатель
+ *     снимает и запрос за данными полки (DRF-2348)
+ *   Bottom nav — Главная · План · Дневник · Записи · Профиль (§55 б)
+ *
+ * Снято решением владельца 22.09: кнопка «спросить» из шапки (Д2) и блок
+ * «Прогресс недели» (Д31 в — сервер этих данных и так не слал).
+ *
+ * Места, оставленные под чужие листы (условный рендер, ключа пока нет):
+ * срок цели — DRF-2173 (заполнено), цена записи — DRF-2172 (заполнено).
+ *
+ * # Что снято с этого экрана и почему (DRF-1546)
+ *
+ * Правило владельца (§33 / DRF-1543): блок, за которым нет ручки, на
+ * главную не выходит — не заглушкой и не «скоро», его просто нет.
+ *
+ *   - **Quick action «📸 Сфотографируй еду»** — ручек
+ *     `/api/v1/customer/food/{scan,log,daily}` не существует (404 на
+ *     боевом контуре), `food-scanner.ts::guardProd` вне DEV бросает.
+ *     Кнопка вела на падающий экран. Маршруты `/customer/food-scanner/*`
+ *     оставлены (§33: снимается вход, а не маршрут).
+ *   - **Строка «🍽 Добрать белок · ещё N г»** (Block 4) — висела на
+ *     `pfc.protein_target_g`, которого бэкенд не шлёт и источника под
+ *     него не имеет. В бою не рендерилась никогда.
+ *   - **Кнопка «Подробнее в Дне»** (Block 6) — поверхности «День» нет,
+ *     вела на `/`, экран входа.
+ *   - **Вкладка «День»** в нижней навигации — та же причина: её роль
+ *     исполнял этот экран, а он теперь Главная.
+ *
+ * AI insight cards не строятся (spec §2: deferred post-pilot), прогресс
+ * цели и мультицели — тоже (в модели Ayla их нет; борды обещают, канон
+ * нет — §34).
  *
  * # Anti-pattern enforcement
  *
@@ -56,13 +104,34 @@
  *      explicit verified tokens (handled in globals.css).
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { ApiError, type Service } from "../lib/api";
-import { formatDuration, formatMoney } from "../lib/format";
+import { authErrorCopy, loadErrorReason, type LoadErrorReason } from "../lib/auth-error-copy";
+import { mapBookingStatus } from "../lib/booking-status";
+import {
+  formatTopicWhen,
+  getLastTopicAndChatLink,
+  type LastTopic,
+} from "../lib/customer-last-topic";
+import { formatDuration, priceFromLabel } from "../lib/format";
+import { returnToChat } from "../lib/max-sdk";
+import { ReturnToChatHint } from "../components/ReturnToChatHint";
+import {
+  getPlanLite,
+  type PlanLite,
+  type PlanLiteActionType,
+  type PlanLiteCadence,
+} from "../lib/plan-lite";
+import { formatGoalDue } from "../lib/goal-deadline";
+import { visitAddressText } from "../lib/visit-address";
 import {
   enqueueWaterLog,
+  enqueueWaterLogEntry,
   flushWaterQueue,
+  onWaterQueueRefused,
+  syncWaterEntry,
+  WATER_SESSION_EXPIRED_TEXT,
   getRecentActivity,
   getWellnessToday,
   isOnboardingDismissed,
@@ -70,16 +139,67 @@ import {
   pickGreeting,
   pickOneLiner,
   readWaterQueue,
+  undoWaterLog,
+  waterRefusalText,
   type RecentActivity,
   type WellnessToday,
+  DIARY_CONSENT_REQUIRED_TEXT,
+  DIARY_OFF_TEXT,
+  diaryIsOff,
+  CONSENT_PROMPT_FAILED_TEXT,
+  CONSENT_PROMPT_ALREADY_SENT_TEXT,
+  CONSENT_PROMPT_OPEN_CHAT_CTA,
+  requestDiaryConsentPrompt,
+  pfcLine,
 } from "../lib/customer-wellness";
 import {
   getCatalogBrowse,
   type CatalogBrowseData,
 } from "../lib/customer-booking";
-import { STUB_SURFACES_ENABLED } from "../lib/feature-flags";
+import { aylaPicksShelfOn } from "../lib/ayla-picks-shelf";
+import { CustomerAvatarEntry } from "../components/CustomerAvatarEntry";
+import { StatusBadge } from "../components/StatusBadge";
+import { CustomerTabBar } from "../components/CustomerTabBar";
 import { UnbookableBadge } from "../components/UnbookableNote";
-import { PilotComingSoonScreen } from "./PilotComingSoonScreen";
+import { useScreenBack } from "../hooks/useScreenBack";
+import { PLAN_LITE_COPY, PLAN_LITE_ROUTE } from "./PlanLiteScreen";
+import { screenRoot } from "../lib/screen-back";
+
+/** Одна цель из `wellness/today.active_goals` (cap=1, решение №13). */
+type ActiveGoal = NonNullable<WellnessToday["active_goals"]>[number];
+
+/**
+ * Шапка H01 здоровается словами макета — Д1, дословно (DRF-2331).
+ *
+ * Строка вынесена сюда, потому что PR обещает «с макета дословно»: сверять
+ * обещание надо с одним местом, а не с копией в тесте.
+ *
+ * ⚠ С этой строкой экран здоровается ДВАЖДЫ: ниже стоит блок приветствия
+ * «Доброе утро, Анна 🌿» (`docs/screens/customer-main-wellness-dashboard.md`
+ * §7), а макет здоровается один раз — только в шапке. Вопрос у владельца
+ * тремя вариантами (шапка вместо блока / шапка без этой строки / оставить
+ * оба). До его слова не трогаем ни то, ни другое: любой выбор здесь
+ * выдал бы догадку за решение.
+ */
+export const HEADER_WELCOME_LINE = "Рада вас видеть!";
+
+/**
+ * Согласие дневника — ОДИН блок на экране (DRF-2144 п.6). Формулировка из
+ * листа. Кнопка сперва просит сервер прислать в чат MAX приглашение с
+ * кнопкой «Дать согласие» (DRF-2230) и только потом закрывает Mini App:
+ * раньше она просто закрывала приложение, и человек попадал в чат, где о
+ * согласии не было ни слова (скрин владельца 21.09).
+ */
+export const DIARY_CONSENT_CARD_TEXT =
+  "Чтобы вести дневник, нужно согласие — дай его в чате с Ayla";
+export const DIARY_CONSENT_CARD_CTA = "Дать согласие в чате";
+
+// DRF-2268: строка и компонент подсказки — общие, `components/ReturnToChatHint`.
+export { CHAT_STUCK_HINT } from "../components/ReturnToChatHint";
+
+function ChatStuckHint() {
+  return <ReturnToChatHint className="wellness-dash__chat-hint" />;
+}
 
 // ---------------------------------------------------------------------------
 // Loading + error state model — per-block isolation for «Partial» state
@@ -90,7 +210,25 @@ import { PilotComingSoonScreen } from "./PilotComingSoonScreen";
 type Slice<T> =
   | { kind: "loading" }
   | { kind: "ok"; data: T }
-  | { kind: "error"; reason: "network" | "server" | "other" };
+  | { kind: "error"; reason: LoadErrorReason };
+
+/**
+ * Подбор для полки «Ayla подобрала тебе» — четыре состояния (DRF-2348).
+ *
+ * `not_requested` — полка обездвижена, за данными не ходили. Отдельное
+ * состояние, потому что остальные три на этот вопрос отвечают неправду:
+ * «грузится», «не ответил» и «ответил, полка построена» — всё это про
+ * источник, которого никто не спрашивал.
+ */
+type RecsSlice = Slice<CatalogBrowseData> | { kind: "not_requested" };
+
+/**
+ * План — три состояния: читаем; прочитан (`null` = плана нет); недоступен
+ * (сервер выключил Plan Lite — 404 `plan_lite_disabled` — или не ответил).
+ * «Недоступен» и «плана нет» — разные факты: во втором случае карточка цели
+ * зовёт составить план, в первом о плане молчит.
+ */
+type PlanSlice = { kind: "loading" } | { kind: "ok"; data: PlanLite | null } | { kind: "unavailable" };
 
 function isOnline(): boolean {
   if (typeof navigator === "undefined") return true;
@@ -102,85 +240,136 @@ function isOnline(): boolean {
 // ---------------------------------------------------------------------------
 
 export function CustomerWellnessDashboardScreen() {
-  // Pilot commit 4 (orchestrator): the wellness dashboard is a stub
-  // surface — hidden in prod builds until S4/post-pilot. The flag is a
-  // build-time constant, so the early return never violates the rules
-  // of hooks (consistent for the component's lifetime). Phase 3 target:
-  // home becomes «Мои записи» on real data — see lib/feature-flags.ts.
-  if (!STUB_SURFACES_ENABLED) {
-    return <PilotComingSoonScreen surface="home" />;
-  }
+  // Гейт снят (DRF-1546, решение владельца §24.2 + §34). Оба условия
+  // владельца выполнены: настоящие цели подключены (DRF-1476),
+  // `weekly_progress` бэкенд опускает, а не шлёт нулями. Экран стоял
+  // закрытым только потому, что его никто не открыл.
   const navigate = useNavigate();
+
+  // Вид экрана (DRF-1493): корень. «Главная» — точка входа клиентской
+  // поверхности: у экрана своя нижняя навигация, и стрелка «назад»
+  // здесь означала бы родителя, которого нет.
+  useScreenBack(
+    screenRoot(
+      "«Главная» — корневая вкладка клиентской поверхности со своей " +
+        "нижней навигацией; выше неё ничего нет.",
+    ),
+  );
 
   const [today, setToday] = useState<Slice<WellnessToday>>({ kind: "loading" });
   const [activity, setActivity] = useState<Slice<RecentActivity>>({
     kind: "loading",
   });
-  const [recs, setRecs] = useState<Slice<CatalogBrowseData>>({
-    kind: "loading",
-  });
+  // Четвёртое состояние, и оно не роскошь: ни одно из трёх не говорит
+  // «мы не спрашивали». `loading` соврал бы «грузится», `error` — «не
+  // ответил», а `ok` с пустыми списками соврал бы дважды: и на экране
+  // («полка построена»), и в шести исходах `picksOutcome`, которые
+  // заведены ровно для того, чтобы не смешивать отсутствие с нулём
+  // (`customer-booking.ts`, таблица исходов). Полка тёмная — вопроса не
+  // было, и так и записано.
+  const [recs, setRecs] = useState<RecsSlice>(() =>
+    // Ленивое начальное значение, потому что «не спрашивали» — ровно то
+    // утверждение, ради которого это состояние и заведено: при зажжённой
+    // полке первый кадр говорил бы неправду до первого `fetchAll`.
+    aylaPicksShelfOn() ? { kind: "loading" } : { kind: "not_requested" },
+  );
+  const [planSlice, setPlanSlice] = useState<PlanSlice>({ kind: "loading" });
+  // Тема — `null` и «ручка упала» читаются одинаково: блок нейтральный.
+  const [lastTopic, setLastTopic] = useState<LastTopic | null>(null);
+  // DRF-2266 — куда ведут двери в чат, и где они «застряли» (web.max.ru).
+  const [chatLink, setChatLink] = useState<string | null>(null);
+  const [chatStuckAt, setChatStuckAt] = useState<"ayla" | "consent" | "plan" | null>(null);
 
   const [online, setOnline] = useState<boolean>(isOnline());
   const [waterQueueLen, setWaterQueueLen] = useState<number>(
     () => readWaterQueue().length,
   );
   const [waterToast, setWaterToast] = useState<string | null>(null);
-  const [photoToast, setPhotoToast] = useState<string | null>(null);
+  // DRF-1919: отказ стаканов из очереди, которых этот экран не ждал, — не молча.
+  // Тап, пришедший следом, допишет эту фразу к своей, а не затрёт её.
+  const queueRefusalNote = useRef<string | null>(null);
+  useEffect(
+    () =>
+      onWaterQueueRefused((refused) => {
+        const note = waterRefusalText(refused, { fromQueue: true });
+        queueRefusalNote.current = note;
+        setWaterToast(note);
+      }),
+    [],
+  );
+  // DRF-1842 — id последнего принятого стакана, пока его можно отменить.
+  // Ручка отмены (`DELETE /wellness/water/{id}`, `undoWaterLog`) была, а
+  // кнопки не было ни одной: ошибочный тап оставался в дневнике навсегда.
+  const [undoEntryId, setUndoEntryId] = useState<string | null>(null);
   const [onboardingDismissed, setOnboardingDismissed] = useState<boolean>(
     () => isOnboardingDismissed(),
   );
+
+  // Один выключатель на вёрстку полки и на запрос за её данными
+  // (`lib/ayla-picks-shelf`, DRF-2348). Читается при отрисовке, а не на
+  // уровне модуля: так сторож может проверить обе стороны.
+  const shelfOn = aylaPicksShelfOn();
 
   // ── data fetch ────────────────────────────────────────────────────────
   const fetchAll = useCallback(async () => {
     setToday({ kind: "loading" });
     setActivity({ kind: "loading" });
-    setRecs({ kind: "loading" });
+    // Тёмная полка не «грузится» — её просто не спрашивают (DRF-2348).
+    setRecs(shelfOn ? { kind: "loading" } : { kind: "not_requested" });
+    setPlanSlice({ kind: "loading" });
 
     // Per-slice isolation — Promise.allSettled so one failure doesn't
-    // blank all three blocks. (Tau §5 State 5 partial render.)
-    const [todayRes, activityRes, recsRes] = await Promise.allSettled([
+    // blank the other blocks. (Tau §5 State 5 partial render.)
+    // `getCatalogBrowse` зовётся ТОЛЬКО при зажжённой полке: решение
+    // владельца гасит полку, а обращение уходило всё равно — при каждом
+    // открытии экрана, хотя показывать нечего (DRF-2348, §172 ответ 40).
+    // Ветка `null` держит форму `allSettled` и порядок распаковки: так
+    // включение полки возвращает запрос одной строкой в `aylaPicksShelfOn`,
+    // а не раскопками.
+    const [todayRes, activityRes, recsRes, planRes, topicRes] = await Promise.allSettled([
       getWellnessToday(),
       getRecentActivity(),
-      getCatalogBrowse(),
+      shelfOn ? getCatalogBrowse() : Promise.resolve(null),
+      getPlanLite(),
+      getLastTopicAndChatLink(),
     ]);
 
     if (todayRes.status === "fulfilled") {
       setToday({ kind: "ok", data: todayRes.value });
     } else {
-      const e = todayRes.reason;
-      setToday({
-        kind: "error",
-        reason:
-          e instanceof ApiError && e.status >= 500
-            ? "server"
-            : e instanceof ApiError
-              ? "other"
-              : "network",
-      });
+      setToday({ kind: "error", reason: loadErrorReason(todayRes.reason) });
     }
 
     if (activityRes.status === "fulfilled") {
       setActivity({ kind: "ok", data: activityRes.value });
     } else {
-      const e = activityRes.reason;
-      setActivity({
-        kind: "error",
-        reason:
-          e instanceof ApiError && e.status >= 500
-            ? "server"
-            : e instanceof ApiError
-              ? "other"
-              : "network",
-      });
+      setActivity({ kind: "error", reason: loadErrorReason(activityRes.reason) });
     }
 
-    if (recsRes.status === "fulfilled") {
-      setRecs({ kind: "ok", data: recsRes.value });
-    } else {
+    if (!shelfOn) {
+      // Вопроса не было — и в срезе стоит именно это, а не пустой ответ.
+      setRecs({ kind: "not_requested" });
+    } else if (recsRes.status === "rejected") {
       // Recommendations errors hide the whole block silently per spec.
-      setRecs({ kind: "error", reason: "other" });
+      setRecs({ kind: "error", reason: loadErrorReason(recsRes.reason) });
+    } else {
+      // Всё остальное при зажжённой полке — ответ. Ветки «а если `null`»
+      // здесь намеренно нет: `null` кладёт только выключенная полка, её
+      // забрал первый случай. Отдельное условие на `null` выглядело бы
+      // аккуратнее, а на деле оставляло бы срез в «грузится» навсегда,
+      // если `getCatalogBrowse` однажды станет возвращать `null` — то
+      // есть меняло бы тип ошибки на самую тихую (найдено ревью).
+      setRecs({ kind: "ok", data: recsRes.value as CatalogBrowseData });
     }
-  }, []);
+
+    // План: выключен на сервере (`plan_lite_disabled`) или не ответил —
+    // «недоступен», без ошибки на экране: Главная от плана не зависит.
+    setPlanSlice(
+      planRes.status === "fulfilled" ? { kind: "ok", data: planRes.value } : { kind: "unavailable" },
+    );
+    setLastTopic(topicRes.status === "fulfilled" ? topicRes.value.topic : null);
+    setChatLink(topicRes.status === "fulfilled" ? topicRes.value.chatLink : null);
+  }, [shelfOn]);
 
   useEffect(() => {
     void fetchAll();
@@ -192,6 +381,7 @@ export function CustomerWellnessDashboardScreen() {
     const onOnline = () => {
       setOnline(true);
       // Auto-flush water queue on reconnect (Tau §11.8).
+      // Отказы стаканов из очереди скажет подписка `onWaterQueueRefused` (DRF-1919).
       void flushWaterQueue().then(() => {
         setWaterQueueLen(readWaterQueue().length);
       });
@@ -205,36 +395,32 @@ export function CustomerWellnessDashboardScreen() {
     };
   }, []);
 
-  // Auto-clear transient toasts after 3s.
+  // Auto-clear transient toasts after 3s — 8s while «Отменить» is on offer:
+  // за три секунды кнопку не успеть нажать.
   useEffect(() => {
     if (!waterToast) return;
-    const t = setTimeout(() => setWaterToast(null), 3000);
+    const t = setTimeout(
+      () => {
+        setWaterToast(null);
+        setUndoEntryId(null);
+        queueRefusalNote.current = null;
+      },
+      undoEntryId ? 8000 : 3000,
+    );
     return () => clearTimeout(t);
-  }, [waterToast]);
-  useEffect(() => {
-    if (!photoToast) return;
-    const t = setTimeout(() => setPhotoToast(null), 3000);
-    return () => clearTimeout(t);
-  }, [photoToast]);
-
+  }, [waterToast, undoEntryId]);
   // ── quick-action handlers ────────────────────────────────────────────
-  const onPhotoTap = useCallback(() => {
-    // §11.7 — disable + toast when offline.
-    if (!online) {
-      setPhotoToast("Для распознавания нужна сеть. Попробуйте позже.");
-      return;
-    }
-    // Tier 1 Priority 7 Phase B — photo handling lives in webview now
-    // (Tau Variant A wizard). The old bot-DM deeplink path is dead
-    // code per founder pivot 2026-06-02; legacy `botDmFoodScanUrl()` +
-    // `maxBridge().openLink` retained for unrelated handlers only.
-    navigate("/customer/food-scanner/capture");
-  }, [navigate, online]);
+  //
+  // Отдельного «📸 Сфотографируй еду» нет (снято в DRF-1546, пока у
+  // съёмки не было ручки). Ручки подключены (DRF-2098/2106), и фото
+  // теперь — вход «Записать питание» (DRF-2289, ниже).
 
   const onWaterTap = useCallback(() => {
     // §11.8 — offline: queue to localStorage 24h TTL. Real POST is
     // wired by W4; STUB MODE simulates instant accept when online.
+    setUndoEntryId(null);
     if (!online) {
+      queueRefusalNote.current = null;
       const len = enqueueWaterLog(250);
       setWaterQueueLen(len);
       setWaterToast(
@@ -245,25 +431,157 @@ export function CustomerWellnessDashboardScreen() {
     // Online — also enqueue + immediately flush. This keeps the queue
     // as a single durable code path while STUB doesn't have a real
     // endpoint. Once W4 ships, the online branch will skip enqueue.
-    enqueueWaterLog(250);
-    void flushWaterQueue().then(() => {
-      setWaterQueueLen(readWaterQueue().length);
+    // DRF-1919: «зачтён» и «Отменить» — только про СВОЙ стакан этого тапа
+    // (сверка по key): в одну синхронизацию уходят и стаканы, ждавшие в
+    // очереди. Отказ в них не затирается принятием нового; свой стакан, не
+    // дошедший по сети, — «ждёт синхронизации».
+    const { entry: own } = enqueueWaterLogEntry(250);
+    void syncWaterEntry(own).then((outcome) => {
+      const len = readWaterQueue().length;
+      setWaterQueueLen(len);
+      let ownText: string;
+      if (outcome.kind === "accepted") {
+        setUndoEntryId(outcome.result.entry_id);
+        ownText = "+1 стакан зачтён";
+      } else {
+        // «Отменить» могла остаться от стакана другого тапа — рядом с этим
+        // тостом она была бы про чужой стакан.
+        setUndoEntryId(null);
+        if (outcome.kind === "rejected") {
+          ownText = waterRefusalText([outcome.err]);
+        } else if (outcome.err instanceof ApiError && outcome.err.status === 401) {
+          ownText = WATER_SESSION_EXPIRED_TEXT;
+        } else if (!readWaterQueue().some((e) => e.key === own.key)) {
+          // Стакана нет ни в очереди, ни в исходе: хранилище его не сохранило.
+          // «Ждёт синхронизации» было бы обещанием, которое нечем выполнить.
+          ownText = "Стакан не сохранён — попробуй ещё раз.";
+        } else {
+          ownText = `+1 стакан · ${len} ${ruPluralWater(len)} ${ruPluralWaterWaits(len)} синхронизации`;
+        }
+      }
+      const note = queueRefusalNote.current;
+      queueRefusalNote.current = null;
+      setWaterToast(joinSentences(note ? [ownText, note] : [ownText]));
     });
-    setWaterToast("+1 стакан зачтён");
   }, [online]);
 
+  const onUndoWater = useCallback(() => {
+    // Фраза об отказах из очереди уже показана — к следующему тосту не приклеивать.
+    queueRefusalNote.current = null;
+    const id = undoEntryId;
+    if (!id) return;
+    setUndoEntryId(null);
+    void undoWaterLog(id).then(
+      (removed) => {
+        // `false` — окно отмены закрылось: стакан ОСТАЛСЯ, и сказать
+        // «убран» было бы той самой ложью, ради которой `undoWaterLog`
+        // различает 404 и сбой.
+        setWaterToast(
+          removed
+            ? "Стакан убран"
+            : "Уже не убрать: окно отмены закрылось, стакан остался в дневнике",
+        );
+        if (removed) void fetchAll();
+      },
+      (err: unknown) => {
+        // DRF-1919: дневник выключен — повтор не поможет, кнопку не возвращаем.
+        if (err instanceof ApiError && err.slug === "nutrition_disabled") {
+          setWaterToast("Дневник воды сейчас выключен — убрать стакан не получилось.");
+          return;
+        }
+        // Сбой сети/сервера — ничего не удалено; кнопку возвращаем.
+        setUndoEntryId(id);
+        setWaterToast("Не получилось убрать — попробуй ещё раз");
+      },
+    );
+  }, [undoEntryId, fetchAll]);
+
   const onGoalTap = useCallback(() => {
-    // §11.2 — context-aware: «Моя цель» if any, «Выбери цель» if none.
-    // Until the goal-editor screen ships (post-pilot), bounce to bot DM
-    // for ambient onboarding. Until that screen exists in Mini App we
-    // keep the action ambient — navigate to root chooser. The handler
-    // is kept stable so a future wiring change is single-site.
-    navigate("/");
+    // §11.2 — context-aware label; the destination is the real goal
+    // surface (`GoalSelectScreen`, DRF-1190), which reads
+    // `/customer/decision-context` and writes `/customer/goals/select`.
+    // It used to `navigate("/")`, i.e. the entry screen: someone who
+    // already had a goal tapped «Моя цель» and landed on a greeting.
+    navigate("/customer/goal-select");
   }, [navigate]);
 
   const onCatalogTap = useCallback(() => {
     navigate("/customer/catalog");
   }, [navigate]);
+
+  // DRF-2101/2144 — Plan Lite: экран плана. Флага сборки больше нет —
+  // включён ли план, скажет сервер (карточка цели уже прочитала ответ).
+  const onPlanTap = useCallback(() => {
+    navigate(PLAN_LITE_ROUTE);
+  }, [navigate]);
+
+  // Вход в дневник живёт во вкладке «Дневник» (DRF-1839 → DRF-2144);
+  // быстрое действие «Записать питание» ведёт к съёмке фото (DRF-2289),
+  // ввод текстом — ссылкой «Записать текстом» на том же экране. Гейт
+  // согласия на сканер съёмка проверяет сама (DRF-1564).
+  const onFoodTap = useCallback(() => {
+    navigate("/customer/food-scanner/capture");
+  }, [navigate]);
+
+  // Карточка «Начнём с малого?» обещает именно текст — её кнопка ведёт
+  // прямо в ввод текстом, а не на съёмку (DRF-2289).
+  const onFoodTextTap = useCallback(() => {
+    navigate("/customer/food-scanner/manual");
+  }, [navigate]);
+
+  const onProfileTap = useCallback(() => {
+    navigate("/customer/profile");
+  }, [navigate]);
+
+  // В чат MAX — закрыть Mini App: приложение открыто из диалога с Ayla, и
+  // закрытие возвращает туда. Фразу («скорректировать план», согласие,
+  // новый вопрос) человек пишет сам: deep link с текстом в MAX не
+  // существует (см. историю в StateError.tsx), и никакого контекста экран
+  // в чат не передаёт — обещать это было бы ложью.
+  // DRF-2266 — все двери Главной в чат идут одним путём: мост close() →
+  // ссылка на диалог бота → подсказка рядом с нажатой кнопкой (web.max.ru:
+  // раньше `closeApp()` там молча ничего не делал — «кнопка не работает»).
+  const goToChat = useCallback(
+    (where: "ayla" | "consent" | "plan") => {
+      const outcome = returnToChat(chatLink);
+      setChatStuckAt(outcome === "stuck" ? where : null);
+    },
+    [chatLink],
+  );
+  const onChatTap = useCallback(() => goToChat("ayla"), [goToChat]);
+  const onPlanChatTap = useCallback(() => goToChat("plan"), [goToChat]);
+
+  // DRF-2230 — приглашение к согласию уходит в чат, и лишь потом экран
+  // закрывается. Сбой отправки — вслух и без закрытия: закрыться молча значило
+  // бы снова отправить человека в чат, где ему нечего нажать.
+  const [consentPromptError, setConsentPromptError] = useState<string | null>(null);
+  const [consentPromptBusy, setConsentPromptBusy] = useState(false);
+  const [consentPromptAlreadySent, setConsentPromptAlreadySent] = useState(false);
+  const onConsentTap = useCallback(async () => {
+    setConsentPromptError(null);
+    setConsentPromptAlreadySent(false);
+    setConsentPromptBusy(true);
+    try {
+      const res = await requestDiaryConsentPrompt();
+      if (res.reason === "already_granted") {
+        // Согласие уже есть — блок уйдёт после перечитывания; в чат незачем.
+        void fetchAll();
+        return;
+      }
+      if (res.reason === "recently_sent") {
+        // Живой проход 21.09: повтор закрывал приложение молча — человек
+        // «проваливался в чат». Теперь говорим, что ждёт в чате, и уходим
+        // туда по явной кнопке.
+        setConsentPromptAlreadySent(true);
+        return;
+      }
+      goToChat("consent");
+    } catch {
+      setConsentPromptError(CONSENT_PROMPT_FAILED_TEXT);
+    } finally {
+      setConsentPromptBusy(false);
+    }
+  }, [fetchAll, goToChat]);
 
   const onDismissOnboarding = useCallback(() => {
     markOnboardingDismissed();
@@ -272,6 +590,12 @@ export function CustomerWellnessDashboardScreen() {
 
   // ── derived state ────────────────────────────────────────────────────
   const todayData = today.kind === "ok" ? today.data : null;
+  // DRF-2071 — контур питания выключен: сводка пришла с маркером и без
+  // ключей дневника (как `consent_required`), имя и цель — на месте. Не
+  // сбой (повтор ничего не даст) и не пустой день; входы в дневник (стакан,
+  // «Дневник питания») не рисуются — иначе рядом с «недоступен» стояло бы
+  // «Добавить».
+  const diaryOff = diaryIsOff(todayData);
   const activityData = activity.kind === "ok" ? activity.data : null;
   const recsData = recs.kind === "ok" ? recs.data : null;
   // Block 7 picks — top-3 services by Ayla scorer rank, joined onto the
@@ -293,14 +617,35 @@ export function CustomerWellnessDashboardScreen() {
   const now = new Date();
   const greeting = pickGreeting(now);
   const displayName = todayData?.display_name ?? "";
-  const waterRatio = todayData
-    ? todayData.water_glasses_target > 0
-      ? todayData.water_glasses_eaten / todayData.water_glasses_target
-      : 0
-    : 0;
+  // Absent ≠ zero (DRF-1546). A failed nutrition or hydration read omits
+  // its keys, and every derived number below has to treat that as
+  // «unknown» rather than folding it into «nothing logged».
+  const caloriesEaten = todayData?.calories_eaten;
+  // Съеденное и цель — РАЗНЫЕ факты, ровно как у воды ниже. Цель Ayla
+  // отдаёт только тем, кто прошёл анкету питания, и «цели нет» обязано
+  // читаться как «цели нет», а не как «не удалось загрузить»: иначе
+  // человек вместо своих калорий видит НЕДОСТУПНО.
+  //
+  // Здесь это ещё и меняло поведение карточки первого шага ниже
+  // (``showOnboarding``): она требует ЗНАНИЯ о пустом дне, а знание
+  // подменялось наличием цели — то есть карточка «Начнём с малого?»
+  // не показалась бы ровно тому, для кого она написана: человеку без
+  // анкеты.
+  const caloriesKnown = caloriesEaten !== undefined;
+  const waterEaten = todayData?.water_glasses_eaten;
+  const waterTarget = todayData?.water_glasses_target;
+  // Выпитое и цель — РАЗНЫЕ факты, и знать их можно порознь. Норму воды
+  // Ayla отдаёт только тем, кто прошёл анкету питания; раньше на её
+  // месте стояла константа «8 стаканов», и человек видел чужое число
+  // как свою дневную цель. Теперь цели просто нет — а выпитое остаётся.
+  const waterKnown = waterEaten !== undefined;
+  const waterTargetKnown = waterTarget !== undefined;
+  const waterRatio =
+    waterTargetKnown && waterTarget > 0 && waterEaten !== undefined
+      ? waterEaten / waterTarget
+      : undefined;
   const hasAnyLogs =
-    !!todayData &&
-    (todayData.calories_eaten > 0 || todayData.water_glasses_eaten > 0);
+    !!todayData && ((caloriesEaten ?? 0) > 0 || (waterEaten ?? 0) > 0);
   const oneLiner = todayData
     ? pickOneLiner({
         hour: now.getHours(),
@@ -318,23 +663,49 @@ export function CustomerWellnessDashboardScreen() {
   const showOnboarding =
     !onboardingDismissed &&
     todayData !== null &&
+    // Only when we actually KNOW the day is empty — an outage is not a
+    // first-time user, and «Начнём с малого?» is wrong for both.
+    caloriesKnown &&
+    waterKnown &&
     !hasAnyLogs &&
     !activityData?.next_booking;
 
-  // Block 6 cold-start gate — show iff active_days_count >= 3 (§11.4).
-  const showWeekly =
-    !!activityData &&
-    activityData.weekly_progress.active_days_count >= 3;
+  // Block 6 gate — PRESENCE first, then the cold-start threshold
+  // «Прогресс недели» снят с экрана решением владельца 22.09 (Д31 в): он
+  // дублировал план, а сервер этих данных и так не слал. Вместе с блоком
+  // ушли и его ключи — держать вычисление ради снятого блока значило бы
+  // оставить мёртвый код, который читается как живой.
+
+  // Goal CTA is TRI-state (DRF-1476). `active_goals` absent means the
+  // backend could not reach the goal layer — that is not «no goal», and
+  // saying «Выбери цель» to someone who has one is the defect this
+  // fixes. `todayData === null` (still loading) is likewise unknown.
+  const goalsSlice = todayData?.active_goals;
+  const goalsKnown = goalsSlice !== undefined;
+  // Одна цель, не несколько (решение владельца №13, 06.09).
+  const goal: ActiveGoal | undefined = goalsSlice?.[0];
+  // DRF-1927 — ключей дневника нет, потому что нет согласия, а не потому,
+  // что чтение упало: один блок согласия вместо строк «Питание»/«Вода».
+  const consentRequired = todayData?.consent_required === true;
+  const topicWhen = useMemo(() => (lastTopic ? formatTopicWhen(lastTopic.at) : ""), [lastTopic]);
 
   // Block 4 actionable targets visibility.
-  const waterRemaining = todayData
-    ? Math.max(0, todayData.water_glasses_target - todayData.water_glasses_eaten)
-    : 0;
-  const proteinDeficit =
-    todayData?.pfc && todayData.pfc.protein_target_g
-      ? Math.max(0, todayData.pfc.protein_target_g - todayData.pfc.protein_g)
-      : 0;
-  const showTodayGoals = waterRemaining > 0 || proteinDeficit > 0;
+  //
+  // Строка «🍽 Добрать белок · ещё N г» СНЯТА (DRF-1546): она висела на
+  // `pfc.protein_target_g`, которого тогда бэкенд не слал. С DRF-1844 ключ
+  // приходит (под признаком происхождения), но строка НЕ возвращается:
+  // «добрать» — оценка, §85 §8 разрешает при ориентире шкалу и процент, а
+  // не призыв; ориентир по белку виден в самой строке БЖУ («Б 108 / 130 г»).
+  // «Ещё N стаканов до нормы» бывает только когда норма есть.
+  //
+  // «До нормы», не «до цели»: решение владельца 11.09.2026 §5.2 — Goal это
+  // желаемый результат, Habit — повторяющееся действие внутри плана,
+  // PlanStep — конкретное действие; привычка или действие не создают
+  // отдельную Goal. Стакан воды — шаг, норма воды — его мера. Назвать её
+  // целью значило бы завести человеку вторую цель, которой он не ставил.
+  const waterRemaining =
+    waterKnown && waterTargetKnown ? Math.max(0, waterTarget - waterEaten) : 0;
+  const showTodayGoals = waterRemaining > 0;
 
   // ── render ────────────────────────────────────────────────────────────
   return (
@@ -344,8 +715,71 @@ export function CustomerWellnessDashboardScreen() {
         К основному содержимому
       </a>
 
-      {/* Header — 56dp. */}
+      {/* Header — 56dp. Иконки «Профиль»/«Настройки» сняты (DRF-2144): обе
+          вели в профиль, а профиль теперь — вкладка панели.
+
+          Д2 (решение владельца 22.09, §172): кнопка «спросить» снята —
+          «один вход в чат вместо двух». Второй и единственный остаётся
+          блоком «Продолжить разговор с Ayla» ниже: он несёт последнюю тему,
+          а шапочная кнопка вела в тот же чат без неё.
+
+          Д1 (DRF-2331): человек слева — аватар, имя, «Рада вас видеть!».
+
+          Колокольчика макета НЕТ, и это решение: ленты уведомлений у
+          клиента не существует — ни ручки на сервере, ни экрана на
+          клиенте (есть только настройки уведомлений, а это не они).
+          Счётчик «2» брать неоткуда вовсе. Мёртвый control запрещён
+          решением владельца (§61, М-4 п. 1) и DRF-1181.
+
+          Вордмарк макет в шапке не рисует, но он ОСТАЁТСЯ и занимает
+          освободившееся справа место: его держат
+          `docs/screens/customer-main-wellness-dashboard.md` §7 и
+          `docs/design/policies/ayla-identity-and-brand.md` §7.1. Снять
+          фирменный знак — решение о бренде, а не правка вёрстки. */}
       <header className="wellness-dash__header" role="banner">
+        <div className="wellness-dash__person">
+          {/* Фотографии клиента нет ни в одном контракте — ни у
+              `wellness/today`, ни у `/me`. Новой сущности под Д1 не
+              заводим: `avatarInitials` уже рисует кружок на профиле
+              клиента, и «·» — его же ответ на «имени нет».
+              §77 п.60 — кружок стал ВХОДОМ в профиль и уехал в общий
+              компонент: он должен быть одинаков на всех экранах панели,
+              а не только здесь. Имя передаём своё — оно уже пришло с
+              `wellness/today`, и второй источник того же имени дал бы
+              расхождение в момент загрузки. */}
+          <CustomerAvatarEntry displayName={displayName} />
+          <span className="wellness-dash__person-text">
+            {/* Пока день грузится, имени ещё нет — и раньше строка просто
+                отсутствовала, отчего «Рада вас видеть!» прыгала внутри
+                56 px при каждом обновлении (в том числе при «Отменить» у
+                стакана воды, DRF-2331, по ревью). Скелет держит высоту и
+                говорит «грузится», а не «имени нет» — тем же приёмом, что
+                блок приветствия ниже. */}
+            {today.kind === "loading" ? (
+              <span
+                className="skeleton wellness-dash__person-skel"
+                aria-hidden="true"
+              />
+            ) : (
+              displayName && (
+                <span className="wellness-dash__person-name">
+                  {/* Многоточие живёт на ВНУТРЕННЕЙ строке, а 👋 стоит
+                      рядом с ней: внутри он съедался первым и длинное имя
+                      оставалось без жеста макета, а сразу за пределами
+                      строки имени — отлетал к вордмарку и читался как его
+                      часть (видно на снимке приёмки). */}
+                  <span className="wellness-dash__person-name-text">
+                    {displayName}
+                  </span>
+                  <span aria-hidden="true">👋</span>
+                </span>
+              )
+            )}
+            <span className="wellness-dash__person-hi">
+              {HEADER_WELCOME_LINE}
+            </span>
+          </span>
+        </div>
         <div className="wellness-dash__brand">
           {/* «ayla» = English wordmark per Tau §7 — wrap in lang="en"
               to keep RU TTS from pronouncing it «Айла» (WCAG 3.1.2). */}
@@ -353,32 +787,6 @@ export function CustomerWellnessDashboardScreen() {
             ayla
           </span>
           <span aria-hidden="true"> ✨</span>
-        </div>
-        <button
-          type="button"
-          className="wellness-dash__ask"
-          aria-label="Спросить у ayla"
-          onClick={() => navigate("/")}
-        >
-          спросить
-        </button>
-        <div className="wellness-dash__header-icons">
-          <button
-            type="button"
-            className="wellness-dash__icon-btn"
-            aria-label="Профиль"
-            onClick={() => navigate("/customer/profile")}
-          >
-            <span aria-hidden="true">👤</span>
-          </button>
-          <button
-            type="button"
-            className="wellness-dash__icon-btn"
-            aria-label="Настройки"
-            onClick={() => navigate("/customer/profile")}
-          >
-            <span aria-hidden="true">⚙</span>
-          </button>
         </div>
       </header>
 
@@ -436,9 +844,18 @@ export function CustomerWellnessDashboardScreen() {
           >
             <div className="wellness-dash__onboarding-body">
               <p className="wellness-dash__onboarding-title">Начнём с малого?</p>
+              {/* DRF-2091: копия честная — путь текстом есть, фото (D26) —
+                  ещё нет; обещать «сфотографируй» без ручки нельзя. */}
               <p className="wellness-dash__onboarding-text">
-                Сфотографируй первый приём, добавь воду или выбери цель.
+                Запиши первый приём текстом, добавь воду или выбери цель.
               </p>
+              <button
+                type="button"
+                className="btn-secondary wellness-dash__onboarding-cta"
+                onClick={onFoodTextTap}
+              >
+                Записать текстом
+              </button>
               <button
                 type="button"
                 className="wellness-dash__onboarding-dismiss"
@@ -451,97 +868,163 @@ export function CustomerWellnessDashboardScreen() {
           </section>
         )}
 
-        {/* Block 2 — Pulse strip (§11.1 — conditional БЖУ). */}
-        <section className="wellness-dash__pulse" aria-label="Сегодня">
-          {today.kind === "loading" && <PulseSkeleton />}
-          {today.kind === "error" && (
+        {/* Block G — карточка активной цели (макет H01, верх). Цель — из
+            `wellness/today.active_goals` (три состояния, DRF-1476), план —
+            из `plan-lite` (тот же источник, что у PlanLiteScreen). */}
+        {today.kind === "ok" && (
+          <GoalCard
+            goal={goal}
+            goalsKnown={goalsKnown}
+            plan={planSlice}
+            onPlan={onPlanTap}
+            onGoal={onGoalTap}
+          />
+        )}
+
+        {/* Block P — «План на сегодня»: действия активного плана; без плана
+            блока нет (DRF-2144 п.2). */}
+        {planSlice.kind === "ok" && planSlice.data && (
+          <PlanToday plan={planSlice.data} onAll={onPlanTap} onAdjust={onPlanChatTap} />
+        )}
+
+        {/* Block 5 — Ближайшая запись (карточка по макету H01, DRF-2144 п.3;
+            источник — `recent-activity`, как и раньше). */}
+        <section
+          className="wellness-dash__booking"
+          aria-labelledby="booking-header"
+        >
+          {/* Д11 (решение владельца 22.09): «Все мои записи» — СПРАВА ОТ
+              ЗАГОЛОВКА, как в макете. Раньше кнопка стояла в самом низу
+              карточки, под «Открыть запись»: человек находил её последней,
+              хотя это выход ко всем записям, а не действие над этой.
+
+              Раскладка — существующий `wellness-dash__plan-head` (та же
+              строка заголовка у блока плана), а не новый класс: у нового
+              не было бы правила в стилях, и сторож стиля (DRF-1066) прав,
+              что такой класс мёртв. */}
+          <div className="wellness-dash__plan-head">
+            <h2 id="booking-header" className="wellness-dash__section-header">
+              Ближайшая запись
+            </h2>
+            {/* Только когда запись действительно есть. Д11 — про МЕСТО
+                кнопки, а не про новое приглашение: у человека без записей
+                «Все мои записи» вело бы в пустой список, а на загрузке и
+                на ошибке — предлагало бы переход рядом со строкой «не
+                удалось прочитать». Прежде кнопка жила внутри карточки и
+                этого условия не теряла. */}
+            {activity.kind === "ok" && activity.data.next_booking && (
+              <button
+                type="button"
+                className="wellness-dash__booking-all"
+                onClick={() => navigate("/customer/records")}
+                aria-label="Все мои записи"
+              >
+                Все мои записи
+                <span aria-hidden="true"> →</span>
+              </button>
+            )}
+          </div>
+          {activity.kind === "loading" && <BookingSkeleton />}
+          {activity.kind === "error" && (
             <BlockError
-              reason={today.reason}
+              reason={activity.reason}
               onRetry={() => void fetchAll()}
             />
           )}
-          {today.kind === "ok" && (
-            <PulseStrip data={today.data} />
+          {activity.kind === "ok" && !activity.data.next_booking && (
+            <BookingEmpty onBook={onCatalogTap} />
+          )}
+          {activity.kind === "ok" && activity.data.next_booking && (
+            <BookingCard
+              data={activity.data}
+              onOpen={() =>
+                activity.data.next_booking &&
+                navigate(
+                  `/customer/records/${activity.data.next_booking.booking_id}`,
+                )
+              }
+            />
           )}
         </section>
 
-        {/* Block 3 — Quick actions 2×2 (§11.5 + §11.7 + §11.8). */}
+        {/* Block 3 — Быстрые действия по фризу 25.08 (DRF-2144 п.4):
+            записать питание / стакан воды / новая запись / скорректировать
+            план / профиль. «Добавить замер» из макета → «стакан воды» (§49:
+            без веса). «Найди услугу» и «Моя цель» ушли: цель — в карточке,
+            услуги — по «Записаться» в каталог. Без контура питания (DRF-2071)
+            дневниковые кнопки не рисуются. */}
         <section
           className="wellness-dash__quick-actions"
           aria-labelledby="qa-header"
         >
           <h2 id="qa-header" className="wellness-dash__section-header">
-            Что сделаем сейчас
+            Быстрые действия
           </h2>
-          <div className="wellness-dash__qa-grid">
-            <button
-              type="button"
-              className="wellness-dash__qa-btn"
-              aria-label="Сфотографируй еду"
-              aria-disabled={!online}
-              aria-describedby={!online ? "qa-photo-hint" : undefined}
-              onClick={onPhotoTap}
-            >
-              <span className="wellness-dash__qa-icon" aria-hidden="true">
-                📸
-              </span>
-              <span className="wellness-dash__qa-label">
-                Сфотографируй еду
-              </span>
-              {!online && (
-                <span
-                  id="qa-photo-hint"
-                  className="wellness-dash__qa-hint"
-                >
-                  (нужна сеть)
+          <div className="wellness-dash__qa-grid wellness-dash__qa-grid--row">
+            {!diaryOff && (
+              <button
+                type="button"
+                className="wellness-dash__qa-btn wellness-dash__qa-btn--compact"
+                aria-label="Записать питание"
+                onClick={onFoodTap}
+              >
+                <span className="wellness-dash__qa-icon" aria-hidden="true">
+                  🍽
                 </span>
-              )}
-            </button>
+                <span className="wellness-dash__qa-label">Записать питание</span>
+              </button>
+            )}
+            {!diaryOff && (
+              <button
+                type="button"
+                className="wellness-dash__qa-btn wellness-dash__qa-btn--compact"
+                // Видимая подпись — по макету «Стакан воды»; имя для скринридера
+                // несёт глагол: тап сразу пишет 250 мл без подтверждения.
+                aria-label="Добавить стакан воды"
+                onClick={onWaterTap}
+              >
+                <span className="wellness-dash__qa-icon" aria-hidden="true">
+                  💧
+                </span>
+                <span className="wellness-dash__qa-label">Стакан воды</span>
+              </button>
+            )}
             <button
               type="button"
-              className="wellness-dash__qa-btn"
-              aria-label="Добавить стакан воды 250 мл"
-              onClick={onWaterTap}
-            >
-              <span className="wellness-dash__qa-icon" aria-hidden="true">
-                💧
-              </span>
-              <span className="wellness-dash__qa-label">
-                + стакан 250 мл
-              </span>
-            </button>
-            <button
-              type="button"
-              className="wellness-dash__qa-btn"
-              aria-label={
-                todayData && todayData.active_goals.length > 0
-                  ? "Моя цель"
-                  : "Выбери цель"
-              }
-              onClick={onGoalTap}
-            >
-              <span className="wellness-dash__qa-icon" aria-hidden="true">
-                🎯
-              </span>
-              <span className="wellness-dash__qa-label">
-                {/* §11.2 — context-aware label */}
-                {todayData && todayData.active_goals.length > 0
-                  ? "Моя цель"
-                  : "Выбери цель"}
-              </span>
-            </button>
-            <button
-              type="button"
-              className="wellness-dash__qa-btn"
-              aria-label="Найди услугу"
+              className="wellness-dash__qa-btn wellness-dash__qa-btn--compact"
+              aria-label="Новая запись"
               onClick={onCatalogTap}
             >
               <span className="wellness-dash__qa-icon" aria-hidden="true">
                 📅
               </span>
-              <span className="wellness-dash__qa-label">Найди услугу</span>
+              <span className="wellness-dash__qa-label">Новая запись</span>
+            </button>
+            <button
+              type="button"
+              className="wellness-dash__qa-btn wellness-dash__qa-btn--compact"
+              aria-label="Скорректировать план"
+              onClick={onPlanChatTap}
+            >
+              <span className="wellness-dash__qa-icon" aria-hidden="true">
+                📝
+              </span>
+              <span className="wellness-dash__qa-label">Скорректировать план</span>
+            </button>
+            <button
+              type="button"
+              className="wellness-dash__qa-btn wellness-dash__qa-btn--compact"
+              aria-label="Профиль"
+              onClick={onProfileTap}
+            >
+              <span className="wellness-dash__qa-icon" aria-hidden="true">
+                👤
+              </span>
+              <span className="wellness-dash__qa-label">Профиль</span>
             </button>
           </div>
+          {/* DRF-2266 — «Скорректировать план» тоже дверь в чат. */}
+          {chatStuckAt === "plan" && <ChatStuckHint />}
 
           {/* Sync indicator for offline water queue (§11.8). */}
           {waterQueueLen > 0 && (
@@ -562,27 +1045,132 @@ export function CustomerWellnessDashboardScreen() {
               aria-live="polite"
             >
               {waterToast}
-            </div>
-          )}
-          {photoToast && (
-            <div
-              className="wellness-dash__toast"
-              role="status"
-              aria-live="polite"
-            >
-              {photoToast}
+              {undoEntryId && (
+                <button
+                  type="button"
+                  className="wellness-dash__toast-action"
+                  aria-label="Отменить стакан"
+                  onClick={onUndoWater}
+                >
+                  Отменить
+                </button>
+              )}
             </div>
           )}
         </section>
 
-        {/* Block 4 — Цели сегодня (text actions). */}
+        {/* Block A — «Продолжить разговор с Ayla» (DRF-2144 п.5; фриз п.4:
+            превью — только реальный последний контекст, иначе нейтрально).
+            Обе кнопки закрывают Mini App — человек возвращается в чат MAX,
+            откуда приложение открыто; фразу он пишет сам (deep link с
+            текстом в MAX не существует — см. StateError.tsx). */}
+        <section className="wellness-dash__ayla" aria-labelledby="ayla-header">
+          <h2 id="ayla-header" className="wellness-dash__section-header">
+            Продолжить разговор с <span lang="en">Ayla</span>
+          </h2>
+          <div className="wellness-dash__ayla-card">
+            {lastTopic && (
+              <>
+                <div className="wellness-dash__ayla-topic-head">
+                  <span>Последняя тема</span>
+                  {topicWhen && (
+                    <span className="wellness-dash__ayla-when">{topicWhen}</span>
+                  )}
+                </div>
+                <p className="wellness-dash__ayla-topic">{lastTopic.text}</p>
+              </>
+            )}
+            <button type="button" className="wellness-dash__cta" onClick={onChatTap}>
+              Продолжить разговор
+            </button>
+            <button type="button" className="wellness-dash__link-btn" onClick={onChatTap}>
+              Задать новый вопрос
+            </button>
+            {chatStuckAt === "ayla" && <ChatStuckHint />}
+          </div>
+        </section>
+
+        {/* ── Дневник, и то, что при нём (Д32, решение владельца 22.09) ──
+
+            По макету дневник идёт последним: цель → план → запись → быстрые
+            действия → Ayla → дневник.
+
+            Рядом с ним, НАЗВАННЫМИ отклонениями (в таблице PR):
+
+            * согласие стоит НАД полосой дневника, потому что оно её и
+              закрывает (``consentRequired`` — единственный ключ, который
+              гасит эту полосу, и ничего выше он не стережёт; замерено).
+              Ворота не могут стоять ниже двери, которую запирают;
+            * «Шаги на сегодня» — сразу ПОСЛЕ дневника: предмет блока это
+              числа дневника («Ещё N стаканов до нормы», норма из анкеты
+              питания). Прежнее место между дневником и записью — случайность
+              истории. Владелец оставил блок ради этой строки (Д31 б). */}
+
+        {/* Block C — согласие дневника: ОДИН блок (DRF-2144 п.6) вместо двух
+            одинаковых абзацев в строках «Питание» и «Вода». */}
+        {today.kind === "ok" && consentRequired && (
+          <section
+            className="wellness-dash__consent"
+            aria-label="Согласие на дневник"
+          >
+            <p className="wellness-dash__consent-text">{DIARY_CONSENT_CARD_TEXT}</p>
+            <button
+              type="button"
+              className="btn-secondary"
+              onClick={() => void onConsentTap()}
+              disabled={consentPromptBusy}
+            >
+              {DIARY_CONSENT_CARD_CTA}
+            </button>
+            {consentPromptError ? (
+              <p className="wellness-dash__consent-error" role="alert">
+                {consentPromptError}
+              </p>
+            ) : null}
+            {consentPromptAlreadySent ? (
+              <>
+                <p className="wellness-dash__consent-text" role="status">
+                  {CONSENT_PROMPT_ALREADY_SENT_TEXT}
+                </p>
+                <button type="button" className="btn-primary" onClick={() => goToChat("consent")}>
+                  {CONSENT_PROMPT_OPEN_CHAT_CTA}
+                </button>
+              </>
+            ) : null}
+            {chatStuckAt === "consent" && <ChatStuckHint />}
+          </section>
+        )}
+
+        {/* Block 2 — Pulse strip (§11.1 — conditional БЖУ). Без согласия
+            строк нет — их место занимает одна карточка согласия выше. */}
+        {!(today.kind === "ok" && consentRequired) && (
+          <section className="wellness-dash__pulse" aria-label="Сегодня">
+            {today.kind === "loading" && <PulseSkeleton />}
+            {today.kind === "error" && (
+              <BlockError
+                reason={today.reason}
+                onRetry={() => void fetchAll()}
+              />
+            )}
+            {today.kind === "ok" && diaryOff && (
+              <div className="wellness-dash__block-error" role="status" aria-live="polite">
+                <p>{DIARY_OFF_TEXT}</p>
+              </div>
+            )}
+            {today.kind === "ok" && !diaryOff && (
+              <PulseStrip data={today.data} />
+            )}
+          </section>
+        )}
+
+        {/* Block 4 — Шаги на сегодня (text actions). */}
         {showTodayGoals && today.kind === "ok" && (
           <section
             className="wellness-dash__today-goals"
             aria-labelledby="tg-header"
           >
             <h2 id="tg-header" className="wellness-dash__section-header">
-              Цели сегодня
+              Шаги на сегодня
             </h2>
             <ul className="wellness-dash__goal-list">
               {waterRemaining > 0 && (
@@ -590,88 +1178,11 @@ export function CustomerWellnessDashboardScreen() {
                   <span aria-hidden="true">💧</span>{" "}
                   <span>
                     Ещё {waterRemaining}{" "}
-                    {ruPluralWater(waterRemaining)} до цели
+                    {ruPluralWater(waterRemaining)} до нормы
                   </span>
                 </li>
               )}
-              {proteinDeficit > 0 && (
-                <li className="wellness-dash__goal-item">
-                  <span aria-hidden="true">🍽</span>{" "}
-                  <span>Добрать белок · ещё {proteinDeficit} г</span>
-                </li>
-              )}
             </ul>
-          </section>
-        )}
-
-        {/* Block 5 — Ближайшая запись (+ multi-record indicator §11.3). */}
-        <section
-          className="wellness-dash__booking"
-          aria-labelledby="booking-header"
-        >
-          <h2 id="booking-header" className="wellness-dash__section-header">
-            Ближайшая запись
-          </h2>
-          {activity.kind === "loading" && <BookingSkeleton />}
-          {activity.kind === "error" && (
-            <BlockError
-              reason={activity.reason}
-              onRetry={() => void fetchAll()}
-            />
-          )}
-          {activity.kind === "ok" && !activity.data.next_booking && (
-            <BookingEmpty onFind={onCatalogTap} />
-          )}
-          {activity.kind === "ok" && activity.data.next_booking && (
-            <BookingCard
-              data={activity.data}
-              onOpen={() =>
-                activity.data.next_booking &&
-                navigate(
-                  `/customer/records/${activity.data.next_booking.booking_id}`,
-                )
-              }
-              onReschedule={() =>
-                activity.data.next_booking &&
-                navigate(
-                  `/my-visits/${activity.data.next_booking.booking_id}/reschedule`,
-                )
-              }
-              onAll={() => navigate("/customer/records")}
-            />
-          )}
-        </section>
-
-        {/* Block 6 — Прогресс недели (cold-start gate §11.4). */}
-        {showWeekly && activity.kind === "ok" && (
-          <section
-            className="wellness-dash__weekly"
-            aria-labelledby="weekly-header"
-          >
-            <h2 id="weekly-header" className="wellness-dash__section-header">
-              Прогресс недели
-            </h2>
-            <ul className="wellness-dash__weekly-list">
-              <li>
-                <span aria-hidden="true">💧</span> Вода:{" "}
-                {activity.data.weekly_progress.water_days_logged} из 7 дней
-              </li>
-              <li>
-                <span aria-hidden="true">🍽</span> Питание:{" "}
-                {activity.data.weekly_progress.food_days_logged} из 7 дней
-              </li>
-              <li>
-                <span aria-hidden="true">📅</span> Активность:{" "}
-                {activity.data.weekly_progress.active_days_count} дней
-              </li>
-            </ul>
-            <button
-              type="button"
-              className="btn-secondary wellness-dash__weekly-more"
-              onClick={() => navigate("/")}
-            >
-              Подробнее в Дне
-            </button>
           </section>
         )}
 
@@ -681,7 +1192,13 @@ export function CustomerWellnessDashboardScreen() {
             signature «Ayla подобрала тебе» is gated on the WHY the
             SOURCE sent, not on a flag: the block reappears on its own
             once `POST /recommendations` returns reasons. */}
-        {picksWithWhy.length > 0 && (
+        {/* `shelfOn` здесь — пояс поверх подтяжек, и проверить его узлом
+            НЕЛЬЗЯ: при тёмной полке за данными не ходят, `picksWithWhy`
+            всегда пуст, и снятие этого условия ничего не меняет (проверено
+            мутацией на ревью). Условие оставлено на случай, если срез
+            когда-нибудь наполнится из другого места — из кэша, из общего
+            состояния. Настоящие ворота — в `fetchAll`. */}
+        {shelfOn && picksWithWhy.length > 0 && (
             <section
               className="wellness-dash__recos"
               aria-labelledby="recos-header"
@@ -697,7 +1214,7 @@ export function CustomerWellnessDashboardScreen() {
                       service={service}
                       reasons={reasons}
                       onOpen={() =>
-                        navigate(`/catalog/${service.id}`)
+                        navigate(`/customer/catalog/${service.id}`)
                       }
                     />
                   </li>
@@ -707,66 +1224,9 @@ export function CustomerWellnessDashboardScreen() {
           )}
       </main>
 
-      {/* Bottom nav — 5 tabs. Wellness is the «День» day view
-          (#951): active tab is «День»; «Главная» leads to the records
-          home (/customer/main). */}
-      <nav className="wellness-dash__nav" aria-label="Основная навигация">
-        <button
-          type="button"
-          className="wellness-dash__nav-tab"
-          aria-label="Главная"
-          onClick={() => navigate("/customer/main")}
-        >
-          <span className="wellness-dash__nav-icon" aria-hidden="true">
-            🏠
-          </span>
-          <span className="wellness-dash__nav-label">Главная</span>
-        </button>
-        <button
-          type="button"
-          className="wellness-dash__nav-tab wellness-dash__nav-tab--active"
-          aria-current="page"
-          aria-label="День"
-        >
-          <span className="wellness-dash__nav-icon" aria-hidden="true">
-            ☀
-          </span>
-          <span className="wellness-dash__nav-label">День</span>
-        </button>
-        <button
-          type="button"
-          className="wellness-dash__nav-tab"
-          aria-label="Записи"
-          onClick={() => navigate("/customer/records")}
-        >
-          <span className="wellness-dash__nav-icon" aria-hidden="true">
-            📅
-          </span>
-          <span className="wellness-dash__nav-label">Записи</span>
-        </button>
-        <button
-          type="button"
-          className="wellness-dash__nav-tab"
-          aria-label="Услуги"
-          onClick={onCatalogTap}
-        >
-          <span className="wellness-dash__nav-icon" aria-hidden="true">
-            💅
-          </span>
-          <span className="wellness-dash__nav-label">Услуги</span>
-        </button>
-        <button
-          type="button"
-          className="wellness-dash__nav-tab"
-          aria-label="Я"
-          onClick={() => navigate("/customer/profile")}
-        >
-          <span className="wellness-dash__nav-icon" aria-hidden="true">
-            👤
-          </span>
-          <span className="wellness-dash__nav-label">Я</span>
-        </button>
-      </nav>
+      {/* Панель — общая для клиентских экранов (DRF-2191, состав и правила —
+          в `components/CustomerTabBar.tsx`); этот экран «Главная». */}
+      <CustomerTabBar active="home" />
     </div>
   );
 }
@@ -791,58 +1251,133 @@ function PulseSkeleton() {
   );
 }
 
+/** Copy for a slice the backend could not read. One string, one place —
+ *  the goal row has said this since DRF-1476 and the nutrition rows say
+ *  it since DRF-1546. */
+const UNAVAILABLE = "Не удалось загрузить";
+
+/** DRF-2288 (№41, CD §76) — текст пустого дня, слово владельца вместо «залогировано». */
+export const EMPTY_DAY_TEXT = "Сегодня ещё ничего не записано";
+
+/** То же для скринридера: « из 61». */
+function spokenTarget(target: number | undefined): string {
+  return target !== undefined ? ` из ${target}` : "";
+}
+
 function PulseStrip({ data }: { data: WellnessToday }) {
+  // Absent is not zero (DRF-1546). `0` is «nothing logged yet» and draws
+  // normally; an ABSENT key means the read failed and must say so.
+  const caloriesEaten = data.calories_eaten;
+  const caloriesTarget = data.calories_target;
+  // По образцу воды парой строк ниже: съеденное и цель — раздельно.
+  const caloriesKnown = caloriesEaten !== undefined;
+  const caloriesTargetKnown = caloriesTarget !== undefined;
+  const waterEaten = data.water_glasses_eaten;
+  const waterTarget = data.water_glasses_target;
+  // Знать выпитое и не знать нормы — обычное состояние, а не сбой.
+  const waterKnown = waterEaten !== undefined;
+  const waterTargetKnown = waterTarget !== undefined;
+  // «Сегодня ещё ничего не записано» — состояние всего дня, а не одной
+  // строки, поэтому считается один раз и решает и текст, и шкалу.
+  const dayIsEmpty = caloriesEaten === 0 && waterEaten === 0;
+  // DRF-2288 (№41): строка БЖУ из нулей не рисуется, как только еды нет, —
+  // даже если вода уже записана (решение владельца: «строку нулей не рисовать»).
+  const foodIsEmpty = caloriesEaten === 0;
+  const pfcSpoken =
+    data.pfc && !foodIsEmpty
+      ? `. Белки ${data.pfc.protein_g}${spokenTarget(data.pfc.protein_target_g)}, жиры ${
+          data.pfc.fat_g
+        }${spokenTarget(data.pfc.fat_target_g)}, углеводы ${data.pfc.carbs_g}${spokenTarget(
+          data.pfc.carbs_target_g,
+        )} граммов`
+      : "";
   const caloriesPct =
-    data.calories_target > 0
-      ? Math.round((data.calories_eaten / data.calories_target) * 100)
+    caloriesKnown && caloriesTargetKnown && caloriesTarget > 0
+      ? Math.round((caloriesEaten / caloriesTarget) * 100)
       : 0;
   const waterPct =
-    data.water_glasses_target > 0
-      ? Math.round(
-          (data.water_glasses_eaten / data.water_glasses_target) * 100,
-        )
+    waterKnown && waterTargetKnown && waterTarget > 0
+      ? Math.round((waterEaten / waterTarget) * 100)
       : 0;
-  const goal = data.active_goals[0];
+  // Цель здесь больше не рисуется — она в карточке цели над этим блоком
+  // (H01, DRF-2144); строка была бы вторым местом для того же факта.
+  // DRF-1927 — ключей дневника нет, потому что нет согласия, а не потому,
+  // что чтение упало: говорим, что нужно, а не «Не удалось загрузить».
+  const sliceClosedCopy = data.consent_required ? DIARY_CONSENT_REQUIRED_TEXT : UNAVAILABLE;
 
   return (
     <div className="wellness-dash__pulse-card">
       {/* Питание row */}
       <div
         className="wellness-dash__pulse-row"
-        aria-label={`Питание: ${data.calories_eaten} из ${data.calories_target} килокалорий, ${caloriesPct} процентов${
-          data.pfc
-            ? `. Белки ${data.pfc.protein_g}, жиры ${data.pfc.fat_g}, углеводы ${data.pfc.carbs_g} граммов`
-            : ""
-        }`}
+        aria-label={
+          !caloriesKnown
+            ? `Питание: ${sliceClosedCopy}`
+            : dayIsEmpty
+              ? // DRF-2288: скринридер слышит то же, что видно глазу, — не «0 из 2100».
+                `Питание: ${EMPTY_DAY_TEXT}`
+              : caloriesTargetKnown
+                ? `Питание: ${caloriesEaten} из ${caloriesTarget} килокалорий, ${caloriesPct} процентов${pfcSpoken}`
+                : `Питание: ${caloriesEaten} килокалорий сегодня`
+        }
       >
         <div className="wellness-dash__pulse-head">
           <span aria-hidden="true">🍽 </span>Питание
         </div>
-        <div className="wellness-dash__pulse-numbers" aria-hidden="true">
-          {data.calories_eaten === 0 && data.water_glasses_eaten === 0
-            ? "Ещё ничего не залогировано"
-            : `${data.calories_eaten} / ${data.calories_target} ккал · ${caloriesPct} %`}
-        </div>
-        {/* §11.1 — БЖУ row hidden when pfc absent. */}
-        {data.pfc && (
-          <div className="wellness-dash__pulse-pfc" aria-hidden="true">
-            Б {data.pfc.protein_g} · Ж {data.pfc.fat_g} · У {data.pfc.carbs_g} г
+        {caloriesKnown && caloriesTargetKnown ? (
+          <>
+            <div className="wellness-dash__pulse-numbers" aria-hidden="true">
+              {dayIsEmpty
+                ? EMPTY_DAY_TEXT
+                : `${caloriesEaten} / ${caloriesTarget} ккал · ${caloriesPct} %`}
+            </div>
+            {/* §11.1 — БЖУ row hidden when pfc absent. DRF-1844: белок
+                «108 / 130 г», когда ориентир по белку приехал; без него —
+                факт без второго числа (§85 §8: процент и «из» только при
+                ориентире). */}
+            {/* DRF-2288 (№41): ориентиры Ж и У — тем же признаком, что белок;
+                в пустой день строки нулей нет — рядом уже сказано, что
+                ничего не записано. */}
+            {data.pfc && !foodIsEmpty && (
+              <div className="wellness-dash__pulse-pfc" aria-hidden="true">
+                {pfcLine(data.pfc, caloriesEaten)}
+              </div>
+            )}
+            {/* Пустой день — без шкалы. Полоса при нуле не видна глазом,
+                но `role="progressbar"` озвучивает «0 из 2000», то есть
+                противоречит строке над ней ровно для того человека,
+                который не может проверить глазами. */}
+            {!dayIsEmpty && (
+              <div
+                className="wellness-dash__progress"
+                role="progressbar"
+                aria-valuenow={caloriesEaten}
+                aria-valuemin={0}
+                aria-valuemax={caloriesTarget}
+                aria-label={`Калории: ${caloriesEaten} из ${caloriesTarget}`}
+              >
+                <div
+                  className="wellness-dash__progress-fill"
+                  style={{ width: `${Math.min(100, caloriesPct)}%` }}
+                  aria-hidden="true"
+                />
+              </div>
+            )}
+          </>
+        ) : caloriesKnown ? (
+          /* Цель не известна — показываем ровно то, что знаем: сколько
+             съедено. Ни шкалы, ни процентов: и то и другое считается ОТ
+             цели, а цели нет. Та же форма, что у воды ниже. */
+          <div className="wellness-dash__pulse-numbers">
+            {dayIsEmpty
+              ? EMPTY_DAY_TEXT
+              : `${caloriesEaten} ккал сегодня`}
           </div>
+        ) : (
+          /* Read failed - no numbers, no bar. «0 / 0 ккал · 0 %» would
+             read as a logged-nothing day, which is a different fact. */
+          <div className="wellness-dash__pulse-numbers">{sliceClosedCopy}</div>
         )}
-        <div
-          className="wellness-dash__progress"
-          role="progressbar"
-          aria-valuenow={data.calories_eaten}
-          aria-valuemin={0}
-          aria-valuemax={data.calories_target}
-          aria-label={`Калории: ${data.calories_eaten} из ${data.calories_target}`}
-        >
-          <div
-            className="wellness-dash__progress-fill"
-            style={{ width: `${Math.min(100, caloriesPct)}%` }}
-            aria-hidden="true"
-          />
-        </div>
       </div>
 
       <hr className="wellness-dash__pulse-divider" aria-hidden="true" />
@@ -850,72 +1385,239 @@ function PulseStrip({ data }: { data: WellnessToday }) {
       {/* Вода row */}
       <div
         className="wellness-dash__pulse-row"
-        aria-label={`Вода: ${data.water_glasses_eaten} из ${data.water_glasses_target} стаканов`}
+        aria-label={
+          !waterKnown
+            ? `Вода: ${sliceClosedCopy}`
+            : waterTargetKnown
+              ? `Вода: ${waterEaten} из ${waterTarget} стаканов`
+              : `Вода: ${waterEaten} ${ruPluralWater(waterEaten)} сегодня`
+        }
       >
         <div className="wellness-dash__pulse-head">
           <span aria-hidden="true">💧 </span>Вода
         </div>
-        <div className="wellness-dash__pulse-numbers" aria-hidden="true">
-          {data.water_glasses_eaten} / {data.water_glasses_target} стаканов
-        </div>
-        <div
-          className="wellness-dash__water-dots"
-          role="progressbar"
-          aria-valuenow={data.water_glasses_eaten}
-          aria-valuemin={0}
-          aria-valuemax={data.water_glasses_target}
-          aria-label={`Вода: ${data.water_glasses_eaten} из ${data.water_glasses_target} стаканов (${waterPct} процентов)`}
-        >
-          <span aria-hidden="true">
-            {Array.from({ length: data.water_glasses_target }).map((_, i) => (
-              <span key={i}>{i < data.water_glasses_eaten ? "●" : "○"}</span>
-            ))}
-          </span>
-        </div>
-      </div>
-
-      <hr className="wellness-dash__pulse-divider" aria-hidden="true" />
-
-      {/* Goal row — §11.2 */}
-      <div
-        className="wellness-dash__pulse-row"
-        aria-label={
-          goal
-            ? `Цель: ${goal.title}, ${goal.week_num}-я неделя, ${goal.progress_pct} процентов`
-            : "Цель не выбрана"
-        }
-      >
-        <div className="wellness-dash__pulse-head">
-          <span aria-hidden="true">🎯 </span>
-          {goal ? `${goal.title} · ${goal.week_num}-я неделя` : "Цель не выбрана"}
-        </div>
-        {goal ? (
+        {waterKnown && waterTargetKnown ? (
           <>
-            <div
-              className="wellness-dash__progress"
-              role="progressbar"
-              aria-valuenow={goal.progress_pct}
-              aria-valuemin={0}
-              aria-valuemax={100}
-              aria-label={`${goal.title}: ${goal.progress_pct} процентов`}
-            >
-              <div
-                className="wellness-dash__progress-fill"
-                style={{ width: `${Math.min(100, goal.progress_pct)}%` }}
-                aria-hidden="true"
-              />
-            </div>
             <div className="wellness-dash__pulse-numbers" aria-hidden="true">
-              {goal.progress_pct} %
+              {waterEaten} / {waterTarget} стаканов
+            </div>
+            <div
+              className="wellness-dash__water-dots"
+              role="progressbar"
+              aria-valuenow={waterEaten}
+              aria-valuemin={0}
+              aria-valuemax={waterTarget}
+              aria-label={`Вода: ${waterEaten} из ${waterTarget} стаканов (${waterPct} процентов)`}
+            >
+              <span aria-hidden="true">
+                {Array.from({ length: waterTarget }).map((_, i) => (
+                  <span key={i}>{i < waterEaten ? "●" : "○"}</span>
+                ))}
+              </span>
             </div>
           </>
-        ) : (
+        ) : waterKnown ? (
+          /* Норма не известна — показываем ровно то, что знаем: сколько
+             выпито. Ни шкалы, ни процентов, ни точек «до нормы»: всё это
+             считается ОТ цели, а цели нет. Формулировка — из макета
+             §Cold-start: «0 стаканов сегодня». */
           <div className="wellness-dash__pulse-numbers">
-            Расскажи о себе — точнее советую
+            {waterEaten} {ruPluralWater(waterEaten)} сегодня
           </div>
+        ) : (
+          /* Read failed. The «+ стакан» quick action stays live - it is
+             a separate handle (POST /wellness/water) and still works. */
+          <div className="wellness-dash__pulse-numbers">{sliceClosedCopy}</div>
         )}
       </div>
+
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// H01 (DRF-2144): карточка цели, «План на сегодня», карточка записи.
+// ---------------------------------------------------------------------------
+
+/** Ярлыки действий Plan Lite — те же, что на экране плана (одно имя на проводе). */
+const PLAN_ACTION_LABELS: Record<PlanLiteActionType, string> = {
+  book_service: PLAN_LITE_COPY.labelBook,
+  log_food: PLAN_LITE_COPY.labelFood,
+  log_water: PLAN_LITE_COPY.labelWater,
+};
+
+const PLAN_ACTION_ICONS: Record<PlanLiteActionType, string> = {
+  book_service: "📅",
+  log_food: "🍽",
+  log_water: "💧",
+};
+
+/** Период ведра — словами экрана плана: «Сегодня» / «На этой неделе» / «Эти 2 недели». */
+const PLAN_CADENCE_PERIOD: Record<PlanLiteCadence, string> = {
+  per_day: PLAN_LITE_COPY.today,
+  per_week: PLAN_LITE_COPY.thisWeek,
+  per_2_weeks: PLAN_LITE_COPY.twoWeeks,
+};
+
+/**
+ * Adherence плана — сколько действий сделано из скольких за текущие вёдра.
+ * Это счёт ДЕЙСТВИЙ, не оценка результата (§49: без веса, §82: без
+ * процентов) — поэтому строка «выполнено N из M действий», а не шкала.
+ */
+function planAdherence(plan: PlanLite): { done: number; total: number } {
+  return plan.actions.reduce(
+    (acc, a) => ({
+      done: acc.done + Math.min(a.done_count, a.target_count),
+      total: acc.total + a.target_count,
+    }),
+    { done: 0, total: 0 },
+  );
+}
+
+function GoalCard({
+  goal,
+  goalsKnown,
+  plan,
+  onPlan,
+  onGoal,
+}: {
+  goal: ActiveGoal | undefined;
+  goalsKnown: boolean;
+  plan: PlanSlice;
+  onPlan: () => void;
+  onGoal: () => void;
+}) {
+  if (!goal) {
+    // Нет цели / слой цели не ответил — та же форма карточки, чтобы экран
+    // не «прыгал» между состояниями. Три состояния — DRF-1476: «Выбери цель»
+    // говорится ТОЛЬКО когда известно, что цели нет.
+    return (
+      <section className="wellness-dash__goal-card" aria-labelledby="goal-header">
+        <p id="goal-header" className="wellness-dash__goal-eyebrow">
+          Цель
+        </p>
+        {goalsKnown ? (
+          <>
+            <p className="wellness-dash__goal-hint">Расскажи о себе — точнее советую</p>
+            <button type="button" className="wellness-dash__cta" onClick={onGoal}>
+              Выбери цель
+            </button>
+          </>
+        ) : (
+          <p className="wellness-dash__goal-hint">{UNAVAILABLE}</p>
+        )}
+      </section>
+    );
+  }
+
+  const planKnown = plan.kind === "ok";
+  const activePlan = plan.kind === "ok" ? plan.data : null;
+  const due = formatGoalDue(goal.target_date);
+  const weekPrefix = goal.week_num ? `Неделя ${goal.week_num} · ` : "";
+  let statusLine: string | null = null;
+  if (activePlan) {
+    const { done, total } = planAdherence(activePlan);
+    statusLine = weekPrefix
+      ? `${weekPrefix}выполнено ${done} из ${total} действий`
+      : `Выполнено ${done} из ${total} действий`;
+  } else if (planKnown) {
+    statusLine = "План ещё не составлен";
+  } else if (goal.week_num) {
+    // План недоступен (сервер выключил или не ответил) — о плане молчим,
+    // счётчик недель остаётся: это не оценка выполнения (решение №13).
+    statusLine = `Неделя ${goal.week_num}`;
+  }
+
+  return (
+    <section className="wellness-dash__goal-card" aria-labelledby="goal-header">
+      {/* «Активная цель» — название блока, не приставка к цели: решение владельца 28.09 (слова, п.3) — оставить. Саму цель — без «Твоя цель:». */}
+      <p id="goal-header" className="wellness-dash__goal-eyebrow">
+        Активная цель
+      </p>
+      <h2 className="wellness-dash__goal-title">{goal.title}</h2>
+      {/* DRF-2173 — срок цели «До 1 ноября 2026» (макет DRF-1321); без срока строки нет. */}
+      {due && <p className="wellness-dash__goal-due">{due}</p>}
+      {/* Ни шкалы, ни процентов, ни веса под целью (§49/§82, решение №13):
+          только счёт действий из плана. */}
+      {statusLine && <p className="wellness-dash__goal-status">{statusLine}</p>}
+      {activePlan && (
+        <button type="button" className="wellness-dash__cta" onClick={onPlan}>
+          Продолжить сегодняшний план
+          <span aria-hidden="true"> →</span>
+        </button>
+      )}
+      {!activePlan && planKnown && (
+        <button type="button" className="wellness-dash__cta" onClick={onPlan}>
+          Составить план
+        </button>
+      )}
+      <button type="button" className="wellness-dash__link-btn" onClick={onGoal}>
+        Посмотреть детали цели
+      </button>
+    </section>
+  );
+}
+
+function PlanToday({
+  plan,
+  onAll,
+  onAdjust,
+}: {
+  plan: PlanLite;
+  onAll: () => void;
+  onAdjust: () => void;
+}) {
+  return (
+    <section className="wellness-dash__plan-today" aria-labelledby="plan-today-header">
+      <div className="wellness-dash__plan-head">
+        <h2 id="plan-today-header" className="wellness-dash__section-header">
+          План на сегодня
+        </h2>
+        <button type="button" className="wellness-dash__link-btn" onClick={onAll}>
+          Смотреть весь план
+        </button>
+      </div>
+      <ul className="wellness-dash__plan-list">
+        {plan.actions.map((a) => {
+          const label = PLAN_ACTION_LABELS[a.action_type];
+          const done = a.done_count >= a.target_count;
+          return (
+            <li key={a.action_type} className="wellness-dash__plan-item">
+              <span className="wellness-dash__plan-icon" aria-hidden="true">
+                {PLAN_ACTION_ICONS[a.action_type]}
+              </span>
+              <div className="wellness-dash__plan-main">
+                <div className="wellness-dash__plan-label">{label}</div>
+                <div className="wellness-dash__plan-period">{PLAN_CADENCE_PERIOD[a.cadence]}</div>
+              </div>
+              <div className="wellness-dash__plan-state">
+                {done ? (
+                  <span
+                    className="wellness-dash__plan-done"
+                    role="img"
+                    aria-label={`${label}: выполнено`}
+                  >
+                    ✓
+                  </span>
+                ) : (
+                  PLAN_LITE_COPY.ofTotal(a.done_count, a.target_count)
+                )}
+              </div>
+              <span className="wellness-dash__plan-chip">из вашего плана</span>
+            </li>
+          );
+        })}
+      </ul>
+      {/* Attention-состояние по фризу 25.08 п.2 — человеческим языком. Кнопка
+          закрывает Mini App в чат MAX; что именно поправить, человек пишет
+          сам — контекст в чат не передаётся. */}
+      <div className="wellness-dash__plan-attention" role="note">
+        <p className="wellness-dash__plan-attention-text">Сегодня не получается по плану?</p>
+        <button type="button" className="btn-secondary" onClick={onAdjust}>
+          Скорректировать с Ayla
+        </button>
+      </div>
+    </section>
   );
 }
 
@@ -935,43 +1637,72 @@ function BookingSkeleton() {
   );
 }
 
-function BookingEmpty({ onFind }: { onFind: () => void }) {
+function BookingEmpty({ onBook }: { onBook: () => void }) {
+  // По макету H01: «Записей нет» + «Записаться» → каталог. Прежняя заглушка
+  // «Подобрать услугу под твою цель…» обещала подбор, которого на Главной
+  // нет (C01: Home — не второй каталог).
   return (
     <div className="wellness-dash__booking-card">
-      <p className="wellness-dash__booking-empty">
-        Подобрать услугу под твою цель — расскажу что подойдёт.
-      </p>
-      <button type="button" className="btn-secondary" onClick={onFind}>
-        Найди услугу
+      <p className="wellness-dash__booking-empty">Записей нет</p>
+      <button type="button" className="btn-secondary" onClick={onBook}>
+        Записаться
       </button>
     </div>
   );
 }
 
+/** «мастер {Имя} · {салон}» — п.2 решений владельца 28.09, дословная форма. */
+export function bookingWhoText(
+  masterName: string | null | undefined,
+  salonName: string | null | undefined,
+): string {
+  const name = masterName?.trim() ?? "";
+  const salon = salonName?.trim() ?? "";
+  return [name ? `мастер ${name}` : "", salon].filter(Boolean).join(" · ");
+}
+
 function BookingCard({
   data,
   onOpen,
-  onReschedule,
-  onAll,
 }: {
   data: RecentActivity;
   onOpen: () => void;
-  onReschedule: () => void;
-  onAll: () => void;
 }) {
   const b = data.next_booking;
   if (!b) return null;
   const moreThisWeek = data.this_week_booking_count > 1;
+  // Бейдж — тем же словарём, что список записей; ключа нет (старый сервер)
+  // — бейджа нет, а не «неизвестно».
+  const status = b.status ? mapBookingStatus(b.status) : null;
+  // Цена — место оставлено под DRF-2172: пока ключа нет, строки нет (§33).
+  const price = b.price ? priceFromLabel(b.price) : "";
   return (
     <div className="wellness-dash__booking-card">
-      <div className="wellness-dash__booking-when">{b.date_human}</div>
-      <div className="wellness-dash__booking-what">
-        {b.service_name} · {b.duration_min} мин
+      <div className="wellness-dash__booking-top">
+        <div className="wellness-dash__booking-what">
+          {b.service_name}
+          {b.duration_min ? ` · ${b.duration_min} мин` : ""}
+        </div>
+        {status && <StatusBadge rendering={status.rendering} />}
       </div>
+      {/* Решение владельца 28.09 (слова, п.2): «мастер {Имя}», имя не
+          склоняется; форма одна на чат, список «Мои записи» и эту строку —
+          одна запись не читается двумя способами. «у {Имя}» снято везде.
+          Нет имени или салона в проводе — без висящего «мастер » / « · ». */}
       <div className="wellness-dash__booking-who">
-        у {b.master_name} · {b.salon_name}
+        {bookingWhoText(b.master_name, b.salon_name)}
       </div>
-      <div className="wellness-dash__booking-where">{b.address}</div>
+      <div className="wellness-dash__booking-row">
+        <div className="wellness-dash__booking-when">{b.date_human}</div>
+        {price && <div className="wellness-dash__booking-price">{price}</div>}
+      </div>
+      {/* Адрес — три состояния, и на экране их два разных текста
+          (DRF-1611). Строка есть ВСЕГДА: человек идёт на визит, и
+          нужда у него одна и та же независимо от того, чей это
+          пробел — салона или наш. */}
+      <div className="wellness-dash__booking-where">
+        {visitAddressText(b.address)}
+      </div>
 
       {/* §11.3 — multi-record indicator. */}
       {moreThisWeek && (
@@ -981,6 +1712,9 @@ function BookingCard({
         </div>
       )}
 
+      {/* По макету: «Открыть запись». «Все мои записи» уехала в строку
+          заголовка блока (Д11, решение владельца 22.09), «Перенести» с
+          Главной снято — перенос живёт в карточке записи. */}
       <div className="wellness-dash__booking-actions">
         <button
           type="button"
@@ -990,25 +1724,7 @@ function BookingCard({
         >
           Открыть запись
         </button>
-        <button
-          type="button"
-          className="btn-secondary"
-          onClick={onReschedule}
-          aria-label="Перенести запись"
-        >
-          Перенести
-        </button>
       </div>
-      {moreThisWeek && (
-        <button
-          type="button"
-          className="wellness-dash__booking-all"
-          onClick={onAll}
-          aria-label="Все записи"
-        >
-          Все записи →
-        </button>
-      )}
     </div>
   );
 }
@@ -1045,14 +1761,20 @@ function RecoCard({
         {!service.is_bookable && (
           // DRF-1164 — the scorer ranks by fit, not by staffing, so a pick
           // can be a service nobody performs. Same label as the catalog
-          // card; the tap lands on /catalog/:id, which withholds the CTA.
+          // card; the tap lands on /customer/catalog/:id, which withholds
+          // the CTA.
           <UnbookableBadge />
         )}
         <div id={metaId} className="wellness-dash__reco-meta">
           {/* Factual mirror fields only — never a synthesised WHY. */}
           {formatDuration(service.duration_min)}
-          {service.duration_min && service.price_from ? " · " : ""}
-          {service.price_from ? `от ${formatMoney(service.price_from)}` : ""}
+          {/* DRF-1989 — цена ниже 1 ₽ не рисуется: «от 0 ₽» читалось как «бесплатно». */}
+          {service.duration_min && service.price_from && priceFromLabel(service.price_from)
+            ? " · "
+            : ""}
+          {service.price_from && priceFromLabel(service.price_from)
+            ? `от ${priceFromLabel(service.price_from)}`
+            : ""}
         </div>
       </button>
       {/* WHY — verbatim from the source. Kept OUTSIDE the button (a
@@ -1074,16 +1796,22 @@ function BlockError({
   reason,
   onRetry,
 }: {
-  reason: "network" | "server" | "other";
+  reason: LoadErrorReason;
   onRetry: () => void;
 }) {
-  // Warm copy per Tau §5 State 3 + §7 brand voice.
+  // Warm copy per Tau §5 State 3 + §7 brand voice. DRF-1319 D-1: отказ
+  // входа — своим именем, как на Hello и в StateError, а не «через минуту».
   const text =
-    reason === "network"
-      ? "Не получилось загрузить. Проверь интернет и попробуй ещё раз."
-      : "Что-то пошло не так. Попробуй ещё раз через минуту.";
+    reason.kind === "auth"
+      ? authErrorCopy(reason.slug).body
+      : reason.kind === "network"
+        ? "Не получилось загрузить. Проверь интернет и попробуй ещё раз."
+        : "Что-то пошло не так. Попробуй ещё раз через минуту.";
   return (
     <div className="wellness-dash__block-error" role="status" aria-live="polite">
+      {reason.kind === "auth" && (
+        <p style={{ fontWeight: 600 }}>{authErrorCopy(reason.slug).title}</p>
+      )}
       <p>{text}</p>
       <button type="button" className="btn-secondary" onClick={onRetry}>
         Обновить
@@ -1108,6 +1836,11 @@ function ruPluralWater(n: number): string {
 // Verb agreement for "стакан(а/ов) ждёт/ждут синхронизации".
 // Singular forms (1, 21, 31, ...) take "ждёт"; rest take "ждут".
 // Excludes the 11-14 teen-irregular range.
+/** Предложения тоста через пробел; точка ставится там, где её нет. */
+function joinSentences(parts: string[]): string {
+  return parts.map((p, i) => (i < parts.length - 1 && !/[.!?]$/.test(p) ? `${p}.` : p)).join(" ");
+}
+
 function ruPluralWaterWaits(n: number): string {
   const mod10 = n % 10;
   const mod100 = n % 100;

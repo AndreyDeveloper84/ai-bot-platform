@@ -37,9 +37,9 @@ on:
     branches:
       - main
       - dev
-    paths-ignore:
-      - "docs/**"
-      - "**/*.md"
+    # No `paths-ignore` here on purpose (DRF-1675, 12.09.2026): the docs-only
+    # case is decided by the `changes` job inside this run, so that there is
+    # ONE workflow named `ci` and one run per push. See `changes` below.
   workflow_dispatch:
 
 # DRF-1377 — keyed on the PR number, and cancelling restricted to PRs.
@@ -57,20 +57,913 @@ on:
 #   * `github.event.pull_request.number` groups a PR with itself. A new
 #     commit makes the previous run's verdict meaningless, so superseding it
 #     is honest work, and that is the only case `cancel-in-progress` covers.
-#   * `github.sha` gives every push its own group. A burst of merges to `dev`
-#     can no longer collide, and with cancelling off for `push` it could not
-#     act even if it did. Landed code always gets its own verdict.
+#   * pushes are grouped by `github.ref`, and cancelling stays OFF for them.
 #
-# Not `github.workflow`: `ci-docs-skip.yml` is also named `ci`, so that
-# expression is ambiguous across the two files. The literal prefix is not.
+# 2026-09-11 — the push group was `github.sha`: every push its own group, so
+# nothing ever collided and nothing was ever cancelled. Measured that day:
+# 24 runs queued behind 2 in progress on the bot, 6 behind 3 on the catalogue,
+# both repositories sharing one runner allowance, and a catalogue lint waiting
+# half an hour. Seven stale `dev` runs were cancelled by hand.
+#
+# The fix is NOT to turn `cancel-in-progress` back on for pushes — that is
+# exactly what DRF-1377 measured and removed (15 of 20 landed commits with no
+# verdict). It is to key pushes on the ref while leaving cancelling off.
+# GitHub keeps at most ONE pending run per concurrency group: a new push to
+# `dev` cancels the *pending* run it supersedes and leaves the *running* one
+# alone. The queue collapses to «one running, one waiting» per branch, and a
+# verdict that has started is never killed. The head of `dev` still gets its
+# own run — the pending one is always the newest push, so `deploy-dev`
+# (which listens for `ci` via `workflow_run`) always sees the head.
+#
+# What a superseded run loses is a verdict for an intermediate commit that
+# never started. That commit is contained in the head, and the head is judged.
+#
+# The literal prefix, not `github.workflow`: until 12.09.2026 a twin file
+# (`ci-docs-skip.yml`) was also named `ci` and the expression was ambiguous;
+# the twin is gone (DRF-1675), the literal stays because it is unambiguous.
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.sha }}
+  group: ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  test:
-    name: pytest + ruff + mypy
+  # ---------------------------------------------------------------------
+  # DRF-1675 (12.09.2026) — one run per push.
+  #
+  # Until today docs-only PRs were served by a sister workflow
+  # (`ci-docs-skip.yml`, same `name: ci`, same job names) that triggered on
+  # `paths: docs/**` and SELF-CANCELLED when the PR turned out to be mixed.
+  # `paths:` is OR-semantics, so every PR touching one .md next to code
+  # fired both workflows in the same second; the twin cancelled itself and
+  # left a *cancelled* check run named exactly like the required one on
+  # the PR head. Branch protection reads the newest check run per name —
+  # a cancelled twin, created a tick later than the real one, is what it
+  # reads. Measured 12.09: 8 of 15 twin runs cancelled, 4 PRs BLOCKED at
+  # green mandatory checks, each freed by re-running the real run by hand
+  # (which merely made it the newer one).
+  #
+  # Fix: detect the change set HERE, in the one and only `ci` workflow,
+  # and skip the engineering jobs on a docs-only PR. A job skipped by `if:`
+  # still reports — as "skipped", which branch protection accepts for a
+  # required check — so docs-only PRs land and mixed PRs get exactly one
+  # verdict from exactly one run. `paths-ignore` stays on `push`: a
+  # docs-only push to `dev` still costs nothing and, since `deploy-dev`
+  # keys off this workflow's conclusion, still deploys nothing.
+  #
+  # Same logic as the `miniapp` job below (which detected its own change
+  # set already) and as the deleted twin — NUL-separated names, so a
+  # Cyrillic path never arrives C-quoted (PR #1504).
+  # ---------------------------------------------------------------------
+  changes:
+    name: change set (docs-only or code)
     runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      code: ${{ steps.detect.outputs.code }}
+    steps:
+      - uses: actions/checkout@v7
+        if: github.event_name == 'pull_request'
+        with:
+          fetch-depth: 0
+
+      - name: Detect docs-only vs code
+        id: detect
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" != "pull_request" ]; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "event=$EVENT — not a pull request, engineering jobs run."
+            exit 0
+          fi
+          # Full fetch, not --depth=1: checkout already runs with fetch-depth 0, and a
+          # shallow fetch of the base on top of a full clone turns the clone shallow —
+          # then "$BASE_SHA"...HEAD has no merge base whenever dev moved between the
+          # PR trigger and this step (CI run 35191873092: a 10-file .py PR was
+          # classified docs-only and every engineering job was skipped green).
+          git fetch origin "$BASE_REF"
+          BASE_SHA="$(git rev-parse "origin/$BASE_REF")"
+          # A diff failure is a tool failure, not an empty change set. Fail closed:
+          # treat it as code so the engineering jobs run. The front-end classifier
+          # further down already does this ("no merge base … running checks (fail-safe)").
+          if ! CHANGED="$(git diff --name-only -z "$BASE_SHA"...HEAD | tr '\0' '\n')"; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "could not diff against $BASE_REF ($BASE_SHA) — treating as code changes (fail-closed)."
+            exit 0
+          fi
+          NON_DOCS="$(printf '%s\n' "$CHANGED" | grep -vE '^$|^docs/|\.md$' || true)"
+          if [ -z "$NON_DOCS" ]; then
+            echo "code=false" >> "$GITHUB_OUTPUT"
+            echo "docs-only PR — engineering jobs are skipped (they report 'skipped', which satisfies branch protection)."
+          else
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "code changes present:"
+            printf '%s\n' "$NON_DOCS"
+          fi
+
+
+  # ---------------------------------------------------------------------
+  # DRF-1349 — WHAT THIS FILE LOOKED LIKE BEFORE, AND WHY IT CHANGED.
+  #
+  # Until this ticket there was ONE Python job, `pytest + ruff + mypy`,
+  # that did everything in sequence. Measured on the `ci` run of PR #1544
+  # (run 34482744443, job 102889320629, SHA e0640f3) from the jobs API —
+  # job `started_at` 13:27:26Z -> `completed_at` 14:06:26Z = 39m00s —
+  # step by step:
+  #
+  #     29m10s   75%   pytest apps/ (full suite)      <- the subject
+  #      3m37s    9%   detect-secrets (baseline audit)
+  #      3m20s    9%   pytest tests/ (cross-cutting)
+  #      1m05s    3%   eventbus booking lifecycle
+  #      0m37s    2%   mypy
+  #      0m22s    1%   ruff + 8 AST guards + django check + migration drift
+  #      0m20s         set up job + containers + checkout
+  #      0m16s         apt postgresql-client + uv install + uv sync
+  #                    (`uv sync --frozen` is 4s — the cache works; there
+  #                     are no savings hiding in dependency install)
+  #
+  # Everything waited on everything above it. A red `pytest apps/` was
+  # learned at ~35 min. A leaked credential was learned at ~4 min, but
+  # only because the secret guard had been hoisted to the top of that one
+  # job — which pushed the tests 3m37s further out on every green run.
+  # That trade was forced by the single-job shape, not chosen.
+  #
+  # THE SHAPE NOW — four Python jobs that all start at the same moment:
+  #
+  #   secret-scan   detect-secrets only. ~3.7 min. Nothing waits on it and
+  #                 it waits on nothing. Still blocking: the aggregate
+  #                 below refuses to be green without it.
+  #   checks        ruff, the 8 AST guards, django check, migration drift,
+  #                 tests/smoke, tests/ cross-cutting, the Ayla route-table
+  #                 contract, the eventbus gate, mypy, and the collection
+  #                 census. ~7 min.
+  #   apps-shard    `pytest apps/` split five ways by MEASURED time — see
+  #                 the layout table on that job. ~8 min each, all at once.
+  #   test          the aggregate. Does no work. Owns the name the branch
+  #                 protection requires, and is the only job that has it.
+  #
+  # Expected critical path: ~8.5 min against the 39 min above.
+  #
+  # WHY AN AGGREGATE JOB EXISTS AT ALL — READ THIS BEFORE RESTRUCTURING.
+  # `pytest + ruff + mypy` is a REQUIRED status check on `dev`. Verified
+  # 2026-09-11 against the protection API, not assumed:
+  #
+  #     required_status_checks.checks =
+  #       [{"context": "pytest + ruff + mypy"},
+  #        {"context": "miniapp (typecheck + vitest)"},
+  #        {"context": "replay fixtures (golden + adversarial + voice)"},
+  #        {"context": "ticket reference (DRF-NNN or named NO-TICKET)"}]
+  #
+  # A check context IS the job name. Turning the old job into a matrix
+  # would have reported `pytest + ruff + mypy (1)`, `(2)`, ... — five new
+  # contexts and NOT the required one. The required check would then never
+  # arrive and every open PR would block on it forever. Editing the
+  # protection list is an owner-only action, so it is not a way out.
+  #
+  # The name therefore survives on a job that does no work: `test` below
+  # depends on the other three and republishes their verdict under the
+  # required name. If you split, rename or merge jobs here, the ONE
+  # invariant is that exactly one job is still called
+  # `pytest + ruff + mypy`.
+  # ---------------------------------------------------------------------
+
+  # ---------------------------------------------------------------------
+  # detect-secrets, lifted off the hot path.
+  #
+  # It used to be the first three steps of the single Python job, placed
+  # there deliberately so a leaked credential went red at ~4 min instead
+  # of ~35. That reasoning was right about the problem and is preserved
+  # verbatim below. What it cost was 3m37s in front of every green run.
+  #
+  # As its own job it gets both halves: a credential still goes red at
+  # ~4 min, and it no longer stands in front of anything. It is not
+  # weakened — `test` below cannot be green unless this job is.
+  # ---------------------------------------------------------------------
+  secret-scan:
+    name: secret scan (detect-secrets)
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    # 3m37s measured (above). 15 is ~4x: enough to absorb an apt/pip
+    # stall, small enough that a hang is cheap.
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # ------------------------------------------------------------------
+      # DRF-1275 — secret guard. Before this ticket `detect-secrets` was
+      # declared ONLY in .pre-commit-config.yaml (`rev: v1.5.0`), so it
+      # defended exactly one population: engineers who had actually run
+      # `uv run pre-commit install`. It defended nobody in a fresh
+      # worktree or clone, nothing committed through the GitHub web UI,
+      # and nothing committed with `--no-verify`. `.secrets.baseline` was
+      # maintained but never enforced by anything automatic.
+      #
+      # The blast radius is worse here than in the Ayla backend: the bot
+      # is deployed by hand (a bundle is copied onto the host), so a
+      # leaked credential first surfaces on a live machine rather than in
+      # a pipeline.
+      #
+      # WHY FIRST IN THE JOB: the same argument that keeps the "eventbus
+      # booking lifecycle tests" step below as its own fast-fail gate — a
+      # cheap gate must not sit behind "pytest apps/ (full suite)"
+      # (~30 min). Measured on ubuntu-latest: the three steps below add
+      # ~2 min to a green run (the scan itself is ~1m45s over ~1800
+      # tracked files), and turn a leaked-credential run red at ~2 min
+      # instead of ~25. That ~2 min is a real, recurring cost on every
+      # push — recorded here rather than buried, same as the
+      # CI-feedback-latency note on `timeout-minutes` above.
+      #
+      # Placing it above `uv sync` also means the guard still runs when
+      # the ayla-ai-core fetch is broken, which is precisely a moment
+      # when credentials are being moved around.
+      - name: Set up Python 3.12 (secret guard)
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install detect-secrets
+        # Pinned to the SAME version as `rev: v1.5.0` of the
+        # Yelp/detect-secrets hook in .pre-commit-config.yaml. Different
+        # releases ship different plugins and filters, so an unpinned CI
+        # would drift away from the local hook silently — the one failure
+        # mode a second copy of a guard must not have.
+        #
+        # No `# pragma: allowlist secret` is needed on the pin: verified
+        # against v1.5.0's own plugin set that `detect-secrets==1.5.0`
+        # under a `run:` key does not trip the Secret Keyword heuristic.
+        # (The Ayla backend needed one because its pin sits inside a
+        # `run: |` block scalar.) Do not add a pragma speculatively — it
+        # would blind this line to a real secret later.
+        run: pip install "detect-secrets==1.5.0"
+
+      - name: detect-secrets (baseline audit)
+        # `detect-secrets-hook` is the GATING entry point: it exits
+        # non-zero on any secret that is not already recorded in
+        # `.secrets.baseline`. (`detect-secrets scan --baseline` only
+        # rewrites the baseline file; it does not fail a build.)
+        #
+        # The baseline is deliberately NOT regenerated here. Regenerating
+        # it in CI would silently bless whatever had already leaked —
+        # that is how junk gets INTO a baseline, not how it gets fixed.
+        #
+        # EXCLUSIONS: the grep alternation below is a literal
+        # transcription of the `exclude:` block of the `detect-secrets`
+        # hook in .pre-commit-config.yaml — same branches, same `^(...)$`
+        # anchoring, verbose-mode whitespace removed. Keeping one list in
+        # two files is a known hazard, so the rule is: if you touch one,
+        # touch the other in the same commit. A hook and a pipeline that
+        # disagree about WHICH paths are exempt produce two truths (green
+        # locally / red in CI, or worse the reverse), which is a defect in
+        # its own right.
+        #
+        # The one intended difference is SCOPE, not rules: pre-commit
+        # sees staged files only, CI sees every tracked file — CI is the
+        # wider net over an identical exemption set.
+        run: |
+          git ls-files \
+            | grep -vE '^(\.secrets\.baseline|uv\.lock|.*\.lock|tests/fixtures/.*|apps/planning_rules/data/.*|legacy_maxbot/.*|legacy_formulatela_mcp/.*|legacy_notifications/.*)$' \
+            | xargs detect-secrets-hook --baseline .secrets.baseline
+
+  # ---------------------------------------------------------------------
+  # Everything that is not `pytest apps/`: lint, the AST guards, the
+  # cross-cutting suites, mypy — plus the collection census that guards
+  # the shard layout.
+  #
+  # Kept as ONE job rather than split further. End to end it is ~7 min,
+  # already under the ~8 min shards, so splitting it buys nothing on the
+  # critical path and pays another job's setup.
+  # ---------------------------------------------------------------------
+  checks:
+    name: lint + guards + cross-cutting tests + mypy
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    # Measured parts (above): 22s lint+guards, 4s smoke, 3m20s tests/, 2s
+    # contract, 1m05s eventbus, 37s mypy, ~36s setup = ~6.5 min, plus ~1
+    # min of census. 25 is ~3x that.
+    timeout-minutes: 25
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: ai_bot_platform
+          POSTGRES_USER: platform
+          POSTGRES_PASSWORD: platform
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U platform -d ai_bot_platform"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      DJANGO_SETTINGS_MODULE: config.settings.local
+      DJANGO_SECRET_KEY: ci-test-secret-do-not-use-in-prod
+      DJANGO_DEBUG: "False"
+      DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: ai_bot_platform
+      POSTGRES_USER: platform
+      POSTGRES_PASSWORD: platform
+      REDIS_URL: redis://localhost:6379/0
+      OPENAI_API_KEY: ci-fake-key-not-real
+      # DRF-2021. `admin_api.W002` («MAX_BOT_WEB_APP is not set») — предупреждение
+      # ВЕРНОЕ: без этой настройки бот не соберёт ни одной кнопки `open_app`, и
+      # Mini App не открыть. На пилоте настройка задана; в CI её нет и быть не
+      # должно — тут некуда открывать. Но печаталось оно в каждом зелёном прогоне,
+      # дважды: `manage.py check` и `makemigrations --check` (вторая команда тоже
+      # гоняет системные проверки). Строку `System check identified` читатели
+      # научились пропускать глазами — и следующее предупреждение той же формы,
+      # уже настоящее, прошло бы так же.
+      #
+      # Поэтому фиктивное значение здесь, а НЕ `SILENCED_SYSTEM_CHECKS`: тот снял
+      # бы проверку везде, включая staging и боевой контур, где она единственный
+      # сторож на деплое. `0 silenced` обязано остаться нулём.
+      #
+      # Только в этой задаче: pytest здесь не запускается, а тесты, читающие
+      # `settings.MAX_BOT_WEB_APP`, задают его сами. Значение нарочно не похоже
+      # на имя Mini App — оно только гасит проверку.
+      MAX_BOT_WEB_APP: ci-not-a-real-mini-app
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # postgresql-client (pg_dump / pg_restore) needed for
+      # apps/identity/tests/test_backup_restore.py — the test verifies
+      # ADR-0011 §11.1 invariant (tombstoned entries stay unreadable
+      # after restore). Without these binaries the test self-skips via
+      # `shutil.which('pg_dump') is None`, so the gate is defence-in-
+      # depth: install here so CI exercises the real backup cycle; the
+      # skipif keeps local dev (Windows, minimal Docker) from breaking.
+      - name: Install postgresql-client (for backup-restore test)
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.11.12"
+          enable-cache: true
+
+      - name: Set up Python 3.12
+        run: uv python install 3.12
+
+      # ayla-ai-core lives in a separate repo that is PUBLIC — owner's
+      # decision of 04.09.2026, recorded in OPEN_DECISIONS.md §22 (that
+      # register lives in the workspace root, outside this repo), and
+      # re-checked anonymously the same day (`"private": false`). An
+      # unauthenticated `git fetch` of the pinned SHA succeeds; measured
+      # 04.09.2026 against an empty git config, and visible independently
+      # in beautygo_backend Dependabot PRs #282-284, which installed
+      # ayla-ai-core with an EMPTY GH_DEPLOY_TOKEN and went green.
+      #
+      # So the token is OPTIONAL here, not required:
+      #   present  -> `insteadOf` rewrites `git+https://github.com/...` to
+      #               `https://x-access-token:<token>@...` at fetch time,
+      #               without the token ever entering the lockfile;
+      #   absent   -> a notice, and the fetch goes out anonymously.
+      #
+      # Support for the token is kept deliberately. The decision says
+      # public "for now" (пока); if the visibility is closed again this
+      # step starts authenticating with no further edit.
+      #
+      # What this step must NOT do is fail the run when the token is
+      # missing. It used to `exit 1` on a `::error::`, and that killed the
+      # Dependabot runs (#1360, #1362, #1363) at ~2 min on a prediction
+      # that was false: Dependabot has its own secret scope which does not
+      # carry GH_DEPLOY_TOKEN, and the fetch the guard predicted would
+      # fail would have succeeded anonymously. Do not restore the exit —
+      # the correct signal for an unreachable dep is `uv sync` failing on
+      # the real fetch, not a guess made before it (DRF-1466).
+      #
+      # K12 (DRF-570) pins `ayla-ai-core` to an exact SHA — `--frozen`
+      # makes any drift a hard CI failure (the lockfile must match).
+      - name: Configure git auth for the ayla-ai-core dep (token optional)
+        env:
+          GH_DEPLOY_TOKEN: ${{ secrets.GH_DEPLOY_TOKEN }}
+        run: |
+          if [ -n "$GH_DEPLOY_TOKEN" ]; then
+            git config --global url."https://x-access-token:${GH_DEPLOY_TOKEN}@github.com/".insteadOf "https://github.com/"
+            echo "GH_DEPLOY_TOKEN present — ayla-ai-core will be fetched with auth."
+          else
+            echo "::notice::GH_DEPLOY_TOKEN not set — fetching ayla-ai-core anonymously (the repo is public, DRF-1466). Expected on Dependabot runs."
+          fi
+
+      - name: uv sync (with ai-core extra)
+        run: uv sync --extra dev --extra ai-core --frozen
+
+      - name: ruff check
+        run: uv run ruff check .
+
+      - name: ruff format check
+        run: uv run ruff format --check .
+
+      # Red-zone direct-access guard — AST lint that blocks
+      # `MemoryEntry.objects.filter(sensitivity_zone='red')` and
+      # related patterns outside the sanctioned `RedZoneReader`
+      # accessor. First line of defence per ADR-0011 §10 (RLS policy
+      # is the final line). See `tools/lint/red_zone_guard.py`
+      # docstring for what is + is not detected.
+      - name: Red-zone guard (AST lint)
+        run: uv run python tools/lint/red_zone_guard.py apps/
+
+      # ADR-0009 G-series module-boundary guard — source-scoped
+      # forbidden-import-edge lint (#1001, Option B). Encodes G2.1
+      # (skills↛yclients), G5.1 (api↛booking mutators), G6.2
+      # (eventbus consumer↛skills/channels), G9 (BookingRequest read
+      # outside apps/booking/ — DRF-1109, dual-source-with-Ayla risk)
+      # + the cross-repo psycopg2 ban (rule 2). Replaces the
+      # never-created `.importlinter` baseline. See
+      # `tools/lint/import_boundaries.py` for the
+      # contracts, the on-`dev` baseline, and what is NOT detected.
+      - name: Import-boundary guard (AST lint)
+        run: uv run python tools/lint/import_boundaries.py apps/
+
+      # Consent-column direct-read guard (DRF-1314). `BotUser.consent_at`
+      # is a denormalised stamp that `consent.services.withdraw()`
+      # deliberately never clears, so it answers "ever consented", not
+      # "may we write to them". Reads outside the shared gate, the two
+      # stamping sites and the operator census are refused. See
+      # `tools/lint/consent_column_guard.py` for what is + is not
+      # detected — notably it cannot catch a surface with NO gate, which
+      # is what DRF-1301 and DRF-1307 actually were.
+      - name: Consent-column direct-read guard (AST lint)
+        run: uv run python tools/lint/consent_column_guard.py apps/
+
+      # Dead-column guard (DRF-1963, M1). `BotUser.food_scanner_consent_at`
+      # is no longer a consent record — the food diary / scanner consent is a
+      # `food_diary_processing` row of the consent registry. The column stays
+      # in the schema for one release; this guard keeps it without readers and
+      # writers (tests included) until the second half removes it. See
+      # `tools/lint/food_scanner_column_guard.py` for the allowlist and limits.
+      - name: Food-scanner dead-column guard (AST lint)
+        run: uv run python tools/lint/food_scanner_column_guard.py apps/
+
+      # Mini App style contract (DRF-1066). A class name written in a
+      # screen and never given a rule renders as nothing: on 2026-08-14
+      # that turned the booking payment block into
+      # «Оплатить на местеНаличными или картой в салоне» and nobody saw
+      # it until a person did. It cannot be caught by vitest -- that
+      # suite runs with `css: false`, so a stylesheet read inside a test
+      # comes back empty and every assertion over it passes vacuously.
+      # Runs in this job rather than the `miniapp` one because it is a
+      # text lint and needs no Node. Accepted debt is baselined in the
+      # script and can only shrink.
+      - name: Mini App style contract
+        run: uv run python tools/lint/miniapp_style_contract.py apps/miniapp
+
+      # Mini App palette contract (DRF-1462). The owner moved every surface
+      # onto the purple palette signed on the DRF-1181 board (§21-ter of
+      # docs/OPEN_DECISIONS.md). Two things drift silently and this guard
+      # refuses both: a colour written anywhere but tokens.css -- there were
+      # 95 such literals, most hidden as dead `var(--c-border, #e0e0e3)`
+      # fallbacks behind variables no stylesheet declared -- and a token pair
+      # that stops meeting WCAG AA. Same reason as the style contract above
+      # for living here: vitest runs with `css: false`, so even a `?raw`
+      # import of tokens.css comes back empty inside a test.
+      - name: Mini App palette contract
+        run: uv run python tools/lint/miniapp_token_contrast.py apps/miniapp
+
+      # Словарь состояний подтверждения расписания (DRF-1237 B1, §29.5).
+      # Состояния жили в двух экранах и разошлись молча: одно и то же
+      # называлось «Расписание не подтверждено» и «Расписание не
+      # подтверждено — салон его не заверял». Сведение чинит сегодняшний
+      # день, сторож — следующий: он роняет и вторую формулировку, и второй
+      # вывод состояния (чтение `is_current` мимо словаря), потому что
+      # одинаковые слова при разном выводе — то же расхождение, только
+      # незаметнее. Здесь, а не в vitest: обход исходников требует
+      # `node:fs`, а `@types/node` в mini-app нет.
+      - name: Mini App schedule-confirmation vocabulary
+        run: uv run python tools/lint/schedule_vocabulary_guard.py apps/miniapp
+
+      # Отказ сервера доезжает до экрана целиком (DRF-2373). `ApiError`
+      # умеет нести `details`, и клиенты его роняли — чинили ТРИЖДЫ
+      # поодиночке: `api.ts` (DRF-1708), `admin-api.ts` (DRF-2273),
+      # `master-api.ts` (DRF-2373). Один дефект, три листа, три года:
+      # каждый раз чинили место, а не правило. Дефект невидим по
+      # построению — уронивший клиент работает, экран просто не знает
+      # того, что сервер сказал, и ни типы, ни прогон этого не ловят.
+      # Сторож судит по РОЛИ вызова: третий аргумент вида `<x>.detail`
+      # значит разобранное тело отказа, и `<x>.details` обязателен;
+      # ошибка, придуманная на месте из литералов, освобождена самим
+      # правилом, а не именем в списке. Непочиненные места перечислены
+      # числом в `api_error_details_allow.txt` и только сокращаются.
+      - name: Mini App ApiError details contract
+        run: uv run python tools/lint/api_error_details_guard.py apps/miniapp
+
+      # Personal-field owner guard (DRF-1365). The memory audit of
+      # 2026-08-24 returned «C — multiple competing memory systems»: six
+      # stores holding facts about the same person, none of them designed
+      # as a memory, all of them grown one field at a time. This lint
+      # refuses the next one: every slot that is keyed to a person and
+      # read back to shape what Ayla says must declare its origin, its
+      # owner and whether it follows the person between salons — in
+      # `apps/identity/personal_fields.py`. The crossing claim is checked
+      # against the store's own tenancy, and the owner's ruling of
+      # 2026-08-24 («сказал сам — переходит; узнали о нём — нет») is
+      # enforced. Today's exceptions are named individually in
+      # POLICY_DEBT and can only shrink. See the script docstring for the
+      # criterion and for what it deliberately does NOT detect.
+      - name: Personal-field owner guard (AST lint)
+        run: uv run python tools/lint/personal_field_guard.py apps/
+
+      # Unguarded-absence guard (DRF-1411). DRF-1406: a PII sweep asserted
+      # `find_forbidden_pii(resp.json()) == []` over a route that had
+      # quietly started returning an empty body. The assertion went on
+      # passing and checked nothing, and never went red. This lint fails
+      # when a test asserts an absence inside content it never proved had
+      # anything in it. `assert resp.status_code == 200` does not count —
+      # an empty body is a perfectly good 200, and that mistaken guard IS
+      # the defect. Today's sites are pinned in the baseline and can only
+      # shrink. See the script docstring for what it deliberately does
+      # NOT detect: a green run is «nothing new», not «nothing wrong».
+      - name: Unguarded-absence assertion guard (AST lint)
+        run: uv run python tools/lint/negative_assert_guard.py apps/ tests/
+
+      # PII guard (DRF-1269). The measurement of 12.09.2026 found a phone
+      # number, an e-mail and six channel ids of real people on the head of
+      # `dev` — in documents, past detect-secrets, which only knows
+      # secrets. Whole-tree scan of every tracked file: phones outside test
+      # ranges, e-mails outside reserved/own domains, the known ids (by
+      # hash), unmasked `max:<digits>` in docs/, dump/log extensions.
+      # Positive proof lives in tests/tools/test_pii_guard.py. Allowlist
+      # with reasons: tools/lint/pii_guard_allow.txt — it only shrinks.
+      - name: PII guard (phones, e-mails, channel ids, dumps)
+        run: uv run python tools/lint/pii_guard.py --all
+
+      # Decision-reversal guard (DRF-1656). §120 велел удалить три поля,
+      # задача написана точно по нему; §144 отменил сужение — удаляется
+      # весь набор. Задача к тому моменту уже слита, и НИЧЕГО не
+      # покраснело: менялось решение, а не код, значит не было ни
+      # диффа, ни события, на которое CI реагирует. Сторож требует,
+      # чтобы секция реестра, отменяющая прежнее решение, называла
+      # затронутые пути — и чтобы эти пути существовали.
+      #
+      # Здесь он ловит ВТОРУЮ половину правила: путь, названный в
+      # отмене, удалён или переехал PR-ом с кодом. Первую половину
+      # (docs-only PR, который дописывает отмену) этот job не увидит
+      # никогда — у `ci.yml` стоит `paths-ignore: docs/**`. Её держит
+      # отдельный `open-decisions-guard.yml` без фильтров путей.
+      #
+      # Сторож проверяет НАЛИЧИЕ списка путей, а не его полноту:
+      # неполный список проходит зелёным. См. докстринг скрипта.
+      - name: Decision-reversal guard (docs/OPEN_DECISIONS.md)
+        run: uv run python tools/lint/decision_reversal_guard.py
+
+      # Ориентира питания нет ни у кого до утверждения методики (§82,
+      # §85): плоские 2000 ккал и формула воды 30 мл × вес сняты
+      # владельцем 09.09.2026. Место без ориентира читается как
+      # недоделка, и «разумное умолчание» туда уже возвращали ДВАЖДЫ —
+      # восьмёрку стаканов сначала выкинули из клиента, а она приехала
+      # по проводу с бэкенда. Сторож ловит форму возврата (число в
+      # поле-ориентире), а не конкретное значение. Чего он не ловит —
+      # переименование поля и TypeScript-стабы — сказано в его
+      # докстринге; там же названы файлы, которым подстановка разрешена.
+      - name: Nutrition-target substitution guard (AST lint)
+        run: uv run python tools/lint/nutrition_target_guard.py apps/
+
+      # Owner decision 11.09 §3: «payload.get("safety") or NOT_APPLICABLE»
+      # is forbidden and AST-guarded. The guard catches the CLASS — an
+      # `or` / `.get(default)` / `getattr(default)` / `x if x else` that
+      # supplies a SafetyState where a verdict was absent — not one
+      # spelling. UNKNOWN / not_evaluated() are the honest defaults and
+      # pass. What it cannot see (two-line defaults, renamed keys) is
+      # named in its docstring; the consumer's __post_init__ is the
+      # second line.
+      - name: Safety-default substitution guard (AST lint)
+        run: uv run python tools/lint/safety_default_guard.py apps/ tests/
+
+      - name: Django manage.py check
+        run: uv run python manage.py check
+
+      # Fail the build if a model change has no matching migration.
+      # Prevents the kind of drift (#1030) that accumulates silently
+      # because the suite doesn't otherwise exercise `makemigrations`.
+      - name: Migration drift guard (makemigrations --check)
+        run: uv run python manage.py makemigrations --check --dry-run
+
+      - name: pytest tests/smoke/
+        run: uv run pytest tests/smoke/ -v
+
+      # ---------------------------------------------------------------
+      # DRF-1253 — the rest of `tests/`.
+      #
+      # `pyproject.toml` declares `testpaths = ["tests", "apps"]`, but CI
+      # only ever ran `tests/smoke/` (6 files). The other 26 test files
+      # under `tests/` — 487 tests — never executed anywhere except on
+      # whoever remembered to run them locally. `mypy apps config tests`
+      # below type-checked them, which is exactly the trap: they looked
+      # covered and defended nothing.
+      #
+      # Measured 22.08 (DRF-1253) against Postgres 16 (NOT SQLite — see
+      # cause (a) below for why that distinction is the whole story): 440
+      # passed, 9 skipped, 38 deselected — 34 of those re-enabled 28.09
+      # (DRF-2588), so these counts are history, not today's run. Four runs before merge — three locally
+      # on Windows (~2.5 min each) and one on this runner (57.77s) —
+      # all with identical counts. 21 of the 26 files are green as-is.
+      #
+      # The 9 skips are by design, not gaps:
+      #   - tests/e2e/test_ayla_integration.py (8) self-skips without
+      #     AYLA_BASE_URL + a credential; its own docstring says
+      #     "CI default = skip".
+      #   - tests/e2e/test_replay_diff_vs_mysite.py (1) skips until the
+      #     mysite ground-truth fixture is present.
+      # Both print a skip reason, so a regression into "skipped" shows
+      # in the log rather than passing as green.
+      #
+      # `--ignore=tests/smoke` leaves the fast smoke gate above as its
+      # own step instead of running those 6 files twice.
+      #
+      # No `-q` here on purpose. `addopts` in pyproject.toml is already
+      # `-q -m "not smoke"`; a second `-q` makes it `-qq`, which
+      # suppresses the final `N passed` line — a failure then reads like
+      # a success. (The `pytest apps/ -q` step below has exactly that
+      # problem today. Out of scope for this ticket, worth its own.)
+      #
+      # ─── Deselected: 3 tests, 2 root causes, none introduced here ───
+      # Every one reproduced on Postgres and filed separately. Deselects
+      # are node-ID-scoped, not file-scoped, so the passing tests that
+      # live *inside* those files still run. Since DRF-2588 the
+      # cross-tenant leakage scanner has NO deselects — keep it that way:
+      # it guards a security invariant, and a deselected case there was
+      # a leak check nobody ran for five weeks.
+      #
+      # (a) REMOVED (DRF-2588, 28.09): 34 x TestEveryScopedModel in
+      #     tests/integration/test_cross_tenant_leakage.py were deselected
+      #     here from 22.08 — 12 models (Message, ConsentRecord,
+      #     PaymentMirror, RemoteBookingProxy, BookingReminder, …) had no
+      #     cross-tenant leak check in CI for five weeks. Cause was the
+      #     generic `_create_row` factory: it appended "-{suffix}" to
+      #     every static string and overflowed varchar(16) on Postgres
+      #     (31 x StringDataRightTruncation), and StaffInvite had no
+      #     factory row at all (3 x NotNullViolation on expires_at). The
+      #     suffix now goes only to fields in a uniqueness rule, fitted to
+      #     max_length. Re-enabled only after a substitution showed every
+      #     one of the 34 goes red ON THE ASSERTION under a simulated
+      #     leak, not in setup — a re-enabled case that cannot fail would
+      #     be worse than a visibly disabled one.
+      # (b) 2 x tests/e2e/ (test_max_echo, test_handoff_skill) — both
+      #     assert the bot echoes the user's text back verbatim; DRF-963
+      #     replaced verbatim echo with the "Я пока не понял" fallback.
+      #     This is DRF-1217. For whoever picks that up: it is 2 tests
+      #     in 2 files, not the 4 the ticket assumes, and in
+      #     test_handoff_skill.py only the last line (197) fails — the
+      #     handoff flow it is named for passes.
+      # (c) 1 x tests/e2e/test_privacy_skill.py — asserts that a chat
+      #     "удали мои данные" hard-deletes the BotUser. DRF-956 / T-05
+      #     deliberately turned that into a redirect to the Mini App
+      #     confirmed flow ("Сейчас я ничего не удалила"), because chat
+      #     cannot express a confirmation step and Pilot was not the
+      #     place to invent one. The test asserts the behaviour that
+      #     ticket removed on purpose. Test-side fix.
+      # (d) RESOLVED 28.09 (DRF-2588) — re-enabled: passes on Postgres 16
+      #     against dev d4ccc25a. Was: 1 x
+      #     tests/contracts/test_event_idempotency.py — its autouse
+      #     fixture sets EVENT_INGEST_TENANT_VERIFY_FAIL_OPEN but never
+      #     EVENT_INGEST_ALLOWED_TENANTS / _ALLOWED_EVENTS, so
+      #     booking.created is denied with
+      #     `reason=relationship_unavailable` and the two reminders are
+      #     never written. Every sibling suite under apps/ that
+      #     dispatches envelopes does set the allowlist in its fixture
+      #     (apps/eventbus/tests/test_booking_consumer.py:137 and five
+      #     others). One-line fixture fix.
+      #
+      # The node IDs are single-quoted (and any future apps/ deselect
+      # should be too): a parametrized ID ends in `[...]`, and an unquoted
+      # `[...]` is a bash glob character class. It happens to survive
+      # today only because nothing matches and nullglob/failglob are
+      # off — which is a property of the shell, not of this file.
+      #
+      # Do NOT add deselects here to silence a new failure — a new red
+      # test means something you touched broke. The list is pinned to
+      # specific node IDs, so renaming any of these tests must also
+      # touch this file.
+      # ---------------------------------------------------------------
+      - name: pytest tests/ (cross-cutting suite, minus smoke)
+        run: |
+          uv run pytest tests/ --ignore=tests/smoke \
+            --deselect 'tests/e2e/test_handoff_skill.py::test_handoff_flow_creates_task_silences_followup_resumes_on_resolve' \
+            --deselect 'tests/e2e/test_max_echo.py::test_max_webhook_to_echo_happy_path' \
+            --deselect 'tests/e2e/test_privacy_skill.py::test_delete_data_triggers_privacy_skill_and_wipes_user'
+
+      # Static Ayla client↔route-table contract (S0-C / G-Contract). Pure,
+      # network-free: exercises every bot Ayla client through its real code and
+      # asserts (method, path, auth header + secret, required non-auth headers)
+      # matches Ayla's internal route-table. Gates every push so a client
+      # method/path/auth-secret drift can't merge silently. It checks
+      # client↔table consistency, NOT table↔Ayla correctness — the latter is the
+      # nightly staging round-trip (#1079).
+      - name: Ayla client contract (route-table)
+        run: uv run pytest apps/integrations/ayla/tests/test_contract_route_table.py -v
+
+      # T-02 / Wave 1 eventbus correctness gate. PR-T02-2 changed booking
+      # lifecycle semantics (status normalization, reminder eligibility,
+      # missing-proxy fail-loud). These tests were not exercised in CI and a
+      # regression (strict normalizer rejecting `pending`) reached `dev`.
+      # Kept as its own fast-fail step even now that "pytest apps/ (full
+      # suite)" below covers it too (DRF-1121) — this gate fails in
+      # seconds, the full suite takes ~30 min, and eventbus correctness
+      # is exactly the kind of regression worth not waiting on.
+      - name: eventbus booking lifecycle tests
+        run: uv run pytest apps/eventbus/tests/ -q
+
+      # mypy is blocking. `strict=False` keeps the bar reasonable while
+      # apps/ are mostly empty AppConfigs; tighten to strict per-package
+      # as real code lands. New untyped imports must add stubs or
+      # `# type: ignore[<code>]` rather than slip through.
+      - name: mypy
+        run: uv run mypy apps config tests
+
+      # ------------------------------------------------------------------
+      # DRF-1349 — the collection census, and what it guards against.
+      #
+      # `pytest apps/` is five jobs now, each collecting a different slice.
+      # The failure mode that shape introduces is silent AND green: a slice
+      # whose path filter matches nothing collects zero tests, runs zero
+      # tests, exits zero, and reports success. Five of those would publish
+      # a fully green `pytest + ruff + mypy` over a suite that never ran.
+      #
+      # Each shard already refuses `tests == 0` on its own junit, but that
+      # only catches a shard that lost ALL of its tests. It does not catch
+      # a shard that lost half of them, and it does not catch a path that
+      # fell out of every shard's selector at once.
+      #
+      # So: collect the WHOLE of apps/ once, here, with the same selection
+      # the shards use, and write the number down. `test` below sums
+      # the five shard junits and refuses to be green unless the sum equals
+      # this number. Recomputed every run, so unlike a hard-coded expected
+      # count it cannot go stale and start lying.
+      #
+      # `--collect-only` needs no database and no services: ~1 min of
+      # imports, on a job that is not the critical path.
+      #
+      # Since DRF-2588 (28.09) there is NO apps/ deselect: the last 26
+      # passed on Postgres against dev and were re-enabled. If one ever has
+      # to be added, it goes into BOTH this step and the shard job in the
+      # same commit — two copies is a known hazard, the rule is the one
+      # the detect-secrets exclusions already carry. They are checked
+      # against each other on every run by construction: a deselect
+      # present here and missing there makes the shard sum exceed the
+      # census, and `test` goes red naming both numbers. And it needs a
+      # Linear leaf next to it — 23 of the last 26 had none ("Candidate
+      # for Linear, not fixed here") and outlived their cause by weeks.
+      # ------------------------------------------------------------------
+      - name: apps/ collection census (sentinel for the shard layout)
+        run: |
+          set -o pipefail
+          # NO `-q` HERE, DELIBERATELY. Quiet level is CUMULATIVE, and
+          # `pyproject.toml` addopts already carries `-q` (since the Sprint 0
+          # scaffold, b1e8e7bd). This step used to add a second one; the two
+          # made `-qq`, which prints per-file counts and NO total line, and the
+          # census died with `CENSUS UNREADABLE` in run 34557386291.
+          #
+          # Quiet level 1 is required, not merely tidier: at quiet 2 a
+          # collection of NOTHING prints nothing and exits 0, so `CENSUS EMPTY`
+          # and `CENSUS UNREADABLE` stop being distinguishable — and an empty
+          # census is the exact silent-green failure this sentinel exists to
+          # catch. Do not add `-q` back.
+          uv run pytest apps/ --collect-only \
+            > census-raw.txt 2>&1 || { tail -30 census-raw.txt; echo "CENSUS FAILED — apps/ did not collect."; exit 1; }
+          tail -3 census-raw.txt
+          # Parser lives in .github/scripts/census_count.py so it can be tested:
+          # tests/tools/test_census_parser.py feeds it real captured pytest
+          # output for BOTH quiet levels, plus garbage, and asserts the two
+          # levels agree on the same collection.
+          python3 .github/scripts/census_count.py census-raw.txt apps-census.txt
+
+      # DRF-2633 — test ids must be the same in every process. xdist collects
+      # the suite in EVERY worker and requires the sets to match; a volatile
+      # id (a uuid4 in parametrize, a memory address in an id) makes a shard
+      # die at collection far from its cause, while one local process is
+      # green. Three checks, each closing a hole the others leave — see the
+      # module docstring of tools/lint/stable_test_ids.py (double collection
+      # with two PYTHONHASHSEEDs, the address pattern, tuple-minded `ids`).
+      # Calibrated on both known cases in tests/tools/test_stable_test_ids.py.
+      - name: stable test ids (DRF-2633)
+        run: uv run python tools/lint/stable_test_ids.py apps tests
+
+      - name: Upload apps/ collection census
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: apps-census-${{ github.sha }}
+          path: apps-census.txt
+          retention-days: 14
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------
+  # DRF-1349 — `pytest apps/`, split five ways BY MEASURED TIME.
+  #
+  # WHERE THE SPLIT COMES FROM. Not from counting files — from the junit
+  # artefact of the run quoted at the top of this file (artifact
+  # junit-apps-e0640f3..., 13177 testcases, each with its own `time`,
+  # recorded under the same `-n 4 --dist load` these shards use). Summed
+  # per directory that is 4962.6s of test time, and it is not remotely
+  # uniform: `apps/skills/` alone is 30.1% of it, and ONE FILE,
+  # apps/skills/booking/tests/test_lookup_routing.py, is 23.3% (872 tests,
+  # 1153.8s). An even split by file count would have put that file in a
+  # bin with other work and left that shard running twice as long as the
+  # rest, which is the whole cost of the exercise.
+  #
+  #   shard  selector                                tests  test-time  share
+  #   -----  --------------------------------------  -----  ---------  -----
+  #     1    skills/booking/tests/test_lookup_routing   872    1153.8s  23.3%
+  #     2    orchestrator + channels                   2880    1010.5s  20.4%
+  #     3    identity + replay                         1380    1028.8s  20.7%
+  #     4    consent + skills(-shard 1) + admin_api    2051     991.1s  20.0%
+  #     5    everything else in apps/                  5994     778.3s  15.7%
+  #   -----  --------------------------------------  -----  ---------  -----
+  #                                                  13177    4962.6s
+  #
+  # 13177 in, 13177 out, verified by replaying the selectors below against
+  # that junit file: every testcase matched exactly one shard — 0 matched
+  # none, 0 matched more than one.
+  #
+  # Shard 1 is a single file because a single file is 23% of the suite.
+  # It is also the floor on how fast this can get: no directory-level
+  # split can make that shard shorter, so five shards — not six, not ten —
+  # is where the returns stop.
+  #
+  # ESTIMATED WALL TIME, and the model, so it can be checked rather than
+  # believed: an LPT (longest-processing-time) schedule of the real
+  # per-test times onto 4 xdist workers gives a makespan of 1241s for the
+  # whole suite, against the 1748s the step actually took — so the junit
+  # times account for 71% of the step and the remaining 29% (per-test
+  # setup/teardown, test-database creation, collection) is carried as a
+  # x1.409 calibration. Applying the same schedule per shard and adding
+  # ~60s of job setup:
+  #
+  #   shard 1  466s (7.8 min)   shard 2  416s (6.9 min)
+  #   shard 3  422s (7.0 min)   shard 4  409s (6.8 min)
+  #   shard 5  334s (5.6 min)
+  #
+  # That model is calibrated on one run and prorates a fixed cost, so it
+  # flatters the small shards; treat ~8 min as the number to check the
+  # first real run against, not as a promise.
+  #
+  # HOW THE SELECTORS ARE BUILT, and why shard 5 is written as a
+  # subtraction. Shards 1-4 name paths explicitly. Shard 5 is `apps/`
+  # MINUS exactly those paths — so a newly added `apps/<something>/` lands
+  # in shard 5 automatically and is TESTED, instead of falling through the
+  # gaps of five explicit lists and being silently skipped forever. If you
+  # move a directory between shards, it must leave one selector and enter
+  # the other in the same edit; the census in `checks` above will catch
+  # you if it does not.
+  #
+  # IF A DESELECT LIST EVER RETURNS (none today, DRF-2588), EVERY SHARD
+  # GETS THE WHOLE OF IT. `--deselect` in pytest is
+  # prefix matching over already-collected items (`_pytest/main.py`,
+  # `pytest_collection_modifyitems`): an id that matches nothing in this
+  # shard is a silent no-op, not an error. So the list is not partitioned
+  # along with the tests — it is passed intact to all five, which is the
+  # only version of this that cannot lose an entry.
+  #
+  # Each shard is its own job, so each gets its own `services:` — its own
+  # Postgres container, on its own localhost. No two shards share a
+  # database, and pytest-django's `_gwN` suffix keeps the 4 workers inside
+  # a shard apart, exactly as before.
+  # ---------------------------------------------------------------------
+  apps-shard:
+    name: apps shard ${{ matrix.shard.id }}
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    # ~8 min estimated (above), against ~29 min for the unsharded step.
+    # 30 is ~3.7x the estimate.
+    #
+    # The ceiling this replaces was 60 min, and the block reproduced
+    # verbatim below is how that number was arrived at. It is KEPT, not
+    # deleted, for two reasons: it is the measurement history of this
+    # suite, and its central lesson — that a confident sentence about
+    # timing goes stale silently while the thing it describes changes
+    # underneath — applies to every number in this file including the
+    # ones added today.
+    #
+    # What is NOT inherited is the 60 itself. It was fitted to a single
+    # 44-minute job that no longer exists; a shard is a different
+    # distribution and 60 would be six times its median. Re-measure from
+    # the jobs API once these shards have real history, and keep the
+    # falsification rule the old block set: IF ANY SHARD IS CANCELLED AT
+    # THIS 30-MIN CEILING WITHIN THE NEXT 20 RUNS, THIS NUMBER IS WRONG —
+    # refit it from fresh data rather than nudging it upward.
+    #
+    # ---- HISTORY, verbatim from the single-job era (DRF-1121 ->
+    # ---- DRF-1381). Describes the `test` job as it was: one job, one
+    # ---- `pytest apps/` step, no shards.
     # DRF-1121 bumped this from 15 to 45: the new "pytest apps/ (full
     # suite)" step alone measured ~30 min against Postgres locally
     # (7246 tests). Flagged for tech-lead confirmation in
@@ -173,7 +1066,38 @@ jobs:
     #
     # That would mean the fit above understated the tail. Recompute it
     # from fresh jobs-API data — do not simply nudge the ceiling upward.
-    timeout-minutes: 60
+    # ---- end of inherited history ----
+    timeout-minutes: 30
+
+    strategy:
+      # A red shard must not cancel its siblings. With fail-fast the run
+      # would report one failure and four `cancelled`, and a second failure
+      # elsewhere in apps/ would be invisible until the next push.
+      fail-fast: false
+      matrix:
+        shard:
+          - id: "1"
+            args: "apps/skills/booking/tests/test_lookup_routing.py"
+          # DRF-2205 — `apps/channels` переехал из шарда 2 в шард 5 по
+          # замеру, а не по названию папок. Сумма времени тестов по junit
+          # зонда #1941 (до деления на четыре воркера): 1:1323 2:1650
+          # 3:1073 4:1297 5:1061 с. Шард 2 был самым тяжёлым — не из-за
+          # виновного теста, а объёмом (2055 тестов apps.orchestrator.tests
+          # + ~271 с apps/channels), — и потому под замедлением раннера
+          # первым переходил потолок. После переезда: 2:~1378 5:~1332,
+          # максимум −16%.
+          #
+          # Чего это НЕ лечит: троекратных замедлений самого раннера. Оно
+          # лишь перестаёт делать всегда один и тот же шард первым
+          # кандидатом на отмену. Перемерять — снова по junit, не на глаз.
+          - id: "2"
+            args: "apps/orchestrator"
+          - id: "3"
+            args: "apps/identity apps/replay"
+          - id: "4"
+            args: "apps/consent apps/skills apps/admin_api --ignore=apps/skills/booking/tests/test_lookup_routing.py"
+          - id: "5"
+            args: "apps/ --ignore=apps/skills --ignore=apps/orchestrator --ignore=apps/identity --ignore=apps/consent --ignore=apps/replay --ignore=apps/admin_api"
 
     services:
       postgres:
@@ -213,82 +1137,7 @@ jobs:
       OPENAI_API_KEY: ci-fake-key-not-real
 
     steps:
-      - uses: actions/checkout@v4
-
-      # ------------------------------------------------------------------
-      # DRF-1275 — secret guard. Before this ticket `detect-secrets` was
-      # declared ONLY in .pre-commit-config.yaml (`rev: v1.5.0`), so it
-      # defended exactly one population: engineers who had actually run
-      # `uv run pre-commit install`. It defended nobody in a fresh
-      # worktree or clone, nothing committed through the GitHub web UI,
-      # and nothing committed with `--no-verify`. `.secrets.baseline` was
-      # maintained but never enforced by anything automatic.
-      #
-      # The blast radius is worse here than in the Ayla backend: the bot
-      # is deployed by hand (a bundle is copied onto the host), so a
-      # leaked credential first surfaces on a live machine rather than in
-      # a pipeline.
-      #
-      # WHY FIRST IN THE JOB: the same argument that keeps the "eventbus
-      # booking lifecycle tests" step below as its own fast-fail gate — a
-      # cheap gate must not sit behind "pytest apps/ (full suite)"
-      # (~30 min). Measured on ubuntu-latest: the three steps below add
-      # ~2 min to a green run (the scan itself is ~1m45s over ~1800
-      # tracked files), and turn a leaked-credential run red at ~2 min
-      # instead of ~25. That ~2 min is a real, recurring cost on every
-      # push — recorded here rather than buried, same as the
-      # CI-feedback-latency note on `timeout-minutes` above.
-      #
-      # Placing it above `uv sync` also means the guard still runs when
-      # the private-dep fetch (GH_DEPLOY_TOKEN) is broken, which is
-      # precisely a moment when credentials are being moved around.
-      - name: Set up Python 3.12 (secret guard)
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install detect-secrets
-        # Pinned to the SAME version as `rev: v1.5.0` of the
-        # Yelp/detect-secrets hook in .pre-commit-config.yaml. Different
-        # releases ship different plugins and filters, so an unpinned CI
-        # would drift away from the local hook silently — the one failure
-        # mode a second copy of a guard must not have.
-        #
-        # No `# pragma: allowlist secret` is needed on the pin: verified
-        # against v1.5.0's own plugin set that `detect-secrets==1.5.0`
-        # under a `run:` key does not trip the Secret Keyword heuristic.
-        # (The Ayla backend needed one because its pin sits inside a
-        # `run: |` block scalar.) Do not add a pragma speculatively — it
-        # would blind this line to a real secret later.
-        run: pip install "detect-secrets==1.5.0"
-
-      - name: detect-secrets (baseline audit)
-        # `detect-secrets-hook` is the GATING entry point: it exits
-        # non-zero on any secret that is not already recorded in
-        # `.secrets.baseline`. (`detect-secrets scan --baseline` only
-        # rewrites the baseline file; it does not fail a build.)
-        #
-        # The baseline is deliberately NOT regenerated here. Regenerating
-        # it in CI would silently bless whatever had already leaked —
-        # that is how junk gets INTO a baseline, not how it gets fixed.
-        #
-        # EXCLUSIONS: the grep alternation below is a literal
-        # transcription of the `exclude:` block of the `detect-secrets`
-        # hook in .pre-commit-config.yaml — same branches, same `^(...)$`
-        # anchoring, verbose-mode whitespace removed. Keeping one list in
-        # two files is a known hazard, so the rule is: if you touch one,
-        # touch the other in the same commit. A hook and a pipeline that
-        # disagree about WHICH paths are exempt produce two truths (green
-        # locally / red in CI, or worse the reverse), which is a defect in
-        # its own right.
-        #
-        # The one intended difference is SCOPE, not rules: pre-commit
-        # sees staged files only, CI sees every tracked file — CI is the
-        # wider net over an identical exemption set.
-        run: |
-          git ls-files \
-            | grep -vE '^(\.secrets\.baseline|uv\.lock|.*\.lock|tests/fixtures/.*|legacy_maxbot/.*|legacy_formulatela_mcp/.*|legacy_notifications/.*)$' \
-            | xargs detect-secrets-hook --baseline .secrets.baseline
+      - uses: actions/checkout@v7
 
       # postgresql-client (pg_dump / pg_restore) needed for
       # apps/identity/tests/test_backup_restore.py — the test verifies
@@ -301,7 +1150,7 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y postgresql-client
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v3
+        uses: astral-sh/setup-uv@v7
         with:
           version: "0.11.12"
           enable-cache: true
@@ -309,281 +1158,71 @@ jobs:
       - name: Set up Python 3.12
         run: uv python install 3.12
 
-      # ayla-ai-core lives in a separate private repo. CI auths via the
-      # GH_DEPLOY_TOKEN secret (read-only PAT scoped to that repo). The
-      # `insteadOf` rewrite makes `git+https://github.com/.../ayla-ai-core`
-      # in pyproject.toml resolve to `https://x-access-token:<token>@...`
-      # at fetch time without leaking the token into the lockfile.
+      # ayla-ai-core lives in a separate repo that is PUBLIC — owner's
+      # decision of 04.09.2026, recorded in OPEN_DECISIONS.md §22 (that
+      # register lives in the workspace root, outside this repo), and
+      # re-checked anonymously the same day (`"private": false`). An
+      # unauthenticated `git fetch` of the pinned SHA succeeds; measured
+      # 04.09.2026 against an empty git config, and visible independently
+      # in beautygo_backend Dependabot PRs #282-284, which installed
+      # ayla-ai-core with an EMPTY GH_DEPLOY_TOKEN and went green.
       #
-      # K12 (DRF-570) pins `ayla-ai-core==v0.6.0` exactly — `--frozen`
+      # So the token is OPTIONAL here, not required:
+      #   present  -> `insteadOf` rewrites `git+https://github.com/...` to
+      #               `https://x-access-token:<token>@...` at fetch time,
+      #               without the token ever entering the lockfile;
+      #   absent   -> a notice, and the fetch goes out anonymously.
+      #
+      # Support for the token is kept deliberately. The decision says
+      # public "for now" (пока); if the visibility is closed again this
+      # step starts authenticating with no further edit.
+      #
+      # What this step must NOT do is fail the run when the token is
+      # missing. It used to `exit 1` on a `::error::`, and that killed the
+      # Dependabot runs (#1360, #1362, #1363) at ~2 min on a prediction
+      # that was false: Dependabot has its own secret scope which does not
+      # carry GH_DEPLOY_TOKEN, and the fetch the guard predicted would
+      # fail would have succeeded anonymously. Do not restore the exit —
+      # the correct signal for an unreachable dep is `uv sync` failing on
+      # the real fetch, not a guess made before it (DRF-1466).
+      #
+      # K12 (DRF-570) pins `ayla-ai-core` to an exact SHA — `--frozen`
       # makes any drift a hard CI failure (the lockfile must match).
-      - name: Configure git auth for private deps
+      - name: Configure git auth for the ayla-ai-core dep (token optional)
         env:
           GH_DEPLOY_TOKEN: ${{ secrets.GH_DEPLOY_TOKEN }}
         run: |
           if [ -n "$GH_DEPLOY_TOKEN" ]; then
             git config --global url."https://x-access-token:${GH_DEPLOY_TOKEN}@github.com/".insteadOf "https://github.com/"
+            echo "GH_DEPLOY_TOKEN present — ayla-ai-core will be fetched with auth."
           else
-            echo "::error::GH_DEPLOY_TOKEN secret missing — ayla-ai-core fetch will fail. Set the secret in repo settings."
-            exit 1
+            echo "::notice::GH_DEPLOY_TOKEN not set — fetching ayla-ai-core anonymously (the repo is public, DRF-1466). Expected on Dependabot runs."
           fi
 
       - name: uv sync (with ai-core extra)
         run: uv sync --extra dev --extra ai-core --frozen
 
-      - name: ruff check
-        run: uv run ruff check .
-
-      - name: ruff format check
-        run: uv run ruff format --check .
-
-      # Red-zone direct-access guard — AST lint that blocks
-      # `MemoryEntry.objects.filter(sensitivity_zone='red')` and
-      # related patterns outside the sanctioned `RedZoneReader`
-      # accessor. First line of defence per ADR-0011 §10 (RLS policy
-      # is the final line). See `tools/lint/red_zone_guard.py`
-      # docstring for what is + is not detected.
-      - name: Red-zone guard (AST lint)
-        run: uv run python tools/lint/red_zone_guard.py apps/
-
-      # ADR-0009 G-series module-boundary guard — source-scoped
-      # forbidden-import-edge lint (#1001, Option B). Encodes G2.1
-      # (skills↛yclients), G5.1 (api↛booking mutators), G6.2
-      # (eventbus consumer↛skills/channels), G9 (BookingRequest read
-      # outside apps/booking/ — DRF-1109, dual-source-with-Ayla risk)
-      # + the cross-repo psycopg2 ban (rule 2). Replaces the
-      # never-created `.importlinter` baseline. See
-      # `tools/lint/import_boundaries.py` for the
-      # contracts, the on-`dev` baseline, and what is NOT detected.
-      - name: Import-boundary guard (AST lint)
-        run: uv run python tools/lint/import_boundaries.py apps/
-
-      # Consent-column direct-read guard (DRF-1314). `BotUser.consent_at`
-      # is a denormalised stamp that `consent.services.withdraw()`
-      # deliberately never clears, so it answers "ever consented", not
-      # "may we write to them". Reads outside the shared gate, the two
-      # stamping sites and the operator census are refused. See
-      # `tools/lint/consent_column_guard.py` for what is + is not
-      # detected — notably it cannot catch a surface with NO gate, which
-      # is what DRF-1301 and DRF-1307 actually were.
-      - name: Consent-column direct-read guard (AST lint)
-        run: uv run python tools/lint/consent_column_guard.py apps/
-
-      # Mini App style contract (DRF-1066). A class name written in a
-      # screen and never given a rule renders as nothing: on 2026-08-14
-      # that turned the booking payment block into
-      # «Оплатить на местеНаличными или картой в салоне» and nobody saw
-      # it until a person did. It cannot be caught by vitest -- that
-      # suite runs with `css: false`, so a stylesheet read inside a test
-      # comes back empty and every assertion over it passes vacuously.
-      # Runs in this job rather than the `miniapp` one because it is a
-      # text lint and needs no Node. Accepted debt is baselined in the
-      # script and can only shrink.
-      - name: Mini App style contract
-        run: uv run python tools/lint/miniapp_style_contract.py apps/miniapp
-
-      # Personal-field owner guard (DRF-1365). The memory audit of
-      # 2026-08-24 returned «C — multiple competing memory systems»: six
-      # stores holding facts about the same person, none of them designed
-      # as a memory, all of them grown one field at a time. This lint
-      # refuses the next one: every slot that is keyed to a person and
-      # read back to shape what Ayla says must declare its origin, its
-      # owner and whether it follows the person between salons — in
-      # `apps/identity/personal_fields.py`. The crossing claim is checked
-      # against the store's own tenancy, and the owner's ruling of
-      # 2026-08-24 («сказал сам — переходит; узнали о нём — нет») is
-      # enforced. Today's exceptions are named individually in
-      # POLICY_DEBT and can only shrink. See the script docstring for the
-      # criterion and for what it deliberately does NOT detect.
-      - name: Personal-field owner guard (AST lint)
-        run: uv run python tools/lint/personal_field_guard.py apps/
-
-      # Unguarded-absence guard (DRF-1411). DRF-1406: a PII sweep asserted
-      # `find_forbidden_pii(resp.json()) == []` over a route that had
-      # quietly started returning an empty body. The assertion went on
-      # passing and checked nothing, and never went red. This lint fails
-      # when a test asserts an absence inside content it never proved had
-      # anything in it. `assert resp.status_code == 200` does not count —
-      # an empty body is a perfectly good 200, and that mistaken guard IS
-      # the defect. Today's sites are pinned in the baseline and can only
-      # shrink. See the script docstring for what it deliberately does
-      # NOT detect: a green run is «nothing new», not «nothing wrong».
-      - name: Unguarded-absence assertion guard (AST lint)
-        run: uv run python tools/lint/negative_assert_guard.py apps/ tests/
-
-      - name: Django manage.py check
-        run: uv run python manage.py check
-
-      # Fail the build if a model change has no matching migration.
-      # Prevents the kind of drift (#1030) that accumulates silently
-      # because the suite doesn't otherwise exercise `makemigrations`.
-      - name: Migration drift guard (makemigrations --check)
-        run: uv run python manage.py makemigrations --check --dry-run
-
-      - name: pytest tests/smoke/
-        run: uv run pytest tests/smoke/ -v
-
-      # ---------------------------------------------------------------
-      # DRF-1253 — the rest of `tests/`.
-      #
-      # `pyproject.toml` declares `testpaths = ["tests", "apps"]`, but CI
-      # only ever ran `tests/smoke/` (6 files). The other 26 test files
-      # under `tests/` — 487 tests — never executed anywhere except on
-      # whoever remembered to run them locally. `mypy apps config tests`
-      # below type-checked them, which is exactly the trap: they looked
-      # covered and defended nothing.
-      #
-      # Measured against Postgres 16 (NOT SQLite — see cause (a) below
-      # for why that distinction is the whole story): 440 passed, 9
-      # skipped, 38 deselected. Four runs before merge — three locally
-      # on Windows (~2.5 min each) and one on this runner (57.77s) —
-      # all with identical counts. 21 of the 26 files are green as-is.
-      #
-      # The 9 skips are by design, not gaps:
-      #   - tests/e2e/test_ayla_integration.py (8) self-skips without
-      #     AYLA_BASE_URL + a credential; its own docstring says
-      #     "CI default = skip".
-      #   - tests/e2e/test_replay_diff_vs_mysite.py (1) skips until the
-      #     mysite ground-truth fixture is present.
-      # Both print a skip reason, so a regression into "skipped" shows
-      # in the log rather than passing as green.
-      #
-      # `--ignore=tests/smoke` leaves the fast smoke gate above as its
-      # own step instead of running those 6 files twice.
-      #
-      # No `-q` here on purpose. `addopts` in pyproject.toml is already
-      # `-q -m "not smoke"`; a second `-q` makes it `-qq`, which
-      # suppresses the final `N passed` line — a failure then reads like
-      # a success. (The `pytest apps/ -q` step below has exactly that
-      # problem today. Out of scope for this ticket, worth its own.)
-      #
-      # ─── Deselected: 38 tests, 4 root causes, none introduced here ──
-      # Every one reproduced on Postgres and filed separately. Deselects
-      # are node-ID-scoped, not file-scoped, so the 206 passing tests
-      # that live *inside* those five files still run — above all the
-      # 186 green cases of the cross-tenant leakage scanner, which
-      # guards a security invariant and is worth keeping in CI.
-      #
-      # (a) 34 x tests/integration/test_cross_tenant_leakage.py — the
-      #     generic `_create_row` factory (`_MODEL_REQUIRED_FIELDS`) is
-      #     wrong on Postgres and only on Postgres:
-      #       31 x StringDataRightTruncation — the factory appends
-      #            "-{Model}-{n}" to a base value and overflows
-      #            varchar(16) columns (TenantStaff.role receives
-      #            "admin-TenantStaff-1", 19 chars).
-      #        3 x NotNullViolation — StaffInvite.expires_at is NOT NULL
-      #            with no default and the factory never supplies it.
-      #     SQLite enforces neither, which is why this file read as
-      #     green for as long as it sat outside CI. Test-side fix.
-      # (b) 2 x tests/e2e/ (test_max_echo, test_handoff_skill) — both
-      #     assert the bot echoes the user's text back verbatim; DRF-963
-      #     replaced verbatim echo with the "Я пока не понял" fallback.
-      #     This is DRF-1217. For whoever picks that up: it is 2 tests
-      #     in 2 files, not the 4 the ticket assumes, and in
-      #     test_handoff_skill.py only the last line (197) fails — the
-      #     handoff flow it is named for passes.
-      # (c) 1 x tests/e2e/test_privacy_skill.py — asserts that a chat
-      #     "удали мои данные" hard-deletes the BotUser. DRF-956 / T-05
-      #     deliberately turned that into a redirect to the Mini App
-      #     confirmed flow ("Сейчас я ничего не удалила"), because chat
-      #     cannot express a confirmation step and Pilot was not the
-      #     place to invent one. The test asserts the behaviour that
-      #     ticket removed on purpose. Test-side fix.
-      # (d) 1 x tests/contracts/test_event_idempotency.py — its autouse
-      #     fixture sets EVENT_INGEST_TENANT_VERIFY_FAIL_OPEN but never
-      #     EVENT_INGEST_ALLOWED_TENANTS / _ALLOWED_EVENTS, so
-      #     booking.created is denied with
-      #     `reason=relationship_unavailable` and the two reminders are
-      #     never written. Every sibling suite under apps/ that
-      #     dispatches envelopes does set the allowlist in its fixture
-      #     (apps/eventbus/tests/test_booking_consumer.py:137 and five
-      #     others). One-line fixture fix.
-      #
-      # The node IDs are single-quoted, unlike the apps/ deselects
-      # below: parametrized IDs end in `[ModelName]`, and an unquoted
-      # `[...]` is a bash glob character class. It happens to survive
-      # today only because nothing matches and nullglob/failglob are
-      # off — which is a property of the shell, not of this file.
-      #
-      # Do NOT add deselects here to silence a new failure — a new red
-      # test means something you touched broke. The list is pinned to
-      # specific node IDs, so renaming any of these tests must also
-      # touch this file.
-      # ---------------------------------------------------------------
-      - name: pytest tests/ (cross-cutting suite, minus smoke)
-        run: |
-          uv run pytest tests/ --ignore=tests/smoke \
-            --deselect 'tests/contracts/test_event_idempotency.py::TestBookingIdempotency::test_booking_created_idempotent' \
-            --deselect 'tests/e2e/test_handoff_skill.py::test_handoff_flow_creates_task_silences_followup_resumes_on_resolve' \
-            --deselect 'tests/e2e/test_max_echo.py::test_max_webhook_to_echo_happy_path' \
-            --deselect 'tests/e2e/test_privacy_skill.py::test_delete_data_triggers_privacy_skill_and_wipes_user' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_default_manager_filters_by_current_tenant[TenantStaff]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_default_manager_filters_by_current_tenant[StaffInvite]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_default_manager_filters_by_current_tenant[DisclaimerLibrary]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_default_manager_filters_by_current_tenant[AIRequestMetric]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_default_manager_filters_by_current_tenant[BookingReminder]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_default_manager_filters_by_current_tenant[PendingBookingAction]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_default_manager_filters_by_current_tenant[RemoteBookingProxy]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_default_manager_filters_by_current_tenant[PaymentMirror]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_default_manager_filters_by_current_tenant[ScheduleException]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_default_manager_filters_by_current_tenant[LoyaltyEvent]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_audit_mode_returns_empty_without_context[TenantStaff]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_audit_mode_returns_empty_without_context[StaffInvite]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_audit_mode_returns_empty_without_context[Message]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_audit_mode_returns_empty_without_context[ConsentRecord]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_audit_mode_returns_empty_without_context[DisclaimerLibrary]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_audit_mode_returns_empty_without_context[AIRequestMetric]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_audit_mode_returns_empty_without_context[BookingReminder]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_audit_mode_returns_empty_without_context[PendingBookingAction]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_audit_mode_returns_empty_without_context[RemoteBookingProxy]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_audit_mode_returns_empty_without_context[PaymentMirror]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_audit_mode_returns_empty_without_context[ScheduleException]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_audit_mode_returns_empty_without_context[LoyaltyEvent]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_off_mode_returns_all_rows[TenantStaff]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_off_mode_returns_all_rows[StaffInvite]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_off_mode_returns_all_rows[Message]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_off_mode_returns_all_rows[ConsentRecord]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_off_mode_returns_all_rows[DisclaimerLibrary]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_off_mode_returns_all_rows[AIRequestMetric]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_off_mode_returns_all_rows[BookingReminder]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_off_mode_returns_all_rows[PendingBookingAction]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_off_mode_returns_all_rows[RemoteBookingProxy]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_off_mode_returns_all_rows[PaymentMirror]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_off_mode_returns_all_rows[ScheduleException]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_off_mode_returns_all_rows[LoyaltyEvent]'
-
-      # Static Ayla client↔route-table contract (S0-C / G-Contract). Pure,
-      # network-free: exercises every bot Ayla client through its real code and
-      # asserts (method, path, auth header + secret, required non-auth headers)
-      # matches Ayla's internal route-table. Gates every push so a client
-      # method/path/auth-secret drift can't merge silently. It checks
-      # client↔table consistency, NOT table↔Ayla correctness — the latter is the
-      # nightly staging round-trip (#1079).
-      - name: Ayla client contract (route-table)
-        run: uv run pytest apps/integrations/ayla/tests/test_contract_route_table.py -v
-
-      # T-02 / Wave 1 eventbus correctness gate. PR-T02-2 changed booking
-      # lifecycle semantics (status normalization, reminder eligibility,
-      # missing-proxy fail-loud). These tests were not exercised in CI and a
-      # regression (strict normalizer rejecting `pending`) reached `dev`.
-      # Kept as its own fast-fail step even now that "pytest apps/ (full
-      # suite)" below covers it too (DRF-1121) — this gate fails in
-      # seconds, the full suite takes ~30 min, and eventbus correctness
-      # is exactly the kind of regression worth not waiting on.
-      - name: eventbus booking lifecycle tests
-        run: uv run pytest apps/eventbus/tests/ -q
-
       # DRF-1121 — CI ran 41 of 410 apps/ test files; everything else was
       # green locally and defended nothing in CI. Full apps/ (7246 tests,
       # measured against Postgres — the SQLite default that most of
       # `dev` runs locally hides real failures, see
-      # project_test_db_sqlite_vs_postgres) is clean EXCEPT the 26 tests
-      # deselected below, grouped by root cause so the excluded set is
-      # legible instead of a wall of paths:
+      # project_test_db_sqlite_vs_postgres) was clean EXCEPT 26 tests
+      # deselected here, grouped by root cause below. All 26 re-enabled
+      # 28.09 (DRF-2588) — the causes are kept as history:
       #
-      # (a) DRF-1044 — 3 pre-existing miniapp_api failures, same on
+      # (a) RESOLVED 28.09 (DRF-2588) — re-enabled: all 3 pass on
+      #     Postgres 16 against dev d4ccc25a. Was: DRF-1044 — 3
+      #     pre-existing miniapp_api failures, same on
       #     SQLite and Postgres, known before this ticket.
-      # (b) NEW (2026-08-15, DRF-1121 investigation) — 23 failures, ALL
+      # (b) RESOLVED 28.09 (DRF-2588) — re-enabled: 22 of 23 pass on
+      #     Postgres 16 against dev d4ccc25a; the 23rd
+      #     (test_q12a_616_root_snapshot_read_uses_select_for_update)
+      #     looked for table "apps_booking_bookingrequest" while the
+      #     table is booking_bookingrequest — the lock it pins IS there
+      #     (apps/booking/services/reschedule.py select_for_update on the
+      #     old row and on the chain root); test fixed to read the name
+      #     from the model. No Linear leaf ever existed for this entry.
+      #     Was: NEW (2026-08-15, DRF-1121 investigation) — 23 failures, ALL
       #     the same root cause: `BookingRequest.all_tenants
       #     .select_for_update().select_related("service")` in
       #     apps/skills/booking/tools.py's execute_reschedule (the
@@ -615,42 +1254,352 @@ jobs:
       # or escalate. This list is pinned to reproduce a specific test
       # invocation for each entry, not a directory-level skip, so a
       # rename/removal of any of these tests must also touch this file.
-      - name: pytest apps/ (full suite)
+      # DRF-1457 — the suite runs under pytest-xdist at 4 workers.
+      #
+      # Measured 2026-09-03 (e2e-artifacts/ci-speed-20260903): this step
+      # alone was 88% of the job — median 2277s of ~2585s across 18
+      # green runs (jobs API) — running single-process, with xdist
+      # absent from the dependency tree entirely. Local A/B on an
+      # 8-core box, same deselect list: 6969s single-process vs 3033s
+      # at `-n 4 --dist load` (2.3x), and the junit test set is
+      # identical — 11145 cases, 0 absent, 0 extra, same 188 skips,
+      # same zero failures (two full runs; the only divergence ever
+      # seen was a Windows-clock created_at tie in one PII test, not
+      # reproducible on Linux timing).
+      #
+      # `-n 4`, not `-n auto`: ubuntu-latest is 4 vCPU today, and
+      # `auto` would silently change the run the day GitHub changes
+      # the runner — the measurement above is pinned to 4.
+      # `--dist load`: any idle worker takes the next test; per-worker
+      # test databases come from pytest-django's `_gwN` suffix, so no
+      # two workers ever share a schema.
+      #
+      # DRF-1349 — the invocation below is the one described above, with
+      # `apps/` replaced by this shard's selector and `-n 4` (the
+      # distribution mode is `worksteal`, DRF-2205, see the step).
+      - name: pytest apps/ (shard ${{ matrix.shard.id }})
+        env:
+          # Via env, not interpolated into the script: the value is a
+          # literal from the matrix above, and keeping `${{ }}` out of
+          # `run:` is the habit that stops the day one of these comes from
+          # a branch name. Left unquoted on use, on purpose — the word
+          # splitting IS the point, each shard passes several arguments.
+          SHARD_ID: ${{ matrix.shard.id }}
+          SHARD_ARGS: ${{ matrix.shard.args }}
+          JUNIT_FILE: junit-apps-shard-${{ matrix.shard.id }}.xml
         run: |
-          uv run pytest apps/ -q \
-            --deselect apps/miniapp_api/tests/test_c7_payments.py::TestPaymentMirrorReadModel::test_booking_confirmed_with_payment_id_stamps_hold \
-            --deselect apps/miniapp_api/tests/test_c7_payments.py::TestPaymentMirrorReadModel::test_booking_confirmed_without_payment_id_no_mirror \
-            --deselect apps/miniapp_api/tests/test_create_booking_ayla.py::TestLocalPathUnchanged::test_flag_off_keeps_local_path \
-            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_happy_path \
-            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_q12a_over_90d_breaks_chain \
-            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_not_owned_rejected \
-            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_already_cancelled_rejected \
-            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_q12a_cancel_requested_rejected \
-            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_not_found_rejected \
-            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_q12a_541_price_hike_breaks_chain_end_to_end \
-            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_q12a_541_identity_unchanged_preserves_chain_and_root_snapshot \
-            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_q12a_616_root_snapshot_read_uses_select_for_update \
-            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_q12a_616_root_snapshot_read_calls_select_for_update_with_of_self \
-            --deselect apps/bookings/tests/test_booking_callbacks.py::TestConfirmTapReschedule::test_happy_path_notifies_manager \
-            --deselect apps/skills/booking/tests/test_tools_q12a.py::TestQ12aContinuationLLMPath::test_within_90d_same_service_continuation_chain \
-            --deselect apps/skills/booking/tests/test_tools_q12a.py::TestQ12aContinuationLLMPath::test_over_90d_breaks_chain_billable_fresh_sale \
-            --deselect apps/skills/booking/tests/test_tools_q12a.py::TestQ12aContinuationLLMPath::test_b1_null_service_id_does_not_falsely_flag_swap \
-            --deselect apps/skills/booking/tests/test_tools_reschedule.py::TestExecuteReschedule::test_happy_path \
-            --deselect apps/skills/booking/tests/test_tools_reschedule.py::TestExecuteReschedule::test_new_row_carries_ai_direct_attribution \
-            --deselect apps/skills/booking/tests/test_tools_reschedule.py::TestIdempotencyMarkerAnchored::test_spoofed_substring_does_not_short_circuit_reschedule \
-            --deselect apps/skills/booking/tests/test_tools_reschedule.py::TestLocalCreateSplitBrainRecovery::test_local_create_fails_compensate_succeeds_recovers_cleanly \
-            --deselect apps/skills/booking/tests/test_tools_reschedule.py::TestLocalCreateSplitBrainRecovery::test_local_create_fails_compensate_fails_alerts_critical \
-            --deselect apps/skills/booking/tests/test_flow_continuation.py::TestSequenceA::test_full_reschedule_flow \
-            --deselect apps/skills/booking/tests/test_flow_continuation.py::TestSequenceB::test_combined_selection_slot_turn \
-            --deselect apps/skills/booking/tests/test_flow_continuation.py::TestSequenceC::test_callback_confirm_executes \
-            --deselect apps/skills/booking/tests/test_flow_continuation.py::TestNegatives::test_duplicate_text_confirm_no_double_mutation
+          rm -f "$JUNIT_FILE"
+          echo "SHARD $SHARD_ID selector: $SHARD_ARGS"
+          # DRF-2205 — `worksteal` вместо `load`: СМЯГЧЕНИЕ, НЕ ФИКС.
+          # При `load` очередь делится заранее, и один воркер, получивший
+          # хвост из медленных тестов, держит весь шард, пока три других
+          # простаивают. `worksteal` даёт простаивающим забирать работу.
+          # Это прячет неравномерность, а не устраняет её причину;
+          # причину лечит перераспределение шардов в матрице выше.
+          uv run pytest $SHARD_ARGS -q -n 4 --dist worksteal \
+            --junitxml="$JUNIT_FILE"
 
-      # mypy is blocking. `strict=False` keeps the bar reasonable while
-      # apps/ are mostly empty AppConfigs; tighten to strict per-package
-      # as real code lands. New untyped imports must add stubs or
-      # `# type: ignore[<code>]` rather than slip through.
-      - name: mypy
-        run: uv run mypy apps config tests
+      # DRF-1349 — the test counts, read from junit rather than from the
+      # exit code. Before this step a red full-suite run printed no test
+      # numbers at all: the log ended at "Process completed with exit code
+      # 1" and the failing test had to be found by re-running things by
+      # hand (three attempts, on #1502). pytest's exit code is no
+      # substitute — it reports zero for a run that collected nothing, and
+      # non-zero for a healthy suite killed for memory. The numbers below
+      # are what a red-PR triage should read.
+      #
+      # Three deliberate properties:
+      #
+      #  - `tests` is printed BEFORE `failures`. failures=0 with tests=0
+      #    means "nothing ran", not "everything passed", so the collected
+      #    count is the first number in the log — and tests=0 fails this
+      #    step instead of riding along as a green run.
+      #  - a missing junit file is its own outcome ("JUNIT MISSING"), NOT
+      #    zero failures: it means pytest died before it finished
+      #    collection — import error, OOM kill, the container going away.
+      #  - the file is deleted before pytest runs (see the step above), so
+      #    an XML left over from an earlier run in the same workspace can
+      #    never be read as this run's result.
+      #
+      # `if: always()` because the run worth reading is exactly the one
+      # where the step above failed.
+      #
+      # DRF-1349 — now one of five. `tests == 0` is refused here per shard,
+      # which catches a shard whose selector matched nothing; the sum
+      # across shards is checked against the collection census in the
+      # aggregate job below, which catches the partial version of the same
+      # mistake.
+      - name: pytest apps/ shard test counts (junit)
+        env:
+          JUNIT_FILE: junit-apps-shard-${{ matrix.shard.id }}.xml
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import os
+          import sys
+          import xml.etree.ElementTree as ET
+
+          path = os.environ["JUNIT_FILE"]
+
+          if not os.path.exists(path):
+              print(
+                  f"JUNIT MISSING - {path} was never written: pytest did not reach "
+                  "test collection. This is NOT zero failures."
+              )
+              sys.exit(1)
+
+          root = ET.parse(path).getroot()
+          suite = root if root.tag == "testsuite" else root.find("testsuite")
+          if suite is None:
+              print(f"JUNIT UNREADABLE - no <testsuite> element in {path}.")
+              sys.exit(1)
+
+          def count(key: str) -> int:
+              return int(suite.get(key) or 0)
+
+          tests = count("tests")
+          failures = count("failures")
+          errors = count("errors")
+          skipped = count("skipped")
+
+          # tests first, on purpose - see the comment on this step.
+          print(f"JUNIT tests={tests}")
+          print(f"JUNIT failures={failures} errors={errors} skipped={skipped}")
+          print(f"JUNIT passed={tests - failures - errors - skipped}")
+
+          if tests == 0:
+              print("JUNIT EMPTY - 0 tests collected. An empty run is not a green run.")
+              sys.exit(1)
+          PY
+
+      # The junit XML itself, so a red run is triaged by downloading one
+      # file instead of scrolling the log. `if-no-files-found: warn` and
+      # not `error`: the missing-file case is already reported, with its
+      # cause, by the step above — a second red X here would only bury it.
+      #
+      # One artefact per shard. The aggregate job downloads all of them by
+      # pattern and sums them; the per-shard file names differ, so
+      # `merge-multiple` cannot collide them.
+      - name: Upload pytest junit (apps/ shard ${{ matrix.shard.id }})
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: junit-apps-${{ github.sha }}-shard-${{ matrix.shard.id }}
+          path: junit-apps-shard-${{ matrix.shard.id }}.xml
+          retention-days: 14
+          if-no-files-found: warn
+
+  # ---------------------------------------------------------------------
+  # THE REQUIRED CHECK. This job does no testing. Its entire purpose is to
+  # carry the name `pytest + ruff + mypy` — see the long note at the top
+  # of `jobs:` for why that name cannot move and cannot be duplicated.
+  #
+  # Two things happen here, in this order:
+  #
+  #   1. THE NUMBERS. The five shard junits are summed and printed, with
+  #      `tests` BEFORE `failures`, because `failures=0` on `tests=0` means
+  #      "nothing ran" and reads as green to anyone skimming. The sum is
+  #      then checked against the collection census taken in `checks`. An
+  #      empty or short total is refused.
+  #   2. THE VERDICT. Every `needs.*.result` is printed and required to be
+  #      exactly `success`. Not `!failure()`, not `success()` — an explicit
+  #      equality, evaluated in the job's own shell, over all three
+  #      dependencies. `cancelled` and `skipped` are NOT success: a shard
+  #      killed by the concurrency group or by its timeout must make this
+  #      job red, and a `skipped` dependency means the graph did not run
+  #      what it promised to run.
+  #
+  # Both steps carry `if: always()`, so the job still runs — and still
+  # reports — when a dependency has failed. That is the only configuration
+  # in which it is a gate at all: `needs` alone would SKIP this job on an
+  # upstream failure, and a skipped required check never turns red, it
+  # just never arrives.
+  # ---------------------------------------------------------------------
+  test:
+    name: pytest + ruff + mypy
+    runs-on: ubuntu-latest
+    needs: [changes, secret-scan, checks, apps-shard]
+    if: always()
+    # Downloads a handful of small XML files and adds up integers.
+    timeout-minutes: 10
+
+    steps:
+      # `continue-on-error` because a missing artefact is a real outcome
+      # this job must REPORT, not an infrastructure error it should die
+      # on. download-artifact fails the step when its pattern matches
+      # nothing (e.g. every shard died before uploading); the summing step
+      # below then says so in words and exits non-zero.
+      # DRF-1786 (12.09): on a docs-only PR the shards never ran, so there is
+      # no junit to download and no census to sum — these three steps are
+      # SKIPPED (by name, in the log), not executed against nothing. Executed
+      # against nothing they said «JUNIT MISSING» and went red (bot #1714,
+      # the first docs-only PR after the twin workflows were removed) — and
+      # that message is correct when code changed and shards vanished, which
+      # is exactly why it must not fire when no code changed.
+      - name: Download shard junit artefacts
+        if: always() && needs.changes.outputs.code == 'true'
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          pattern: junit-apps-${{ github.sha }}-shard-*
+          path: shard-junit
+          merge-multiple: true
+
+      - name: Download apps/ collection census
+        if: always() && needs.changes.outputs.code == 'true'
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          name: apps-census-${{ github.sha }}
+          path: census
+
+      - name: apps/ test counts, summed across shards
+        if: always() && needs.changes.outputs.code == 'true'
+        env:
+          # Kept next to the matrix it describes. If you add or remove a
+          # shard above, this number moves in the same edit — a missing
+          # shard is otherwise indistinguishable from a shard that simply
+          # never uploaded.
+          EXPECTED_SHARDS: "5"
+        run: |
+          python3 - <<'PY'
+          import glob
+          import os
+          import sys
+          import xml.etree.ElementTree as ET
+
+          expected = int(os.environ["EXPECTED_SHARDS"])
+          files = sorted(glob.glob("shard-junit/*.xml"))
+
+          print(f"JUNIT shard files found={len(files)} expected={expected}")
+          for f in files:
+              print(f"  {f}")
+
+          if not files:
+              print(
+                  "JUNIT MISSING — no shard junit was downloaded at all. The shards "
+                  "did not reach test collection, or did not run. This is NOT zero "
+                  "failures."
+              )
+              sys.exit(1)
+
+          tests = failures = errors = skipped = 0
+          unreadable = []
+          for f in files:
+              try:
+                  root = ET.parse(f).getroot()
+              except ET.ParseError as exc:
+                  unreadable.append(f"{f}: {exc}")
+                  continue
+              suite = root if root.tag == "testsuite" else root.find("testsuite")
+              if suite is None:
+                  unreadable.append(f"{f}: no <testsuite> element")
+                  continue
+
+              def count(key, _s=suite):
+                  return int(_s.get(key) or 0)
+
+              tests += count("tests")
+              failures += count("failures")
+              errors += count("errors")
+              skipped += count("skipped")
+
+          # tests first, on purpose — see the note on this job.
+          print(f"JUNIT TOTAL tests={tests}")
+          print(
+              f"JUNIT TOTAL failures={failures} errors={errors} skipped={skipped}"
+          )
+          print(f"JUNIT TOTAL passed={tests - failures - errors - skipped}")
+
+          bad = False
+
+          for u in unreadable:
+              print(f"JUNIT UNREADABLE — {u}")
+              bad = True
+
+          if len(files) != expected:
+              print(
+                  f"JUNIT SHORT — {len(files)} of {expected} shard junits present. "
+                  "The total above is a sum over an incomplete set and does not "
+                  "describe this run."
+              )
+              bad = True
+
+          if tests == 0:
+              print(
+                  "JUNIT EMPTY — 0 tests collected across every shard. An empty run "
+                  "is not a green run."
+              )
+              bad = True
+
+          # The sentinel against a shard layout that quietly drops tests.
+          census_path = "census/apps-census.txt"
+          if not os.path.exists(census_path):
+              print(
+                  "CENSUS MISSING — checks did not publish an apps/ collection "
+                  "count, so the shard sum above is unverified. This is NOT a pass."
+              )
+              bad = True
+          else:
+              census = int(open(census_path, encoding="utf-8").read().strip() or 0)
+              print(f"CENSUS apps/ collected (unsharded)={census}")
+              print(f"CENSUS shard sum={tests}  delta={tests - census}")
+              if tests != census:
+                  print(
+                      "CENSUS MISMATCH — the shards together ran a different number "
+                      "of tests than a single unsharded collection of apps/ finds. "
+                      "A path has fallen out of every shard's selector, or is in two "
+                      "of them. This is a defect in the shard layout, not a rounding "
+                      "difference: fix the selectors in the `apps-shard` matrix."
+                  )
+                  bad = True
+
+          if failures or errors:
+              print(f"JUNIT RED — {failures} failures, {errors} errors.")
+              bad = True
+
+          sys.exit(1 if bad else 0)
+          PY
+
+      - name: Verdict
+        if: always()
+        env:
+          CODE: ${{ needs.changes.outputs.code }}
+          R_CHANGES: ${{ needs.changes.result }}
+          R_SECRET_SCAN: ${{ needs.secret-scan.result }}
+          R_CHECKS: ${{ needs.checks.result }}
+          R_APPS_SHARD: ${{ needs.apps-shard.result }}
+        run: |
+          # DRF-1675: on a docs-only PR the engineering jobs were skipped by
+          # design and this required check reports OK. Only when `changes`
+          # itself succeeded and said so — a failed detection is red, not a
+          # free pass.
+          if [ "$R_CHANGES" = "success" ] && [ "$CODE" = "false" ]; then
+            echo "OK — docs-only PR: secret-scan, checks and apps shards skipped by the changes gate."
+            exit 0
+          fi
+          bad=0
+          for pair in "secret-scan=$R_SECRET_SCAN" "checks=$R_CHECKS" "apps-shard=$R_APPS_SHARD"; do
+            job="${pair%%=*}"
+            res="${pair#*=}"
+            echo "needs.${job}.result = ${res}"
+            if [ "$res" != "success" ]; then
+              bad=1
+            fi
+          done
+
+          if [ "$bad" -ne 0 ]; then
+            echo
+            echo "FAILED — at least one dependency is not 'success'."
+            echo "Anything other than 'success' — failure, cancelled, skipped —"
+            echo "is a red verdict here. A cancelled shard has not passed; it has"
+            echo 'not run. needs.apps-shard.result is the aggregate of all five'
+            echo "matrix legs: it is 'success' only when every leg succeeded."
+            exit 1
+          fi
+
+          echo
+          echo "OK — secret-scan, checks and all apps shards reported success."
 
   # ---------------------------------------------------------------------
   # DRF-1229 — Mini App front-end gate.
@@ -675,24 +1624,33 @@ jobs:
   # the dev deploy — which is the intent.
   # ---------------------------------------------------------------------
   miniapp:
+    # Имя намеренно НЕ переименовано после добавления шага eslint (DRF-2388):
+    # эта строка — контекст обязательной проверки в защите ветки (см. список
+    # выше), и переименование сделало бы требуемую проверку несуществующей, то
+    # есть тихо отключило бы её для всех PR. Состав шагов ниже.
     name: miniapp (typecheck + vitest)
     runs-on: ubuntu-latest
-    # Measured: npm ci ~15s + tsc ~10s + 259 vitest tests ~40s on a warm
-    # cache. 15 min is a generous ceiling that still fails fast on a hang.
+    # Замерено 24.09 на этом раннере: весь job ~2 мин 35 с — npm ci, eslint,
+    # tsc, **2068 узлов в 208 файлах** vitest, vite build и загрузка артефакта.
+    # Прежняя запись («259 vitest tests ~40s») устарела в восемь раз по числу
+    # узлов; потолок 15 мин от неё не зависел и оставлен как был — он ловит
+    # зависание, а не медленность. Если однажды упрётся, сначала измерить, а не
+    # поднимать: локально те же 2068 узлов идут 9 мин, и разрыв с раннером сам
+    # по себе стоит объяснения.
     timeout-minutes: 15
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           # Full history: the change-detection step below diffs against
           # the PR base, which a depth-1 checkout cannot reach.
           fetch-depth: 0
 
       # Per-job `paths:` filters do not exist in GitHub Actions — only
-      # per-workflow. Rather than split this into a sister workflow (and
-      # inherit the required-check-never-reports trap that ci-docs-skip.yml
-      # exists to work around), detect the change set inside the job, the
-      # same way ci-docs-skip.yml does. The job therefore ALWAYS reports a
+      # per-workflow. Rather than split this into a sister workflow (the
+      # required-check-never-reports trap, and — DRF-1675 — the cancelled-twin
+      # trap), detect the change set inside the job, the same way the
+      # `changes` job at the top does. The job therefore ALWAYS reports a
       # verdict and is safe to mark as a required check, while the
       # expensive steps only run when apps/miniapp/** actually changed.
       #
@@ -782,7 +1740,7 @@ jobs:
       # with. Regenerating it under npm 11 produces a lockfile npm 10 rejects.
       - name: Set up Node (from apps/miniapp/.nvmrc)
         if: steps.detect.outputs.run_fe == 'true'
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version-file: apps/miniapp/.nvmrc
           cache: npm
@@ -796,6 +1754,25 @@ jobs:
         if: steps.detect.outputs.run_fe == 'true'
         working-directory: apps/miniapp
         run: npm ci
+
+      # DRF-2388 — до этого шага в apps/miniapp не было конфигурации ESLint
+      # вовсе, и линтер никогда не гонялся ни здесь, ни где-либо ещё. Поэтому
+      # нарушение порядка хуков дожило до пилота (DRF-2374): tsc его не видит,
+      # а vitest замечает, только если сломанную ветку кто-то отрисует.
+      #
+      # Что проверяется сейчас (DRF-2391): порядок хуков, полнота зависимостей,
+      # отладочная печать в консоль, обязательная причина у подавления и
+      # отсутствие мёртвых подавлений. Состав — в apps/miniapp/eslint.config.mjs;
+      # имя шага перечисляет предметы, а не правила, чтобы не разойтись с
+      # конфигурацией при следующей правке.
+      #
+      # Шаг обязательный и стоит ДО typecheck намеренно: нарушение порядка
+      # хуков — дефект независимо от типов, и красный крест должен называть
+      # именно его, а не теряться за ошибкой компиляции.
+      - name: eslint (хуки, зависимости, консоль, причины подавлений — ошибкой)
+        if: steps.detect.outputs.run_fe == 'true'
+        working-directory: apps/miniapp
+        run: npm run lint
 
       - name: tsc --noEmit (typecheck)
         if: steps.detect.outputs.run_fe == 'true'
@@ -837,7 +1814,7 @@ jobs:
       # bundle was built from.
       - name: Upload dist artefact
         if: steps.detect.outputs.run_fe == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: miniapp-dist-${{ github.sha }}
           path: apps/miniapp/dist

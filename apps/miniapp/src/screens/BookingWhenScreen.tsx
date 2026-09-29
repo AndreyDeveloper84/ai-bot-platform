@@ -7,10 +7,13 @@ import { ScreenLayout } from "../components/ScreenLayout";
 import { StickyCta } from "../components/StickyCta";
 import { DelayedSkeleton, Skeleton, SlotGridSkeleton } from "../components/Skeleton";
 import { StateError } from "../components/StateError";
-import { useBackButton } from "../hooks/useBackButton";
 import { useHaptics } from "../hooks/useHaptics";
 import { formatDateLabel, formatDayStrip, formatSlotTime } from "../lib/format";
 import { setVisitAt, useBookingDraft } from "../state/booking";
+import { backTo } from "../lib/screen-back";
+
+/** Возврат (DRF-1493): к выбору мастера — предыдущий шаг записи. */
+const BACK = backTo("/customer/book/master");
 
 function isoDateNDaysAhead(offset: number): string {
   const d = new Date();
@@ -30,7 +33,6 @@ export function BookingWhenScreen() {
   const [state, setState] = useState<State>({ kind: "loading" });
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
 
-  useBackButton({ onBack: () => navigate(-1) });
 
   const load = useCallback(() => {
     if (!draft.serviceId || !draft.masterId) return;
@@ -57,7 +59,7 @@ export function BookingWhenScreen() {
 
   useEffect(() => {
     if (!draft.serviceId || !draft.masterId) {
-      navigate("/catalog", { replace: true });
+      navigate("/customer/catalog", { replace: true });
       return;
     }
     return load();
@@ -84,16 +86,16 @@ export function BookingWhenScreen() {
 
   function onContinue() {
     if (!draft.visitAt) return;
-    // Wave 0 flow unification: the service-first chain also lands on
-    // the payment-capable confirmation screen (payment choice C7.4
-    // lives there; the legacy /book/confirm has none and stays
-    // reachable only for deep links).
+    // Wave 0 flow unification: the service-first chain lands on the
+    // payment-capable confirmation screen — the only one there is.
+    // Payment choice C7.4 lives here; the legacy /book/confirm had none
+    // and was removed with its screen (DRF-1485).
     navigate("/customer/booking/confirm");
   }
 
   if (state.kind === "loading") {
     return (
-      <ScreenLayout title="Выберите время">
+      <ScreenLayout back={BACK} title="Выберите время">
         <DelayedSkeleton loading>
           <div className="date-strip">
             {Array.from({ length: 6 }, (_, i) => (
@@ -108,7 +110,7 @@ export function BookingWhenScreen() {
 
   if (state.kind === "error") {
     return (
-      <ScreenLayout title="Выберите время">
+      <ScreenLayout back={BACK} title="Выберите время">
         <StateError err={state.err} onRetry={load} screenId="slots" />
       </ScreenLayout>
     );
@@ -116,7 +118,7 @@ export function BookingWhenScreen() {
 
   if (state.slots.length === 0) {
     return (
-      <ScreenLayout title="Выберите время">
+      <ScreenLayout back={BACK} title="Выберите время">
         <div className="callout">
           <p style={{ margin: 0 }}>На ближайшие две недели свободного времени нет.</p>
         </div>
@@ -130,10 +132,11 @@ export function BookingWhenScreen() {
 
   return (
     <ScreenLayout
+      back={BACK}
       title="Выберите время"
       cta={
         <StickyCta onClick={onContinue} disabled={!draft.visitAt}>
-          {draft.visitAt ? "Дальше" : "Выберите слот"}
+          {draft.visitAt ? "Дальше" : "Выбрать время"}
         </StickyCta>
       }
     >
@@ -160,7 +163,7 @@ export function BookingWhenScreen() {
         })}
       </div>
 
-      <div className="slot-grid" role="radiogroup" aria-label="Свободные слоты">
+      <div className="slot-grid" role="radiogroup" aria-label="Свободное время">
         {slotsForDay.length === 0 ? (
           <div className="slot-grid__empty">{emptyDayCopy}</div>
         ) : (

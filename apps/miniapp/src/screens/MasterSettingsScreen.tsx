@@ -44,9 +44,10 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 
 import { SurfaceSwitchButton } from "../components/SurfaceSwitch";
+import { useSelfService } from "../hooks/useMasterAvatarItems";
 import { MASTER_SESSION_STORAGE_KEY } from "../lib/master-api";
 import {
   hapticNotify,
@@ -76,6 +77,12 @@ const COPY = {
 
 export function MasterSettingsScreen() {
   const navigate = useNavigate();
+  // DRF-2247: экран общий у соло и салонного мастера — двери ведут в
+  // маршруты СВОЕЙ поверхности. Раньше «Рабочие часы» и «Место работы» вели
+  // на /solo/* и салонного мастера молча выбрасывало на «Сегодня».
+  const isSolo = useLocation().pathname.startsWith("/solo/");
+  // DRF-2254: «Место работы» — только когда каталог не назвал пространство салоном.
+  const selfService = useSelfService();
   const [confirmOpen, setConfirmOpen] = useState(false);
 
   // --- Bridge: BackButton wiring ---
@@ -89,7 +96,7 @@ export function MasterSettingsScreen() {
       off();
       setBackButton(false);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `navigate` нужен только внутри обработчика системной кнопки; привязка делается один раз за монтирование
   }, []);
 
   const openConfirm = useCallback(() => {
@@ -136,6 +143,30 @@ export function MasterSettingsScreen() {
         {COPY.comingSoon}
       </p>
 
+      {/* DRF-1817 — экран 06: рабочие часы на общем контракте /working-hours. */}
+      <button
+        type="button"
+        className="btn-secondary"
+        style={{ width: "100%", justifyContent: "center", marginBottom: "var(--s-3)" }}
+        onClick={() => navigate(isSolo ? "/solo/working-hours" : "/master/working-hours")}
+      >
+        Рабочие часы
+      </button>
+
+      {/* DRF-1811 (M19) — экран 05: место работы (изменить формат/адрес в любое время, P45/P50).
+          DRF-2247: только соло — у салонного мастера место задаёт салон, и
+          экрана «Место работы» на его поверхности нет. */}
+      {isSolo && selfService ? (
+        <button
+          type="button"
+          className="btn-secondary"
+          style={{ width: "100%", justifyContent: "center", marginBottom: "var(--s-3)" }}
+          onClick={() => navigate("/solo/place")}
+        >
+          Место работы
+        </button>
+      ) : null}
+
       {/* Phase 2b — billing / payout surface (C2/C3, real proxies). */}
       <button
         type="button"
@@ -153,20 +184,14 @@ export function MasterSettingsScreen() {
       */}
       <SurfaceSwitchButton />
 
-      <hr
-        style={{
-          border: 0,
-          borderTop: "1px solid var(--c-border, rgba(0,0,0,0.08))",
-          margin: "var(--s-4) 0",
-        }}
-      />
+      <hr className="master-settings__divider" />
 
       <button
         type="button"
         className="btn-secondary"
         onClick={openConfirm}
         style={{
-          color: "var(--c-danger, #d33)",
+          color: "var(--c-danger)",
           width: "100%",
           justifyContent: "center",
         }}
@@ -226,7 +251,7 @@ function LogoutConfirmSheet({
           <button
             type="button"
             className="cta-bar__button"
-            style={{ flex: 1, color: "var(--c-danger, #d33)" }}
+            style={{ flex: 1, color: "var(--c-danger)" }}
             onClick={onConfirm}
           >
             {COPY.confirm.confirm}

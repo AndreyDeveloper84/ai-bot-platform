@@ -53,12 +53,18 @@ class TestUmirayuNarrowing:
 
     @pytest.mark.parametrize(
         "text",
-        ["умираю от боли в груди", "помогите, умираю", "кажется, умираю"],
+        ["помогите, умираю", "кажется, умираю"],
     )
     def test_real_emergency_still_caught(self, text):
-        # Guard: narrowing must NOT drop a genuine «умираю»/«умираю от…» emergency.
+        # Guard: narrowing must NOT drop a genuine bare «умираю» — crisis bucket.
         assert evaluate_inbound(text).allowed is False
         assert evaluate_inbound(text).verdict == "handoff"
+
+    def test_dying_of_pain_is_the_medical_emergency(self):
+        # DRF-2000 (S-2): «умираю от боли» is a body, not despair — 103 / 112.
+        outcome = evaluate_inbound("умираю от боли в груди")
+        assert outcome.allowed is False
+        assert outcome.verdict == "medical"
 
 
 # #1081 — expanded self-harm / suicidal-ideation coverage. Coverage-first: a

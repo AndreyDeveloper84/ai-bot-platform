@@ -58,3 +58,28 @@ def get_global_bot_tenant() -> "Tenant":
             GLOBAL_BOT_TENANT_SLUG,
         )
     return tenant
+
+
+def find_global_bot_tenant() -> "Tenant | None":
+    """Read-only двойник :func:`get_global_bot_tenant`: ``None`` вместо создания.
+
+    Нужен там, где вопрос ЧИТАЮЩИЙ — «этот тенант сентинельный?» (DRF-1968,
+    :func:`apps.skills.welcome.skill._is_global_bot_scope` зовётся на каждом
+    отказе по согласию). Resolve-or-create там неуместен: чтение, умеющее
+    писать, заводит системного тенанта в ответ на вопрос о нём, и хуже всего
+    это проявится ровно там, где строки ещё нет — в тестах и в редких путях.
+
+    Первичное снабжение — миграция ``0014_seed_global_bot_tenant``; ленивое
+    создание в :func:`get_global_bot_tenant` остаётся страховкой для путей,
+    которым сентинел нужен ПО СУЩЕСТВУ (глобальный резолвер, разговоры,
+    ингресс): там осиротевший глобальный пользователь хуже лишней строки.
+    Вызывающий этой функции обязан решить, что делать с ``None``, — у
+    различителя это fail-closed.
+
+    ``Tenant.all_objects`` по той же причине, что и у соседа: глобальный путь
+    живёт при ``current_tenant()=None``, и деактивированный сентинел должен
+    остаться видимым.
+    """
+    from apps.tenancy.models import Tenant
+
+    return Tenant.all_objects.filter(slug=GLOBAL_BOT_TENANT_SLUG).first()

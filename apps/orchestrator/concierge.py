@@ -58,9 +58,12 @@ from apps.identity.services.global_tenant import get_global_bot_tenant
 from apps.llm.model_tiers import TIER_SMART
 from apps.llm.pricing import UnknownModelError, compute_cost
 from apps.llm.router import get_router
+from apps.orchestrator.clarify_guard import filter_clarification_options
 from apps.marketplace.discovery import (
+    city_service_samples,
     discover_masters,
     find_masters_by_name,
+    parse_query,
     service_coverage,
 )
 from apps.observability.ai_metrics import record_ai_request
@@ -81,13 +84,24 @@ from apps.orchestrator.discovery import (
     execute_catalog_tool,
     has_discovery_criteria,
     reground_specialization,
+    clarifying_question,
     render_no_criteria_clarification,
+    rotation_seed,
+    split_master_page,
+    render_no_match,
     requested_services,
 )
 from apps.orchestrator.fast_path import claims_direct_show_masters
 from apps.orchestrator.handoff import handoff_to_booking
-from apps.orchestrator.llm.templates import get_fallback
+from apps.orchestrator.llm.templates import (
+    get_booking_needs_name,
+    get_fallback,
+    get_no_answer,
+    get_no_answer_retry,
+    get_not_parsed,
+)
 from apps.orchestrator.nutrition_global import (
+    NUTRITION_ONLY_TOOL_NAMES,
     NUTRITION_TOOL_ACTIONS,
     NUTRITION_TOOL_SPECS,
     execute_nutrition_tool,
@@ -97,7 +111,31 @@ from apps.orchestrator.personal_surface import (
     SHOW_MY_RECORDS_TOOL_SPEC,
     execute_personal_tool,
 )
-from apps.persona.voice import SURFACE_MARKETPLACE, assistant_identity
+from apps.orchestrator.open_question import (
+    AnsweredQuestion,
+    close_question,
+    open_question,
+    render_answer_block,
+)
+from apps.orchestrator.safety.outbound import ACTION_PROMISE_STEMS
+from apps.orchestrator.said_memory import (
+    CONFIRM_SAID_FACT_TOOL,
+    CONFIRM_SAID_FACT_TOOL_SPEC,
+    confirm_keyboard,
+    confirm_offer,
+    execution_stage_turn,
+    render_said_block,
+    said_facts,
+    said_question_id,
+)
+from apps.orchestrator.search_recap import render_search_recap
+from apps.orchestrator.refusal_memo import (
+    RefusedQuery,
+    recall_refusals,
+    remember_refusal,
+    render_refusal_block,
+)
+from apps.persona.voice import NO_INTERNAL_TERMS_RULE, SURFACE_MARKETPLACE, assistant_identity
 
 logger = logging.getLogger(__name__)
 
@@ -194,70 +232,10 @@ def _to_openai_shape(result: Any) -> Any:
 # call onto a turn the model answered correctly in words. We therefore
 # match first-person commitments and the wait-markers, both of which only
 # make sense when the assistant is about to act itself.
-_PROMISE_STEMS: tuple[str, ...] = (
-    # first-person commitment to act
-    "подберу",
-    "подберем",
-    "подберём",
-    "подбираю",
-    "подбираем",
-    "посмотрю",
-    "посмотрим",
-    "гляну",
-    "глянем",
-    "уточню",
-    "уточним",
-    "найду",
-    "поищу",
-    "покажу",
-    "покажем",
-    "проверю",
-    "проверим",
-    "помогу подобрать",
-    "помогу выбрать",
-    # explicit wait - an assistant that asks the client to wait without
-    # emitting a tool call is ALWAYS a bug: nothing is running.
-    "секундочк",
-    "минуточк",
-    "минутку",
-    "одну минут",
-    "одну секунд",
-    "подождит",
-    "подожди",
-    # "вот варианты" / "вот кто подойдёт" - announces a result
-    # that, without a tool call, does not exist.
-    "вот вариант",
-    "вот кто",
-    "вот подходящ",
-    # joint-action framing of the same promise
-    "давайте подбер",
-    "давай подбер",
-    "давайте уточн",
-    "давай уточн",
-    # DRF-1268 — the gate itself is tool-agnostic (it fires on "the model
-    # called NO tool", not on a list of action types), but this LEXICON was
-    # tuned on master-search vocabulary and missed "записываю 200 мл воды"
-    # entirely. Recording verbs are the promise form the nutrition tools
-    # (log_water, clarify_food_entry, start_nutrition_anketa,
-    # health_screening) attract, so they belong here too.
-    "запишу",
-    "запишем",
-    "записываю",
-    "сохраню",
-    "сохраним",
-    "сохраняю",
-    "зафиксирую",
-    "зафиксируем",
-    "оформлю",
-    "оформим",
-    "заполню",
-    "заполним",
-    "заведу",
-    # Deliberately NOT here: "добавлю" / "отмечу". Both are ordinary Russian
-    # discourse markers ("Добавлю, что цены могут отличаться") and would fire
-    # on turns the model answered correctly in words — the same false-positive
-    # cost that made this list narrower than the legacy one.
-)
+# DRF-1827 — единый словарь обещаний живёт в исходящем стороже
+# (``safety.outbound.ACTION_PROMISE_STEMS``): им же судится черновик на
+# выходе, и два списка разошлись бы за один тикет. Здесь — тот же объект.
+_PROMISE_STEMS: tuple[str, ...] = ACTION_PROMISE_STEMS
 
 
 def _looks_like_promise_without_tool(content: str | None) -> bool:
@@ -323,6 +301,9 @@ class _RouterCompletions:
         # adapter's constant) — so the metric reader picks them up here.
         self.last_provider = ""
         self.last_model = ""
+        # DRF-2147 — the vendor the router asked first and hopped away
+        # from, when ``last_provider`` is the fallback. Empty otherwise.
+        self.last_fallback_from = ""
         # DRF-1286 - promise-without-tool retry. Armed per pass by
         # `generate_concierge_reply`: forcing a tool call is only correct
         # while a tool call is still a legitimate outcome. On the
@@ -441,6 +422,7 @@ class _RouterCompletions:
 
         self.last_provider = result.provider or ""
         self.last_model = result.model or ""
+        self.last_fallback_from = getattr(result, "fallback_from", "") or ""
         return _to_openai_shape(result)
 
 
@@ -459,6 +441,11 @@ class RouterLLMClient:
     def last_model(self) -> str:
         """Vendor-resolved model id of the most recent completion."""
         return self.chat.completions.last_model
+
+    @property
+    def last_fallback_from(self) -> str:
+        """Provider the router hopped away from on the most recent completion (DRF-2147)."""
+        return self.chat.completions.last_fallback_from
 
     def arm_forced_tool_retry(self, armed: bool) -> None:
         """Enable/disable the DRF-1286 promise-without-tool retry.
@@ -664,9 +651,69 @@ CONCIERGE_TOOL_SPECS: list[dict[str, Any]] = [
     SHOW_SALONS_TOOL_SPEC,
     SHOW_SERVICES_TOOL_SPEC,
     ASK_CLARIFICATION_TOOL_SPEC,
+    CONFIRM_SAID_FACT_TOOL_SPEC,
     *NUTRITION_TOOL_SPECS,
     SHOW_MY_RECORDS_TOOL_SPEC,
 ]
+
+
+def _has_said_facts(conversation: Any) -> bool:
+    """Есть ли у человека сказанные факты, которые можно подтвердить (DRF-1878)."""
+
+    bot_user = getattr(conversation, "bot_user", None) if conversation is not None else None
+    if bot_user is None:
+        return False
+    try:
+        return bool(said_facts(bot_user))
+    except Exception:  # noqa: BLE001 — без чтения фактов инструмент не предлагается
+        return False
+
+
+def _tools_offered(message_text: str, conversation: Any) -> list[dict[str, Any]]:
+    """Инструменты этого хода — без тех, которые исполнитель отвергнет.
+
+    DRF-1779. ``execute_nutrition_tool`` судит ``health_screening`` по словам
+    человека и памятке DRF-1542 ДЕТЕРМИНИРОВАННО — но после вызова модели.
+    На живом ходу 12.09 модель четыре раза подряд выбирала этот инструмент,
+    исполнитель четыре раза отказывал, и в чат уходила проза рядом с
+    несработавшим вызовом («Не разобрала», «Сейчас проверю»). Тот же суд,
+    выполненный ДО вызова модели, просто не даёт ей такого выбора.
+
+    Красный флаг проходит всегда (§35 п.5 — ``HealthScreeningSkill.matches``
+    возвращает True до чтения памятки); здесь тот же порядок, тем же
+    классификатором. Остальные инструменты не трогаются: их парсеры судят
+    грамматику, а не память разговора, и заранее их вердикт не известен.
+
+    DRF-1878 — второй такой инструмент: ``confirm_said_fact`` без сказанных
+    фактов исполнитель отвергнет наверняка (подтверждать нечего), поэтому без
+    них он не предлагается.
+    """
+
+    from apps.skills.health_screening.classifier import PainSignal, classify
+    from apps.skills.health_screening.memo import screening_asked_recently
+
+    signal = classify(message_text)
+    offer_screening = signal in (PainSignal.RED_FLAG, PainSignal.CLARIFY) or (
+        signal != PainSignal.NONE and not screening_asked_recently(conversation)
+    )
+    withheld: set[str] = set()
+    if not offer_screening:
+        withheld.add("health_screening")
+    # DRF-1994 (решение U) / DRF-1295 — при выключенном контуре питания
+    # модели не предлагаются ТРИ инструмента еды/воды/анкеты. Не четыре:
+    # ``health_screening`` остаётся по решению владельца о coarse guard —
+    # см. ``NUTRITION_ONLY_TOOL_NAMES``. Это второй слой поверх ворот в
+    # ``execute_nutrition_tool``: не предложить дешевле, чем отказать.
+    if not _nutrition_enabled():
+        withheld.update(NUTRITION_ONLY_TOOL_NAMES)
+    # DRF-1923, H7-B: подтверждение сказанного города и времени — только в ходе
+    # выбора исполнителя (C05), не в DISCOVERY.
+    if not (_has_said_facts(conversation) and execution_stage_turn(message_text, conversation)):
+        withheld.add(CONFIRM_SAID_FACT_TOOL)
+    if not withheld:
+        return list(CONCIERGE_TOOL_SPECS)
+    return [spec for spec in CONCIERGE_TOOL_SPECS if spec["name"] not in withheld]
+
 
 # Cap on a tool argument written to the turn log. Both values are bounded by
 # the model's own output, not by anything upstream, and a log line is not the
@@ -678,6 +725,7 @@ _KNOWN_TOOLS = frozenset(
         SHOW_MASTERS_TOOL_SPEC["name"],
         START_BOOKING_TOOL_SPEC["name"],
         ASK_CLARIFICATION_TOOL_SPEC["name"],
+        CONFIRM_SAID_FACT_TOOL,
     }
     | NUTRITION_TOOL_ACTIONS
     | CATALOG_TOOL_ACTIONS
@@ -773,6 +821,7 @@ def _record_concierge_metric(
 
         llm_provider = ""
         llm_model = ""
+        llm_fallback_from = ""
         tokens_in: int | None = None
         tokens_out: int | None = None
         latency_llm_ms: int | None = None
@@ -786,6 +835,7 @@ def _record_concierge_metric(
         if llm_client is not None:
             llm_provider = llm_client.last_provider
             llm_model = llm_client.last_model
+            llm_fallback_from = llm_client.last_fallback_from
         if llm_model and tokens_in is not None:
             try:
                 cost_usd = compute_cost(
@@ -806,6 +856,7 @@ def _record_concierge_metric(
             latency_total_ms=latency_total_ms,
             latency_llm_ms=latency_llm_ms,
             llm_provider=llm_provider,
+            llm_fallback_from=llm_fallback_from,
             llm_model=llm_model,
             llm_tokens_input=tokens_in,
             llm_tokens_output=tokens_out,
@@ -877,6 +928,10 @@ def _dispatch_tool(tool_call: Any, context: Any) -> ToolResult:
         # read are I/O and belong in the wrapper's sync scope, not in a
         # dispatcher the ai-core contract requires to be side-effect-free.
         return ToolResult(action_type=name, action_data={"arguments": args})
+    if name == CONFIRM_SAID_FACT_TOOL:
+        # DRF-1878 — selection only: reading the fact and rendering the
+        # question are I/O and run in the wrapper's sync scope.
+        return ToolResult(action_type=name, action_data={"arguments": args})
     if name == START_BOOKING_ACTION:
         # DRF-1354 — selection only, like every carve-out above. The name
         # resolution and the handoff dispatch are I/O and run after
@@ -886,6 +941,22 @@ def _dispatch_tool(tool_call: Any, context: Any) -> ToolResult:
         action_type=ActionType.SHOW_MASTERS,
         action_data={"arguments": args},
     )
+
+
+def _tool_acted(tool_trace: Any) -> bool:
+    """Сработал ли на этом ходу хоть один инструмент (DRF-1827).
+
+    Запись трассы без ``result`` — инструмент выполнен (карточки, запись,
+    уточнение); ``result=declined_*`` — исполнитель отказал, и ответом ушла
+    проза рядом с вызовом. Пустая трасса — модель отвечала только словами.
+    """
+
+    for entry in tool_trace or ():
+        if not isinstance(entry, dict):
+            continue
+        if not str(entry.get("result") or "").startswith("declined"):
+            return True
+    return False
 
 
 def _tool_trace_entry(dto: Any) -> dict[str, Any]:
@@ -1079,6 +1150,121 @@ def _execute_start_booking(
     return DiscoveryReply(text=reply.text, action_data=reply.action_data, persisted=True)
 
 
+def _nutrition_enabled() -> bool:
+    """DRF-1994 — тот же читатель флага, что у меню, анкеты, воды и инструментов."""
+    from apps.skills.menu.marketplace import nutrition_enabled
+
+    return nutrition_enabled()
+
+
+def _nutrition_off_prompt_line() -> str:
+    """Инструкция модели при выключенном контуре питания — свободный текст.
+
+    Решение владельца (DRF-1295): «в Core Pilot бот содержательно о питании
+    не говорит. Допустима только нейтральная заглушка». Выключатель гасит
+    детерминированные пути; свободный ответ на «что мне есть?» — это
+    промпт, и без этой строки контур был бы «выключен наполовину» с другого
+    конца. Заглушка — та же константа, что у навыков: не второй литерал.
+
+    Слова подобраны мимо ``outbound._MEDICAL``: строка живёт в промпте, а
+    бюджетный сторож читает и его (см. ``_NUTRITION_WELLNESS_INTERPRETATION``).
+
+    Предел, названный, а не спрятанный: мы контролируем, что строка В
+    ПРОМПТЕ, — не то, что модель ей подчинилась. Второе тестом не
+    доказывается.
+    """
+    from apps.skills.menu.marketplace import NUTRITION_UNAVAILABLE_TEXT
+
+    return (
+        "- Контур питания ВЫКЛЮЧЕН. На любой вопрос о питании, еде, рационе, "
+        "калориях, воде, дневнике или анкете питания отвечай ТОЛЬКО этой "
+        f"фразой, дословно и ничем больше: «{NUTRITION_UNAVAILABLE_TEXT}» "
+        "Ничего о еде не советуй, не оценивай и не считай.\n"
+    )
+
+
+#: Строка скрининга — БЕЗУСЛОВНАЯ часть блока питания в промпте (DRF-358 T04,
+#: coarse guard по решению владельца). Вынесена в константу, чтобы тест мог
+#: утверждать её присутствие при выключенном контуре буквально, а не по слову.
+_SCREENING_PROMPT_LINE = (
+    "- Жалоба на боль или симптомы («болит спина», «онемела рука») — "
+    "вызывай health_screening ПЕРВЫМ, раньше любых других инструментов "
+    "и раньше show_masters.\n"
+)
+
+#: Три строки, которые уходят из промпта вместе с тремя инструментами
+#: (``NUTRITION_ONLY_TOOL_NAMES``), когда контур питания выключен.
+_NUTRITION_TOOLS_PROMPT_LINES = (
+    "- Напиток («стакан воды», «кофе 200 мл») — только log_water, "
+    "никогда не clarify_food_entry.\n"
+    "- Короткий текст про еду («борщ 300г») — clarify_food_entry.\n"
+    "- Просьба заполнить или продолжить анкету питания — "
+    "start_nutrition_anketa.\n"
+)
+
+
+#: DRF-2285 (живой проход 22.09): «Сфотографируем еду?» → «Я не умею делать
+#: фото», хотя фото без подписи — рабочий вход в сканер
+#: (``is_structured_nutrition_turn``). Строка — по воротам фото
+#: (:func:`apps.consent.photo_gate.photo_scan_refusal`, флаг
+#: ``FOOD_PHOTO_SCAN_ENABLED``, cross-border): при выключенном распознавании
+#: пригласить прислать фото значило бы пообещать и отказать (ревью #1979).
+FOOD_PHOTO_ON_PROMPT_LINE = (
+    "- Фото еды человек присылает прямо в этот чат, без подписи — бот "
+    "распознаёт его сам и покажет, прежде чем записать. На «сфотографируем "
+    "еду?» пригласи прислать фото; не говори, что не умеешь.\n"
+)
+FOOD_PHOTO_OFF_PROMPT_LINE = (
+    "- Распознавание фото еды сейчас выключено: не обещай разобрать фото — "
+    "предложи написать, что было, словами.\n"
+)
+
+
+def _food_photo_prompt_line() -> str:
+    from apps.consent.photo_gate import photo_scan_refusal
+
+    return FOOD_PHOTO_OFF_PROMPT_LINE if photo_scan_refusal() else FOOD_PHOTO_ON_PROMPT_LINE
+
+
+def _nutrition_tools_prompt_block() -> str:
+    """Блок «Инструменты питания» промпта — с учётом единого выключателя.
+
+    DRF-1994 (решение U) / DRF-1295. Инструменты, которых модели не дают
+    (``_tools_offered``), нельзя при этом рекламировать в промпте — это
+    «выключено наполовину»: модель ищет инструмент, которого нет, и
+    отвечает прозой о еде. Строка скрининга остаётся всегда: скрининг —
+    coarse guard, не контур питания.
+
+    Строка про ``show_my_records`` остаётся тоже: инструмент читает и
+    память, и дневник; дневник при выключенном контуре ответит заглушкой
+    из ``render_diary``, а память — как прежде.
+
+    При выключенном контуре вместо трёх строк про инструменты — одна
+    инструкция молчать заглушкой (``_nutrition_off_prompt_line``). Никогда
+    ни обе, ни ни одной: тест утверждает присутствие одной И отсутствие
+    другой в обоих положениях флага.
+    """
+    tool_lines = (
+        _NUTRITION_TOOLS_PROMPT_LINES + _food_photo_prompt_line()
+        if _nutrition_enabled()
+        else _nutrition_off_prompt_line()
+    )
+    return (
+        "Инструменты питания (приоритет обязателен):\n"
+        + _SCREENING_PROMPT_LINE
+        + tool_lines
+        # DRF-1302/1305 — the READ tool. Named apart from the writing tools
+        # above because the failure it prevents is the model ANSWERING
+        # «что я ел сегодня» from its own head: without a tool call there is
+        # no data, and a warm invented answer about the person's food is the
+        # exact thing the boundary below forbids.
+        + "- Вопрос про СВОИ записи или про то, что ты о нём помнишь («что я "
+        "ел сегодня», «мой дневник», «что ты про меня помнишь») — "
+        "show_my_records. Никогда не отвечай на такой вопрос по памяти "
+        "разговора: числа и факты берутся только из ответа инструмента."
+    )
+
+
 def build_concierge_system_prompt(
     *,
     memory_block: str = "",
@@ -1172,6 +1358,14 @@ def build_concierge_system_prompt(
         "если хочешь записаться» — это тупик: клиент уже сказал, чего "
         "хочет. Не показывай список мастеров второй раз, если нужный "
         "мастер в нём уже был.",
+        # DRF-1827 — обещание действия без действия. Живой ход 12.09:
+        # «Сейчас проверю», «запускаю проверку» рядом с отказавшим
+        # инструментом. Правило читается как правило; исходящий сторож
+        # (класс action_promise) — последняя линия, не первая.
+        "Никогда не обещай «проверю», «поищу», «подберу», «запускаю» и не "
+        "проси подождать: ты ничего не делаешь между ходами. Либо вызови "
+        "нужный инструмент на ЭТОМ же ходу, либо скажи, что можешь сделать "
+        "прямо сейчас, и спроси, что из этого сделать.",
         # DRF-1304 — the salon/service tools exist now (tool_definitions).
         # DRF-1355 sharpens the first two lines against the live failure:
         # «покажи мне салоны» went to show_services with an invented salon.
@@ -1196,24 +1390,10 @@ def build_concierge_system_prompt(
         # load-bearing registry order of apps/skills/apps.py is restated
         # here as model-facing priority: the reasons for that order do not
         # disappear with the transfer, they become prompt requirements.
-        "Инструменты питания (приоритет обязателен):\n"
-        "- Жалоба на боль или симптомы («болит спина», «онемела рука») — "
-        "вызывай health_screening ПЕРВЫМ, раньше любых других инструментов "
-        "и раньше show_masters.\n"
-        "- Напиток («стакан воды», «кофе 200 мл») — только log_water, "
-        "никогда не clarify_food_entry.\n"
-        "- Короткий текст про еду («борщ 300г») — clarify_food_entry.\n"
-        "- Просьба заполнить или продолжить анкету питания — "
-        "start_nutrition_anketa.\n"
-        # DRF-1302/1305 — the READ tool. Named apart from the four writing
-        # tools above because the failure it prevents is the model ANSWERING
-        # «что я ел сегодня» from its own head: without a tool call there is
-        # no data, and a warm invented answer about the person's food is the
-        # exact thing the boundary below forbids.
-        "- Вопрос про СВОИ записи или про то, что ты о нём помнишь («что я "
-        "ел сегодня», «мой дневник», «что ты про меня помнишь») — "
-        "show_my_records. Никогда не отвечай на такой вопрос по памяти "
-        "разговора: числа и факты берутся только из ответа инструмента.",
+        # DRF-1994 — the block is assembled by a function: the three
+        # food/water/anketa lines leave the prompt together with the tools
+        # when the nutrition contour is off, the screening line never does.
+        _nutrition_tools_prompt_block(),
         f"Если вопрос не про запись к мастеру — мягко верни в тему: "
         f"«{voice['off_topic_redirect']}»",
         # Boundaries (W5 task 4) — Constitution Art. X (helpful restraint),
@@ -1230,15 +1410,60 @@ def build_concierge_system_prompt(
         "простыми словами и предложи безопасный шаг — обратиться к "
         "профильному специалисту или сформулировать новое безопасное "
         "намерение. Не сохраняй медицинские выводы как факт о клиенте.",
+        # DRF-2593 — решение владельца 28.09, п.10.
+        NO_INTERNAL_TERMS_RULE,
         f"Ответ не длиннее {_MAX_REPLY_CHARS} символов.",
     ]
     if memory_block:
         parts.append(memory_block)
     if nutrition_block:
+        # §48 — разрешение едет ТОЛЬКО вместе с картиной. Это и есть
+        # детерминированный гейт: нет блока — нет и способности, и решает
+        # это код выше по стеку, а не модель и не тема разговора.
+        parts.append(_NUTRITION_WELLNESS_INTERPRETATION)
         parts.append(nutrition_block)
     if extra_system:
         parts.append(extra_system)
     return "\n\n".join(parts)
+
+
+#: Nutrition Wellness Interpretation — решение владельца §48 (07.09.2026).
+#:
+#: НЕ исключение из медицинской границы. Граница выше не тронута ни одним
+#: словом и остаётся в силе целиком; это отдельная, положительно
+#: определённая способность, которая существует рядом с ней.
+#:
+#: Название выбрано владельцем намеренно: «исключение из границы» — это
+#: формулировка, которая приглашает себя расширять, и каждый следующий
+#: случай просился бы в то же исключение. Расширить способность нельзя,
+#: дописав сюда строку: придётся расширить ГЕЙТ
+#: (:mod:`apps.orchestrator.nutrition_wellness`), а это видимое действие
+#: в дифе.
+#:
+#: Едет в промпт только когда к ходу приложена картина питания. Допуск
+#: решён кодом ДО этой точки — модель узнаёт о нём тем, что картина
+#: пришла.
+#:
+#: Юридический статус: продуктово-архитектурное направление, не
+#: канонический медицинский норматив. Перед превращением в канон —
+#: отдельный прогон через Privacy / Safety / Legal.
+_NUTRITION_WELLNESS_INTERPRETATION = (
+    "Питание (отдельная способность, границы выше остаются в силе):\n"
+    "- К этому ходу приложена картина питания клиента. Тебе разрешено "
+    "назвать связь между тем, что человек ел, и его запросом — своими "
+    "словами, коротко и БЕЗ ЦИФР.\n"
+    # Формулировка обходит слово «диагноз» намеренно, и не из
+    # брезгливости: исходящий страж ловит его ЛЮБОЕ вхождение, включая
+    # отрицающее («это не диагноз»), — шаблон _MEDICAL требует после него
+    # лишь слово, а разделитель у него необязателен. Пока это так, строка
+    # с «диагнозом» внутри промпта роняет бюджетный страж собственной
+    # копии бота. Дефект стража общий и вынесен отдельным PR; здесь он
+    # обойдён, а не замаскирован.
+    "- Это не медицинский совет: назначений, препаратов, добавок, "
+    "диет и целей по весу по-прежнему нет.\n"
+    "- Если тема уходит в симптом, боль, вес или лечение — граница выше "
+    "возвращается немедленно, и связь называть не нужно."
+)
 
 
 def _max_llm_passes() -> int:
@@ -1344,6 +1569,120 @@ def _build_tool_result_message(
     return "\n".join(lines)
 
 
+def _render_zero_result(
+    *,
+    city: str | None,
+    specialization: str | None,
+    already_refused: bool = False,
+) -> DiscoveryReply:
+    """The zero-result refusal, with the alternative named (DRF-1474).
+
+    One function so every deterministic zero path — budget exhausted, a
+    follow-up pass that raised, the repeat short-circuit — says the same
+    thing. Before this ticket they all went through ``_render_master_cards``
+    with an empty list, which routes to ``render_no_match``: the same words,
+    but no way to add the «and here is what we DO have» half without adding it
+    three times.
+
+    The catalog read is best-effort by contract. A refusal that loses its
+    suggestion is the pre-DRF-1474 refusal, which shipped for weeks; a refusal
+    that raises is a lost turn.
+    """
+    alternatives: list[str] = []
+    try:
+        alternatives = city_service_samples(city)
+    except Exception:  # noqa: BLE001 — a suggestion may never cost the refusal
+        logger.exception("orchestrator.concierge.alternatives_failed")
+    return render_no_match(
+        city=city,
+        specialization=specialization,
+        alternatives=alternatives,
+        already_refused=already_refused,
+    )
+
+
+def _render_pending(
+    cards: list[Any],
+    args: dict[str, Any],
+    more_offset: int | None = None,
+    recap: str | None = None,
+) -> DiscoveryReply:
+    """Render the last executed ``show_masters`` result deterministically.
+
+    Two branches reach for this for one reason: a pass died AFTER the tool
+    already returned data, and that data is a better answer than any degraded
+    line. An EMPTY list is not «no data», it is a searched zero, and since
+    DRF-1474 it gets the refusal that names an alternative rather than the
+    same one with a shorter tail.
+
+    DRF-1489 gave the second caller — a follow-up completion that came back
+    empty — the same treatment the raising one already had. Without it that
+    branch answered «AI недоступна» while holding the cards.
+    """
+
+    city = args.get("city")
+    specialization = args.get("specialization")
+    if cards:
+        return _render_master_cards(
+            cards[:_MAX_MASTER_CARDS],
+            city=city,
+            specialization=specialization,
+            more_offset=more_offset,
+            recap=recap,
+        )
+    return _render_zero_result(city=city, specialization=specialization)
+
+
+def _repeats_a_refusal(conversation: Any, message_text: str) -> RefusedQuery | None:
+    """The refusal this turn repeats, or ``None`` — decided WITHOUT the model.
+
+    The guarantee behind DRF-1474. The system-prompt block
+    (:func:`apps.orchestrator.refusal_memo.render_refusal_block`) asks the
+    model not to re-open a settled fact; this decides the one case that must
+    not depend on asking — the person typing the refused service again, which
+    is exactly what happened at 12:12:16 on 04.09 and produced «Помогу найти
+    мастера по маникюру! Уточните, в каком городе вы находитесь?».
+
+    The turn is matched by STEMS against the recorded query, so «Маникюр»,
+    «маникюр» and «маникюр?» are one question. Two conditions keep it narrow:
+
+    * every stem of the turn must be one of the refused query's — a turn that
+      adds a word is asking something else, and answering it from the ledger
+      would be this ticket's own defect with the sign flipped;
+    * the turn must name no city, or the same one — «маникюр в Самаре» is a
+      question the catalog has not been asked, and the memo may not answer it.
+    """
+    if conversation is None:
+        return None
+    # The ledger FIRST: `parse_query` reads the catalog for its city and goal
+    # vocabularies, and on a conversation that has been refused nothing there
+    # is nothing to compare against. Almost every turn takes this exit, so the
+    # two reads are paid only where they can change an answer.
+    entries = recall_refusals(conversation)
+    if not entries:
+        return None
+    try:
+        parsed = parse_query(message_text or "")
+    except Exception:  # noqa: BLE001 — a hint may never cost the turn
+        logger.exception("orchestrator.concierge.repeat_parse_failed")
+        return None
+    turn_stems = set(parsed.stems)
+    if not turn_stems:
+        return None
+    named_city = parsed.cities[0] if parsed.cities else ""
+    for entry in reversed(entries):
+        try:
+            refused_stems = set(parse_query(entry.specialization).stems)
+        except Exception:  # noqa: BLE001
+            continue
+        if not refused_stems or not turn_stems <= refused_stems:
+            continue
+        if named_city and entry.city and named_city.casefold() != entry.city.casefold():
+            continue
+        return entry
+    return None
+
+
 def generate_concierge_reply(
     message_text: str,
     *,
@@ -1407,7 +1746,18 @@ def generate_concierge_reply(
     # let it reach the prompt.
     from apps.orchestrator.safety.gate import guard_outbound
 
-    _guarded = guard_outbound(reply.text, surface="concierge", bot_user=bot_user, trace_id=trace_id)
+    # DRF-1827 — состоялось ли действие: в трассе есть инструмент, который
+    # НЕ отказал. Отказавший (``result=declined_*``, DRF-1754) действием не
+    # считается — это ровно ход 12.09: вызов был, инструмент отказал, «Сейчас
+    # проверю» ушло в чат. Без трассы (ответ только словами, аварийный
+    # fallback) действия тоже не было.
+    _guarded = guard_outbound(
+        reply.text,
+        surface="concierge",
+        bot_user=bot_user,
+        trace_id=trace_id,
+        acted=_tool_acted(reply.tool_trace),
+    )
     if _guarded.blocked:
         # action_data goes with the text (the channel drops keyboards on a
         # block for the same reason). ``persisted`` is preserved so the row
@@ -1429,6 +1779,10 @@ def generate_concierge_reply(
                 content=reply.text,
                 rendered_text=reply.text,
                 action_type=store.action_type,
+                # DRF-1780 — клавиатура/карточки консьержа тоже оставляют
+                # след: до этого все его строки шли с action_data=NULL, и
+                # расшифровка не могла сказать, были ли у ответа кнопки.
+                action_data=reply.action_data,
                 tokens_in=store.tokens_in,
                 tokens_out=store.tokens_out,
                 latency_ms=store.latency_ms or None,
@@ -1439,6 +1793,56 @@ def generate_concierge_reply(
                 "orchestrator.concierge.reply_record_failed trace=%s err=%s", trace_id, exc
             )
     return reply
+
+
+def _g4_question_turn(
+    message_text: str, *, conversation: Any, bot_user: Any, trace_id: str | None
+) -> DiscoveryReply | None:
+    """The deterministic G4 turn on the global path, or None when it is not one.
+
+    Runs the very same skill the per-tenant registry runs, with the same
+    conversation state, so the reply and the persisted question are identical
+    on every surface. Persisted here (``persisted=True``) — the transcript must
+    say what the bot said, exactly as the other model-less branches do.
+    """
+
+    from apps.skills.base import SkillContext
+    from apps.skills.health_screening.classifier import PainSignal, classify
+    from apps.skills.health_screening.g4_question import g4_state
+    from apps.skills.health_screening.g7_question import g7_pending, is_g7_callback
+    from apps.skills.health_screening.skill import HealthScreeningSkill
+
+    # [OD-BOT §164] G4 and [OD-BOT §170] G7 — an open safety question (or a G7
+    # structured answer) is answered before the model: the model never sees
+    # the turn, and a question of its own cannot replace the safety one.
+    if not (
+        g4_state(conversation, bot_user).active
+        or g7_pending(conversation) is not None
+        or is_g7_callback(message_text)
+        or classify(message_text) is PainSignal.CLARIFY
+    ):
+        return None
+    started = time.monotonic()
+    result = HealthScreeningSkill().handle(
+        SkillContext(conversation=conversation, bot_user=bot_user, message_text=message_text)
+    )
+    logger.info(
+        "orchestrator.concierge.g4_question kind=%s trace=%s",
+        (result.meta or {}).get("reply_kind"),
+        trace_id,
+    )
+    _record_concierge_metric(
+        bot_user=bot_user,
+        conversation=conversation,
+        trace_id=trace_id,
+        message_text=message_text,
+        pass_index=None,
+        outcome=AIRequestMetric.OUTCOME_SUCCESS,
+        latency_total_ms=int((time.monotonic() - started) * 1000),
+        skill_selected="health_screening",
+    )
+    # The G7 question carries its three structured answers as buttons.
+    return DiscoveryReply(text=result.reply_text, action_data=result.action_data, persisted=True)
 
 
 def _concierge_turn(
@@ -1475,7 +1879,77 @@ def _concierge_turn(
     failure degrades to the same safe fallback line as the legacy
     discovery path — the concierge must never 500.
     """
+    # DRF-1474 — the person typed the refused service again. There is nothing
+    # for a model to decide here: the catalog has already answered, and the
+    # only thing another model call can add is the chance of answering it with
+    # «помогу найти!». Said once more, plainly, with the alternative named.
+    #
+    # Ahead of the LLM client setup below because this branch never touches it.
+    repeated = _repeats_a_refusal(conversation, message_text)
+    if repeated is not None:
+        started = time.monotonic()
+        logger.info(
+            "orchestrator.concierge.refusal_repeat spec=%r city=%r trace=%s",
+            repeated.specialization[:_MAX_LOGGED_ARG_CHARS],
+            repeated.city[:_MAX_LOGGED_ARG_CHARS],
+            trace_id,
+        )
+        rendered = _render_zero_result(
+            city=repeated.city or None,
+            specialization=repeated.specialization,
+            already_refused=True,
+        )
+        # A model-less turn still belongs in the funnel it answers — same
+        # argument as :func:`_record_direct_metric`, and its LLM columns stay
+        # NULL for the same reason: there was no pass to number.
+        _record_concierge_metric(
+            bot_user=bot_user,
+            conversation=conversation,
+            trace_id=trace_id,
+            message_text=message_text,
+            pass_index=None,
+            outcome=AIRequestMetric.OUTCOME_SUCCESS,
+            latency_total_ms=int((time.monotonic() - started) * 1000),
+            skill_selected="concierge_refusal_repeat",
+        )
+        # DRF-1576 — the keyboard travels with the words, like it does on the
+        # seven other returns in this module. Dropping ``action_data`` here
+        # sent the repeat refusal out as bare text: the alternatives it names
+        # («Классический массаж») were rendered as chips and then discarded,
+        # so the one turn that most needs a way out arrived with none.
+        return DiscoveryReply(
+            text=rendered.text,
+            action_data=rendered.action_data,
+            persisted=True,
+        )
+
+    # [OD-BOT §164] — the G4 routing question is not the model's to interpret:
+    # an open one binds THIS reply to the screening skill, and an ambiguous G4
+    # message asks it. Both are decided here, before the model, so the global
+    # path behaves like the per-tenant registry (where the skill precedes
+    # booking). The gate already ran upstream — a crisis phrase never gets here.
+    g4_reply = _g4_question_turn(
+        message_text, conversation=conversation, bot_user=bot_user, trace_id=trace_id
+    )
+    if g4_reply is not None:
+        return g4_reply
+
+    # DRF-1779 — если бот на прошлом ходу задал вопрос, эта реплика — ответ на
+    # него. Вопрос снимается ДО вызова модели (второй раз его не задать), ответ
+    # ложится в состояние, а модель получает это фактом в system-prompt.
+    answered: AnsweredQuestion | None = close_question(conversation, message_text)
+    if answered is not None:
+        logger.info(
+            "orchestrator.concierge.answer_to_open_question question=%s trace=%s",
+            answered.question.question_id,
+            trace_id,
+        )
+
+    # Медицинский red flag G1–G7 сюда не доходит: обработчик MAX отвечает на
+    # него детерминированно сразу после гейта (DRF-2000 → DRF-2213 Q2,
+    # :mod:`apps.orchestrator.red_flag_turn`).
     llm_client = RouterLLMClient(skill=CONCIERGE_SKILL)
+
     concierge = AIConcierge(
         openai_client=llm_client,
         store=store,
@@ -1485,15 +1959,29 @@ def _concierge_turn(
             summary_text="",
             tenant_id=GLOBAL_TENANT_ID,
         ),
-        tool_definitions=CONCIERGE_TOOL_SPECS,
+        tool_definitions=_tools_offered(message_text, conversation),
         tool_dispatcher=_dispatch_tool,
+    )
+
+    # DRF-1474 — what this conversation has already been told does not exist,
+    # as a system-prompt fact rather than one more message in the transcript.
+    # The transcript already carried it on 04.09 and the model re-opened it
+    # anyway; an instruction is read as an instruction.
+    refusal_block = render_refusal_block(conversation)
+    answer_block = render_answer_block(answered)
+    # Бриф «Мозг» п.4 — что человек уже сказал о себе в прошлых разговорах.
+    said_block = render_said_block(
+        bot_user, offer_confirm=execution_stage_turn(message_text, conversation)
+    )
+    turn_extra_system = "\n\n".join(
+        part for part in (extra_system, refusal_block, answer_block, said_block) if part
     )
 
     def _renderer(_ctx: Any) -> str:
         return build_concierge_system_prompt(
             memory_block=memory_block,
             nutrition_block=nutrition_block,
-            extra_system=extra_system,
+            extra_system=turn_extra_system,
         )
 
     max_passes = _max_llm_passes()
@@ -1513,6 +2001,10 @@ def _concierge_turn(
     # The tool arguments behind ``pending_cards`` — so a degraded render can
     # still say WHAT was searched for (DRF-1283 / render_no_match).
     pending_args: dict[str, Any] = {}
+    # DRF-1532 — and the offset of the page AFTER ``pending_cards``, so a
+    # degraded render keeps «Показать ещё» instead of quietly capping the
+    # person at five for the sake of a pass that died.
+    pending_more_offset: int | None = None
     dto: Any = None
     # DRF-1385 — the ordered trace of tools the model picked this turn, one
     # element per pass that ended in a tool call. The concierge classified
@@ -1562,10 +2054,19 @@ def _concierge_turn(
                 # A follow-up pass failed AFTER the tool already returned
                 # data — render the cards deterministically rather than the
                 # generic fallback: the user asked for masters, we have them.
-                rendered = _render_master_cards(
-                    pending_cards[:_MAX_MASTER_CARDS],
-                    city=pending_args.get("city"),
-                    specialization=pending_args.get("specialization"),
+                # An EMPTY `pending_cards` is not «no data», it is a searched
+                # zero, and since DRF-1474 it gets the refusal that names an
+                # alternative rather than the same one with a shorter tail.
+                rendered = _render_pending(
+                    pending_cards,
+                    pending_args,
+                    pending_more_offset,
+                    recap=render_search_recap(
+                        message_text,
+                        conversation,
+                        city=(pending_args or {}).get("city"),
+                        specialization=(pending_args or {}).get("specialization"),
+                    ),
                 )
                 return _reply(
                     text=rendered.text,
@@ -1677,11 +2178,31 @@ def _concierge_turn(
                 action_data=rendered.action_data,
                 persisted=True,
             )
-        cards = discover_masters(
-            city=city,
-            specialization=specialization,
-            limit=int(limit) if isinstance(limit, int) and limit > 0 else _MAX_MASTER_CARDS,
-            resolve_service=True,
+        # DRF-1532 — a PAGE, not a truncation. ``more_offset`` is the offset
+        # of the next one (``None`` when there is none), and it rides into
+        # every render below so the «Показать ещё» button can exist. Before
+        # this the sixth candidate was never fetched: on «массаж» that was
+        # three real people the person could not reach by any means, chosen
+        # by surname.
+        page_size = min(
+            int(limit) if isinstance(limit, int) and limit > 0 else _MAX_MASTER_CARDS,
+            _MAX_MASTER_CARDS,
+        )
+        # +1 row: the extra card is how this learns there IS a next page,
+        # without a second COUNT — the idiom ``show_salons`` and the
+        # ask-the-service menu already use. ``discover_masters`` stays the
+        # call, and stays THIS module's global, because that is the seam every
+        # show_masters suite patches.
+        cards, more_offset = split_master_page(
+            discover_masters(
+                city=city,
+                specialization=specialization,
+                limit=page_size + 1,
+                resolve_service=True,
+                rotation_seed=rotation_seed(conversation),
+            ),
+            offset=0,
+            limit=page_size,
         )
         # DRF-1312 — which of the requested services the CATALOG can serve.
         # Names come from the model, verdicts come from the catalog: the model
@@ -1703,6 +2224,17 @@ def _concierge_turn(
             trace_id,
             pass_index,
         )
+        # DRF-1882 — сколько мастеров нашлось и в каком порядке едет в запись
+        # трассы этого вызова: из неё теневой DecisionReadiness строит подпись
+        # кандидатов (id мастеров — адреса каталога, не сведения о человеке).
+        if tool_trace and isinstance(tool_trace[-1], dict):
+            tool_trace[-1]["result_count"] = len(cards)
+            tool_trace[-1]["ordered_ids"] = [str(getattr(card, "master_id", "")) for card in cards]
+        if not cards:
+            # DRF-1474 — the fact, written down where it is established. Every
+            # branch below that can answer an empty search reads it back, and
+            # so does the next turn's system prompt.
+            remember_refusal(conversation, specialization=specialization, city=city)
         if cards and missing:
             # Half the request has masters and half has nobody. This is the
             # DRF-1312 turn, and it is answered DETERMINISTICALLY rather than
@@ -1727,6 +2259,10 @@ def _concierge_turn(
                 specialization=specialization,
                 available_services=available,
                 missing_services=missing,
+                more_offset=more_offset,
+                recap=render_search_recap(
+                    message_text, conversation, city=city, specialization=specialization
+                ),
             )
             return _reply(
                 text=rendered.text,
@@ -1743,8 +2279,23 @@ def _concierge_turn(
                 trace_id,
                 pass_index,
             )
-            rendered = _render_master_cards(
-                cards[:_MAX_MASTER_CARDS], city=city, specialization=specialization
+            rendered = (
+                _render_master_cards(
+                    cards[:_MAX_MASTER_CARDS],
+                    city=city,
+                    specialization=specialization,
+                    more_offset=more_offset,
+                    recap=render_search_recap(
+                        message_text, conversation, city=city, specialization=specialization
+                    ),
+                )
+                if cards
+                # DRF-1474 — this is the branch the live refusal came out of
+                # (worker log 04.09 12:12:15, `multipass_budget_exhausted
+                # passes=2` with `count=0`). It used to reach `render_no_match`
+                # through an empty card list, which cannot name what we DO
+                # have; now it asks for that by name.
+                else _render_zero_result(city=city, specialization=specialization)
             )
             return _reply(
                 text=rendered.text,
@@ -1753,6 +2304,7 @@ def _concierge_turn(
             )
         pending_cards = cards
         pending_args = args
+        pending_more_offset = more_offset
         current_text = _build_tool_result_message(message_text, cards, args, missing=missing)
 
     if dto.action_type in NUTRITION_TOOL_ACTIONS:
@@ -1767,6 +2319,10 @@ def _concierge_turn(
             bot_user=bot_user,
             conversation=conversation,
             trace_id=trace_id or "",
+            # DRF-1542 — реплика человека, а не пересказ модели. Вето
+            # health_screening считается по ней: иначе модель проверяет
+            # себя собой и всегда соглашается.
+            message_text=message_text,
         )
         if result is not None and result.reply_text:
             return _reply(
@@ -1776,11 +2332,29 @@ def _concierge_turn(
             )
         # Parser refused the phrase the model passed (or the skill
         # declined): fall back to whatever text the model produced
-        # alongside the call, else the safe line.
+        # alongside the call, else the line that asks for other words.
+        #
+        # DRF-1489 — NOT an outage. The model was reached, it picked the right
+        # tool, and the skill's parser could not read the phrase inside. A
+        # «Повторить» button would re-send the same words, the model would
+        # pick the same tool with the same arguments, and the parser would
+        # refuse them again — a button that loops. The old «отвечу через
+        # минуту» was worse: nobody returns to this turn at all.
+        #
+        # DRF-1754 — исход инструмента едет в трассу. Диалог владельца 12.09:
+        # четыре ответа подряд с action_type=health_screening и
+        # outcome=success, а на экране «Не разобрала» и «Сейчас проверю» —
+        # инструмент отказал, ответом ушла проза рядом с ним, и ни одна
+        # строка базы об этом не говорила. Помечается ТА ЖЕ запись трассы
+        # (резолвер намерения читает из неё tool/arguments и лишний ключ
+        # не замечает), а не новая — иначе он посчитает отказ вторым
+        # намерением.
         text = (dto.content or "").strip()
+        if tool_trace and isinstance(tool_trace[-1], dict):
+            tool_trace[-1]["result"] = "declined_prose" if text else "declined_not_parsed"
         if text:
             return _reply(text=text[:_MAX_REPLY_CHARS], persisted=True)
-        return _reply(text=get_fallback("ru"), persisted=True)
+        return _reply(text=get_not_parsed("ru"), persisted=True)
 
     if dto.action_type in PERSONAL_TOOL_ACTIONS:
         # DRF-1302/1305 — the person's own diary + memory. Deterministic
@@ -1797,10 +2371,33 @@ def _concierge_turn(
                 persisted=True,
             )
         # Unreachable (_KNOWN_TOOLS gates dispatch); degrade like its siblings.
+        #
+        # DRF-1489 — NOT an outage. If this ever fires it is our defect, not
+        # the vendor's, and dispatch is deterministic: the same message
+        # re-sent lands here again. «Повторить» would spend the person's
+        # patience on a guaranteed repeat; «отвечу через минуту» would spend
+        # it on a wait with no end.
         text = (dto.content or "").strip()
         if text:
             return _reply(text=text[:_MAX_REPLY_CHARS], persisted=True)
-        return _reply(text=get_fallback("ru"), persisted=True)
+        return _reply(text=get_no_answer("ru"), persisted=True)
+
+    if dto.action_type == CONFIRM_SAID_FACT_TOOL:
+        # DRF-1878 — the model asked to confirm a fact the person said before.
+        # The question and the buttons are the bot's, not the model's, and the
+        # question is opened (DRF-1779) so the tap's label is read as its answer.
+        args = (dto.action_data or {}).get("arguments", {})
+        key = str(args.get("key") or "") if isinstance(args, dict) else ""
+        offer = confirm_offer(bot_user, key)
+        if offer is not None:
+            open_question(conversation, said_question_id(offer.key), asked_text=offer.question)
+            return _reply(text=offer.question, action_data=confirm_keyboard(offer), persisted=True)
+        # Nothing to confirm (erased between the prompt and the call, or a key
+        # the enum does not have): keep what the model said, never an empty turn.
+        text = (dto.content or "").strip()
+        if text:
+            return _reply(text=text[:_MAX_REPLY_CHARS], persisted=True)
+        return _reply(text=get_no_answer("ru"), persisted=True)
 
     if dto.action_type == START_BOOKING_ACTION:
         # DRF-1354 — the model named a master and asked to book. Resolution
@@ -1823,10 +2420,15 @@ def _concierge_turn(
         # The call named nobody (a model that emitted ``start_booking`` with an
         # empty ``master``). Keep whatever it said alongside the call rather
         # than replacing a possibly fine sentence with the generic line.
+        #
+        # DRF-1489 — NOT an outage: the model answered, it just left out the
+        # one argument the tool needs. And the missing datum is known
+        # exactly, so the degraded line asks for THAT by name instead of
+        # apologising in general or promising a return nobody makes.
         text = (dto.content or "").strip()
         if text:
             return _reply(text=text[:_MAX_REPLY_CHARS], persisted=True)
-        return _reply(text=get_fallback("ru"), persisted=True)
+        return _reply(text=get_booking_needs_name("ru"), persisted=True)
 
     if dto.action_type in CATALOG_TOOL_ACTIONS:
         # DRF-1304 — salons / services selected by the model as tools. The
@@ -1841,6 +2443,10 @@ def _concierge_turn(
             # ``salon`` argument is checked against it before the platform
             # answers for a salon (see ``discovery.salon_named_in``).
             said=_conversation_text(conversation, message_text),
+            # C-01 — сид ротации услуг. Тот же разговор, что уже сеет
+            # ротацию мастеров, чтобы два экрана в одном диалоге не
+            # расходились в порядке.
+            conversation=conversation,
         )
         if catalog_reply is not None:
             # No re-clamp to _MAX_REPLY_CHARS here: the renderer already bounds
@@ -1852,11 +2458,15 @@ def _concierge_turn(
                 persisted=True,
             )
         # Unknown tool name is unreachable (_KNOWN_TOOLS gates dispatch), but
-        # degrade exactly like the nutrition branch if it ever happens.
+        # degrade exactly like the personal branch if it ever happens.
+        #
+        # DRF-1489 — NOT an outage, same reasoning as that branch: a
+        # dispatcher defect repeats identically on the next send, so neither
+        # the retry button nor the promise line would be honest here.
         text = (dto.content or "").strip()
         if text:
             return _reply(text=text[:_MAX_REPLY_CHARS], persisted=True)
-        return _reply(text=get_fallback("ru"), persisted=True)
+        return _reply(text=get_no_answer("ru"), persisted=True)
 
     if dto.action_type == ActionType.ASK_CLARIFICATION:
         data = dto.action_data or {}
@@ -1865,14 +2475,29 @@ def _concierge_turn(
             # No question text: either _dispatch_tool's internal degrade path
             # (unknown tool / malformed arguments — action_data carries only
             # "reason") or a genuine ask_clarification call with a blank
-            # question. Same safe fallback as an LLM error — never send an
-            # empty clarification.
-            return _reply(text=get_fallback("ru"), persisted=True)
+            # question. Never send an empty clarification.
+            #
+            # DRF-1489 — NOT an outage, and no longer the same line as an LLM
+            # error. The model was reached and it replied; what it replied
+            # cannot be shown. Offering «Повторить» for a turn that WAS taken
+            # would be the second way of lying, and «отвечу через минуту»
+            # was the first.
+            return _reply(text=get_no_answer("ru"), persisted=True)
+        # DRF-1765 — граница C02 держится ЗДЕСЬ, на опциях модели, а не в
+        # рендере: уточнение по материалу каталога (DRF-1531, §29.2) нарочно
+        # называет услуги и через этот фильтр не идёт.
+        options, _dropped = filter_clarification_options(
+            [str(o).strip() for o in (data.get("options") or []) if str(o).strip()]
+        )
         rendered = _render_ask_clarification(
             question,
-            list(data.get("options") or []),
+            options,
             data.get("mode"),
+            # DRF-1760 — «Не знаю» на free-вопросе модели (макет C02.3).
+            offer_dont_know=True,
         )
+        # DRF-1779 — вопрос задан: следующая реплика человека — ответ на него.
+        open_question(conversation, "ask_clarification", asked_text=str(question))
         return _reply(
             text=rendered.text,
             action_data=rendered.action_data,
@@ -1881,7 +2506,51 @@ def _concierge_turn(
 
     text = (dto.content or "").strip()
     if not text:
-        return _reply(text=get_fallback("ru"), persisted=True)
+        # DRF-1489 — the ONE of the six that IS an outage. The model was
+        # reached and produced nothing at all: no tool, no prose. There is no
+        # answer here to call good or bad — the turn did not happen — and the
+        # only remedy is the same message sent again, which is exactly what
+        # «Повторить» does. So it joins the unreachable-model case: the
+        # channel draws «AI недоступна» from макет C01, and the promise the
+        # outage line makes is one the button keeps.
+        #
+        # Unless this turn is holding real data. A ``show_masters`` pass that
+        # ran and then died on an empty follow-up completion still has the
+        # cards; rendering them beats any screen, and offering «Повторить»
+        # over an answer we already have would be the same lie pointing the
+        # other way.
+        if pending_cards is not None:
+            rendered = _render_pending(
+                pending_cards,
+                pending_args,
+                pending_more_offset,
+                recap=render_search_recap(
+                    message_text,
+                    conversation,
+                    city=(pending_args or {}).get("city"),
+                    specialization=(pending_args or {}).get("specialization"),
+                ),
+            )
+            return _reply(
+                text=rendered.text,
+                action_data=rendered.action_data,
+                persisted=True,
+            )
+        # Its OWN line, not the llm_error one: «отвечу через минуту» promises
+        # a return, and here nothing is coming on its own — what is on offer
+        # is another attempt, which is what the button does. Text and button
+        # make the same offer (owner's ruling on DRF-1489).
+        #
+        # In MAX the person does not read this sentence today: the channel
+        # substitutes the C01 screen text for every ``outage=True`` reply
+        # (``handler.py`` → ``AI_UNAVAILABLE_TEXT``). The button is there and
+        # correct; only the wording still comes from the shared screen, and
+        # changing that needs a handler this ticket may not touch.
+        #
+        # ``persisted`` stays False on purpose: the store has nothing worth
+        # keeping (the completion was empty), so the channel records its own
+        # line — exactly as on the llm_error path above.
+        return _reply(text=get_no_answer_retry("ru"), outage=True)
     # DRF-1354 — the multi-pass prose reply carried NO keyboard. DRF-1266
     # feeds the executed ``show_masters`` result back so the model can phrase
     # it warmly, and the deterministic card render — the only thing that ever
@@ -1894,14 +2563,38 @@ def _concierge_turn(
     # Only the KEYBOARD is taken from the renderer; the model keeps the words.
     # Same cards, same callbacks, same order — the tap path is identical to
     # the pre-DRF-1266 reply.
-    action_data = None
+    # DRF-2267 (CD §72) — ответ словами без карточек больше не тупик: под ним
+    # следующий шаг и «Меню». Карточки мастеров (ниже) заменяют эти кнопки —
+    # у них своя клавиатура с «Записаться».
+    from apps.orchestrator.next_steps import (
+        discover_button,
+        menu_button,
+        next_step_action_data,
+        salons_button,
+    )
+
+    action_data: dict[str, Any] | None = next_step_action_data(
+        discover_button(), salons_button(), menu_button()
+    )
+    reply_text = text[:_MAX_REPLY_CHARS]
     if pending_cards:
         action_data = _render_master_cards(
             pending_cards[:_MAX_MASTER_CARDS],
             city=pending_args.get("city"),
             specialization=pending_args.get("specialization"),
+            more_offset=pending_more_offset,
         ).action_data
-    return _reply(text=text[:_MAX_REPLY_CHARS], action_data=action_data, persisted=True)
+        # DRF-1908 — the model keeps the words; the «по твоим словам» line is
+        # the last line of text, directly above the cards' keyboard.
+        recap = render_search_recap(
+            message_text,
+            conversation,
+            city=pending_args.get("city"),
+            specialization=pending_args.get("specialization"),
+        )
+        if recap:
+            reply_text = f"{text[: _MAX_REPLY_CHARS - len(recap) - 2].rstrip()}\n\n{recap}"
+    return _reply(text=reply_text, action_data=action_data, persisted=True)
 
 
 def generate_direct_show_masters_reply(
@@ -2015,10 +2708,37 @@ def generate_direct_show_masters_reply(
         # path did not answer the inbound message.
         logger.info("orchestrator.concierge.direct_show_masters.not_claimed trace=%s", trace_id)
         return None
-    cards = discover_masters(
-        specialization=message_text,
+    # DRF-1531 — один различающий вопрос вместо сортировки неразличимого
+    # (решение владельца §29.2). Стоит ПЕРЕД чтением каталога: ход, который
+    # спрашивает, карточек не рисует вовсе.
+    #
+    # Здесь, а не только на LLM-пути, по той же причине, по которой здесь
+    # стоит ``claims_direct_show_masters``: детерминированная ветка отвечает
+    # на «покажи мастеров по услуге» сама, и если бы вопрос жил только у
+    # соседа, «массаж» получал бы вопрос или список в зависимости от того,
+    # какая из двух дверей открылась. Два экрана в один тап друг от друга не
+    # должны вести себя по-разному — ровно довод DRF-1539.
+    question = clarifying_question(specialization=message_text)
+    if question is not None:
+        logger.info("orchestrator.concierge.direct_show_masters.clarify trace=%s", trace_id)
+        _record_direct_metric(
+            bot_user=bot_user,
+            conversation=conversation,
+            trace_id=trace_id,
+            message_text=message_text,
+            started=started,
+            outcome=AIRequestMetric.OUTCOME_SUCCESS,
+        )
+        return question
+    cards, more_offset = split_master_page(
+        discover_masters(
+            specialization=message_text,
+            limit=_MAX_MASTER_CARDS + 1,
+            resolve_service=True,
+            rotation_seed=rotation_seed(conversation),
+        ),
+        offset=0,
         limit=_MAX_MASTER_CARDS,
-        resolve_service=True,
     )
     logger.info(
         "orchestrator.concierge.direct_show_masters count=%d trace=%s",
@@ -2039,7 +2759,12 @@ def generate_direct_show_masters_reply(
         started=started,
         outcome=AIRequestMetric.OUTCOME_SUCCESS,
     )
-    return _render_master_cards(cards, specialization=message_text)
+    return _render_master_cards(
+        cards,
+        specialization=message_text,
+        more_offset=more_offset,
+        recap=render_search_recap(message_text, conversation, specialization=message_text),
+    )
 
 
 def _record_direct_metric(

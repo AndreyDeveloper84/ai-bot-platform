@@ -4,6 +4,7 @@ from django.apps import AppConfig
 class IdentityConfig(AppConfig):
     default_auto_field = "django.db.models.BigAutoField"
     name = "apps.identity"
+    verbose_name = "Люди и профили"
 
     def ready(self) -> None:
         # Wire signal handlers (P1 auto-create profile, P8 booking_completed).

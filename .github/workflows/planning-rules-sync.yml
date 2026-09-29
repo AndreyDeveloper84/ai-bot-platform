@@ -1,0 +1,37 @@
+name: planning-rules-sync
+
+# Дрейф-контроль артефакта реестра планировочных правил (D-1): вендоренная
+# копия в apps/planning_rules/data/ обязана совпадать с источником в
+# ayla-knowledge. Правило, изменённое владельцем, не должно тихо не доехать.
+# Отдельный workflow, а не шаг ci: дрейф источника — не поломка чужого PR.
+
+on:
+  pull_request:
+    paths:
+      - "apps/planning_rules/**"
+      - "scripts/sync_planning_rules_registry.py"
+      - ".github/workflows/planning-rules-sync.yml"
+  schedule:
+    - cron: "23 5 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  drift-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Install PyYAML
+        run: python -m pip install "PyYAML==6.0.2"
+
+      - name: Check registry drift against ayla-knowledge
+        run: python scripts/sync_planning_rules_registry.py --check

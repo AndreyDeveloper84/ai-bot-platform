@@ -27,11 +27,25 @@ from apps.orchestrator.nutrition_global import (
     food_tap_labels,
     resolve_anketa_tap,
     resolve_food_tap,
+    resolve_nutri_stop_tap,
     try_handle_structured_nutrition_turn,
 )
 from apps.skills.base import SkillResult
 
 pytestmark = pytest.mark.django_db(transaction=True)
+
+
+@pytest.fixture(autouse=True)
+def _nutrition_contour_on(settings):
+    """DRF-1994 — этот модуль проверяет контур питания ВКЛЮЧЁННЫМ.
+
+    До единого выключателя пути анкеты/дневника/воды флаг не читали, и
+    модуль работал при любом его значении. Теперь умолчание ``False``
+    (fail-closed по решению владельца) даёт заглушку — и то, что модуль
+    всегда предполагал, названо явно. Выключенное поведение живёт в
+    ``test_nutrition_single_switch_1994``.
+    """
+    settings.NUTRITION_ENABLED = True
 
 
 def _conversation(skill_state=None):
@@ -138,7 +152,15 @@ class TestExecuteNutritionTool:
     def test_unknown_tool_returns_none(self):
         assert (
             execute_nutrition_tool(
-                "order_pizza", {}, bot_user=Mock(), conversation=Mock(), trace_id="t"
+                "order_pizza",
+                {},
+                bot_user=Mock(),
+                conversation=Mock(),
+                trace_id="t",
+                # Реплика человека этому инструменту не нужна — но
+                # аргумент обязателен (DRF-1542), и пустая строка здесь
+                # сказана вслух, а не подставлена умолчанием.
+                message_text="",
             )
             is None
         )
@@ -151,6 +173,7 @@ class TestExecuteNutritionTool:
                 bot_user=Mock(),
                 conversation=Mock(),
                 trace_id="t",
+                message_text="выпил",
             )
             is None
         )
@@ -164,18 +187,24 @@ class TestExecuteNutritionTool:
             bot_user=Mock(),
             conversation=Mock(),
             trace_id="t",
+            message_text="привет, как дела у тебя сегодня",
         )
         assert result is None
 
     def test_health_screening_executes_real_skill(self):
         # Network-free skill: the deterministic diagnostic reply must come
         # from the same class the per-tenant registry would have run.
+        #
+        # DRF-1542 — ``message_text`` (реплика человека) теперь обязателен
+        # для скрининга: вето считается по ней, а не по ``symptom_text``
+        # модели. Здесь человек сказал ровно то же, что модель пересказала.
         result = execute_nutrition_tool(
             "health_screening",
             {"symptom_text": "болит спина"},
             bot_user=Mock(),
-            conversation=Mock(),
+            conversation=_conversation(),
             trace_id="t",
+            message_text="болит спина",
         )
         assert result is not None
         assert result.reply_text
@@ -222,6 +251,20 @@ class TestConciergeNutritionTurn:
             chat_id="drf1268-e2e-chat",
         )
         conversation = resolve_active_global_conversation(bot_user)
+        # §92 п.1 / DRF-1698 — согласие на персональный расчёт. Гейт стоит НА
+        # ВХОДЕ в анкету (#1593): без согласия анкета ничего не спрашивает, и
+        # этот тест проверял бы отказ вместо потока. Выдаётся НАСТОЯЩИМ
+        # писателем (тем же, что экран согласия), а не подменой предиката:
+        # тест гоняет живой обработчик, и предусловие обязано быть таким же
+        # живым. У отказа свои тесты — test_consent_gate_at_entry.py.
+        from apps.consent.personal_calculation import (
+            PERSONAL_CALCULATION_DOCUMENT_VERSION,
+            grant as grant_personal_calculation,
+        )
+
+        assert grant_personal_calculation(
+            bot_user, document_version=PERSONAL_CALCULATION_DOCUMENT_VERSION
+        )
         return bot_user, conversation
 
     def test_nutrition_tool_specs_reach_the_model(self, monkeypatch):
@@ -239,7 +282,16 @@ class TestConciergeNutritionTurn:
         generate_concierge_reply("привет", bot_user=bot_user, conversation=conversation)
 
         tool_names = {t["name"] for t in captured["tools"]}
-        assert NUTRITION_TOOL_ACTIONS <= tool_names
+        # DRF-1779 — ``health_screening`` предлагается модели только когда
+        # исполнитель его не отвергнет: на «привет» симптома нет,
+        # ``HealthScreeningSkill.matches`` вернул бы False, и вызов ушёл бы в
+        # veto → проза. Остальные nutrition-инструменты — всегда.
+        assert (NUTRITION_TOOL_ACTIONS - {"health_screening"}) <= tool_names
+        assert "health_screening" not in tool_names
+
+        captured.clear()
+        generate_concierge_reply("болит спина", bot_user=bot_user, conversation=conversation)
+        assert NUTRITION_TOOL_ACTIONS <= {t["name"] for t in captured["tools"]}
 
     def test_health_screening_tool_call_returns_skill_reply(self, monkeypatch):
         provider = AsyncMock()
@@ -287,6 +339,16 @@ class TestAnketaOnGlobalPath:
             chat_id="drf1268-anketa-chat",
         )
         conversation = resolve_active_global_conversation(bot_user)
+        # §92 п.1 / DRF-1698 — согласие на расчёт настоящим писателем: гейт
+        # стоит на входе в анкету, без него тест проверял бы отказ.
+        from apps.consent.personal_calculation import (
+            PERSONAL_CALCULATION_DOCUMENT_VERSION,
+            grant as grant_personal_calculation,
+        )
+
+        assert grant_personal_calculation(
+            bot_user, document_version=PERSONAL_CALCULATION_DOCUMENT_VERSION
+        )
         return bot_user, conversation
 
     def test_anketa_start_writes_fsm_state(self):
@@ -361,6 +423,37 @@ class TestAnketaTapAsAHistoryTurn:
             assert options, step
             assert not [(lbl, slug) for lbl, slug in options if not lbl or not slug], step
 
+    @pytest.mark.parametrize("value", ["pregnancy_nursing", "eating_disorder", "condition", "none"])
+    def test_screening_tap_leaves_no_line_in_the_history(self, value):
+        """Скрининг §7.1 — единственный choice-шаг без подстановки метки.
+
+        Метка здесь — health-факт («Беременность или кормление»), и
+        подстановка положила бы его в ``record_global_message`` как реплику
+        человека, то есть в постоянную историю, которую на следующих ходах
+        читает промпт консьержа. Анкета эти ответы не хранит; история —
+        такое же хранилище, и исключения для неё нет.
+
+        ``none`` проверяется вместе с остальными намеренно: если метку не
+        подставлять только для «объявленных» состояний, само наличие строки
+        в истории станет признаком объявления.
+        """
+        tap = resolve_anketa_tap(f"cb:anketa:choice:screening:{value}")
+        assert tap is not None
+        assert tap.history_text is None
+
+    def test_screening_labels_exist_but_are_deliberately_unused_here(self):
+        """Сторож предыдущего теста: метки есть и они не пусты.
+
+        Без него ``history_text is None`` зеленел бы и на опустевшей
+        таблице — то есть доказывал бы отсутствие подстановки там, где
+        подставлять просто нечего.
+        """
+        from apps.skills.nutrition_anketa.fsm import choice_keyboard_options
+
+        options = choice_keyboard_options("screening")
+        assert options
+        assert all(lbl and slug for lbl, slug in options)
+
     @pytest.mark.parametrize("step", ["age", "height", "weight"])
     def test_text_input_steps_have_no_label_to_substitute(self, step):
         """Шаг без клавиатуры не может прийти как ``choice`` — и не подставляется."""
@@ -426,12 +519,20 @@ class TestFoodTapAsAHistoryTurn:
         Кнопка, добавленная через месяц без метки, падает здесь, а не в
         истории у человека в чате.
         """
+        from apps.orchestrator.nutrition_global import edit_tap_history_text
+
         labels = food_tap_labels(self.SCAN)
         assert labels, "клавиатуры еды пусты — проверка ниже ни о чём"
         for payload, label in labels.items():
             tap = resolve_food_tap(payload)
             assert tap is not None, payload
-            assert tap.history_text == label, payload
+            # DRF-1838 — чипы правки своей записи идут через точку выбора H2
+            # (OD-WATER-TAP-HISTORY): метка есть всегда, а в историю она
+            # попадает или нет по решению владельца. Остальные — меткой.
+            if payload.startswith("cb:food:entry_"):
+                assert tap.history_text == edit_tap_history_text(label), payload
+            else:
+                assert tap.history_text == label, payload
 
     def test_the_confirmation_and_the_rejection_are_both_kept(self):
         """«✅ В дневник» и «❌ Не то» — подтверждение и поправка о себе."""
@@ -493,3 +594,40 @@ class TestFoodTapAsAHistoryTurn:
         assert tap is not None
         assert tap.history_text is not None
         assert "abc-xyz-789" not in tap.history_text
+
+
+class TestNutriStopTapAsAHistoryTurn:
+    """DRF-1468 — тап «Не присылать» (``cb:nutri:stop:*``).
+
+    Кнопка отписки — высказывание кнопкой, но фразы за ней нет: метка
+    одна на все поверхности, а смысл тапа целиком в payload'е. В историю
+    не идёт ничего — ход виден по ответу-подтверждению бота, ровно как у
+    навигационных тапов анкеты и ``cb:catalog:*``.
+    """
+
+    @pytest.mark.parametrize("surface", ["report", "water", "coach_hint"])
+    def test_a_stop_tap_never_reaches_history(self, surface):
+        tap = resolve_nutri_stop_tap(f"cb:nutri:stop:{surface}")
+        assert tap is not None
+        assert tap.history_text is None
+
+    def test_an_unknown_but_well_formed_surface_is_still_a_tap(self):
+        """Старая кнопка (поверхность, которой больше нет) — тоже не фраза."""
+        tap = resolve_nutri_stop_tap("cb:nutri:stop:hint")
+        assert tap is not None
+        assert tap.history_text is None
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "cb:nutri:stop",  # без поверхности — не наша кнопка
+            "cb:nutri:stop:вода",  # набрано руками — не payload кнопки
+            "cb:nutri:stop:report extra",
+            "cb:nutri:delete:report",  # другой глагол
+            "cb:food:diary",
+            "не присылать",
+            "",
+        ],
+    )
+    def test_anything_else_is_not_ours(self, text):
+        assert resolve_nutri_stop_tap(text) is None

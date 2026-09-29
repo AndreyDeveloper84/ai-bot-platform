@@ -9,8 +9,12 @@ FAQ / discovery instead of a safe response. This module wires the SAME
 
 ### Scope (S1-B, #1053) — detection + canned reply only
 
-* ``HANDOFF`` verdict (suicide / self-harm / acute emergency / abuse) → a canned
-  **crisis** reply (crisis resources).
+* ``HANDOFF`` verdict (suicide / self-harm / abuse) → a canned **crisis** reply
+  (crisis resources).
+* ``MEDICAL`` verdict (acute medical emergency — the «неотложка» group, DRF-2000)
+  → the medical emergency text
+  (:data:`apps.orchestrator.safety.medical_emergency.MEDICAL_EMERGENCY_TEXT_V2`,
+  103 / 112), never the psychological helpline.
 * ``BLOCK`` verdict (specific drugs / definitive diagnosis / legal advice) → a
   canned **block** reply.
 * ``CLARIFY`` and ``ALLOW`` → the turn proceeds to normal handling. We
@@ -67,7 +71,8 @@ from dataclasses import dataclass, field
 
 import logging
 
-from apps.orchestrator.safety.outbound import evaluate_outbound
+from apps.orchestrator.safety.medical_emergency import MEDICAL_EMERGENCY_TEXT_V2
+from apps.orchestrator.safety.outbound import evaluate_action_promise, evaluate_outbound
 from apps.orchestrator.safety.pre_check import SafetyResult, SafetyVerdict, pre_check
 
 logger = logging.getLogger(__name__)
@@ -109,14 +114,20 @@ class SafetyGateOutcome:
     reply_text: str = ""
     reason: str = ""
     matched_patterns: list[str] = field(default_factory=list)
+    #: DRF-1885 — сырой результат ``pre_check`` на ВСЕХ ветках. Нужен
+    #: производителю вердикта DecisionReadiness (``safety.record``):
+    #: ``assess()`` ставит ``rule_id``/``evidence_ref`` по совпавшему
+    #: паттерну, а ветка CLARIFY/ALLOW выше отдаёт только строку verdict.
+    result: SafetyResult | None = None
 
 
 def evaluate_inbound(text: str) -> SafetyGateOutcome:
     """Run the shared safety pre-check over inbound ``text`` for the MAX handlers.
 
-    Returns an :class:`SafetyGateOutcome`. Short-circuits (``allowed=False``) only
-    on ``HANDOFF`` (crisis reply) and ``BLOCK`` (block reply); ``CLARIFY`` and
-    ``ALLOW`` return ``allowed=True`` so the turn proceeds as before.
+    Returns an :class:`SafetyGateOutcome`. Short-circuits (``allowed=False``) on
+    ``HANDOFF`` (crisis reply), ``MEDICAL`` (medical emergency text, 103 / 112 —
+    DRF-2000) and ``BLOCK`` (block reply); ``CLARIFY`` and ``ALLOW`` return
+    ``allowed=True`` so the turn proceeds as before.
 
     ``intent_decision`` is intentionally not passed — neither live MAX path runs
     the LLM intent classifier (that is the pipeline's step 6, dead in prod). This
@@ -132,6 +143,19 @@ def evaluate_inbound(text: str) -> SafetyGateOutcome:
             reply_text=CRISIS_REPLY_TEXT,
             reason=result.reason,
             matched_patterns=list(result.matched_patterns),
+            result=result,
+        )
+    if verdict == SafetyVerdict.MEDICAL:
+        # DRF-2000 (S-2): the «неотложка» group ends the safety-sensitive
+        # flow with the owner's medical text — 103 / 112 in the first line,
+        # no helpline, no diagnosis. Separate from the crisis reply above.
+        return SafetyGateOutcome(
+            allowed=False,
+            verdict=verdict.value,
+            reply_text=MEDICAL_EMERGENCY_TEXT_V2,
+            reason=result.reason,
+            matched_patterns=list(result.matched_patterns),
+            result=result,
         )
     if verdict == SafetyVerdict.BLOCK:
         return SafetyGateOutcome(
@@ -140,10 +164,60 @@ def evaluate_inbound(text: str) -> SafetyGateOutcome:
             reply_text=BLOCK_REPLY_TEXT,
             reason=result.reason,
             matched_patterns=list(result.matched_patterns),
+            result=result,
         )
 
     # CLARIFY + ALLOW → proceed to normal handling.
-    return SafetyGateOutcome(allowed=True, verdict=verdict.value, reason=result.reason)
+    return SafetyGateOutcome(
+        allowed=True, verdict=verdict.value, reason=result.reason, result=result
+    )
+
+
+#: Verdicts that are answered even while a human operator drives the
+#: conversation (DRF-2213 Q1). Owner decision N-1 (CD §67, AYLA-DEC-0096),
+#: verbatim: «кризис и неотложка получают детерминированный ответ всегда, в
+#: том числе при согласии, не данном или отозванном, и при работе оператора».
+#: It overrides the S1-B barge-guard (#1053, REPLY_DRF-1015 №1 «не перебивать
+#: оператора») for these two verdicts ONLY: ``BLOCK`` and everything else stay
+#: silent under handoff, as before.
+REACHES_THROUGH_HANDOFF: frozenset[str] = frozenset(
+    {SafetyVerdict.HANDOFF.value, SafetyVerdict.MEDICAL.value}
+)
+
+
+def reaches_through_handoff(outcome: SafetyGateOutcome) -> bool:
+    """True when this inbound verdict must be answered despite a handoff."""
+    return not outcome.allowed and outcome.verdict in REACHES_THROUGH_HANDOFF
+
+
+def under_handoff(text: str, outcome: SafetyGateOutcome) -> SafetyGateOutcome:
+    """The inbound verdict as it stands while an operator drives the dialog.
+
+    Owner decision «все по рекомендациям» (CD §72, DRF-2213 Q1 п.1в): a
+    medical red flag G1–G7 of the ``health_screening`` classifier is
+    «неотложка» too, and under N-1 it is answered even during a handoff.
+    Outside a handoff the skill / Q2 branch answers it; under one, the
+    operator's mute would swallow it — so here it becomes the same ``MEDICAL``
+    outcome the gate gives the «неотложка» group: the medical emergency text
+    [OD-BOT §163], one text on every path. Anything the gate already stopped,
+    and anything the classifier does not flag, is returned unchanged.
+    """
+
+    if not outcome.allowed:
+        return outcome
+    from apps.orchestrator.safety.medical_emergency import MEDICAL_EMERGENCY_TEXT_V2
+    from apps.skills.health_screening.classifier import PainSignal, classify
+
+    if classify(text) is not PainSignal.RED_FLAG:
+        return outcome
+    reason = "health_screening_red_flag_under_handoff"
+    return SafetyGateOutcome(
+        allowed=False,
+        verdict=SafetyVerdict.MEDICAL.value,
+        reply_text=MEDICAL_EMERGENCY_TEXT_V2,
+        reason=reason,
+        result=SafetyResult(verdict=SafetyVerdict.MEDICAL, reason=reason),
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -182,8 +256,19 @@ def guard_outbound(
     surface: str,
     bot_user: object | None = None,
     trace_id: object | None = None,
+    acted: bool | None = None,
+    subject_own_data: bool = False,
 ) -> OutboundGuardOutcome:
     """Check a drafted reply on its way to a person; emit once if it is blocked.
+
+    ``acted`` (DRF-1827) — состоялось ли на этом ходу действие: сработал ли
+    инструмент, чьим результатом является черновик. ``False`` включает класс
+    ``action_promise`` (см. ``outbound.evaluate_action_promise``): проза,
+    обещающая «проверю / поищу / запускаю / секундочку», не выпускается —
+    вместо неё уходит, чего ассистент не умеет и что может прямо сейчас.
+    ``None`` (умолчание) — вызывающий не знает; класс не применяется, и все
+    прежние вызывающие видят прежнее поведение. ``True`` — действие было,
+    и «покажу ещё» после сработавшего show_masters честно.
 
     ``surface`` is the free-form name of the place the reply was about to
     leave from (``"max"``, ``"telegram"``, ``"concierge"``). It rides in the
@@ -191,12 +276,36 @@ def guard_outbound(
     often does the assistant have to be stopped, and where» without a union
     over per-channel names.
 
-    Never raises. ``evaluate_outbound`` already fails open on a broken
-    pattern, and the emit is wrapped: a telemetry failure must not be the
-    thing that costs someone their answer.
+    Never raises, but no longer for the reason this docstring used to give.
+    ``evaluate_outbound`` used to fail OPEN on a broken pattern — it handed
+    back the unchecked draft. Since owner §111 it fails closed for this one
+    capability: an unlookable draft is replaced by :data:`REPLACEMENT_TEXT`,
+    so the person still gets an answer and it is not the one nobody checked.
+    The emit is still wrapped: a telemetry failure must not be the thing that
+    costs someone their answer.
     """
 
-    verdict = evaluate_outbound(text)
+    verdict = evaluate_outbound(text, subject_own_data=subject_own_data)
+    own_data = verdict.own_data_categories
+    if verdict.allowed and acted is False:
+        # `evaluate_action_promise` возвращает свой вердикт, у которого поля
+        # про своих данные нет: признак запоминается ДО подмены, иначе запись
+        # в журнал потерялась бы именно на этом пути.
+        verdict = evaluate_action_promise(text)
+    if own_data:
+        # DRF-2435 — «заблокировали чужой контакт» и «это собственные данные
+        # человека, пропускаем» обязаны читаться в журнале по-разному: иначе мы
+        # починим поведение и оставим слепой журнал, а молчал именно он.
+        #
+        # Единственный писатель этого имени в контуре — здесь: у шлюза есть
+        # поверхность и trace, а одно имя события обязано иметь один смысл.
+        logger.info(
+            "safety.outbound.own_data_passed surface=%s categories=%s allowed=%s trace=%s",
+            surface,
+            ",".join(own_data),
+            verdict.allowed,
+            trace_id,
+        )
     if verdict.allowed:
         return OutboundGuardOutcome(allowed=True, text=verdict.text)
 
@@ -238,7 +347,10 @@ __all__ = [
     "CRISIS_REPLY_TEXT",
     "OUTBOUND_ACTION_TYPE",
     "OutboundGuardOutcome",
+    "REACHES_THROUGH_HANDOFF",
     "SafetyGateOutcome",
     "evaluate_inbound",
     "guard_outbound",
+    "reaches_through_handoff",
+    "under_handoff",
 ]

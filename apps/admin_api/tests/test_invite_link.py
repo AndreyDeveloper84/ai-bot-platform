@@ -1,10 +1,11 @@
 """The invitation must be handable over, not only DM-able (DRF-1424).
 
 #1332 gave the invitation a working entry — an ``open_app`` button — but
-only inside a DM, and :func:`~apps.admin_api.views_invite._dispatch_max_dm`
-can address that DM only to a MAX username the salon already knows, in a
-chat that already exists. An owner holding a phone number, a Telegram
-handle, or a group chat has nothing to send.
+only inside a personal message, and that message could be addressed only
+to a MAX username the salon already knows, in a chat that already
+exists. An owner holding a phone number, a Telegram handle, or a group
+chat had nothing to send. (The message itself is gone since §44.4; the
+link below is now the whole of the handover.)
 
 ``invite_link`` is that missing object: a start link
 (``https://max.ru/<bot>?start=master_invite_<token>``) which opens
@@ -25,7 +26,6 @@ pipeline with no opinion about it and drop it silently.
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import patch
 
 import pytest
 from django.test import Client
@@ -87,14 +87,12 @@ def _invite(client: Client, *, registry: tuple[BotEntry, ...], settings) -> dict
     settings.MAX_BOT_REGISTRY = registry
     settings.MAX_BOT_WEB_APP = SALON_WEB_APP
     settings.SITE_DOMAIN = "https://miniapp-dev.example"
-    with patch("apps.admin_api.views_invite.max_outbound.send_message") as mock:
-        mock.return_value = {"ok": True}
-        resp = client.post(
-            _invite_url(),
-            data=_valid_body(),
-            content_type="application/json",
-            HTTP_AUTHORIZATION=init_data_header("5001"),
-        )
+    resp = client.post(
+        _invite_url(),
+        data=_valid_body(),
+        content_type="application/json",
+        HTTP_AUTHORIZATION=init_data_header("5001"),
+    )
     assert resp.status_code == 201, resp.content
     return resp.json()
 

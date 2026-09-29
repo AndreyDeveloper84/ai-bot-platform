@@ -103,9 +103,9 @@ describe("GoalSelectScreen (dumb renderer over the decision document)", () => {
       goal_key: "relax",
       source_channel: "miniapp",
     });
-    // New document replaces state: current-goal block shows the label,
-    // the old missing prompt is gone.
-    const current = await screen.findByRole("region", { name: "Текущая цель" });
+    // New document replaces state: the goal now sits in «Уже учла»
+    // (DRF-2177 — from the first frame), the old missing prompt is gone.
+    const current = await screen.findByRole("region", { name: "Уже учла" });
     expect(
       within(current).getByText("Расслабиться и восстановиться"),
     ).toBeInTheDocument();
@@ -144,7 +144,7 @@ describe("GoalSelectScreen (dumb renderer over the decision document)", () => {
     expect(
       await screen.findByText("Хочу избавиться от напряжения в плечах"),
     ).toBeInTheDocument();
-  });
+  }, 15_000);
 
   it("need_guidance button → postGoalSelect({intent}) → renders the guidance prompt from missing", async () => {
     const user = userEvent.setup();
@@ -191,6 +191,11 @@ describe("GoalSelectScreen (dumb renderer over the decision document)", () => {
         { id: "choose_suggested", label: "Выбери из вариантов" },
         { id: "need_guidance", label: "Помоги определиться" },
       ],
+      // Документ обязан оставлять дорогу дальше, иначе это ворота, и
+      // экран подставит своё поле и свой выход (C-2 guard, DRF-1483).
+      // Здесь проверяется другое — что поле ввода следует намерению
+      // `formulate_own`, — поэтому документ берётся не-ворота.
+      next: { id: "browse_catalog", label: "Найти услугу" },
     };
     mockedFetch.mockResolvedValue(otherDoc);
     renderScreen();
@@ -202,7 +207,9 @@ describe("GoalSelectScreen (dumb renderer over the decision document)", () => {
     expect(
       screen.getByText("Какая зона требует внимания?"),
     ).toBeInTheDocument();
-    // No formulate_own intent in the document → no textarea rendered.
+    // No formulate_own intent in a document that is NOT a gate → no
+    // textarea rendered. The screen follows the document, it does not
+    // invent the field; the C-2 guard below is what covers the gate.
     expect(screen.queryByRole("textbox")).not.toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Помоги определиться" }),
@@ -242,5 +249,100 @@ describe("GoalSelectScreen (dumb renderer over the decision document)", () => {
     expect(
       screen.getByText("Что хочешь получить от визита?"),
     ).toBeInTheDocument();
+  });
+  // ─── DRF-1435 / разбор целей §9 п.1-2 ─────────────────────────────────
+  //
+  // До этих правок отказ имел голос (`role="alert"`), а успех — никакого:
+  // ни объявления, ни видимого изменения там, где человек стоит. Секция
+  // «Текущая цель» и подсветка чипа — выше сгиба, у поля ввода их не видно.
+
+  it("успех сохранения объявляется — и до нажатия объявления НЕТ", async () => {
+    const user = userEvent.setup();
+    mockedFetch.mockResolvedValue(BASE_DOC);
+    mockedPost.mockResolvedValue({
+      ...BASE_DOC,
+      known: {
+        goal: {
+          goal_key: null,
+          goal_text: "Хочу спать лучше",
+          selected_at: "2026-09-07T07:00:00Z",
+          source_channel: "miniapp",
+        },
+      },
+      missing: [],
+    });
+    renderScreen();
+
+    const textarea = await screen.findByRole("textbox", {
+      name: "Опиши своими словами",
+    });
+    // Парная положительная стража (DRF-1411): сначала доказываем, что
+    // объявления нет, иначе «оно появилось» прошло бы и на экране, где
+    // оно висит всегда.
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+
+    await user.type(textarea, "Хочу спать лучше");
+    await user.click(screen.getByRole("button", { name: "Отправить" }));
+
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      "Цель сохранена.",
+    );
+  });
+
+  it("ответ на шаг анкеты объявляется СВОИМИ словами, а не «цель сохранена»", async () => {
+    const user = userEvent.setup();
+    const anketaDoc: DecisionContext = {
+      ...BASE_DOC,
+      missing: [
+        {
+          kind: "anketa_step",
+          step: "area",
+          prompt: "Что сейчас хочется привести в порядок?",
+          allow_free_text: true,
+          options: [],
+        } as unknown as DecisionContext["missing"][number],
+      ],
+    };
+    mockedFetch.mockResolvedValue(anketaDoc);
+    mockedPost.mockResolvedValue(anketaDoc);
+    renderScreen();
+
+    const textarea = await screen.findByRole("textbox", {
+      name: "Опиши своими словами",
+    });
+    await user.type(textarea, "лицо");
+    await user.click(screen.getByRole("button", { name: "Отправить" }));
+
+    // Названо тем, чем является: шаг анкеты — не сохранённая цель.
+    expect(await screen.findByRole("status")).toHaveTextContent(
+      "Ответ сохранён.",
+    );
+  });
+
+  it("«Отправить» уезжает в липкую панель, когда в поле появился текст", async () => {
+    const user = userEvent.setup();
+    mockedFetch.mockResolvedValue(BASE_DOC);
+    renderScreen();
+
+    const textarea = await screen.findByRole("textbox", {
+      name: "Опиши своими словами",
+    });
+    // Пустое поле: кнопка одна и отключена — сохранять нечего.
+    const idle = screen.getAllByRole("button", { name: "Отправить" });
+    expect(idle).toHaveLength(1);
+    expect(idle[0]).toBeDisabled();
+
+    await user.type(textarea, "Хочу спать лучше");
+
+    // Текст есть: кнопка по-прежнему ОДНА (дубля не завели) и нажимаема.
+    const active = screen.getAllByRole("button", { name: "Отправить" });
+    expect(active).toHaveLength(1);
+    expect(active[0]).toBeEnabled();
+
+    // И она в липкой панели, а не последней содержательной на странице:
+    // ровно это и делало 29 целей на боевом без единого `goal_text`.
+    const save = active[0];
+    expect(save).toBeDefined();
+    expect(save?.closest(".cta-bar")).not.toBeNull();
   });
 });

@@ -1,5 +1,7 @@
 /**
- * Лист согласия на медданные (DRF-1453).
+ * Лист согласия на медданные (DRF-1453) — с DRF-2100 выдаёт ОДНО согласие
+ * дневника `food-diary-v1` и показывает раскрытие Z9; старые строки HEALTH
+ * читаются и отзываются тем же листом.
  *
  * Проверяется не «рендерится ли», а те свойства, из-за которых 152-ФЗ ст. 10
  * требует отдельного согласия:
@@ -32,6 +34,7 @@ import {
   withdrawHealthConsent,
   type HealthConsentState,
 } from "../lib/health-consent";
+import { DISCLOSURE_BODY, FOOD_DIARY_DISCLOSURE_VERSION } from "../lib/food-diary-disclosure";
 import { HealthConsentSheet } from "./PersonalDataSheets";
 
 const mockedGrant = vi.mocked(grantHealthConsent);
@@ -72,15 +75,22 @@ beforeEach(() => {
 });
 
 describe("выдача", () => {
-  it("показывает, что именно передаётся и зачем, до подтверждения", () => {
+  it("показывает раскрытие дневника (Z9) целиком, до подтверждения", () => {
     renderSheet(false);
 
-    // Перечень виден сразу — не за аккордеоном, не после нажатия.
-    expect(screen.getByText(/Что передаётся:/)).toBeInTheDocument();
-    expect(screen.getByText(/Зачем:/)).toBeInTheDocument();
-    expect(screen.getByText(/дневник питания/)).toBeInTheDocument();
+    // DRF-2100 — тот же текст, что на экране сканера: согласие одно.
+    // Каждый абзац виден сразу — не за аккордеоном, не после нажатия.
+    for (const paragraph of DISCLOSURE_BODY) {
+      expect(screen.getByText(paragraph)).toBeInTheDocument();
+    }
     // И прямо сказано, что разрешение отдельное.
     expect(screen.getByText(/особой категории/)).toBeInTheDocument();
+  });
+
+  it("не несёт своего текста о медданных рядом с раскрытием", () => {
+    renderSheet(false);
+    expect(screen.queryByText(/Что передаётся:/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Зачем:/)).not.toBeInTheDocument();
   });
 
   it("называет обратимость до нажатия, а не после", () => {
@@ -88,13 +98,15 @@ describe("выдача", () => {
     expect(screen.getByText(/Отозвать можно в любой момент/)).toBeInTheDocument();
   });
 
-  it("отправляет версию показанного раскрытия", async () => {
+  it("отправляет версию показанного раскрытия — дневника v1, не health-data", async () => {
     mockedGrant.mockResolvedValue(state(true));
     const { onSettled } = renderSheet(false);
 
     await userEvent.click(screen.getByRole("button", { name: "Разрешить" }));
 
-    expect(mockedGrant).toHaveBeenCalledWith(HEALTH_CONSENT_DOCUMENT_VERSION);
+    expect(mockedGrant).toHaveBeenCalledWith(FOOD_DIARY_DISCLOSURE_VERSION);
+    expect(FOOD_DIARY_DISCLOSURE_VERSION).toBe("food-diary-v1");
+    expect(HEALTH_CONSENT_DOCUMENT_VERSION).toBe(FOOD_DIARY_DISCLOSURE_VERSION);
     expect(onSettled).toHaveBeenCalledWith(state(true));
   });
 

@@ -21,21 +21,29 @@ import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { ScreenLayout } from "../components/ScreenLayout";
 import { StickyCta } from "../components/StickyCta";
 import { DelayedSkeleton, MasterCardSkeleton } from "../components/Skeleton";
+import { OfflineBanner } from "../components/OfflineBanner";
 import { StateError } from "../components/StateError";
-import { useBackButton } from "../hooks/useBackButton";
+import { useOnline } from "../hooks/useOnline";
 import {
   getCustomerMaster,
   type CustomerMaster,
 } from "../lib/customer-booking";
-import { publicRating } from "../lib/rating";
-import { setMaster, setService, useBookingDraft } from "../state/booking";
+import { publicRating, reviewCountLabel } from "../lib/rating";
+import { setEntryPoint, setMaster, setService, useBookingDraft } from "../state/booking";
+import { backTo } from "../lib/screen-back";
+
+/** Возврат (DRF-1493): в каталог — единственный вход в карточку мастера. */
+const BACK = backTo("/customer/catalog");
 
 type State =
   | { kind: "loading" }
   | { kind: "ok"; master: CustomerMaster }
   | { kind: "error"; err: unknown };
 
+export const OTHER_MASTERS_LABEL = "Другие специалисты";
+
 export function CustomerMasterDetailScreen() {
+  const online = useOnline();
   const navigate = useNavigate();
   const { masterId } = useParams<{ masterId: string }>();
   const [params] = useSearchParams();
@@ -43,7 +51,6 @@ export function CustomerMasterDetailScreen() {
   const draft = useBookingDraft();
   const [state, setState] = useState<State>({ kind: "loading" });
 
-  useBackButton({ onBack: () => navigate(-1) });
 
   const load = useCallback(() => {
     if (!masterId) return;
@@ -65,6 +72,8 @@ export function CustomerMasterDetailScreen() {
 
   function onChooseTime() {
     if (state.kind !== "ok" || !masterId) return;
+    // DRF-1484 — provenance: this flow originates at the master profile.
+    setEntryPoint("master");
     setMaster(masterId, state.master.name);
     // Pre-fill service in draft if URL param available — keeps the
     // F3 → F4 chain consistent.
@@ -79,7 +88,7 @@ export function CustomerMasterDetailScreen() {
 
   if (state.kind === "loading") {
     return (
-      <ScreenLayout title="Мастер">
+      <ScreenLayout back={BACK} title="Мастер">
         <DelayedSkeleton loading>
           <MasterCardSkeleton />
           <MasterCardSkeleton />
@@ -90,7 +99,7 @@ export function CustomerMasterDetailScreen() {
 
   if (state.kind === "error") {
     return (
-      <ScreenLayout title="Мастер">
+      <ScreenLayout back={BACK} title="Мастер">
         <StateError err={state.err} onRetry={load} screenId="customer-master-detail" />
       </ScreenLayout>
     );
@@ -103,13 +112,15 @@ export function CustomerMasterDetailScreen() {
 
   return (
     <ScreenLayout
+      back={BACK}
       title={m.name}
       cta={
-        <StickyCta onClick={onChooseTime}>
+        <StickyCta onClick={onChooseTime} disabled={!online}>
           Выбрать время
         </StickyCta>
       }
     >
+      <OfflineBanner online={online} />
       <section className="customer-master__intro">
         <div className="customer-master__identity">
           <div className="customer-master__name">{m.name}</div>
@@ -120,6 +131,12 @@ export function CustomerMasterDetailScreen() {
             >
               <span aria-hidden="true">⭐ </span>
               {rating}
+              {/* DRF-1778 — число отзывов только из данных, иначе без скобок. */}
+              {reviewCountLabel(m.review_count) && (
+                <span className="customer-master__reviews" data-testid="master-reviews">
+                  {" "}({reviewCountLabel(m.review_count)})
+                </span>
+              )}
             </div>
           )}
           {m.specialization && (
@@ -148,6 +165,28 @@ export function CustomerMasterDetailScreen() {
           Выбери удобное время — покажу свободные.
         </p>
       </section>
+
+      {/* DRF-1778 (C05.3): «Другие специалисты» — с карточки, не только
+          из ошибки. С известной услугой — выбор мастера под неё; без —
+          каталог с той же секцией мастеров. Не marketplace: ни фильтров,
+          ни сравнения. */}
+      <div className="customer-master__others">
+        <button
+          type="button"
+          className="goal-select__minor-action"
+          onClick={() => {
+            const svc = draft.serviceId || serviceId;
+            if (svc) {
+              if (!draft.serviceId) setService(svc, "");
+              navigate("/customer/book/master");
+            } else {
+              navigate("/customer/catalog");
+            }
+          }}
+        >
+          {OTHER_MASTERS_LABEL}
+        </button>
+      </div>
 
       {/* Secondary CTA «Сообщить по записи» — hidden in round-1 until
           the messaging route ships. `/customer/masters/{id}/message`

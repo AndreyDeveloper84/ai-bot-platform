@@ -86,6 +86,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
+import { SystemState } from "../components/master/SystemState";
 import { MasterTabBar } from "../components/MasterTabBar";
 import { Snackbar } from "../components/Snackbar";
 import { ApiError } from "../lib/api";
@@ -172,13 +173,7 @@ const COPY = {
     save: "Сохранить",
     cancel: "Отмена",
   },
-  states: {
-    loading: "Загружаем настройки…",
-    errorTitle: "Не получилось загрузить",
-    errorBody:
-      "Не получилось загрузить настройки уведомлений. Проверьте интернет.",
-    retry: "Попробовать снова",
-  },
+  // Загрузка / ошибка загрузки — SystemState (DRF-2190, словарь DRF-1181 п.10).
 };
 
 // --- State model --------------------------------------------------------
@@ -233,7 +228,7 @@ export function MasterNotificationSettingsScreen() {
       setBackButton(false);
       setClosingConfirmation(false);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `navigate` нужен только внутри обработчика системной кнопки; привязка делается один раз за монтирование
   }, []);
 
   // Modal-dirty closing-confirmation: ON while quiet-hours editor is open
@@ -298,7 +293,6 @@ export function MasterNotificationSettingsScreen() {
           // defensively so we notice if a future writer bypasses the UI.
           const slug = e.slug as NotificationPrefsErrorSlug;
           if (slug === "urgent_forced_on") {
-            // eslint-disable-next-line no-console
             console.warn(
               "[M7] backend rejected urgent=false — UI guard breached?",
               e.detail,
@@ -356,7 +350,7 @@ export function MasterNotificationSettingsScreen() {
         const msg =
           slug === "time_invalid"
             ? COPY.modal.sameTimeError
-            : e.detail || COPY.toasts.saveError;
+            : COPY.toasts.saveError;
         setEditor({ ...editor, saving: false, err: msg });
       } else {
         setOfflineBanner(true);
@@ -370,14 +364,19 @@ export function MasterNotificationSettingsScreen() {
   if (phase.kind === "loading") {
     return (
       <NotifFrame>
-        <LoadingSkeleton />
+        <SystemState kind="loading" lines={5} />
       </NotifFrame>
     );
   }
   if (phase.kind === "error") {
     return (
       <NotifFrame>
-        <ErrorPane onRetry={() => void fetchPrefs()} />
+        <SystemState
+          kind="load_error"
+          what="notifications"
+          err={phase.err}
+          onRetry={() => void fetchPrefs()}
+        />
       </NotifFrame>
     );
   }
@@ -476,11 +475,6 @@ export function MasterNotificationSettingsScreen() {
         />
       </NotifSection>
 
-      <MasterTabBar
-        unreadCount={0}
-        scheduleHasPendingChange={false}
-        profileHasOwnerPendingChange={false}
-      />
 
       {editor !== null ? (
         <QuietHoursEditor
@@ -520,6 +514,7 @@ function NotifFrame({ children }: { children: React.ReactNode }) {
         <h1 className="m-notif__title">{COPY.header}</h1>
       </header>
       {children}
+      <MasterTabBar scheduleHasPendingChange={false} />
     </div>
   );
 }
@@ -706,41 +701,5 @@ function OfflineBanner() {
     >
       <p style={{ margin: 0 }}>{COPY.banners.offline}</p>
     </div>
-  );
-}
-
-function LoadingSkeleton() {
-  return (
-    <div className="m-notif__skeleton-wrap" aria-busy="true">
-      <p className="m-notif__loading-label">{COPY.states.loading}</p>
-      {[0, 1, 2, 3, 4].map((i) => (
-        <div key={i} className="m-card m-card--skel">
-          <div
-            className="skeleton"
-            style={{ width: "55%", height: "1em" }}
-          />
-          <div
-            className="skeleton"
-            style={{ width: "75%", height: "0.85em", marginTop: 6 }}
-          />
-        </div>
-      ))}
-    </div>
-  );
-}
-
-function ErrorPane({ onRetry }: { onRetry: () => void }) {
-  return (
-    <section className="m-notif__section">
-      <h2 className="m-notif__section-title">{COPY.states.errorTitle}</h2>
-      <div className="callout callout--danger" role="alert">
-        <p style={{ margin: 0 }}>{COPY.states.errorBody}</p>
-        <div style={{ marginTop: "var(--s-3)" }}>
-          <button type="button" className="btn-secondary" onClick={onRetry}>
-            {COPY.states.retry}
-          </button>
-        </div>
-      </div>
-    </section>
   );
 }

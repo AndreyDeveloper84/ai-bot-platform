@@ -5,9 +5,9 @@ Mounted under ``/api/v1/master/`` from :mod:`config.urls`.
 
 from __future__ import annotations
 
-from django.urls import path
+from django.urls import path, re_path
 
-from apps.master_api import views
+from apps.master_api import views, views_assistant, views_bookings, views_profile_card
 
 app_name = "master_api"
 
@@ -16,59 +16,99 @@ urlpatterns = [
     path("onboarding/accept", views.onboarding_accept, name="onboarding_accept"),
     path("onboarding/reject", views.onboarding_reject, name="onboarding_reject"),
     path("onboarding/profile", views.onboarding_profile, name="onboarding_profile"),
+    path("onboarding/readiness", views.onboarding_readiness, name="onboarding_readiness"),
+    # DRF-1797 (M5) — готовность, «Опубликовать» и статус — прокси в каталог M4.
+    path("publication/readiness", views.publication_readiness, name="publication_readiness"),
+    path("publication/status", views.publication_status, name="publication_status"),
+    path("publication", views.publication_publish, name="publication"),
     # M4 alias — same view, post-onboarding edit URL. Idempotent +
     # last-write-wins; audit event slug still reads MASTER_PROFILE_INITIALIZED
     # until the dedicated MASTER_PROFILE_UPDATED slug ships in a follow-up
     # backend cleanup ticket (Option B per the M4 frontend PR body).
     path("profile", views.onboarding_profile, name="profile"),
+    # DRF-1814 (часть A) — экран 07: карточка (владелец полей — каталог,
+    # limits оттуда же), бейдж «Принимает сегодня» из реального слота, чипы
+    # из выбранных шаблонов; портфолио — прокси. Субъект — мастер из
+    # initData: параметра specialist_id в путях НЕТ по построению.
+    path("profile/card", views_profile_card.profile_card, name="profile_card"),
+    path("profile/portfolio", views_profile_card.profile_portfolio, name="profile_portfolio"),
+    path(
+        "profile/portfolio/<uuid:item_id>",
+        views_profile_card.profile_portfolio_item,
+        name="profile_portfolio_item",
+    ),
     path("me", views.me, name="me"),
     path("dashboard", views.dashboard, name="dashboard"),
+    # DRF-1895 (M10b) — выбор канонических услуг и цена мастера: прокси в
+    # каталог (M8a / M8b). `selection` раньше `<uuid:salon_service_id>`.
+    path("services/selection", views.service_selection, name="service_selection"),
+    # DRF-1799 (M7) — канон для экрана 03: направления и шаблоны направления.
+    path("services/directions", views.service_directions, name="service_directions"),
+    path("services/templates", views.service_templates, name="service_templates"),
+    path(
+        "services/<uuid:salon_service_id>/offer",
+        views.service_offer,
+        name="service_offer",
+    ),
+    path(
+        "services/<uuid:salon_service_id>",
+        views.selected_service,
+        name="selected_service",
+    ),
     # M3 schedule self-service (master-mobile §M3, PR Tier1.2)
     path("schedule", views.schedule, name="schedule"),
+    # DRF-1816 (M24) — недельный шаблон часов мастера: прокси в каталог.
+    path("working-hours", views.working_hours, name="working_hours"),
+    # DRF-1802 (M10) — «своя услуга» = заявка о разрыве канона: прокси в
+    # каталог (M9). Решает только владелец в admin каталога — мутаций статуса
+    # здесь нет. `similar` раньше `<uuid:request_id>`.
+    # DRF-1811 (M19) — место работы соло-мастера: прокси в каталог (M11 #502,
+    # M12 #476). Подсказки адреса — POST: адрес не должен оседать в URL.
+    path("service-locations", views.service_locations, name="service_locations"),
+    path(
+        "service-locations/<uuid:item_id>",
+        views.service_location_detail,
+        name="service_location_detail",
+    ),
+    path("geocoding/suggest", views.address_suggest, name="address_suggest"),
+    path("canon-gap-requests", views.canon_gap_requests, name="canon_gap_requests"),
+    path("canon-gap-requests/similar", views.canon_gap_similar, name="canon_gap_similar"),
+    path(
+        "canon-gap-requests/<uuid:request_id>",
+        views.canon_gap_request_detail,
+        name="canon_gap_request_detail",
+    ),
+    # DRF-1845 — «Принимаю записи»; не путать с «availability» (заявка на выходной).
+    path("accepting-bookings", views.accepting_bookings, name="accepting_bookings"),
+    # DRF-2154 (М-2) — записи мастера: детали с временным состоянием
+    # (DRF-1185), создание и окна под услугу (DRF-1184) — тем же кодом, что
+    # салонная стойка (admin_api/services/booking). Субъект — мастер из
+    # initData: master_id в путях и телах НЕТ по построению. Поиск клиента
+    # — `customers?q=` (тот же маршрут, что ростер).
+    path("bookings", views_bookings.create_booking, name="create_booking"),
+    path(
+        "bookings/<uuid:appointment_id>",
+        views_bookings.booking_detail_view,
+        name="booking_detail",
+    ),
+    path("booking-slots", views_bookings.booking_slots, name="booking_slots"),
+    # DRF-1857 (K14) — «Мои отзывы»: прокси в каталог под субъектом мастера.
+    path("reviews", views.reviews, name="reviews"),
     path("availability", views.availability_request, name="availability_request"),
     path(
         "availability/pending",
         views.availability_pending,
         name="availability_pending",
     ),
-    # M5 conversations list (master-mobile §M5, PR Tier1.3)
-    path("conversations", views.conversations_list, name="conversations_list"),
-    # M6 conversation detail backend (master-mobile §M6, PR M6.1)
-    path(
-        "conversations/<uuid:conversation_id>",
-        views.conversation_detail,
-        name="conversation_detail",
-    ),
-    path(
-        "conversations/<uuid:conversation_id>/messages",
-        views.conversation_send_message,
-        name="conversation_send_message",
-    ),
-    path(
-        "conversations/<uuid:conversation_id>/mark-read",
-        views.conversation_mark_read,
-        name="conversation_mark_read",
-    ),
-    path(
-        "conversations/<uuid:conversation_id>/promote",
-        views.conversation_promote,
-        name="conversation_promote",
-    ),
-    # M6 AI drafts (master-mobile §M6, Bundle B / item 4 backend)
-    path(
-        "conversations/<uuid:conversation_id>/drafts/generate",
-        views.conversation_draft_generate,
-        name="conversation_draft_generate",
-    ),
-    path(
-        "conversations/<uuid:conversation_id>/drafts/<uuid:draft_id>/send-as-me",
-        views.conversation_draft_send_as_me,
-        name="conversation_draft_send_as_me",
-    ),
-    path(
-        "conversations/<uuid:conversation_id>/drafts/<uuid:draft_id>/release-to-ai",
-        views.conversation_draft_release_to_ai,
-        name="conversation_draft_release_to_ai",
+    # DRF-1528 (ruling владельца 06.09): прямой переписки мастера с клиентом
+    # нет (OD-7), поверхность снята в DRF-1255. Открытые ручки — способ
+    # обойти DRF-1039 в обход поверхности, поэтому сняты и они. Один
+    # «ушедший» маршрут на весь префикс: девять прежних адресов отвечают
+    # 410 Gone с причиной, а не 404 (молчание) и не 500 (зовёт повторить).
+    re_path(
+        r"^conversations(?:/.*)?$",
+        views.conversations_retired,
+        name="conversations_retired",
     ),
     # M7 notification preferences (master-mobile §M7, Bundle B / item 3)
     path(
@@ -79,6 +119,14 @@ urlpatterns = [
     # Tier 2 Phase 1 read-only roster + catalog (master-solo-surface §4.3 + §4.4)
     path("customers", views.customers_list, name="customers_list"),
     path("catalog", views.catalog_list, name="catalog_list"),
+    # Раздел «Ayla» — диалог мастера с ассистентом (DRF-1180, OD-MASTER-IA).
+    # Маршрут поверх уже работающего `services.assistant`; исполнение
+    # пишущего действия отделено от ответа (см. views_assistant).
+    path("assistant/history", views_assistant.assistant_history, name="assistant_history"),
+    # DRF-2153 (М-5) — стартовый экран Ayla: контекст дня + чипы (макет DRF-1187).
+    path("assistant/context", views_assistant.assistant_context, name="assistant_context"),
+    path("assistant/ask", views_assistant.assistant_ask, name="assistant_ask"),
+    path("assistant/confirm", views_assistant.assistant_confirm, name="assistant_confirm"),
     # Billing status (C2) + payout preview (C3) proxies (pilot 2026-08-15)
     path("billing/status", views.billing_status, name="billing_status"),
     path("billing/card-setup", views.billing_card_setup, name="billing_card_setup"),

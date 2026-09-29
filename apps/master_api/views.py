@@ -35,14 +35,15 @@ token lookup is filtered by tenant explicitly as defence-in-depth.
 from __future__ import annotations
 
 import json
+from decimal import Decimal, InvalidOperation
 import logging
 import re
 import uuid
 from datetime import datetime, timedelta, timezone as dt_timezone
-from pathlib import Path
 from typing import Any
+from collections.abc import Callable
+from functools import wraps
 
-from django.conf import settings
 from django.db import transaction
 from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.utils import timezone as dj_timezone
@@ -50,29 +51,32 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
 from apps.audit.services import write_audit
+from apps.catalog.handles import canonical_handle
+from apps.catalog.specialist_ref import CatalogSpecialistUnresolved, catalog_specialist_id
 from apps.catalog.models import CatalogMaster, CatalogService, MasterService
-from apps.conversations.models import AiDraft
-from apps.master_api.services.conversations import (
-    ConversationsListError,
-    DEFAULT_LIMIT as CONVERSATIONS_DEFAULT_LIMIT,
-    MAX_LIMIT as CONVERSATIONS_MAX_LIMIT,
-    list_master_conversations,
+from apps.catalog.master_state import sale_block
+from apps.catalog.services.schedule_confirmation import (
+    ScheduleConfirmationError,
+    confirm_schedule,
 )
-from apps.master_api.services.ai_draft_limits import check_and_consume_rate_limit
-from apps.master_api.services.ai_drafts import (
-    generate_draft_for_conversation,
-    release_draft_to_ai,
-    send_draft_as_master,
+from apps.admin_api.services.availability import (
+    AvailabilityDecisionError,
+    approve_availability_request,
 )
-from apps.master_api.services.conversation_detail import (
-    ConversationDetailError,
-    get_conversation_detail,
-    mark_conversation_read,
-    promote_to_human_locked,
-    send_master_message,
+from apps.identity.services.solo_onboarding import is_solo_provider
+from apps.integrations.ayla.booking_client import (
+    BookingAPIError,
+    BookingBadRequestError,
+    BookingUnavailableError,
+    ScheduleBlockConflictError,
+    get_ayla_booking_client,
 )
+from apps.integrations.ayla.salon_client import SalonAPIError
+from apps.integrations.ayla.user_proxy import external_user_id_for
 from apps.master_api.services.catalog import list_master_services
 from apps.master_api.services.customers import list_master_customers
+from apps.master_api.services.onboarding_readiness import build_readiness, identity_facts
+from apps.master_api.services.permissions import permissions_from_facts
 from apps.master_api.services.dashboard import build_dashboard
 from apps.master_api.services.billing import (
     BillingProxyResult,
@@ -92,7 +96,9 @@ from apps.master_api.services.schedule import (
     AvailabilityRequestError,
     DEFAULT_RANGE_DAYS,
     MAX_RANGE_DAYS,
+    TEMPLATE_CONFLICT_HORIZON_DAYS,
     build_schedule,
+    conflicting_bookings_for_template,
     list_pending_requests,
     request_availability_change,
 )
@@ -113,11 +119,11 @@ from apps.master_api.auth import (
     require_master_init_data,
     validate_invite_token,
 )
+from apps.miniapp_api.master_media import master_photo_path
 
 logger = logging.getLogger(__name__)
 
 
-MAX_BIO_LENGTH = 280
 """Per master-mobile §M0 Step 3 — twitter-length bio limit."""
 
 
@@ -126,35 +132,6 @@ MAX_BIO_LENGTH = 280
 
 def _error(slug: str, detail: str, status: int) -> JsonResponse:
     return JsonResponse({"error": slug, "detail": detail}, status=status)
-
-
-def _draft_error_response(exc: Any) -> JsonResponse:
-    """Map a :class:`DraftActionError` to a JSON response.
-
-    Mirrors the inline mapping in
-    :func:`conversation_draft_generate` for the ``generate_in_flight``
-    slug (Issue #550). Generalised here so the send/release endpoints
-    surface ``conversation_busy`` (Issue #551 — lock symmetry) with the
-    same shape: JSON body carries ``retry_after_seconds`` AND the
-    response has a ``Retry-After`` header for clients that read it.
-
-    Slugs handled with Retry-After:
-      * ``generate_in_flight`` — Issue #550 (generate path)
-      * ``conversation_busy`` — Issue #551 (send / release path)
-      * ``cost_cap_exceeded`` — fixed 1h hint
-    """
-
-    retry_after = exc.extra.get("retry_after_seconds") if exc.extra else None
-    body: dict[str, Any] = {"error": exc.slug, "detail": exc.detail}
-    if isinstance(retry_after, int) and retry_after > 0:
-        body["retry_after_seconds"] = retry_after
-    resp = JsonResponse(body, status=exc.status)
-    if exc.slug in ("generate_in_flight", "conversation_busy"):
-        secs = retry_after if isinstance(retry_after, int) and retry_after > 0 else 3
-        resp["Retry-After"] = str(secs)
-    elif exc.slug == "cost_cap_exceeded":
-        resp["Retry-After"] = "3600"
-    return resp
 
 
 def _parse_json_body(request: HttpRequest) -> dict[str, Any] | JsonResponse:
@@ -196,11 +173,15 @@ def _services_for_master(master: CatalogMaster) -> list[dict[str, Any]]:
     shouldn't show services they can't be booked for.
     """
 
-    service_ids = MasterService.all_tenants.filter(
-        master_id=master.id, tenant=master.tenant
-    ).values_list("service_id", flat=True)
+    # DRF-1989 — кабинет мастера показывает непродаваемое с причиной.
+    sale_state = {
+        service_id: (sellable, unsellable_reason or None)
+        for service_id, sellable, unsellable_reason in MasterService.all_tenants.filter(
+            master_id=master.id, tenant=master.tenant
+        ).values_list("service_id", "sellable", "unsellable_reason")
+    }
     services = CatalogService.all_tenants.filter(
-        id__in=list(service_ids),
+        id__in=list(sale_state),
         tenant=master.tenant,
         is_active=True,
     ).order_by("name")
@@ -209,6 +190,8 @@ def _services_for_master(master: CatalogMaster) -> list[dict[str, Any]]:
             "id": str(s.id),
             "name": s.name,
             "duration_min": s.duration_min,
+            "sellable": sale_state[s.id][0],
+            "unsellable_reason": sale_state[s.id][1],
         }
         for s in services
     ]
@@ -226,7 +209,7 @@ def _master_card(master: CatalogMaster, *, include_services: bool = True) -> dic
         "name": master.name,
         "specialization": master.specialization,
         "bio": master.bio,
-        "photo_url": master.photo_url,
+        "photo_url": master_photo_path(master.id, master.photo_url),
     }
     if include_services:
         payload["services"] = _services_for_master(master)
@@ -251,6 +234,155 @@ def _audit_payload(
     if extra:
         out.update(extra)
     return out
+
+
+def _as_uuid(value: object) -> uuid.UUID | None:
+    """``UUID`` или ``None``. SQLite отдаёт UUIDField строкой, Postgres — UUID.
+
+    Сравнивать ``str`` с ``UUID`` можно бесконечно и всегда получать False,
+    поэтому приведение здесь, а не в вызывающем.
+    """
+
+    if value is None or value == "":
+        return None
+    if isinstance(value, uuid.UUID):
+        return value
+    try:
+        return uuid.UUID(str(value))
+    except (TypeError, ValueError, AttributeError):
+        return None
+
+
+def _init_data_handle(request: HttpRequest) -> str:
+    """MAX-хэндл предъявителя из HMAC-подписанного ``initData``.
+
+    ``user.username`` входит в подписанную часть (``apps/miniapp_api/auth.py``
+    §Trust model), поэтому значению можно верить так же, как ``user.id``.
+    MAX отдаёт его без ведущей ``@`` — приводим к той форме, которую пишет
+    владелец, чтобы повторное приглашение нашло эту строку.
+    """
+
+    verified = getattr(request, "verified_init_data", None)
+    if verified is None:
+        return ""
+    raw = verified.user.get("username") if isinstance(verified.user, dict) else None
+    return canonical_handle(raw if isinstance(raw, str) else "")
+
+
+def _glue_target(
+    *,
+    tenant_id: uuid.UUID,
+    ayla_user_id: uuid.UUID | None,
+    exclude_pk: uuid.UUID,
+) -> CatalogMaster | None:
+    """Строка того же салона, на которой ``ayla_user_id`` человека УЖЕ стоит.
+
+    DRF-1507, пункт 4 — и порядок здесь важнее самого заполнения.
+
+    До этой правки ни один из путей приёма не проставлял ``ayla_user_id``:
+    его писала только синхронизация (``apps/catalog/services/upserter.py``).
+    Как только приём начинает его проставлять, он упирается в ограничение
+    ``uq_catalog_master_tenant_ayla_user_id`` (миграция
+    ``catalog/0016_master_dedup_keys``, PR #1401): DRF-1510 привела пять
+    салонов синхронизацией, и мастера этих салонов уже лежат строками с
+    заполненным ``ayla_user_id``. Наивная реализация — «записать в свою
+    инвайт-строку» — даёт этому человеку **500 вместо приземления**, и
+    только на живых данных подключённого салона: на чистой локальной базе
+    второй строки нет и всё зелено.
+
+    Поэтому сначала ищем, потом пишем. Нашли — приземляемся в найденную
+    строку; не нашли — заполняем свою.
+
+    ``ayla_user_id is None`` — это не отказ, а «моста с Ayla ещё нет»:
+    склеивать не по чему и конфликтовать тоже не с чем.
+
+    DRF-1649 — здесь раньше стояло «заполняет единственный писатель
+    (``apps/identity/services/ayla_link.py``)». Писателей **два**:
+    ``ayla_link`` и ``apps/identity/services/resolver.py:192``
+    (``get_or_create(defaults=...)`` на sentinel-тенанте), и второй получает
+    идентификатор от вызывающего, то есть сорта не знает. Отсюда же и
+    трёхзначность ``BotUser.ayla_user_id_is_proxy``: ``NULL`` — это не «ещё
+    не дошли руки», а честное «этот писатель знать не мог».
+    """
+
+    if ayla_user_id is None:
+        return None
+    return (
+        CatalogMaster.all_tenants.filter(tenant_id=tenant_id, ayla_user_id=ayla_user_id)
+        .exclude(pk=exclude_pk)
+        .select_related("tenant")
+        .first()
+    )
+
+
+def _land_on_glue_row(
+    *,
+    invite_row: CatalogMaster,
+    glue_row: CatalogMaster,
+    bot_user: BotUser,
+    handle: str,
+) -> CatalogMaster:
+    """Приземлить человека в его существующую строку, инвайт-строку погасить.
+
+    ### Что делает со второй строкой и почему именно это
+
+    Инвайт-строка **остаётся** и переводится в ``CANCELLED`` с пометкой в
+    ``raw`` о том, чем она замещена. Три рассмотренных варианта:
+
+    * *осиротить* (оставить ``PENDING``) — это ровно фантом из разрыва Р5:
+      строка навсегда висит в ростере «ждёт ответа», и ни мастер, ни
+      владелец об этом не узнают. Отвергнуто;
+    * *удалить* — на инвайт-строке уже висят ``MasterService``, засеянные
+      при создании приглашения, и ссылается ``AuditLog``. Удаление — это
+      слияние дублей, а слияние по границе задачи отдельный обоснованный
+      шаг с замером, а не побочный эффект приземления. Отвергнуто;
+    * *пометить* — то, что здесь. Ни одного FK не тронуто, строка видна
+      владельцу как отменённая, а не как вечно ожидающая, и настоящее
+      слияние (перенос услуг, архивация) остаётся возможным и обратимым.
+
+    ``invite_token`` обнуляется: приглашение потрачено, и оставлять
+    работающий токен на погашенной строке значило бы держать дверь,
+    которая ведёт в отменённое.
+
+    Услуги, выбранные владельцем в приглашении, остаются на погашенной
+    строке — их перенос это то самое слияние. Названо в отчёте DRF-1507.
+    """
+
+    glue_row.linked_bot_user = bot_user
+    glue_row.invite_status = CatalogMaster.InviteStatus.ACCEPTED
+    glue_row.mode = CatalogMaster.Mode.INVITE
+    update_fields = ["linked_bot_user", "invite_status", "mode"]
+    # ``max_handle`` синхронизация не пишет вовсе — на склеенной строке он
+    # пуст, а у владельца он есть. Blank-fill, не перезапись.
+    if not glue_row.max_handle and handle:
+        glue_row.max_handle = handle
+        update_fields.append("max_handle")
+    # Тот же ``archived_at``-guard, что и на обычном приёме: отозванный
+    # мастер не возвращается в продажу через приглашение.
+    if glue_row.archived_at is None and not glue_row.is_active:
+        glue_row.is_active = True
+        update_fields.append("is_active")
+    glue_row.save(update_fields=update_fields)
+
+    invite_row.invite_token = None
+    invite_row.invite_status = CatalogMaster.InviteStatus.CANCELLED
+    invite_row.raw = {
+        **(invite_row.raw or {}),
+        "superseded_by_master_id": str(glue_row.id),
+        "superseded_reason": "drf1507_glue_ayla_user_id",
+    }
+    invite_row.save(update_fields=["invite_token", "invite_status", "raw"])
+
+    logger.info(
+        "master_api.onboarding.accept.glued bot_user=%s invite_master=%s "
+        "glue_master=%s ayla_user_id=%s — приземление в существующую строку "
+        "салона; инвайт-строка погашена (DRF-1507).",
+        bot_user.id,
+        invite_row.id,
+        glue_row.id,
+        glue_row.ayla_user_id,
+    )
+    return glue_row
 
 
 # --- POST /onboarding/claim -----------------------------------------------
@@ -352,12 +484,22 @@ def onboarding_accept(request: HttpRequest) -> HttpResponse:
     the call (network blip, user double-tapped). A DIFFERENT BotUser →
     403.
 
+    DRF-1507 — the retry branch is now gated on the presented token: a
+    token that belongs to a DIFFERENT master row of the same salon is
+    not a retry, it is somebody else's invite, and it answers 403
+    ``wrong_recipient`` instead of silently handing back the caller's
+    own session while the other row stays PENDING forever.
+
     Side effects:
       * ``invite_token = None`` (one-shot consumption)
       * ``invite_status = ACCEPTED``
       * ``mode = INVITE`` (this master now has login access)
       * ``is_active = True`` unless the row is archived (DRF-1080)
       * ``linked_bot_user = current bot_user``
+      * ``accepted_at = now()`` — стамп ставит ``CatalogMaster.save()``,
+        а не этот код: приземление пишут три места, и просить каждое
+        помнить про столбец — ровно тот способ, которым определений
+        «мастер приземлился» стало пять (DRF-1506).
       * Audit row + event ``master.onboarding_accepted``
     """
 
@@ -388,6 +530,53 @@ def onboarding_accept(request: HttpRequest) -> HttpResponse:
         .first()
     )
     if existing is not None:
+        # DRF-1507 — проба смотрит на предъявленный токен, а не только на
+        # связанного пользователя.
+        #
+        # Было: любой токен от уже связанного человека читался как повтор.
+        # Человек, привязанный к строке А, предъявлял валидный токен строки Б
+        # и получал HTTP 200 и сессию А. Строка Б оставалась PENDING навсегда
+        # — фантом в ростере, о котором не узнавал ни он, ни владелец салона.
+        #
+        # Стало: если предъявленный токен принадлежит ДРУГОЙ строке этого
+        # салона — это не повтор, а чужое приглашение, и оно получает ту же
+        # честную ошибку, что и приглашение, адресованное другому аккаунту
+        # MAX (``wrong_recipient``, 403). Слуг переиспользован намеренно: с
+        # точки зрения предъявителя утверждение верное — приглашение выписано
+        # не на него — а Mini App уже умеет его показывать
+        # (``MasterOnboardingScreen``), и вводить второй слуг ради того же
+        # смысла значило бы просить фронт научиться ещё одному тексту.
+        #
+        # Свой токен по-прежнему идемпотентен: ``invite_token`` обнуляется на
+        # приёме (one-shot), поэтому собственный уже использованный токен ни
+        # в одной строке не находится, и проба ниже его не ловит. Ровно так
+        # же ведёт себя произвольный UUID — различить их невозможно в
+        # принципе, и молчаливый успех на повторе тут дешевле отказа на
+        # честном ретрае из-за сетевого сбоя.
+        foreign = (
+            CatalogMaster.all_tenants.filter(
+                tenant=bot_user.tenant,
+                invite_token=token_uuid,
+            )
+            .exclude(pk=existing.pk)
+            .first()
+        )
+        if foreign is not None:
+            logger.warning(
+                "master_api.onboarding.accept.foreign_token bot_user=%s "
+                "linked_master=%s token_master=%s — предъявлен токен другой "
+                "строки мастера; раньше это молча возвращало сессию своей "
+                "(DRF-1507).",
+                bot_user.id,
+                existing.id,
+                foreign.id,
+            )
+            return _error(
+                "wrong_recipient",
+                "this invite was sent to a different MAX account",
+                403,
+            )
+
         # The accepted row may have cleared invite_token already, so we
         # can't match on the wire token. We trust the linkage: the
         # SAME BotUser arriving with ANY token after accepting is a
@@ -420,6 +609,7 @@ def onboarding_accept(request: HttpRequest) -> HttpResponse:
         )
 
     # Fresh accept path. Atomic + locked.
+    landed: CatalogMaster
     try:
         with transaction.atomic():
             master = validate_invite_token(token_uuid, bot_user.tenant)
@@ -434,53 +624,130 @@ def onboarding_accept(request: HttpRequest) -> HttpResponse:
                     403,
                 )
 
-            master.linked_bot_user = bot_user
-            master.invite_status = CatalogMaster.InviteStatus.ACCEPTED
-            master.mode = CatalogMaster.Mode.INVITE
-            master.invite_token = None  # one-shot consumption
-            # DRF-1080 — activate on accept.
+            # DRF-1507, пункт 4 — СНАЧАЛА ищем строку этого человека,
+            # потом пишем. Обоснование порядка — в докстринге
+            # :func:`_glue_target`; коротко: обратный порядок даёт 500 на
+            # живых данных подключённого салона и зелёные тесты локально.
+            # DRF-1649. The key on a ``BotUser`` may be Ayla's isolated proxy,
+            # and that is correct there: booking needs it and
+            # ``ensure_ayla_link`` is right to write it. It is NOT correct one
+            # layer out — ``apps/catalog/master_state.py:464-471`` forbids a
+            # proxy id in ``CatalogMaster.ayla_user_id`` because "он занял бы
+            # ключ значением, по которому совпадения не будет никогда", and the
+            # same applies to searching by it: looking a master up by a proxy id
+            # is as pointless as storing one.
             #
-            # ``master_invite_create`` writes the row with
-            # ``is_active=False`` (apps/admin_api/views_invite.py:499) and
-            # deliberately so: an invited master who has not answered yet
-            # must not appear in the booking surface. Nothing flipped it
-            # back, so accepting produced a master whom ``resolve_role``
-            # reports as a master while ``require_master_init_data``
-            # answers 403 ``master_inactive`` on every master endpoint
-            # (apps/master_api/auth.py:369). A person holding a valid
-            # one-shot token is active by definition — the same reasoning
-            # and the same write as the code path in
-            # ``apps.identity.services.staff_invites._link_master``.
-            #
-            # Guarded on ``archived_at``: deactivation writes
-            # ``is_active=False`` **together with** ``archived_at``
-            # (apps/admin_api/services/master_deactivation.py:1073-1076),
-            # so the pair distinguishes "never activated" from "taken out
-            # of service". Flipping an archived master back would put them
-            # into ``_MasterManager.bookable()`` again — a revoked master
-            # silently back on sale.
-            if master.archived_at is None:
-                master.is_active = True
-            master.save(
-                update_fields=[
-                    "linked_bot_user",
-                    "invite_status",
-                    "mode",
-                    "invite_token",
-                    "is_active",
-                ]
+            # Fail closed on BOTH unusable sorts. ``None`` is not "probably a
+            # real account": it is a row written by a path that never learned
+            # the sort (``apps/identity/services/resolver.py:192`` takes the id
+            # from its caller) or one linked before the column existed. Reading
+            # it as permission would turn an honest gap into a silent one — and
+            # the honest gap already has a correct downstream behaviour, because
+            # an empty ``CatalogMaster.ayla_user_id`` is a named state
+            # (``ayla_unlinked``), not a crash.
+            person_ayla_user_id = (
+                _as_uuid(bot_user.ayla_user_id) if bot_user.ayla_user_id_is_proxy is False else None
             )
+            glue = _glue_target(
+                tenant_id=bot_user.tenant_id,
+                ayla_user_id=person_ayla_user_id,
+                exclude_pk=master.pk,
+            )
+            if glue is not None and glue.linked_bot_user_id not in (None, bot_user.id):
+                # Один ``ayla_user_id`` на двух разных ``BotUser`` в одном
+                # салоне — расхождение личности, а не ретрай. Молча забрать
+                # чужую строку было бы ровно тем перенаправлением, которое
+                # эта же задача чинит в идемпотентной пробе выше.
+                logger.warning(
+                    "master_api.onboarding.accept.glue_conflict bot_user=%s "
+                    "invite_master=%s glue_master=%s linked_bot_user=%s — строка "
+                    "с тем же ayla_user_id уже связана с другим MAX-аккаунтом "
+                    "(DRF-1507).",
+                    bot_user.id,
+                    master.id,
+                    glue.id,
+                    glue.linked_bot_user_id,
+                )
+                return _error(
+                    "wrong_recipient",
+                    "this invite was sent to a different MAX account",
+                    403,
+                )
+
+            handle = canonical_handle(master.max_handle) or _init_data_handle(request)
+
+            if glue is not None:
+                landed = _land_on_glue_row(
+                    invite_row=master,
+                    glue_row=glue,
+                    bot_user=bot_user,
+                    handle=handle,
+                )
+                audit_extra = {"glued_from_master_id": str(master.id)}
+            else:
+                landed = master
+                audit_extra = None
+                # Склеивать не с чем — заполняем свою строку. Оба
+                # столбца blank-fill: их же пишут синхронизация и
+                # владелец, и перезапись чужого непустого значения
+                # превратила бы приземление в тихий редактор чужих
+                # данных.
+                extra_fields: list[str] = []
+                if master.ayla_user_id is None and person_ayla_user_id is not None:
+                    master.ayla_user_id = person_ayla_user_id
+                    extra_fields.append("ayla_user_id")
+                if not master.max_handle and handle:
+                    master.max_handle = handle
+                    extra_fields.append("max_handle")
+                master.linked_bot_user = bot_user
+                master.invite_status = CatalogMaster.InviteStatus.ACCEPTED
+                master.mode = CatalogMaster.Mode.INVITE
+                master.invite_token = None  # one-shot consumption
+                # DRF-1080 — activate on accept.
+                #
+                # ``master_invite_create`` writes the row with
+                # ``is_active=False`` (apps/admin_api/views_invite.py) and
+                # deliberately so: an invited master who has not answered
+                # yet must not appear in the booking surface. Nothing
+                # flipped it back, so accepting produced a master whom
+                # ``resolve_role`` reports as a master while
+                # ``require_master_init_data`` answers 403
+                # ``master_inactive`` on every master endpoint
+                # (apps/master_api/auth.py:369). A person holding a valid
+                # one-shot token is active by definition — the same
+                # reasoning and the same write as the code path in
+                # ``apps.identity.services.staff_invites._link_master``.
+                #
+                # Guarded on ``archived_at``: deactivation writes
+                # ``is_active=False`` **together with** ``archived_at``
+                # (apps/admin_api/services/master_deactivation.py), so the
+                # pair distinguishes "never activated" from "taken out of
+                # service". Flipping an archived master back would put
+                # them into ``_MasterManager.bookable()`` again — a
+                # revoked master silently back on sale.
+                if master.archived_at is None:
+                    master.is_active = True
+                master.save(
+                    update_fields=[
+                        "linked_bot_user",
+                        "invite_status",
+                        "mode",
+                        "invite_token",
+                        "is_active",
+                        *extra_fields,
+                    ]
+                )
 
             write_audit(
                 MASTER_ONBOARDING_ACCEPTED,
                 target="catalog.CatalogMaster",
-                target_id=master.id,
-                payload=_audit_payload(master, bot_user),
+                target_id=landed.id,
+                payload=_audit_payload(landed, bot_user, audit_extra),
                 actor_id=bot_user.id,
             )
             emit(
                 MASTER_ONBOARDING_ACCEPTED,
-                properties=_audit_payload(master, bot_user),
+                properties=_audit_payload(landed, bot_user, audit_extra),
             )
     except InviteTokenError as exc:
         return _error(
@@ -489,17 +756,80 @@ def onboarding_accept(request: HttpRequest) -> HttpResponse:
             INVITE_TOKEN_SLUG_TO_STATUS.get(exc.slug, 400),
         )
 
+    # DRF-2442 — сказать КАТАЛОГУ, что эта личность и есть тот мастер.
+    #
+    # Всё выше — бот-сторона: ``linked_bot_user``, погашенный токен, статус.
+    # Каталог об этом не знает, и без связи ``users_user.linked_user_id`` его
+    # сторож субъекта отвечает 403 ``subject_unresolved`` на всех ручках
+    # кабинета. Записать связь мог только человек-оператор, и операторов ноль —
+    # отсюда «мастер принял приглашение и никуда не попал».
+    #
+    # Доказательство владения — ровно то гашение, которое уже случилось выше:
+    # ссылка одноразовая, и открыть её мог только тот, кому её передали.
+    #
+    # ПОСЛЕ коммита и НЕ ломая приём: мастер уже принял, токен уже погашен, и
+    # откат ради недоступного каталога потерял бы одноразовое приглашение. Отказ
+    # уходит в лог по имени; дозвонить можно командой ``link_master_identities``.
+    _link_identity_in_catalog(landed, bot_user)
+
     session_token, exp_ts = issue_master_session_token(
-        master_id=master.id,
-        tenant_id=master.tenant_id,
+        master_id=landed.id,
+        tenant_id=landed.tenant_id,
         bot_user_id=bot_user.id,
     )
     return JsonResponse(
         {
-            "master_id": str(master.id),
+            "master_id": str(landed.id),
             "session_token": session_token,
             "expires_at": datetime.fromtimestamp(exp_ts, tz=dt_timezone.utc).isoformat(),
         }
+    )
+
+
+def _link_identity_in_catalog(master: CatalogMaster, bot_user: BotUser) -> None:
+    """Связь личности мастера в каталоге — лучшая попытка, приём не рушит (DRF-2442).
+
+    Нет ``catalog_specialist_id`` — связывать не с чем: строка ещё не привязана
+    к каталогу (``apps.catalog.identity``), её дозаводит подметальщик, и уже
+    после этого связь ставит команда ``link_master_identities``. Это отдельная
+    ветвь, а не отказ: у неё своя строка журнала, чтобы «не с чем связывать» не
+    читалось как «каталог отказал».
+    """
+
+    from apps.identity.services.specialist_identity_link import (
+        SpecialistIdentityLinkRefused,
+        bind_master_identity_in_catalog,
+    )
+
+    specialist_id = getattr(master, "catalog_specialist_id", None)
+    if not specialist_id:
+        logger.warning(
+            "master_api.onboarding_accept.identity_link_skipped reason=catalog_unlinked "
+            "master=%s — строка ещё не привязана к каталогу; связь поставит "
+            "link_master_identities после привязки",
+            master.id,
+        )
+        return
+    try:
+        outcome = bind_master_identity_in_catalog(
+            specialist_id=specialist_id,
+            bot_user=bot_user,
+        )
+    except SpecialistIdentityLinkRefused as exc:
+        logger.warning(
+            "master_api.onboarding_accept.identity_link_refused reason=%s master=%s "
+            "correlation_id=%s hint=%s",
+            exc.reason,
+            master.id,
+            exc.correlation_id,
+            exc.hint,
+        )
+        return
+    logger.info(
+        "master_api.onboarding_accept.identity_linked master=%s specialist=%s created=%s",
+        master.id,
+        outcome.specialist_id,
+        outcome.created,
     )
 
 
@@ -564,50 +894,79 @@ def onboarding_reject(request: HttpRequest) -> HttpResponse:
 # --- PATCH /onboarding/profile --------------------------------------------
 
 
-def _save_master_photo(master: CatalogMaster, file_obj: Any) -> str:
-    """Save the uploaded photo + return the absolute URL.
-
-    Phase 1 (this PR): raw upload only, no resize pipeline. Lives under
-    ``MEDIA_ROOT/master_photos/<master_id>.<ext>`` and the URL is
-    ``MEDIA_URL + master_photos/<master_id>.<ext>``.
-
-    TODO(master PR 4+): proper resize pipeline (Pillow → 800×800 JPEG
-    + thumbnail). Track via media-pipeline ticket. For now we accept
-    PNG/JPEG/WEBP and trust the extension; content-type sniffing is
-    a follow-up.
-    """
-
-    ext = (Path(file_obj.name).suffix or ".jpg").lower()
-    if ext not in (".jpg", ".jpeg", ".png", ".webp"):
-        ext = ".jpg"
-
-    media_root = Path(getattr(settings, "MEDIA_ROOT", "media"))
-    media_url = getattr(settings, "MEDIA_URL", "/media/")
-    photos_dir = media_root / "master_photos"
-    photos_dir.mkdir(parents=True, exist_ok=True)
-
-    out_path = photos_dir / f"{master.id}{ext}"
-    with open(out_path, "wb") as f:
-        for chunk in file_obj.chunks():
-            f.write(chunk)
-
-    return f"{media_url.rstrip('/')}/master_photos/{master.id}{ext}"
+def _profile_refusal(exc: BookingBadRequestError) -> HttpResponse:
+    """Отказы каталога на запись профиля — по имени, данные под ``details``."""
+    details = exc.details or {}
+    if exc.status_code == 403:
+        return _error("not_linked", "Профиль ещё не связан с каталогом.", 403)
+    if exc.status_code == 404:
+        if exc.code == "SPECIALIST_NOT_FOUND":
+            return _error("specialist_not_found", "Профиль мастера не найден в каталоге.", 404)
+        return _error("not_found", "Не найдено.", 404)
+    if exc.status_code == 400:
+        # Не ``_error_with``: у него третий параметр назван ``status`` — ответ
+        # собран напрямую, чтобы поле каталога с тем же именем не столкнулось.
+        return JsonResponse(
+            {
+                "error": "validation_error",
+                "detail": "Каталог не принял профиль.",
+                "details": dict(details),
+            },
+            status=400,
+        )
+    return _error("catalog_refused", "Каталог отказал.", exc.status_code or 400)
 
 
 @csrf_exempt
+def _catalog_profile_required(
+    view_func: Callable[..., HttpResponse],
+) -> Callable[..., HttpResponse]:
+    """DRF-1933: прокси мастерской зовут каталог по id его профиля.
+
+    Id берёт :func:`apps.catalog.specialist_ref.catalog_specialist_id` прямо
+    в аргументах вызова клиента; пустая колонка поднимает отказ ДО вызова,
+    и здесь он становится ответом по имени. Первичный ключ зеркала в
+    каталог не уходит: у соло-мастера и склеенного приглашения это uuid4.
+    """
+
+    @wraps(view_func)
+    def wrapper(request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
+        try:
+            return view_func(request, *args, **kwargs)
+        except CatalogSpecialistUnresolved:
+            master = getattr(request, "master", None)
+            logger.warning(
+                "master_api.catalog_profile_unresolved master=%s", getattr(master, "pk", None)
+            )
+            return _error(
+                "catalog_profile_unresolved",
+                "Профиль мастера ещё не заведён в каталоге.",
+                409,
+            )
+
+    return wrapper
+
+
 @require_http_methods(["PATCH"])
 @require_master_init_data
+@_catalog_profile_required
 def onboarding_profile(request: HttpRequest) -> HttpResponse:
-    """M0 Step 3 — populate bio + photo. Idempotent.
+    """«О себе» и фото мастера — прокси в каталог (DRF-1813, M21; каталог #455).
 
-    Accepts multipart (for photo) OR JSON (bio-only). The bio comes from
-    either ``request.POST['bio']`` (multipart) or the JSON body.
+    Принимает multipart (с фото) или JSON (только текст). Владелец полей —
+    каталог: «о себе» уходит в ``PATCH …/profile/``, фото — в
+    ``POST …/media/avatar/``. Лимиты и отказы — его (имя ≥ 2, «о себе» ≤ 500,
+    форматы, квадрат); бот своих не держит и файлов не пишет. Зеркало
+    ``CatalogMaster`` берёт ОТВЕТ каталога сразу — кабинет видит правку, не
+    дожидаясь синхронизации. Аудит ``master.profile_initialized`` — только
+    после успешной записи.
     """
 
     master: CatalogMaster = request.master  # type: ignore[attr-defined]
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
 
-    bio: str | None = None
+    bio: Any = None
+    display_name: Any = None
     photo_file = None
 
     content_type = request.headers.get("Content-Type", "")
@@ -625,33 +984,62 @@ def onboarding_profile(request: HttpRequest) -> HttpResponse:
             return _error("bad_request", "malformed multipart body", 400)
         if "bio" in post:
             bio = str(post["bio"])
+        if "display_name" in post:
+            display_name = str(post["display_name"])
         photo_file = files.get("photo")
     else:
         body = _parse_json_body(request)
         if isinstance(body, JsonResponse):
             return body
-        if "bio" in body:
-            bio = body["bio"]
+        bio = body.get("bio")
+        display_name = body.get("display_name")
 
+    if bio is not None and not isinstance(bio, str):
+        return _error("bad_request", "bio must be a string", 400)
+    if display_name is not None and not isinstance(display_name, str):
+        return _error("bad_request", "display_name must be a string", 400)
+
+    client = get_ayla_booking_client()
+    actor = external_user_id_for(bot_user)
     fields_populated: list[str] = []
     update_fields: list[str] = []
-
-    if bio is not None:
-        if len(bio) > MAX_BIO_LENGTH:
-            return _error(
-                "bad_request",
-                f"bio exceeds {MAX_BIO_LENGTH} characters",
-                400,
+    try:
+        if bio is not None or display_name is not None:
+            state = client.patch_specialist_profile(
+                specialist_id=catalog_specialist_id(master),
+                external_user_id=actor,
+                display_name=display_name,
+                bio=bio,
             )
-        master.bio = bio
-        update_fields.append("bio")
-        if bio.strip():
-            fields_populated.append("bio")
-
-    if photo_file is not None:
-        master.photo_url = _save_master_photo(master, photo_file)
-        update_fields.append("photo_url")
-        fields_populated.append("photo")
+            if bio is not None:
+                master.bio = str(state.get("bio") or "")
+                update_fields.append("bio")
+                if master.bio.strip():
+                    fields_populated.append("bio")
+            if display_name is not None:
+                master.name = str(state.get("display_name") or master.name)
+                update_fields.append("name")
+                fields_populated.append("name")
+        if photo_file is not None:
+            state = client.upload_specialist_avatar(
+                specialist_id=catalog_specialist_id(master),
+                external_user_id=actor,
+                filename=photo_file.name or "photo",
+                content=photo_file.read(),
+                content_type=photo_file.content_type or "application/octet-stream",
+            )
+            master.photo_url = str(state.get("avatar_url") or "")
+            update_fields.append("photo_url")
+            fields_populated.append("photo")
+    except BookingBadRequestError as exc:
+        # Что каталог уже принял до отказа — в зеркало; аудита нет.
+        if update_fields:
+            master.save(update_fields=update_fields)
+        return _profile_refusal(exc)
+    except BookingUnavailableError:
+        if update_fields:
+            master.save(update_fields=update_fields)
+        return _error("catalog_unavailable", "Каталог сейчас недоступен — попробуйте позже.", 503)
 
     if update_fields:
         master.save(update_fields=update_fields)
@@ -673,7 +1061,7 @@ def onboarding_profile(request: HttpRequest) -> HttpResponse:
                 "id": str(master.id),
                 "name": master.name,
                 "bio": master.bio,
-                "photo_url": master.photo_url,
+                "photo_url": master_photo_path(master.id, master.photo_url),
             }
         }
     )
@@ -691,12 +1079,17 @@ def me(request: HttpRequest) -> HttpResponse:
     rebuild local state after the session token is loaded from
     DeviceStorage.
 
-    Permissions block: PR 1 hardcodes all three to True. The full
-    permission model (PR 11+) will compute these from role + tenant
-    settings.
+    Permissions block (DRF-1805): из фактов проводки — право есть ровно
+    тогда, когда в URLconf стоит маршрут, принимающий действие
+    (:mod:`apps.master_api.services.permissions`); ``can_edit_services``
+    ложно, пока нет ручки M10. Права роли/тенанта — не этот срез.
     """
 
     master: CatalogMaster = request.master  # type: ignore[attr-defined]
+    # DRF-1794: мастер видит своё состояние продажи тем же словом, что
+    # витрина и ростер (один ``sale_block``); до этого кабинет молчал о
+    # том, что человек не опубликован.
+    block = sale_block(master)
     return JsonResponse(
         {
             "master": {
@@ -704,18 +1097,1039 @@ def me(request: HttpRequest) -> HttpResponse:
                 "name": master.name,
                 "specialization": master.specialization,
                 "bio": master.bio,
-                "photo_url": master.photo_url,
+                "photo_url": master_photo_path(master.id, master.photo_url),
                 "services": _services_for_master(master),
             },
             "salon": {
                 "tenant_id": str(master.tenant_id),
                 "name": master.tenant.name,
             },
-            "permissions": {
-                "can_edit_schedule": True,
-                "can_edit_services": True,
-                "can_message_customers": True,
-            },
+            "permissions": permissions_from_facts(),
+            "setup_state": "READY" if block is None else "SETUP_PENDING",
+            "sale_block": block,
+            "identity": identity_facts(master),
+        }
+    )
+
+
+# --- GET/PUT /working-hours (DRF-1816, M24) --------------------------------
+
+
+@csrf_exempt
+@require_http_methods(["GET", "PUT"])
+@require_master_init_data
+@_catalog_profile_required
+def working_hours(request: HttpRequest) -> HttpResponse:
+    """The master's own weekly template — read and written in the catalog.
+
+    Макет 7.1–7.5 (M24). Прокси в ``/internal/specialists/{id}/working-hours/``
+    каталога (DRF-1815): часы живут там и только там — второго хранилища в
+    боте нет (§16 «Source of truth»), ответ — то, что каталог ПРОЧИТАЛ
+    после записи, не эхо запроса.
+
+    Субъект — сам мастер: ``X-External-User-ID`` несёт его bot-личность, и
+    каталог пускает только к его собственному профилю. До связи в
+    каталоге (LINKED) записывать некуда — 403 ``not_linked`` честно, а не
+    «сохранено» в никуда.
+
+    Соло (§83): владелец = мастер, поэтому после удачной записи
+    расписание подтверждается тем же человеком — иначе он застрял бы в
+    ``schedule_unconfirmed`` при включённом гейте, ожидая владельца,
+    которым сам и является. Подтверждение читает часы ЗАНОВО из источника
+    (readback), а не берёт их из ответа: ``schedule_confirmed_at`` обязан
+    описывать то, что лежит в каталоге.
+    """
+
+    master: CatalogMaster = request.master  # type: ignore[attr-defined]
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    actor = external_user_id_for(bot_user)
+    client = get_ayla_booking_client()
+
+    if request.method == "GET":
+        try:
+            data = client.get_working_hours(
+                specialist_id=catalog_specialist_id(master), external_user_id=actor
+            )
+        except BookingBadRequestError as exc:
+            return _working_hours_refusal(exc)
+        except BookingUnavailableError:
+            return _error("schedule_unavailable", "Расписание сейчас недоступно.", 503)
+        return JsonResponse(_working_hours_payload(data))
+
+    try:
+        body = json.loads(request.body or b"{}")
+    except ValueError:
+        return _error("invalid_json", "Body must be JSON.", 400)
+    schedule = body.get("schedule") if isinstance(body, dict) else None
+    if not isinstance(schedule, list):
+        return _error("validation_error", "schedule must be a list of 7 days.", 400)
+
+    try:
+        data = client.put_working_hours(
+            specialist_id=catalog_specialist_id(master), external_user_id=actor, schedule=schedule
+        )
+    except ScheduleBlockConflictError:
+        # DRF-2200 (макет DRF-1186, экран 4): каталог говорит «есть записи», но
+        # не говорит какие — экран без них показывает тупик. Состав берётся из
+        # того же вычислителя, что рисует «Расписание» (build_schedule), чтобы
+        # мастер не увидел конфликт, которого в его расписании нет.
+        try:
+            conflicts = conflicting_bookings_for_template(master, schedule)
+        except Exception:  # noqa: BLE001 — украшение отказа, а не сам отказ
+            # Ловим широко намеренно: 409 сказал каталог, и он правда. Любая
+            # поломка сборщика карточек (нечитаемая дата, чужая форма тела,
+            # молчащий каталог) не имеет права превратить честный отказ в 500.
+            logger.warning(
+                "master_api.working_hours.conflicts_unreadable master=%s",
+                master.id,
+                exc_info=True,
+            )
+            conflicts = []
+        return _error_with(
+            "has_active_appointments",
+            "В это время уже есть записи. Сначала разберитесь с ними.",
+            409,
+            conflicts=conflicts,
+            # Горизонт поиска — чтобы экран назвал его словами, а не делал
+            # вид, что показал всё будущее (DRF-2200).
+            horizon_days=TEMPLATE_CONFLICT_HORIZON_DAYS,
+        )
+    except BookingBadRequestError as exc:
+        return _working_hours_refusal(exc)
+    except BookingUnavailableError:
+        return _error("schedule_unavailable", "Расписание сейчас недоступно.", 503)
+
+    confirmed = False
+    if is_solo_provider(master.tenant):
+        # §83 — соло: подтверждает тот же человек, и только после того,
+        # как каталог прочёл записанное (readback внутри confirm_schedule).
+        try:
+            confirm_schedule(master, by=bot_user)
+            confirmed = True
+        except ScheduleConfirmationError as exc:
+            # Например, ни одного рабочего дня: часы сохранены, подтверждать
+            # нечего — и это не ошибка сохранения.
+            logger.info(
+                "master_api.working_hours.not_confirmed master=%s reason=%s",
+                master.id,
+                exc.args[0] if exc.args else "",
+            )
+        except (BookingAPIError, SalonAPIError):
+            # Часы сохранены; подтвердить не удалось прочитать заново —
+            # экран увидит schedule_confirmed=false и «Расписание верно»
+            # останется доступным.
+            logger.warning(
+                "master_api.working_hours.confirm_readback_failed master=%s",
+                master.id,
+                exc_info=True,
+            )
+
+    payload = _working_hours_payload(data)
+    payload["schedule_confirmed"] = confirmed
+    return JsonResponse(payload)
+
+
+def _working_hours_payload(data: dict[str, Any]) -> dict[str, Any]:
+    """Форма для экрана — ровно то, что прислал каталог, без дорисовки."""
+    return {
+        "specialist_id": data.get("specialist_id"),
+        "timezone": data.get("timezone"),
+        "schedule": data.get("schedule") or [],
+    }
+
+
+def _working_hours_refusal(exc: BookingBadRequestError) -> HttpResponse:
+    if exc.status_code == 403:
+        return _error(
+            "not_linked",
+            "Профиль ещё не связан с каталогом — сохранить часы пока некуда.",
+            403,
+        )
+    if exc.status_code == 400:
+        return _error(
+            "validation_error", "Проверьте время: начало раньше конца, перерыв внутри смены.", 400
+        )
+    return _error("schedule_unavailable", "Расписание сейчас недоступно.", 502)
+
+
+# --- /service-locations, /geocoding/suggest (DRF-1811, M19) -----------------
+#
+# Место работы соло-мастера (макет 5). Всё живёт в каталоге (M11, #502) — бот
+# не хранит ни места, ни зоны выезда; ответ каждой ручки — readback каталога
+# ПОСЛЕ записи, не эхо запроса. Проверяет ввод каталог: лишнее поле,
+# ``tenant_id`` или ``status`` он отвергает 400 по имени, второе место —
+# 409 ``place_already_set``; здесь коды каталога отдаются экрану как есть,
+# чтобы отказ читался по имени, а не «что-то не так».
+
+#: Отказы каталога, которые экран показывает по имени (M11, tenants/master_places.py).
+_LOCATION_REFUSALS: dict[str, str] = {
+    "salon_place_owner_managed": "Место работы мастера салона ведёт владелец салона.",
+    # DRF-2378: роли «оператор» в системе нет — ни группы, ни роли, ни
+    # поля. Текст утверждён владельцем (§77 п. 27, 24.09); адресат на
+    # экране — студия, и дверь к ней рисует `StudioCallout`.
+    "no_workspace_tenant": "Профиль пока не подключён — место работы пока не указать.",
+    "place_already_set": "Место уже указано — измените его, а не добавляйте второе.",
+    "place_outside_workspace": "Это место не из вашего рабочего пространства.",
+    "area_already_set": "Зона выезда уже указана — измените её.",
+}
+
+
+def _location_refusal(exc: BookingBadRequestError) -> HttpResponse:
+    """Отказ каталога → ответ экрану тем же именем; 5xx сюда не приходит."""
+    if exc.status_code == 403:
+        return _error(
+            "not_linked",
+            "Профиль ещё не связан с каталогом — сохранить место пока некуда.",
+            403,
+        )
+    if exc.status_code == 404:
+        return _error("not_found", "Такого места или зоны у вас нет.", 404)
+    code = (exc.code or "").lower()
+    if exc.status_code == 409 and code in _LOCATION_REFUSALS:
+        return _error(code, _LOCATION_REFUSALS[code], 409)
+    if exc.status_code == 400:
+        # Текст каталога — про поле по имени (``details``); экрану — как есть.
+        detail = ""
+        if isinstance(exc.details, dict):
+            detail = str(exc.details.get("detail") or exc.details.get("field") or "")
+        return _error("validation_error", detail or "Проверьте введённое.", 400)
+    return _error("locations_unavailable", "Место работы сейчас недоступно.", 502)
+
+
+def _read_json_object(request: HttpRequest) -> dict[str, Any] | HttpResponse:
+    try:
+        body = json.loads(request.body or b"{}")
+    except ValueError:
+        return _error("invalid_json", "Body must be JSON.", 400)
+    if not isinstance(body, dict):
+        return _error("validation_error", "Body must be a JSON object.", 400)
+    return body
+
+
+@csrf_exempt
+@require_http_methods(["GET", "POST"])
+@require_master_init_data
+@_catalog_profile_required
+def service_locations(request: HttpRequest) -> HttpResponse:
+    """Своё место и зоны выезда — чтение и создание (макет 5, кадры 5.1–5.4).
+
+    ``GET`` → ``{specialist_id, city, places[], areas[]}`` каталога как есть:
+    у места — ``status`` (CONFIRMED / REVIEW_REQUIRED / INACTIVE), координаты
+    либо ``null``, ``shown_to_clients_after_publication`` — только при
+    CONFIRMED; у зоны — ``coverage`` (whole_city / later) и ``configured``.
+    ``POST`` → место (``kind`` + ``address``, ``label``, ``note_for_client``)
+    или зона (``kind=mobile`` + ``coverage``); ответ — readback.
+    """
+    master: CatalogMaster = request.master  # type: ignore[attr-defined]
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    actor = external_user_id_for(bot_user)
+    client = get_ayla_booking_client()
+
+    if request.method == "GET":
+        try:
+            data = client.get_service_locations(
+                specialist_id=catalog_specialist_id(master), external_user_id=actor
+            )
+        except BookingBadRequestError as exc:
+            return _location_refusal(exc)
+        except BookingUnavailableError:
+            return _error("locations_unavailable", "Место работы сейчас недоступно.", 503)
+        return JsonResponse(_locations_payload(data))
+
+    body = _read_json_object(request)
+    if isinstance(body, HttpResponse):
+        return body
+    try:
+        data = client.create_service_location(
+            specialist_id=catalog_specialist_id(master), external_user_id=actor, fields=body
+        )
+    except BookingBadRequestError as exc:
+        return _location_refusal(exc)
+    except BookingUnavailableError:
+        return _error("locations_unavailable", "Место работы сейчас недоступно.", 503)
+    return JsonResponse(_locations_payload(data), status=201)
+
+
+@csrf_exempt
+@require_http_methods(["PATCH"])
+@require_master_init_data
+@_catalog_profile_required
+def service_location_detail(request: HttpRequest, item_id: str) -> HttpResponse:
+    """Изменить поля своего места или охват своей зоны — ``PATCH``; ответ — readback."""
+    master: CatalogMaster = request.master  # type: ignore[attr-defined]
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    actor = external_user_id_for(bot_user)
+    client = get_ayla_booking_client()
+
+    body = _read_json_object(request)
+    if isinstance(body, HttpResponse):
+        return body
+    try:
+        data = client.patch_service_location(
+            specialist_id=catalog_specialist_id(master),
+            external_user_id=actor,
+            item_id=str(item_id),
+            fields=body,
+        )
+    except BookingBadRequestError as exc:
+        return _location_refusal(exc)
+    except BookingUnavailableError:
+        return _error("locations_unavailable", "Место работы сейчас недоступно.", 503)
+    return JsonResponse(_locations_payload(data))
+
+
+def _locations_payload(data: Any) -> dict[str, Any]:
+    """Форма для экрана — ровно то, что прислал каталог, без дорисовки."""
+    if not isinstance(data, dict):
+        return {"specialist_id": None, "city": "", "places": [], "areas": []}
+    return {
+        "specialist_id": data.get("specialist_id"),
+        "city": data.get("city") or "",
+        "places": [p for p in (data.get("places") or []) if isinstance(p, dict)],
+        "areas": [a for a in (data.get("areas") or []) if isinstance(a, dict)],
+    }
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_master_init_data
+@_catalog_profile_required
+def address_suggest(request: HttpRequest) -> HttpResponse:
+    """Подсказки адреса (M12a, #476) — ``POST`` с телом ``{"q": "..."}``.
+
+    Строка адреса — в теле, не в URL, и не в логе: это адрес мастера, часто
+    домашний. Когда геокодер не настроен (стенд пилота: ключ пуст) или лёг,
+    каталог отвечает 503 — здесь это ``{"available": false, "reason": …,
+    "suggestions": []}`` с тем же 503, и экран падает в ручной ввод. Не 500
+    и не выключатель клиента бронирования (см. ``suggest_address`` клиента).
+    """
+    master: CatalogMaster = request.master  # type: ignore[attr-defined]
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    actor = external_user_id_for(bot_user)
+    client = get_ayla_booking_client()
+
+    body = _read_json_object(request)
+    if isinstance(body, HttpResponse):
+        return body
+    q = body.get("q")
+    if not isinstance(q, str) or not q.strip():
+        return _error("validation_error", "q is required.", 400)
+    try:
+        data = client.suggest_address(
+            specialist_id=catalog_specialist_id(master), external_user_id=actor, q=q.strip()
+        )
+    except BookingBadRequestError as exc:
+        return _location_refusal(exc)
+    except BookingUnavailableError:
+        return JsonResponse(
+            {"available": False, "reason": "unavailable", "suggestions": []}, status=503
+        )
+    if not data.get("available"):
+        return JsonResponse(
+            {"available": False, "reason": data.get("reason"), "suggestions": []},
+            status=503 if data.get("reason") != "no_city" else 409,
+        )
+    return JsonResponse(
+        {
+            "available": True,
+            "city": data.get("city"),
+            "suggestions": [
+                {"value": s.get("value"), "unrestricted_value": s.get("unrestricted_value")}
+                for s in data.get("suggestions", [])
+                if isinstance(s, dict)
+            ],
+        }
+    )
+
+
+# --- /canon-gap-requests (DRF-1802, M10) ----------------------------------
+
+
+@csrf_exempt
+@require_http_methods(["GET", "POST"])
+@require_master_init_data
+@_catalog_profile_required
+def canon_gap_requests(request: HttpRequest) -> HttpResponse:
+    """«Своя услуга» мастера = заявка о разрыве канона к владельцу (G6 / D6).
+
+    Прокси в ``/internal/specialists/{id}/canon-gap-requests/`` каталога
+    (M9): заявка живёт там и только там, второго хранилища в боте нет;
+    ответ — то, что вернул каталог. Решает заявку только владелец в
+    Django-admin каталога — у этого прокси нет ни PATCH, ни PUT, ни DELETE.
+
+    Субъект — сам мастер (``X-External-User-ID`` его bot-личности), профиль —
+    его ``CatalogMaster.id``; каталог пускает только к своему профилю.
+    """
+    master: CatalogMaster = request.master  # type: ignore[attr-defined]
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    actor = external_user_id_for(bot_user)
+    client = get_ayla_booking_client()
+
+    if request.method == "GET":
+        try:
+            data = client.list_canon_gap_requests(
+                specialist_id=catalog_specialist_id(master), external_user_id=actor
+            )
+        except BookingBadRequestError as exc:
+            return _canon_gap_refusal(exc)
+        except BookingUnavailableError:
+            return _error("catalog_unavailable", "Каталог сейчас недоступен.", 503)
+        return JsonResponse({"requests": data.get("requests") or []})
+
+    try:
+        body = json.loads(request.body or b"{}")
+    except ValueError:
+        return _error("invalid_json", "Body must be JSON.", 400)
+    if not isinstance(body, dict):
+        return _error("validation_error", "Body must be an object.", 400)
+    name = str(body.get("name") or "").strip()
+    duration = body.get("duration_minutes")
+    price = body.get("price")
+    if (
+        not name
+        or not isinstance(duration, int)
+        or isinstance(duration, bool)
+        or duration < 1
+        or price in (None, "")
+    ):
+        return _error("validation_error", "Нужны название, длительность в минутах и цена.", 400)
+
+    try:
+        data = client.create_canon_gap_request(
+            specialist_id=catalog_specialist_id(master),
+            external_user_id=actor,
+            name=name,
+            description=str(body.get("description") or ""),
+            duration_minutes=duration,
+            price=str(price),
+        )
+    except BookingBadRequestError as exc:
+        return _canon_gap_refusal(exc)
+    except BookingUnavailableError:
+        return _error("catalog_unavailable", "Каталог сейчас недоступен.", 503)
+    return JsonResponse(
+        {"request": data.get("request"), "similar": data.get("similar") or []}, status=201
+    )
+
+
+@require_http_methods(["GET"])
+@require_master_init_data
+@_catalog_profile_required
+def canon_gap_similar(request: HttpRequest) -> HttpResponse:
+    """Подсказка «похожая услуга» — канон по подтверждённым синонимам и имени.
+
+    Только чтение: выбор «Выбрать эту услугу» / «Добавить мою» делает мастер
+    на экране, связь здесь не создаётся.
+    """
+    name = (request.GET.get("name") or "").strip()
+    if not name:
+        return _error("validation_error", "name is required.", 400)
+    master: CatalogMaster = request.master  # type: ignore[attr-defined]
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    try:
+        data = get_ayla_booking_client().similar_canon_templates(
+            specialist_id=catalog_specialist_id(master),
+            external_user_id=external_user_id_for(bot_user),
+            name=name,
+        )
+    except BookingBadRequestError as exc:
+        return _canon_gap_refusal(exc)
+    except BookingUnavailableError:
+        return _error("catalog_unavailable", "Каталог сейчас недоступен.", 503)
+    return JsonResponse({"similar": data.get("similar") or []})
+
+
+@require_http_methods(["GET"])
+@require_master_init_data
+@_catalog_profile_required
+def canon_gap_request_detail(request: HttpRequest, request_id: uuid.UUID) -> HttpResponse:
+    """Одна своя заявка; чужая неотличима от несуществующей (404)."""
+    master: CatalogMaster = request.master  # type: ignore[attr-defined]
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    try:
+        data = get_ayla_booking_client().get_canon_gap_request(
+            specialist_id=catalog_specialist_id(master),
+            external_user_id=external_user_id_for(bot_user),
+            request_id=str(request_id),
+        )
+    except BookingBadRequestError as exc:
+        return _canon_gap_refusal(exc)
+    except BookingUnavailableError:
+        return _error("catalog_unavailable", "Каталог сейчас недоступен.", 503)
+    return JsonResponse({"request": data.get("request")})
+
+
+def _canon_gap_refusal(exc: BookingBadRequestError) -> HttpResponse:
+    if exc.status_code == 403:
+        return _error(
+            "not_linked", "Профиль ещё не связан с каталогом — заявку пока некуда отправить.", 403
+        )
+    if exc.status_code == 404:
+        return _error("not_found", "Заявка не найдена.", 404)
+    if exc.status_code == 400:
+        return _error("validation_error", "Проверьте название, длительность и цену.", 400)
+    return _error("catalog_unavailable", "Каталог сейчас недоступен.", 502)
+
+
+# --- GET/PATCH /accepting-bookings (DRF-1845) -------------------------------
+
+_ACCEPTING_UNAVAILABLE = "Настройка приёма записей сейчас недоступна."
+
+
+@csrf_exempt
+@require_http_methods(["GET", "PATCH"])
+@require_master_init_data
+@_catalog_profile_required
+def accepting_bookings(request: HttpRequest) -> HttpResponse:
+    """«Принимаю записи / Не принимаю» — прокси в каталог (DRF-1845).
+
+    Флаг живёт в каталоге (``SpecialistProfile.is_booking_enabled``) и только
+    там — второй копии в боте нет; ответ — то, что каталог прочёл после
+    записи. Субъект — сам мастер, как у часов (``working_hours``).
+
+    Бот узнаёт о паузе на следующем синке каталога (≤15 мин): до этого
+    мастер ещё виден клиентам в боте — экран говорит это словами, а не
+    обещает мгновенного эффекта. Не путать с ``availability`` — там заявка
+    на выходной.
+    """
+
+    master: CatalogMaster = request.master  # type: ignore[attr-defined]
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    actor = external_user_id_for(bot_user)
+    client = get_ayla_booking_client()
+
+    if request.method == "GET":
+        try:
+            data = client.get_accepting_bookings(
+                specialist_id=catalog_specialist_id(master), external_user_id=actor
+            )
+        except BookingBadRequestError as exc:
+            return _accepting_bookings_refusal(exc)
+        except BookingUnavailableError:
+            return _error("accepting_bookings_unavailable", _ACCEPTING_UNAVAILABLE, 503)
+        return _accepting_bookings_response(data)
+
+    try:
+        body = json.loads(request.body or b"{}")
+    except ValueError:
+        return _error("invalid_json", "Body must be JSON.", 400)
+    value = body.get("accepting_bookings") if isinstance(body, dict) else None
+    if not isinstance(value, bool):
+        return _error("validation_error", "accepting_bookings must be true or false.", 400)
+
+    try:
+        data = client.set_accepting_bookings(
+            specialist_id=catalog_specialist_id(master), external_user_id=actor, accepting=value
+        )
+    except BookingBadRequestError as exc:
+        return _accepting_bookings_refusal(exc)
+    except BookingUnavailableError:
+        return _error("accepting_bookings_unavailable", _ACCEPTING_UNAVAILABLE, 503)
+    return _accepting_bookings_response(data)
+
+
+def _accepting_bookings_response(data: dict[str, Any]) -> HttpResponse:
+    """Ровно то, что прочёл каталог. Без флага в ответе — не «не принимаю»,
+    а непрочитанный ответ: экран не должен нарисовать паузу, которой нет."""
+    value = data.get("accepting_bookings") if isinstance(data, dict) else None
+    if not isinstance(value, bool):
+        return _error("accepting_bookings_unavailable", _ACCEPTING_UNAVAILABLE, 502)
+    return JsonResponse({"accepting_bookings": value, "status": data.get("status")})
+
+
+def _accepting_bookings_refusal(exc: BookingBadRequestError) -> HttpResponse:
+    if exc.status_code == 403:
+        return _error(
+            "not_linked",
+            "Профиль ещё не связан с каталогом — настроить приём записей пока нельзя.",
+            403,
+        )
+    if exc.status_code == 409:
+        return _error(
+            "profile_not_active",
+            "Профиль ещё не опубликован — принимать записи можно после проверки.",
+            409,
+        )
+    if exc.status_code == 400:
+        return _error("validation_error", "accepting_bookings must be true or false.", 400)
+    return _error("accepting_bookings_unavailable", _ACCEPTING_UNAVAILABLE, 502)
+
+
+# --- GET /reviews (DRF-1857) -----------------------------------------------
+
+_REVIEWS_UNAVAILABLE = "Отзывы сейчас недоступны."
+
+#: What a review row may carry to the screen. Anything else the catalog adds is
+#: dropped here — the bot's own boundary, not a trust in the upstream shape.
+_REVIEW_FIELDS = ("id", "rating", "text", "client_name", "service_name", "created_at")
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+@require_master_init_data
+@_catalog_profile_required
+def reviews(request: HttpRequest) -> HttpResponse:
+    """«Мои отзывы» — прокси в каталог (DRF-1857, карта кабинета K14).
+
+    Отзывы живут в каталоге и только там — копии в боте нет. Субъект — сам
+    мастер, как у часов и «Принимаю записи»: каталог отдаёт отзывы только
+    своего профиля и журналирует чтение. Клиент в ответе — «Имя Ф.» /
+    «Клиент» / ``null`` для анонимного; поля строки — белым списком
+    :data:`_REVIEW_FIELDS`. Оценки нет, пока нет ни одного отзыва: ноль —
+    это «нет данных», а не 0.0.
+    """
+
+    master: CatalogMaster = request.master  # type: ignore[attr-defined]
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    actor = external_user_id_for(bot_user)
+    client = get_ayla_booking_client()
+    try:
+        data = client.get_specialist_reviews(
+            specialist_id=catalog_specialist_id(master), external_user_id=actor
+        )
+    except BookingBadRequestError as exc:
+        return _reviews_refusal(exc)
+    except BookingUnavailableError:
+        return _error("reviews_unavailable", _REVIEWS_UNAVAILABLE, 503)
+    return _reviews_response(data)
+
+
+def _reviews_response(data: dict[str, Any]) -> HttpResponse:
+    """Число, оценка и строки ровно из ответа каталога — или 502, если его не прочесть.
+
+    Без числа или списка это не «отзывов нет», а непрочитанный ответ: экран не
+    должен нарисовать пустоту, которой нет."""
+    count = data.get("review_count") if isinstance(data, dict) else None
+    rows = data.get("reviews") if isinstance(data, dict) else None
+    if not isinstance(count, int) or isinstance(count, bool) or not isinstance(rows, list):
+        return _error("reviews_unavailable", _REVIEWS_UNAVAILABLE, 502)
+    return JsonResponse(
+        {
+            "review_count": count,
+            "rating": data.get("rating") if count > 0 else None,
+            "reviews": [
+                {field: row.get(field) for field in _REVIEW_FIELDS}
+                for row in rows
+                if isinstance(row, dict)
+            ],
+        }
+    )
+
+
+def _reviews_refusal(exc: BookingBadRequestError) -> HttpResponse:
+    if exc.status_code == 403:
+        return _error(
+            "not_linked", "Профиль ещё не связан с каталогом — отзывы пока не прочесть.", 403
+        )
+    if exc.status_code == 404:
+        return _error("not_found", "Профиль мастера не найден в каталоге.", 404)
+    return _error("reviews_unavailable", _REVIEWS_UNAVAILABLE, 502)
+
+
+# --- GET /onboarding/readiness --------------------------------------------
+
+
+@require_http_methods(["GET"])
+@require_master_init_data
+def onboarding_readiness(request: HttpRequest) -> HttpResponse:
+    """Чек-лист «Осталось настроить» — проекция по фактам (DRF-1794, M2).
+
+    Read-only, без аудита и без хранимого состояния: см.
+    :mod:`apps.master_api.services.onboarding_readiness`. Экран 01 и карточка
+    «продолжить настройку» в ``/solo/my-day`` читают только это.
+    """
+
+    master: CatalogMaster = request.master  # type: ignore[attr-defined]
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    # DRF-2370: место работы каталог отдаёт только под субъектом мастера.
+    return JsonResponse(build_readiness(master, actor=external_user_id_for(bot_user)).as_dict())
+
+
+# --- /publication/readiness, /publication, /publication/status (DRF-1797, M5) ---
+
+_PUBLICATION_UNAVAILABLE = "Каталог сейчас недоступен — попробуйте позже."
+_PUBLICATION_REFUSED_REASONS = frozenset(
+    {"command_id_reused", "salon_publication_owner_managed", "no_workspace_tenant"}
+)
+
+
+def _publication_refusal(exc: BookingBadRequestError) -> HttpResponse:
+    """Один перевод отказов публикации каталога (M4) на имена экрана — с их данными."""
+    details = exc.details or {}
+    if exc.status_code == 403:
+        return _error("not_linked", "Профиль ещё не связан с каталогом.", 403)
+    if exc.status_code == 404:
+        if exc.code == "SPECIALIST_NOT_FOUND":
+            return _error("specialist_not_found", "Профиль мастера не найден в каталоге.", 404)
+        return _error("not_found", "Не найдено.", 404)
+    if exc.status_code == 409:
+        if exc.code == "PUBLICATION_NOT_READY":
+            # Не ``_error_with``: у него третий параметр называется ``status``,
+            # а готовность каталога несёт своё поле ``status`` (READY /
+            # NOT_READY) — та же форма ответа, собранная без столкновения имён.
+            return JsonResponse(
+                {
+                    "error": "not_ready",
+                    "detail": "Профиль ещё не готов к публикации.",
+                    "details": {
+                        "status": details.get("status"),
+                        "missing": list(details.get("missing") or []),
+                    },
+                },
+                status=409,
+            )
+        if exc.code == "PUBLICATION_REFUSED":
+            reason = details.get("reason")
+            slug = reason if reason in _PUBLICATION_REFUSED_REASONS else "publication_refused"
+            return _error_with(slug, "Публикация сейчас недоступна.", 409, reason=reason)
+    if exc.status_code == 400:
+        return _error("validation_error", "Каталог не принял запрос.", 400)
+    return _error("catalog_refused", "Каталог отказал.", exc.status_code or 400)
+
+
+@require_http_methods(["GET"])
+@require_master_init_data
+@_catalog_profile_required
+def publication_readiness(request: HttpRequest) -> HttpResponse:
+    """«Готов к публикации?» — прокси готовности каталога (M5; каталог M4 #453).
+
+    Ответ — как его прислал каталог: READY / NOT_READY и поимённый ``missing``;
+    бот его не пересчитывает. Субъект — сам мастер, профиль — его
+    ``CatalogMaster.id``.
+    """
+    master: CatalogMaster = request.master  # type: ignore[attr-defined]
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    try:
+        data = get_ayla_booking_client().get_publication_readiness(
+            specialist_id=catalog_specialist_id(master),
+            external_user_id=external_user_id_for(bot_user),
+        )
+    except BookingBadRequestError as exc:
+        return _publication_refusal(exc)
+    except BookingUnavailableError:
+        return _error("catalog_unavailable", _PUBLICATION_UNAVAILABLE, 503)
+    return JsonResponse(data)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_master_init_data
+@_catalog_profile_required
+def publication_publish(request: HttpRequest) -> HttpResponse:
+    """«Опубликовать» — прокси команды каталога (M5; каталог M4 #453).
+
+    ``command_id`` (UUID) присылает экран: повтор с тем же ключом безопасен,
+    каталог вернёт ту же команду. Без ключа — 400 без вызова каталога.
+    201 — только когда каталог сделал переход; повтор и «уже на проверке» — 200.
+    ACTIVE ставит модератор — не эта команда.
+    """
+    master: CatalogMaster = request.master  # type: ignore[attr-defined]
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    body = _json_object(request)
+    command_id = body.get("command_id") if body is not None else None
+    if not _is_uuid(command_id):
+        return _error("validation_error", "Нужен command_id (UUID) — ключ повтора команды.", 400)
+    try:
+        data = get_ayla_booking_client().publish(
+            specialist_id=catalog_specialist_id(master),
+            external_user_id=external_user_id_for(bot_user),
+            command_id=str(command_id),
+        )
+    except BookingBadRequestError as exc:
+        return _publication_refusal(exc)
+    except BookingUnavailableError:
+        return _error("catalog_unavailable", _PUBLICATION_UNAVAILABLE, 503)
+    created = bool(data.pop("created", False))
+    return JsonResponse(data, status=201 if created else 200)
+
+
+@require_http_methods(["GET"])
+@require_master_init_data
+@_catalog_profile_required
+def publication_status(request: HttpRequest) -> HttpResponse:
+    """«Проверить статус» — прокси статуса публикации каталога (M5; каталог M4 #453)."""
+    master: CatalogMaster = request.master  # type: ignore[attr-defined]
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    try:
+        data = get_ayla_booking_client().get_publication_status(
+            specialist_id=catalog_specialist_id(master),
+            external_user_id=external_user_id_for(bot_user),
+        )
+    except BookingBadRequestError as exc:
+        return _publication_refusal(exc)
+    except BookingUnavailableError:
+        return _error("catalog_unavailable", _PUBLICATION_UNAVAILABLE, 503)
+    return JsonResponse(data)
+
+
+# --- /services/selection, /services/<id>/offer, /services/<id> (DRF-1895, M10b) ---
+
+_SELECTION_UNAVAILABLE = "Каталог сейчас недоступен."
+#: Пределы каталога (#443 / #444) — проверяются здесь, чтобы заведомо
+#: неверное тело не уходило в каталог; решает всё равно каталог.
+_MAX_TEMPLATES_PER_CALL = 200
+_OFFER_MIN_PRICE = Decimal("1")
+_OFFER_DURATION_RANGE = (5, 480)
+_SELECTION_REFUSED_REASONS = frozenset(
+    {"salon_catalog_owner_managed", "no_workspace_tenant", "service_removed"}
+)
+
+
+@csrf_exempt
+@require_http_methods(["GET", "POST"])
+@require_master_init_data
+@_catalog_profile_required
+def service_selection(request: HttpRequest) -> HttpResponse:
+    """«Выберите услуги» мастера-соло — прокси в каталог (M8a).
+
+    Выбор живёт в каталоге и только там; ответ — состояние выбора, как его
+    прислал каталог, со счётчиками ``selected`` / ``configured`` — бот их не
+    пересчитывает. Субъект — сам мастер, профиль — его ``CatalogMaster.id``.
+    """
+    master: CatalogMaster = request.master  # type: ignore[attr-defined]
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    actor = external_user_id_for(bot_user)
+    client = get_ayla_booking_client()
+    if request.method == "GET":
+        try:
+            data = client.get_service_selection(
+                specialist_id=catalog_specialist_id(master), external_user_id=actor
+            )
+        except BookingBadRequestError as exc:
+            return _selection_refusal(exc)
+        except BookingUnavailableError:
+            return _error("catalog_unavailable", _SELECTION_UNAVAILABLE, 503)
+        return JsonResponse(data)
+    body = _json_object(request)
+    template_ids = body.get("template_ids") if body is not None else None
+    if (
+        not isinstance(template_ids, list)
+        or not 1 <= len(template_ids) <= _MAX_TEMPLATES_PER_CALL
+        or not all(_is_uuid(value) for value in template_ids)
+    ):
+        return _error("validation_error", "Нужен список template_ids: от 1 до 200 UUID.", 400)
+    try:
+        data = client.select_services(
+            specialist_id=catalog_specialist_id(master),
+            external_user_id=actor,
+            template_ids=[str(value) for value in template_ids],
+        )
+    except BookingBadRequestError as exc:
+        return _selection_refusal(exc)
+    except BookingUnavailableError:
+        return _error("catalog_unavailable", _SELECTION_UNAVAILABLE, 503)
+    return JsonResponse(data, status=201 if data.get("created") else 200)
+
+
+@csrf_exempt
+@require_http_methods(["PUT"])
+@require_master_init_data
+@_catalog_profile_required
+def service_offer(request: HttpRequest, salon_service_id: uuid.UUID) -> HttpResponse:
+    """Цена и длительность выбранной услуги — прокси в каталог (M8b).
+
+    Первая цена создаёт предложение мастера (201), следующие обновляют (200).
+    Цена >= 1 (не больше двух знаков после запятой), длительность 5..480 минут.
+    """
+    master: CatalogMaster = request.master  # type: ignore[attr-defined]
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    body = _json_object(request)
+    price = body.get("price") if body is not None else None
+    duration = body.get("duration_minutes") if body is not None else None
+    low, high = _OFFER_DURATION_RANGE
+    if (
+        not _is_offer_price(price)
+        or not isinstance(duration, int)
+        or isinstance(duration, bool)
+        or not low <= duration <= high
+    ):
+        return _error("validation_error", "Нужны цена от 1 и длительность от 5 до 480 минут.", 400)
+    try:
+        data = get_ayla_booking_client().put_service_offer(
+            specialist_id=catalog_specialist_id(master),
+            external_user_id=external_user_id_for(bot_user),
+            salon_service_id=str(salon_service_id),
+            price=str(price),
+            duration_minutes=duration,
+        )
+    except BookingBadRequestError as exc:
+        return _selection_refusal(exc)
+    except BookingUnavailableError:
+        return _error("catalog_unavailable", _SELECTION_UNAVAILABLE, 503)
+    payload = dict(data)
+    created = bool(payload.pop("created", False))
+    return JsonResponse(payload, status=201 if created else 200)
+
+
+@csrf_exempt
+@require_http_methods(["DELETE"])
+@require_master_init_data
+@_catalog_profile_required
+def selected_service(request: HttpRequest, salon_service_id: uuid.UUID) -> HttpResponse:
+    """«Убрать из моих услуг» — прокси в каталог (M8b)."""
+    master: CatalogMaster = request.master  # type: ignore[attr-defined]
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    try:
+        data = get_ayla_booking_client().remove_service(
+            specialist_id=catalog_specialist_id(master),
+            external_user_id=external_user_id_for(bot_user),
+            salon_service_id=str(salon_service_id),
+        )
+    except BookingBadRequestError as exc:
+        return _selection_refusal(exc)
+    except BookingUnavailableError:
+        return _error("catalog_unavailable", _SELECTION_UNAVAILABLE, 503)
+    return JsonResponse(data)
+
+
+def _json_object(request: HttpRequest) -> dict | None:
+    try:
+        body = json.loads(request.body or b"{}")
+    except ValueError:
+        return None
+    return body if isinstance(body, dict) else None
+
+
+def _is_uuid(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        uuid.UUID(value)
+    except ValueError:
+        return False
+    return True
+
+
+def _is_offer_price(value: object) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        return False
+    try:
+        amount = Decimal(str(value))
+    except InvalidOperation:
+        return False
+    exponent = amount.as_tuple().exponent
+    return (
+        amount.is_finite()
+        and isinstance(exponent, int)
+        and exponent >= -2
+        and amount >= _OFFER_MIN_PRICE
+    )
+
+
+def _selection_refusal(exc: BookingBadRequestError) -> HttpResponse:
+    """Один перевод отказов каталога M8 на имена экрана — с их данными."""
+    details = exc.details or {}
+    reason = details.get("reason")
+    if exc.status_code == 403:
+        return _error("not_linked", "Профиль ещё не связан с каталогом.", 403)
+    if exc.status_code == 404:
+        if exc.code == "SPECIALIST_NOT_FOUND":
+            return _error("specialist_not_found", "Профиль мастера не найден в каталоге.", 404)
+        if reason == "template_not_found":
+            return _error_with(
+                "template_not_found",
+                "Некоторых услуг нет в каталоге.",
+                404,
+                template_ids=list(details.get("template_ids") or []),
+            )
+        if reason == "service_not_selected":
+            return _error("service_not_selected", "Эта услуга не выбрана.", 404)
+        return _error("not_found", "Не найдено.", 404)
+    if exc.status_code == 409:
+        if exc.code == "HAS_APPOINTMENTS":
+            return _error_with(
+                "has_future_appointments",
+                "У услуги есть будущие записи.",
+                409,
+                count=details.get("count"),
+            )
+        if exc.code == "SERVICE_SELECTION_REFUSED":
+            slug = reason if reason in _SELECTION_REFUSED_REASONS else "selection_refused"
+            return _error_with(slug, "Выбор услуг сейчас недоступен.", 409, reason=reason)
+    if exc.status_code == 400:
+        return _error("validation_error", "Проверьте цену и длительность.", 400)
+    return _error("catalog_unavailable", _SELECTION_UNAVAILABLE, 502)
+
+
+def _error_with(slug: str, detail: str, status: int, **details: object) -> JsonResponse:
+    """Отказ с данными — под ``details``, как их читает ``ApiError`` Mini App (DRF-1708)."""
+    return JsonResponse({"error": slug, "detail": detail, "details": details}, status=status)
+
+
+# --- GET /services/directions, /services/templates (DRF-1799, M7) -----------
+
+_CANON_UNAVAILABLE = "Каталог услуг сейчас недоступен."
+
+#: Строки направления и шаблона — белым списком. Экран 03 выбирает услуги
+#: без цен и минут, поэтому ни цена, ни длительность из каталога до него не
+#: доходят; что бы каталог ни добавил, экран получает только это.
+_DIRECTION_FIELDS = ("id", "name", "slug", "icon", "sort_order")
+_TEMPLATE_FIELDS = ("id", "name", "name_short", "is_popular", "category_id", "category_name")
+
+
+def _pick(row: dict[str, Any], fields: tuple[str, ...]) -> dict[str, Any]:
+    return {field: row.get(field) for field in fields}
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+@require_master_init_data
+def service_directions(request: HttpRequest) -> HttpResponse:
+    """Направления канона для экрана 03 — прокси в каталог (DRF-1799, M7).
+
+    Список — ровно ответ каталога ``/internal/services/directions/``: ни числа
+    направлений, ни их кодов бот не знает и не держит. Оговорка #454 / G7:
+    сегодня это корни канона, а не шесть направлений экрана 02; ответ G7 меняет
+    данные каталога, а не этот прокси. Не прочитался — 502/503, а не пустой
+    список.
+    """
+    client = get_ayla_booking_client()
+    try:
+        data = client.get_service_directions()
+    except BookingBadRequestError:
+        return _error("catalog_unavailable", _CANON_UNAVAILABLE, 502)
+    except BookingUnavailableError:
+        return _error("catalog_unavailable", _CANON_UNAVAILABLE, 503)
+    if not isinstance(data, list):
+        return _error("catalog_unavailable", _CANON_UNAVAILABLE, 502)
+    return JsonResponse(
+        {"directions": [_pick(row, _DIRECTION_FIELDS) for row in data if isinstance(row, dict)]}
+    )
+
+
+@csrf_exempt
+@require_http_methods(["GET"])
+@require_master_init_data
+def service_templates(request: HttpRequest) -> HttpResponse:
+    """Шаблоны одного направления для экрана 03 — прокси в каталог (DRF-1799, M7).
+
+    Каталог отдаёт всё поддерево направления одним запросом (M7a) — логики
+    дерева в боте нет. Без ``direction_id`` (UUID) — 400 без вызова каталога;
+    не направление — ``not_a_direction``, неизвестное — ``direction_not_found``.
+    """
+    direction_id = request.GET.get("direction_id")
+    if not _is_uuid(direction_id):
+        return _error("validation_error", "Нужен direction_id — UUID направления.", 400)
+    client = get_ayla_booking_client()
+    try:
+        data = client.get_service_templates(direction_id=str(direction_id))
+    except BookingBadRequestError as exc:
+        if exc.status_code == 404:
+            return _error("direction_not_found", "Направление не найдено в каталоге.", 404)
+        if exc.status_code == 400 and exc.code == "NOT_A_DIRECTION":
+            return _error("not_a_direction", "Это не направление каталога.", 400)
+        return _error("catalog_unavailable", _CANON_UNAVAILABLE, 502)
+    except BookingUnavailableError:
+        return _error("catalog_unavailable", _CANON_UNAVAILABLE, 503)
+    templates = data.get("templates") if isinstance(data, dict) else None
+    if not isinstance(templates, list):
+        return _error("catalog_unavailable", _CANON_UNAVAILABLE, 502)
+    return JsonResponse(
+        {
+            "direction_id": str(direction_id),
+            "templates": [
+                _pick(row, _TEMPLATE_FIELDS) for row in templates if isinstance(row, dict)
+            ],
         }
     )
 
@@ -778,52 +2192,18 @@ def _parse_iso_datetime(raw: str) -> datetime | None:
 
 
 def _maybe_send_manager_dm(*, tenant: Any, master: CatalogMaster, request_id: uuid.UUID) -> None:
-    """Dispatch the «Анна просит выходной» DM to the salon manager.
+    """DM «Анна просит выходной» управляющим салона — от салонного бота.
 
-    Per master-mobile §M3 line 458: «server marks slot blocked → owner
-    notified (audit + bot DM)». No-op when ``manager_chat_id`` is
-    empty — degraded mode aligned with the reminder-escalation pattern
-    (apps/bookings/tasks::escalate_stale_reminders).
-
-    Imports are local because the function is wired via
-    ``transaction.on_commit`` and the channels module isn't needed by
-    every master endpoint.
+    Тонкая обёртка над
+    :func:`apps.master_api.services.schedule.notify_manager_of_availability_request`:
+    до DRF-2128 здесь жила своя копия той же логики (вьюхи были заняты
+    DRF-1507), теперь копия одна. Имя оставлено — его держат
+    ``transaction.on_commit`` ниже и подмены в тестах.
     """
 
-    chat_id = (tenant.manager_chat_id or "").strip()
-    if not chat_id:
-        logger.info(
-            "master_api.availability.no_manager_chat_id tenant=%s master=%s",
-            tenant.id,
-            master.id,
-        )
-        return
+    from apps.master_api.services.schedule import notify_manager_of_availability_request
 
-    from apps.channels.max.outbound import MaxAPIError, send_message
-
-    # Admin Mini App deeplink — settings-overridable so staging can point
-    # at the staging admin URL. The default value mirrors the customer-
-    # side ADMIN_MINI_APP_URL convention from PR #450.
-    admin_url = getattr(
-        settings,
-        "ADMIN_MINI_APP_URL",
-        "https://admin.formulatela.ru/availability",
-    )
-    text = (
-        f"{master.name} просит изменить расписание. "
-        f"[Открыть запрос]({admin_url}?request_id={request_id})"
-    )
-    try:
-        send_message(chat_id=chat_id, text=text)
-    except MaxAPIError:
-        # Best-effort: the audit + DB row are the source of truth. DM
-        # failures are logged for ops but don't propagate.
-        logger.warning(
-            "master_api.availability.manager_dm_failed tenant=%s request=%s",
-            tenant.id,
-            request_id,
-            exc_info=True,
-        )
+    notify_manager_of_availability_request(tenant=tenant, master=master, request_id=request_id)
 
 
 @csrf_exempt
@@ -859,9 +2239,9 @@ def schedule(request: HttpRequest) -> HttpResponse:
 
     # Resolve defaults in tenant-local TZ so «today» means today for
     # the master, not for UTC.
-    from apps.master_api.services.schedule import get_tenant_tz
+    from apps.tenancy.timezones import salon_zone
 
-    tz = get_tenant_tz(tenant)
+    tz = salon_zone(tenant)
     today_local = dj_timezone.now().astimezone(tz).date()
 
     raw_from = request.GET.get("from", "").strip()
@@ -926,7 +2306,7 @@ def availability_request(request: HttpRequest) -> HttpResponse:
     Side effects:
       * Audit row: ``master.availability_change_requested``.
       * Event emit (same slug) for analytics fanout.
-      * MAX DM to ``tenant.manager_chat_id`` post-commit. No-op when
+      * MAX DM to the salon manager's address post-commit. No-op when
         empty (degraded mode, matches reminder-escalation pattern).
     """
 
@@ -980,15 +2360,38 @@ def availability_request(request: HttpRequest) -> HttpResponse:
             )
 
             request_id = req.id
-            transaction.on_commit(
-                lambda: _maybe_send_manager_dm(
-                    tenant=tenant,
-                    master=master,
-                    request_id=request_id,
+            solo = is_solo_provider(tenant)
+            if not solo:
+                transaction.on_commit(
+                    lambda: _maybe_send_manager_dm(
+                        tenant=tenant,
+                        master=master,
+                        request_id=request_id,
+                    )
                 )
-            )
     except AvailabilityRequestError as exc:
         return _error(exc.slug, exc.detail, 400)
+
+    if solo:
+        # DRF-1816 (M24, карта P69/P71) — соло: владелец = мастер, и
+        # «заявка владельцу» была бы заявкой самому себе. Выходной ставится
+        # одним действием: та же материализация, что у одобрения владельцем
+        # (в Ayla при включённом флаге, локально при выключенном), с тем же
+        # автором в аудите. Отказ (записи в это время, Ayla недоступна) —
+        # честно наружу, заявка при этом не остаётся висеть «на решении».
+        try:
+            approve_availability_request(
+                request_id=req.id,
+                tenant_id=master.tenant_id,
+                actor=None,
+                actor_bot_user_id=bot_user.id,
+                actor_bot_user=bot_user,
+                actor_role="owner",
+            )
+        except AvailabilityDecisionError as exc:
+            req.delete()
+            return _error(exc.slug, exc.detail, exc.status)
+        req.refresh_from_db()
 
     return JsonResponse(
         {
@@ -998,388 +2401,11 @@ def availability_request(request: HttpRequest) -> HttpResponse:
             "requested_end": (req.requested_end.isoformat() if req.requested_end else None),
             "reason_class": req.reason_class,
             "created_at": req.created_at.isoformat(),
+            # DRF-1816 — соло: выходной уже стоит, ждать некого.
+            "applied": bool(solo),
         },
         status=201,
     )
-
-
-@require_http_methods(["GET"])
-@require_master_init_data
-def conversations_list(request: HttpRequest) -> HttpResponse:
-    """M5 master conversations list (master-mobile §M5, PR Tier1.3).
-
-    Spec quote (§M5 line 552):
-
-        «Screen M5 — Master conversation list (their conversations only)»
-
-    Spec quote (§M5 lines 608-614):
-
-        «Master's card is **stripped down** vs admin's: ❌ No LTV /
-        financial signal … ✅ Customer first name only … ✅ Last name
-        as 1-letter initial»
-
-    Query params (all optional):
-      filter: "active" (default) | "all" | "resolved"
-      search: substring on customer first name (case-insensitive)
-      cursor: opaque base64-JSON signed token
-      limit:  default 25, max 50
-
-    Returns 200 with::
-
-        {
-          "items": [...],
-          "section_counts": {...},
-          "next_cursor": null | "<token>"
-        }
-
-    Read-only. No audit row, no event emit. Cross-master + cross-tenant
-    isolation enforced by :func:`require_master_init_data` plus the
-    explicit ``master_id`` + ``tenant_id`` filters in the service layer.
-    """
-
-    master: CatalogMaster = request.master  # type: ignore[attr-defined]
-
-    raw_filter = (request.GET.get("filter") or "active").strip().lower()
-    raw_search = (request.GET.get("search") or "").strip()
-    raw_cursor = (request.GET.get("cursor") or "").strip() or None
-    raw_limit = (request.GET.get("limit") or "").strip()
-    if raw_limit:
-        try:
-            limit = int(raw_limit)
-        except ValueError:
-            return _error("bad_request", "'limit' must be an integer", 400)
-    else:
-        limit = CONVERSATIONS_DEFAULT_LIMIT
-    if limit < 1 or limit > CONVERSATIONS_MAX_LIMIT:
-        return _error(
-            "bad_request",
-            f"'limit' must be in 1..{CONVERSATIONS_MAX_LIMIT}",
-            400,
-        )
-
-    try:
-        response = list_master_conversations(
-            master,
-            filter=raw_filter,  # type: ignore[arg-type]
-            search=raw_search,
-            cursor=raw_cursor,
-            limit=limit,
-            now=dj_timezone.now(),
-        )
-    except ConversationsListError as exc:
-        return _error(exc.slug, exc.detail, 400)
-
-    return JsonResponse(response.to_dict())
-
-
-# --- M6 conversation detail (PR M6.1) -------------------------------------
-
-
-@require_http_methods(["GET"])
-@require_master_init_data
-def conversation_detail(request: HttpRequest, conversation_id: str) -> HttpResponse:
-    """M6 master conversation detail (master-mobile §M6).
-
-    Spec quote (§M6 lines 706-712):
-
-        «When master taps «Отправить от себя» on a draft, the message
-        renders to the customer as «Помощник: …». Same single assistant
-        identity. Master's authorship is recorded in attribution
-        metadata (``actor_type=master``, ``composed_by=master_id``)»
-
-    Cross-master + cross-tenant isolation enforced by
-    :func:`apps.master_api.services.conversation_detail._verify_master_involved`.
-    """
-
-    master: CatalogMaster = request.master  # type: ignore[attr-defined]
-    try:
-        response = get_conversation_detail(master, conversation_id)
-    except ConversationDetailError as exc:
-        return _error(exc.slug, exc.detail, exc.status)
-    return JsonResponse(response.to_dict())
-
-
-@csrf_exempt
-@require_http_methods(["POST"])
-@require_master_init_data
-def conversation_send_message(request: HttpRequest, conversation_id: str) -> HttpResponse:
-    """M6 master compose endpoint (§M6 lines 668, 674).
-
-    Stamps the message with attribution metadata
-    ``{"actor_type": "master", "composed_by": <master_id>}`` so audit /
-    admin views can distinguish bot-authored from master-authored text.
-
-    Rejects HUMAN_LOCKED with 403 ``tier_locked``.
-    """
-
-    master: CatalogMaster = request.master  # type: ignore[attr-defined]
-    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
-
-    body = _parse_json_body(request)
-    if isinstance(body, JsonResponse):
-        return body
-
-    content = body.get("content") or ""
-    try:
-        response = send_master_message(
-            master,
-            conversation_id,
-            content=content,
-            actor_bot_user=bot_user,
-        )
-    except ConversationDetailError as exc:
-        return _error(exc.slug, exc.detail, exc.status)
-    return JsonResponse(response.to_dict(), status=201)
-
-
-@csrf_exempt
-@require_http_methods(["POST"])
-@require_master_init_data
-def conversation_mark_read(request: HttpRequest, conversation_id: str) -> HttpResponse:
-    """M6 mark-read endpoint — debounced (one audit row per call)."""
-
-    master: CatalogMaster = request.master  # type: ignore[attr-defined]
-    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
-
-    try:
-        marked = mark_conversation_read(
-            master,
-            conversation_id,
-            actor_bot_user=bot_user,
-        )
-    except ConversationDetailError as exc:
-        return _error(exc.slug, exc.detail, exc.status)
-    return JsonResponse({"marked_count": marked})
-
-
-@csrf_exempt
-@require_http_methods(["POST"])
-@require_master_init_data
-def conversation_promote(request: HttpRequest, conversation_id: str) -> HttpResponse:
-    """M6 safety promote — escalate to HUMAN_LOCKED (§M6 line 765).
-
-    Returns 409 ``already_locked`` if the conversation is already
-    locked; 400 on missing/invalid reason_class.
-    """
-
-    master: CatalogMaster = request.master  # type: ignore[attr-defined]
-    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
-
-    body = _parse_json_body(request)
-    if isinstance(body, JsonResponse):
-        return body
-
-    reason_class = body.get("reason_class") or ""
-    reason_text = body.get("reason_text") or ""
-    try:
-        response = promote_to_human_locked(
-            master,
-            conversation_id,
-            reason_class=reason_class,
-            reason_text=reason_text,
-            actor_bot_user=bot_user,
-        )
-    except ConversationDetailError as exc:
-        return _error(exc.slug, exc.detail, exc.status)
-    return JsonResponse(response.to_dict())
-
-
-# --- M6 AI drafts (Bundle B / item 4 backend) -----------------------------
-
-
-@csrf_exempt
-@require_http_methods(["POST"])
-@require_master_init_data
-def conversation_draft_generate(request: HttpRequest, conversation_id: str) -> HttpResponse:
-    """Generate a fresh AI draft for the master on this conversation.
-
-    Spec quote (master-mobile §M6 lines 662-671):
-
-        «✨ Предложенный ответ ... [Отправить от себя] [Отредактировать]
-        [Пусть помощник ответит]»
-
-    Body: empty (any JSON dict ignored — keeps the endpoint a pure
-    «generate now» trigger).
-
-    Status codes:
-      200  — fresh draft (or idempotent re-serve within 60s window)
-      400  — ``conversation_locked``: HUMAN_LOCKED tier
-      404  — master not involved / conversation not found
-      429  — ``rate_limit_exceeded`` (per-master 10/min, 100/day) /
-             ``cost_cap_exceeded`` (per-master $X/day cumulative) /
-             ``generate_in_flight`` (another concurrent generate holds
-             the Conversation row lock; issue #550). All three include
-             a ``Retry-After`` header.
-      503  — ``llm_unavailable``: provider raised; refer to logs
-    """
-
-    master: CatalogMaster = request.master  # type: ignore[attr-defined]
-    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
-
-    # Blocker #2: per-master rate limit at the view layer — fail fast
-    # BEFORE any service work so a rogue loop can't burn budget.
-    rate = check_and_consume_rate_limit(master.id)
-    if not rate.allowed:
-        resp = _error(rate.slug, rate.detail, 429)
-        if rate.retry_after_seconds > 0:
-            resp["Retry-After"] = str(rate.retry_after_seconds)
-        return resp
-
-    try:
-        response = generate_draft_for_conversation(
-            conversation_id=conversation_id,
-            master=master,
-            actor_bot_user=bot_user,
-        )
-    except ConversationDetailError as exc:
-        # Issue #550 + #551: ``generate_in_flight`` /
-        # ``conversation_busy`` carry ``extra={"retry_after_seconds": 3}``
-        # so the frontend gets a concrete hint how long «Помощник уже
-        # думает…» should hold before re-enabling the tap. The shared
-        # :func:`_draft_error_response` helper surfaces the field in
-        # the JSON body AND sets the ``Retry-After`` header for clients
-        # that don't read JSON shims.
-        return _draft_error_response(exc)
-    return JsonResponse(response.to_dict())
-
-
-def _log_auto_draft_acted(draft_id: str, action_kind: str) -> None:
-    """Emit ``master_api.tasks.auto_draft.acted`` INFO slug (issue #707).
-
-    Slug prefix ``master_api.tasks.auto_draft.`` is the **logical
-    operational namespace** for the M6 auto-draft pipeline — it
-    intentionally matches PR #700's task-side prefix
-    (``apps/master_api/tasks.py``) so log triage / Grafana dashboards
-    (runbook ``m6-auto-draft-suppress-tuning.md`` Panel 4) can scrape a
-    single namespace regardless of whether the event came from the
-    Celery task or this HTTP view. We are NOT in ``tasks.py`` here, but
-    the namespace is by operational concern, not by code module.
-
-    Payload is PII-safe: UUIDs + enum + floats only. No customer
-    content — that's the contract that classifies this PR as NON-§H.3.
-    """
-
-    draft = AiDraft.all_tenants.filter(pk=draft_id).first()
-    if draft is None:
-        # Defence-in-depth: service path guaranteed the row existed at
-        # 201-return time, but a parallel hard-delete window is
-        # theoretically possible. Skip the log rather than 500.
-        return
-    now = dj_timezone.now()
-    draft_age_seconds = (now - draft.created_at).total_seconds()
-    trigger_id = draft.trigger_message_id
-    if trigger_id is None:
-        trigger_age_seconds = -1.0
-    else:
-        # Avoid triggering an extra Message fetch when we just need
-        # created_at. trigger_message FK is auto-fetched lazily; the
-        # `.trigger_message` access loads the related row.
-        trigger_msg = draft.trigger_message
-        trigger_age_seconds = (
-            (now - trigger_msg.created_at).total_seconds() if trigger_msg is not None else -1.0
-        )
-    logger.info(
-        "master_api.tasks.auto_draft.acted "
-        "conv=%s draft=%s action=%s "
-        "draft_age_seconds=%.1f trigger_age_seconds=%.1f",
-        draft.conversation_id,
-        draft.id,
-        action_kind,
-        draft_age_seconds,
-        trigger_age_seconds,
-    )
-
-
-@csrf_exempt
-@require_http_methods(["POST"])
-@require_master_init_data
-def conversation_draft_send_as_me(
-    request: HttpRequest, conversation_id: str, draft_id: str
-) -> HttpResponse:
-    """Send the draft text (or override) as a master-attributed message.
-
-    Spec quote (master-mobile §M6 lines 706-712):
-
-        «When master taps «Отправить от себя» on a draft, the message
-        renders to the customer as «Помощник: …». Same single assistant
-        identity. Master's authorship is recorded in attribution metadata
-        (``actor_type=master``, ``composed_by=master_id``)»
-
-    Body (optional):
-      ``{"override_content": "edited text"}`` — the «Отредактировать»
-      path. When present, replaces the draft's LLM text with the
-      master's edited version. ≤ 2000 chars.
-
-    Status codes:
-      201  — message created; draft marked SENT_AS_MASTER
-      400  — ``draft_already_acted`` (non-ACTIVE) / ``bad_request``
-             (override too long or empty)
-      403  — ``tier_locked``: HUMAN_LOCKED
-      404  — master not involved / draft not found
-    """
-
-    master: CatalogMaster = request.master  # type: ignore[attr-defined]
-    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
-
-    body = _parse_json_body(request)
-    if isinstance(body, JsonResponse):
-        return body
-
-    override_content = body.get("override_content")
-    if override_content is not None and not isinstance(override_content, str):
-        return _error("bad_request", "override_content must be a string", 400)
-
-    try:
-        response = send_draft_as_master(
-            conversation_id=conversation_id,
-            draft_id=draft_id,
-            master=master,
-            actor_bot_user=bot_user,
-            override_content=override_content,
-        )
-    except ConversationDetailError as exc:
-        return _draft_error_response(exc)
-    # Issue #707: ground-truth log for Panel 4 (tap-to-decide latency).
-    _log_auto_draft_acted(draft_id, "sent_as_master")
-    return JsonResponse(response.to_dict(), status=201)
-
-
-@csrf_exempt
-@require_http_methods(["POST"])
-@require_master_init_data
-def conversation_draft_release_to_ai(
-    request: HttpRequest, conversation_id: str, draft_id: str
-) -> HttpResponse:
-    """Let the AI auto-send the draft (no master attribution).
-
-    Spec quote (master-mobile §M6 line 670):
-
-        «[Пусть помощник ответит]  Releases to AI auto-send»
-
-    Body: empty.
-
-    Status codes:
-      201  — message created; draft marked RELEASED_TO_AI
-      400  — ``draft_already_acted``
-      403  — ``tier_locked``
-      404  — master not involved / draft not found
-    """
-
-    master: CatalogMaster = request.master  # type: ignore[attr-defined]
-    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
-
-    try:
-        response = release_draft_to_ai(
-            conversation_id=conversation_id,
-            draft_id=draft_id,
-            master=master,
-            actor_bot_user=bot_user,
-        )
-    except ConversationDetailError as exc:
-        return _draft_error_response(exc)
-    # Issue #707: ground-truth log for Panel 4 (tap-to-decide latency).
-    _log_auto_draft_acted(draft_id, "released_to_ai")
-    return JsonResponse(response.to_dict(), status=201)
 
 
 @require_http_methods(["GET"])
@@ -1399,6 +2425,40 @@ def availability_pending(request: HttpRequest) -> HttpResponse:
     master: CatalogMaster = request.master  # type: ignore[attr-defined]
     items = list_pending_requests(master, now=dj_timezone.now())
     return JsonResponse({"items": items})
+
+
+# --- DRF-1528: переписка мастер↔клиент снята ------------------------------
+
+
+@csrf_exempt
+def conversations_retired(request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
+    """Девять прежних ручек переписки отвечают 410 Gone.
+
+    Почему не 404: молчание неотличимо от опечатки в адресе, и следующий,
+    кто увидит его в логе, пойдёт искать маршрут. Почему не 500: он зовёт
+    повторить запрос, хотя повторять нечего — ручки больше нет.
+    Прецедент — ``apps.integrations.yookassa_retired`` (#732): 410 ради
+    громкости в логах и соответствия RFC 9110 §15.5.11.
+
+    Личность не разбирается: ручка снята для всех, и 401 вместо 410 только
+    отправил бы звонящего чинить не то.
+    """
+
+    logger.info(
+        "master_api.conversations.retired path=%s method=%s",
+        request.path,
+        request.method,
+    )
+    return JsonResponse(
+        {
+            "error": "master_client_chat_retired",
+            "detail": (
+                "Прямой переписки мастера с клиентом нет (OD-7). "
+                "Поверхность снята в DRF-1255, ручки — в DRF-1528."
+            ),
+        },
+        status=410,
+    )
 
 
 # --- M7 notification preferences (Bundle B / item 3) -----------------------
@@ -1468,7 +2528,8 @@ def notification_prefs(request: HttpRequest) -> HttpResponse:
 def customers_list(request: HttpRequest) -> HttpResponse:
     """Read-only customer roster for the calling master (Tau §4.3 P0 tab).
 
-    Aggregates :class:`apps.booking.BookingRequest` history grouped by
+    Aggregates the master's attended visits in the booking mirror
+    (:class:`apps.booking.RemoteBookingProxy`, DRF-1138) grouped by
     ``bot_user_id``. See :func:`apps.master_api.services.customers.list_master_customers`
     for the field shape + counting rules. Tenant scope is enforced by
     :func:`require_master_init_data`; the service layer adds an explicit
@@ -1491,7 +2552,20 @@ def customers_list(request: HttpRequest) -> HttpResponse:
         {"customers": [...]}
 
     Empty array when the master has no bookings yet.
+
+    With ``?q=`` (DRF-2154) the same route answers the booking-flow search
+    instead: ``{"results": [{id, name «Анна П.», last_visit_date, named}]}``
+    — see :func:`apps.master_api.views_bookings.search_customers`.
     """
+
+    query = (request.GET.get("q") or "").strip()
+    if query:
+        # DRF-2154 (М-2): поиск клиента для записи — имя + инициал + дата
+        # последнего визита у этого мастера; телефона нет ни на входе, ни
+        # на выходе. Один маршрут на ростер и поиск.
+        from apps.master_api.views_bookings import search_customers
+
+        return search_customers(request, query)
 
     master: CatalogMaster = request.master  # type: ignore[attr-defined]
     items = list_master_customers(master=master)

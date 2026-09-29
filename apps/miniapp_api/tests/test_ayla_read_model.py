@@ -15,7 +15,7 @@ import hmac
 import json
 import time as time_module
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta
 from urllib.parse import quote, urlencode
 
 import pytest
@@ -30,6 +30,7 @@ from apps.integrations.ayla.booking_client import (
     BookingUnavailableError,
 )
 from apps.tenancy.models import Tenant
+from tests.support.catalog_mirror import sync_shaped
 
 
 pytestmark = pytest.mark.django_db
@@ -92,14 +93,16 @@ def other_user(tenant) -> BotUser:
 
 @pytest.fixture
 def master(tenant) -> CatalogMaster:
-    return CatalogMaster.all_tenants.create(
-        tenant=tenant,
-        external_updated_at=timezone.now(),
-        name="Ольга",
-        specialization="Маникюр",
-        is_active=True,
-        invite_status=CatalogMaster.InviteStatus.ACCEPTED,
-        ayla_user_id=uuid.uuid4(),
+    return sync_shaped(
+        CatalogMaster.all_tenants.create(
+            tenant=tenant,
+            external_updated_at=timezone.now(),
+            name="Ольга",
+            specialization="Маникюр",
+            is_active=True,
+            invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+            ayla_user_id=uuid.uuid4(),
+        )
     )
 
 
@@ -215,17 +218,43 @@ class TestList:
         assert item["service_name"] == "Маникюр"  # via ayla_service_id mirror
         assert item["master_id"] == str(master.id)
         assert item["master_name"] == "Ольга"  # via CatalogMaster.id mirror
-        assert item["visit_at"] == proxy.start_at.isoformat()
+        # DRF-2589: тот же момент, но в поясе салона — не строка UTC.
+        assert datetime.fromisoformat(item["visit_at"]) == proxy.start_at
+        assert not item["visit_at"].endswith("+00:00")
         assert item["duration_min"] == 90  # end - start
         # Immediate-cancel surface: no two-step undo on the Ayla path.
         assert item["cancel_requested_at"] is None
         assert item["undo_window_seconds"] == 0
         assert item["cancellable"] is True
-        assert item["reschedulable"] is False
+        # DRF-2561 — живая запись с известными мастером и услугой переносится.
+        assert item["reschedulable"] is True
         assert item["rating"] is None
         assert item["can_rate"] is False
         # Optional C7.3 block absent without a PaymentMirror row.
         assert "payment" not in item
+
+    def test_reschedulable_only_when_confirmed_and_master_and_service_known(
+        self, client, tenant, bot_user, service, master
+    ) -> None:
+        """DRF-2561: флаг — пара, которая обязана различаться. Живая запись с
+        мастером и услугой — да; неоплаченная или без мастера — нет (экрану
+        без мастера не найти свободного времени)."""
+        ok = _proxy(
+            tenant, bot_user, days_ahead=3, service_id=SERVICE_AYLA_ID, specialist_id=master.id
+        )
+        unpaid = _proxy(
+            tenant,
+            bot_user,
+            days_ahead=4,
+            status="awaiting_payment",
+            service_id=SERVICE_AYLA_ID,
+            specialist_id=master.id,
+        )
+        nameless = _proxy(tenant, bot_user, days_ahead=5, service_id=SERVICE_AYLA_ID)
+        items = {i["id"]: i for i in _get(client, LIST_URL).json()["items"]}
+        assert items[str(ok.appointment_id)]["reschedulable"] is True
+        assert items[str(unpaid.appointment_id)]["reschedulable"] is False
+        assert items[str(nameless.appointment_id)]["reschedulable"] is False
 
     def test_optional_payment_block_from_mirror(
         self, client, tenant, bot_user, service, master

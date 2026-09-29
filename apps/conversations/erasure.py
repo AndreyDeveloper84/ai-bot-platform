@@ -41,11 +41,12 @@ reverse map is literally ``rev:<PHONE_a8f2c1d4_1>`` → the person's real phone
 number, kept so the LLM's reply can be de-tokenised. Clearing the message
 window and leaving that behind would empty the sentence and keep the number.
 
-The remaining prompt-bound reader that touches ``Message`` at all —
-``master_api.services.ai_drafts._recent_history`` — additionally honours the
-cutoff, so the master's draft prompt does not even receive the blanked rows.
-That is belt-and-braces, not the mechanism; the mechanism is that the text is
-not in the column.
+Читатель, который раньше приводили здесь как второй рубеж —
+``master_api.services.ai_drafts._recent_history`` — снят вместе с перепиской
+мастер↔клиент (DRF-1528). Это ничего не ослабляет: он и был «ремнём поверх
+подтяжек», а механизм — в том, что текста нет в колонке. Прочие
+prompt-bound читатели перечислены в ``dialogue_readers.DIALOGUE_READERS``, и
+каждый из них проверяется зондом в ``test_dialogue_reader_registry``.
 
 The standing proof that a *future* reader cannot quietly reopen the route is
 the registry guard in ``apps/conversations/dialogue_readers.py`` and
@@ -118,6 +119,7 @@ import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from datetime import timezone as dt_timezone
 from typing import Any
 
 from django.conf import settings
@@ -154,7 +156,22 @@ class AnonymizeResult:
     messages_archived: int = 0
     drafts_cleared: int = 0
     windows_cleared: int = 0
+    #: DRF-2243 — обращения к оператору, чей снимок или причина обезличены.
+    admin_tasks_cleared: int = 0
     conversation_ids: tuple[uuid.UUID, ...] = field(default_factory=tuple)
+    #: DRF-2220 — raw webhook entries of this person deleted from the
+    #: ``ingress:*`` streams and their DLQs, and entries up to the cutoff
+    #: whose sender could not be read (kept; gone by the retention window).
+    raw_entries_deleted: int = 0
+    raw_entries_unattributed: int = 0
+    #: False when Redis could not be read for that purge. The database half
+    #: still ran — a side store must not hold the erasure hostage — and the
+    #: entries leave by INGRESS_RAW_RETENTION_HOURS; callers must say so
+    #: rather than report the streams as erased.
+    raw_streams_checked: bool = True
+    #: DRF-2242 — rows of ``WebhookJournal`` severed from this person: body
+    #: emptied, trace cleared, event id hashed.
+    journal_rows_severed: int = 0
 
     @property
     def changed(self) -> bool:
@@ -165,9 +182,11 @@ class AnonymizeResult:
 #: contact patterns run and restored after — see :func:`_redact`.
 #:
 #: The lookarounds are written as explicit character classes rather than as a
-#: word boundary on purpose: a word boundary is exactly what breaks
+#: word boundary on purpose: a word boundary is exactly what used to break
 #: ``apps.replay.redactor.OTP_RE`` on this input, because ``-`` is not a word
-#: character and so the digit groups INSIDE a UUID satisfy it.
+#: character and so the digit groups INSIDE a UUID satisfied it. That upstream
+#: hole is closed (DRF-1389); this class is kept as written because the same
+#: trap is one edit away for any pattern that reaches this list.
 _UUID_RE = re.compile(
     "(?<![0-9a-zA-Z-])[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(?![0-9a-zA-Z-])"
 )
@@ -203,11 +222,16 @@ def _redact(text: str) -> str:
     ``apps/conversations/tests/test_erasure_redaction.py``:
 
     **1. UUIDs are masked before the patterns run and restored after.** The
-    full redactor corrupts **43.8% of canonical UUIDs** — 20 000 samples,
-    measured against ``origin/dev`` at ``a7c144d``, i.e. AFTER DRF-1382 tightened
-    the phone and card shapes. That ticket cut two of the three contributors
-    (``PHONE_RE`` 611 → 148, ``CC_RE`` 410 → 29) and left the dominant one
-    untouched: ``OTP_RE`` still hits 8 679 of 20 000 on its own.
+    full redactor used to corrupt **43.8% of canonical UUIDs** — 20 000
+    samples, measured against ``origin/dev`` at ``a7c144d``. DRF-1389 has
+    since closed the dominant contributor upstream, and the re-measurement on
+    the same 20 000 samples is **0.73%**: ``OTP_RE`` 0 (was 8 664),
+    ``PHONE_RE`` 147, ``CC_RE`` 24 matched and all declined by the Luhn gate.
+
+    The masking stays, because 0.73% is not 0 and ``PHONE_RE`` is under its own
+    ticket. It is a smaller reason than it was, and the test module says so at
+    a threshold rather than at a number, so the day that reaches zero the
+    masking can go.
 
     ``action_data`` and ``tool_call`` are dense with UUIDs (master, service and
     conversation ids), and an archive whose foreign keys are mangled on almost
@@ -283,6 +307,7 @@ def _clear_redis_stores(conversation_id: uuid.UUID) -> None:
     """
 
     from apps.llm import pii_tokenizer
+    from apps.orchestrator.decision_readiness import state as dre_state
     from apps.orchestrator.memory import short_term
 
     # The window itself — the raw sentence the fact was extracted from. This
@@ -293,6 +318,151 @@ def _clear_redis_stores(conversation_id: uuid.UUID) -> None:
     # kept so the model's reply can be de-tokenised. Emptying the sentence
     # and leaving this behind would keep the number.
     pii_tokenizer.clear_conversation(conversation_id)
+    # DRF-2214 — the decision-readiness state: its slots hold what the person
+    # said in this conversation (``dre:state:<id>``, TTL 2 h). Keyed by the
+    # conversation id as a string — the same key ``dr_shadow`` writes.
+    dre_state.clear(str(conversation_id))
+
+
+def _purge_raw_entries(bot_user_ids: list[uuid.UUID], *, through: datetime) -> Any:
+    """XDEL the person's raw MAX webhook entries up to ``through`` (DRF-2220).
+
+    The streams key an entry by the MAX user id inside its body, so the
+    shells are mapped to their ``channel_user_id`` first — MAX shells only:
+    another channel's id space could collide with a MAX id and take a
+    stranger's entry.
+    """
+
+    from apps.identity.models import BotUser
+    from apps.ingress.streams import purge_person_entries
+
+    channel_user_ids = [
+        cid
+        for cid in BotUser.all_tenants.filter(id__in=bot_user_ids, channel="max").values_list(
+            "channel_user_id", flat=True
+        )
+        if cid
+    ]
+    return purge_person_entries(channel_user_ids, through=through)
+
+
+#: ``AdminTask.reason``, который — код причины (``booking_handoff``,
+#: ``skill_requested_handoff``), а не слова человека. Всё прочее — свободный
+#: текст: «Trigger phrase: {реплика}», фрагмент отзыва — и обезличивается.
+_REASON_CODE_RE = re.compile(r"^[a-z0-9_.:\-]*$")
+
+
+def _before(iso: Any, through: datetime) -> bool:
+    """Отметка времени из снимка — не позже ``through``? Непонятная → да
+    (обезличиваем: ошибка в сторону человека, как у черновиков выше)."""
+    try:
+        moment = datetime.fromisoformat(str(iso))
+    except (TypeError, ValueError):
+        return True
+    if timezone.is_naive(moment):
+        moment = moment.replace(tzinfo=dt_timezone.utc)
+    return moment <= through
+
+
+def _anonymize_admin_tasks(conversation_id: uuid.UUID, through: datetime) -> int:
+    """Обезличить обращения к оператору в этом диалоге (DRF-2243).
+
+    ``AdminTask`` держит вторую копию переписки, которую стирание не видело:
+
+    * ``transcript_snapshot`` (``handoff.services.package_transcript``) —
+      последние 20 сообщений с полным ``content`` и идентификаторы человека;
+    * ``reason`` — на двух путях handoff «Trigger phrase: {реплика}», у жалобы
+      после визита — фрагмент отзыва.
+
+    Пустая строка, а не редакция (решение главного окна): редакция оставила бы
+    слова в поле, которое читает оператор, а слова для спора уже лежат в
+    ``ArchivedMessage`` — редактированные, на :data:`ANONYMIZED_DIALOGUE_
+    RETENTION_DAYS`. Сама строка задачи — тип, статус, время, адресат —
+    остаётся: это форензика, как и строка ``Message``.
+
+    Cutoff тот же, что у сообщений: реплика снимка позже ``through`` — снова
+    своя; идентификаторы и причина снимаются, если задача заведена не позже
+    ``through`` или в снимке есть хотя бы одна реплика до него. Открытые
+    задачи обезличиваются наравне с закрытыми (рекомендация главного окна,
+    ждёт слова владельца).
+
+    Returns:
+      число задач, в которых что-то изменилось.
+    """
+
+    from apps.handoff.models import AdminTask
+
+    changed = 0
+    for task in AdminTask.all_tenants.filter(conversation_id=conversation_id):
+        snapshot = dict(task.transcript_snapshot or {})
+        blanked_any = False
+        messages = []
+        for entry in snapshot.get("messages") or []:
+            item = dict(entry) if isinstance(entry, dict) else {}
+            if item.get("content") and _before(item.get("created_at"), through):
+                item["content"] = ""
+                blanked_any = True
+            messages.append(item)
+        if "messages" in snapshot:
+            snapshot["messages"] = messages
+
+        in_scope = blanked_any or task.created_at <= through
+        fields: list[str] = []
+        if in_scope:
+            person = dict(snapshot.get("bot_user") or {})
+            for key in ("display_name", "channel_user_id", "phone_hash"):
+                if person.get(key):
+                    person[key] = ""
+                    blanked_any = True
+            if "bot_user" in snapshot:
+                snapshot["bot_user"] = person
+            if task.reason and not _REASON_CODE_RE.match(task.reason):
+                task.reason = ""
+                fields.append("reason")
+        if blanked_any:
+            task.transcript_snapshot = snapshot
+            fields.append("transcript_snapshot")
+        if fields:
+            task.save(update_fields=[*fields, "updated_at"] if _has_updated_at(task) else fields)
+            changed += 1
+    return changed
+
+
+def _has_updated_at(instance: Any) -> bool:
+    return any(f.name == "updated_at" for f in instance._meta.concrete_fields)
+
+
+def _erase_journal_rows(bot_user_ids: list[uuid.UUID], *, through: datetime) -> int:
+    """Оторвать строки ``WebhookJournal`` от человека до ``through`` (DRF-2242).
+
+    Тот же фильтр оболочек, что у :func:`_purge_raw_entries` (только MAX:
+    чужое пространство id могло бы совпасть числом), плюс ``trace_id`` его
+    сообщений: после ``INGRESS_RAW_RETENTION_HOURS`` тела уже нет, а трасса
+    связывает строку с человеком весь срок строки.
+    """
+
+    from apps.identity.models import BotUser
+    from apps.ingress.retention import erase_person_rows
+
+    channel_user_ids = [
+        cid
+        for cid in BotUser.all_tenants.filter(id__in=bot_user_ids, channel="max").values_list(
+            "channel_user_id", flat=True
+        )
+        if cid
+    ]
+    trace_ids = (
+        Message.all_tenants.filter(
+            conversation__bot_user_id__in=bot_user_ids,
+            created_at__lte=through,
+            trace_id__isnull=False,
+        )
+        .values_list("trace_id", flat=True)
+        .distinct()
+    )
+    return erase_person_rows(
+        channel_user_ids, trace_ids=[str(t) for t in trace_ids], through=through
+    )
 
 
 def shell_ids_for_person(
@@ -359,6 +529,39 @@ def anonymize_dialogue(
     if not ids:
         return AnonymizeResult()
 
+    # DRF-2220 — the raw webhook bodies of the same turns. A processed entry
+    # is already gone; what can remain is a failed one (PEL) or its DLQ copy,
+    # up to INGRESS_RAW_RETENTION_HOURS. Bounded by ``through`` like the rest
+    # of this function, so re-running is free and a turn sent after the
+    # request is never touched.
+    #
+    # Unlike `_clear_redis_stores` below, a failure here does NOT stop the
+    # database half. That one guards the dialogue itself and its retry is
+    # the unmoved cutoff; this store holds copies that expire by the term
+    # anyway, and a person without a pre-request conversation has no cutoff
+    # to leave unmoved — raising would block their erasure without buying a
+    # retry. So: log it, carry `raw_streams_checked=False` to every caller,
+    # and let none of them report the streams as erased.
+    raw_checked = True
+    try:
+        raw = _purge_raw_entries(ids, through=through)
+    except Exception:  # noqa: BLE001 — named in the result, not swallowed
+        logger.exception(
+            "conversations.erasure.ingress_purge_failed — streams unchecked; "
+            "raw entries leave by INGRESS_RAW_RETENTION_HOURS"
+        )
+        from apps.ingress.streams import RawPurgeResult
+
+        raw = RawPurgeResult()
+        raw_checked = False
+
+    # DRF-2242 — the same bodies' copy in Postgres (`WebhookJournal`), and the
+    # trace / event id that tie a body-less row back to the person. Same
+    # database as the dialogue, so unlike the streams a failure is NOT
+    # swallowed: it propagates, the cutoff stays unmoved, and the sweep
+    # retries — the same contract `_clear_redis_stores` keeps below.
+    journal_rows = _erase_journal_rows(ids, through=through)
+
     conversations = list(
         # ``created_at__lte`` matters: a thread STARTED after the request
         # instant cannot hold a pre-cutoff turn, so anonymising it would move
@@ -373,6 +576,7 @@ def anonymize_dialogue(
     archived_total = 0
     drafts_total = 0
     windows_total = 0
+    tasks_total = 0
     keep_until = timezone.now() + timedelta(days=retention_days())
 
     for conv in conversations:
@@ -434,9 +638,11 @@ def anonymize_dialogue(
 
             # AiDraft.content quotes the customer verbatim — it is the master's
             # unsent reply built from these very turns. Layer 1 clears it at
-            # terminal status (`master_api.services.ai_drafts`); an ACTIVE
-            # draft would otherwise carry the erased person's words into the
-            # master's compose box after the erasure.
+            # terminal status — слой жил в `master_api.services.ai_drafts`
+            # и снят вместе с перепиской (DRF-1528). Новых черновиков не
+            # появляется, но старые строки остаются, и стирание обязано
+            # чистить их здесь: иначе слова стёртого человека переживут
+            # каскад в поле, которое просто перестали показывать.
             #
             # Deliberately NOT scoped to the cutoff, unlike the messages. A
             # draft carries `trigger_message`, so one written after the request
@@ -450,9 +656,44 @@ def anonymize_dialogue(
                 .update(content="")
             )
 
+            # DRF-2181 — состояние навыков опустошается тем же обновлением.
+            # Незавершённая анкета питания (вес, рост, возраст, цель) живёт в
+            # `skill_state["nutrition_anketa"]` и никуда не переносится, пока
+            # не дописана; рядом лежат незаконченная запись, разбор еды,
+            # план, ручные ориентиры — всё выведено из сказанного человеком.
+            # Защит среди ключей нет (замер DRF-2181), поэтому снимается всё.
+            #
+            # Граница та же, что у сообщений: сюда доходят только диалоги,
+            # начатые до просьбы, и не обезличенные до того же момента. Для
+            # свипа (`through` = момент просьбы) это значит: анкета, начатая в
+            # том же диалоге ПОСЛЕ первого прогона, вторым прогоном не
+            # стирается — «лишнее» стирание ограничено первым прогоном, тот же
+            # выбор, что сделан выше для черновиков. Чатовое «забудь всё» и
+            # Mini App зовут с `through=now()` и стирают всё до этого момента —
+            # в том числе повторным «удалить»; это задумано.
+            #
+            # Предел, названный, а не решённый здесь: ход того же человека,
+            # параллельный стиранию, может вернуть стёртое. Сериализации ходов
+            # по пользователю нет. Воскрешают два механизма:
+            #
+            # * три живых места пишут `skill_state` ЦЕЛИКОМ из копии в памяти
+            #   (`save(update_fields=["skill_state"])`): `booking_context`,
+            #   `refusal_memo`, `time_preference` — последнее на каждом ходе,
+            #   где текст называет время;
+            # * сама анкета идёт через `write_skill_state`, но тот защищает
+            #   только СОСЕДНИЕ подключи: свой ключ пишет тем, что передали, а
+            #   FSM анкеты десериализуется из копии в начале хода. Поэтому
+            #   перевод трёх мест на `write_skill_state` анкету НЕ закрывает.
+            #
+            # Настоящее лечение — проверка эпохи в `write_skill_state`: читать
+            # под `select_for_update` ещё и `anonymized_through` и отбрасывать
+            # запись, если он новее копии в памяти. Повторный прогон этот
+            # диалог пропустит, поэтому воскрешение необратимо. Отдельный лист.
             Conversation.all_tenants.filter(id=conv.id).update(
-                anonymized_through=through, anonymized_reason=reason
+                anonymized_through=through, anonymized_reason=reason, skill_state={}
             )
+            # DRF-2243 — вторая копия переписки: обращение к оператору.
+            tasks_total += _anonymize_admin_tasks(conv.id, through)
         touched.append(conv.id)
 
     result = AnonymizeResult(
@@ -460,7 +701,12 @@ def anonymize_dialogue(
         messages_archived=archived_total,
         drafts_cleared=drafts_total,
         windows_cleared=windows_total,
+        admin_tasks_cleared=tasks_total,
         conversation_ids=tuple(touched),
+        raw_entries_deleted=raw.deleted,
+        raw_entries_unattributed=raw.unattributed,
+        raw_streams_checked=raw_checked,
+        journal_rows_severed=journal_rows,
     )
 
     if result.changed:
@@ -474,6 +720,7 @@ def anonymize_dialogue(
                 "conversations": result.conversations,
                 "messages_archived": result.messages_archived,
                 "drafts_cleared": result.drafts_cleared,
+                "admin_tasks_cleared": result.admin_tasks_cleared,
                 # Ids, never bodies (C5 §6.2) — the audit row must not carry
                 # the text this function just went to the trouble of moving.
                 "conversation_ids": [str(c) for c in touched],

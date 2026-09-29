@@ -50,6 +50,7 @@ from apps.booking.models import BookingRequest, RemoteBookingProxy
 from apps.catalog.models import CatalogMaster, CatalogService
 from apps.identity.models import BotUser
 from apps.tenancy.models import Tenant
+from tests.support.catalog_mirror import sync_shaped
 
 pytestmark = pytest.mark.django_db
 
@@ -120,14 +121,16 @@ def _make_service(tenant: Tenant, *, name: str, ayla_service_id: uuid.UUID) -> C
 
 
 def _make_master(tenant: Tenant, *, name: str) -> CatalogMaster:
-    return CatalogMaster.all_tenants.create(
-        tenant=tenant,
-        external_updated_at=timezone.now(),
-        name=name,
-        specialization="Массаж",
-        is_active=True,
-        invite_status=CatalogMaster.InviteStatus.ACCEPTED,
-        ayla_user_id=uuid.uuid4(),
+    return sync_shaped(
+        CatalogMaster.all_tenants.create(
+            tenant=tenant,
+            external_updated_at=timezone.now(),
+            name=name,
+            specialization="Массаж",
+            is_active=True,
+            invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+            ayla_user_id=uuid.uuid4(),
+        )
     )
 
 
@@ -204,7 +207,15 @@ class TestMirrorIsTheSource:
         assert nb["master_name"] == "Ирина"
         assert nb["duration_min"] == 90
         assert nb["salon_name"] == "Формула тела"
-        assert nb["address"] == ""  # documented gap — no Tenant.address
+        # Адрес у этого тенанта не задан, и молчание источника доезжает
+        # как `null` (DRF-1611). Здесь стояло `== ""` с причиной
+        # «documented gap — no Tenant.address»: поле завела DRF-1587,
+        # и утверждение закрепляло дефект вместо того, чтобы его ловить.
+        #
+        # Проверка стоит и на зеркальном пути тоже: обе ветки ручки
+        # собирают ОДИН словарь `next_booking`, и это подтверждено
+        # прогоном — при правке одной ветки покраснела вторая.
+        assert nb["address"] is None
         assert nb["booking_id"] == str(proxy.appointment_id)
         assert "·" in nb["date_human"]
 
@@ -510,14 +521,17 @@ class TestAylaPathGatesOnBookingRequestReaders:
         assert resp.json()["error"] == "invalid_state"
 
     def test_reschedule_confirm_is_gated(self, client: Client, tenant: Tenant, bot_user: BotUser):
+        # DRF-2561: перенос на пути Ayla подключён, и подтверждение без
+        # времени — это 400 «нужно время», а не 409. Предмет узла прежний:
+        # о записи, которую человек видит, — не 404.
         booking_id = self._proxy_id(tenant, bot_user)
         resp = client.post(
             reverse("miniapp_api:booking_reschedule_confirm", args=[booking_id]),
             content_type="application/json",
             HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id),
         )
-        assert resp.status_code == 409
-        assert resp.json()["error"] == "invalid_state"
+        assert resp.status_code == 400
+        assert resp.json()["error"] == "bad_request"
 
     def test_submit_feedback_is_gated(self, client: Client, tenant: Tenant, bot_user: BotUser):
         booking_id = self._proxy_id(tenant, bot_user)

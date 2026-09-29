@@ -80,10 +80,16 @@ class QuickAction:
     text: str
 
 
-#: Три goal-like чипа с утверждённого макета C01.1, дословно (на макете они
-#: помечены WORKING COPY — формулировки владельца, не выдуманные здесь).
+#: Шесть goal-like чипов. Первые три — с утверждённого макета C01.1 дословно
+#: (на макете помечены WORKING COPY). Три следующих добавлены решением
+#: владельца 07.09.2026 (`OPEN_DECISIONS.md` §38) и взяты из текста самой
+#: DRF-1179, где они утверждены как примеры свободного ввода, — не выдуманы
+#: здесь.
 #:
-#: Ни один не называется услугой. Проверка — в тесте, не на слово.
+#: Ни один не называется услугой, и это не косметика: слов услуги нет
+#: в словаре быстрой ветки, поэтому такой чип уходит консьержу сам собой,
+#: и дописывать ветке исключения не приходится (замер DRF-1328: 15 из 16).
+#: Проверка — в тесте, не на слово.
 FIRST_CONTACT_QUICK_ACTIONS: tuple[QuickAction, ...] = (
     QuickAction(
         slug="fresh",
@@ -100,9 +106,25 @@ FIRST_CONTACT_QUICK_ACTIONS: tuple[QuickAction, ...] = (
         label="Хочу снять напряжение",
         text="Хочу снять напряжение",
     ),
+    QuickAction(
+        slug="tired",
+        label="Последнее время сильно устаю",
+        text="Последнее время сильно устаю",
+    ),
+    QuickAction(
+        slug="self_time",
+        label="Хочу больше времени уделять себе",
+        text="Хочу больше времени уделять себе",
+    ),
+    QuickAction(
+        slug="event",
+        label="Готовлюсь к важному событию",
+        text="Готовлюсь к важному событию",
+    ),
 )
 
-#: Вторичный вход «Найти услугу →» (решение владельца 24.08: **ОСТАВИТЬ**).
+#: Вторичный вход «Найти услугу» (решение владельца 24.08: **ОСТАВИТЬ**;
+#: подпись без стрелки — текст владельца 19.09, DRF-2120 v2).
 #:
 #: Его нет на макете основного потока именно потому, что он — выход **из**
 #: C01, а не шаг C01→C05. Малый вес: идёт последним, отдельной строкой, и
@@ -126,7 +148,7 @@ FIRST_CONTACT_QUICK_ACTIONS: tuple[QuickAction, ...] = (
 #: реплика в чате не противоречит нажатой кнопке.
 SECONDARY_ACTION = QuickAction(
     slug="find_service",
-    label="Найти услугу →",
+    label="Найти услугу",
     text="Какие услуги у вас есть",
 )
 
@@ -154,6 +176,30 @@ _QUICK_ACTION_RE = re.compile(r"^cb:qa:[a-z_]+$")
 #: лестнице с самого верха. Тот же принцип, что у чипов, и по той же
 #: причине — сценария у кнопки быть не должно.
 RETRY_CALLBACK = "cb:retry:last"
+#: DRF-1762 — «Повторить», привязанное к ходу: ``cb:retry:{id строки
+#: человека}``. Кнопка повторяет ровно тот ход, под которым нарисована, и
+#: только пока он последний: повтор сам ложится новой строкой, так что второй
+#: тап по той же кнопке — уже не последний ход и протухает честно. Форма
+#: ``cb:retry:last`` остаётся для клавиатур, нарисованных до этого.
+RETRY_CALLBACK_PREFIX = "cb:retry:"
+_RETRY_TURN_RE = re.compile(r"^cb:retry:([0-9a-f]{32})$")
+
+
+def retry_callback(turn_id: str | None) -> str:
+    """Payload «Повторить» для хода ``turn_id`` (hex UUID строки человека)."""
+    return f"{RETRY_CALLBACK_PREFIX}{turn_id}" if turn_id else RETRY_CALLBACK
+
+
+def is_retry_callback(text: str) -> bool:
+    stripped = (text or "").strip()
+    return stripped == RETRY_CALLBACK or bool(_RETRY_TURN_RE.match(stripped))
+
+
+def retry_turn_id(text: str) -> str | None:
+    """Ход, к которому привязан тап, или None для ``cb:retry:last``."""
+    match = _RETRY_TURN_RE.match((text or "").strip())
+    return match.group(1) if match else None
+
 
 _ALL_ACTIONS: tuple[QuickAction, ...] = (*FIRST_CONTACT_QUICK_ACTIONS, SECONDARY_ACTION)
 _BY_SLUG: dict[str, QuickAction] = {a.slug: a for a in _ALL_ACTIONS}
@@ -182,92 +228,51 @@ def resolve_quick_action(text: str) -> QuickAction | None:
 
 
 # ---------------------------------------------------------------------------
-# Экран C01: текст + клавиатура
+# Экран C01: что из чипов идёт на первый экран (DRF-2120 v2)
 # ---------------------------------------------------------------------------
 
-#: Строка над чипами с макета C01.1, дословно.
-QUICK_ACTIONS_HINT = "Можно написать своими словами или выбрать пример:"
+#: Три фразы первого экрана — решение владельца 19.09 («три из C01»), выбор
+#: главного окна из шести §38. Именно подмножество ТАБЛИЦЫ, а не своя копия:
+#: обновится C01 — обновятся и они. Порядок несущий.
+FIRST_SCREEN_SLUGS: tuple[str, ...] = ("fresh", "tension", "tired")
 
-#: Сколько кнопок разрешено на первом экране (BOT-001 AC-4.2 / DRF-1200).
+#: Потолок кнопок первого экрана — BOT-001 AC-4.2 / DRF-1200: пять.
 #:
-#: Пришпилено здесь и проверяется тестом: три чипа плюс вторичный вход — это
-#: четыре, и пятая кнопка не должна появиться незаметно.
+#: Поднимался до семи (§38, шесть чипов + вторичный вход) и восьми (дневник
+#: 07.09); DRF-2120 v2 (решение владельца 19.09) возвращает пять: три фразы
+#: C01 + «Найти услугу», дневник и остальное — в главном меню. Смысл
+#: ограничения прежний и пришпилен тестом: кнопка не должна появиться на
+#: первом экране незаметно.
 MAX_FIRST_CONTACT_BUTTONS = 5
 
-
-def first_contact_buttons(
-    actions: tuple[QuickAction, ...] = FIRST_CONTACT_QUICK_ACTIONS,
-    *,
-    with_secondary: bool = True,
-) -> list[dict[str, str]]:
-    """Клавиатура первого экрана: чипы, затем вторичный вход.
-
-    Порядок несущий. Вторичный вход идёт **последним** и один в строке —
-    решение владельца «малый вес, не конкурирует со свободным текстом».
-    """
-    buttons = [{"label": a.label, "callback": quick_action_callback(a)} for a in actions]
-    if with_secondary:
-        buttons.append(
-            {"label": SECONDARY_ACTION.label, "callback": quick_action_callback(SECONDARY_ACTION)}
-        )
-    return buttons
+# Строители клавиатуры первого экрана (``first_contact_buttons`` /
+# ``render_first_contact`` с подсказкой «выбрать пример» и дневником) сняты:
+# экран рисует ``global_onboarding.first_contact_action_data`` — одно место,
+# и «не рисовать» шесть чипов должно быть отсутствием кода, а не путём,
+# который может сработать. Таблица выше и перевод ``cb:qa:*`` в фразу
+# остаются: старая клавиатура в истории чата живёт дольше правки.
 
 
-def first_contact_action_data(
-    actions: tuple[QuickAction, ...] = FIRST_CONTACT_QUICK_ACTIONS,
-    *,
-    with_secondary: bool = True,
-) -> dict[str, Any]:
-    """``action_data`` первого экрана в плоской форме.
-
-    Плоская форма (``buttons`` + ``button_columns``), а не канонический
-    конверт: этот экран рисует ``_build_attachments`` ветка (2), ровно как
-    у остального, что приходит из ``WelcomeSkill`` на этом пути.
-    """
-    return {
-        "buttons": first_contact_buttons(actions, with_secondary=with_secondary),
-        "button_columns": 1,
-    }
-
-
-def render_first_contact(
-    body: str,
-    actions: tuple[QuickAction, ...] = FIRST_CONTACT_QUICK_ACTIONS,
-    *,
-    with_secondary: bool = True,
-) -> tuple[str, dict[str, Any] | None]:
-    """Текст и клавиатура экрана C01 — включая состояние **No Quick Actions**.
-
-    Макет, ДОПОЛНИТЕЛЬНЫЕ СОСТОЯНИЯ: «Показываем, если нет релевантных
-    примеров в контексте» — то же приветствие, **без** строки-подсказки и
-    **без** чипов, композер на месте. Здесь это не отдельная ветка, а
-    пустой ``actions``: строка «Можно написать своими словами» существует
-    только чтобы объяснить чипы, и без них она врёт.
-
-    Вторичный вход переживает пустой набор — он выход из экрана, а не
-    пример запроса, и когда примеров нет, выход нужнее.
-    """
-    if not actions:
-        return body, (
-            first_contact_action_data((), with_secondary=with_secondary) if with_secondary else None
-        )
-    return (
-        f"{body}\n\n{QUICK_ACTIONS_HINT}",
-        first_contact_action_data(actions, with_secondary=with_secondary),
-    )
+def first_screen_actions() -> tuple[QuickAction, ...]:
+    """Чипы первого экрана в порядке владельца — из таблицы §38 по слагам."""
+    return tuple(_BY_SLUG[slug] for slug in FIRST_SCREEN_SLUGS)
 
 
 # ---------------------------------------------------------------------------
 # «AI недоступна» (макет C01, ДОПОЛНИТЕЛЬНЫЕ СОСТОЯНИЯ)
 # ---------------------------------------------------------------------------
 
-#: Дословно с макета. Отличается от
+#: Дословно по решению владельца 23.09.2026 (DRF-2328): макет говорил «вы»,
+#: а весь остальной разговор — на «ты», и обращение прыгало ровно в тот миг,
+#: когда человеку отказывают. Разошлось ТОЛЬКО обращение — остальное слово в
+#: слово текст макета, и «восстанавливать» его обратно не нужно.
+#: Отличается от
 #: :data:`apps.orchestrator.llm.templates.OUTAGE_RU` («короткий технический
 #: сбой — отвечу через минуту»), которое обещает ответ, которого не будет:
 #: ход уже потерян, и никто к нему не вернётся, пока человек не напишет сам.
 #: Поэтому текст говорит правду, а кнопка делает то, что текст обещает.
 AI_UNAVAILABLE_TEXT = (
-    "Сейчас у меня временные трудности с подключением 😔\nПопробуйте написать чуть позже."
+    "Сейчас у меня временные трудности с подключением 😔\nПопробуй написать чуть позже."
 )
 
 RETRY_LABEL = "Повторить"
@@ -278,13 +283,20 @@ RETRY_LABEL = "Повторить"
 #: настоящая, а фразы за ней уже нет, и угадывать её — значит вложить
 #: человеку в рот слова, которых он не говорил.
 STALE_TAP_TEXT = (
-    "Не нашла, что повторить. Напишите, пожалуйста, своими словами — или выберите пример ниже."
+    "Не нашла, что повторить. Напишите, пожалуйста, своими словами — или выберите кнопку ниже."
 )
 
 
-def ai_unavailable_action_data() -> dict[str, Any]:
-    """Клавиатура экрана «AI недоступна»: одна кнопка «Повторить»."""
-    return {"buttons": [{"label": RETRY_LABEL, "callback": RETRY_CALLBACK}], "button_columns": 1}
+def ai_unavailable_action_data(turn_id: str | None = None) -> dict[str, Any]:
+    """Клавиатура экрана «AI недоступна»: одна кнопка «Повторить».
+
+    ``turn_id`` (DRF-1762) привязывает кнопку к строке человека, чей ход не
+    состоялся; без него — прежняя форма «последний ход».
+    """
+    return {
+        "buttons": [{"label": RETRY_LABEL, "callback": retry_callback(turn_id)}],
+        "button_columns": 1,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -338,7 +350,8 @@ def resolve_tap_text(text: str, *, last_user_text: str | None = None) -> str | N
 
     * ``cb:qa:{slug}``  — чип C01 или вторичный вход;
     * ``cb:menu:{slug}``— главное меню (DRF-1051);
-    * ``cb:retry:last`` — «Повторить» с экрана «AI недоступна».
+    * ``cb:retry:last`` / ``cb:retry:{id}`` — «Повторить» с экрана «AI
+      недоступна» (привязанная к ходу форма — DRF-1762).
 
     Ни один ``cb:`` другого семейства (``cb:discover:``, ``cb:catalog:``,
     ``cb:book:``, ``cb:welcome:``, ``cb:visit:``, ``cb:anketa:``…) сюда не
@@ -377,12 +390,40 @@ def resolve_tap_text(text: str, *, last_user_text: str | None = None) -> str | N
         )
         return resolved
 
-    if stripped == RETRY_CALLBACK:
+    if is_retry_callback(stripped):
         resolved_retry = (last_user_text or "").strip()
         logger.info("channels.max.global.retry_tapped resolved=%s", bool(resolved_retry))
         return resolved_retry or None
 
     return None
+
+
+#: Форма любого payload'а кнопки платформы: ``cb:{домен}:{остальное}``
+#: (грамматика :mod:`apps.orchestrator.ui.keyboards`). Двоеточия внутри
+#: хвоста разрешены — их несут ``cb:book:pick_slot:{id}:{iso}`` и родня.
+_ANY_CALLBACK_RE = re.compile(r"^cb:[a-z_]+:[A-Za-z0-9_:.,+-]*$")
+
+
+def looks_like_callback_payload(text: str) -> bool:
+    """Похоже ли сообщение на payload кнопки — любого семейства.
+
+    Нужно ровно в одном месте: в самом низу глобальной лестницы, ПОСЛЕ
+    того как каждое семейство со своей веткой уже забрало своё, а
+    структурные нутриционные тапы вернули «не моё». Всё, что дожило
+    досюда в этой форме, — тап по кнопке, ветки у которой нет: сегодня
+    это глагол семейства ``cb:discover:``, кроме ``book:``, и
+    нераспознанный ``cb:anketa:`` / ``cb:food:`` правильной формы. До
+    DRF-1491 такой ход уезжал в модель СЫРЫМ payload'ом — тот самый
+    «гейт как список исключений», описанный в комментарии у вызова
+    консьержа.
+
+    Намеренно НЕ используется выше по лестнице: там подмена формы на
+    «это тап» стёрла бы человеку его собственную реплику
+    (:func:`resolve_tap_text`). Здесь ничего не подменяется — ход просто
+    получает честный ответ «не поняла» с клавиатурой вместо того, чтобы
+    быть истолкованным моделью.
+    """
+    return bool(_ANY_CALLBACK_RE.match((text or "").strip()))
 
 
 def is_stale_tap(text: str) -> bool:
@@ -396,4 +437,4 @@ def is_stale_tap(text: str) -> bool:
     поэтому «Повторить» с историей сюда уже не доходит.
     """
     stripped = (text or "").strip()
-    return is_quick_action_callback(stripped) or stripped == RETRY_CALLBACK
+    return is_quick_action_callback(stripped) or is_retry_callback(stripped)

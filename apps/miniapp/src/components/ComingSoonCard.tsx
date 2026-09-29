@@ -1,11 +1,10 @@
 /**
- * R3 coming-soon card — Profile tab memory transparency (deferred).
+ * Calm coming-soon card for gated stub surfaces (`PilotComingSoonScreen`).
  *
- * Spec: `docs/screens/customer-profile-flow.md` §5 — backend memory
- * layer NOT built (no `UserPersonalContext` / `MemoryEntry` tables,
- * no summary endpoint, no clear endpoint). For pilot we render a
- * calm coming-soon block; no data surface, no clear action, no
- * fake bullet list of memory categories.
+ * Born as the R3 memory placeholder (spec `docs/screens/customer-profile-flow.md`
+ * §5). Since DRF-2133 the profile's R3 section renders `MemoryCard` against the
+ * real `GET/DELETE /memory/` endpoints; the default copy below is kept only as
+ * the fallback wording and is no longer shown on the profile.
  *
  * Anti-pattern avoided per spec §14: «Fake "Что Ayla знает"
  * data-surface или clear-кнопка без backend».

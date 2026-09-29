@@ -1,0 +1,442 @@
+/**
+ * «Мой план» — Plan Lite без веса (DRF-2101, §49).
+ *
+ * Что сторожится:
+ *   - плана нет → конструктор из трёх обязательств; выбранные 1–3 уходят
+ *     POST'ом ТОЛЬКО как actions (goal_id не шлётся — PR-1b);
+ *   - карточка — «N из M» по каждому обязательству и ничего о результате
+ *     (В-5: ни процента, ни «достигнута», ни «пропустил»);
+ *   - «Изменить план» — DELETE, затем конструктор;
+ *   - отказы по слагам: not_found на POST (нет активной цели) → экран
+ *     цели; already_active → перечитать карточку; plan_lite_disabled →
+ *     «недоступно»; ayla_unavailable → фраза + «Повторить»;
+ *   - флага сборки нет (DRF-2144): «недоступно» говорит только сервер.
+ */
+import { configure, fireEvent, getConfig, render, screen, within } from "@testing-library/react";
+import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { primeDisplayName } from "../components/CustomerAvatarEntry";
+
+vi.mock("../lib/plan-lite", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../lib/plan-lite")>();
+  return {
+    ...original,
+    getPlanLite: vi.fn(),
+    getPlanLiteProposal: vi.fn(),
+    createPlanLite: vi.fn(),
+    closePlanLite: vi.fn(),
+  };
+});
+vi.mock("../lib/customer-goals", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../lib/customer-goals")>();
+  return { ...original, fetchDecisionContext: vi.fn() };
+});
+vi.mock("../lib/food-scanner", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../lib/food-scanner")>();
+  return { ...original, fetchDiaryConsentGate: vi.fn() };
+});
+vi.mock("../lib/max-sdk", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../lib/max-sdk")>();
+  return { ...original, setBackButton: vi.fn(), signalReady: vi.fn() };
+});
+
+import { ApiError } from "../lib/api";
+import { fetchDiaryConsentGate } from "../lib/food-scanner";
+import { fetchDecisionContext, type DecisionContext } from "../lib/customer-goals";
+import { closePlanLite, createPlanLite, getPlanLite, getPlanLiteProposal, type PlanLite } from "../lib/plan-lite";
+import { PLAN_LITE_COPY, PLAN_LITE_ROUTE, PlanLiteScreen } from "./PlanLiteScreen";
+import { settleScenario } from "../test/settleScenario";
+
+// Дверь в профиль (`CustomerAvatarEntry`) без пропа спрашивает имя у
+// `/me`. Этот набор ручку не подменяет, поэтому имя засевается явно:
+// иначе в прогоне живёт неподменённый сетевой вызов и асинхронное
+// обновление, которое может прилететь посреди чужого теста (DRF-2523).
+beforeEach(() => {
+  primeDisplayName("Тест Тестов");
+});
+
+const GUARD_ASYNC_TIMEOUT_MS = 20;
+let previousAsyncUtilTimeout = 1000;
+beforeAll(() => {
+  previousAsyncUtilTimeout = getConfig().asyncUtilTimeout;
+  configure({ asyncUtilTimeout: GUARD_ASYNC_TIMEOUT_MS });
+});
+afterAll(() => {
+  configure({ asyncUtilTimeout: previousAsyncUtilTimeout });
+});
+
+
+const mockedGet = vi.mocked(getPlanLite);
+const mockedProposal = vi.mocked(getPlanLiteProposal);
+const mockedCreate = vi.mocked(createPlanLite);
+const mockedClose = vi.mocked(closePlanLite);
+const mockedDoc = vi.mocked(fetchDecisionContext);
+
+const GATE_GRANTED = {
+  canonical: true,
+  grantedAt: "2026-09-01T10:00:00Z",
+  currentDocumentVersion: "v1",
+};
+
+const DOC: DecisionContext = {
+  version: 1,
+  known: { goal: { goal_key: "tone_up", goal_text: null, selected_at: "2026-09-10T10:00:00Z", source_channel: "miniapp" } },
+  missing: [],
+  suggestions: [{ key: "tone_up", label: "Подтянуть фигуру" }],
+  intents: [],
+};
+
+const PLAN: PlanLite = {
+  plan_id: "p-1",
+  goal_key: "tone_up",
+  actions: [
+    { action_type: "book_service", cadence: "per_week", target_count: 1, done_count: 1, bucket: { start: "2026-09-14", end: "2026-09-21" } },
+    { action_type: "log_food", cadence: "per_week", target_count: 3, done_count: 1, bucket: { start: "2026-09-14", end: "2026-09-21" } },
+    { action_type: "log_water", cadence: "per_day", target_count: 7, done_count: 4, bucket: { start: "2026-09-18", end: "2026-09-19" } },
+  ],
+};
+
+function LocationProbe() {
+  const location = useLocation();
+  return <div data-testid="location">{location.pathname}</div>;
+}
+
+function renderScreen() {
+  return render(
+    <MemoryRouter initialEntries={[PLAN_LITE_ROUTE]}>
+      <Routes>
+        <Route path={PLAN_LITE_ROUTE} element={<PlanLiteScreen />} />
+        <Route path="*" element={<LocationProbe />} />
+      </Routes>
+    </MemoryRouter>,
+  );
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  mockedDoc.mockResolvedValue(DOC);
+  mockedGet.mockResolvedValue(null);
+  // Здесь — прежний путь без шаблона (DRF-2123: no_template → конструктор);
+  // предложение из шаблона сторожит PlanLiteScreen.proposal.test.tsx.
+  mockedProposal.mockRejectedValue(new ApiError(404, "no_template", "none"));
+  mockedCreate.mockResolvedValue(PLAN);
+  mockedClose.mockResolvedValue(undefined);
+  vi.mocked(fetchDiaryConsentGate).mockResolvedValue(GATE_GRANTED);
+});
+
+
+describe("конструктор", () => {
+  it("плана нет → три обязательства, ничего не выбрано, «Составить» не активна", async () => {
+    renderScreen();
+    await settleScenario();
+
+    const chips = screen.getAllByRole("checkbox");
+    expect(chips).toHaveLength(3);
+    expect(screen.getByText(PLAN_LITE_COPY.chipBook)).toBeInTheDocument();
+    expect(screen.getByText(PLAN_LITE_COPY.chipFood(3))).toBeInTheDocument();
+    expect(screen.getByText(PLAN_LITE_COPY.chipWater(7))).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: PLAN_LITE_COPY.compose })).toBeDisabled();
+  });
+
+  it("выбранные уходят POST'ом только как actions (goal_id не шлётся)", async () => {
+    renderScreen();
+    await settleScenario();
+
+    fireEvent.click(screen.getByLabelText(PLAN_LITE_COPY.chipBook));
+    fireEvent.click(screen.getByLabelText(PLAN_LITE_COPY.chipFood(3)));
+    fireEvent.click(screen.getByRole("button", { name: PLAN_LITE_COPY.compose }));
+    await settleScenario();
+
+    expect(mockedCreate).toHaveBeenCalledTimes(1);
+    expect(mockedCreate.mock.calls[0]?.[0]).toEqual([
+      { action_type: "book_service", cadence: "per_week", target_count: 1 },
+      { action_type: "log_food", cadence: "per_week", target_count: 3 },
+    ]);
+    // После POST — карточка из ответа.
+    expect(screen.getByTestId("plan-lite-card")).toBeInTheDocument();
+  });
+
+  it("нет активной цели (404 на POST) → «сначала выбери цель» → экран цели", async () => {
+    mockedCreate.mockRejectedValue(new ApiError(404, "not_found", "no active goal"));
+    renderScreen();
+    await settleScenario();
+
+    fireEvent.click(screen.getByLabelText(PLAN_LITE_COPY.chipBook));
+    fireEvent.click(screen.getByRole("button", { name: PLAN_LITE_COPY.compose }));
+    await settleScenario();
+
+    expect(screen.getByTestId("location")).toHaveTextContent("/customer/goal-select");
+  });
+
+  it("already_active на POST → перечитать: карточка с сервера", async () => {
+    mockedCreate.mockRejectedValue(new ApiError(409, "already_active", "exists"));
+    mockedGet.mockResolvedValueOnce(null).mockResolvedValueOnce(PLAN);
+    renderScreen();
+    await settleScenario();
+
+    fireEvent.click(screen.getByLabelText(PLAN_LITE_COPY.chipBook));
+    fireEvent.click(screen.getByRole("button", { name: PLAN_LITE_COPY.compose }));
+    await settleScenario();
+
+    expect(mockedGet).toHaveBeenCalledTimes(2);
+    expect(screen.getByTestId("plan-lite-card")).toBeInTheDocument();
+  });
+});
+
+describe("карточка", () => {
+  it("«N из M» по каждому обязательству, метка цели из decision-context, без слов результата", async () => {
+    mockedGet.mockResolvedValue(PLAN);
+    renderScreen();
+    await settleScenario();
+
+    const card = screen.getByTestId("plan-lite-card");
+    expect(card).toHaveTextContent("Подтянуть фигуру");
+    expect(card).toHaveTextContent("Записаться на услугу");
+    expect(card).toHaveTextContent("1 из 1");
+    expect(card).toHaveTextContent("Дневник");
+    expect(card).toHaveTextContent("1 из 3");
+    expect(card).toHaveTextContent("Вода");
+    expect(card).toHaveTextContent("4 из 7");
+    const low = card.textContent?.toLowerCase() ?? "";
+    expect(low).toContain("из");
+    expect(low).not.toContain("%");
+    expect(low).not.toMatch(/достиг|пропуст|прогресс/);
+  });
+
+  it("каждое обязательство ведёт туда, где оно делается", async () => {
+    mockedGet.mockResolvedValue(PLAN);
+    renderScreen();
+    await settleScenario();
+
+    const card = screen.getByTestId("plan-lite-card");
+    fireEvent.click(within(card).getByRole("button", { name: `${PLAN_LITE_COPY.go}: Дневник` }));
+    expect(screen.getByTestId("location")).toHaveTextContent("/customer/food-scanner/diary");
+  });
+
+  it("«Изменить план» — DELETE, затем конструктор", async () => {
+    mockedGet.mockResolvedValue(PLAN);
+    renderScreen();
+    await settleScenario();
+
+    fireEvent.click(screen.getByRole("button", { name: PLAN_LITE_COPY.change }));
+    await settleScenario();
+
+    expect(mockedClose).toHaveBeenCalledTimes(1);
+    expect(screen.queryByTestId("plan-lite-card")).toBeNull();
+    expect(screen.getAllByRole("checkbox")).toHaveLength(3);
+  });
+});
+
+describe("отказы и флаг", () => {
+  it("plan_lite_disabled от сервера → «недоступно», конструктора нет", async () => {
+    mockedGet.mockRejectedValue(new ApiError(404, "plan_lite_disabled", "off"));
+    renderScreen();
+    await settleScenario();
+
+    expect(screen.getByText(PLAN_LITE_COPY.unavailable)).toBeInTheDocument();
+    expect(screen.queryByRole("checkbox")).toBeNull();
+  });
+
+  it("DRF-2351: «недоступно» — не тупик: панель на месте, «Главная» уводит с экрана", async () => {
+    // Лист заявлял стену без выхода. Выход — нижняя панель: она стоит вне
+    // веток состояния (#1927, #1918). До этого узла её присутствие именно
+    // в состоянии «недоступно» держал только комментарий в коде.
+    mockedGet.mockRejectedValue(new ApiError(404, "plan_lite_disabled", "off"));
+    renderScreen();
+    await settleScenario();
+
+    expect(screen.getByText(PLAN_LITE_COPY.unavailable)).toBeInTheDocument();
+    const nav = screen.getByRole("navigation", { name: "Основная навигация" });
+    fireEvent.click(within(nav).getByRole("button", { name: "Главная" }));
+    expect(screen.getByTestId("location")).toHaveTextContent("/customer/main");
+  });
+
+  it("DRF-2351: включено — та же панель и на экране с планом", async () => {
+    // Пара к узлу выше: панель не выдумана для «недоступно», она одна на
+    // все состояния экрана.
+    mockedGet.mockResolvedValue(PLAN);
+    renderScreen();
+    await settleScenario();
+
+    expect(screen.queryByText(PLAN_LITE_COPY.unavailable)).toBeNull();
+    expect(screen.getByRole("navigation", { name: "Основная навигация" })).toBeInTheDocument();
+  });
+
+  it("ayla_unavailable → фраза и «Повторить», который повторяет запрос", async () => {
+    mockedGet.mockRejectedValueOnce(new ApiError(502, "ayla_unavailable", "down"));
+    renderScreen();
+    await settleScenario();
+
+    expect(screen.getByText(PLAN_LITE_COPY.transient)).toBeInTheDocument();
+    mockedGet.mockResolvedValueOnce(PLAN);
+    fireEvent.click(screen.getByRole("button", { name: PLAN_LITE_COPY.retry }));
+    await settleScenario();
+
+    expect(mockedGet).toHaveBeenCalledTimes(2);
+    expect(screen.getByTestId("plan-lite-card")).toBeInTheDocument();
+  });
+
+  it("флаг сборки VITE_PLAN_LITE ничего не решает — план читается с сервера (DRF-2144)", async () => {
+    vi.stubEnv("VITE_PLAN_LITE", "");
+    renderScreen();
+    await settleScenario();
+
+    expect(mockedGet).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText(PLAN_LITE_COPY.unavailable)).toBeNull();
+    vi.unstubAllEnvs();
+  });
+});
+
+describe("служебный ключ на экран не попадает (DRF-2355)", () => {
+  // Метка цели тянется ВТОРЫМ запросом. Раньше при его сбое подставлялся
+  // `goal_key` — человеку показывался слаг вида «tone_up». Ключ — адрес
+  // внутри системы, а не слово, которым человек называет свою цель.
+  it("сбой второго запроса не выводит ключ в карточке", async () => {
+    mockedGet.mockResolvedValue(PLAN);
+    mockedDoc.mockRejectedValue(new Error("boom"));
+
+    renderScreen();
+    await settleScenario();
+
+    expect(screen.getByTestId("plan-lite-card")).toBeInTheDocument();
+    expect(screen.queryByText(/tone_up/)).toBeNull();
+    // Заголовок остаётся — просто без имени цели, прежними словами.
+    expect(screen.getAllByText(PLAN_LITE_COPY.title).length).toBeGreaterThan(0);
+  });
+
+  it("сбой второго запроса не выводит ключ в предложении", async () => {
+    mockedGet.mockResolvedValue(null);
+    mockedProposal.mockResolvedValue({
+      goal_key: "tone_up",
+      why: "Под твою цель",
+      template_version: 1,
+      actions: [{ action_type: "log_water", cadence: "per_day", target_count: 7 }],
+    });
+    mockedDoc.mockRejectedValue(new Error("boom"));
+
+    renderScreen();
+    await settleScenario();
+
+    expect(screen.getByTestId("plan-lite-proposal")).toBeInTheDocument();
+    expect(screen.queryByText(/tone_up/)).toBeNull();
+  });
+
+  it("метка есть — цель зовётся словами человека", async () => {
+    mockedGet.mockResolvedValue(PLAN);
+    mockedDoc.mockResolvedValue({
+      ...DOC,
+      known: { goal: { ...DOC.known.goal!, goal_text: "хочу −5 кг к лету" } },
+    });
+
+    renderScreen();
+    await settleScenario();
+
+    // DRF-2576 (п. 7 решений 28.09): заголовок — слова человека целиком, без
+    // подписи. Подмена: вернуть «Твоя цель: …» — точное совпадение краснеет.
+    expect(
+      screen.getByRole("heading", { level: 2, name: "хочу −5 кг к лету" }),
+    ).toBeInTheDocument();
+  });
+});
+
+describe("цель без подписи — пары, которых узел выше не держит (п.7 решений 28.09, DRF-2576)", () => {
+  // Узел выше держит карточку × свободную цель. Замер на a02fc651: подпись
+  // «Твоя цель: » в обоих местах экрана краснила только его — карточку с
+  // готовой целью держала проверка по подстроке, конструктор не держал никто.
+  const FREE = "хочу −5 кг к лету";
+  const READY = "Подтянуть фигуру"; // suggestions[tone_up] в DOC
+
+  it("карточка, готовая цель — заголовок ровно выбранное название", async () => {
+    mockedGet.mockResolvedValue(PLAN);
+    renderScreen();
+    await settleScenario();
+
+    const card = screen.getByTestId("plan-lite-card");
+    expect(within(card).getByRole("heading", { level: 2, name: READY })).toBeInTheDocument();
+  });
+
+  it("конструктор, свободная цель — ровно слова человека", async () => {
+    mockedDoc.mockResolvedValue({
+      ...DOC,
+      known: { goal: { ...DOC.known.goal!, goal_text: FREE } },
+    });
+    renderScreen();
+    await settleScenario();
+
+    expect(screen.getByText(FREE)).toBeInTheDocument();
+    expect(screen.queryByText(READY)).toBeNull();
+  });
+
+  it("конструктор, готовая цель — ровно выбранное название", async () => {
+    renderScreen();
+    await settleScenario();
+
+    expect(screen.getByText(READY)).toBeInTheDocument();
+  });
+});
+
+describe("три исхода гейта согласия (DRF-2354)", () => {
+  // «Нет» и «не знаю» — разные ответы. Раньше сбой гейта превращался в
+  // `false`, строка дневника молча выпадала из отправки, и человек
+  // подтверждал план без дневника, не зная почему. Тихое замыкание «в
+  // безопасную сторону» неотличимо от его собственного решения.
+  const PROPOSAL_WITH_FOOD = {
+    goal_key: "tone_up",
+    why: "Под твою цель",
+    template_version: 1,
+    actions: [
+      { action_type: "log_food" as const, cadence: "per_week" as const, target_count: 3 },
+      { action_type: "log_water" as const, cadence: "per_day" as const, target_count: 7 },
+    ],
+  };
+
+  const showProposal = async () => {
+    mockedGet.mockResolvedValue(null);
+    mockedProposal.mockResolvedValue(PROPOSAL_WITH_FOOD);
+    renderScreen();
+    await settleScenario();
+  };
+
+  it("согласие есть — дневник включён и уходит в план", async () => {
+    vi.mocked(fetchDiaryConsentGate).mockResolvedValue(GATE_GRANTED);
+
+    await showProposal();
+    fireEvent.click(screen.getByRole("button", { name: PLAN_LITE_COPY.confirm }));
+    await settleScenario();
+
+    const actions = (mockedCreate.mock.calls[0]?.[0] ?? []).map((a) => a.action_type);
+    expect(actions).toContain("log_food");
+  });
+
+  it("согласия нет — строка не уходит, и человеку сказано почему", async () => {
+    vi.mocked(fetchDiaryConsentGate).mockResolvedValue({ ...GATE_GRANTED, grantedAt: null });
+
+    await showProposal();
+
+    expect(screen.getByRole("button", { name: PLAN_LITE_COPY.needConsent })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: PLAN_LITE_COPY.confirm }));
+    await settleScenario();
+
+    const actions = (mockedCreate.mock.calls[0]?.[0] ?? []).map((a) => a.action_type);
+    expect(actions).not.toContain("log_food");
+  });
+
+  it("ответа нет — строка остаётся, и решает человек, а не сбой", async () => {
+    vi.mocked(fetchDiaryConsentGate).mockRejectedValue(new Error("gate down"));
+
+    await showProposal();
+
+    // Строка видна и включена: «не знаю» не выдаётся за его «нет».
+    const food = screen
+      .getAllByLabelText(PLAN_LITE_COPY.labelFood)
+      .find((el) => el.tagName === "INPUT") as HTMLInputElement;
+    expect(food.checked).toBe(true);
+    expect(food.disabled).toBe(false);
+
+    fireEvent.click(screen.getByRole("button", { name: PLAN_LITE_COPY.confirm }));
+    await settleScenario();
+
+    const actions = (mockedCreate.mock.calls[0]?.[0] ?? []).map((a) => a.action_type);
+    expect(actions).toContain("log_food");
+  });
+});

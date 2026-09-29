@@ -19,6 +19,7 @@ from apps.nutrition_proactive.optout_skill import (
     matches_opt_out,
     normalise,
     try_handle_opt_out,
+    try_handle_surface_stop,
 )
 from apps.skills.base import SkillContext
 from apps.tenancy.models import Tenant
@@ -33,16 +34,31 @@ def tenant(db) -> Tenant:
 
 @pytest.fixture
 def bot_user(tenant: Tenant) -> BotUser:
+    from apps.consent.models import ConsentRecord
+    from apps.consent.nutrition import FOOD_DIARY_CONSENT_DOCUMENT_VERSION
+
     now = datetime(2026, 5, 1, tzinfo=dt_timezone.utc)
-    return BotUser.all_tenants.create(
+    user = BotUser.all_tenants.create(
         tenant=tenant,
         channel="max",
+        customer_status=BotUser.CustomerStatus.LINKED,  # S2-2: the client contour knows this person
         channel_user_id="np-oo-1",
         chat_id="chat-oo-1",
         consent_at=now,
-        food_scanner_consent_at=now,
         context={prefs.CONTEXT_KEY: {"water_reminders": True, "daily_report_time": "21:00"}},
     )
+    # DRF-1963 (M1): the diary/scanner consent is a registry row, not a column.
+    ConsentRecord.all_tenants.create(
+        tenant=tenant,
+        bot_user=user,
+        consent_type=ConsentRecord.ConsentType.FOOD_DIARY_PROCESSING.value,
+        granted=True,
+        source="test:fixture",
+        # Текущая версия, не литерал: фикстура «согласие есть» обязана
+        # стоять под тем текстом, который признаёт предикат (D3).
+        document_version=FOOD_DIARY_CONSENT_DOCUMENT_VERSION,
+    )
+    return user
 
 
 def ctx(bot_user: BotUser, text: str) -> SkillContext:
@@ -296,3 +312,96 @@ class TestRegistration:
         names = [getattr(s, "name", "") for s in registered()]
         assert "proactive_opt_out" in names
         assert names.index("proactive_opt_out") < names.index("echo")
+
+
+class TestSurfaceStopButton:
+    """The one-tap unsubscribe on every proactive outbound (DRF-1468, R6).
+
+    Unlike the text opt-out, the button silences ONE surface -- the person
+    tapped «Не присылать» under a specific message, not «never write to me».
+    The platform-wide veto therefore stays unset.
+    """
+
+    def test_the_report_button_turns_off_only_the_report(self, bot_user: BotUser) -> None:
+        result = ProactiveOptOutSkill().handle(ctx(bot_user, "cb:nutri:stop:report"))
+        stored_user = BotUser.all_tenants.get(pk=bot_user.pk)
+        stored = prefs.get_prefs(stored_user)
+        assert stored["daily_report_time"] == prefs.REPORT_OFF
+        assert stored["water_reminders"] is True
+        assert stored_user.proactive_messages_opt_out is False
+        assert "мини-приложении" in result.reply_text
+
+    def test_the_water_button_turns_off_only_water(self, bot_user: BotUser) -> None:
+        result = ProactiveOptOutSkill().handle(ctx(bot_user, "cb:nutri:stop:water"))
+        stored_user = BotUser.all_tenants.get(pk=bot_user.pk)
+        stored = prefs.get_prefs(stored_user)
+        assert stored["water_reminders"] is False
+        assert stored["daily_report_time"] == "21:00"
+        assert stored_user.proactive_messages_opt_out is False
+        assert "мини-приложении" in result.reply_text
+
+    def test_an_unknown_surface_is_claimed_but_changes_nothing(self, bot_user: BotUser) -> None:
+        """A stale button (a surface the schema no longer knows) still gets
+        an honest answer -- silence would leave the tap looking broken."""
+        reply = try_handle_surface_stop(text="cb:nutri:stop:hint", bot_user=bot_user)
+        assert reply is not None
+        stored = prefs.get_prefs(BotUser.all_tenants.get(pk=bot_user.pk))
+        assert stored["daily_report_time"] == "21:00"
+        assert stored["water_reminders"] is True
+
+    def test_the_button_callbacks_match(self, bot_user: BotUser) -> None:
+        skill = ProactiveOptOutSkill()
+        assert skill.matches(ctx(bot_user, "cb:nutri:stop:report")) is True
+        assert skill.matches(ctx(bot_user, "cb:nutri:stop:water")) is True
+        assert skill.matches(ctx(bot_user, "cb:nutri:stop:hint")) is True
+
+    def test_lookalikes_do_not_match(self, bot_user: BotUser) -> None:
+        """``cb:nutri:stop`` without a surface is not a button we drew, and
+        other callback families keep their owners."""
+        skill = ProactiveOptOutSkill()
+        assert skill.matches(ctx(bot_user, "cb:nutri:stop")) is False
+        assert skill.matches(ctx(bot_user, "cb:food:diary")) is False
+        assert matches_opt_out("cb:nutri:stop:water") is False
+
+    def test_it_falls_through_on_anything_else(self, bot_user: BotUser) -> None:
+        assert try_handle_surface_stop(text="привет", bot_user=bot_user) is None
+        assert try_handle_surface_stop(text="cb:nutri:stop", bot_user=bot_user) is None
+        assert try_handle_surface_stop(text="cb:food:diary", bot_user=bot_user) is None
+        assert BotUser.all_tenants.get(pk=bot_user.pk).proactive_messages_opt_out is False
+
+    def test_it_never_raises(self) -> None:
+        """A failure must cost a log line, not the person's turn."""
+
+        class Exploding:
+            pk = "nope"
+
+            @property
+            def context(self):
+                raise RuntimeError("boom")
+
+        assert try_handle_surface_stop(text="cb:nutri:stop:water", bot_user=Exploding()) is None
+
+    def test_both_entry_points_share_one_implementation(self, bot_user: BotUser) -> None:
+        skill_reply = ProactiveOptOutSkill().handle(ctx(bot_user, "cb:nutri:stop:water"))
+        BotUser.all_tenants.filter(pk=bot_user.pk).update(
+            context={prefs.CONTEXT_KEY: {"water_reminders": True, "daily_report_time": "21:00"}}
+        )
+        fresh = BotUser.all_tenants.get(pk=bot_user.pk)
+        global_reply = try_handle_surface_stop(text="cb:nutri:stop:water", bot_user=fresh)
+        assert skill_reply.reply_text == global_reply
+
+    def test_repeating_the_tap_is_harmless(self, bot_user: BotUser) -> None:
+        skill = ProactiveOptOutSkill()
+        skill.handle(ctx(bot_user, "cb:nutri:stop:water"))
+        skill.handle(ctx(bot_user, "cb:nutri:stop:water"))
+        stored = prefs.get_prefs(BotUser.all_tenants.get(pk=bot_user.pk))
+        assert stored["water_reminders"] is False
+
+    def test_other_context_keys_survive(self, bot_user: BotUser) -> None:
+        BotUser.all_tenants.filter(pk=bot_user.pk).update(
+            context={"last_followup_sent_at": "2026-08-22", prefs.CONTEXT_KEY: {}}
+        )
+        fresh = BotUser.all_tenants.get(pk=bot_user.pk)
+        ProactiveOptOutSkill().handle(ctx(fresh, "cb:nutri:stop:report"))
+        stored = BotUser.all_tenants.get(pk=bot_user.pk)
+        assert stored.context["last_followup_sent_at"] == "2026-08-22"

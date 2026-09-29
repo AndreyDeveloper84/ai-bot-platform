@@ -90,13 +90,14 @@ class ConversationAdmin(admin.ModelAdmin):
 @admin.register(Message)
 class MessageAdmin(admin.ModelAdmin):
     list_display = ("id", "conversation", "tenant", "role", "content_preview", "created_at")
-    list_filter = ("role", "action_type", "tenant")
+    list_filter = ("role", "input_channel", "action_type", "tenant")
     search_fields = ("id", "content", "rendered_text", "tool_call_id")
     readonly_fields = (
         "id",
         "conversation",
         "tenant",
         "role",
+        "input_channel",
         "content",
         "rendered_text",
         "action_type",

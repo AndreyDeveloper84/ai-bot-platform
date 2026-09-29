@@ -56,9 +56,21 @@ def open_consent(monkeypatch):
 
 @pytest.fixture
 def ayla(monkeypatch):
-    """Stub the Ayla fetch; returns the Mock so tests assert call/no-call."""
+    """Stub EVERY Ayla door; returns the weekly Mock for call/no-call asserts.
+
+    Two doors since DRF-1467: the weekly aggregate through
+    ``_fetch_deficits``, and today's rows through
+    ``food_history.read_today``. Stubbing only the first would leave a unit
+    test able to open a real socket the moment an environment happens to
+    carry ``AYLA_BASE_URL`` + ``NUTRITION_SERVICE_TOKEN`` — and
+    ``ayla.assert_not_called()`` would still be telling the truth about the
+    door it watches.
+    """
+    from apps.orchestrator import food_history
+
     fetch = Mock(return_value=_deficits())
     monkeypatch.setattr(nutrition_context, "_fetch_deficits", fetch)
+    monkeypatch.setattr(food_history, "read_today", Mock(return_value=food_history.UNKNOWN))
     return fetch
 
 
@@ -87,7 +99,15 @@ class TestConsentGate:
         _, asked = self._wire(monkeypatch, {"personal_data", "health"})
         assert build_nutrition_context_block(object()) != ""
         # Both bases were actually consulted — not one standing in for two.
-        assert set(asked) == {"personal_data", "health"}
+        # DRF-2100: the nutrition basis is «diary v1 OR legacy HEALTH», so a
+        # person with only the old row is asked for the diary first, then HEALTH.
+        assert set(asked) == {"personal_data", "food_diary_processing", "health"}
+
+    def test_the_diary_consent_alone_is_the_new_basis(self, monkeypatch, ayla) -> None:
+        """DRF-2100 — a new person has food-diary-v1 and no HEALTH row at all."""
+        _, asked = self._wire(monkeypatch, {"personal_data", "food_diary_processing"})
+        assert build_nutrition_context_block(object()) != ""
+        assert "health" not in asked  # the OR short-circuits: v1 was enough
 
     def test_personal_data_only_is_blocked(self, monkeypatch, ayla) -> None:
         self._wire(monkeypatch, {"personal_data"})

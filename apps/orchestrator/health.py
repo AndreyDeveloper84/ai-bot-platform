@@ -2,7 +2,7 @@
 
 Per-component checks for the orchestrator pipeline, surfaced through
 `/readyz/` alongside the existing backing-service probes (postgres,
-redis, chromadb, MinIO from DRF-431).
+redis, chromadb from DRF-431; MinIO left the stack in DRF-2611).
 
 ### Components checked
 
@@ -41,21 +41,53 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+#: DRF-1938 — breaker LLM на пути консьержа нет ни у одного вендора: единственный
+#: breaker ``openai.complete`` стоит на старом ``intent_router`` (путь per-tenant),
+#: а консьерж ходит через ``apps.llm.router`` без breaker. Проверка это говорит.
+LLM_BREAKER_NOT_ON_CONCIERGE_PATH = "llm_breaker_not_on_concierge_path"
+
+
+def _resolved_vendor() -> str | None:
+    """Вендор, которого выбирает роутер (тот же вызов, что у пробы). Без вызова API."""
+
+    try:
+        from apps.llm.router import resolve_provider_tier
+
+        return str(resolve_provider_tier()[0])
+    except Exception:  # noqa: BLE001 — health never raises
+        logger.warning("health.check_intent_router.vendor_unresolved", exc_info=True)
+        return None
+
+
 def check_intent_router() -> dict[str, Any]:
-    """Verify the OpenAI breaker isn't open.
+    """Legacy intent-router breaker, and an honest note on what it does NOT cover.
 
     Returns a dict matching the readyz check shape:
-    ``{"ok": bool, "error": str | None, "duration_ms": int}``.
+    ``{"ok": bool, "error": str | None, "duration_ms": int}`` plus, since
+    DRF-1938, ``checked`` / ``vendor`` / ``detail``.
+
+    ``ok`` here means «does not block traffic», not «the LLM is healthy»:
+    readyz must not depend on an external API, so LLM health lives in the
+    periodic probe (:mod:`apps.llm.health`) and its alerts. ``checked`` says
+    whether this check measured the LLM path of the resolved vendor — today
+    it never does (see :data:`LLM_BREAKER_NOT_ON_CONCIERGE_PATH`). The
+    pre-existing gate stays: an OPEN legacy ``openai.complete`` breaker is
+    still ``ok=False``.
     """
 
     start = time.monotonic()
+    honest = {
+        "checked": False,
+        "vendor": _resolved_vendor(),
+        "detail": LLM_BREAKER_NOT_ON_CONCIERGE_PATH,
+    }
     try:
         from apps.orchestrator.llm.breaker import State, get_state
 
         # _BREAKER_NAME from openai_provider — duplicate the constant
         # here to avoid importing the OpenAI module just for a string.
         # get_state returns None when the breaker hasn't been instantiated
-        # yet (cold boot) — treat as CLOSED / healthy.
+        # yet (cold boot) — treat as CLOSED / not blocking.
         breaker_state = get_state("openai.complete")
         duration_ms = int((time.monotonic() - start) * 1000)
         if breaker_state == State.OPEN:
@@ -63,14 +95,55 @@ def check_intent_router() -> dict[str, Any]:
                 "ok": False,
                 "error": "openai_breaker_open",
                 "duration_ms": duration_ms,
+                **honest,
             }
-        return {"ok": True, "error": None, "duration_ms": duration_ms}
+        return {"ok": True, "error": None, "duration_ms": duration_ms, **honest}
     except Exception as exc:  # noqa: BLE001 — health never raises
         logger.exception("health.check_intent_router.error")
         return {
             "ok": False,
             "error": f"{type(exc).__name__}: {exc}",
             "duration_ms": int((time.monotonic() - start) * 1000),
+            **honest,
+        }
+
+
+def check_llm_path() -> dict[str, Any]:
+    """Путь к LLM по последнему тику пробы (DRF-2065). Без вызова LLM.
+
+    До DRF-2065 readyz о доступности LLM молчал: 16–17.09 стенд 9 ч
+    отвечал аварийным текстом при зелёном readyz. Теперь в теле —
+    ``state``: ``primary`` (основной жив), ``fallback`` (работаем на
+    резерве DRF-2147), ``down`` (оба лежат), ``unknown`` (не мерили или
+    мерили давно). Плюс ``direct_path``, если при сетевом отказе через
+    прокси мерили прямой путь.
+
+    ``ok`` всегда True — решение на GO DRF-2065: LLM не переворачивает
+    readyz в 503. Деплой-смоук (``deploy-dev.yml``: ``curl -fsS
+    /readyz/``) упал бы ровно на выкатке починки — проба меряет раз в
+    5 минут, смоук ждёт 30 секунд. Операторов о лежащей LLM будит сама
+    проба (``llm.health.down`` → ``alerting.page``); мониторинг читает
+    ``checks.llm.state``.
+    """
+
+    start = time.monotonic()
+    try:
+        from apps.llm.health import read_path_state
+
+        state = read_path_state()
+        return {
+            "ok": True,
+            "error": None,
+            "duration_ms": int((time.monotonic() - start) * 1000),
+            **state,
+        }
+    except Exception as exc:  # noqa: BLE001 — health never raises
+        logger.exception("health.check_llm_path.error")
+        return {
+            "ok": True,
+            "error": f"{type(exc).__name__}: {exc}",
+            "duration_ms": int((time.monotonic() - start) * 1000),
+            "state": "unknown",
         }
 
 
@@ -114,6 +187,8 @@ def pipeline_health() -> dict[str, dict[str, Any]]:
     return {
         "intent_router": check_intent_router(),
         "skill_registry": check_skill_registry(),
+        # DRF-2065 — путь к LLM: основной / резерв / оба лежат / неизвестно.
+        "llm": check_llm_path(),
         # Sprint 8 / G4 (DRF-735) — extended health surface.
         "chromadb_auth": check_chromadb_auth(),
         "audit_cleanup": check_audit_cleanup_recent(),

@@ -8,3 +8,10 @@ tests/fixtures/contracts/MANIFEST.sha256 text eol=lf
 # Shell scripts must stay LF — they run under git-bash / WSL / CI ubuntu
 # runners, where a CRLF shebang line fails with "bad interpreter".
 *.sh text eol=lf
+
+# The planning rules registry artifact is hashed byte-for-byte by
+# apps/planning_rules/check.py against data/source.json. Same LF pin as the
+# contract fixtures above: autocrlf would rewrite it to CRLF on Windows
+# checkouts and break the integrity guard.
+apps/planning_rules/data/*.yaml text eol=lf
+apps/planning_rules/data/*.json text eol=lf

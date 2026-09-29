@@ -24,10 +24,15 @@ import { useLocation, useNavigate } from "react-router-dom";
 
 import { StateError } from "../components/StateError";
 import {
-  fetchDailySummary,
-  fetchHealthFlags,
-  type DailySummaryResponse,
 } from "../lib/food-scanner";
+import {
+  DIARY_OFF_TEXT,
+  diaryIsOff,
+  getWellnessToday,
+  type WellnessToday,
+} from "../lib/customer-wellness";
+import { useScreenBack } from "../hooks/useScreenBack";
+import { backToOrigin, originFrom } from "../lib/screen-back";
 
 interface RouterState {
   dishName?: string;
@@ -37,8 +42,12 @@ interface RouterState {
 
 export function FoodScannerSavedScreen() {
   const navigate = useNavigate();
+
+  // Возврат (DRF-1493) — на дом; адрес прежний, теперь объявленный.
   const location = useLocation();
   const state = (location.state ?? {}) as RouterState;
+  // DRF-2349 — последний экран потока: выход ведёт туда, откуда вошли.
+  const onBack = useScreenBack(backToOrigin(location.state, "/customer/main"));
   const dishName = state.dishName ?? "Запись";
   const recapCalories = state.calories ?? null;
   // Default ED-mode TRUE — defence-in-depth for deep-link refresh
@@ -49,18 +58,21 @@ export function FoodScannerSavedScreen() {
     state.edMode === undefined ? true : Boolean(state.edMode),
   );
 
-  const [summary, setSummary] = useState<DailySummaryResponse | null>(null);
+  const [summary, setSummary] = useState<WellnessToday | null>(null);
   const [err, setErr] = useState<unknown>(null);
+  // DRF-2071 — сводка с маркером «контур выключен»: чисел нет и не будет.
+  const diaryOff = diaryIsOff(summary);
 
   const load = useCallback(async () => {
     setErr(null);
     try {
-      const [s, flags] = await Promise.all([
-        fetchDailySummary(),
-        fetchHealthFlags(),
-      ]);
+      const s = await getWellnessToday();
       setSummary(s);
-      setEdMode(Boolean(flags.health_flags.eating_disorder));
+      // Признак приходит от источника; отсутствие ключа ПРЯЧЕТ числа —
+      // «не смогли спросить» не становится разрешением их показать
+      // (§10 Appendix ED Mode). Раньше здесь стояла заглушка, которая
+      // на этот вопрос отвечала выдумкой.
+      setEdMode(s.nutrition_numbers_hidden !== false);
     } catch (e) {
       setErr(e);
     }
@@ -70,13 +82,15 @@ export function FoodScannerSavedScreen() {
     load();
   }, [load]);
 
+  // Процент считается, ТОЛЬКО когда известны оба числа. Цели нет —
+  // нет и шкалы: доля от несуществующей цели это не ноль процентов,
+  // это отсутствие ответа (§65).
+  const eaten = summary?.calories_eaten;
+  const target = summary?.calories_target;
   const progressPct =
-    summary && summary.calories_goal > 0
-      ? Math.min(
-          100,
-          Math.round((summary.calories_total * 100) / summary.calories_goal),
-        )
-      : 0;
+    eaten !== undefined && target !== undefined && target > 0
+      ? Math.min(100, Math.round((eaten * 100) / target))
+      : null;
 
   return (
     <div className="food-scanner-screen">
@@ -85,7 +99,7 @@ export function FoodScannerSavedScreen() {
           type="button"
           className="records-screen__back"
           aria-label="На главную"
-          onClick={() => navigate("/customer/main")}
+          onClick={onBack}
         >
           <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
             <path
@@ -130,6 +144,13 @@ export function FoodScannerSavedScreen() {
           </p>
         )}
 
+        {/* DRF-2071 — контур выключили между записью и сводкой: сводка пришла
+            с маркером и без чисел (edMode остаётся true — ключа нет). Не сбой,
+            повтор ничего не даст; «записала» выше остаётся правдой. */}
+        {diaryOff && (
+          <p className="food-scanner-saved__recap" role="status">{DIARY_OFF_TEXT}</p>
+        )}
+
         {!edMode && (
           <section
             className="food-scanner-saved__daily"
@@ -144,44 +165,56 @@ export function FoodScannerSavedScreen() {
             {err !== null && <StateError err={err} onRetry={load} />}
             {err === null && summary && (
               <>
-                <p className="food-scanner-saved__total">
-                  {summary.calories_total} / {summary.calories_goal} ккал
-                </p>
-                <div
-                  className="food-scanner-saved__bar"
-                  role="progressbar"
-                  aria-valuenow={progressPct}
-                  aria-valuemin={0}
-                  aria-valuemax={100}
-                  aria-label={`Прогресс по калориям: ${progressPct} процентов`}
-                >
-                  <div
-                    className="food-scanner-saved__bar-fill"
-                    style={{ width: `${progressPct}%` }}
-                  />
-                </div>
-                <p className="food-scanner-saved__pct">{progressPct} %</p>
-                <p className="food-scanner-saved__macros">
-                  Б {summary.protein_g} · Ж {summary.fat_g} · У{" "}
-                  {summary.carbs_g} г
-                </p>
+                {eaten !== undefined && (
+                  <p className="food-scanner-saved__total">
+                    {target !== undefined ? `${eaten} / ${target} ккал` : `${eaten} ккал`}
+                  </p>
+                )}
+                {progressPct !== null && (
+                  <>
+                    <div
+                      className="food-scanner-saved__bar"
+                      role="progressbar"
+                      aria-valuenow={progressPct}
+                      aria-valuemin={0}
+                      aria-valuemax={100}
+                      aria-label={`Прогресс по калориям: ${progressPct} процентов`}
+                    >
+                      <div
+                        className="food-scanner-saved__bar-fill"
+                        style={{ width: `${progressPct}%` }}
+                      />
+                    </div>
+                    <p className="food-scanner-saved__pct">{progressPct} %</p>
+                  </>
+                )}
+                {summary.pfc && (
+                  <p className="food-scanner-saved__macros">
+                    Б {summary.pfc.protein_g} · Ж {summary.pfc.fat_g} · У{" "}
+                    {summary.pfc.carbs_g} г
+                  </p>
+                )}
               </>
             )}
           </section>
         )}
 
         <div className="food-scanner-screen__cta-stack">
-          <button
-            type="button"
-            className="btn-primary"
-            onClick={() => navigate("/customer/food-scanner/diary")}
-          >
-            Открыть дневник
-          </button>
+          {/* DRF-2071 — при выключенном контуре дневник не открывается:
+              кнопка вела бы на экран с той же фразой «недоступен». */}
+          {!diaryOff && (
+            <button
+              type="button"
+              className="btn-primary"
+              onClick={() => navigate("/customer/food-scanner/diary")}
+            >
+              Открыть дневник
+            </button>
+          )}
           <button
             type="button"
             className="btn-secondary"
-            onClick={() => navigate("/customer/main")}
+            onClick={() => navigate(originFrom(location.state) ?? "/customer/main")}
           >
             Готово
           </button>

@@ -1,0 +1,45 @@
+{% extends "admin/base_site.html" %}
+{# «Отозвать код» (DRF-2082): причина обязательна; сервис revoke_staff_invite
+   ставит revoked_at, ввод кода после этого отклоняется. Использованный код не
+   отзывается — доступ снимается на карточке доступов. #}
+
+{% block breadcrumbs %}
+  <div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">Админка</a>
+    &rsaquo; <a href="{% url 'admin:tenancy_staffinvite_changelist' %}">Приглашения</a>
+    &rsaquo; Отозвать код
+  </div>
+{% endblock %}
+
+{% block content %}
+  <div id="content-main">
+    <h1>{{ title }}</h1>
+    <p style="max-width: 46em;">
+      Выбрано приглашений: {{ rows|length }}. После отзыва ввод кода отклоняется;
+      человек, который его ещё не ввёл, доступа не получит. Использованные коды
+      отзыву не подлежат — там снимается сам доступ.
+    </p>
+    <form method="post">
+      {% csrf_token %}
+      <fieldset class="module aligned">
+        <div class="form-row">
+          <label for="id_reason"><strong>Причина (обязательно)</strong></label>
+          <textarea id="id_reason" name="reason" rows="3" cols="60" required style="display: block; margin-top: .5em;"></textarea>
+        </div>
+      </fieldset>
+      <ul style="margin: 1em 0;">
+        {% for row in rows %}
+          <li>{{ row.tenant }} — {{ row.role }} · действует до {{ row.expires_at|date:"d.m.Y" }}{% if row.note %} · {{ row.note }}{% endif %}</li>
+        {% endfor %}
+      </ul>
+      {% for row in rows %}
+        <input type="hidden" name="{{ action_checkbox_name }}" value="{{ row.pk }}">
+      {% endfor %}
+      <input type="hidden" name="action" value="revoke_staff_invite">
+      <div class="submit-row">
+        <input type="submit" name="apply" value="Отозвать код" class="default">
+        <a href="{% url 'admin:tenancy_staffinvite_changelist' %}" class="button cancel-link">Отмена</a>
+      </div>
+    </form>
+  </div>
+{% endblock %}

@@ -26,22 +26,25 @@
  * what the backend stores; the UI never auto-formats customer names.
  */
 
+import { applyIdentityHeaders } from "./auth-headers";
 import { ApiError } from "./api";
-import { applyDevBypassHeaders } from "./dev-bypass";
-import { getInitData } from "./max-sdk";
 
 const INTERNAL_CHAT_API_BASE = "/api/v1/internal-chat";
 
 interface ErrorBody {
   error: string;
   detail: string;
+  /**
+   * Структурные подробности отказа (DRF-1708). Сегодня внутренний чат их не
+   * присылает — поле объявлено, чтобы клиент перестал быть местом, где оно
+   * теряется молча, когда сервер начнёт (DRF-2439).
+   */
+  details?: Record<string, unknown>;
 }
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const initData = getInitData();
   const headers = new Headers(init.headers);
-  if (initData) headers.set("Authorization", `MaxInitData ${initData}`);
-  applyDevBypassHeaders(headers);
+  applyIdentityHeaders(headers);
   if (init.body && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
@@ -57,7 +60,7 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
     } catch {
       /* non-JSON 5xx */
     }
-    throw new ApiError(res.status, parsed.error, parsed.detail);
+    throw new ApiError(res.status, parsed.error, parsed.detail, parsed.details);
   }
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;

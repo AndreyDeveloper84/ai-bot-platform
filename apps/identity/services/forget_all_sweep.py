@@ -27,7 +27,8 @@ changes the stored state so that a gate-less read finds nothing to return.
 
 # What it erases
 
-* Every live 🟢 green ``MemoryEntry`` → the existing soft-delete tombstone
+* Every live ``MemoryEntry`` of the subject, **любой зоны** → soft-delete
+  tombstone
   (``delete_requested_at`` + ``soft_deleted_at`` + ``deletion_reason`` +
   ``status='deleted'``), via :func:`memory_deleter.soft_delete_green_entries`
   so there is exactly one way a green row is ever tombstoned.
@@ -44,20 +45,38 @@ changes the stored state so that a gate-less read finds nothing to return.
 * Finally the UPC is stamped ``soft_deleted_at`` — the «completed forget-all»
   state ``memory_reader`` already documents.
 
+# Все три зоны, а не только зелёная (DRF-2180)
+
+До этого листа свип фильтровал ``sensitivity_zone=GREEN`` и объявлял это
+осознанным: «yellow/red erasure carries extra rules … not in scope here».
+Матрица удаления (DRF-2134, ``test_forget_all_matrix.py``) говорит обратное
+и НОВЕЕ — для обеих зон ``DELETE``, исполнитель «никто»:
+
+    "identity.MemoryEntry:red": «специальная категория (152-ФЗ ст. 10) не
+    должна переживать „забудь всё"»
+    "identity.MemoryEntry:yellow": «человек сказал „забудь всё"; жёлтая
+    зона — личные факты с TTL 365 дней»
+
+То есть требование было записано вместе с причиной и записано как долг.
+«Extra rules», на которые ссылался прежний докстринг, — это не повод не
+стирать, а описание ТОГО, КАК стирать: у красной строки доступ — строка
+журнала, и свип её заводит (``RedZoneAccessLog``, ``access_type='delete'``,
+``accessor_role='system_job'``). Предупреждения о противопоказаниях
+(policy §8.4) — про показ строки мастеру, а не про её снятие по просьбе
+самого человека.
+
+Зелёный удалитель при этом НЕ расширен: его зовут ещё чатовая команда
+«забудь про веганство», экран памяти Mini App и путь стирания Ayla, и там
+строку называет человек по идентификатору — жёсткая привязка к зелёной
+зоне держит дверь «снять красную строку по id мимо журнала» закрытой. У
+свипа свой путь, ``memory_deleter.soft_delete_all_zones_for_forget_all``.
+
 # What it deliberately does NOT erase
 
 * **``minor_lock``** — a protection, not a fact about the person. It blocks
   yellow/red writes once reconciliation finds the user is a minor. Clearing
   it as part of an erasure would turn a subject-rights request into a safety
   downgrade.
-* **Yellow and red entries.** This stream is green-only, as the whole
-  ``memory_deleter`` module is: yellow/red erasure carries extra rules
-  (``RedZoneAccessLog``, contraindication warnings — policy §8.4) and is not
-  in scope here. Neither zone is readable by the surfacing path this sweep
-  is protecting: ``memory_reader`` never selects them, and red is reachable
-  only through the audited ``red_zone_reader`` accessor. Named here rather
-  than silently skipped — see ``export_coverage`` for the same rule applied
-  to the export.
 * **``UserPreferences``** — the four notification toggles and the profile
   screen's birthday. Standing instructions and a form the person maintains
   themselves are not things Ayla «remembers about» them; deleting that row
@@ -105,7 +124,7 @@ from apps.conversations.erasure import (
 )
 from apps.conversations.models import ArchivedMessage, Conversation
 from apps.identity.models import MemoryEntry, UserPersonalContext
-from apps.identity.services.memory_deleter import soft_delete_green_entries
+from apps.identity.services.memory_deleter import soft_delete_all_zones_for_forget_all
 
 logger = logging.getLogger(__name__)
 
@@ -125,6 +144,18 @@ class ForgetAllSweepResult:
     tombstoned: bool = False
     conversations_anonymized: int = 0
     messages_archived: int = 0
+    #: DRF-2220 — raw webhook entries deleted from the ingress streams, and
+    #: those up to the cutoff whose sender could not be read (counted, kept,
+    #: gone by INGRESS_RAW_RETENTION_HOURS).
+    raw_entries_deleted: int = 0
+    raw_entries_unattributed: int = 0
+    #: False when Redis was unreachable for the stream purge: the rest of the
+    #: sweep still ran, and this says the streams were NOT checked.
+    raw_streams_checked: bool = True
+    #: DRF-2214 — cards whose reasons, facts and goal key were blanked, and
+    #: shells whose proactive-nutrition observations were removed.
+    recommendations_anonymized: int = 0
+    nutrition_observations_cleared: int = 0
 
     @property
     def changed(self) -> bool:
@@ -135,7 +166,89 @@ class ForgetAllSweepResult:
             or self.context_fields_cleared
             or self.tombstoned
             or self.conversations_anonymized
+            or self.raw_entries_deleted
+            or not self.raw_streams_checked
+            or self.recommendations_anonymized
+            or self.nutrition_observations_cleared
         )
+
+
+#: DRF-2214 — observations inside ``BotUser.context["nutrition_proactive"]``:
+#: how much the person drank (``water``) and the day of the last report. The
+#: toggles (``daily_report_time``, ``water_reminders``, ``opted_out_at``) are
+#: notification settings — «настройки уведомлений остаются» — and the send
+#: journal (``outbox``) holds only times and kinds, which the anti-spam reads.
+NUTRITION_OBSERVATION_KEYS: tuple[str, ...] = ("water", "last_report_date")
+
+
+#: DRF-2308 — the fingerprint of an erased card; the account deletion path
+#: writes the same (``recommendation/erasure.py``).
+ERASED_FINGERPRINT_PREFIX = "erased:"
+
+
+def anonymise_recommendations(shell_ids) -> int:
+    """Blank the person's words on every card; keep the card (DRF-2214).
+
+    ``why`` is the reasons verbatim, ``facts`` the labels of the goal and the
+    answers they were built from, ``goal_id`` the key of a goal «забудь всё»
+    erases in the catalog (#526). ``fingerprint`` goes too (DRF-2308): an
+    ABSENCE card keys it ``absence:{goal_id}`` — the goal in plain text — and
+    a DIRECTION card an unsalted ``sha256({goal, what, why})`` that brute force
+    recovers. It becomes ``erased:{id}``: unique per row, so the
+    ``(bot_user, fingerprint)`` constraint holds, and meaningless.
+
+    Row by row in Python, in one transaction — the same value the account
+    deletion path writes (``recommendation/erasure.py``, #1986). A SQL cast of
+    the UUID would render differently on SQLite (no dashes) and Postgres, and
+    the two paths must agree. Rows already carrying the marker are skipped, so
+    a repeat sweep changes nothing.
+
+    The row stays for attribution (owner B13: which card led to which
+    booking) — ``reaction``, ``booking_id``, dates; ``what``/``subline``/
+    ``alternatives`` are the owner's curated table, not data about the person.
+    A side effect, accepted: the same context under the same goal may produce
+    a new card later, since the old fingerprint no longer deduplicates it.
+    """
+    from django.db.models import Q
+
+    from apps.recommendation.models import Recommendation
+
+    rows = list(
+        Recommendation.objects.filter(bot_user_id__in=list(shell_ids))
+        .exclude(fingerprint__startswith=ERASED_FINGERPRINT_PREFIX)
+        .only("id")
+    )
+    rows += list(
+        Recommendation.objects.filter(
+            bot_user_id__in=list(shell_ids), fingerprint__startswith=ERASED_FINGERPRINT_PREFIX
+        )
+        .filter(~Q(why=[]) | ~Q(facts={}) | ~Q(goal_id=""))
+        .only("id")
+    )
+    with transaction.atomic():
+        for row in rows:
+            Recommendation.objects.filter(pk=row.pk).update(
+                why=[], facts={}, goal_id="", fingerprint=f"{ERASED_FINGERPRINT_PREFIX}{row.pk}"
+            )
+    return len(rows)
+
+
+def forget_nutrition_observations(shell_ids) -> int:
+    """Remove the observation keys from each shell's proactive-nutrition prefs."""
+    from apps.identity.models import BotUser
+
+    cleared = 0
+    for bot_user in BotUser.all_tenants.filter(pk__in=list(shell_ids)).only("pk", "context"):
+        context = dict(bot_user.context or {})
+        prefs = context.get("nutrition_proactive")
+        if not isinstance(prefs, dict) or not any(k in prefs for k in NUTRITION_OBSERVATION_KEYS):
+            continue
+        context["nutrition_proactive"] = {
+            k: v for k, v in prefs.items() if k not in NUTRITION_OBSERVATION_KEYS
+        }
+        BotUser.all_tenants.filter(pk=bot_user.pk).update(context=context)
+        cleared += 1
+    return cleared
 
 
 def sweep_forget_all(user_id: uuid.UUID) -> ForgetAllSweepResult:
@@ -157,21 +270,30 @@ def sweep_forget_all(user_id: uuid.UUID) -> ForgetAllSweepResult:
     # the surfacing reader is blind to the very rows we are here to bury. Going
     # around it is the point of the module; every OTHER caller must keep using
     # the reader.
-    doomed_ids = list(
-        MemoryEntry.objects.filter(
-            user_id=user_id,
-            sensitivity_zone=MemoryEntry.SENSITIVITY_GREEN,
-            soft_deleted_at__isnull=True,
-            delete_requested_at__isnull=True,
-        ).values_list("id", flat=True)
-    )
-    entries_deleted = soft_delete_green_entries(
-        user_id,
-        doomed_ids,
-        # Not `user_delete`: nobody named these rows. The tombstone must say
-        # which request buried it, or an audit cannot tell «я забыла про
-        # веганство» from «забудь всё».
-        reason=MemoryEntry.DELETION_REASON_FORGET_ALL,
+    # DRF-2180 — по зоне НЕ фильтруем: человек попросил забыть всё, и
+    # матрица объявляет `DELETE` для всех трёх зон. Причина надгробия —
+    # `forget_all`, не `user_delete`: строк никто не называл, а надгробие,
+    # которое их не различает, не ответит аудиту «почему эта строка снята».
+    #
+    # «Живая» строка — та, у которой ПУСТЫ оба поля надгробия. Строка, где
+    # выставлен только `delete_requested_at`, сюда не попадёт: сегодня такого
+    # состояния не бывает (все три писателя ставят оба поля разом), но если
+    # появится — свип окажется молча неполным, и красная строка переживёт
+    # «забудь всё» без единого следа. Условие оставлено прежним намеренно:
+    # менять предикат живости в этом листе значило бы менять то, что он не
+    # измерял.
+    #
+    # Сам отбор живёт В ДЕЛЕТЕРЕ, а не здесь: GUC красной зоны должен
+    # накрывать весь путь, а SELECT отсюда шёл бы без него — и красные строки
+    # не доехали бы до делетера вовсе, сколько бы GUC он у себя ни ставил.
+    # Граница «кто ставит GUC» обязана совпадать с границей «кто трогает
+    # красное», иначе она не граница.
+    #
+    # Один `request_id` на прогон: одна просьба «забудь всё» — это одно
+    # обращение к красной зоне, разбитое на строки. Он же уходит в GUC и в
+    # каждую строку журнала, так что по нему их собирают обратно.
+    entries_deleted, red_deleted = soft_delete_all_zones_for_forget_all(
+        user_id, request_id=uuid.uuid4()
     )
 
     now = timezone.now()
@@ -213,15 +335,20 @@ def sweep_forget_all(user_id: uuid.UUID) -> ForgetAllSweepResult:
     # bound to a local so the invariant is stated where it is relied on rather
     # than asserted away with a cast.
     requested_at = upc.forget_all_requested_at
+    shells = shell_ids_for_person(ayla_user_id=user_id)
     dialogue = (
         anonymize_dialogue(
-            shell_ids_for_person(ayla_user_id=user_id),
+            shells,
             through=requested_at,
             reason=ArchivedMessage.Reason.FORGET_ALL,
         )
         if requested_at is not None
         else AnonymizeResult()
     )
+
+    # DRF-2214 — the two bot stores «забудь всё» used to leave standing.
+    recommendations_anonymized = anonymise_recommendations(shells)
+    nutrition_observations_cleared = forget_nutrition_observations(shells)
 
     result = ForgetAllSweepResult(
         user_id=user_id,
@@ -230,6 +357,11 @@ def sweep_forget_all(user_id: uuid.UUID) -> ForgetAllSweepResult:
         tombstoned=tombstoned,
         conversations_anonymized=dialogue.conversations,
         messages_archived=dialogue.messages_archived,
+        raw_entries_deleted=dialogue.raw_entries_deleted,
+        raw_entries_unattributed=dialogue.raw_entries_unattributed,
+        raw_streams_checked=dialogue.raw_streams_checked,
+        recommendations_anonymized=recommendations_anonymized,
+        nutrition_observations_cleared=nutrition_observations_cleared,
     )
 
     if result.changed:
@@ -246,17 +378,26 @@ def sweep_forget_all(user_id: uuid.UUID) -> ForgetAllSweepResult:
                 "tombstoned": result.tombstoned,
                 "conversations_anonymized": result.conversations_anonymized,
                 "messages_archived": result.messages_archived,
+                "raw_entries_deleted": result.raw_entries_deleted,
+                "raw_entries_unattributed": result.raw_entries_unattributed,
+                "raw_streams_checked": result.raw_streams_checked,
+                "recommendations_anonymized": result.recommendations_anonymized,
+                "nutrition_observations_cleared": result.nutrition_observations_cleared,
             },
         )
         logger.info(
             "identity.forget_all_sweep.user user_id=%s entries=%d fields=%d "
-            "tombstoned=%s conversations=%d messages=%d",
+            "tombstoned=%s conversations=%d messages=%d raw_deleted=%d raw_unattributed=%d "
+            "raw_streams_checked=%s",
             user_id,
             result.entries_deleted,
             result.context_fields_cleared,
             result.tombstoned,
             result.conversations_anonymized,
             result.messages_archived,
+            result.raw_entries_deleted,
+            result.raw_entries_unattributed,
+            result.raw_streams_checked,
         )
     return result
 

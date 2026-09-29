@@ -1,0 +1,79 @@
+// DRF-1034 — бэкап строк «записи-призрака» перед отменой на пилоте (2026-08-13).
+//
+// Контекст: appointment 0d3f41d1 удалён из backend Ayla 12.08 по слову владельца
+// (бэкап удаления — docs/drf985-scripts/test-booking-20260812-backup.json), но
+// зеркало бота об удалении не узнало: строки остались в статусе confirmed с датой
+// визита 14.08, и бот показывал клиенту несуществующую запись.
+//
+// Выполнено по GO владельца: статусы переведены в cancelled, ожидающее напоминание
+// снято. Жёсткого DELETE не делалось — отмена оставляет историю.
+//
+// Восстановление (если понадобится): вернуть status обратно в confirmed / pending
+// у перечисленных ниже строк по их id.
+//
+// Напоминание day_before (053fc951) уже было в терминальном статусе failed —
+// оно сработало 13.08 в 10:00 UTC и не доставилось; не трогалось.
+
+{
+  "applied_at": "2026-08-13T10:2x:00Z",
+  "applied_by": "главное окно, по GO владельца",
+  "result": "proxy=1 request=1 reminders_pending=1 переведены в cancelled",
+  "verification": "route_global_booking_lookup для глобального BotUser владельца возвращает «У вас пока нет предстоящих записей.»",
+
+  "remote_booking_proxy": [
+    {
+      "appointment_id": "0d3f41d1-d40a-4565-8462-66faa6f90210",
+      "status_before": "confirmed",
+      "status_after": "cancelled",
+      "start_at": "2026-08-14 10:00:00+00:00",
+      "end_at": "2026-08-14 10:30:00+00:00",
+      "tenant_id": "b32a057a-56c7-4bf0-ae50-e11e76ab44be",
+      "bot_user_id": "42cc8f3e-3ce3-4105-a899-f3705894a7ba",
+      "source": "automation",
+      "synced_at": "2026-08-12 05:47:46.977359+00:00"
+    }
+  ],
+
+  "booking_request": [
+    {
+      "id": "ee7d34b4-d69f-47a0-9f05-23bd48c4cdb3",
+      "status_before": "confirmed",
+      "status_after": "cancelled",
+      "visit_at": "2026-08-14 10:00:00+00:00",
+      "service_name": "УЗ-кавитация — 1 зона",
+      "master_name": "Тихонова Ольга",
+      "tenant_id": "b32a057a-56c7-4bf0-ae50-e11e76ab44be",
+      "bot_user_id": "42cc8f3e-3ce3-4105-a899-f3705894a7ba",
+      "created_at": "2026-08-12 05:47:46.934291+00:00"
+    }
+  ],
+
+  "booking_reminders": [
+    {
+      "id": "053fc951-1003-49fd-8bcf-ee607caf01c0",
+      "kind": "day_before",
+      "status_before": "failed",
+      "status_after": "failed (не трогалось — терминальный статус)",
+      "visit_at": "2026-08-14 10:00:00+00:00",
+      "scheduled_at": "2026-08-13 10:00:00+00:00",
+      "sent_at": null,
+      "chat_id": "361762682",
+      "tenant_id": "b32a057a-56c7-4bf0-ae50-e11e76ab44be",
+      "bot_user_id": "42cc8f3e-3ce3-4105-a899-f3705894a7ba",
+      "yclients_record_id": "0d3f41d1-d40a-4565-8462-66faa6f90210"
+    },
+    {
+      "id": "8dbaaa1d-84ea-459d-bf1d-79de3a5d2cb4",
+      "kind": "two_hours",
+      "status_before": "pending",
+      "status_after": "cancelled",
+      "visit_at": "2026-08-14 10:00:00+00:00",
+      "scheduled_at": "2026-08-14 08:00:00+00:00",
+      "sent_at": null,
+      "chat_id": "361762682",
+      "tenant_id": "b32a057a-56c7-4bf0-ae50-e11e76ab44be",
+      "bot_user_id": "42cc8f3e-3ce3-4105-a899-f3705894a7ba",
+      "yclients_record_id": "0d3f41d1-d40a-4565-8462-66faa6f90210"
+    }
+  ]
+}

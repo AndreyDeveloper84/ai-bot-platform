@@ -50,6 +50,13 @@ import { fetchDecisionContext, type DecisionContext } from "../lib/customer-goal
 import { signalReady } from "../lib/max-sdk";
 import { GoalSelectScreen } from "./GoalSelectScreen";
 import { HelloScreen } from "./HelloScreen";
+import { screenRoot } from "../lib/screen-back";
+
+/** Вид экрана (DRF-1493). */
+const BACK = screenRoot(
+  "`/` — корень клиентской поверхности: сюда попадает запуск " +
+    "мини-приложения, выше некуда.",
+);
 
 type State =
   | { kind: "loading" }
@@ -68,7 +75,11 @@ export function CustomerEntryScreen() {
     fetchDecisionContext()
       .then((doc) => {
         if (cancelled) return;
-        setState(doc.missing.length > 0 ? { kind: "ask", doc } : { kind: "home" });
+        // DRF-2177: документ с целью теперь несёт и её сужающие вопросы
+        // (C03), но первый экран — анкета только для того, у кого цели
+        // НЕТ (DRF-1451). С целью — главный; к вопросам ведёт карточка цели.
+        const newcomer = doc.known.goal === null && doc.missing.length > 0;
+        setState(newcomer ? { kind: "ask", doc } : { kind: "home" });
       })
       .catch(() => {
         if (!cancelled) setState({ kind: "fallback" });
@@ -80,7 +91,7 @@ export function CustomerEntryScreen() {
 
   if (state.kind === "loading") {
     return (
-      <ScreenLayout title="Помощник студии">
+      <ScreenLayout back={BACK} title="Помощник студии">
         <DelayedSkeleton loading>
           <ServiceCardSkeleton />
           <ServiceCardSkeleton />

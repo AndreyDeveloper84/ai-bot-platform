@@ -411,6 +411,61 @@ def has_consent(
     return qs.exists()
 
 
+def person_channel_shells(bot_user: "BotUser") -> list["BotUser"]:
+    """Оболочки человека по его каналу — ``(channel, channel_user_id)``.
+
+    В пилоте у человека несколько ``BotUser``: Mini App резолвит строку под
+    ``MAX_BOT_TENANT_SLUG``, чат глобального бота — под сентинелом
+    ``global_bot``. Это разные строки по ``unique_together (tenant, channel,
+    channel_user_id)``. Пустой ``channel_user_id`` идентичностью не является:
+    совпадение по нему собрало бы посторонних людей — тогда только сама строка.
+
+    Намеренно без ``privacy.person_shell_ids``: тот резолв при отсутствии
+    связки с Ayla ходит в сеть и заводит upstream-прокси — уместно для права
+    на стирание, дико для чтения согласия на каждом ходу.
+    """
+    from apps.identity.models import BotUser as BotUserModel
+
+    channel = (getattr(bot_user, "channel", "") or "").strip()
+    channel_user_id = (getattr(bot_user, "channel_user_id", "") or "").strip()
+    if not channel or not channel_user_id:
+        return [bot_user]
+    shells = list(BotUserModel.all_tenants.filter(channel=channel, channel_user_id=channel_user_id))
+    return shells or [bot_user]
+
+
+def has_person_consent(bot_user: "BotUser", consent_type: str) -> bool:
+    """Согласие ЧЕЛОВЕКА, а не строки (DRF-2230, живой проход владельца 21.09).
+
+    Чат пишет согласие на свою оболочку, Mini App читал свою — и после
+    «Готово, согласие есть» в чате Главная продолжала требовать согласия.
+    Читаем по всем оболочкам (:func:`person_channel_shells`):
+
+    * открыто, если у человека есть активный грант (``granted`` и не отозван)
+      **и** его последний грант позже последнего отзыва на любой оболочке —
+      отзыв где угодно закрывает, новый грант после него открывает снова;
+    * на одной строке это ровно прежнее правило :func:`has_global_consent`.
+
+    Ложноположительного направления нет: отзыв и так идёт по всем оболочкам
+    (``withdraw_personal_data_for_bot_users``, §8.4), а последнее событие
+    человека решает даже там, где отзыв задел лишь одну строку.
+    """
+    rows = list(
+        ConsentRecord.all_tenants.filter(
+            bot_user__in=person_channel_shells(bot_user),
+            consent_type=consent_type,
+            granted=True,
+        ).values_list("captured_at", "withdrawn_at")
+    )
+    active = [captured for captured, withdrawn in rows if withdrawn is None]
+    if not active:
+        return False
+    withdrawals = [withdrawn for _, withdrawn in rows if withdrawn is not None]
+    if not withdrawals:
+        return True
+    return max(active) > max(withdrawals)
+
+
 def has_global_consent(
     bot_user: "BotUser",
     consent_type: str,
@@ -461,12 +516,30 @@ MEMORY_ZONE_CONSENT = {
 # обрабатывать нечего в принципе. Оставить активный health-грант человеку,
 # который вышел из персонализированного сервиса, значило бы держать открытым
 # согласие на самую чувствительную категорию у того, кто отозвал самое общее.
+#
+# DRF-1520 добавляет ``marketing``. До него в этот тип не писал никто, и его
+# отсутствие в каскаде ничего не значило. Теперь маркетинговое согласие —
+# настоящая строка реестра, а ``_erase_bot_user_pii`` удаляет строку
+# ``UserPreferences`` целиком, и ``get_profile`` пересоздаёт её с
+# ``notify_promo=False``. Без этой строки человек, реализовавший право на
+# стирание, оставался бы с ДЕЙСТВУЮЩИМ маркетинговым согласием в реестре и
+# выключенным зеркалом — то самое расхождение двух источников правды, ради
+# устранения которого реестр и объявлен главным.
+#
+# DRF-1963 (M1, решение D6) добавляет ``food_diary_processing``. Согласие
+# дневника и сканера стоит поверх personal_data (DRF-1948); раньше его снимал
+# отдельный ``update`` колонки в одной-единственной ручке отзыва, и любой
+# другой путь отзыва personal_data оставлял его действующим. Теперь это строка
+# реестра, и снимается она там же, где снимаются остальные надстройки.
+# ``personal_calculation`` в каскаде нет — вне M1, вопрос назван в PR.
 _PERSONAL_DATA_CASCADE = (
     ConsentRecord.ConsentType.PERSONAL_DATA,
     ConsentRecord.ConsentType.HEALTH,
+    ConsentRecord.ConsentType.MARKETING,
     ConsentRecord.ConsentType.MEMORY_GREEN,
     ConsentRecord.ConsentType.MEMORY_YELLOW,
     ConsentRecord.ConsentType.MEMORY_RED,
+    ConsentRecord.ConsentType.FOOD_DIARY_PROCESSING,
 )
 
 

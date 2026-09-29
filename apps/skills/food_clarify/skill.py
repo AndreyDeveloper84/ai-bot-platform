@@ -4,10 +4,11 @@ Sprint 9 / P4 (DRF-821). When a short message looks like a food/drink
 log attempt (``looks_like_food_drink``) the skill takes the turn and
 emits a 2-button card:
 
-* **📔 В дневник** → ``cb:food:diary`` — hands off to ``food_scanner``
-  with a "send a photo" prompt (text-only food parsing is not in scope
-  for Phase 0; the upstream nutrition_anketa ladder lives in skills/
-  nutrition_anketa).
+* **📔 В дневник** → ``cb:food:diary`` — since DRF-1837 estimates the
+  phrase the person just typed and shows «Я распознала так»
+  (:mod:`apps.skills.food_clarify.text_entry`, §109). Until then this
+  said «Скинь фото — через текст пока не умею», and with the photo flag
+  off that closed the ring: nothing could be logged at all.
 * **❌ Опечатка** → ``cb:food:typo`` — silent soft-ack to avoid
   fatiguing the user on false positives.
 
@@ -30,6 +31,7 @@ from typing import ClassVar
 
 from apps.orchestrator.ui.keyboards import food_drink_clarify_keyboard
 from apps.skills.base import SkillContext, SkillResult
+from apps.skills.food_clarify import text_entry
 from apps.skills.food_clarify.hints import looks_like_food_drink
 from apps.skills.registry import register
 
@@ -38,12 +40,15 @@ CARD_TEXT = (
     "Если просто описался — отметь «опечатка»."
 )
 
-DIARY_PROMPT = (
-    "📸 Скинь фото блюда — посчитаю калории и БЖУ. "
-    "Через текст пока не умею распознавать (это в работе)."
-)
+#: Kept under its old name for callers; the text changed with DRF-1837 —
+#: asked only when the tap arrives without the phrase it was about.
+DIARY_PROMPT = text_entry.ASK_WHAT_TEXT
 
 TYPO_ACK = "Поняла 🙂"
+
+#: DRF-2071 — ходы, которые при выключенном контуре остаются ack'ами: они
+#: только стирают открытый вопрос и ничего не пишут и не спрашивают.
+_ACK_WHEN_OFF = frozenset({"cb:food:typo", text_entry.CB_REJECT})
 
 
 @register
@@ -62,7 +67,14 @@ class FoodClarifySkill:
         # Callback path — channel adapter has already decoded the inline
         # button click into a "cb:food:diary" / "cb:food:typo" text body
         # (per the platform's channel-agnostic callback contract).
-        if text in ("cb:food:diary", "cb:food:typo"):
+        if text in ("cb:food:diary", "cb:food:typo") or text in text_entry.TEXT_CALLBACKS:
+            return True
+        # DRF-1838 — тап под сохранённой записью (исправить / удалить / вернуть).
+        if text_entry.is_entry_callback(text):
+            return True
+        # DRF-1837 — an answer to the question this skill asked (grams, or
+        # «что было»). Checked before the hint: «250» is not food-shaped.
+        if text_entry.claims_text(context.conversation, text):
             return True
         # Free-text path — only when the hint detector says yes.
         return looks_like_food_drink(text)
@@ -70,19 +82,45 @@ class FoodClarifySkill:
     def handle(self, context: SkillContext) -> SkillResult:
         text = context.message_text.strip()
 
-        if text == "cb:food:diary":
+        # DRF-2071 — единый выключатель контура питания (DRF-1994) в талии
+        # навыка, не по веткам. Ворота ``text_entry._gate`` стояли только на
+        # оценке и записи; перепись по классу (``test_nutrition_switch_census_2071``)
+        # нашла ветки, которые при OFF продолжали разговор о еде: карточка
+        # «Это про еду?» на свободный текст, «📔 В дневник» без исходной
+        # фразы («напиши, что было»), «записать»/«граммы» без оценки («эта
+        # оценка уже не действует — напиши ещё раз»). Два хода остаются
+        # без ворот намеренно: «Опечатка» и «не записываю» — молчаливый
+        # ack, который стирает состояние и ничего не спрашивает. Литерал —
+        # свой (``NUTRITION_OFF_TEXT``), как у остальных ворот этого пакета
+        # (PR #1800, «Пределы» п.3: сведение литералов — решение владельца).
+        if text not in _ACK_WHEN_OFF and not text_entry._nutrition_on():
+            text_entry.forget(context)
             return SkillResult(
-                reply_text=DIARY_PROMPT,
-                meta={"reply_kind": "food_clarify_diary"},
+                reply_text=text_entry.NUTRITION_OFF_TEXT,
+                meta={"reply_kind": "food_text_nutrition_off"},
             )
 
+        if text in text_entry.TEXT_CALLBACKS:
+            return text_entry.on_callback(context, text)
+
+        if text_entry.is_entry_callback(text):
+            return text_entry.on_entry_callback(context, text)
+
+        if text == "cb:food:diary":
+            return text_entry.on_diary_tap(context)
+
         if text == "cb:food:typo":
+            text_entry.forget(context)
             return SkillResult(
                 reply_text=TYPO_ACK,
                 meta={"reply_kind": "food_clarify_typo"},
             )
 
-        # Free-text → emit the card.
+        if text_entry.claims_text(context.conversation, text):
+            return text_entry.on_text(context, text)
+
+        # Free-text → remember the phrase for the «📔 В дневник» tap, emit the card.
+        text_entry.remember_source(context, text)
         return SkillResult(
             reply_text=CARD_TEXT,
             action_type="food_clarify_card",

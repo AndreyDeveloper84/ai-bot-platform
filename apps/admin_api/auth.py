@@ -32,6 +32,14 @@ Error envelope mirrors the master_api / miniapp_api shape:
 * ``stale`` (401) — init-data ``auth_date`` expired.
 * ``user_not_registered`` (404) — no BotUser row for this MAX user.
 * ``forbidden`` (403) — caller is not Owner / Admin.
+
+:func:`require_admin_or_reception_read` is the *narrow* second gate
+(DRF-1552, owner's decision ``docs/OPEN_DECISIONS.md`` §35 п.1). It adds
+Receptionist to the allow-list **for reading only**, and it is applied to
+exactly one view — :func:`apps.admin_api.views_day.salon_day`. Everything
+else under ``/api/v1/admin/`` keeps :func:`require_admin_role` unchanged,
+which is the point: reading the day is the receptionist's job, inviting
+staff, deactivating masters and answering availability requests are not.
 """
 
 from __future__ import annotations
@@ -43,19 +51,13 @@ from typing import Any, Callable
 from django.http import HttpRequest, HttpResponse, JsonResponse
 
 from apps.identity.services.bot_user_resolver import (
+    SalonChoiceRequired,
     resolve_bot_user,
     resolve_tenant_slug_for_init_data,
+    salon_choice_from,
 )
 from apps.identity.services.role_resolver import RoleContext, resolve_role
-from apps.miniapp_api.auth import (
-    InitDataBadSignature,
-    InitDataError,
-    InitDataMalformed,
-    InitDataNotConfigured,
-    InitDataStale,
-    extract_init_data,
-    verify_init_data,
-)
+from apps.miniapp_api.transport_refusal import GUARD_ATTR, verify_request_init_data
 from apps.tenancy.context import tenant_scope
 
 logger = logging.getLogger(__name__)
@@ -65,10 +67,23 @@ def _error(slug: str, detail: str, status: int) -> JsonResponse:
     return JsonResponse({"error": slug, "detail": detail}, status=status)
 
 
-def require_admin_role(
+#: Methods a Receptionist may use on the endpoints opened to her.
+#: The owner's decision is «только GET» — HEAD rides along because Django
+#: answers it from the GET handler and it carries no body.
+_RECEPTION_SAFE_METHODS = frozenset({"GET", "HEAD"})
+
+
+def _gate(
     view_func: Callable[..., HttpResponse],
+    *,
+    allow_reception_read: bool,
 ) -> Callable[..., HttpResponse]:
-    """Gate a view to Owner / Admin callers only.
+    """Shared body of the admin gates.
+
+    ``allow_reception_read`` is the only difference between them, and it
+    is deliberately not a general «extra roles» knob: a Receptionist gets
+    in only on a safe method, so a view that is opened to her cannot
+    quietly grow a POST later without this failing first.
 
     On success, attaches to the request:
 
@@ -92,21 +107,11 @@ def require_admin_role(
 
     @wraps(view_func)
     def wrapper(request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
-        header = request.headers.get("Authorization", "")
-        try:
-            raw = extract_init_data(header)
-            verified = verify_init_data(raw)
-        except InitDataNotConfigured:
-            logger.error("admin_api.auth.not_configured")
-            return _error("server_misconfigured", "MAX bot token not configured", 500)
-        except InitDataBadSignature:
-            return _error("bad_signature", "initData signature mismatch", 401)
-        except InitDataStale:
-            return _error("stale", "initData expired — reopen the Mini App", 401)
-        except InitDataMalformed as exc:
-            return _error("malformed", str(exc), 400)
-        except InitDataError as exc:
-            return _error("unauthorized", str(exc), 401)
+        # DRF-1893 — один отказ транспорта: 401 no_init_data, причина в логе.
+        verified, refusal = verify_request_init_data(request, surface="admin_api")
+        if refusal is not None:
+            return refusal
+        assert verified is not None
 
         # DRF-1150 — resolve identity by the bot that signed, not by the
         # bot-tenant setting alone. Shared with the master surface (the
@@ -130,7 +135,14 @@ def require_admin_role(
         # it. Cross-tenant escalation is not a risk here: resolve_role
         # reads TenantStaff within the resolved row's OWN tenant, so a
         # wrong pick can only under-privilege (403), never over.
-        if not resolve_tenant_slug_for_init_data(verified):
+        #
+        # DRF-1785 (срез 4c, главное окно Q2 15.09): 500 — только когда тенант не
+        # может прийти ниоткуда: initData не подписан ни одним ботом реестра И
+        # MAX_BOT_TENANT_SLUG пуст. Подпись бота реестра идёт в резолвер — у
+        # салонного бота тенант решает человек, а не запись и не настройка.
+        if not getattr(verified, "bot_slug", "") and not resolve_tenant_slug_for_init_data(
+            verified
+        ):
             logger.error("admin_api.auth.no_tenant_slug")
             return _error(
                 "server_misconfigured",
@@ -138,7 +150,22 @@ def require_admin_role(
                 500,
             )
 
-        bot_user = resolve_bot_user(verified, surface="admin_api")
+        try:
+            bot_user = resolve_bot_user(
+                verified, surface="admin_api", chosen_slug=salon_choice_from(request)
+            )
+        except SalonChoiceRequired as exc:
+            # DRF-1766: several salons — the admin Mini App shows the chooser.
+            return JsonResponse(
+                {
+                    "error": "salon_choice_required",
+                    "detail": "this account holds a role in several salons — choose one",
+                    "details": {
+                        "tenants": [{"slug": t.slug, "name": t.name or t.slug} for t in exc.tenants]
+                    },
+                },
+                status=409,
+            )
         if bot_user is None:
             return _error(
                 "user_not_registered",
@@ -147,7 +174,14 @@ def require_admin_role(
             )
 
         role_ctx = resolve_role(bot_user)
-        if not (role_ctx.is_owner or role_ctx.is_admin):
+        allowed = role_ctx.is_owner or role_ctx.is_admin
+        if not allowed and allow_reception_read and role_ctx.is_receptionist:
+            # DRF-1552 — the front desk reads the day and nothing else.
+            # The method check is not decoration: it is what keeps this
+            # branch from becoming a write door if the view ever gains
+            # one.
+            allowed = request.method in _RECEPTION_SAFE_METHODS
+        if not allowed:
             return _error(
                 "forbidden",
                 "admin or owner role required",
@@ -161,7 +195,46 @@ def require_admin_role(
         with tenant_scope(bot_user.tenant):
             return view_func(request, *args, **kwargs)
 
+    setattr(wrapper, GUARD_ATTR, "admin_or_reception_read" if allow_reception_read else "admin")
     return wrapper
 
 
-__all__ = ["RoleContext", "require_admin_role"]
+def require_admin_role(
+    view_func: Callable[..., HttpResponse],
+) -> Callable[..., HttpResponse]:
+    """Gate a view to Owner / Admin callers only.
+
+    Receptionist, master and customer-only callers get 403 here — the
+    behaviour this decorator has always had, and the behaviour every
+    writing endpoint under ``/api/v1/admin/`` still relies on.
+    """
+
+    return _gate(view_func, allow_reception_read=False)
+
+
+def require_admin_or_reception_read(
+    view_func: Callable[..., HttpResponse],
+) -> Callable[..., HttpResponse]:
+    """Gate a view to Owner / Admin — plus Receptionist on a safe method.
+
+    Owner's decision, ``docs/OPEN_DECISIONS.md`` §35 п.1 (DRF-1552):
+    «Ресепшн открыть чтение "Дня салона". Только GET, без изменений
+    записей и настроек.»
+
+    Deliberately narrow. It is *not* a relaxation of
+    :func:`require_admin_role` — that decorator is untouched, and this one
+    is spelled out view by view. Widening the front desk's reach means
+    naming another view here on purpose, which is exactly the friction the
+    decision asks for: ``/api/v1/admin/`` also carries staff invites,
+    master deactivation and availability decisions, and one shared
+    weakening would have opened all three at once.
+    """
+
+    return _gate(view_func, allow_reception_read=True)
+
+
+__all__ = [
+    "RoleContext",
+    "require_admin_or_reception_read",
+    "require_admin_role",
+]

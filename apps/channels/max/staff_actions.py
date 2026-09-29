@@ -24,21 +24,13 @@ import logging
 from datetime import datetime, timedelta, timezone as dt_timezone
 
 from django.utils import timezone
+from apps.tenancy.timezones import salon_zone
 
 logger = logging.getLogger(__name__)
 
 MAX_LISTED = 12
 """Cap on lines in one reply. A salon day beyond this is a Mini App job —
 a chat message with forty rows is not readable on a phone."""
-
-
-def _tenant_tz(tenant):
-    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-
-    try:
-        return ZoneInfo(getattr(tenant, "timezone", "") or "Europe/Moscow")
-    except (ZoneInfoNotFoundError, ValueError):
-        return ZoneInfo("Europe/Moscow")
 
 
 def _day_bounds(now: datetime, tz) -> tuple[datetime, datetime]:
@@ -60,7 +52,7 @@ def salon_day(tenant, *, now: datetime | None = None) -> str:
     from apps.master_api.services.visit_source import master_visits
 
     now = now or timezone.now()
-    tz = _tenant_tz(tenant)
+    tz = salon_zone(tenant)
     start, end = _day_bounds(now, tz)
 
     # `.objects` — the callers run inside tenant_scope (the consumer enters
@@ -102,7 +94,7 @@ def master_day(master, *, now: datetime | None = None) -> str:
     from apps.master_api.services.visit_source import master_visits
 
     now = now or timezone.now()
-    tz = _tenant_tz(master.tenant)
+    tz = salon_zone(master.tenant)
     start, end = _day_bounds(now, tz)
 
     visits = master_visits(master, start=start, end=end)
@@ -129,7 +121,7 @@ def pending_request_rows(tenant) -> list[tuple[str, str]]:
 
     from apps.scheduling.models import ScheduleChangeRequest
 
-    tz = _tenant_tz(tenant)
+    tz = salon_zone(tenant)
     rows = list(
         ScheduleChangeRequest.objects.filter(
             status=ScheduleChangeRequest.Status.PENDING,
@@ -177,6 +169,7 @@ def approve_request(*, tenant, request_id: str, actor) -> str:
             # same as the Mini App path does.
             actor=None,
             actor_bot_user_id=getattr(actor, "id", None),
+            actor_bot_user=actor,
             actor_role="admin",
         )
     except AvailabilityDecisionError as exc:
@@ -194,6 +187,18 @@ def approve_request(*, tenant, request_id: str, actor) -> str:
     return "Заявка одобрена. Мастер получит уведомление."
 
 
+def salon_readiness(tenant) -> str:
+    """«Проверить готовность» (DRF-2117): поимённый список того, что мешает записи.
+
+    Каталог + зеркало — :mod:`apps.admin_api.services.salon_readiness`;
+    источник недоступен → «не удалось проверить», не «готов».
+    """
+
+    from apps.admin_api.services.salon_readiness import check_salon_readiness, render
+
+    return render(check_salon_readiness(tenant))
+
+
 def pending_requests(tenant) -> str:
     """Schedule-change requests waiting on an admin.
 
@@ -206,7 +211,7 @@ def pending_requests(tenant) -> str:
 
     from apps.scheduling.models import ScheduleChangeRequest
 
-    tz = _tenant_tz(tenant)
+    tz = salon_zone(tenant)
     rows = list(
         ScheduleChangeRequest.objects.filter(
             status=ScheduleChangeRequest.Status.PENDING,

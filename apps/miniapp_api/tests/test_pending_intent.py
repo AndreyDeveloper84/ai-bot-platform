@@ -147,6 +147,39 @@ class TestValidator:
         out = validate_intent({"price_quoted": 1850.5})
         assert out["price_quoted"] == 1850.5
 
+    def test_entry_point_accepted(self):
+        """DRF-1484 / §24.5 — provenance rides the snapshot."""
+        out = validate_intent({"master_id": "m1", "entry_point": "catalog"})
+        assert out["entry_point"] == "catalog"
+
+    def test_entry_point_truncated(self):
+        long_ep = f"deep_link:{'x' * 512}"
+        out = validate_intent({"entry_point": long_ep})
+        assert len(out["entry_point"]) == 64
+        assert out["entry_point"].startswith("deep_link:")
+
+    def test_entry_point_wrong_type_raises(self):
+        with pytest.raises(PendingIntentInvalid, match="entry_point"):
+            validate_intent({"entry_point": 7})
+
+    def test_tenant_id_dropped_not_stored(self):
+        """§24.5 owner decision: tenant is execution-context, never a
+        property of the durable intent — `tenant_id` must NOT survive
+        validation even if a caller sends it."""
+        out = validate_intent(
+            {
+                "master_id": "m1",
+                "entry_point": "master",
+                "tenant_id": "must-not-round-trip",
+            }
+        )
+        # Positive guard on the same data (negative_assert_guard,
+        # DRF-1411): the payload validated and kept its real fields —
+        # without this, «no tenant_id» would pass on an empty result.
+        assert out["master_id"] == "m1"
+        assert out["entry_point"] == "master"
+        assert "tenant_id" not in out
+
 
 # ─── TestCacheRoundTrip ─────────────────────────────────────────────────
 
@@ -362,3 +395,32 @@ class TestAuthVerifyIntegration:
         assert resp.status_code == 200
         intent = resp.json()["pending_booking_intent"]
         assert intent == {"master_id": "m1"}
+
+    def test_entry_point_round_trips_tenant_id_dropped(self, client: Client, bot_user: BotUser):
+        """DRF-1484 / §24.5 end-to-end lock: `entry_point` (provenance)
+        is part of the server contract; `tenant_id` is not — the
+        endpoint must cache one and silently drop the other."""
+        resp = client.post(
+            self._url(),
+            data=json.dumps(
+                {
+                    "pending_booking_intent": {
+                        "master_id": "m1",
+                        "service_id": "s1",
+                        "slot_iso": "2026-07-15T14:00:00+03:00",
+                        "entry_point": "deep_link:open_catalog",
+                        "tenant_id": "must-not-round-trip",
+                    }
+                }
+            ),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id),
+        )
+        assert resp.status_code == 200
+        intent = resp.json()["pending_booking_intent"]
+        # Positive guard on the same data: the intent cached and the
+        # provenance round-tripped — the absence check below is only
+        # meaningful because these pass first.
+        assert intent["master_id"] == "m1"
+        assert intent["entry_point"] == "deep_link:open_catalog"
+        assert "tenant_id" not in intent

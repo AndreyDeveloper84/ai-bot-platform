@@ -17,12 +17,10 @@
  *     «← Что обсудим? … Выберите тему — это поможет быстрее ответить:
  *      ⦿ 💰 Что-то по доходу или комиссии … ◯ ❓ Что-то другое / [Дальше]»
  *
- * Surface decision (documented in PR body): the master surface uses a
- * SEPARATE channel from customer conversations (which live under
- * /master/conversations and render in the bottom-nav «💬 Диалоги»
- * tab). «Со студией» is accessed via a section row in the M4 profile
- * («Со студией ›») rather than a 5th bottom-nav tab — bottom-nav real
- * estate is already at the 4-tab MAX recommendation cap. The M4
+ * Surface decision: «Со студией» — переписка мастера с САЛОНОМ, отдельный
+ * канал. Прямой переписки мастера с клиентом у мастера нет (OD-7,
+ * DRF-1255 — экраны /master/conversations сняты); этот канал под запрет не
+ * подпадает. Вход — из листа аватара / профиля, не вкладкой панели. The M4
  * profile «Написать Карине» CTA is wired to deep-link
  * /master/internal-chat/new?topic=general.
  *
@@ -222,7 +220,7 @@ export function MasterInternalChatListScreen() {
       setBackButton(false);
       setClosingConfirmation(false);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `navigate` нужен только внутри обработчика системной кнопки; привязка делается один раз за монтирование
   }, []);
 
   // --- Closing confirmation while compose dirty ---
@@ -262,7 +260,7 @@ export function MasterInternalChatListScreen() {
       submitting: false,
       err: "",
     });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- совет правила здесь ломает замысел: с `sheet.kind` эффект перезапустится при закрытии шторки и откроет её снова
   }, [initialOpenTopic]);
 
   // --- Sheet handlers ---
@@ -356,7 +354,7 @@ export function MasterInternalChatListScreen() {
       hapticNotify("error");
       const msg =
         e instanceof ApiError
-          ? e.detail || COPY.toastCreateError
+          ? COPY.toastCreateError
           : COPY.toastCreateError;
       setSheet({ ...sheet, submitting: false, err: msg });
     }

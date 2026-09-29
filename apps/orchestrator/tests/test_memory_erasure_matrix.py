@@ -46,7 +46,12 @@ from apps.orchestrator.memory.personal_context import record_explicit_green_fact
 from apps.orchestrator.memory_block import build_concierge_memory_block
 from apps.persona.memory_commands import FORGET_ALL_PROMPT, handle_memory_command
 
-pytestmark = pytest.mark.django_db(transaction=True)
+# DRF-2220 — erasure also purges the ingress streams; this file is not
+# about them, so they are empty and need no Redis (apps/conftest.py).
+pytestmark = [
+    pytest.mark.django_db(transaction=True),
+    pytest.mark.usefixtures("ingress_streams_empty"),
+]
 
 
 # ---------------------------------------------------------------------------
@@ -67,11 +72,13 @@ class _FakeAyla:
         self.calls: list[tuple] = []
 
     # -- wire surface -------------------------------------------------
-    def get_context(self, *, ayla_user_id: str) -> DeclaredContext:
+    def get_context(self, *, ayla_user_id: str, external_user_id: str) -> DeclaredContext:
         self.calls.append(("get", ayla_user_id))
         return DeclaredContext(ayla_user_id=ayla_user_id, context=dict(self.context))
 
-    def patch_context(self, *, ayla_user_id: str, updates: list) -> DeclaredContext:
+    def patch_context(
+        self, *, ayla_user_id: str, external_user_id: str, updates: list
+    ) -> DeclaredContext:
         self.calls.append(("patch", ayla_user_id, updates))
         for item in updates:
             # Backend: setattr(ctx, item["field"], item["value"]) — no
@@ -79,7 +86,7 @@ class _FakeAyla:
             self.context[item["field"]] = item["value"]
         return DeclaredContext(ayla_user_id=ayla_user_id, context=dict(self.context))
 
-    def delete_personal_data(self, *, ayla_user_id: str) -> None:
+    def delete_personal_data(self, *, ayla_user_id: str, external_user_id: str) -> None:
         self.calls.append(("delete", ayla_user_id))
         self.context.clear()
         self.deleted = True
@@ -109,6 +116,12 @@ class _FakeRedis:
             def rpush(self, key, value):
                 self.ops.append(("rpush", key, value))
 
+            # DRF-2511: `append` читает уходящее тем же конвейером, поэтому
+            # модель Redis обязана знать `lrange`. Без него стенд краснел на
+            # отсутствии метода — то есть на себе, а не на предмете.
+            def lrange(self, key, start, end):
+                self.ops.append(("lrange", key, start, end))
+
             def ltrim(self, key, start, end):
                 self.ops.append(("ltrim", key, start, end))
 
@@ -116,12 +129,20 @@ class _FakeRedis:
                 self.ops.append(("expire", key, ttl))
 
             def execute(self):
+                out: list = []
                 for op in self.ops:
                     if op[0] == "rpush":
                         outer.store.setdefault(op[1], []).append(op[2])
+                        out.append(None)
                     elif op[0] == "ltrim":
                         outer.store[op[1]] = outer.store.get(op[1], [])[op[2] :]
+                        out.append(None)
+                    elif op[0] == "lrange":
+                        out.append(outer.lrange(op[1], op[2], op[3]))
+                    else:
+                        out.append(None)
                 self.ops = []
+                return out
 
         return _Pipe()
 
@@ -131,6 +152,22 @@ class _FakeRedis:
 
     def delete(self, key):
         self.store.pop(key, None)
+
+
+def _readable_window(conversation):
+    """Строки, которые читатель промпта имел право взять: позже cutoff.
+
+    Правило то же, что было зашито в снятом `ai_drafts._recent_history`
+    (DRF-1528): анонимизация пустит колонку, а `anonymized_through`
+    отрезает всё, что было до неё.
+    """
+    from apps.conversations.models import Message
+
+    rows = Message.all_tenants.filter(conversation=conversation).order_by("created_at")
+    cutoff = conversation.anonymized_through
+    if cutoff is not None:
+        rows = rows.filter(created_at__gt=cutoff)
+    return [m for m in rows if (m.content or "").strip()]
 
 
 def _bot_user(uid: str):
@@ -385,7 +422,10 @@ class TestBackendDeclaredContext:
         assert ayla.context["home_district"] == "Сокол"
         block = build_concierge_memory_block(bu)
         assert "Диета" not in block
-        assert "Любимые мастера" in block
+        # Чужой домен уцелел. Маркером здесь были «Любимые мастера», но с
+        # DRF-2553 выведенный каталогом список в подсказку не идёт вовсе —
+        # маркер взят у поля, которое блок по-прежнему несёт.
+        assert "Избегает" in block
         assert "Ищет рядом с домом" in block
 
     def test_forget_all_clears_the_price_the_contract_cannot_clear(self, settings, ayla):
@@ -532,6 +572,10 @@ class TestDialogueHistory:
         fake = _FakeRedis()
         monkeypatch.setattr(short_term, "_redis_client", lambda: fake)
         monkeypatch.setattr(pii_tokenizer, "_redis_client", lambda: fake)
+        # DRF-2214 — «забудь всё» снимает и состояние движка готовности (dre:state).
+        monkeypatch.setattr(
+            "apps.orchestrator.decision_readiness.state._redis_client", lambda: fake
+        )
         return fake
 
     def test_forget_all_empties_the_short_term_window(self, settings, ayla, monkeypatch):
@@ -613,13 +657,19 @@ class TestDialogueHistory:
 
         Step 5 erased ``StaffAssistantMessage`` — the EMPLOYEE surface. The
         customer's own words survived verbatim and were read straight into the
-        master's AI draft prompt (``ai_drafts._recent_history``), which is the
-        route the audit missed while looking at the concierge.
+        history window built for the master's AI draft — the route the audit
+        missed while it was looking at the concierge.
+
+        DRF-1528 снял самого читателя вместе с перепиской мастер↔клиент,
+        поэтому ячейка проверяет то, на чём он стоял: правило «до cutoff
+        слова не выдаются» держит не читатель, а пустая колонка и
+        ``anonymized_through``. Окно здесь собирается тем же правилом
+        (:func:`_readable_window`) — иначе утверждение сузилось бы до
+        «строка есть, а что в ней — неважно».
         """
         from apps.conversations.models import Message
         from apps.conversations.services import resolve_active_global_conversation
         from apps.identity.services.privacy import delete_personal_data
-        from apps.master_api.services.ai_drafts import _recent_history
 
         self._fake_redis(monkeypatch)
 
@@ -633,11 +683,13 @@ class TestDialogueHistory:
             content="я веган, мой мастер — Анна, телефон 89990001122",
         )
 
-        # Positive guard on the READER, not just on the row: this cell claims
-        # the master's draft prompt stops carrying the person's words, and that
-        # claim is empty unless the prompt carried them a line earlier.
-        before = _recent_history(conversation)
-        assert [m.content for m in before] == ["я веган, мой мастер — Анна, телефон 89990001122"]
+        # Положительная пара к утверждению об отсутствии: до каскада слова
+        # в окне есть — иначе «после каскада их нет» ничего не значит.
+        # Окно читается тем же правилом, что читал снятый `_recent_history`:
+        # строки позже `anonymized_through` (DRF-1528 — сам читатель снят).
+        assert [m.content for m in _readable_window(conversation)] == [
+            "я веган, мой мастер — Анна, телефон 89990001122"
+        ]
 
         result = delete_personal_data(bu, client=ayla)
 
@@ -645,9 +697,40 @@ class TestDialogueHistory:
         rows = list(Message.all_tenants.filter(conversation=conversation))
         assert len(rows) == 1  # строка на месте
         assert rows[0].content == ""  # а слов в ней нет
-        # And the prompt-side reader hands back nothing.
+        # И окно, из которого собирался промпт, пустое.
         conversation.refresh_from_db()
-        assert _recent_history(conversation) == []
+        assert _readable_window(conversation) == []
+
+    def test_account_delete_blanks_the_recommendation_words(self, settings, ayla, monkeypatch):
+        """DRF-1772 (К-3) — карточка C04 хранит слова человека (причины и факты
+        из его ответов). Шаг 7 каскада: строка остаётся tombstone (что и когда
+        показано, реакция — attribution, B13/D7), слова уходят.
+        """
+        from apps.identity.services.privacy import delete_personal_data
+        from apps.recommendation.models import Recommendation
+
+        self._fake_redis(monkeypatch)
+        bu = _bot_user("erase-reco-1")
+        _consents(bu, settings)
+        card = Recommendation.objects.create(
+            bot_user=bu,
+            goal_id="goal-1",
+            what="Уменьшить утреннюю отёчность",
+            subline="Сфокусируемся на этом.",
+            why=["Ты сказала, что хочешь привести себя в порядок"],
+            facts={"goal": "Привести себя в порядок"},
+            fingerprint="fp-erase",
+            reaction=Recommendation.Reaction.WHY_REQUESTED,
+        )
+        assert card.why  # присутствие: слова на месте до каскада
+
+        result = delete_personal_data(bu, client=ayla)
+
+        assert {s.step: s.ok for s in result.steps}["recommendation_erase"] is True
+        card.refresh_from_db()
+        assert card.reaction == Recommendation.Reaction.WHY_REQUESTED  # tombstone жив
+        assert card.what == "" and card.subline == ""
+        assert card.why == [] and card.facts == {}
 
     def test_account_delete_empties_the_short_term_window(self, settings, ayla, monkeypatch):
         """FIXED (was GAP, P0) — same for the Redis window, which is the actual
@@ -778,7 +861,9 @@ class TestConsentWithdrawal:
 
         block = build_concierge_memory_block(bu)
         assert "Диета" in block
-        assert "Любимые мастера" in block
+        # Маркер «вернулось всё» — не «Любимые мастера»: с DRF-2553 этот
+        # ключ каталога в подсказку не идёт.
+        assert "Избегает" in block
 
 
 # ---------------------------------------------------------------------------

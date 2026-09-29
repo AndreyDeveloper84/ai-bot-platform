@@ -78,15 +78,18 @@ from django.utils import timezone
 
 from apps.audit.services import write_audit
 from apps.consent.models import ConsentRecord
+from apps.consent.customer import _mirror_notify_promo
 from apps.consent.services import withdraw_personal_data_for_bot_users
 from apps.identity.export_coverage import build_coverage_section
 from apps.identity.models import BotUser, UserPreferences
+from apps.identity.services import ayla_erasure
 from apps.identity.services.memory_deleter import (
     request_forget_all,
     soft_delete_green_entries,
 )
 from apps.identity.services.memory_key_policy import select_current_facts
 from apps.identity.services.memory_reader import get_personal_context, read_green_entries
+from apps.integrations.ayla.user_proxy import external_user_id_for
 from apps.integrations.ayla.personal_context_client import (
     PersonalContextError,
     PersonalContextHttpClient,
@@ -128,6 +131,19 @@ class DeleteCascadeResult:
     @property
     def failed_steps(self) -> list[str]:
         return [s.step for s in self.steps if not s.ok]
+
+    @property
+    def deletion_started(self) -> bool:
+        """DRF-1950: единственный незавершённый шаг — удаление в Ayla, поставленное в задание.
+
+        Не «частично»: удаление идёт и завершится повтором; readback ещё не подтвердил.
+        """
+        failed = [s for s in self.steps if not s.ok]
+        return (
+            len(failed) == 1
+            and failed[0].step == "ayla_delete"
+            and failed[0].detail == "deletion_started"
+        )
 
 
 def _resolve_ayla_user_id(bot_user: BotUser) -> uuid.UUID | None:
@@ -241,6 +257,13 @@ def _resolve_person_link(bot_user: BotUser) -> _PersonLink:
             return _PersonLink(ayla_user_id=resolved)
 
     return _PersonLink(ayla_user_id=next(iter(candidates), None))
+
+
+#: Публичное имя для соседей по пакету (DRF-1699 — заявка на удаление
+#: обязана определять человека ТЕМ ЖЕ способом, что и стирание: иначе
+#: заявка легла бы на одного, а каскад прошёл по другому).
+resolve_person_link = _resolve_person_link
+PersonLink = _PersonLink
 
 
 def _bot_user_ids_for(ayla_user_id: uuid.UUID) -> list[uuid.UUID]:
@@ -417,7 +440,18 @@ def export_personal_data(
         owns = client is None
         client = client or PersonalContextHttpClient()
         try:
-            ayla_section = client.get_personal_data_export(ayla_user_id=str(ayla_user_id))
+            ayla_section = client.get_personal_data_export(
+                ayla_user_id=str(ayla_user_id),
+                # The subject is named from the SAME shell whose link we
+                # resolved. `_channel_sibling_ids` only gathers shells
+                # sharing `(channel, channel_user_id)`, and the external id
+                # is built from exactly that pair — so every candidate that
+                # could have supplied `ayla_user_id` produces this identical
+                # header. A conflict across shells has already fail-closed
+                # above, so there is no branch here where the header and the
+                # path could name different people.
+                external_user_id=external_user_id_for(bot_user),
+            )
         except PersonalContextError as exc:
             raise PrivacyUpstreamError(f"ayla export failed: {exc}") from exc
         finally:
@@ -511,6 +545,43 @@ def export_personal_data(
         for row in preferences_qs
     ]
 
+    # DRF-2214 — what Ayla showed the person as a direction, and why (К-3):
+    # the reasons verbatim, the facts they were built from, the curated
+    # alternatives shown next to it and the person's reaction.
+    from apps.recommendation.models import Recommendation
+
+    recommendations_section = [
+        {
+            "kind": row.kind,
+            "goal_id": row.goal_id,
+            "what": row.what,
+            "subline": row.subline,
+            "why": row.why,
+            "facts": row.facts,
+            "alternatives": row.alternatives,
+            "reaction": row.reaction,
+            "reacted_at": row.reacted_at.isoformat() if row.reacted_at else None,
+            "booked_at": row.booked_at.isoformat() if row.booked_at else None,
+            "created_at": row.created_at.isoformat(),
+        }
+        for row in Recommendation.objects.filter(bot_user_id__in=shell_ids).order_by("created_at")
+    ]
+
+    # DRF-2214 — the proactive-nutrition toggles the person set themselves.
+    # Observations and the send journal are declared withheld in coverage.
+    nutrition_settings_section = []
+    for shell in BotUser.all_tenants.filter(pk__in=shell_ids).order_by("first_seen", "id"):
+        prefs = (shell.context or {}).get("nutrition_proactive")
+        if not isinstance(prefs, dict):
+            continue
+        nutrition_settings_section.append(
+            {
+                "daily_report_time": prefs.get("daily_report_time", "off"),
+                "water_reminders": bool(prefs.get("water_reminders", False)),
+                "opted_out_at": prefs.get("opted_out_at"),
+            }
+        )
+
     consents_qs = ConsentRecord.all_tenants.filter(bot_user_id__in=shell_ids).order_by(
         "captured_at"
     )
@@ -537,6 +608,8 @@ def export_personal_data(
                 "personal_context",
                 "memory_green",
                 "preferences",
+                "recommendations",
+                "nutrition_notification_settings",
                 "consents",
                 "coverage",
             ],
@@ -552,6 +625,8 @@ def export_personal_data(
         "personal_context": personal_context_section,
         "memory": memory_section,
         "preferences": preferences_section,
+        "recommendations": recommendations_section,
+        "nutrition_notification_settings": nutrition_settings_section,
         "consents": consents_section,
         # Last on purpose: the reader has just seen what IS here, and this is
         # the answer to «а это всё?». Under-reporting the composition is the
@@ -570,9 +645,18 @@ def delete_personal_data(
     bot_user: BotUser,
     *,
     client: PersonalContextHttpClient | None = None,
+    retry_source: str | None = None,
 ) -> DeleteCascadeResult:
     """Run the C5 delete cascade for the person. Every step is
-    idempotent; per-step outcomes are reported, never hidden."""
+    idempotent; per-step outcomes are reported, never hidden.
+
+    ``retry_source`` (DRF-1950) — вход, который ставит удаление в Ayla в
+    durable-задание с readback (``AylaErasureJob.Source``). При открытом
+    ``AYLA_ERASURE_RETRY_ENABLED`` шаг ``ayla_delete`` ok только после
+    подтверждения каталогом; иначе ``deletion_started`` (или
+    ``superseded_by_account_deletion``). Без источника — прежний путь: так
+    зовёт бот-половина D3, у которой повтор и перечитывание остатка — на
+    стороне каталога (решение главного окна В2)."""
     # Person-level, not row-level — see _resolve_person_link. A row-level
     # read makes a linked person look unlinked from the Mini App shell,
     # which would report their live memory as "no state".
@@ -598,11 +682,50 @@ def delete_personal_data(
             bot_user.id,
         )
         steps.append(DeleteStep("ayla_delete", False, "not_linked"))
+    elif retry_source is not None and ayla_erasure.retry_enabled():
+        # DRF-1950 (M3): «удалено» — только после readback каталога. Снимок
+        # внешнего id берётся здесь, до локальных шагов, которые стирают
+        # идентификаторы оболочек.
+        owns = client is None
+        client = client or PersonalContextHttpClient(
+            retries=ayla_erasure.SYNC_RETRIES, timeout=ayla_erasure.SYNC_TIMEOUT_SECONDS
+        )
+        outcome: ayla_erasure.ErasureOutcome | None
+        try:
+            outcome = ayla_erasure.erase_with_readback(
+                bot_user=bot_user,
+                ayla_user_id=ayla_user_id,
+                external_user_id=external_user_id_for(bot_user),
+                source=retry_source,
+                client=client,
+            )
+        except Exception:  # noqa: BLE001 — сбой механики задания не отменяет локальные шаги (ревью B1)
+            logger.exception("identity.privacy.ayla_erasure_job_failed")
+            outcome = None
+        finally:
+            if owns:
+                client.close()
+        if outcome is None or outcome.state == ayla_erasure.FAILED:
+            # Задание могло не сохраниться или его повторы исчерпаны — «запущено»
+            # здесь было бы ложью: честный частичный исход.
+            steps.append(DeleteStep("ayla_delete", False))
+        elif outcome.state == ayla_erasure.CONFIRMED:
+            steps.append(DeleteStep("ayla_delete", True, "confirmed"))
+        elif outcome.state == ayla_erasure.SUPERSEDED:
+            steps.append(DeleteStep("ayla_delete", False, "superseded_by_account_deletion"))
+        else:
+            steps.append(DeleteStep("ayla_delete", False, "deletion_started"))
     else:
+        # Флаг закрыт или вход без источника (D3): прежний путь без readback.
+        # При закрытом флаге «удалено» здесь не подтверждено чтением каталога —
+        # названный долг против правила владельца M3 (DRF-1950), гасится флагом.
         owns = client is None
         client = client or PersonalContextHttpClient()
         try:
-            client.delete_personal_data(ayla_user_id=str(ayla_user_id))
+            client.delete_personal_data(
+                ayla_user_id=str(ayla_user_id),
+                external_user_id=external_user_id_for(bot_user),
+            )
             steps.append(DeleteStep("ayla_delete", True))
         except PersonalContextNotFoundError:
             # Already gone upstream — idempotent success.
@@ -640,12 +763,24 @@ def delete_personal_data(
     # the withdrawal must not depend on a linkage that is NULL in production
     # (ruling §5). Subject = the same shell set step 4 erases.
     try:
-        withdraw_personal_data_for_bot_users(
+        shells = list(
             BotUser.all_tenants.filter(id__in=_person_shell_ids(bot_user, link)).select_related(
                 "tenant"
-            ),
-            source="privacy_delete",
+            )
         )
+        # DRF-1731 замер 12.09: реестр и зеркало ``notify_promo`` — два
+        # носителя одного факта. Раньше зеркало здесь не писалось вовсе и
+        # «сходилось» только потому, что шаг 4 удалял строку
+        # ``UserPreferences`` целиком; при падении шага 4 после шага 3
+        # реестр уже отозван, а зеркало оставалось ``True`` — тумблер
+        # показывал «получаю акции» человеку, который просил стереть всё.
+        # Теперь оба — в одной транзакции и тем же писателем, что у
+        # ``set_marketing`` (``_mirror_notify_promo``): либо отозван и
+        # реестр, и зеркало, либо ни то ни другое — и шаг назван
+        # неудавшимся.
+        with transaction.atomic():
+            withdraw_personal_data_for_bot_users(shells, source="privacy_delete")
+            _mirror_notify_promo(shells, granted=False)
         steps.append(
             DeleteStep(
                 "consent_withdraw",
@@ -698,17 +833,39 @@ def delete_personal_data(
     from apps.conversations.models import ArchivedMessage
 
     try:
-        anonymize_dialogue(
+        dialogue = anonymize_dialogue(
             _person_shell_ids(bot_user, link),
             through=timezone.now(),
             reason=ArchivedMessage.Reason.ACCOUNT_DELETE,
         )
-        steps.append(
-            DeleteStep("dialogue_anonymize", True, "own_row_only" if link.conflict else "")
-        )
+        if not dialogue.raw_streams_checked:
+            # DRF-2220 — the database half ran, the raw webhook copies in
+            # Redis were not checked. Not «done»: the step reports failure,
+            # the answer is partial, and a retry re-runs this idempotent step
+            # — which is the retry of the purge.
+            steps.append(DeleteStep("dialogue_anonymize", False, "ingress_streams_unchecked"))
+        else:
+            steps.append(
+                DeleteStep("dialogue_anonymize", True, "own_row_only" if link.conflict else "")
+            )
     except Exception:  # noqa: BLE001 — per-step isolation, reported below
         logger.exception("identity.privacy.dialogue_anonymize_failed")
         steps.append(DeleteStep("dialogue_anonymize", False))
+
+    # Step 7 — карточки C04 (DRF-1772, К-3). Запись Recommendation несёт
+    # слова человека (причины и факты, из которых они собраны); по D7 сама
+    # строка остаётся tombstone для attribution (B13), слова обнуляются.
+    # Свой шаг, а не хвост шага 6: у него свой предмет и своё имя в отчёте.
+    from apps.recommendation.erasure import anonymize_recommendations
+
+    try:
+        anonymize_recommendations(_person_shell_ids(bot_user, link))
+        steps.append(
+            DeleteStep("recommendation_erase", True, "own_row_only" if link.conflict else "")
+        )
+    except Exception:  # noqa: BLE001 — per-step isolation, reported below
+        logger.exception("identity.privacy.recommendation_erase_failed")
+        steps.append(DeleteStep("recommendation_erase", False))
 
     result = DeleteCascadeResult(steps=tuple(steps))
     # Audit: actor + scope only — never the deleted values (C5 §6.2).

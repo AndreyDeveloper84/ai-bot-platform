@@ -74,13 +74,30 @@ class _State:
 
 
 def _document(state: _State) -> dict[str, Any]:
+    """Ответ подделки — В ТОЙ ЖЕ ФОРМЕ, в какой отвечает Ayla.
+
+    Форма выписана из кода каталога, не из памяти:
+
+    * конверт ``{"data": …}`` — `users/response.py::success_response`,
+      через который идут все семь успешных выходов `goals/api.py`;
+      ``meta`` у целей не передаётся нигде;
+    * ``version: 2`` и ключ ``next`` — `goals/decision_context.py:270-278`.
+
+    Раньше здесь стоял документ БЕЗ конверта и с ``version: 1``. Именно
+    поэтому дефект конверта дожил до пилота: подделка и проверки сходились
+    друг с другом, потому что обе стороны построил один автор, — а с живой
+    Ayla не сходился ни один из четырёх читателей документа.
+    """
     goal = state.stored_goal
     return {
-        "version": 1,
-        "known": {"goal": goal},
-        "missing": [] if goal else [{"kind": "goal", "prompt": "Что хочешь изменить?"}],
-        "suggestions": [{"key": "relax", "label": "Расслабиться"}],
-        "intents": [],
+        "data": {
+            "version": 2,
+            "known": {"goal": goal},
+            "missing": [] if goal else [{"kind": "goal", "prompt": "Что хочешь изменить?"}],
+            "suggestions": [{"key": "relax", "label": "Расслабиться"}],
+            "intents": [],
+            "next": None,
+        }
     }
 
 
@@ -357,3 +374,78 @@ class TestTimeoutBudgetIsSplit:
         делить одно число: на пилоте их стоимости отличаются в ~80 раз."""
         assert gc.CONNECT_TIMEOUT_S != gc.READ_TIMEOUT_S
         assert gc.CONNECT_TIMEOUT_S >= 4.0, "холодное рукопожатие измерено в 3.77 s"
+
+
+class TestTheEnvelopeIsRemovedAtTheSeam:
+    """Дефект конверта: Ayla заворачивает, бот читал с корня.
+
+    Проверка идёт НА СТЫКЕ — настоящий клиент против настоящего читателя, —
+    а не на рукотворном словаре. Именно плоские фикстуры, где обе стороны
+    построил один автор, и дали дефекту дожить до пилота: у трёх живых
+    людей цель есть, а четыре читателя видели пустоту.
+    """
+
+    def test_client_returns_the_document_not_the_envelope(self, ayla: _State) -> None:
+        ayla.stored_goal = {"goal_key": "relax", "goal_text": "Расслабиться"}
+
+        document = fetch_decision_context(external_user_id=EXT_USER)
+
+        # Положительная стража прежде отрицания: документ настоящий и
+        # непустой. Без неё «в ответе нет ключа data» зеленело бы и на
+        # пустом словаре, то есть на сломанном клиенте.
+        assert document["version"] == 2
+        assert document["known"]["goal"]["goal_key"] == "relax"
+        assert "data" not in document, (
+            "конверт обязан сниматься на границе, а не доезжать до читателей"
+        )
+
+    def test_the_nutrition_coach_reader_sees_the_goal(self, ayla: _State) -> None:
+        """Тот самый читатель, который на пилоте отдавал None.
+
+        Берётся НАСТОЯЩАЯ функция коуча, а не её пересказ: предмет здесь —
+        стык двух модулей, и доказательством может быть только замер на
+        стыке.
+        """
+        from apps.nutrition_coach.goals import _goal_from_document
+
+        ayla.stored_goal = {"goal_key": "skin_care", "goal_text": "Кожа"}
+
+        goal = _goal_from_document(fetch_decision_context(external_user_id=EXT_USER))
+
+        assert goal is not None, "цель есть у человека, но читатель её не увидел"
+        assert goal.key == "skin_care"
+
+    def test_the_goals_dashboard_reader_sees_the_goal(self, ayla: _State) -> None:
+        """Второй пострадавший читатель — экран «Сегодня»."""
+        from django.utils import timezone
+
+        from apps.miniapp_api.views import _active_goals_from_context
+
+        ayla.stored_goal = {
+            "goal_key": "relax",
+            "goal_text": "Расслабиться",
+            "selected_at": "2026-09-01T10:00:00+00:00",
+        }
+
+        goals = _active_goals_from_context(
+            fetch_decision_context(external_user_id=EXT_USER),
+            now=timezone.now(),
+        )
+
+        assert goals, "у человека есть цель, а дашборд показал пустой список"
+
+    def test_a_body_without_the_envelope_is_named_not_swallowed(
+        self, ayla: _State, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Пропасть молча — это и есть механизм, которым дефект дожил.
+
+        Тело без ``data`` не должно ехать дальше как документ: читатель
+        получит словарь, прочитает ``known`` → ``None`` и не пожалуется.
+        """
+        monkeypatch.setattr(
+            "apps.integrations.ayla.tests.test_goals_client_cold_path._document",
+            lambda state: {"version": 2, "known": {"goal": None}},
+        )
+
+        with pytest.raises(GoalsUnavailable, match="no data envelope"):
+            fetch_decision_context(external_user_id=EXT_USER)

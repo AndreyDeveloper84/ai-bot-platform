@@ -32,14 +32,25 @@ from apps.identity.services.memory_reader import GreenFact, PersonalContextView
 # content-based renderers below; keys without either fall back to a stored
 # `display` string or are skipped, so an unrenderable fact is never surfaced
 # as raw JSON.
+#
+# Второе лицо (DRF-1292, решение владельца 20.09): каждая фраза стоит после
+# «Помню, что ты …» в чате, «Запомнила: ты …» в анонсе и в списке экрана
+# «Что Ayla помнит» — одна фраза, три места, одинаково. До 20.09 банк был в
+# третьем лице («придерживается»), и чат говорил «помню, что ты придерживается».
 _DIET_PHRASES = {
-    "vegan": "придерживается веганского питания",
-    "vegetarian": "придерживается вегетарианского питания",
-    "keto": "придерживается кето-диеты",
-    "halal": "ест халяль",
-    "kosher": "ест кошерное",
+    "vegan": "придерживаешься веганского питания",
+    "vegetarian": "придерживаешься вегетарианского питания",
+    "keto": "придерживаешься кето-диеты",
+    "halal": "ешь халяль",
+    "kosher": "ешь кошерное",
     # «я теперь снова ем мясо» — the correction row itself is shown honestly.
-    "none": "больше не называет ограничений по питанию",
+    "none": "больше не называешь ограничений по питанию",
+    # DRF-2398: без этих двух локальная строка со значением словаря молча НЕ
+    # показывалась бы — человек не увидел бы, что про него помнят, и не смог
+    # бы это забыть. Слова те же, что в банке ниже: второй формулировки об
+    # одном и том же не заводим (видимый текст утверждает владелец).
+    "omnivore": "ешь всё",
+    "other": "называешь особое питание",
 }
 
 _FACT_RENDERERS = {
@@ -65,11 +76,11 @@ def _fmt_amount(raw: str) -> str:
 def _price_phrase(content: dict) -> str | None:
     lo, hi = content.get("min"), content.get("max")
     if isinstance(lo, str) and lo and isinstance(hi, str) and hi:
-        return f"ориентируется на бюджет от {_fmt_amount(lo)} до {_fmt_amount(hi)} ₽"
+        return f"ориентируешься на бюджет от {_fmt_amount(lo)} до {_fmt_amount(hi)} ₽"
     if isinstance(hi, str) and hi:
-        return f"ориентируется на бюджет до {_fmt_amount(hi)} ₽"
+        return f"ориентируешься на бюджет до {_fmt_amount(hi)} ₽"
     if isinstance(lo, str) and lo:
-        return f"ориентируется на бюджет от {_fmt_amount(lo)} ₽"
+        return f"ориентируешься на бюджет от {_fmt_amount(lo)} ₽"
     return None
 
 
@@ -79,14 +90,14 @@ def _render_by_key(key: str, content: dict) -> str | None:
     value = content.get("value")
     if key == "preferred_time_slots" and isinstance(value, str):
         phrase = _SLOT_PHRASES.get(value)
-        return f"предпочитает время: {phrase}" if phrase else None
+        return f"предпочитаешь время: {phrase}" if phrase else None
     if key == "preferred_districts" and isinstance(value, str) and value:
         # Verbatim as stated (may be inflected) — quoted, never «corrected».
-        return f"предпочитает район «{value}»"
+        return f"предпочитаешь район «{value}»"
     if key == "price_range":
         return _price_phrase(content)
     if key == "favorite_masters" and isinstance(value, str) and value:
-        return f"называет любимым мастером «{value}»"
+        return f"называешь любимым мастером «{value}»"
     return None
 
 
@@ -95,13 +106,13 @@ def _render_by_key(key: str, content: dict) -> str | None:
 # rows (silent-remember ruling 2026-08-23: the show/forget loop is what
 # justifies remembering without asking).
 _DECLARED_DIET_PHRASES = {
-    "omnivore": "ест всё",
+    "omnivore": _DIET_PHRASES["omnivore"],
     "vegetarian": _DIET_PHRASES["vegetarian"],
     "vegan": _DIET_PHRASES["vegan"],
     "keto": _DIET_PHRASES["keto"],
     "halal": _DIET_PHRASES["halal"],
     "kosher": _DIET_PHRASES["kosher"],
-    "other": "называет особое питание",
+    "other": _DIET_PHRASES["other"],
 }
 
 
@@ -126,13 +137,13 @@ def describe_declared_prefs(context: dict) -> dict[str, str]:
     if isinstance(slots, list):
         labels = [_SLOT_PHRASES[s] for s in slots if s in _SLOT_PHRASES]
         if labels:
-            out["preferred_time_slots"] = "предпочитает время: " + ", ".join(labels)
+            out["preferred_time_slots"] = "предпочитаешь время: " + ", ".join(labels)
 
     districts = context.get("preferred_districts")
     if isinstance(districts, list):
         names = [d for d in districts if isinstance(d, str) and d]
         if names:
-            out["preferred_districts"] = "предпочитает районы: " + ", ".join(
+            out["preferred_districts"] = "предпочитаешь районы: " + ", ".join(
                 f"«{d}»" for d in names
             )
 
@@ -177,6 +188,35 @@ def describe_green_content(content: dict) -> str | None:
     return None
 
 
+# Scanner-correction keys (DRF-1454) are read where they belong — the scanner
+# card, through ``apps.orchestrator.memory.food.recall_corrections``. They
+# must not ALSO ride every concierge prompt: up to 20 dishes' worth of phrases
+# like «блюдо «борщ» называет «борщ по-домашнему»» in every conversation,
+# including ones with no food in them (review DRF-1454 — found independently by
+# two axes). The exclusion also closes the rollback hole: accumulated rows kept
+# rendering after FOOD_SCANNER_MEMORY_ENABLED was flipped off. They stay visible
+# in «покажи, что помнишь» — that surface is the person's; this one is the
+# model's.
+#
+# Only ``food_dish_name:`` is written today (owner decision 2026-09-04, variant
+# А — see ``food_memory.REMEMBERED_FIELDS``). The portion and macros prefixes
+# stay listed as guards: whichever of them DRF-825 revives must be excluded from
+# the prompt on the day it appears, not on the day somebody notices.
+_PROMPT_EXCLUDED_KEY_PREFIXES = ("food_portion:", "food_dish_name:", "food_macros:")
+
+
+def _prompt_visible(fact: GreenFact) -> bool:
+    """May this fact ride the concierge system prompt?"""
+
+    content = fact.content if isinstance(fact.content, dict) else {}
+    key = content.get("key")
+    # Память сказанного (said_memory) идёт в промпт своим блоком с правилом
+    # «предложи подтвердить»; здесь она была бы вторым, голым утверждением.
+    if key in ("city", "visit_context"):
+        return False
+    return not (isinstance(key, str) and key.startswith(_PROMPT_EXCLUDED_KEY_PREFIXES))
+
+
 def _render_fact(fact: GreenFact) -> str | None:
     """Render one green fact to a phrase, or None if it can't be phrased."""
 
@@ -192,27 +232,37 @@ def render_personal_context(view: PersonalContextView) -> str | None:
     parts: list[str] = []
     derived: list[str] = []
     if view.summary:
-        # Происхождение summary не хранится ни в каком виде — оставляем его
-        # там, где оно было. Это осознанный долг, а не недосмотр: тащить
-        # сюда «неизвестно» без источника было бы догадкой о догадке.
-        parts.append(view.summary.strip())
+        # Происхождение summary не хранится ни в каком виде, но его ПРИРОДА
+        # записана: проза «кто этот человек» — вывод по определению
+        # (POLICY_DEBT, apps/identity/personal_fields.py). Здесь она стояла в
+        # группе сказанного, то есть модель получила бы вывод как слова
+        # клиента. Место ей — среди выведенного; без «возможно, ты» — это
+        # свободный текст, а не фраза банка. Писателя у поля нет (DRF-2526). DRF-2548.
+        derived.append(view.summary.strip())
     for fact in view.green_facts:
+        if not _prompt_visible(fact):
+            continue
         phrase = _render_fact(fact)
         if not phrase:
             continue
+        # Фразы банка — во 2-м лице (DRF-1292); «ты …» ставится здесь, чтобы
+        # summary (свободный текст) остался как есть.
         if fact.source == MemoryEntry.SOURCE_EXPLICIT:
-            parts.append(phrase)
+            parts.append(f"ты {phrase}")
         else:
-            derived.append(phrase)
+            derived.append(f"возможно, ты {phrase}")
 
     if not parts and not derived:
         return None
 
     if parts:
+        # Фразы — во 2-м лице, как сказать самому клиенту (DRF-1292): рамка
+        # называет это прямо, чтобы «ты …» модель читала как обращение к нему,
+        # а не к себе.
         block = (
-            "Что ты уже знаешь об этом клиенте (используй естественно и только когда "
-            "уместно — например «помню, что ты…»; НЕ перечисляй списком и НЕ "
-            f"придумывай ничего сверх этого): {'; '.join(parts)}."
+            "Что ты уже знаешь об этом клиенте — в форме обращения к нему, повторяй "
+            "естественно и только когда уместно, например «помню, что ты…»; НЕ "
+            f"перечисляй списком и НЕ придумывай ничего сверх этого: {'; '.join(parts)}."
         )
     else:
         block = ""

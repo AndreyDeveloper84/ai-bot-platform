@@ -64,7 +64,10 @@ from typing import Any
 import httpx
 from django.conf import settings
 
+from apps.integrations.ayla.health_check import HEALTH_CHECK_CODES
+from apps.integrations.ayla.offer_refusal import reason_from_refusal
 from apps.integrations.ayla.url_builder import AylaUrlBuilder
+from apps.integrations.ayla.request_id import with_request_id
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +75,21 @@ DEFAULT_TIMEOUT_S = 10.0
 
 
 class SalonAPIError(Exception):
-    """Base for every salon-surface failure."""
+    """Base for every salon-surface failure.
+
+    Carries Ayla's machine-readable ``code`` alongside the human detail.
+    Before DRF-1614 the code was computed in :meth:`_raise_for_status` and
+    then dropped on the floor for every branch that did not immediately
+    read it — so a caller that needed to tell two same-status refusals
+    apart had nothing but prose to go on, two levels before the log line
+    that was supposed to distinguish them. Empty string means Ayla sent
+    no code, which is not the same as a code we do not recognise.
+    """
+
+    def __init__(self, detail: str = "", *, code: str = "", handoff: bool | None = None) -> None:
+        super().__init__(detail)
+        self.code = code
+        self.handoff = handoff
 
 
 class SalonNotConfigured(SalonAPIError):
@@ -131,6 +148,43 @@ class SalonNotAllowed(SalonAPIError):
     A finished visit cannot be cancelled and a cancelled one cannot be
     moved. Not a rights problem (403) and not a race (409): no retry and
     no other actor changes the answer.
+    """
+
+
+class SalonOfferNotSellable(SalonNotAllowed):
+    """422 ``SERVICE_NOT_ACTIVE`` с ``details.reason`` — каталог не продаёт предложение.
+
+    DRF-1989. Подкласс :class:`SalonNotAllowed`: смысл тот же — «так нельзя,
+    кто бы ни просил», — но у отказа есть причина, и администратору её
+    говорят. Безымянный ``SERVICE_NOT_ACTIVE`` остаётся ``SalonNotAllowed``.
+    """
+
+    def __init__(self, detail: str = "", *, code: str = "", reason: str) -> None:
+        super().__init__(detail, code=code)
+        self.reason = reason
+
+
+class SalonHealthCheckHandoff(SalonAPIError):
+    """422 ``HEALTH_CHECK_*`` — a medical decision, not a broken server.
+
+    Shares a status code with :class:`SalonNotAllowed` and means something
+    entirely different, exactly as :class:`SalonStaleVersion` does with
+    :class:`SalonSlotTaken` on 409. «This booking's state forbids it»
+    sends the receptionist to look at the visit; «this service needs
+    screening first» sends the request to a human who can ask the
+    questions. Only ``code`` separates them, so it is read rather than
+    collapsed.
+
+    Left inside :class:`SalonAPIError`'s catch-all it surfaced as
+    ``outcome="failed"`` with HTTP 502 — a deliberate refusal rendered to
+    the salon administrator as a server outage, which is the one reading
+    that makes somebody call support about a working system.
+
+    ``code`` keeps the exact one of the three (DRF-1614). The person sees
+    one sentence; the log has to know which code produced the handoff,
+    because the service-annotation queue is prioritised by the count of
+    ``HEALTH_CHECK_UNKNOWN`` and a merged counter leaves it without a
+    criterion.
     """
 
 
@@ -197,13 +251,15 @@ class AylaSalonClient:
         and no route that silently forgets it.
         """
 
-        headers = {
-            "Authorization": f"Bearer {self._token}",
-            "X-External-User-ID": actor_external_id,
-            "X-Tenant": tenant_slug,
-            "X-App-Type": "pro",
-            "Accept": "application/json",
-        }
+        headers = with_request_id(
+            {
+                "Authorization": f"Bearer {self._token}",
+                "X-External-User-ID": actor_external_id,
+                "X-Tenant": tenant_slug,
+                "X-App-Type": "pro",
+                "Accept": "application/json",
+            }
+        )
         # Reads carry no idempotency key: there is nothing to de-duplicate,
         # and sending one would suggest to the reader that there is.
         if idempotency_key:
@@ -247,6 +303,161 @@ class AylaSalonClient:
         self._raise_for_status(resp)
         raise SalonAPIError("unreachable")  # pragma: no cover — _raise_for_status always raises
 
+    # ── Writes as the PERSON (DRF-2607) ─────────────────────────────────────
+
+    @staticmethod
+    def _person_headers(*, person_token: str, tenant_slug: str) -> dict[str, str]:
+        """The administrator's own token — and nothing of the service's.
+
+        No ``X-External-User-ID``: the token already says who, and a second
+        claim beside it would be a second answer to the same question. No
+        service Bearer: with it, Ayla's ``ServiceCredentialIsReadOnly`` would
+        refuse the write anyway — but the point is that it is not there to
+        refuse.
+        """
+
+        return with_request_id(
+            {
+                "Authorization": f"Bearer {person_token}",
+                "X-Tenant": tenant_slug,
+                "X-App-Type": "pro",
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            }
+        )
+
+    def _send_as_person(
+        self,
+        method: str,
+        endpoint: str,
+        *,
+        person_token: str,
+        tenant_slug: str,
+        json_body: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """One write on the person's token. Without a token — refused here,
+        never re-sent under the service credential."""
+
+        _require_tenant(tenant_slug)
+        if not person_token:
+            raise SalonForbidden("no person token — a salon write is not made on the service key")
+        url = self._urls.build(f"tenants/me/{endpoint.lstrip('/')}")
+        try:
+            with httpx.Client(timeout=self._timeout_s, transport=self._transport) as http:
+                resp = http.request(
+                    method,
+                    url,
+                    headers=self._person_headers(
+                        person_token=person_token, tenant_slug=tenant_slug
+                    ),
+                    json=json_body,
+                )
+        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+            logger.warning("salon_client.%s.network err=%s", endpoint, type(exc).__name__)
+            raise SalonUnavailable(f"network: {type(exc).__name__}") from exc
+
+        if resp.status_code == 204:
+            return {}
+        if resp.status_code in (200, 201):
+            try:
+                return resp.json()
+            except ValueError as exc:
+                raise SalonUnavailable("upstream returned non-JSON on success") from exc
+        self._raise_for_status(resp)
+        raise SalonAPIError("unreachable")  # pragma: no cover — _raise_for_status always raises
+
+    def create_time_off(
+        self,
+        *,
+        person_token: str,
+        tenant_slug: str,
+        specialist_id: str,
+        start_at: str,
+        end_at: str,
+        reason: str = "",
+    ) -> dict[str, Any]:
+        """``POST tenants/me/masters/{specialist_id}/time-off/`` as the person.
+
+        Without ``resolutions``: Ayla refuses with 409 ``HAS_ACTIVE_APPOINTMENTS``
+        when live bookings sit in the period — nobody strands a booked client
+        by accident. Settling the displaced bookings in the same write is a
+        separate step, not opened here.
+        """
+
+        _require_id(specialist_id, field="specialist_id")
+        if not start_at or not end_at:
+            raise SalonValidationError("start_at and end_at are both required")
+        return self._send_as_person(
+            "POST",
+            f"masters/{specialist_id}/time-off/",
+            person_token=person_token,
+            tenant_slug=tenant_slug,
+            json_body={"start_at": start_at, "end_at": end_at, "reason": reason},
+        )
+
+    def delete_time_off(
+        self, *, person_token: str, tenant_slug: str, specialist_id: str, time_off_id: str
+    ) -> dict[str, Any]:
+        """``DELETE tenants/me/masters/{specialist_id}/time-off/{pk}/`` as the person."""
+
+        _require_id(specialist_id, field="specialist_id")
+        _require_id(time_off_id, field="time_off_id")
+        return self._send_as_person(
+            "DELETE",
+            f"masters/{specialist_id}/time-off/{time_off_id}/",
+            person_token=person_token,
+            tenant_slug=tenant_slug,
+        )
+
+    def set_schedule_exception(
+        self,
+        *,
+        person_token: str,
+        tenant_slug: str,
+        specialist_id: str,
+        date: str,
+        is_working_day: bool,
+        start_time: str | None = None,
+        end_time: str | None = None,
+        note: str = "",
+    ) -> dict[str, Any]:
+        """``PUT tenants/me/masters/{specialist_id}/schedule-exceptions/`` as the person.
+
+        One row per (master, date): «не работаю» on a date, or other hours on
+        it. Ayla refuses a shrink that would strand a booking (409).
+        """
+
+        _require_id(specialist_id, field="specialist_id")
+        body: dict[str, Any] = {
+            "date": _require_iso_date(date, field="date"),
+            "is_working_day": bool(is_working_day),
+            "note": note,
+        }
+        if is_working_day:
+            body["start_time"] = start_time
+            body["end_time"] = end_time
+        return self._send_as_person(
+            "PUT",
+            f"masters/{specialist_id}/schedule-exceptions/",
+            person_token=person_token,
+            tenant_slug=tenant_slug,
+            json_body=body,
+        )
+
+    def delete_schedule_exception(
+        self, *, person_token: str, tenant_slug: str, specialist_id: str, date: str
+    ) -> dict[str, Any]:
+        """``DELETE …/schedule-exceptions/{date}/`` as the person — back to the weekly template."""
+
+        _require_id(specialist_id, field="specialist_id")
+        day = _require_iso_date(date, field="date")
+        return self._send_as_person(
+            "DELETE",
+            f"masters/{specialist_id}/schedule-exceptions/{day}/",
+            person_token=person_token,
+            tenant_slug=tenant_slug,
+        )
+
     @staticmethod
     def _raise_for_status(resp: httpx.Response) -> None:
         """Turn a non-2xx into the exception that says what to do about it.
@@ -284,7 +495,17 @@ class AylaSalonClient:
                 raise SalonNotAllowed(detail)
             raise SalonSlotTaken(detail)
         if resp.status_code == 422:
-            raise SalonNotAllowed(detail)
+            # Same split as 409 above: one status, two meanings, and the
+            # code is the only thing that separates them. Unknown 422s
+            # stay «the booking's state forbids this» — the pre-DRF-1614
+            # meaning — because guessing «needs screening» would promise
+            # a consultation nobody is going to give.
+            if code in HEALTH_CHECK_CODES:
+                raise SalonHealthCheckHandoff(detail, code=code, handoff=_error_handoff(resp))
+            offer_reason = reason_from_refusal(code, _error_details(resp))
+            if offer_reason is not None:
+                raise SalonOfferNotSellable(detail, code=code, reason=offer_reason)
+            raise SalonNotAllowed(detail, code=code)
         if resp.status_code >= 500:
             raise SalonUnavailable(f"upstream {resp.status_code}: {detail}")
         raise SalonAPIError(f"unexpected {resp.status_code}: {detail}")
@@ -522,6 +743,39 @@ class AylaSalonClient:
             f"appointments/{appointment_id}/complete/",
             actor_external_id=actor_external_id,
             idempotency_key=f"complete:{appointment_id}:{expected_version}",
+            tenant_slug=tenant_slug,
+            json_body={"expected_version": expected_version},
+        )
+
+    def mark_no_show(
+        self,
+        *,
+        actor_external_id: str,
+        tenant_slug: str,
+        appointment_id: str,
+        expected_version: int,
+    ) -> dict[str, Any]:
+        """«Не пришёл» (DRF-1851). Same version rule as :meth:`complete_appointment`.
+
+        Ayla runs the state machine (``CONFIRMED → NO_SHOW``; a completed or
+        cancelled visit is refused) and emits ``booking.cancelled`` with
+        ``reason_code="user_no_show"`` — the mirror flips from that event, not
+        from this response.
+        """
+
+        if not tenant_slug:
+            raise SalonValidationError("tenant_slug is required")
+        if not appointment_id:
+            raise SalonValidationError("appointment_id is required")
+        if isinstance(expected_version, bool) or not isinstance(expected_version, int):
+            raise SalonValidationError("expected_version must be a positive integer")
+        if expected_version < 1:
+            raise SalonValidationError("expected_version must be a positive integer")
+
+        return self._post(
+            f"appointments/{appointment_id}/no-show/",
+            actor_external_id=actor_external_id,
+            idempotency_key=f"no-show:{appointment_id}:{expected_version}",
             tenant_slug=tenant_slug,
             json_body={"expected_version": expected_version},
         )
@@ -907,6 +1161,33 @@ def _error_code(resp: httpx.Response) -> str:
         if isinstance(err, dict):
             return str(err.get("code") or "")
     return ""
+
+
+def _error_details(resp: httpx.Response) -> dict[str, Any] | None:
+    """Ayla's ``error.details`` as sent, or None when absent (DRF-1989)."""
+
+    try:
+        details = (resp.json().get("error") or {}).get("details")
+    except (ValueError, AttributeError):
+        return None
+    return details if isinstance(details, dict) else None
+
+
+def _error_handoff(resp: httpx.Response) -> bool | None:
+    """Ayla's ``error.details.handoff``, or None when the field is absent.
+
+    Read, never derived. The catalog declares this boolean precisely so a
+    surface does not decide «will somebody call this person» by taking
+    the code string apart. ``None`` is a third state: the field was not
+    sent, which is not Ayla saying «no».
+    """
+
+    try:
+        details = ((resp.json().get("error") or {}).get("details")) or {}
+        value = details.get("handoff")
+    except (ValueError, AttributeError):
+        return None
+    return value if isinstance(value, bool) else None
 
 
 def _detail(resp: httpx.Response) -> str:

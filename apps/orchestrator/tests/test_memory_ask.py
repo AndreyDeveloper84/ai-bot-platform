@@ -153,7 +153,8 @@ class TestAnswer:
     def test_acceptance_flow_answer_patches_memory(
         self, monkeypatch, conversation, bot_user
     ) -> None:
-        """Сквозной сценарий: вопрос задан → ответ → PATCH (source: conversational)."""
+        """Сквозной сценарий: вопрос задан → ответ → PATCH (source: explicit —
+        слова человека, DRF-2397)."""
         self._ask(
             monkeypatch,
             bot_user,
@@ -170,7 +171,7 @@ class TestAnswer:
         assert "Записала" in out.text
         patch.assert_called_once_with(
             bot_user,
-            [{"field": "preferred_time_slots", "value": ["evening"], "source": "conversational"}],
+            [{"field": "preferred_time_slots", "value": ["evening"], "source": "explicit"}],
         )
         assert read_pending(conversation.id) is None
 
@@ -286,3 +287,64 @@ class TestRollbackFlag:
         monkeypatch.setattr(memory_ask, "patch_declared_prefs", patch)
         assert try_handle_answer(conversation, bot_user, "я веган") is None
         patch.assert_not_called()
+
+
+class TestAnswerIsThePersonsOwnWord:
+    """Ответ на прямой вопрос — слова человека, а не наш вывод (DRF-2397).
+
+    Происхождение — одна граница: «сказал сам» против «вывели». Перечень
+    стороны «сказал сам» живёт в ``apps/orchestrator/memory/food.py``
+    (``STATED_SOURCES``: значение библиотеки, пока пин её не отдаёт — тот же
+    набор буквами); ``conversational`` в него не входит, то есть означает
+    «не слова клиента». Этот поток спрашивает человека и записывает ЕГО
+    ответ, поэтому пометка выводов здесь ложь — и не безобидная, её читают
+    трое:
+
+    * движок молчания каталога (правило 5) не считает ответ ответом и
+      задаёт тот же вопрос снова;
+    * подсказка модели помечает ответ как «вывод, клиент этого не
+      говорил» — прямая ложь о словах человека;
+    * ночная инференция каталога вправе перезаписать не-субъектное поле
+      догадкой из истории броней, а ``busy_days`` человек называет и
+      здесь — то есть названный ответ молча заменялся догадкой.
+
+    Мы правим сторону, которая врёт (пишущую), а не трёх читателей.
+    """
+
+    @pytest.mark.parametrize(
+        ("field", "text", "value"),
+        [
+            ("diet_type", "я веган", "vegan"),
+            # busy_days — единственное поле, которое СПРАШИВАЕТ БОТ и при этом
+            # выводит каталог из истории броней (`favorite_masters` каталог
+            # тоже выводит, но бот его не спрашивает — `_FIELD_PARSERS` его не
+            # знает). На нём пометка решала, переживёт ли ответ ночь.
+            ("busy_days", "по субботам занято", ["sat"]),
+        ],
+    )
+    def test_the_answer_is_written_as_stated(
+        self, monkeypatch, conversation, bot_user, field, text, value
+    ) -> None:
+        memory_ask._write_pending(conversation.id, {"field": field, "hint": "h"})
+        patch = Mock(return_value=SimpleNamespace(status=memory_ask.GateStatus.OK))
+        monkeypatch.setattr(memory_ask, "patch_declared_prefs", patch)
+
+        try_handle_answer(conversation, bot_user, text)
+
+        # Буква провода: каталог принимает ровно `explicit`
+        # (`users/internal_personal_context_api.py`, `_SOURCE_CHOICES`).
+        patch.assert_called_once_with(
+            bot_user, [{"field": field, "value": value, "source": "explicit"}]
+        )
+
+    def test_the_written_label_means_the_person_said_it(self) -> None:
+        """Смысл пометки, а не её буква: значение константы, которой помечает
+        запись этот поток, должно лежать на стороне «сказал сам». Краснеет на
+        `conversational` и на любой другой пометке выводов, включая опечатку.
+
+        Сам вызов записи узел не трогает — за буквой на проводе следит
+        равенство в узле выше; подменённую на литерал константу поймает оно,
+        а не этот узел."""
+        from apps.orchestrator.memory.food import STATED_SOURCES
+
+        assert memory_ask.BACKEND_STATED_SOURCE in STATED_SOURCES

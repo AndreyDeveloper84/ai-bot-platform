@@ -13,22 +13,36 @@
  * apps/miniapp_api/auth.verify_init_data.
  */
 
-import { getInitData } from "./max-sdk";
+import { applyIdentityHeaders } from "./auth-headers";
 import { ApiError } from "./api";
-import { applyDevBypassHeaders } from "./dev-bypass";
 
 const MASTER_API_BASE = "/api/v1/master";
 
 interface ErrorBody {
   error: string;
   detail: string;
+  /**
+   * Структурные подробности отказа, когда сервер их шлёт. Третий клиент,
+   * который узнаёт об этом поле: `api.ts` его поднимал с DRF-1708,
+   * `admin-api.ts` — с DRF-2273, а мастерский ронял до DRF-2373.
+   *
+   * Цена потери была не косметическая: сервер начинал что-то говорить в
+   * `details`, а на мастерском экране этого просто не существовало —
+   * правка «работала» в виде и не доезжала наружу. Здесь по этому каналу
+   * едет `retriable` — жив ли талон подтверждения.
+   *
+   * Остальные места этого файла поле ещё роняют; они перечислены числом в
+   * `tools/lint/api_error_details_allow.txt` и ждут своего листа.
+   */
+  details?: Record<string, unknown>;
 }
 
-export async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
-  const initData = getInitData();
+export async function request<T>(
+  path: string,
+  init: RequestInit = {},
+): Promise<T> {
   const headers = new Headers(init.headers);
-  if (initData) headers.set("Authorization", `MaxInitData ${initData}`);
-  applyDevBypassHeaders(headers);
+  applyIdentityHeaders(headers);
   // Don't auto-set Content-Type for FormData (the browser writes the
   // boundary string). JSON callers explicitly set it.
   const body = init.body;
@@ -46,7 +60,7 @@ export async function request<T>(path: string, init: RequestInit = {}): Promise<
     } catch {
       /* non-JSON 5xx */
     }
-    throw new ApiError(res.status, parsed.error, parsed.detail);
+    throw new ApiError(res.status, parsed.error, parsed.detail, parsed.details);
   }
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
@@ -131,6 +145,20 @@ export interface DashboardNextVisit {
   duration_min: number;
   is_returning_customer: boolean;
   customer_intent_hint: string;
+  /** DRF-2152 — начало–конец и «до визита N мин» с сервера; экран не тикает. */
+  end_at: string; // ISO
+  minutes_until: number;
+}
+
+/** DRF-2152 — запись дня после ближайшей. Набор полей закрыт макетом DRF-1182:
+ * имя, услуга, время — без телефона/цены/оплаты/источника. */
+export interface DashboardUpcomingVisit {
+  booking_id: string;
+  client_first_name: string;
+  client_last_initial: string;
+  service_name: string;
+  visit_at: string; // ISO
+  end_at: string; // ISO
 }
 
 export type SlaTier = "red" | "yellow" | "white";
@@ -151,6 +179,17 @@ export interface DashboardTodaySummary {
   next_free_window: { start: string; end: string } | null;
 }
 
+/** DRF-1846 — календарная неделя в поясе салона. Числа только от сервера;
+ * `rating` — `null`, пока за оценкой нет ни одного отзыва. Выручки нет:
+ * у зеркала броней нет цены. */
+export interface DashboardWeekSummary {
+  week_start: string; // YYYY-MM-DD, понедельник
+  week_end: string; // YYYY-MM-DD, воскресенье
+  bookings: number;
+  completed: number;
+  rating: { value: number; review_count: number } | null;
+}
+
 export interface DashboardTabBadges {
   conversations_unread: number;
   schedule_has_pending_change: boolean;
@@ -160,6 +199,17 @@ export interface DashboardTabBadges {
 export interface DashboardStatesFlags {
   is_day_done: boolean;
   is_offline_safe_response: boolean;
+  /** DRF-2152: true — выходной (рамка дня прочитана, блока нет); false —
+   * рабочий день; null — рамка не прочитана (каталог не ответил): «не знаю»
+   * ≠ «выходной» (DRF-1111), экран говорит «не удалось проверить». */
+  day_off: boolean | null;
+  /** DRF-2200: задан ли недельный график ВООБЩЕ. `day_off` про сегодня, а
+   * это — про то, есть ли у мастера часы: «часы не заданы» и «сегодня
+   * выходной» — разные слова и разные двери (макет DRF-1186). null — рамка
+   * не прочитана: «не знаю», как и у `day_off`. Поле необязательное: Mini
+   * App обновляется отдельно от бэкенда, и от сервера без М-7 оно просто не
+   * придёт — экран читает это как «не знаю», а не как «часов нет». */
+  hours_set?: boolean | null;
 }
 
 export interface DashboardResponse {
@@ -168,10 +218,12 @@ export interface DashboardResponse {
   now_iso: string;
   active_visit: DashboardActiveVisit | null;
   next_visit: DashboardNextVisit | null;
+  upcoming_today: DashboardUpcomingVisit[];
   inbox_preview: DashboardInboxItem[];
   today_summary: DashboardTodaySummary;
   tab_badges: DashboardTabBadges;
   states: DashboardStatesFlags;
+  week_summary: DashboardWeekSummary;
 }
 
 // --- endpoints -------------------------------------------------------------
@@ -215,6 +267,58 @@ export const patchOnboardingProfile = (input: {
 export const getDashboard = (): Promise<DashboardResponse> =>
   request("/dashboard", { method: "GET" });
 
+// --- М-4 booking detail (DRF-2156) — контракт М-2 GET master/bookings/<uuid>
+// (DRF-2154, зафиксирован ayla-22 20.09). Экран «Детали записи» по макету
+// DRF-1185: постоянная часть (клиент, дата, время, услуга) + ОДИН контекстный
+// блок по `temporal_state`. Состояние считает СЕРВЕР по своим часам
+// (`checked_at`); `completed` — только по подтверждённому `status`, экран
+// ничего не переводит по часам устройства. На экран не выходят: телефон,
+// оплата, история, заметки (их в контракте и нет — DRF-1039).
+
+export type BookingTemporalState =
+  "upcoming" | "now" | "after" | "completed" | "unknown";
+
+/** Сырой статус зеркала Ayla. Экран смотрит только на cancelled/no_show. */
+export type MasterBookingStatus =
+  | "confirmed"
+  | "awaiting_payment"
+  | "pending_payment"
+  | "completed"
+  | "cancelled"
+  | "no_show"
+  | (string & {});
+
+export interface MasterBookingDetail {
+  /** Ayla appointment_id — тот же uuid, что booking_id в dashboard/schedule. */
+  id: string;
+  client: {
+    /** «Анна П.»; без bot_user — «Гость». */
+    name_initial: string;
+    /** Последний completed визит у этого мастера, YYYY-MM-DD; на экран М-4 не выходит. */
+    last_visit_date: string | null;
+  };
+  service: { id: string; name: string };
+  start_at: string; // ISO со смещением тенанта
+  end_at: string; // ISO со смещением тенанта
+  duration_min: number;
+  status: MasterBookingStatus;
+  temporal_state: BookingTemporalState;
+  /** Только для upcoming, по часам сервера; иначе null. */
+  minutes_until: number | null;
+  /** Часы сервера в tz тенанта — точка отсчёта для «Сегодня/Завтра». */
+  checked_at: string;
+}
+
+/** 404 `not_found` одним телом — и чужая, и несуществующая запись. */
+export const getMasterBooking = (
+  id: string,
+  opts: { signal?: AbortSignal } = {},
+): Promise<MasterBookingDetail> =>
+  request(`/bookings/${encodeURIComponent(id)}`, {
+    method: "GET",
+    signal: opts.signal,
+  });
+
 // --- M4 master profile (read-by-self + edit own bio/photo) --------------
 // Mirrors apps/master_api/views.py::me() + onboarding_profile() (PATCH).
 // Spec: docs/design/handoffs/2026-05-18-master-mobile-handoff.md §M4
@@ -257,6 +361,410 @@ export interface MasterMeResponse {
 export const getMasterMe = (): Promise<MasterMeResponse> =>
   request("/me", { method: "GET" });
 
+// --- M2/M15 onboarding readiness (DRF-1794 / DRF-1807) --------------------
+// Mirrors apps/master_api/services/onboarding_readiness.py. Проекция по
+// фактам: ничего не хранится, экран ничего не вычисляет — только рисует.
+
+export type ReadinessItemKey = "services" | "location" | "hours" | "profile";
+/**
+ * `done` / `missing` — факт; `unknown` — канон не ответил (`reason` — имя
+ * исключения): экран НЕ пишет «настройте», а показывает «не удалось
+ * прочитать»; `unavailable` — шага у мастера сейчас нет: либо возможности
+ * ещё нет (`capability_not_built`), либо он ведётся не в приложении
+ * (`managed_outside_app` — салонное рабочее пространство, DRF-2254). До
+ * DRF-2326 такой пункт не рисовался вовсе; теперь рисуется названным
+ * недоступным, с причиной и без тапа.
+ */
+export type ReadinessItemState = "done" | "missing" | "unknown" | "unavailable";
+
+export interface ReadinessItem {
+  key: ReadinessItemKey | string;
+  state: ReadinessItemState | string;
+  detail: Record<string, unknown>;
+  reason: string | null;
+  /** DRF-2254: `null` — вести некуда (пункт ведётся вне приложения, `managed_outside_app`). */
+  deep_link: string | null;
+}
+
+/** Связь личности — условие ПУБЛИКАЦИИ (ruling 6), не настройки. */
+export type IdentityState = "linked" | "pending" | "rejected" | "unlinked";
+
+export interface OnboardingReadiness {
+  ready: boolean;
+  blocking: string[];
+  items: ReadinessItem[];
+  identity: { state: IdentityState | string; link_status: string | null };
+  setup_state: "READY" | "SETUP_PENDING" | string;
+  sale_block: string | null;
+}
+
+export const getOnboardingReadiness = (): Promise<OnboardingReadiness> =>
+  request("/onboarding/readiness", { method: "GET" });
+
+// --- M24/M25 working hours (DRF-1816 / DRF-1817) ---------------------------
+// Mirrors apps/master_api/views.py::working_hours — a proxy to the catalog's
+// working-hours route. The response is the catalog's readback, never an echo.
+
+export interface WorkingHoursDay {
+  day_of_week: number; // 0 = Monday … 6 = Sunday
+  day_name?: string;
+  is_working_day: boolean;
+  start_time: string | null; // "HH:MM"
+  end_time: string | null;
+  break_start: string | null;
+  break_end: string | null;
+}
+
+export interface WorkingHoursResponse {
+  specialist_id: string | null;
+  timezone: string | null;
+  schedule: WorkingHoursDay[];
+  /** PUT only — §83: соло подтверждает своё расписание сразу после записи. */
+  schedule_confirmed?: boolean;
+}
+
+export const getWorkingHours = (): Promise<WorkingHoursResponse> =>
+  request("/working-hours", { method: "GET" });
+
+export const putWorkingHours = (
+  schedule: WorkingHoursDay[],
+): Promise<WorkingHoursResponse> =>
+  request("/working-hours", {
+    method: "PUT",
+    body: JSON.stringify({ schedule }),
+  });
+
+// --- M19 место работы (DRF-1811) -----------------------------------------------
+// Mirrors apps/master_api/views.py::service_locations / service_location_detail /
+// address_suggest — proxies to the catalog (M11 #502, M12 #476). The answer is
+// the catalog's readback: `shown_to_clients_after_publication` is the catalog's
+// word (CONFIRMED only), coordinates are null until geocoded.
+
+export type PlaceKind = "private_studio" | "salon_or_studio";
+export type PlaceStatus = "confirmed" | "review_required" | "inactive" | string;
+export type AreaCoverage = "whole_city" | "later";
+
+export interface ServicePlace {
+  id: string;
+  kind: PlaceKind | "";
+  label: string;
+  address: string;
+  city: string;
+  note_for_client: string;
+  status: PlaceStatus;
+  geocode_status: string;
+  latitude: string | null;
+  longitude: string | null;
+  shown_to_clients_after_publication: boolean;
+}
+
+export interface ServiceArea {
+  id: string;
+  kind: "mobile";
+  city: string;
+  coverage: AreaCoverage;
+  configured: boolean;
+}
+
+export interface ServiceLocationsState {
+  specialist_id: string | null;
+  city: string;
+  places: ServicePlace[];
+  areas: ServiceArea[];
+}
+
+export type ServiceLocationCreate =
+  | {
+      kind: PlaceKind;
+      address: string;
+      label?: string;
+      note_for_client?: string;
+    }
+  | { kind: "mobile"; coverage: AreaCoverage };
+
+export const getServiceLocations = (): Promise<ServiceLocationsState> =>
+  request("/service-locations", { method: "GET" });
+
+export const createServiceLocation = (
+  body: ServiceLocationCreate,
+): Promise<ServiceLocationsState> =>
+  request("/service-locations", { method: "POST", body: JSON.stringify(body) });
+
+export const patchServiceLocation = (
+  itemId: string,
+  body: Partial<{
+    kind: PlaceKind;
+    address: string;
+    label: string;
+    note_for_client: string;
+    coverage: AreaCoverage;
+  }>,
+): Promise<ServiceLocationsState> =>
+  request(`/service-locations/${encodeURIComponent(itemId)}`, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  });
+
+export interface AddressSuggestion {
+  value: string;
+  unrestricted_value: string;
+}
+
+export interface AddressSuggestResponse {
+  available: boolean;
+  reason?: string | null;
+  city?: string | null;
+  suggestions: AddressSuggestion[];
+}
+
+/**
+ * Подсказки адреса — POST с телом: адрес мастера не должен оседать в URL.
+ * 503 (геокодер не настроен — стенд пилота) и 409 (нет города) приходят с
+ * `available: false`; экран читает их как «подсказок нет», не как ошибку.
+ */
+export const suggestAddress = (q: string): Promise<AddressSuggestResponse> =>
+  request("/geocoding/suggest", {
+    method: "POST",
+    body: JSON.stringify({ q }),
+  });
+
+// --- M18a «Свои услуги» — заявки о разрыве канона (DRF-1896 / DRF-1802) ---------
+// Mirrors apps/master_api/views.py::canon_gap_requests / canon_gap_similar /
+// canon_gap_request_detail — a proxy to the catalog (DRF-1801). The answer is
+// the catalog's, never an echo; the owner decides, the screen only shows.
+
+export type CanonGapStatus =
+  "pending" | "approved" | "needs_clarification" | "rejected";
+
+export interface CanonGapRequest {
+  id: string;
+  specialist_id: string;
+  name: string;
+  description: string;
+  duration_minutes: number;
+  price: string;
+  status: CanonGapStatus | string;
+  /** Одно из четырёх слов мастеру — от сервера, не вычисляется на экране. */
+  status_label: string;
+  resolved_template_id: string | null;
+  clarification_question: string | null;
+  rejection_reason: string | null;
+  decided_at: string | null;
+  created_at: string;
+}
+
+export interface CanonGapSimilar {
+  template_id: string;
+  name: string;
+  matched_by: "synonym" | "canonical_name" | string;
+}
+
+export interface CanonGapRequestCreate {
+  name: string;
+  description: string;
+  duration_minutes: number;
+  price: string;
+}
+
+export const listCanonGapRequests = (): Promise<{
+  requests: CanonGapRequest[];
+}> => request("/canon-gap-requests", { method: "GET" });
+
+export const createCanonGapRequest = (
+  body: CanonGapRequestCreate,
+): Promise<{ request: CanonGapRequest; similar: CanonGapSimilar[] }> =>
+  request("/canon-gap-requests", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+
+export const getSimilarCanonTemplates = (
+  name: string,
+): Promise<{ similar: CanonGapSimilar[] }> =>
+  request(`/canon-gap-requests/similar?name=${encodeURIComponent(name)}`, {
+    method: "GET",
+  });
+
+// --- DRF-1895 (M10b) выбор канонических услуг и цена мастера ------------------
+// Mirrors apps/master_api/views.py::service_selection / service_offer /
+// selected_service — a proxy to the catalog (M8a / M8b). The counters
+// `selected` / `configured` are the server's; the screen never computes them.
+
+export interface SelectedServiceOffer {
+  id: string;
+  price: string;
+  duration_minutes: number;
+  is_active: boolean;
+}
+
+export interface SelectedService {
+  salon_service_id: string;
+  template_id: string;
+  name: string;
+  category_id: string | null;
+  is_active: boolean;
+  mapping_status: string;
+  offer: SelectedServiceOffer | null;
+  configured: boolean;
+  /** Каталог M8a/M8b: категория услуги и корень её дерева — «направление» (DRF-1912). */
+  category_name: string | null;
+  direction_id: string | null;
+  direction_name: string | null;
+  direction_sort_order: number | null;
+}
+
+export interface ServiceSelectionState {
+  specialist_id: string;
+  tenant_id: string;
+  selected: number;
+  configured: number;
+  services: SelectedService[];
+}
+
+export const getServiceSelection = (): Promise<ServiceSelectionState> =>
+  request("/services/selection", { method: "GET" });
+
+export const selectServices = (
+  templateIds: string[],
+): Promise<ServiceSelectionState & { created: number }> =>
+  request("/services/selection", {
+    method: "POST",
+    body: JSON.stringify({ template_ids: templateIds }),
+  });
+
+export const putServiceOffer = (
+  salonServiceId: string,
+  body: { price: string; duration_minutes: number },
+): Promise<ServiceSelectionState & { offer_id: string }> =>
+  request(`/services/${salonServiceId}/offer`, {
+    method: "PUT",
+    body: JSON.stringify(body),
+  });
+
+export const removeService = (
+  salonServiceId: string,
+): Promise<ServiceSelectionState & { removal: "deleted" | "deactivated" }> =>
+  request(`/services/${salonServiceId}`, { method: "DELETE" });
+
+// --- DRF-1799 (M7) канон для экрана 03 ------------------------------------------
+// Mirrors apps/master_api/views.py::service_directions / service_templates —
+// proxies to the catalog's canon. Directions are exactly the catalog's list (no
+// count or codes kept here); template rows carry no price or duration.
+
+export interface ServiceDirection {
+  id: string;
+  name: string;
+  slug: string;
+  icon: string;
+  sort_order: number;
+}
+
+export interface ServiceTemplate {
+  id: string;
+  name: string;
+  name_short: string | null;
+  is_popular: boolean;
+  category_id: string | null;
+  category_name: string | null;
+}
+
+export const getServiceDirections = (): Promise<{
+  directions: ServiceDirection[];
+}> => request("/services/directions", { method: "GET" });
+
+export const getServiceTemplates = (
+  directionId: string,
+): Promise<{ direction_id: string; templates: ServiceTemplate[] }> =>
+  request(
+    `/services/templates?direction_id=${encodeURIComponent(directionId)}`,
+    { method: "GET" },
+  );
+
+// --- M5/M26 publication (DRF-1797 / DRF-1818) ------------------------------
+// Mirrors apps/master_api/views.py::publication_status / publication_publish —
+// thin proxies of the catalog M4 routes. The screen reads the catalog's answer
+// and never recomputes readiness on its own.
+
+export type PublicationProfileStatus = "draft" | "pending" | "active";
+
+export interface PublicationMissingItem {
+  code: string;
+  /** Те же ключи, что у пунктов readiness бота, плюс `identity`. */
+  section: string;
+  detail: Record<string, unknown>;
+}
+
+export interface PublicationReadiness {
+  status: "READY" | "NOT_READY" | string;
+  missing: PublicationMissingItem[];
+}
+
+export interface PublicationRequestRecord {
+  id: string;
+  command_id: string;
+  outcome: string;
+  from_status: string;
+  to_status: string;
+  created_at: string;
+}
+
+export interface PublicationStatus {
+  specialist_id: string;
+  profile_status: PublicationProfileStatus | string;
+  readiness: PublicationReadiness;
+  last_request: PublicationRequestRecord | null;
+}
+
+export interface PublishResponse {
+  specialist_id: string;
+  profile_status: PublicationProfileStatus | string;
+  replayed: boolean;
+  request: PublicationRequestRecord;
+}
+
+export const getPublicationStatus = (): Promise<PublicationStatus> =>
+  request("/publication/status", { method: "GET" });
+
+/** `commandId` — ключ одной попытки: повтор с тем же ключом каталог не выполнит второй раз. */
+export const publishProfile = (
+  commandId: string,
+  signal?: AbortSignal,
+): Promise<PublishResponse> =>
+  request("/publication", {
+    method: "POST",
+    body: JSON.stringify({ command_id: commandId }),
+    signal,
+  });
+
+/**
+ * Пункты, которые мастер может закрыть САМ: всё, кроме `unavailable`.
+ *
+ * До DRF-2326 имя было `drawnReadinessItems` — «что экран рисует». Экран 01
+ * теперь рисует и недоступные пункты (спрятанный шаг мастер читает как «у
+ * меня всё», хотя профиль всё равно не отправить), поэтому имя врало бы.
+ * Отбор остался прежним, и смысл у него всегда был этот: бар готовности,
+ * «следующий шаг» и карточка «продолжить настройку» считают достижимое —
+ * недоступный пункт в знаменателе обещал бы работу, которой мастер сделать
+ * не может.
+ */
+export const actionableReadinessItems = (items: ReadinessItem[]): ReadinessItem[] =>
+  items.filter((item) => item.state !== "unavailable");
+
+/**
+ * Бар готовности — доля закрытых пунктов среди достижимых. Число не
+ * показывается словами: ни процентов, ни «N из M» (макет: «no fake percent
+ * complete»; доктрина 12.09 — счётчик как обещание времени).
+ */
+export const readinessFill = (
+  items: ReadinessItem[],
+): { done: number; total: number } => {
+  const drawn = actionableReadinessItems(items);
+  return {
+    done: drawn.filter((item) => item.state === "done").length,
+    total: drawn.length,
+  };
+};
+
 /**
  * PATCH master profile — bio only (JSON path).
  *
@@ -268,11 +776,15 @@ export const getMasterMe = (): Promise<MasterMeResponse> =>
  */
 export const patchMasterProfile = (patch: {
   bio?: string;
-}): Promise<ProfilePatchResponse> =>
-  request("/profile", {
-    method: "PATCH",
-    body: JSON.stringify({ bio: patch.bio ?? "" }),
-  });
+  display_name?: string;
+}): Promise<ProfilePatchResponse> => {
+  // DRF-1814: только переданные поля — имя без «о себе» не затирает «о себе»
+  // пустой строкой (владелец полей — каталог, он пишет ровно то, что пришло).
+  const body: Record<string, string> = {};
+  if (patch.bio !== undefined) body.bio = patch.bio;
+  if (patch.display_name !== undefined) body.display_name = patch.display_name;
+  return request("/profile", { method: "PATCH", body: JSON.stringify(body) });
+};
 
 /**
  * Upload a new profile photo (multipart). Bypasses the shared
@@ -286,10 +798,8 @@ export const uploadMasterProfilePhoto = async (
 ): Promise<ProfilePatchResponse> => {
   const fd = new FormData();
   fd.set("photo", file);
-  const initData = getInitData();
   const headers = new Headers();
-  if (initData) headers.set("Authorization", `MaxInitData ${initData}`);
-  applyDevBypassHeaders(headers);
+  applyIdentityHeaders(headers);
   // No Content-Type — let fetch set the multipart boundary.
   const res = await fetch(`${MASTER_API_BASE}/profile`, {
     method: "PATCH",
@@ -303,21 +813,108 @@ export const uploadMasterProfilePhoto = async (
     } catch {
       /* non-JSON 5xx */
     }
-    throw new ApiError(res.status, parsed.error, parsed.detail);
+    // DRF-2439. Единственное из восьми мест, где потеря НЕ пустая: эта же
+    // ручка отвечает через `_profile_refusal` (`master_api/views.py:849`) и
+    // на 400 кладёт в `details` данные каталога о том, ЧТО ИМЕННО не так с
+    // фото — формат, квадрат, размер. Человек видел только общее «Каталог не
+    // принял профиль.», а подробность не доезжала никуда.
+    //
+    // Тот же вид обслуживает и текст, и multipart: текстовый путь идёт через
+    // общего помощника `request` и поле получает (DRF-2373), а этот
+    // самописный `fetch` — нужный из-за multipart — ронял.
+    throw new ApiError(res.status, parsed.error, parsed.detail, parsed.details);
   }
   return (await res.json()) as ProfilePatchResponse;
 };
 
-/** §M4 line 527 — bio UI cap (server-side MAX_BIO_LENGTH = 280). */
-export const MASTER_PROFILE_BIO_MAX = 280;
-/** §M4 line 550 — photo upload cap. Mirrors backend PHOTO_MAX_BYTES. */
-export const MASTER_PROFILE_PHOTO_MAX_BYTES = 10 * 1024 * 1024;
-/** §M4 line 550 — accepted MIME types. */
+// DRF-1814: лимитов «о себе» и байтов фото здесь больше НЕТ. Они приходят в
+// `MasterProfileCard.limits` из каталога (DRF-1960) — те же числа, которыми
+// каталог проверяет запись. Литерал 280 при лимите каталога 500 был двумя
+// числами на один предмет (GAP_MAP §3 «лимиты — данные контракта»).
+/** Форматы фото — как у каталога (`ALLOWED_FORMATS`); предпроверка до сети. */
 export const MASTER_PROFILE_PHOTO_MIME_ALLOWLIST = new Set<string>([
   "image/jpeg",
   "image/png",
   "image/webp",
 ]);
+
+// --- Экран 07 «Профиль мастера» (DRF-1814, часть B) ------------------------
+// Зеркало apps/master_api/views_profile_card.py (часть A): карточка с
+// лимитами каталога, бейджем из реального слота и чипами из выбранных
+// шаблонов; портфолио — прокси в каталог, субъект — мастер из initData.
+
+export interface ProfileLimits {
+  bio: number;
+  display_name_min: number;
+  avatar_bytes: number;
+  portfolio_bytes: number;
+  portfolio_count: number;
+}
+
+export interface MasterProfileCard {
+  master: { id: string; name: string; bio: string; photo_url: string };
+  limits: ProfileLimits;
+  portfolio: { count: number; limit: number };
+  accepts_today: boolean;
+  accepts_today_reason: string | null;
+  categories: string[];
+  categories_reason: string | null;
+}
+
+export interface PortfolioItem {
+  id: string;
+  image_url: string;
+  sort_order: number;
+  created_at: string;
+}
+
+export interface PortfolioList {
+  items: PortfolioItem[];
+  count: number;
+  limit: number;
+}
+
+export const getMasterProfileCard = (): Promise<MasterProfileCard> =>
+  request("/profile/card", { method: "GET" });
+
+export const getPortfolio = (): Promise<PortfolioList> =>
+  request("/profile/portfolio", { method: "GET" });
+
+export const deletePortfolioItem = (
+  itemId: string,
+): Promise<{ count: number; limit: number }> =>
+  request(`/profile/portfolio/${encodeURIComponent(itemId)}`, {
+    method: "DELETE",
+  });
+
+/** Загрузка работы — multipart `image`; тот же обход `request()`, что у фото профиля. */
+export const uploadPortfolioPhoto = async (
+  file: File,
+): Promise<PortfolioItem> => {
+  const fd = new FormData();
+  fd.set("image", file);
+  const headers = new Headers();
+  applyIdentityHeaders(headers);
+  const res = await fetch(`${MASTER_API_BASE}/profile/portfolio`, {
+    method: "POST",
+    headers,
+    body: fd,
+  });
+  if (!res.ok) {
+    let parsed: ErrorBody = { error: "http_error", detail: res.statusText };
+    try {
+      parsed = (await res.json()) as ErrorBody;
+    } catch {
+      /* non-JSON 5xx */
+    }
+    // DRF-2439: сегодня сервер здесь `details` не присылает — аргумент
+    // добавлен, чтобы поле не потерялось молча, когда начнёт. Правило
+    // живёт в помощнике `request`, а этот `fetch` написан руками — multipart (boundary ставит браузер),
+    // то есть мимо помощника: `POST master/profile/portfolio`.
+    throw new ApiError(res.status, parsed.error, parsed.detail, parsed.details);
+  }
+  return (await res.json()) as PortfolioItem;
+};
 
 export const MASTER_SESSION_STORAGE_KEY = "master_token";
 
@@ -332,9 +929,7 @@ export interface ScheduleFreeWindow {
 }
 
 export type ScheduleConflictType =
-  | "double_booking"
-  | "outside_hours"
-  | "overlapping_exception";
+  "double_booking" | "outside_hours" | "overlapping_exception";
 
 export interface ScheduleConflict {
   type: ScheduleConflictType | string;
@@ -379,10 +974,7 @@ export interface MasterScheduleResponse {
 }
 
 export type AvailabilityReasonClass =
-  | "vacation"
-  | "sick"
-  | "personal"
-  | "other";
+  "vacation" | "sick" | "personal" | "other";
 
 export interface AvailabilityRequestBody {
   start: string; // ISO datetime
@@ -438,61 +1030,11 @@ export const getPendingAvailability =
   (): Promise<PendingAvailabilityResponse> =>
     request("/availability/pending", { method: "GET" });
 
-// --- M5 conversations types -----------------------------------------------
-// Mirrors apps/master_api/services/conversations.py::ConversationsListResponse.
-
-export type ConversationSection =
-  | "awaiting_master"
-  | "ai_drafted"
-  | "ai_handling"
-  | "resolved"
-  | "other";
-
-export type ConversationFilter = "active" | "all" | "resolved";
-
-export interface MasterConversationItem {
-  conversation_id: string;
-  client_first_name: string;
-  client_last_initial: string;
-  is_returning_customer: boolean;
-  section: ConversationSection | string;
-  last_message_excerpt: string;
-  last_message_at: string | null;
-  sla_tier: SlaTier;
-  ai_drafted_reply_available: boolean;
-  reason_chip: string | null;
-  resolved_outcome: string | null;
-}
-
-export interface ConversationSectionCounts {
-  awaiting_master: number;
-  ai_drafted: number;
-  ai_handling: number;
-  resolved_today: number;
-}
-
-export interface MasterConversationsResponse {
-  items: MasterConversationItem[];
-  section_counts: ConversationSectionCounts;
-  next_cursor: string | null;
-}
-
-export const getMasterConversations = (
-  params: {
-    filter?: ConversationFilter;
-    search?: string;
-    cursor?: string;
-    limit?: number;
-  } = {},
-): Promise<MasterConversationsResponse> => {
-  const search = new URLSearchParams();
-  if (params.filter) search.set("filter", params.filter);
-  if (params.search) search.set("search", params.search);
-  if (params.cursor) search.set("cursor", params.cursor);
-  if (params.limit !== undefined) search.set("limit", String(params.limit));
-  const qs = search.toString();
-  return request(`/conversations${qs ? `?${qs}` : ""}`, { method: "GET" });
-};
+// --- Переписка мастер↔клиент снята (DRF-1255, OD-7) ------------------------
+// Клиентских функций к /conversations* здесь больше нет: у мастера нет прямой
+// переписки с клиентом. Бэкенд и данные — DRF-1528 (не удаляются здесь).
+// Поля dashboard `inbox_preview` / `conversations_unread` остаются в типе как
+// контракт сервера до DRF-1528; UI их не читает.
 
 /**
  * Fields that must NEVER appear in ANY master-facing response — not just
@@ -527,246 +1069,9 @@ export const FORBIDDEN_PII_KEYS = [
   "client_full_name",
 ] as const;
 
-export function findForbiddenPiiKeys(
-  item: Record<string, unknown>,
-): string[] {
+export function findForbiddenPiiKeys(item: Record<string, unknown>): string[] {
   return FORBIDDEN_PII_KEYS.filter((k) => k in item);
 }
-
-// --- M6 conversation detail types ----------------------------------------
-// Mirrors apps/master_api/services/conversation_detail.py
-// (ConversationDetailResponse / MessageItem / MessageResponse).
-// Spec: docs/design/handoffs/2026-05-18-master-mobile-handoff.md §M6.
-
-export type ConversationTier =
-  | "ai_continuity"
-  | "human_supervised"
-  | "human_locked";
-
-/** «Передать админу» reason classes — mirrors backend `VALID_REASON_CLASSES`. */
-export type PromoteReasonClass =
-  | "complaint"
-  | "financial"
-  | "medical"
-  | "other";
-
-export interface ConversationMessage {
-  message_id: string;
-  /** "user" | "assistant" | "system" — backend uses lowercase Message.Role. */
-  role: string;
-  content: string;
-  /** ISO datetime — empty string if the server couldn't render it. */
-  sent_at: string;
-  composed_by_master: boolean;
-  composed_by_master_id: string | null;
-}
-
-export interface ConversationAiDraft {
-  draft_id: string | null;
-  content: string | null;
-  created_at: string | null;
-}
-
-export interface ConversationPermissions {
-  can_compose: boolean;
-  can_promote_to_human_locked: boolean;
-}
-
-export interface ConversationDetailResponse {
-  conversation_id: string;
-  tier: ConversationTier | string;
-  /** complaint/financial/medical/other when HUMAN_LOCKED, null otherwise. */
-  tier_reason: string | null;
-  is_active: boolean;
-  tier_locked_by_admin_name: string | null;
-  tier_locked_since: string | null;
-  client_first_name: string;
-  client_last_initial: string;
-  is_returning_customer: boolean;
-  visit_count: number;
-  messages: ConversationMessage[];
-  ai_draft: ConversationAiDraft;
-  permissions: ConversationPermissions;
-}
-
-export interface SendMessageResponse {
-  message_id: string;
-  content: string;
-  sent_at: string;
-  composed_by_master: boolean;
-}
-
-export interface MarkReadResponse {
-  marked_count: number;
-}
-
-export interface PromoteResponse {
-  conversation_id: string;
-  tier: ConversationTier | string;
-  tier_locked_at: string;
-}
-
-/** Mirrors backend MAX_COMPOSE_LENGTH (apps/master_api/services/conversation_detail.py). */
-export const MASTER_COMPOSE_MAX_LENGTH = 2000;
-/** Threshold at which the live counter starts being visible. */
-export const MASTER_COMPOSE_COUNTER_THRESHOLD = 1500;
-
-export const getConversationDetail = (
-  conversationId: string,
-): Promise<ConversationDetailResponse> =>
-  request(`/conversations/${conversationId}`, { method: "GET" });
-
-export const sendMasterMessage = (
-  conversationId: string,
-  content: string,
-): Promise<SendMessageResponse> =>
-  request(`/conversations/${conversationId}/messages`, {
-    method: "POST",
-    body: JSON.stringify({ content }),
-  });
-
-export const markConversationRead = (
-  conversationId: string,
-): Promise<MarkReadResponse> =>
-  request(`/conversations/${conversationId}/mark-read`, {
-    method: "POST",
-    body: JSON.stringify({}),
-  });
-
-export const promoteConversationToHumanLocked = (
-  conversationId: string,
-  reasonClass: PromoteReasonClass,
-  reasonText?: string,
-): Promise<PromoteResponse> =>
-  request(`/conversations/${conversationId}/promote`, {
-    method: "POST",
-    body: JSON.stringify({
-      reason_class: reasonClass,
-      reason_text: reasonText ?? "",
-    }),
-  });
-
-// --- M6 AI drafts (Bundle B / item 4 frontend) ----------------------------
-// Mirrors apps/master_api/services/ai_drafts.py
-// (DraftResponse / DraftMessageResponse) + apps/master_api/views.py
-// (conversation_draft_generate / send_as_me / release_to_ai).
-//
-// Spec: docs/design/handoffs/2026-05-18-master-mobile-handoff.md §M6
-// (lines 632-738). Backend PR #535.
-//
-// Error envelopes are the standard `{error: slug, detail: string}` shape
-// surfaced by the shared `request()` helper as `ApiError(status, slug,
-// detail)`. Callers `catch (err)` and switch on `err.slug` — there is
-// no separate structured response type needed.
-
-/**
- * Generated draft payload returned by `POST .../drafts/generate`. Also
- * the shape served back by `getConversationDetail()`'s `ai_draft` field
- * when an ACTIVE draft exists for the caller's master — backend response
- * only includes `draft_id`, `content`, `created_at` in that read path
- * (no provider/model echo). We model both shapes via optional fields so
- * the response interfaces stay structurally compatible.
- */
-export interface AiDraftPayload {
-  draft_id: string;
-  content: string;
-  created_at: string;
-  /** Present only on POST .../drafts/generate; absent on detail GET. */
-  llm_provider?: string;
-  /** Present only on POST .../drafts/generate; absent on detail GET. */
-  llm_model?: string;
-}
-
-/**
- * 201 response from send-as-me / release-to-ai. `composed_by_master`
- * distinguishes the two paths (master-authored vs released-to-AI);
- * `was_edited` is true only when the master tapped «Отредактировать»
- * and passed `override_content`.
- */
-export interface DraftMessageResponse {
-  message_id: string;
-  content: string;
-  sent_at: string;
-  composed_by_master: boolean;
-  was_edited: boolean;
-}
-
-/** Slugs the backend may emit on 4xx/5xx for the draft endpoints. */
-export type DraftErrorSlug =
-  | "draft_already_acted"
-  | "llm_unavailable"
-  | "conversation_locked"
-  | "tier_locked"
-  | "bad_request"
-  | "not_found";
-
-/**
- * POST /api/v1/master/conversations/:id/drafts/generate
- *
- * Empty body. Returns the freshly-generated draft (or the existing
- * ACTIVE draft if we're inside the 60s idempotency window AND no new
- * customer message has arrived since).
- *
- * Throws `ApiError` with `.slug ∈ DraftErrorSlug`:
- *   - 400 `conversation_locked` (HUMAN_LOCKED tier)
- *   - 404 `not_found` (master not involved)
- *   - 503 `llm_unavailable` (provider failure)
- */
-export const generateDraft = (
-  conversationId: string,
-): Promise<AiDraftPayload> =>
-  request(`/conversations/${conversationId}/drafts/generate`, {
-    method: "POST",
-    body: JSON.stringify({}),
-  });
-
-/**
- * POST /api/v1/master/conversations/:id/drafts/:draftId/send-as-me
- *
- * Body: `{override_content?: string}`. When `overrideContent` is
- * undefined we omit the field entirely — the backend uses the draft's
- * LLM text. When provided, the backend uses the edited text and stamps
- * `was_edited=true` in the message's attribution metadata.
- *
- * Throws `ApiError` with `.slug ∈ DraftErrorSlug`:
- *   - 400 `draft_already_acted` (status != ACTIVE; race lost)
- *   - 400 `bad_request` (override too long / empty)
- *   - 403 `tier_locked` (HUMAN_LOCKED)
- *   - 404 `not_found`
- */
-export const sendDraftAsMaster = (
-  conversationId: string,
-  draftId: string,
-  overrideContent?: string,
-): Promise<DraftMessageResponse> => {
-  const body: Record<string, string> = {};
-  if (overrideContent !== undefined) body.override_content = overrideContent;
-  return request(`/conversations/${conversationId}/drafts/${draftId}/send-as-me`, {
-    method: "POST",
-    body: JSON.stringify(body),
-  });
-};
-
-/**
- * POST /api/v1/master/conversations/:id/drafts/:draftId/release-to-ai
- *
- * Empty body. Releases the draft as a plain assistant message (no
- * master attribution — customer-side render is indistinguishable from
- * a fully-auto reply).
- *
- * Throws `ApiError` with `.slug ∈ DraftErrorSlug`:
- *   - 400 `draft_already_acted`
- *   - 403 `tier_locked`
- *   - 404 `not_found`
- */
-export const releaseDraftToAi = (
-  conversationId: string,
-  draftId: string,
-): Promise<DraftMessageResponse> =>
-  request(`/conversations/${conversationId}/drafts/${draftId}/release-to-ai`, {
-    method: "POST",
-    body: JSON.stringify({}),
-  });
 
 // --- M7 notification preferences (Bundle B / item 3) --------------------
 // Mirrors apps/master_api/services/notification_prefs.py +
@@ -801,9 +1106,7 @@ export interface MasterNotificationPrefs {
  * Surfaced via ApiError.slug — callers do not parse the body themselves.
  */
 export type NotificationPrefsErrorSlug =
-  | "urgent_forced_on"
-  | "time_invalid"
-  | "bad_request";
+  "urgent_forced_on" | "time_invalid" | "bad_request";
 
 /** Partial-update shape — all fields optional, urgent intentionally NOT settable. */
 export type NotificationPrefsPatch = Partial<
@@ -819,10 +1122,13 @@ interface PrefsEnvelope {
  * with §M7 defaults (transparent — the UI does not show a «first load»
  * banner). Subsequent calls are read-only.
  */
-export const getNotificationPrefs = async (): Promise<MasterNotificationPrefs> => {
-  const env = await request<PrefsEnvelope>("/notification-prefs/", { method: "GET" });
-  return env.prefs;
-};
+export const getNotificationPrefs =
+  async (): Promise<MasterNotificationPrefs> => {
+    const env = await request<PrefsEnvelope>("/notification-prefs/", {
+      method: "GET",
+    });
+    return env.prefs;
+  };
 
 /**
  * PATCH a subset of fields. On 400 the request() helper throws ApiError —
@@ -939,11 +1245,7 @@ export const getMasterCatalog = async (): Promise<MasterServiceItem[]> => {
 // 502 billing_upstream_unavailable.
 
 export type SubscriptionStatus =
-  | "trial"
-  | "active"
-  | "past_due"
-  | "canceled"
-  | "none";
+  "trial" | "active" | "past_due" | "canceled" | "none";
 
 export interface BillingStatusNextCharge {
   subscription_amount: string;
@@ -1024,4 +1326,343 @@ export const cardSetup = async (input: {
     body: JSON.stringify(input),
   });
   return env.data;
+};
+
+// --- Раздел «Ayla»: диалог мастера с ассистентом (DRF-1180) ---------------
+// Зеркалит apps/master_api/views_assistant.py.
+//
+// Решение владельца (OD-7 от 21.08, повторено 05.09): «Раздел «Ayla» —
+// это диалог мастера с Ayla, тот же, что в боте, но через Mini App».
+// Поэтому история читается с сервера, а не копится в браузере: она
+// общая с салонным ботом.
+
+export interface AylaMessage {
+  id: string;
+  /** "user" | "assistant" */
+  role: string;
+  content: string;
+  /** Имя сработавшего инструмента или "" — для отладки, не для показа. */
+  tool: string;
+  /** ISO datetime, "" если сервер не смог его отрендерить. */
+  created_at: string;
+}
+
+/**
+ * Предложенное, но НЕ выполненное действие, меняющее данные.
+ *
+ * Эпик DRF-1180: «сначала она должна показать, что именно собирается
+ * сделать, получить подтверждение пользователя и только после этого
+ * выполнять действие». `summary` — то, что человек читает; `token` —
+ * единственное, чем это можно выполнить, и аргументы лежат внутри
+ * него, а не в этом объекте: иначе экран мог бы показать одно, а
+ * отправить на исполнение другое.
+ */
+/** Строки карточки предложения (DRF-2153, макет DRF-1187): клиент / услуга / дата / время. */
+export interface AylaBookingDetails {
+  client: string;
+  service: string;
+  duration_min: number;
+  /** «21 августа, четверг» */
+  date: string;
+  /** «12:30» */
+  time: string;
+  /** «12:30–13:30» */
+  time_range?: string;
+}
+
+export interface AylaDayOffDetails {
+  kind: "day_off";
+  title: string;
+  /** «Среда, 26 августа» */
+  date: string;
+  /** «Не работаю весь день» */
+  change: string;
+}
+
+export interface AylaPendingAction {
+  action: string;
+  summary: string;
+  confirm_label: string;
+  token: string;
+  expires_in_sec: number;
+  details?: AylaBookingDetails | AylaDayOffDetails;
+}
+
+/** Карточки ответа — структура вместо абзаца (DRF-2153). Строятся сервером из данных. */
+export interface AylaFreeWindow {
+  start: string;
+  end: string;
+  book_url: string;
+}
+export type AylaCard =
+  | {
+      kind: "free_windows";
+      date: string;
+      day_off?: boolean;
+      stale: boolean;
+      notice: string | null;
+      footer?: string | null;
+      recheck: string | null;
+      windows: AylaFreeWindow[];
+      book_url?: string;
+    }
+  | {
+      kind: "day";
+      date: string;
+      count: number;
+      visits: {
+        time: string;
+        client: string;
+        service: string;
+        duration_min: number;
+      }[];
+    }
+  | { kind: "clarify_client"; options: { client_id: string; label: string }[] }
+  | {
+      kind: "choose_service";
+      options: { service_id: string; name: string; duration_min: number }[];
+    }
+  | {
+      kind: "slot_taken";
+      range?: string;
+      alternatives: { time: string; start_at: string | null }[];
+      /** «Выбрать другое время» → форма М-3 на тот же день. */
+      book_url?: string;
+    }
+  | { kind: "open"; url: string; label: string };
+
+/** Выбор из карточки — уходит модели уточнением, в нить пишется только текст кнопки. */
+export interface AylaSelect {
+  client_id?: string;
+  start_at?: string;
+}
+
+export interface AylaAskResponse {
+  answer: string;
+  tool: string;
+  pending_action: AylaPendingAction | null;
+  cards?: AylaCard[];
+  message_id: string;
+}
+
+export interface AylaConfirmResponse {
+  answer: string;
+  action: string;
+  /** `false` — не выполнено: «занято» / «проверяем результат». */
+  executed: boolean;
+  /** Дверь после результата: «Открыть запись» → обычный экран деталей. */
+  open?: { url: string; label: string } | null;
+  cards?: AylaCard[];
+  details?: AylaBookingDetails | AylaDayOffDetails | null;
+  message_id: string;
+}
+
+/** Стартовый экран Ayla: контекст дня + чипы (DRF-2153). */
+export interface AylaContextResponse {
+  today: {
+    date: string;
+    count: number;
+    next: {
+      client_name_initial: string;
+      time: string;
+      service_name: string;
+      duration_min: number;
+    } | null;
+  };
+  chips: string[];
+  chip_hints?: Record<string, string>;
+}
+
+export const getAylaContext = (): Promise<AylaContextResponse> =>
+  request("/assistant/context", { method: "GET" });
+
+/** Что уже сказано в диалоге, старое первым. */
+export const getAylaHistory = (
+  limit?: number,
+): Promise<{ messages: AylaMessage[] }> =>
+  request(`/assistant/history${limit ? `?limit=${limit}` : ""}`, {
+    method: "GET",
+  });
+
+/** Задать вопрос. Ответ может нести предложение — оно НЕ выполнено. */
+export const askAyla = (
+  text: string,
+  select?: AylaSelect,
+): Promise<AylaAskResponse> =>
+  request("/assistant/ask", {
+    method: "POST",
+    body: JSON.stringify(select ? { text, select } : { text }),
+  });
+
+/** Выполнить предложение. Только по талону — своих аргументов нет. */
+export const confirmAylaAction = (
+  token: string,
+): Promise<AylaConfirmResponse> =>
+  request("/assistant/confirm", {
+    method: "POST",
+    body: JSON.stringify({ token }),
+  });
+
+// --- DRF-1845 «Принимаю записи» ---------------------------------------------
+// Mirrors apps/master_api/views.py::accepting_bookings — a proxy to the
+// catalog's availability route. The flag lives in the catalog only; the answer
+// is its readback. The bot sees a pause on its next catalog sync (≤15 min).
+
+export interface AcceptingBookingsResponse {
+  accepting_bookings: boolean;
+  status: string | null;
+}
+
+export const getAcceptingBookings = (): Promise<AcceptingBookingsResponse> =>
+  request("/accepting-bookings", { method: "GET" });
+
+export const setAcceptingBookings = (
+  accepting: boolean,
+): Promise<AcceptingBookingsResponse> =>
+  request("/accepting-bookings", {
+    method: "PATCH",
+    body: JSON.stringify({ accepting_bookings: accepting }),
+  });
+
+// --- DRF-1857 «Мои отзывы» --------------------------------------------------
+// Mirrors apps/master_api/views.py::reviews — a proxy to the catalog's
+// own-reviews route under the master as subject. Rows are whitelisted by the
+// bot; the client is «Имя Ф.» / «Клиент» / null (anonymous); no rating until a
+// review exists.
+
+export interface MasterReview {
+  id: string;
+  rating: number;
+  text: string;
+  client_name: string | null;
+  service_name: string | null;
+  created_at: string;
+}
+
+export interface MasterReviewsResponse {
+  review_count: number;
+  rating: number | null;
+  reviews: MasterReview[];
+}
+
+export const getMasterReviews = (): Promise<MasterReviewsResponse> =>
+  request("/reviews", { method: "GET" });
+
+// --- Ручки М-2 для «Новой записи» мастера (DRF-2154 → DRF-2155, М-3) -------
+//
+// Субъект — мастер из initData: ни в путях, ни в телах нет master_id.
+// Телефон клиента — только ВХОД для нового гостя; наружу не приходит ни
+// в списке поиска, ни в деталях (DRF-1039, владелец 20.09).
+
+import type { BookingSlot } from "./admin-api";
+
+/** Строка `GET /customers?q=` — «Анна П.» + дата последнего визита у этого мастера. */
+export interface MasterCustomerSearchRow {
+  /** Ayla client id — уходит в `client_id` при создании. */
+  id: string;
+  /** «Имя Ф.»; «Без имени», когда каталог не знает имени. */
+  name: string;
+  named: boolean;
+  /** YYYY-MM-DD последнего completed визита у этого мастера; null — новый клиент. */
+  last_visit_date: string | null;
+}
+
+export const searchMasterCustomers = async (
+  q: string,
+  opts: { signal?: AbortSignal } = {},
+): Promise<MasterCustomerSearchRow[]> => {
+  const env = await request<{ results: MasterCustomerSearchRow[] }>(
+    `/customers?q=${encodeURIComponent(q)}`,
+    { method: "GET", signal: opts.signal },
+  );
+  return env.results;
+};
+
+export interface MasterBookingSlotsResponse {
+  date: string;
+  timezone: string;
+  service_id: string;
+  duration_min: number;
+  slots: BookingSlot[];
+}
+
+export const getMasterBookingSlots = (
+  params: { serviceId: string; date: string },
+  opts: { signal?: AbortSignal } = {},
+): Promise<MasterBookingSlotsResponse> => {
+  const qs = new URLSearchParams({
+    date: params.date,
+    service_id: params.serviceId,
+  });
+  return request(`/booking-slots?${qs.toString()}`, {
+    method: "GET",
+    signal: opts.signal,
+  });
+};
+
+export interface MasterCreateBookingBody {
+  service_id: string;
+  /** ISO start, как отдало расписание. */
+  start_at: string;
+  /** Один ключ на попытку, тот же при повторе — иначе повтор станет второй записью. */
+  idempotency_key: string;
+  /** Ровно один путь (§14). Телефон — вход нового гостя, обратно не приходит. */
+  client_id?: string;
+  client_name?: string;
+  client_phone?: string;
+}
+
+export interface MasterCreateBookingResult {
+  outcome: "committed" | "conflict" | "blocked" | "pending" | "failed";
+  detail: string;
+  appointment_id?: string;
+  /** `slot_taken` при conflict, `result_pending` при pending, иначе — как у стойки. */
+  reason_code?: string;
+  /** Ближайшие окна того дня при `slot_taken`; null — слоты были недоступны. */
+  alternatives?: BookingSlot[] | null;
+  alternatives_unavailable?: boolean;
+  /** На `pending` — чтобы повтор был той же записью. */
+  idempotency_key?: string;
+}
+
+/**
+ * Создать запись к себе. Не через `request`: 409 «занято» и 202 «проверяем
+ * результат» — исходы §18, не ошибки. Сеть упала / тело не прочитано —
+ * `pending` с тем же ключом: запись могла лечь, «failed» подтолкнул бы
+ * нажать ещё раз.
+ */
+export const createMasterBooking = async (
+  body: MasterCreateBookingBody,
+): Promise<MasterCreateBookingResult> => {
+  const headers = new Headers({ "Content-Type": "application/json" });
+  applyIdentityHeaders(headers);
+
+  let res: Response;
+  try {
+    res = await fetch(`${MASTER_API_BASE}/bookings`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+    });
+  } catch {
+    return {
+      outcome: "pending",
+      detail: "нет ответа от сети",
+      idempotency_key: body.idempotency_key,
+    };
+  }
+
+  try {
+    const data = (await res.json()) as Partial<MasterCreateBookingResult> & {
+      error?: string;
+    };
+    if (data.outcome) return data as MasterCreateBookingResult;
+    return { outcome: "failed", detail: data.detail ?? "неизвестная ошибка" };
+  } catch {
+    return {
+      outcome: "pending",
+      detail: "ответ не прочитан",
+      idempotency_key: body.idempotency_key,
+    };
+  }
 };

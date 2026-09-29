@@ -14,17 +14,32 @@ swappable to the Ayla provider-directory API (#249-#251) later.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import replace
-from typing import NamedTuple
+from typing import Any, NamedTuple, Protocol, TypeVar
 from uuid import UUID
 
 from django.core.paginator import Paginator
-from django.db.models import Case, Exists, F, IntegerField, Max, OuterRef, Q, QuerySet, Value, When
+from django.db.models import (
+    Case,
+    Exists,
+    ExpressionWrapper,
+    F,
+    FloatField,
+    IntegerField,
+    Max,
+    OuterRef,
+    Q,
+    QuerySet,
+    Value,
+    When,
+)
 from django.db.models.expressions import CombinedExpression
-from django.db.models.functions import Coalesce
+from django.db.models.functions import Cast, Coalesce, Length, Replace, Trim
 
-from apps.catalog.models import CatalogMaster, CatalogService
+from apps.catalog.master_state import AVAILABLE
+from apps.catalog.models import CatalogMaster, CatalogService, sellable_edge_q
 from apps.marketplace.dto import MasterCard, SalonCard, ServiceCard
 from apps.tenancy.models import Tenant
 
@@ -502,13 +517,16 @@ def _known_cities() -> list[str]:
     this marketplace can serve». One small DISTINCT; the ``all_tenants``
     carve-out (MKT1) applies here for the same reason it applies to discovery
     itself — the set spans every tenant.
+
+    «Bookable» is :data:`apps.catalog.master_state.AVAILABLE` (DRF-1544), the
+    same predicate :func:`_bookable_qs` selects on. Sharing it is what keeps
+    a city out of the recognition set once its last sellable master is gone:
+    a hand-written copy here would keep recognising «Пенза» and route the
+    query to a city that answers with nobody.
     """
     return [
         c
-        for c in CatalogMaster.all_tenants.filter(
-            is_active=True,
-            invite_status=CatalogMaster.InviteStatus.ACCEPTED,
-        )
+        for c in CatalogMaster.all_tenants.filter(AVAILABLE)
         .values_list("tenant__city", flat=True)
         .distinct()
         if c
@@ -990,8 +1008,11 @@ def _service_row_q() -> Q:
     tenant at once, so it should not depend on a writer-side guarantee to
     avoid surfacing a master for a service they do not offer.
     """
-    return Q(services_offered__service__is_active=True) & Q(
-        services_offered__service__tenant_id=F("tenant_id")
+    return (
+        Q(services_offered__service__is_active=True)
+        & Q(services_offered__service__tenant_id=F("tenant_id"))
+        # DRF-1964a — непродаваемое ребро не предлагается; тот же Q, та же строка.
+        & sellable_edge_q("services_offered__")
     )
 
 
@@ -1004,8 +1025,8 @@ def _service_match_q(stems: list[str]) -> Q:
     («массаж пенза») or the profession («массажист») can no longer erase a
     salon that offers exactly the service asked for. What AND used to buy —
     «Спортивный массаж» beating a bare «массаж» — is bought instead by
-    :func:`_match_score`, which ranks a row by HOW MANY stems it matched, so
-    precision becomes ordering rather than a cliff.
+    :func:`_match_precision`, which ranks a row by HOW PRECISELY it matched
+    (DRF-1530), so precision becomes ordering rather than a cliff.
 
     Binding to one row still matters, for that ranking: a master offering
     «Спортивный маникюр» plus a separate «Тайский массаж» scores 1 for
@@ -1060,12 +1081,155 @@ def _relation_match_q(parsed: "ParsedQuery") -> Q:
     return _service_match_q(parsed.stems)
 
 
-def _match_score(stems: list[str]) -> Coalesce:
-    """Rank expression: how many stems the master's BEST service row matched.
+#: Word separator the precision denominator counts. ONE character on purpose:
+#: :func:`name_word_count` and its SQL twin must agree byte for byte, and
+#: ``str.split()`` (whitespace runs) has no cheap portable SQL equivalent.
+_WORD_SEP = " "
 
-    ``MAX`` over the joined rows of a per-row ``CASE`` sum — the aggregate is
-    what makes «best row» rather than «total across everything they offer» the
-    score, preserving the one-row binding :func:`_service_match_q` documents.
+
+def name_word_count(name: str) -> int:
+    """Words in a service name — the PURE definition the SQL twin mirrors.
+
+    Counted by the spaces between them, never below 1, so it can stand in a
+    denominator unguarded. «Классический массаж» → 2; «Массаж ног — глубокое
+    расслабление и лимфодренаж» → 7 (the em-dash is a word, and that is the
+    count DRF-1530 states for that name); «» → 1.
+
+    Repeated spaces inflate the count by one each. Left in deliberately: the
+    mirror stores names an operator typed, a doubled space is rare, and the
+    alternative — collapsing runs — is what makes the SQL side unportable
+    (SQLite has no ``regexp_replace``). An inflated denominator can only make
+    a padded name rank slightly LOWER, never higher, so the failure mode
+    points away from the defect this ranking exists to fix.
+    """
+    return (name or "").strip(_WORD_SEP).count(_WORD_SEP) + 1
+
+
+def _name_word_count_sql(field: str) -> ExpressionWrapper:
+    """:func:`name_word_count` as an ORM expression over ``field``.
+
+    ``LENGTH(x) - LENGTH(REPLACE(x, ' ', '')) + 1`` — the spaces, plus one.
+    Every function used exists on BOTH backends the suite runs on — SQLite is
+    a real target here, not a hypothetical (the module's own tests carry a
+    Postgres-only skip precisely because the suite also runs without it) —
+    which is why this is not ``regexp_split_to_array``.
+
+    NULL is deliberately NOT absorbed here. The only way ``field`` is NULL is
+    the LEFT JOIN of a master with no service row at all, and that master must
+    reach :func:`_match_precision`'s ``COALESCE`` as a NULL — swallowing it
+    down here would turn that guard into decoration and the two tests that pin
+    it into tests that cannot fail. Checked, not assumed: removing the outer
+    ``COALESCE`` reddens both of them.
+    """
+    trimmed = Trim(field)
+    return ExpressionWrapper(
+        Length(trimmed) - Length(Replace(trimmed, Value(_WORD_SEP), Value(""))) + Value(1),
+        output_field=IntegerField(),
+    )
+
+
+def _row_precision(field: str, stems: list[str], *, row: Q | None = None) -> ExpressionWrapper:
+    """Match PRECISION of one service-name row against ``stems`` — DRF-1530.
+
+    ``(matched / len(stems)) * (matched / words(name))`` — the share of the
+    query the name covers, times the share of the name the query covers.
+    Both factors are needed and neither is the old counter:
+
+    * the FIRST says «did this row answer the whole request»; on a one-word
+      query it is 1 for every match, which is exactly why it cannot rank
+      alone — the counter it replaces was this factor and nothing else, and
+      the pilot measurement (five queries out of six landing in ONE tier) is
+      what that looks like from outside;
+    * the SECOND says «is this row ABOUT the request». «массаж» on
+      «Классический массаж» is 1 word of 2 = 0.5; on «Массаж ног — глубокое
+      расслабление и лимфодренаж» it is 1 of 7 ≈ 0.14. A long advertising
+      name stops beating a precise one just because the same word fell into
+      it.
+
+    Covered name words are approximated by the number of MATCHED STEMS, not
+    counted directly: a stem matches by substring, so it covers at least one
+    word, and two distinct stems cannot be satisfied by the same word unless
+    one contains the other (``_parse_query`` already de-duplicates stems).
+    Counting covered words exactly would need per-word tokenisation inside
+    SQL on both backends; the approximation is exact for every query the
+    contour sees and can only ever UNDER-count, which lowers a row rather
+    than promoting one.
+
+    ``row``, when given, is AND-ed into every ``CASE`` — the master-side
+    caller uses it to bind the score to a service row that really counts
+    (active, same tenant), so a row that fails :func:`_service_row_q` scores
+    0 instead of scoring on a service the master does not offer.
+
+    ``float`` throughout: integer division on Postgres would truncate every
+    quotient to 0 and flatten the ranking completely.
+
+    ``stems`` must be non-empty — it is the denominator of the first factor,
+    and every caller already routes an empty stem list elsewhere (a goal query
+    ranks by nothing at all, see :func:`service_rows_score`). Stated as a
+    raise rather than a silent ``None``, so a future caller that forgets finds
+    out here instead of in a queryset that scores everybody zero.
+    """
+    if not stems:
+        raise ValueError("_row_precision needs at least one stem")
+
+    def _term(stem: str) -> Case:
+        cond = _stem_match_q(field, stem)
+        return Case(
+            When(cond if row is None else row & cond, then=Value(1)),
+            default=Value(0),
+            output_field=IntegerField(),
+        )
+
+    matched: Case | CombinedExpression = _term(stems[0])
+    for stem in stems[1:]:
+        matched = matched + _term(stem)
+    matched_f = Cast(matched, FloatField())
+    words_f = Cast(_name_word_count_sql(field), FloatField())
+    return ExpressionWrapper(
+        matched_f * matched_f / (Value(float(len(stems))) * words_f),
+        output_field=FloatField(),
+    )
+
+
+def row_precision(name: str, stems: list[str]) -> float:
+    """:func:`_row_precision`'s quotient, in Python. PURE.
+
+    The SAME arithmetic the SQL expression builds, written once so the two
+    readers that need it outside a queryset — the service STAMPED on a card
+    (:func:`_matched_services`) and the options of a clarifying question
+    (:func:`clarification_material`) — cannot drift from the ranking. They
+    must not: a card that says one thing and was ordered by another, or a
+    question whose chips come from a tier the ranking did not agree was the
+    tier, is the same defect in two costumes.
+
+    ``0.0`` for an empty stem list, matching the SQL side's callers rather
+    than :func:`_row_precision`'s raise: a GOAL query has no stems, every row
+    scores the same 0.0, and they all share one tier — which is the correct
+    reading of «carrying a goal is a yes/no fact», not a degenerate case.
+
+    Stems are already casefolded by :func:`_query_tokens`, so ``in`` here
+    means what ``ILIKE`` meant there.
+    """
+    if not stems:
+        return 0.0
+    matched = sum(1 for stem in stems if stem in (name or "").casefold())
+    return (matched * matched) / (len(stems) * name_word_count(name))
+
+
+def _match_precision(stems: list[str]) -> Coalesce:
+    """Rank expression: the precision of the master's BEST service row.
+
+    DRF-1530 replaces the stem COUNTER that used to live here. Everything the
+    counter's docstring said about the aggregate still holds and is still
+    load-bearing — only the per-row value changed, from «how many stems» to
+    «how precisely» (:func:`_row_precision`).
+
+    ``MAX`` over the joined rows of a per-row expression — the aggregate is
+    what makes «best row» rather than «total across everything they offer»
+    the score, preserving the one-row binding :func:`_service_match_q`
+    documents. A master offering «Спортивный маникюр» plus a separate
+    «Тайский массаж» still scores their best SINGLE row for «спортивный
+    массаж», never the sum of two.
 
     ``MAX`` (not ``SUM``) is also why this stays correct if Django resolves
     the annotation through a second join of the same relation: duplicating
@@ -1077,21 +1241,11 @@ def _match_score(stems: list[str]) -> Coalesce:
     which would rank «matched nothing in the service relation» above every
     real service match. Zero says what NULL meant.
     """
-    row = _service_row_q()
-    # Annotated because the accumulator changes shape on the second term: one
-    # stem is a bare Case, two or more is a CombinedExpression of them.
-    total: Case | CombinedExpression | None = None
-    for stem in stems:
-        term = Case(
-            When(
-                row & _stem_match_q("services_offered__service__name", stem),
-                then=Value(1),
-            ),
-            default=Value(0),
-            output_field=IntegerField(),
-        )
-        total = term if total is None else total + term
-    return Coalesce(Max(total), Value(0), output_field=IntegerField())
+    return Coalesce(
+        Max(_row_precision("services_offered__service__name", stems, row=_service_row_q())),
+        Value(0.0),
+        output_field=FloatField(),
+    )
 
 
 def _matched_services(
@@ -1112,14 +1266,16 @@ def _matched_services(
     single service matching ONE stem and another matching ALL of them are both
     in the result set — and treating that as ambiguous would silently drop the
     service stamp for the very queries the OR was meant to rescue. Only the
-    master's OWN best-scoring rows compete, mirroring :func:`_match_score`
+    master's OWN best-scoring rows compete, mirroring :func:`_match_precision`
     exactly: «спортивный массаж» resolves to «Спортивный массаж» (2 stems)
     even though «Классический массаж» (1 stem) is also in the set.
 
     Scored in Python rather than in SQL: the row set is already bounded by the
     discovery ``limit``, and the scoring rule must be provably identical to
     the ranking rule, which is easier to see in eight lines than in a second
-    ``CASE`` sum.
+    ``CASE`` sum. Since DRF-1530 that rule is match PRECISION rather than a
+    stem count, and the arithmetic below is the same quotient
+    :func:`_row_precision` builds in SQL.
 
     Deliverability gate (review of DRF-962): a stamped service becomes a
     promise on the card — the button must be able to keep it. The booking
@@ -1159,7 +1315,7 @@ def _matched_services(
         )
     )
     # {master_id: (best_score, {(service_id, name), ...})} — only the master's
-    # own top tier survives, same rule as _match_score. Stems are already
+    # own top tier survives, same rule as _match_precision. Stems are already
     # casefolded by _query_tokens, so ``in`` here means what ILIKE meant there.
     #
     # A GOAL query has no stems, so every matching row scores 0 and they all
@@ -1169,11 +1325,16 @@ def _matched_services(
     # then decides on its own: a master with one service for that goal gets
     # the stamp, a master with four is ambiguous and falls through to the menu
     # (which DRF-1324 narrows by the same goal).
-    best: dict[UUID, tuple[int, set[tuple[UUID, str]]]] = {}
+    best: dict[UUID, tuple[float, set[tuple[UUID, str]]]] = {}
     for master_id, service_id, service_name in rows:
         name = service_name or ""
-        folded = name.casefold()
-        score = sum(1 for stem in stems if stem in folded)
+        # The SAME quotient :func:`_row_precision` computes in SQL, written
+        # out in Python (DRF-1530). It has to be the same or the service
+        # STAMPED on a card could come from a row the RANKING did not think
+        # was the master's best — a card that says one thing and was ordered
+        # by another. A goal query has no stems, so every row scores 0.0 and
+        # they all share the top tier, exactly as before.
+        score = row_precision(name, stems)
         current = best.get(master_id)
         if current is None or score > current[0]:
             best[master_id] = (score, {(service_id, name)})
@@ -1194,9 +1355,16 @@ def _bookable_qs(
 ) -> QuerySet[CatalogMaster]:
     """Cross-tenant queryset of bookable masters, optionally filtered.
 
-    The SOLE ``all_tenants`` carve-out (MKT1). Only ``is_active`` +
-    invite-``accepted`` masters (the same ``bookable`` predicate
-    customer-facing reads use). Optional ``city`` (exact, case-insensitive, on
+    The SOLE ``all_tenants`` carve-out (MKT1). Bookability is asked of
+    :data:`apps.catalog.master_state.AVAILABLE` and nowhere else (DRF-1544):
+    this read used to spell out ``is_active`` + invite-``accepted`` by hand,
+    which made it one more hand-rolled copy of a predicate that has since
+    grown two conditions it never learned about — ``archived_at IS NULL``
+    (DRF-1506) and a canonical ``ayla_user_id`` (DRF-1540, owner decision:
+    a master the booking notification cannot reach is not sold). Reading
+    the shared ``Q`` means
+    the next condition (DRF-1521's profile completeness) arrives here without
+    anyone editing this line. Optional ``city`` (exact, case-insensitive, on
     the owning tenant) and ``specialization`` narrow it.
 
     ### Matching a service (DRF-945)
@@ -1241,10 +1409,7 @@ def _bookable_qs(
     than join it.
     """
     qs = (
-        CatalogMaster.all_tenants.filter(
-            is_active=True,
-            invite_status=CatalogMaster.InviteStatus.ACCEPTED,
-        )
+        CatalogMaster.all_tenants.filter(AVAILABLE)
         .select_related("tenant")  # N+1-safe tenant.city / tenant_id
         .order_by("name", "id")
     )
@@ -1318,7 +1483,7 @@ def _bookable_qs(
         # twice for «массаж» without it).
         qs = (
             qs.filter(service_match | specialization_match)
-            .annotate(match_score=_match_score(stems))
+            .annotate(match_score=_match_precision(stems))
             .order_by("-match_score", "name", "id")
         )
 
@@ -1331,6 +1496,8 @@ def discover_masters(
     specialization: str | None = None,
     limit: int = _DEFAULT_LIMIT,
     resolve_service: bool = False,
+    rotation_seed: str | None = None,
+    offset: int = 0,
 ) -> list[MasterCard]:
     """Return bookable masters across ALL tenants as public DTOs.
 
@@ -1343,6 +1510,10 @@ def discover_masters(
     since the result is ranked, the clamp now keeps the BEST matches rather
     than the alphabetically first ones.
 
+    ``rotation_seed`` and ``offset`` are :func:`discover_masters_window`'s,
+    forwarded — this is that function with the found-count dropped, kept for
+    the callers that only ever wanted the first page.
+
     ``resolve_service`` (DRF-962): additionally stamp each card with the ONE
     service that matched the query, when unambiguous (see
     :func:`_matched_services`) — the discovery→booking handoff needs it so a
@@ -1350,9 +1521,126 @@ def discover_masters(
     stale-context dead-end. Off by default: the HTTP directory (#249) and
     other list readers don't pay the extra query.
     """
+    cards, _total = discover_masters_window(
+        city=city,
+        specialization=specialization,
+        limit=limit,
+        resolve_service=resolve_service,
+        rotation_seed=rotation_seed,
+        offset=offset,
+    )
+    return cards
+
+
+#: Ceiling on the candidates one search materialises before the page slice.
+#: The slice used to happen in SQL (``qs[:limit]``), which is why DRF-1530
+#: could not reorder anything and DRF-1532's «Показать ещё» had nothing to
+#: show: the masters past position five were not hidden, they were never
+#: fetched. Equal to :data:`_MAX_LIMIT` — the whole pilot contour is 31
+#: bookable masters, and a marketplace big enough to exceed 200 matches for
+#: one service needs a cursor, not a bigger number.
+_CANDIDATE_SCAN_CAP = _MAX_LIMIT
+
+
+def _rotation_key(seed: str, master_id: UUID) -> bytes:
+    """Per-conversation shuffle key for one master. PURE and stable.
+
+    ``blake2b(seed || master_id)`` — a deterministic function of the pair and
+    nothing else, so:
+
+    * the SAME conversation asking twice gets the SAME order (§29.6: the list
+      must not reshuffle between a person's own replies);
+    * DIFFERENT conversations get independent orders, and the digest is
+      uniform, so first place is shared evenly across candidates instead of
+      always going to the alphabetically first name.
+
+    Not the clock and not ``random``: either would break the first property,
+    which is the one a person actually notices.
+    """
+    payload = f"{seed}{master_id}".encode()
+    return hashlib.blake2b(payload, digest_size=16).digest()
+
+
+class _Rotatable(Protocol):
+    """Что нужно ротации от строки: идентификатор, и всё.
+
+    Протокол, а не ``CatalogMaster``, потому что тот же самый порядок нужен
+    услугам (C-01): ``discover_services`` резала алфавитом с отсечением
+    top-N — ровно то, что §9 запрещает. Заводить вторую ротацию для второго
+    типа значило бы завести и второй ключ, а ключ — это и есть контракт
+    «стабильно внутри человека, равномерно между людьми».
+
+    ``match_score`` не в протоколе намеренно: он есть не на всех выдачах, и
+    его отсутствие читается как «все равны» (см. ниже).
+    """
+
+    id: Any
+
+
+_R = TypeVar("_R", bound=_Rotatable)
+
+
+def rotate_ties(rows: list[_R], seed: str) -> list[_R]:
+    """Order ``rows`` by score, breaking EXACT ties by :func:`_rotation_key`.
+
+    Score first, always. Rotation is the answer to «these candidates are
+    indistinguishable», not a re-ranking: where :func:`_match_precision` tells
+    two masters apart, its verdict stands and this function cannot move them
+    (the positive guard DRF-1411 asks for).
+
+    ``match_score`` is absent on the querysets that do not rank — a goal
+    query, a bare city listing — and every candidate then reads 0.0 and the
+    whole result rotates. That is the correct reading: those results ARE all
+    equal, and today they are ordered by surname.
+    """
+    return sorted(
+        rows,
+        key=lambda row: (
+            -float(getattr(row, "match_score", 0.0) or 0.0),
+            _rotation_key(seed, row.id),
+        ),
+    )
+
+
+def discover_masters_window(
+    *,
+    city: str | None = None,
+    specialization: str | None = None,
+    limit: int = _DEFAULT_LIMIT,
+    offset: int = 0,
+    resolve_service: bool = False,
+    rotation_seed: str | None = None,
+) -> tuple[list[MasterCard], int]:
+    """One window of discovered masters plus how many were FOUND — DRF-1532.
+
+    The count is what makes «Показать ещё» possible: a caller that knows only
+    its own five cards cannot tell «that is everyone» from «three more people
+    exist and this person will never see them». On the pilot's «массаж» the
+    difference was eight found against five shown, with the three losers
+    picked by surname.
+
+    Candidates are materialised up to :data:`_CANDIDATE_SCAN_CAP` and sliced
+    HERE, in Python, rather than by ``LIMIT`` in SQL. Both tickets need that:
+    rotation has to see the whole tie before it can break it, and a later page
+    has to be able to reach past the first one.
+
+    ``rotation_seed`` — the conversation id, or ``None`` for the readers with
+    no conversation (the HTTP directory, tests of pure ranking). ``None``
+    keeps the deterministic ``("name", "id")`` order the ranking leaves
+    behind, so no caller changes behaviour by not passing it.
+
+    Paging is stable BY CONSTRUCTION: the order is a pure function of (score,
+    seed, id), so page 2 is the tail of the same list page 1 was the head of —
+    nobody is shown twice and nobody falls between the pages.
+    """
     limit = max(1, min(limit, _MAX_LIMIT))
+    offset = max(0, int(offset))
     qs = _bookable_qs(city=city, specialization=specialization)
-    masters = list(qs[:limit])
+    candidates = list(qs[:_CANDIDATE_SCAN_CAP])
+    if rotation_seed:
+        candidates = rotate_ties(candidates, rotation_seed)
+    total = len(candidates)
+    masters = candidates[offset : offset + limit]
     cards = [_to_card(master) for master in masters]
     if resolve_service and specialization and specialization.strip():
         matched = _matched_services([master.id for master in masters], _parse_query(specialization))
@@ -1364,7 +1652,201 @@ def discover_masters(
             )
             for card in cards
         ]
-    return cards
+    return cards, total
+
+
+# ─── DRF-1531: material for ONE distinguishing question ────────────────────
+#
+# Замер пилота 06.09.2026: «массаж» — восемь мастеров в одном ярусе, показаны
+# пять. DRF-1530 сжал ярус, но не убрал причину: запрос «массаж» НЕ СОДЕРЖИТ
+# того, чем кандидаты различаются. Решение владельца §29.2 — не изображать
+# уверенность, а задать один различающий вопрос ИМЕНАМИ КАТАЛОГА.
+#
+# Здесь считается только материал вопроса. Решение «спрашивать или показывать»
+# принимает оркестратор (`apps/orchestrator/discovery.py`), потому что оно про
+# ход разговора, а не про каталог.
+
+#: Ceiling on the options one question may carry. Five is §7's progressive
+#: disclosure limit and the same ceiling the renderer already applies
+#: (``_MAX_CLARIFICATION_OPTIONS``): more than five names is a catalogue
+#: again, which is the thing the question exists instead of.
+_MAX_CLARIFY_OPTIONS = 5
+
+#: Decimal places the tier comparison rounds to. Two candidates whose SQL
+#: score differs in the tenth decimal are the SAME tier by any honest reading;
+#: the alternative is a tier of one that exists only because of float
+#: representation. Same figure the module's own tier measurement uses.
+_TIER_ROUNDING = 9
+
+
+class ClarifyMaterial(NamedTuple):
+    """What a clarifying question COULD be built from — DRF-1531.
+
+    ``tier`` — how many candidates share the best match precision, i.e. how
+    many people the query genuinely fails to tell apart. ``options`` — the
+    distinct catalog names that tier is made of, best-supported first.
+
+    Both, not either: the tier decides WHETHER the request is answerable as
+    it stands, the options decide whether there is anything honest to ask.
+    A caller that has one without the other can only guess.
+    """
+
+    tier: int
+    options: list[str]
+
+
+def clarification_material(
+    *,
+    city: str | None = None,
+    specialization: str | None = None,
+    limit: int = _MAX_CLARIFY_OPTIONS,
+) -> ClarifyMaterial:
+    """The top tier of a search, and the CATALOG NAMES it is made of.
+
+    Owner decision §29.2: when the gap is not enough, Ayla asks one
+    distinguishing question «используя реальные названия услуг из каталога».
+    Every word this returns is a row of ``CatalogService`` — nothing is
+    generated, so the §20 boundary is reinforced rather than moved.
+
+    ### Why the options are the TIER's names, not the search's
+
+    The tier is the set of candidates the ranking could not separate. Its
+    names are exactly the axis the query is missing: on «массаж» the two-word
+    massage services all score 0.5 and «Массаж ног — глубокое расслабление и
+    лимфодренаж» scores 0.14, so the question offers «Классический /
+    Спортивный / Лимфодренажный / Массаж головы» and not the advertising
+    name that was never in the tie. Offering a name from below the tier would
+    ask about a distinction the ranking had already made.
+
+    ### Why every option has a master, by construction
+
+    The names come from rows joined to masters who are IN the tier — masters
+    the caller's own search just returned. There is no separate existence
+    check to get out of step with the search, and no option can lead to an
+    empty list: «чип в пустоту хуже отсутствия чипа».
+
+    ### Ordering
+
+    ``(-masters, name)`` — how many bookable people perform it, then the name.
+    The same rule :func:`city_service_samples` uses, and for the same reason:
+    «what most people here can be booked for» is a fact of the catalog, while
+    any other order would be an editorial pick. It is NOT a ranking of the
+    masters against each other — that is the line §29.3 draws and this stays
+    on the near side of it.
+
+    A GOAL query («хочу расслабиться») has no ranking at all — carrying a goal
+    is a yes/no fact — so every carrier is in the tier and this ordering is
+    what decides which five names are offered. That is the case the ticket is
+    written around: today such a query returns 120 services alphabetically and
+    is not ranked at all.
+
+    ``ClarifyMaterial(0, [])`` when the query names neither a service nor a
+    goal (a bare city, an unparseable turn) or when nobody matched: there is
+    no tie to break, and asking would be asking for its own sake.
+    """
+    parsed = _parse_query(specialization or "")
+    if parsed.is_empty or not (parsed.stems or parsed.goals):
+        return ClarifyMaterial(0, [])
+    limit = max(1, min(int(limit), _MAX_CLARIFY_OPTIONS))
+    candidates = list(_bookable_qs(city=city, specialization=specialization)[:_CANDIDATE_SCAN_CAP])
+    if not candidates:
+        return ClarifyMaterial(0, [])
+    # Scores compared only against each other and only within one engine: the
+    # tier is decided on SQL floats, the options on Python floats, and the two
+    # never meet. Mixing them would make the tier depend on how a backend
+    # rounds a quotient.
+    scores = [
+        round(float(getattr(master, "match_score", 0.0) or 0.0), _TIER_ROUNDING)
+        for master in candidates
+    ]
+    best = max(scores)
+    tier_ids = [master.id for master, score in zip(candidates, scores) if score == best]
+    rows = (
+        CatalogMaster.all_tenants.filter(id__in=tier_ids)
+        .filter(_relation_match_q(parsed))
+        .values_list("id", "services_offered__service__name")
+    )
+    # The SAME match Q the search ran (``_relation_match_q``), so a name here
+    # is a name that really put its master on the list.
+    scored = [
+        (str(name or "").strip(), master_id, row_precision(name or "", parsed.stems))
+        for master_id, name in rows
+    ]
+    scored = [row for row in scored if row[0]]
+    if not scored:
+        # Reachable: a tier of masters matched through the legacy free-text
+        # ``specialization`` has no joined service row to name.
+        return ClarifyMaterial(len(tier_ids), [])
+    top = round(max(score for _name, _master_id, score in scored), _TIER_ROUNDING)
+    per_name: dict[str, set[UUID]] = {}
+    for name, master_id, score in scored:
+        # A tier master may ALSO offer a service from below the tier («Массаж
+        # ног — …» alongside «Классический массаж»). Only the rows that put
+        # them in the tier name it.
+        if round(score, _TIER_ROUNDING) == top:
+            per_name.setdefault(name, set()).add(master_id)
+    ranked = sorted(per_name.items(), key=lambda item: (-len(item[1]), item[0]))
+    return ClarifyMaterial(len(tier_ids), [name for name, _masters in ranked[:limit]])
+
+
+# How many service names a refusal may name back as the alternative it CAN
+# serve. Three is the ceiling the salon cards already use
+# (``_SALON_SERVICE_SAMPLES``) and the reason is the same one: a refusal that
+# answers with a catalogue is a catalogue, and the system prompt forbids those
+# («никаких каталог-перечислений»). Three names read as «here is what we do
+# instead», twenty read as a price list.
+_CITY_SERVICE_SAMPLES = 3
+
+# Ceiling on the (master, service) rows the sample scans. The pilot's
+# whole contour is ~500 of them; this is a suggestion, not a survey, and a
+# marketplace large enough to exceed the cap has a most-common service well
+# inside the first rows anyway.
+_SAMPLE_SCAN_ROWS = 2000
+
+
+def city_service_samples(
+    city: str | None = None, *, limit: int = _CITY_SERVICE_SAMPLES
+) -> list[str]:
+    """Services that ARE bookable in ``city`` right now — at most ``limit`` names.
+
+    DRF-1474. The honest refusal («маникюра в Пензе нет») used to end at
+    «назовите другую услугу или другой город», which hands the person the job
+    of guessing what this marketplace actually does. On the live turn of
+    04.09 they guessed «массаж», it worked, and the transcript then reads as
+    though the bot had quietly answered a nail request with a massage list.
+
+    Naming the alternative is what makes it an alternative rather than a
+    substitution: the caller states these ARE something else, and states it in
+    the same breath as the refusal.
+
+    Ranked by how many bookable masters perform each service — «what most
+    people here can be booked for», not an editorial pick — with the name as
+    the tiebreak so the same catalog always yields the same three.
+
+    The SAME ``_bookable_qs`` predicate that produced the (empty) card list,
+    for the reason :func:`service_coverage` gives: a suggestion this function
+    makes must be something discovery would really find.
+    """
+    limit = max(1, min(int(limit), _CITY_SERVICE_SAMPLES))
+    # ``order_by()`` clears the master ordering before the read: the sort
+    # columns are not in the selected set, and the ranking below is ours.
+    rows = (
+        _bookable_qs(city=city)
+        .filter(_service_row_q())
+        .order_by()
+        .values_list("services_offered__service__name", "id")[:_SAMPLE_SCAN_ROWS]
+    )
+    # Counted in Python rather than by a GROUP BY for the same reason
+    # :func:`_matched_services` scores in Python: the row set is bounded by
+    # construction, and the rule is easier to see than to reconstruct from an
+    # annotate/values pair.
+    per_service: dict[str, set[UUID]] = {}
+    for name, master_id in rows:
+        cleaned = str(name or "").strip()
+        if cleaned:
+            per_service.setdefault(cleaned, set()).add(master_id)
+    ranked = sorted(per_service.items(), key=lambda item: (-len(item[1]), item[0]))
+    return [name for name, _masters in ranked[:limit]]
 
 
 def discover_masters_page(
@@ -1406,6 +1888,20 @@ def get_master(master_id: UUID) -> MasterCard | None:
     """
     master = _bookable_qs().filter(id=master_id).first()
     return _to_card(master) if master is not None else None
+
+
+def master_for_media(master_id: UUID | str) -> CatalogMaster | None:
+    """Мастер — хозяин фото/портфолио по id бота, в любом салоне (DRF-2539).
+
+    Фото мастера отдаётся байтами через бот (``apps.miniapp_api.master_media``):
+    клиенту на витрине, мастеру на своём экране, администратору в «Команде».
+    Поиск межтенантный — поэтому здесь, в единственном разрешённом месте
+    ``all_tenants`` (MKT1). В отличие от :func:`get_master` не требует
+    «доступен для записи»: мастер видит своё фото до публикации, салон — у
+    архивного. Наружу из этого поиска уходят только байты фото; поля мастера
+    вызывающий на провод не отдаёт.
+    """
+    return CatalogMaster.all_tenants.filter(id=master_id).first()
 
 
 # ─── DRF-1354: finding a master the client named BY NAME ────────────────
@@ -1572,20 +2068,6 @@ def _bookable_tenants(
     return {t.id: t for t in Tenant.objects.filter(id__in=tenant_ids)}
 
 
-def _master_address(master: CatalogMaster) -> str:
-    """The salon address as mirrored on a master row, or "".
-
-    The address is per-master, not per-tenant: ``Tenant`` has no address
-    column — the Ayla specialists feed carries it in the specialist payload,
-    mirrored into ``CatalogMaster.raw``. Four of the pilot's masters carry
-    none, so "" is a normal value, not an error.
-    """
-    raw = master.raw
-    if not isinstance(raw, dict):
-        return ""
-    return str(raw.get("address") or "").strip()
-
-
 def discover_salons(
     *,
     city: str | None = None,
@@ -1597,8 +2079,9 @@ def discover_salons(
     Optional ``city`` (exact, case-insensitive, on the tenant) narrows the
     result — same semantics as :func:`discover_masters`; ``tenant_id`` narrows
     it to one salon (the chip-tap read — see :func:`get_salon`). Each card carries
-    the salon's address (first non-empty one among its bookable masters —
-    "" when none of them has one), its bookable-master count, and a count +
+    the salon's address (``Tenant.address`` verbatim — ``None`` when the source
+    said nothing, "" when it said there is none; DRF-1609 stopped deriving it
+    from the masters' addresses), its bookable-master count, and a count +
     short sample of its active services («что там делают»). Three bounded
     queries total: masters, tenants, service names.
     """
@@ -1624,7 +2107,28 @@ def discover_salons(
         salon_masters = masters_by_tenant.get(tenant_id, [])
         if not salon_masters:
             continue  # inactive tenant — its masters are not a public salon
-        address = next((a for a in (_master_address(m) for m in salon_masters) if a), "")
+        # DRF-1609 — адрес САЛОНА берётся из колонки салона.
+        #
+        # Здесь стояло ``next((a for a in (_master_address(m) …) if a), "")``:
+        # первый непустой адрес среди мастеров. OPEN_DECISIONS §45 назвал это
+        # лотереей, и буквально: подтвердили нового мастера, деактивировали
+        # старого — и клиент видит ДРУГОЙ адрес того же салона, хотя салон не
+        # переезжал. DRF-1587 завела ``Tenant.address`` (миграция
+        # tenancy/0015, 08.09) ровно затем, чтобы читать колонку, а не
+        # угадывать; синхронизация уже пишет её (``_write_tenant_address``,
+        # apps/catalog/services/upserter.py).
+        #
+        # ``None`` НЕ схлопывается в "". Это два разных ответа источника, и
+        # различает их та же DRF-1587: ``None`` — источник об адресе ничего
+        # не сказал (сегодня это все салоны: ключа ``tenant_address`` в фиде
+        # ещё нет), "" — источник сказал, что адреса нет. Подстановка "" на
+        # месте молчания сделала бы «мы не знаем» неотличимым от «адреса
+        # нет», а рендер и так печатает пустоту одинаково — значит платить
+        # за слияние нечем, а терять есть что.
+        #
+        # Старшинство «салон против мастера» (DRF-1589) здесь не решается:
+        # мастерский адрес в карточку САЛОНА не попадает вовсе.
+        address = tenant.address
         service_names = services_by_tenant.get(tenant_id, [])
         cards.append(
             SalonCard(
@@ -1685,22 +2189,27 @@ def service_rows_match_q(parsed: "ParsedQuery") -> Q:
     return any_stem
 
 
-def service_rows_score(parsed: "ParsedQuery") -> Case | CombinedExpression | None:
+def service_rows_score(parsed: "ParsedQuery") -> ExpressionWrapper | None:
     """Rank expression for :func:`service_rows_match_q`, or ``None``.
 
     ``None`` for a goal query, deliberately: carrying a goal is a yes/no fact
     and ordering its carriers against each other would be recommendation, not
     selection. Callers fall back to their stable name order there.
+
+    DRF-1530 moved this to the SAME match precision the master search ranks
+    by (:func:`_row_precision`) rather than leaving it on the stem counter.
+    That was a decision, not a sweep: this expression orders the service menu
+    behind a master card (``apps/orchestrator/handoff.py``) and the service
+    cards of ``discover_services`` — the two screens a person reaches
+    immediately either side of the master list. Leaving them on the counter
+    would have shown the same catalog in two different orders one tap apart,
+    and «Классический массаж» above «Массаж ног — …» in the list while below
+    it in the menu is the kind of inconsistency nobody reports and everybody
+    distrusts.
     """
-    score: Case | CombinedExpression | None = None
-    for stem in parsed.stems:
-        term = Case(
-            When(_stem_match_q("name", stem), then=Value(1)),
-            default=Value(0),
-            output_field=IntegerField(),
-        )
-        score = term if score is None else score + term
-    return score
+    if not parsed.stems:
+        return None
+    return _row_precision("name", parsed.stems)
 
 
 def discover_services(
@@ -1709,18 +2218,28 @@ def discover_services(
     tenant_id: UUID | None = None,
     city: str | None = None,
     query: str | None = None,
+    goal_key: str | None = None,
     limit: int = _DEFAULT_LIMIT,
+    rotation_seed: str | None = None,
 ) -> list[ServiceCard]:
     """Return active services of salons on the platform, as public DTOs.
+
+    ``goal_key`` (DRF-2125) — the curated goal key DIRECTLY, bypassing the
+    text parser: the plan card knows the key (``PlanLite.goal_key``), and
+    re-parsing its label as free text would depend on the label's wording
+    (short tokens, stems shared with another goal). Same selection the goal
+    branch of ``query`` makes (:func:`service_rows_match_q`), unranked.
+    Mutually exclusive with ``query``; ``goal_key`` wins.
 
     Filters (all optional, AND-ed): ``salon`` — substring of the tenant name;
     ``tenant_id`` — that one salon, exactly (the chip-tap read: the button
     carries the id, so the follow-up must not re-run a name match);
     ``city`` — exact, case-insensitive, on the tenant; ``query`` — free text
     matched against service names through the same stem machinery as master
-    discovery (:func:`_parse_query`): tokens OR-ed, ranked by how many stems
-    one name matched, and a token naming a city we serve routes to the city
-    filter, so «массаж в пензе» works here exactly as it does for masters.
+    discovery (:func:`_parse_query`): tokens OR-ed, ranked by the same match
+    PRECISION the master search uses since DRF-1530 (:func:`_row_precision`),
+    and a token naming a city we serve routes to the city filter, so «массаж
+    в пензе» works here exactly as it does for masters.
     A query that names a GOAL and nothing else selects on the curated goal key
     instead (DRF-1324), unranked — see :func:`service_rows_score`.
     An untokenizable query fails CLOSED (empty list) rather than dropping the
@@ -1728,6 +2247,29 @@ def discover_services(
 
     Only services of tenants with at least one bookable master are shown:
     a salon no client can book at is not on the surface.
+
+    ``rotation_seed`` — C-01. До этой правки ничьи разводились алфавитом, а
+    срез в ``limit`` делал SQL: значит услуги, чьё имя стоит дальше по
+    алфавиту, не показывались НИКОГДА, и кто именно выпал, решала первая
+    буква. Канон §9 запрещает алфавитный fallback именно при отсечении
+    top-N — отсечение превращает порядок в систематическое смещение показов.
+    DRF-1529 вылечила эту болезнь на списке мастеров и назвала три точки;
+    вылечена была одна.
+
+    Кандидаты поэтому набираются до :data:`_CANDIDATE_SCAN_CAP` и режутся
+    ЗДЕСЬ, в питоне, ровно как в :func:`discover_masters_window`. Срез в SQL
+    оставлял бы ротации нечего переставлять — та же причина, по которой
+    DRF-1530 ничего не переупорядочила.
+
+    ``None`` (сида нет) сохраняет прежний детерминированный порядок, так что
+    ни один существующий вызывающий не меняет поведения молча.
+
+    **Следствие, которое стоит назвать:** на выдаче БЕЗ запроса прежний
+    порядок группировал услуги по салону (``tenant__name``). С сидом
+    группировка уступает ротации — все кандидаты там равны, и «равны» на
+    этой поверхности означает именно то же, что и на соседней: сегодня их
+    порядок решает алфавит. Это тот же выбор, который уже сделан для
+    мастеров, а не новый.
     """
     limit = max(1, min(limit, _MAX_LIMIT))
     bookable_tenant_ids = _bookable_qs().order_by().values_list("tenant_id", flat=True).distinct()
@@ -1748,7 +2290,10 @@ def discover_services(
         qs = qs.filter(tenant__city__iexact=city)
 
     order: tuple[str, ...] = ("tenant__name", "name", "id")
-    if query:
+    goal_key = (goal_key or "").strip()
+    if goal_key:
+        qs = qs.filter(service_rows_match_q(ParsedQuery(stems=[], cities=[], goals=[goal_key])))
+    elif query:
         parsed = _parse_query(query)
         stems, named_cities = parsed.stems, parsed.cities
         if parsed.is_empty:
@@ -1762,30 +2307,36 @@ def discover_services(
             qs = qs.filter(service_rows_match_q(parsed))
         elif stems:
             any_stem = Q()
-            # No join multiplication here (the tenant join is many-to-one and
-            # the filter binds the row's own name), so a plain per-row CASE
-            # sum ranks — MAX-over-rows is the master-side requirement only.
-            score: Case | CombinedExpression | None = None
             for stem in stems:
-                cond = _stem_match_q("name", stem)
-                any_stem |= cond
-                term = Case(
-                    When(cond, then=Value(1)),
-                    default=Value(0),
-                    output_field=IntegerField(),
-                )
-                score = term if score is None else score + term
-            qs = qs.filter(any_stem).annotate(match_score=score)
+                any_stem |= _stem_match_q("name", stem)
+            # No join multiplication here (the tenant join is many-to-one and
+            # the filter binds the row's own name), so the per-row expression
+            # ranks directly — MAX-over-rows is the master-side requirement
+            # only. The expression itself is the one the master search and the
+            # service menu use (DRF-1530), so all three surfaces order the
+            # same catalog the same way.
+            qs = qs.filter(any_stem).annotate(match_score=_row_precision("name", stems))
             order = ("-match_score", "name", "id")
     # DRF-1304 — «is there anyone to book with for this service» decides
     # whether the renderer may put a chip on the line. Nobody performing it is
     # a normal state (a salon lists a service its masters are not mapped to),
     # and a chip leading there would spend the user's trust on a dead end.
     # ``.order_by()`` because an EXISTS subquery has nothing to sort.
-    performs_it = _bookable_qs().order_by().filter(services_offered__service_id=OuterRef("pk"))
+    performs_it = (
+        _bookable_qs()
+        .order_by()
+        .filter(sellable_edge_q("services_offered__"), services_offered__service_id=OuterRef("pk"))
+    )
     qs = qs.annotate(has_bookable_master=Exists(performs_it))
 
-    rows = qs.order_by(*order)[:limit]
+    # Набираем до потолка и режем в питоне — иначе ротации нечего
+    # переставлять. Потолок (200) не меньше любого возможного ``limit``
+    # (он клампится тем же числом выше), так что кандидатов для среза
+    # всегда достаточно.
+    candidates = list(qs.order_by(*order)[:_CANDIDATE_SCAN_CAP])
+    if rotation_seed:
+        candidates = rotate_ties(candidates, rotation_seed)
+    rows = candidates[:limit]
     return [
         ServiceCard(
             tenant_id=service.tenant_id,
@@ -1802,7 +2353,11 @@ def discover_services(
 
 
 def discover_masters_for_service(
-    service_id: UUID, *, limit: int = _DEFAULT_LIMIT
+    service_id: UUID,
+    *,
+    limit: int = _DEFAULT_LIMIT,
+    offset: int = 0,
+    rotation_seed: str | None = None,
 ) -> list[MasterCard]:
     """Return the bookable masters who perform ONE service (DRF-1304).
 
@@ -1815,8 +2370,37 @@ def discover_masters_for_service(
     Empty list when the service is gone or inactive, its salon went inactive,
     or nobody bookable performs it any more. All of those mean «no one to book
     with», and the caller must say that rather than invent a master.
+
+    ### DRF-1539 — the slice stops happening in SQL
+
+    This reader kept ``order_by("name", "id")[:limit]``: the same defect
+    DRF-1530 and DRF-1532 removed one function up, on a path they never
+    touched. Past position five the masters were not hidden, they were never
+    fetched, and which of them fell out was decided by surname. After #1410 the
+    two screens are one tap apart and disagreed — meaningful order by text,
+    alphabet by chip — and nothing could be said to a person about why.
+
+    So candidates are materialised to :data:`_CANDIDATE_SCAN_CAP` and sliced
+    HERE, in Python, exactly as :func:`discover_masters_window` does, and
+    ``offset`` lets «Показать ещё» reach the tail (§29.6 — «никто не должен
+    исчезать из выдачи навсегда»).
+
+    **The scoring half of §29 is DEGENERATE on this path, and saying so is the
+    point.** Every candidate performs the tapped service, so their best row is
+    that one row and :func:`row_precision` returns the same number for all of
+    them — there is no gap for match precision to find. That is not a gap in
+    the fix: it is what «полное равенство кандидатов» (§29.6) means, and the
+    honest answer to it is the rotation below, not an invented tiebreak.
+    ``rotate_ties`` is therefore given the whole list, and it orders by score
+    first regardless — if a future filter ever does separate these candidates,
+    its verdict stands and rotation cannot move them (DRF-1411).
+
+    ``rotation_seed`` — the conversation id, or ``None`` for a reader with no
+    dialogue behind it, which keeps the deterministic ``("name", "id")`` order
+    and so changes no existing caller.
     """
     limit = max(1, min(limit, _MAX_LIMIT))
+    offset = max(0, int(offset))
     service = (
         CatalogService.all_tenants.select_related("tenant")
         .filter(id=service_id, is_active=True, tenant__is_active=True)
@@ -1826,11 +2410,14 @@ def discover_masters_for_service(
         return []
     # tenant_id from the SERVICE, not from the caller: an edge may only bind a
     # master to a service of their own tenant (see _service_row_q).
-    masters = list(
-        _bookable_qs(tenant_id=service.tenant_id).filter(services_offered__service_id=service.id)[
-            :limit
-        ]
+    candidates = list(
+        _bookable_qs(tenant_id=service.tenant_id).filter(
+            sellable_edge_q("services_offered__"), services_offered__service_id=service.id
+        )[:_CANDIDATE_SCAN_CAP]
     )
+    if rotation_seed:
+        candidates = rotate_ties(candidates, rotation_seed)
+    masters = candidates[offset : offset + limit]
     return [
         replace(_to_card(master), service_id=service.id, service_name=service.name)
         for master in masters

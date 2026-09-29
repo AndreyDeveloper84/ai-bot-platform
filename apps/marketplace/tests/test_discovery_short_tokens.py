@@ -147,6 +147,10 @@ def contour() -> Tenant:
             specialization=specialization,
             is_active=True,
             invite_status=CatalogMaster.InviteStatus.ACCEPTED,
+            # DRF-1540/1544 — синхронизированная строка несёт канонический ключ.
+            # Без него мастер не продаётся, и пустая выдача читалась бы как
+            # поломка подбора, а не как отсутствие связи с Ayla.
+            ayla_user_id=uuid4(),
         )
         for service_name, goals in services:
             service = CatalogService.all_tenants.create(

@@ -1,0 +1,329 @@
+/**
+ * Экран 01 — «[имя], всё готово» (DRF-1807, M15; макет FINAL FREEZE §7).
+ *
+ * Читает ОДНУ ручку — `GET /api/v1/master/onboarding/readiness` (M2) — и
+ * рисует чек-лист «Осталось настроить» ровно по её пунктам. Экран не
+ * решает, что настроено: это проекция по доменным фактам на сервере,
+ * состояние онбординга не хранится нигде, и «продолжить позже» — просто
+ * уход с экрана; возврат считается заново из тех же фактов.
+ *
+ * Три честности пункта (контракт M2):
+ * - `done` / `missing` — факт: ✓ либо «не настроено», тап ведёт по `deep_link`;
+ * - `unknown` — канон не ответил: «не удалось прочитать», а НЕ «настройте»
+ *   (человеку, который настроил расписание, это была бы ложь);
+ * - `unavailable` — шага у мастера сейчас нет: пункт РИСУЕТСЯ, назван
+ *   недоступным и причиной, но не тапается (DRF-2326). Раньше он прятался
+ *   вовсе, и мастер читал экран как «у меня всё настроено», хотя пункт
+ *   оставался в `blocking` и профиль было не отправить. Молчание хуже
+ *   отказа: отказ хотя бы называет причину.
+ *
+ * Включение таких шагов в этот экран НЕ входит: `deep_link` у них пуст,
+ * вести некуда, и тикет DRF-2326 их не открывает.
+ *
+ * Бар — от числа закрытых пунктов, без процентов и без «N из M» (макет:
+ * «no fake percent complete»). Связь личности — отдельная строка: это
+ * условие публикации, не настройки (ruling 6); до LINKED профиль остаётся
+ * черновиком, и слово «опубликован» здесь не звучит (§16, §20).
+ *
+ * Нижней навигации на этом экране нет (макет §7).
+ */
+import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
+
+// Загрузка / ошибка загрузки — мастерский SystemState (DRF-2194), не клиентский StateError.
+import { SystemState } from "../components/master/SystemState";
+import {
+  actionableReadinessItems,
+  getMasterMe,
+  getOnboardingReadiness,
+  readinessFill,
+  type OnboardingReadiness,
+  type ReadinessItem,
+} from "../lib/master-api";
+import { setBackButton, signalReady } from "../lib/max-sdk";
+import { SALON_PLACE_TEXT } from "./MasterPlaceScreen";
+
+export const SETUP_ROUTE = "/solo/setup";
+export const HOME_ROUTE = "/solo/my-day";
+/** Экран 08 — отправка профиля на проверку (DRF-1818, M26): вход только из готового чек-листа. */
+export const PUBLICATION_ROUTE = "/solo/publication";
+
+/** Подписи пунктов — по макету 1.1; профиль — по контракту readiness (D8: место решает дизайнер). */
+export const READINESS_ITEM_LABELS: Record<string, string> = {
+  services: "Услуги и цены",
+  location: "Место работы",
+  hours: "Расписание",
+  profile: "Профиль для клиентов",
+};
+
+export const ITEM_STATE_TEXT = {
+  done: "Настроено",
+  missing: "Не настроено",
+  unknown: "Не удалось прочитать",
+  unavailable: "Недоступно",
+} as const;
+
+/**
+ * Причина недоступности — словами, по коду причины из readiness (DRF-2326).
+ *
+ * Коды заводит сервер (`onboarding_readiness.MANAGED_OUTSIDE_APP`,
+ * `capability_not_built`); сырой код на экран не попадает — незнакомая
+ * причина остаётся без строки, и пункт называет только состояние. Выдумать
+ * причину хуже, чем не назвать её.
+ *
+ * ЧЕРНОВИК ТЕКСТА: формулировки в тикете не заданы, их утверждает владелец.
+ */
+export const REASON_TEXT = {
+  capability_not_built: "Возможности ещё нет",
+  managed_outside_app: "Настраивается не в приложении",
+} as const;
+
+/** Текст причины по коду сервера; незнакомый код — без текста, не сырым кодом. */
+export function reasonText(reason: string | null, key?: string): string | undefined {
+  if (!reason) return undefined;
+  // П.6 решений 28.09 (DRF-2581): место салонного мастера — фраза владельца.
+  if (key === "location" && reason === "managed_outside_app") return SALON_PLACE_TEXT;
+  return (REASON_TEXT as Record<string, string | undefined>)[reason];
+}
+
+export const SETUP_LEAD = "Ваше рабочее пространство уже создано.";
+export const SETUP_EXPLAIN = "Теперь подготовим профиль, чтобы клиенты могли записываться к вам.";
+export const SETUP_RESUME_NOTE = "Настройку можно прервать и продолжить позже. Всё сохранится.";
+export const START_LABEL = "Начать настройку";
+export const CONTINUE_LABEL = "Продолжить настройку";
+export const LATER_LABEL = "Продолжить позже";
+export const ALL_DONE_TITLE = "Всё настроено";
+
+/**
+ * Решение владельца 28.09 (слова, п.7; DRF-2582) — дословно. Когда мастер
+ * закрыл всё, что зависит от него, а остальное ведёт салон: полоса и озвучка
+ * не должны читаться как «вам ещё заполнять» — ни «полна» без слов (диктор
+ * читал 100 % при ненастроенных услугах и месте), ни «подготовим профиль».
+ */
+export const SALON_REST_TEXT = "С вашей стороны всё готово. Остальное настроит салон.";
+
+/**
+ * Своё закрыто, остальное — салона: не готово, достижимых незакрытых нет
+ * (`unknown` — незакрытый: незнание сюда не попадает), и есть пункт, который
+ * ведёт салон (`managed_outside_app`).
+ */
+export function restIsSalons(readiness: OnboardingReadiness): boolean {
+  return (
+    !readiness.ready &&
+    firstOpenItem(readiness.items) === null &&
+    readiness.items.some((item) => item.state === "unavailable" && item.reason === "managed_outside_app")
+  );
+}
+export const PUBLISH_ENTRY_LABEL = "Отправить профиль на проверку";
+
+/**
+ * Отправить на проверку можно только связанному мастеру (ruling 6): `ready`
+ * бота считает пункты настройки, а личность — отдельной строкой. Одно
+ * правило на оба входа — экран 01 и карточку «Моего дня» (§6-квартер).
+ */
+export function canSubmitProfile(readiness: OnboardingReadiness): boolean {
+  return readiness.ready && readiness.identity.state === "linked";
+}
+export const IDENTITY_PENDING_NOTE = "Подтверждение личности — ожидает оператора.";
+export const IDENTITY_UNLINKED_NOTE =
+  "Отправить профиль на проверку можно будет после подтверждения личности.";
+export const IDENTITY_REJECTED_NOTE = "Подтверждение личности отклонено — напишите в поддержку.";
+
+type Phase =
+  | { kind: "loading" }
+  | { kind: "error"; err: unknown }
+  | { kind: "ready"; readiness: OnboardingReadiness; name: string };
+
+export function itemLabel(item: ReadinessItem): string {
+  return READINESS_ITEM_LABELS[item.key] ?? item.key;
+}
+
+/** Первый незакрытый пункт, с которого начинается настройка. */
+export function firstOpenItem(items: ReadinessItem[]): ReadinessItem | null {
+  return actionableReadinessItems(items).find((item) => item.state !== "done") ?? null;
+}
+
+export function identityNote(state: string): string | null {
+  if (state === "pending") return IDENTITY_PENDING_NOTE;
+  if (state === "rejected") return IDENTITY_REJECTED_NOTE;
+  if (state === "unlinked") return IDENTITY_UNLINKED_NOTE;
+  return null;
+}
+
+export function MasterSetupLandingScreen() {
+  const navigate = useNavigate();
+  const [phase, setPhase] = useState<Phase>({ kind: "loading" });
+
+  useEffect(() => {
+    setBackButton(false);
+    signalReady();
+  }, []);
+
+  const load = async () => {
+    setPhase({ kind: "loading" });
+    try {
+      const [readiness, me] = await Promise.all([
+        getOnboardingReadiness(),
+        // Имя — для приветствия; без него экран всё равно рисуется.
+        getMasterMe().catch(() => null),
+      ]);
+      setPhase({ kind: "ready", readiness, name: me?.master.name?.trim() ?? "" });
+    } catch (err) {
+      setPhase({ kind: "error", err });
+    }
+  };
+
+  useEffect(() => {
+    void load();
+  }, []);
+
+  if (phase.kind === "loading") {
+    return (
+      <main className="screen setup-landing">
+        <SystemState kind="loading" lines={3} />
+      </main>
+    );
+  }
+
+  if (phase.kind === "error") {
+    return (
+      <main className="screen setup-landing">
+        <SystemState kind="load_error" what="setup" err={phase.err} onRetry={() => void load()} />
+      </main>
+    );
+  }
+
+  const { readiness, name } = phase;
+  // Рисуются ВСЕ пункты, включая недоступные (DRF-2326); бар и «следующий
+  // шаг» ниже считают только достижимые.
+  const items = readiness.items;
+  const fill = readinessFill(readiness.items);
+  const next = firstOpenItem(readiness.items);
+  const note = identityNote(readiness.identity.state);
+  const greeting = name ? `${name}, всё готово 👋` : "Всё готово 👋";
+  const canSubmit = canSubmitProfile(readiness);
+  const salonRest = restIsSalons(readiness);
+
+  return (
+    <main className="screen setup-landing" aria-labelledby="setup-landing-title">
+      <h1 id="setup-landing-title" className="setup-landing__title">
+        {readiness.ready ? ALL_DONE_TITLE : greeting}
+      </h1>
+      {!readiness.ready && (
+        <>
+          <p className="setup-landing__lead">{SETUP_LEAD}</p>
+          <p className="setup-landing__lead">{salonRest ? SALON_REST_TEXT : SETUP_EXPLAIN}</p>
+        </>
+      )}
+
+      <div
+        className="setup-landing__bar"
+        role="progressbar"
+        aria-label="Готовность настройки"
+        aria-valuemin={0}
+        aria-valuemax={fill.total}
+        aria-valuenow={fill.done}
+        {...(salonRest ? { "aria-valuetext": SALON_REST_TEXT } : {})}
+        data-testid="setup-bar"
+      >
+        <div
+          className="setup-landing__bar-fill"
+          style={{ width: fill.total ? `${(fill.done / fill.total) * 100}%` : "0%" }}
+        />
+      </div>
+
+      <h2 className="setup-landing__section-title">Осталось настроить</h2>
+      <ul className="setup-landing__list" aria-label="Осталось настроить">
+        {items.map((item) => (
+          <li key={item.key} className={`setup-landing__item setup-landing__item--${item.state}`}>
+            <ItemRow item={item} onOpen={() => item.deep_link && navigate(item.deep_link)} />
+          </li>
+        ))}
+      </ul>
+
+      {note && (
+        <p className="setup-landing__identity" data-testid="setup-identity">
+          {note}
+        </p>
+      )}
+
+      <p className="setup-landing__note">{SETUP_RESUME_NOTE}</p>
+
+      <div className="setup-landing__actions">
+        {next ? (
+          <button
+            type="button"
+            className="btn-primary"
+            onClick={() => next.deep_link && navigate(next.deep_link)}
+          >
+            {fill.done > 0 ? CONTINUE_LABEL : START_LABEL}
+          </button>
+        ) : null}
+        {canSubmit && (
+          <button
+            type="button"
+            className="btn-primary"
+            onClick={() => navigate(PUBLICATION_ROUTE)}
+          >
+            {PUBLISH_ENTRY_LABEL}
+          </button>
+        )}
+        <button
+          type="button"
+          className={next || canSubmit ? "btn-secondary" : "btn-primary"}
+          onClick={() => navigate(HOME_ROUTE)}
+        >
+          {next ? LATER_LABEL : "Открыть кабинет"}
+        </button>
+      </div>
+    </main>
+  );
+}
+
+function ItemRow({ item, onOpen }: { item: ReadinessItem; onOpen: () => void }) {
+  const label = itemLabel(item);
+  if (item.state === "unavailable") {
+    // Шага у мастера сейчас нет: показываем и называем причину, но вести
+    // некуда — `deep_link` у таких пунктов пуст.
+    const reason = reasonText(item.reason, item.key);
+    return (
+      <div className="setup-landing__row" data-testid={`setup-item-${item.key}`}>
+        <span className="setup-landing__mark" aria-hidden="true">
+          —
+        </span>
+        <span className="setup-landing__label">{label}</span>
+        <span className="setup-landing__state">{ITEM_STATE_TEXT.unavailable}</span>
+        {reason && <span className="setup-landing__reason">{reason}</span>}
+      </div>
+    );
+  }
+  if (item.state === "unknown") {
+    // Канон не ответил — это не «не настроено», и вести настраивать нельзя.
+    return (
+      <div className="setup-landing__row" data-testid={`setup-item-${item.key}`}>
+        <span className="setup-landing__mark" aria-hidden="true">
+          ?
+        </span>
+        <span className="setup-landing__label">{label}</span>
+        <span className="setup-landing__state">{ITEM_STATE_TEXT.unknown}</span>
+      </div>
+    );
+  }
+  const done = item.state === "done";
+  return (
+    <button
+      type="button"
+      className="setup-landing__row setup-landing__row--tappable"
+      data-testid={`setup-item-${item.key}`}
+      onClick={onOpen}
+    >
+      <span className="setup-landing__mark" aria-hidden="true">
+        {done ? "✓" : "○"}
+      </span>
+      <span className="setup-landing__label">{label}</span>
+      <span className="setup-landing__state">
+        {done ? ITEM_STATE_TEXT.done : ITEM_STATE_TEXT.missing}
+      </span>
+    </button>
+  );
+}

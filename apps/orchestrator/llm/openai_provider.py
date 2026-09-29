@@ -1,8 +1,32 @@
 """OpenAI provider wrapper (DRF-428 / D1).
 
 Sole LLM provider in Sprint 1. Wrapped in the circuit breaker from
-``apps.orchestrator.llm.breaker``. When the breaker is open, returns
-the static fallback template (no LLM call attempted; latency <10ms).
+``apps.orchestrator.llm.breaker``. When the breaker is open the call is
+REFUSED — :class:`LLMOutageError` is raised, no HTTP call is attempted
+(latency <10ms).
+
+**Why it raises instead of answering (DRF-1512).** Until this ticket the
+open breaker returned ``LLMResponse(content=get_fallback(...),
+is_fallback=True)`` — the «Извини, у меня сейчас короткий технический
+сбой — отвечу через минуту» line, delivered as an ordinary, successful
+completion. A dead upstream arrived at the caller wearing the shape of a
+working one, carrying the one sentence in the product that promises the
+bot will come back.
+
+That promise is only true where a «Повторить» button is drawn under it,
+and the flag that draws it is ``DiscoveryReply.outage`` (DRF-1489,
+:mod:`apps.orchestrator.llm.templates`). Nothing in an ``LLMResponse``
+can carry that flag, so every caller wired to a client reply would have
+had to invent it — and the DRF-1489 measurement, which reads
+``apps/orchestrator/concierge.py``, would have gone on reporting zero
+because this module was never in its scope.
+
+So this module now produces no human-facing text at all. It reports
+the outage as a typed failure and leaves the wording — and the button —
+to the layer that owns both. The exception carries ``outage = True`` for
+exactly that hand-off, which is also what the production router does
+(``apps.llm.router`` raises ``BreakerOpenError``); the two providers now
+fail the same way.
 
 Shape designed to extract into an ``LLMProvider`` Protocol when Sprint
 6 multi-provider routing arrives — ``complete()`` is the method name
@@ -22,7 +46,6 @@ from django.conf import settings
 from apps.audit.services import write_audit
 from apps.llm.model_tiers import resolve_model
 from apps.orchestrator.llm.breaker import BreakerOpenError, with_circuit_breaker
-from apps.orchestrator.llm.templates import get_fallback
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +56,12 @@ class LLMResponse:
 
     Sprint 1 has just OpenAI; Sprint 6 generalises this into the
     ``LLMProvider`` Protocol's return type and adds tool-call fields.
+
+    ``is_fallback`` is read by ``apps.orchestrator.intent_router``'s
+    legacy path. Since DRF-1512 this provider never sets it: a degraded
+    turn leaves here as :class:`LLMOutageError`, never as a response.
+    An ``LLMResponse`` from this module is always an answer the model
+    actually gave.
     """
 
     content: str
@@ -46,6 +75,36 @@ class LLMResponse:
 _BREAKER_NAME = "openai.complete"
 
 
+class LLMOutageError(BreakerOpenError):
+    """The call was refused because the circuit breaker is open (DRF-1512).
+
+    A subclass of :class:`~apps.orchestrator.llm.breaker.BreakerOpenError`
+    so a caller that already catches the breaker's own refusal keeps
+    catching this one, and so ``except BreakerOpenError`` remains the
+    single vocabulary for «the provider would not even try».
+
+    ``outage`` is the whole point of the type. It is the same fact
+    ``DiscoveryReply.outage`` carries one layer up: the turn produced no
+    answer at all, the only remedy is the same message sent again, and a
+    text that offers that remedy («отвечу через минуту», «Попробовать ещё
+    раз?») may be shown ONLY together with the button that performs it.
+    A caller that turns this failure into a client reply has the fact in
+    its hands and cannot serve the promise without it.
+    """
+
+    #: This failure IS an outage — see the class docstring. Read by
+    #: callers that map provider failures onto ``DiscoveryReply.outage``.
+    outage = True
+
+    def __init__(self, *, model: str, reason: str = "breaker_open") -> None:
+        self.model = model
+        self.reason = reason
+        super().__init__(
+            f"OpenAI call refused: circuit breaker {_BREAKER_NAME!r} is open "
+            f"(model={model}, reason={reason}). No completion was produced.",
+        )
+
+
 class OpenAIProvider:
     """Async OpenAI ChatCompletion wrapper with circuit breaker.
 
@@ -57,21 +116,19 @@ class OpenAIProvider:
             model="gpt-4o-mini",
         )
 
-    On breaker-open (5 failures in 60s by default): returns
-    ``LLMResponse(content=template, is_fallback=True)`` immediately
-    without making an HTTP call. A Sentry-instrumented audit log
-    records the fallback.
+    On breaker-open (5 failures in 60s by default): raises
+    :class:`LLMOutageError` immediately without making an HTTP call, and
+    writes an audit row for the refusal. It does NOT return a reply —
+    see the module docstring (DRF-1512).
     """
 
     def __init__(
         self,
         api_key: str | None = None,
         default_model: str = "gpt-4o-mini",
-        fallback_lang: str = "ru",
     ):
         self.api_key = api_key or getattr(settings, "OPENAI_API_KEY", "")
         self.default_model = default_model
-        self.fallback_lang = fallback_lang
 
     async def complete(
         self,
@@ -82,8 +139,11 @@ class OpenAIProvider:
     ) -> LLMResponse:
         """Run an OpenAI chat completion through the circuit breaker.
 
-        Returns ``LLMResponse``. If the breaker is open, returns the
-        cached fallback template; ``is_fallback=True``.
+        Returns ``LLMResponse`` — an answer the model actually gave.
+
+        Raises:
+          LLMOutageError: the breaker is open; nothing was attempted and
+            nothing is returned. ``.outage`` is True.
         """
 
         # DRF-1443 — this wrapper is OpenAI-only by construction, so a
@@ -107,26 +167,26 @@ class OpenAIProvider:
                 chosen_model,
                 **kwargs,
             )
-        except BreakerOpenError:
-            # Short-circuit: breaker is open. Return static fallback,
-            # log the event for observability. write_audit is sync
-            # (Django ORM), so wrap with sync_to_async — we're inside
-            # an async method.
-            template = get_fallback(self.fallback_lang)
-            logger.warning("llm.openai.fallback model=%s reason=breaker_open", chosen_model)
+        except BreakerOpenError as exc:
+            # Short-circuit: the breaker is open. Log and journal the
+            # refusal, then hand it upstream as a failure. write_audit is
+            # sync (Django ORM), so wrap with sync_to_async — we're
+            # inside an async method.
+            logger.warning("llm.openai.outage_refused model=%s reason=breaker_open", chosen_model)
             # thread_sensitive=False — Django's sync_to_async runs the
             # call on a fresh worker thread without an asyncio event loop,
             # which is what the Django ORM requires.
+            #
+            # DRF-1512 renamed this action from ``llm.openai.fallback_served``.
+            # Nothing is served any more: the old name told a reader of the
+            # journal that a person had been given a reply, which was the
+            # defect itself written down.
             await sync_to_async(write_audit, thread_sensitive=False)(
-                "llm.openai.fallback_served",
+                "llm.openai.outage_refused",
                 target="OpenAIProvider",
                 payload={"model": chosen_model, "reason": "breaker_open"},
             )
-            return LLMResponse(
-                content=template,
-                model=chosen_model,
-                is_fallback=True,
-            )
+            raise LLMOutageError(model=chosen_model, reason="breaker_open") from exc
 
     def _build_client(self) -> Any:
         """Build the SDK client the way the production provider does.

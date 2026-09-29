@@ -176,6 +176,22 @@ def resolve_active_conversation(
     return conversation
 
 
+def _check_input_channel(input_channel: str, role: str) -> None:
+    """Отвергнуть недопустимый канал ввода реплики (DRF-2488).
+
+    Значение вне ``Message.InputChannel`` не пишем: ``CharField`` с
+    ``choices`` на ``create()`` не валидируется, и опечатка молча легла бы
+    в базу. ``voice`` бывает только у реплики человека — голосовой реплики
+    бота нет, такая пометка у ассистента была бы ошибкой вызывающего.
+    """
+    if input_channel not in Message.InputChannel.values:
+        raise ValueError(
+            f"input_channel={input_channel!r} is not one of {Message.InputChannel.values!r}."
+        )
+    if input_channel == Message.InputChannel.VOICE and role != Message.Role.USER:
+        raise ValueError(f"input_channel='voice' is only valid for role='user', got role={role!r}.")
+
+
 def record_message(
     conversation: Conversation,
     *,
@@ -190,6 +206,7 @@ def record_message(
     tokens_in: int = 0,
     tokens_out: int = 0,
     latency_ms: int | None = None,
+    input_channel: str = Message.InputChannel.TEXT,
 ) -> Message:
     """Persist a single message turn under `conversation`.
 
@@ -208,17 +225,23 @@ def record_message(
       trace_id: explicit trace ID; when None, reads ``current_trace_id()``
                 from ContextVar. UUID string is normalised to UUID.
       tokens_in / tokens_out / latency_ms: telemetry, Sprint 3+ AI track.
+      input_channel: как человек передал реплику (DRF-2488) — ``text`` или
+                     ``voice`` (content — расшифровка голосового). ``voice``
+                     допустим только при ``role=user``.
 
     Returns:
       The created Message.
 
     Raises:
-      ValueError: ``current_tenant()`` is None.
+      ValueError: ``current_tenant()`` is None; ``input_channel`` не из
+                  ``Message.InputChannel`` или ``voice`` не у реплики человека.
       CrossTenantError: ``conversation.tenant_id != current_tenant.id``
                         — defends against handler bugs that resolve a
                         Conversation in one tenant_scope and then write
                         to it inside a different scope.
     """
+
+    _check_input_channel(input_channel, role)
 
     tenant = current_tenant()
     if tenant is None:
@@ -262,6 +285,7 @@ def record_message(
             tokens_in=tokens_in,
             tokens_out=tokens_out,
             latency_ms=latency_ms,
+            input_channel=input_channel,
         )
         # Atomic UPDATE (not .save()) — so concurrent appends from
         # racing webhook turns don't overwrite each other's
@@ -285,35 +309,12 @@ def record_message(
         )
     )
 
-    # M6 AI drafts auto-trigger (deferred follow-up from PR #535 / #540).
-    # Spec §M6 line 660: «— помощник готовит ответ —» — every inbound
-    # customer message kicks off a proactive draft generation in the
-    # background.  The Celery task re-checks the feature flag, master
-    # involvement, tier, staleness and per-conversation debounce inside
-    # the worker; this hook only ENQUEUES on the role=USER fast path.
-    # We import the task module lazily inside the if-block to avoid a
-    # module-load circular: master_api imports conversations heavily.
-    # `transaction.on_commit` defers the enqueue until after the DB
-    # commit so the worker can never read a Message that hasn't
-    # actually landed.
-    if role == Message.Role.USER:
-        captured_msg_id = message.id
-        captured_conv_id = conversation.id
-        captured_tenant_id = tenant.id
-
-        def _enqueue_auto_draft() -> None:
-            # Lazy import — keeps the producer-side import graph thin
-            # and avoids the master_api → conversations circular at
-            # app boot.
-            from apps.master_api.tasks import auto_generate_draft_for_inbound
-
-            auto_generate_draft_for_inbound.delay(
-                conversation_id=str(captured_conv_id),
-                trigger_message_id=str(captured_msg_id),
-                tenant_id=str(captured_tenant_id),
-            )
-
-        transaction.on_commit(_enqueue_auto_draft)
+    # DRF-1528: здесь висел автотриггер AI-черновика для мастера —
+    # `transaction.on_commit` на каждое входящее сообщение клиента
+    # ставил в очередь `master_api.tasks.auto_generate_draft_for_inbound`.
+    # Переписка мастер↔клиент снята (OD-7), вместе с ней — и черновики:
+    # предлагать ответ некуда. Канонический путь записи сообщения при
+    # этом не изменился — он и раньше только ставил задачу в очередь.
     logger.info(
         "conversations.message.stored id=%s conversation=%s role=%s",
         message.id,
@@ -434,6 +435,41 @@ def write_skill_state(
         conversation.skill_state = new_state
 
 
+def resolve_conversation_for_bot_user(
+    bot_user,
+    *,
+    create_if_missing: bool = False,
+) -> Conversation | None:
+    """The one active Conversation a ``bot_user`` owns — from any surface.
+
+    [OD-BOT §164] — the Mini App has no conversation in hand, yet it must read
+    and write the SAME persisted question / restriction state the chat
+    surfaces use (``Conversation.skill_state``). A BotUser is tenant-bound, so
+    the tenant is taken from it, never from the caller: the global sentinel's
+    users go through :func:`resolve_active_global_conversation`, every other
+    through :func:`resolve_active_conversation` inside that tenant's scope.
+
+    Returns None when nothing exists and ``create_if_missing`` is False, and
+    on any failure to resolve the global sentinel — a missing carrier must
+    read as «no state», never raise into a request.
+    """
+
+    from apps.identity.services.global_tenant import get_global_bot_tenant
+    from apps.tenancy.context import tenant_scope
+
+    tenant = getattr(bot_user, "tenant", None)
+    if tenant is None:
+        return None
+    try:
+        sentinel = get_global_bot_tenant()
+    except Exception:  # noqa: BLE001 — no sentinel → treat as a per-tenant user
+        sentinel = None
+    if sentinel is not None and getattr(bot_user, "tenant_id", None) == sentinel.id:
+        return resolve_active_global_conversation(bot_user, create_if_missing=create_if_missing)
+    with tenant_scope(tenant):
+        return resolve_active_conversation(bot_user, create_if_missing=create_if_missing)
+
+
 # ─── Global (tenant-less) discovery persistence (#1026 / EPIC #1014) ──────
 #
 # Siblings of resolve_active_conversation / record_message for the nationwide
@@ -545,6 +581,7 @@ def record_global_message(
     tokens_in: int = 0,
     tokens_out: int = 0,
     latency_ms: int | None = None,
+    input_channel: str = Message.InputChannel.TEXT,
 ) -> Message:
     """Persist a turn under a global (sentinel) Conversation (#1026).
 
@@ -567,7 +604,13 @@ def record_global_message(
     is what a multi-select needs: the options it offered have to survive until
     the tap that answers them. Defaults to ``None``, i.e. exactly the old
     behaviour for every caller that does not pass it.
+
+    ``input_channel`` — как в :func:`record_message` (DRF-2488): ``voice``
+    помечает реплику человека, чей ``content`` — расшифровка голосового;
+    неизвестное значение или ``voice`` не у ``role=user`` — ``ValueError``.
     """
+
+    _check_input_channel(input_channel, role)
 
     from apps.identity.services.global_tenant import get_global_bot_tenant
 
@@ -600,6 +643,7 @@ def record_global_message(
             tokens_in=tokens_in,
             tokens_out=tokens_out,
             latency_ms=latency_ms,
+            input_channel=input_channel,
         )
         Conversation.all_tenants.filter(pk=conversation.pk).update(last_message_at=now)
     conversation.last_message_at = now

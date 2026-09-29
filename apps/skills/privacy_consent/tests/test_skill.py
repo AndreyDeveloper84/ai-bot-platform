@@ -92,6 +92,24 @@ class TestDataExport:
         assert len(export["conversations"]) == 1
         assert len(export["conversations"][0]["messages"]) == 1
 
+    def test_each_message_carries_its_input_channel(self, tenant, bot_user, conversation):
+        """DRF-2488 — человек видит в выгрузке, какие реплики он надиктовал."""
+        Message.all_tenants.create(
+            tenant=tenant, conversation=conversation, role="user", content="набрала"
+        )
+        Message.all_tenants.create(
+            tenant=tenant,
+            conversation=conversation,
+            role="user",
+            content="надиктовала",
+            input_channel=Message.InputChannel.VOICE,
+        )
+        with tenant_scope(tenant):
+            export = data_export(bot_user)
+        (conv,) = export["conversations"]
+        channels = sorted((m["content"], m["input_channel"]) for m in conv["messages"])
+        assert channels == [("набрала", "text"), ("надиктовала", "voice")]
+
     def test_phone_hashed_not_raw(self, tenant, bot_user, conversation):
         with tenant_scope(tenant):
             export = data_export(bot_user)
@@ -153,20 +171,18 @@ class TestDataDelete:
         ).first()
         assert ev is not None
 
-    def test_raises_protected_error_on_ai_metric(self, tenant, bot_user):
-        """Locks WHY the chat path no longer calls this (DRF-956 blocker A).
+    def test_an_ai_metric_survives_the_delete_without_its_subject(self, tenant, bot_user):
+        """Owner decision 11.09 §16.1 — the metric is about the SYSTEM, its
+        value is not in bot_user_id: `AIRequestMetric.bot_user` is SET_NULL.
 
-        `delete_bot_user_data` hard-deletes the BotUser row, and
-        `AIRequestMetric.bot_user` is PROTECT — so any user who ever
-        triggered one AI turn cannot be deleted this way. The helper is
-        admin-only now; re-wiring it to a customer surface must first
-        resolve these references.
+        Until 11.09 this test locked the opposite (PROTECT, DRF-956 blocker
+        A): a user who ever triggered one AI turn could not be deleted this
+        way. That blocker is gone by decision, not by accident — the row
+        stays, the link goes, and the helper now completes.
         """
-        from django.db.models import ProtectedError
-
         from apps.observability.models import AIRequestMetric
 
-        AIRequestMetric.all_tenants.create(
+        metric = AIRequestMetric.all_tenants.create(
             tenant=tenant,
             bot_user=bot_user,
             request_id=uuid.uuid4(),
@@ -174,8 +190,12 @@ class TestDataDelete:
             latency_total_ms=100,
             outcome=AIRequestMetric.OUTCOME_SUCCESS,
         )
-        with tenant_scope(tenant), pytest.raises(ProtectedError):
+        with tenant_scope(tenant):
             data_delete(bot_user)
+        metric.refresh_from_db()
+        assert metric.bot_user_id is None
+        assert metric.latency_total_ms == 100
+        assert not BotUser.all_tenants.filter(id=bot_user.id).exists()
 
     def test_staff_assistant_thread_wiped_with_the_user(self, tenant, bot_user):
         """DRF-1276 — the staff assistant thread no longer blocks the wipe.

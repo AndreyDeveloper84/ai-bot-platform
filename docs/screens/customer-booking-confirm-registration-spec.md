@@ -20,6 +20,24 @@
 
 ## 2. Pending-intent — набор полей (зафиксировано)
 
+> **ПЕРЕСМОТРЕНО 2026-09-05 (§24.5 реестра `docs/OPEN_DECISIONS.md`, DRF-1484, PR #1388).**
+> Решение 02.07 пересмотрено, а не реализовано механически:
+> - **`tenant_id` в снимок намерения НЕ добавляется.** После §23 tenant — свойство
+>   текущего контекста запроса, а не устойчивого пользовательского намерения.
+>   Защита транзакции записи от смены контекста обеспечивается серверной
+>   границей (`create_booking` в `tenant_scope` из подписи initData, чужие
+>   `service_id`/`master_id` → 404, регрессионный лок
+>   `test_views_create_booking_tenant_guard.py`); отдельная сущность
+>   «booking snapshot» не потребовалась.
+> - **`entry_point` добавлен** как provenance: клиент `PendingBookingIntent`,
+>   серверный `ServerPendingBookingIntent`, backend-валидация
+>   (`apps/miniapp_api/pending_intent.py`), строка ≤ 64 символов. Значения
+>   проставляются по факту реальных входов кода (`catalog` / `master` /
+>   `deep_link:<start_param>` / `direct`), а не по enum ниже — enum 02.07
+>   описывал сценарии, которых в рантайме пока нет.
+> Ниже исходная формулировка 02.07 сохранена для истории; действующий контракт —
+> в этом блоке и в коде.
+
 **Назначение:** `pending-intent` — это **снимок намерения пользователя**, а не объект брони. Задача: после любого прерывания (OAuth / сбой сети / закрытие приложения) Ayla продолжает сценарий, будто ничего не было.
 
 **Семантическое ядро снимка — 6 полей** (существующие вспомогательные поля кода сохраняются, см. ниже):
@@ -30,7 +48,7 @@
 | `master_id` | обязательно |
 | `slot_iso` | обязательно (ISO 8601 с offset, = `visit_at`) |
 | `note` | нельзя терять («буду с ребёнком», «тихая музыка») |
-| `tenant_id` | **добавить.** multi-tenant: через год пользователь начал бронь в одном салоне, открыл другой — без `tenant_id` можно восстановить неверно. Стоимость ≈ 0 |
+| `tenant_id` | ~~**добавить.**~~ **ПЕРЕСМОТРЕНО 2026-09-05 (§24.5, DRF-1484): НЕ добавлять** — tenant живёт в контексте запроса, защита транзакции на серверной границе. Исходная формулировка: multi-tenant: через год пользователь начал бронь в одном салоне, открыл другой — без `tenant_id` можно восстановить неверно. Стоимость ≈ 0 |
 | `entry_point` | **добавить.** Ради **поведения AI** (какой сценарий привёл к брони: recommendation / search / food_scanner / ai_avatar / symptom / direct). Вход в зафиксированную `attribution-extensible-model` |
 
 **НЕ храним (осознанно):**
@@ -88,7 +106,7 @@ Instrumentation — bot-platform (analytics/observability по ADR-0009; шин�
 
 | Пункт | Решение |
 |---|---|
-| Pending-intent | ядро 6 полей (`service_id, master_id, slot_iso, note, tenant_id, entry_point`); существующие `price_rub`(P0)/`loyalty_choice`/display — **сохраняются**; `coupon/step/goal` — нет |
+| Pending-intent | ядро 6 полей (`service_id, master_id, slot_iso, note, tenant_id, entry_point`); существующие `price_rub`(P0)/`loyalty_choice`/display — **сохраняются**; `coupon/step/goal` — нет. **ПЕРЕСМОТРЕНО 2026-09-05 (§24.5, DRF-1484):** `tenant_id` исключён, `entry_point` добавлен как provenance — см. блок пересмотра в §2 |
 | Booking lifecycle | Variant A; готовность к B = требование к **Ayla** (hold-движок; bot-platform `TENTATIVE` = mirror-enum `RemoteBookingProxy`) |
 | KPI | registration-attributable drop-off — заложить сейчас (bot-platform) |
 | UI copy / consent / error / invisible-reg | зафиксировано выше |

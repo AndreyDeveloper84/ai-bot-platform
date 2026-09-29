@@ -248,8 +248,11 @@ def resolve_role(bot_user: "BotUser") -> RoleContext:
     Reads two source tables:
 
     - :class:`apps.catalog.models.CatalogMaster` — reverse OneToOne via
-      ``linked_bot_user``. If the linked master is ACCEPTED and not
-      archived, the user is a master.
+      ``linked_bot_user``. The user is a master iff the linked row is
+      enrolled — :data:`apps.catalog.master_state.ENROLLED`, the same
+      definition ``require_master_init_data`` reads. DRF-1521 moved both
+      off :data:`~apps.catalog.master_state.LANDED`: taking a master off
+      the storefront must not stop her from being a master.
     - :class:`apps.tenancy.models.TenantStaff` — active rows
       (``deactivated_at IS NULL``) within ``bot_user.tenant``.
 
@@ -268,6 +271,7 @@ def resolve_role(bot_user: "BotUser") -> RoleContext:
     # services on AppConfig.ready, so a top-level import here would
     # work today; keeping it local is defensive against future imports
     # from this service in models.)
+    from apps.catalog.master_state import ENROLLED
     from apps.catalog.models import CatalogMaster
     from apps.tenancy.models import TenantStaff
 
@@ -276,12 +280,23 @@ def resolve_role(bot_user: "BotUser") -> RoleContext:
     # is ``master_identity`` per the related_name on the FK. Use
     # CatalogMaster.all_tenants for tenant-safety (the BotUser already
     # carries its tenant; we re-filter explicitly as defence-in-depth).
+    # DRF-1506 — предикат один на пять мест, здесь он применяется как
+    # ``Q``. Раньше этот фильтр не спрашивал про ``is_active``, а
+    # ``require_master_init_data`` спрашивал только про него:
+    # деактивированная мастер оставалась мастером для резолвера и
+    # получала 403 в мастер-приложении. См. apps/catalog/master_state.py.
+    #
+    # DRF-1521 — предикат сменился с ``LANDED`` на ``ENROLLED``, и это
+    # НЕ возврат к прежнему расхождению: разъезжались два места, каждое
+    # со своим набором столбцов, а теперь оба спрашивают одну константу.
+    # Ответ «она мастер» перестал зависеть от ``is_active`` намеренно:
+    # снятая с витрины мастер остаётся мастером — иначе она теряет роль
+    # целиком, включая бота, и починить своё состояние ей нечем.
     master_row = (
         CatalogMaster.all_tenants.filter(
+            ENROLLED,
             tenant=bot_user.tenant_id,
             linked_bot_user=bot_user,
-            invite_status=CatalogMaster.InviteStatus.ACCEPTED,
-            archived_at__isnull=True,
         )
         .only("id")
         .first()

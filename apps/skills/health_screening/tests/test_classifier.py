@@ -19,7 +19,6 @@ class TestSoftPain:
             "плечи тянет",
             "пульсирует в висках",
             "защемило в шее",
-            "напряжение в спине",
             "Поясница ломит к вечеру",
             "стреляет в ягодицу",
             "Не могу повернуть шею",
@@ -30,12 +29,31 @@ class TestSoftPain:
         assert classify(text) == PainSignal.SOFT
 
 
-class TestRedFlags:
+class TestAmbiguousG4:
+    """[OD-BOT §164] — numbness / loss of sensation without a sudden marker and a
+    side is the AMBIGUOUS G4: one routing question (``CLARIFY``), never STOP and
+    never silence. These used to be DRF-973 red flags; the signal is not lost,
+    it is routed."""
+
     @pytest.mark.parametrize(
         "text",
         [
             "Потерял чувствительность в ноге",
             "Онемение в руке",
+            "болит шея, онемение в руке",
+            "напряжение в шее и немеет рука",
+        ],
+    )
+    def test_ambiguous_g4_is_clarify(self, text: str) -> None:
+        assert classify(text) == PainSignal.CLARIFY
+
+
+class TestRedFlags:
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "Внезапно потерял чувствительность в правой ноге",
+            "Внезапно онемела правая рука",
             "Болит шея, отдаёт в руку",
             "Болит спина, отдает в ногу",
             "У меня температура 38",
@@ -56,8 +74,12 @@ class TestRedFlags:
 class TestRedFlagShadowsSoft:
     """Red-flag pattern wins when it co-occurs with a soft pain word."""
 
-    def test_pain_plus_numbness_is_red(self) -> None:
-        assert classify("болит шея, онемение в руке") == PainSignal.RED_FLAG
+    def test_pain_plus_numbness_is_the_g4_question_not_soft(self) -> None:
+        """[OD-BOT §164]: the ambiguous S1 shadows the soft-pain path too."""
+        assert classify("болит шея, онемение в руке") == PainSignal.CLARIFY
+
+    def test_pain_plus_sudden_one_sided_numbness_is_red(self) -> None:
+        assert classify("болит шея, внезапно онемела правая рука") == PainSignal.RED_FLAG
 
     def test_pain_plus_radiation_is_red(self) -> None:
         assert classify("Тянет в пояснице, отдаёт в ногу") == PainSignal.RED_FLAG
@@ -79,11 +101,62 @@ class TestNoSignal:
     def test_non_pain_messages(self, text: str) -> None:
         assert classify(text) == PainSignal.NONE
 
-    def test_long_text_does_not_classify(self) -> None:
-        """200-char cap: full-text questions about pain are an LLM job,
-        not the classifier's."""
+
+class TestNoLengthCap:
+    """DRF-1996 (S-1a): the rule changed, the test did not drift.
+
+    The old test here pinned the 200-character cap — «full-text questions
+    about pain are an LLM job» — and asserted ``NONE`` for any long text. The
+    same cap silenced red flags: a person who described an emergency in more
+    words got no red flag at all (CLINICAL-F01). The S1 detector validation
+    report requires «отсутствие length cap / иных silent-miss механизмов»
+    (clinical-review-001 F01 п. 2), so the expectation is reversed on purpose.
+    """
+
+    def test_long_text_with_pain_is_soft(self) -> None:
         long_text = "болит " * 100  # well over 200 chars
-        assert classify(long_text) == PainSignal.NONE
+        assert len(long_text) > 200
+        assert classify(long_text) == PainSignal.SOFT
+
+    def test_a_red_flag_at_the_end_of_a_long_message_is_caught(self) -> None:
+        long_text = (
+            "Хочу записаться на массаж спины в пятницу после работы. " * 5 + "теряю сознание"
+        )
+        assert len(long_text) > 200
+        assert classify(long_text) == PainSignal.RED_FLAG
+
+
+class TestTensionIsANeedNotPain:
+    """DRF-2001 (S-3c, F08): пакет 3 п. 6b — напряжение и зажимы без боли — потребность.
+
+    «Хочу снять напряжение» — кнопка первого контакта (``apps/channels/max/quick_actions.py``);
+    раньше на неё приходил вопрос «где именно болит». Те же фразы в теневой
+    таксономии NBA — цели RELAXATION / BACK_COMFORT (#1774, DRF-1945): это потребность.
+
+    Снятие стемов «напряж» и «зажим» не должно ослабить путь боли и неврологии —
+    для этого положительная стража ниже.
+    """
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "хочу снять напряжение",
+            "хочу снять зажимы",
+            "спина напряжена",
+            "напряжение в спине",
+            "хочу снять напряжение в спине",
+            "спина напряжена после работы",
+        ],
+    )
+    def test_tension_without_pain_is_not_a_pain_signal(self, text: str) -> None:
+        assert classify(text) == PainSignal.NONE
+
+    def test_tension_with_pain_still_asks(self) -> None:
+        assert classify("зажимы в шее, болит") == PainSignal.SOFT
+
+    def test_tension_with_numbness_is_still_an_s1_signal(self) -> None:
+        """Not NONE: the ambiguous G4 question ([OD-BOT §164]), not the need path."""
+        assert classify("напряжение в шее и немеет рука") == PainSignal.CLARIFY
 
 
 class TestTypeTolerance:
@@ -137,6 +210,16 @@ NOT_PAIN_PHRASES: tuple[str, ...] = (
     "у меня напряжённая неделя",  # «напряж»
     "хочу напряжённый график",
     "у меня была напряжённая неделя, хочу расслабляющий массаж",
+    # ── DRF-2001 (S-3c): СМЕНА ПРАВИЛА решением владельца, не подгонка. Пакет 3
+    #    п. 6b (docs/OWNER_DECISIONS_2026-09-15_PACKAGE3.md:15): «Хочу снять
+    #    напряжение / зажимы» без боли, онемения, слабости, травмы = обычная
+    #    потребность, не S2. Эти две фразы раньше стояли в PAIN_PHRASES (и
+    #    «напряжение в спине» — ещё и в TestSoftPain); пометка «never trim» выше
+    #    защищает от потери настоящей жалобы, а здесь жалобы нет: «зажим в шее»
+    #    без слова боли по п. 6b — тоже потребность. С болью или неврологией —
+    #    по-прежнему сигнал: см. TestTensionIsANeedNotPain. ──
+    "зажим в шее",
+    "напряжение в спине",
     # ── the question about a procedure that has not happened yet ──
     "а это больно?",
     "больно ли делать татуаж?",
@@ -194,8 +277,6 @@ PAIN_PHRASES: tuple[str, ...] = (
     "дёргает зуб",
     "пульсирует висок",
     "защемило нерв",
-    "зажим в шее",
-    "напряжение в спине",
     "спазм мышц",
     "судорога в ноге",
     "тяжесть в ногах",
@@ -219,7 +300,11 @@ PAIN_PHRASES: tuple[str, ...] = (
     "шею тянет на сквозняке",
 )
 
-RED_FLAG_PHRASES: tuple[str, ...] = (
+#: [OD-BOT §164] — the DRF-973 numbness phrases, verbatim. They are no longer
+#: red flags: without a sudden marker and a side they are the ambiguous G4 and
+#: get the one routing question (``CLARIFY``). The DRF-973 guard survives in
+#: :class:`TestDrf973PainSurvives` as «never NONE».
+AMBIGUOUS_G4_PHRASES: tuple[str, ...] = (
     # DRF-973 — the two that matched NOTHING before the patch.
     "онемела рука",
     "немеет рука",
@@ -228,6 +313,9 @@ RED_FLAG_PHRASES: tuple[str, ...] = (
     # the ones that already worked
     "онемение в ноге",
     "потеряла чувствительность",
+)
+
+RED_FLAG_PHRASES: tuple[str, ...] = (
     "отнимается нога",
     "отдаёт в руку",
     "температура 38.5",
@@ -262,6 +350,13 @@ class TestDrf973PainSurvives:
     @pytest.mark.parametrize("text", RED_FLAG_PHRASES)
     def test_red_flags_still_redirect_to_a_doctor(self, text: str) -> None:
         assert classify(text) == PainSignal.RED_FLAG
+
+    @pytest.mark.parametrize("text", AMBIGUOUS_G4_PHRASES)
+    def test_numbness_still_reaches_the_screening_as_the_g4_question(self, text: str) -> None:
+        """The DRF-973 half that must stay honest: the fix routes the signal to
+        the [OD-BOT §164] question — it never loses it (NONE) and never asks the
+        pain questions (SOFT)."""
+        assert classify(text) == PainSignal.CLARIFY
 
 
 class TestDrf973MaskingIsPhraseScoped:

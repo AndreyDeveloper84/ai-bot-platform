@@ -77,7 +77,24 @@ class KbDocumentAdmin(admin.ModelAdmin):
     # Admin actions
     # ------------------------------------------------------------------
 
-    @admin.action(description="Force reindex selected tenant(s)")
+    # DRF-1495: без ``permissions=`` Django отдаёт действие всякому, кто
+    # открыл экран (``_filter_actions_by_permissions`` пропускает всё, у
+    # чего нет ``allowed_permissions``) — включая роль «смотрящий»,
+    # которой правки не положены вовсе. Реиндекс ставит в очередь
+    # эмбеддинги (платные вызовы) по произвольным тенантам, то есть это
+    # правка, а не чтение.
+    #
+    # ``permissions=("change",)`` здесь не годится: ``has_change_permission``
+    # выше безусловно False, и действие умерло бы вместе с ролями. Поэтому
+    # отдельный предикат — он спрашивает право на модель, а не разрешение
+    # экрана: суперпользователь и роль «правящий» получают, «смотрящий» нет.
+    def has_reindex_permission(self, request: HttpRequest) -> bool:
+        return request.user.has_perm("kb.change_kbdocument")
+
+    @admin.action(
+        description="Force reindex selected tenant(s)",
+        permissions=("reindex",),
+    )
     def force_reindex_selected_tenants(self, request: HttpRequest, queryset) -> None:
         """Enqueue :func:`reindex_tenant_kb` per distinct tenant in the
         selected rows.

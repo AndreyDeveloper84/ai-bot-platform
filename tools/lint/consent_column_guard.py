@@ -120,6 +120,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+import lint_parse  # DRF-2538: нечитаемый вход — отдельный исход, не ноль
+
 #: The column this guard is about.
 _COLUMN = "consent_at"
 
@@ -264,13 +266,17 @@ def scan_file(file_path: Path, repo_root: Path | None = None) -> list[Violation]
 
     try:
         source = file_path.read_text(encoding="utf-8")
-    except OSError:
+    except OSError as exc:
+        lint_parse.unreadable(file_path, exc)
         return []
 
-    try:
-        tree = ast.parse(source, filename=str(file_path))
-    except SyntaxError:
-        # Broken syntax is ruff's problem, not this guard's.
+    # DRF-2538. Здесь стояло «Broken syntax is ruff's problem, not this guard's». Это верно про
+    # красноту `dev` — ruff в том же джобе краснеет на той же ошибке — и
+    # неверно про смысл зелени этого сторожа: «0 нарушений» что-то говорит
+    # о коде, только если код прочитан. Нечитаемый файл теперь отдельный
+    # исход (`lint_parse.finish`), а не ноль.
+    tree = lint_parse.parse_or_report(source, file_path)
+    if tree is None:
         return []
 
     visitor = _ConsentColumnVisitor(file_path=file_path)
@@ -299,7 +305,7 @@ def _detect_repo_root(start: Path) -> Path:
     return current
 
 
-def main(argv: list[str]) -> int:
+def _run(argv: list[str]) -> int:
     if len(argv) < 2:
         print("usage: consent_column_guard.py <path> [<path> ...]", file=sys.stderr)
         return 2
@@ -327,6 +333,14 @@ def main(argv: list[str]) -> int:
         file=sys.stderr,
     )
     return 1
+
+
+def main(argv: list[str]) -> int:
+    lint_parse.reset()
+    code = _run(argv)
+    if code not in (0, 1):  # ошибка вызова — охват не о чем печатать
+        return code
+    return max(code, lint_parse.finish("consent_column_guard"))
 
 
 if __name__ == "__main__":

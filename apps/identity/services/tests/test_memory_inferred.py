@@ -37,8 +37,15 @@ def tenant(db) -> Tenant:
 def _bot_user(tenant: Tenant, ayla_user_id, cuid: str = "u1"):
     from apps.identity.models import BotUser
 
+    # S2-2 (owner §2.4): a shell with an identity link is LINKED by the §2 rule;
+    # these tests build it directly rather than through the resolver, which is
+    # what classifies at creation — so the standing is written here explicitly.
     return BotUser.all_tenants.create(
-        tenant=tenant, channel="max", channel_user_id=cuid, ayla_user_id=ayla_user_id
+        tenant=tenant,
+        channel="max",
+        channel_user_id=cuid,
+        ayla_user_id=ayla_user_id,
+        customer_status=BotUser.CustomerStatus.LINKED,
     )
 
 
@@ -107,28 +114,28 @@ class _StubPCClient:
         self.calls: list[tuple] = []
         self.closed = False
 
-    def get_context(self, *, ayla_user_id: str):
+    def get_context(self, *, ayla_user_id: str, external_user_id: str):
         self.calls.append(("get", ayla_user_id))
         from apps.integrations.ayla.personal_context_client import DeclaredContext
 
         return DeclaredContext(ayla_user_id=ayla_user_id, context={"diet_type": "vegan"})
 
-    def patch_context(self, *, ayla_user_id: str, updates: list):
+    def patch_context(self, *, ayla_user_id: str, external_user_id: str, updates: list):
         self.calls.append(("patch", ayla_user_id, updates))
         from apps.integrations.ayla.personal_context_client import DeclaredContext
 
         return DeclaredContext(ayla_user_id=ayla_user_id, context={})
 
-    def get_ask_eligibility(self, *, ayla_user_id: str):
+    def get_ask_eligibility(self, *, ayla_user_id: str, external_user_id: str):
         self.calls.append(("ask", ayla_user_id))
         from apps.integrations.ayla.personal_context_client import AskEligibility
 
         return AskEligibility(should_ask=True, field="diet_type", prompt_hint="?")
 
-    def mark_asked(self, *, ayla_user_id: str, field: str):
+    def mark_asked(self, *, ayla_user_id: str, external_user_id: str, field: str):
         self.calls.append(("mark", ayla_user_id, field))
 
-    def skip(self, *, ayla_user_id: str, field: str):
+    def skip(self, *, ayla_user_id: str, external_user_id: str, field: str):
         self.calls.append(("skip", ayla_user_id, field))
         return 2
 
@@ -225,7 +232,7 @@ class TestPersonalContextGate:
         _grant(bu, CT.MEMORY_GREEN)
 
         class _Failing(_StubPCClient):
-            def get_context(self, *, ayla_user_id: str):
+            def get_context(self, *, ayla_user_id: str, external_user_id: str):
                 raise PersonalContextTransportError("http_500")
 
         result = get_declared_prefs(bu, client=_Failing())  # type: ignore[arg-type]

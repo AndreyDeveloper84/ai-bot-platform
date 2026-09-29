@@ -47,10 +47,12 @@ entry price.
 
 Only «👤 Профиль» needs a Mini App route. Behaviour follows config:
 
-* ``settings.MAX_BOT_WEB_APP`` set → ``open_app`` (Mini App opens INSIDE
+* ``web_app`` of the bot in scope (DRF-1361: registry entry, else the
+  ``max_global`` entry, else ``settings.MAX_BOT_WEB_APP``) set →
+  ``open_app`` (Mini App opens INSIDE
   the MAX client; the route comes from the ``callback`` field which MAX
   forwards into the Mini App's ``initData``).
-* ``settings.MAX_BOT_WEB_APP`` empty + ``settings.MAX_MINIAPP_URL`` set
+* ``web_app`` empty + ``miniapp_url`` (same ladder) set
   → ``link`` button (opens in the external browser). The path comes from
   :data:`MINIAPP_ROUTES`, joined onto the bare domain.
 * Both empty → «👤 Профиль» is **dropped entirely** — not downgraded to a
@@ -87,14 +89,18 @@ dispatcher flow.
 privacy consent prompt (Tau's customer-onboarding-flow.md §5):
 
 * ``cb:welcome:consent_yes`` — DIRECT path («Да, продолжим» из S2).
-  Funnels к ``_render_consent_granted(show_s3=True)`` — stamps
-  consent_at idempotently + renders S3 + S5 combined bubble.
+  Funnels к ``_render_consent_granted(show_s3=True)`` — on the per-tenant
+  path writes the ``personal_data`` ConsentRecord for every shell of the
+  person (DRF-2016; ``consent_at`` is stamped atomically with the row) +
+  renders S3 + S5 combined bubble. On the global path the journal is
+  written by ``global_onboarding`` after the render.
 * ``cb:welcome:consent_yes_via_s2a`` — S2a path («Понятно, продолжим»
   из S2a fold). Same handler but ``show_s3=False`` per Tau §6
   conditional rule (user already saw scope disclosure → S3
   repositioning would feel repetitive).
 * ``cb:welcome:consent_details`` — S2a expanded fold disclosing scope.
-* ``cb:welcome:consent_refuse`` — State 3 graceful exit. No keyboard.
+* ``cb:welcome:consent_refuse`` — State 3 graceful exit. Keyboard «Дать согласие» /
+  «Узнать что хранится» since DRF-2267 (owner CD §72).
 
 ### S3 positioning + S5 first-action grid — task #85 part 3, 2026-05-26
 
@@ -122,9 +128,11 @@ from __future__ import annotations
 import logging
 from typing import ClassVar
 
-from django.conf import settings
+from apps.channels.miniapp_config import miniapp_target
 from django.utils import timezone
 
+from apps.consent.models import ConsentRecord
+from apps.consent.services import record_person_consent
 from apps.skills.base import SkillContext, SkillResult
 from apps.skills.menu.matching import (
     CALLBACK_MENU_BOOK,
@@ -181,7 +189,37 @@ MINIAPP_ROUTES: dict[str, str] = {
     "open_food_scan": "customer/food-scanner/capture",
     "open_water_add_250": "customer/wellness",
     "open_goal_select": "customer/goal-select",
+    # DRF-2125 — «Мой план» с карточки плана в чате («Изменить» /
+    # «Изменить план»). Флага сборки у экрана больше нет (DRF-2144): он же
+    # вкладка «План» нижней панели; включён ли план, решает ``PLAN_LITE_ENABLED``.
+    "open_plan": "customer/plan",
     "open_home": "customer/main",
+    # DRF-1491 — главное меню витрины (``apps.skills.menu.marketplace``).
+    # Два экрана, у которых слага до сих пор не было.
+    "open_food_diary": "customer/food-scanner/diary",
+    # DRF-2114 — тройка «Сегодня | Расписание | Ayla» персоналу (§50 п.5):
+    # салон (owner|admin — за ``canOpenSalonPilot``, DRF-2115) и мастер.
+    # Имена согласованы с ayla-85 (#1867 пути не менял). Слага под
+    # ``/admin/handoff`` нет намеренно: вход — только с карточки «Сегодня».
+    "open_admin_today": "admin/today",
+    "open_admin_schedule": "admin/schedule",
+    "open_admin_ayla": "admin/ayla",
+    "open_admin_booking_new": "admin/booking/new",
+    "open_master_today": "master/dashboard",
+    "open_master_schedule": "master/schedule",
+    "open_master_ayla": "master/ayla",
+    # На ``open_wellness`` кнопки сегодня НЕТ — по той же причине и с той
+    # же судьбой, что у ``open_food_scan`` абзацем выше: экран в прод-
+    # сборке отдаёт ``PilotComingSoonScreen`` (сторож
+    # ``STUB_SURFACES_ENABLED``, «hidden until S4/post-pilot»), и меню
+    # витрины его не предлагает. Строка остаётся: экран готовится, кнопка
+    # вернётся, а запись в таблице — не то, что человек может нажать.
+    #
+    # Панель уже достижима через ``open_water_add_250``, но под тем
+    # именем, под которым её нельзя предложить в меню — «+ стакан воды»
+    # это не «самочувствие»; старое имя не переименовано, потому что
+    # старые клавиатуры в истории чата продолжают его слать.
+    "open_wellness": "customer/wellness",
 }
 
 
@@ -460,6 +498,42 @@ class WelcomeSkill:
                 },
                 meta={"reply_kind": "welcome_s2a_details"},
             )
+        for origin in CONSENT_RECOVERY_ORIGINS:
+            # DRF-1968 — вход в согласие из отказа: тот же утверждённый экран
+            # S2, но каждая кнопка помнит, куда человека вернуть.
+            if text == f"cb:welcome:consent_offer_{origin}":
+                return SkillResult(
+                    reply_text=S2_CONSENT_TEXT,
+                    action_type="welcome_consent_prompt",
+                    action_data={
+                        "buttons": _s2_consent_buttons_for(origin),
+                        "button_columns": 1,
+                    },
+                    meta={
+                        "reply_kind": CONSENT_RECOVERY_PROMPT_KIND,
+                        "consent_origin": origin,
+                    },
+                )
+            if text == f"cb:welcome:consent_details_{origin}":
+                # Тот же разворот S2a, что у приветствия; отличается только
+                # тем, что кнопка продолжения не теряет исходный вход.
+                return SkillResult(
+                    reply_text=S2A_DETAILS_TEXT,
+                    action_type="welcome_consent_details",
+                    action_data={
+                        "buttons": _s2a_details_buttons_for(origin),
+                        "button_columns": 1,
+                    },
+                    meta={
+                        "reply_kind": "welcome_s2a_details",
+                        "consent_origin": origin,
+                    },
+                )
+            if text in (
+                f"cb:welcome:consent_yes_{origin}",
+                f"cb:welcome:consent_yes_via_s2a_{origin}",
+            ):
+                return self._render_consent_recovery_granted(context, origin=origin)
         if text == "cb:welcome:consent_yes":
             # Direct S1 → S2 → S3 → S5 path. SHOW S3 positioning.
             return self._render_consent_granted(context, show_s3=True)
@@ -483,8 +557,12 @@ class WelcomeSkill:
                 getattr(context.bot_user, "id", None),
                 getattr(context.bot_user, "channel", None),
             )
+            # DRF-2267 (решение владельца CD §72) переворачивает Tau §11
+            # «no keyboard»: отказ — не тупик, дверь к согласию остаётся
+            # открытой той же парой, что на экране S2.
             return SkillResult(
                 reply_text=S2_REFUSED_TEXT,
+                action_data={"buttons": _s2_refused_buttons(), "button_columns": 1},
                 meta={"reply_kind": "welcome_consent_refused"},
             )
         # /start OR S1 auto-trigger OR Mini-App-opening callback that we
@@ -498,20 +576,7 @@ class WelcomeSkill:
         # S1 idempotency: stamp welcomed_at so subsequent inbound
         # messages bypass the auto-trigger branch in matches().
         bot_user = context.bot_user
-        if getattr(bot_user, "welcomed_at", None) is None:
-            try:
-                bot_user.welcomed_at = timezone.now()
-                bot_user.save(update_fields=["welcomed_at"])
-            except Exception as exc:  # noqa: BLE001
-                # Не блокируем welcome delivery если DB write fail —
-                # худший случай: welcome re-fires на следующем msg.
-                # ERROR log: оператор увидит pattern если это
-                # систематически воспроизводится.
-                logger.error(
-                    "welcome.welcomed_at_save_failed bot_user_id=%s err=%s",
-                    getattr(bot_user, "id", None),
-                    exc,
-                )
+        _stamp_welcomed_at(bot_user)
         # DRF-1202 — Returning User (§9) и User with an Active Task (§10).
         # Оба доступны только через явный жест: `/start` или колбэк
         # welcome-клавиатуры. Автотриггер по произвольному тексту
@@ -578,8 +643,79 @@ class WelcomeSkill:
             meta={"reply_kind": "welcome"},
         )
 
+    def _render_consent_recovery_granted(
+        self, context: SkillContext, *, origin: str
+    ) -> SkillResult:
+        """Согласие выдано из отказа — возврат в тот поток, откуда человек пришёл.
+
+        Журнал 152-ФЗ пишет глобальный онбординг по ``reply_kind``, и текст
+        он выбирает ПО ФАКТУ записи, а не по отсутствию исключения
+        (:func:`apps.channels.max.global_onboarding.run_onboarding_turn`).
+        Здесь — только экран.
+
+        **Вне глобального пути этой ветки быть не должно**: кнопку туда не
+        отдаёт :func:`consent_offer_action_data`. Но клавиатура живёт в чате
+        человека и переживает смену пути, так что тап всё-таки может прийти
+        с салонного. Тогда он уходит в канонический салонный путь
+        (:meth:`_render_consent_granted` пишет строку реестра и ``consent_at``) — а НЕ
+        отвечает «готово, согласие есть», потому что на салонном пути
+        ConsentRecord писал бы только он (DRF-2016): иначе это было бы ложное утверждение о
+        152-ФЗ, выданное человеку.
+        """
+        if not _is_global_bot_scope(current_tenant()):
+            return self._render_consent_granted(context, show_s3=True)
+        # Человек, впервые заговоривший с ботом через отказ, для приветствия
+        # уже знаком: без отметки S1-автотриггер выстрелил бы следующим ходом
+        # и накрыл бы возврат в поток полным первым приветствием.
+        _stamp_welcomed_at(context.bot_user)
+        action_data: dict | None = None
+        if origin in CONSENT_RECOVERY_RESUMED_ORIGINS:
+            # Возврат делает вызывающий, после записи согласия. Сюда ветка
+            # доходит, только если возврат не состоялся, и тогда говорит то
+            # же, что сама поверхность в свой недоступный час.
+            from apps.orchestrator.personal_surface import (
+                DIARY_UNAVAILABLE_TEXT,
+                MEMORY_UNAVAILABLE_TEXT,
+            )
+
+            reply_text = MEMORY_UNAVAILABLE_TEXT if origin == "memory" else DIARY_UNAVAILABLE_TEXT
+        else:
+            reply_text = CONSENT_RECOVERY_RETURN_TEXTS[origin]
+        if origin == "miniapp":
+            # DRF-2230 (скрин владельца 21.09): «возвращайся в приложение» без
+            # кнопки оставлял человека в чате без пути дальше.
+            button = _miniapp_return_button()
+            if button is not None:
+                action_data = {"buttons": [button], "button_columns": 1}
+            else:
+                reply_text = f"{reply_text} {MINIAPP_RETURN_HINT}"
+        if origin == "target":
+            # DRF-2138: возврат — кнопкой, не инструкцией «напиши фразу»:
+            # тап структурен на обоих путях, фраза на глобальном — нет.
+            from apps.skills.nutrition_anketa.skill import (
+                MANUAL_TARGET_BUTTON,
+                MANUAL_TARGET_CALLBACK,
+            )
+
+            action_data = {
+                "buttons": [{"label": MANUAL_TARGET_BUTTON, "callback": MANUAL_TARGET_CALLBACK}]
+            }
+        return SkillResult(
+            reply_text=reply_text,
+            action_type="welcome_consent_recovery_granted",
+            action_data=action_data,
+            meta={
+                "reply_kind": CONSENT_RECOVERY_GRANT_KIND,
+                "consent_origin": origin,
+                # Наше действие. Доказательство читает вызывающий: глобальный
+                # онбординг проверяет, что журнал 152-ФЗ записан, и при
+                # неудаче заменяет ответ на «не получилось сохранить
+                # согласие» (``run_onboarding_turn``). Здесь — объявление.
+            },
+        )
+
     def _render_consent_granted(self, context: SkillContext, *, show_s3: bool) -> SkillResult:
-        """Stamp consent_at + render S5 first-action grid.
+        """Write the consent row (per-tenant path) + render S5 first-action grid.
 
         Both consent_yes callbacks (direct + via_s2a) funnel here for
         single-source idempotent consent stamping. ``show_s3`` toggles
@@ -593,22 +729,38 @@ class WelcomeSkill:
         infrastructure. Strict two-bubble может revisit post-pilot.
         """
         bot_user = context.bot_user
-        # #1074 — on the GLOBAL (tenant-less) path we do NOT stamp consent_at here.
+        # #1074 — on the GLOBAL (tenant-less) path nothing is written here:
         # global_onboarding calls ``consent.services.record_global_consent`` right
         # after this render, and that stamps consent_at ATOMICALLY with the
-        # ConsentRecord (proof-of-consent) — so on the global path consent_at can
-        # never be set without the record. On the per-tenant path
-        # (``current_tenant()`` set) we stamp as before.
-        if current_tenant() is not None and getattr(bot_user, "consent_at", None) is None:
+        # ConsentRecord (proof-of-consent).
+        #
+        # DRF-2016 — on the per-tenant path this used to stamp ``consent_at``
+        # and stop. Every reader (``diary_write_refusal`` →
+        # ``personal_records_consent_open`` → ``has_global_consent``) asks the
+        # REGISTRY ROW of the BotUser, never the column — so a person who came
+        # through a salon bot kept getting ``consent_required`` after «Дать
+        # согласие». Now the salon path writes the same row through the same
+        # person-level primitive the nutrition consents use: one row per shell
+        # of the person, ``consent_at`` stamped inside the same transaction as
+        # the row, idempotent on a repeat tap. Only ``personal_data``:
+        # ``memory_green`` «одним тапом» was the owner's decision for the GLOBAL
+        # onboarding and is not extended to the salon path without his word.
+        if current_tenant() is not None:
             try:
-                bot_user.consent_at = timezone.now()
-                bot_user.save(update_fields=["consent_at"])
+                record_person_consent(
+                    bot_user,
+                    consent_type=ConsentRecord.ConsentType.PERSONAL_DATA.value,
+                    source=S2_CONSENT_SOURCE_TENANT,
+                    document_version=S2_CONSENT_DOCUMENT_VERSION,
+                )
             except Exception as exc:  # noqa: BLE001
-                # Mirror welcomed_at pattern: log + continue. Worst case
-                # — consent re-asked on next entry to S2; not data-loss
-                # since user IS giving consent right now.
+                # Mirror welcomed_at pattern: log + continue. Worst case —
+                # consent re-asked on next entry to S2; not data-loss since
+                # the person IS giving consent right now. Nothing half-done:
+                # the stamp lives inside the row's transaction, so a failure
+                # leaves neither.
                 logger.error(
-                    "welcome.consent_at_save_failed bot_user_id=%s err=%s",
+                    "welcome.consent_record_failed bot_user_id=%s err=%s",
                     getattr(bot_user, "id", None),
                     exc,
                 )
@@ -629,6 +781,43 @@ class WelcomeSkill:
                 "reply_kind": "welcome_s5_first_action",
                 "s3_shown": show_s3,
             },
+        )
+
+
+#: Где выдано согласие салонного S2 (форма ``<путь>:<экран>``, как у
+#: ``global_onboarding:welcome_s2``).
+S2_CONSENT_SOURCE_TENANT = "welcome:s2_tenant"
+
+#: Версия текста S2. Один текст (Tau §5) на оба пути — глобальный онбординг
+#: переиспользует WelcomeSkill напрямую и пишет ту же версию
+#: (``global_onboarding.CONSENT_DOCUMENT_VERSION``); равенство держит узел
+#: ``tests/test_consent_registry_2016.py::TestC7``. Импортировать оттуда
+#: нельзя: skills не зависят от channels.
+S2_CONSENT_DOCUMENT_VERSION = "welcome-s2-v1"
+
+
+def _stamp_welcomed_at(bot_user) -> None:
+    """S1 idempotency: отметить, что человек уже поздоровался.
+
+    Без отметки автотриггер приветствия выстреливает на следующем же входящем
+    сообщении. Вынесено из :meth:`WelcomeSkill.handle` одним источником, потому
+    что выдача согласия из отказа (DRF-1968) — тоже первый разговор человека с
+    ботом, и копия этой логики разошлась бы с оригиналом.
+
+    Не блокируем доставку, если запись в БД упала — худший случай: приветствие
+    повторится следующим сообщением. ERROR в лог: систематическое повторение
+    оператор увидит.
+    """
+    if getattr(bot_user, "welcomed_at", None) is not None:
+        return
+    try:
+        bot_user.welcomed_at = timezone.now()
+        bot_user.save(update_fields=["welcomed_at"])
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "welcome.welcomed_at_save_failed bot_user_id=%s err=%s",
+            getattr(bot_user, "id", None),
+            exc,
         )
 
 
@@ -733,8 +922,10 @@ def _welcome_buttons() -> list[dict[str, str]]:
     and the S5 first-action grid still opens the catalog directly
     (``open_catalog`` in :func:`_s5_first_action_buttons`).
     """
-    web_app = getattr(settings, "MAX_BOT_WEB_APP", "")
-    miniapp_url = getattr(settings, "MAX_MINIAPP_URL", "")
+    # DRF-1361 — the Mini App of the bot in THIS conversation (registry
+    # entry first, global settings as the single-bot fallback), one source
+    # for every button builder: apps.channels.miniapp_config.
+    web_app, miniapp_url, _ = miniapp_target()
 
     if not pilot_ux_enabled():
         # DRF-963 rolled back without a deploy — restore the pre-change
@@ -837,6 +1028,190 @@ def _start_buttons() -> list[dict[str, str]]:
     return [{"label": "▶️ Начать", "callback": "cb:welcome:start_s2"}]
 
 
+#: DRF-1968 (M2+) — откуда человек пришёл к согласию. Один сегмент payload:
+#: ``cb:welcome:consent_offer_<origin>`` и ``cb:welcome:consent_yes_<origin>``.
+#: ``target`` — ориентир от специалиста (DRF-2138): отказ без PERSONAL_DATA на
+#: входе ручного ориентира ведёт сюда же.
+#: ``miniapp`` — кнопка «Дать согласие в чате» на Главной Mini App (DRF-2230):
+#: приглашение приходит в чат само, по нажатию в приложении.
+#: ``diary`` (DRF-2267) — отказ ЧТЕНИЯ дневника: «мне нужно согласие на
+#: обработку личных данных». Возврат у него особый и живёт не здесь, а в
+#: ``global_onboarding.run_onboarding_turn``: дневник рисуется ПОСЛЕ записи
+#: согласия, иначе он спросил бы своё согласие раньше, чем оно записано, и
+#: человек получил бы отказ сразу после того, как согласие дал.
+CONSENT_RECOVERY_ORIGINS: tuple[str, ...] = (
+    "photo",
+    "text",
+    "water",
+    "target",
+    "miniapp",
+    "diary",
+    "memory",
+)
+
+#: Вид ответа «согласие выдано из отказа»: по нему глобальный онбординг пишет
+#: журнал согласий тем же путём, что и приветственный S5.
+CONSENT_RECOVERY_GRANT_KIND = "welcome_consent_recovery_granted"
+
+#: Экран согласия, ВЫЗВАННЫЙ ОТКАЗОМ, — отдельное имя, хотя текст тот же S2.
+#: Снаружи это один экран, внутрь — разные события: приветственный S2 живёт в
+#: первом контакте, этот приходит из середины разговора. Общее имя сделало бы
+#: их неразличимыми в истории и в счётчиках.
+CONSENT_RECOVERY_PROMPT_KIND = "welcome_s2_consent_prompt_recovery"
+
+#: Журнал согласия не записался. ЧЕРНОВИК: владельцем не утверждён, идёт к нему
+#: вместе с W1–W3. Утверждать «готово, согласие есть» здесь нельзя — отказы
+#: читают журнал, и человек упёрся бы в тот же отказ следующим же ходом.
+CONSENT_RECOVERY_FAILED_TEXT = (
+    "Не получилось сохранить согласие прямо сейчас. Попробуй, пожалуйста, ещё раз через минуту."
+)
+
+#: Подпись кнопки в отказе. Рекомендация владельца (OWNER_QUESTIONS, раздел M):
+#: «добавить кнопку „Дать согласие“ в оба отказа».
+CONSENT_OFFER_LABEL = "Дать согласие"
+
+#: Возврат в исходный поток после выдачи согласия (решение владельца M2+:
+#: «После consent возвращать пользователя в исходный flow»). ЧЕРНОВИК: сами
+#: фразы владельцем не утверждены, вынесены вопросом W3 вместе с текстами
+#: «забудь всё»; экран согласия при этом — утверждённый S2_CONSENT_TEXT.
+#: Входы, которые возвращают человека СВОЕЙ поверхностью, а не заготовленной
+#: фразой: возврат у них — сам ответ того потока (для ``diary`` — дневник,
+#: который рисует :func:`apps.channels.max.global_onboarding._resume_after_consent`
+#: после записи согласия). Фразы в :data:`CONSENT_RECOVERY_RETURN_TEXTS` у
+#: них нет и не должно быть: это был бы новый видимый текст рядом с ответом,
+#: который человек и так получит.
+CONSENT_RECOVERY_RESUMED_ORIGINS: frozenset[str] = frozenset({"diary", "memory"})
+
+#: Для ``diary`` строки здесь нет намеренно: возвращает сам дневник, своим
+#: текстом (см. :data:`CONSENT_RECOVERY_ORIGINS`). Сюда ветка доходит только
+#: если возврат не состоялся, и тогда говорит то же, что дневник в свой
+#: недоступный час, — не выдумывая нового обещания.
+CONSENT_RECOVERY_RETURN_TEXTS: dict[str, str] = {
+    "photo": "Готово, согласие есть. Пришли фото ещё раз — запишу в дневник.",
+    "text": "Готово, согласие есть. Напиши, что съела, — посчитаю и запишу.",
+    "water": "Готово, согласие есть. Сколько воды записать?",
+    "target": "Готово, согласие есть. Впиши ориентир от специалиста — кнопкой ниже.",
+    # DRF-2230 — ЧЕРНОВИК, к владельцу списком в теле PR.
+    "miniapp": "Готово, согласие есть. Возвращайся в приложение — дневник открыт.",
+}
+
+
+#: DRF-2230 — ЧЕРНОВИКИ к владельцу: подпись кнопки возврата и подсказка там,
+#: где кнопку построить не из чего (Mini App в настройках бота не задан).
+MINIAPP_RETURN_LABEL = "Открыть приложение"
+MINIAPP_RETURN_HINT = "Открой его тем же путём, каким открывал в прошлый раз."
+
+
+def _miniapp_return_button() -> dict[str, str] | None:
+    """``open_app`` на Главную (``open_home``) → ссылка → ничего (лестница DRF-1361)."""
+    web_app, miniapp_url, _ = miniapp_target()
+    if web_app:
+        return {"label": MINIAPP_RETURN_LABEL, "callback": "open_home", "web_app": web_app}
+    if miniapp_url:
+        return {"label": MINIAPP_RETURN_LABEL, "url": _miniapp_url(miniapp_url, "open_home")}
+    return None
+
+
+def consent_offer_buttons(origin: str) -> list[dict[str, str]]:
+    """Кнопка «Дать согласие» под отказом; несёт, откуда человек пришёл."""
+    return [
+        {
+            "label": CONSENT_OFFER_LABEL,
+            "callback": f"cb:welcome:consent_offer_{origin}",
+        }
+    ]
+
+
+def _is_global_bot_scope(tenant: object | None) -> bool:
+    """True на глобальном пути бота — вне тенанта ИЛИ под сентинелом.
+
+    Признака «тенанта нет» здесь недостаточно, и это не теория: три отказа,
+    под которыми живёт кнопка, исполняются ВНУТРИ
+    ``tenant_scope(get_global_bot_tenant())`` (``orchestrator/nutrition_global.py``
+    ::``_run_skill`` — сентинел нужен там, чтобы принять глобальную
+    Conversation). Сентинел не ``None`` никогда, поэтому проверка
+    ``current_tenant() is None`` отбивала кнопку на ВСЕХ трёх поверхностях —
+    в бою её не было ни разу, а тесты, зовущие навыки мимо scope, этого
+    не видели.
+
+    Сравнение — по ``pk``, то есть по идентичности СТРОКИ, и сентинел берётся
+    тем же аксессором, каким его получает боевой путь. Ни по slug, ни по своей
+    копии константы: слепок имени пережил бы переименование и соврал бы молча.
+
+    Аксессор — ЧИТАЮЩИЙ (``find_global_bot_tenant``), не resolve-or-create:
+    вопрос «это сентинел?» не должен уметь заводить системного тенанта. Этот
+    различитель зовётся на каждом отказе, и побочная запись проявилась бы
+    ровно там, где строки ещё нет.
+
+    Fail-closed: сентинела нет или прочитать не удалось — путь считается не
+    глобальным, то есть возвращаемся к поведению без кнопки.
+    """
+    if tenant is None:
+        return True
+    try:
+        from apps.identity.services.global_tenant import find_global_bot_tenant
+
+        sentinel_pk = getattr(find_global_bot_tenant(), "pk", None)
+    except Exception:  # noqa: BLE001 — читаем сентинел best-effort
+        logger.exception("welcome.global_scope_probe_failed")
+        return False
+    tenant_pk = getattr(tenant, "pk", None)
+    return tenant_pk is not None and tenant_pk == sentinel_pk
+
+
+def consent_offer_action_data(origin: str) -> dict | None:
+    """``action_data`` для отказа — ТОЛЬКО на глобальном пути.
+
+    На салонном пути тап согласия ставит ``consent_at``, но не пишет
+    ConsentRecord (:meth:`WelcomeSkill._render_consent_granted`), а отказы
+    читают журнал — кнопка вернула бы человека к тому же отказу. Салонный путь
+    — отдельный лист (решение главного окна 16.09).
+    """
+    from apps.tenancy.context import current_tenant
+
+    if not _is_global_bot_scope(current_tenant()):
+        return None
+    return {"buttons": consent_offer_buttons(origin), "button_columns": 1}
+
+
+def _s2_consent_buttons_for(origin: str) -> list[dict[str, str]]:
+    """Тот же экран S2, но «Да, продолжим» несёт исходный вход человека."""
+    return [
+        {"label": "Да, продолжим", "callback": f"cb:welcome:consent_yes_{origin}"},
+        {"label": "Узнать что хранится", "callback": f"cb:welcome:consent_details_{origin}"},
+        {"label": "Не сейчас", "callback": "cb:welcome:consent_refuse"},
+    ]
+
+
+def _s2a_details_buttons_for(origin: str) -> list[dict[str, str]]:
+    """S2a-разворот, в который пришли из отказа: продолжение помнит вход.
+
+    Без этого человек, решивший сперва прочитать «что хранится», выдавал бы
+    согласие общим ``consent_yes_via_s2a`` и возвращался на приветственный
+    экран вместо своего потока — origin терялся ровно на том шаге, который
+    добросовестный человек и делает.
+    """
+    return [
+        {
+            "label": "Понятно, продолжим",
+            "callback": f"cb:welcome:consent_yes_via_s2a_{origin}",
+        },
+        {"label": "Не сейчас", "callback": "cb:welcome:consent_refuse"},
+    ]
+
+
+def _s2_refused_buttons() -> list[dict[str, str]]:
+    """Под «Поняла. Когда захочешь — пиши, я тут.» (DRF-2267, CD §72).
+
+    «Дать согласие» — снова экран S2 (``cb:welcome:start_s2``), «Узнать что
+    хранится» — разворот S2a. Подписи — те же, что у кнопки отказа и у S2.
+    """
+    return [
+        {"label": CONSENT_OFFER_LABEL, "callback": "cb:welcome:start_s2"},
+        {"label": "Узнать что хранится", "callback": "cb:welcome:consent_details"},
+    ]
+
+
 def _s2_consent_buttons() -> list[dict[str, str]]:
     """S2 privacy consent keyboard (Tau §5).
 
@@ -893,11 +1268,17 @@ def welcome_tap_labels() -> dict[str, str]:
     ``cb:welcome:`` payload, и в чат они ничего не присылают.
     """
     labels: dict[str, str] = {}
+    recovery_buttons: list[dict[str, str]] = []
+    for origin in CONSENT_RECOVERY_ORIGINS:
+        recovery_buttons.extend(consent_offer_buttons(origin))
+        recovery_buttons.extend(_s2_consent_buttons_for(origin))
+        recovery_buttons.extend(_s2a_details_buttons_for(origin))
     for button in (
         *_start_buttons(),
         *_s2_consent_buttons(),
         *_s2a_details_buttons(),
         *_legacy_wellness_buttons(),
+        *recovery_buttons,
     ):
         callback = button.get("callback", "")
         if callback.startswith("cb:welcome:"):
@@ -969,8 +1350,7 @@ def _s5_first_action_buttons() -> list[dict[str, str]]:
     ``tests/test_miniapp_routes.py``, so a button added here without its
     route fails a test instead of shipping a dead deeplink.
     """
-    web_app = getattr(settings, "MAX_BOT_WEB_APP", "")
-    miniapp_url = getattr(settings, "MAX_MINIAPP_URL", "")
+    web_app, miniapp_url, _ = miniapp_target()  # DRF-1361 — see _welcome_buttons
 
     primary_actions: list[dict[str, str]] = []
     just_browse: list[dict[str, str]] = []
@@ -1029,6 +1409,26 @@ def _miniapp_url(base: str, slug: str) -> str:
             programming error, and louder than a dead button.
     """
     return _join(base, MINIAPP_ROUTES[slug])
+
+
+def reschedule_route(booking_id: str) -> str:
+    """Путь экрана переноса КОНКРЕТНОЙ записи в мини-приложении.
+
+    DRF-1547. Не запись в :data:`MINIAPP_ROUTES`: та таблица плоская —
+    «слаг это путь», — и параметра в ней быть не может, а слаг без
+    параметра открыл бы экран, который не знает, что переносить.
+
+    Канонический адрес закреплён DRF-1481 (``RescheduleScreen`` смонтирован
+    и по нему, и по legacy-алиасу ``/my-visits/:id/reschedule``); экран
+    читает запись сам, по id из адреса, поэтому ссылка работает и как
+    первый экран сессии, а не только как переход изнутри приложения.
+
+    Одно определение на обе формы кнопки: ``open_app`` кладёт
+    ``reschedule_{id}`` в payload и путь строит SPA, внешняя ссылка строит
+    путь здесь. Разъехаться им нельзя — тест
+    ``apps/skills/welcome/tests/test_miniapp_routes.py`` сверяет обе.
+    """
+    return f"customer/records/{booking_id}/reschedule"
 
 
 def _join(base: str, route: str) -> str:

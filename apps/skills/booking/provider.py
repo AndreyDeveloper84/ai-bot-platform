@@ -54,6 +54,8 @@ from apps.integrations.ayla.booking_client import (
     BookingRateLimitedError,
     BookingUnavailableError,
 )
+from apps.integrations.ayla.health_check import is_health_check_code
+from apps.integrations.ayla.offer_refusal import reason_from_edge, reason_from_refusal
 from apps.integrations.yclients.client import (
     AvailableTime,
     BookingRecord,
@@ -96,6 +98,7 @@ def get_booking_provider(*, bot_user: Any) -> Any:
             # resolves to (must match server-side or create 403s). Empty when
             # identity could not be resolved → create fails gracefully.
             client_id=str(ayla_user_id or ""),
+            tenant=getattr(bot_user, "tenant", None),
         )
 
     from apps.integrations.yclients import get_yclients_client
@@ -120,10 +123,59 @@ class AylaYClientsAdapter:
         client: AylaBookingClient,
         external_user_id: str,
         client_id: str = "",
+        tenant: Any = None,
     ) -> None:
         self._client = client
+        # DRF-1933: салон, в котором резолвится id мастера для каталога.
+        self._tenant = tenant
         self._external_user_id = external_user_id
         self._client_id = client_id
+
+    # ── id мастера для каталога (DRF-1933) ────────────────────────────────
+
+    def catalog_specialist_id(self, staff_id: int | str) -> str:
+        """Id профиля в каталоге для мастера, которого бот знает по ``staff_id``.
+
+        Внутри бота мастер — первичный ключ зеркала: его кладёт консьерж
+        (``handoff.native_master_id``) и несёт колбэк ``book:pick_master``, по
+        нему ищут рёбра и ворота здоровья. У склеенного приглашения и
+        соло-мастера это ``uuid4``, а не id каталога. Поэтому перевод — здесь,
+        на границе, а не в хендоффе.
+
+        * строка зеркала с этим pk → её ``catalog_specialist_id``; пусто —
+          нейтральный :class:`YClientsSpecialistUnavailableError`, без вызова;
+        * строки нет (или адаптер не привязан к салону) → id пришёл от каталога
+          (``get_staff``) или неизвестен —
+          уходит как есть: бот его не выдумывал.
+        """
+        from apps.catalog.models import CatalogMaster
+        from apps.tenancy.context import tenant_scope
+        from apps.catalog.specialist_ref import (
+            CatalogSpecialistUnresolved,
+            catalog_specialist_id,
+        )
+
+        key = str(staff_id)
+        try:
+            uuid.UUID(key)
+        except ValueError:
+            return key
+        if self._tenant is None:
+            # Без салона строку не найти законно (MKT1: межсалонное чтение
+            # каталога — только marketplace). Фабрика салон привязывает всегда.
+            return key
+        with tenant_scope(self._tenant):
+            row = (
+                CatalogMaster.objects.filter(tenant=self._tenant, pk=key)
+                .only("pk", "catalog_specialist_id")
+                .first()
+            )
+        if row is None:
+            return key
+        try:
+            return catalog_specialist_id(row)
+        except CatalogSpecialistUnresolved as exc:
+            raise YClientsSpecialistUnavailableError(str(exc)) from exc
 
     # ── reads ──────────────────────────────────────────────────────────────
 
@@ -168,7 +220,7 @@ class AylaYClientsAdapter:
             # selected service through ("" when absent → the client raises a
             # clear BookingBadRequestError, not a 14-day 400 cascade).
             return self._client.get_available_dates(
-                specialist_id=str(staff_id),
+                specialist_id=self.catalog_specialist_id(staff_id),
                 service_id=_first_id(service_ids) or "",
             )
 
@@ -181,7 +233,7 @@ class AylaYClientsAdapter:
     ) -> list[AvailableTime]:
         with _translate_errors():
             rows = self._client.get_available_times(
-                specialist_id=str(staff_id),
+                specialist_id=self.catalog_specialist_id(staff_id),
                 date=date,
                 service_id=_first_id(service_ids) or "",  # #1051: mandatory
             )
@@ -202,6 +254,8 @@ class AylaYClientsAdapter:
         notify_by_sms: int = 0,
         notify_by_email: int = 0,
         payment_required: bool = True,
+        quoted_price: Decimal | None = None,
+        quoted_duration_minutes: int | None = None,
     ) -> BookingRecord:
         # ``notify_*`` / phone / name are YClients-specific; Ayla owns
         # notifications and resolves the client from client_id + X-External-User-ID.
@@ -217,15 +271,24 @@ class AylaYClientsAdapter:
         key = _idempotency_key(
             self._external_user_id, "create", staff_id, service_id, datetime, payment_required
         )
+        # DRF-1708 / D4: то, что человек видел в превью, едет в создание —
+        # Ayla сверит с применяемым внутри транзакции. Только когда
+        # прислано: без котировки — прежний вызов.
+        quote_kwargs: dict[str, Any] = {}
+        if quoted_price is not None:
+            quote_kwargs["quoted_price"] = str(quoted_price)
+        if quoted_duration_minutes is not None:
+            quote_kwargs["quoted_duration_minutes"] = int(quoted_duration_minutes)
         with _translate_errors():
             record = self._client.create_appointment(
                 external_user_id=self._external_user_id,
                 client_id=self._client_id,
-                specialist_id=str(staff_id),
+                specialist_id=self.catalog_specialist_id(staff_id),
                 service_id=service_id,
                 start_datetime=datetime,
                 idempotency_key=key,
                 payment_required=payment_required,
+                **quote_kwargs,
             )
         return BookingRecord(
             record_id=0,
@@ -233,7 +296,7 @@ class AylaYClientsAdapter:
             raw=_mirror_raw(
                 record,
                 requested_service_id=service_id or None,
-                requested_specialist_id=str(staff_id) or None,
+                requested_specialist_id=self.catalog_specialist_id(staff_id) or None,
             ),
         )
 
@@ -316,6 +379,32 @@ class AylaYClientsAdapter:
             rows = self._client.get_user_appointments(external_user_id=self._external_user_id)
         return [_to_yc_user_record(r) for r in rows]
 
+    def get_specialist_service_quote(
+        self,
+        *,
+        staff_id: int | str,
+        service_id: int | str | None,
+    ) -> tuple[Decimal | None, int | None]:
+        """Цена и длительность ребра мастер+услуга — то, что Ayla поставит
+        на НОВУЮ запись (DRF-1708). ``None`` в любой позиции — значение
+        не известно; превью тогда его не показывает и не шлёт.
+        """
+        with _translate_errors():
+            rows = self._client.get_specialist_service_edges(
+                specialist_id=self.catalog_specialist_id(staff_id),
+                service_id=str(service_id),
+            )
+        if not rows:
+            return None, None
+        _refuse_unsellable(rows[0])
+        duration = rows[0].get("duration_minutes")
+        return (
+            _parse_edge_price(rows[0].get("price")),
+            duration
+            if isinstance(duration, int) and not isinstance(duration, bool) and duration > 0
+            else None,
+        )
+
     def get_specialist_service_price(
         self,
         *,
@@ -339,11 +428,12 @@ class AylaYClientsAdapter:
         """
         with _translate_errors():
             rows = self._client.get_specialist_service_edges(
-                specialist_id=str(staff_id),
+                specialist_id=self.catalog_specialist_id(staff_id),
                 service_id=str(service_id),
             )
         if not rows:
             return None
+        _refuse_unsellable(rows[0])
         return _parse_edge_price(rows[0].get("price"))
 
 
@@ -375,6 +465,73 @@ class YClientsScheduleUnavailableError(YClientsUnavailableError):
     """
 
 
+class YClientsHealthCheckHandoffError(YClientsAPIError):
+    """Ayla refused ``create`` with 422 ``HEALTH_CHECK_*`` (§98, DRF-1614).
+
+    A medical routing decision, not an outage and not a rejected payload.
+    Before this class the refusal fell through to plain
+    ``YClientsAPIError`` and the skill answered
+    ``_handoff(reason="booking_yclients_failure")`` with the generic
+    failure copy — so the person WAS passed to a human, but under the
+    name of a bus failure and in the words of a breakdown.
+
+    That mattered twice. To the person, because the calm sentence §98
+    fixes was replaced by «не получилось оформить запись». And to us,
+    because a journal that files a medical decision as an integration
+    failure will lie later, when somebody counts why people end up with
+    an operator.
+
+    ``code`` carries the exact one of the three. §98 requires ``True``
+    and ``UNKNOWN`` to stay apart inside the system — the annotation
+    queue is prioritised by the ``UNKNOWN`` count — while the person
+    hears one sentence.
+    """
+
+    def __init__(self, detail: str = "", *, code: str = "", handoff: bool | None = None) -> None:
+        super().__init__(detail)
+        self.code = code
+        self.handoff = handoff
+
+
+class YClientsQuoteChangedError(YClientsAPIError):
+    """DRF-1708 (владелец, пакет 2, D4): показанное уже не действует.
+
+    Ayla сверила ``quoted_*`` с применяемым внутри транзакции создания и
+    отказала ``409 QUOTE_CHANGED``. Не поломка и не занятый слот —
+    MATERIAL_CHANGE: человек обязан увидеть, что было и что стало, и
+    подтвердить заново. Обе пары едут с провода дословно.
+    """
+
+    def __init__(self, detail: str = "", *, field: str, quoted: Any, applied: Any) -> None:
+        super().__init__(detail)
+        self.field = field
+        self.quoted = quoted
+        self.applied = applied
+
+
+class YClientsOfferNotSellableError(YClientsAPIError):
+    """DRF-1989: каталог не продаёт это предложение — и назвал причину.
+
+    Два источника одной причины: ребро ``sellable=false`` в котировке и отказ
+    создания ``422 SERVICE_NOT_ACTIVE`` с ``details.reason``. Не поломка и не
+    передача менеджеру: у отказа есть слова (``offer_refusal.client_text_for``).
+    """
+
+    def __init__(self, detail: str = "", *, reason: str) -> None:
+        super().__init__(detail)
+        self.reason = reason
+
+
+def _refuse_unsellable(row: dict[str, Any]) -> None:
+    """Непродаваемое ребро → именованный отказ вместо цены (DRF-1989).
+
+    Ответ без ключа ``sellable`` (каталог до DRF-1962) ничего не меняет.
+    """
+    reason = reason_from_edge(row)
+    if reason is not None:
+        raise YClientsOfferNotSellableError("offer_not_sellable", reason=reason)
+
+
 class YClientsStaleVersionError(YClientsAPIError):
     """Optimistic concurrency conflict on Ayla reschedule.
 
@@ -385,11 +542,33 @@ class YClientsStaleVersionError(YClientsAPIError):
     """
 
 
+def _health_check_code(exc: BaseException) -> str:
+    """The ``HEALTH_CHECK_*`` code of this 422, or "" when it is not one.
+
+    Reads status AND code, never the message: the reason must not be
+    reconstructed from prose (§98). A 422 whose code we do not recognise
+    is deliberately NOT treated as a health-check refusal — guessing one
+    would promise a consultation nobody is going to give.
+    """
+    code = getattr(exc, "code", None)
+    status = getattr(exc, "status_code", None)
+    if status != 422 or not isinstance(code, str):
+        return ""
+    return code if is_health_check_code(code) else ""
+
+
 def _is_c1_debt_block(exc: BaseException) -> bool:
     """True when the Ayla 4xx is the C1 billing-eligibility rejection."""
     code = getattr(exc, "code", None)
     status = getattr(exc, "status_code", None)
     return status == 409 and isinstance(code, str) and code.lower() == "subscription_past_due"
+
+
+def _is_quote_changed(exc: BaseException) -> bool:
+    """True when the Ayla 4xx is ``409 QUOTE_CHANGED`` (DRF-1708)."""
+    code = getattr(exc, "code", None)
+    status = getattr(exc, "status_code", None)
+    return status == 409 and isinstance(code, str) and code.upper() == "QUOTE_CHANGED"
 
 
 def _is_stale_version(exc: BaseException) -> bool:
@@ -415,10 +594,37 @@ class _translate_errors:
         # translated YClients error, or lets the original propagate.
         if exc_type is None:
             return
+        # DRF-1614 — checked FIRST among the 4xx specialisations. Not for
+        # precedence over C1 or stale-version (the statuses differ, so
+        # they cannot collide), but because this is the branch a reader
+        # must see before the generic fall-through below, which is where
+        # the refusal used to end up.
+        if issubclass(exc_type, BookingBadRequestError):
+            health_code = _health_check_code(exc)
+            if health_code:
+                raise YClientsHealthCheckHandoffError(
+                    str(exc), code=health_code, handoff=getattr(exc, "handoff", None)
+                ) from exc
+        if issubclass(exc_type, BookingBadRequestError):
+            # DRF-1989 — осознанный отказ каталога с именем причины, а не
+            # безымянный YClientsAPIError, за которым шла передача менеджеру.
+            offer_reason = reason_from_refusal(
+                getattr(exc, "code", None), getattr(exc, "details", None)
+            )
+            if offer_reason is not None:
+                raise YClientsOfferNotSellableError(str(exc), reason=offer_reason) from exc
         if issubclass(exc_type, BookingBadRequestError) and _is_c1_debt_block(exc):
             raise YClientsSpecialistUnavailableError(str(exc)) from exc
         if issubclass(exc_type, BookingBadRequestError) and _is_stale_version(exc):
             raise YClientsStaleVersionError(str(exc)) from exc
+        if issubclass(exc_type, BookingBadRequestError) and _is_quote_changed(exc):
+            details = getattr(exc, "details", None) or {}
+            raise YClientsQuoteChangedError(
+                str(exc),
+                field=str(details.get("field") or ""),
+                quoted=details.get("quoted"),
+                applied=details.get("applied"),
+            ) from exc
         # DRF-997: 429 after retries is a transient schedule outage, not a
         # generic YClients outage, so the skill can reply "try again in a
         # minute" instead of handing off to a manager.
@@ -440,8 +646,10 @@ def _to_yc_service(svc: AylaService) -> Service:
     return Service(
         id=svc.id,  # type: ignore[arg-type]
         title=svc.title,
-        price_min=svc.price_min,
-        price_max=svc.price_max,
+        # DRF-1727: ``None`` = no price in the catalog; the YClients DTO is
+        # float-typed (anti-touch) and nothing downstream renders these two.
+        price_min=svc.price_min,  # type: ignore[arg-type]
+        price_max=svc.price_max,  # type: ignore[arg-type]
         duration_s=svc.duration_s,
         category_id=svc.category_id,  # type: ignore[arg-type]
         raw=svc.raw,

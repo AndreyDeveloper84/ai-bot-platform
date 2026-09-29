@@ -12,7 +12,7 @@ This module pins the live-path capture:
 * gated by ``REPLAY_LIVE_CAPTURE_ENABLED`` (default OFF): flag off = zero
   new rows, byte-identical behaviour (:class:`TestFlagOffCharacterization`);
 * the SAME recorder the pipeline point uses — same sampling
-  (``REPLAY_SAMPLE_RATE_*``), same ``regex_v2`` redaction BEFORE persist,
+  (``REPLAY_SAMPLE_RATE_*``), same ``regex_v3`` redaction BEFORE persist,
   same swallow-everything contract;
 * global rows park under the ``global_bot`` sentinel tenant (the global
   path runs at ``current_tenant()=None``, which the recorder skips);
@@ -220,7 +220,7 @@ class TestGlobalConciergeTurn:
     def test_concierge_turn_redacts_pii_before_persist(
         self, mock_send, fake_redis, mock_concierge, capture_enabled
     ):
-        # Same regex_v2 redaction the pipeline point applies — the raw user
+        # Same regex_v3 redaction the pipeline point applies — the raw user
         # text NEVER reaches the row.
         _run_global("мой телефон +74951234567, запишите на массаж")
 

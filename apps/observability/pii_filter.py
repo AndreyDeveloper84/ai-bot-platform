@@ -317,23 +317,35 @@ class PIIRedactingFilter(logging.Filter):
         # contract, but be defensive: leave anything else untouched.
 
     def _redact(self, text: str) -> str:
-        """Apply every pattern to a single string. Idempotent.
+        """Apply every pattern to a single string. See :func:`redact_pii`."""
+        return redact_pii(text)
 
-        Short-circuits on the common "no digit, no @" case to avoid
-        three regex passes on every log line.
-        """
-        if not text:
-            return text
-        if not _HAS_PII_CANDIDATE.search(text):
-            return text
 
-        # Order: credit card first (greediest digit run), then phone,
-        # then email. Each pattern runs once via re.sub — no findall/
-        # replace loops.
-        text = _CREDIT_CARD_RE.sub(_sub_credit_card, text)
-        text = _PHONE_RE.sub(_PHONE_PLACEHOLDER, text)
-        text = _EMAIL_RE.sub(_EMAIL_PLACEHOLDER, text)
+def redact_pii(text: str) -> str:
+    """Apply every pattern to a single string. Idempotent.
+
+    The one place the phone / e-mail / card patterns are applied to free
+    text. The log filter above calls it per record; DRF-2158
+    :mod:`apps.observability.alerting` calls it on the operator-facing
+    MAX line, so an alert body that quotes a client's phone reaches the
+    operator chat as ``[PHONE]`` — same placeholders operators already
+    grep for in the logs.
+
+    Short-circuits on the common "no digit, no @" case to avoid three
+    regex passes on every call.
+    """
+    if not text:
         return text
+    if not _HAS_PII_CANDIDATE.search(text):
+        return text
+
+    # Order: credit card first (greediest digit run), then phone,
+    # then email. Each pattern runs once via re.sub — no findall/
+    # replace loops.
+    text = _CREDIT_CARD_RE.sub(_sub_credit_card, text)
+    text = _PHONE_RE.sub(_PHONE_PLACEHOLDER, text)
+    text = _EMAIL_RE.sub(_EMAIL_PLACEHOLDER, text)
+    return text
 
 
 # ---------------------------------------------------------------------------

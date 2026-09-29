@@ -17,6 +17,7 @@ from django.db.migrations.executor import MigrationExecutor
 from apps.identity.models import MemoryEntry, UserPersonalContext
 from apps.identity.services.memory_reader import read_personal_context
 from apps.identity.services.memory_writer import write_entry
+from tests.support.migration_graph import restore_migration_head
 
 pytestmark = pytest.mark.django_db
 
@@ -73,10 +74,10 @@ class TestMigrationShape:
         """B. 0015 migrates back to 0014 and forward again cleanly."""
         # Fresh executor per migrate() — the loader caches applied-migration
         # state at init, so a reused executor mis-plans the second migrate.
-        # The finally ALWAYS returns the test DB to the migration-chain head:
-        # 0016+ are data-only, 0017 adds `provenance` — leaving the DB behind
-        # head breaks later tests that write through the runtime model.
-        head = ("identity", "0018_memoryentry_provenance_backfill")
+        # The finally ALWAYS restores the WHOLE graph, not identity's head:
+        # dropping to 0014 unapplies every app that depends on identity
+        # (handoff/0002, catalog/0016), and those come back only through
+        # `graph.leaf_nodes()` (DRF-1551).
         try:
             executor = MigrationExecutor(connection)
             executor.migrate([_MIG_PREV])
@@ -92,7 +93,7 @@ class TestMigrationShape:
             )
             assert set(NEW_FIELDS) <= {f.name for f in new._meta.fields}
         finally:
-            MigrationExecutor(connection).migrate([head])
+            restore_migration_head()
 
 
 class TestLegacyRowCompat:

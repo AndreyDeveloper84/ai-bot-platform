@@ -49,6 +49,7 @@ import httpx
 from django.conf import settings
 
 from apps.integrations.ayla.url_builder import AylaUrlBuilder
+from apps.integrations.ayla.request_id import with_request_id
 
 
 logger = logging.getLogger(__name__)
@@ -139,8 +140,162 @@ class NutritionUnavailableError(NutritionAPIError):
     """Ayla is down or the circuit is open — caller should show a fallback."""
 
 
+class NothingToConfirmError(NutritionAPIError):
+    """Каталог ответил ``409 NOTHING_TO_CONFIRM``: ориентир не в состоянии
+    ``ayla_proposed``. Несёт текущий источник — у трёх состояний три
+    разных ответа человеку («ещё не считали» / «уже подтверждено» /
+    «поставлено рукой»), и склеивать их в одно «не вышло» нельзя.
+    """
+
+    def __init__(self, source: str) -> None:
+        self.source = source
+        super().__init__(f"nothing_to_confirm:{source or 'unknown'}")
+
+
+class LegacyDefaultUnconfirmedError(NutritionAPIError):
+    """Каталог ответил ``409 LEGACY_DEFAULT_UNCONFIRMED`` (DRF-2279, DRF-2332).
+
+    Предложение есть, но посчитано на входах, которые подставила прежняя
+    анкета (``legacy_default_inputs``), — подтвердить его значило бы выдать
+    старое умолчание за ответ человека. ``fields`` — имена входов, как их
+    назвал каталог (``activity_coefficient``, ``pace``).
+
+    Отдельный класс, а не ``NothingToConfirmError``: до DRF-2332 любой 409
+    читался как «подтверждать нечего», и человеку с живым предложением бот
+    отвечал «Подтверждать пока нечего.» — неверная причина вместо верной.
+    """
+
+    def __init__(self, fields: list[str]) -> None:
+        self.fields = [str(f) for f in fields]
+        super().__init__(f"legacy_default_unconfirmed:{','.join(self.fields)}")
+
+
+class ManualTargetsRefusedError(NutritionAPIError):
+    """Каталог отказал в ручном ориентире ``422`` (DRF-2138, режим 3 §82):
+    ``CALORIES_BELOW_FLOOR`` — значение не сохранено. ``details`` — ответ
+    каталога как есть (``floor_kcal`` и т.п.): порог называет каталог, бот
+    его не дублирует.
+    """
+
+    def __init__(self, code: str, details: dict[str, Any]) -> None:
+        self.code = code
+        self.details = dict(details)
+        super().__init__(f"manual_targets_refused:{code}")
+
+
+class ManualTargetsConfirmationRequiredError(NutritionAPIError):
+    """``409 CONFIRMATION_REQUIRED``: каталог запишет только после повторного
+    подтверждения (``kind`` — ``calories_deviation`` / ``water_out_of_range``).
+    ``details`` — ответ каталога (``maintenance_kcal``, ``deviation_ratio``…).
+    """
+
+    def __init__(self, kind: str, details: dict[str, Any]) -> None:
+        self.kind = kind
+        self.details = dict(details)
+        super().__init__(f"manual_targets_confirmation_required:{kind}")
+
+
 class FoodNotRecognizedError(NutritionAPIError):
     """Ayla returned 400 FOOD_NOT_RECOGNIZED — not food / unreadable photo."""
+
+
+class MealNotFoundError(NutritionAPIError):
+    """DRF-1838: 404 — no such entry (or deletion) for THIS person."""
+
+
+class MealRestoreExpiredError(NutritionAPIError):
+    """DRF-1838: 410 RESTORE_WINDOW_EXPIRED — the deletion is final."""
+
+
+class MealEditConflictError(NutritionAPIError):
+    """DRF-1838: 409 — the entry mirrors a water entry (the water undo owns it)."""
+
+
+class ScanBudgetError(NutritionAPIError):
+    """DRF-2195: каталог отказал в распознавании ПО БЮДЖЕТУ, а не по сбою.
+
+    Каталог (#519) считает снимки дважды — на человека за сутки и на всех за
+    сутки. Исчерпанный счёт — ответ системы, которая работает: сеть цела,
+    каталог отвечает, остальные ручки питания в порядке. Поэтому такой отказ
+
+    * НЕ наследник :class:`NutritionUnavailableError` — иначе лестница навыка
+      сказала бы «попробуй через минуту» про счёт, который снимется в полночь;
+    * НЕ кормит предохранитель — см. :meth:`_parse_scan_response`.
+    """
+
+
+class ScanDailyLimitError(ScanBudgetError):
+    """429 ``FOOD_SCAN_DAILY_LIMIT`` — личный потолок человека на сутки.
+
+    ``retry_after`` (секунды до полуночи) приходит от каталога и хранится для
+    журнала и возможных будущих окон ожидания. Текстам отказа он НЕ нужен:
+    называть человеку «через N часов» — обещание часа, который ему ничего не
+    даст, когда рядом есть работающая дорога — записать еду словами.
+    """
+
+    def __init__(self, reason: str = "daily_limit", *, retry_after: int | None = None) -> None:
+        self.retry_after = retry_after
+        super().__init__(reason)
+
+
+def _retry_after_or_none(value: object) -> int | None:
+    """``retry_after`` из чужого тела → секунды или ничего.
+
+    ``bool`` — не число секунд (``True`` дало бы «через 1 секунду»), а
+    бесконечность и NaN json разбирает молча и роняют ``int()``.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if value != value or value in (float("inf"), float("-inf")):  # NaN / ±inf
+        return None
+    return int(value)
+
+
+class ScanBudgetExhaustedError(ScanBudgetError):
+    """503 ``FOOD_SCAN_BUDGET_EXHAUSTED`` — общий дневной бюджет распознавания.
+
+    Статус 5xx, но это НЕ недоступность: каталог отвечает осознанно и знает,
+    что отвечает. Именно ради этого случая разбор кода ошибки стоит ВЫШЕ
+    развилки по статусу.
+    """
+
+
+class ScanProviderDownError(NutritionAPIError):
+    """503 ``FOOD_API_UNAVAILABLE`` с ``details.permanent`` — распознаватель отказал стойко (DRF-2318).
+
+    Каталог (#549): у всех провайдеров стойкий отказ — счёт не активен, ключ
+    отвергнут, квота исчерпана, ключ не задан. Через минуту ничего не
+    изменится, поэтому это
+
+    * НЕ наследник :class:`NutritionUnavailableError` — иначе лестница навыка
+      сказала бы «попробуй через минуту»;
+    * НЕ кормит предохранитель — неоплаченный распознаватель не гасит запись
+      текстом, дневник и сводку (как бюджет, DRF-2195).
+
+    ``reason`` — закрытое слово каталога или ``unknown``.
+    """
+
+    REASONS = frozenset(
+        {
+            "billing_not_active",
+            "quota_exhausted",
+            "invalid_api_key",
+            "auth_rejected",
+            "not_configured",
+        }
+    )
+
+    def __init__(self, reason: str = "unknown") -> None:
+        self.reason = reason if reason in self.REASONS else "unknown"
+        super().__init__(f"scan_provider_down:{self.reason}")
+
+
+class NutritionUncertainOutcomeError(NutritionUnavailableError):
+    """DRF-1838: the request left, the answer never came back (timeout / network).
+
+    Unlike a 5xx or an open circuit, the write MAY have been applied on Ayla's
+    side — the chat must not tell the person «ничего не изменила».
+    """
 
 
 @dataclass(frozen=True)
@@ -163,8 +318,113 @@ class FoodLogResponse:
     log_id: str
     dish_name: str
     meal_type: str
-    calories: float
+    #: DRF-2371 — ``None``, когда каталог сохранил запись без чисел.
+    #: Запись есть, числа нет; ноль здесь был бы выдумкой.
+    calories: float | None
     raw: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class MealDeletion:
+    """DRF-1838 — ``DELETE internal/food-log/<id>/``: запись убрана, окно открыто."""
+
+    log_id: str
+    restore_window_expires_at: str | None
+
+
+@dataclass(frozen=True)
+class SavedMealRow:
+    """DRF-2092 (F12) — строка избранного, как её отдаёт ``internal/saved-meals/``.
+
+    Снимок на момент сохранения: порция в граммах и калории/БЖУ; ссылки на
+    справочник нет — «то, что я сохранил» не меняется вместе с ним.
+    """
+
+    meal_id: str
+    dish_name: str
+    #: DRF-2371 — ``None``, когда снимок сделан без веса.
+    portion_g: float | None
+    #: DRF-2371 — ``None``, если снимок сделан с записи без чисел.
+    calories: float | None
+    protein_g: float | None
+    fat_g: float | None
+    carbs_g: float | None
+    source_food_log_id: str | None
+    created_at: str | None
+
+
+@dataclass(frozen=True)
+class DiaryDayRow:
+    """DRF-2099 — один день дневника, как его считает ``internal/diary/days/``.
+
+    Границы суток — по поясу человека в каталоге; здесь дата — строка
+    ``YYYY-MM-DD`` в том поясе, а не UTC. ``kcal`` — ``None`` без записей.
+    """
+
+    date: str
+    meals_count: int
+    kcal: float | None
+    has_entries: bool
+
+
+@dataclass(frozen=True)
+class DiaryDaysResponse:
+    """DRF-2099 — период дневника: строка на КАЖДЫЙ день, пустые тоже."""
+
+    timezone: str
+    date_from: str
+    date_to: str
+    days: tuple[DiaryDayRow, ...]
+
+
+@dataclass(frozen=True)
+class DishEstimate:
+    """Оценка блюда БЕЗ записи — ``internal/food-estimate/`` (DRF-1837, §109).
+
+    ``portion_estimated`` — граммов человек не называл, порция взята базовая;
+    карточка обязана назвать это оценкой.
+    """
+
+    matched_dish: str
+    #: DRF-2371 — ``None``, когда веса нет вовсе.
+    portion_g: float | None
+    portion_estimated: bool
+    #: DRF-2371 — ``None``, когда числа вывести неоткуда (блюда нет в
+    #: справочнике, вес неизвестен). Это НЕ ноль: ноль означал бы «съел и
+    #: не получил калорий», и произносить это за человека нельзя.
+    kcal: float | None
+    protein_g: float | None
+    fat_g: float | None
+    carbs_g: float | None
+    raw: dict[str, Any]
+
+
+def _float_or_none(raw: Any) -> float | None:
+    try:
+        return None if raw is None else float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _optional_int(raw: Any) -> int | None:
+    """Число — или ``None``, когда ключа нет.
+
+    Не ``int(raw or 0)``. Тот вариант отвечал одинаково на три разных
+    вопроса: «ключа нет», «ключ null» и «ориентир ноль». Отличать их
+    обязан именно этот слой — он единственный видит сырое тело ответа;
+    ниже по конвейеру исходный ключ уже недоступен, и восстановить
+    различие будет неоткуда.
+
+    Ноль, пришедший ЯВНО, сохраняется как ноль: врать в обратную
+    сторону тоже нельзя. Ориентиром он при этом не станет — потребители
+    проверяют значение на положительность.
+    """
+    if raw is None:
+        return None
+    try:
+        return int(raw)
+    except (TypeError, ValueError):
+        return None
 
 
 @dataclass(frozen=True)
@@ -173,13 +433,251 @@ class SummaryResponse:
 
     date: str
     calories_total: float
-    calories_goal: int
+    #: ``None`` — ОРИЕНТИРА НЕТ. Ayla перестала присылать ключ вовсе
+    #: (§82: «Текущая плоская норма калорий для всех удаляется»), и
+    #: нормализовать это в ноль на нашей стороне нельзя: ноль здесь
+    #: неотличим от «ориентир ноль», а дальше по конвейеру он рисуется
+    #: как «0 из 0 ккал · 0 %». Отсутствие едет отсутствием до экрана.
+    calories_goal: int | None
     protein_g: float
     fat_g: float
     carbs_g: float
     entries: list[dict[str, Any]]
     raw: dict[str, Any]
     ai_comment: str | None = None
+
+
+def _targets_source(body: dict[str, Any]) -> str:
+    """``targets_provenance.source`` — или ``""``, если каталог его не прислал.
+
+    Каталог отдаёт блок обязательным с #316, поэтому пустая строка здесь
+    — сигнал нарушенного контракта, а не «ориентиров нет». Подставить
+    ``"none"`` было бы изготовлением состояния на границе: потребитель
+    напечатал бы человеку объяснение, которого каталог не давал.
+    """
+    provenance = body.get("targets_provenance")
+    if not isinstance(provenance, dict):
+        return ""
+    return str(provenance.get("source") or "")
+
+
+#: Виды ориентира. Имена — те же, что у каталога в ``targets_provenance.by_kind``
+#: и в ``targets_method_versions``: грань по видам проведена там раньше и по
+#: той же причине — у калорий и жидкости методики разные (§85).
+KIND_CALORIES = "calories"
+KIND_FLUIDS = "fluids"
+
+
+def _kind_source(body: dict[str, Any], kind: str) -> str:
+    """``targets_provenance.by_kind.<вид>.source`` — с НАЗВАННЫМ мостом.
+
+    DRF-1929 (F1(б)): каталог начал подписывать калории и жидкость порознь,
+    чтобы ручная правка одного вида не переписывала происхождение другого.
+
+    **Мост, и почему он обязателен.** Этот PR может слиться раньше, чем
+    каталожный, и уж точно раньше, чем каталог выложат. Пока ``by_kind`` не
+    приходит, единственная правда о видах — общая подпись, и читать её
+    здесь не «на всякий случай», а единственно верно: иначе бот, поехав
+    впереди каталога, счёл бы КАЖДЫЙ профиль ненастроенным и снял бы
+    ориентиры у всех живых клиентов.
+
+    Мост исчезает сам, когда каталог начнёт слать ``by_kind``: тогда ветка
+    просто перестаёт выбираться. Отдельного снятия он не требует.
+    """
+    provenance = body.get("targets_provenance")
+    if not isinstance(provenance, dict):
+        return ""
+    by_kind = provenance.get("by_kind")
+    if isinstance(by_kind, dict):
+        entry = by_kind.get(kind)
+        if isinstance(entry, dict):
+            value = entry.get("source")
+            # ``None`` внутри ``by_kind`` — «по видам не устанавливалось»
+            # (строка каталога до миграции данных): это не «нет ориентира»,
+            # и подставлять "none" нельзя — падаем на общую подпись.
+            if value:
+                return str(value)
+    return str(provenance.get("source") or "")
+
+
+def _provenance_dict(body: dict[str, Any], key: str) -> dict[str, Any]:
+    """``targets_provenance.<key>`` как словарь — или ``{}``.
+
+    Для ``method_versions`` и ``input_snapshot``. Каталог шлёт снимок
+    входов владельцу данных с §5.1 (11.09.2026): «методика и
+    использованные данные показываются человеку». Пустой словарь —
+    и «расчёта не было», и «ключа нет»: различать их здесь незачем,
+    показывающая сторона по пустому снимку просто не печатает строку
+    «от твоих данных», а не изготавливает её.
+    """
+    provenance = body.get("targets_provenance")
+    if not isinstance(provenance, dict):
+        return {}
+    value = provenance.get(key)
+    return dict(value) if isinstance(value, dict) else {}
+
+
+#: §6 свода владельца 11.09 (OD-NUT-1): «неизвестные нормы имеют
+#: NOT_CONFIGURED, а не ноль». Настроенным ориентир считается ТОЛЬКО при
+#: названном происхождении. Всё остальное — не настроено:
+#:
+#:   none            расчёта не было или он снят (§103)
+#:   unknown_legacy  происхождение не сохранялось — число есть, объяснить
+#:                   его нечем; §103: «уже рассчитанный ориентир нельзя
+#:                   показывать как актуальный без происхождения»
+#:   ""              ключ не пришёл — контракт нарушен, число не подтверждено
+#:   ayla_proposed   посчитано, но человеком НЕ подтверждено (§5.1 свода,
+#:                   вводится ayla-a3) — не настроено до подтверждения
+#:
+#: Правило применяется ОДИН РАЗ, на границе: ниже, при разборе ответа,
+#: ориентиры не настроенного профиля читаются как ``None``, и ни одна
+#: поверхность не получает числа, которое ей нельзя показывать. Иначе
+#: правило пришлось бы повторять в каждом рендере, и первая же новая
+#: поверхность, прочитавшая ``profile.protein_g`` напрямую, напечатала бы
+#: число без происхождения — как это и было до этой правки у шести
+#: профилей пилота (все ``unknown_legacy``).
+TARGETS_CONFIGURED_SOURCES: frozenset[str] = frozenset({"ayla_calculated", "user_entered"})
+TARGETS_CONFIGURED = "configured"
+TARGETS_NOT_CONFIGURED = "not_configured"
+
+
+def targets_configured(source: str | None) -> bool:
+    """Есть ли у ориентира названное происхождение (§6, §103).
+
+    Множество источников общее для всех видов: меняется не то, ЧТО значит
+    «настроено», а то, У КОГО спрашивают. Поэтому предикат один, а
+    вопросов к нему теперь два — по калориям и по жидкости.
+    """
+    return (source or "") in TARGETS_CONFIGURED_SOURCES
+
+
+#: Источник, при котором числа в ``norms`` — ПРЕДЛОЖЕНИЕ (§5.1, каталог
+#: #369): показать можно и нужно — как предложение; действовать они не
+#: действуют, и инвариант ``ProfileResponse`` их обнуляет. Читать их
+#: отсюда, из ``raw`` — единственный санкционированный путь.
+TARGETS_PROPOSED = "ayla_proposed"
+
+#: Префикс имён отказа расчёта по health-фактору (каталог #372, §5.1):
+#: ``health_factor_pregnant`` и т. д. в ``overrides_applied``.
+HEALTH_FACTOR_PREFIX = "health_factor_"
+
+
+def proposed_norms(profile: "ProfileResponse") -> dict[str, int | None]:
+    """Числа предложения — из ``raw``, только при ``ayla_proposed``.
+
+    Инвариант DTO (§6) обнуляет поля ориентиров у не настроенного
+    источника, и это правильно для всех читателей, кроме одного: экрана,
+    который обязан показать предложение как предложение, чтобы человек
+    мог его подтвердить (§5.1). Для любого другого источника — пустой
+    словарь: предложением называется только то, что каталог так назвал.
+    """
+    if profile.targets_source != TARGETS_PROPOSED:
+        return {}
+    norms = profile.raw.get("norms") or {}
+    if not isinstance(norms, dict):
+        return {}
+    return {
+        "daily_kcal": _target_or_none(norms, "daily_kcal"),
+        "protein_g": _target_or_none(norms, "daily_protein_g"),
+        "fat_g": _target_or_none(norms, "daily_fat_g"),
+        "carbs_g": _target_or_none(norms, "daily_carbs_g"),
+        "water_ml": _target_or_none(norms, "daily_water_ml"),
+    }
+
+
+def pending_proposal(profile: "ProfileResponse | None") -> dict[str, Any]:
+    """Предложение, лежащее РЯДОМ с действующим ориентиром (каталог DRF-2192).
+
+    С каталожного #525 пересчёт на подтверждённом расчёте (``ayla_calculated``)
+    больше не ставит ``ayla_proposed`` поверх действующего: действующее
+    остаётся, новое лежит в ``targets_provenance.pending_proposal``, и
+    ``confirm_targets`` его забирает. ``targets_source`` при этом —
+    ``ayla_calculated``, поэтому ``proposed_norms`` его не видит по
+    построению.
+
+    Возвращает ``{"kinds": […], "norms": {…}, "input_snapshot": {…},
+    "method_versions": {…}}`` — числа под теми же ключами, что у
+    ``proposed_norms``, — или
+    пустой словарь, если рядом ничего нет (каталог старый — ключа нет вовсе).
+    """
+    if profile is None:
+        return {}
+    raw = getattr(profile, "raw", None) or {}
+    provenance = raw.get("targets_provenance") if isinstance(raw, dict) else None
+    pending = provenance.get("pending_proposal") if isinstance(provenance, dict) else None
+    if not isinstance(pending, dict):
+        return {}
+    norms = {
+        "daily_kcal": _target_or_none(pending, "daily_kcal"),
+        "protein_g": _target_or_none(pending, "daily_protein_g"),
+        "fat_g": _target_or_none(pending, "daily_fat_g"),
+        "carbs_g": _target_or_none(pending, "daily_carbs_g"),
+        "water_ml": _target_or_none(pending, "daily_water_ml"),
+    }
+    if not any(norms.values()):
+        return {}
+    kinds = [str(k) for k in (pending.get("kinds") or []) if k in ("calories", "fluids")]
+    return {
+        # Виды, которые пересчитаны: карточка показывает и сравнивает только
+        # их — остальные действуют как были.
+        "kinds": kinds or ["calories", "fluids"],
+        "norms": norms,
+        "input_snapshot": dict(pending.get("input_snapshot") or {}),
+        "method_versions": dict(pending.get("method_versions") or {}),
+    }
+
+
+def health_factor_refusals(profile: "ProfileResponse") -> list[str]:
+    """Имена health-факторов, по которым каталог отказал считать (§5.1).
+
+    ``["pregnant"]`` из ``{"reason": "health_factor_pregnant"}``. Пусто —
+    отказа по здоровью не было (или ключа нет — тогда и сказать нечего).
+    """
+    overrides = profile.raw.get("overrides_applied") or []
+    names: list[str] = []
+    for entry in overrides:
+        reason = str((entry or {}).get("reason") or "") if isinstance(entry, dict) else ""
+        if reason.startswith(HEALTH_FACTOR_PREFIX):
+            names.append(reason[len(HEALTH_FACTOR_PREFIX) :])
+    return names
+
+
+def insufficient_inputs(profile: "ProfileResponse") -> list[str]:
+    """Входы, без которых каталог отказал считать (``insufficient_inputs``).
+
+    С вопроса 59 (CD §72) каталог не подставляет темп и активность, а с
+    #527 — пол и цель: без них расчёта нет, и отказ называет поля. Пусто —
+    такого отказа не было.
+    """
+    overrides = profile.raw.get("overrides_applied") or []
+    for entry in overrides:
+        if isinstance(entry, dict) and entry.get("reason") == "insufficient_inputs":
+            return [str(name) for name in (entry.get("fields") or [])]
+    return []
+
+
+def _target_or_none(norms: dict[str, Any], key: str) -> int | None:
+    """Ориентир из блока ``norms`` — или ``None``, если его там нет.
+
+    Три состояния входа и ровно два исхода:
+
+    * ключа нет — ориентира нет, каталог сказал это отсутствием
+      (``norms: {}`` при несостоявшемся расчёте) → ``None``;
+    * ключ есть и значение ложное (``0``, ``null``) → тоже ``None``:
+      ориентир ноль калорий физически невозможен, а строки, посчитанные
+      ДО перехода каталога на пустой блок, ещё присылают нули;
+    * ключ есть и значение настоящее → число.
+
+    Второй пункт — не снисходительность к старому формату, а условие
+    того, чтобы поставка была наблюдаемой сразу: пока в базе каталога
+    лежат строки с ``daily_kcal = 0``, разница между «ноль» и «нет»
+    обязана исчезнуть здесь, а не через миграцию (она отдельный срез,
+    N-b, и ждёт решения владельца).
+    """
+    value = norms.get(key)
+    if not value:
+        return None
+    return int(value)
 
 
 @dataclass(frozen=True)
@@ -197,19 +695,134 @@ class ProfileResponse:
     height_cm: int
     weight_kg: int
     goal: str  # "lose" | "maintain" | "gain" | "tone" | ""
-    daily_kcal: int
-    protein_g: int
-    fat_g: int
-    carbs_g: int
-    water_ml: int
-    bmr: int
+    # ``None`` — ориентира НЕТ, и это не то же самое, что ноль. Ноль
+    # калорий в сутки физически невозможен, поэтому раньше он и служил
+    # молчаливым именем отсутствия — а необязательность в типе делает имя
+    # явным: читатель обязан решить, что показывать, вместо того чтобы
+    # напечатать «0 ккал» и не заметить (DRF-1623 N-c).
+    daily_kcal: int | None
+    protein_g: int | None
+    fat_g: int | None
+    carbs_g: int | None
+    water_ml: int | None
+    bmr: int | None
     health_flags: dict[str, Any]
     disclaimer_acked: dict[str, Any] | None
     goal_pace: str = ""
     activity: str = ""
     diet_preference: str = ""
     goal_overridden_by: str | None = None
+    #: Происхождение ориентира — ``targets_provenance.source`` каталога
+    #: (DRF-1623 N-b): ``none | unknown_legacy | ayla_calculated |
+    #: user_entered``. Пустая строка — ключ НЕ ПРИШЁЛ, и это не то же
+    #: самое, что ``"none"``: «прислали „нет“» и «не прислали» — разные
+    #: состояния, и второе нельзя изготовить из первого. Показывающая
+    #: сторона по ``"none"`` объясняет человеку, почему ориентиров нет, а
+    #: по ``""`` молчит и пишет warning: нарушен контракт, а не расчёт.
+    targets_source: str = ""
+    #: Происхождение ПО ВИДАМ (DRF-1929, F1(б)): каталог подписывает калории
+    #: и жидкость порознь, чтобы ручная правка одного вида не переписывала
+    #: другой. Пустая строка — ``by_kind`` не пришёл; разбор в этом случае
+    #: кладёт сюда общую подпись (мост в :func:`_kind_source`), поэтому
+    #: пустыми они остаются только у DTO, собранного руками мимо клиента.
+    calories_source: str = ""
+    fluids_source: str = ""
+    #: Методика (``{"calories": "mifflin_st_jeor_v1"}``) и входы расчёта
+    #: (``SNAPSHOT_INPUTS`` каталога: пол, возраст, рост, вес, активность,
+    #: цель, темп) — §5.1 11.09.2026: показываются человеку. Это данные
+    #: самого человека, приехавшие ему же; дальше личного диалога не
+    #: уходят. Пусто, когда расчёта нет.
+    targets_method_versions: dict[str, str] = field(default_factory=dict)
+    targets_input_snapshot: dict[str, Any] = field(default_factory=dict)
+    #: DRF-2279 (CD §76, №32): входы, которые каталог пометил как прежние
+    #: умолчания (``pace``, ``activity_coefficient``) — подставлены до
+    #: вопроса 59, человек их не называл. Для расчёта они «не названы», и бот
+    #: переспрашивает, а не переносит. Пусто — пометок нет ИЛИ каталог ключа
+    #: ещё не присылает (бот выходит раньше каталога).
+    legacy_default_inputs: tuple[str, ...] = ()
     raw: dict[str, Any] = field(default_factory=dict)
+
+    #: Поля, которые обязаны быть ``None`` у не настроенного профиля —
+    #: РАЗДЕЛЬНО по видам (DRF-1929). Макросы и ``bmr`` выведены из расчёта
+    #: калорий и делят их родословную; вода — своя.
+    _CALORIE_FIELDS = ("daily_kcal", "protein_g", "fat_g", "carbs_g", "bmr")
+    _FLUID_FIELDS = ("water_ml",)
+    #: Прежнее общее имя — для читателей, которым нужен весь набор.
+    _TARGET_FIELDS = _CALORIE_FIELDS + _FLUID_FIELDS
+
+    def __post_init__(self) -> None:
+        """Инвариант DTO: не настроено ⇒ ориентиров нет — при ЛЮБОМ способе сборки.
+
+        Правило §6 живёт здесь, а не в разборе ответа, потому что разбор —
+        не единственный конструктор: тесты и фикстуры собирают
+        ``ProfileResponse`` напрямую, и правило в разборе они бы обошли,
+        получив профиль с ``unknown_legacy`` И числами — состояние, которого
+        по §103 не бывает. Инвариант на типе обойти нельзя. Числа при этом
+        не теряются: они в ``raw``, для диагностики.
+
+        DRF-1929 (F1(б)): гасится КАЖДЫЙ вид по своему происхождению. До
+        разделения один общий вердикт снимал воду вместе с калориями — то
+        есть бот воспроизводил на своей границе ровно ту потерю числа,
+        которую каталог только что убрал у себя. Теперь калории, макросы и
+        ``bmr`` уходят по подписи калорий, а вода — по своей.
+        """
+        for source, names in (
+            (self._kind_source_value(KIND_CALORIES), self._CALORIE_FIELDS),
+            (self._kind_source_value(KIND_FLUIDS), self._FLUID_FIELDS),
+        ):
+            if targets_configured(source):
+                continue
+            for name in names:
+                if getattr(self, name) is not None:
+                    object.__setattr__(self, name, None)
+
+    def _kind_source_value(self, kind: str) -> str:
+        """Подпись вида — своя, либо общая, если по видам ничего не пришло.
+
+        Тот же мост, что в :func:`_kind_source`, но для DTO, собранного
+        МИМО клиента (тесты, фикстуры, ``nutrition_coach_dryrun``): такие
+        объекты несут только ``targets_source``, и без моста инвариант
+        погасил бы у них всё.
+        """
+        own = self.calories_source if kind == KIND_CALORIES else self.fluids_source
+        return own or self.targets_source
+
+    @property
+    def targets_state(self) -> str:
+        """``configured`` | ``not_configured`` — имя отсутствия по §6.
+
+        Производное от ``targets_source``, а не отдельное поле: два поля
+        об одном факте разошлись бы при первом же новом источнике.
+        """
+        return (
+            TARGETS_CONFIGURED
+            if targets_configured(self.targets_source)
+            else TARGETS_NOT_CONFIGURED
+        )
+
+    @property
+    def targets_are_configured(self) -> bool:
+        """То же одним булевым — для поверхностей, которым нужен ответ, а не имя.
+
+        Единственный вопрос, который поверхность вправе задать: «можно ли
+        показывать ориентир». Ответ производится здесь, а не собирается на
+        каждом экране заново из ``targets_source``.
+
+        DRF-1929: «настроен хоть один вид». Ослабить прежнее поведение это
+        не может — у профиля без разделения оба вида читают одну подпись, —
+        а поверхность, знающая свой вид, обязана спрашивать его напрямую.
+        """
+        return self.calories_are_configured or self.fluids_are_configured
+
+    @property
+    def calories_are_configured(self) -> bool:
+        """Можно ли показывать калории и выведенное из них (макросы, bmr, RDA)."""
+        return targets_configured(self._kind_source_value(KIND_CALORIES))
+
+    @property
+    def fluids_are_configured(self) -> bool:
+        """Можно ли показывать норму жидкости."""
+        return targets_configured(self._kind_source_value(KIND_FLUIDS))
 
 
 @dataclass(frozen=True)
@@ -228,7 +841,9 @@ class WaterEntryResponse:
     kcal: int
     milestone_text: str | None
     today_total_ml: int
-    today_norm_ml: int
+    #: ``None`` — ориентира по жидкости нет. Формула ``30 мл × вес``
+    #: снята до утверждения методики (§82, §85 раздел 4).
+    today_norm_ml: int | None
     alcohol_recovery_hint: bool
     raw: dict[str, Any] = field(default_factory=dict)
 
@@ -244,7 +859,7 @@ class WaterTodayResponse:
     """
 
     total_ml: int
-    norm_ml: int
+    norm_ml: int | None
     entries: list[dict[str, Any]]
     kcal_from_beverages: float = 0.0
     caffeine_mg: float = 0.0
@@ -323,17 +938,27 @@ class NutritionClient:
         Raises:
             NutritionUnavailableError: circuit open, network error, 5xx, timeout.
             FoodNotRecognizedError: 400 FOOD_NOT_RECOGNIZED.
+            ScanDailyLimitError: 429 FOOD_SCAN_DAILY_LIMIT (DRF-2195).
+            ScanBudgetExhaustedError: 503 FOOD_SCAN_BUDGET_EXHAUSTED (DRF-2195).
             NutritionAPIError: other 4xx.
+
+        Два класса бюджета — штатные отказы, а не сбой: они НЕ наследники
+        ``NutritionUnavailableError``, не кормят предохранитель и требуют
+        своего текста («напиши словами»), а не «попробуй через минуту».
+        Вызывающий, который ловит только ``NutritionUnavailableError``, их
+        пропустит; общий хвост ``NutritionAPIError`` — поймает.
         """
         now = time.monotonic()
         if self._circuit.is_open(now=now):
             raise NutritionUnavailableError("circuit_open")
 
         url = self._urls.build("nutrition/internal/scan/")
-        headers = {
-            "X-Service-Token": self._token,
-            "X-External-User-ID": external_user_id,
-        }
+        headers = with_request_id(
+            {
+                "X-Service-Token": self._token,
+                "X-External-User-ID": external_user_id,
+            }
+        )
         files = {"image": (filename, image_bytes, "image/jpeg")}
         data: dict[str, str] = {}
         if portion_multiplier is not None:
@@ -373,6 +998,52 @@ class NutritionClient:
                 raw=body,
             )
 
+        # DRF-2195 — тело читается ПЕРВЫМ, до развилки по статусу. Иначе
+        # штатный «бюджет исчерпан» (503) попадает в ветку 5xx и кормит
+        # предохранитель, общий на весь клиент питания: пять таких снимков
+        # подряд гасят запись еды текстом, дневник, сводку и ориентиры —
+        # функции, к фото отношения не имеющие. Порядок ветвей здесь и есть
+        # содержание правки.
+        # Тело — чужие данные: `{"error": "service overloaded"}` встречается у
+        # прокси и балансировщиков не реже объекта. Разбор идёт через
+        # `isinstance`, как в ветке 409/422 ниже: иначе `AttributeError`
+        # улетел бы мимо ветки 5xx — предохранитель не сработал бы В САМУЮ
+        # АВАРИЮ, а человек получил бы трассировку вместо отказа.
+        try:
+            payload = resp.json()
+        except ValueError:
+            payload = {}
+        error = payload.get("error") if isinstance(payload, dict) else None
+        error = error if isinstance(error, dict) else {}
+        err_code = str(error.get("code") or "")
+        raw_details = error.get("details")
+        err_details: dict[str, Any] = raw_details if isinstance(raw_details, dict) else {}
+
+        if err_code == "FOOD_SCAN_DAILY_LIMIT":
+            retry_after = err_details.get("retry_after")
+            logger.info(
+                "nutrition_client.scan.daily_limit ext=%s retry_after=%s",
+                external_user_id,
+                retry_after,
+            )
+            raise ScanDailyLimitError("daily_limit", retry_after=_retry_after_or_none(retry_after))
+        if err_code == "FOOD_SCAN_BUDGET_EXHAUSTED":
+            logger.info("nutrition_client.scan.budget_exhausted ext=%s", external_user_id)
+            raise ScanBudgetExhaustedError("budget_exhausted")
+        if err_code == "FOOD_API_UNAVAILABLE" and err_details.get("permanent") is True:
+            # DRF-2318: стойкий отказ распознавателя — не авария каталога.
+            reason = str(err_details.get("reason") or "")
+            logger.warning("nutrition_client.scan.provider_down reason=%s", reason[:32])
+            raise ScanProviderDownError(reason)
+
+        # Ни одна из двух веток выше не зовёт и `record_success()` — это
+        # осознанно, а не забыто. Отказ по бюджету доказывает, что жива
+        # РУЧКА СКАНА, но ничего не говорит про остальной каталог, чьи сбои
+        # копятся в том же окне. Обнулять их отказом сканера значило бы
+        # оттягивать предохранитель в настоящую аварию. Ветки 409/422 ниже
+        # зовут `record_success()` потому, что там ответ приходит от той же
+        # ручки, что и успех.
+
         if resp.status_code >= 500:
             self._circuit.record_failure(now=now)
             logger.warning(
@@ -381,11 +1052,6 @@ class NutritionClient:
                 external_user_id,
             )
             raise NutritionUnavailableError(f"http_{resp.status_code}")
-
-        try:
-            err_code = (resp.json().get("error") or {}).get("code", "")
-        except ValueError:
-            err_code = ""
 
         if err_code == "FOOD_NOT_RECOGNIZED":
             raise FoodNotRecognizedError("low_confidence")
@@ -403,6 +1069,79 @@ class NutritionClient:
 
     # ─── log meal ─────────────────────────────────────────────────────────
 
+    async def estimate_dish(
+        self,
+        *,
+        external_user_id: str,
+        dish_name: str,
+        portion_g: float | None = None,
+    ) -> DishEstimate:
+        """POST ``/api/v1/nutrition/internal/food-estimate/`` — оценка без записи.
+
+        DRF-1837, §109 шаги 2–4: показать «Я распознала так» до того, как
+        число стало данными человека. Каталог не пишет ничего.
+
+        Raises:
+            NutritionUnavailableError: circuit open, network error, 5xx, timeout.
+            FoodNotRecognizedError: 400 FOOD_NOT_RECOGNIZED — блюда нет в справочнике.
+            NutritionAPIError: other 4xx.
+        """
+        now = time.monotonic()
+        if self._circuit.is_open(now=now):
+            raise NutritionUnavailableError("circuit_open")
+
+        url = self._urls.build("nutrition/internal/food-estimate/")
+        headers = with_request_id(
+            {
+                "X-Service-Token": self._token,
+                "X-External-User-ID": external_user_id,
+            }
+        )
+        body: dict[str, Any] = {"dish_name": dish_name}
+        if portion_g is not None:
+            body["portion_g"] = portion_g
+
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout_s) as http:
+                resp = await http.post(url, headers=headers, json=body)
+        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+            self._circuit.record_failure(now=now)
+            logger.warning(
+                "nutrition_client.estimate.network ext=%s err=%s",
+                external_user_id,
+                type(exc).__name__,
+            )
+            raise NutritionUnavailableError(f"network: {type(exc).__name__}") from exc
+
+        if resp.status_code == 200:
+            self._circuit.record_success()
+            data = resp.json().get("data", {})
+            return DishEstimate(
+                matched_dish=str(data.get("matched_dish") or dish_name),
+                # DRF-2371 — вес такое же число о еде, как калории:
+                # «Порция — 0 г, по твоим словам» утверждало бы слова,
+                # которых человек не говорил.
+                portion_g=_float_or_none(data.get("portion_g")),
+                portion_estimated=bool(data.get("portion_estimated")),
+                # DRF-2371 — ``or 0.0`` здесь превращал «не посчитано» в
+                # «0 ккал», и ниже отсутствие было уже неотличимо.
+                kcal=_float_or_none(data.get("kcal")),
+                protein_g=_float_or_none(data.get("protein_g")),
+                fat_g=_float_or_none(data.get("fat_g")),
+                carbs_g=_float_or_none(data.get("carbs_g")),
+                raw=data,
+            )
+        if resp.status_code >= 500:
+            self._circuit.record_failure(now=now)
+            raise NutritionUnavailableError(f"http_{resp.status_code}")
+        try:
+            err_code = (resp.json().get("error") or {}).get("code", "")
+        except ValueError:
+            err_code = ""
+        if err_code == "FOOD_NOT_RECOGNIZED":
+            raise FoodNotRecognizedError("dish_not_found")
+        raise NutritionAPIError(f"http_{resp.status_code}_{err_code or 'unknown'}")
+
     async def log_meal(
         self,
         *,
@@ -412,6 +1151,7 @@ class NutritionClient:
         meal_type: str,
         portion_multiplier: float = 1.0,
         idempotency_key: str | None = None,
+        entry_origin: str | None = None,
     ) -> FoodLogResponse:
         """POST ``/api/v1/nutrition/internal/food-log/``.
 
@@ -422,10 +1162,12 @@ class NutritionClient:
             raise NutritionUnavailableError("circuit_open")
 
         url = self._urls.build("nutrition/internal/food-log/")
-        headers: dict[str, str] = {
-            "X-Service-Token": self._token,
-            "X-External-User-ID": external_user_id,
-        }
+        headers: dict[str, str] = with_request_id(
+            {
+                "X-Service-Token": self._token,
+                "X-External-User-ID": external_user_id,
+            }
+        )
         if idempotency_key:
             headers["X-Idempotency-Key"] = idempotency_key
         body: dict[str, Any] = {
@@ -436,6 +1178,10 @@ class NutritionClient:
             body["scan_id"] = scan_id
         if dish_name:
             body["dish_name"] = dish_name
+        if entry_origin:
+            # §136: чем получено число записи; решается на карточке, которую
+            # человек видел, и не угадывается задним числом.
+            body["entry_origin"] = entry_origin
 
         try:
             async with httpx.AsyncClient(timeout=self._timeout_s) as http:
@@ -465,7 +1211,9 @@ class NutritionClient:
                 log_id=str(body.get("id") or ""),
                 dish_name=body.get("dish_name") or "",
                 meal_type=body.get("meal_type") or "",
-                calories=float(body.get("calories") or 0.0),
+                # DRF-2371 — см. ``FoodLogResponse.calories``: отсутствие
+                # остаётся отсутствием.
+                calories=_float_or_none(body.get("calories")),
                 raw=body,
             )
         if resp.status_code >= 500:
@@ -479,7 +1227,331 @@ class NutritionClient:
             raise FoodNotRecognizedError("nutrition_missing")
         raise NutritionAPIError(f"http_{resp.status_code}_{err_code or 'unknown'}")
 
+    # ─── правка / удаление записи (DRF-1838, §109 шаг 7) ─────────────────
+
+    def _meal_edit_refusal(self, resp: httpx.Response, *, now: float) -> NutritionAPIError:
+        """Map a non-success answer of the entry-edit routes to a named error."""
+        if resp.status_code >= 500:
+            self._circuit.record_failure(now=now)
+            return NutritionUnavailableError(f"http_{resp.status_code}")
+        self._circuit.record_success()
+        try:
+            err_code = (resp.json().get("error") or {}).get("code", "")
+        except ValueError:
+            err_code = ""
+        if resp.status_code == 404:
+            return MealNotFoundError(err_code or "not_found")
+        if resp.status_code == 410:
+            return MealRestoreExpiredError(err_code or "restore_window_expired")
+        if resp.status_code == 409:
+            return MealEditConflictError(err_code or "conflict")
+        return NutritionAPIError(f"http_{resp.status_code}_{err_code or 'unknown'}")
+
+    async def _meal_edit_call(
+        self,
+        method: str,
+        path: str,
+        *,
+        external_user_id: str,
+        body: dict[str, Any] | None = None,
+    ) -> tuple[httpx.Response, float]:
+        now = time.monotonic()
+        if self._circuit.is_open(now=now):
+            raise NutritionUnavailableError("circuit_open")
+        url = self._urls.build(path)
+        headers = with_request_id(
+            {
+                "X-Service-Token": self._token,
+                "X-External-User-ID": external_user_id,
+            }
+        )
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout_s) as http:
+                resp = await http.request(method, url, headers=headers, json=body)
+        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+            self._circuit.record_failure(now=now)
+            logger.warning(
+                "nutrition_client.meal_edit.network method=%s ext=%s err=%s",
+                method,
+                external_user_id,
+                type(exc).__name__,
+            )
+            raise NutritionUncertainOutcomeError(f"network: {type(exc).__name__}") from exc
+        return resp, now
+
+    async def update_meal(
+        self,
+        *,
+        external_user_id: str,
+        log_id: str,
+        portion_multiplier: float | None = None,
+        meal_type: str | None = None,
+    ) -> FoodLogResponse:
+        """PATCH ``/api/v1/nutrition/internal/food-log/{log_id}/``.
+
+        Каталог пересчитывает снимок записи и называет число исправленным
+        клиентом (§136). Raises :class:`MealNotFoundError` (404),
+        :class:`MealEditConflictError` (409), :class:`NutritionUnavailableError`.
+        """
+        body: dict[str, Any] = {}
+        if portion_multiplier is not None:
+            body["portion_multiplier"] = portion_multiplier
+        if meal_type is not None:
+            body["meal_type"] = meal_type
+        resp, now = await self._meal_edit_call(
+            "PATCH",
+            f"nutrition/internal/food-log/{log_id}/",
+            external_user_id=external_user_id,
+            body=body,
+        )
+        if resp.status_code == 200:
+            return self._parse_log_response(resp, external_user_id=external_user_id)
+        raise self._meal_edit_refusal(resp, now=now)
+
+    async def delete_meal(self, *, external_user_id: str, log_id: str) -> MealDeletion:
+        """DELETE ``/api/v1/nutrition/internal/food-log/{log_id}/`` — обратимо в окне."""
+        resp, now = await self._meal_edit_call(
+            "DELETE",
+            f"nutrition/internal/food-log/{log_id}/",
+            external_user_id=external_user_id,
+        )
+        if resp.status_code == 200:
+            self._circuit.record_success()
+            try:
+                body = resp.json().get("data")
+            except ValueError:
+                body = None
+            if not isinstance(body, dict):
+                # 200 пришёл — удаление ПРОШЛО, но ответ не читается. Это
+                # неизвестный исход, а не «ничего не изменилось»: иначе человек
+                # услышит неправду про уже удалённую запись и не получит «Вернуть».
+                raise NutritionUncertainOutcomeError("http_200_malformed_body")
+            return MealDeletion(
+                log_id=str(body.get("entry_id") or log_id),
+                restore_window_expires_at=body.get("restore_window_expires_at"),
+            )
+        raise self._meal_edit_refusal(resp, now=now)
+
+    #: Ниже этого тело не может быть фотографией еды: самый маленький
+    #: настоящий снимок на стенде — 36 КБ, пустышки замера 25.09 — сотни
+    #: байт. Порог грубый намеренно: он отделяет «файл есть» от «файла нет
+    #: по существу», а не сортирует снимки по качеству.
+    MIN_PHOTO_RESPONSE_BYTES = 1024
+
+    #: Верхняя граница тела снимка. Вход ограничен 10 MiB
+    #: (``MAX_PHOTO_BYTES``), и ответ каталога больше этого — признак
+    #: беды, а не большой фотографии.
+    MAX_PHOTO_RESPONSE_BYTES = 12 * 1024 * 1024
+
+    async def food_photo(
+        self,
+        *,
+        external_user_id: str,
+        log_id: str,
+    ) -> tuple[bytes, str] | None:
+        """GET ``internal/food-log/{log_id}/photo/`` — сам файл снимка.
+
+        DRF-2455. Возвращает ``(байты, тип)`` или ``None``, если снимка
+        нет: записана текстом или удалён по сроку (§134). Владение
+        проверяет каталог — здесь мы только называем человека.
+
+        Прямой адрес хранилища не запрашиваем и наружу не отдаём: он
+        внутренний для контейнера, а бакет публичный, и утёкшая ссылка
+        работала бы у любого.
+        """
+        now = time.monotonic()
+        if self._circuit.is_open(now=now):
+            raise NutritionUnavailableError("circuit_open")
+
+        url = self._urls.build(f"nutrition/internal/food-log/{log_id}/photo/")
+        headers = with_request_id(
+            {
+                "X-Service-Token": self._token,
+                "X-External-User-ID": external_user_id,
+            }
+        )
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout_s) as http:
+                resp = await http.get(url, headers=headers)
+        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+            self._circuit.record_failure(now=now)
+            logger.warning(
+                "nutrition_client.food_photo.network ext=%s err=%s",
+                external_user_id,
+                type(exc).__name__,
+            )
+            raise NutritionUnavailableError(f"network: {type(exc).__name__}") from exc
+
+        if resp.status_code == 200:
+            self._circuit.record_success()
+            content_type = resp.headers.get("Content-Type", "application/octet-stream")
+            if len(resp.content) < self.MIN_PHOTO_RESPONSE_BYTES:
+                # Пустое или почти пустое тело поверхность прочитала бы как
+                # «фото есть, но сломано». Для неё это «снимка нет».
+                #
+                # Не теория: замер стенда 25.09 нашёл три живые записи из
+                # пятнадцати, чей объект существует и весит несколько сотен
+                # байт. Каталог такие уже не отдаёт, но полагаться на одну
+                # сторону нельзя — байты приходят сюда, и решение о показе
+                # принимается здесь.
+                logger.warning(
+                    "nutrition_client.food_photo.too_small ext=%s size=%d",
+                    external_user_id,
+                    len(resp.content),
+                )
+                return None
+            if len(resp.content) > self.MAX_PHOTO_RESPONSE_BYTES:
+                # Размеру, который назвал каталог, не доверяем: один
+                # неверно сохранённый объект не должен класть воркер.
+                self._circuit.record_failure(now=now)
+                raise NutritionUnavailableError("photo_too_large")
+            return resp.content, content_type
+        if resp.status_code == 404:
+            # Снимка нет — это не отказ и не сбой: штатное состояние записи.
+            self._circuit.record_success()
+            return None
+        if resp.status_code in (401, 403) or 300 <= resp.status_code < 400:
+            # Протухший токен и перенаправление на хранилище — сбой
+            # настройки, а не отказ человеку. И за ``Location`` не идём:
+            # он ведёт внутрь контура.
+            self._circuit.record_failure(now=now)
+            raise NutritionUnavailableError(f"http_{resp.status_code}")
+        if resp.status_code >= 500:
+            self._circuit.record_failure(now=now)
+            raise NutritionUnavailableError(f"http_{resp.status_code}")
+        raise NutritionAPIError(f"http_{resp.status_code}")
+
+    async def restore_meal(self, *, external_user_id: str, log_id: str) -> FoodLogResponse:
+        """POST ``/api/v1/nutrition/internal/food-log/{log_id}/restore/``.
+
+        Raises :class:`MealRestoreExpiredError` (410) — окно закрыто, удаление
+        окончательно; :class:`MealNotFoundError` (404).
+        """
+        resp, now = await self._meal_edit_call(
+            "POST",
+            f"nutrition/internal/food-log/{log_id}/restore/",
+            external_user_id=external_user_id,
+        )
+        if resp.status_code == 200:
+            return self._parse_log_response(resp, external_user_id=external_user_id)
+        raise self._meal_edit_refusal(resp, now=now)
+
     # ─── summary ──────────────────────────────────────────────────────────
+
+    # ─── избранные блюда — DRF-2092 (F12) ────────────────────────────────
+
+    _SAVED_MEALS_PATH = "nutrition/internal/saved-meals/"
+
+    @staticmethod
+    def _saved_meal_row(body: Any) -> SavedMealRow:
+        if not isinstance(body, dict):
+            raise NutritionUnavailableError("saved_meal_malformed_body")
+
+        def _num(key: str) -> float | None:
+            value = body.get(key)
+            return (
+                float(value)
+                if isinstance(value, (int, float)) and not isinstance(value, bool)
+                else None
+            )
+
+        return SavedMealRow(
+            meal_id=str(body.get("id") or ""),
+            dish_name=str(body.get("dish_name") or ""),
+            # DRF-2371 — см. выше: ноль граммов никто не называл.
+            portion_g=_num("portion_g"),
+            # DRF-2371 — снимок избранного мог быть сделан с записи без
+            # чисел; ``or 0.0`` печатал бы «0 ккал» в списке избранного.
+            calories=_num("calories"),
+            protein_g=_num("protein_g"),
+            fat_g=_num("fat_g"),
+            carbs_g=_num("carbs_g"),
+            source_food_log_id=(
+                str(body["source_food_log_id"]) if body.get("source_food_log_id") else None
+            ),
+            created_at=str(body["created_at"]) if body.get("created_at") else None,
+        )
+
+    async def list_saved_meals(self, *, external_user_id: str) -> list[SavedMealRow]:
+        """GET ``internal/saved-meals/`` — живые строки субъекта, новые сверху.
+
+        Пустой список — «избранного нет»; тело не разобрать — «каталог не
+        ответил» (:class:`NutritionUnavailableError`): спутать их значит
+        показать пустой экран вместо ошибки.
+        """
+        resp, now = await self._meal_edit_call(
+            "GET", self._SAVED_MEALS_PATH, external_user_id=external_user_id
+        )
+        if resp.status_code != 200:
+            raise self._meal_edit_refusal(resp, now=now)
+        self._circuit.record_success()
+        try:
+            data = resp.json().get("data")
+        except ValueError:
+            data = None
+        items = data.get("items") if isinstance(data, dict) else None
+        if not isinstance(items, list):
+            raise NutritionUnavailableError("saved_meals_malformed_body")
+        return [self._saved_meal_row(item) for item in items]
+
+    async def save_meal(
+        self,
+        *,
+        external_user_id: str,
+        food_log_id: str | None = None,
+        dish_name: str | None = None,
+        portion_g: float | None = None,
+        calories: float | None = None,
+        protein_g: float | None = None,
+        fat_g: float | None = None,
+        carbs_g: float | None = None,
+    ) -> tuple[SavedMealRow, bool]:
+        """POST ``internal/saved-meals/`` — из записи (``food_log_id``) или снимком.
+
+        Возвращает ``(строка, создана)``: каталог отвечает 201 на новую и 200
+        на уже сохранённую (то же блюдо с той же порцией — не дубль).
+        Raises :class:`MealNotFoundError` — ``food_log_id`` не у этого субъекта.
+        """
+        body: dict[str, Any]
+        if food_log_id is not None:
+            body = {"food_log_id": food_log_id}
+        else:
+            body = {"dish_name": dish_name, "portion_g": portion_g}
+            for key, value in (
+                ("calories", calories),
+                ("protein_g", protein_g),
+                ("fat_g", fat_g),
+                ("carbs_g", carbs_g),
+            ):
+                if value is not None:
+                    body[key] = value
+        resp, now = await self._meal_edit_call(
+            "POST", self._SAVED_MEALS_PATH, external_user_id=external_user_id, body=body
+        )
+        if resp.status_code not in (200, 201):
+            raise self._meal_edit_refusal(resp, now=now)
+        self._circuit.record_success()
+        try:
+            data = resp.json().get("data")
+        except ValueError:
+            data = None
+        return self._saved_meal_row(data), resp.status_code == 201
+
+    async def delete_saved_meal(self, *, external_user_id: str, meal_id: str) -> str:
+        """DELETE ``internal/saved-meals/{id}/`` — скрыть; чужая/скрытая — 404."""
+        resp, now = await self._meal_edit_call(
+            "DELETE", f"{self._SAVED_MEALS_PATH}{meal_id}/", external_user_id=external_user_id
+        )
+        if resp.status_code != 200:
+            raise self._meal_edit_refusal(resp, now=now)
+        self._circuit.record_success()
+        try:
+            data = resp.json().get("data")
+        except ValueError:
+            data = None
+        if not isinstance(data, dict):
+            raise NutritionUncertainOutcomeError("http_200_malformed_body")
+        return str(data.get("id") or meal_id)
 
     async def daily_summary(
         self,
@@ -498,10 +1570,12 @@ class NutritionClient:
             raise NutritionUnavailableError("circuit_open")
 
         url = self._urls.build("nutrition/internal/summary/")
-        headers = {
-            "X-Service-Token": self._token,
-            "X-External-User-ID": external_user_id,
-        }
+        headers = with_request_id(
+            {
+                "X-Service-Token": self._token,
+                "X-External-User-ID": external_user_id,
+            }
+        )
         params: dict[str, str] = {}
         if date:
             params["date"] = date
@@ -535,7 +1609,7 @@ class NutritionClient:
             return SummaryResponse(
                 date=str(body.get("date") or ""),
                 calories_total=float(body.get("calories_total") or 0.0),
-                calories_goal=int(body.get("calories_goal") or 0),
+                calories_goal=_optional_int(body.get("calories_goal")),
                 protein_g=float(body.get("protein_g") or 0.0),
                 fat_g=float(body.get("fat_g") or 0.0),
                 carbs_g=float(body.get("carbs_g") or 0.0),
@@ -562,10 +1636,12 @@ class NutritionClient:
             raise NutritionUnavailableError("circuit_open")
 
         url = self._urls.build("nutrition/internal/deficits/")
-        headers = {
-            "X-Service-Token": self._token,
-            "X-External-User-ID": external_user_id,
-        }
+        headers = with_request_id(
+            {
+                "X-Service-Token": self._token,
+                "X-External-User-ID": external_user_id,
+            }
+        )
         try:
             async with httpx.AsyncClient(timeout=self._timeout_s) as http:
                 resp = await http.get(url, headers=headers, params={"days": str(days)})
@@ -589,17 +1665,104 @@ class NutritionClient:
             raise NutritionUnavailableError(f"http_{resp.status_code}")
         raise NutritionAPIError(f"http_{resp.status_code}")
 
+    # ─── diary days (DRF-2099) ────────────────────────────────────────────
+
+    async def diary_days(
+        self,
+        *,
+        external_user_id: str,
+        date_from: str | None = None,
+        date_to: str | None = None,
+    ) -> DiaryDaysResponse:
+        """GET ``/api/v1/nutrition/internal/diary/days/?from=&to=``.
+
+        Без периода каталог отдаёт свою неделю (7 дней до сегодня по поясу
+        человека). Слишком длинный или перевёрнутый период — 400 у каталога,
+        здесь ``NutritionAPIError``: отказ по имени, а не пустая неделя.
+        Тело ответа в лог не пишется.
+        """
+        now = time.monotonic()
+        if self._circuit.is_open(now=now):
+            raise NutritionUnavailableError("circuit_open")
+
+        url = self._urls.build("nutrition/internal/diary/days/")
+        headers = with_request_id(
+            {
+                "X-Service-Token": self._token,
+                "X-External-User-ID": external_user_id,
+            }
+        )
+        params: dict[str, str] = {}
+        if date_from:
+            params["from"] = date_from
+        if date_to:
+            params["to"] = date_to
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout_s) as http:
+                resp = await http.get(url, headers=headers, params=params)
+        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+            self._circuit.record_failure(now=now)
+            logger.warning(
+                "nutrition_client.diary_days.network ext=%s err=%s",
+                external_user_id,
+                type(exc).__name__,
+            )
+            raise NutritionUnavailableError(f"network: {type(exc).__name__}") from exc
+
+        if resp.status_code >= 500:
+            self._circuit.record_failure(now=now)
+            raise NutritionUnavailableError(f"http_{resp.status_code}")
+        if resp.status_code != 200:
+            raise NutritionAPIError(f"http_{resp.status_code}")
+        self._circuit.record_success()
+        try:
+            body = resp.json().get("data") or {}
+            rows = body["days"]
+            if not isinstance(rows, list):
+                raise TypeError("days")
+            days = tuple(
+                DiaryDayRow(
+                    date=str(row["date"]),
+                    meals_count=int(row.get("meals_count") or 0),
+                    kcal=_float_or_none(row.get("kcal")),
+                    has_entries=bool(row.get("has_entries")),
+                )
+                for row in rows
+            )
+        except (KeyError, TypeError, ValueError, AttributeError) as exc:
+            # Ответ 200 не той формы — не «пустая неделя»: экран покажет отказ.
+            logger.warning(
+                "nutrition_client.diary_days.malformed ext=%s err=%s",
+                external_user_id,
+                type(exc).__name__,
+            )
+            raise NutritionUnavailableError("malformed_body") from exc
+        return DiaryDaysResponse(
+            timezone=str(body.get("timezone") or "UTC"),
+            date_from=str(body.get("from") or ""),
+            date_to=str(body.get("to") or ""),
+            days=days,
+        )
+
     # ─── profile ──────────────────────────────────────────────────────────
 
     async def get_profile(
         self,
         *,
         external_user_id: str,
+        timeout_s: float | None = None,
+        feeds_circuit: bool = True,
     ) -> ProfileResponse | None:
         """GET ``/api/v1/nutrition/internal/profile/``.
 
         Returns the profile when found, ``None`` when Ayla returns 404
         PROFILE_NOT_FOUND or 200 with ``exists=false``.
+
+        ``timeout_s`` — свой таймаут вызова (по умолчанию общий клиента).
+        ``feeds_circuit=False`` — ТАЙМАУТ этого вызова не записывается в общий
+        breaker (DRF-2225): проба-вежливость с коротким таймаутом не должна
+        открывать breaker для всего питания. Прочие сетевые отказы и 5xx
+        считаются как обычно — это настоящий сигнал о каталоге.
 
         Raises:
             NutritionUnavailableError: circuit / 5xx / network.
@@ -610,14 +1773,21 @@ class NutritionClient:
             raise NutritionUnavailableError("circuit_open")
 
         url = self._urls.build("nutrition/internal/profile/")
-        headers = {
-            "X-Service-Token": self._token,
-            "X-External-User-ID": external_user_id,
-        }
+        headers = with_request_id(
+            {
+                "X-Service-Token": self._token,
+                "X-External-User-ID": external_user_id,
+            }
+        )
+        timeout = self._timeout_s if timeout_s is None else timeout_s
         try:
-            async with httpx.AsyncClient(timeout=self._timeout_s) as http:
+            async with httpx.AsyncClient(timeout=timeout) as http:
                 resp = await http.get(url, headers=headers)
-        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+        except httpx.TimeoutException as exc:
+            if feeds_circuit:
+                self._circuit.record_failure(now=now)
+            raise NutritionUnavailableError(f"network: {type(exc).__name__}") from exc
+        except httpx.NetworkError as exc:
             self._circuit.record_failure(now=now)
             raise NutritionUnavailableError(f"network: {type(exc).__name__}") from exc
 
@@ -640,10 +1810,12 @@ class NutritionClient:
             raise NutritionUnavailableError("circuit_open")
 
         url = self._urls.build("nutrition/internal/profile/")
-        headers = {
-            "X-Service-Token": self._token,
-            "X-External-User-ID": external_user_id,
-        }
+        headers = with_request_id(
+            {
+                "X-Service-Token": self._token,
+                "X-External-User-ID": external_user_id,
+            }
+        )
         try:
             async with httpx.AsyncClient(timeout=self._timeout_s) as http:
                 resp = await http.post(url, headers=headers, json=data)
@@ -656,6 +1828,171 @@ class NutritionClient:
         # the type-checker rather than runtime.
         assert result is not None
         return result
+
+    async def confirm_targets(
+        self,
+        *,
+        external_user_id: str,
+    ) -> tuple[ProfileResponse, str]:
+        """POST ``/api/v1/nutrition/internal/profile/targets/confirm/`` (§5.1).
+
+        Человек подтверждает предложенный ориентир: ``ayla_proposed`` →
+        ``ayla_calculated``. Тела нет — подтверждается ровно то, что
+        предложено. Возвращает профиль и исход: ``confirmed`` либо
+        ``already_confirmed`` (повтор кнопки — не ошибка). ``409
+        NOTHING_TO_CONFIRM`` → :class:`NothingToConfirmError` с текущим
+        источником.
+        """
+        now = time.monotonic()
+        if self._circuit.is_open(now=now):
+            raise NutritionUnavailableError("circuit_open")
+
+        url = self._urls.build("nutrition/internal/profile/targets/confirm/")
+        headers = with_request_id(
+            {
+                "X-Service-Token": self._token,
+                "X-External-User-ID": external_user_id,
+            }
+        )
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout_s) as http:
+                resp = await http.post(url, headers=headers, json={})
+        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+            self._circuit.record_failure(now=now)
+            raise NutritionUnavailableError(f"network: {type(exc).__name__}") from exc
+
+        if resp.status_code == 409:
+            self._circuit.record_success()
+            try:
+                err = resp.json().get("error") or {}
+            except ValueError:
+                err = {}
+            details = err.get("details") or {}
+            # DRF-2332: у 409 два смысла, и различает их код, а не статус.
+            if err.get("code") == "LEGACY_DEFAULT_UNCONFIRMED":
+                raise LegacyDefaultUnconfirmedError(list(details.get("fields") or []))
+            source = str(details.get("targets_source") or "")
+            raise NothingToConfirmError(source)
+
+        result = self._parse_profile_response(resp, allow_404=False)
+        assert result is not None
+        outcome = str((result.raw.get("confirmation") or {}).get("outcome") or "")
+        return result, outcome
+
+    async def set_manual_targets(
+        self,
+        *,
+        external_user_id: str,
+        calories_kcal: int,
+        confirm_deviation: bool = False,
+    ) -> tuple[ProfileResponse, dict[str, Any]]:
+        """POST ``/api/v1/nutrition/internal/profile/targets/manual/`` (DRF-2138).
+
+        Режим 3 §82 — ориентир, названный человеком (от специалиста);
+        единственный писатель источника ``user_entered``. Шлётся ТОЛЬКО
+        ``calories_kcal`` и, когда человек подтвердил отклонение от
+        расчётного поддержания, ``confirm_deviation: true`` (без
+        подтверждения ключа нет — не ``false``). Воду и белок этот метод не
+        шлёт: белка в контракте каталога нет (DRF-2186), вода — не этот
+        лист. Пороги (<1000 отказ, 1000–1199 ``calories_low``, >30 % от
+        поддержания) — у каталога; отказы приходят по имени:
+
+        Raises:
+            ManualTargetsRefusedError: 422 — не сохранено (``CALORIES_BELOW_FLOOR``).
+            ManualTargetsConfirmationRequiredError: 409 — нужно подтверждение.
+            NutritionUnavailableError: circuit / 5xx / network.
+            NutritionAPIError: прочие 4xx.
+
+        Returns:
+            Профиль (``user_entered``) и отчёт ``manual_targets``
+            (``{"set": [...], "warnings": [...], "deviation": {...}}``).
+        """
+        now = time.monotonic()
+        if self._circuit.is_open(now=now):
+            raise NutritionUnavailableError("circuit_open")
+
+        url = self._urls.build("nutrition/internal/profile/targets/manual/")
+        headers = with_request_id(
+            {
+                "X-Service-Token": self._token,
+                "X-External-User-ID": external_user_id,
+            }
+        )
+        body: dict[str, Any] = {"calories_kcal": int(calories_kcal)}
+        if confirm_deviation:
+            body["confirm_deviation"] = True
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout_s) as http:
+                resp = await http.post(url, headers=headers, json=body)
+        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+            self._circuit.record_failure(now=now)
+            raise NutritionUnavailableError(f"network: {type(exc).__name__}") from exc
+
+        if resp.status_code in (409, 422):
+            self._circuit.record_success()
+            try:
+                payload = resp.json()
+            except ValueError:
+                payload = {}
+            err = payload.get("error") if isinstance(payload, dict) else None
+            err = err if isinstance(err, dict) else {}
+            code = str(err.get("code") or "")
+            raw_details = err.get("details")
+            details: dict[str, Any] = dict(raw_details) if isinstance(raw_details, dict) else {}
+            if resp.status_code == 422:
+                raise ManualTargetsRefusedError(code or "CALORIES_BELOW_FLOOR", details)
+            # 409 — только именованное «нужно подтверждение»; чужой 409 —
+            # обычная ошибка API, иначе «Да» гоняло бы вопрос по кругу.
+            if code == "CONFIRMATION_REQUIRED":
+                raise ManualTargetsConfirmationRequiredError(
+                    str(details.get("kind") or ""), details
+                )
+            raise NutritionAPIError(f"manual_targets_conflict:{code or resp.status_code}")
+
+        result = self._parse_profile_response(resp, allow_404=False)
+        assert result is not None
+        report = result.raw.get("manual_targets")
+        return result, dict(report) if isinstance(report, dict) else {}
+
+    async def purge_body_parameters(self, *, external_user_id: str) -> bool:
+        """``DELETE /api/v1/nutrition/internal/profile/body-parameters/`` (DRF-1698).
+
+        Отзыв согласия на персональный расчёт (владелец 12.09 §2): каталог
+        обнуляет вес/рост/возраст/пол и снимок ввода целей, инвалидирует
+        нормы; история дневника остаётся. Идемпотентно. ``True`` — каталог
+        подтвердил (200/204, повтор — тоже), ``False`` — ручки ещё нет
+        (404): вызывающий обязан сказать «не подтверждено», не «удалено».
+
+        Raises:
+            NutritionUnavailableError: circuit / 5xx / network.
+            NutritionAPIError: прочие 4xx.
+        """
+        now = time.monotonic()
+        if self._circuit.is_open(now=now):
+            raise NutritionUnavailableError("circuit_open")
+        url = self._urls.build("nutrition/internal/profile/body-parameters/")
+        headers = with_request_id(
+            {
+                "X-Service-Token": self._token,
+                "X-External-User-ID": external_user_id,
+            }
+        )
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout_s) as http:
+                resp = await http.delete(url, headers=headers)
+        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+            self._circuit.record_failure(now=now)
+            raise NutritionUnavailableError(f"network: {type(exc).__name__}") from exc
+        if resp.status_code in (200, 204):
+            self._circuit.record_success()
+            return True
+        if resp.status_code == 404:
+            # Ручки ещё нет на этой выкладке — не «удалено».
+            return False
+        if resp.status_code >= 500:
+            self._circuit.record_failure(now=now)
+            raise NutritionUnavailableError(f"http_{resp.status_code}")
+        raise NutritionAPIError(f"purge_body_parameters: HTTP {resp.status_code}")
 
     def _parse_profile_response(
         self,
@@ -675,6 +2012,12 @@ class NutritionClient:
             # prefix per Ayla spec §1.1. Flat top-level fallback was removed
             # in DRF-270.
             norms = body.get("norms") or {}
+            # §6 / §103: число без названного происхождения наружу не
+            # выходит — но правило стоит не здесь, а на самом типе
+            # (``ProfileResponse.__post_init__``): разбор не единственный
+            # конструктор, и правило в разборе обошёл бы любой, кто
+            # собирает DTO руками. Здесь ориентиры читаются как есть;
+            # тип сам обнулит их у не настроенного профиля.
             return ProfileResponse(
                 gender=str(body.get("gender") or ""),
                 age=int(body.get("age") or 0),
@@ -683,19 +2026,44 @@ class NutritionClient:
                 goal=str(body.get("goal") or ""),
                 # Ayla spec uses "pace"; "goal_pace" is the back-compat name.
                 goal_pace=str(body.get("pace") or body.get("goal_pace") or ""),
+                legacy_default_inputs=tuple(
+                    str(name)
+                    for name in (body.get("legacy_default_inputs") or [])
+                    if isinstance(name, str) and name
+                ),
                 # Ayla spec uses "activity_coefficient" (number); "activity"
                 # is the back-compat string name.
                 activity=str(body.get("activity_coefficient") or body.get("activity") or ""),
                 diet_preference=str(body.get("diet_preference") or ""),
-                daily_kcal=int(norms.get("daily_kcal") or 0),
-                protein_g=int(norms.get("daily_protein_g") or 0),
-                fat_g=int(norms.get("daily_fat_g") or 0),
-                carbs_g=int(norms.get("daily_carbs_g") or 0),
-                water_ml=int(norms.get("daily_water_ml") or 0),
-                bmr=int(norms.get("bmr") or 0),
+                # Ориентир, которого нет, приезжает ОТСУТСТВИЕМ ключа и
+                # таким же уезжает дальше — ``None``, а не ноль.
+                #
+                # Стояло ``int(norms.get("daily_kcal") or 0)`` при
+                # ``daily_kcal: int`` в типе, и это изготовление
+                # правдоподобного значения на границе: «ключа нет» и
+                # «ноль» становились неразличимы раньше, чем кто-либо
+                # успевал увидеть разницу. Каталог с этой поставки
+                # присылает пустой ``norms``, когда расчёта не было
+                # (DRF-1623 N-c), — и без этой правки бот изготовил бы
+                # ноль заново, то есть половина поставки в каталоге не
+                # дала бы наблюдаемого эффекта.
+                #
+                # Отсутствие обязано пережить КАЖДЫЙ переход. Здесь
+                # переход последний перед экраном.
+                daily_kcal=_target_or_none(norms, "daily_kcal"),
+                protein_g=_target_or_none(norms, "daily_protein_g"),
+                fat_g=_target_or_none(norms, "daily_fat_g"),
+                carbs_g=_target_or_none(norms, "daily_carbs_g"),
+                water_ml=_target_or_none(norms, "daily_water_ml"),
+                bmr=_target_or_none(norms, "bmr"),
                 health_flags=dict(body.get("health_flags") or {}),
                 disclaimer_acked=body.get("disclaimer_acked"),
                 goal_overridden_by=body.get("goal_overridden_by"),
+                targets_source=_targets_source(body),
+                calories_source=_kind_source(body, KIND_CALORIES),
+                fluids_source=_kind_source(body, KIND_FLUIDS),
+                targets_method_versions=_provenance_dict(body, "method_versions"),
+                targets_input_snapshot=_provenance_dict(body, "input_snapshot"),
                 raw=body,
             )
 
@@ -734,10 +2102,12 @@ class NutritionClient:
             raise NutritionUnavailableError("circuit_open")
 
         url = self._urls.build("nutrition/internal/water/")
-        headers: dict[str, str] = {
-            "X-Service-Token": self._token,
-            "X-External-User-ID": external_user_id,
-        }
+        headers: dict[str, str] = with_request_id(
+            {
+                "X-Service-Token": self._token,
+                "X-External-User-ID": external_user_id,
+            }
+        )
         if idempotency_key:
             headers["X-Idempotency-Key"] = idempotency_key
         body: dict[str, Any] = {"ml": ml}
@@ -767,7 +2137,7 @@ class NutritionClient:
                 kcal=int(body.get("kcal") or 0),
                 milestone_text=body.get("milestone_text"),
                 today_total_ml=int(body.get("today_total_water_ml") or 0),
-                today_norm_ml=int(body.get("today_norm_water_ml") or 0),
+                today_norm_ml=_optional_int(body.get("today_norm_water_ml")),
                 alcohol_recovery_hint=bool(body.get("alcohol_recovery_hint") or False),
                 raw=body,
             )
@@ -799,10 +2169,12 @@ class NutritionClient:
             raise NutritionUnavailableError("circuit_open")
 
         url = self._urls.build(f"nutrition/internal/water/{entry_id}/")
-        headers = {
-            "X-Service-Token": self._token,
-            "X-External-User-ID": external_user_id,
-        }
+        headers = with_request_id(
+            {
+                "X-Service-Token": self._token,
+                "X-External-User-ID": external_user_id,
+            }
+        )
         try:
             async with httpx.AsyncClient(timeout=self._timeout_s) as http:
                 resp = await http.delete(url, headers=headers)
@@ -832,10 +2204,12 @@ class NutritionClient:
             raise NutritionUnavailableError("circuit_open")
 
         url = self._urls.build("nutrition/internal/water/today/")
-        headers = {
-            "X-Service-Token": self._token,
-            "X-External-User-ID": external_user_id,
-        }
+        headers = with_request_id(
+            {
+                "X-Service-Token": self._token,
+                "X-External-User-ID": external_user_id,
+            }
+        )
         try:
             async with httpx.AsyncClient(timeout=self._timeout_s) as http:
                 resp = await http.get(url, headers=headers)
@@ -848,7 +2222,7 @@ class NutritionClient:
             body = resp.json().get("data", {})
             return WaterTodayResponse(
                 total_ml=int(body.get("today_total_water_ml") or 0),
-                norm_ml=int(body.get("today_norm_water_ml") or 0),
+                norm_ml=_optional_int(body.get("today_norm_water_ml")),
                 entries=list(body.get("entries") or []),
                 kcal_from_beverages=float(body.get("today_kcal_from_beverages") or 0.0),
                 caffeine_mg=float(body.get("today_caffeine_mg") or 0.0),
@@ -881,10 +2255,12 @@ class NutritionClient:
             raise NutritionUnavailableError("circuit_open")
 
         url = self._urls.build("nutrition/internal/insights/cross_domain/")
-        headers = {
-            "X-Service-Token": self._token,
-            "X-External-User-ID": external_user_id,
-        }
+        headers = with_request_id(
+            {
+                "X-Service-Token": self._token,
+                "X-External-User-ID": external_user_id,
+            }
+        )
 
         try:
             async with httpx.AsyncClient(timeout=self._timeout_s) as http:
@@ -978,10 +2354,12 @@ class NutritionClient:
             raise NutritionUnavailableError("circuit_open")
 
         url = self._urls.build(f"nutrition/internal/insights/cross_domain/{action}/{shown_id}/")
-        headers = {
-            "X-Service-Token": self._token,
-            "X-External-User-ID": external_user_id,
-        }
+        headers = with_request_id(
+            {
+                "X-Service-Token": self._token,
+                "X-External-User-ID": external_user_id,
+            }
+        )
 
         try:
             async with httpx.AsyncClient(timeout=self._timeout_s) as http:

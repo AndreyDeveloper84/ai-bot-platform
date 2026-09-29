@@ -30,10 +30,21 @@ Never:
 
 ### Why the remark goes silent for some people
 
-``ProfileResponse.goal_overridden_by`` is Ayla's own signal that it
-overrode the stated goal because of pregnancy, breastfeeding, an eating
-disorder, or a BMI floor; ``health_flags["eating_disorder"]`` is the
-explicit flag the legacy bot also honoured. For those people the numbers
+Pregnancy, breastfeeding, an eating disorder, or the BMR floor. Ayla says so
+in two places, and both are read (DRF-2222):
+
+* ``health_flags`` — ``pregnant`` / ``breastfeeding`` / ``eating_disorder``.
+  Since catalogue #372 (DRF-1623 N-g) these make Ayla REFUSE the
+  calculation with ``goal_overridden_by=""``; the flag is the only signal
+  left, and a hand-entered (``user_entered``) target stays active through
+  the refusal — so the remarks would keep flowing without this read;
+* ``goal_overridden_by`` — only ``"bmr_floor"`` survives a calculation, on
+  the active target AND on the recalculation waiting beside it
+  (``targets_provenance.pending_proposal``, DRF-2192). Both are read: the
+  proposal is what the person is about to confirm, and an unconfirmed
+  sensitive override is still sensitive (fail-closed).
+
+For those people the numbers
 still render -- they asked for their diary back -- but every trace of
 "you are behind on X, top it up" is dropped. A nudge toward eating more or
 less is exactly the sentence that stops being neutral in that context, and
@@ -46,12 +57,21 @@ from typing import Any
 
 from apps.integrations.ayla import ProfileResponse, SummaryResponse, WaterTodayResponse
 
-#: ``goal_overridden_by`` values that suppress every remark. ``bmi_floor``
-#: is included: Ayla raises the floor when a loss target would go too low,
-#: and "you ate under your calories" is not a neutral observation there.
+#: ``goal_overridden_by`` values that suppress every remark. ``bmr_floor``:
+#: Ayla moves a loss goal to maintain when it would undercut BMR, and "you
+#: ate under your calories" is not a neutral observation there. The other
+#: names are kept as old names (a stale cached profile may still carry
+#: them); ``bmi_floor`` Ayla never emitted — ``git log -S`` DRF-300…dev
+#: finds only ``bmr_floor`` (DRF-2222). The drift guard in
+#: ``tests/test_remarks_suppressed_2222.py`` pins this set against the
+#: catalogue's own list.
 SENSITIVE_OVERRIDES: frozenset[str] = frozenset(
-    {"pregnancy", "breastfeeding", "eating_disorder", "bmi_floor"}
+    {"bmr_floor", "pregnancy", "breastfeeding", "eating_disorder", "bmi_floor"}
 )
+
+#: ``health_flags`` keys that suppress every remark — the catalogue's
+#: ``HEALTH_FACTOR_FLAGS`` (DRF-2222).
+SENSITIVE_HEALTH_FLAGS: frozenset[str] = frozenset({"pregnant", "breastfeeding", "eating_disorder"})
 
 #: A macro under this share of its profile norm is what the remark points
 #: at. 0.7 rather than a tighter band because the remark should fire on a
@@ -76,13 +96,32 @@ GOAL_LABELS: dict[str, str] = {
 
 
 def remarks_suppressed(profile: ProfileResponse | None) -> bool:
-    """True when this person gets numbers only, never a suggestion."""
+    """True when this person gets numbers only, never a suggestion.
+
+    Fail-closed: the active override, the pending proposal's override and
+    the health flags are read as a union — any one of them silences.
+    """
     if profile is None:
         return True
-    if str(profile.goal_overridden_by or "") in SENSITIVE_OVERRIDES:
+    overrides = {str(profile.goal_overridden_by or ""), _pending_override(profile)}
+    if overrides & SENSITIVE_OVERRIDES:
         return True
     flags: dict[str, Any] = profile.health_flags or {}
-    return bool(flags.get("eating_disorder"))
+    return any(flags.get(flag) for flag in SENSITIVE_HEALTH_FLAGS)
+
+
+def _pending_override(profile: ProfileResponse) -> str:
+    """``goal_overridden_by`` of the recalculation waiting beside the active
+    target (DRF-2192), or ``""``. Read from the raw body on purpose, not via
+    :func:`apps.integrations.ayla.nutrition_client.pending_proposal`: that
+    helper drops a proposal without numbers, and an override must not be
+    dropped with it."""
+    raw = getattr(profile, "raw", None) or {}
+    provenance = raw.get("targets_provenance") if isinstance(raw, dict) else None
+    pending = provenance.get("pending_proposal") if isinstance(provenance, dict) else None
+    if not isinstance(pending, dict):
+        return ""
+    return str(pending.get("goal_overridden_by") or "")
 
 
 def render_daily_report(
@@ -91,6 +130,7 @@ def render_daily_report(
     profile: ProfileResponse | None = None,
     *,
     include_opt_out: bool = True,
+    include_entries: bool = False,
 ) -> str:
     """Compose the daily report.
 
@@ -102,11 +142,24 @@ def render_daily_report(
     boundary and the remark rules stay byte-identical either way; a second
     renderer for the pull would have been a second boundary to keep in sync.
 
-    Structure: what was logged against what the profile expects, then at
-    most **one** remark, then Ayla's own comment if it sent one, then the
-    off-switch. Degrades cleanly -- without a profile the macro targets are
-    simply absent and no remark is made, so an Ayla outage costs detail
-    rather than correctness.
+    ``include_entries`` (DRF-1467): the dish names, likewise for the PULL
+    only. Until this ticket ``summary.entries`` was read here for its
+    truthiness alone (``_anything_logged``) and then discarded, so a person
+    who asked «что я ел сегодня» was answered with calories and macros and
+    not a single dish -- an answer to a question they had not asked. The rows
+    are read from Ayla on the turn and kept nowhere: the diary is hers behind
+    the HEALTH consent, and a second copy in the bot would be the same health
+    profile on a weaker basis (:mod:`apps.orchestrator.food_history`).
+
+    The push keeps its default of ``False``. An unprompted evening message
+    reciting what somebody ate is a different act from answering them when
+    they ask, and only the second one was requested.
+
+    Structure: what was logged against what the profile expects, then the
+    dishes when asked for, then at most **one** remark, then Ayla's own
+    comment if it sent one, then the off-switch. Degrades cleanly -- without
+    a profile the macro targets are simply absent and no remark is made, so
+    an Ayla outage costs detail rather than correctness.
     """
     lines: list[str] = ["Итоги дня по питанию."]
 
@@ -120,12 +173,30 @@ def render_daily_report(
         return "\n".join(lines)
 
     lines.append("")
-    lines.append(_macro_line("Калории", summary.calories_total, summary.calories_goal, "ккал"))
+    lines.append(
+        _macro_line("Калории", summary.calories_total, _summary_goal(summary, profile), "ккал")
+    )
     lines.append(_macro_line("Белки", summary.protein_g, _target(profile, "protein_g"), "г"))
     lines.append(_macro_line("Жиры", summary.fat_g, _target(profile, "fat_g"), "г"))
     lines.append(_macro_line("Углеводы", summary.carbs_g, _target(profile, "carbs_g"), "г"))
-    if water is not None and water.norm_ml:
-        lines.append(_macro_line("Вода", water.total_ml, water.norm_ml, "мл"))
+    if water is not None:
+        # Норма воды приезжает в ответе по воде и происхождения не несёт —
+        # как и ``calories_goal`` сводки. Показывается только при
+        # настроенных ориентирах профиля; иначе строка без «из» (§6:
+        # «фактически внесённые значения» доступны без анкеты — факт
+        # остаётся, снимается ориентир). Раньше без нормы исчезала вся
+        # строка, вместе с фактом. Этот случай нашёл сторож, а не чтение:
+        # три поверхности были закрыты, четвёртая — вода — пропускала
+        # 2100 мл наружу.
+        norm = _water_norm(water, profile)
+        if water.total_ml or norm is not None:
+            lines.append(_macro_line("Вода", water.total_ml, norm, "мл"))
+
+    if include_entries:
+        entries_lines = _entry_lines(summary)
+        if entries_lines:
+            lines.append("")
+            lines.extend(entries_lines)
 
     remark = goal_remark(summary, water, profile)
     if remark:
@@ -161,27 +232,64 @@ def goal_remark(
         return ""
     assert profile is not None  # narrowed by remarks_suppressed
 
-    goal_label = GOAL_LABELS.get(profile.goal, "")
+    # §6 свода 11.09: до настройки ориентиров скрыты оценки «мало», «много»,
+    # «перебор» и «осталось». Все четыре реплики ниже — такие оценки, и
+    # все они сравнивают с нормой. Нормы не настроены — реплики нет,
+    # какое бы число ни лежало в сводке или в ответе по воде: у них нет
+    # происхождения, у профиля есть.
+    #
+    # DRF-1929 (F1(б)): вид — КАЛОРИИ. Все четыре реплики ниже сравнивают с
+    # нормой калорий или выведенных из неё макросов; происхождение воды к
+    # ним отношения не имеет. Водную реплику отдельно охраняет
+    # ``_water_norm`` — по своей подписи.
+    if not profile.calories_are_configured:
+        return ""
 
-    if profile.protein_g and summary.protein_g < profile.protein_g * SHORTFALL_RATIO:
+    goal_label = GOAL_LABELS.get(profile.goal, "")
+    calories_goal = _summary_goal(summary, profile)
+    # DRF-2319 (живой проход 22.09): реплики про нутриенты — только при
+    # записанной еде. День с одной водой давал «Белка меньше ориентира на
+    # 123 г»: ноль без записей — это «еду не записывали», а не «мало белка».
+    # Водная реплика от еды не зависит и остаётся.
+    food_logged = _food_logged(summary)
+
+    # DRF-1844 / §82: про калории и белок — «ориентир», не «норма». Вода
+    # остаётся «нормой» намеренно — решение владельца 11.09.2026 §5.2:
+    # норма воды — мера шага («до нормы», не «до цели»), это другой предмет.
+    if (
+        food_logged
+        and profile.protein_g
+        and summary.protein_g < profile.protein_g * SHORTFALL_RATIO
+    ):
         short = round(profile.protein_g - summary.protein_g)
         tail = f" — при цели «{goal_label}» его обычно добирают первым" if goal_label else ""
-        return f"Белка сегодня меньше нормы из профиля на {short} г{tail}."
+        return f"Белка сегодня меньше ориентира из профиля на {short} г{tail}."
 
-    if water is not None and water.norm_ml and water.total_ml < water.norm_ml * SHORTFALL_RATIO:
-        return f"До нормы воды из профиля осталось {water.norm_ml - water.total_ml} мл."
+    water_norm = _water_norm(water, profile) if water is not None else None
+    if water is not None and water_norm and water.total_ml < water_norm * SHORTFALL_RATIO:
+        return f"До нормы воды из профиля осталось {round(water_norm - water.total_ml)} мл."
 
+    # Страж ниже не меняет исхода (без еды калорий ноль и перебора нет) —
+    # оставлен для симметрии: все три реплики про нутриенты — при еде.
     if (
-        profile.goal in {"lose", "tone"}
-        and summary.calories_goal
-        and summary.calories_total > summary.calories_goal * OVERSHOOT_RATIO
+        food_logged
+        and profile.goal in {"lose", "tone"}
+        and calories_goal
+        and summary.calories_total > calories_goal * OVERSHOOT_RATIO
     ):
-        over = round(summary.calories_total - summary.calories_goal)
+        over = round(summary.calories_total - calories_goal)
         tail = f" — цель в профиле «{goal_label}»" if goal_label else ""
-        return f"Калорий вышло на {over} ккал больше нормы из профиля{tail}."
+        return f"Калорий вышло на {over} ккал больше ориентира из профиля{tail}."
 
-    if summary.calories_goal and summary.calories_total >= summary.calories_goal * SHORTFALL_RATIO:
-        return "День уложился в нормы из твоего профиля."
+    # DRF-2215 (T-2, безопасная форма): «День уложился в ориентир» здесь
+    # стояло — и это вердикт о дне, а не число. Не говорится вообще: при
+    # съеденном ориентире сказать нечего, ниже — только разность.
+    #
+    # DRF-1844 (F1, D15): «осталось N ккал» — только при действующем
+    # ориентире. Арифметика, не оценка: §85 §8 запрещает осуждающие
+    # формулировки, а «осталось» — просто разность.
+    if food_logged and calories_goal and summary.calories_total < calories_goal:
+        return f"До ориентира по калориям осталось {round(calories_goal - summary.calories_total)} ккал."
 
     return ""
 
@@ -198,6 +306,14 @@ def render_water_reminder(
     "here is the arithmetic" -- and it is the same figure the gate used, so
     the message cannot disagree with the decision that produced it.
     """
+    # Без ориентира этого сообщения НЕ БЫВАЕТ: оно целиком построено на
+    # норме — «выпито X из N», «до нормы ещё M». Отправитель это уже
+    # знает и до сюда не доходит (`tasks.py`: `if not water.norm_ml:
+    # continue`), поэтому здесь не подстановка умолчания, а объявление
+    # предусловия: ориентира нет — напоминания нет, а не напоминание с
+    # выдуманным числом (§82, §85).
+    if not water.norm_ml:
+        return ""
     deficit = max(0, water.norm_ml - water.total_ml)
     lines = [f"Сегодня выпито {water.total_ml} из {water.norm_ml} мл."]
     if proportional_ml:
@@ -210,18 +326,106 @@ def render_water_reminder(
 # -- helpers ----------------------------------------------------------------
 
 
+def _entry_lines(summary: SummaryResponse) -> list[str]:
+    """The dishes behind the totals, one per line. ``[]`` when there are none.
+
+    Every value printed comes from ``summary.entries`` as Ayla sent it, read
+    through :func:`apps.orchestrator.food_history.meals_from_summary` -- the
+    one place the raw rows are coerced, so this renderer and the recognition
+    card cannot disagree about what a row says. A meal Ayla priced at nothing
+    prints its name alone rather than «0 ккал»: a bare zero next to a dish
+    reads as a verdict on the dish.
+    """
+    from apps.orchestrator.food_history import meals_from_summary
+
+    meals = meals_from_summary(summary)
+    if not meals:
+        return []
+    lines = ["Что было записано:"]
+    for meal in meals:
+        tail = f" — {meal.calories} ккал" if meal.calories else ""
+        lines.append(f"• {meal.dish}{tail}")
+    return lines
+
+
+def _food_logged(summary: SummaryResponse) -> bool:
+    """Записана ли еда — одно определение на отчёт и реплику (DRF-2319).
+
+    Предел: каталог зеркалит в ``FoodLog`` КАЛОРИЙНЫЕ напитки (латте, кефир,
+    сок — ``water_entry_service._create_food_log_mirror``), и в ``entries`` они
+    неотличимы от еды: у сводки нет признака происхождения записи. День из
+    одних таких напитков считается днём с едой. Чистая вода (0 ккал) сюда не
+    попадает. Различить — контракт каталога (признак источника записи).
+    """
+    return summary.calories_total > 0 or bool(summary.entries)
+
+
 def _anything_logged(summary: SummaryResponse, water: WaterTodayResponse | None) -> bool:
-    logged_food = summary.calories_total > 0 or bool(summary.entries)
     logged_water = water is not None and water.total_ml > 0
-    return logged_food or logged_water
+    return _food_logged(summary) or logged_water
 
 
-def _target(profile: ProfileResponse | None, field: str) -> float:
-    return float(getattr(profile, field, 0) or 0) if profile is not None else 0.0
+def _target(profile: ProfileResponse | None, field: str) -> float | None:
+    """Ориентир из профиля — или ``None``, когда его нет.
+
+    Раньше здесь стояло ``or 0``, и ноль служил именем отсутствия: ``None``
+    → ``0.0`` → «нет». Пользователю это не было видно — ``_macro_line`` ноль
+    не печатал, — но это ровно вариант B из §103, который владелец отверг:
+    одно число несёт два смысла, и первый же рефакторинг ``if target:`` в
+    ``if target is not None:`` напечатал бы «из 0 г». §6: неизвестная норма
+    — ``NOT_CONFIGURED``, а не ноль. Здесь отсутствие остаётся отсутствием.
+    """
+    if profile is None:
+        return None
+    value = getattr(profile, field, None)
+    return None if value is None else float(value)
 
 
-def _macro_line(label: str, actual: float, target: float, unit: str) -> str:
-    """``Белки: 80 из 95 г`` -- or without the target when none is known."""
-    if target:
+def _water_norm(water: WaterTodayResponse, profile: ProfileResponse | None) -> float | None:
+    """``norm_ml`` ответа по воде — только при настроенных ориентирах профиля.
+
+    Тот же довод, что у :func:`_summary_goal`: число едет отдельным ответом
+    и своего происхождения не имеет; профиль знает, можно ли его показывать.
+
+    DRF-1929 (F1(б)): спрашивается подпись ЖИДКОСТИ. До разделения норму
+    воды снимали неподтверждённые калории — спрашивали набор, а показывали
+    воду.
+    """
+    if profile is None or not profile.fluids_are_configured:
+        return None
+    norm = water.norm_ml
+    return None if not norm else float(norm)
+
+
+def _summary_goal(summary: SummaryResponse, profile: ProfileResponse | None) -> float | None:
+    """``calories_goal`` сводки — только если ориентиры профиля настроены.
+
+    Сводка приезжает отдельным ответом и происхождения не несёт: у
+    ``unknown_legacy`` каталог до команды очистки (#332) присылает в ней
+    число. Профиль своё происхождение знает, и он же решает, можно ли
+    показывать число из соседнего ответа. Без профиля — нельзя: §103.
+
+    DRF-1929 (F1(б)): вид — КАЛОРИИ.
+    """
+    if profile is None or not profile.calories_are_configured:
+        return None
+    goal = summary.calories_goal
+    return None if goal is None else float(goal)
+
+
+def _macro_line(
+    label: str,
+    actual: float,
+    target: float | None,
+    unit: str,
+) -> str:
+    """``Белки: 80 из 95 г`` — или без ориентира, когда его нет.
+
+    ``None`` в ``target`` теперь штатное состояние, а не сбой: ориентир
+    по калориям снят до утверждения методики (§82, §85). Строка без
+    второго числа — это и есть режим «без ориентира»: факт показан,
+    цель не выдумана.
+    """
+    if target is not None:
         return f"{label}: {round(actual)} из {round(target)} {unit}."
     return f"{label}: {round(actual)} {unit}."

@@ -2,8 +2,18 @@
 
 Pulls Ayla's canonical catalog and upserts the ``CatalogService`` mirror
 under a Redis advisory lock. Called by the Celery beat every 15 minutes
-(``apps.catalog.tasks.sync_catalog_for_all_tenants``) and by the admin
-"force resync" action.
+(``apps.catalog.tasks.sync_catalog_for_all_tenants``), for a one-shot
+operator run by ``manage.py sync_catalog``, and from the admin
+force-resync action (DRF-1581) by
+``apps.catalog.tasks.sync_catalog_for_tenant``.
+
+(Until DRF-1494 this line promised an admin "force resync" action instead.
+There was none then — C6/DRF-576 was never built — so for the whole life
+of the pilot the beat was the only way this code could run at all, and an
+operator who read this docstring while the catalog was twelve days stale
+would have gone looking for a button that did not exist. The button has
+since landed: DRF-1581 added the force-resync action on
+``CatalogServiceAdmin``.)
 
 Three mirrors, pulled in FK order so each one's dependencies already exist:
 
@@ -43,9 +53,11 @@ from typing import TYPE_CHECKING, Any
 
 from django.conf import settings
 from django.core.cache import cache
+from django.utils import timezone as dj_timezone
 
 from apps.audit.services import write_audit
-from apps.catalog.services.http_client import CatalogHttpClient
+from apps.catalog.services.http_client import CatalogHttpClient, CatalogThrottledError
+from apps.catalog.services.throttle import ThrottleWaitBudget
 from apps.catalog.services.upserter import (
     UpsertResult,
     upsert_master_services,
@@ -86,8 +98,14 @@ class SyncResult:
 
     Fields:
       ran: True when the lock was acquired and the cycle ran.
-      skipped: True when the lock was held by another beat — we returned
-               without doing work.
+      skipped: True when the cycle returned without doing work.
+      skip_reason: WHY it was skipped, when it was — ``"lock_held"`` (another
+               beat has this tenant) or ``"throttled"`` (Ayla rate-limited us
+               and this run had no wait budget left, DRF-1595). Empty when
+               ``skipped`` is False. It exists because the fan-out logs the
+               two outcomes as different events: a salon we chose not to
+               hammer is not a salon that broke, and for three pilot days
+               those were the same line in the journal.
       services: CatalogService (salon-services) mirror counters.
       masters: CatalogMaster (specialists) mirror counters — S3B masters.
       master_services: MasterService (specialist-services) bookable-edge
@@ -99,6 +117,7 @@ class SyncResult:
 
     ran: bool = False
     skipped: bool = False
+    skip_reason: str = ""
     services: MirrorCounts = field(default_factory=MirrorCounts)
     masters: MirrorCounts = field(default_factory=MirrorCounts)
     master_services: MirrorCounts = field(default_factory=MirrorCounts)
@@ -113,11 +132,17 @@ class CatalogSyncService:
         self,
         *,
         http_client: Any | None = None,
+        wait_budget: ThrottleWaitBudget | None = None,
     ) -> None:
         # ``Any`` instead of CatalogHttpClient — tests inject duck-typed
         # fakes that implement the same fetch_salon_services surface + the
         # context-manager protocol without inheriting the production class.
         self._http = http_client
+        # Shared across every tenant of one beat run (DRF-1595) — the fan-out
+        # owns it and hands the same object down, so the ceiling on 429 sleeps
+        # is per RUN and cannot be multiplied by the tenant count. A caller
+        # that passes none gets a per-run budget of its own from settings.
+        self._wait_budget = wait_budget
 
     def run(self, tenant: "Tenant") -> SyncResult:
         """Run one sync cycle. Returns :class:`SyncResult`.
@@ -133,7 +158,7 @@ class CatalogSyncService:
         # already exists. Canonical Django distributed advisory lock.
         if not cache.add(lock_key, "1", timeout=ttl):
             logger.info("catalog.sync.skipped reason=lock_held tenant_id=%s", tenant.id)
-            return SyncResult(ran=False, skipped=True)
+            return SyncResult(ran=False, skipped=True, skip_reason="lock_held")
 
         try:
             return self._run_locked(tenant)
@@ -146,11 +171,30 @@ class CatalogSyncService:
 
     def _run_locked(self, tenant: "Tenant") -> SyncResult:
         """Salon-services pull + upsert within the lock window."""
-        http = self._http if self._http is not None else CatalogHttpClient()
+        http = (
+            self._http
+            if self._http is not None
+            else CatalogHttpClient(wait_budget=self._wait_budget)
+        )
 
         try:
             with http:
                 salon_dtos = http.fetch_salon_services(tenant_id=str(tenant.id))
+        except CatalogThrottledError as exc:
+            # Ayla's rate limiter, not this salon's catalog (DRF-1595). Nothing
+            # landed, so the run is not "ran"; but calling it a FAILURE is the
+            # mistake that let this go unnoticed for three days — it put a
+            # healthy salon in the same counter as a broken one, and the
+            # unordered fan-out fed the same two salons into it every cycle.
+            # Skipped-with-a-reason is the honest record, and the caller uses
+            # it to stand down for the rest of the cycle instead of digging.
+            logger.warning(
+                "catalog.sync.skipped reason=throttled tenant_id=%s budget_exhausted=%s: %s",
+                tenant.id,
+                exc.budget_exhausted,
+                exc,
+            )
+            return SyncResult(ran=False, skipped=True, skip_reason="throttled")
         except Exception as exc:  # noqa: BLE001 — orchestrator boundary
             logger.exception("catalog.sync.fetch_failed tenant_id=%s", tenant.id)
             return SyncResult(ran=True, error=str(exc))
@@ -159,10 +203,13 @@ class CatalogSyncService:
             # Ayla filters salon-services by the exact ``?tenant=`` UUID. An
             # empty result on a run that succeeded (no error) is either a
             # genuinely empty catalog OR a tenant-id mismatch — the bot
-            # ``Tenant.id`` must equal the Ayla Tenant UUID (it does for
-            # Ayla-provisioned tenants; ``create_tenant`` mints a local
-            # uuid4). Warn so a mis-provisioned pilot tenant can't silently
-            # ship an empty mirror that looks identical to a healthy one.
+            # ``Tenant.id`` must equal the Ayla Tenant UUID. Since DRF-1510
+            # ``create_tenant --id <ayla-tenant-uuid>`` states it at
+            # provisioning time and warns when it is omitted; a row created
+            # before that (or without the flag) carries a local uuid4 and
+            # lands here every cycle. Warn so a mis-provisioned pilot tenant
+            # can't silently ship an empty mirror that looks identical to a
+            # healthy one.
             logger.warning(
                 "catalog.sync.empty_fetch tenant_id=%s — Ayla returned 0 "
                 "salon-services; if this salon has a catalog, verify Tenant.id "
@@ -232,11 +279,29 @@ class CatalogSyncService:
                     {"ayla_specialist_service_id": "?", "reason": str(exc)}
                 )
 
-        # Freshness signal only — not a fetch cursor (Ayla has no ?since=).
+        # Two different questions, two different columns (DRF-1494).
+        #
+        # `last_catalog_sync_at` answers "how fresh is the CONTENT": the newest
+        # upstream `updated_at` this pull saw. It is a watermark, not a clock —
+        # a salon nobody has edited for a month legitimately freezes it, so its
+        # age can never tell a static catalog from a dead sync.
+        #
+        # `last_catalog_sync_ok_at` answers "did the sync RUN": wall-clock, set
+        # on every run that got past the salon-services fetch. It moves on a
+        # healthy contour whether or not the catalog changed, so an age above
+        # the threshold means one thing only, and the alarm can act on it.
+        #
+        # Stamped here rather than at the top of `_run_locked` on purpose: this
+        # line is downstream of the fetch, so a run that could not reach Ayla
+        # leaves the clock where it was and ages into the alarm.
+        update_fields = ["last_catalog_sync_ok_at"]
+        tenant.last_catalog_sync_ok_at = dj_timezone.now()
+
         new_cursor = _max_upstream_ts(salon_dtos)
         if new_cursor is not None:
             tenant.last_catalog_sync_at = new_cursor
-            tenant.save(update_fields=["last_catalog_sync_at"])
+            update_fields.append("last_catalog_sync_at")
+        tenant.save(update_fields=update_fields)
 
         result = SyncResult(
             ran=True,

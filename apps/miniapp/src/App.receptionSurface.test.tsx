@@ -1,0 +1,279 @@
+/**
+ * DRF-1522 / DRF-1552 — салонная поверхность глазами ресепшн.
+ *
+ * Решение владельца 05.09.2026: «убрать две вкладки и сажать на День».
+ * Уточнено 06.09.2026 (§35 п.1): «Услуги» у ресепшн тоже убрать —
+ * остаются две вкладки, День · Команда.
+ *
+ * Пять разделов при этом СОХРАНЯЮТСЯ для владельца и администратора —
+ * поэтому здесь каждая отрицательная проверка идёт в паре с
+ * положительной. Без пары «починка» легко превратилась бы в исчезновение
+ * вкладок у всех (`negative_assert_guard`, DRF-1411).
+ *
+ * Тесты умеют падать: верните `to="/admin/team"` в catch-all `AdminRoutes`
+ * — покраснеет посадка; верните полный список вместо `adminTabsFor(me)` в
+ * `AdminTabBar` — покраснеет состав панели; снимите стража с
+ * `/admin/internal-chat` — покраснеет прямая ссылка.
+ */
+import { render, screen, waitFor } from "@testing-library/react";
+import { MemoryRouter } from "react-router-dom";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+
+// DRF-1893 (15.09.2026 UTC): App не стартует без initData (решение владельца U —
+// пустой initData это отказ транспорта, экран «Открой Ayla из MAX»). Эти
+// тесты — про запуск из MAX, поэтому канал объявлен опознанным явно: в jsdom
+// моста MAX нет, и без этой строки App честно показал бы экран отказа.
+vi.mock("./lib/identity", async (importOriginal) => {
+  const original = await importOriginal<typeof import("./lib/identity")>();
+  return { ...original, channelIdentity: () => "identified" as const };
+});
+
+vi.mock("./lib/admin-api", async (importOriginal) => {
+  const original = await importOriginal<typeof import("./lib/admin-api")>();
+  return {
+    ...original,
+    getMe: vi.fn(),
+    getSalonDay: vi.fn(),
+    listMasters: vi.fn(),
+    getAvailabilityRequests: vi.fn(),
+    getServicesMapping: vi.fn(),
+  };
+});
+
+vi.mock("./lib/internal-chat-api", async (importOriginal) => {
+  const original =
+    await importOriginal<typeof import("./lib/internal-chat-api")>();
+  return { ...original, listAdminThreads: vi.fn() };
+});
+
+import {
+  getAvailabilityRequests,
+  getMe,
+  getSalonDay,
+  getServicesMapping,
+  listMasters,
+  type MeResponse,
+} from "./lib/admin-api";
+import { listAdminThreads } from "./lib/internal-chat-api";
+import { App } from "./App";
+
+const mockedGetMe = vi.mocked(getMe);
+const mockedDay = vi.mocked(getSalonDay);
+const mockedMasters = vi.mocked(listMasters);
+const mockedRequests = vi.mocked(getAvailabilityRequests);
+const mockedThreads = vi.mocked(listAdminThreads);
+const mockedServicesMapping = vi.mocked(getServicesMapping);
+
+const BASE_ME: MeResponse = {
+  user: { id: "u-1", name: "Ирина", phone_masked: "+7 *** **12" },
+  tenant: { id: "t-1", name: "Demo", slug: "demo" },
+  role: "receptionist",
+  capabilities: [],
+  is_customer: false,
+  is_master: false,
+  is_receptionist: false,
+  is_admin: false,
+  is_owner: false,
+  master_id: null,
+  landing_path: "/admin/team",
+};
+
+/** Ресепшн — и только ресепшн. */
+const RECEPTION_ME: MeResponse = { ...BASE_ME, is_receptionist: true };
+const OWNER_ME: MeResponse = { ...BASE_ME, role: "owner", is_owner: true };
+const ADMIN_ME: MeResponse = { ...BASE_ME, role: "admin", is_admin: true };
+
+function renderAppAt(path: string) {
+  render(
+    <MemoryRouter initialEntries={[path]}>
+      <App />
+    </MemoryRouter>,
+  );
+}
+
+/** Подписи вкладок в нижней панели, в порядке отрисовки. */
+function tabLabels(): string[] {
+  const bar = screen.getByRole("navigation", { name: "Основная навигация" });
+  return Array.from(bar.querySelectorAll("button")).map(
+    (b) => b.getAttribute("aria-label") ?? "",
+  );
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  mockedDay.mockResolvedValue({
+    date: "2026-09-05",
+    timezone: "Europe/Moscow",
+    summary: { total: 0, upcoming: 0, completed: 0, released: 0 },
+    masters: [],
+    orphan_visits: [],
+  });
+  mockedMasters.mockResolvedValue({ items: [], next_cursor: null, total_count: 0 });
+  mockedRequests.mockResolvedValue({ items: [], next_cursor: null });
+  mockedThreads.mockResolvedValue({
+    items: [],
+    total_count: 0,
+    offset: 0,
+    limit: 50,
+  });
+  mockedServicesMapping.mockResolvedValue({
+    services: [],
+    masters: [],
+    mapping: [],
+    orphans: { services_without_masters: [], masters_without_services: [] },
+    snapshot_token: "tok",
+  });
+});
+
+describe("ресепшн садится на «День» (DRF-1522)", () => {
+  it("вход без адреса приводит ресепшн на «День», а не на «Команду»", async () => {
+    mockedGetMe.mockResolvedValue(RECEPTION_ME);
+    renderAppAt("/");
+    // «День» открылся: экран сходил за днём салона.
+    await waitFor(() => expect(mockedDay).toHaveBeenCalled());
+    const bar = await screen.findByRole("navigation", {
+      name: "Основная навигация",
+    });
+    const current = bar.querySelector("[aria-current]");
+    expect(current?.getAttribute("aria-label")).toBe("День");
+    // Ростер мастеров не запрашивался — на «Команду» её не заносило.
+    expect(mockedMasters).not.toHaveBeenCalled();
+  });
+
+  // DRF-2115 (§50 п.5): владелец и администратор садятся в «Сегодня»
+  // пилота; прежние узлы пришпиливали §47.1 «посадку не переключать» —
+  // снято решением владельца 19.09.2026. Ресепшн — как была (§35).
+  it("владелец садится в «Сегодня» пилота", async () => {
+    mockedGetMe.mockResolvedValue(OWNER_ME);
+    renderAppAt("/");
+    expect(await screen.findByRole("heading", { name: "Сегодня" })).toBeInTheDocument();
+    expect(mockedMasters).not.toHaveBeenCalled();
+  });
+
+  it("администратор садится в «Сегодня» пилота", async () => {
+    mockedGetMe.mockResolvedValue(ADMIN_ME);
+    renderAppAt("/");
+    expect(await screen.findByRole("heading", { name: "Сегодня" })).toBeInTheDocument();
+    expect(mockedMasters).not.toHaveBeenCalled();
+  });
+});
+
+describe("состав нижней панели (DRF-1522, DRF-1552)", () => {
+  it("у ресепшн две вкладки: «Чатов», «Настроек» и «Услуг» нет", async () => {
+    mockedGetMe.mockResolvedValue(RECEPTION_ME);
+    renderAppAt("/admin/day");
+    await waitFor(() => expect(mockedDay).toHaveBeenCalled());
+    expect(tabLabels()).toEqual(["День", "Команда"]);
+    expect(
+      screen.queryByRole("button", { name: "Чаты" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Настройки" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Услуги" }),
+    ).not.toBeInTheDocument();
+  });
+
+  // DRF-2115: у владельца и администратора нижняя панель — ровно три
+  // вкладки пилота на любом адресе админки, «День» в том числе (адрес
+  // остаётся по прямой ссылке). Прежние «пять» пришпиливали §47.1.
+  it("у владельца на «Дне» — тройка пилота, не пять вкладок моста", async () => {
+    mockedGetMe.mockResolvedValue(OWNER_ME);
+    renderAppAt("/admin/day");
+    await waitFor(() => expect(mockedDay).toHaveBeenCalled());
+    expect(tabLabels()).toEqual(["Сегодня", "Расписание", "Ayla"]);
+  });
+
+  it("у администратора на «Дне» — тройка пилота", async () => {
+    mockedGetMe.mockResolvedValue(ADMIN_ME);
+    renderAppAt("/admin/day");
+    await waitFor(() => expect(mockedDay).toHaveBeenCalled());
+    expect(tabLabels()).toEqual(["Сегодня", "Расписание", "Ayla"]);
+  });
+
+  it("панель ресепшн растянута на свои две колонки, а не сжата в пять", async () => {
+    mockedGetMe.mockResolvedValue(RECEPTION_ME);
+    renderAppAt("/admin/day");
+    await waitFor(() => expect(mockedDay).toHaveBeenCalled());
+    const bar = screen.getByRole("navigation", { name: "Основная навигация" });
+    expect(bar.getAttribute("style")).toContain("repeat(2, 1fr)");
+  });
+});
+
+describe("прямая ссылка на закрытый раздел (DRF-1522, DRF-1552)", () => {
+  it("ресепшн получает честный отказ на «Чатах», а не пустой экран", async () => {
+    mockedGetMe.mockResolvedValue(RECEPTION_ME);
+    renderAppAt("/admin/internal-chat");
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /Раздел «Чаты» открыт владельцу и администратору/,
+    );
+    // До бэкенда дело не дошло: 403 остаётся правильным ответом, но
+    // человеку показывают отказ, а не ошибку загрузки.
+    expect(mockedThreads).not.toHaveBeenCalled();
+    // Выход есть — и он ведёт на «День».
+    expect(
+      screen.getByRole("button", { name: "Вернуться в «День»" }),
+    ).toBeInTheDocument();
+  });
+
+  it("ресепшн получает честный отказ на «Настройках»", async () => {
+    mockedGetMe.mockResolvedValue(RECEPTION_ME);
+    renderAppAt("/admin/settings");
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /Раздел «Настройки» открыт владельцу и администратору/,
+    );
+    expect(screen.queryByText(/Скоро здесь будут настройки/)).toBeNull();
+  });
+
+  it("владелец те же адреса открывает как раньше", async () => {
+    mockedGetMe.mockResolvedValue(OWNER_ME);
+    renderAppAt("/admin/internal-chat");
+    await waitFor(() => expect(mockedThreads).toHaveBeenCalled());
+    expect(
+      screen.queryByRole("button", { name: "Вернуться в «День»" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("администратору «Настройки» открываются заглушкой, а не отказом", async () => {
+    mockedGetMe.mockResolvedValue(ADMIN_ME);
+    renderAppAt("/admin/settings");
+    expect(
+      await screen.findByText(/Скоро здесь будут настройки/),
+    ).toBeInTheDocument();
+  });
+
+  it("ресепшн получает честный отказ на «Услугах» (DRF-1552)", async () => {
+    mockedGetMe.mockResolvedValue(RECEPTION_ME);
+    renderAppAt("/admin/services");
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /Раздел «Услуги» открыт владельцу и администратору/,
+    );
+    // Матрицу не запрашивали: до бэкенда дело не дошло, человеку
+    // показали отказ, а не пустую таблицу.
+    expect(mockedServicesMapping).not.toHaveBeenCalled();
+    expect(
+      screen.getByRole("button", { name: "Вернуться в «День»" }),
+    ).toBeInTheDocument();
+  });
+
+  it("владельцу «Услуги» открываются как раньше (DRF-1552)", async () => {
+    // Парная положительная стража (DRF-1411): вкладку убрали у ресепшн,
+    // а не у всех.
+    mockedGetMe.mockResolvedValue(OWNER_ME);
+    renderAppAt("/admin/services");
+    await waitFor(() => expect(mockedServicesMapping).toHaveBeenCalled());
+    expect(
+      screen.queryByRole("button", { name: "Вернуться в «День»" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("администратору «Услуги» открываются как раньше (DRF-1552)", async () => {
+    mockedGetMe.mockResolvedValue(ADMIN_ME);
+    renderAppAt("/admin/services");
+    await waitFor(() => expect(mockedServicesMapping).toHaveBeenCalled());
+    expect(
+      screen.queryByRole("button", { name: "Вернуться в «День»" }),
+    ).not.toBeInTheDocument();
+  });
+});

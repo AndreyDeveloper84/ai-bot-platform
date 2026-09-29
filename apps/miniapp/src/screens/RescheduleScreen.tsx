@@ -11,6 +11,23 @@
  *   3. Confirmation modal shows old → new diff.
  *   4. On confirm we POST /reschedule + /reschedule/confirm
  *      sequentially. Spec §5.3 final screen copy: "Перенесена…".
+ *
+ * Куда ведут выходы (DRF-1480) — в каноническое `/customer/*`, а не в
+ * старое поколение. После успешного переноса это новая карточка
+ * `/customer/records/:id` (`CustomerBookingDetailScreen`). Обе карточки
+ * читают один `GET /bookings/<id>`, поэтому id переносится как есть, но
+ * старая `MyVisitDetailScreen` не рисует статус оплаты, сумму и
+ * выставленную оценку и не имеет кнопки «Оценить визит» — человек после
+ * переноса терял возможность оценить визит. «Каталог» из состояния
+ * «сирота» — тоже новый `/customer/catalog`. Образец перевода —
+ * `CustomerBookingSuccessScreen`.
+ *
+ * Канонический адрес (DRF-1481) — `/customer/records/:id/reschedule`.
+ * До уборки экран был смонтирован только по legacy-адресу
+ * `/my-visits/:id/reschedule`, и обе карточки вели туда. Старый маршрут
+ * остаётся compatibility-алиасом на этот же компонент (страховка для
+ * внешних ссылок, ушедших наружу ранее); все внутренние переходы идут
+ * на канонический адрес.
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -20,7 +37,6 @@ import { Snackbar } from "../components/Snackbar";
 import { StickyCta } from "../components/StickyCta";
 import { DelayedSkeleton, Skeleton, SlotGridSkeleton } from "../components/Skeleton";
 import { StateError } from "../components/StateError";
-import { useBackButton } from "../hooks/useBackButton";
 import { useHaptics } from "../hooks/useHaptics";
 import {
   ApiError,
@@ -33,6 +49,8 @@ import {
 } from "../lib/api";
 import { formatDateLabel, formatDayStrip, formatSlotTime, formatVisitFull } from "../lib/format";
 import { resetBooking } from "../state/booking";
+import { CLIENT_RESCHEDULE_REFUSAL } from "../lib/refusal-canon";
+import { backTo } from "../lib/screen-back";
 
 function isoDateNDaysAhead(offset: number): string {
   const d = new Date();
@@ -56,7 +74,12 @@ export function RescheduleScreen() {
   const [confirming, setConfirming] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  useBackButton({ onBack: () => navigate(-1) });
+  // Возврат (DRF-1493) — к самой записи, которую переносят. Адрес несёт
+  // её id, поэтому родитель известен и при входе по ссылке из бота.
+  // Каноническая карточка — `/customer/records/:id` (DRF-1481).
+  const back = backTo(
+    bookingId ? `/customer/records/${bookingId}` : "/customer/records",
+  );
 
   const load = useCallback(() => {
     if (!bookingId) return;
@@ -120,29 +143,31 @@ export function RescheduleScreen() {
     setConfirming(true);
     setError(null);
     try {
-      // request → stash candidate.
-      await rescheduleBookingRequest(bookingId, {
+      const candidate = {
         new_master_id: b.master_id,
         new_service_id: b.service_id,
         new_visit_at: pickedSlot,
-      });
-      // confirm → commit (creates new booking).
-      const { new_booking } = await rescheduleBookingConfirm(bookingId);
+      };
+      // request → stash candidate (local path) / check it (Ayla path).
+      await rescheduleBookingRequest(bookingId, candidate);
+      // confirm → commit. DRF-2561: the Ayla path has nowhere to stash the
+      // candidate, so the confirm carries it too.
+      const { new_booking } = await rescheduleBookingConfirm(bookingId, candidate);
       resetBooking();
       // Spec §5.3 confirmation: "Перенесена — было … стало …".
-      navigate(`/my-visits/${new_booking.id}`, {
+      navigate(`/customer/records/${new_booking.id}`, {
         state: { justRescheduled: true, oldVisit: b.visit_at },
         replace: true,
       });
     } catch (err) {
       if (err instanceof ApiError && err.slug === "slot_unavailable") {
-        setError("Этот слот только что заняли. Выберите другое время.");
+        setError(CLIENT_RESCHEDULE_REFUSAL.slotTaken);
         // Reload slots — the picked one is now gone.
         load();
-      } else if (err instanceof ApiError) {
-        setError(err.detail || "Не получилось перенести.");
       } else {
-        setError("Не получилось перенести. Проверьте интернет.");
+        // Решение владельца 28.09, п.10: «перенос не удался по другой
+        // причине» — одна фраза клиентского регистра, в том числе без сети.
+        setError(CLIENT_RESCHEDULE_REFUSAL.failed);
       }
       setConfirming(false);
     }
@@ -150,7 +175,7 @@ export function RescheduleScreen() {
 
   if (state.kind === "loading") {
     return (
-      <ScreenLayout title="Перенести">
+      <ScreenLayout back={back} title="Перенести">
         <DelayedSkeleton loading>
           <div className="date-strip">
             {Array.from({ length: 6 }, (_, i) => (
@@ -165,7 +190,7 @@ export function RescheduleScreen() {
 
   if (state.kind === "error") {
     return (
-      <ScreenLayout title="Перенести">
+      <ScreenLayout back={back} title="Перенести">
         <StateError err={state.err} onRetry={load} screenId="reschedule" />
       </ScreenLayout>
     );
@@ -173,7 +198,7 @@ export function RescheduleScreen() {
 
   if (state.kind === "orphan") {
     return (
-      <ScreenLayout title="Перенести">
+      <ScreenLayout back={back} title="Перенести">
         <div className="callout">
           <p style={{ margin: 0 }}>
             Эту услугу нельзя перенести — она больше не предлагается в текущем
@@ -183,7 +208,7 @@ export function RescheduleScreen() {
             type="button"
             className="btn-secondary"
             style={{ marginTop: "var(--s-3)" }}
-            onClick={() => navigate("/catalog")}
+            onClick={() => navigate("/customer/catalog")}
           >
             Каталог
           </button>
@@ -196,10 +221,11 @@ export function RescheduleScreen() {
 
   return (
     <ScreenLayout
+      back={back}
       title="Перенести"
       cta={
         <StickyCta onClick={onConfirm} disabled={!pickedSlot || confirming}>
-          {confirming ? "Переношу…" : pickedSlot ? "Подтвердить перенос" : "Выберите слот"}
+          {confirming ? "Переношу…" : pickedSlot ? "Подтвердить перенос" : "Выберите время"}
         </StickyCta>
       }
     >
@@ -265,7 +291,7 @@ export function RescheduleScreen() {
             })}
           </div>
 
-          <div className="slot-grid" role="radiogroup" aria-label="Свободные слоты">
+          <div className="slot-grid" role="radiogroup" aria-label="Свободное время">
             {slotsForDay.length === 0 ? (
               <div className="slot-grid__empty">
                 {selectedDate

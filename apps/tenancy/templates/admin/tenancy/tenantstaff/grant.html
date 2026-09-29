@@ -1,0 +1,75 @@
+{% extends "admin/base_site.html" %}
+{# Промежуточная страница «Выдать роль в салоне» (DRF-2082).
+
+   Салон → человек из ЭТОГО салона → роль. Строку пишет
+   apps.identity.services.staff_roles.grant_role_by_operator — то же ядро,
+   что у кода приглашения; повтор — «уже есть», не вторая строка. #}
+
+{% block breadcrumbs %}
+  <div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">Админка</a>
+    &rsaquo; <a href="{% url 'admin:tenancy_tenantstaff_changelist' %}">Доступы</a>
+    &rsaquo; Выдать роль
+  </div>
+{% endblock %}
+
+{% block content %}
+  <div id="content-main">
+    <h1>{{ title }}</h1>
+    <p style="max-width: 46em;">
+      Роль выдаётся человеку, у которого уже есть строка в этом салоне
+      (он писал салонному боту). Роль <code>owner</code> — одна на салон;
+      повторная выдача той же роли — «уже есть», второй строки не появится.
+    </p>
+
+    <form method="get">
+      <fieldset class="module aligned">
+        <div class="form-row">
+          <label for="id_tenant"><strong>Салон</strong></label>
+          <select id="id_tenant" name="tenant" onchange="this.form.submit()" style="display: block; margin-top: .5em;">
+            <option value="">— выберите —</option>
+            {% for t in tenants %}
+              <option value="{{ t.pk }}" {% if tenant and t.pk == tenant.pk %}selected{% endif %}>{{ t.name }} ({{ t.slug }})</option>
+            {% endfor %}
+          </select>
+        </div>
+      </fieldset>
+      <noscript><input type="submit" value="Показать людей"></noscript>
+    </form>
+
+    {% if tenant %}
+    <form method="post">
+      {% csrf_token %}
+      <input type="hidden" name="tenant" value="{{ tenant.pk }}">
+      <fieldset class="module aligned">
+        <div class="form-row">
+          <label for="id_bot_user_id"><strong>Человек из салона «{{ tenant.name }}»</strong></label>
+          <select id="id_bot_user_id" name="bot_user_id" style="display: block; margin-top: .5em;">
+            <option value="">— выберите —</option>
+            {% for person in candidates %}
+              <option value="{{ person.pk }}">{{ person.display_name|default:"(без имени)" }} · {{ person.channel }} · {{ person.pk|stringformat:"s"|slice:":8" }} · был {{ person.last_seen|date:"d.m H:i" }}</option>
+            {% endfor %}
+          </select>
+          <p class="help">
+            Показаны до {{ candidate_limit }} недавно активных строк салона. Нужного нет —
+            впишите id строки <code>BotUser</code> вручную (телефон здесь не ищется):
+          </p>
+          <input type="text" name="bot_user_id_manual" placeholder="uuid строки BotUser (необязательно)" style="display: block; width: 24em;">
+        </div>
+        <div class="form-row">
+          <label for="id_role"><strong>Роль</strong></label>
+          <select id="id_role" name="role" style="display: block; margin-top: .5em;">
+            {% for value, label in roles %}
+              <option value="{{ value }}">{{ label }} ({{ value }})</option>
+            {% endfor %}
+          </select>
+        </div>
+      </fieldset>
+      <div class="submit-row">
+        <input type="submit" name="apply" value="Выдать роль" class="default">
+        <a href="{% url 'admin:tenancy_tenantstaff_changelist' %}" class="button cancel-link">Отмена</a>
+      </div>
+    </form>
+    {% endif %}
+  </div>
+{% endblock %}

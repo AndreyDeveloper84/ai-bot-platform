@@ -62,6 +62,8 @@ ALLOWED_EVENT_NAMES: Final[frozenset[str]] = frozenset(
         "subscription.activated",
         "subscription.past_due",
         "billing.fee_charged",
+        # DRF-2196 (а1, §64) — системный сигнал: без пользователя и тенанта.
+        "system.module.health.degraded",
     }
 )
 
@@ -92,8 +94,29 @@ TENANT_NULLABLE_EVENT_NAMES: Final[frozenset[str]] = frozenset(
         "subscription.activated",
         "subscription.past_due",
         "billing.fee_charged",
+        # DRF-2196 — у системного сигнала тенанта нет по построению.
+        "system.module.health.degraded",
     }
 )
+
+
+#: DRF-2196 (вариант а1, решение владельца §64) — события без субъекта.
+#:
+#: Контракт требовал ``user_id`` у КАЖДОГО события («Always present — even
+#: tenant_id=null events have a user», ``event-contract.md`` §2). У системного
+#: сигнала пользователя нет в принципе: каталог считает снимки, а не тех, кто
+#: их прислал. Владелец ослабил инвариант ровно для этого набора.
+#:
+#: Набор ЗАКРЫТ, а не шаблон: префикс ``system.`` пропуском не является, и
+#: имя вне набора падает на ``invalid_event_name``, как любое чужое. Каждое
+#: имя здесь обязано быть и в ``ALLOWED_EVENT_NAMES``, и в
+#: ``TENANT_NULLABLE_EVENT_NAMES``, и в ``ingest_dispatcher._KNOWN_NAMES``, и в
+#: дубле ``ingest_tenancy._TENANT_NULLABLE_EVENT_NAMES``.
+#:
+#: Единственная авторизация такого события — HMAC и имя: путь ``tenant_id=null``
+#: обходит allowlist событий (принято сознательно, §64), а пользователя, по
+#: которому user-global события проверяются дополнительно, нет.
+SYSTEM_EVENT_NAMES: Final[frozenset[str]] = frozenset({"system.module.health.degraded"})
 
 
 class IngestEnvelopeError(ValueError):
@@ -129,11 +152,27 @@ class IngestEnvelope:
     event_version: int
     occurred_at: dt.datetime
     tenant_id: str | None
-    user_id: str
+    #: ``None`` только у событий из :data:`SYSTEM_EVENT_NAMES` (DRF-2196);
+    #: у всех прочих — непустая строка, как и прежде.
+    user_id: str | None
     actor: ActorEnum
     correlation_id: str
     causation_id: str | None
     data: dict[str, Any]
+
+    def require_user_id(self) -> str:
+        """Субъект события — для потребителя, которому он обязателен.
+
+        DRF-2196 сделал ``user_id`` необязательным ровно для закрытого набора
+        :data:`SYSTEM_EVENT_NAMES`; у всех прочих событий разбор конверта его
+        по-прежнему требует. Потребители, которым нужен субъект, берут его
+        этим методом, а не полем: инвариант «у этого события есть человек»
+        назван в месте использования, а не держится на том, что системное
+        событие сюда просто не маршрутизируется.
+        """
+        if self.user_id is None:
+            raise ValueError(f"{self.event_name}: событие без субъекта")
+        return self.user_id
 
 
 _REQUIRED_TOP_LEVEL: Final[tuple[str, ...]] = (
@@ -226,7 +265,19 @@ def parse_envelope(raw_body: bytes | str | dict[str, Any]) -> IngestEnvelope:
         raise IngestEnvelopeError("invalid_tenant_id", f"null_not_allowed_for_{event_name}")
 
     user_id = payload["user_id"]
-    if not isinstance(user_id, str) or not user_id:
+    if event_name in SYSTEM_EVENT_NAMES:
+        # DRF-2196 — третий путь: у системного события НЕТ субъекта, и
+        # событие, которое его называет, противоречит себе. Отказ с
+        # конкретной причиной, а не молчаливое игнорирование поля: иначе
+        # «системный» конверт мог бы протащить `user_id` в потребителя.
+        if tenant_id is not None:
+            raise IngestEnvelopeError("invalid_tenant_id", "system_event_has_no_tenant")
+        if user_id is not None:
+            raise IngestEnvelopeError("invalid_user_id", "system_event_has_no_subject")
+        if actor != "system":
+            raise IngestEnvelopeError("invalid_actor", "system_event_must_be_system")
+    elif not isinstance(user_id, str) or not user_id:
+        # Все прочие — как до DRF-2196: ослабление не расползается.
         raise IngestEnvelopeError("missing_field", "user_id")
 
     event_id = payload["event_id"]

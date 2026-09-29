@@ -58,6 +58,10 @@ from typing import Any
 CB_DAY = "cb:staff:day"
 CB_REQUESTS = "cb:staff:requests"
 
+#: «Проверить готовность» (DRF-2117): первое приветствие владельца /
+#: администратора — поимённый список того, что мешает записи.
+CB_READINESS = "cb:staff:readiness"
+
 #: Approving one request. The request id rides in the 4th segment;
 #: `parse_callback` splits on the first three colons only, so a UUID
 #: survives intact.

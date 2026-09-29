@@ -11,7 +11,7 @@ from __future__ import annotations
 import pytest
 
 from apps.audit.models import AuditLog
-from apps.conversations.models import Conversation
+from apps.conversations.models import Conversation, Message
 from apps.conversations.services import (
     close_conversation,
     record_message,
@@ -149,6 +149,47 @@ class TestRecordMessage:
         # Drop out of scope.
         with pytest.raises(ValueError, match="tenant in scope"):
             record_message(conv, role="user", content="x")
+
+    # DRF-2488 — канал ввода реплики.
+
+    def test_input_channel_defaults_to_text(self, tenant_a, bot_user_a, settings):
+        settings.STRICT_TENANT_SCOPE = "strict"
+        with tenant_scope(tenant_a):
+            conv = resolve_active_conversation(bot_user_a)
+            user = record_message(conv, role="user", content="привет")
+            bot = record_message(conv, role="assistant", content="здравствуйте")
+        user.refresh_from_db()
+        bot.refresh_from_db()
+        assert (user.input_channel, bot.input_channel) == ("text", "text")
+
+    def test_voice_is_persisted_for_user_turn(self, tenant_a, bot_user_a, settings):
+        settings.STRICT_TENANT_SCOPE = "strict"
+        with tenant_scope(tenant_a):
+            conv = resolve_active_conversation(bot_user_a)
+            msg = record_message(conv, role="user", content="расшифровка", input_channel="voice")
+        msg.refresh_from_db()
+        assert msg.input_channel == Message.InputChannel.VOICE
+        assert msg.content == "расшифровка"
+
+    @pytest.mark.parametrize(
+        ("role", "input_channel", "match"),
+        [
+            ("user", "audio", "is not one of"),
+            ("user", "", "is not one of"),
+            ("assistant", "voice", "only valid for role='user'"),
+            ("system", "voice", "only valid for role='user'"),
+        ],
+    )
+    def test_invalid_input_channel_raises_and_writes_nothing(
+        self, tenant_a, bot_user_a, settings, role, input_channel, match
+    ):
+        settings.STRICT_TENANT_SCOPE = "strict"
+        with tenant_scope(tenant_a):
+            conv = resolve_active_conversation(bot_user_a)
+            record_message(conv, role="user", content="до")
+            with pytest.raises(ValueError, match=match):
+                record_message(conv, role=role, content="x", input_channel=input_channel)
+        assert Message.all_tenants.filter(conversation=conv).count() == 1
 
 
 class TestCloseConversation:

@@ -82,11 +82,15 @@ dependencies = [
 
 [project.optional-dependencies]
 
-# ayla-ai-core is a separate private repo. Pulling it requires GitHub
-# auth (locally via ssh, in CI via a GH_DEPLOY_TOKEN secret + `git
-# config insteadOf` rewrite — see .github/workflows/ci.yml). It lives
-# in its own extra so plain `uv sync --extra dev` works without auth
-# for non-AI contributors. AI work uses `uv sync --extra dev --extra ai-core`.
+# ayla-ai-core is a separate PUBLIC repo (owner's decision 04.09.2026,
+# recorded in OPEN_DECISIONS.md §22 in the workspace root, outside this
+# repo), so pulling it needs no GitHub auth — the pinned SHA fetches
+# anonymously. GH_DEPLOY_TOKEN is still honoured
+# where it exists (CI/Docker rewrite the URL with it when non-empty) so
+# the machinery survives the visibility being closed again; it is not
+# required. It lives in its own extra because it is a heavy AI-only dep:
+# plain `uv sync --extra dev` stays light for non-AI contributors, AI
+# work uses `uv sync --extra dev --extra ai-core`.
 #
 # A2 / DRF-618: ref pinned to a 40-char commit SHA, NOT a tag. Tags are
 # force-pushable on GitHub (Security Engineer P1, 2026-05-12 six-agent
@@ -169,6 +173,7 @@ dev = [
     "django-stubs[compatible-mypy]",
     "types-requests",
     "pytest-httpx",
+    "pytest-xdist>=3.8",
     "pre-commit>=4.0",
     "detect-secrets>=1.5",
     "freezegun>=1.5",
@@ -214,21 +219,36 @@ asyncio_mode = "strict"
 # MasterService write-provenance context for the ~60 existing edge
 # fixtures. Rationale in that module; the gate itself is tested with the
 # context explicitly torn down.
-addopts = "-p config.pytest_env_guard -p config.pytest_master_service_provenance -q -m \"not smoke\""
+# `-p config.pytest_vendor_sdk_preimport` (DRF-1643) — imports the vendor
+# SDKs before any test can patch `httpx.AsyncClient`. Both SDKs derive a
+# class from it at import time, and a lazy first import landing inside
+# `with patch(...)` binds that class to the mock permanently. Same reason
+# as above for being a plugin: a conftest is imported too late.
+addopts = "-p config.pytest_env_guard -p config.pytest_master_service_provenance -p config.pytest_vendor_sdk_preimport -q -m \"not smoke and not cross_boundary\""
 markers = [
     "e2e: end-to-end test requiring real Redis + Postgres (CI services or docker compose locally). Skipped automatically when backing services aren't reachable.",
     "slow: opt-in performance / latency-SLO tests. Excluded from the default suite (`-m \"not slow\"`); run via `pytest -m slow` in nightly perf jobs.",
+    "cross_boundary: golden через настоящую HTTP-границу бот↔каталог (tests/cross_boundary/). Исключён из обычного прогона (`-m \"not cross_boundary\"`), потому что требует поднятого каталога; без стенда ПАДАЕТ, а не пропускается. Запуск: см. tests/cross_boundary/README.md.",
     "smoke: opt-in smoke test that hits real seeded ChromaDB + real OpenAI (KB-RAG Sub-6 / GH #119). Excluded from the default suite (`-m \"not smoke\"`); run via `pytest -m smoke apps/kb/services/tests/test_global_fallback_smoke.py -v` after seeding the `global_kb` corpus.",
 ]
 
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+# ruff 0.16 (Dependabot #1363, вынесен отдельно): по умолчанию он (а) включает в
+# обход `*.md` и форматирует Python-блоки в документах — 84 файла docs/ стали бы
+# «не отформатированы» без единой правки кода; (б) расширил набор правил по
+# умолчанию с 59 до 413 — на dev 11.09 это 3391 находка в 999 файлах. Обе строки
+# ниже возвращают поведение 0.15 явно: обновление инструмента нейтрально,
+# принятие новых правил и форматирования документов — отдельное решение.
+include = ["*.py", "*.pyi", "*.pyw", "*.ipynb", "**/pyproject.toml", "**/ruff.toml", "**/.ruff.toml"]
 # legacy_*/ are AS-IS migration sources — they follow the source repo's
 # style, not the platform's. Drained sprint-by-sprint into apps/.
 extend-exclude = ["legacy_maxbot", "legacy_formulatela_mcp", "legacy_notifications"]
 
 [tool.ruff.lint]
+# Набор по умолчанию ruff ≤ 0.15 (E4, E7, E9, F) — закреплён явно, см. [tool.ruff].
+select = ["E4", "E7", "E9", "F"]
 # TID251 = banned-api / banned-module-level-imports. Stops apps/ from
 # accidentally pulling legacy_* code while migration is in flight.
 # Override per-line with `# noqa: TID251` only for transitional glue
@@ -248,3 +268,13 @@ exclude = ["^legacy_maxbot/", "^legacy_formulatela_mcp/", "^legacy_notifications
 
 [tool.django-stubs]
 django_settings_module = "config.settings.local"
+
+# mypy 2.3 (Dependabot #1363 → #1630): `import-untyped` стал ошибкой при текущем
+# конфиге — 44 файла `apps/*/apps.py` импортируют `django_celery_beat.models`, а у
+# пакета (2.9.0) нет ни стабов, ни `py.typed`. На dev с mypy 2.0.0 — 0 ошибок,
+# с 2.3.1 без этой секции — 44, все одного модуля. Это не ослабление проверки:
+# типов у пакета нет, проверять нечего; для всех остальных модулей правило
+# прежнее.
+[[tool.mypy.overrides]]
+module = ["django_celery_beat", "django_celery_beat.*"]
+ignore_missing_imports = true

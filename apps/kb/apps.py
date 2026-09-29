@@ -4,6 +4,7 @@ from django.apps import AppConfig
 class KbConfig(AppConfig):
     default_auto_field = "django.db.models.BigAutoField"
     name = "apps.kb"
+    verbose_name = "База знаний"
 
     def ready(self) -> None:
         # Sprint 7 / K11 (DRF-569) — import for side effect of

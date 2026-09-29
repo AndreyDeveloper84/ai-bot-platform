@@ -5,6 +5,15 @@
 > Target completion sprint: _Phase 5_
 > Owner: _Customer Mini App (PI track)_
 
+> **Dead host — do not work on `194.87.99.126`.** SSH to it still succeeds and
+> every command will report success, but the box serves nobody: `miniapp-dev`,
+> `proapp`, `dev` and `api-dev` `.gobeauty.site` all resolve to
+> `176.119.159.141`, and the `.126` vhost only proxies there. A change made on
+> `.126` never reaches a person. The pilot is `176.119.159.141`,
+> `/home/taximeter/ai-bot-platform-dev`, Compose project `ayla-bot-staging`,
+> port 8014, env `.env.staging`, files `docker-compose.yml` +
+> `docker-compose.staging.yml` + `docker-compose.staging.local.yml`.
+
 ## Purpose
 
 Manual end-to-end walkthrough an operator runs against any Mini App
@@ -175,12 +184,23 @@ that covers either case.
 
 ## Rollback
 
-The Mini App is static SPA + Django API; deploys are reversible:
+The Mini App is static SPA + Django API; deploys are reversible. Neither half
+is rolled back by a deploy script run on the host any more — there is no
+`.dist-archive/`, and the API is Compose, not systemd.
 
-1. SPA: redeploy the previous `dist/` tarball (kept in
-   `/home/taximeter/ai-bot-platform-dev/.dist-archive/<sha>/` from the
-   previous deploy script run).
-2. API: `git checkout <previous-sha> && systemctl restart
-   ai-bot-platform-dev.service`.
+1. **SPA.** The previous build is left on the pilot as
+   `apps/miniapp/dist.prev` by the `Ship Mini App to the box and swap` step of
+   `deploy-dev`. Emergency flip, on `176.119.159.141`:
 
-See [rollback-procedure.md](rollback-procedure.md) for the full flow.
+   ```bash
+   cd /home/taximeter/ai-bot-platform-dev/apps/miniapp
+   mv dist dist.broken && mv dist.prev dist
+   ```
+
+   It survives exactly one deploy — the next ship overwrites `dist.prev`.
+   The durable fix is to revert on `dev` and let the pipeline publish it.
+   Do **not** rebuild the Mini App on the host; see
+   [miniapp-deploy.md](miniapp-deploy.md).
+2. **API.** Compose project `ayla-bot-staging`, not
+   `systemctl restart ai-bot-platform-dev.service`. See
+   [rollback-procedure.md](rollback-procedure.md) for the full flow.

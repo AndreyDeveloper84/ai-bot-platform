@@ -5,6 +5,13 @@ description: |
 input:
   channel: max
   text: "cb:food:correct:grams:abc-xyz-789"
+  # The prompt is only asked when the card it corrects is still known
+  # (DRF-1454): the scanner stashes it under this key when rendering.
+  # Without the stash the honest answer is the stale-card refusal.
+  skill_state:
+    food_scan:
+      scan_id: abc-xyz-789
+      dish: борщ
 must_pass:
   - response_contains_any:
       - грамм

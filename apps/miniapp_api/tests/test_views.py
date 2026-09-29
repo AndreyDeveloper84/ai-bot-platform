@@ -8,6 +8,7 @@ import json
 import time as time_module
 from datetime import date, datetime, time, timedelta, timezone
 from urllib.parse import urlencode
+from uuid import uuid4
 
 import pytest
 from django.test import Client
@@ -64,12 +65,19 @@ def bot_user(tenant: Tenant) -> BotUser:
 
 @pytest.fixture
 def master(tenant: Tenant) -> CatalogMaster:
+    # DRF-1496: умолчание invite_status теперь PENDING — бронируемость
+    # декларируем явно, а не побочным эффектом умолчания.
     return CatalogMaster.all_tenants.create(
         tenant=tenant,
         external_id=1,
         external_updated_at=datetime(2026, 5, 18, tzinfo=timezone.utc),
         name="Анна",
         is_active=True,
+        # DRF-1540 — форма синхронизированной строки: канонический ключ
+        # заполнен. Без него мастер не бронируется, и клиентские ручки
+        # ниже отвечали бы 404 не потому, что сломаны.
+        ayla_user_id=uuid4(),
+        invite_status=CatalogMaster.InviteStatus.ACCEPTED,
     )
 
 
@@ -127,11 +135,13 @@ class TestAuthVerify:
         assert data["tenant"]["slug"] == "mn-test"
 
     def test_missing_header(self, client: Client) -> None:
+        # 15.09.2026 UTC (DRF-1893): отказ транспорта — один код 401 no_init_data (было 400 malformed / 401 bad_signature).
         resp = client.post(reverse("miniapp_api:auth_verify"))
-        assert resp.status_code == 400
-        assert resp.json()["error"] == "malformed"
+        assert resp.status_code == 401
+        assert resp.json()["error"] == "no_init_data"
 
     def test_bad_signature(self, client: Client, bot_user: BotUser, settings) -> None:
+        # 15.09.2026 UTC (DRF-1893): отказ транспорта — один код 401 no_init_data (было 400 malformed / 401 bad_signature).
         settings.MAX_BOT_TOKEN = BOT_TOKEN
         # Sign with wrong token.
         params = {
@@ -144,7 +154,7 @@ class TestAuthVerify:
             HTTP_AUTHORIZATION=f"MaxInitData {raw}",
         )
         assert resp.status_code == 401
-        assert resp.json()["error"] == "bad_signature"
+        assert resp.json()["error"] == "no_init_data"
 
     @pytest.mark.django_db
     def test_user_not_registered(self, client: Client, tenant: Tenant) -> None:
@@ -159,6 +169,63 @@ class TestAuthVerify:
         assert BotUser.all_tenants.filter(
             tenant=tenant, channel="max", channel_user_id="99999"
         ).exists()
+
+    # Таблица отображения исключений в ``require_init_data`` — пять ветвей,
+    # у каждой свой статус И свой ``error``. На уровне модуля типы исключений
+    # закреплены прочно (``test_auth.py``), но это проверяет ВЕРИФИКАТОР.
+    # Что увидит Mini App — свойство декоратора, и до этих двух узлов оно
+    # было закреплено только у ``bad_signature`` и ``malformed``.
+    #
+    # Утверждаются статус и код ПО ОТДЕЛЬНОСТИ, а не «не 200»: узел, который
+    # проверяет только статус, зелен и когда ``stale`` отвечает 401 с кодом
+    # ``bad_signature`` — то есть ровно при той путанице, ради которой
+    # различимые коды и заведены.
+    #
+    # Третьего узла на ``malformed`` здесь намеренно нет. Его входы
+    # (отсутствующий заголовок, дубль ключа, битый JSON) различаются только
+    # в ``detail`` — 'missing Authorization header' против "duplicate key
+    # 'hash'" — а статус и код у всех одинаковы: 400 / ``malformed``.
+    # На оси, которую стерегут эти узлы, входы неразличимы; на оси, где они
+    # различаются, значение — свободная проза, ломающаяся от правки текста.
+
+    def test_stale_init_data_is_the_same_transport_refusal(self, client: Client) -> None:
+        """Просрочка наружу неотличима от неверной подписи: 401 ``no_init_data``.
+
+        Контракт DRF-1893 (#1781): один отказ транспорта для любой причины,
+        причина уходит только в лог. Различать ``stale`` на HTTP-уровне
+        клиенту незачем — экран один: «Открой Ayla из MAX».
+        """
+
+        params = {
+            "user": json.dumps({"id": 12345}),
+            "auth_date": str(int(time_module.time()) - 3601),  # > 60 мин
+        }
+        raw = _sign(params)
+        resp = client.post(
+            reverse("miniapp_api:auth_verify"),
+            HTTP_AUTHORIZATION=f"MaxInitData {raw}",
+        )
+        assert resp.status_code == 401
+        assert resp.json()["error"] == "no_init_data"
+
+    def test_no_configured_bot_token_is_500_not_401(self, client: Client, settings) -> None:
+        """Ненастроенный сервер — вина сервера, а не клиента: 500, не 401.
+
+        Гасятся оба источника токенов: ``MAX_BOT_TOKEN`` и реестр. Реестр
+        строится один раз на импорте настроек из ``os.environ``
+        (``config/settings/base.py:1964``), поэтому снятие одного только
+        токена его НЕ опустошает, и без второй строки узел свалился бы в
+        ``bad_signature`` — то есть прошёл бы по неверной причине.
+        """
+
+        settings.MAX_BOT_TOKEN = ""
+        settings.MAX_BOT_REGISTRY = ()
+        resp = client.post(
+            reverse("miniapp_api:auth_verify"),
+            HTTP_AUTHORIZATION=_init_data_header("12345"),
+        )
+        assert resp.status_code == 500
+        assert resp.json()["error"] == "server_misconfigured"
 
 
 class TestSlots:
@@ -442,8 +509,85 @@ class TestServicesEndpoints:
         assert resp.status_code == 200
         assert resp.json()["service"]["is_bookable"] is True
 
+    # --- DRF-1482: empty_reason on the catalog payload -----------------
+    # Contract: docs/screens/customer-catalog-empty-states-spec.md §2 —
+    # the reason lives on the server so the API can grow new reasons
+    # without breaking the client. `search_no_match` is NOT produced
+    # here: free-text search never leaves the Mini App.
+
+    def test_empty_reason_region_empty_when_no_services(
+        self, client: Client, bot_user: BotUser
+    ) -> None:
+        """City without connected salons (pilot reality): the tenant has
+        no active services at all."""
+
+        resp = client.get(
+            reverse("miniapp_api:services_list"),
+            HTTP_AUTHORIZATION=_init_data_header("12345"),
+        )
+        assert resp.status_code == 200
+        assert resp.json()["services"] == []
+        assert resp.json()["empty_reason"] == "region_empty"
+
+    def test_empty_reason_booking_unavailable_when_nothing_bookable(
+        self, client: Client, bot_user: BotUser, service: CatalogService
+    ) -> None:
+        """Services exist but not one has a bookable performer —
+        «услуги есть, но не забронировать» (CONFIRMED reading)."""
+
+        resp = client.get(
+            reverse("miniapp_api:services_list"),
+            HTTP_AUTHORIZATION=_init_data_header("12345"),
+        )
+        assert resp.status_code == 200
+        assert len(resp.json()["services"]) == 1
+        assert resp.json()["empty_reason"] == "booking_unavailable"
+
+    def test_empty_reason_null_when_catalog_bookable(
+        self,
+        client: Client,
+        bot_user: BotUser,
+        service: CatalogService,
+        master: CatalogMaster,
+        master_service,
+    ) -> None:
+        """Positive guard on the same data: as soon as one bookable
+        service exists, no empty state applies — the field is null, not
+        a stale reason."""
+
+        resp = client.get(
+            reverse("miniapp_api:services_list"),
+            HTTP_AUTHORIZATION=_init_data_header("12345"),
+        )
+        assert resp.status_code == 200
+        assert len(resp.json()["services"]) == 1
+        assert resp.json()["empty_reason"] is None
+
 
 class TestMastersEndpoints:
+    def test_review_count_rides_from_the_mirror(
+        self,
+        client: Client,
+        bot_user: BotUser,
+        master: CatalogMaster,
+    ) -> None:
+        """DRF-1778: число отзывов — из зеркала (`reviews_count` фида), как
+        есть; ноль остаётся нулём, а не пропадает и не становится единицей."""
+        CatalogMaster.all_tenants.filter(id=master.id).update(review_count=108)
+        resp = client.get(
+            reverse("miniapp_api:masters_list"),
+            HTTP_AUTHORIZATION=_init_data_header("12345"),
+        )
+        assert resp.status_code == 200
+        (row,) = resp.json()["masters"]
+        assert row["review_count"] == 108
+        CatalogMaster.all_tenants.filter(id=master.id).update(review_count=0)
+        detail = client.get(
+            reverse("miniapp_api:master_detail", args=[master.id]),
+            HTTP_AUTHORIZATION=_init_data_header("12345"),
+        )
+        assert detail.json()["master"]["review_count"] == 0
+
     def test_list_bookable_only(
         self,
         client: Client,
@@ -513,7 +657,204 @@ class TestMastersEndpoints:
         assert str(service.id) in payload["service_ids"]
 
 
+class TestCatalogShelfMatchesPicker:
+    """DRF-1549 — витрина услуг и подборщик мастеров отвечают одинаково.
+
+    ``is_bookable`` на карточке услуги — это обещание, а
+    ``GET /masters?service_id=`` — его исполнение. Разъедутся — клиент
+    увидит услугу доступной, откроет выбор мастера и упрётся в пустой
+    экран: тупик DRF-1164.
+
+    Разъехались они уже однажды и молча: витрина набирала столбцы
+    руками, ``bookable()`` вырос на ``ayla_user_id`` (DRF-1540), и ни
+    один тест этого не заметил, потому что все проверяли поведение
+    каждой поверхности по отдельности. Поэтому здесь проверяется не
+    «обе фильтруют по одним столбцам сегодня», а сам инвариант: на
+    одних и тех же данных ответы совпадают. Следующее условие,
+    добавленное в :data:`apps.catalog.master_state.AVAILABLE`, приедет
+    в обе поверхности сразу — или этот класс покраснеет.
+    """
+
+    #: Формы строки мастера, которые различает ``AVAILABLE``. Продаётся
+    #: только ``normal``; каждая остальная — отдельная причина отказа.
+    SHAPES = ("normal", "unlinked", "archived", "pending", "inactive")
+
+    @staticmethod
+    def _seed(tenant: Tenant) -> dict[str, CatalogService]:
+        """По услуге на каждую форму мастера; исполнитель у услуги ОДИН.
+
+        Единственный — чтобы ответ про услугу был ответом про эту
+        конкретную форму, а не про то, что рядом нашёлся кто-то ещё.
+        """
+
+        stamp = datetime(2026, 5, 18, tzinfo=timezone.utc)
+        overrides: dict[str, dict[str, object]] = {
+            "normal": {},
+            # DRF-1540: строка без канонического ключа продаётся, а
+            # уведомление о записи идёт мостом master_user_id и не
+            # доходит. Владелец выбрал видимый отказ.
+            "unlinked": {"ayla_user_id": None},
+            "archived": {"archived_at": stamp},
+            "pending": {"invite_status": CatalogMaster.InviteStatus.PENDING},
+            "inactive": {"is_active": False},
+        }
+        out: dict[str, CatalogService] = {}
+        for n, shape in enumerate(TestCatalogShelfMatchesPicker.SHAPES, start=1):
+            fields: dict[str, object] = {
+                "tenant": tenant,
+                "external_id": 154900 + n,
+                "external_updated_at": stamp,
+                "name": f"Мастер ({shape})",
+                "is_active": True,
+                "ayla_user_id": uuid4(),
+                "invite_status": CatalogMaster.InviteStatus.ACCEPTED,
+            }
+            fields.update(overrides[shape])
+            master = CatalogMaster.all_tenants.create(**fields)
+            service = CatalogService.all_tenants.create(
+                tenant=tenant,
+                external_id=154900 + n,
+                external_updated_at=stamp,
+                slug=f"usluga-{shape}",
+                name=f"Услуга ({shape})",
+                duration_min=60,
+                is_active=True,
+            )
+            MasterService.all_tenants.create(tenant=tenant, master=master, service=service)
+            out[shape] = service
+        return out
+
+    @staticmethod
+    def _shelf(client: Client) -> dict[str, bool]:
+        """``{service_id: is_bookable}`` — то, что обещает витрина."""
+
+        resp = client.get(
+            reverse("miniapp_api:services_list"),
+            HTTP_AUTHORIZATION=_init_data_header("12345"),
+        )
+        assert resp.status_code == 200
+        return {s["id"]: s["is_bookable"] for s in resp.json()["services"]}
+
+    @staticmethod
+    def _picker(client: Client, service: CatalogService) -> list[dict]:
+        """Мастера, которых подборщик реально покажет под эту услугу."""
+
+        resp = client.get(
+            reverse("miniapp_api:masters_list") + f"?service_id={service.id}",
+            HTTP_AUTHORIZATION=_init_data_header("12345"),
+        )
+        assert resp.status_code == 200
+        return resp.json()["masters"]
+
+    def test_normal_performer_is_bookable_and_shown(
+        self, client: Client, bot_user: BotUser, tenant: Tenant
+    ) -> None:
+        """Парная положительная стража (DRF-1411), и она идёт первой:
+        обычный исполнитель как продавался, так и продаётся, а подборщик
+        его показывает. Без этого всё отрицательное ниже было бы
+        согласием двух пустот."""
+
+        services = self._seed(tenant)
+        shelf = self._shelf(client)
+
+        assert shelf[str(services["normal"].id)] is True
+        assert [m["name"] for m in self._picker(client, services["normal"])] == ["Мастер (normal)"]
+
+    def test_unlinked_performer_is_not_bookable(
+        self, client: Client, bot_user: BotUser, tenant: Tenant
+    ) -> None:
+        """Единственный исполнитель без ``ayla_user_id`` — витрина
+        обещать его не имеет права: подборщик его уже не показывает."""
+
+        services = self._seed(tenant)
+        shelf = self._shelf(client)
+
+        assert shelf[str(services["normal"].id)] is True
+        assert shelf[str(services["unlinked"].id)] is False
+
+    def test_archived_performer_is_not_bookable(
+        self, client: Client, bot_user: BotUser, tenant: Tenant
+    ) -> None:
+        """Второй столбец, который прежняя ручная копия не спрашивала:
+        мастер, заархивированный при ``is_active=True``, оставался на
+        витрине."""
+
+        services = self._seed(tenant)
+        shelf = self._shelf(client)
+
+        assert shelf[str(services["normal"].id)] is True
+        assert shelf[str(services["archived"].id)] is False
+
+    def test_shelf_and_picker_never_disagree(
+        self, client: Client, bot_user: BotUser, tenant: Tenant
+    ) -> None:
+        """Инвариант целиком: на каждой форме мастера обещание витрины
+        равно тому, что показывает подборщик.
+
+        Это единственная защита от повторения: совпадение отдельных
+        случаев сегодня ничего не говорит про завтра, а равенство двух
+        множеств на всех формах разъехаться молча не может."""
+
+        services = self._seed(tenant)
+        shelf = self._shelf(client)
+        shelf_promises = sorted(sid for sid, bookable in shelf.items() if bookable)
+        picker_delivers = sorted(str(s.id) for s in services.values() if self._picker(client, s))
+
+        assert str(services["normal"].id) in shelf_promises
+        assert str(services["unlinked"].id) not in shelf_promises
+        assert str(services["archived"].id) not in shelf_promises
+        assert shelf_promises == picker_delivers
+
+
 class TestCreateBooking:
+    def test_the_created_booking_carries_the_salon_address(
+        self,
+        client: Client,
+        tenant: Tenant,
+        bot_user: BotUser,
+        master: CatalogMaster,
+        service: CatalogService,
+        master_service,
+        working_hours,
+    ) -> None:
+        """DRF-1952: пара к «адрес неизвестен» — адрес салона доезжает в ответ."""
+        Tenant.objects.filter(pk=tenant.pk).update(address="ул. Карпинского, 33А")
+        visit_at = self._picked_slot()
+        resp = client.post(
+            reverse("miniapp_api:create_booking"),
+            data=json.dumps(
+                {"service_id": str(service.id), "master_id": str(master.id), "visit_at": visit_at}
+            ),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=_init_data_header("12345"),
+        )
+        assert resp.status_code == 201, resp.json()
+        assert resp.json()["booking"]["address"] == "ул. Карпинского, 33А"
+
+    def test_the_created_booking_carries_the_salon_address_even_when_unknown(
+        self,
+        client: Client,
+        bot_user: BotUser,
+        master: CatalogMaster,
+        service: CatalogService,
+        master_service,
+        working_hours,
+    ) -> None:
+        """DRF-1952: ключ есть всегда; ``None`` — зеркало молчит (экран скажет «Уточните…»)."""
+        visit_at = self._picked_slot()
+        resp = client.post(
+            reverse("miniapp_api:create_booking"),
+            data=json.dumps(
+                {"service_id": str(service.id), "master_id": str(master.id), "visit_at": visit_at}
+            ),
+            content_type="application/json",
+            HTTP_AUTHORIZATION=_init_data_header("12345"),
+        )
+        assert resp.status_code == 201, resp.json()
+        booking = resp.json()["booking"]
+        assert "address" in booking
+        assert booking["address"] is None
+
     def _picked_slot(self) -> str:
         # Pick a far-future Monday 12:00 MSK to bypass past + lead_time.
         target_date = date.today() + timedelta(days=30)
@@ -703,12 +1044,19 @@ class TestCreateBooking:
         # different defect — a service nobody performs — and the new
         # `service_unbookable` gate would (correctly) answer first,
         # leaving "master does not perform this service" untested.
+        #
+        # DRF-1549: «бронируемая» здесь означает то же, что для
+        # `GET /masters?service_id=` — с DRF-1540 туда входит и
+        # `ayla_user_id`. Без ключа Ольга не исполнитель ни для
+        # витрины, ни для подборщика, и гейт `service_unbookable`
+        # снова ответил бы первым.
         other = CatalogMaster.all_tenants.create(
             tenant=tenant,
             external_id=7,
             external_updated_at=datetime(2026, 5, 18, tzinfo=timezone.utc),
             name="Ольга",
             is_active=True,
+            ayla_user_id=uuid4(),
             invite_status=CatalogMaster.InviteStatus.ACCEPTED,
         )
         MasterService.all_tenants.create(tenant=tenant, master=other, service=service)
@@ -851,6 +1199,45 @@ class TestBookingDetail:
         )
         assert resp.status_code == 200
         assert resp.json()["booking"]["id"] == str(confirmed_booking.id)
+
+    def test_address_carries_all_three_states(
+        self, client: Client, tenant: Tenant, bot_user: BotUser, confirmed_booking
+    ) -> None:
+        """«Клиент записался и не видит, куда ехать» (DRF-1652).
+
+        Заглушка адрес рисовала, настоящая ручка его не несла. Правка
+        обязана вернуть поле, СОХРАНИВ честность: адрес появляется, когда
+        его прислали, и отсутствие остаётся отличимым.
+
+        Три состояния проверяются по очереди на одной и той же записи, и
+        первым идёт положительное: если бы ключа в ответе не было вовсе,
+        проверки на `null` и `""` прошли бы одинаково и ничего не значили.
+        """
+
+        def _get() -> dict:
+            resp = client.get(
+                reverse(
+                    "miniapp_api:booking_detail",
+                    kwargs={"booking_id": str(confirmed_booking.id)},
+                ),
+                HTTP_AUTHORIZATION=_init_data_header("12345"),
+            )
+            assert resp.status_code == 200
+            return resp.json()["booking"]
+
+        tenant.address = "ул. Тверская 12"
+        tenant.save(update_fields=["address"])
+        body = _get()
+        assert "address" in body, "поля нет в ответе — проверки ниже ничего не значат"
+        assert body["address"] == "ул. Тверская 12"
+
+        tenant.address = ""
+        tenant.save(update_fields=["address"])
+        assert _get()["address"] == "", "салон ответил «адреса нет» — это ответ, не молчание"
+
+        tenant.address = None
+        tenant.save(update_fields=["address"])
+        assert _get()["address"] is None, "молчание источника схлопнуто в ответ салона"
 
     def test_other_user_404(
         self,

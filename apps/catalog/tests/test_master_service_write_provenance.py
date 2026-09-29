@@ -33,6 +33,7 @@ from apps.events.vocabulary import (
     MASTER_SERVICE_EDGE_DELETED,
 )
 from apps.tenancy.models import Tenant
+from tests.support.catalog_mirror import sync_shaped
 
 
 def _ts() -> datetime:
@@ -46,8 +47,10 @@ def tenant(db) -> Tenant:
 
 @pytest.fixture
 def master(tenant: Tenant) -> CatalogMaster:
-    return CatalogMaster.all_tenants.create(
-        tenant=tenant, external_id=1, external_updated_at=_ts(), name="Master"
+    return sync_shaped(
+        CatalogMaster.all_tenants.create(
+            tenant=tenant, external_id=1, external_updated_at=_ts(), name="Master"
+        )
     )
 
 
@@ -341,7 +344,11 @@ def test_unrelated_model_writes_are_unaffected(no_master_service_provenance, db)
     CatalogService.all_tenants.create(
         tenant=t, external_id=9, external_updated_at=_ts(), slug="s9", name="S9"
     )
-    CatalogMaster.all_tenants.create(tenant=t, external_id=9, external_updated_at=_ts(), name="M9")
+    sync_shaped(
+        CatalogMaster.all_tenants.create(
+            tenant=t, external_id=9, external_updated_at=_ts(), name="M9"
+        )
+    )
 
 
 # ---------------------------------------------------------------------------

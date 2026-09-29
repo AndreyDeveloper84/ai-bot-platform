@@ -22,6 +22,9 @@ from apps.integrations.ayla.personal_context_client import (
 _BASE = "https://ayla.test"
 _TOKEN = "TOKEN-SENTINEL"  # noqa: S105  # pragma: allowlist secret
 _UID = "11111111-2222-3333-4444-555555555555"
+# The acting subject the caller names. CP-2 / DRF-1617: the token says
+# which SERVICE called, this says which SUBJECT it acts for.
+_EXT = "bot:telegram:424242"
 
 
 def _client(handler, **kwargs) -> PersonalContextHttpClient:
@@ -55,7 +58,7 @@ class TestGetContext:
             seen["auth"] = request.headers.get("authorization")
             return httpx.Response(200, json=_ctx_payload(diet_type="vegan"))
 
-        out = _client(handler).get_context(ayla_user_id=_UID)
+        out = _client(handler).get_context(ayla_user_id=_UID, external_user_id=_EXT)
 
         assert seen["url"] == f"{_BASE}/api/v1/internal/users/{_UID}/personal-context/"
         assert seen["auth"] == f"Bearer {_TOKEN}"
@@ -70,7 +73,7 @@ class TestGetContext:
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(200, json=_ctx_payload(future_field={"x": 1}, diet_type=""))
 
-        out = _client(handler).get_context(ayla_user_id=_UID)
+        out = _client(handler).get_context(ayla_user_id=_UID, external_user_id=_EXT)
 
         assert out.context["future_field"] == {"x": 1}
         assert out.context["diet_type"] == ""
@@ -79,7 +82,7 @@ class TestGetContext:
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(200, json={"context": {"busy_days": ["mon"]}})
 
-        out = _client(handler).get_context(ayla_user_id=_UID)
+        out = _client(handler).get_context(ayla_user_id=_UID, external_user_id=_EXT)
 
         assert out.context == {"busy_days": ["mon"]}
         assert out.filled_fields is None
@@ -96,6 +99,7 @@ class TestPatchContext:
 
         out = _client(handler).patch_context(
             ayla_user_id=_UID,
+            external_user_id=_EXT,
             updates=[{"field": "price_range_max", "value": "2000.00"}],
         )
 
@@ -109,7 +113,7 @@ class TestPatchContext:
             raise AssertionError("wire must not be hit")
 
         with pytest.raises(PersonalContextClientError):
-            _client(handler).patch_context(ayla_user_id=_UID, updates=[])
+            _client(handler).patch_context(ayla_user_id=_UID, external_user_id=_EXT, updates=[])
 
     def test_too_many_updates_rejected_locally(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:  # pragma: no cover
@@ -117,7 +121,9 @@ class TestPatchContext:
 
         updates = [{"field": f"f{i}", "value": i} for i in range(11)]
         with pytest.raises(PersonalContextClientError, match="TOO_MANY_FIELDS"):
-            _client(handler).patch_context(ayla_user_id=_UID, updates=updates)
+            _client(handler).patch_context(
+                ayla_user_id=_UID, external_user_id=_EXT, updates=updates
+            )
 
 
 class TestAskEligibility:
@@ -136,7 +142,7 @@ class TestAskEligibility:
                 },
             )
 
-        out = _client(handler).get_ask_eligibility(ayla_user_id=_UID)
+        out = _client(handler).get_ask_eligibility(ayla_user_id=_UID, external_user_id=_EXT)
 
         assert out.should_ask is True
         assert out.field == "preferred_time_slots"
@@ -149,7 +155,7 @@ class TestAskEligibility:
                 200, json={"data": {"should_ask": False, "blocked_by": "cooldown"}}
             )
 
-        out = _client(handler).get_ask_eligibility(ayla_user_id=_UID)
+        out = _client(handler).get_ask_eligibility(ayla_user_id=_UID, external_user_id=_EXT)
 
         assert out.should_ask is False
         assert out.blocked_by == "cooldown"
@@ -165,7 +171,7 @@ class TestMarkAskedSkip:
             seen["body"] = request.content.decode()
             return httpx.Response(200, json={"data": {"ok": True}})
 
-        _client(handler).mark_asked(ayla_user_id=_UID, field="diet_type")
+        _client(handler).mark_asked(ayla_user_id=_UID, external_user_id=_EXT, field="diet_type")
 
         assert seen["url"].endswith(f"/api/v1/internal/users/{_UID}/personal-context/mark-asked/")
         assert '"diet_type"' in seen["body"]
@@ -174,7 +180,9 @@ class TestMarkAskedSkip:
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(200, json={"data": {"ok": True, "skip_count": 2}})
 
-        assert _client(handler).skip(ayla_user_id=_UID, field="diet_type") == 2
+        assert (
+            _client(handler).skip(ayla_user_id=_UID, external_user_id=_EXT, field="diet_type") == 2
+        )
 
     def test_non_idempotent_verbs_never_retried(self) -> None:
         """A 5xx on mark-asked must surface after ONE attempt — a blind
@@ -186,7 +194,9 @@ class TestMarkAskedSkip:
             return httpx.Response(500, json={"error": "boom"})
 
         with pytest.raises(PersonalContextTransportError):
-            _client(handler, retries=3).mark_asked(ayla_user_id=_UID, field="diet_type")
+            _client(handler, retries=3).mark_asked(
+                ayla_user_id=_UID, external_user_id=_EXT, field="diet_type"
+            )
 
         assert calls["n"] == 1
 
@@ -201,7 +211,7 @@ class TestRetryPolicy:
                 return httpx.Response(500, json={})
             return httpx.Response(200, json=_ctx_payload())
 
-        out = _client(handler, retries=3).get_context(ayla_user_id=_UID)
+        out = _client(handler, retries=3).get_context(ayla_user_id=_UID, external_user_id=_EXT)
 
         assert calls["n"] == 3
         assert out.context == {}
@@ -214,7 +224,7 @@ class TestRetryPolicy:
             return httpx.Response(500, json={})
 
         with pytest.raises(PersonalContextTransportError):
-            _client(handler, retries=2).get_context(ayla_user_id=_UID)
+            _client(handler, retries=2).get_context(ayla_user_id=_UID, external_user_id=_EXT)
 
         assert calls["n"] == 2
 
@@ -226,7 +236,7 @@ class TestErrorMapping:
             return httpx.Response(status, json={})
 
         with pytest.raises(PersonalContextAuthError):
-            _client(handler).get_context(ayla_user_id=_UID)
+            _client(handler).get_context(ayla_user_id=_UID, external_user_id=_EXT)
 
     def test_not_found(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
@@ -235,7 +245,7 @@ class TestErrorMapping:
             )
 
         with pytest.raises(PersonalContextNotFoundError):
-            _client(handler).get_context(ayla_user_id=_UID)
+            _client(handler).get_context(ayla_user_id=_UID, external_user_id=_EXT)
 
     def test_validation_error_carries_code(self) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
@@ -245,7 +255,7 @@ class TestErrorMapping:
 
         with pytest.raises(PersonalContextClientError, match="VALIDATION_ERROR"):
             _client(handler).patch_context(
-                ayla_user_id=_UID, updates=[{"field": "nope", "value": 1}]
+                ayla_user_id=_UID, external_user_id=_EXT, updates=[{"field": "nope", "value": 1}]
             )
 
     def test_missing_token_fails_closed(self) -> None:
@@ -258,7 +268,7 @@ class TestErrorMapping:
             http_client=httpx.Client(transport=httpx.MockTransport(handler)),
         )
         with pytest.raises(PersonalContextTransportError, match="TOKEN"):
-            client.get_context(ayla_user_id=_UID)
+            client.get_context(ayla_user_id=_UID, external_user_id=_EXT)
 
 
 class TestPersonalDataExportDelete:
@@ -274,7 +284,7 @@ class TestPersonalDataExportDelete:
                 200, json={"data": {"profile": {"display_name": "М"}, "context": {}}}
             )
 
-        out = _client(handler).get_personal_data_export(ayla_user_id=_UID)
+        out = _client(handler).get_personal_data_export(ayla_user_id=_UID, external_user_id=_EXT)
 
         assert seen["method"] == "GET"
         assert seen["url"] == f"{_BASE}/api/v1/internal/users/{_UID}/personal-data/export/"
@@ -288,7 +298,7 @@ class TestPersonalDataExportDelete:
             seen["method"] = request.method
             return httpx.Response(204)
 
-        _client(handler).delete_personal_data(ayla_user_id=_UID)
+        _client(handler).delete_personal_data(ayla_user_id=_UID, external_user_id=_EXT)
 
         assert seen["method"] == "DELETE"
         assert seen["url"] == f"{_BASE}/api/v1/internal/users/{_UID}/personal-data/"
@@ -303,7 +313,7 @@ class TestPersonalDataExportDelete:
                 return httpx.Response(500, json={})
             return httpx.Response(204)
 
-        _client(handler, retries=2).delete_personal_data(ayla_user_id=_UID)
+        _client(handler, retries=2).delete_personal_data(ayla_user_id=_UID, external_user_id=_EXT)
 
         assert calls["n"] == 2
 
@@ -312,4 +322,4 @@ class TestPersonalDataExportDelete:
             return httpx.Response(404, json={"error": {"code": "USER_NOT_FOUND"}})
 
         with pytest.raises(PersonalContextNotFoundError):
-            _client(handler).delete_personal_data(ayla_user_id=_UID)
+            _client(handler).delete_personal_data(ayla_user_id=_UID, external_user_id=_EXT)

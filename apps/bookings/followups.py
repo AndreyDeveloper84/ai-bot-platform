@@ -119,12 +119,21 @@ What is gated now, in :func:`_consent_blocker`, and why each is here:
   client_name / phone / context but **not** ``chat_id``, so an erased
   person stays reachable and, before this commit, stayed a recipient.
 
-Deliberately NOT gated on ``ConsentType.MARKETING``. A «как прошёл
-визит?» nudge is arguably marketing, but nothing in this codebase
-collects that consent, so gating on it would silence the feature
-permanently while looking like it worked. That is an owner decision,
-not one to smuggle in under a bug fix — raised as an open question in
-``docs/REPORT_DRF1301.md``.
+**Gated on ``ConsentType.MARKETING`` since DRF-1731.** This paragraph
+used to say the opposite — «deliberately NOT gated … nothing in this
+codebase collects that consent, so gating on it would silence the
+feature permanently» — and that was true when written. Two things
+changed: the consent is collected now (Mini App toggle «Акции и
+предложения», ``apps/consent/customer.py set_marketing``, DRF-1520),
+and the owner's consent epic (DRF-1728/1731) classes this beat as
+PROMO: «как прошёл визит?» is a nudge the person did not ask for, and
+38-ФЗ ст. 18 ч. 1 allows it only with prior consent to advertising;
+§35 п.17 — an unproven marketing consent is an absent one. So the beat
+asks for ``PERSONAL_DATA`` *and* ``MARKETING``, both by record, and a
+missing second one is its own slug, ``no_marketing_consent``. The
+feature is silent for people who never flipped the toggle — that is
+the law, not a bug, and the dry run names it per row. Registered in
+:data:`apps.notifications.proactive.PROACTIVE_SENDERS`.
 
 ### Two switches, both closed (DRF-1301)
 
@@ -381,6 +390,12 @@ def _should_send_b11(
     blockers, but the consent gate + payment-failure gate still apply.
     Phase 1 Ayla event integration tightens this.
     """
+    # D2 (§7, DRF-1699): живая заявка на удаление — раньше всех прочих
+    # вето, включая согласие: человек, попросивший себя удалить, не
+    # получает от нас ничего непрошеного, и причина названа своим именем.
+    deletion_blocker = _deletion_blocker(bot_user)
+    if deletion_blocker:
+        return (False, deletion_blocker)
     consent_blocker = _consent_blocker(bot_user)
     if consent_blocker:
         return (False, consent_blocker)
@@ -435,6 +450,14 @@ def _should_send_b11(
     return (True, None)
 
 
+def _deletion_blocker(bot_user: Any) -> str | None:
+    """``deletion_requested`` when the person has a live deletion request."""
+    from apps.identity.services.deletion_gate import deletion_gate
+
+    gate = deletion_gate(getattr(bot_user, "ayla_user_id", None))
+    return gate.reason if gate.blocked else None
+
+
 def _consent_blocker(bot_user: Any) -> str | None:
     """May we write to this person unprompted at all? (DRF-1301)
 
@@ -476,9 +499,10 @@ def _consent_blocker(bot_user: Any) -> str | None:
     condition is in the shared gate.
     """
 
-    from apps.notifications.proactive import consent_blocker
+    from apps.notifications.proactive import PROMO_REQUIRED_CONSENTS, consent_blocker
 
-    return consent_blocker(bot_user)
+    # DRF-1731: PROMO class — 152-ФЗ baseline AND advertising consent.
+    return consent_blocker(bot_user, required_consents=PROMO_REQUIRED_CONSENTS)
 
 
 def _payment_failures_blocker(bot_user: Any, tenant: Any) -> str | None:
@@ -626,6 +650,25 @@ def _eligible_reminders(window_start: datetime, window_end: datetime) -> list[Bo
     into the output. Opt-out and erasure need no such visibility — both
     are plain columns anyone can ``count()`` at any time, and neither is
     a number that changes what the operator does next.
+
+    **Caveat since §35 п.9 (``apps.consent.customer.revoke_data_storage``):
+    that separation is no longer clean for one route.** Revoking the
+    storage consent from the Mini App now also sets
+    ``proactive_messages_opt_out`` — the toggle must not read "on" while
+    the effect is off — so a *self-serve* revoker is filtered out here
+    and never reaches :func:`_consent_blocker`'s ``consent_withdrawn``.
+    Two consequences an operator has to know before reading the numbers
+    above as an answer:
+
+    * the opt-out count now mixes "chose not to be messaged" with
+      "withdrew their 152-ФЗ consent through the app";
+    * withdrawal by any other route (:func:`apps.consent.services.withdraw`
+      from the admin side) leaves the column ``False``, so those people
+      still surface with ``consent_withdrawn``. The same legal fact is
+      visible differently depending on which door it came through.
+
+    Nothing is delivered in either arrangement — both vetoes block — so
+    this is an observability caveat, not a delivery risk.
     """
     return list(
         BookingReminder.all_tenants.filter(
@@ -661,14 +704,17 @@ class Decision:
     visit_at: datetime | None
     send: bool
     reason: str
-    chat_id: str = ""
+    #: MAX ``user_id`` of the recipient — ``BotUser.channel_user_id``, the
+    #: person. NOT ``chat_id``: a follow-up writes first, and the stored
+    #: ``chat_id`` names a dialog with whichever bot opened one (DRF-1558).
+    user_id: str = ""
     text: str = ""
 
     def as_log(self) -> dict[str, Any]:
         """PII-free projection for logs and the dry-run listing.
 
-        ``text`` and ``chat_id`` are excluded on purpose. The rendered
-        nudge carries the master's name and the chat id is the address
+        ``text`` and ``user_id`` are excluded on purpose. The rendered
+        nudge carries the master's name and the user id is the address
         itself; neither belongs in a log line an operator will paste into
         a ticket.
         """
@@ -726,8 +772,12 @@ def plan_post_visit_followups(*, now_utc: datetime | None = None) -> list[Decisi
                 **kwargs,
             )
 
-        chat_id = (bu.chat_id or "").strip()
-        if not chat_id:
+        # Reason slug and the counter it feeds keep the name ``no_chat_id``
+        # even though the address moved to ``channel_user_id`` (DRF-1558):
+        # it is an emitted metric key, and renaming it silently zeroes
+        # whatever counts it today.
+        user_id = (bu.channel_user_id or "").strip()
+        if not user_id:
             logger.warning(
                 "bookings.followup.no_chat_id bot_user=%s tenant=%s",
                 bu.pk,
@@ -759,7 +809,7 @@ def plan_post_visit_followups(*, now_utc: datetime | None = None) -> list[Decisi
             decisions.append(decide(blocked_by))
             continue
 
-        decisions.append(decide("due", send=True, chat_id=chat_id, text=text))
+        decisions.append(decide("due", send=True, user_id=user_id, text=text))
 
     return decisions
 
@@ -790,7 +840,7 @@ def send_post_visit_followups() -> dict[str, int]:
 
     ``skipped_blocked`` counts consent-gate and B11 blocker hits —
     ``opt_out``, ``no_consent``, ``consent_withdrawn``,
-    ``consent_unproven``, ``deleted``, ``completed_at_null``, terminal
+    ``consent_unproven``, ``no_marketing_consent``, ``deleted``, ``completed_at_null``, terminal
     booking status, payment-failure threshold, and an outbound-safety
     hit (per :func:`_should_send_b11` and :func:`vet_outbound`).
     """
@@ -833,7 +883,7 @@ def send_post_visit_followups() -> dict[str, int]:
             )
             continue
         try:
-            send_message(chat_id=decision.chat_id, text=decision.text, attachments=None)
+            send_message(user_id=decision.user_id, text=decision.text, attachments=None)
         except MaxAPIError as exc:
             logger.warning(
                 "bookings.followup.send_failed bot_user=%s status=%s err=%s",

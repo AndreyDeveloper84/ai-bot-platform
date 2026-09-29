@@ -30,14 +30,14 @@ pytestmark = pytest.mark.django_db(transaction=True)
 def resolver(monkeypatch: pytest.MonkeyPatch):
     """Stub the identity read-back and count how often it is called."""
     calls: list[str] = []
-    state: dict[str, Any] = {"uuid": uuid.uuid4(), "error": None}
+    state: dict[str, Any] = {"uuid": uuid.uuid4(), "error": None, "is_proxy": True}
 
     def _fake(external_user_id: str) -> ResolvedIdentity:
         calls.append(external_user_id)
         error = state["error"]
         if error is not None:
             raise error
-        return ResolvedIdentity(ayla_user_id=state["uuid"], is_proxy=True)
+        return ResolvedIdentity(ayla_user_id=state["uuid"], is_proxy=state["is_proxy"])
 
     monkeypatch.setattr(
         "apps.integrations.ayla.identity_client.resolve_identity", _fake, raising=True
@@ -75,11 +75,29 @@ class TestMemoryEstablishesIdentity:
         assert any(f.content.get("value") == "vegan" for f in view.green_facts)
 
     def test_second_write_reuses_the_link(self, settings, resolver) -> None:
+        """Вторая запись памяти переиспользует связь — для НАСТОЯЩЕГО ключа.
+
+        12.09.2026 (DRF-1790): стаб раньше отдавал прокси, и тест держался
+        на том, что прокси-ключ кешировался навсегда — на самой дыре 1790.
+        Привязанный человек — это настоящий ключ; контракт про него.
+        """
+        resolver.state["is_proxy"] = False
         bot_user = _unlinked_user("drf1035-mem-3", settings)
         record_explicit_green_facts(bot_user, "я веган")
         record_explicit_green_facts(bot_user, "я вегетарианка")
 
         assert len(resolver.calls) == 1  # resolved once, then cache hits
+
+    def test_a_proxy_answer_is_asked_again_on_the_next_write(self, settings, resolver) -> None:
+        """Обратная сторона (DRF-1790): прокси-ключ — не связь, каталог спрашивается снова.
+
+        По одному вызову на зависимое действие (запись памяти), не на «привет».
+        """
+        bot_user = _unlinked_user("drf1035-mem-3b", settings)
+        record_explicit_green_facts(bot_user, "я веган")
+        record_explicit_green_facts(bot_user, "я вегетарианка")
+
+        assert len(resolver.calls) == 2
 
 
 class TestMinimalSufficientIdentity:

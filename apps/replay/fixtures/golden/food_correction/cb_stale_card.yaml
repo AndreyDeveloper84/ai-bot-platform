@@ -1,0 +1,18 @@
+name: food_correction_cb_stale_card
+description: |
+  ✏️ without a known card (expired conversation, card rendered before
+  DRF-1454, second photo scanned meanwhile) — the honest refusal, not a
+  question whose answer would have nothing to be keyed on and would be
+  silently lost (review DRF-1454, correctness axis).
+input:
+  channel: max
+  text: "cb:food:correct:grams:scan-gone"
+must_pass:
+  - response_contains_any:
+      - карточк
+forbidden:
+  - response_contains_any:
+      - Оставляем
+voice_check:
+  max_length: 200
+  caps_lock: 0.5

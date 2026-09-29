@@ -24,9 +24,21 @@ phone-as-secondary-key cross-channel consolidation (Sprint 3+).
   this table at query time.
 
 * **`chat_id` separate from `channel_user_id`** — in some channels
-  (Telegram private DM) they're identical, but in MAX the chat_id is
-  the conversation key that outbound `send_message` writes to, and may
-  differ from the user identity once group chats land Phase 1+.
+  (Telegram private DM) they're identical. **In MAX they are not, even
+  in a private dialog** (DRF-1558): measured on the pilot 2026-09-07,
+  `chat_id=518410834` while `channel_user_id=260237491` for the same
+  person in a one-to-one dialog. MAX's `chat_id` is the id of a
+  **dialog**, so it is meaningful only together with the bot that opened
+  it — and this row has no bot column, so all of one person's rows carry
+  the SAME `chat_id`, valid for at most one of our bots. That false
+  equality is what made storing one address per person look safe; a
+  salon bot sending there answers 404 `dialog.not.found`
+  (`docs/OPEN_DECISIONS.md` §55).
+
+  Therefore: a **reply** uses the inbound event's own `chat_id`, and
+  anything the bot **writes first** uses `channel_user_id` via
+  `outbound.send_message(user_id=...)`. `chat_id` on this row is not an
+  address for a bot-initiated send.
 
 * **Default manager = `TenantScopedManager`** — `(channel, channel_user_id)`
   is unique *within a tenant*, not globally. Same Telegram user can sign
@@ -87,22 +99,81 @@ class BotUser(models.Model):
         "envelope.user_id → BotUser for BookingReminder + Conversation update.",
     )
 
+    # DRF-1649. Which SORT of Ayla account the key above points at.
+    #
+    # Ayla's `IsBotServiceWithVerifiedClient` lazily creates an `is_proxy=True`
+    # User the first time it sees a bot-issued external identity, and resolves a
+    # REAL account only once one has been bound (`bind_external_identity`). Both
+    # are legitimate canonical ids for THIS person, and booking needs either —
+    # which is why `ensure_ayla_link` writes both and must keep writing both.
+    #
+    # The distinction matters one layer out. `CatalogMaster.ayla_user_id` is the
+    # bridge `master_user_id` → ORM join for booking notifications, and
+    # `apps/catalog/master_state.py:464-471` forbids a proxy id there in as many
+    # words: "он занял бы ключ значением, по которому совпадения не будет
+    # никогда". Before this column the sort was resolved, emitted to telemetry
+    # and dropped — so the consumer that needed it could not ask.
+    #
+    # Three-valued, and NULL is not "probably fine":
+    #   False  a real bound account — the only sort safe to copy onward
+    #   True   the isolated proxy — never into CatalogMaster
+    #   NULL   the sort is unknown, and it is genuinely unknowable for rows
+    #          written by `apps/identity/services/resolver.py:192`, which
+    #          receives an id from its caller, and for every row linked before
+    #          this column existed.
+    #
+    # Consumers fail closed on True AND on NULL. "We do not know" is not "yes";
+    # reading it as permission would turn an honest gap into a silent one.
+    ayla_user_id_is_proxy = models.BooleanField(
+        null=True,
+        blank=True,
+        default=None,
+        help_text=(
+            "Sort of the Ayla account `ayla_user_id` points at: False = a real "
+            "bound account, True = Ayla's isolated proxy, NULL = unknown (written "
+            "by a path that does not learn it, or predates this column). Written "
+            "in the same save() as the key by apps/identity/services/ayla_link.py "
+            "— a sort that could be filled in separately would create a fourth "
+            "state, 'key present, sort pending', worse than any of the three."
+        ),
+        verbose_name="Ключ Ayla — прокси",
+    )
+
     # Synced from Ayla's `user.profile.updated` domain event (Gamma #446,
     # event-contract.md §3.12). Mirror-only — Ayla owns the canonical
     # value per ADR-0009 §Hard rule #1. Refresh via REST GET
     # /api/v1/users/{ayla_user_id} on event receipt OR re-sync from event
-    # payload. Used by bot-platform UI surfaces (mini app, conversation
-    # thread, master-side internal-chat) for visual rendering only.
-    # Empty string default for backward compat with rows that pre-date
-    # the bridge / for users with no avatar set in Ayla.
+    # payload. Empty string default for backward compat with rows that
+    # pre-date the bridge / for users with no avatar set in Ayla.
+    #
+    # NOT SHOWN ANYWHERE (DRF-2520). No miniapp_api endpoint returns this
+    # field and no screen renders it: the customer's circle is initials
+    # from ``display_name``, and every <img> in the Mini App is a MASTER
+    # photo from other fields. The field is kept for personal-data
+    # accounting and erasure (privacy ``_PII_FIELDS``, ``soft_delete_user``,
+    # export coverage) — not for rendering. An earlier comment here said
+    # it was «used by UI surfaces (mini app, conversation thread,
+    # master-side internal-chat)»; that was never true.
+    #
+    # Do NOT put it on the wire as-is. The value is the catalog storage
+    # URL (``profile.avatar.url``): MinIO behind the container's internal
+    # address, in a ``public-read`` bucket — measured on the stand
+    # 26.09.2026: prod settings, no storage override in the environment,
+    # so ``endpoint_url = http://minio:9000``, ``custom_domain = None``.
+    # The phone cannot load it, and a URL that did load would publish a
+    # person's face to anyone holding it. Showing it means a proxy through
+    # the bot with an ownership check — the shape DRF-2455 built for food
+    # photos; the proxy for every catalog photo is DRF-2539. ``tests/contracts/test_avatar_url_not_on_wire_2520.py`` fails
+    # if an endpoint starts returning it.
     avatar_url = models.URLField(
         max_length=500,
         blank=True,
         default="",
         help_text="Avatar URL mirrored from Ayla user.profile.updated event "
-        "(per event-contract.md §3.12). Used by bot-platform for UI "
-        "rendering (mini app, conversation thread). NOT a canonical "
-        "store — Ayla djangoproject is. Refresh via REST GET "
+        "(per event-contract.md §3.12). Kept for personal-data accounting "
+        "and erasure only — NOT returned by any endpoint and NOT rendered "
+        "(DRF-2520): it is an internal public-read storage URL. NOT a "
+        "canonical store — Ayla djangoproject is. Refresh via REST GET "
         "/api/v1/users/{ayla_user_id} on event receipt. Empty string "
         "default for backward compat.",
     )
@@ -111,6 +182,56 @@ class BotUser(models.Model):
         max_length=32,
         help_text="Channel slug — 'max', 'telegram', 'whatsapp', 'web'.",
     )
+
+    # ── Owner decision 11.09 §2 (DRF-1700, slice S2-1) ─────────────────────
+    #
+    # This shell IS the «SalonCustomer» of §2: one person's relationship with
+    # one salon. What the person is to Ayla — a LINKED client profile or a
+    # SHADOW the salon assistant created — is written HERE, on the
+    # relationship, because it is the relationship that a SHADOW restricts
+    # (§2.4: no goals, nutrition, health or cross-salon memory).
+    #
+    # Three values, and the default is the honest one. UNRESOLVED means the
+    # §2 rule has not been applied to this shell — not «shadow», not
+    # «linked». The schema migration writes UNRESOLVED to every row; the
+    # classification is a separate command (`resolve_salon_customers`) that
+    # reads only by default and prints its breakdown, because it decides
+    # who is a person and who is a fixture, and that is the owner's call.
+    class CustomerStatus(models.TextChoices):
+        UNRESOLVED = "unresolved", "Правило §2 не применялось"
+        LINKED = "linked", "Связан с профилем клиента Ayla"
+        SHADOW = "shadow", "Теневой профиль салонного помощника"
+
+    class CustomerSource(models.TextChoices):
+        UNKNOWN = "", "Не записано"
+        CLIENT_BOT = "client_bot", "Клиентский контур"
+        SALON_ASSISTANT = "salon_assistant", "Салонный помощник"
+
+    customer_status = models.CharField(
+        max_length=16,
+        choices=CustomerStatus.choices,
+        default=CustomerStatus.UNRESOLVED,
+        db_index=True,
+        help_text="§2: LINKED — matched to the client contour by MAX ID, an "
+        "identity link or a confirmed phone; SHADOW — none of those, a "
+        "restricted profile the salon assistant created; UNRESOLVED — the "
+        "rule was not applied yet (never a permission).",
+    )
+    customer_source = models.CharField(
+        max_length=32,
+        choices=CustomerSource.choices,
+        default=CustomerSource.UNKNOWN,
+        blank=True,
+        help_text="§2.3: where this relationship came from. SALON_ASSISTANT is "
+        "required on a SHADOW; CLIENT_BOT is the client contour's own shell.",
+    )
+    customer_status_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="When customer_status was last decided. NULL exactly while "
+        "UNRESOLVED: a status with no moment is a guess, not a decision.",
+    )
+
     channel_user_id = models.CharField(
         max_length=128,
         help_text="Stable user identifier within the channel. Stored as "
@@ -125,6 +246,11 @@ class BotUser(models.Model):
         help_text="E.164-normalised phone. PII — never write raw to "
         "AuditLog payload; reference by bot_user_id UUID instead.",
     )
+    # DRF-1558 — the help_text below predates the pilot measurement and its
+    # «Equal to channel_user_id in private DMs» is FALSE for MAX; see the
+    # module docstring. Left as-is on purpose: editing help_text generates
+    # an AlterField migration, and a schema migration is not what a
+    # correction to prose should cost.
     chat_id = models.CharField(
         max_length=128,
         blank=True,
@@ -217,16 +343,71 @@ class BotUser(models.Model):
         help_text="Customer-level opt-out of proactive bot-initiated "
         "messages (B11 post-visit follow-up etc.). False = receive.",
     )
+
+    # DRF-1497 — блокировка клиента из админки. ``blocked_at`` NULL =
+    # не заблокирован. Эффект — один: ``apps.channels.max.outbound``
+    # не отправляет заблокированному человеку ничего (ни ответы бота,
+    # ни проактив), пока блокировка не снята. Ставится и снимается
+    # только через ``apps.identity.services.blocking`` — с причиной и
+    # записью в журнал; правкой полей руками состояние не меняется.
+    blocked_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        db_index=True,
+        help_text="Когда клиента заблокировали из админки (DRF-1497). "
+        "NULL = не заблокирован. Non-null = исходящие ему не отправляются.",
+    )
+    blocked_reason = models.CharField(
+        max_length=500,
+        blank=True,
+        default="",
+        help_text="Причина блокировки — обязательна, см. "
+        "apps.identity.services.blocking. Показывается в карточке клиента.",
+    )
+    blocked_by_username = models.CharField(
+        max_length=150,
+        blank=True,
+        default="",
+        help_text="Кто заблокировал (username учётной записи админки). "
+        "Дублирует журнал, чтобы карточка читалась без второго запроса.",
+    )
+    # DRF-2276 — когда этой строке в последний раз сказали фразу блокировки.
+    # «Раз за эпизод» — сравнением с ``blocked_at`` действующей блокировки:
+    # метка раньше неё (или пусто) — эпизод новый. Сброса при снятии не нужно,
+    # новая блокировка сама новее старой метки.
+    block_notice_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Когда этой строке сказали фразу блокировки (DRF-2276). "
+        "Служебная метка «раз за эпизод», не факт о человеке.",
+    )
     context = models.JSONField(
         default=dict,
         blank=True,
         help_text="Per-user scratch JSON for personalisation flags, "
         "consent timestamps, etc. Avoid raw PII — store IDs.",
     )
+    # DRF-1606. Умолчанием здесь стоял `Europe/Moscow` — НАСТОЯЩИЙ пояс в
+    # роли «никто не выбирал». Поэтому молчание 26 из 26 человек на пилоте
+    # было неотличимо от осознанного выбора москвича, и читатель пояса
+    # относил явный московский ответ к «не задано».
+    #
+    # Кто читает: `apps.nutrition_proactive.prefs.resolve_timezone`.
+    # Кто пишет: только `apps.identity.services.profile.update_profile`
+    # (через `PATCH /me`), с проверкой IANA — DRF-1477.
+    #
+    # Разбор решения живёт ЗДЕСЬ, а не в `help_text`: `help_text`
+    # рендерится на карточке клиента в админконсоли, рядом с телефоном и
+    # дневником питания, и её сторож (`adminconsole/tests/
+    # test_client_scope.py`) справедливо запрещает там всё, что пахнет
+    # медданными, — включая имя модуля `nutrition_proactive`. Оператору
+    # салона путь питоновского модуля не говорит ничего; ему нужно ровно
+    # одно — что означает пустота.
     timezone = models.CharField(
         max_length=64,
-        default="Europe/Moscow",
-        help_text="IANA timezone for time-of-day rendering in messages.",
+        default="",
+        blank=True,
+        help_text="Часовой пояс человека. Пусто означает «не задано».",
     )
 
     # GDPR-style soft delete (Phase 3 / F4). ``deleted_at`` set when the
@@ -533,8 +714,10 @@ class ClientProfile(models.Model):
 # modulator + zone semantics».
 #
 # Tenant relationship that a MemoryEntry was sourced FROM is captured by
-# the nullable MemoryEntry.source_tenant_id field — informational, not a
-# scoping boundary.
+# the nullable MemoryEntry.source_tenant_id field, written at write time
+# (DRF-2544, apps.identity.services.memory_origin). Not a storage boundary;
+# the read rule for it is personal_fields.NEVER_CROSSES +
+# UNKNOWN_ORIGIN_NEVER_CROSSES, owed by the first salon-scoped reader.
 
 
 class UserPersonalContext(models.Model):
@@ -586,13 +769,25 @@ class UserPersonalContext(models.Model):
         blank=True,
         help_text="ISO-639-1 language code, e.g. 'ru'. NULL until user sets a preference.",
     )
+    # DRF-2526 — the original help_text promised a «running summary», and nothing
+    # has ever written one: the only write in production code is the NULL of
+    # forget-all (`forget_all_sweep`). It cannot be written today either — a
+    # prose «who this user is» is inference by definition (POLICY_DEBT in
+    # `personal_fields.py`), and inference reaches persistent memory only via
+    # MemoryProposal (AYLA-DEC-0024), which does not exist. The field stays
+    # empty; readers turn blank into None, so the prompt never gets it.
+    # Known debt: should a writer appear, `memory_surface.render_personal_context`
+    # puts this text in the prompt verbatim — no provenance, no per-salon rule.
+    # `test_summary_has_no_writer_2526` catches the writer, not that hole.
+    # help_text is corrected in its own migration PR (0033), not here.
     summary = models.TextField(
         null=True,
         blank=True,
-        help_text="Ayla's running summary of who this user is. "
-        "Application-side capped at 8 KB. NOT encrypted at storage layer "
-        "because it's intentionally retrievable in plaintext by the LLM "
-        "context-building path on every conversation.",
+        help_text="Reserved; nothing writes it (DRF-2526). A prose summary of "
+        "the person is inference, and inference reaches persistent memory "
+        "only via MemoryProposal (AYLA-DEC-0024). Forget-all sets it to NULL. "
+        "Readers treat blank as absent; if ever filled, the prompt builder "
+        "reads it in plaintext, verbatim, with no provenance.",
     )
 
     # DRF-1370 — this column records the user-intent MOMENT and nothing else.
@@ -612,6 +807,24 @@ class UserPersonalContext(models.Model):
         help_text="Set when user invokes POST /api/v1/users/me/memory/"
         "forget-all (per ADR-0011 §3.3). Records user-intent moment; "
         "async sweep then soft-deletes all entries.",
+    )
+    # DRF-1699 D2 (§7 свода) — живая заявка на удаление аккаунта. Ставится в
+    # момент приёма заявки (до показа успеха), снимается исполнителем по
+    # COMPLETED. Читатели памяти, рекомендаций и проактива отвечают отказом
+    # С ИМЕНЕМ ``deletion_requested`` и этим номером — не пустым видом, как
+    # ``forget_all_requested_at`` выше: пустота читалась бы как «новый
+    # человек» и включила бы сбор заново. Если выставлены оба флага —
+    # побеждает этот (шире и с номером). Единственный писатель —
+    # ``apps.identity.services.deletion_gate``.
+    deletion_requested_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Set when the person's account-deletion request was accepted (§7). Personalisation stops.",
+    )
+    deletion_request_id = models.UUIDField(
+        null=True,
+        blank=True,
+        help_text="Catalog DeletionRequest id the person saw on screen.",
     )
     minor_lock = models.BooleanField(
         default=False,
@@ -694,8 +907,14 @@ class MemoryEntry(models.Model):
     DELETION_REASON_TTL_PURGE = "ttl_purge"
     DELETION_REASON_MINOR_PROTECTION = "minor_protection"
     DELETION_REASON_UNKNOWN_LEGACY = "unknown_legacy"
+    # DRF-2133 — «Забыть» с экрана «Что Ayla помнит». Отдельно от
+    # ``user_delete`` (команда в чате): два запроса с разной доказательной
+    # базой, и tombstone, который их не различает, не ответит аудиту
+    # «откуда пришло удаление». Ровно 20 символов — предел поля.
+    DELETION_REASON_USER_REQUEST_MINIAPP = "user_request_miniapp"
     DELETION_REASON_CHOICES = [
         (DELETION_REASON_USER_DELETE, "User-initiated per-entry delete"),
+        (DELETION_REASON_USER_REQUEST_MINIAPP, "User-initiated per-entry delete from Mini App"),
         (DELETION_REASON_WITHDRAWAL, "Consent withdrawn for yellow/red entry"),
         (DELETION_REASON_FORGET_ALL, "User invoked forget-all"),
         (DELETION_REASON_TTL_PURGE, "Auto-purged by TTL sweep"),
@@ -784,10 +1003,11 @@ class MemoryEntry(models.Model):
     source_tenant_id = models.UUIDField(
         null=True,
         blank=True,
-        help_text="Tenant the fact originated at. NULL if cross-tenant "
-        "or platform-level. Informational — NOT a scoping boundary; "
-        "tenant scoping is enforced at the app-layer voice modulator + "
-        "cross-tenant reuse rule per ADR-0011 §9.",
+        help_text="Tenant the fact was said at, resolved at write time "
+        "(DRF-2544): the salon in scope, or the global_bot sentinel for the "
+        "global surface. NULL = origin UNKNOWN (rows before DRF-2544, or a "
+        "path that declared neither) — NOT «platform-level». Read rule: "
+        "personal_fields.UNKNOWN_ORIGIN_NEVER_CROSSES.",
     )
     kind = models.CharField(
         max_length=20,
@@ -1025,10 +1245,15 @@ class RedZoneAccessLog(models.Model):
     ACCESSOR_AYLA_LLM = "ayla_llm"
     ACCESSOR_SYSTEM_JOB = "system_job"
     ACCESSOR_OPS_ADMIN = "ops_admin"
+    # DRF-2133 — субъект данных читает / забывает свои red-строки с экрана
+    # «Что Ayla помнит». Не ops_admin с principal=user_id: аудит субъекта
+    # под чужой ролью недопустим (152-ФЗ гл. 3 «кто обращался»).
+    ACCESSOR_DATA_SUBJECT = "data_subject"
     ACCESSOR_ROLE_CHOICES = [
         (ACCESSOR_AYLA_LLM, "Ayla LLM prompt construction"),
         (ACCESSOR_SYSTEM_JOB, "System job (TTL sweep, forget-all)"),
         (ACCESSOR_OPS_ADMIN, "Ops admin (break-glass)"),
+        (ACCESSOR_DATA_SUBJECT, "Data subject (own memory, Mini App)"),
     ]
 
     ACCESS_READ = "read"
@@ -1036,14 +1261,25 @@ class RedZoneAccessLog(models.Model):
     ACCESS_PURGE = "purge"
     ACCESS_WITHDRAWAL = "withdrawal"
     ACCESS_WRITE_REJECTED_DOB = "write_rejected_dob_lookup"
+    # DRF-2542 §2 — база отказала жёлтой/красной записи без согласия
+    # (CHECK memory_entry_yellow_red_requires_consent). Отдельное значение, а
+    # не «dob»: причина другая, и сторож читает её по значению, не по тексту.
+    ACCESS_WRITE_REJECTED_NO_CONSENT = "write_rejected_no_consent"
+    # DRF-2133 — soft-delete по просьбе субъекта (tombstone, не purge).
+    ACCESS_DELETE = "delete"
     ACCESS_TYPE_CHOICES = [
         (ACCESS_READ, "Read"),
         (ACCESS_WRITE, "Write"),
         (ACCESS_PURGE, "Purge"),
+        (ACCESS_DELETE, "Delete — subject-requested soft-delete (tombstone)"),
         (ACCESS_WITHDRAWAL, "Withdrawal — explicit consent revocation"),
         (
             ACCESS_WRITE_REJECTED_DOB,
             "Write rejected — DOB lookup failed (Ayla REST outage)",
+        ),
+        (
+            ACCESS_WRITE_REJECTED_NO_CONSENT,
+            "Write rejected — yellow/red without consent (DB CHECK)",
         ),
     ]
 
@@ -1076,7 +1312,8 @@ class RedZoneAccessLog(models.Model):
         max_length=32,
         choices=ACCESS_TYPE_CHOICES,
         help_text="What kind of access. Round-2 AS2 + ADR-0011 §11.3 "
-        "added 'withdrawal' + 'write_rejected_dob_lookup' values.",
+        "added 'withdrawal' + 'write_rejected_dob_lookup' values; DRF-2133 "
+        "added 'delete' (subject-requested soft-delete from the Mini App).",
     )
     ts = models.DateTimeField(
         auto_now_add=True,
@@ -1116,3 +1353,243 @@ class RedZoneAccessLog(models.Model):
             f"RedZoneAccessLog[{self.access_type} entry={self.memory_entry_id} "
             f"user={self.user_id} ts={self.ts:%Y-%m-%d %H:%M:%S}]"
         )
+
+
+class SoloIdentityLink(models.Model):
+    """Связь соло-мастера с личностью Ayla — состояние и его провенанс (§6 пакета 12.09).
+
+    Владелец: identity-токен боту не выдаётся (NO-GO); Phase 0 —
+    operator-assisted linking как контролируемый provisioning step:
+
+        solo registration → IDENTITY_LINK_PENDING
+        → controlled operator verification/link → LINKED (provenance
+          OPERATOR_VERIFIED, operator_id, timestamp)
+        → publication readiness.
+
+    ``PENDING`` — не полный успех: кабинет настраивать можно, публикация
+    требует ``LINKED``. ``REJECTED`` — контролируемый отказ с внутренней
+    таксономией причин и безопасным сообщением человеку.
+
+    Сам ключ личности живёт в ``CatalogMaster.ayla_user_id`` (единственная
+    дверь — ``solo_ayla_link.link_solo_provider_to_ayla``); эта строка —
+    **о том, как он туда попал и кто за это отвечает**. Без неё LINKED
+    неотличим от «ключ появился откуда-то», а §6 требует провенанс и
+    аудит-пакет по каждой связи.
+
+    Аудит-пакет (§6 «минимальный»): solo_registration_id (= id тенанта
+    соло-мастера), channel, channel_user_id, tenant_id, master_id, телефон
+    если есть, время запроса. Значения — идентификаторы и телефон, не
+    содержимое разговоров.
+    """
+
+    class Status(models.TextChoices):
+        PENDING = "IDENTITY_LINK_PENDING", "Ожидает связывания"
+        LINKED = "IDENTITY_LINKED", "Связан"
+        REJECTED = "IDENTITY_LINK_REJECTED", "Отклонено"
+
+    class Provenance(models.TextChoices):
+        OPERATOR_VERIFIED = "OPERATOR_VERIFIED", "Проверил оператор"
+        CATALOG_RESOLVED = "CATALOG_RESOLVED", "Каталог ответил настоящим ключом"
+
+    class RejectReason(models.TextChoices):
+        """Внутренняя таксономия отказа — оператору; человеку уходит
+        безопасное сообщение, не причина."""
+
+        NOT_A_MASTER = "not_a_master", "Не мастер"
+        DUPLICATE_PERSON = "duplicate_person", "Уже есть аккаунт мастера"
+        IDENTITY_UNVERIFIABLE = "identity_unverifiable", "Личность не подтверждена"
+        FRAUD_SUSPECTED = "fraud_suspected", "Подозрение на злоупотребление"
+        OTHER = "other", "Другое (в комментарии)"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    master = models.OneToOneField(
+        "catalog.CatalogMaster",
+        on_delete=models.CASCADE,
+        related_name="identity_link",
+    )
+    status = models.CharField(max_length=32, choices=Status.choices, default=Status.PENDING)
+    provenance = models.CharField(max_length=32, choices=Provenance.choices, blank=True, default="")
+    # --- аудит-пакет (§6) ---
+    solo_registration_id = models.UUIDField(
+        help_text="id тенанта соло-мастера — регистрация одна на тенант."
+    )
+    channel = models.CharField(max_length=16)
+    channel_user_id = models.CharField(max_length=128)
+    tenant_id_snapshot = models.UUIDField()
+    phone = models.CharField(max_length=32, blank=True, default="")
+    requested_at = models.DateTimeField(auto_now_add=True)
+    # --- исход ---
+    operator_id = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        help_text="auth.User.pk оператора в админке бота (int, как LogEntry.user_id).",
+    )
+    operator_username = models.CharField(max_length=150, blank=True, default="")
+    decided_at = models.DateTimeField(null=True, blank=True)
+    ayla_user_id = models.UUIDField(
+        null=True,
+        blank=True,
+        help_text="Что записано в CatalogMaster.ayla_user_id в момент LINKED.",
+    )
+    reject_reason = models.CharField(
+        max_length=32, choices=RejectReason.choices, blank=True, default=""
+    )
+    reject_note = models.CharField(max_length=500, blank=True, default="")
+    last_attempt_refusal = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        help_text="Машинная причина последнего отказа автосвязи (solo_link_attempt).",
+    )
+    last_attempt_at = models.DateTimeField(null=True, blank=True)
+    # --- каталожный workspace (DRF-1830, M29; решение владельца G1/G4) ---
+    # Три разных «SETUP_PENDING» не имеют права делить одно слово: токена
+    # нет у нас, каталог отказал, каталог не ответил — чинятся в разных
+    # местах. Поэтому провижининг пишет свой исход рядом со связью, а не
+    # в ``last_attempt_refusal`` автосвязи.
+    catalog_specialist_id = models.UUIDField(
+        null=True,
+        blank=True,
+        help_text="SpecialistProfile.id DRAFT-профиля, заведённого в каталоге для этого workspace.",
+    )
+    catalog_provisioned_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Когда каталог подтвердил solo-workspace (readback ответа), не когда послали.",
+    )
+    catalog_provisioning_refusal = models.CharField(
+        max_length=64,
+        blank=True,
+        default="",
+        help_text="Машинная причина последнего неуспешного провижининга в каталоге; "
+        "пусто после успеха.",
+    )
+
+    class Meta:
+        verbose_name = "Связь соло-мастера с Ayla"
+        verbose_name_plural = "Связи соло-мастеров с Ayla"
+        indexes = [models.Index(fields=["status"], name="solo_identity_link_status_idx")]
+
+    def __str__(self) -> str:
+        return f"SoloIdentityLink[{self.master_id} {self.status}]"
+
+    @property
+    def is_linked(self) -> bool:
+        return self.status == self.Status.LINKED
+
+
+class SoloRegistrationDraft(models.Model):
+    """Черновик регистрации соло-мастера в MAX — по личности, до создания кабинета (DRF-1793, M1).
+
+    Слово владельца (PROMPT §12): «Я работаю сам» → имя → город → сводка →
+    «Создать мой профиль» → явное подтверждение → создание. **Тенант не
+    создаётся до подтверждения.** У незнакомца строки ``BotUser`` нет
+    (DRF-1784), а диалог из трёх шагов должен пережить и TTL чата, и
+    перезапуск процесса (фриз §19) — поэтому черновик durable и ключуется
+    личностью ``(channel, channel_user_id)``, не строкой.
+
+    Это не заявка и не аккаунт: одна строка на личность, перезаписывается
+    при новом «Я работаю сам», удаляется при создании кабинета и при
+    отмене, протухает по ``expires_at``. Телефона здесь нет.
+    """
+
+    class Step(models.TextChoices):
+        NAME = "name", "Ждём имя"
+        CITY = "city", "Ждём город"
+        CONFIRM = "confirm", "Ждём подтверждение"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    channel = models.CharField(max_length=16)
+    channel_user_id = models.CharField(max_length=128)
+    chat_id = models.CharField(max_length=64, blank=True, default="")
+    step = models.CharField(max_length=16, choices=Step.choices, default=Step.NAME)
+    #: Имя, которое увидят клиенты. Prefill — имя отправителя из MAX,
+    #: человек его подтверждает или заменяет.
+    display_name = models.CharField(max_length=80, blank=True, default="")
+    #: Город из контролируемого списка (``settings.SOLO_REGISTRATION_CITIES``),
+    #: хранимое написание.
+    city = models.CharField(max_length=120, blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    expires_at = models.DateTimeField()
+
+    class Meta:
+        verbose_name = "Черновик регистрации соло-мастера"
+        verbose_name_plural = "Черновики регистрации соло-мастеров"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["channel", "channel_user_id"],
+                name="solo_registration_draft_one_per_identity",
+            ),
+        ]
+
+    def __str__(self) -> str:
+        return f"SoloRegistrationDraft[{self.channel}:{self.channel_user_id} {self.step}]"
+
+
+class AylaErasureJob(models.Model):
+    """Durable-удаление персональных данных в Ayla (DRF-1950, решение владельца M3).
+
+    Запрос → задание → идемпотентность → повтор с backoff → authoritative
+    readback (каталог C5.3 ``…/personal-data/erasure-status/``) → completed.
+    До readback человеку «удалено» не говорится.
+
+    Одно открытое задание на ``ayla_user_id`` (частичный уникальный индекс) —
+    повторный запрос того же человека переиспользует его. Внешний идентификатор
+    нужен заголовку ``X-External-User-ID`` на повторах: снимок берётся ДО
+    локальных шагов каскада (они стирают идентификаторы оболочек) и очищается,
+    как только задание закрыто.
+    """
+
+    class Source(models.TextChoices):
+        REVOKE_DATA_STORAGE = "revoke_data_storage", "Отзыв согласия на хранение данных"
+        PERSONAL_DATA_DELETE = "personal_data_delete", "Удаление персональных данных"
+        CHAT_FORGET = "chat_forget", "«Забудь всё» в чате"
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Ожидает подтверждения"
+        COMPLETED = "completed", "Стирание подтверждено"
+        FAILED = "failed", "Повторы исчерпаны"
+        SUPERSEDED = "superseded_by_account_deletion", "Закрыто удалением аккаунта"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    bot_user = models.ForeignKey(
+        "identity.BotUser",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+        verbose_name="Пользователь бота",
+    )
+    ayla_user_id = models.UUIDField("Субъект в Ayla")
+    external_user_id = models.CharField(
+        "Внешний идентификатор для повтора", max_length=128, blank=True, default=""
+    )
+    source = models.CharField("Откуда запрос", max_length=32, choices=Source.choices)
+    status = models.CharField(
+        "Состояние", max_length=40, choices=Status.choices, default=Status.PENDING
+    )
+    attempts = models.PositiveSmallIntegerField("Попыток", default=0)
+    next_attempt_at = models.DateTimeField("Следующая попытка", null=True, blank=True)
+    last_error_kind = models.CharField("Последняя причина", max_length=32, blank=True, default="")
+    created_at = models.DateTimeField("Создано", auto_now_add=True)
+    updated_at = models.DateTimeField("Обновлено", auto_now=True)
+    completed_at = models.DateTimeField("Закрыто", null=True, blank=True)
+    alerted_at = models.DateTimeField("Алерт отправлен", null=True, blank=True)
+
+    class Meta:
+        verbose_name = "Задание удаления в Ayla"
+        verbose_name_plural = "Задания удаления в Ayla"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["ayla_user_id"],
+                condition=models.Q(status="pending"),
+                name="ayla_erasure_job_one_pending_per_subject",
+            ),
+        ]
+        indexes = [
+            models.Index(fields=["status", "next_attempt_at"], name="ayla_erasure_job_due"),
+        ]
+
+    def __str__(self) -> str:
+        return f"AylaErasureJob[{self.pk} {self.status} attempts={self.attempts}]"

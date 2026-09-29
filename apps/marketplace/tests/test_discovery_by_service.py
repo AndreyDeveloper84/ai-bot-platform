@@ -70,6 +70,10 @@ def _master(tenant: Tenant, name: str, *, specialization: str = "", **kw) -> Cat
     defaults = {
         "is_active": True,
         "invite_status": CatalogMaster.InviteStatus.ACCEPTED,
+        # DRF-1540/1544 — синхронизированная строка всегда несёт канонический
+        # ключ; без него мастер не продаётся. ``kw`` может передать ``None``,
+        # и это отдельный, названный случай, а не забытое поле.
+        "ayla_user_id": uuid4(),
     }
     defaults.update(kw)
     return CatalogMaster.all_tenants.create(
@@ -203,8 +207,8 @@ class TestResolvedServiceContext:
     """DRF-962 — cards carry the matched service so the booking handoff can.
 
     Without this the discovery→booking tap dispatched a serviceless
-    ``pick_master`` and the booking skill's stale-context guard dead-ended
-    every card tap with «Контекст записи устарел».
+    ``pick_master`` and the booking skill's incomplete-callback guard
+    dead-ended every card tap (DRF-1473 renamed the refusal).
 
     A stamped service is a promise the button must keep, so resolution also
     requires deliverability: ``BOOKING_VIA_AYLA_REST`` ON and a non-NULL
@@ -865,3 +869,62 @@ class TestTokenCapKeepsTheTail:
         _link(penza, master, _service(penza, "Один два", slug="leading"))
 
         assert discover_masters(specialization="один два три четыре пять шесть массаж") == []
+
+
+class TestCityServiceSamples:
+    """DRF-1474 — what a refusal is allowed to offer instead.
+
+    ``city_service_samples`` exists so «маникюра в Пензе нет» can end in
+    «зато есть вот это» without the caller inventing the «это». Everything it
+    returns must be something ``discover_masters`` would really find, which is
+    why it is built on the same ``_bookable_qs`` predicate — these tests pin
+    that agreement, not the wording.
+    """
+
+    def test_ranks_by_how_many_bookable_masters_perform_the_service(self, penza: Tenant) -> None:
+        from apps.marketplace.discovery import city_service_samples
+
+        popular = _service(penza, "Классический массаж", slug="klassika")
+        rare = _service(penza, "Массаж спины", slug="spina")
+        first = _master(penza, "Архипкин Денис")
+        second = _master(penza, "Сазонова Инна")
+        _link(penza, first, popular)
+        _link(penza, second, popular)
+        _link(penza, first, rare)
+
+        assert city_service_samples("Пенза") == ["Классический массаж", "Массаж спины"]
+
+    def test_scoped_to_the_city_the_refusal_was_about(self, penza: Tenant, moscow: Tenant) -> None:
+        """«У нас есть X» about Пенза may not name a service only Москва has."""
+        from apps.marketplace.discovery import city_service_samples
+
+        _link(penza, _master(penza, "Пензенский"), _service(penza, "Массаж спины", slug="p"))
+        _link(moscow, _master(moscow, "Московский"), _service(moscow, "Стрижка", slug="m"))
+
+        assert city_service_samples("Пенза") == ["Массаж спины"]
+
+    def test_an_inactive_service_is_never_offered(self, penza: Tenant) -> None:
+        from apps.marketplace.discovery import city_service_samples
+
+        _link(
+            penza,
+            _master(penza, "Мастер"),
+            _service(penza, "Снятая с продажи", slug="off", is_active=False),
+        )
+
+        assert city_service_samples("Пенза") == []
+
+    def test_a_city_with_nobody_offers_nothing(self, penza: Tenant) -> None:
+        from apps.marketplace.discovery import city_service_samples
+
+        assert city_service_samples("Саратов") == []
+
+    def test_capped_at_three(self, penza: Tenant) -> None:
+        """A refusal that answers with a catalogue is a catalogue."""
+        from apps.marketplace.discovery import city_service_samples
+
+        master = _master(penza, "Мастер")
+        for i in range(5):
+            _link(penza, master, _service(penza, f"Услуга {i}", slug=f"s{i}"))
+
+        assert len(city_service_samples("Пенза")) == 3

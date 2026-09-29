@@ -23,9 +23,25 @@ and left the dominant one exactly where it was. That is the reason the cell
 below asserts the defect at a threshold rather than at a number: the shapes are
 under active repair, and the guard should survive the next repair too.
 
-The cause is a boundary choice, not a bug in the shapes: ``OTP_RE`` anchors on
-``\w``, a UUID's separator is ``-`` which is not ``\w``, so a digit group
-inside a canonical UUID satisfies both lookarounds.
+It did. **DRF-1389 closed the dominant contributor upstream** — ``OTP_RE`` now
+refuses a four-digit group that sits between two dashes with four hex
+characters on either side, which is what a canonical UUID puts around each of
+its middle groups. Re-measured on the same 20 000 samples:
+
+    apps.replay.redactor.Redactor().redact_text over 20 000 canonical UUIDs
+        corrupted 147 of them — 0.73%        (this branch)
+        OTP_RE         0      (was 8 664 on the same run)
+        PHONE_RE     147
+        CC_RE         24 matched, all declined by the Luhn gate
+
+So the departures below stay, but the first one now rests on 0.73%, not on
+43.8%. ``PHONE_RE`` is the whole of what is left, it has its own ticket, and
+the guard below is re-pointed at it rather than deleted: the day that number
+reaches zero, the UUID masking here can go.
+
+The original cause was a boundary choice, not a bug in the shapes: ``OTP_RE``
+anchored on ``\w``, a UUID's separator is ``-`` which is not ``\w``, so a digit
+group inside a canonical UUID satisfied both lookarounds.
 """
 
 from __future__ import annotations
@@ -52,13 +68,24 @@ class TestUuidsSurvive:
             "foreign keys are its usefulness — see _redact's docstring."
         )
 
-    def test_the_unnarrowed_redactor_really_does_corrupt_them(self) -> None:
+    def test_the_unnarrowed_redactor_still_corrupts_some_of_them(self) -> None:
         """Pins the reason this module does not simply call ``redact_text``.
 
+        This assertion used to read ``> SAMPLE // 10`` and it was right:
+        ``OTP_RE`` sliced 8 664 of 20 000. DRF-1389 closed that, and the
+        threshold was re-pointed rather than deleted — what is left is
+        ``PHONE_RE`` at 147 of 20 000 (0.73%), an order of magnitude
+        smaller and still not zero.
+
         If this ever goes green, ``apps.replay.redactor`` has been fixed
-        upstream and the narrowing here can be revisited — deliberately
-        asserting the defect rather than describing it in a comment that
-        nobody re-checks.
+        the rest of the way and the UUID masking in ``_redact`` can be
+        dropped — deliberately asserting the residual defect rather than
+        describing it in a comment that nobody re-checks.
+
+        Note this guards only departure **1** (the UUID masking).
+        Departure 2 — not applying ``OTP_RE`` at all — is about prices
+        and years, not about UUIDs, and nothing upstream can retire it;
+        ``TestTheDisputeSurvives`` is its guard.
         """
         from apps.replay.redactor import Redactor
 
@@ -67,8 +94,8 @@ class TestUuidsSurvive:
             1 for u in (str(uuid.uuid4()) for _ in range(SAMPLE)) if redactor.redact_text(u) != u
         )
 
-        assert corrupted > SAMPLE // 10, (
-            "apps.replay.redactor no longer mangles UUIDs at scale — recheck "
+        assert corrupted > 0, (
+            "apps.replay.redactor no longer mangles UUIDs at all — recheck "
             "whether apps.conversations.erasure still needs its own narrowing."
         )
 

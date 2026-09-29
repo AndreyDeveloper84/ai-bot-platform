@@ -172,7 +172,12 @@ class TestTheGuardCanActuallyFire:
         assert resp.status_code == 409
         data = resp.json()
         assert data["outcome"] == "conflict"
-        assert "обновите" in data["detail"]
+        # DRF-2453: слова человеку переехали в `hint`, `detail` стал
+        # внутренним. Узел не ослаб — теперь он держит ОБЕ половины:
+        # что человеку сказано «обновите» и что внутреннее не выдаётся
+        # за слова владельца.
+        assert "обновите" in data["hint"]
+        assert "обновите" not in data["detail"]
 
 
 class TestVersionIsRequired:
@@ -433,9 +438,13 @@ class TestReschedule:
         ).json()
 
         assert stale["outcome"] == taken["outcome"] == "conflict"
+        # DRF-2453: два разных исхода по-прежнему различимы — но там, где
+        # эту разницу читает человек, то есть в `hint`. Внутренние причины
+        # тоже разные, и это проверяется отдельной строкой: слить их в одну
+        # значило бы потерять различие в журнале.
         assert stale["detail"] != taken["detail"]
-        assert "перенесли" in stale["detail"]
-        assert "время" in taken["detail"]
+        assert "перенесли" in stale["hint"]
+        assert "время" in taken["hint"]
 
     @pytest.mark.parametrize(
         "body",
@@ -507,3 +516,62 @@ class TestReschedule:
 
         assert resp.status_code == 403
         assert salon.calls == []
+
+    def test_a_master_in_the_body_never_reaches_the_schedule(
+        self, client: Client, tenant: Tenant, owner_bot_user, stubs
+    ) -> None:
+        """Салонный перенос двигает ВРЕМЯ и только время (DRF-1239).
+
+        Владелец запретил подмену мастера при переносе на салонной
+        поверхности. Рантайм сегодня чист: ручка читает из тела только
+        ``expected_version`` и ``new_start_at``, поля мастера в ней нет
+        вовсе, и вниз уходят пять kwargs без него.
+
+        Но держится этот запрет ровно тем, что поле никто не дописал, —
+        а макет DRF-1239 рисует смену мастера на трёх экранах подряд
+        («Было: Денис 12:30 → Станет: Инна 16:30») и тем самым прямо
+        предлагает его дописать. Стража на это не было ни одного.
+
+        Тест падает в ту минуту, когда мастер начнёт приниматься.
+
+        ГРАНИЦА, и она здесь важнее самого запрета. Запрет касается
+        ТОЛЬКО салонной поверхности — поэтому и тест лежит в
+        ``apps/admin_api``. На КЛИЕНТСКОЙ поверхности замена мастера
+        спроектирована каноном (``docs/screens/
+        customer-cancellation-reschedule-flow.md`` §5.3 «R2 — Master
+        substitution»), живёт в других модулях (``apps.miniapp_api``,
+        ``apps.skills.booking``) и этим запретом НЕ затронута. Расширить
+        страж на них значило бы сломать спроектированное поведение.
+        """
+        proxy = _proxy(tenant)
+        _, salon = stubs(salon=_StubReschedule())
+
+        resp = _move(
+            client,
+            proxy,
+            expected_version=5,
+            new_start_at="2026-08-23T15:00:00+03:00",
+            # Формы, в которых мастер приехал бы, если бы поле дописали.
+            staff_id="777",
+            master_id="777",
+            employee_id="777",
+            staff={"id": "777"},
+        )
+
+        # Присутствие выше отсутствия и на тех же данных: перенос
+        # состоялся, значит «мастера нет» ниже говорит о настоящем
+        # вызове, а не о том, что вызова не случилось вовсе.
+        assert resp.status_code == 200
+        call = salon.calls[0]
+        assert call["new_start_datetime"] == "2026-08-23T15:00:00+03:00"
+        # Контракт ручки — ровно эти пять полей. Проверяем БЕЛЫМ списком,
+        # а не перечнем запрещённых имён: запретный список пришлось бы
+        # догонять при каждом новом названии поля, и первый же промах
+        # прошёл бы молча. Белый список ловит поле любой формы.
+        assert set(call) == {
+            "actor_external_id",
+            "tenant_slug",
+            "appointment_id",
+            "new_start_datetime",
+            "expected_version",
+        }

@@ -7,7 +7,15 @@ from __future__ import annotations
 
 from django.urls import path
 
-from apps.miniapp_api import views
+from apps.miniapp_api import (
+    master_media,
+    views,
+    views_diary_days,
+    views_last_topic,
+    views_memory,
+    views_plan_lite,
+    views_saved_meals,
+)
 
 app_name = "miniapp_api"
 
@@ -20,6 +28,7 @@ urlpatterns = [
     path("masters", views.masters_list, name="masters_list"),
     path("masters/<uuid:master_id>", views.master_detail, name="master_detail"),
     path("bookings", views.create_booking, name="create_booking"),
+    path("quote", views.booking_quote, name="booking_quote"),
     # Customer cancel + reschedule (customer-cancellation-reschedule-spec).
     path("bookings/list", views.bookings_list, name="bookings_list"),
     path("bookings/<uuid:booking_id>", views.booking_detail, name="booking_detail"),
@@ -62,12 +71,51 @@ urlpatterns = [
         views.personal_data_delete,
         name="personal_data_delete",
     ),
+    # DRF-1699 (§7 свода) — заявка на удаление аккаунта: POST заводит до
+    # любого стирания, GET показывает текущую. Стирания здесь нет (D3).
+    path(
+        "me/deletion-request/",
+        views.deletion_request,
+        name="deletion_request",
+    ),
     # Health-data consent (152-ФЗ ст. 10) — DRF-1453. GET/POST/DELETE on one
     # resource: одно согласие — один ресурс, выдача только явным POST.
     path(
         "me/health-consent/",
         views.health_consent,
         name="health_consent",
+    ),
+    # Согласия человека (DRF-1520). Чтение — всех типов сразу; запись —
+    # по ресурсу на согласие, чтобы «сохрани все галочки» было невозможно.
+    # Согласие на сканирование еды (152-ФЗ) — DRF-1564. GET/POST/DELETE на
+    # одном ресурсе, как у health-consent: одно согласие — один ресурс.
+    #
+    # До этой ручки колонка `BotUser.food_scanner_consent_at` не имела ни
+    # одного писателя, а согласие человека оседало в localStorage браузера:
+    # экран его принимал, гейт навыка (`food_scanner/skill.py:463`) о нём не
+    # знал, и бот вечно отвечал «открой Mini App и дай согласие».
+    path(
+        "me/food-scanner-consent/",
+        views.food_scanner_consent,
+        name="food_scanner_consent",
+    ),
+    path("me/consents/", views.customer_consents, name="customer_consents"),
+    path(
+        "me/consents/proactive-hints/",
+        views.customer_proactive_hints,
+        name="customer_proactive_hints",
+    ),
+    path(
+        "me/consents/marketing/",
+        views.customer_marketing_consent,
+        name="customer_marketing_consent",
+    ),
+    # Только DELETE: выдаёт согласие человек своим действием в приветственном
+    # потоке, эта ручка умеет ровно отзывать.
+    path(
+        "me/consents/data-storage/",
+        views.customer_data_storage_consent,
+        name="customer_data_storage_consent",
     ),
     # C7 client payments passthrough (PILOT_CONTRACTS §7.5)
     path("me/payments/", views.create_payment, name="create_payment"),
@@ -87,6 +135,13 @@ urlpatterns = [
         views.customer_recommendations,
         name="customer_recommendations",
     ),
+    # Карточка C04 «направление + почему» для экрана (DRF-1769): бот
+    # отдаёт ЗАПИСЬ, которую человек уже увидел в чате, — не пересчёт.
+    path(
+        "recommendation/<uuid:recommendation_id>",
+        views.customer_recommendation,
+        name="customer_recommendation",
+    ),
     # Goal layer (DRF-1190) — decision-context document + goal selection,
     # proxied onto Ayla verbatim (Mini App is a dumb renderer).
     path(
@@ -105,6 +160,19 @@ urlpatterns = [
         views.customer_wellness_today,
         name="customer_wellness_today",
     ),
+    # DRF-2091 (F8, текстовая половина) — запись еды текстом из Mini App:
+    # оценка без записи и подтверждение — той же тропой, что текст в чате.
+    path("food/estimate", views.customer_food_estimate, name="customer_food_estimate"),
+    path("food/log", views.customer_food_log, name="customer_food_log"),
+    # DRF-2098 (F8, фото-половина) — скан фото из Mini App под тем же гейтом
+    # дневника v1; запись — через food/log по scan_id.
+    path("food/scan", views.customer_food_scan, name="customer_food_scan"),
+    # DRF-2230 — «Дать согласие в чате»: приглашение с кнопкой в чат MAX.
+    path(
+        "wellness/consent-prompt",
+        views.customer_wellness_consent_prompt,
+        name="customer_wellness_consent_prompt",
+    ),
     # Wellness write path (DRF-1402) — log / undo a water entry on Ayla.
     path(
         "wellness/water",
@@ -116,10 +184,100 @@ urlpatterns = [
         views.customer_wellness_water_undo,
         name="customer_wellness_water_undo",
     ),
+    # DRF-1838 — правка / удаление / возврат записи еды (§109 шаг 7).
+    path(
+        "wellness/food/<str:entry_id>/restore",
+        views.customer_wellness_food_entry_restore,
+        name="customer_wellness_food_entry_restore",
+    ),
+    path(
+        "wellness/food/<str:entry_id>",
+        views.customer_wellness_food_entry,
+        name="customer_wellness_food_entry",
+    ),
+    # DRF-2092 (F12) — избранные блюда: серверный источник в каталоге.
+    path(
+        "saved-meals",
+        views_saved_meals.customer_saved_meals,
+        name="customer_saved_meals",
+    ),
+    path(
+        "saved-meals/<str:meal_id>",
+        views_saved_meals.customer_saved_meal,
+        name="customer_saved_meal",
+    ),
+    # DRF-2101 (§49) — Plan Lite: план из 1–3 действий из цели, adherence
+    # «N из M»; серверный источник — каталог, под флагом PLAN_LITE_ENABLED.
+    path(
+        "plan-lite",
+        views_plan_lite.customer_plan_lite,
+        name="customer_plan_lite",
+    ),
+    # DRF-2123 (План-A) — предложение из шаблона активной цели; ничего не
+    # создаёт, подтверждается POST plan-lite с template_version.
+    path(
+        "plan-lite/proposal",
+        views_plan_lite.customer_plan_lite_proposal,
+        name="customer_plan_lite_proposal",
+    ),
+    # DRF-2099 — дневник за неделю: строка на день и записи одного дня;
+    # границы суток считает каталог по поясу человека.
+    path(
+        "diary/days",
+        views_diary_days.customer_diary_days,
+        name="customer_diary_days",
+    ),
+    path(
+        "diary/day",
+        views_diary_days.customer_diary_day,
+        name="customer_diary_day",
+    ),
+    # DRF-2455 — снимок записи: файл идёт через бот, а не ссылкой на
+    # хранилище (адрес внутренний, бакет публичный).
+    path(
+        # `<str:>`, а не `<uuid:>`, как у соседних ручек записи: при
+        # `<uuid:>` неверный идентификатор даёт HTML-404 от резолвера, а
+        # клиент Mini App разбирает форму `{error, detail}`. Формат
+        # проверяет сама ручка и отвечает тем же отказом, что и на чужую
+        # запись, — по ответу нельзя отличить «не то имя» от «не твоё».
+        "diary/entry/<str:log_id>/photo",
+        views_diary_days.customer_food_photo,
+        name="customer_food_photo",
+    ),
+    # DRF-2539 — фото мастера и работы портфолио через бот (вариант 3 владельца).
+    # Строка, а не <uuid:>: ручка сама отвечает 404 на кривой id, одинаково с
+    # «фото нет».
+    path(
+        "media/masters/<str:master_id>/photo",
+        master_media.master_photo,
+        name="master_media_photo",
+    ),
+    path(
+        "media/masters/<str:master_id>/portfolio/<str:item_id>/image",
+        master_media.master_portfolio_image,
+        name="master_media_portfolio_image",
+    ),
     # Dashboard rollup — next booking + this-week count (bookings-only).
     path(
         "recent-activity",
         views.customer_recent_activity,
         name="customer_recent_activity",
     ),
+    # DRF-2133 (Память-2) — «Что Ayla помнит»: те же читатели и удалитель,
+    # что у команд в чате; раздел «Здоровье» — только через RedZoneReader.
+    path("memory/", views_memory.customer_memory, name="customer_memory"),
+    path(
+        "memory/forget-all/",
+        views_memory.customer_memory_forget_all,
+        name="customer_memory_forget_all",
+    ),
+    path(
+        "memory/<uuid:entry_id>/",
+        views_memory.customer_memory_entry,
+        name="customer_memory_entry",
+    ),
+    # DRF-2144 (H01) — «Продолжить разговор с Ayla»: последняя тема — первые
+    # 80 знаков последнего хода ассистента, без safety-строк и служебных
+    # строк памяти; нет темы — null, экран говорит нейтрально.
+    path("last-topic/", views_last_topic.customer_last_topic, name="customer_last_topic"),
 ]

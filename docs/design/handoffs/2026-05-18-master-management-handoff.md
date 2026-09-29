@@ -475,8 +475,7 @@ Response 201:
   "master_id": "uuid",
   "invite_token": "uuid",            // for owner UI to render «copy invite link» fallback
   "invite_expires_at": "2026-05-25T17:00:00Z",
-  "max_dm_delivery": "queued" | "delivered" | "failed",
-  "fallback_link": "https://salon.app/invite/<token>"  // for sharing if MAX fails
+  "fallback_link": "https://salon.app/invite/<token>"  // Mini App web address, MAX webview only
 }
 ```
 
@@ -484,8 +483,16 @@ Side effects on success:
 - `Master` row created (`is_active=False`, `invite_status=pending`)
 - Default `WorkingHours` rows seeded (10:00–19:00 Mon-Fri per Q-SC1, or per `schedule_preset`)
 - Default `MasterService` mapping rows (from `services[]` array)
-- MAX bot DM dispatched to invitee with deeplink `max://bot/<salon_bot>?start=master_invite_<token>`
 - Audit event `master.created` + `master.invite_sent`
+
+> **Обновлено 07.09.2026 (решение владельца §44.4).** Эндпоинт больше не
+> шлёт приглашённому мастеру личного сообщения, поэтому из конверта ушли
+> `max_dm_delivery` и `max_dm_error`, а из списка побочных эффектов —
+> отправка DM и парная аудит-строка `master.invite_dispatched`.
+> Сообщение уходило клиентским ботом и достигало только уже
+> существующий чат, то есть незнакомому мастеру не доходило никогда.
+> Приглашение передаёт владелец салона — ссылкой `invite_link` и готовым
+> текстом, который экран собирает рядом с ней (§44.2).
 
 ---
 

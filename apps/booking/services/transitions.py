@@ -66,6 +66,7 @@ from apps.booking.services.attribution import (
     compute_assist_score,
     compute_billable,
 )
+from apps.booking.services.master_gate import master_sale_refusal
 from apps.events.services import emit
 from apps.identity.models import BotUser
 
@@ -427,13 +428,14 @@ def commit_reschedule(
             )
         except CatalogMaster.DoesNotExist:
             raise InvalidBookingTransition("master_not_found", "master not bookable")
-        if not new_master.is_active:
-            raise InvalidBookingTransition("master_archived", "master deactivated")
-        if new_master.invite_status != CatalogMaster.InviteStatus.ACCEPTED:
-            raise InvalidBookingTransition(
-                "master_not_bookable",
-                f"master invite_status={new_master.invite_status}",
-            )
+        # DRF-1548 — тот же гейт продажи, что и при создании
+        # (``apps.booking.services.master_gate``), а не своя копия
+        # столбцов: перенос на мастера без канонической связи с Ayla
+        # создавал бронь, до которой не доходило уведомление. Порядок
+        # шагов под локом не изменился — проверка там же, где была.
+        refusal = master_sale_refusal(new_master)
+        if refusal is not None:
+            raise InvalidBookingTransition(*refusal)
 
         try:
             new_service = CatalogService.all_tenants.get(

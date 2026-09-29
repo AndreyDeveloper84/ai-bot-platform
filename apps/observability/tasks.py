@@ -401,3 +401,58 @@ def aggregate_ai_metrics_daily(self: Any, target_date_iso: str | None = None) ->
         alerts_total,
     )
     return result
+
+
+# ---------------------------------------------------------------------------
+# DRF-1616, блокер B-7. Beat-обёртка над aggregate_ai_metrics_daily.
+# ---------------------------------------------------------------------------
+#
+# Задача написана в мае и с тех пор ни разу не стояла в CELERY_BEAT_SCHEDULE
+# (замер 11.09.2026: grep по расписанию пуст). Дневные сводки не считались,
+# пороги не проверялись — панель качества показывала «нет данных» и это
+# читалось как «нет трафика». Расписание указывает сюда, а не на саму задачу:
+# прямой вызов с `target_date_iso` остаётся операторским replay'ем и не
+# должен зависеть от beat-рубильника.
+#
+# Рубильник и DRY_RUN — по образцу nutrition_proactive (DRF-1285). DRY_RUN
+# считает, сколько тенантов и сколько строк метрик за дату попали бы в
+# сводку, и ничего не пишет и не пейджит.
+
+
+def _ai_metrics_beat_enabled() -> bool:
+    return bool(getattr(settings, "AI_METRICS_BEAT_ENABLED", False))
+
+
+def _ai_metrics_beat_dry_run() -> bool:
+    return bool(getattr(settings, "AI_METRICS_BEAT_DRY_RUN", True))
+
+
+@shared_task(name="apps.observability.tasks.aggregate_ai_metrics_daily_beat")  # type: ignore[misc]
+def aggregate_ai_metrics_daily_beat() -> dict[str, Any]:
+    """Расписание → сюда → `aggregate_ai_metrics_daily` за вчера, если открыто."""
+
+    if not _ai_metrics_beat_enabled():
+        return {"mode": "disabled"}
+    target_date = _resolve_target_date(None)
+    if _ai_metrics_beat_dry_run():
+        from apps.observability.models import AIRequestMetric
+        from apps.tenancy.models import Tenant
+
+        tenants = Tenant.objects.filter(is_active=True).count()
+        rows = AIRequestMetric.all_tenants.filter(created_at__date=target_date).count()
+        logger.info(
+            "observability.ai_metrics.beat.dry_run target_date=%s tenants=%d rows=%d — ничего не записано",
+            target_date,
+            tenants,
+            rows,
+        )
+        return {
+            "mode": "dry_run",
+            "target_date": target_date.isoformat(),
+            "tenants": tenants,
+            "rows": rows,
+        }
+    result = aggregate_ai_metrics_daily.apply(
+        kwargs={"target_date_iso": target_date.isoformat()}
+    ).get()
+    return {"mode": "live", "target_date": target_date.isoformat(), **result}

@@ -26,6 +26,14 @@ consent event).
    argument — otherwise `ZonePromotionRequiresConsent` (ADR-0011
    §11.2). Demotion (yellow→green, red→yellow) is always allowed.
 
+   **Minor protection applies to this path too (DRF-2180).** Until this
+   list, `promote_zone` checked neither the DOB stub nor `minor_lock`:
+   «write green, then promote» reached the red zone around the
+   fail-closed gate in one line, and left no `write_rejected_dob_lookup`
+   row — because there was no check to reject. Consent and age are
+   different questions: a token says the person agreed, it does not say
+   the person is an adult.
+
 # Phase 0 reality
 
 The Ayla REST DOB endpoint does not exist yet (tracked in #597). Per
@@ -45,7 +53,7 @@ from collections.abc import Iterable
 from datetime import timedelta
 from typing import Any, Optional
 
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.utils import timezone
 
 from apps.identity.models import MemoryEntry, RedZoneAccessLog, UserPersonalContext
@@ -53,6 +61,28 @@ from apps.identity.services.exceptions import (
     MinorProtectionLookupFailed,
     ZonePromotionRequiresConsent,
 )
+
+
+#: DRF-2542 — условия, которые обязаны быть закрыты ДО первого писателя жёлтой
+#: и красной зоны, то есть до снятия заглушки ``_check_minor_protection`` (#597).
+#: Ключ — машинное имя, значение — адрес в листе. Код эту запись НЕ читает: её
+#: сверяет сторож ``apps/identity/tests/test_zone_writer_conditions_2542.py``,
+#: который краснеет, как только у жёлтой или красной зоны появится писатель,
+#: а хоть одно условие не закрыто.
+ZONE_WRITER_CONDITIONS: dict[str, str] = {
+    "consent_check_in_write_entry": "DRF-2542 §1 — проверка согласия в write_entry",
+    "targeted_integrity_error": "DRF-2542 §2 — адресный IntegrityError вместо общего except",
+    "export_152fz_covers_zones": "DRF-2542 §3 — выгрузка 152-ФЗ покрывает зоны",
+    "ttl_purge_sweep": "DRF-2542 §4 — свип срока TTL_PURGE",
+    "withdrawal_deletes_zone_rows": "DRF-2542 §5 — отзыв согласия удаляет строки с причиной WITHDRAWAL",
+    "minor_lock_spec_decision": "DRF-2542 §6 — решение спеки по minor_lock и уже лежащим строкам",
+    "account_reset_red_zone_rls": "DRF-2542 §7 — узел на Postgres: account_reset при скрытой RLS красной зоне",
+}
+
+#: Закрытые условия: исполнены или названы решением владельца как сознательно
+#: отложенные. ПУСТО по построению — закрывает их не сторож и не исполнитель
+#: сторожа. Имя, которого нет в ``ZONE_WRITER_CONDITIONS``, — ошибка записи.
+ZONE_WRITER_CONDITIONS_CLOSED: frozenset[str] = frozenset()
 
 
 def _check_minor_protection(user_id: uuid.UUID) -> None:
@@ -88,8 +118,13 @@ def _audit_write_rejected(
     user_id: uuid.UUID,
     request_id: uuid.UUID,
     purpose: str,
+    access_type: str = RedZoneAccessLog.ACCESS_WRITE_REJECTED_DOB,
 ) -> None:
-    """Append a write_rejected_dob_lookup audit row — durable per ADR-0011 §11.3.
+    """Append a write-rejected audit row — durable per ADR-0011 §11.3.
+
+    ``access_type`` names WHY the write was refused: the DOB lookup (the
+    default, and the only reason before DRF-2542) or the database refusing a
+    yellow/red row without consent.
 
     Called from the fail-closed paths (DOB lookup failed OR minor_lock
     set). No MemoryEntry row was created, so `memory_entry_id` uses a
@@ -114,10 +149,29 @@ def _audit_write_rejected(
             user_id=user_id,
             accessor_role=RedZoneAccessLog.ACCESSOR_SYSTEM_JOB,
             accessor_principal=_writer_principal(),
-            access_type=RedZoneAccessLog.ACCESS_WRITE_REJECTED_DOB,
+            access_type=access_type,
             request_id=request_id,
             purpose=purpose,
         )
+
+
+#: DRF-2542 §2 — CHECK из миграции 0007: жёлтая/красная строка требует
+#: ``consent_at`` (или надгробия).
+_CONSENT_CONSTRAINT = "memory_entry_yellow_red_requires_consent"
+
+
+def _is_consent_violation(exc: IntegrityError) -> bool:
+    """Это отказ именно CHECK согласия, а не любое другое нарушение целостности.
+
+    Сначала — имя констрейнта из диагностики драйвера (psycopg:
+    ``exc.__cause__.diag.constraint_name``); если драйвер его не дал — по тексту
+    ошибки, где Postgres называет констрейнт.
+    """
+    diag = getattr(exc.__cause__, "diag", None)
+    name = getattr(diag, "constraint_name", None)
+    if name:
+        return name == _CONSENT_CONSTRAINT
+    return _CONSENT_CONSTRAINT in str(exc)
 
 
 def write_entry(
@@ -147,8 +201,10 @@ def write_entry(
         request_id: audit reference (UUID).
         purpose: human-readable purpose for the audit log.
         consent_at: REQUIRED for yellow/red (CHECK 2 enforces it).
-        source_tenant_id: tenant the fact originated at. None for
-            cross-tenant / platform-level facts.
+        source_tenant_id: tenant the fact originated at. Not passed →
+            resolved HERE by :func:`memory_origin.resolve_source_tenant_id`
+            (DRF-2544): global surface → ``global_bot`` sentinel, salon in
+            scope → that salon, neither → ``ORIGIN_UNKNOWN`` (None).
         last_inferred_at: REQUIRED when source IN ('inferred','signal'),
             MUST be NULL when source='explicit' (CHECK 1 enforces it).
         ttl_days: per-zone retention cap. None = no auto-TTL (green).
@@ -195,19 +251,45 @@ def write_entry(
             "expires_at": (write_ts + timedelta(days=ttl_days) if ttl_days is not None else None),
         }
 
-    return MemoryEntry.objects.create(
-        user_id=user_id,
-        personal_context=personal_context,
-        sensitivity_zone=sensitivity_zone,
-        source=source,
-        kind=kind,
-        content=content,
-        consent_at=consent_at,
-        source_tenant_id=source_tenant_id,
-        last_inferred_at=last_inferred_at,
-        ttl_days=ttl_days,
-        **canonical,
-    )
+    # DRF-2544 — происхождение решается в момент записи и в одном месте:
+    # иначе поле честно ровно у тех вызывающих, кто вспомнил его передать
+    # (до правки — ни у одного из 13 мест записи).
+    if source_tenant_id is None:
+        from apps.identity.services.memory_origin import resolve_source_tenant_id
+
+        source_tenant_id = resolve_source_tenant_id()
+
+    # DRF-2542 §2 — отказ базы по согласию ловится ЗДЕСЬ, где он рождается, и
+    # называется: durable-строкой аудита, как отказ по возрасту. Не выше: у
+    # всех вызывающих широкий ``except Exception`` («память не ломает ход»), и
+    # безымянный IntegrityError превратился бы у них в тихий пропуск. Savepoint
+    # — чтобы отказ не отравил транзакцию вызывающего. Любое ДРУГОЕ нарушение
+    # целостности пробрасывается как было.
+    try:
+        with transaction.atomic():
+            return MemoryEntry.objects.create(
+                user_id=user_id,
+                personal_context=personal_context,
+                sensitivity_zone=sensitivity_zone,
+                source=source,
+                kind=kind,
+                content=content,
+                consent_at=consent_at,
+                source_tenant_id=source_tenant_id,
+                last_inferred_at=last_inferred_at,
+                ttl_days=ttl_days,
+                **canonical,
+            )
+    except IntegrityError as exc:
+        if not _is_consent_violation(exc):
+            raise
+        _audit_write_rejected(
+            user_id,
+            request_id,
+            purpose,
+            access_type=RedZoneAccessLog.ACCESS_WRITE_REJECTED_NO_CONSENT,
+        )
+        return None
 
 
 def supersede_entries(
@@ -252,11 +334,46 @@ def supersede_entries(
         )
 
 
+def _guard_minor_protection_for_promotion(
+    *,
+    user_id: uuid.UUID,
+    request_id: uuid.UUID,
+    purpose: str,
+) -> None:
+    """Та же защита, что у прямой записи, — на пути повышения зоны.
+
+    Судебная строка пишется ПЕРЕД броском: отказ платформы писать
+    специальную категорию, потому что возраст не подтверждён, — это
+    доказательство по 152-ФЗ гл. 3, и терять его на исключении нельзя.
+    ``_audit_write_rejected`` коммитит её durable, независимо от отката
+    вызывающего, по той же причине, что и у ``write_entry``.
+    """
+    # Нет строки UPC — нет и `minor_lock`, который можно прочитать. Сегодня
+    # это безопасно: `_check_minor_protection` ниже всё равно всегда бросает.
+    # После #597, когда он начнёт пропускать взрослых, отсутствие UPC станет
+    # «замка нет» — и это ровно тот момент, когда сюда нужен отказ, а не
+    # пропуск. `write_entry` от этого защищён тем, что берёт
+    # `personal_context` обязательным аргументом.
+    personal_context = UserPersonalContext.objects.filter(user_id=user_id).first()
+    if personal_context is not None and personal_context.minor_lock:
+        _audit_write_rejected(user_id, request_id, purpose)
+        raise MinorProtectionLookupFailed(
+            f"minor_lock is set for user {user_id} — zone promotion refused (ADR-0011 §10.2)."
+        )
+    try:
+        _check_minor_protection(user_id)
+    except MinorProtectionLookupFailed:
+        _audit_write_rejected(user_id, request_id, purpose)
+        raise
+
+
 def promote_zone(
     *,
     entry: MemoryEntry,
     new_zone: str,
     consent_token: Optional[str] = None,
+    request_id: uuid.UUID,
+    purpose: str,
 ) -> MemoryEntry:
     """Change `entry.sensitivity_zone`.
 
@@ -271,6 +388,33 @@ def promote_zone(
 
     Either way ``updated_at`` moves to the transition moment (DRF-1263).
     A REJECTED promotion is not a transition and moves nothing.
+
+    DRF-2180 — promotion up ALSO passes minor protection, exactly as
+    :func:`write_entry` does: ``minor_lock`` first (cheaper and more
+    specific), then the DOB check. A rejection raises
+    ``MinorProtectionLookupFailed`` and leaves the forensic
+    ``write_rejected_dob_lookup`` row.
+
+    ``request_id`` and ``purpose`` are REQUIRED for the same reason they are
+    on :func:`write_entry`: the forensic row has to be joinable to the
+    request that produced it. A default would mint a random id attached to
+    nothing and give every rejection the same purpose text — evidence
+    without a subject.
+
+    **Callers MUST NOT wrap this in their own ``transaction.atomic()``**, the
+    same contract ``write_entry`` carries and for the same reason: the
+    forensic row commits via ``atomic(durable=True)``, and a durable block
+    nested in another atomic raises ``RuntimeError`` — you would catch
+    something other than ``MinorProtectionLookupFailed``. Fail-loud is
+    deliberate (Q2 fork 2026-05-25): a rejection row lost to a caller-side
+    rollback breaks the regulatory invariant the guard exists to uphold.
+
+    The two paths differ in ONE thing, deliberately: ``write_entry``
+    swallows the exception and returns ``None`` (there was nothing to
+    return), while ``promote_zone`` re-raises. It takes an EXISTING row
+    and must answer «did the zone change?»; returning the unchanged entry
+    would answer «yes, it is green» to a caller who asked for red, and the
+    caller would store a red fact believing it protected.
     """
     promoting_up = entry.sensitivity_zone == MemoryEntry.SENSITIVITY_GREEN and new_zone in (
         MemoryEntry.SENSITIVITY_YELLOW,
@@ -291,6 +435,14 @@ def promote_zone(
                 f"{entry.sensitivity_zone!r} to {new_zone!r} without "
                 "consent_token (ADR-0011 §11.2)."
             )
+        # DRF-2180 — согласие и возраст это разные вопросы: токен говорит,
+        # что человек согласился, и ничего не говорит о том, взрослый ли он.
+        # Порядок как у `write_entry`: `minor_lock` дешевле и адреснее.
+        _guard_minor_protection_for_promotion(
+            user_id=entry.user_id,
+            request_id=request_id,
+            purpose=purpose,
+        )
         # Same UPDATE — satisfies CHECK 2 (yellow/red require
         # consent_at NOT NULL).
         entry.sensitivity_zone = new_zone

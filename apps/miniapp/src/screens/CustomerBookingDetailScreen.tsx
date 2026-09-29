@@ -10,8 +10,9 @@
  * only what the backend serves (service, master, visit time, duration,
  * status, rating) plus actions wired to REAL endpoints:
  *
- *   - «Перенести» → `/my-visits/:id/reschedule` (real RescheduleScreen;
- *     gated by `reschedulable`);
+ *   - «Перенести» → `/customer/records/:id/reschedule` (real
+ *     RescheduleScreen; canonical address since DRF-1481; gated by
+ *     `reschedulable`);
  *   - «Отменить» → 2-step cancel with a 5s undo window — the proven
  *     flow mirrored from `MyVisitDetailScreen` (cancel request →
  *     snackbar undo → server confirm on timeout), gated by `cancellable`;
@@ -25,7 +26,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { Snackbar } from "../components/Snackbar";
 import { StateError } from "../components/StateError";
 import { PaymentStatusBadge } from "../components/PaymentStatusBadge";
@@ -40,7 +41,16 @@ import {
   type CancelReasonClass,
 } from "../lib/api";
 import { displayStatusFor, getBookingDetail, renderStatus } from "../lib/customer-records";
-import { formatDuration, formatMoney, formatVisitFull } from "../lib/format";
+import {
+  formatDayMonthTime,
+  formatDuration,
+  formatMoney,
+  formatVisitFull,
+  priceFromLabel,
+} from "../lib/format";
+import { visitAddressText } from "../lib/visit-address";
+import { useScreenBack } from "../hooks/useScreenBack";
+import { backTo } from "../lib/screen-back";
 
 type State =
   | { kind: "loading" }
@@ -55,9 +65,46 @@ const REASON_CHIPS: { value: CancelReasonClass; label: string }[] = [
   { value: "other", label: "Другое" },
 ];
 
+/**
+ * DRF-2346 — текст ЖДЁТ СЛОВА ВЛАДЕЛЬЦА (вопрос задан 23.09).
+ *
+ * Смысл, который он обязан нести: отмена ЗАПУЩЕНА и через несколько секунд
+ * станет окончательной; завершится сама, даже если закрыть приложение;
+ * вернуть пока можно, кнопка рядом. Чего в нём быть не должно — слова,
+ * утверждающего выполненное («отменена», «отменила», «готово»): сервер в
+ * этот момент отвечает «отмена запрошена».
+ *
+ * Соседние два исхода не меняются и менять их не предлагалось: немедленная
+ * отмена (путь через Ayla) говорит «Запись отменена», и это правда;
+ * истёкшее окно возврата говорит «Окно отмены истекло».
+ */
+export const CANCEL_STARTED_COPY =
+  "Отменяю запись — через несколько секунд станет окончательно. Пока можно вернуть.";
+
 export function CustomerBookingDetailScreen() {
   const navigate = useNavigate();
+
+  // Возврат (DRF-1493) — к списку записей. Не `-1`: карточку
+  // открывают и по ссылке из бота, и сразу после создания записи,
+  // где предыдущий экран — оформление, возвращаться в которое
+  // нельзя.
+  const onBack = useScreenBack(backTo("/customer/records"));
   const { bookingId } = useParams<{ bookingId: string }>();
+  // DRF-2585: экран переноса передаёт сюда, откуда перенесли. Читателя у
+  // этого состояния не было с 19.05 — подтверждение «было → стало» не
+  // рисовалось нигде.
+  // Запоминаем при первом показе и стираем из истории: иначе «Перенесла
+  // запись» всплывало бы снова при возврате «назад» и перезагрузке.
+  const location = useLocation();
+  const [moved] = useState(
+    () => location.state as { justRescheduled?: boolean; oldVisit?: string } | null,
+  );
+  useEffect(() => {
+    if (moved?.justRescheduled) {
+      navigate(location.pathname, { replace: true, state: null });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- только при первом показе: дальше состояние уже в `moved`, повтор стёр бы уже стёртое
+  }, []);
   const [state, setState] = useState<State>({ kind: "loading" });
   const [modalOpen, setModalOpen] = useState(false);
   const [reasonClass, setReasonClass] = useState<CancelReasonClass | null>(null);
@@ -102,8 +149,12 @@ export function CustomerBookingDetailScreen() {
       setModalOpen(false);
       setReasonClass(null);
       if (booking.status === "cancel_requested") {
-        // Local path: 2-step with the server-held undo window.
-        setSnack({ visible: true, message: "Запись отменена", showUndo: true });
+        // DRF-2346 — местный двухшаговый путь: сервер вернул «отмена
+        // запрошена», а не «отменена», и говорить о факте нельзя. Отмену
+        // теперь добивает сервер (`bookings.commit_expired_cancels`), даже
+        // если эту вкладку закрыть, — поэтому обещание «завершится само»
+        // правдиво, а не наоборот.
+        setSnack({ visible: true, message: CANCEL_STARTED_COPY, showUndo: true });
       } else {
         // Ayla path: cancel is immediate (no two-step confirm, no undo
         // window — the proxy flips to cancelled via the round-trip
@@ -115,7 +166,7 @@ export function CustomerBookingDetailScreen() {
       if (err instanceof ApiError) {
         setSnack({
           visible: true,
-          message: err.detail || "Не получилось отменить.",
+          message: "Не получилось отменить.",
           showUndo: false,
         });
       }
@@ -179,7 +230,7 @@ export function CustomerBookingDetailScreen() {
             type="button"
             className="records-screen__back"
             aria-label="Назад"
-            onClick={() => navigate(-1)}
+            onClick={onBack}
           >
             <span aria-hidden="true">←</span>
           </button>
@@ -201,6 +252,8 @@ export function CustomerBookingDetailScreen() {
 
   const b = state.booking;
   const { rendering } = renderStatus(displayStatusFor(b));
+  // DRF-2172 — цена записи (снимок); ниже 1 ₽ / null → строки нет.
+  const priceLabel = b.price ? priceFromLabel(b.price) : "";
   const isHistoryRow =
     rendering.label !== "Подтверждена" || new Date(b.visit_at).getTime() < Date.now();
 
@@ -211,7 +264,7 @@ export function CustomerBookingDetailScreen() {
           type="button"
           className="records-screen__back"
           aria-label="Назад"
-          onClick={() => navigate(-1)}
+          onClick={onBack}
         >
           <span aria-hidden="true">←</span>
         </button>
@@ -224,6 +277,20 @@ export function CustomerBookingDetailScreen() {
           {/* C7.3 — payment status when the passthrough ships it. */}
           <PaymentStatusBadge state={b.payment?.capture_state} />
         </div>
+
+        {/* DRF-2585 — слова владельца 28.09, п.8: «Перенесла запись» +
+            «Было / Стало». «Стало» — время самой записи, не состояние экрана. */}
+        {moved?.justRescheduled && moved.oldVisit && (
+          <div className="confirm-card" role="status">
+            <p>Перенесла запись</p>
+            <p>
+              <strong>Было:</strong> {formatDayMonthTime(moved.oldVisit)}
+            </p>
+            <p>
+              <strong>Стало:</strong> {formatDayMonthTime(b.visit_at)}
+            </p>
+          </div>
+        )}
 
         <div className="confirm-card">
           <dl>
@@ -239,6 +306,24 @@ export function CustomerBookingDetailScreen() {
               <>
                 <dt>Длительность</dt>
                 <dd>{formatDuration(b.duration_min)}</dd>
+              </>
+            )}
+            {/* DRF-1652 — «клиент записался и не видит, куда ехать».
+                Строка БЕЗУСЛОВНА, в отличие от соседей выше: те скрывают
+                себя, когда значения нет, и это верно для мастера и
+                длительности — их отсутствие человеку ничего не говорит.
+                Адрес другой: «куда ехать» — вопрос, который у
+                записавшегося уже возник, и промолчать на него значит
+                оставить его без ответа вместо того, чтобы сказать, где
+                ответ взять. Разбор трёхзначности — в lib/visit-address. */}
+            <dt>Адрес</dt>
+            <dd>{visitAddressText(b.address)}</dd>
+            {/* DRF-2172 — цена записи (снимок на момент записи); без цены
+                строки нет, «Сумма» ниже — это платёж, другой факт. */}
+            {priceLabel && (
+              <>
+                <dt>Цена</dt>
+                <dd>{priceLabel}</dd>
               </>
             )}
             {b.payment?.amount && (
@@ -269,7 +354,7 @@ export function CustomerBookingDetailScreen() {
                 type="button"
                 className="btn-secondary"
                 style={{ flex: 1 }}
-                onClick={() => navigate(`/my-visits/${b.id}/reschedule`)}
+                onClick={() => navigate(`/customer/records/${b.id}/reschedule`)}
               >
                 Перенести
               </button>
@@ -339,7 +424,7 @@ export function CustomerBookingDetailScreen() {
             ref={modalRef}
             className="modal__sheet"
             style={{
-              background: "var(--surface-1, #fff)",
+              background: "var(--c-surface-1)",
               padding: "var(--s-4)",
               borderRadius: "var(--r-lg) var(--r-lg) 0 0",
               width: "100%",
@@ -350,12 +435,12 @@ export function CustomerBookingDetailScreen() {
             <p style={{ marginTop: "var(--s-2)", marginBottom: "var(--s-2)" }}>
               {formatVisitFull(b.visit_at)}
             </p>
-            <p style={{ color: "var(--text-muted, #888)" }}>
+            <p style={{ color: "var(--c-text-secondary)" }}>
               {b.service_name}
               {b.master_name ? ` · ${b.master_name}` : ""}
             </p>
             <p style={{ marginTop: "var(--s-3)" }}>Что повлияло? (опционально)</p>
-            <div className="chip-row" style={{ flexWrap: "wrap" }}>
+            <div className="chip-row">
               {REASON_CHIPS.map((r) => (
                 <button
                   key={r.value}

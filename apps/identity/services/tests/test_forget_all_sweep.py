@@ -65,7 +65,9 @@ from apps.orchestrator import memory_block
 from apps.orchestrator.memory_block import build_concierge_memory_block
 from apps.tenancy.models import Tenant
 
-pytestmark = pytest.mark.django_db
+# DRF-2220 — erasure also purges the ingress streams; this file is not
+# about them, so they are empty and need no Redis (apps/conftest.py).
+pytestmark = [pytest.mark.django_db, pytest.mark.usefixtures("ingress_streams_empty")]
 
 _SUMMARY = "Мария, 34, ходит на маникюр раз в три недели, любит тишину в кресле."
 
@@ -332,16 +334,25 @@ class TestScope:
         upc.refresh_from_db()
         assert upc.minor_lock is True
 
-    def test_yellow_is_left_for_its_own_stream(self):
-        """Green-only, like the whole memory_deleter module. Named, not skipped."""
+    def test_yellow_does_not_survive_either(self):
+        """DRF-2180 — прежде узел держал обратное: «green-only, named, not skipped».
+
+        Матрица удаления (DRF-2134) объявляла для жёлтой зоны ``DELETE`` с
+        исполнителем «никто» — то есть долг, а не решение. Свип его закрыл,
+        и этот узел развёрнут вслед за ним: он пинил не свойство, а
+        состояние, которое лист и пришёл менять.
+        """
         upc = _upc()
         yellow = _yellow(upc)
         request_forget_all(upc.user_id)
         sweep_forget_all(upc.user_id)
         yellow.refresh_from_db()
-        assert yellow.soft_deleted_at is None
-        # And it was never reachable by the reader this sweep protects.
-        assert read_green_entries(upc.user_id) == []
+        assert yellow.soft_deleted_at is not None
+        assert yellow.deletion_reason == MemoryEntry.DELETION_REASON_FORGET_ALL
+        # Прежняя строка «и читатель её всё равно не видел» снята: она была
+        # осмысленной, пока жёлтая переживала свип («лежит, но недостижима»).
+        # Теперь строка снята, и «читатель ничего не вернул» верно по другой
+        # причине — то есть проверяет не то, про что написано.
 
     def test_notification_settings_are_not_erased(self):
         """The decision, pinned: standing instructions are not memories.
@@ -456,6 +467,12 @@ class TestTheDialogueHalf:
                 def rpush(self, key, value):
                     self.ops.append((key, value))
 
+                # DRF-2511: `append` читает уходящее тем же конвейером.
+                # Здесь стенд нарочно грубый — предмет файла не окно, а
+                # зачистка, — поэтому `lrange` терпит вызов и отдаёт пусто.
+                def lrange(self, *a):
+                    pass
+
                 def ltrim(self, *a):
                     pass
 
@@ -485,6 +502,10 @@ class TestTheDialogueHalf:
         fake = self._FakeRedis()
         monkeypatch.setattr(short_term, "_redis_client", lambda: fake)
         monkeypatch.setattr(pii_tokenizer, "_redis_client", lambda: fake)
+        # DRF-2214 — «забудь всё» снимает и состояние движка готовности (dre:state).
+        monkeypatch.setattr(
+            "apps.orchestrator.decision_readiness.state._redis_client", lambda: fake
+        )
         return fake
 
     @staticmethod
@@ -549,6 +570,38 @@ class TestTheDialogueHalf:
         assert result.messages_archived == 1
         assert before.content == ""
         assert after.content == "запиши меня на маникюр"
+
+    def test_a_voice_turn_keeps_its_mark_and_loses_its_text(self, redis, settings):
+        """DRF-2488 — пометка ``voice`` переживает «забудь всё».
+
+        Обезличивание стирает расшифровку, как любой текст, а канал ввода
+        остаётся на строке вместе с ролью и временем: это не слова человека,
+        а факт «здесь было голосовое» — ровно то, что обещает строка
+        ``conversations.Message.content`` в ``export_coverage``.
+        """
+        upc = _upc()
+        request_forget_all(upc.user_id)
+        upc.refresh_from_db()
+        conversation, Message = self._dialogue(upc, settings)
+
+        voiced = Message.all_tenants.create(
+            tenant=conversation.tenant,
+            conversation=conversation,
+            role="user",
+            content="я веган, запиши на маникюр",
+            input_channel=Message.InputChannel.VOICE,
+        )
+        Message.all_tenants.filter(pk=voiced.pk).update(
+            created_at=upc.forget_all_requested_at - timedelta(minutes=5)
+        )
+
+        result = sweep_forget_all(upc.user_id)
+
+        voiced.refresh_from_db()
+        assert result.messages_archived == 1
+        assert voiced.role == "user"
+        assert voiced.input_channel == "voice"
+        assert voiced.content == ""
 
     def test_an_unfinished_dialogue_keeps_the_person_in_the_queue(self, redis, settings):
         """The failure direction: a Redis outage must not tick the person off.

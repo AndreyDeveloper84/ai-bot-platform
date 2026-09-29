@@ -51,6 +51,7 @@ from apps.replay.live_path import (
     build_max_payload,
     canary_reply_for,
 )
+from apps.replay.provider_guard import forbid_provider_calls
 
 pytestmark = pytest.mark.django_db
 
@@ -119,14 +120,22 @@ def live_run(monkeypatch, fake_redis):
 
         uid = 900_000 + counter["n"]
         payload = build_max_payload(fixture, user_id=uid, mid=f"replay-{uid}")
-        max_handler.handle_global_max_event(payload)
+        # DRF-2599 — the canary above replaces ONE function; every other route
+        # to a model (intent resolution, a second OpenAI client, speech) was
+        # open, and with a key in the environment made a real paid call. The
+        # block sits on the SDK classes, and every attempt is recorded — its
+        # callers swallow exceptions, so the record, not the raise, is the
+        # evidence.
+        with forbid_provider_calls() as guard:
+            max_handler.handle_global_max_event(payload)
 
         return LivePathResult(
             fixture_name=fixture.name,
             response_text="\n".join(sent),
-            llm_called=concierge.called,
+            llm_called=concierge.called or guard.called,
             safety_blocked=_fixture_expects_block(fixture),
             sent_count=len(sent),
+            provider_calls=[f"{c.sdk_method} ← {c.caller}" for c in guard.calls],
         )
 
     return _run
@@ -188,7 +197,7 @@ class TestDeterministicRepliesAreHeldToTheFixture:
                 "concierge, not from a deterministic branch"
             )
 
-        failures = evaluate(result.as_trace(), fixture.must_pass, fixture.forbidden)
+        failures = evaluate(result.as_trace(), fixture.must_pass, fixture.reply_forbidden)
         failures += evaluate_voice(result.response_text, fixture.voice_check)
         assert not failures, f"{fixture.name}: {failures}"
 
@@ -211,8 +220,8 @@ class TestTheModelIsNeverConsultedOnARedFlag:
             pytest.skip(f"{fixture.name}: safety gate allows this input")
 
         assert not result.llm_called, (
-            f"{fixture.name}: the safety gate refused this text, but the "
-            "concierge was called anyway"
+            f"{fixture.name}: the safety gate refused this text, but a model was "
+            f"consulted anyway — provider calls: {result.provider_calls or 'concierge'}"
         )
 
     @pytest.mark.parametrize("fixture", ALL_FIXTURES, ids=_fixture_ids(ALL_FIXTURES))

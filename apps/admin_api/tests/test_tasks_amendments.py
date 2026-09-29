@@ -54,7 +54,7 @@ def _clear_cache() -> Any:
 
 def _call_task(
     *,
-    chat_id: str = "9001-chat",
+    user_id: str = "9001",
     decision: str = "approved",
     date_range_human: str = "12–15 июня",
     request_id: str | None = None,
@@ -66,7 +66,7 @@ def _call_task(
     """
     return dispatch_master_decision_dm.apply(
         kwargs={
-            "chat_id": chat_id,
+            "user_id": user_id,
             "decision": decision,
             "date_range_human": date_range_human,
             "request_id": request_id or str(uuid.uuid4()),

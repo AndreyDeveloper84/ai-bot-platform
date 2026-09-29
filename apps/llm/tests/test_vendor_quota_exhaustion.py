@@ -512,19 +512,27 @@ class TestQuotaFallbackHop:
         )
 
     @pytest.mark.asyncio
-    async def test_transport_error_does_not_hop(self) -> None:
+    async def test_transport_error_hops_too(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """DRF-2147 inverted this guard. Until the 2026-09-15 incident a
+        transport failure was «the retry layer's job» and stayed on the
+        primary; 45 minutes of a dead proxy with a healthy second vendor
+        showed what that costs. The full set of unavailability shapes is
+        pinned in ``test_fallback_unavailable_2147.py``; this one stays
+        here so the file that documents the hop does not contradict it.
+        """
         from apps.llm.protocol import LLMTransportError
 
+        monkeypatch.setattr("apps.observability.alerting.page", lambda *a, **k: True)
         stubs = {
             "openai": StubProvider("openai", raises=LLMTransportError("connection reset")),
             "anthropic": StubProvider("anthropic"),
         }
 
         provider = _router_with(stubs).get_provider(None, op="complete")
-        with pytest.raises(LLMTransportError):
-            await provider.complete([], model="m")
+        result = await provider.complete([], model="m")
 
-        assert stubs["anthropic"].calls == 0
+        assert result.provider == "anthropic"
+        assert stubs["anthropic"].calls == 1
 
     @pytest.mark.asyncio
     async def test_success_never_touches_the_second_provider(self) -> None:
@@ -648,7 +656,7 @@ class TestQuotaFallbackHop:
         catches ``LLMError``), it does not 500 — but Claude cannot cover
         it.
         """
-        from apps.llm.router import QuotaFallbackProvider
+        from apps.llm.router import FallbackProvider
 
         stubs = _exhausted_and_healthy()
         provider = _router_with(stubs).get_provider(None, op="embedding")
@@ -660,7 +668,7 @@ class TestQuotaFallbackHop:
         assert provider is stubs["openai"], (
             "identity: the raw resolved provider, with nothing wrapped around it"
         )
-        assert not isinstance(provider, QuotaFallbackProvider)
+        assert not isinstance(provider, FallbackProvider)
 
     @pytest.mark.asyncio
     async def test_wrapper_keeps_the_primary_vendor_name(self) -> None:
@@ -804,14 +812,14 @@ class TestHopThroughTheRealWrapperChain:
         after the hop, Anthropic must receive its OWN model id.
         """
         from apps.llm.pii_protected_provider import PIITokenizingProvider
-        from apps.llm.router import QuotaFallbackProvider
+        from apps.llm.router import FallbackProvider
 
         provider = LLMRouter().get_provider(None, skill="intent", op="complete")
 
         # Presence first: this is the REAL chain, PII wrapper included —
         # if it silently degraded to a bare provider, the assertions
         # below would prove nothing about production.
-        assert isinstance(provider, QuotaFallbackProvider)
+        assert isinstance(provider, FallbackProvider)
         assert isinstance(provider._primary, PIITokenizingProvider)
         assert provider.default_completion_model == "gpt-4o-mini"
         # DRF-1443 — the fast tier has to survive the same two wrappers,

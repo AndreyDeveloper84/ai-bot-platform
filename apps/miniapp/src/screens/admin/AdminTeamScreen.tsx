@@ -18,13 +18,17 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
 import { AdminTabBar } from "../../components/AdminTabBar";
+import { countLabel, type MaybeCount } from "../../lib/format";
 import { Snackbar } from "../../components/Snackbar";
 import { StateError } from "../../components/StateError";
 import { ApiError } from "../../lib/api";
 import {
   getAvailabilityRequests,
+  getMastersAwaitingVerification,
   listMasters,
   reactivateMaster,
+  verifyMasters,
+  type AwaitingVerificationMaster,
   type MasterListItem,
   type MeResponse,
 } from "../../lib/admin-api";
@@ -32,7 +36,9 @@ import {
   listAdminThreads,
   threadNeedsAdminResponse,
 } from "../../lib/internal-chat-api";
-import { hapticImpact, hapticSelection, setBackButton } from "../../lib/max-sdk";
+import { useSalonSectionBack } from "../../hooks/useSalonSectionBack";
+import { hapticImpact, hapticSelection } from "../../lib/max-sdk";
+import { MasterPhoto } from "../../components/MasterPhoto";
 
 interface Props {
   me: MeResponse;
@@ -50,6 +56,20 @@ function initials(name: string): string {
     .map((p) => p.charAt(0).toUpperCase())
     .join("");
 }
+
+/**
+ * Строка на случай «не удалось узнать» (DRF-2366).
+ *
+ * Слов своих не сочинял, и добавленных нами тоже нет: это ДОСЛОВНО домашняя
+ * формула этой же поверхности — `AdminReadinessScreen` говорит «Не удалось
+ * проверить готовность.», сервер — «{name} — не удалось проверить свободные
+ * окна». Решение главного окна: берём чистую формулу без хвоста, чтобы в
+ * тексте не было ни одного слова, которого владелец не писал.
+ *
+ * Чего в строке быть не должно — утверждения о пустоте: «Все запросы
+ * рассмотрены» и «Новых обсуждений нет» это ровно то, чего мы не знаем.
+ */
+const TEAM_COUNT_UNKNOWN_COPY = "Не удалось проверить.";
 
 export function AdminTeamScreen({ me }: Props) {
   const navigate = useNavigate();
@@ -80,20 +100,34 @@ export function AdminTeamScreen({ me }: Props) {
   // M3-admin (Bundle B) — pending availability-requests badge on the
   // root nav card. Best-effort fetch; failure is silent and the card
   // hides the count rather than blocking the team screen.
+  // DRF-2366 — `null` значит «не удалось узнать», и это НЕ ноль. Умолчанием
+  // был ноль, поэтому до первого ответа и после отказа карточка утверждала
+  // «Все запросы рассмотрены» — про запросы, о которых ничего не знала.
   const [pendingAvailabilityCount, setPendingAvailabilityCount] =
-    useState<number>(0);
+    useState<MaybeCount>(null);
   // «Чаты с мастерами» nav badge — count of threads in the tenant
   // queue that need admin response (status ∈ {open, master_responded}).
   // Best-effort fetch; failure is silent and the card renders without
   // the badge rather than blocking the team screen. Mirrors the
   // existing availability-requests pattern above.
   const [internalChatUnreadCount, setInternalChatUnreadCount] =
-    useState<number>(0);
+    useState<MaybeCount>(null);
 
-  useEffect(() => {
-    // Tab bar is at the root — hide MAX BackButton on the team screen.
-    setBackButton(false);
-  }, []);
+  // DRF-1597 — очередь «ждут подтверждения».
+  //
+  // НЕ best-effort, в отличие от двух бэйджей выше: те украшают ссылку
+  // на соседний экран, а этот список — единственное место, где владелица
+  // вообще узнаёт, что заведённого ею мастера клиент не видит. Молчание
+  // при ошибке здесь было бы тем же молчанием, ради которого задача и
+  // заведена, поэтому ошибка называется словами (`awaitingErr`).
+  const [awaiting, setAwaiting] = useState<AwaitingVerificationMaster[]>([]);
+  const [awaitingCount, setAwaitingCount] = useState<number>(0);
+  const [awaitingErr, setAwaitingErr] = useState<boolean>(false);
+  const [verifying, setVerifying] = useState<boolean>(false);
+
+  // DRF-2115: у владельца/администратора «Команда» открывается из аватара —
+  // системная «назад» ведёт в «Сегодня»; у ресепшн это корень моста.
+  useSalonSectionBack(me);
 
   useEffect(() => {
     if (!(me.is_owner || me.is_admin)) return;
@@ -107,7 +141,9 @@ export function AdminTeamScreen({ me }: Props) {
         if (controller.signal.aborted) return;
         setPendingAvailabilityCount(res.items.length);
       } catch {
-        // Silent — the card still renders without the badge.
+        // Экран не падает из-за счётчика — это решение остаётся. Но и не
+        // выдаёт неизвестность за ноль: счётчик остаётся `null` (DRF-2366).
+        if (!controller.signal.aborted) setPendingAvailabilityCount(null);
       }
     })();
     return () => controller.abort();
@@ -128,13 +164,34 @@ export function AdminTeamScreen({ me }: Props) {
         const count = res.items.filter(threadNeedsAdminResponse).length;
         setInternalChatUnreadCount(count);
       } catch {
-        // Silent — the card renders without the badge.
+        if (!cancelled) setInternalChatUnreadCount(null);
       }
     })();
     return () => {
       cancelled = true;
     };
   }, [me.is_admin, me.is_owner]);
+
+  const loadAwaiting = useCallback(async (signal?: AbortSignal) => {
+    if (!(me.is_owner || me.is_admin)) return;
+    try {
+      const res = await getMastersAwaitingVerification({ signal });
+      if (signal?.aborted) return;
+      setAwaiting(res.items);
+      setAwaitingCount(res.count);
+      setAwaitingErr(false);
+    } catch {
+      if (signal?.aborted) return;
+      setAwaitingErr(true);
+    }
+  }, [me.is_admin, me.is_owner]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void loadAwaiting(controller.signal);
+    return () => controller.abort();
+  }, [loadAwaiting]);
+
 
   // Polish item (a) from PR #498 review — 300ms debounce on search +
   // AbortController to cancel in-flight requests when input changes.
@@ -188,6 +245,59 @@ export function AdminTeamScreen({ me }: Props) {
     void reload();
   }, [reload]);
 
+  const handleVerifyAll = useCallback(async () => {
+    if (verifying) return;
+    setVerifying(true);
+    try {
+      const res = await verifyMasters();
+      hapticImpact();
+      // Три исхода называются по отдельности. «Подтверждено: 0» без
+      // причины читается как сбой, а причин у нуля две разных, и ведут
+      // они владелицу в разные стороны.
+      const parts = [`Подтверждено: ${res.verified}.`];
+      if (res.blocked > 0) {
+        parts.push(
+          `Ждут нажатия самого мастера: ${res.blocked} — им приглашение ` +
+            `выписано лично, принять его может только сама мастер.`,
+        );
+      }
+      if (res.not_eligible > 0) {
+        parts.push(
+          `Не подошли: ${res.not_eligible} — в архиве или сняты с ` +
+            `активности; подтверждение их клиенту не откроет.`,
+        );
+      }
+      if (res.still_hidden.length > 0) {
+        // Сегодня сюда не попадает никто. Если попадёт — владелица узнает
+        // об этом от нас, а не по тому, что мастер так и не появился у
+        // клиента (§78).
+        parts.push(
+          `Подтверждены, но клиент их всё ещё не видит: ` +
+            `${res.still_hidden.join(", ")}. Напишите нам.`,
+        );
+      }
+      setToast(parts.join(" "));
+      await Promise.all([loadAwaiting(), reload()]);
+    } catch (e) {
+      setToast(
+        e instanceof ApiError && e.status === 403
+          ? "Подтвердить мастера может только владелец салона."
+          : "Не удалось подтвердить. Попробуйте ещё раз.",
+      );
+    } finally {
+      setVerifying(false);
+    }
+  }, [loadAwaiting, reload, verifying]);
+
+  // Кто именно ждёт подтверждения — по ответу сервера, а не по второму
+  // правилу на клиенте. Нужен для подписи в списке: `pending` у строки
+  // из очереди и `pending` у лично приглашённой — разные состояния, и
+  // одно слово на оба врало бы про одно из них.
+  const awaitingIds = useMemo(
+    () => new Set(awaiting.map((m) => m.id)),
+    [awaiting],
+  );
+
   // Sync filter back into the URL so the «Открыть архив» deep-link
   // round-trips when the user navigates back from MM5 Step 4.
   useEffect(() => {
@@ -200,7 +310,7 @@ export function AdminTeamScreen({ me }: Props) {
       const qs = q.toString();
       navigate(`/admin/team${qs ? `?${qs}` : ""}`, { replace: true });
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- DRF-2395: без `location.search` адрес разойдётся с фильтром при возврате извне, но включить его — риск цикла, эффект сам пишет адрес. Нужен живой проход, не правка наугад
   }, [filter]);
 
   const ownerOnlyDisabledLabel = "Только владелец может деактивировать мастера";
@@ -244,7 +354,7 @@ export function AdminTeamScreen({ me }: Props) {
     } catch (e) {
       const msg =
         e instanceof ApiError
-          ? e.detail || "Не получилось восстановить"
+          ? "Не получилось восстановить"
           : "Сеть недоступна — попробуйте ещё раз";
       setToast(msg);
     } finally {
@@ -266,7 +376,7 @@ export function AdminTeamScreen({ me }: Props) {
       <div className="screen">
         <h1 className="screen__title">Команда</h1>
         <StateError err={err} onRetry={manualReload} />
-        <AdminTabBar />
+        <AdminTabBar me={me} />
       </div>
     );
   }
@@ -307,32 +417,95 @@ export function AdminTeamScreen({ me }: Props) {
             style={{ padding: "var(--s-2) var(--s-3)" }}
             onClick={() => {
               hapticSelection();
-              navigate("/admin/team/invite");
+              navigate("/admin/team/add");
             }}
           >
-            + Добавить мастера
+            + Добавить человека
           </button>
         )}
       </header>
 
       {/*
-        DRF-1061 block 2.4. Deliberately a separate, quieter control rather
-        than a second primary button: adding a NEW master to the catalog and
-        giving an EXISTING person access are different jobs, and the roster
-        screen is where somebody realises they need the second one.
+        DRF-1597 — очередь «ждут подтверждения».
+
+        Стоит ПЕРВЫМ блоком под шапкой, выше фильтров и поиска, и это не
+        вкусовщина. Мастер, заведённый через админку Ayla, приезжает
+        сюда со статусом приглашения `pending` и клиенту не виден;
+        подсказка на форме заведения (DRF-1596) об этом говорит, но
+        сделать шаг оттуда нельзя. Место, где владелица про это узнаёт,
+        должно быть тем же, где она это чинит, — и оно не должно
+        требовать прокрутки.
+
+        Карточка появляется только когда очередь непуста: постоянный
+        блок «ждут: 0» приучил бы её не читать.
       */}
-      {(me.is_owner || me.is_admin) && (
-        <button
-          type="button"
-          className="admin-flow-back"
-          onClick={() => {
-            hapticSelection();
-            navigate("/admin/team/access");
-          }}
-        >
-          Выдать доступ тому, кто уже в салоне
-        </button>
+      {(me.is_owner || me.is_admin) && awaitingErr && (
+        <div className="admin-notice admin-notice--warn" role="status">
+          Не удалось проверить, все ли мастера видны клиенту. Обновите
+          экран — пока список не загрузился, судить об этом нельзя.
+        </div>
       )}
+
+      {(me.is_owner || me.is_admin) && awaitingCount > 0 && (
+        <section
+          className="admin-notice admin-notice--warn"
+          aria-label="Мастера, которых не видит клиент"
+        >
+          <div style={{ fontWeight: 600 }}>
+            {`Клиент не видит ${awaitingCount} ${awaitingCount === 1 ? "мастера" : "мастеров"}`}
+          </div>
+          <p style={{ margin: "var(--s-2) 0" }}>
+            Они заведены и активны, но их ещё никто не подтвердил. Пока
+            вы этого не сделаете, записаться к ним нельзя.
+          </p>
+          <ul style={{ margin: "0 0 var(--s-2)", paddingInlineStart: "var(--s-4)" }}>
+            {awaiting.map((m) => (
+              <li key={m.id}>
+                {m.name}
+                {m.specialization ? ` — ${m.specialization}` : ""}
+              </li>
+            ))}
+          </ul>
+          {me.is_owner ? (
+            <button
+              type="button"
+              className="cta-bar__button"
+              disabled={verifying}
+              onClick={() => {
+                hapticSelection();
+                void handleVerifyAll();
+              }}
+            >
+              {verifying
+                ? "Подтверждаю…"
+                : `Подтвердить ${awaitingCount} ${awaitingCount === 1 ? "мастера" : "мастеров"}`}
+            </button>
+          ) : (
+            /* Админ видит очередь, но не нажимает: подтверждение делает
+               человека продаваемым клиенту, и владелец пилота назвал
+               ответственной за своих людей владелицу салона. Сервер
+               отвечает 403 в любом случае — кнопка не прячет решение,
+               она его не обещает. */
+            <p style={{ margin: 0 }}>
+              Подтвердить может только владелец салона.
+            </p>
+          )}
+        </section>
+      )}
+
+      {/*
+        DRF-1505 — одна кнопка вместо двух.
+
+        Здесь стояла вторая, тише первой: «Выдать доступ тому, кто уже в
+        салоне». Разделение было верным для бэкенда (две модели, два
+        жизненных цикла) и неверным для читателя: чтобы выбрать кнопку,
+        он должен был заранее знать, заведён ли человек в каталоге.
+        Промахнувшись, попадал в форму, которая просит не то.
+
+        Теперь вопрос задаётся ПОСЛЕ нажатия, на самом экране, где на
+        него можно ответить и передумать. Решение владельца §25 п.4 от
+        05.09.2026.
+      */}
 
       {/*
         The only entry to «Люди салона». Owner-only, matching the
@@ -340,8 +513,11 @@ export function AdminTeamScreen({ me }: Props) {
         role, and the owner reserved role decisions to herself. Hiding it
         from an admin is convenience — the backend answers 403 either way.
 
-        It sits next to «Выдать доступ» because that is where somebody
-        realises they do not actually know who already has it.
+        It sits next to «Добавить человека» because that is where
+        somebody realises they do not actually know who already has
+        access. (It used to say «Выдать доступ» — that button was
+        folded into «Добавить человека» by DRF-1505, and the reason
+        survived the button.)
       */}
       {me.is_owner && (
         <button
@@ -353,6 +529,24 @@ export function AdminTeamScreen({ me }: Props) {
           }}
         >
           Кто есть в салоне и с какими ролями
+        </button>
+      )}
+
+      {/*
+        DRF-2275 — the codes issued from «Добавить человека»: who has not
+        arrived yet, and cancelling or re-issuing a code. Owner AND admin,
+        unlike the entry above: whoever issues codes manages them.
+      */}
+      {(me.is_owner || me.is_admin) && (
+        <button
+          type="button"
+          className="admin-flow-back"
+          onClick={() => {
+            hapticSelection();
+            navigate("/admin/team/invites");
+          }}
+        >
+          Выданные коды доступа
         </button>
       )}
 
@@ -429,17 +623,19 @@ export function AdminTeamScreen({ me }: Props) {
               className="master-card__spec"
               style={{ display: "block" }}
             >
-              {pendingAvailabilityCount > 0
-                ? `${pendingAvailabilityCount} ожидают решения`
-                : "Все запросы рассмотрены"}
+              {pendingAvailabilityCount === null
+                ? TEAM_COUNT_UNKNOWN_COPY
+                : pendingAvailabilityCount > 0
+                  ? `${pendingAvailabilityCount} ожидают решения`
+                  : "Все запросы рассмотрены"}
             </span>
           </span>
-          {pendingAvailabilityCount > 0 && (
+          {(pendingAvailabilityCount === null || pendingAvailabilityCount > 0) && (
             <span
               className="admin-count-chip"
-              aria-label={`ожидают: ${pendingAvailabilityCount}`}
+              aria-label={`ожидают: ${countLabel(pendingAvailabilityCount)}`}
             >
-              {pendingAvailabilityCount}
+              {countLabel(pendingAvailabilityCount)}
             </span>
           )}
         </button>
@@ -473,17 +669,19 @@ export function AdminTeamScreen({ me }: Props) {
               className="master-card__spec"
               style={{ display: "block" }}
             >
-              {internalChatUnreadCount > 0
-                ? `${internalChatUnreadCount} требуют ответа`
-                : "Новых обсуждений нет"}
+              {internalChatUnreadCount === null
+                ? TEAM_COUNT_UNKNOWN_COPY
+                : internalChatUnreadCount > 0
+                  ? `${internalChatUnreadCount} требуют ответа`
+                  : "Новых обсуждений нет"}
             </span>
           </span>
-          {internalChatUnreadCount > 0 && (
+          {(internalChatUnreadCount === null || internalChatUnreadCount > 0) && (
             <span
               className="admin-count-chip"
-              aria-label={`требуют ответа: ${internalChatUnreadCount}`}
+              aria-label={`требуют ответа: ${countLabel(internalChatUnreadCount)}`}
             >
-              {internalChatUnreadCount}
+              {countLabel(internalChatUnreadCount)}
             </span>
           )}
         </button>
@@ -520,11 +718,11 @@ export function AdminTeamScreen({ me }: Props) {
                   className="master-card__avatar"
                   style={{ background: PLACEHOLDER_AVATAR_BG }}
                 >
-                  {m.photo_url ? (
-                    <img src={m.photo_url} alt="" />
-                  ) : (
-                    <span aria-hidden="true">{initials(m.name)}</span>
-                  )}
+                  <MasterPhoto
+                    src={m.photo_url}
+                    alt=""
+                    fallback={<span aria-hidden="true">{initials(m.name)}</span>}
+                  />
                 </span>
                 <span style={{ flex: 1, minWidth: 0 }}>
                   <span className="master-card__name">{m.name}</span>
@@ -541,9 +739,23 @@ export function AdminTeamScreen({ me }: Props) {
                       flexWrap: "wrap",
                     }}
                   >
-                    {m.invite_status === "pending" && (
-                      <span className="admin-chip admin-chip--warn">приглашён</span>
-                    )}
+                    {/*
+                      DRF-1597 — «приглашён» больше не подпись для всех
+                      `pending`. Мастеру, приехавшему синхронизацией,
+                      приглашения никто не отправлял: подпись обещала
+                      событие, которого не было, и владелица ждала
+                      ответа, которого не будет. Кто именно ждёт
+                      подтверждения — говорит сервер (`awaitingIds`), а
+                      не второе правило на клиенте.
+                    */}
+                    {m.invite_status === "pending" &&
+                      (awaitingIds.has(m.id) ? (
+                        <span className="admin-chip admin-chip--warn">
+                          не подтверждён — клиент не видит
+                        </span>
+                      ) : (
+                        <span className="admin-chip admin-chip--warn">приглашён</span>
+                      ))}
                     <span className="admin-chip">{`${m.services_count} услуг`}</span>
                   </span>
                 </span>
@@ -674,7 +886,7 @@ export function AdminTeamScreen({ me }: Props) {
         onDismiss={() => setToast("")}
       />
 
-      <AdminTabBar />
+      <AdminTabBar me={me} />
     </div>
   );
 }

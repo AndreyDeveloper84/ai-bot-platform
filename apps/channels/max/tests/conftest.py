@@ -13,23 +13,6 @@ from __future__ import annotations
 import pytest
 
 
-@pytest.fixture(autouse=True)
-def _stub_auto_draft_enqueue(monkeypatch):
-    """Stub the auto-draft Celery enqueue so handler tests need no broker.
-
-    ``record_message`` (apps/conversations/services) enqueues
-    ``auto_generate_draft_for_inbound.delay(...)`` for every USER message via
-    ``transaction.on_commit``. Under ``django_db(transaction=True)`` (the skills
-    tests) that callback actually fires → a Celery ``.delay()`` publish to a
-    broker that isn't running in tests (kombu ConnectionRefused). These handler
-    tests don't exercise the auto-draft path, so stub the enqueue to a no-op.
-    (Non-transactional tests roll the on_commit back, so this is a no-op there.)
-    """
-    from apps.master_api import tasks as _mt
-
-    monkeypatch.setattr(_mt.auto_generate_draft_for_inbound, "delay", lambda **kw: None)
-
-
 @pytest.fixture
 def mark_welcomed():
     """Return a callable that pre-marks a BotUser as welcomed (inside tenant_scope)."""
@@ -42,13 +25,23 @@ def mark_welcomed():
         bu = resolve_or_create_bot_user(
             channel="max", channel_user_id=str(user_id), chat_id=str(chat_id)
         )
-        now = timezone.now()
-        bu.welcomed_at = now
-        fields = ["welcomed_at"]
+        bu.welcomed_at = timezone.now()
+        bu.save(update_fields=["welcomed_at"])
         if food_consent:
-            bu.food_scanner_consent_at = now
-            fields.append("food_scanner_consent_at")
-        bu.save(update_fields=fields)
+            # DRF-1948: сканер пишет в дневник только при PERSONAL_DATA — согласие
+            # сканера стоит поверх него. Без этой строки фото-тесты проверяли бы
+            # отказ PERSONAL_DATA, а не то, ради чего написаны.
+            from apps.consent.nutrition import DIARY, FOOD_DIARY_CONSENT_DOCUMENT_VERSION
+            from apps.consent.services import record_global_consent
+
+            record_global_consent(bu, source="test:mark_welcomed")
+            # DRF-1963 (M1): согласие дневника/сканера — строка реестра.
+            record_global_consent(
+                bu,
+                consent_type=DIARY,
+                source="test:mark_welcomed",
+                document_version=FOOD_DIARY_CONSENT_DOCUMENT_VERSION,
+            )
         return bu
 
     return _mark

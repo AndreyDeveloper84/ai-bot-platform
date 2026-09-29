@@ -18,7 +18,21 @@ handful of shapes that are unambiguous in Russian and expensive when wrong:
 * **contact details** — phone numbers and emails, which no answer here has
   a reason to contain (DRF-1039), including a phone's four-digit tail when
   the sentence itself calls it a number (DRF-1209: «номер 4567», «тел.
-  1234» — a partial phone is a phone, OD-W2-2).
+  1234» — a partial phone is a phone, OD-W2-2);
+* **nagging / pressure** (DRF-1468, copy policy R2/R3) — «не забывайте про
+  цель», «давно не работали», «вы пропустили», virtue streaks and counters
+  («дней подряд», «серия»). Written for the proactive path, where an
+  unsolicited reproach is the worst sentence there is; the shapes are
+  banned in any reply;
+* **planning claims** (P1-D1, `OPEN_DECISIONS.md` §50) — «между курсами
+  нужно три-четыре недели», «курс из пяти процедур», «нельзя совмещать с
+  пилингом», «восстановление занимает три дня». Правило «модель не
+  придумывает тайминги» до этого существовало **только как намерение**:
+  антигаллюцинационные списки во всех промптах перечисляли мастера, цену,
+  адрес, длительность и ID — про интервалы, курсы, совместимость,
+  восстановление и подготовку не было ни одного правила, и здесь не было
+  категории. Инвентарь Трека D показал, что 11 из 13 типов ограничений в
+  каноне — `UNKNOWN`, то есть утверждать их нам **нечем**.
 
 Anything subtler stays with the prompt. A greedy filter that mangles decent
 replies would get itself turned off within a week, and then there would be
@@ -56,7 +70,23 @@ _MEDICAL = (
     r"(?i)\b(примите|выпейте|принимайте|назначаю|пропейте)\b",
     r"(?i)\b(ибупрофен|анальгин|парацетамол|кеторол|антибиотик\w*)\b",
     r"(?i)\b(это\s+точно|у\s+вас\s+явно)\s+\w*(аллерг|инфекц|заболевани)",
-    r"(?i)\bдиагноз\w*\s+(—|-|:)?\s*\w+",
+    # Разделитель ОБЯЗАТЕЛЕН — в этом вся правка. Прежняя редакция
+    # делала его необязательным и ловила слово «диагноз» при любом
+    # вхождении, включая ОТРИЦАЮЩЕЕ: «это не диагноз и не лечение»
+    # блокировалось наравне с «диагноз — дерматит, лечите мазью».
+    #
+    # Докстринг выше обещает «требуется утвердительный глагол»; именно эта
+    # половина обещание не держала. Утвердительная форма диагноза в русском
+    # несёт связку («диагноз — дерматит», «диагноз: экзема»), отрицающая —
+    # нет, и разделитель разводит их без списка исключений.
+    #
+    # Цена правки названа честно: «ваш диагноз аллергия» без связки теперь
+    # проходит. Это редкая форма, а соседний шаблон ловит её обычную запись
+    # («у вас аллергия»). Обратная цена была выше: канон ПРЕДПИСЫВАЕТ боту
+    # говорить «это наблюдение, а не диагноз»
+    # (docs/design/handoffs/2026-05-19-wellness-symptom-handoff.md), то есть
+    # страж ел ровно ту фразу, которую политика велит произносить.
+    r"(?i)\bдиагноз\w*\s*(—|-|:)\s*\w+",
 )
 
 #: Promises the assistant cannot keep on the salon's behalf.
@@ -67,15 +97,39 @@ _PROMISES = (
     r"(?i)\b(бесплатно\s+переделаем|сделаем\s+скидку|дам\s+скидку|дадим\s+скидку)\b",
 )
 
+#: DRF-2435 — граница шестнадцатеричного соседства.
+#:
+#: Телефонный шаблон разрешает между группами цифр дефис и пробельные, поэтому
+#: он ловил цифры ВНУТРИ машинных идентификаторов: UUID — это hex-группы через
+#: дефис, sha256 — 64 hex-символа. Замер: 4 ложных телефона на 4094 случайных
+#: UUID'а (0.098%), 80 на 20000 sha256-дайджестов (0.40%). Живое следствие: ответ
+#: выгрузки личных данных, который состоит из UUID'ов и хэшей, подменялся
+#: рекомендательной фразой примерно раз в 250 запросов — то есть запрос доступа
+#: по ст. 14 152-ФЗ отвечался продажей, а журнал записывал это как «заблокировали
+#: утечку контакта».
+#:
+#: Что делает граница: совпадение не считается номером, если оно ПРИМЫКАЕТ к
+#: шестнадцатеричному символу (или к дефису слева, как внутри UUID). Настоящий
+#: номер в человеческом тексте стоит рядом с пробелом, началом строки или
+#: знаком препинания, а не приклеен к `bd2cd`.
+#:
+#: Цена, названная честно: номер, СПЕЦИАЛЬНО вписанный в hex-подобную обёртку
+#: (`…-4444-89991234567a`), больше не блокируется. Это неустранимо для любого
+#: правила «цифры внутри hex — не телефон»; выбор здесь между «ломаем выгрузку
+#: каждому 250-му» и «крафт в чужом поле проходит». Второе ловится глазами
+#: (`master.name` проверяется человеком), первое не ловилось три года.
+_HEX_LEFT = r"(?<![0-9a-fA-F\-])"
+_HEX_RIGHT = r"(?![0-9a-fA-F])"
+
 #: Contact details have no business in these replies.
 _CONTACTS = (
-    r"(?<!\d)(\+7|8)[\s\-(]*\d{3}[\s\-)]*\d{3}[\s\-]*\d{2}[\s\-]*\d{2}(?!\d)",
+    _HEX_LEFT + r"(\+7|8)[\s\-(]*\d{3}[\s\-)]*\d{3}[\s\-]*\d{2}[\s\-]*\d{2}" + _HEX_RIGHT,
     r"(?i)[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}",
 )
 
 #: A four-digit tail, written the way a truncated phone actually comes out:
 #: "4567", "45 67", "45-67". Never matched bare — only behind a marker below.
-_TAIL = r"(?<!\d)\d{2}[\s\-]?\d{2}(?!\d)"
+_TAIL = _HEX_LEFT + r"\d{2}[\s\-]?\d{2}" + _HEX_RIGHT
 
 #: What may sit between the marker and the tail: at most one possessive-ish
 #: word («номер телефона …», «телефон клиентки …») and a separator. The gap
@@ -114,17 +168,183 @@ _PARTIAL_PHONES = (
     rf"(?i)\bпоследние\s+(?:\d|четыре)\s+цифр\w*{_SEP}{_TAIL}",
 )
 
+#: Nagging / pressure shapes (DRF-1468, copy policy R2/R3). A proactive
+#: message must never scold, count absences, or score virtue: «не забывайте
+#: про цель», «давно не работали», «вы пропустили», streaks and counters.
+#: These read as reproach on a bad day, and an unsolicited reproach is the
+#: exact failure the shared anti-nag mechanism exists to prevent.
+#:
+#: «серия» is excluded only before «процедур»: a course of salon procedures
+#: is a legitimate service phrase, every other use here is a virtue counter.
+_NAG = (
+    r"(?i)\bне\s+забыва\w*\s+про\s+цель",
+    r"(?i)\bдавно\s+не\s+(работа\w*|писа\w*|записыва\w*|заходил\w*)",
+    r"(?i)\b(?:вы|ты)\s+пропустил\w*",
+    r"(?i)\bдн(?:ей|я|ень)\s+без\s+(?:срыв\w*|пропуск\w*)",
+    r"(?i)\bдн(?:ей|я|ень)\s+подряд",
+    r"(?i)\bсери[яиюе]\b(?!\s+процедур)",
+)
+
+#: Числительные словами и цифрами. Планировочная выдумка почти никогда
+#: не пишется цифрой: «три-четыре недели», «пара сеансов», «полтора
+#: месяца». Список без цифр ловил бы ровно половину случаев.
+_NUM = (
+    r"(?:\d+|одн\w+|дв[еа]|двух|тр[иё]|трёх|трех|четыр\w+|пят\w+|шест\w+|"
+    r"сем\w+|восьм\w+|восем\w+|девят\w+|десят\w+|полтора|полутора|пар[ауы])"
+)
+
+#: Единицы, которыми меряют план: время и штуки процедур.
+#:
+#: «день» перечислено ОТДЕЛЬНО, а не как `дн\w*`: в именительном падеже
+#: беглая гласная разрывает основу, и `дн` в слове «день» не встречается
+#: вовсе. Первая редакция ловила «дня» и «дней», а «за день до процедуры
+#: не загорайте» пропускала — молча, потому что ложный пропуск ничего не
+#: печатает.
+_DAY = r"(?:день|дн(?:я|ей|ю|ём|ем))"
+_UNIT = rf"(?:недел\w*|{_DAY}|сут(?:ок|ки)|месяц\w*|сеанс\w*|процедур\w*)"
+
+#: Модальность ДОЛЖЕНСТВОВАНИЯ — то, что отличает утверждение о норме от
+#: приглашения. «Приходите через месяц, если понравится» никакой нормы не
+#: утверждает и проходит; «между курсами нужно три-четыре недели» —
+#: утверждает, и утверждать нам это нечем.
+#:
+#: Ровно на этом различии стоит вся категория. Без модальности пришлось бы
+#: ловить любой интервал в тексте, и первым, что фильтр съел бы, стали бы
+#: живые человеческие фразы вроде «загляните на следующей неделе».
+_MODAL = (
+    r"(?:нужн\w*|необходим\w*|следует|требуется|должн\w*|обязательн\w*|"
+    r"рекоменд\w*|оптимальн\w*|минимум|минимальн\w*|положено|"
+    r"не\s+раньше|не\s+ранее|не\s+чаще|не\s+менее)"
+)
+
+#: Внутри ОДНОГО предложения: `[^.!?\n]` не пускает совпадение через точку.
+#: «Нужен мастер. Приходите через месяц» не должно читаться как норма
+#: интервала только потому, что оба слова оказались в одном ответе.
+_GAP = r"[^.!?\n]{0,60}"
+_QTY = rf"{_NUM}\s*(?:[-–—]\s*{_NUM}\s*)?{_UNIT}"
+
+#: Только ВРЕМЕННЫЕ единицы — без «процедур» и «сеансов». Нужно для формы
+#: без числа («нужно приходить через месяц»), где счёта нет вовсе.
+_TIME_UNIT = rf"(?:недел\w*|{_DAY}|сут(?:ок|ки)|месяц\w*|год|года|полгода)"
+
+#: Предлог интервала. Он и делает форму без числа безопасной: «нужно
+#: записаться на процедуру» модальность содержит, но интервала не
+#: утверждает и проходит; «приходить нужно через месяц» — утверждает.
+#: Без этого условия категория съела бы половину операционных фраз.
+_EVERY = r"(?:через|спустя|раз\s+в|кажд\w+)"
+
+_PLANNING = (
+    # норма → количество и обратно, в пределах предложения
+    rf"(?i)\b{_MODAL}\b{_GAP}\b{_QTY}",
+    rf"(?i)\b{_QTY}{_GAP}\b{_MODAL}\b",
+    # то же, но БЕЗ числа: «приходить нужно через месяц». Спасает предлог
+    # интервала — см. _EVERY.
+    rf"(?i)\b{_MODAL}\b{_GAP}\b{_EVERY}\s+(?:{_NUM}\s*)?{_TIME_UNIT}",
+    rf"(?i)\b{_EVERY}\s+(?:{_NUM}\s*)?{_TIME_UNIT}{_GAP}\b{_MODAL}\b",
+    # интервал и курс как утверждения сами по себе
+    r"(?i)\b(?:интервал\w*|перерыв\w*)\s+(?:между|в)\b",
+    rf"(?i)\bкурс\w*\s+из\s+{_NUM}",
+    r"(?i)\b(?:повтор\w*|приходит[ья]|записыва\w*)\s+(?:кажд\w+|раз\s+в)\b",
+    r"(?i)\bраз\s+в\s+(?:недел\w*|месяц\w*|полгода|год)\b",
+    # совместимость — OD-CI-4/CI-5: реестра нет и не будет, значит сказать нечего
+    r"(?i)\bнельзя\s+(?:совмещать|сочетать|делать\s+вместе)",
+    r"(?i)\b(?:не\s+)?совместим\w*\s+(?:с|со)\b",
+    r"(?i)\bнесовместим\w*",
+    # восстановление и подготовка
+    r"(?i)\b(?:восстановлени\w*|реабилитаци\w*|заживлени\w*)\s+"
+    r"(?:занима\w*|длит\w*|составля\w*|проходит|идёт|идет)",
+    # Подготовка: «за неделю до процедуры не загорайте». Числа может не
+    # быть вовсе («за сутки до»), поэтому единица допускается голой.
+    #
+    # Но одного «за N до» мало: «за день до визита напомню» — это про НАС
+    # и никакой нормы не утверждает. Поэтому требуется ещё и запрет либо
+    # предписание человеку. Без этого условия фильтр съел бы полезное
+    # напоминание, а такой фильтр выключают через неделю.
+    rf"(?i)\bза\s+(?:{_QTY}|{_UNIT})\s+до\b{_GAP}"
+    r"(?:нельзя|не\s+рекоменд\w*|не\s+стоит|воздержит\w*|откажит\w*|"
+    r"нужно|необходимо|"
+    r"не\s+(?:загора\w*|моч(?:и|ите)\w*|принима\w*|пейте|пить|ешьте|"
+    r"есть|употребля\w*|наноси\w*|брейте|брить))",
+    r"(?i)\bпосле\s+процедур\w*\s+(?:нельзя|не\s+рекомендуется|нужно|нельзя\s+будет)",
+)
+
 _CATEGORIES: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("medical", _MEDICAL),
     ("promise", _PROMISES),
     ("contact", _CONTACTS + _PARTIAL_PHONES),
+    ("nag", _NAG),
+    ("planning", _PLANNING),
 )
 
 #: What the person reads instead. Says the shape of the problem without
 #: pretending the assistant knows the answer.
+#: Owner §128 — the approved line, verbatim. It replaces a draft the check
+#: refused AND a draft the check could not look at, because the person must
+#: not be able to tell our judgement from our outage.
+#:
+#: Two prohibitions come with it, and both say the same thing — **a failed
+#: check is not an empty world**:
+#:
+#: * never «ничего не найдено» when the catalogue is not empty — our fault
+#:   must not read as a bare shelf;
+#: * never «не могу помочь» when a controlled continuation exists — our fault
+#:   must not read as the end of the conversation.
+#:
+#: The previous line («тут нужен человек… спросите администратора») broke the
+#: second one: it closed the conversation and handed the person an errand.
 REPLACEMENT_TEXT = (
-    "Не могу это ответить — тут нужен человек, а не помощник. Спросите администратора салона."
+    "Пока у меня недостаточно подтверждённых данных, чтобы уверенно "
+    "посоветовать конкретный вариант. Могу показать доступные услуги "
+    "или помочь уточнить, что тебе сейчас нужно."
 )
+
+#: The two continuations §128 names alongside the text. They are declared here
+#: and NOT yet carried by :class:`OutboundVerdict`, which has room for
+#: ``allowed``, ``text`` and ``categories`` and nothing else.
+#:
+#: Wiring them is a separate slice, and saying so is the point: adding a field
+#: quietly would make «the person was offered a way out» look delivered while
+#: no surface renders one. Until then the text names both continuations in
+#: prose, which the person can act on by saying so — the sentence is written
+#: to survive exactly this gap.
+OFFERED_CONTINUATIONS: tuple[str, ...] = ("Посмотреть услуги", "Уточнить запрос")
+
+#: DRF-2267 (CD §72) — подпись кнопки под подменённым ответом. «Посмотреть
+#: услуги» — первое продолжение §128, у него есть ветка: та же фраза, что у
+#: «Подобрать услугу». «Уточнить запрос» кнопкой не становится — ветки, которая
+#: бы на неё ответила, нет (DRF-1492); его место — в тексте.
+REPLACEMENT_SERVICES_LABEL = OFFERED_CONTINUATIONS[0]
+
+
+def replacement_action_data() -> dict:
+    """Клавиатура под подменённым ответом: «Посмотреть услуги» и «Меню».
+
+    Карточки черновика по-прежнему уходят вместе с текстом (ответ ЗАМЕНЯЕТСЯ,
+    а не правится); вместо них — продолжения, которые текст называет.
+    """
+    from apps.orchestrator.next_steps import (
+        discover_button,
+        menu_button,
+        next_step_action_data,
+    )
+
+    services = {**discover_button(), "label": REPLACEMENT_SERVICES_LABEL}
+    return next_step_action_data(services, menu_button())
+
+
+#: Category recorded when the check itself could not run. Deliberately not one
+#: of the content labels: an operator has to be able to separate "the draft
+#: matched a banned shape" from "we never got to look at the draft". The first
+#: says the model wrote something it should not; the second says our own check
+#: is broken. Same replacement line outward, different counters inward, and
+#: opposite fixes.
+CHECK_FAILED_CATEGORY = "check_failed"
+
+
+#: Категория, которую снимает признак «это собственные данные человека».
+#: Ровно одна: остальные классы к своим данным относятся так же, как к любому
+#: другому тексту, и их послабление было бы не починкой, а дырой.
+_OWN_DATA_EXEMPT = ("contact",)
 
 
 @dataclass(frozen=True)
@@ -134,40 +354,259 @@ class OutboundVerdict:
     allowed: bool
     text: str
     categories: tuple[str, ...] = field(default_factory=tuple)
+    #: Категории, которые ЗАБЛОКИРОВАЛИ БЫ ответ, но сняты признаком «это
+    #: собственные данные человека» (DRF-2435). Пусто в обычном случае. Нужны
+    #: журналу: «заблокировали чужой контакт» и «это свои данные, пропускаем» —
+    #: разные записи, и различать их обязан тот, кто читает журнал потом.
+    own_data_categories: tuple[str, ...] = field(default_factory=tuple)
 
     @property
     def blocked(self) -> bool:
         return not self.allowed
 
 
-def evaluate_outbound(text: str) -> OutboundVerdict:
+def evaluate_outbound(text: str, *, subject_own_data: bool = False) -> OutboundVerdict:
     """Check a drafted reply before it reaches a person.
 
-    Returns the original text when clean, and :data:`REPLACEMENT_TEXT`
-    with the matched categories when not. Never raises: a crash in a
-    safety check must not be the thing that costs someone their answer.
+    Returns the original text when clean, and :data:`REPLACEMENT_TEXT` when
+    not — whether "not" means a category matched or the check could not run
+    at all. Never raises: a crash here must not propagate into the turn.
+
+    ``subject_own_data`` (DRF-2435) — этот черновик есть собственные данные
+    человека, отданные ему по его же просьбе (ответ выгрузки по ст. 14
+    152-ФЗ). Тогда класс ``contact`` к нему не применяется: его телефон в его
+    выгрузке — не утечка чужого контакта, а предмет запроса.
+
+    Признак приходит ОТ МЕСТА, ГДЕ АРХИВ СОБИРАЕТСЯ
+    (``SkillResult.subject_own_data``), и не выводится из формы текста.
+    Угадывание по форме было бы тем же шаблоном с другой стороны и ошибалось
+    бы так же — этот лист начался именно с такой ошибки.
+
+    Послабление узкое по КЛАССУ и по ОБЛАСТИ: снимается ровно ``contact`` (см.
+    ``_OWN_DATA_EXEMPT``) и только для этого черновика. Прочие классы
+    (медицина, обещания, давление, планирование) применяются как ко всякому
+    другому тексту, и ``check_failed`` по-прежнему закрывается наглухо.
+
+    Чего оно НЕ делает узким: внутри помеченного черновика проходит ЛЮБОЙ
+    номер, включая написанный человекочитаемо и включая чужой. Это названо
+    решением, а не побочным эффектом — см.
+    ``TestWhatThePersonGetsInTheirOwnArchive``: прятать номер в собственной
+    выгрузке значило бы повторить тот же дефект шире, а остаточный случай
+    (номер третьего лица, который человек сам переписал в чат) вынесен
+    владельцу. Если он решит прятать — правка одной строки здесь.
+    """
+
+    body = text or ""
+    if not body.strip():
+        # Nothing drafted, so nothing to check and nothing to send. Replacing
+        # an empty draft would turn a no-op into a message the person never
+        # had coming.
+        return OutboundVerdict(allowed=True, text=body)
+
+    hits: list[str] = []
+    exempt: list[str] = []
+    try:
+        for label, patterns in _CATEGORIES:
+            if any(re.search(p, body) for p in patterns):
+                if subject_own_data and label in _OWN_DATA_EXEMPT:
+                    exempt.append(label)
+                    continue
+                hits.append(label)
+    except Exception:  # noqa: BLE001 — a crash must not raise into the turn
+        # The check did not run, so nothing is known about this draft.
+        # Sending it anyway was the old behaviour, and its reasoning was sound
+        # as far as it went: a crash in a safety check must not cost someone
+        # their answer.
+        #
+        # What that reasoning missed is that those were never the only two
+        # options. :data:`REPLACEMENT_TEXT` already exists, so the choice is
+        # not "send the unchecked text" versus "say nothing" — it is "send the
+        # unchecked text" versus "send the safe line". The person still gets
+        # an answer; it is simply not the one we were unable to check.
+        #
+        # Owner §111: Safety uncertain → fail closed for the AFFECTED
+        # capability, not for the product. This is exactly that, scoped to one
+        # capability: this draft.
+        #
+        # The category is :data:`CHECK_FAILED_CATEGORY` rather than one of the
+        # content labels on purpose. "Replaced because it matched" and
+        # "replaced because we could not look" are different states with
+        # opposite fixes, and an operator reading the audit a month from now
+        # has to tell them apart. Outward both are the same line; inward they
+        # are separate counters.
+        logger.exception("safety.outbound.check_failed")
+        return OutboundVerdict(
+            allowed=False,
+            text=REPLACEMENT_TEXT,
+            categories=(CHECK_FAILED_CATEGORY,),
+        )
+
+    if not hits:
+        # Запись о пропуске своих данных пишет ШЛЮЗ (`safety.gate`), а не этот
+        # модуль: у него есть `surface` и `trace`, и одно имя события должно
+        # иметь ровно один смысл. Два писателя давали «два раза на пропуск,
+        # один раз на пропуск-при-блокировке, один на прямой вызов» — три
+        # разных значения одного счётчика (найдено ревью DRF-2435).
+        return OutboundVerdict(
+            allowed=True,
+            text=body,
+            own_data_categories=tuple(exempt),
+        )
+
+    # Category only. Logging the sentence would copy the thing we just
+    # decided not to show anyone.
+    logger.warning("safety.outbound.blocked categories=%s len=%d", ",".join(hits), len(body))
+    return OutboundVerdict(
+        allowed=False,
+        text=REPLACEMENT_TEXT,
+        categories=tuple(hits),
+        own_data_categories=tuple(exempt),
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Обещание действия без действия (DRF-1827)                                   #
+# --------------------------------------------------------------------------- #
+#
+# Диалог владельца 12.09 (DRF-1754): «ну я назвал тебе конкретное место —
+# спина» → «Ты прав, прости! Сейчас проверю.»; «и?» → «Прости за задержку —
+# запускаю проверку.» Ничего не проверялось и не запускалось: в обоих
+# случаях проза стояла РЯДОМ с вызовом инструмента, инструмент отказал, а
+# слова ушли в чат. Категории выше (медицина, гарантии салона, контакты) про
+# другое; а сторож консьержа ``_looks_like_promise_without_tool`` зовётся
+# только на первом проходе и только когда вызова инструмента НЕТ — здесь
+# он был.
+#
+# Этот класс — отдельный, а не строка в ``_CATEGORIES``: обещание действия
+# честно там, где действие СОСТОЯЛОСЬ («покажу ещё» после сработавшего
+# show_masters), и только вызывающий знает, состоялось ли. Поэтому
+# :func:`evaluate_action_promise` вызывается с явным ``acted=False`` из
+# :func:`apps.orchestrator.safety.gate.guard_outbound`, а не из общего
+# прохода по категориям.
+
+#: Обязательства первого лица действовать и маркеры ожидания. Список
+#: намеренно УЖЕ старого legacy (голые основы «подбер», «посмотр» ловили
+#: императивы клиенту: «подберите время»); совпадает с
+#: ``concierge._PROMISE_STEMS`` (DRF-1286) плюс «запускаю/запущу» из живого
+#: хода 12.09. Подстрочный поиск по нижнему регистру — основы, не слова.
+ACTION_PROMISE_STEMS: tuple[str, ...] = (
+    # обязательство первого лица
+    "подберу",
+    "подберем",
+    "подберём",
+    "подбираю",
+    "подбираем",
+    "посмотрю",
+    "посмотрим",
+    "гляну",
+    "глянем",
+    "уточню",
+    "уточним",
+    "найду",
+    "поищу",
+    "покажу",
+    "покажем",
+    "проверю",
+    "проверим",
+    "запускаю",
+    "запущу",
+    "помогу подобрать",
+    "помогу выбрать",
+    # явное ожидание — ассистент, просящий подождать без вызова
+    # инструмента, всегда ошибка: ничего не выполняется
+    "секундочк",
+    "минуточк",
+    "минутку",
+    "одну минут",
+    "одну секунд",
+    "подождит",
+    "подожди",
+    # «вот варианты» — объявляет результат, которого без вызова нет
+    "вот вариант",
+    "вот кто",
+    "вот подходящ",
+    # то же обещание в совместной форме
+    "давайте подбер",
+    "давай подбер",
+    "давайте уточн",
+    "давай уточн",
+    # DRF-1268 — глаголы записи: та форма обещания, которую притягивают
+    # nutrition-инструменты («записываю 200 мл воды» без вызова log_water)
+    "запишу",
+    "запишем",
+    "записываю",
+    "сохраню",
+    "сохраним",
+    "сохраняю",
+    "зафиксирую",
+    "зафиксируем",
+    "оформлю",
+    "оформим",
+    "заполню",
+    "заполним",
+    "заведу",
+    # Намеренно НЕ здесь: «добавлю» / «отмечу» — обычные вводные («Добавлю,
+    # что цены могут отличаться»), срабатывали бы на верных ответах словами.
+)
+
+ACTION_PROMISE_CATEGORY = "action_promise"
+
+#: Что уходит вместо обещания: чего не умею — и что могу прямо сейчас.
+#: Текст персоны — окно клиентской поверхности вправе переформулировать;
+#: смысл (не умею X / умею Y, без «подожди») — решение владельца (бриф
+#: окна «Мозг», п.3).
+ACTION_PROMISE_TEXT = (
+    "Проверять или искать «в фоне» я не умею — отвечаю сразу тем, что знаю. "
+    "Прямо сейчас могу показать мастеров по услуге и городу, рассказать про "
+    "салоны и услуги или начать запись к названному мастеру. Что сделать?"
+)
+
+
+def looks_like_action_promise(text: str | None) -> bool:
+    """Обещает ли проза действие («проверю», «запускаю», «секундочку»)."""
+
+    if not text:
+        return False
+    body = text.lower()
+    return any(stem in body for stem in ACTION_PROMISE_STEMS)
+
+
+def evaluate_action_promise(text: str) -> OutboundVerdict:
+    """Проверка черновика на обещание действия, которого не было.
+
+    Вызывать ТОЛЬКО когда на этом ходу ни один инструмент не сработал —
+    решает вызывающий (``acted=False``). Никогда не бросает: крах проверки
+    здесь, как и в :func:`evaluate_outbound`, закрывается заменой, а не
+    пропуском непроверенного.
     """
 
     body = text or ""
     if not body.strip():
         return OutboundVerdict(allowed=True, text=body)
-
-    hits: list[str] = []
     try:
-        for label, patterns in _CATEGORIES:
-            if any(re.search(p, body) for p in patterns):
-                hits.append(label)
-    except Exception:  # noqa: BLE001 — a broken regex must not eat the turn
-        logger.exception("safety.outbound.check_failed")
+        promised = looks_like_action_promise(body)
+    except Exception:  # noqa: BLE001 — крах не должен подняться в ход
+        logger.exception("safety.outbound.action_promise_check_failed")
+        return OutboundVerdict(
+            allowed=False, text=ACTION_PROMISE_TEXT, categories=(CHECK_FAILED_CATEGORY,)
+        )
+    if not promised:
         return OutboundVerdict(allowed=True, text=body)
-
-    if not hits:
-        return OutboundVerdict(allowed=True, text=body)
-
-    # Category only. Logging the sentence would copy the thing we just
-    # decided not to show anyone.
-    logger.warning("safety.outbound.blocked categories=%s len=%d", ",".join(hits), len(body))
-    return OutboundVerdict(allowed=False, text=REPLACEMENT_TEXT, categories=tuple(hits))
+    logger.warning("safety.outbound.action_promise len=%d", len(body))
+    return OutboundVerdict(
+        allowed=False, text=ACTION_PROMISE_TEXT, categories=(ACTION_PROMISE_CATEGORY,)
+    )
 
 
-__all__ = ["REPLACEMENT_TEXT", "OutboundVerdict", "evaluate_outbound"]
+__all__ = [
+    "ACTION_PROMISE_CATEGORY",
+    "ACTION_PROMISE_STEMS",
+    "ACTION_PROMISE_TEXT",
+    "CHECK_FAILED_CATEGORY",
+    "OFFERED_CONTINUATIONS",
+    "REPLACEMENT_TEXT",
+    "OutboundVerdict",
+    "evaluate_action_promise",
+    "evaluate_outbound",
+    "looks_like_action_promise",
+]

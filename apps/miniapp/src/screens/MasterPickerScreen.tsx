@@ -7,9 +7,19 @@ import { ScreenLayout } from "../components/ScreenLayout";
 import { MasterCard } from "../components/MasterCard";
 import { DelayedSkeleton, MasterCardSkeleton } from "../components/Skeleton";
 import { StateError } from "../components/StateError";
-import { useBackButton } from "../hooks/useBackButton";
 import { useHaptics } from "../hooks/useHaptics";
-import { setMaster, useBookingDraft } from "../state/booking";
+import { setEntryPoint, setMaster, useBookingDraft } from "../state/booking";
+import { backTo } from "../lib/screen-back";
+
+/**
+ * Возврат (DRF-1493): в каталог — шаг назад сценария записи.
+ *
+ * Адрес канонический (`/customer/catalog`), как и у карточки услуги
+ * (`ServiceDetailScreen`), с которой сюда и приходят. §31 оставил этот
+ * экран жить навсегда — значит и его возврат обязан вести в живое
+ * поколение, а не в `/catalog` прежнего.
+ */
+const BACK = backTo("/customer/catalog");
 
 type State =
   | { kind: "loading" }
@@ -22,7 +32,6 @@ export function MasterPickerScreen() {
   const haptics = useHaptics();
   const [state, setState] = useState<State>({ kind: "loading" });
 
-  useBackButton({ onBack: () => navigate(-1) });
 
   const load = useCallback(() => {
     if (!draft.serviceId) return;
@@ -42,7 +51,7 @@ export function MasterPickerScreen() {
 
   useEffect(() => {
     if (!draft.serviceId) {
-      navigate("/catalog", { replace: true });
+      navigate("/customer/catalog", { replace: true });
       return;
     }
     return load();
@@ -50,13 +59,19 @@ export function MasterPickerScreen() {
 
   function onPick(m: Master) {
     haptics.selection();
+    // DRF-1484 — provenance: подбор мастера (§31: `/customer/book/master`,
+    // алиас `/book/master`) reachable only from the
+    // service detail (catalog) flow, so the draft originates at the
+    // catalog. Stamped here because ServiceDetailScreen is owned by
+    // another change window; both spots stamp the same value.
+    setEntryPoint("catalog");
     setMaster(m.id, m.name);
-    navigate("/book/when");
+    navigate("/customer/book/when");
   }
 
   if (state.kind === "loading") {
     return (
-      <ScreenLayout title="Кто сделает">
+      <ScreenLayout back={BACK} title="Кто сделает">
         <DelayedSkeleton loading>
           <MasterCardSkeleton />
           <MasterCardSkeleton />
@@ -68,7 +83,7 @@ export function MasterPickerScreen() {
 
   if (state.kind === "error") {
     return (
-      <ScreenLayout title="Кто сделает">
+      <ScreenLayout back={BACK} title="Кто сделает">
         <StateError err={state.err} onRetry={load} screenId="masters" />
       </ScreenLayout>
     );
@@ -76,14 +91,14 @@ export function MasterPickerScreen() {
 
   if (state.masters.length === 0) {
     return (
-      <ScreenLayout title="Кто сделает">
+      <ScreenLayout back={BACK} title="Кто сделает">
         <div className="callout">
           <p style={{ margin: 0 }}>У этой услуги пока нет доступных мастеров.</p>
           <button
             type="button"
             className="btn-secondary"
             style={{ marginTop: "var(--s-3)" }}
-            onClick={() => navigate("/catalog", { replace: true })}
+            onClick={() => navigate("/customer/catalog", { replace: true })}
           >
             Другие услуги
           </button>
@@ -93,7 +108,7 @@ export function MasterPickerScreen() {
   }
 
   return (
-    <ScreenLayout title="Кто сделает">
+    <ScreenLayout back={BACK} title="Кто сделает">
       {state.masters.map((m) => (
         <MasterCard
           key={m.id}

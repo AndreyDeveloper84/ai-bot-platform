@@ -1,5 +1,5 @@
 import type { Service } from "../lib/api";
-import { formatDuration, formatMoney } from "../lib/format";
+import { formatDuration, priceFromLabel } from "../lib/format";
 import { UNBOOKABLE_NOTE, UnbookableBadge } from "./UnbookableNote";
 
 interface Props {
@@ -14,7 +14,11 @@ export function ServiceCard({ service, onSelect }: Props) {
   // list. The aria-label carries the same fact — a screen-reader user must
   // not have to render the badge visually to know.
   const unbookable = !service.is_bookable;
-  const meta = `${formatDuration(service.duration_min)}, ${formatMoney(service.price_from)}`;
+  // DRF-1989 — цена ниже 1 ₽ не рисуется ни на карточке, ни в aria-label.
+  const price = priceFromLabel(service.price_from);
+  const meta = price
+    ? `${formatDuration(service.duration_min)}, ${price}`
+    : formatDuration(service.duration_min);
   return (
     <button
       type="button"
@@ -29,8 +33,8 @@ export function ServiceCard({ service, onSelect }: Props) {
       <div className="service-card__name">{service.name}</div>
       <div className="service-card__meta">
         {formatDuration(service.duration_min)}
-        {service.duration_min && service.price_from ? " • " : ""}
-        {formatMoney(service.price_from)}
+        {service.duration_min && service.price_from && price ? " • " : ""}
+        {price}
       </div>
       {unbookable && <UnbookableBadge />}
     </button>

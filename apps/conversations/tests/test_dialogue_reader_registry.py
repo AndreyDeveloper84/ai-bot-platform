@@ -45,7 +45,12 @@ from apps.identity.models import BotUser
 from apps.orchestrator.memory import short_term
 from apps.tenancy.models import Tenant
 
-pytestmark = pytest.mark.django_db(transaction=True)
+# DRF-2220 — erasure also purges the ingress streams; this file is not
+# about them, so they are empty and need no Redis (apps/conftest.py).
+pytestmark = [
+    pytest.mark.django_db(transaction=True),
+    pytest.mark.usefixtures("ingress_streams_empty"),
+]
 
 APPS_ROOT = Path(__file__).resolve().parents[2]
 
@@ -74,6 +79,12 @@ class _FakeRedis:
             def rpush(self, key, value):
                 self.ops.append(("rpush", key, value))
 
+            # DRF-2511: `append` читает уходящее тем же конвейером, поэтому
+            # модель Redis обязана знать `lrange`. Без него стенд краснел на
+            # отсутствии метода — то есть на себе, а не на предмете.
+            def lrange(self, key, start, end):
+                self.ops.append(("lrange", key, start, end))
+
             def ltrim(self, key, start, end):
                 self.ops.append(("ltrim", key, start, end))
 
@@ -81,12 +92,20 @@ class _FakeRedis:
                 self.ops.append(("expire", key, ttl))
 
             def execute(self):
+                out: list = []
                 for op in self.ops:
                     if op[0] == "rpush":
                         outer.store.setdefault(op[1], []).append(op[2])
+                        out.append(None)
                     elif op[0] == "ltrim":
                         outer.store[op[1]] = outer.store.get(op[1], [])[op[2] :]
+                        out.append(None)
+                    elif op[0] == "lrange":
+                        out.append(outer.lrange(op[1], op[2], op[3]))
+                    else:
+                        out.append(None)
                 self.ops = []
+                return out
 
         return _Pipe()
 
@@ -109,6 +128,8 @@ def fake_redis(monkeypatch) -> _FakeRedis:
     fake = _FakeRedis()
     monkeypatch.setattr(short_term, "_redis_client", lambda: fake)
     monkeypatch.setattr(pii_tokenizer, "_redis_client", lambda: fake)
+    # DRF-2214 — «забудь всё» снимает и состояние движка готовности (dre:state).
+    monkeypatch.setattr("apps.orchestrator.decision_readiness.state._redis_client", lambda: fake)
     return fake
 
 
@@ -186,21 +207,6 @@ def erased(seeded) -> Conversation:
 # ---------------------------------------------------------------------------
 
 
-def _probe_ai_drafts_history(conversation: Conversation) -> str:
-    from apps.master_api.services.ai_drafts import _recent_history
-
-    return " ".join(
-        f"{m.content or ''} {m.rendered_text or ''}" for m in _recent_history(conversation)
-    )
-
-
-def _probe_ai_drafts_latest(conversation: Conversation) -> str:
-    from apps.master_api.services.ai_drafts import _latest_customer_message
-
-    msg = _latest_customer_message(conversation)
-    return "" if msg is None else f"{msg.content or ''} {msg.rendered_text or ''}"
-
-
 def _probe_handler_retry_text(conversation: Conversation) -> str:
     from apps.channels.max.handler import _last_user_content
 
@@ -240,8 +246,6 @@ def _probe_concierge_store_history(conversation: Conversation) -> str:
 
 
 PROBES: dict[str, Callable[[Conversation], str]] = {
-    "apps.master_api.services.ai_drafts:_recent_history": _probe_ai_drafts_history,
-    "apps.master_api.services.ai_drafts:_latest_customer_message": _probe_ai_drafts_latest,
     "apps.channels.max.handler:_last_user_content": _probe_handler_retry_text,
     "apps.channels.max.handler:_last_clarification_offer": _probe_handler_clarification,
     "apps.channels.max.handler:_handle_global_max_event_inner": _probe_max_prompt_window,

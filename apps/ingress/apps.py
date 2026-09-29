@@ -4,3 +4,4 @@ from django.apps import AppConfig
 class IngressConfig(AppConfig):
     default_auto_field = "django.db.models.BigAutoField"
     name = "apps.ingress"
+    verbose_name = "Служебное: входящие сообщения"

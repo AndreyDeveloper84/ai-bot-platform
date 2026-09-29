@@ -1,18 +1,19 @@
 /**
- * Gate tests for `CustomerWellnessDashboardScreen`.
+ * Layout + honesty tests for `CustomerWellnessDashboardScreen`.
  *
- * The reads are wired to the backend now, so the dashboard no longer
- * invents anyone's day. The gate itself is unchanged and still under
- * test: prod renders the honest `PilotComingSoonScreen` until the
- * owner lifts it.
+ * The reads are wired to the backend, so the dashboard no longer
+ * invents anyone's day. The screen-level gate came off with DRF-1546
+ * (решение владельца §24.2 + §34) — a prod build now renders the real
+ * home screen, and the tests below hold that open in both directions:
+ * the screen must render, AND nothing without a live handle may come
+ * back with it.
  *
  * The reads are mocked here rather than left to hit the network — this
- * file is about the gate and the layout, and a screen test that also
- * exercised HTTP would fail for reasons that have nothing to do with
- * either.
+ * file is about the layout, and a screen test that also exercised HTTP
+ * would fail for reasons that have nothing to do with it.
  */
-import { render, screen } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { fireEvent, render, screen, within } from "@testing-library/react";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../lib/customer-booking", async (importOriginal) => {
@@ -23,8 +24,16 @@ vi.mock("../lib/customer-booking", async (importOriginal) => {
   };
 });
 
-vi.mock("../lib/max-sdk", () => ({ getInitData: () => "test-init-data" }));
+// DRF-1493: экран объявляет свой вид через `useScreenBack`, а тот
+// заводит аппаратную кнопку MAX — мок должен отдавать и её ручки,
+// иначе тест падает на отсутствующем экспорте, а не на поведении.
+vi.mock("../lib/max-sdk", () => ({
+  getInitData: () => "test-init-data",
+  setBackButton: () => undefined,
+  onBackButton: () => () => undefined,
+}));
 
+import { authErrorCopy } from "../lib/auth-error-copy";
 import { getCatalogBrowse } from "../lib/customer-booking";
 
 const mockedBrowse = vi.mocked(getCatalogBrowse);
@@ -43,7 +52,43 @@ function useDevStubData() {
   window.history.replaceState({}, "", "/customer/main?stub=default");
 }
 
-/** Fetch must never be reached in these tests — if it is, the stub
+/**
+ * Payload for the prod-build cases. A production bundle ignores `?stub=`
+ * by design (`pickStubOrLive` returns `null` unconditionally there), so
+ * those cases are served over `fetch`, exactly like the DRF-1476 ones
+ * further down.
+ */
+function serveLiveHome(today: Record<string, unknown> = {}) {
+  const body = {
+    calories_eaten: 1240,
+    calories_target: 2100,
+    pfc: { protein_g: 65, fat_g: 40, carbs_g: 120 },
+    water_glasses_eaten: 4,
+    water_glasses_target: 8,
+    active_goals: [],
+    display_name: "Анна",
+    ...today,
+  };
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: unknown) => {
+      const u = String(url);
+      const payload = u.includes("/wellness/today")
+        ? body
+        : u.includes("/recent-activity")
+          ? { this_week_booking_count: 0 }
+          : null;
+      if (payload === null) throw new Error(`unexpected fetch: ${u}`);
+      return {
+        ok: true,
+        status: 200,
+        json: async () => payload,
+      } as unknown as Response;
+    }),
+  );
+}
+
+/** Fetch must never be reached in the DEV cases — if it is, the stub
  *  selection above silently stopped working and the test would go
  *  green against real network shape instead of the layout. */
 function forbidNetwork() {
@@ -72,7 +117,7 @@ async function renderScreen(prod: boolean) {
   }
 }
 
-describe("CustomerWellnessDashboardScreen gating", () => {
+describe("CustomerWellnessDashboardScreen — the home surface", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
     vi.unstubAllEnvs();
@@ -80,25 +125,103 @@ describe("CustomerWellnessDashboardScreen gating", () => {
       services: [],
       masters: [],
       picks: [],
+      picksOutcome: "OK",
     });
     useDevStubData();
     forbidNetwork();
   });
 
-  it("DEV build: renders the wellness stub surface as before", async () => {
+  it("DEV build: renders the dashboard", async () => {
+    // Узел ПЕРЕВЁРНУТ (DRF-2330): раньше «экран отрисовался» доказывалось
+    // строкой «Вода: N из 7 дней» СНЯТОГО «Прогресса недели» (Д31 в,
+    // решение владельца 22.09). Доказательство переехало на полосу
+    // дневника — она на экране осталась и по макету стоит последней.
     await renderScreen(false);
-    expect(await screen.findByText(/Вода:/)).toBeInTheDocument();
+    expect(await screen.findByText(/стаканов/)).toBeInTheDocument();
+    expect(screen.queryByText(/выдуманных данных/)).not.toBeInTheDocument();
+  }, 15_000);
+
+  it("prod build: renders the SAME dashboard — the gate is off (DRF-1546)", async () => {
+    // До DRF-1546 здесь рисовался `PilotComingSoonScreen`, и человек на
+    // «Главной» видел «скоро будет» вместо своего дня.
+    serveLiveHome();
+    await renderScreen(true);
+    expect(await screen.findByText(/4 \/ 8 стаканов/)).toBeInTheDocument();
+    expect(screen.getByText(/1240 \/ 2100 ккал/)).toBeInTheDocument();
+    // NEGATIVE (парная): заглушки больше нет.
     expect(screen.queryByText(/выдуманных данных/)).not.toBeInTheDocument();
   });
 
-  it("prod build: renders the honest placeholder, never fake wellness data", async () => {
+  it("prod build: the 📸 quick action is GONE, the ones with handles stay", async () => {
+    // Правило владельца §33 / DRF-1543: за «📸 Сфотографируй еду» нет
+    // ручки (`/api/v1/customer/food/*` = 404, `guardProd` бросает вне
+    // DEV), поэтому её на главной нет. Парная положительная стража —
+    // остальные быстрые действия обязаны работать, иначе «починить»
+    // можно было бы, опустошив блок.
+    serveLiveHome();
     await renderScreen(true);
+    expect(await screen.findByText(/4 \/ 8 стаканов/)).toBeInTheDocument();
+
+    // Смотрим ровно в блок быстрых действий (H01, DRF-2144: пять по фризу).
+    const qa = within(screen.getByRole("region", { name: "Быстрые действия" }));
+    // NEGATIVE: кнопки, ведущей на падающий экран, нет.
     expect(
-      await screen.findByRole("heading", { name: "Главная" }),
+      qa.queryByRole("button", { name: "Сфотографируй еду" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText(/Сфотографируй еду/)).not.toBeInTheDocument();
+    // POSITIVE (парная): действия с живыми ручками на месте.
+    expect(qa.getByRole("button", { name: "Добавить стакан воды" })).toBeInTheDocument();
+    expect(qa.getByRole("button", { name: "Записать питание" })).toBeInTheDocument();
+    expect(qa.getByRole("button", { name: "Новая запись" })).toBeInTheDocument();
+    // Цель — в карточке цели, не в быстрых действиях (DRF-2144 п.4).
+    expect(qa.queryByRole("button", { name: "Выбери цель" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Выбери цель" })).toBeInTheDocument();
+  });
+
+  it("вкладка «Дневник» ведёт на экран дневника (DRF-1839 → DRF-2144)", async () => {
+    // До DRF-1839 входа в дневник с главной не было ни одного: записи из
+    // чата человек в Mini App не видел. С DRF-2144 вход — вкладка панели.
+    // Проверяется переход, а не кнопка — кнопка без маршрута была бы той
+    // же дырой в новой обёртке.
+    vi.resetModules();
+    const { CustomerWellnessDashboardScreen } = await import(
+      "./CustomerWellnessDashboardScreen"
+    );
+    render(
+      <MemoryRouter initialEntries={["/customer/main"]}>
+        <Routes>
+          <Route path="/customer/main" element={<CustomerWellnessDashboardScreen />} />
+          <Route
+            path="/customer/food-scanner/diary"
+            element={<div>экран дневника</div>}
+          />
+        </Routes>
+      </MemoryRouter>,
+    );
+    const nav = within(await screen.findByRole("navigation", { name: "Основная навигация" }));
+    fireEvent.click(nav.getByRole("button", { name: "Дневник" }));
+    expect(await screen.findByText("экран дневника")).toBeInTheDocument();
+  });
+
+  it("prod build: «Главная» is the active tab and «День» is not offered", async () => {
+    // Поверхности «День» не существует — её роль исполнял этот экран.
+    serveLiveHome();
+    await renderScreen(true);
+    expect(await screen.findByText(/4 \/ 8 стаканов/)).toBeInTheDocument();
+
+    const nav = screen.getByRole("navigation", { name: "Основная навигация" });
+    expect(
+      within(nav).getByRole("button", { name: "Главная", current: "page" }),
     ).toBeInTheDocument();
-    expect(screen.getByText(/выдуманных данных/)).toBeInTheDocument();
-    expect(screen.queryByText(/Вода:/)).not.toBeInTheDocument();
-    expect(screen.queryByText(/Питание:/)).not.toBeInTheDocument();
+    // NEGATIVE (парная): мёртвой вкладки нет...
+    expect(
+      within(nav).queryByRole("button", { name: "День" }),
+    ).not.toBeInTheDocument();
+    // ...а живые вкладки на месте — ровно пять по макету H01 (§55 б).
+    for (const tab of ["План", "Дневник", "Записи", "Профиль"]) {
+      expect(within(nav).getByRole("button", { name: tab })).toBeInTheDocument();
+    }
+    expect(within(nav).getAllByRole("button")).toHaveLength(5);
   });
 
   const PEDIKYUR = {
@@ -114,19 +237,54 @@ describe("CustomerWellnessDashboardScreen gating", () => {
     is_bookable: true,
   };
 
-  it("DEV build, Block 7: renders scorer picks WITH the WHY the source sent", async () => {
+  // Узел ПЕРЕВЁРНУТ (DRF-2330, Д31 г): полка «Ayla подобрала тебе» снята С
+  // ЭКРАНА решением владельца 22.09.
+  //
+  // Сюда же переехал предмет снятого файла `…price.test.tsx`: пока полки
+  // нет, её цену на Главной проверять не на чем, и узел «не пишет „от 0 ₽"»
+  // стал бы пустым — он дублировал бы отсутствие полки. Само правило
+  // DRF-1989 (цена ниже 1 ₽ не округляется в «0 ₽») осталось под сторожем
+  // `ServiceDetailScreen.price.test.tsx` на карточке услуги. Вернётся полка
+  // — вернётся и её ценовой узел. Код полки НЕ удалён — вопрос 40 от
+  // 20.09 (снимать совсем или оставить обездвиженной) у владельца, и
+  // включение — одна строка в `lib/ayla-picks-shelf`. Поэтому узел пинит
+  // ОТСУТСТВИЕ НА ЭКРАНЕ при полноценном ответе источника: если полку
+  // вернут, не ответив на вопрос 40, он покраснеет.
+  it("DEV build, Block 7: за подбором не ходят, и полки нет", async () => {
     mockedBrowse.mockResolvedValue({
       services: [PEDIKYUR],
       masters: [],
-      picks: [{ serviceId: "svc-2", reasons: ["Свободно раньше всех остальных"] }],
+      picks: [
+        {
+          serviceId: "svc-2",
+          tier: 1,
+          rank: 1,
+          reasonCodes: ["EXEC_SLOT_CONFIRMED_IN_WINDOW"],
+          reasons: ["Есть свободное время в нужном окне"],
+        },
+      ],
+      picksOutcome: "OK",
     });
     await renderScreen(false);
+    // Присутствие: экран отрисован — значит отсутствие ниже про решение,
+    // а не про пустой рендер.
+    //
+    // Прежде присутствием служил сам запрос («подборка пришла с
+    // объяснением»), и имя узла обещало, что объяснённый подбор НЕ
+    // доезжает до экрана. DRF-2348 снял запрос (§172, ответ 40) — подбор
+    // теперь не выезжает из мока вовсе, и прежнее имя стало неправдой.
+    //
+    // Что перестало проверяться: «данные есть, а полка тёмная» —
+    // состояние недостижимое, раз данные кладёт только зажжённая полка.
+    // Фикстура ниже сегодня ИНЕРТНА: она описывает, что источник ответил
+    // бы, и делает возврат полки правкой одной строки — но ни одно
+    // утверждение этого узла ею не движется.
+    expect(await screen.findByText(/стаканов/)).toBeInTheDocument();
+    expect(mockedBrowse).not.toHaveBeenCalled();
     expect(
-      await screen.findByRole("heading", { name: /Ayla подобрала тебе/ }),
-    ).toBeInTheDocument();
-    expect(screen.getByText("Педикюр")).toBeInTheDocument();
-    expect(screen.getByText(/2 200 ₽/)).toBeInTheDocument();
-    expect(screen.getByText("Свободно раньше всех остальных")).toBeInTheDocument();
+      screen.queryByRole("heading", { name: /Ayla подобрала тебе/ }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("Педикюр")).not.toBeInTheDocument();
   });
 
   // Owner ruling 25.08 — same gate on the second branded surface.
@@ -135,13 +293,1261 @@ describe("CustomerWellnessDashboardScreen gating", () => {
       services: [PEDIKYUR],
       masters: [],
       picks: [],
+      picksOutcome: "OK",
     });
     await renderScreen(false);
-    // Dashboard itself still renders.
-    expect(await screen.findByText(/Вода:/)).toBeInTheDocument();
+    // Dashboard itself still renders. Проверка переехала со строки снятого
+    // «Прогресса недели» на полосу дневника (DRF-2330).
+    expect(await screen.findByText(/стаканов/)).toBeInTheDocument();
     expect(
       screen.queryByRole("heading", { name: /Ayla подобрала тебе/ }),
     ).not.toBeInTheDocument();
     expect(screen.queryByText("Педикюр")).not.toBeInTheDocument();
+  });
+});
+
+
+/**
+ * DRF-1476 — the dashboard must not contradict the goal screen.
+ *
+ * Owner walkthrough 2026-09-05: a goal was chosen and active, and this
+ * dashboard offered «Выбери цель». `active_goals` was hardcoded `[]`.
+ *
+ * These tests drive the REAL read path (no `?stub=`), stubbing `fetch`,
+ * so they cover the lib→screen wiring and not just the renderer. Every
+ * «the CTA is gone» assertion is paired with a «the CTA is there» case
+ * on the same code path — a fix that hid the CTA from everyone would
+ * pass the first and fail the second.
+ */
+describe("CustomerWellnessDashboardScreen — goal truthfulness (DRF-1476)", () => {
+  const BASE_TODAY = {
+    calories_eaten: 777,
+    calories_target: 1900,
+    water_glasses_eaten: 3,
+    water_glasses_target: 8,
+    display_name: "Анна",
+  };
+
+  /** Route by URL so all three reads resolve; unknown URLs fail loudly. */
+  function serve(today: unknown, activity: unknown) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: unknown) => {
+        const u = String(url);
+        const body = u.includes("/wellness/today")
+          ? today
+          : u.includes("/recent-activity")
+            ? activity
+            : null;
+        if (body === null) throw new Error(`unexpected fetch: ${u}`);
+        return { ok: true, status: 200, json: async () => body } as unknown as Response;
+      }),
+    );
+  }
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+    mockedBrowse.mockResolvedValue({
+    services: [],
+    masters: [],
+    picks: [],
+    picksOutcome: "OK",
+  });
+    // No `?stub=` — go through the wired read.
+    window.history.replaceState({}, "", "/customer/main");
+  });
+
+  it("goal chosen: it is named on the dashboard and «Выбери цель» is gone", async () => {
+    serve(
+      {
+        ...BASE_TODAY,
+        active_goals: [{ title: "Позаботиться о коже лица", week_num: 2 }],
+      },
+      { this_week_booking_count: 0 },
+    );
+    await renderScreen(false);
+
+    // POSITIVE: the person's actual goal is on screen, by name — in the
+    // goal card (H01, DRF-2144).
+    expect(
+      await screen.findByText(/Позаботиться о коже лица/),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Активная цель")).toBeInTheDocument();
+    // NEGATIVE (paired, same render): the bug is gone.
+    expect(screen.queryByText("Выбери цель")).not.toBeInTheDocument();
+  });
+
+  it("no goal chosen: «Выбери цель» still shows, exactly as before", async () => {
+    // The guard on the fix. Without it, «the CTA disappeared» would be
+    // indistinguishable from a change that hides it from everyone.
+    serve({ ...BASE_TODAY, active_goals: [] }, { this_week_booking_count: 0 });
+    await renderScreen(false);
+
+    expect(await screen.findByText("Выбери цель")).toBeInTheDocument();
+    expect(screen.getByText(/Расскажи о себе/)).toBeInTheDocument();
+    expect(screen.queryByText("Активная цель")).not.toBeInTheDocument();
+  });
+
+  it("goal layer unreachable: neither claim is made", async () => {
+    // `active_goals` absent — the backend could not ask. Telling this
+    // person to choose a goal is the original defect, restored by an
+    // outage; telling her she has one would be the mirror lie.
+    serve({ ...BASE_TODAY }, { this_week_booking_count: 0 });
+    await renderScreen(false);
+
+    // POSITIVE: the dashboard rendered and the goal card is honest.
+    expect(await screen.findByText(/Не удалось загрузить/)).toBeInTheDocument();
+    // One neutral «Цель» eyebrow on the card — it asserts nothing about
+    // having a goal.
+    expect(screen.getAllByText("Цель")).toHaveLength(1);
+    // NEGATIVE (paired): neither of the two claims appears.
+    expect(screen.queryByText("Выбери цель")).not.toBeInTheDocument();
+    expect(screen.queryByText("Активная цель")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Расскажи о себе/)).not.toBeInTheDocument();
+  });
+
+  it("goal: name and week show, no percentage and no bar", async () => {
+    serve(
+      { ...BASE_TODAY, active_goals: [{ title: "Меньше стресса", week_num: 3 }] },
+      { this_week_booking_count: 0 },
+    );
+    await renderScreen(false);
+
+    // POSITIVE: goal and its real week are rendered (план недоступен в этом
+    // тесте — fetch плана не обслужен, — и карточка говорит только «Неделя 3»).
+    expect(await screen.findByText(/Меньше стресса/)).toBeInTheDocument();
+    expect(screen.getByText("Неделя 3")).toBeInTheDocument();
+    // NEGATIVE (paired): ни процента, ни шкалы ВНУТРИ карточки цели.
+    // Проценты калорий ниже — это другой блок и другой факт.
+    const goalCard = within(screen.getByRole("region", { name: "Активная цель" }));
+    expect(goalCard.queryByText(/%/)).not.toBeInTheDocument();
+    expect(goalCard.queryByRole("progressbar")).not.toBeInTheDocument();
+  });
+
+  it("goal progress is not drawn even if a percentage arrives (решение №13)", async () => {
+    // Решение владельца №13 (06.09): на пилоте разрешён простой показ
+    // «Моя цель» — без процентов, шкал и оценок выполнения. Раньше
+    // полоса рисовалась, как только приходил `progress_pct`; бэкенд его
+    // не слал, так что запрет держался на молчании источника. Теперь он
+    // держится на экране, и лишнее поле в ответе ничего не рисует.
+    serve(
+      {
+        ...BASE_TODAY,
+        active_goals: [
+          { title: "Меньше стресса", week_num: 3, progress_pct: 78 },
+        ],
+      },
+      { this_week_booking_count: 0 },
+    );
+    await renderScreen(false);
+
+    // POSITIVE: цель на месте — снят прогресс, а не сама цель.
+    expect(await screen.findByText(/Меньше стресса/)).toBeInTheDocument();
+    expect(screen.getByText("Активная цель")).toBeInTheDocument();
+    // NEGATIVE (paired): процента и шкалы нет.
+    expect(screen.queryByText(/78 %/)).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("progressbar", { name: /Меньше стресса/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("nothing on the home screen is weight, measurements, sleep or steps", async () => {
+    // Решение владельца №10 (§35): вес, замеры, сон и шаги вне пилота.
+    // Замер, а не утверждение: экран рисуется целиком и обыскивается.
+    serve(
+      { ...BASE_TODAY, active_goals: [{ title: "Меньше стресса", week_num: 3 }] },
+      { this_week_booking_count: 0 },
+    );
+    await renderScreen(false);
+
+    // POSITIVE: экран отрисован — иначе «ничего не нашли» ничего не значит.
+    expect(await screen.findByText(/Меньше стресса/)).toBeInTheDocument();
+    expect(screen.getByText(/3 \/ 8 стаканов/)).toBeInTheDocument();
+    const text = document.body.textContent ?? "";
+    for (const forbidden of [
+      "Вес",
+      "вес,",
+      "Замер",
+      "замер",
+      "Сон",
+      "Шагомер",
+      "шагомер",
+      "Отзыв",
+      "отзыв",
+      "Рейтинг",
+      "★",
+    ]) {
+      expect(text).not.toContain(forbidden);
+    }
+    // «Шаги» §35 п.10 — это шагомер, счётчик пройденного. Прежняя стража
+    // ловила подстроку «Шаг»/«шаг» и с 11.09.2026 сталкивалась с §5.2:
+    // блок «Шаги на сегодня» — шаги ПЛАНА (PlanStep), не шаги ног. Два
+    // решения об одном слове и разных предметах; стража сужена до
+    // класса, который она стережёт: число + «шаг» (5000 шагов) и
+    // «шагомер». Заголовок §5.2 через неё проходит, счётчик — нет.
+    expect(text).not.toMatch(/\d+\s*шаг/i);
+    expect(text).not.toMatch(/шагов/i);
+  });
+});
+
+describe("CustomerWellnessDashboardScreen — weekly rollup (DRF-1476)", () => {
+  const TODAY = {
+    calories_eaten: 777,
+    calories_target: 1900,
+    water_glasses_eaten: 3,
+    water_glasses_target: 8,
+    active_goals: [],
+    display_name: "Анна",
+  };
+
+  function serve(activity: unknown) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: unknown) => {
+        const u = String(url);
+        const body = u.includes("/wellness/today")
+          ? TODAY
+          : u.includes("/recent-activity")
+            ? activity
+            : null;
+        if (body === null) throw new Error(`unexpected fetch: ${u}`);
+        return { ok: true, status: 200, json: async () => body } as unknown as Response;
+      }),
+    );
+  }
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+    mockedBrowse.mockResolvedValue({
+    services: [],
+    masters: [],
+    picks: [],
+    picksOutcome: "OK",
+  });
+    window.history.replaceState({}, "", "/customer/main");
+  });
+
+  it("rollup absent: Block 6 stays hidden, and invents no «0 из 7 дней»", async () => {
+    serve({ this_week_booking_count: 0 });
+    await renderScreen(false);
+
+    // POSITIVE: the dashboard did render — so the absence below is the
+    // gate working, not a blank screen.
+    expect(await screen.findByText("Выбери цель")).toBeInTheDocument();
+    // NEGATIVE (paired): no fabricated week.
+    expect(screen.queryByText(/Прогресс недели/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/из 7 дней/)).not.toBeInTheDocument();
+  });
+
+  it("rollup present: Block 6 is gone from the screen (owner ruling 22.09)", async () => {
+    // Узел ПЕРЕВЁРНУТ (DRF-2330, Д31 в): он пинил отменённый контракт —
+    // «данные пришли → блок рисуется». Владелец снял «Прогресс недели»:
+    // он дублировал план, а сервер этих данных и так не слал. Теперь узел
+    // сторожит обратное — даже с данными блока нет.
+    serve({
+      this_week_booking_count: 0,
+      weekly_progress: {
+        water_days_logged: 4,
+        food_days_logged: 5,
+        active_days_count: 5,
+      },
+    });
+    await renderScreen(false);
+
+    // Присутствие: экран отрисован — значит отсутствие ниже про блок.
+    expect(await screen.findByText("Выбери цель")).toBeInTheDocument();
+    expect(screen.queryByText(/Прогресс недели/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/из 7 дней/)).not.toBeInTheDocument();
+  });
+
+  it("rollup present but below the cold-start gate: still hidden (§11.4)", async () => {
+    serve({
+      this_week_booking_count: 0,
+      weekly_progress: {
+        water_days_logged: 2,
+        food_days_logged: 1,
+        active_days_count: 2,
+      },
+    });
+    await renderScreen(false);
+
+    expect(await screen.findByText("Выбери цель")).toBeInTheDocument();
+    expect(screen.queryByText(/Прогресс недели/)).not.toBeInTheDocument();
+  });
+});
+
+
+/**
+ * DRF-1546 — «не удалось прочитать» не то же самое, что «за день ничего
+ * не залогировано».
+ *
+ * Бэкенд опускает срез, который не прочитался (`summary_known` /
+ * `water_known` в `customer_wellness_today`), ровно как он уже опускает
+ * `active_goals` и `weekly_progress`. Экран обязан сказать об этом
+ * словами, а не нарисовать «0 / 0 ккал · 0 %» и пустые кружки — человек
+ * с четырьмя выпитыми стаканами читал это как «ты ничего не пила».
+ *
+ * Стража парная: рядом с каждым «числа не выдуманы» стоит «числа
+ * рисуются, когда они действительно пришли».
+ */
+describe("CustomerWellnessDashboardScreen — degraded reads (DRF-1546)", () => {
+  function serve(today: unknown, activity: unknown) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: unknown) => {
+        const u = String(url);
+        const body = u.includes("/wellness/today")
+          ? today
+          : u.includes("/recent-activity")
+            ? activity
+            : null;
+        if (body === null) throw new Error(`unexpected fetch: ${u}`);
+        return { ok: true, status: 200, json: async () => body } as unknown as Response;
+      }),
+    );
+  }
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+    mockedBrowse.mockResolvedValue({
+    services: [],
+    masters: [],
+    picks: [],
+    picksOutcome: "OK",
+  });
+    window.history.replaceState({}, "", "/customer/main");
+  });
+
+  it("DRF-1927 → DRF-2144: no personal-data consent — ONE consent card says why, not «Не удалось загрузить»", async () => {
+    serve(
+      {
+        // Ключей дневника нет: сервер его не читал — нет согласия.
+        consent_required: true,
+        active_goals: [],
+        display_name: "Анна",
+      },
+      { this_week_booking_count: 0 },
+    );
+    await renderScreen(false);
+
+    // POSITIVE: один блок согласия (DRF-2144 п.6) — не две строки дневника.
+    expect(await screen.findAllByText(/Чтобы вести дневник, нужно согласие/)).toHaveLength(1);
+    expect(screen.getByRole("button", { name: "Дать согласие в чате" })).toBeInTheDocument();
+    // NEGATIVE (парная): это не сбой и не пустой день; старой пары абзацев нет.
+    expect(screen.queryByText(/нужно согласие на обработку личных данных/)).not.toBeInTheDocument();
+    expect(screen.queryByText("Не удалось загрузить")).not.toBeInTheDocument();
+    expect(screen.queryByText(/ккал/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/стаканов/)).not.toBeInTheDocument();
+  });
+
+  it("nutrition read failed: says so, invents no «0 / 0 ккал»", async () => {
+    serve(
+      {
+        // calories_* + pfc отсутствуют — ручка не ответила.
+        water_glasses_eaten: 4,
+        water_glasses_target: 8,
+        active_goals: [],
+        display_name: "Анна",
+      },
+      { this_week_booking_count: 0 },
+    );
+    await renderScreen(false);
+
+    // POSITIVE: соседний срез прочитался и рисуется как обычно.
+    expect(await screen.findByText(/4 \/ 8 стаканов/)).toBeInTheDocument();
+    expect(screen.getByText("Не удалось загрузить")).toBeInTheDocument();
+    // NEGATIVE (парная): ни нулей, ни процентов, ни «ничего не залогировано».
+    expect(screen.queryByText(/ккал/)).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/Сегодня ещё ничего не записано/),
+    ).not.toBeInTheDocument();
+  });
+
+  it("hydration read failed: says so, and «+ стакан» still works", async () => {
+    serve(
+      {
+        calories_eaten: 0,
+        calories_target: 2100,
+        // water_* отсутствуют.
+        active_goals: [],
+        display_name: "Анна",
+      },
+      { this_week_booking_count: 0 },
+    );
+    await renderScreen(false);
+
+    expect(await screen.findByText("Не удалось загрузить")).toBeInTheDocument();
+    // NEGATIVE: пустых кружков и «0 / 8 стаканов» нет.
+    expect(screen.queryByText(/стаканов/)).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("progressbar", { name: /Вода/ }),
+    ).not.toBeInTheDocument();
+    // POSITIVE (парная): запись воды — отдельная ручка, она жива.
+    expect(
+      screen.getByRole("button", { name: "Добавить стакан воды" }),
+    ).toBeInTheDocument();
+  });
+
+  it("both reads OK: real numbers render, nothing says «не удалось»", async () => {
+    // Парная положительная стража на обе проверки выше: правка, которая
+    // прятала бы числа всегда, прошла бы их и упала здесь.
+    serve(
+      {
+        calories_eaten: 1240,
+        calories_target: 2100,
+        pfc: { protein_g: 65, fat_g: 40, carbs_g: 120 },
+        water_glasses_eaten: 4,
+        water_glasses_target: 8,
+        active_goals: [],
+        display_name: "Анна",
+      },
+      { this_week_booking_count: 0 },
+    );
+    await renderScreen(false);
+
+    expect(
+      await screen.findByText(/1240 \/ 2100 ккал · 59 %/),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/4 \/ 8 стаканов/)).toBeInTheDocument();
+    expect(screen.getByText(/Б 65 · Ж 40 · У/)).toBeInTheDocument();
+    expect(screen.queryByText("Не удалось загрузить")).not.toBeInTheDocument();
+  });
+
+  it("zero is still zero: an empty day reads as an empty day", async () => {
+    // Ноль — настоящее значение и обязан рисоваться, иначе «опускаем
+    // при сбое» превратилось бы в «прячем всегда».
+    serve(
+      {
+        calories_eaten: 0,
+        calories_target: 2100,
+        water_glasses_eaten: 0,
+        water_glasses_target: 8,
+        active_goals: [],
+        display_name: "Анна",
+      },
+      { this_week_booking_count: 0 },
+    );
+    await renderScreen(false);
+
+    expect(
+      await screen.findByText(/Сегодня ещё ничего не записано/),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/0 \/ 8 стаканов/)).toBeInTheDocument();
+    expect(screen.queryByText("Не удалось загрузить")).not.toBeInTheDocument();
+  });
+
+  it("«Добрать белок» is gone even when a protein target arrives", async () => {
+    // Строка снята: бэкенд `protein_target_g` не шлёт и источника не
+    // имеет. Парная положительная стража — водяная строка «Шаги на
+    // сегодня» на месте, то есть снят пункт, а не весь блок.
+    serve(
+      {
+        calories_eaten: 800,
+        calories_target: 2100,
+        pfc: { protein_g: 65, fat_g: 40, carbs_g: 120, protein_target_g: 100 },
+        water_glasses_eaten: 4,
+        water_glasses_target: 8,
+        active_goals: [],
+        display_name: "Анна",
+      },
+      { this_week_booking_count: 0 },
+    );
+    await renderScreen(false);
+
+    expect(await screen.findByText(/Ещё 4 стакана до нормы/)).toBeInTheDocument();
+    expect(screen.queryByText(/Добрать белок/)).not.toBeInTheDocument();
+    // DRF-1844: ориентир по белку виден в самой строке БЖУ, а не призывом.
+    expect(screen.getByText(/Б 65 \/ 100 · Ж 40 · У 120 г/)).toBeInTheDocument();
+  });
+
+  it("DRF-1844 / §85 §8: после 100 % — число и процент без осуждения, шкала не переполняется", async () => {
+    // Пример владельца: «2150 из 2000 ккал · 108 %».
+    serve(
+      {
+        calories_eaten: 2150,
+        calories_target: 2000,
+        pfc: { protein_g: 108, fat_g: 70, carbs_g: 250, protein_target_g: 130 },
+        water_glasses_eaten: 4,
+        water_glasses_target: 8,
+        active_goals: [],
+        display_name: "Анна",
+      },
+      { this_week_booking_count: 0 },
+    );
+    await renderScreen(false);
+
+    expect(await screen.findByText(/2150 \/ 2000 ккал · 108 %/)).toBeInTheDocument();
+    expect(screen.getByLabelText("Калории: 2150 из 2000")).toBeInTheDocument();
+    expect(screen.getByText(/Б 108 \/ 130 · Ж 70 · У 250 г/)).toBeInTheDocument();
+    const bar = screen.getByRole("progressbar", { name: "Калории: 2150 из 2000" });
+    const fill = bar.querySelector(".wellness-dash__progress-fill") as HTMLElement;
+    expect(fill.style.width).toBe("100%"); // зажато, не 108 %
+    expect(fill.className).toBe("wellness-dash__progress-fill"); // без модификатора «перебор»
+    // Ни одного осуждающего слова в блоке питания (§85 §8).
+    const row = screen.getByLabelText(/^Питание:/);
+    expect(row.textContent).not.toMatch(/перебор|превыш|слишком|много/i);
+  });
+
+  it("DRF-2288 (№41): ориентиры жиров и углеводов — в той же строке, что у белка", async () => {
+    serve(
+      {
+        calories_eaten: 800,
+        calories_target: 2100,
+        pfc: {
+          protein_g: 65,
+          fat_g: 40,
+          carbs_g: 120,
+          protein_target_g: 100,
+          fat_target_g: 61,
+          carbs_target_g: 220,
+        },
+        water_glasses_eaten: 4,
+        water_glasses_target: 8,
+        active_goals: [],
+        display_name: "Анна",
+      },
+      { this_week_booking_count: 0 },
+    );
+    await renderScreen(false);
+
+    expect(await screen.findByText(/Б 65 \/ 100 · Ж 40 \/ 61 · У 120 \/ 220 г/)).toBeInTheDocument();
+    // Скринридер слышит те же ориентиры.
+    expect(screen.getByLabelText(/^Питание:/)).toHaveAttribute(
+      "aria-label",
+      expect.stringContaining("Белки 65 из 100, жиры 40 из 61, углеводы 120 из 220 граммов"),
+    );
+  });
+
+  it("DRF-2288 (№41): без ориентира у одной буквы — только факт у неё", async () => {
+    serve(
+      {
+        calories_eaten: 800,
+        calories_target: 2100,
+        pfc: { protein_g: 65, fat_g: 40, carbs_g: 120, protein_target_g: 100, carbs_target_g: 220 },
+        water_glasses_eaten: 4,
+        water_glasses_target: 8,
+        active_goals: [],
+        display_name: "Анна",
+      },
+      { this_week_booking_count: 0 },
+    );
+    await renderScreen(false);
+
+    expect(await screen.findByText(/Б 65 \/ 100 · Ж 40 · У 120 \/ 220 г/)).toBeInTheDocument();
+  });
+
+  it("DRF-2288 (№41): вода есть, еды нет — строки нулей БЖУ нет", async () => {
+    serve(
+      {
+        calories_eaten: 0,
+        calories_target: 2100,
+        pfc: { protein_g: 0, fat_g: 0, carbs_g: 0, protein_target_g: 123 },
+        water_glasses_eaten: 3,
+        water_glasses_target: 12,
+        active_goals: [],
+        display_name: "Анна",
+      },
+      { this_week_booking_count: 0 },
+    );
+    await renderScreen(false);
+
+    expect(await screen.findByText(/3 \/ 12 стаканов/)).toBeInTheDocument();
+    expect(screen.queryByText(/Б 0/)).not.toBeInTheDocument();
+  });
+
+  it("DRF-2288 (№41): пустой день — «ничего не записано» и без строки нулей БЖУ", async () => {
+    serve(
+      {
+        calories_eaten: 0,
+        calories_target: 2100,
+        pfc: { protein_g: 0, fat_g: 0, carbs_g: 0, protein_target_g: 123 },
+        water_glasses_eaten: 0,
+        water_glasses_target: 12,
+        active_goals: [],
+        display_name: "Анна",
+      },
+      { this_week_booking_count: 0 },
+    );
+    await renderScreen(false);
+
+    expect(await screen.findByText("Сегодня ещё ничего не записано")).toBeInTheDocument();
+    // Скринридер слышит то же, что видно, — не «0 из 2100 … белки 0».
+    expect(screen.getByLabelText("Питание: Сегодня ещё ничего не записано")).toBeInTheDocument();
+    expect(screen.queryByText(/Б 0/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/залогировано/)).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * Норма воды: показываем только настоящую.
+ *
+ * До правки бэкенд подставлял `_WATER_GLASSES_TARGET_DEFAULT = 8`, когда
+ * Ayla отвечает `norm_ml=0` — то есть когда нормы у человека нет вовсе
+ * (анкету питания он не проходил). Экран рисовал «4 / 8 стаканов»,
+ * восемь точек и «Ещё 4 стакана до нормы»: чужое число как ЕГО дневную
+ * цель, с процентом выполнения.
+ *
+ * Стража парная (`negative_assert_guard`, DRF-1411): к «цели и шкалы
+ * нет» приложены положительные на тех же данных — выпитое видно
+ * (`water_glasses_eaten` — настоящее число, скрывать его вместе с
+ * выдумкой нельзя), соседняя строка питания цела, и второй случай
+ * показывает, что С НАСТОЯЩЕЙ нормой цель, шкала и «до нормы»
+ * возвращаются.
+ *
+ * Тест умеет падать: верните `water_glasses_target: 8` в ответ ручки —
+ * покраснеет первый случай; сделайте `waterKnown` снова зависимым от
+ * цели — покраснеет положительная проверка про «2 стакана сегодня».
+ */
+describe("CustomerWellnessDashboardScreen — отказ входа назван своим именем (DRF-1319 D-1)", () => {
+  /** Ручка today отвечает отказом; activity — обычно. */
+  function serveTodayRefused(status: number, slug: string, detail: string) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: unknown) => {
+        const u = String(url);
+        if (u.includes("/wellness/today")) {
+          return {
+            ok: false,
+            status,
+            statusText: "refused",
+            json: async () => ({ error: slug, detail }),
+          } as unknown as Response;
+        }
+        if (u.includes("/recent-activity")) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({ this_week_booking_count: 0 }),
+          } as unknown as Response;
+        }
+        throw new Error(`unexpected fetch: ${u}`);
+      }),
+    );
+  }
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+    mockedBrowse.mockResolvedValue({ services: [], masters: [], picks: [], picksOutcome: "OK" });
+    window.history.replaceState({}, "", "/customer/main");
+  });
+
+  it("400 malformed → «MAX не передал данные для входа», не «через минуту»", async () => {
+    serveTodayRefused(400, "malformed", "missing Authorization header");
+    await renderScreen(false);
+
+    expect(await screen.findByText(authErrorCopy("malformed").title)).toBeInTheDocument();
+    expect(screen.getByText(authErrorCopy("malformed").body)).toBeInTheDocument();
+    expect(screen.queryByText(/через минуту/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/missing Authorization header/)).not.toBeInTheDocument();
+  });
+
+  it("прочий 4xx → по-прежнему «через минуту» (положительная стража)", async () => {
+    serveTodayRefused(422, "validation_error", "bad day");
+    await renderScreen(false);
+
+    expect(await screen.findByText(/через минуту/)).toBeInTheDocument();
+    expect(screen.queryByText(authErrorCopy("malformed").title)).not.toBeInTheDocument();
+  });
+});
+
+describe("CustomerWellnessDashboardScreen — норма воды не выдумывается", () => {
+  function serve(today: unknown) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: unknown) => {
+        const u = String(url);
+        const body = u.includes("/wellness/today")
+          ? today
+          : u.includes("/recent-activity")
+            ? { this_week_booking_count: 0 }
+            : null;
+        if (body === null) throw new Error(`unexpected fetch: ${u}`);
+        return { ok: true, status: 200, json: async () => body } as unknown as Response;
+      }),
+    );
+  }
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+    mockedBrowse.mockResolvedValue({
+    services: [],
+    masters: [],
+    picks: [],
+    picksOutcome: "OK",
+  });
+    window.history.replaceState({}, "", "/customer/main");
+  });
+
+  it("нормы нет: ни цели, ни шкалы, ни «до нормы» — но выпитое видно", async () => {
+    serve({
+      calories_eaten: 800,
+      calories_target: 2100,
+      water_glasses_eaten: 2,
+      // water_glasses_target отсутствует — Ayla ответила norm_ml=0.
+      active_goals: [],
+      display_name: "Анна",
+    });
+    await renderScreen(false);
+
+    // POSITIVE: настоящее число на месте, и соседний срез цел.
+    expect(await screen.findByText("2 стакана сегодня")).toBeInTheDocument();
+    expect(screen.getByText(/800 \/ 2100 ккал/)).toBeInTheDocument();
+    // NEGATIVE: выдуманной восьмёрки нет ни в числах, ни в шкале, ни в целях.
+    expect(screen.queryByText(/\/ 8 стаканов/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/до нормы/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/до цели/)).not.toBeInTheDocument();
+    expect(
+      screen.queryByLabelText(/из 8 стаканов/),
+    ).not.toBeInTheDocument();
+  });
+
+  it("норма есть: цель, шкала и «до нормы» возвращаются", async () => {
+    serve({
+      calories_eaten: 800,
+      calories_target: 2100,
+      water_glasses_eaten: 4,
+      water_glasses_target: 8,
+      active_goals: [],
+      display_name: "Анна",
+    });
+    await renderScreen(false);
+
+    expect(await screen.findByText(/4 \/ 8 стаканов/)).toBeInTheDocument();
+    expect(screen.getByText(/Ещё 4 стакана до нормы/)).toBeInTheDocument();
+    expect(screen.queryByText(/стакана сегодня/)).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * Block 4 называется «Шаги на сегодня», не «Цели сегодня» (решение владельца
+ * 11.09.2026 §5.2: Goal — желаемый результат, Habit — повторяющееся действие
+ * внутри плана, PlanStep — конкретное действие; привычка или действие не
+ * создают отдельную Goal). Стакан воды — шаг; заголовок «Цели» заводил
+ * человеку вторую цель, которой он не ставил, и строка «до цели» — тоже.
+ *
+ * Оговорка о предмете: на пилоте блок не рендерится никому — норма воды
+ * сегодня отсутствует у всех (#304/#1527, `water_service.water_goal_ml =
+ * None`), а блок показывается только при известной норме. Здесь стережётся
+ * МЕХАНИЗМ, а не наблюдение: первый человек с нормой должен увидеть «Шаги»,
+ * а не «Цели». Тест умеет падать: верните заголовок «Цели сегодня» или
+ * «до цели» в строку — покраснеет.
+ */
+describe("Block 4 — «Шаги на сегодня» (§5.2)", () => {
+  function serve(today: unknown) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: unknown) => {
+        const u = String(url);
+        const body = u.includes("/wellness/today")
+          ? today
+          : u.includes("/recent-activity")
+            ? { this_week_booking_count: 0 }
+            : null;
+        if (body === null) throw new Error(`unexpected fetch: ${u}`);
+        return { ok: true, status: 200, json: async () => body } as unknown as Response;
+      }),
+    );
+  }
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+    mockedBrowse.mockResolvedValue({
+      services: [],
+      masters: [],
+      picks: [],
+      picksOutcome: "OK",
+    });
+    window.history.replaceState({}, "", "/customer/main");
+  });
+
+  it("заголовок — «Шаги на сегодня», слова «цел» в блоке нет", async () => {
+    serve({
+      calories_eaten: 800,
+      water_glasses_eaten: 4,
+      water_glasses_target: 8,
+      active_goals: [],
+      display_name: "Анна",
+    });
+    await renderScreen(false);
+
+    const header = await screen.findByRole("heading", { name: "Шаги на сегодня" });
+    expect(header).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: /Цели сегодня/ })).not.toBeInTheDocument();
+    // Внутри блока — ни «цели», ни «цель»: шаг измеряется нормой.
+    const block = header.closest("section");
+    expect(block).not.toBeNull();
+    expect(block!.textContent).toMatch(/до нормы/);
+    expect(block!.textContent).not.toMatch(/цел[ьи]/i);
+  });
+});
+
+describe("CustomerWellnessDashboardScreen — цель калорий не выдумывается", () => {
+  function serve(today: unknown) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: unknown) => {
+        const u = String(url);
+        const body = u.includes("/wellness/today")
+          ? today
+          : u.includes("/recent-activity")
+            ? { this_week_booking_count: 0 }
+            : null;
+        if (body === null) throw new Error(`unexpected fetch: ${u}`);
+        return { ok: true, status: 200, json: async () => body } as unknown as Response;
+      }),
+    );
+  }
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+    mockedBrowse.mockResolvedValue({
+    services: [],
+    masters: [],
+    picks: [],
+    picksOutcome: "OK",
+  });
+    window.history.replaceState({}, "", "/customer/main");
+  });
+
+  it("цели нет: съеденное видно, а НЕДОСТУПНО не показывается", async () => {
+    serve({
+      calories_eaten: 800,
+      // calories_target отсутствует — анкеты питания нет, Ayla ответила 0.
+      // pfc тоже нет: строка БЖУ целевая (§11.1).
+      water_glasses_eaten: 4,
+      water_glasses_target: 8,
+      active_goals: [],
+      display_name: "Анна",
+    });
+    await renderScreen(false);
+
+    // POSITIVE: съеденное на месте, соседний срез цел.
+    expect(await screen.findByText("800 ккал сегодня")).toBeInTheDocument();
+    expect(screen.getByText(/4 \/ 8 стаканов/)).toBeInTheDocument();
+    // NEGATIVE: ни выдуманного знаменателя, ни процента, ни отказа.
+    // «Не удалось загрузить» здесь было бы ЛОЖНЫМ отказом: чтение прошло,
+    // это цели нет — и до правки экран показывал именно его, потому что
+    // `caloriesKnown` требовал оба значения сразу.
+    expect(screen.queryByText(/2000 ккал/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/ккал · /)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/Питание: .*недоступ/i)).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/^Калории: /)).not.toBeInTheDocument();
+  });
+
+  it("цель есть: знаменатель, процент и шкала возвращаются", async () => {
+    serve({
+      calories_eaten: 800,
+      calories_target: 2100,
+      pfc: { protein_g: 65, fat_g: 40, carbs_g: 120 },
+      water_glasses_eaten: 4,
+      water_glasses_target: 8,
+      active_goals: [],
+      display_name: "Анна",
+    });
+    await renderScreen(false);
+
+    expect(await screen.findByText(/800 \/ 2100 ккал/)).toBeInTheDocument();
+    expect(screen.getByLabelText("Калории: 800 из 2100")).toBeInTheDocument();
+    expect(screen.getByText(/Б 65 · Ж 40 · У 120 г/)).toBeInTheDocument();
+    expect(screen.queryByText(/ккал сегодня/)).not.toBeInTheDocument();
+  });
+
+  it("пустой день: шкалы нет и для скринридера, а не только для глаза", async () => {
+    serve({
+      calories_eaten: 0,
+      calories_target: 2100,
+      water_glasses_eaten: 0,
+      water_glasses_target: 8,
+      active_goals: [],
+      display_name: "Анна",
+    });
+    await renderScreen(false);
+
+    // POSITIVE: экран действительно нарисован и говорит про пустой день.
+    expect(await screen.findByText("Сегодня ещё ничего не записано")).toBeInTheDocument();
+    // NEGATIVE: полоса при нуле не видна глазом, но `role="progressbar"`
+    // озвучивал «Калории: 0 из 2100» — дефект доставался ровно тому, кто
+    // не может проверить глазами.
+    expect(screen.queryByLabelText("Калории: 0 из 2100")).not.toBeInTheDocument();
+  });
+});
+
+
+describe("CustomerWellnessDashboardScreen — отмена стакана (DRF-1842)", () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+    window.localStorage.clear();
+    mockedBrowse.mockResolvedValue({
+      services: [],
+      masters: [],
+      picks: [],
+      picksOutcome: "OK",
+    });
+  });
+
+  function json(body: unknown, status = 200): Response {
+    return new Response(JSON.stringify(body), {
+      status,
+      headers: { "Content-Type": "application/json" },
+    });
+  }
+
+  /** Live prod home + the two water handles; records every call. */
+  function serveWater(
+    undo: () => Response,
+    post?: () => Response | Promise<Response>,
+  ): string[] {
+    const calls: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: unknown, init?: RequestInit) => {
+        const u = String(url);
+        const method = (init?.method ?? "GET").toUpperCase();
+        calls.push(`${method} ${u}`);
+        if (method === "DELETE" && u.includes("/wellness/water/")) return undo();
+        if (method === "POST" && u.includes("/wellness/water")) {
+          if (post) return post();
+          return json({
+            entry_id: "entry-9",
+            ml: 250,
+            water_ml: 250,
+            today_total_ml: 250,
+            today_norm_ml: 0,
+            water_glasses_eaten: 1,
+          });
+        }
+        if (u.includes("/wellness/today")) {
+          return json({
+            calories_eaten: 0,
+            water_glasses_eaten: 0,
+            active_goals: [],
+            display_name: "Анна",
+          });
+        }
+        if (u.includes("/recent-activity")) return json({ this_week_booking_count: 0 });
+        throw new Error(`unexpected fetch: ${method} ${u}`);
+      }),
+    );
+    return calls;
+  }
+
+  async function tapWater() {
+    await renderScreen(true);
+    const qa = within(await screen.findByRole("region", { name: "Быстрые действия" }));
+    fireEvent.click(qa.getByRole("button", { name: "Добавить стакан воды" }));
+  }
+
+  it("принятый стакан можно отменить: DELETE по id записи, тост «Стакан убран»", async () => {
+    const calls = serveWater(() => new Response(null, { status: 204 }));
+    await tapWater();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Отменить стакан" }));
+
+    expect(await screen.findByText("Стакан убран")).toBeInTheDocument();
+    expect(calls).toContain("DELETE /api/v1/customer/wellness/water/entry-9");
+  });
+
+  it("окно отмены закрылось — сказано, что стакан остался", async () => {
+    serveWater(() => json({ error: "not_undoable" }, 404));
+    await tapWater();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Отменить стакан" }));
+
+    expect(
+      await screen.findByText(/окно отмены закрылось, стакан остался в дневнике/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Стакан убран")).not.toBeInTheDocument();
+  });
+
+  it("DRF-1919: «+1 стакан зачтён» — только после того, как сервер принял стакан", async () => {
+    serveWater(() => new Response(null, { status: 204 }));
+    await tapWater();
+
+    expect(await screen.findByText("+1 стакан зачтён")).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Отменить стакан" })).toBeInTheDocument();
+  });
+
+  it("DRF-1919: пока сервер не ответил, «зачтён» не показан — и показан после", async () => {
+    let answer: (r: Response) => void = () => {};
+    const pending = new Promise<Response>((resolve) => {
+      answer = resolve;
+    });
+    const calls = serveWater(() => new Response(null, { status: 204 }), () => pending);
+    await tapWater();
+
+    // POST ушёл, ответа ещё нет: обещать «зачтён» не на чем.
+    await vi.waitFor(() => expect(calls).toContain("POST /api/v1/customer/wellness/water"));
+    expect(screen.queryByText("+1 стакан зачтён")).not.toBeInTheDocument();
+
+    answer(
+      json({
+        entry_id: "entry-9",
+        ml: 250,
+        water_ml: 250,
+        today_total_ml: 250,
+        today_norm_ml: 0,
+        water_glasses_eaten: 1,
+      }),
+    );
+    expect(await screen.findByText("+1 стакан зачтён")).toBeInTheDocument();
+  });
+
+  it("DRF-1919: нет согласия — сказано, что не записано, и как это исправить", async () => {
+    serveWater(
+      () => new Response(null, { status: 204 }),
+      () => json({ error: "consent_required", detail: "no consent" }, 403),
+    );
+    await tapWater();
+
+    expect(
+      await screen.findByText(
+        "Стакан не записан. Чтобы менять дневник, нужно согласие на обработку личных данных — дай его в чате с Ayla.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("+1 стакан зачтён")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Отменить стакан" })).not.toBeInTheDocument();
+  });
+
+  it("DRF-1919: сервер недоступен — стакан ждёт синхронизации, а не «зачтён»", async () => {
+    serveWater(
+      () => new Response(null, { status: 204 }),
+      () => json({ error: "ayla_unavailable" }, 502),
+    );
+    await tapWater();
+
+    // Тост — точным текстом: индикатор очереди тоже говорит «ждёт синхронизации».
+    expect(await screen.findByText("+1 стакан · 1 стакан ждёт синхронизации")).toBeInTheDocument();
+    expect(screen.queryByText("+1 стакан зачтён")).not.toBeInTheDocument();
+  });
+
+  it("DRF-1919: дневник выключен — отмена говорит об этом, а не «окно закрылось»", async () => {
+    serveWater(() => json({ error: "nutrition_disabled" }, 404));
+    await tapWater();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Отменить стакан" }));
+
+    expect(
+      await screen.findByText("Дневник воды сейчас выключен — убрать стакан не получилось."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/окно отмены закрылось/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Отменить стакан" })).not.toBeInTheDocument();
+  });
+
+  it("DRF-1919: принят старый стакан из очереди, а свой не ушёл — «зачтён» не сказан", async () => {
+    window.localStorage.setItem("max:wellness_water_offline_queue", JSON.stringify([{ ts: Date.now() - 60_000, volume_ml: 250, key: "water-old" }]));
+    let n = 0;
+    serveWater(
+      () => new Response(null, { status: 204 }),
+      () => {
+        n += 1;
+        if (n === 1) return json({ entry_id: "entry-old", ml: 250, water_ml: 250, today_total_ml: 250, today_norm_ml: 0, water_glasses_eaten: 1 });
+        throw new TypeError("Failed to fetch");
+      },
+    );
+    await tapWater();
+
+    expect(await screen.findByText("+1 стакан · 1 стакан ждёт синхронизации")).toBeInTheDocument();
+    expect(screen.queryByText(/зачтён/)).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Отменить стакан" })).not.toBeInTheDocument();
+  });
+
+  it("DRF-1919: отказ старого стакана не затирается принятием нового", async () => {
+    window.localStorage.setItem("max:wellness_water_offline_queue", JSON.stringify([{ ts: Date.now() - 60_000, volume_ml: 250, key: "water-old" }]));
+    let n = 0;
+    serveWater(
+      () => new Response(null, { status: 204 }),
+      () => {
+        n += 1;
+        if (n === 1) return json({ error: "ayla_bad_request", detail: "rejected" }, 400);
+        return json({ entry_id: "entry-9", ml: 250, water_ml: 250, today_total_ml: 250, today_norm_ml: 0, water_glasses_eaten: 1 });
+      },
+    );
+    await tapWater();
+
+    expect(
+      await screen.findByText(
+        "+1 стакан зачтён. Стакан из очереди не записан — дневник его не принял.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("DRF-1919: второй тап во время синхронизации — его стакан тоже уходит", async () => {
+    let releaseFirst: () => void = () => {};
+    let n = 0;
+    const calls = serveWater(
+      () => new Response(null, { status: 204 }),
+      () => {
+        n += 1;
+        const body = json({ entry_id: `entry-${n}`, ml: 250, water_ml: 250, today_total_ml: 250, today_norm_ml: 0, water_glasses_eaten: 1 });
+        if (n === 1) {
+          return new Promise<Response>((resolve) => {
+            releaseFirst = () => resolve(body);
+          });
+        }
+        return body;
+      },
+    );
+    await tapWater();
+    const posts = () => calls.filter((c) => c.startsWith("POST")).length;
+    await vi.waitFor(() => expect(posts()).toBe(1));
+
+    const qa = within(screen.getByRole("region", { name: "Быстрые действия" }));
+    fireEvent.click(qa.getByRole("button", { name: "Добавить стакан воды" }));
+    releaseFirst();
+
+    await vi.waitFor(() => expect(posts()).toBe(2));
+    // Оба стакана ушли: очередь в хранилище пуста — стакан второго тапа снимается
+    // из неё ТОЛЬКО принятым («зачтён» уже показал первый тап, это не доказательство).
+    await vi.waitFor(() =>
+      expect(
+        JSON.parse(window.localStorage.getItem("max:wellness_water_offline_queue") ?? "null"),
+      ).toEqual([]),
+    );
+  });
+
+  it("DRF-1919: после возврата сети отказанные стаканы из очереди названы числом", async () => {
+    window.localStorage.setItem("max:wellness_water_offline_queue", JSON.stringify([{ ts: Date.now() - 120_000, volume_ml: 250, key: "water-a" }, { ts: Date.now() - 60_000, volume_ml: 250, key: "water-b" }]));
+    serveWater(
+      () => new Response(null, { status: 204 }),
+      () => json({ error: "consent_required", detail: "no consent" }, 403),
+    );
+    await renderScreen(true);
+    await screen.findByRole("region", { name: "Быстрые действия" });
+
+    window.dispatchEvent(new Event("online"));
+
+    expect(
+      await screen.findByText(
+        "2 стакана из очереди не записаны. Чтобы менять дневник, нужно согласие на обработку личных данных — дай его в чате с Ayla.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("DRF-1919: три тапа — отказ третьего назван как его, а не «из очереди»", async () => {
+    let releaseFirst: () => void = () => {};
+    let n = 0;
+    const calls = serveWater(
+      () => new Response(null, { status: 204 }),
+      () => {
+        n += 1;
+        if (n === 1) {
+          return new Promise<Response>((resolve) => {
+            releaseFirst = () => resolve(json({ entry_id: "entry-1", ml: 250, water_ml: 250, today_total_ml: 250, today_norm_ml: 0, water_glasses_eaten: 1 }));
+          });
+        }
+        if (n === 3) return json({ error: "ayla_bad_request", detail: "rejected" }, 400);
+        return json({ entry_id: `entry-${n}`, ml: 250, water_ml: 250, today_total_ml: 250, today_norm_ml: 0, water_glasses_eaten: 1 });
+      },
+    );
+    await tapWater();
+    const posts = () => calls.filter((c) => c.startsWith("POST")).length;
+    await vi.waitFor(() => expect(posts()).toBe(1));
+    const qa = within(screen.getByRole("region", { name: "Быстрые действия" }));
+    fireEvent.click(qa.getByRole("button", { name: "Добавить стакан воды" }));
+    fireEvent.click(qa.getByRole("button", { name: "Добавить стакан воды" }));
+    releaseFirst();
+
+    await vi.waitFor(() => expect(posts()).toBe(3));
+    expect(
+      await screen.findByText("Стакан не записан — дневник его не принял."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/из очереди/)).not.toBeInTheDocument();
+  });
+
+  it("DRF-1919: «Отменить» не остаётся от чужого стакана рядом с «ждёт синхронизации»", async () => {
+    let releaseFirst: () => void = () => {};
+    let n = 0;
+    const calls = serveWater(
+      () => new Response(null, { status: 204 }),
+      () => {
+        n += 1;
+        if (n === 1) {
+          return new Promise<Response>((resolve) => {
+            releaseFirst = () => resolve(json({ entry_id: "entry-1", ml: 250, water_ml: 250, today_total_ml: 250, today_norm_ml: 0, water_glasses_eaten: 1 }));
+          });
+        }
+        throw new TypeError("Failed to fetch");
+      },
+    );
+    await tapWater();
+    const posts = () => calls.filter((c) => c.startsWith("POST")).length;
+    await vi.waitFor(() => expect(posts()).toBe(1));
+    const qa = within(screen.getByRole("region", { name: "Быстрые действия" }));
+    fireEvent.click(qa.getByRole("button", { name: "Добавить стакан воды" }));
+    releaseFirst();
+
+    expect(await screen.findByText("+1 стакан · 1 стакан ждёт синхронизации")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Отменить стакан" })).not.toBeInTheDocument();
+  });
+
+  it("DRF-1919: отказ своего и стакана из очереди — названы раздельно, каждый со своей причиной", async () => {
+    window.localStorage.setItem("max:wellness_water_offline_queue", JSON.stringify([{ ts: Date.now() - 60_000, volume_ml: 250, key: "water-old" }]));
+    let n = 0;
+    serveWater(
+      () => new Response(null, { status: 204 }),
+      () => {
+        n += 1;
+        if (n === 1) return json({ error: "ayla_bad_request", detail: "rejected" }, 400);
+        return json({ error: "consent_required", detail: "no consent" }, 403);
+      },
+    );
+    await tapWater();
+
+    expect(
+      await screen.findByText(
+        "Стакан не записан. Чтобы менять дневник, нужно согласие на обработку личных данных — дай его в чате с Ayla. Стакан из очереди не записан — дневник его не принял.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("DRF-1919: 401 — сказано, что сессия истекла, а не «ждёт синхронизации»", async () => {
+    serveWater(
+      () => new Response(null, { status: 204 }),
+      () => json({ error: "stale", detail: "init data expired" }, 401),
+    );
+    await tapWater();
+
+    expect(
+      await screen.findByText(
+        "Стакан сохранён, но не отправлен: сессия истекла — открой приложение заново.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/зачтён/)).not.toBeInTheDocument();
+  });
+
+  it("DRF-1919: стакан не сохранился (хранилище не пишет) — так и сказано, без «ждёт»", async () => {
+    const calls = serveWater(() => new Response(null, { status: 204 }));
+    await renderScreen(true);
+    const qa = within(await screen.findByRole("region", { name: "Быстрые действия" }));
+    vi.spyOn(Storage.prototype, "setItem").mockImplementation(() => {
+      throw new DOMException("quota", "QuotaExceededError");
+    });
+
+    fireEvent.click(qa.getByRole("button", { name: "Добавить стакан воды" }));
+
+    expect(await screen.findByText("Стакан не сохранён — попробуй ещё раз.")).toBeInTheDocument();
+    expect(screen.queryByText(/синхронизации/)).not.toBeInTheDocument();
+    expect(calls.filter((c) => c.startsWith("POST"))).toEqual([]);
+  });
+
+  it("сбой при отмене — ничего не убрано, кнопка возвращается", async () => {
+    serveWater(() => json({ error: "ayla_unavailable" }, 502));
+    await tapWater();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Отменить стакан" }));
+
+    expect(
+      await screen.findByText("Не получилось убрать — попробуй ещё раз"),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Отменить стакан" })).toBeInTheDocument();
+    expect(screen.queryByText("Стакан убран")).not.toBeInTheDocument();
   });
 });

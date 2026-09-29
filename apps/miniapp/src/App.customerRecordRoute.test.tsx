@@ -10,13 +10,25 @@
  * booking-detail screen, and (c) it hands that screen the SAME id from
  * the URL (the id `GET /bookings/<id>` is then called with).
  *
- * The legacy `/my-visits/:bookingId` route stays mounted on purpose
- * (bot-DM deep links live outside this repo) — a second case asserts it
- * still resolves, so nobody reads this change as a legacy removal.
+ * DRF-1625: легаси-`/my-visits/:bookingId` снят вместе со своим
+ * экраном — продюсеров этого адреса не нашлось ни в коде, ни в истории
+ * (замер в комментарии у маршрутов в `App.tsx`). Псевдоним экрана
+ * переноса `/my-visits/:bookingId/reschedule` остался: за ним стоит тот
+ * же `RescheduleScreen`, что и на каноническом адресе, — второй кейс
+ * ниже это и проверяет.
  */
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+
+// DRF-1893 (15.09.2026 UTC): App не стартует без initData (решение владельца U —
+// пустой initData это отказ транспорта, экран «Открой Ayla из MAX»). Эти
+// тесты — про запуск из MAX, поэтому канал объявлен опознанным явно: в jsdom
+// моста MAX нет, и без этой строки App честно показал бы экран отказа.
+vi.mock("./lib/identity", async (importOriginal) => {
+  const original = await importOriginal<typeof import("./lib/identity")>();
+  return { ...original, channelIdentity: () => "identified" as const };
+});
 
 vi.mock("./lib/admin-api", async (importOriginal) => {
   const original = await importOriginal<typeof import("./lib/admin-api")>();
@@ -25,15 +37,16 @@ vi.mock("./lib/admin-api", async (importOriginal) => {
 
 vi.mock("./lib/api", async (importOriginal) => {
   const original = await importOriginal<typeof import("./lib/api")>();
-  return { ...original, fetchBooking: vi.fn() };
+  return { ...original, fetchBooking: vi.fn(), fetchSlots: vi.fn() };
 });
 
 import { getMe, type MeResponse } from "./lib/admin-api";
-import { fetchBooking, type BookingItem } from "./lib/api";
+import { fetchBooking, fetchSlots, type BookingItem } from "./lib/api";
 import { App } from "./App";
 
 const mockedGetMe = vi.mocked(getMe);
 const mockedFetchBooking = vi.mocked(fetchBooking);
+const mockedFetchSlots = vi.mocked(fetchSlots);
 
 const CUSTOMER_ME: MeResponse = {
   user: { id: "u-1", name: "Ольга", phone_masked: "+7 *** **12" },
@@ -65,6 +78,8 @@ const BOOKING: BookingItem = {
   reschedulable: true,
   rating: null,
   can_rate: false,
+  // DRF-1652 — «источник промолчал», см. другие фикстуры.
+  address: null,
 };
 
 function renderAppAt(path: string) {
@@ -79,6 +94,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   mockedGetMe.mockResolvedValue(CUSTOMER_ME);
   mockedFetchBooking.mockResolvedValue({ booking: BOOKING });
+  mockedFetchSlots.mockResolvedValue({ slots: [] });
 });
 
 describe("canonical record route registration", () => {
@@ -88,11 +104,34 @@ describe("canonical record route registration", () => {
     expect(await screen.findByText("Маникюр")).toBeInTheDocument();
     expect(screen.getByText(/Анна Соколова/)).toBeInTheDocument();
     // The id from the URL is the id the detail screen actually loads.
-    expect(mockedFetchBooking).toHaveBeenCalledWith("bk-77");
+    // Загрузка — в эффекте ПОСЛЕ первого рендера заголовка: ждать вызов,
+    // а не проверять его синхронно (под нагрузкой заголовок успевает раньше).
+    await waitFor(() => expect(mockedFetchBooking).toHaveBeenCalledWith("bk-77"));
+  });
+});
+
+describe("canonical reschedule route registration (DRF-1481)", () => {
+  it("/customer/records/:bookingId/reschedule resolves to the real reschedule screen", async () => {
+    renderAppAt("/customer/records/bk-77/reschedule");
+    // Real reschedule screen (not a 404 / not the booking detail).
+    expect(
+      await screen.findByRole("heading", { name: "Перенести" }),
+    ).toBeInTheDocument();
+    // The id from the URL is the id the screen actually loads.
+    // Загрузка — в эффекте ПОСЛЕ первого рендера заголовка: ждать вызов,
+    // а не проверять его синхронно (под нагрузкой заголовок успевает раньше).
+    await waitFor(() => expect(mockedFetchBooking).toHaveBeenCalledWith("bk-77"));
   });
 
-  it("legacy /my-visits/:bookingId stays mounted (external deep links)", async () => {
-    renderAppAt("/my-visits/bk-77");
-    expect(await screen.findByText("Маникюр")).toBeInTheDocument();
+  it("legacy /my-visits/:bookingId/reschedule alias mounts the same screen", async () => {
+    // Compatibility alias — страховка для старых внешних ссылок,
+    // ушедших наружу ранее. Тот же компонент, тот же id.
+    renderAppAt("/my-visits/bk-77/reschedule");
+    expect(
+      await screen.findByRole("heading", { name: "Перенести" }),
+    ).toBeInTheDocument();
+    // Загрузка — в эффекте ПОСЛЕ первого рендера заголовка: ждать вызов,
+    // а не проверять его синхронно (под нагрузкой заголовок успевает раньше).
+    await waitFor(() => expect(mockedFetchBooking).toHaveBeenCalledWith("bk-77"));
   });
 });

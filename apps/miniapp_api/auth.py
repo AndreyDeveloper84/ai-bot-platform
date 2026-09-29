@@ -53,6 +53,12 @@ logger = logging.getLogger(__name__)
 
 
 AUTH_DATE_MAX_AGE_SECONDS = 60 * 60  # 60 min — matches MAX recommendation.
+#: DRF-2007 — how far in the FUTURE ``auth_date`` may be. The MAX server sets
+#: ``auth_date`` when it signs, so only the skew between MAX's clock and ours
+#: matters (both on NTP). 300 s is the anti-replay window this repo already uses
+#: for signed events (event-contract §6.2): one skew policy, not two. With it the
+#: lifetime of a signed initData is bounded: 3600 + 300 s instead of unbounded.
+AUTH_DATE_FUTURE_SKEW_SECONDS = 300
 HEADER_NAME = "Authorization"
 HEADER_PREFIX = "MaxInitData "
 
@@ -71,6 +77,10 @@ class InitDataBadSignature(InitDataError):
 
 class InitDataStale(InitDataError):
     """The ``auth_date`` is older than :attr:`AUTH_DATE_MAX_AGE_SECONDS`."""
+
+
+class InitDataFromFuture(InitDataError):
+    """``auth_date`` is further in the future than :data:`AUTH_DATE_FUTURE_SKEW_SECONDS` (DRF-2007)."""
 
 
 class InitDataNotConfigured(InitDataError):
@@ -203,12 +213,14 @@ def verify_init_data(
         Reject if ``now - auth_date > max_age_seconds``. Default 60 min.
     """
 
+    # DRF-1893 — пустое значение проверяется ДО токена: это отказ транспорта
+    # при любой конфигурации сервера, а не 500 из-за ненастроенного токена.
+    if not raw:
+        raise InitDataMalformed("empty initData")
+
     candidates = _candidate_tokens(bot_token)
     if not candidates:
         raise InitDataNotConfigured("no MAX bot token is configured")
-
-    if not raw:
-        raise InitDataMalformed("empty initData")
 
     # parse_qsl preserves duplicates as list-of-tuples; the MAX spec
     # has no duplicate keys, so a dict is fine. keep_blank_values keeps
@@ -258,6 +270,12 @@ def verify_init_data(
     now_ts = now if now is not None else int(time_module.time())
     if now_ts - auth_date > max_age_seconds:
         raise InitDataStale(f"auth_date {auth_date} older than {max_age_seconds}s")
+    # DRF-2007 — a signature dated in the future would otherwise stay «fresh»
+    # until now + TTL: the lifetime of a signed initData was unbounded.
+    if auth_date - now_ts > AUTH_DATE_FUTURE_SKEW_SECONDS:
+        raise InitDataFromFuture(
+            f"auth_date {auth_date} is more than {AUTH_DATE_FUTURE_SKEW_SECONDS}s in the future"
+        )
 
     # user payload — parse JSON. Required for our flows (we always need
     # to know who the customer is). chat payload is optional.

@@ -79,6 +79,7 @@ import {
   setBackButton,
   setClosingConfirmation,
 } from "../../lib/max-sdk";
+import { SALON_PILOT_LANDING } from "../../lib/salon-pilot";
 
 interface Props {
   me: MeResponse;
@@ -229,7 +230,8 @@ export function AdminServicesMatrixScreen({ me }: Props) {
       if (dirtyCount > 0) {
         setConfirmLeave(true);
       } else {
-        navigate("/admin/team");
+        // DRF-2115: «Услуги» открываются из аватара — назад в «Сегодня».
+        navigate(SALON_PILOT_LANDING);
       }
     });
     return () => {
@@ -237,7 +239,7 @@ export function AdminServicesMatrixScreen({ me }: Props) {
       setBackButton(false);
       setClosingConfirmation(false);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `navigate` нужен только внутри обработчика системной кнопки; перезапуск нужен лишь при смене `dirtyCount`
   }, [dirtyCount]);
 
   useEffect(() => {
@@ -401,7 +403,7 @@ export function AdminServicesMatrixScreen({ me }: Props) {
       } catch (e) {
         hapticNotify("error");
         if (e instanceof ApiError) {
-          setErrBanner(e.detail || "Не получилось сохранить");
+          setErrBanner("Не получилось сохранить");
         } else {
           setErrBanner("Связь пропала. Проверьте интернет.");
         }
@@ -418,7 +420,7 @@ export function AdminServicesMatrixScreen({ me }: Props) {
       <div className="screen">
         <h1 className="screen__title">Услуги мастеров</h1>
         <StateError err={loadErr} onRetry={() => void reload(false)} />
-        <AdminTabBar />
+        <AdminTabBar me={me} />
       </div>
     );
   }
@@ -430,7 +432,7 @@ export function AdminServicesMatrixScreen({ me }: Props) {
         <div className="callout" role="status">
           Загружаем матрицу…
         </div>
-        <AdminTabBar />
+        <AdminTabBar me={me} />
       </div>
     );
   }
@@ -442,7 +444,7 @@ export function AdminServicesMatrixScreen({ me }: Props) {
         <div className="callout callout--danger" role="alert">
           Не удалось загрузить данные.
         </div>
-        <AdminTabBar />
+        <AdminTabBar me={me} />
       </div>
     );
   }
@@ -486,7 +488,7 @@ export function AdminServicesMatrixScreen({ me }: Props) {
             Добавить услугу →
           </button>
         </div>
-        <AdminTabBar />
+        <AdminTabBar me={me} />
       </div>
     );
   }
@@ -523,7 +525,7 @@ export function AdminServicesMatrixScreen({ me }: Props) {
             Пригласить мастера →
           </button>
         </div>
-        <AdminTabBar />
+        <AdminTabBar me={me} />
       </div>
     );
   }
@@ -558,15 +560,9 @@ export function AdminServicesMatrixScreen({ me }: Props) {
         </button>
         {dirtyCount > 0 && (
           <span
+            className="services-matrix__dirty-dot"
             aria-label={`несохранённые изменения: ${dirtyCount}`}
             title="Несохранённые изменения"
-            style={{
-              width: 10,
-              height: 10,
-              borderRadius: "50%",
-              background: "var(--c-accent, #ff8a00)",
-              flexShrink: 0,
-            }}
           />
         )}
       </header>
@@ -729,7 +725,7 @@ export function AdminServicesMatrixScreen({ me }: Props) {
               <li
                 key={m.id}
                 style={{
-                  borderBottom: "1px solid var(--c-border, rgba(0,0,0,0.08))",
+                  borderBottom: "1px solid var(--c-divider)",
                 }}
               >
                 <button
@@ -780,10 +776,7 @@ export function AdminServicesMatrixScreen({ me }: Props) {
                 {isExpanded && (
                   <div
                     id={`master-services-${m.id}`}
-                    style={{
-                      padding: "var(--s-2) var(--s-3) var(--s-3)",
-                      background: "var(--c-surface-1)",
-                    }}
+                    className="services-matrix__master-services"
                   >
                     <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
                       {payload.services.map((svc) => (
@@ -869,18 +862,7 @@ export function AdminServicesMatrixScreen({ me }: Props) {
         <div
           role="region"
           aria-label="Несохранённые изменения"
-          style={{
-            position: "fixed",
-            insetInline: 0,
-            bottom: 0,
-            padding: "var(--s-2) var(--s-3) calc(var(--s-3) + env(safe-area-inset-bottom, 0px))",
-            background: "var(--c-surface-0, #fff)",
-            borderTop: "1px solid var(--c-border, rgba(0,0,0,0.08))",
-            display: "flex",
-            alignItems: "center",
-            gap: "var(--s-2)",
-            zIndex: 5,
-          }}
+          className="services-matrix__save-bar"
         >
           <span style={{ flex: 1, minWidth: 0 }}>
             {`${dirtyCount} ${pluralChange(dirtyCount)} в очереди`}
@@ -1043,7 +1025,7 @@ export function AdminServicesMatrixScreen({ me }: Props) {
         onDismiss={() => setToast("")}
       />
 
-      <AdminTabBar />
+      <AdminTabBar me={me} />
     </div>
   );
 }

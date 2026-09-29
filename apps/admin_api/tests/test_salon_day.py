@@ -8,15 +8,19 @@ number reach the response.
 
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import pytest
+from django.http import JsonResponse
 from django.test import Client
 from django.urls import reverse
 
-from apps.admin_api.services.salon_day import build_salon_day, day_bounds_utc, tenant_tz
+from apps.admin_api.auth import require_admin_or_reception_read
+from apps.admin_api.services.salon_day import build_salon_day, day_bounds_utc
+from apps.tenancy.timezones import salon_zone
 from apps.admin_api.tests.conftest import init_data_header, make_master
 from apps.booking.models import RemoteBookingProxy
 from apps.catalog.models import CatalogService
@@ -214,7 +218,7 @@ class TestProjection:
 class TestTimezoneHelpers:
     def test_bad_timezone_falls_back_instead_of_raising(self, tenant: Tenant) -> None:
         tenant.timezone = "Not/AZone"
-        assert str(tenant_tz(tenant)) == "Europe/Moscow"
+        assert str(salon_zone(tenant)) == "Europe/Moscow"
 
     def test_day_bounds_span_exactly_24h(self) -> None:
         start, end = day_bounds_utc(datetime(2026, 8, 20, tzinfo=MSK).date(), MSK)
@@ -235,9 +239,108 @@ class TestEndpoint:
         assert data["masters"][0]["name"] == "Анна"
         assert data["orphan_visits"] == []
 
+    def test_visit_hour_on_the_wire_is_the_salon_hour_drf2591(
+        self, client: Client, owner_bot_user, tenant: Tenant
+    ) -> None:
+        """Администратор ведёт день по этому экрану, а экран берёт часы из
+        строки. Провод обязан нести ЧАС САЛОНА: «10:00+03:00», а не
+        «07:00+00:00». Тот же момент — иначе починка сдвинула бы визит.
+        «Время непустое» и «момент верный» проходят и при дефекте, поэтому
+        узел смотрит на сами часы в строке."""
+        master = make_master(tenant, name="Анна", external_id=1)
+        start = datetime(2026, 8, 20, 10, 0, tzinfo=MSK)
+        _visit(tenant, master, start_local=start)
+
+        resp = client.get(_url("2026-08-20"), HTTP_AUTHORIZATION=init_data_header("5001"))
+        assert resp.status_code == 200
+        visit = resp.json()["masters"][0]["visits"][0]
+        assert visit["start_at"][11:16] == "10:00", visit["start_at"]
+        assert visit["start_at"].endswith("+03:00"), visit["start_at"]
+        assert visit["end_at"][11:16] == "11:00", visit["end_at"]
+        assert datetime.fromisoformat(visit["start_at"]) == start
+
+    def test_empty_timezone_gives_one_hour_on_day_and_day_schedule_drf2591(
+        self, client: Client, owner_bot_user, tenant: Tenant
+    ) -> None:
+        """Салон без пояса: одна запись — один час на /day/ и в day-schedule.
+
+        Правил «пояс салона» в коде несколько, и при пустом ``timezone`` одно
+        из них молча давало UTC. Запасной пояс на проводе admin_api — один и
+        назван (МСК, ``tenancy.timezones.FALLBACK_TZ``). Подмена «UTC в одном из двух»
+        краснеет здесь, без стенда и без числа пустых салонов."""
+        from apps.admin_api.views_master_schedule import _in_salon_zone, _schedule_zone
+
+        tenant.timezone = ""
+        tenant.save(update_fields=["timezone"])
+        master = make_master(tenant, name="Анна", external_id=1)
+        start = datetime(2026, 8, 20, 10, 0, tzinfo=MSK)
+        _visit(tenant, master, start_local=start)
+
+        resp = client.get(_url("2026-08-20"), HTTP_AUTHORIZATION=init_data_header("5001"))
+        assert resp.status_code == 200
+        day_hour = resp.json()["masters"][0]["visits"][0]["start_at"][11:16]
+
+        body = {"days": [{"bookings": [{"visit_at": start.astimezone(timezone.utc).isoformat()}]}]}
+        schedule_hour = _in_salon_zone(body, _schedule_zone(master))["days"][0]["bookings"][0][
+            "visit_at"
+        ][11:16]
+
+        assert day_hour == "10:00"
+        assert schedule_hour == day_hour
+
     def test_admin_may_read_it_too(self, client: Client, admin_bot_user, tenant: Tenant) -> None:
         resp = client.get(_url("2026-08-20"), HTTP_AUTHORIZATION=init_data_header("5002"))
         assert resp.status_code == 200
+
+    def test_receptionist_may_read_the_day(
+        self, client: Client, receptionist_bot_user, tenant: Tenant
+    ) -> None:
+        """DRF-1552 — owner's decision, ``docs/OPEN_DECISIONS.md`` §35 п.1.
+
+        «Ресепшн открыть чтение "Дня салона". Только GET.» This endpoint
+        was named in the module docstring as the first one the front desk
+        should get, and it is the only one it got.
+        """
+
+        master = make_master(tenant, name="Анна", external_id=1)
+        _visit(tenant, master, start_local=datetime(2026, 8, 20, 10, 0, tzinfo=MSK))
+
+        resp = client.get(_url("2026-08-20"), HTTP_AUTHORIZATION=init_data_header("5003"))
+        assert resp.status_code == 200
+        data = resp.json()
+        # She gets the real day, not a hollowed-out one: the summary and
+        # the roster are what she needs at the front desk.
+        assert data["summary"]["total"] == 1
+        assert data["masters"][0]["name"] == "Анна"
+
+    def test_receptionist_reads_the_day_without_any_phone(
+        self, client: Client, receptionist_bot_user, tenant: Tenant
+    ) -> None:
+        """DRF-1039 asserted for the newly admitted caller too.
+
+        The receptionist is the role whose capability set includes
+        ``view_customer_phone_audited``; this endpoint is not where she
+        gets it, and opening it to her must not have changed the payload.
+        """
+
+        master = make_master(tenant, name="Анна", external_id=1)
+        bu = _client_bot_user(tenant, name="Мария Иванова")
+        _visit(
+            tenant,
+            master,
+            start_local=datetime(2026, 8, 20, 10, 0, tzinfo=MSK),
+            bot_user=bu,
+        )
+
+        resp = client.get(_url("2026-08-20"), HTTP_AUTHORIZATION=init_data_header("5003"))
+        assert resp.status_code == 200
+        body = resp.content.decode()
+        # Presence first: the client whose phone we are looking for is
+        # actually in this body, so the absence below means something.
+        assert resp.json()["masters"][0]["visits"][0]["client_first_name"] == "Мария"
+        assert "+79991234567" not in body
+        assert "79991234567" not in body
+        assert "phone" not in body
 
     def test_master_only_is_forbidden(
         self, client: Client, master_only_bot_user, tenant: Tenant
@@ -245,9 +348,18 @@ class TestEndpoint:
         resp = client.get(_url("2026-08-20"), HTTP_AUTHORIZATION=init_data_header("5004"))
         assert resp.status_code == 403
 
+    def test_customer_only_is_forbidden(
+        self, client: Client, customer_bot_user, tenant: Tenant
+    ) -> None:
+        """Opening the door for the front desk did not open it for everyone."""
+
+        resp = client.get(_url("2026-08-20"), HTTP_AUTHORIZATION=init_data_header("5005"))
+        assert resp.status_code == 403
+
     def test_unauthenticated_is_rejected(self, client: Client, tenant: Tenant) -> None:
+        # 15.09.2026 UTC (DRF-1893): отказ транспорта — один код 401 no_init_data (было 400 malformed / 401 bad_signature).
         resp = client.get(_url("2026-08-20"))
-        assert resp.status_code == 400
+        assert resp.status_code == 401
 
     def test_bad_date_is_a_400_not_a_500(
         self, client: Client, owner_bot_user, tenant: Tenant
@@ -261,7 +373,7 @@ class TestEndpoint:
     ) -> None:
         resp = client.get(_url(), HTTP_AUTHORIZATION=init_data_header("5001"))
         assert resp.status_code == 200
-        expected = datetime.now(tz=timezone.utc).astimezone(tenant_tz(tenant)).date()
+        expected = datetime.now(tz=timezone.utc).astimezone(salon_zone(tenant)).date()
         assert resp.json()["date"] == expected.isoformat()
 
     def test_response_carries_no_phone_anywhere(
@@ -301,3 +413,104 @@ class TestEndpoint:
         visit = resp.json()["masters"][0]["visits"][0]
         assert visit["client_first_name"] == "Мария"
         assert visit["client_last_initial"] == "И."
+
+
+class TestReceptionGateStaysNarrow:
+    """DRF-1552 — the front desk got «День», and only «День».
+
+    ``require_admin_role`` gates *every* endpoint under
+    ``/api/v1/admin/``. Relaxing it would have opened staff invites,
+    master deactivation and availability decisions in one move — so the
+    day endpoint got its own decorator instead. These tests are the
+    proof, and they are the negative half of the pair whose positive half
+    is :meth:`TestEndpoint.test_receptionist_may_read_the_day`.
+
+    They fail on purpose if someone swaps ``require_admin_role`` for
+    ``require_admin_or_reception_read`` anywhere else, or turns the
+    latter into a plain role widening.
+
+    Read endpoints are listed deliberately alongside the writing ones:
+    «только GET» is a limit on the receptionist's *method*, not a licence
+    to read every admin surface.
+    """
+
+    @pytest.mark.parametrize(
+        "url_name",
+        [
+            "masters_list",
+            "staff_roster",
+            "services_mapping_get",
+            "availability_requests_list",
+            "search_customers",
+        ],
+    )
+    def test_other_admin_reads_stay_forbidden(
+        self, client: Client, receptionist_bot_user, tenant: Tenant, url_name: str
+    ) -> None:
+        resp = client.get(
+            reverse(f"admin_api:{url_name}"),
+            HTTP_AUTHORIZATION=init_data_header("5003"),
+        )
+        assert resp.status_code == 403, url_name
+        assert resp.json()["error"] == "forbidden"
+
+    def test_the_day_endpoint_itself_refuses_a_write(
+        self, client: Client, receptionist_bot_user, tenant: Tenant
+    ) -> None:
+        """«Только GET» on the endpoint that was opened.
+
+        ``require_http_methods(["GET"])`` sits outside the gate and
+        answers first, so the observable code here is 405. What matters
+        is that no writing method reaches the view; the gate's own half
+        of that promise is asserted in
+        :meth:`test_the_gate_refuses_a_receptionist_on_a_writing_method`,
+        which is what would still hold if the method decorator were ever
+        dropped.
+        """
+
+        resp = client.post(_url("2026-08-20"), HTTP_AUTHORIZATION=init_data_header("5003"))
+        assert resp.status_code == 405
+
+    def test_the_gate_refuses_a_receptionist_on_a_writing_method(
+        self, rf, receptionist_bot_user, tenant: Tenant
+    ) -> None:
+        """The «GET only» limit lives in the gate, not in the URL config.
+
+        Applied to a view that would happily accept a POST, the decorator
+        still answers 403 to the front desk — so opening a second
+        endpoint to her later cannot accidentally open it for writes.
+        """
+
+        @require_admin_or_reception_read
+        def _writable(request):
+            return JsonResponse({"ok": True})
+
+        header = init_data_header("5003")
+
+        allowed = _writable(rf.get("/x", HTTP_AUTHORIZATION=header))
+        assert allowed.status_code == 200
+
+        refused = _writable(rf.post("/x", HTTP_AUTHORIZATION=header))
+        assert refused.status_code == 403
+        assert json.loads(refused.content)["error"] == "forbidden"
+
+    def test_the_gate_still_lets_an_owner_write(self, rf, owner_bot_user, tenant: Tenant) -> None:
+        """Paired positive guard: the method limit is the receptionist's alone."""
+
+        @require_admin_or_reception_read
+        def _writable(request):
+            return JsonResponse({"ok": True})
+
+        resp = _writable(rf.post("/x", HTTP_AUTHORIZATION=init_data_header("5001")))
+        assert resp.status_code == 200
+
+    def test_owner_still_reaches_the_other_endpoints(
+        self, client: Client, owner_bot_user, tenant: Tenant
+    ) -> None:
+        """Paired positive guard (DRF-1411): nothing was closed by mistake."""
+
+        resp = client.get(
+            reverse("admin_api:masters_list"),
+            HTTP_AUTHORIZATION=init_data_header("5001"),
+        )
+        assert resp.status_code == 200

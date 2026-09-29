@@ -5,6 +5,15 @@
 > Milestone: EPIC #1014 → **M0**. Refs: #1010 (worker), #419 (secrets), `tenant-onboarding.md`, `solo-provider-bootstrap.md`, `server-deployment.md`.
 > Acceptance (M0): *the existing bot responds and is provisioned for the pilot tenants in MAX.*
 
+> **Dead host — do not work on `194.87.99.126`.** SSH to it still succeeds and
+> every command will report success, but the box serves nobody: `miniapp-dev`,
+> `proapp`, `dev` and `api-dev` `.gobeauty.site` all resolve to
+> `176.119.159.141`, and the `.126` vhost only proxies there. A change made on
+> `.126` never reaches a person. The pilot is `176.119.159.141`,
+> `/home/taximeter/ai-bot-platform-dev`, Compose project `ayla-bot-staging`,
+> port 8014, env `.env.staging`, files `docker-compose.yml` +
+> `docker-compose.staging.yml` + `docker-compose.staging.local.yml`.
+
 ## What this runbook is
 
 A single checklist that wires the pilot salons into MAX. It does **not** restate
@@ -77,9 +86,17 @@ Never paste secrets into git, tickets, or this runbook.
 ## Step 2a — provision a multi-staff tenant (idempotent)
 
 ```bash
-python manage.py create_tenant --slug <salon-slug> --name "<Salon name>"
-# --dry-run to preview; re-runs are safe (get_or_create on slug).
+python manage.py create_tenant --slug <salon-slug> --name "<Salon name>" \
+  --id <ayla-tenant-uuid> --city "<City>"
+# --dry-run to preview; re-runs are safe (no-op on an existing slug).
 ```
+
+> **`--id` is not optional for a salon (DRF-1510).** Catalog sync fetches with
+> `?tenant=str(tenant.id)` and Ayla filters on its own Tenant UUID, so a
+> tenant minted without `--id` mirrors **zero** services while every counter
+> reads healthy. `--city` is what puts the salon into city-scoped discovery.
+> Full procedure, verification and recovery:
+> [`connect-five-salons-drf1510.md`](connect-five-salons-drf1510.md).
 
 ## Step 2b — provision a solo master
 
@@ -172,11 +189,13 @@ M0 is done when Steps 1–5 pass for every pilot tenant.
   but is **absent from `server-deployment.md`'s install/enable list** (`web worker
   beat`). On a systemd box the DM drainer isn't running. Fix: add `consumer` to
   the unit install + `systemctl enable` list (and to the deploy workflow).
-- **Deploy model conflict (vs #1039).** `server-deployment.md` + the full
-  `infra/systemd/*.template` set describe a **systemd** dev box (gunicorn, host
-  PG/Redis, "no new containers"). `deploy-dev.yml` (#1039) instead does
-  `docker compose -p ai-bot-platform-dev up -d … web worker` — a parallel compose
-  stack. The two models diverge on which background processes run (Celery vs
-  consumer). The box is the tiebreaker: `systemctl list-units 'ai-bot-platform-dev*'`
-  vs `docker compose -p ai-bot-platform-dev ps`. Resolve before activating
-  auto-deploy.
+- **Deploy model conflict (vs #1039) — RESOLVED: Compose won.** This item used
+  to say the box was the tiebreaker between `server-deployment.md`'s systemd
+  layout and a compose stack. The box has answered. The pilot runs Docker
+  Compose, project **`ayla-bot-staging`** (not `ai-bot-platform-dev`, which was
+  never the real project name), env `.env.staging`, `docker-compose.yml` +
+  `docker-compose.staging.yml` + `docker-compose.staging.local.yml`, web on
+  8014, and `deploy-dev.yml` drives it automatically on every green `ci` on
+  `dev`. `server-deployment.md` is superseded and marked as such. What remains
+  open is only the item above: whether the MAX consumer runs at all, and under
+  what — check on the pilot, not from these documents.

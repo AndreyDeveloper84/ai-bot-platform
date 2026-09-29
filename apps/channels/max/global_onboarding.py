@@ -28,13 +28,18 @@ discovery bot:
 
 * the initial welcome → :data:`GLOBAL_WELCOME_TEXT` + a single «Начать» button
   that routes into the shared S2 consent flow;
-* the S5 first-action prompt → :data:`GLOBAL_S5_TEXT` + the C01 Quick Actions
-  (:mod:`apps.channels.max.quick_actions`), with the wellness grid dropped.
+* the S5 first-action prompt → S3 (when WelcomeSkill showed it) +
+  :data:`GLOBAL_S5_TEXT` + three C01 phrases and «Найти услугу»
+  (:func:`first_contact_action_data`), with the wellness grid dropped;
+* the returning greeting → :data:`GLOBAL_RETURNING_TEXT` + buttons by state
+  (:func:`returning_action_data`).
 
 Обе копии переписаны в DRF-1348 (решение владельца 24.08): need/outcome-first,
-без города и каталожной подачи. Экран C01 несёт три goal-like чипа и один
-вторичный вход; тап по любому из них — обычное сообщение человека, а не
-команда (см. модуль ``quick_actions``).
+без города и каталожной подачи; тексты v2 — владельца, 19.09 (DRF-2120,
+§50-К). Первый экран несёт три goal-like чипа C01 и один вторичный вход;
+тап по чипу — обычное сообщение человека, а не команда (см. модуль
+``quick_actions``). Главный вход — свободный текст (DRF-1179/1272): кнопки
+лишь помогают начать и не выглядят каталогом функций.
 
 The S2 consent texts themselves are marketplace-neutral («Я буду помнить о тебе
 только то, что поможет рекомендовать точнее…») and pass through unchanged.
@@ -56,7 +61,12 @@ import uuid
 from dataclasses import dataclass
 from typing import Any
 
-from apps.channels.max.quick_actions import render_first_contact
+from apps.channels.max.quick_actions import (
+    MAX_FIRST_CONTACT_BUTTONS,
+    SECONDARY_ACTION,
+    first_screen_actions,
+    quick_action_callback,
+)
 from apps.orchestrator.discovery import DiscoveryReply
 from apps.tenancy.context import current_tenant
 
@@ -151,7 +161,11 @@ def resolve_welcome_tap(text: str) -> WelcomeTap | None:
     # текстового хода, который сюда приходит на каждой реплике.
     from apps.skills.welcome.skill import welcome_tap_labels
 
-    return WelcomeTap(history_text=welcome_tap_labels().get(stripped))
+    # Кнопки этого пути подписаны текстом владельца («Начать», «Записать
+    # еду»), а не подписями строителей WelcomeSkill («▶️ Начать», «🍽 Дневник
+    # еды»): в историю ложится то, что человек прочитал на кнопке.
+    label = GLOBAL_WELCOME_TAP_LABELS.get(stripped) or welcome_tap_labels().get(stripped)
+    return WelcomeTap(history_text=label)
 
 
 # Need/outcome-first welcome (DRF-1348, решение владельца 24.08 дословно:
@@ -165,39 +179,60 @@ def resolve_welcome_tap(text: str) -> WelcomeTap | None:
 #
 # WelcomeSkill.WELCOME_TEXT по-прежнему не подходит, но по другой причине —
 # он называет салон «Формула тела» и wellness-меню.
+#
+# v2 — текст владельца 19.09 дословно (DRF-2120, §50-К); тест держит буквой.
 GLOBAL_WELCOME_TEXT = (
-    "Привет! Я Ayla 👋\n\n"
-    "Расскажи, чего тебе хочется или что сейчас беспокоит.\n"
-    "Я помогу разобраться и предложу подходящий следующий шаг.\n\n"
-    "Начнём?"
+    "Привет! Я Ayla 👋\n"
+    "Помогу разобраться, что может подойти, найти услугу и записаться. "
+    "Можно просто рассказать, чего хочется или что сейчас беспокоит."
 )
 
-# Экран C01 — то, что человек видит сразу после согласия.
-#
-# Было — «Напиши услугу и город, например "маникюр в Пензе"». Города на
-# первом экране больше нет: он спрашивается тогда, когда нужен для поиска
-# исполнителя, а не как обязательное поле анкеты (решение владельца 24.08).
-# Wellness-грид сюда по-прежнему не возвращается (см. :86 ниже по истории
-# файла): человек маркетплейса не должен попадать в дневник еды.
-#
-# Приветствие здесь не повторяется: «Привет! Я Ayla 👋» человек прочитал
-# ходом раньше, на экране согласия. На макете эти два экрана — один пузырь,
-# потому что макет шага согласия не содержит (известное расхождение,
-# зафиксировано в теле DRF-1348); в пилоте между ними стоит 152-ФЗ.
-#
-# Строка «Можно написать своими словами или выбрать пример:» и сами чипы
-# добавляются рендером (``quick_actions.render_first_contact``), а не текстом
-# этой константы — чтобы состояние **No Quick Actions** убирало подсказку
-# вместе с чипами, а не оставляло обещание примеров без примеров.
+# Первый рабочий экран после согласия — текст владельца 19.09 дословно
+# (DRF-2120 v2). Города нет: он спрашивается тогда, когда нужен для поиска
+# исполнителя (решение владельца 24.08). Wellness-грид WelcomeSkill сюда не
+# возвращается; вместо него — три фразы C01 и «Найти услугу»
+# (:func:`first_contact_buttons`). S3 идёт ПЕРЕД этим текстом, когда
+# WelcomeSkill его показал (:func:`first_contact_text`): до DRF-2120 путь
+# подменял весь ``reply_text`` и S3 терялся.
 GLOBAL_S5_TEXT = (
-    "Расскажи, чего тебе хочется или что сейчас беспокоит.\n"
-    "Я помогу разобраться и предложу подходящий следующий шаг."
+    "С чего начнём?\n"
+    "Напиши своими словами, чего хочется или что сейчас беспокоит. "
+    "Не обязательно знать название услуги."
 )
+
+# Возврат к диалогу с согласием на руках — текст владельца 19.09 дословно
+# (DRF-2120 v2). Кнопки — по состоянию человека (:func:`returning_buttons`).
+GLOBAL_RETURNING_TEXT = "С возвращением! Что хочешь сделать сегодня? Можно написать своими словами."
+
+#: Подписи кнопок возврата — текст владельца.
+RETURNING_LABEL_DISCOVER = "Подобрать услугу"
+RETURNING_LABEL_MY_BOOKING = "Моя запись"
+RETURNING_LABEL_LOG_FOOD = "Записать еду"
+RETURNING_LABEL_MENU = "Меню"
+
+#: «Записать еду» — тот же ``cb:welcome:food``, что у прежней wellness-кнопки:
+#: WelcomeSkill отвечает на него :data:`FOOD_PROMPT` («пришлите фото или
+#: название»), а ворота дневника читаются здесь, на ответе
+#: (:func:`_food_prompt_reply`). Своего payload'а у кнопки нет намеренно —
+#: второй вход в ту же ветку разошёлся бы с первым при первой правке.
+CALLBACK_LOG_FOOD = "cb:welcome:food"
 
 # Single «Начать» button on the marketplace welcome — routes into the SHARED S2
 # consent flow (WelcomeSkill handles ``cb:welcome:start_s2``). We drop the
-# salon/wellness buttons WelcomeSkill would otherwise attach.
-_START_BUTTON: list[dict[str, str]] = [{"label": "▶️ Начать", "callback": "cb:welcome:start_s2"}]
+# salon/wellness buttons WelcomeSkill would otherwise attach. Подпись —
+# владельца (v2): без стрелки.
+START_BUTTON_LABEL = "Начать"
+_START_BUTTON: list[dict[str, str]] = [
+    {"label": START_BUTTON_LABEL, "callback": "cb:welcome:start_s2"}
+]
+
+#: Чем тап по кнопке ЭТОГО пути был как реплика — для истории диалога
+#: (:func:`resolve_welcome_tap`). Только ``cb:welcome:`` payload'ы: чипы
+#: ``cb:qa:`` и меню ``cb:menu:`` переводит ``quick_actions.resolve_tap_text``.
+GLOBAL_WELCOME_TAP_LABELS: dict[str, str] = {
+    "cb:welcome:start_s2": START_BUTTON_LABEL,
+    CALLBACK_LOG_FOOD: RETURNING_LABEL_LOG_FOOD,
+}
 
 # reply_kind values (WelcomeSkill.meta["reply_kind"]) whose TEXT we replace with a
 # marketplace surface. Everything else (S2 consent prompt, S2a details, refusal,
@@ -222,10 +257,12 @@ _WELCOME_KINDS = frozenset(
 # которое у него уже есть. Единственное состояние возврата на пилоте было
 # неотличимо от первого контакта.
 #
-# Теперь текст WelcomeSkill проходит как есть (он маркетплейс-нейтрален), а
-# клавиатура — та же, что на C01: возврат на верхний уровень, макет для него
-# чипы предписывает («КОГДА ПОКАЗЫВАТЬ: всегда при начале нового диалога или
-# при возврате на верхний уровень»).
+# Теперь оба состояния отвечают текстом владельца (:data:`GLOBAL_RETURNING_TEXT`,
+# DRF-2120 v2) и кнопками по состоянию человека (:func:`returning_action_data`).
+# «Мы кое-что не закончили — продолжим?» на этом пути не звучит: «Продолжить»
+# (Current Focus, DRF-1198) не построен, и владелец велел отложить, — а
+# обещать продолжение, которого нет, нельзя. Незаконченная задача от простого
+# возврата здесь поэтому не отличается.
 #
 # **Пока согласия нет — поведение прежнее.** «▶️ Начать» на этом пути
 # единственный вход в 152-ФЗ; заменить его чипами у несогласившегося значило
@@ -403,23 +440,96 @@ def run_onboarding_turn(
     )
     result = WelcomeSkill().handle(ctx)
 
-    # Capture consent on the grant turn. WelcomeSkill renders the S5 first-action
-    # surface only on the consent-grant callbacks (both consent_yes and
-    # consent_yes_via_s2a funnel through ``_render_consent_granted``), so the S5
-    # reply_kind is the reliable «consent granted this turn» signal. On this global
+    # Capture consent on the grant turn. Грант-видов ДВА (DRF-1968): приветственный
+    # S5 (оба callback'а funnel через ``_render_consent_granted``) и возврат из
+    # отказа, который через ``_render_consent_granted`` НЕ идёт — у него свой
+    # ``_render_consent_recovery_granted``. Признак гранта — набор reply_kind в
+    # :func:`_is_consent_grant_turn`, а не один S5. На this global
     # path WelcomeSkill does NOT stamp consent_at itself (current_tenant() is None
     # → its guard skips); record_global_consent stamps consent_at ATOMICALLY with
     # the ConsentRecord (#1074). Idempotent (get_or_create) — re-tapping «Да» never
     # duplicates and a repeat tap reconciles a consent_at a prior failure dropped.
     if _is_consent_grant_turn(result):
-        _record_consent_journal(bot_user)
+        recorded = _record_consent_journal(bot_user)
+        if not recorded and _is_recovery_grant_turn(result):
+            # Журнал глотает исключения — «не бросило» НЕ значит «записано».
+            # Обещать человеку «готово, согласие есть», когда в журнале
+            # ничего нет, нельзя: это утверждение о 152-ФЗ, и отказы,
+            # читающие журнал, упрут его в тот же отказ следующим ходом.
+            # Приветственный S5 сознательно не трогаем — его поведение при
+            # сбое journal'а прежнее (отдельный предмет).
+            from apps.skills.welcome.skill import CONSENT_RECOVERY_FAILED_TEXT
+
+            return DiscoveryReply(text=CONSENT_RECOVERY_FAILED_TEXT)
+        if recorded:
+            resumed = _resume_after_consent(result, bot_user)
+            if resumed is not None:
+                return resumed
 
     return _to_discovery_reply(result, bot_user)
 
 
+def _resume_after_consent(result: Any, bot_user: Any) -> DiscoveryReply | None:
+    """Возврат в поток, ради которого человек дал согласие (DRF-2267).
+
+    Таких потоков два — чтение дневника и список памяти (``consent_origin``):
+    отказ «мне нужно согласие на обработку личных данных» получил кнопку
+    согласия, и после неё человек должен увидеть то, за чем шёл, а не начало.
+
+    **Почему здесь, а не в навыке.** Журнал 152-ФЗ пишется выше по этой же
+    функции, ПОСЛЕ ``WelcomeSkill.handle``. Дневник, нарисованный внутри
+    навыка, спросил бы своё согласие раньше записи и ответил бы отказом на
+    ход, которым согласие давали.
+
+    **Ворота не обходятся.** Дневник рисуется обычным путём и спрашивает
+    согласие сам: если его всё ещё нет, человек читает тот же отказ, а не
+    записи. ``UNTRACKED`` — как в :mod:`apps.orchestrator.health_return`:
+    заход не планировался как открытие дневника, и суточный слот
+    наблюдения диетолога он не тратит.
+
+    ``None`` — «возвращать нечего», ответ навыка уходит как есть. Сбой
+    отрисовки тоже ``None``: согласие уже записано, и ронять ход из-за
+    возврата нельзя.
+    """
+    from apps.skills.welcome.skill import CONSENT_RECOVERY_RESUMED_ORIGINS
+
+    origin = (getattr(result, "meta", None) or {}).get("consent_origin")
+    if origin not in CONSENT_RECOVERY_RESUMED_ORIGINS:
+        return None
+    try:
+        from apps.orchestrator import personal_surface
+        from apps.orchestrator.coach_observation import Cadence
+
+        if origin == "memory":
+            resumed = personal_surface.render_memory(bot_user)
+        else:
+            resumed = personal_surface.render_diary(bot_user, cadence=Cadence.UNTRACKED)
+    except Exception:  # noqa: BLE001 — возврат не может стоить согласия
+        logger.exception("global_onboarding.consent_resume_failed origin=%s", origin)
+        return None
+    return DiscoveryReply(text=resumed.text, action_data=resumed.action_data)
+
+
 def _is_consent_grant_turn(result: Any) -> bool:
-    """True when this WelcomeSkill turn is the one that grants consent (S5 render)."""
-    return (getattr(result, "meta", None) or {}).get("reply_kind", "") == _S5_KIND
+    """True when this WelcomeSkill turn is the one that grants consent.
+
+    Два вида: приветственный S5 и возврат в исходный поток после отказа
+    (DRF-1968, ``welcome_consent_recovery_granted``). Оба идут через
+    ``WelcomeSkill``, журнал пишется здесь одним путём — ``record_global_consent``
+    идемпотентен, повторный тап не плодит строк.
+    """
+    from apps.skills.welcome.skill import CONSENT_RECOVERY_GRANT_KIND
+
+    kind = (getattr(result, "meta", None) or {}).get("reply_kind", "")
+    return kind in {_S5_KIND, CONSENT_RECOVERY_GRANT_KIND}
+
+
+def _is_recovery_grant_turn(result: Any) -> bool:
+    """True только для возврата из отказа (DRF-1968), не для приветственного S5."""
+    from apps.skills.welcome.skill import CONSENT_RECOVERY_GRANT_KIND
+
+    kind = (getattr(result, "meta", None) or {}).get("reply_kind", "")
+    return kind == CONSENT_RECOVERY_GRANT_KIND
 
 
 def _consent_captured(bot_user: Any) -> bool:
@@ -446,9 +556,11 @@ def _consent_captured(bot_user: Any) -> bool:
     """
     try:
         from apps.consent.models import ConsentRecord
-        from apps.consent.services import has_global_consent
+        from apps.consent.services import has_person_consent
 
-        return has_global_consent(bot_user, ConsentRecord.ConsentType.PERSONAL_DATA.value)
+        # DRF-2230: зеркало Главной — согласие, данное в Mini App (своя
+        # оболочка), не заставляет чат спрашивать заново.
+        return has_person_consent(bot_user, ConsentRecord.ConsentType.PERSONAL_DATA.value)
     except Exception:  # noqa: BLE001 — consent probe must never break the turn
         logger.exception(
             "global_onboarding.consent_probe_failed bot_user=%s",
@@ -482,7 +594,14 @@ def _to_discovery_reply(result: Any, bot_user: Any = None) -> DiscoveryReply:
 
     Wellness-грид не возвращается. Вместо него — Quick Actions макета C01:
     три goal-like чипа и вторичный вход, четыре кнопки при потолке в пять
-    (BOT-001 AC-4.2 / DRF-1200).
+    (BOT-001 AC-4.2 / DRF-1200; DRF-2120 v2 вернул потолок к пяти).
+
+    ### DRF-2120 — S3 доходит
+
+    До этого листа ветка S5 подменяла ВЕСЬ ``reply_text`` WelcomeSkill, а S3
+    в нём склеен («\\n\\n»-пузырь ``_render_consent_granted``) — так S3 на
+    глобальном пути терялся вовсе. Теперь S3 читается по ``meta.s3_shown``
+    и ставится перед S5 дословно (:func:`first_contact_text`).
     """
     reply_kind = (getattr(result, "meta", None) or {}).get("reply_kind", "")
 
@@ -494,20 +613,152 @@ def _to_discovery_reply(result: Any, bot_user: Any = None) -> DiscoveryReply:
         # здесь единственный вход в 152-ФЗ (см. :data:`_RETURN_KINDS`).
         if not _consent_captured(bot_user):
             return _consent_entry_reply()
-        text, action_data = render_first_contact(result.reply_text)
-        return DiscoveryReply(text=text, action_data=action_data)
+        return DiscoveryReply(
+            text=GLOBAL_RETURNING_TEXT, action_data=returning_action_data(bot_user)
+        )
 
     if reply_kind == _S5_KIND:
-        text, action_data = render_first_contact(GLOBAL_S5_TEXT)
-        return DiscoveryReply(text=text, action_data=action_data)
+        return DiscoveryReply(
+            text=first_contact_text(s3_shown=bool((result.meta or {}).get("s3_shown"))),
+            action_data=first_contact_action_data(bot_user),
+        )
+
+    if reply_kind == _FOOD_PROMPT_KIND:
+        return _food_prompt_reply(result, bot_user)
 
     # S2 consent prompt / S2a details / refusal / ask-food-water prompts →
     # verbatim (their texts are already marketplace-neutral).
     return DiscoveryReply(text=result.reply_text, action_data=result.action_data)
 
 
-def _record_consent_journal(bot_user: Any) -> None:
+_FOOD_PROMPT_KIND = "welcome_food_prompt"
+
+
+def first_contact_text(*, s3_shown: bool) -> str:
+    """Текст первого экрана: [S3 дословно +] :data:`GLOBAL_S5_TEXT`.
+
+    S3 — та же условность, что у WelcomeSkill (``show_s3``: прямой путь
+    S1→S2→S3→S5 показывает, путь через S2a — нет); читается из ``meta``,
+    а не из ``reply_text``, потому что ``reply_text`` здесь подменяется.
+    """
+    from apps.skills.welcome.skill import S3_POSITIONING_TEXT
+
+    parts = [S3_POSITIONING_TEXT] if s3_shown else []
+    parts.append(GLOBAL_S5_TEXT)
+    return "\n\n".join(parts)
+
+
+def first_contact_buttons() -> list[dict[str, str]]:
+    """Клавиатура первого экрана: три фразы C01, затем «Найти услугу».
+
+    Порядок несущий: вторичный вход идёт последним и один в строке —
+    решение владельца 24.08 («малый вес, не конкурирует со свободным
+    текстом»). Кнопки не персональные: дневник с первого экрана снят
+    (DRF-2120 v2 вытесняет решение 07.09; дневник — в главном меню), и
+    ``bot_user`` этому экрану не нужен. Зависит только от таблицы §38.
+    """
+    buttons = [
+        {"label": action.label, "callback": quick_action_callback(action)}
+        for action in first_screen_actions()
+    ]
+    buttons.append(
+        {"label": SECONDARY_ACTION.label, "callback": quick_action_callback(SECONDARY_ACTION)}
+    )
+    return buttons
+
+
+def first_contact_action_data(bot_user: Any = None) -> dict[str, Any]:
+    """``action_data`` первого экрана в плоской форме (``_build_attachments``, ветка 2).
+
+    ``bot_user`` не читается (см. :func:`first_contact_buttons`); параметр —
+    ради единой сигнатуры с экраном stale-tap в handler.
+    """
+    buttons = first_contact_buttons()
+    assert len(buttons) <= MAX_FIRST_CONTACT_BUTTONS  # noqa: S101 — предел DRF-1200
+    return {"buttons": buttons, "button_columns": 1}
+
+
+def _has_upcoming_booking(bot_user: Any) -> bool:
+    """Есть ли у человека ближайшая запись — тем же чтением, что «мои записи».
+
+    Каталог недоступен → ``False``: кнопка «Моя запись» не рисуется, а не
+    обещает запись, которую нечем показать. Сбой не рушит приветствие.
+    """
+    try:
+        from apps.booking.services.records import list_upcoming
+
+        return list_upcoming(bot_user=bot_user, limit=1).status == "ok"
+    except Exception:  # noqa: BLE001 — greeting must never break on the lookup
+        logger.exception(
+            "global_onboarding.upcoming_probe_failed bot_user=%s", getattr(bot_user, "id", None)
+        )
+        return False
+
+
+def returning_buttons(bot_user: Any) -> list[dict[str, str]]:
+    """Кнопки возврата по состоянию (DRF-2120 v2, решение владельца 19.09).
+
+    * «Подобрать услугу» — всегда (пока нет «Продолжить»: DRF-1198 Current
+      Focus не существует, владелец: «отложить»); тап — та же фраза, что у
+      пункта главного меню (``DISCOVER_TAP_TEXT``);
+    * «Моя запись» — только когда есть ближайшая (``list_upcoming``); тап —
+      ``cb:menu:my_bookings`` → «Покажи мои записи» → настоящие записи;
+    * «Записать еду» — когда питание включено; без согласия дневника ответ
+      объясняет и ведёт к согласию (:func:`_food_prompt_reply`, DRF-2096);
+    * «Меню» — ``cb:menu:help`` → «Что ты умеешь?» → меню из восьми (DRF-1491).
+
+    Потолок — :data:`MAX_FIRST_CONTACT_BUTTONS` (DRF-1200): максимум четыре.
+    """
+    from apps.skills.menu.marketplace import DISCOVER_TAP_TEXT, nutrition_enabled
+    from apps.skills.menu.matching import CALLBACK_MENU_HELP, CALLBACK_MENU_MY_BOOKINGS
+
+    buttons = [{"label": RETURNING_LABEL_DISCOVER, "callback": DISCOVER_TAP_TEXT}]
+    if _has_upcoming_booking(bot_user):
+        buttons.append({"label": RETURNING_LABEL_MY_BOOKING, "callback": CALLBACK_MENU_MY_BOOKINGS})
+    if nutrition_enabled():
+        buttons.append({"label": RETURNING_LABEL_LOG_FOOD, "callback": CALLBACK_LOG_FOOD})
+    buttons.append({"label": RETURNING_LABEL_MENU, "callback": CALLBACK_MENU_HELP})
+    return buttons
+
+
+def returning_action_data(bot_user: Any) -> dict[str, Any]:
+    buttons = returning_buttons(bot_user)
+    assert len(buttons) <= MAX_FIRST_CONTACT_BUTTONS  # noqa: S101 — предел DRF-1200
+    return {"buttons": buttons, "button_columns": 2}
+
+
+def _food_prompt_reply(result: Any, bot_user: Any) -> DiscoveryReply:
+    """Ответ на «Записать еду» — ворота дневника ДО приглашения прислать еду.
+
+    WelcomeSkill на ``cb:welcome:food`` отвечает :data:`FOOD_PROMPT` без
+    ворот (это его прежняя wellness-кнопка). Здесь тот же предикат, что у
+    всех писателей дневника (``diary_write_refusal``, DRF-2093), и те же
+    отказы, что у текстовой записи (``text_entry.diary_entry_refusal``,
+    DRF-1968/2096): без 152-ФЗ — «Дать согласие», без согласия дневника —
+    объяснение и «Открыть и разрешить». Звать человека прислать еду, чтобы
+    отказать ему на следующем ходу, — тот дефект, ради которого кнопка и
+    получила ворота.
+    """
+    from apps.skills.food_clarify.text_entry import diary_entry_refusal
+
+    refusal = diary_entry_refusal(bot_user)
+    if refusal is not None:
+        return DiscoveryReply(text=refusal.reply_text, action_data=refusal.action_data)
+    return DiscoveryReply(text=result.reply_text, action_data=result.action_data)
+
+
+def _record_consent_journal(bot_user: Any) -> bool:
     """Capture consent server-side, ATOMICALLY (best-effort, loud on failure).
+
+    Возвращает, ЕСТЬ ЛИ активный грант PERSONAL_DATA после вызова — создан им
+    или уже существовал (``record_global_consent`` идемпотентен). Именно это, а
+    не «создан этим ходом», и нужно для утверждения по 152-ФЗ: человеку обещают
+    наличие согласия, а не факт его создания. НЕ сужать до флага ``created`` из
+    ``get_or_create`` — тогда повторный тап человека, у которого согласие уже
+    есть, начнёт получать текст неудачи.
+
+    Вызывающему этого не вывести из «не бросило»: исключения здесь глотаются
+    намеренно, и молчание одинаково выглядит и при успехе, и при сбое (DRF-1968).
 
     ``record_global_consent`` writes the proof-of-consent ConsentRecord AND stamps
     ``bot_user.consent_at`` in one transaction (#1074), so on this global path
@@ -544,8 +795,10 @@ def _record_consent_journal(bot_user: Any) -> None:
     from apps.consent.models import ConsentRecord
     from apps.consent.services import record_global_consent
 
+    personal_data_type = ConsentRecord.ConsentType.PERSONAL_DATA.value
+    recorded_personal_data = False
     for consent_type in (
-        ConsentRecord.ConsentType.PERSONAL_DATA.value,
+        personal_data_type,
         ConsentRecord.ConsentType.MEMORY_GREEN.value,
     ):
         try:
@@ -561,3 +814,7 @@ def _record_consent_journal(bot_user: Any) -> None:
                 getattr(bot_user, "id", None),
                 consent_type,
             )
+        else:
+            if consent_type == personal_data_type:
+                recorded_personal_data = True
+    return recorded_personal_data

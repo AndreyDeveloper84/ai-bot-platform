@@ -101,6 +101,7 @@ from typing import Any
 from django.conf import settings
 
 from apps.channels.max.global_onboarding import (
+    first_contact_action_data,
     needs_onboarding,
     resolve_welcome_tap,
     run_onboarding_turn,
@@ -113,13 +114,15 @@ from apps.channels.max.outbound import (
 from apps.channels.max.parser import CanonicalEvent, ParseError, parse_max_webhook
 from apps.channels.max.quick_actions import (
     AI_UNAVAILABLE_TEXT,
-    RETRY_CALLBACK,
     STALE_TAP_TEXT,
     ai_unavailable_action_data,
-    first_contact_action_data,
+    is_retry_callback,
     is_stale_tap,
+    looks_like_callback_payload,
     resolve_tap_text,
+    retry_turn_id,
 )
+from apps.orchestrator.llm.templates import get_fallback
 from apps.channels.max.photo import (
     PhotoDownloadError,
     PhotoTooLargeError,
@@ -127,7 +130,18 @@ from apps.channels.max.photo import (
     extract_first_photo_url,
     safe_hostname,
 )
-from apps.conversations.models import Conversation
+from apps.channels.max.voice import (
+    VOICE_ACTION_TYPE,
+    VOICE_NOT_SUPPORTED_TEXT,
+    is_voice_only,
+)
+from apps.channels.max.voice_turn import (
+    VoiceRefused,
+    VoiceResolved,
+    resolve_voice_turn,
+    with_voice_echo,
+)
+from apps.conversations.models import Conversation, Message
 from apps.conversations.services import (
     record_global_message,
     record_message,
@@ -136,20 +150,31 @@ from apps.conversations.services import (
 )
 from apps.events.services import emit
 from apps.consent.memory import can_store_green_memory
+from apps.handoff.silence import mark_handoff_announced, notify_silence
 from apps.identity.services import (
     resolve_or_create_bot_user,
     resolve_or_create_global_bot_user,
 )
 from apps.identity.services.global_tenant import get_global_bot_tenant
+from apps.identity.services.memory_origin import global_surface_scope
+from apps.identity.services.identity_card import WHOAMI_COMMAND, build_card, render_for_person
 from apps.observability.ai_metrics import record_ai_request
 from apps.observability.models import AIRequestMetric
 from apps.persona.memory_commands import handle_memory_command
 from apps.persona.memory_surface import render_current_personal_context
 from apps.persona.voice import SALON_BUSINESS_NAME
 from apps.orchestrator.concierge import generate_direct_show_masters_reply
+from apps.integrations.ayla.user_proxy import external_user_id_for
 from apps.orchestrator.fast_path import claims_direct_show_masters
+from apps.orchestrator.goal_capture import (
+    CONFIRMATION,
+    capture_goal_from_chat,
+    looks_like_goal_statement,
+)
+from apps.orchestrator.open_question import close_question, open_question
 from apps.orchestrator.discovery import (
     CALLBACK_DISCOVER_BOOK_PREFIX,
+    CALLBACK_DISCOVER_MORE_PREFIX,
     CATALOG_CALLBACK_PREFIXES,
     CATALOG_STALE_CARD_TEXT,
     CLARIFY_CALLBACK_PREFIX,
@@ -158,7 +183,14 @@ from apps.orchestrator.discovery import (
     DiscoveryReply,
     execute_catalog_callback,
     execute_clarify_callback,
+    execute_show_more,
     resolve_discover_tap,
+)
+from apps.handoff.notify import notify_safety_reply_during_handoff
+from apps.identity.services.blocking import (
+    BLOCK_NOTICE_TEXT,
+    blocked_since,
+    claim_block_notice,
 )
 from apps.orchestrator.handoff import (
     BOOKING_CALLBACK_PREFIXES,
@@ -173,9 +205,13 @@ from apps.orchestrator.intent_resolution import resolve_and_log_turn_intent
 from apps.orchestrator.nutrition_global import (
     resolve_anketa_tap,
     resolve_food_tap,
+    resolve_plan_tap,
+    resolve_nutri_stop_tap,
     try_handle_structured_nutrition_turn,
 )
-from apps.nutrition_proactive.optout import try_handle_opt_out
+from apps.nutrition_proactive.optout import try_handle_opt_out, try_handle_surface_stop
+from apps.nutrition_proactive.report_hour import ACTION_TYPE as REPORT_HOUR_ACTION_TYPE
+from apps.nutrition_proactive.report_hour import try_handle_report_hour
 from apps.orchestrator.visits import (
     CALLBACK_VISIT_REPEAT_PREFIX,
     VISIT_CALLBACK_PREFIXES,
@@ -183,14 +219,49 @@ from apps.orchestrator.visits import (
     route_visits,
 )
 from apps.orchestrator.memory import short_term
-from apps.orchestrator.memory.personal_context import record_explicit_green_facts
+from apps.orchestrator.memory.evicted_review import review_evicted
+from apps.orchestrator.said_memory import (
+    OTHER_QUESTIONS as SAID_OTHER_QUESTIONS,
+)
+from apps.orchestrator.said_memory import (
+    STALE_TEXT as SAID_STALE_TEXT,
+)
+from apps.orchestrator.said_memory import (
+    VERDICT_YES as SAID_VERDICT_YES,
+)
+from apps.orchestrator.said_memory import (
+    confirm_said_fact,
+    resolve_said_tap,
+    said_question_id,
+)
+from apps.orchestrator.memory_announce import (
+    PRE_SEND_LINK_BUDGET_S,
+    bridge_after_send,
+    guard_service_line,
+    record_turn_facts,
+    weave_service_line,
+)
 from apps.orchestrator.memory_ask import maybe_weave_question, try_handle_answer
+from apps.orchestrator.red_flag_turn import (
+    RED_FLAG_ACTION_TYPE,
+    g7_question_reply,
+    red_flag_reply,
+)
+from apps.skills.health_screening.g7_question import (
+    g7_under_mute,
+    history_text as g7_history_text,
+    is_g7_callback,
+    is_stale_g7_tap,
+)
 from apps.orchestrator.memory_block import build_concierge_memory_block
 from apps.orchestrator.nutrition_context import build_nutrition_context_block
+from apps.orchestrator.nutrition_wellness import interpretation_eligible
 from apps.orchestrator.safety.gate import (
     OUTBOUND_ACTION_TYPE,
     evaluate_inbound,
     guard_outbound,
+    reaches_through_handoff,
+    under_handoff,
 )
 from apps.orchestrator.turn_seam import (
     SURFACE_GLOBAL,
@@ -200,6 +271,19 @@ from apps.orchestrator.turn_seam import (
     turn_reply_to_skill_result,
 )
 from apps.skills.booking.lookup import is_personal_booking_lookup
+from apps.skills.menu.marketplace import (
+    FALLBACK_ACTION_TYPE,
+    HEALTH_DECLINE_ACTION_TYPE,
+    MENU_ACTION_TYPE,
+    OPEN_WARNING_ACTION_TYPE,
+    is_extra_callback,
+    is_health_callback,
+    is_open_callback,
+    marketplace_fallback_reply,
+    marketplace_menu_reply,
+    matches_menu_request,
+    resolve_health_tap,
+)
 from apps.tools.idempotency import AlreadyClaimed, with_idempotency
 
 logger = logging.getLogger(__name__)
@@ -247,8 +331,16 @@ def _last_assistant_content(history: list[dict[str, Any]] | None) -> str | None:
 def _last_user_content(
     history: list[dict[str, Any]] | None,
     conversation: Any = None,
+    *,
+    turn_id: str | None = None,
 ) -> str | None:
     """Последняя реплика САМОГО человека, или None.
+
+    ``turn_id`` (DRF-1762) — кнопка привязана к строке: реплика отдаётся,
+    только если эта строка всё ещё последняя у человека. Повтор ложится новой
+    строкой, поэтому второй тап по той же кнопке и тап после новой реплики —
+    оба «не последний ход» и подставить им нечего. Короткая память здесь не
+    годится: у неё нет id строк, поэтому привязанный тап читает таблицу.
 
     Что подставляет «Повторить» с экрана «AI недоступна» (DRF-1348): повтор —
     это «отправь то же самое ещё раз», а не «спроси модель заново», поэтому
@@ -263,23 +355,34 @@ def _last_user_content(
     Тап по самой кнопке сюда попасть не может: подстановка стоит ДО записи
     входящего хода, поэтому ``cb:retry:last`` в истории не оказывается.
     """
-    for item in reversed(history or []):
-        if item.get("role") == "user":
-            content = item.get("content")
-            if isinstance(content, str) and content.strip():
-                return content
+    if turn_id is None:
+        for item in reversed(history or []):
+            if item.get("role") == "user":
+                content = item.get("content")
+                if isinstance(content, str) and content.strip():
+                    return content
     conversation_id = getattr(conversation, "id", None)
     if conversation_id is None:
         return None
     try:
         from apps.conversations.models import Message
 
-        row = (
+        last = (
             Message.all_tenants.filter(conversation_id=conversation_id, role="user")
             .order_by("-created_at")
-            .values_list("content", flat=True)
+            .values_list("id", "content")
             .first()
         )
+        row = last[1] if last is not None else None
+        if turn_id is not None:
+            is_last = last is not None and last[0].hex == turn_id
+            logger.info(
+                "channels.max.global.retry_bound conversation=%s is_last=%s",
+                conversation_id,
+                is_last,
+            )
+            if not is_last:
+                return None
     except Exception:  # noqa: BLE001 — a retry must never break the turn
         logger.exception(
             "channels.max.global.retry_history_probe_failed conversation=%s",
@@ -332,6 +435,12 @@ def _last_clarification_offer(conversation: Any) -> tuple[str, list[str]]:
                 continue
             options = [str(o) for o in (block.get("options") or []) if str(o).strip()]
             if options:
+                # DRF-1760 — вопрос берётся из блока, где он лежит без
+                # «Выбрано: N»; строки, записанные до этого, несут его в
+                # ``content`` — как прежде.
+                asked = block.get("question")
+                if isinstance(asked, str) and asked.strip():
+                    return asked, options
                 return (content if isinstance(content, str) else ""), options
     except Exception:  # noqa: BLE001 — a tap must never break the turn
         logger.exception(
@@ -522,6 +631,7 @@ def _capture_live_replay(
     reply_text: str,
     skill_name: str = "",
     keyboard_size: int = 0,
+    tool_trace: Any = None,
 ) -> None:
     """DRF-1209 step 18 — one ``ReplayTrace`` row for a live-path turn.
 
@@ -529,7 +639,7 @@ def _capture_live_replay(
     ``apps.orchestrator.pipeline.turn`` and the offline replay runner — the
     path that actually answers people wrote no traces. This helper ports the
     SAME recorder onto the live handler: same sampling gate
-    (``REPLAY_SAMPLE_RATE_*``, decided inside the recorder), same ``regex_v2``
+    (``REPLAY_SAMPLE_RATE_*``, decided inside the recorder), same ``regex_v3``
     redaction before persist, same swallow-everything contract.
 
     The six pipeline stages do not exist on the live path, so the snapshots
@@ -574,7 +684,15 @@ def _capture_live_replay(
             },
             {
                 "step": "routing",
-                "payload": {"branch": branch, "skill": skill_name},
+                # DRF-1754 — трасса выбора инструментов (DRF-1385) едет в
+                # строку, а не только в лог: без неё расшифровка диалога
+                # не говорит, какой инструмент выбрала модель и что он
+                # вернул. Редактор ниже проходит и по аргументам.
+                "payload": {
+                    "branch": branch,
+                    "skill": skill_name,
+                    "tool_trace": list(tool_trace) if tool_trace else [],
+                },
             },
             {
                 "step": "pre_check",
@@ -616,8 +734,14 @@ def _deliver_crisis_reply(
     trace_id: str | uuid.UUID | None,
     is_global: bool,
     attachments: list[dict[str, Any]] | None = None,
+    blocked: bool = False,
 ) -> None:
     """Send a safety/crisis reply, alerting LOUDLY if delivery fails (#1082).
+
+    ``blocked`` (DRF-2276): the recipient is blocked by a platform operator,
+    and the reply still goes out — N-1 (CD §67). Only then does the send carry
+    ``bypass_block="safety"``: for everyone else the call stays exactly what
+    it was, so nothing about the unblocked path changes.
 
     A crisis reply that fails to send is categorically worse than a normal one:
     ``with_idempotency`` has already claimed the key, so a PEL retry hits
@@ -634,7 +758,11 @@ def _deliver_crisis_reply(
     the only addition.
     """
     try:
-        send_message(chat_id=chat_id, text=text, attachments=attachments)
+        if blocked:
+            # DRF-2276 — N-1: ответ безопасности проходит забор блокировки.
+            send_message(chat_id=chat_id, text=text, attachments=attachments, bypass_block="safety")
+        else:
+            send_message(chat_id=chat_id, text=text, attachments=attachments)
     except Exception:
         logger.error(
             "channels.max.safety.crisis_delivery_failed bot_user=%s is_global=%s trace=%s",
@@ -654,6 +782,58 @@ def _deliver_crisis_reply(
         except Exception:  # noqa: BLE001 — the alert event must not mask the send failure
             logger.exception("channels.max.safety.crisis_delivery_alert_emit_failed")
         raise
+
+
+#: ``Message.action_type`` фразы блокировки (DRF-2276).
+BLOCK_NOTICE_ACTION_TYPE = "block_notice"
+
+
+def _answer_blocked(
+    *,
+    conversation: Any,
+    bot_user: Any,
+    chat_id: str | None,
+    trace_id: str | uuid.UUID | None,
+    since: Any,
+    is_global: bool,
+) -> None:
+    """Ход заблокированного человека (DRF-2276, CD §72 п.15): фраза раз за эпизод.
+
+    Зовётся только когда гейт не нашёл ни кризиса, ни неотложки — их
+    заблокированному отвечает safety-ветка (N-1). Дальше ничего: ни навыков,
+    ни модели. Входящее уже записано в диалог — карточка покажет, что человек
+    писал. Событие без текста клиента.
+    """
+    told = claim_block_notice(bot_user, since=since)
+    logger.info(
+        "channels.max.blocked_inbound conversation=%s is_global=%s notice=%s",
+        conversation.id,
+        is_global,
+        told,
+    )
+    emit(
+        "channels.max.blocked_inbound",
+        payload={
+            "bot_user_id": str(bot_user.id),
+            "conversation_id": str(conversation.id),
+            "is_global_bot": is_global,
+            "notice_sent": told,
+        },
+    )
+    if not told or not chat_id:
+        return
+    # Витринный диалог живёт у тенанта-стража и пишется своей функцией.
+    record = record_global_message if is_global else record_message
+    record(
+        conversation,
+        role="assistant",
+        content=BLOCK_NOTICE_TEXT,
+        rendered_text=BLOCK_NOTICE_TEXT,
+        action_type=BLOCK_NOTICE_ACTION_TYPE,
+        trace_id=trace_id,
+    )
+    short_term.append(conversation.id, role="assistant", content=BLOCK_NOTICE_TEXT)
+    send_message(chat_id=chat_id, text=BLOCK_NOTICE_TEXT, bypass_block="block_notice")
 
 
 def _confidence_floor_reason(skill_result: Any) -> str:
@@ -773,6 +953,19 @@ def _dispatch_skill_handoff(
         trace_id=trace_id,
     )
     short_term.append(conversation.id, role="assistant", content=handoff_text)
+    # DRF-1486 — этот диалог говорит человеку, что подключает сотрудника, и
+    # факт этого решает, ЧТО человек прочитает, когда молчание включится на
+    # его следующем сообщении.
+    #
+    # ДО отправки, ровно как ``record_message`` выше и по той же причине:
+    # ``send_message`` пробрасывает MaxAPIError наверх, автоматического
+    # ретрая нет (запись остаётся в PEL до ручного XCLAIM). Записать после
+    # отправки значило бы, что упавший ход оставляет диалог с меткой
+    # «здесь ничего не говорили» — и на следующем сообщении человек прочитал
+    # бы «вы просили связать вас с сотрудником в ДРУГОМ нашем чате» ровно в
+    # том чате, где он и спрашивал. Раньше такой сбой давал молчание; врать
+    # хуже, чем молчать.
+    mark_handoff_announced(conversation=conversation, chat_id=chat_id)
     send_message(
         chat_id=chat_id,
         text=handoff_text,
@@ -891,9 +1084,9 @@ def handle_max_event(payload: dict, trace_id: str | uuid.UUID | None = None) -> 
         )
         return
 
+    # DRF-2009: без id человека в канале — ПДн в логе не пишутся.
     logger.info(
-        "channels.max.handler.received channel_user_id=%s text_len=%d attachments=%d",
-        event.channel_user_id,
+        "channels.max.handler.received text_len=%d attachments=%d",
         len(event.text),
         len(event.attachments),
     )
@@ -924,6 +1117,187 @@ def handle_max_event(payload: dict, trace_id: str | uuid.UUID | None = None) -> 
             },
         )
         return
+
+
+def _health_already_declined(conversation: Any) -> bool | None:
+    """Отказывался ли человек от согласия на медданные В ЭТОМ диалоге.
+
+    ``True`` — отказывался, ``False`` — нет, ``None`` — прочитать не
+    удалось. Три состояния, а не два, потому что третье звучит для
+    человека иначе: поведение в нём осторожное (экран не открываем), но
+    говорить при этом «я про согласие больше не напоминаю» тому, кто
+    никогда не отказывался, значит утверждать про него неправду.
+
+    Читается таблица сообщений, а не короткая память: у короткой памяти
+    TTL, а «тот же диалог» (канон 2.5 «без понуканий», 2.6 «автономия
+    клиента абсолютна») живёт дольше её окна — иначе достаточно было бы
+    подождать час, чтобы бот спросил ещё раз.
+
+    Два следа, и это не перестраховка. Реплика ЧЕЛОВЕКА («Не сейчас»,
+    ``marketplace.HEALTH_TAP_TEXT``) пишется ДО того, как ответ проходит
+    сторожа исходящего; метка ответа БОТА
+    (``action_type``) — после, и при блокировке сторож заменяет её на
+    ``OUTBOUND_ACTION_TYPE``, то есть теряет. Один след без другого
+    оставлял бы обещание «больше не спрошу» держащимся не всегда.
+
+    ``all_tenants`` — потому что глобальный диалог лежит под sentinel-
+    тенантом, а вызов идёт вне ``tenant_scope``.
+    """
+    from apps.conversations.models import Message
+    from apps.skills.menu.marketplace import CALLBACK_HEALTH_DECLINE, health_tap_text
+
+    decline_phrase = health_tap_text().get(CALLBACK_HEALTH_DECLINE, "")
+    try:
+        rows = Message.all_tenants.filter(conversation=conversation)
+        if rows.filter(role="assistant", action_type=HEALTH_DECLINE_ACTION_TYPE).exists():
+            return True
+        return bool(decline_phrase) and rows.filter(role="user", content=decline_phrase).exists()
+    except Exception:  # noqa: BLE001 — сбой чтения не повод выпрашивать медданные
+        logger.exception(
+            "channels.max.global.health_decline_lookup_failed conversation=%s",
+            getattr(conversation, "id", None),
+        )
+        return None
+
+
+def _route_health_callback(
+    *, callback_text: str, bot_user: Any, conversation: Any
+) -> tuple[DiscoveryReply, str]:
+    """Тап семейства ``cb:health:`` — ответ и его ``action_type``.
+
+    Три исхода, и ни один из них не молчание:
+
+    * «Не сейчас» — возврат в меню плюс отметка отказа. Отметка и есть
+      механизм «повторного запроса в том же диалоге нет»: она читается
+      :func:`_health_already_declined`.
+    * пищевой пункт, отказа ещё не было — экран ЗАПРОСА согласия
+      (§25 п.6: «видит и попадает на запрос согласия»).
+    * пищевой пункт после отказа — объяснение без кнопок согласия. Не
+      запрос: спрашивать второй раз нельзя, а ответить нечем — значит
+      вернуть мёртвую кнопку, которую тот же пункт решения запрещает.
+
+    Неизвестный слаг семейства (снятый пункт из истории чата) попадает в
+    последнюю ветку и отвечает меню — тем же правилом, по которому
+    ``resolve_tap_text`` переводит снятый ``cb:menu:*`` в «Что ты
+    умеешь?»: чем кнопка была, восстановить нечем, но ход терять нельзя.
+
+    ПЕРВЫЕ ворота проверяются здесь тоже, а не только при отрисовке.
+    Клавиатура живёт в истории чата дольше, чем флаг в окружении: если
+    ``NUTRITION_ENABLED`` выключили после того, как человек увидел меню,
+    тап по старой кнопке не должен просить согласие на особую категорию
+    персданных ради поверхности, которую только что выключили. Такой ход
+    отвечает меню — в котором пищевого пункта уже нет (первая строка
+    таблицы §25 п.6).
+    """
+    from apps.skills.menu.marketplace import (
+        CALLBACK_HEALTH_DECLINE,
+        HEALTH_CHECK_FAILED_TEXT,
+        HEALTH_DECLINED_EARLIER_TEXT,
+        HEALTH_DECLINED_TEXT,
+        HEALTH_REQUEST_TEXT,
+        health_need_surface,
+        health_request_action_data,
+        health_request_action_type,
+        nutrition_enabled,
+    )
+
+    stripped = (callback_text or "").strip()
+    if stripped == CALLBACK_HEALTH_DECLINE:
+        _, menu_data = marketplace_menu_reply(bot_user=bot_user)
+        return (
+            DiscoveryReply(text=HEALTH_DECLINED_TEXT, action_data=menu_data),
+            HEALTH_DECLINE_ACTION_TYPE,
+        )
+
+    menu_text, menu_data = marketplace_menu_reply(bot_user=bot_user)
+    surface = health_need_surface(stripped)
+    if surface is None or not nutrition_enabled():
+        # Снятый пункт либо выключенный мастер-флаг: обе кнопки —
+        # пережитки клавиатуры из истории чата, и ответ на них один.
+        return DiscoveryReply(text=menu_text, action_data=menu_data), MENU_ACTION_TYPE
+
+    declined = _health_already_declined(conversation)
+    if declined is None:
+        return (
+            DiscoveryReply(text=HEALTH_CHECK_FAILED_TEXT, action_data=menu_data),
+            MENU_ACTION_TYPE,
+        )
+    if declined:
+        return (
+            DiscoveryReply(text=HEALTH_DECLINED_EARLIER_TEXT, action_data=menu_data),
+            MENU_ACTION_TYPE,
+        )
+
+    logger.info(
+        "channels.max.global.health_consent_requested surface=%s bot_user=%s",
+        surface,
+        getattr(bot_user, "id", None),
+    )
+    return (
+        DiscoveryReply(text=HEALTH_REQUEST_TEXT, action_data=health_request_action_data()),
+        # DRF-1547 / §37 п.5 — метка несёт ПОВЕРХНОСТЬ, а не просто «здесь
+        # был запрос». Выдача согласия происходит в мини-приложении,
+        # отдельным HTTP-запросом, и без этой метки вернуть человека туда,
+        # куда он шёл, не по чему: в профиле он оказался бы с пустыми
+        # руками и обязанностью вспомнить, зачем пришёл.
+        health_request_action_type(surface),
+    )
+
+
+def _route_menu_nav_callback(*, callback_text: str, bot_user: Any) -> tuple[DiscoveryReply, str]:
+    """Тап навигации по меню — ответ и его ``action_type`` (DRF-1547).
+
+    Два исхода, и ни один из них не молчание:
+
+    * ``cb:open:{слаг}`` — ПРЕДУПРЕЖДЕНИЕ перед открытием приложения
+      (§37 п.6) и уже под ним кнопка, которая его открывает;
+    * ВСЁ семейство ``cb:extra:*`` — главное меню.
+
+    Второй пункт с OD-UI-2 («Ещё убираем, помощь в главное меню») стал
+    правилом без исключений. Раньше ``cb:extra:open`` открывал подменю, а
+    ``back`` и ``help`` возвращали в главное меню; подменю снесено, и
+    открывать больше нечего.
+
+    Ветка при этом НЕ снята вместе с подменю, и это главное здесь:
+
+    * ``cb:extra:help`` — живая кнопка ГЛАВНОГО меню. Её payload
+      намеренно не переведён в ``cb:menu:help``: ``resolve_tap_text``
+      перехватывает весь ``cb:menu:*`` ВЫШЕ этой лестницы и подставляет
+      каноническую фразу, а для ``help`` эта фраза — «Что ты умеешь?»,
+      уезжающая к консьержу. Человек получил бы свободную прозу модели
+      вместо меню, что §25 п.2 и запрещает («отвечаем меню, а не
+      свободной прозой»), — а главное меню И ЕСТЬ ответ на этот вопрос;
+    * ``cb:extra:open`` и ``cb:extra:back`` кнопками больше не рисуются,
+      но лежат в истории чатов на вчерашних клавиатурах. Тап по кнопке,
+      которую бот сам нарисовал, обязан дойти до ответа: снять ветку —
+      значит отдать сырой ``cb:extra:…`` модели (ровно дефект DRF-1051)
+      или промолчать.
+
+    Незнакомый слаг любой из двух форм — снятая кнопка из истории чата.
+    Отвечается меню, тем же правилом, по которому ``resolve_tap_text``
+    переводит снятый ``cb:menu:*`` в «Что ты умеешь?»: чем кнопка была,
+    восстановить нечем, но ход терять нельзя.
+    """
+    from apps.skills.menu.marketplace import (
+        open_callback_slug,
+        open_warning_reply,
+    )
+
+    stripped = (callback_text or "").strip()
+
+    if is_open_callback(stripped):
+        slug = open_callback_slug(stripped)
+        warning = open_warning_reply(slug) if slug else None
+        if warning is not None:
+            warn_text, warn_data = warning
+            logger.info("channels.max.global.open_warned slug=%s", slug)
+            return (
+                DiscoveryReply(text=warn_text, action_data=warn_data),
+                OPEN_WARNING_ACTION_TYPE,
+            )
+
+    menu_text, menu_data = marketplace_menu_reply(bot_user=bot_user)
+    return DiscoveryReply(text=menu_text, action_data=menu_data), MENU_ACTION_TYPE
 
 
 def handle_global_max_event(payload: dict, trace_id: str | uuid.UUID | None = None) -> None:
@@ -972,7 +1346,9 @@ def handle_global_max_event(payload: dict, trace_id: str | uuid.UUID | None = No
     else:
         idempotency_key = f"webhook:max_global:{event.channel_message_id or event.channel_user_id}"
     try:
-        with with_idempotency(idempotency_key, ttl_seconds=86_400):
+        # DRF-2544: факты памяти этого хода сказаны глобальной Ayla, не салону —
+        # писатель ставит им сентинел ``global_bot``, а не «неизвестно».
+        with with_idempotency(idempotency_key, ttl_seconds=86_400), global_surface_scope():
             _handle_global_max_event_inner(event, trace_id)
     except AlreadyClaimed:
         logger.info(
@@ -992,21 +1368,19 @@ def handle_global_max_event(payload: dict, trace_id: str | uuid.UUID | None = No
 def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | None) -> None:
     """Inner tenant-less discovery pipeline — parse-already-done. Side-effects only."""
 
-    # DRF-1348 — состояние C01.4 Transient («индикатор набора») из макета.
-    #
-    # Эти две строки уже пять месяцев стоят на АРЕНДАТОРСКОМ пути
-    # (``_handle_max_event_inner``), а на глобальном — том самом, по которому
-    # работает пилот, — их не было никогда: при переносе обработчика их просто
-    # не продублировали. Поэтому «прочитано / печатает…» видел кто угодно,
-    # кроме клиента маркетплейса, у которого ход самый длинный (консьерж +
-    # инструменты). Fire-and-forget: сбой логируется внутри send_chat_action и
-    # не всплывает. Стоит первой строкой, до любой тяжёлой работы, — ровно как
-    # на соседнем пути.
+    # DRF-1487 — вниз, за развилку молчания, уехало «печатает…», и только оно
+    # (см. ниже, сразу после ``global_handoff_muted``). «Прочитано» осталось
+    # здесь: у двух индикаторов разная семантика, и разъехаться они обязаны
+    # именно по ней. ``mark_seen`` — констатация: сообщение дошло и его
+    # увидели; это правда даже тогда, когда отвечать будет человек, и это
+    # единственная обратная связь, которая у клиента 04.09 вообще была.
+    # ``typing_on`` — обещание ответа, и вот его-то и нельзя давать тому,
+    # кому бот не ответит. DRF-1348 поставил на эту строку оба; DRF-1487
+    # оставляет здесь честный из них.
     if event.chat_id:
         from apps.channels.max.outbound import send_chat_action
 
         send_chat_action(chat_id=event.chat_id, action="mark_seen")
-        send_chat_action(chat_id=event.chat_id, action="typing_on")
 
     bot_user = resolve_or_create_global_bot_user(
         channel=event.channel,
@@ -1022,6 +1396,31 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
 
     # Prior short-term history (before this turn) feeds the discovery prompt.
     history = short_term.recall(conversation.id)
+
+    # DRF-1942 — голосовое становится текстом ЗДЕСЬ, выше тапа, записи
+    # сообщения и гейта, тем же приёмом, что подстановка текста тапа ниже:
+    # всему, что дальше, достаётся строка, которую человек мог набрать сам.
+    # Отказы (флаг выключен, не скачалось, слишком длинное, провайдер
+    # недоступен) отвечаются в ветке лестницы ПОСЛЕ онбординга — там, где
+    # стояла заглушка DRF-1939; при выключенном флаге текст и action_type
+    # те же, что у неё. ``voice_gate_text`` — копия без знаков препинания
+    # для гейта (K19-Б, решение владельца 22.09), ``voice_transcript`` —
+    # для эха «Я услышала: …» перед ответом. ``inbound_channel`` — пометка
+    # ``voice`` на записи реплики человека (DRF-2488): только у удачной
+    # расшифровки; отказ пишется как ``text`` с пустым content.
+    voice_refusal: VoiceRefused | None = None
+    voice_transcript = None
+    voice_gate_text: str | None = None
+    inbound_channel = Message.InputChannel.TEXT
+    if is_voice_only(event.text, event.attachments):
+        voice_outcome = resolve_voice_turn(event, trace_id=trace_id)
+        if isinstance(voice_outcome, VoiceResolved):
+            event = voice_outcome.event
+            voice_transcript = voice_outcome.transcript
+            voice_gate_text = voice_outcome.gate_text
+            inbound_channel = Message.InputChannel.VOICE
+        else:
+            voice_refusal = voice_outcome
 
     # DRF-1348 / DRF-1051 — тап становится сообщением ДО всего остального.
     #
@@ -1047,8 +1446,8 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     tap_text = resolve_tap_text(
         event.text,
         last_user_text=(
-            _last_user_content(history, conversation)
-            if (event.text or "").strip() == RETRY_CALLBACK
+            _last_user_content(history, conversation, turn_id=retry_turn_id(event.text))
+            if is_retry_callback(event.text)
             else None
         ),
     )
@@ -1086,7 +1485,7 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     # machinery that answers anything a person says, not by a second parallel
     # path that could disagree with it.
     #
-    # Toggles and «Ни один вариант» keep their payload and are answered by the
+    # Toggles and «Другое (расскажу сама)» keep their payload and are answered by the
     # branch below. A payload that matched the prefix but decoded to nothing
     # is NOT allowed to fall through — a raw `cb:clarify:…` string reaching
     # the concierge is precisely the DRF-988 defect.
@@ -1099,10 +1498,36 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             clarify_outcome = None
         elif clarify_outcome is None:
             clarify_outcome = ClarifyOutcome(reply=DiscoveryReply(text=CLARIFY_STALE_TEXT))
+        elif clarify_outcome.answer_text:
+            # DRF-1760 — ответ дан тапом («Не знаю») и в модель не идёт:
+            # открытый вопрос (DRF-1779) закрывается здесь, иначе следующая
+            # реплика прочиталась бы как второй ответ на него.
+            close_question(conversation, clarify_outcome.answer_text)
 
     # A submitted answer no longer starts with the prefix, so it is persisted
     # as the user turn it now is; a redraw tap still does not reach history.
     is_clarify_redraw_tap = event.text.startswith(CLARIFY_CALLBACK_PREFIX)
+
+    # DRF-1878 — подтверждение сказанного одним тапом (`cb:said:*`). ФРАЗА, а
+    # не молчание, по образцу `cb:food:*` («✅ В дневник» ложится меткой):
+    # «Да, Пенза» — высказывание человека о себе, в историю идёт метка кнопки,
+    # payload — никогда. «Да» — факт переписывается свежей строкой, и ход идёт
+    # дальше ТЕКСТОМ МЕТКИ (как «Продолжить» у уточнения выше): консьерж сам
+    # закроет открытый вопрос `said.<key>` этой репликой. «Другое» — бот
+    # спрашивает сам, без модели, и открывает вопрос заново. Кнопка, за
+    # которой факта уже нет, — устаревшая: ответ без модели, в историю ничего.
+    said_tap = resolve_said_tap(event.text, bot_user)
+    said_outcome: DiscoveryReply | None = None
+    if said_tap is not None:
+        if said_tap.history_text is None:
+            said_outcome = DiscoveryReply(text=SAID_STALE_TEXT)
+        elif said_tap.verdict == SAID_VERDICT_YES:
+            confirm_said_fact(bot_user, said_tap.key)
+            event = replace(event, text=said_tap.history_text)
+        else:
+            said_question = SAID_OTHER_QUESTIONS[said_tap.key]
+            open_question(conversation, said_question_id(said_tap.key), asked_text=said_question)
+            said_outcome = DiscoveryReply(text=said_question)
 
     # DRF-990 — the anketa taps. Same defect class as DRF-988/DRF-1304, and
     # NOT closed by DRF-1268: that one routes `cb:anketa:*` deterministically
@@ -1153,6 +1578,15 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     # `event.text` сломала бы и опрос согласия, и дневник еды.
     welcome_tap = resolve_welcome_tap(event.text)
     food_tap = resolve_food_tap(event.text)
+    # DRF-2125 — ``cb:plan:*``: ФРАЗА по тому же доводу, что у еды (человек
+    # сам спросил «мой план» текстом; тап — его ответ о своём плане).
+    plan_tap = resolve_plan_tap(event.text)
+
+    # DRF-1468 — тап «Не присылать» (`cb:nutri:stop:*`). МОЛЧАНИЕ по той же
+    # причине, что у `cb:catalog:*` и навигации анкеты: метка одна на все
+    # поверхности, фразы за тапом нет, а сырой payload в истории — дефект
+    # DRF-988. Ход остаётся виден по ответу-подтверждению бота.
+    nutri_stop_tap = resolve_nutri_stop_tap(event.text)
 
     # МОЛЧАНИЕ — то же решение и по той же причине, что у `cb:book:*`
     # (DRF-988) и `cb:catalog:*` (DRF-1304): текст несёт id карточки, которую
@@ -1164,6 +1598,29 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     # Семейство `cb:discover:*` — то же решение, но оно переехало ниже, из
     # `startswith` в резолвер по форме; довод там же.
     is_visit_callback = event.text.startswith(VISIT_CALLBACK_PREFIXES)
+
+    # DRF-1772 (К-3) — `cb:reco:*`: тап по карточке C04 («Почему» / «Другой
+    # вариант» / «Не сейчас»). МОЛЧАНИЕ по тому же правилу, что у
+    # `cb:visit:*`: текст несёт id карточки, которую бот сам нарисовал, а
+    # не слова человека. Ход виден по ответу бота и по реакции в записи.
+    from apps.recommendation.taps import is_recommendation_callback
+
+    is_reco_callback = is_recommendation_callback(event.text)
+
+    # DRF-1547 — МОЛЧАНИЕ, и по тому же правилу, что у соседей выше.
+    #
+    #   `cb:extra:*` — «Ещё», «Помощь», «Назад». Навигация по меню, как
+    #       `cb:anketa:start` / `cb:anketa:edit`: человек ничего не сказал,
+    #       он открыл другой экран. Фразы за этими тапами нет — «Ещё» это
+    #       не высказывание, — а сырой payload в истории с ролью `user`
+    #       есть ровно дефект DRF-988.
+    #   `cb:open:*` — «открой экран приложения». То же самое, и добавочно:
+    #       ход отвечается ПРЕДУПРЕЖДЕНИЕМ, после которого человек ещё
+    #       может передумать. Записать это как его реплику значило бы
+    #       записать намерение, которое он не подтвердил.
+    #
+    # Ход при этом в переписке виден — ответ бота записывается всегда.
+    is_menu_nav_callback = is_extra_callback(event.text) or is_open_callback(event.text)
 
     # DRF-990, третий заход — СЕМЕЙСТВО `cb:discover:`, а не глагол `book:`.
     #
@@ -1206,8 +1663,33 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     # заявить в типе, что молчания не бывает, тогда как молчание тут половина
     # решения; следующий читатель обязан увидеть его здесь, а не вычитывать из
     # ветки `inbound_history_text is None` десятью строками ниже.
+    # DRF-1491 — семейство ``cb:health:`` заводится этим же PR и приходит
+    # со своим резолвером, а не с долгом. Без него сырой
+    # «cb:health:need:food_scan» лёг бы в историю с ролью ``user`` — то
+    # есть в промпт консьержа, у которого есть нутриционные инструменты,
+    # — и модель истолковала бы его как просьбу человека про еду сразу
+    # после того, как бот пообещал эту тему больше не поднимать.
+    # [OD-BOT §170], owner decisions on PR #1982 — a G7 tap with nothing to
+    # answer (no open G7 question, no S1 restriction: a duplicate delivery, an
+    # old keyboard, a forgery) is not an accepted action. No state change, no
+    # history row, no text — the one idempotent outcome that neither invents a
+    # reply nor shows the «Нет» acknowledgement reserved for a real answer.
+    if is_stale_g7_tap(conversation, bot_user, event.text):
+        logger.info("channels.max.global.g7_stale_tap conversation=%s", conversation.id)
+        return
+    health_tap = resolve_health_tap(event.text)
+
     inbound_history_text: str | None = event.text
-    for tap in (anketa_tap, welcome_tap, food_tap, discover_tap):
+    for tap in (
+        anketa_tap,
+        welcome_tap,
+        food_tap,
+        plan_tap,
+        discover_tap,
+        nutri_stop_tap,
+        health_tap,
+        said_tap,
+    ):
         if tap is None:
             # «Это не тап моего семейства» — резолвер пропускает ход дальше и
             # не трогает ни текст, ни персистенс.
@@ -1218,18 +1700,28 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
         # ответ на вопрос «чем этот тап был как реплика».
         inbound_history_text = tap.history_text
         break
+    if is_g7_callback(event.text):
+        # [OD-BOT §170] — a G7 answer lies in the history as its verbatim
+        # label, never as the raw ``cb:s1g7:`` payload the model would read.
+        inbound_history_text = g7_history_text(event.text)
     if (
         is_booking_callback
         or is_catalog_callback
         or is_clarify_redraw_tap
         or is_visit_callback
+        or is_reco_callback
+        or is_menu_nav_callback
         or stale_tap
         or inbound_history_text is None
     ):
         user_msg = None
     else:
         user_msg = record_global_message(
-            conversation, role="user", content=inbound_history_text, trace_id=trace_id
+            conversation,
+            role="user",
+            content=inbound_history_text,
+            trace_id=trace_id,
+            input_channel=inbound_channel,
         )
         short_term.append(conversation.id, role="user", content=inbound_history_text)
 
@@ -1257,16 +1749,96 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     # the user turn is already recorded above (parity with the per-tenant
     # path), but nothing is sent. The mute lifts on its own when the operator
     # closes the task (DRF-980) — no linkage bookkeeping.
-    if global_handoff_muted(
+    #
+    # DRF-2213 Q1 — except crisis and medical emergency. Owner decision N-1
+    # (CD §67): they get the deterministic reply ALWAYS, operator or not. The
+    # gate therefore runs BEFORE the mute check, and a turn it stops with one
+    # of those two verdicts falls through to the safety branch below instead
+    # of returning silent. Everything else (BLOCK included) stays muted.
+    #
+    # DRF-2213 Q1 п.1в (CD §72): under a handoff a medical red flag of the
+    # classifier is «неотложка» too — ``under_handoff`` turns it into the same
+    # MEDICAL outcome, so the safety branch below answers it with the one
+    # medical text. П.1а: the operator is told a safety reply went out over
+    # them — no client text in the signal.
+    #
+    # DRF-2276 (CD §72 п.15) — блокировка оператором платформы. Тот же приём:
+    # гейт раньше блокировки, кризис и неотложка (с red flag классификатора —
+    # навыки заблокированному не работают, иначе red flag промолчал бы)
+    # отвечаются; всё прочее — фраза раз за эпизод и ``return``. Блок раньше
+    # handoff: заблокированному под открытой задачей — фраза блока, не
+    # уведомление о молчании.
+    safety = evaluate_inbound(voice_gate_text if voice_gate_text is not None else event.text)
+    handoff_muted = global_handoff_muted(
         conversation=conversation,
         channel=event.channel,
         channel_user_id=event.channel_user_id,
-    ):
+    )
+    blocked_at = blocked_since(channel=event.channel, channel_user_id=event.channel_user_id)
+    if handoff_muted or blocked_at is not None:
+        safety = under_handoff(event.text, safety)
+        # [OD-BOT §170] — a live «Да, есть хотя бы один признак» tap is the same
+        # «неотложка» and reaches through the mute (N-1).
+        safety = g7_under_mute(conversation, bot_user, event.text, safety)
+    if handoff_muted and reaches_through_handoff(safety):
+        notify_safety_reply_during_handoff(
+            conversation=conversation,
+            channel=event.channel,
+            channel_user_id=event.channel_user_id,
+        )
+    if blocked_at is not None and not reaches_through_handoff(safety):
+        _answer_blocked(
+            conversation=conversation,
+            bot_user=bot_user,
+            chat_id=event.chat_id,
+            trace_id=trace_id,
+            since=blocked_at,
+            is_global=True,
+        )
+        return
+    if handoff_muted and not reaches_through_handoff(safety):
         logger.info(
             "channels.max.global.silenced_by_handoff conversation=%s",
             conversation.id,
         )
+        # DRF-1486 — молчание объясняется ровно один раз за эпизод. Само
+        # молчание правильное и остаётся (оператор и бот не говорят
+        # одновременно); чего человеку не хватало 04.09 — фразы о том, ЧТО
+        # происходит: он писал салонному боту, а онемел витринный, и связи
+        # между этими двумя событиями для него не существовало. Функция сама
+        # помнит, что уже сказала: второе и пятое входящее не получают ничего.
+        notify_silence(
+            conversation=conversation,
+            bot_user=bot_user,
+            chat_id=event.chat_id,
+            trace_id=trace_id,
+        )
         return
+
+    # DRF-1487 — «печатает…» ПОСЛЕ решения отвечать, а не до.
+    #
+    # Замер боевого контура, диалог 6e8fdde2, 13:34:20–13:34:34 UTC: на каждое
+    # входящее уходили два ``POST /chats/518410834/actions`` → 200, а следом
+    # ``silenced_by_handoff``. Пять сообщений — пять пар индикаторов и ноль
+    # ответов. Бот, показавший «печатает», ОБЕЩАЕТ ответ, и обещание не
+    # выполнялось пять раз подряд.
+    #
+    # Выбран перенос, а не явное снятие индикатора на ветке отказа: снимать
+    # нечем. У MAX в наборе действий (``outbound._CHAT_ACTIONS``) есть
+    # ``typing_on`` и нет ``typing_off`` — «печатает…» гаснет только по
+    # таймауту или по приходу сообщения. Ветки отказа, на которой можно было бы
+    # что-то снять, физически не существует.
+    #
+    # Цена переноса измерена и мала: между прежней позицией и этой строкой
+    # стоят только резолверы личности и диалога, чтение короткой памяти,
+    # запись входящего хода и один запрос mute — ни навыков, ни LLM. Это
+    # единственный ранний ``return`` во всей функции (ветка выше), поэтому
+    # ниже индикатор уже ничем не задерживается: следующая тяжёлая работа —
+    # консьерж — начинается после него, как и раньше.
+    if event.chat_id:
+        from apps.channels.max.outbound import send_chat_action
+
+        send_chat_action(chat_id=event.chat_id, action="typing_on")
 
     # Reply, in priority order:
     #   0. Safety pre-check (#1053) — a red-flag phrase (suicide / self-harm /
@@ -1292,6 +1864,11 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     #      consent capture. Variant A «soft gate»: we greet + capture consent but
     #      do NOT block discovery on it. When onboarding runs we do NOT call
     #      generate_discovery_reply this turn.
+    #   1.5. Voice message (DRF-1939) — a turn of only ``audio`` attachments and no
+    #      text gets a deterministic «аудио и голосовые пока не понимаю» reply,
+    #      no LLM, nothing downloaded. AFTER onboarding on purpose: above it the
+    #      reply would be the conversation's second row and the DRF-1207 guard
+    #      would cancel the welcome for good (GLOBAL_BOT_ONBOARDING=true on pilot).
     #   2. Discovery → booking handoff (the user tapped a master card → transition
     #      into tenant T's booking flow, #1020).
     #   2.5. Post-handoff booking taps (DRF-988): pick_date / pick_slot /
@@ -1329,7 +1906,14 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     clarify_redraw = False
     was_memory_command = False
     concierge_turn_ran = False
-    safety = evaluate_inbound(event.text)
+    # ``safety`` посчитан выше, до проверки глушения handoff (DRF-2213 Q1).
+    # DRF-1885 — ход открывает новую ревизию DecisionReadiness и пишет в неё
+    # вердикт pre_check. Ответ не меняет: решение ниже принимает прежний
+    # путь; читатель вердикта сегодня — теневой движок (флаг
+    # DRE_SHADOW_ENABLED), без флага — ноль работы. Не бросает.
+    from apps.orchestrator.dr_shadow import record_turn_safety
+
+    record_turn_safety(conversation, safety)
     if not safety.allowed:
         _emit_safety_shortcircuit(bot_user, safety, is_global=True)
         reply = DiscoveryReply(text=safety.reply_text)
@@ -1346,6 +1930,48 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             t_start=t_start,
             outcome=AIRequestMetric.OUTCOME_SUCCESS,
             skill_selected="safety_pre_check",
+        )
+    elif (
+        _red_flag_reply := red_flag_reply(
+            event.text, bot_user=bot_user, conversation=conversation, trace_id=trace_id
+        )
+    ) is not None:
+        # DRF-2213 Q2 — медицинский red flag G1–G7 классификатора: ответ навыка
+        # health_screening без модели, сразу после гейта и ВЫШЕ любой другой
+        # ветки. В DRF-2000 это замыкание стояло внутри консьержа, и ветки
+        # ниже (онбординг, продолжение записи, ответ на вопрос памяти)
+        # отвечали на red flag своим текстом — «онемела половина лица»
+        # первым сообщением получало приветствие. Гейт выше уже снял
+        # «неотложку» и кризис; здесь — остальные группы классификатора.
+        reply = _red_flag_reply
+        assistant_action_type = RED_FLAG_ACTION_TYPE
+        _record_live_path_metric(
+            bot_user=bot_user,
+            conversation=conversation,
+            trace_id=trace_id,
+            message_text=event.text,
+            t_start=t_start,
+            outcome=AIRequestMetric.OUTCOME_SUCCESS,
+            skill_selected=RED_FLAG_ACTION_TYPE,
+        )
+    elif (
+        _g7_reply := g7_question_reply(
+            event.text, bot_user=bot_user, conversation=conversation, trace_id=trace_id
+        )
+    ) is not None:
+        # [OD-BOT §170] — the G7 question turn at the red flag's point: the
+        # ambiguous message asks, the open question binds the reply, a tap is
+        # routed — above every branch that could answer in its place.
+        reply = _g7_reply
+        assistant_action_type = RED_FLAG_ACTION_TYPE
+        _record_live_path_metric(
+            bot_user=bot_user,
+            conversation=conversation,
+            trace_id=trace_id,
+            message_text=event.text,
+            t_start=t_start,
+            outcome=AIRequestMetric.OUTCOME_SUCCESS,
+            skill_selected=RED_FLAG_ACTION_TYPE,
         )
     elif (_opt_out_reply := try_handle_opt_out(text=event.text, bot_user=bot_user)) is not None:
         # DRF-1285 — «не пиши мне» must work on THIS surface too. The skill
@@ -1369,12 +1995,71 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             outcome=AIRequestMetric.OUTCOME_SUCCESS,
             skill_selected="proactive_opt_out",
         )
+    elif (
+        _surface_stop_reply := try_handle_surface_stop(text=event.text, bot_user=bot_user)
+    ) is not None:
+        # DRF-1468 — тап «Не присылать» (`cb:nutri:stop:{surface}`). Стоит
+        # сразу после текстовой отписки и по той же причине выше всех
+        # прочих веток: просьба не писать важнее всего, чем ещё мог быть
+        # ход. Отличие от текстовой отписки одно и принципиальное: глушится
+        # ОДНА поверхность, платформенное вето не ставится.
+        reply = DiscoveryReply(text=_surface_stop_reply)
+        assistant_action_type = "proactive_opt_out"
+        _record_live_path_metric(
+            bot_user=bot_user,
+            conversation=conversation,
+            trace_id=trace_id,
+            message_text=event.text,
+            t_start=t_start,
+            outcome=AIRequestMetric.OUTCOME_SUCCESS,
+            skill_selected="proactive_opt_out",
+        )
+    elif (
+        _report_hour_reply := try_handle_report_hour(text=event.text, bot_user=bot_user)
+    ) is not None:
+        # DRF-2141 — час отчёта словами: «присылай итоги в 21:00» /
+        # «не присылай отчёт» / «во сколько ты присылаешь итоги?». Стоит
+        # рядом с отпиской и по той же причине выше остальных веток:
+        # закрытый матч по целому сообщению, глагол обязателен, так что
+        # «21:00» без глагола и любая фраза соседей сюда не попадают.
+        # Под обоими флагами питания (NUTRITION_ENABLED и
+        # NUTRITION_PROACTIVE_ENABLED): при выключенном — None, и ход идёт
+        # туда же, куда у прочих нутриционных веток.
+        # DRF-2267 (CD §72): час поставлен — шаг завершён, и под ним есть
+        # выход: «Мой дневник» (фразу разбирает эта же, глобальная, лестница)
+        # и «Меню». «Больше не присылай» кнопок не получает: это просьба
+        # замолчать, и предлагать следующий шаг в ответ на «хватит» нельзя.
+        from apps.orchestrator.next_steps import (
+            diary_button,
+            menu_button,
+            next_step_action_data,
+        )
+
+        reply = DiscoveryReply(
+            text=str(_report_hour_reply),
+            action_data=None
+            if _report_hour_reply.silences
+            else next_step_action_data(diary_button(), menu_button()),
+        )
+        assistant_action_type = REPORT_HOUR_ACTION_TYPE
+        _record_live_path_metric(
+            bot_user=bot_user,
+            conversation=conversation,
+            trace_id=trace_id,
+            message_text=event.text,
+            t_start=t_start,
+            outcome=AIRequestMetric.OUTCOME_SUCCESS,
+            skill_selected=REPORT_HOUR_ACTION_TYPE,
+        )
     elif stale_tap:
         # DRF-1348 — тап, который нечем подставить. Стоит здесь, а не среди
         # прочих колбэковых веток, по правилу ``_PASSTHROUGH_CALLBACK_PREFIXES``:
         # тап по кнопке, которую бот сам нарисовал, обязан дойти до ответа, а
         # не быть проглоченным приветствием или отданным модели сырым.
-        reply = DiscoveryReply(text=STALE_TAP_TEXT, action_data=first_contact_action_data())
+        # Клавиатура — та же, что на первом экране (DRF-2120: четыре кнопки).
+        reply = DiscoveryReply(
+            text=STALE_TAP_TEXT, action_data=first_contact_action_data(bot_user=bot_user)
+        )
         assistant_action_type = "stale_tap"
         # The tap could not be resolved to its intended action — a fallback,
         # not a successfully answered turn.
@@ -1395,6 +2080,14 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             message_text=event.text,
             trace_id=trace_id,
         )
+        # DRF-1486 — этот диалог сам сказал человеку «передаю менеджеру»,
+        # и это решает, ЧТО он прочитает, когда на следующем ходу включится
+        # молчание. Отличить «спросил здесь» от «переехало с другого бота»
+        # по одной базе нельзя: задача в обоих случаях может лежать на
+        # салонном диалоге (см. queue addressing в ``route_global_human_
+        # handoff``). Различает их только факт доставки подтверждения — он
+        # и записывается здесь, рядом с доставкой.
+        mark_handoff_announced(conversation=conversation, chat_id=event.chat_id)
         assistant_action_type = "human_handoff"
         _record_live_path_metric(
             bot_user=bot_user,
@@ -1404,6 +2097,25 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             t_start=t_start,
             outcome=AIRequestMetric.OUTCOME_ESCALATED,
             skill_selected="human_handoff",
+        )
+    elif is_reco_callback:
+        # DRF-1772 (К-3) — тап по карточке C04 в DM. Как и визиты ниже: id
+        # нарисовал бот, модели тут делать нечего; реакция пишется в запись.
+        from apps.recommendation.taps import route_recommendation_callback
+
+        reply = route_recommendation_callback(
+            global_bot_user=bot_user,
+            callback_text=event.text,
+        )
+        assistant_action_type = "recommendation_reaction"
+        _record_live_path_metric(
+            bot_user=bot_user,
+            conversation=conversation,
+            trace_id=trace_id,
+            message_text=event.text,
+            t_start=t_start,
+            outcome=AIRequestMetric.OUTCOME_SUCCESS,
+            skill_selected="recommendation_card",
         )
     elif event.text.startswith(VISIT_CALLBACK_PREFIXES):
         # Cards and repeat taps carry an appointment id the bot itself
@@ -1419,6 +2131,62 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             "booking_repeat"
             if event.text.startswith(CALLBACK_VISIT_REPEAT_PREFIX)
             else "visit_card"
+        )
+        _record_live_path_metric(
+            bot_user=bot_user,
+            conversation=conversation,
+            trace_id=trace_id,
+            message_text=event.text,
+            t_start=t_start,
+            outcome=AIRequestMetric.OUTCOME_SUCCESS,
+            skill_selected=assistant_action_type,
+        )
+    elif is_extra_callback(event.text) or is_open_callback(event.text):
+        # DRF-1547 / §37 + OD-UI-2 — «Помощь» главного меню, тапы по
+        # снесённому подменю из истории чата и предупреждение перед
+        # открытием приложения.
+        #
+        # Стоит здесь, среди колбэковых веток и ВЫШЕ приветствия, по тому
+        # же правилу, что и ``cb:health:``: тап по кнопке, которую бот сам
+        # нарисовал, обязан дойти до ответа, а не быть проглоченным
+        # приветствием или отданным модели сырым.
+        #
+        # Своё семейство, а не ``cb:menu:``, потому что ``resolve_tap_text``
+        # переводит весь ``cb:menu:*`` в фразу ВЫШЕ лестницы. Пока было
+        # подменю, «Ещё» превратилось бы в «Что ты умеешь?» и не открылось
+        # бы никогда; после OD-UI-2 тот же перехват держит «Помощь»: её
+        # фраза на глобальном пути уезжает к консьержу, и человек получил
+        # бы прозу модели вместо меню.
+        reply, assistant_action_type = _route_menu_nav_callback(
+            callback_text=event.text,
+            bot_user=bot_user,
+        )
+        _record_live_path_metric(
+            bot_user=bot_user,
+            conversation=conversation,
+            trace_id=trace_id,
+            message_text=event.text,
+            t_start=t_start,
+            outcome=AIRequestMetric.OUTCOME_SUCCESS,
+            skill_selected=assistant_action_type,
+        )
+    elif is_health_callback(event.text):
+        # DRF-1491 / §25 п.6 — тап по пищевому пункту меню, на который нет
+        # согласия ``HEALTH``, и «Не сейчас» на экране запроса.
+        #
+        # Стоит здесь, среди колбэковых веток и ВЫШЕ приветствия, по
+        # правилу ``_PASSTHROUGH_CALLBACK_PREFIXES``: тап по кнопке,
+        # которую бот сам нарисовал, обязан дойти до ответа, а не быть
+        # проглоченным приветствием или отданным модели сырым.
+        #
+        # Своё семейство, а не ``cb:menu:``, потому что ``resolve_tap_text``
+        # переводит весь ``cb:menu:*`` в фразу ВЫШЕ лестницы: пищевой
+        # пункт превратился бы в «Что ты умеешь?» и запроса согласия
+        # человек не увидел бы никогда.
+        reply, assistant_action_type = _route_health_callback(
+            callback_text=event.text,
+            bot_user=bot_user,
+            conversation=conversation,
         )
         _record_live_path_metric(
             bot_user=bot_user,
@@ -1447,6 +2215,18 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             outcome=AIRequestMetric.OUTCOME_SUCCESS,
             skill_selected="booking_lookup",
         )
+    elif event.text.strip() == WHOAMI_COMMAND:
+        # Owner 11.09 §12.3 — the person asks what this bot knows about them
+        # and gets their own card whole (it is their data), with other salons
+        # as a number and never by name. Typed, so it sits ABOVE onboarding
+        # the way `/start` does: a command must not be swallowed by the
+        # welcome for a user who has not been welcomed yet.
+        reply = DiscoveryReply(
+            text=render_for_person(
+                build_card(bot_user.channel, bot_user.channel_user_id), tenant_slug=None
+            )
+        )
+        assistant_action_type = "whoami"
     elif getattr(settings, "GLOBAL_BOT_ONBOARDING", False) and needs_onboarding(
         bot_user, event.text, conversation
     ):
@@ -1460,6 +2240,39 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             outcome=AIRequestMetric.OUTCOME_SUCCESS,
             skill_selected="onboarding",
         )
+    elif is_voice_only(event.text, event.attachments):
+        # DRF-1939 — голосовое: честный ответ до фото-ветки и консьержа (иначе
+        # консьерж получал пустую строку). Без LLM; аудио не скачивается и не
+        # хранится. Временная заглушка до DRF-1942.
+        #
+        # ПОСЛЕ онбординга, не выше: первое голосовое нового человека получает
+        # приветствие и вход в согласие. Заглушка выше записала бы вторую
+        # строку разговора, и сторож DRF-1207 (`_conversation_already_under_way`)
+        # навсегда отменил бы приветствие (на пилоте GLOBAL_BOT_ONBOARDING=true).
+        #
+        # DRF-1942 — сюда попадает только голосовое, которое НЕ стало текстом
+        # выше (``resolve_voice_turn`` вернул отказ): при выключенном флаге —
+        # прежние текст и action_type, иначе — фраза по коду отказа.
+        reply = DiscoveryReply(
+            text=voice_refusal.text if voice_refusal is not None else VOICE_NOT_SUPPORTED_TEXT
+        )
+        assistant_action_type = (
+            voice_refusal.action_type if voice_refusal is not None else VOICE_ACTION_TYPE
+        )
+        _record_live_path_metric(
+            bot_user=bot_user,
+            conversation=conversation,
+            trace_id=trace_id,
+            message_text=event.text,
+            t_start=t_start,
+            outcome=AIRequestMetric.OUTCOME_SUCCESS,
+            skill_selected=assistant_action_type,
+        )
+    elif said_outcome is not None:
+        # DRF-1878 — «Другой город» / устаревшая кнопка подтверждения: ответ
+        # бота без модели, по той же причине, что у соседних колбэков.
+        reply = said_outcome
+        assistant_action_type = "said_confirm"
     elif clarify_outcome is not None:
         # DRF-1362 — a multi-select redraw or its close. Sits with the other
         # callback branches and BEFORE the concierge for the same reason they
@@ -1476,8 +2289,21 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
         # execute_catalog_callback returns a reply for every catalog callback
         # — stale and malformed refs included — so this branch cannot fall
         # through once the prefix matched.
-        reply = execute_catalog_callback(event.text) or DiscoveryReply(text=CATALOG_STALE_CARD_TEXT)
+        # ``conversation`` (DRF-1539) seeds the rotation of the master list
+        # behind a service chip, exactly as it does for «Показать ещё» below:
+        # two taps on one chip in one dialogue must give the same order.
+        reply = execute_catalog_callback(event.text, conversation=conversation) or DiscoveryReply(
+            text=CATALOG_STALE_CARD_TEXT
+        )
         assistant_action_type = "catalog_card"
+    elif event.text.startswith(CALLBACK_DISCOVER_MORE_PREFIX):
+        # DRF-1532 — «Показать ещё». Sits with the other callback branches and
+        # BEFORE the concierge for the same reason they do: the text is an id
+        # this bot rendered, not something a person said. The conversation is
+        # what seeds the rotation, so the next page is the tail of the list
+        # THIS dialogue was shown and not of some other ordering.
+        reply = execute_show_more(event.text, conversation=conversation)
+        assistant_action_type = "discovery_more"
     elif event.text.startswith(CALLBACK_DISCOVER_BOOK_PREFIX):
         reply = _discovery_handoff_reply(event, bot_user, trace_id)
     elif event.text.startswith(BOOKING_CALLBACK_PREFIXES):
@@ -1635,12 +2461,133 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
                         "channels.max.global.nutrition_turn_failed bot_user=%s", bot_user.id
                     )
                     nutrition_result = None
+                # DRF-2283 / CD §73 — цель словами человека, сказанная в
+                # переписке. Стоит ПОСЛЕ всех, кто ведёт незаконченный шаг
+                # (ответ памяти, воронка записи, прямой показ мастеров,
+                # нутриционная анкета): фраза, сказанная ВНУТРИ шага, целью
+                # не становится, даже если начинается с «хочу». Ниже —
+                # только консьерж, поэтому ход у модели отбирается лишь
+                # тогда, когда цель действительно записана.
+                #
+                # `ayla_user_id is not None` — та же личность памяти, что и
+                # у команд выше: согласие PERSONAL_DATA есть. Без него цель
+                # человека никуда не пишется.
+                goal_reply: DiscoveryReply | None = None
+                if (
+                    nutrition_result is None
+                    and ayla_user_id is not None
+                    and looks_like_goal_statement(event.text)
+                ):
+                    try:
+                        captured = capture_goal_from_chat(
+                            bot_user=bot_user,
+                            external_user_id=external_user_id_for(bot_user),
+                            text=event.text,
+                        )
+                    except Exception:  # noqa: BLE001 — запись цели не ломает ход
+                        logger.exception(
+                            "channels.max.global.goal_capture_failed bot_user=%s", bot_user.id
+                        )
+                        captured = None
+                    if captured is not None:
+                        # Ленивый импорт — как у соседей по этой функции ниже:
+                        # те же имена уже импортируются внутри другой ветки, и
+                        # модульный импорт ими затенялся бы (UnboundLocalError).
+                        from apps.orchestrator.next_steps import (
+                            discover_button as _discover_button,
+                            menu_button as _menu_button,
+                            next_step_action_data as _next_step_action_data,
+                        )
+
+                        # §72 (DRF-2267): после завершённого шага — 1–2 кнопки
+                        # следующего шага и «Меню», иначе человек остаётся с
+                        # текстом и без пути. Подписи НЕ новые: те же, что у
+                        # пунктов меню витрины и экрана возврата
+                        # (`orchestrator.next_steps`). Состав кнопок под этим
+                        # ответом ждёт слова главного окна вместе с текстом.
+                        goal_reply = DiscoveryReply(
+                            text=CONFIRMATION.format(goal=captured),
+                            action_data=_next_step_action_data(_discover_button(), _menu_button()),
+                        )
+
                 if nutrition_result is not None:
                     reply = DiscoveryReply(
                         text=nutrition_result.reply_text,
                         action_data=nutrition_result.action_data,
                     )
                     assistant_action_type = nutrition_result.action_type or "nutrition_skill"
+                elif goal_reply is not None:
+                    reply = goal_reply
+                    assistant_action_type = "goal_stated"
+                elif looks_like_callback_payload(event.text):
+                    # DRF-1491 — ветка «не поняла» глобального пути.
+                    #
+                    # Досюда доживает ровно то, что комментарий у вызова
+                    # консьержа ниже описывает как «тап, у которого ветки
+                    # нет»: нераспознанный ``cb:anketa:`` / ``cb:food:``
+                    # правильной формы и глагол ``cb:discover:``, кроме
+                    # ``book:``. До сих пор такой ход уезжал в модель СЫРЫМ
+                    # payload'ом — ровно тот дефект, который DRF-1051 чинил
+                    # для ``cb:menu:`` и ``cb:qa:``, но для остальных
+                    # семейств оставил.
+                    #
+                    # Салонный путь на нераспознанный ход отвечает честным
+                    # «я пока не понял» с клавиатурой
+                    # (``menu.replies.FALLBACK_TEXT``); у витрины такой
+                    # ветки не существовало вовсе. Здесь она и появляется —
+                    # со СВОИМ текстом: салонный назван «Формулой тела» и
+                    # перечисляет услуги одного салона.
+                    fallback_text, fallback_data = marketplace_fallback_reply(bot_user=bot_user)
+                    reply = DiscoveryReply(text=fallback_text, action_data=fallback_data)
+                    assistant_action_type = FALLBACK_ACTION_TYPE
+                    logger.info("channels.max.global.unclaimed_callback bot_user=%s", bot_user.id)
+                    _record_live_path_metric(
+                        bot_user=bot_user,
+                        conversation=conversation,
+                        trace_id=trace_id,
+                        message_text=event.text,
+                        t_start=t_start,
+                        outcome=AIRequestMetric.OUTCOME_FALLBACK,
+                        skill_selected=FALLBACK_ACTION_TYPE,
+                        fallback_triggered=True,
+                    )
+                elif matches_menu_request(event.text):
+                    # DRF-1491 / §25 п.1-п.2 — «что ты умеешь», «помощь», «меню».
+                    #
+                    # До сих пор эти слова уезжали к консьержу и возвращались
+                    # прозой без единой кнопки: реестр навыков, где живут
+                    # ``HELP_TEXT`` и клавиатура, диспетчеризуется только на
+                    # арендаторском пути, а пилот работает на глобальном боте.
+                    # Владелец: «отвечаем меню, а не свободной прозой».
+                    #
+                    # Стоит ЗДЕСЬ, а не верхним ``elif`` лестницы, и место
+                    # выбрано по одному правилу: НЕЗАКОНЧЕННОЕ важнее
+                    # оглавления. Выше отсюда стоят приветствие C01
+                    # (новичок получает первый экран, а не список),
+                    # незакрытый вопрос памяти, воронка записи в полёте — и
+                    # нутриционная анкета: ``is_structured_nutrition_turn``
+                    # забирает ЛЮБОЙ текст, пока FSM жив, поэтому «помощь»
+                    # посреди анкеты остаётся ответом анкете, а не выходом
+                    # из неё. Тот же довод уже принят рядом: «что я ел»
+                    # посреди анкеты — это ответ, а не запрос дневника
+                    # (``nutrition_global``).
+                    #
+                    # Матчер закрытый и по ЦЕЛОМУ сообщению
+                    # (``marketplace.matches_menu_request``), поэтому ветка
+                    # не может отобрать ход у консьержа: «помоги выбрать
+                    # массаж» сюда не попадает.
+                    menu_text, menu_data = marketplace_menu_reply(bot_user=bot_user)
+                    reply = DiscoveryReply(text=menu_text, action_data=menu_data)
+                    assistant_action_type = MENU_ACTION_TYPE
+                    _record_live_path_metric(
+                        bot_user=bot_user,
+                        conversation=conversation,
+                        trace_id=trace_id,
+                        message_text=event.text,
+                        t_start=t_start,
+                        outcome=AIRequestMetric.OUTCOME_SUCCESS,
+                        skill_selected=MENU_ACTION_TYPE,
+                    )
                 else:
                     # Memory surfacing (M-C1 / #1101): inject the user's GREEN memory into
                     # the discovery prompt. Best-effort: these DB reads run BEFORE the reply
@@ -1677,9 +2624,29 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
                     # Best-effort exactly like its neighbours: this runs AFTER the
                     # idempotency key is claimed, so a raise would lose the reply
                     # on retry rather than retry it.
+                    # §48 — ПЕРВАЯ ступень гейта Nutrition Wellness
+                    # Interpretation, по ХОДУ. Дешёвый предикат до всякого
+                    # I/O: ход про еду и не про медицину. Вторая ступень (по
+                    # цели человека) стоит внутри билдера — там она видна.
+                    #
+                    # Две службы одного предиката. Без него включённый флаг
+                    # платит ДВА похода в Ayla и ~200 токенов за КАЖДЫЙ ход,
+                    # включая «во сколько вы работаете». А по §48 он же
+                    # ограничитель области действия способности: нет
+                    # приложенной картины — нет и разрешения модели о ней
+                    # говорить.
+                    #
+                    # Плюс флаг диетолога. Флагов два намеренно и они про
+                    # разное: CONCIERGE_NUTRITION_CONTEXT_ENABLED — труба
+                    # (DRF-1284), NUTRITION_COACH_ENABLED — поверхность
+                    # диетолога (DRF-1464). Труба без диетолога это ровно
+                    # то, что DRF-1284 измерил: токены растут, ответ нет.
                     nutrition_block = ""
                     try:
-                        nutrition_block = build_nutrition_context_block(bot_user)
+                        from apps.nutrition_coach import flags as _coach_flags
+
+                        if _coach_flags.enabled() and interpretation_eligible(event.text):
+                            nutrition_block = build_nutrition_context_block(bot_user)
                     except Exception:  # noqa: BLE001 — belt-and-braces; module is fail-closed
                         logger.exception(
                             "channels.max.global.nutrition_context_failed bot_user=%s",
@@ -1750,9 +2717,55 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
                             bot_user.id,
                             trace_id,
                         )
+                        # DRF-1489 — слова берутся у консьержа, когда он сказал
+                        # СВОИ.
+                        #
+                        # Правка пришла из DRF-1489 и делается здесь потому,
+                        # что она целиком в этом файле: тому исполнителю
+                        # handler.py трогать было нельзя, и он остановился на
+                        # границе, оставив разрыв описанным в докстринге
+                        # ``templates.NO_ANSWER_RETRY_RU``.
+                        #
+                        # Разрыв был такой: строка собиралась заново, текст
+                        # ответа затирался целиком, и утверждённая владельцем
+                        # формулировка для случая «модель вызвали, ответа не
+                        # вышло» — «Не получилось подготовить ответ. Попробовать
+                        # ещё раз?» — до человека не доходила никогда. Он читал
+                        # слова соседней ветки, про подключение, под кнопкой
+                        # «Повторить», которая работала.
+                        #
+                        # Подменяется РОВНО общий outage-шаблон, и ничего
+                        # больше. ``AI_UNAVAILABLE_TEXT`` — текст экрана C01
+                        # для состояния «AI недоступна» (обращение — по
+                        # решению владельца, DRF-2328), то есть для
+                        # ветки llm_error, которая как раз этот шаблон и
+                        # приносит; для неё всё остаётся как было. Любая другая
+                        # строка — это выбор консьержа, сделанный осознанно, и
+                        # затирать его канал не вправе.
+                        #
+                        # Сравнение с шаблоном, а не проверка «текст пустой»:
+                        # ветка llm_error приходит сюда с непустым
+                        # ``OUTAGE_RU``, и на пустоте условие просто не
+                        # сработало бы. Сравнение с getter'ом, а не с
+                        # константой, — чтобы правка формулировки в
+                        # ``templates`` не разъехалась с этой строкой молча.
+                        #
+                        # Константа не тронута, кнопка не тронута: «Повторить»
+                        # ставится по флагу outage, как и раньше.
+                        _generic_outage = {get_fallback("ru"), get_fallback("en")}
                         reply = DiscoveryReply(
-                            text=AI_UNAVAILABLE_TEXT,
-                            action_data=ai_unavailable_action_data(),
+                            text=(
+                                AI_UNAVAILABLE_TEXT
+                                if (turn_reply.reply_text or "") in _generic_outage
+                                or not turn_reply.reply_text
+                                else turn_reply.reply_text
+                            ),
+                            # DRF-1762 — кнопка привязана к строке этого
+                            # хода: повторяет его один раз и только пока он
+                            # последний.
+                            action_data=ai_unavailable_action_data(
+                                user_msg.id.hex if user_msg is not None else None
+                            ),
                             persisted=turn_reply.assistant_persisted,
                         )
                         assistant_action_type = "ai_unavailable"
@@ -1760,6 +2773,35 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
                         # памяти (W5) на этом ходу не нужны: первое — ещё один
                         # вызов той же недоступной модели, второе — вопрос
                         # поверх извинения. Ход не состоялся.
+                    elif not (turn_reply.reply_text or "").strip():
+                        # DRF-1491, вторая половина ветки «не поняла».
+                        #
+                        # Модель ответила — но ничем. Флаг ``outage`` при
+                        # этом не стоит (до модели дошли), поэтому соседняя
+                        # ветка сюда не годится, а «Повторить» было бы
+                        # враньём: ход состоялся. До сих пор пустая строка
+                        # уезжала в ``send_message`` как есть, и человек
+                        # видел от бота пустоту — худший из тупиков.
+                        #
+                        # Отвечаем тем же экраном, что и нераспознанному
+                        # тапу: человеку, оставшемуся без ответа, нужен не
+                        # разбор причины, а список того, что сработает.
+                        logger.warning(
+                            "channels.max.global.empty_concierge_reply bot_user=%s trace=%s",
+                            bot_user.id,
+                            trace_id,
+                        )
+                        fallback_text, fallback_data = marketplace_fallback_reply(bot_user=bot_user)
+                        # ``persisted=False``, а не то, что сказал шов:
+                        # человек прочитал ЭТОТ текст, и в переписке должен
+                        # стоять он. Если консьерж свою пустую строку уже
+                        # записал, рядом появится вторая — что честнее, чем
+                        # переписка, в которой ответа нет вовсе.
+                        reply = DiscoveryReply(
+                            text=fallback_text,
+                            action_data=fallback_data,
+                        )
+                        assistant_action_type = FALLBACK_ACTION_TYPE
                     else:
                         reply = DiscoveryReply(
                             text=turn_reply.reply_text,
@@ -1767,15 +2809,10 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
                             persisted=turn_reply.assistant_persisted,
                         )
                         concierge_turn_ran = True
-                        # W5 (S3.5): organically weave ONE memory question when the Ayla
-                        # anti-spam engine allows asking. Best-effort.
-                        try:
-                            reply = maybe_weave_question(conversation, bot_user, reply)
-                        except Exception:  # noqa: BLE001
-                            logger.exception(
-                                "channels.max.global.memory_ask_weave_failed bot_user=%s",
-                                bot_user.id,
-                            )
+                        # W5 (S3.5): the ONE memory question used to be woven
+                        # right here. Since DRF-1292 the service line under the
+                        # reply (question OR «Запомнила: …») is decided in one
+                        # place, after guard_outbound — see weave_service_line.
 
     # DRF-1325 — the time half of «хочу на массаж завтра вечером». On
     # 2026-08-23 it was dropped without a word and the booking landed five
@@ -1798,6 +2835,14 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     # администратора салона» is the one failure here that could cost more than
     # it saves. Nothing else is exempt — including the contour's own canned
     # lines, which a test pins clean rather than a whitelist excuses.
+    if voice_transcript is not None and assistant_action_type != "safety_pre_check":
+        # DRF-1942 — эхо «Я услышала: …» (``VOICE_ECHO_MODE``), до гарда и
+        # записи: в переписке остаётся ровно то, что человек прочитал.
+        reply = DiscoveryReply(
+            text=with_voice_echo(reply.text, voice_transcript.text),
+            action_data=reply.action_data,
+            persisted=reply.persisted,
+        )
     if assistant_action_type != "safety_pre_check":
         guarded = guard_outbound(reply.text, surface="max", bot_user=bot_user, trace_id=trace_id)
         post_verdict = "block" if guarded.blocked else "allow"
@@ -1807,7 +2852,13 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             # under «тут нужен человек» would be an edited reply by another
             # name. ``persisted=False``: whatever the producer wrote, the
             # transcript has to end up holding what the person actually read.
-            reply = DiscoveryReply(text=guarded.text, action_data=None, persisted=False)
+            # DRF-2267 (§72): карточки уходят с текстом, а под заменой —
+            # продолжения, которые она называет («Посмотреть услуги», «Меню»).
+            from apps.orchestrator.safety.outbound import replacement_action_data
+
+            reply = DiscoveryReply(
+                text=guarded.text, action_data=replacement_action_data(), persisted=False
+            )
             assistant_action_type = OUTBOUND_ACTION_TYPE
             # DRF-1362 — and it is never an in-place edit either. ``outbound.py``
             # 's rule is that a blocked reply is REPLACED, not edited; quietly
@@ -1816,6 +2867,67 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             # message is also the only form in which «тут нужен человек» reads
             # as the turn stopping rather than the question changing.
             clarify_redraw = False
+
+    # DRF-1292 — memory write + the ONE service line, in one place.
+    #
+    # Until DRF-1292 the green facts of this turn were written AFTER the send
+    # (zero latency, «never affects the reply already sent»). The owner's
+    # ruling (19.09, §52 В3) wants the person told on the SAME reply —
+    # «Запомнила: ты …» — so the write moves here: after the guard has said
+    # «allow» (a blocked or crisis reply gets no memory line; the safety copy
+    # is founder-approved and stays byte-identical) and before persist/send.
+    #
+    # Budget: the writers are best-effort; the one network call they keep
+    # here (``ensure_ayla_link`` for a person not linked yet) gets ≤ 1 s per
+    # turn (a sibling writer stops once the budget is spent), and the Ayla
+    # declared-prefs mirror (two REST calls, 5 s each) is NOT run here — it
+    # goes after the send (``bridge_after_send``). Budget ran out? The rows
+    # that writer did not write are written after the send as before, and no
+    # line is said about them: a line promises what is already done, never
+    # what might be (rows a faster sibling did write are announced honestly).
+    #
+    # One service line per turn: the announce takes the slot; the memory
+    # question (memory_ask) is asked only when there is nothing to announce,
+    # and only on a concierge turn — exactly the branch that wove it before.
+    # The appended line then passes the same outbound guard the reply did
+    # (DRF-1210: the guard sees the FINAL text) — blocked → the line is dropped.
+    memory_written: list = []
+    memory_link_timed_out = False
+    memory_pre_send_ran = False
+    if (
+        not was_memory_command
+        and post_verdict != "block"
+        and assistant_action_type
+        not in (
+            "safety_pre_check",
+            "ai_unavailable",
+        )
+    ):
+        memory_pre_send_ran = True
+        sink = record_turn_facts(
+            bot_user,
+            conversation,
+            event.text,
+            tool_trace=getattr(turn_reply, "tool_trace", None) if concierge_turn_ran else None,
+            link_timeout_s=PRE_SEND_LINK_BUDGET_S,
+            bridge=False,
+        )
+        memory_written = sink.entries
+        memory_link_timed_out = sink.link_timed_out
+        before_line = reply
+        reply = weave_service_line(
+            conversation,
+            bot_user,
+            reply,
+            written=memory_written,
+            allow_question=concierge_turn_ran,
+            weave_question=maybe_weave_question,
+        )
+        reply = guard_service_line(
+            before_line,
+            reply,
+            lambda tail: guard_outbound(tail, surface="max", bot_user=bot_user, trace_id=trace_id),
+        )
 
     # Persist + remember the assistant turn, then send to MAX (with any keyboard).
     # W5: the AIConcierge store already persisted concierge turns
@@ -1847,6 +2959,7 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             trace_id=trace_id,
             is_global=True,
             attachments=_build_attachments(reply.action_data),
+            blocked=blocked_at is not None,
         )
     elif clarify_redraw and event.channel_message_id:
         # DRF-1362 — the whole point of the ticket: two taps update ONE
@@ -1891,6 +3004,23 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
         post_verdict=post_verdict,
         reply_text=reply.text,
         keyboard_size=len(_build_attachments(reply.action_data) or []),
+        # ``turn_reply`` существует только на ветке консьержа — там же, где
+        # его читает резолвер намерения ниже.
+        tool_trace=getattr(turn_reply, "tool_trace", None) if concierge_turn_ran else None,
+    )
+
+    # DRF-1882 — теневой DecisionReadiness (решение владельца C1): после
+    # отправки, одна строка лога «что решил бы движок / что сделал путь».
+    # Флаг DRE_SHADOW_ENABLED выключен — ноль работы; не бросает.
+    from apps.orchestrator.dr_shadow import observe_live_turn
+
+    observe_live_turn(
+        conversation,
+        tool_trace=getattr(turn_reply, "tool_trace", None) if concierge_turn_ran else None,
+        trace_id=trace_id,
+        branch=assistant_action_type or ("concierge" if concierge_turn_ran else ""),
+        # DRF-1932 — реплика только для словарей выбора NBA; в строку лога не идёт.
+        message_text=event.text,
     )
 
     # DRF-1273 — canonical intent resolution (Output Contract 0.5) for
@@ -1919,16 +3049,32 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
                 "channels.max.global.intent_resolution_failed bot_user=%s", bot_user.id
             )
 
-    # Memory write (M-B2 / #1099): learn explicit green facts the user stated
-    # this turn (e.g. «я веган»). Best-effort + consent-gated inside; never
-    # affects the reply already sent. No active questioning in the pilot.
+    # Memory write (M-B2 / #1099) — the post-send fallback. Since DRF-1292 the
+    # facts of this turn are written BEFORE the send (see the block above the
+    # persist) so the reply can carry «Запомнила: …». Two cases still land
+    # here, both without a line:
+    #   * the pre-send Ayla link ran out its 1 s budget — write now, with the
+    #     client's default timeout, as this block always did;
+    #   * a blocked / crisis / outage reply skipped the pre-send write — a
+    #     fact the person stated is still theirs to keep, the line just has
+    #     no reply to ride on.
     #
     # SKIP when this turn was a memory command (M-B4): «забудь что я веган»
     # contains the substring «я веган», so re-running the extractor here would
     # instantly re-create the fact the user just asked to forget — nullifying
     # the 152-ФЗ erasure. A forget/show turn must never write memory.
     if not was_memory_command:
-        record_explicit_green_facts(bot_user, event.text)
+        if memory_link_timed_out or not memory_pre_send_ran:
+            record_turn_facts(
+                bot_user,
+                conversation,
+                event.text,
+                tool_trace=getattr(turn_reply, "tool_trace", None) if concierge_turn_ran else None,
+            )
+        else:
+            # The pre-send write skipped the Ayla declared-prefs mirror to keep
+            # its budget; the mirror runs here, as it always did — after the send.
+            bridge_after_send(bot_user, event.text)
 
 
 def _remember_time_preference(conversation, bot_user, text: str, reply):
@@ -2083,18 +3229,6 @@ def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | N
     # lives inside _record_live_path_metric.
     t_start = time.monotonic()
 
-    # MAX UX indicators: tell the chat we've read the message and we're
-    # typing a reply BEFORE doing any heavy work (LLM call, DB writes).
-    # Both are best-effort fire-and-forget — failures are logged inside
-    # send_chat_action and do not propagate. Done first so the user
-    # sees the «прочитано / печатает…» chrome that mysite's MAX SDK
-    # provided automatically (post-cutover regression 2026-05-20).
-    if event.chat_id:
-        from apps.channels.max.outbound import send_chat_action
-
-        send_chat_action(chat_id=event.chat_id, action="mark_seen")
-        send_chat_action(chat_id=event.chat_id, action="typing_on")
-
     bot_user = resolve_or_create_bot_user(
         channel=event.channel,
         channel_user_id=event.channel_user_id,
@@ -2105,18 +3239,84 @@ def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | N
     # narrow tells mypy this; an assertion in case the contract slips.
     assert conversation is not None  # noqa: S101 — contract guard
 
+    # DRF-1942 — голосовое становится текстом до записи сообщения и гейта
+    # (см. тот же блок на глобальном пути). Под оператором (HUMAN_HANDOFF)
+    # не скачиваем и не распознаём: бот молчит, деньги не тратятся — такая
+    # реплика пишется как ``text`` с пустым content (DRF-2488).
+    voice_refusal: VoiceRefused | None = None
+    voice_transcript = None
+    voice_gate_text: str | None = None
+    inbound_channel = Message.InputChannel.TEXT
+    if (
+        is_voice_only(event.text, event.attachments)
+        and conversation.state != Conversation.State.HUMAN_HANDOFF
+    ):
+        voice_outcome = resolve_voice_turn(event, trace_id=trace_id)
+        if isinstance(voice_outcome, VoiceResolved):
+            event = voice_outcome.event
+            voice_transcript = voice_outcome.transcript
+            voice_gate_text = voice_outcome.gate_text
+            inbound_channel = Message.InputChannel.VOICE
+        else:
+            voice_refusal = voice_outcome
+    # DRF-2276 — блокировка оператором платформы; эффект ниже, после гейта.
+    blocked_at = blocked_since(channel=event.channel, channel_user_id=event.channel_user_id)
+
+    # MAX UX indicators: tell the chat we've read the message and we're
+    # typing a reply BEFORE doing any heavy work (LLM call, DB writes).
+    # Both are best-effort fire-and-forget — failures are logged inside
+    # send_chat_action and do not propagate. The user sees the «прочитано /
+    # печатает…» chrome that mysite's MAX SDK provided automatically
+    # (post-cutover regression 2026-05-20).
+    #
+    # DRF-1487 — но «печатает…» НЕ когда бот молчит. Оба индикатора стояли
+    # первой строкой функции, а решение промолчать принимается на 230 строк
+    # ниже: замер 04.09 показал пять пар индикаторов и ноль ответов подряд.
+    #
+    # Расходятся они по семантике, а не по удобству. «Прочитано» —
+    # констатация факта доставки, правдивая и тогда, когда отвечать будет
+    # оператор; убрать её значило бы оставить человека вообще без признаков
+    # жизни, то есть усугубить ровно тот дефект, который чинит DRF-1486.
+    # «Печатает…» — обещание ответа от БОТА, и его-то и нельзя давать тому,
+    # кому бот не ответит.
+    #
+    # Условие, а не перенос вниз, — по замеру: единственный молчащий
+    # ``return`` здесь стоит ПОСЛЕ ``orchestrate_turn``, то есть после
+    # навыков и LLM. Перенести индикатор туда значило бы задержать
+    # «печатает…» на всё время работы модели для каждого обычного хода —
+    # дороже, чем сам дефект. Условие же стоит два запроса (резолверы выше)
+    # и повторяет ровно тот предикат, по которому ниже молчит диспетчер
+    # (``skills.registry.dispatch``: state == HUMAN_HANDOFF), так что
+    # разойтись они не могут.
+    if event.chat_id:
+        from apps.channels.max.outbound import send_chat_action
+
+        send_chat_action(chat_id=event.chat_id, action="mark_seen")
+        # DRF-2276 — и не заблокированному: ему «печатает…» не обещается.
+        if conversation.state != Conversation.State.HUMAN_HANDOFF and blocked_at is None:
+            send_chat_action(chat_id=event.chat_id, action="typing_on")
+
     # Persist the inbound turn.
     record_message(
         conversation,
         role="user",
         content=event.text,
         trace_id=trace_id,
+        input_channel=inbound_channel,
     )
-    short_term.append(
+    # DRF-2511 — то, что этот ход выдавил из окна, просматривается перед
+    # тем как исчезнуть. Чинится не «память на двадцати сообщениях», а
+    # потеря при недоступности Ayla: `record_explicit_green_facts` вернул
+    # ноль, а «следующий ход» — уже другой текст, и повтора для того
+    # сообщения не существует. Провенанс остаётся `explicit`: слова человек
+    # произнёс, опоздание не меняет автора. Гейты (согласие, дедуп,
+    # forget-all) — внутри писателя, второй копии здесь нет.
+    evicted = short_term.append(
         conversation.id,
         role="user",
         content=event.text,
     )
+    review_evicted(bot_user, evicted)
 
     # --- Safety pre-check (#1053) — BEFORE photo download + skill dispatch ---
     # A red-flag (suicide / self-harm / acute emergency) or a BLOCK phrase (drugs
@@ -2132,8 +3332,34 @@ def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | N
     # runs BEFORE dispatch, so without this guard it would barge a canned crisis
     # reply over the operator — the worst moment to auto-inject. When in handoff we
     # skip the short-circuit and fall through to dispatch, which mutes the turn.
-    safety = evaluate_inbound(event.text)
-    if not safety.allowed and conversation.state != Conversation.State.HUMAN_HANDOFF:
+    #
+    # DRF-2213 Q1 — except crisis and medical emergency: owner decision N-1
+    # (CD §67) overrides the barge-guard for exactly those two verdicts — they
+    # get the deterministic reply ALWAYS, operator or not
+    # (``gate.reaches_through_handoff``). BLOCK stays muted under handoff.
+    # Q1 п.1в / п.1а (CD §72): under a handoff a classifier red flag becomes
+    # the MEDICAL outcome (``under_handoff``), and the operator is signalled.
+    safety = evaluate_inbound(voice_gate_text if voice_gate_text is not None else event.text)
+    in_handoff = conversation.state == Conversation.State.HUMAN_HANDOFF
+    # DRF-2276 — заблокированному, как и под handoff, навыки не отвечают:
+    # red flag классификатора становится «неотложкой» гейта (N-1).
+    if in_handoff or blocked_at is not None:
+        safety = under_handoff(event.text, safety)
+        # [OD-BOT §170] — a live G7 «Да» tap reaches through the mute (N-1).
+        safety = g7_under_mute(conversation, bot_user, event.text, safety)
+    if in_handoff and reaches_through_handoff(safety):
+        notify_safety_reply_during_handoff(conversation=conversation)
+    if blocked_at is not None and not reaches_through_handoff(safety):
+        _answer_blocked(
+            conversation=conversation,
+            bot_user=bot_user,
+            chat_id=event.chat_id,
+            trace_id=trace_id,
+            since=blocked_at,
+            is_global=False,
+        )
+        return
+    if not safety.allowed and (not in_handoff or reaches_through_handoff(safety)):
         _emit_safety_shortcircuit(bot_user, safety, is_global=False)
         record_message(
             conversation,
@@ -2150,6 +3376,7 @@ def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | N
             bot_user=bot_user,
             trace_id=trace_id,
             is_global=False,
+            blocked=blocked_at is not None,
         )
         logger.info(
             "channels.max.handler.safety_shortcircuit conversation=%s verdict=%s",
@@ -2178,6 +3405,56 @@ def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | N
             pre_verdict=safety.verdict,
             post_verdict="",
             reply_text=safety.reply_text,
+        )
+        return
+
+    # DRF-1939 — голосовое сообщение: честный ответ до фото-блока и навыков.
+    # Ход без текста с одними audio-вложениями иначе шёл в food_scanner как
+    # «фото без байтов». Аудио не скачивается и не хранится. Оператор ведёт
+    # диалог (HUMAN_HANDOFF) — бот молчит, как диспетчер ниже.
+    if (
+        is_voice_only(event.text, event.attachments)
+        and conversation.state != Conversation.State.HUMAN_HANDOFF
+    ):
+        # DRF-1942 — только голосовое, которое НЕ стало текстом выше: при
+        # выключенном флаге — прежние текст и action_type, иначе — по коду отказа.
+        voice_text = voice_refusal.text if voice_refusal is not None else VOICE_NOT_SUPPORTED_TEXT
+        voice_action_type = (
+            voice_refusal.action_type if voice_refusal is not None else VOICE_ACTION_TYPE
+        )
+        voice_guard = guard_outbound(
+            voice_text, surface="max", bot_user=bot_user, trace_id=trace_id
+        )
+        if voice_guard.blocked:
+            voice_text = voice_guard.text
+        record_message(
+            conversation,
+            role="assistant",
+            content=voice_text,
+            rendered_text=voice_text,
+            action_type=voice_action_type,
+            trace_id=trace_id,
+        )
+        short_term.append(conversation.id, role="assistant", content=voice_text)
+        _record_live_path_metric(
+            bot_user=bot_user,
+            conversation=conversation,
+            trace_id=trace_id,
+            message_text=event.text,
+            t_start=t_start,
+            tenant=conversation.tenant,
+            outcome=AIRequestMetric.OUTCOME_SUCCESS,
+            skill_selected=voice_action_type,
+        )
+        send_message(chat_id=event.chat_id, text=voice_text)
+        _capture_live_replay(
+            trace_id=trace_id,
+            event=event,
+            surface="max_per_tenant",
+            branch=voice_action_type,
+            pre_verdict=safety.verdict,
+            post_verdict="block" if voice_guard.blocked else "allow",
+            reply_text=voice_text,
         )
         return
 
@@ -2316,14 +3593,35 @@ def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | N
     # nothing, log the silence + return. Operator drives until
     # resolve_admin_task flips state back.
     if skill_result is not None and not skill_result.should_send:
+        silenced_by = (skill_result.meta or {}).get("silenced_by", "skill_request")
         logger.info(
             "channels.max.handler.silenced conversation=%s reason=%s",
             conversation.id,
-            (skill_result.meta or {}).get("silenced_by", "skill_request"),
+            silenced_by,
         )
+        # DRF-1486 — объяснить молчание нужно и здесь, и в первую очередь
+        # здесь: инцидент 04.09 НАЧАЛСЯ в салонном боте. Там человеку сказали
+        # «передаю менеджеру», и дальше он писал именно сюда — без ответа и
+        # без единого признака, что его вообще слышат.
+        #
+        # Только на handoff-молчании, а не на любом ``should_send=False``:
+        # навык, попросивший тишины по своим причинам, к оператору отношения
+        # не имеет, и объяснять за него «с вами работает сотрудник» значило
+        # бы соврать. Функция сама помнит, что уже сказала, — второе и пятое
+        # входящее не получают ничего.
+        if silenced_by == "human_handoff":
+            notify_silence(
+                conversation=conversation,
+                bot_user=bot_user,
+                chat_id=event.chat_id,
+                trace_id=trace_id,
+            )
         return
 
     reply_text = skill_result.reply_text if skill_result is not None else _echo_text(event)
+    if voice_transcript is not None:
+        # DRF-1942 — эхо «Я услышала: …» (``VOICE_ECHO_MODE``), до гарда и записи.
+        reply_text = with_voice_echo(reply_text, voice_transcript.text)
     action_type = skill_result.action_type if skill_result is not None else ""
     action_data = skill_result.action_data if skill_result is not None else None
     closing = skill_result is not None and skill_result.should_close_conversation
@@ -2333,7 +3631,16 @@ def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | N
     # but the same person on the other end, and a KB-driven answer is model
     # text like any other. No crisis exemption is needed here: the inbound
     # short-circuit above returns before reaching this line.
-    _guarded = guard_outbound(reply_text, surface="max", bot_user=bot_user, trace_id=trace_id)
+    _guarded = guard_outbound(
+        reply_text,
+        surface="max",
+        bot_user=bot_user,
+        trace_id=trace_id,
+        # DRF-2435 — признак едет от навыка, собравшего архив, а не от формы
+        # текста. Ответ выгрузки — собственные данные человека, и класс
+        # `contact` к ним не применяется.
+        subject_own_data=bool(skill_result is not None and skill_result.subject_own_data),
+    )
     if _guarded.blocked:
         reply_text = _guarded.text
         action_type = OUTBOUND_ACTION_TYPE
@@ -2401,6 +3708,32 @@ def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | N
         outcome=AIRequestMetric.OUTCOME_SUCCESS,
         skill_selected=_skill_selected_label(skill_result),
     )
+
+    # DRF-1486 — этот ход заканчивается тем, что диалог уходит в handoff, а
+    # человеку прямо сейчас уходит строка об этом. Значит, подтверждение
+    # доставлено ЗДЕСЬ, и на следующем сообщении молчание объясняется словами
+    # «ваш вопрос уже у сотрудника», а не «вы просили в другом чате».
+    #
+    # Проверяется состояние диалога, а не имя навыка: задачу заводит и
+    # ``HumanHandoffSkill``, и booking через ``should_handoff``, и порог
+    # уверенности (DRF-1209), — общее у них ровно одно, флип в HUMAN_HANDOFF
+    # внутри ``create_admin_task``. Список навыков здесь пришлось бы дополнять
+    # при каждом новом источнике эскалации, и первый же забытый вернул бы
+    # человеку неверную формулировку.
+    #
+    # До отправки — как ``record_message`` выше: ``send_message`` пробрасывает
+    # MaxAPIError, автоматического ретрая нет, и упавший ход не должен
+    # оставлять диалог с меткой «здесь ничего не говорили».
+    #
+    # Читается ИМЕННО объект в памяти, и это часть корректности, а не
+    # экономия запроса. В память состояние попадает только отсюда — из
+    # ``create_admin_task`` этого же хода. Флип, случившийся параллельно в
+    # другом процессе (глобальный путь завёл задачу на этом салонном
+    # диалоге, пока ход шёл), в памяти не виден — и не должен быть виден:
+    # ЭТОТ диалог тогда ничего человеку не объявлял, и метка была бы
+    # ложной. ``refresh_from_db()`` здесь сломает инвариант молча.
+    if conversation.state == Conversation.State.HUMAN_HANDOFF:
+        mark_handoff_announced(conversation=conversation, chat_id=event.chat_id)
 
     # Outbound — MaxAPIError propagates up (handler does not swallow).
     send_message(chat_id=event.chat_id, text=reply_text, attachments=attachments)

@@ -16,6 +16,9 @@ urlpatterns = [
     # urlpatterns so the specific prefix wins over admin's catch-all
     # include (Django matches patterns in declared order).
     path("admin/observability/", include("apps.observability.urls", namespace="observability")),
+    # DRF-1500 — экран здоровья контура. До catch-all админки, как и
+    # observability выше: иначе префикс проиграет admin.site.urls.
+    path("admin/health/", include("apps.adminconsole.urls", namespace="adminconsole")),
     path("admin/", admin.site.urls),
     path("", include("apps.orchestrator.urls")),
     path("api/v1/ingress/", include("apps.ingress.urls", namespace="ingress")),
@@ -53,6 +56,12 @@ urlpatterns = [
     path(
         "api/v1/internal/events/",
         include("apps.eventbus.urls", namespace="eventbus_internal"),
+    ),
+    # §7 D3 (DRF-1725) — бот-половина удаления аккаунта по просьбе
+    # исполнителя каталога; тот же HMAC, что у ingest выше.
+    path(
+        "api/v1/internal/privacy/",
+        include("apps.identity.internal_urls", namespace="identity_internal"),
     ),
     # Phase 1 / CH1 (DRF-848) — Telegram channel adapter webhook.
     # Tenant resolution happens from the URL slug, not the X-Tenant

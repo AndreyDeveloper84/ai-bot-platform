@@ -61,18 +61,23 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import date as date_cls, datetime, time, timedelta, timezone as dt_timezone
-from typing import Any
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from typing import Any, NamedTuple
+from zoneinfo import ZoneInfo
 
 from django.utils import timezone as dj_timezone
 
-from apps.booking.models import RemoteBookingProxy
 from apps.catalog.models import CatalogMaster, CatalogService
 from apps.identity.models import BotUser
 from apps.master_api.services.visit_source import (
     UPCOMING_STATUSES,
     VisitRow,
+    attended_visits,
     master_visits,
+)
+from apps.integrations.ayla.salon_client import (
+    SalonAPIError,
+    SalonNotConfigured,
+    SalonUnavailable,
 )
 from apps.master_api.services.schedule_frame import (
     ExceptionLike,
@@ -84,6 +89,7 @@ from apps.scheduling.models import (
     ScheduleChangeRequest,
     ScheduleException,
 )
+from apps.tenancy.timezones import salon_zone
 
 logger = logging.getLogger(__name__)
 
@@ -266,21 +272,6 @@ class AvailabilityRequestError(Exception):
 # --- TZ + duration helpers --------------------------------------------
 
 
-def get_tenant_tz(tenant: Any) -> ZoneInfo:
-    """Resolve the tenant's IANA TZ — fall back to UTC on bad values.
-
-    Same fallback contract as
-    :func:`apps.master_api.services.dashboard.get_tenant_tz`.
-    """
-
-    tz_name = getattr(tenant, "timezone", "") or "UTC"
-    try:
-        return ZoneInfo(tz_name)
-    except ZoneInfoNotFoundError:
-        logger.warning("master_api.schedule.bad_tenant_tz tz=%s", tz_name)
-        return ZoneInfo("UTC")
-
-
 def _resolve_duration(booking: VisitRow, service_cache: dict[Any, int]) -> int:
     """Pick best-available duration; memoised lookup of CatalogService.duration_min.
 
@@ -340,34 +331,88 @@ def _day_bounds_utc(day: date_cls, tz: ZoneInfo) -> tuple[datetime, datetime]:
 # --- working block lookup ----------------------------------------------
 
 
+class DayWindow(NamedTuple):
+    """Рамка дня и перерыв внутри неё — ОДНИМ решением.
+
+    Перерыв возвращается отсюда, а не вычисляется отдельной функцией,
+    потому что правило приоритета («исключение на дату бьёт недельный
+    шаблон») одно. Вторая функция с тем же приоритетом разошлась бы с
+    первой молча — ровно тот дефект, который мы весь день ловим в других
+    местах.
+    """
+
+    working: tuple[time, time] | None
+    lunch: tuple[time, time] | None
+
+
+def _lunch_of(row: Any, *, master_id: Any, day: date_cls) -> tuple[time, time] | None:
+    """Перерыв строки, если он назван ПОЛНОСТЬЮ.
+
+    Читается защищённо: локальные модели (``scheduling.WorkingHours``,
+    ``ScheduleException``) колонок перерыва не имеют вовсе, и ветка с
+    выключенным флагом обязана продолжать работать.
+
+    Половина перерыва — не перерыв. Вычесть её нельзя, а промолчать
+    нельзя тем более: в логе остаётся имя, потому что «перерыв назван
+    наполовину» и «перерыва нет» — разные состояния данных, и второе
+    читается как норма.
+    """
+
+    start = getattr(row, "break_start", None)
+    end = getattr(row, "break_end", None)
+    if start is None and end is None:
+        return None
+    if start is None or end is None or start >= end:
+        logger.warning(
+            "schedule.lunch_half_named master=%s day=%s start=%s end=%s",
+            master_id,
+            day.isoformat(),
+            start,
+            end,
+        )
+        return None
+    return (start, end)
+
+
 def _working_block_for_day(
     master: CatalogMaster,
     day: date_cls,
     exceptions_by_date: dict[date_cls, ExceptionLike],
     wh_by_weekday: dict[int, WorkingHoursLike],
-) -> tuple[time, time] | None:
-    """Return the master's effective working window for ``day``, in tenant-local time.
+) -> DayWindow:
+    """Рамка мастера на ``day`` в местном времени тенанта — вместе с перерывом.
 
     Priority: ScheduleException (custom_hours → use; full-day-off →
     None) → WorkingHours for the weekday (skip is_working=False).
-    Returns None when the master isn't working that day.
+    ``working is None`` when the master isn't working that day.
 
     Caller passes pre-fetched dicts so we don't re-hit the DB per day.
+
+    DRF-1638: перерыв приезжает отсюда же. До 11.09.2026 функция возвращала
+    только окно, перерыв терялся ещё раньше — при разборе кадра, — и обед
+    попадал в «свободное время». Каталог при этом считает перерыв занятым и
+    на чтении, и на записи: экран предлагал время, которое запись отклоняла.
     """
 
     exc = exceptions_by_date.get(day)
     if exc is not None:
         if exc.type == ScheduleException.Type.CUSTOM_HOURS:
             if exc.start_time and exc.end_time:
-                return (exc.start_time, exc.end_time)
-            return None
+                return DayWindow(
+                    working=(exc.start_time, exc.end_time),
+                    lunch=_lunch_of(exc, master_id=master.id, day=day),
+                )
+            return DayWindow(None, None)
         # Any other exception type is full-day off.
-        return None
+        return DayWindow(None, None)
 
     wh = wh_by_weekday.get(day.weekday())
     if wh is None or not wh.is_working or not wh.start_time or not wh.end_time:
-        return None
-    return (wh.start_time, wh.end_time)
+        return DayWindow(None, None)
+    return DayWindow(
+        working=(wh.start_time, wh.end_time),
+        lunch=_lunch_of(wh, master_id=master.id, day=day),
+    )
 
 
 # --- free-window + conflict computation -------------------------------
@@ -543,17 +588,179 @@ def _build_returning_customer_index(master: CatalogMaster, bot_user_ids: list[An
         return set()
     from collections import Counter
 
-    rows = RemoteBookingProxy.all_tenants.filter(
-        tenant_id=master.tenant_id,
-        specialist_id=master.id,
-        bot_user_id__in=list(bot_user_ids),
-        status="completed",
-    ).values_list("bot_user_id", flat=True)
+    # DRF-2462: «приходил» — одно правило с чипом дня и списком «Клиенты»
+    # (``attended_visits``): закрыл канон И закрыл человек.
+    rows = (
+        attended_visits(master)
+        .filter(bot_user_id__in=list(bot_user_ids))
+        .values_list("bot_user_id", flat=True)
+    )
     counts = Counter(rows)
     return {bid for bid, n in counts.items() if n > 1}
 
 
 # --- public: build_schedule -------------------------------------------
+
+
+#: Насколько вперёд ищутся записи, мешающие новому графику (DRF-2200).
+#: Две недели — столько же, сколько показывает «Расписание» одним запросом;
+#: дальше конфликт всё равно разойдётся с тем, что человек видит. Число
+#: уезжает в тело отказа, чтобы экран мог назвать горизонт словами, а не
+#: молчать о нём.
+TEMPLATE_CONFLICT_HORIZON_DAYS = 14
+
+
+class ProposedDay(NamedTuple):
+    """Один день недели из ПРЕДЛАГАЕМОГО шаблона (тело PUT /working-hours)."""
+
+    working: tuple[time, time] | None
+    lunch: tuple[time, time] | None
+
+
+def _proposed_week(schedule: list[dict[str, Any]]) -> dict[int, ProposedDay]:
+    """Тело PUT → день недели → смена и перерыв. Невнятную строку пропускаем.
+
+    Строка без часов или с нечитаемым временем — «не работаю»: писать её как
+    рабочую значило бы придумать смену, которой в теле нет.
+    """
+
+    out: dict[int, ProposedDay] = {}
+    for row in schedule or []:
+        if not isinstance(row, dict):
+            continue
+        raw_weekday = row.get("day_of_week")
+        if raw_weekday is None:
+            continue
+        try:
+            weekday = int(raw_weekday)
+        except (TypeError, ValueError):
+            continue
+        if not row.get("is_working_day"):
+            out[weekday] = ProposedDay(None, None)
+            continue
+        working = _hm_pair(row.get("start_time"), row.get("end_time"))
+        out[weekday] = ProposedDay(working, _hm_pair(row.get("break_start"), row.get("break_end")))
+    return out
+
+
+def _hm_pair(raw_start: Any, raw_end: Any) -> tuple[time, time] | None:
+    try:
+        start = time.fromisoformat(str(raw_start or "")[:5])
+        end = time.fromisoformat(str(raw_end or "")[:5])
+    except ValueError:
+        return None
+    return (start, end) if start < end else None
+
+
+def conflicting_bookings_for_template(
+    master: CatalogMaster,
+    schedule: list[dict[str, Any]],
+    *,
+    now: datetime | None = None,
+    horizon_days: int = TEMPLATE_CONFLICT_HORIZON_DAYS,
+) -> list[dict[str, Any]]:
+    """Записи, которые не помещаются в ПРЕДЛАГАЕМЫЙ недельный график (DRF-2200).
+
+    Макет DRF-1186, экран 4: «На это время уже есть запись» показывает саму
+    запись, а не слово «конфликт». Источник — тот же, что у «Расписания»
+    (:func:`build_schedule`): второй вычислитель разошёлся бы с экраном, и
+    мастер увидел бы конфликт, которого в его расписании нет.
+
+    ``schedule`` — тело PUT: семь строк ``{day_of_week, is_working_day,
+    start_time, end_time, break_start, break_end}``. Запись мешает, если она
+    начинается раньше начала смены, заканчивается позже конца, попадает на
+    предложенный перерыв или на день, который в новом графике нерабочий.
+
+    Чего здесь НЕТ и почему:
+
+    * **Даты с исключением каталога** пропускаются: их рамку задаёт
+      исключение, а не шаблон (:func:`_working_block_for_day`), и менять
+      шаблон на такой день бессмысленно — мастер увидел бы конфликт,
+      который его правка всё равно не разрешит.
+    * **Дальше горизонта** (:data:`TEMPLATE_CONFLICT_HORIZON_DAYS`) не
+      смотрим: Ayla отказывает по всему будущему, поэтому список —
+      «вот что мешает в ближайшие две недели», и горизонт экран называет.
+    """
+
+    tz = salon_zone(master.tenant)
+    resolved_now = now if now is not None else dj_timezone.now()
+    local_now = resolved_now.astimezone(tz)
+    from_date = local_now.date()
+    to_date = from_date + timedelta(days=max(horizon_days, 0))
+
+    proposed = _proposed_week(schedule)
+    if not proposed:
+        return []
+
+    # Рамка нужна только ради дат с исключением — см. докстроку.
+    _wh_by_weekday, exceptions_by_date, _extra_blocks = load_day_frame(
+        master, from_date=from_date, to_date=to_date, tz=tz
+    )
+
+    payload = build_schedule(master, from_date=from_date, to_date=to_date, now=resolved_now)
+    out: list[dict[str, Any]] = []
+    for day in payload.days:
+        day_date = date_cls.fromisoformat(day.date)
+        # День не назван в теле — график на него не меняется, и мешать нечему.
+        if day_date.weekday() not in proposed or day_date in exceptions_by_date:
+            continue
+        shift = proposed[day_date.weekday()]
+        for booking in day.bookings:
+            try:
+                visit_at = datetime.fromisoformat(booking.visit_at)
+            except ValueError:
+                continue
+            start_local = visit_at.astimezone(tz)
+            end_local = start_local + timedelta(minutes=booking.duration_min or 0)
+            if end_local <= local_now:
+                continue
+            if _fits_proposed(shift, day_date, start_local, end_local, tz=tz):
+                continue
+            out.append(
+                {
+                    "booking_id": booking.booking_id,
+                    "date": day.date,
+                    "client_name": " ".join(
+                        p for p in (booking.client_first_name, booking.client_last_initial) if p
+                    ).strip(),
+                    "service_name": booking.service_name,
+                    "duration_min": booking.duration_min,
+                    "start_at": start_local.isoformat(),
+                    "end_at": end_local.isoformat(),
+                }
+            )
+    return out
+
+
+def _fits_proposed(
+    shift: ProposedDay,
+    day: date_cls,
+    start_local: datetime,
+    end_local: datetime,
+    *,
+    tz: ZoneInfo,
+) -> bool:
+    """Помещается ли запись в предложенную смену этого дня.
+
+    Сравниваются МОМЕНТЫ, а не ``.time()``: запись 23:30+60 мин кончается
+    00:30 следующего дня, и по часам она «раньше 19:00» — то есть при
+    сравнении времён исчезала бы из конфликтов вовсе.
+    """
+
+    if shift.working is None:
+        return False
+    block_start = datetime.combine(day, shift.working[0], tzinfo=tz)
+    block_end = datetime.combine(day, shift.working[1], tzinfo=tz)
+    if start_local < block_start or end_local > block_end:
+        return False
+    if shift.lunch is not None:
+        lunch_start = datetime.combine(day, shift.lunch[0], tzinfo=tz)
+        lunch_end = datetime.combine(day, shift.lunch[1], tzinfo=tz)
+        # Перерыв, заведённый поверх записи, — такой же конфликт: после
+        # записи часов в это время новых записей быть не может, а эта есть.
+        if start_local < lunch_end and end_local > lunch_start:
+            return False
+    return True
 
 
 def build_schedule(
@@ -581,7 +788,7 @@ def build_schedule(
 
     if now is None:
         now = dj_timezone.now()
-    tz = get_tenant_tz(master.tenant)
+    tz = salon_zone(master.tenant)
     tz_name = str(tz)
 
     # Pre-fetch all per-day inputs in a single DB roundtrip each.
@@ -665,7 +872,8 @@ def _build_one_day(
 ) -> ScheduleDay:
     """Build a single :class:`ScheduleDay`. See :func:`build_schedule`."""
 
-    working_block = _working_block_for_day(master, day, exceptions_by_date, wh_by_weekday)
+    day_window = _working_block_for_day(master, day, exceptions_by_date, wh_by_weekday)
+    working_block = day_window.working
     # An «off day» is one with no working hours configured AT ALL —
     # i.e. WorkingHours row is missing OR is_working=False. A full-day
     # ScheduleException (vacation/sick) on a normally-working day is
@@ -738,7 +946,29 @@ def _build_one_day(
     # Partial-day absences (Ayla time-off, flag ON): the local model has
     # no per-hours absence, so these arrive only from the wire. They are
     # real occupied time — free windows and the conflict pass both see them.
-    for extra in extra_blocks or []:
+    # DRF-1638 — перерыв вычитается ТЕМ ЖЕ механизмом, что недоступность.
+    #
+    # Своей арифметики он не получает намеренно: ``_compute_free_windows``
+    # уже умеет вычитать блоки, и заводить рядом второй способ «убрать кусок
+    # из рамки» значило бы завести второе определение занятости. Заодно
+    # перерыв появляется в ``blocks`` — экран уже рисует reason ``lunch``
+    # словом «перерыв», отдельной работы на клиенте не нужно.
+    #
+    # Только в рабочий день: перерыв в день, когда мастер не работает, —
+    # это данные, а не событие, и вычитать его не из чего.
+    day_blocks = list(extra_blocks or [])
+    if day_window.lunch is not None and working_block is not None:
+        lunch_start, lunch_end = day_window.lunch
+        day_blocks.append(
+            FrameBlock(
+                id=f"lunch-{day.isoformat()}",
+                start_local=lunch_start,
+                end_local=lunch_end,
+                reason="lunch",
+            )
+        )
+
+    for extra in day_blocks:
         start_utc = datetime.combine(day, extra.start_local, tzinfo=tz).astimezone(dt_timezone.utc)
         end_utc = datetime.combine(day, extra.end_local, tzinfo=tz).astimezone(dt_timezone.utc)
         blocks.append(
@@ -825,40 +1055,64 @@ def request_availability_change(
     if len(reason_text or "") > 200:
         raise AvailabilityRequestError("bad_request", "reason_text must be ≤ 200 chars")
 
-    tz = get_tenant_tz(master.tenant)
+    tz = salon_zone(master.tenant)
     # Compute the date range the window touches in tenant-local TZ.
     start_local_date = start.astimezone(tz).date()
     end_local_date = end.astimezone(tz).date()
 
-    # Overlap check against approved ScheduleException rows.
-    # CUSTOM_HOURS is a partial-day exception so we project to UTC
-    # window precisely; full-day types cover [00:00, 23:59:59] local.
-    exceptions = list(
-        ScheduleException.all_tenants.filter(
-            tenant_id=master.tenant_id,
-            master_id=master.id,
-            date__gte=start_local_date,
-            date__lte=end_local_date,
+    # Overlap check against approved exceptions — из ЖИВОГО источника (DRF-2019).
+    #
+    # Здесь стоял прямой запрос к локальной ``ScheduleException`` мимо
+    # ``BOOKING_VIA_AYLA_REST``, тогда как экран расписания, готовность мастера и
+    # дашборд (DRF-2014) уже читают рамку через ``load_day_frame``. Кабинет
+    # решал по копии, которую при включённом флаге никто не обновляет: замер
+    # главного окна на пилоте 15.09.2026 ~23:20 UTC — в копии 28 строк недельных
+    # часов у 4 мастеров от 22.07 против 63 строк у 9 мастеров в каталоге, а
+    # ``scheduling_scheduleexception`` пуст. Путь молчал по ДАННЫМ, а не по
+    # устройству: первая же строка в копии — и заявка отклонялась по ней.
+    #
+    # Форма источника другая, и это не переименование: рамка отдаёт
+    # ``dict[date, ExceptionLike]``, у каталожного ``FrameException`` поля
+    # ``date`` нет — день приходит ключом. Граница частичного исключения
+    # считается по этому ключу.
+    #
+    # Рамку не прочитали — отказ, а не создание заявки против расписания,
+    # которого мы не видели: выдать разрешение по незнанию хуже, чем отказать.
+    # Наружу одно имя (``schedule_unavailable``), внутрь — названная причина;
+    # третьего состояния в контракте здесь не заводим (вопрос владельца X7).
+    try:
+        _wh_by_weekday, exceptions_by_date, _blocks = load_day_frame(
+            master,
+            from_date=start_local_date,
+            to_date=end_local_date,
+            tz=tz,
         )
-    )
-    for exc in exceptions:
-        if exc.type == ScheduleException.Type.CUSTOM_HOURS:
-            if not exc.start_time or not exc.end_time:
+    except (SalonNotConfigured, SalonUnavailable, SalonAPIError) as exc:
+        logger.info(
+            "master.availability.frame_unreadable master=%s reason=%s",
+            master.id,
+            type(exc).__name__,
+        )
+        raise AvailabilityRequestError(
+            "schedule_unavailable",
+            "schedule cannot be read right now — try again later",
+        ) from exc
+
+    for day, exc_row in sorted(exceptions_by_date.items()):
+        if exc_row.type == ScheduleException.Type.CUSTOM_HOURS:
+            if not exc_row.start_time or not exc_row.end_time:
                 continue  # malformed row; skip rather than crash
-            exc_start = datetime.combine(exc.date, exc.start_time, tzinfo=tz).astimezone(
+            exc_start = datetime.combine(day, exc_row.start_time, tzinfo=tz).astimezone(
                 dt_timezone.utc
             )
-            exc_end = datetime.combine(exc.date, exc.end_time, tzinfo=tz).astimezone(
-                dt_timezone.utc
-            )
+            exc_end = datetime.combine(day, exc_row.end_time, tzinfo=tz).astimezone(dt_timezone.utc)
         else:
             # Full-day off types — block the whole local date.
-            day_start, day_end = _day_bounds_utc(exc.date, tz)
-            exc_start, exc_end = day_start, day_end
+            exc_start, exc_end = _day_bounds_utc(day, tz)
         if start < exc_end and exc_start < end:
             raise AvailabilityRequestError(
                 "overlap",
-                f"window overlaps an existing approved exception on {exc.date.isoformat()}",
+                f"window overlaps an existing approved exception on {day.isoformat()}",
             )
 
     req = ScheduleChangeRequest.all_tenants.create(
@@ -942,9 +1196,63 @@ def list_pending_requests(
     return items
 
 
+def notify_manager_of_availability_request(*, tenant, master, request_id) -> None:
+    """Уведомление-решение «мастер просит изменить график» управляющим салона.
+
+    Спека master-mobile §M3 строка 458: «server marks slot blocked →
+    owner notified (audit + bot DM)». С DRF-2118 — единый формат
+    :mod:`apps.channels.max.salon_notify`: «Было / Станет / затронуто N»
+    (impact §142 тем же чтением, что у Admin Mini App) и кнопки
+    Одобрить / Отклонить / Подробнее. Отправитель и адресаты —
+    ``send_to_staff`` (DRF-2128); повтор по той же заявке — не дубль.
+    Никого не нашлось — деградация с именем; slug ``no_manager_chat_id``
+    ниже сохранён — это эмитируемый ключ.
+
+    Живёт здесь, потому что заявку подают два места: кнопка «Помечу как
+    недоступно» в расписании и подтверждённое предложение Ayla
+    (:mod:`apps.master_api.services.assistant_actions`); вьюха
+    ``master_api.views._maybe_send_manager_dm`` — тонкая обёртка над этой
+    функцией. Импорты локальные: ``apps.channels`` не нужен эндпоинтам
+    master_api, которые сюда не заходят.
+    """
+
+    from apps.channels.max import salon_notify
+
+    request = (
+        ScheduleChangeRequest.all_tenants.filter(id=request_id, tenant=tenant)
+        .select_related("master", "tenant")
+        .first()
+    )
+    if request is None:
+        logger.warning(
+            "master_api.availability.notify_request_missing tenant=%s request=%s",
+            tenant.id,
+            request_id,
+        )
+        return
+    impact = salon_notify.schedule_request_impact(request)
+    result = salon_notify.notify(salon_notify.schedule_request_notice(request, impact=impact))
+    if result is None:
+        return  # дубль — уже уведомляли по этой заявке
+    if result.recipients == 0:
+        logger.info(
+            "master_api.availability.no_manager_chat_id tenant=%s master=%s",
+            tenant.id,
+            master.id,
+        )
+    elif not result.delivered:
+        # Best-effort: источник правды — строка в базе и аудит.
+        logger.warning(
+            "master_api.availability.manager_dm_failed tenant=%s request=%s",
+            tenant.id,
+            request_id,
+        )
+
+
 __all__ = [
     "AvailabilityRequestError",
     "Conflict",
+    "TEMPLATE_CONFLICT_HORIZON_DAYS",
     "DEFAULT_RANGE_DAYS",
     "FREE_WINDOW_MIN_GAP_MIN",
     "FreeWindow",
@@ -955,7 +1263,8 @@ __all__ = [
     "ScheduleDay",
     "ScheduleResponse",
     "build_schedule",
-    "get_tenant_tz",
+    "conflicting_bookings_for_template",
     "list_pending_requests",
+    "notify_manager_of_availability_request",
     "request_availability_change",
 ]

@@ -23,9 +23,13 @@ BEFORE invoking the skill; returns a :class:`SafetyVerdict` ∈
   for medical / drug / acute / legal / suicidal / forbidden.
 - Tenant overrides via ``settings.SAFETY_PATTERNS`` (merged on top of
   defaults — partial override doesn't wipe defaults).
-- Per-tenant BrandVoiceConfig.forbidden_phrases is consulted as a
-  generic "block" gate (operators add tenant-specific disallowed
-  vocabulary there; voice_check (Sprint 4 / C4) validates outbound).
+- Per-tenant ``BrandVoiceConfig.forbidden_phrases`` is NOT consulted here
+  (DRF-2608). Those are words Ayla must not SAY — they are checked on the
+  reply by ``post_check`` → ``voice_check.validate_voice``. Blocking the
+  PERSON's message for a word forbidden to Ayla broke the side of the
+  conversation. The earlier design also used the list as an operator
+  filter of rude client requests; that filter is not cancelled by us — it
+  is put to the owner as a separate question (a separate list, if wanted).
 
 ### intent_decision integration
 
@@ -61,6 +65,10 @@ class SafetyVerdict(str, Enum):
     ALLOW = "allow"
     CLARIFY = "clarify"
     BLOCK = "block"
+    #: DRF-2000 (S-2): медицинская неотложка — 103 / 112. Отдельно от
+    #: ``HANDOFF`` (психологический кризис, телефон доверия): это два
+    #: разных ответа человеку, и первой строкой у них стоят разные номера.
+    MEDICAL = "medical"
     HANDOFF = "handoff"
 
 
@@ -118,17 +126,56 @@ _DEFAULT_PATTERNS: dict[str, list[str]] = {
         r"(?i)(\bkill\w*\s+my\s?self|\bhang\w*\s+my\s?self|\b(hurt|harm|cut)\w*\s+my\s?self"
         r"|\bslit\w*\s+my\s+wrist|take\s+my\s+own\s+life|\bend\s+(my\s+life|it(\s+all)?)\b"
         r"|\bsuicid|self[\s-]?harm|\boverdos)",
-        # Acute medical emergency. `умираю` excludes the hyperbole «умираю (как)
-        # хочу…» (common on a beauty bot) via negative lookahead — but NOT
-        # «умираю от…», because «умираю от боли» is a real emergency we must catch.
-        r"(?i)(\bскорая\b|\bemergency\b|\bумираю\b(?!\s+(как\s+)?хочу)|\bdying\b"
-        r"|сердечный приступ|heart attack)",
+        # Bare «умираю» stays here (crisis): without «от боли / скорую /
+        # сердце» it reads as despair as often as as a body. The hyperbole
+        # «умираю (как) хочу…» (common on a beauty bot) is excluded by the
+        # negative lookahead; the physical «умираю от …» moved to MEDICAL
+        # (DRF-2000) together with the rest of the acute-emergency group.
+        r"(?i)(\bумираю\b(?!\s+(как\s+)?хочу)(?!\s+от\b)|\bdying\b)",
         # Abuse / domestic violence — stems
         r"(?i)(\bизбива|\bнасили|\babuse\b|\bbattered\b)",
     ],
+    # DRF-2000 (S-2) — the «неотложка» group, owner ruling 20.09 (ticket
+    # comment) on top of [OD-BOT §163]: a heart attack, a call for an
+    # ambulance, «не могу дышать / теряю сознание / давит в груди». The
+    # reply is the medical emergency text (103 / 112 first line), never the
+    # psychological helpline. Until DRF-2000 the cardiac phrases sat in the
+    # HANDOFF list and got the crisis text; «скорая» matched only the
+    # nominative, so «вызовите скорую» went to the model.
+    SafetyVerdict.MEDICAL.value: [
+        # Cardiac / ambulance / dying of pain — all inflections of «скорая».
+        r"(?i)(сердечн\w*\s+приступ|heart\s+attack|\bинфаркт|\bинсульт"
+        r"|\bскор(ая|ую|ой|ые)\b(\s+помощ\w*)?|\bemergency\b|\bумираю\s+от\b)",
+        # Breathing / consciousness / chest — with the same emotional-idiom
+        # exception the health_screening classifier keeps («задыхаюсь от
+        # смеха», «потеряла сознание от восторга» are not emergencies; S-1b).
+        r"(?i)(не\s+могу\s+(в)?дышать|нечем\s+дышать|\bудушь\w*"
+        r"|\bзадыха\w*+(?!\s+от\s+(смеха|хохота|восторга|счастья|радости)))",
+        r"(?i)((теря|потеря)\w*\s+сознани\w*+(?!\s+от\s+(смеха|хохота|восторга|счастья|радости))"
+        r"|без\s+сознания|\bобморок\w*)",
+        r"(?i)((давит|сдавил\w*|жж[её]т|боль)\s+(в\s+)?груд\w*|груд\w*\s+давит)",
+    ],
     SafetyVerdict.BLOCK.value: [
-        # Specific drug names (recommend → block)
-        r"(?i)\b(ибупрофен|анальгин|парацетамол|кеторол|tramadol|opioid)\b",
+        # Owner decision 11.09 §3, verbatim: «Простое упоминание лекарства не
+        # является автоматическим STOP; запрос подобрать препарат, дозировку
+        # или схему — STOP». Until 11.09 the bare word was enough — «вчера
+        # выпила ибупрофен, можно на массаж?» was refused as if it asked for
+        # a prescription. Two lookaheads, order-free: the message must ASK
+        # (pick / advise / dose / how to take / what to take) AND name a
+        # drug or a drug noun. «подберите обезболивающее» is STOP with no
+        # brand named; «принимаю парацетамол, это помешает?» is not. Bare
+        # mention is NORMAL, not CAUTION: CAUTION has 0 rules by §126 and
+        # giving it its first one is the owner's act, not this patch's.
+        r"(?is)(?=.*\b(подбер\w*|подобра\w*|посовет\w*|порекоменд\w*|назнач\w*"
+        r"|дай(те)?|выпиш\w*|пропиш\w*|дозир\w*|доз[ауы]"
+        r"|сколько\s+(таблет\w*|мг|миллиграм\w*|раз\s+в\s+день)"
+        r"|схем\w*\s+(при[её]ма|лечения)|как\s+(принимать|пить|колоть)"
+        r"|что\s+(принять|выпить|попить|поколоть)"
+        r"|как[ойуюие]+\s+(препарат\w*|лекарств\w*|таблет\w*|обезболивающ\w*)"
+        r"|recommend|prescribe|dosage|how\s+much|what\s+to\s+take|should\s+i\s+take)\b)"
+        r"(?=.*\b(ибупрофен\w*|анальгин\w*|парацетамол\w*|кеторол\w*|tramadol|opioid\w*"
+        r"|препарат\w*|лекарств\w*|таблет\w*|обезболивающ\w*|антибиотик\w*"
+        r"|painkiller\w*|medication\w*|pills?)\b)",
         # Diagnosis requests with definitive words
         r"(?i)\b(поставьте диагноз|diagnose me|у меня (рак|онколог))",
         # Legal advice
@@ -195,15 +242,17 @@ def pre_check(
       text: user message.
       intent_decision: optional :class:`IntentDecision` (O2). If risk_level=='high',
         verdict is elevated to at least 'handoff'.
-      brand_voice: optional dict (from BrandVoiceConfig). If
-        ``forbidden_phrases`` contains a pattern that matches, verdict
-        becomes 'block' regardless of other matches.
+      brand_voice: accepted for call compatibility and NOT used on the
+        input (DRF-2608): ``forbidden_phrases`` of the brand are words Ayla
+        must not say and are checked on the reply (``post_check``). An
+        input filter of client requests, if the owner wants one, is a
+        separate list — not this one.
 
     Returns:
       :class:`SafetyResult`. Default verdict is ALLOW. Empty text → ALLOW.
 
     ### Verdict priority (highest wins)
-    HANDOFF > BLOCK > CLARIFY > ALLOW
+    HANDOFF > MEDICAL > BLOCK > CLARIFY > ALLOW
 
     Multiple matches across verdicts: highest-priority verdict wins, but
     `matched_patterns` carries ALL matches (forensic). Cross-tenant
@@ -226,15 +275,10 @@ def pre_check(
                 matched.append(pattern)
                 triggered_verdicts.add(verdict)
 
-    # BrandVoice forbidden_phrases — operator-defined per-tenant block list.
-    if brand_voice:
-        for pattern in brand_voice.get("forbidden_phrases", []) or []:
-            compiled = _compile(pattern)
-            if compiled is None:
-                continue
-            if compiled.search(text):
-                matched.append(pattern)
-                triggered_verdicts.add(SafetyVerdict.BLOCK.value)
+    # DRF-2608: brand ``forbidden_phrases`` are NOT applied to the person's
+    # input — they belong to the reply side (``post_check``). ``brand_voice``
+    # stays in the signature for callers; see the docstring.
+    del brand_voice
 
     # Map intent_decision.risk_level into the verdict elevation.
     elevation = _risk_elevation(intent_decision)
@@ -251,10 +295,14 @@ def pre_check(
 
 
 # Verdict priority — higher index = higher priority.
+# HANDOFF > MEDICAL > BLOCK > CLARIFY > ALLOW. Self-harm outranks the medical
+# group on purpose: the crisis text already names 112, and a person who
+# writes both must not lose the helpline (DRF-2000).
 _VERDICT_PRIORITY = [
     SafetyVerdict.ALLOW.value,
     SafetyVerdict.CLARIFY.value,
     SafetyVerdict.BLOCK.value,
+    SafetyVerdict.MEDICAL.value,
     SafetyVerdict.HANDOFF.value,
 ]
 

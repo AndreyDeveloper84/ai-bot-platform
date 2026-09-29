@@ -20,7 +20,7 @@ import pytest
 from django.test import Client as DjangoClient
 
 from apps.consent.models import ConsentRecord
-from apps.identity.models import BotUser, MemoryEntry
+from apps.identity.models import BotUser, MemoryEntry, UserPreferences
 from apps.identity.services.memory_inferred import (
     InferredGreenFact,
     record_inferred_green_facts,
@@ -39,7 +39,9 @@ from apps.integrations.ayla.personal_context_client import (
 from apps.tenancy.models import Tenant
 
 
-pytestmark = pytest.mark.django_db
+# DRF-2220 — erasure also purges the ingress streams; this file is not
+# about them, so they are empty and need no Redis (apps/conftest.py).
+pytestmark = [pytest.mark.django_db, pytest.mark.usefixtures("ingress_streams_empty")]
 
 BOT_TOKEN = "test-bot-token-xyz"
 CT = ConsentRecord.ConsentType
@@ -116,6 +118,12 @@ def _delete_request(
 
 
 def _seed_memory(bu: BotUser, ayla_user_id: uuid.UUID) -> None:
+    # S2-2 (owner §2.4): memory is written only for a shell the client contour
+    # knows. These fixtures build shells directly, not through the resolver
+    # that classifies at creation, so the standing is written here — a shell
+    # that gets memory seeded IS, by the fixture's own premise, LINKED.
+    BotUser.all_tenants.filter(pk=bu.pk).update(customer_status=BotUser.CustomerStatus.LINKED)
+    bu.refresh_from_db(fields=["customer_status"])
     _grant(bu, CT.PERSONAL_DATA)
     record_inferred_green_facts(
         bu,
@@ -135,11 +143,11 @@ class _StubPCClient:
         self.calls: list[tuple[str, str]] = []
         self.closed = False
 
-    def get_personal_data_export(self, *, ayla_user_id: str):
+    def get_personal_data_export(self, *, ayla_user_id: str, external_user_id: str):
         self.calls.append(("export", ayla_user_id))
         return self.export_payload
 
-    def delete_personal_data(self, *, ayla_user_id: str) -> None:
+    def delete_personal_data(self, *, ayla_user_id: str, external_user_id: str) -> None:
         self.calls.append(("delete", ayla_user_id))
         if self.delete_exc:
             raise self.delete_exc
@@ -173,7 +181,7 @@ class TestExport:
 
     def test_upstream_failure_raises(self, bot_user) -> None:
         class _Failing(_StubPCClient):
-            def get_personal_data_export(self, *, ayla_user_id: str):
+            def get_personal_data_export(self, *, ayla_user_id: str, external_user_id: str):
                 raise PersonalContextTransportError("http_500")
 
         with pytest.raises(PrivacyUpstreamError):
@@ -414,6 +422,36 @@ class TestDelete:
             bot_user=bot_user, withdrawn_at__isnull=True
         ).exists()
 
+    def test_unchecked_ingress_streams_are_not_reported_done(
+        self, bot_user, ayla_user_id, monkeypatch
+    ) -> None:
+        """DRF-2220 — Redis down: the rest of the cascade runs, the answer is partial.
+
+        The raw webhook copies were not checked, so the dialogue step must not
+        say «done»; a retry re-runs that idempotent step, which retries the purge.
+        """
+        import redis
+
+        from apps.ingress import streams
+
+        def _down():
+            raise redis.ConnectionError("ingress redis is down")
+
+        monkeypatch.setattr(streams, "_client", _down)
+        _seed_memory(bot_user, ayla_user_id)
+
+        result = delete_personal_data(bot_user, client=_StubPCClient())  # type: ignore[arg-type]
+
+        steps = {s.step: s for s in result.steps}
+        assert steps["dialogue_anonymize"].ok is False
+        assert steps["dialogue_anonymize"].detail == "ingress_streams_unchecked"
+        assert not result.all_ok
+        # Everything else still ran.
+        assert steps["memory_delete"].ok is True
+        assert not MemoryEntry.objects.filter(
+            user_id=ayla_user_id, soft_deleted_at__isnull=True
+        ).exists()
+
     def test_idempotent_repeat(self, bot_user, ayla_user_id) -> None:
         _seed_memory(bot_user, ayla_user_id)
         client = _StubPCClient()
@@ -515,6 +553,9 @@ class TestDelete:
             # DRF-1369 — the customer's own dialogue. Step 5 covered the
             # employee surface; this is the one the cascade had no step for.
             "dialogue_anonymize",
+            # DRF-1772 (К-3) — слова человека в карточке C04: причины и факты,
+            # из которых они собраны. Строка остаётся tombstone (B13/D7).
+            "recommendation_erase",
         }
 
 
@@ -537,7 +578,7 @@ class TestViews:
 
     def test_export_upstream_502(self, client: DjangoClient, bot_user, monkeypatch) -> None:
         class _Failing(_StubPCClient):
-            def get_personal_data_export(self, *, ayla_user_id: str):
+            def get_personal_data_export(self, *, ayla_user_id: str, external_user_id: str):
                 raise PersonalContextTransportError("http_500")
 
         monkeypatch.setattr(
@@ -852,7 +893,7 @@ class TestProfilePiiErase:
         _with_pii(bot_user)
 
         class _GoneOnRepeat(_StubPCClient):
-            def delete_personal_data(self, *, ayla_user_id: str) -> None:
+            def delete_personal_data(self, *, ayla_user_id: str, external_user_id: str) -> None:
                 already = ("delete", ayla_user_id) in self.calls
                 self.calls.append(("delete", ayla_user_id))
                 if already:
@@ -1497,3 +1538,67 @@ class TestExportMarksCurrency:
         self._two_conflicting_facts(ayla_user_id)
         payload = export_personal_data(bot_user, client=_StubPCClient())  # type: ignore[arg-type]
         assert all("status" in m for m in payload["memory"])
+
+
+class TestConsentWithdrawMirrorsNotifyPromoAtomically:
+    """DRF-1731 замер 12.09: реестр MARKETING и зеркало ``notify_promo`` —
+    два носителя одного факта. Шаг 3 стирания отзывал реестр, зеркало не
+    писал, и оно «сходилось» лишь потому, что шаг 4 удалял строку
+    ``UserPreferences``. Здесь — сценарий дефекта (шаг 4 упал) и обратный
+    (зеркало упало): либо оба сняты, либо ни одно — и шаг назван.
+    """
+
+    @staticmethod
+    def _promo_on(bu: BotUser) -> None:
+        from apps.consent import customer as customer_consents
+
+        customer_consents.set_marketing(bu, granted=True)
+        assert UserPreferences.all_tenants.get(bot_user=bu).notify_promo is True
+
+    def test_step_4_failure_no_longer_leaves_the_mirror_on(self, bot_user, monkeypatch) -> None:
+        self._promo_on(bot_user)
+        monkeypatch.setattr(
+            "apps.identity.services.privacy._erase_bot_user_pii",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("step 4 down")),
+        )
+        result = delete_personal_data(bot_user, client=_StubPCClient())  # type: ignore[arg-type]
+
+        assert "profile_pii_erase" in result.failed_steps
+        assert next(s for s in result.steps if s.step == "consent_withdraw").ok
+        # Реестр отозван…
+        assert not ConsentRecord.all_tenants.filter(
+            bot_user=bot_user, consent_type=CT.MARKETING, withdrawn_at__isnull=True
+        ).exists()
+        # …и зеркало снято той же транзакцией, хотя строка настроек жива.
+        assert UserPreferences.all_tenants.get(bot_user=bot_user).notify_promo is False
+
+    def test_mirror_failure_rolls_the_registry_back_and_names_the_step(
+        self, bot_user, monkeypatch
+    ) -> None:
+        self._promo_on(bot_user)
+        monkeypatch.setattr(
+            "apps.identity.services.privacy._mirror_notify_promo",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("mirror down")),
+        )
+        result = delete_personal_data(bot_user, client=_StubPCClient())  # type: ignore[arg-type]
+
+        assert "consent_withdraw" in result.failed_steps
+        assert not result.all_ok
+        # Ни один носитель не изменился: реестр всё ещё действует…
+        assert ConsentRecord.all_tenants.filter(
+            bot_user=bot_user, consent_type=CT.MARKETING, withdrawn_at__isnull=True
+        ).exists()
+        # …и это видно, а не спрятано за зелёным шагом. Зеркало — по шагу 4
+        # (строка настроек удалена и пересоздаётся выключенной), поэтому
+        # расхождения «реестр отозван, зеркало True» нет ни в одной ветке.
+        assert not UserPreferences.all_tenants.filter(bot_user=bot_user, notify_promo=True).exists()
+
+    def test_happy_path_withdraws_both_carriers(self, bot_user) -> None:
+        """POSITIVE: без подмен оба носителя сняты и шаг зелёный."""
+        self._promo_on(bot_user)
+        result = delete_personal_data(bot_user, client=_StubPCClient())  # type: ignore[arg-type]
+        assert next(s for s in result.steps if s.step == "consent_withdraw").ok
+        assert not ConsentRecord.all_tenants.filter(
+            bot_user=bot_user, consent_type=CT.MARKETING, withdrawn_at__isnull=True
+        ).exists()
+        assert not UserPreferences.all_tenants.filter(bot_user=bot_user, notify_promo=True).exists()

@@ -130,10 +130,24 @@ GRANTED_PRECONDITIONS = (
     "BotUser.welcomed_at is set (WelcomeSkill intercepts the first message "
     "from an ungreeted user and would answer every fixture with the "
     "welcome copy)",
-    "BotUser.food_scanner_consent_at is set (152-ФЗ gate; without it every "
-    "food_scanner fixture gets the «открой Mini App» refusal)",
+    "ConsentRecord FOOD_DIARY_PROCESSING is granted with its document version "
+    "(152-ФЗ gate, DRF-1963; without it every food_scanner fixture gets the "
+    "«открой Mini App» refusal)",
     "NUTRITION_ENABLED / FOOD_PHOTO_SCAN_ENABLED are on (their default is "
     "off, and off means the «функция готовится» placeholder)",
+    "ConsentRecord PERSONAL_CALCULATION is granted with its document version "
+    "(§92 п.1 / DRF-1698; the gate sits at the anketa ENTRANCE, so without it "
+    "every anketa fixture gets the consent screen instead of its question). "
+    "Same terms as the ones above: the refusal branch has its own tests in "
+    "apps/skills/nutrition_anketa/tests/test_consent_gate_at_entry.py, so a "
+    "fixture written for it has to stop being granted here",
+    "ConsentRecord PERSONAL_DATA is granted through record_global_consent "
+    "(DRF-1926; the water log sits behind the same consent as the food diary "
+    "in chat, so without it every water fixture gets the consent sentence "
+    "instead of its «250 мл»). The refusal branch has its own tests in "
+    "apps/skills/water/tests/test_skill.py and "
+    "apps/orchestrator/tests/test_water_consent_1926.py, so a fixture written "
+    "for it has to stop being granted here",
 )
 
 
@@ -224,8 +238,38 @@ def golden_run(monkeypatch, fake_redis, golden_tenant, settings):
                 # nobody has to read this file to learn what the gate handed
                 # the system for free.
                 bot_user.welcomed_at = timezone.now()
-                bot_user.food_scanner_consent_at = timezone.now()
-                bot_user.save(update_fields=["welcomed_at", "food_scanner_consent_at"])
+                bot_user.save(update_fields=["welcomed_at"])
+                # DRF-1926 — согласие на обработку личных данных тем же
+                # писателем, что экран приветствия, не подменой предиката.
+                from apps.consent.nutrition import DIARY, FOOD_DIARY_CONSENT_DOCUMENT_VERSION
+                from apps.consent.services import record_global_consent
+
+                # DRF-1963 (M1) — согласие дневника/сканера, строка реестра.
+                record_global_consent(
+                    bot_user,
+                    consent_type=DIARY,
+                    source="replay:golden-gate",
+                    document_version=FOOD_DIARY_CONSENT_DOCUMENT_VERSION,
+                )
+
+                record_global_consent(
+                    bot_user,
+                    consent_type="personal_data",
+                    source="replay:golden-gate",
+                    document_version="welcome-s2-v1",
+                )
+                # §92 п.1 / DRF-1698 — согласие на расчёт, НАСТОЯЩИМ
+                # писателем экрана согласия, не подменой предиката: фикстуры
+                # гоняют живой обработчик, и предусловие обязано быть таким
+                # же живым.
+                from apps.consent.personal_calculation import (
+                    PERSONAL_CALCULATION_DOCUMENT_VERSION,
+                    grant as grant_personal_calculation,
+                )
+
+                assert grant_personal_calculation(
+                    bot_user, document_version=PERSONAL_CALCULATION_DOCUMENT_VERSION
+                )
 
                 with tripwire, model_probe:
                     for i, setup_text in enumerate(prior_texts(fixture)):
@@ -239,6 +283,26 @@ def golden_run(monkeypatch, fake_redis, golden_tenant, settings):
                     probe.skill_name = ""
                     tripwire.attempts.clear()
                     model_probe.requests.clear()
+
+                    # Declared dialogue state — the same pattern as
+                    # prior_texts, one level down. Some turns are only
+                    # meaningful with state an earlier turn wrote: the
+                    # correction callback is answered from the scanner's
+                    # last-card stash (DRF-1454), and without it the honest
+                    # answer is the stale-card refusal, not the prompt.
+                    # ``input.skill_state`` is a free-form key the fixture
+                    # schema already tolerates, like ``prior_texts``.
+                    seed = fixture.input.get("skill_state") or {}
+                    if seed:
+                        from apps.conversations.services import (
+                            resolve_active_conversation,
+                            write_skill_state,
+                        )
+
+                        conversation = resolve_active_conversation(bot_user, create_if_missing=True)
+                        assert conversation is not None
+                        for subkey, value in seed.items():
+                            write_skill_state(conversation, subkey, value)
 
                     try:
                         max_handler.handle_max_event(
@@ -316,12 +380,12 @@ class TestOurOwnWordsObeyTheFixture:
         # the whole set; asserted again here, on the one fixture this
         # parametrisation is about, so the claim cannot be satisfied by a
         # rule list that quietly emptied.
-        assert fixture.must_pass or fixture.forbidden, (
+        assert fixture.must_pass or fixture.reply_forbidden, (
             f"{fixture.name}: no must_pass and no forbidden — this fixture "
             "asserts nothing, and passing it proves nothing"
         )
 
-        failures = evaluate(result.as_trace(), fixture.must_pass, fixture.forbidden)
+        failures = evaluate(result.as_trace(), fixture.must_pass, fixture.reply_forbidden)
         failures += evaluate_voice(result.response_text, fixture.voice_check)
         assert not failures, f"{fixture.name}: {failures}"
 
@@ -340,7 +404,8 @@ class TestNoFixtureAssertsOnSomethingNobodyComputes:
         offenders = [
             f.name
             for f in ALL_FIXTURES
-            if any("intent" in c for c in f.must_pass) or any("intent" in c for c in f.forbidden)
+            if any("intent" in c for c in f.must_pass)
+            or any("intent" in c for c in f.reply_forbidden)
         ]
         assert not offenders, (
             "golden fixtures asserting on `intent`, which the per-tenant path "

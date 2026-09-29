@@ -30,23 +30,37 @@
  * render a minimal «Готово» card with just the booking id.
  */
 
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { PaymentStatusBadge } from "../components/PaymentStatusBadge";
 import { ScreenLayout } from "../components/ScreenLayout";
-import { StickyCta } from "../components/StickyCta";
+import { StickyBar, StickyCtaButton } from "../components/StickyCta";
 import { formatVisitFull } from "../lib/format";
-import { hapticNotify, maxBridge } from "../lib/max-sdk";
+import { visitAddressText } from "../lib/visit-address";
+import { hapticNotify, maxBridge, returnToChat } from "../lib/max-sdk";
+import { ReturnToChatHint } from "../components/ReturnToChatHint";
+import { backTo } from "../lib/screen-back";
+
+/**
+ * Возврат (DRF-1493): к списку записей, а НЕ на подтверждение.
+ * Запись уже создана: шаг назад по истории вернул бы человека в
+ * оформление с оплатой, которое он только что завершил.
+ */
+const BACK = backTo("/customer/records");
 
 interface SuccessState {
   service_name?: string;
   master_name?: string;
   visit_at?: string;
+  /** DRF-1952 — адрес салона записи; `null`/нет ключа → «Уточните адрес в салоне». */
+  address?: string | null;
   /** C7.4 — booking created but the payment create failed right after. */
   payment_start_failed?: boolean;
   /** C7.3 — capture_state right after payment create (online path). */
   payment_capture_state?: string | null;
 }
+
+export const RETURN_TO_CHAT_LABEL = "Вернуться в чат";
 
 export function CustomerBookingSuccessScreen() {
   const { bookingId } = useParams<{ bookingId: string }>();
@@ -73,19 +87,36 @@ export function CustomerBookingSuccessScreen() {
       }.`
     : "Записала.";
 
+  // DRF-1777 (C05.7, P0 actions DONE / RETURN_TO_CHAT): «Вернуться в
+  // чат» закрывает мини-приложение и возвращает в диалог с Ayla — только
+  // внутри MAX, где есть куда возвращаться; в браузере кнопки нет.
+  const insideMax = maxBridge() !== null;
+  // DRF-2268: «Вернуться в чат» не молчит — «застрял» → подсказка.
+  const [chatStuck, setChatStuck] = useState(false);
+
   return (
     <ScreenLayout
+      back={BACK}
       title=""
+      tallCta={insideMax}
       cta={
-        <StickyCta
-          onClick={() =>
-            bookingId
-              ? navigate(`/customer/records/${bookingId}`, { replace: true })
-              : navigate("/customer/catalog", { replace: true })
-          }
-        >
-          Открыть запись
-        </StickyCta>
+        <StickyBar>
+          <StickyCtaButton
+            onClick={() =>
+              bookingId
+                ? navigate(`/customer/records/${bookingId}`, { replace: true })
+                : navigate("/customer/catalog", { replace: true })
+            }
+          >
+            Открыть запись
+          </StickyCtaButton>
+          {insideMax && (
+            <StickyCtaButton onClick={() => setChatStuck(returnToChat() === "stuck")}>
+              {RETURN_TO_CHAT_LABEL}
+            </StickyCtaButton>
+          )}
+          {chatStuck && <ReturnToChatHint />}
+        </StickyBar>
       }
     >
       <h1 className="customer-success__headline">{headline}</h1>
@@ -110,6 +141,14 @@ export function CustomerBookingSuccessScreen() {
             <>
               <dt>Услуга</dt>
               <dd>{s.service_name}</dd>
+            </>
+          )}
+          {/* DRF-1952 — куда идти. Только когда запись известна (есть state):
+              при переходе по ссылке без state адреса мы не знаем. */}
+          {(s.service_name || s.visit_at) && (
+            <>
+              <dt>Адрес</dt>
+              <dd>{visitAddressText(s.address)}</dd>
             </>
           )}
           {bookingId && (

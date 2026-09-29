@@ -166,9 +166,16 @@ def _redact_match(match: re.Match[str]) -> str:
 def redact_contacts(text: str | None) -> str:
     """Strip phone numbers and e-mails out of customer-authored text.
 
-    Applied to every free-text value the master surface echoes back —
-    message bodies, list excerpts, AI drafts. Canonical UUIDs are passed
-    through untouched.
+    Canonical UUIDs are passed through untouched.
+
+    **Живого вызывающего у функции сейчас нет.** Её звали списки и
+    детали переписки мастер↔клиент, и DRF-1528 снял эту поверхность
+    целиком. Функция остаётся здесь как каноническая реализация правила
+    OD-W2-2 для следующего, кто соберётся показать мастеру текст,
+    написанный клиентом: писать её заново — значит написать её иначе,
+    а тонкости (UUID до телефона, редактура до усечения) стоили
+    DRF-2095 и DRF-1360. Утверждения о ней — чистые, без HTTP — живут в
+    ``test_pii_boundary.TestCustomerTypedContactsAreRedacted``.
 
     Must run **before** any truncation: truncating first can cut a phone
     in half and leave a four-digit tail in the excerpt, which is exactly

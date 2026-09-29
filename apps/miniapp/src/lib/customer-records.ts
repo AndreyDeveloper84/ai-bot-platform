@@ -78,12 +78,20 @@ export interface RecordItem {
   durationMin: number | null;
   serviceName: string;
   masterName: string;
+  /** DRF-2436 B / п.15 — салон записи; `""`, когда провод его не несёт. */
+  salonName: string;
   /** First upcoming item with the visit within 24h (Tau §4.1). */
   isNearest: boolean;
   actions: BookingAction[];
   rating: number | null;
   /** C7.3 — raw capture_state when the passthrough ships it; else null. */
   paymentState?: string | null;
+  /**
+   * DRF-2172 — цена записи (снимок на момент записи), Decimal-строка или
+   * null. Формат для экрана — `priceFromLabel` (как у услуг каталога):
+   * «3 200 ₽»; ниже 1 ₽ — пусто (DRF-1989).
+   */
+  price: string | null;
 }
 
 export interface RecordsPage {
@@ -145,10 +153,12 @@ function toRecordItem(
     durationMin: item.duration_min,
     serviceName: item.service_name,
     masterName: item.master_name,
+    salonName: item.salon_name ?? "",
     isNearest,
     actions: actionsFor(item, section),
     rating: item.rating,
     paymentState: item.payment?.capture_state ?? null,
+    price: item.price ?? null,
   };
 }
 

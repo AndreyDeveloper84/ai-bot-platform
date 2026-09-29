@@ -34,6 +34,12 @@ from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.views.decorators.http import require_http_methods
 
 from apps.identity.models import BotUser
+from apps.identity.services.bot_user_resolver import (
+    SalonChoiceRequired,
+    is_staff_surface,
+    resolve_working_bot_user,
+    salon_choice_from,
+)
 from apps.identity.services.role_resolver import resolve_role
 from apps.miniapp_api.views import require_init_data
 
@@ -90,9 +96,41 @@ def me_view(request: HttpRequest) -> HttpResponse:
     the bot's configured tenant; the resolver only looks at that tenant.
     A forged init-data for a user in another tenant cannot reach a
     different tenant's role rows.
+
+    One exception, and only on the staff surface (DRF-1755): when the
+    SALON bot signed the initData, the answer is the row that carries the
+    person's working role — a solo master's own tenant, not the
+    ``customer`` row the salon bot's tenant holds for them. This endpoint
+    decides which screen the Mini App mounts (``is_solo_provider``,
+    ``is_master``), so ``master_api`` answering 200 while ``/me`` still
+    said «customer of the salon» would open the doors and hide them. The
+    customer surface is untouched: the client bot keeps asking «who are
+    you as a client». The identity is still the HMAC-verified one — a
+    forged initData reaches no row it could not reach before.
     """
 
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    verified = getattr(request, "verified_init_data", None)
+    if verified is not None and is_staff_surface(verified):
+        try:
+            working = resolve_working_bot_user(
+                verified.user_id, surface="me", chosen_slug=salon_choice_from(request)
+            )
+        except SalonChoiceRequired as exc:
+            # DRF-1766: the Mini App renders «В каком салоне вы сейчас?» and
+            # repeats the request with X-Salon-Choice.
+            return JsonResponse(
+                {
+                    "error": "salon_choice_required",
+                    "detail": "this account holds a role in several salons — choose one",
+                    "details": {
+                        "tenants": [{"slug": t.slug, "name": t.name or t.slug} for t in exc.tenants]
+                    },
+                },
+                status=409,
+            )
+        if working is not None:
+            bot_user = working
     tenant = bot_user.tenant
 
     role_ctx = resolve_role(bot_user)
@@ -108,6 +146,7 @@ def me_view(request: HttpRequest) -> HttpResponse:
     # Local import to avoid an apps.identity.views ↔ apps.identity.services
     # circular at module-load time (services may import view helpers
     # later); the per-request cost of import resolution is negligible.
+    from apps.identity.services import workspace_kind
     from apps.identity.services.solo_onboarding import is_solo_provider
 
     return JsonResponse(
@@ -134,6 +173,21 @@ def me_view(request: HttpRequest) -> HttpResponse:
             # admin-only chrome for self-employed solo providers (1 distinct
             # person = staff ∪ master_link is a single user).
             "is_solo_provider": is_solo_provider(tenant),
+            # DRF-2254 — «чьё место и кто ведёт услуги»: ``Tenant.kind``
+            # каталога, единственный источник; ``is_solo_provider`` выше —
+            # только раскладка. Экраны самообслуживания мастера гейтятся по
+            # этому полю. ``null`` — не знаю (каталог молчит / у клиента не
+            # спрашиваем): Mini App ведёт себя как прежде.
+            "workspace_kind": (
+                workspace_kind.workspace_kind(tenant.id)
+                if (
+                    role_ctx.is_master
+                    or role_ctx.is_owner
+                    or role_ctx.is_admin
+                    or role_ctx.is_receptionist
+                )
+                else None
+            ),
             "master_id": str(role_ctx.master_id) if role_ctx.master_id else None,
             "landing_path": role_ctx.landing_path,
         }

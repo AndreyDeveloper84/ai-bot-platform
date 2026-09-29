@@ -32,6 +32,19 @@ from apps.orchestrator.memory import short_term
 pytestmark = pytest.mark.django_db
 
 
+@pytest.fixture(autouse=True)
+def _nutrition_contour_on(settings):
+    """DRF-1994 — этот модуль проверяет контур питания ВКЛЮЧЁННЫМ.
+
+    До единого выключателя пути анкеты/дневника/воды флаг не читали, и
+    модуль работал при любом его значении. Теперь умолчание ``False``
+    (fail-closed по решению владельца) даёт заглушку — и то, что модуль
+    всегда предполагал, названо явно. Выключенное поведение живёт в
+    ``test_nutrition_single_switch_1994``.
+    """
+    settings.NUTRITION_ENABLED = True
+
+
 # --------------------------------------------------------------------------- #
 # Оснастка — та же, что у C01 (apps/channels/tests/test_first_contact_c01.py)   #
 # --------------------------------------------------------------------------- #
@@ -119,6 +132,20 @@ def _welcomed_user(user_id: int):
         consent_type="personal_data",
         source="test:drf990",
         document_version="welcome-s2-v1",
+    )
+    # §92 п.1 / DRF-1698 — согласие на персональный расчёт. Гейт стоит НА
+    # ВХОДЕ в анкету (#1593): без согласия анкета ничего не спрашивает, и
+    # этот тест проверял бы отказ вместо потока. Выдаётся НАСТОЯЩИМ
+    # писателем (тем же, что экран согласия), а не подменой предиката:
+    # тест гоняет живой обработчик, и предусловие обязано быть таким же
+    # живым. У отказа свои тесты — test_consent_gate_at_entry.py.
+    from apps.consent.personal_calculation import (
+        PERSONAL_CALCULATION_DOCUMENT_VERSION,
+        grant as grant_personal_calculation,
+    )
+
+    assert grant_personal_calculation(
+        bot_user, document_version=PERSONAL_CALCULATION_DOCUMENT_VERSION
     )
     bot_user.refresh_from_db()
     return bot_user, resolve_active_global_conversation(bot_user)
@@ -345,7 +372,7 @@ class TestAnketaGoldenFixturesStillReplay:
                 "tool_calls": [],
             }
             if fixture.name not in self.CASE_MISMATCH:
-                for problem in evaluate(trace, fixture.must_pass, fixture.forbidden):
+                for problem in evaluate(trace, fixture.must_pass, fixture.reply_forbidden):
                     failures.append(f"{fixture.name}: {problem}")
             for problem in evaluate_voice(response, fixture.voice_check):
                 failures.append(f"{fixture.name}: voice: {problem}")

@@ -112,9 +112,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from apps.orchestrator.discovery import DiscoveryReply
+
+if TYPE_CHECKING:
+    from apps.orchestrator.coach_observation import Cadence
 
 logger = logging.getLogger(__name__)
 
@@ -227,6 +230,11 @@ DIARY_UNAVAILABLE_TEXT = (
 #: PERSONAL_DATA is not granted. The bot must not read, and must not pretend
 #: the record is empty either — «пусто» and «мне нельзя смотреть» are
 #: different truths.
+#: Память не поднялась. Строка та же, что была внутри :func:`render_memory`;
+#: имя понадобилось, чтобы запасной путь возврата после согласия (DRF-2267)
+#: говорил ровно то же, а не выдумывал новое обещание.
+MEMORY_UNAVAILABLE_TEXT = "Не могу сейчас поднять, что о тебе помню."
+
 CONSENT_CLOSED_TEXT = (
     "Чтобы показать твои записи, мне нужно согласие на обработку личных "
     "данных — без него я к ним не обращаюсь."
@@ -234,7 +242,39 @@ CONSENT_CLOSED_TEXT = (
 
 #: No anketa yet. The diary has nothing to be measured against, so the anketa
 #: is not a suggestion here — it is the missing half of the answer.
-NO_PROFILE_TEXT = "Норм пока нет — я ещё не считала их для тебя."
+NO_PROFILE_TEXT = "Ориентиров пока нет — я ещё не считала их для тебя."
+
+#: Анкета есть, ориентиров нет — каталог их снял (``targets_provenance.source
+#: == "none"``, DRF-1623 N-b). Человек, который вчера видел «из 95 г»,
+#: сегодня видит «Белки: 61 г» без «из» — и без этой строки не узнал бы,
+#: почему. ``NO_PROFILE_TEXT`` сюда не годится: «я ещё не считала» — ложь
+#: про очищенный профиль, считала и сняла.
+#:
+#: Текст не зовёт в дверь, которой нет (экрана согласий пока нет — #1523),
+#: не говорит «ты не заполнил» (copy-policy R2) и не называет ни одного
+#: числа — ни прежнего, ни нового. Формулировка — предложение исполнителя,
+#: вынесена владельцу на утверждение (реестр, окно ЦЕЛИ И ПЛАН).
+NO_TARGETS_TEXT = (
+    "Ориентиров в профиле сейчас нет: считаю их только с согласия на "
+    "персональный расчёт, а его пока не было. Записи и итоги дня работают "
+    "как раньше."
+)
+
+#: Хвост добавляется, когда ориентиры НЕ НАСТРОЕНЫ — §6 свода 11.09
+#: (OD-NUT-1): ``none`` и ``unknown_legacy`` оба. Раньше хвост получал
+#: только ``none``, а ``unknown_legacy`` печатался числами — «Белки: 61
+#: из 95 г» у всех шести профилей пилота, у двух от подставленных 70 кг.
+#: Сами числа теперь до сюда не доезжают: граница читает их как ``None``;
+#: здесь решается лишь, объяснять ли человеку, почему их нет.
+#:
+#: Текст один на оба состояния намеренно: «считаю только с согласия на
+#: персональный расчёт, а его пока не было» — правда и для снятых, и для
+#: посчитанных до того, как согласие такого вида существовало. Второй
+#: текст был бы вторым источником истины об одном факте.
+#:
+#: Самого имени источника здесь больше нет: вопрос «настроено ли» задаётся
+#: DTO (``ProfileResponse.targets_are_configured``), а не сравнением строк
+#: на каждом экране.
 
 
 # ---------------------------------------------------------------------------
@@ -327,6 +367,19 @@ def diary_is_reachable() -> bool:
 # ---------------------------------------------------------------------------
 
 
+def _nutrition_enabled() -> bool:
+    """DRF-1994 — тот же читатель флага, что у меню, анкеты, воды и инструментов."""
+    from apps.skills.menu.marketplace import nutrition_enabled
+
+    return nutrition_enabled()
+
+
+def _nutrition_unavailable_text() -> str:
+    from apps.skills.menu.marketplace import NUTRITION_UNAVAILABLE_TEXT
+
+    return NUTRITION_UNAVAILABLE_TEXT
+
+
 def personal_records_consent_open(bot_user: Any) -> bool:
     """PERSONAL_DATA granted? Fail-closed on any error.
 
@@ -335,9 +388,11 @@ def personal_records_consent_open(bot_user: Any) -> bool:
     """
     try:
         from apps.consent.models import ConsentRecord
-        from apps.consent.services import has_global_consent
+        from apps.consent.services import has_person_consent
 
-        return has_global_consent(bot_user, ConsentRecord.ConsentType.PERSONAL_DATA.value)
+        # DRF-2230: по человеку, а не по строке — согласие, данное в чате
+        # (оболочка ``global_bot``), видно Главной Mini App (своя оболочка).
+        return has_person_consent(bot_user, ConsentRecord.ConsentType.PERSONAL_DATA.value)
     except Exception:  # noqa: BLE001 — fail-closed: no consent proven, no read
         logger.exception("orchestrator.personal_surface.consent_check_failed")
         return False
@@ -348,20 +403,96 @@ def personal_records_consent_open(bot_user: Any) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def render_diary(bot_user: Any, *, period: str = PERIOD_TODAY) -> DiscoveryReply:
+def render_diary(
+    bot_user: Any,
+    *,
+    period: str = PERIOD_TODAY,
+    cadence: Cadence | None = None,
+) -> DiscoveryReply:
     """The person's own food/water record, with chips that execute.
 
     Never raises. Ayla unreachable → :data:`DIARY_UNAVAILABLE_TEXT`; no
     consent → :data:`CONSENT_CLOSED_TEXT`; nothing logged → the honest
     «записей не было» line ``render_daily_report`` already owns.
+
+    The reply may carry one solicited observation line (DRF-1464 T6) —
+    see :func:`_with_coach_observation`. When no line is due the reply is
+    byte-identical to what it was before that surface existed.
+
+    ``cadence`` — считается ли эта отрисовка событием для лимитов
+    диетолога (:class:`apps.orchestrator.coach_observation.Cadence`,
+    OPEN_DECISIONS §39). ``None`` означает обычный заход, то есть
+    ``TRACKED``: сторона, которая ничего не знает про §39, не может
+    случайно оказаться вне лимитов. ``UNTRACKED`` передаёт возврат к
+    дневнику после выдачи согласия
+    (:func:`apps.orchestrator.health_return.resume_after_health_consent`):
+    приветственное слово показывается, но суточный слот не тратит.
     """
+    # DRF-1994 (решение U) / DRF-1295 — талия ЧТЕНИЯ дневника: сюда сходятся
+    # «что я ел сегодня» (``_try_handle_diary_request``), инструмент
+    # ``show_my_records`` (``execute_personal_tool``) и возврат после
+    # согласия (``health_return``). Флаг раньше согласия — «функция
+    # выключена» важнее «согласия нет», как у сканера.
+    if not _nutrition_enabled():
+        return _reply(_nutrition_unavailable_text(), [])
+
     if not personal_records_consent_open(bot_user):
-        return _reply(CONSENT_CLOSED_TEXT, [])
+        return _consent_closed_reply("diary")
 
     profile = _fetch_profile(bot_user)
     if period == PERIOD_WEEK:
-        return _render_week(bot_user, profile)
-    return _render_today(bot_user, profile)
+        reply = _render_week(bot_user, profile)
+    else:
+        reply = _render_today(bot_user, profile)
+    return _with_coach_observation(bot_user, reply, profile=profile, cadence=cadence)
+
+
+def _with_coach_observation(
+    bot_user: Any,
+    reply: DiscoveryReply,
+    *,
+    profile: Any,
+    cadence: Cadence | None = None,
+) -> DiscoveryReply:
+    """Append the solicited observation line when one is due (DRF-1464 T6).
+
+    The person opened their own diary, so one dietologist observation may
+    ride along — journaled with the solicited marker, outside the weekly
+    budget, with its own once-a-day / no-unchanged-repeat ceiling
+    (:mod:`apps.orchestrator.coach_observation`).
+
+    Two ways this returns ``reply`` untouched:
+
+    * no line due (flag, HEALTH, perimeter, goal, trigger, own limit,
+      guard) — the diary is byte-identical to its pre-T6 self;
+    * the composed text would overflow the reply budget — the line is
+      dropped rather than clipped mid-sentence, and NOT journaled: the
+      journal records what was shown, and nothing was.
+
+    And the third: any failure inside the observation path degrades to the
+    plain diary. A line nobody asked a question to receive is never worth
+    losing the answer they did ask for.
+    """
+    try:
+        from apps.orchestrator.coach_observation import (
+            Cadence,
+            decide_observation,
+            persist_observation,
+        )
+
+        resolved = cadence or Cadence.TRACKED
+        observation = decide_observation(bot_user, profile=profile, cadence=resolved)
+        if observation is None:
+            return reply
+        combined = f"{reply.text}\n\n{observation.text}"
+        if len(combined) > _MAX_PERSONAL_REPLY_CHARS:
+            return reply
+        persist_observation(bot_user, observation, cadence=resolved)
+    except Exception:  # noqa: BLE001 — the diary must survive its garnish
+        logger.exception("orchestrator.personal_surface.observation_failed")
+        return reply
+    buttons = list((reply.action_data or {}).get("buttons") or [])
+    return _reply(combined, buttons)
 
 
 def _render_today(bot_user: Any, profile: Any) -> DiscoveryReply:
@@ -378,10 +509,49 @@ def _render_today(bot_user: Any, profile: Any) -> DiscoveryReply:
     # same boundary and the same «every number traces» test. `include_opt_out`
     # is off because the person PULLED this: offering to stop sending it makes
     # no sense for a message nobody sent.
-    text = render_daily_report(summary, water, profile, include_opt_out=False)
+    #
+    # `include_entries` is on for the same reason it is off in the push
+    # (DRF-1467): the question here was «что я ел», and until that ticket the
+    # answer was calories and macros with the dish names dropped on the floor —
+    # ``summary.entries`` was fetched, tested for truthiness, and discarded.
+    # The rows come from Ayla on this turn and are stored nowhere: her diary
+    # sits behind the HEALTH consent and a copy here would be the same profile
+    # on a weaker basis (``apps.orchestrator.food_history``).
+    text = render_daily_report(summary, water, profile, include_opt_out=False, include_entries=True)
     if profile is None:
         text = f"{text}\n\n{NO_PROFILE_TEXT}"
+    elif _targets_not_configured(profile):
+        text = f"{text}\n\n{NO_TARGETS_TEXT}"
     return _reply(text, _diary_chips(profile))
+
+
+def _targets_not_configured(profile: Any) -> bool:
+    """True when the targets have no named provenance — §6 ``NOT_CONFIGURED``.
+
+    Three inputs, two outcomes:
+
+    * ``"none"`` (cleared, DRF-1623 N-b) and ``"unknown_legacy"`` (computed
+      before provenance existed) — not configured → the person is told
+      why. The numbers themselves never reach this function: the client
+      boundary already reads them as ``None`` for both (§6 OD-NUT-1);
+    * ``"ayla_calculated"`` / ``"user_entered"`` — configured → numbers
+      are printed, nothing to explain → no tail;
+    * ``""`` — the key did not arrive. That is a broken contract (the
+      catalog declares the block required since #316), not an absent
+      target, and the tail must not be manufactured from it: warn once
+      per reply and stay silent.
+    """
+    # Direct attribute, not ``getattr(..., "")``: the field is part of
+    # ``ProfileResponse`` and a default here would be a third «absence»
+    # indistinguishable from the client's own ``""``.
+    source = str(profile.targets_source or "")
+    if not source:
+        logger.warning(
+            "orchestrator.personal_surface.targets_source_missing: "
+            "profile arrived without targets_provenance.source"
+        )
+        return False
+    return not profile.targets_are_configured
 
 
 def _render_week(bot_user: Any, profile: Any) -> DiscoveryReply:
@@ -408,25 +578,58 @@ def _render_week(bot_user: Any, profile: Any) -> DiscoveryReply:
     if pct is not None:
         # % of the goal in the person's OWN profile — Ayla's arithmetic over
         # what they logged against what they chose. Not a claim about them.
-        lines.append(f"Белок: в среднем {round(pct)}% от твоей нормы.")
+        lines.append(f"Белок: в среднем {round(pct)}% от твоего ориентира.")
     streak = _clamp_int(getattr(deficits, "protein_low_streak_days", 0))
     if streak:
-        lines.append(f"Дней подряд ниже нормы белка: {streak}.")
+        lines.append(f"Дней подряд ниже ориентира по белку: {streak}.")
     # Ayla's free-form ``hint`` is NOT appended — see the module docstring.
     return _reply("\n".join(lines), _diary_chips(profile))
+
+
+def _consent_closed_reply(origin: str) -> DiscoveryReply:
+    """Отказ по согласию с выходом — кнопкой согласия или «Меню» (DRF-2267).
+
+    Отказ называл условие и не давал способа его выполнить. Кнопка ведёт на
+    экран согласия и помнит, куда человек шёл (DRF-1968): после согласия он
+    возвращается в СВОЙ поток, а не в начало. Вне глобального пути кнопки
+    нет — там тап вернул бы к тому же отказу, — и остаётся общий выход.
+
+    Ворота этим не трогаются: обе поверхности спрашивают согласие сами.
+    """
+    from apps.skills.welcome.skill import consent_offer_action_data
+
+    offer = consent_offer_action_data(origin)
+    if offer is not None:
+        return DiscoveryReply(text=CONSENT_CLOSED_TEXT, action_data=offer)
+    from apps.orchestrator.next_steps import menu_button
+
+    return _reply(CONSENT_CLOSED_TEXT, [menu_button()])
 
 
 def _diary_chips(profile: Any) -> list[dict[str, str]]:
     """Chips for a diary view. Each callback is claimed deterministically.
 
-    Without a profile the anketa IS the next step — the diary has nothing to
-    be measured against until it exists, and today nothing anywhere offers
-    it: a person has to guess that ``/anketa`` is a command. With a profile,
-    the one-tap water log is the cheapest real thing the person can do next.
+    §6 свода 11.09 (OD-NUT-1): анкета не блокирует дневник и запрашивается
+    по функции, а не на входе. Вода — одним тапом — предлагается ВСЕГДА:
+    самое дешёвое настоящее действие, не требует ни профиля, ни ориентиров
+    (каталог для записи профиль не спрашивает). Анкета — вторым чипом,
+    когда ориентиры не настроены (нет профиля, ``none``, ``unknown_legacy``):
+    это «предложение настроить ориентиры» из §6 — рядом с действием, а не
+    вместо него. Раньше без профиля чип был один, анкета, и этот докстринг
+    говорил «the anketa IS the next step». §6 говорит обратное.
+
+    DRF-2303 (решение владельца CD §72): первым — «Записать еду». Экран,
+    открытый кнопкой «Дневник питания», давал итоги и воду, а записать еду
+    или прислать фото отсюда было нельзя. Последним — «Меню». Все четыре
+    отвечают на глобальном пути, а дневник рисуется только там.
     """
-    if profile is None:
-        return [dict(CHIP_ANKETA)]
-    return [dict(CHIP_WATER)]
+    from apps.orchestrator.next_steps import log_food_button, menu_button
+
+    chips = [log_food_button(), dict(CHIP_WATER)]
+    if profile is None or not profile.targets_are_configured:
+        chips.append(dict(CHIP_ANKETA))
+    chips.append(menu_button())
+    return chips
 
 
 # ---------------------------------------------------------------------------
@@ -446,7 +649,17 @@ def render_memory(bot_user: Any) -> DiscoveryReply:
     about a person, which is the one thing this surface may never produce.
     """
     if not personal_records_consent_open(bot_user):
-        return _reply(CONSENT_CLOSED_TEXT, [])
+        return _consent_closed_reply("memory")
+    from apps.identity.services.person_context_gate import person_context_access
+
+    if person_context_access(bot_user) is not None:
+        # §2.4 (S2-2): the same closed door as no consent, from the person's
+        # side — not a placeholder, not a fact. The reason is in the gate's log.
+        #
+        # DRF-2267: выход тот же. На глобальном пути эта дверь не запирается
+        # вовсе (ворота пропускают сентинел), а на салонном кнопки согласия
+        # нет — остаётся «Меню».
+        return _consent_closed_reply("memory")
     try:
         from apps.persona.memory_commands import memory_show_chips, render_memory_summary
 
@@ -454,7 +667,7 @@ def render_memory(bot_user: Any) -> DiscoveryReply:
         chips = memory_show_chips(bot_user)
     except Exception:  # noqa: BLE001 — memory must never break the turn
         logger.exception("orchestrator.personal_surface.memory_render_failed")
-        return _reply("Не могу сейчас поднять, что о тебе помню.", [])
+        return _reply(MEMORY_UNAVAILABLE_TEXT, [])
     if chips:
         text = f"{text}\n\n{MEMORY_CORRECT_HINT}"
     return _reply(text, chips)

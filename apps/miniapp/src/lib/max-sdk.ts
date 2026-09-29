@@ -54,8 +54,11 @@ export function maxBridge(): MaxWebAppGlobal | null {
 export function getInitData(): string {
   const fromBridge = maxBridge()?.initData ?? "";
   if (fromBridge) return fromBridge;
-  const fromEnv = (import.meta.env.VITE_DEV_INIT_DATA as string | undefined) ?? "";
-  return fromEnv;
+  // DRF-1893 — подписанный dev-initData только в режиме разработки: без этой
+  // проверки прод-бандл, собранный с VITE_DEV_INIT_DATA, вёз заранее
+  // подписанный вход мимо MAX.
+  if (!import.meta.env.DEV) return "";
+  return (import.meta.env.VITE_DEV_INIT_DATA as string | undefined) ?? "";
 }
 
 /**
@@ -135,8 +138,54 @@ export const MASTER_ONBOARDING_PATH = "/onboarding/master";
  * on (`validate_invite_token` looks the token up by UUID), so anything
  * else is refused here rather than forwarded and refused later.
  */
+/**
+ * Payload prefix for «перенести ЭТУ запись» (DRF-1547).
+ *
+ * The bot builds `${RESCHEDULE_PAYLOAD_PREFIX}${bookingId}` in
+ * `apps/orchestrator/visits.py` (constant of the same name there), and
+ * `apps/skills/welcome/skill.py::reschedule_route` builds the same path
+ * for the link-button fallback. `test_miniapp_routes.py` reads both
+ * sources and fails when they drift.
+ *
+ * Owner decision §37: the schedule is the one thing a chat cannot do
+ * well, so it — and only it — opens the app, and only after the bot has
+ * said so. A person who has already picked WHICH booking must not be
+ * asked to pick it again here, so the payload carries the id.
+ */
+export const RESCHEDULE_PAYLOAD_PREFIX = "reschedule_";
+
+/**
+ * DRF-1773 — ссылка на карточку C04 «направление + почему»: бот кладёт
+ * `reco_<uuid>` в `open_app` payload кнопки «Подобрать вариант».
+ * Назначение то же, что у каталога (исполнение начинается там), а сам id
+ * доезжает до провенанса интента (`deep_link:reco_<uuid>`) и связывает
+ * бронь с рекомендацией, из которой она выросла.
+ */
+export const RECO_PAYLOAD_PREFIX = "reco_";
+
+/** Canonical address of the reschedule screen (DRF-1481). */
+export const RESCHEDULE_PATH_PREFIX = "/customer/records";
+
 const _MASTER_INVITE_RE = new RegExp(
   `^${MASTER_INVITE_PAYLOAD_PREFIX}` +
+    "([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-" +
+    "[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$",
+);
+
+/**
+ * Strict shape of a reschedule payload — the prefix and a canonical UUID,
+ * anchored at both ends. Same rule and same reason as
+ * `_MASTER_INVITE_RE` above: the tail becomes part of the app's own URL,
+ * so "anything after the prefix" is a hole, not a shortcut.
+ */
+const _RECO_RE = new RegExp(
+  `^${RECO_PAYLOAD_PREFIX}` +
+    "([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-" +
+    "[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$",
+);
+
+const _RESCHEDULE_RE = new RegExp(
+  `^${RESCHEDULE_PAYLOAD_PREFIX}` +
     "([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-" +
     "[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$",
 );
@@ -151,8 +200,9 @@ const _ROUTE_MAP: Record<string, string> = {
   // Before DRF-1326 these three pointed at the legacy pre-reskin screens
   // (/catalog, /my-visits, /me) while the link fallback pointed at the
   // /customer/* ones — same button, two destinations depending on config.
-  // The legacy routes stay mounted in App.tsx for reschedule flows and
-  // old bot DMs; they are simply no longer what the welcome menu opens.
+  // /catalog and /my-visits stay mounted in App.tsx as compatibility
+  // aliases; /me and its screen were removed with DRF-1485. None of the
+  // three is what the welcome menu opens any more.
   open_catalog: "/customer/catalog",
   open_visits: "/customer/records",
   open_profile: "/customer/profile",
@@ -161,10 +211,28 @@ const _ROUTE_MAP: Record<string, string> = {
   open_food_scan: "/customer/food-scanner/capture",
   open_water_add_250: "/customer/wellness",
   open_goal_select: "/customer/goal-select",
+  // DRF-2125 — «Мой план» с карточки плана в чате (зеркало MINIAPP_ROUTES).
+  open_plan: "/customer/plan",
   // Home = «Мои записи» (pilot phase 3.2 orchestrator decision, App.tsx
   // comment at the /customer/main route) — newer than the onboarding spec's
   // "Dashboard empty state".
   open_home: "/customer/main",
+  // DRF-1491 — главное меню витрины (apps/skills/menu/marketplace.py).
+  // Дневник питания и панель самочувствия: пункты меню есть, а слагов
+  // не было. open_wellness ведёт туда же, куда open_water_add_250, —
+  // старое имя оставлено ради клавиатур в истории чата.
+  open_food_diary: "/customer/food-scanner/diary",
+  // DRF-2114 — тройка «Сегодня | Расписание | Ayla» персоналу из салонного
+  // бота (§50 п.5). Зеркало ``MINIAPP_ROUTES`` (welcome/skill.py); стража —
+  // test_miniapp_routes. Слага под /admin/handoff нет намеренно (DRF-2115).
+  open_admin_today: "/admin/today",
+  open_admin_schedule: "/admin/schedule",
+  open_admin_ayla: "/admin/ayla",
+  open_admin_booking_new: "/admin/booking/new",
+  open_master_today: "/master/dashboard",
+  open_master_schedule: "/master/schedule",
+  open_master_ayla: "/master/ayla",
+  open_wellness: "/customer/wellness",
   // Legacy querystring inner-values — kept for cold-start back-compat.
   // Same destinations as the flat slugs above: a stale `route=visits`
   // payload should land on today's records screen, not on a screen the
@@ -209,9 +277,31 @@ export function parseStartRoute(payload: string): string | null {
   // `route=catalog`. Claiming the prefix is what makes the strictness
   // above mean something — matching order alone would not, since a
   // failed `exec` simply falls through.
+  // DRF-1773 — ссылка на карточку: маршрут тот же, что у каталога, id
+  // остаётся в payload для провенанса. Claimed by prefix и разбирается
+  // строгой формой, как соседи ниже: «объявил себя ссылкой и не
+  // является» — это не маршрут, а отказ.
+  if (payload.startsWith(RECO_PAYLOAD_PREFIX)) {
+    // DRF-1769 — у карточки появился свой адрес, и ссылка с её именем
+    // ведёт на неё, а не в каталог. До N3 вести было некуда: id ехал
+    // ради провенанса, а показать карточку на экране было нечем.
+    // Провенанс это не трогает — `entry_point` собирается из
+    // start-payload, а не из маршрута.
+    const match = _RECO_RE.exec(payload);
+    return match === null ? null : `/customer/recommendation/${match[1]}`;
+  }
   if (payload.startsWith(MASTER_INVITE_PAYLOAD_PREFIX)) {
     const invite = _MASTER_INVITE_RE.exec(payload);
     return invite ? `${MASTER_ONBOARDING_PATH}?token=${invite[1]}` : null;
+  }
+  // Перенос конкретной записи (DRF-1547) — второй и последний payload с
+  // параметром. Claimed by prefix, resolved by the strict form, for the
+  // same reason the invitation is: a payload that announces itself as a
+  // reschedule and then isn't one is refused outright rather than left to
+  // the querystring fallback below.
+  if (payload.startsWith(RESCHEDULE_PAYLOAD_PREFIX)) {
+    const move = _RESCHEDULE_RE.exec(payload);
+    return move ? `${RESCHEDULE_PATH_PREFIX}/${move[1]}/reschedule` : null;
   }
   // Fall back to legacy querystring shape (``route=<value>``).
   if (payload.includes("=")) {
@@ -309,6 +399,30 @@ export function removeDeviceStorage(key: string): void {
 }
 
 /**
+ * Открыть внешний адрес: в MAX — через оболочку (webview overlay), в
+ * обычном браузере — новой вкладкой.
+ *
+ * Заведена как отдельная функция, потому что тем же механизмом
+ * пользуется не только оплата (DRF-1319). Звать `openPaymentConfirmation`
+ * ради OAuth значило бы назвать вход оплатой — имя, обвиняющее не тот
+ * предмет, дороже лишней функции: по нему потом ищут не там.
+ */
+export function openExternalLink(url: string): void {
+  const b = maxBridge();
+  if (b?.openLink) {
+    try {
+      b.openLink(url);
+      return;
+    } catch (err) {
+      console.warn("[max-sdk] openLink failed, falling back to window.open", err);
+    }
+  }
+  if (typeof window !== "undefined") {
+    window.open(url, "_blank", "noopener,noreferrer");
+  }
+}
+
+/**
  * Open the payment confirmation page (C7.4) — YooKassa checkout URL
  * returned by the payment-create passthrough. In MAX we hand the URL
  * to the wrapper's openLink (webview overlay); in a plain browser we
@@ -330,20 +444,49 @@ export function openPaymentConfirmation(url: string): void {
 }
 
 /**
- * Ask MAX to close the Mini App. Falls back to ``history.back()`` when
- * the bridge isn't available — at least navigates the dev browser away.
+ * DRF-2268 — ссылка на диалог бота, которую отдал сервер (`chat_link` с
+ * `last-topic`, #1961). Главная её запоминает, и экраны после неё зовут
+ * `returnToChat()` без аргумента — с той же ссылкой, без лишнего запроса.
+ * `closeApp()` снят целиком: он молчал там, где нет `close()`, и сторож
+ * `noBareCloseApp.guard` не даёт вернуть ни его, ни прямой `close()` моста.
  */
-export function closeApp(): void {
+let rememberedChatLink: string | null = null;
+
+export function rememberChatLink(link: string | null): void {
+  rememberedChatLink = link && link.trim() ? link : null;
+}
+
+/** Чем кончилась попытка вернуть человека в чат (DRF-2266). */
+export type ReturnToChatOutcome = "closed" | "opened_chat" | "stuck";
+
+/**
+ * Вернуть человека в чат с ботом — и честно сказать, получилось ли.
+ *
+ * DRF-2266 (скрины владельца 21.09, web.max.ru): `closeApp()` при отсутствии
+ * моста `close()` и пустой истории молча ничего не делал — «кнопка не
+ * работает». Порядок: мост `close()` → ссылка на диалог бота через
+ * `openLink` (её отдаёт сервер — `chat_link`) → `"stuck"`, и экран
+ * показывает подсказку. `history.back()` здесь нет намеренно: он уводит
+ * внутри приложения, а не в чат.
+ */
+export function returnToChat(chatLink?: string | null): ReturnToChatOutcome {
+  const link = chatLink ?? rememberedChatLink;
   const b = maxBridge();
   if (b?.close) {
     try {
       b.close();
-      return;
+      return "closed";
     } catch (err) {
-      console.warn("[max-sdk] close() failed", err);
+      console.warn("[max-sdk] close() failed, trying the chat link", err);
     }
   }
-  if (typeof window !== "undefined" && window.history?.length > 1) {
-    window.history.back();
+  if (b?.openLink && link) {
+    try {
+      b.openLink(link);
+      return "opened_chat";
+    } catch (err) {
+      console.warn("[max-sdk] openLink(chat) failed", err);
+    }
   }
+  return "stuck";
 }

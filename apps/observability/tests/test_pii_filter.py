@@ -135,7 +135,10 @@ class TestIdentifiersNotSlicedAsPhone:
         assert record.msg == f"draft_id={identifier}"
 
     def test_suppress_log_line_shape_untouched(self, pii_filter: PIIRedactingFilter) -> None:
-        """The real log line from master_api.tasks.auto_draft.
+        """Настоящая строка лога снятого `master_api.tasks.auto_draft`.
+
+        Таск снят в DRF-1528; строка остаётся образцом формы, на
+        которой фильтр обязан работать, — она пришла из продакшена.
 
         Pinned ids, both of which the old pattern sliced.
         """

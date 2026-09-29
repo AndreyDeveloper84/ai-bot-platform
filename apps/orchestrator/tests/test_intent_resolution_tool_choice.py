@@ -542,3 +542,90 @@ class TestToolTracePlumbing:
             )
         )
         assert reply.tool_trace is None
+
+
+# --------------------------------------------------------------------------- #
+# DRF-1920 — confirm_said_fact и сторож класса «строка или названное исключение» #
+# --------------------------------------------------------------------------- #
+#: Образцовые аргументы на каждый инструмент консьержа. Новый инструмент без
+#: образца — красный сторож: автор обязан либо дать строку драфта, либо записать
+#: инструмент в intent_resolution.NO_HONEST_MAPPING с причиной.
+_SAMPLE_ARGUMENTS: dict[str, dict] = {
+    "show_masters": {"specialization": "массаж", "city": "Пензе"},
+    "start_booking": {"master": "Анна", "service": "массаж"},
+    "show_salons": {"city": "Пензе"},
+    "show_services": {"city": "Пензе"},
+    "ask_clarification": {"question": "Какая услуга нужна?"},
+    "confirm_said_fact": {"key": "city"},
+    "health_screening": {"symptom_text": "массажистов"},
+    "log_water": {"drink_text": "массажистов"},
+    "clarify_food_entry": {"food_text": "массажистов"},
+    "start_nutrition_anketa": {},
+}
+
+
+class TestConfirmSaidFact:
+    @pytest.mark.parametrize("key", ["city", "visit_context"])
+    def test_maps_like_a_clarification_the_turn_waits_for_an_answer(self, key):
+        contract = _build("confirm_said_fact", {"key": key})
+        assert contract is not None
+        assert contract["intent_type"] == "UNKNOWN"
+        assert contract["status"] == "needs_clarification"
+        assert contract["requires_clarification"] is True
+        assert contract["clarification_reason"] == "intent_low_confidence"
+        assert contract["clarification_effect"] == "blocks_current_action"
+        assert contract["clarification_question"]
+        # Значение факта взято из памяти, а не из реплики, — в контракт не идёт.
+        assert "Пенз" not in contract["clarification_question"]
+
+    def test_unknown_key_has_no_honest_mapping(self):
+        # empty-assert-ok: неизвестный ключ по построению без отображения; соседний тест доказывает, что известный отображается
+        assert (
+            build_draft_from_tool_choice(
+                "confirm_said_fact", {"key": "health"}, user_text=USER_TEXT
+            )
+            is None
+        )
+
+    @override_settings(INTENT_RESOLUTION_FROM_TOOL_CHOICE_ENABLED=True)
+    def test_flag_on_confirm_said_fact_builds_contract_without_llm(self):
+        contract, client, client_cls = _resolve(
+            tool_trace=[{"tool": "confirm_said_fact", "arguments": {"key": "city"}}]
+        )
+        assert contract is not None
+        assert contract["status"] == "needs_clarification"
+        # НОЛЬ новых вызовов модели — как у show_masters выше.
+        client_cls.assert_not_called()
+        client.chat.completions.create.assert_not_called()
+
+
+class TestEveryConciergeToolHasARowOrANamedException:
+    """DRF-1920: новый инструмент консьержа не может молча уйти в LLM-проход."""
+
+    def _roster(self) -> list[str]:
+        names = [str(spec["name"]) for spec in concierge.CONCIERGE_TOOL_SPECS]
+        assert len(names) >= 10, names  # guard the guard: пустой список сделал бы тест пустым
+        return names
+
+    def test_every_tool_is_mapped_or_named(self):
+        unaccounted = []
+        for tool in self._roster():
+            if tool in intent_resolution.NO_HONEST_MAPPING:
+                continue
+            if tool not in _SAMPLE_ARGUMENTS:
+                unaccounted.append(f"{tool}: нет образца аргументов")
+                continue
+            if _build(tool, _SAMPLE_ARGUMENTS[tool]) is None:
+                unaccounted.append(f"{tool}: драфт не построен или отвергнут контрактом")
+        assert unaccounted == [], (
+            "Инструмент консьержа без строки в build_draft_from_tool_choice и без записи в "
+            f"intent_resolution.NO_HONEST_MAPPING: {unaccounted}"
+        )
+
+    def test_every_named_exception_is_a_real_tool_and_really_unmapped(self):
+        roster = set(self._roster())
+        for tool, reason in intent_resolution.NO_HONEST_MAPPING.items():
+            assert tool in roster, f"устаревшее исключение: {tool} больше не инструмент консьержа"
+            assert len(reason.strip()) >= 40, tool
+            # empty-assert-ok: исключение по построению без отображения; test_every_tool_is_mapped_or_named доказывает, что остальные отображаются
+            assert build_draft_from_tool_choice(tool, {}, user_text=USER_TEXT) is None

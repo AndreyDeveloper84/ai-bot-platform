@@ -9,15 +9,14 @@
  *
  * # Contracts
  *
- *   - `GET    /api/v1/customer/wellness/today`  → `WellnessToday`   STUB
- *   - `GET    /api/v1/customer/recent-activity` → `RecentActivity`  STUB
+ *   - `GET    /api/v1/customer/wellness/today`  → `WellnessToday`   WIRED
+ *   - `GET    /api/v1/customer/recent-activity` → `RecentActivity`  WIRED
  *   - `POST   /api/v1/customer/wellness/water`  → log a glass       WIRED
  *   - `DELETE /api/v1/customer/wellness/water/{entry_id}`           WIRED
  *
- * The two READS are still served from stubs here even though their
- * backends exist (`apps/miniapp_api/views.py::customer_wellness_today`
- * / `::customer_recent_activity`). Wiring them is a follow-up, not this
- * change. Until then they are fenced by `guardProd` — see below.
+ * All four are live against `apps/miniapp_api`. The stub blobs below
+ * are a dev-only `?stub=` QA hook and are unreachable in a production
+ * build (`pickStubOrLive` returns `null` there unconditionally).
  *
  * The WRITE path is real (DRF-1402): `flushWaterQueue` posts to Ayla
  * through `apps/miniapp_api` and the offline queue drains ONLY on
@@ -28,9 +27,11 @@
  * Stub variants for dev QA (matching the Phase B catalog stub pattern
  * in `customer-booking.ts::pickStubVariant`):
  *   - `?stub=default`  — happy path with pfc + booking + goal (default)
- *   - `?stub=empty`    — first-time user, anketa not done, no booking
- *   - `?stub=partial`  — pfc missing, no goal, no booking (graceful
- *                        degradation across Tier 2 §11.1 / §11.2 / §11.5)
+ *   - `?stub=empty`    — first-time user, anketa not done, no goal, no
+ *                        booking, no weekly rollup
+ *   - `?stub=partial`  — pfc missing, goal layer UNREACHABLE, no booking
+ *                        (graceful degradation across Tier 2 §11.1 /
+ *                        §11.2 / §11.5)
  *
  * Variants are dev-only (gated on `import.meta.env.DEV`). Production
  * bundle ships only the `default` variant; the variant blobs for
@@ -59,39 +60,208 @@ import { ApiError, request } from "./api";
  * Pulse data + today's targets + greeting context. Shape matches the
  * future `GET /api/v1/customer/wellness/today` per W4.
  */
+/**
+ * Одна запись дневника питания, дословно как её отдаёт источник
+ * (`nutrition/serializers.py::FoodLogEntrySerializer`).
+ *
+ * БЖУ приходит НА ЗАПИСЬ и настоящее. Клиент до 08.09.2026 считал его
+ * сам — умножал калории на постоянные коэффициенты (0.075 / 0.018 /
+ * 0.105) — и показывал человеку как факт о том, что тот съел. Это было
+ * выдуманное число о человеке, а не выдуманная цель, и снято вместе с
+ * подключением настоящих записей.
+ *
+ * `logged_at` — UTC. Расхождение суток разбирает DRF-1582; здесь оно не
+ * решается и не воспроизводится.
+ */
+export interface FoodDiaryEntry {
+  id: string;
+  dish_name: string;
+  /** DRF-2371 — `null`, когда каталог сохранил блюдо без чисел; не ноль. */
+  calories: number | null;
+  /**
+   * DRF-2455 — макросы тоже бывают отсутствующими, и **по отдельности**:
+   * каталог пишет их независимо, так что «калории есть, белка нет» —
+   * не выдумка, а обычная запись. Тип это скрывал, и карточка напечатала
+   * бы «Б null».
+   */
+  protein_g: number | null;
+  fat_g: number | null;
+  carbs_g: number | null;
+  meal_type: string;
+  logged_at: string;
+  /**
+   * §136 — чем получено число записи (`text_*` / `photo_*`), `null` для
+   * старых. Экран дневника по нему решает, можно ли править граммы:
+   * `граммы ÷ 100` верно только для записи текстом (DRF-1838).
+   */
+  entry_origin?: string | null;
+  /**
+   * DRF-2455 — есть ли у записи снимок, который отдаст прокси бота
+   * (`diary/entry/<id>/photo`). Каталог считает его по скану записи;
+   * бот пропускает насквозь. Снимок живёт 30 суток (§134), поэтому
+   * `false` — обычная старая запись, а не сбой. Отсутствие поля читается
+   * как `false`: без признака к прокси не ходим — иначе 404 на каждой
+   * записи. Загрузка — `lib/diary-photo.ts`.
+   */
+  has_photo?: boolean;
+}
+
 export interface WellnessToday {
-  /** Eaten today (kcal). 0 when no logs. */
-  calories_eaten: number;
+  /**
+   * DRF-1927 — `true`, когда у человека нет согласия на обработку личных
+   * данных: сервер дневник НЕ читал, и ключей дневника (калории, БЖУ,
+   * записи, вода) в ответе нет не из-за сбоя. Экран вместо «Не удалось
+   * загрузить» говорит {@link DIARY_CONSENT_REQUIRED_TEXT}. Цель
+   * (`active_goals`) приходит как обычно.
+   */
+  consent_required?: boolean;
+  /**
+   * DRF-2071 — `true`, когда контур питания выключен (`NUTRITION_ENABLED=false`):
+   * сервер дневник и воду НЕ читал, ключей дневника нет; имя и цель — есть,
+   * они к дневнику не относятся. Та же форма, что у `consent_required`.
+   */
+  nutrition_disabled?: boolean;
+  /**
+   * Eaten today (kcal), and the target. `0` is a real value — «nothing
+   * logged yet». **Both keys are ABSENT when the nutrition read failed**
+   * (DRF-1546), which is a different thing entirely: the screen must
+   * then say «Не удалось загрузить», not «0 / 0 ккал · 0 %». Same
+   * contract as `active_goals` below — absence cannot be misread the
+   * way a zero can.
+   */
+  calories_eaten?: number;
   /** User's target (kcal). Pulled from Layer 2 Goals or anketa. */
-  calories_target: number;
+  calories_target?: number;
   /**
    * Macros breakdown. **MAY BE undefined / null** when the customer
    * has not completed the nutrition anketa (Tau §11.1). In that case
    * the БЖУ row is hidden entirely — NEVER rendered as «Б — · Ж — · У —».
+   *
+   * `protein_target_g` — DRF-1844 (F1): the profile's protein target,
+   * derived from the §85 calories target; the backend sends it ONLY
+   * under the same provenance flag as `calories_target` (confirmed
+   * `ayla_calculated` / `user_entered`). Absent = no target — the БЖУ row
+   * then shows the fact alone («Б 65 г»), never «Б 65 / 0 г». The
+   * «Добрать белок» line removed in DRF-1546 is NOT brought back here.
    */
   pfc?: {
     protein_g: number;
     fat_g: number;
     carbs_g: number;
     protein_target_g?: number;
+    /** DRF-2288 (№41): ориентиры жиров и углеводов — тем же признаком, каждый сам по себе. */
+    fat_target_g?: number;
+    carbs_target_g?: number;
   };
-  /** Glasses logged today. */
-  water_glasses_eaten: number;
-  /** Daily target. Defaults to 8 if anketa skipped. */
-  water_glasses_target: number;
   /**
-   * Active goals (cap=1 for MVP — multi-goal post-pilot).
-   * Empty array when no goal chosen → quick action shows
-   * «Выбери цель» per Tau §11.2.
+   * Стаканы за сегодня и дневная норма.
+   *
+   * `water_glasses_eaten` отсутствует, когда чтение воды упало (см.
+   * `calories_eaten`). `water_glasses_target` отсутствует ЕЩЁ И тогда,
+   * когда нормы у человека просто нет: анкету питания он не проходил, и
+   * Ayla отвечает `norm_ml=0`. Раньше на это место бэкенд подставлял
+   * константу «8», и человек видел чужое число как свою цель — теперь
+   * ключа нет, и экран рисует выпитое без цели и без шкалы.
    */
-  active_goals: Array<{
+  water_glasses_eaten?: number;
+  water_glasses_target?: number;
+  /**
+   * Записи дневника за сегодня — ТРИ различимых состояния, и различие
+   * несёт КЛЮЧ, а не длина списка:
+   *
+   * * ключа нет            → «прочитать не удалось». Экран говорит это
+   *   словами, а не показывает пустой день;
+   * * `[]`                 → «спросили, за день ничего не записано»;
+   * * непустой список      → записи.
+   *
+   * Свести первые два — та же ложь, что «0 из 0 ккал» при отказе
+   * чтения: человеку сообщают «ты сегодня ничего не ел» там, где
+   * правда — «мы не смогли спросить».
+   *
+   * Поля приходят ДОСЛОВНО от источника
+   * (`nutrition/serializers.py::FoodLogEntrySerializer`) и здесь не
+   * переименовываются: одно поле — одно имя на всём проводе.
+   */
+  entries?: FoodDiaryEntry[];
+  /**
+   * Прятать ли числа (калории, БЖУ) — производный признак, а не
+   * диагноз.
+   *
+   * Наружу приходит следствие, потому что клиенту нужно знать
+   * «прятать ли цифру», а не «что с человеком»: здоровье — специальная
+   * категория 152-ФЗ, и границу она пересекать не обязана.
+   *
+   * **Отсутствие ключа = fail-closed, числа ПРЯЧУТСЯ.** «Не смогли
+   * спросить» не превращается в разрешение показать калории тому, кому
+   * спека их показывать запрещает (§10 Appendix ED Mode). Цена названа
+   * и принята: пока чтение профиля не работает, числа спрятаны у всех.
+   */
+  nutrition_numbers_hidden?: boolean;
+  /**
+   * Строка диетолога (DRF-1897) — тот же текст, что в дневнике в чате.
+   *
+   * Приходит ТОЛЬКО на `?surface=diary` (`loadDiaryToday`): сервер
+   * решает её и пишет в журнал наблюдений лишь для открытого дневника.
+   * Главная этот признак не ставит и строки не получает — иначе её
+   * открытие тратило бы суточный слот наблюдения. Ключа нет — строки нет.
+   */
+  coach_observation?: string;
+  /**
+   * Active goals (cap=1 for MVP — multi-goal post-pilot). Read from
+   * Ayla's goal layer — the same `known.goal` the goal screen renders
+   * (`customer-goals.ts`), so the two surfaces cannot disagree.
+   *
+   * THREE states, and the difference between the last two matters
+   * (DRF-1476):
+   *
+   *   - `[{...}]` — a goal is active → «Моя цель».
+   *   - `[]`      — no goal chosen → «Выбери цель» per Tau §11.2.
+   *   - `undefined` — the backend could NOT reach the goal layer. Not
+   *     the same as «no goal»: rendering «Выбери цель» here is what
+   *     told a customer who had just picked «Позаботиться о коже лица»
+   *     to go pick one. Render a neutral label instead.
+   *
+   * There is NO progress field, by owner decision (решение №13,
+   * 06.09): на пилоте разрешён простой показ «Моя цель» — без
+   * процентов, шкал и оценок выполнения. Ayla и не хранит прогресс
+   * (`ClientGoal` = key / text / selected_at / source_channel), так что
+   * поле было бы нечем наполнить; теперь его нет и в контракте, и
+   * нарисовать полосу не из чего.
+   *
+   * Одна цель, не несколько — тем же решением.
+   *
+   * `week_num` — производная от `selected_at` на сервере, отсутствует
+   * только когда та отметка непригодна. Это счётчик недель, а не оценка
+   * выполнения, и под запрет №13 не попадает.
+   */
+  active_goals?: Array<{
     title: string;
-    progress_pct: number;
-    week_num: number;
+    week_num?: number;
+    /**
+     * DRF-2173 — срок цели: ISO-дата из `known.goal.target_date` каталога;
+     * ключ опускается, когда срока нет (§103 — строки на карточке нет).
+     * `target_date_passed` — факт сервера «срок прошёл» (на Главной строка
+     * «До …» остаётся; «Срок прошёл — обновить?» живёт на экране цели).
+     */
+    target_date?: string;
+    target_date_passed?: boolean;
   }>;
   /**
-   * Optional preferred display name (Layer 1 Identity). Falls back to
-   * `me.user.client_name` from `/auth/verify` when undefined.
+   * Preferred display name (Layer 1 Identity) — **собирает сервер**:
+   * `bot_user.client_name or bot_user.display_name or ""` во всех трёх
+   * ветках ручки (`apps/miniapp_api/views.py`, строки 3760, 3778, 3994).
+   * Клиенту запасного источника искать не нужно и негде: второй запрос за
+   * именем на Главной — ровно то, что с неё сейчас снимают (DRF-2348).
+   *
+   * Поэтому ключ приходит всегда, но может быть `""` — у человека,
+   * который не назвался сам и у которого канал не дал имени. Пустая
+   * строка значит «имени нет», а не «не загрузилось»: шапка рисует на
+   * этом месте «·» (Д1, DRF-2331), заголовок — приветствие без имени.
+   *
+   * Прежний текст здесь обещал клиентский запасной путь к
+   * `me.user.client_name` из `/auth/verify`. Такого пути нет ни в одном
+   * экране, и он не нужен — работу делает сервер (найдено ревью
+   * DRF-2331).
    */
   display_name?: string;
   /**
@@ -128,8 +298,34 @@ export interface RecentActivity {
     duration_min: number;
     master_name: string;
     salon_name: string;
-    address: string;
+    /**
+     * Адрес салона — ТРИ состояния, и схлопывать их нельзя (DRF-1611):
+     *
+     * * строка   — адрес известен;
+     * * `""`     — **салон сказал**, что адреса нет. Это ответ;
+     * * `null`   — источник об адресе не сказал ничего. Это НАШ пробел.
+     *
+     * Ни `?? ""`, ни `|| ""` по дороге: они превратили бы молчание
+     * источника в ответ салона, а разница видна человеку — при `""`
+     * спрашивать некого, при `null` адрес скорее всего есть и его
+     * стоит уточнить.
+     */
+    address: string | null;
     booking_id: string;
+    /**
+     * DRF-2144 — wire-статус той же строки (mirror: `confirmed` /
+     * `awaiting_payment` / `pending_payment`; local: `confirmed`). Карточка
+     * на Главной переводит его через `mapBookingStatus` — тем же словарём,
+     * что список записей. Ключа нет (старый сервер) — бейджа нет.
+     */
+    status?: string;
+    /**
+     * Цена записи — МЕСТО ОСТАВЛЕНО, ждёт DRF-2172: каталог поля ещё не
+     * отдаёт, сервер ключ не шлёт. Строка «3 200 ₽» — как на макете
+     * DRF-1321 v1.2; отсутствие ключа = строки нет (§33: без источника не
+     * рисуем). Формат — как `priceFromLabel` в каталоге.
+     */
+    price?: string | null;
   };
   /**
    * Count of CONFIRMED bookings in the current week. Drives the
@@ -138,10 +334,16 @@ export interface RecentActivity {
    */
   this_week_booking_count: number;
   /**
-   * 7-day rollup. The screen's Block 6 (Прогресс недели) is gated on
-   * `weekly_progress.active_days_count >= 3` per Tau §11.4 cold-start.
+   * 7-day rollup. **Optional** — the backend omits it entirely while
+   * Ayla has no meals-list endpoint to build it from (DRF-1476). It
+   * previously arrived as three hardcoded zeros, and only Block 6's
+   * `>= 3` threshold kept that fiction off the screen.
+   *
+   * So Block 6 is gated on PRESENCE first, then on
+   * `active_days_count >= 3` per Tau §11.4 cold-start. Absence cannot
+   * be misread the way a zero can.
    */
-  weekly_progress: {
+  weekly_progress?: {
     water_days_logged: number;
     food_days_logged: number;
     active_days_count: number;
@@ -149,18 +351,13 @@ export interface RecentActivity {
 }
 
 // ---------------------------------------------------------------------------
-// Production honesty guard — same precedent as `customer-profile.ts:215`
-// and `food-scanner.ts:180`.
-//
-// The pilot rule (`lib/feature-flags.ts:9-12`): NOTHING fake in prod. A
-// stub that ships to a real customer would show them «Анна», 1240 kcal
-// they never ate and a massage they never booked. Until the reads are
-// wired, a prod-mode call must fail loudly → `StateError` renders.
-//
-// NOTE: the dashboard is ALSO hidden in prod by `STUB_SURFACES_ENABLED`
-// (`CustomerWellnessDashboardScreen.tsx:109`). That gate is a screen-
-// level decision that can be lifted at any time; this guard is a
-// module-level one that must not depend on it. Two locks, one door.
+// Production honesty rule (`lib/feature-flags.ts`): NOTHING fake in
+// prod. A stub that shipped to a real customer would show them «Клиент»,
+// 1240 kcal they never ate and a massage they never booked — so the
+// stub blobs below are reachable ONLY from a dev build, and only when
+// `?stub=` names a variant. The screen-level gate that used to hide
+// this surface entirely came off with DRF-1546; this module never
+// depended on it.
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
@@ -195,6 +392,12 @@ function pickStubOrLive(): StubVariant | null {
 // «рекомендуем» / «лучший» / «спонсировано» / «топ» / medical content).
 // ---------------------------------------------------------------------------
 
+// Стаб состояния «ориентир ЕСТЬ». Число здесь оставлено намеренно:
+// §85 вернул шкалу и процент для режимов «Рассчитано Ayla» и
+// «Установлено клиентом», и вёрстку этого состояния надо на чём-то
+// развивать. Оно DEV-only (`pickStubOrLive` возвращает null вне DEV) и
+// в боевой ответ не попадает. Холодный старт — `EMPTY_TODAY` ниже, и
+// там ориентира нет, потому что сегодня его нет ни у кого.
 const DEFAULT_TODAY: WellnessToday = {
   calories_eaten: 1240,
   calories_target: 2100,
@@ -206,10 +409,8 @@ const DEFAULT_TODAY: WellnessToday = {
   },
   water_glasses_eaten: 4,
   water_glasses_target: 8,
-  active_goals: [
-    { title: "Меньше стресса", progress_pct: 78, week_num: 3 },
-  ],
-  display_name: "Анна",
+  active_goals: [{ title: "Меньше стресса", week_num: 3 }],
+  display_name: "Клиент",
   day_pattern_hint: "morning_good_progress",
 };
 
@@ -218,12 +419,14 @@ const DEFAULT_ACTIVITY: RecentActivity = {
     date_human: "Завтра · пт · 16:00",
     service_name: "Массаж лимфодренаж",
     duration_min: 60,
-    master_name: "Ирина",
+    master_name: "Мастер",
     salon_name: "Формула тела",
     address: "ул. Тверская 12",
     booking_id: "booking-stub-001",
   },
   this_week_booking_count: 3,
+  // Kept so Block 6 stays developable in dev; the live endpoint omits
+  // this key until the meals layer ships (DRF-1476).
   weekly_progress: {
     water_days_logged: 4,
     food_days_logged: 5,
@@ -233,33 +436,39 @@ const DEFAULT_ACTIVITY: RecentActivity = {
 
 const EMPTY_TODAY: WellnessToday = {
   calories_eaten: 0,
-  calories_target: 2000,
+  // `calories_target` ОПУЩЕН — по той же причине, по которой ниже
+  // опущен `water_glasses_target`. Здесь стояло `2000`: та самая плоская
+  // норма для всех, которую владелец удалил (§82), воспроизведённая в
+  // стабе холодного старта. Стаб «подтверждал» константу вместо того,
+  // чтобы её ловить, — и человек без анкеты в dev выглядел как человек
+  // с целью 2000 ккал.
   // pfc undefined — anketa not done, БЖУ row hidden per §11.1
   water_glasses_eaten: 0,
-  water_glasses_target: 8,
+  // water_glasses_target omitted — анкету не проходили, нормы нет.
+  // Это и есть боевое состояние холодного старта: раньше здесь стояла
+  // та же выдуманная восьмёрка, что и на бэкенде, и стаб «подтверждал»
+  // константу вместо того, чтобы её ловить.
   active_goals: [],
-  display_name: "Анна",
+  display_name: "Клиент",
   day_pattern_hint: "morning_no_logs",
 };
 
 const EMPTY_ACTIVITY: RecentActivity = {
   // next_booking omitted → empty-state CTA per Tau §5 State 2
   this_week_booking_count: 0,
-  weekly_progress: {
-    water_days_logged: 0,
-    food_days_logged: 0,
-    active_days_count: 0,
-  },
+  // weekly_progress omitted — mirrors the live endpoint, and exercises
+  // the presence gate on Block 6 (DRF-1476).
 };
 
 const PARTIAL_TODAY: WellnessToday = {
-  calories_eaten: 800,
-  calories_target: 2000,
+  // calories_* omitted — the nutrition read failed. Exercises the
+  // «Не удалось загрузить» row instead of «0 / 0 ккал» (DRF-1546).
   // pfc undefined — partial state exercises the conditional render path
   water_glasses_eaten: 2,
-  water_glasses_target: 8,
-  active_goals: [], // no goal — quick action shows «Выбери цель»
-  display_name: "Анна",
+  // water_glasses_target omitted — тот же холодный старт.
+  // active_goals omitted — the goal layer was unreachable. Exercises
+  // the third state: neutral label, never «Выбери цель» (DRF-1476).
+  display_name: "Клиент",
   // No day_pattern_hint → falls back to «fallback» template
 };
 
@@ -311,9 +520,68 @@ const ACTIVITY_STUB: Record<StubVariant, RecentActivity> = import.meta.env.DEV
  * Ayla; swapping this body for `request("/wellness/today")` is the
  * follow-up. Signature does NOT change.
  */
-export async function getWellnessToday(): Promise<WellnessToday> {
+/**
+ * Дневник за сегодня — три различимых состояния.
+ *
+ * Живёт здесь, а не в `food-scanner.ts`, потому что источник у него
+ * тот же, что у дашборда: одна композитная ручка на обе поверхности.
+ * Второе хранилище не заводится — его надо не «не заводить
+ * специально», а просто не завести.
+ *
+ * * `unreachable` — ручка не ответила: наружу уходит исключение, экран
+ *   рисует состояние ошибки с повтором;
+ * * `unreadable` — ручка ответила, но БЕЗ ключа `entries`: питательная
+ *   половина у сервера не прочиталась. Повтор осмыслен, сообщение
+ *   другое, и «пустой день» показывать нельзя;
+ * * `empty` / `entries` — ключ есть; пустой список означает ровно
+ *   «за сегодня ничего не записано».
+ *
+ * `hideNumbers` читается ОДИНАКОВО в обеих непустых ветках, и
+ * отсутствие ключа прячет числа (fail-closed).
+ */
+export type DiaryToday =
+  | { state: "unreadable" }
+  // DRF-1927 — нет согласия на обработку личных данных: сервер дневник не
+  // читал. Не сбой (повтор ничего не даст) и не пустой день.
+  | { state: "consent_required" }
+  // DRF-2071 — контур питания выключен: сервер дневник не читал. Тоже не
+  // сбой и не пустой день; входов в запись при этом не рисуется.
+  | { state: "diary_off" }
+  | { state: "empty"; hideNumbers: boolean; today: WellnessToday }
+  | {
+      state: "entries";
+      entries: FoodDiaryEntry[];
+      hideNumbers: boolean;
+      today: WellnessToday;
+    };
+
+export async function loadDiaryToday(): Promise<DiaryToday> {
+  // Явный признак «открыт именно дневник» (DRF-1897): по нему и только по
+  // нему сервер решает строку диетолога и пишет журнал.
+  const today = await getWellnessToday({ surface: "diary" });
+  // Выключено важнее «согласия нет» — так отвечает и сервер.
+  if (diaryIsOff(today)) return { state: "diary_off" };
+  if (today.consent_required === true) return { state: "consent_required" };
+  if (!Array.isArray(today.entries)) return { state: "unreadable" };
+  const hideNumbers = today.nutrition_numbers_hidden !== false;
+  // `today` едет целиком, а не разобранным на итоги: у его ключей уже
+  // объявлены правила отсутствия (цели нет → ключа нет), и пересобрать
+  // их здесь значило бы завести второй набор тех же правил.
+  return today.entries.length === 0
+    ? { state: "empty", hideNumbers, today }
+    : { state: "entries", entries: today.entries, hideNumbers, today };
+}
+
+export async function getWellnessToday(
+  /** `diary` — зовёт экран дневника; главная признак не передаёт. */
+  options: { surface?: "diary" } = {},
+): Promise<WellnessToday> {
   const variant = pickStubOrLive();
-  if (variant === null) return request<WellnessToday>("/wellness/today");
+  if (variant === null) {
+    return request<WellnessToday>(
+      options.surface === "diary" ? "/wellness/today?surface=diary" : "/wellness/today",
+    );
+  }
   // Simulate realistic network latency for skeleton testing (~300ms).
   await new Promise<void>((resolve) => setTimeout(resolve, 300));
   return TODAY_STUB[variant];
@@ -381,11 +649,20 @@ function mintQueueKey(ts: number): string {
  * indicator).
  */
 export function enqueueWaterLog(volume_ml = 250): number {
+  return enqueueWaterLogEntry(volume_ml).length;
+}
+
+/**
+ * DRF-1919 — то же, но возвращает и сам стакан: вызывающий узнаёт СВОЙ стакан
+ * в колбэках синхронизации по `key`, а не по «что-то приняли».
+ */
+export function enqueueWaterLogEntry(volume_ml = 250): { entry: QueuedWaterLog; length: number } {
   const queue = readWaterQueue();
   const ts = Date.now();
-  queue.push({ ts, volume_ml, key: mintQueueKey(ts) });
+  const entry: QueuedWaterLog = { ts, volume_ml, key: mintQueueKey(ts) };
+  queue.push(entry);
   writeWaterQueue(queue);
-  return queue.length;
+  return { entry, length: queue.length };
 }
 
 /**
@@ -444,7 +721,8 @@ export interface WaterLogResult {
   today_total_ml: number;
   today_norm_ml: number;
   water_glasses_eaten: number;
-  water_glasses_target: number;
+  /** Отсутствует, когда нормы у человека нет (Ayla шлёт norm_ml=0). */
+  water_glasses_target?: number;
 }
 
 /**
@@ -463,10 +741,85 @@ export async function postWaterLog(entry: QueuedWaterLog): Promise<WaterLogResul
 }
 
 /**
+ * DRF-2230 — «Дать согласие в чате»: сервер шлёт в чат MAX приглашение с
+ * кнопкой «Дать согласие». `sent: false` — либо приглашение уже отправлено
+ * недавно (`recently_sent`, дубля нет — можно закрываться), либо согласие
+ * уже есть (`already_granted` — закрываться незачем, данные перечитываются).
+ */
+export interface ConsentPromptResult {
+  sent: boolean;
+  reason?: "recently_sent" | "already_granted";
+}
+
+export function requestDiaryConsentPrompt(): Promise<ConsentPromptResult> {
+  return request<ConsentPromptResult>("/wellness/consent-prompt", { method: "POST" });
+}
+
+/**
+ * DRF-2230 (живой проход владельца 21.09) — ЧЕРНОВИКИ: повтор в окне дубля.
+ * Приглашение уже лежит в чате; закрыть приложение молча значило «провалиться
+ * в чат», не понимая, что там ждёт. Выход в чат — по явной кнопке.
+ */
+export const CONSENT_PROMPT_ALREADY_SENT_TEXT =
+  "Приглашение уже в чате с Ayla — открой его и нажми «Дать согласие».";
+export const CONSENT_PROMPT_OPEN_CHAT_CTA = "Открыть чат";
+
+/** DRF-2230 — ЧЕРНОВИК: приглашение в чат не ушло; приложение не закрывается. */
+export const CONSENT_PROMPT_FAILED_TEXT =
+  "Не получилось отправить приглашение в чат. Попробуй ещё раз.";
+
+/** DRF-1919 — одна фраза на «нет согласия» для дневника еды и воды. */
+export const DIARY_CONSENT_REQUIRED_TEXT =
+  "Чтобы менять дневник, нужно согласие на обработку личных данных — дай его в чате с Ayla.";
+
+/**
+ * DRF-2071 — контур питания выключен (`NUTRITION_ENABLED=false`): на ЧТЕНИЕ
+ * `wellness/today` сервер отвечает 200 с `nutrition_disabled: true` и без
+ * ключей дневника/воды (запись — 404 с тем же слагом). Это не сбой (повтор
+ * ничего не даст) и не пустой день — экраны, читающие сводку, показывают эту
+ * фразу и не рисуют кнопок записи. Литерал тот же, что у экранов
+ * дня/недели/избранного (`*_COPY.diaryOff`).
+ */
+export const DIARY_OFF_TEXT = "Дневник питания пока недоступен.";
+
+/** DRF-2071 — «контур выключен» узнаётся по маркеру сводки, не по статусу. */
+export function diaryIsOff(today: WellnessToday | null | undefined): boolean {
+  return today?.nutrition_disabled === true;
+}
+
+/**
+ * DRF-1919 — что сказать, когда сервер навсегда отказал в стаканах. Они
+ * выброшены из очереди, то есть НЕ записаны: фраза называет, сколько, откуда
+ * (`fromQueue` — не только что нажатый, а ждавший в очереди) и почему.
+ */
+export function waterRefusalText(
+  refused: readonly ApiError[],
+  { fromQueue = false }: { fromQueue?: boolean } = {},
+): string {
+  const n = refused.length;
+  const one = n === 1;
+  const where = fromQueue ? " из очереди" : "";
+  const head = one ? `Стакан${where} не записан` : `${n} ${glassesWord(n)}${where} не записаны`;
+  const slugs = new Set(refused.map((e) => e.slug));
+  if (slugs.has("consent_required")) return `${head}. ${DIARY_CONSENT_REQUIRED_TEXT}`;
+  if (slugs.has("nutrition_disabled")) return `${head}: дневник воды сейчас выключен.`;
+  return `${head} — дневник ${one ? "его" : "их"} не принял.`;
+}
+
+function glassesWord(n: number): string {
+  const mod10 = n % 10;
+  const mod100 = n % 100;
+  if (mod10 === 1 && mod100 !== 11) return "стакан";
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return "стакана";
+  return "стаканов";
+}
+
+/**
  * Undo a logged glass — the way back when the customer mis-tapped.
  *
  * Returns `true` when Ayla removed it, `false` when the restore window
- * has closed (404) and the glass therefore STAYS counted. Anything else
+ * has closed (404 `not_undoable`) and the glass therefore STAYS counted.
+ * DRF-1919: a 404 `nutrition_disabled` (diary off) is not that — it throws. Anything else
  * (outage, 5xx) throws: a caller must never be told «removed» on the
  * strength of a failed request. That confusion is exactly the bug this
  * whole change exists to remove.
@@ -478,9 +831,57 @@ export async function undoWaterLog(entryId: string): Promise<boolean> {
     });
     return true;
   } catch (err) {
-    if (err instanceof ApiError && err.status === 404) return false;
+    if (err instanceof ApiError && err.status === 404 && err.slug === "not_undoable") return false;
     throw err;
   }
+}
+
+/** DRF-1838 — ответ на удаление записи еды: окно, в котором её можно вернуть. */
+export interface FoodEntryDeletion {
+  entry_id: string;
+  restore_window_expires_at: string | null;
+}
+
+/**
+ * Убрать запись еды из дневника. Обратимо в окне восстановления каталога.
+ * Любой отказ бросает `ApiError` — вызывающий называет его своей фразой.
+ */
+export async function deleteFoodEntry(entryId: string): Promise<FoodEntryDeletion> {
+  return request<FoodEntryDeletion>(`/wellness/food/${encodeURIComponent(entryId)}`, {
+    method: "DELETE",
+  });
+}
+
+/**
+ * Исход возврата удалённой записи — три РАЗНЫХ ответа, и сбой ни одним из них
+ * не является: `expired` — окно закрылось, удаление окончательно; `gone` —
+ * такой удалённой записи нет. Всё остальное бросает.
+ */
+export type FoodEntryRestore = "restored" | "expired" | "gone";
+
+export async function restoreFoodEntry(entryId: string): Promise<FoodEntryRestore> {
+  try {
+    await request<unknown>(`/wellness/food/${encodeURIComponent(entryId)}/restore`, {
+      method: "POST",
+    });
+    return "restored";
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 410) return "expired";
+    // «Записи нет» — только если так сказал сам сервер. 404 от прокси или от
+    // сервера без этого маршрута (Mini App выложен раньше) — сбой, не исход.
+    if (err instanceof ApiError && err.status === 404 && err.slug === "not_found") {
+      return "gone";
+    }
+    throw err;
+  }
+}
+
+/** Исправить граммы записи, сделанной текстом (`portion = граммы / 100` на сервере). */
+export async function correctFoodEntryGrams(entryId: string, grams: number): Promise<void> {
+  await request<unknown>(`/wellness/food/${encodeURIComponent(entryId)}`, {
+    method: "PATCH",
+    body: JSON.stringify({ grams }),
+  });
 }
 
 /**
@@ -494,7 +895,51 @@ export async function undoWaterLog(entryId: string): Promise<boolean> {
 function isPermanentRejection(err: unknown): boolean {
   if (!(err instanceof ApiError)) return false; // network / parse — retry
   if (err.status === 408 || err.status === 429) return false;
+  // DRF-1919: 401 — истекла сессия Mini App, а не отказ дневника: стакан
+  // уйдёт после перезахода. 404 без slug сервера (прокси, сервер без этого
+  // маршрута — `request` подставляет `http_error`) — тоже не отказ.
+  if (err.status === 401) return false;
+  if (err.status === 404 && err.slug === "http_error") return false;
   return err.status >= 400 && err.status < 500;
+}
+
+/**
+ * DRF-1919 — исход ОДНОГО стакана: принят, отказан навсегда или остался в
+ * очереди (с причиной — сеть, 5xx, истёкшая сессия).
+ */
+export type WaterEntryOutcome =
+  | { kind: "accepted"; result: WaterLogResult }
+  | { kind: "rejected"; err: ApiError }
+  | { kind: "queued"; err: unknown };
+
+/** Кто ждёт исхода какого стакана — по ключу стакана, а не по проходу. */
+const entryWatchers = new Map<string, (outcome: WaterEntryOutcome) => void>();
+/** Кому сказать об отказе стаканов, исхода которых никто не ждёт. */
+const queueRefusalListeners = new Set<(refused: ApiError[]) => void>();
+
+function notifyEntry(entry: QueuedWaterLog, outcome: WaterEntryOutcome): boolean {
+  const key = idempotencyKeyFor(entry);
+  const watcher = entryWatchers.get(key);
+  if (!watcher) return false;
+  entryWatchers.delete(key);
+  try {
+    watcher(outcome);
+  } catch {
+    /* исход для экрана — не часть синхронизации */
+  }
+  return true;
+}
+
+/**
+ * DRF-1919 — подписка на отказы стаканов из очереди, которых никто не ждёт
+ * (офлайн-стаканы, ушедшие при возврате сети или вместе с новым тапом): отказ
+ * не должен пропадать молча. Возвращает отписку.
+ */
+export function onWaterQueueRefused(listener: (refused: ApiError[]) => void): () => void {
+  queueRefusalListeners.add(listener);
+  return () => {
+    queueRefusalListeners.delete(listener);
+  };
 }
 
 /** Guards against two overlapping flushes double-posting the same entry. */
@@ -522,28 +967,57 @@ let flushInFlight: Promise<number> | null = null;
  * accepted stay accepted — they are not re-sent. A PERMANENT rejection
  * drops just that one entry and the loop continues.
  */
-export async function flushWaterQueue(): Promise<number> {
+export async function flushWaterQueue(
+  /** DRF-1842: id принятой записи — чтобы вызывающий мог предложить её отменить. */
+  onAccepted?: (result: WaterLogResult, entry: QueuedWaterLog) => void,
+  /** DRF-1919: постоянный отказ — стакан выброшен из очереди, экран обязан это сказать. */
+  onRejected?: (err: ApiError, entry: QueuedWaterLog) => void,
+): Promise<number> {
+  // Исход СВОЕГО стакана вызывающий узнаёт через `syncWaterEntry`, а не через
+  // колбэки прохода: присоединившийся к идущему проходу своих колбэков не имеет.
   if (flushInFlight) return flushInFlight;
   flushInFlight = (async () => {
     const queue = readWaterQueue();
     if (queue.length === 0) return 0;
 
     const remaining: QueuedWaterLog[] = [];
+    const unwatchedRefusals: ApiError[] = [];
     let synced = 0;
 
     for (const [i, entry] of queue.entries()) {
+      let accepted: WaterLogResult | null = null;
       try {
-        await postWaterLog(entry);
+        accepted = await postWaterLog(entry);
         synced += 1;
       } catch (err) {
         if (isPermanentRejection(err)) {
-          // eslint-disable-next-line no-console
           console.warn("[customer-wellness] water entry refused, dropping", err);
+          if (err instanceof ApiError) {
+            if (onRejected) {
+              try {
+                onRejected(err, entry);
+              } catch {
+                /* фраза об отказе — не часть синхронизации */
+              }
+            }
+            if (!notifyEntry(entry, { kind: "rejected", err })) unwatchedRefusals.push(err);
+          }
           continue;
         }
         // Retryable — this entry and every later one stay queued.
+        for (const left of queue.slice(i)) notifyEntry(left, { kind: "queued", err });
         remaining.push(...queue.slice(i));
         break;
+      }
+      // Вне try: сбой подсказки в интерфейсе не должен превращать уже
+      // принятый стакан в «повторить отправку» — это был бы дубль.
+      if (accepted) notifyEntry(entry, { kind: "accepted", result: accepted });
+      if (accepted && onAccepted) {
+        try {
+          onAccepted(accepted, entry);
+        } catch {
+          /* подсказка «отменить» — не часть синхронизации */
+        }
       }
     }
 
@@ -554,6 +1028,15 @@ export async function flushWaterQueue(): Promise<number> {
       (e) => !queue.some((sent) => sent.ts === e.ts && sent.key === e.key),
     );
     writeWaterQueue([...remaining, ...appended]);
+    if (unwatchedRefusals.length > 0) {
+      for (const listener of queueRefusalListeners) {
+        try {
+          listener(unwatchedRefusals);
+        } catch {
+          /* фраза об отказе — не часть синхронизации */
+        }
+      }
+    }
     return synced;
   })();
   try {
@@ -562,6 +1045,47 @@ export async function flushWaterQueue(): Promise<number> {
     flushInFlight = null;
   }
 }
+
+/**
+ * DRF-1919 — отправить стакан и узнать ЕГО исход, какой бы проход его ни взял.
+ *
+ * Идущий проход снял снимок очереди до этого стакана — дождаться его и
+ * запустить проход, в котором стакан есть. Любой проход, взявший стакан,
+ * называет его исход (принят / отказан / остался в очереди с причиной).
+ */
+export async function syncWaterEntry(entry: QueuedWaterLog): Promise<WaterEntryOutcome> {
+  const key = idempotencyKeyFor(entry);
+  let resolveOutcome: (outcome: WaterEntryOutcome) => void = () => {};
+  const outcome = new Promise<WaterEntryOutcome>((resolve) => {
+    resolveOutcome = resolve;
+  });
+  // Второй ожидающий того же стакана цепляется к первому — исход получают оба.
+  const previous = entryWatchers.get(key);
+  entryWatchers.set(
+    key,
+    previous
+      ? (o) => {
+          previous(o);
+          resolveOutcome(o);
+        }
+      : resolveOutcome,
+  );
+  for (let attempt = 0; attempt < 3 && entryWatchers.has(key); attempt += 1) {
+    await flushWaterQueue();
+  }
+  const pending = entryWatchers.get(key);
+  if (pending) {
+    // Стакан не попал ни в один проход (не сохранился в хранилище, очередь
+    // очищена, TTL) — исход не известен; вызывающий проверит очередь сам.
+    entryWatchers.delete(key);
+    pending({ kind: "queued", err: null });
+  }
+  return outcome;
+}
+
+/** DRF-1919 — 401: стакан сохранён, но сам не уйдёт, пока приложение не открыть заново. */
+export const WATER_SESSION_EXPIRED_TEXT =
+  "Стакан сохранён, но не отправлен: сессия истекла — открой приложение заново.";
 
 // ---------------------------------------------------------------------------
 // Onboarding card dismiss state (localStorage flag) — §11.6.
@@ -627,7 +1151,14 @@ export function pickGreeting(now: Date = new Date()): string {
 export function pickOneLiner(args: {
   hour: number;
   hint?: string;
-  waterRatio: number; // 0..1
+  /**
+   * Доля выпитого от нормы, 0..1 — или `undefined`, когда НОРМЫ НЕТ.
+   *
+   * Раньше её место занимал ноль, и ноль означал сразу две разные вещи:
+   * «сегодня ещё не пил» и «нормы у человека нет». Из второго нельзя
+   * делать вывод «мало воды» — сравнивать не с чем.
+   */
+  waterRatio?: number;
   hasAnyLogs: boolean;
   hasNextBooking: boolean;
 }): string {
@@ -649,7 +1180,8 @@ export function pickOneLiner(args: {
   // Heuristic fallback when no hint provided.
   if (hour >= 4 && hour < 12) {
     if (!hasAnyLogs) return "Доброе утро. Начнём день?";
-    if (waterRatio < 0.5) return "Хороший старт дня. Давай мягко доберём воду.";
+    if (waterRatio !== undefined && waterRatio < 0.5)
+      return "Хороший старт дня. Давай мягко доберём воду.";
     return "Хороший старт дня.";
   }
   if (hour >= 12 && hour < 18) {
@@ -658,9 +1190,27 @@ export function pickOneLiner(args: {
       : "Хорошо идёшь. Продолжаем.";
   }
   if (hour >= 18 && hour < 22) {
-    if (waterRatio >= 0.75) return "Почти всё что хотели. Допей воду перед сном.";
+    if (waterRatio !== undefined && waterRatio >= 0.75)
+      return "Почти всё что хотели. Допей воду перед сном.";
     if (!hasAnyLogs) return "Тихий день. Если что-то нужно — расскажи.";
     return "Что нужно сегодня?";
   }
   return "Что нужно сегодня?";
+}
+
+/**
+ * DRF-2288 (№41): строка БЖУ — одна на Главной и в дневнике. Ориентир у буквы —
+ * « / N», без ориентира — только факт (§85 §8: «из» только при ориентире).
+ * Нет еды (``eaten === 0``) — строки нет: нулей не рисуем.
+ */
+export function pfcLine(
+  pfc: NonNullable<WellnessToday["pfc"]>,
+  eaten: number | undefined,
+): string | null {
+  if (eaten === 0) return null;
+  const t = (target: number | undefined) => (target !== undefined ? ` / ${target}` : "");
+  return (
+    `Б ${pfc.protein_g}${t(pfc.protein_target_g)} · Ж ${pfc.fat_g}${t(pfc.fat_target_g)} · ` +
+    `У ${pfc.carbs_g}${t(pfc.carbs_target_g)} г`
+  );
 }

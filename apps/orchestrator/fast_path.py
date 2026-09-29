@@ -572,6 +572,20 @@ FAST_PATH_TOOL_CLAIMS: tuple[ToolClaim, ...] = (
         ),
     ),
     ToolClaim(
+        tool="confirm_said_fact",
+        claimed=False,
+        why=(
+            "Confirming a fact the person said in an earlier conversation "
+            "(DRF-1878) is the model's call on relevance, and the question it "
+            "leads to is rendered by the bot. A turn that names no service is "
+            "not this parser's to answer, so it never short-circuits it."
+        ),
+        sample_turns=(
+            "да, в пензе как обычно",
+            "ищем там же, где в прошлый раз",
+        ),
+    ),
+    ToolClaim(
         tool="health_screening",
         claimed=False,
         why=(

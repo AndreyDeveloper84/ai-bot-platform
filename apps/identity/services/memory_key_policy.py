@@ -58,6 +58,10 @@ _KEY_CARDINALITY: dict[str, str] = {
     "preferred_districts": CARDINALITY_MULTI,
     "preferred_time_slots": CARDINALITY_MULTI,
     "favorite_masters": CARDINALITY_MULTI,
+    # Бриф окна «Мозг» п.4 (память сказанного): один текущий город поиска и
+    # один текущий «когда удобно приходить» — новое сказанное вытесняет.
+    "city": CARDINALITY_SINGLE,
+    "visit_context": CARDINALITY_SINGLE,
 }
 
 _EPOCH = datetime.min.replace(tzinfo=timezone.utc)

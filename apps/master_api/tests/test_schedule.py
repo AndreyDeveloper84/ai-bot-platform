@@ -581,6 +581,19 @@ class TestScheduleConflicts:
 # --- POST /availability ----------------------------------------------------
 
 
+@pytest.fixture
+def salon_owner(tenant: Tenant, other_bot_user: BotUser):
+    """Второй человек в тенанте — владелец. Без него тенант с одним мастером
+    по §3.1 — соло, и заявка о недоступности (DRF-1816) ставится одним
+    действием, а не уходит владельцу на решение. Наборы ниже — про салон."""
+    from apps.tenancy.models import TenantStaff
+
+    return TenantStaff.all_tenants.create(
+        tenant=tenant, bot_user=other_bot_user, role=TenantStaff.Role.OWNER
+    )
+
+
+@pytest.mark.usefixtures("salon_owner")
 class TestAvailabilityRequest:
     def test_valid_request_creates_row(
         self,
@@ -783,13 +796,17 @@ class TestAvailabilityRequest:
             assert "Анна" in kwargs["text"] or accepted_master.name in kwargs["text"]
 
     @pytest.mark.django_db(transaction=True)
-    def test_no_manager_chat_id_skips_dm(
+    def test_no_manager_chat_id_still_reaches_the_owner(
         self,
         client: Client,
         bot_user: BotUser,
         tenant: Tenant,
         accepted_master: CatalogMaster,
     ) -> None:
+        """DRF-2128: адресат — активный владелец из ``TenantStaff`` (человек),
+        даже когда ``manager_chat_id`` пуст. До этого листа пустое поле
+        значило «DM никому» — и салон с владельцем, но без вручную вписанного
+        адреса, молчал."""
         # tenant fixture has empty manager_chat_id by default.
         assert tenant.manager_chat_id == ""
         start = (datetime.now(tz=timezone.utc) + timedelta(days=7)).replace(
@@ -811,12 +828,15 @@ class TestAvailabilityRequest:
                 HTTP_AUTHORIZATION=init_data_header("12345"),
             )
             assert resp.status_code == 201
-            assert not send.called
+            assert send.call_count == 1
+            assert send.call_args.kwargs["user_id"] == "99999"  # salon_owner → other_bot_user
+            assert "chat_id" not in send.call_args.kwargs
 
 
 # --- GET /availability/pending ---------------------------------------------
 
 
+@pytest.mark.usefixtures("salon_owner")
 class TestAvailabilityPending:
     def test_returns_own_pending(
         self,

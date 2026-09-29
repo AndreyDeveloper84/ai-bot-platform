@@ -22,6 +22,21 @@ export type GoalSourceChannel = "bot" | "miniapp";
 export interface KnownGoal {
   goal_key: string | null;
   goal_text: string | null;
+  /**
+   * DRF-2177 — подпись цели едет С ЦЕЛЬЮ (каталог #517). До этого экран
+   * выводил её из `suggestions[].label` по ключу — то есть подпись
+   * зависела от того, показан ли ряд целей. Необязательное: документ
+   * каталога до выкладки #517 её не несёт, тогда — прежний вывод.
+   */
+  label?: string;
+  /**
+   * DRF-2173 — срок цели: ISO-дата («2026-11-01») или null — без срока
+   * (умолчание; строки на экране нет, §103). `target_date_passed` — факт
+   * сервера «срок прошёл»: экран с календарём не сверяет. Необязательные:
+   * документ каталога до выкладки #518 их не несёт.
+   */
+  target_date?: string | null;
+  target_date_passed?: boolean;
   selected_at: string; // ISO 8601
   source_channel: GoalSourceChannel;
 }
@@ -36,12 +51,28 @@ export type MissingKind =
 export interface AnketaOption {
   key: string;
   label: string;
+  /**
+   * DRF-1747 — роль опции. `escape` = «Не знаю»: полноценный ответ,
+   * рисуется тихо и отдельно от вариантов; тап шлёт `{option_key}` и на
+   * multi-шаге тоже (заменяет отмеченное). Отсутствие роли — обычный
+   * вариант.
+   */
+  role?: "escape" | string;
 }
 
 /** Server-computed position of the current question. Never derived here. */
+/**
+ * Где человек в проходе. `index`/`total` экран больше НЕ рисует (DRF-1743,
+ * доктрина 12.09): «Вопрос 2 из 3» — счётчик, честный лишь пока порядок
+ * вопросов фиксирован; с движком вопросов общее число неизвестно
+ * заранее, и число стало бы выдумкой. Рисуется только `is_last` — факт,
+ * который сервер гарантирует («Ещё один короткий вопрос»). Числа
+ * остаются в типе на один релиз, пока сервер их шлёт.
+ */
 export interface AnketaProgress {
-  index: number;
-  total: number;
+  index?: number;
+  total?: number;
+  is_last?: boolean;
 }
 
 export interface MissingItem {
@@ -56,15 +87,40 @@ export interface MissingItem {
    * refused by the server (409) instead of being filed under the
    * wrong question — NOT so the client can choose a step.
    *
-   * There is deliberately no "is this the last one" flag and no list
-   * of remaining steps: the sequence is the server's, and the screen
-   * must not be able to compute what comes next. `progress` arrives
-   * ready-made for the same reason.
+   * There is deliberately no list of remaining steps: the sequence is
+   * the server's, and the screen must not be able to compute what comes
+   * next. `progress.is_last` is a server-guaranteed fact rendered as
+   * one phrase, not material for arithmetic (DRF-1743).
    */
   step?: string;
   options?: AnketaOption[];
   allow_free_text?: boolean;
   progress?: AnketaProgress;
+  /**
+   * DRF-1746 — тип ответа по смыслу. Отсутствие = `single`; незнакомое
+   * значение экран рисует как `single` (к простому, не к пустому).
+   * `multi` отвечает `{option_keys: [...]}` одним запросом, `scale` —
+   * деления в порядке `options` с подписями концов, `text` — короткое
+   * поле с `text_limit`. `confirm` — компонент подтверждения (DRF-1745).
+   */
+  mode?: "single" | "multi" | "confirm" | "scale" | "text" | string;
+  scale?: { low_label: string; high_label: string };
+  text_limit?: number;
+  /**
+   * DRF-1745 — подтверждение известного (`mode: "confirm"`). `prompt` —
+   * вопрос подтверждения («Раньше ты выбирала «X». Всё ещё так?»),
+   * `question` — обычный вопрос шага (для «Изменилось»), `answer_mode` —
+   * каким компонентом на него отвечать, `known_value` — что подтверждаем.
+   * «Да» шлёт `{confirm: true}`; значение экран не пересылает.
+   */
+  known_value?: {
+    option_key: string | null;
+    option_keys?: string[];
+    text?: string | null;
+    label: string;
+  };
+  question?: string;
+  answer_mode?: string;
 }
 
 export interface GoalSuggestion {
@@ -96,13 +152,48 @@ export interface GoalIntent {
  * nobody decided anything.
  */
 export interface NextStep {
-  id: "browse_catalog";
+  /**
+   * DRF-1481 (решение владельца §24.1) — произвольная строка, а не
+   * перечень известных назначений. Единственное решающее место — таблица
+   * маршрутов экрана (`NEXT_ROUTES` в `GoalSelectScreen`): тип, копирующий
+   * её содержимое, расходился бы с сервером молча — Python вправе
+   * завести новое назначение, не спросив клиентские типы. Незнакомый id
+   * безопасен по построению: назначение вне таблицы не даёт кнопки, а
+   * guard DRF-1483 в том документе ставит запасной выход.
+   */
+  id: string;
   label: string;
+}
+
+/**
+ * Строка блока «Уже учла» (DRF-1744): ответ на шаг открытого прохода,
+ * как его прислал сервер. Несёт `options` шага, чтобы «Изменить» было
+ * чем ответить без списка вопросов на клиенте; `revisable` — решение
+ * сервера, экран его не выводит.
+ */
+export interface KnownAnketaAnswer {
+  /** DRF-1746 — ключи multi-ответа; [] у остальных режимов. */
+  option_keys?: string[];
+  mode?: string;
+  /** DRF-1747 — ответ «Не знаю»: сказанное, но не известный факт. */
+  unknown?: boolean;
+  /** Происхождение факта: conversation / anketa / operator. */
+  origin?: string;
+  step: string;
+  prompt: string;
+  option_key: string | null;
+  label: string;
+  options: AnketaOption[];
+  revisable: boolean;
 }
 
 export interface DecisionContext {
   version: number;
-  known: { goal: KnownGoal | null };
+  known: {
+    goal: KnownGoal | null;
+    /** Absent on documents before DRF-1744 — then there is no block. */
+    anketa?: KnownAnketaAnswer[];
+  };
   missing: MissingItem[];
   suggestions: GoalSuggestion[];
   intents: GoalIntent[];
@@ -112,6 +203,45 @@ export interface DecisionContext {
 
 interface DecisionContextEnvelope {
   data: DecisionContext;
+}
+
+/**
+ * DRF-1763 — the safety half of `POST /goals/select`. When the free text
+ * carries a health signal the server does NOT write the goal and answers
+ * with this envelope instead of `{data}`: the document is unchanged, the
+ * screen shows what is here and waits for the person. `text` is the whole
+ * reply for the three hard stops (`crisis` / `block` / `health_red_flag`);
+ * `acknowledgement` + `questions` are the clarify frame (`health_clarify`).
+ * The screen renders what it receives and invents nothing.
+ */
+export interface SafetyStop {
+  kind: string;
+  text?: string;
+  acknowledgement?: string;
+  questions?: string[];
+  /**
+   * [OD-BOT §170] — the G7 question's three structured answers. `value` goes
+   * back verbatim as `safety_answer` (it carries the slot's one-time token);
+   * free text is not an answer to this question, so no text box is shown.
+   */
+  options?: SafetyOption[];
+  question_id?: string;
+}
+
+export interface SafetyOption {
+  label: string;
+  value: string;
+}
+
+export interface SafetyEnvelope {
+  safety: SafetyStop;
+}
+
+/** What `postGoalSelect` resolves to: the updated document, or a safety stop. */
+export type GoalSelectResult = DecisionContext | SafetyEnvelope;
+
+export function isSafetyStop(result: GoalSelectResult): result is SafetyEnvelope {
+  return "safety" in result && typeof (result as SafetyEnvelope).safety === "object";
 }
 
 /**
@@ -125,13 +255,72 @@ interface DecisionContextEnvelope {
 export type GoalSelectBody =
   | { goal_key: string; source_channel: "miniapp" }
   | { goal_text: string; source_channel: "miniapp" }
+  /** DRF-1763 — the person's answer to the clarifying questions, carried
+      next to the ORIGINAL body it answers for. The server classifies it
+      and drops it; it is never stored. */
+  | { goal_text: string; safety_answer: string; source_channel: "miniapp" }
+  | { answer: { step: string; text: string }; safety_answer: string; source_channel: "miniapp" }
   | { intent: "need_guidance"; source_channel: "miniapp" }
   | { intent: "start_anketa"; source_channel: "miniapp" }
   | {
       answer: { step: string; option_key: string };
       source_channel: "miniapp";
     }
-  | { answer: { step: string; text: string }; source_channel: "miniapp" };
+  /** DRF-1746 — режим multi: массив ключей одним ответом. */
+  | {
+      answer: { step: string; option_keys: string[] };
+      source_channel: "miniapp";
+    }
+  /** DRF-1745 — «Да, всё так» на шаге подтверждения. */
+  | {
+      answer: { step: string; confirm: true };
+      source_channel: "miniapp";
+    }
+  | { answer: { step: string; text: string }; source_channel: "miniapp" }
+  /** DRF-1744 — пересмотр уже данного ответа («Изменить» в «Уже учла»). */
+  | {
+      answer: { step: string; option_key: string; revise: true };
+      source_channel: "miniapp";
+    };
+
+/**
+ * DRF-1751 — граница C03 (макет P23): «не спрашиваем бюджет, район, время,
+ * мастера, салон, акции, оплату». Сервер держит её своим сторожем; экран
+ * — отрицательной стражей на `step`: шаг с таким ключом вопросом не
+ * рисуется и логируется. Один список с сервером.
+ */
+export const C03_FORBIDDEN_STEP_KEYS: ReadonlySet<string> = new Set([
+  "budget",
+  "price",
+  "district",
+  "distance",
+  "time",
+  "date",
+  "master",
+  "rating",
+  "salon",
+  "discount",
+  "promo",
+  "payment",
+]);
+
+export function isOutsideC03Boundary(item: MissingItem): boolean {
+  return typeof item.step === "string" && C03_FORBIDDEN_STEP_KEYS.has(item.step);
+}
+
+/**
+ * Документ без вопросов за границей C03. Тот, что за ней, — не рисуется и
+ * называется в консоли: молча выкинуть было бы вторым способом спрятать
+ * нарушение.
+ */
+export function withinC03Boundary(doc: DecisionContext): DecisionContext {
+  const outside = doc.missing.filter(isOutsideC03Boundary);
+  if (outside.length === 0) return doc;
+  for (const item of outside) {
+    console.warn(`[c03-boundary] шаг «${item.step}» за границей C03 — вопрос не показан`);
+  }
+  return { ...doc, missing: doc.missing.filter((item) => !isOutsideC03Boundary(item)) };
+}
 
 /** GET /decision-context — current decision-context document. */
 export const fetchDecisionContext = async (): Promise<DecisionContext> => {
@@ -148,10 +337,13 @@ export const fetchDecisionContext = async (): Promise<DecisionContext> => {
  */
 export const postGoalSelect = async (
   body: GoalSelectBody,
-): Promise<DecisionContext> => {
-  const env = await request<DecisionContextEnvelope>("/goals/select", {
+): Promise<GoalSelectResult> => {
+  const env = await request<DecisionContextEnvelope | SafetyEnvelope>("/goals/select", {
     method: "POST",
     body: JSON.stringify(body),
   });
+  // DRF-1763 — a safety stop comes WITHOUT `data`: the document did not
+  // move, and handing the caller a stale one would say it did.
+  if ("safety" in env) return env;
   return env.data;
 };

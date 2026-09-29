@@ -80,7 +80,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from collections.abc import Set as AbstractSet
 from typing import Any, Literal
 from uuid import UUID
@@ -98,9 +98,17 @@ from apps.booking.services.attribution import (
     get_reschedulable_statuses,
 )
 from apps.eventbus import services as eventbus_services
+from apps.integrations.ayla.health_check import (
+    promises_a_specialist as health_check_promises_a_specialist,
+)
+from apps.integrations.ayla.health_check import text_for as health_check_text_for
+from apps.integrations.ayla.offer_refusal import OFFER_NOT_SELLABLE_SLUG, client_text_for
 from apps.bookings.keyboards import confirm_2_button
 from apps.bookings.pending_actions import create_pending
-from apps.bookings.reminders_factory import create_reminders_for_booking
+from apps.bookings.reminders_factory import (
+    create_reminders_for_ayla_appointment,
+    create_reminders_for_booking,
+)
 from apps.integrations.yclients import (
     AvailableTime,
     BookingRecord,
@@ -110,6 +118,9 @@ from apps.integrations.yclients import (
     YClientsUnavailableError,
 )
 from apps.skills.booking.provider import (
+    YClientsHealthCheckHandoffError,
+    YClientsOfferNotSellableError,
+    YClientsQuoteChangedError,
     YClientsScheduleUnavailableError,
     YClientsSpecialistUnavailableError,
     YClientsStaleVersionError,
@@ -423,6 +434,12 @@ def get_active_booking_tool_specs() -> list[dict[str, Any]]:
 EVENT_BOOKING_TOOL_INVOKED = "booking.tool_invoked"
 EVENT_BOOKING_CONFIRMED = "booking.confirmed"
 EVENT_BOOKING_CONFIRM_FAILED = "booking.confirm_failed"
+# DRF-1614 / §98 — its own event, deliberately not a `*_failed` one.
+# The booking did not happen, but nothing failed: the service needs a
+# screening question first and the request goes to a human. Counted
+# separately because «why do people end up with an operator» is a
+# question we will actually be asked.
+EVENT_BOOKING_HEALTH_CHECK_HANDOFF = "booking.health_check_handoff"
 EVENT_BOOKING_PREVIEW = "booking.preview"
 EVENT_BOOKING_CANCELLED = "booking.cancelled"
 EVENT_BOOKING_CANCEL_FAILED = "booking.cancel_failed"
@@ -507,6 +524,10 @@ class BookingRow:
     master_name: str
     service_name: str
     status: str
+    #: DRF-2569 / решение владельца 28.09 п.1–2: салон записи (``Tenant.name``)
+    #: и его пояс — время человеку показывается в поясе салона, не в UTC.
+    salon_name: str = ""
+    salon_tz: str = ""
 
 
 @dataclass(frozen=True)
@@ -617,6 +638,11 @@ class BookingToolResult:
     certificate: BuyCertificateResult | None = None
     keyboard: list[dict[str, str]] = field(default_factory=list)
     error: str = ""
+    #: DRF-2012 — whether this refusal promised the person a specialist.
+    #: The callback path reads the RESULT, not the exception, and cannot
+    #: decide this from the text: the two refusals differ by wording, not
+    #: by a sign. False unless a branch says otherwise.
+    handoff: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -852,8 +878,8 @@ def _to_slot_candidate(slot: AvailableTime, target_date: str) -> SlotCandidate |
 
 def _format_slots_text(slots: list[SlotCandidate], target_date: str) -> str:
     if not slots:
-        return f"На {target_date} свободных слотов нет."
-    lines = [f"Свободные слоты на {target_date}:"]
+        return f"На {target_date} свободного времени нет."
+    lines = [f"Свободное время на {target_date}:"]
     for s in slots[:8]:
         # Pull HH:MM out of the ISO datetime for compact rendering.
         time_part = s.datetime.split("T", 1)[1][:5] if "T" in s.datetime else s.datetime
@@ -947,6 +973,22 @@ def confirm_booking(
         "master_name": master_name,
         "service_name": service_name,
     }
+    # DRF-1708 / D4: то, что превью ПОКАЖЕТ, ложится в снимок pending и
+    # уедет в создание как quoted_*; неизвестное — не кладётся.
+    try:
+        quoted_price, quoted_duration = _quote_for_preview(
+            client, master_id=master_id, service_id=service_id
+        )
+    except YClientsOfferNotSellableError as exc:
+        # DRF-1989: каталог не продаёт это предложение. Ни превью с «Цена: 0 ₽»,
+        # ни pending на запись, которую каталог откажет.
+        return _offer_not_sellable_result(
+            tenant_id=tenant_id, tool="confirm_booking", reason=exc.reason
+        )
+    if quoted_price is not None:
+        payload["quoted_price"] = str(quoted_price)
+    if quoted_duration is not None:
+        payload["quoted_duration_minutes"] = quoted_duration
     token = create_pending(
         tenant=tenant,
         bot_user=bot_user,
@@ -978,9 +1020,12 @@ def confirm_booking(
         )
 
     preview_text = _format_confirm_preview(
+        address_line=_salon_address_line(tenant),
         master_name=master_name,
         service_name=service_name,
         slot_datetime=slot_datetime,
+        quoted_price=payload.get("quoted_price"),
+        quoted_duration_minutes=payload.get("quoted_duration_minutes"),
     )
     keyboard = confirm_2_button(str(token))
 
@@ -1005,11 +1050,43 @@ def confirm_booking(
     )
 
 
+def _format_money(value: Any) -> str:
+    """«1 500 ₽» из десятичной строки/числа; пусто — если не число."""
+    try:
+        n = int(round(float(Decimal(str(value)))))
+    except (InvalidOperation, ValueError, TypeError):
+        return ""
+    return f"{n:,}".replace(",", " ") + " ₽"
+
+
+def _format_minutes(value: Any) -> str:
+    try:
+        m = int(value)
+    except (ValueError, TypeError):
+        return ""
+    if m <= 0:
+        return ""
+    if m < 60:
+        return f"{m} мин"
+    h, rest = divmod(m, 60)
+    return f"{h} ч" if rest == 0 else f"{h} ч {rest} мин"
+
+
+def _salon_address_line(tenant: Any) -> str:
+    """DRF-1952 — строка адреса салона ЭТОЙ записи (фразы ``visit-address.ts``)."""
+    from apps.tenancy.visit_address import tenant_address_line
+
+    return tenant_address_line(tenant)
+
+
 def _format_confirm_preview(
     *,
     master_name: str,
     service_name: str,
     slot_datetime: str,
+    address_line: str,
+    quoted_price: Any = None,
+    quoted_duration_minutes: Any = None,
 ) -> str:
     """Render the Russian preview body for a ``confirm_booking`` card.
 
@@ -1017,6 +1094,9 @@ def _format_confirm_preview(
     boilerplate). The second LLM call in :class:`BookingSkill` MAY
     rephrase; this is the deterministic fallback the channel adapter
     uses if the LLM returns empty.
+
+    DRF-1708: длительность и цена — из котировки ребра, ровно те, что
+    уедут как ``quoted_*``; неизвестное не рисуется.
     """
     parts = ["Записываю:"]
     if service_name:
@@ -1025,8 +1105,57 @@ def _format_confirm_preview(
         parts.append(f"• Мастер: {master_name}")
     if slot_datetime:
         parts.append(f"• Время: {slot_datetime}")
+    # DRF-1952 — куда идти. Всегда: пустой адрес — честная фраза, не пропуск.
+    parts.append(f"• {address_line}")
+    duration = _format_minutes(quoted_duration_minutes)
+    if duration:
+        parts.append(f"• Длительность: {duration}")
+    price = _format_money(quoted_price)
+    if price:
+        parts.append(f"• Цена: {price}")
     parts.append("Подтверждаете?")
     return "\n".join(parts)
+
+
+def _quote_for_preview(
+    client: Any, *, master_id: int | str, service_id: int | str | None
+) -> tuple[Decimal | None, int | None]:
+    """Котировка ребра для превью (DRF-1708); любой сбой → «неизвестно».
+
+    Только на пути Ayla с клиентом, который умеет котировать; иначе
+    ``(None, None)`` — превью без цены, как раньше.
+    """
+    if not _booking_via_ayla() or not hasattr(client, "get_specialist_service_quote"):
+        return None, None
+    try:
+        return client.get_specialist_service_quote(staff_id=master_id, service_id=service_id)
+    except YClientsOfferNotSellableError:
+        # DRF-1989: не сбой котировки, а ответ — его разбирает вызывающий.
+        raise
+    except (YClientsUnavailableError, YClientsAPIError) as exc:
+        logger.warning(
+            "booking.confirm.quote_failed master_id=%s service_id=%s err=%s",
+            master_id,
+            service_id,
+            exc,
+        )
+        return None, None
+
+
+def _offer_not_sellable_result(
+    *, tenant_id: str, tool: str, reason: str, confirm: bool = True
+) -> BookingToolResult:
+    """DRF-1989: именованный отказ непродаваемого предложения — слова причины, без передачи."""
+    _audit_tool(
+        tenant_id=tenant_id, tool=tool, outcome=OFFER_NOT_SELLABLE_SLUG, extra={"reason": reason}
+    )
+    return BookingToolResult(
+        text=client_text_for(reason),
+        error=OFFER_NOT_SELLABLE_SLUG,
+        confirmation=(
+            ConfirmationResult(ok=False, error=OFFER_NOT_SELLABLE_SLUG) if confirm else None
+        ),
+    )
 
 
 def _resolve_payment_required(tenant: Any, payload: dict[str, Any]) -> bool:
@@ -1132,6 +1261,26 @@ def execute_confirm(
             error="invalid_payload",
         )
 
+    # DRF-1708: котировка из снимка pending — ровно то, что человек видел
+    # в превью. Только когда есть: без неё прежний вызов, и клиент без
+    # этих именованных параметров (B1 YClients) их не получает.
+    quote_kwargs: dict[str, Any] = {}
+    if payload.get("quoted_price") is not None:
+        try:
+            quote_kwargs["quoted_price"] = Decimal(str(payload["quoted_price"]))
+        except (InvalidOperation, ValueError):
+            logger.warning(
+                "booking.confirm.exec.bad_quoted_price value=%r", payload["quoted_price"]
+            )
+    if payload.get("quoted_duration_minutes") is not None:
+        try:
+            quote_kwargs["quoted_duration_minutes"] = int(payload["quoted_duration_minutes"])
+        except (ValueError, TypeError):
+            logger.warning(
+                "booking.confirm.exec.bad_quoted_duration value=%r",
+                payload["quoted_duration_minutes"],
+            )
+
     try:
         record: BookingRecord = client.create_record(
             staff_id=master_id,
@@ -1144,6 +1293,54 @@ def execute_confirm(
             # BOOKING_NO_PREPAYMENT_TENANTS (пилот без предоплаты);
             # вне allowlist — прежний дефолт «с предоплатой».
             payment_required=_resolve_payment_required(tenant, payload),
+            **quote_kwargs,
+        )
+    except YClientsQuoteChangedError as exc:
+        # DRF-1708 / D4 — MATERIAL_CHANGE: не поломка и не занятый слот.
+        # Показать, что было и что стало, и попросить новое подтверждение:
+        # новый pending с применяемым значением, старый снят. Запись НЕ
+        # создана — и это сказано словами.
+        logger.info("booking.confirm.exec.quote_changed field=%s", exc.field)
+        _audit_tool(tenant_id=tenant_id, tool="execute_confirm", outcome="quote_changed")
+        write_audit(
+            EVENT_BOOKING_CONFIRM_FAILED,
+            target="BookingSkill",
+            payload={"tenant_id": tenant_id, "reason": "quote_changed", "field": exc.field},
+        )
+        new_payload = dict(payload)
+        if exc.field == "price":
+            new_payload["quoted_price"] = str(exc.applied)
+            was, now = _format_money(exc.quoted), _format_money(exc.applied)
+            changed = f"цена изменилась: было {was}, стало {now}"
+        else:
+            new_payload["quoted_duration_minutes"] = int(exc.applied)
+            was, now = _format_minutes(exc.quoted), _format_minutes(exc.applied)
+            changed = f"длительность изменилась: было {was}, стало {now}"
+        new_token = create_pending(
+            tenant=tenant,
+            bot_user=bot_user,
+            kind=PendingBookingAction.Kind.CONFIRM,
+            payload=new_payload,
+        )
+        preview = _format_confirm_preview(
+            address_line=_salon_address_line(tenant),
+            master_name=master_name,
+            service_name=service_name,
+            slot_datetime=slot_datetime,
+            quoted_price=new_payload.get("quoted_price"),
+            quoted_duration_minutes=new_payload.get("quoted_duration_minutes"),
+        )
+        text = f"Пока вы выбирали, {changed}. Запись не создана.\n\n{preview}"
+        return BookingToolResult(
+            text=text,
+            error="quote_changed",
+            confirmation=ConfirmationResult(ok=False, error="quote_changed"),
+            pending=PendingPreview(
+                kind=PendingBookingAction.Kind.CONFIRM,
+                token=new_token,
+                preview_text=text,
+                keyboard=confirm_2_button(str(new_token)),
+            ),
         )
     except YClientsScheduleUnavailableError as exc:
         logger.warning("booking.confirm.exec.schedule_unavailable err=%s", exc)
@@ -1174,6 +1371,13 @@ def execute_confirm(
             confirmation=ConfirmationResult(ok=False, error="yclients_unavailable"),
             error="yclients_unavailable",
         )
+    except YClientsOfferNotSellableError as exc:
+        # DRF-1989: 422 SERVICE_NOT_ACTIVE с причиной — каталог не продаёт
+        # предложение. Не поломка и не передача менеджеру: у отказа свои слова.
+        logger.info("booking.confirm.exec.offer_not_sellable reason=%s", exc.reason)
+        return _offer_not_sellable_result(
+            tenant_id=tenant_id, tool="execute_confirm", reason=exc.reason
+        )
     except YClientsSpecialistUnavailableError as exc:
         # C1 (PILOT_CONTRACTS §2): Ayla rejected the NEW booking with 409
         # SUBSCRIPTION_PAST_DUE. The customer sees the NEUTRAL slug
@@ -1191,6 +1395,44 @@ def execute_confirm(
         return BookingToolResult(
             confirmation=ConfirmationResult(ok=False, error="unavailable"),
             error="unavailable",
+        )
+    except YClientsHealthCheckHandoffError as exc:
+        # DRF-1614 / §98. Caught BEFORE the generic branch below, which is
+        # where this refusal used to land: the person was handed to a
+        # human — correctly — but the handoff was named
+        # ``yclients_api_error`` and worded with the breakdown copy.
+        #
+        # The outcome carries the EXACT code, so the annotation queue can
+        # count HEALTH_CHECK_UNKNOWN on its own. §98 names that the
+        # substantive reason for keeping the two apart inside: merged
+        # into REQUIRED, the counter loses the criterion the queue is
+        # prioritised by. Outwards it is one calm sentence.
+        #
+        # The audit event is its own name and NOT
+        # ``EVENT_BOOKING_CONFIRM_FAILED``: nothing failed. Filing a
+        # medical decision under a failure event is the same defect one
+        # level up — it would lie to us later, when somebody counts why
+        # people end up with an operator.
+        code = exc.code or "MISSING"
+        logger.info("booking.confirm.exec.health_check_handoff code=%s err=%s", code, exc)
+        _audit_tool(
+            tenant_id=tenant_id,
+            tool="execute_confirm",
+            outcome=f"health_check_{code.lower()}",
+        )
+        write_audit(
+            EVENT_BOOKING_HEALTH_CHECK_HANDOFF,
+            target="BookingSkill",
+            payload={"tenant_id": tenant_id, "code": code},
+        )
+        # `text` and not a bare error slug: this result carries the
+        # sentence the person reads, exactly as the schedule-outage
+        # branch above does. The slug stays distinct so the caller routes
+        # to a handoff instead of the failure copy.
+        return BookingToolResult(
+            text=health_check_text_for(exc.code, handoff=exc.handoff),
+            error="health_check_handoff",
+            handoff=health_check_promises_a_specialist(exc.code, handoff=exc.handoff),
         )
     except YClientsAPIError as exc:
         logger.info("booking.confirm.exec.api_error err=%s", exc)
@@ -1336,14 +1578,25 @@ def execute_confirm(
             record=record,
             start_at=visit_at_dt,
         )
-        _schedule_reminders(
-            tenant=tenant,
-            bot_user=bot_user,
-            yc_id=yc_id,
-            visit_at_dt=visit_at_dt,
-            master_name=master_name,
-            service_name=service_name,
-        )
+        # DRF-2547: напоминание — только визиту, который канон ПОДТВЕРДИЛ. При
+        # предоплате канон создаёт ``awaiting_payment``; напоминание по нему
+        # звало клиента на неоплаченный визит. Подтверждение приедет событием
+        # ``booking.confirmed``, и напоминания поставит его обработчик.
+        if not _booking_via_ayla() or _canon_status_of(record) == _CANON_CONFIRMED:
+            _schedule_reminders(
+                tenant=tenant,
+                bot_user=bot_user,
+                yc_id=yc_id,
+                visit_at_dt=visit_at_dt,
+                master_name=master_name,
+                service_name=service_name,
+            )
+        else:
+            logger.info(
+                "booking.confirm.reminders_deferred appt=%s canon_status=%s",
+                yc_id,
+                _canon_status_of(record) or "unknown",
+            )
 
     _audit_tool(tenant_id=tenant_id, tool="execute_confirm", outcome="ok")
     write_audit(
@@ -1363,7 +1616,7 @@ def execute_confirm(
         master_name=master_name,
         service_name=service_name,
     )
-    text = _format_confirmation_text(confirmation)
+    text = _format_confirmation_text(confirmation, address_line=_salon_address_line(tenant))
     return BookingToolResult(text=text, confirmation=confirmation)
 
 
@@ -1392,6 +1645,20 @@ def _schedule_reminders(
     if visit_at_dt is None:
         return
     try:
+        # DRF-2586: под флагом ``yc_id`` — UUID записи Ayla, и напоминания
+        # пишутся тем же ключом, что у потребителя событий: одна пара на
+        # запись, двойника исключает уникальный индекс.
+        appointment_id = _as_uuid(yc_id) if _booking_via_ayla() else None
+        if appointment_id is not None:
+            create_reminders_for_ayla_appointment(
+                tenant=tenant,
+                bot_user=bot_user,
+                appointment_id=appointment_id,
+                visit_at=visit_at_dt,
+                master_name=master_name,
+                service_name=service_name,
+            )
+            return
         create_reminders_for_booking(
             tenant=tenant,
             bot_user=bot_user,
@@ -1404,7 +1671,27 @@ def _schedule_reminders(
         logger.exception("booking.reminder.schedule_failed yc_id=%s", yc_id)
 
 
-def _format_confirmation_text(confirmation: ConfirmationResult) -> str:
+def _reminders_for_record(record_id: Any) -> Any:
+    """Напоминания записи, в какой бы колонке они ни лежали (DRF-2586).
+
+    Под флагом запись — UUID Ayla: её напоминания лежат в
+    ``ayla_appointment_id`` (новые, из диалога и из событий) или в
+    ``yclients_record_id`` (записи из диалога до DRF-2586). Прежний фильтр
+    только по ``yclients_record_id`` не видел бы новых строк, и отмена или
+    перенос оставляли бы их ``PENDING`` — напоминание об отменённом визите.
+    Без флага — прежний фильтр по номеру YClients.
+    """
+    from apps.booking.models import BookingReminder
+
+    appointment_id = _as_uuid(record_id) if _booking_via_ayla() else None
+    if appointment_id is not None:
+        from apps.booking.reminder_lookup import reminders_for_appointment
+
+        return reminders_for_appointment(appointment_id)
+    return BookingReminder.all_tenants.filter(yclients_record_id=str(record_id))
+
+
+def _format_confirmation_text(confirmation: ConfirmationResult, *, address_line: str) -> str:
     if not confirmation.ok:
         return "Не удалось создать запись — переключу на менеджера."
     parts: list[str] = ["Готово! Записала."]
@@ -1414,6 +1701,8 @@ def _format_confirmation_text(confirmation: ConfirmationResult) -> str:
         parts.append(f"Услуга: {confirmation.service_name}.")
     if confirmation.visit_at:
         parts.append(f"Время: {confirmation.visit_at}.")
+    # DRF-1952 — адрес салона записи; пустой — фраза visit-address.ts.
+    parts.append(address_line if address_line.endswith(".") else f"{address_line}.")
     return " ".join(parts)
 
 
@@ -1615,8 +1904,7 @@ def execute_cancel(
     # keep). Import lazily to avoid the top-level cycle.
     from apps.booking.models import BookingReminder
 
-    BookingReminder.all_tenants.filter(
-        yclients_record_id=str(record_id),
+    _reminders_for_record(record_id).filter(
         status=BookingReminder.Status.PENDING,
     ).update(status=BookingReminder.Status.CANCELLED)
 
@@ -1934,8 +2222,7 @@ def _execute_reschedule_ayla(
     # Re-point reminders at the new time, same canonical id (best-effort).
     from apps.booking.models import BookingReminder
 
-    BookingReminder.all_tenants.filter(
-        yclients_record_id=str(record_id),
+    _reminders_for_record(record_id).filter(
         status=BookingReminder.Status.PENDING,
     ).update(status=BookingReminder.Status.CANCELLED)
     _schedule_reminders(
@@ -1973,7 +2260,8 @@ def _execute_reschedule_ayla(
         service_name=service_name or booking.service_name,
     )
     return BookingToolResult(
-        text=_format_confirmation_text(confirmation), confirmation=confirmation
+        text=_format_confirmation_text(confirmation, address_line=_salon_address_line(tenant)),
+        confirmation=confirmation,
     )
 
 
@@ -2182,8 +2470,7 @@ def execute_reschedule(
     BookingRequest.all_tenants.filter(pk=booking.pk).update(
         status=BookingRequest.Status.RESCHEDULED,
     )
-    BookingReminder.all_tenants.filter(
-        yclients_record_id=str(record_id),
+    _reminders_for_record(record_id).filter(
         status=BookingReminder.Status.PENDING,
     ).update(status=BookingReminder.Status.CANCELLED)
 
@@ -2671,17 +2958,22 @@ def _show_my_bookings_ayla(
     """
     from apps.booking.mirror_status import LIVE_STATUSES
     from apps.booking.models import RemoteBookingProxy
+    from apps.identity.services.bot_user_resolver import person_bot_users
 
+    # DRF-2436 B / решение владельца п.15: «мои записи» — единый список по ВСЕМ
+    # салонам человека, как в Mini App. Учётная строка и зеркало одной записи
+    # лежат в одном салоне (обе пишутся под его личностью), поэтому оба чтения
+    # идут по всем личностям подписанного аккаунта, а склейка — по id визита.
+    persons = person_bot_users(bot_user)
     rows = list(
         BookingRequest.all_tenants.filter(
-            tenant=tenant,
-            bot_user=bot_user,
+            bot_user__in=persons,
             status=BookingRequest.Status.CONFIRMED,
         ).order_by("-created_at")[:20]
     )
     proxies = {
         str(p.appointment_id): p
-        for p in RemoteBookingProxy.all_tenants.filter(tenant=tenant, bot_user=bot_user)
+        for p in RemoteBookingProxy.all_tenants.filter(bot_user__in=persons)
     }
 
     bookings: list[BookingRow] = []
@@ -2710,6 +3002,9 @@ def _show_my_bookings_ayla(
                 master_name=row.master_name,
                 service_name=row.service_name,
                 status="CONFIRMED",
+                # Салон — ЗАПИСИ (с DRF-2436 B чат читает все салоны человека).
+                salon_name=proxy.tenant.name,
+                salon_tz=_salon_tz_key(proxy.tenant),
             )
         )
 
@@ -2802,6 +3097,8 @@ def show_my_bookings(
                 master_name=row.master_name,
                 service_name=row.service_name,
                 status="CONFIRMED",
+                salon_name=getattr(tenant, "name", "") or "",
+                salon_tz=_salon_tz_key(tenant),
             )
         )
 
@@ -2815,17 +3112,28 @@ def show_my_bookings(
     return BookingToolResult(text=text, bookings=bookings)
 
 
+def _salon_tz_key(tenant: Any) -> str:
+    """Пояс салона — тем же правилом, что «✅ Вы записаны» (``tenant_timezone``)."""
+    from apps.tenancy.timezones import salon_zone
+
+    return salon_zone(tenant).key
+
+
+def _format_booking_line(b: BookingRow) -> str:
+    """Строка записи — слова владельца 28.09, п.1–2 (дом: ``booking.visit_words``)."""
+    from apps.booking.visit_words import booking_line, visit_time_words
+
+    when = visit_time_words(b.visit_at, b.salon_tz)
+    return "• " + booking_line(
+        service=b.service_name, master=b.master_name, salon=b.salon_name, when=when
+    )
+
+
 def _format_bookings_text(bookings: list[BookingRow]) -> str:
     if not bookings:
         return "У вас пока нет предстоящих записей."
     lines = ["Ваши предстоящие записи:"]
-    for b in bookings[:5]:
-        parts = [b.service_name or "—"]
-        if b.master_name:
-            parts.append(f"с {b.master_name}")
-        if b.visit_at:
-            parts.append(f"в {b.visit_at}")
-        lines.append("• " + " ".join(parts))
+    lines += [_format_booking_line(b) for b in bookings[:5]]
     return "\n".join(lines)
 
 
@@ -2961,9 +3269,20 @@ def calc_price(
     # at. ``service_id`` is the Ayla UUID here (``_coerce_id`` under
     # flag ON), the same key the edge lookup is scoped by.
     if master_id is not None and client is not None and _booking_via_ayla():
-        edge_price = _edge_price_for_quote(client, master_id=master_id, service_id=service_id)
+        try:
+            edge_price = _edge_price_for_quote(client, master_id=master_id, service_id=service_id)
+        except YClientsOfferNotSellableError as exc:
+            # DRF-1989: у этого мастера предложение не продаётся — цены нет.
+            return _offer_not_sellable_result(
+                tenant_id=tenant_id, tool="calc_price", reason=exc.reason, confirm=False
+            )
         if edge_price is not None:
             base_price = edge_price
+
+    # DRF-1989: цена ниже 1 ₽ — не цена, а незаполненное поле (каталог такое не
+    # продаёт): ответ «цену озвучит администратор», а не «0 ₽».
+    if base_price is not None and base_price < 1:
+        base_price = None
 
     # ── No promo case ──────────────────────────────────────────────
     if not promo_code:
@@ -3062,6 +3381,9 @@ def _edge_price_for_quote(
     """
     try:
         return client.get_specialist_service_price(staff_id=master_id, service_id=service_id)
+    except YClientsOfferNotSellableError:
+        # DRF-1989: не сбой чтения цены, а ответ — его разбирает вызывающий.
+        raise
     except (YClientsUnavailableError, YClientsAPIError) as exc:
         logger.warning(
             "booking.calc_price.edge_price_failed master_id=%s service_id=%s err=%s",
@@ -3463,6 +3785,39 @@ def _as_uuid(value: Any) -> Any:
         return None
 
 
+#: DRF-2537 — отметка «последнее событие канона неизвестно». Её ставят записи
+#: зеркала, которые делает сам бот (не применение события канона).
+_UNKNOWN_CANON_EVENT: dict[str, Any] = {
+    "last_applied_event_name": "",
+    "last_applied_event_at": None,
+}
+
+
+#: Значение зеркала для визита, который канон подтвердил.
+_CANON_CONFIRMED = "confirmed"
+
+
+def _canon_status_of(record: BookingRecord) -> str | None:
+    """Статус визита, который вернул КАНОН, в словаре зеркала (DRF-2547).
+
+    Ответ Ayla на создание и перенос — ``AppointmentDetailSerializer``, в нём
+    есть ``status``; ``provider._mirror_raw`` переносит его в ``record.raw``.
+    Нормализация — та же, что у ``booking.created``
+    (:func:`apps.eventbus.consumers.booking.normalize_booking_created_status`):
+    одно правило, иначе запись бота и событие разошлись бы молча.
+    ``None`` — статуса нет или он незнаком: «не знаем», а не «подтверждён».
+    """
+    from apps.eventbus.consumers.booking import normalize_booking_created_status
+
+    raw_status = (record.raw or {}).get("status")
+    if not raw_status:
+        return None
+    try:
+        return normalize_booking_created_status(raw_status)
+    except ValueError:
+        return None
+
+
 def _upsert_remote_booking_proxy(
     *,
     tenant: Any,
@@ -3470,11 +3825,13 @@ def _upsert_remote_booking_proxy(
     record: BookingRecord,
     start_at: datetime | None,
 ) -> None:
-    """Mirror a CONFIRMED Ayla appointment onto :class:`RemoteBookingProxy`.
+    """Mirror an Ayla appointment onto :class:`RemoteBookingProxy`.
 
     ADR-0009: Ayla owns the canonical booking; bot-platform keeps this thin
     mirror for reminder math + RFM/sentiment fan-out. Used by confirm and
-    (native) reschedule — both land the appointment in CONFIRMED. Best-effort:
+    (native) reschedule. The status is the one Ayla RETURNED (DRF-2547) —
+    with prepayment a fresh booking is ``awaiting_payment``, not CONFIRMED,
+    and a constant here overwrote that for good. Best-effort:
     the canonical row already exists in Ayla, so a mirror-write failure must
     NOT fail the customer-facing action (the next ``booking.*`` event from
     Ayla reconciles it). No-op on the flag-OFF (YClients) path.
@@ -3498,9 +3855,32 @@ def _upsert_remote_booking_proxy(
             "bot_user": bot_user,
             "start_at": start_at,
             "end_at": end_at,
-            "status": RemoteBookingProxy.Status.CONFIRMED,
             "source": RemoteBookingProxy.Source.AUTOMATION,
+            # DRF-2537: бот пишет строку сам (из ответа REST), а не применяет
+            # событие канона, — отметка последнего события становится
+            # «неизвестно». Оставить прежнюю значило бы подписать эту запись
+            # чужим событием: правдоподобно и неверно.
+            **_UNKNOWN_CANON_EVENT,
         }
+        # DRF-2547: статус — тот, что вернул КАНОН, а не константа CONFIRMED.
+        # Константа затирала ``awaiting_payment`` брони с предоплатой, а
+        # пришедший следом ``booking.created`` видел «уже confirmed» и молчал
+        # (advanced-state no-op) — зеркало врало навсегда. Статуса в ответе нет
+        # или он незнаком: существующую строку не трогаем по статусу («нет
+        # вестей», как с услугой ниже), новую не заводим — её заведёт
+        # ``booking.created`` с правильным статусом.
+        canon_status = _canon_status_of(record)
+        if canon_status is not None:
+            defaults["status"] = canon_status
+        elif not RemoteBookingProxy.all_tenants.filter(
+            appointment_id=_as_uuid(appt), tenant=tenant
+        ).exists():
+            logger.warning(
+                "booking.proxy.upsert_skipped_unknown_status appt=%s status=%r",
+                appt,
+                raw.get("status"),
+            )
+            return
         # Only write what we actually know. Ayla's appointment payload does
         # not expose the salon service at all, so a reschedule whose
         # response omits it used to overwrite a good service_id with NULL —
@@ -3582,6 +3962,7 @@ def _mirror_cancel(*, tenant: Any, record_id: int | str) -> None:
 
         RemoteBookingProxy.all_tenants.filter(tenant=tenant, appointment_id=appt).update(
             status=RemoteBookingProxy.Status.CANCELLED,
+            **_UNKNOWN_CANON_EVENT,  # DRF-2537: запись бота, не событие канона
         )
     except Exception:  # noqa: BLE001 — mirror write is best-effort
         logger.exception("booking.proxy.cancel_failed appt=%s", record_id)

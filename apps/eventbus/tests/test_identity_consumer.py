@@ -30,6 +30,7 @@ import pytest
 from apps.eventbus.consumers.identity import handle_user_profile_updated
 from apps.eventbus.ingest_envelope import IngestEnvelope
 from apps.identity.models import BotUser
+from apps.integrations.ayla.user_proxy import external_user_id_for
 from apps.integrations.ayla.profile_client import (
     ProfileFetchError,
     ProfileFields,
@@ -45,6 +46,18 @@ TENANT_ID = "9c3a7e1b-4d52-4f8e-b3a1-7c2d8e1f0a5c"
 
 
 # ─── helpers ───────────────────────────────────────────────────────────────
+
+
+def _assert_fetched_for(mock_fetch, user_id: UUID, bot_user: BotUser) -> None:
+    """One fetch, for ``user_id``, naming ``bot_user``'s identity (DRF-1709).
+
+    The header is what the catalog checks against the URL: it must be the
+    external id of a row that belongs to exactly this user, never a payload
+    field and never invented.
+    """
+    mock_fetch.assert_called_once()
+    assert mock_fetch.call_args.args == (user_id,)
+    assert mock_fetch.call_args.kwargs == {"on_behalf_of": external_user_id_for(bot_user)}
 
 
 def _envelope(
@@ -198,7 +211,7 @@ class TestPIISafeSyncList:
             handle_user_profile_updated(env)
 
         # REST fired exactly once.
-        mock_fetch.assert_called_once_with(UUID(AYLA_USER_ID))
+        _assert_fetched_for(mock_fetch, UUID(AYLA_USER_ID), bot_user)
 
         # display_name updated.
         bot_user.refresh_from_db()
@@ -375,11 +388,15 @@ class TestFailureModes:
         assert bot_user.display_name == "Old Name"
 
     def test_no_bot_users_no_rest_call(self, tenant: Tenant) -> None:
-        """Event for an Ayla user with no BotUser projection yet
-        (mobile-only customer) — REST still fires (we need to fetch
-        before we know there are no BotUsers? No: we check BotUsers
-        AFTER fetching). Actually current code fetches first. Test
-        documents the behaviour."""
+        """Эталон ПЕРЕВЁРНУТ 12.09.2026 (DRF-1709).
+
+        Раньше тест назывался так же — и ждал ОБРАТНОГО: «REST still
+        fires», потому что код сначала ходил в каталог и только потом
+        смотрел, есть ли кому обновлять. Теперь строки собираются первыми:
+        каталог требует назвать субъект на этом маршруте, и назвать его
+        честно можно только личностью строки, которую мы обновляем. Нет
+        строк — нет ни вызова, ни субъекта, которого пришлось бы выдумать.
+        """
         env = _envelope(data={"user_id": AYLA_USER_ID, "changed_fields": ["display_name"]})
         with patch(
             "apps.eventbus.consumers.identity.fetch_profile_fields",
@@ -387,8 +404,7 @@ class TestFailureModes:
         ) as mock_fetch:
             handle_user_profile_updated(env)
 
-        # REST fired, but no DB writes (no BotUsers to write to).
-        mock_fetch.assert_called_once()
+        mock_fetch.assert_not_called()
         assert BotUser.all_tenants.filter(ayla_user_id=AYLA_USER_ID).count() == 0
 
     def test_bad_user_id_no_rest_call(self, tenant: Tenant) -> None:
@@ -501,7 +517,7 @@ class TestSubjectIsTheEnvelope:
         ) as mock_fetch:
             handle_user_profile_updated(env)
 
-        mock_fetch.assert_called_once_with(UUID(AYLA_USER_ID))
+        _assert_fetched_for(mock_fetch, UUID(AYLA_USER_ID), bot_user)
 
     def test_absent_payload_user_id_still_works(self, tenant: Tenant, bot_user: BotUser) -> None:
         """``data.user_id`` is no longer required — the envelope carries it."""

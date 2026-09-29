@@ -291,15 +291,21 @@ class TestWelcomeTapsAreThePhraseTheButtonCarried:
         Кнопка, добавленная через месяц, падает здесь, а не в истории у
         человека в чате.
         """
-        from apps.channels.max.global_onboarding import resolve_welcome_tap
+        from apps.channels.max.global_onboarding import (
+            GLOBAL_WELCOME_TAP_LABELS,
+            resolve_welcome_tap,
+        )
         from apps.skills.welcome.skill import welcome_tap_labels
 
         labels = welcome_tap_labels()
         assert labels, "клавиатура приветствия пуста — проверка ниже ни о чём"
+        # DRF-2120: кнопки самого глобального пути подписаны текстом
+        # владельца («Начать», «Записать еду») — их таблица побеждает.
+        assert GLOBAL_WELCOME_TAP_LABELS, "таблица подписей глобального пути пуста"
         for payload, label in labels.items():
             tap = resolve_welcome_tap(payload)
             assert tap is not None, payload
-            assert tap.history_text == label, payload
+            assert tap.history_text == GLOBAL_WELCOME_TAP_LABELS.get(payload, label), payload
 
     def test_a_retired_welcome_button_leaves_no_user_turn(self, sent, fake_redis, concierge):
         """Снятая кнопка: форма правильная, метки нет — выдумать фразу нечем.
@@ -739,23 +745,28 @@ class TestFoodGoldenFixturesStillReplay:
     def _consented_user(self, user_id: int):
         """Пользователь, у которого сканер еды уже разрешён.
 
-        ``FoodScannerSkill`` держит собственный 152-ФЗ гейт на поле
-        ``BotUser.food_scanner_consent_at`` и без него отвечает «открой Mini
-        App и подтверди согласие». Фикстуры описывают поведение согласившегося
-        человека, поэтому согласие ставит оснастка — иначе проверялся бы гейт,
-        а не то, что фикстуры описывают.
+        ``FoodScannerSkill`` держит собственный 152-ФЗ гейт на согласии
+        ``food_diary_processing`` (строка реестра, DRF-1963) и без него отвечает
+        «открой Mini App и подтверди согласие». Фикстуры описывают поведение
+        согласившегося человека, поэтому согласие ставит оснастка — иначе
+        проверялся бы гейт, а не то, что фикстуры описывают.
         """
-        from django.utils import timezone
+        from apps.consent.nutrition import DIARY, FOOD_DIARY_CONSENT_DOCUMENT_VERSION
+        from apps.consent.services import record_global_consent
 
         bot_user, conversation = _welcomed_user(user_id)
-        bot_user.food_scanner_consent_at = timezone.now()
-        bot_user.save(update_fields=["food_scanner_consent_at"])
+        record_global_consent(
+            bot_user,
+            consent_type=DIARY,
+            source="test:consented_user",
+            document_version=FOOD_DIARY_CONSENT_DOCUMENT_VERSION,
+        )
         return bot_user, conversation
 
     def test_the_fixture_sets_are_the_real_ones(self):
         """Стража сторожа: перебор ниже читает настоящие YAML."""
         counts = {name: len(list(self._fixtures(name))) for name in self.SETS}
-        assert counts == {"food_scanner": 5, "food_clarify": 5, "food_correction": 5}, counts
+        assert counts == {"food_scanner": 5, "food_clarify": 5, "food_correction": 6}, counts
 
     def test_the_replayed_subset_is_exactly_the_callback_shaped_fixtures(self):
         """Что именно перебирается ниже — и почему не все пятнадцать.
@@ -780,6 +791,7 @@ class TestFoodGoldenFixturesStillReplay:
             "food_correction_cb_grams",
             "food_correction_cb_macros",
             "food_correction_cb_name",
+            "food_correction_cb_stale_card",
             "food_correction_distinct_prompts",
             "food_correction_unknown_field",
             "food_scanner_cb_clarify",
@@ -804,6 +816,15 @@ class TestFoodGoldenFixturesStillReplay:
                 uid += 1
                 replayed += 1
                 _, conversation = self._consented_user(uid)
+                # Посев диалогового состояния, как в штатном гейте
+                # (``input.skill_state``, DRF-1454): коллбэк правки
+                # отвечается из карточки сканера, без неё честный отказ.
+                seed = fixture.input.get("skill_state") or {}
+                if seed:
+                    state = dict(conversation.skill_state or {})
+                    state.update(seed)
+                    conversation.skill_state = state
+                    conversation.save(update_fields=["skill_state"])
                 before = len(sent)
                 max_handler.handle_global_max_event(
                     _tap(payload=text, user_id=uid, callback_id=f"fx-{uid}")
@@ -822,7 +843,7 @@ class TestFoodGoldenFixturesStillReplay:
                     # Та же проверка на тех же данных, только без регистра.
                     trace = {**trace, "response_text": response.lower()}
                     must_pass = _lowercased(must_pass)
-                for problem in evaluate(trace, must_pass, fixture.forbidden):
+                for problem in evaluate(trace, must_pass, fixture.reply_forbidden):
                     failures.append(f"{set_name}/{fixture.name}: {problem}")
                 for problem in evaluate_voice(response, fixture.voice_check):
                     failures.append(f"{set_name}/{fixture.name}: voice: {problem}")
@@ -833,5 +854,5 @@ class TestFoodGoldenFixturesStillReplay:
                     failures.append(f"{set_name}/{fixture.name}: сырой payload в истории: {raw}")
 
         # Положительная стража: перебор действительно что-то прогнал.
-        assert replayed == 11, replayed
+        assert replayed == 12, replayed
         assert not failures, failures

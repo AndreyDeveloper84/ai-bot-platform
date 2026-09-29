@@ -83,6 +83,7 @@ from apps.integrations.ayla.wellness_context_client import (
     WellnessContextError,
     WellnessContextHttpClient,
 )
+from apps.consent.nutrition import diary_or_health_granted
 from apps.notifications.proactive import consent_blocker, vet_outbound
 
 logger = logging.getLogger(__name__)
@@ -94,12 +95,13 @@ OCCASION_FAMILY = "OBSERVE"
 TRIGGER_PROGRESS_STATES = frozenset({"no_observations", "baseline_only"})
 TRIGGER_HORIZON_STATUS = "elapsed"
 
-#: Оба согласия — стандарт чтения и отправки health-class данных
-#: (DRF-1338; тот же набор, что у apps.orchestrator.nutrition_context).
-REQUIRED_CONSENTS = (
-    ConsentRecord.ConsentType.PERSONAL_DATA.value,
-    ConsentRecord.ConsentType.HEALTH.value,
-)
+#: Базовое согласие — через :func:`consent_blocker`; второе основание
+#: (дневник v1 ИЛИ старый HEALTH, DRF-2100) блокер выразить не может — оно
+#: «или», а не тип, — и проверяется отдельной ступенью ниже тем же слагом
+#: ``no_health_consent`` (тот же набор оснований, что у
+#: apps.orchestrator.nutrition_context; DRF-1338).
+REQUIRED_CONSENTS = (ConsentRecord.ConsentType.PERSONAL_DATA.value,)
+NO_NUTRITION_BASIS = "no_health_consent"
 
 #: Cap на строки за тик — тот же смысл, что у nutrition_proactive:
 #: пилотный список получателей однозначный, cap существует, чтобы будущий
@@ -268,6 +270,8 @@ def plan_observe_occasions(
 
         # Гейт получателя — до чтения health-class документа (см. модуль).
         blocked = consent_blocker(bot_user, required_consents=REQUIRED_CONSENTS)
+        if not blocked and not diary_or_health_granted(bot_user):
+            blocked = NO_NUTRITION_BASIS
         if blocked:
             decisions.append(decide(blocked, gate="recipient"))
             continue

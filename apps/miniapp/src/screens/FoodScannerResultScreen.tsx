@@ -2,7 +2,8 @@
  * F3 Recognition Result + Edit + F3-Clarify Modal — Customer Food Scanner.
  *
  * Route: `/customer/food-scanner/result` (router state from F2 carries
- * `{ result: ScanResponse, photo: File, mealType, previewUrl }`).
+ * `{ result: ScanResponse, photo: File, mealType }`). Адрес превью
+ * сюда НЕ передаётся: экран делает свой из `photo` (DRF-2399).
  *
  * Spec: `docs/screens/customer-food-scanner-flow.md` §4 (F3 high/low
  * conf) + §5 (F3-Clarify modal) + §10 (voice rules).
@@ -21,26 +22,36 @@
  * deficits / beauty_impact / recommendation) below the primary CTAs.
  */
 
-import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
+import { useScreenBack } from "../hooks/useScreenBack";
+import { backByAction, originFrom } from "../lib/screen-back";
+
 import { Snackbar } from "../components/Snackbar";
+import { DIARY_OFF_TEXT, diaryIsOff, getWellnessToday } from "../lib/customer-wellness";
 import {
   MEAL_TYPE_ICON,
   MEAL_TYPE_LABEL,
   PORTION_STEPS,
-  fetchHealthFlags,
+  FoodLogAnswerUnreadableError,
   logMeal,
   nextPortion,
   type MealType,
   type ScanResponse,
 } from "../lib/food-scanner";
+import {
+  portionNeedsConfirmation,
+  portionNumbersAreNamed,
+  portionProvenanceOf,
+} from "../lib/portion-provenance";
 
 interface RouterState {
   result?: ScanResponse;
   photo?: File;
   mealType?: MealType;
-  previewUrl?: string;
+  /** DRF-2349 — откуда вошли в поток; здесь поток заканчивается. */
+  returnTo?: string;
 }
 
 const MEAL_TYPES: ReadonlyArray<MealType> = [
@@ -56,12 +67,61 @@ export function FoodScannerResultScreen() {
   const navigate = useNavigate();
   const location = useLocation();
   const state = (location.state ?? {}) as RouterState;
+  // DRF-2349 — поток заканчивается здесь, и выйти надо туда, откуда вошли.
+  const origin = originFrom(location.state);
   const result = state.result;
   const photo = state.photo;
   const initialMealType = state.mealType ?? "lunch";
-  const previewUrl = state.previewUrl;
+  // Адрес превью — СВОЙ, и создаётся ВНУТРИ эффекта (DRF-2399).
+  //
+  // Первая редакция этой правки делала его в `useMemo` — и это был ровно
+  // тот дефект, который соседний лист DRF-2394 (б) вычищает из экрана
+  // мастера: побочное действие в функции, обязанной быть чистой.
+  // `StrictMode` вызывает фабрику `useMemo` дважды, оставляет второе
+  // значение, а очистка пассивного эффекта при имитации размонтирования
+  // отзывает именно его. Замер узлом на моём же коде:
+  //
+  //   created: blob/1, blob/2   revoked: blob/2   img src: blob/2
+  //   то есть адрес в `src` отозван, пока экран смонтирован, а blob/1 утёк
+  //
+  // Создание и освобождение в ОДНОМ эффекте делают это невозможным по
+  // построению: каждая живая подписка создаёт ровно один адрес и сама же
+  // его отзывает. Цена названа: картинка появляется на один коммит позже —
+  // на первом кадре её нет.
+  //
+  // Почему адрес вообще свой: раньше он приходил навигацией от экрана
+  // обработки, а тот освобождал его при своём уходе — адрес переживал
+  // владельца. Замер в настоящем Chrome (создать → присвоить `src` →
+  // отозвать): синхронно после `src` — СЛОМАНО, в микротаске и через
+  // `setTimeout(0)` — ЗАГРУЗИЛОСЬ. Очистка пассивна и бежит после мутации
+  // DOM, поэтому на первом показе картинка была видна и дефект выглядел
+  // отсутствующим; ломалось ПОВТОРНОЕ обращение.
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  useEffect(() => {
+    if (!photo) {
+      setPreviewUrl(null);
+      return;
+    }
+    const url = URL.createObjectURL(photo);
+    setPreviewUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [photo]);
 
   const [mealType, setMealType] = useState<MealType>(initialMealType);
+  // Возврат (DRF-1493) — к съёмке, с восстановлением уже сделанного
+  // снимка: без него человек, вернувшийся посмотреть на кадр,
+  // фотографировал бы заново. Поэтому не адрес, а заданное действие —
+  // но всё так же не `history.back()`.
+  const backToCapture = useCallback(
+    () =>
+      navigate("/customer/food-scanner/capture", {
+        replace: true,
+        state: { photo, mealType, returnTo: state.returnTo },
+      }),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `state.returnTo` приходит из `location.state` и на монтировании постоянен
+    [navigate, photo, mealType],
+  );
+  const onBack = useScreenBack(backByAction(backToCapture));
   const [portionMultiplier, setPortionMultiplier] = useState<number>(1.0);
   const [dishName, setDishName] = useState<string>(result?.dish_name ?? "");
   const [editingName, setEditingName] = useState(false);
@@ -69,13 +129,24 @@ export function FoodScannerResultScreen() {
   const [busy, setBusy] = useState(false);
   // ED-mode initial = true (fail-safe per adversarial CR P1).
   // Spec §10 Appendix mandates UI MUST hide numeric nutrition for
-  // customers with eating_disorder flag. Initializing to `false` and
-  // letting `fetchHealthFlags()` resolve asynchronously creates a race
-  // window where ED-customer sees calorie numbers before the flag
-  // arrives. We default to «hide», then `flagsResolved=true` flips ON
-  // ONLY if the customer is explicitly NOT in ED mode.
+  // customers with the eating-disorder flag. Initializing to `false` and
+  // letting the flag resolve asynchronously creates a race window where
+  // an ED-customer sees calorie numbers before the flag arrives. We
+  // default to «hide», then `flagsResolved=true` flips ON ONLY if the
+  // source says explicitly `nutrition_numbers_hidden: false`.
+  //
+  // DRF-2106 — the flag is the diary's own `nutrition_numbers_hidden`
+  // from `wellness/today`, the same key Saved / Favorites / Week read.
+  // Until this ticket the card asked `fetchHealthFlags()`, a stub behind
+  // `guardProd` that THREW in the production build: every customer saw
+  // «Примерно — записала.» instead of numbers, plus a console.error.
   const [edMode, setEdMode] = useState<boolean>(true);
   const [flagsResolved, setFlagsResolved] = useState<boolean>(false);
+  // DRF-2071 — контур выключили между сканом и записью: сводка пришла с
+  // маркером. «Записать» и «Уточнить» не рисуются — запись всё равно
+  // получит отказ, а «попробуй ещё раз» было бы ложью. «Не то» остаётся:
+  // это ack, ничего не пишет.
+  const [diaryOff, setDiaryOff] = useState<boolean>(false);
   const [clarifyOpen, setClarifyOpen] = useState(false);
   const [snack, setSnack] = useState<{ visible: boolean; message: string }>({
     visible: false,
@@ -84,17 +155,18 @@ export function FoodScannerResultScreen() {
   const clarifyTriggerRef = useRef<HTMLButtonElement | null>(null);
   const portionRowRef = useRef<HTMLDivElement | null>(null);
 
-  // Read health_flags once — ED mode also implied by null nutrition.
-  // Default is `edMode=true` (fail-safe); flip OFF only after the
-  // fetch confirms the customer is NOT in ED mode. If the fetch fails
-  // we stay in safe mode + keep numbers hidden — the cost is one
-  // user-visible «Примерно — записала.» instead of calories.
+  // Read the diary's ED flag once — ED mode also implied by null nutrition.
+  // Default is `edMode=true` (fail-safe); flip OFF only after the source
+  // says `nutrition_numbers_hidden === false`. An absent key or a failed
+  // read keeps numbers hidden — «не смогли спросить» is not permission to
+  // show them; the cost is one user-visible «Примерно — записала.».
   useEffect(() => {
     let cancelled = false;
-    fetchHealthFlags()
-      .then((flags) => {
+    getWellnessToday()
+      .then((today) => {
         if (cancelled) return;
-        setEdMode(Boolean(flags.health_flags.eating_disorder));
+        setEdMode(today.nutrition_numbers_hidden !== false);
+        setDiaryOff(diaryIsOff(today));
         setFlagsResolved(true);
       })
       .catch(() => {
@@ -125,49 +197,102 @@ export function FoodScannerResultScreen() {
     result.portion_g != null
       ? Math.round(result.portion_g * portionMultiplier)
       : null;
-  const calories = result.nutrition
-    ? Math.round(result.nutrition.calories * portionMultiplier)
-    : null;
-  const proteinG = result.nutrition
-    ? round1(result.nutrition.protein_g * portionMultiplier)
-    : null;
-  const fatG = result.nutrition
-    ? round1(result.nutrition.fat_g * portionMultiplier)
-    : null;
-  const carbsG = result.nutrition
-    ? round1(result.nutrition.carbs_g * portionMultiplier)
-    : null;
+  // DRF-2371 — каждое число может отсутствовать по отдельности, и
+  // отсутствие НЕ ноль. Прежний код умножал `null` на множитель:
+  // `Math.round(null * 1)` даёт 0, и экран печатал «Калории: ~0 ккал»
+  // о блюде, которого никто не считал. Ноль читается как «посчитано, и
+  // вышло почти ничего» — это утверждение, а не приближение.
+  const scaled = (value: number | null | undefined, round: (n: number) => number) =>
+    value == null ? null : round(value * portionMultiplier);
+  const calories = scaled(result.nutrition?.calories, Math.round);
+  const proteinG = scaled(result.nutrition?.protein_g, round1);
+  const fatG = scaled(result.nutrition?.fat_g, round1);
+  const carbsG = scaled(result.nutrition?.carbs_g, round1);
+  // DRF-2371 — показывать число или спрашивать вес, решает ПРИЗНАК
+  // происхождения порции, а не пустота ответа. Пустота двузначна и скоро
+  // исчезнет: как только типовая порция начнёт закрывать пустые итоги
+  // (DRF-2444), «числа есть» перестанет значить «вес назвали».
+  // `portionProvenanceOf` — единственное место, где живут строки провода;
+  // отсутствие поля и незнакомое значение оба читаются как «не названо».
+  const provenance = portionProvenanceOf(result.nutrition?.portion_source);
+  // Число показываем, только когда вес кто-то назвал. Причину пробела
+  // наружу не выводим: форма ответа причиной не является, а «признак
+  // наружу» (п. 3 DRF-2335) ждёт слова владельца.
+  const showNumbers =
+    !hideNumbers && calories != null && portionNumbersAreNamed(provenance);
+  // Дорога — существующая: «Написать вручную», где спрашивают «Сколько
+  // граммов?» и считают по весу. Нужна и когда числа нет, и когда оно есть,
+  // но веса никто не называл.
+  const askForWeight =
+    !hideNumbers && (calories == null || portionNeedsConfirmation(provenance));
+  // DRF-2371 — каждый макрос может отсутствовать отдельно от калорий:
+  // «Б null · Ж null · У null г» на экране и «Белки null» в озвучке —
+  // такой же выдуманный ответ, как «~0 ккал», только громче.
+  const macroParts = (
+    [
+      ["Б", proteinG],
+      ["Ж", fatG],
+      ["У", carbsG],
+    ] as Array<[string, number | null]>
+  ).filter(([, value]) => value != null);
+  const macrosLine = macroParts.length
+    ? `${macroParts.map(([label, value]) => `${label} ${value}`).join(" · ")} г`
+    : "";
+  const macrosLabel = macrosLine ? ` ${macrosLine}.` : "";
   const isLowConf = result.confidence < 0.6;
   const leadVerb = isLowConf ? "Похоже на" : "Узнала";
+  // DRF-2098 — ключ идемпотентности живёт столько, сколько карточка: повтор
+  // «Записать» после потерянного ответа не пишет вторую запись, а новая
+  // карточка (новый скан) получает новый ключ.
+  const idempotencyKey = useMemo(
+    () => `${result.scan_id}:${Date.now().toString(36)}`,
+    [result.scan_id],
+  );
 
   const onSave = useCallback(async () => {
     // Decide name override by comparing current input vs original
     // result — NOT by the `editingName` sticky flag (adversarial CR P2).
-    // Previously: opening F3-Clarify > Rename and tapping save without
-    // actually editing dropped scan_id permanently, losing the
-    // recognition link in analytics. Compare strings → only drop
-    // scan_id when the customer really renamed the dish.
+    // Compare strings → send `dish_name` only when the customer really
+    // renamed the dish. DRF-2098: `scan_id` STAYS next to the new name —
+    // it is the photo's provenance (§136 `photo_*`); the catalog accepts
+    // both. Dropping it on rename (as before) lost the recognition link.
     const trimmed = dishName.trim();
     const renamed =
       trimmed.length > 0 && trimmed !== result.dish_name;
     setBusy(true);
-    try {
-      await logMeal({
-        scan_id: renamed ? undefined : result.scan_id,
-        dish_name: renamed ? trimmed : undefined,
-        meal_type: mealType,
-        portion_multiplier: portionMultiplier,
-        note: note.trim() || undefined,
-      });
+    const toSaved = (namedCalories: number | null) =>
       navigate("/customer/food-scanner/saved", {
         replace: true,
         state: {
           dishName: renamed ? trimmed : result.dish_name,
-          calories,
+          // DRF-2371 — на следующий экран уезжает только то число, которое
+          // эта карточка имела право назвать. Иначе правило держалось бы
+          // один экран: карточка молчит, а «Записано» говорит «~250 ккал».
+          calories: namedCalories,
           edMode: hideNumbers,
+          returnTo: state.returnTo,
         },
       });
-    } catch {
+    try {
+      await logMeal({
+        scan_id: result.scan_id,
+        dish_name: renamed ? trimmed : undefined,
+        meal_type: mealType,
+        portion_multiplier: portionMultiplier,
+        idempotency_key: idempotencyKey,
+        note: note.trim() || undefined,
+      });
+      toSaved(showNumbers ? calories : null);
+    } catch (err) {
+      // DRF-2554 — сервер ответил успехом, но тело не читается: запись
+      // СДЕЛАНА. «Не получилось» толкнуло бы человека записать второй раз.
+      // Числа не называем: подтверждения каталога мы не прочли.
+      if (err instanceof FoodLogAnswerUnreadableError) {
+        toSaved(null);
+        return;
+      }
+      // Остальные классы (`FoodLogRefusedError.kind`) различимы в коде и в
+      // логе бота; своя фраза у каждого — слово владельца, до него общая.
       setSnack({
         visible: true,
         message: "Не получилось сохранить. Попробуй ещё раз.",
@@ -175,6 +300,7 @@ export function FoodScannerResultScreen() {
     } finally {
       setBusy(false);
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps -- `state.returnTo` приходит из `location.state` и на монтировании постоянен
   }, [
     result,
     mealType,
@@ -183,6 +309,7 @@ export function FoodScannerResultScreen() {
     dishName,
     calories,
     hideNumbers,
+    idempotencyKey,
     navigate,
   ]);
 
@@ -196,8 +323,8 @@ export function FoodScannerResultScreen() {
       visible: true,
       message: "Поняла, не записываю. Если хочешь — пришли ещё фото.",
     });
-    window.setTimeout(() => navigate("/customer/main"), 1800);
-  }, [navigate]);
+    window.setTimeout(() => navigate(origin ?? "/customer/main"), 1800);
+  }, [navigate, origin]);
 
   const openClarify = useCallback(() => setClarifyOpen(true), []);
   const closeClarify = useCallback(() => {
@@ -228,9 +355,10 @@ export function FoodScannerResultScreen() {
       }
       // rephoto
       navigate("/customer/food-scanner/capture", {
-        state: { mealType, photo: null },
+        state: { mealType, photo: null, returnTo: state.returnTo },
       });
     },
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `state.returnTo` приходит из `location.state` и на монтировании постоянен
     [mealType, navigate],
   );
 
@@ -241,12 +369,7 @@ export function FoodScannerResultScreen() {
           type="button"
           className="records-screen__back"
           aria-label="Назад"
-          onClick={() =>
-            navigate("/customer/food-scanner/capture", {
-              replace: true,
-              state: { photo, mealType },
-            })
-          }
+          onClick={onBack}
         >
           <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
             <path
@@ -258,7 +381,7 @@ export function FoodScannerResultScreen() {
             />
           </svg>
         </button>
-        <h1 className="records-screen__title">Распознанное</h1>
+        <h1 className="records-screen__title">Я распознала так</h1>
       </header>
 
       <main className="food-scanner-screen__main">
@@ -351,21 +474,23 @@ export function FoodScannerResultScreen() {
               </button>
             </div>
           </div>
-          {!hideNumbers && calories != null && (
+          {showNumbers && (
             <div
               className="food-scanner-result__nutrition"
               role="status"
               aria-live="polite"
               aria-label={`Примерно ${
                 portionGrams ?? ""
-              } граммов, ${calories} килокалорий. Белки ${proteinG}, жиры ${fatG}, углеводы ${carbsG} граммов.`}
+              } граммов, ${calories} килокалорий.${macrosLabel}`}
             >
               <p className="food-scanner-result__calories" aria-hidden="true">
                 Калории: ~{calories} ккал
               </p>
-              <p className="food-scanner-result__macros" aria-hidden="true">
-                Б {proteinG} · Ж {fatG} · У {carbsG} г
-              </p>
+              {macrosLine && (
+                <p className="food-scanner-result__macros" aria-hidden="true">
+                  {macrosLine}
+                </p>
+              )}
             </div>
           )}
           {hideNumbers && (
@@ -445,24 +570,51 @@ export function FoodScannerResultScreen() {
          */}
 
         <div className="food-scanner-screen__cta-stack">
-          <button
-            type="button"
-            className="btn-primary"
-            disabled={busy}
-            onClick={onSave}
-          >
-            Записать в дневник
-          </button>
-          <button
-            ref={clarifyTriggerRef}
-            type="button"
-            className={`btn-secondary${
-              isLowConf ? " food-scanner-result__cta--hint" : ""
-            }`}
-            onClick={openClarify}
-          >
-            Уточнить
-          </button>
+          {diaryOff && (
+            <p className="food-scanner-diary__caption" role="status">{DIARY_OFF_TEXT}</p>
+          )}
+          {!diaryOff && (
+            <button
+              type="button"
+              className="btn-primary"
+              disabled={busy}
+              onClick={onSave}
+            >
+              Записать в дневник
+            </button>
+          )}
+          {!diaryOff && (
+            <button
+              ref={clarifyTriggerRef}
+              type="button"
+              className={`btn-secondary${
+                isLowConf ? " food-scanner-result__cta--hint" : ""
+              }`}
+              onClick={openClarify}
+            >
+              Уточнить
+            </button>
+          )}
+          {askForWeight && (
+            // DRF-2371 — вместо числа, которого нет, дорога к числу: тот же
+            // ручной ввод, что предлагает экран обработки при отказе. Имя
+            // блюда переносим, чтобы не набирать заново.
+            <button
+              type="button"
+              className="btn-secondary"
+              onClick={() =>
+                navigate("/customer/food-scanner/manual", {
+                  state: {
+                    mealType,
+                    returnTo: state.returnTo,
+                    fromSaved: { dish_name: dishName },
+                  },
+                })
+              }
+            >
+              Написать вручную
+            </button>
+          )}
           <button
             type="button"
             className="btn-secondary"

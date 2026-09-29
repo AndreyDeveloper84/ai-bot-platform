@@ -1,0 +1,170 @@
+/* Оформление админки Ayla (задача «человеческие названия и стили»).
+ *
+ * Правила, которые здесь соблюдаются:
+ *
+ * 1. Ничего не мигает, не анимируется и не перекрашивает штатный
+ *    интерфейс Django. Файл добавляет ТОЛЬКО свои классы `ayla-*`;
+ *    ни один селектор Django не переопределяется, поэтому обновление
+ *    Django не сломает экраны, а экраны — Django.
+ * 2. Обе темы, и каскад повторяет каскад самой админки Django 5.x
+ *    (`base.css` + `dark_mode.css`), а не изобретает свой: светлые
+ *    значения на `html[data-theme="light"], :root`, системная тёмная в
+ *    `@media (prefers-color-scheme: dark) { :root { … } }`, явная
+ *    тёмная на `html[data-theme="dark"]`. Голый `:root` в медиазапросе
+ *    здесь принципиален: `data-theme` ставит `theme.js` только по
+ *    событию `load`, до него атрибута на странице нет вовсе, и
+ *    привязка тёмных цветов к `[data-theme="auto"]` давала бы вспышку
+ *    светлых бейджей на тёмном фоне при каждой загрузке.
+ * 3. Значение статуса машинное остаётся на экране рядом с человеческим
+ *    (`.ayla-badge__code`): оператору нужны оба — понятная подпись,
+ *    чтобы читать, и точная строка, чтобы спросить о ней в задаче.
+ */
+
+/* Светлая тема. Селектор повторяет приём base.css самого Django:
+ * `html[data-theme="light"]` имеет специфичность выше, чем `:root`,
+ * поэтому явно выбранная светлая тема переживает медиазапрос ниже. */
+html[data-theme="light"],
+:root {
+  --ayla-ok-fg: #14663a;
+  --ayla-ok-bg: rgba(20, 102, 58, 0.10);
+  --ayla-ok-br: rgba(20, 102, 58, 0.28);
+
+  --ayla-wait-fg: #7a4d00;
+  --ayla-wait-bg: rgba(122, 77, 0, 0.10);
+  --ayla-wait-br: rgba(122, 77, 0, 0.28);
+
+  --ayla-stop-fg: #8c1d18;
+  --ayla-stop-bg: rgba(140, 29, 24, 0.10);
+  --ayla-stop-br: rgba(140, 29, 24, 0.28);
+
+  --ayla-off-fg: #4a4f57;
+  --ayla-off-bg: rgba(74, 79, 87, 0.10);
+  --ayla-off-br: rgba(74, 79, 87, 0.26);
+
+  --ayla-code-fg: #5b616b;
+  --ayla-absent-fg: #6b7079;
+}
+
+/* Системная тёмная. Селектор — голый `:root`, ровно как в
+ * dark_mode.css Django, а НЕ `html[data-theme="auto"]`: атрибут
+ * `data-theme` ставит `theme.js` только по событию `load`, и до этого
+ * момента его на странице нет вовсе. Бейджи со светлыми цветами
+ * мигнули бы на тёмном фоне при каждой загрузке. */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ayla-ok-fg: #7ee2a8;
+    --ayla-ok-bg: rgba(126, 226, 168, 0.14);
+    --ayla-ok-br: rgba(126, 226, 168, 0.34);
+
+    --ayla-wait-fg: #f0c674;
+    --ayla-wait-bg: rgba(240, 198, 116, 0.14);
+    --ayla-wait-br: rgba(240, 198, 116, 0.34);
+
+    --ayla-stop-fg: #ff9e94;
+    --ayla-stop-bg: rgba(255, 158, 148, 0.14);
+    --ayla-stop-br: rgba(255, 158, 148, 0.34);
+
+    --ayla-off-fg: #b6bcc6;
+    --ayla-off-bg: rgba(182, 188, 198, 0.12);
+    --ayla-off-br: rgba(182, 188, 198, 0.30);
+
+    --ayla-code-fg: #a4abb5;
+    --ayla-absent-fg: #9aa1ab;
+  }
+}
+
+/* Явно выбранная тёмная — специфичность выше медиазапроса выше. */
+html[data-theme="dark"] {
+  --ayla-ok-fg: #7ee2a8;
+  --ayla-ok-bg: rgba(126, 226, 168, 0.14);
+  --ayla-ok-br: rgba(126, 226, 168, 0.34);
+
+  --ayla-wait-fg: #f0c674;
+  --ayla-wait-bg: rgba(240, 198, 116, 0.14);
+  --ayla-wait-br: rgba(240, 198, 116, 0.34);
+
+  --ayla-stop-fg: #ff9e94;
+  --ayla-stop-bg: rgba(255, 158, 148, 0.14);
+  --ayla-stop-br: rgba(255, 158, 148, 0.34);
+
+  --ayla-off-fg: #b6bcc6;
+  --ayla-off-bg: rgba(182, 188, 198, 0.12);
+  --ayla-off-br: rgba(182, 188, 198, 0.30);
+
+  --ayla-code-fg: #a4abb5;
+  --ayla-absent-fg: #9aa1ab;
+}
+
+/* ── Бейдж состояния ───────────────────────────────────────────────── */
+
+.ayla-badge {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.4em;
+  padding: 0.15em 0.55em;
+  border: 1px solid var(--ayla-off-br);
+  border-radius: 0.75em;
+  background: var(--ayla-off-bg);
+  color: var(--ayla-off-fg);
+  font-size: 0.92em;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.ayla-badge--ok {
+  border-color: var(--ayla-ok-br);
+  background: var(--ayla-ok-bg);
+  color: var(--ayla-ok-fg);
+}
+
+.ayla-badge--wait {
+  border-color: var(--ayla-wait-br);
+  background: var(--ayla-wait-bg);
+  color: var(--ayla-wait-fg);
+}
+
+.ayla-badge--stop {
+  border-color: var(--ayla-stop-br);
+  background: var(--ayla-stop-bg);
+  color: var(--ayla-stop-fg);
+}
+
+/* Машинное имя состояния. Мелко и рядом — но НЕ спрятано: по этой
+ * строке оператор заводит задачу и ищет в логах. */
+.ayla-badge__code {
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.82em;
+  letter-spacing: 0.02em;
+  color: var(--ayla-code-fg);
+}
+
+/* ── Отсутствие значения ───────────────────────────────────────────── */
+
+/* Отсутствие называется словами и НЕ подменяется значением: ни нулём,
+ * ни прочерком, который читается как «ноль». Курсив и приглушённый цвет
+ * дополнительно отделяют «данных нет» от данных. */
+.ayla-absent {
+  color: var(--ayla-absent-fg);
+  font-style: italic;
+}
+
+/* ── Числа ─────────────────────────────────────────────────────────── */
+
+.ayla-num {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  display: inline-block;
+  min-width: 4ch;
+}
+
+/* ── Многострочная подсказка в карточке ────────────────────────────── */
+
+.ayla-note {
+  margin: 0;
+  line-height: 1.5;
+}
+
+.ayla-note ul {
+  margin: 0.35em 0 0;
+  padding-left: 1.2em;
+}

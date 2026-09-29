@@ -1,4 +1,4 @@
-"""readyz settings wiring — REDIS_URL / S3_ENDPOINT_URL as attributes.
+"""readyz settings wiring — REDIS_URL as an attribute.
 
 Pins the fix for the silent-localhost probe bug: the readyz probes
 read ``getattr(settings, ...)``, so the urls MUST exist as settings
@@ -20,9 +20,6 @@ class TestSettingsAttributes:
     def test_redis_url_attribute_present(self) -> None:
         assert hasattr(dj_settings, "REDIS_URL")
 
-    def test_s3_endpoint_url_attribute_present(self) -> None:
-        assert hasattr(dj_settings, "S3_ENDPOINT_URL")
-
     def test_redis_url_shape(self) -> None:
         """The attribute resolves to a redis:// URL (env or safe default)."""
         assert dj_settings.REDIS_URL.startswith("redis://")
@@ -41,28 +38,3 @@ class TestProbesHitConfiguredUrl:
         from_url.assert_called_once_with(sentinel)
         client.ping.assert_awaited_once()
         client.aclose.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_minio_probe_uses_configured_endpoint(self, settings) -> None:
-        sentinel = "http://minio:9000"  # container value, NOT localhost
-        settings.S3_ENDPOINT_URL = sentinel
-        captured = {}
-
-        class _FakeResponse:
-            def raise_for_status(self) -> None: ...
-
-        class _FakeClient:
-            def __init__(self, **_kwargs) -> None: ...
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, *_args):
-                return None
-
-            async def get(self, url: str):
-                captured["url"] = url
-                return _FakeResponse()
-
-        with patch("httpx.AsyncClient", side_effect=lambda **kw: _FakeClient(**kw)):
-            await readyz_views._ping_minio()
-        assert captured["url"] == "http://minio:9000/minio/health/live"

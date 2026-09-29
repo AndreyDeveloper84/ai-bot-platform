@@ -20,10 +20,12 @@
  *        persisted in DeviceStorage). Covers the solo provider case
  *        (owner+admin+master = one Olga) AND the team admin who also
  *        delivers services.
- *      - has admin role only → AdminRoutes (default landing /admin/team).
- *        Receptionist sees the list but every owner-only action button
- *        is disabled with a tooltip — backend re-checks at /deactivate
- *        + /reactivate.
+ *      - has admin role only → AdminRoutes. Владелец и администратор
+ *        садятся на /admin/team; ресепшн — на /admin/day, и «Чаты» с
+ *        «Настройками» ей не показывают вовсе (DRF-1522, см.
+ *        `lib/admin-tabs.ts`). На «Команде» ресепшн видит список, но
+ *        каждое owner-only действие выключено — бэкенд перепроверяет на
+ *        /deactivate + /reactivate.
  *      - is_master only → /master/dashboard (unchanged from M0..M6).
  *      - is_customer → existing customer routes (unchanged).
  *      - 401 / unmapped → «Доступ не настроен» error screen with
@@ -37,11 +39,28 @@
 
 import type React from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Link, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
+import {
+  Link,
+  Navigate,
+  Route,
+  Routes,
+  useLocation,
+  useNavigate,
+} from "react-router-dom";
 
 import { ApiError } from "./lib/api";
 import { getMe, type MeResponse } from "./lib/admin-api";
+import {
+  type SalonChoiceTenant,
+  salonChoiceTenantsFrom,
+  setSalonChoice,
+} from "./lib/salon-choice";
+import { adminLandingPath, isAdminTabAllowed } from "./lib/admin-tabs";
+import { canOpenSalonPilot } from "./lib/salon-pilot";
 import { getStartPayload, parseStartRoute } from "./lib/max-sdk";
+import { channelIdentity } from "./lib/identity";
+import { ErrorBoundary } from "./components/ErrorBoundary";
+import { OpenFromMaxScreen } from "./components/OpenFromMaxScreen";
 import {
   SurfaceModeContext,
   type SurfaceModeContextValue,
@@ -56,27 +75,33 @@ import {
   type UnifiedSurface,
 } from "./state/surface";
 import { BootReloadContext } from "./state/boot";
+import { AdminAddPersonScreen } from "./screens/admin/AdminAddPersonScreen";
 import { AdminAvailabilityRequestsScreen } from "./screens/admin/AdminAvailabilityRequestsScreen";
 import { AdminDeactivationFlowScreen } from "./screens/admin/AdminDeactivationFlowScreen";
 import { AdminInternalChatListScreen } from "./screens/admin/AdminInternalChatListScreen";
 import { AdminInternalChatThreadScreen } from "./screens/admin/AdminInternalChatThreadScreen";
-import { AdminInviteMasterScreen } from "./screens/admin/AdminInviteMasterScreen";
 import { AdminMasterDetailScreen } from "./screens/admin/AdminMasterDetailScreen";
 import { AdminNewBookingScreen } from "./screens/admin/AdminNewBookingScreen";
 import { AdminPeopleScreen } from "./screens/admin/AdminPeopleScreen";
+import { AdminInvitesScreen } from "./screens/admin/AdminInvitesScreen";
+import { AdminHandoffQueueScreen } from "./screens/admin/AdminHandoffQueueScreen";
+import { AdminReadinessScreen } from "./screens/admin/AdminReadinessScreen";
 import { AdminSalonDayScreen } from "./screens/admin/AdminSalonDayScreen";
+import { AdminSectionDeniedScreen } from "./screens/admin/AdminSectionDeniedScreen";
 import { AdminServicesMatrixScreen } from "./screens/admin/AdminServicesMatrixScreen";
 import { AdminSettingsPlaceholderScreen } from "./screens/admin/AdminSettingsPlaceholderScreen";
-import { AdminStaffAccessScreen } from "./screens/admin/AdminStaffAccessScreen";
 import { AdminTeamScreen } from "./screens/admin/AdminTeamScreen";
-import { BookingConfirmScreen } from "./screens/BookingConfirmScreen";
-import { BookingSuccessScreen } from "./screens/BookingSuccessScreen";
+import { SalonPilotAylaScreen } from "./screens/admin/SalonPilotAylaScreen";
+import { SalonPilotScheduleScreen } from "./screens/admin/SalonPilotScheduleScreen";
+import { SalonPilotTodayScreen } from "./screens/admin/SalonPilotTodayScreen";
 import { BookingWhenScreen } from "./screens/BookingWhenScreen";
-import { CatalogScreen } from "./screens/CatalogScreen";
 import { CustomerBookingConfirmScreen } from "./screens/CustomerBookingConfirmScreen";
 import { CustomerBookingDetailScreen } from "./screens/CustomerBookingDetailScreen";
 import { CustomerBookingSuccessScreen } from "./screens/CustomerBookingSuccessScreen";
 import { CustomerCatalogScreen } from "./screens/CustomerCatalogScreen";
+import { RecommendationCardScreen } from "./screens/RecommendationCardScreen";
+import { ExecutionOptionScreen } from "./screens/ExecutionOptionScreen";
+import { ProviderChoiceScreen } from "./screens/ProviderChoiceScreen";
 import { CustomerMasterDetailScreen } from "./screens/CustomerMasterDetailScreen";
 import { CustomerProfileScreen } from "./screens/CustomerProfileScreen";
 import { CustomerNotificationSettingsScreen } from "./screens/CustomerNotificationSettingsScreen";
@@ -85,42 +110,55 @@ import { CustomerRecordsScreen } from "./screens/CustomerRecordsScreen";
 import { CustomerSlotsScreen } from "./screens/CustomerSlotsScreen";
 import { CustomerWellnessDashboardScreen } from "./screens/CustomerWellnessDashboardScreen";
 import { GoalSelectScreen } from "./screens/GoalSelectScreen";
+import { PlanLiteScreen } from "./screens/PlanLiteScreen";
 import { FeedbackScreen } from "./screens/FeedbackScreen";
 import { FoodScannerCaptureScreen } from "./screens/FoodScannerCaptureScreen";
 import { FoodScannerDiaryScreen } from "./screens/FoodScannerDiaryScreen";
 import { FoodScannerManualScreen } from "./screens/FoodScannerManualScreen";
+import { FoodScannerWeekScreen } from "./screens/FoodScannerWeekScreen";
 import { FoodScannerProcessingScreen } from "./screens/FoodScannerProcessingScreen";
 import { FoodScannerResultScreen } from "./screens/FoodScannerResultScreen";
 import { FoodScannerSavedScreen } from "./screens/FoodScannerSavedScreen";
+import { FoodScannerDayScreen } from "./screens/FoodScannerDayScreen";
+import { FoodScannerFavoritesScreen } from "./screens/FoodScannerFavoritesScreen";
 import { HelloScreen } from "./screens/HelloScreen";
 import { CustomerEntryScreen } from "./screens/CustomerEntryScreen";
 import { RoleNotReadyScreen } from "./screens/RoleNotReadyScreen";
-import { MasterConversationDetailScreen } from "./screens/MasterConversationDetailScreen";
-import { MasterConversationsScreen } from "./screens/MasterConversationsScreen";
 import { MasterCustomersScreen } from "./screens/MasterCustomersScreen";
 import { MasterBillingScreen } from "./screens/MasterBillingScreen";
 import { MasterDashboardScreen } from "./screens/MasterDashboardScreen";
+import { MasterBookingDetailScreen } from "./screens/MasterBookingDetailScreen";
+import { MasterNewBookingScreen } from "./screens/MasterNewBookingScreen";
 import { MasterInternalChatListScreen } from "./screens/MasterInternalChatListScreen";
 import { MasterInternalChatThreadScreen } from "./screens/MasterInternalChatThreadScreen";
 import { MasterOnboardingScreen } from "./screens/MasterOnboardingScreen";
 import { MasterPickerScreen } from "./screens/MasterPickerScreen";
 import { MasterNotificationSettingsScreen } from "./screens/MasterNotificationSettingsScreen";
 import { MasterProfileScreen } from "./screens/MasterProfileScreen";
+import { MasterReviewsScreen } from "./screens/MasterReviewsScreen";
+import { MasterAylaScreen } from "./screens/MasterAylaScreen";
 import { MasterScheduleScreen } from "./screens/MasterScheduleScreen";
+import { MasterPublicationScreen } from "./screens/MasterPublicationScreen";
+import { MasterDirectionsScreen } from "./screens/MasterDirectionsScreen";
+import { MasterPlaceScreen } from "./screens/MasterPlaceScreen";
+import { MasterServiceSelectScreen } from "./screens/MasterServiceSelectScreen";
 import { MasterServicesScreen } from "./screens/MasterServicesScreen";
 import { MasterSettingsScreen } from "./screens/MasterSettingsScreen";
-import { MyVisitDetailScreen } from "./screens/MyVisitDetailScreen";
-import { MyVisitsScreen } from "./screens/MyVisitsScreen";
-import { ProfileScreen } from "./screens/ProfileScreen";
+import { MasterSetupLandingScreen } from "./screens/MasterSetupLandingScreen";
+import { MasterWorkingHoursScreen } from "./screens/MasterWorkingHoursScreen";
+import { SoloSetupGate } from "./components/SoloSetupGate";
+import { SoloSurfaceContext } from "./hooks/useMasterAvatarItems";
 import { RescheduleScreen } from "./screens/RescheduleScreen";
 import { ServiceDetailScreen } from "./screens/ServiceDetailScreen";
 
-type BootStatus = "loading" | "ready" | "error" | "no_role";
+type BootStatus = "loading" | "ready" | "error" | "no_role" | "choose_salon";
 
 interface BootState {
   status: BootStatus;
   me: MeResponse | null;
   err: unknown;
+  /** DRF-1766: салоны на выбор, когда сервер ответил `salon_choice_required`. */
+  salons?: SalonChoiceTenant[];
 }
 
 const INITIAL: BootState = { status: "loading", me: null, err: null };
@@ -138,10 +176,57 @@ function SplashScreen() {
           gap: "var(--s-3)",
         }}
       >
-        <div className="skeleton" style={{ width: 80, height: 80, borderRadius: "50%" }} />
+        <div
+          className="skeleton"
+          style={{ width: 80, height: 80, borderRadius: "50%" }}
+        />
         <p style={{ color: "var(--c-text-secondary)" }}>
           Загружаем рабочее место…
         </p>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * «В каком салоне вы сейчас?» — DRF-1766 (срез 5 DRF-1705). Показывается,
+ * когда `/api/v1/me` ответил `409 salon_choice_required`: у этой личности
+ * рабочая роль в нескольких салонах, и решение владельца — спросить, а не
+ * выбрать за человека. Выбор живёт на сессию и уходит заголовком
+ * `X-Salon-Choice` на каждый запрос; сервер принимает его только среди
+ * салонов из этого списка.
+ */
+function SalonChooserScreen({
+  salons,
+  onChoose,
+}: {
+  salons: SalonChoiceTenant[];
+  onChoose: (slug: string) => void;
+}) {
+  return (
+    <div className="screen">
+      <h1 className="screen__title">В каком салоне вы сейчас?</h1>
+      <p>
+        У вас есть роль в нескольких салонах. Выберите, с каким работать сейчас.
+      </p>
+      <div
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          gap: "var(--s-2)",
+          marginTop: "var(--s-4)",
+        }}
+      >
+        {salons.map((t) => (
+          <button
+            key={t.slug}
+            type="button"
+            className="btn-primary"
+            onClick={() => onChoose(t.slug)}
+          >
+            {t.name}
+          </button>
+        ))}
       </div>
     </div>
   );
@@ -152,8 +237,8 @@ function NoRoleScreen({ onRetry }: { onRetry: () => void }) {
     <div className="screen">
       <h1 className="screen__title">Доступ не настроен</h1>
       <p>
-        Кажется, эта учётная запись пока не привязана к салону. Откройте
-        чат с ботом, чтобы зарегистрироваться, и попробуйте снова.
+        Кажется, эта учётная запись пока не привязана к салону. Откройте чат с
+        ботом, чтобы зарегистрироваться, и попробуйте снова.
       </p>
       <div
         style={{ display: "flex", gap: "var(--s-2)", marginTop: "var(--s-4)" }}
@@ -187,23 +272,140 @@ function NoRoleScreen({ onRetry }: { onRetry: () => void }) {
 function adminRouteElements(me: MeResponse): React.ReactNode {
   return (
     <>
-      {/* Phase 2 — the salon's day. First tab in AdminTabBar. */}
-      <Route path="/admin/day" element={<AdminSalonDayScreen />} />
-      <Route path="/admin/booking/new" element={<AdminNewBookingScreen />} />
-      <Route path="/admin/team" element={<AdminTeamScreen me={me} />} />
-      <Route
-        path="/admin/team/invite"
-        element={<AdminInviteMasterScreen me={me} />}
-      />
       {/*
-        DRF-1061 block 2.4 — access codes. Sits beside `/admin/team/invite`
-        rather than inside it: that screen CREATES a catalog master, this
-        one GRANTS ACCESS to a person who already exists. The backend keeps
-        the two endpoints apart for the same reason.
+        Пилотная салонная админка — «Сегодня · Расписание · Ayla»
+        (DRF-1235, решение владельца 07.09.2026).
+
+        Три адреса стоят РЯДОМ с пятивкладочным мостом, а не вместо
+        него: мост — двадцать живых экранов, на которых салон работает
+        сегодня, и выключать его владелец не просил. Обе поверхности
+        живут параллельно, у каждой своя нижняя панель и своё правило
+        доступа.
+
+        Страж — не украшение, и он НЕ повторяет собой гейт ручки.
+        `GET /api/v1/admin/day/`, за которым ходит «Сегодня», с DRF-1552
+        пускает и ресепшн (`require_admin_or_reception_read`), так что
+        403 сам собой её отсюда не выставит. Закрывает её решение о
+        поверхности: пилотную админку владелец открыл владельцу и
+        администратору, а вопрос, какие салонные сценарии отдать
+        ресепшн, отдельный и незакрытый (`docs/OPEN_DECISIONS.md` §35).
+        До ответа она не должна попадать сюда даже по прямой ссылке из
+        закладок или старого сообщения бота.
+
+        Проверка спрашивает наличие управляющей роли
+        (`canOpenSalonPilot`), а не отсутствие приёмной: владелец,
+        которому заодно проставили ресепшн, остаётся владельцем.
+
+        Отказ рисует общий `AdminSectionDeniedScreen` — тот же, что на
+        «Чатах», «Настройках» и «Услугах». Своего экрана у пилота для
+        этого нет намеренно: два отказа с разными словами про одно и то
+        же разъезжаются на первой же правке текста.
+
+        Посадка приложения не тронута: `adminLandingPath` по-прежнему
+        ведёт на мост. Какая из двух поверхностей встречает человека при
+        входе — решение владельца, и принимать его здесь нечем.
       */}
       <Route
+        path="/admin/today"
+        element={
+          canOpenSalonPilot(me) ? (
+            <SalonPilotTodayScreen me={me} />
+          ) : (
+            <AdminSectionDeniedScreen me={me} section="Сегодня" />
+          )
+        }
+      />
+      <Route
+        path="/admin/schedule"
+        element={
+          canOpenSalonPilot(me) ? (
+            <SalonPilotScheduleScreen me={me} />
+          ) : (
+            <AdminSectionDeniedScreen me={me} section="Расписание" />
+          )
+        }
+      />
+      <Route
+        path="/admin/ayla"
+        element={
+          canOpenSalonPilot(me) ? (
+            <SalonPilotAylaScreen me={me} />
+          ) : (
+            <AdminSectionDeniedScreen me={me} section="Ayla" />
+          )
+        }
+      />
+      {/* DRF-2115 — очередь диалогов, ждущих человека: с карточки «Сегодня». */}
+      <Route
+        path="/admin/handoff"
+        element={
+          canOpenSalonPilot(me) ? (
+            <AdminHandoffQueueScreen />
+          ) : (
+            <AdminSectionDeniedScreen me={me} section="Диалоги" />
+          )
+        }
+      />
+      {/* DRF-2117 — готовность салона поимённо: с карточки «Сегодня». */}
+      <Route
+        path="/admin/readiness"
+        element={
+          canOpenSalonPilot(me) ? (
+            <AdminReadinessScreen />
+          ) : (
+            <AdminSectionDeniedScreen me={me} section="Готовность" />
+          )
+        }
+      />
+      {/* Phase 2 — the salon's day. Был первой вкладкой моста; у владельца и
+          администратора мост снят (DRF-2115), адрес живёт по прямой ссылке. */}
+      <Route path="/admin/day" element={<AdminSalonDayScreen me={me} />} />
+      <Route path="/admin/booking/new" element={<AdminNewBookingScreen />} />
+      <Route path="/admin/team" element={<AdminTeamScreen me={me} />} />
+      {/*
+        DRF-1505 — «Добавить человека»: один экран, три адреса.
+
+        Раньше здесь стояли два экрана. Один СОЗДАВАЛ карточку мастера,
+        второй ВЫДАВАЛ доступ тому, кто уже заведён, и владелец салона
+        должен был выбрать между ними до того, как что-то сделает —
+        зная то, чего он знать не обязан. Экран теперь один, а вопрос
+        задаётся на нём (решение владельца §25 п.4 от 05.09.2026).
+
+        Прежние адреса оставлены и выбирают ветку: они лежат в
+        рунбуках, в `docs/screens/admin-surface-spec.md` и в чужих
+        экранах, и ломать их ради переезда незачем.
+
+        `key` у каждого элемента — не украшение. Три маршрута рисуют ОДИН
+        тип компонента на одном и том же месте дерева, поэтому переход
+        между ними React считает обновлением пропов, а не новым экраном:
+        инициализатор `useState` не перезапускается, и `initialTrack`
+        приезжает новый, а ветка остаётся прежняя. Сегодня по этим
+        адресам никто друг к другу не переходит, но ловушка сработала бы
+        молча — экран открылся бы «не тем».
+      */}
+      <Route
+        path="/admin/team/add"
+        element={<AdminAddPersonScreen key="add-person" me={me} />}
+      />
+      <Route
+        path="/admin/team/invite"
+        element={
+          <AdminAddPersonScreen
+            key="add-person-master"
+            me={me}
+            initialTrack="new-master"
+          />
+        }
+      />
+      <Route
         path="/admin/team/access"
-        element={<AdminStaffAccessScreen me={me} />}
+        element={
+          <AdminAddPersonScreen
+            key="add-person-access"
+            me={me}
+            initialTrack="access-code"
+          />
+        }
       />
       {/*
         The roster of PEOPLE — every role, both tables (ADR-0008). Owner
@@ -220,6 +422,11 @@ function adminRouteElements(me: MeResponse): React.ReactNode {
         path="/admin/team/people"
         element={<AdminPeopleScreen me={me} />}
       />
+      {/* DRF-2275 — issued access codes. Owner and admin; see the screen. */}
+      <Route
+        path="/admin/team/invites"
+        element={<AdminInvitesScreen me={me} />}
+      />
       <Route
         path="/admin/team/:masterId/deactivate"
         element={<AdminDeactivationFlowScreen me={me} />}
@@ -228,22 +435,56 @@ function adminRouteElements(me: MeResponse): React.ReactNode {
         path="/admin/team/:masterId"
         element={<AdminMasterDetailScreen me={me} />}
       />
+      {/*
+        «Услуги» — матрица «мастер × услуга» с правкой и массовым
+        применением. У ресепшн вкладку убрали (DRF-1552, решение
+        владельца §35 п.1: разрешённого сценария для неё нет), поэтому
+        страж стоит и на адресе: ссылка переживает вкладку — в закладке,
+        в старом сообщении бота, в `AdminMasterDetailScreen`, который
+        уводит сюда с `?master_id=`.
+      */}
       <Route
         path="/admin/services"
-        element={<AdminServicesMatrixScreen me={me} />}
+        element={
+          isAdminTabAllowed(me, "services") ? (
+            <AdminServicesMatrixScreen me={me} />
+          ) : (
+            <AdminSectionDeniedScreen me={me} section="Услуги" />
+          )
+        }
       />
       <Route
         path="/admin/availability-requests"
         element={<AdminAvailabilityRequestsScreen me={me} />}
       />
-      {/* Master ↔ admin internal chat — admin queue ("Чаты с мастерами"). */}
+      {/*
+        Master ↔ admin internal chat — admin queue ("Чаты с мастерами").
+
+        Ресепшн сюда не пускают (DRF-1522). Бэкенд и так отвечает 403
+        (`require_admin_role`), но экран за 403 показывал баннер поверх
+        пустого списка — человек видел ошибку, а не отказ. Страж стоит на
+        адресе, потому что вкладку мы убрали, а ссылка остаётся: в старых
+        диалогах бота, в закладках, в чужом сообщении.
+      */}
       <Route
         path="/admin/internal-chat"
-        element={<AdminInternalChatListScreen me={me} />}
+        element={
+          isAdminTabAllowed(me, "chats") ? (
+            <AdminInternalChatListScreen me={me} />
+          ) : (
+            <AdminSectionDeniedScreen me={me} section="Чаты" />
+          )
+        }
       />
       <Route
         path="/admin/internal-chat/threads/:threadId"
-        element={<AdminInternalChatThreadScreen me={me} />}
+        element={
+          isAdminTabAllowed(me, "chats") ? (
+            <AdminInternalChatThreadScreen me={me} />
+          ) : (
+            <AdminSectionDeniedScreen me={me} section="Чаты" />
+          )
+        }
       />
       {/*
         Legacy /admin/chats path (used by AdminTabBar) → redirect to the
@@ -254,9 +495,20 @@ function adminRouteElements(me: MeResponse): React.ReactNode {
         path="/admin/chats"
         element={<Navigate to="/admin/internal-chat" replace />}
       />
+      {/*
+        «Настройки» — заглушка, и для ресепшн это была заглушка, которую
+        она не может ничем заменить: настройки салона правит владелец
+        (DRF-1522). Отказ честнее, чем «Скоро здесь будут настройки».
+      */}
       <Route
         path="/admin/settings"
-        element={<AdminSettingsPlaceholderScreen />}
+        element={
+          isAdminTabAllowed(me, "settings") ? (
+            <AdminSettingsPlaceholderScreen me={me} />
+          ) : (
+            <AdminSectionDeniedScreen me={me} section="Настройки" />
+          )
+        }
       />
     </>
   );
@@ -326,7 +578,9 @@ function useStartParamRedirect(enabled: boolean): void {
  * only renders its own error states.
  */
 function inviteOnboardingRouteElements(): React.ReactNode {
-  return <Route path="/onboarding/master" element={<MasterOnboardingScreen />} />;
+  return (
+    <Route path="/onboarding/master" element={<MasterOnboardingScreen />} />
+  );
 }
 
 /**
@@ -343,14 +597,30 @@ function masterRouteElements(): React.ReactNode {
       {/* D7 billing — subscription status + card binding (money path) */}
       <Route path="/master/billing" element={<MasterBillingScreen />} />
       <Route path="/master/schedule" element={<MasterScheduleScreen />} />
+      {/* DRF-2200 (М-7) — «Рабочий график» мастера салона: тот же экран,
+       * только на чтение, с «Запросить изменение» (§83). */}
       <Route
-        path="/master/conversations"
-        element={<MasterConversationsScreen />}
+        path="/master/working-hours"
+        element={<MasterWorkingHoursScreen />}
       />
+      {/* DRF-2156 (М-4) — «Детали записи» по макету DRF-1185: тап по записи
+          на «Сегодня» и в «Расписании» ведёт сюда, не в переписки. */}
       <Route
-        path="/master/conversations/:id"
-        element={<MasterConversationDetailScreen />}
+        path="/master/bookings/:id"
+        element={<MasterBookingDetailScreen />}
       />
+      {/* DRF-2155 (М-3) — «Новая запись» по макету DRF-1184: с «Сегодня»
+          («Добавить запись») и из «Расписания» (тап по свободному окну,
+          ?date&from&to → «Выбранное окно»). */}
+      <Route path="/master/booking/new" element={<MasterNewBookingScreen />} />
+      {/* Раздел «Ayla» — диалог мастера с ассистентом (DRF-1180,
+          OD-MASTER-IA от 25.08). */}
+      <Route path="/master/ayla" element={<MasterAylaScreen />} />
+      {/* DRF-1255 (OD-7): прямой переписки мастера с клиентом нет — экраны
+          сняты. Адреса могли остаться в старых DM/deeplink'ах: ведём на
+          «Сегодня», а не в пустой экран. */}
+      <Route path="/master/conversations" element={<Navigate to="/master/dashboard" replace />} />
+      <Route path="/master/conversations/:id" element={<Navigate to="/master/dashboard" replace />} />
       <Route path="/master/profile" element={<MasterProfileScreen />} />
       {/* M7 notification settings (Bundle B / item 3) */}
       <Route
@@ -395,7 +665,6 @@ function CatchAllRedirect({ to }: { to: string }) {
   const location = useLocation();
   useEffect(() => {
     if (import.meta.env.DEV) {
-      // eslint-disable-next-line no-console
       console.warn(
         `[App] Unknown route ${location.pathname} — redirecting to ${to}`,
       );
@@ -417,8 +686,15 @@ function AdminRoutes({ me }: { me: MeResponse }) {
           already mount it via `masterRouteElements`, don't declare it
           twice. */}
       {inviteOnboardingRouteElements()}
-      {/* Default + unknown — land on team. */}
-      <Route path="*" element={<CatchAllRedirect to="/admin/team" />} />
+      {/*
+        Default + unknown. Владелец и администратор — на «Команду», как и
+        было. Ресепшн — на «День» (DRF-1522): ростер мастеров, где почти
+        все действия от неё скрыты, был последним, что ей нужно утром.
+      */}
+      <Route
+        path="*"
+        element={<CatchAllRedirect to={adminLandingPath(me)} />}
+      />
     </Routes>
   );
 }
@@ -474,19 +750,8 @@ function SurfaceCard({
   return (
     <button
       type="button"
+      className="surface-card"
       onClick={onClick}
-      style={{
-        display: "flex",
-        flexDirection: "column",
-        alignItems: "flex-start",
-        gap: "var(--s-1)",
-        padding: "var(--s-4)",
-        minHeight: 88,
-        background: "var(--c-surface-1)",
-        border: "1px solid var(--c-divider)",
-        borderRadius: "var(--r-md)",
-        textAlign: "left",
-      }}
       aria-label={ariaLabel}
     >
       <span style={{ fontSize: "var(--font-size-300)", fontWeight: 600 }}>
@@ -546,7 +811,7 @@ function UnifiedLanding({ me }: { me: MeResponse }) {
               title="Салон"
               subtitle="Команда, услуги, запросы графика"
               ariaLabel="Перейти в Салон"
-              onClick={() => pick("admin", "/admin/team")}
+              onClick={() => pick("admin", adminLandingPath(me))}
             />
             <SurfaceCard
               icon="👤"
@@ -602,7 +867,7 @@ function UnifiedLandingOrRedirect({ me }: { me: MeResponse }) {
   // the fall-through below (→ chooser) is defensive only.
   const last = readLastSurface();
   if (last === "admin") {
-    return <Navigate to="/admin/team" replace />;
+    return <Navigate to={adminLandingPath(me)} replace />;
   }
   if (last === "master") {
     return <Navigate to="/master/dashboard" replace />;
@@ -646,37 +911,24 @@ function UnifiedAdminMasterRoutes({ me }: { me: MeResponse }) {
 }
 
 /**
- * Solo provider unified surface — Variant B navigation per Tau §3 verdict
- * (master-solo-surface.md r1 2026-05-26). Rebuilt from PR #798's 8-tab
- * horizontal-scroll Variant A to the 5-tab + «Ещё» bottom-sheet pattern
- * mandated by founder + Tau review for WCAG 2.5.8 compliance on 360dp
- * viewport (360 ÷ 5 = 72dp per tab, no label truncation).
+ * Solo provider unified surface (Tau §3 → §28/§50, DRF-2127).
  *
  * Activated only when `me.is_solo_provider === true` (W4 PR #760).
  *
- * Bottom-bar tabs (5):
- *   📋 День     → MasterDashboardScreen  (today agenda; reuse)
- *   📅 Записи   → MasterScheduleScreen   (booking calendar; reuse)
- *   👥 Клиенты  → MasterCustomersScreen  (Tier 2 read-only roster — this PR)
- *   💼 Услуги   → MasterServicesScreen   (Tier 2 read-only catalog — this PR)
- *   ⋯ Ещё      → opens bottom sheet (does NOT navigate)
+ * Bottom bar — ровно три, как у мастерской и салонной поверхности
+ * (§28 п.2, решение владельца 05.09; DRF-2127):
+ *   📋 Сегодня    → /solo/my-day    MasterDashboardScreen
+ *   📅 Расписание → /solo/schedule  MasterScheduleScreen (/solo/bookings — алиас)
+ *   ✦ Ayla        → /solo/ayla      MasterAylaScreen (OD-7: диалог с ассистентом)
  *
- * «Ещё» bottom sheet (Tau §3 spec):
- *   ⏰ Расписание   → MasterScheduleScreen  (same screen as Записи today)
- *   💰 Доходы       → SoonScreen            (post-pilot per pilot runbook)
- *   ⭐ Отзывы       → SoonScreen            (post-pilot)
- *   🤖 AI-помощник → MasterConversationsScreen (M5 + AI drafts)
- *   ──────────────
- *   👤 Профиль      → MasterProfileScreen
- *   ⚙ Настройки     → MasterSettingsScreen (M8 logout-only)
- *
- * Deep-link behaviour for /solo/more: a direct URL hit (e.g. from a stale
- * bookmark) redirects to /solo/my-day AND opens the sheet — Tau's
- * "implementation choice: simplest" instruction. Tap «Ещё» tab from the
- * bottom bar toggles the sheet without navigation.
- *
- * Legacy `/admin/*` + `/master/*` routes are still mounted so deep-links
- * from bot DMs keep working. The bottom nav just doesn't surface them.
+ * Прежние пять вкладок + лист «Ещё» (Variant B, Tau §3) сняты. Куда ушло:
+ *   Клиенты, Услуги, Отзывы, Профиль, Настройки → лист аватара
+ *     (`AvatarSheet`, `masterAvatarSheetItems({ surface: "solo" })`);
+ *   «Управление салоном» → тот же лист при владельческой роли (DRF-1149);
+ *   Доходы (/solo/earnings, экран-заглушка — §33) — в листе не рисуются,
+ *     адрес живёт по прямой ссылке; «AI-помощник» (/solo/ai — переписка с
+ *     клиентами) снят DRF-1255, адрес ведёт на «Сегодня».
+ * /solo/more (старая ссылка из DM) — редирект на /solo/my-day.
  */
 const SOLO_NAV_TABS: ReadonlyArray<{
   path: string;
@@ -686,127 +938,31 @@ const SOLO_NAV_TABS: ReadonlyArray<{
   /** When true, taps toggle the «Ещё» sheet instead of navigating. */
   opensSheet?: boolean;
 }> = [
-  { path: "/solo/my-day", label: "День", icon: "📋", ariaLabel: "Мой день" },
-  { path: "/solo/bookings", label: "Записи", icon: "📅", ariaLabel: "Записи" },
-  { path: "/solo/customers", label: "Клиенты", icon: "👥", ariaLabel: "Клиенты" },
-  { path: "/solo/services", label: "Услуги", icon: "💼", ariaLabel: "Услуги и цены" },
-  { path: "/solo/more", label: "Ещё", icon: "⋯", ariaLabel: "Меню «Ещё»", opensSheet: true },
-];
-
-interface SoloMoreSheetItem {
-  path: string;
-  label: string;
-  icon: string;
-  ariaLabel: string;
-  /** Divider sits between functional and settings items per Tau §3 mock. */
-  trailingDivider?: boolean;
-}
-
-const SOLO_MORE_SHEET_ITEMS: ReadonlyArray<SoloMoreSheetItem> = [
-  { path: "/solo/schedule", label: "Расписание", icon: "⏰", ariaLabel: "Расписание" },
-  { path: "/solo/earnings", label: "Доходы", icon: "💰", ariaLabel: "Доходы" },
-  { path: "/solo/reviews", label: "Отзывы", icon: "⭐", ariaLabel: "Отзывы" },
+  // DRF-2127 (§28 п.2 / §50): ровно три, те же слова, что у мастерской и
+  // салонной панели. Снятое отсюда живёт в листе аватара (`AvatarSheet`,
+  // `masterAvatarSheetItems({ surface: "solo" })`): Клиенты, Услуги,
+  // Отзывы, Настройки, Профиль, «Управление салоном» при роли; «Доходы» и
+  // «Доходы» — только по прямой ссылке (§33); «AI-помощник» снят (DRF-1255).
+  { path: "/solo/my-day", label: "Сегодня", icon: "📋", ariaLabel: "Сегодня" },
   {
-    path: "/solo/ai",
-    label: "AI-помощник",
-    icon: "🤖",
-    ariaLabel: "AI-помощник",
-    trailingDivider: true,
+    path: "/solo/schedule",
+    label: "Расписание",
+    icon: "📅",
+    ariaLabel: "Расписание",
   },
-  { path: "/solo/profile", label: "Профиль", icon: "👤", ariaLabel: "Профиль" },
-  { path: "/solo/settings", label: "Настройки", icon: "⚙", ariaLabel: "Настройки" },
+  { path: "/solo/ayla", label: "Ayla", icon: "✦", ariaLabel: "Ayla" },
 ];
 
-/**
- * The «Салон» escape hatch — DRF-1149 safety net.
- *
- * The solo surface mounts every `/admin/*` route (see
- * `UnifiedSoloSurface`) but the five-tab bar and the sheet above surface
- * none of them, so until now the only way in was typing a URL. That was
- * fine while «solo» meant «one person». It stopped being fine when the
- * pilot salon — four masters, three of them never bridged to a BotUser —
- * was mis-counted as solo and lost its entire admin surface.
- *
- * The counting bug itself is fixed in `is_solo_provider`; this item is
- * the second lock on the same door. If the classifier is ever wrong
- * again, an owner or admin can still reach the team screen instead of
- * being stranded on a surface with no way out.
- *
- * Gated on the role flags, not on `is_solo_provider`: a genuine solo
- * provider IS an owner, and «Салон» is where she manages her catalog and
- * her services regardless of headcount. A master-only caller never sees
- * it — same rule the backend enforces at `@require_admin_role`.
- */
-const SOLO_ADMIN_SHEET_ITEM: SoloMoreSheetItem = {
-  path: "/admin/team",
-  label: "Салон",
-  icon: "🏢",
-  ariaLabel: "Управление салоном",
-  trailingDivider: true,
-};
-
-/**
- * Sheet items for this caller: the Tau §3 base list, plus «Салон» when
- * the caller holds an admin-side role. The divider moves onto «Салон» so
- * the functional / settings split from the Tau mock is preserved.
- */
-function soloMoreSheetItems(me: MeResponse): ReadonlyArray<SoloMoreSheetItem> {
-  const hasAdmin = me.is_owner || me.is_admin || me.is_receptionist;
-  if (!hasAdmin) return SOLO_MORE_SHEET_ITEMS;
-  return SOLO_MORE_SHEET_ITEMS.flatMap((it) =>
-    it.trailingDivider
-      ? [{ ...it, trailingDivider: false }, SOLO_ADMIN_SHEET_ITEM]
-      : [it],
-  );
-}
-
-/**
- * Bottom-bar nav for the solo surface. Five tabs; the «Ещё» tab does
- * NOT navigate — it toggles the sheet via the `onOpenSheet` callback.
- * Active-state highlighting tracks the actual route prefix so the
- * indicator stays put even after the user dismisses the sheet.
- */
-function SoloBottomNav({
-  onOpenSheet,
-  sheetOpen,
-  moreItems,
-}: {
-  onOpenSheet: () => void;
-  sheetOpen: boolean;
-  moreItems: ReadonlyArray<SoloMoreSheetItem>;
-}) {
+function SoloBottomNav() {
   const location = useLocation();
   return (
     <nav className="solo-tabbar" aria-label="Основная навигация">
       {SOLO_NAV_TABS.map((t) => {
-        // «Ещё» is active iff sheet open OR pathname is in one of the
-        // nested sheet items (deep-link case).
-        const isMore = t.opensSheet === true;
-        const matchesPath = location.pathname.startsWith(t.path);
-        const matchesSheetItem =
-          isMore &&
-          moreItems.some((it) => location.pathname.startsWith(it.path));
-        const isActive = isMore
-          ? sheetOpen || matchesSheetItem
-          : matchesPath;
-        if (isMore) {
-          return (
-            <button
-              key={t.path}
-              type="button"
-              className={`solo-tabbar__tab${isActive ? " solo-tabbar__tab--active" : ""}`}
-              aria-label={t.ariaLabel}
-              aria-haspopup="menu"
-              aria-expanded={sheetOpen}
-              onClick={onOpenSheet}
-            >
-              <span className="solo-tabbar__icon" aria-hidden="true">
-                {t.icon}
-              </span>
-              <span className="solo-tabbar__label">{t.label}</span>
-            </button>
-          );
-        }
+        // «Расписание» подсвечивается и на алиасе /solo/bookings (тот же экран).
+        const isActive =
+          location.pathname.startsWith(t.path) ||
+          (t.path === "/solo/schedule" &&
+            location.pathname.startsWith("/solo/bookings"));
         return (
           <Link
             key={t.path}
@@ -827,150 +983,6 @@ function SoloBottomNav({
 }
 
 /**
- * «Ещё» bottom sheet (Tau §3). Modal-like overlay anchored to the
- * bottom edge; tap-outside dismisses, Escape dismisses. Each item is a
- * full-width row; tapping navigates AND auto-dismisses per Tau spec.
- *
- * Accessibility (round-1 adversarial Code Reviewer amendment):
- *   - role=dialog + aria-modal so SR users get the modal semantic.
- *   - Focus moves to the first item on open (was previously left on the
- *     «Ещё» trigger, which is outside the modal — SR users had no
- *     anchor inside the sheet).
- *   - Tab / Shift+Tab is trapped within the panel so keyboard users
- *     can't tab out of the modal into the backgrounded surface.
- *   - On close, focus is restored to whatever element opened the sheet
- *     (snapshot of document.activeElement at mount). This handles the
- *     bottom-bar trigger case AND the deep-link case (where there is
- *     no opening trigger — restoreFocus is a no-op then).
- */
-function SoloMoreSheet({
-  open,
-  onClose,
-  items,
-}: {
-  open: boolean;
-  onClose: () => void;
-  items: ReadonlyArray<SoloMoreSheetItem>;
-}) {
-  const navigate = useNavigate();
-  const panelRef = useRef<HTMLDivElement | null>(null);
-  const restoreFocusRef = useRef<HTMLElement | null>(null);
-
-  // Escape-key dismiss for keyboard users.
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [open, onClose]);
-
-  // Focus management — round-1 amendment. Snapshot the previously
-  // focused element on open, move focus into the panel, trap Tab/
-  // Shift+Tab within the panel, restore focus on close.
-  useEffect(() => {
-    if (!open) return;
-    // Snapshot the element that had focus when the sheet opened — we
-    // restore to it on close (typically the «Ещё» bottom-tab button).
-    if (typeof document !== "undefined") {
-      const active = document.activeElement;
-      restoreFocusRef.current =
-        active instanceof HTMLElement ? active : null;
-    }
-    const panel = panelRef.current;
-    if (!panel) return;
-
-    // Move focus to the first focusable item on open so SR users land
-    // inside the dialog instead of staying on the trigger.
-    const firstItem = panel.querySelector<HTMLElement>(
-      '[role="menuitem"], button',
-    );
-    firstItem?.focus();
-
-    // Trap Tab/Shift+Tab within the panel.
-    function onKeyDown(e: KeyboardEvent) {
-      if (e.key !== "Tab") return;
-      if (!panel) return;
-      const focusable = panel.querySelectorAll<HTMLElement>(
-        'button, [tabindex="0"], a[href]',
-      );
-      if (focusable.length === 0) return;
-      const first = focusable[0];
-      const last = focusable[focusable.length - 1];
-      if (!first || !last) return;
-      if (e.shiftKey && document.activeElement === first) {
-        e.preventDefault();
-        last.focus();
-      } else if (!e.shiftKey && document.activeElement === last) {
-        e.preventDefault();
-        first.focus();
-      }
-    }
-    document.addEventListener("keydown", onKeyDown);
-    return () => {
-      document.removeEventListener("keydown", onKeyDown);
-      // Restore focus on close — guard against the trigger being
-      // unmounted (deep-link → /solo/more redirect case).
-      const target = restoreFocusRef.current;
-      if (target && typeof document !== "undefined" && document.contains(target)) {
-        target.focus();
-      }
-      restoreFocusRef.current = null;
-    };
-  }, [open]);
-
-  if (!open) return null;
-
-  const handleItemClick = (path: string) => {
-    onClose();
-    navigate(path);
-  };
-
-  return (
-    <div className="solo-more-sheet" role="presentation">
-      {/* Backdrop — tap-outside dismiss. */}
-      <button
-        type="button"
-        className="solo-more-sheet__backdrop"
-        aria-label="Закрыть меню"
-        onClick={onClose}
-      />
-      <div
-        ref={panelRef}
-        className="solo-more-sheet__panel"
-        role="dialog"
-        aria-modal="true"
-        aria-label="Меню «Ещё»"
-      >
-        <div className="solo-more-sheet__grip" aria-hidden="true" />
-        <h2 className="solo-more-sheet__title">Ещё</h2>
-        <ul className="solo-more-sheet__list">
-          {items.map((it) => (
-            <li key={it.path}>
-              <button
-                type="button"
-                className="solo-more-sheet__item"
-                aria-label={it.ariaLabel}
-                onClick={() => handleItemClick(it.path)}
-              >
-                <span className="solo-more-sheet__item-icon" aria-hidden="true">
-                  {it.icon}
-                </span>
-                <span className="solo-more-sheet__item-label">{it.label}</span>
-              </button>
-              {it.trailingDivider && (
-                <hr className="solo-more-sheet__divider" aria-hidden="true" />
-              )}
-            </li>
-          ))}
-        </ul>
-      </div>
-    </div>
-  );
-}
-
-/**
  * Empty-state «скоро» placeholder for tabs in the «Ещё» sheet whose
  * underlying screens haven't shipped (Доходы / Отзывы post-pilot).
  * Voice follows Tau §5.4 — frame as a promise, not as «functionality is
@@ -985,8 +997,8 @@ function SoonScreen({ tab, slug }: { tab: string; slug: string }) {
       </span>
       <h1 className="soon-screen__title">«{tab}» — скоро</h1>
       <p className="soon-screen__body">
-        Этот раздел появится в следующих обновлениях. Пока работаю над тем,
-        что уже есть — день, записи, расписание.
+        Этот раздел появится в следующих обновлениях. Пока работаю над тем, что
+        уже есть — день, записи, расписание.
       </p>
       <p
         className="soon-screen__body"
@@ -1016,101 +1028,130 @@ function SoloMoreLanding() {
 }
 
 function UnifiedSoloSurface({ me }: { me: MeResponse }) {
-  const location = useLocation();
+  // DRF-2127: «Управление салоном» в листе аватара — при владельческой
+  // роли поверх соло-профиля (правило DRF-1149, прежде жило в листе «Ещё»).
+  const soloInfo = useMemo(
+    () => ({
+      salonAdmin: Boolean(me.is_owner || me.is_admin || me.is_receptionist),
+      // DRF-2254: место и услуги ведёт мастер сам, только если каталог не
+      // назвал пространство салоном; «не знаю» (null) — как прежде.
+      selfService: me.workspace_kind !== "salon",
+    }),
+    [me],
+  );
+  // DRF-2254: при "salon" экранов самообслуживания нет — прямая ссылка
+  // уводит на «Мой день», а не на отказ каталога «ведёт владелец салона».
+  const selfServiceOnly = (screen: React.ReactElement) =>
+    soloInfo.selfService ? screen : <Navigate to="/solo/my-day" replace />;
   // Round-1 amendment: read deep-link sheet-open state from the URL
   // on mount. If the user pasted `/solo/more` (e.g. stale bot DM
   // bookmark), the parent renders with `moreOpen=true` immediately —
   // no effect-then-Navigate race in SoloMoreLanding. The Navigate
   // away to /solo/my-day still fires from the route element below;
   // sheet state is already captured here.
-  const [moreOpen, setMoreOpen] = useState<boolean>(
-    () => location.pathname === "/solo/more",
-  );
-  const openSheet = useCallback(() => setMoreOpen(true), []);
-  const closeSheet = useCallback(() => setMoreOpen(false), []);
-  // «Салон» appears for admin-side callers only — see soloMoreSheetItems.
-  const moreItems = useMemo(() => soloMoreSheetItems(me), [me]);
-
-  // Defensive sync — if the user navigates TO /solo/more after mount
-  // (e.g. via browser back to a stale URL), re-open the sheet. Initial
-  // state already covers the mount case; this is a belt-and-braces
-  // guard for in-session URL changes.
-  useEffect(() => {
-    if (location.pathname === "/solo/more") {
-      setMoreOpen(true);
-    }
-  }, [location.pathname]);
-
   return (
-    <div className="solo-surface">
-      <Routes>
-        {/* Default landing — Tau §5.1 specifies «Мой день» as solo home. */}
-        <Route path="/" element={<Navigate to="/solo/my-day" replace />} />
+    <SoloSurfaceContext.Provider value={soloInfo}>
+      <div className="solo-surface">
+        <Routes>
+          {/* Default landing — Tau §5.1 specifies «Мой день» as solo home;
+           * DRF-1807: пока настройка не закрыта (readiness M2), корень
+           * ведёт на экран 01 «всё готово», иначе — «Мой день». */}
+          <Route path="/" element={<SoloSetupGate />} />
+          <Route path="/solo/setup" element={<MasterSetupLandingScreen />} />
+          <Route
+            path="/solo/publication"
+            element={<MasterPublicationScreen />}
+          />
+          {/* DRF-1817 — экран 06: рабочие часы на общем контракте /working-hours. */}
+          <Route
+            path="/solo/working-hours"
+            element={<MasterWorkingHoursScreen />}
+          />
+          {/* DRF-1811 (M19) — экран 05: место работы; всё в каталоге через /service-locations. */}
+          <Route path="/solo/place" element={selfServiceOnly(<MasterPlaceScreen />)} />
 
-        {/* Bottom-bar destinations. */}
-        <Route path="/solo/my-day" element={<MasterDashboardScreen />} />
-        <Route path="/solo/bookings" element={<MasterScheduleScreen />} />
-        <Route path="/solo/customers" element={<MasterCustomersScreen />} />
-        <Route path="/solo/services" element={<MasterServicesScreen />} />
-        {/* /solo/more — deep-link only; redirects synchronously to
-         * /solo/my-day. The parent (`UnifiedSoloSurface`) reads the URL
-         * on mount and initialises `moreOpen=true` for this path, so
-         * the sheet appears without an effect-ordering race. The bottom
-         * bar tap path uses the click handler instead (no navigation). */}
-        <Route path="/solo/more" element={<SoloMoreLanding />} />
+          {/* Bottom-bar destinations. */}
+          <Route path="/solo/my-day" element={<MasterDashboardScreen />} />
+          <Route path="/solo/bookings" element={<MasterScheduleScreen />} />
+          {/* DRF-2156 (М-4) — «Детали записи»; соло-панель подсвечивает «Расписание» по префиксу /solo/bookings. */}
+          <Route
+            path="/solo/bookings/:id"
+            element={<MasterBookingDetailScreen />}
+          />
+          {/* DRF-2155 (М-3) — «Новая запись» соло-мастера; тот же экран. */}
+          <Route
+            path="/solo/booking/new"
+            element={<MasterNewBookingScreen />}
+          />
+          <Route path="/solo/customers" element={<MasterCustomersScreen />} />
+          <Route path="/solo/services" element={selfServiceOnly(<MasterServicesScreen />)} />
+          {/* DRF-1808 (M16) — экран 02: направления; выбор уходит на экран 03 навигацией, не хранится. */}
+          <Route path="/solo/directions" element={selfServiceOnly(<MasterDirectionsScreen />)} />
+          {/* DRF-1809 (M17) — экран 03: выбор услуг из каталога по направлению. */}
+          <Route
+            path="/solo/services/select"
+            element={selfServiceOnly(<MasterServiceSelectScreen />)}
+          />
+          {/* /solo/more — deep-link only; redirects synchronously to
+           * /solo/my-day. The parent (`UnifiedSoloSurface`) reads the URL
+           * on mount and initialises `moreOpen=true` for this path, so
+           * the sheet appears without an effect-ordering race. The bottom
+           * bar tap path uses the click handler instead (no navigation). */}
+          <Route path="/solo/more" element={<SoloMoreLanding />} />
 
-        {/* «Ещё» sheet destinations. */}
-        <Route path="/solo/schedule" element={<MasterScheduleScreen />} />
-        <Route
-          path="/solo/earnings"
-          element={<SoonScreen tab="Доходы" slug="solo-earnings-screen" />}
-        />
-        <Route
-          path="/solo/reviews"
-          element={<SoonScreen tab="Отзывы" slug="solo-reviews-screen" />}
-        />
-        <Route path="/solo/ai" element={<MasterConversationsScreen />} />
-        <Route path="/solo/profile" element={<MasterProfileScreen />} />
-        <Route path="/solo/settings" element={<MasterSettingsScreen />} />
+          {/* «Ещё» sheet destinations. */}
+          <Route path="/solo/schedule" element={<MasterScheduleScreen />} />
+          <Route
+            path="/solo/earnings"
+            element={<SoonScreen tab="Доходы" slug="solo-earnings-screen" />}
+          />
+          <Route path="/solo/reviews" element={<MasterReviewsScreen />} />
+          {/* DRF-1255: «AI-помощник» был переписка с клиентами — снят; старый адрес → «Сегодня». */}
+          <Route path="/solo/ai" element={<Navigate to="/solo/my-day" replace />} />
+          {/* DRF-2127 — «Ayla» тройки: диалог мастера с ассистентом (OD-7), не
+            переписка с клиентами. Один экран с /master/ayla; на /solo/*
+            MasterTabBar не рисуется — панель одна. */}
+          <Route path="/solo/ayla" element={<MasterAylaScreen />} />
+          <Route path="/solo/profile" element={<MasterProfileScreen />} />
+          <Route path="/solo/settings" element={<MasterSettingsScreen />} />
 
-        {/* Legacy admin/master routes still accessible via deep link.
-         * The bot DM might link directly to `/admin/services` or
-         * `/master/conversations/:id` — those must keep working even
-         * though the solo bottom nav doesn't surface them. */}
-        {adminRouteElements(me)}
-        {masterRouteElements()}
+          {/* Legacy admin/master routes still accessible via deep link.
+           * The bot DM might link directly to `/admin/services` or
+           * `/master/profile` — those must keep working even though the
+           * solo bottom nav doesn't surface them. */}
+          {adminRouteElements(me)}
+          {masterRouteElements()}
 
-        {/* Catch-all → land on solo home. */}
-        <Route path="*" element={<CatchAllRedirect to="/solo/my-day" />} />
-      </Routes>
-      <SoloBottomNav
-        onOpenSheet={openSheet}
-        sheetOpen={moreOpen}
-        moreItems={moreItems}
-      />
-      <SoloMoreSheet open={moreOpen} onClose={closeSheet} items={moreItems} />
-    </div>
+          {/* Catch-all → land on solo home. */}
+          <Route path="*" element={<CatchAllRedirect to="/solo/my-day" />} />
+        </Routes>
+        <SoloBottomNav />
+      </div>
+    </SoloSurfaceContext.Provider>
   );
 }
 
 /** Routes for the customer role (Phase 0c / Phase 4 surface).
  *
- * `goalEntry` — DRF-1451. Отдаётся ли корень поверхности цели.
+ * Одна поверхность для всех, кто на неё пришёл (DRF-1469).
  *
- * Выключается для админа-мастера, который переключился на клиентскую
- * поверхность. У него нет `ClientGoal`, поэтому анкету он получил бы
- * первым же экраном; а `SurfaceSwitchButton` смонтирована только на
- * `CustomerProfileScreen`, `MasterSettingsScreen` и
- * `AdminSettingsPlaceholderScreen` — то есть обратно к «Сменить режим»
- * он бы уже не дошёл. `useLastSurface` держит выбор в localStorage,
- * так что следующий запуск повторил бы то же самое.
+ * До этой правки здесь был проп `goalEntry`, и корень отдавал анкету
+ * только одноролевому клиенту. Многоролевому — админу-мастеру,
+ * выбравшему «Клиент», — вместо неё показывали приветствие: своей цели
+ * у него нет, анкету он получил бы первым же экраном, а выход
+ * «Сменить режим» жил только на профиле и в настройках, куда с корня не
+ * дойти. Запрет был по делу, лечение — нет: под него попали владелец и
+ * вся команда, то есть анкету не видел никто из тех, кто её заказал.
  *
- * Это тот же класс дефекта, что DRF-1349 и DRF-1434 (см. комментарии
- * ниже): роль есть, а экран показан не тот. И анкета здесь не про него:
- * владелец салона, зашедший посмотреть клиентскую поверхность, — не
- * человек, впервые встречающий Ayla.
+ * Выход теперь стоит на самой поверхности цели, в её закреплённой
+ * нижней панели (`SurfaceSwitchExit`), поэтому двух поведений больше
+ * нет и держать в голове, кто какую поверхность видит, не нужно.
+ *
+ * Приём общий с DRF-1349 и DRF-1434 (см. комментарии ниже): то, без
+ * чего человек застревает, объявляется там, куда он попадает, а не
+ * там, где это было удобно объявить.
  */
-export function CustomerRoutes({ goalEntry = true }: { goalEntry?: boolean } = {}) {
+export function CustomerRoutes() {
   return (
     <Routes>
       {/*
@@ -1127,26 +1168,80 @@ export function CustomerRoutes({ goalEntry = true }: { goalEntry?: boolean } = {
         несуществующие адреса, а не первый вход, и лишний
         decision-context на каждой опечатке в ссылке не нужен.
       */}
-      <Route path="/" element={goalEntry ? <CustomerEntryScreen /> : <HelloScreen />} />
-      <Route path="/catalog" element={<CatalogScreen />} />
+      <Route path="/" element={<CustomerEntryScreen />} />
+      {/*
+        DRF-1481 — compatibility aliases старого поколения. Ни один
+        продюсер ссылок в этом репозитории (бот, уведомления, скиllы)
+        больше не выдаёт адресов вне `/customer/*`, поэтому «deep-links
+        from bot DMs» как основание устарело: алиасы остаются страховкой
+        для СТАРЫХ внешних ссылок, ушедших наружу ранее (пересланные
+        сообщения, закладки, сторонние посты). Внутренние переходы на
+        них не ведут — это замерено, а не заявлено (DRF-1485).
+
+        Остались ровно те алиасы, за которыми стоит КАНОНИЧЕСКИЙ экран:
+        `/catalog/:serviceId` — тот же `ServiceDetailScreen`, что на
+        каноническом адресе. Три экрана прежнего поколения, на которые
+        не вело уже ничего, сняты вместе со своими адресами (DRF-1485):
+        `/book/confirm`, `/book/success/:bookingId` и `/me`. Алиасами
+        они быть не могли — каждый показывал СВОЙ экран, а не
+        канонический по старому адресу, так что оставить адрес значило
+        бы оставить и экран.
+
+        DRF-1625 — `/catalog` (`CatalogScreen`) снят по тому же
+        критерию, под который он подпадал всё это время: канонический
+        каталог это `CustomerCatalogScreen` на `/customer/catalog`, а
+        `CatalogScreen` был СВОИМ экраном, а не тем же по старому
+        адресу. Внутренний вход в него был ровно один — из
+        `MyVisitsScreen`, снятого тем же пакетом; продюсеров пути
+        `/catalog` в репозитории нет: единственный маршрутный литерал у
+        продюсеров — `"open_catalog": "customer/catalog"`
+        (`apps/skills/welcome/skill.py:172`), а протухший payload
+        `catalog` из старых клавиатур `_ROUTE_MAP` резолвит в
+        `/customer/catalog`.
+
+        `/catalog/:serviceId` остаётся: это настоящий псевдоним.
+      */}
       <Route path="/catalog/:serviceId" element={<ServiceDetailScreen />} />
+      {/*
+        §31 (решение владельца 06.09.2026) — `MasterPickerScreen` и
+        `BookingWhenScreen` исключены из удаления DRF-1485 и
+        КАНОНИЗИРОВАНЫ по адресам `/customer/book/master` и
+        `/customer/book/when`. Старые `/book/*` остаются алиасами —
+        ровно как сказано в решении, ни один адрес наружу не ломается.
+
+        Каноническая пара идёт ПЕРВОЙ: внутренние переходы ведут только
+        на неё (`ServiceDetailScreen`, `MasterPickerScreen`,
+        `BookingWhenScreen`), а `/book/master` и `/book/when` ниже
+        держат ранее ушедшие наружу ссылки.
+      */}
+      <Route path="/customer/book/master" element={<MasterPickerScreen />} />
+      <Route path="/customer/book/when" element={<BookingWhenScreen />} />
       <Route path="/book/master" element={<MasterPickerScreen />} />
       <Route path="/book/when" element={<BookingWhenScreen />} />
-      <Route path="/book/confirm" element={<BookingConfirmScreen />} />
-      <Route path="/book/success/:bookingId" element={<BookingSuccessScreen />} />
       {/*
         Customer booking flow F1-F5 — Tier 1 Priority 3 Phase B
         (Ayla-first reskin per docs/screens/customer-booking-flow.md).
-        Runs alongside the legacy /catalog + /book/* routes; F1 reads
-        the real mirror catalog since pilot phase 3.1. The legacy routes
-        stay reachable for deep-links from bot DMs and reschedule
-        flows.
+        F1 reads the real mirror catalog since pilot phase 3.1.
       */}
-      {/* Home = «Мои записи» (pilot phase 3.2, orchestrator decision):
-          records on real data is the pilot home. The wellness dashboard
-          (stub surface, gated) moves to /customer/wellness until
-          S4/post-pilot. */}
-      <Route path="/customer/main" element={<CustomerRecordsScreen />} />
+      {/*
+        DRF-1546 — «Главная» это домашний экран (wellness dashboard),
+        решение владельца §24.2 + §34: старший канон клиентской
+        поверхности — `docs/screens/customer-main-wellness-dashboard.md`,
+        и там этот экран объявлен P0 BLOCKER пилота.
+
+        Оба условия снятия гейта из §24.2 выполнены до этой правки:
+        настоящие цели подключены (DRF-1476), `weekly_progress` бэкенд
+        опускает, а не шлёт нулями. Экран стоял закрытым флагом только
+        потому, что его никто не открыл, и человек на «Главной» видел
+        список записей.
+
+        Записи никуда не делись — они на `/customer/records` и на своей
+        вкладке в нижней навигации.
+      */}
+      <Route
+        path="/customer/main"
+        element={<CustomerWellnessDashboardScreen />}
+      />
       {/*
         DRF-1190 — the goal surface. Registered by the main window at the
         conversation window's request: the screen is theirs, App.tsx is
@@ -1158,11 +1253,42 @@ export function CustomerRoutes({ goalEntry = true }: { goalEntry?: boolean } = {
         the bot, not just an internal link.
       */}
       <Route path="/customer/goal-select" element={<GoalSelectScreen />} />
+      <Route path="/customer/plan" element={<PlanLiteScreen />} />
+      {/*
+        Совместимый псевдоним того же экрана. Слаги бота
+        `open_wellness` и `open_water_add_250` резолвятся сюда
+        (`_ROUTE_MAP` в lib/max-sdk.ts), то есть это договор с ботом, а
+        не внутренняя ссылка — удалять его нельзя, пока живы ссылки.
+      */}
       <Route
         path="/customer/wellness"
         element={<CustomerWellnessDashboardScreen />}
       />
+      {/* Карточка C04 «направление + почему» (DRF-1769): свой адрес,
+          потому что у записи есть id и ссылка из чата ведёт именно на
+          неё. Исполнение живёт в каталоге, и «Подобрать вариант»
+          отсюда ведёт туда одним тапом. */}
+      <Route
+        path="/customer/recommendation/:recommendationId"
+        element={<RecommendationCardScreen />}
+      />
+      {/* Один поток записи C05 по макету DRF-1320 (DRF-2178, этап 1 из 4):
+          способ исполнения → выбор специалиста. Время и «Проверь запись»
+          пока прежние экраны — радиус этапа ограничен намеренно. */}
+      <Route path="/customer/booking/option" element={<ExecutionOptionScreen />} />
+      <Route path="/customer/booking/provider" element={<ProviderChoiceScreen />} />
       <Route path="/customer/catalog" element={<CustomerCatalogScreen />} />
+      {/*
+        DRF-1481 — канонический адрес общей карточки услуги. Тот же
+        `ServiceDetailScreen`, что на алиасе `/catalog/:serviceId`
+        выше: карточка — общий узел трёх входов (оба каталога и подборы
+        wellness), а не экран старого поколения, поэтому она
+        канонизирована, а не удалена.
+      */}
+      <Route
+        path="/customer/catalog/:serviceId"
+        element={<ServiceDetailScreen />}
+      />
       <Route
         path="/customer/masters/:masterId"
         element={<CustomerMasterDetailScreen />}
@@ -1180,22 +1306,59 @@ export function CustomerRoutes({ goalEntry = true }: { goalEntry?: boolean } = {
         element={<CustomerBookingSuccessScreen />}
       />
       {/* Tier 1 Priority 5 Phase B — customer records (Tau R1-R6).
-          New canonical routes. Legacy /my-visits stays mounted for
-          deep links from bot DMs + reschedule flows. */}
+          Канонические адреса. От легаси-`/my-visits` остался только
+          псевдоним экрана переноса — см. комментарий ниже (DRF-1625). */}
       <Route path="/customer/records" element={<CustomerRecordsScreen />} />
       <Route
         path="/customer/records/:bookingId"
         element={<CustomerBookingDetailScreen />}
       />
-      <Route path="/my-visits" element={<MyVisitsScreen />} />
-      <Route path="/my-visits/:bookingId" element={<MyVisitDetailScreen />} />
+      {/*
+        DRF-1481 — канонический адрес переноса записи. `RescheduleScreen`
+        — единственный экран переноса, общий для обеих карточек; до
+        уборки он жил только по legacy-адресу. Старый маршрут ниже
+        остаётся compatibility-алиасом на тот же компонент.
+      */}
+      <Route
+        path="/customer/records/:bookingId/reschedule"
+        element={<RescheduleScreen />}
+      />
+      {/*
+        DRF-1625 — от старого пространства имён `/my-visits` остался
+        ровно один адрес, и он настоящий псевдоним: тот же
+        `RescheduleScreen`, что на каноническом
+        `/customer/records/:bookingId/reschedule` выше.
+
+        `/my-visits` (`MyVisitsScreen`) и `/my-visits/:bookingId`
+        (`MyVisitDetailScreen`) сняты вместе со своими экранами. Они
+        подпадали под критерий DRF-1485, записанный у алиасов выше:
+        каждый показывал СВОЙ экран, а не канонический по старому
+        адресу, — то есть оставить адрес значило бы оставить и
+        поверхность прежнего поколения, беднее канонической
+        (`MyVisitDetailScreen` не рисовал ни оплату, ни оценку).
+
+        Внешних ссылок на них нет, и это замерено, а не предположено:
+        ни один продюсер ссылок в репозитории никогда не выдавал пути
+        `/my-visits` — `git log -S` по `apps/skills`, `apps/orchestrator`,
+        `apps/channels`, `apps/notifications`, `apps/booking`,
+        `apps/miniapp_api`, `config` находит ровно один коммит, и тот
+        добавляет строку докстринга. Клавиатуры, ушедшие в историю чата
+        раньше, несут не URL, а payload (`open_visits`, `route=visits`),
+        и `_ROUTE_MAP` в `lib/max-sdk.ts` резолвит его сегодня в
+        `/customer/records`.
+
+        Сторож: `App.legacyRoutes.test.ts` — легаси-адрес имеет право
+        существовать только как псевдоним канонического экрана.
+      */}
       <Route
         path="/my-visits/:bookingId/reschedule"
         element={<RescheduleScreen />}
       />
       {/* Tier 1 Priority 6 Phase B — customer profile tab (Tau R1-R6,
-          deferred Variant 3 per tech-lead 2026-06-01). New canonical
-          route. Legacy /me stays mounted for bot DM deeplinks. */}
+          deferred Variant 3 per tech-lead 2026-06-01). Единственный
+          профиль клиента: легаси-`/me` (`ProfileScreen`) снят вместе с
+          экраном (DRF-1485) — алиасом он быть не мог, потому что
+          показывал ДРУГОЙ экран, а не тот же по другому адресу. */}
       <Route path="/customer/profile" element={<CustomerProfileScreen />} />
       <Route
         path="/customer/notification-settings"
@@ -1226,10 +1389,22 @@ export function CustomerRoutes({ goalEntry = true }: { goalEntry?: boolean } = {
         element={<FoodScannerDiaryScreen />}
       />
       <Route
+        path="/customer/food-scanner/favorites"
+        element={<FoodScannerFavoritesScreen />}
+      />
+      <Route
         path="/customer/food-scanner/manual"
         element={<FoodScannerManualScreen />}
       />
-      <Route path="/me" element={<ProfileScreen />} />
+      {/* DRF-2099 — дневник за неделю и записи одного дня (только чтение). */}
+      <Route
+        path="/customer/food-scanner/week"
+        element={<FoodScannerWeekScreen />}
+      />
+      <Route
+        path="/customer/food-scanner/day/:date"
+        element={<FoodScannerDayScreen />}
+      />
       <Route path="/feedback/:bookingId" element={<FeedbackScreen />} />
       {/* DRF-1349 — the surface an invited master actually boots into.
           `/api/v1/me` returns is_master=false until the invitation is
@@ -1251,7 +1426,10 @@ export function CustomerRoutes({ goalEntry = true }: { goalEntry?: boolean } = {
         `is_master: true` и монтируется `MasterRoutes`. Экран ниже
         виден, только если роль действительно не пришла.
       */}
-      <Route path="/master/*" element={<RoleNotReadyScreen surface="master" />} />
+      <Route
+        path="/master/*"
+        element={<RoleNotReadyScreen surface="master" />}
+      />
       <Route path="/admin/*" element={<RoleNotReadyScreen surface="admin" />} />
       <Route path="*" element={<HelloScreen />} />
     </Routes>
@@ -1264,11 +1442,7 @@ export function CustomerRoutes({ goalEntry = true }: { goalEntry?: boolean } = {
  * out of catalog browsing. The error banner sits on top of the
  * customer routes via a wrapper.
  */
-function CustomerFallbackWithBanner({
-  onRetry,
-}: {
-  onRetry: () => void;
-}) {
+function CustomerFallbackWithBanner({ onRetry }: { onRetry: () => void }) {
   const location = useLocation();
   // Banner shows only on the root page so customers browsing don't
   // see a perpetual error toast.
@@ -1281,9 +1455,7 @@ function CustomerFallbackWithBanner({
           role="alert"
           style={{ margin: "var(--s-2) var(--s-3)" }}
         >
-          <p style={{ margin: 0 }}>
-            Не получилось загрузить ваш профиль.{" "}
-          </p>
+          <p style={{ margin: 0 }}>Не получилось загрузить ваш профиль. </p>
           <button
             type="button"
             className="btn-secondary"
@@ -1299,7 +1471,29 @@ function CustomerFallbackWithBanner({
   );
 }
 
+/**
+ * DRF-1893 — без initData Mini App не стартует: ни `/api/v1/me`, ни одного
+ * дерева маршрутов. Решение владельца (раздел U): пустой initData — отказ
+ * транспорта, а не анонимный клиент; экран один на всех входах.
+ * Определение пустоты — одно, в `lib/identity.ts`.
+ */
 export function App() {
+  const [identity] = useState(() => channelIdentity());
+  if (identity === "no_init_data") return <OpenFromMaxScreen />;
+  // DRF-2198: одна граница ошибок на приложение — `AppShell` ниже отдаёт
+  // ровно одно дерево маршрутов (мастер / соло / админ / клиент), и четыре
+  // одинаковые обёртки были бы четырьмя местами, где можно забыть. Любое
+  // исключение рендера даёт состояние с повтором, а не белый экран
+  // (инцидент 20.09, #1918). Возврат в MAX при отказе транспорта проверяется
+  // выше — граница его не перехватывает.
+  return (
+    <ErrorBoundary>
+      <AppShell />
+    </ErrorBoundary>
+  );
+}
+
+function AppShell() {
   const [boot, setBoot] = useState<BootState>(INITIAL);
   // Surface choice drives the cascade below, so it has to be reactive —
   // a bare localStorage read wouldn't re-render when the user picks
@@ -1328,7 +1522,9 @@ export function App() {
         boot.status === "ready" &&
         boot.me != null &&
         [
-          Boolean(boot.me.is_owner || boot.me.is_admin || boot.me.is_receptionist),
+          Boolean(
+            boot.me.is_owner || boot.me.is_admin || boot.me.is_receptionist,
+          ),
           Boolean(boot.me.is_master),
         ].filter(Boolean).length > 1,
       requestChooser,
@@ -1346,6 +1542,13 @@ export function App() {
         // user_not_registered — first-time visitor who hasn't DM'd
         // the bot. Surface the «Доступ не настроен» onboarding hint.
         setBoot({ status: "no_role", me: null, err: e });
+        return;
+      }
+      const salons = salonChoiceTenantsFrom(e);
+      if (salons) {
+        // DRF-1766: several salons — ask, then boot again with the choice.
+        setSalonChoice(null);
+        setBoot({ status: "choose_salon", me: null, err: e, salons });
         return;
       }
       // Any other failure — log and fall back to customer surface
@@ -1385,8 +1588,7 @@ export function App() {
     const multiRole = hasAdmin && hasMaster;
     const stored = readLastSurface();
     if (stored === null) return;
-    const meaningful =
-      multiRole && (stored === "customer" || !isSolo);
+    const meaningful = multiRole && (stored === "customer" || !isSolo);
     if (!meaningful) clearLastSurface();
   }, [boot.status, boot.me]);
 
@@ -1404,6 +1606,17 @@ export function App() {
     if (boot.status === "loading") return <SplashScreen />;
     if (boot.status === "no_role") {
       return <NoRoleScreen onRetry={() => void loadMe()} />;
+    }
+    if (boot.status === "choose_salon" && boot.salons) {
+      return (
+        <SalonChooserScreen
+          salons={boot.salons}
+          onChoose={(slug) => {
+            setSalonChoice(slug);
+            void loadMe();
+          }}
+        />
+      );
     }
 
     if (boot.status === "ready" && boot.me) {
@@ -1497,9 +1710,10 @@ function RoleSurface({
     return <UnifiedLanding me={me} />;
   }
   if (multiRole && surfacePref === "customer") {
-    // goalEntry={false}: см. шапку CustomerRoutes — иначе админ-мастер
-    // запирается на анкете без дороги обратно к «Сменить режим».
-    return <CustomerRoutes goalEntry={false} />;
+    // Ровно та же поверхность, что у обычного клиента (DRF-1469).
+    // Выход обратно к «Сменить режим» есть на ней самой, поэтому
+    // отдельного поведения для многоролевого больше нет.
+    return <CustomerRoutes />;
   }
   if (isSolo && hasMaster) {
     return <UnifiedSoloSurface me={me} />;

@@ -109,6 +109,11 @@ ROUTE_TABLE: tuple[Route, ...] = (
     Route("GET", "/api/v1/internal/specialists/", Auth.BEARER),
     Route("GET", "/api/v1/internal/specialists/{id}/", Auth.BEARER),
     Route("GET", "/api/v1/internal/specialists/{id}/slots/", Auth.BEARER),
+    # DRF-1802 (M10) — заявки мастера о разрыве канона, под субъектом (M9).
+    Route("GET", "/api/v1/internal/specialists/{id}/canon-gap-requests/", Auth.BEARER_EXT),
+    Route("POST", "/api/v1/internal/specialists/{id}/canon-gap-requests/", Auth.BEARER_EXT),
+    Route("GET", "/api/v1/internal/specialists/{id}/canon-gap-requests/similar/", Auth.BEARER_EXT),
+    Route("GET", "/api/v1/internal/specialists/{id}/canon-gap-requests/{id}/", Auth.BEARER_EXT),
     # Writes pin X-Idempotency-Key — the double-booking dedup guarantee
     # (В2.4), same rationale as payments' Idempotence-Key row below.
     Route(
@@ -132,6 +137,11 @@ ROUTE_TABLE: tuple[Route, ...] = (
     # DRF-1233 — the canonical version, without which the salon console
     # cannot offer a reschedule or a closure at all.
     Route("GET", "/api/v1/internal/appointments/{id}/", Auth.BEARER_EXT),
+    # DRF-1845 — «Принимаю записи» мастера под его субъектом.
+    Route("GET", "/api/v1/internal/specialists/{id}/availability/", Auth.BEARER_EXT),
+    Route("PATCH", "/api/v1/internal/specialists/{id}/availability/", Auth.BEARER_EXT),
+    # DRF-1857 — «Мои отзывы» мастера под его субъектом.
+    Route("GET", "/api/v1/internal/specialists/{id}/reviews/", Auth.BEARER_EXT),
     Route("GET", "/api/v1/internal/me/bookings/", Auth.BEARER_EXT),
     # DRF-1032 customer records: visit card + «Записаться ещё» prefill.
     Route("GET", "/api/v1/internal/me/bookings/{id}/", Auth.BEARER_EXT),
@@ -140,22 +150,64 @@ ROUTE_TABLE: tuple[Route, ...] = (
     # point: the subject is named ONLY by the header, and there is no request
     # body a caller could use to substitute a different one.
     Route("GET", "/api/v1/internal/me/identity/", Auth.BEARER_EXT),
-    # profile_client (#978).
-    Route("GET", "/api/v1/internal/users/{id}/", Auth.BEARER),
+    # profile_client (#978 → DRF-1709, 12.09.2026). Until this day: Bearer
+    # ALONE, on the reading that the `user.profile.updated` consumer acts on
+    # a NOTIFICATION about a person and has nobody to name. Reversed with
+    # B-2.1/B-2.2: the card fetched is the card of the person the
+    # notification is about, the refresh serves that person's own mirror,
+    # and the catalog refuses this route to a caller who does not name the
+    # subject in the URL. The consumer now collects the rows first and names
+    # the identity of the row it is about to refresh — the actor IS the
+    # subject, nothing is invented.
+    Route("GET", "/api/v1/internal/users/{id}/", Auth.BEARER_EXT),
     # personal_context_client (M-B1, frozen contract v1.0 2026-07-09).
-    Route("GET", "/api/v1/internal/users/{id}/personal-context/", Auth.BEARER),
-    Route("PATCH", "/api/v1/internal/users/{id}/personal-context/", Auth.BEARER),
-    Route("GET", "/api/v1/internal/users/{id}/personal-context/ask-eligibility/", Auth.BEARER),
-    Route("POST", "/api/v1/internal/users/{id}/personal-context/mark-asked/", Auth.BEARER),
-    Route("POST", "/api/v1/internal/users/{id}/personal-context/skip/", Auth.BEARER),
+    # BEARER_EXT since CP-2 / DRF-1617: upstream now authorises the subject in
+    # the path against the one this header resolves to, so a leaked token can
+    # no longer reach an arbitrary person's declared profile.
+    Route("GET", "/api/v1/internal/users/{id}/personal-context/", Auth.BEARER_EXT),
+    Route("PATCH", "/api/v1/internal/users/{id}/personal-context/", Auth.BEARER_EXT),
+    Route(
+        "GET",
+        "/api/v1/internal/users/{id}/personal-context/ask-eligibility/",
+        Auth.BEARER_EXT,
+    ),
+    Route("POST", "/api/v1/internal/users/{id}/personal-context/mark-asked/", Auth.BEARER_EXT),
+    Route("POST", "/api/v1/internal/users/{id}/personal-context/skip/", Auth.BEARER_EXT),
     # personal_context_client C5 legs (PILOT_CONTRACTS §6; upstream = W2 S3.1).
-    Route("GET", "/api/v1/internal/users/{id}/personal-data/export/", Auth.BEARER),
-    Route("DELETE", "/api/v1/internal/users/{id}/personal-data/", Auth.BEARER),
+    # The 152-ФЗ pair — disclosure and erasure — is exactly where naming the
+    # subject matters most: without it the path alone decided whose data was
+    # exported and whose was destroyed.
+    Route("GET", "/api/v1/internal/users/{id}/personal-data/export/", Auth.BEARER_EXT),
+    Route("DELETE", "/api/v1/internal/users/{id}/personal-data/", Auth.BEARER_EXT),
+    # DRF-1950 (M3) — authoritative readback стирания (каталог C5.3 / AMD-020, DRF-1984):
+    # «удалено» человеку — только после этого чтения.
+    Route("GET", "/api/v1/internal/users/{id}/personal-data/erasure-status/", Auth.BEARER_EXT),
+    # DRF-1699 D1 (§7 свода) — заявка на удаление аккаунта: POST заводит
+    # (идемпотентно), GET без номера — текущая для профиля.
+    Route("POST", "/api/v1/internal/users/{id}/deletion-requests/", Auth.BEARER_EXT),
+    Route("GET", "/api/v1/internal/users/{id}/deletion-requests/", Auth.BEARER_EXT),
+    # DRF-1855 — a client's review of their own visit, written as that person.
+    Route("POST", "/api/v1/internal/users/{id}/reviews/", Auth.BEARER_EXT),
     # billing_client — C2 billing status + C3 payout preview (pilot 2026-08-15).
     Route("GET", "/api/v1/internal/billing/specialists/{id}/status/", Auth.BEARER),
     Route("POST", "/api/v1/internal/billing/specialists/{id}/card-setup/", Auth.BEARER),
     Route("POST", "/api/v1/internal/billing/specialists/{id}/pay-debt/", Auth.BEARER),
     Route("GET", "/api/v1/internal/specialists/{id}/payout-preview/", Auth.BEARER),
+    # DRF-1813 (M21) — профиль и аватар мастера под субъектом (каталог #455).
+    Route("PATCH", "/api/v1/internal/specialists/{id}/profile/", Auth.BEARER_EXT),
+    Route("POST", "/api/v1/internal/specialists/{id}/media/avatar/", Auth.BEARER_EXT),
+    # DRF-1895 (M10b) — выбор услуг мастера и его цена под субъектом (каталог #443/#444).
+    Route("GET", "/api/v1/internal/specialists/{id}/services/selection/", Auth.BEARER_EXT),
+    Route("POST", "/api/v1/internal/specialists/{id}/services/selection/", Auth.BEARER_EXT),
+    Route("PUT", "/api/v1/internal/specialists/{id}/services/{id}/offer/", Auth.BEARER_EXT),
+    Route("DELETE", "/api/v1/internal/specialists/{id}/services/{id}/", Auth.BEARER_EXT),
+    # DRF-1797 (M5) — готовность, публикация и статус соло-мастера под субъектом (каталог #453).
+    Route("GET", "/api/v1/internal/specialists/{id}/publication/readiness/", Auth.BEARER_EXT),
+    Route("POST", "/api/v1/internal/specialists/{id}/publication/", Auth.BEARER_EXT),
+    Route("GET", "/api/v1/internal/specialists/{id}/publication/status/", Auth.BEARER_EXT),
+    # DRF-1799 (M7) — канон для экрана 03: направления и шаблоны направления (каталог M6 + M7a).
+    Route("GET", "/api/v1/internal/services/directions/", Auth.BEARER),
+    Route("GET", "/api/v1/internal/services/templates/", Auth.BEARER),
     # payments_client — C7 client payments (§7.5, REVIEW; upstream W1 pending).
     # IsBotServiceWithVerifiedClient: Bearer + X-External-User-ID on every leg.
     Route("POST", "/api/v1/internal/appointments/{id}/payment/", Auth.BEARER_EXT),
@@ -167,10 +219,17 @@ ROUTE_TABLE: tuple[Route, ...] = (
     # nutrition_client (#1050) — X-Service-Token + X-External-User-ID.
     Route("POST", "/api/v1/nutrition/internal/scan/", Auth.SERVICE_EXT),
     Route("POST", "/api/v1/nutrition/internal/food-log/", Auth.SERVICE_EXT),
+    # DRF-1838 — правка / удаление записи и возврат в окне (§109 шаг 7).
+    Route("PATCH", "/api/v1/nutrition/internal/food-log/{id}/", Auth.SERVICE_EXT),
+    Route("DELETE", "/api/v1/nutrition/internal/food-log/{id}/", Auth.SERVICE_EXT),
+    Route("POST", "/api/v1/nutrition/internal/food-log/{id}/restore/", Auth.SERVICE_EXT),
     Route("GET", "/api/v1/nutrition/internal/summary/", Auth.SERVICE_EXT),
     Route("GET", "/api/v1/nutrition/internal/deficits/", Auth.SERVICE_EXT),
     Route("GET", "/api/v1/nutrition/internal/profile/", Auth.SERVICE_EXT),
     Route("POST", "/api/v1/nutrition/internal/profile/", Auth.SERVICE_EXT),
+    # DRF-1698 (владелец 12.09 §2) — отзыв согласия на персональный расчёт:
+    # стереть шесть параметров и ориентиры, дневник оставить.
+    Route("DELETE", "/api/v1/nutrition/internal/profile/body-parameters/", Auth.SERVICE_EXT),
     Route("POST", "/api/v1/nutrition/internal/water/", Auth.SERVICE_EXT),
     Route("DELETE", "/api/v1/nutrition/internal/water/{id}/", Auth.SERVICE_EXT),
     Route("GET", "/api/v1/nutrition/internal/water/today/", Auth.SERVICE_EXT),
@@ -337,13 +396,64 @@ def _exercise_booking() -> None:
     tenant = Tenant(id=uuid.uuid4(), slug="route-table", name="Route Table")
     with tenant_scope(tenant):
         _swallow(lambda: c.get_services())
+        # DRF-1473: the roster list is tenant-scoped for the same reason the
+        # catalog is — it IS the allow-set the booking guard checks against.
+        _swallow(lambda: c.get_masters())
     # DRF-1019: ``catalog/specialist-services/`` used to be exercised here via
     # ``get_services(specialist_id=…)`` — a branch no production caller reached,
     # so the row was covered by dead code while the live reader of the same
     # route was not covered at all. ``get_specialist_service_edges`` is that
     # live reader (quote/repeat, DRF-1067). It takes no tenant scope by design.
     _swallow(lambda: c.get_specialist_service_edges(specialist_id="SPECID", service_id="SVCID"))
-    _swallow(lambda: c.get_masters())
+    # DRF-1813 (M21) — профиль и аватар мастера.
+    _swallow(
+        lambda: c.patch_specialist_profile(
+            specialist_id="SPECID", external_user_id=_EXT_USER, bio="о себе"
+        )
+    )
+    _swallow(
+        lambda: c.upload_specialist_avatar(
+            specialist_id="SPECID",
+            external_user_id=_EXT_USER,
+            filename="a.jpg",
+            content=b"\xff\xd8",
+            content_type="image/jpeg",
+        )
+    )
+    # DRF-1895 (M10b) — выбор услуг и цена мастера.
+    _swallow(lambda: c.get_service_selection(specialist_id="SPECID", external_user_id=_EXT_USER))
+    _swallow(
+        lambda: c.select_services(
+            specialist_id="SPECID", external_user_id=_EXT_USER, template_ids=[str(_PROFILE_UUID)]
+        )
+    )
+    _swallow(
+        lambda: c.put_service_offer(
+            specialist_id="SPECID",
+            external_user_id=_EXT_USER,
+            salon_service_id=str(_PROFILE_UUID),
+            price="1500",
+            duration_minutes=45,
+        )
+    )
+    _swallow(
+        lambda: c.remove_service(
+            specialist_id="SPECID", external_user_id=_EXT_USER, salon_service_id=str(_PROFILE_UUID)
+        )
+    )
+    # DRF-1797 (M5) — публикация соло-мастера.
+    _swallow(
+        lambda: c.get_publication_readiness(specialist_id="SPECID", external_user_id=_EXT_USER)
+    )
+    _swallow(
+        lambda: c.publish(
+            specialist_id="SPECID", external_user_id=_EXT_USER, command_id=str(_PROFILE_UUID)
+        )
+    )
+    _swallow(lambda: c.get_publication_status(specialist_id="SPECID", external_user_id=_EXT_USER))
+    # DRF-1799 (M7) — канон для экрана 03.
+    _swallow(lambda: c.get_service_directions())
+    _swallow(lambda: c.get_service_templates(direction_id=str(_PROFILE_UUID)))
     _swallow(lambda: c.get_masters(specialist_id="SPECID"))
     _swallow(
         lambda: c.get_available_times(specialist_id="SPECID", date="2026-07-03", service_id="SVCID")
@@ -380,13 +490,61 @@ def _exercise_booking() -> None:
     _swallow(lambda: c.get_repeat_intent(external_user_id=_EXT_USER, booking_id="APPTID"))
     # DRF-1233 canonical version read.
     _swallow(lambda: c.get_appointment_version(external_user_id=_EXT_USER, booking_id="APPTID"))
+    # DRF-1802 (M10) — canon gap requests under the subject.
+    _swallow(lambda: c.list_canon_gap_requests(specialist_id="SPECID", external_user_id=_EXT_USER))
+    _swallow(
+        lambda: c.create_canon_gap_request(
+            specialist_id="SPECID",
+            external_user_id=_EXT_USER,
+            name="Татуаж",
+            description="",
+            duration_minutes=60,
+            price="1000",
+        )
+    )
+    _swallow(
+        lambda: c.similar_canon_templates(
+            specialist_id="SPECID", external_user_id=_EXT_USER, name="Татуаж"
+        )
+    )
+    _swallow(
+        lambda: c.get_canon_gap_request(
+            specialist_id="SPECID", external_user_id=_EXT_USER, request_id=str(_PROFILE_UUID)
+        )
+    )
+    # DRF-1855 review under the client's subject.
+    _swallow(
+        lambda: c.create_review(
+            external_user_id=_EXT_USER,
+            ayla_user_id=str(_PROFILE_UUID),
+            appointment_id="APPTID",
+            rating=5,
+        )
+    )
+    # DRF-1845 «Принимаю записи».
+    _swallow(
+        lambda: c.get_accepting_bookings(
+            specialist_id=str(_PROFILE_UUID), external_user_id=_EXT_USER
+        )
+    )
+    _swallow(
+        lambda: c.set_accepting_bookings(
+            specialist_id=str(_PROFILE_UUID), external_user_id=_EXT_USER, accepting=False
+        )
+    )
+    # DRF-1857 «Мои отзывы».
+    _swallow(
+        lambda: c.get_specialist_reviews(
+            specialist_id=str(_PROFILE_UUID), external_user_id=_EXT_USER
+        )
+    )
 
 
 def _exercise_profile() -> None:
     from apps.integrations.ayla import profile_client
 
     profile_client._circuit.record_success()
-    _swallow(lambda: profile_client.fetch_profile_fields(_PROFILE_UUID))
+    _swallow(lambda: profile_client.fetch_profile_fields(_PROFILE_UUID, on_behalf_of=_EXT_USER))
 
 
 def _exercise_identity() -> None:
@@ -400,18 +558,24 @@ def _exercise_personal_context() -> None:
     from apps.integrations.ayla.personal_context_client import PersonalContextHttpClient
 
     uid = str(_PROFILE_UUID)
+    ext = _EXT_USER
     c = PersonalContextHttpClient()  # reads settings.AYLA_*; httpx.Client is patched
-    _swallow(lambda: c.get_context(ayla_user_id=uid))
+    _swallow(lambda: c.get_context(ayla_user_id=uid, external_user_id=ext))
     _swallow(
         lambda: c.patch_context(
-            ayla_user_id=uid, updates=[{"field": "diet_type", "value": "vegan"}]
+            ayla_user_id=uid,
+            external_user_id=ext,
+            updates=[{"field": "diet_type", "value": "vegan"}],
         )
     )
-    _swallow(lambda: c.get_ask_eligibility(ayla_user_id=uid))
-    _swallow(lambda: c.mark_asked(ayla_user_id=uid, field="diet_type"))
-    _swallow(lambda: c.skip(ayla_user_id=uid, field="diet_type"))
-    _swallow(lambda: c.get_personal_data_export(ayla_user_id=uid))
-    _swallow(lambda: c.delete_personal_data(ayla_user_id=uid))
+    _swallow(lambda: c.get_ask_eligibility(ayla_user_id=uid, external_user_id=ext))
+    _swallow(lambda: c.mark_asked(ayla_user_id=uid, external_user_id=ext, field="diet_type"))
+    _swallow(lambda: c.skip(ayla_user_id=uid, external_user_id=ext, field="diet_type"))
+    _swallow(lambda: c.get_personal_data_export(ayla_user_id=uid, external_user_id=ext))
+    _swallow(lambda: c.delete_personal_data(ayla_user_id=uid, external_user_id=ext))
+    _swallow(lambda: c.get_erasure_status(ayla_user_id=uid, external_user_id=ext))
+    _swallow(lambda: c.create_deletion_request(ayla_user_id=uid, external_user_id=ext))
+    _swallow(lambda: c.get_current_deletion_request(ayla_user_id=uid, external_user_id=ext))
 
 
 def _exercise_recommendations() -> None:
@@ -510,8 +674,12 @@ async def _exercise_nutrition() -> None:
     await guard(c.weekly_deficits(external_user_id=_EXT_USER))
     await guard(c.get_profile(external_user_id=_EXT_USER))
     await guard(c.upsert_profile(external_user_id=_EXT_USER, data={}))
+    await guard(c.purge_body_parameters(external_user_id=_EXT_USER))
     await guard(c.add_water(external_user_id=_EXT_USER, ml=250))
     await guard(c.undo_water(external_user_id=_EXT_USER, entry_id="ENTRYID"))
+    await guard(c.update_meal(external_user_id=_EXT_USER, log_id="ENTRYID", portion_multiplier=2.0))
+    await guard(c.delete_meal(external_user_id=_EXT_USER, log_id="ENTRYID"))
+    await guard(c.restore_meal(external_user_id=_EXT_USER, log_id="ENTRYID"))
     await guard(c.get_water_today(external_user_id=_EXT_USER))
     await guard(c.get_cross_domain_insights(external_user_id=_EXT_USER))
     await guard(c.post_cross_domain_seen(external_user_id=_EXT_USER, shown_id="SHOWNID"))
@@ -572,18 +740,26 @@ def test_matcher_catches_drift() -> None:
     """Prove the matcher rejects each drift class without touching prod code."""
     uid = "11111111-2222-3333-4444-555555555555"
     bearer = {"authorization": f"Bearer {_INTERNAL_TOKEN}"}
+    # DRF-1709 (12.09.2026): the profile route names its subject, so the
+    # good request carries the header and «bearer alone» joins the drift.
+    named = {**bearer, "x-external-user-id": _EXT_USER}
 
-    ok = Captured("GET", f"/api/v1/internal/users/{uid}/", bearer)
+    ok = Captured("GET", f"/api/v1/internal/users/{uid}/", named)
     route, err = _match(ok)
     assert route is not None and err is None, "sanity: the good request must match"
 
     drift = {
-        "missing /api/v1 prefix": Captured("GET", f"/internal/users/{uid}/", bearer),
-        "double /api/v1 prefix": Captured("GET", f"/api/v1/api/v1/internal/users/{uid}/", bearer),
-        "wrong method": Captured("POST", f"/api/v1/internal/users/{uid}/", bearer),
-        "dropped trailing slash": Captured("GET", f"/api/v1/internal/users/{uid}", bearer),
+        "missing /api/v1 prefix": Captured("GET", f"/internal/users/{uid}/", named),
+        "double /api/v1 prefix": Captured("GET", f"/api/v1/api/v1/internal/users/{uid}/", named),
+        "wrong method": Captured("POST", f"/api/v1/internal/users/{uid}/", named),
+        "dropped trailing slash": Captured("GET", f"/api/v1/internal/users/{uid}", named),
         "wrong token value": Captured(
-            "GET", f"/api/v1/internal/users/{uid}/", {"authorization": "Bearer WRONG"}
+            "GET",
+            f"/api/v1/internal/users/{uid}/",
+            {"authorization": "Bearer WRONG", "x-external-user-id": _EXT_USER},
+        ),
+        "profile card fetched without naming the subject": Captured(
+            "GET", f"/api/v1/internal/users/{uid}/", bearer
         ),
         "missing X-External-User-ID on a write": Captured(
             "POST", "/api/v1/internal/me/catalog/recommendations/", bearer

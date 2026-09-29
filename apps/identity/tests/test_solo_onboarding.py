@@ -19,7 +19,6 @@ from apps.catalog.models import CatalogMaster
 from apps.identity.models import BotUser
 from apps.identity.services.solo_onboarding import (
     BOOTSTRAP_TENANT_SLUG,
-    BootstrapTenantMissing,
     SoloOnboardingPartialStateError,
     SoloOnboardingResult,
     _default_tenant_name,
@@ -99,13 +98,32 @@ class TestHelpers:
 # ─── TestBootstrapGate — pre-flight check ───────────────────────────────
 
 
-class TestBootstrapGate:
-    """Pre-flight: BootstrapTenantMissing raises when ops setup not done."""
+class TestBootstrapGateIsGone:
+    """Предполётной проверки bootstrap-тенанта больше нет — и не должно.
 
-    def test_missing_bootstrap_raises(self, channel_identity):
-        # No bootstrap_tenant fixture loaded — Tenant table empty.
-        with pytest.raises(BootstrapTenantMissing, match=BOOTSTRAP_TENANT_SLUG):
-            create_solo_provider(**channel_identity)
+    Она сторожила ops-настройку под ВЫДЕЛЕННОГО бота «Ayla Solo».
+    Владелец его отменил (§26 п.2): вход соло-мастера идёт через
+    салонного, который уже настроен. Тенант в засеве не участвовал —
+    `create_solo_provider` создаёт свой на человека.
+
+    Замер пилота 11.09.2026: `ayla_solo_bootstrap` там нет, а двенадцать
+    других тенантов есть. То есть проверка не ждала настройки — она
+    требовала настройки под закрытую дверь, и первая же регистрация
+    соло-мастера упиралась бы в неё.
+
+    Тест перевёрнут, а не удалён: прежнее поведение было закреплено, и
+    его исчезновение должно быть закреплено тоже — иначе проверка
+    вернётся «как было» при следующем слиянии.
+    """
+
+    def test_seeding_works_without_any_bootstrap_tenant(self, channel_identity):
+        # Фикстура `bootstrap_tenant` НЕ загружена — таблица тенантов пуста.
+        result = create_solo_provider(**channel_identity)
+
+        assert result.created is True
+        assert result.tenant.slug.startswith("solo-")
+        # И тенанта с прежним слагом от этого не появилось.
+        assert not Tenant.objects.filter(slug=BOOTSTRAP_TENANT_SLUG).exists()
 
 
 class TestInputValidation:

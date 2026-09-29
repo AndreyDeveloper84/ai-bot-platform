@@ -34,7 +34,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date as date_cls, datetime, time, timedelta
 from typing import Any
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from zoneinfo import ZoneInfo
+from apps.tenancy.timezones import salon_zone
 
 #: Hard ceiling on rows returned to the model. A month of visits in a
 #: prompt is tokens spent to make an answer worse.
@@ -63,14 +64,6 @@ class ToolOutcome:
 
     name: str
     data: dict[str, Any]
-
-
-def _tz(master) -> ZoneInfo:
-    tenant = getattr(master, "tenant", None)
-    try:
-        return ZoneInfo(getattr(tenant, "timezone", "") or "Europe/Moscow")
-    except (ZoneInfoNotFoundError, ValueError):
-        return ZoneInfo("Europe/Moscow")
 
 
 def _parse_date(raw: Any, *, field: str) -> date_cls:
@@ -105,7 +98,7 @@ def my_day(master, *, date: Any, now: datetime | None = None) -> dict[str, Any]:
 
     from apps.master_api.services.visit_source import master_visits
 
-    tz = _tz(master)
+    tz = salon_zone(getattr(master, "tenant", None))
     day = _parse_date(date, field="date")
     start, end = _day_bounds(day, tz)
 
@@ -127,7 +120,7 @@ def my_week(master, *, date_from: Any, date_to: Any) -> dict[str, Any]:
 
     from apps.master_api.services.visit_source import master_visits
 
-    tz = _tz(master)
+    tz = salon_zone(getattr(master, "tenant", None))
     start_day = _parse_date(date_from, field="date_from")
     end_day = _parse_date(date_to, field="date_to")
     if end_day < start_day:
@@ -156,12 +149,51 @@ def my_week(master, *, date_from: Any, date_to: Any) -> dict[str, Any]:
     }
 
 
-def free_slots(master, *, date: Any, duration_min: Any = 60) -> dict[str, Any]:
-    """Gaps of at least ``duration_min`` inside the working day."""
+def _working_block(master, day: date_cls) -> tuple[time, time, list[tuple[time, time]]] | None:
+    """Рабочая рамка дня из живого источника (как у «Сегодня», DRF-2152).
 
+    Возвращает ``(начало, конец, занятые куски)``: перерыв и блоки
+    недоступности Ayla — занятость, как в «Расписании» (DRF-1638: обед в
+    «свободно» уже утекал однажды). ``None`` — рамка прочитана, мастер в этот
+    день не работает. Отказ источника (``Salon*``) НЕ ловится здесь:
+    :func:`free_slots` переводит его в «последние известные данные».
+    """
+
+    from apps.master_api.services.schedule import _working_block_for_day
+    from apps.master_api.services.schedule_frame import load_day_frame
+
+    tz = salon_zone(getattr(master, "tenant", None))
+    wh_by_weekday, exceptions_by_date, extra_blocks_by_date = load_day_frame(
+        master, from_date=day, to_date=day, tz=tz
+    )
+    window = _working_block_for_day(master, day, exceptions_by_date, wh_by_weekday)
+    if window.working is None:
+        return None
+    blocked: list[tuple[time, time]] = []
+    if window.lunch is not None:
+        blocked.append((window.lunch[0], window.lunch[1]))
+    for extra in extra_blocks_by_date.get(day, []) or []:
+        blocked.append((extra.start_local, extra.end_local))
+    return window.working[0], window.working[1], blocked
+
+
+def free_slots(master, *, date: Any, duration_min: Any = 60) -> dict[str, Any]:
+    """Gaps of at least ``duration_min`` inside the working day.
+
+    Рамка дня — живая (каталог / Ayla). Когда источник не отвечает, окна
+    считаются по зашитым часам и зеркалу, а ответ помечается ``stale``:
+    модель не должна уверенно говорить «свободно», а экран показывает
+    «Последние известные данные» + «Проверить снова» (DRF-2153).
+    """
+
+    from apps.integrations.ayla.salon_client import (
+        SalonAPIError,
+        SalonNotConfigured,
+        SalonUnavailable,
+    )
     from apps.master_api.services.visit_source import occupied_intervals
 
-    tz = _tz(master)
+    tz = salon_zone(getattr(master, "tenant", None))
     day = _parse_date(date, field="date")
     try:
         wanted = int(duration_min)
@@ -170,11 +202,35 @@ def free_slots(master, *, date: Any, duration_min: Any = 60) -> dict[str, Any]:
     if wanted < MIN_SLOT_MINUTES:
         wanted = MIN_SLOT_MINUTES
 
-    day_start = datetime.combine(day, DEFAULT_DAY_START, tzinfo=tz)
-    day_end = datetime.combine(day, DEFAULT_DAY_END, tzinfo=tz)
+    stale = False
+    try:
+        block = _working_block(master, day)
+    except (SalonNotConfigured, SalonUnavailable, SalonAPIError):
+        stale = True
+        block = (DEFAULT_DAY_START, DEFAULT_DAY_END, [])
+    if block is None:
+        return {
+            "date": day.isoformat(),
+            "duration_min": wanted,
+            "working_hours": None,
+            "day_off": True,
+            "slots": [],
+            "count": 0,
+            "stale": False,
+        }
+    day_start = datetime.combine(day, block[0], tzinfo=tz)
+    day_end = datetime.combine(day, block[1], tzinfo=tz)
     bound_start, bound_end = _day_bounds(day, tz)
 
-    busy = sorted(occupied_intervals(master, day_start=bound_start, day_end=bound_end))
+    busy = list(occupied_intervals(master, day_start=bound_start, day_end=bound_end))
+    for b_start, b_end in block[2]:
+        busy.append(
+            (
+                datetime.combine(day, b_start, tzinfo=tz),
+                datetime.combine(day, b_end, tzinfo=tz),
+            )
+        )
+    busy.sort()
 
     gaps: list[dict[str, str]] = []
     cursor = day_start
@@ -192,9 +248,12 @@ def free_slots(master, *, date: Any, duration_min: Any = 60) -> dict[str, Any]:
     return {
         "date": day.isoformat(),
         "duration_min": wanted,
-        "working_hours": f"{DEFAULT_DAY_START:%H:%M}–{DEFAULT_DAY_END:%H:%M}",
+        "working_hours": f"{day_start:%H:%M}–{day_end:%H:%M}",
+        "day_off": False,
         "slots": gaps[:MAX_ROWS],
         "count": len(gaps),
+        # Источник не ответил — данные последние известные, не подтверждённые.
+        "stale": stale,
     }
 
 

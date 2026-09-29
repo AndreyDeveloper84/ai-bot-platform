@@ -41,8 +41,11 @@ env-backed source for a DB-backed one later changes only :func:`load`.
   ``X-Max-Bot-Api-Secret`` header. Doubles as the registry's primary key.
 * ``API_TOKEN`` — required. The outbound ``Authorization`` credential, and
   the initData HMAC key.
-* ``TENANT_SLUG`` — optional. Empty means tenant-less (the nationwide
-  discovery bot, which selects a tenant only at booking time).
+* ``TENANT_SLUG`` — optional. Empty means the tenant is decided later
+  (DRF-1785, 15.09.2026): the nationwide discovery bot selects it at
+  booking time; the salon bot takes it from the person (working row,
+  invite code, «Я работаю сам») and never from this entry — owner
+  12.09.2026: the salon bot does not belong to a salon (DRF-1705).
 * ``STREAM`` — optional, defaults to ``max``. The ingress stream suffix;
   must match a handler registered via ``apps.workers.registry``.
 * ``MINIAPP_URL`` / ``WEB_APP`` — optional. Per-bot Mini App address, so a
@@ -97,6 +100,11 @@ _SLUG_RE = re.compile(r"^[a-z0-9_]{1,32}$")
 # from it, so exotic characters would produce unreachable Redis keys.
 _STREAM_RE = re.compile(r"^[a-z0-9_]{1,32}$")
 
+#: Поток салонного бота. Дублируется как ``SALON_STREAM`` в трёх модулях-потребителях
+#: (salon_handler, master_notify, internal_chat) — они импортируют это имя, а не
+#: пишут строку заново.
+SALON_STREAM = "max_salon"
+
 _DEFAULT_STREAM = "max"
 
 # The slug used by the legacy fallback entry. Deliberately not a real bot
@@ -129,10 +137,19 @@ class BotEntry:
     stream: str = _DEFAULT_STREAM
     miniapp_url: str = ""
     web_app: str = ""
+    #: Публичная ссылка на бота (``MAX_BOT_<S>_LINK``) — чтобы другой бот мог
+    #: отправить человека сюда кнопкой (DRF-2113: салонный → клиентский).
+    link: str = ""
 
     @property
     def is_tenant_less(self) -> bool:
-        """True for the nationwide bot, which resolves a tenant only later."""
+        """True when the entry names no tenant: the tenant is decided later.
+
+        Since DRF-1785 (15.09.2026) that covers two streams — the nationwide
+        bot (a tenant at booking) and the salon bot (a tenant from the
+        person). Until that day the docstring read «True for the nationwide
+        bot», which the salon bot's pilot entry contradicted.
+        """
         return not self.tenant_slug
 
     def __repr__(self) -> str:  # pragma: no cover - trivial, but security-relevant
@@ -141,7 +158,7 @@ class BotEntry:
         return (
             f"BotEntry(slug={self.slug!r}, webhook_secret='<redacted>', "
             f"api_token='<redacted>', tenant_slug={self.tenant_slug!r}, "
-            f"stream={self.stream!r}, miniapp_url={self.miniapp_url!r})"
+            f"stream={self.stream!r}, miniapp_url={self.miniapp_url!r}, link={self.link!r})"
         )
 
 
@@ -257,7 +274,24 @@ def parse_registry(env: Mapping[str, Any]) -> tuple[BotEntry, ...]:
                 stream=stream,
                 miniapp_url=_clean(env.get(f"{prefix}MINIAPP_URL")),
                 web_app=_clean(env.get(f"{prefix}WEB_APP")),
+                link=_clean(env.get(f"{prefix}LINK")),
             )
+        )
+
+    # DRF-1705 (срез 1, DRF-1726): салонный бот ОДИН на инсталляцию. Решение
+    # владельца 12.09.2026 — «бот не принадлежит салону»: это платформенная
+    # поверхность мастеров всех салонов и соло-мастеров, и исходящие
+    # выбирают его по ПОТОКУ, а не по тенанту записи (``resolve_by_stream``).
+    # Две записи на ``max_salon`` сделали бы этот выбор произвольным —
+    # уведомление мастеру ушло бы от «какого-то» бота, а чаты MAX привязаны
+    # к боту, так что оно скорее не дошло бы вовсе. Отказ здесь, при
+    # загрузке, с именами обеих записей.
+    salon_bots = [e.slug for e in entries if e.stream == SALON_STREAM]
+    if len(salon_bots) > 1:
+        raise BotRegistryConfigurationError(
+            f"bots {salon_bots!r} all declare stream {SALON_STREAM!r} — the salon bot "
+            "is one per deployment (DRF-1705); outbound picks it by stream, and two "
+            "candidates would make that pick arbitrary"
         )
 
     return tuple(entries)
@@ -406,6 +440,10 @@ def resolve_by_tenant_stream(
     customer-facing token — which, since MAX chat ids are per-bot, most
     likely fails outright rather than merely looking odd.
 
+    For the SALON stream this is no longer the right question — the salon
+    bot serves every tenant (DRF-1705), see :func:`resolve_by_stream`. The
+    per-tenant argument above stays valid for ``stream=max``.
+
     Returns ``None`` when the deployment has no such bot; callers must
     treat that as "do not speak as anyone" rather than falling back to a
     default identity.
@@ -415,6 +453,33 @@ def resolve_by_tenant_stream(
         return None
     for entry in registry:
         if entry.tenant_slug == tenant_slug and entry.stream == stream:
+            return entry
+    return None
+
+
+def resolve_by_stream(stream: str, registry: tuple[BotEntry, ...]) -> BotEntry | None:
+    """The one bot serving ``stream``, regardless of tenant.
+
+    For ``max_salon`` this is the right question (DRF-1705, срез 1): the salon
+    bot does not belong to a salon, so «which bot notifies THIS master» has
+    the same answer for a master of ``formula-tela`` and a solo master in
+    ``solo-…`` — the previous tenant-keyed lookup answered ``None`` for the
+    latter, and ``None`` downstream meant «speak with the client bot's
+    token», i.e. into a chat that bot has never had.
+
+    ``parse_registry`` guarantees at most one entry on ``max_salon``; for
+    other streams (``max``, a per-tenant client bot) this function is NOT
+    the right tool — use :func:`resolve_by_tenant_stream`, whose docstring
+    says why both keys matter there.
+
+    Returns ``None`` when no bot serves the stream; callers must treat that
+    as «do not speak as anyone».
+    """
+
+    if not stream:
+        return None
+    for entry in registry:
+        if entry.stream == stream:
             return entry
     return None
 

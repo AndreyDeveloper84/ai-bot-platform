@@ -26,6 +26,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { SystemState } from "../components/master/SystemState";
 import { ApiError } from "../lib/api";
 import { formatMoney } from "../lib/format";
 import { formatConsentDate } from "../lib/customer-profile";
@@ -120,11 +121,9 @@ export function MasterBillingScreen() {
           <h2 id="billing-sub-h2" className="profile-section__heading">
             Подписка
           </h2>
-          {status.kind === "loading" && (
-            <p className="profile-section__caption">Загружаю…</p>
-          )}
+          {status.kind === "loading" && <SystemState kind="loading" lines={1} />}
           {status.kind === "error" && (
-            <BillingError err={status.err} onRetry={loadStatus} />
+            <BillingError err={status.err} what="subscription" onRetry={() => void loadStatus()} />
           )}
           {status.kind === "ok" && (
             <SubscriptionCard
@@ -147,11 +146,9 @@ export function MasterBillingScreen() {
           <h2 id="billing-payout-h2" className="profile-section__heading">
             К выплате
           </h2>
-          {payout.kind === "loading" && (
-            <p className="profile-section__caption">Загружаю…</p>
-          )}
+          {payout.kind === "loading" && <SystemState kind="loading" lines={1} />}
           {payout.kind === "error" && (
-            <BillingError err={payout.err} onRetry={loadPayout} />
+            <BillingError err={payout.err} what="payout" onRetry={() => void loadPayout()} />
           )}
           {payout.kind === "ok" && <PayoutBreakdown preview={payout.data} />}
         </section>
@@ -436,15 +433,29 @@ function PayoutBreakdown({ preview }: { preview: PayoutPreview }) {
 // Honest error states
 // ---------------------------------------------------------------------------
 
-function BillingError({ err, onRetry }: { err: unknown; onRetry: () => void }) {
+/**
+ * Синхронизация биллинга (specialist_mapping_unavailable) — доменное
+ * состояние со своим текстом и кнопкой, остаётся (ruling §61 М-6b м).
+ * Остальное — общая ошибка загрузки SystemState с предметом секции.
+ */
+function BillingError({
+  err,
+  what,
+  onRetry,
+}: {
+  err: unknown;
+  what: "subscription" | "payout";
+  onRetry: () => void;
+}) {
   const mapping =
     err instanceof ApiError && err.slug === "specialist_mapping_unavailable";
+  if (!mapping) {
+    return <SystemState kind="load_error" what={what} err={err} onRetry={onRetry} />;
+  }
   return (
     <div className="callout" role="alert">
       <p style={{ margin: 0 }}>
-        {mapping
-          ? "Данные биллинга ещё синхронизируются — загляни чуть позже."
-          : "Не получилось загрузить. Попробуй ещё раз."}
+        Данные биллинга ещё синхронизируются — загляни чуть позже.
       </p>
       <button
         type="button"

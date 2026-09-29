@@ -1,55 +1,81 @@
-"""C01 First Contact на глобальном пути — чипы, состояния, живые кнопки.
+"""Первый контакт глобального (клиентского) бота — v2 (DRF-2120, §50-К, 19.09).
 
-DRF-1348 + DRF-1051, один PR. Источник истины по составу экрана —
-утверждённый макет ``ТЗ Дизайнеру/Клиент/Спецификация UX UI Первый контакт
-Ayla.png`` (v1.0, APPROVED).
+Решение владельца 19.09: главный вход — свободный текст (DRF-1179/1272),
+кнопки лишь помогают начать и не выглядят каталогом функций. Отсюда состав
+экранов, пришпиленный здесь:
 
-Что здесь пришпилено, и почему именно это:
-
-* **Тап по чипу и тот же текст руками дают один и тот же ответ.** Главное
-  требование макета («один pipeline», блок ВАЖНО повторяет его дважды) и
-  единственное, которое нельзя доказать чтением кода: доказывается двумя
+* **Тексты владельца — дословно** (S1, первый экран, возврат); согласие и
+  S3 — как утверждены, без изменений.
+* **S3 доходит.** До DRF-2120 глобальный путь подменял весь ``reply_text``
+  WelcomeSkill, а S3 в нём склеен — S3 терялся. Теперь он читается по
+  ``meta.s3_shown`` и стоит перед первым экраном.
+* **Первый экран — три фразы C01 (§38) + «Найти услугу»**, потолок пять
+  (DRF-1200). Ни «Выбрать цель», ни «+ стакан воды», ни «Просто
+  посмотреть», ни «Записаться», ни «Дневник питания» — дневник в главном
+  меню (решение 07.09 о дневнике на первом экране вытеснено).
+* **Тап по фразе и тот же текст руками дают один и тот же ответ** — блок
+  ВАЖНО макета C01 («нет отдельных команд и сценариев»); доказывается двумя
   прогонами настоящего входа рядом.
-* **Ни одна выложенная кнопка не уходит в модель сырым payload'ом.** Таблица
-  читается из самой клавиатуры, а не переписывается сюда, поэтому пятая
-  кнопка, добавленная через месяц, не может проехать мимо проверки. Это и
-  есть причина, по которой DRF-1051 в одном PR с DRF-1348.
-* **Чипы не называются услугами** (ограничение владельца 24.08) — проверяется
-  разбором быстрой ветки, а не глазами: каждый чип обязан уйти консьержу.
-* Четыре состояния макета: Transient, AI недоступна + «Повторить»,
-  No Quick Actions, Возврат к диалогу.
+* **Возврат — кнопки по состоянию**: «Подобрать услугу» всегда, «Моя
+  запись» при ближайшей записи, «Записать еду» при включённом питании (с
+  воротами согласия дневника на ответе), «Меню». «Продолжить» не строится
+  (DRF-1198 нет; владелец: отложить).
+* **Ни одна выложенная кнопка не уходит в модель сырым payload'ом** — таблица
+  читается из самих клавиатур, а не переписывается сюда.
+* Состояния макета: AI недоступна + «Повторить», Transient.
 """
 
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from apps.channels.max import handler as max_handler
 from apps.channels.max.global_onboarding import (
+    CALLBACK_LOG_FOOD,
+    GLOBAL_RETURNING_TEXT,
     GLOBAL_S5_TEXT,
     GLOBAL_WELCOME_TEXT,
+    RETURNING_LABEL_DISCOVER,
+    RETURNING_LABEL_LOG_FOOD,
+    RETURNING_LABEL_MENU,
+    RETURNING_LABEL_MY_BOOKING,
+    START_BUTTON_LABEL,
     _to_discovery_reply,
+    first_contact_action_data,
+    first_contact_buttons,
+    first_contact_text,
+    needs_onboarding,
+    resolve_welcome_tap,
+    returning_buttons,
+    run_onboarding_turn,
 )
 from apps.channels.max.quick_actions import (
     AI_UNAVAILABLE_TEXT,
     FIRST_CONTACT_QUICK_ACTIONS,
+    FIRST_SCREEN_SLUGS,
     MAX_FIRST_CONTACT_BUTTONS,
-    QUICK_ACTIONS_HINT,
     RETRY_CALLBACK,
     RETRY_LABEL,
     SECONDARY_ACTION,
     STALE_TAP_TEXT,
-    first_contact_buttons,
+    first_screen_actions,
+    is_retry_callback,
     quick_action_callback,
-    render_first_contact,
     resolve_tap_text,
+    retry_turn_id,
 )
 from apps.conversations.services import resolve_active_global_conversation
 from apps.identity.services.resolver import resolve_or_create_global_bot_user
 from apps.orchestrator.memory import short_term
+from apps.skills.menu.marketplace import DISCOVER_TAP_TEXT, marketplace_menu_buttons
+from apps.skills.welcome.skill import (
+    FOOD_PROMPT,
+    S2_CONSENT_TEXT,
+    S3_POSITIONING_TEXT,
+)
 
 pytestmark = pytest.mark.django_db
 
@@ -72,6 +98,24 @@ def _no_chat_actions(monkeypatch):
         "apps.channels.max.outbound.send_chat_action",
         lambda **kwargs: {"ok": True},
     )
+
+
+@pytest.fixture(autouse=True)
+def no_upcoming(monkeypatch):
+    """Каталог записей — сеть; по умолчанию «записей нет». Возвращает
+    переключатель, чтобы узел мог положить человеку ближайшую запись."""
+    from apps.booking.services.records import VisitsResult
+
+    state = {"status": "empty"}
+    monkeypatch.setattr(
+        "apps.booking.services.records.list_upcoming",
+        lambda **kwargs: VisitsResult(status=state["status"]),
+    )
+
+    def _set(status: str) -> None:
+        state["status"] = status
+
+    return _set
 
 
 @pytest.fixture
@@ -174,40 +218,80 @@ def _user_messages(conversation) -> list[str]:
     )
 
 
-# --------------------------------------------------------------------------- #
-# Копия                                                                        #
-# --------------------------------------------------------------------------- #
-class TestCopyIsNeedFirst:
-    """Решение владельца 24.08: need/outcome-first, без города и каталога.
+def _labels(buttons) -> list[str]:
+    return [b["label"] for b in buttons]
 
-    Обе константы, а не только та, к которой добавляются кнопки: навесить
-    чипы поверх каталожной копии значило бы оставить Ayla каталогом с
-    кнопками.
+
+def _callbacks(buttons) -> list[str]:
+    return [b["callback"] for b in buttons]
+
+
+def _welcome_result(kind: str, **meta):
+    return SimpleNamespace(
+        reply_text="ignored", action_data=None, meta={"reply_kind": kind, **meta}
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Тексты владельца — буквой                                                    #
+# --------------------------------------------------------------------------- #
+class TestOwnerTextsVerbatim:
+    """Тексты — константы, тест держит их дословно (лист: «тесты — дословно»).
+
+    Литералы здесь намеренно НЕ импортированы из модуля: тест, читающий
+    ожидание из проверяемого, не может провалиться.
     """
 
-    def test_welcome_asks_what_bothers_you(self):
-        assert "чего тебе хочется или что сейчас беспокоит" in GLOBAL_WELCOME_TEXT
+    def test_s1(self):
+        assert GLOBAL_WELCOME_TEXT == (
+            "Привет! Я Ayla 👋\n"
+            "Помогу разобраться, что может подойти, найти услугу и записаться. "
+            "Можно просто рассказать, чего хочется или что сейчас беспокоит."
+        )
+        assert START_BUTTON_LABEL == "Начать"
 
-    def test_s5_asks_what_bothers_you(self):
-        assert "чего тебе хочется или что сейчас беспокоит" in GLOBAL_S5_TEXT
+    def test_consent_is_the_approved_text_unchanged(self):
+        assert S2_CONSENT_TEXT == (
+            "Прежде чем начать — короткое слово.\n"
+            "Я буду помнить о тебе только то, что поможет рекомендовать точнее. "
+            "Хранится безопасно. Удалить можно в любой момент.\n\n"
+            "Продолжим?"
+        )
 
-    @pytest.mark.parametrize("catalog_word", ["маникюр", "массаж", "стрижк", "по всей стране"])
-    def test_no_catalog_pitch(self, catalog_word):
-        """Список услуг на первом экране макет запрещает прямо (НЕ ДЕЛАЕМ)."""
-        assert catalog_word not in GLOBAL_WELCOME_TEXT.lower()
-        assert catalog_word not in GLOBAL_S5_TEXT.lower()
+    def test_s3_as_is(self):
+        assert S3_POSITIONING_TEXT == (
+            "Если коротко — я не календарь и не ещё одна программа правильного "
+            "питания. Я помогу разобраться с собой каждый день — еда, вода, "
+            "ближайшая запись, самочувствие. Без оценок."
+        )
 
-    @pytest.mark.parametrize("city_word", ["пенз", "город"])
-    def test_no_city_on_the_first_screen(self, city_word):
-        """Город спрашивается тогда, когда нужен для поиска исполнителя."""
-        assert city_word not in GLOBAL_WELCOME_TEXT.lower()
-        assert city_word not in GLOBAL_S5_TEXT.lower()
+    def test_first_screen(self):
+        assert GLOBAL_S5_TEXT == (
+            "С чего начнём?\n"
+            "Напиши своими словами, чего хочется или что сейчас беспокоит. "
+            "Не обязательно знать название услуги."
+        )
 
-    # Про «Не знаю, с чего начать» здесь НЕТ проверки, и это решение, а не
-    # пропуск. Владелец 24.08 отложил вопрос: «не использовать и не
-    # запрещать» — реестр и DRF-1179 противоречат макету, надо сверять.
-    # Тест, падающий на этой формулировке, был бы запретом, то есть
-    # решением за владельца. Сегодня она просто не используется.
+    def test_returning(self):
+        assert GLOBAL_RETURNING_TEXT == (
+            "С возвращением! Что хочешь сделать сегодня? Можно написать своими словами."
+        )
+
+    def test_first_screen_button_labels(self):
+        assert _labels(first_contact_buttons()) == [
+            "Хочу выглядеть свежее",
+            "Хочу снять напряжение",
+            "Последнее время сильно устаю",
+            "Найти услугу",
+        ]
+
+    def test_returning_button_labels(self):
+        assert (
+            RETURNING_LABEL_DISCOVER,
+            RETURNING_LABEL_MY_BOOKING,
+            RETURNING_LABEL_LOG_FOOD,
+            RETURNING_LABEL_MENU,
+        ) == ("Подобрать услугу", "Моя запись", "Записать еду", "Меню")
 
 
 # --------------------------------------------------------------------------- #
@@ -221,10 +305,8 @@ class TestChipsAreNotServiceNames:
     быстрой ветке отдельный отказ не приходится. Если кто-то назовёт чип
     «Лимфодренаж», ход заберут карточки мастеров — правильный ответ на
     название услуги и неправильный на потребность, — и падёт этот тест, а
-    не пилот.
-
-    ``_SERVICE_QUALIFIER_STEMS`` при этом не тронут: чинится формулировка
-    чипа, а не поведение ветки.
+    не пилот. Проверяется вся таблица §38, а не только три на экране:
+    старая клавиатура с шестью живёт в истории чата.
     """
 
     @pytest.mark.parametrize("action", FIRST_CONTACT_QUICK_ACTIONS, ids=lambda a: a.slug)
@@ -240,90 +322,244 @@ class TestChipsAreNotServiceNames:
         assert mentions_service(action.text) is False
 
     def test_secondary_entry_reaches_the_catalog_not_the_fast_path(self):
-        """«Найти услугу →» — выход из C01, а не запрос мастера по услуге."""
+        """«Найти услугу» — выход из C01, а не запрос мастера по услуге."""
         from apps.orchestrator.fast_path import claims_direct_show_masters
 
         assert claims_direct_show_masters(SECONDARY_ACTION.text) is False
 
 
 # --------------------------------------------------------------------------- #
-# Экран C01                                                                    #
+# Первый экран                                                                 #
 # --------------------------------------------------------------------------- #
 class TestFirstScreen:
-    def test_s5_ships_chips_and_the_secondary_entry(self):
-        result = SimpleNamespace(
-            reply_text="ignored",
-            action_data=None,
-            meta={"reply_kind": "welcome_s5_first_action"},
-        )
-        reply = _to_discovery_reply(result, None)
+    def test_s3_reaches_the_person_on_the_direct_path(self):
+        """Дефект до DRF-2120: S3 терялся — путь подменял весь reply_text."""
+        reply = _to_discovery_reply(_welcome_result("welcome_s5_first_action", s3_shown=True), None)
 
-        assert reply.text.startswith(GLOBAL_S5_TEXT)
-        assert QUICK_ACTIONS_HINT in reply.text
-        labels = [b["label"] for b in reply.action_data["buttons"]]
-        assert labels == [a.label for a in FIRST_CONTACT_QUICK_ACTIONS] + [SECONDARY_ACTION.label]
+        assert reply.text == f"{S3_POSITIONING_TEXT}\n\n{GLOBAL_S5_TEXT}"
 
-    def test_button_ceiling_is_not_breached(self):
-        """BOT-001 AC-4.2 / DRF-1200 — не больше пяти кнопок на первом экране."""
-        assert len(first_contact_buttons()) <= MAX_FIRST_CONTACT_BUTTONS
-
-    def test_no_quick_actions_state_drops_the_hint_with_the_chips(self):
-        """Макет, ДОПОЛНИТЕЛЬНЫЕ СОСТОЯНИЯ: «Показываем, если нет
-        релевантных примеров в контексте». Подсказка «выбрать пример»
-        без примеров — обещание, которого экран не выполняет."""
-        text, action_data = render_first_contact(GLOBAL_S5_TEXT, ())
-
-        assert text == GLOBAL_S5_TEXT
-        assert QUICK_ACTIONS_HINT not in text
-        labels = [b["label"] for b in (action_data or {}).get("buttons", [])]
-        assert labels == [SECONDARY_ACTION.label]
-
-    def test_no_quick_actions_without_secondary_ships_no_keyboard(self):
-        text, action_data = render_first_contact(GLOBAL_S5_TEXT, (), with_secondary=False)
-
-        assert text == GLOBAL_S5_TEXT
-        assert action_data is None
-
-
-# --------------------------------------------------------------------------- #
-# Возврат к диалогу                                                            #
-# --------------------------------------------------------------------------- #
-class TestReturnToDialog:
-    """Макет, ДОПОЛНИТЕЛЬНЫЕ СОСТОЯНИЯ — «Возврат к диалогу».
-
-    До DRF-1348 этот путь выбрасывал оба состояния возврата DRF-1202 и
-    здоровался с вернувшимся как с новым, предлагая согласие, которое у
-    него уже есть.
-    """
-
-    def _returning(self):
-        return SimpleNamespace(
-            reply_text="С возвращением! 👋\n\nС чем помочь сегодня?",
-            action_data={"buttons": [{"label": "📅 Записаться", "callback": "cb:menu:book"}]},
-            meta={"reply_kind": "welcome_returning"},
+    def test_s3_is_skipped_after_the_s2a_fold_as_welcome_decides(self):
+        reply = _to_discovery_reply(
+            _welcome_result("welcome_s5_first_action", s3_shown=False), None
         )
 
-    def test_consented_returning_user_continues_the_dialog(self):
-        bot_user, _ = _welcomed_user(64001)
-        reply = _to_discovery_reply(self._returning(), bot_user)
+        assert reply.text == GLOBAL_S5_TEXT
 
-        assert reply.text.startswith("С возвращением!")
-        assert reply.text != GLOBAL_WELCOME_TEXT
-        callbacks = [b["callback"] for b in reply.action_data["buttons"]]
-        assert callbacks == [quick_action_callback(a) for a in FIRST_CONTACT_QUICK_ACTIONS] + [
+    def test_first_contact_text_is_the_only_composer(self):
+        assert first_contact_text(s3_shown=True).endswith(GLOBAL_S5_TEXT)
+        assert first_contact_text(s3_shown=False) == GLOBAL_S5_TEXT
+
+    def test_the_screen_is_three_c01_phrases_and_find_service(self):
+        reply = _to_discovery_reply(_welcome_result("welcome_s5_first_action"), None)
+
+        callbacks = _callbacks(reply.action_data["buttons"])
+        assert callbacks == [quick_action_callback(a) for a in first_screen_actions()] + [
             quick_action_callback(SECONDARY_ACTION)
         ]
+        assert reply.action_data["button_columns"] == 1
+
+    def test_the_three_are_a_subset_of_the_c01_table(self):
+        """«Три из C01» — подмножество таблицы §38, не своя копия: обновится
+        C01 — обновятся и они."""
+        table = {a.slug: a for a in FIRST_CONTACT_QUICK_ACTIONS}
+        assert len(FIRST_SCREEN_SLUGS) == 3
+        assert [a.slug for a in first_screen_actions()] == list(FIRST_SCREEN_SLUGS)
+        for action in first_screen_actions():
+            assert table[action.slug] is action
+
+    def test_ceiling_is_five_and_the_screen_is_four(self):
+        """Потолок — DRF-1200; РАВЕНСТВО, а не «≤»: пятая кнопка появится
+        решением, а не по ходу правки."""
+        assert MAX_FIRST_CONTACT_BUTTONS == 5
+        assert len(first_contact_buttons()) == 4
+
+    @pytest.mark.parametrize(
+        "forbidden", ["Выбрать цель", "стакан воды", "Просто посмотреть", "Записаться", "Дневник"]
+    )
+    def test_nothing_from_the_menu_or_the_wellness_grid(self, forbidden, settings):
+        """Владелец: на первом экране этого нет. Присутствие — рядом: экран
+        не пуст и дневник ЖИВ в главном меню (он не удалён, а не здесь)."""
+        settings.NUTRITION_ENABLED = True
+        settings.MAX_BOT_WEB_APP = "aylabot"
+        person = SimpleNamespace(id="stub")
+        with patch("apps.consent.nutrition.diary_or_health_granted", lambda _u: True):
+            in_menu = _labels(marketplace_menu_buttons(bot_user=person))
+            on_screen = _labels(first_contact_action_data(person)["buttons"])
+
+        assert on_screen == _labels(first_contact_buttons())
+        assert [label for label in in_menu if label.endswith("Дневник питания")]
+        assert not [label for label in on_screen if forbidden.lower() in label.lower()]
+
+    def test_no_button_opens_the_mini_app_from_the_first_screen(self):
+        buttons = first_contact_buttons()
+        assert buttons
+        assert all(b["callback"].startswith("cb:qa:") for b in buttons)
+        assert not any("web_app" in b or "url" in b for b in buttons)
+
+    def test_live_path_s1_consent_s3_first_screen(self):
+        """Тем же входом, что и живой бот: /start → S1 → согласие → S3 + экран."""
+        bot_user = resolve_or_create_global_bot_user(
+            channel="max", channel_user_id="65001", chat_id="8899"
+        )
+        conv = resolve_active_global_conversation(bot_user)
+
+        s1 = run_onboarding_turn(conv, bot_user, "/start")
+        assert s1.text == GLOBAL_WELCOME_TEXT
+        assert s1.action_data["buttons"] == [
+            {"label": START_BUTTON_LABEL, "callback": "cb:welcome:start_s2"}
+        ]
+
+        s2 = run_onboarding_turn(conv, bot_user, "cb:welcome:start_s2")
+        assert s2.text == S2_CONSENT_TEXT
+
+        s5 = run_onboarding_turn(conv, bot_user, "cb:welcome:consent_yes")
+        assert s5.text == f"{S3_POSITIONING_TEXT}\n\n{GLOBAL_S5_TEXT}"
+        assert _labels(s5.action_data["buttons"]) == _labels(first_contact_buttons())
+
+
+# --------------------------------------------------------------------------- #
+# Возврат к диалогу — кнопки по состоянию                                      #
+# --------------------------------------------------------------------------- #
+class TestReturnToDialog:
+    """Четыре состояния возврата: без согласия; с согласием и ничем; с
+    ближайшей записью; с включённым питанием."""
 
     def test_unconsented_returning_user_still_gets_the_consent_entry(self):
-        """«▶️ Начать» здесь единственный вход в 152-ФЗ. Забрать его
+        """«Начать» здесь единственный вход в 152-ФЗ. Забрать его
         нельзя даже ради красивого экрана."""
         bot_user = resolve_or_create_global_bot_user(
             channel="max", channel_user_id="64002", chat_id="8899"
         )
-        reply = _to_discovery_reply(self._returning(), bot_user)
+        reply = _to_discovery_reply(_welcome_result("welcome_returning"), bot_user)
 
         assert reply.text == GLOBAL_WELCOME_TEXT
         assert reply.action_data["buttons"][0]["callback"] == "cb:welcome:start_s2"
+
+    def test_consented_bare_state_is_discover_and_menu(self, settings):
+        settings.NUTRITION_ENABLED = False
+        bot_user, _ = _welcomed_user(64001)
+        reply = _to_discovery_reply(_welcome_result("welcome_returning"), bot_user)
+
+        assert reply.text == GLOBAL_RETURNING_TEXT
+        assert _labels(reply.action_data["buttons"]) == [
+            RETURNING_LABEL_DISCOVER,
+            RETURNING_LABEL_MENU,
+        ]
+
+    def test_upcoming_booking_adds_my_booking_second(self, settings, no_upcoming):
+        settings.NUTRITION_ENABLED = False
+        no_upcoming("ok")
+        bot_user, _ = _welcomed_user(64003)
+
+        assert _labels(returning_buttons(bot_user)) == [
+            RETURNING_LABEL_DISCOVER,
+            RETURNING_LABEL_MY_BOOKING,
+            RETURNING_LABEL_MENU,
+        ]
+
+    def test_nutrition_on_adds_log_food_before_menu(self, settings):
+        settings.NUTRITION_ENABLED = True
+        bot_user, _ = _welcomed_user(64004)
+
+        assert _labels(returning_buttons(bot_user)) == [
+            RETURNING_LABEL_DISCOVER,
+            RETURNING_LABEL_LOG_FOOD,
+            RETURNING_LABEL_MENU,
+        ]
+
+    def test_full_state_fits_the_ceiling(self, settings, no_upcoming):
+        settings.NUTRITION_ENABLED = True
+        no_upcoming("ok")
+        bot_user, _ = _welcomed_user(64005)
+        buttons = returning_buttons(bot_user)
+
+        assert len(buttons) == 4 <= MAX_FIRST_CONTACT_BUTTONS
+
+    def test_catalog_down_hides_my_booking_and_keeps_the_greeting(self, settings, no_upcoming):
+        """Fail-closed: записи, которую нечем показать, кнопка не обещает."""
+        settings.NUTRITION_ENABLED = False
+        no_upcoming("backend_unavailable")
+        bot_user, _ = _welcomed_user(64006)
+        reply = _to_discovery_reply(_welcome_result("welcome_returning"), bot_user)
+
+        assert reply.text == GLOBAL_RETURNING_TEXT
+        assert RETURNING_LABEL_MY_BOOKING not in _labels(reply.action_data["buttons"])
+
+    def test_active_task_does_not_promise_to_continue(self, settings):
+        """«Продолжить» не строится (DRF-1198 нет; владелец: отложить) —
+        незаконченная задача отвечает тем же возвратом."""
+        settings.NUTRITION_ENABLED = False
+        bot_user, _ = _welcomed_user(64007)
+        reply = _to_discovery_reply(_welcome_result("welcome_active_task"), bot_user)
+
+        assert reply.text == GLOBAL_RETURNING_TEXT
+        assert "продолжим" not in reply.text.lower()
+
+    def test_every_return_button_has_a_branch(self, settings, no_upcoming):
+        """Куда ведёт каждый тап — не на слово: фраза (в тот же конвейер),
+        перевод тапа меню в фразу, или ветка приветствия (``cb:welcome:``)."""
+        settings.NUTRITION_ENABLED = True
+        no_upcoming("ok")
+        bot_user, conv = _welcomed_user(64008)
+        callbacks = _callbacks(returning_buttons(bot_user))
+        assert len(callbacks) == 4
+
+        assert callbacks[0] == DISCOVER_TAP_TEXT and not DISCOVER_TAP_TEXT.startswith("cb:")
+        assert resolve_tap_text(callbacks[1]) == "Покажи мои записи"
+        assert callbacks[2] == CALLBACK_LOG_FOOD and needs_onboarding(bot_user, callbacks[2], conv)
+        assert resolve_tap_text(callbacks[3]) == "Что ты умеешь?"
+
+
+# --------------------------------------------------------------------------- #
+# «Записать еду» — ворота дневника на ответе                                   #
+# --------------------------------------------------------------------------- #
+class TestLogFoodTap:
+    @pytest.fixture
+    def person(self, settings):
+        settings.NUTRITION_ENABLED = True
+        settings.MAX_BOT_WEB_APP = "aylabot"
+        settings.MAX_MINIAPP_URL = ""
+        bot_user, conv = _welcomed_user(66001)
+        return bot_user, conv
+
+    def test_with_diary_consent_the_tap_invites_food(self, person):
+        bot_user, conv = person
+        with patch("apps.consent.nutrition.diary_is_granted", lambda _u: True):
+            reply = run_onboarding_turn(conv, bot_user, CALLBACK_LOG_FOOD)
+
+        assert reply.text == FOOD_PROMPT
+
+    def test_without_diary_consent_the_tap_explains_and_leads_to_consent(self, person):
+        """DRF-2096: объяснение + «Открыть и разрешить», а не приглашение
+        прислать еду, чтобы отказать следующим ходом."""
+        from apps.skills.food_clarify.text_entry import (
+            DIARY_CONSENT_REQUIRED_WITH_BUTTON_TEXT,
+        )
+
+        bot_user, conv = person
+        with patch("apps.consent.nutrition.diary_is_granted", lambda _u: False):
+            reply = run_onboarding_turn(conv, bot_user, CALLBACK_LOG_FOOD)
+
+        assert reply.text == DIARY_CONSENT_REQUIRED_WITH_BUTTON_TEXT
+        assert reply.text != FOOD_PROMPT
+        assert _labels(reply.action_data["buttons"]) == ["Открыть и разрешить"]
+
+    def test_without_personal_data_consent_the_tap_offers_it(self, settings):
+        """Старая клавиатура у отозвавшего согласие: ворота 152-ФЗ первыми."""
+        from apps.skills.food_clarify.text_entry import CONSENT_TEXT
+
+        settings.NUTRITION_ENABLED = True
+        bot_user = resolve_or_create_global_bot_user(
+            channel="max", channel_user_id="66002", chat_id="8899"
+        )
+        conv = resolve_active_global_conversation(bot_user)
+        reply = run_onboarding_turn(conv, bot_user, CALLBACK_LOG_FOOD)
+
+        assert reply.text == CONSENT_TEXT
+
+    def test_the_tap_lands_in_history_as_the_owners_label(self):
+        assert resolve_welcome_tap(CALLBACK_LOG_FOOD).history_text == RETURNING_LABEL_LOG_FOOD
+        assert resolve_welcome_tap("cb:welcome:start_s2").history_text == START_BUTTON_LABEL
 
 
 # --------------------------------------------------------------------------- #
@@ -336,7 +572,7 @@ class TestTapIsTheSameMessageAsTyping:
     """
 
     def test_chip_tap_and_typed_text_reach_the_model_identically(self, sent, fake_redis, concierge):
-        chip = FIRST_CONTACT_QUICK_ACTIONS[2]  # «Хочу снять напряжение»
+        chip = first_screen_actions()[1]  # «Хочу снять напряжение»
 
         _welcomed_user(60001)
         max_handler.handle_global_max_event(
@@ -357,7 +593,7 @@ class TestTapIsTheSameMessageAsTyping:
         """DRF-990 класс: сырой «cb:…» в истории — то, что модель охотно
         толкует. Подстановка стоит выше персистенса, поэтому в истории
         оказывается фраза."""
-        chip = FIRST_CONTACT_QUICK_ACTIONS[0]
+        chip = first_screen_actions()[0]
         _, conversation = _welcomed_user(60003)
 
         max_handler.handle_global_max_event(
@@ -379,14 +615,30 @@ class TestTapIsTheSameMessageAsTyping:
 
         assert concierge.call_args.args[0] == SECONDARY_ACTION.text
 
+    def test_a_chip_from_the_old_six_button_keyboard_still_speaks(
+        self, sent, fake_redis, concierge
+    ):
+        """Старая клавиатура в истории чата живёт дольше правки: снятый с
+        экрана чип §38 по-прежнему переводится в свою фразу."""
+        retired_from_screen = [
+            a for a in FIRST_CONTACT_QUICK_ACTIONS if a.slug not in FIRST_SCREEN_SLUGS
+        ]
+        assert retired_from_screen
+        chip = retired_from_screen[0]
+        _welcomed_user(60005)
+
+        max_handler.handle_global_max_event(
+            _tap(payload=quick_action_callback(chip), user_id=60005, callback_id="tap-4")
+        )
+
+        assert concierge.call_args.args[0] == chip.text
+
 
 # --------------------------------------------------------------------------- #
 # DRF-1051 — ни одной кнопки, уходящей в модель                                #
 # --------------------------------------------------------------------------- #
 class TestNoShippedButtonReachesTheModelRaw:
-    """Причина, по которой PR один.
-
-    Таблица не переписывается сюда: она читается из самой клавиатуры плюс
+    """Таблица не переписывается сюда: она читается из самих клавиатур плюс
     главное меню. Кнопка, добавленная через месяц без обработчика, падает
     здесь, а не у человека в чате.
     """
@@ -395,15 +647,13 @@ class TestNoShippedButtonReachesTheModelRaw:
         from apps.skills.menu.matching import main_menu_buttons
 
         return (
-            [b["callback"] for b in first_contact_buttons()]
-            + [b["callback"] for b in main_menu_buttons()]
-            + [RETRY_CALLBACK]
+            _callbacks(first_contact_buttons()) + _callbacks(main_menu_buttons()) + [RETRY_CALLBACK]
         )
 
     @pytest.mark.parametrize(
         "callback",
         [
-            *[b["callback"] for b in first_contact_buttons()],
+            *_callbacks(first_contact_buttons()),
             "cb:menu:book",
             "cb:menu:my_bookings",
             "cb:menu:reschedule",
@@ -450,27 +700,43 @@ class TestNoShippedButtonReachesTheModelRaw:
         assert concierge.call_args.args[0] == "Хочу записаться"
 
     def test_retired_menu_slug_never_reaches_the_model_raw(self, sent, fake_redis, concierge):
+        """DRF-1491 — снятый слаг отвечает МЕНЮ, а не прозой модели."""
         _welcomed_user(61003)
 
         max_handler.handle_global_max_event(
             _tap(payload="cb:menu:retired_button", user_id=61003, callback_id="menu-3")
         )
 
-        assert concierge.called
-        assert not concierge.call_args.args[0].startswith("cb:")
+        # Стража: ход не потерян и клавиатура доехала.
+        assert sent, "снятый слаг остался без ответа"
+        assert sent[-1]["attachments"], sent[-1]
+        # И только теперь отрицание: сырого payload'а человек не видел…
+        assert "cb:" not in sent[-1]["text"], sent[-1]["text"]
+        # …и модель его тоже не видела.
+        assert concierge.called is False
 
     def test_typed_lookalike_is_not_treated_as_a_tap(self, sent, fake_redis, concierge):
-        """Проверка формы, а не префикса: человек может НАБРАТЬ «cb:qa:…».
-
-        Подстановка формы не совпадает — текст идёт как обычный, и в лог
-        не попадает содержимое (правило #842).
-        """
+        """Проверка формы, а не префикса: человек может НАБРАТЬ «cb:qa:…»."""
         typed = "cb:qa: мой телефон +79001234567"
         _welcomed_user(61004)
 
         max_handler.handle_global_max_event(_msg(text=typed, user_id=61004, mid="typed-2"))
 
         assert concierge.call_args.args[0] == typed
+
+    def test_stale_tap_screen_carries_the_first_screen_keyboard(self, sent, fake_redis, concierge):
+        """Экран «кнопка устарела» — те же три фразы и «Найти услугу»."""
+        _welcomed_user(61005)
+
+        max_handler.handle_global_max_event(
+            _tap(payload="cb:qa:no_such_slug_anymore", user_id=61005, callback_id="stale-1")
+        )
+
+        assert sent[-1]["text"] == STALE_TAP_TEXT
+        assert [b["text"] for b in _buttons(sent[-1]["attachments"])] == _labels(
+            first_contact_buttons()
+        )
+        assert concierge.called is False
 
 
 # --------------------------------------------------------------------------- #
@@ -507,7 +773,9 @@ class TestAiUnavailable:
         assert sent[-1]["text"] == AI_UNAVAILABLE_TEXT
         buttons = _buttons(sent[-1]["attachments"])
         assert [b["text"] for b in buttons] == [RETRY_LABEL]
-        assert buttons[0]["payload"] == RETRY_CALLBACK
+        # DRF-1762 — кнопка привязана к строке хода, а не «последнее что было».
+        assert is_retry_callback(buttons[0]["payload"])
+        assert retry_turn_id(buttons[0]["payload"]) is not None
 
     def test_retry_resends_the_persons_own_words(self, sent, fake_redis, broken_model, monkeypatch):
         _welcomed_user(62002)

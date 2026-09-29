@@ -96,6 +96,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+import lint_parse  # DRF-2538: нечитаемый вход — отдельный исход, не ноль
+
 #: Attributes whose value proves nothing about whether a body has content.
 #: ``assert resp.status_code == 200`` is the mistaken guard at the heart
 #: of DRF-1406 — an empty body is a perfectly good 200.
@@ -380,9 +382,8 @@ def _marker(lines: list[str], lineno: int) -> tuple[bool, bool]:
 
 def scan_file(path: Path, source: str) -> tuple[list[Site], list[Site]]:
     """Return (unguarded sites, bare-marker sites) for one test module."""
-    try:
-        tree = ast.parse(source)
-    except SyntaxError:
+    tree = lint_parse.parse_or_report(source, path)
+    if tree is None:
         return [], []
 
     lines = source.splitlines()
@@ -480,7 +481,7 @@ def read_baseline(path: Path = _BASELINE) -> set[str]:
     }
 
 
-def main(argv: list[str]) -> int:
+def _run(argv: list[str]) -> int:
     roots = [Path(a) for a in argv[1:] if not a.startswith("-")]
     if not roots:
         print(
@@ -532,6 +533,14 @@ def main(argv: list[str]) -> int:
         "Green means nothing NEW was added -- not that the baseline is sound."
     )
     return 0
+
+
+def main(argv: list[str]) -> int:
+    lint_parse.reset()
+    code = _run(argv)
+    if code not in (0, 1):  # ошибка вызова — охват не о чем печатать
+        return code
+    return max(code, lint_parse.finish("negative_assert_guard"))
 
 
 if __name__ == "__main__":

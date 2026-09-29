@@ -26,13 +26,40 @@
  * list and must never collapse it to `roles[0]` — that would restore
  * exactly the blindness the screen was built to remove.
  *
- * ### Read-only on purpose
+ * ### Three actions
  *
- * No role change, no revoke, no bulk actions. The owner scoped this to
- * the list because there was no list at all; the buttons are a separate
- * decision that has not been made. Revoking already exists as an
- * endpoint (`staff/revoke/`) with no caller, which is where a follow-up
- * would start.
+ * The screen shipped read-only: the owner had asked for the list and the
+ * list only. `staff/revoke/` existed as an endpoint with *no caller* —
+ * access was grantable from the Mini App and removable only from a psql
+ * session, so a master invited by mistake or a receptionist who left
+ * kept their way in until somebody wrote to us.
+ *
+ * This screen is that caller (DRF-1557, the owner's decision of
+ * 07.09.2026). Granting lives on «Команда».
+ *
+ * DRF-2273 (CD §72 p.15–16, 21.09.2026 — the Mini App is the owner's only
+ * workplace) adds the second: «Сменить роль», onto `staff/role/`, the
+ * same service the Django admin calls. OWNER ONLY, unlike revoke — the
+ * owner ruled that changing roles is hers alone (`views_staff_roster`),
+ * so `mayChangeRole` reads `me.is_owner` and nothing wider.
+ *
+ * DRF-2274 adds the third: «Вернуть доступ», onto `staff/restore/`. It
+ * gives back the role a person HELD — the revoked chip on this very row —
+ * and never a new one. Owner only as well: restoring is granting, and an
+ * admin who may revoke may not restore (accepted 22.09).
+ *
+ * ### The button is gated on the VIEWER'S ROLE
+ *
+ * `staff/revoke/` sits behind `require_admin_role` — owner and admin,
+ * never the front desk — so `mayRevoke` reads the viewer's role and
+ * nothing else. `AdminSalonDayScreen` decides its buttons from visit
+ * lifecycle instead, and so gets to disagree with the server about who
+ * may act; that is not copied here.
+ *
+ * Whether the ROW has anything to take away is a second, separate
+ * question, and it is kept visibly separate (`STATE_REVOCABLE`,
+ * `revokeTarget`). Conflating the two is how the permission check
+ * quietly becomes a lifecycle check.
  *
  * ### No phone numbers
  *
@@ -46,8 +73,14 @@ import { useNavigate } from "react-router-dom";
 
 import { AdminTabBar } from "../../components/AdminTabBar";
 import { StateError } from "../../components/StateError";
+import { ApiError } from "../../lib/api";
 import {
+  changeStaffRole,
   getStaffRoster,
+  restoreStaffAccess,
+  revokeStaffAccess,
+  type ChangeableRole,
+  type RestorableRole,
   type MeResponse,
   type RoleSource,
   type RoleState,
@@ -77,21 +110,109 @@ const SOURCE_LABEL: Record<RoleSource, string> = {
  * Suffix on the role chip. `active` says nothing — a live role is the
  * default and does not need a word.
  *
- * `pending` and `revoked` must never share copy: one is somebody who has
- * not arrived yet and needs the invite resent, the other is somebody
- * whose access was taken away. Telling them apart is why the backend
- * returns three states instead of a boolean.
+ * `pending`, `revoked` and `ayla_unlinked` must never share copy: one is
+ * somebody who has not arrived yet and needs the invite resent, one is
+ * somebody whose access was taken away, and one is a master we failed to
+ * link to Ayla. Three different next moves for the owner. Telling them
+ * apart is why the backend returns a reason instead of a boolean.
  */
 const STATE_SUFFIX: Record<RoleState, string> = {
   active: "",
   pending: " — приглашение не принято",
   revoked: " — доступ отозван",
+  // DRF-1540, wording is the owner's decision of 06.09.2026 kept
+  // verbatim. It repeats «мастера» after the «Мастер» chip label, and
+  // that is the cheaper of the two prices: paraphrasing a decision text
+  // is how a status starts meaning something slightly else.
+  //
+  // It must never read like `pending` or `revoked`. Those two send the
+  // owner to the master (resend the invite / restore access); this one
+  // sends her to us, because the missing link is ours to fix. One text
+  // for two causes would send her to spend an evening on the wrong one.
+  ayla_unlinked: " — не удалось связать профиль мастера с Ayla",
+  // ПРЕДЛОЖЕННЫЙ текст — решения владельца по формулировке нет.
+  // Требование то же, что у соседей: не читаться ни как `revoked`
+  // (никто ничего не отзывал), ни как `pending` (она уже пришла), и
+  // называть следующий шаг владелицы. Шаг здесь тот же, что у
+  // `ayla_unlinked`, — идти к нам, — но СЛОВО другое намеренно: не
+  // хватает другой личности, и поддержке нужно различать какой.
+  catalog_unlinked: " — профиль мастера не заведён в каталоге",
+  // DRF-1521. ПРЕДЛОЖЕННЫЙ текст — решение владельца по формулировке
+  // ещё не получено; таких строк здесь теперь две — вторая
+  // `catalog_unlinked` выше.
+  // Требование к любой замене: не читаться ни как `revoked` («доступ
+  // отозван» — здесь никто ничего не отзывал), ни как `ayla_unlinked`
+  // («не удалось» — это наша вина, а эта причина не наша), и называть
+  // следующий шаг владелицы, а он один — написать мастеру.
+  profile_incomplete: " — профиль не заполнен",
+  // §83, текст владельца дословно. Не читается ни как `revoked` (никто
+  // ничего не отзывал), ни как `ayla_unlinked` (вина не наша): следующий
+  // шаг владелицы — открыть карточку мастера и проверить часы.
+  schedule_unconfirmed: " — расписание не подтверждено",
 };
 
 const STATE_CHIP_CLASS: Record<RoleState, string> = {
   active: "admin-chip",
   pending: "admin-chip admin-chip--warn",
   revoked: "admin-chip admin-chip--revoked",
+  // Not `--warn` and not `--revoked`: a revoked role is a fact and a
+  // pending invite is a nudge, while this one is a fault that keeps a
+  // working master off the storefront until somebody acts.
+  ayla_unlinked: "admin-chip admin-chip--fault",
+  // `--fault`, как у соседа выше, и по той же причине: рабочая с виду
+  // мастер не продаётся, пока кто-то не вмешается, и этот кто-то — не
+  // владелица. `--warn` звал бы её чинить то, до чего она не достаёт.
+  catalog_unlinked: "admin-chip admin-chip--fault",
+  // `--warn`, как у `pending`, и это не лень: обе причины — про
+  // человека, который ещё не дошёл, и обе чинятся одним и тем же
+  // движением владелицы. `--fault` здесь был бы неправдой: сломанного
+  // ничего нет.
+  profile_incomplete: "admin-chip admin-chip--warn",
+  // `--warn`, а не `--fault`: сломанного ничего нет, шаг остался за
+  // владелицей — ровно как у `pending` и `profile_incomplete`.
+  schedule_unconfirmed: "admin-chip admin-chip--warn",
+};
+
+/**
+ * Is there anything for `staff/revoke/` to take away from a role in this
+ * state?
+ *
+ * A third exhaustive `Record<RoleState, …>` beside the two above, for the
+ * same reason they are exhaustive: a new state added to the union must
+ * force a decision here rather than default to a button that quietly
+ * appears — or quietly stops appearing — on a state nobody thought about.
+ *
+ * This answers «is there access to take away», which is NOT «may this
+ * viewer revoke». That one is `mayRevoke`, and it reads the role. Keeping
+ * them apart is the whole point; see the header.
+ */
+const STATE_REVOCABLE: Record<RoleState, boolean> = {
+  active: true,
+  // Nobody has taken this up yet — no account exists, so the server would
+  // answer 200 with `changed: false` and the row would not move. The
+  // owner's next move here is to resend the invite, which «Команда» does.
+  pending: false,
+  // Already gone. Offering it again would make «доступ отозван» read as
+  // though it had not landed.
+  revoked: false,
+  // DRF-1540 is OUR fault, not the salon's — but the access is real: she
+  // accepted, she is linked, she can open the Mini App. The chip already
+  // tells the owner this one is ours to fix; it does not follow that she
+  // may not remove a master who is leaving anyway.
+  ayla_unlinked: true,
+  // По тому же доводу, что и строкой выше: причина не в доступе. Она
+  // приняла приглашение, она связана и входит в кабинет — отзывать есть
+  // что. Вина наша, но это не отнимает у владелицы права убрать мастера,
+  // которая всё равно уходит.
+  catalog_unlinked: true,
+  // DRF-1521 — по тому же доводу, что и строкой выше: причина не в
+  // доступе. Она приняла приглашение, она связана, она входит в кабинет
+  // (и входит ИМЕННО затем, чтобы дозаполнить профиль). Доступ реален,
+  // значит его есть что отозвать, если владелица решит.
+  profile_incomplete: true,
+  // §83 — по тому же доводу: причина не в доступе. Она принята, связана и
+  // входит в кабинет; отзывать есть что, если владелица решит.
+  schedule_unconfirmed: true,
 };
 
 const MONTHS_GEN = [
@@ -148,12 +269,218 @@ function roleLine(grant: StaffRoleGrant): string {
   return [label, source, since].filter(Boolean).join(" · ");
 }
 
+/**
+ * May THIS VIEWER revoke anybody at all?
+ *
+ * Mirrors `require_admin_role`, which admits owner and admin and refuses
+ * the front desk. One line, reading `me` and nothing else — a permission
+ * question answered by a role, so that it cannot drift into being
+ * answered by whatever the row happens to look like.
+ *
+ * In practice everyone who reaches this screen is an owner (the roster
+ * endpoint is owner-only). Writing the admin half anyway is what keeps
+ * the button correct on the day the roster widens: the alternative is a
+ * `me.is_owner` that looks deliberate and is really an accident of which
+ * endpoint happened to be narrower.
+ */
+function mayRevoke(me: MeResponse): boolean {
+  return me.is_owner || me.is_admin;
+}
+
+/**
+ * The roles this row would actually lose, or `null` when the row must
+ * not offer the button at all.
+ *
+ * Every `null` here is a request the server would refuse or no-op, and
+ * each is named:
+ *
+ *   - no `bot_user_id` — nobody holds anything. `has_account` is defined
+ *     as exactly this, and revoking by `master_id` would answer 200 with
+ *     `changed: false`;
+ *   - yourself — the view answers 403. An admin who revokes their own
+ *     access cannot restore it;
+ *   - the salon owner — the service raises `owner_revoke_refused` (409).
+ *     A tenant has one active owner and only an owner may issue an owner
+ *     code, so revoking it leaves a salon nobody can re-enter;
+ *   - nothing revocable left — see `STATE_REVOCABLE`.
+ */
+function revokeTarget(
+  person: StaffRosterPerson,
+  me: MeResponse,
+): { botUserId: string; roles: StaffRoleGrant[] } | null {
+  const botUserId = person.bot_user_id;
+  if (!botUserId) return null;
+  if (botUserId === me.user.id) return null;
+  const roles = person.roles.filter((g) => STATE_REVOCABLE[g.state]);
+  if (roles.length === 0) return null;
+  if (roles.some((g) => g.role === "owner")) return null;
+  return { botUserId, roles };
+}
+
+/** «Мастер и Администратор» — what the confirmation says is going away. */
+function roleNames(roles: StaffRoleGrant[]): string {
+  const labels = roles.map((g) => ROLE_LABEL[g.role] ?? g.role);
+  if (labels.length <= 1) return labels[0] ?? "";
+  return `${labels.slice(0, -1).join(", ")} и ${labels[labels.length - 1]}`;
+}
+
+/** What the confirmation dialog is currently asking about. */
+interface PendingRevoke {
+  person: StaffRosterPerson;
+  botUserId: string;
+  roles: StaffRoleGrant[];
+}
+
+/**
+ * The roles `staff/role/` can hand out, in the order the sheet lists them.
+ * `owner` is absent on purpose: ownership moves by a separate two-step
+ * handover and the server answers 403 to it here.
+ */
+const CHANGEABLE_ROLES: ChangeableRole[] = ["admin", "receptionist"];
+
+/**
+ * May THIS VIEWER change roles? Owner only — the owner's ruling, recorded
+ * on the backend in `views_staff_roster`. Deliberately NOT `mayRevoke`:
+ * an admin may take access away but not re-shape it.
+ */
+function mayChangeRole(me: MeResponse): boolean {
+  return me.is_owner;
+}
+
+/**
+ * The live staff roles this row would swap out, or `null` when the row
+ * must not offer «Сменить роль». Each `null` is a request the server
+ * would refuse:
+ *
+ *   - no `bot_user_id` — no person to name;
+ *   - yourself — 403;
+ *   - the salon owner — the service's `owner_role_locked`;
+ *   - no live admin / receptionist role — `no_active_role` (409). A
+ *     master-only row is here: the master link lives in another table
+ *     and this endpoint does not touch it.
+ */
+function roleChangeTarget(
+  person: StaffRosterPerson,
+  me: MeResponse,
+): { botUserId: string; current: StaffRoleGrant[] } | null {
+  const botUserId = person.bot_user_id;
+  if (!botUserId) return null;
+  if (botUserId === me.user.id) return null;
+  if (person.roles.some((g) => g.role === "owner")) return null;
+  const current = person.roles.filter(
+    (g) =>
+      g.state === "active" &&
+      (CHANGEABLE_ROLES as string[]).includes(g.role),
+  );
+  if (current.length === 0) return null;
+  return { botUserId, current };
+}
+
+/**
+ * What «Вернуть доступ» can give back on this row, or `null` for no
+ * button. The list is the SERVER's (`restorable_roles`, the same rule
+ * `staff/restore/` applies) — never derived from the chips here: a role
+ * change closes rows too and they read as «доступ отозван», and giving
+ * that role back would leave two roles. Yourself is dropped here as well
+ * (the view answers 403).
+ */
+function restoreTarget(
+  person: StaffRosterPerson,
+  me: MeResponse,
+): RestorableRole[] | null {
+  if (person.bot_user_id && person.bot_user_id === me.user.id) return null;
+  const roles = person.restorable_roles.filter(
+    (r) => r !== "master" || person.master_id !== null,
+  );
+  return roles.length > 0 ? roles : null;
+}
+
+/** What the restore sheet is currently asking about. */
+interface PendingRestore {
+  person: StaffRosterPerson;
+  options: RestorableRole[];
+  choice: RestorableRole | null;
+}
+
+/** What the role sheet is currently asking about. */
+interface PendingRoleChange {
+  person: StaffRosterPerson;
+  botUserId: string;
+  current: StaffRoleGrant[];
+  choice: ChangeableRole | null;
+}
+
+/**
+ * A refusal the role and restore sheets can say in words, or `null` to
+ * fall back to `StateError`. The catalog's refusal carries its own «что
+ * сделать» (`details.hint`, the same words the operator reads in the
+ * Django admin); without it the owner would see an English service slug.
+ */
+function accessRefusal(err: unknown): string | null {
+  if (!(err instanceof ApiError)) return null;
+  if (err.slug === "catalog_admin_link_refused") {
+    const hint = typeof err.details?.hint === "string" ? err.details.hint : "";
+    return hint
+      ? `Каталог не подтвердил администратора: ${hint}.`
+      : "Каталог не подтвердил администратора.";
+  }
+  if (err.slug === "no_active_role") {
+    return "У этого человека уже нет роли в салоне — обновите список.";
+  }
+  // DRF-2274 — restore refusals.
+  if (err.slug === "role_not_previously_held") {
+    return "Этой роли у человека не было — возвращать нечего. Обновите список.";
+  }
+  if (err.slug === "person_gone") {
+    return "Аккаунта этого человека больше нет — пригласите его заново на экране «Команда».";
+  }
+  if (err.slug === "wrong_recipient") {
+    return "Карточка мастера уже связана с другим человеком.";
+  }
+  if (err.slug === "person_already_master") {
+    return "Этот человек уже связан с другой карточкой мастера.";
+  }
+  if (err.slug === "holds_another_role") {
+    return "У человека уже есть другая роль — поменяйте её кнопкой «Сменить роль».";
+  }
+  if (err.slug === "invite_master_missing") {
+    return "Карточка мастера в архиве — вернуть доступ к ней нельзя.";
+  }
+  // Refusals a retry cannot change: the person left the salon, or the
+  // row no longer allows it. «Повторить» would repeat the same answer.
+  if (err.status === 404) {
+    return "Этого человека больше нет в салоне — обновите список.";
+  }
+  if (err.status === 403) {
+    return "Эту роль отсюда сменить нельзя — обновите список.";
+  }
+  return null;
+}
+
 export function AdminPeopleScreen({ me }: Props) {
   const navigate = useNavigate();
   const [items, setItems] = useState<StaffRosterPerson[] | null>(null);
   const [totalCount, setTotalCount] = useState<number>(0);
   const [truncated, setTruncated] = useState<boolean>(false);
   const [err, setErr] = useState<unknown>(null);
+  // `null` = no dialog. Holding the whole target rather than an id keeps
+  // the confirmation able to name the person and the roles without
+  // looking anything up again while the list is being reloaded.
+  const [pending, setPending] = useState<PendingRevoke | null>(null);
+  const [revoking, setRevoking] = useState<boolean>(false);
+  // Kept apart from `err`: the roster loaded fine, the revoke did not.
+  // Folding the two would replace a working list with an error card and
+  // lose which of the two things actually failed.
+  const [revokeErr, setRevokeErr] = useState<unknown>(null);
+  // DRF-2273 — the role sheet. Its own trio, for the reason `revokeErr`
+  // is kept apart from `err`: which of the actions failed must stay said.
+  const [roleChange, setRoleChange] = useState<PendingRoleChange | null>(null);
+  const [changingRole, setChangingRole] = useState<boolean>(false);
+  const [roleErr, setRoleErr] = useState<unknown>(null);
+  // DRF-2274 — the restore sheet, its own trio for the same reason.
+  const [restore, setRestore] = useState<PendingRestore | null>(null);
+  const [restoring, setRestoring] = useState<boolean>(false);
+  const [restoreErr, setRestoreErr] = useState<unknown>(null);
 
   useEffect(() => {
     setBackButton(true);
@@ -197,9 +524,95 @@ export function AdminPeopleScreen({ me }: Props) {
     void reload();
   }, [reload]);
 
+  const confirmRevoke = useCallback(async () => {
+    if (!pending) return;
+    setRevoking(true);
+    setRevokeErr(null);
+    try {
+      await revokeStaffAccess({
+        bot_user_id: pending.botUserId,
+        reason: "отозвано владельцем на экране «Люди салона»",
+      });
+      setPending(null);
+      // The row must be re-read, not patched locally. What the revoke
+      // actually did is the server's answer — which roles fell, whether
+      // the master row was unlinked — and reloading is how the chip
+      // becomes «доступ отозван» from the same source as every other
+      // chip on this screen.
+      await reload();
+    } catch (e) {
+      // Deliberately no silent swallow (DRF-1556 was exactly that: an
+      // empty catch hid a contract mismatch). The dialog stays open,
+      // the refusal is shown, and the owner can retry or back out.
+      setRevokeErr(e);
+    } finally {
+      setRevoking(false);
+    }
+  }, [pending, reload]);
+
+  const closeRevoke = useCallback(() => {
+    setPending(null);
+    setRevokeErr(null);
+  }, []);
+
+  const confirmRoleChange = useCallback(async () => {
+    if (!roleChange?.choice) return;
+    setChangingRole(true);
+    setRoleErr(null);
+    try {
+      await changeStaffRole({
+        bot_user_id: roleChange.botUserId,
+        role: roleChange.choice,
+      });
+      setRoleChange(null);
+      // Re-read, never patch — as after a revoke: the chips come from
+      // the server's answer, the same source as every other row.
+      await reload();
+    } catch (e) {
+      setRoleErr(e);
+    } finally {
+      setChangingRole(false);
+    }
+  }, [roleChange, reload]);
+
+  const closeRoleChange = useCallback(() => {
+    setRoleChange(null);
+    setRoleErr(null);
+  }, []);
+
+  const confirmRestore = useCallback(async () => {
+    if (!restore?.choice) return;
+    const { person, choice } = restore;
+    setRestoring(true);
+    setRestoreErr(null);
+    try {
+      // The master card is named by master_id alone: after the revoke it
+      // has no account, and the server finds who held it in the journal.
+      await restoreStaffAccess(
+        choice === "master"
+          ? { role: choice, master_id: person.master_id ?? "" }
+          : { role: choice, bot_user_id: person.bot_user_id ?? "" },
+      );
+      setRestore(null);
+      await reload();
+    } catch (e) {
+      setRestoreErr(e);
+    } finally {
+      setRestoring(false);
+    }
+  }, [restore, reload]);
+
+  const closeRestore = useCallback(() => {
+    setRestore(null);
+    setRestoreErr(null);
+  }, []);
+
   // The endpoint is owner-only and answers 403 to everyone else. The
   // check here is so an admin who deep-links sees a sentence instead of
   // an error card; the backend 403 is the actual gate.
+  const roleRefusal = roleErr != null ? accessRefusal(roleErr) : null;
+  const restoreRefusal = restoreErr != null ? accessRefusal(restoreErr) : null;
+
   if (!me.is_owner) {
     return (
       <div className="screen">
@@ -207,7 +620,7 @@ export function AdminPeopleScreen({ me }: Props) {
         <div className="callout" role="status">
           Список ролей видит только владелец салона.
         </div>
-        <AdminTabBar />
+        <AdminTabBar me={me} />
       </div>
     );
   }
@@ -217,7 +630,7 @@ export function AdminPeopleScreen({ me }: Props) {
       <div className="screen">
         <h1 className="screen__title">Люди салона</h1>
         <StateError err={err} onRetry={manualReload} />
-        <AdminTabBar />
+        <AdminTabBar me={me} />
       </div>
     );
   }
@@ -282,85 +695,453 @@ export function AdminPeopleScreen({ me }: Props) {
           className="admin-master-list"
           style={{ listStyle: "none", padding: 0, margin: 0 }}
         >
-          {items.map((p) => (
-            <li key={p.id}>
-              {/*
-                A div, not a button: there is nothing to tap. A card that
-                looks pressable and does nothing is worse than a flat one.
-              */}
-              <div className="master-card" style={{ cursor: "default" }}>
-                <span
-                  className="master-card__avatar"
-                  style={{
-                    background: "var(--c-surface-2)",
-                    opacity: p.is_active ? 1 : 0.5,
-                  }}
-                  aria-hidden="true"
-                >
-                  {initials(p.name)}
-                </span>
-                <span style={{ flex: 1, minWidth: 0 }}>
-                  <span className="master-card__name">{p.name}</span>
-
+          {items.map((p) => {
+            // Two questions, asked in this order and never merged: may
+            // the VIEWER revoke (a role), and is there anything in THIS
+            // ROW to take away (a state). `null` from either means no
+            // button — and every `null` is a call the server would have
+            // refused or no-opped. See `revokeTarget`.
+            const target = mayRevoke(me) ? revokeTarget(p, me) : null;
+            const roleTarget = mayChangeRole(me)
+              ? roleChangeTarget(p, me)
+              : null;
+            // Owner only, like the role change: restoring is granting.
+            const restoreRoles = mayChangeRole(me) ? restoreTarget(p, me) : null;
+            return (
+              <li key={p.id}>
+                {/*
+                  A div, not a button: the CARD is not a tap target — there
+                  is no person screen to open. A card that looks pressable
+                  and does nothing is worse than a flat one. The revoke
+                  button below is its own target and says so.
+                */}
+                <div className="master-card" style={{ cursor: "default" }}>
                   <span
+                    className="master-card__avatar"
                     style={{
-                      display: "flex",
-                      gap: "var(--s-2)",
-                      margin: "var(--s-1) 0",
-                      flexWrap: "wrap",
+                      background: "var(--c-surface-2)",
+                      opacity: p.is_active ? 1 : 0.5,
                     }}
+                    aria-hidden="true"
                   >
+                    {initials(p.name)}
+                  </span>
+                  <span style={{ flex: 1, minWidth: 0 }}>
+                    <span className="master-card__name">{p.name}</span>
+
+                    <span
+                      style={{
+                        display: "flex",
+                        gap: "var(--s-2)",
+                        margin: "var(--s-1) 0",
+                        flexWrap: "wrap",
+                      }}
+                    >
+                      {p.roles.map((grant) => (
+                        <span
+                          key={`${p.id}:${grant.role}`}
+                          className={
+                            STATE_CHIP_CLASS[grant.state] ?? "admin-chip"
+                          }
+                        >
+                          {ROLE_LABEL[grant.role] ?? grant.role}
+                          {STATE_SUFFIX[grant.state] ?? ""}
+                        </span>
+                      ))}
+                      {p.roles.length === 0 && (
+                        <span className="admin-chip admin-chip--revoked">
+                          без роли
+                        </span>
+                      )}
+                    </span>
+
                     {p.roles.map((grant) => (
                       <span
-                        key={`${p.id}:${grant.role}`}
-                        className={
-                          STATE_CHIP_CLASS[grant.state] ?? "admin-chip"
-                        }
+                        key={`line:${p.id}:${grant.role}`}
+                        className="master-card__spec"
+                        style={{ display: "block" }}
                       >
-                        {ROLE_LABEL[grant.role] ?? grant.role}
-                        {STATE_SUFFIX[grant.state] ?? ""}
+                        {roleLine(grant)}
                       </span>
                     ))}
-                    {p.roles.length === 0 && (
-                      <span className="admin-chip admin-chip--revoked">
-                        без роли
+
+                    {/*
+                      Suppressed while every role is `pending`: «приглашение
+                      не принято» already says the person has no login, and
+                      two warning chips saying one thing read as two
+                      problems.
+                    */}
+                    {!p.has_account &&
+                      !p.roles.every((r) => r.state === "pending") && (
+                        <span
+                          className="admin-chip admin-chip--warn"
+                          style={{ marginTop: "var(--s-1)" }}
+                        >
+                          нет входа в приложение
+                        </span>
+                      )}
+
+                    {(target || roleTarget || restoreRoles) && (
+                      <span
+                        style={{
+                          display: "flex",
+                          gap: "var(--s-2)",
+                          flexWrap: "wrap",
+                          marginTop: "var(--s-2)",
+                        }}
+                      >
+                        {roleTarget && (
+                          <button
+                            type="button"
+                            className="btn-secondary"
+                            aria-label={`Сменить роль: ${p.name}`}
+                            onClick={() => {
+                              setRoleErr(null);
+                              setRoleChange({
+                                person: p,
+                                botUserId: roleTarget.botUserId,
+                                current: roleTarget.current,
+                                choice: null,
+                              });
+                            }}
+                          >
+                            Сменить роль
+                          </button>
+                        )}
+                        {restoreRoles && (
+                          <button
+                            type="button"
+                            className="btn-secondary"
+                            aria-label={`Вернуть доступ: ${p.name}`}
+                            onClick={() => {
+                              setRestoreErr(null);
+                              setRestore({
+                                person: p,
+                                options: restoreRoles,
+                                // One role — nothing to choose.
+                                choice:
+                                  restoreRoles.length === 1
+                                    ? (restoreRoles[0] ?? null)
+                                    : null,
+                              });
+                            }}
+                          >
+                            Вернуть доступ
+                          </button>
+                        )}
+                        {target && (
+                          <button
+                            type="button"
+                            className="btn-secondary"
+                            // Every row carries the same words, so the label
+                            // alone would name nobody to a screen reader.
+                            aria-label={`Отозвать доступ у ${p.name}`}
+                            onClick={() => {
+                              setRevokeErr(null);
+                              setPending({
+                                person: p,
+                                botUserId: target.botUserId,
+                                roles: target.roles,
+                              });
+                            }}
+                          >
+                            Отозвать доступ
+                          </button>
+                        )}
                       </span>
                     )}
                   </span>
-
-                  {p.roles.map((grant) => (
-                    <span
-                      key={`line:${p.id}:${grant.role}`}
-                      className="master-card__spec"
-                      style={{ display: "block" }}
-                    >
-                      {roleLine(grant)}
-                    </span>
-                  ))}
-
-                  {/*
-                    Suppressed while every role is `pending`: «приглашение
-                    не принято» already says the person has no login, and
-                    two warning chips saying one thing read as two
-                    problems.
-                  */}
-                  {!p.has_account &&
-                    !p.roles.every((r) => r.state === "pending") && (
-                      <span
-                        className="admin-chip admin-chip--warn"
-                        style={{ marginTop: "var(--s-1)" }}
-                      >
-                        нет входа в приложение
-                      </span>
-                    )}
-                </span>
-              </div>
-            </li>
-          ))}
+                </div>
+              </li>
+            );
+          })}
         </ul>
       )}
 
-      <AdminTabBar />
+      {/*
+        Confirmation, not an undo. Since DRF-2274 the owner can give the
+        role back from this screen, but the person is locked out until
+        she does — so the dialog still names WHO and WHAT: a bare «Вы
+        уверены?» over a list of similar rows is how the wrong person
+        gets revoked.
+      */}
+      {pending && (
+        <div
+          className="admin-sheet-backdrop"
+          role="dialog"
+          aria-modal="true"
+          aria-label={`Отозвать доступ у ${pending.person.name}?`}
+          onClick={() => !revoking && closeRevoke()}
+        >
+          <div
+            className="admin-sheet"
+            onClick={(e) => e.stopPropagation()}
+            style={{ textAlign: "start" }}
+          >
+            <div className="admin-sheet__title" style={{ textAlign: "start" }}>
+              {`Отозвать доступ у ${pending.person.name}?`}
+            </div>
+            <p style={{ margin: "var(--s-2) 0" }}>
+              {`Снимаем роль: ${roleNames(pending.roles)}. ${pending.person.name} больше не сможет войти в приложение салона.`}
+            </p>
+            <p style={{ margin: "var(--s-2) 0" }}>
+              Вернуть доступ можно будет здесь же — кнопкой «Вернуть
+              доступ» на этой строке.
+            </p>
+
+            {/*
+              The server's refusal, shown as itself. `StateError` is the
+              same component seven admin screens use for a failed load,
+              and its retry re-sends the revoke rather than reloading the
+              page. The dialog stays open: closing it on failure would
+              leave the owner unsure whether the access is gone.
+            */}
+            {revokeErr != null && (
+              <div style={{ margin: "var(--s-3) 0" }}>
+                <p style={{ margin: "0 0 var(--s-2)" }}>Доступ не отозван.</p>
+                <StateError
+                  err={revokeErr}
+                  onRetry={() => void confirmRevoke()}
+                />
+              </div>
+            )}
+
+            <div style={{ display: "flex", gap: "var(--s-2)" }}>
+              <button
+                type="button"
+                className="btn-secondary"
+                disabled={revoking}
+                onClick={closeRevoke}
+                style={{ flex: 1 }}
+              >
+                Отмена
+              </button>
+              <button
+                type="button"
+                className="cta-bar__button"
+                disabled={revoking}
+                onClick={() => void confirmRevoke()}
+                style={{ flex: 1 }}
+              >
+                {revoking ? "Отзываем…" : "Отозвать доступ"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/*
+        DRF-2274. Names the person and the role coming back. With one role
+        there is nothing to choose and it is preselected; with several the
+        owner picks — the server restores one role per call.
+      */}
+      {restore && (
+        <div
+          className="admin-sheet-backdrop"
+          role="dialog"
+          aria-modal="true"
+          aria-label={`Вернуть доступ: ${restore.person.name}`}
+          onClick={() => !restoring && closeRestore()}
+        >
+          <div
+            className="admin-sheet"
+            onClick={(e) => e.stopPropagation()}
+            style={{ textAlign: "start" }}
+          >
+            <div className="admin-sheet__title" style={{ textAlign: "start" }}>
+              {`Вернуть доступ: ${restore.person.name}`}
+            </div>
+            {restore.options.length === 1 ? (
+              <p style={{ margin: "var(--s-2) 0" }}>
+                {`Вернём роль: ${ROLE_LABEL[restore.options[0] ?? ""] ?? ""}. Войти можно будет сразу, без нового приглашения.`}
+              </p>
+            ) : (
+              <>
+                <p style={{ margin: "var(--s-2) 0" }}>
+                  Какую роль вернуть? Войти можно будет сразу, без нового
+                  приглашения.
+                </p>
+                <div
+                  role="radiogroup"
+                  aria-label="Роль"
+                  style={{
+                    display: "flex",
+                    flexDirection: "column",
+                    gap: "var(--s-2)",
+                    margin: "var(--s-3) 0",
+                  }}
+                >
+                  {restore.options.map((r) => (
+                    <button
+                      key={r}
+                      type="button"
+                      role="radio"
+                      aria-checked={restore.choice === r}
+                      className={
+                        restore.choice === r ? "cta-bar__button" : "btn-secondary"
+                      }
+                      disabled={restoring}
+                      onClick={() => setRestore({ ...restore, choice: r })}
+                    >
+                      {ROLE_LABEL[r]}
+                    </button>
+                  ))}
+                </div>
+              </>
+            )}
+
+            {restoreRefusal != null && (
+              <div style={{ margin: "var(--s-3) 0" }}>
+                <p style={{ margin: "0 0 var(--s-2)" }}>Доступ не возвращён.</p>
+                <div className="callout callout--danger" role="alert">
+                  {restoreRefusal}
+                </div>
+              </div>
+            )}
+            {restoreErr != null && restoreRefusal == null && (
+              <div style={{ margin: "var(--s-3) 0" }}>
+                <p style={{ margin: "0 0 var(--s-2)" }}>Доступ не возвращён.</p>
+                <StateError
+                  err={restoreErr}
+                  onRetry={() => void confirmRestore()}
+                />
+              </div>
+            )}
+
+            <div style={{ display: "flex", gap: "var(--s-2)" }}>
+              <button
+                type="button"
+                className="btn-secondary"
+                disabled={restoring}
+                onClick={closeRestore}
+                style={{ flex: 1 }}
+              >
+                Отмена
+              </button>
+              <button
+                type="button"
+                className="cta-bar__button"
+                disabled={restoring || restore.choice === null}
+                onClick={() => void confirmRestore()}
+                style={{ flex: 1 }}
+              >
+                {restoring ? "Возвращаем…" : "Вернуть доступ"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/*
+        DRF-2273. The sheet names the person and the role they hold now,
+        and nothing is sent until a new role is picked AND confirmed.
+        The current role is not offered: choosing it would be a request
+        that changes nothing and still writes an audit row.
+      */}
+      {roleChange && (
+        <div
+          className="admin-sheet-backdrop"
+          role="dialog"
+          aria-modal="true"
+          aria-label={`Сменить роль: ${roleChange.person.name}`}
+          onClick={() => !changingRole && closeRoleChange()}
+        >
+          <div
+            className="admin-sheet"
+            onClick={(e) => e.stopPropagation()}
+            style={{ textAlign: "start" }}
+          >
+            <div className="admin-sheet__title" style={{ textAlign: "start" }}>
+              {`Сменить роль: ${roleChange.person.name}`}
+            </div>
+            <p style={{ margin: "var(--s-2) 0" }}>
+              {`Сейчас: ${roleNames(roleChange.current)}. Новая роль заменит нынешнюю.`}
+              {roleChange.person.roles.some((g) => g.role === "master") &&
+                " Роль мастера останется как есть."}
+            </p>
+
+            <div
+              role="radiogroup"
+              aria-label="Новая роль"
+              style={{
+                display: "flex",
+                flexDirection: "column",
+                gap: "var(--s-2)",
+                margin: "var(--s-3) 0",
+              }}
+            >
+              {/*
+                The current role is hidden only when it is the ONE role
+                held: a person with both admin and receptionist rows may
+                be collapsed into either, and hiding both would leave a
+                sheet with nothing to pick.
+              */}
+              {CHANGEABLE_ROLES.filter(
+                (r) =>
+                  roleChange.current.length > 1 ||
+                  !roleChange.current.some((g) => g.role === r),
+              ).map((r) => (
+                <button
+                  key={r}
+                  type="button"
+                  role="radio"
+                  aria-checked={roleChange.choice === r}
+                  className={
+                    roleChange.choice === r ? "cta-bar__button" : "btn-secondary"
+                  }
+                  disabled={changingRole}
+                  onClick={() =>
+                    setRoleChange({ ...roleChange, choice: r })
+                  }
+                >
+                  {ROLE_LABEL[r]}
+                </button>
+              ))}
+            </div>
+
+            {roleRefusal != null && (
+              <div style={{ margin: "var(--s-3) 0" }}>
+                <p style={{ margin: "0 0 var(--s-2)" }}>Роль не изменена.</p>
+                <div className="callout callout--danger" role="alert">
+                  {roleRefusal}
+                </div>
+              </div>
+            )}
+            {roleErr != null && roleRefusal == null && (
+              <div style={{ margin: "var(--s-3) 0" }}>
+                <p style={{ margin: "0 0 var(--s-2)" }}>Роль не изменена.</p>
+                <StateError
+                  err={roleErr}
+                  onRetry={() => void confirmRoleChange()}
+                />
+              </div>
+            )}
+
+            <div style={{ display: "flex", gap: "var(--s-2)" }}>
+              <button
+                type="button"
+                className="btn-secondary"
+                disabled={changingRole}
+                onClick={closeRoleChange}
+                style={{ flex: 1 }}
+              >
+                Отмена
+              </button>
+              <button
+                type="button"
+                className="cta-bar__button"
+                disabled={changingRole || roleChange.choice === null}
+                onClick={() => void confirmRoleChange()}
+                style={{ flex: 1 }}
+              >
+                {changingRole ? "Меняем…" : "Сменить роль"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      <AdminTabBar me={me} />
     </div>
   );
 }

@@ -37,7 +37,7 @@ from __future__ import annotations
 
 import logging
 from importlib import import_module
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from celery import shared_task  # type: ignore[import-untyped]
 from django.conf import settings
@@ -237,3 +237,50 @@ def _emit_dlq_alert(dlq_count: int) -> None:
         )
     except Exception:  # noqa: BLE001 — alert never breaks dispatcher
         logger.exception("eventbus.dispatch.alert_emit_failed dlq_count=%s", dlq_count)
+
+
+# ---------------------------------------------------------------------------
+# DRF-1616, блокер B-7 (наблюдаемость). Beat-обёртка над dispatch_pending_events.
+# ---------------------------------------------------------------------------
+#
+# До этого диспетчер ящика НЕ ЗВАЛ НИКТО: ни расписание, ни сигнал — только
+# тесты. Тревога о застрявшем ящике (`_emit_dlq_alert`) живёт внутри него и
+# потому молчала (правила исполнителя §23: «тревога внутри предмета — не
+# тревога»). Расписание в config/settings/base.py указывает СЮДА, а не на
+# `dispatch_pending_events` напрямую, по двум причинам:
+#
+#   * прямой вызов остаётся как был — операторский replay и тесты не должны
+#     получать «skipped» от рубильника, который заведён для beat;
+#   * рубильник и DRY_RUN — по образцу nutrition_proactive (DRF-1285): оба
+#     закрыты по умолчанию, и запись в расписании безопасна до решения
+#     владельца её включить. DRY_RUN не берёт строки под select_for_update и
+#     ничего не помечает — считает и говорит, сколько бы взял.
+
+
+def _dispatch_beat_enabled() -> bool:
+    return bool(getattr(settings, "EVENTBUS_DISPATCH_BEAT_ENABLED", False))
+
+
+def _dispatch_beat_dry_run() -> bool:
+    return bool(getattr(settings, "EVENTBUS_DISPATCH_BEAT_DRY_RUN", True))
+
+
+@shared_task(name="apps.eventbus.dispatch_pending_events_beat")
+def dispatch_pending_events_beat() -> dict[str, Any]:
+    """Расписание → сюда → `dispatch_pending_events`, если открыто.
+
+    Три исхода, и все три различимы по ключу `mode` в ответе — чтобы
+    «ничего не отправлено» никогда не читалось одинаково для «выключено»,
+    «сухой прогон» и «отправлять было нечего».
+    """
+
+    if not _dispatch_beat_enabled():
+        return {"mode": "disabled", "pending": None}
+    if _dispatch_beat_dry_run():
+        pending = DomainEvent.objects.filter(
+            is_dispatched=False, dead_lettered_at__isnull=True
+        ).count()
+        logger.info("eventbus.dispatch.beat.dry_run pending=%d — ничего не помечено", pending)
+        return {"mode": "dry_run", "pending": pending}
+    counters = dispatch_pending_events()
+    return {"mode": "live", **counters}

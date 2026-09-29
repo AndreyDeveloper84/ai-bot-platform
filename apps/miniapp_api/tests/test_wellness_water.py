@@ -58,6 +58,36 @@ def _bot_token(settings):
     settings.MAX_BOT_TOKEN = BOT_TOKEN
 
 
+@pytest.fixture(autouse=True)
+def _diary_on(settings):
+    """DRF-1919: ручки воды за теми же воротами, что правка еды (#1745)."""
+    settings.NUTRITION_ENABLED = True
+
+
+@pytest.fixture(autouse=True)
+def consent():
+    with patch(
+        "apps.orchestrator.personal_surface.personal_records_consent_open", return_value=True
+    ) as m:
+        yield m
+
+
+@pytest.fixture(autouse=True)
+def diary_consent():
+    """DRF-2093: третьи ворота записи — согласие дневника из реестра (DRF-1963).
+    Отозванное согласие — в apps/consent/tests/test_diary_write_gate_2093.py."""
+    with patch("apps.consent.nutrition.diary_is_granted", return_value=True) as m:
+        yield m
+
+
+@pytest.fixture
+def no_consent():
+    with patch(
+        "apps.orchestrator.personal_surface.personal_records_consent_open", return_value=False
+    ) as m:
+        yield m
+
+
 @pytest.fixture
 def tenant(db, settings) -> Tenant:
     t = Tenant.objects.create(slug="water-test", name="Water Test", timezone="Europe/Moscow")
@@ -84,7 +114,8 @@ class _FakeEntry:
     kcal: int = 0
     milestone_text: Any = None
     today_total_ml: int = 1250
-    today_norm_ml: int = 2000
+    # Ориентира нет ни у кого до утверждения методики (§82, §85).
+    today_norm_ml: int | None = None
     alcohol_recovery_hint: bool = False
     raw: dict = field(default_factory=dict)
 
@@ -137,9 +168,17 @@ class TestAddWaterHappyPath:
         data = resp.json()
         assert data["entry_id"] == "entry-abc"
         assert data["today_total_ml"] == 1250
-        # Same 250 ml glass + same default target as GET /wellness/today.
+        # Тот же стакан 250 мл, что у GET /wellness/today — два разных
+        # определения стакана показали бы человеку число, которое
+        # прыгает при обновлении.
         assert data["water_glasses_eaten"] == 5
-        assert data["water_glasses_target"] == 8
+        # NEGATIVE: ориентира нет — нет ни ключа цели, ни нормы в мл.
+        # Ни 2000, ни 8, ни ноль: ключа в ответе не бывает вовсе, пока
+        # методика не утверждена (§82, §85 раздел 4). Выпитое выше — то
+        # самое POSITIVE, без которого отрицание проходило бы и по
+        # пустому ответу (DRF-1411).
+        assert "water_glasses_target" not in data
+        assert "today_norm_ml" not in data
 
     def test_tap_time_and_idempotency_key_are_forwarded(self, client: Client, bot_user: BotUser):
         # A queued glass flushed later must keep its own timestamp.
@@ -157,13 +196,29 @@ class TestAddWaterHappyPath:
         assert kwargs["ts"] == tap_ts
         assert kwargs["idempotency_key"] == "water-1-abc"
 
-    def test_zero_norm_falls_back_to_the_default_target(self, client: Client, bot_user: BotUser):
-        # Anketa skipped → Ayla reports norm 0; the read endpoint shows 8
-        # glasses, so the write endpoint must not answer 0.
+    def test_zero_norm_omits_the_target(self, client: Client, bot_user: BotUser):
+        """Анкету не проходили → Ayla шлёт norm 0 → цели нет.
+
+        Здесь проверялось обратное: что запись воды ответит константой 8,
+        «раз read-ручка показывает 8». Обе ручки показывали одно и то же
+        выдуманное число — согласованно, но неправдиво.
+
+        Стража парная (``negative_assert_guard``, DRF-1411): ключа цели
+        нет, но выпитое на месте, и 201 остаётся 201 —
+        ``test_...glass_reaches_ayla`` выше держит вторую половину пары:
+        с настоящей нормой ключ приходит.
+        """
         patcher, _ = _patch_client(add=_FakeEntry(today_norm_ml=0))
         with patcher:
             resp = _post(client, bot_user, {"ml": 250})
-        assert resp.json()["water_glasses_target"] == 8
+        assert resp.status_code == 201
+        data = resp.json()
+        # POSITIVE ВПЕРЕДИ: ответ настоящий и содержит выпитое, поэтому
+        # «ключа цели нет» ниже — про этот ответ, а не про пустой.
+        assert data["water_glasses_eaten"] == 5
+        assert data["entry_id"] == "entry-abc"
+        # NEGATIVE: нормы нет — цели нет.
+        assert "water_glasses_target" not in data
 
 
 class TestAddWaterValidation:
@@ -203,8 +258,9 @@ class TestAddWaterValidation:
 
     def test_unauthenticated_write_is_refused(self, client: Client, db):
         # No Authorization header -> require_init_data answers 400
-        # ("malformed") before the view body, same as every other
+        # ("no_init_data") before the view body, same as every other
         # customer endpoint. What matters is that nothing reaches Ayla.
+        # 15.09.2026 UTC (DRF-1893): отказ транспорта — один код 401 no_init_data (было 400 malformed / 401 bad_signature).
         patcher, fake = _patch_client(add=_FakeEntry())
         with patcher:
             resp = client.post(
@@ -212,7 +268,7 @@ class TestAddWaterValidation:
                 data=json.dumps({"ml": 250}),
                 content_type="application/json",
             )
-        assert resp.status_code == 400
+        assert resp.status_code == 401
         fake.add_water.assert_not_awaited()
 
     def test_get_not_allowed(self, client: Client, bot_user: BotUser):
@@ -273,8 +329,86 @@ class TestUndoWater:
         assert resp.status_code == 502
 
     def test_unauthenticated_undo_is_refused(self, client: Client, db):
+        # 15.09.2026 UTC (DRF-1893): отказ транспорта — один код 401 no_init_data (было 400 malformed / 401 bad_signature).
         patcher, fake = _patch_client(undo=True)
         with patcher:
             resp = client.delete(_undo_url("entry-abc"))
-        assert resp.status_code == 400
+        assert resp.status_code == 401
+        fake.undo_water.assert_not_awaited()
+
+
+class TestWaterGates:
+    """DRF-1919: новый стакан — запись в дневник, она за согласием на персональные
+    данные, как запись и правка еды (#1745). Убрать свой стакан — не новая
+    обработка: согласия не требует, как удаление еды. Обе ручки — за
+    ``NUTRITION_ENABLED``, как у еды."""
+
+    def test_a_glass_without_consent_is_refused_before_ayla(
+        self, client: Client, bot_user: BotUser, no_consent
+    ):
+        patcher, fake = _patch_client(add=_FakeEntry())
+        with patcher:
+            resp = _post(client, bot_user, {"ml": 250})
+        assert resp.status_code == 403
+        assert resp.json()["error"] == "consent_required"
+        fake.add_water.assert_not_awaited()
+
+    def test_the_gate_answers_before_the_body_is_read(
+        self, client: Client, bot_user: BotUser, no_consent
+    ):
+        # Как PATCH еды: без согласия ответ — 403, какое бы тело ни пришло.
+        patcher, fake = _patch_client(add=_FakeEntry())
+        with patcher:
+            resp = client.post(
+                _post_url(),
+                data="not json",
+                content_type="application/json",
+                HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id),
+            )
+        assert resp.status_code == 403
+        assert resp.json()["error"] == "consent_required"
+        fake.add_water.assert_not_awaited()
+
+    def test_a_glass_with_consent_reaches_ayla(self, client: Client, bot_user: BotUser):
+        patcher, fake = _patch_client(add=_FakeEntry())
+        with patcher:
+            resp = _post(client, bot_user, {"ml": 250})
+        assert resp.status_code == 201
+        fake.add_water.assert_awaited_once()
+
+    def test_a_glass_with_the_diary_off_is_refused_before_ayla(
+        self, client: Client, bot_user: BotUser, settings
+    ):
+        settings.NUTRITION_ENABLED = False
+        patcher, fake = _patch_client(add=_FakeEntry())
+        with patcher:
+            resp = _post(client, bot_user, {"ml": 250})
+        assert resp.status_code == 404
+        assert resp.json()["error"] == "nutrition_disabled"
+        fake.add_water.assert_not_awaited()
+
+    def test_undoing_own_glass_does_not_need_consent(
+        self, client: Client, bot_user: BotUser, no_consent
+    ):
+        patcher, fake = _patch_client(undo=True)
+        with patcher:
+            resp = client.delete(
+                _undo_url("entry-abc"),
+                HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id),
+            )
+        assert resp.status_code == 204
+        fake.undo_water.assert_awaited_once()
+
+    def test_undo_with_the_diary_off_is_refused_before_ayla(
+        self, client: Client, bot_user: BotUser, settings
+    ):
+        settings.NUTRITION_ENABLED = False
+        patcher, fake = _patch_client(undo=True)
+        with patcher:
+            resp = client.delete(
+                _undo_url("entry-abc"),
+                HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id),
+            )
+        assert resp.status_code == 404
+        assert resp.json()["error"] == "nutrition_disabled"
         fake.undo_water.assert_not_awaited()

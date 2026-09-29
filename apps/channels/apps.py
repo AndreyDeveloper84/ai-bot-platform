@@ -14,6 +14,11 @@ class ChannelsConfig(AppConfig):
         # land alongside their channel adapter modules.
         from apps.channels import handlers  # noqa: F401 — registration side effect
 
+        # DRF-2393 — системные проверки этого приложения. Импорт здесь,
+        # как у соседей: без него сторож объявлен и не зарегистрирован,
+        # то есть молчит ровно так же, как молчал предмет его надзора.
+        from apps.channels import checks  # noqa: F401 — registration side effect
+
         # Sprint 8 review P1-cycle2: register the MAX outbound sender
         # with the orchestrator channel registry. Pipeline._send_outbound
         # used to lazy-import apps.channels.max.outbound directly —

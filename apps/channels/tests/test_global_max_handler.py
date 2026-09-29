@@ -167,11 +167,25 @@ def test_booking_callback_routes_to_booking_pipeline_not_concierge(
     )
 
 
-def test_foreign_callback_still_goes_to_concierge(
+def test_foreign_callback_answers_with_the_menu_instead_of_the_model(
     settings, mock_send, fake_redis, monkeypatch
 ) -> None:
-    """Non-booking ``cb:*`` payloads (e.g. cb:foo:…) keep the pre-DRF-988
-    behaviour: a normal concierge turn with the user turn persisted."""
+    """DRF-1491 — ``cb:*`` без ветки больше НЕ уезжает в модель сырым.
+
+    До сих пор здесь было закреплено обратное («keep the pre-DRF-988
+    behaviour: a normal concierge turn»), и закреплён был дефект, а не
+    решение. Ровно этот путь описан комментарием у вызова консьержа как
+    «гейт как список исключений»: тап, у которого ветки нет, доезжал до
+    модели строкой ``cb:foo:bar`` — то есть моделью истолковывалось то,
+    что человек не писал. DRF-1051 закрыл это для ``cb:menu:`` и
+    ``cb:qa:``; остальные семейства остались, и витрина отвечала на них
+    догадкой.
+
+    Теперь ход приземляется на ветку «не поняла» с клавиатурой меню.
+    Персистенс не менялся: реплика человека по-прежнему записывается
+    дословно — это отдельное решение (DRF-990), и трогать его здесь не
+    за чем.
+    """
     from apps.conversations.models import Message
     from apps.orchestrator.discovery import DiscoveryReply
 
@@ -190,5 +204,12 @@ def test_foreign_callback_still_goes_to_concierge(
 
     GlobalMaxHandler()(_raw_entry(_payload(text="cb:foo:bar", user_id=7780, chat_id=8890)))
 
-    assert seen.get("concierge") is True
+    # Стража: ход не потерян и ответ — тот самый экран промаха.
+    # (Клавиатура пришпилена там, где её видно, — ``mock_send`` этого
+    # файла ловит только текст: ``apps/channels/tests/
+    # test_marketplace_menu_drf1491.py::TestHonestFallbackOnTheGlobalPath``.)
+    assert mock_send, "ход пропал вместе с ответом"
+    assert mock_send[-1]["text"].startswith("Я пока не поняла"), mock_send[-1]["text"]
+    # И только теперь отрицание: модель сырого payload'а не увидела.
+    assert seen.get("concierge") is None
     assert Message.all_tenants.filter(role="user", content="cb:foo:bar").count() == 1

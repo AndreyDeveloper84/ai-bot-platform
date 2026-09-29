@@ -20,7 +20,7 @@ no new queue, no dependency on the mobile app.
 ### Delivery fan-out
 
 * **The specialist personally** — when the appointment's master has a
-  linked MAX account (``CatalogMaster.linked_bot_user.chat_id``), he
+  linked MAX account (``CatalogMaster.linked_bot_user.channel_user_id``), he
   receives his own copy, addressed to him («У вас новая запись»). The
   epic's contract is «if the master does not learn, the visit does not
   happen», so the specialist is an *additional* recipient, not an
@@ -33,16 +33,28 @@ no new queue, no dependency on the mobile app.
   WARNING log line and a ``booking.specialist_unreachable`` audit row.
   The push era hid exactly this state behind a quiet ``failed`` in the
   database; it must never be silent again.
-* **The salon cascade (first hit wins)** — ``Tenant.manager_chat_id``,
-  then ``HANDOFF_NOTIFY_MAX_CHAT_IDS``. Deliberately the *same* setting
-  as DRF-1029 rather than a new one: on the pilot it already holds the
-  owner's chat, so the booking notification reaches a human on day one
-  without an env change. If a salon later wants booking alerts split
-  from escalation alerts, that is a settings-level split, not a
-  rewrite of this module.
-* **Nobody at all** — an explicit WARNING log line. Silence was the old
-  behaviour and it is exactly what made the gap invisible for months;
-  a booking that could not be announced must leave a trace.
+* **The salon — its own manager address, and nothing else.** It carries
+  its own addressing key (DRF-1559): a manager with ``manager_user_id``
+  filled in is written to as a PERSON, and only a salon not yet migrated
+  uses its dialog id. That matters precisely here — this message goes out
+  under the SALON bot, and a dialog id copied out of the client bot's
+  chat answers 404 ``dialog.not.found`` (`docs/OPEN_DECISIONS.md` §55).
+
+  Until the owner's decision of 2026-09-07 this rung fell back to the
+  configured operator channel. That channel is a single GLOBAL list with
+  no tenant binding of any kind: on the pilot all ten salons resolved to
+  the very same hand-typed address, so each salon would have been shown
+  the others' bookings — and being a dialog id sent under the salon bot,
+  it answered ``404 chat.not.found`` in the same pass in which the
+  master's own copy answered ``200`` (`docs/OPEN_DECISIONS.md` §60). It
+  is not a salon address and cannot be made into one. The rung is gone;
+  a salon that wants booking alerts configures itself.
+* **No salon address is a NORMAL state** — one INFO line per pass, no
+  warning. An empty manager address means this salon has not asked for
+  MAX alerts, not that a delivery failed; the noisy log on a routine
+  state is meant to be switched off after a week of watching. The
+  specialist's personal copy is unaffected and keeps its own loud
+  ``booking.specialist_unreachable`` trace.
 
 ### Contract (mirrors DRF-1029 §3 — do not weaken)
 
@@ -76,9 +88,8 @@ from __future__ import annotations
 import datetime as dt
 import logging
 from dataclasses import dataclass
-from typing import Final
+from typing import Any, Final
 from uuid import UUID
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from django.db import transaction
 from django.db.models import Q
@@ -86,9 +97,11 @@ from django.db.models import Q
 from apps.audit.services import write_audit
 from apps.catalog.models import CatalogMaster, CatalogService
 from apps.channels.bot_context import bot_scope
-from apps.handoff.notify import get_notify_chat_ids, send_max_notification
+from apps.channels.max.addressing import MaxAddress, manager_address
+from apps.handoff.notify import send_max_notification
 from apps.tenancy.context import tenant_scope
 from apps.tenancy.models import Tenant
+from apps.tenancy.timezones import salon_zone
 
 logger = logging.getLogger(__name__)
 
@@ -101,8 +114,6 @@ SALON_STREAM = "max_salon"
 # message is still worth sending without a service name — the time and
 # the master usually identify the slot for the salon.
 _UNKNOWN = "—"
-
-_DEFAULT_TZ = "Europe/Moscow"
 
 # ``RemoteBookingProxy.Source`` values (event-contract.md §3.1), plus a
 # few strings the pilot producer emits. Unknown values pass through
@@ -136,26 +147,37 @@ CHAT_ORIGIN_SOURCE: Final[str] = "ayla_bot"
 class NotifyTarget:
     """Resolved salon recipients plus the cascade step that produced them.
 
-    ``channel`` is one of ``manager`` / ``fallback`` / ``none`` and
+    ``channel`` is ``manager`` or ``none`` and
     exists so logs (and tests) can assert *which* rung of the cascade
     answered, not merely that something was sent. The specialist's
     personal address is resolved separately — see
-    :func:`resolve_specialist_chat_id` — because it is an additional
+    :func:`resolve_specialist_user_id` — because it is an additional
     recipient, not a rung of this cascade.
     """
 
-    chat_ids: tuple[str, ...]
+    #: Получатели этой ступени, каждый со СВОИМ ключом адресации
+    #: (DRF-1559). Не ``chat_ids``: у менеджера теперь может быть
+    #: идентификатор человека, и тогда сообщение уходит по нему — иначе
+    #: салонный бот пишет в чужой диалог и получает 404.
+    addresses: tuple[MaxAddress, ...]
     channel: str
 
 
-def _clean_chat_id(value: object) -> str:
+def _clean_id(value: object) -> str:
+    """Прежнее имя — ``_clean_chat_id``. Чистить осталось только
+    ``channel_user_id`` (DRF-1558): адрес менеджера теперь приходит готовым
+    из :func:`~apps.channels.max.addressing.manager_address` (DRF-1559)."""
+
     return str(value or "").strip()
 
 
 def resolve_master(*, tenant: Tenant, specialist_id: UUID | None) -> CatalogMaster | None:
     """Catalog-mirror row for the appointment's specialist, if mirrored.
 
-    Matched on **either** mirror key. The masters mirror is keyed on the
+    Matched on **either** mirror key. DRF-1933: the catalog id lives in
+    ``CatalogMaster.catalog_specialist_id`` — the primary key equals it only
+    for rows sync created (a glued invite or a solo master keeps its uuid4).
+    The masters mirror is keyed on the
     Ayla ``SpecialistProfile.id`` (``CatalogMaster.id`` — see
     ``upsert_specialists``) and separately carries the specialist's Ayla
     ``User.id`` in ``ayla_user_id``. ``booking.created.specialist_id`` is
@@ -180,7 +202,7 @@ def resolve_master(*, tenant: Tenant, specialist_id: UUID | None) -> CatalogMast
     with tenant_scope(tenant):
         return (
             CatalogMaster.objects.filter(tenant=tenant)
-            .filter(Q(id=specialist_id) | Q(ayla_user_id=specialist_id))
+            .filter(Q(catalog_specialist_id=specialist_id) | Q(ayla_user_id=specialist_id))
             .select_related("linked_bot_user")
             .first()
         )
@@ -200,55 +222,44 @@ def resolve_service_name(*, tenant: Tenant, service_id: UUID | None) -> str:
     return (row.name if row else "").strip() or _UNKNOWN
 
 
-def resolve_specialist_chat_id(master: CatalogMaster | None) -> str:
-    """The specialist's personal MAX chat_id, or ``""`` when unreachable.
+def resolve_specialist_user_id(master: CatalogMaster | None) -> str:
+    """The specialist's MAX ``user_id``, or ``""`` when unreachable.
 
     «Reachable» means a *linked account*: ``linked_bot_user`` is set by
-    the staff-invite accept flow and by solo onboarding, and the BotUser
-    carries the chat_id of the master's own dialog with the bot. On the
+    the staff-invite accept flow and by solo onboarding. On the
     pilot every master is unlinked today — linking them is a data
     change, not a code change, and this resolver starts answering the
     moment it happens.
+
+    Reads ``channel_user_id``, not ``chat_id`` (DRF-1558). This message
+    goes out under the SALON bot's token, and the stored ``chat_id`` is
+    the master's dialog with whichever bot opened one first — the client
+    bot, on the pilot. Sending there answered 404 ``dialog.not.found``
+    on 2026-09-07 (`docs/OPEN_DECISIONS.md` §55) for exactly one reason:
+    a dialog id means nothing to a bot that is not in that dialog. The
+    person id does.
     """
 
     linked = getattr(master, "linked_bot_user", None) if master is not None else None
-    return _clean_chat_id(getattr(linked, "chat_id", ""))
+    return _clean_id(getattr(linked, "channel_user_id", ""))
 
 
 def resolve_salon_target(*, tenant: Tenant) -> NotifyTarget:
-    """Walk the salon-side cascade; the first rung with an address wins.
+    """This salon's own address, or none at all.
 
-    The salon rungs stay exclusive among themselves (a manager who
-    receives every booking does not also need the fallback copy); only
-    the specialist's personal copy is additive — see the module
-    docstring.
+    One rung, by the owner's decision of 2026-09-07: the salon is
+    whoever :func:`~apps.channels.max.addressing.manager_address` names.
+    There is no fallback to the operator channel — see the module
+    docstring for why that global list was never a salon address. An
+    empty result is a normal state, not a failure: the caller records it
+    at INFO and sends nothing.
     """
 
-    manager_chat_id = _clean_chat_id(getattr(tenant, "manager_chat_id", ""))
-    if manager_chat_id:
-        return NotifyTarget(chat_ids=(manager_chat_id,), channel="manager")
+    manager = manager_address(tenant)
+    if manager:
+        return NotifyTarget(addresses=(manager,), channel="manager")
 
-    fallback = tuple(c for c in (_clean_chat_id(c) for c in get_notify_chat_ids()) if c)
-    if fallback:
-        return NotifyTarget(chat_ids=fallback, channel="fallback")
-
-    return NotifyTarget(chat_ids=(), channel="none")
-
-
-def _tenant_tz(tenant: Tenant) -> ZoneInfo:
-    """Tenant-local timezone, falling back to MSK then UTC.
-
-    A booking rendered in the wrong timezone is worse than no message:
-    the salon would prepare for the wrong hour. An invalid tenant value
-    therefore degrades to the pilot's real timezone rather than to UTC.
-    """
-
-    for candidate in (getattr(tenant, "timezone", "") or "", _DEFAULT_TZ):
-        try:
-            return ZoneInfo(candidate)
-        except (ZoneInfoNotFoundError, ValueError):
-            continue
-    return ZoneInfo("UTC")
+    return NotifyTarget(addresses=(), channel="none")
 
 
 def source_label(raw_source: str) -> str:
@@ -276,7 +287,7 @@ def build_booking_created_notification(
     single row to support; it is an opaque Ayla UUID, not client PII.
     """
 
-    when = start_at.astimezone(_tenant_tz(tenant)).strftime("%d.%m.%Y в %H:%M")
+    when = start_at.astimezone(salon_zone(tenant)).strftime("%d.%m.%Y в %H:%M")
     lines = [
         "🆕 Новая запись",
         f"Салон: {tenant.name}",
@@ -305,7 +316,7 @@ def build_specialist_booking_notification(
     client data of any kind.
     """
 
-    when = start_at.astimezone(_tenant_tz(tenant)).strftime("%d.%m.%Y в %H:%M")
+    when = start_at.astimezone(salon_zone(tenant)).strftime("%d.%m.%Y в %H:%M")
     lines = [
         "🆕 У вас новая запись",
         f"Салон: {tenant.name}",
@@ -318,7 +329,17 @@ def build_specialist_booking_notification(
 
 
 def _salon_bot_for(tenant: Tenant):
-    """The salon's staff bot, or ``None`` when it has none.
+    """The platform's staff bot, or ``None`` when the deployment has none.
+
+    Chosen by STREAM, not by the tenant of a registry entry (DRF-1705,
+    срез 1): the salon bot does not belong to a salon. Before this a master
+    in a solo tenant (``solo-…``) resolved to ``None`` here — and ``None``
+    below means «send with the single configured token», i.e. the CLIENT
+    bot's, into a chat that bot has never had. The message was built and
+    lost.
+
+    ``tenant`` is kept in the signature for the log line and for the day a
+    per-tenant staff bot exists again; it no longer decides anything.
 
     ``None`` means outbound keeps using the single configured token, i.e.
     exactly the behaviour before DRF-1061 — see the call site for why that
@@ -326,9 +347,9 @@ def _salon_bot_for(tenant: Tenant):
     """
 
     try:
-        from apps.channels.bot_registry import effective_registry, resolve_by_tenant_stream
+        from apps.channels.bot_registry import effective_registry, resolve_by_stream
 
-        return resolve_by_tenant_stream(tenant.slug, SALON_STREAM, effective_registry())
+        return resolve_by_stream(SALON_STREAM, effective_registry())
     except Exception:  # noqa: BLE001 — identity must never break ingest
         logger.warning("booking.notify.registry_unavailable tenant=%s", tenant.slug)
         return None
@@ -369,6 +390,29 @@ def _audit_specialist_unreachable(
         )
 
 
+def master_muted_new_booking(master: CatalogMaster | None) -> bool:
+    """Has the master switched «Новая запись» off in their own settings?
+
+    DRF-1123: ``MasterNotificationPrefs`` had a model, a CRUD screen and
+    an audit trail — and zero readers among senders. The master flipped
+    the toggle, saw «сохранено», and the DM kept coming. This is the
+    reader for the one toggle that has a live sender today
+    (``new_booking`` → the personal copy below). A missing row means
+    the master never opened the screen — defaults apply, i.e. ON. The
+    salon copy is not the master's toggle and is not read here.
+    """
+    if master is None:
+        return False
+    from apps.notifications.models import MasterNotificationPrefs
+
+    value = (
+        MasterNotificationPrefs.all_tenants.filter(master=master)
+        .values_list("new_booking", flat=True)
+        .first()
+    )
+    return value is False
+
+
 def notify_booking_created(
     *,
     tenant: Tenant,
@@ -386,7 +430,7 @@ def notify_booking_created(
 
     try:
         master = resolve_master(tenant=tenant, specialist_id=specialist_id)
-        specialist_chat_id = resolve_specialist_chat_id(master)
+        specialist_user_id = resolve_specialist_user_id(master)
         service_name = resolve_service_name(tenant=tenant, service_id=service_id)
         specialist_notified = False
 
@@ -405,7 +449,18 @@ def notify_booking_created(
         # tone, whereas silence is worse in substance. That is the one case
         # where the wrong avatar beats no message.
         with bot_scope(_salon_bot_for(tenant)):
-            if specialist_chat_id:
+            if specialist_user_id and master_muted_new_booking(master):
+                # DRF-1123 — the master's own «Новая запись» switch is
+                # off. Named, not silent: the salon copy below still
+                # goes, and the master's diary row exists either way.
+                logger.info(
+                    "booking.notify.master_muted tenant=%s appointment_id=%s "
+                    "specialist_id=%s toggle=new_booking",
+                    tenant.slug,
+                    appointment_id,
+                    specialist_id,
+                )
+            elif specialist_user_id:
                 # The specialist goes FIRST: if MAX dies mid-fan-out, the
                 # epic's priority recipient already has the message.
                 personal = build_specialist_booking_notification(
@@ -415,7 +470,7 @@ def notify_booking_created(
                     service_name=service_name,
                     raw_source=raw_source,
                 )
-                failures = send_max_notification(text=personal, chat_ids=(specialist_chat_id,))
+                failures = send_max_notification(text=personal, user_ids=(specialist_user_id,))
                 specialist_notified = failures == 0
                 if specialist_notified:
                     logger.info(
@@ -457,7 +512,7 @@ def notify_booking_created(
                 )
 
             target = resolve_salon_target(tenant=tenant)
-            if target.chat_ids:
+            if target.addresses:
                 text = build_booking_created_notification(
                     tenant=tenant,
                     appointment_id=appointment_id,
@@ -466,14 +521,14 @@ def notify_booking_created(
                     master_name=(getattr(master, "name", "") or "").strip() or _UNKNOWN,
                     raw_source=raw_source,
                 )
-                failures = send_max_notification(text=text, chat_ids=target.chat_ids)
+                failures = send_max_notification(text=text, addresses=target.addresses)
                 if failures == 0:
                     logger.info(
                         "booking.notify.sent tenant=%s appointment_id=%s channel=%s recipients=%d",
                         tenant.slug,
                         appointment_id,
                         target.channel,
-                        len(target.chat_ids),
+                        len(target.addresses),
                     )
                 else:
                     logger.warning(
@@ -482,28 +537,73 @@ def notify_booking_created(
                         tenant.slug,
                         appointment_id,
                         target.channel,
-                        len(target.chat_ids),
+                        len(target.addresses),
                         failures,
                     )
-            elif not specialist_notified:
-                # An unannounceable booking must be loud. Every address
-                # being empty is a configuration defect, not a normal
-                # state. (When the specialist WAS notified the booking is
-                # announced — a missing salon address is then a quieter
-                # observation, already covered by the cascade semantics.)
-                logger.warning(
-                    "booking.notify.no_recipients tenant=%s appointment_id=%s "
-                    "specialist_id=%s — no linked master chat, no manager_chat_id, "
-                    "no HANDOFF_NOTIFY_MAX_CHAT_IDS: nobody was told about this booking",
+            else:
+                # Observable, but quiet: since the owner's decision of
+                # 2026-09-07 a salon with no manager address simply has
+                # no MAX address, which is a normal state and not a
+                # refusal. One INFO line per pass so the silence can be
+                # counted while the pilot fills the field in; a WARNING
+                # here would cry defect on every booking of every salon
+                # that has not asked for alerts. An unreachable
+                # *specialist* stays loud — that trace is above and is
+                # untouched.
+                logger.info(
+                    "booking.notify.no_salon_target tenant=%s appointment_id=%s "
+                    "specialist_notified=%s — no manager address is configured, "
+                    "the salon copy is skipped",
                     tenant.slug,
                     appointment_id,
-                    specialist_id,
+                    specialist_notified,
                 )
     except Exception:  # noqa: BLE001 — hard containment; ingest must not break
         logger.exception(
             "booking.notify.unexpected appointment_id=%s",
             appointment_id,
         )
+
+
+def notify_booking_attention(*, proxy_pk: Any, reason: str) -> None:
+    """Тип 5 DRF-2118 — «запись требует вмешательства» управляющим салона.
+
+    Источники и их код причины: ``booking.cancelled`` не от салона →
+    ``cancelled_by_client`` (иначе ``cancelled``), ``booking.no_show`` →
+    ``no_show``. Читается строка зеркала после коммита — как и у «новой
+    записи»; названия услуги и мастера — из зеркала каталога. Никогда не
+    бросает: ингест уже завершён.
+    """
+
+    try:
+        from apps.booking.models import RemoteBookingProxy
+        from apps.channels.max import salon_notify
+
+        proxy = (
+            RemoteBookingProxy.all_tenants.filter(pk=proxy_pk)
+            .select_related("tenant", "bot_user")
+            .first()
+        )
+        if proxy is None:
+            return
+        tenant = proxy.tenant
+        master = resolve_master(tenant=tenant, specialist_id=proxy.specialist_id)
+        salon_notify.notify(
+            salon_notify.booking_attention_notice(
+                proxy,
+                reason=reason,
+                master_name=getattr(master, "name", "") or "",
+                service_name=resolve_service_name(tenant=tenant, service_id=proxy.service_id),
+            )
+        )
+    except Exception:  # noqa: BLE001 — уведомление не должно ронять хук после коммита
+        logger.exception("booking.notify.attention_failed proxy=%s reason=%s", proxy_pk, reason)
+
+
+def schedule_booking_attention_notification(*, proxy_pk: Any, reason: str) -> None:
+    """Очередь уведомления типа 5 на после коммита ингеста (DRF-2118)."""
+
+    transaction.on_commit(lambda: notify_booking_attention(proxy_pk=proxy_pk, reason=reason))
 
 
 def schedule_booking_created_notification(

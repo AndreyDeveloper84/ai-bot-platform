@@ -99,6 +99,13 @@ def _isolated_cache(settings):
 
 @pytest.fixture(autouse=True)
 def _health_settings(settings):
+    # DRF-1631: the probe now follows the router's tier walk, so the
+    # vendor these tests exercise has to be pinned rather than inherited
+    # from whatever LLM_PROVIDER the environment happens to carry.
+    # OpenAI here because that is the class the fixtures below patch;
+    # the vendor-agnostic claims live in test_health_probe_parity.py.
+    settings.LLM_PROVIDER = "openai"
+    settings.SKILL_LLM_PROVIDER = {}
     settings.LLM_HEALTH_PROBE_ENABLED = True
     settings.LLM_HEALTH_FAILURE_THRESHOLD = 2
     settings.LLM_HEALTH_STATE_TTL_S = 3600
@@ -371,6 +378,8 @@ async def test_probe_success(patched_provider):
 
     assert result.ok is True
     assert result.error_class == ""
+    # DRF-1631 — the result carries the vendor that was actually asked.
+    assert result.provider == "openai"
     assert result.latency_s >= 0
     # Cheapest possible call -- one token out, deterministic.
     assert patched_provider["kwargs"]["max_tokens"] == 1
@@ -454,7 +463,9 @@ def test_check_skips_without_api_key(settings, recorder, monkeypatch):
     settings.OPENAI_API_KEY = ""
     monkeypatch.setattr(health, "run_probe_sync", _boom_if_called)
 
-    assert check_llm_availability() == {"skipped": SKIP_NO_API_KEY}
+    # DRF-1631 — the summary names the vendor whose key was missing, so
+    # a Celery result says WHOSE wallet it looked in.
+    assert check_llm_availability() == {"skipped": SKIP_NO_API_KEY, "provider": "openai"}
     assert recorder.calls == []
 
 

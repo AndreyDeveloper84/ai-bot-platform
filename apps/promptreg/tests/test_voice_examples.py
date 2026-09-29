@@ -94,7 +94,8 @@ class TestRenderVoiceExamples:
 
     def test_nutrition_anketa_uses_anketa_pool(self) -> None:
         block = render_voice_examples("nutrition_anketa")
-        assert "анкете" in block or "норм" in block.lower()
+        # DRF-1840 сняла «нормы», DRF-2104 — «по анкете»; пул узнаётся по своему примеру.
+        assert "Принято — 65 кг" in block and "ориентир" in block
         assert "Шея болит" not in block
 
     def test_cross_domain_merges_pools(self) -> None:

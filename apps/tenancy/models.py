@@ -51,7 +51,9 @@ class Tenant(models.Model):
     FK target across the platform.
     """
 
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    id = models.UUIDField(
+        primary_key=True, default=uuid.uuid4, editable=False, verbose_name="Идентификатор салона"
+    )
     slug = models.SlugField(
         max_length=50,
         unique=True,
@@ -60,10 +62,12 @@ class Tenant(models.Model):
             "Letters, digits, hyphen, underscore. Must start with a letter "
             "or digit. Cannot be changed after creation."
         ),
+        verbose_name="Код салона",
     )
     name = models.CharField(
         max_length=200,
         help_text="Human-readable name shown in admin and billing.",
+        verbose_name="Название салона",
     )
     is_active = models.BooleanField(
         default=True,
@@ -73,6 +77,7 @@ class Tenant(models.Model):
             "middleware returns 403 (strict mode) or routes to None (audit "
             "mode)."
         ),
+        verbose_name="Салон подключён",
     )
     # Sprint 2 / E1 — Sprint-1-debt fields per PHASE0_DESIGN.md §3.1.
     # All have safe defaults so the migration is backward-compatible
@@ -83,24 +88,32 @@ class Tenant(models.Model):
         help_text="Per-tenant feature flags JSON. Sprint 4+ consumers "
         "read entries like {'voice_input': true}; missing keys default "
         "to False at the call site.",
+        verbose_name="Включённые возможности",
     )
     plan = models.CharField(
         max_length=32,
         default="free",
         help_text="Billing plan tier. Free during Phase 0; Sprint 9+ "
         "billing module will gate features by this value.",
+        verbose_name="Тариф",
     )
     timezone = models.CharField(
         max_length=64,
         default="Europe/Moscow",
-        help_text="IANA timezone for tenant-local rendering of times in "
-        "messages (e.g. 'завтра в 10:00'). Falls back to UTC if invalid.",
+        help_text="IANA timezone of the salon: its day, its hours in messages "
+        "(e.g. 'завтра в 10:00'). Read ONLY via "
+        "apps.tenancy.timezones.salon_zone (DRF-2595): empty → Europe/Moscow, "
+        "an unknown name → Europe/Moscow plus a tenancy.bad_tenant_tz log line; "
+        "on strict paths (booking create, slots) both refuse, logged as "
+        "tenancy.empty_tenant_tz / tenancy.bad_tenant_tz. Never UTC.",
+        verbose_name="Часовой пояс",
     )
     locale = models.CharField(
         max_length=16,
         default="ru-RU",
         help_text="BCP-47 locale tag for tenant-default language. "
         "Per-BotUser overrides land alongside personalisation work.",
+        verbose_name="Язык",
     )
 
     # Sprint 8 / S1 (DRF-716) — shadow-mode flag.
@@ -117,6 +130,7 @@ class Tenant(models.Model):
             "outbound messages to the user. Used during shadow-mode soak "
             "before canary cutover. See docs/runbooks/shadow-mode-launch.md."
         ),
+        verbose_name="Теневой режим: бот не пишет клиенту",
     )
 
     # Phase 1 / R2 (DRF-845) — destination chat for stale-reminder
@@ -133,11 +147,46 @@ class Tenant(models.Model):
         blank=True,
         default="",
         help_text=(
-            "MAX chat_id of the salon manager who receives escalation "
-            "alerts for T-24h reminders the client never replied to. "
-            "Empty disables escalation for the tenant; status still "
-            "flips to ESCALATED but no outbound message is dispatched."
+            "УСТАРЕВШЕЕ (DRF-1559): MAX chat_id менеджера. chat_id — это "
+            "идентификатор ДИАЛОГА, он верен только для того бота, из "
+            "переписки с которым его скопировали; салонный бот, отправляя "
+            "туда, получает 404 dialog.not.found. Читается, пока "
+            "manager_user_id пуст, — чтобы уже настроенные салоны не "
+            "замолчали в день выкладки. Заполните manager_user_id и "
+            "очистите это поле."
         ),
+        verbose_name="Идентификатор диалога менеджера в MAX",
+    )
+
+    # DRF-1559 — тот же получатель, но как ЧЕЛОВЕК, а не как диалог.
+    #
+    # ``manager_chat_id`` выше работал ровно до тех пор, пока бот был один:
+    # диалоговый идентификатор осмыслен только вместе с тем ботом, который
+    # этот диалог завёл. Замер 07.09.2026 (`docs/OPEN_DECISIONS.md` §55,
+    # §56): один человек, один салонный бот — ``?user_id=`` даёт 200,
+    # ``?chat_id=`` даёт 404 ``dialog.not.found``.
+    #
+    # Отдельным полем, а не переосмыслением старого: значения в старом
+    # поле — настоящие chat_id, и молчаливая смена их смысла сделала бы
+    # неверную настройку НЕОБНАРУЖИМОЙ. Пустое новое поле обнаруживается
+    # сразу — по тому, что адресация осталась прежней.
+    #
+    # Заполняется вручную (админка → «Адрес менеджера»): перенести
+    # значения нельзя, `chat_id` человека не пересчитывается в его
+    # `user_id` — MAX отдаёт `recipient.user_id` в ответе на успешную
+    # отправку, оттуда его и берут.
+    manager_user_id = models.CharField(
+        max_length=128,
+        blank=True,
+        default="",
+        help_text=(
+            "MAX user_id менеджера салона — идентификатор ЧЕЛОВЕКА, а не "
+            "диалога, и потому верный для любого нашего бота (DRF-1559). "
+            "Заполнен — адресуемся по нему; пуст — откатываемся на "
+            "manager_chat_id, который работает только для бота, из чьего "
+            "диалога он взят."
+        ),
+        verbose_name="Идентификатор менеджера в MAX",
     )
 
     # Phase 5 / KB-RAG Sub-1 (GH #114) — marks service tenants that hold
@@ -152,6 +201,7 @@ class Tenant(models.Model):
             "Service tenant — not a real salon. Holds shared infrastructure "
             "data (e.g. cross-salon KB corpus). Cannot be deleted from admin."
         ),
+        verbose_name="Системный салон",
     )
 
     # Phase 1 / CH1 (DRF-848) — per-tenant Telegram bot credentials.
@@ -183,6 +233,7 @@ class Tenant(models.Model):
             "log this value — masked in __repr__ and admin list views. "
             "See docs/runbooks/telegram-bot-onboarding.md."
         ),
+        verbose_name="Токен бота Telegram",
     )
     telegram_webhook_secret = models.CharField(
         max_length=64,
@@ -195,6 +246,7 @@ class Tenant(models.Model):
             "X-Telegram-Bot-Api-Secret-Token on every webhook POST; the "
             "webhook view verifies with hmac.compare_digest."
         ),
+        verbose_name="Секрет вебхука Telegram",
     )
 
     # Phase 1 / PI9 (DRF-860) — per-tenant daily LLM cost ceiling.
@@ -219,6 +271,7 @@ class Tenant(models.Model):
             "apps.llm.cost_tracker rejects with TenantQuotaExceeded "
             "once the counter reaches this value."
         ),
+        verbose_name="Дневной лимит токенов",
     )
     daily_cost_cap_usd = models.DecimalField(
         max_digits=8,
@@ -230,19 +283,53 @@ class Tenant(models.Model):
             "crosses this value the cost-tracker rejects further LLM "
             "calls via TenantQuotaExceeded. Reset at 00:00 UTC."
         ),
+        verbose_name="Дневной лимит расходов, $",
     )
 
-    # Sprint 7 / C4 (DRF-575) — cursor for the catalog sync orchestrator.
-    # NULL = full-resync on the next beat (initial bootstrap or admin
-    # force-clear). Sync service writes the upstream `updated_at` of the
-    # most recent row pulled, so the next run's `?since=` filter only
-    # picks up rows mysite has touched since.
+    # Sprint 7 / C4 (DRF-575), re-labelled in DRF-1494.
+    #
+    # This is NOT a run timestamp and never was one, whatever its name
+    # suggests. `apps.catalog.services.sync` writes `max(external_updated_at)`
+    # across the rows it pulled — an UPSTREAM CONTENT WATERMARK. The `?since=`
+    # filter the original help_text described does not exist: Ayla's internal
+    # catalog exposes no such parameter (see the module docstring of
+    # apps/catalog/services/sync.py, § "No incremental cursor"), so every run
+    # is a full fetch and this value drives nothing.
+    #
+    # The distinction is the whole of DRF-1494. A salon whose catalog nobody
+    # has edited for three weeks shows a three-week-old value here on a
+    # perfectly healthy contour; a salon whose sync has been failing for
+    # three weeks shows exactly the same thing. The field cannot tell the two
+    # apart, so no alarm can be built on it — and for twelve days none was.
+    # `last_catalog_sync_ok_at` below is the field that answers "did it run".
     last_catalog_sync_at = models.DateTimeField(
         null=True,
         blank=True,
-        help_text="Cursor — `?since=` filter for the next catalog sync run. "
-        "NULL → full resync. Written by apps.catalog.services.sync after "
-        "a successful pull-upsert cycle.",
+        help_text="Upstream content watermark — max(updated_at) over the rows the "
+        "last successful pull returned. NOT a run timestamp: a static catalog "
+        "freezes this value on a healthy contour. Use last_catalog_sync_ok_at to "
+        "judge freshness of the SYNC.",
+        verbose_name="Последняя попытка синхронизации",
+    )
+
+    # DRF-1494 — when the catalog sync last completed successfully for this
+    # tenant. Wall-clock at completion, written by
+    # `apps.catalog.services.sync.CatalogSyncService` only on a run whose
+    # salon-services fetch succeeded.
+    #
+    # Separate column rather than a repurposed `last_catalog_sync_at`: the
+    # watermark above is read by anything that wants to know how fresh the
+    # CONTENT is, and collapsing the two would trade one blind spot for
+    # another. NULL means this tenant has never had a successful sync — which
+    # the staleness alarm reports as loudly as a stale one, because "never"
+    # and "not lately" are the same outage to the client on the other end.
+    last_catalog_sync_ok_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Wall-clock of the last SUCCESSFUL catalog sync run for this "
+        "tenant. NULL → never synced. Age above CATALOG_SYNC_STALE_AFTER_SECONDS "
+        "pages the on-call channel (apps.catalog.tasks.alert_stale_catalog_sync).",
+        verbose_name="Последняя успешная синхронизация",
     )
 
     # P1 marketplace (#1018) — the salon's city, used to filter nationwide
@@ -254,20 +341,71 @@ class Tenant(models.Model):
         default="",
         help_text="Salon city for marketplace discovery (e.g. «Пенза»). "
         "Blank = not yet set; minimal geo for the pilot (no lat/lng).",
+        verbose_name="Город",
     )
 
-    created_at = models.DateTimeField(auto_now_add=True)
-    updated_at = models.DateTimeField(auto_now=True)
+    # DRF-1588 — почтовый адрес салона. Отдельная колонка, а НЕ производная
+    # от адресов мастеров: «первый непустой среди мастеров» — лотерея
+    # (OPEN_DECISIONS §45), сменится состав мастеров — сменится адрес салона.
+    #
+    # ``NULL`` и ``""`` здесь РАЗНЫЕ значения, и разница смысловая:
+    #
+    # * ``NULL``  — источник об адресе НИЧЕГО не сказал: ключ ``tenant_address``
+    #   каталог отдаёт с DRF-1587, но пустой адрес салона шлёт как ``null``
+    #   (DRF-1954), и подставлять вместо него что-либо —
+    #   ровно тот дефект, который вычищался 07-08.09 (§65): подставленное
+    #   значение неотличимо от настоящего, и человек считает его фактом.
+    # * ``""``    — источник сказал «адреса нет». Это ответ, а не молчание.
+    #
+    # Поэтому ``default=None``, а не ``default=""`` как у ``city`` выше:
+    # у ``city`` два состояния слиты в одно, и «не задан» от «пуст» там уже
+    # не отличить. Правило старшинства «салон против мастера» — DRF-1589,
+    # здесь его нет: колонка только довозит источник до читателя.
+    address = models.CharField(
+        max_length=500,
+        null=True,
+        blank=True,
+        default=None,
+        help_text=(
+            "Почтовый адрес салона. NULL — источник об адресе не сказал "
+            'ничего (не «пустой адрес»); "" — источник сказал, что адреса '
+            "нет. Пишется синхронизацией каталога из ключа "
+            "``tenant_address`` фида специалистов, когда тот появится "
+            "(DRF-1587); до тех пор заполняется вручную. Не выводится из "
+            "адресов мастеров — это была бы лотерея (OPEN_DECISIONS §45)."
+        ),
+        verbose_name="Адрес",
+    )
+
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="Заведён")
+    updated_at = models.DateTimeField(auto_now=True, verbose_name="Изменён")
 
     objects = _ActiveTenantManager()
     all_objects = models.Manager()
 
     class Meta:
-        verbose_name = "Tenant"
-        verbose_name_plural = "Tenants"
+        verbose_name = "Салон"
+        verbose_name_plural = "Салоны"
         ordering = ["name"]
         indexes = [
             models.Index(fields=["is_active", "slug"]),
+        ]
+        permissions = [
+            # Решение владельца: ``is_staff`` — ТОЛЬКО вход в Django Admin,
+            # и бизнес-правом он не является. Право поперёк салонов —
+            # отдельное и явное.
+            #
+            # Висит на ``Tenant``, потому что предмет права — операции над
+            # салонами поперёк арендаторов. Повесить его на журнал доступа
+            # к данным клиента (``adminconsole``) значило бы назвать право
+            # не тем, чем оно является.
+            #
+            # Выдаётся через группу «Ayla Operations», а не поштучно:
+            # поштучная выдача не переживает второго оператора.
+            (
+                "platform_operations",
+                "Операции платформы: действия поперёк салонов",
+            ),
         ]
 
     def __str__(self) -> str:
@@ -385,13 +523,16 @@ class TenantStaff(models.Model):
         ADMIN = "admin", "Admin"
         OWNER = "owner", "Owner"
 
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    id = models.UUIDField(
+        primary_key=True, default=uuid.uuid4, editable=False, verbose_name="Идентификатор"
+    )
     tenant = models.ForeignKey(
         "tenancy.Tenant",
         on_delete=models.PROTECT,
         related_name="staff",
         help_text="Owning tenant. PROTECT — dropping a tenant must not "
         "silently nuke the audit trail of who held what role.",
+        verbose_name="Салон",
     )
     bot_user = models.ForeignKey(
         "identity.BotUser",
@@ -400,6 +541,7 @@ class TenantStaff(models.Model):
         help_text="The person holding this role, identified by their "
         "channel-scoped BotUser. PROTECT mirrors the tenant FK — a "
         "delete must not silently drop role history.",
+        verbose_name="Аккаунт в мессенджере",
     )
     role = models.CharField(
         max_length=16,
@@ -408,10 +550,10 @@ class TenantStaff(models.Model):
         help_text="One of owner / admin / receptionist (ADR-0008). "
         "Owner uniqueness is enforced per-tenant via partial unique "
         "constraint below.",
+        verbose_name="Роль",
     )
     created_at = models.DateTimeField(
-        auto_now_add=True,
-        help_text="When the staff row was created.",
+        auto_now_add=True, help_text="When the staff row was created.", verbose_name="Доступ выдан"
     )
     created_by = models.ForeignKey(
         "identity.BotUser",
@@ -422,6 +564,7 @@ class TenantStaff(models.Model):
         help_text="BotUser who created this assignment — audit trail for "
         "operator-led promotions. NULL allowed for system-created rows "
         "(seed data, management commands, migrations).",
+        verbose_name="Кем выдан доступ",
     )
     deactivated_at = models.DateTimeField(
         null=True,
@@ -431,14 +574,15 @@ class TenantStaff(models.Model):
         "the role resolver ignores rows with this set, and the partial "
         "unique-Owner constraint only counts active rows so an Owner "
         "handover can deactivate the old row then create the new one.",
+        verbose_name="Доступ снят",
     )
 
     objects = TenantScopedManager()
     all_tenants = models.Manager()
 
     class Meta:
-        verbose_name = "Tenant staff"
-        verbose_name_plural = "Tenant staff"
+        verbose_name = "Доступ сотрудника"
+        verbose_name_plural = "Доступы сотрудников"
         constraints = [
             # ADR-0008 decision 5: each tenant has exactly one active
             # Owner. Partial unique index lets handover work as
@@ -540,19 +684,23 @@ class StaffInvite(models.Model):
         OWNER = "owner", "Owner"
         MASTER = "master", "Master"
 
-    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    id = models.UUIDField(
+        primary_key=True, default=uuid.uuid4, editable=False, verbose_name="Идентификатор"
+    )
     tenant = models.ForeignKey(
         "tenancy.Tenant",
         on_delete=models.PROTECT,
         related_name="staff_invites",
+        verbose_name="Салон",
     )
-    role = models.CharField(max_length=16, choices=Role.choices, db_index=True)
+    role = models.CharField(max_length=16, choices=Role.choices, db_index=True, verbose_name="Роль")
     code_hash = models.CharField(
         max_length=64,
         unique=True,
         db_index=True,
         help_text="SHA-256 of the normalized code. The code itself is shown "
         "once at issue time and never stored.",
+        verbose_name="Хеш кода приглашения",
     )
     catalog_master = models.ForeignKey(
         "catalog.CatalogMaster",
@@ -562,17 +710,24 @@ class StaffInvite(models.Model):
         related_name="staff_invites",
         help_text="Required for role=master: the EXISTING catalog row this "
         "invite links a person to. Never used to create a master.",
+        verbose_name="Мастер",
     )
-    expires_at = models.DateTimeField(db_index=True)
-    used_at = models.DateTimeField(null=True, blank=True)
+    expires_at = models.DateTimeField(db_index=True, verbose_name="Действует до")
+    used_at = models.DateTimeField(null=True, blank=True, verbose_name="Использовано")
+    # DRF-2082: активный отзыв кода оператором. До этого поля приглашение
+    # гасилось только пассивно — сроком и однократностью; «отозван» и
+    # «истёк» были неразличимы, а отозвать до срока было нечем. Кто отозвал —
+    # в аудите (оператор платформы не имеет BotUser), здесь только когда.
+    revoked_at = models.DateTimeField(null=True, blank=True, verbose_name="Отозвано")
     used_by = models.ForeignKey(
         "identity.BotUser",
         on_delete=models.SET_NULL,
         null=True,
         blank=True,
         related_name="redeemed_staff_invites",
+        verbose_name="Кто воспользовался",
     )
-    created_at = models.DateTimeField(auto_now_add=True)
+    created_at = models.DateTimeField(auto_now_add=True, verbose_name="Создано")
     created_by = models.ForeignKey(
         "identity.BotUser",
         on_delete=models.SET_NULL,
@@ -581,6 +736,7 @@ class StaffInvite(models.Model):
         related_name="+",
         help_text="Who issued it. NULL for invites issued by a management "
         "command — the pilot's first owner has no one to be invited by.",
+        verbose_name="Кто пригласил",
     )
     note = models.CharField(
         max_length=200,
@@ -588,14 +744,15 @@ class StaffInvite(models.Model):
         default="",
         help_text="Free-form label for the issuer: who this code was meant "
         "for. Not shown to the recipient.",
+        verbose_name="Заметка",
     )
 
     objects = TenantScopedManager()
     all_tenants = models.Manager()
 
     class Meta:
-        verbose_name = "Staff invite"
-        verbose_name_plural = "Staff invites"
+        verbose_name = "Приглашение сотрудника"
+        verbose_name_plural = "Приглашения сотрудников"
         ordering = ["-created_at"]
         indexes = [
             # Redeem hot path is the unique code_hash lookup above. This one

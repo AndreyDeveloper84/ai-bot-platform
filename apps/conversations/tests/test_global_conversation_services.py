@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from apps.conversations.models import Conversation
+from apps.conversations.models import Conversation, Message
 from apps.conversations.services import (
     record_global_message,
     record_message,
@@ -86,3 +86,28 @@ def test_per_tenant_functions_left_untouched(settings) -> None:
     assert conv is not None
     with pytest.raises(ValueError, match="tenant in scope"):
         record_message(conv, role="user", content="x")
+
+
+def test_global_input_channel_default_voice_and_rejects(settings) -> None:
+    """DRF-2488 — ``input_channel`` на глобальном пути: по умолчанию ``text``,
+    ``voice`` у реплики человека пишется, неизвестное значение и ``voice``
+    у ответа бота — ``ValueError`` без записи.
+    """
+    settings.STRICT_TENANT_SCOPE = "strict"
+    bot_user = resolve_or_create_global_bot_user(channel="max", channel_user_id="g-105")
+    conv = resolve_active_global_conversation(bot_user)
+    assert conv is not None
+
+    typed = record_global_message(conv, role="user", content="привет")
+    voiced = record_global_message(
+        conv, role="user", content="расшифровка", input_channel=Message.InputChannel.VOICE
+    )
+    typed.refresh_from_db()
+    voiced.refresh_from_db()
+    assert (typed.input_channel, voiced.input_channel) == ("text", "voice")
+
+    with pytest.raises(ValueError, match="is not one of"):
+        record_global_message(conv, role="user", content="x", input_channel="audio")
+    with pytest.raises(ValueError, match="only valid for role='user'"):
+        record_global_message(conv, role="assistant", content="x", input_channel="voice")
+    assert Message.all_tenants.filter(conversation=conv).count() == 2
