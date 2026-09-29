@@ -105,8 +105,9 @@ class TestWhatIsAKey:
         [None, "", "   ", True, False, 1.5, {}, []],
         ids=["null", "empty", "blank", "true", "false", "float", "object", "array"],
     )
-    def test_refused(self, value) -> None:
-        assert parse_inbound(_with(MESSAGE, value, 1001)) is None
+    @pytest.mark.parametrize("template", [MESSAGE, CALLBACK], ids=["message", "callback_query"])
+    def test_refused(self, value, template) -> None:
+        assert parse_inbound(_with(template, value, 1001)) is None
 
     @pytest.mark.parametrize(
         ("value", "key"),
