@@ -7,7 +7,7 @@
  */
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter, Route, Routes, useParams } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useLocation, useParams } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../lib/api", async (importOriginal) => {
@@ -110,9 +110,17 @@ afterEach(() => {
 });
 
 describe("подтверждение переноса «было → стало» (DRF-2585, слова владельца п.8)", () => {
+  // Проба истории: какое состояние у текущей записи истории сейчас.
+  let historyState: unknown = "не прочитано";
+  function HistoryProbe() {
+    historyState = useLocation().state;
+    return null;
+  }
+
   function renderMoved(state: unknown) {
     render(
       <MemoryRouter initialEntries={[{ pathname: "/customer/records/b-m", state }]}>
+        <HistoryProbe />
         <Routes>
           <Route path="/customer/records/:bookingId" element={<CustomerBookingDetailScreen />} />
         </Routes>
@@ -134,6 +142,8 @@ describe("подтверждение переноса «было → стало�
     // показанный блок остаётся — экран его запомнил.
     await new Promise((r) => setTimeout(r, 0));
     expect(screen.getByText("Перенесла запись")).toBeInTheDocument();
+    // Ревью: без этой строки узел оставался зелёным и без стирания.
+    expect(historyState).toBeNull();
   });
 
   it("без переноса блока нет — карточка открыта не после переноса", async () => {
