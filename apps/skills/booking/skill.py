@@ -1403,6 +1403,13 @@ def _has_contraindication_text(tenant: Any, service_id: int | str) -> bool:
     try:
         rows = rows.filter(ayla_service_id=uuid.UUID(str(service_id)))
     except (ValueError, AttributeError, TypeError):
+        if _booking_via_ayla():
+            # DRF-2630: on the Ayla path a service is its UUID and nothing
+            # else — the legacy int ``external_id`` belongs to the flag-OFF
+            # (YClients) contour, as in the two neighbours
+            # (``_service_requires_health_check``, ``calc_price``). A non-UUID
+            # here is not a service we know: «absent», not a guess by int.
+            return False
         try:
             rows = rows.filter(external_id=int(service_id))
         except (ValueError, TypeError):
