@@ -348,7 +348,7 @@ def _try_send_master_dm(data: dict[str, Any], payment_id: str) -> None:
 
     # Step 4: enrichment from mirror.
     service_name = _resolve_service_name(proxy.service_id, tenant_id) or "услугу"
-    appointment_date = _format_appointment_date(proxy.start_at)
+    appointment_date = _format_appointment_date(proxy.start_at, master.tenant)
 
     # CR #881 M1: coerce consecutive_failures defensively before passing
     # к _format_master_dm_text. Raw payload value comes from JSON / event
@@ -453,12 +453,12 @@ def _resolve_service_name(service_id: Any, tenant_id: Any) -> str | None:
     return service.name or None
 
 
-def _format_appointment_date(start_at: Any) -> str:
-    """Render appointment start в MSK timezone for the master DM.
+def _format_appointment_date(start_at: Any, tenant: Any) -> str:
+    """Render appointment start in the SALON's timezone for the master DM.
 
     Format: ``DD.MM в HH:MM`` (same convention as
-    ``apps/bookings/tasks.py::_format_day_before_text``). MSK because
-    the master operates on salon-local time, not UTC.
+    ``apps/bookings/tasks.py::_format_day_before_text``). Salon time, not
+    UTC: the master operates on salon-local time.
 
     **Invariant:** ``RemoteBookingProxy.start_at`` is ``db_index=True``
     + non-nullable (``apps/booking/models.py``). Callers always pass a
@@ -466,14 +466,14 @@ def _format_appointment_date(start_at: Any) -> str:
     None-check dropped — would mask a real model invariant violation
     if it ever fires.
 
-    TODO Phase 2 multi-region: hardcoded MSK works для pilot (Penza =
-    MSK); future tenants в other timezones would read ``tenant.timezone``
-    field (CR #881 F1).
+    Zone — ``apps.tenancy.timezones.salon_zone`` (DRF-2595). Until then this
+    was hardcoded MSK (CR #881 F1 TODO): right for the Penza pilot, three
+    hours off for a salon in Yekaterinburg.
     """
-    from zoneinfo import ZoneInfo
+    from apps.tenancy.timezones import salon_zone
 
-    msk = start_at.astimezone(ZoneInfo("Europe/Moscow"))
-    return msk.strftime("%d.%m в %H:%M")
+    local = start_at.astimezone(salon_zone(tenant))
+    return local.strftime("%d.%m в %H:%M")
 
 
 def _format_master_dm_text(
