@@ -1202,8 +1202,8 @@ class TestEverySnapshotHasATotalOrder:
             lambda: list(Message.all_tenants.order_by("created_at").values("id")), monkeypatch
         )
         assert seen == [("conversations.Message", ("created_at",))]
-        assert not _unique_column(Message, "created_at")
         assert _unique_column(Message, "pk")
+        assert not _unique_column(Message, "created_at")
 
 
 class TestAfterTheSweepEveryStoreHasItsOutcome:
