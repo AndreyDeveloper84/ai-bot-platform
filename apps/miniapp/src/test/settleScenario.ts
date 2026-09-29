@@ -23,8 +23,24 @@
  * цепочка ещё идёт. Гарантированно — до глубины `min` (3): 20/20; глубина 4
  * — 13/20, 5 — 3/20, 8 — 0/20. Цепочку глубже `min` ждут `min` побольше
  * или фейковые таймеры узла.
+ *
+ * За пределом — ОТКАЗ, а не проход (DRF-2617). До DRF-2617 помощник молча
+ * возвращал управление, и тест на глубокой таймерной цепочке зеленел, не
+ * дождавшись работы. Теперь в момент выхода — по тишине DOM или по `max` —
+ * он спрашивает `timerLedger`: ждут ли ещё короткие таймеры (не длиннее
+ * `SHORT_TIMER_MS`). Ждут — падение с числом, колбэками и советом; про
+ * `setInterval` (его не считаем) отказ говорит прямо. Условие ожидания НЕ
+ * менялось — только громкость: замер 29.09 показал, что до предела не доходит
+ * ни один настоящий тест, и платить перестройкой за молчащую дыру не стоит.
  */
 import { act } from "@testing-library/react";
+
+import {
+  activeIntervals,
+  describePendingShortTimers,
+  pendingShortTimers,
+  SHORT_TIMER_MS,
+} from "./timerLedger";
 
 export async function settleScenario({ min = 3, max = 12 } = {}): Promise<void> {
   let previous = document.body.innerHTML;
@@ -36,6 +52,25 @@ export async function settleScenario({ min = 3, max = 12 } = {}): Promise<void> 
     const current = document.body.innerHTML;
     quiet = current === previous ? quiet + 1 : 0;
     previous = current;
-    if (round + 1 >= min && quiet >= 2) return;
+    if (round + 1 >= min && quiet >= 2) {
+      refuseIfTimersPending(round + 1);
+      return;
+    }
   }
+  refuseIfTimersPending(max);
+}
+
+function refuseIfTimersPending(rounds: number): void {
+  const left = pendingShortTimers();
+  if (left === 0) return;
+  const intervals = activeIntervals();
+  const lines = [
+    `settleScenario: очередь коротких таймеров (≤ ${SHORT_TIMER_MS} мс) не пуста после ` +
+      `${rounds} оборотов — ${left} шт. Сценарий не улёгся, и проверка после помощника ` +
+      `прошла бы, не дождавшись работы. Передайте { min: … } больше глубины цепочки ` +
+      `или фейковые часы узла.`,
+    ...describePendingShortTimers().map((d) => `  ${d}`),
+    `  setInterval помощник не считает; активных интервалов сейчас: ${intervals}.`,
+  ];
+  throw new Error(lines.join("\n"));
 }
