@@ -8,8 +8,8 @@ Covers:
 * PATCH — name/bio/specialization updates, audit row + diff,
   is_active gate (Owner-only deactivate, Admin allowed to reactivate),
   validation (blank name, oversized bio).
-* POST photo — valid jpeg + audit, oversized rejected, non-image
-  rejected, photo_url returned.
+* POST photo — moved to ``test_admin_master_photo_2619`` (DRF-2619: the
+  bytes go to the catalog on the administrator's own token).
 * GET audit — feed shape, cross-tenant isolation, pagination.
 """
 
@@ -20,7 +20,6 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import Client
 from django.urls import reverse
 
@@ -34,7 +33,6 @@ from apps.audit.models import AuditLog
 from apps.catalog.models import CatalogMaster
 from apps.identity.models import BotUser
 from apps.tenancy.models import Tenant
-from apps.miniapp_api.master_media import master_photo_path
 
 
 # --- URL helpers ----------------------------------------------------------
@@ -548,119 +546,6 @@ class TestMasterUpdate:
         )
         after = AuditLog.all_tenants.filter(action="master.profile_updated_by_admin").count()
         assert after == before
-
-
-# =========================================================================
-# POST /api/v1/admin/masters/<id>/photo/
-# =========================================================================
-
-
-class TestMasterPhotoUpload:
-    def test_valid_jpeg_accepted(
-        self,
-        client: Client,
-        owner_bot_user: BotUser,
-        master: CatalogMaster,
-        tmp_path,
-        settings,
-    ) -> None:
-        settings.MEDIA_ROOT = str(tmp_path)
-        settings.MEDIA_URL = "/media/"
-        upload = SimpleUploadedFile(
-            "selfie.jpg",
-            b"\xff\xd8\xff\xd9" * 10,
-            content_type="image/jpeg",
-        )
-        resp = client.post(
-            _photo_url(master.id),
-            data={"photo": upload},
-            HTTP_AUTHORIZATION=init_data_header("5001"),
-        )
-        assert resp.status_code == 200, resp.content
-        body = resp.json()
-        assert "photo_url" in body
-        master.refresh_from_db()
-        # Зеркало хранит сырой адрес, на провод — наш путь к байтам (DRF-2539).
-        assert "master_photos" in master.photo_url
-        assert body["photo_url"] == master_photo_path(master.id, master.photo_url)
-        # File on disk.
-        assert (tmp_path / "master_photos").exists()
-
-    def test_audit_row_on_photo(
-        self,
-        client: Client,
-        owner_bot_user: BotUser,
-        master: CatalogMaster,
-        tmp_path,
-        settings,
-    ) -> None:
-        settings.MEDIA_ROOT = str(tmp_path)
-        upload = SimpleUploadedFile(
-            "p.png",
-            b"\x89PNG\r\n\x1a\n" + b"\x00" * 100,
-            content_type="image/png",
-        )
-        client.post(
-            _photo_url(master.id),
-            data={"photo": upload},
-            HTTP_AUTHORIZATION=init_data_header("5001"),
-        )
-        row = AuditLog.all_tenants.filter(
-            action="master.photo_updated_by_admin",
-            target_id=master.id,
-        ).first()
-        assert row is not None
-        assert row.payload["mime"] == "image/png"
-        assert row.payload["size_bytes"] > 0
-        assert row.payload["actor_role"] == "owner"
-
-    def test_non_image_rejected(
-        self,
-        client: Client,
-        owner_bot_user: BotUser,
-        master: CatalogMaster,
-    ) -> None:
-        upload = SimpleUploadedFile(
-            "evil.exe",
-            b"MZ\x90\x00",  # PE header
-            content_type="application/octet-stream",
-        )
-        resp = client.post(
-            _photo_url(master.id),
-            data={"photo": upload},
-            HTTP_AUTHORIZATION=init_data_header("5001"),
-        )
-        assert resp.status_code == 400
-
-    def test_oversized_rejected(
-        self,
-        client: Client,
-        owner_bot_user: BotUser,
-        master: CatalogMaster,
-        settings,
-    ) -> None:
-        # Use a synthesized 11 MB upload.
-        big = b"\xff" * (11 * 1024 * 1024)
-        upload = SimpleUploadedFile("huge.jpg", big, content_type="image/jpeg")
-        resp = client.post(
-            _photo_url(master.id),
-            data={"photo": upload},
-            HTTP_AUTHORIZATION=init_data_header("5001"),
-        )
-        assert resp.status_code == 400
-
-    def test_missing_photo_field_400(
-        self,
-        client: Client,
-        owner_bot_user: BotUser,
-        master: CatalogMaster,
-    ) -> None:
-        resp = client.post(
-            _photo_url(master.id),
-            data={},
-            HTTP_AUTHORIZATION=init_data_header("5001"),
-        )
-        assert resp.status_code == 400
 
 
 # =========================================================================

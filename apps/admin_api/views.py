@@ -34,8 +34,8 @@ forensic review can rebuild the diff. The photo payload carries
   separate PR. This PR allows Owner to flip ``is_active=False`` but
   does **not** cascade (just sets the flag + writes audit).
 * Master role change (master ↔ admin) — separate PR.
-* Photo resize / S3 storage / CDN — TODO comments only; raw upload
-  saved to ``MEDIA_ROOT/master_photos/``.
+* Photo bytes live in the catalog (DRF-2619): the upload goes there on the
+  administrator's own token; the bot keeps only the mirrored address.
 """
 
 from __future__ import annotations
@@ -45,10 +45,8 @@ import binascii
 import json
 import logging
 from datetime import datetime
-from pathlib import Path
 from typing import Any
 
-from django.conf import settings
 from django.db import transaction
 from django.db.models import Count, Q
 from django.http import HttpRequest, HttpResponse, JsonResponse
@@ -57,9 +55,11 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
 from apps.admin_api.auth import RoleContext, require_admin_role
+from apps.admin_api.views_salon_schedule_writes import salon_person_write
 from apps.audit.models import AuditLog
 from apps.audit.services import write_audit
 from apps.catalog.models import CatalogMaster, CatalogService, MasterService
+from apps.catalog.specialist_ref import catalog_specialist_id
 from apps.events.vocabulary import (
     MASTER_PHOTO_UPDATED_BY_ADMIN,
     MASTER_PROFILE_UPDATED_BY_ADMIN,
@@ -79,14 +79,6 @@ MAX_NAME_LEN = 200
 MAX_SPECIALIZATION_LEN = 255
 MAX_BIO_LEN = 1000
 MAX_EXPERIENCE_LEN = 255
-
-PHOTO_MAX_BYTES = 10 * 1024 * 1024  # 10 MB
-ALLOWED_PHOTO_MIMES = ("image/jpeg", "image/png", "image/webp")
-MIME_TO_EXT = {
-    "image/jpeg": ".jpg",
-    "image/png": ".png",
-    "image/webp": ".webp",
-}
 
 PATCH_EDITABLE_FIELDS = {"name", "specialization", "bio", "experience", "is_active"}
 
@@ -620,103 +612,74 @@ def _master_update(request: HttpRequest, master_id: str) -> HttpResponse:
 # --- POST /api/v1/admin/masters/<master_id>/photo/ -----------------------
 
 
-def _save_photo_to_media(master: CatalogMaster, file_obj: Any, mime: str) -> tuple[str, int]:
-    """Write the upload to ``MEDIA_ROOT/master_photos/`` and return URL + bytes.
-
-    Phase 1: raw upload only — no Pillow, no resize, no S3, no CDN.
-    The file name is ``<master_id>.<ext>``. Overwriting an existing
-    photo is intentional (this is the admin edit path; one photo per
-    master). TODO(media-pipeline): resize to 800×800 + thumbnail in a
-    follow-up PR; route uploads through a signed-URL flow for S3.
-    """
-
-    ext = MIME_TO_EXT.get(mime, ".jpg")
-    media_root = Path(getattr(settings, "MEDIA_ROOT", "media"))
-    media_url = getattr(settings, "MEDIA_URL", "/media/")
-    photos_dir = media_root / "master_photos"
-    photos_dir.mkdir(parents=True, exist_ok=True)
-
-    out_path = photos_dir / f"{master.id}{ext}"
-    written = 0
-    with open(out_path, "wb") as f:
-        for chunk in file_obj.chunks():
-            f.write(chunk)
-            written += len(chunk)
-
-    return f"{media_url.rstrip('/')}/master_photos/{master.id}{ext}", written
-
-
 @csrf_exempt
 @require_http_methods(["POST"])
 @require_admin_role
 def master_photo_upload(request: HttpRequest, master_id: str) -> HttpResponse:
-    """Multipart photo upload — JPEG / PNG / WebP only, ≤ 10 MB.
+    """Фото мастера — в каталог, на собственном токене администратора (DRF-2619).
 
     Body: ``multipart/form-data`` with a single file field ``photo``.
 
-    Validation:
+    Раньше файл ложился на диск бота (``MEDIA_ROOT/master_photos/``), а в
+    зеркало — адрес ``/media/master_photos/…``, который никто не отдавал;
+    первая синхронизация затирала его ``avatar_url`` каталога. Теперь
+    владелец байтов один — каталог (``POST tenants/me/masters/{id}/media/avatar/``),
+    правила файла его (форматы по содержимому, размер, квадрат), отказ несёт
+    ``details.reason``. Путь записи — общий с отгулами (``salon_person_write``): токен
+    человека, один код отказа, журнал с причиной.
 
-    * Content-Type must be one of ``image/jpeg``, ``image/png``,
-      ``image/webp``. The server trusts the multipart-stated MIME for
-      Phase 1; content-sniffing lands with the media-pipeline PR.
-    * Size ≤ 10 MB. Frontend pre-checks but we double-check here.
+    Зеркало берёт ``avatar_url`` из ОТВЕТА каталога сразу — как
+    ``master_api.onboarding_profile`` у самого мастера; синхронизация потом
+    приносит то же значение и ничего не затирает.
 
-    Side effects:
+    Audit slug ``master.photo_updated_by_admin`` — ``{master_id, actor_role,
+    size_bytes, mime}``, только после принятой каталогом записи.
 
-    * File saved to ``MEDIA_ROOT/master_photos/<master_id>.<ext>``.
-    * ``CatalogMaster.photo_url`` updated to the public URL.
-    * Audit slug ``master.photo_updated_by_admin`` with payload
-      ``{master_id, actor_role, size_bytes, mime}``.
-
-    Response: ``{"photo_url": "<url>"}``.
+    Response: ``{"photo_url": "<наш путь прокси>"}``.
     """
 
-    tenant = request.tenant  # type: ignore[attr-defined]
     role_ctx: RoleContext = request.role_context  # type: ignore[attr-defined]
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
-
-    master = _get_master_or_404(tenant.id, master_id)
-    if master is None:
-        return _error("not_found", "master not found", 404)
 
     file_obj = request.FILES.get("photo")
     if file_obj is None:
         return _error("bad_request", "photo field is required", 400)
-
+    content = file_obj.read()
     mime = (file_obj.content_type or "").lower()
-    if mime not in ALLOWED_PHOTO_MIMES:
-        return _error(
-            "bad_request",
-            f"unsupported image type {mime!r}; use JPEG/PNG/WebP",
-            400,
-        )
 
-    size = file_obj.size or 0
-    if size > PHOTO_MAX_BYTES:
-        return _error(
-            "bad_request",
-            f"image exceeds {PHOTO_MAX_BYTES} bytes ({size} given)",
-            400,
-        )
+    def mirror(master: CatalogMaster, state: dict[str, Any]) -> HttpResponse:
+        with transaction.atomic():
+            master.photo_url = str(state.get("avatar_url") or "")
+            master.save(update_fields=["photo_url"])
+            write_audit(
+                MASTER_PHOTO_UPDATED_BY_ADMIN,
+                target="catalog.CatalogMaster",
+                target_id=master.id,
+                payload={
+                    "master_id": str(master.id),
+                    "actor_role": role_ctx.primary_role,
+                    "size_bytes": len(content),
+                    "mime": mime,
+                },
+                actor_id=bot_user.id,
+            )
+        return JsonResponse({"photo_url": master_photo_path(master.id, master.photo_url)})
 
-    with transaction.atomic():
-        photo_url, written = _save_photo_to_media(master, file_obj, mime)
-        master.photo_url = photo_url
-        master.save(update_fields=["photo_url"])
-        write_audit(
-            MASTER_PHOTO_UPDATED_BY_ADMIN,
-            target="catalog.CatalogMaster",
-            target_id=master.id,
-            payload={
-                "master_id": str(master.id),
-                "actor_role": role_ctx.primary_role,
-                "size_bytes": written,
-                "mime": mime,
-            },
-            actor_id=bot_user.id,
-        )
-
-    return JsonResponse({"photo_url": master_photo_path(master.id, photo_url)})
+    return salon_person_write(
+        request,
+        master_id,
+        "master_photo_upload",
+        lambda client, token, slug, master: client.upload_master_avatar(
+            person_token=token,
+            tenant_slug=slug,
+            specialist_id=catalog_specialist_id(master),
+            filename=file_obj.name or "photo",
+            content=content,
+            content_type=mime,
+        ),
+        success_status=200,
+        on_success=mirror,
+    )
 
 
 # --- GET /api/v1/admin/masters/<master_id>/audit/ ------------------------

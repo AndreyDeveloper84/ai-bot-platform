@@ -292,6 +292,15 @@ SALON_ROUTES: tuple[SalonRoute, ...] = (
         access=SalonRouteAccess.PERSON_TOKEN,
         client_method="delete_schedule_exception",
     ),
+    # DRF-2619 — фото мастера рукой администратора: байты у каталога, на
+    # собственном токене администратора, как отгулы и исключения.
+    SalonRoute(
+        name="tenants-master-avatar",
+        method="POST",
+        path="masters/{specialist_id}/media/avatar/",
+        access=SalonRouteAccess.PERSON_TOKEN,
+        client_method="upload_master_avatar",
+    ),
     SalonRoute(
         name="tenants-closures",
         method="GET",
