@@ -2319,11 +2319,11 @@ CHROMA_HTTP_HOST = os.environ.get("CHROMA_HTTP_HOST", "").strip()
 CHROMA_HTTP_PORT = int(os.environ.get("CHROMA_HTTP_PORT", "8001"))
 CHROMA_AUTH_TOKEN = os.environ.get("CHROMA_AUTH_TOKEN", "").strip()
 
-# S3/minio endpoint — exposed as a settings attribute so the readyz
-# minio probe (apps/orchestrator/views.py) checks the configured
-# endpoint instead of its getattr localhost default. Replay/S3 writers
-# read env directly today; this is the single attribute probes rely on.
-S3_ENDPOINT_URL = os.environ.get("S3_ENDPOINT_URL", "http://localhost:9000")
+# DRF-2611: no S3_ENDPOINT_URL setting. Its only reader was the readyz MinIO
+# ping — nothing in the bot writes to object storage, so MinIO left the stack.
+# The backup scripts' S3_* variables are a DIFFERENT configuration read from
+# /etc/formula_tela/backup.env (scripts/backup/**) and are not touched here;
+# tests/test_no_minio_in_bot_stack_2611.py keeps the two apart.
 
 # Catalog sync (Ayla internal catalog → CatalogService mirror). S3B (#1044):
 # the sync service pulls `salon-services` from Ayla's internal Bearer catalog
