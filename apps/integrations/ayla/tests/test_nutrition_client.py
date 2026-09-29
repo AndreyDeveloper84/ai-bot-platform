@@ -135,7 +135,7 @@ class TestScanPhoto:
         monkeypatch.setattr(
             nc,
             "_fire_breaker_alert",
-            lambda transition, failures: alerts.append((transition, failures)),
+            lambda transition, failures, **_: alerts.append((transition, failures)),
         )
 
         def handler(_: httpx.Request) -> httpx.Response:
@@ -166,7 +166,7 @@ class TestScanPhoto:
         monkeypatch.setattr(
             nc,
             "_fire_breaker_alert",
-            lambda transition, failures: alerts.append((transition, failures)),
+            lambda transition, failures, **_: alerts.append((transition, failures)),
         )
 
         # Drive a fast time-skip via patching ``time.monotonic`` in the

@@ -85,7 +85,7 @@ class TestBudgetRefusalsAreNotFailures:
             with pytest.raises(nc.ScanBudgetExhaustedError):
                 await client.scan_photo(external_user_id="bot:1", image_bytes=b"...")
 
-        assert client._circuit.is_open(now=time.monotonic()) is False
+        assert client._breaker(nc.BreakerPurpose.NUTRITION).is_open(now=time.monotonic()) is False
 
     @pytest.mark.asyncio
     async def test_repeated_daily_limit_429_does_not_open_the_breaker(self) -> None:
@@ -96,7 +96,7 @@ class TestBudgetRefusalsAreNotFailures:
             with pytest.raises(nc.ScanDailyLimitError):
                 await client.scan_photo(external_user_id="bot:1", image_bytes=b"...")
 
-        assert client._circuit.is_open(now=time.monotonic()) is False
+        assert client._breaker(nc.BreakerPurpose.NUTRITION).is_open(now=time.monotonic()) is False
 
     @pytest.mark.asyncio
     async def test_positive_pair_real_5xx_still_counts_as_failure(self) -> None:
@@ -108,7 +108,7 @@ class TestBudgetRefusalsAreNotFailures:
             with pytest.raises(nc.NutritionUnavailableError):
                 await client.scan_photo(external_user_id="bot:1", image_bytes=b"...")
 
-        assert client._circuit.is_open(now=time.monotonic()) is True
+        assert client._breaker(nc.BreakerPurpose.NUTRITION).is_open(now=time.monotonic()) is True
 
     @pytest.mark.asyncio
     async def test_non_object_error_body_still_feeds_the_breaker(self) -> None:
@@ -127,7 +127,7 @@ class TestBudgetRefusalsAreNotFailures:
             with pytest.raises(nc.NutritionUnavailableError):
                 await client.scan_photo(external_user_id="bot:1", image_bytes=b"...")
 
-        assert client._circuit.is_open(now=time.monotonic()) is True
+        assert client._breaker(nc.BreakerPurpose.NUTRITION).is_open(now=time.monotonic()) is True
 
     @pytest.mark.asyncio
     async def test_empty_and_listy_bodies_do_not_crash_the_parse(self) -> None:
