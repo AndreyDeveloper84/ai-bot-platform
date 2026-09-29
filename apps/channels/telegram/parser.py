@@ -117,6 +117,23 @@ def parse_inbound(payload: dict[str, Any]) -> CanonicalEvent | None:
     return None
 
 
+def _identity_key(value: Any) -> str | None:
+    """``channel_user_id`` — the person's key — from a Telegram ``from.id``.
+
+    DRF-2665 (the MAX door is DRF-2661): presence of the key is not validity
+    of the value. ``{"id": null}`` passes ``"id" in d`` and ``str(None)`` is
+    ``"None"`` — every such update would become ONE person. Only an integer
+    or a non-blank string is a key; anything else is refused the way this
+    module refuses — ``None`` (see «Why return None» above). The value is
+    returned unchanged: re-keying an existing person is its own defect.
+    """
+
+    if isinstance(value, bool) or not isinstance(value, int | str):
+        return None
+    key = str(value)
+    return key if key.strip() else None
+
+
 def _parse_message(payload: dict[str, Any]) -> CanonicalEvent | None:
     """Translate a ``Update.message`` (or photo) update."""
     message = payload.get("message")
@@ -128,6 +145,9 @@ def _parse_message(payload: dict[str, Any]) -> CanonicalEvent | None:
     if not isinstance(sender, dict) or "id" not in sender:
         return None
     if not isinstance(chat, dict) or "id" not in chat:
+        return None
+    user_key = _identity_key(sender["id"])
+    if user_key is None:
         return None
 
     # Photo messages put the prompt in ``caption``; text messages in
@@ -150,7 +170,7 @@ def _parse_message(payload: dict[str, Any]) -> CanonicalEvent | None:
 
     return CanonicalEvent(
         channel="telegram",
-        channel_user_id=str(sender["id"]),
+        channel_user_id=user_key,
         channel_message_id=str(message.get("message_id", "")),
         chat_id=str(chat["id"]),
         text=text,
@@ -168,6 +188,9 @@ def _parse_callback_query(payload: dict[str, Any]) -> CanonicalEvent | None:
 
     sender = cb.get("from")
     if not isinstance(sender, dict) or "id" not in sender:
+        return None
+    user_key = _identity_key(sender["id"])
+    if user_key is None:
         return None
 
     # ``callback_query.message`` is the message the button was attached
@@ -192,7 +215,7 @@ def _parse_callback_query(payload: dict[str, Any]) -> CanonicalEvent | None:
 
     return CanonicalEvent(
         channel="telegram",
-        channel_user_id=str(sender["id"]),
+        channel_user_id=user_key,
         channel_message_id=str(cb_message.get("message_id", "")),
         chat_id=str(chat_id),
         text=str(data),

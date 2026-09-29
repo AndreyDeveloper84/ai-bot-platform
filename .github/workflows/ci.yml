@@ -240,11 +240,19 @@ jobs:
   # ~4 min, and it no longer stands in front of anything. It is not
   # weakened — `test` below cannot be green unless this job is.
   # ---------------------------------------------------------------------
+  # DRF-2657 (29.09) — this job runs on EVERY pull request, docs-only included.
+  # It used to sit behind `needs.changes.outputs.code == 'true'` like the
+  # engineering jobs, so a PR touching only `docs/` skipped both guards that
+  # catch leaked data — detect-secrets here and `pii_guard` in `checks`. That
+  # is exactly where it leaked: #2204 (docs-only) brought six full identifiers
+  # of real MAX accounts into `dev` of a PUBLIC repository with every guard
+  # "skipping". Docs are where personal data and credentials arrive, so the
+  # data guards must not follow the "docs-only → nothing to test" shortcut.
+  # The aggregate `test` below refuses a docs-only PR unless this job passed.
   secret-scan:
     name: secret scan (detect-secrets)
     runs-on: ubuntu-latest
     needs: changes
-    if: needs.changes.outputs.code == 'true'
     # 3m37s measured (above). 15 is ~4x: enough to absorb an apt/pip
     # stall, small enough that a hang is cheap.
     timeout-minutes: 15
@@ -326,6 +334,12 @@ jobs:
           git ls-files \
             | grep -vE '^(\.secrets\.baseline|uv\.lock|.*\.lock|tests/fixtures/.*|apps/planning_rules/data/.*|legacy_maxbot/.*|legacy_formulatela_mcp/.*|legacy_notifications/.*)$' \
             | xargs detect-secrets-hook --baseline .secrets.baseline
+
+      # DRF-2657 — the personal-data guard, here so a docs-only PR runs it too
+      # (it also runs in `checks` for code PRs; the duplicate costs seconds).
+      # Standard library only, so the bare interpreter set up above suffices.
+      - name: pii guard (all tracked files)
+        run: python tools/lint/pii_guard.py --all
 
   # ---------------------------------------------------------------------
   # Everything that is not `pytest apps/`: lint, the AST guards, the
@@ -1575,7 +1589,14 @@ jobs:
           # itself succeeded and said so — a failed detection is red, not a
           # free pass.
           if [ "$R_CHANGES" = "success" ] && [ "$CODE" = "false" ]; then
-            echo "OK — docs-only PR: secret-scan, checks and apps shards skipped by the changes gate."
+            # DRF-2657: docs-only skips the engineering jobs, NOT the data
+            # guards — secret-scan (detect-secrets + pii_guard) must pass.
+            echo "needs.secret-scan.result = ${R_SECRET_SCAN}"
+            if [ "$R_SECRET_SCAN" != "success" ]; then
+              echo "FAILED — docs-only PR, but the data guards (detect-secrets + pii_guard) are '${R_SECRET_SCAN}', not 'success'."
+              exit 1
+            fi
+            echo "OK — docs-only PR: checks and apps shards skipped by the changes gate; data guards passed."
             exit 0
           fi
           bad=0
