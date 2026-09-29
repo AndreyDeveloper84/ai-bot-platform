@@ -14,9 +14,9 @@
  * O1 — «+ Добавить свою услугу» открывает форму M18a; выбор похожей обновляет счётчик из ответа.
  *
  * Сторож от зависимости от времени — как в тесте экрана 04: малый asyncUtilTimeout
- * и явный settle(); новая гонка краснеет детерминированно.
+ * и явный settleScenario(); новая гонка краснеет детерминированно.
  */
-import { act, configure, fireEvent, getConfig, render, screen, within } from "@testing-library/react";
+import { configure, fireEvent, getConfig, render, screen, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -47,6 +47,7 @@ import {
   type ServiceTemplate,
 } from "../lib/master-api";
 import { MasterServiceSelectScreen, SELECT_COPY } from "./MasterServiceSelectScreen";
+import { settleScenario } from "../test/settleScenario";
 
 const GUARD_ASYNC_TIMEOUT_MS = 20;
 let previousAsyncUtilTimeout = 1000;
@@ -60,11 +61,6 @@ afterAll(() => {
   configure({ asyncUtilTimeout: previousAsyncUtilTimeout });
 });
 
-const settle = async (rounds = 4) => {
-  for (let i = 0; i < rounds; i += 1) {
-    await act(async () => {});
-  }
-};
 
 const mockedDirections = vi.mocked(getServiceDirections);
 const mockedTemplates = vi.mocked(getServiceTemplates);
@@ -127,14 +123,14 @@ async function renderScreen() {
       </Routes>
     </MemoryRouter>,
   );
-  await settle();
+  await settleScenario();
 }
 
 const directionsRegion = () => screen.getByRole("region", { name: SELECT_COPY.directionsTitle });
 
 async function openDirection(name: string) {
   fireEvent.click(within(directionsRegion()).getByRole("button", { name: new RegExp(name) }));
-  await settle();
+  await settleScenario();
 }
 
 beforeEach(() => {
@@ -206,7 +202,7 @@ describe("MasterServiceSelectScreen — шаблоны направления", 
 
     fireEvent.click(within(region).getByLabelText(/Классический маникюр/));
     fireEvent.click(within(region).getByRole("button", { name: SELECT_COPY.save }));
-    await settle();
+    await settleScenario();
 
     expect(mockedSelect).toHaveBeenCalledTimes(1);
     expect(mockedSelect).toHaveBeenCalledWith(["t-classic"]);
@@ -221,7 +217,7 @@ describe("MasterServiceSelectScreen — шаблоны направления", 
     await openDirection("Направление 0");
     fireEvent.click(screen.getByLabelText(/Классический маникюр/));
     fireEvent.click(screen.getByRole("button", { name: SELECT_COPY.save }));
-    await settle();
+    await settleScenario();
 
     const done = screen.getByRole("region", { name: SELECT_COPY.done("Направление 0") });
     expect(within(done).getByText(SELECT_COPY.doneSummary(2))).toBeInTheDocument();
@@ -233,17 +229,17 @@ describe("MasterServiceSelectScreen — шаблоны направления", 
     await renderScreen();
     await openDirection("Направление 0");
     fireEvent.click(screen.getByRole("button", { name: SELECT_COPY.save }));
-    await settle();
+    await settleScenario();
 
     fireEvent.click(screen.getByRole("button", { name: SELECT_COPY.nextDirection }));
-    await settle();
+    await settleScenario();
     expect(mockedTemplates).toHaveBeenLastCalledWith("dir-1");
     fireEvent.click(screen.getByRole("button", { name: SELECT_COPY.save }));
-    await settle();
+    await settleScenario();
 
     expect(screen.queryByRole("button", { name: SELECT_COPY.nextDirection })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: SELECT_COPY.toPrices }));
-    await settle();
+    await settleScenario();
     expect(screen.getByTestId("location")).toHaveTextContent("/solo/services");
   });
 });
@@ -260,7 +256,7 @@ describe("MasterServiceSelectScreen — вход с экрана 02 (DRF-1808)",
         </Routes>
       </MemoryRouter>,
     );
-    await settle();
+    await settleScenario();
 
     // ПРИСУТСТВИЕ: ровно два выбранных направления.
     const rows = within(directionsRegion()).getAllByRole("button", { name: /Направление \d/ });
@@ -275,9 +271,9 @@ describe("MasterServiceSelectScreen — вход с экрана 02 (DRF-1808)",
     // «Следующее направление» после 1-го ведёт на 3-е, минуя 2-е.
     await openDirection("Направление 1");
     fireEvent.click(screen.getByRole("button", { name: SELECT_COPY.save }));
-    await settle();
+    await settleScenario();
     fireEvent.click(screen.getByRole("button", { name: SELECT_COPY.nextDirection }));
-    await settle();
+    await settleScenario();
     expect(mockedTemplates).toHaveBeenLastCalledWith("dir-3");
   });
 
@@ -312,7 +308,7 @@ describe("MasterServiceSelectScreen — отказы", () => {
     expect(screen.queryByText(SELECT_COPY.noTemplates)).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Повторить" })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Попробовать снова" }));
-    await settle();
+    await settleScenario();
     expect(screen.getByLabelText(/Классический маникюр/)).toBeInTheDocument();
   });
 });
@@ -328,10 +324,10 @@ describe("MasterServiceSelectScreen — своя услуга", () => {
     fireEvent.change(screen.getByLabelText(FIELD_DURATION), { target: { value: "60" } });
     fireEvent.change(screen.getByLabelText(FIELD_PRICE), { target: { value: "1000" } });
     fireEvent.click(screen.getByRole("button", { name: ADD_OWN_LABEL }));
-    await settle();
+    await settleScenario();
 
     fireEvent.click(screen.getByRole("button", { name: PICK_CANON_LABEL }));
-    await settle();
+    await settleScenario();
 
     expect(mockedSelect).toHaveBeenCalledWith(["t9"]);
     expect(screen.getByText(pickedMessage(5))).toBeInTheDocument();

@@ -6,7 +6,7 @@
  * «в этот день записей нет» (не ошибка); отказы — по слагу; кнопок
  * правки/удаления прошлых записей здесь НЕТ — это предел экрана.
  */
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -19,6 +19,7 @@ import { ApiError } from "../lib/api";
 import { getDiaryDay, type DiaryDay } from "../lib/diary-days";
 import { DAY_COPY, DAY_ROUTE_PATTERN, FoodScannerDayScreen, dayRoute } from "./FoodScannerDayScreen";
 import { WEEK_ROUTE } from "./FoodScannerWeekScreen";
+import { settleScenario } from "../test/settleScenario";
 
 const mockedDay = vi.mocked(getDiaryDay);
 
@@ -58,11 +59,6 @@ function renderScreen(date = "2026-09-14") {
   );
 }
 
-const settle = async (rounds = 4) => {
-  for (let i = 0; i < rounds; i += 1) {
-    await act(async () => {});
-  }
-};
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -110,7 +106,7 @@ describe("день", () => {
 
   it("кривая дата в маршруте — отказ до запроса", async () => {
     renderScreen("14.09.2026");
-    await settle();
+    await settleScenario();
 
     expect(await screen.findByText(DAY_COPY.badDate)).toBeInTheDocument();
     expect(mockedDay).not.toHaveBeenCalled();

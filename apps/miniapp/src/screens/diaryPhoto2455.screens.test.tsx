@@ -14,7 +14,7 @@
  *  * чисел нет (`calories: null`) → миниатюра на месте, калорий нет — два
  *    пустых состояния независимы.
  */
-import { act, render, waitFor } from "@testing-library/react";
+import { render, waitFor } from "@testing-library/react";
 import { StrictMode, type ReactElement } from "react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -39,6 +39,7 @@ import { getDiaryDay } from "../lib/diary-days";
 import { resetDiaryPhotoCacheForTests } from "../lib/diary-photo";
 import { DAY_ROUTE_PATTERN, FoodScannerDayScreen, dayRoute } from "./FoodScannerDayScreen";
 import { FoodScannerDiaryScreen } from "./FoodScannerDiaryScreen";
+import { settleScenario } from "../test/settleScenario";
 
 const PHOTO_PATH = (id: string) => `/api/v1/customer/diary/entry/${id}/photo`;
 const WITH_THUMB = "food-scanner-diary__entry--with-thumb";
@@ -167,11 +168,6 @@ afterEach(() => {
   resetDiaryPhotoCacheForTests();
 });
 
-async function flush() {
-  await act(async () => {
-    await new Promise((r) => setTimeout(r, 0));
-  });
-}
 
 describe.each(SCREENS)("$name", (s) => {
   it("снимок есть → миниатюра из прокси, один запрос, в строке первой", async () => {
@@ -195,7 +191,7 @@ describe.each(SCREENS)("$name", (s) => {
     const { container, findByText } = s.render([WITHOUT_PHOTO]);
 
     await findByText("Борщ");
-    await flush();
+    await settleScenario();
     expect(container.querySelectorAll("img")).toHaveLength(0);
     expect(photoCalls()).toEqual([]);
     // Строка без снимка — прежняя: ни картинки, ни модификатора.
@@ -218,7 +214,7 @@ describe.each(SCREENS)("$name", (s) => {
 
     await findByText("Овсянка с ягодами");
     await waitFor(() => expect(photoCalls()).toHaveLength(1));
-    await flush();
+    await settleScenario();
     expect(container.querySelectorAll("img")).toHaveLength(0);
     expect(created).toEqual([]);
     // has_photo=true, но снимка нет: модификатор ставится по факту, не по сводке —
@@ -234,7 +230,7 @@ describe.each(SCREENS)("$name", (s) => {
     expect(photoCalls().sort()).toEqual([PHOTO_PATH("fl-photo"), PHOTO_PATH("fl-risotto")].sort());
 
     unmount();
-    await flush();
+    await settleScenario();
     expect(created.length).toBe(2);
     expect([...revoked].sort()).toEqual([...created].sort());
   });
@@ -263,7 +259,7 @@ describe.each(SCREENS)("$name — строка без фото прежняя ц
   it("outerHTML строки без снимка равен рендеру dev ebfe80ce", async () => {
     const { findByText } = s.render([WITHOUT_PHOTO]);
     const dish = await findByText("Борщ");
-    await flush();
+    await settleScenario();
     expect(normalizedRow(dish.closest("li")!)).toBe(ROW_WITHOUT_PHOTO_AT_DEV_EBFE80CE[s.name]);
   });
 });

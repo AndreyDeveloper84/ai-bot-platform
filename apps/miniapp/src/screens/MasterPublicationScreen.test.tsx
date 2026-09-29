@@ -14,9 +14,9 @@
  * E1 — отказы по `error`, каждый своим текстом, на загрузке и на POST; E2 — 5xx загрузки → общий текст;
  * G1 — ни в одном состоянии нет «популярн», «несколько секунд», «немного больше времени», процентов.
  *
- * Сторож от зависимости от времени — как в тестах экранов 03/04: малый asyncUtilTimeout и явный settle().
+ * Сторож от зависимости от времени — как в тестах экранов 03/04: малый asyncUtilTimeout и явный settleScenario().
  */
-import { act, configure, fireEvent, getConfig, render, screen, within } from "@testing-library/react";
+import { configure, fireEvent, getConfig, render, screen, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -63,6 +63,7 @@ import {
   PUBLICATION_MISSING_TEXT,
   PUBLICATION_REFUSAL_TEXT,
 } from "./MasterPublicationScreen";
+import { settleScenario } from "../test/settleScenario";
 
 const GUARD_ASYNC_TIMEOUT_MS = 20;
 let previousAsyncUtilTimeout = 1000;
@@ -76,11 +77,6 @@ afterAll(() => {
   configure({ asyncUtilTimeout: previousAsyncUtilTimeout });
 });
 
-const settle = async (rounds = 6) => {
-  for (let i = 0; i < rounds; i += 1) {
-    await act(async () => {});
-  }
-};
 
 const mockedStatus = vi.mocked(getPublicationStatus);
 const mockedPublish = vi.mocked(publishProfile);
@@ -232,7 +228,7 @@ async function renderScreen(solo?: SoloSurfaceInfo) {
     </MemoryRouter>
   );
   render(solo ? <SoloSurfaceContext.Provider value={solo}>{routes}</SoloSurfaceContext.Provider> : routes);
-  await settle();
+  await settleScenario();
 }
 
 const title = () => screen.getByRole("heading", { level: 1 });
@@ -381,7 +377,7 @@ describe("экран 08 — отправка", () => {
     const button = submitButton();
     fireEvent.click(button);
     fireEvent.click(button);
-    await settle();
+    await settleScenario();
 
     expect(mockedPublish).toHaveBeenCalledTimes(1);
     expect(mockedPublish.mock.calls[0]?.[0]).toMatch(UUID_V4);
@@ -391,7 +387,7 @@ describe("экран 08 — отправка", () => {
 
     mockedStatus.mockResolvedValue(withStatus("pending"));
     release(PUBLISHED);
-    await settle();
+    await settleScenario();
 
     expect(mockedStatus).toHaveBeenCalledTimes(2);
     expect(title()).toHaveTextContent(PUBLICATION_COPY.pendingTitle);
@@ -403,14 +399,14 @@ describe("экран 08 — отправка", () => {
     await renderScreen();
 
     fireEvent.click(submitButton());
-    await settle();
+    await settleScenario();
 
     expect(screen.getByText(PUBLICATION_COPY.uncertainTitle)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: PUBLICATION_COPY.submit })).toBeNull();
 
     mockedStatus.mockResolvedValue(withStatus("pending"));
     fireEvent.click(screen.getByRole("button", { name: PUBLICATION_COPY.checkStatus }));
-    await settle();
+    await settleScenario();
 
     expect(mockedStatus).toHaveBeenCalledTimes(2);
     expect(mockedPublish).toHaveBeenCalledTimes(1);
@@ -425,13 +421,13 @@ describe("экран 08 — отправка", () => {
     await renderScreen();
 
     fireEvent.click(submitButton());
-    await settle();
+    await settleScenario();
     fireEvent.click(screen.getByRole("button", { name: PUBLICATION_COPY.checkStatus }));
-    await settle();
+    await settleScenario();
 
     mockedStatus.mockResolvedValue(withStatus("pending"));
     fireEvent.click(submitButton());
-    await settle();
+    await settleScenario();
 
     expect(mockedPublish).toHaveBeenCalledTimes(2);
     expect(mockedPublish.mock.calls[1]?.[0]).toBe(mockedPublish.mock.calls[0]?.[0]);
@@ -444,7 +440,7 @@ describe("экран 08 — отправка", () => {
     await renderScreen();
 
     fireEvent.click(submitButton());
-    await settle();
+    await settleScenario();
 
     expect(title()).toHaveTextContent(PUBLICATION_COPY.notReadyTitle);
     expect(screen.getByTestId("publication-section-profile")).toHaveTextContent(
@@ -482,7 +478,7 @@ describe("экран 08 — отказы", () => {
     await renderScreen();
 
     fireEvent.click(submitButton());
-    await settle();
+    await settleScenario();
 
     expect(screen.getByTestId("publication-refusal")).toHaveTextContent(
       PUBLICATION_REFUSAL_TEXT.catalog_profile_unresolved ?? "—",
@@ -539,7 +535,7 @@ describe("системные состояния через SystemState (DRF-2194
     expect(screen.getByRole("alert")).toHaveTextContent("Не удалось загрузить статус публикации");
     expect(screen.queryByText(/Не получилось загрузить/)).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Попробовать снова" }));
-    await settle();
+    await settleScenario();
     expect(mockedStatus).toHaveBeenCalledTimes(2);
   });
 });
