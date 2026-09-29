@@ -63,6 +63,7 @@ import {
   setClosingConfirmation,
 } from "../lib/max-sdk";
 import { REFUSAL_CANON } from "../lib/refusal-canon";
+import { MasterPhoto } from "../components/MasterPhoto";
 
 // --- Копия -----------------------------------------------------------------
 
@@ -557,7 +558,7 @@ export function MasterProfileScreen() {
       <ProfileSection title={PROFILE_COPY.sections.photoAndName}>
         <div className="master-profile__header-row">
           <div className="master-profile__avatar" aria-hidden="true">
-            {master.photo_url ? <img src={master.photo_url} alt="" /> : <span>{initials(master.name)}</span>}
+            <MasterPhoto src={master.photo_url} alt="" fallback={<span>{initials(master.name)}</span>} />
           </div>
           <div className="master-profile__identity">
             <div className="master-profile__name-row">
@@ -658,7 +659,7 @@ export function MasterProfileScreen() {
               <ul className="master-profile__portfolio">
                 {portfolio.items.map((item) => (
                   <li key={item.id} className="master-profile__work">
-                    <img src={item.image_url} alt="" />
+                    <MasterPhoto src={item.image_url} alt="" />
                     <button
                       type="button"
                       className="master-profile__work-remove"

@@ -34,6 +34,7 @@ from apps.audit.models import AuditLog
 from apps.catalog.models import CatalogMaster
 from apps.identity.models import BotUser
 from apps.tenancy.models import Tenant
+from apps.miniapp_api.master_media import master_photo_path
 
 
 # --- URL helpers ----------------------------------------------------------
@@ -578,9 +579,10 @@ class TestMasterPhotoUpload:
         assert resp.status_code == 200, resp.content
         body = resp.json()
         assert "photo_url" in body
-        assert "master_photos" in body["photo_url"]
         master.refresh_from_db()
-        assert master.photo_url == body["photo_url"]
+        # Зеркало хранит сырой адрес, на провод — наш путь к байтам (DRF-2539).
+        assert "master_photos" in master.photo_url
+        assert body["photo_url"] == master_photo_path(master.id, master.photo_url)
         # File on disk.
         assert (tmp_path / "master_photos").exists()
 

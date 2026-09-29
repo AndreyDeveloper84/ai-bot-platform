@@ -32,6 +32,7 @@ from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.views.decorators.http import require_http_methods
 
 from apps.marketplace.discovery import MasterCard, discover_masters_page, get_master
+from apps.miniapp_api.master_media import master_photo_path
 
 
 def _error(slug: str, detail: str, status: int) -> JsonResponse:
@@ -48,7 +49,7 @@ def _card_to_dict(card: MasterCard) -> dict[str, Any]:
         "name": card.name,
         "specialization": card.specialization,
         "rating": str(card.rating) if card.rating is not None else None,
-        "photo_url": card.photo_url,
+        "photo_url": master_photo_path(card.master_id, card.photo_url),
         "city": card.city,
     }
 

@@ -14,6 +14,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import { AVATAR_SHEET_COPY, initialsOf, type AvatarSheetItem } from "../lib/avatar-sheet";
+import { MasterPhoto } from "./MasterPhoto";
 
 export function AvatarSheet({
   name,
@@ -103,11 +104,12 @@ export function AvatarSheet({
         aria-expanded={open}
         onClick={() => setOpen(true)}
       >
-        {photoUrl ? (
-          <img className="avatar-sheet__photo" src={photoUrl} alt="" />
-        ) : (
-          initialsOf(name)
-        )}
+        <MasterPhoto
+          className="avatar-sheet__photo"
+          src={photoUrl}
+          alt=""
+          fallback={initialsOf(name)}
+        />
         {dot ? <span className="avatar-sheet__dot" aria-label="есть изменения" /> : null}
       </button>
       {open ? (

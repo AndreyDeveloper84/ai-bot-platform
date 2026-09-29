@@ -119,6 +119,7 @@ from apps.master_api.auth import (
     require_master_init_data,
     validate_invite_token,
 )
+from apps.miniapp_api.master_media import master_photo_path
 
 logger = logging.getLogger(__name__)
 
@@ -208,7 +209,7 @@ def _master_card(master: CatalogMaster, *, include_services: bool = True) -> dic
         "name": master.name,
         "specialization": master.specialization,
         "bio": master.bio,
-        "photo_url": master.photo_url,
+        "photo_url": master_photo_path(master.id, master.photo_url),
     }
     if include_services:
         payload["services"] = _services_for_master(master)
@@ -1060,7 +1061,7 @@ def onboarding_profile(request: HttpRequest) -> HttpResponse:
                 "id": str(master.id),
                 "name": master.name,
                 "bio": master.bio,
-                "photo_url": master.photo_url,
+                "photo_url": master_photo_path(master.id, master.photo_url),
             }
         }
     )
@@ -1096,7 +1097,7 @@ def me(request: HttpRequest) -> HttpResponse:
                 "name": master.name,
                 "specialization": master.specialization,
                 "bio": master.bio,
-                "photo_url": master.photo_url,
+                "photo_url": master_photo_path(master.id, master.photo_url),
                 "services": _services_for_master(master),
             },
             "salon": {

@@ -59,6 +59,9 @@ CONVERTED = {
     # DRF-2607: отгул и изменение на дату на токене администратора — четыре
     # записи, каждая зовёт резолвер прямо в вызове.
     ("apps/admin_api/views_salon_schedule_writes.py", 4),
+    # DRF-2539: фото мастера и работы портфолио — байты из каталога через бот,
+    # один вызов через колонку.
+    ("apps/miniapp_api/master_media.py", 1),
 }
 
 PENDING_1933B: dict[tuple[str, str], int] = {}

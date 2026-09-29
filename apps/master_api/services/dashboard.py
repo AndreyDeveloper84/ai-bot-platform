@@ -65,6 +65,7 @@ from apps.integrations.ayla.salon_client import (
 from apps.master_api.services.schedule_frame import load_day_frame
 from apps.scheduling.models import ScheduleChangeRequest
 from apps.tenancy.timezones import salon_zone
+from apps.miniapp_api.master_media import master_photo_path
 
 logger = logging.getLogger(__name__)
 
@@ -987,7 +988,7 @@ def build_dashboard(master: CatalogMaster, now: datetime) -> DashboardSnapshot:
             "id": str(master.id),
             "name": master.name,
             "specialization": master.specialization,
-            "photo_url": master.photo_url,
+            "photo_url": master_photo_path(master.id, master.photo_url),
         },
         salon={
             "id": str(master.tenant_id),

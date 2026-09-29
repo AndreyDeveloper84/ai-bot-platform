@@ -38,6 +38,7 @@ import {
 } from "../../lib/internal-chat-api";
 import { useSalonSectionBack } from "../../hooks/useSalonSectionBack";
 import { hapticImpact, hapticSelection } from "../../lib/max-sdk";
+import { MasterPhoto } from "../../components/MasterPhoto";
 
 interface Props {
   me: MeResponse;
@@ -717,11 +718,11 @@ export function AdminTeamScreen({ me }: Props) {
                   className="master-card__avatar"
                   style={{ background: PLACEHOLDER_AVATAR_BG }}
                 >
-                  {m.photo_url ? (
-                    <img src={m.photo_url} alt="" />
-                  ) : (
-                    <span aria-hidden="true">{initials(m.name)}</span>
-                  )}
+                  <MasterPhoto
+                    src={m.photo_url}
+                    alt=""
+                    fallback={<span aria-hidden="true">{initials(m.name)}</span>}
+                  />
                 </span>
                 <span style={{ flex: 1, minWidth: 0 }}>
                   <span className="master-card__name">{m.name}</span>

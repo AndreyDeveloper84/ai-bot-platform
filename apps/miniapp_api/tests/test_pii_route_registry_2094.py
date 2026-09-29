@@ -256,6 +256,28 @@ CUSTOMER_ROUTES: dict[str, Entry] = {
             "on a booking and nothing beyond the published profile is added on detail"
         ),
     ),
+    # --- master photo bytes (DRF-2539) --------------------------------------
+    "master_media_photo": third_party(
+        "the photo file itself (image/*)",
+        via="apps.miniapp_api.master_media:master_photo",
+        whose="one master, by id — the face on the published card",
+        why=(
+            "the same photo the card lists as photo_url, now as bytes: the storage address "
+            "was internal to the container and signed for an hour, so the phone never "
+            "loaded it. Any signed Mini App session may read it — client on the storefront, "
+            "master on their own screen, admin in the team list; no identity is resolved "
+            "or created, and nothing but the bytes is returned"
+        ),
+    ),
+    "master_media_portfolio_image": third_party(
+        "the portfolio image itself (image/*)",
+        via="apps.miniapp_api.master_media:master_portfolio_image",
+        whose="one master's portfolio work, by master id + item id",
+        why=(
+            "the works the master publishes on their profile; the catalog serves the item "
+            "only when it belongs to that master (404 otherwise); bytes only, as above"
+        ),
+    ),
     # --- bookings (own + master name) --------------------------------------
     "create_booking": (
         own(

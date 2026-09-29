@@ -8,6 +8,7 @@ from __future__ import annotations
 from django.urls import path
 
 from apps.miniapp_api import (
+    master_media,
     views,
     views_diary_days,
     views_last_topic,
@@ -242,6 +243,19 @@ urlpatterns = [
         "diary/entry/<str:log_id>/photo",
         views_diary_days.customer_food_photo,
         name="customer_food_photo",
+    ),
+    # DRF-2539 — фото мастера и работы портфолио через бот (вариант 3 владельца).
+    # Строка, а не <uuid:>: ручка сама отвечает 404 на кривой id, одинаково с
+    # «фото нет».
+    path(
+        "media/masters/<str:master_id>/photo",
+        master_media.master_photo,
+        name="master_media_photo",
+    ),
+    path(
+        "media/masters/<str:master_id>/portfolio/<str:item_id>/image",
+        master_media.master_portfolio_image,
+        name="master_media_portfolio_image",
     ),
     # Dashboard rollup — next booking + this-week count (bookings-only).
     path(
