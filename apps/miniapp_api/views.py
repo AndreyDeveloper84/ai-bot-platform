@@ -598,7 +598,10 @@ def slots(request: HttpRequest) -> HttpResponse:
 
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
     tenant = bot_user.tenant
-    tz = ZoneInfo(tenant.timezone)
+    # DRF-2595: битый пояс — отказ (strict), а не окна по московскому часу.
+    from apps.tenancy.timezones import salon_zone
+
+    tz = salon_zone(tenant, strict=True)
 
     master_id = request.GET.get("master_id", "")
     service_id = request.GET.get("service_id", "")
@@ -5494,10 +5497,9 @@ def customer_recent_activity(request: HttpRequest) -> HttpResponse:
 
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
     tenant = bot_user.tenant
-    try:
-        tz = ZoneInfo(tenant.timezone or "Europe/Moscow")
-    except Exception:  # noqa: BLE001 — bad tz config must not 500 the dashboard
-        tz = ZoneInfo("Europe/Moscow")
+    from apps.tenancy.timezones import salon_zone
+
+    tz = salon_zone(tenant)  # битый пояс не роняет главную: МСК + журнал (DRF-2595)
 
     now = timezone.now()
 

@@ -352,3 +352,33 @@ class TestFlagOffKeepsLocalComputation:
         assert resp.status_code == 200
         assert resp.json()["slots"], "local WorkingHours still drive this path"
         assert calls == []
+
+
+class TestABrokenSalonZoneShowsNoWindows:
+    """DRF-2595 (часть Б): слоты при битом поясе салона — отказ, а не окна по
+    московскому часу; каталог при этом не спрашивается вовсе. Пара с тем же
+    запросом после починки пояса."""
+
+    def test_refused_while_broken_then_shown_once_fixed(
+        self, client, bot_user, master, service, master_service, open_every_day, sunday, caplog
+    ):
+        from zoneinfo import ZoneInfoNotFoundError
+
+        from apps.tenancy.models import Tenant
+
+        fake, calls = _fake_client({sunday.isoformat(): [f"{sunday.isoformat()}T12:00:00+03:00"]})
+        Tenant.objects.filter(pk=bot_user.tenant_id).update(timezone="Not/AZone")
+        with patch(CLIENT_PATH, return_value=fake), caplog.at_level("WARNING"):
+            with pytest.raises(ZoneInfoNotFoundError):
+                _get(client, master, service, sunday)
+        assert any("tenancy.bad_tenant_tz" in r.getMessage() for r in caplog.records)
+        assert len(calls) == 0
+
+        Tenant.objects.filter(pk=bot_user.tenant_id).update(timezone="Europe/Moscow")
+        with patch(CLIENT_PATH, return_value=fake):
+            resp = _get(client, master, service, sunday)
+        assert resp.status_code == 200
+        assert [s["start"] for s in resp.json()["slots"]] == [
+            f"{sunday.isoformat()}T12:00:00+03:00"
+        ]
+        assert len(calls) >= 1

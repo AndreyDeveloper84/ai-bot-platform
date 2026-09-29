@@ -349,6 +349,41 @@ class TestMasterDMDispatch:
         sent_audits = [a for a in written_audits if a["action"] == "payment_failed.master_dm_sent"]
         assert len(sent_audits) == 1
 
+    def test_the_visit_hour_is_the_salons_not_moscows(
+        self,
+        tenant,
+        make_bot_user,
+        make_remote_proxy,
+        make_master,
+        make_service,
+        sent_dms,
+        written_audits,
+    ):
+        """DRF-2595 (часть Б): час визита в сообщении мастеру — по поясу его
+        салона. До правки — МСК намертво (TODO CR #881 F1). Салон в
+        Екатеринбурге (UTC+5): визит 14:00 UTC — это 19:00 салона, а не 17:00
+        Москвы. На МСК-салоне оба варианта совпали бы — узел недоказуем там."""
+        from datetime import datetime, timezone
+
+        from apps.skills.payment_failed import on_payment_failed_event
+
+        type(tenant).objects.filter(pk=tenant.pk).update(timezone="Asia/Yekaterinburg")
+        make_bot_user(ayla_user_id=CLIENT_AYLA, chat_id="max-client")
+        service_id = uuid.uuid4()
+        make_service(ayla_service_id=service_id, name="Маникюр")
+        make_remote_proxy(
+            specialist_id=MASTER_AYLA,
+            service_id=service_id,
+            start_at=datetime(2026, 5, 15, 14, 0, tzinfo=timezone.utc),
+        )
+        make_master(ayla_user_id=MASTER_AYLA, chat_id="max-master")
+
+        on_payment_failed_event(_enriched_data(tenant_id_override=str(tenant.pk)))
+
+        master_dm = next(d for d in sent_dms if d["addr"] == "max-master")
+        assert "15.05 в 19:00" in master_dm["text"]
+        assert "15.05 в 17:00" not in master_dm["text"]
+
     def test_amount_line_dropped_when_missing(
         self,
         tenant,

@@ -49,7 +49,6 @@ from dataclasses import dataclass, field
 from datetime import date as date_cls
 from datetime import timedelta
 from typing import Any, Literal
-from zoneinfo import ZoneInfo
 
 from django.utils import timezone
 
@@ -258,7 +257,10 @@ def _location_item(master: CatalogMaster, actor: str | None) -> ReadinessItem:
 
 def _hours_item(master: CatalogMaster) -> ReadinessItem:
     today = timezone.now().date()
-    tz = ZoneInfo(getattr(master.tenant, "timezone", None) or "Europe/Moscow")
+    from apps.tenancy.timezones import salon_zone
+
+    # DRF-2595: битое имя бросало и бросает (strict) — теперь с журналом.
+    tz = salon_zone(master.tenant, strict=True)
     try:
         weekly, _exceptions, _blocks = load_day_frame(
             master,
