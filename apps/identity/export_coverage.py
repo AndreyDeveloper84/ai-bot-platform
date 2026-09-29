@@ -347,6 +347,14 @@ CATALOG_EXPORT_SECTIONS: tuple[str, ...] = (
 #: Known incompleteness of the export ITSELF — not a store, a behaviour.
 #: Declared for the same reason as everything else here: it is better written
 #: down than discovered by a regulator.
+#: Хранилище, чей состав раздел ``ayla`` отдаёт дословно, — декларированный
+#: профиль каталога. Объявлен здесь, константой, а не именем класса в тексте
+#: ``KNOWN_LIMITS``: текст — для человека и простыми словами (DRF-2598), а
+#: перепись «забудь всё» (``test_forget_all_matrix``) читает объявление, не прозу.
+#: До DRF-2598 объявлением служили слова «(users.UserPersonalContext в Ayla)»
+#: в строке про ``ayla``, и их упрощение молча сняло объявление.
+AYLA_SECTION_OWNER_STORE = "catalog.users.UserPersonalContext"
+
 KNOWN_LIMITS: tuple[str, ...] = (
     # DRF-2183 — пробел раздела `consents`, найденный замером: назван в самом
     # документе, а не только в комментарии кода (отдельный лист у главного

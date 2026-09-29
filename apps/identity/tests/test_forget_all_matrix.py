@@ -10,7 +10,7 @@
 Источник — ``apps.identity.export_coverage``: реестр того, что бот хранит о
 человеке (``SECTIONS`` + ``EXCLUSIONS`` покрывают каждый слот
 ``personal_fields.PERSONAL_FIELDS``, ``NON_REGISTRY_STORES`` — хранилища вне
-формы «колонка»; ``KNOWN_LIMITS`` называет каталожный профиль). Хранилище
+формы «колонка»; ``AYLA_SECTION_OWNER_STORE`` — каталожный профиль). Хранилище
 берётся из слота отбрасыванием поля: ``identity.ClientProfile.ltv`` →
 ``identity.ClientProfile``; ``memory_key:*`` → зелёные ``MemoryEntry``.
 
@@ -56,7 +56,6 @@
 from __future__ import annotations
 
 import json
-import re
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -76,8 +75,8 @@ from apps.conversations.models import (
     StaffAssistantThread,
 )
 from apps.identity.export_coverage import (
+    AYLA_SECTION_OWNER_STORE,
     EXCLUSIONS,
-    KNOWN_LIMITS,
     NON_REGISTRY_SECTIONS,
     NON_REGISTRY_STORES,
     SECTIONS,
@@ -360,8 +359,9 @@ def stores_declared_by_export_coverage() -> set[str]:
         _store_of(slot)
         for slot in (*SECTIONS, *EXCLUSIONS, *NON_REGISTRY_STORES, *NON_REGISTRY_SECTIONS)
     }
-    if any(re.search(r"users\.UserPersonalContext", limit) for limit in KNOWN_LIMITS):
-        declared.add(CATALOG_STORE)
+    # Каталожный профиль объявлен константой: до DRF-2598 — именем класса в
+    # тексте KNOWN_LIMITS, и упрощение текста для человека сняло объявление.
+    declared.add(AYLA_SECTION_OWNER_STORE)
     return declared
 
 
