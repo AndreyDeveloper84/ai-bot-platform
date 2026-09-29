@@ -787,7 +787,7 @@ def _live_entries(person: Person, zone: str) -> list[Any]:
         MemoryEntry.objects.filter(
             user_id=person.ayla_user_id, sensitivity_zone=zone, soft_deleted_at__isnull=True
         )
-        .order_by("created_at")
+        .order_by("created_at", "pk")
         .values("id", "status", "content")
     )
 
@@ -796,7 +796,9 @@ def _tombstoned_entries(person: Person, zone: str) -> list[Any]:
     return list(
         MemoryEntry.objects.filter(
             user_id=person.ayla_user_id, sensitivity_zone=zone, soft_deleted_at__isnull=False
-        ).values("status", "deletion_reason", "delete_requested_at")
+        )
+        .order_by("pk")
+        .values("status", "deletion_reason", "delete_requested_at")
     )
 
 
@@ -805,7 +807,14 @@ def _rows(model_manager, **filters) -> list[Any]:
 
 
 def snapshot(store: str, person: Person, fake_redis: _FakeRedis) -> Any:
-    """Что лежит в хранилище про этого человека. Сравнивается «до» и «после»."""
+    """Что лежит в хранилище про этого человека. Сравнивается «до» и «после».
+
+    DRF-2641: сравнения «до/после» здесь — списки, и порядок в них значим
+    (канал ввода привязан к конкретной реплике). Поэтому у КАЖДОГО запроса
+    снимка последний ключ сортировки — ``pk``: при равных ``created_at``
+    PostgreSQL отдаёт строки в любом порядке, и узел краснел через раз.
+    Держит ``TestEverySnapshotHasATotalOrder``.
+    """
 
     bu = person.bot_user
     if store == "identity.MemoryEntry:green":
@@ -819,17 +828,21 @@ def snapshot(store: str, person: Person, fake_redis: _FakeRedis) -> Any:
     if store == "conversations.Message":
         return list(
             Message.all_tenants.filter(conversation=person.conversation)
-            .order_by("created_at")
+            .order_by("created_at", "pk")
             .values("content", "rendered_text", "action_data", "tool_call", "input_channel")
         )
     if store == "conversations.ArchivedMessage":
         return list(
             ArchivedMessage.all_tenants.filter(conversation=person.conversation)
-            .order_by("original_created_at")
+            .order_by("original_created_at", "pk")
             .values("body", "rendered_body", "reason", "retention_until")
         )
     if store == "conversations.AiDraft":
-        return list(AiDraft.all_tenants.filter(conversation=person.conversation).values("content"))
+        return list(
+            AiDraft.all_tenants.filter(conversation=person.conversation)
+            .order_by("pk")
+            .values("content")
+        )
     if store == "redis.short_term":
         return fake_redis.store.get(f"conv:{person.conversation.id}:msgs")
     if store == "redis.pii_tokenmap":
@@ -847,21 +860,23 @@ def snapshot(store: str, person: Person, fake_redis: _FakeRedis) -> Any:
         ] or None
     if store == "conversations.Conversation":
         return list(
-            Conversation.all_tenants.filter(pk=person.conversation.pk).values(
-                "skill_state", "anonymized_through", "anonymized_reason"
-            )
+            Conversation.all_tenants.filter(pk=person.conversation.pk)
+            .order_by("pk")
+            .values("skill_state", "anonymized_through", "anonymized_reason")
         )
     if store == "conversations.StaffAssistantMessage":
         return list(
-            StaffAssistantMessage.all_tenants.filter(thread=person.staff_thread).values(
-                "content", "role", "seq"
-            )
+            StaffAssistantMessage.all_tenants.filter(thread=person.staff_thread)
+            .order_by("seq", "pk")
+            .values("content", "role", "seq")
         )
     if store == "identity.UserPreferences":
         return _rows(UserPreferences.all_tenants, bot_user=bu)
     if store == "identity.ClientProfile":
         return list(
-            ClientProfile.all_tenants.filter(bot_user=bu).values(
+            ClientProfile.all_tenants.filter(bot_user=bu)
+            .order_by("pk")
+            .values(
                 "recency_days",
                 "frequency_visits",
                 "monetary_total",
@@ -873,13 +888,15 @@ def snapshot(store: str, person: Person, fake_redis: _FakeRedis) -> Any:
         )
     if store == "loyalty.LoyaltyAccount":
         return list(
-            LoyaltyAccount.all_tenants.filter(customer=bu).values("balance", "tier", "enrolled")
+            LoyaltyAccount.all_tenants.filter(customer=bu)
+            .order_by("pk")
+            .values("balance", "tier", "enrolled")
         )
     if store == "identity.BotUser":
         rows = list(
-            BotUser.all_tenants.filter(pk=bu.pk).values(
-                "phone", "display_name", "client_name", "context", "timezone", "deleted_at"
-            )
+            BotUser.all_tenants.filter(pk=bu.pk)
+            .order_by("pk")
+            .values("phone", "display_name", "client_name", "context", "timezone", "deleted_at")
         )
         # DRF-2214 — подключ nutrition_proactive — свои три строки матрицы
         # (настройки / наблюдения / журнал); оболочка сверяется без него.
@@ -889,8 +906,13 @@ def snapshot(store: str, person: Person, fake_redis: _FakeRedis) -> Any:
             }
         return rows
     if store.startswith("nutrition_proactive:"):
-        bot = BotUser.all_tenants.get(pk=bu.pk)
-        prefs = (bot.context or {}).get("nutrition_proactive") or {}
+        context = (
+            BotUser.all_tenants.filter(pk=bu.pk)
+            .order_by("pk")
+            .values_list("context", flat=True)
+            .first()
+        )
+        prefs = (context or {}).get("nutrition_proactive") or {}
         keys = {
             "nutrition_proactive:settings": (
                 "daily_report_time",
@@ -906,7 +928,9 @@ def snapshot(store: str, person: Person, fake_redis: _FakeRedis) -> Any:
         from apps.recommendation.models import Recommendation
 
         return list(
-            Recommendation.objects.filter(bot_user=bu).values(
+            Recommendation.objects.filter(bot_user=bu)
+            .order_by("pk")
+            .values(
                 "id", "why", "facts", "goal_id", "fingerprint", "alternatives", "what", "reaction"
             )
         )
@@ -914,21 +938,27 @@ def snapshot(store: str, person: Person, fake_redis: _FakeRedis) -> Any:
         return fake_redis.store.get(f"dre:state:{person.conversation.id}")
     if store == "consent.ConsentRecord":
         return list(
-            ConsentRecord.all_tenants.filter(bot_user=bu).values(
-                "consent_type", "granted", "withdrawn_at", "source"
-            )
+            ConsentRecord.all_tenants.filter(bot_user=bu)
+            .order_by("pk")
+            .values("consent_type", "granted", "withdrawn_at", "source")
         )
     if store == "tenancy.TenantStaff":
-        return list(TenantStaff.all_tenants.filter(bot_user=bu).values("role", "deactivated_at"))
+        return list(
+            TenantStaff.all_tenants.filter(bot_user=bu)
+            .order_by("pk")
+            .values("role", "deactivated_at")
+        )
     if store == "tenancy.StaffInvite":
         return list(
-            StaffInvite.all_tenants.filter(used_by=bu).values("note", "used_at", "revoked_at")
+            StaffInvite.all_tenants.filter(used_by=bu)
+            .order_by("pk")
+            .values("note", "used_at", "revoked_at")
         )
     if store in CATALOG_STORES:
         return list(
-            AylaErasureJob.objects.filter(ayla_user_id=person.ayla_user_id).values(
-                "status", "attempts", "completed_at"
-            )
+            AylaErasureJob.objects.filter(ayla_user_id=person.ayla_user_id)
+            .order_by("pk")
+            .values("status", "attempts", "completed_at")
         )
     raise AssertionError(f"нет снимка для {store} — хранилище добавлено в OUTCOMES без чтения")
 
@@ -1094,6 +1124,86 @@ def swept(settings, fake_redis) -> Callable[..., Swept]:
         return Swept(person, neighbour, before, catalog, fake_redis, status)
 
     return _run
+
+
+def _unique_column(model: Any, key: str) -> bool:
+    """Последний ключ сортировки — уникальный столбец: ``pk`` или ``unique``-поле."""
+    name = key.lstrip("-")
+    if name == "pk":
+        return True
+    field = model._meta.get_field(name)
+    return bool(field.primary_key or field.unique)
+
+
+def _orderings_evaluated_by(call: Callable[[], Any], monkeypatch) -> list[tuple[str, tuple]]:
+    """Каждый запрос, который ``call`` ВЫЧИСЛИЛ, — модель и его ``order_by``.
+
+    Перехват на ``QuerySet._fetch_all``: мимо него не проходит ни ``list()``,
+    ни ``.first()``, ни ``.get()`` — новый запрос снимка в обход правила
+    попадёт сюда сам.
+    """
+    from django.db.models.query import QuerySet
+
+    seen: list[tuple[str, tuple]] = []
+    original = QuerySet._fetch_all
+
+    def recording(self):
+        if self._result_cache is None:
+            seen.append((self.model._meta.label, tuple(self.query.order_by)))
+        return original(self)
+
+    monkeypatch.setattr(QuerySet, "_fetch_all", recording)
+    try:
+        call()
+    finally:
+        monkeypatch.setattr(QuerySet, "_fetch_all", original)
+    return [(label, order) for label, order in seen]
+
+
+class TestEverySnapshotHasATotalOrder:
+    """DRF-2641 — «до» и «после» сравниваются списками; порядок обязан быть полным.
+
+    Свойство проверяется на самих запросах, а не на данных: две строки с
+    равным ``created_at`` МОГУТ совпасть порядком случайно, и такой узел
+    прошёл бы при живом дефекте. Здесь — детерминированно: последний ключ
+    сортировки каждого вычисленного запроса снимка — уникальный столбец.
+    """
+
+    def test_the_last_sort_key_of_every_snapshot_query_is_unique(
+        self, settings, fake_redis, monkeypatch
+    ):
+        from django.apps import apps as django_apps
+
+        settings.STRICT_TENANT_SCOPE = "off"
+        tenant = Tenant.objects.create(slug=f"fam-{uuid.uuid4().hex[:8]}", name="Total order")
+        person = seed_person(tenant, fake_redis, "person")
+
+        seen = _orderings_evaluated_by(
+            lambda: [snapshot(store, person, fake_redis) for store in OUTCOMES], monkeypatch
+        )
+
+        # Положительный контроль: перехват видит запросы снимка, и тот, на
+        # котором узел краснел через раз, среди них.
+        labels = {label for label, _ in seen}
+        assert "conversations.Message" in labels, sorted(labels)
+        assert len(seen) >= 20, len(seen)
+        partial = sorted(
+            {
+                (label, order)
+                for label, order in seen
+                if not order or not _unique_column(django_apps.get_model(label), order[-1])
+            }
+        )
+        assert partial == [], partial  # empty-assert-ok: присутствие запросов доказано выше
+
+    def test_the_check_catches_a_partial_order(self, monkeypatch):
+        """Сторож сторожа: запрос с неуникальным последним ключом — пойман."""
+        seen = _orderings_evaluated_by(
+            lambda: list(Message.all_tenants.order_by("created_at").values("id")), monkeypatch
+        )
+        assert seen == [("conversations.Message", ("created_at",))]
+        assert not _unique_column(Message, "created_at")
+        assert _unique_column(Message, "pk")
 
 
 class TestAfterTheSweepEveryStoreHasItsOutcome:
