@@ -434,3 +434,56 @@ class TestWhoMayAsk:
         resp = _time_off(client, foreign, init_data_header("5001"))
         assert resp.status_code == 404
         assert wire.exchanged == [] and wire.sent == []
+
+
+_EVERY_WRITE = [
+    (
+        "master_time_off",
+        "post",
+        [],
+        {"start_at": "2031-01-10T09:00:00+03:00", "end_at": "2031-01-10T18:00:00+03:00"},
+    ),
+    ("master_time_off_detail", "delete", [TIME_OFF_ID], None),
+    ("master_date_exception", "put", [], {"date": "2031-01-11", "is_working_day": False}),
+    ("master_date_exception_detail", "delete", ["2031-01-11"], None),
+]
+
+
+class TestNotSetUpIsNotAbsent:
+    """DRF-2637: a master who exists but has no catalog profile yet answers
+    409 ``catalog_profile_unresolved`` — the code and reason of every
+    neighbour; a master who does not exist answers 404. The pair on every
+    write, on the same request."""
+
+    @pytest.mark.parametrize(("name", "method", "extra", "body"), _EVERY_WRITE)
+    @pytest.mark.parametrize("case", ["not_set_up", "absent"])
+    def test_the_two_answers_differ(
+        self, client, owner_bot_user, tenant, monkeypatch, case, name, method, extra, body
+    ) -> None:
+        wire = _Wire(monkeypatch)
+        if case == "not_set_up":
+            master_id = CatalogMaster.all_tenants.create(
+                tenant=tenant,
+                external_id=2637,
+                external_updated_at=datetime.now(tz=dt_timezone.utc),
+                name="Незаведённая",
+                ayla_user_id=uuid.uuid4(),
+            ).id
+            assert not CatalogMaster.all_tenants.get(id=master_id).catalog_specialist_id
+        else:
+            master_id = uuid.uuid4()
+            assert not CatalogMaster.all_tenants.filter(id=master_id).exists()
+        kwargs = {"HTTP_AUTHORIZATION": init_data_header("5001")}
+        if body is not None:
+            kwargs.update(data=json.dumps(body), content_type="application/json")
+
+        resp = getattr(client, method)(
+            reverse(f"admin_api:{name}", args=[str(master_id), *extra]), **kwargs
+        )
+
+        expected = {
+            "not_set_up": (409, "catalog_profile_unresolved"),
+            "absent": (404, "not_found"),
+        }[case]
+        assert (resp.status_code, resp.json()["error"]) == expected, resp.content
+        assert wire.exchanged == [] and wire.sent == []
