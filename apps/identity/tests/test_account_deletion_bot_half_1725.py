@@ -213,7 +213,9 @@ class TestView:
 
 class TestRealCascade:
     """Без подмены каскада — только каталог за фальшивым клиентом: телефон
-    на оболочке стёрт, флаг снят, шаг ``ayla_delete`` сходил в каталог."""
+    на оболочке стёрт, флаг снят, а в каталог шаг ``ayla_delete`` НЕ ходит —
+    каталог стёр свою половину сам до вопроса (DRF-2639; прежний фальшивый
+    каталог отвечал успехом там, где настоящий отвечает 403)."""
 
     def test_end_to_end_with_a_fake_catalog(self, flagged):
         calls: list[dict] = []
@@ -243,7 +245,8 @@ class TestRealCascade:
                 ayla_user_id=AYLA_ID, external_user_ids=["bot:max:1725001"], request_id=REQUEST_ID
             )
         assert out.all_ok, out.failed_steps
-        assert calls == [{"ayla_user_id": str(AYLA_ID), "external_user_id": "bot:max:1725001"}]
+        assert calls == []
+        assert {"step": "ayla_delete", "ok": True, "detail": "erased_by_catalog"} in out.steps
         flagged.refresh_from_db()
         assert flagged.phone == "" and flagged.display_name == ""
         assert not deletion_gate(AYLA_ID).blocked

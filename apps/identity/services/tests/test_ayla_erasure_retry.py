@@ -322,7 +322,8 @@ class TestWhereNoJobIsQueued:
         with patch("apps.identity.services.privacy.PersonalContextHttpClient", return_value=ayla):
             execute_bot_half(ayla_user_id=ayla_user_id, external_user_ids=[], request_id="d3-test")
 
-        assert ayla.verbs() == ["delete"]
+        # DRF-2639: D3 does not ask the catalog back — it erased its half before asking us.
+        assert ayla.verbs() == []
         from apps.identity.models import AylaErasureJob
 
         assert AylaErasureJob.objects.count() == 0
