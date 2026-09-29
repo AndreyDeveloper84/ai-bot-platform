@@ -41,6 +41,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
 from apps.identity.models import BotUser
+from apps.miniapp_api.per_person_quota import over_quota, rate_limited
 from apps.miniapp_api.views import (
     _diary_entry_gate,
     _error,
@@ -139,6 +140,16 @@ def customer_diary_days(request: HttpRequest) -> HttpResponse:
 #: уезжает как поток байтов: см. про один источник в ``customer_food_photo``.
 _PHOTO_TYPES_SHOWN = frozenset({"image/jpeg", "image/png", "image/webp"})
 
+#: DRF-2629 — снимков в минуту на человека, до похода в каталог.
+#:
+#: Выведено от честного пика: самый тяжёлый экран — неделя дневника, 7 дней
+#: по 4–8 записей (``apps/miniapp/src/lib/diary-photo.ts``, ``MAX_CACHED_PHOTOS``
+#: = 64 рассчитан на то же), то есть до 56 снимков. Повтор в пределах 5 минут
+#: бесплатен (``Cache-Control: private, max-age=300`` ниже + аренда Mini App).
+#: 120 ≈ 2× пика — то же отношение, что у фото мастера (DRF-2618): листающий
+#: человек не упрётся, зациклившийся клиент остановится на двух в секунду.
+FOOD_PHOTO_PER_PERSON_PER_MINUTE = 120
+
 
 @csrf_exempt
 @require_http_methods(["GET"])
@@ -171,6 +182,10 @@ def customer_food_photo(request: HttpRequest, log_id: str) -> HttpResponse:
         # Тот же отказ, что на чужую запись: по ответу нельзя отличить
         # «не то имя» от «не твоя запись».
         return _error("not_found", "photo not found", 404)
+    # DRF-2629 — квота на человека до каталога: сверх неё каталог не спрошен.
+    if over_quota("food_photo", str(bot_user.pk), per_minute=FOOD_PHOTO_PER_PERSON_PER_MINUTE):
+        logger.warning("miniapp_api.food_photo.person_rate_limited")
+        return rate_limited("photo_rate_limited", "too many photos, retry in a minute")
     external_id = external_user_id_for(bot_user)
 
     try:
