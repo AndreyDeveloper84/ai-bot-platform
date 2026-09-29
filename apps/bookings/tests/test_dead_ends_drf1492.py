@@ -330,7 +330,9 @@ class TestFunnelEndsAreNotDeadEnds:
             )
 
         assert result.reply_text == REPLY_BOOK_EXPIRED_UNCHANGED
-        assert "подберём слот" not in result.reply_text
+        # DRF-2593 (решение владельца 28.09, п.10): «подберём слот заново» стало
+        # «подберём время заново» — без этой правки узел проходил всегда.
+        assert "подберём время" not in result.reply_text
         assert _callbacks(result) == [CALLBACK_MENU_MY_BOOKINGS]
         assert client.cancel_calls == []
 

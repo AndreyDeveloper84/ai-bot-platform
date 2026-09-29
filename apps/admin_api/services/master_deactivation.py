@@ -116,8 +116,8 @@ DEFAULT_CUSTOMER_NOTIFICATION_TEMPLATE = (
     "{new_master_last_initial} — {she_he} тоже делает {service_name}.\n"
     "Если так не подходит — напишите, я предложу другие варианты. 🙏\n\n"
     "[CANCEL BRANCH]\n"
-    "Запись на это время отменим. Если хотите, могу предложить другие "
-    "свободные слоты — напишите."
+    "Запись на это время отменим. Если хотите, могу предложить другое "
+    "свободное время — напишите."
 )
 """Default per-spec §770-783. Owner can override via ``custom_template``."""
 

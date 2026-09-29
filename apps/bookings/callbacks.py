@@ -157,7 +157,7 @@ REPLY_NOT_FOUND = "Не нашла эту запись — возможно, о�
 REPLY_FORBIDDEN = "Эта запись не для этого профиля."
 
 # B5 / DRF-841 — replies for the 2-button preview gate.
-REPLY_BOOK_EXPIRED = "Слишком много времени прошло — давайте подберём слот заново."
+REPLY_BOOK_EXPIRED = "Слишком много времени прошло — давайте подберём время заново."
 # DRF-1492 — the same timeout over a CANCEL or RESCHEDULE preview. Nothing was
 # booked and nothing was changed, so «подберём слот заново» is about the wrong
 # verb: the honest fact is that the existing booking is exactly where it was.

@@ -878,8 +878,8 @@ def _to_slot_candidate(slot: AvailableTime, target_date: str) -> SlotCandidate |
 
 def _format_slots_text(slots: list[SlotCandidate], target_date: str) -> str:
     if not slots:
-        return f"На {target_date} свободных слотов нет."
-    lines = [f"Свободные слоты на {target_date}:"]
+        return f"На {target_date} свободного времени нет."
+    lines = [f"Свободное время на {target_date}:"]
     for s in slots[:8]:
         # Pull HH:MM out of the ISO datetime for compact rendering.
         time_part = s.datetime.split("T", 1)[1][:5] if "T" in s.datetime else s.datetime

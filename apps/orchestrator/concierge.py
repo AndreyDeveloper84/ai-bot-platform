@@ -135,7 +135,7 @@ from apps.orchestrator.refusal_memo import (
     remember_refusal,
     render_refusal_block,
 )
-from apps.persona.voice import SURFACE_MARKETPLACE, assistant_identity
+from apps.persona.voice import NO_INTERNAL_TERMS_RULE, SURFACE_MARKETPLACE, assistant_identity
 
 logger = logging.getLogger(__name__)
 
@@ -1410,6 +1410,8 @@ def build_concierge_system_prompt(
         "простыми словами и предложи безопасный шаг — обратиться к "
         "профильному специалисту или сформулировать новое безопасное "
         "намерение. Не сохраняй медицинские выводы как факт о клиенте.",
+        # DRF-2593 — решение владельца 28.09, п.10.
+        NO_INTERNAL_TERMS_RULE,
         f"Ответ не длиннее {_MAX_REPLY_CHARS} символов.",
     ]
     if memory_block:
