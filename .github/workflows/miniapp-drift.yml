@@ -125,6 +125,9 @@ on:
 
 permissions:
   contents: read
+  # DRF-2621: the source map is an artifact of the deploy-dev run, not a file
+  # on the host; reading another run's artifacts needs `actions: read`.
+  actions: read
 
 concurrency:
   group: miniapp-drift-${{ github.ref }}
@@ -195,11 +198,68 @@ jobs:
         working-directory: apps/miniapp
         run: npx vite build
 
+      # DRF-2621. The deploy does not ship `*.map` to the host (deploy-dev.yml:
+      # 4.29 MB of 5.2, the transfer kept failing) and keeps it as the run
+      # artifact `miniapp-sourcemap-<sha>` for 14 days. Until this step the
+      # guard asked the host for the map over HTTP, got 404, and was red
+      # "could not run" from 2026-09-28 11:30 -- red without naming anything.
+      #
+      # Which run: the deploy that published what is served. On workflow_run
+      # that is exactly the triggering run; on schedule/dispatch it is the last
+      # successful deploy-dev on dev. Either way the guard then requires
+      # `<served js name>.map` inside the artifact -- the name carries the
+      # bundle's content hash -- so an artifact of any other build is refused
+      # with both names, never compared.
+      - name: Locate the deploy run that published the served bundle
+        id: deploy
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_RUN_ID: ${{ github.event.workflow_run.id }}
+          EVENT_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          if [ "$EVENT_NAME" = "workflow_run" ]; then
+            RUN_ID="$EVENT_RUN_ID"
+            SHA="$EVENT_SHA"
+          else
+            LAST="$(gh run list -R "$GITHUB_REPOSITORY" --workflow deploy-dev.yml \
+              --branch dev --status success --limit 1 \
+              --json databaseId,headSha -q '.[0] | "\(.databaseId) \(.headSha)"')"
+            RUN_ID="${LAST%% *}"
+            SHA="${LAST##* }"
+          fi
+          echo "run_id=${RUN_ID}" >> "$GITHUB_OUTPUT"
+          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
+          echo "::notice::source map from deploy-dev run ${RUN_ID:-<none>} (sha ${SHA:-<none>})"
+
+      # A missing artifact is NOT handled here: the guard refuses on an empty
+      # directory and says why (retention passed, or never uploaded). Failing
+      # this step instead would hide that reason behind a download error.
+      - name: Download that run's source map artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ steps.deploy.outputs.run_id }}
+          SHA: ${{ steps.deploy.outputs.sha }}
+        run: |
+          mkdir -p sourcemap
+          if [ -n "$RUN_ID" ] && [ -n "$SHA" ]; then
+            gh run download "$RUN_ID" -R "$GITHUB_REPOSITORY" \
+              -n "miniapp-sourcemap-${SHA}" -D sourcemap \
+              || echo "::warning::artifact miniapp-sourcemap-${SHA} of run ${RUN_ID} is not downloadable"
+          else
+            echo "::warning::no successful deploy-dev run found on dev"
+          fi
+          ls -la sourcemap
+
       - name: Compare the served bundle against these sources
         env:
           URL: ${{ inputs.url || 'https://miniapp-dev.gobeauty.site' }}
+          RUN_ID: ${{ steps.deploy.outputs.run_id }}
+          SHA: ${{ steps.deploy.outputs.sha }}
         run: |
           python3 tools/ci/miniapp_bundle_drift.py \
             --url "$URL" \
             --src apps/miniapp/src \
-            --dist apps/miniapp/dist
+            --dist apps/miniapp/dist \
+            --map-dir sourcemap \
+            --map-origin "artifact miniapp-sourcemap-${SHA:-?} of deploy-dev run ${RUN_ID:-?}"
