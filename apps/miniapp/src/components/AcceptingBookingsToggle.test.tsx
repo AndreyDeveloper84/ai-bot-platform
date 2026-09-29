@@ -7,7 +7,7 @@
  * профиль называется своим текстом, прочие отказы — общим, переключатель при
  * отказе не меняет положение.
  */
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -19,6 +19,7 @@ vi.mock("../lib/master-api", async (importOriginal) => {
 import { ApiError } from "../lib/api";
 import { getAcceptingBookings, setAcceptingBookings } from "../lib/master-api";
 import { ACCEPTING_COPY, AcceptingBookingsToggle } from "./AcceptingBookingsToggle";
+import { settleScenario } from "../test/settleScenario";
 
 const mockedGet = vi.mocked(getAcceptingBookings);
 const mockedSet = vi.mocked(setAcceptingBookings);
@@ -31,7 +32,10 @@ describe("AcceptingBookingsToggle", () => {
   it("не рисуется, если прочитать не удалось", async () => {
     mockedGet.mockRejectedValue(new ApiError(403, "not_linked", "…"));
     const { container } = render(<AcceptingBookingsToggle />);
-    await new Promise((r) => setTimeout(r, 0));
+    // DRF-2616: ждём событие — отказ чтения пришёл и отрисован, — а не один
+    // оборот таймера: отсутствие после одного оборота не может провалиться.
+    await waitFor(() => expect(mockedGet).toHaveBeenCalled());
+    await settleScenario();
     expect(container).toBeEmptyDOMElement();
   });
 

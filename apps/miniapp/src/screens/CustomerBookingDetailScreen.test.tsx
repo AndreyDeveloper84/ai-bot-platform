@@ -33,6 +33,7 @@ import {
   CANCEL_STARTED_COPY,
   CustomerBookingDetailScreen,
 } from "./CustomerBookingDetailScreen";
+import { settleScenario } from "../test/settleScenario";
 
 const mockedFetch = vi.mocked(fetchBooking);
 const mockedRequest = vi.mocked(cancelBookingRequest);
@@ -139,8 +140,9 @@ describe("подтверждение переноса «было → стало�
     expect(box).toHaveTextContent("Было: 25 сентября в 09:00");
     expect(box).toHaveTextContent("Стало: 27 сентября в 11:00");
     // Состояние стёрто из истории (чтобы блок не всплыл при возврате), а
-    // показанный блок остаётся — экран его запомнил.
-    await new Promise((r) => setTimeout(r, 0));
+    // показанный блок остаётся — экран его запомнил. DRF-2616: стирание делает
+    // эффект — ждём, пока он улёгся, а не один оборот таймера.
+    await settleScenario();
     expect(screen.getByText("Перенесла запись")).toBeInTheDocument();
     // Ревью: без этой строки узел оставался зелёным и без стирания.
     expect(historyState).toBeNull();
