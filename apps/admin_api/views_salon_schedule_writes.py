@@ -135,9 +135,17 @@ def _write(
     if master is None:
         return JsonResponse({"error": "not_found"}, status=404)
     try:
-        catalog_specialist_id(master)  # unresolved → 404 before any exchange
+        catalog_specialist_id(master)
     except CatalogSpecialistUnresolved:
-        return JsonResponse({"error": "not_found"}, status=404)
+        # The master exists and is not set up in the catalog yet — the same
+        # code and reason as every neighbour (DRF-2637); before any exchange.
+        return JsonResponse(
+            {
+                "error": "catalog_profile_unresolved",
+                "detail": "master is not set up in the catalog yet",
+            },
+            status=409,
+        )
 
     if not _signed_by_the_salon_bot(request):
         logger.info(
