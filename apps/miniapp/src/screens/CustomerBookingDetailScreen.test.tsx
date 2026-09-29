@@ -7,7 +7,7 @@
  */
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter, Route, Routes, useParams } from "react-router-dom";
+import { MemoryRouter, Route, Routes, useLocation, useParams } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../lib/api", async (importOriginal) => {
@@ -107,6 +107,51 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.useRealTimers();
+});
+
+describe("подтверждение переноса «было → стало» (DRF-2585, слова владельца п.8)", () => {
+  // Проба истории: какое состояние у текущей записи истории сейчас.
+  let historyState: unknown = "не прочитано";
+  function HistoryProbe() {
+    historyState = useLocation().state;
+    return null;
+  }
+
+  function renderMoved(state: unknown) {
+    render(
+      <MemoryRouter initialEntries={[{ pathname: "/customer/records/b-m", state }]}>
+        <HistoryProbe />
+        <Routes>
+          <Route path="/customer/records/:bookingId" element={<CustomerBookingDetailScreen />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+  }
+
+  it("после переноса — «Перенесла запись», было и стало", async () => {
+    mockedFetch.mockResolvedValue({
+      booking: booking({ id: "b-m", visit_at: "2026-09-27T11:00:00+03:00" }),
+    });
+    renderMoved({ justRescheduled: true, oldVisit: "2026-09-25T09:00:00+03:00" });
+
+    const box = await screen.findByRole("status");
+    expect(box).toHaveTextContent("Перенесла запись");
+    expect(box).toHaveTextContent("Было: 25 сентября в 09:00");
+    expect(box).toHaveTextContent("Стало: 27 сентября в 11:00");
+    // Состояние стёрто из истории (чтобы блок не всплыл при возврате), а
+    // показанный блок остаётся — экран его запомнил.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(screen.getByText("Перенесла запись")).toBeInTheDocument();
+    // Ревью: без этой строки узел оставался зелёным и без стирания.
+    expect(historyState).toBeNull();
+  });
+
+  it("без переноса блока нет — карточка открыта не после переноса", async () => {
+    mockedFetch.mockResolvedValue({ booking: booking({ id: "b-m" }) });
+    renderMoved(null);
+    expect(await screen.findByText("Маникюр")).toBeInTheDocument();
+    expect(screen.queryByText("Перенесла запись")).toBeNull();
+  });
 });
 
 describe("CustomerBookingDetailScreen (real data)", () => {
