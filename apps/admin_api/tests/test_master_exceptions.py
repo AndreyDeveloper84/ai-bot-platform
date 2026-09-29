@@ -57,10 +57,16 @@ def _exception_row(**overrides) -> dict:
 
 
 def _time_off_row(**overrides) -> dict:
+    # Форма провода КАТАЛОГА, а не удобная: отгулы приходят в UTC
+    # (``users/schedule_api.py`` ``_to_to_dict``: ``to.start_at.isoformat()``
+    # при ``USE_TZ=True``). Здесь раньше стояло «+03:00» — фикстура
+    # моделировала провод, которого не существует, и узлы зеленели на
+    # вымышленной системе (DRF-2601). Не «чинить» обратно в +03:00.
+    # Предел: форма снята с КОДА каталога, живого ответа под рукой не было.
     row = {
         "id": "off-1",
-        "start_at": "2026-09-13T10:00:00+03:00",
-        "end_at": "2026-09-13T14:00:00+03:00",
+        "start_at": "2026-09-13T07:00:00+00:00",
+        "end_at": "2026-09-13T11:00:00+00:00",
         "reason": "учёба",
     }
     row.update(overrides)
@@ -161,6 +167,56 @@ class TestTheSalonSeesWhatIsAlreadyBooked:
         assert body["time_off"]["rows"][0]["reason"] == "учёба"
         assert body["closures"]["rows"][0]["date"] == "2026-09-14"
         assert fake.calls == ["exceptions", "time_off", "closures"]
+
+    def test_time_off_hour_is_the_salon_hour_drf2601(
+        self, client: Client, owner_bot_user: BotUser, synced_master: CatalogMaster, ayla
+    ) -> None:
+        """Каталог отдаёт отгулы в UTC; экран берёт час из строки. Отгул с 01:00
+        до 05:00 по салону лежит как 22:00–02:00 UTC — провод обязан нести
+        «01:00» и «05:00», тот же момент."""
+        ayla(
+            time_off=[
+                _time_off_row(
+                    start_at="2026-09-12T22:00:00+00:00", end_at="2026-09-13T02:00:00+00:00"
+                )
+            ]
+        )
+
+        row = _get(client, synced_master).json()["time_off"]["rows"][0]
+
+        assert row["start_at"][11:16] == "01:00", row["start_at"]
+        assert row["end_at"][11:16] == "05:00", row["end_at"]
+        assert datetime.fromisoformat(row["start_at"]) == datetime(
+            2026, 9, 12, 22, 0, tzinfo=dt_timezone.utc
+        )
+
+    def test_time_off_date_is_the_salon_date_drf2601(
+        self, client: Client, owner_bot_user: BotUser, synced_master: CatalogMaster, ayla
+    ) -> None:
+        """Хуже часа — ДАТА: отгул в 01:00 13 сентября по салону (22:00 UTC 12-го)
+        показывался 12-м — пропадал из дня, когда мастер не работает, и
+        появлялся в дне, когда работает. Отдельный узел: узел только на час
+        пропустит половину дефекта."""
+        ayla(
+            time_off=[
+                _time_off_row(
+                    start_at="2026-09-12T22:00:00+00:00", end_at="2026-09-13T02:00:00+00:00"
+                )
+            ]
+        )
+
+        row = _get(client, synced_master).json()["time_off"]["rows"][0]
+
+        assert row["start_at"][:10] == "2026-09-13", row["start_at"]
+
+    def test_time_off_not_a_moment_is_unreadable_not_shown_drf2601(
+        self, client: Client, owner_bot_user: BotUser, synced_master: CatalogMaster, ayla
+    ) -> None:
+        ayla(time_off=[_time_off_row(start_at="вчера", end_at="сегодня")])
+
+        body = _get(client, synced_master).json()
+
+        assert body["time_off"]["state"] == "unreadable"
 
     def test_a_day_off_carries_no_hours(
         self, client: Client, owner_bot_user: BotUser, synced_master: CatalogMaster, ayla

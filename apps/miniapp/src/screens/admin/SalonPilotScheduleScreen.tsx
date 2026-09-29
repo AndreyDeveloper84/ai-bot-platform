@@ -187,16 +187,15 @@ function wireTime(iso: string): string {
 }
 
 /**
- * Отгул мастера: дата и часы — срезом строки. ИЗВЕСТНЫЙ ДОЛГ (DRF-2591,
- * замер 29.09): каталог отдаёт отгулы в UTC (`users/schedule_api.py:201`,
- * `_to_to_dict`: `to.start_at.isoformat()` при `USE_TZ=True`), бот передаёт
- * как есть (`admin_api/views_master_exceptions.py:149`) — час и дата около
- * полуночи уедут. Носитель — лист DRF-2601 (снять пометку вместе с починкой); до неё
- * функция держит долг на виду, а не прячет его в `wireTime`.
+ * Отгул мастера: «13 сентября · 01:00–05:00». Провод отгулов — в поясе
+ * салона (DRF-2601, `admin_api/views_master_exceptions._time_off_row`):
+ * каталог отдаёт UTC, бот переводит тем же приёмом, что визиты (#2156).
+ * Часы — функцией дома `formatSlotTime`, дата — из той же строки салона.
+ * До DRF-2601 здесь стояла пометка долга: отгул в 01:00 по салону (22:00
+ * UTC накануне) показывался ВЧЕРАШНИМ днём.
  */
 function timeOffWhen(startAt: string, endAt: string): string {
-  // wall-clock-ok: ИЗВЕСТНЫЙ ДОЛГ DRF-2601 — отгулы приходят из каталога в UTC (users/schedule_api.py:201); снять вместе с починкой
-  return `${humanDate(startAt.slice(0, 10))} · ${startAt.slice(11, 16)}–${endAt.slice(11, 16)}`;
+  return `${humanDate(startAt.slice(0, 10))} · ${formatSlotTime(startAt)}–${formatSlotTime(endAt)}`;
 }
 
 const ASSIGNED_TITLE: Record<string, string> = {
