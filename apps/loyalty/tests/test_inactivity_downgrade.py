@@ -185,20 +185,59 @@ class TestIdempotency:
         assert second["scanned"] == 0  # account now STARTER, excluded
 
 
+def _rows_added_since(qs, existed: set) -> list:
+    """Строки ``qs``, которых нет в ``existed`` — по признаку, не по положению (DRF-2649).
+
+    «Добавленная действием» и «последняя по ``occurred_at``» — разные
+    утверждения. Здесь до понижения уже есть строка того же рода:
+    ``_earn_regular_tier`` сам поднимает счёт до REGULAR и пишет
+    ``TIER_CHANGED`` / ``customer.tier.changed`` starter→regular (замер: 1 до,
+    2 после). Ключи отбору не помогают: ``LoyaltyEvent.id`` — uuid4,
+    ``DomainEvent.event_id`` — ULID, растущий лишь с точностью до
+    миллисекунды; и даже растущий ключ отвечал бы «последняя», а не
+    «добавленная».
+    """
+    return list(qs.exclude(pk__in=existed))
+
+
+def _move_later(qs) -> None:
+    """Приманка: уже существующие строки — на час ПОЗЖЕ любой новой.
+
+    Бизнес-логику не трогает: понижение читает визиты, а не прежние смены
+    уровня. Отбор «последняя по времени» взял бы приманку детерминированно.
+    """
+    qs.update(occurred_at=timezone.now() + dt.timedelta(hours=1))
+
+
+class TestNewRowsAreChosenByIdentity:
+    """DRF-2649 — пара к узлам ниже: без понижения отбор пуст, хотя строка
+    того же рода (starter→regular) в журнале есть и сдвинута «позже»."""
+
+    def test_nothing_added_means_nothing_returned(self, tenant, customer, service):
+        account = _earn_regular_tier(tenant, customer, service)
+        changes = LoyaltyEvent.all_tenants.filter(
+            account=account, event_type=LoyaltyEvent.EventType.TIER_CHANGED
+        )
+        existed = set(changes.values_list("pk", flat=True))
+        assert len(existed) == 1  # presence: the promotion row is there
+        _move_later(changes)
+
+        assert _rows_added_since(changes, existed) == []
+
+
 class TestTierChangedMetadata:
     def test_tier_changed_carries_inactivity_trigger(self, tenant, customer, service):
         account = _earn_regular_tier(tenant, customer, service)
         _backdate_all_visits(account, days_ago=400)
+        changes = LoyaltyEvent.all_tenants.filter(
+            account=account, event_type=LoyaltyEvent.EventType.TIER_CHANGED
+        )
+        existed = set(changes.values_list("pk", flat=True))
+        assert len(existed) == 1  # presence: the promotion already left its row
+        _move_later(changes)
         apply_inactivity_downgrades()
 
-        latest = (
-            LoyaltyEvent.all_tenants.filter(
-                account=account, event_type=LoyaltyEvent.EventType.TIER_CHANGED
-            )
-            .order_by("-occurred_at")
-            .first()
-        )
-        assert latest is not None
+        (latest,) = _rows_added_since(changes, existed)
         assert latest.metadata["trigger"] == "inactivity_hard_downgrade"
         assert latest.metadata["cutoff_days"] == INACTIVITY_HARD_DOWNGRADE_DAYS
         assert latest.metadata["old_tier"] == "regular"
@@ -232,14 +271,13 @@ class TestSingleEmit:
 
         account = _earn_regular_tier(tenant, customer, service)
         _backdate_all_visits(account, days_ago=400)
+        envelopes = DomainEvent.objects.filter(event_name="customer.tier.changed")
+        existed = set(envelopes.values_list("pk", flat=True))
+        assert len(existed) == 1  # presence: the promotion already emitted its envelope
+        _move_later(envelopes)
         apply_inactivity_downgrades()
 
-        ev = (
-            DomainEvent.objects.filter(event_name="customer.tier.changed")
-            .order_by("-occurred_at")
-            .first()
-        )
-        assert ev is not None
+        (ev,) = _rows_added_since(envelopes, existed)
         assert ev.data["reason"] == "inactivity_hard_downgrade"
         assert ev.data["old_tier"] == "regular"
         assert ev.data["new_tier"] == "starter"
