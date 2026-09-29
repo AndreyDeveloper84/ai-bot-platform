@@ -2238,9 +2238,9 @@ def schedule(request: HttpRequest) -> HttpResponse:
 
     # Resolve defaults in tenant-local TZ so «today» means today for
     # the master, not for UTC.
-    from apps.master_api.services.schedule import get_tenant_tz
+    from apps.tenancy.timezones import salon_zone
 
-    tz = get_tenant_tz(tenant)
+    tz = salon_zone(tenant)
     today_local = dj_timezone.now().astimezone(tz).date()
 
     raw_from = request.GET.get("from", "").strip()

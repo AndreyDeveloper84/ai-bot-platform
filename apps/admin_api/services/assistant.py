@@ -43,7 +43,6 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any
 from urllib.parse import urlencode
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from django.core.signing import BadSignature, SignatureExpired, TimestampSigner
 from django.db import transaction
@@ -60,6 +59,7 @@ from apps.master_api.services.assistant_actions import (
     _parse_dt,
 )
 from apps.master_api.services.assistant_tools import ToolError, ToolOutcome
+from apps.tenancy.timezones import salon_zone
 
 logger = logging.getLogger(__name__)
 
@@ -189,13 +189,6 @@ def mask_phones(text: str) -> str:
 # ── резолв по имени ──────────────────────────────────────────────────
 
 
-def _tz(tenant: Any) -> ZoneInfo:
-    try:
-        return ZoneInfo(getattr(tenant, "timezone", "") or "Europe/Moscow")
-    except (ZoneInfoNotFoundError, ValueError):
-        return ZoneInfo("Europe/Moscow")
-
-
 def _resolve_master(tenant: Any, name: Any):
     """Мастер салона по части имени — из зеркала каталога; неоднозначность — отказ."""
 
@@ -265,7 +258,7 @@ def _parse_day(raw: Any, *, default: date) -> date:
 
 
 def find_booking(tenant: Any, arguments: dict[str, Any], *, now: datetime) -> ToolOutcome:
-    tz = _tz(tenant)
+    tz = salon_zone(tenant)
     local_now = now.astimezone(tz)
     day = _parse_day(arguments.get("date"), default=local_now.date())
     client = str(arguments.get("client") or "").strip().lower()
@@ -357,7 +350,7 @@ def propose_admin_action(
 
 
 def _propose_booking(arguments: dict[str, Any], *, tenant: Any) -> AdminProposal:
-    tz = _tz(tenant)
+    tz = salon_zone(tenant)
     master = _resolve_master(tenant, arguments.get("master"))
     service = _resolve_service(tenant, master, arguments.get("service"))
     start = _localise(_parse_dt(arguments.get("start_at"), field="start_at"), tz)
@@ -399,7 +392,7 @@ def _propose_booking(arguments: dict[str, Any], *, tenant: Any) -> AdminProposal
 
 
 def _propose_schedule(arguments: dict[str, Any], *, tenant: Any, bot_user: Any) -> AdminProposal:
-    tz = _tz(tenant)
+    tz = salon_zone(tenant)
     master = _resolve_master(tenant, arguments.get("master"))
     start = _localise(_parse_dt(arguments.get("start"), field="start"), tz)
     end = _localise(_parse_dt(arguments.get("end"), field="end"), tz)
@@ -492,7 +485,7 @@ def execute_admin_action(
         master = CatalogMaster.objects.filter(id=str(args.get("master_id") or "")).first()
     if master is None:
         raise ActionError("мастер не найден", slug="not_found")
-    tz = _tz(tenant)
+    tz = salon_zone(tenant)
     start = _localise(_parse_dt(args.get("start"), field="start"), tz)
     end = _localise(_parse_dt(args.get("end"), field="end"), tz)
 

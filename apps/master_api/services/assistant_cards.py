@@ -17,6 +17,7 @@ from typing import Any, Iterable
 from urllib.parse import urlencode
 
 from apps.master_api.services.bookings import name_initial
+from apps.tenancy.timezones import salon_zone
 
 #: Четыре подсказки макета — фраза и подзаголовок; чип = отправка фразы.
 CHIPS: list[dict[str, str]] = [
@@ -152,10 +153,10 @@ def cards_for_tool(
 def today_context(master: Any, *, now: datetime) -> dict[str, Any]:
     """Контекст дня для стартового экрана: «Сегодня N записей · Следующая — …»."""
 
-    from apps.master_api.services.dashboard import get_next_visit, get_tenant_tz
+    from apps.master_api.services.dashboard import get_next_visit
     from apps.master_api.services.visit_source import master_visits
 
-    tz = get_tenant_tz(master.tenant)
+    tz = salon_zone(master.tenant)
     local = now.astimezone(tz)
     day_start = local.replace(hour=0, minute=0, second=0, microsecond=0)
     day_end = day_start.replace(hour=23, minute=59, second=59)

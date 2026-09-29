@@ -89,6 +89,7 @@ from apps.scheduling.models import (
     ScheduleChangeRequest,
     ScheduleException,
 )
+from apps.tenancy.timezones import salon_zone
 
 logger = logging.getLogger(__name__)
 
@@ -269,20 +270,6 @@ class AvailabilityRequestError(Exception):
 
 
 # --- TZ + duration helpers --------------------------------------------
-
-
-def get_tenant_tz(tenant: Any) -> ZoneInfo:
-    """Пояс салона — правилом дня салона (``salon_day.tenant_tz``), DRF-2595.
-
-    До DRF-2595 здесь был свой запасной пояс — UTC, а у семи соседних
-    правил — Москва. У салона с пустым или битым ``timezone`` сутки мастера
-    резались по UTC: визит в 01:30 по Москве (22:30 UTC накануне) уезжал в
-    ПРЕДЫДУЩИЙ день — час верный, день чужой. Пятого правила не вводится:
-    запасной пояс один и назван там (``DEFAULT_TZ = "Europe/Moscow"``, пилот).
-    """
-    from apps.admin_api.services.salon_day import tenant_tz
-
-    return tenant_tz(tenant)
 
 
 def _resolve_duration(booking: VisitRow, service_cache: dict[Any, int]) -> int:
@@ -695,7 +682,7 @@ def conflicting_bookings_for_template(
       «вот что мешает в ближайшие две недели», и горизонт экран называет.
     """
 
-    tz = get_tenant_tz(master.tenant)
+    tz = salon_zone(master.tenant)
     resolved_now = now if now is not None else dj_timezone.now()
     local_now = resolved_now.astimezone(tz)
     from_date = local_now.date()
@@ -801,7 +788,7 @@ def build_schedule(
 
     if now is None:
         now = dj_timezone.now()
-    tz = get_tenant_tz(master.tenant)
+    tz = salon_zone(master.tenant)
     tz_name = str(tz)
 
     # Pre-fetch all per-day inputs in a single DB roundtrip each.
@@ -1068,7 +1055,7 @@ def request_availability_change(
     if len(reason_text or "") > 200:
         raise AvailabilityRequestError("bad_request", "reason_text must be ≤ 200 chars")
 
-    tz = get_tenant_tz(master.tenant)
+    tz = salon_zone(master.tenant)
     # Compute the date range the window touches in tenant-local TZ.
     start_local_date = start.astimezone(tz).date()
     end_local_date = end.astimezone(tz).date()
@@ -1277,7 +1264,6 @@ __all__ = [
     "ScheduleResponse",
     "build_schedule",
     "conflicting_bookings_for_template",
-    "get_tenant_tz",
     "list_pending_requests",
     "notify_manager_of_availability_request",
     "request_availability_change",

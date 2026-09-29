@@ -19,7 +19,8 @@ from django.test import Client
 from django.urls import reverse
 
 from apps.admin_api.auth import require_admin_or_reception_read
-from apps.admin_api.services.salon_day import build_salon_day, day_bounds_utc, tenant_tz
+from apps.admin_api.services.salon_day import build_salon_day, day_bounds_utc
+from apps.tenancy.timezones import salon_zone
 from apps.admin_api.tests.conftest import init_data_header, make_master
 from apps.booking.models import RemoteBookingProxy
 from apps.catalog.models import CatalogService
@@ -217,7 +218,7 @@ class TestProjection:
 class TestTimezoneHelpers:
     def test_bad_timezone_falls_back_instead_of_raising(self, tenant: Tenant) -> None:
         tenant.timezone = "Not/AZone"
-        assert str(tenant_tz(tenant)) == "Europe/Moscow"
+        assert str(salon_zone(tenant)) == "Europe/Moscow"
 
     def test_day_bounds_span_exactly_24h(self) -> None:
         start, end = day_bounds_utc(datetime(2026, 8, 20, tzinfo=MSK).date(), MSK)
@@ -265,7 +266,7 @@ class TestEndpoint:
 
         Правил «пояс салона» в коде несколько, и при пустом ``timezone`` одно
         из них молча давало UTC. Запасной пояс на проводе admin_api — один и
-        назван (МСК, ``salon_day.DEFAULT_TZ``). Подмена «UTC в одном из двух»
+        назван (МСК, ``tenancy.timezones.FALLBACK_TZ``). Подмена «UTC в одном из двух»
         краснеет здесь, без стенда и без числа пустых салонов."""
         from apps.admin_api.views_master_schedule import _in_salon_zone, _schedule_zone
 
@@ -372,7 +373,7 @@ class TestEndpoint:
     ) -> None:
         resp = client.get(_url(), HTTP_AUTHORIZATION=init_data_header("5001"))
         assert resp.status_code == 200
-        expected = datetime.now(tz=timezone.utc).astimezone(tenant_tz(tenant)).date()
+        expected = datetime.now(tz=timezone.utc).astimezone(salon_zone(tenant)).date()
         assert resp.json()["date"] == expected.isoformat()
 
     def test_response_carries_no_phone_anywhere(

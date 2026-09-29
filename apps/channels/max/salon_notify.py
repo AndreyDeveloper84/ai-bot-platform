@@ -47,12 +47,12 @@ import logging
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from typing import Any
-from zoneinfo import ZoneInfo
 
 from django.core.cache import cache
 
 from apps.channels.max.addressing import MaxAddress
 from apps.channels.max.staff_outbound import MANAGER, StaffSendResult, send_to_staff
+from apps.tenancy.timezones import salon_zone
 
 logger = logging.getLogger(__name__)
 
@@ -255,14 +255,6 @@ def notify(notice: SalonNotice) -> StaffSendResult | None:
 # ── общие помощники ──────────────────────────────────────────────────
 
 
-def _tz(tenant: Any) -> ZoneInfo:
-    name = getattr(tenant, "timezone", "") or "Europe/Moscow"
-    try:
-        return ZoneInfo(name)
-    except Exception:  # noqa: BLE001 — неверный IANA в настройке не должен ронять уведомление
-        return ZoneInfo("Europe/Moscow")
-
-
 def _hm(value: time | datetime) -> str:
     return value.strftime("%H:%M")
 
@@ -328,7 +320,7 @@ def _frame_windows(
         return {}
     try:
         hours, exceptions, _blocks = load_day_frame(
-            master, from_date=days[0], to_date=days[-1], tz=_tz(tenant)
+            master, from_date=days[0], to_date=days[-1], tz=salon_zone(tenant)
         )
     except Exception:  # noqa: BLE001 — рамка недоступна: назовём это словами, не нулём
         logger.warning(
@@ -390,7 +382,7 @@ def schedule_diff(request: Any, master: Any, tenant: Any) -> tuple[list[str], st
     end = getattr(request, "requested_end", None)
     if start is None or end is None:
         return ["по заявке"], "по заявке", "по заявке"
-    tz = _tz(tenant)
+    tz = salon_zone(tenant)
     start_l, end_l = start.astimezone(tz), end.astimezone(tz)
     days: list[date] = []
     cursor = start_l.date()
@@ -461,7 +453,7 @@ def schedule_request_impact(request: Any) -> Impact:
     end = getattr(request, "requested_end", None)
     if start is None or end is None:
         return Impact(si.UNAVAILABLE, None)
-    tz = _tz(request.tenant)
+    tz = salon_zone(request.tenant)
     result = si.impact_for_window(
         request.tenant,
         request.master,
@@ -542,7 +534,7 @@ def sync_failed_notice(tenant: Any, age: Any) -> SalonNotice:
 
     last_ok = getattr(age, "last_ok_at", None)
     age_human = getattr(age, "age_human", "") or "давно"
-    tz = _tz(tenant)
+    tz = salon_zone(tenant)
     last_line = (
         f"Последняя удачная синхронизация: {last_ok.astimezone(tz).strftime('%d.%m %H:%M')}"
         if last_ok
@@ -607,7 +599,7 @@ def booking_attention_notice(
     """Тип 5: «Запись требует вмешательства: клиент отменил» → Открыть запись."""
 
     tenant = proxy.tenant
-    tz = _tz(tenant)
+    tz = salon_zone(tenant)
     start = getattr(proxy, "start_at", None)
     when = start.astimezone(tz).strftime("%d.%m %H:%M") if start else "время не указано"
     name = _first_name(getattr(proxy, "bot_user", None))

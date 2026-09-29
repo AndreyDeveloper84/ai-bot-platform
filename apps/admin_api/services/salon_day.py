@@ -73,28 +73,9 @@ from apps.master_api.services.visit_source import (
     RELEASED_STATUSES,
     UPCOMING_STATUSES,
 )
+from apps.tenancy.timezones import salon_zone
 
 logger = logging.getLogger(__name__)
-
-DEFAULT_TZ = "Europe/Moscow"
-
-
-def tenant_tz(tenant) -> ZoneInfo:
-    """The tenant's timezone, falling back to Moscow.
-
-    «Today» has to mean today for the salon, not for UTC — a visit at
-    01:00 MSK belongs to the day the receptionist calls today, not to the
-    previous UTC date.
-    """
-
-    name = getattr(tenant, "timezone", "") or DEFAULT_TZ
-    try:
-        return ZoneInfo(name)
-    except Exception:  # noqa: BLE001 — a bad tz string must not 500 the day
-        # DRF-2595: этим правилом теперь режут сутки и расписание мастера —
-        # оператор должен узнать о битом поясе салона, а не угадывать.
-        logger.warning("salon_day.bad_tenant_tz tenant=%s tz=%r", getattr(tenant, "pk", None), name)
-        return ZoneInfo(DEFAULT_TZ)
 
 
 def day_bounds_utc(day: date_cls, tz: ZoneInfo) -> tuple[datetime, datetime]:
@@ -263,7 +244,7 @@ def build_salon_day(tenant, *, day: date_cls, now: datetime | None = None) -> Sa
 
     if now is None:
         now = dj_timezone.now()
-    tz = tenant_tz(tenant)
+    tz = salon_zone(tenant)
     start_utc, end_utc = day_bounds_utc(day, tz)
 
     # Enter the scope explicitly rather than relying on the caller. The
@@ -340,5 +321,4 @@ __all__ = [
     "SalonDay",
     "build_salon_day",
     "day_bounds_utc",
-    "tenant_tz",
 ]

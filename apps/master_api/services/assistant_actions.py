@@ -60,6 +60,7 @@ from typing import Any, Final
 from django.core.signing import BadSignature, SignatureExpired, TimestampSigner
 from django.db import transaction
 from django.utils import timezone as dj_timezone
+from apps.tenancy.timezones import salon_zone
 
 logger = logging.getLogger(__name__)
 
@@ -308,15 +309,6 @@ def _signer() -> TimestampSigner:
     return TimestampSigner(key=key, salt=ACTION_TOKEN_SALT)
 
 
-def _tenant_tz(master):
-    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-
-    try:
-        return ZoneInfo(getattr(getattr(master, "tenant", None), "timezone", "") or "Europe/Moscow")
-    except (ZoneInfoNotFoundError, ValueError):
-        return ZoneInfo("Europe/Moscow")
-
-
 def _parse_dt(raw: Any, *, field: str) -> datetime:
     text = str(raw or "").strip()
     if not text:
@@ -353,7 +345,7 @@ def _human_window(start: datetime, end: datetime, tz) -> str:
 def _validate_block_time(arguments: dict[str, Any], *, master) -> tuple[dict[str, Any], str]:
     """Разобрать аргументы `block_time` и собрать сводку по ним же."""
 
-    tz = _tenant_tz(master)
+    tz = salon_zone(getattr(master, "tenant", None))
     start = _localise(_parse_dt(arguments.get("start"), field="start"), tz)
     end = _localise(_parse_dt(arguments.get("end"), field="end"), tz)
     if start >= end:
@@ -388,7 +380,7 @@ def _visits_in(master, start: datetime, end: datetime) -> list[dict[str, Any]]:
     from apps.master_api.services.visit_source import master_visits
 
     rows = master_visits(master, start=start, end=end)
-    return visit_card_rows(rows, _tenant_tz(master))
+    return visit_card_rows(rows, salon_zone(getattr(master, "tenant", None)))
 
 
 def _block_time_details(start: datetime, end: datetime, tz) -> dict[str, Any]:
@@ -421,7 +413,7 @@ def propose(name: str, arguments: dict[str, Any], *, master) -> ProposedAction:
     if name != ACTION_BLOCK_TIME:
         raise ActionError(f"неизвестное действие {name!r}")
     normalised, summary = _validate_block_time(arguments or {}, master=master)
-    tz = _tenant_tz(master)
+    tz = salon_zone(getattr(master, "tenant", None))
     start = _parse_dt(normalised["start"], field="start")
     end = _parse_dt(normalised["end"], field="end")
     # Макет DRF-1187: «Если есть записи — будет показан экран конфликта».
@@ -614,7 +606,7 @@ def _resolve_client(master, arguments: dict[str, Any], *, tz) -> dict[str, Any]:
 
 
 def _propose_booking(arguments: dict[str, Any], *, master) -> ProposedAction:
-    tz = _tenant_tz(master)
+    tz = salon_zone(getattr(master, "tenant", None))
     start = _localise(_parse_dt(arguments.get("start_at"), field="start_at"), tz)
     if start <= dj_timezone.now():
         raise ActionError("Это время уже прошло. На какое время записать?", verbatim=True)
@@ -707,7 +699,7 @@ def _execute_booking(payload: dict[str, Any], *, master, actor, token: str = "")
     if result.outcome == "conflict" and result.status == 409:
         # Только «занято» (409). 404 «Ayla не знает клиента» — тоже conflict у
         # стойки, но предлагать другое время тут бессмысленно.
-        tz = _tenant_tz(master)
+        tz = salon_zone(getattr(master, "tenant", None))
         try:
             day = datetime.fromisoformat(start_at).astimezone(tz).date()
         except ValueError:
@@ -796,7 +788,7 @@ def execute(token: str, *, master, actor) -> ExecutedAction:
         raise ActionError(f"неизвестное действие {payload.get('action')!r}")
 
     args = payload.get("args") or {}
-    tz = _tenant_tz(master)
+    tz = salon_zone(getattr(master, "tenant", None))
     start = _localise(_parse_dt(args.get("start"), field="start"), tz)
     end = _localise(_parse_dt(args.get("end"), field="end"), tz)
 

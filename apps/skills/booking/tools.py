@@ -3114,9 +3114,9 @@ def show_my_bookings(
 
 def _salon_tz_key(tenant: Any) -> str:
     """Пояс салона — тем же правилом, что «✅ Вы записаны» (``tenant_timezone``)."""
-    from apps.booking.client_notify import tenant_timezone
+    from apps.tenancy.timezones import salon_zone
 
-    return tenant_timezone(tenant).key
+    return salon_zone(tenant).key
 
 
 def _format_booking_line(b: BookingRow) -> str:

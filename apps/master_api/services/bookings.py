@@ -37,7 +37,7 @@ from apps.booking.models import RemoteBookingProxy
 from apps.catalog.models import CatalogMaster, CatalogService
 from apps.catalog.specialist_ref import specialist_keys
 from apps.identity.models import BotUser
-from apps.master_api.services.dashboard import get_tenant_tz
+from apps.tenancy.timezones import salon_zone
 from apps.master_api.services.visit_source import GUEST_NAME, attended_visits
 
 logger = logging.getLogger(__name__)
@@ -207,7 +207,7 @@ def _last_visit_dates(
     qs = attended_visits(master).filter(bot_user_id__in=ids)
     if before is not None:
         qs = qs.filter(start_at__lt=before)
-    tz = get_tenant_tz(master.tenant)
+    tz = salon_zone(master.tenant)
     out: dict[UUID, date] = {}
     for row in qs.values("bot_user_id").annotate(last=Max("start_at")):
         if row["last"] is not None:

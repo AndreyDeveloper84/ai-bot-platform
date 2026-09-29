@@ -55,7 +55,7 @@ from apps.master_api.services.bookings import (
     enrich_customer_rows,
     looks_like_phone,
 )
-from apps.master_api.services.dashboard import get_tenant_tz
+from apps.tenancy.timezones import salon_zone
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +89,7 @@ def booking_detail_view(request: HttpRequest, appointment_id: uuid.UUID) -> Http
     detail = booking_detail(master, appointment_id, now=dj_timezone.now())
     if detail is None:
         return _error("not_found", "booking not found", 404)
-    return JsonResponse(detail.to_dict(get_tenant_tz(master.tenant)))
+    return JsonResponse(detail.to_dict(salon_zone(master.tenant)))
 
 
 # ─── POST bookings ──────────────────────────────────────────────────────────
@@ -105,7 +105,7 @@ def _alternatives(
     остаётся, человек выберет время сам.
     """
 
-    tz = get_tenant_tz(master.tenant)
+    tz = salon_zone(master.tenant)
     try:
         when = datetime.fromisoformat(start_at)
     except ValueError:
@@ -245,7 +245,7 @@ def booking_slots(request: HttpRequest) -> HttpResponse:
     return JsonResponse(
         {
             "date": day.isoformat(),
-            "timezone": str(get_tenant_tz(tenant)),
+            "timezone": str(salon_zone(tenant)),
             "service_id": str(service.id),
             "duration_min": service.duration_min,
             "slots": [slot_payload(s) for s in slots],

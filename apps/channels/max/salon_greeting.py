@@ -38,9 +38,9 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
-from zoneinfo import ZoneInfo
 
 from django.utils import timezone
+from apps.tenancy.timezones import salon_zone
 
 logger = logging.getLogger(__name__)
 NL = chr(10)  # перевод строки — одной константой, чтобы тексты читались как у владельца
@@ -146,13 +146,6 @@ class GreetingData:
     missing: tuple[str, ...] = field(default_factory=tuple)
 
 
-def _tenant_now(tenant: Any) -> datetime:
-    try:
-        return timezone.now().astimezone(ZoneInfo(getattr(tenant, "timezone", "") or "UTC"))
-    except Exception:  # noqa: BLE001 — незнакомый пояс не должен ронять приветствие
-        return timezone.now()
-
-
 # Три источника — три функции, чтобы подмена источника в тесте меняла ЧИСЛО,
 # а отказ источника опускал строку (§103). Вызываются в tenant_scope.
 
@@ -219,7 +212,7 @@ def gather(tenant: Any, role_ctx: Any, *, now: datetime | None = None) -> Greeti
 
     from apps.tenancy.context import tenant_scope
 
-    now = now or _tenant_now(tenant)
+    now = now or timezone.now().astimezone(salon_zone(tenant))
     missing: list[str] = []
     records = masters_available = attention = my_records = None
     readiness_problems = None

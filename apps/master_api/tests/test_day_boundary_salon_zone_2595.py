@@ -20,6 +20,7 @@ from apps.catalog.models import CatalogMaster
 from apps.master_api.services import schedule as sched
 from apps.master_api.tests.test_schedule import _make_booking, workdays  # noqa: F401
 from apps.tenancy.models import Tenant
+from apps.tenancy.timezones import salon_zone
 
 pytestmark = pytest.mark.django_db
 
@@ -59,25 +60,20 @@ def test_a_visit_after_midnight_stays_in_its_own_day(
     assert result.tenant_tz == "Europe/Moscow"
 
 
-def test_both_master_rules_and_the_salon_day_agree_on_a_zoneless_salon(
-    zoneless: Tenant,
-) -> None:
-    """Одно правило, а не три: расписание, день мастера и день салона."""
-    from apps.admin_api.services.salon_day import tenant_tz
-    from apps.master_api.services.dashboard import get_tenant_tz as dashboard_tz
-    from apps.master_api.services.schedule import get_tenant_tz as schedule_tz
-
-    zones = {str(schedule_tz(zoneless)), str(dashboard_tz(zoneless)), str(tenant_tz(zoneless))}
-    assert zones == {"Europe/Moscow"}
+def test_a_zoneless_salon_lives_in_the_named_fallback(zoneless: Tenant) -> None:
+    """Одно правило, а не три (DRF-2595): расписание, день мастера и день
+    салона зовут ``salon_zone``; что другого определения нет, держит сторож
+    ``apps/tenancy/tests/test_one_salon_zone_2595.py``."""
+    assert str(salon_zone(zoneless)) == "Europe/Moscow"
 
 
 def test_a_real_zone_is_still_honoured(tenant: Tenant) -> None:
     Tenant.objects.filter(pk=tenant.pk).update(timezone="Asia/Yekaterinburg")
     tenant.refresh_from_db()
-    assert str(sched.get_tenant_tz(tenant)) == "Asia/Yekaterinburg"
+    assert str(salon_zone(tenant)) == "Asia/Yekaterinburg"
     # И запасной не подменяет настоящий пояс: момент тот же, день тот же.
     moment = datetime(2026, 5, 20, 22, 30, tzinfo=ZoneInfo("UTC"))
-    assert moment.astimezone(sched.get_tenant_tz(tenant)).date() == date(2026, 5, 21)
+    assert moment.astimezone(salon_zone(tenant)).date() == date(2026, 5, 21)
 
 
 def test_a_broken_zone_falls_back_to_the_named_one_and_says_so(tenant: Tenant, caplog) -> None:
@@ -86,6 +82,6 @@ def test_a_broken_zone_falls_back_to_the_named_one_and_says_so(tenant: Tenant, c
     Tenant.objects.filter(pk=tenant.pk).update(timezone="Not/AZone")
     tenant.refresh_from_db()
     with caplog.at_level("WARNING"):
-        zone = sched.get_tenant_tz(tenant)
+        zone = salon_zone(tenant)
     assert str(zone) == "Europe/Moscow"
     assert any("bad_tenant_tz" in r.getMessage() for r in caplog.records)

@@ -2066,10 +2066,10 @@ def _proxy_duration_min(proxy) -> int:
 
 
 def _salon_zone(tenant) -> ZoneInfo:
-    """Пояс салона — тем же правилом, что «✅ Вы записаны» (DRF-2589)."""
-    from apps.booking.client_notify import tenant_timezone
+    """Пояс салона — одно правило на бот (DRF-2589, DRF-2595)."""
+    from apps.tenancy.timezones import salon_zone
 
-    return tenant_timezone(tenant)
+    return salon_zone(tenant)
 
 
 def _salon_iso(moment, tenant) -> str:
@@ -2080,19 +2080,14 @@ def _salon_iso(moment, tenant) -> str:
     из строки (``formatVisitFull``), и человек видел «в 06:00». Тот же момент
     в поясе салона: ``new Date()`` на фронте не меняется, а часы в строке
     становятся часами салона — правило владельца (28.09, п.1) и прецедент
-    «✅ Вы записаны» (``tenant_timezone``). Пусто — пустая строка.
+    «✅ Вы записаны». Пояс и запись момента — ``apps.tenancy.timezones``
+    (DRF-2595); здесь только контракт провода: пусто — пустая строка.
+    Время без пояса (канон без смещения, тело запроса без смещения) — время
+    салона: ``astimezone`` принял бы его за пояс СЕРВЕРА и сдвинул час заново.
     """
-    if moment is None:
-        return ""
-    from apps.booking.client_notify import tenant_timezone
+    from apps.tenancy.timezones import salon_iso, salon_zone
 
-    zone = tenant_timezone(tenant)
-    if moment.tzinfo is None:
-        # Время без пояса (канон без смещения, тело запроса без смещения) —
-        # время салона: ``astimezone`` принял бы его за пояс СЕРВЕРА и сдвинул
-        # час заново. Пришиваем пояс салона, не пересчитывая.
-        return moment.replace(tzinfo=zone).isoformat()
-    return moment.astimezone(zone).isoformat()
+    return salon_iso(moment, salon_zone(tenant)) or ""
 
 
 def _proxy_booking_to_dict(proxy, *, tenant) -> dict[str, Any]:
