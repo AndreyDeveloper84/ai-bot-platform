@@ -59,6 +59,10 @@ CIRCUIT_FAILURE_WINDOW_S = 60.0
 CIRCUIT_FAILURE_THRESHOLD = 5
 CIRCUIT_OPEN_DURATION_S = 30.0
 _BREAKER_NAME = "ayla.booking"
+#: DRF-2618 — свой автомат у картинок мастера (фото и портфолио). Картинок на
+#: экране десятки, запись — одна: общий автомат давал дешёвой поверхности
+#: погасить самую дорогую.
+_MEDIA_BREAKER_NAME = "ayla.booking.media"
 
 # DRF-997: bounded retry for transient 429 responses. Retry-After is respected
 # up to a cap so a single slow backend header cannot block the worker forever.
@@ -96,7 +100,7 @@ MAX_AVAILABLE_DATES_WINDOW_DAYS = 31
 MAX_CATALOG_PAGES = 100
 
 
-def _fire_breaker_alert(transition: str, failures: int) -> None:
+def _fire_breaker_alert(transition: str, failures: int, *, name: str = _BREAKER_NAME) -> None:
     """Borrow the CR-3 Telegram alert path on a breaker state transition.
 
     Lazy-imports the alert helper and swallows every exception — alerting is
@@ -107,7 +111,7 @@ def _fire_breaker_alert(transition: str, failures: int) -> None:
         from apps.orchestrator.llm.telegram_alert import send_breaker_alert
 
         send_breaker_alert(
-            provider=_BREAKER_NAME,
+            provider=name,
             transition=transition,
             details={"failures": failures},
         )
@@ -125,6 +129,8 @@ class _Circuit:
 
     failures: list[float] = field(default_factory=list)
     opened_at: float | None = None
+    #: Имя в журнале и тревоге: у записи и у картинок автоматы разные (DRF-2618).
+    name: str = _BREAKER_NAME
 
     def is_open(self, *, now: float) -> bool:
         if self.opened_at is None:
@@ -133,7 +139,7 @@ class _Circuit:
             failures_before = len(self.failures)
             self.opened_at = None
             self.failures = []
-            _fire_breaker_alert("open → closed", failures_before)
+            _fire_breaker_alert("open → closed", failures_before, name=self.name)
             return False
         return True
 
@@ -144,11 +150,12 @@ class _Circuit:
         if len(self.failures) >= CIRCUIT_FAILURE_THRESHOLD and self.opened_at is None:
             self.opened_at = now
             logger.warning(
-                "booking_client.circuit_opened failures=%d window_s=%.0f",
+                "booking_client.circuit_opened breaker=%s failures=%d window_s=%.0f",
+                self.name,
                 len(self.failures),
                 CIRCUIT_FAILURE_WINDOW_S,
             )
-            _fire_breaker_alert("closed → open", len(self.failures))
+            _fire_breaker_alert("closed → open", len(self.failures), name=self.name)
 
     def record_success(self) -> None:
         self.failures = []
@@ -715,6 +722,9 @@ class AylaBookingHTTPClient:
         self._timeout_s = timeout_s
         self._transport = transport
         self._circuit = _Circuit()
+        # DRF-2618 — картинки мастера ходят мимо ``_circuit``: их таймауты и 5xx
+        # не открывают автомат записи (см. ``specialist_media_file``).
+        self._media_circuit = _Circuit(name=_MEDIA_BREAKER_NAME)
         # CR-SF1: one persistent httpx.Client reused across calls so the
         # ``get_available_dates`` fan-out (one request per day) shares a
         # connection pool instead of building/tearing one client per HTTP
@@ -1683,17 +1693,50 @@ class AylaBookingHTTPClient:
         ``…/portfolio/{item}/file/``. Субъекта нет: это публичное лицо мастера,
         каталог пускает сервисный токен (``IsInternalBearer``). 404 — «фото
         нет» (мастера нет, файла нет, объект пропал или пуст — каталог
-        отвечает одинаково); остальное — как у всех вызовов клиента.
+        отвечает одинаково).
+
+        DRF-2618 — мимо ``_request`` и мимо автомата записи:
+
+        * свой автомат ``_media_circuit``: таймаут, сеть и 5xx картинок его
+          открывают, автомат записи (``_circuit``) не трогают и его
+          состояния не читают;
+        * 429 каталога — сразу :class:`BookingRateLimitedError`, без
+          повторов и без ``time.sleep``: картинок на экране десятки, и поток
+          воркера спал бы до ~3 с за каждую, пока ждёт запись.
+
+        Raises:
+            BookingUnavailableError: автомат картинок открыт / таймаут / сеть / 5xx.
+            BookingRateLimitedError: каталог ответил 429.
+            BookingBadRequestError: прочие 4xx.
         """
         endpoint = (
             f"specialists/{specialist_id}/media/avatar/file/"
             if item_id is None
             else f"specialists/{specialist_id}/portfolio/{item_id}/file/"
         )
-        resp = self._request("GET", endpoint)
+        now = time.monotonic()
+        if self._media_circuit.is_open(now=now):
+            raise BookingUnavailableError("media_circuit_open")
+        url = self._urls.build(f"internal/{endpoint}")
+        try:
+            resp = self._client().get(url, headers=self._headers())
+        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+            self._media_circuit.record_failure(now=now)
+            logger.warning("booking_client.media.network err=%s", type(exc).__name__)
+            raise BookingUnavailableError(f"network: {type(exc).__name__}") from exc
+        if resp.status_code == 429:
+            raise BookingRateLimitedError("media_rate_limited_429")
+        if resp.status_code >= 500:
+            self._media_circuit.record_failure(now=now)
+            logger.warning("booking_client.media.5xx status=%d", resp.status_code)
+            raise BookingUnavailableError(f"http_{resp.status_code}")
         if resp.status_code not in (200, 404):
-            self._ok(resp, success=(200,))  # поднимает Unavailable / BadRequest
-        self._circuit.record_success()
+            raise BookingBadRequestError(
+                f"http_{resp.status_code}_{_err_code(resp)}",
+                status_code=resp.status_code,
+                code=_err_code(resp),
+            )
+        self._media_circuit.record_success()
         if resp.status_code == 404:
             return None
         return resp.content, resp.headers.get("content-type", "")
