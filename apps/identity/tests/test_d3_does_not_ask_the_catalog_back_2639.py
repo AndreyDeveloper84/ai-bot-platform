@@ -142,6 +142,8 @@ class TestD3DoesNotRecreateTheProxy:
             )
 
         assert out.shells == 1  # presence: the shell was found and the cascade ran
+        # failed_steps deliberately unchecked: whether an unlinked D3 is ok is
+        # the owner's ruling on ``not_linked``; this node must hold either way.
         assert resolutions == []
         assert catalog.requests == []
 
