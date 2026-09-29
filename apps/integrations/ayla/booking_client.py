@@ -1670,6 +1670,34 @@ class AylaBookingHTTPClient:
         )
         return self._ok(resp, success=(200,))
 
+    def specialist_media_file(
+        self,
+        *,
+        specialist_id: str,
+        item_id: str | None = None,
+    ) -> tuple[bytes, str] | None:
+        """Байты фото мастера (или работы портфолио) — ``None``, если их нет.
+
+        DRF-2539, вариант 3 владельца: каталог отдаёт файл, а не адрес
+        хранилища. ``GET internal/specialists/{id}/media/avatar/file/`` или
+        ``…/portfolio/{item}/file/``. Субъекта нет: это публичное лицо мастера,
+        каталог пускает сервисный токен (``IsInternalBearer``). 404 — «фото
+        нет» (мастера нет, файла нет, объект пропал или пуст — каталог
+        отвечает одинаково); остальное — как у всех вызовов клиента.
+        """
+        endpoint = (
+            f"specialists/{specialist_id}/media/avatar/file/"
+            if item_id is None
+            else f"specialists/{specialist_id}/portfolio/{item_id}/file/"
+        )
+        resp = self._request("GET", endpoint)
+        if resp.status_code not in (200, 404):
+            self._ok(resp, success=(200,))  # поднимает Unavailable / BadRequest
+        self._circuit.record_success()
+        if resp.status_code == 404:
+            return None
+        return resp.content, resp.headers.get("content-type", "")
+
     # ── M22 карточка профиля и портфолио (DRF-1814; каталог #471, #455) ────────
     # Тот же субъект и тот же bearer, что у PATCH выше. Лимиты (``limits``)
     # приходят из каталога и нигде здесь не повторяются: один источник для

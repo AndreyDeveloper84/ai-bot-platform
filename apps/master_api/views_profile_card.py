@@ -70,6 +70,11 @@ from apps.integrations.ayla.booking_client import (
 from apps.integrations.ayla.user_proxy import external_user_id_for
 from apps.master_api.auth import require_master_init_data
 from apps.tenancy.timezones import salon_zone
+from apps.miniapp_api.master_media import (
+    master_photo_path,
+    outward_portfolio,
+    outward_portfolio_item,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -212,7 +217,7 @@ def profile_card(request: HttpRequest) -> HttpResponse:
                 "id": str(master.id),
                 "name": state.get("display_name") or master.name,
                 "bio": state.get("bio") or "",
-                "photo_url": state.get("avatar_url") or "",
+                "photo_url": master_photo_path(master.id, state.get("avatar_url")),
             },
             "limits": dict(state.get("limits") or {}),
             "portfolio": dict(state.get("portfolio") or {}),
@@ -241,8 +246,11 @@ def profile_portfolio(request: HttpRequest) -> HttpResponse:
     try:
         if request.method == "GET":
             return JsonResponse(
-                client.list_specialist_portfolio(
-                    specialist_id=catalog_specialist_id(master), external_user_id=actor
+                outward_portfolio(
+                    master.id,
+                    client.list_specialist_portfolio(
+                        specialist_id=catalog_specialist_id(master), external_user_id=actor
+                    ),
                 )
             )
         image = request.FILES.get("image")
@@ -263,7 +271,7 @@ def profile_portfolio(request: HttpRequest) -> HttpResponse:
     logger.info(
         "master_api.profile_portfolio.uploaded master=%s item=%s", master.pk, item.get("id")
     )
-    return JsonResponse(item, status=201)
+    return JsonResponse(outward_portfolio_item(master.id, item), status=201)
 
 
 @require_http_methods(["DELETE"])

@@ -76,6 +76,7 @@ import {
   type MasterSchedule,
   type MeResponse,
 } from "../../lib/admin-api";
+import { MasterPhoto } from "../../components/MasterPhoto";
 import {
   hapticNotify,
   hapticSelection,
@@ -958,15 +959,12 @@ export function AdminMasterDetailScreen({ me }: Props) {
               fontWeight: 600,
             }}
           >
-            {master.photo_url ? (
-              <img
-                src={master.photo_url}
-                alt={`Фото ${master.name}`}
-                style={{ width: "100%", height: "100%", objectFit: "cover" }}
-              />
-            ) : (
-              <span aria-hidden="true">{initials(master.name)}</span>
-            )}
+            <MasterPhoto
+              src={master.photo_url}
+              alt={`Фото ${master.name}`}
+              style={{ width: "100%", height: "100%", objectFit: "cover" }}
+              fallback={<span aria-hidden="true">{initials(master.name)}</span>}
+            />
           </span>
           <div style={{ display: "flex", flexDirection: "column", gap: "var(--s-2)" }}>
             <input

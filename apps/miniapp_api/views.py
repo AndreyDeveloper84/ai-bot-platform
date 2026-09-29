@@ -66,6 +66,7 @@ from apps.integrations.ayla.offer_refusal import (
 from apps.identity.models import BotUser
 from apps.tenancy.models import Tenant
 from apps.miniapp_api.auth import VerifiedInitData
+from apps.miniapp_api.master_media import master_photo_path
 from apps.miniapp_api.transport_refusal import GUARD_ATTR, verify_request_init_data
 from apps.miniapp_api.dev_bypass import try_dev_bypass
 from apps.scheduling.services.resolver import (
@@ -815,7 +816,7 @@ def _master_to_dict(m: CatalogMaster) -> dict[str, Any]:
         "bio": m.bio,
         "experience": m.experience,
         "rating": str(m.rating) if m.rating is not None else None,
-        "photo_url": m.photo_url,
+        "photo_url": master_photo_path(m.id, m.photo_url),
         # DRF-1778 — trust signal только из данных: число отзывов из
         # зеркала (`reviews_count` фида). 0 — экран скобок не рисует.
         "review_count": int(m.review_count or 0),

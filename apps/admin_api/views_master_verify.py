@@ -82,6 +82,7 @@ from apps.catalog.master_state import AWAITING_VERIFICATION, is_available
 from apps.catalog.models import CatalogMaster
 from apps.catalog.services import verification
 from apps.identity.services.role_resolver import RoleContext
+from apps.miniapp_api.master_media import master_photo_path
 
 logger = logging.getLogger(__name__)
 
@@ -132,7 +133,7 @@ def _row(master: CatalogMaster) -> dict[str, Any]:
         "id": str(master.id),
         "name": master.name,
         "specialization": master.specialization,
-        "photo_url": master.photo_url,
+        "photo_url": master_photo_path(master.id, master.photo_url),
         "invite_status": master.invite_status,
     }
 
