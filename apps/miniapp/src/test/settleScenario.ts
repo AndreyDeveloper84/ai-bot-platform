@@ -1,0 +1,35 @@
+/**
+ * Дождаться, пока сценарий уляжется, — перед запретом «не позван» (DRF-2597).
+ *
+ * `expect(x).not.toHaveBeenCalled()` утверждает отсутствие вызова К ЭТОМУ
+ * МОМЕНТУ. Сразу после `findBy*` / `waitFor` / клика момент — «появился
+ * элемент», а запрещённый вызов, стоящий за следующим `await` (обработчик
+ * после промиса, эффект после загрузки, таймер 0 мс), случится позже, и
+ * проверка его не увидит: она не может провалиться. Запрет «за сценарий»
+ * ставится после этого помощника.
+ *
+ * Как устроен: раунды `act` с одним поворотом очереди событий
+ * (`setTimeout(…, 0)` — оборот цикла, а не ожидание по часам). Каждый раунд
+ * сливает микрозадачи (цепочки `mockResolvedValue`), таймеры с нулевой
+ * задержкой и отложенные эффекты React. Раунды идут, пока DOM не перестанет
+ * меняться два раунда подряд, но не меньше `min` и не больше `max`.
+ *
+ * Предел по построению: вызов с НАСТОЯЩЕЙ задержкой (`setTimeout(…, 500)`,
+ * дебаунс) помощник не дожидается — это ожидание по часам, и ему место в
+ * фейковых таймерах конкретного узла, а не здесь.
+ */
+import { act } from "@testing-library/react";
+
+export async function settleScenario({ min = 3, max = 12 } = {}): Promise<void> {
+  let previous = document.body.innerHTML;
+  let quiet = 0;
+  for (let round = 0; round < max; round += 1) {
+    await act(async () => {
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    });
+    const current = document.body.innerHTML;
+    quiet = current === previous ? quiet + 1 : 0;
+    previous = current;
+    if (round + 1 >= min && quiet >= 2) return;
+  }
+}

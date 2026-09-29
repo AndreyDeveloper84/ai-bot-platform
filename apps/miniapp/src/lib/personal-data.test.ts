@@ -187,6 +187,7 @@ describe("triggerDownload", () => {
 
     expect(createUrl).toHaveBeenCalledTimes(1);
     expect(clickSpy).toHaveBeenCalledTimes(1);
+    // DRF-2597: запрет по предмету временной — «адрес не отозван ДО 1000 мс»; момент верный, успокоение не нужно.
     expect(revokeUrl).not.toHaveBeenCalled();
     vi.advanceTimersByTime(1000);
     expect(revokeUrl).toHaveBeenCalledWith("blob:mock-url");

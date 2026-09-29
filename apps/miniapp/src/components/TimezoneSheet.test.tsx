@@ -19,6 +19,7 @@ import { createRef } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { TimezoneSheet, zoneLabel } from "./TimezoneSheet";
+import { settleScenario } from "../test/settleScenario";
 
 function renderSheet(opts: {
   current?: string;
@@ -105,6 +106,8 @@ describe("отказ ведёт к выбору, а не к пустоте", () 
     // Присутствие: список открылся…
     const option = await screen.findByRole("button", { name: "Владивосток" });
     // …отсутствие: лист не закрылся молча, оставив человека ни с чем.
+    // DRF-2597: лист не закрылся к моменту выбора — после того, как «Нет, другой» улёгся.
+    await settleScenario();
     expect(onClose).not.toHaveBeenCalled();
 
     await user.click(option);

@@ -37,6 +37,7 @@ import { ApiError } from "../lib/api";
 import * as foodScanner from "../lib/food-scanner";
 import { estimateFoodText, fetchConsentAt, logFoodText, type FoodTextEstimate } from "../lib/food-scanner";
 import { FoodScannerManualScreen, MANUAL_COPY, renderEstimateLines } from "./FoodScannerManualScreen";
+import { settleScenario } from "../test/settleScenario";
 
 const GUARD_ASYNC_TIMEOUT_MS = 20;
 let previousAsyncUtilTimeout = 1000;
@@ -114,6 +115,8 @@ describe("оценка → карточка → «В дневник»", () => {
     await typeAndEstimate("борщ 250");
 
     expect(mockedEstimate).toHaveBeenCalledWith("борщ 250", undefined);
+    // DRF-2597: оценка не пишет в дневник до «В дневник» — замер после того, как оценка улеглась.
+    await settleScenario();
     expect(mockedLog).not.toHaveBeenCalled(); // оценка ничего не пишет
 
     const card = screen.getByTestId("estimate-card");

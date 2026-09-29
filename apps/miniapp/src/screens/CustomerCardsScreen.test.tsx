@@ -27,6 +27,7 @@ vi.mock("../lib/max-sdk", async (importOriginal) => {
 import { deleteCard, getSavedCards, setupCard } from "../lib/cards";
 import { openPaymentConfirmation } from "../lib/max-sdk";
 import { CustomerCardsScreen } from "./CustomerCardsScreen";
+import { settleScenario } from "../test/settleScenario";
 
 const mockedList = vi.mocked(getSavedCards);
 const mockedSetup = vi.mocked(setupCard);
@@ -115,6 +116,8 @@ describe("CustomerCardsScreen (live C7.2)", () => {
       within(mirItem).getByRole("button", { name: /Отвязать/ }),
     );
     // Confirmation step — no delete call yet.
+    // DRF-2597: удаления нет до «Да, отвязать» — замер после того, как «Отвязать» улёгся.
+    await settleScenario();
     expect(mockedDelete).not.toHaveBeenCalled();
     await user.click(
       screen.getByRole("button", { name: "Да, отвязать" }),

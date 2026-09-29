@@ -39,6 +39,7 @@ vi.mock("../lib/max-sdk", () => ({
 import { getCatalogBrowse } from "../lib/customer-booking";
 import { returnToChat } from "../lib/max-sdk";
 import { bookingWhoText, CustomerWellnessDashboardScreen } from "./CustomerWellnessDashboardScreen";
+import { settleScenario } from "../test/settleScenario";
 
 const mockedBrowse = vi.mocked(getCatalogBrowse);
 /** «Ушёл в чат» — теперь `returnToChat` (DRF-2266), а не голый `closeApp`. */
@@ -404,6 +405,8 @@ describe("H01 · нет согласия дневника", () => {
     renderHome();
     fireEvent.click(await screen.findByRole("button", { name: "Дать согласие в чате" }));
     expect(await screen.findByText(/Приглашение уже в чате/)).toBeInTheDocument();
+    // DRF-2597: мини-апп не закрыт до «Открыть чат» — замер после того, как повтор приглашения улёгся.
+    await settleScenario();
     expect(mockedClose).not.toHaveBeenCalled();
     // Положительная пара: выход в чат — по явной кнопке.
     fireEvent.click(screen.getByRole("button", { name: "Открыть чат" }));

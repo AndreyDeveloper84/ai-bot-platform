@@ -26,6 +26,7 @@ import {
   type MissingItem,
 } from "../lib/customer-goals";
 import { GoalSelectScreen } from "./GoalSelectScreen";
+import { settleScenario } from "../test/settleScenario";
 
 const mockedFetch = vi.mocked(fetchDecisionContext);
 const mockedPost = vi.mocked(postGoalSelect);
@@ -111,6 +112,8 @@ describe("multi", () => {
     // Порядок тапов обратный порядку вариантов — в ответе порядок сервера.
     fireEvent.click(screen.getByRole("checkbox", { name: "Усталость" }));
     fireEvent.click(screen.getByRole("checkbox", { name: "Сухость" }));
+    // DRF-2597: тапы не шлют ответ до «Продолжить» — замер после того, как тапы улеглись.
+    await settleScenario();
     expect(mockedPost).not.toHaveBeenCalled();
     expect(screen.getByRole("checkbox", { name: "Сухость" })).toHaveAttribute(
       "aria-checked",

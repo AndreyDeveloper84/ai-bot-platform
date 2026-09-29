@@ -35,6 +35,7 @@ import {
   type MeResponse,
 } from "../../lib/admin-api";
 import { SalonPilotAylaScreen } from "./SalonPilotAylaScreen";
+import { settleScenario } from "../../test/settleScenario";
 
 const mockedHistory = vi.mocked(getAdminAylaHistory);
 const mockedAsk = vi.mocked(askAdminAyla);
@@ -133,6 +134,8 @@ describe("SalonPilotAylaScreen (DRF-2119)", () => {
     await userEvent.click(screen.getByLabelText("Отправить"));
 
     await screen.findByText(/Собираюсь закрыть время у Ольги/);
+    // DRF-2597: подтверждения нет до кнопки «Изменить график» — замер после того, как ответ улёгся.
+    await settleScenario();
     expect(mockedConfirm).not.toHaveBeenCalled(); // положительная половина — карточка выше
 
     await userEvent.click(screen.getByRole("button", { name: "Изменить график" }));

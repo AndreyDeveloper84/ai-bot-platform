@@ -45,6 +45,7 @@ import {
   type StaffInviteRow,
 } from "../../lib/admin-api";
 import { AdminInvitesScreen } from "./AdminInvitesScreen";
+import { settleScenario } from "../../test/settleScenario";
 
 const mockedList = vi.mocked(listStaffInvites);
 const mockedCancel = vi.mocked(cancelStaffInvite);
@@ -177,6 +178,8 @@ describe("cancel", () => {
 
     const dialog = await screen.findByRole("dialog");
     expect(within(dialog).getByText("Код: Ресепшен · Лена.")).toBeInTheDocument();
+    // DRF-2597: отмены нет до подтверждения в диалоге — замер после того, как открытие улеглось.
+    await settleScenario();
     expect(mockedCancel).not.toHaveBeenCalled();
 
     const reads = mockedList.mock.calls.length;
