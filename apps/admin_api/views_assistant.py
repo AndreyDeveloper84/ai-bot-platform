@@ -139,6 +139,11 @@ def assistant_ask(request: HttpRequest) -> HttpResponse:
     body = _body(request)
     if isinstance(body, JsonResponse):
         return body
+    # DRF-2666: свободный текст из тела хранится или уходит наружу — нестроковое
+    # значение получает отказ этой двери, а не становится текстом "{'a': 1}".
+    for field in ("text",):
+        if body.get(field) is not None and not isinstance(body.get(field), str):
+            return _error("bad_request", f"{field} must be a string", 400)
     text = str(body.get("text") or "").strip()
     if not text:
         return _error("bad_request", "text is required", 400)

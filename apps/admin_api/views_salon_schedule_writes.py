@@ -111,6 +111,21 @@ def _master(master_id: str) -> CatalogMaster | None:
     return CatalogMaster.objects.filter(id=mid).first()
 
 
+def _text_fields_refusal(body: dict[str, Any], *fields: str) -> JsonResponse | None:
+    """DRF-2666: свободный текст уходит в каталог как чужие данные.
+
+    Нестроковое значение — отказ этой же двери (``validation``, 400) ДО
+    обмена токена и вызова каталога, а не текст ``"{'a': 1}"`` в отгуле.
+    """
+    for field in fields:
+        value = body.get(field)
+        if value is not None and not isinstance(value, str):
+            return JsonResponse(
+                {"error": "validation", "detail": f"{field} must be a string"}, status=400
+            )
+    return None
+
+
 def _body(request: HttpRequest) -> dict[str, Any] | None:
     try:
         data = json.loads(request.body or b"{}")
@@ -277,6 +292,9 @@ def master_time_off(request: HttpRequest, master_id: str) -> HttpResponse:
         return JsonResponse(
             {"error": "validation", "detail": "start_at and end_at are required"}, status=400
         )
+    refused = _text_fields_refusal(body, "reason")
+    if refused is not None:
+        return refused
     return _write(
         request,
         master_id,
@@ -323,6 +341,9 @@ def master_date_exception(request: HttpRequest, master_id: str) -> HttpResponse:
             {"error": "validation", "detail": "date and a boolean is_working_day are required"},
             status=400,
         )
+    refused = _text_fields_refusal(body, "note")
+    if refused is not None:
+        return refused
     return _write(
         request,
         master_id,
