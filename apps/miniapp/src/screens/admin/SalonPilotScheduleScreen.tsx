@@ -181,6 +181,7 @@ function humanDate(iso: string): string {
  * трогает, так что блоки, приходящие часами, печатаются как есть.
  */
 function wireTime(iso: string): string {
+  // wall-clock-ok: ИЗВЕСТНЫЙ ДОЛГ (DRF-2589, ревью 28.09) — блоки и часы смены приходят временем суток, но визиты (visit.start_at, b.visit_at) приходят меткой, а admin_api/views_day.py отдаёт её в UTC (salon_day.py: start_at=proxy.start_at); докстринг выше полагает смещение салона — по коду сервера его нет. Лист — у главного окна.
   return iso.length >= 16 ? iso.slice(11, 16) : iso;
 }
 

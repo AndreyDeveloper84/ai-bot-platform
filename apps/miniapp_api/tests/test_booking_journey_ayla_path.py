@@ -422,6 +422,8 @@ class TestTheJourney:
         assert resp.status_code == 201, resp.content[:300]
         appointment_id = str(resp.json()["booking"]["id"])
         assert len(ayla.created) == 1
+        # DRF-2589: час в ответе — час салона (экран читает его из строки).
+        assert resp.json()["booking"]["visit_at"][11:16] == "14:00"
 
         # 2. ШОВ СУЩЕСТВУЕТ: до события записи в списке НЕТ. Это не
         #    придирка — без этой строки узел не отличал бы «шов пройден»

@@ -15,7 +15,7 @@ import hmac
 import json
 import time as time_module
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta
 from urllib.parse import quote, urlencode
 
 import pytest
@@ -218,7 +218,9 @@ class TestList:
         assert item["service_name"] == "Маникюр"  # via ayla_service_id mirror
         assert item["master_id"] == str(master.id)
         assert item["master_name"] == "Ольга"  # via CatalogMaster.id mirror
-        assert item["visit_at"] == proxy.start_at.isoformat()
+        # DRF-2589: тот же момент, но в поясе салона — не строка UTC.
+        assert datetime.fromisoformat(item["visit_at"]) == proxy.start_at
+        assert not item["visit_at"].endswith("+00:00")
         assert item["duration_min"] == 90  # end - start
         # Immediate-cancel surface: no two-step undo on the Ayla path.
         assert item["cancel_requested_at"] is None
