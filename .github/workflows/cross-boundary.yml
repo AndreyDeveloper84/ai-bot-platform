@@ -85,10 +85,10 @@ jobs:
 
     steps:
       - name: Checkout bot
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Checkout catalog @ pinned SHA
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: ${{ env.CATALOG_REPO }}
           ref: ${{ env.CATALOG_SHA }}

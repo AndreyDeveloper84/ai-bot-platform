@@ -81,9 +81,10 @@ is empty. To still exercise the auth flow:
 ## Runtime env vars
 
 - `VITE_SUPPORT_DEEPLINK` — support channel URL used by the profile
-  privacy sheets (#949). Falls back to the pilot placeholder
-  `https://max.me/aylasupport` when unset. Set it at deploy time once
-  ops decides the real support channel handle.
+  privacy sheets (#949). **Must be set for every deploy build** (DRF-2654):
+  unset or empty → the placeholder `https://max.me/aylasupport` is baked into
+  the bundle, and that is what the pilot shipped on 29.09. Where it is set
+  and how to check the bundle — `docs/runbooks/miniapp-build-env.md`.
 
 ## What's deferred (swap later in one PR)
 

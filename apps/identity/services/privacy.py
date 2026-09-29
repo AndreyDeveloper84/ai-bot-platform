@@ -654,6 +654,7 @@ def delete_personal_data(
     client: PersonalContextHttpClient | None = None,
     retry_source: str | None = None,
     erased_by_catalog: bool = False,
+    catalog_request_id: str | None = None,
 ) -> DeleteCascadeResult:
     """Run the C5 delete cascade for the person. Every step is
     idempotent; per-step outcomes are reported, never hidden.
@@ -678,6 +679,10 @@ def delete_personal_data(
     # Person-level, not row-level — see _resolve_person_link. A row-level
     # read makes a linked person look unlinked from the Mini App shell,
     # which would report their live memory as "no state".
+    if erased_by_catalog != bool(catalog_request_id):
+        # DRF-2651: the D3 audit row names the catalog's request; one without
+        # the other would write ``request_id: None`` or drop it silently.
+        raise ValueError("erased_by_catalog and catalog_request_id come together")
     link = _resolve_person_link(bot_user, resolve_upstream=not erased_by_catalog)
     ayla_user_id = link.ayla_user_id
     steps: list[DeleteStep] = []
@@ -891,12 +896,35 @@ def delete_personal_data(
 
     result = DeleteCascadeResult(steps=tuple(steps))
     # Audit: actor + scope only — never the deleted values (C5 §6.2).
+    # «actor» names WHO ACTED (DRF-2651). On the D3 path that is the catalog's
+    # deletion executor, not the person. ``ActorRole`` has no role for a
+    # service, so the kind comes from ``ActorType`` («system», as
+    # ``eventbus/dispatcher.py`` names service actions) and the executor's
+    # name goes in its own key, in the catalog's word (its log line says
+    # ``initiator=deletion_executor``). So this one key now holds words of
+    # two vocabularies — a role («customer») or a kind («system») — and must
+    # not be parsed against either type alone. Who ASKED for the deletion is not this
+    # row's fact: it carries the catalog's ``request_id``, and that
+    # ``DeletionRequest.initiator`` (bot/app/admin) says who asked. The bot
+    # keeps no audit row of the request itself — the legal trace is the
+    # catalog's.
+    actor = (
+        {
+            "actor": "system",
+            "initiator": "deletion_executor",
+            # The catalog's DeletionRequest: its ``initiator`` answers «who
+            # asked» in one step, whether or not the shell is linked.
+            "request_id": catalog_request_id,
+        }
+        if erased_by_catalog
+        else {"actor": "customer"}
+    )
     write_audit(
         "privacy.personal_data_deleted",
         target="BotUser",
         target_id=bot_user.id,
         payload={
-            "actor": "customer",
+            **actor,
             "scope": [s.step for s in result.steps],
             "all_ok": result.all_ok,
             "failed_steps": result.failed_steps,
