@@ -2404,7 +2404,8 @@ VOICE_STT_MONTHLY_MINUTES_CAP = int(os.environ.get("VOICE_STT_MONTHLY_MINUTES_CA
 #   не скачивается и человек получает «сейчас не могу разобрать голосовое».
 # VOICE_ECHO_MODE — never | always: «Я услышала: «…»» перед ответом
 #   (вопрос 4 ТЗ; режим «при неуверенности» невозможен — gpt-transcribe
-#   уверенность не отдаёт).
+#   уверенность не отдаёт). По умолчанию always — решение владельца 28.09
+#   (DRF-2425): ошибка распознавания видна до того, как уедет в дневник.
 # VOICE_GATE_STRIP_PUNCT — K19-Б (решение владельца 22.09): гейту safety
 #   отдаётся копия расшифровки без знаков препинания. Выключить, когда окно
 #   safety поправит исключение гиперболы в pre_check.py (вариант А).
@@ -2415,7 +2416,7 @@ VOICE_INPUT_ENABLED = os.environ.get("VOICE_INPUT_ENABLED", "false").strip().low
 VOICE_CROSS_BORDER_ALLOWED = (
     os.environ.get("VOICE_CROSS_BORDER_ALLOWED", "false").strip().lower() in _VOICE_TRUE
 )
-VOICE_ECHO_MODE = os.environ.get("VOICE_ECHO_MODE", "never").strip().lower()
+VOICE_ECHO_MODE = os.environ.get("VOICE_ECHO_MODE", "always").strip().lower()
 VOICE_GATE_STRIP_PUNCT = (
     os.environ.get("VOICE_GATE_STRIP_PUNCT", "true").strip().lower() in _VOICE_TRUE
 )
