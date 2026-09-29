@@ -183,6 +183,27 @@ dev = [
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
+[tool.uv]
+# DRF-2642 — полы ТРАНЗИТИВНЫХ зависимостей, у которых закрыты уязвимости
+# из открытых оповещений Dependabot (29.09). Ограничение, а не прямая
+# зависимость: пакет по-прежнему приходит через того, кому он нужен, но
+# лок не может опуститься ниже исправленной версии.
+#
+#   anyio >= 4.14.2        — critical: подмена TLS-сертификата через IDNA 2003
+#                            в TLSStream (#53); medium: зависание воркеров (#52)
+#   sqlparse >= 0.6.0      — high ×3 и medium ×2: квадратичные DoS на разборе
+#                            и выход из строки в генерации кода (#30–#33, #41)
+#   pydantic-settings >= 2.14.2 — medium: NestedSecretsSettingsSource идёт по
+#                            симлинкам наружу (#18); приходит через chromadb
+#
+# Сборки идут строго по uv.lock (Dockerfile: `uv sync --locked`, CI:
+# `--frozen`), поэтому действует лок; пол держит его от отката.
+constraint-dependencies = [
+    "anyio>=4.14.2",
+    "sqlparse>=0.6.0",
+    "pydantic-settings>=2.14.2",
+]
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["config*", "apps*"]
