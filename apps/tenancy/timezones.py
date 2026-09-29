@@ -14,10 +14,14 @@
 * битое имя → :data:`FALLBACK_TZ` и строка ``tenancy.bad_tenant_tz`` в журнал.
   Журнал — не украшение: до DRF-2595 так делали ``salon_day`` и
   ``time_preference``, а наивное сведение стёрло бы и эти две строки;
-* ``strict=True`` — битое имя не подменяется, а пробрасывается исключением
-  (после той же строки журнала). Для путей, где подмена опаснее отказа: запись,
-  созданная по московскому часу в салоне не в Москве, — неверные данные, которых
-  никто не заметит, а отказ громок.
+* ``strict=True`` — ни битое, ни ПУСТОЕ имя не подменяются, а дают отказ после
+  строки журнала; причины в журнале разные, потому что разное лечение:
+  ``tenancy.bad_tenant_tz`` — имя не разобрано (опечатка), исходное исключение;
+  ``tenancy.empty_tenant_tz`` — имя стёрто (у поля default есть, «никогда не
+  задавали» не бывает), :class:`EmptyTenantTimezone`. Для путей, чей выход —
+  обязательство (запись, предложенные часы): МСК там правдоподобен, а неверный
+  час — человек, который приедет не тогда. До DRF-2595 эти пути звали
+  ``ZoneInfo(tenant.timezone)`` и отказывали на обоих — это прежнее поведение.
 """
 
 from __future__ import annotations
@@ -36,6 +40,11 @@ logger = logging.getLogger(__name__)
 FALLBACK_TZ = "Europe/Moscow"
 
 
+class EmptyTenantTimezone(ValueError):
+    """Строгий путь: пояс салона пуст. ``ValueError`` — как у прежнего
+    ``ZoneInfo("")`` на этих путях, чтобы вызывающие ловили то же, что ловили."""
+
+
 def salon_zone(tenant: Any, *, strict: bool = False) -> ZoneInfo:
     """Пояс салона ``tenant`` по правилу модуля; ``tenant=None`` — как пустой."""
 
@@ -51,6 +60,9 @@ def salon_zone(tenant: Any, *, strict: bool = False) -> ZoneInfo:
             )
             if strict:
                 raise
+    elif strict:
+        logger.warning("tenancy.empty_tenant_tz tenant=%s", getattr(tenant, "pk", None))
+        raise EmptyTenantTimezone(f"tenant {getattr(tenant, 'pk', None)} has no timezone")
     return ZoneInfo(FALLBACK_TZ)
 
 

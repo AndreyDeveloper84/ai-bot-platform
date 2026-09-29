@@ -49,11 +49,20 @@ class TestTheRule:
     def test_strict_raises_on_a_broken_zone_after_the_same_log_line(self, caplog) -> None:
         with caplog.at_level("WARNING"), pytest.raises(ZoneInfoNotFoundError):
             salon_zone(_tenant("Not/AZone"), strict=True)
-        assert any("tenancy.bad_tenant_tz" in r.getMessage() for r in caplog.records)
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("tenancy.bad_tenant_tz" in m for m in messages)
+        assert not any("empty_tenant_tz" in m for m in messages)
 
-    def test_strict_keeps_the_fallback_for_an_unset_zone(self) -> None:
-        # strict — про БИТОЕ имя; незаданный пояс — default поля, не ошибка.
-        assert str(salon_zone(_tenant(""), strict=True)) == "Europe/Moscow"
+    def test_strict_refuses_an_empty_zone_with_its_own_reason(self, caplog) -> None:
+        # Пусто на строгом пути — отказ (так было до сведения: ZoneInfo("")),
+        # и причина в журнале своя: стёрли, а не опечатались.
+        from apps.tenancy.timezones import EmptyTenantTimezone
+
+        with caplog.at_level("WARNING"), pytest.raises(EmptyTenantTimezone):
+            salon_zone(_tenant(""), strict=True)
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("tenancy.empty_tenant_tz" in m for m in messages)
+        assert not any("bad_tenant_tz" in m for m in messages)
 
 
 class TestSalonIso:
