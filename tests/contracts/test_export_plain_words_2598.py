@@ -21,6 +21,11 @@ RFM/LTV), пути модулей и классов, константы, иде�
 номера листов ``DRF-…``, файлы ``*.md`` и жаргон разработки («мешок», «промпт»,
 «гейт», «свип», «сборка» …).
 
+Отдельный признак — **наше внутреннее состояние решения**: «стоит вопросом к
+владельцу», «отдельное решение владельца», «никто не принял решения». Человеку,
+который спросил, что мы о нём храним, не сообщают, кто у нас что ещё не
+решил (главное окно 29.09: «нет, никогда»).
+
 Разрешено: имена разделов самой выгрузки — человек видит их ключами в том же
 файле (``memory``, ``consents``, ``ayla`` и разделы ``ayla``), и названия
 продуктов (Ayla, MAX, BeautyGO).
@@ -68,11 +73,17 @@ JARGON = re.compile(
     r"оболочк|чатовый путь|аудируем|каскад|недо-отчёт|вышестоящ",
     re.IGNORECASE,
 )
+#: Наше незавершённое решение, показанное человеку.
+UNDECIDED = re.compile(
+    r"вопрос\w* к владельцу|стоит вопросом|отдельн\w* решени\w* владельца|"
+    r"не принял\w* решени|до слова владельца|решит владелец",
+    re.IGNORECASE,
+)
 
 
 def technical_words(text: str) -> set[str]:
     found: set[str] = set()
-    for pattern in (FORMATS, DOTTED, CONSTANT, CAMEL, TICKET, MD_FILE, JARGON):
+    for pattern in (FORMATS, DOTTED, CONSTANT, CAMEL, TICKET, MD_FILE, JARGON, UNDECIDED):
         found.update(m.group(0) for m in pattern.finditer(text))
     for m in SNAKE.finditer(text):
         if m.group(0) not in VISIBLE_SECTION_KEYS:
@@ -97,55 +108,26 @@ def subject_texts() -> dict[str, str]:
 #: многих полей (у 13 полей «Вычисленный снимок…»), номера плывут. Не
 #: исключения по сути — по ответу текст переписывается, запись снимается.
 AWAITING_OWNER: dict[str, frozenset[str]] = {
-    "152-ФЗ ст. 14 даёт право знать сос": frozenset(["сборк"]),
-    "Неотправленный черновик ответа мас": frozenset(["DRF-1369", "чатовый путь"]),
-    "Обезличенная переписка, оставшаяся": frozenset(
-        [
-            "ANONYMIZED_DIALOGUE_RETENTION_DAYS",
-            "OD_MEMORY",
-            "OD_MEMORY.md",
-            "apps.conversations.tasks.purge_expired_archived_messages",
-            "purge_expired_archived_messages",
-        ]
-    ),
-    "Состояние незавершённых пошаговых": frozenset(["DRF-2181"]),
-    "Переписка целиком: каждое сообщени": frozenset(
-        ["ArchivedMessage", "DRF-1369", "conversations.ArchivedMessage", "форензик"]
-    ),
-    "Диктовки сотрудника салонному асси": frozenset(["DRF-1276", "Каскад"]),
+    "Неотправленный черновик ответа мас": frozenset(["чатовый путь"]),
+    "Переписка целиком: каждое сообщени": frozenset(["отдельное решение владельца", "форензик"]),
+    "Диктовки сотрудника салонному асси": frozenset(["Каскад"]),
     "Контактные и профильные значения н": frozenset(["JSON", "оболочк"]),
-    "JSON-мешок «флагов персонализации»": frozenset(
-        ["JSON", "POLICY_DEBT", "personal_fields", "personal_fields.POLICY_DEBT", "мешка", "мешок"]
-    ),
+    "JSON-мешок «флагов персонализации»": frozenset(["JSON", "мешка", "мешок"]),
     "Вычисленный снимок RFM/LTV/риска:": frozenset(
         ["LTV", "RFM", "churn_risk", "low_rating_flag", "sentiment_score"]
     ),
-    "Красная зона — специальная категор": frozenset(
-        ["RedZoneAccessLog", "red_zone_reader", "аудируем"]
-    ),
-    "Жёлтая зона — личные факты с обяза": frozenset(["TTL"]),
+    "Красная зона — специальная категор": frozenset(["отдельное решение владельца"]),
+    "Жёлтая зона — личные факты с обяза": frozenset(["TTL", "вопрос к владельцу"]),
     "Состояние текущего разговора у дви": frozenset(["Redis", "чатовый путь"]),
     "Входящие сообщения из MAX в том ви": frozenset(["Redis", "чатовый путь"]),
     "Техническая обратная карта «токен": frozenset(
         ["Postgres", "Redis", "промпт", "свип", "чатовый путь"]
     ),
-    "Кратковременная память диалога в R": frozenset(
-        ["Redis", "SHORT_TERM_MEMORY_TTL_SECONDS", "чатовый путь"]
-    ),
+    "Кратковременная память диалога в R": frozenset(["Redis", "чатовый путь"]),
     "Разделы memory и personal_context": frozenset(
-        [
-            "apps.identity.services.forget_all_sweep",
-            "forget_all_sweep",
-            "гейт",
-            "надгробие",
-            "недо-отчёт",
-            "промпт",
-            "развёртк",
-        ]
+        ["гейт", "надгробие", "недо-отчёт", "промпт", "развёртк"]
     ),
-    "Раздел ayla отдаётся вышестоящей с": frozenset(
-        ["UserPersonalContext", "users.UserPersonalContext", "вышестоящ"]
-    ),
+    "Раздел ayla отдаётся вышестоящей с": frozenset(["вышестоящ"]),
 }
 
 
@@ -164,6 +146,8 @@ def test_the_surface_is_read_and_the_detector_sees() -> None:
     assert "RedZoneAccessLog" in technical_words("пишет RedZoneAccessLog")
     assert "DRF-1369" in technical_words("(DRF-1369)")
     assert "churn_risk" in technical_words("часть из них (churn_risk)")
+    assert "стоит вопросом" in technical_words("сам срок стоит вопросом к владельцу")
+    assert "отдельное решение владельца" in technical_words("— отдельное решение владельца")
     # Разрешённое не ловится: раздел выгрузки и название продукта.
     assert technical_words("выгружается в разделе memory и в разделе food_diary у Ayla") == set()
 
