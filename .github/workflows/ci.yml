@@ -669,9 +669,10 @@ jobs:
       # below type-checked them, which is exactly the trap: they looked
       # covered and defended nothing.
       #
-      # Measured against Postgres 16 (NOT SQLite — see cause (a) below
-      # for why that distinction is the whole story): 440 passed, 9
-      # skipped, 38 deselected. Four runs before merge — three locally
+      # Measured 22.08 (DRF-1253) against Postgres 16 (NOT SQLite — see
+      # cause (a) below for why that distinction is the whole story): 440
+      # passed, 9 skipped, 38 deselected — 34 of those re-enabled 28.09
+      # (DRF-2588), so these counts are history, not today's run. Four runs before merge — three locally
       # on Windows (~2.5 min each) and one on this runner (57.77s) —
       # all with identical counts. 21 of the 26 files are green as-is.
       #
@@ -693,24 +694,28 @@ jobs:
       # a success. (The `pytest apps/ -q` step below has exactly that
       # problem today. Out of scope for this ticket, worth its own.)
       #
-      # ─── Deselected: 38 tests, 4 root causes, none introduced here ──
+      # ─── Deselected: 3 tests, 2 root causes, none introduced here ───
       # Every one reproduced on Postgres and filed separately. Deselects
-      # are node-ID-scoped, not file-scoped, so the 206 passing tests
-      # that live *inside* those five files still run — above all the
-      # 186 green cases of the cross-tenant leakage scanner, which
-      # guards a security invariant and is worth keeping in CI.
+      # are node-ID-scoped, not file-scoped, so the passing tests that
+      # live *inside* those files still run. Since DRF-2588 the
+      # cross-tenant leakage scanner has NO deselects — keep it that way:
+      # it guards a security invariant, and a deselected case there was
+      # a leak check nobody ran for five weeks.
       #
-      # (a) 34 x tests/integration/test_cross_tenant_leakage.py — the
-      #     generic `_create_row` factory (`_MODEL_REQUIRED_FIELDS`) is
-      #     wrong on Postgres and only on Postgres:
-      #       31 x StringDataRightTruncation — the factory appends
-      #            "-{Model}-{n}" to a base value and overflows
-      #            varchar(16) columns (TenantStaff.role receives
-      #            "admin-TenantStaff-1", 19 chars).
-      #        3 x NotNullViolation — StaffInvite.expires_at is NOT NULL
-      #            with no default and the factory never supplies it.
-      #     SQLite enforces neither, which is why this file read as
-      #     green for as long as it sat outside CI. Test-side fix.
+      # (a) REMOVED (DRF-2588, 28.09): 34 x TestEveryScopedModel in
+      #     tests/integration/test_cross_tenant_leakage.py were deselected
+      #     here from 22.08 — 12 models (Message, ConsentRecord,
+      #     PaymentMirror, RemoteBookingProxy, BookingReminder, …) had no
+      #     cross-tenant leak check in CI for five weeks. Cause was the
+      #     generic `_create_row` factory: it appended "-{suffix}" to
+      #     every static string and overflowed varchar(16) on Postgres
+      #     (31 x StringDataRightTruncation), and StaffInvite had no
+      #     factory row at all (3 x NotNullViolation on expires_at). The
+      #     suffix now goes only to fields in a uniqueness rule, fitted to
+      #     max_length. Re-enabled only after a substitution showed every
+      #     one of the 34 goes red ON THE ASSERTION under a simulated
+      #     leak, not in setup — a re-enabled case that cannot fail would
+      #     be worse than a visibly disabled one.
       # (b) 2 x tests/e2e/ (test_max_echo, test_handoff_skill) — both
       #     assert the bot echoes the user's text back verbatim; DRF-963
       #     replaced verbatim echo with the "Я пока не понял" fallback.
@@ -753,41 +758,7 @@ jobs:
           uv run pytest tests/ --ignore=tests/smoke \
             --deselect 'tests/e2e/test_handoff_skill.py::test_handoff_flow_creates_task_silences_followup_resumes_on_resolve' \
             --deselect 'tests/e2e/test_max_echo.py::test_max_webhook_to_echo_happy_path' \
-            --deselect 'tests/e2e/test_privacy_skill.py::test_delete_data_triggers_privacy_skill_and_wipes_user' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_default_manager_filters_by_current_tenant[TenantStaff]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_default_manager_filters_by_current_tenant[StaffInvite]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_default_manager_filters_by_current_tenant[DisclaimerLibrary]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_default_manager_filters_by_current_tenant[AIRequestMetric]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_default_manager_filters_by_current_tenant[BookingReminder]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_default_manager_filters_by_current_tenant[PendingBookingAction]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_default_manager_filters_by_current_tenant[RemoteBookingProxy]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_default_manager_filters_by_current_tenant[PaymentMirror]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_default_manager_filters_by_current_tenant[ScheduleException]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_default_manager_filters_by_current_tenant[LoyaltyEvent]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_audit_mode_returns_empty_without_context[TenantStaff]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_audit_mode_returns_empty_without_context[StaffInvite]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_audit_mode_returns_empty_without_context[Message]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_audit_mode_returns_empty_without_context[ConsentRecord]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_audit_mode_returns_empty_without_context[DisclaimerLibrary]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_audit_mode_returns_empty_without_context[AIRequestMetric]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_audit_mode_returns_empty_without_context[BookingReminder]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_audit_mode_returns_empty_without_context[PendingBookingAction]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_audit_mode_returns_empty_without_context[RemoteBookingProxy]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_audit_mode_returns_empty_without_context[PaymentMirror]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_audit_mode_returns_empty_without_context[ScheduleException]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_audit_mode_returns_empty_without_context[LoyaltyEvent]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_off_mode_returns_all_rows[TenantStaff]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_off_mode_returns_all_rows[StaffInvite]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_off_mode_returns_all_rows[Message]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_off_mode_returns_all_rows[ConsentRecord]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_off_mode_returns_all_rows[DisclaimerLibrary]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_off_mode_returns_all_rows[AIRequestMetric]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_off_mode_returns_all_rows[BookingReminder]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_off_mode_returns_all_rows[PendingBookingAction]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_off_mode_returns_all_rows[RemoteBookingProxy]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_off_mode_returns_all_rows[PaymentMirror]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_off_mode_returns_all_rows[ScheduleException]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_off_mode_returns_all_rows[LoyaltyEvent]'
+            --deselect 'tests/e2e/test_privacy_skill.py::test_delete_data_triggers_privacy_skill_and_wipes_user'
 
       # Static Ayla client↔route-table contract (S0-C / G-Contract). Pure,
       # network-free: exercises every bot Ayla client through its real code and
