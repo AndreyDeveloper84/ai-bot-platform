@@ -72,8 +72,10 @@ class KbDocument(models.Model):
       * ``doc_type`` — one of :class:`KbDocType`. Drives the chunking
         strategy and metadata payload written into ChromaDB.
       * ``source_uri`` — stable provenance key. For catalog-mirrored
-        rows: ``mysite://services/<external_id>``,
-        ``mysite://masters/<external_id>``, etc. For manual rows
+        rows: ``ayla://services/<ayla uuid>``, ``mysite://services/<legacy
+        pk>`` or ``mirror://services/<mirror uuid>`` — the first identity
+        the row really has (``apps.kb.projectors._source_uri``, DRF-2626;
+        the field's ``help_text`` below predates it). For manual rows
         (legal text, hand-curated FAQ): a free-form slug.
       * ``version`` — monotonic int per ``source_uri``. Increment when
         upstream content changes; old versions stay queryable for
