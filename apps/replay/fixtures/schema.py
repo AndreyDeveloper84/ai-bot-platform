@@ -47,9 +47,9 @@ class Fixture:
     # Ayla must not answer with it. This field carries the inverse contract:
     # every phrase here MUST occur in ``input.text``, otherwise it belongs in
     # ``forbidden``. Evaluated on the reply exactly like ``forbidden``.
-    # Limit: substring rules only (``response_contains_any``/``_all``); a
-    # regex in ``voice_check.forbidden_phrases`` has no reply-side twin yet —
-    # the echo baselines run it against the input too.
+    # Substring rules only (``response_contains_any``/``_all``). The regex
+    # twin is ``voice_check.forbidden_phrases_in_reply`` (DRF-2604). Which
+    # to use: substring → ``forbidden_in_reply``; regex → ``voice_check.forbidden_phrases_in_reply``.
     forbidden_in_reply: list[dict[str, Any]] = field(default_factory=list)
     voice_check: dict[str, Any] = field(default_factory=dict)
     expected_action_type: str | None = None

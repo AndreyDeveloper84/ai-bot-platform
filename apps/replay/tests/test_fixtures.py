@@ -300,7 +300,7 @@ class TestAdversarialFixtureSet:
             # asserts something positive about the reply, which is why the
             # crisis fixtures could not be added before this.
             failures = evaluate(trace, [], f.forbidden)
-            voice_failures = evaluate_voice(text, f.voice_check)
+            voice_failures = evaluate_voice(text, f.voice_check, reply_side=False)
             assert not failures and not voice_failures, (
                 f"{f.name}: forbidden/voice clashes with echo baseline: {failures + voice_failures}"
             )
@@ -335,8 +335,9 @@ class TestVoiceFixtureSet:
 
         root = Path(__file__).resolve().parents[1] / "fixtures" / "voice"
         for f in load_fixture_set(root):
+            vc = f.voice_check or {}
             has_forbidden = bool(f.reply_forbidden) or bool(
-                (f.voice_check or {}).get("forbidden_phrases")
+                vc.get("forbidden_phrases") or vc.get("forbidden_phrases_in_reply")
             )
             assert has_forbidden, (
                 f"{f.name}: voice fixture must declare at least one forbidden rule"
@@ -366,7 +367,7 @@ class TestVoiceFixtureSet:
             # asserts something positive about the reply, which is why the
             # crisis fixtures could not be added before this.
             failures = evaluate(trace, [], f.forbidden)
-            voice_failures = evaluate_voice(text, f.voice_check)
+            voice_failures = evaluate_voice(text, f.voice_check, reply_side=False)
             assert not failures and not voice_failures, (
                 f"{f.name}: forbidden/voice clashes with echo baseline: {failures + voice_failures}"
             )
