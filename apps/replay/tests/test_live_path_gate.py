@@ -197,7 +197,7 @@ class TestDeterministicRepliesAreHeldToTheFixture:
                 "concierge, not from a deterministic branch"
             )
 
-        failures = evaluate(result.as_trace(), fixture.must_pass, fixture.forbidden)
+        failures = evaluate(result.as_trace(), fixture.must_pass, fixture.reply_forbidden)
         failures += evaluate_voice(result.response_text, fixture.voice_check)
         assert not failures, f"{fixture.name}: {failures}"
 

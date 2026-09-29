@@ -135,7 +135,7 @@ class Runner:
                 logger.exception("replay.runner.recorder_failed trace_id=%s", trace_id)
 
         # Assertion phase — pure logic; never crashes.
-        failures = evaluate(trace, fixture.must_pass, fixture.forbidden)
+        failures = evaluate(trace, fixture.must_pass, fixture.reply_forbidden)
         voice_failures = evaluate_voice(str(trace.get("response_text", "")), fixture.voice_check)
 
         # Pipeline-error marker propagates as a failure.
