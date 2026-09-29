@@ -41,7 +41,6 @@ class TestReadyzAllHealthy:
             patch("apps.orchestrator.views._ping_postgres", AsyncMock()),
             patch("apps.orchestrator.views._ping_redis", AsyncMock()),
             patch("apps.orchestrator.views._ping_chromadb", AsyncMock()),
-            patch("apps.orchestrator.views._ping_minio", AsyncMock()),
         ):
             response = await client.get("/readyz/")
         assert response.status_code == 200
@@ -55,7 +54,6 @@ class TestReadyzAllHealthy:
             "postgres",
             "redis",
             "chromadb",
-            "minio",
             "intent_router",
             "skill_registry",
             "chromadb_auth",
@@ -80,7 +78,6 @@ class TestReadyzFailure:
                 AsyncMock(side_effect=ConnectionError("redis down")),
             ),
             patch("apps.orchestrator.views._ping_chromadb", AsyncMock()),
-            patch("apps.orchestrator.views._ping_minio", AsyncMock()),
         ):
             response = await client.get("/readyz/")
         assert response.status_code == 503
@@ -103,7 +100,6 @@ class TestReadyzFailure:
             patch("apps.orchestrator.views._ping_postgres", AsyncMock()),
             patch("apps.orchestrator.views._ping_redis", AsyncMock()),
             patch("apps.orchestrator.views._ping_chromadb", hang),
-            patch("apps.orchestrator.views._ping_minio", AsyncMock()),
         ):
             response = await client.get("/readyz/")
         assert response.status_code == 503
@@ -124,7 +120,6 @@ class TestReadyzFailure:
                 "apps.orchestrator.views._ping_chromadb",
                 AsyncMock(side_effect=RuntimeError("chroma down")),
             ),
-            patch("apps.orchestrator.views._ping_minio", AsyncMock()),
         ):
             response = await client.get("/readyz/")
         assert response.status_code == 503
@@ -132,7 +127,6 @@ class TestReadyzFailure:
         assert body["checks"]["postgres"]["ok"] is False
         assert body["checks"]["chromadb"]["ok"] is False
         assert body["checks"]["redis"]["ok"] is True
-        assert body["checks"]["minio"]["ok"] is True
 
 
 class TestExcludedFromTenantMiddleware:
@@ -159,7 +153,6 @@ class TestExcludedFromTenantMiddleware:
             patch("apps.orchestrator.views._ping_postgres", AsyncMock()),
             patch("apps.orchestrator.views._ping_redis", AsyncMock()),
             patch("apps.orchestrator.views._ping_chromadb", AsyncMock()),
-            patch("apps.orchestrator.views._ping_minio", AsyncMock()),
         ):
             response = await client.get("/readyz/")
         assert response.status_code == 200
@@ -174,7 +167,6 @@ class TestReadyzChromaSemantics:
         with (
             patch("apps.orchestrator.views._ping_postgres", AsyncMock()),
             patch("apps.orchestrator.views._ping_redis", AsyncMock()),
-            patch("apps.orchestrator.views._ping_minio", AsyncMock()),
         ):
             response = await client.get("/readyz/")
         assert response.status_code == 200
@@ -188,7 +180,6 @@ class TestReadyzChromaSemantics:
         with (
             patch("apps.orchestrator.views._ping_postgres", AsyncMock()),
             patch("apps.orchestrator.views._ping_redis", AsyncMock()),
-            patch("apps.orchestrator.views._ping_minio", AsyncMock()),
         ):
             response = await client.get("/readyz/")
         assert response.status_code == 200
@@ -221,7 +212,6 @@ class TestReadyzChromaSemantics:
             patch("apps.orchestrator.views._ping_redis", AsyncMock()),
             patch("httpx.AsyncClient", side_effect=lambda **kw: _FakeClient(**kw)),
             patch("httpx.head", return_value=MagicMock(status_code=200)),
-            patch("apps.orchestrator.views._ping_minio", AsyncMock()),
         ):
             response = await client.get("/readyz/")
         assert response.status_code == 200
@@ -240,7 +230,6 @@ class TestReadyzChromaSemantics:
             patch("apps.orchestrator.views._ping_redis", AsyncMock()),
             patch("httpx.AsyncClient", side_effect=lambda **kw: _raise()),
             patch("httpx.head", return_value=MagicMock(status_code=200)),
-            patch("apps.orchestrator.views._ping_minio", AsyncMock()),
         ):
             response = await client.get("/readyz/")
         assert response.status_code == 503
@@ -279,7 +268,6 @@ class TestReadyzChromaSemantics:
             patch("apps.orchestrator.views._ping_redis", AsyncMock()),
             patch("httpx.AsyncClient", side_effect=lambda **kw: _FakeClient(**kw)),
             patch("httpx.head", return_value=_UnauthorizedResponse(401)),
-            patch("apps.orchestrator.views._ping_minio", AsyncMock()),
         ):
             response = await client.get("/readyz/")
         assert response.status_code == 503
@@ -297,7 +285,6 @@ class TestReadyzChromaSemantics:
                 "apps.orchestrator.views._ping_redis",
                 AsyncMock(side_effect=ConnectionError("redis down")),
             ),
-            patch("apps.orchestrator.views._ping_minio", AsyncMock()),
         ):
             response = await client.get("/readyz/")
         assert response.status_code == 503
