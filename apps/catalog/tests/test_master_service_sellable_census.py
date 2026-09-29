@@ -120,7 +120,8 @@ EXPECTED: dict[str, tuple[int, str, str]] = {
         1,
         NOT_SALE_PATH,
         "перенос существующей записи — не продажа: решение владельца R6 "
-        "(OWNER_QUESTIONS.md), цена не перепроверяется; закреплено тестом DRF-1989",
+        "(docs/OWNER_QUESTIONS_2026-09-12.md, раздел T), цена не перепроверяется; "
+        "закреплено тестом DRF-1989",
     ),
     "apps/admin_api/views_services_mapping.py": (
         6,
