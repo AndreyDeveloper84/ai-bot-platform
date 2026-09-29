@@ -107,6 +107,16 @@ class SalonRouteAccess(str, Enum):
     #: The view accepts no service credential at all — JWT only.
     JWT_ONLY = "jwt_only"
 
+    #: DRF-2607, owner ruling 29.09 «(а) — подпись MAX, служебный ключ в
+    #: записи не участвует». Called on the salon administrator's OWN token
+    #: (``apps.integrations.ayla.person_token``), never on the service key —
+    #: which stays read-only here. Opened only where Ayla accepts that token
+    #: (catalog #593): time off and per-date exceptions. The §117 conditions
+    #: are Ayla's: object authorization (``IsTenantAdmin`` + tenant-scoped
+    #: master), tenant scope (the token is bound to one salon), audit
+    #: attribution (the journal names the person and ``via=max_init_data``).
+    PERSON_TOKEN = "person_token"
+
 
 @dataclass(frozen=True)
 class SalonRoute:
@@ -251,22 +261,15 @@ SALON_ROUTES: tuple[SalonRoute, ...] = (
         name="tenants-master-time-off",
         method="POST",
         path="masters/{specialist_id}/time-off/",
-        access=SalonRouteAccess.SERVICE_READ_ONLY,
-        reason=(
-            "Creating an absence is a consequential write; the service "
-            "credential is read-only on this surface by owner decision "
-            "(OD_SALON_P0_CONTRACT ЧАСТЬ 2.1). The impact preview that must "
-            "precede it IS callable — see tenants-master-schedule-impact — so "
-            "a screen can show the consequence honestly and hand the commit "
-            "to the console."
-        ),
+        access=SalonRouteAccess.PERSON_TOKEN,
+        client_method="create_time_off",
     ),
     SalonRoute(
         name="tenants-master-time-off-detail",
         method="DELETE",
         path="masters/{specialist_id}/time-off/{pk}/",
-        access=SalonRouteAccess.SERVICE_READ_ONLY,
-        reason="Write on the read-only surface — same as the POST above.",
+        access=SalonRouteAccess.PERSON_TOKEN,
+        client_method="delete_time_off",
     ),
     SalonRoute(
         name="tenants-master-schedule-exceptions",
@@ -279,19 +282,15 @@ SALON_ROUTES: tuple[SalonRoute, ...] = (
         name="tenants-master-schedule-exceptions",
         method="PUT",
         path="masters/{specialist_id}/schedule-exceptions/",
-        access=SalonRouteAccess.SERVICE_READ_ONLY,
-        reason=(
-            "Write on the read-only surface — the specific-date «не работаю» "
-            "upsert. PUT rather than POST because there is one row per "
-            "(master, date)."
-        ),
+        access=SalonRouteAccess.PERSON_TOKEN,
+        client_method="set_schedule_exception",
     ),
     SalonRoute(
         name="tenants-master-schedule-exception-detail",
         method="DELETE",
         path="masters/{specialist_id}/schedule-exceptions/{date}/",
-        access=SalonRouteAccess.SERVICE_READ_ONLY,
-        reason="Write on the read-only surface — clears a specific-date exception.",
+        access=SalonRouteAccess.PERSON_TOKEN,
+        client_method="delete_schedule_exception",
     ),
     SalonRoute(
         name="tenants-closures",
@@ -382,6 +381,19 @@ def callable_client_methods() -> tuple[str, ...]:
             raise ValueError(
                 f"CALLABLE salon route {route.method} {route.path} names no client "
                 "method — a callable row must say what calls it."
+            )
+        names.append(route.client_method)
+    return tuple(names)
+
+
+def person_token_client_methods() -> tuple[str, ...]:
+    """The method names bound to PERSON_TOKEN routes — same narrowing as above."""
+
+    names: list[str] = []
+    for route in routes_by_access(SalonRouteAccess.PERSON_TOKEN):
+        if route.client_method is None:
+            raise ValueError(
+                f"PERSON_TOKEN salon route {route.method} {route.path} names no client method."
             )
         names.append(route.client_method)
     return tuple(names)

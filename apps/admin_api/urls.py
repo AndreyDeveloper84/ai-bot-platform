@@ -29,6 +29,7 @@ from apps.admin_api import (
     views_master_schedule,
     views_master_verify,
     views_salon_frame,
+    views_salon_schedule_writes,
     views_staff_invite,
     views_staff_invites,
     views_staff_revoke,
@@ -212,6 +213,29 @@ urlpatterns = [
         "masters/<str:master_id>/schedule/impact/",
         views_schedule_impact.master_schedule_impact,
         name="master_schedule_impact",
+    ),
+    # DRF-2607 — отгул и изменение на дату на СОБСТВЕННОМ токене
+    # администратора (подпись MAX); служебный ключ в записи не участвует.
+    # Недельный шаблон и закрытия не открыты.
+    path(
+        "masters/<str:master_id>/time-off/",
+        views_salon_schedule_writes.master_time_off,
+        name="master_time_off",
+    ),
+    path(
+        "masters/<str:master_id>/time-off/<str:time_off_id>/",
+        views_salon_schedule_writes.master_time_off_detail,
+        name="master_time_off_detail",
+    ),
+    path(
+        "masters/<str:master_id>/date-exceptions/",
+        views_salon_schedule_writes.master_date_exception,
+        name="master_date_exception",
+    ),
+    path(
+        "masters/<str:master_id>/date-exceptions/<str:date>/",
+        views_salon_schedule_writes.master_date_exception_detail,
+        name="master_date_exception_detail",
     ),
     path(
         "masters/<str:master_id>/schedule/confirm/",
