@@ -11,9 +11,11 @@
 
 1. :func:`~apps.identity.services.privacy.delete_personal_data` на одной
    из оболочек (каскад C5 — person-level: память, согласия, PII оболочек,
-   нити ассистента, диалог → ``ArchivedMessage``). Шаг 1 каскада ходит в
-   каталог за ``…/personal-data/`` — каталог к этому моменту уже обезличил
-   строку, и это идемпотентный ответ «стирать нечего».
+   нити ассистента, диалог → ``ArchivedMessage``). Шаг 1 каскада в каталог
+   НЕ ходит (DRF-2639): каталог к этому моменту уже стёр свою половину и
+   переименовал прокси, и ``DELETE …/personal-data/`` получил бы не «стирать
+   нечего», а ``unknown_actor`` 403 — заявка оставалась бы ``PROCESSING``
+   и повторялась каждым тиком (900 с) без конца.
 2. :func:`~apps.identity.services.deletion_gate.clear_deletion_flag` —
    флаг D2 снимается тем же ходом, что и ``COMPLETED`` в каталоге.
 
@@ -81,7 +83,9 @@ def execute_bot_half(
     if shells:
         # Каскад — person-level (см. ``_person_shell_ids``): одной оболочки
         # достаточно, остальные он находит сам по каналу и ``ayla_user_id``.
-        result = delete_personal_data(shells[0])
+        # DRF-2639: the catalog has already erased its half and renamed the
+        # proxies — its own erasure is not asked for again (see the kwarg).
+        result = delete_personal_data(shells[0], erased_by_catalog=True)
         steps = [{"step": s.step, "ok": s.ok, "detail": s.detail} for s in result.steps]
         failed = list(result.failed_steps)
 

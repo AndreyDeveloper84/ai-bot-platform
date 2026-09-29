@@ -646,6 +646,7 @@ def delete_personal_data(
     *,
     client: PersonalContextHttpClient | None = None,
     retry_source: str | None = None,
+    erased_by_catalog: bool = False,
 ) -> DeleteCascadeResult:
     """Run the C5 delete cascade for the person. Every step is
     idempotent; per-step outcomes are reported, never hidden.
@@ -656,7 +657,15 @@ def delete_personal_data(
     подтверждения каталогом; иначе ``deletion_started`` (или
     ``superseded_by_account_deletion``). Без источника — прежний путь: так
     зовёт бот-половина D3, у которой повтор и перечитывание остатка — на
-    стороне каталога (решение главного окна В2)."""
+    стороне каталога (решение главного окна В2).
+
+    ``erased_by_catalog`` (DRF-2639) — только бот-половина D3: каталог сам
+    инициатор и уже стёр свою половину (``erase_personal_context`` в
+    ``deletion_executor``), а прокси переименовал — наш ``DELETE`` получил
+    бы ``unknown_actor`` 403, неотличимый от сломанного заголовка, и
+    заявка вращалась бы вечно (тик 900 с). Шаг ``ayla_delete`` — ok по
+    заявлению каталога, без запроса. Ветки ``identity_conflict`` и
+    ``not_linked`` не меняются."""
     # Person-level, not row-level — see _resolve_person_link. A row-level
     # read makes a linked person look unlinked from the Mini App shell,
     # which would report their live memory as "no state".
@@ -682,6 +691,10 @@ def delete_personal_data(
             bot_user.id,
         )
         steps.append(DeleteStep("ayla_delete", False, "not_linked"))
+    elif erased_by_catalog:
+        # DRF-2639: the catalog asked us after erasing its half; asking it
+        # back is a 403 by construction, not a fact about the erasure.
+        steps.append(DeleteStep("ayla_delete", True, "erased_by_catalog"))
     elif retry_source is not None and ayla_erasure.retry_enabled():
         # DRF-1950 (M3): «удалено» — только после readback каталога. Снимок
         # внешнего id берётся здесь, до локальных шагов, которые стирают
