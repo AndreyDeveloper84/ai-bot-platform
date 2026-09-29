@@ -291,7 +291,10 @@ export class DataStorageRevocationFailedError extends Error {
  * do NOT hardcode another URL here.
  */
 export const SUPPORT_DEEPLINK =
-  (import.meta.env.VITE_SUPPORT_DEEPLINK as string | undefined) ??
+  // DRF-2654: `||`, а не `??` — пустая строка (`.env.local.example`) тоже
+  // «не задано». Сборка выкладки обязана задать переменную: без неё в бандл
+  // уезжает эта заглушка (замер пилота 29.09) — docs/runbooks/miniapp-build-env.md.
+  (import.meta.env.VITE_SUPPORT_DEEPLINK as string | undefined) ||
   "https://max.me/aylasupport";
 
 // ---------------------------------------------------------------------------
