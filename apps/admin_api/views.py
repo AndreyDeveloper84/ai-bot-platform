@@ -625,7 +625,7 @@ def master_photo_upload(request: HttpRequest, master_id: str) -> HttpResponse:
     первая синхронизация затирала его ``avatar_url`` каталога. Теперь
     владелец байтов один — каталог (``POST tenants/me/masters/{id}/media/avatar/``),
     правила файла его (форматы по содержимому, размер, квадрат), отказ несёт
-    ``details.reason``. Путь записи — общий с отгулами (``_write``): токен
+    ``details.reason``. Путь записи — общий с отгулами (``salon_person_write``): токен
     человека, один код отказа, журнал с причиной.
 
     Зеркало берёт ``avatar_url`` из ОТВЕТА каталога сразу — как
