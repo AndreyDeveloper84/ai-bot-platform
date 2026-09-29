@@ -191,11 +191,11 @@ function wireTime(iso: string): string {
  * замер 29.09): каталог отдаёт отгулы в UTC (`users/schedule_api.py:201`,
  * `_to_to_dict`: `to.start_at.isoformat()` при `USE_TZ=True`), бот передаёт
  * как есть (`admin_api/views_master_exceptions.py:149`) — час и дата около
- * полуночи уедут. Носитель вынесен отдельным листом; до его починки
+ * полуночи уедут. Носитель — лист DRF-2601 (снять пометку вместе с починкой); до неё
  * функция держит долг на виду, а не прячет его в `wireTime`.
  */
 function timeOffWhen(startAt: string, endAt: string): string {
-  // wall-clock-ok: ИЗВЕСТНЫЙ ДОЛГ — отгулы приходят из каталога в UTC (users/schedule_api.py:201); отдельный лист у главного окна
+  // wall-clock-ok: ИЗВЕСТНЫЙ ДОЛГ DRF-2601 — отгулы приходят из каталога в UTC (users/schedule_api.py:201); снять вместе с починкой
   return `${humanDate(startAt.slice(0, 10))} · ${startAt.slice(11, 16)}–${endAt.slice(11, 16)}`;
 }
 
