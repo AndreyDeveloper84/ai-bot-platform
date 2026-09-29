@@ -3,8 +3,9 @@
  * unified admin+master for solo providers and dual-role staff) coexist
  * behind a /api/v1/me boot fetch + role-gated routes.
  *
- * Spec: docs/design/handoffs/2026-05-18-master-management-handoff.md §MM0
- * (admin shell) + ADR-0008 (role detection) + memory
+ * Spec: the admin shell has none — master-management-handoff has no
+ * section MM0 (its screens are MM1–MM5), see DRF-2679. Role detection:
+ * ADR-0008 + memory
  * `project_solo_provider_universal_ui` (founder decision 2026-05-25 —
  * universal UI with smart defaults; solo provider = self-employed
  * Olga who is owner+admin+master in one tenant, one User row).

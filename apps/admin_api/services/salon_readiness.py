@@ -7,7 +7,7 @@
 ### Два слоя, и почему их два
 
 Каталог (``GET /api/v1/internal/salons/<slug>/readiness/``, контракт §2b
-``docs/CATALOG_INTERNAL_API_CONTRACT.md``) знает публикацию, рабочие дни,
+``beautygo_backend/docs/CATALOG_INTERNAL_API_CONTRACT.md``) знает публикацию, рабочие дни,
 продаваемые предложения, привязку MAX-личности и свободные окна. Он **не
 знает** того, что живёт только в зеркале бота: подтверждения графика
 владельцем (§83, ``schedule_confirmed_at``), ``catalog_specialist_id``,

@@ -22,10 +22,10 @@ Two steps:
   1. Add the constant here.
   2. Append to :data:`CANONICAL_EVENTS`.
 
-(A third step — «document the payload contract in
-``docs/agents/events_vocabulary.md``, Sprint 5 deliverable» — was removed
-in DRF-2657: that document was never written, and the step was followed
-0 times across the 71 constants added from 11.05 to 18.09.)
+(A third step — «document the payload contract» in an events vocabulary
+document under ``docs/agents/``, marked a Sprint 5 deliverable — was
+removed in DRF-2657: that document was never written, and the step was
+followed 0 times across the 71 constants added from 11.05 to 18.09.)
 
 DO NOT remove or rename existing constants without a migration plan —
 old replay snapshots reference them by string value.

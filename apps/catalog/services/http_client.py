@@ -2,7 +2,7 @@
 
 Typed wrapper around :class:`httpx.Client` for Ayla's read-only internal
 catalog surface (`SalonService` → `SpecialistService`, per
-``docs/CATALOG_INTERNAL_API_CONTRACT.md`` on the Ayla repo). The upserter
+``beautygo_backend/docs/CATALOG_INTERNAL_API_CONTRACT.md`` on the Ayla repo). The upserter
 (:mod:`apps.catalog.services.upserter`) consumes the returned DTOs.
 
 Covers all three read surfaces the mirror needs:
@@ -188,7 +188,7 @@ class CatalogSpecialistServiceDTO:
 
     Ayla's canonical **bookable edge** (``SpecialistService``) — the
     master↔service relation the ``MasterService`` mirror is built from
-    (DRF-945). Per ``docs/CATALOG_INTERNAL_API_CONTRACT.md`` §2:
+    (DRF-945). Per ``beautygo_backend/docs/CATALOG_INTERNAL_API_CONTRACT.md`` §2:
 
     * ``ayla_specialist_service_id`` — ``SpecialistService.id``, the stable
       booking key and this mirror's provenance stamp.

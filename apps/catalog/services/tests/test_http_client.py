@@ -3,7 +3,7 @@
 Network is mocked via ``pytest-httpx`` so CI never hits real Ayla. We
 exercise the wire-shape contract: Bearer auth + tenant filter + DRF
 PageNumberPagination + retry / error-mapping + DTO parsing against
-``docs/CATALOG_INTERNAL_API_CONTRACT.md``.
+``beautygo_backend/docs/CATALOG_INTERNAL_API_CONTRACT.md``.
 """
 
 from __future__ import annotations
