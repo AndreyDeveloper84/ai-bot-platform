@@ -85,7 +85,9 @@ def execute_bot_half(
         # достаточно, остальные он находит сам по каналу и ``ayla_user_id``.
         # DRF-2639: the catalog has already erased its half and renamed the
         # proxies — its own erasure is not asked for again (see the kwarg).
-        result = delete_personal_data(shells[0], erased_by_catalog=True)
+        result = delete_personal_data(
+            shells[0], erased_by_catalog=True, catalog_request_id=request_id
+        )
         steps = [{"step": s.step, "ok": s.ok, "detail": s.detail} for s in result.steps]
         failed = list(result.failed_steps)
 
