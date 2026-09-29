@@ -102,10 +102,12 @@ class TestC1Client:
             raise httpx.ReadTimeout("slow", request=request)
 
         client = _client_with(handler)
-        with patch.object(client._circuit, "record_failure") as record:
+        # DRF-2627: вид тенанта стережёт автомат ЧТЕНИЙ, не записи.
+        with patch.object(client._read_circuit, "record_failure") as record:
             with pytest.raises(bc.BookingUnavailableError):
                 client.get_tenant_kind(tenant_id=TENANT_ID, timeout=wk.WORKSPACE_KIND_TIMEOUT)
         record.assert_called_once()
+        assert client._circuit.opened_at is None
 
     def test_the_per_call_timeout_reaches_the_request(self) -> None:
         seen: list[dict] = []

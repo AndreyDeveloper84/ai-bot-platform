@@ -158,7 +158,8 @@ class TestQ2BreakersAreIsolated:
         catalog, _ = _catalog(media="ok")
         for _ in range(bc.CIRCUIT_FAILURE_THRESHOLD):
             with pytest.raises(bc.BookingUnavailableError):
-                catalog._request("GET", "slow/")
+                # DRF-2627: назначение обязательно — это путь записи.
+                catalog._request("GET", "slow/", purpose="booking")
         assert catalog._circuit.opened_at is not None
         assert catalog._media_circuit.opened_at is None
         assert catalog.specialist_media_file(specialist_id=str(CATALOG_ID)) == (JPEG, "image/jpeg")

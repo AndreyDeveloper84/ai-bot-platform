@@ -158,7 +158,10 @@ class TestSuggestWire:
             except bc.BookingUnavailableError:
                 tripped += 1
         assert tripped >= 1
-        assert c._circuit.is_open(now=time.monotonic()) is True
+        # DRF-2627: место работы мастера — путь НЕ про запись: открывается
+        # автомат чтений, автомат записи остаётся закрытым.
+        assert c._read_circuit.is_open(now=time.monotonic()) is True
+        assert c._circuit.is_open(now=time.monotonic()) is False
 
     def test_409_no_city_is_named(self) -> None:
         def handler(req: httpx.Request) -> httpx.Response:
