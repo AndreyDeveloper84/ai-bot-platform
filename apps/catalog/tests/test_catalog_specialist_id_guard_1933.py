@@ -56,6 +56,9 @@ CONVERTED = {
     # DRF-2370: пункт «Место работы» готовности читает service-locations
     # каталога под субъектом мастера — один вызов через колонку.
     ("apps/master_api/services/onboarding_readiness.py", 1),
+    # DRF-2607: отгул и изменение на дату на токене администратора — четыре
+    # записи, каждая зовёт резолвер прямо в вызове.
+    ("apps/admin_api/views_salon_schedule_writes.py", 4),
 }
 
 PENDING_1933B: dict[tuple[str, str], int] = {}

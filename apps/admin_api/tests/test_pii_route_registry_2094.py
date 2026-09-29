@@ -217,6 +217,34 @@ ADMIN_ROUTES: dict[str, Entry] = {
         "payment_status, refund_percent_if_cancelled} — what a schedule change would hit; no person field",
         via=A + "views_schedule_impact:master_schedule_impact",
     ),
+    # DRF-2607 — writes on the administrator's own token; the body is what Ayla
+    # answered about the one row just written.
+    "master_time_off": third_party(
+        "data (the time-off row Ayla stored: id, start_at, end_at, reason)",
+        via=A + "views_salon_schedule_writes:_write",
+        whose="the master whose absence was just recorded",
+        why=(
+            "the operator who created the absence gets back the row as stored, including the "
+            "reason text the operator typed a moment ago — nothing the request did not carry"
+        ),
+    ),
+    "master_time_off_detail": none(
+        "204 with no body — the removed time-off row is not echoed back",
+        via=A + "views_salon_schedule_writes:master_time_off_detail",
+    ),
+    "master_date_exception": third_party(
+        "data (the per-date exception row: date, is_working_day, hours, note)",
+        via=A + "views_salon_schedule_writes:_write",
+        whose="the master whose hours on one date were changed",
+        why=(
+            "the operator sees the exception exactly as Ayla saved it, so the screen shows the "
+            "date's real hours and the operator's own note rather than what was sent"
+        ),
+    ),
+    "master_date_exception_detail": none(
+        "204 with no body — clearing a date returns the master to the weekly template",
+        via=A + "views_salon_schedule_writes:master_date_exception_detail",
+    ),
     "master_audit_feed": third_party(
         "actor_id",
         "actor_role",
