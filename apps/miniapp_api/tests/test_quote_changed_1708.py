@@ -393,6 +393,8 @@ class TestClientCarriesDetails:
 
         client = AylaBookingHTTPClient.__new__(AylaBookingHTTPClient)
         client._circuit = type("C", (), {"record_failure": lambda self, now: None})()
+        # DRF-2627: _fail_status спрашивает, каким автоматом шёл ответ.
+        client._circuit_of = {}
         resp = httpx.Response(
             409,
             json={

@@ -37,10 +37,11 @@ import math
 import random
 import time
 import uuid
+import weakref
 from dataclasses import dataclass, field
 from datetime import date as date_cls
 from datetime import timedelta, timezone as tz
-from typing import Any, NoReturn, Protocol, runtime_checkable
+from typing import Any, Literal, NoReturn, Protocol, runtime_checkable
 
 import httpx
 from django.conf import settings
@@ -63,6 +64,20 @@ _BREAKER_NAME = "ayla.booking"
 #: экране десятки, запись — одна: общий автомат давал дешёвой поверхности
 #: погасить самую дорогую.
 _MEDIA_BREAKER_NAME = "ayla.booking.media"
+
+#: DRF-2627 — автоматы по НАЗНАЧЕНИЮ, а не по методу. До DRF-2627 все 44 пути
+#: клиента (кроме картинок, DRF-2618) делили один автомат с записью: серия
+#: таймаутов на правке профиля мастера, списке портфолио или публикации
+#: открывала автомат ЗАПИСИ и гасила самую дорогую поверхность продукта, а
+#: пока он был открыт из-за чтения, запись отказывала по чужой причине.
+#: ``booking`` — путь клиента к записи (13 методов), ``read`` — чтения и правки
+#: каталога и кабинета мастера (31), медиа — свой (DRF-2618).
+_READ_BREAKER_NAME = "ayla.booking.read"
+
+#: Назначение вызова — какой автомат его стережёт. Обязательный параметр
+#: ``_request``/``_get_all_rows`` БЕЗ умолчания: новый метод не ляжет молча на
+#: чужой автомат — без назначения его не пропустит проверка типов.
+Purpose = Literal["booking", "read"]
 
 # DRF-997: bounded retry for transient 429 responses. Retry-After is respected
 # up to a cap so a single slow backend header cannot block the worker forever.
@@ -721,7 +736,17 @@ class AylaBookingHTTPClient:
         self._token = api_token
         self._timeout_s = timeout_s
         self._transport = transport
+        #: Автомат ЗАПИСИ (DRF-2627): только путь клиента к записи.
         self._circuit = _Circuit()
+        #: Автомат чтений и правок каталога и кабинета мастера (DRF-2627): их
+        #: таймауты не открывают автомат записи и его состояния не читают.
+        self._read_circuit = _Circuit(name=_READ_BREAKER_NAME)
+        #: Каким автоматом ``_request`` пропустил ответ: 5xx и успех засчитывают
+        #: ``_fail_status``/``_ok`` уже ПОСЛЕ ``_request``, и назначения вызова
+        #: они не знают. Слабые ключи — ответ не живёт дольше разбора.
+        self._circuit_of: weakref.WeakKeyDictionary[httpx.Response, _Circuit] = (
+            weakref.WeakKeyDictionary()
+        )
         # DRF-2618 — картинки мастера ходят мимо ``_circuit``: их таймауты и 5xx
         # не открывают автомат записи (см. ``specialist_media_file``).
         self._media_circuit = _Circuit(name=_MEDIA_BREAKER_NAME)
@@ -731,6 +756,10 @@ class AylaBookingHTTPClient:
         # call. The client is a singleton (``get_ayla_booking_client``), so
         # the pool lives for the process lifetime.
         self._http: httpx.Client | None = None
+
+    def _breaker(self, purpose: Purpose) -> _Circuit:
+        """Автомат по назначению вызова — единственное место выбора (DRF-2627)."""
+        return self._circuit if purpose == "booking" else self._read_circuit
 
     def _client(self) -> httpx.Client:
         """Lazily build + reuse the connection-pooled HTTP client (CR-SF1)."""
@@ -772,6 +801,7 @@ class AylaBookingHTTPClient:
         json_body: dict[str, Any] | None = None,
         idempotency_key: str | None = None,
         files: dict[str, Any] | None = None,
+        purpose: Purpose,
     ) -> httpx.Response:
         """Issue one request through the breaker. Maps network/timeout to
         :class:`BookingUnavailableError`; 429 is retried with backoff.
@@ -791,8 +821,11 @@ class AylaBookingHTTPClient:
             refactor is out of scope for DRF-997.
         """
         now = time.monotonic()
-        if self._circuit.is_open(now=now):
-            raise BookingUnavailableError("circuit_open")
+        circuit = self._breaker(purpose)
+        if circuit.is_open(now=now):
+            raise BookingUnavailableError(
+                "circuit_open" if purpose == "booking" else "read_circuit_open"
+            )
 
         url = self._urls.build(f"internal/{endpoint.lstrip('/')}")
         headers = self._headers(external_user_id=external_user_id)
@@ -807,7 +840,7 @@ class AylaBookingHTTPClient:
             http = self._client()
         except (httpx.TimeoutException, httpx.NetworkError) as exc:
             # Client construction only touches local state; treat as network.
-            self._circuit.record_failure(now=now)
+            circuit.record_failure(now=now)
             logger.warning("booking_client.%s.network err=%s", endpoint, type(exc).__name__)
             raise BookingUnavailableError(f"network: {type(exc).__name__}") from exc
 
@@ -817,11 +850,12 @@ class AylaBookingHTTPClient:
                     method, url, headers=headers, params=params, json=json_body, files=files
                 )
             except (httpx.TimeoutException, httpx.NetworkError) as exc:
-                self._circuit.record_failure(now=now)
+                circuit.record_failure(now=now)
                 logger.warning("booking_client.%s.network err=%s", endpoint, type(exc).__name__)
                 raise BookingUnavailableError(f"network: {type(exc).__name__}") from exc
 
             if resp.status_code != 429:
+                self._circuit_of[resp] = circuit
                 return resp
 
             retry_after = _parse_retry_after(resp.headers.get("retry-after"))
@@ -855,8 +889,9 @@ class AylaBookingHTTPClient:
         (4xx) → :class:`BookingBadRequestError` (no trip). Shared by
         :meth:`_ok` and :meth:`cancel_appointment` so the mapping can't drift.
         """
+        circuit = self._circuit_of_response(resp)
         if resp.status_code >= 500:
-            self._circuit.record_failure(now=now)
+            circuit.record_failure(now=now)
             logger.warning("booking_client.5xx status=%d", resp.status_code)
             raise BookingUnavailableError(f"http_{resp.status_code}")
         # Structured status_code/code ride along (dev C1 — the provider
@@ -870,14 +905,20 @@ class AylaBookingHTTPClient:
             details=_err_details(resp),
         )
 
+    def _circuit_of_response(self, resp: httpx.Response) -> _Circuit:
+        """Автомат, которым ``_request`` пропустил ответ (DRF-2627). Ответ не
+        из ``_request`` — автомат записи: прежнее поведение, а не догадка."""
+        return self._circuit_of.get(resp, self._circuit)
+
     def _ok(self, resp: httpx.Response, *, success: tuple[int, ...] = (200, 201)) -> Any:
         """Validate status + unwrap the body. Maps 5xx→Unavailable (trips),
         4xx→BadRequest (no trip). A successful status with unparseable JSON
         is treated as unavailable so it can never be silently read as "empty".
         """
+        circuit = self._circuit_of_response(resp)
         now = time.monotonic()
         if resp.status_code in success:
-            self._circuit.record_success()
+            circuit.record_success()
             try:
                 return _unwrap(resp.json())
             except ValueError as exc:
@@ -916,10 +957,13 @@ class AylaBookingHTTPClient:
         rows = self._get_all_rows(
             "catalog/salon-services/",
             params={"tenant": tenant_id, "is_active": "true"},
+            purpose="booking",
         )
         return [_service_from_wire(r) for r in rows]
 
-    def _get_all_rows(self, endpoint: str, *, params: dict[str, Any]) -> list[dict[str, Any]]:
+    def _get_all_rows(
+        self, endpoint: str, *, params: dict[str, Any], purpose: Purpose
+    ) -> list[dict[str, Any]]:
         """Walk a paginated DRF list endpoint to completion.
 
         Never returns a partial catalog silently: when the envelope advertises
@@ -932,7 +976,9 @@ class AylaBookingHTTPClient:
         advertised: int | None = None
         page = 1
         for _ in range(MAX_CATALOG_PAGES):
-            payload = self._ok(self._request("GET", endpoint, params={**params, "page": page}))
+            payload = self._ok(
+                self._request("GET", endpoint, params={**params, "page": page}, purpose=purpose)
+            )
             if not (isinstance(payload, dict) and "results" in payload):
                 # Non-paginated payload (raw list) — nothing to walk.
                 return _as_rows(payload)
@@ -999,7 +1045,7 @@ class AylaBookingHTTPClient:
           was not. ``get_services`` has always scoped its read this way.
         """
         if specialist_id:
-            resp = self._request("GET", f"specialists/{specialist_id}/")
+            resp = self._request("GET", f"specialists/{specialist_id}/", purpose="booking")
             payload = self._ok(resp)
             return [_master_from_wire(payload)] if isinstance(payload, dict) and payload else []
         tenant_id = _require_tenant_id()
@@ -1007,7 +1053,7 @@ class AylaBookingHTTPClient:
         if lat is not None and lon is not None:
             params["lat"] = f"{lat:.6f}"
             params["lon"] = f"{lon:.6f}"
-        rows = self._get_all_rows("specialists/", params=params)
+        rows = self._get_all_rows("specialists/", params=params, purpose="booking")
         return [_master_from_wire(r) for r in rows]
 
     def get_available_times(
@@ -1034,7 +1080,9 @@ class AylaBookingHTTPClient:
             return cached
 
         params: dict[str, Any] = {"date": date, "service_id": service_id}
-        resp = self._request("GET", f"specialists/{specialist_id}/slots/", params=params)
+        resp = self._request(
+            "GET", f"specialists/{specialist_id}/slots/", params=params, purpose="booking"
+        )
         payload = self._ok(resp)
         slots = payload.get("slots") if isinstance(payload, dict) else payload
         result = [_slot_from_wire(s) for s in slots] if isinstance(slots, list) else []
@@ -1123,6 +1171,7 @@ class AylaBookingHTTPClient:
             external_user_id=external_user_id,
             json_body=body,
             idempotency_key=idempotency_key,
+            purpose="booking",
         )
         data = self._ok(resp, success=(200, 201))
         # DRF-997: a successful write may consume the slot we cached, so
@@ -1154,6 +1203,7 @@ class AylaBookingHTTPClient:
             external_user_id=external_user_id,
             json_body={},
             idempotency_key=idempotency_key,
+            purpose="booking",
         )
         now = time.monotonic()
         if resp.status_code in (200, 204):
@@ -1198,6 +1248,7 @@ class AylaBookingHTTPClient:
             external_user_id=external_user_id,
             json_body=json_body,
             idempotency_key=idempotency_key,
+            purpose="booking",
         )
         data = self._ok(resp, success=(200, 201))
         # DRF-997: both the old and new dates may have changed occupancy.
@@ -1256,6 +1307,7 @@ class AylaBookingHTTPClient:
             # этого клиента (создание, отмена, перенос) человека несут, эта
             # была единственной без него.
             external_user_id=external_user_id,
+            purpose="read",
         )
         if resp.status_code == 409:
             # Distinct from a generic 4xx: the request was well-formed and
@@ -1284,6 +1336,7 @@ class AylaBookingHTTPClient:
             "GET",
             f"specialists/{specialist_id}/working-hours/",
             external_user_id=external_user_id,
+            purpose="read",
         )
         return self._ok(resp, success=(200,))
 
@@ -1308,6 +1361,7 @@ class AylaBookingHTTPClient:
             f"specialists/{specialist_id}/working-hours/",
             json_body={"schedule": schedule},
             external_user_id=external_user_id,
+            purpose="read",
         )
         if resp.status_code == 409:
             raise ScheduleBlockConflictError("has_active_appointments")
@@ -1326,18 +1380,23 @@ class AylaBookingHTTPClient:
 
         ``None`` — тенанта в каталоге нет (404). ``timeout`` — свой таймаут
         вызова (``httpx.Timeout`` с долями фаз или число — на КАЖДУЮ фазу);
-        ``feeds_circuit=False`` — ТАЙМАУТ этого вызова не пишется в
-        общий breaker (как проба DRF-2225): чтение на загрузке Mini App с
-        коротким таймаутом не должно открывать breaker для всей брони.
-        Прочие сетевые отказы и 5xx считаются как обычно.
+        ``feeds_circuit=False`` — ТАЙМАУТ этого вызова не пишется в автомат.
+        После DRF-2627 вызов стережёт автомат ЧТЕНИЙ (``ayla.booking.read``),
+        и первая причина флага — «не открывать breaker для всей брони» —
+        снята разводом. Вторая остаётся: единственный вызывающий (``/me``,
+        ``identity.services.workspace_kind``) ставит НАРОЧНО короткий таймаут
+        (read 1 с, connect 0,5 с), и его таймаут говорит о нетерпении пробы, а
+        не о болезни каталога. Без флага медленный, но живой каталог открывал
+        бы автомат чтений и на 30 с гасил профиль, портфолио и публикацию
+        мастера. Прочие сетевые отказы и 5xx считаются как обычно.
 
         Raises:
             BookingUnavailableError: circuit / таймаут / сеть / 5xx.
             BookingBadRequestError: прочие 4xx.
         """
         now = time.monotonic()
-        if self._circuit.is_open(now=now):
-            raise BookingUnavailableError("circuit_open")
+        if self._read_circuit.is_open(now=now):
+            raise BookingUnavailableError("read_circuit_open")
 
         url = self._urls.build(f"internal/tenants/{tenant_id}/kind/")
         per_call = self._timeout_s if timeout is None else timeout
@@ -1345,10 +1404,10 @@ class AylaBookingHTTPClient:
             resp = self._client().get(url, headers=self._headers(), timeout=per_call)
         except httpx.TimeoutException as exc:
             if feeds_circuit:
-                self._circuit.record_failure(now=now)
+                self._read_circuit.record_failure(now=now)
             raise BookingUnavailableError(f"network: {type(exc).__name__}") from exc
         except httpx.NetworkError as exc:
-            self._circuit.record_failure(now=now)
+            self._read_circuit.record_failure(now=now)
             raise BookingUnavailableError(f"network: {type(exc).__name__}") from exc
 
         if resp.status_code == 404:
@@ -1375,6 +1434,7 @@ class AylaBookingHTTPClient:
             "GET",
             f"specialists/{specialist_id}/service-locations/",
             external_user_id=external_user_id,
+            purpose="read",
         )
         return self._ok(resp, success=(200,))
 
@@ -1398,6 +1458,7 @@ class AylaBookingHTTPClient:
             f"specialists/{specialist_id}/service-locations/",
             json_body=fields,
             external_user_id=external_user_id,
+            purpose="read",
         )
         return self._ok(resp, success=(200, 201))
 
@@ -1415,6 +1476,7 @@ class AylaBookingHTTPClient:
             f"specialists/{specialist_id}/service-locations/{item_id}/",
             json_body=fields,
             external_user_id=external_user_id,
+            purpose="read",
         )
         return self._ok(resp, success=(200,))
 
@@ -1443,6 +1505,7 @@ class AylaBookingHTTPClient:
             f"specialists/{specialist_id}/geocoding/suggest/",
             json_body={"q": q},
             external_user_id=external_user_id,
+            purpose="read",
         )
         if resp.status_code in (503, 409):
             # Причина — в ``error.details.reason`` (misconfigured / no_city / …),
@@ -1476,6 +1539,7 @@ class AylaBookingHTTPClient:
             "GET",
             f"specialists/{specialist_id}/canon-gap-requests/",
             external_user_id=external_user_id,
+            purpose="read",
         )
         return self._ok(resp, success=(200,))
 
@@ -1505,6 +1569,7 @@ class AylaBookingHTTPClient:
                 "price": price,
             },
             external_user_id=external_user_id,
+            purpose="read",
         )
         return self._ok(resp, success=(201,))
 
@@ -1521,6 +1586,7 @@ class AylaBookingHTTPClient:
             f"specialists/{specialist_id}/canon-gap-requests/similar/",
             params={"name": name},
             external_user_id=external_user_id,
+            purpose="read",
         )
         return self._ok(resp, success=(200,))
 
@@ -1540,6 +1606,7 @@ class AylaBookingHTTPClient:
             "GET",
             f"specialists/{specialist_id}/canon-gap-requests/{request_id}/",
             external_user_id=external_user_id,
+            purpose="read",
         )
         return self._ok(resp, success=(200,))
 
@@ -1558,6 +1625,7 @@ class AylaBookingHTTPClient:
             "GET",
             f"specialists/{specialist_id}/availability/",
             external_user_id=external_user_id,
+            purpose="booking",
         )
         return self._ok(resp, success=(200,))
 
@@ -1582,6 +1650,7 @@ class AylaBookingHTTPClient:
             f"specialists/{specialist_id}/availability/",
             json_body={"accepting_bookings": accepting},
             external_user_id=external_user_id,
+            purpose="read",
         )
         return self._ok(resp, success=(200,))
 
@@ -1603,6 +1672,7 @@ class AylaBookingHTTPClient:
             "GET",
             f"specialists/{specialist_id}/reviews/",
             external_user_id=external_user_id,
+            purpose="read",
         )
         return self._ok(resp, success=(200,))
 
@@ -1634,6 +1704,7 @@ class AylaBookingHTTPClient:
                 "salon_service": service_id,
                 "is_active": "true",
             },
+            purpose="read",
         )
 
     # ── M21 профиль мастера (DRF-1813; каталог #455) ─────────────────────────
@@ -1659,6 +1730,7 @@ class AylaBookingHTTPClient:
             f"specialists/{specialist_id}/profile/",
             json_body=body,
             external_user_id=external_user_id,
+            purpose="read",
         )
         return self._ok(resp, success=(200,))
 
@@ -1677,6 +1749,7 @@ class AylaBookingHTTPClient:
             f"specialists/{specialist_id}/media/avatar/",
             files={"image": (filename, content, content_type)},
             external_user_id=external_user_id,
+            purpose="read",
         )
         return self._ok(resp, success=(200,))
 
@@ -1758,6 +1831,7 @@ class AylaBookingHTTPClient:
             "GET",
             f"specialists/{specialist_id}/profile/",
             external_user_id=external_user_id,
+            purpose="read",
         )
         return self._ok(resp, success=(200,))
 
@@ -1772,6 +1846,7 @@ class AylaBookingHTTPClient:
             "GET",
             f"specialists/{specialist_id}/portfolio/",
             external_user_id=external_user_id,
+            purpose="read",
         )
         return self._ok(resp, success=(200,))
 
@@ -1790,6 +1865,7 @@ class AylaBookingHTTPClient:
             f"specialists/{specialist_id}/portfolio/",
             files={"image": (filename, content, content_type)},
             external_user_id=external_user_id,
+            purpose="read",
         )
         return self._ok(resp, success=(201,))
 
@@ -1805,6 +1881,7 @@ class AylaBookingHTTPClient:
             "DELETE",
             f"specialists/{specialist_id}/portfolio/{item_id}/",
             external_user_id=external_user_id,
+            purpose="read",
         )
         return self._ok(resp, success=(200,))
 
@@ -1824,6 +1901,7 @@ class AylaBookingHTTPClient:
             "GET",
             f"specialists/{specialist_id}/services/selection/",
             external_user_id=external_user_id,
+            purpose="read",
         )
         return self._ok(resp, success=(200,))
 
@@ -1844,6 +1922,7 @@ class AylaBookingHTTPClient:
             f"specialists/{specialist_id}/services/selection/",
             json_body={"template_ids": list(template_ids)},
             external_user_id=external_user_id,
+            purpose="read",
         )
         return self._ok(resp, success=(200, 201))
 
@@ -1867,6 +1946,7 @@ class AylaBookingHTTPClient:
             f"specialists/{specialist_id}/services/{salon_service_id}/offer/",
             json_body={"price": price, "duration_minutes": duration_minutes},
             external_user_id=external_user_id,
+            purpose="read",
         )
         data = self._ok(resp, success=(200, 201))
         return {**data, "created": resp.status_code == 201}
@@ -1887,6 +1967,7 @@ class AylaBookingHTTPClient:
             "DELETE",
             f"specialists/{specialist_id}/services/{salon_service_id}/",
             external_user_id=external_user_id,
+            purpose="read",
         )
         return self._ok(resp, success=(200,))
 
@@ -1906,6 +1987,7 @@ class AylaBookingHTTPClient:
             "GET",
             f"specialists/{specialist_id}/publication/readiness/",
             external_user_id=external_user_id,
+            purpose="read",
         )
         return self._ok(resp, success=(200,))
 
@@ -1928,6 +2010,7 @@ class AylaBookingHTTPClient:
             f"specialists/{specialist_id}/publication/",
             json_body={"command_id": command_id},
             external_user_id=external_user_id,
+            purpose="read",
         )
         data = self._ok(resp, success=(200, 201))
         return {**data, "created": resp.status_code == 201}
@@ -1943,6 +2026,7 @@ class AylaBookingHTTPClient:
             "GET",
             f"specialists/{specialist_id}/publication/status/",
             external_user_id=external_user_id,
+            purpose="read",
         )
         return self._ok(resp, success=(200,))
 
@@ -1953,7 +2037,7 @@ class AylaBookingHTTPClient:
         канон не принадлежит мастеру. Форму ответа проверяет вызывающий —
         пустой список вместо непрочитанного ответа был бы выдуманной пустотой.
         """
-        resp = self._request("GET", "services/directions/")
+        resp = self._request("GET", "services/directions/", purpose="read")
         return self._ok(resp, success=(200,))
 
     def get_service_templates(self, *, direction_id: str) -> Any:
@@ -1963,7 +2047,9 @@ class AylaBookingHTTPClient:
         подкатегория. Не корень — 400 ``NOT_A_DIRECTION``, неизвестный — 404,
         оба как :class:`BookingBadRequestError` со своим кодом.
         """
-        resp = self._request("GET", "services/templates/", params={"direction_id": direction_id})
+        resp = self._request(
+            "GET", "services/templates/", params={"direction_id": direction_id}, purpose="read"
+        )
         return self._ok(resp, success=(200,))
 
     def get_user_bookings_page(
@@ -2002,7 +2088,11 @@ class AylaBookingHTTPClient:
         if cursor:
             params["cursor"] = cursor
         resp = self._request(
-            "GET", "me/bookings/", external_user_id=external_user_id, params=params
+            "GET",
+            "me/bookings/",
+            external_user_id=external_user_id,
+            params=params,
+            purpose="booking",
         )
         payload = self._ok(resp)
         # Canonical shape after the ``{"data": ...}`` envelope is stripped:
@@ -2088,7 +2178,12 @@ class AylaBookingHTTPClient:
         A booking belonging to someone else answers 404, identically to one
         that does not exist (info-hidden), and surfaces as a 4xx error here.
         """
-        resp = self._request("GET", f"me/bookings/{booking_id}/", external_user_id=external_user_id)
+        resp = self._request(
+            "GET",
+            f"me/bookings/{booking_id}/",
+            external_user_id=external_user_id,
+            purpose="booking",
+        )
         payload = self._ok(resp)
         if not isinstance(payload, dict):
             # Same rule as the list read: a 200 we cannot read is an outage,
@@ -2130,7 +2225,10 @@ class AylaBookingHTTPClient:
         does not exist (info-hidden upstream), surfacing here as a 4xx.
         """
         resp = self._request(
-            "GET", f"appointments/{booking_id}/", external_user_id=external_user_id
+            "GET",
+            f"appointments/{booking_id}/",
+            external_user_id=external_user_id,
+            purpose="booking",
         )
         payload = self._ok(resp)
         if not isinstance(payload, dict):
@@ -2173,7 +2271,10 @@ class AylaBookingHTTPClient:
         caller that got an object back may trust its ids.
         """
         resp = self._request(
-            "POST", f"me/bookings/{booking_id}/repeat-intent/", external_user_id=external_user_id
+            "POST",
+            f"me/bookings/{booking_id}/repeat-intent/",
+            external_user_id=external_user_id,
+            purpose="booking",
         )
         payload = self._ok(resp)
         data = payload if isinstance(payload, dict) else {}
@@ -2255,6 +2356,7 @@ class AylaBookingHTTPClient:
                 "text": text,
                 "is_anonymous": is_anonymous,
             },
+            purpose="read",
         )
         payload = self._ok(resp, success=(201,))
         data = payload if isinstance(payload, dict) else {}
