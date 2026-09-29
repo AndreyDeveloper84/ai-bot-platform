@@ -430,23 +430,28 @@ class AylaYClientsAdapter:
 
     def _mirror_places_here(self, staff_id: int | str) -> bool:
         """Does this salon's mirror hold the master — by mirror key or by
-        catalog id, WHETHER OR NOT saleable (the question is which salon, not
-        whether bookable: ``all_tenants``, not the sales-filtered manager)."""
+        catalog id, WHETHER OR NOT saleable: the question is which salon, not
+        whether bookable. ``objects`` under ``tenant_scope`` is this salon's
+        rows only; the sale filter is the opt-in ``.bookable()``, not applied
+        here. Same path as :meth:`catalog_specialist_id` (MKT1: no
+        ``all_tenants`` outside the marketplace)."""
 
         from django.db.models import Q
 
         from apps.catalog.models import CatalogMaster
+        from apps.tenancy.context import tenant_scope
 
         key = str(staff_id)
         try:
             uuid.UUID(key)
         except ValueError:
             return False
-        return (
-            CatalogMaster.all_tenants.filter(tenant=self._tenant)
-            .filter(Q(pk=key) | Q(catalog_specialist_id=key))
-            .exists()
-        )
+        with tenant_scope(self._tenant):
+            return (
+                CatalogMaster.objects.filter(tenant=self._tenant)
+                .filter(Q(pk=key) | Q(catalog_specialist_id=key))
+                .exists()
+            )
 
     def get_specialist_service_quote(
         self,

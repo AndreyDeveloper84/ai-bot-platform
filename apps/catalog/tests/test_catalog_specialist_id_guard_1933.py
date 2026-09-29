@@ -49,7 +49,9 @@ CONVERTED = {
     ("apps/admin_api/services/schedule_impact.py", 1),
     ("apps/catalog/services/schedule_confirmation.py", 1),
     # Консьерж: резолв на границе адаптера (handoff держит pk зеркала).
-    ("apps/skills/booking/provider.py", 5),
+    # DRF-2669: 5 → 4 — the two edge reads (price, preview quote) are one
+    # helper now; still translated, one call site fewer.
+    ("apps/skills/booking/provider.py", 4),
     # DRF-1814 (часть A): карточка профиля (профиль, слоты на сегодня, выбор
     # услуг) + портфолио (список, загрузка, удаление) — все шесть через колонку.
     ("apps/master_api/views_profile_card.py", 6),
