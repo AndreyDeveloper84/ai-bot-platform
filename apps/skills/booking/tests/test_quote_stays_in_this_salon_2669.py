@@ -2,7 +2,7 @@
 
 The model may name any ``master_id``. The edge read goes to the catalog's
 mirror door, where ``tenant`` is an optional filter by a recorded decision
-(``CATALOG_INTERNAL_API_CONTRACT.md`` §2a — «Verify, don't trust: the
+(``beautygo_backend/docs/CATALOG_INTERNAL_API_CONTRACT.md`` §2a — «Verify, don't trust: the
 consumer should re-check it»), and the read sends none. Today no foreign
 price reaches the reply by construction — the catalog refuses a cross-salon
 edge (``services/tests/test_specialist_service_same_tenant.py``) and the

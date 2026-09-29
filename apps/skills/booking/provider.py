@@ -385,7 +385,7 @@ class AylaYClientsAdapter:
         """Edge rows for the quote — only of THIS salon (DRF-2669).
 
         The catalog's mirror door takes ``tenant`` as an optional filter by a
-        recorded decision (``CATALOG_INTERNAL_API_CONTRACT.md`` §2a: «Verify,
+        recorded decision (``beautygo_backend/docs/CATALOG_INTERNAL_API_CONTRACT.md`` §2a: «Verify,
         don't trust — the consumer should re-check it»), and the edge read
         sends none. So every returned row is re-checked against the bound
         salon, the same test as ``upsert_master_services``:
