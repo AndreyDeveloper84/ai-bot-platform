@@ -31,7 +31,10 @@ Error envelope mirrors the master_api / miniapp_api shape:
 * ``bad_signature`` (401) — HMAC mismatch.
 * ``stale`` (401) — init-data ``auth_date`` expired.
 * ``user_not_registered`` (404) — no BotUser row for this MAX user.
-* ``forbidden`` (403) — caller is not Owner / Admin.
+* ``forbidden`` (403) — caller is not Owner / Admin. Since DRF-2645 the
+  refusal carries ``details = {reason, remedy}`` (see :func:`_role_refusal`):
+  a bare «admin or owner role required» told nobody what to do, while the
+  operator's move exists and has a name.
 
 :func:`require_admin_or_reception_read` is the *narrow* second gate
 (DRF-1552, owner's decision ``docs/OPEN_DECISIONS.md`` §35 п.1). It adds
@@ -65,6 +68,59 @@ logger = logging.getLogger(__name__)
 
 def _error(slug: str, detail: str, status: int) -> JsonResponse:
     return JsonResponse({"error": slug, "detail": detail}, status=status)
+
+
+#: DRF-2645 — why the role gate refused, and the operator's move that fixes it.
+#: Machine codes: the words on the screen are the owner's, not this module's.
+#:
+#: * ``no_salon_role`` — the person holds no staff role in this salon at all
+#:   (``TenantStaff`` is empty for them). Only the ``platform_operations``
+#:   operator gives one: «Выдать роль в салоне» (for ``admin`` it also creates
+#:   the catalog half, DRF-2085).
+#: * ``role_insufficient`` — a role exists (receptionist, master) but this door
+#:   needs owner / admin: «Сменить роль».
+NO_SALON_ROLE = "no_salon_role"
+ROLE_INSUFFICIENT = "role_insufficient"
+REMEDY_GRANT = "operator_grants_salon_role"
+REMEDY_CHANGE = "operator_changes_salon_role"
+
+_REFUSAL_TEXT = {
+    NO_SALON_ROLE: (
+        "you hold no role in this salon — a platform operator grants one («Выдать роль в салоне»)"
+    ),
+    ROLE_INSUFFICIENT: (
+        "this needs the owner or admin role in this salon — a platform operator "
+        "changes the role («Сменить роль»)"
+    ),
+}
+
+
+def _role_refusal(role_ctx: RoleContext, *, tenant_slug: str) -> JsonResponse:
+    """403 with the reason and the operator's move named (DRF-2645).
+
+    Same status and ``error`` slug as before — screens key on them — plus
+    ``details``. The reason is decided from the resolved roles, never guessed:
+    no staff role at all and «a role, but not this one» have different moves.
+    """
+    has_staff_role = (
+        role_ctx.is_owner or role_ctx.is_admin or role_ctx.is_receptionist or role_ctx.is_master
+    )
+    reason = ROLE_INSUFFICIENT if has_staff_role else NO_SALON_ROLE
+    remedy = REMEDY_CHANGE if has_staff_role else REMEDY_GRANT
+    logger.info(
+        "admin_api.auth.role_refused reason=%s tenant=%s primary_role=%s",
+        reason,
+        tenant_slug,
+        role_ctx.primary_role,
+    )
+    return JsonResponse(
+        {
+            "error": "forbidden",
+            "detail": _REFUSAL_TEXT[reason],
+            "details": {"reason": reason, "remedy": remedy},
+        },
+        status=403,
+    )
 
 
 #: Methods a Receptionist may use on the endpoints opened to her.
@@ -182,11 +238,7 @@ def _gate(
             # one.
             allowed = request.method in _RECEPTION_SAFE_METHODS
         if not allowed:
-            return _error(
-                "forbidden",
-                "admin or owner role required",
-                403,
-            )
+            return _role_refusal(role_ctx, tenant_slug=bot_user.tenant.slug)
 
         request.verified_init_data = verified  # type: ignore[attr-defined]
         request.bot_user = bot_user  # type: ignore[attr-defined]
