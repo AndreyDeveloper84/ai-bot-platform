@@ -43,10 +43,11 @@
  *
  * Receptionist read-only:
  *   - Spec §642 doesn't explicitly call out Receptionist for this
- *     screen but the broader §MM0 chrome treats Receptionist as
- *     read-only for editing flows. We render the matrix with
- *     ``disabled`` checkboxes + a padlock banner for that role; the
- *     backend ``@require_admin_role`` decorator also gates the API.
+ *     screen, and no document grounds the read-only rule: the §MM0
+ *     cited here before does not exist (master-management-handoff has
+ *     MM1–MM5; no admin-shell spec exists, see DRF-2679). We render
+ *     the matrix with ``disabled`` checkboxes + a padlock banner for
+ *     that role; the backend ``@require_admin_role`` decorator also gates the API.
  */
 
 import {

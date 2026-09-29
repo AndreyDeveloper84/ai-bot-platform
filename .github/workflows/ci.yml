@@ -341,6 +341,15 @@ jobs:
       - name: pii guard (all tracked files)
         run: python tools/lint/pii_guard.py --all
 
+      # DRF-2657 — the document-reference guard. A basis cited in code
+      # (a path under docs/, a path with §S, «§N свода») must exist, file AND section;
+      # a dead one is fixed or excepted in tools/lint/doc_refs_allow.txt with
+      # its register item. Here, not in `checks`: a docs-only PR that renames
+      # a heading kills the section a code comment cites, and `checks` skips
+      # docs-only PRs. Standard library only.
+      - name: document-reference guard
+        run: python tools/lint/doc_refs_guard.py
+
   # ---------------------------------------------------------------------
   # Everything that is not `pytest apps/`: lint, the AST guards, the
   # cross-cutting suites, mypy — plus the collection census that guards
