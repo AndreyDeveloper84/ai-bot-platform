@@ -183,11 +183,11 @@ class TestRegistryShape:
             ("PUT", "tenants-master-schedule-exceptions"),
             ("DELETE", "tenants-master-schedule-exception-detail"),
         }
-        assert (
-            capability("tenants-master-schedule", "PUT").access
-            is SalonRouteAccess.SERVICE_READ_ONLY
-        )
-        assert capability("tenants-closures", "POST").access is SalonRouteAccess.SERVICE_READ_ONLY
+        weekly = capability("tenants-master-schedule", "PUT")
+        closures = capability("tenants-closures", "POST")
+        assert weekly is not None and closures is not None
+        assert weekly.access is SalonRouteAccess.SERVICE_READ_ONLY
+        assert closures.access is SalonRouteAccess.SERVICE_READ_ONLY
 
 
 # ── 2. the table and the client agree, both ways ─────────────────────────

@@ -123,7 +123,7 @@ def _write(
     request: HttpRequest,
     master_id: str,
     op: str,
-    call: Callable[[Any, str, str, str], dict[str, Any]],
+    call: Callable[[Any, str, str, CatalogMaster], dict[str, Any]],
     *,
     success_status: int,
 ) -> HttpResponse:
@@ -135,7 +135,7 @@ def _write(
     if master is None:
         return JsonResponse({"error": "not_found"}, status=404)
     try:
-        specialist_id = catalog_specialist_id(master)
+        catalog_specialist_id(master)  # unresolved → 404 before any exchange
     except CatalogSpecialistUnresolved:
         return JsonResponse({"error": "not_found"}, status=404)
 
@@ -200,7 +200,10 @@ def _write(
         return _refused()
 
     try:
-        result = call(client, token.access_token, tenant.slug, specialist_id)
+        # The master, not a pre-resolved id: each call resolves the catalog id
+        # itself (``catalog_specialist_id`` in the call — the DRF-1933 guard
+        # reads exactly that).
+        result = call(client, token.access_token, tenant.slug, master)
     except SalonForbidden:
         forget_person_token(cache_key)
         # The person's fresh token, refused: their right went away between
@@ -270,10 +273,10 @@ def master_time_off(request: HttpRequest, master_id: str) -> HttpResponse:
         request,
         master_id,
         "time_off_create",
-        lambda client, token, slug, sid: client.create_time_off(
+        lambda client, token, slug, master: client.create_time_off(
             person_token=token,
             tenant_slug=slug,
-            specialist_id=sid,
+            specialist_id=catalog_specialist_id(master),
             start_at=str(body["start_at"]),
             end_at=str(body["end_at"]),
             reason=str(body.get("reason") or ""),
@@ -292,8 +295,11 @@ def master_time_off_detail(request: HttpRequest, master_id: str, time_off_id: st
         request,
         master_id,
         "time_off_delete",
-        lambda client, token, slug, sid: client.delete_time_off(
-            person_token=token, tenant_slug=slug, specialist_id=sid, time_off_id=time_off_id
+        lambda client, token, slug, master: client.delete_time_off(
+            person_token=token,
+            tenant_slug=slug,
+            specialist_id=catalog_specialist_id(master),
+            time_off_id=time_off_id,
         ),
         success_status=204,
     )
@@ -313,10 +319,10 @@ def master_date_exception(request: HttpRequest, master_id: str) -> HttpResponse:
         request,
         master_id,
         "date_exception_set",
-        lambda client, token, slug, sid: client.set_schedule_exception(
+        lambda client, token, slug, master: client.set_schedule_exception(
             person_token=token,
             tenant_slug=slug,
-            specialist_id=sid,
+            specialist_id=catalog_specialist_id(master),
             date=str(body["date"]),
             is_working_day=body["is_working_day"],
             start_time=body.get("start_time"),
@@ -339,8 +345,11 @@ def master_date_exception_detail(request: HttpRequest, master_id: str, date: str
         request,
         master_id,
         "date_exception_delete",
-        lambda client, token, slug, sid: client.delete_schedule_exception(
-            person_token=token, tenant_slug=slug, specialist_id=sid, date=date
+        lambda client, token, slug, master: client.delete_schedule_exception(
+            person_token=token,
+            tenant_slug=slug,
+            specialist_id=catalog_specialist_id(master),
+            date=date,
         ),
         success_status=204,
     )
