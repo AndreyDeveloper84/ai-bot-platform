@@ -46,10 +46,38 @@ The JS bundle's own content hash is deliberately never compared: it shifts with
 the minifier and the Node version even when the sources are identical, which
 would make this guard cry wolf. Sources are the invariant; bytes are not.
 
+Where the map comes from (DRF-2621)
+-----------------------------------
+Since DRF-2574 the deploy does NOT ship ``*.map`` to the host
+(``deploy-dev.yml``: 4.29 MB of a 5.2 MB build, the transfer kept failing) --
+a decision with a reason, not an accident. The map is kept as the deploy run's
+artifact ``miniapp-sourcemap-<sha>`` instead. From 2026-09-28 11:30 this guard
+kept asking the host for it over HTTP, got 404 and answered "could not run"
+for more than a day: red on every run, naming nothing.
+
+``--map-dir`` points the guard at that artifact. The served ``index.html``
+still decides WHICH bundle people get; the guard then requires exactly
+``<served js name>.map`` in the directory. The JS name carries the bundle's
+content hash, so a map from any other build -- another head, a rollback, a
+manual copy -- is simply not there, and the guard refuses naming both builds
+instead of comparing one build's sources against another build's bundle (a red
+with no defect behind it is the worst outcome: it teaches people to dismiss
+this guard). The map's own ``file`` field must name the same bundle.
+
+An artifact lives ``retention-days: 14``. After that the directory is empty and
+the guard refuses (exit 2) saying so: a bundle older than the retention window
+cannot be verified, and redeploying is what makes it verifiable again. Passing
+silently there would be exactly the "could not check" read as "all clear" this
+file exists to prevent.
+
+Without ``--map-dir`` the map is still fetched over HTTP next to the bundle --
+the path ``infra/deploy/miniapp-release.sh`` publishes.
+
 Usage::
 
     python tools/ci/miniapp_bundle_drift.py
     python tools/ci/miniapp_bundle_drift.py --url https://... --dist apps/miniapp/dist
+    python tools/ci/miniapp_bundle_drift.py --map-dir sourcemap/         --map-origin "artifact miniapp-sourcemap-<sha> of deploy-dev run <id>"
 
 Runs on Python 3.8
 ------------------
@@ -81,6 +109,9 @@ from pathlib import Path
 DEFAULT_URL = "https://miniapp-dev.gobeauty.site"
 DEFAULT_SRC = Path("apps/miniapp/src")
 TIMEOUT = 30
+#: ``retention-days`` of the ``miniapp-sourcemap-<sha>`` artifact in
+#: ``.github/workflows/deploy-dev.yml`` -- named in the refusal when it is gone.
+ARTIFACT_RETENTION_DAYS = 14
 
 # Vite rewrites module paths relative to the emitted asset, so an application
 # module arrives as some number of `../` followed by `src/<path>`. How many is
@@ -130,7 +161,37 @@ def normalize(text: str) -> str:
     return text.replace(BOM, "").replace("\r\n", "\n").replace("\r", "\n")
 
 
-def served_modules(base_url: str) -> tuple[dict[str, str], str, str]:
+def read_map_from_dir(map_dir: Path, js_name: str, origin: str) -> bytes:
+    """The map of the SERVED bundle from a downloaded artifact, or a named refusal.
+
+    Looked up by the served bundle's own name, never "whatever map is there":
+    the name carries the content hash, so this is what ties the map to the
+    bundle people receive (DRF-2621).
+    """
+    wanted = f"{js_name}.map"
+    present = sorted(p.name for p in map_dir.rglob("*.map")) if map_dir.is_dir() else []
+    if not present:
+        raise CannotCheck(
+            f"no source map at all in {map_dir} ({origin}). The deploy keeps it as a run "
+            f"artifact for {ARTIFACT_RETENTION_DAYS} days: either that window has passed "
+            "(the served bundle is older than the retention and can no longer be verified "
+            "-- redeploy dev to publish a fresh map) or the artifact was never uploaded"
+        )
+    matches = [p for p in map_dir.rglob(wanted) if p.is_file()]
+    if not matches:
+        raise CannotCheck(
+            f"the site serves {js_name}, but {origin} holds {present} -- a map of a "
+            "different build. Comparing it would judge one build's sources against "
+            "another build's bundle, so this refuses instead"
+        )
+    if len(matches) > 1:
+        raise CannotCheck(f"{map_dir} holds {len(matches)} copies of {wanted} -- cannot pick one")
+    return matches[0].read_bytes()
+
+
+def served_modules(
+    base_url: str, map_dir: Path | None = None, map_origin: str = ""
+) -> tuple[dict[str, str], str, str]:
     """Return ({relative src path: source text}, js asset name, css asset name)."""
     index_html = fetch(f"{base_url}/").decode("utf-8", errors="replace")
 
@@ -144,11 +205,20 @@ def served_modules(base_url: str) -> tuple[dict[str, str], str, str]:
     css_match = ASSET_CSS.search(index_html)
     css_name = css_match.group(1) if css_match else ""
 
-    raw_map = fetch(f"{base_url}/assets/{js_name}.map")
+    if map_dir is None:
+        raw_map = fetch(f"{base_url}/assets/{js_name}.map")
+    else:
+        raw_map = read_map_from_dir(map_dir, js_name, map_origin or str(map_dir))
     try:
         source_map = json.loads(raw_map)
     except json.JSONDecodeError as exc:
         raise CannotCheck(f"{js_name}.map is not valid JSON: {exc}") from exc
+    mapped_file = source_map.get("file")
+    if mapped_file is not None and mapped_file != js_name:
+        raise CannotCheck(
+            f"{js_name}.map describes {mapped_file!r}, not the served {js_name} -- "
+            "a renamed map of another build"
+        )
 
     contents = source_map.get("sourcesContent")
     if not contents:
@@ -217,6 +287,17 @@ def main() -> int:
         "--src", type=Path, default=DEFAULT_SRC, help="Mini App sources in this tree"
     )
     parser.add_argument("--dist", type=Path, help="freshly built dist/, enables the CSS comparison")
+    parser.add_argument(
+        "--map-dir",
+        type=Path,
+        help="downloaded deploy artifact miniapp-sourcemap-<sha>; the map is read from "
+        "here instead of over HTTP (DRF-2621)",
+    )
+    parser.add_argument(
+        "--map-origin",
+        default="",
+        help="where --map-dir came from, named in every refusal (artifact + run id)",
+    )
     args = parser.parse_args()
 
     base_url = str(args.url).rstrip("/")
@@ -225,7 +306,7 @@ def main() -> int:
         return 2
 
     try:
-        modules, js_name, css_name = served_modules(base_url)
+        modules, js_name, css_name = served_modules(base_url, args.map_dir, args.map_origin)
         drifted, vanished = compare_sources(modules, args.src)
         css_problem = compare_css(base_url, css_name, args.dist) if args.dist else None
     except CannotCheck as exc:
@@ -255,7 +336,11 @@ def main() -> int:
     print("")
     print(f"{len(drifted)} module(s) drifted, {len(vanished)} removed, css={css_state}.")
     print("People are looking at an older interface than this branch describes.")
-    print("Rebuild and publish: infra/deploy/miniapp-release.sh (docs/runbooks/miniapp-deploy.md).")
+    print(
+        "Publication is deploy-dev.yml (builds on the runner, ships on green ci on dev); "
+        "check its last run. Manual path: infra/deploy/miniapp-release.sh "
+        "(docs/runbooks/miniapp-deploy.md)."
+    )
     return 1
 
 
