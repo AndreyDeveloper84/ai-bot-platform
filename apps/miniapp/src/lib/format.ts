@@ -56,6 +56,19 @@ export function formatSlotTime(isoWithOffset: string): string {
 }
 
 /**
+ * «25 сентября в 09:00» — слова владельца 28.09, п.8 (DRF-2585), для
+ * подтверждения переноса «Было / Стало». Часы — из строки, как у
+ * {@link formatVisitFull}: пояс задаёт сервер. Не разобралось — «—».
+ */
+export function formatDayMonthTime(isoWithOffset: string): string {
+  const match = isoWithOffset.match(/^\d{4}-(\d{2})-(\d{2})T(\d{2}:\d{2})/);
+  if (!match) return UNKNOWN_MARK;
+  const month = MONTHS_GEN[Number(match[1]) - 1];
+  if (!month) return UNKNOWN_MARK;
+  return `${Number(match[2])} ${month} в ${match[3]}`;
+}
+
+/**
  * Часы берутся ИЗ СТРОКИ, не из часов браузера: время визита — время
  * салона. Опора — сервер отдаёт `visit_at` в поясе салона записи
  * (DRF-2589, `miniapp_api.views._salon_iso`); до этого провод нёс UTC, и
