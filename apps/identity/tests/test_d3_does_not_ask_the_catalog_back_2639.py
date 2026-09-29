@@ -153,3 +153,34 @@ class TestD3DoesNotRecreateTheProxy:
             delete_personal_data(unlinked)
 
         assert resolutions == ["bot:max:2639001"]
+
+
+class TestTheAuditNamesWhoActed:
+    """DRF-2651: «actor» in ``privacy.personal_data_deleted`` names who acted.
+    Before, both paths wrote ``"customer"`` and the D3 row could not be told
+    from the person's own «forget everything». Expected values are literals,
+    not the code's constants — a vocabulary change must go red here."""
+
+    @staticmethod
+    def _deleted_row() -> dict:
+        from apps.audit.models import AuditLog
+
+        # all_tenants: the default manager hides rows — it read empty once.
+        (row,) = AuditLog.all_tenants.filter(action="privacy.personal_data_deleted")
+        return {k: v for k, v in row.payload.items() if k in ("actor", "initiator")}
+
+    def test_d3_names_the_catalog_executor(self, person) -> None:
+        catalog = _CatalogAfterD3()
+        with patch("apps.identity.services.privacy.PersonalContextHttpClient", catalog.client):
+            execute_bot_half(
+                ayla_user_id=AYLA_ID, external_user_ids=["bot:max:2639001"], request_id=REQUEST_ID
+            )
+
+        assert self._deleted_row() == {"actor": "system", "initiator": "deletion_executor"}
+
+    def test_forget_everything_names_the_person(self, person) -> None:
+        catalog = _CatalogAfterD3()
+        with patch("apps.identity.services.privacy.PersonalContextHttpClient", catalog.client):
+            delete_personal_data(person)
+
+        assert self._deleted_row() == {"actor": "customer"}

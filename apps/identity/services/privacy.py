@@ -891,12 +891,25 @@ def delete_personal_data(
 
     result = DeleteCascadeResult(steps=tuple(steps))
     # Audit: actor + scope only — never the deleted values (C5 §6.2).
+    # «actor» names WHO ACTED (DRF-2651). On the D3 path that is the catalog's
+    # deletion executor, not the person. ``ActorRole`` has no role for a
+    # service, so the kind comes from ``ActorType`` («system», as
+    # ``eventbus/dispatcher.py`` names service actions) and the executor's
+    # name goes in its own key, in the catalog's word (its log line says
+    # ``initiator=deletion_executor``). Who ASKED for the deletion is not this
+    # row's fact: ``privacy.account_deletion_bot_half`` → ``request_id`` →
+    # the catalog's ``DeletionRequest.initiator``.
+    actor = (
+        {"actor": "system", "initiator": "deletion_executor"}
+        if erased_by_catalog
+        else {"actor": "customer"}
+    )
     write_audit(
         "privacy.personal_data_deleted",
         target="BotUser",
         target_id=bot_user.id,
         payload={
-            "actor": "customer",
+            **actor,
             "scope": [s.step for s in result.steps],
             "all_ok": result.all_ok,
             "failed_steps": result.failed_steps,
