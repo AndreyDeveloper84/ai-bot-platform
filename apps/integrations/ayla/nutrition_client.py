@@ -43,6 +43,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import Any
 
 import httpx
@@ -63,7 +64,20 @@ CIRCUIT_OPEN_DURATION_S = 30.0
 _BREAKER_NAME = "ayla.nutrition"
 
 
-def _fire_breaker_alert(transition: str, failures: int) -> None:
+class BreakerPurpose(Enum):
+    """Назначение вызова — какой автомат защиты он кормит (DRF-2629).
+
+    Снимок записи дневника (DRF-2455) кормил общий автомат всего питания:
+    серия таймаутов на снимках открывала автомат клиента, и вместе со
+    снимком отказывали дневник, распознавание, сводка и коуч. Значение —
+    имя автомата в журнале и в тревоге.
+    """
+
+    NUTRITION = _BREAKER_NAME
+    FOOD_PHOTO = "ayla.nutrition.food_photo"
+
+
+def _fire_breaker_alert(transition: str, failures: int, *, name: str = _BREAKER_NAME) -> None:
     """Borrow the CR-3 Telegram alert path on a state transition.
 
     Lazy-imports the alert helper — keeps this module free of Django
@@ -75,7 +89,7 @@ def _fire_breaker_alert(transition: str, failures: int) -> None:
         from apps.orchestrator.llm.telegram_alert import send_breaker_alert
 
         send_breaker_alert(
-            provider=_BREAKER_NAME,
+            provider=name,
             transition=transition,
             details={"failures": failures},
         )
@@ -97,6 +111,8 @@ class _Circuit:
 
     failures: list[float] = field(default_factory=list)
     opened_at: float | None = None
+    #: Имя автомата в журнале и тревоге — у снимков и у питания разные (DRF-2629).
+    name: str = _BREAKER_NAME
 
     def is_open(self, *, now: float) -> bool:
         if self.opened_at is None:
@@ -110,7 +126,7 @@ class _Circuit:
             failures_before = len(self.failures)
             self.opened_at = None
             self.failures = []
-            _fire_breaker_alert("open → closed", failures_before)
+            _fire_breaker_alert("open → closed", failures_before, name=self.name)
             return False
         return True
 
@@ -121,11 +137,12 @@ class _Circuit:
         if len(self.failures) >= CIRCUIT_FAILURE_THRESHOLD and self.opened_at is None:
             self.opened_at = now
             logger.warning(
-                "nutrition_client.circuit_opened failures=%d window_s=%.0f",
+                "nutrition_client.circuit_opened breaker=%s failures=%d window_s=%.0f",
+                self.name,
                 len(self.failures),
                 CIRCUIT_FAILURE_WINDOW_S,
             )
-            _fire_breaker_alert("closed → open", len(self.failures))
+            _fire_breaker_alert("closed → open", len(self.failures), name=self.name)
 
     def record_success(self) -> None:
         self.failures = []
@@ -921,7 +938,13 @@ class NutritionClient:
         self._urls = AylaUrlBuilder(base_url)
         self._token = service_token
         self._timeout_s = timeout_s
-        self._circuit = _Circuit()
+        # DRF-2629 — один автомат на назначение, имя назначения — имя автомата.
+        # Голого ``self._circuit`` нет: метод без назначения не соберётся.
+        self._circuits = {p: _Circuit(name=p.value) for p in BreakerPurpose}
+
+    def _breaker(self, purpose: BreakerPurpose) -> _Circuit:
+        """Автомат назначения. Без умолчания: назначение называет каждый вызов."""
+        return self._circuits[purpose]
 
     # ─── scan ──────────────────────────────────────────────────────────────
 
@@ -949,7 +972,7 @@ class NutritionClient:
         пропустит; общий хвост ``NutritionAPIError`` — поймает.
         """
         now = time.monotonic()
-        if self._circuit.is_open(now=now):
+        if self._breaker(BreakerPurpose.NUTRITION).is_open(now=now):
             raise NutritionUnavailableError("circuit_open")
 
         url = self._urls.build("nutrition/internal/scan/")
@@ -968,7 +991,7 @@ class NutritionClient:
             async with httpx.AsyncClient(timeout=self._timeout_s) as http:
                 resp = await http.post(url, headers=headers, files=files, data=data)
         except (httpx.TimeoutException, httpx.NetworkError) as exc:
-            self._circuit.record_failure(now=now)
+            self._breaker(BreakerPurpose.NUTRITION).record_failure(now=now)
             logger.warning(
                 "nutrition_client.scan.network ext=%s err=%s",
                 external_user_id,
@@ -976,17 +999,20 @@ class NutritionClient:
             )
             raise NutritionUnavailableError(f"network: {type(exc).__name__}") from exc
 
-        return self._parse_scan_response(resp, external_user_id=external_user_id)
+        return self._parse_scan_response(
+            resp, external_user_id=external_user_id, purpose=BreakerPurpose.NUTRITION
+        )
 
     def _parse_scan_response(
         self,
         resp: httpx.Response,
         *,
         external_user_id: str,
+        purpose: BreakerPurpose,
     ) -> ScanResponse:
         now = time.monotonic()
         if resp.status_code == 200:
-            self._circuit.record_success()
+            self._breaker(purpose).record_success()
             body = resp.json().get("data", {})
             return ScanResponse(
                 scan_id=str(body.get("id") or body.get("scan_id") or ""),
@@ -1045,7 +1071,7 @@ class NutritionClient:
         # ручки, что и успех.
 
         if resp.status_code >= 500:
-            self._circuit.record_failure(now=now)
+            self._breaker(purpose).record_failure(now=now)
             logger.warning(
                 "nutrition_client.scan.5xx status=%d ext=%s",
                 resp.status_code,
@@ -1056,7 +1082,7 @@ class NutritionClient:
         if err_code == "FOOD_NOT_RECOGNIZED":
             raise FoodNotRecognizedError("low_confidence")
         if err_code == "FOOD_API_UNAVAILABLE":
-            self._circuit.record_failure(now=now)
+            self._breaker(purpose).record_failure(now=now)
             raise NutritionUnavailableError(err_code)
 
         logger.info(
@@ -1087,7 +1113,7 @@ class NutritionClient:
             NutritionAPIError: other 4xx.
         """
         now = time.monotonic()
-        if self._circuit.is_open(now=now):
+        if self._breaker(BreakerPurpose.NUTRITION).is_open(now=now):
             raise NutritionUnavailableError("circuit_open")
 
         url = self._urls.build("nutrition/internal/food-estimate/")
@@ -1105,7 +1131,7 @@ class NutritionClient:
             async with httpx.AsyncClient(timeout=self._timeout_s) as http:
                 resp = await http.post(url, headers=headers, json=body)
         except (httpx.TimeoutException, httpx.NetworkError) as exc:
-            self._circuit.record_failure(now=now)
+            self._breaker(BreakerPurpose.NUTRITION).record_failure(now=now)
             logger.warning(
                 "nutrition_client.estimate.network ext=%s err=%s",
                 external_user_id,
@@ -1114,7 +1140,7 @@ class NutritionClient:
             raise NutritionUnavailableError(f"network: {type(exc).__name__}") from exc
 
         if resp.status_code == 200:
-            self._circuit.record_success()
+            self._breaker(BreakerPurpose.NUTRITION).record_success()
             data = resp.json().get("data", {})
             return DishEstimate(
                 matched_dish=str(data.get("matched_dish") or dish_name),
@@ -1132,7 +1158,7 @@ class NutritionClient:
                 raw=data,
             )
         if resp.status_code >= 500:
-            self._circuit.record_failure(now=now)
+            self._breaker(BreakerPurpose.NUTRITION).record_failure(now=now)
             raise NutritionUnavailableError(f"http_{resp.status_code}")
         try:
             err_code = (resp.json().get("error") or {}).get("code", "")
@@ -1158,7 +1184,7 @@ class NutritionClient:
         At least one of ``scan_id`` / ``dish_name`` must be provided.
         """
         now = time.monotonic()
-        if self._circuit.is_open(now=now):
+        if self._breaker(BreakerPurpose.NUTRITION).is_open(now=now):
             raise NutritionUnavailableError("circuit_open")
 
         url = self._urls.build("nutrition/internal/food-log/")
@@ -1187,7 +1213,7 @@ class NutritionClient:
             async with httpx.AsyncClient(timeout=self._timeout_s) as http:
                 resp = await http.post(url, headers=headers, json=body)
         except (httpx.TimeoutException, httpx.NetworkError) as exc:
-            self._circuit.record_failure(now=now)
+            self._breaker(BreakerPurpose.NUTRITION).record_failure(now=now)
             logger.warning(
                 "nutrition_client.log.network ext=%s err=%s",
                 external_user_id,
@@ -1195,17 +1221,20 @@ class NutritionClient:
             )
             raise NutritionUnavailableError(f"network: {type(exc).__name__}") from exc
 
-        return self._parse_log_response(resp, external_user_id=external_user_id)
+        return self._parse_log_response(
+            resp, external_user_id=external_user_id, purpose=BreakerPurpose.NUTRITION
+        )
 
     def _parse_log_response(
         self,
         resp: httpx.Response,
         *,
         external_user_id: str,
+        purpose: BreakerPurpose,
     ) -> FoodLogResponse:
         now = time.monotonic()
         if resp.status_code in (200, 201):
-            self._circuit.record_success()
+            self._breaker(purpose).record_success()
             body = resp.json().get("data", {})
             return FoodLogResponse(
                 log_id=str(body.get("id") or ""),
@@ -1217,7 +1246,7 @@ class NutritionClient:
                 raw=body,
             )
         if resp.status_code >= 500:
-            self._circuit.record_failure(now=now)
+            self._breaker(purpose).record_failure(now=now)
             raise NutritionUnavailableError(f"http_{resp.status_code}")
         try:
             err_code = (resp.json().get("error") or {}).get("code", "")
@@ -1229,12 +1258,14 @@ class NutritionClient:
 
     # ─── правка / удаление записи (DRF-1838, §109 шаг 7) ─────────────────
 
-    def _meal_edit_refusal(self, resp: httpx.Response, *, now: float) -> NutritionAPIError:
+    def _meal_edit_refusal(
+        self, resp: httpx.Response, *, now: float, purpose: BreakerPurpose
+    ) -> NutritionAPIError:
         """Map a non-success answer of the entry-edit routes to a named error."""
         if resp.status_code >= 500:
-            self._circuit.record_failure(now=now)
+            self._breaker(purpose).record_failure(now=now)
             return NutritionUnavailableError(f"http_{resp.status_code}")
-        self._circuit.record_success()
+        self._breaker(purpose).record_success()
         try:
             err_code = (resp.json().get("error") or {}).get("code", "")
         except ValueError:
@@ -1253,10 +1284,11 @@ class NutritionClient:
         path: str,
         *,
         external_user_id: str,
+        purpose: BreakerPurpose,
         body: dict[str, Any] | None = None,
     ) -> tuple[httpx.Response, float]:
         now = time.monotonic()
-        if self._circuit.is_open(now=now):
+        if self._breaker(purpose).is_open(now=now):
             raise NutritionUnavailableError("circuit_open")
         url = self._urls.build(path)
         headers = with_request_id(
@@ -1269,7 +1301,7 @@ class NutritionClient:
             async with httpx.AsyncClient(timeout=self._timeout_s) as http:
                 resp = await http.request(method, url, headers=headers, json=body)
         except (httpx.TimeoutException, httpx.NetworkError) as exc:
-            self._circuit.record_failure(now=now)
+            self._breaker(purpose).record_failure(now=now)
             logger.warning(
                 "nutrition_client.meal_edit.network method=%s ext=%s err=%s",
                 method,
@@ -1303,10 +1335,13 @@ class NutritionClient:
             f"nutrition/internal/food-log/{log_id}/",
             external_user_id=external_user_id,
             body=body,
+            purpose=BreakerPurpose.NUTRITION,
         )
         if resp.status_code == 200:
-            return self._parse_log_response(resp, external_user_id=external_user_id)
-        raise self._meal_edit_refusal(resp, now=now)
+            return self._parse_log_response(
+                resp, external_user_id=external_user_id, purpose=BreakerPurpose.NUTRITION
+            )
+        raise self._meal_edit_refusal(resp, now=now, purpose=BreakerPurpose.NUTRITION)
 
     async def delete_meal(self, *, external_user_id: str, log_id: str) -> MealDeletion:
         """DELETE ``/api/v1/nutrition/internal/food-log/{log_id}/`` — обратимо в окне."""
@@ -1314,9 +1349,10 @@ class NutritionClient:
             "DELETE",
             f"nutrition/internal/food-log/{log_id}/",
             external_user_id=external_user_id,
+            purpose=BreakerPurpose.NUTRITION,
         )
         if resp.status_code == 200:
-            self._circuit.record_success()
+            self._breaker(BreakerPurpose.NUTRITION).record_success()
             try:
                 body = resp.json().get("data")
             except ValueError:
@@ -1330,7 +1366,7 @@ class NutritionClient:
                 log_id=str(body.get("entry_id") or log_id),
                 restore_window_expires_at=body.get("restore_window_expires_at"),
             )
-        raise self._meal_edit_refusal(resp, now=now)
+        raise self._meal_edit_refusal(resp, now=now, purpose=BreakerPurpose.NUTRITION)
 
     #: Ниже этого тело не может быть фотографией еды: самый маленький
     #: настоящий снимок на стенде — 36 КБ, пустышки замера 25.09 — сотни
@@ -1360,7 +1396,7 @@ class NutritionClient:
         работала бы у любого.
         """
         now = time.monotonic()
-        if self._circuit.is_open(now=now):
+        if self._breaker(BreakerPurpose.FOOD_PHOTO).is_open(now=now):
             raise NutritionUnavailableError("circuit_open")
 
         url = self._urls.build(f"nutrition/internal/food-log/{log_id}/photo/")
@@ -1374,7 +1410,7 @@ class NutritionClient:
             async with httpx.AsyncClient(timeout=self._timeout_s) as http:
                 resp = await http.get(url, headers=headers)
         except (httpx.TimeoutException, httpx.NetworkError) as exc:
-            self._circuit.record_failure(now=now)
+            self._breaker(BreakerPurpose.FOOD_PHOTO).record_failure(now=now)
             logger.warning(
                 "nutrition_client.food_photo.network ext=%s err=%s",
                 external_user_id,
@@ -1383,7 +1419,7 @@ class NutritionClient:
             raise NutritionUnavailableError(f"network: {type(exc).__name__}") from exc
 
         if resp.status_code == 200:
-            self._circuit.record_success()
+            self._breaker(BreakerPurpose.FOOD_PHOTO).record_success()
             content_type = resp.headers.get("Content-Type", "application/octet-stream")
             if len(resp.content) < self.MIN_PHOTO_RESPONSE_BYTES:
                 # Пустое или почти пустое тело поверхность прочитала бы как
@@ -1403,21 +1439,21 @@ class NutritionClient:
             if len(resp.content) > self.MAX_PHOTO_RESPONSE_BYTES:
                 # Размеру, который назвал каталог, не доверяем: один
                 # неверно сохранённый объект не должен класть воркер.
-                self._circuit.record_failure(now=now)
+                self._breaker(BreakerPurpose.FOOD_PHOTO).record_failure(now=now)
                 raise NutritionUnavailableError("photo_too_large")
             return resp.content, content_type
         if resp.status_code == 404:
             # Снимка нет — это не отказ и не сбой: штатное состояние записи.
-            self._circuit.record_success()
+            self._breaker(BreakerPurpose.FOOD_PHOTO).record_success()
             return None
         if resp.status_code in (401, 403) or 300 <= resp.status_code < 400:
             # Протухший токен и перенаправление на хранилище — сбой
             # настройки, а не отказ человеку. И за ``Location`` не идём:
             # он ведёт внутрь контура.
-            self._circuit.record_failure(now=now)
+            self._breaker(BreakerPurpose.FOOD_PHOTO).record_failure(now=now)
             raise NutritionUnavailableError(f"http_{resp.status_code}")
         if resp.status_code >= 500:
-            self._circuit.record_failure(now=now)
+            self._breaker(BreakerPurpose.FOOD_PHOTO).record_failure(now=now)
             raise NutritionUnavailableError(f"http_{resp.status_code}")
         raise NutritionAPIError(f"http_{resp.status_code}")
 
@@ -1431,10 +1467,13 @@ class NutritionClient:
             "POST",
             f"nutrition/internal/food-log/{log_id}/restore/",
             external_user_id=external_user_id,
+            purpose=BreakerPurpose.NUTRITION,
         )
         if resp.status_code == 200:
-            return self._parse_log_response(resp, external_user_id=external_user_id)
-        raise self._meal_edit_refusal(resp, now=now)
+            return self._parse_log_response(
+                resp, external_user_id=external_user_id, purpose=BreakerPurpose.NUTRITION
+            )
+        raise self._meal_edit_refusal(resp, now=now, purpose=BreakerPurpose.NUTRITION)
 
     # ─── summary ──────────────────────────────────────────────────────────
 
@@ -1480,11 +1519,14 @@ class NutritionClient:
         показать пустой экран вместо ошибки.
         """
         resp, now = await self._meal_edit_call(
-            "GET", self._SAVED_MEALS_PATH, external_user_id=external_user_id
+            "GET",
+            self._SAVED_MEALS_PATH,
+            external_user_id=external_user_id,
+            purpose=BreakerPurpose.NUTRITION,
         )
         if resp.status_code != 200:
-            raise self._meal_edit_refusal(resp, now=now)
-        self._circuit.record_success()
+            raise self._meal_edit_refusal(resp, now=now, purpose=BreakerPurpose.NUTRITION)
+        self._breaker(BreakerPurpose.NUTRITION).record_success()
         try:
             data = resp.json().get("data")
         except ValueError:
@@ -1526,11 +1568,15 @@ class NutritionClient:
                 if value is not None:
                     body[key] = value
         resp, now = await self._meal_edit_call(
-            "POST", self._SAVED_MEALS_PATH, external_user_id=external_user_id, body=body
+            "POST",
+            self._SAVED_MEALS_PATH,
+            external_user_id=external_user_id,
+            body=body,
+            purpose=BreakerPurpose.NUTRITION,
         )
         if resp.status_code not in (200, 201):
-            raise self._meal_edit_refusal(resp, now=now)
-        self._circuit.record_success()
+            raise self._meal_edit_refusal(resp, now=now, purpose=BreakerPurpose.NUTRITION)
+        self._breaker(BreakerPurpose.NUTRITION).record_success()
         try:
             data = resp.json().get("data")
         except ValueError:
@@ -1540,11 +1586,14 @@ class NutritionClient:
     async def delete_saved_meal(self, *, external_user_id: str, meal_id: str) -> str:
         """DELETE ``internal/saved-meals/{id}/`` — скрыть; чужая/скрытая — 404."""
         resp, now = await self._meal_edit_call(
-            "DELETE", f"{self._SAVED_MEALS_PATH}{meal_id}/", external_user_id=external_user_id
+            "DELETE",
+            f"{self._SAVED_MEALS_PATH}{meal_id}/",
+            external_user_id=external_user_id,
+            purpose=BreakerPurpose.NUTRITION,
         )
         if resp.status_code != 200:
-            raise self._meal_edit_refusal(resp, now=now)
-        self._circuit.record_success()
+            raise self._meal_edit_refusal(resp, now=now, purpose=BreakerPurpose.NUTRITION)
+        self._breaker(BreakerPurpose.NUTRITION).record_success()
         try:
             data = resp.json().get("data")
         except ValueError:
@@ -1566,7 +1615,7 @@ class NutritionClient:
         Older Ayla deploys ignore the flag and return ``ai_comment=None``.
         """
         now = time.monotonic()
-        if self._circuit.is_open(now=now):
+        if self._breaker(BreakerPurpose.NUTRITION).is_open(now=now):
             raise NutritionUnavailableError("circuit_open")
 
         url = self._urls.build("nutrition/internal/summary/")
@@ -1586,7 +1635,7 @@ class NutritionClient:
             async with httpx.AsyncClient(timeout=self._timeout_s) as http:
                 resp = await http.get(url, headers=headers, params=params)
         except (httpx.TimeoutException, httpx.NetworkError) as exc:
-            self._circuit.record_failure(now=now)
+            self._breaker(BreakerPurpose.NUTRITION).record_failure(now=now)
             logger.warning(
                 "nutrition_client.summary.network ext=%s err=%s",
                 external_user_id,
@@ -1594,17 +1643,20 @@ class NutritionClient:
             )
             raise NutritionUnavailableError(f"network: {type(exc).__name__}") from exc
 
-        return self._parse_summary_response(resp, external_user_id=external_user_id)
+        return self._parse_summary_response(
+            resp, external_user_id=external_user_id, purpose=BreakerPurpose.NUTRITION
+        )
 
     def _parse_summary_response(
         self,
         resp: httpx.Response,
         *,
         external_user_id: str,
+        purpose: BreakerPurpose,
     ) -> SummaryResponse:
         now = time.monotonic()
         if resp.status_code == 200:
-            self._circuit.record_success()
+            self._breaker(purpose).record_success()
             body = resp.json().get("data", {})
             return SummaryResponse(
                 date=str(body.get("date") or ""),
@@ -1618,7 +1670,7 @@ class NutritionClient:
                 ai_comment=body.get("ai_comment") or None,
             )
         if resp.status_code >= 500:
-            self._circuit.record_failure(now=now)
+            self._breaker(purpose).record_failure(now=now)
             raise NutritionUnavailableError(f"http_{resp.status_code}")
         raise NutritionAPIError(f"http_{resp.status_code}")
 
@@ -1632,7 +1684,7 @@ class NutritionClient:
     ) -> DeficitsResponse:
         """GET ``/api/v1/nutrition/internal/deficits/?days=N``."""
         now = time.monotonic()
-        if self._circuit.is_open(now=now):
+        if self._breaker(BreakerPurpose.NUTRITION).is_open(now=now):
             raise NutritionUnavailableError("circuit_open")
 
         url = self._urls.build("nutrition/internal/deficits/")
@@ -1646,11 +1698,11 @@ class NutritionClient:
             async with httpx.AsyncClient(timeout=self._timeout_s) as http:
                 resp = await http.get(url, headers=headers, params={"days": str(days)})
         except (httpx.TimeoutException, httpx.NetworkError) as exc:
-            self._circuit.record_failure(now=now)
+            self._breaker(BreakerPurpose.NUTRITION).record_failure(now=now)
             raise NutritionUnavailableError(f"network: {type(exc).__name__}") from exc
 
         if resp.status_code == 200:
-            self._circuit.record_success()
+            self._breaker(BreakerPurpose.NUTRITION).record_success()
             body = resp.json().get("data", {})
             return DeficitsResponse(
                 days_observed=int(body.get("days_observed") or 0),
@@ -1661,7 +1713,7 @@ class NutritionClient:
                 raw=body,
             )
         if resp.status_code >= 500:
-            self._circuit.record_failure(now=now)
+            self._breaker(BreakerPurpose.NUTRITION).record_failure(now=now)
             raise NutritionUnavailableError(f"http_{resp.status_code}")
         raise NutritionAPIError(f"http_{resp.status_code}")
 
@@ -1682,7 +1734,7 @@ class NutritionClient:
         Тело ответа в лог не пишется.
         """
         now = time.monotonic()
-        if self._circuit.is_open(now=now):
+        if self._breaker(BreakerPurpose.NUTRITION).is_open(now=now):
             raise NutritionUnavailableError("circuit_open")
 
         url = self._urls.build("nutrition/internal/diary/days/")
@@ -1701,7 +1753,7 @@ class NutritionClient:
             async with httpx.AsyncClient(timeout=self._timeout_s) as http:
                 resp = await http.get(url, headers=headers, params=params)
         except (httpx.TimeoutException, httpx.NetworkError) as exc:
-            self._circuit.record_failure(now=now)
+            self._breaker(BreakerPurpose.NUTRITION).record_failure(now=now)
             logger.warning(
                 "nutrition_client.diary_days.network ext=%s err=%s",
                 external_user_id,
@@ -1710,11 +1762,11 @@ class NutritionClient:
             raise NutritionUnavailableError(f"network: {type(exc).__name__}") from exc
 
         if resp.status_code >= 500:
-            self._circuit.record_failure(now=now)
+            self._breaker(BreakerPurpose.NUTRITION).record_failure(now=now)
             raise NutritionUnavailableError(f"http_{resp.status_code}")
         if resp.status_code != 200:
             raise NutritionAPIError(f"http_{resp.status_code}")
-        self._circuit.record_success()
+        self._breaker(BreakerPurpose.NUTRITION).record_success()
         try:
             body = resp.json().get("data") or {}
             rows = body["days"]
@@ -1769,7 +1821,7 @@ class NutritionClient:
             NutritionAPIError: other 4xx.
         """
         now = time.monotonic()
-        if self._circuit.is_open(now=now):
+        if self._breaker(BreakerPurpose.NUTRITION).is_open(now=now):
             raise NutritionUnavailableError("circuit_open")
 
         url = self._urls.build("nutrition/internal/profile/")
@@ -1785,13 +1837,13 @@ class NutritionClient:
                 resp = await http.get(url, headers=headers)
         except httpx.TimeoutException as exc:
             if feeds_circuit:
-                self._circuit.record_failure(now=now)
+                self._breaker(BreakerPurpose.NUTRITION).record_failure(now=now)
             raise NutritionUnavailableError(f"network: {type(exc).__name__}") from exc
         except httpx.NetworkError as exc:
-            self._circuit.record_failure(now=now)
+            self._breaker(BreakerPurpose.NUTRITION).record_failure(now=now)
             raise NutritionUnavailableError(f"network: {type(exc).__name__}") from exc
 
-        return self._parse_profile_response(resp)
+        return self._parse_profile_response(resp, purpose=BreakerPurpose.NUTRITION)
 
     async def upsert_profile(
         self,
@@ -1806,7 +1858,7 @@ class NutritionClient:
         norms + ``goal_overridden_by``.
         """
         now = time.monotonic()
-        if self._circuit.is_open(now=now):
+        if self._breaker(BreakerPurpose.NUTRITION).is_open(now=now):
             raise NutritionUnavailableError("circuit_open")
 
         url = self._urls.build("nutrition/internal/profile/")
@@ -1820,10 +1872,12 @@ class NutritionClient:
             async with httpx.AsyncClient(timeout=self._timeout_s) as http:
                 resp = await http.post(url, headers=headers, json=data)
         except (httpx.TimeoutException, httpx.NetworkError) as exc:
-            self._circuit.record_failure(now=now)
+            self._breaker(BreakerPurpose.NUTRITION).record_failure(now=now)
             raise NutritionUnavailableError(f"network: {type(exc).__name__}") from exc
 
-        result = self._parse_profile_response(resp, allow_404=False)
+        result = self._parse_profile_response(
+            resp, purpose=BreakerPurpose.NUTRITION, allow_404=False
+        )
         # allow_404=False raises before returning None, so the assert guards
         # the type-checker rather than runtime.
         assert result is not None
@@ -1844,7 +1898,7 @@ class NutritionClient:
         источником.
         """
         now = time.monotonic()
-        if self._circuit.is_open(now=now):
+        if self._breaker(BreakerPurpose.NUTRITION).is_open(now=now):
             raise NutritionUnavailableError("circuit_open")
 
         url = self._urls.build("nutrition/internal/profile/targets/confirm/")
@@ -1858,11 +1912,11 @@ class NutritionClient:
             async with httpx.AsyncClient(timeout=self._timeout_s) as http:
                 resp = await http.post(url, headers=headers, json={})
         except (httpx.TimeoutException, httpx.NetworkError) as exc:
-            self._circuit.record_failure(now=now)
+            self._breaker(BreakerPurpose.NUTRITION).record_failure(now=now)
             raise NutritionUnavailableError(f"network: {type(exc).__name__}") from exc
 
         if resp.status_code == 409:
-            self._circuit.record_success()
+            self._breaker(BreakerPurpose.NUTRITION).record_success()
             try:
                 err = resp.json().get("error") or {}
             except ValueError:
@@ -1874,7 +1928,9 @@ class NutritionClient:
             source = str(details.get("targets_source") or "")
             raise NothingToConfirmError(source)
 
-        result = self._parse_profile_response(resp, allow_404=False)
+        result = self._parse_profile_response(
+            resp, purpose=BreakerPurpose.NUTRITION, allow_404=False
+        )
         assert result is not None
         outcome = str((result.raw.get("confirmation") or {}).get("outcome") or "")
         return result, outcome
@@ -1908,7 +1964,7 @@ class NutritionClient:
             (``{"set": [...], "warnings": [...], "deviation": {...}}``).
         """
         now = time.monotonic()
-        if self._circuit.is_open(now=now):
+        if self._breaker(BreakerPurpose.NUTRITION).is_open(now=now):
             raise NutritionUnavailableError("circuit_open")
 
         url = self._urls.build("nutrition/internal/profile/targets/manual/")
@@ -1925,11 +1981,11 @@ class NutritionClient:
             async with httpx.AsyncClient(timeout=self._timeout_s) as http:
                 resp = await http.post(url, headers=headers, json=body)
         except (httpx.TimeoutException, httpx.NetworkError) as exc:
-            self._circuit.record_failure(now=now)
+            self._breaker(BreakerPurpose.NUTRITION).record_failure(now=now)
             raise NutritionUnavailableError(f"network: {type(exc).__name__}") from exc
 
         if resp.status_code in (409, 422):
-            self._circuit.record_success()
+            self._breaker(BreakerPurpose.NUTRITION).record_success()
             try:
                 payload = resp.json()
             except ValueError:
@@ -1949,7 +2005,9 @@ class NutritionClient:
                 )
             raise NutritionAPIError(f"manual_targets_conflict:{code or resp.status_code}")
 
-        result = self._parse_profile_response(resp, allow_404=False)
+        result = self._parse_profile_response(
+            resp, purpose=BreakerPurpose.NUTRITION, allow_404=False
+        )
         assert result is not None
         report = result.raw.get("manual_targets")
         return result, dict(report) if isinstance(report, dict) else {}
@@ -1968,7 +2026,7 @@ class NutritionClient:
             NutritionAPIError: прочие 4xx.
         """
         now = time.monotonic()
-        if self._circuit.is_open(now=now):
+        if self._breaker(BreakerPurpose.NUTRITION).is_open(now=now):
             raise NutritionUnavailableError("circuit_open")
         url = self._urls.build("nutrition/internal/profile/body-parameters/")
         headers = with_request_id(
@@ -1981,16 +2039,16 @@ class NutritionClient:
             async with httpx.AsyncClient(timeout=self._timeout_s) as http:
                 resp = await http.delete(url, headers=headers)
         except (httpx.TimeoutException, httpx.NetworkError) as exc:
-            self._circuit.record_failure(now=now)
+            self._breaker(BreakerPurpose.NUTRITION).record_failure(now=now)
             raise NutritionUnavailableError(f"network: {type(exc).__name__}") from exc
         if resp.status_code in (200, 204):
-            self._circuit.record_success()
+            self._breaker(BreakerPurpose.NUTRITION).record_success()
             return True
         if resp.status_code == 404:
             # Ручки ещё нет на этой выкладке — не «удалено».
             return False
         if resp.status_code >= 500:
-            self._circuit.record_failure(now=now)
+            self._breaker(BreakerPurpose.NUTRITION).record_failure(now=now)
             raise NutritionUnavailableError(f"http_{resp.status_code}")
         raise NutritionAPIError(f"purge_body_parameters: HTTP {resp.status_code}")
 
@@ -1998,11 +2056,12 @@ class NutritionClient:
         self,
         resp: httpx.Response,
         *,
+        purpose: BreakerPurpose,
         allow_404: bool = True,
     ) -> ProfileResponse | None:
         now = time.monotonic()
         if resp.status_code in (200, 201):
-            self._circuit.record_success()
+            self._breaker(purpose).record_success()
             body = resp.json().get("data", {})
             # GET /profile/ may return 200 with ``exists=false`` instead of
             # 404; treat as "no profile".
@@ -2068,11 +2127,11 @@ class NutritionClient:
             )
 
         if resp.status_code == 404 and allow_404:
-            self._circuit.record_success()  # 404 = valid "no profile" for GET.
+            self._breaker(purpose).record_success()  # 404 = valid "no profile" for GET.
             return None
 
         if resp.status_code >= 500:
-            self._circuit.record_failure(now=now)
+            self._breaker(purpose).record_failure(now=now)
             raise NutritionUnavailableError(f"http_{resp.status_code}")
 
         try:
@@ -2098,7 +2157,7 @@ class NutritionClient:
         ``water_coefficient`` and returns the effective ``water_ml``.
         """
         now = time.monotonic()
-        if self._circuit.is_open(now=now):
+        if self._breaker(BreakerPurpose.NUTRITION).is_open(now=now):
             raise NutritionUnavailableError("circuit_open")
 
         url = self._urls.build("nutrition/internal/water/")
@@ -2120,15 +2179,17 @@ class NutritionClient:
             async with httpx.AsyncClient(timeout=self._timeout_s) as http:
                 resp = await http.post(url, headers=headers, json=body)
         except (httpx.TimeoutException, httpx.NetworkError) as exc:
-            self._circuit.record_failure(now=now)
+            self._breaker(BreakerPurpose.NUTRITION).record_failure(now=now)
             raise NutritionUnavailableError(f"network: {type(exc).__name__}") from exc
 
-        return self._parse_water_entry_response(resp)
+        return self._parse_water_entry_response(resp, purpose=BreakerPurpose.NUTRITION)
 
-    def _parse_water_entry_response(self, resp: httpx.Response) -> WaterEntryResponse:
+    def _parse_water_entry_response(
+        self, resp: httpx.Response, *, purpose: BreakerPurpose
+    ) -> WaterEntryResponse:
         now = time.monotonic()
         if resp.status_code in (200, 201):
-            self._circuit.record_success()
+            self._breaker(purpose).record_success()
             body = resp.json().get("data", {})
             return WaterEntryResponse(
                 entry_id=str(body.get("entry_id") or ""),
@@ -2142,7 +2203,7 @@ class NutritionClient:
                 raw=body,
             )
         if resp.status_code >= 500:
-            self._circuit.record_failure(now=now)
+            self._breaker(purpose).record_failure(now=now)
             raise NutritionUnavailableError(f"http_{resp.status_code}")
         try:
             err_code = (resp.json().get("error") or {}).get("code", "")
@@ -2165,7 +2226,7 @@ class NutritionClient:
             NutritionUnavailableError: circuit / 5xx / network.
         """
         now = time.monotonic()
-        if self._circuit.is_open(now=now):
+        if self._breaker(BreakerPurpose.NUTRITION).is_open(now=now):
             raise NutritionUnavailableError("circuit_open")
 
         url = self._urls.build(f"nutrition/internal/water/{entry_id}/")
@@ -2179,17 +2240,17 @@ class NutritionClient:
             async with httpx.AsyncClient(timeout=self._timeout_s) as http:
                 resp = await http.delete(url, headers=headers)
         except (httpx.TimeoutException, httpx.NetworkError) as exc:
-            self._circuit.record_failure(now=now)
+            self._breaker(BreakerPurpose.NUTRITION).record_failure(now=now)
             raise NutritionUnavailableError(f"network: {type(exc).__name__}") from exc
 
         if resp.status_code in (200, 204):
-            self._circuit.record_success()
+            self._breaker(BreakerPurpose.NUTRITION).record_success()
             return True
         if resp.status_code == 404:
-            self._circuit.record_success()
+            self._breaker(BreakerPurpose.NUTRITION).record_success()
             return False
         if resp.status_code >= 500:
-            self._circuit.record_failure(now=now)
+            self._breaker(BreakerPurpose.NUTRITION).record_failure(now=now)
             raise NutritionUnavailableError(f"http_{resp.status_code}")
         raise NutritionAPIError(f"http_{resp.status_code}")
 
@@ -2200,7 +2261,7 @@ class NutritionClient:
     ) -> WaterTodayResponse:
         """GET ``/api/v1/nutrition/internal/water/today/``."""
         now = time.monotonic()
-        if self._circuit.is_open(now=now):
+        if self._breaker(BreakerPurpose.NUTRITION).is_open(now=now):
             raise NutritionUnavailableError("circuit_open")
 
         url = self._urls.build("nutrition/internal/water/today/")
@@ -2214,11 +2275,11 @@ class NutritionClient:
             async with httpx.AsyncClient(timeout=self._timeout_s) as http:
                 resp = await http.get(url, headers=headers)
         except (httpx.TimeoutException, httpx.NetworkError) as exc:
-            self._circuit.record_failure(now=now)
+            self._breaker(BreakerPurpose.NUTRITION).record_failure(now=now)
             raise NutritionUnavailableError(f"network: {type(exc).__name__}") from exc
 
         if resp.status_code == 200:
-            self._circuit.record_success()
+            self._breaker(BreakerPurpose.NUTRITION).record_success()
             body = resp.json().get("data", {})
             return WaterTodayResponse(
                 total_ml=int(body.get("today_total_water_ml") or 0),
@@ -2231,7 +2292,7 @@ class NutritionClient:
                 raw=body,
             )
         if resp.status_code >= 500:
-            self._circuit.record_failure(now=now)
+            self._breaker(BreakerPurpose.NUTRITION).record_failure(now=now)
             raise NutritionUnavailableError(f"http_{resp.status_code}")
         raise NutritionAPIError(f"http_{resp.status_code}")
 
@@ -2251,7 +2312,7 @@ class NutritionClient:
             NutritionUnavailableError: circuit / network / 5xx / timeout.
         """
         now = time.monotonic()
-        if self._circuit.is_open(now=now):
+        if self._breaker(BreakerPurpose.NUTRITION).is_open(now=now):
             raise NutritionUnavailableError("circuit_open")
 
         url = self._urls.build("nutrition/internal/insights/cross_domain/")
@@ -2266,7 +2327,7 @@ class NutritionClient:
             async with httpx.AsyncClient(timeout=self._timeout_s) as http:
                 resp = await http.get(url, headers=headers)
         except (httpx.TimeoutException, httpx.NetworkError) as exc:
-            self._circuit.record_failure(now=now)
+            self._breaker(BreakerPurpose.NUTRITION).record_failure(now=now)
             logger.warning(
                 "nutrition_client.cross_domain.network ext=%s err=%s",
                 external_user_id,
@@ -2277,7 +2338,7 @@ class NutritionClient:
         if resp.status_code == 404:
             return None
         if resp.status_code == 200:
-            self._circuit.record_success()
+            self._breaker(BreakerPurpose.NUTRITION).record_success()
             body = resp.json().get("data", {})
             if not body.get("has_insight"):
                 return None
@@ -2291,7 +2352,7 @@ class NutritionClient:
                 disclaimer_text=str(insight.get("disclaimer_text") or ""),
             )
         if resp.status_code >= 500:
-            self._circuit.record_failure(now=now)
+            self._breaker(BreakerPurpose.NUTRITION).record_failure(now=now)
             logger.warning(
                 "nutrition_client.cross_domain.5xx status=%d ext=%s",
                 resp.status_code,
@@ -2311,6 +2372,7 @@ class NutritionClient:
             external_user_id=external_user_id,
             shown_id=shown_id,
             action="seen",
+            purpose=BreakerPurpose.NUTRITION,
         )
 
     async def post_cross_domain_dismiss(
@@ -2324,6 +2386,7 @@ class NutritionClient:
             external_user_id=external_user_id,
             shown_id=shown_id,
             action="dismiss",
+            purpose=BreakerPurpose.NUTRITION,
         )
 
     async def post_cross_domain_convert(
@@ -2339,6 +2402,7 @@ class NutritionClient:
             shown_id=shown_id,
             action="convert",
             json_body={"appointment_id": appointment_id},
+            purpose=BreakerPurpose.NUTRITION,
         )
 
     async def _post_cross_domain_action(
@@ -2347,10 +2411,11 @@ class NutritionClient:
         external_user_id: str,
         shown_id: str,
         action: str,
+        purpose: BreakerPurpose,
         json_body: dict[str, Any] | None = None,
     ) -> bool:
         now = time.monotonic()
-        if self._circuit.is_open(now=now):
+        if self._breaker(purpose).is_open(now=now):
             raise NutritionUnavailableError("circuit_open")
 
         url = self._urls.build(f"nutrition/internal/insights/cross_domain/{action}/{shown_id}/")
@@ -2365,7 +2430,7 @@ class NutritionClient:
             async with httpx.AsyncClient(timeout=self._timeout_s) as http:
                 resp = await http.post(url, headers=headers, json=json_body or {})
         except (httpx.TimeoutException, httpx.NetworkError) as exc:
-            self._circuit.record_failure(now=now)
+            self._breaker(purpose).record_failure(now=now)
             logger.warning(
                 "nutrition_client.cross_domain.%s.network ext=%s err=%s",
                 action,
@@ -2375,10 +2440,10 @@ class NutritionClient:
             raise NutritionUnavailableError(f"network: {type(exc).__name__}") from exc
 
         if 200 <= resp.status_code < 300:
-            self._circuit.record_success()
+            self._breaker(purpose).record_success()
             return True
         if resp.status_code >= 500:
-            self._circuit.record_failure(now=now)
+            self._breaker(purpose).record_failure(now=now)
             raise NutritionUnavailableError(f"http_{resp.status_code}")
         raise NutritionAPIError(f"http_{resp.status_code}")
 

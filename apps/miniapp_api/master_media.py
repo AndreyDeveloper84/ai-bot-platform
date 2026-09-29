@@ -52,6 +52,7 @@ from apps.integrations.ayla.booking_client import (
 )
 from apps.marketplace.discovery import master_for_media
 from apps.miniapp_api.dev_bypass import try_dev_bypass
+from apps.miniapp_api.per_person_quota import WINDOW_SECONDS, over_quota, rate_limited
 from apps.miniapp_api.transport_refusal import GUARD_ATTR, verify_request_init_data
 
 logger = logging.getLogger(__name__)
@@ -80,7 +81,7 @@ IMAGE_TYPES_SHOWN = frozenset({"image/jpeg", "image/png", "image/webp"})
 #: одновременных честных пиков выберут её и так; квота на человека лечит
 #: одиночку, не толпу.
 MEDIA_PER_PERSON_PER_MINUTE = 120
-MEDIA_QUOTA_WINDOW_SECONDS = 60
+MEDIA_QUOTA_WINDOW_SECONDS = WINDOW_SECONDS
 
 
 def _version(raw: str) -> str:
@@ -122,39 +123,13 @@ def outward_portfolio(master_id: object, body: dict) -> dict:
     return out
 
 
-def _quota_key(identity: str) -> str:
-    return f"miniapp.master_media.quota:{identity}"
-
-
 def _over_quota(identity: str) -> bool:
-    """Сверх квоты ли этот запрос человека (фиксированное окно, общий кэш).
-
-    ``add`` ставит срок ровно один раз, в начале окна, — окно не ползёт за
-    запросами (тот же приём, что у ``staff_invites._check_rate_limit_for``).
-    Кэш недоступен — пропускаем: это тормоз, а не пропуск; отказ картинок
-    всем из-за кэша хуже, чем минута без тормоза.
-    """
-    from django.core.cache import cache
-
-    key = _quota_key(identity)
-    try:
-        if cache.add(key, 1, timeout=MEDIA_QUOTA_WINDOW_SECONDS):
-            return False
-        return int(cache.incr(key)) > MEDIA_PER_PERSON_PER_MINUTE
-    except ValueError:
-        return False  # ключ истёк между add и incr — первый запрос окна
-    except Exception as exc:  # noqa: BLE001 — тормоз, не ворота
-        logger.warning("miniapp_api.master_media.quota_unavailable exc=%s", type(exc).__name__)
-        return False
+    """Сверх квоты ли этот запрос человека — общий тормоз ``per_person_quota``."""
+    return over_quota("master_media", identity, per_minute=MEDIA_PER_PERSON_PER_MINUTE)
 
 
 def _rate_limited() -> JsonResponse:
-    response = JsonResponse(
-        {"error": "media_rate_limited", "detail": "too many images, retry in a minute"},
-        status=429,
-    )
-    response["Retry-After"] = str(MEDIA_QUOTA_WINDOW_SECONDS)
-    return response
+    return rate_limited("media_rate_limited", "too many images, retry in a minute")
 
 
 def _absent() -> JsonResponse:
