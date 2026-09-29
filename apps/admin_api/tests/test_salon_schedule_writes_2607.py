@@ -456,14 +456,26 @@ class TestNotSetUpIsNotAbsent:
     write, on the same request."""
 
     @pytest.mark.parametrize(("name", "method", "extra", "body"), _EVERY_WRITE)
-    @pytest.mark.parametrize("case", ["not_set_up", "absent"])
-    def test_the_two_answers_differ(
-        self, client, owner_bot_user, tenant, monkeypatch, case, name, method, extra, body
+    @pytest.mark.parametrize("case", ["not_set_up", "absent", "foreign_not_set_up"])
+    def test_the_answers_differ(
+        self,
+        client,
+        owner_bot_user,
+        tenant,
+        other_tenant,
+        monkeypatch,
+        case,
+        name,
+        method,
+        extra,
+        body,
     ) -> None:
+        """A master of another salon who is not set up either is still 404:
+        the salon's scope answers before the catalog profile does."""
         wire = _Wire(monkeypatch)
-        if case == "not_set_up":
+        if case in ("not_set_up", "foreign_not_set_up"):
             master_id = CatalogMaster.all_tenants.create(
-                tenant=tenant,
+                tenant=tenant if case == "not_set_up" else other_tenant,
                 external_id=2637,
                 external_updated_at=datetime.now(tz=dt_timezone.utc),
                 name="Незаведённая",
@@ -484,6 +496,7 @@ class TestNotSetUpIsNotAbsent:
         expected = {
             "not_set_up": (409, "catalog_profile_unresolved"),
             "absent": (404, "not_found"),
+            "foreign_not_set_up": (404, "not_found"),
         }[case]
         assert (resp.status_code, resp.json()["error"]) == expected, resp.content
         assert wire.exchanged == [] and wire.sent == []
