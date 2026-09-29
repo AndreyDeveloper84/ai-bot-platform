@@ -845,6 +845,17 @@ jobs:
           # levels agree on the same collection.
           python3 .github/scripts/census_count.py census-raw.txt apps-census.txt
 
+      # DRF-2633 — test ids must be the same in every process. xdist collects
+      # the suite in EVERY worker and requires the sets to match; a volatile
+      # id (a uuid4 in parametrize, a memory address in an id) makes a shard
+      # die at collection far from its cause, while one local process is
+      # green. Three checks, each closing a hole the others leave — see the
+      # module docstring of tools/lint/stable_test_ids.py (double collection
+      # with two PYTHONHASHSEEDs, the address pattern, tuple-minded `ids`).
+      # Calibrated on both known cases in tests/tools/test_stable_test_ids.py.
+      - name: stable test ids (DRF-2633)
+        run: uv run python tools/lint/stable_test_ids.py apps tests
+
       - name: Upload apps/ collection census
         if: always()
         uses: actions/upload-artifact@v7

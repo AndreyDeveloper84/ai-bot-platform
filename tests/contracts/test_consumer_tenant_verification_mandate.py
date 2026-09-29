@@ -70,10 +70,26 @@ def _handler_source_or_unavailable(handler) -> str:
         return ""
 
 
+def _param_id(value: object) -> str:
+    """One id per VALUE — with two argnames pytest calls ``ids`` for ``key``
+    and for ``handler`` separately, never with the pair (DRF-2633). The key
+    is ``(event_name, version)``; the handler is named by module + qualname.
+    ``str(handler)`` was ``<function … at 0x…>``: a memory address, different
+    in every xdist worker, so the workers collected different sets."""
+    if isinstance(value, tuple):
+        return f"{value[0]}@v{value[1]}"
+    qualname = getattr(value, "__qualname__", None)
+    if qualname is not None:
+        return f"{getattr(value, '__module__', '?')}.{qualname}"
+    if isinstance(value, str | int):
+        return str(value)
+    return type(value).__name__  # never str(obj): that is where addresses come from
+
+
 @pytest.mark.parametrize(
     "key,handler",
     list(registered_handlers().items()),
-    ids=lambda hk: f"{hk[0]}@v{hk[1]}" if isinstance(hk, tuple) else str(hk),
+    ids=_param_id,
 )
 def test_every_registered_handler_calls_tenant_verify(key, handler) -> None:
     """Each registered ``(event_name, event_version)`` handler MUST
