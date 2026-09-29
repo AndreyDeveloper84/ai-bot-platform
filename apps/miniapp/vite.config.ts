@@ -59,7 +59,9 @@ export default defineConfig({
         test: {
           name: "dom",
           environment: "jsdom",
-          setupFiles: "./src/test/setup.ts",
+          // DRF-2597: сторож запоздавшего вызова — ПОСЛЕ setup.ts, чтобы его
+          // `afterEach` шёл раньше размонтирования (порядок хуков — stack).
+          setupFiles: ["./src/test/setup.ts", "./src/test/lateCallGuard.ts"],
           include: ["src/**/*.test.{ts,tsx}"],
           // `defaultExclude` обязателен: своё `exclude` затирает умолчания
           // vitest (node_modules, dist), и прогон полез бы в зависимости.

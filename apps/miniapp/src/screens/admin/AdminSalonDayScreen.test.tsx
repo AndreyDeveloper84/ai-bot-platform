@@ -36,6 +36,7 @@ import {
   type MeResponse,
   type SalonDayResponse,
 } from "../../lib/admin-api";
+import { REFUSAL_CANON } from "../../lib/refusal-canon";
 import { AdminSalonDayScreen } from "./AdminSalonDayScreen";
 
 const mockedDay = vi.mocked(getSalonDay);
@@ -724,6 +725,38 @@ describe("moving a visit", () => {
       expect(mockedMove).toHaveBeenCalledWith("v-1", 4, "2026-08-20T11:00:00+00:00"),
     );
   });
+
+  it.each([
+    ["conflict", "запись уже перенесли — обновите день и посмотрите заново"],
+    ["failed", undefined],
+  ] as const)(
+    "перенос не прошёл (%s) — фраза владельца, под ней шаг сервера, detail не виден (§6-кси п.6, DRF-2577)",
+    async (outcome, hint) => {
+      const user = userEvent.setup();
+      mockedDay.mockResolvedValue(dayWith());
+      mockedVersion.mockResolvedValue(okVersion);
+      mockedSlots.mockResolvedValue(
+        slotsPayload([
+          { time: "14:00", start_at: "2026-08-20T11:00:00+00:00", duration_min: 60 },
+        ]) as never,
+      );
+      mockedMove.mockResolvedValue({ outcome, detail: "slot conflict", ...(hint ? { hint } : {}) });
+      vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      renderScreen();
+
+      await user.click(await screen.findByRole("button", { name: /Перенести визит: Мария/ }));
+      await user.click(await screen.findByRole("button", { name: "14:00" }));
+
+      // Фраза отказа — владельца, дословно, первой строкой; под ней — что
+      // делать дальше (`hint`), если сервер его назвал. `detail` — нигде.
+      const status = await screen.findByText((_, el) =>
+        el?.getAttribute("role") === "status" && (el.textContent ?? "").startsWith(REFUSAL_CANON.visitMove),
+      );
+      const step = hint ? "Запись уже перенесли — обновите день и посмотрите заново" : "";
+      expect(status.textContent).toBe(REFUSAL_CANON.visitMove + step);
+      expect(screen.queryByText(/slot conflict/)).toBeNull();
+    },
+  );
 
   it("never renders an unreachable slot list as «no free time»", async () => {
     const user = userEvent.setup();

@@ -64,7 +64,10 @@ import {
   type PortfolioList,
 } from "../lib/master-api";
 import { loadImage, renderSquareCrop } from "../lib/image-crop";
+import { ApiError } from "../lib/api";
+import { REFUSAL_CANON } from "../lib/refusal-canon";
 import { MasterProfileScreen, PROFILE_COPY } from "./MasterProfileScreen";
+import { settleScenario } from "../test/settleScenario";
 
 const GUARD_ASYNC_TIMEOUT_MS = 20;
 let previousAsyncUtilTimeout = 1000;
@@ -218,6 +221,8 @@ describe("6.1 — лимиты из контракта, имя с «Измени
     fireEvent.change(input, { target: { value: "А" } });
     fireEvent.click(screen.getByText(PROFILE_COPY.buttons.save));
     await settle();
+    // DRF-2597: короткое имя не уходит на сервер вовсе — замер после того, как «Сохранить» улеглось.
+    await settleScenario();
     expect(patchMasterProfile).not.toHaveBeenCalled();
     expect(screen.getByRole("alert").textContent).toContain("2");
 
@@ -339,5 +344,24 @@ describe("системные состояния через SystemState (М-6b)",
     mountScreen();
     expect(screen.getByRole("status", { busy: true })).toBeInTheDocument();
     expect(screen.queryByText(/Загружаем/)).toBeNull();
+  });
+});
+
+describe("отказ сохранения — фраза владельца (§6-кси п.4, DRF-2577)", () => {
+  // Раньше экран печатал серверный `detail` — английский текст для нас.
+  it("сервер отказал с detail — человек читает ровно «Не удалось сохранить профиль.»", async () => {
+    vi.mocked(patchMasterProfile).mockRejectedValue(new ApiError(400, "invalid", "bio: invalid value"));
+    mountScreen();
+    await settle();
+
+    fireEvent.click(screen.getByText(PROFILE_COPY.buttons.editBio));
+    fireEvent.change(screen.getByRole("textbox", { name: PROFILE_COPY.bioEdit.title }), {
+      target: { value: "Опыт 6 лет" },
+    });
+    fireEvent.click(screen.getByText(PROFILE_COPY.buttons.save));
+    await settle();
+
+    expect(screen.getByText(REFUSAL_CANON.profileSave)).toBeInTheDocument();
+    expect(screen.queryByText(/invalid value/)).toBeNull();
   });
 });

@@ -23,7 +23,7 @@ import ast
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from apps.identity.personal_fields import NEVER_CROSSES
+from apps.identity.personal_fields import NEVER_CROSSES, UNKNOWN_ORIGIN_NEVER_CROSSES
 
 _ROOT = Path(__file__).resolve().parents[3]
 
@@ -164,7 +164,8 @@ def _unknown(census: Census, known: dict[tuple[str, str, str], str]) -> list[str
     keys = ", ".join(sorted(NEVER_CROSSES))
     return [
         f"{path}:{line} {function}() → {callee}: если это сборка для салона, через "
-        f"него потекут {keys} — нужен предикат source_tenant_id (DRF-2544, OD_MEMORY §3)"
+        f"него потекут {keys} — нужен предикат source_tenant_id (DRF-2544, OD_MEMORY §3); "
+        f"и записи с пустым происхождением: {UNKNOWN_ORIGIN_NEVER_CROSSES}"
         for path, function, callee, line in census.sites
         if (path, function, callee) not in known
     ]
@@ -214,6 +215,9 @@ class TestSubstitution:
             "apps/skills/booking/salon_prompt.py:4 build_prompt() → read_current_view"
         )
         assert "memory_key:favorite_masters" in unknown[0]
+        # DRF-2544: новому салонному читателю названо и второе обязательство —
+        # записи с неизвестным происхождением в чужой салон не переходят.
+        assert UNKNOWN_ORIGIN_NEVER_CROSSES in unknown[0]
 
     def test_same_callee_in_a_new_function_of_a_known_file_is_named(self) -> None:
         # Точность до функции: handler.py держит и салонный путь. Вызов вне

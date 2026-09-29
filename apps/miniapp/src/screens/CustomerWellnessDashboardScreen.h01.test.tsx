@@ -38,7 +38,8 @@ vi.mock("../lib/max-sdk", () => ({
 
 import { getCatalogBrowse } from "../lib/customer-booking";
 import { returnToChat } from "../lib/max-sdk";
-import { CustomerWellnessDashboardScreen } from "./CustomerWellnessDashboardScreen";
+import { bookingWhoText, CustomerWellnessDashboardScreen } from "./CustomerWellnessDashboardScreen";
+import { settleScenario } from "../test/settleScenario";
 
 const mockedBrowse = vi.mocked(getCatalogBrowse);
 /** «Ушёл в чат» — теперь `returnToChat` (DRF-2266), а не голый `closeApp`. */
@@ -332,7 +333,9 @@ describe("H01 · ближайшая запись", () => {
     const heading = await screen.findByRole("heading", { name: "Ближайшая запись" });
     const block = heading.closest("section") as HTMLElement;
     expect(within(block).getByText(/Лимфодренажный массаж/)).toBeInTheDocument();
-    expect(within(block).getByText(/Екатерина С\./)).toBeInTheDocument();
+    // Решение владельца 28.09 (слова, п.2) — ровно «мастер {Имя} · {салон}»,
+    // сравнение строки целиком: «у Екатерина С. · …» этот узел не пройдёт.
+    expect(within(block).getByText("мастер Екатерина С. · Ayla Beauty")).toBeInTheDocument();
     expect(within(block).getByText(/Завтра · пн · 14:00/)).toBeInTheDocument();
     expect(within(block).getByText(/м\. Петровка, 5/)).toBeInTheDocument();
     expect(within(block).getByText("Подтверждена")).toBeInTheDocument();
@@ -402,6 +405,8 @@ describe("H01 · нет согласия дневника", () => {
     renderHome();
     fireEvent.click(await screen.findByRole("button", { name: "Дать согласие в чате" }));
     expect(await screen.findByText(/Приглашение уже в чате/)).toBeInTheDocument();
+    // DRF-2597: мини-апп не закрыт до «Открыть чат» — замер после того, как повтор приглашения улёгся.
+    await settleScenario();
     expect(mockedClose).not.toHaveBeenCalled();
     // Положительная пара: выход в чат — по явной кнопке.
     fireEvent.click(screen.getByRole("button", { name: "Открыть чат" }));
@@ -639,5 +644,16 @@ describe("H01 · без веса и процентов (§49/§82)", () => {
       .join(" ");
     expect(outsideDiary).toMatch(/Активная цель/);
     expect(outsideDiary).not.toMatch(/%/);
+  });
+});
+
+describe("строка «кто» ближайшей записи (п.2 решений владельца 28.09)", () => {
+  it.each([
+    ["Марина", "Формула тела", "мастер Марина · Формула тела"],
+    ["", "Формула тела", "Формула тела"],
+    ["Марина", "", "мастер Марина"],
+    ["  ", null, ""],
+  ])("%j + %j → %j", (name, salon, text) => {
+    expect(bookingWhoText(name, salon)).toBe(text);
   });
 });

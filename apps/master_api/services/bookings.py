@@ -37,8 +37,8 @@ from apps.booking.models import RemoteBookingProxy
 from apps.catalog.models import CatalogMaster, CatalogService
 from apps.catalog.specialist_ref import specialist_keys
 from apps.identity.models import BotUser
-from apps.master_api.services.dashboard import get_tenant_tz
-from apps.master_api.services.visit_source import GUEST_NAME
+from apps.tenancy.timezones import salon_zone
+from apps.master_api.services.visit_source import GUEST_NAME, attended_visits
 
 logger = logging.getLogger(__name__)
 
@@ -202,15 +202,12 @@ def _last_visit_dates(
     ids = [i for i in bot_user_ids if i is not None]
     if not ids:
         return {}
-    qs = RemoteBookingProxy.all_tenants.filter(
-        tenant_id=master.tenant_id,
-        specialist_id__in=specialist_keys(master),
-        status="completed",
-        bot_user_id__in=ids,
-    )
+    # DRF-2462: «была» — визит, который закрыл человек; то же правило, что
+    # у списка «Клиенты» и чипа «постоянный клиент» (``attended_visits``).
+    qs = attended_visits(master).filter(bot_user_id__in=ids)
     if before is not None:
         qs = qs.filter(start_at__lt=before)
-    tz = get_tenant_tz(master.tenant)
+    tz = salon_zone(master.tenant)
     out: dict[UUID, date] = {}
     for row in qs.values("bot_user_id").annotate(last=Max("start_at")):
         if row["last"] is not None:

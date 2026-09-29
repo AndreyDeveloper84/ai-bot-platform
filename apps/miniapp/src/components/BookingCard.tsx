@@ -101,7 +101,13 @@ export function BookingCard({
         )}
       </div>
 
-      <div className="records-card__who">у {item.masterName}</div>
+      {/* DRF-2436 B / п.15: салон — в той же строке, через «·». Слова
+          владельца 28.09, п.2: «мастер {Имя}» без склонения — «у Ольга»
+          ломало падеж. */}
+      <div className="records-card__who">
+        мастер {item.masterName}
+        {item.salonName ? ` · ${item.salonName}` : ""}
+      </div>
 
       {/* DRF-2172 — цена записи «3 200 ₽» (снимок на момент записи), в
           той же форме, что в карточке на Главной. null / ниже 1 ₽ →

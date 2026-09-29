@@ -34,7 +34,8 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date as date_cls, datetime, time, timedelta
 from typing import Any
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from zoneinfo import ZoneInfo
+from apps.tenancy.timezones import salon_zone
 
 #: Hard ceiling on rows returned to the model. A month of visits in a
 #: prompt is tokens spent to make an answer worse.
@@ -63,14 +64,6 @@ class ToolOutcome:
 
     name: str
     data: dict[str, Any]
-
-
-def _tz(master) -> ZoneInfo:
-    tenant = getattr(master, "tenant", None)
-    try:
-        return ZoneInfo(getattr(tenant, "timezone", "") or "Europe/Moscow")
-    except (ZoneInfoNotFoundError, ValueError):
-        return ZoneInfo("Europe/Moscow")
 
 
 def _parse_date(raw: Any, *, field: str) -> date_cls:
@@ -105,7 +98,7 @@ def my_day(master, *, date: Any, now: datetime | None = None) -> dict[str, Any]:
 
     from apps.master_api.services.visit_source import master_visits
 
-    tz = _tz(master)
+    tz = salon_zone(getattr(master, "tenant", None))
     day = _parse_date(date, field="date")
     start, end = _day_bounds(day, tz)
 
@@ -127,7 +120,7 @@ def my_week(master, *, date_from: Any, date_to: Any) -> dict[str, Any]:
 
     from apps.master_api.services.visit_source import master_visits
 
-    tz = _tz(master)
+    tz = salon_zone(getattr(master, "tenant", None))
     start_day = _parse_date(date_from, field="date_from")
     end_day = _parse_date(date_to, field="date_to")
     if end_day < start_day:
@@ -169,7 +162,7 @@ def _working_block(master, day: date_cls) -> tuple[time, time, list[tuple[time, 
     from apps.master_api.services.schedule import _working_block_for_day
     from apps.master_api.services.schedule_frame import load_day_frame
 
-    tz = _tz(master)
+    tz = salon_zone(getattr(master, "tenant", None))
     wh_by_weekday, exceptions_by_date, extra_blocks_by_date = load_day_frame(
         master, from_date=day, to_date=day, tz=tz
     )
@@ -200,7 +193,7 @@ def free_slots(master, *, date: Any, duration_min: Any = 60) -> dict[str, Any]:
     )
     from apps.master_api.services.visit_source import occupied_intervals
 
-    tz = _tz(master)
+    tz = salon_zone(getattr(master, "tenant", None))
     day = _parse_date(date, field="date")
     try:
         wanted = int(duration_min)

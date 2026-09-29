@@ -39,7 +39,7 @@ from apps.admin_api.services.booking import (
     bookable_starts,
     slot_payload,
 )
-from apps.admin_api.services.salon_day import tenant_tz
+from apps.tenancy.timezones import salon_zone
 from apps.admin_api.views import _get_master_or_404
 
 logger = logging.getLogger(__name__)
@@ -110,7 +110,7 @@ def booking_slots(request: HttpRequest) -> HttpResponse:
             # The review screen has to state the timezone the appointment
             # is in (UX contract §18). It comes from the server because
             # the salon's timezone is the salon's fact, not the device's.
-            "timezone": str(tenant_tz(tenant)),
+            "timezone": str(salon_zone(tenant)),
             "master_id": str(master.id),
             "service_id": str(service.id),
             "duration_min": service.duration_min,

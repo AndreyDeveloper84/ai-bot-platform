@@ -1530,6 +1530,7 @@ function GoalCard({
 
   return (
     <section className="wellness-dash__goal-card" aria-labelledby="goal-header">
+      {/* «Активная цель» — название блока, не приставка к цели: решение владельца 28.09 (слова, п.3) — оставить. Саму цель — без «Твоя цель:». */}
       <p id="goal-header" className="wellness-dash__goal-eyebrow">
         Активная цель
       </p>
@@ -1650,6 +1651,16 @@ function BookingEmpty({ onBook }: { onBook: () => void }) {
   );
 }
 
+/** «мастер {Имя} · {салон}» — п.2 решений владельца 28.09, дословная форма. */
+export function bookingWhoText(
+  masterName: string | null | undefined,
+  salonName: string | null | undefined,
+): string {
+  const name = masterName?.trim() ?? "";
+  const salon = salonName?.trim() ?? "";
+  return [name ? `мастер ${name}` : "", salon].filter(Boolean).join(" · ");
+}
+
 function BookingCard({
   data,
   onOpen,
@@ -1674,8 +1685,12 @@ function BookingCard({
         </div>
         {status && <StatusBadge rendering={status.rendering} />}
       </div>
+      {/* Решение владельца 28.09 (слова, п.2): «мастер {Имя}», имя не
+          склоняется; форма одна на чат, список «Мои записи» и эту строку —
+          одна запись не читается двумя способами. «у {Имя}» снято везде.
+          Нет имени или салона в проводе — без висящего «мастер » / « · ». */}
       <div className="wellness-dash__booking-who">
-        у {b.master_name} · {b.salon_name}
+        {bookingWhoText(b.master_name, b.salon_name)}
       </div>
       <div className="wellness-dash__booking-row">
         <div className="wellness-dash__booking-when">{b.date_human}</div>

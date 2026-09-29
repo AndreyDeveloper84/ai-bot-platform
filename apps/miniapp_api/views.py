@@ -598,7 +598,10 @@ def slots(request: HttpRequest) -> HttpResponse:
 
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
     tenant = bot_user.tenant
-    tz = ZoneInfo(tenant.timezone)
+    # DRF-2595: битый или пустой пояс — отказ, а не окна по московскому часу.
+    from apps.tenancy.timezones import salon_zone
+
+    tz = salon_zone(tenant, refuse_broken=True, refuse_empty=True)
 
     master_id = request.GET.get("master_id", "")
     service_id = request.GET.get("service_id", "")
@@ -1308,7 +1311,7 @@ def _create_booking_via_ayla(
                 "id": record.appointment_id,
                 "service_name": service.name,
                 "master_name": master.name,
-                "visit_at": visit_at.isoformat(),
+                "visit_at": _salon_iso(visit_at, tenant),
                 "duration_min": service.duration_min,
                 # DRF-1952 — адрес салона записи, тот же источник, что у карточки
                 # записи (зеркало ``Tenant.address``); ``None`` — зеркало молчит,
@@ -1573,7 +1576,7 @@ def create_booking(request: HttpRequest) -> HttpResponse:
                 "id": str(booking.id),
                 "service_name": booking.service_name,
                 "master_name": booking.master_name,
-                "visit_at": booking.visit_at.isoformat() if booking.visit_at else "",
+                "visit_at": _salon_iso(booking.visit_at, tenant),
                 "duration_min": booking.duration_min,
                 "status": booking.status,
                 # DRF-1952 — см. ветку Ayla выше.
@@ -1630,7 +1633,7 @@ def _booking_to_dict(b, *, tenant, now=None) -> dict[str, Any]:
     """
     from apps.booking.services.transitions import UNDO_WINDOW_SECONDS
 
-    visit_at_iso = b.visit_at.isoformat() if b.visit_at else ""
+    visit_at_iso = _salon_iso(b.visit_at, tenant)
     cancel_requested_iso = b.cancel_requested_at.isoformat() if b.cancel_requested_at else None
     # Cancellable + reschedulable derived flags. Action buttons in the
     # Mini App use these directly — spec §3.4 + §5.3.
@@ -1805,22 +1808,198 @@ def _get_booking_owned(bot_user: BotUser, booking_id: str):
         return None
 
 
-def _reschedule_unavailable_on_ayla_path() -> HttpResponse:
-    """409 for the reschedule pair when BOOKING_VIA_AYLA_REST is ON.
+def _ayla_reschedule_target(
+    bot_user, booking_id: str, raw_body: bytes
+) -> tuple[Any, datetime] | HttpResponse:
+    """Проверить перенос на пути Ayla: чья запись, можно ли, куда (DRF-2561).
 
-    ``_get_booking_owned`` reads ``BookingRequest``, which the Ayla path
-    does not write, so without this gate both reschedule endpoints answer
-    404 «booking not found» for a visit the customer is looking at in her
-    own list — the same shape of lie the cancel pair already gates against
-    two functions up. The seam itself is genuinely absent, not merely
-    unrouted: ``_proxy_booking_to_dict`` reports ``reschedulable: False``.
-    DRF-1349.
+    Возвращает ``(строка зеркала, новое начало)`` или готовый отказ.
+
+    До DRF-2561 обе ручки переноса на этом пути отвечали 409 безусловно, с
+    докстрингом «шва нет совсем». Шов был: ``AylaBookingHTTPClient.
+    reschedule_appointment`` (``POST appointments/{id}/reschedule/``) — тот
+    же, которым переносит чат (``provider.reschedule_record``). Его не
+    подключили к Mini App, потому что ручки держались на строке
+    ``BookingRequest``, которую путь Ayla не пишет.
+
+    Нативный перенос Ayla двигает **только время**: мастер и услуга те же,
+    ``appointment_id`` сохраняется. Экран присылает мастера и услугу записи;
+    другие — отказ, а не молчаливое «перенесли, но не к тому».
     """
-    return _error(
-        "invalid_state",
-        "reschedule is not available on the Ayla path",
-        409,
+    import json
+
+    proxy = _person_owned_proxy(bot_user, booking_id)
+    if proxy is None:
+        # Чужая и сиротская строка — одинаково, без утечки существования.
+        return _error("not_found", "booking not found", 404)
+    try:
+        body = json.loads(raw_body or b"{}")
+    except json.JSONDecodeError:
+        return _error("bad_request", "invalid JSON body", 400)
+    if not isinstance(body, dict):
+        return _error("bad_request", "invalid JSON body", 400)
+    raw_visit_at = body.get("new_visit_at")
+    new_visit_at = _parse_iso_datetime(raw_visit_at) if isinstance(raw_visit_at, str) else None
+    if new_visit_at is None or new_visit_at.tzinfo is None:
+        return _error("bad_request", "new_visit_at (ISO 8601 with offset) is required", 400)
+    if new_visit_at <= timezone.now():
+        return _error("visit_in_past", "new_visit_at must be in the future", 400)
+    if proxy.status != "confirmed":
+        return _error("invalid_state", "booking cannot be rescheduled in its current state", 409)
+
+    service, master = _proxy_catalog_refs(proxy)
+    same_master = not body.get("new_master_id") or (
+        master is not None and str(body["new_master_id"]) == str(master.id)
     )
+    same_service = not body.get("new_service_id") or (
+        proxy.service_id is not None and str(body["new_service_id"]) == str(proxy.service_id)
+    )
+    if not (same_master and same_service):
+        return _error(
+            "invalid_state",
+            "reschedule keeps the master and the service on the Ayla path",
+            409,
+        )
+    return proxy, new_visit_at
+
+
+def _reschedule_request_via_ayla(bot_user, booking_id: str, raw_body: bytes) -> HttpResponse:
+    """POST /reschedule на пути Ayla — проверка и эхо, без записи.
+
+    Локальный путь здесь откладывает кандидата в свою строку. На пути Ayla
+    откладывать некуда и незачем: подтверждение приносит время само, а
+    канон проверит слот под своей блокировкой.
+    """
+    target = _ayla_reschedule_target(bot_user, booking_id, raw_body)
+    if isinstance(target, HttpResponse):
+        return target
+    proxy, _new_visit_at = target
+    return JsonResponse({"booking": _proxy_booking_to_dict(proxy, tenant=proxy.tenant)})
+
+
+def _reschedule_confirm_via_ayla(bot_user, booking_id: str, raw_body: bytes) -> HttpResponse:
+    """POST /reschedule/confirm на пути Ayla — перенос в каноне (DRF-2561).
+
+    Владение — человеком, как у отмены (DRF-2436). Ключ идемпотентности —
+    человек, запись, ОТКУДА и КУДА (оба — в UTC): повтор того же нажатия не
+    двигает запись дважды, другое время — другой перенос. «Откуда» в ключе
+    обязательно: без него «10:00 → 12:00 → снова 10:00» повторил бы первый
+    ключ, и канон вправе ответить сохранённым 200, не двинув запись.
+
+    После 200 канона ручка сдвигает в зеркале ТОЛЬКО время — названное
+    исключение из правила «зеркало пишут потребители событий», по прецеденту
+    чата (комментарий у места записи). ``new_booking`` — строка зеркала с
+    временем, которое **ответил канон**, а не с тем, что прислал экран.
+    """
+    import hashlib
+
+    from apps.integrations.ayla.booking_client import (
+        BookingAPIError,
+        BookingBadRequestError,
+        BookingUnavailableError,
+        get_ayla_booking_client,
+    )
+    from apps.integrations.ayla.user_proxy import external_user_id_for
+
+    target = _ayla_reschedule_target(bot_user, booking_id, raw_body)
+    if isinstance(target, HttpResponse):
+        return target
+    proxy, new_visit_at = target
+
+    if proxy.start_at == new_visit_at:
+        # Повтор уже прошедшего переноса: зеркало сдвинуто этой же ручкой
+        # (исключение ниже), и новый ключ ушёл бы в канон как «ещё один
+        # перенос». Запись уже там, куда просят, — отвечаем как есть.
+        same = _proxy_booking_to_dict(proxy, tenant=proxy.tenant)
+        return JsonResponse({"old_booking": same, "new_booking": same})
+
+    new_iso = new_visit_at.isoformat()
+    from_utc = proxy.start_at.astimezone(UTC).isoformat() if proxy.start_at else ""
+    to_utc = new_visit_at.astimezone(UTC).isoformat()
+    seed = "|".join(
+        [external_user_id_for(bot_user), "reschedule", str(booking_id), from_utc, to_utc]
+    )
+    idempotency_key = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:32]
+
+    try:
+        record = get_ayla_booking_client().reschedule_appointment(
+            external_user_id=external_user_id_for(bot_user),
+            appointment_id=str(booking_id),
+            new_start_datetime=new_iso,
+            # То же правило, что у чата (tools.py, _proxy_expected_version):
+            # версия, которую зеркало знает. Сегодня она NULL у всех строк
+            # (DRF-2537) — тогда поле не отправляется вовсе
+            # (booking_client: ``if expected_version is not None``), то есть
+            # это «не проверять», а не «отказать».
+            expected_version=proxy.last_applied_appointment_version,
+            idempotency_key=idempotency_key,
+            specialist_id=str(proxy.specialist_id) if proxy.specialist_id else None,
+            service_id=str(proxy.service_id) if proxy.service_id else None,
+            old_date=proxy.start_at.date().isoformat() if proxy.start_at else None,
+        )
+    except BookingBadRequestError as exc:
+        code = (exc.code or "").lower()
+        if exc.status_code == 404 or code == "not_found":
+            return _error("not_found", "booking not found", 404)
+        logger.info("miniapp_api.reschedule_booking.ayla_bad_request err=%s", exc)
+        if "slot" in code:
+            return _error("slot_unavailable", "the new time is no longer free", 409)
+        return _error(
+            "invalid_state",
+            "booking cannot be rescheduled in its current state",
+            409,
+        )
+    except BookingUnavailableError:
+        logger.warning("miniapp_api.reschedule_booking.ayla_unavailable")
+        return _error("upstream_unavailable", "booking upstream is temporarily unavailable", 502)
+    except BookingAPIError:
+        logger.exception("miniapp_api.reschedule_booking.ayla_error")
+        return _error("upstream_unavailable", "booking upstream is temporarily unavailable", 502)
+
+    old = _proxy_booking_to_dict(proxy, tenant=proxy.tenant)
+    new = dict(old)
+    # Время — из ответа канона (``start_datetime``, как читает и
+    # ``provider.py``). Канон его не прислал — значит 200 и есть «перенесено
+    # на запрошенное»: другого времени у переноса быть не может.
+    moved_to = _parse_iso_datetime(
+        str(record.raw.get("start_datetime") or record.raw.get("start_at") or "")
+    )
+    moved_start = moved_to or new_visit_at
+
+    # ИСКЛЮЧЕНИЕ из правила раздела «зеркало пишут только потребители
+    # событий» — названное, а не нарушение (DRF-2561, решение главного окна
+    # 28.09, вариант А). Без него экран после успешного переноса перечитывает
+    # зеркало и до прихода ``booking.rescheduled`` показывает СТАРОЕ время с
+    # той же кнопкой «Перенести»: человек видит «не перенеслось». Прецедент —
+    # чат, который после того же нативного переноса пишет зеркало сам
+    # (``skills/booking/tools.py::_upsert_remote_booking_proxy``).
+    #
+    # Двигается ТОЛЬКО время, по ответу канона и с прежней длительностью —
+    # как делает потребитель события. Статус, личность и закрывающий не
+    # трогаются: запись статуса константой вместо события — ровно дефект
+    # DRF-2537. Событие потом доведёт то же значение (потребитель
+    # идемпотентен). Не удалось записать — перенос в каноне уже состоялся,
+    # ответ не меняется, зеркало догонит событием.
+    if proxy.start_at and proxy.end_at:
+        moved_end = moved_start + (proxy.end_at - proxy.start_at)
+        try:
+            from apps.booking.models import RemoteBookingProxy
+
+            # Сравнить-и-поставить: пишем, только если строка стоит там, откуда
+            # переносили. Опоздавший из двух одновременных переносов прочёл
+            # устаревшее «откуда» и победителя не перезапишет — правду
+            # доведёт событие.
+            RemoteBookingProxy.all_tenants.filter(pk=proxy.pk, start_at=proxy.start_at).update(
+                start_at=moved_start, end_at=moved_end
+            )
+        except Exception:  # noqa: BLE001 — зеркало best-effort, см. выше
+            logger.exception(
+                "miniapp_api.reschedule_booking.mirror_move_failed appt=%s", booking_id
+            )
+
+    new["id"] = record.appointment_id
+    new["visit_at"] = _salon_iso(moved_start, proxy.tenant)
+    return JsonResponse({"old_booking": old, "new_booking": new})
 
 
 # ── Ayla-path read model (RemoteBookingProxy) — W4 escalation №3 ────────────
@@ -1828,7 +2007,10 @@ def _reschedule_unavailable_on_ayla_path() -> HttpResponse:
 # BOOKING_VIA_AYLA_REST ON: the Ayla-first create never writes
 # BookingRequest (no dual-write, by design), so list/detail/cancel read
 # the proxy mirror instead. The proxy itself is written ONLY by event
-# consumers (booking.* round-trip) — never by these views.
+# consumers (booking.* round-trip) — never by these views. ONE named
+# exception: a successful reschedule moves start_at/end_at (and nothing else)
+# right away, as the chat does after the same native reschedule — DRF-2561,
+# see ``_reschedule_confirm_via_ayla``.
 
 # Statuses the customer considers "upcoming" on the Ayla path (analog of
 # CONFIRMED + RESCHEDULE_REQUESTED on the local path). ``pending_payment``
@@ -1886,6 +2068,31 @@ def _proxy_duration_min(proxy) -> int:
     return 0
 
 
+def _salon_zone(tenant) -> ZoneInfo:
+    """Пояс салона — одно правило на бот (DRF-2589, DRF-2595)."""
+    from apps.tenancy.timezones import salon_zone
+
+    return salon_zone(tenant)
+
+
+def _salon_iso(moment, tenant) -> str:
+    """Время визита на проводе — в поясе САЛОНА записи (DRF-2589).
+
+    Django отдаёт ``DateTimeField`` в UTC, и ``isoformat()`` уезжал как
+    ``06:00+00:00`` при визите в 09:00 по салону. Экраны Mini App берут часы
+    из строки (``formatVisitFull``), и человек видел «в 06:00». Тот же момент
+    в поясе салона: ``new Date()`` на фронте не меняется, а часы в строке
+    становятся часами салона — правило владельца (28.09, п.1) и прецедент
+    «✅ Вы записаны». Пояс и запись момента — ``apps.tenancy.timezones``
+    (DRF-2595); здесь только контракт провода: пусто — пустая строка.
+    Время без пояса (канон без смещения, тело запроса без смещения) — время
+    салона: ``astimezone`` принял бы его за пояс СЕРВЕРА и сдвинул час заново.
+    """
+    from apps.tenancy.timezones import salon_iso, salon_zone
+
+    return salon_iso(moment, salon_zone(tenant)) or ""
+
+
 def _proxy_booking_to_dict(proxy, *, tenant) -> dict[str, Any]:
     """BookingItem shape from a RemoteBookingProxy row.
 
@@ -1904,14 +2111,21 @@ def _proxy_booking_to_dict(proxy, *, tenant) -> dict[str, Any]:
         "service_name": service.name if service else "",
         "master_id": str(master.id) if master else None,
         "master_name": master.name if master else "",
-        "visit_at": proxy.start_at.isoformat() if proxy.start_at else "",
+        # DRF-2436 / решение владельца п.15: у каждой записи видно, в каком
+        # салоне она создана. Имя — клиентское имя салона (как у витрины), не ID.
+        "salon_name": proxy.tenant.name,
+        "visit_at": _salon_iso(proxy.start_at, proxy.tenant),
         "duration_min": duration_min,
         # Immediate-cancel path — no two-step undo flow on the Ayla path.
         "cancel_requested_at": None,
         "undo_window_seconds": 0,
         "cancellable": proxy.status in _AYLA_UPCOMING_STATUSES,
-        # Reschedule seam is out of the W4 №3 scope — keep it hidden.
-        "reschedulable": False,
+        # DRF-2561 — нативный перенос Ayla (то же время → другое, мастер и
+        # услуга те же). Как у локального пути: живая запись И известны
+        # мастер и услуга — без них экран не найдёт свободного времени.
+        "reschedulable": (
+            proxy.status == "confirmed" and service is not None and master is not None
+        ),
         # No rating read model on the Ayla path in pilot.
         "rating": None,
         "can_rate": False,
@@ -1967,9 +2181,11 @@ def _bookings_list_ayla(request: HttpRequest, bot_user) -> HttpResponse:
 
     before = _parse_iso_datetime(request.GET.get("before"))
 
-    qs = RemoteBookingProxy.all_tenants.filter(
-        tenant=bot_user.tenant,
-        bot_user=bot_user,
+    # DRF-2436 B / решение владельца п.15: «Мои записи» — единый личный список
+    # по ВСЕМ салонам. Отбор по салону ушёл; владение — человек (все личности
+    # подписанного аккаунта), как у детали, отмены и оплаты.
+    qs = RemoteBookingProxy.all_tenants.select_related("tenant").filter(
+        bot_user__in=_person_bot_users(bot_user),
     )
     now = timezone.now()
     if is_past_view:
@@ -1994,31 +2210,18 @@ def _bookings_list_ayla(request: HttpRequest, bot_user) -> HttpResponse:
 
     return JsonResponse(
         {
-            "items": [_proxy_booking_to_dict(p, tenant=bot_user.tenant) for p in rows],
+            "items": [_proxy_booking_to_dict(p, tenant=p.tenant) for p in rows],
             "next_cursor": next_cursor,
         }
     )
 
 
 def _person_bot_users(bot_user):
-    """Все личности человека, чей ``initData`` подписан (DRF-2436).
+    """Все личности подписанного аккаунта — одно правило для всех поверхностей
+    (:func:`apps.identity.services.bot_user_resolver.person_bot_users`, DRF-2436)."""
+    from apps.identity.services.bot_user_resolver import person_bot_users
 
-    Личность бота — «channel-scoped identity inside a tenant»: глобальный бот
-    держит одну под служебным салоном, переход к записи в салон T заводит ещё
-    одну в T (``orchestrator/handoff.py``). Mini App узнаёт человека под ОДНИМ
-    салоном (``MAX_BOT_TENANT_SLUG``), а запись лежит в зеркале под личностью
-    своего салона — поэтому чтение по одной личности не находило записей в
-    других салонах.
-
-    Множество выводится ТОЛЬКО из ``bot_user``, которого ``require_init_data``
-    получил из подписи: тот же канал и тот же внешний id. Из параметров запроса
-    — ничего, иначе это стало бы способом посмотреть чужое. Тем же правилом
-    человека видит и Ayla: ``external_user_id_for`` = ``bot:{channel}:{id}``,
-    одинаковый у всех его личностей.
-    """
-    return BotUser.all_tenants.filter(
-        channel=bot_user.channel, channel_user_id=bot_user.channel_user_id
-    )
+    return person_bot_users(bot_user)
 
 
 def _person_owned_proxy(bot_user, appointment_id: str):
@@ -2305,7 +2508,7 @@ def booking_reschedule_request(request: HttpRequest, booking_id: str) -> HttpRes
 
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
     if getattr(settings, "BOOKING_VIA_AYLA_REST", False):
-        return _reschedule_unavailable_on_ayla_path()
+        return _reschedule_request_via_ayla(bot_user, booking_id, request.body)
     booking = _get_booking_owned(bot_user, booking_id)
     if booking is None:
         return _error("not_found", "booking not found", 404)
@@ -2361,7 +2564,7 @@ def booking_reschedule_confirm(request: HttpRequest, booking_id: str) -> HttpRes
 
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
     if getattr(settings, "BOOKING_VIA_AYLA_REST", False):
-        return _reschedule_unavailable_on_ayla_path()
+        return _reschedule_confirm_via_ayla(bot_user, booking_id, request.body)
     booking = _get_booking_owned(bot_user, booking_id)
     if booking is None:
         return _error("not_found", "booking not found", 404)
@@ -5089,6 +5292,13 @@ class _ActivityRow(NamedTuple):
     status: str
     #: Booking-time price snapshot (DRF-2172); None when the source has none.
     price_amount: Decimal | None
+    #: DRF-2436 B — салон САМОЙ записи (имя и адрес). После п.15 ближайшая
+    #: запись может быть в любом салоне человека: салон запроса здесь солгал бы.
+    salon_name: str
+    salon_address: str | None
+    #: DRF-2589 — пояс салона записи: «ближайшая» может быть в любом салоне
+    #: человека, и пояс салона запроса показал бы чужой час.
+    salon_tz: ZoneInfo | None = None
 
 
 def _recent_activity_from_mirror(
@@ -5109,9 +5319,9 @@ def _recent_activity_from_mirror(
     """
     from apps.booking.models import RemoteBookingProxy
 
-    owned = RemoteBookingProxy.all_tenants.filter(
-        tenant=bot_user.tenant,
-        bot_user=bot_user,
+    # DRF-2436 B / п.15: ближайшая запись — по человеку, из любого салона.
+    owned = RemoteBookingProxy.all_tenants.select_related("tenant").filter(
+        bot_user__in=_person_bot_users(bot_user),
         status__in=_AYLA_UPCOMING_STATUSES,
     )
 
@@ -5127,6 +5337,9 @@ def _recent_activity_from_mirror(
             booking_id=str(proxy.appointment_id),
             status=str(proxy.status),
             price_amount=proxy.price_amount,
+            salon_name=proxy.tenant.name,
+            salon_address=proxy.tenant.address,
+            salon_tz=_salon_zone(proxy.tenant),
         )
 
     this_week_count = owned.filter(
@@ -5169,6 +5382,9 @@ def _recent_activity_from_local(
             status=str(booking.status),
             # The local BookingRequest keeps no price (DRF-2172) — null, honestly.
             price_amount=None,
+            salon_name=booking.tenant.name,
+            salon_address=booking.tenant.address,
+            salon_tz=_salon_zone(booking.tenant),
         )
 
     this_week_count = owned.filter(
@@ -5281,10 +5497,9 @@ def customer_recent_activity(request: HttpRequest) -> HttpResponse:
 
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
     tenant = bot_user.tenant
-    try:
-        tz = ZoneInfo(tenant.timezone or "Europe/Moscow")
-    except Exception:  # noqa: BLE001 — bad tz config must not 500 the dashboard
-        tz = ZoneInfo("Europe/Moscow")
+    from apps.tenancy.timezones import salon_zone
+
+    tz = salon_zone(tenant)  # битый пояс не роняет главную: МСК + журнал (DRF-2595)
 
     now = timezone.now()
 
@@ -5313,16 +5528,16 @@ def customer_recent_activity(request: HttpRequest) -> HttpResponse:
     next_booking: dict[str, Any] | None = None
     if next_row is not None:
         next_booking = {
-            "date_human": _format_visit_human(next_row.visit_at, tz, now=now),
+            "date_human": _format_visit_human(next_row.visit_at, next_row.salon_tz or tz, now=now),
             "service_name": next_row.service_name,
             "duration_min": next_row.duration_min,
             "master_name": next_row.master_name,
-            "salon_name": tenant.name,
+            "salon_name": next_row.salon_name,
             # Дословно как в колонке: `None` уезжает как `null`, `""` —
             # как `""`. Ни `or ""`, ни `?? ""` здесь быть не может: они
             # схлопнули бы «источник промолчал» в «адреса нет», то есть
             # выдали бы наш пробел за ответ салона.
-            "address": tenant.address,
+            "address": next_row.salon_address,
             "booking_id": next_row.booking_id,
             # DRF-2172 — цена записи «3 200 ₽» (макет DRF-1321): снимок из
             # зеркала (`price_total` события); локальный путь цены не хранит

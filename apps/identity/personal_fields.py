@@ -96,14 +96,31 @@ class PersonalField:
 #: here (see the guard's KNOWN LIMITATIONS).
 #:
 #: DRF-2544: the ruling also names the mechanism — ``source_tenant_id``
-#: «проверяемым при чтении». It is not built, because no reader assembles
-#: memory FOR a tenant today (every prompt that carries personal memory is
-#: the global surface). ``apps/identity/tests/test_never_crosses_readers_2544.py``
-#: turns red the day such a reader appears, naming these keys.
+#: «проверяемым при чтении». The WRITE half is built: every MemoryEntry gets
+#: its origin at write time (``apps.identity.services.memory_origin``). The
+#: READ half is not, because no reader assembles memory FOR a tenant today
+#: (every prompt that carries personal memory is the global surface, and the
+#: global surface is not a salon). ``apps/identity/tests/test_never_crosses_readers_2544.py``
+#: turns red the day such a reader appears, naming these keys AND
+#: :data:`UNKNOWN_ORIGIN_NEVER_CROSSES` — that reader must obey both.
 NEVER_CROSSES: frozenset[str] = frozenset(
     {
         "memory_key:favorite_masters",
     }
+)
+
+
+#: DRF-2544 — обязательство первому читателю, который соберёт память ДЛЯ
+#: салона. Запись с ``source_tenant_id`` = ``memory_origin.ORIGIN_UNKNOWN``
+#: (NULL) в чужой салон НЕ переходит: происхождение неизвестно, значит
+#: «сказано здесь же» не доказано. Так лежат все записи до DRF-2544 (на
+#: стенде 28.09 — пять из пяти) и всё, что запишет путь, не объявивший ни
+#: салон, ни глобальную поверхность. Выбор — самый безопасный из трёх
+#: (глобальные / салонные / неизвестные), совет главного окна 28.09.
+#: Глобальный факт отличим: он несёт id сентинела ``global_bot``.
+UNKNOWN_ORIGIN_NEVER_CROSSES: str = (
+    "source_tenant_id IS NULL means origin unknown: a salon-scoped reader "
+    "treats such a row as another salon's fact and does not show it"
 )
 
 
@@ -115,15 +132,21 @@ NEVER_CROSSES: frozenset[str] = frozenset(
 #: baseline is a way of not looking at them.
 POLICY_DEBT: Mapping[str, str] = {
     "memory_key:favorite_masters": (
-        "The person names a master out loud, so «сказал сам» would let it "
-        "travel — but the ruling of 2026-08-24 overrides that for masters "
-        "specifically: a favourite master is a relationship with one salon, "
-        "and salon B learning it is salon A's commercial observation leaking. "
-        "Today it travels: apps/persona/memory_extract.py:396 writes it as a "
-        "green MemoryEntry and apps/identity/services/memory_reader.py:100 "
-        "reads green rows by user_id with no tenant predicate. Fixing it is a "
-        "read-path change (source_tenant_id stops being informational), which "
-        "is not this change."
+        "The ruling of 2026-08-24 makes a favourite master a relationship with "
+        "one salon: salon B must not learn it, even when the person said it. "
+        "What is NOT debt any more: the global surface knowing it. Owner "
+        "decision 2026-09-28 (docs/OWNER_DECISIONS_2026-09-28.md п. 12): «Пользователь "
+        "сам отметил мастера любимым → Ayla может это знать. Передаём имя "
+        "мастера, а не внутренний ID»; the global surface is not a salon. "
+        "Measured 28.09 (DRF-2544): what reaches the prompt is only the stated "
+        "fact, as a NAME (apps/persona/memory_surface.py «называешь любимым "
+        "мастером «…»»); the catalog's inferred UUID list is kept out "
+        "(apps/orchestrator/memory_block.py DECLARED_KEYS_NOT_IN_PROMPT, DRF-2553). "
+        "What remains is the salon half: the row lives in a store read by "
+        "user_id, and the tenant predicate is not built because no salon-scoped "
+        "reader exists. Since DRF-2544 source_tenant_id is written honestly, and "
+        "apps/identity/tests/test_never_crosses_readers_2544.py turns red when "
+        "the first such reader appears. That reader closes this line."
     ),
     "identity.UserPersonalContext.summary": (
         "Ayla's running prose summary of who the user is — INFERRED by "

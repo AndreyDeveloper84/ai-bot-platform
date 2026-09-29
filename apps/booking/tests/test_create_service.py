@@ -402,3 +402,81 @@ class TestVisitAtValidator:
             client_phone="+71112223344",
             # booking_source defaults to 'external' → validator skipped.
         )
+
+
+class TestABrokenSalonZoneRefusesInsteadOfGuessing:
+    """DRF-2595 (часть Б): битый пояс салона на пути создания — отказ.
+
+    Подмена «МСК + журнал» создала бы запись по московскому часу: в салоне не
+    в Москве это неверный час визита, которого никто не заметит. Отказ громок.
+    Пара: тот же вход с битым поясом — отказ без записи; с починенным — запись.
+    """
+
+    def test_refused_while_broken_then_booked_once_fixed(
+        self, tenant, bot_user, master, service, master_service, working_hours, caplog
+    ) -> None:
+        from zoneinfo import ZoneInfoNotFoundError
+
+        def _book():
+            tenant.refresh_from_db()
+            return create_customer_booking(
+                inp=CreateBookingInput(
+                    tenant=tenant,
+                    bot_user=bot_user,
+                    service_id=str(service.id),
+                    master_id=str(master.id),
+                    visit_at=_far_future_monday_noon(),
+                ),
+                correlation_id="corr-2595",
+            )
+
+        before = BookingRequest.all_tenants.count()
+        Tenant.objects.filter(pk=tenant.pk).update(timezone="Not/AZone")
+        with caplog.at_level("WARNING"), pytest.raises(ZoneInfoNotFoundError):
+            _book()
+        assert any("tenancy.bad_tenant_tz" in r.getMessage() for r in caplog.records)
+        assert BookingRequest.all_tenants.count() == before
+
+        Tenant.objects.filter(pk=tenant.pk).update(timezone="Europe/Moscow")
+        booking = _book()
+        assert booking.master_id == master.id
+        assert BookingRequest.all_tenants.count() == before + 1
+
+    def test_empty_and_broken_both_refuse_and_say_different_things(
+        self, tenant, bot_user, master, service, master_service, working_hours, caplog
+    ) -> None:
+        """Пусто и битое — оба отказ (так было до сведения: ``ZoneInfo("")``
+        бросал), но причины в журнале разные: стёрли против опечатки — разное
+        лечение. Подмена «МСК при пустом» создала бы запись — краснеет."""
+        from zoneinfo import ZoneInfoNotFoundError
+
+        from apps.tenancy.timezones import EmptyTenantTimezone
+
+        def _book():
+            tenant.refresh_from_db()
+            return create_customer_booking(
+                inp=CreateBookingInput(
+                    tenant=tenant,
+                    bot_user=bot_user,
+                    service_id=str(service.id),
+                    master_id=str(master.id),
+                    visit_at=_far_future_monday_noon(),
+                ),
+                correlation_id="corr-2595-empty",
+            )
+
+        before = BookingRequest.all_tenants.count()
+        outcomes: dict[str, list[str]] = {}
+        for zone, exc in (("", EmptyTenantTimezone), ("Not/AZone", ZoneInfoNotFoundError)):
+            Tenant.objects.filter(pk=tenant.pk).update(timezone=zone)
+            caplog.clear()
+            with caplog.at_level("WARNING"), pytest.raises(exc):
+                _book()
+            outcomes[zone] = [
+                m for m in (r.getMessage() for r in caplog.records) if "_tenant_tz" in m
+            ]
+        assert BookingRequest.all_tenants.count() == before
+        assert any("tenancy.empty_tenant_tz" in m for m in outcomes[""])
+        assert any("tenancy.bad_tenant_tz" in m for m in outcomes["Not/AZone"])
+        assert not any("bad_tenant_tz" in m for m in outcomes[""])
+        assert not any("empty_tenant_tz" in m for m in outcomes["Not/AZone"])

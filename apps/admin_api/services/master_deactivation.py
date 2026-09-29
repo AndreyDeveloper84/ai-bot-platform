@@ -116,8 +116,8 @@ DEFAULT_CUSTOMER_NOTIFICATION_TEMPLATE = (
     "{new_master_last_initial} — {she_he} тоже делает {service_name}.\n"
     "Если так не подходит — напишите, я предложу другие варианты. 🙏\n\n"
     "[CANCEL BRANCH]\n"
-    "Запись на это время отменим. Если хотите, могу предложить другие "
-    "свободные слоты — напишите."
+    "Запись на это время отменим. Если хотите, могу предложить другое "
+    "свободное время — напишите."
 )
 """Default per-spec §770-783. Owner can override via ``custom_template``."""
 
@@ -323,8 +323,16 @@ def _render_customer_notification(
     tpl = template if template is not None else DEFAULT_CUSTOMER_NOTIFICATION_TEMPLATE
     visit_at_human = ""
     if booking.visit_at is not None:
-        # Tenant-local stringification: keep ISO-ish but readable.
-        visit_at_human = booking.visit_at.strftime("%d.%m.%Y %H:%M")
+        # Час салона, не UTC (DRF-2591). Здесь стоял комментарий «tenant-local
+        # stringification», а код печатал `visit_at` как есть — UTC из базы:
+        # клиент читал в сообщении визит на 3 часа раньше. Пояс — одно правило
+        # на бот (`apps.tenancy.timezones.salon_zone`, DRF-2595).
+        from apps.tenancy.timezones import salon_zone
+
+        zone = salon_zone(old_master.tenant)
+        moment = booking.visit_at
+        local = moment.replace(tzinfo=zone) if moment.tzinfo is None else moment.astimezone(zone)
+        visit_at_human = local.strftime("%d.%m.%Y %H:%M")
 
     fields = {
         "client_first_name": _first_name(booking.client_name),

@@ -74,43 +74,15 @@ export function Snackbar({
   if (!visible) return null;
 
   return (
-    <div
-      className="snackbar"
-      role="status"
-      aria-live="polite"
-      style={{
-        position: "fixed",
-        left: "var(--s-3)",
-        right: "var(--s-3)",
-        bottom: "calc(var(--s-6) + var(--safe-bottom, 0px))",
-        background: "var(--c-text-primary)",
-        color: "var(--c-bg)",
-        padding: "var(--s-3) var(--s-4)",
-        borderRadius: "var(--r-md)",
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "space-between",
-        gap: "var(--s-3)",
-        boxShadow: "0 4px 16px rgba(0,0,0,0.18)",
-        zIndex: 100,
-      }}
-    >
+    <div className="snackbar" role="status" aria-live="polite">
       <span style={{ flex: 1 }}>{message}</span>
       {actionLabel && onAction && (
         <button
           type="button"
+          className="snackbar__action"
           onClick={() => {
             onAction();
             onDismiss?.();
-          }}
-          style={{
-            background: "transparent",
-            color: "var(--c-accent-subtle)",
-            border: "none",
-            font: "inherit",
-            fontWeight: 600,
-            padding: "var(--s-1) var(--s-2)",
-            cursor: "pointer",
           }}
         >
           {actionLabel}

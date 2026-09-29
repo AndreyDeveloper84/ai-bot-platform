@@ -28,6 +28,7 @@ import {
   MAX_CACHED_PHOTOS,
   resetDiaryPhotoCacheForTests,
 } from "./diary-photo";
+import { settleScenario } from "../test/settleScenario";
 
 const fetchMock = vi.fn();
 
@@ -159,6 +160,8 @@ describe("аренда: ветки кэша", () => {
       idle.push((await lease.promise) as string);
       lease.release();
     }
+    // DRF-2597: отложенная уборка идёт через setTimeout(sweep, 0) — ниже предела она не вытесняет ничего, и это видно только после её запуска.
+    await settleScenario();
     expect(revokeObjectURL).not.toHaveBeenCalled();
 
     // 64 слота заняты; 65-й и 66-й вытесняют два самых давних свободных.

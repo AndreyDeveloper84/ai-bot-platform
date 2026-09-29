@@ -34,6 +34,7 @@
  * from the canonical owner and this module only tracks which one is
  * selected and when that selection stops being trustworthy.
  */
+import { REFUSAL_CANON } from "./refusal-canon";
 
 /** An existing customer, as returned by search. */
 export interface DraftExistingCustomer {
@@ -309,12 +310,13 @@ export type SubmitOutcome =
 /** Copy for each outcome. Kept beside the enum so none can go unhandled. */
 export const SUBMIT_OUTCOME_COPY: Record<SubmitOutcome, string> = {
   committed: "Запись создана.",
-  conflict:
-    "Это время уже занято — выберите другое. Клиент и услуга сохранены.",
+  // §6-кси п.3 и п.2 (DRF-2577) — дословно. Что черновик цел, форма
+  // говорит своей строкой («Введённые данные сохранены.»).
+  conflict: REFUSAL_CANON.slotTaken,
   blocked: "Недостаточно прав для записи. Обратитесь к владельцу салона.",
   pending:
     "Ответ от расписания не пришёл. Запись могла быть создана — обновите день, прежде чем пробовать снова.",
-  failed: "Не удалось создать запись. Попробуйте ещё раз.",
+  failed: REFUSAL_CANON.bookingCreate,
 };
 
 /** True when the outcome must preserve what the user entered (§18). */

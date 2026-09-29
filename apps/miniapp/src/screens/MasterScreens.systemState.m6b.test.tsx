@@ -76,6 +76,17 @@ describe("«Клиенты» — SystemState", () => {
     await userEvent.click(screen.getByRole("button", { name: "Попробовать снова" }));
     expect(mockedCustomers).toHaveBeenCalledTimes(2);
   });
+
+  it("пусто — слова владельца (28.09, п.9), без «пула» и без механики подтверждения", async () => {
+    // DRF-1138: после гейта по completed_by список на пилоте пуст, хотя
+    // записи есть, — прежнее «Накопится после первых записей» было бы неправдой.
+    mockedCustomers.mockResolvedValueOnce([]);
+    renderAt("/solo/customers", <MasterCustomersScreen />);
+    expect(
+      await screen.findByText("Клиентов пока нет. Они появятся здесь после завершённых визитов."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/пул клиентов/i)).toBeNull();
+  });
 });
 
 describe("«Уведомления» — SystemState", () => {

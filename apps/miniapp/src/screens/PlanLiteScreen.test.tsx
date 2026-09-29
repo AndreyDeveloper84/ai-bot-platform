@@ -241,6 +241,31 @@ describe("отказы и флаг", () => {
     expect(screen.queryByRole("checkbox")).toBeNull();
   });
 
+  it("DRF-2351: «недоступно» — не тупик: панель на месте, «Главная» уводит с экрана", async () => {
+    // Лист заявлял стену без выхода. Выход — нижняя панель: она стоит вне
+    // веток состояния (#1927, #1918). До этого узла её присутствие именно
+    // в состоянии «недоступно» держал только комментарий в коде.
+    mockedGet.mockRejectedValue(new ApiError(404, "plan_lite_disabled", "off"));
+    renderScreen();
+    await settle();
+
+    expect(screen.getByText(PLAN_LITE_COPY.unavailable)).toBeInTheDocument();
+    const nav = screen.getByRole("navigation", { name: "Основная навигация" });
+    fireEvent.click(within(nav).getByRole("button", { name: "Главная" }));
+    expect(screen.getByTestId("location")).toHaveTextContent("/customer/main");
+  });
+
+  it("DRF-2351: включено — та же панель и на экране с планом", async () => {
+    // Пара к узлу выше: панель не выдумана для «недоступно», она одна на
+    // все состояния экрана.
+    mockedGet.mockResolvedValue(PLAN);
+    renderScreen();
+    await settle();
+
+    expect(screen.queryByText(PLAN_LITE_COPY.unavailable)).toBeNull();
+    expect(screen.getByRole("navigation", { name: "Основная навигация" })).toBeInTheDocument();
+  });
+
   it("ayla_unavailable → фраза и «Повторить», который повторяет запрос", async () => {
     mockedGet.mockRejectedValueOnce(new ApiError(502, "ayla_unavailable", "down"));
     renderScreen();
@@ -310,7 +335,47 @@ describe("служебный ключ на экран не попадает (DRF
     renderScreen();
     await settle();
 
-    expect(screen.getByText(PLAN_LITE_COPY.goalTitle("хочу −5 кг к лету"))).toBeInTheDocument();
+    // DRF-2576 (п. 7 решений 28.09): заголовок — слова человека целиком, без
+    // подписи. Подмена: вернуть «Твоя цель: …» — точное совпадение краснеет.
+    expect(
+      screen.getByRole("heading", { level: 2, name: "хочу −5 кг к лету" }),
+    ).toBeInTheDocument();
+  });
+});
+
+describe("цель без подписи — пары, которых узел выше не держит (п.7 решений 28.09, DRF-2576)", () => {
+  // Узел выше держит карточку × свободную цель. Замер на a02fc651: подпись
+  // «Твоя цель: » в обоих местах экрана краснила только его — карточку с
+  // готовой целью держала проверка по подстроке, конструктор не держал никто.
+  const FREE = "хочу −5 кг к лету";
+  const READY = "Подтянуть фигуру"; // suggestions[tone_up] в DOC
+
+  it("карточка, готовая цель — заголовок ровно выбранное название", async () => {
+    mockedGet.mockResolvedValue(PLAN);
+    renderScreen();
+    await settle();
+
+    const card = screen.getByTestId("plan-lite-card");
+    expect(within(card).getByRole("heading", { level: 2, name: READY })).toBeInTheDocument();
+  });
+
+  it("конструктор, свободная цель — ровно слова человека", async () => {
+    mockedDoc.mockResolvedValue({
+      ...DOC,
+      known: { goal: { ...DOC.known.goal!, goal_text: FREE } },
+    });
+    renderScreen();
+    await settle();
+
+    expect(screen.getByText(FREE)).toBeInTheDocument();
+    expect(screen.queryByText(READY)).toBeNull();
+  });
+
+  it("конструктор, готовая цель — ровно выбранное название", async () => {
+    renderScreen();
+    await settle();
+
+    expect(screen.getByText(READY)).toBeInTheDocument();
   });
 });
 

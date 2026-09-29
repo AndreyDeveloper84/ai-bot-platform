@@ -19,7 +19,7 @@ import re
 import uuid
 from datetime import datetime
 from decimal import Decimal
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from apps.booking.services.records import (
     DEFAULT_VISIT_LIMIT,
@@ -375,7 +375,7 @@ def route_visit_card(
         return DiscoveryReply(text=_UNAVAILABLE_TEXT)
 
     lines = [
-        f"{visit.service_name or 'Визит'} — {_format_when(visit.start_at)}",
+        f"{visit.service_name or 'Визит'} — {_format_when(visit.start_at, visit.salon_tz)}",
     ]
     if visit.master_name:
         lines.append(f"Мастер: {visit.master_name}")
@@ -442,7 +442,7 @@ def route_visit_cancel_ask(*, global_bot_user, appointment_id: str) -> Discovery
     visit = get_visit(bot_user=global_bot_user, appointment_id=appointment_id)
     if visit is None:
         return DiscoveryReply(text=_CANCEL_GONE_TEXT)
-    what = f"{visit.service_name or 'запись'} — {_format_when(visit.start_at)}"
+    what = f"{visit.service_name or 'запись'} — {_format_when(visit.start_at, visit.salon_tz)}"
     return DiscoveryReply(
         text=f"Отменяю запись: {what}.\nПодтвердите — отменить её?",
         action_data=keyboard_envelope(
@@ -473,7 +473,7 @@ def route_visit_cancel_do(*, global_bot_user, appointment_id: str) -> DiscoveryR
     visit = get_visit(bot_user=global_bot_user, appointment_id=appointment_id)
     what = ""
     if visit is not None:
-        what = f"{visit.service_name or 'запись'} — {_format_when(visit.start_at)}"
+        what = f"{visit.service_name or 'запись'} — {_format_when(visit.start_at, visit.salon_tz)}"
 
     status = cancel_booking(bot_user=global_bot_user, appointment_id=appointment_id)
     emit(
@@ -616,20 +616,27 @@ def _render_visits(visits: tuple[Visit, ...]) -> str:
 
 
 def _visit_line(visit: Visit) -> str:
-    """One line per visit, joined by «·» rather than by prepositions.
+    """Строка визита — слова владельца 28.09, п.1–2 (DRF-2569).
 
-    Deliberately no «у {мастер}»: the name arrives in the nominative case and
-    Russian would need the genitive («у Инны», not «у Инна»). Declension is
-    not something to guess at on someone's name — the separator says the same
-    thing and cannot be wrong.
+    «Массаж — мастер Марина · Формула тела, 19.08.2026 в 14:00 — 3 200 ₽».
+    Форма одна с навыком записи (дом — ``booking.visit_words``): та же шапка
+    «Ваши предстоящие записи:» не может давать две разные строки. «мастер
+    {Имя}» без склонения — падеж по имени не угадывается. Цена остаётся в
+    конце: владелец её не снимал, его образец — про предстоящую запись.
+
+    Пояс — салона записи (``Visit.salon_tz`` по локальному ``Tenant``). ПРЕДЕЛ,
+    названный: салон не опознан локально — пилотный ``_DISPLAY_TZ``. Это не
+    выбор, а нехватка данных: ответ канона называет салон, но не его пояс.
     """
-    parts = [visit.service_name or "услуга"]
-    if visit.master_name:
-        parts.append(visit.master_name)
-    when = _format_when(visit.start_at)
-    if when:
-        parts.append(when)
-    line = " · ".join(parts)
+    from apps.booking.visit_words import booking_line, visit_time_words
+
+    when = visit_time_words(visit.start_at, visit.salon_tz, fallback_tz=_DISPLAY_TZ)
+    line = booking_line(
+        service=visit.service_name or "услуга",
+        master=visit.master_name,
+        salon=visit.salon_name,
+        when=when,
+    )
     if visit.price is not None:
         line = f"{line} — {_format_money(visit.price)}"
     return line
@@ -838,7 +845,7 @@ def _repeat_refusal(result: RepeatResult) -> tuple[str, list[dict[str, str]]]:
     return (_UNAVAILABLE_TEXT, [])
 
 
-def _format_when(raw: str) -> str:
+def _format_when(raw: str, salon_tz: str = "") -> str:
     """ISO timestamp → «19 августа, среда, 14:00» in the salon's local time.
 
     The backend serialises ``start_datetime`` straight from the database, so
@@ -847,8 +854,10 @@ def _format_when(raw: str) -> str:
     11:00 — the one formatting error that makes a person arrive on the wrong
     hour. Converting is therefore not cosmetic.
 
-    The response names the tenant but not its timezone, so the pilot's zone
-    is the fallback, exactly as ``client_notify.tenant_timezone`` degrades.
+    DRF-2569: the zone is the booking salon's (``Visit.salon_tz``, resolved
+    from the local ``Tenant``) — the same one the list line uses, so one
+    visit never shows two times. The pilot's zone is only the fallback when
+    the salon was not recognised, exactly as ``tenant_timezone`` degrades.
     A naive timestamp is left alone: inventing an offset for it would be the
     same class of guess this fixes.
     """
@@ -860,7 +869,13 @@ def _format_when(raw: str) -> str:
         logger.warning("visits.unparseable_datetime raw=%r", raw)
         return ""
     if moment.tzinfo is not None:
-        moment = moment.astimezone(_DISPLAY_TZ)
+        zone = _DISPLAY_TZ
+        if salon_tz:
+            try:
+                zone = ZoneInfo(salon_tz)
+            except (ZoneInfoNotFoundError, ValueError):
+                zone = _DISPLAY_TZ
+        moment = moment.astimezone(zone)
     weekday = _WEEKDAYS[moment.weekday()]
     return f"{moment.day} {_MONTHS_GENITIVE[moment.month - 1]}, {weekday}, {moment:%H:%M}"
 

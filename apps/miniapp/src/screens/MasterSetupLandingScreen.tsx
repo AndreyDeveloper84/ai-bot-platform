@@ -41,6 +41,7 @@ import {
   type ReadinessItem,
 } from "../lib/master-api";
 import { setBackButton, signalReady } from "../lib/max-sdk";
+import { SALON_PLACE_TEXT } from "./MasterPlaceScreen";
 
 export const SETUP_ROUTE = "/solo/setup";
 export const HOME_ROUTE = "/solo/my-day";
@@ -78,8 +79,10 @@ export const REASON_TEXT = {
 } as const;
 
 /** Текст причины по коду сервера; незнакомый код — без текста, не сырым кодом. */
-export function reasonText(reason: string | null): string | undefined {
+export function reasonText(reason: string | null, key?: string): string | undefined {
   if (!reason) return undefined;
+  // П.6 решений 28.09 (DRF-2581): место салонного мастера — фраза владельца.
+  if (key === "location" && reason === "managed_outside_app") return SALON_PLACE_TEXT;
   return (REASON_TEXT as Record<string, string | undefined>)[reason];
 }
 
@@ -90,7 +93,37 @@ export const START_LABEL = "Начать настройку";
 export const CONTINUE_LABEL = "Продолжить настройку";
 export const LATER_LABEL = "Продолжить позже";
 export const ALL_DONE_TITLE = "Всё настроено";
+
+/**
+ * Решение владельца 28.09 (слова, п.7; DRF-2582) — дословно. Когда мастер
+ * закрыл всё, что зависит от него, а остальное ведёт салон: полоса и озвучка
+ * не должны читаться как «вам ещё заполнять» — ни «полна» без слов (диктор
+ * читал 100 % при ненастроенных услугах и месте), ни «подготовим профиль».
+ */
+export const SALON_REST_TEXT = "С вашей стороны всё готово. Остальное настроит салон.";
+
+/**
+ * Своё закрыто, остальное — салона: не готово, достижимых незакрытых нет
+ * (`unknown` — незакрытый: незнание сюда не попадает), и есть пункт, который
+ * ведёт салон (`managed_outside_app`).
+ */
+export function restIsSalons(readiness: OnboardingReadiness): boolean {
+  return (
+    !readiness.ready &&
+    firstOpenItem(readiness.items) === null &&
+    readiness.items.some((item) => item.state === "unavailable" && item.reason === "managed_outside_app")
+  );
+}
 export const PUBLISH_ENTRY_LABEL = "Отправить профиль на проверку";
+
+/**
+ * Отправить на проверку можно только связанному мастеру (ruling 6): `ready`
+ * бота считает пункты настройки, а личность — отдельной строкой. Одно
+ * правило на оба входа — экран 01 и карточку «Моего дня» (§6-квартер).
+ */
+export function canSubmitProfile(readiness: OnboardingReadiness): boolean {
+  return readiness.ready && readiness.identity.state === "linked";
+}
 export const IDENTITY_PENDING_NOTE = "Подтверждение личности — ожидает оператора.";
 export const IDENTITY_UNLINKED_NOTE =
   "Отправить профиль на проверку можно будет после подтверждения личности.";
@@ -168,9 +201,8 @@ export function MasterSetupLandingScreen() {
   const next = firstOpenItem(readiness.items);
   const note = identityNote(readiness.identity.state);
   const greeting = name ? `${name}, всё готово 👋` : "Всё готово 👋";
-  // Отправить на проверку можно только связанному мастеру (ruling 6): `ready` бота
-  // считает пункты настройки, а личность — отдельной строкой ниже.
-  const canSubmit = readiness.ready && readiness.identity.state === "linked";
+  const canSubmit = canSubmitProfile(readiness);
+  const salonRest = restIsSalons(readiness);
 
   return (
     <main className="screen setup-landing" aria-labelledby="setup-landing-title">
@@ -180,7 +212,7 @@ export function MasterSetupLandingScreen() {
       {!readiness.ready && (
         <>
           <p className="setup-landing__lead">{SETUP_LEAD}</p>
-          <p className="setup-landing__lead">{SETUP_EXPLAIN}</p>
+          <p className="setup-landing__lead">{salonRest ? SALON_REST_TEXT : SETUP_EXPLAIN}</p>
         </>
       )}
 
@@ -191,6 +223,7 @@ export function MasterSetupLandingScreen() {
         aria-valuemin={0}
         aria-valuemax={fill.total}
         aria-valuenow={fill.done}
+        {...(salonRest ? { "aria-valuetext": SALON_REST_TEXT } : {})}
         data-testid="setup-bar"
       >
         <div
@@ -252,7 +285,7 @@ function ItemRow({ item, onOpen }: { item: ReadinessItem; onOpen: () => void }) 
   if (item.state === "unavailable") {
     // Шага у мастера сейчас нет: показываем и называем причину, но вести
     // некуда — `deep_link` у таких пунктов пуст.
-    const reason = reasonText(item.reason);
+    const reason = reasonText(item.reason, item.key);
     return (
       <div className="setup-landing__row" data-testid={`setup-item-${item.key}`}>
         <span className="setup-landing__mark" aria-hidden="true">

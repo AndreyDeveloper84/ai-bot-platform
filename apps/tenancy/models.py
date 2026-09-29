@@ -100,8 +100,12 @@ class Tenant(models.Model):
     timezone = models.CharField(
         max_length=64,
         default="Europe/Moscow",
-        help_text="IANA timezone for tenant-local rendering of times in "
-        "messages (e.g. 'завтра в 10:00'). Falls back to UTC if invalid.",
+        help_text="IANA timezone of the salon: its day, its hours in messages "
+        "(e.g. 'завтра в 10:00'). Read ONLY via "
+        "apps.tenancy.timezones.salon_zone (DRF-2595): empty → Europe/Moscow, "
+        "an unknown name → Europe/Moscow plus a tenancy.bad_tenant_tz log line; "
+        "on strict paths (booking create, slots) both refuse, logged as "
+        "tenancy.empty_tenant_tz / tenancy.bad_tenant_tz. Never UTC.",
         verbose_name="Часовой пояс",
     )
     locale = models.CharField(

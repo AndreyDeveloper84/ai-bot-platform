@@ -38,18 +38,8 @@ const SURFACE = /\b(background|backgroundColor|border|borderRadius|boxShadow)\s*
 /** Известные носители по файлам. Счёт — точный. */
 const KNOWN: Record<string, { count: number; what: string }> = {
   // App.tsx SurfaceCard одет классом .surface-card (DRF-2465, 28.09) — снят.
-  "components/Snackbar.tsx": {
-    count: 1,
-    what: "кнопка действия снекбара (DRF-2527)",
-  },
-  "screens/admin/AdminServicesMatrixScreen.tsx": {
-    count: 3,
-    what: "точка «несохранено», панель услуг мастера, полоса сохранения (DRF-2527)",
-  },
-  "screens/MasterSettingsScreen.tsx": {
-    count: 1,
-    what: "разделитель hr (DRF-2527)",
-  },
+  // Snackbar, три носителя AdminServicesMatrix, hr в MasterSettings одеты
+  // классами (DRF-2527, 28.09, п.10) — сняты. Остался только сброс.
   "screens/admin/AdminSalonDayScreen.tsx": {
     count: 1,
     what: "fieldset со сбросом border: 0 — не вид, а сброс",
@@ -139,7 +129,7 @@ describe("элементов без класса с видом поверхно�
       }
     }
     expect(problems, "неодетый элемент прибавился или одет без правки списка").toEqual([]);
-    expect(HITS.length).toBe(6);
+    expect(HITS.length).toBe(1);
   });
 
   it("узел умеет покраснеть: ловит неодетый и не ловит одетый", () => {

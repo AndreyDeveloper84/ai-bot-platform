@@ -62,6 +62,7 @@ import {
   setBackButton,
   setClosingConfirmation,
 } from "../lib/max-sdk";
+import { REFUSAL_CANON } from "../lib/refusal-canon";
 
 // --- Копия -----------------------------------------------------------------
 
@@ -141,7 +142,7 @@ export const PROFILE_COPY = {
   },
   states: {
     // Загрузка / ошибка загрузки — SystemState (DRF-2190, словарь DRF-1181 п.10).
-    saveError: "Не удалось сохранить. Попробуйте ещё раз.",
+    saveError: REFUSAL_CANON.profileSave,
     photoTooLarge: (mb: number) => `Фото больше ${mb} МБ. Уменьшите размер.`,
     photoBadMime: "Поддерживаются JPG / PNG / WebP",
     photoNetwork: "Не получилось загрузить фото. Проверьте интернет и попробуйте снова.",
@@ -207,7 +208,8 @@ type Phase = { kind: "loading" } | { kind: "ready"; data: ReadyData } | { kind: 
  */
 function saveRefusalText(e: unknown): string {
   if (e instanceof ApiError && e.slug === NOT_LINKED_SLUG) return PROFILE_COPY.notLinked;
-  if (e instanceof ApiError && e.detail) return e.detail;
+  // §6-кси п.4 (DRF-2577): остальные отказы — фраза владельца; `detail`
+  // в журнале (logApiDetail), не на экране.
   return PROFILE_COPY.states.saveError;
 }
 

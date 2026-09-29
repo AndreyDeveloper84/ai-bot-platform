@@ -208,6 +208,7 @@ from apps.integrations.ayla import (
 from apps.integrations.ayla.goals_client import fetch_decision_context
 from apps.integrations.ayla.nutrition_client import (
     TARGETS_PROPOSED,
+    LegacyDefaultUnconfirmedError,
     ManualTargetsConfirmationRequiredError,
     ManualTargetsRefusedError,
     NothingToConfirmError,
@@ -1026,6 +1027,16 @@ class NutritionAnketaSkill:
             profile, outcome = asyncio.run(
                 get_nutrition_client().confirm_targets(external_user_id=external_id)
             )
+        except LegacyDefaultUnconfirmedError as exc:
+            # DRF-2332: предложение есть, но стоит на прежних умолчаниях —
+            # называем, что именно, и ведём в уже построенный путь, который
+            # спрашивает каждый помеченный вход (DRF-2279), а не в тупик.
+            logger.info(
+                "anketa.confirm_targets.legacy_default user=%s fields=%s",
+                external_id,
+                ",".join(exc.fields),
+            )
+            return _legacy_default_unconfirmed_reply(exc.fields)
         except NothingToConfirmError as exc:
             logger.info("anketa.confirm_targets.nothing user=%s source=%s", external_id, exc.source)
             return SkillResult(
@@ -2083,6 +2094,59 @@ def _is_real_orm_conversation(conversation: object) -> bool:
 #: ``cb:anketa:*``.
 CB_CONFIRM_TARGETS = "cb:anketa:confirm_targets"
 CHIP_CONFIRM_TARGETS = {"label": "✅ Подтвердить ориентиры", "callback": CB_CONFIRM_TARGETS}
+
+#: DRF-2332 — ответ на ``409 LEGACY_DEFAULT_UNCONFIRMED``. Слова утверждены
+#: главным окном 28.09; имена входов — те же, что в живых вопросах DRF-2279.
+LEGACY_DEFAULT_UNCONFIRMED_TEXT = (
+    "Подтвердить пока нельзя: {what} в расчёте — прежние значения по умолчанию, "
+    "а не твои ответы. Давай сначала их уточним."
+)
+#: Та же фраза без перечисления — список пуст или имена незнакомы. Это
+#: нарушение контракта каталога (поля ⊂ ``activity_coefficient``, ``pace``):
+#: видно нам в журнале, а человеку — правда без выдуманных слов.
+LEGACY_DEFAULT_UNCONFIRMED_UNNAMED_TEXT = (
+    "Подтвердить пока нельзя: в расчёте — прежние значения по умолчанию, "
+    "а не твои ответы. Давай сначала их уточним."
+)
+_LEGACY_FIELD_WORDS = {"activity_coefficient": "активность", "pace": "темп"}
+
+
+def _legacy_default_unconfirmed_reply(fields: list[str]) -> SkillResult:
+    """Причина словами + следующий шаг: путь «обнови вес», который по
+    пометкам сначала спрашивает каждый вход (DRF-2279). Ярлыки кнопок —
+    уже живущие в боте; новых ярлыков нет."""
+    from apps.orchestrator.next_steps import menu_button
+
+    named: set[str] = set()
+    for name in fields:
+        name = _LEGACY_MARK_ALIASES.get(name, name)
+        if name in _LEGACY_FIELD_WORDS:
+            named.add(name)
+        else:
+            logger.warning("anketa.confirm_targets.legacy_unknown_field name=%s", name)
+    # Порядок — анкеты (активность, потом темп), а не присланного списка.
+    words = [_LEGACY_FIELD_WORDS[n] for n, _step in _LEGACY_CONFIRM_ORDER if n in named]
+    if words:
+        text = LEGACY_DEFAULT_UNCONFIRMED_TEXT.format(what=" и ".join(words))
+    else:
+        logger.warning(
+            "anketa.confirm_targets.legacy_unnamed code=LEGACY_DEFAULT_UNCONFIRMED fields=%s",
+            list(fields),
+        )
+        text = LEGACY_DEFAULT_UNCONFIRMED_UNNAMED_TEXT
+    return SkillResult(
+        reply_text=text,
+        action_type="anketa_confirm_targets_legacy_default",
+        action_data={
+            "fields": list(fields),
+            "buttons": [
+                {"label": UPDATE_WEIGHT_BUTTON, "callback": UPDATE_WEIGHT_CALLBACK},
+                menu_button(),
+            ],
+        },
+        meta={"reply_kind": "anketa_confirm_targets_legacy_default"},
+    )
+
 
 #: Ответы на ``NOTHING_TO_CONFIRM`` — по источнику, а не одно «не вышло».
 _NOTHING_TO_CONFIRM_TEXTS: dict[str, str] = {

@@ -1739,7 +1739,9 @@ def onboarding_readiness(request: HttpRequest) -> HttpResponse:
     """
 
     master: CatalogMaster = request.master  # type: ignore[attr-defined]
-    return JsonResponse(build_readiness(master).as_dict())
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    # DRF-2370: место работы каталог отдаёт только под субъектом мастера.
+    return JsonResponse(build_readiness(master, actor=external_user_id_for(bot_user)).as_dict())
 
 
 # --- /publication/readiness, /publication, /publication/status (DRF-1797, M5) ---
@@ -2236,9 +2238,9 @@ def schedule(request: HttpRequest) -> HttpResponse:
 
     # Resolve defaults in tenant-local TZ so «today» means today for
     # the master, not for UTC.
-    from apps.master_api.services.schedule import get_tenant_tz
+    from apps.tenancy.timezones import salon_zone
 
-    tz = get_tenant_tz(tenant)
+    tz = salon_zone(tenant)
     today_local = dj_timezone.now().astimezone(tz).date()
 
     raw_from = request.GET.get("from", "").strip()
@@ -2525,7 +2527,8 @@ def notification_prefs(request: HttpRequest) -> HttpResponse:
 def customers_list(request: HttpRequest) -> HttpResponse:
     """Read-only customer roster for the calling master (Tau §4.3 P0 tab).
 
-    Aggregates :class:`apps.booking.BookingRequest` history grouped by
+    Aggregates the master's attended visits in the booking mirror
+    (:class:`apps.booking.RemoteBookingProxy`, DRF-1138) grouped by
     ``bot_user_id``. See :func:`apps.master_api.services.customers.list_master_customers`
     for the field shape + counting rules. Tenant scope is enforced by
     :func:`require_master_init_data`; the service layer adds an explicit

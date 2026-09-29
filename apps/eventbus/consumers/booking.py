@@ -466,6 +466,24 @@ def _schedule_reminders(
             )
             continue
 
+        # DRF-2586: запись, сделанная в диалоге ДО этой правки, держит свои
+        # напоминания в ``yclients_record_id`` (UUID строкой). Новая строка
+        # здесь была бы вторым набором того же визита — человек получил бы
+        # напоминание дважды (на пилоте 13 пар, 4 доставлены обеими). Новые
+        # записи диалога пишут тем же ключом, что и здесь, и двойника
+        # исключает уникальный индекс; эта проверка — только для старых строк.
+        if (
+            reminders_for_appointment(appointment_id)
+            .filter(kind=kind, ayla_appointment_id__isnull=True)
+            .exists()
+        ):
+            logger.info(
+                "eventbus.consumer.booking.skip_reminder_dialog_owns appointment_id=%s kind=%s",
+                appointment_id,
+                kind,
+            )
+            continue
+
         # ``defaults`` are applied on UPDATE; ``create_defaults`` are
         # applied on INSERT. Keeping ``status``/``scheduled_at`` out of
         # ``defaults`` prevents a late/redelivered event from resurrecting
@@ -477,10 +495,6 @@ def _schedule_reminders(
             # collide across multiple Ayla appointments.
             "yclients_record_id": None,
             "chat_id": chat_id,
-            "visit_at": start_at,
-            # Names are looked up via the catalog mirror on send.
-            "master_name": "",
-            "service_name": "",
         }
         BookingReminder.all_tenants.update_or_create(
             ayla_appointment_id=appointment_id,
@@ -491,6 +505,18 @@ def _schedule_reminders(
                 **common_defaults,
                 "status": BookingReminder.Status.PENDING,
                 "scheduled_at": scheduled_at,
+                # DRF-2586: время визита — только при создании, как и
+                # ``scheduled_at``. Строка теперь общая с диалогом, и опоздавшее
+                # или повторное событие с прежним ``start_at`` вернуло бы
+                # ``visit_at`` к старому времени после переноса в диалоге, при
+                # новом ``scheduled_at``. Перенос по событию делает
+                # ``_reschedule_reminders``.
+                "visit_at": start_at,
+                # Names are looked up via the catalog mirror on send. Only on
+                # INSERT (DRF-2586): the dialog writes the same row with the
+                # names snapshot, and an event must not blank it.
+                "master_name": "",
+                "service_name": "",
             },
         )
 

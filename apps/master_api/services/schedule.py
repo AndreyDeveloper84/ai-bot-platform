@@ -62,17 +62,16 @@ import logging
 from dataclasses import dataclass, field
 from datetime import date as date_cls, datetime, time, timedelta, timezone as dt_timezone
 from typing import Any, NamedTuple
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from zoneinfo import ZoneInfo
 
 from django.utils import timezone as dj_timezone
 
-from apps.booking.models import RemoteBookingProxy
 from apps.catalog.models import CatalogMaster, CatalogService
-from apps.catalog.specialist_ref import specialist_keys
 from apps.identity.models import BotUser
 from apps.master_api.services.visit_source import (
     UPCOMING_STATUSES,
     VisitRow,
+    attended_visits,
     master_visits,
 )
 from apps.integrations.ayla.salon_client import (
@@ -90,6 +89,7 @@ from apps.scheduling.models import (
     ScheduleChangeRequest,
     ScheduleException,
 )
+from apps.tenancy.timezones import salon_zone
 
 logger = logging.getLogger(__name__)
 
@@ -270,21 +270,6 @@ class AvailabilityRequestError(Exception):
 
 
 # --- TZ + duration helpers --------------------------------------------
-
-
-def get_tenant_tz(tenant: Any) -> ZoneInfo:
-    """Resolve the tenant's IANA TZ — fall back to UTC on bad values.
-
-    Same fallback contract as
-    :func:`apps.master_api.services.dashboard.get_tenant_tz`.
-    """
-
-    tz_name = getattr(tenant, "timezone", "") or "UTC"
-    try:
-        return ZoneInfo(tz_name)
-    except ZoneInfoNotFoundError:
-        logger.warning("master_api.schedule.bad_tenant_tz tz=%s", tz_name)
-        return ZoneInfo("UTC")
 
 
 def _resolve_duration(booking: VisitRow, service_cache: dict[Any, int]) -> int:
@@ -603,12 +588,13 @@ def _build_returning_customer_index(master: CatalogMaster, bot_user_ids: list[An
         return set()
     from collections import Counter
 
-    rows = RemoteBookingProxy.all_tenants.filter(
-        tenant_id=master.tenant_id,
-        specialist_id__in=specialist_keys(master),
-        bot_user_id__in=list(bot_user_ids),
-        status="completed",
-    ).values_list("bot_user_id", flat=True)
+    # DRF-2462: «приходил» — одно правило с чипом дня и списком «Клиенты»
+    # (``attended_visits``): закрыл канон И закрыл человек.
+    rows = (
+        attended_visits(master)
+        .filter(bot_user_id__in=list(bot_user_ids))
+        .values_list("bot_user_id", flat=True)
+    )
     counts = Counter(rows)
     return {bid for bid, n in counts.items() if n > 1}
 
@@ -696,7 +682,7 @@ def conflicting_bookings_for_template(
       «вот что мешает в ближайшие две недели», и горизонт экран называет.
     """
 
-    tz = get_tenant_tz(master.tenant)
+    tz = salon_zone(master.tenant)
     resolved_now = now if now is not None else dj_timezone.now()
     local_now = resolved_now.astimezone(tz)
     from_date = local_now.date()
@@ -802,7 +788,7 @@ def build_schedule(
 
     if now is None:
         now = dj_timezone.now()
-    tz = get_tenant_tz(master.tenant)
+    tz = salon_zone(master.tenant)
     tz_name = str(tz)
 
     # Pre-fetch all per-day inputs in a single DB roundtrip each.
@@ -1069,7 +1055,7 @@ def request_availability_change(
     if len(reason_text or "") > 200:
         raise AvailabilityRequestError("bad_request", "reason_text must be ≤ 200 chars")
 
-    tz = get_tenant_tz(master.tenant)
+    tz = salon_zone(master.tenant)
     # Compute the date range the window touches in tenant-local TZ.
     start_local_date = start.astimezone(tz).date()
     end_local_date = end.astimezone(tz).date()
@@ -1278,7 +1264,6 @@ __all__ = [
     "ScheduleResponse",
     "build_schedule",
     "conflicting_bookings_for_template",
-    "get_tenant_tz",
     "list_pending_requests",
     "notify_manager_of_availability_request",
     "request_availability_change",

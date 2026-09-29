@@ -6,7 +6,9 @@ Covers (Phase 1 Tier 2):
 * Roster ordering — last_visit_at DESC.
 * No customer phone in the payload, in any form (DRF-1360 / OD-W2-2).
 * Cross-tenant isolation — sibling tenant's customers must NOT leak.
-* Counting rules — CONFIRMED + RESCHEDULED counted, CANCELLED excluded.
+* Counting rules — a visit is a mirror row the canon closed AND a human
+  closed (DRF-1138 source, DRF-2462 gate); cancelled / never-closed /
+  closed-by-the-clock rows are not visits.
 * Returning + at-risk flags.
 * GDPR scrub edge case — booking row with NULL bot_user is skipped.
 * Schema completeness — every documented key always present.
@@ -14,14 +16,16 @@ Covers (Phase 1 Tier 2):
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from django.test import Client
 from django.urls import reverse
+from django.utils import timezone as dj_timezone
 
-from apps.booking.models import BookingRequest
-from apps.catalog.models import CatalogMaster
+from apps.booking.models import BookingRequest, RemoteBookingProxy
+from apps.catalog.models import CatalogMaster, CatalogService
 from apps.identity.models import BotUser
 from apps.master_api.services import customers as cs
 from apps.master_api.tests.conftest import init_data_header, make_master
@@ -41,29 +45,57 @@ def _make_booking(
     tenant: Tenant,
     master: CatalogMaster,
     bot_user: BotUser | None,
-    visit_local: datetime,
+    visit_local: datetime | None = None,
+    visit_utc: datetime | None = None,
     duration_min: int = 60,
     status: str = BookingRequest.Status.CONFIRMED,
     completed: bool = True,
+    completed_by: str = "master",
     service_name: str = "маникюр гель-лак",
     client_name: str = "Клиент",
-) -> BookingRequest:
-    """A roster-visible row is a COMPLETED visit (DRF-1146): the owner
-    ruled the chip counts visits, not bookings, so the helper stamps
-    ``completed_at`` by default. ``completed=False`` reproduces the old
-    world — a confirmed booking that never became a visit — for the
-    tests that pin the new rule."""
-    return BookingRequest.all_tenants.create(
+) -> RemoteBookingProxy:
+    """One visit as the roster reads it since DRF-1138: a mirror row.
+
+    A roster-visible row is a COMPLETED visit (DRF-1146) closed by a human
+    (DRF-2462) — so the helper writes ``status=completed`` with
+    ``completed_by="master"`` by default. ``completed=False`` reproduces a
+    booking that never became a visit (``confirmed``, or ``cancelled`` when
+    ``status`` says so); ``completed_by="system"`` — the clock's auto-close.
+    The service name lives in the catalog mirror, as in production.
+    ``client_name`` is kept for call-site compatibility: the mirror has no
+    snapshot of it, the roster reads ``BotUser``."""
+    del client_name
+    if visit_utc is not None:
+        start = visit_utc
+    else:
+        assert visit_local is not None, "visit_local or visit_utc"
+        start = _utc(visit_local)
+    sid = uuid.uuid4()
+    CatalogService.all_tenants.create(
         tenant=tenant,
-        master=master,
-        bot_user=bot_user,
-        service_name=service_name,
-        client_name=client_name,
-        client_phone="+79000000000",
-        visit_at=_utc(visit_local),
+        external_updated_at=dj_timezone.now(),
+        name=service_name,
+        slug=f"svc-{sid.hex[:8]}",
         duration_min=duration_min,
-        status=status,
-        completed_at=_utc(visit_local) if completed else None,
+        is_active=True,
+        ayla_service_id=sid,
+    )
+    if completed:
+        mirror_status = "completed"
+    elif status == BookingRequest.Status.CANCELLED:
+        mirror_status = "cancelled"
+    else:
+        mirror_status = "confirmed"
+    return RemoteBookingProxy.all_tenants.create(
+        appointment_id=uuid.uuid4(),
+        tenant=tenant,
+        bot_user=bot_user,
+        start_at=start,
+        end_at=start + timedelta(minutes=duration_min),
+        status=mirror_status,
+        completed_by=completed_by if completed else "",
+        service_id=sid,
+        specialist_id=master.id,
     )
 
 
@@ -211,18 +243,12 @@ class TestRosterAggregation:
         anna = _make_client(tenant=tenant, channel_user_id="r2", client_name="Анна")
         # 3 historical visits, last 70 days ago — at_risk should fire.
         for offset in (90, 80, 70):
-            visit_at = now - timedelta(days=offset)
-            BookingRequest.all_tenants.create(
+            _make_booking(
                 tenant=tenant,
                 master=accepted_master,
                 bot_user=anna,
+                visit_utc=now - timedelta(days=offset),
                 service_name="маникюр",
-                client_name="Анна",
-                client_phone="+79000000000",
-                visit_at=visit_at,
-                duration_min=60,
-                status=BookingRequest.Status.CONFIRMED,
-                completed_at=visit_at,
             )
         out = cs.list_master_customers(master=accepted_master, now=now)
         assert len(out) == 1
@@ -235,17 +261,12 @@ class TestRosterAggregation:
         # Only 1 visit a long time ago → not at_risk (cold lead, not lost regular).
         now = datetime(2026, 8, 1, 12, 0, tzinfo=timezone.utc)
         anna = _make_client(tenant=tenant, channel_user_id="r3", client_name="Анна")
-        BookingRequest.all_tenants.create(
+        _make_booking(
             tenant=tenant,
             master=accepted_master,
             bot_user=anna,
+            visit_utc=now - timedelta(days=90),
             service_name="маникюр",
-            client_name="Анна",
-            client_phone="+79000000000",
-            visit_at=now - timedelta(days=90),
-            duration_min=60,
-            status=BookingRequest.Status.CONFIRMED,
-            completed_at=now - timedelta(days=90),
         )
         out = cs.list_master_customers(master=accepted_master, now=now)
         assert out[0]["at_risk"] is False

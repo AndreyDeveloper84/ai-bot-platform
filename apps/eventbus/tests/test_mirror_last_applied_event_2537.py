@@ -293,12 +293,15 @@ class TestBotOwnWritesMarkUnknown:
             tenant=tenant,
             bot_user=None,
             # Стаб записи: функции нужен только ``record.raw``.
-            record=cast(Any, _Record({"ayla_appointment_id": APPOINTMENT_ID})),
+            # DRF-2547: ответ Ayla всегда несёт status (AppointmentDetailSerializer).
+            record=cast(
+                Any, _Record({"ayla_appointment_id": APPOINTMENT_ID, "status": "confirmed"})
+            ),
             start_at=dt.datetime(2026, 5, 22, 15, 0, tzinfo=dt.UTC),
         )
 
         row = RemoteBookingProxy.all_tenants.get(appointment_id=UUID(APPOINTMENT_ID))
-        assert row.status == "confirmed"  # бот записал константу…
+        assert row.status == "confirmed"  # бот записал статус из ответа…
         assert (row.last_applied_event_name, row.last_applied_event_at) == (
             "",
             None,

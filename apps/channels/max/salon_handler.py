@@ -1485,7 +1485,11 @@ def _register_solo_provider(
     # получилось», — см. `solo_link_attempt`.
     link_refusal = None
     catalog_refusal = None
+    identity_link_refusal = None
     from apps.identity.services.solo_catalog_provisioning import provision_catalog_workspace
+    from apps.identity.services.specialist_identity_link import (
+        bind_solo_identity_after_provisioning,
+    )
 
     if result.created:
         from apps.identity.services.solo_identity_link import open_link, record_attempt
@@ -1506,6 +1510,15 @@ def _register_solo_provider(
             bot_user=result.bot_user,
             display_name=result.bot_user.display_name or result.master.name,
         )
+        # DRF-2450 (А), §77 п.38: связь личности — сразу, в том же ходе, без
+        # оператора. Только на подтверждённом workspace: дверь сверяет личность
+        # с claim провижининга, без профиля сверять не с чем. После успеха
+        # автопопытка ниже получает настоящий ключ и пишет LINKED сама.
+        if catalog_refusal is None:
+            link.refresh_from_db(fields=["catalog_specialist_id"])
+            identity_link_refusal = bind_solo_identity_after_provisioning(
+                link, bot_user=result.bot_user
+            )
         link_refusal = attempt_solo_link(result.master, result.bot_user)
         result.master.refresh_from_db(fields=["ayla_user_id"])
         record_attempt(link, refusal=link_refusal, ayla_user_id=result.master.ayla_user_id)
@@ -1527,6 +1540,26 @@ def _register_solo_provider(
                 bot_user=result.bot_user,
                 display_name=result.bot_user.display_name or result.master.name,
             )
+            # DRF-2450: повтор — естественный дозвон связи, если первая попытка
+            # упала (сеть, каталог). Только PENDING: отказ оператора
+            # (REJECTED — fraud_suspected, duplicate_person) бот не отменяет.
+            if (
+                catalog_refusal is None
+                and master is not None
+                and existing_link.status == SoloIdentityLink.Status.PENDING
+            ):
+                from apps.identity.services.solo_identity_link import record_attempt
+                from apps.identity.services.solo_link_attempt import attempt_solo_link
+
+                existing_link.refresh_from_db(fields=["catalog_specialist_id"])
+                identity_link_refusal = bind_solo_identity_after_provisioning(
+                    existing_link, bot_user=result.bot_user
+                )
+                link_refusal = attempt_solo_link(master, result.bot_user)
+                master.refresh_from_db(fields=["ayla_user_id"])
+                record_attempt(
+                    existing_link, refusal=link_refusal, ayla_user_id=master.ayla_user_id
+                )
 
     emit(
         "channels.max.salon.solo_registered",
@@ -1537,6 +1570,7 @@ def _register_solo_provider(
             "blocked_by": result.blocked_by,
             "link_refusal": link_refusal,
             "catalog_provisioning_refusal": catalog_refusal,
+            "identity_link_refusal": identity_link_refusal,
         },
     )
     logger.info(

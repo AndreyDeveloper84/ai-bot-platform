@@ -482,7 +482,9 @@ describe("возврат: корни пилота без системной «н
     mockedGetMe.mockResolvedValue(OWNER_ME);
     renderAppAt("/admin/today");
     await screen.findByRole("heading", { name: "Сегодня" });
-    expect(max.backButton.hide).toHaveBeenCalled();
+    // DRF-2596/2597: «назад» показывает/прячет эффект useScreenBack экрана,
+    // смонтированного после `await getMe()` — вне act; ждём вызов, а не время.
+    await waitFor(() => expect(max.backButton.hide).toHaveBeenCalled());
     expect(max.backButton.onClick).not.toHaveBeenCalled();
   });
 
@@ -491,7 +493,9 @@ describe("возврат: корни пилота без системной «н
     mockedGetMe.mockResolvedValue(OWNER_ME);
     renderAppAt("/admin/settings");
     await screen.findByText(/Скоро здесь будут настройки/);
-    expect(max.backButton.show).toHaveBeenCalled();
+    // DRF-2596/2597: «назад» показывает/прячет эффект useScreenBack экрана,
+    // смонтированного после `await getMe()` — вне act; ждём вызов, а не время.
+    await waitFor(() => expect(max.backButton.show).toHaveBeenCalled());
     max.press();
     expect(await screen.findByRole("heading", { name: "Сегодня" })).toBeInTheDocument();
   });

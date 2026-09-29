@@ -98,6 +98,7 @@ import {
   confirmationLabel,
   confirmationState,
 } from "../../lib/schedule-confirmation-state";
+import { formatSlotTime } from "../../lib/format";
 import { SalonPilotFrame } from "./SalonPilotFrame";
 
 /** Сегодня в местном исчислении браузера — та же дата, что подставит сервер. */
@@ -163,29 +164,38 @@ function humanDate(iso: string): string {
 }
 
 /**
- * Часы из ISO со смещением — как их прислал салон.
+ * Время суток «HH:MM», как его прислал салон — только для строк, которые
+ * УЖЕ время суток салона: часы смены и `start_local`/`end_local` строк
+ * влияния (каталог, `dto.py`: «"HH:MM" in specialist's local timezone»).
+ * Такая строка короче 16 символов и проходит насквозь.
  *
- * Намеренно строкой, а не через Date: провод несёт смещение САЛОНА, и
- * пересчёт в часовой пояс браузера показал бы администратору в Калининграде
- * московские времена сдвинутыми. Показываем время салона, потому что
- * недоступность назначена в нём.
+ * Метки времени (визиты, записи дня мастера, блоки) сюда НЕ идут: они
+ * печатаются функцией дома `formatSlotTime` (`lib/format.ts`), которая
+ * берёт часы из строки со смещением салона. Смещение салона на проводе
+ * держит сервер (DRF-2591, `admin_api`: `/day/` и `day-schedule`). Здесь
+ * прежде стояло «провод несёт смещение САЛОНА» про всё подряд — для визитов
+ * это было неправдой до DRF-2591: провод нёс UTC, и администратор видел
+ * визит на 3 часа раньше.
  *
- * Это правило было записано здесь с самого начала — и рядом жила вторая
- * функция `hhmm`, которая делала ровно обратное через `new Date`. Ею
- * печатались часы визитов и блоков и по ней же группировалась хронология,
- * так что в UTC «14:00 салона» становилось «11:00», а группа разъезжалась
- * надвое. Правило было перенесено, поведение — нет; поймал прогон CI,
- * который идёт в UTC, а не местные прогоны в МSK (11.09.2026).
- *
- * Формат «HH:MM» без даты проходит насквозь: срез короче строки её не
- * трогает, так что блоки, приходящие часами, печатаются как есть.
+ * Историческое: рядом жила функция `hhmm` через `new Date` — в UTC-прогоне
+ * CI «14:00 салона» становилось «11:00» (11.09.2026). Поэтому строкой, не
+ * через `Date`.
  */
 function wireTime(iso: string): string {
+  // wall-clock-ok: время суток салона (часы смены, start_local/end_local «HH:MM» из каталога), не метка визита
   return iso.length >= 16 ? iso.slice(11, 16) : iso;
 }
 
-function wireDate(iso: string): string {
-  return humanDate(iso.slice(0, 10));
+/**
+ * Отгул мастера: «13 сентября · 01:00–05:00». Провод отгулов — в поясе
+ * салона (DRF-2601, `admin_api/views_master_exceptions._time_off_row`):
+ * каталог отдаёт UTC, бот переводит тем же приёмом, что визиты (#2156).
+ * Часы — функцией дома `formatSlotTime`, дата — из той же строки салона.
+ * До DRF-2601 здесь стояла пометка долга: отгул в 01:00 по салону (22:00
+ * UTC накануне) показывался ВЧЕРАШНИМ днём.
+ */
+function timeOffWhen(startAt: string, endAt: string): string {
+  return `${humanDate(startAt.slice(0, 10))} · ${formatSlotTime(startAt)}–${formatSlotTime(endAt)}`;
 }
 
 const ASSIGNED_TITLE: Record<string, string> = {
@@ -220,7 +230,7 @@ function groupByStart(
   const buckets = new Map<string, TimelineEntry[]>();
   for (const master of salon.masters) {
     for (const visit of master.visits) {
-      const key = visit.start_at ? wireTime(visit.start_at) : "—";
+      const key = visit.start_at ? formatSlotTime(visit.start_at) : "—";
       const list = buckets.get(key) ?? [];
       list.push({ masterName: master.name, visit });
       buckets.set(key, list);
@@ -537,7 +547,7 @@ export function SalonPilotScheduleScreen({ me }: { me: MeResponse }) {
               <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
                 {day.bookings.map((b) => (
                   <li key={b.booking_id} style={{ padding: "2px 0" }}>
-                    {`${wireTime(b.visit_at)} · ${b.service_name} · ${b.client_first_name} ${b.client_last_initial}`}
+                    {`${formatSlotTime(b.visit_at)} · ${b.service_name} · ${b.client_first_name} ${b.client_last_initial}`}
                     {b.is_in_progress && NOW_MARKER}
                   </li>
                 ))}
@@ -558,7 +568,7 @@ export function SalonPilotScheduleScreen({ me }: { me: MeResponse }) {
               <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
                 {day.blocks.map((bl) => (
                   <li key={bl.exception_id} style={{ padding: "2px 0" }}>
-                    {`${wireTime(bl.start)}–${wireTime(bl.end)} · ${BLOCK_REASON[bl.reason] ?? bl.reason}`}
+                    {`${formatSlotTime(bl.start)}–${formatSlotTime(bl.end)} · ${BLOCK_REASON[bl.reason] ?? bl.reason}`}
                   </li>
                 ))}
               </ul>
@@ -740,9 +750,7 @@ export function SalonPilotScheduleScreen({ me }: { me: MeResponse }) {
                   ))}
                   {assigned!.time_off.rows.map((r) => (
                     <li key={`off-${r.id}`} style={{ padding: "2px 0" }}>
-                      {`${wireDate(r.start_at)} · ${wireTime(r.start_at)}–${wireTime(
-                        r.end_at,
-                      )} · недоступна${r.reason ? ` · ${r.reason}` : ""}`}
+                      {`${timeOffWhen(r.start_at, r.end_at)} · недоступна${r.reason ? ` · ${r.reason}` : ""}`}
                     </li>
                   ))}
                   {assigned!.closures.rows.map((r) => (

@@ -213,6 +213,7 @@ describe("кадр C03.5 — контекст собран", () => {
     renderAt("/customer/goal-select");
 
     expect(await screen.findByText(COMPLETION_TEXT)).toBeInTheDocument();
+    // DRF-2597: запрет по предмету временной — «не закрыт ДО паузы COMPLETION_AUTO_MS»; момент верный, успокоение не нужно.
     expect(mockedClose).not.toHaveBeenCalled();
     await act(async () => {
       vi.advanceTimersByTime(COMPLETION_AUTO_MS + 10);

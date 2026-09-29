@@ -16,6 +16,7 @@
 import { useState } from "react";
 
 import { ApiError } from "../lib/api";
+import { REFUSAL_CANON } from "../lib/refusal-canon";
 import {
   createCanonGapRequest,
   getSimilarCanonTemplates,
@@ -113,7 +114,9 @@ export function OwnServiceForm({
       onNotLinked();
       return;
     }
-    setSubmitError(e instanceof ApiError ? e.detail || e.slug : "Сеть недоступна");
+    // §6-кси п.1 (DRF-2577): фраза владельца, а не `detail` и не слаг
+    // (слаг — служебное обозначение, худший из шести случаев).
+    setSubmitError(e instanceof ApiError ? REFUSAL_CANON.serviceSave : "Сеть недоступна");
   };
 
   const create = async () => {

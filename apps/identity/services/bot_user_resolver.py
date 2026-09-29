@@ -274,10 +274,29 @@ def resolve_bot_user(
     return qs.select_related("tenant").order_by("-last_seen", "pk").first()
 
 
+def person_bot_users(bot_user: BotUser):
+    """Все личности человека, чья подпись дала ``bot_user`` (DRF-2436).
+
+    Тот же аккаунт мессенджера — ``(channel, channel_user_id)`` — во всех
+    салонах: глобальный бот держит одну личность под служебным салоном,
+    переход к записи в салон T заводит ещё одну в T (``orchestrator/handoff.py``).
+    «Человек» здесь — этот аккаунт мессенджера, а не человек в Ayla: личности
+    не склеиваются, их просто читают вместе. Тем же правилом человека видит
+    Ayla: ``external_user_id_for`` = ``bot:{channel}:{id}``.
+
+    Множество выводится ТОЛЬКО из ``bot_user``, полученного из подписи; вызывающий
+    не передаёт сюда ничего из параметров запроса.
+    """
+    return BotUser.all_tenants.filter(
+        channel=bot_user.channel, channel_user_id=bot_user.channel_user_id
+    )
+
+
 __all__ = [
     "SALON_CHOICE_HEADER",
     "SalonChoiceRequired",
     "is_staff_surface",
+    "person_bot_users",
     "resolve_bot_user",
     "resolve_tenant_slug_for_init_data",
     "resolve_working_bot_user",

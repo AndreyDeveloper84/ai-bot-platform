@@ -74,7 +74,15 @@ class TestItemsAreComputedFromRows:
     def test_fresh_master_has_every_item_open_and_names_why(
         self, client: Client, accepted_master: CatalogMaster
     ) -> None:
-        resp = _get(client)
+        from unittest.mock import MagicMock
+
+        no_place = MagicMock()
+        no_place.get_service_locations.return_value = {"places": [], "areas": []}
+        with patch(
+            "apps.master_api.services.onboarding_readiness.get_ayla_booking_client",
+            return_value=no_place,
+        ):
+            resp = _get(client)
         assert resp.status_code == 200, resp.content
         body = resp.json()
         items = _items(body)
@@ -85,12 +93,12 @@ class TestItemsAreComputedFromRows:
         assert items["hours"]["state"] == "missing"
         assert items["profile"]["state"] == "missing"
         assert items["profile"]["detail"] == {"name": True, "photo": False, "bio": False}
-        # Несуществующая возможность — не «не сделано».
-        assert items["location"]["state"] == "unavailable"
-        assert items["location"]["reason"] == "capability_not_built"
+        # DRF-2370: места нет — «не сделано» тем же слагом, что у каталога.
+        assert items["location"]["state"] == "missing"
+        assert items["location"]["reason"] == "location_not_assigned"
         assert set(body["blocking"]) == {
             "services:missing",
-            "location:unavailable",
+            "location:missing",
             "hours:missing",
             "profile:missing",
         }
@@ -222,11 +230,12 @@ class TestPublicationStateIsTheOneSaleGate:
         link.save(update_fields=["status"])
         assert _get(client).json()["identity"]["state"] == "rejected"
 
-    def test_ready_is_never_true_while_a_capability_is_unavailable(
+    def test_ready_is_never_true_while_the_location_is_not_known(
         self, tenant: Tenant, accepted_master: CatalogMaster, settings
     ) -> None:
-        """Всё, что мастер может сделать сегодня, сделано — и всё равно не READY:
-        причина названа, не спрятана за истиной по умолчанию."""
+        """Всё остальное сделано, а место спросить не у кого (нет субъекта) —
+        не READY: незнание названо причиной, а не превращено в истину по
+        умолчанию. Положительная сторона — ``test_location_readiness_2370``."""
 
         settings.BOOKING_VIA_AYLA_REST = False
         _priced_service(tenant, accepted_master, price=1500, duration=60)
@@ -247,8 +256,8 @@ class TestPublicationStateIsTheOneSaleGate:
             "services": "done",
             "hours": "done",
             "profile": "done",
-            "location": "unavailable",
+            "location": "unknown",
         }
         assert readiness.ready is False
-        assert readiness.blocking == ["location:unavailable"]
+        assert readiness.blocking == ["location:unknown"]
         assert "location" in REQUIRED_ITEMS

@@ -55,7 +55,7 @@ from dataclasses import dataclass
 from datetime import date as date_cls
 from datetime import datetime, timedelta
 from typing import Any
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from apps.tenancy.timezones import salon_zone
 
 logger = logging.getLogger(__name__)
 
@@ -422,24 +422,6 @@ def parse_explicit_date(text: str, *, today: date_cls) -> date_cls | None:
 # Turning a preference into a calendar date — tenant-local, once
 # ---------------------------------------------------------------------------
 
-FALLBACK_TZ = "Europe/Moscow"
-
-
-def tenant_zone(tenant: Any) -> ZoneInfo:
-    """The salon's zone, or ``Europe/Moscow``.
-
-    Deliberately per TENANT and never per master: the bot's catalog mirror
-    carries no per-specialist timezone column, and re-deriving one local
-    date per master is exactly the divergence the salon audit warns about.
-    """
-    name = (getattr(tenant, "timezone", "") or "").strip()
-    if name:
-        try:
-            return ZoneInfo(name)
-        except (ZoneInfoNotFoundError, ValueError, KeyError):
-            logger.warning("time_preference.bad_tenant_timezone value=%s", name[:64])
-    return ZoneInfo(FALLBACK_TZ)
-
 
 def local_today(tenant: Any, *, now: datetime | None = None) -> date_cls:
     """Today's calendar date in the salon's zone.
@@ -451,7 +433,7 @@ def local_today(tenant: Any, *, now: datetime | None = None) -> date_cls:
     from django.utils import timezone as dj_timezone
 
     moment = now or dj_timezone.now()
-    return moment.astimezone(tenant_zone(tenant)).date()
+    return moment.astimezone(salon_zone(tenant)).date()
 
 
 def resolve_date(pref: TimePreference | None, today: date_cls) -> str | None:

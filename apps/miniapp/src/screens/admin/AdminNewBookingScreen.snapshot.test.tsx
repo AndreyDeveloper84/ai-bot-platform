@@ -38,6 +38,7 @@ import {
   listMasters,
   searchSalonCustomers,
 } from "../../lib/admin-api";
+import { REFUSAL_CANON } from "../../lib/refusal-canon";
 import { AdminNewBookingScreen } from "./AdminNewBookingScreen";
 
 const mockedSlots = vi.mocked(getBookingSlots);
@@ -168,5 +169,23 @@ describe("салонная форма рисует то же самое (сто�
     await expect(normalize(container.innerHTML)).toMatchFileSnapshot(
       "./__snapshots__/AdminNewBookingScreen.conflict.html",
     );
+  });
+});
+
+describe("исходы записи словами владельца (§6-кси п.2, п.3, DRF-2577)", () => {
+  // Под фразой исхода форма печатала `detail` — внутреннюю причину.
+  it.each([
+    ["conflict", REFUSAL_CANON.slotTaken],
+    ["failed", REFUSAL_CANON.bookingCreate],
+  ] as const)("%s — ровно фраза владельца, detail не показан, черновик цел", async (outcome, phrase) => {
+    mockedCreate.mockResolvedValue({ outcome, detail: "internal: provider said no" });
+    vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    renderScreen();
+    await fillWholeDraft();
+    screen.getByRole("button", { name: "Создать запись" }).click();
+
+    expect(await screen.findByText(phrase)).toBeInTheDocument();
+    expect(screen.getByText("Введённые данные сохранены.")).toBeInTheDocument();
+    expect(screen.queryByText(/provider said no/)).toBeNull();
   });
 });

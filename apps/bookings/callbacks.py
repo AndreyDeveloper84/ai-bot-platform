@@ -52,7 +52,7 @@ from django.utils import timezone
 
 from apps.audit.services import write_audit
 from apps.booking.models import BookingReminder, PendingBookingAction
-from apps.booking.reminder_lookup import ayla_appointment_id_of
+from apps.booking.reminder_lookup import appointment_ref, ayla_appointment_id_of
 from apps.channels.max.staff_outbound import MANAGER, send_to_staff
 from apps.bookings.keyboards import (
     CALLBACK_BOOK_CANCEL_PREFIX,
@@ -157,7 +157,7 @@ REPLY_NOT_FOUND = "Не нашла эту запись — возможно, о�
 REPLY_FORBIDDEN = "Эта запись не для этого профиля."
 
 # B5 / DRF-841 — replies for the 2-button preview gate.
-REPLY_BOOK_EXPIRED = "Слишком много времени прошло — давайте подберём слот заново."
+REPLY_BOOK_EXPIRED = "Слишком много времени прошло — давайте подберём время заново."
 # DRF-1492 — the same timeout over a CANCEL or RESCHEDULE preview. Nothing was
 # booked and nothing was changed, so «подберём слот заново» is about the wrong
 # verb: the honest fact is that the existing booking is exactly where it was.
@@ -562,12 +562,16 @@ class BookingReminderCallbackSkill:
             action=AUDIT_REMINDER_CONFIRMED,
             target="BookingReminder",
             target_id=reminder.pk,
-            payload={"yclients_record_id": reminder.yclients_record_id},
+            payload={
+                "yclients_record_id": reminder.yclients_record_id,
+                "appointment_ref": appointment_ref(reminder),
+            },
         )
         emit(
             AUDIT_REMINDER_CONFIRMED,
             properties={
                 "yclients_record_id": reminder.yclients_record_id,
+                "appointment_ref": appointment_ref(reminder),
                 "reminder_id": str(reminder.pk),
                 "bot_user_id": str(reminder.bot_user_id),
             },
@@ -737,6 +741,7 @@ class BookingReminderCallbackSkill:
         """Аудит и событие отмены — один след на оба пути."""
         payload = {
             "yclients_record_id": reminder.yclients_record_id,
+            "appointment_ref": appointment_ref(reminder),
             "yclients_cancel_ok": upstream_ok,
         }
         write_audit(
@@ -816,12 +821,16 @@ class BookingReminderCallbackSkill:
             action=AUDIT_REMINDER_RESCHEDULE,
             target="BookingReminder",
             target_id=reminder.pk,
-            payload={"yclients_record_id": reminder.yclients_record_id},
+            payload={
+                "yclients_record_id": reminder.yclients_record_id,
+                "appointment_ref": appointment_ref(reminder),
+            },
         )
         emit(
             AUDIT_REMINDER_RESCHEDULE,
             properties={
                 "yclients_record_id": reminder.yclients_record_id,
+                "appointment_ref": appointment_ref(reminder),
                 "reminder_id": str(reminder.pk),
                 "bot_user_id": str(reminder.bot_user_id),
             },
@@ -854,7 +863,7 @@ def _reschedule_reason(reminder: BookingReminder) -> str:
     """
     visit = timezone.localtime(reminder.visit_at).strftime("%d.%m %H:%M")
     return (
-        f"[перенос записи] запись {reminder.yclients_record_id}, визит {visit}, "
+        f"[перенос записи] запись {appointment_ref(reminder)}, визит {visit}, "
         f"услуга {reminder.service_name}, мастер {reminder.master_name} "
         f"(напоминание {reminder.pk})"
     )

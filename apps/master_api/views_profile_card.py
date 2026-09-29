@@ -53,7 +53,6 @@ from __future__ import annotations
 import logging
 from datetime import date as date_cls
 from typing import Any
-from zoneinfo import ZoneInfo
 
 from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.utils import timezone
@@ -70,6 +69,7 @@ from apps.integrations.ayla.booking_client import (
 )
 from apps.integrations.ayla.user_proxy import external_user_id_for
 from apps.master_api.auth import require_master_init_data
+from apps.tenancy.timezones import salon_zone
 
 logger = logging.getLogger(__name__)
 
@@ -89,10 +89,6 @@ def _error(slug: str, detail: str, status: int) -> JsonResponse:
 
 def _catalog_unavailable() -> JsonResponse:
     return _error("catalog_unavailable", "Каталог сейчас недоступен — попробуйте позже.", 503)
-
-
-def _tenant_tz(master: CatalogMaster) -> ZoneInfo:
-    return ZoneInfo(getattr(master.tenant, "timezone", None) or "Europe/Moscow")
 
 
 def _bridged_service_id(master: CatalogMaster) -> str | None:
@@ -131,7 +127,7 @@ def accepts_today(master: CatalogMaster, *, client: Any, today: date_cls | None 
     service_id = _bridged_service_id(master)
     if service_id is None:
         return {"value": False, "reason": ACCEPTS_TODAY_NO_SERVICE}
-    day = today or timezone.now().astimezone(_tenant_tz(master)).date()
+    day = today or timezone.now().astimezone(salon_zone(master.tenant, refuse_broken=True)).date()
     try:
         slots = client.get_available_times(
             specialist_id=catalog_specialist_id(master),

@@ -835,7 +835,7 @@ export function AdminDeactivationFlowScreen({ me }: Props) {
                         Отменить запись
                       </span>
                       <span style={{ color: "var(--c-text-secondary)" }}>
-                        Клиент получит извинение и предложение нового слота.
+                        Клиент получит извинение и предложение другого времени.
                       </span>
                     </span>
                   </label>
@@ -965,7 +965,7 @@ export function AdminDeactivationFlowScreen({ me }: Props) {
 
       {hasFutureBookings && cancelCount > 0 && (
         <p style={{ marginTop: "var(--s-3)", color: "var(--c-text-secondary)" }}>
-          Запись на это время отменим. Если хотите, могу предложить другие свободные слоты — напишите.
+          Запись на это время отменим. Если хотите, могу предложить другое свободное время — напишите.
         </p>
       )}
 

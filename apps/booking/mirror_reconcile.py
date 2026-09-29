@@ -68,7 +68,6 @@ from dataclasses import dataclass
 from datetime import date as date_cls
 from datetime import datetime, time, timedelta
 from typing import Any, Callable, Mapping
-from zoneinfo import ZoneInfo
 
 from django.conf import settings
 from django.core.cache import cache
@@ -87,10 +86,9 @@ from apps.integrations.ayla.salon_client import (
 from apps.integrations.ayla.user_proxy import external_user_id_for
 from apps.observability.alerting import page as alert_page
 from apps.tenancy.models import Tenant, TenantStaff
+from apps.tenancy.timezones import salon_zone
 
 logger = logging.getLogger(__name__)
-
-DEFAULT_TZ = "Europe/Moscow"
 
 #: Start times on both sides name the same instant; 60 s of slack covers
 #: wire rounding without letting a real reschedule through.
@@ -170,25 +168,12 @@ class TenantDivergence:
         return hashlib.sha256("|".join(sorted(parts)).encode()).hexdigest()
 
 
-def _tenant_tz(tenant: Tenant) -> ZoneInfo:
-    """The tenant's timezone, falling back to Moscow.
-
-    «Сегодня» means today for the salon, not for UTC — the same rule the
-    salon-day projection applies.
-    """
-
-    try:
-        return ZoneInfo(getattr(tenant, "timezone", "") or DEFAULT_TZ)
-    except Exception:  # noqa: BLE001 — a bad tz string must not blind the sweep
-        return ZoneInfo(DEFAULT_TZ)
-
-
 def _window(
     tenant: Tenant, now: datetime, window_days: int
 ) -> tuple[datetime, datetime, list[date_cls]]:
     """``[start, end)`` UTC instants + the tenant-local dates to fan out."""
 
-    tz = _tenant_tz(tenant)
+    tz = salon_zone(tenant)
     today = now.astimezone(tz).date()
     start = datetime.combine(today, time.min, tzinfo=tz)
     end = datetime.combine(today + timedelta(days=window_days), time.min, tzinfo=tz)
