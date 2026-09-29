@@ -121,7 +121,9 @@ class TestP3Absent:
         assert resp.status_code == 404
         assert JPEG not in resp.content
 
-    @pytest.mark.parametrize("master_id", ["not-a-uuid", str(uuid.uuid4())])
+    # Постоянный UUID, не uuid4(): случайный id узла расходится между
+    # воркерами xdist, и сбор падает («Different tests were collected»).
+    @pytest.mark.parametrize("master_id", ["not-a-uuid", "9d3f1c2b-8a7e-4f60-b5d4-3c2b1a0f9e8d"])
     def test_unknown_master_never_reaches_catalog(self, client, master, master_id) -> None:
         patcher, catalog = _catalog(photo=(JPEG, "image/jpeg"))
         with patcher:

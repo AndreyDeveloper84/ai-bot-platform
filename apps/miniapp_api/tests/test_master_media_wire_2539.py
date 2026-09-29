@@ -33,6 +33,7 @@ import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlsplit
 
 import pytest
@@ -120,7 +121,7 @@ class TestW3Helper:
     def test_portfolio_body_is_rewritten_item_by_item(self) -> None:
         mid = uuid.uuid4()
         item = str(uuid.uuid4())
-        body = {
+        body: dict[str, Any] = {
             "items": [{"id": item, "image_url": STORAGE_FORMS["v2_minio"], "created_at": "x"}],
             "count": 1,
             "limit": 10,
