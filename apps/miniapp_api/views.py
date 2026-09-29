@@ -118,9 +118,13 @@ def _lazy_register_bot_user(tenant: Tenant, verified: VerifiedInitData) -> BotUs
     last = (user.get("last_name") or "").strip()
     display = (f"{first} {last}".strip() or f"max:{verified.user_id}")[:200]
 
-    chat_id = ""
-    if verified.chat and "id" in verified.chat:
-        chat_id = str(verified.chat.get("id", ""))[:128]
+    # DRF-2668: как у парсера MAX (``channels/max/parser.py`` — ``is None`` до
+    # ``str()``): отсутствие адреса остаётся пустотой. ``str(None)`` писал
+    # строку ``"None"``, а резолвер дописывает только ПУСТЫЕ поля — такая
+    # строка застревала навсегда и не давала первому сообщению боту
+    # поставить настоящий ``chat_id``.
+    raw_chat_id = (verified.chat or {}).get("id")
+    chat_id = "" if raw_chat_id is None else str(raw_chat_id).strip()[:128]
 
     bot_user, created = BotUser.all_tenants.get_or_create(
         tenant=tenant,
