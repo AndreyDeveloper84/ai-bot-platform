@@ -8,7 +8,7 @@
  * один таймер 0 мс уже слиты — опаздывает то, что дальше одного оборота
  * очереди. Сразу после синхронного `render`/`getBy` опаздывают уже микрозадачи.
  */
-import { render, screen } from "@testing-library/react";
+import { act, render, screen } from "@testing-library/react";
 import { useEffect, useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 
@@ -87,5 +87,60 @@ describe("settleScenario — запоздавший запрещённый вы�
     await settleScenario();
     expect(screen.getByRole("heading", { name: "Тихо" })).toBeInTheDocument();
     expect(performance.now() - started).toBeLessThan(1000);
+  });
+});
+
+describe("DRF-2609 — почему 18 локальных «дождаться» сведены сюда", () => {
+  // Замер 29.09 (20 повторов на клетку). Прежняя форма `settle` — N×
+  // `act(async () => {})`: к гонке DRF-2596 не уязвима (внутри `act` React
+  // сливает эффекты своей очередью), но таймер 0 мс видит СЛУЧАЙНО — N=1:
+  // 0/20, N=2: 3/20, N=4: 8/20, N=6: 6/20 — а вложенный таймер не видит
+  // никогда. Отсюда «раунды на глаз»: больше раундов — больше шанс позеленеть.
+  // Прежние `flush`/`flushSweep` — `act` + ОДИН оборот: глубина 1 — 20/20,
+  // 2 — 5/20, 3 — 0/20. Но и там, где замер дал 0/20, прежняя форма изредка
+  // видит лишний оборот (узел на глубине 2 падал ~1 раз из 25). Поэтому узлы
+  // берут цепочку глубины 8 — прежним формам нужно 8 оборотов, а у них их
+  // от одного до шести, — и зовут помощник с `min: 10`: предел глубины
+  // `settleScenario` тем самым назван и снят узлом явно.
+  const DEPTH = 8;
+  const nested = (depth: number, call: () => void): (() => void) =>
+    depth === 0 ? call : () => setTimeout(nested(depth - 1, call), 0);
+
+  it("прежняя форма N×act не видит цепочку таймеров, settleScenario — видит", async () => {
+    const call = vi.fn();
+    function Chain() {
+      useEffect(() => {
+        nested(DEPTH, call)();
+      }, []);
+      return <h1>Экран</h1>;
+    }
+    render(<Chain />);
+    for (let i = 0; i < 6; i += 1) {
+      await act(async () => {});
+    }
+    expect(call).not.toHaveBeenCalled(); // empty-assert-ok: прежняя форма — пара к строке ниже
+
+    await settleScenario({ min: 10 });
+
+    expect(call).toHaveBeenCalledTimes(1);
+  });
+
+  it("прежние flush/flushSweep (один оборот) не видят цепочку таймеров, settleScenario — видит", async () => {
+    const call = vi.fn();
+    function Chain() {
+      useEffect(() => {
+        nested(DEPTH, call)();
+      }, []);
+      return <h1>Экран</h1>;
+    }
+    render(<Chain />);
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(call).not.toHaveBeenCalled(); // empty-assert-ok: прежняя форма — пара к строке ниже
+
+    await settleScenario({ min: 10 });
+
+    expect(call).toHaveBeenCalledTimes(1);
   });
 });

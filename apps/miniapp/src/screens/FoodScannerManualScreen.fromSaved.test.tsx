@@ -8,7 +8,7 @@
  * порцию человек назвал, сохранив блюдо; это не поправка на карточке).
  * Сторож слов F8 («примерно» / «оценка») обязан пройти и на этом входе.
  */
-import { act, configure, fireEvent, getConfig, render, screen } from "@testing-library/react";
+import { configure, fireEvent, getConfig, render, screen } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -23,6 +23,7 @@ vi.mock("../lib/max-sdk", async (importOriginal) => {
 
 import { estimateFoodText, fetchConsentAt, logFoodText, type FoodTextEstimate } from "../lib/food-scanner";
 import { FoodScannerManualScreen, MANUAL_COPY, MANUAL_ROUTE } from "./FoodScannerManualScreen";
+import { settleScenario } from "../test/settleScenario";
 
 const GUARD_ASYNC_TIMEOUT_MS = 20;
 let previousAsyncUtilTimeout = 1000;
@@ -34,11 +35,6 @@ afterAll(() => {
   configure({ asyncUtilTimeout: previousAsyncUtilTimeout });
 });
 
-const settle = async (rounds = 4) => {
-  for (let i = 0; i < rounds; i += 1) {
-    await act(async () => {});
-  }
-};
 
 const mockedConsent = vi.mocked(fetchConsentAt);
 const mockedEstimate = vi.mocked(estimateFoodText);
@@ -76,7 +72,7 @@ beforeEach(() => {
 describe("из избранного — тот же путь F8", () => {
   it("оценка зовётся сразу с сохранённой порцией; карточка несёт «примерно»/«оценка»", async () => {
     renderFromSaved();
-    await settle();
+    await settleScenario();
 
     expect(mockedEstimate).toHaveBeenCalledTimes(1);
     expect(mockedEstimate).toHaveBeenCalledWith("Борщ", 250);
@@ -93,10 +89,10 @@ describe("из избранного — тот же путь F8", () => {
 
   it("«В дневник» с карточки из избранного пишет как показано, corrected=false", async () => {
     renderFromSaved();
-    await settle();
+    await settleScenario();
 
     fireEvent.click(screen.getByRole("button", { name: MANUAL_COPY.toDiary }));
-    await settle();
+    await settleScenario();
 
     expect(mockedLog).toHaveBeenCalledTimes(1);
     expect(mockedLog.mock.calls[0]?.[0]).toMatchObject({ dish_name: "борщ", portion_g: 250, corrected: false });

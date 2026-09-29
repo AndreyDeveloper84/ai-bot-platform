@@ -15,7 +15,7 @@
  *   - отказ каталога `place_already_set` показан по имени.
  */
 
-import { act, configure, fireEvent, getConfig, render, screen, waitFor, within } from "@testing-library/react";
+import { configure, fireEvent, getConfig, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -43,6 +43,7 @@ import {
   type ServicePlace,
 } from "../lib/master-api";
 import { MasterPlaceScreen, NOTE_MAX, PLACE_COPY, SALON_PLACE_TEXT, mapLink } from "./MasterPlaceScreen";
+import { settleScenario } from "../test/settleScenario";
 
 const GUARD_ASYNC_TIMEOUT_MS = 20;
 let previousAsyncUtilTimeout = 1000;
@@ -56,11 +57,6 @@ afterAll(() => {
   configure({ asyncUtilTimeout: previousAsyncUtilTimeout });
 });
 
-const settle = async (rounds = 4) => {
-  for (let i = 0; i < rounds; i += 1) {
-    await act(async () => {});
-  }
-};
 
 const mockedGet = vi.mocked(getServiceLocations);
 const mockedCreate = vi.mocked(createServiceLocation);
@@ -123,7 +119,7 @@ describe("два формата = две записи", () => {
       .mockResolvedValueOnce(state([place("review_required")]))
       .mockResolvedValueOnce(state([place("review_required")], [area("whole_city")]));
     renderScreen();
-    await settle();
+    await settleScenario();
 
     fireEvent.click(check("format-private_studio"));
     fireEvent.click(check("format-mobile"));
@@ -132,13 +128,13 @@ describe("два формата = две записи", () => {
     fireEvent.change(screen.getByLabelText(PLACE_COPY.addressField), { target: { value: "Москва, Тверская, 1" } });
     fireEvent.change(screen.getByLabelText(PLACE_COPY.noteField), { target: { value: "Вход со двора" } });
     fireEvent.click(screen.getByRole("button", { name: PLACE_COPY.saveAddress }));
-    await settle();
+    await settleScenario();
 
     // Кадр 5.3 — выезд, город из ответа.
     expect(screen.getByText(PLACE_COPY.areaCity("Москва"))).toBeInTheDocument();
     fireEvent.click(within(screen.getByTestId("coverage-whole_city")).getByRole("radio"));
     fireEvent.click(screen.getByRole("button", { name: PLACE_COPY.saveArea }));
-    await settle();
+    await settleScenario();
 
     expect(mockedCreate).toHaveBeenCalledTimes(2);
     expect(mockedCreate.mock.calls[0]?.[0]).toEqual({
@@ -158,14 +154,14 @@ describe("бейдж «Будет виден клиентам» — только
   it("CONFIRMED → бейдж есть (положительный контроль)", async () => {
     mockedGet.mockResolvedValue(state([place("confirmed")]));
     renderScreen();
-    await settle();
+    await settleScenario();
     expect(screen.getByTestId("badge-pl-1")).toHaveTextContent(PLACE_COPY.badgeVisible);
   });
 
   it("REVIEW_REQUIRED → бейджа нет, вместо него «На проверке»", async () => {
     mockedGet.mockResolvedValue(state([place("review_required")]));
     renderScreen();
-    await settle();
+    await settleScenario();
     expect(screen.getByTestId("badge-pl-1")).toHaveTextContent(PLACE_COPY.badgeReview);
     expect(screen.queryByText(PLACE_COPY.badgeVisible)).toBeNull();
   });
@@ -174,7 +170,7 @@ describe("бейдж «Будет виден клиентам» — только
     // Экран не выводит право из status сам — только из поля каталога.
     mockedGet.mockResolvedValue(state([place("confirmed", { shown_to_clients_after_publication: false })]));
     renderScreen();
-    await settle();
+    await settleScenario();
     expect(screen.queryByText(PLACE_COPY.badgeVisible)).toBeNull();
   });
 });
@@ -183,7 +179,7 @@ describe("нет фото фасада; карта — только ссылка
   it("ни одного <img> ни в одном кадре; без координат — нет и ссылки", async () => {
     mockedGet.mockResolvedValue(state([place("confirmed")], [area("later")]));
     const { container } = renderScreen();
-    await settle();
+    await settleScenario();
 
     // ПРИСУТСТВИЕ: сводка отрисована.
     expect(screen.getByTestId("place-pl-1")).toBeInTheDocument();
@@ -200,7 +196,7 @@ describe("нет фото фасада; карта — только ссылка
   it("с координатами из ответа — ссылка «Открыть на карте» с координатами, без встраивания", async () => {
     mockedGet.mockResolvedValue(state([place("confirmed", { latitude: "55.7600", longitude: "37.6100" })]));
     const { container } = renderScreen();
-    await settle();
+    await settleScenario();
 
     const link = screen.getByRole("link", { name: new RegExp(PLACE_COPY.openMap) });
     expect(link).toHaveAttribute("href", mapLink("55.7600", "37.6100"));
@@ -215,19 +211,19 @@ describe("подсказки адреса", () => {
     mockedSuggest.mockRejectedValue(new ApiError(503, "suggest_unavailable", "unavailable", { reason: "misconfigured" }));
     mockedCreate.mockResolvedValue(state([place("review_required")]));
     renderScreen();
-    await settle();
+    await settleScenario();
 
     fireEvent.click(check("format-private_studio"));
     fireEvent.click(screen.getByRole("button", { name: PLACE_COPY.next }));
     fireEvent.change(screen.getByLabelText(PLACE_COPY.addressField), { target: { value: "Москва, Тверская, 1" } });
-    await settle();
+    await settleScenario();
 
     expect(mockedSuggest).toHaveBeenCalledWith("Москва, Тверская, 1");
     expect(screen.queryByRole("listbox")).toBeNull();
     expect(screen.queryByRole("alert")).toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: PLACE_COPY.saveAddress }));
-    await settle();
+    await settleScenario();
     expect(mockedCreate).toHaveBeenCalledTimes(1);
   });
 
@@ -237,11 +233,11 @@ describe("подсказки адреса", () => {
       suggestions: [{ value: "Тверская ул, 1", unrestricted_value: "г Москва, Тверская ул, д 1" }],
     });
     renderScreen();
-    await settle();
+    await settleScenario();
     fireEvent.click(check("format-salon_or_studio"));
     fireEvent.click(screen.getByRole("button", { name: PLACE_COPY.next }));
     fireEvent.change(screen.getByLabelText(PLACE_COPY.addressField), { target: { value: "Тверск" } });
-    await settle();
+    await settleScenario();
 
     const listbox = screen.getByRole("listbox");
     fireEvent.click(within(listbox).getByRole("button", { name: "Тверская ул, 1" }));
@@ -253,7 +249,7 @@ describe("подсказки адреса", () => {
 describe("«Как клиенту вас найти?» ≤ 200 — счётчик от длины", () => {
   it("счётчик растёт с вводом; поле не принимает 201-й символ", async () => {
     renderScreen();
-    await settle();
+    await settleScenario();
     fireEvent.click(check("format-private_studio"));
     fireEvent.click(screen.getByRole("button", { name: PLACE_COPY.next }));
 
@@ -269,7 +265,7 @@ describe("зона выезда", () => {
   it("радио «районы» отсутствует по построению; «Настрою позже» уходит как later", async () => {
     mockedCreate.mockResolvedValue(state([], [area("later")]));
     renderScreen();
-    await settle();
+    await settleScenario();
     fireEvent.click(check("format-mobile"));
     fireEvent.click(screen.getByRole("button", { name: PLACE_COPY.next }));
 
@@ -280,7 +276,7 @@ describe("зона выезда", () => {
 
     fireEvent.click(within(screen.getByTestId("coverage-later")).getByRole("radio"));
     fireEvent.click(screen.getByRole("button", { name: PLACE_COPY.saveArea }));
-    await settle();
+    await settleScenario();
     expect(mockedCreate).toHaveBeenCalledWith({ kind: "mobile", coverage: "later" });
     expect(screen.getByTestId("badge-ar-1")).toHaveTextContent(PLACE_COPY.badgeLater);
   });
@@ -290,12 +286,12 @@ describe("отказы каталога — по имени; изменение 
   it("place_already_set показан своим текстом, форма остаётся", async () => {
     mockedCreate.mockRejectedValue(new ApiError(409, "place_already_set", "x"));
     renderScreen();
-    await settle();
+    await settleScenario();
     fireEvent.click(check("format-private_studio"));
     fireEvent.click(screen.getByRole("button", { name: PLACE_COPY.next }));
     fireEvent.change(screen.getByLabelText(PLACE_COPY.addressField), { target: { value: "Москва, Тверская, 1" } });
     fireEvent.click(screen.getByRole("button", { name: PLACE_COPY.saveAddress }));
-    await settle();
+    await settleScenario();
 
     expect(screen.getByRole("alert")).toHaveTextContent("Место уже указано — измените его, а не добавляйте второе.");
     expect(screen.getByLabelText(PLACE_COPY.addressField)).toBeInTheDocument();
@@ -305,14 +301,14 @@ describe("отказы каталога — по имени; изменение 
     mockedGet.mockResolvedValue(state([place("review_required")]));
     mockedPatch.mockResolvedValue(state([place("review_required", { note_for_client: "Второй этаж" })]));
     renderScreen();
-    await settle();
+    await settleScenario();
 
     fireEvent.click(screen.getByRole("button", { name: PLACE_COPY.changeKind }));
     expect(check("format-private_studio").checked).toBe(true); // предвыбор — из readback
     fireEvent.click(screen.getByRole("button", { name: PLACE_COPY.next }));
     fireEvent.change(screen.getByLabelText(PLACE_COPY.noteField), { target: { value: "Второй этаж" } });
     fireEvent.click(screen.getByRole("button", { name: PLACE_COPY.saveAddress }));
-    await settle();
+    await settleScenario();
 
     expect(mockedCreate).not.toHaveBeenCalled();
     expect(mockedPatch).toHaveBeenCalledWith("pl-1", expect.objectContaining({ note_for_client: "Второй этаж" }));

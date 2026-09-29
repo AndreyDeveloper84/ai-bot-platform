@@ -19,7 +19,7 @@
  *      свойство `ACTION_REPEATABLE`, не список слагов: четвёртое
  *      действие обяжет автора ответить на вопрос, а не угадать по имени.
  */
-import { act, configure, getConfig, render, screen } from "@testing-library/react";
+import { configure, getConfig, render, screen } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -46,6 +46,7 @@ import { ApiError } from "../lib/api";
 import { fetchDecisionContext, type DecisionContext } from "../lib/customer-goals";
 import { getPlanLite, getPlanLiteProposal, type PlanLite, type PlanLiteAction } from "../lib/plan-lite";
 import { PLAN_LITE_ROUTE, PlanLiteScreen, shouldOfferGo } from "./PlanLiteScreen";
+import { settleScenario } from "../test/settleScenario";
 
 const GUARD_ASYNC_TIMEOUT_MS = 20;
 let previousAsyncUtilTimeout = 1000;
@@ -58,11 +59,6 @@ afterAll(() => {
   vi.unstubAllEnvs();
 });
 
-const settle = async (rounds = 4) => {
-  for (let i = 0; i < rounds; i += 1) {
-    await act(async () => {});
-  }
-};
 
 const DOC: DecisionContext = {
   version: 1,
@@ -105,7 +101,7 @@ async function card(p: PlanLite): Promise<HTMLElement> {
       </Routes>
     </MemoryRouter>,
   );
-  await settle();
+  await settleScenario();
   return screen.getByTestId("plan-lite-card");
 }
 

@@ -18,6 +18,7 @@ vi.mock("../lib/max-sdk", () => ({
 
 import { resetDiaryPhotoCacheForTests } from "../lib/diary-photo";
 import { useDiaryEntryPhoto } from "./useDiaryEntryPhoto";
+import { settleScenario } from "../test/settleScenario";
 
 const fetchMock = vi.fn();
 
@@ -50,12 +51,6 @@ function photoResponse(): Response {
 
 const strict = ({ children }: { children: ReactNode }) => <StrictMode>{children}</StrictMode>;
 
-/** Отложенная уборка — на следующем тике. */
-async function flushSweep() {
-  await act(async () => {
-    await new Promise((r) => setTimeout(r, 0));
-  });
-}
 
 let urls: ReturnType<typeof trackObjectUrls>;
 
@@ -68,7 +63,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
-  await flushSweep();
+  await settleScenario();
   // Каждый узел уходит, отдав всё: остаток кэша — утечка, а не «чужая забота».
   expect(resetDiaryPhotoCacheForTests()).toBe(0);
 });
@@ -81,7 +76,7 @@ describe("без снимка — ни запроса, ни адреса", () =>
     const { result, unmount } = renderHook(() => useDiaryEntryPhoto(entry), { wrapper: strict });
     expect(result.current).toBeNull();
     unmount();
-    await flushSweep();
+    await settleScenario();
     expect(fetchMock).not.toHaveBeenCalled();
     expect(urls.created).toEqual([]);
   });
@@ -99,7 +94,7 @@ describe("со снимком", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
 
     unmount();
-    await flushSweep();
+    await settleScenario();
 
     expect(urls.created.length).toBeGreaterThan(0);
     expect(urls.revoked.length).toBe(urls.created.length);
@@ -118,12 +113,12 @@ describe("со снимком", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
 
     a.unmount();
-    await flushSweep();
+    await settleScenario();
     // Вторая карточка ещё на экране — адрес жив.
     expect(urls.revoked).toEqual([]);
 
     b.unmount();
-    await flushSweep();
+    await settleScenario();
     expect(urls.revoked).toEqual(urls.created);
   });
 
@@ -143,7 +138,7 @@ describe("со снимком", () => {
     const signal = (fetchMock.mock.calls[0] as [string, RequestInit])[1].signal!;
 
     unmount();
-    await flushSweep();
+    await settleScenario();
     expect(signal.aborted).toBe(true);
 
     await act(async () => {
@@ -167,7 +162,7 @@ describe("со снимком", () => {
     });
 
     await waitFor(() => expect(answered).toBe(true));
-    await flushSweep();
+    await settleScenario();
     // Ответ разобран (иначе null был бы просто «ещё грузится»): адрес не создан.
     expect(urls.created).toEqual([]);
     expect(result.current).toBeNull();
@@ -197,7 +192,7 @@ describe("со снимком", () => {
     await waitFor(() => expect(result.current).toBe("blob:ayla/2"));
 
     unmount();
-    await flushSweep();
+    await settleScenario();
     expect(urls.live()).toEqual([]);
   });
 });

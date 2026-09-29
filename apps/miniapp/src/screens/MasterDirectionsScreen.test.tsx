@@ -12,7 +12,7 @@
  *   - «Продолжить» передаёт выбранное экрану 03 навигацией, а не записью.
  */
 
-import { act, configure, fireEvent, getConfig, render, screen, waitFor, within } from "@testing-library/react";
+import { configure, fireEvent, getConfig, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -40,6 +40,7 @@ import {
   type ServiceSelectionState,
 } from "../lib/master-api";
 import { DIRECTIONS_COPY, MasterDirectionsScreen, derivedDirectionIds } from "./MasterDirectionsScreen";
+import { settleScenario } from "../test/settleScenario";
 
 const GUARD_ASYNC_TIMEOUT_MS = 20;
 let previousAsyncUtilTimeout = 1000;
@@ -53,11 +54,6 @@ afterAll(() => {
   configure({ asyncUtilTimeout: previousAsyncUtilTimeout });
 });
 
-const settle = async (rounds = 4) => {
-  for (let i = 0; i < rounds; i += 1) {
-    await act(async () => {});
-  }
-};
 
 const mockedDirections = vi.mocked(getServiceDirections);
 const mockedSelection = vi.mocked(getServiceSelection);
@@ -128,7 +124,7 @@ beforeEach(() => {
 describe("карточки — корни каталога, не список макета", () => {
   it("ровно то, что вернул сервер: ни лишних, ни недостающих", async () => {
     renderScreen();
-    await settle();
+    await settleScenario();
 
     // ПРИСУТСТВИЕ: все три корня — по имени сервера.
     for (const root of ROOTS) {
@@ -147,7 +143,7 @@ describe("карточки — корни каталога, не список м
 describe("«Выбрано: N» — от состояния", () => {
   it("растёт и падает с кликами, а не стоит константой", async () => {
     renderScreen();
-    await settle();
+    await settleScenario();
     const counter = screen.getByTestId("directions-counter");
     expect(counter).toHaveTextContent(DIRECTIONS_COPY.selected(0));
 
@@ -166,7 +162,7 @@ describe("«Выбрано: N» — от состояния", () => {
     // (`direction_id: null`) и не должна дать ни предвыбора, ни счёта.
     mockedSelection.mockResolvedValue(selection([selected("t-brow", "dir-brows"), selected("t-orphan", null)]));
     renderScreen();
-    await settle();
+    await settleScenario();
 
     expect(checkbox("dir-brows").checked).toBe(true);
     expect(checkbox("dir-nails").checked).toBe(false);
@@ -197,7 +193,7 @@ describe("«Другое направление» — заявка о разры
       similar: [],
     });
     renderScreen();
-    await settle();
+    await settleScenario();
 
     fireEvent.click(screen.getByRole("button", { name: `+ ${DIRECTIONS_COPY.other}` }));
     fireEvent.change(screen.getByLabelText(DIRECTIONS_COPY.otherField), { target: { value: "татуаж" } });
@@ -211,7 +207,7 @@ describe("«Другое направление» — заявка о разры
     fireEvent.change(screen.getByLabelText(FIELD_DURATION), { target: { value: "90" } });
     fireEvent.change(screen.getByLabelText(FIELD_PRICE), { target: { value: "5000" } });
     fireEvent.submit(screen.getByLabelText(FIELD_NAME).closest("form") as HTMLFormElement);
-    await settle();
+    await settleScenario();
 
     // ПРИСУТСТВИЕ: заявка ушла, и в ней названо направление.
     expect(mockedCreate).toHaveBeenCalledTimes(1);
@@ -235,14 +231,14 @@ describe("«Другое направление» — заявка о разры
 describe("«Продолжить» — навигация, не запись", () => {
   it("передаёт выбранные направления экрану 03 в порядке каталога", async () => {
     renderScreen();
-    await settle();
+    await settleScenario();
     const next = screen.getByRole("button", { name: DIRECTIONS_COPY.next });
     expect(next).toBeDisabled(); // ноль выбранных — идти некуда
 
     fireEvent.click(checkbox("dir-lashes"));
     fireEvent.click(checkbox("dir-nails")); // кликнули позже — в state раньше: порядок каталога
     fireEvent.click(next);
-    await settle();
+    await settleScenario();
 
     expect(screen.getByTestId("location")).toHaveTextContent("/solo/services/select|dir-nails,dir-lashes");
     // Ничего не записано: ни выбора услуг, ни заявки.

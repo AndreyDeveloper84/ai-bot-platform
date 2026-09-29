@@ -6,7 +6,7 @@
  * записи, экран числа не переписывает. 201 и 200 сервера — разные фразы:
  * «сохранила» и «уже в избранном» не одно и то же для человека.
  */
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -24,6 +24,7 @@ import { loadDiaryToday, type WellnessToday } from "../lib/customer-wellness";
 import { saveMealFromEntry, type SavedMeal } from "../lib/saved-meals";
 import { FoodScannerDiaryScreen } from "./FoodScannerDiaryScreen";
 import { FAVORITES_COPY, FAVORITES_ROUTE } from "./FoodScannerFavoritesScreen";
+import { settleScenario } from "../test/settleScenario";
 
 const mockedLoad = vi.mocked(loadDiaryToday);
 const mockedSave = vi.mocked(saveMealFromEntry);
@@ -68,11 +69,6 @@ function renderScreen() {
   );
 }
 
-const settle = async (rounds = 4) => {
-  for (let i = 0; i < rounds; i += 1) {
-    await act(async () => {});
-  }
-};
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -100,7 +96,7 @@ describe("дневник → избранное", () => {
     await screen.findByText("Овсянка с ягодами");
 
     fireEvent.click(screen.getByRole("button", { name: `В избранное: Овсянка с ягодами` }));
-    await settle();
+    await settleScenario();
 
     expect(mockedSave).toHaveBeenCalledWith("fl-1");
     expect(screen.getByText(FAVORITES_COPY.savedNotice("Овсянка с ягодами"))).toBeInTheDocument();
@@ -112,7 +108,7 @@ describe("дневник → избранное", () => {
     await screen.findByText("Овсянка с ягодами");
 
     fireEvent.click(screen.getByRole("button", { name: `В избранное: Овсянка с ягодами` }));
-    await settle();
+    await settleScenario();
 
     expect(screen.getByText(FAVORITES_COPY.alreadyNotice("Овсянка с ягодами"))).toBeInTheDocument();
   });
@@ -123,7 +119,7 @@ describe("дневник → избранное", () => {
     await screen.findByText("Овсянка с ягодами");
 
     fireEvent.click(screen.getByRole("button", { name: `В избранное: Овсянка с ягодами` }));
-    await settle();
+    await settleScenario();
 
     expect(screen.getByText(FAVORITES_COPY.unavailable)).toBeInTheDocument();
   });
