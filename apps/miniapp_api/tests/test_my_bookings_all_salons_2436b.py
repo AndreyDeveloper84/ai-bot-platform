@@ -146,3 +146,7 @@ class TestChatMyBookingsReadsThePerson:
 
         services = sorted(b.service_name for b in result.bookings)
         assert services == ["Маникюр", "Массаж"]
+        # DRF-2569 / слова владельца п.2: у каждой строки — салон ЕЁ записи.
+        lines = result.text.splitlines()[1:]
+        assert any("Маникюр — мастер Мастер · Формула тела, " in ln for ln in lines), lines
+        assert any("Массаж — мастер Мастер · Люмина, " in ln for ln in lines), lines
