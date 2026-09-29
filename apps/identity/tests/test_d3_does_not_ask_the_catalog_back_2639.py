@@ -29,6 +29,7 @@ from apps.identity.models import BotUser
 from apps.identity.services.account_deletion import execute_bot_half
 from apps.identity.services.deletion_gate import deletion_gate, mark_deletion_requested
 from apps.identity.services.privacy import delete_personal_data
+from apps.integrations.ayla.identity_client import ResolvedIdentity
 from apps.integrations.ayla.personal_context_client import PersonalContextHttpClient
 from apps.tenancy.models import Tenant
 
@@ -106,3 +107,47 @@ class TestTheSame403TwoAnswers:
             ("DELETE", "bot:max:2639001")
         ]
         assert "ayla_delete" in result.failed_steps
+
+
+class TestD3DoesNotRecreateTheProxy:
+    """An unlinked shell: outside D3 the cascade resolves ``bot:max:<id>``
+    in the catalog (DRF-1035) — in D3 that would CREATE a fresh proxy after
+    the catalog renamed the old one, and the external id would outlive the
+    deletion. The count of resolutions is the node, not the step's outcome
+    (``not_linked`` stays whatever its rule says)."""
+
+    @pytest.fixture
+    def unlinked(self, person) -> BotUser:
+        BotUser.all_tenants.filter(pk=person.pk).update(ayla_user_id=None)
+        person.refresh_from_db()
+        return person
+
+    @pytest.fixture
+    def resolutions(self):
+        seen: list[str] = []
+
+        def resolve(external_user_id, **_kw):
+            seen.append(external_user_id)
+            # the catalog would hand out a fresh proxy
+            return ResolvedIdentity(ayla_user_id=uuid.uuid4(), is_proxy=True)
+
+        with patch("apps.integrations.ayla.identity_client.resolve_identity", resolve):
+            yield seen
+
+    def test_d3_resolves_nothing(self, unlinked, resolutions) -> None:
+        catalog = _CatalogAfterD3()
+        with patch("apps.identity.services.privacy.PersonalContextHttpClient", catalog.client):
+            out = execute_bot_half(
+                ayla_user_id=AYLA_ID, external_user_ids=["bot:max:2639001"], request_id=REQUEST_ID
+            )
+
+        assert out.shells == 1  # presence: the shell was found and the cascade ran
+        assert resolutions == []
+        assert catalog.requests == []
+
+    def test_forget_everything_still_resolves(self, unlinked, resolutions) -> None:
+        catalog = _CatalogAfterD3()
+        with patch("apps.identity.services.privacy.PersonalContextHttpClient", catalog.client):
+            delete_personal_data(unlinked)
+
+        assert resolutions == ["bot:max:2639001"]

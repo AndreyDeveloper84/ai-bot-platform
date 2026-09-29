@@ -196,7 +196,7 @@ class _PersonLink:
     conflict: bool = False
 
 
-def _resolve_person_link(bot_user: BotUser) -> _PersonLink:
+def _resolve_person_link(bot_user: BotUser, *, resolve_upstream: bool = True) -> _PersonLink:
     """Resolve the person's Ayla id across all their shells, deterministically.
 
     Reading it off the requesting row alone is wrong: the only writer,
@@ -234,6 +234,13 @@ def _resolve_person_link(bot_user: BotUser) -> _PersonLink:
             len(candidates),  # count only, never the ids themselves
         )
         return _PersonLink(conflict=True)
+
+    if not candidates and not resolve_upstream:
+        # DRF-2639: D3 — the catalog has erased the person and renamed the
+        # proxy before asking us; resolving ``bot:<channel>:<id>`` now would
+        # create a FRESH proxy and the external id would outlive the
+        # deletion. Unlinked stays unlinked (the ``not_linked`` rule decides).
+        return _PersonLink()
 
     if not candidates:
         # DRF-1035. A blank link used to mean «upstream is unaddressable»:
@@ -665,11 +672,13 @@ def delete_personal_data(
     бы ``unknown_actor`` 403, неотличимый от сломанного заголовка, и
     заявка вращалась бы вечно (тик 900 с). Шаг ``ayla_delete`` — ok по
     заявлению каталога, без запроса. Ветки ``identity_conflict`` и
-    ``not_linked`` не меняются."""
+    ``not_linked`` не меняются, но связь личности на этом пути в каталоге
+    НЕ разрешается: ``bot:<channel>:<id>`` после переименования прокси
+    создал бы свежий прокси, и внешний id пережил бы удаление."""
     # Person-level, not row-level — see _resolve_person_link. A row-level
     # read makes a linked person look unlinked from the Mini App shell,
     # which would report their live memory as "no state".
-    link = _resolve_person_link(bot_user)
+    link = _resolve_person_link(bot_user, resolve_upstream=not erased_by_catalog)
     ayla_user_id = link.ayla_user_id
     steps: list[DeleteStep] = []
 
