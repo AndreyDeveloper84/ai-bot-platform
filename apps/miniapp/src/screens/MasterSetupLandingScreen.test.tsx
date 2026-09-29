@@ -47,6 +47,7 @@ import {
   SETUP_RESUME_NOTE,
   START_LABEL,
 } from "./MasterSetupLandingScreen";
+import { SALON_PLACE_TEXT } from "./MasterPlaceScreen";
 
 const mockedReadiness = vi.mocked(getOnboardingReadiness);
 const mockedMe = vi.mocked(getMasterMe);
@@ -207,7 +208,14 @@ describe("экран 01", () => {
     renderScreen();
     const list = await screen.findByRole("list", { name: "Осталось настроить" });
     expect(within(list).getAllByRole("listitem")).toHaveLength(4);
-    expect(within(list).getAllByText(REASON_TEXT.managed_outside_app)).toHaveLength(2);
+    // П.6 решений 28.09 (DRF-2581): у МЕСТА — фраза владельца, у услуг —
+    // прежняя причина. Пара обязана различаться: одна строка на оба пункта
+    // вернула бы «место настраивается не в приложении», а это не то решение.
+    expect(within(screen.getByTestId("setup-item-location")).getByText(SALON_PLACE_TEXT)).toBeInTheDocument();
+    expect(
+      within(screen.getByTestId("setup-item-services")).getByText(REASON_TEXT.managed_outside_app),
+    ).toBeInTheDocument();
+    expect(within(list).queryByText(/поддержк/)).toBeNull();
     const bar = screen.getByTestId("setup-bar");
     expect(bar).toHaveAttribute("aria-valuemax", "2");
     expect(bar).toHaveAttribute("aria-valuenow", "2");
