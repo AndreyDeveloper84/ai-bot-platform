@@ -109,7 +109,12 @@ def test_docs_only_with_data_guards_not_run_is_red(result: str) -> None:
 
 def test_code_pr_keeps_its_rules() -> None:
     green = _run_verdict(
-        **_CODE, R_SECRET_SCAN="success", R_CHECKS="success", R_APPS_SHARD="success"
+        **_CODE,
+        # R_SECRET_SCAN — имя переменной окружения CI (результат джоба secret-scan),
+        # значение — статус джоба; не секрет и не его имитация.
+        R_SECRET_SCAN="success",  # pragma: allowlist secret
+        R_CHECKS="success",
+        R_APPS_SHARD="success",
     )
     red = _run_verdict(**_CODE, R_SECRET_SCAN="success", R_CHECKS="failure", R_APPS_SHARD="success")
     assert (green.returncode, red.returncode) == (0, 1)
