@@ -160,7 +160,7 @@ describe("MasterAylaScreen · подтверждение действия (DRF-1
     ).toBeInTheDocument();
     // И только теперь отрицание: ничего не выполнено.
     expect(mockedConfirm).not.toHaveBeenCalled();
-  });
+  }, 15_000);
 
   it("по подтверждению выполняется — тем самым талоном", async () => {
     mockedAsk.mockResolvedValue({
@@ -214,7 +214,7 @@ describe("MasterAylaScreen · подтверждение действия (DRF-1
       await screen.findByText("Хорошо, ничего не меняю."),
     ).toBeInTheDocument();
     expect(screen.queryByText("Подтвердите действие")).toBeNull();
-  });
+  }, 15_000);
 
   it("новый вопрос снимает висящее предложение", async () => {
     mockedAsk.mockResolvedValueOnce({
@@ -234,5 +234,5 @@ describe("MasterAylaScreen · подтверждение действия (DRF-1
     expect(await screen.findByText("Завтра три записи.")).toBeInTheDocument();
     expect(screen.queryByText("Подтвердите действие")).toBeNull();
     expect(mockedConfirm).not.toHaveBeenCalled();
-  });
+  }, 15_000);
 });

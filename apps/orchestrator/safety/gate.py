@@ -190,6 +190,36 @@ def reaches_through_handoff(outcome: SafetyGateOutcome) -> bool:
     return not outcome.allowed and outcome.verdict in REACHES_THROUGH_HANDOFF
 
 
+def under_handoff(text: str, outcome: SafetyGateOutcome) -> SafetyGateOutcome:
+    """The inbound verdict as it stands while an operator drives the dialog.
+
+    Owner decision «все по рекомендациям» (CD §72, DRF-2213 Q1 п.1в): a
+    medical red flag G1–G7 of the ``health_screening`` classifier is
+    «неотложка» too, and under N-1 it is answered even during a handoff.
+    Outside a handoff the skill / Q2 branch answers it; under one, the
+    operator's mute would swallow it — so here it becomes the same ``MEDICAL``
+    outcome the gate gives the «неотложка» group: the medical emergency text
+    [OD-BOT §163], one text on every path. Anything the gate already stopped,
+    and anything the classifier does not flag, is returned unchanged.
+    """
+
+    if not outcome.allowed:
+        return outcome
+    from apps.orchestrator.safety.medical_emergency import MEDICAL_EMERGENCY_TEXT_V2
+    from apps.skills.health_screening.classifier import PainSignal, classify
+
+    if classify(text) is not PainSignal.RED_FLAG:
+        return outcome
+    reason = "health_screening_red_flag_under_handoff"
+    return SafetyGateOutcome(
+        allowed=False,
+        verdict=SafetyVerdict.MEDICAL.value,
+        reply_text=MEDICAL_EMERGENCY_TEXT_V2,
+        reason=reason,
+        result=SafetyResult(verdict=SafetyVerdict.MEDICAL, reason=reason),
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Outbound half (DRF-1210)                                                     #
 # --------------------------------------------------------------------------- #
@@ -227,6 +257,7 @@ def guard_outbound(
     bot_user: object | None = None,
     trace_id: object | None = None,
     acted: bool | None = None,
+    subject_own_data: bool = False,
 ) -> OutboundGuardOutcome:
     """Check a drafted reply on its way to a person; emit once if it is blocked.
 
@@ -254,9 +285,27 @@ def guard_outbound(
     costs someone their answer.
     """
 
-    verdict = evaluate_outbound(text)
+    verdict = evaluate_outbound(text, subject_own_data=subject_own_data)
+    own_data = verdict.own_data_categories
     if verdict.allowed and acted is False:
+        # `evaluate_action_promise` возвращает свой вердикт, у которого поля
+        # про своих данные нет: признак запоминается ДО подмены, иначе запись
+        # в журнал потерялась бы именно на этом пути.
         verdict = evaluate_action_promise(text)
+    if own_data:
+        # DRF-2435 — «заблокировали чужой контакт» и «это собственные данные
+        # человека, пропускаем» обязаны читаться в журнале по-разному: иначе мы
+        # починим поведение и оставим слепой журнал, а молчал именно он.
+        #
+        # Единственный писатель этого имени в контуре — здесь: у шлюза есть
+        # поверхность и trace, а одно имя события обязано иметь один смысл.
+        logger.info(
+            "safety.outbound.own_data_passed surface=%s categories=%s allowed=%s trace=%s",
+            surface,
+            ",".join(own_data),
+            verdict.allowed,
+            trace_id,
+        )
     if verdict.allowed:
         return OutboundGuardOutcome(allowed=True, text=verdict.text)
 
@@ -303,4 +352,5 @@ __all__ = [
     "evaluate_inbound",
     "guard_outbound",
     "reaches_through_handoff",
+    "under_handoff",
 ]

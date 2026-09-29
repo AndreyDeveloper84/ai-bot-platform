@@ -11,7 +11,7 @@
  *   - 0 — тоже факт, печатается;
  *   - у воды и брони «в ориентире» не бывает.
  */
-import { act, configure, getConfig, render, screen } from "@testing-library/react";
+import { configure, getConfig, render, screen } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -38,6 +38,7 @@ import { ApiError } from "../lib/api";
 import { fetchDecisionContext, type DecisionContext } from "../lib/customer-goals";
 import { getPlanLite, getPlanLiteProposal, type PlanLite, type PlanLiteAction } from "../lib/plan-lite";
 import { PLAN_LITE_ROUTE, PlanLiteScreen } from "./PlanLiteScreen";
+import { settleScenario } from "../test/settleScenario";
 
 const GUARD_ASYNC_TIMEOUT_MS = 20;
 let previousAsyncUtilTimeout = 1000;
@@ -50,11 +51,6 @@ afterAll(() => {
   vi.unstubAllEnvs();
 });
 
-const settle = async (rounds = 4) => {
-  for (let i = 0; i < rounds; i += 1) {
-    await act(async () => {});
-  }
-};
 
 const DOC: DecisionContext = {
   version: 1,
@@ -89,7 +85,7 @@ function renderScreen() {
 async function card(p: PlanLite): Promise<HTMLElement> {
   vi.mocked(getPlanLite).mockResolvedValue(p);
   renderScreen();
-  await settle();
+  await settleScenario();
   return screen.getByTestId("plan-lite-card");
 }
 

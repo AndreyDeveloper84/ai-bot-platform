@@ -105,7 +105,10 @@ from apps.integrations.ayla.health_check import text_for as health_check_text_fo
 from apps.integrations.ayla.offer_refusal import OFFER_NOT_SELLABLE_SLUG, client_text_for
 from apps.bookings.keyboards import confirm_2_button
 from apps.bookings.pending_actions import create_pending
-from apps.bookings.reminders_factory import create_reminders_for_booking
+from apps.bookings.reminders_factory import (
+    create_reminders_for_ayla_appointment,
+    create_reminders_for_booking,
+)
 from apps.integrations.yclients import (
     AvailableTime,
     BookingRecord,
@@ -521,6 +524,10 @@ class BookingRow:
     master_name: str
     service_name: str
     status: str
+    #: DRF-2569 / решение владельца 28.09 п.1–2: салон записи (``Tenant.name``)
+    #: и его пояс — время человеку показывается в поясе салона, не в UTC.
+    salon_name: str = ""
+    salon_tz: str = ""
 
 
 @dataclass(frozen=True)
@@ -871,8 +878,8 @@ def _to_slot_candidate(slot: AvailableTime, target_date: str) -> SlotCandidate |
 
 def _format_slots_text(slots: list[SlotCandidate], target_date: str) -> str:
     if not slots:
-        return f"На {target_date} свободных слотов нет."
-    lines = [f"Свободные слоты на {target_date}:"]
+        return f"На {target_date} свободного времени нет."
+    lines = [f"Свободное время на {target_date}:"]
     for s in slots[:8]:
         # Pull HH:MM out of the ISO datetime for compact rendering.
         time_part = s.datetime.split("T", 1)[1][:5] if "T" in s.datetime else s.datetime
@@ -1571,14 +1578,25 @@ def execute_confirm(
             record=record,
             start_at=visit_at_dt,
         )
-        _schedule_reminders(
-            tenant=tenant,
-            bot_user=bot_user,
-            yc_id=yc_id,
-            visit_at_dt=visit_at_dt,
-            master_name=master_name,
-            service_name=service_name,
-        )
+        # DRF-2547: напоминание — только визиту, который канон ПОДТВЕРДИЛ. При
+        # предоплате канон создаёт ``awaiting_payment``; напоминание по нему
+        # звало клиента на неоплаченный визит. Подтверждение приедет событием
+        # ``booking.confirmed``, и напоминания поставит его обработчик.
+        if not _booking_via_ayla() or _canon_status_of(record) == _CANON_CONFIRMED:
+            _schedule_reminders(
+                tenant=tenant,
+                bot_user=bot_user,
+                yc_id=yc_id,
+                visit_at_dt=visit_at_dt,
+                master_name=master_name,
+                service_name=service_name,
+            )
+        else:
+            logger.info(
+                "booking.confirm.reminders_deferred appt=%s canon_status=%s",
+                yc_id,
+                _canon_status_of(record) or "unknown",
+            )
 
     _audit_tool(tenant_id=tenant_id, tool="execute_confirm", outcome="ok")
     write_audit(
@@ -1627,6 +1645,20 @@ def _schedule_reminders(
     if visit_at_dt is None:
         return
     try:
+        # DRF-2586: под флагом ``yc_id`` — UUID записи Ayla, и напоминания
+        # пишутся тем же ключом, что у потребителя событий: одна пара на
+        # запись, двойника исключает уникальный индекс.
+        appointment_id = _as_uuid(yc_id) if _booking_via_ayla() else None
+        if appointment_id is not None:
+            create_reminders_for_ayla_appointment(
+                tenant=tenant,
+                bot_user=bot_user,
+                appointment_id=appointment_id,
+                visit_at=visit_at_dt,
+                master_name=master_name,
+                service_name=service_name,
+            )
+            return
         create_reminders_for_booking(
             tenant=tenant,
             bot_user=bot_user,
@@ -1637,6 +1669,26 @@ def _schedule_reminders(
         )
     except Exception:  # noqa: BLE001 — reminder is best-effort
         logger.exception("booking.reminder.schedule_failed yc_id=%s", yc_id)
+
+
+def _reminders_for_record(record_id: Any) -> Any:
+    """Напоминания записи, в какой бы колонке они ни лежали (DRF-2586).
+
+    Под флагом запись — UUID Ayla: её напоминания лежат в
+    ``ayla_appointment_id`` (новые, из диалога и из событий) или в
+    ``yclients_record_id`` (записи из диалога до DRF-2586). Прежний фильтр
+    только по ``yclients_record_id`` не видел бы новых строк, и отмена или
+    перенос оставляли бы их ``PENDING`` — напоминание об отменённом визите.
+    Без флага — прежний фильтр по номеру YClients.
+    """
+    from apps.booking.models import BookingReminder
+
+    appointment_id = _as_uuid(record_id) if _booking_via_ayla() else None
+    if appointment_id is not None:
+        from apps.booking.reminder_lookup import reminders_for_appointment
+
+        return reminders_for_appointment(appointment_id)
+    return BookingReminder.all_tenants.filter(yclients_record_id=str(record_id))
 
 
 def _format_confirmation_text(confirmation: ConfirmationResult, *, address_line: str) -> str:
@@ -1852,8 +1904,7 @@ def execute_cancel(
     # keep). Import lazily to avoid the top-level cycle.
     from apps.booking.models import BookingReminder
 
-    BookingReminder.all_tenants.filter(
-        yclients_record_id=str(record_id),
+    _reminders_for_record(record_id).filter(
         status=BookingReminder.Status.PENDING,
     ).update(status=BookingReminder.Status.CANCELLED)
 
@@ -2171,8 +2222,7 @@ def _execute_reschedule_ayla(
     # Re-point reminders at the new time, same canonical id (best-effort).
     from apps.booking.models import BookingReminder
 
-    BookingReminder.all_tenants.filter(
-        yclients_record_id=str(record_id),
+    _reminders_for_record(record_id).filter(
         status=BookingReminder.Status.PENDING,
     ).update(status=BookingReminder.Status.CANCELLED)
     _schedule_reminders(
@@ -2420,8 +2470,7 @@ def execute_reschedule(
     BookingRequest.all_tenants.filter(pk=booking.pk).update(
         status=BookingRequest.Status.RESCHEDULED,
     )
-    BookingReminder.all_tenants.filter(
-        yclients_record_id=str(record_id),
+    _reminders_for_record(record_id).filter(
         status=BookingReminder.Status.PENDING,
     ).update(status=BookingReminder.Status.CANCELLED)
 
@@ -2909,17 +2958,22 @@ def _show_my_bookings_ayla(
     """
     from apps.booking.mirror_status import LIVE_STATUSES
     from apps.booking.models import RemoteBookingProxy
+    from apps.identity.services.bot_user_resolver import person_bot_users
 
+    # DRF-2436 B / решение владельца п.15: «мои записи» — единый список по ВСЕМ
+    # салонам человека, как в Mini App. Учётная строка и зеркало одной записи
+    # лежат в одном салоне (обе пишутся под его личностью), поэтому оба чтения
+    # идут по всем личностям подписанного аккаунта, а склейка — по id визита.
+    persons = person_bot_users(bot_user)
     rows = list(
         BookingRequest.all_tenants.filter(
-            tenant=tenant,
-            bot_user=bot_user,
+            bot_user__in=persons,
             status=BookingRequest.Status.CONFIRMED,
         ).order_by("-created_at")[:20]
     )
     proxies = {
         str(p.appointment_id): p
-        for p in RemoteBookingProxy.all_tenants.filter(tenant=tenant, bot_user=bot_user)
+        for p in RemoteBookingProxy.all_tenants.filter(bot_user__in=persons)
     }
 
     bookings: list[BookingRow] = []
@@ -2948,6 +3002,9 @@ def _show_my_bookings_ayla(
                 master_name=row.master_name,
                 service_name=row.service_name,
                 status="CONFIRMED",
+                # Салон — ЗАПИСИ (с DRF-2436 B чат читает все салоны человека).
+                salon_name=proxy.tenant.name,
+                salon_tz=_salon_tz_key(proxy.tenant),
             )
         )
 
@@ -3040,6 +3097,8 @@ def show_my_bookings(
                 master_name=row.master_name,
                 service_name=row.service_name,
                 status="CONFIRMED",
+                salon_name=getattr(tenant, "name", "") or "",
+                salon_tz=_salon_tz_key(tenant),
             )
         )
 
@@ -3053,17 +3112,28 @@ def show_my_bookings(
     return BookingToolResult(text=text, bookings=bookings)
 
 
+def _salon_tz_key(tenant: Any) -> str:
+    """Пояс салона — тем же правилом, что «✅ Вы записаны» (``tenant_timezone``)."""
+    from apps.tenancy.timezones import salon_zone
+
+    return salon_zone(tenant).key
+
+
+def _format_booking_line(b: BookingRow) -> str:
+    """Строка записи — слова владельца 28.09, п.1–2 (дом: ``booking.visit_words``)."""
+    from apps.booking.visit_words import booking_line, visit_time_words
+
+    when = visit_time_words(b.visit_at, b.salon_tz)
+    return "• " + booking_line(
+        service=b.service_name, master=b.master_name, salon=b.salon_name, when=when
+    )
+
+
 def _format_bookings_text(bookings: list[BookingRow]) -> str:
     if not bookings:
         return "У вас пока нет предстоящих записей."
     lines = ["Ваши предстоящие записи:"]
-    for b in bookings[:5]:
-        parts = [b.service_name or "—"]
-        if b.master_name:
-            parts.append(f"с {b.master_name}")
-        if b.visit_at:
-            parts.append(f"в {b.visit_at}")
-        lines.append("• " + " ".join(parts))
+    lines += [_format_booking_line(b) for b in bookings[:5]]
     return "\n".join(lines)
 
 
@@ -3715,6 +3785,39 @@ def _as_uuid(value: Any) -> Any:
         return None
 
 
+#: DRF-2537 — отметка «последнее событие канона неизвестно». Её ставят записи
+#: зеркала, которые делает сам бот (не применение события канона).
+_UNKNOWN_CANON_EVENT: dict[str, Any] = {
+    "last_applied_event_name": "",
+    "last_applied_event_at": None,
+}
+
+
+#: Значение зеркала для визита, который канон подтвердил.
+_CANON_CONFIRMED = "confirmed"
+
+
+def _canon_status_of(record: BookingRecord) -> str | None:
+    """Статус визита, который вернул КАНОН, в словаре зеркала (DRF-2547).
+
+    Ответ Ayla на создание и перенос — ``AppointmentDetailSerializer``, в нём
+    есть ``status``; ``provider._mirror_raw`` переносит его в ``record.raw``.
+    Нормализация — та же, что у ``booking.created``
+    (:func:`apps.eventbus.consumers.booking.normalize_booking_created_status`):
+    одно правило, иначе запись бота и событие разошлись бы молча.
+    ``None`` — статуса нет или он незнаком: «не знаем», а не «подтверждён».
+    """
+    from apps.eventbus.consumers.booking import normalize_booking_created_status
+
+    raw_status = (record.raw or {}).get("status")
+    if not raw_status:
+        return None
+    try:
+        return normalize_booking_created_status(raw_status)
+    except ValueError:
+        return None
+
+
 def _upsert_remote_booking_proxy(
     *,
     tenant: Any,
@@ -3722,11 +3825,13 @@ def _upsert_remote_booking_proxy(
     record: BookingRecord,
     start_at: datetime | None,
 ) -> None:
-    """Mirror a CONFIRMED Ayla appointment onto :class:`RemoteBookingProxy`.
+    """Mirror an Ayla appointment onto :class:`RemoteBookingProxy`.
 
     ADR-0009: Ayla owns the canonical booking; bot-platform keeps this thin
     mirror for reminder math + RFM/sentiment fan-out. Used by confirm and
-    (native) reschedule — both land the appointment in CONFIRMED. Best-effort:
+    (native) reschedule. The status is the one Ayla RETURNED (DRF-2547) —
+    with prepayment a fresh booking is ``awaiting_payment``, not CONFIRMED,
+    and a constant here overwrote that for good. Best-effort:
     the canonical row already exists in Ayla, so a mirror-write failure must
     NOT fail the customer-facing action (the next ``booking.*`` event from
     Ayla reconciles it). No-op on the flag-OFF (YClients) path.
@@ -3750,9 +3855,32 @@ def _upsert_remote_booking_proxy(
             "bot_user": bot_user,
             "start_at": start_at,
             "end_at": end_at,
-            "status": RemoteBookingProxy.Status.CONFIRMED,
             "source": RemoteBookingProxy.Source.AUTOMATION,
+            # DRF-2537: бот пишет строку сам (из ответа REST), а не применяет
+            # событие канона, — отметка последнего события становится
+            # «неизвестно». Оставить прежнюю значило бы подписать эту запись
+            # чужим событием: правдоподобно и неверно.
+            **_UNKNOWN_CANON_EVENT,
         }
+        # DRF-2547: статус — тот, что вернул КАНОН, а не константа CONFIRMED.
+        # Константа затирала ``awaiting_payment`` брони с предоплатой, а
+        # пришедший следом ``booking.created`` видел «уже confirmed» и молчал
+        # (advanced-state no-op) — зеркало врало навсегда. Статуса в ответе нет
+        # или он незнаком: существующую строку не трогаем по статусу («нет
+        # вестей», как с услугой ниже), новую не заводим — её заведёт
+        # ``booking.created`` с правильным статусом.
+        canon_status = _canon_status_of(record)
+        if canon_status is not None:
+            defaults["status"] = canon_status
+        elif not RemoteBookingProxy.all_tenants.filter(
+            appointment_id=_as_uuid(appt), tenant=tenant
+        ).exists():
+            logger.warning(
+                "booking.proxy.upsert_skipped_unknown_status appt=%s status=%r",
+                appt,
+                raw.get("status"),
+            )
+            return
         # Only write what we actually know. Ayla's appointment payload does
         # not expose the salon service at all, so a reschedule whose
         # response omits it used to overwrite a good service_id with NULL —
@@ -3834,6 +3962,7 @@ def _mirror_cancel(*, tenant: Any, record_id: int | str) -> None:
 
         RemoteBookingProxy.all_tenants.filter(tenant=tenant, appointment_id=appt).update(
             status=RemoteBookingProxy.Status.CANCELLED,
+            **_UNKNOWN_CANON_EVENT,  # DRF-2537: запись бота, не событие канона
         )
     except Exception:  # noqa: BLE001 — mirror write is best-effort
         logger.exception("booking.proxy.cancel_failed appt=%s", record_id)

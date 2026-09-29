@@ -26,10 +26,10 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
 
 import { StateError } from "../../components/StateError";
-import { useBackButton } from "../../hooks/useBackButton";
+import { useScreenBack } from "../../hooks/useScreenBack";
+import { backTo } from "../../lib/screen-back";
 import { getSalonReadiness, type SalonReadinessResponse } from "../../lib/admin-api";
 import { SALON_PILOT_LANDING } from "../../lib/salon-pilot";
 import { checkedAtLabel, readinessState } from "../../lib/salon-readiness";
@@ -55,9 +55,8 @@ type State =
   | { kind: "ready"; data: SalonReadinessResponse };
 
 export function AdminReadinessScreen() {
-  const navigate = useNavigate();
-  const back = useCallback(() => navigate(SALON_PILOT_LANDING), [navigate]);
-  useBackButton({ onBack: back });
+  // DRF-2368 — см. очередь передач: одно объявление, две половины.
+  const back = useScreenBack(backTo(SALON_PILOT_LANDING));
 
   const [state, setState] = useState<State>({ kind: "loading" });
   const [busy, setBusy] = useState(false);

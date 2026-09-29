@@ -380,12 +380,12 @@ class TestOurOwnWordsObeyTheFixture:
         # the whole set; asserted again here, on the one fixture this
         # parametrisation is about, so the claim cannot be satisfied by a
         # rule list that quietly emptied.
-        assert fixture.must_pass or fixture.forbidden, (
+        assert fixture.must_pass or fixture.reply_forbidden, (
             f"{fixture.name}: no must_pass and no forbidden — this fixture "
             "asserts nothing, and passing it proves nothing"
         )
 
-        failures = evaluate(result.as_trace(), fixture.must_pass, fixture.forbidden)
+        failures = evaluate(result.as_trace(), fixture.must_pass, fixture.reply_forbidden)
         failures += evaluate_voice(result.response_text, fixture.voice_check)
         assert not failures, f"{fixture.name}: {failures}"
 
@@ -404,7 +404,8 @@ class TestNoFixtureAssertsOnSomethingNobodyComputes:
         offenders = [
             f.name
             for f in ALL_FIXTURES
-            if any("intent" in c for c in f.must_pass) or any("intent" in c for c in f.forbidden)
+            if any("intent" in c for c in f.must_pass)
+            or any("intent" in c for c in f.reply_forbidden)
         ]
         assert not offenders, (
             "golden fixtures asserting on `intent`, which the per-tenant path "

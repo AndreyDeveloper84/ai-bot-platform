@@ -57,6 +57,7 @@ from typing import Any, cast
 
 from ayla_ai_core import SOURCE_INFERRED, SOURCE_STATED, build_memory_block
 
+from apps.integrations.ayla.diet_types import CATALOG_DIET_TYPES
 from apps.identity.models import MemoryEntry
 from apps.identity.services.memory_key_policy import CARDINALITY_MULTI, key_cardinality
 from apps.identity.services.personal_context import GateStatus, get_declared_prefs
@@ -80,18 +81,30 @@ _SLOT_DISPLAY = {
 _INFERRED_KEY_MAP = {"diet": "diet_type"}
 
 # Values allowed to reach the block as a diet_type (Ayla contract vocabulary).
-_DIET_TYPE_VOCAB = frozenset(
-    {"omnivore", "vegetarian", "vegan", "keto", "halal", "kosher", "other"}
-)
+#: DRF-2392: словарь ОДИН на бот. Здесь была одна из трёх копий набора; копии
+#: расходятся молча — у копии в ``memory_ask`` не было ``omnivore``.
+_DIET_TYPE_VOCAB = frozenset(CATALOG_DIET_TYPES)
 
 _DECLARED_CONFIDENCE = 1.0
 _INFERRED_CONFIDENCE = 0.6
 
 # Backend `UserPersonalContext.data_sources` value that means «the person
-# typed this». Everything else the backend can stamp — `inferred` (nightly
-# booking-history inference), `behavioral`, `transactional`, `conversational`
-# — is a derivation, and so is any value we do not recognise.
-_BACKEND_STATED_SOURCE = "explicit"
+# said this themselves». Everything else the backend can stamp — `inferred`
+# (nightly booking-history inference), `behavioral`, `transactional`,
+# `conversational` — is a derivation, and so is any value we do not recognise.
+#
+# Один дом для этого чтения и для записи `memory_ask` (DRF-2397): там этим
+# значением помечается ОТВЕТ человека на заданный нами вопрос. Других домов
+# у самой строки «explicit» в боте хватает (`memory/ayla_bridge.py`,
+# `memory/food.py`, `MemoryEntry.SOURCE_EXPLICIT`) — речь только об этих двух.
+#
+# Имя намеренно не `SOURCE_STATED`: так зовётся константа библиотеки со
+# значением `"stated"` (её импорт — выше в этом же модуле). Из двух имён
+# стороны «сказал сам» каталог принимает только `explicit`; `stated` в его
+# `_SOURCE_CHOICES` отсутствует (`users/internal_personal_context_api.py`) и
+# ответил бы 400 — поэтому два имени-близнеца с разными значениями здесь
+# опасны.
+BACKEND_STATED_SOURCE = "explicit"
 
 
 def concierge_memory_enabled() -> bool:
@@ -105,6 +118,29 @@ def concierge_memory_enabled() -> bool:
     from django.conf import settings
 
     return bool(getattr(settings, "CONCIERGE_MEMORY_ENABLED", True))
+
+
+#: Ключи заявленного контекста каталога, которые в подсказку не идут, хотя
+#: каталог их присылает. Контракт не меняется: каталог хранит поле, отдаёт его
+#: во внутреннем API и в выгрузке 152-ФЗ — не читает его только подсказка.
+#:
+#: ``favorite_masters`` (DRF-2553, из замера DRF-2551). Доводов два, и нужны
+#: оба — по отдельности каждый опровергается:
+#:
+#: 1. агрегация сама пересекает салоны: каталог выводит список ночью из
+#:    завершённых визитов человека во ВСЕХ салонах и без окна по времени
+#:    (``users/personal_context_inference.py``). Это «узнали о нём», собранное
+#:    из данных нескольких салонов, — решение владельца 24.08 (OD_MEMORY §3)
+#:    называет любимых мастеров отношением с конкретным салоном;
+#: 2. пользы ноль: сюда приходили голые UUID («Любимые мастера: id=…»), а
+#:    единственный инструмент, которому нужен мастер, ``start_booking``,
+#:    принимает имя так, как оно прозвучало.
+#:
+#: Местный факт «называешь любимым мастером «…»» (``memory_surface``) не
+#: тронут, и довод тут — область, а не «сказал сам»: реестр ``NEVER_CROSSES``
+#: говорит о чтении, собранном для салона, а такого чтения сегодня нет;
+#: глобальная поверхность салоном не является.
+DECLARED_KEYS_NOT_IN_PROMPT: frozenset[str] = frozenset({"favorite_masters"})
 
 
 def build_concierge_memory_block(bot_user: Any) -> str:
@@ -125,6 +161,8 @@ def build_concierge_memory_block(bot_user: Any) -> str:
     sources: dict[str, str] = {}
     declared_origins = _declared_origins(declared.context)
     for key, value in (declared.context.context or {}).items():
+        if key in DECLARED_KEYS_NOT_IN_PROMPT:
+            continue
         if key == "preferred_time_slots" and isinstance(value, list):
             value = [_SLOT_DISPLAY.get(s, s) for s in value]
         facts[key] = value
@@ -132,7 +170,7 @@ def build_concierge_memory_block(bot_user: Any) -> str:
         if declared_origins is not None:
             sources[key] = (
                 SOURCE_STATED
-                if declared_origins.get(key, _BACKEND_STATED_SOURCE) == _BACKEND_STATED_SOURCE
+                if declared_origins.get(key, BACKEND_STATED_SOURCE) == BACKEND_STATED_SOURCE
                 else SOURCE_INFERRED
             )
 

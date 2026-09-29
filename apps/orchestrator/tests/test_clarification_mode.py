@@ -125,8 +125,20 @@ class TestExistingClarificationsAreUnchanged:
         assert reply.text == discovery.NO_CRITERIA_QUESTION
 
     def test_canon_prescribed_no_criteria_reply_is_untouched(self):
-        assert discovery.render_no_criteria_clarification().action_data is None
-        assert discovery.render_no_service_criteria_clarification().action_data is None
+        """Текст канона не меняется; с DRF-2267 (§72) у него есть выход.
+
+        Клавиатура — «Найти салон» и «Меню», не варианты ответа: ``mode``
+        уточнения сюда не пишется (ключа ``clarification`` нет).
+        """
+        for reply in (
+            discovery.render_no_criteria_clarification(),
+            discovery.render_no_service_criteria_clarification(),
+        ):
+            assert [b["callback"] for b in reply.action_data["buttons"]] == [
+                "cb:catalog:salons",
+                "cb:menu:help",
+            ]
+            assert "clarification" not in reply.action_data
 
     def test_keyboard_is_identical_with_and_without_the_new_argument(self):
         """The pre-DRF-1362 call signature and the new one must agree."""

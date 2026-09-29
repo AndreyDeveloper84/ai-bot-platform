@@ -123,6 +123,10 @@ class OpenQuestion:
     asked_at: datetime
     #: Связывающий вопрос — см. раздел «Связывающий вопрос» в docstring модуля.
     binding: bool = False
+    #: Одноразовый токен слота — structured-ответы привязаны к нему ([OD-BOT §170]):
+    #: кнопка из чужого, протухшего или уже разрешённого слота не совпадёт. Пусто —
+    #: у вопроса нет structured-ответов.
+    token: str = ""
 
 
 @dataclass(frozen=True)
@@ -184,7 +188,12 @@ def _fresh(stamped: Any) -> datetime | None:
 
 
 def open_question(
-    conversation: Any, question_id: str, *, asked_text: str = "", binding: bool = False
+    conversation: Any,
+    question_id: str,
+    *,
+    asked_text: str = "",
+    binding: bool = False,
+    token: str = "",
 ) -> None:
     """Записать «бот спросил ``question_id`` и ждёт ответа». Никогда не бросает.
 
@@ -195,7 +204,8 @@ def open_question(
     Исключение — открытый СВЯЗЫВАЮЩИЙ вопрос (``binding``): его обычный вопрос
     не замещает (запись остаётся, попытка логируется), а повторное открытие
     того же связывающего вопроса лишь обновляет отметку времени — один слот,
-    двух pending-вопросов не бывает.
+    двух pending-вопросов не бывает. Токен слота при этом сохраняется: кнопки,
+    уже показанные человеку, остаются действительными.
     """
 
     if conversation is None or not question_id:
@@ -213,8 +223,10 @@ def open_question(
                     getattr(conversation, "id", None),
                 )
                 return
-            # Same binding question again: a re-stamp, never a downgrade.
+            # Same binding question again: a re-stamp, never a downgrade, and
+            # the slot keeps its token.
             binding = True
+            token = current.token or token
         row: dict[str, Any] = {
             "question_id": str(question_id),
             "asked_text": str(asked_text or "")[:_MAX_TEXT_CHARS],
@@ -222,6 +234,8 @@ def open_question(
         }
         if binding:
             row["binding"] = True
+        if token:
+            row["token"] = str(token)
         _write(conversation, STATE_KEY, row)
         logger.info(
             "orchestrator.open_question.opened question=%s binding=%s conversation=%s",
@@ -256,6 +270,7 @@ def pending_question(conversation: Any) -> OpenQuestion | None:
             asked_text=str(row.get("asked_text") or ""),
             asked_at=at,
             binding=bool(row.get("binding")),
+            token=str(row.get("token") or ""),
         )
     except Exception:  # noqa: BLE001
         logger.exception("orchestrator.open_question.read_failed")

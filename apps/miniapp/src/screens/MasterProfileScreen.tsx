@@ -28,6 +28,11 @@
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  NOT_LINKED_SLUG,
+  StudioCallout,
+  notConnectedText,
+} from "../components/StudioCallout";
 import { useNavigate } from "react-router-dom";
 
 import { MasterCard } from "../components/MasterCard";
@@ -57,6 +62,8 @@ import {
   setBackButton,
   setClosingConfirmation,
 } from "../lib/max-sdk";
+import { REFUSAL_CANON } from "../lib/refusal-canon";
+import { MasterPhoto } from "../components/MasterPhoto";
 
 // --- Копия -----------------------------------------------------------------
 
@@ -127,7 +134,7 @@ export const PROFILE_COPY = {
   reviewsTooltip: "Отзывы появятся позже — мы готовим этот раздел.",
   internalChatHint: "Личный канал общения с админами студии.",
   // Инцидент 20.09: 403 not_linked на карточке — этап жизни, не отказ прав.
-  notLinked: "Профиль ещё не связан с каталогом — фото и текст пока не изменить. Привязку выполнит оператор.",
+  notLinked: notConnectedText("фото и текст пока не изменить"),
   toasts: {
     saved: "✓ Сохранено",
     photoSaved: "✓ Фото обновлено",
@@ -136,7 +143,7 @@ export const PROFILE_COPY = {
   },
   states: {
     // Загрузка / ошибка загрузки — SystemState (DRF-2190, словарь DRF-1181 п.10).
-    saveError: "Не удалось сохранить. Попробуйте ещё раз.",
+    saveError: REFUSAL_CANON.profileSave,
     photoTooLarge: (mb: number) => `Фото больше ${mb} МБ. Уменьшите размер.`,
     photoBadMime: "Поддерживаются JPG / PNG / WebP",
     photoNetwork: "Не получилось загрузить фото. Проверьте интернет и попробуйте снова.",
@@ -179,6 +186,34 @@ type Phase = { kind: "loading" } | { kind: "ready"; data: ReadyData } | { kind: 
 
 // --- Компонент -------------------------------------------------------------
 
+/**
+ * Текст отказа сохранения (DRF-2378, текстовая половина DRF-2362).
+ *
+ * «Не привязан» — это НЕ «попробуйте ещё раз»: повтор не лечит отсутствие
+ * привязки, а обещает лекарство. Владелец видел здесь общий отказ в живом
+ * проходе 23.09 (17:56 имя, 17:58 «О себе»), и если причина была та самая
+ * непривязанная личность, то человек читал «попробуйте» там, где пробовать
+ * бессмысленно.
+ *
+ * Различается по SLUG, а не по коду 403 (найдено ревью). Под тем же кодом
+ * сервер отвечает `master_inactive` (`master_api/auth.py`, декоратор на
+ * КАЖДОЙ ручке мастера) и `forbidden`. Мастерица в архиве прочитала бы
+ * «профиль не подключён» — ложный диагноз — и получила бы дверь к студии,
+ * которая ей тоже откажет. Это ровно тот дефект, ради которого заведён
+ * этот лист: уверенная фраза, указывающая не туда.
+ *
+ * ЧТО ЭТО НЕ ДОКАЗЫВАЕТ: причина отказов 23.09 не установлена — лог стенда
+ * не читан, и лист DRF-2362 прямо запрещает писать диагноз до него. Здесь
+ * правится только ТЕКСТ состояния «не привязан»; остальные отказы говорят
+ * прежними словами, потому что утверждённых формулировок для них нет.
+ */
+function saveRefusalText(e: unknown): string {
+  if (e instanceof ApiError && e.slug === NOT_LINKED_SLUG) return PROFILE_COPY.notLinked;
+  // §6-кси п.4 (DRF-2577): остальные отказы — фраза владельца; `detail`
+  // в журнале (logApiDetail), не на экране.
+  return PROFILE_COPY.states.saveError;
+}
+
 export function MasterProfileScreen() {
   const navigate = useNavigate();
 
@@ -216,7 +251,7 @@ export function MasterProfileScreen() {
       setBackButton(false);
       setClosingConfirmation(false);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `navigate` нужен только внутри обработчика системной кнопки; привязка делается один раз за монтирование
   }, []);
 
   useEffect(() => {
@@ -283,7 +318,7 @@ export function MasterProfileScreen() {
       setToast(PROFILE_COPY.toasts.saved);
     } catch (e) {
       if (e instanceof ApiError) {
-        setBioEditor({ ...bioEditor, saving: false, err: e.detail || PROFILE_COPY.states.saveError });
+        setBioEditor({ ...bioEditor, saving: false, err: saveRefusalText(e) });
       } else {
         setOfflineBanner(true);
         setBioEditor({ ...bioEditor, saving: false, err: "" });
@@ -317,7 +352,7 @@ export function MasterProfileScreen() {
       setToast(PROFILE_COPY.toasts.saved);
     } catch (e) {
       if (e instanceof ApiError) {
-        setNameEditor({ ...nameEditor, saving: false, err: e.detail || PROFILE_COPY.states.saveError });
+        setNameEditor({ ...nameEditor, saving: false, err: saveRefusalText(e) });
       } else {
         setOfflineBanner(true);
         setNameEditor({ ...nameEditor, saving: false, err: "" });
@@ -367,7 +402,7 @@ export function MasterProfileScreen() {
         setCropFile(null);
         setToast(PROFILE_COPY.toasts.photoSaved);
       } catch (e) {
-        setPhotoErr(e instanceof ApiError ? e.detail || PROFILE_COPY.states.photoNetwork : PROFILE_COPY.states.photoNetwork);
+        setPhotoErr(PROFILE_COPY.states.photoNetwork);
         hapticNotify("error");
       } finally {
         setPhotoUploading(false);
@@ -401,7 +436,7 @@ export function MasterProfileScreen() {
         hapticNotify("success");
         setToast(PROFILE_COPY.toasts.workAdded);
       } catch (e) {
-        setWorkErr(e instanceof ApiError ? e.detail || PROFILE_COPY.states.photoNetwork : PROFILE_COPY.states.photoNetwork);
+        setWorkErr(PROFILE_COPY.states.photoNetwork);
         hapticNotify("error");
       } finally {
         setWorkBusy(false);
@@ -421,7 +456,7 @@ export function MasterProfileScreen() {
         hapticNotify("success");
         setToast(PROFILE_COPY.toasts.workRemoved);
       } catch (e) {
-        setWorkErr(e instanceof ApiError ? e.detail || PROFILE_COPY.states.saveError : PROFILE_COPY.states.saveError);
+        setWorkErr(saveRefusalText(e));
         hapticNotify("error");
       } finally {
         setWorkBusy(false);
@@ -480,13 +515,14 @@ export function MasterProfileScreen() {
     );
   }
   if (phase.kind === "error") {
-    const notLinked = phase.err instanceof ApiError && phase.err.status === 403;
+    // По slug, не по коду: 403 носят и `master_inactive`, и `forbidden`
+    // (найдено ревью). Прежде здесь любой 403 объявлялся непривязкой.
+    const notLinked =
+      phase.err instanceof ApiError && phase.err.slug === NOT_LINKED_SLUG;
     return (
       <ProfileFrame>
         {notLinked ? (
-          <p className="callout" role="status">
-            {PROFILE_COPY.notLinked}
-          </p>
+          <StudioCallout text={PROFILE_COPY.notLinked} />
         ) : (
           <SystemState
             kind="load_error"
@@ -522,7 +558,7 @@ export function MasterProfileScreen() {
       <ProfileSection title={PROFILE_COPY.sections.photoAndName}>
         <div className="master-profile__header-row">
           <div className="master-profile__avatar" aria-hidden="true">
-            {master.photo_url ? <img src={master.photo_url} alt="" /> : <span>{initials(master.name)}</span>}
+            <MasterPhoto src={master.photo_url} alt="" fallback={<span>{initials(master.name)}</span>} />
           </div>
           <div className="master-profile__identity">
             <div className="master-profile__name-row">
@@ -623,7 +659,7 @@ export function MasterProfileScreen() {
               <ul className="master-profile__portfolio">
                 {portfolio.items.map((item) => (
                   <li key={item.id} className="master-profile__work">
-                    <img src={item.image_url} alt="" />
+                    <MasterPhoto src={item.image_url} alt="" />
                     <button
                       type="button"
                       className="master-profile__work-remove"

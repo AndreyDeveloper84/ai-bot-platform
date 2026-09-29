@@ -67,6 +67,27 @@ def _resolve_ayla_user_id(bot_user) -> uuid.UUID | None:
     return raw if isinstance(raw, uuid.UUID) else uuid.UUID(str(raw))
 
 
+def _erasure_subject(bot_user) -> uuid.UUID | None:
+    """Ключ субъекта для стирания — актуальный, а не ключ прокси до привязки.
+
+    DRF-2309. Когда каталог привязал прокси к аккаунту, заголовок
+    ``bot:<канал>:<id>`` он разрешает в аккаунт, и запрос с ключом прокси в URL
+    получает 403 — «забудь всё» не проходит, пока бот не узнает новый ключ
+    (DRF-1790 узнаёт его только при следующем «зависимом действии»).
+
+    Поэтому известный ключ прокси переспрашивается (``ensure_ayla_link``) перед
+    стиранием. Личность при этом НЕ создаётся: без ключа — ``None``, как и
+    раньше (переспрос только следует уже существующей привязке); реальный ключ
+    — без сети; сбой переспроса — прежний ключ.
+    """
+    stored = _resolve_ayla_user_id(bot_user)
+    if stored is None or getattr(bot_user, "ayla_user_id_is_proxy", None) is not True:
+        return stored
+    from apps.identity.services.ayla_link import ensure_ayla_link
+
+    return ensure_ayla_link(bot_user, trigger="erasure") or stored
+
+
 def _gate(bot_user) -> uuid.UUID | None:
     """The memory_green gate. Returns the ayla_user_id when open, else None.
 
@@ -264,7 +285,7 @@ def erase_declared_prefs(
     row upstream is a tombstone — including the idempotent 404 case, where
     it is already gone.
     """
-    ayla_user_id = _resolve_ayla_user_id(bot_user)
+    ayla_user_id = _erasure_subject(bot_user)
     if ayla_user_id is None:
         logger.info(
             "identity.personal_context.erase_unaddressable reason=unlinked bot_user=%s",

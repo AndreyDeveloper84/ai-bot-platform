@@ -152,6 +152,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+import lint_parse  # DRF-2538: нечитаемый вход — отдельный исход, не ноль
+
 # ── Contract registry ────────────────────────────────────────────────
 
 
@@ -563,12 +565,6 @@ BASELINE: frozenset[BaselineKey] = frozenset(
             "LoyaltySubscriber._revoke_visit",
             "apps.booking.models.BookingRequest",
         ),
-        (
-            "G9-booking-request-outside-owner",
-            "apps/master_api/services/customers.py",
-            "<module>",
-            "apps.booking.models.BookingRequest",
-        ),
         # dashboard.py and schedule.py stood here until DRF-1085 (869285c,
         # 205f2dd) moved both surfaces onto the RemoteBookingProxy mirror
         # and the BookingRequest import left the files entirely. The
@@ -578,6 +574,8 @@ BASELINE: frozenset[BaselineKey] = frozenset(
         # Тем же порядком DRF-1528 снял записи переписки мастер↔клиент
         # (`services/conversations.py`, `services/conversation_detail.py`)
         # и автотриггера черновиков (`tasks.py`): файлов нет — записи ушли.
+        # `services/customers.py` — DRF-1138: список «Клиенты» читает зеркало
+        # (`visit_source.attended_visits`), импорт BookingRequest ушёл.
     }
 )
 
@@ -1243,15 +1241,6 @@ BASELINE_NOTES: dict[BaselineKey, BaselineNote] = {
         "UNTRIAGED",
         "Zero BOOKING_VIA_AYLA_REST references in the file (DRF-1109 sweep, 2026-08-15). Neither confirmed safe nor confirmed broken - nobody has looked at this surface since the contract first surfaced it.",
     ),
-    (
-        "G9-booking-request-outside-owner",
-        "apps/master_api/services/customers.py",
-        "<module>",
-        "apps.booking.models.BookingRequest",
-    ): BaselineNote(
-        "UNTRIAGED",
-        "Zero BOOKING_VIA_AYLA_REST references in the file (DRF-1109 sweep, 2026-08-15). Neither confirmed safe nor confirmed broken - nobody has looked at this surface since the contract first surfaced it.",
-    ),
     # -- DRF-1130: the joined FK is NOT NULL, declared elsewhere ------
     (
         "DRF1130-no-join-under-row-lock",
@@ -1786,9 +1775,17 @@ def evaluate_file(
     # every such file is parsed.
 
     try:
-        tree = ast.parse(file_path.read_text(encoding="utf-8"), filename=str(file_path))
-    except (OSError, SyntaxError):
-        # Broken syntax / unreadable is ruff's job, not ours.
+        source = file_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        lint_parse.unreadable(file_path, exc)
+        return [], set()
+    # DRF-2538. Здесь стояло «Broken syntax / unreadable is ruff's job, not ours». Это верно про
+    # красноту `dev` — ruff в том же джобе краснеет на той же ошибке — и
+    # неверно про смысл зелени этого сторожа: «0 нарушений» что-то говорит
+    # о коде, только если код прочитан. Нечитаемый файл теперь отдельный
+    # исход (`lint_parse.finish`), а не ноль.
+    tree = lint_parse.parse_or_report(source, file_path)
+    if tree is None:
         return [], set()
 
     # De-dupe identical (contract, root, scope) crossings on the same line.
@@ -2033,8 +2030,12 @@ def count_scheduling_all_tenants_sites(
             if _is_skipped(rel_posix):
                 continue
             try:
-                tree = ast.parse(py_file.read_text(encoding="utf-8"), filename=str(py_file))
-            except (OSError, SyntaxError):
+                source = py_file.read_text(encoding="utf-8")
+            except OSError as exc:
+                lint_parse.unreadable(py_file, exc)
+                continue
+            tree = lint_parse.parse_or_report(source, py_file)
+            if tree is None:
                 continue
             visitor = _CatalogAllTenantsVisitor(scheduling_models, SCHEDULING_CROSS_TENANT_MANAGER)
             visitor.visit(tree)
@@ -2053,7 +2054,7 @@ def _detect_repo_root(start: Path) -> Path:
     return current
 
 
-def main(argv: list[str]) -> int:
+def _run(argv: list[str]) -> int:
     if len(argv) < 2:
         print(
             "usage: import_boundaries.py <path> [<path> ...]\n"
@@ -2088,6 +2089,14 @@ def main(argv: list[str]) -> int:
         file=sys.stderr,
     )
     return 1
+
+
+def main(argv: list[str]) -> int:
+    lint_parse.reset()
+    code = _run(argv)
+    if code not in (0, 1):  # ошибка вызова — охват не о чем печатать
+        return code
+    return max(code, lint_parse.finish("import_boundaries"))
 
 
 if __name__ == "__main__":

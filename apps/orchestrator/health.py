@@ -2,7 +2,7 @@
 
 Per-component checks for the orchestrator pipeline, surfaced through
 `/readyz/` alongside the existing backing-service probes (postgres,
-redis, chromadb, MinIO from DRF-431).
+redis, chromadb from DRF-431; MinIO left the stack in DRF-2611).
 
 ### Components checked
 

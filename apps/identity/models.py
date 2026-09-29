@@ -143,18 +143,37 @@ class BotUser(models.Model):
     # event-contract.md §3.12). Mirror-only — Ayla owns the canonical
     # value per ADR-0009 §Hard rule #1. Refresh via REST GET
     # /api/v1/users/{ayla_user_id} on event receipt OR re-sync from event
-    # payload. Used by bot-platform UI surfaces (mini app, conversation
-    # thread, master-side internal-chat) for visual rendering only.
-    # Empty string default for backward compat with rows that pre-date
-    # the bridge / for users with no avatar set in Ayla.
+    # payload. Empty string default for backward compat with rows that
+    # pre-date the bridge / for users with no avatar set in Ayla.
+    #
+    # NOT SHOWN ANYWHERE (DRF-2520). No miniapp_api endpoint returns this
+    # field and no screen renders it: the customer's circle is initials
+    # from ``display_name``, and every <img> in the Mini App is a MASTER
+    # photo from other fields. The field is kept for personal-data
+    # accounting and erasure (privacy ``_PII_FIELDS``, ``soft_delete_user``,
+    # export coverage) — not for rendering. An earlier comment here said
+    # it was «used by UI surfaces (mini app, conversation thread,
+    # master-side internal-chat)»; that was never true.
+    #
+    # Do NOT put it on the wire as-is. The value is the catalog storage
+    # URL (``profile.avatar.url``): MinIO behind the container's internal
+    # address, in a ``public-read`` bucket — measured on the stand
+    # 26.09.2026: prod settings, no storage override in the environment,
+    # so ``endpoint_url = http://minio:9000``, ``custom_domain = None``.
+    # The phone cannot load it, and a URL that did load would publish a
+    # person's face to anyone holding it. Showing it means a proxy through
+    # the bot with an ownership check — the shape DRF-2455 built for food
+    # photos; the proxy for every catalog photo is DRF-2539. ``tests/contracts/test_avatar_url_not_on_wire_2520.py`` fails
+    # if an endpoint starts returning it.
     avatar_url = models.URLField(
         max_length=500,
         blank=True,
         default="",
         help_text="Avatar URL mirrored from Ayla user.profile.updated event "
-        "(per event-contract.md §3.12). Used by bot-platform for UI "
-        "rendering (mini app, conversation thread). NOT a canonical "
-        "store — Ayla djangoproject is. Refresh via REST GET "
+        "(per event-contract.md §3.12). Kept for personal-data accounting "
+        "and erasure only — NOT returned by any endpoint and NOT rendered "
+        "(DRF-2520): it is an internal public-read storage URL. NOT a "
+        "canonical store — Ayla djangoproject is. Refresh via REST GET "
         "/api/v1/users/{ayla_user_id} on event receipt. Empty string "
         "default for backward compat.",
     )
@@ -351,6 +370,16 @@ class BotUser(models.Model):
         default="",
         help_text="Кто заблокировал (username учётной записи админки). "
         "Дублирует журнал, чтобы карточка читалась без второго запроса.",
+    )
+    # DRF-2276 — когда этой строке в последний раз сказали фразу блокировки.
+    # «Раз за эпизод» — сравнением с ``blocked_at`` действующей блокировки:
+    # метка раньше неё (или пусто) — эпизод новый. Сброса при снятии не нужно,
+    # новая блокировка сама новее старой метки.
+    block_notice_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="Когда этой строке сказали фразу блокировки (DRF-2276). "
+        "Служебная метка «раз за эпизод», не факт о человеке.",
     )
     context = models.JSONField(
         default=dict,
@@ -685,8 +714,10 @@ class ClientProfile(models.Model):
 # modulator + zone semantics».
 #
 # Tenant relationship that a MemoryEntry was sourced FROM is captured by
-# the nullable MemoryEntry.source_tenant_id field — informational, not a
-# scoping boundary.
+# the nullable MemoryEntry.source_tenant_id field, written at write time
+# (DRF-2544, apps.identity.services.memory_origin). Not a storage boundary;
+# the read rule for it is personal_fields.NEVER_CROSSES +
+# UNKNOWN_ORIGIN_NEVER_CROSSES, owed by the first salon-scoped reader.
 
 
 class UserPersonalContext(models.Model):
@@ -738,13 +769,25 @@ class UserPersonalContext(models.Model):
         blank=True,
         help_text="ISO-639-1 language code, e.g. 'ru'. NULL until user sets a preference.",
     )
+    # DRF-2526 — the original help_text promised a «running summary», and nothing
+    # has ever written one: the only write in production code is the NULL of
+    # forget-all (`forget_all_sweep`). It cannot be written today either — a
+    # prose «who this user is» is inference by definition (POLICY_DEBT in
+    # `personal_fields.py`), and inference reaches persistent memory only via
+    # MemoryProposal (AYLA-DEC-0024), which does not exist. The field stays
+    # empty; readers turn blank into None, so the prompt never gets it.
+    # Known debt: should a writer appear, `memory_surface.render_personal_context`
+    # puts this text in the prompt verbatim — no provenance, no per-salon rule.
+    # `test_summary_has_no_writer_2526` catches the writer, not that hole.
+    # help_text is corrected in its own migration PR (0033), not here.
     summary = models.TextField(
         null=True,
         blank=True,
-        help_text="Ayla's running summary of who this user is. "
-        "Application-side capped at 8 KB. NOT encrypted at storage layer "
-        "because it's intentionally retrievable in plaintext by the LLM "
-        "context-building path on every conversation.",
+        help_text="Reserved; nothing writes it (DRF-2526). A prose summary of "
+        "the person is inference, and inference reaches persistent memory "
+        "only via MemoryProposal (AYLA-DEC-0024). Forget-all sets it to NULL. "
+        "Readers treat blank as absent; if ever filled, the prompt builder "
+        "reads it in plaintext, verbatim, with no provenance.",
     )
 
     # DRF-1370 — this column records the user-intent MOMENT and nothing else.
@@ -960,10 +1003,11 @@ class MemoryEntry(models.Model):
     source_tenant_id = models.UUIDField(
         null=True,
         blank=True,
-        help_text="Tenant the fact originated at. NULL if cross-tenant "
-        "or platform-level. Informational — NOT a scoping boundary; "
-        "tenant scoping is enforced at the app-layer voice modulator + "
-        "cross-tenant reuse rule per ADR-0011 §9.",
+        help_text="Tenant the fact was said at, resolved at write time "
+        "(DRF-2544): the salon in scope, or the global_bot sentinel for the "
+        "global surface. NULL = origin UNKNOWN (rows before DRF-2544, or a "
+        "path that declared neither) — NOT «platform-level». Read rule: "
+        "personal_fields.UNKNOWN_ORIGIN_NEVER_CROSSES.",
     )
     kind = models.CharField(
         max_length=20,
@@ -1217,6 +1261,10 @@ class RedZoneAccessLog(models.Model):
     ACCESS_PURGE = "purge"
     ACCESS_WITHDRAWAL = "withdrawal"
     ACCESS_WRITE_REJECTED_DOB = "write_rejected_dob_lookup"
+    # DRF-2542 §2 — база отказала жёлтой/красной записи без согласия
+    # (CHECK memory_entry_yellow_red_requires_consent). Отдельное значение, а
+    # не «dob»: причина другая, и сторож читает её по значению, не по тексту.
+    ACCESS_WRITE_REJECTED_NO_CONSENT = "write_rejected_no_consent"
     # DRF-2133 — soft-delete по просьбе субъекта (tombstone, не purge).
     ACCESS_DELETE = "delete"
     ACCESS_TYPE_CHOICES = [
@@ -1228,6 +1276,10 @@ class RedZoneAccessLog(models.Model):
         (
             ACCESS_WRITE_REJECTED_DOB,
             "Write rejected — DOB lookup failed (Ayla REST outage)",
+        ),
+        (
+            ACCESS_WRITE_REJECTED_NO_CONSENT,
+            "Write rejected — yellow/red without consent (DB CHECK)",
         ),
     ]
 

@@ -69,6 +69,7 @@ The split now is by what the rule is *for*:
 
 from __future__ import annotations
 
+from apps.replay.response_shape import describe
 from typing import Any
 
 
@@ -106,7 +107,16 @@ def evaluate(
     return failures
 
 
-def evaluate_voice(response_text: str, voice_check: dict[str, Any]) -> list[str]:
+#: Every key ``evaluate_voice`` reads. A key outside this set is a typo the
+#: check would silently ignore — ``test_voice_sides_2604`` holds the YAML to it.
+VOICE_CHECK_KEYS = frozenset(
+    {"max_length", "caps_lock", "forbidden_phrases", "forbidden_phrases_in_reply"}
+)
+
+
+def evaluate_voice(
+    response_text: str, voice_check: dict[str, Any], *, reply_side: bool = True
+) -> list[str]:
     """Run voice_check constraints against the response text.
 
     Supported keys:
@@ -114,6 +124,18 @@ def evaluate_voice(response_text: str, voice_check: dict[str, Any]) -> list[str]
       - caps_lock: float — fraction of ALL-CAPS chars over limit fails
       - forbidden_phrases: list[str] — regex patterns; delegates to
         ``apps.orchestrator.safety.voice_check.validate_voice``
+      - forbidden_phrases_in_reply: list[str] — regex patterns the PERSON may
+        say and the reply must not (DRF-2604). ``forbidden_phrases`` carries
+        the echo contract (never matches the input), so a word the person
+        uses could not be forbidden in the reply at all — authors dodged it
+        (``adv_allergy_oil_recommendation`` spelled «подойдет» without ё, and
+        the reply «точно подойдёт» went through). Inverse contract here:
+        every pattern MUST match the input. Which reply-only place to use:
+        substring → ``forbidden_in_reply``; regex → ``voice_check.forbidden_phrases_in_reply`` (a regex tolerates ё/е and inflection).
+
+    ``reply_side`` is on by default, so a new judge of a reply cannot forget
+    it. Only the echo baselines turn it off — they ask «does the input
+    overlap», and the reply side overlaps by definition.
     """
 
     failures: list[str] = []
@@ -133,14 +155,16 @@ def evaluate_voice(response_text: str, voice_check: dict[str, Any]) -> list[str]
             if ratio > float(caps_threshold):
                 failures.append(f"voice_check.caps_lock: {ratio:.2f} > {caps_threshold}")
 
-    forbidden_phrases = voice_check.get("forbidden_phrases") or []
-    if forbidden_phrases:
-        # Phase 0: pattern match locally to avoid touching the Sprint 4
-        # validate_voice() event-emission path (which needs tenant scope).
-        # Phase 1 may swap to validate_voice() if we add a no-emit mode.
-        for pattern in forbidden_phrases:
+    # Phase 0: pattern match locally to avoid touching the Sprint 4
+    # validate_voice() event-emission path (which needs tenant scope).
+    # Phase 1 may swap to validate_voice() if we add a no-emit mode.
+    sides = [("forbidden_phrases", "forbidden_phrase")]
+    if reply_side:
+        sides.append(("forbidden_phrases_in_reply", "forbidden_phrase_in_reply"))
+    for key, label in sides:
+        for pattern in voice_check.get(key) or []:
             if _matches_pattern(response_text, pattern):
-                failures.append(f"voice_check.forbidden_phrase: {pattern!r} matched")
+                failures.append(f"voice_check.{label}: {pattern!r} matched")
 
     return failures
 
@@ -205,23 +229,33 @@ def _dispatch_check(trace: dict[str, Any], key: str, expected: Any, *, polarity:
         hit = expected in names
         return _polarity_check("tool_called", hit, expected, sorted(names), polarity)
 
+    # DRF-2440 — вместо литерала ``<text>`` в отказ идёт ФОРМА ответа: размер,
+    # какие из ожидаемых подстрок нашлись, совпал ли ответ целиком со служебным
+    # шаблоном. Текст по-прежнему наружу не выносится (сторож —
+    # ``tests/test_failure_shape_2440.py``), но «навык ответил иначе» и «ответ
+    # подменили после навыка» теперь различимы по сообщению, а не по догадке.
     if key == "response_contains_any":
         substrings = _needles(expected)
         haystack = response_text.casefold()
         hit = any(s.casefold() in haystack for s in substrings)
-        return _polarity_check("response_contains_any", hit, substrings, "<text>", polarity)
+        shape = describe(response_text, substrings, case_folded=True)
+        return _polarity_check("response_contains_any", hit, substrings, shape, polarity)
 
     if key == "response_contains_all":
         substrings = _needles(expected)
         haystack = response_text.casefold()
         hit = all(s.casefold() in haystack for s in substrings)
         # response_contains_all on forbidden is unusual but supported.
-        return _polarity_check("response_contains_all", hit, substrings, "<text>", polarity)
+        shape = describe(response_text, substrings, case_folded=True)
+        return _polarity_check("response_contains_all", hit, substrings, shape, polarity)
 
     if key == "response_contains_exact":
         substrings = _needles(expected)
         hit = all(s in response_text for s in substrings)
-        return _polarity_check("response_contains_exact", hit, substrings, "<text>", polarity)
+        # Регистр здесь не складывается — и форма обязана мерить тем же
+        # сравнением, иначе она объяснит не тот промах.
+        shape = describe(response_text, substrings, case_folded=False)
+        return _polarity_check("response_contains_exact", hit, substrings, shape, polarity)
 
     return [f"unknown_assertion_key: {key!r}"]
 

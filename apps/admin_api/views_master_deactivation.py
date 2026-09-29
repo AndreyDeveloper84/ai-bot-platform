@@ -66,11 +66,21 @@ def _parse_json_body(request: HttpRequest) -> dict[str, Any] | JsonResponse:
     return data
 
 
-def _preview_to_payload(preview: DeactivationPreview) -> dict[str, Any]:
+def _preview_to_payload(preview: DeactivationPreview, tz: Any = None) -> dict[str, Any]:
+    def _visit_at(moment: Any) -> str | None:
+        # DRF-2591: провод admin_api — в поясе салона, тот же момент.
+        if moment is None:
+            return None
+        if tz is None:
+            return moment.isoformat()
+        return (
+            moment.replace(tzinfo=tz) if moment.tzinfo is None else moment.astimezone(tz)
+        ).isoformat()
+
     def _booking(p: FutureBookingPreview) -> dict[str, Any]:
         return {
             "booking_id": p.booking_id,
-            "visit_at": p.visit_at.isoformat() if p.visit_at else None,
+            "visit_at": _visit_at(p.visit_at),
             "service_name": p.service_name,
             "service_id": p.service_id,
             "client_first_name": p.client_first_name,
@@ -212,7 +222,9 @@ def master_deactivation_preview(request: HttpRequest, master_id: str) -> HttpRes
         actor=bot_user,
         actor_role=role_ctx.primary_role,
     )
-    return JsonResponse(_preview_to_payload(preview))
+    from apps.tenancy.timezones import salon_zone
+
+    return JsonResponse(_preview_to_payload(preview, salon_zone(tenant)))
 
 
 # --- POST /api/v1/admin/masters/<id>/deactivate/ -------------------------

@@ -438,3 +438,82 @@ class TestLogByScan:
                 resp = _log(client, bot_user, SCAN_LOG)
         assert resp.status_code == 403 and resp.json()["error"] == "food_diary_consent_required"
         fake.log_meal.assert_not_called()
+
+
+class TestEveryOutcomeIsNamedInTheLog:
+    """DRF-2554 — исход записи назван в логе одним ключом, каждый класс своим слагом.
+
+    До листа лог бота видел два отказа из тринадцати, и жалобу «не получилось
+    сохранить» нельзя было разобрать. Узел проверяет не «что-то записалось», а
+    что строка несёт ИМЕННО тот слаг и код, который получил экран.
+    """
+
+    @staticmethod
+    def _outcome_lines(caplog: pytest.LogCaptureFixture) -> list[str]:
+        return [
+            r.getMessage()
+            for r in caplog.records
+            if r.getMessage().startswith(("food_log_ma.refused", "food_log_ma.logged"))
+        ]
+
+    @pytest.mark.parametrize(
+        ("arrange", "status", "slug"),
+        [
+            ("diary_off", 404, "nutrition_disabled"),
+            ("no_personal_consent", 403, "consent_required"),
+            ("no_diary_consent", 403, "food_diary_consent_required"),
+            ("malformed", 400, "malformed"),
+            ("not_recognized", 400, "food_not_recognized"),
+            ("catalog_429", 400, "ayla_bad_request"),
+            ("catalog_down", 503, "nutrition_unavailable"),
+        ],
+    )
+    def test_each_refusal_class_is_named_by_its_slug(
+        self, client, bot_user, settings, caplog, arrange, status, slug
+    ) -> None:
+        caplog.set_level(logging.INFO, logger="apps.miniapp_api.views")
+        log_side: Exception | None = {
+            "not_recognized": FoodNotRecognizedError("nutrition_missing"),
+            "catalog_429": NutritionAPIError("http_429_THROTTLED"),
+            "catalog_down": NutritionUnavailableError("http_502"),
+        }.get(arrange)
+        body = {**SCAN_LOG, "meal_type": "brunch"} if arrange == "malformed" else SCAN_LOG
+        if arrange == "diary_off":
+            settings.NUTRITION_ENABLED = False
+        personal = patch(
+            "apps.orchestrator.personal_surface.personal_records_consent_open",
+            return_value=arrange != "no_personal_consent",
+        )
+        diary = patch(
+            "apps.consent.nutrition.diary_is_granted", return_value=arrange != "no_diary_consent"
+        )
+        patcher, _ = _patch_client(log=log_side)
+        with personal, diary, patcher:
+            resp = _log(client, bot_user, body)
+
+        # Положительная пара: экран получил ровно этот отказ.
+        assert resp.status_code == status and resp.json()["error"] == slug
+        assert self._outcome_lines(caplog) == [
+            f"food_log_ma.refused class={slug} status={status} bot_user={bot_user.id}"
+        ]
+
+    def test_a_written_entry_is_named_as_logged(self, client, bot_user, caplog) -> None:
+        """Жалоба при записанном успехе — это клиент; лог должен это различать."""
+        caplog.set_level(logging.INFO, logger="apps.miniapp_api.views")
+        patcher, _ = _patch_client()
+        with patcher:
+            resp = _log(client, bot_user, SCAN_LOG)
+        assert resp.status_code == 201
+        assert self._outcome_lines(caplog) == [
+            f"food_log_ma.logged status=201 bot_user={bot_user.id}"
+        ]
+
+    def test_an_unhandled_error_is_named_and_still_a_500(self, bot_user, caplog) -> None:
+        caplog.set_level(logging.INFO, logger="apps.miniapp_api.views")
+        patcher, _ = _patch_client(log=ValueError("catalog answered 2xx with a non-JSON body"))
+        with patcher:
+            resp = _log(Client(raise_request_exception=False), bot_user, SCAN_LOG)
+        assert resp.status_code == 500
+        assert self._outcome_lines(caplog) == [
+            f"food_log_ma.refused class=unhandled exc=ValueError bot_user={bot_user.id}"
+        ]

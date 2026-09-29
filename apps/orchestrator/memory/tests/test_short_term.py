@@ -33,10 +33,27 @@ class _FakeRedis:
         self.ttls: dict[str, int] = {}
         self.deletions: list[str] = []
         self._pending: list[tuple[str, tuple[Any, ...]]] = []
+        self._buffering = False
 
     def pipeline(self) -> "_FakeRedis":
         self._pending = []
+        self._buffering = True
         return self
+
+    # DRF-2511: `append` читает уходящее тем же конвейером, поэтому модель
+    # обязана знать `lrange`. Прямое чтение (`recall`) отличается от
+    # конвейерного флагом: без этого прямой вызов буферизовался бы и отдавал
+    # `None`, и узел краснел бы на стенде, а не на предмете.
+    def lrange(self, key: str, start: int, end: int) -> Any:
+        if self._buffering:
+            self._pending.append(("lrange", (key, start, end)))
+            return None
+        return self._slice(key, start, end)
+
+    def _slice(self, key: str, start: int, end: int) -> list[str]:
+        lst = self.lists.get(key, [])
+        stop = len(lst) if end == -1 else (end + 1 if end >= 0 else len(lst) + end + 1)
+        return lst[start:stop]
 
     def rpush(self, key: str, value: str) -> None:
         self._pending.append(("rpush", (key, value)))
@@ -48,10 +65,16 @@ class _FakeRedis:
         self._pending.append(("expire", (key, ttl)))
 
     def execute(self) -> list[Any]:
+        out: list[Any] = []
         for cmd, args in self._pending:
-            if cmd == "rpush":
+            if cmd == "lrange":
+                # Читается ДО записи, порядком буфера — как в настоящем
+                # конвейере: иначе «уходящее» пришло бы уже обрезанным.
+                out.append(self._slice(*args))
+            elif cmd == "rpush":
                 key, value = args
                 self.lists.setdefault(key, []).append(value)
+                out.append(len(self.lists[key]))
             elif cmd == "ltrim":
                 key, start, end = args
                 lst = self.lists.get(key, [])
@@ -61,17 +84,14 @@ class _FakeRedis:
                     self.lists[key] = lst[start:]
                 else:
                     self.lists[key] = lst[start : end + 1 if end >= 0 else len(lst) + end + 1]
+                out.append(True)
             elif cmd == "expire":
                 key, ttl = args
                 self.ttls[key] = ttl
+                out.append(True)
         self._pending = []
-        return []
-
-    def lrange(self, key: str, start: int, end: int) -> list[str]:
-        lst = self.lists.get(key, [])
-        if end == -1:
-            return lst[start:]
-        return lst[start : end + 1]
+        self._buffering = False
+        return out
 
     def delete(self, key: str) -> None:
         self.deletions.append(key)

@@ -1,0 +1,217 @@
+"""DRF-2595 — пояс салона: одно правило, и сторож, чтобы оно им осталось.
+
+До сведения правило было записано тринадцать раз: одиннадцать давали Москву,
+одно — UTC, одно падало, и лишь два писали в журнал о битом поясе. Каждая
+новая поверхность заводила новую запись и выбирала запасной пояс заново.
+"""
+
+from __future__ import annotations
+
+import ast
+from pathlib import Path
+from types import SimpleNamespace
+from zoneinfo import ZoneInfoNotFoundError
+
+import pytest
+
+from apps.tenancy.timezones import FALLBACK_TZ, salon_iso, salon_zone
+
+_ROOT = Path(__file__).resolve().parents[3]
+_HOME = "apps/tenancy/timezones.py"
+
+
+def _tenant(tz: str | None) -> SimpleNamespace:
+    return SimpleNamespace(pk=2595, timezone=tz)
+
+
+class TestTheRule:
+    def test_a_real_zone_is_honoured(self) -> None:
+        assert str(salon_zone(_tenant("Asia/Yekaterinburg"))) == "Asia/Yekaterinburg"
+
+    def test_empty_and_missing_fall_back_to_the_named_zone_silently(self, caplog) -> None:
+        with caplog.at_level("WARNING"):
+            zones = {
+                str(salon_zone(_tenant(""))),
+                str(salon_zone(_tenant(None))),
+                str(salon_zone(None)),
+            }
+        assert zones == {FALLBACK_TZ} == {"Europe/Moscow"}
+        assert [
+            r for r in caplog.records if "bad_tenant_tz" in r.getMessage()
+        ] == []  # empty-assert-ok: три зоны выше — запасная; пусто не битое
+
+    def test_a_broken_zone_falls_back_and_says_so(self, caplog) -> None:
+        with caplog.at_level("WARNING"):
+            zone = salon_zone(_tenant("Not/AZone"))
+        assert str(zone) == "Europe/Moscow"
+        assert any("tenancy.bad_tenant_tz" in r.getMessage() for r in caplog.records)
+
+    def test_refuse_broken_raises_on_a_broken_zone_after_its_log_line(self, caplog) -> None:
+        with caplog.at_level("WARNING"), pytest.raises(ZoneInfoNotFoundError):
+            salon_zone(_tenant("Not/AZone"), refuse_broken=True)
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("tenancy.bad_tenant_tz" in m for m in messages)
+        assert not any("empty_tenant_tz" in m for m in messages)
+
+    def test_refuse_empty_raises_on_an_empty_zone_with_its_own_reason(self, caplog) -> None:
+        # Пусто на пути-обязательстве — отказ (так было до сведения: ZoneInfo("")),
+        # и причина в журнале своя: стёрли, а не опечатались.
+        from apps.tenancy.timezones import EmptyTenantTimezone
+
+        with caplog.at_level("WARNING"), pytest.raises(EmptyTenantTimezone):
+            salon_zone(_tenant(""), refuse_broken=True, refuse_empty=True)
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("tenancy.empty_tenant_tz" in m for m in messages)
+        assert not any("bad_tenant_tz" in m for m in messages)
+
+    def test_the_two_questions_are_answered_separately(self) -> None:
+        """Путь-показ: refuse_broken без refuse_empty — пусто даёт МСК, битое
+        отказывает. Склейка двух вопросов в один флаг сделала бы эти пары
+        одинаковыми."""
+        from apps.tenancy.timezones import EmptyTenantTimezone
+
+        assert str(salon_zone(_tenant(""), refuse_broken=True)) == "Europe/Moscow"
+        with pytest.raises(ZoneInfoNotFoundError):
+            salon_zone(_tenant("Not/AZone"), refuse_broken=True)
+        # и обратная половина: refuse_empty без refuse_broken
+        assert str(salon_zone(_tenant("Not/AZone"), refuse_empty=True)) == "Europe/Moscow"
+        with pytest.raises(EmptyTenantTimezone):
+            salon_zone(_tenant(""), refuse_empty=True)
+
+
+#: Решение главного окна 29.09 — какие флаги у каких путей, по цене ошибки на
+#: выходе и по прежнему поведению (см. докстринг apps.tenancy.timezones).
+#: Сверяется по коду: место вызова обязано нести ровно эти флаги.
+REFUSAL_BY_PATH: dict[tuple[str, str], frozenset[str]] = {
+    # выход — обязательство; до сведения ZoneInfo(tenant.timezone) отказывал на обоих
+    ("apps/booking/services/create.py", "create_customer_booking"): frozenset(
+        {"refuse_broken", "refuse_empty"}
+    ),
+    ("apps/miniapp_api/views.py", "slots"): frozenset({"refuse_broken", "refuse_empty"}),
+    # выход — показ; до сведения пусто давало МСК, отказывало только битое
+    ("apps/master_api/views_profile_card.py", "accepts_today"): frozenset({"refuse_broken"}),
+    ("apps/master_api/services/onboarding_readiness.py", "_hours_item"): frozenset(
+        {"refuse_broken"}
+    ),
+}
+
+
+class TestEachPathCarriesItsDecidedFlags:
+    def test_refusing_call_sites_are_exactly_the_decided_ones(self) -> None:
+        found: dict[tuple[str, str], frozenset[str]] = {}
+        for path, text in _production_sources().items():
+            tree = ast.parse(text)
+
+            def visit(node: ast.AST, function: str, path: str = path) -> None:
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    function = node.name
+                if isinstance(node, ast.Call):
+                    f = node.func
+                    name = f.id if isinstance(f, ast.Name) else getattr(f, "attr", None)
+                    flags = frozenset(
+                        k.arg
+                        for k in node.keywords
+                        if k.arg in ("refuse_broken", "refuse_empty")
+                        and isinstance(k.value, ast.Constant)
+                        and k.value.value is True
+                    )
+                    if name == "salon_zone" and flags:
+                        found[(path, function)] = flags
+                for child in ast.iter_child_nodes(node):
+                    visit(child, function)
+
+            visit(tree, "<module>")
+        assert found == REFUSAL_BY_PATH
+
+
+class TestSalonIso:
+    def test_the_moment_is_kept_and_only_written_in_the_salon_zone(self) -> None:
+        from datetime import datetime, timezone
+
+        zone = salon_zone(_tenant("Asia/Yekaterinburg"))
+        aware = datetime(2026, 9, 30, 4, 0, tzinfo=timezone.utc)
+        assert salon_iso(aware, zone) == "2026-09-30T09:00:00+05:00"
+        naive = datetime(2026, 9, 30, 9, 0)
+        assert salon_iso(naive, zone) == "2026-09-30T09:00:00+05:00"
+        assert salon_iso(None, zone) is None
+
+
+# ─── сторож: одно определение ───────────────────────────────────────────────
+
+#: Места, где ``ZoneInfo`` строится из ``.timezone`` тенанта мимо помощника, —
+#: поимённо, с причиной. Пусто с части Б DRF-2595: последние четыре встроенных
+#: места (создание записи, слоты, главная клиента, готовность мастера)
+#: переведены на ``salon_zone``. Храповик в обе стороны: новое место — красно.
+#: Что сканер вообще видит такие места, держит узел с посаженным правилом.
+KNOWN_OUTSIDE: dict[tuple[str, str], str] = {}
+
+
+def _reads_tenant_timezone(node: ast.AST) -> bool:
+    for sub in ast.walk(node):
+        if isinstance(sub, ast.Attribute) and sub.attr == "timezone":
+            return True
+        if (
+            isinstance(sub, ast.Call)
+            and isinstance(sub.func, ast.Name)
+            and sub.func.id == "getattr"
+            and any(isinstance(a, ast.Constant) and a.value == "timezone" for a in sub.args)
+        ):
+            return True
+    return False
+
+
+def _census(sources: dict[str, str]) -> set[tuple[str, str]]:
+    found: set[tuple[str, str]] = set()
+    for path, text in sources.items():
+        tree = ast.parse(text)
+
+        def visit(node: ast.AST, function: str, path: str = path) -> None:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                function = node.name
+            if isinstance(node, ast.Call):
+                f = node.func
+                name = f.id if isinstance(f, ast.Name) else getattr(f, "attr", None)
+                if name == "ZoneInfo" and any(_reads_tenant_timezone(a) for a in node.args):
+                    found.add((path, function))
+            for child in ast.iter_child_nodes(node):
+                visit(child, function)
+
+        visit(tree, "<module>")
+    return found
+
+
+def _production_sources() -> dict[str, str]:
+    out: dict[str, str] = {}
+    for top in ("apps", "config"):
+        for path in (_ROOT / top).rglob("*.py"):
+            rel = path.relative_to(_ROOT)
+            if "tests" in rel.parts or "migrations" in rel.parts or rel.as_posix() == _HOME:
+                continue
+            out[rel.as_posix()] = path.read_text(encoding="utf-8")
+    return out
+
+
+class TestOneDefinition:
+    def test_no_new_place_builds_the_salon_zone_by_itself(self) -> None:
+        found = _census(_production_sources())
+        assert len(found) == len(KNOWN_OUTSIDE)
+        assert (
+            found - set(KNOWN_OUTSIDE) == set()
+        ), (  # empty-assert-ok: число мест утверждено строкой выше
+            "новое место строит пояс салона мимо apps.tenancy.timezones.salon_zone — "
+            "четырнадцатое правило; позовите помощник"
+        )
+
+    def test_the_known_list_has_no_stale_entries(self) -> None:
+        found = _census(_production_sources())
+        assert set(KNOWN_OUTSIDE) - found == set()  # empty-assert-ok: равенство чисел — узлом выше
+
+    def test_a_planted_rule_is_caught_by_name(self) -> None:
+        planted = (
+            "from zoneinfo import ZoneInfo\n"
+            "def _tz(tenant):\n"
+            "    return ZoneInfo(getattr(tenant, 'timezone', '') or 'UTC')\n"
+        )
+        assert _census({"apps/skills/new/salon.py": planted}) == {
+            ("apps/skills/new/salon.py", "_tz")
+        }

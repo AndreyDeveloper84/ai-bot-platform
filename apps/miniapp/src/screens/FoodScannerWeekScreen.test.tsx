@@ -7,7 +7,7 @@
  * дня, отказы — по слагу. Слов «напоминание», «серия», «пропустил» на
  * экране нет — сторож словами (В-5, DRF-1332).
  */
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -19,6 +19,7 @@ vi.mock("../lib/diary-days", async (importOriginal) => {
 import { ApiError } from "../lib/api";
 import { getDiaryDays, type DiaryDays } from "../lib/diary-days";
 import { FoodScannerWeekScreen, WEEK_COPY, WEEK_ROUTE } from "./FoodScannerWeekScreen";
+import { settleScenario } from "../test/settleScenario";
 
 const mockedDays = vi.mocked(getDiaryDays);
 
@@ -64,11 +65,6 @@ function renderScreen() {
   );
 }
 
-const settle = async (rounds = 4) => {
-  for (let i = 0; i < rounds; i += 1) {
-    await act(async () => {});
-  }
-};
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -142,7 +138,7 @@ describe("неделя: стрелки", () => {
 
     mockedDays.mockResolvedValueOnce(week("2026-09-06", "2026-09-12"));
     fireEvent.click(screen.getByRole("button", { name: WEEK_COPY.earlier }));
-    await settle();
+    await settleScenario();
 
     expect(mockedDays).toHaveBeenLastCalledWith("2026-09-06", "2026-09-12");
     expect(screen.getByRole("button", { name: WEEK_COPY.later })).toBeEnabled();
@@ -162,7 +158,7 @@ describe("неделя: стрелки", () => {
       const earlier = screen.getByRole("button", { name: WEEK_COPY.earlier });
       expect(earlier).toBeEnabled();
       fireEvent.click(earlier);
-      await settle();
+      await settleScenario();
     }
 
     expect(mockedDays).toHaveBeenLastCalledWith("2026-08-23", "2026-08-29");

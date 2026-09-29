@@ -184,23 +184,35 @@ def record_webhook(
     is_global = is_global_bot_token(channel_token)
     trace_id = current_trace_id() or ""
 
-    try:
-        # transaction.atomic — without it, IntegrityError aborts the
-        # surrounding test transaction and blows up the test runner.
-        # In production with autocommit, this is equally clean.
-        with transaction.atomic():
-            row = WebhookJournal.objects.create(
-                channel=channel,
-                external_event_id=external_event_id,
-                raw_payload=raw_payload,
-                resolved_tenant=tenant,
-                trace_id=trace_id,
-            )
-        created = True
-    except IntegrityError:
-        # Dedup hit: same channel+external_event_id was already inserted.
-        row = WebhookJournal.objects.get(channel=channel, external_event_id=external_event_id)
-        created = False
+    # DRF-2242 — an event whose row was severed from its person by «забудь
+    # всё» keeps its dedup under a one-way hash of the id. A late MAX retry of
+    # that event must still be recognised, or the erased turn would be
+    # processed a second time.
+    from apps.ingress.retention import erased_event_id
+
+    erased = WebhookJournal.objects.filter(
+        channel=channel, external_event_id=erased_event_id(external_event_id)
+    ).first()
+    if erased is not None:
+        row, created = erased, False
+    else:
+        try:
+            # transaction.atomic — without it, IntegrityError aborts the
+            # surrounding test transaction and blows up the test runner.
+            # In production with autocommit, this is equally clean.
+            with transaction.atomic():
+                row = WebhookJournal.objects.create(
+                    channel=channel,
+                    external_event_id=external_event_id,
+                    raw_payload=raw_payload,
+                    resolved_tenant=tenant,
+                    trace_id=trace_id,
+                )
+            created = True
+        except IntegrityError:
+            # Dedup hit: same channel+external_event_id was already inserted.
+            row = WebhookJournal.objects.get(channel=channel, external_event_id=external_event_id)
+            created = False
 
     # Wrap emit / write_audit in tenant_scope(tenant) so the resolved
     # tenant ends up on the Event + AuditLog rows. Without this scope,

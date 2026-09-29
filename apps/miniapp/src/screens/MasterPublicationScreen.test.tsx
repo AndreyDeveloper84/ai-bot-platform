@@ -14,9 +14,9 @@
  * E1 — отказы по `error`, каждый своим текстом, на загрузке и на POST; E2 — 5xx загрузки → общий текст;
  * G1 — ни в одном состоянии нет «популярн», «несколько секунд», «немного больше времени», процентов.
  *
- * Сторож от зависимости от времени — как в тестах экранов 03/04: малый asyncUtilTimeout и явный settle().
+ * Сторож от зависимости от времени — как в тестах экранов 03/04: малый asyncUtilTimeout и явный settleScenario().
  */
-import { act, configure, fireEvent, getConfig, render, screen, within } from "@testing-library/react";
+import { configure, fireEvent, getConfig, render, screen, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -38,6 +38,7 @@ vi.mock("../lib/max-sdk", async (importOriginal) => {
   return { ...original, setBackButton: vi.fn(), signalReady: vi.fn() };
 });
 
+import { SoloSurfaceContext, type SoloSurfaceInfo } from "../hooks/useMasterAvatarItems";
 import { ApiError } from "../lib/api";
 import {
   getMasterMe,
@@ -62,6 +63,7 @@ import {
   PUBLICATION_MISSING_TEXT,
   PUBLICATION_REFUSAL_TEXT,
 } from "./MasterPublicationScreen";
+import { settleScenario } from "../test/settleScenario";
 
 const GUARD_ASYNC_TIMEOUT_MS = 20;
 let previousAsyncUtilTimeout = 1000;
@@ -75,11 +77,6 @@ afterAll(() => {
   configure({ asyncUtilTimeout: previousAsyncUtilTimeout });
 });
 
-const settle = async (rounds = 6) => {
-  for (let i = 0; i < rounds; i += 1) {
-    await act(async () => {});
-  }
-};
 
 const mockedStatus = vi.mocked(getPublicationStatus);
 const mockedPublish = vi.mocked(publishProfile);
@@ -221,16 +218,17 @@ function LocationProbe() {
   return <div data-testid="location">{location.pathname}</div>;
 }
 
-async function renderScreen() {
-  render(
+async function renderScreen(solo?: SoloSurfaceInfo) {
+  const routes = (
     <MemoryRouter initialEntries={["/solo/publication"]}>
       <Routes>
         <Route path="/solo/publication" element={<MasterPublicationScreen />} />
         <Route path="*" element={<LocationProbe />} />
       </Routes>
-    </MemoryRouter>,
+    </MemoryRouter>
   );
-  await settle();
+  render(solo ? <SoloSurfaceContext.Provider value={solo}>{routes}</SoloSurfaceContext.Provider> : routes);
+  await settleScenario();
 }
 
 const title = () => screen.getByRole("heading", { level: 1 });
@@ -282,6 +280,9 @@ describe("экран 08 — состояния из ответа каталог�
     const place = screen.getByTestId("publication-section-location");
     expect(place).toHaveTextContent(missing("location_not_assigned"));
     expect(place).toHaveTextContent(PUBLICATION_COPY.locationUnavailable);
+    // П.6 решений 28.09 (DRF-2581): дословно фраза владельца, без «поддержки».
+    expect(place).toHaveTextContent("Место работы определяется салоном.");
+    expect(place).not.toHaveTextContent(/поддержк/);
     expect(within(place).queryByRole("button")).toBeNull();
     expect(screen.queryByRole("button", { name: PUBLICATION_COPY.submit })).toBeNull();
 
@@ -336,6 +337,14 @@ describe("экран 08 — состояния из ответа каталог�
     expect(screen.getByTestId("location")).toHaveTextContent("/solo/services/select");
   });
 
+  it("S3c (DRF-2254): каталог назвал пространство салоном — «Добавить ещё услуги» нет, кабинет есть", async () => {
+    mockedStatus.mockResolvedValue(withStatus("active"));
+    await renderScreen({ salonAdmin: false, selfService: false });
+
+    expect(screen.getByRole("button", { name: PUBLICATION_COPY.toCabinet })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: PUBLICATION_COPY.addServices })).toBeNull();
+  });
+
   it("S3b: ACTIVE — «Перейти в кабинет» ведёт в «Мой день»", async () => {
     mockedStatus.mockResolvedValue(withStatus("active"));
     await renderScreen();
@@ -368,7 +377,7 @@ describe("экран 08 — отправка", () => {
     const button = submitButton();
     fireEvent.click(button);
     fireEvent.click(button);
-    await settle();
+    await settleScenario();
 
     expect(mockedPublish).toHaveBeenCalledTimes(1);
     expect(mockedPublish.mock.calls[0]?.[0]).toMatch(UUID_V4);
@@ -378,7 +387,7 @@ describe("экран 08 — отправка", () => {
 
     mockedStatus.mockResolvedValue(withStatus("pending"));
     release(PUBLISHED);
-    await settle();
+    await settleScenario();
 
     expect(mockedStatus).toHaveBeenCalledTimes(2);
     expect(title()).toHaveTextContent(PUBLICATION_COPY.pendingTitle);
@@ -390,14 +399,14 @@ describe("экран 08 — отправка", () => {
     await renderScreen();
 
     fireEvent.click(submitButton());
-    await settle();
+    await settleScenario();
 
     expect(screen.getByText(PUBLICATION_COPY.uncertainTitle)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: PUBLICATION_COPY.submit })).toBeNull();
 
     mockedStatus.mockResolvedValue(withStatus("pending"));
     fireEvent.click(screen.getByRole("button", { name: PUBLICATION_COPY.checkStatus }));
-    await settle();
+    await settleScenario();
 
     expect(mockedStatus).toHaveBeenCalledTimes(2);
     expect(mockedPublish).toHaveBeenCalledTimes(1);
@@ -412,13 +421,13 @@ describe("экран 08 — отправка", () => {
     await renderScreen();
 
     fireEvent.click(submitButton());
-    await settle();
+    await settleScenario();
     fireEvent.click(screen.getByRole("button", { name: PUBLICATION_COPY.checkStatus }));
-    await settle();
+    await settleScenario();
 
     mockedStatus.mockResolvedValue(withStatus("pending"));
     fireEvent.click(submitButton());
-    await settle();
+    await settleScenario();
 
     expect(mockedPublish).toHaveBeenCalledTimes(2);
     expect(mockedPublish.mock.calls[1]?.[0]).toBe(mockedPublish.mock.calls[0]?.[0]);
@@ -431,7 +440,7 @@ describe("экран 08 — отправка", () => {
     await renderScreen();
 
     fireEvent.click(submitButton());
-    await settle();
+    await settleScenario();
 
     expect(title()).toHaveTextContent(PUBLICATION_COPY.notReadyTitle);
     expect(screen.getByTestId("publication-section-profile")).toHaveTextContent(
@@ -469,7 +478,7 @@ describe("экран 08 — отказы", () => {
     await renderScreen();
 
     fireEvent.click(submitButton());
-    await settle();
+    await settleScenario();
 
     expect(screen.getByTestId("publication-refusal")).toHaveTextContent(
       PUBLICATION_REFUSAL_TEXT.catalog_profile_unresolved ?? "—",
@@ -503,19 +512,30 @@ describe("экран 08 — слова", () => {
 });
 
 describe("системные состояния через SystemState (DRF-2194)", () => {
-  it("загрузка — общий скелет без слов", () => {
+  it("загрузка — общий скелет без слов", async () => {
     mockedStatus.mockReturnValue(new Promise(() => {}));
-    void renderScreen();
+    // DRF-2204: `await`, а не `void`. `renderScreen` после рендера делает
+    // шесть раундов `act`, и без `await` этот хвост доезжал в СЛЕДУЮЩИЙ
+    // тест и перемешивался с его рендером — тот падал, хотя в одиночку
+    // проходил. Дождаться хвоста безопасно: запрос висит вечно, и экран
+    // после шести раундов по-прежнему в состоянии загрузки.
+    await renderScreen();
     expect(screen.getByRole("status", { busy: true })).toBeInTheDocument();
   });
 
   it("ошибка — «Не удалось загрузить статус публикации» + «Попробовать снова», без клиентского словаря", async () => {
-    mockedStatus.mockRejectedValueOnce(new Error("boom"));
+    // DRF-2204: тест сам задаёт ОБА ответа — и отказ, и то, что вернёт
+    // повтор. Раньше второй ответ он одалживал у соседа: `beforeEach`
+    // зовёт `vi.clearAllMocks()`, а тот сбрасывает вызовы, но НЕ
+    // реализации, и `mockResolvedValue` из предыдущего теста доживал до
+    // этого. Запущенный первым — через `-t` или при перемешанном порядке —
+    // тест получал на повторе `undefined` и падал на `profile_status`.
+    mockedStatus.mockRejectedValueOnce(new Error("boom")).mockResolvedValueOnce(DRAFT_READY);
     await renderScreen();
     expect(screen.getByRole("alert")).toHaveTextContent("Не удалось загрузить статус публикации");
     expect(screen.queryByText(/Не получилось загрузить/)).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Попробовать снова" }));
-    await settle();
+    await settleScenario();
     expect(mockedStatus).toHaveBeenCalledTimes(2);
   });
 });

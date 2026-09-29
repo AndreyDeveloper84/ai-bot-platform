@@ -29,8 +29,11 @@ from apps.admin_api import (
     views_master_schedule,
     views_master_verify,
     views_salon_frame,
+    views_salon_schedule_writes,
     views_staff_invite,
+    views_staff_invites,
     views_staff_revoke,
+    views_staff_role,
     views_staff_roster,
     views_master_deactivation,
     views_services_mapping,
@@ -128,6 +131,35 @@ urlpatterns = [
         views_staff_revoke.staff_revoke,
         name="staff_revoke",
     ),
+    # DRF-2273 — changing a person's role. Owner-only; see the view.
+    path(
+        "staff/role/",
+        views_staff_role.staff_role_change,
+        name="staff_role_change",
+    ),
+    # DRF-2274 — giving back a revoked role. Owner-only; see the view.
+    path(
+        "staff/restore/",
+        views_staff_role.staff_restore,
+        name="staff_restore",
+    ),
+    # DRF-2275 — issued codes: list, cancel, resend. Owner and admin; an
+    # owner code is the owner's alone. See the view.
+    path(
+        "staff/invites/",
+        views_staff_invites.staff_invites_list,
+        name="staff_invites_list",
+    ),
+    path(
+        "staff/invites/<str:invite_id>/cancel/",
+        views_staff_invites.staff_invite_cancel,
+        name="staff_invite_cancel",
+    ),
+    path(
+        "staff/invites/<str:invite_id>/resend/",
+        views_staff_invites.staff_invite_resend,
+        name="staff_invite_resend",
+    ),
     # The list nothing produced: every person of the salon with every
     # role they hold, merged across TenantStaff and CatalogMaster
     # (ADR-0008). Owner-only — see the view's module docstring.
@@ -181,6 +213,29 @@ urlpatterns = [
         "masters/<str:master_id>/schedule/impact/",
         views_schedule_impact.master_schedule_impact,
         name="master_schedule_impact",
+    ),
+    # DRF-2607 — отгул и изменение на дату на СОБСТВЕННОМ токене
+    # администратора (подпись MAX); служебный ключ в записи не участвует.
+    # Недельный шаблон и закрытия не открыты.
+    path(
+        "masters/<str:master_id>/time-off/",
+        views_salon_schedule_writes.master_time_off,
+        name="master_time_off",
+    ),
+    path(
+        "masters/<str:master_id>/time-off/<str:time_off_id>/",
+        views_salon_schedule_writes.master_time_off_detail,
+        name="master_time_off_detail",
+    ),
+    path(
+        "masters/<str:master_id>/date-exceptions/",
+        views_salon_schedule_writes.master_date_exception,
+        name="master_date_exception",
+    ),
+    path(
+        "masters/<str:master_id>/date-exceptions/<str:date>/",
+        views_salon_schedule_writes.master_date_exception_detail,
+        name="master_date_exception_detail",
     ),
     path(
         "masters/<str:master_id>/schedule/confirm/",

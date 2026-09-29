@@ -87,7 +87,11 @@ describe("без сигнала персонализации экран ниче
     expect(await screen.findByText("День")).toBeInTheDocument();
     expect(screen.getByText(/3 окна/)).toBeInTheDocument();
     const user = userEvent.setup();
-    expect(screen.getByRole("button", { name: "Выбери слот" })).toBeDisabled();
+    // DRF-2593: «слот» человеку не показывается — решение владельца 28.09, п.10
+    // (docs/OWNER_WORDS_DECISIONS_2026-09-28.md); было «Выбери слот». Подпись
+    // кнопки — утверждённая владельцем «Выбрать время» (экран F2), чтобы она
+    // не повторяла заголовок «Выбери время» (решение главного окна 28.09).
+    expect(screen.getByRole("button", { name: "Выбрать время" })).toBeDisabled();
     const [slot] = screen.getAllByRole("button", { name: /в 15:00/ });
     await user.click(slot!);
     expect(screen.getByRole("button", { name: "Дальше" })).toBeEnabled();

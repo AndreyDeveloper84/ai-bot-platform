@@ -2,12 +2,12 @@
 # Usage: `make <target>`. Every target except `env` assumes docker compose
 # is the runtime; `env` is host-side and builds this worktree's venv.
 
-.PHONY: help env up down restart shell test migrate makemigrations logs ps clean reset chroma-ping minio-bucket
+.PHONY: help env up down restart shell test migrate makemigrations logs ps clean reset chroma-ping
 
 help:
 	@echo "Targets:"
 	@echo "  env              Build/repair this worktree's venv to match the pins (host-side)"
-	@echo "  up               Bring up the dev stack (postgres, redis, chromadb, minio, web)"
+	@echo "  up               Bring up the dev stack (postgres, redis, chromadb, web)"
 	@echo "  down             Stop the dev stack (volumes preserved)"
 	@echo "  restart          Restart all services"
 	@echo "  shell            Django shell inside the web container"
@@ -17,7 +17,6 @@ help:
 	@echo "  logs             Tail logs from all services"
 	@echo "  ps               Show service status + healthcheck"
 	@echo "  chroma-ping      Verify chromadb HTTP API"
-	@echo "  minio-bucket     Create the replay bucket in MinIO"
 	@echo "  clean            Stop the stack (preserves volumes)"
 	@echo "  reset            Stop the stack AND delete all volumes (destructive)"
 
@@ -56,11 +55,6 @@ ps:
 
 chroma-ping:
 	curl -fsS http://localhost:8001/api/v2/heartbeat && echo
-
-minio-bucket:
-	docker compose exec minio mc alias set local http://localhost:9000 minioadmin minioadmin
-	docker compose exec minio mc mb --ignore-existing local/ai-bot-replay
-	docker compose exec minio mc ls local/
 
 clean: down
 

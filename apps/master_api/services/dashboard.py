@@ -46,13 +46,13 @@ import logging
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone as dt_timezone
 from typing import Any
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from zoneinfo import ZoneInfo
 
 from apps.master_api.services.visit_source import (
     UPCOMING_STATUSES,
     VisitRow,
+    attended_visits,
     master_client_ids,
-    master_visit_count,
     master_visits,
 )
 from apps.catalog.models import CatalogMaster, CatalogService
@@ -64,6 +64,8 @@ from apps.integrations.ayla.salon_client import (
 )
 from apps.master_api.services.schedule_frame import load_day_frame
 from apps.scheduling.models import ScheduleChangeRequest
+from apps.tenancy.timezones import salon_zone
+from apps.miniapp_api.master_media import master_photo_path
 
 logger = logging.getLogger(__name__)
 
@@ -247,21 +249,6 @@ def _dc_to_dict(obj: Any) -> Any:
 # Helpers ----------------------------------------------------------------
 
 
-def get_tenant_tz(tenant: Any) -> ZoneInfo:
-    """Resolve the tenant's IANA TZ — falls back to UTC on bad values.
-
-    The :attr:`Tenant.timezone` field's docstring promises this fallback
-    so callers don't need to guard against operator typos.
-    """
-
-    tz_name = getattr(tenant, "timezone", "") or "UTC"
-    try:
-        return ZoneInfo(tz_name)
-    except ZoneInfoNotFoundError:
-        logger.warning("master_api.dashboard.bad_tenant_tz tz=%s", tz_name)
-        return ZoneInfo("UTC")
-
-
 def _split_name(client_name: str) -> tuple[str, str]:
     """Split ``Мария Иванова`` → («Мария», «И.»).
 
@@ -384,11 +371,15 @@ def _is_returning_customer(master: CatalogMaster, booking: VisitRow) -> bool:
     they make a no-show risk. Until visit completion is used at scale
     (DRF-1048) the chip stays dark for everyone: an empty flag does not
     lie, a wrong one does.
+
+    «Приходил» — :func:`visit_source.attended_visits`: визит закрыт каноном
+    И закрыт человеком. Автозакрытие по часам не свидетельство прихода
+    (DRF-2462); то же правило читает список «Клиенты».
     """
 
     if booking.bot_user_id is None:
         return False
-    return master_visit_count(master, bot_user_id=booking.bot_user_id, statuses=("completed",)) > 1
+    return attended_visits(master).filter(bot_user_id=booking.bot_user_id).count() > 1
 
 
 def _customer_intent_hint(booking: VisitRow) -> str:
@@ -452,7 +443,7 @@ def get_next_visit(master: CatalogMaster, now: datetime) -> NextVisit | None:
     («Сегодня нет записей. … Ближайшая запись завтра в 10:00»).
     """
 
-    tz = get_tenant_tz(master.tenant)
+    tz = salon_zone(master.tenant)
     _, end_of_today, _ = _today_bounds(now, tz)
 
     upcoming = master_visits(
@@ -491,7 +482,7 @@ def get_upcoming_today(master: CatalogMaster, now: datetime) -> list[UpcomingVis
     состояние дня, не журнал.
     """
 
-    tz = get_tenant_tz(master.tenant)
+    tz = salon_zone(master.tenant)
     _, end_of_today, _ = _today_bounds(now, tz)
     rows = master_visits(
         master,
@@ -732,7 +723,7 @@ def _working_block_today_ex(
 def _next_free_window(master: CatalogMaster, now: datetime) -> dict[str, str] | None:
     """First gap of ≥30min after now in today's working block."""
 
-    tz = get_tenant_tz(master.tenant)
+    tz = salon_zone(master.tenant)
     local_now = now.astimezone(tz)
     today_local = local_now.date()
     block = _working_block_today(master, today_local, tz=tz)
@@ -788,7 +779,7 @@ def _time_diff_min(start: time, end: time) -> int:
 def get_today_summary(master: CatalogMaster, now: datetime) -> TodaySummary:
     """Aggregate counts + next-free-window for today (tenant TZ)."""
 
-    tz = get_tenant_tz(master.tenant)
+    tz = salon_zone(master.tenant)
     start_utc, end_utc, _ = _today_bounds(now, tz)
     # Booked statuses only — cancelled and no-show rows are not clients the
     # master is expecting. The mirror has no `rescheduled` state at all: a
@@ -842,7 +833,7 @@ def _rating_if_backed(master: CatalogMaster) -> dict[str, Any] | None:
 def get_week_summary(master: CatalogMaster, now: datetime) -> WeekSummary:
     """Counts for the current calendar week (Mon–Sun, tenant TZ)."""
 
-    tz = get_tenant_tz(master.tenant)
+    tz = salon_zone(master.tenant)
     start_utc, end_utc, monday, sunday = _week_bounds(now, tz)
     # Same status set as «today»: cancelled and no-show rows did not take
     # the master's time.
@@ -947,7 +938,7 @@ def get_states(master: CatalogMaster, now: datetime) -> DashboardStates:
     cached data, never when it has fresh server data.
     """
 
-    tz = get_tenant_tz(master.tenant)
+    tz = salon_zone(master.tenant)
     start_utc, end_utc, today_local = _today_bounds(now, tz)
     latest = master_visits(
         master,
@@ -997,7 +988,7 @@ def build_dashboard(master: CatalogMaster, now: datetime) -> DashboardSnapshot:
             "id": str(master.id),
             "name": master.name,
             "specialization": master.specialization,
-            "photo_url": master.photo_url,
+            "photo_url": master_photo_path(master.id, master.photo_url),
         },
         salon={
             "id": str(master.tenant_id),
@@ -1033,7 +1024,6 @@ __all__ = [
     "get_next_visit",
     "get_states",
     "get_tab_badges",
-    "get_tenant_tz",
     "get_today_summary",
     "get_upcoming_today",
 ]

@@ -19,6 +19,7 @@
 import { render, screen, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { primeDisplayName } from "../components/CustomerAvatarEntry";
 
 vi.mock("../lib/plan-lite", async (importOriginal) => {
   const original = await importOriginal<typeof import("../lib/plan-lite")>();
@@ -45,6 +46,14 @@ import { getPlanLite, getPlanLiteProposal } from "../lib/plan-lite";
 import { ApiError } from "../lib/api";
 import { FoodScannerDiaryScreen } from "./FoodScannerDiaryScreen";
 import { PlanLiteScreen } from "./PlanLiteScreen";
+
+// Дверь в профиль (`CustomerAvatarEntry`) без пропа спрашивает имя у
+// `/me`. Этот набор ручку не подменяет, поэтому имя засевается явно:
+// иначе в прогоне живёт неподменённый сетевой вызов и асинхронное
+// обновление, которое может прилететь посреди чужого теста (DRF-2523).
+beforeEach(() => {
+  primeDisplayName("Тест Тестов");
+});
 
 const mockedPlan = vi.mocked(getPlanLite);
 const mockedProposal = vi.mocked(getPlanLiteProposal);

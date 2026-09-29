@@ -26,6 +26,7 @@ from apps.conversations.models import Conversation
 from apps.handoff.models import AdminTask
 from apps.identity.models import BotUser
 from apps.tenancy.models import Tenant
+from tests.support.pii_asserts import visible_text
 
 
 def _url() -> str:
@@ -92,7 +93,7 @@ class TestQueue:
         assert "task_id" in flat
         assert "Анна" not in flat
         assert "Клиентова" not in flat
-        assert "7001" not in flat
+        assert "7001" not in visible_text(body)  # в flat есть task_id-UUID (DRF-2278)
         assert "секретный текст" not in flat
         assert "transcript" not in flat
         assert "reason" not in flat

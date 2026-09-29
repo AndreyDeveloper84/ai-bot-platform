@@ -27,6 +27,7 @@
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { StudioCallout, notConnectedText } from "../components/StudioCallout";
 import { useLocation, useNavigate } from "react-router-dom";
 
 import {
@@ -67,7 +68,7 @@ export const SELECT_COPY = {
   addOwn: "+ Добавить свою услугу",
   saveError: "Не получилось сохранить выбор.",
   salonManaged: "Услуги салона ведёт владелец салона.",
-  notLinked: "Профиль ещё не привязан — привязку выполнит оператор.",
+  notLinked: notConnectedText("выбрать услуги некуда"),
 } as const;
 
 export const PRICES_PATH = "/solo/services";
@@ -303,11 +304,7 @@ export function MasterServiceSelectScreen() {
             {SELECT_COPY.salonManaged}
           </p>
         )}
-        {load.kind === "not_linked" && (
-          <p className="callout" role="status">
-            {SELECT_COPY.notLinked}
-          </p>
-        )}
+        {load.kind === "not_linked" && <StudioCallout text={SELECT_COPY.notLinked} />}
         {load.kind === "error" && (
           <SystemState
             kind="load_error"

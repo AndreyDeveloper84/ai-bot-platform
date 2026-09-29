@@ -209,13 +209,20 @@ class TestRiskElevation:
 
 
 class TestBrandVoice:
-    def test_brand_voice_forbidden_phrase_blocks(self):
+    def test_brand_phrase_in_the_persons_input_does_not_block_drf2608(self):
+        """ПЕРЕВЁРНУТО DRF-2608. Здесь стояло «вход "интим…" блокируется
+        фразой бренда»: один список служил и запретом для Ayla, и
+        операторским фильтром грубых запросов клиента. Фразы бренда — слова,
+        которые Ayla не говорит; они проверяются на ОТВЕТЕ (``post_check``).
+        Фильтр входа не отменён нами, а вынесен владельцу отдельным вопросом
+        (нужен ли и отдельным ли списком). На 29.09 в боевой базе
+        ``persona_brandvoiceconfig`` — 0 строк, живое поведение не меняется."""
         r = pre_check(
             "обсудим интим за доплату",
             brand_voice={"forbidden_phrases": [r"(?i)интим"]},
         )
-        assert r.verdict == SafetyVerdict.BLOCK
-        assert any("интим" in p for p in r.matched_patterns)
+        assert r.verdict == SafetyVerdict.ALLOW
+        assert not any("интим" in p for p in r.matched_patterns)
 
     def test_bad_brand_voice_regex_ignored(self):
         # Bad regex shouldn't crash; just gets skipped.

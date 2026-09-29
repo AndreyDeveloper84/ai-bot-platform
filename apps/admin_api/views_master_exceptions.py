@@ -72,6 +72,7 @@ from apps.catalog.specialist_ref import CatalogSpecialistUnresolved, catalog_spe
 from apps.admin_api.auth import require_admin_or_reception_read
 from apps.admin_api.services.wire_lists import UNREADABLE, read_rows
 from apps.catalog.models import CatalogMaster
+from apps.tenancy.timezones import salon_zone
 from apps.integrations.ayla.salon_client import (
     SalonAPIError,
     SalonForbidden,
@@ -139,15 +140,40 @@ def _exception_row(item: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
-def _time_off_row(item: dict[str, Any]) -> dict[str, Any] | None:
+def _in_zone(raw: str, tz: Any) -> str | None:
+    """Момент отгула — тот же, но со смещением САЛОНА (DRF-2601).
+
+    Каталог отдаёт отгулы в UTC (``users/schedule_api.py`` ``_to_to_dict``:
+    ``to.start_at.isoformat()`` при ``USE_TZ=True``), а экран дня салона
+    берёт из строки и час, и ДАТУ: отгул в 01:00 по салону (22:00 UTC
+    накануне) показывался вчерашним днём — пропадал из дня, когда мастер не
+    работает, и появлялся в дне, когда работает. Приём — #2156 (DRF-2591):
+    момент не меняется; без пояса — пояс салона пришивается без пересчёта.
+    Не разбирается как момент — ``None``: строка уходит в ``unreadable`` с
+    названными полями, а не на экран как есть.
+    """
+    try:
+        moment = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        return moment.replace(tzinfo=tz).isoformat()
+    return moment.astimezone(tz).isoformat()
+
+
+def _time_off_row(item: dict[str, Any], tz: Any) -> dict[str, Any] | None:
     start = item.get("start_at")
     end = item.get("end_at")
     if not isinstance(start, str) or not isinstance(end, str) or not start or not end:
         return None
+    start_local = _in_zone(start, tz)
+    end_local = _in_zone(end, tz)
+    if start_local is None or end_local is None:
+        return None
     return {
         "id": str(item.get("id") or ""),
-        "start_at": start,
-        "end_at": end,
+        "start_at": start_local,
+        "end_at": end_local,
         "reason": item.get("reason") or "",
     }
 
@@ -308,11 +334,14 @@ def master_exceptions(request: HttpRequest, master_id: str) -> HttpResponse:
             503,
         )
 
+    zone = salon_zone(tenant)
     payload: dict[str, Any] = {
         "from": from_date.isoformat(),
         "to": to_date.isoformat(),
         "exceptions": read_rows(exceptions, _exception_row),
-        "time_off": read_rows(time_off, _time_off_row),
+        # Пояс — одно правило на бот (apps.tenancy.timezones.salon_zone, DRF-2595),
+        # тот же, что у /day/ и day-schedule (DRF-2591, DRF-2601).
+        "time_off": read_rows(time_off, lambda item: _time_off_row(item, zone)),
         "closures": read_rows(closures, _closure_row),
     }
     unreadable = sorted(k for k in LIST_KEYS if payload[k]["state"] == UNREADABLE)

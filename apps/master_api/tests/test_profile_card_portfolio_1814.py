@@ -42,6 +42,7 @@ from apps.integrations.ayla.booking_client import (
 from apps.master_api import urls as master_urls
 from apps.master_api import views_profile_card as card
 from apps.master_api.tests.conftest import init_data_header
+from apps.miniapp_api.master_media import master_photo_path
 from apps.tenancy.models import Tenant
 
 pytestmark = pytest.mark.django_db
@@ -149,7 +150,8 @@ class TestCardIsTheCatalogsAnswer:
             "id": str(accepted_master.id),
             "name": "Анна из каталога",
             "bio": "О себе — из каталога",
-            "photo_url": AVATAR,
+            # DRF-2539: на провод — наш путь к байтам, версия от объекта каталога.
+            "photo_url": master_photo_path(accepted_master.id, AVATAR),
         }
         kwargs = ayla.get_specialist_profile.call_args.kwargs
         assert kwargs["specialist_id"] == str(accepted_master.catalog_specialist_id)

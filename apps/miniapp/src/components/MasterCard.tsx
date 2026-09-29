@@ -1,6 +1,7 @@
 import type { Master } from "../lib/api";
 import { formatDistance } from "../lib/nearby";
 import { publicRating, reviewCountLabel } from "../lib/rating";
+import { MasterPhoto } from "./MasterPhoto";
 
 interface Props {
   master: Master;
@@ -41,7 +42,7 @@ export function MasterCard({ master, selected, onSelect, acceptsToday, categorie
       aria-label={`Мастер ${master.name}${master.specialization ? `, ${master.specialization}` : ""}`}
     >
       <div className="master-card__avatar" aria-hidden="true">
-        {master.photo_url ? <img src={master.photo_url} alt="" /> : <span>{initials(master.name)}</span>}
+        <MasterPhoto src={master.photo_url} alt="" fallback={<span>{initials(master.name)}</span>} />
       </div>
       <div className="master-card__body">
         <div className="master-card__name">{master.name}</div>

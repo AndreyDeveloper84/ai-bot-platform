@@ -41,10 +41,19 @@ x-staging-app-env: &staging_app_env
   POSTGRES_USER: platform
   POSTGRES_PASSWORD: platform  # dev-stack dummy default, same as docker-compose.yml  # pragma: allowlist secret
   REDIS_URL: redis://redis:6379/0
-  S3_ENDPOINT_URL: http://minio:9000
-  S3_ACCESS_KEY: minioadmin
-  S3_SECRET_KEY: minioadmin  # dev-stack dummy default, same as docker-compose.yml  # pragma: allowlist secret
-  S3_REPLAY_BUCKET: ai-bot-replay
+
+# DRF-2272 — логи прикладных сервисов в journald хоста. Драйвер по умолчанию
+# (json-file) держит лог в каталоге контейнера, и `up -d --force-recreate`
+# каждой выкладки удалял его вместе с контейнером. Журнал хоста переживает
+# пересоздание; срок хранения — настройка хоста (journald.conf), не compose.
+# Чтение по времени без shell в контейнере:
+#   journalctl CONTAINER_NAME=ayla-bot-staging-web-1 --since "…" --until "…" -o cat
+# ПДн: в журнал идёт то, что прошло PIIRedactingFilter (включая access-строку
+# uvicorn и воркер Celery — DRF-2272 C).
+x-persistent-logs: &persistent_logs
+  driver: journald
+  options:
+    tag: "{{.Name}}"
 
 services:
   # ------------------------------------------------------------------
@@ -54,6 +63,7 @@ services:
   # and fills the same role. Deviation reported to the orchestrator.
   # ------------------------------------------------------------------
   web:
+    logging: *persistent_logs
     command: >
       uvicorn config.asgi:application
       --host 0.0.0.0 --port 8000 --workers 2 --timeout-keep-alive 30
@@ -73,8 +83,6 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-      minio:
-        condition: service_healthy
       # chromadb (dev-file entry) is profiled out below — mark the
       # dependency optional so the project model still validates.
       chromadb:
@@ -89,6 +97,7 @@ services:
 
   # MAX DM stream consumer (XREADGROUP drain of ingress:max).
   worker:
+    logging: *persistent_logs
     environment: *staging_app_env
     env_file:
       - .env.staging
@@ -150,6 +159,7 @@ services:
   # differs per contour, exactly as for `worker`.
   # ------------------------------------------------------------------
   shadow-worker:
+    logging: *persistent_logs
     environment: *staging_app_env
     env_file:
       - .env.staging
@@ -157,6 +167,7 @@ services:
 
   # Celery worker — general tasks (reminders dispatch, followups, sync).
   celery-worker:
+    logging: *persistent_logs
     build:
       context: .
       dockerfile: Dockerfile
@@ -179,6 +190,7 @@ services:
   # Celery beat — DatabaseScheduler. Without it R1 reminders (T-24h/T-2h)
   # never fire. ONE beat per environment — do not scale this service.
   celery-beat:
+    logging: *persistent_logs
     build:
       context: .
       dockerfile: Dockerfile
@@ -204,10 +216,11 @@ services:
   # Infra — internal only (this host's 5432/6379 belong to Ayla).
   #
   # `restart: unless-stopped` here is not optional (DRF-1915). The base
-  # file gives these three no restart policy, so compose creates them with
+  # file gives these no restart policy, so compose creates them with
   # `restart=no`. On 2026-09-15 the pilot host was resized and rebooted at
   # 04:14 UTC: every app service came back (they carry `unless-stopped`),
   # postgres/redis/minio did not — and the bot answered /readyz/ with 503
+  # (minio has since left the bot's stack entirely — DRF-2611)
   # until they were started by hand. A `docker update --restart` on the
   # host fixes the running containers only; the next `up` that recreates
   # them brings `restart=no` back. The policy belongs in this file.
@@ -218,12 +231,6 @@ services:
 
   redis:
     ports: !override []
-    restart: unless-stopped
-
-  minio:
-    ports: !override
-      - "127.0.0.1:9002:9000"
-      - "127.0.0.1:9003:9001"
     restart: unless-stopped
 
   # chromadb is OUT of the sprint's critical path — kept behind an

@@ -228,7 +228,7 @@ export function MasterNotificationSettingsScreen() {
       setBackButton(false);
       setClosingConfirmation(false);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `navigate` нужен только внутри обработчика системной кнопки; привязка делается один раз за монтирование
   }, []);
 
   // Modal-dirty closing-confirmation: ON while quiet-hours editor is open
@@ -293,7 +293,6 @@ export function MasterNotificationSettingsScreen() {
           // defensively so we notice if a future writer bypasses the UI.
           const slug = e.slug as NotificationPrefsErrorSlug;
           if (slug === "urgent_forced_on") {
-            // eslint-disable-next-line no-console
             console.warn(
               "[M7] backend rejected urgent=false — UI guard breached?",
               e.detail,
@@ -351,7 +350,7 @@ export function MasterNotificationSettingsScreen() {
         const msg =
           slug === "time_invalid"
             ? COPY.modal.sameTimeError
-            : e.detail || COPY.toasts.saveError;
+            : COPY.toasts.saveError;
         setEditor({ ...editor, saving: false, err: msg });
       } else {
         setOfflineBanner(true);

@@ -90,6 +90,22 @@ class TestPackageTranscript:
         contents = [m["content"] for m in snap["messages"]]
         assert contents == ["first", "second", "third"]
 
+    def test_each_message_carries_its_input_channel(self, tenant, bot_user, conversation):
+        """DRF-2488 — оператор видит, что реплика надиктована и в ней расшифровка."""
+        Message.all_tenants.create(
+            tenant=tenant,
+            conversation=conversation,
+            role="user",
+            content="расшифровка",
+            input_channel=Message.InputChannel.VOICE,
+        )
+        _make_message(tenant, conversation, "assistant", "ответ")
+        snap = package_transcript(conversation, max_messages=10)
+        assert [(m["role"], m["input_channel"]) for m in snap["messages"]] == [
+            ("user", "voice"),
+            ("assistant", "text"),
+        ]
+
     def test_max_messages_trims(self, tenant, bot_user, conversation):
         for i in range(8):
             _make_message(tenant, conversation, "user", f"msg-{i}")

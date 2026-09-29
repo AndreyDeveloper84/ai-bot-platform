@@ -105,7 +105,7 @@ def data_export(bot_user: "BotUser") -> dict[str, Any]:
             {"id": "...", "state": "idle", "outcome": "",
              "is_active": true, "created_at": "...", "deleted_at": null,
              "messages": [
-               {"role": "user", "content": "...",
+               {"role": "user", "input_channel": "text", "content": "...",
                 "action_type": "", "created_at": "..."},
                ...
              ]},
@@ -141,6 +141,8 @@ def data_export(bot_user: "BotUser") -> dict[str, Any]:
                 "messages": [
                     {
                         "role": msg.role,
+                        # DRF-2488 — voice: content — расшифровка голосового.
+                        "input_channel": msg.input_channel,
                         "content": msg.content,
                         "action_type": msg.action_type or "",
                         "created_at": msg.created_at.isoformat(),

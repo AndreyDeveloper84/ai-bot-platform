@@ -843,7 +843,7 @@ class TestFoodGoldenFixturesStillReplay:
                     # Та же проверка на тех же данных, только без регистра.
                     trace = {**trace, "response_text": response.lower()}
                     must_pass = _lowercased(must_pass)
-                for problem in evaluate(trace, must_pass, fixture.forbidden):
+                for problem in evaluate(trace, must_pass, fixture.reply_forbidden):
                     failures.append(f"{set_name}/{fixture.name}: {problem}")
                 for problem in evaluate_voice(response, fixture.voice_check):
                     failures.append(f"{set_name}/{fixture.name}: voice: {problem}")

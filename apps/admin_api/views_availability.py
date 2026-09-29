@@ -50,8 +50,23 @@ logger = logging.getLogger(__name__)
 # --- helpers --------------------------------------------------------------
 
 
-def _error(slug: str, detail: str, status: int) -> JsonResponse:
-    return JsonResponse({"error": slug, "detail": detail}, status=status)
+def _error(
+    slug: str,
+    detail: str,
+    status: int,
+    details: dict[str, Any] | None = None,
+) -> JsonResponse:
+    """Отказ. ``detail`` — нам в журнал, ``details`` — машине на клиенте.
+
+    DRF-2453: конфликтующие даты ехали ВНУТРИ английской фразы, и экран
+    доставал их регуляркой. Предложение — не канал данных: перепишут
+    формулировку, и даты пропадут, никого не предупредив. Полка не новая
+    (``views_staff_role.py`` отдаёт так же, клиент объявил с DRF-2273).
+    """
+    body: dict[str, Any] = {"error": slug, "detail": detail}
+    if details:
+        body["details"] = details
+    return JsonResponse(body, status=status)
 
 
 def _parse_json_body(request: HttpRequest) -> dict[str, Any] | JsonResponse:
@@ -192,7 +207,7 @@ def availability_requests_list(request: HttpRequest) -> HttpResponse:
             limit=limit,
         )
     except AvailabilityDecisionError as exc:
-        return _error(exc.slug, exc.detail, exc.status)
+        return _error(exc.slug, exc.detail, exc.status, exc.details)
 
     return JsonResponse(result)
 
@@ -245,7 +260,7 @@ def availability_request_approve(request: HttpRequest, request_id: str) -> HttpR
             actor_role=_resolve_actor_role(role_ctx),
         )
     except AvailabilityDecisionError as exc:
-        return _error(exc.slug, exc.detail, exc.status)
+        return _error(exc.slug, exc.detail, exc.status, exc.details)
 
     return JsonResponse({"request": _serialise_request(result.request, result.materialised_dates)})
 
@@ -300,7 +315,7 @@ def availability_request_reject(request: HttpRequest, request_id: str) -> HttpRe
             rejection_reason=rejection_reason,
         )
     except AvailabilityDecisionError as exc:
-        return _error(exc.slug, exc.detail, exc.status)
+        return _error(exc.slug, exc.detail, exc.status, exc.details)
 
     return JsonResponse({"request": _serialise_request(result.request)})
 

@@ -7,8 +7,12 @@
  * не передал данные для входа». Теперь копия одна (`lib/auth-error-copy.ts`).
  *
  * Положительная половина впереди: обычные ошибки (5xx, 403 без слага
- * входа, прочие 4xx с detail) рисуются как раньше — иначе тест зеленел бы
- * на компоненте, который на ЛЮБУЮ ошибку отвечает «не получилось войти».
+ * входа, прочие 4xx) рисуются как раньше — иначе тест зеленел бы на
+ * компоненте, который на ЛЮБУЮ ошибку отвечает «не получилось войти».
+ *
+ * DRF-2446: прочие 4xx больше НЕ печатают серверный `detail` — он
+ * написан для нас и по-английски; на экране согласованная фраза, а
+ * `detail` уходит в журнал.
  */
 import { render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
@@ -33,9 +37,40 @@ describe("StateError — обычные ошибки как раньше", () =>
     expect(screen.getByText("Этот раздел сейчас недоступен.")).toBeTruthy();
   });
 
-  it("прочие 4xx → detail сервера (это не отказ входа)", () => {
-    renderErr(new ApiError(422, "validation_error", "Дата в прошлом"));
-    expect(screen.getByText("Дата в прошлом")).toBeTruthy();
+  it("прочие 4xx → согласованная фраза, серверный detail не показан (DRF-2446)", () => {
+    // Решение изменилось: раньше сюда печатался `detail`, и владелец
+    // увидел «booking not found». Узел не ослаблен — он стал строже:
+    // проверяем И фразу, И отсутствие внутреннего текста.
+    renderErr(new ApiError(404, "not_found", "booking not found"));
+    expect(screen.getByText("Не получилось загрузить.")).toBeTruthy();
+    expect(screen.queryByText(/booking not found/)).toBeNull();
+  });
+
+  it("никакой 4xx не выносит detail на экран", () => {
+    // Охват, а не один случай: по замеру 24.09 в `miniapp_api` 176
+    // английских строк `detail`, и общий хвост печатал любую.
+    for (const [status, slug, detail] of [
+      [400, "bad_request", "master_id and service_id are required"],
+      [404, "not_found", "booking not found"],
+      [409, "conflict", "price or duration changed since it was shown"],
+      [422, "validation_error", "ml must be between 50 and 2000"],
+    ] as const) {
+      const { unmount } = render(<StateError err={new ApiError(status, slug, detail)} onRetry={vi.fn()} />);
+      expect(screen.getByText("Не получилось загрузить.")).toBeTruthy();
+      expect(screen.queryByText(new RegExp(detail.slice(0, 12)))).toBeNull();
+      unmount();
+    }
+  });
+
+  it("detail не потерян — он уходит в журнал", () => {
+    // Иначе через неделю его вернут на экран, чтобы «было видно».
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    renderErr(new ApiError(404, "not_found", "booking not found"));
+    expect(warn).toHaveBeenCalledTimes(1);
+    const [line] = warn.mock.calls[0] ?? [];
+    expect(String(line)).toContain("booking not found");
+    expect(String(line)).toContain("not_found");
+    warn.mockRestore();
   });
 
   it("не ApiError → фраза про интернет", () => {

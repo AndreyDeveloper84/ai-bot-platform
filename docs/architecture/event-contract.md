@@ -683,19 +683,22 @@ A module reports that it has crossed an operational threshold. First emitter: th
 
 | Field         | Type                | Description |
 |---------------|---------------------|-------------|
-| `module_name` | string              | Emitting module. Today: `nutrition.food_scan`. |
+| `module_name` | string              | Emitting module. Today: `nutrition.food_scan`, `appointments.outbox` (DRF-2306). |
 | `severity`    | enum string         | `warning` \| `error`. Never `critical`. Informational — the consumer decides the level itself. |
-| `metric`      | object \| string    | Module-specific. **Two shapes under one name:** bot-internal emitters send a string; `nutrition.food_scan` sends an object `{used: int, limit: int, day: "YYYY-MM-DD", cost_usd: string \| null}`. `cost_usd: null` means «not computed», never a placeholder string. |
+| `metric`      | object \| string    | Module-specific. **Two shapes under one name:** bot-internal emitters send a string; `nutrition.food_scan` sends an object `{used: int, limit: int, day: "YYYY-MM-DD", cost_usd: string \| null}`. `cost_usd: null` means «not computed», never a placeholder string. `appointments.outbox` sends `{topic: string, failure: "rejected" \| "retries_exhausted", http_status: int \| null, count: int, hour: "YYYY-MM-DDTHH" (UTC), reason: slug \| null}` — see below. |
 
 No personal data: the module counts events, not the people behind them (§7).
 
 **Consumer contract (bot, `apps/eventbus/consumers/system.py`):**
 1. Authorization is HMAC plus the closed name set. The system-event path — a branch of its own in `assert_envelope_tenant_authorized`, ahead of the tenant-null carve-out — like the tenant-null path, does not consult `EVENT_INGEST_ALLOWED_EVENTS`. Accepted deliberately (§64); the only detective control is the `verification_mode=system_event` accept log line.
 2. `nutrition.food_scan` → `apps.observability.scan_budget_alert.signal_budget(used, limit, day, cost_usd)`, which owns the level, the per-day-per-threshold dedup and delivery to the operators' MAX chat.
+2a. `appointments.outbox` (DRF-2306, §6.4 alert) → `apps.observability.outbox_dead_alert.signal_outbox_dead`: one operator page per (topic, failure, UTC hour); topic shown only if it has the shape of an event name (else `?`), `reason` only if a slug, numbers only if integers; an unknown `failure` or a malformed `hour` is acknowledged and not paged (both are part of the dedup key). `not_delivered` → 500, as in 5.
 3. An unknown `module_name` is acknowledged, logged and not paged — neither a dead letter per new module nor a page built from data the consumer does not understand.
 4. Idempotent: redelivery is cut by `event_id` dedupe before the handler; the core's own per-day dedup is the second line.
 5. **A page that was not delivered is not an accepted event.** Ayla emits this event once per day per threshold, so the consumer is the only place a lost page can be retried: on `not_delivered` the handler raises, the dedupe row rolls back with it, ingest answers 500, and the Ayla outbox redelivers with backoff (then dead-letters — visible). Accepting it would lose the page until midnight UTC.
 6. `metric.day` must be an ISO date and `metric.cost_usd` a string or `null`; anything else is acknowledged and not paged (the day becomes the core's dedup key and part of the operator text).
+
+**`appointments.outbox` — dead-letter signal (DRF-2306).** When the Ayla publisher dead-letters rows, it emits one event per (topic, failure) per publisher batch, deduplicated per UTC hour: `failure=rejected` for a 4xx (a permanent refusal, §8.12 — `reason` is the slug from the bot's 422 body), `retries_exhausted` for 5xx / network after the retry budget. It never signals the death of a `system.module.health.degraded` row — that would be a signal about a dead signal. **Known limit:** the signal rides the same outbox to the same bot; when rows died because the bot was down, the signal waits for the bot too, and after ~4.5 h of downtime it is dead-lettered itself, silently. The catalog has no independent channel (DRF-2145).
 
 **Enablement order (Ayla side).** The Ayla publisher dead-letters any 4xx except 429 immediately. `OUTBOX_EXTERNAL_DELIVERY_TOPICS` must include this topic **only after** the bot consumer is merged and green — otherwise every event goes straight to dead-letter.
 
@@ -888,6 +891,8 @@ The ingest endpoint's handler-routing layer:
 
 The consumer's own dedupe table is NOT written on exception — that way the retry actually re-attempts processing.
 
+This section covers failures a retry can fix (an event ahead of its booking, a DB error) and genuine consumer bugs. A refusal that no retry will ever fix is §8.12 — 422, not 500.
+
 ### 8.2 Ingest endpoint is down (HTTP 5xx, timeout, connection refused)
 
 Ayla's dispatcher keeps the outbox row pending and retries per §6.3. Outbox rows accumulate during the outage. On recovery, dispatcher drains the queue; lag SLA alert (§6.5) will fire if drain takes >5 min.
@@ -960,6 +965,19 @@ Long-running consumer work (e.g. catalog cache rebuild) MUST be moved off the sy
 ### 8.11 Consumer crash between processing and dedupe write
 
 Pattern enforced by §5.1 (process-then-INSERT in one transaction) prevents this: a crash inside the transaction rolls back BOTH the side-effect and the dedupe row, leaving the system in the pre-event state. Ayla's retry then re-delivers and re-processes cleanly. No silent loss.
+
+### 8.12 Consumer rejects the event permanently (DRF-2302)
+
+Some refusals no retry can fix: the tenant does not exist in bot-platform, the tenant or the event is outside the pilot allowlist (`tenant_not_found`, `tenant_not_allowed`, `event_not_allowed`, `relationship_unavailable`), the envelope is structurally wrong for its event (`system_event_has_subject`, `missing_subject`, `tenant_id_null`), the appointment belongs to another tenant (`cross_tenant_appointment`), or the payload is invalid (`unknown_booking_status`, `invalid_payload`). Answering those with 500 (§8.1) would make Ayla's outbox retry 9 times over ~4.5 h before dead-lettering — noise that hides the refusal.
+
+The consumer raises an `IngestRejection` (`apps/eventbus/ingest_rejection.py`) carrying a `reason` slug. The ingest endpoint:
+
+1. Rolls back the handler transaction — the dedupe row is NOT written, so a replay after the fix is processed as a new delivery, not a duplicate.
+2. Writes a DLQ row with `reason=<slug>` immediately (no attempt counter — there will be no more attempts).
+3. Returns HTTP 422 `{"status": "rejected", "reason": "<slug>"}` and an audit row `eventbus.ingest.rejected` (slug only, never the exception text).
+4. Ayla's outbox dead-letters the 422 at once (4xx except 429). After the root cause is fixed — tenant provisioned, allowlist corrected — the operator replays with `replay_dead_outbox_events`.
+
+Refusals that a retry CAN fix stay on §8.1 (500): tenant-verification probe / DB errors, an import race, an allowlist lookup error, a malformed allowlist configuration (ours to fix; the retry window gives time), `no_active_relationship` (until #246 the relationship may arrive after the event), an event ahead of its booking, a version gap, an undelivered page.
 
 ---
 

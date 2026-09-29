@@ -98,6 +98,17 @@ class TurnReply:
     # 1:1 so the channel handler can enforce the confidence floor (pipeline
     # step 10.5) on the live path. None = the skill computed no score.
     confidence: float | None = None
+    # DRF-2341 — ветка утверждает ВЫПОЛНЕННОЕ действие, и чем это
+    # подтверждено со стороны источника. Переносятся 1:1 и не толкуются:
+    # шов не имеет мнения о том, вправе ли ветка утверждать — он лишь не
+    # теряет её объявление по дороге к поверхности.
+    claims_done: bool = False
+    claims_done_evidence: str = ""
+    #: DRF-2435 — этот ответ ЕСТЬ собственные данные человека, отданные ему по
+    #: его же просьбе. Переносится через шов, потому что читает его исходящий
+    #: гейт ПОСЛЕ шва: не перенести — значит вернуть подмену ответа выгрузки
+    #: рекомендательной фразой (измерено: 0.4% запросов).
+    subject_own_data: bool = False
     # DRF-1348 — mirrors DiscoveryReply.outage: the model could not be
     # reached at all. Carried, never interpreted: the seam has no opinion
     # about what a surface should draw for it.
@@ -204,6 +215,18 @@ SKILL_RESULT_TO_TURN: Mapping[str, str] = MappingProxyType(
         "should_close_conversation": "should_close_conversation",
         "meta": "meta",
         "confidence": "confidence",
+        # DRF-2341 — признак «ветка утверждает выполненное» и подтверждение
+        # от источника. ПЕРЕНОСЯТСЯ: признак описывает ответ, который увидит
+        # человек, и сторож класса читает живой ответ. Не перенести — значит
+        # сделать признак невидимым за швом, то есть ровно та слепота, от
+        # которой этот признак и заводится.
+        "claims_done": "claims_done",
+        "claims_done_evidence": "claims_done_evidence",
+        # DRF-2435 — признак «это собственные данные человека» ПЕРЕНОСИТСЯ:
+        # его единственный читатель — исходящий гейт, и он стоит ЗА швом.
+        # Не перенести — значит оставить подмену ответа выгрузки в силе, то
+        # есть ровно тот дефект, от которого признак заводится.
+        "subject_own_data": "subject_own_data",
     }
 )
 
@@ -395,6 +418,9 @@ def _per_tenant_legacy_adapter(context: TurnContext) -> TurnReply:
         should_close_conversation=result.should_close_conversation,
         meta=result.meta,
         confidence=result.confidence,
+        claims_done=result.claims_done,
+        claims_done_evidence=result.claims_done_evidence,
+        subject_own_data=result.subject_own_data,
     )
 
 
@@ -467,4 +493,8 @@ def turn_reply_to_skill_result(reply: TurnReply) -> Any:
         # TurnReply keeps None as "no meta" — normalise at the boundary.
         meta=reply.meta or {},
         confidence=reply.confidence,
+        # DRF-2435 — обратный перенос обязателен по той же причине: обработчик
+        # читает признак у `SkillResult`, который получил ОТСЮДА, и без этой
+        # строки признак умирал бы на обратном пути так же тихо, как на прямом.
+        subject_own_data=reply.subject_own_data,
     )

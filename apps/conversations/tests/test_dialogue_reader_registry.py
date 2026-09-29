@@ -79,6 +79,12 @@ class _FakeRedis:
             def rpush(self, key, value):
                 self.ops.append(("rpush", key, value))
 
+            # DRF-2511: `append` читает уходящее тем же конвейером, поэтому
+            # модель Redis обязана знать `lrange`. Без него стенд краснел на
+            # отсутствии метода — то есть на себе, а не на предмете.
+            def lrange(self, key, start, end):
+                self.ops.append(("lrange", key, start, end))
+
             def ltrim(self, key, start, end):
                 self.ops.append(("ltrim", key, start, end))
 
@@ -86,12 +92,20 @@ class _FakeRedis:
                 self.ops.append(("expire", key, ttl))
 
             def execute(self):
+                out: list = []
                 for op in self.ops:
                     if op[0] == "rpush":
                         outer.store.setdefault(op[1], []).append(op[2])
+                        out.append(None)
                     elif op[0] == "ltrim":
                         outer.store[op[1]] = outer.store.get(op[1], [])[op[2] :]
+                        out.append(None)
+                    elif op[0] == "lrange":
+                        out.append(outer.lrange(op[1], op[2], op[3]))
+                    else:
+                        out.append(None)
                 self.ops = []
+                return out
 
         return _Pipe()
 
@@ -114,6 +128,8 @@ def fake_redis(monkeypatch) -> _FakeRedis:
     fake = _FakeRedis()
     monkeypatch.setattr(short_term, "_redis_client", lambda: fake)
     monkeypatch.setattr(pii_tokenizer, "_redis_client", lambda: fake)
+    # DRF-2214 — «забудь всё» снимает и состояние движка готовности (dre:state).
+    monkeypatch.setattr("apps.orchestrator.decision_readiness.state._redis_client", lambda: fake)
     return fake
 
 

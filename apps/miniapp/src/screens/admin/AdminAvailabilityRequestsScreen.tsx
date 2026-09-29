@@ -34,7 +34,6 @@
 import {
   useCallback,
   useEffect,
-  useMemo,
   useState,
 } from "react";
 import { useNavigate } from "react-router-dom";
@@ -43,6 +42,8 @@ import { AdminTabBar } from "../../components/AdminTabBar";
 import { Snackbar } from "../../components/Snackbar";
 import { StateError } from "../../components/StateError";
 import { ApiError } from "../../lib/api";
+import { countLabel, type MaybeCount } from "../../lib/format";
+import { REFUSAL_CANON } from "../../lib/refusal-canon";
 import {
   approveAvailabilityRequest,
   getAvailabilityRequests,
@@ -199,7 +200,6 @@ const EMPTY_APPROVE_STATE: ConfirmApproveState = {
 
 interface OverlapBannerState {
   dates: string[];
-  detail: string;
 }
 
 const MAX_REJECTION_REASON_LEN = 500;
@@ -215,8 +215,10 @@ export function AdminAvailabilityRequestsScreen({ me }: Props) {
   const [loading, setLoading] = useState<boolean>(false);
   const [loadingMore, setLoadingMore] = useState<boolean>(false);
   const [err, setErr] = useState<unknown>(null);
-  const [pendingCount, setPendingCount] = useState<number>(0);
-  const [decidedCount, setDecidedCount] = useState<number>(0);
+  // DRF-2366 — `null` значит «не удалось узнать». Умолчанием был ноль, и
+  // чипы показывали «Ожидают (0)» там, где счёт не состоялся.
+  const [pendingCount, setPendingCount] = useState<MaybeCount>(null);
+  const [decidedCount, setDecidedCount] = useState<MaybeCount>(null);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
   const [approveState, setApproveState] = useState<ConfirmApproveState>(
@@ -286,7 +288,7 @@ export function AdminAvailabilityRequestsScreen({ me }: Props) {
         } else {
           const msg =
             e instanceof ApiError
-              ? e.detail || "Не получилось загрузить ещё"
+              ? "Не получилось загрузить ещё"
               : "Сеть недоступна — попробуйте ещё раз";
           setToast(msg);
         }
@@ -312,8 +314,13 @@ export function AdminAvailabilityRequestsScreen({ me }: Props) {
       setPendingCount(pendingRes.items.length);
       setDecidedCount(decidedRes.items.length);
     } catch {
-      // Counts are best-effort — silent fail keeps the chips visible
-      // with stale or zero numbers; the main list path surfaces errors.
+      // Счётчики остаются best-effort: список несёт свои ошибки сам, и
+      // ронять экран из-за чипа незачем. Но неизвестность больше не
+      // выдаётся за ноль — чип показывает знак «значения нет» (DRF-2366).
+      if (!signal?.aborted) {
+        setPendingCount(null);
+        setDecidedCount(null);
+      }
     }
   }, []);
 
@@ -374,10 +381,9 @@ export function AdminAvailabilityRequestsScreen({ me }: Props) {
       if ("__conflict" in result) {
         // 409 — branch on slug.
         if (result.conflict === "overlap_conflict") {
-          setOverlapBanner({
-            dates: result.dates || [],
-            detail: result.detail,
-          });
+          // `detail` — нам в журнал, не на экран (DRF-2446, DRF-2577).
+          if (result.detail) console.warn(`[api-detail] 409 overlap_conflict: ${result.detail}`);
+          setOverlapBanner({ dates: result.dates || [] });
           hapticNotify("error");
           setApproveState(EMPTY_APPROVE_STATE);
           return;
@@ -400,15 +406,17 @@ export function AdminAvailabilityRequestsScreen({ me }: Props) {
           p.request_id === req.request_id ? { ...p, ...result } : p,
         );
       });
-      setPendingCount((c) => Math.max(0, c - 1));
-      setDecidedCount((c) => c + 1);
+      // Неизвестность не становится известной от того, что мы решили один
+      // запрос: `null` остаётся `null`, а не превращается в число.
+      setPendingCount((c) => (c === null ? null : Math.max(0, c - 1)));
+      setDecidedCount((c) => (c === null ? null : c + 1));
       setToast(`✓ Запрос ${req.master_name} одобрен`);
       setApproveState(EMPTY_APPROVE_STATE);
     } catch (e) {
       hapticNotify("error");
       const msg =
         e instanceof ApiError
-          ? e.detail || "Не получилось одобрить"
+          ? "Не получилось одобрить"
           : "Сеть недоступна — попробуйте ещё раз";
       setToast(msg);
       setApproveState((s) => ({ ...s, submitting: false }));
@@ -465,7 +473,9 @@ export function AdminAvailabilityRequestsScreen({ me }: Props) {
         setRejectState((s) => ({
           ...s,
           submitting: false,
-          errorMsg: result.detail || "Конфликт. Перезагрузите список.",
+          // DRF-2453: внутренняя причина у сервера по-английски и человеку
+          // не показывается; своя согласованная фраза уже есть.
+          errorMsg: "Конфликт. Перезагрузите список.",
         }));
         hapticNotify("error");
         return;
@@ -480,15 +490,17 @@ export function AdminAvailabilityRequestsScreen({ me }: Props) {
           p.request_id === req.request_id ? { ...p, ...result } : p,
         );
       });
-      setPendingCount((c) => Math.max(0, c - 1));
-      setDecidedCount((c) => c + 1);
+      // Неизвестность не становится известной от того, что мы решили один
+      // запрос: `null` остаётся `null`, а не превращается в число.
+      setPendingCount((c) => (c === null ? null : Math.max(0, c - 1)));
+      setDecidedCount((c) => (c === null ? null : c + 1));
       setToast(`✗ Запрос ${req.master_name} отклонён`);
       setRejectState(EMPTY_REJECT_STATE);
     } catch (e) {
       hapticNotify("error");
       const msg =
         e instanceof ApiError
-          ? e.detail || "Не получилось отклонить"
+          ? "Не получилось отклонить"
           : "Сеть недоступна — попробуйте ещё раз";
       // Preserve user's typed reason on failure.
       setRejectState((s) => ({
@@ -519,19 +531,6 @@ export function AdminAvailabilityRequestsScreen({ me }: Props) {
     );
   }
 
-  const reasonCount = useMemo(() => {
-    if (!items) return { pending: 0, decided: 0 };
-    let p = 0;
-    let d = 0;
-    for (const it of items) {
-      if (it.status === "pending") p += 1;
-      else d += 1;
-    }
-    return { pending: p, decided: d };
-  }, [items]);
-
-  void reasonCount; // memo retained for future inline counts
-
   return (
     <div className="screen">
       <header
@@ -553,12 +552,12 @@ export function AdminAvailabilityRequestsScreen({ me }: Props) {
           }}
         >
           Запросы на смену графика
-          {pendingCount > 0 && (
+          {(pendingCount === null || pendingCount > 0) && (
             <span
               className="admin-count-chip"
-              aria-label={`ожидают: ${pendingCount}`}
+              aria-label={`ожидают: ${countLabel(pendingCount)}`}
             >
-              {pendingCount}
+              {countLabel(pendingCount)}
             </span>
           )}
         </h1>
@@ -576,7 +575,7 @@ export function AdminAvailabilityRequestsScreen({ me }: Props) {
           className={`admin-filter-tabs__tab${filter === "pending" ? " admin-filter-tabs__tab--active" : ""}`}
           onClick={() => handleFilterChange("pending")}
         >
-          {`● Ожидают (${pendingCount})`}
+          {`● Ожидают (${countLabel(pendingCount)})`}
         </button>
         <button
           type="button"
@@ -585,7 +584,7 @@ export function AdminAvailabilityRequestsScreen({ me }: Props) {
           className={`admin-filter-tabs__tab${filter === "decided" ? " admin-filter-tabs__tab--active" : ""}`}
           onClick={() => handleFilterChange("decided")}
         >
-          {`Решены (${decidedCount})`}
+          {`Решены (${countLabel(decidedCount)})`}
         </button>
         <button
           type="button"
@@ -623,14 +622,11 @@ export function AdminAvailabilityRequestsScreen({ me }: Props) {
           role="alert"
           style={{ marginTop: "var(--s-3)" }}
         >
-          <p style={{ margin: 0 }}>
-            Не удалось одобрить — на этих датах уже есть другие изменения:
-            {" "}
-            {overlapBanner.dates.length > 0
-              ? overlapBanner.dates.join(", ")
-              : overlapBanner.detail}
-            .
-          </p>
+          {/* §6-кси п.5 (DRF-2577) — дословно. Даты — данные, не фраза. */}
+          <p style={{ margin: 0 }}>{REFUSAL_CANON.scheduleOverlap}</p>
+          {overlapBanner.dates.length > 0 && (
+            <p style={{ margin: "var(--s-1) 0 0" }}>{overlapBanner.dates.join(", ")}</p>
+          )}
           <div style={{ marginTop: "var(--s-2)" }}>
             <button
               type="button"
@@ -761,14 +757,7 @@ export function AdminAvailabilityRequestsScreen({ me }: Props) {
                           <button
                             type="button"
                             className="btn-link"
-                            style={{
-                              marginLeft: "var(--s-1)",
-                              background: "none",
-                              border: "none",
-                              padding: 0,
-                              color: "var(--c-accent)",
-                              cursor: "pointer",
-                            }}
+                            style={{ marginLeft: "var(--s-1)" }}
                             onClick={() => toggleExpanded(it.request_id)}
                           >
                             {isExpanded ? "свернуть" : "развернуть"}

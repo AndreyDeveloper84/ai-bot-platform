@@ -66,7 +66,8 @@ import {
   resolveCatalogPicks,
   type CatalogBrowseData,
 } from "../lib/customer-booking";
-import { closeApp, maxBridge } from "../lib/max-sdk";
+import { maxBridge, returnToChat } from "../lib/max-sdk";
+import { ReturnToChatHint } from "../components/ReturnToChatHint";
 import {
   NEARBY_BUTTON,
   NEARBY_DENIED,
@@ -197,6 +198,8 @@ export function CustomerCatalogScreen() {
       ?.scrollIntoView({ behavior: "smooth", block: "start" });
   const frame = !query ? absenceFrame(picksOutcome) : null;
   const insideMax = maxBridge() !== null;
+  // DRF-2268: «Написать Ayla» не молчит — «застрял» → подсказка.
+  const [chatStuck, setChatStuck] = useState(false);
 
   const picksWithWhy = useMemo((): ShelfEntry[] => {
     if (state.kind !== "ok") return [];
@@ -330,11 +333,16 @@ export function CustomerCatalogScreen() {
               {ACTION_SHOW_SERVICES}
             </button>
             {insideMax && (
-              <button type="button" className="btn-secondary" onClick={() => closeApp()}>
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => setChatStuck(returnToChat() === "stuck")}
+              >
                 {ACTION_WRITE_AYLA}
               </button>
             )}
           </div>
+          {chatStuck && <ReturnToChatHint />}
         </section>
       )}
 

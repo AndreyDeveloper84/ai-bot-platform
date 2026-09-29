@@ -73,6 +73,10 @@ from apps.integrations.ayla import (
     external_user_id_for,
     get_nutrition_client,
 )
+from apps.integrations.ayla.portion_provenance import (
+    portion_numbers_are_named,
+    portion_provenance_of,
+)
 from apps.orchestrator.ui.keyboards import (
     ENTRY_CALLBACK_RE,
     ENTRY_ID_RE,
@@ -173,9 +177,14 @@ def diary_consent_required_result(reply_kind: str) -> SkillResult:
 NUTRITION_OFF_TEXT = "Дневник еды пока недоступен — функция готовится."
 FIX_GRAMS_PROMPT = "Сколько граммов было на самом деле? Напиши число — пересчитаю запись."
 FIXED_TEXT = "Исправила: {dish} — теперь {kcal} ккал."
+#: DRF-2371 — та же правка, когда числа в записи нет: о числе молчим, а не
+#: подставляем ноль. Текст, называющий сам пробел, ждёт слова владельца.
+FIXED_WITHOUT_NUMBERS_TEXT = "Исправила: {dish}."
 DELETED_TEXT = "Убрала запись из дневника."
 DELETED_WITH_WINDOW_TEXT = "Убрала запись из дневника. Вернуть можно ещё {minutes}."
 RESTORED_TEXT = "Вернула в дневник: {dish} — {kcal} ккал."
+#: DRF-2371 — возврат записи без чисел: см. ``FIXED_WITHOUT_NUMBERS_TEXT``.
+RESTORED_WITHOUT_NUMBERS_TEXT = "Вернула в дневник: {dish}."
 RESTORE_EXPIRED_TEXT = "Уже не вернуть: окно возврата закрылось, запись удалена окончательно."
 ENTRY_GONE_TEXT = "Этой записи уже нет в дневнике."
 ENTRY_WATER_TEXT = "Эту запись ведёт учёт воды — её убирает отмена стакана."
@@ -421,7 +430,11 @@ def on_diary_tap(context: SkillContext) -> SkillResult:
     """«📔 В дневник» под «Это про еду?»: оценить исходную фразу — или спросить её."""
     bucket = _bucket(context.conversation)
     source = bucket.get("source") if bucket else None
-    parsed = parse_food_text(source) if isinstance(source, str) else None
+    # DRF-2287: фраза-вопрос («а торт в справочнике есть?») — не описание
+    # еды. Оценить её значило бы искать в справочнике весь вопрос и ответить
+    # «Не нашла «а есть вообще торт…»». Спрашиваем, что было, — как без фразы.
+    is_question = isinstance(source, str) and source.rstrip(" )!.…").endswith(("?", "？"))
+    parsed = parse_food_text(source) if isinstance(source, str) and not is_question else None
     if parsed is None:
         _write(context.conversation, {"expect_food": True, "at": _now_iso()})
         return SkillResult(reply_text=ASK_WHAT_TEXT, meta={"reply_kind": "food_text_ask"})
@@ -518,11 +531,23 @@ def render_estimate_card(estimate: Any) -> str:
         lines.append(f"Порция — примерно {grams} г, это оценка: граммов в сообщении не было.")
     else:
         lines.append(f"Порция — {grams} г, по твоим словам.")
-    macros = [f"Примерно {int(round(estimate.kcal))} ккал"]
-    for label, value in (("Б", estimate.protein_g), ("Ж", estimate.fat_g), ("У", estimate.carbs_g)):
-        if value is not None:
-            macros.append(f"{label} {int(round(value))}")
-    lines.append(" · ".join(macros) + " — оценка по справочнику блюд.")
+    # DRF-2371 — числа может не быть вовсе (блюда нет в справочнике). Тогда
+    # строки макросов нет: «Примерно 0 ккал» утверждало бы посчитанное.
+    # Текст, называющий сам пробел, ждёт слова владельца (OWNER_QUESTIONS);
+    # до ответа карточка о числах молчит, а дорога рядом — назвать граммы.
+    # DRF-2371 — см. `portion_provenance`: число называем только тогда,
+    # когда вес кто-то назвал; подставленное за названное не выдаём.
+    provenance = portion_provenance_of((getattr(estimate, "raw", None) or {}).get("portion_source"))
+    if estimate.kcal is not None and portion_numbers_are_named(provenance):
+        macros = [f"Примерно {int(round(estimate.kcal))} ккал"]
+        for label, value in (
+            ("Б", estimate.protein_g),
+            ("Ж", estimate.fat_g),
+            ("У", estimate.carbs_g),
+        ):
+            if value is not None:
+                macros.append(f"{label} {int(round(value))}")
+        lines.append(" · ".join(macros) + " — оценка по справочнику блюд.")
     lines.append("Записать в дневник?")
     return "\n".join(lines)
 
@@ -579,14 +604,27 @@ def _log(context: SkillContext, bucket: dict[str, Any]) -> SkillResult:
         "calories": log.calories,
         "entry_origin": origin,
     }
+    entry_chips: list[dict[str, str]] = []
     if log.log_id and ENTRY_ID_RE.match(log.log_id):
         # DRF-1838 — §109 шаг 7: сохранённую запись можно исправить или удалить.
-        action_data["buttons"] = food_text_logged_keyboard(log.log_id)
+        entry_chips = food_text_logged_keyboard(log.log_id)
+    # DRF-2267 (CD §72): и следующий шаг — «Мой дневник», «Меню».
+    action_data["buttons"] = [*entry_chips, *_after_entry_buttons()]
     return SkillResult(
-        reply_text=f"Записала в дневник: {log.dish_name} — {int(round(log.calories))} ккал.",
+        reply_text=(
+            # DRF-2371 — запись легла, числа нет: говорим о записи, а число
+            # не выдумываем (ноль читался бы как посчитанный).
+            f"Записала в дневник: {log.dish_name}."
+            if log.calories is None
+            else f"Записала в дневник: {log.dish_name} — {int(round(log.calories))} ккал."
+        ),
+        claims_done=True,
+        claims_done_evidence="ayla.meals.log:log_id",
         action_type="food_logged",
         action_data=action_data,
-        meta={"reply_kind": "food_text_logged"},
+        meta={
+            "reply_kind": "food_text_logged",
+        },
     )
 
 
@@ -654,23 +692,38 @@ def on_entry_callback(context: SkillContext, text: str) -> SkillResult:
 
 
 def _entry_refusal(exc: Exception, *, external_id: str, step: str) -> SkillResult:
+    # DRF-2267 (CD §72) — отказ про УЖЕ существующую запись: «Мой дневник»
+    # показывает, что в дневнике на самом деле, и «Меню».
+    way_on = {"buttons": _after_entry_buttons(), "button_columns": 1}
     if isinstance(exc, MealRestoreExpiredError):
         return SkillResult(
-            reply_text=RESTORE_EXPIRED_TEXT, meta={"reply_kind": "food_entry_restore_expired"}
+            reply_text=RESTORE_EXPIRED_TEXT,
+            action_data=way_on,
+            meta={"reply_kind": "food_entry_restore_expired"},
         )
     if isinstance(exc, MealNotFoundError):
-        return SkillResult(reply_text=ENTRY_GONE_TEXT, meta={"reply_kind": "food_entry_gone"})
+        return SkillResult(
+            reply_text=ENTRY_GONE_TEXT, action_data=way_on, meta={"reply_kind": "food_entry_gone"}
+        )
     if isinstance(exc, MealEditConflictError):
-        return SkillResult(reply_text=ENTRY_WATER_TEXT, meta={"reply_kind": "food_entry_water"})
+        return SkillResult(
+            reply_text=ENTRY_WATER_TEXT, action_data=way_on, meta={"reply_kind": "food_entry_water"}
+        )
     if isinstance(exc, NutritionUncertainOutcomeError):
         logger.warning("food_entry.%s.uncertain user=%s", step, external_id)
-        return SkillResult(reply_text=UNCERTAIN_TEXT, meta={"reply_kind": "food_entry_uncertain"})
+        return SkillResult(
+            reply_text=UNCERTAIN_TEXT,
+            action_data=way_on,
+            meta={"reply_kind": "food_entry_uncertain"},
+        )
     if isinstance(exc, NutritionUnavailableError):
         logger.warning("food_entry.%s.unavailable user=%s", step, external_id)
     else:
         logger.exception("food_entry.%s.error user=%s", step, external_id)
     return SkillResult(
-        reply_text=EDIT_UNAVAILABLE_TEXT, meta={"reply_kind": "food_entry_unavailable"}
+        reply_text=EDIT_UNAVAILABLE_TEXT,
+        action_data=way_on,
+        meta={"reply_kind": "food_entry_unavailable"},
     )
 
 
@@ -687,16 +740,41 @@ def _delete_entry(context: SkillContext, log_id: str) -> SkillResult:
         # Окна с провода нет — не обещаем ни фразой, ни чипом (fail-closed).
         return SkillResult(
             reply_text=DELETED_TEXT,
+            claims_done=True,
+            claims_done_evidence="ayla.meals.delete:2xx",
             action_type="food_entry_deleted",
-            action_data={"log_id": log_id},
-            meta={"reply_kind": "food_entry_deleted"},
+            action_data={"log_id": log_id, "buttons": _after_delete_buttons()},
+            meta={
+                "reply_kind": "food_entry_deleted",
+            },
         )
     return SkillResult(
         reply_text=DELETED_WITH_WINDOW_TEXT.format(minutes=_minutes_ru(minutes)),
+        claims_done=True,
+        claims_done_evidence="ayla.meals.delete:restore_window",
         action_type="food_entry_deleted",
-        action_data={"log_id": log_id, "buttons": food_text_deleted_keyboard(log_id)},
-        meta={"reply_kind": "food_entry_deleted"},
+        action_data={
+            "log_id": log_id,
+            "buttons": [*food_text_deleted_keyboard(log_id), *_after_delete_buttons()],
+        },
+        meta={
+            "reply_kind": "food_entry_deleted",
+        },
     )
+
+
+def _after_entry_buttons() -> list[dict[str, str]]:
+    """DRF-2267 (CD §72) — под записанным: «Мой дневник» (где дойдёт) и «Меню»."""
+    from apps.orchestrator.next_steps import after_entry_buttons
+
+    return after_entry_buttons()
+
+
+def _after_delete_buttons() -> list[dict[str, str]]:
+    """DRF-2267 (CD §72) — после удаления: записать заново и «Меню»."""
+    from apps.orchestrator.next_steps import log_food_button, menu_button
+
+    return [log_food_button(), menu_button()]
 
 
 def _restore_entry(context: SkillContext, log_id: str) -> SkillResult:
@@ -708,13 +786,24 @@ def _restore_entry(context: SkillContext, log_id: str) -> SkillResult:
     except NutritionAPIError as exc:
         return _entry_refusal(exc, external_id=external_id, step="restore")
     return SkillResult(
-        reply_text=RESTORED_TEXT.format(dish=log.dish_name, kcal=int(round(log.calories))),
+        reply_text=(
+            RESTORED_WITHOUT_NUMBERS_TEXT.format(dish=log.dish_name)
+            if log.calories is None
+            else RESTORED_TEXT.format(dish=log.dish_name, kcal=int(round(log.calories)))
+        ),
+        claims_done=True,
+        claims_done_evidence="ayla.meals.restore:log_id",
         action_type="food_entry_restored",
         action_data={
             "log_id": log_id,
-            "buttons": food_entry_keyboard(log_id, fixable=_entry_fixable(log)),
+            "buttons": [
+                *food_entry_keyboard(log_id, fixable=_entry_fixable(log)),
+                *_after_entry_buttons(),
+            ],
         },
-        meta={"reply_kind": "food_entry_restored"},
+        meta={
+            "reply_kind": "food_entry_restored",
+        },
     )
 
 
@@ -745,11 +834,22 @@ def _on_fix_grams_answer(context: SkillContext, bucket: dict[str, Any], text: st
         return _entry_refusal(exc, external_id=external_id, step="update")
     forget(context)
     return SkillResult(
-        reply_text=FIXED_TEXT.format(dish=log.dish_name, kcal=int(round(log.calories))),
+        reply_text=(
+            FIXED_WITHOUT_NUMBERS_TEXT.format(dish=log.dish_name)
+            if log.calories is None
+            else FIXED_TEXT.format(dish=log.dish_name, kcal=int(round(log.calories)))
+        ),
+        claims_done=True,
+        claims_done_evidence="ayla.meals.update:log_id",
         action_type="food_entry_updated",
         action_data={
             "log_id": log_id,
-            "buttons": food_entry_keyboard(log_id, fixable=_entry_fixable(log)),
+            "buttons": [
+                *food_entry_keyboard(log_id, fixable=_entry_fixable(log)),
+                *_after_entry_buttons(),
+            ],
         },
-        meta={"reply_kind": "food_entry_updated"},
+        meta={
+            "reply_kind": "food_entry_updated",
+        },
     )

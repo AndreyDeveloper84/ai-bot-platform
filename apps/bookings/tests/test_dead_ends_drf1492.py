@@ -45,7 +45,11 @@ from apps.conversations.models import Conversation
 from apps.identity.models import BotUser
 from apps.integrations.yclients import AvailableTime, BookingRecord
 from apps.skills.base import SkillContext
-from apps.skills.menu.matching import CALLBACK_MENU_BOOK, CALLBACK_MENU_MY_BOOKINGS
+from apps.skills.menu.matching import (
+    CALLBACK_MENU_BOOK,
+    CALLBACK_MENU_HELP,
+    CALLBACK_MENU_MY_BOOKINGS,
+)
 from apps.tenancy.context import tenant_scope
 from apps.tenancy.models import Tenant
 
@@ -326,7 +330,9 @@ class TestFunnelEndsAreNotDeadEnds:
             )
 
         assert result.reply_text == REPLY_BOOK_EXPIRED_UNCHANGED
-        assert "подберём слот" not in result.reply_text
+        # DRF-2593 (решение владельца 28.09, п.10): «подберём слот заново» стало
+        # «подберём время заново» — без этой правки узел проходил всегда.
+        assert "подберём время" not in result.reply_text
         assert _callbacks(result) == [CALLBACK_MENU_MY_BOOKINGS]
         assert client.cancel_calls == []
 
@@ -363,17 +369,18 @@ class TestFunnelEndsAreNotDeadEnds:
         assert client.create_calls == []  # no mutation on stale state
 
 
-class TestRepliesThatStayButtonless:
-    """The paired negatives (DRF-1411), each with its positive on the same
-    handler and the same fixtures.
+class TestAcknowledgementsNowCarryNextSteps:
+    """DRF-2267 — решение владельца CD §72 переворачивает прежнее (DRF-1411).
 
-    These are not oversights. «Подтверждено, ждём вас!» and «Передал
-    администратору, скоро напишут» name no action for the person to take —
-    the first is an acknowledgement, the second says somebody else will act —
-    and hanging a chip under them would invent a step nobody asked for.
+    Было: «Подтверждено, ждём вас!» и «Передал администратору, скоро напишут»
+    без кнопок — «подтверждение не называет следующего шага». Владелец 21.09:
+    после каждого завершённого действия — кнопки следующего шага и «Меню»,
+    иначе человек остаётся в чате «и не знает, что дальше». Здесь — «Мои
+    записи» (то, что он только что подтвердил или просил перенести) и «Меню».
+    Положительная пара на той же фикстуре — ветка отмены, как было.
     """
 
-    def test_reminder_confirm_and_reschedule_stay_plain(
+    def test_reminder_confirm_and_reschedule_offer_my_bookings_and_menu(
         self, tenant: Tenant, bot_user: BotUser, conversation: Conversation
     ) -> None:
         # Positive guard first: the SAME skill, on the same fixture shape,
@@ -395,17 +402,20 @@ class TestRepliesThatStayButtonless:
             )
         )
         assert confirmed.reply_text == REPLY_CONFIRMED
-        assert confirmed.action_data is None
+        assert _callbacks(confirmed) == [CALLBACK_MENU_MY_BOOKINGS, CALLBACK_MENU_HELP]
 
-        moved = BookingReminderCallbackSkill().handle(
-            _ctx(
-                f"cb:rem:reschedule:{_reminder(tenant, bot_user, yc_id='903').pk}",
-                bot_user=bot_user,
-                conversation=conversation,
+        # DRF-2338 — перенос передаёт человека оператору; тенант в области
+        # видимости, как его открывает цикл потребителя в бою.
+        with tenant_scope(tenant):
+            moved = BookingReminderCallbackSkill().handle(
+                _ctx(
+                    f"cb:rem:reschedule:{_reminder(tenant, bot_user, yc_id='903').pk}",
+                    bot_user=bot_user,
+                    conversation=conversation,
+                )
             )
-        )
         assert moved.reply_text == REPLY_RESCHEDULE
-        assert moved.action_data is None
+        assert _callbacks(moved) == [CALLBACK_MENU_MY_BOOKINGS, CALLBACK_MENU_HELP]
 
 
 class TestChipsLandOnBothSurfaces:

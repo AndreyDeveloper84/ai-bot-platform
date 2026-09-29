@@ -11,6 +11,7 @@
  * (per spec §10 Appendix ED Mode).
  */
 
+import { DiaryEntryItem } from "../components/DiaryEntryPhoto";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
@@ -32,12 +33,14 @@ import {
   type FoodDiaryEntry,
   DIARY_CONSENT_REQUIRED_TEXT,
   DIARY_OFF_TEXT,
+  pfcLine,
 } from "../lib/customer-wellness";
 import { ApiError } from "../lib/api";
 import { minutesRu, restoreWindowMinutesLeft } from "../lib/restore-window";
 import { saveMealFromEntry } from "../lib/saved-meals";
 import { useScreenBack } from "../hooks/useScreenBack";
 import { screenRoot } from "../lib/screen-back";
+import { CustomerAvatarEntry } from "../components/CustomerAvatarEntry";
 import { CustomerTabBar } from "../components/CustomerTabBar";
 import { FAVORITES_COPY, FAVORITES_ROUTE, favoritesRefusalText } from "./FoodScannerFavoritesScreen";
 import { WEEK_COPY, WEEK_ROUTE } from "./FoodScannerWeekScreen";
@@ -249,6 +252,10 @@ export function FoodScannerDiaryScreen() {
     <div className="food-scanner-screen food-scanner-screen--tab-root">
       <header className="records-screen__header">
         <h1 className="records-screen__title">Питание</h1>
+        {/* Вход в профиль — §77 п.60. Стоит на всех экранах нижней
+            панели: вход, который есть не везде, читается как «иногда
+            можно». Имя компонент берёт сам — у этого экрана его нет. */}
+        <CustomerAvatarEntry />
       </header>
 
       <main className="food-scanner-screen__main">
@@ -397,7 +404,7 @@ function DiaryReady({
             </h2>
             <ul className="food-scanner-diary__list">
               {items.map((entry) => (
-                <li key={entry.id} className="food-scanner-diary__entry">
+                <DiaryEntryItem key={entry.id} entry={entry}>
                   <div className="food-scanner-diary__entry-main">
                     <span className="food-scanner-diary__entry-time">
                       {formatTimeShort(entry.logged_at)}
@@ -406,7 +413,9 @@ function DiaryReady({
                       {entry.dish_name}
                     </span>
                   </div>
-                  {showNumbers && (
+                  {/* DRF-2371 — без числа строки нет: «~ ккал» и «~0 ккал»
+                      оба говорят о расчёте, которого не было. */}
+                  {showNumbers && entry.calories != null && (
                     <span className="food-scanner-diary__entry-cal">
                       ~{entry.calories} ккал
                     </span>
@@ -454,7 +463,7 @@ function DiaryReady({
                       onCancel={() => setEditing(null)}
                     />
                   )}
-                </li>
+                </DiaryEntryItem>
               ))}
             </ul>
           </section>
@@ -483,14 +492,9 @@ function DiaryReady({
           {/* БЖУ — строка целевая: живёт и гаснет вместе с целью, ровно
               как на дашборде. Считать его здесь не из чего и незачем:
               настоящее приходит с каждой записью. */}
-          {pfc && (
-            <p className="food-scanner-saved__macros">
-              Б {pfc.protein_g}
-              {pfc.protein_target_g !== undefined
-                ? ` / ${pfc.protein_target_g}`
-                : ""}{" "}
-              · Ж {pfc.fat_g} · У {pfc.carbs_g} г
-            </p>
+          {/* DRF-2288 (№41): та же строка, что на Главной, — одна функция. */}
+          {pfc && pfcLine(pfc, eaten) !== null && (
+            <p className="food-scanner-saved__macros">{pfcLine(pfc, eaten)}</p>
           )}
         </section>
       )}

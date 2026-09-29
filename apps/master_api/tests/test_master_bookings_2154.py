@@ -51,7 +51,9 @@ from apps.integrations.ayla.salon_client import (
 from apps.master_api.pii import FORBIDDEN_PII_KEYS, find_forbidden_pii
 from apps.master_api.services import bookings as mod
 from apps.master_api.tests.conftest import init_data_header, make_master
+from apps.tenancy.timezones import salon_zone
 from apps.tenancy.models import Tenant
+from tests.support.pii_asserts import visible_text
 
 pytestmark = pytest.mark.django_db
 
@@ -103,6 +105,8 @@ def _visit(
         start_at=start,
         end_at=end if end is not None else start + timedelta(minutes=minutes),
         status=status,
+        # DRF-2462: завершённый визит засчитывается, только если закрыл человек.
+        completed_by="master" if status == "completed" else "",
         bot_user=bot_user,
         service_id=service.ayla_service_id if service else None,
     )
@@ -204,7 +208,9 @@ def _assert_no_customer_phone(resp) -> None:
     assert find_forbidden_pii(resp.json()) == []  # empty-assert-ok: тело проверено вызывающим
     assert CUSTOMER_PHONE not in raw
     assert CUSTOMER_PHONE_DIGITS not in raw
-    assert "5544" not in raw
+    assert "5544" not in visible_text(
+        resp.json()
+    )  # хвост — в видимом тексте: в raw есть случайные id (DRF-2278)
 
 
 # ─── h1: детали и временные состояния ───────────────────────────────────────
@@ -351,7 +357,7 @@ class TestClientInDetail:
         row = _visit(accepted_master, start=now + timedelta(hours=1), bot_user=customer)
         body = _get_detail(client, row.appointment_id).json()
         assert body["client"]["name_initial"] == "Анна П."
-        expected = last.start_at.astimezone(mod.get_tenant_tz(tenant)).date().isoformat()
+        expected = last.start_at.astimezone(salon_zone(tenant)).date().isoformat()
         assert body["client"]["last_visit_date"] == expected
 
     def test_a_visit_with_another_master_does_not_count(
@@ -612,6 +618,25 @@ class TestBookingSlots:
         }
         assert stub.calls[0]["specialist_id"] == str(accepted_master.catalog_specialist_id)
 
+    def test_the_timezone_field_names_the_zone_the_salon_actually_uses(
+        self, client, tenant, bot_user, accepted_master, bridged_service, stub_slots, caplog
+    ):
+        """DRF-2595: ``"timezone"`` — утверждение контракта, на него опирается
+        чужой код. Настоящий пояс отдаётся как есть; битый — тем, которым салон
+        реально живёт (запасной МСК), а не битой строкой и не UTC, и с журналом."""
+        stub_slots(_StubSlots(slots=[_slot("10:00", "2026-10-21T10:00:00+03:00")]))
+        type(tenant).objects.filter(pk=tenant.pk).update(timezone="Asia/Yekaterinburg")
+        resp = self._get(client, date="2026-10-21", service_id=bridged_service.id)
+        assert resp.status_code == 200, resp.content
+        assert resp.json()["timezone"] == "Asia/Yekaterinburg"
+
+        type(tenant).objects.filter(pk=tenant.pk).update(timezone="Not/AZone")
+        with caplog.at_level("WARNING"):
+            resp = self._get(client, date="2026-10-21", service_id=bridged_service.id)
+        assert resp.status_code == 200, resp.content
+        assert resp.json()["timezone"] == "Europe/Moscow"
+        assert any("tenancy.bad_tenant_tz" in r.getMessage() for r in caplog.records)
+
     def test_unreachable_schedule_is_503_never_an_empty_list(
         self, client, tenant, bot_user, accepted_master, bridged_service, stub_slots
     ):
@@ -670,7 +695,7 @@ class TestCustomerSearch:
         )
         resp = _search(client, "Анна")
         assert resp.status_code == 200, resp.content
-        expected_date = last.start_at.astimezone(mod.get_tenant_tz(tenant)).date().isoformat()
+        expected_date = last.start_at.astimezone(salon_zone(tenant)).date().isoformat()
         assert resp.json()["results"] == [
             {
                 "id": str(CUSTOMER_AYLA_ID),
@@ -720,7 +745,7 @@ class TestCustomerSearch:
         stub_salon(_StubSalon(rows=[{"id": str(CUSTOMER_AYLA_ID), "name": "Анна Петрова"}]))
         results = _search(client, "Анна").json()["results"]
         assert results[0]["name"] == "Анна П."
-        expected = later.start_at.astimezone(mod.get_tenant_tz(tenant)).date().isoformat()
+        expected = later.start_at.astimezone(salon_zone(tenant)).date().isoformat()
         assert results[0]["last_visit_date"] == expected
 
     def test_a_visit_with_another_master_is_a_new_client_here(
@@ -855,12 +880,13 @@ class TestSoloMaster:
             start_at=_now() - timedelta(days=9),
             end_at=_now() - timedelta(days=9) + timedelta(hours=1),
             status="completed",
+            completed_by="master",  # DRF-2462: «была» — визит, закрытый человеком
             bot_user=anna,
         )
         stub_salon(_StubSalon(rows=[{"id": str(CUSTOMER_AYLA_ID), "name": "Анна Петрова"}]))
         results = _search(client, "Анна", uid="55555").json()["results"]
         assert results[0]["name"] == "Анна П."
-        expected = done.start_at.astimezone(mod.get_tenant_tz(tenant)).date().isoformat()
+        expected = done.start_at.astimezone(salon_zone(tenant)).date().isoformat()
         assert results[0]["last_visit_date"] == expected
 
 

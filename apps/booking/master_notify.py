@@ -90,7 +90,6 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Final
 from uuid import UUID
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from django.db import transaction
 from django.db.models import Q
@@ -102,6 +101,7 @@ from apps.channels.max.addressing import MaxAddress, manager_address
 from apps.handoff.notify import send_max_notification
 from apps.tenancy.context import tenant_scope
 from apps.tenancy.models import Tenant
+from apps.tenancy.timezones import salon_zone
 
 logger = logging.getLogger(__name__)
 
@@ -114,8 +114,6 @@ SALON_STREAM = "max_salon"
 # message is still worth sending without a service name — the time and
 # the master usually identify the slot for the salon.
 _UNKNOWN = "—"
-
-_DEFAULT_TZ = "Europe/Moscow"
 
 # ``RemoteBookingProxy.Source`` values (event-contract.md §3.1), plus a
 # few strings the pilot producer emits. Unknown values pass through
@@ -264,22 +262,6 @@ def resolve_salon_target(*, tenant: Tenant) -> NotifyTarget:
     return NotifyTarget(addresses=(), channel="none")
 
 
-def _tenant_tz(tenant: Tenant) -> ZoneInfo:
-    """Tenant-local timezone, falling back to MSK then UTC.
-
-    A booking rendered in the wrong timezone is worse than no message:
-    the salon would prepare for the wrong hour. An invalid tenant value
-    therefore degrades to the pilot's real timezone rather than to UTC.
-    """
-
-    for candidate in (getattr(tenant, "timezone", "") or "", _DEFAULT_TZ):
-        try:
-            return ZoneInfo(candidate)
-        except (ZoneInfoNotFoundError, ValueError):
-            continue
-    return ZoneInfo("UTC")
-
-
 def source_label(raw_source: str) -> str:
     """Human-readable booking source; unknown values pass through."""
 
@@ -305,7 +287,7 @@ def build_booking_created_notification(
     single row to support; it is an opaque Ayla UUID, not client PII.
     """
 
-    when = start_at.astimezone(_tenant_tz(tenant)).strftime("%d.%m.%Y в %H:%M")
+    when = start_at.astimezone(salon_zone(tenant)).strftime("%d.%m.%Y в %H:%M")
     lines = [
         "🆕 Новая запись",
         f"Салон: {tenant.name}",
@@ -334,7 +316,7 @@ def build_specialist_booking_notification(
     client data of any kind.
     """
 
-    when = start_at.astimezone(_tenant_tz(tenant)).strftime("%d.%m.%Y в %H:%M")
+    when = start_at.astimezone(salon_zone(tenant)).strftime("%d.%m.%Y в %H:%M")
     lines = [
         "🆕 У вас новая запись",
         f"Салон: {tenant.name}",

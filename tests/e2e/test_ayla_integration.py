@@ -345,3 +345,46 @@ class TestRecommendationsClient:
             )
         else:
             assert isinstance(body, dict)
+
+
+# ─── C5.1 personal-data export sections (DRF-2307) ────────────────────────
+
+
+@_needs_internal_token
+@pytest.mark.skipif(
+    not (_PROFILE_USER_ID and _PROFILE_EXTERNAL_USER_ID),
+    reason=(
+        "Set AYLA_E2E_PROFILE_USER_ID and AYLA_E2E_PROFILE_EXTERNAL_USER_ID "
+        "(the same subject pair as the profile round-trip) to read C5.1."
+    ),
+)
+class TestPersonalDataExportSections:
+    """DRF-2307 — the other half of ``test_catalog_sections_declared_2307``.
+
+    The static guard proves the bot's mirror of C5.1 keys
+    (``export_coverage.CATALOG_EXPORT_SECTIONS``) is declared everywhere; only
+    the real catalog can prove the mirror matches it. A section the catalog
+    added and the mirror lacks — or one the mirror keeps after the catalog
+    dropped it — turns this red. Each read writes one access-journal row on
+    the catalog side (``PersonalDataAccessLog``, operation ``export``) for the
+    staging subject — the same cost as any C5.1 read.
+    """
+
+    def test_the_real_export_carries_exactly_the_mirrored_sections(self) -> None:
+        from apps.identity.export_coverage import CATALOG_EXPORT_SECTIONS
+        from apps.integrations.ayla.personal_context_client import PersonalContextHttpClient
+
+        assert _PROFILE_USER_ID and _PROFILE_EXTERNAL_USER_ID  # narrowed for mypy
+        client = PersonalContextHttpClient()
+        try:
+            payload = client.get_personal_data_export(
+                ayla_user_id=_PROFILE_USER_ID, external_user_id=_PROFILE_EXTERNAL_USER_ID
+            )
+        finally:
+            client.close()
+
+        assert "profile" in payload  # наличие: это ответ C5.1
+        assert set(payload) == set(CATALOG_EXPORT_SECTIONS), (
+            sorted(set(payload) - set(CATALOG_EXPORT_SECTIONS)),
+            sorted(set(CATALOG_EXPORT_SECTIONS) - set(payload)),
+        )

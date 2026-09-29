@@ -97,15 +97,39 @@ _PROMISES = (
     r"(?i)\b(бесплатно\s+переделаем|сделаем\s+скидку|дам\s+скидку|дадим\s+скидку)\b",
 )
 
+#: DRF-2435 — граница шестнадцатеричного соседства.
+#:
+#: Телефонный шаблон разрешает между группами цифр дефис и пробельные, поэтому
+#: он ловил цифры ВНУТРИ машинных идентификаторов: UUID — это hex-группы через
+#: дефис, sha256 — 64 hex-символа. Замер: 4 ложных телефона на 4094 случайных
+#: UUID'а (0.098%), 80 на 20000 sha256-дайджестов (0.40%). Живое следствие: ответ
+#: выгрузки личных данных, который состоит из UUID'ов и хэшей, подменялся
+#: рекомендательной фразой примерно раз в 250 запросов — то есть запрос доступа
+#: по ст. 14 152-ФЗ отвечался продажей, а журнал записывал это как «заблокировали
+#: утечку контакта».
+#:
+#: Что делает граница: совпадение не считается номером, если оно ПРИМЫКАЕТ к
+#: шестнадцатеричному символу (или к дефису слева, как внутри UUID). Настоящий
+#: номер в человеческом тексте стоит рядом с пробелом, началом строки или
+#: знаком препинания, а не приклеен к `bd2cd`.
+#:
+#: Цена, названная честно: номер, СПЕЦИАЛЬНО вписанный в hex-подобную обёртку
+#: (`…-4444-89991234567a`), больше не блокируется. Это неустранимо для любого
+#: правила «цифры внутри hex — не телефон»; выбор здесь между «ломаем выгрузку
+#: каждому 250-му» и «крафт в чужом поле проходит». Второе ловится глазами
+#: (`master.name` проверяется человеком), первое не ловилось три года.
+_HEX_LEFT = r"(?<![0-9a-fA-F\-])"
+_HEX_RIGHT = r"(?![0-9a-fA-F])"
+
 #: Contact details have no business in these replies.
 _CONTACTS = (
-    r"(?<!\d)(\+7|8)[\s\-(]*\d{3}[\s\-)]*\d{3}[\s\-]*\d{2}[\s\-]*\d{2}(?!\d)",
+    _HEX_LEFT + r"(\+7|8)[\s\-(]*\d{3}[\s\-)]*\d{3}[\s\-]*\d{2}[\s\-]*\d{2}" + _HEX_RIGHT,
     r"(?i)[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}",
 )
 
 #: A four-digit tail, written the way a truncated phone actually comes out:
 #: "4567", "45 67", "45-67". Never matched bare — only behind a marker below.
-_TAIL = r"(?<!\d)\d{2}[\s\-]?\d{2}(?!\d)"
+_TAIL = _HEX_LEFT + r"\d{2}[\s\-]?\d{2}" + _HEX_RIGHT
 
 #: What may sit between the marker and the tail: at most one possessive-ish
 #: word («номер телефона …», «телефон клиентки …») and a separator. The gap
@@ -285,6 +309,29 @@ REPLACEMENT_TEXT = (
 #: to survive exactly this gap.
 OFFERED_CONTINUATIONS: tuple[str, ...] = ("Посмотреть услуги", "Уточнить запрос")
 
+#: DRF-2267 (CD §72) — подпись кнопки под подменённым ответом. «Посмотреть
+#: услуги» — первое продолжение §128, у него есть ветка: та же фраза, что у
+#: «Подобрать услугу». «Уточнить запрос» кнопкой не становится — ветки, которая
+#: бы на неё ответила, нет (DRF-1492); его место — в тексте.
+REPLACEMENT_SERVICES_LABEL = OFFERED_CONTINUATIONS[0]
+
+
+def replacement_action_data() -> dict:
+    """Клавиатура под подменённым ответом: «Посмотреть услуги» и «Меню».
+
+    Карточки черновика по-прежнему уходят вместе с текстом (ответ ЗАМЕНЯЕТСЯ,
+    а не правится); вместо них — продолжения, которые текст называет.
+    """
+    from apps.orchestrator.next_steps import (
+        discover_button,
+        menu_button,
+        next_step_action_data,
+    )
+
+    services = {**discover_button(), "label": REPLACEMENT_SERVICES_LABEL}
+    return next_step_action_data(services, menu_button())
+
+
 #: Category recorded when the check itself could not run. Deliberately not one
 #: of the content labels: an operator has to be able to separate "the draft
 #: matched a banned shape" from "we never got to look at the draft". The first
@@ -294,6 +341,12 @@ OFFERED_CONTINUATIONS: tuple[str, ...] = ("Посмотреть услуги", "
 CHECK_FAILED_CATEGORY = "check_failed"
 
 
+#: Категория, которую снимает признак «это собственные данные человека».
+#: Ровно одна: остальные классы к своим данным относятся так же, как к любому
+#: другому тексту, и их послабление было бы не починкой, а дырой.
+_OWN_DATA_EXEMPT = ("contact",)
+
+
 @dataclass(frozen=True)
 class OutboundVerdict:
     """Whether the drafted reply may be sent, and what to send instead."""
@@ -301,18 +354,46 @@ class OutboundVerdict:
     allowed: bool
     text: str
     categories: tuple[str, ...] = field(default_factory=tuple)
+    #: Категории, которые ЗАБЛОКИРОВАЛИ БЫ ответ, но сняты признаком «это
+    #: собственные данные человека» (DRF-2435). Пусто в обычном случае. Нужны
+    #: журналу: «заблокировали чужой контакт» и «это свои данные, пропускаем» —
+    #: разные записи, и различать их обязан тот, кто читает журнал потом.
+    own_data_categories: tuple[str, ...] = field(default_factory=tuple)
 
     @property
     def blocked(self) -> bool:
         return not self.allowed
 
 
-def evaluate_outbound(text: str) -> OutboundVerdict:
+def evaluate_outbound(text: str, *, subject_own_data: bool = False) -> OutboundVerdict:
     """Check a drafted reply before it reaches a person.
 
     Returns the original text when clean, and :data:`REPLACEMENT_TEXT` when
     not — whether "not" means a category matched or the check could not run
     at all. Never raises: a crash here must not propagate into the turn.
+
+    ``subject_own_data`` (DRF-2435) — этот черновик есть собственные данные
+    человека, отданные ему по его же просьбе (ответ выгрузки по ст. 14
+    152-ФЗ). Тогда класс ``contact`` к нему не применяется: его телефон в его
+    выгрузке — не утечка чужого контакта, а предмет запроса.
+
+    Признак приходит ОТ МЕСТА, ГДЕ АРХИВ СОБИРАЕТСЯ
+    (``SkillResult.subject_own_data``), и не выводится из формы текста.
+    Угадывание по форме было бы тем же шаблоном с другой стороны и ошибалось
+    бы так же — этот лист начался именно с такой ошибки.
+
+    Послабление узкое по КЛАССУ и по ОБЛАСТИ: снимается ровно ``contact`` (см.
+    ``_OWN_DATA_EXEMPT``) и только для этого черновика. Прочие классы
+    (медицина, обещания, давление, планирование) применяются как ко всякому
+    другому тексту, и ``check_failed`` по-прежнему закрывается наглухо.
+
+    Чего оно НЕ делает узким: внутри помеченного черновика проходит ЛЮБОЙ
+    номер, включая написанный человекочитаемо и включая чужой. Это названо
+    решением, а не побочным эффектом — см.
+    ``TestWhatThePersonGetsInTheirOwnArchive``: прятать номер в собственной
+    выгрузке значило бы повторить тот же дефект шире, а остаточный случай
+    (номер третьего лица, который человек сам переписал в чат) вынесен
+    владельцу. Если он решит прятать — правка одной строки здесь.
     """
 
     body = text or ""
@@ -323,9 +404,13 @@ def evaluate_outbound(text: str) -> OutboundVerdict:
         return OutboundVerdict(allowed=True, text=body)
 
     hits: list[str] = []
+    exempt: list[str] = []
     try:
         for label, patterns in _CATEGORIES:
             if any(re.search(p, body) for p in patterns):
+                if subject_own_data and label in _OWN_DATA_EXEMPT:
+                    exempt.append(label)
+                    continue
                 hits.append(label)
     except Exception:  # noqa: BLE001 — a crash must not raise into the turn
         # The check did not run, so nothing is known about this draft.
@@ -357,12 +442,26 @@ def evaluate_outbound(text: str) -> OutboundVerdict:
         )
 
     if not hits:
-        return OutboundVerdict(allowed=True, text=body)
+        # Запись о пропуске своих данных пишет ШЛЮЗ (`safety.gate`), а не этот
+        # модуль: у него есть `surface` и `trace`, и одно имя события должно
+        # иметь ровно один смысл. Два писателя давали «два раза на пропуск,
+        # один раз на пропуск-при-блокировке, один на прямой вызов» — три
+        # разных значения одного счётчика (найдено ревью DRF-2435).
+        return OutboundVerdict(
+            allowed=True,
+            text=body,
+            own_data_categories=tuple(exempt),
+        )
 
     # Category only. Logging the sentence would copy the thing we just
     # decided not to show anyone.
     logger.warning("safety.outbound.blocked categories=%s len=%d", ",".join(hits), len(body))
-    return OutboundVerdict(allowed=False, text=REPLACEMENT_TEXT, categories=tuple(hits))
+    return OutboundVerdict(
+        allowed=False,
+        text=REPLACEMENT_TEXT,
+        categories=tuple(hits),
+        own_data_categories=tuple(exempt),
+    )
 
 
 # --------------------------------------------------------------------------- #

@@ -63,6 +63,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+import lint_parse  # DRF-2538: нечитаемый вход — отдельный исход, не ноль
+
 #: Имена, под которыми вердикт безопасности ездит в словарях и атрибутах.
 SAFETY_KEYS = frozenset(
     {
@@ -151,9 +153,8 @@ def _get_default(node: ast.Call) -> ast.AST | None:
 
 def scan_source(source: str, *, path: str) -> list[Violation]:
     out: list[Violation] = []
-    try:
-        tree = ast.parse(source)
-    except SyntaxError:
+    tree = lint_parse.parse_or_report(source, path)
+    if tree is None:
         return out
     for node in ast.walk(tree):
         # `payload.get("safety") or NORMAL`, `state.safety or NORMAL`
@@ -202,7 +203,7 @@ def scan_file(path: Path, *, repo_root: Path) -> list[Violation]:
     return scan_source(path.read_text(encoding="utf-8"), path=rel)
 
 
-def main(argv: list[str]) -> int:
+def _run(argv: list[str]) -> int:
     if len(argv) < 2:
         print("usage: safety_default_guard.py <path> [<path> ...]", file=sys.stderr)
         return 2
@@ -217,8 +218,25 @@ def main(argv: list[str]) -> int:
             found.extend(scan_file(f, repo_root=repo_root))
     for v in found:
         print(v.format())
-    print(f"safety_default_guard: {len(found)} violation(s) in {scanned} file(s)")
+    # DRF-2538: охват — разобранные файлы, а не переданные. Прежнее «in {scanned}»
+    # засчитывало нечитаемые как просмотренные: 2224 → 2227 на трёх подложенных.
+    # Остаток «переданные − разобранные − неразобранные» — файлы из ALLOWED,
+    # их сторож не читает намеренно; печатается, чтобы число сходилось.
+    parsed = lint_parse.parsed_count()
+    unparsed = lint_parse.unparsed_count()
+    print(
+        f"safety_default_guard: {len(found)} violation(s) in {parsed} parsed file(s) "
+        f"of {scanned} (unparsed {unparsed}, allow-listed {scanned - parsed - unparsed})"
+    )
     return 1 if found else 0
+
+
+def main(argv: list[str]) -> int:
+    lint_parse.reset()
+    code = _run(argv)
+    if code not in (0, 1):  # ошибка вызова — охват не о чем печатать
+        return code
+    return max(code, lint_parse.finish("safety_default_guard"))
 
 
 if __name__ == "__main__":

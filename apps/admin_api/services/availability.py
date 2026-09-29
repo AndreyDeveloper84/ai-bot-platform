@@ -78,7 +78,7 @@ from apps.events.vocabulary import (
     ADMIN_AVAILABILITY_APPROVED,
     ADMIN_AVAILABILITY_REJECTED,
 )
-from apps.master_api.services.schedule import get_tenant_tz
+from apps.tenancy.timezones import salon_zone
 from apps.scheduling.models import ScheduleChangeRequest, ScheduleException
 
 logger = logging.getLogger(__name__)
@@ -228,15 +228,31 @@ class AvailabilityDecisionError(Exception):
 
     Attributes:
       slug: stable error slug for the JSON envelope.
-      detail: human-readable explanation.
+      detail: internal explanation — for the log, not for a person.
       status: HTTP status code the view should return.
+      details: machine facts for the caller (DRF-2453).
+
+    ``details`` exists because the screen used to MINE ``detail`` for data:
+    conflicting dates rode inside the English sentence and the client
+    pulled them out with a regular expression (``parseDatesFromDetail``).
+    A sentence is not a data channel — rephrase it and the dates vanish
+    with nobody noticing. The shelf is not new: ``views_staff_role.py``
+    already answers with ``details={"hint": ...}``, and the client has
+    declared ``details`` since DRF-2273.
     """
 
-    def __init__(self, slug: str, detail: str, status: int = 400) -> None:
+    def __init__(
+        self,
+        slug: str,
+        detail: str,
+        status: int = 400,
+        details: dict[str, Any] | None = None,
+    ) -> None:
         super().__init__(detail)
         self.slug = slug
         self.detail = detail
         self.status = status
+        self.details = details or {}
 
 
 # --- public helpers -------------------------------------------------------
@@ -678,7 +694,7 @@ def approve_availability_request(
             raise AvailabilityDecisionError("not_found", "master not found", status=404) from exc
 
         master: CatalogMaster = req.master
-        tz = get_tenant_tz(master.tenant)
+        tz = salon_zone(master.tenant)
         dates = _covered_dates(req.requested_start, req.requested_end, tz)
 
         # Overlap re-check: any pre-existing ScheduleException on one of
@@ -705,6 +721,7 @@ def approve_availability_request(
                 "overlap_conflict",
                 f"existing exceptions conflict on dates: {sorted(conflicting_dates)}",
                 status=409,
+                details={"dates": sorted(conflicting_dates)},
             )
 
         # DRF-1062 — Ayla owns the schedule, so the approval lands there
@@ -912,7 +929,7 @@ def reject_availability_request(
         # Human date range for the DM. If both endpoints are present,
         # compute covered dates; else fall back to a generic phrase.
         if req.requested_start and req.requested_end:
-            tz = get_tenant_tz(master.tenant)
+            tz = salon_zone(master.tenant)
             dates = _covered_dates(req.requested_start, req.requested_end, tz)
             date_range_human = _format_date_range_human(dates[0], dates[-1])
         else:

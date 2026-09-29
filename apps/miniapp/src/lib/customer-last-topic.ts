@@ -13,6 +13,7 @@
  * «темы нет»: блок нейтральный, Главная от него не зависит.
  */
 import { request } from "./api";
+import { rememberChatLink } from "./max-sdk";
 
 export interface LastTopic {
   /** Первые знаки последнего ответа Ayla, обрезка по слову с «…». */
@@ -35,6 +36,8 @@ export async function getLastTopicAndChatLink(): Promise<LastTopicAndChat> {
   const topic = res.last_topic;
   const clean = !topic || typeof topic.text !== "string" || !topic.text.trim() ? null : topic;
   const link = typeof res.chat_link === "string" && res.chat_link.trim() ? res.chat_link : null;
+  // DRF-2268: ссылку знают и экраны после Главной — через returnToChat().
+  rememberChatLink(link);
   return { topic: clean, chatLink: link };
 }
 

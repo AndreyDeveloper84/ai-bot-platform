@@ -29,12 +29,14 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { StudioCallout, notConnectedText } from "../components/StudioCallout";
 import { useNavigate } from "react-router-dom";
 
 import { SystemState } from "../components/master/SystemState";
 import { ApiError } from "../lib/api";
 import {
   createServiceLocation,
+  getMasterMe,
   getServiceLocations,
   patchServiceLocation,
   suggestAddress,
@@ -47,6 +49,15 @@ import {
 } from "../lib/master-api";
 
 export const PLACE_ROUTE = "/solo/place";
+
+/**
+ * Решение владельца 28.09 (слова, п.6; DRF-2581): для салонного мастера место
+ * работы — не его настройка; показываются название салона и адрес без
+ * действия редактирования, пояснение — дословно эта фраза. В поддержку за
+ * сменой места не отправлять. Одна строка на все поверхности, где место
+ * салонного мастера нуждается в пояснении (экраны 01, 05, 08).
+ */
+export const SALON_PLACE_TEXT = "Место работы определяется салоном.";
 export const NOTE_MAX = 200;
 
 export const PLACE_COPY = {
@@ -88,12 +99,14 @@ export const PLACE_COPY = {
   edit: "Изменить",
   done: "Готово",
   saveError: "Не получилось сохранить.",
-  notLinked: "Профиль ещё не связан с каталогом — сохранить место пока некуда.",
-  salonManaged: "Место работы мастера салона ведёт владелец салона.",
+  // Оба отказа этого экрана — про одно и то же состояние, поэтому и
+  // говорят теперь одной первой половиной (названо строкой в PR).
+  notLinked: notConnectedText("сохранить место некуда"),
+  salonManaged: SALON_PLACE_TEXT,
   refusal: {
     place_already_set: "Место уже указано — измените его, а не добавляйте второе.",
     area_already_set: "Зона выезда уже указана — измените её.",
-    no_workspace_tenant: "У профиля ещё нет рабочего пространства — привязку выполнит оператор.",
+    no_workspace_tenant: notConnectedText("указать место работы некуда"),
     place_outside_workspace: "Это место не из вашего рабочего пространства.",
     validation_error: "Проверьте введённое.",
   } as Record<string, string>,
@@ -152,6 +165,22 @@ async function fetchSuggestions(q: string): Promise<AddressSuggestion[]> {
 export function MasterPlaceScreen() {
   const navigate = useNavigate();
   const [load, setLoad] = useState<Load>({ kind: "loading" });
+  // Салонному мастеру — название салона (п.6 решений 28.09). Читается только в
+  // этом состоянии; не ответил — строки нет, фраза остаётся (не гадаем).
+  const [salonName, setSalonName] = useState<string | null>(null);
+  const salonManaged = load.kind === "salon_managed";
+  useEffect(() => {
+    if (!salonManaged) return;
+    let alive = true;
+    getMasterMe()
+      .then((me) => {
+        if (alive) setSalonName(me.salon.name.trim() || null);
+      })
+      .catch(() => undefined);
+    return () => {
+      alive = false;
+    };
+  }, [salonManaged]);
   const [reloadKey, setReloadKey] = useState(0);
   const [frame, setFrame] = useState<Frame>("formats");
   const [formats, setFormats] = useState<Set<Format>>(new Set());
@@ -303,15 +332,15 @@ export function MasterPlaceScreen() {
         {header}
         {load.kind === "loading" && <SystemState kind="loading" />}
         {load.kind === "salon_managed" && (
-          <p className="callout" role="status">
-            {PLACE_COPY.salonManaged}
-          </p>
+          // Без действия редактирования: место салонного мастера — не его
+          // настройка (п.6). Адреса салона ответ бота мастеру не несёт —
+          // названный предел DRF-2581, не догадка экрана.
+          <div className="callout" role="status" data-testid="place-salon-managed">
+            {salonName && <p style={{ margin: 0, fontWeight: 600 }}>{salonName}</p>}
+            <p style={{ margin: 0 }}>{PLACE_COPY.salonManaged}</p>
+          </div>
         )}
-        {load.kind === "not_linked" && (
-          <p className="callout" role="status">
-            {PLACE_COPY.notLinked}
-          </p>
-        )}
+        {load.kind === "not_linked" && <StudioCallout text={PLACE_COPY.notLinked} />}
         {load.kind === "error" && (
           <SystemState
             kind="load_error"

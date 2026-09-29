@@ -13,7 +13,7 @@
 * **Цели нет** — «Сначала выберем цель» + ``open_goal_select``.
 * **Цель есть, шаблона нет** — прежний текст «составить можно в приложении»
   + «Изменить» (конструктор).
-* **План есть** — карточка «Твоя цель: … · На этой неделе: …» (только «N из
+* **План есть** — карточка: слова человека, ниже «На этой неделе: …» (только «N из
   M», В-5: ни процента, ни «достигнута»; у дневника при подтверждённом
   ориентире — ещё «в ориентире N», DRF-2124: второй факт, не оценка) +
   кнопки **«Записаться»**
@@ -34,9 +34,13 @@
 
 ### «Не сейчас»
 
-Маркер ``plan_proposal_declined_at`` в ``skill_state["plan_lite"]`` — для
-недельного возврата A4 (DRF-2126): в тот же день не дёргать. Повторный «мой
-план» в тот же день предложение показывает — это явный запрос.
+Ответ человеку и ничего больше. Маркер ``plan_proposal_declined_at``
+больше НЕ пишется — DRF-2356: он писался для недельного возврата A4
+(DRF-2126), которого нет, и никто его не читал. Пометка, которую никто не
+читает, хуже отсутствия пометки: она выглядит работающим механизмом.
+Правило возврата — вопрос владельца; когда он ответит, маркер заводится
+заново (полчаса работы). Уже записанные значения остаются в строках: не
+писать новые и стирать старые — разные решения, второе не наше.
 
 ### Матчер и маршрутизация
 
@@ -57,7 +61,6 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import Any
 
 from django.conf import settings
@@ -107,12 +110,19 @@ OPEN_CATALOG_SLUG = "open_catalog"
 
 #: Ключ в ``conversation.skill_state`` — маркер «Не сейчас» для A4 (DRF-2126).
 STATE_KEY = "plan_lite"
-DECLINED_AT = "plan_proposal_declined_at"
 
 
 @dataclass(frozen=True)
 class _Copy:
-    title: str = "Твоя цель: {goal}."
+    #: DRF-2283 — над списком действий стоят СЛОВА ЧЕЛОВЕКА, и ничего
+    #: нашего: решение владельца 24.09 (реестр §77) — «пусть будет слова
+    #: собственные клиента». Ни ярлыка, ни подписи, ни «Цель:» — строки,
+    #: которую можно было бы «улучшить», здесь больше нет.
+    #:
+    #: Решение 24.09 было про ЭТУ карточку. Слово на остальные места дал
+    #: владелец 28.09 (п. 7, DRF-2576): «Никаких „Твоя цель:“» — снято и в
+    #: мини-приложении (PlanLiteScreen), и в чате (goal_capture.CONFIRMATION).
+    title: str = "{goal}"
     week: str = "На этой неделе: {items}."
     two_weeks: str = "Эти 2 недели: {items}."
     today_suffix: str = " (сегодня)"
@@ -223,6 +233,39 @@ def goal_label(goal_key: str) -> str:
         return goal_key or "—"
 
 
+def goal_words(external_user_id: str) -> str | None:
+    """Цель словами человека, как он её написал (DRF-2283, CD §73).
+
+    Источник — decision-context: документ, обращённый к человеку, из
+    которого те же слова читает экран цели в Mini App. Один источник на
+    две поверхности.
+
+    **Почему не из plan_lite.** `plan_lite` едет внутри документа
+    wellness-context, у которого контракт объявлен прямым текстом
+    (`wellness/context_read.py`, DRF-1344): только коды состояний, **ни
+    одного текста**, потому что это вход решающего слоя, а не экран.
+    Дословная речь человека туда не кладётся — то же свойство, ради
+    которого событие воронки несёт `has_text`, а не сам текст.
+
+    ``None`` — слов нет ИЛИ чтение не удалось. Оба случая читаются
+    одинаково нарочно: у карточки есть прежний выход — курируемая
+    подпись по ключу, и единое состояние ошибки не должно съедать его.
+
+    **Ничего не кэшируем.** Взяли на показ — показали. Кэш пережил бы
+    «забудь всё» в каталоге, и стирание перестало бы быть стиранием.
+    """
+    try:
+        from apps.integrations.ayla.goals_client import fetch_decision_context
+
+        doc = fetch_decision_context(external_user_id=external_user_id)
+        goal = (doc or {}).get("known", {}).get("goal") or {}
+        words = (goal.get("goal_text") or "").strip()
+    except Exception:  # noqa: BLE001 — карточка переживает отказ чтения
+        logger.info("orchestrator.plan_lite.goal_words_unavailable")
+        return None
+    return words or None
+
+
 # ─── карточка плана ───────────────────────────────────────────────────────
 
 
@@ -240,13 +283,24 @@ def _action_line(action: PlanLiteAction) -> str:
     return line
 
 
-def render_plan_lite_card(plan: PlanLite) -> str:
+def render_plan_lite_card(plan: PlanLite, *, words: str | None = None) -> str:
     """Карточка — только форма обязательств и факты «N из M» (и «в ориентире N»
     у дневника, когда ориентир подтверждён — DRF-2124).
 
     ``per_2_weeks`` — своей строкой «Эти 2 недели: …», остальное — «На этой неделе».
     """
-    lines = [PLAN_LITE_COPY.title.format(goal=goal_label(plan.goal_key))]
+    # DRF-2283 — цель зовётся словами человека, когда они есть. Курируемая
+    # подпись по ключу остаётся живым путём: она и ответ на «слов нет», и
+    # ответ на «прочитать не удалось».
+    #
+    # ВНИМАНИЕ, это прочтение окна, а не слово владельца: владелец говорил
+    # про случай, КОГДА СЛОВА ЕСТЬ («пусть будет слова собственные
+    # клиента», §77, 24.09). Для цели, выбранной чипом, слов человека нет,
+    # и здесь стоит её собственное название из списка владельца — тоже не
+    # наш текст, но выбор человека, а не его слова. Вопрос владельцу задан
+    # (OWNER_QUESTIONS §6-эта); скажет «не показывать вовсе» — правка на
+    # одну строку. Ярлыка и точки нет ни в одном из двух случаев.
+    lines = [PLAN_LITE_COPY.title.format(goal=words or goal_label(plan.goal_key))]
     weekly = [a for a in plan.actions if a.cadence != "per_2_weeks"]
     biweekly = [a for a in plan.actions if a.cadence == "per_2_weeks"]
     if weekly:
@@ -338,57 +392,12 @@ def plan_buttons() -> dict[str, Any] | None:
     )
 
 
-# ─── состояние «Не сейчас» ────────────────────────────────────────────────
-
-
-def _mark_declined(conversation: Any) -> None:
-    """Маркер для A4 (DRF-2126): в этот день предложение не дёргать.
-
-    Read-merge-write внутри ведра ``plan_lite`` — соседние ключи (их добавит
-    A4) не затираются. Глобальный путь идёт при ``current_tenant()=None`` по
-    замыслу, а ``write_skill_state`` требует область — она входится на время
-    одной записи и берётся у самого разговора (тот же приём, что
-    ``open_question._write``; ветка «внутри навыка» её уже держит).
-    """
-    raw = getattr(conversation, "skill_state", None)
-    bucket = dict(raw.get(STATE_KEY) or {}) if isinstance(raw, dict) else {}
-    bucket[DECLINED_AT] = datetime.now(UTC).isoformat()
-    try:
-        from apps.conversations.models import Conversation
-
-        if isinstance(conversation, Conversation):
-            from apps.conversations.services import write_skill_state
-            from apps.tenancy.context import current_tenant, tenant_scope
-
-            if current_tenant() is not None:
-                write_skill_state(conversation, STATE_KEY, bucket)
-            else:
-                with tenant_scope(conversation.tenant):
-                    write_skill_state(conversation, STATE_KEY, bucket)
-            return
-    except Exception:  # noqa: BLE001 — потеря маркера стоит одного лишнего напоминания A4
-        logger.warning(
-            "plan_lite.state_write_failed conversation=%s",
-            getattr(conversation, "id", None),
-            exc_info=True,
-        )
-        return
-    if isinstance(raw, dict):
-        raw[STATE_KEY] = bucket
-
-
-def declined_at(conversation: Any) -> datetime | None:
-    """Когда человек нажал «Не сейчас»; ``None`` — не нажимал / маркер стёрт."""
-    raw = getattr(conversation, "skill_state", None)
-    bucket = raw.get(STATE_KEY) if isinstance(raw, dict) else None
-    stamped = bucket.get(DECLINED_AT) if isinstance(bucket, dict) else None
-    if not isinstance(stamped, str):
-        return None
-    try:
-        at = datetime.fromisoformat(stamped)
-    except ValueError:
-        return None
-    return at if at.tzinfo else at.replace(tzinfo=UTC)
+# ─── «Не сейчас» ──────────────────────────────────────────────────────────
+#
+# DRF-2356: писателя и читателя маркера ``plan_proposal_declined_at`` здесь
+# больше нет. Он писался для недельного возврата A4 (DRF-2126), который не
+# реализован, и читателей вне тестов не имел. Вернуть его — вместе с
+# правилом возврата, которое называет владелец.
 
 
 # ─── результаты ───────────────────────────────────────────────────────────
@@ -403,8 +412,8 @@ def _result(text: str, kind: str, *, buttons: dict[str, Any] | None = None) -> S
     )
 
 
-def _plan_result(plan: PlanLite, *, prefix: str = "") -> SkillResult:
-    text = render_plan_lite_card(plan)
+def _plan_result(plan: PlanLite, *, prefix: str = "", words: str | None = None) -> SkillResult:
+    text = render_plan_lite_card(plan, words=words)
     if prefix:
         text = f"{prefix}\n{text}"
     return _result(text, "plan_lite_card", buttons=plan_buttons())
@@ -491,7 +500,9 @@ def try_handle_my_plan(
         len(ctx.plan_lite.actions),
         trace_id,
     )
-    return _plan_result(ctx.plan_lite)
+    # DRF-2283 — один лишний REST-вызов на ПОКАЗ карточки (событие редкое),
+    # а не на каждый ход. Отказ чтения оставляет карточку прежней.
+    return _plan_result(ctx.plan_lite, words=goal_words(external_id))
 
 
 # ─── вход: тапы cb:plan:* ─────────────────────────────────────────────────
@@ -546,7 +557,9 @@ def _accept(
                 "plan_lite_already_active",
                 buttons=_buttons(_app_button(PLAN_LITE_COPY.button_edit_plan, OPEN_PLAN_SLUG)),
             )
-        return _plan_result(ctx.plan_lite, prefix=PLAN_LITE_COPY.already_active)
+        return _plan_result(
+            ctx.plan_lite, prefix=PLAN_LITE_COPY.already_active, words=goal_words(external_id)
+        )
     except PlanLiteGoalNotFoundError:
         return _no_goal_result()
     except WellnessContextError as exc:
@@ -558,7 +571,7 @@ def _accept(
         len(plan.actions),
         trace_id,
     )
-    return _plan_result(plan, prefix=PLAN_LITE_COPY.accepted)
+    return _plan_result(plan, prefix=PLAN_LITE_COPY.accepted, words=goal_words(external_id))
 
 
 def _book(
@@ -635,7 +648,6 @@ def try_handle_plan_callback(
     external_id = external_user_id_for(bot_user)
     client = WellnessContextHttpClient()
     if stripped == CB_LATER:
-        _mark_declined(conversation)
         logger.info(
             "orchestrator.plan_lite.declined bot_user=%s trace=%s",
             getattr(bot_user, "pk", None),
@@ -662,13 +674,11 @@ __all__ = [
     "CB_DIARY",
     "CB_LATER",
     "CB_PREFIX",
-    "DECLINED_AT",
     "MY_PLAN_TRIGGERS",
     "OPEN_PLAN_SLUG",
     "PLAN_CALLBACK_RE",
     "PLAN_LITE_COPY",
     "STATE_KEY",
-    "declined_at",
     "goal_label",
     "is_plan_callback",
     "looks_like_my_plan_request",

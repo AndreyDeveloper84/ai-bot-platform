@@ -72,7 +72,12 @@ class TestFreeModeKeyboard:
     def test_canon_no_criteria_replies_stay_bare(self):
         """Канонические «без критериев» — не вопрос модели: без кнопки, как были."""
         assert discovery._render_ask_clarification(_QUESTION, []).action_data is None
-        assert discovery.render_no_criteria_clarification().action_data is None
+        # DRF-2267 (§72): у канона — выход «Найти салон» / «Меню», но не «Не знаю».
+        canon = discovery.render_no_criteria_clarification()
+        assert [b["callback"] for b in canon.action_data["buttons"]] == [
+            "cb:catalog:salons",
+            "cb:menu:help",
+        ]
 
     def test_question_with_options_has_no_dont_know(self):
         """Кнопка — только у free: у выбора из вариантов свой набор."""

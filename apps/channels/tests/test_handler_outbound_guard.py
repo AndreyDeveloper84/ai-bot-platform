@@ -196,7 +196,16 @@ class TestForbiddenReplyNeverReachesTheClient:
         _run_global("хочу записаться", mid="ob-kb")
 
         assert mock_send[0]["text"] == REPLACEMENT_TEXT
-        assert not mock_send[0]["attachments"]
+        # DRF-2267 (CD §72): карточки черновика уходят вместе с текстом, а под
+        # заменой — продолжения, которые она называет. Ни одного колбэка карточек.
+        payloads = [
+            cell.get("payload")
+            for att in mock_send[0]["attachments"] or []
+            for row in att["payload"]["buttons"]
+            for cell in row
+        ]
+        assert payloads, "под заменой — «Посмотреть услуги» и «Меню»"
+        assert not any(str(p).startswith("cb:discover:") for p in payloads), payloads
 
 
 # --------------------------------------------------------------------------- #

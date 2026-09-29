@@ -201,3 +201,143 @@ def test_line_endings_are_not_drift(tmp_path: Path) -> None:
 
     assert drifted == []
     assert vanished == []
+
+
+# --------------------------------------------------------------------------
+# DRF-2621 — the map comes from the deploy artifact, not from the host.
+#
+# The deploy stopped shipping `*.map` (deploy-dev.yml, DRF-2574) and keeps it
+# as the run artifact `miniapp-sourcemap-<sha>`; the guard kept asking the host
+# over HTTP and was red "could not run" from 2026-09-28 11:30. The artifact's
+# real shape (deploy-dev run 36565377487): one file named `<bundle>.js.map`,
+# `"file"` naming the bundle. Three outcomes, each proved by running the guard
+# whole: green from matching sources, red naming the drifted module, red when
+# the map is not the served build's or is gone.
+# --------------------------------------------------------------------------
+
+_SRC = {"../../src/App.tsx": "export const App = 1;\n", "../../src/lib/api.ts": "export {};\n"}
+
+
+def _artifact(
+    tmp_path: Path, name: str = "index-AAAA1111.js.map", body: bytes | None = None
+) -> Path:
+    d = tmp_path / "sourcemap"
+    d.mkdir(exist_ok=True)
+    (d / name).write_bytes(body if body is not None else _sourcemap(_SRC))
+    return d
+
+
+def _tree(tmp_path: Path, *, app: str = "export const App = 1;\n") -> Path:
+    src = tmp_path / "src"
+    (src / "lib").mkdir(parents=True)
+    (src / "App.tsx").write_text(app, encoding="utf-8")
+    (src / "lib" / "api.ts").write_text("export {};\n", encoding="utf-8")
+    return src
+
+
+def _run(monkeypatch: pytest.MonkeyPatch, src: Path, map_dir: Path) -> int:
+    fetched: list[str] = []
+
+    def fake_fetch(url: str) -> bytes:
+        fetched.append(url)
+        if url == "https://pilot.test/":
+            return _INDEX_HTML.encode("utf-8")
+        raise AssertionError(f"with --map-dir nothing but index.html is fetched, got {url}")
+
+    monkeypatch.setattr(guard, "fetch", fake_fetch)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "miniapp_bundle_drift.py",
+            "--url",
+            "https://pilot.test",
+            "--src",
+            str(src),
+            "--map-dir",
+            str(map_dir),
+            "--map-origin",
+            "artifact miniapp-sourcemap-abc of deploy-dev run 1",
+        ],
+    )
+    code = guard.main()
+    assert fetched == ["https://pilot.test/"]
+    return int(code)
+
+
+def test_artifact_map_of_the_served_build_and_matching_sources_is_green(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert _run(monkeypatch, _tree(tmp_path), _artifact(tmp_path)) == 0
+    assert "2 application modules" in capsys.readouterr().out
+
+
+def test_artifact_map_with_a_changed_line_is_red_and_names_the_module(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    src = _tree(tmp_path, app="export const App = 2;\n")
+    assert _run(monkeypatch, src, _artifact(tmp_path)) == 1
+    out = capsys.readouterr().out
+    assert "::error file=apps/miniapp/src/App.tsx::" in out
+    assert "lib/api.ts" not in out
+
+
+def test_artifact_of_another_build_is_refused_naming_both(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Same sources, other bundle: comparing would pass by accident today and
+    # judge the wrong build tomorrow. Refused before any comparison.
+    assert _run(monkeypatch, _tree(tmp_path), _artifact(tmp_path, "index-CCCC3333.js.map")) == 2
+    out = capsys.readouterr().out
+    assert "index-AAAA1111.js" in out and "index-CCCC3333.js.map" in out
+
+
+def test_a_renamed_map_whose_file_names_another_bundle_is_refused(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    other = json.loads(_sourcemap(_SRC))
+    other["file"] = "index-CCCC3333.js"
+    body = json.dumps(other).encode("utf-8")
+    assert _run(monkeypatch, _tree(tmp_path), _artifact(tmp_path, body=body)) == 2
+    assert "'index-CCCC3333.js'" in capsys.readouterr().out
+
+
+def test_an_expired_artifact_is_a_named_refusal_not_a_pass(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Retention is 14 days; after that the download leaves the directory empty."""
+    empty = tmp_path / "sourcemap"
+    empty.mkdir()
+    assert _run(monkeypatch, _tree(tmp_path), empty) == 2
+    out = capsys.readouterr().out
+    assert "14 days" in out
+    assert "redeploy" in out
+    assert guard.ARTIFACT_RETENTION_DAYS == 14  # решённое число литералом — зеркало deploy-dev.yml
+
+
+def test_retention_mirror_matches_the_deploy_workflow() -> None:
+    deploy = (_PROJECT_ROOT / ".github" / "workflows" / "deploy-dev.yml").read_text(
+        encoding="utf-8"
+    )
+    block = deploy[deploy.index("name: miniapp-sourcemap-") :][:400]
+    assert f"retention-days: {guard.ARTIFACT_RETENTION_DAYS}" in block
+
+
+def test_the_workflow_hands_the_artifact_to_the_guard() -> None:
+    """Без этого шага сторож снова спросит карту у стенда и получит 404."""
+    wf = (_PROJECT_ROOT / ".github" / "workflows" / "miniapp-drift.yml").read_text(encoding="utf-8")
+    assert "actions: read" in wf
+    assert '-n "miniapp-sourcemap-${SHA}"' in wf
+    assert "--map-dir sourcemap" in wf
+    assert "github.event.workflow_run.id" in wf
+
+
+def test_schedule_picks_the_newest_deploy_by_its_own_sort() -> None:
+    """`--limit 1` trusted the API order; on the runner it returned a 2026-09-11 run.
+
+    Dispatch run 36569037350 judged deploy 34570842718 while a same-day success
+    existed. The pick must sort by createdAt itself.
+    """
+    wf = (_PROJECT_ROOT / ".github" / "workflows" / "miniapp-drift.yml").read_text(encoding="utf-8")
+    assert "sort_by(.createdAt) | last" in wf
+    assert "--status success --limit 1" not in wf

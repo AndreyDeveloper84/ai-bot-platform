@@ -12,14 +12,14 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../lib/max-sdk", async (importOriginal) => {
   const original = await importOriginal<typeof import("../lib/max-sdk")>();
-  return { ...original, hapticNotify: vi.fn(), maxBridge: vi.fn(() => null), closeApp: vi.fn() };
+  return { ...original, hapticNotify: vi.fn(), maxBridge: vi.fn(() => null), returnToChat: vi.fn(() => "closed") };
 });
 
-import { closeApp, maxBridge } from "../lib/max-sdk";
+import { maxBridge, returnToChat } from "../lib/max-sdk";
 import { CustomerBookingSuccessScreen, RETURN_TO_CHAT_LABEL } from "./CustomerBookingSuccessScreen";
 
 const mockedBridge = vi.mocked(maxBridge);
-const mockedClose = vi.mocked(closeApp);
+const mockedClose = vi.mocked(returnToChat);
 
 function renderScreen() {
   render(
@@ -34,6 +34,7 @@ function renderScreen() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockedClose.mockReturnValue("closed");
 });
 
 describe("«Вернуться в чат» (DRF-1777)", () => {

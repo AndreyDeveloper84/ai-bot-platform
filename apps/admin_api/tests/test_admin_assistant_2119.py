@@ -63,6 +63,26 @@ MSK = dt_timezone(timedelta(hours=3))
 NOW = datetime(2026, 9, 21, 12, 0, tzinfo=MSK)
 
 
+def _future_period() -> tuple[str, str]:
+    """Период для «изменения графика» — ЗАВТРА, а не литеральной датой.
+
+    Здесь стояло `2026-09-25T10:00`–`12:00`. Пока эта дата была в будущем,
+    три узла проходили. 25.09 она СТАЛА сегодняшним днём, и с полудня по
+    Москве период оказывался в прошлом: `ActionError: этот период уже
+    прошёл`. Краснели они у всех подряд, и причина была не в коде, а в
+    часах — прогон в 10:42 и 11:15 MSK проходил, в 13:49 нет.
+
+    Соседние узлы этого файла берут замороженный `NOW`; эти три работают с
+    настоящим временем, поэтому им нужна не заморозка, а дата, которая не
+    может устареть. Час оставлен прежним (10:00–12:00): на него опираются
+    утверждения о тексте сводки.
+    """
+    start = (timezone.now().astimezone(MSK) + timedelta(days=1)).replace(
+        hour=10, minute=0, second=0, microsecond=0
+    )
+    return start.strftime("%Y-%m-%dT%H:%M"), start.replace(hour=12).strftime("%Y-%m-%dT%H:%M")
+
+
 @dataclass
 class FakeToolCall:
     name: str
@@ -275,8 +295,8 @@ class TestP4ScheduleChangeNeedsConfirmation:
             "prepare_schedule_change",
             {
                 "master": master.name,
-                "start": "2026-09-25T10:00",
-                "end": "2026-09-25T12:00",
+                "start": _future_period()[0],
+                "end": _future_period()[1],
                 "reason_class": "personal",
             },
             tenant=tenant,
@@ -313,7 +333,11 @@ class TestP4ScheduleChangeNeedsConfirmation:
         master.save(update_fields=["linked_bot_user"])
         proposal = aa.propose_admin_action(
             "prepare_schedule_change",
-            {"master": master.name, "start": "2026-09-25T10:00", "end": "2026-09-25T12:00"},
+            {
+                "master": master.name,
+                "start": _future_period()[0],
+                "end": _future_period()[1],
+            },
             tenant=tenant,
             bot_user=owner_bot_user,
         )
@@ -337,7 +361,11 @@ class TestP4ScheduleChangeNeedsConfirmation:
 
         proposal = aa.propose_admin_action(
             "prepare_schedule_change",
-            {"master": master.name, "start": "2026-09-25T10:00", "end": "2026-09-25T12:00"},
+            {
+                "master": master.name,
+                "start": _future_period()[0],
+                "end": _future_period()[1],
+            },
             tenant=tenant,
             bot_user=owner_bot_user,
         )

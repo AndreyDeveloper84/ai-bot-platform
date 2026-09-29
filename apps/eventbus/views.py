@@ -57,6 +57,7 @@ AUDIT_UNKNOWN_EVENT_NAME = "eventbus.ingest.unknown_event_name"
 AUDIT_UNKNOWN_EVENT_VERSION = "eventbus.ingest.unknown_event_version"
 AUDIT_INVALID_EVENT_ID = "eventbus.ingest.invalid_event_id"
 AUDIT_HANDLER_EXCEPTION = "eventbus.ingest.handler_exception"
+AUDIT_REJECTED = "eventbus.ingest.rejected"
 AUDIT_DUPLICATE = "eventbus.ingest.duplicate"
 AUDIT_PROCESSED = "eventbus.ingest.processed"
 AUDIT_RATE_LIMITED = "eventbus.ingest.rate_limited"
@@ -405,6 +406,23 @@ class InternalEventsIngestView(View):
             # event off the retry budget too fast.
             response["Retry-After"] = "5"
             return response
+
+        if outcome is DispatchOutcome.REJECTED:
+            # DRF-2302 (§8.12) — постоянный отказ потребителя: 422, отправитель
+            # кладёт событие в dead сразу, повтор — вручную после починки.
+            # В ответе и аудите только slug причины, не текст исключения (PII).
+            reason = getattr(result.exception, "reason", "rejected")
+            write_audit(
+                action=AUDIT_REJECTED,
+                target="eventbus.ingest",
+                payload={
+                    "event_id": envelope.event_id,
+                    "event_name": envelope.event_name,
+                    "event_version": envelope.event_version,
+                    "reason": reason,
+                },
+            )
+            return JsonResponse({"status": "rejected", "reason": reason}, status=422)
 
         # HANDLER_EXCEPTION
         exc_type = type(result.exception).__name__ if result.exception is not None else "Unknown"

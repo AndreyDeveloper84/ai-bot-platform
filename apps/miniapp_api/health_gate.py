@@ -81,12 +81,22 @@ from django.core.cache import cache
 
 from apps.orchestrator.safety.gate import evaluate_inbound
 from apps.orchestrator.safety.pre_check import SafetyVerdict
-from apps.skills.health_screening.classifier import PainSignal, classify
+from apps.skills.health_screening.classifier import PainSignal, clarify_group, classify
 from apps.skills.health_screening.g4_question import (
     G4_ROUTING_QUESTION,
     ask_g4,
     g4_state,
     route_g4_reply,
+)
+from apps.skills.health_screening.g7_question import (
+    ANSWER_LABELS,
+    ANSWERS,
+    G7_QUESTION_ID,
+    G7_QUESTION_TEXT,
+    ask_g7,
+    g7_callback,
+    g7_pending,
+    route_g7_turn,
 )
 from apps.skills.health_screening.memo import STATE_TTL_SECONDS
 from apps.skills.health_screening.skill import RED_FLAG_REPLY
@@ -146,6 +156,10 @@ class SafetyStop:
     text: str = ""
     acknowledgement: str = ""
     questions: tuple[str, ...] = field(default_factory=tuple)
+    #: [OD-BOT §170] — the G7 question's three structured answers
+    #: (``{label, value}``); ``value`` goes back verbatim as ``safety_answer``.
+    options: tuple[dict[str, str], ...] = field(default_factory=tuple)
+    question_id: str = ""
 
     def as_payload(self) -> dict[str, Any]:
         payload: dict[str, Any] = {"kind": self.kind}
@@ -157,6 +171,10 @@ class SafetyStop:
             # The G4 frame ([OD-BOT §164]) is one question with no
             # acknowledgement line; the screen lists ``questions`` on its own.
             payload["questions"] = list(self.questions)
+        if self.options:
+            payload["options"] = [dict(option) for option in self.options]
+        if self.question_id:
+            payload["question_id"] = self.question_id
         return payload
 
 
@@ -199,6 +217,24 @@ def _conversation_for(bot_user: Any, *, create: bool):
 
 def _g4_stop_from(outcome: Any) -> SafetyStop:
     return _S1_STOP if outcome.stop else _G4_QUESTION_STOP
+
+
+def _g7_question_stop(token: str) -> SafetyStop:
+    """[OD-BOT §170] — the one G7 question with its three structured answers.
+
+    Same kind as the other clarify frames; no acknowledgement line, no second
+    question. The body is never forwarded while it is open.
+    """
+
+    return SafetyStop(
+        kind=KIND_CLARIFY,
+        questions=(G7_QUESTION_TEXT,),
+        options=tuple(
+            {"label": ANSWER_LABELS[answer], "value": g7_callback(answer, token)}
+            for answer in ANSWERS
+        ),
+        question_id=G7_QUESTION_ID,
+    )
 
 
 def free_text_of(body: dict[str, Any]) -> str | None:
@@ -356,7 +392,32 @@ def _screen(
             logger.error("miniapp_api.health_gate.stop_not_persisted bot_user=%s", bot_user.pk)
         return _g4_stop_from(outcome), forward
 
-    explicit = _explicit_s1_stop(reply_text) or (_explicit_s1_stop(text) if text else None)
+    # [OD-BOT §170] — an open G7 question binds whatever comes next the same
+    # way; only a structured answer with the live slot token is an answer.
+    g7_answered_no = False
+    pending_g7 = g7_pending(conversation) if conversation is not None else None
+    if pending_g7 is not None:
+        if not reply_text:
+            return _g7_question_stop(pending_g7.token), forward
+        g7_outcome = route_g7_turn(conversation, bot_user, reply_text)
+        logger.info(
+            "miniapp_api.health_gate.g7 outcome=%s reason=%s bot_user=%s",
+            g7_outcome.kind,
+            g7_outcome.reason,
+            bot_user.pk,
+        )
+        if g7_outcome.kind in ("stop", "restriction_persists"):
+            return _S1_STOP, forward
+        if g7_outcome.kind == "unknown":
+            return _g7_question_stop(pending_g7.token), forward
+        # outside_s1_g7: G7 not confirmed — the text is still screened for every
+        # other S1 group and the other checks below; only the G7 question is
+        # not put again for this body.
+        g7_answered_no = True
+
+    explicit = (None if g7_answered_no else _explicit_s1_stop(reply_text)) or (
+        _explicit_s1_stop(text) if text else None
+    )
     if explicit is not None:
         logger.info(
             "miniapp_api.health_gate.stop kind=%s on=text bot_user=%s", explicit.kind, bot_user.pk
@@ -379,7 +440,21 @@ def _screen(
         # No question on record → the flag is not clearance; fall through
         # and screen the text itself.
 
-    if classify(text) == PainSignal.CLARIFY:
+    if classify(text) == PainSignal.CLARIFY and clarify_group(text) == "G7":
+        if g7_answered_no:
+            # answered №2 for this very body — G7 not confirmed; the other
+            # checks below still run
+            pass
+        else:
+            # [OD-BOT §170] — the one G7 question; NO durable restriction. The
+            # carrier is created on demand; fail-closed when it cannot be written.
+            conversation = _conversation_for(bot_user, create=True)
+            token = ask_g7(conversation) if conversation is not None else None
+            if token is None:
+                raise _CarrierUnavailable
+            logger.info("miniapp_api.health_gate.g7_asked bot_user=%s", bot_user.pk)
+            return _g7_question_stop(token), forward
+    elif classify(text) == PainSignal.CLARIFY:
         # Ambiguous G4 — the one registered question, persisted on the same
         # conversation the chat surfaces read. The carrier is created on
         # demand; if it cannot be created or the state cannot be written, the

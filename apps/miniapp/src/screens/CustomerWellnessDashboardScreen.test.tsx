@@ -132,10 +132,14 @@ describe("CustomerWellnessDashboardScreen — the home surface", () => {
   });
 
   it("DEV build: renders the dashboard", async () => {
+    // Узел ПЕРЕВЁРНУТ (DRF-2330): раньше «экран отрисовался» доказывалось
+    // строкой «Вода: N из 7 дней» СНЯТОГО «Прогресса недели» (Д31 в,
+    // решение владельца 22.09). Доказательство переехало на полосу
+    // дневника — она на экране осталась и по макету стоит последней.
     await renderScreen(false);
-    expect(await screen.findByText(/Вода:/)).toBeInTheDocument();
+    expect(await screen.findByText(/стаканов/)).toBeInTheDocument();
     expect(screen.queryByText(/выдуманных данных/)).not.toBeInTheDocument();
-  });
+  }, 15_000);
 
   it("prod build: renders the SAME dashboard — the gate is off (DRF-1546)", async () => {
     // До DRF-1546 здесь рисовался `PilotComingSoonScreen`, и человек на
@@ -233,7 +237,20 @@ describe("CustomerWellnessDashboardScreen — the home surface", () => {
     is_bookable: true,
   };
 
-  it("DEV build, Block 7: renders scorer picks WITH the WHY the source sent", async () => {
+  // Узел ПЕРЕВЁРНУТ (DRF-2330, Д31 г): полка «Ayla подобрала тебе» снята С
+  // ЭКРАНА решением владельца 22.09.
+  //
+  // Сюда же переехал предмет снятого файла `…price.test.tsx`: пока полки
+  // нет, её цену на Главной проверять не на чем, и узел «не пишет „от 0 ₽"»
+  // стал бы пустым — он дублировал бы отсутствие полки. Само правило
+  // DRF-1989 (цена ниже 1 ₽ не округляется в «0 ₽») осталось под сторожем
+  // `ServiceDetailScreen.price.test.tsx` на карточке услуги. Вернётся полка
+  // — вернётся и её ценовой узел. Код полки НЕ удалён — вопрос 40 от
+  // 20.09 (снимать совсем или оставить обездвиженной) у владельца, и
+  // включение — одна строка в `lib/ayla-picks-shelf`. Поэтому узел пинит
+  // ОТСУТСТВИЕ НА ЭКРАНЕ при полноценном ответе источника: если полку
+  // вернут, не ответив на вопрос 40, он покраснеет.
+  it("DEV build, Block 7: за подбором не ходят, и полки нет", async () => {
     mockedBrowse.mockResolvedValue({
       services: [PEDIKYUR],
       masters: [],
@@ -249,12 +266,25 @@ describe("CustomerWellnessDashboardScreen — the home surface", () => {
       picksOutcome: "OK",
     });
     await renderScreen(false);
+    // Присутствие: экран отрисован — значит отсутствие ниже про решение,
+    // а не про пустой рендер.
+    //
+    // Прежде присутствием служил сам запрос («подборка пришла с
+    // объяснением»), и имя узла обещало, что объяснённый подбор НЕ
+    // доезжает до экрана. DRF-2348 снял запрос (§172, ответ 40) — подбор
+    // теперь не выезжает из мока вовсе, и прежнее имя стало неправдой.
+    //
+    // Что перестало проверяться: «данные есть, а полка тёмная» —
+    // состояние недостижимое, раз данные кладёт только зажжённая полка.
+    // Фикстура ниже сегодня ИНЕРТНА: она описывает, что источник ответил
+    // бы, и делает возврат полки правкой одной строки — но ни одно
+    // утверждение этого узла ею не движется.
+    expect(await screen.findByText(/стаканов/)).toBeInTheDocument();
+    expect(mockedBrowse).not.toHaveBeenCalled();
     expect(
-      await screen.findByRole("heading", { name: /Ayla подобрала тебе/ }),
-    ).toBeInTheDocument();
-    expect(screen.getByText("Педикюр")).toBeInTheDocument();
-    expect(screen.getByText(/2 200 ₽/)).toBeInTheDocument();
-    expect(screen.getByText("Есть свободное время в нужном окне")).toBeInTheDocument();
+      screen.queryByRole("heading", { name: /Ayla подобрала тебе/ }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("Педикюр")).not.toBeInTheDocument();
   });
 
   // Owner ruling 25.08 — same gate on the second branded surface.
@@ -266,8 +296,9 @@ describe("CustomerWellnessDashboardScreen — the home surface", () => {
       picksOutcome: "OK",
     });
     await renderScreen(false);
-    // Dashboard itself still renders.
-    expect(await screen.findByText(/Вода:/)).toBeInTheDocument();
+    // Dashboard itself still renders. Проверка переехала со строки снятого
+    // «Прогресса недели» на полосу дневника (DRF-2330).
+    expect(await screen.findByText(/стаканов/)).toBeInTheDocument();
     expect(
       screen.queryByRole("heading", { name: /Ayla подобрала тебе/ }),
     ).not.toBeInTheDocument();
@@ -510,9 +541,11 @@ describe("CustomerWellnessDashboardScreen — weekly rollup (DRF-1476)", () => {
     expect(screen.queryByText(/из 7 дней/)).not.toBeInTheDocument();
   });
 
-  it("rollup present and past the cold-start gate: Block 6 renders it", async () => {
-    // The guard: proves Block 6 is hidden above for want of data, and
-    // has not simply been removed.
+  it("rollup present: Block 6 is gone from the screen (owner ruling 22.09)", async () => {
+    // Узел ПЕРЕВЁРНУТ (DRF-2330, Д31 в): он пинил отменённый контракт —
+    // «данные пришли → блок рисуется». Владелец снял «Прогресс недели»:
+    // он дублировал план, а сервер этих данных и так не слал. Теперь узел
+    // сторожит обратное — даже с данными блока нет.
     serve({
       this_week_booking_count: 0,
       weekly_progress: {
@@ -523,9 +556,10 @@ describe("CustomerWellnessDashboardScreen — weekly rollup (DRF-1476)", () => {
     });
     await renderScreen(false);
 
-    expect(await screen.findByText(/Прогресс недели/)).toBeInTheDocument();
-    expect(screen.getByText(/4 из 7 дней/)).toBeInTheDocument();
-    expect(screen.getByText(/5 из 7 дней/)).toBeInTheDocument();
+    // Присутствие: экран отрисован — значит отсутствие ниже про блок.
+    expect(await screen.findByText("Выбери цель")).toBeInTheDocument();
+    expect(screen.queryByText(/Прогресс недели/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/из 7 дней/)).not.toBeInTheDocument();
   });
 
   it("rollup present but below the cold-start gate: still hidden (§11.4)", async () => {
@@ -628,7 +662,7 @@ describe("CustomerWellnessDashboardScreen — degraded reads (DRF-1546)", () => 
     // NEGATIVE (парная): ни нулей, ни процентов, ни «ничего не залогировано».
     expect(screen.queryByText(/ккал/)).not.toBeInTheDocument();
     expect(
-      screen.queryByText(/Ещё ничего не залогировано/),
+      screen.queryByText(/Сегодня ещё ничего не записано/),
     ).not.toBeInTheDocument();
   });
 
@@ -699,7 +733,7 @@ describe("CustomerWellnessDashboardScreen — degraded reads (DRF-1546)", () => 
     await renderScreen(false);
 
     expect(
-      await screen.findByText(/Ещё ничего не залогировано/),
+      await screen.findByText(/Сегодня ещё ничего не записано/),
     ).toBeInTheDocument();
     expect(screen.getByText(/0 \/ 8 стаканов/)).toBeInTheDocument();
     expect(screen.queryByText("Не удалось загрузить")).not.toBeInTheDocument();
@@ -755,6 +789,95 @@ describe("CustomerWellnessDashboardScreen — degraded reads (DRF-1546)", () => 
     // Ни одного осуждающего слова в блоке питания (§85 §8).
     const row = screen.getByLabelText(/^Питание:/);
     expect(row.textContent).not.toMatch(/перебор|превыш|слишком|много/i);
+  });
+
+  it("DRF-2288 (№41): ориентиры жиров и углеводов — в той же строке, что у белка", async () => {
+    serve(
+      {
+        calories_eaten: 800,
+        calories_target: 2100,
+        pfc: {
+          protein_g: 65,
+          fat_g: 40,
+          carbs_g: 120,
+          protein_target_g: 100,
+          fat_target_g: 61,
+          carbs_target_g: 220,
+        },
+        water_glasses_eaten: 4,
+        water_glasses_target: 8,
+        active_goals: [],
+        display_name: "Анна",
+      },
+      { this_week_booking_count: 0 },
+    );
+    await renderScreen(false);
+
+    expect(await screen.findByText(/Б 65 \/ 100 · Ж 40 \/ 61 · У 120 \/ 220 г/)).toBeInTheDocument();
+    // Скринридер слышит те же ориентиры.
+    expect(screen.getByLabelText(/^Питание:/)).toHaveAttribute(
+      "aria-label",
+      expect.stringContaining("Белки 65 из 100, жиры 40 из 61, углеводы 120 из 220 граммов"),
+    );
+  });
+
+  it("DRF-2288 (№41): без ориентира у одной буквы — только факт у неё", async () => {
+    serve(
+      {
+        calories_eaten: 800,
+        calories_target: 2100,
+        pfc: { protein_g: 65, fat_g: 40, carbs_g: 120, protein_target_g: 100, carbs_target_g: 220 },
+        water_glasses_eaten: 4,
+        water_glasses_target: 8,
+        active_goals: [],
+        display_name: "Анна",
+      },
+      { this_week_booking_count: 0 },
+    );
+    await renderScreen(false);
+
+    expect(await screen.findByText(/Б 65 \/ 100 · Ж 40 · У 120 \/ 220 г/)).toBeInTheDocument();
+  });
+
+  it("DRF-2288 (№41): вода есть, еды нет — строки нулей БЖУ нет", async () => {
+    serve(
+      {
+        calories_eaten: 0,
+        calories_target: 2100,
+        pfc: { protein_g: 0, fat_g: 0, carbs_g: 0, protein_target_g: 123 },
+        water_glasses_eaten: 3,
+        water_glasses_target: 12,
+        active_goals: [],
+        display_name: "Анна",
+      },
+      { this_week_booking_count: 0 },
+    );
+    await renderScreen(false);
+
+    expect(await screen.findByText(/3 \/ 12 стаканов/)).toBeInTheDocument();
+    expect(screen.queryByText(/Б 0/)).not.toBeInTheDocument();
+  });
+
+  it("DRF-2288 (№41): пустой день — «ничего не записано» и без строки нулей БЖУ", async () => {
+    serve(
+      {
+        calories_eaten: 0,
+        calories_target: 2100,
+        pfc: { protein_g: 0, fat_g: 0, carbs_g: 0, protein_target_g: 123 },
+        water_glasses_eaten: 0,
+        water_glasses_target: 12,
+        active_goals: [],
+        display_name: "Анна",
+      },
+      { this_week_booking_count: 0 },
+    );
+    await renderScreen(false);
+
+    expect(await screen.findByText("Сегодня ещё ничего не записано")).toBeInTheDocument();
+    // Скринридер слышит то же, что видно, — не «0 из 2100 … белки 0».
+    expect(screen.getByLabelText("Питание: Сегодня ещё ничего не записано")).toBeInTheDocument();
+    expect(screen.queryByText(/Б 0/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/залогировано/)).not.toBeInTheDocument();
   });
 });
 
@@ -1048,7 +1171,7 @@ describe("CustomerWellnessDashboardScreen — цель калорий не вы�
     await renderScreen(false);
 
     // POSITIVE: экран действительно нарисован и говорит про пустой день.
-    expect(await screen.findByText("Ещё ничего не залогировано")).toBeInTheDocument();
+    expect(await screen.findByText("Сегодня ещё ничего не записано")).toBeInTheDocument();
     // NEGATIVE: полоса при нуле не видна глазом, но `role="progressbar"`
     // озвучивал «Калории: 0 из 2100» — дефект доставался ровно тому, кто
     // не может проверить глазами.

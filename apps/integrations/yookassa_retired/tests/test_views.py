@@ -30,7 +30,9 @@ from apps.integrations.yookassa_retired.views import (
 )
 
 
-pytestmark = pytest.mark.django_db
+# DRF-2278 — окна ratelimit по неподвижным часам: без этого тест мигает, если
+# его запросы разъехались по границе окна (см. apps/conftest.py).
+pytestmark = [pytest.mark.django_db, pytest.mark.usefixtures("frozen_ratelimit_clock")]
 
 
 # Canonical YooKassa-shaped retry payload — small JSON that mimics the

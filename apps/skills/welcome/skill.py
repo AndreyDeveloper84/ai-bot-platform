@@ -99,7 +99,8 @@ privacy consent prompt (Tau's customer-onboarding-flow.md §5):
   conditional rule (user already saw scope disclosure → S3
   repositioning would feel repetitive).
 * ``cb:welcome:consent_details`` — S2a expanded fold disclosing scope.
-* ``cb:welcome:consent_refuse`` — State 3 graceful exit. No keyboard.
+* ``cb:welcome:consent_refuse`` — State 3 graceful exit. Keyboard «Дать согласие» /
+  «Узнать что хранится» since DRF-2267 (owner CD §72).
 
 ### S3 positioning + S5 first-action grid — task #85 part 3, 2026-05-26
 
@@ -556,8 +557,12 @@ class WelcomeSkill:
                 getattr(context.bot_user, "id", None),
                 getattr(context.bot_user, "channel", None),
             )
+            # DRF-2267 (решение владельца CD §72) переворачивает Tau §11
+            # «no keyboard»: отказ — не тупик, дверь к согласию остаётся
+            # открытой той же парой, что на экране S2.
             return SkillResult(
                 reply_text=S2_REFUSED_TEXT,
+                action_data={"buttons": _s2_refused_buttons(), "button_columns": 1},
                 meta={"reply_kind": "welcome_consent_refused"},
             )
         # /start OR S1 auto-trigger OR Mini-App-opening callback that we
@@ -664,7 +669,18 @@ class WelcomeSkill:
         # и накрыл бы возврат в поток полным первым приветствием.
         _stamp_welcomed_at(context.bot_user)
         action_data: dict | None = None
-        reply_text = CONSENT_RECOVERY_RETURN_TEXTS[origin]
+        if origin in CONSENT_RECOVERY_RESUMED_ORIGINS:
+            # Возврат делает вызывающий, после записи согласия. Сюда ветка
+            # доходит, только если возврат не состоялся, и тогда говорит то
+            # же, что сама поверхность в свой недоступный час.
+            from apps.orchestrator.personal_surface import (
+                DIARY_UNAVAILABLE_TEXT,
+                MEMORY_UNAVAILABLE_TEXT,
+            )
+
+            reply_text = MEMORY_UNAVAILABLE_TEXT if origin == "memory" else DIARY_UNAVAILABLE_TEXT
+        else:
+            reply_text = CONSENT_RECOVERY_RETURN_TEXTS[origin]
         if origin == "miniapp":
             # DRF-2230 (скрин владельца 21.09): «возвращайся в приложение» без
             # кнопки оставлял человека в чате без пути дальше.
@@ -691,6 +707,10 @@ class WelcomeSkill:
             meta={
                 "reply_kind": CONSENT_RECOVERY_GRANT_KIND,
                 "consent_origin": origin,
+                # Наше действие. Доказательство читает вызывающий: глобальный
+                # онбординг проверяет, что журнал 152-ФЗ записан, и при
+                # неудаче заменяет ответ на «не получилось сохранить
+                # согласие» (``run_onboarding_turn``). Здесь — объявление.
             },
         )
 
@@ -1014,7 +1034,20 @@ def _start_buttons() -> list[dict[str, str]]:
 #: входе ручного ориентира ведёт сюда же.
 #: ``miniapp`` — кнопка «Дать согласие в чате» на Главной Mini App (DRF-2230):
 #: приглашение приходит в чат само, по нажатию в приложении.
-CONSENT_RECOVERY_ORIGINS: tuple[str, ...] = ("photo", "text", "water", "target", "miniapp")
+#: ``diary`` (DRF-2267) — отказ ЧТЕНИЯ дневника: «мне нужно согласие на
+#: обработку личных данных». Возврат у него особый и живёт не здесь, а в
+#: ``global_onboarding.run_onboarding_turn``: дневник рисуется ПОСЛЕ записи
+#: согласия, иначе он спросил бы своё согласие раньше, чем оно записано, и
+#: человек получил бы отказ сразу после того, как согласие дал.
+CONSENT_RECOVERY_ORIGINS: tuple[str, ...] = (
+    "photo",
+    "text",
+    "water",
+    "target",
+    "miniapp",
+    "diary",
+    "memory",
+)
 
 #: Вид ответа «согласие выдано из отказа»: по нему глобальный онбординг пишет
 #: журнал согласий тем же путём, что и приветственный S5.
@@ -1041,6 +1074,18 @@ CONSENT_OFFER_LABEL = "Дать согласие"
 #: «После consent возвращать пользователя в исходный flow»). ЧЕРНОВИК: сами
 #: фразы владельцем не утверждены, вынесены вопросом W3 вместе с текстами
 #: «забудь всё»; экран согласия при этом — утверждённый S2_CONSENT_TEXT.
+#: Входы, которые возвращают человека СВОЕЙ поверхностью, а не заготовленной
+#: фразой: возврат у них — сам ответ того потока (для ``diary`` — дневник,
+#: который рисует :func:`apps.channels.max.global_onboarding._resume_after_consent`
+#: после записи согласия). Фразы в :data:`CONSENT_RECOVERY_RETURN_TEXTS` у
+#: них нет и не должно быть: это был бы новый видимый текст рядом с ответом,
+#: который человек и так получит.
+CONSENT_RECOVERY_RESUMED_ORIGINS: frozenset[str] = frozenset({"diary", "memory"})
+
+#: Для ``diary`` строки здесь нет намеренно: возвращает сам дневник, своим
+#: текстом (см. :data:`CONSENT_RECOVERY_ORIGINS`). Сюда ветка доходит только
+#: если возврат не состоялся, и тогда говорит то же, что дневник в свой
+#: недоступный час, — не выдумывая нового обещания.
 CONSENT_RECOVERY_RETURN_TEXTS: dict[str, str] = {
     "photo": "Готово, согласие есть. Пришли фото ещё раз — запишу в дневник.",
     "text": "Готово, согласие есть. Напиши, что съела, — посчитаю и запишу.",
@@ -1152,6 +1197,18 @@ def _s2a_details_buttons_for(origin: str) -> list[dict[str, str]]:
             "callback": f"cb:welcome:consent_yes_via_s2a_{origin}",
         },
         {"label": "Не сейчас", "callback": "cb:welcome:consent_refuse"},
+    ]
+
+
+def _s2_refused_buttons() -> list[dict[str, str]]:
+    """Под «Поняла. Когда захочешь — пиши, я тут.» (DRF-2267, CD §72).
+
+    «Дать согласие» — снова экран S2 (``cb:welcome:start_s2``), «Узнать что
+    хранится» — разворот S2a. Подписи — те же, что у кнопки отказа и у S2.
+    """
+    return [
+        {"label": CONSENT_OFFER_LABEL, "callback": "cb:welcome:start_s2"},
+        {"label": "Узнать что хранится", "callback": "cb:welcome:consent_details"},
     ]
 
 

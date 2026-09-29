@@ -5,7 +5,9 @@
  *   - network → "Не получилось загрузить. Проверьте интернет и попробуйте снова."
  *   - 5xx → "Что-то у нас не получается прямо сейчас."
  *   - 403 → "Этот раздел сейчас недоступен."
- *   - other → falls back to detail
+ *   - прочее → та же согласованная фраза «Не получилось загрузить.»;
+ *     серверный `detail` человеку НЕ показывается (DRF-2446) и уходит
+ *     в журнал
  *
  * Always offers retry. The escalation button («Сообщить студии») used
  * to deeplink to `https://max.ru/?prefill=…`, but that URL never opened
@@ -42,14 +44,33 @@ function pickCopy(err: unknown): Copy {
     }
     if (err.status >= 500) return { body: "Что-то у нас не получается прямо сейчас." };
     if (err.status === 403) return { body: "Этот раздел сейчас недоступен." };
-    return { body: err.detail || "Не получилось загрузить." };
+    // DRF-2446. Здесь стоял `err.detail || …`, и владелец увидел
+    // «booking not found»: `detail` написан для нас, по-английски
+    // (`apps/miniapp_api/views.py`, 176 английских строк на день замера),
+    // а общий хвост печатал его человеку дословно.
+    //
+    // Показываем УЖЕ СОГЛАСОВАННУЮ фразу — ту самую, что стояла здесь
+    // запасной. Ни одного нового слова не придумано: что показывать
+    // вместо английского по каждому исходу — вопрос к владельцу, и он
+    // отдельный от вопроса «перестать показывать внутреннее».
+    //
+    // `detail` не потерян: он уходит в журнал (см. `logDetail`). Иначе
+    // через неделю его вернут на экран, чтобы «было видно».
+    return { body: "Не получилось загрузить." };
   }
   return { body: "Не получилось загрузить. Проверьте интернет и попробуйте снова." };
+}
+
+/** Журнал вместо экрана: `detail` нужен нам, а не человеку (DRF-2446). */
+function logDetail(err: unknown): void {
+  if (!(err instanceof ApiError) || !err.detail) return;
+  console.warn(`[api-detail] ${err.status} ${err.slug}: ${err.detail}`);
 }
 
 export function StateError({ err, onRetry }: Props) {
   // DRF-1893 — отказ транспорта: возврат в MAX вместо повтора.
   if (err instanceof ApiError && isTransportRefusalSlug(err.slug)) return <OpenFromMaxBody />;
+  logDetail(err);
   const copy = pickCopy(err);
   return (
     <div className="callout callout--danger" role="alert">

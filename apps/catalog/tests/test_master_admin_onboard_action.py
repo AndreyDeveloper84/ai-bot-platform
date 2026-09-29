@@ -38,6 +38,11 @@ from apps.audit.models import AuditLog
 from apps.catalog.admin import CatalogMasterAdmin
 from apps.catalog.identity import REASON_CREATION_UNAVAILABLE
 from apps.catalog.models import CatalogMaster
+from apps.catalog.services import http_client as http_client_mod
+from apps.catalog.services.http_client import (
+    CatalogSalonSpecialistDoorAbsent,
+    ProvisionedSalonSpecialistDTO,
+)
 from apps.events.vocabulary import STAFF_SPECIALIST_ONBOARDED
 from apps.identity.models import BotUser
 from apps.identity.services import specialist_onboarding as facade
@@ -70,6 +75,55 @@ def _client(username: str, *, ops: bool) -> tuple[Client, Any]:
     client = Client()
     assert client.login(username=username, password=password)
     return client, user
+
+
+class _SalonDoorAbsent:
+    """Каталог БЕЗ салонной ручки — состояние контура до слияния половины (DRF-2379).
+
+    Умолчание стенда: у большинства узлов предмет — как админка ПОКАЗЫВАЕТ
+    оператору обе половины при отказе identity, и им нужен отказ.
+    """
+
+    def __enter__(self) -> "_SalonDoorAbsent":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        return None
+
+    def provision_salon_specialist(self, **kwargs: Any) -> Any:
+        raise CatalogSalonSpecialistDoorAbsent("no such route")
+
+
+class _SalonDoorAnswers:
+    """Каталог С салонной ручкой: отвечает подтверждённым id."""
+
+    specialist_id = uuid.UUID("d0a20600-0000-4000-8000-000000000379")
+
+    def __enter__(self) -> "_SalonDoorAnswers":
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        return None
+
+    def provision_salon_specialist(self, **kwargs: Any) -> ProvisionedSalonSpecialistDTO:
+        return ProvisionedSalonSpecialistDTO(
+            tenant_id=uuid.UUID(str(kwargs["tenant_id"])),
+            specialist_id=self.specialist_id,
+            user_id=uuid.uuid4(),
+            status="draft",
+            created=True,
+        )
+
+
+@pytest.fixture(autouse=True)
+def _no_real_catalog(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Сети в узлах админки нет — ни до DRF-2379, ни после.
+
+    До листа стенд был не нужен: салонный мастер отказывал, не доходя до
+    сети. Дверь появилась, и без этой подмены узлы ходили бы в настоящий
+    каталог.
+    """
+    monkeypatch.setattr(http_client_mod, "CatalogHttpClient", _SalonDoorAbsent)
 
 
 @pytest.fixture
@@ -205,7 +259,13 @@ def test_apply_links_person_through_the_facade_and_journals(salon: Tenant) -> No
 def test_apply_reports_identity_unavailable_as_warning_with_the_reason(
     salon: Tenant,
 ) -> None:
-    """Связь есть, identity нет — оператору обе половины и причина по имени."""
+    """Связь есть, identity нет — оператору обе половины и причина по имени.
+
+    DRF-2379 поменял, ЧТО означает здесь ``creation_unavailable``: раньше
+    «двери у салонного мастера нет вовсе», теперь «каталог не знает этой
+    ручки» (наша половина ещё не выложена). Предмет узла прежний — админка
+    не прячет отказ и не выдаёт его за успех.
+    """
     client, _ = _client("ops-warn", ops=True)
     master = _master(salon, "Без ключа")
     person = _person(salon, "Человек")
@@ -221,6 +281,28 @@ def test_apply_reports_identity_unavailable_as_warning_with_the_reason(
     assert REASON_CREATION_UNAVAILABLE in warning[0]
     assert "заводится оператором" in warning[0]  # текст восстановления, а не «никогда»
     assert _audit_rows(master)[0].payload["identity_reason"] == REASON_CREATION_UNAVAILABLE
+
+
+def test_apply_reaches_success_when_the_catalog_door_answers(
+    salon: Tenant, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """DRF-2379: операторский путь чинится той же дверью, что и приглашение.
+
+    Третий вызывающий одной операции (первые два — приглашение и «Команда» в
+    Mini App). Запереть дверь на один путь значило бы завести два поведения
+    одной операции.
+    """
+    monkeypatch.setattr(http_client_mod, "CatalogHttpClient", _SalonDoorAnswers)
+    client, _ = _client("ops-linked", ops=True)
+    master = _master(salon, "С ключом")
+    person = _person(salon, "Человек")
+
+    response = _post(client, [master], apply="1", bot_user_id=str(person.pk))
+
+    row = CatalogMaster.all_tenants.get(pk=master.pk)
+    assert row.linked_bot_user_id == person.pk
+    assert row.catalog_specialist_id == _SalonDoorAnswers.specialist_id
+    assert [text for level, text in _messages(response) if level == 30] == []
 
 
 def test_person_of_another_salon_is_refused_and_nothing_is_written(

@@ -273,10 +273,59 @@ def _open_job(
     raise RuntimeError(f"AylaErasureJob: не удалось открыть задание для {ayla_user_id}")
 
 
+def _follow_rebind(job: AylaErasureJob) -> None:
+    """Перевесить задание на актуальный ключ субъекта, если прокси привязан (DRF-2309).
+
+    Задание хранит ключ со времени создания. Если тогда это был ключ прокси, а
+    каталог с тех пор привязал прокси к аккаунту, каждая попытка с ним получает
+    403 (заголовок ``bot:…`` каталог разрешает в аккаунт) — задание не
+    выздоравливает никогда. Поэтому перед попыткой:
+
+    * оболочка уже держит другой ключ (перепривязана другим действием,
+      DRF-1790) — он и берётся, без сети;
+    * оболочка держит известный ключ прокси — переспрос ``ensure_ayla_link``;
+    * иначе (реальный ключ, ключ неизвестного вида, оболочки нет) — как было.
+
+    Смена ключа — условный UPDATE по открытому заданию. Если для нового ключа
+    уже открыто своё задание (одно открытое на ключ), старое не перевешивается:
+    стирание по новому ключу идёт тем заданием. Предел — старое задание само
+    не закрывается.
+    """
+    from apps.identity.models import AylaErasureJob
+
+    bot_user = job.bot_user
+    if bot_user is None:
+        return
+    current = getattr(bot_user, "ayla_user_id", None)
+    fresh = None
+    if current and str(current) != str(job.ayla_user_id):
+        fresh = current
+    elif getattr(bot_user, "ayla_user_id_is_proxy", None) is True:
+        from apps.identity.services.ayla_link import ensure_ayla_link
+
+        fresh = ensure_ayla_link(bot_user, trigger="erasure_retry")
+    if not fresh or str(fresh) == str(job.ayla_user_id):
+        return
+    try:
+        with transaction.atomic():
+            moved = AylaErasureJob.objects.filter(
+                pk=job.pk, status=AylaErasureJob.Status.PENDING
+            ).update(ayla_user_id=fresh)
+    except IntegrityError:
+        logger.warning(
+            "identity.ayla_erasure.rebind_skipped job=%s reason=open_job_for_new_key", job.pk
+        )
+        return
+    if moved:
+        logger.info("identity.ayla_erasure.rebound job=%s", job.pk)
+        job.ayla_user_id = fresh
+
+
 def _attempt(job: AylaErasureJob, *, client: PersonalContextHttpClient) -> str:
     """Одна попытка: DELETE, затем readback. Меняет поля задания, не сохраняет."""
     from apps.identity.models import AylaErasureJob
 
+    _follow_rebind(job)
     now = timezone.now()
     job.attempts += 1
     ayla_id = str(job.ayla_user_id)

@@ -13,27 +13,36 @@
  * apps/miniapp_api/auth.verify_init_data.
  */
 
-import { getInitData } from "./max-sdk";
+import { applyIdentityHeaders } from "./auth-headers";
 import { ApiError } from "./api";
-import { applyDevBypassHeaders } from "./dev-bypass";
-import { applySalonChoiceHeader } from "./salon-choice";
 
 const MASTER_API_BASE = "/api/v1/master";
 
 interface ErrorBody {
   error: string;
   detail: string;
+  /**
+   * Структурные подробности отказа, когда сервер их шлёт. Третий клиент,
+   * который узнаёт об этом поле: `api.ts` его поднимал с DRF-1708,
+   * `admin-api.ts` — с DRF-2273, а мастерский ронял до DRF-2373.
+   *
+   * Цена потери была не косметическая: сервер начинал что-то говорить в
+   * `details`, а на мастерском экране этого просто не существовало —
+   * правка «работала» в виде и не доезжала наружу. Здесь по этому каналу
+   * едет `retriable` — жив ли талон подтверждения.
+   *
+   * Остальные места этого файла поле ещё роняют; они перечислены числом в
+   * `tools/lint/api_error_details_allow.txt` и ждут своего листа.
+   */
+  details?: Record<string, unknown>;
 }
 
 export async function request<T>(
   path: string,
   init: RequestInit = {},
 ): Promise<T> {
-  const initData = getInitData();
   const headers = new Headers(init.headers);
-  if (initData) headers.set("Authorization", `MaxInitData ${initData}`);
-  applyDevBypassHeaders(headers);
-  applySalonChoiceHeader(headers);
+  applyIdentityHeaders(headers);
   // Don't auto-set Content-Type for FormData (the browser writes the
   // boundary string). JSON callers explicitly set it.
   const body = init.body;
@@ -51,7 +60,7 @@ export async function request<T>(
     } catch {
       /* non-JSON 5xx */
     }
-    throw new ApiError(res.status, parsed.error, parsed.detail);
+    throw new ApiError(res.status, parsed.error, parsed.detail, parsed.details);
   }
   if (res.status === 204) return undefined as T;
   return (await res.json()) as T;
@@ -360,8 +369,11 @@ export type ReadinessItemKey = "services" | "location" | "hours" | "profile";
 /**
  * `done` / `missing` — факт; `unknown` — канон не ответил (`reason` — имя
  * исключения): экран НЕ пишет «настройте», а показывает «не удалось
- * прочитать»; `unavailable` — возможности ещё нет (`capability_not_built`):
- * пункт не рисуется вовсе.
+ * прочитать»; `unavailable` — шага у мастера сейчас нет: либо возможности
+ * ещё нет (`capability_not_built`), либо он ведётся не в приложении
+ * (`managed_outside_app` — салонное рабочее пространство, DRF-2254). До
+ * DRF-2326 такой пункт не рисовался вовсе; теперь рисуется названным
+ * недоступным, с причиной и без тапа.
  */
 export type ReadinessItemState = "done" | "missing" | "unknown" | "unavailable";
 
@@ -370,7 +382,8 @@ export interface ReadinessItem {
   state: ReadinessItemState | string;
   detail: Record<string, unknown>;
   reason: string | null;
-  deep_link: string;
+  /** DRF-2254: `null` — вести некуда (пункт ведётся вне приложения, `managed_outside_app`). */
+  deep_link: string | null;
 }
 
 /** Связь личности — условие ПУБЛИКАЦИИ (ruling 6), не настройки. */
@@ -723,19 +736,29 @@ export const publishProfile = (
     signal,
   });
 
-/** Пункты, которые экран рисует: всё, кроме `unavailable`. */
-export const drawnReadinessItems = (items: ReadinessItem[]): ReadinessItem[] =>
+/**
+ * Пункты, которые мастер может закрыть САМ: всё, кроме `unavailable`.
+ *
+ * До DRF-2326 имя было `drawnReadinessItems` — «что экран рисует». Экран 01
+ * теперь рисует и недоступные пункты (спрятанный шаг мастер читает как «у
+ * меня всё», хотя профиль всё равно не отправить), поэтому имя врало бы.
+ * Отбор остался прежним, и смысл у него всегда был этот: бар готовности,
+ * «следующий шаг» и карточка «продолжить настройку» считают достижимое —
+ * недоступный пункт в знаменателе обещал бы работу, которой мастер сделать
+ * не может.
+ */
+export const actionableReadinessItems = (items: ReadinessItem[]): ReadinessItem[] =>
   items.filter((item) => item.state !== "unavailable");
 
 /**
- * Бар готовности — доля закрытых пунктов среди нарисованных. Число не
+ * Бар готовности — доля закрытых пунктов среди достижимых. Число не
  * показывается словами: ни процентов, ни «N из M» (макет: «no fake percent
  * complete»; доктрина 12.09 — счётчик как обещание времени).
  */
 export const readinessFill = (
   items: ReadinessItem[],
 ): { done: number; total: number } => {
-  const drawn = drawnReadinessItems(items);
+  const drawn = actionableReadinessItems(items);
   return {
     done: drawn.filter((item) => item.state === "done").length,
     total: drawn.length,
@@ -775,11 +798,8 @@ export const uploadMasterProfilePhoto = async (
 ): Promise<ProfilePatchResponse> => {
   const fd = new FormData();
   fd.set("photo", file);
-  const initData = getInitData();
   const headers = new Headers();
-  if (initData) headers.set("Authorization", `MaxInitData ${initData}`);
-  applyDevBypassHeaders(headers);
-  applySalonChoiceHeader(headers);
+  applyIdentityHeaders(headers);
   // No Content-Type — let fetch set the multipart boundary.
   const res = await fetch(`${MASTER_API_BASE}/profile`, {
     method: "PATCH",
@@ -793,7 +813,16 @@ export const uploadMasterProfilePhoto = async (
     } catch {
       /* non-JSON 5xx */
     }
-    throw new ApiError(res.status, parsed.error, parsed.detail);
+    // DRF-2439. Единственное из восьми мест, где потеря НЕ пустая: эта же
+    // ручка отвечает через `_profile_refusal` (`master_api/views.py:849`) и
+    // на 400 кладёт в `details` данные каталога о том, ЧТО ИМЕННО не так с
+    // фото — формат, квадрат, размер. Человек видел только общее «Каталог не
+    // принял профиль.», а подробность не доезжала никуда.
+    //
+    // Тот же вид обслуживает и текст, и multipart: текстовый путь идёт через
+    // общего помощника `request` и поле получает (DRF-2373), а этот
+    // самописный `fetch` — нужный из-за multipart — ронял.
+    throw new ApiError(res.status, parsed.error, parsed.detail, parsed.details);
   }
   return (await res.json()) as ProfilePatchResponse;
 };
@@ -864,11 +893,8 @@ export const uploadPortfolioPhoto = async (
 ): Promise<PortfolioItem> => {
   const fd = new FormData();
   fd.set("image", file);
-  const initData = getInitData();
   const headers = new Headers();
-  if (initData) headers.set("Authorization", `MaxInitData ${initData}`);
-  applyDevBypassHeaders(headers);
-  applySalonChoiceHeader(headers);
+  applyIdentityHeaders(headers);
   const res = await fetch(`${MASTER_API_BASE}/profile/portfolio`, {
     method: "POST",
     headers,
@@ -881,7 +907,11 @@ export const uploadPortfolioPhoto = async (
     } catch {
       /* non-JSON 5xx */
     }
-    throw new ApiError(res.status, parsed.error, parsed.detail);
+    // DRF-2439: сегодня сервер здесь `details` не присылает — аргумент
+    // добавлен, чтобы поле не потерялось молча, когда начнёт. Правило
+    // живёт в помощнике `request`, а этот `fetch` написан руками — multipart (boundary ставит браузер),
+    // то есть мимо помощника: `POST master/profile/portfolio`.
+    throw new ApiError(res.status, parsed.error, parsed.detail, parsed.details);
   }
   return (await res.json()) as PortfolioItem;
 };
@@ -1604,11 +1634,8 @@ export interface MasterCreateBookingResult {
 export const createMasterBooking = async (
   body: MasterCreateBookingBody,
 ): Promise<MasterCreateBookingResult> => {
-  const initData = getInitData();
   const headers = new Headers({ "Content-Type": "application/json" });
-  if (initData) headers.set("Authorization", `MaxInitData ${initData}`);
-  applyDevBypassHeaders(headers);
-  applySalonChoiceHeader(headers);
+  applyIdentityHeaders(headers);
 
   let res: Response;
   try {

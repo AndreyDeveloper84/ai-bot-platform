@@ -310,7 +310,9 @@ class TestPersistedState:
             ("кровь не останавливается", "G5"),
             ("не могу вдохнуть", "G1"),
             ("потеряла сознание", "G2"),
-            ("резко стало очень плохо", "G7"),
+            # [OD-BOT §170]: «резко стало очень плохо» is AMBIGUOUS G7 now (its own
+            # question, not a stop); an explicit G7 sign keeps the G7 label.
+            ("мне очень плохо, сейчас упаду", "G7"),
         ),
     )
     def test_another_group_during_pending_g4_is_stop_with_its_own_label(
@@ -535,7 +537,8 @@ class TestOtherGroupsUnchanged:
             "кровь не останавливается",
             "после лекарства внезапно опухли губы",
             "онемела рука и температура 38.5",
-            "резко стало очень плохо",
+            # [OD-BOT §170]: explicit G7 (ambiguous «резко стало очень плохо» is a question)
+            "мне очень плохо, сейчас упаду",
             "Болит шея, отдаёт в руку",
         ),
     )

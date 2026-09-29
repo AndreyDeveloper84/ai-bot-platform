@@ -22,10 +22,10 @@
  *
  * Плавающее «A+B» (падало под параллельной нагрузкой, DRF-1810): тест ждал
  * цепочку загрузок (каталог → секция → заявки) в окне findBy 1000 мс. Теперь каждая загрузка досчитывается явным
- * `settle()` (act), и файл идёт со СТОРОЖЕМ — малым asyncUtilTimeout только
+ * `settleScenario()` (act), и файл идёт со СТОРОЖЕМ — малым asyncUtilTimeout только
  * здесь: новая зависимость от времени краснеет детерминированно, а не раз в тысячу.
  */
-import { act, configure, fireEvent, getConfig, render, screen, within } from "@testing-library/react";
+import { configure, fireEvent, getConfig, render, screen, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -46,7 +46,7 @@ vi.mock("../lib/master-api", async (importOriginal) => {
 });
 
 import { ApiError } from "../lib/api";
-import { SUPPORT_DEEPLINK } from "../lib/customer-profile";
+import { REFUSAL_CANON } from "../lib/refusal-canon";
 import {
   createCanonGapRequest,
   getMasterCatalog,
@@ -81,6 +81,7 @@ import {
   pickedMessage,
   validateOwnService,
 } from "./MasterServicesScreen";
+import { settleScenario } from "../test/settleScenario";
 
 /**
  * Сторож от зависимости от времени (DRF-1810): только в этом файле.
@@ -99,11 +100,6 @@ afterAll(() => {
 });
 
 /** Досчитать все уже разрешённые промисы и эффекты — без ожидания по времени. */
-const settle = async (rounds = 4) => {
-  for (let i = 0; i < rounds; i += 1) {
-    await act(async () => {});
-  }
-};
 
 const mockedCatalog = vi.mocked(getMasterCatalog);
 const mockedList = vi.mocked(listCanonGapRequests);
@@ -192,7 +188,7 @@ async function renderScreen() {
       </Routes>
     </MemoryRouter>,
   );
-  await settle();
+  await settleScenario();
 }
 
 const ownSection = () => screen.getByRole("region", { name: OWN_TITLE });
@@ -219,7 +215,7 @@ async function openSimilarHint() {
   fill(FIELD_DURATION, "90");
   fill(FIELD_PRICE, "3000");
   fireEvent.click(within(ownSection()).getByRole("button", { name: ADD_OWN_LABEL }));
-  await settle();
+  await settleScenario();
 }
 
 // ---------------------------------------------------------------------------
@@ -284,7 +280,7 @@ describe("MasterServicesScreen — экран 04 «Цены и длительн�
     await renderScreen();
 
     fireEvent.click(screen.getByRole("button", { name: "Направления" }));
-    await settle();
+    await settleScenario();
     expect(screen.getByTestId("location")).toHaveTextContent("/solo/directions");
   });
 
@@ -326,7 +322,7 @@ describe("MasterServicesScreen — экран 04 «Цены и длительн�
     await renderScreen();
 
     fireEvent.click(screen.getByRole("button", { name: "Продолжить" }));
-    await settle();
+    await settleScenario();
     expect(screen.getByTestId("location")).toHaveTextContent("/solo/working-hours");
   });
 
@@ -341,7 +337,7 @@ describe("MasterServicesScreen — экран 04 «Цены и длительн�
     await renderScreen();
 
     fireEvent.click(screen.getByRole("button", { name: "Продолжить" }));
-    await settle();
+    await settleScenario();
     expect(screen.getByTestId("location")).toHaveTextContent("/solo/profile");
   });
 
@@ -351,7 +347,7 @@ describe("MasterServicesScreen — экран 04 «Цены и длительн�
     await renderScreen();
 
     fireEvent.click(screen.getByRole("button", { name: "Продолжить" }));
-    await settle();
+    await settleScenario();
     expect(screen.getByTestId("location")).toHaveTextContent("/solo/setup");
   });
 
@@ -361,7 +357,7 @@ describe("MasterServicesScreen — экран 04 «Цены и длительн�
     await renderScreen();
 
     fireEvent.click(screen.getByRole("button", { name: "Продолжить" }));
-    await settle();
+    await settleScenario();
     expect(screen.getByTestId("location")).toHaveTextContent("/solo/setup");
   });
 
@@ -370,7 +366,7 @@ describe("MasterServicesScreen — экран 04 «Цены и длительн�
     await renderScreen();
 
     fireEvent.click(screen.getByRole("button", { name: "Сохранить и продолжить позже" }));
-    await settle();
+    await settleScenario();
     expect(screen.getByTestId("location")).toHaveTextContent("/solo/setup");
   });
 
@@ -380,7 +376,7 @@ describe("MasterServicesScreen — экран 04 «Цены и длительн�
 
     expect(screen.getByText("Выбери хотя бы одну услугу")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Выбрать из каталога" }));
-    await settle();
+    await settleScenario();
     expect(screen.getByTestId("location")).toHaveTextContent("/solo/services/select");
   });
 
@@ -418,7 +414,7 @@ describe("MasterServicesScreen — экран 04 «Цены и длительн�
     await renderScreen();
 
     fireEvent.click(screen.getByRole("button", { name: "Продолжить" }));
-    await settle();
+    await settleScenario();
     expect(screen.getByTestId("location")).toHaveTextContent("/solo/profile");
   });
 
@@ -431,7 +427,7 @@ describe("MasterServicesScreen — экран 04 «Цены и длительн�
     await renderScreen();
 
     fireEvent.click(within(prices()).getByRole("button", { name: /Коррекция бровей/ }));
-    await settle();
+    await settleScenario();
     const sheet = screen.getByRole("dialog", { name: "Коррекция бровей" });
     // Ровно два поля: цена и длительность. Ни названия, ни описания.
     expect(within(sheet).getByLabelText("Цена, ₽")).toBeInTheDocument();
@@ -447,7 +443,7 @@ describe("MasterServicesScreen — экран 04 «Цены и длительн�
     fireEvent.change(within(sheet).getByLabelText("Цена, ₽"), { target: { value: "1800" } });
     fireEvent.click(within(sheet).getByRole("radio", { name: "45 мин" }));
     fireEvent.click(within(sheet).getByRole("button", { name: "Сохранить" }));
-    await settle();
+    await settleScenario();
 
     expect(mockedPut).toHaveBeenCalledWith("svc-1", { price: "1800", duration_minutes: 45 });
     expect(within(prices()).getByText("Настроено 1 из 1")).toBeInTheDocument();
@@ -460,13 +456,13 @@ describe("MasterServicesScreen — экран 04 «Цены и длительн�
     await renderScreen();
 
     fireEvent.click(within(prices()).getByRole("button", { name: /Коррекция бровей/ }));
-    await settle();
+    await settleScenario();
     const sheet = screen.getByRole("dialog", { name: "Коррекция бровей" });
     fireEvent.change(within(sheet).getByLabelText("Цена, ₽"), { target: { value: "900" } });
     fireEvent.click(within(sheet).getByRole("radio", { name: "Другое время" }));
     fireEvent.change(within(sheet).getByLabelText("Минут"), { target: { value: "200" } });
     fireEvent.click(within(sheet).getByRole("button", { name: "Сохранить" }));
-    await settle();
+    await settleScenario();
 
     expect(mockedPut).toHaveBeenCalledWith("svc-1", { price: "900", duration_minutes: 200 });
   });
@@ -481,13 +477,13 @@ describe("MasterServicesScreen — экран 04 «Цены и длительн�
     await renderScreen();
 
     fireEvent.click(within(prices()).getByRole("button", { name: /Коррекция бровей/ }));
-    await settle();
+    await settleScenario();
     const sheet = screen.getByRole("dialog", { name: "Коррекция бровей" });
     fireEvent.change(within(sheet).getByLabelText("Цена, ₽"), { target: { value: price } });
     fireEvent.click(within(sheet).getByRole("radio", { name: "Другое время" }));
     fireEvent.change(within(sheet).getByLabelText("Минут"), { target: { value: minutes } });
     fireEvent.click(within(sheet).getByRole("button", { name: "Сохранить" }));
-    await settle();
+    await settleScenario();
 
     expect(within(sheet).getByText(message)).toBeInTheDocument();
     expect(mockedPut).not.toHaveBeenCalled();
@@ -499,9 +495,9 @@ describe("MasterServicesScreen — экран 04 «Цены и длительн�
     await renderScreen();
 
     fireEvent.click(within(prices()).getByRole("button", { name: /Коррекция бровей/ }));
-    await settle();
+    await settleScenario();
     fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Убрать из моих услуг" }));
-    await settle();
+    await settleScenario();
 
     expect(mockedRemove).toHaveBeenCalledWith("svc-1");
     expect(within(prices()).queryByRole("button", { name: /Коррекция бровей/ })).not.toBeInTheDocument();
@@ -516,10 +512,10 @@ describe("MasterServicesScreen — экран 04 «Цены и длительн�
     await renderScreen();
 
     fireEvent.click(within(prices()).getByRole("button", { name: /Коррекция бровей/ }));
-    await settle();
+    await settleScenario();
     const sheet = screen.getByRole("dialog");
     fireEvent.click(within(sheet).getByRole("button", { name: "Убрать из моих услуг" }));
-    await settle();
+    await settleScenario();
 
     expect(within(sheet).getByText("Нельзя убрать: есть будущие записи (2).")).toBeInTheDocument();
     expect(within(prices()).getByRole("button", { name: /Коррекция бровей/ })).toBeInTheDocument();
@@ -534,12 +530,12 @@ describe("MasterServicesScreen — экран 04 «Цены и длительн�
     await renderScreen();
 
     fireEvent.click(within(prices()).getByRole("button", { name: /Коррекция бровей/ }));
-    await settle();
+    await settleScenario();
     const sheet = screen.getByRole("dialog");
     fireEvent.change(within(sheet).getByLabelText("Цена, ₽"), { target: { value: "1500" } });
     fireEvent.click(within(sheet).getByRole("radio", { name: "60 мин" }));
     fireEvent.click(within(sheet).getByRole("button", { name: "Сохранить" }));
-    await settle();
+    await settleScenario();
 
     expect(within(sheet).getByText(message)).toBeInTheDocument();
   });
@@ -555,13 +551,27 @@ describe("MasterServicesScreen — экран 04 «Цены и длительн�
     expect(screen.queryByRole("button", { name: "Продолжить" })).not.toBeInTheDocument();
   });
 
-  it("S10: not linked → «Доступ не настроен», operator links, support contact, no editing", async () => {
+  // Узел ПЕРЕВЁРНУТ (DRF-2378) — по решению владельца, не по правке кода.
+  //
+  // Было: текст называл исполнителем «оператора», а дверь вела во ВНЕШНЮЮ
+  // поддержку (`SUPPORT_DEEPLINK`). Роли «оператор» в системе нет вовсе —
+  // одним словом названы группа `Ayla Operations`, флаг
+  // `is_platform_admin` каталога и пустой `HANDOFF_DUTY_OPERATORS`; ни
+  // одна не даёт права привязки. Адресат теперь студия, и чат у неё
+  // существует (`/master/internal-chat`, «Со студией»).
+  //
+  // Что при этом перестало проверяться: внешняя поддержка с этого экрана
+  // больше не достижима — это следствие решения, а не потеря по
+  // недосмотру. Заголовок «Доступ не настроен» остался: он говорит, что
+  // это за блок, и листом про слово не снимается.
+  it("S10: not linked → «Доступ не настроен», дверь к студии, редактирования нет", async () => {
     mockedSelection.mockRejectedValue(new ApiError(403, "not_linked", "…"));
     await renderScreen();
 
     expect(screen.getByRole("heading", { name: "Доступ не настроен" })).toBeInTheDocument();
-    expect(screen.getByText("Профиль ещё не привязан — привязку выполнит оператор.")).toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Написать в поддержку" })).toHaveAttribute("href", SUPPORT_DEEPLINK);
+    expect(screen.getByText("Профиль пока не подключён — услуги пока не настроить.")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Написать студии" })).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Написать в поддержку" })).toBeNull();
     expect(screen.queryByRole("region", { name: "Цены и длительность" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Продолжить" })).not.toBeInTheDocument();
   });
@@ -577,7 +587,7 @@ describe("MasterServicesScreen — экран 04 «Цены и длительн�
     expect(screen.getByRole("alert")).toHaveTextContent("Не удалось загрузить услуги");
     expect(screen.queryByRole("button", { name: "Повторить" })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Попробовать снова" }));
-    await settle();
+    await settleScenario();
 
     expect(mockedSelection).toHaveBeenCalledTimes(2);
     expect(within(prices()).getByRole("button", { name: /Коррекция бровей/ })).toBeInTheDocument();
@@ -632,7 +642,7 @@ describe("MasterServicesScreen — «Свои услуги»", () => {
     fireEvent.click(within(ownSection()).getByRole("button", { name: ADD_OWN_LABEL }));
     fill(FIELD_DURATION, "0");
     fireEvent.click(within(ownSection()).getByRole("button", { name: ADD_OWN_LABEL }));
-    await settle();
+    await settleScenario();
 
     expect(within(ownSection()).getByText(ERR_NAME)).toBeInTheDocument();
     expect(within(ownSection()).getByText(ERR_DURATION)).toBeInTheDocument();
@@ -648,13 +658,15 @@ describe("MasterServicesScreen — «Свои услуги»", () => {
 
     expect(within(ownSection()).getByText("Перманентный макияж бровей")).toBeInTheDocument();
     expect(mockedSimilar).toHaveBeenCalledWith("Татуаж бровей");
+    // DRF-2597: создания нет до «Всё равно добавить мою» — замер после того, как подсказка улеглась.
+    await settleScenario();
     expect(mockedCreate).not.toHaveBeenCalled();
     expect(within(ownSection()).getByRole("button", { name: PICK_CANON_LABEL })).toBeEnabled();
     expect(mockedSelect).not.toHaveBeenCalled();
 
     mockedList.mockResolvedValue({ requests: [req("r1", "Татуаж бровей пудровый"), req("r2", "Татуаж бровей")] });
     fireEvent.click(within(ownSection()).getByRole("button", { name: ADD_ANYWAY_LABEL }));
-    await settle();
+    await settleScenario();
 
     expect(mockedCreate).toHaveBeenCalledTimes(1);
     expect(mockedCreate).toHaveBeenCalledWith({ name: "Татуаж бровей", description: "", duration_minutes: 90, price: "3000" });
@@ -670,10 +682,27 @@ describe("MasterServicesScreen — «Свои услуги»", () => {
     fill(FIELD_DURATION, "60");
     fill(FIELD_PRICE, "2000,50");
     fireEvent.click(within(ownSection()).getByRole("button", { name: ADD_OWN_LABEL }));
-    await settle();
+    await settleScenario();
 
     expect(mockedCreate).toHaveBeenCalledTimes(1);
     expect(mockedCreate).toHaveBeenCalledWith(expect.objectContaining({ name: "Ламинирование", duration_minutes: 60, price: "2000.50" }));
+  });
+
+  it.each([
+    ["слаг без detail", new ApiError(400, "canon_gap_duplicate", "")],
+    ["английский detail", new ApiError(400, "invalid", "price: must be positive")],
+  ])("отказ сервера (%s) — ровно «Не удалось сохранить услугу.» (§6-кси п.1, DRF-2577)", async (_, refusal) => {
+    mockedCreate.mockRejectedValue(refusal);
+    await renderScreen();
+    fireEvent.click(within(ownSection()).getByRole("button", { name: ADD_OWN_LABEL }));
+    fill(FIELD_NAME, "Ламинирование");
+    fill(FIELD_DURATION, "60");
+    fill(FIELD_PRICE, "2000");
+    fireEvent.click(within(ownSection()).getByRole("button", { name: ADD_OWN_LABEL }));
+    await settleScenario();
+
+    expect(within(ownSection()).getByText(REFUSAL_CANON.serviceSave)).toBeInTheDocument();
+    expect(within(ownSection()).queryByText(/canon_gap_duplicate|must be positive/)).toBeNull();
   });
 
   it("K: a new submission clears the previous message — an invalid one included", async () => {
@@ -683,13 +712,13 @@ describe("MasterServicesScreen — «Свои услуги»", () => {
     fill(FIELD_DURATION, "60");
     fill(FIELD_PRICE, "2000");
     fireEvent.click(within(ownSection()).getByRole("button", { name: ADD_OWN_LABEL }));
-    await settle();
+    await settleScenario();
     expect(within(ownSection()).getByText(SENT_MESSAGE)).toBeInTheDocument();
 
     // Открыть форму снова и отправить пустой: прежнее сообщение уходит в момент отправки.
     fireEvent.click(within(ownSection()).getByRole("button", { name: ADD_OWN_LABEL }));
     fireEvent.click(within(ownSection()).getByRole("button", { name: ADD_OWN_LABEL }));
-    await settle();
+    await settleScenario();
 
     expect(within(ownSection()).getByText(ERR_NAME)).toBeInTheDocument();
     expect(within(ownSection()).queryByText(SENT_MESSAGE)).not.toBeInTheDocument();
@@ -723,7 +752,7 @@ describe("MasterServicesScreen — «Выбрать эту услугу» (DRF-1
     await openSimilarHint();
 
     fireEvent.click(within(ownSection()).getByRole("button", { name: PICK_CANON_LABEL }));
-    await settle();
+    await settleScenario();
 
     expect(mockedSelect).toHaveBeenCalledWith(["t1"]);
     expect(within(ownSection()).getByText(pickedMessage(3))).toBeInTheDocument();

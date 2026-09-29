@@ -12,7 +12,7 @@
  *     `ayla_unavailable` → фраза + «Повторить», который повторяет запрос;
  *   - числа под тем же ED-признаком, что дневник.
  */
-import { act, configure, fireEvent, getConfig, render, screen, within } from "@testing-library/react";
+import { configure, fireEvent, getConfig, render, screen, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -34,6 +34,7 @@ import { getWellnessToday, type WellnessToday } from "../lib/customer-wellness";
 import { deleteSavedMeal, listSavedMeals, type SavedMeal } from "../lib/saved-meals";
 import { FAVORITES_COPY, FAVORITES_ROUTE, FoodScannerFavoritesScreen } from "./FoodScannerFavoritesScreen";
 import { MANUAL_ROUTE } from "./FoodScannerManualScreen";
+import { settleScenario } from "../test/settleScenario";
 
 const GUARD_ASYNC_TIMEOUT_MS = 20;
 let previousAsyncUtilTimeout = 1000;
@@ -45,11 +46,6 @@ afterAll(() => {
   configure({ asyncUtilTimeout: previousAsyncUtilTimeout });
 });
 
-const settle = async (rounds = 4) => {
-  for (let i = 0; i < rounds; i += 1) {
-    await act(async () => {});
-  }
-};
 
 const mockedList = vi.mocked(listSavedMeals);
 const mockedDelete = vi.mocked(deleteSavedMeal);
@@ -99,7 +95,7 @@ beforeEach(() => {
 describe("список с сервера", () => {
   it("рисует строки, которые отдал сервер: блюдо, порция, ккал", async () => {
     renderScreen();
-    await settle();
+    await settleScenario();
 
     expect(mockedList).toHaveBeenCalledTimes(1);
     const items = screen.getAllByRole("listitem");
@@ -113,7 +109,7 @@ describe("список с сервера", () => {
   it("числа скрыты под тем же ED-признаком, что дневник", async () => {
     mockedToday.mockResolvedValue({ nutrition_numbers_hidden: true } as WellnessToday);
     renderScreen();
-    await settle();
+    await settleScenario();
 
     const first = screen.getAllByRole("listitem")[0];
     expect(first).toHaveTextContent("Борщ");
@@ -123,7 +119,7 @@ describe("список с сервера", () => {
   it("пусто — названо словами и сказано, как добавить", async () => {
     mockedList.mockResolvedValue([]);
     renderScreen();
-    await settle();
+    await settleScenario();
 
     expect(screen.getByText(FAVORITES_COPY.emptyTitle)).toBeInTheDocument();
     expect(screen.getByText(FAVORITES_COPY.emptyHint)).toBeInTheDocument();
@@ -134,10 +130,10 @@ describe("список с сервера", () => {
 describe("действия", () => {
   it("«Удалить» — строка уходит после подтверждения сервером", async () => {
     renderScreen();
-    await settle();
+    await settleScenario();
 
     fireEvent.click(screen.getByRole("button", { name: `${FAVORITES_COPY.remove}: Борщ` }));
-    await settle();
+    await settleScenario();
 
     expect(mockedDelete).toHaveBeenCalledWith("sm-1");
     const items = screen.getAllByRole("listitem");
@@ -148,10 +144,10 @@ describe("действия", () => {
   it("«Удалить» при отказе сервера строку не убирает и называет причину", async () => {
     mockedDelete.mockRejectedValue(new ApiError(502, "ayla_unavailable", "down"));
     renderScreen();
-    await settle();
+    await settleScenario();
 
     fireEvent.click(screen.getByRole("button", { name: `${FAVORITES_COPY.remove}: Борщ` }));
-    await settle();
+    await settleScenario();
 
     expect(screen.getAllByRole("listitem")).toHaveLength(2);
     expect(screen.getByText(FAVORITES_COPY.unavailable)).toBeInTheDocument();
@@ -159,10 +155,10 @@ describe("действия", () => {
 
   it("«Записать» — на экран текста той же тропой с сохранённой порцией", async () => {
     renderScreen();
-    await settle();
+    await settleScenario();
 
     fireEvent.click(screen.getByRole("button", { name: `${FAVORITES_COPY.record}: Борщ` }));
-    await settle();
+    await settleScenario();
 
     const probe = screen.getByTestId("location");
     expect(probe).toHaveTextContent(MANUAL_ROUTE);
@@ -174,7 +170,7 @@ describe("отказы по имени", () => {
   it("nutrition_disabled → дневник недоступен, списка нет", async () => {
     mockedList.mockRejectedValue(new ApiError(404, "nutrition_disabled", "off"));
     renderScreen();
-    await settle();
+    await settleScenario();
 
     expect(screen.getByText(FAVORITES_COPY.diaryOff)).toBeInTheDocument();
     expect(screen.queryByRole("listitem")).toBeNull();
@@ -183,7 +179,7 @@ describe("отказы по имени", () => {
   it("consent_required → гейт согласия с возвратом сюда", async () => {
     mockedList.mockRejectedValue(new ApiError(403, "consent_required", "consent"));
     renderScreen();
-    await settle();
+    await settleScenario();
 
     const probe = screen.getByTestId("location");
     expect(probe).toHaveTextContent("/customer/food-scanner/capture");
@@ -193,12 +189,12 @@ describe("отказы по имени", () => {
   it("ayla_unavailable → фраза и «Повторить», который повторяет запрос", async () => {
     mockedList.mockRejectedValueOnce(new ApiError(502, "ayla_unavailable", "down"));
     renderScreen();
-    await settle();
+    await settleScenario();
 
     expect(screen.getByText(FAVORITES_COPY.unavailable)).toBeInTheDocument();
     mockedList.mockResolvedValueOnce([BORSCH]);
     fireEvent.click(screen.getByRole("button", { name: FAVORITES_COPY.retry }));
-    await settle();
+    await settleScenario();
 
     expect(mockedList).toHaveBeenCalledTimes(2);
     expect(within(screen.getByRole("list")).getAllByRole("listitem")).toHaveLength(1);

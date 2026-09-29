@@ -16,6 +16,7 @@
  * недоступен; `consent_required` — гейт согласия с возвратом сюда;
  * остальное — фраза и «Повторить».
  */
+import { DiaryEntryItem } from "../components/DiaryEntryPhoto";
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 
@@ -43,6 +44,12 @@ export const DAY_COPY = {
   title: (date: string) => dayLabel(date),
   count: (n: number) => `${entriesLabel(n)}.`,
   kcal: (kcal: number) => `~${Math.round(kcal)} ккал`,
+  /**
+   * DRF-2455 (§77 п.40) — «в дневнике со всей информацией о записи:
+   * время, ккал, бжу, фото». Вид взят у экрана результата, где он уже
+   * согласован: «Б 11 · Ж 6 · У 54 г». Новых слов здесь нет.
+   */
+  macros: (parts: string[]) => `${parts.join(" · ")} г`,
   empty: "В этот день записей нет.",
   badDate: "Такого дня нет.",
   retry: "Повторить",
@@ -50,6 +57,25 @@ export const DAY_COPY = {
   diaryOff: "Дневник питания пока недоступен.",
   unavailable: "День сейчас недоступен — сервис питания не отвечает. Попробуй чуть позже.",
 } as const;
+
+/**
+ * DRF-2455 — макросы записи в виде, согласованном на экране результата.
+ * Отсутствующий макрос не печатается: «Б 0» и «Б null» одинаково
+ * утверждают расчёт, которого не было.
+ */
+function macroParts(entry: FoodDiaryEntry): string[] {
+  const parts: string[] = [];
+  for (const [label, value] of [
+    ["Б", entry.protein_g],
+    ["Ж", entry.fat_g],
+    ["У", entry.carbs_g],
+  ] as Array<[string, number | null | undefined]>) {
+    // Округление — то же, что на экране результата (один знак): иначе
+    // одно и то же блюдо читается как «Б 11» здесь и «Б 11.4» там.
+    if (value != null) parts.push(`${label} ${Math.round(value * 10) / 10}`);
+  }
+  return parts;
+}
 
 const KNOWN_MEALS = ["breakfast", "lunch", "dinner", "snack"] as const;
 const OTHER_MEALS = "__other__";
@@ -190,19 +216,30 @@ export function FoodScannerDayScreen() {
                   </h2>
                   <ul className="food-scanner-diary__list">
                     {items.map((entry) => (
-                      <li key={entry.id} className="food-scanner-diary__entry">
+                      <DiaryEntryItem key={entry.id} entry={entry}>
                         <div className="food-scanner-diary__entry-main">
                           <span className="food-scanner-diary__entry-time">
                             {formatTimeShort(entry.logged_at)}
                           </span>
                           <span className="food-scanner-diary__entry-dish">{entry.dish_name}</span>
                         </div>
-                        {showNumbers && (
+                        {/* DRF-2371 — запись без чисел не получает числа:
+                            «~0 ккал» или «null ккал» утверждали бы расчёт,
+                            которого не было. Строки просто нет. */}
+                        {showNumbers && entry.calories != null && (
                           <span className="food-scanner-diary__entry-cal">
                             {DAY_COPY.kcal(entry.calories)}
                           </span>
                         )}
-                      </li>
+                        {/* DRF-2455 — БЖУ приходили в ответе и не
+                            показывались. Каждый макрос проверяется
+                            отдельно: они пишутся независимо от калорий. */}
+                        {showNumbers && macroParts(entry).length > 0 && (
+                          <span className="food-scanner-diary__entry-macros">
+                            {DAY_COPY.macros(macroParts(entry))}
+                          </span>
+                        )}
+                      </DiaryEntryItem>
                     ))}
                   </ul>
                 </section>

@@ -550,6 +550,21 @@ jobs:
       - name: Mini App schedule-confirmation vocabulary
         run: uv run python tools/lint/schedule_vocabulary_guard.py apps/miniapp
 
+      # Отказ сервера доезжает до экрана целиком (DRF-2373). `ApiError`
+      # умеет нести `details`, и клиенты его роняли — чинили ТРИЖДЫ
+      # поодиночке: `api.ts` (DRF-1708), `admin-api.ts` (DRF-2273),
+      # `master-api.ts` (DRF-2373). Один дефект, три листа, три года:
+      # каждый раз чинили место, а не правило. Дефект невидим по
+      # построению — уронивший клиент работает, экран просто не знает
+      # того, что сервер сказал, и ни типы, ни прогон этого не ловят.
+      # Сторож судит по РОЛИ вызова: третий аргумент вида `<x>.detail`
+      # значит разобранное тело отказа, и `<x>.details` обязателен;
+      # ошибка, придуманная на месте из литералов, освобождена самим
+      # правилом, а не именем в списке. Непочиненные места перечислены
+      # числом в `api_error_details_allow.txt` и только сокращаются.
+      - name: Mini App ApiError details contract
+        run: uv run python tools/lint/api_error_details_guard.py apps/miniapp
+
       # Personal-field owner guard (DRF-1365). The memory audit of
       # 2026-08-24 returned «C — multiple competing memory systems»: six
       # stores holding facts about the same person, none of them designed
@@ -654,9 +669,10 @@ jobs:
       # below type-checked them, which is exactly the trap: they looked
       # covered and defended nothing.
       #
-      # Measured against Postgres 16 (NOT SQLite — see cause (a) below
-      # for why that distinction is the whole story): 440 passed, 9
-      # skipped, 38 deselected. Four runs before merge — three locally
+      # Measured 22.08 (DRF-1253) against Postgres 16 (NOT SQLite — see
+      # cause (a) below for why that distinction is the whole story): 440
+      # passed, 9 skipped, 38 deselected — 34 of those re-enabled 28.09
+      # (DRF-2588), so these counts are history, not today's run. Four runs before merge — three locally
       # on Windows (~2.5 min each) and one on this runner (57.77s) —
       # all with identical counts. 21 of the 26 files are green as-is.
       #
@@ -678,24 +694,28 @@ jobs:
       # a success. (The `pytest apps/ -q` step below has exactly that
       # problem today. Out of scope for this ticket, worth its own.)
       #
-      # ─── Deselected: 38 tests, 4 root causes, none introduced here ──
+      # ─── Deselected: 3 tests, 2 root causes, none introduced here ───
       # Every one reproduced on Postgres and filed separately. Deselects
-      # are node-ID-scoped, not file-scoped, so the 206 passing tests
-      # that live *inside* those five files still run — above all the
-      # 186 green cases of the cross-tenant leakage scanner, which
-      # guards a security invariant and is worth keeping in CI.
+      # are node-ID-scoped, not file-scoped, so the passing tests that
+      # live *inside* those files still run. Since DRF-2588 the
+      # cross-tenant leakage scanner has NO deselects — keep it that way:
+      # it guards a security invariant, and a deselected case there was
+      # a leak check nobody ran for five weeks.
       #
-      # (a) 34 x tests/integration/test_cross_tenant_leakage.py — the
-      #     generic `_create_row` factory (`_MODEL_REQUIRED_FIELDS`) is
-      #     wrong on Postgres and only on Postgres:
-      #       31 x StringDataRightTruncation — the factory appends
-      #            "-{Model}-{n}" to a base value and overflows
-      #            varchar(16) columns (TenantStaff.role receives
-      #            "admin-TenantStaff-1", 19 chars).
-      #        3 x NotNullViolation — StaffInvite.expires_at is NOT NULL
-      #            with no default and the factory never supplies it.
-      #     SQLite enforces neither, which is why this file read as
-      #     green for as long as it sat outside CI. Test-side fix.
+      # (a) REMOVED (DRF-2588, 28.09): 34 x TestEveryScopedModel in
+      #     tests/integration/test_cross_tenant_leakage.py were deselected
+      #     here from 22.08 — 12 models (Message, ConsentRecord,
+      #     PaymentMirror, RemoteBookingProxy, BookingReminder, …) had no
+      #     cross-tenant leak check in CI for five weeks. Cause was the
+      #     generic `_create_row` factory: it appended "-{suffix}" to
+      #     every static string and overflowed varchar(16) on Postgres
+      #     (31 x StringDataRightTruncation), and StaffInvite had no
+      #     factory row at all (3 x NotNullViolation on expires_at). The
+      #     suffix now goes only to fields in a uniqueness rule, fitted to
+      #     max_length. Re-enabled only after a substitution showed every
+      #     one of the 34 goes red ON THE ASSERTION under a simulated
+      #     leak, not in setup — a re-enabled case that cannot fail would
+      #     be worse than a visibly disabled one.
       # (b) 2 x tests/e2e/ (test_max_echo, test_handoff_skill) — both
       #     assert the bot echoes the user's text back verbatim; DRF-963
       #     replaced verbatim echo with the "Я пока не понял" fallback.
@@ -710,7 +730,9 @@ jobs:
       #     cannot express a confirmation step and Pilot was not the
       #     place to invent one. The test asserts the behaviour that
       #     ticket removed on purpose. Test-side fix.
-      # (d) 1 x tests/contracts/test_event_idempotency.py — its autouse
+      # (d) RESOLVED 28.09 (DRF-2588) — re-enabled: passes on Postgres 16
+      #     against dev d4ccc25a. Was: 1 x
+      #     tests/contracts/test_event_idempotency.py — its autouse
       #     fixture sets EVENT_INGEST_TENANT_VERIFY_FAIL_OPEN but never
       #     EVENT_INGEST_ALLOWED_TENANTS / _ALLOWED_EVENTS, so
       #     booking.created is denied with
@@ -720,8 +742,8 @@ jobs:
       #     (apps/eventbus/tests/test_booking_consumer.py:137 and five
       #     others). One-line fixture fix.
       #
-      # The node IDs are single-quoted, unlike the apps/ deselects
-      # below: parametrized IDs end in `[ModelName]`, and an unquoted
+      # The node IDs are single-quoted (and any future apps/ deselect
+      # should be too): a parametrized ID ends in `[...]`, and an unquoted
       # `[...]` is a bash glob character class. It happens to survive
       # today only because nothing matches and nullglob/failglob are
       # off — which is a property of the shell, not of this file.
@@ -734,44 +756,9 @@ jobs:
       - name: pytest tests/ (cross-cutting suite, minus smoke)
         run: |
           uv run pytest tests/ --ignore=tests/smoke \
-            --deselect 'tests/contracts/test_event_idempotency.py::TestBookingIdempotency::test_booking_created_idempotent' \
             --deselect 'tests/e2e/test_handoff_skill.py::test_handoff_flow_creates_task_silences_followup_resumes_on_resolve' \
             --deselect 'tests/e2e/test_max_echo.py::test_max_webhook_to_echo_happy_path' \
-            --deselect 'tests/e2e/test_privacy_skill.py::test_delete_data_triggers_privacy_skill_and_wipes_user' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_default_manager_filters_by_current_tenant[TenantStaff]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_default_manager_filters_by_current_tenant[StaffInvite]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_default_manager_filters_by_current_tenant[DisclaimerLibrary]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_default_manager_filters_by_current_tenant[AIRequestMetric]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_default_manager_filters_by_current_tenant[BookingReminder]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_default_manager_filters_by_current_tenant[PendingBookingAction]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_default_manager_filters_by_current_tenant[RemoteBookingProxy]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_default_manager_filters_by_current_tenant[PaymentMirror]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_default_manager_filters_by_current_tenant[ScheduleException]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_default_manager_filters_by_current_tenant[LoyaltyEvent]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_audit_mode_returns_empty_without_context[TenantStaff]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_audit_mode_returns_empty_without_context[StaffInvite]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_audit_mode_returns_empty_without_context[Message]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_audit_mode_returns_empty_without_context[ConsentRecord]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_audit_mode_returns_empty_without_context[DisclaimerLibrary]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_audit_mode_returns_empty_without_context[AIRequestMetric]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_audit_mode_returns_empty_without_context[BookingReminder]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_audit_mode_returns_empty_without_context[PendingBookingAction]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_audit_mode_returns_empty_without_context[RemoteBookingProxy]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_audit_mode_returns_empty_without_context[PaymentMirror]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_audit_mode_returns_empty_without_context[ScheduleException]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_audit_mode_returns_empty_without_context[LoyaltyEvent]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_off_mode_returns_all_rows[TenantStaff]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_off_mode_returns_all_rows[StaffInvite]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_off_mode_returns_all_rows[Message]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_off_mode_returns_all_rows[ConsentRecord]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_off_mode_returns_all_rows[DisclaimerLibrary]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_off_mode_returns_all_rows[AIRequestMetric]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_off_mode_returns_all_rows[BookingReminder]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_off_mode_returns_all_rows[PendingBookingAction]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_off_mode_returns_all_rows[RemoteBookingProxy]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_off_mode_returns_all_rows[PaymentMirror]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_off_mode_returns_all_rows[ScheduleException]' \
-            --deselect 'tests/integration/test_cross_tenant_leakage.py::TestEveryScopedModel::test_off_mode_returns_all_rows[LoyaltyEvent]'
+            --deselect 'tests/e2e/test_privacy_skill.py::test_delete_data_triggers_privacy_skill_and_wipes_user'
 
       # Static Ayla client↔route-table contract (S0-C / G-Contract). Pure,
       # network-free: exercises every bot Ayla client through its real code and
@@ -815,8 +802,8 @@ jobs:
       # a shard that lost half of them, and it does not catch a path that
       # fell out of every shard's selector at once.
       #
-      # So: collect the WHOLE of apps/ once, here, with the same deselect
-      # list the shards use, and write the number down. `test` below sums
+      # So: collect the WHOLE of apps/ once, here, with the same selection
+      # the shards use, and write the number down. `test` below sums
       # the five shard junits and refuses to be green unless the sum equals
       # this number. Recomputed every run, so unlike a hard-coded expected
       # count it cannot go stale and start lying.
@@ -824,13 +811,16 @@ jobs:
       # `--collect-only` needs no database and no services: ~1 min of
       # imports, on a job that is not the critical path.
       #
-      # The deselect list below is the SAME list as in the shard job. Two
-      # copies is a known hazard, and the rule is the one the
-      # detect-secrets exclusions already carry: if you touch one, touch
-      # the other in the same commit. They are also checked against each
-      # other on every run by construction — a deselect present here and
-      # missing there makes the shard sum exceed the census, and `test`
-      # goes red naming both numbers.
+      # Since DRF-2588 (28.09) there is NO apps/ deselect: the last 26
+      # passed on Postgres against dev and were re-enabled. If one ever has
+      # to be added, it goes into BOTH this step and the shard job in the
+      # same commit — two copies is a known hazard, the rule is the one
+      # the detect-secrets exclusions already carry. They are checked
+      # against each other on every run by construction: a deselect
+      # present here and missing there makes the shard sum exceed the
+      # census, and `test` goes red naming both numbers. And it needs a
+      # Linear leaf next to it — 23 of the last 26 had none ("Candidate
+      # for Linear, not fixed here") and outlived their cause by weeks.
       # ------------------------------------------------------------------
       - name: apps/ collection census (sentinel for the shard layout)
         run: |
@@ -847,32 +837,6 @@ jobs:
           # census is the exact silent-green failure this sentinel exists to
           # catch. Do not add `-q` back.
           uv run pytest apps/ --collect-only \
-            --deselect apps/miniapp_api/tests/test_c7_payments.py::TestPaymentMirrorReadModel::test_booking_confirmed_with_payment_id_stamps_hold \
-            --deselect apps/miniapp_api/tests/test_c7_payments.py::TestPaymentMirrorReadModel::test_booking_confirmed_without_payment_id_no_mirror \
-            --deselect apps/miniapp_api/tests/test_create_booking_ayla.py::TestLocalPathUnchanged::test_flag_off_keeps_local_path \
-            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_happy_path \
-            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_q12a_over_90d_breaks_chain \
-            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_not_owned_rejected \
-            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_already_cancelled_rejected \
-            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_q12a_cancel_requested_rejected \
-            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_not_found_rejected \
-            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_q12a_541_price_hike_breaks_chain_end_to_end \
-            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_q12a_541_identity_unchanged_preserves_chain_and_root_snapshot \
-            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_q12a_616_root_snapshot_read_uses_select_for_update \
-            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_q12a_616_root_snapshot_read_calls_select_for_update_with_of_self \
-            --deselect apps/bookings/tests/test_booking_callbacks.py::TestConfirmTapReschedule::test_happy_path_notifies_manager \
-            --deselect apps/skills/booking/tests/test_tools_q12a.py::TestQ12aContinuationLLMPath::test_within_90d_same_service_continuation_chain \
-            --deselect apps/skills/booking/tests/test_tools_q12a.py::TestQ12aContinuationLLMPath::test_over_90d_breaks_chain_billable_fresh_sale \
-            --deselect apps/skills/booking/tests/test_tools_q12a.py::TestQ12aContinuationLLMPath::test_b1_null_service_id_does_not_falsely_flag_swap \
-            --deselect apps/skills/booking/tests/test_tools_reschedule.py::TestExecuteReschedule::test_happy_path \
-            --deselect apps/skills/booking/tests/test_tools_reschedule.py::TestExecuteReschedule::test_new_row_carries_ai_direct_attribution \
-            --deselect apps/skills/booking/tests/test_tools_reschedule.py::TestIdempotencyMarkerAnchored::test_spoofed_substring_does_not_short_circuit_reschedule \
-            --deselect apps/skills/booking/tests/test_tools_reschedule.py::TestLocalCreateSplitBrainRecovery::test_local_create_fails_compensate_succeeds_recovers_cleanly \
-            --deselect apps/skills/booking/tests/test_tools_reschedule.py::TestLocalCreateSplitBrainRecovery::test_local_create_fails_compensate_fails_alerts_critical \
-            --deselect apps/skills/booking/tests/test_flow_continuation.py::TestSequenceA::test_full_reschedule_flow \
-            --deselect apps/skills/booking/tests/test_flow_continuation.py::TestSequenceB::test_combined_selection_slot_turn \
-            --deselect apps/skills/booking/tests/test_flow_continuation.py::TestSequenceC::test_callback_confirm_executes \
-            --deselect apps/skills/booking/tests/test_flow_continuation.py::TestNegatives::test_duplicate_text_confirm_no_double_mutation \
             > census-raw.txt 2>&1 || { tail -30 census-raw.txt; echo "CENSUS FAILED — apps/ did not collect."; exit 1; }
           tail -3 census-raw.txt
           # Parser lives in .github/scripts/census_count.py so it can be tested:
@@ -880,6 +844,17 @@ jobs:
           # output for BOTH quiet levels, plus garbage, and asserts the two
           # levels agree on the same collection.
           python3 .github/scripts/census_count.py census-raw.txt apps-census.txt
+
+      # DRF-2633 — test ids must be the same in every process. xdist collects
+      # the suite in EVERY worker and requires the sets to match; a volatile
+      # id (a uuid4 in parametrize, a memory address in an id) makes a shard
+      # die at collection far from its cause, while one local process is
+      # green. Three checks, each closing a hole the others leave — see the
+      # module docstring of tools/lint/stable_test_ids.py (double collection
+      # with two PYTHONHASHSEEDs, the address pattern, tuple-minded `ids`).
+      # Calibrated on both known cases in tests/tools/test_stable_test_ids.py.
+      - name: stable test ids (DRF-2633)
+        run: uv run python tools/lint/stable_test_ids.py apps tests
 
       - name: Upload apps/ collection census
         if: always()
@@ -949,7 +924,8 @@ jobs:
   # the other in the same edit; the census in `checks` above will catch
   # you if it does not.
   #
-  # EVERY SHARD GETS THE WHOLE DESELECT LIST. `--deselect` in pytest is
+  # IF A DESELECT LIST EVER RETURNS (none today, DRF-2588), EVERY SHARD
+  # GETS THE WHOLE OF IT. `--deselect` in pytest is
   # prefix matching over already-collected items (`_pytest/main.py`,
   # `pytest_collection_modifyitems`): an id that matches nothing in this
   # shard is a silent no-op, not an error. So the list is not partitioned
@@ -1230,13 +1206,23 @@ jobs:
       # green locally and defended nothing in CI. Full apps/ (7246 tests,
       # measured against Postgres — the SQLite default that most of
       # `dev` runs locally hides real failures, see
-      # project_test_db_sqlite_vs_postgres) is clean EXCEPT the 26 tests
-      # deselected below, grouped by root cause so the excluded set is
-      # legible instead of a wall of paths:
+      # project_test_db_sqlite_vs_postgres) was clean EXCEPT 26 tests
+      # deselected here, grouped by root cause below. All 26 re-enabled
+      # 28.09 (DRF-2588) — the causes are kept as history:
       #
-      # (a) DRF-1044 — 3 pre-existing miniapp_api failures, same on
+      # (a) RESOLVED 28.09 (DRF-2588) — re-enabled: all 3 pass on
+      #     Postgres 16 against dev d4ccc25a. Was: DRF-1044 — 3
+      #     pre-existing miniapp_api failures, same on
       #     SQLite and Postgres, known before this ticket.
-      # (b) NEW (2026-08-15, DRF-1121 investigation) — 23 failures, ALL
+      # (b) RESOLVED 28.09 (DRF-2588) — re-enabled: 22 of 23 pass on
+      #     Postgres 16 against dev d4ccc25a; the 23rd
+      #     (test_q12a_616_root_snapshot_read_uses_select_for_update)
+      #     looked for table "apps_booking_bookingrequest" while the
+      #     table is booking_bookingrequest — the lock it pins IS there
+      #     (apps/booking/services/reschedule.py select_for_update on the
+      #     old row and on the chain root); test fixed to read the name
+      #     from the model. No Linear leaf ever existed for this entry.
+      #     Was: NEW (2026-08-15, DRF-1121 investigation) — 23 failures, ALL
       #     the same root cause: `BookingRequest.all_tenants
       #     .select_for_update().select_related("service")` in
       #     apps/skills/booking/tools.py's execute_reschedule (the
@@ -1289,8 +1275,8 @@ jobs:
       # two workers ever share a schema.
       #
       # DRF-1349 — the invocation below is the one described above, with
-      # `apps/` replaced by this shard's selector. `-n 4 --dist load` and
-      # the deselect list are unchanged.
+      # `apps/` replaced by this shard's selector and `-n 4` (the
+      # distribution mode is `worksteal`, DRF-2205, see the step).
       - name: pytest apps/ (shard ${{ matrix.shard.id }})
         env:
           # Via env, not interpolated into the script: the value is a
@@ -1311,33 +1297,7 @@ jobs:
           # Это прячет неравномерность, а не устраняет её причину;
           # причину лечит перераспределение шардов в матрице выше.
           uv run pytest $SHARD_ARGS -q -n 4 --dist worksteal \
-            --junitxml="$JUNIT_FILE" \
-            --deselect apps/miniapp_api/tests/test_c7_payments.py::TestPaymentMirrorReadModel::test_booking_confirmed_with_payment_id_stamps_hold \
-            --deselect apps/miniapp_api/tests/test_c7_payments.py::TestPaymentMirrorReadModel::test_booking_confirmed_without_payment_id_no_mirror \
-            --deselect apps/miniapp_api/tests/test_create_booking_ayla.py::TestLocalPathUnchanged::test_flag_off_keeps_local_path \
-            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_happy_path \
-            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_q12a_over_90d_breaks_chain \
-            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_not_owned_rejected \
-            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_already_cancelled_rejected \
-            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_q12a_cancel_requested_rejected \
-            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_not_found_rejected \
-            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_q12a_541_price_hike_breaks_chain_end_to_end \
-            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_q12a_541_identity_unchanged_preserves_chain_and_root_snapshot \
-            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_q12a_616_root_snapshot_read_uses_select_for_update \
-            --deselect apps/booking/tests/test_reschedule.py::TestRescheduleCustomerBooking::test_q12a_616_root_snapshot_read_calls_select_for_update_with_of_self \
-            --deselect apps/bookings/tests/test_booking_callbacks.py::TestConfirmTapReschedule::test_happy_path_notifies_manager \
-            --deselect apps/skills/booking/tests/test_tools_q12a.py::TestQ12aContinuationLLMPath::test_within_90d_same_service_continuation_chain \
-            --deselect apps/skills/booking/tests/test_tools_q12a.py::TestQ12aContinuationLLMPath::test_over_90d_breaks_chain_billable_fresh_sale \
-            --deselect apps/skills/booking/tests/test_tools_q12a.py::TestQ12aContinuationLLMPath::test_b1_null_service_id_does_not_falsely_flag_swap \
-            --deselect apps/skills/booking/tests/test_tools_reschedule.py::TestExecuteReschedule::test_happy_path \
-            --deselect apps/skills/booking/tests/test_tools_reschedule.py::TestExecuteReschedule::test_new_row_carries_ai_direct_attribution \
-            --deselect apps/skills/booking/tests/test_tools_reschedule.py::TestIdempotencyMarkerAnchored::test_spoofed_substring_does_not_short_circuit_reschedule \
-            --deselect apps/skills/booking/tests/test_tools_reschedule.py::TestLocalCreateSplitBrainRecovery::test_local_create_fails_compensate_succeeds_recovers_cleanly \
-            --deselect apps/skills/booking/tests/test_tools_reschedule.py::TestLocalCreateSplitBrainRecovery::test_local_create_fails_compensate_fails_alerts_critical \
-            --deselect apps/skills/booking/tests/test_flow_continuation.py::TestSequenceA::test_full_reschedule_flow \
-            --deselect apps/skills/booking/tests/test_flow_continuation.py::TestSequenceB::test_combined_selection_slot_turn \
-            --deselect apps/skills/booking/tests/test_flow_continuation.py::TestSequenceC::test_callback_confirm_executes \
-            --deselect apps/skills/booking/tests/test_flow_continuation.py::TestNegatives::test_duplicate_text_confirm_no_double_mutation
+            --junitxml="$JUNIT_FILE"
 
       # DRF-1349 — the test counts, read from junit rather than from the
       # exit code. Before this step a red full-suite run printed no test
@@ -1664,10 +1624,19 @@ jobs:
   # the dev deploy — which is the intent.
   # ---------------------------------------------------------------------
   miniapp:
+    # Имя намеренно НЕ переименовано после добавления шага eslint (DRF-2388):
+    # эта строка — контекст обязательной проверки в защите ветки (см. список
+    # выше), и переименование сделало бы требуемую проверку несуществующей, то
+    # есть тихо отключило бы её для всех PR. Состав шагов ниже.
     name: miniapp (typecheck + vitest)
     runs-on: ubuntu-latest
-    # Measured: npm ci ~15s + tsc ~10s + 259 vitest tests ~40s on a warm
-    # cache. 15 min is a generous ceiling that still fails fast on a hang.
+    # Замерено 24.09 на этом раннере: весь job ~2 мин 35 с — npm ci, eslint,
+    # tsc, **2068 узлов в 208 файлах** vitest, vite build и загрузка артефакта.
+    # Прежняя запись («259 vitest tests ~40s») устарела в восемь раз по числу
+    # узлов; потолок 15 мин от неё не зависел и оставлен как был — он ловит
+    # зависание, а не медленность. Если однажды упрётся, сначала измерить, а не
+    # поднимать: локально те же 2068 узлов идут 9 мин, и разрыв с раннером сам
+    # по себе стоит объяснения.
     timeout-minutes: 15
 
     steps:
@@ -1785,6 +1754,25 @@ jobs:
         if: steps.detect.outputs.run_fe == 'true'
         working-directory: apps/miniapp
         run: npm ci
+
+      # DRF-2388 — до этого шага в apps/miniapp не было конфигурации ESLint
+      # вовсе, и линтер никогда не гонялся ни здесь, ни где-либо ещё. Поэтому
+      # нарушение порядка хуков дожило до пилота (DRF-2374): tsc его не видит,
+      # а vitest замечает, только если сломанную ветку кто-то отрисует.
+      #
+      # Что проверяется сейчас (DRF-2391): порядок хуков, полнота зависимостей,
+      # отладочная печать в консоль, обязательная причина у подавления и
+      # отсутствие мёртвых подавлений. Состав — в apps/miniapp/eslint.config.mjs;
+      # имя шага перечисляет предметы, а не правила, чтобы не разойтись с
+      # конфигурацией при следующей правке.
+      #
+      # Шаг обязательный и стоит ДО typecheck намеренно: нарушение порядка
+      # хуков — дефект независимо от типов, и красный крест должен называть
+      # именно его, а не теряться за ошибкой компиляции.
+      - name: eslint (хуки, зависимости, консоль, причины подавлений — ошибкой)
+        if: steps.detect.outputs.run_fe == 'true'
+        working-directory: apps/miniapp
+        run: npm run lint
 
       - name: tsc --noEmit (typecheck)
         if: steps.detect.outputs.run_fe == 'true'

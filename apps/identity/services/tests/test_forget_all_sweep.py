@@ -467,6 +467,12 @@ class TestTheDialogueHalf:
                 def rpush(self, key, value):
                     self.ops.append((key, value))
 
+                # DRF-2511: `append` читает уходящее тем же конвейером.
+                # Здесь стенд нарочно грубый — предмет файла не окно, а
+                # зачистка, — поэтому `lrange` терпит вызов и отдаёт пусто.
+                def lrange(self, *a):
+                    pass
+
                 def ltrim(self, *a):
                     pass
 
@@ -496,6 +502,10 @@ class TestTheDialogueHalf:
         fake = self._FakeRedis()
         monkeypatch.setattr(short_term, "_redis_client", lambda: fake)
         monkeypatch.setattr(pii_tokenizer, "_redis_client", lambda: fake)
+        # DRF-2214 — «забудь всё» снимает и состояние движка готовности (dre:state).
+        monkeypatch.setattr(
+            "apps.orchestrator.decision_readiness.state._redis_client", lambda: fake
+        )
         return fake
 
     @staticmethod
@@ -560,6 +570,38 @@ class TestTheDialogueHalf:
         assert result.messages_archived == 1
         assert before.content == ""
         assert after.content == "запиши меня на маникюр"
+
+    def test_a_voice_turn_keeps_its_mark_and_loses_its_text(self, redis, settings):
+        """DRF-2488 — пометка ``voice`` переживает «забудь всё».
+
+        Обезличивание стирает расшифровку, как любой текст, а канал ввода
+        остаётся на строке вместе с ролью и временем: это не слова человека,
+        а факт «здесь было голосовое» — ровно то, что обещает строка
+        ``conversations.Message.content`` в ``export_coverage``.
+        """
+        upc = _upc()
+        request_forget_all(upc.user_id)
+        upc.refresh_from_db()
+        conversation, Message = self._dialogue(upc, settings)
+
+        voiced = Message.all_tenants.create(
+            tenant=conversation.tenant,
+            conversation=conversation,
+            role="user",
+            content="я веган, запиши на маникюр",
+            input_channel=Message.InputChannel.VOICE,
+        )
+        Message.all_tenants.filter(pk=voiced.pk).update(
+            created_at=upc.forget_all_requested_at - timedelta(minutes=5)
+        )
+
+        result = sweep_forget_all(upc.user_id)
+
+        voiced.refresh_from_db()
+        assert result.messages_archived == 1
+        assert voiced.role == "user"
+        assert voiced.input_channel == "voice"
+        assert voiced.content == ""
 
     def test_an_unfinished_dialogue_keeps_the_person_in_the_queue(self, redis, settings):
         """The failure direction: a Redis outage must not tick the person off.

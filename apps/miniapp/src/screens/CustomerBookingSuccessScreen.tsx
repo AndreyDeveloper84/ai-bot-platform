@@ -30,14 +30,15 @@
  * render a minimal «Готово» card with just the booking id.
  */
 
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { PaymentStatusBadge } from "../components/PaymentStatusBadge";
 import { ScreenLayout } from "../components/ScreenLayout";
 import { StickyBar, StickyCtaButton } from "../components/StickyCta";
 import { formatVisitFull } from "../lib/format";
 import { visitAddressText } from "../lib/visit-address";
-import { closeApp, hapticNotify, maxBridge } from "../lib/max-sdk";
+import { hapticNotify, maxBridge, returnToChat } from "../lib/max-sdk";
+import { ReturnToChatHint } from "../components/ReturnToChatHint";
 import { backTo } from "../lib/screen-back";
 
 /**
@@ -90,6 +91,8 @@ export function CustomerBookingSuccessScreen() {
   // чат» закрывает мини-приложение и возвращает в диалог с Ayla — только
   // внутри MAX, где есть куда возвращаться; в браузере кнопки нет.
   const insideMax = maxBridge() !== null;
+  // DRF-2268: «Вернуться в чат» не молчит — «застрял» → подсказка.
+  const [chatStuck, setChatStuck] = useState(false);
 
   return (
     <ScreenLayout
@@ -108,8 +111,11 @@ export function CustomerBookingSuccessScreen() {
             Открыть запись
           </StickyCtaButton>
           {insideMax && (
-            <StickyCtaButton onClick={() => closeApp()}>{RETURN_TO_CHAT_LABEL}</StickyCtaButton>
+            <StickyCtaButton onClick={() => setChatStuck(returnToChat() === "stuck")}>
+              {RETURN_TO_CHAT_LABEL}
+            </StickyCtaButton>
           )}
+          {chatStuck && <ReturnToChatHint />}
         </StickyBar>
       }
     >

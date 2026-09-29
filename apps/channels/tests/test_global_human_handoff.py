@@ -169,9 +169,14 @@ class TestGlobalHandoffMute:
 # Acceptance: §3 queue addressing with a tenant context                        #
 # --------------------------------------------------------------------------- #
 class TestQueueAddressing:
-    def test_task_goes_to_most_recent_tenant_context(
+    def test_two_salons_go_to_the_platform_queue_and_no_salon_is_muted(
         self, mock_send, fake_redis, spy_concierge, settings
     ):
+        """Решение главного окна 28.09 по DRF-2545, вариант (B). Было: задача
+        ложилась на последний по ``last_message_at`` салон (этот узел звался
+        ``test_task_goes_to_most_recent_tenant_context`` и держал ``newer``).
+        Салонов два — адресат неоднозначен: очередь платформы, ни один салон
+        не замолкает (буква (в): жалоба на Б будила А)."""
 
         older = _make_tenant_context(
             "salon-old", last_message_at=datetime(2026, 8, 1, tzinfo=dt_timezone.utc)
@@ -183,14 +188,13 @@ class TestQueueAddressing:
         _run_global("оператор", mid="t1")
 
         task = AdminTask.all_tenants.get()
-        assert task.tenant_id == newer.tenant_id
-        assert task.conversation_id == newer.id
-        # The tenant dialog is flipped by create_admin_task…
+        assert task.tenant.slug == GLOBAL_BOT_TENANT_SLUG
+        assert task.conversation_id == _global_conversation().id
         newer.refresh_from_db()
         older.refresh_from_db()
-        assert newer.state == Conversation.State.HUMAN_HANDOFF
+        assert newer.state != Conversation.State.HUMAN_HANDOFF
         assert older.state != Conversation.State.HUMAN_HANDOFF
-        # …and the user gets the handoff reply on the global chat.
+        # …and the user gets the same handoff reply on the global chat.
         assert mock_send[-1]["text"] == ("Передаю менеджеру — ответят в течение 30 минут.")
 
     def test_global_dialog_muted_when_task_went_to_tenant(

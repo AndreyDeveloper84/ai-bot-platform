@@ -22,6 +22,7 @@
 import { fireEvent, render, screen, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { primeDisplayName } from "../components/CustomerAvatarEntry";
 
 vi.mock("../lib/customer-wellness", async (importOriginal) => {
   const original =
@@ -46,6 +47,14 @@ import {
 } from "../lib/customer-wellness";
 import { ApiError } from "../lib/api";
 import { FoodScannerDiaryScreen } from "./FoodScannerDiaryScreen";
+
+// Дверь в профиль (`CustomerAvatarEntry`) без пропа спрашивает имя у
+// `/me`. Этот набор ручку не подменяет, поэтому имя засевается явно:
+// иначе в прогоне живёт неподменённый сетевой вызов и асинхронное
+// обновление, которое может прилететь посреди чужого теста (DRF-2523).
+beforeEach(() => {
+  primeDisplayName("Тест Тестов");
+});
 
 const mockedLoad = vi.mocked(loadDiaryToday);
 
@@ -111,6 +120,27 @@ describe("дневник рисует НАСТОЯЩИЕ числа источн
 
     expect(await screen.findByText("530 / 2100 ккал")).toBeInTheDocument();
     expect(screen.getByText(/Б 108 \/ 130 · Ж 13 · У 66/)).toBeInTheDocument();
+  });
+
+  it("DRF-2288 (№41): ориентиры жиров и углеводов — та же строка, что на Главной", async () => {
+    mockedLoad.mockResolvedValue({
+      state: "entries",
+      entries: [OATS, SOUP],
+      hideNumbers: false,
+      today: today({
+        pfc: {
+          protein_g: 108,
+          fat_g: 13,
+          carbs_g: 66,
+          protein_target_g: 130,
+          fat_target_g: 61,
+          carbs_target_g: 220,
+        },
+      }),
+    });
+    renderScreen();
+
+    expect(await screen.findByText("Б 108 / 130 · Ж 13 / 61 · У 66 / 220 г")).toBeInTheDocument();
   });
 
   it("БЖУ приходит от источника, а не вычисляется из калорий", async () => {

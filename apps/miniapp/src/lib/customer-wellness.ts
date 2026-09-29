@@ -76,10 +76,17 @@ import { ApiError, request } from "./api";
 export interface FoodDiaryEntry {
   id: string;
   dish_name: string;
-  calories: number;
-  protein_g: number;
-  fat_g: number;
-  carbs_g: number;
+  /** DRF-2371 — `null`, когда каталог сохранил блюдо без чисел; не ноль. */
+  calories: number | null;
+  /**
+   * DRF-2455 — макросы тоже бывают отсутствующими, и **по отдельности**:
+   * каталог пишет их независимо, так что «калории есть, белка нет» —
+   * не выдумка, а обычная запись. Тип это скрывал, и карточка напечатала
+   * бы «Б null».
+   */
+  protein_g: number | null;
+  fat_g: number | null;
+  carbs_g: number | null;
   meal_type: string;
   logged_at: string;
   /**
@@ -88,6 +95,15 @@ export interface FoodDiaryEntry {
    * `граммы ÷ 100` верно только для записи текстом (DRF-1838).
    */
   entry_origin?: string | null;
+  /**
+   * DRF-2455 — есть ли у записи снимок, который отдаст прокси бота
+   * (`diary/entry/<id>/photo`). Каталог считает его по скану записи;
+   * бот пропускает насквозь. Снимок живёт 30 суток (§134), поэтому
+   * `false` — обычная старая запись, а не сбой. Отсутствие поля читается
+   * как `false`: без признака к прокси не ходим — иначе 404 на каждой
+   * записи. Загрузка — `lib/diary-photo.ts`.
+   */
+  has_photo?: boolean;
 }
 
 export interface WellnessToday {
@@ -133,6 +149,9 @@ export interface WellnessToday {
     fat_g: number;
     carbs_g: number;
     protein_target_g?: number;
+    /** DRF-2288 (№41): ориентиры жиров и углеводов — тем же признаком, каждый сам по себе. */
+    fat_target_g?: number;
+    carbs_target_g?: number;
   };
   /**
    * Стаканы за сегодня и дневная норма.
@@ -228,8 +247,21 @@ export interface WellnessToday {
     target_date_passed?: boolean;
   }>;
   /**
-   * Optional preferred display name (Layer 1 Identity). Falls back to
-   * `me.user.client_name` from `/auth/verify` when undefined.
+   * Preferred display name (Layer 1 Identity) — **собирает сервер**:
+   * `bot_user.client_name or bot_user.display_name or ""` во всех трёх
+   * ветках ручки (`apps/miniapp_api/views.py`, строки 3760, 3778, 3994).
+   * Клиенту запасного источника искать не нужно и негде: второй запрос за
+   * именем на Главной — ровно то, что с неё сейчас снимают (DRF-2348).
+   *
+   * Поэтому ключ приходит всегда, но может быть `""` — у человека,
+   * который не назвался сам и у которого канал не дал имени. Пустая
+   * строка значит «имени нет», а не «не загрузилось»: шапка рисует на
+   * этом месте «·» (Д1, DRF-2331), заголовок — приветствие без имени.
+   *
+   * Прежний текст здесь обещал клиентский запасной путь к
+   * `me.user.client_name` из `/auth/verify`. Такого пути нет ни в одном
+   * экране, и он не нужен — работу делает сервер (найдено ревью
+   * DRF-2331).
    */
   display_name?: string;
   /**
@@ -959,7 +991,6 @@ export async function flushWaterQueue(
         synced += 1;
       } catch (err) {
         if (isPermanentRejection(err)) {
-          // eslint-disable-next-line no-console
           console.warn("[customer-wellness] water entry refused, dropping", err);
           if (err instanceof ApiError) {
             if (onRejected) {
@@ -1165,4 +1196,21 @@ export function pickOneLiner(args: {
     return "Что нужно сегодня?";
   }
   return "Что нужно сегодня?";
+}
+
+/**
+ * DRF-2288 (№41): строка БЖУ — одна на Главной и в дневнике. Ориентир у буквы —
+ * « / N», без ориентира — только факт (§85 §8: «из» только при ориентире).
+ * Нет еды (``eaten === 0``) — строки нет: нулей не рисуем.
+ */
+export function pfcLine(
+  pfc: NonNullable<WellnessToday["pfc"]>,
+  eaten: number | undefined,
+): string | null {
+  if (eaten === 0) return null;
+  const t = (target: number | undefined) => (target !== undefined ? ` / ${target}` : "");
+  return (
+    `Б ${pfc.protein_g}${t(pfc.protein_target_g)} · Ж ${pfc.fat_g}${t(pfc.fat_target_g)} · ` +
+    `У ${pfc.carbs_g}${t(pfc.carbs_target_g)} г`
+  );
 }

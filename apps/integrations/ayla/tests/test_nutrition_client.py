@@ -764,3 +764,173 @@ class TestProposedNormsAndConfirm:
         with pytest.raises(nc.NothingToConfirmError) as exc:
             await client.confirm_targets(external_user_id="bot:1")
         assert exc.value.source == "user_entered"
+
+    @staticmethod
+    def _refusal(code: str, details: dict[str, Any]) -> Callable[[httpx.Request], httpx.Response]:
+        def handler(_: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                409, json={"error": {"code": code, "message": "…", "details": details}}
+            )
+
+        return handler
+
+    @pytest.mark.asyncio
+    async def test_legacy_default_refusal_is_its_own_error_with_the_fields(self) -> None:
+        """DRF-2332: у 409 два смысла, и различает их код, а не статус.
+
+        До правки этот отказ читался как «подтверждать нечего» с пустым
+        источником — и человеку с живым предложением бот отвечал неправдой.
+        """
+        client, transport = _client_with_handler(
+            self._refusal(
+                "LEGACY_DEFAULT_UNCONFIRMED", {"fields": ["activity_coefficient", "pace"]}
+            )
+        )
+        _set_transport(transport)
+        with pytest.raises(nc.LegacyDefaultUnconfirmedError) as exc:
+            await client.confirm_targets(external_user_id="bot:1")
+        assert exc.value.fields == ["activity_coefficient", "pace"]
+        assert not isinstance(exc.value, nc.NothingToConfirmError)
+
+    @pytest.mark.asyncio
+    async def test_nothing_to_confirm_is_not_read_as_legacy(self) -> None:
+        """Пара с узлом выше: прежний отказ остался прежним классом."""
+        client, transport = _client_with_handler(
+            self._refusal("NOTHING_TO_CONFIRM", {"targets_source": "none"})
+        )
+        _set_transport(transport)
+        with pytest.raises(nc.NothingToConfirmError) as exc:
+            await client.confirm_targets(external_user_id="bot:1")
+        assert exc.value.source == "none"
+        assert not isinstance(exc.value, nc.LegacyDefaultUnconfirmedError)
+
+
+class TestFoodPhoto2455:
+    """DRF-2455 — ветки самого клиента: до этого они не исполнялись нигде.
+
+    Ручка бота их разбирает, но проверялась через `AsyncMock`, то есть
+    поведение клиента никем не доказано.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_photo_comes_back_with_its_type(self) -> None:
+        def handler(_: httpx.Request) -> httpx.Response:
+            # Тело правдоподобного размера: сотни байт код считает
+            # пустышкой (замер стенда 25.09), и стенд обязан это повторять.
+            return httpx.Response(
+                200,
+                content=b"\x89PNG\r\n\x1a\n" + bytes(40_000),
+                headers={"Content-Type": "image/png"},
+            )
+
+        client, transport = _client_with_handler(handler)
+        _set_transport(transport)
+
+        photo = await client.food_photo(external_user_id="bot:1", log_id="log-1")
+
+        assert photo is not None
+        content, content_type = photo
+        assert content.startswith(b"\x89PNG")
+        assert content_type == "image/png"
+
+    @pytest.mark.asyncio
+    async def test_404_means_no_photo_and_is_not_a_failure(self) -> None:
+        def handler(_: httpx.Request) -> httpx.Response:
+            return httpx.Response(404, json={"error": {"code": "NOT_FOUND"}})
+
+        client, transport = _client_with_handler(handler)
+        _set_transport(transport)
+
+        assert await client.food_photo(external_user_id="bot:1", log_id="log-1") is None
+
+    @pytest.mark.asyncio
+    async def test_an_empty_body_is_not_a_photo(self) -> None:
+        """200 с пустым телом экран прочитал бы как «фото есть, но сломано».
+
+        Частный случай порога ``MIN_PHOTO_RESPONSE_BYTES``; оставлен
+        отдельно, потому что нулевое тело приходит по другой причине —
+        объект удалён, а ответ собран.
+        """
+
+        def handler(_: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=b"", headers={"Content-Type": "image/jpeg"})
+
+        client, transport = _client_with_handler(handler)
+        _set_transport(transport)
+
+        assert await client.food_photo(external_user_id="bot:1", log_id="log-1") is None
+
+    @pytest.mark.asyncio
+    async def test_a_few_hundred_bytes_are_not_a_photo(self) -> None:
+        """Замер стенда 25.09: три живые записи из пятнадцати ссылались на
+        объект в несколько сотен байт. Отдать их — показать битую картинку
+        вместо честного «снимка нет»."""
+
+        def handler(_: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                content=b"x" * 379,
+                headers={"Content-Type": "image/jpeg"},
+            )
+
+        client, transport = _client_with_handler(handler)
+        _set_transport(transport)
+
+        assert await client.food_photo(external_user_id="bot:1", log_id="log-1") is None
+
+    @pytest.mark.asyncio
+    async def test_a_real_sized_body_passes(self) -> None:
+        """Положительная пара: порог не отсекает настоящий снимок."""
+
+        def handler(_: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                200,
+                content=bytes(40_000),
+                headers={"Content-Type": "image/jpeg"},
+            )
+
+        client, transport = _client_with_handler(handler)
+        _set_transport(transport)
+
+        photo = await client.food_photo(external_user_id="bot:1", log_id="log-1")
+
+        assert photo is not None
+        assert len(photo[0]) == 40_000
+
+    @pytest.mark.asyncio
+    async def test_an_oversized_body_is_refused(self) -> None:
+        """Размеру, названному каталогом, не доверяем: воркер дороже снимка."""
+        big = b"x" * (nc.NutritionClient.MAX_PHOTO_RESPONSE_BYTES + 1)
+
+        def handler(_: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, content=big, headers={"Content-Type": "image/jpeg"})
+
+        client, transport = _client_with_handler(handler)
+        _set_transport(transport)
+
+        with pytest.raises(nc.NutritionUnavailableError):
+            await client.food_photo(external_user_id="bot:1", log_id="log-1")
+
+    @pytest.mark.asyncio
+    async def test_a_redirect_is_a_failure_not_a_refusal(self) -> None:
+        """Перенаправление ведёт внутрь контура — за ним не идём."""
+
+        def handler(_: httpx.Request) -> httpx.Response:
+            return httpx.Response(302, headers={"Location": "http://minio:9000/x.jpg"})
+
+        client, transport = _client_with_handler(handler)
+        _set_transport(transport)
+
+        with pytest.raises(nc.NutritionUnavailableError):
+            await client.food_photo(external_user_id="bot:1", log_id="log-1")
+
+    @pytest.mark.asyncio
+    async def test_5xx_is_a_failure(self) -> None:
+        def handler(_: httpx.Request) -> httpx.Response:
+            return httpx.Response(503)
+
+        client, transport = _client_with_handler(handler)
+        _set_transport(transport)
+
+        with pytest.raises(nc.NutritionUnavailableError):
+            await client.food_photo(external_user_id="bot:1", log_id="log-1")

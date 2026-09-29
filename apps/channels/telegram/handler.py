@@ -99,12 +99,18 @@ from apps.conversations.models import Conversation
 from apps.conversations.services import record_message, resolve_active_conversation
 from apps.events.services import emit
 from apps.identity.services import resolve_or_create_bot_user
+from apps.identity.services.blocking import (
+    BLOCK_NOTICE_TEXT,
+    blocked_since,
+    claim_block_notice,
+)
 from apps.orchestrator.memory import short_term
 from apps.orchestrator.safety.gate import (
     OUTBOUND_ACTION_TYPE,
     evaluate_inbound,
     guard_outbound,
     reaches_through_handoff,
+    under_handoff,
 )
 from apps.orchestrator.turn_seam import (
     SURFACE_PER_TENANT,
@@ -232,10 +238,37 @@ def handle_inbound(payload: dict[str, Any], tenant: "Tenant") -> None:
     # seam is contractually side-effect-free (it never persists, never sends)
     # and MAX already gates above it, so putting it there would either double-
     # run the verdict or force side effects into the seam.
+    #
+    # Q1 п.1в / п.1а (CD §72): under a handoff a classifier red flag becomes the
+    # MEDICAL outcome (``under_handoff``), and the operator is signalled.
     safety = evaluate_inbound(event.text)
-    if not safety.allowed and (
-        conversation.state != Conversation.State.HUMAN_HANDOFF or reaches_through_handoff(safety)
-    ):
+    in_handoff = conversation.state == Conversation.State.HUMAN_HANDOFF
+    # DRF-2276 (CD §72 п.15) — блокировка оператором платформы: гейт раньше
+    # неё, кризис и неотложка (с red flag классификатора) отвечаются (N-1);
+    # всё прочее — фраза раз за эпизод и больше ничего.
+    blocked_at = blocked_since(channel="telegram", channel_user_id=event.channel_user_id)
+    if in_handoff or blocked_at is not None:
+        safety = under_handoff(event.text, safety)
+        # [OD-BOT §170] — a live G7 «Да» tap is «неотложка» and reaches through
+        # the mute (N-1); the durable G7 STOP is recorded there.
+        from apps.skills.health_screening.g7_question import g7_under_mute
+
+        safety = g7_under_mute(conversation, bot_user, event.text, safety)
+    if in_handoff and reaches_through_handoff(safety):
+        from apps.handoff.notify import notify_safety_reply_during_handoff
+
+        notify_safety_reply_during_handoff(conversation=conversation)
+    if blocked_at is not None and not reaches_through_handoff(safety):
+        _answer_blocked(
+            event=event,
+            tenant=tenant,
+            bot_user=bot_user,
+            conversation=conversation,
+            since=blocked_at,
+        )
+        _answer_callback_if_present(event, tenant)
+        return
+    if not safety.allowed and (not in_handoff or reaches_through_handoff(safety)):
         _emit_safety_shortcircuit(bot_user, safety)
         record_message(
             conversation,
@@ -308,7 +341,18 @@ def handle_inbound(payload: dict[str, Any], tenant: "Tenant") -> None:
     # structural guard in ``apps/channels/tests/test_handler_safety_parity.py``
     # would say so. No crisis exemption: the inbound short-circuit returns
     # before this line.
-    _guarded = guard_outbound(reply_text, surface="telegram", bot_user=bot_user)
+    _guarded = guard_outbound(
+        reply_text,
+        surface="telegram",
+        bot_user=bot_user,
+        # DRF-2435 — тот же мозг, что у MAX (`orchestrate_turn`,
+        # `SURFACE_PER_TENANT`), значит выгрузка личных данных достижима и
+        # здесь, и признак «это собственные данные человека» обязан ехать так
+        # же. Без этой строки ответ выгрузки подменялся бы рекомендательной
+        # фразой у каждого, в чьей истории есть похожее на телефон — то есть
+        # починка жила бы в одном канале из двух (найдено ревью).
+        subject_own_data=bool(skill_result is not None and skill_result.subject_own_data),
+    )
     if _guarded.blocked:
         reply_text = _guarded.text
         action_type = OUTBOUND_ACTION_TYPE
@@ -397,6 +441,47 @@ def _emit_safety_shortcircuit(bot_user: Any, safety: Any) -> None:
             "is_global_bot": False,
         },
     )
+
+
+def _answer_blocked(
+    *,
+    event: CanonicalEvent,
+    tenant: "Tenant",
+    bot_user: Any,
+    conversation: Any,
+    since: Any,
+) -> None:
+    """Ход заблокированного (DRF-2276): фраза раз за эпизод, дальше ничего.
+
+    Паритет с ``max.handler._answer_blocked``. Telegram-исходящий забором
+    блокировки не закрыт (DRF-1497, осознанно) — обход ему не нужен.
+    """
+    told = claim_block_notice(bot_user, since=since)
+    logger.info(
+        "channels.telegram.blocked_inbound conversation=%s notice=%s",
+        conversation.id,
+        told,
+    )
+    emit(
+        "channels.telegram.blocked_inbound",
+        payload={
+            "bot_user_id": str(bot_user.id),
+            "conversation_id": str(conversation.id),
+            "notice_sent": told,
+        },
+    )
+    if not told:
+        return
+    record_message(
+        conversation,
+        role="assistant",
+        content=BLOCK_NOTICE_TEXT,
+        rendered_text=BLOCK_NOTICE_TEXT,
+        action_type="block_notice",
+        trace_id=None,
+    )
+    short_term.append(conversation.id, role="assistant", content=BLOCK_NOTICE_TEXT)
+    outbound.send_message(chat_id=event.chat_id, text=BLOCK_NOTICE_TEXT, tenant=tenant)
 
 
 def _deliver_safety_reply(

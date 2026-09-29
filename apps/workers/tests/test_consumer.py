@@ -18,7 +18,7 @@ from apps.tenancy.context import current_tenant, current_trace_id
 from apps.tenancy.models import Tenant
 from apps.workers import consumer
 from apps.workers.base import TenantAwareTask
-from apps.workers.registry import clear_registry, register
+from apps.workers.registry import clear_registry, emptied_registry_for_tests, register
 
 pytestmark = pytest.mark.django_db
 
@@ -145,9 +145,9 @@ def fake_redis(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _clean_registry():
-    clear_registry()
-    yield
-    clear_registry()
+    # DRF-2220 — empty for the test, the production handlers back after.
+    with emptied_registry_for_tests():
+        yield
 
 
 # ---------------------------------------------------------------------------

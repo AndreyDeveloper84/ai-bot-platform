@@ -303,6 +303,161 @@ class AylaSalonClient:
         self._raise_for_status(resp)
         raise SalonAPIError("unreachable")  # pragma: no cover — _raise_for_status always raises
 
+    # ── Writes as the PERSON (DRF-2607) ─────────────────────────────────────
+
+    @staticmethod
+    def _person_headers(*, person_token: str, tenant_slug: str) -> dict[str, str]:
+        """The administrator's own token — and nothing of the service's.
+
+        No ``X-External-User-ID``: the token already says who, and a second
+        claim beside it would be a second answer to the same question. No
+        service Bearer: with it, Ayla's ``ServiceCredentialIsReadOnly`` would
+        refuse the write anyway — but the point is that it is not there to
+        refuse.
+        """
+
+        return with_request_id(
+            {
+                "Authorization": f"Bearer {person_token}",
+                "X-Tenant": tenant_slug,
+                "X-App-Type": "pro",
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+            }
+        )
+
+    def _send_as_person(
+        self,
+        method: str,
+        endpoint: str,
+        *,
+        person_token: str,
+        tenant_slug: str,
+        json_body: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """One write on the person's token. Without a token — refused here,
+        never re-sent under the service credential."""
+
+        _require_tenant(tenant_slug)
+        if not person_token:
+            raise SalonForbidden("no person token — a salon write is not made on the service key")
+        url = self._urls.build(f"tenants/me/{endpoint.lstrip('/')}")
+        try:
+            with httpx.Client(timeout=self._timeout_s, transport=self._transport) as http:
+                resp = http.request(
+                    method,
+                    url,
+                    headers=self._person_headers(
+                        person_token=person_token, tenant_slug=tenant_slug
+                    ),
+                    json=json_body,
+                )
+        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+            logger.warning("salon_client.%s.network err=%s", endpoint, type(exc).__name__)
+            raise SalonUnavailable(f"network: {type(exc).__name__}") from exc
+
+        if resp.status_code == 204:
+            return {}
+        if resp.status_code in (200, 201):
+            try:
+                return resp.json()
+            except ValueError as exc:
+                raise SalonUnavailable("upstream returned non-JSON on success") from exc
+        self._raise_for_status(resp)
+        raise SalonAPIError("unreachable")  # pragma: no cover — _raise_for_status always raises
+
+    def create_time_off(
+        self,
+        *,
+        person_token: str,
+        tenant_slug: str,
+        specialist_id: str,
+        start_at: str,
+        end_at: str,
+        reason: str = "",
+    ) -> dict[str, Any]:
+        """``POST tenants/me/masters/{specialist_id}/time-off/`` as the person.
+
+        Without ``resolutions``: Ayla refuses with 409 ``HAS_ACTIVE_APPOINTMENTS``
+        when live bookings sit in the period — nobody strands a booked client
+        by accident. Settling the displaced bookings in the same write is a
+        separate step, not opened here.
+        """
+
+        _require_id(specialist_id, field="specialist_id")
+        if not start_at or not end_at:
+            raise SalonValidationError("start_at and end_at are both required")
+        return self._send_as_person(
+            "POST",
+            f"masters/{specialist_id}/time-off/",
+            person_token=person_token,
+            tenant_slug=tenant_slug,
+            json_body={"start_at": start_at, "end_at": end_at, "reason": reason},
+        )
+
+    def delete_time_off(
+        self, *, person_token: str, tenant_slug: str, specialist_id: str, time_off_id: str
+    ) -> dict[str, Any]:
+        """``DELETE tenants/me/masters/{specialist_id}/time-off/{pk}/`` as the person."""
+
+        _require_id(specialist_id, field="specialist_id")
+        _require_id(time_off_id, field="time_off_id")
+        return self._send_as_person(
+            "DELETE",
+            f"masters/{specialist_id}/time-off/{time_off_id}/",
+            person_token=person_token,
+            tenant_slug=tenant_slug,
+        )
+
+    def set_schedule_exception(
+        self,
+        *,
+        person_token: str,
+        tenant_slug: str,
+        specialist_id: str,
+        date: str,
+        is_working_day: bool,
+        start_time: str | None = None,
+        end_time: str | None = None,
+        note: str = "",
+    ) -> dict[str, Any]:
+        """``PUT tenants/me/masters/{specialist_id}/schedule-exceptions/`` as the person.
+
+        One row per (master, date): «не работаю» on a date, or other hours on
+        it. Ayla refuses a shrink that would strand a booking (409).
+        """
+
+        _require_id(specialist_id, field="specialist_id")
+        body: dict[str, Any] = {
+            "date": _require_iso_date(date, field="date"),
+            "is_working_day": bool(is_working_day),
+            "note": note,
+        }
+        if is_working_day:
+            body["start_time"] = start_time
+            body["end_time"] = end_time
+        return self._send_as_person(
+            "PUT",
+            f"masters/{specialist_id}/schedule-exceptions/",
+            person_token=person_token,
+            tenant_slug=tenant_slug,
+            json_body=body,
+        )
+
+    def delete_schedule_exception(
+        self, *, person_token: str, tenant_slug: str, specialist_id: str, date: str
+    ) -> dict[str, Any]:
+        """``DELETE …/schedule-exceptions/{date}/`` as the person — back to the weekly template."""
+
+        _require_id(specialist_id, field="specialist_id")
+        day = _require_iso_date(date, field="date")
+        return self._send_as_person(
+            "DELETE",
+            f"masters/{specialist_id}/schedule-exceptions/{day}/",
+            person_token=person_token,
+            tenant_slug=tenant_slug,
+        )
+
     @staticmethod
     def _raise_for_status(resp: httpx.Response) -> None:
         """Turn a non-2xx into the exception that says what to do about it.

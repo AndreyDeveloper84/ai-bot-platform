@@ -490,7 +490,7 @@ class TestS2ConsentFlow:
         assert unwelcomed_bot_user.consent_at == original_consent_at
 
     @pytest.mark.django_db
-    def test_consent_refuse_returns_goodbye_no_keyboard(self, unwelcomed_bot_user, caplog):
+    def test_consent_refuse_returns_goodbye_with_a_door_open(self, unwelcomed_bot_user, caplog):
         """«Не сейчас» → State 3 graceful exit. Tau §11: «six words,
         dignity preserved, door open». consent_at остаётся NULL.
 
@@ -505,7 +505,12 @@ class TestS2ConsentFlow:
                 _ctx_with_botuser("cb:welcome:consent_refuse", unwelcomed_bot_user),
             )
         assert result.reply_text == S2_REFUSED_TEXT
-        assert result.action_data is None
+        # DRF-2267 (CD §72) переворачивает Tau §11 «no keyboard»: отказ не
+        # тупик — «Дать согласие» (снова S2) и «Узнать что хранится» (S2a).
+        assert [b["callback"] for b in result.action_data["buttons"]] == [
+            "cb:welcome:start_s2",
+            "cb:welcome:consent_details",
+        ]
         assert result.meta["reply_kind"] == "welcome_consent_refused"
         unwelcomed_bot_user.refresh_from_db()
         assert unwelcomed_bot_user.consent_at is None

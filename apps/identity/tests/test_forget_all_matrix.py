@@ -10,7 +10,7 @@
 Источник — ``apps.identity.export_coverage``: реестр того, что бот хранит о
 человеке (``SECTIONS`` + ``EXCLUSIONS`` покрывают каждый слот
 ``personal_fields.PERSONAL_FIELDS``, ``NON_REGISTRY_STORES`` — хранилища вне
-формы «колонка»; ``KNOWN_LIMITS`` называет каталожный профиль). Хранилище
+формы «колонка»; ``AYLA_SECTION_OWNER_STORE`` — каталожный профиль). Хранилище
 берётся из слота отбрасыванием поля: ``identity.ClientProfile.ltv`` →
 ``identity.ClientProfile``; ``memory_key:*`` → зелёные ``MemoryEntry``.
 
@@ -56,7 +56,6 @@
 from __future__ import annotations
 
 import json
-import re
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -76,8 +75,8 @@ from apps.conversations.models import (
     StaffAssistantThread,
 )
 from apps.identity.export_coverage import (
+    AYLA_SECTION_OWNER_STORE,
     EXCLUSIONS,
-    KNOWN_LIMITS,
     NON_REGISTRY_SECTIONS,
     NON_REGISTRY_STORES,
     SECTIONS,
@@ -113,6 +112,24 @@ LEAF_TO_FOLLOW = "лист следом"
 #: строка матрицы (DRF-1984): «удалено» не говорится, пока readback не вернул
 #: ``erased``.
 CATALOG_STORE = "catalog.users.UserPersonalContext"
+
+#: DRF-2214 — что каталог запомнил вне профиля и что «забудь всё» стирает там
+#: же, через тот же C5.2 и тот же readback C5.3 (beautygo_backend #530/#541):
+#: разделы выгрузки ``ayla`` (#544). Исход у всех — исход ``CATALOG_STORE``.
+CATALOG_SECTIONS: tuple[str, ...] = (
+    "catalog.goals",
+    "catalog.wellness_plan",
+    "catalog.nutrition_profile",
+    "catalog.food_diary",
+    "catalog.shown_hints",
+    # DRF-2307 — beautygo_backend #545 (DRF-2277, CD §72 п.3).
+    "catalog.notification_history",
+    "catalog.app_ai_chat",
+)
+#: DRF-2307 — разделы C5.1, которые «забудь всё» ОСТАВЛЯЕТ (beautygo_backend
+#: #548; ``forget_all_catalog.KEPT_BY_FORGET_ALL``).
+CATALOG_RETAINED: tuple[str, ...] = ("catalog.favorite_specialists",)
+CATALOG_STORES = frozenset({CATALOG_STORE, *CATALOG_SECTIONS, *CATALOG_RETAINED})
 
 #: Телефон в тестовом диапазоне (pii_guard: префикс 999) — направляется в
 #: диалог, чтобы обезличивание было проверяемо, а не предположено.
@@ -246,6 +263,55 @@ OUTCOMES: dict[str, Outcome] = {
         "решение владельца 20.09 (§58): след, как человек попал в штат "
         "(код, срок, кем выдан); note — свободный текст выдавшего",
     ),
+    # DRF-2214 — три хранилища бота, которые «забудь всё» не трогало.
+    "recommendation.Recommendation": Outcome(
+        ANONYMISE,
+        "forget_all_sweep.sweep_forget_all → anonymise_recommendations (DRF-2214)",
+        "why → [], facts → {}, goal_id → '': причины дословно и факты — слова "
+        "человека, ключ цели держал бы знание о стёртой цели (#526). Строка "
+        "остаётся для атрибуции B13 (reaction, booking_id); alternatives — "
+        "курируемая таблица владельца, не данные о человеке, остаются",
+    ),
+    "redis.dre_state": Outcome(
+        DELETE,
+        "conversations.erasure._clear_redis_stores → decision_readiness.state.clear",
+        "состояние разговора движка готовности (dre:state:<id>: слоты со "
+        "сказанным человеком) удаляется, не ждёт TTL 2 ч",
+    ),
+    "nutrition_proactive:settings": Outcome(
+        RETAIN,
+        "никто — «настройки уведомлений остаются» (текст команды «забудь всё»)",
+        "daily_report_time, water_reminders, opted_out_at — тумблеры, которые "
+        "человек ведёт сам; стереть — значит молча выключить то, что он включил",
+    ),
+    "nutrition_proactive:observations": Outcome(
+        DELETE,
+        "forget_all_sweep.sweep_forget_all → forget_nutrition_observations (DRF-2214)",
+        "water.* (сколько человек выпил — данные о здоровье) и last_report_date",
+    ),
+    "nutrition_proactive:journal": Outcome(
+        RETAIN,
+        "никто — антиспам читает журнал (weekly_sent_count, surface_ignored_streak)",
+        "outbox: только время и вид отправки, без содержимого — недельный "
+        "бюджет и серия игнорирования продолжают работать",
+    ),
+    **{
+        section: Outcome(
+            DELETE,
+            "ayla_erasure.erase_with_readback — C5.2 стирает запомненное каталогом "
+            "(DRF-2214, beautygo_backend #530), readback C5.3 считает остаток (#541)",
+            "«удалено» — только когда readback вернул erased: remembered_rows == 0 "
+            "по каждой личности",
+        )
+        for section in CATALOG_SECTIONS
+    },
+    "catalog.favorite_specialists": Outcome(
+        RETAIN,
+        "никто — forget_all_catalog.KEPT_BY_FORGET_ALL в каталоге (CD §72 п.3); "
+        "сверку держит сторож beautygo_backend #539",
+        "избранные мастера — выбор человека в приложении BeautyGO; «забудь всё» "
+        "их оставляет, и текст команды так и говорит (CD §76)",
+    ),
     CATALOG_STORE: Outcome(
         DELETE,
         "ayla_erasure.erase_with_readback (DELETE → readback erasure-status; DRF-1950/1984)",
@@ -293,8 +359,9 @@ def stores_declared_by_export_coverage() -> set[str]:
         _store_of(slot)
         for slot in (*SECTIONS, *EXCLUSIONS, *NON_REGISTRY_STORES, *NON_REGISTRY_SECTIONS)
     }
-    if any(re.search(r"users\.UserPersonalContext", limit) for limit in KNOWN_LIMITS):
-        declared.add(CATALOG_STORE)
+    # Каталожный профиль объявлен константой: до DRF-2598 — именем класса в
+    # тексте KNOWN_LIMITS, и упрощение текста для человека сняло объявление.
+    declared.add(AYLA_SECTION_OWNER_STORE)
     return declared
 
 
@@ -429,7 +496,10 @@ def fake_redis(monkeypatch) -> _FakeRedis:
 
     from apps.ingress import streams
 
+    from apps.orchestrator.decision_readiness import state as dre_state
+
     fake = _FakeRedis()
+    monkeypatch.setattr(dre_state, "_redis_client", lambda: fake)
     monkeypatch.setattr(short_term, "_redis_client", lambda: fake)
     monkeypatch.setattr(pii_tokenizer, "_redis_client", lambda: fake)
     monkeypatch.setattr(streams, "_client", lambda: fake)
@@ -529,6 +599,7 @@ def seed_person(tenant: Tenant, fake_redis: _FakeRedis, label: str) -> Person:
     """По одной строке в КАЖДОМ хранилище из :data:`OUTCOMES` (кроме каталога — он подменён)."""
 
     from apps.catalog.models import CatalogMaster
+    from apps.recommendation.models import Recommendation
 
     ayla_user_id = uuid.uuid4()
     bot_user = BotUser.all_tenants.create(
@@ -540,7 +611,23 @@ def seed_person(tenant: Tenant, fake_redis: _FakeRedis, label: str) -> Person:
         phone=_PHONE,
         display_name=f"Мария {label}",
         client_name=f"Мария Иванова {label}",
-        context={"tone": f"warm-{label}"},
+        context={
+            "tone": f"warm-{label}",
+            # DRF-2214 — настройки остаются, наблюдения уходят, журнал остаётся.
+            "nutrition_proactive": {
+                "daily_report_time": "21:00",
+                "water_reminders": True,
+                "opted_out_at": None,
+                "last_report_date": "2026-09-20",
+                "water": {
+                    "date": "2026-09-20",
+                    "sent": 2,
+                    "last_total_ml": 1400,
+                    "ignored_streak": 1,
+                },
+                "outbox": [{"surface": "report", "sent_at": "2026-09-20T18:00:00+00:00"}],
+            },
+        },
     )
     upc = UserPersonalContext.objects.create(
         user_id=ayla_user_id,
@@ -577,6 +664,9 @@ def seed_person(tenant: Tenant, fake_redis: _FakeRedis, label: str) -> Person:
             content=text,
             rendered_text=text,
             action_data={"offer": f"вариант для {label}"},
+            # DRF-2488 — реплика человека надиктована: пометка обязана
+            # пережить обезличивание (проверка ANONYMISE ниже).
+            input_channel="voice" if role == "user" else "text",
         )
         Message.all_tenants.filter(pk=message.pk).update(created_at=earlier)
     master = CatalogMaster.all_tenants.create(
@@ -593,6 +683,20 @@ def seed_person(tenant: Tenant, fake_redis: _FakeRedis, label: str) -> Person:
     )
     fake_redis.store[f"conv:{conversation.id}:msgs"] = [f"raw-{label}"]
     fake_redis.store[f"pii_tokenmap:{conversation.id}"] = {"rev:PHONE_1": _PHONE}
+    # DRF-2214 — состояние разговора движка готовности: слот со сказанным.
+    fake_redis.store[f"dre:state:{conversation.id}"] = json.dumps(
+        {"slots": {"budget": {"state": "known", "value": f"до 3000 [{label}]"}}}, ensure_ascii=False
+    )
+    Recommendation.objects.create(
+        bot_user=bot_user,
+        goal_id="weight",
+        what="Лимфодренажный массаж",
+        subline="курс 5 сеансов",
+        why=[f"вы сказали, что хотите к свадьбе сестры [{label}]"],
+        facts={"goal": "вес", "answer": f"после родов [{label}]"},
+        alternatives=[{"what": "Прессотерапия", "subline": "курс"}],
+        fingerprint="absence:weight",  # DRF-2308: ключ цели открытым текстом
+    )
     # DRF-2220 — the raw webhook of one of those turns, left in the stream
     # (a failed entry: a processed one is already gone). Its id is the
     # enqueue millisecond, before the request like the turns themselves.
@@ -716,7 +820,7 @@ def snapshot(store: str, person: Person, fake_redis: _FakeRedis) -> Any:
         return list(
             Message.all_tenants.filter(conversation=person.conversation)
             .order_by("created_at")
-            .values("content", "rendered_text", "action_data", "tool_call")
+            .values("content", "rendered_text", "action_data", "tool_call", "input_channel")
         )
     if store == "conversations.ArchivedMessage":
         return list(
@@ -772,11 +876,42 @@ def snapshot(store: str, person: Person, fake_redis: _FakeRedis) -> Any:
             LoyaltyAccount.all_tenants.filter(customer=bu).values("balance", "tier", "enrolled")
         )
     if store == "identity.BotUser":
-        return list(
+        rows = list(
             BotUser.all_tenants.filter(pk=bu.pk).values(
                 "phone", "display_name", "client_name", "context", "timezone", "deleted_at"
             )
         )
+        # DRF-2214 — подключ nutrition_proactive — свои три строки матрицы
+        # (настройки / наблюдения / журнал); оболочка сверяется без него.
+        for row in rows:
+            row["context"] = {
+                k: v for k, v in (row["context"] or {}).items() if k != "nutrition_proactive"
+            }
+        return rows
+    if store.startswith("nutrition_proactive:"):
+        bot = BotUser.all_tenants.get(pk=bu.pk)
+        prefs = (bot.context or {}).get("nutrition_proactive") or {}
+        keys = {
+            "nutrition_proactive:settings": (
+                "daily_report_time",
+                "water_reminders",
+                "opted_out_at",
+            ),
+            "nutrition_proactive:observations": ("water", "last_report_date"),
+            "nutrition_proactive:journal": ("outbox",),
+        }[store]
+        # «Ключей нет» читается как None — то же «ключ снят», что у Redis.
+        return {k: prefs[k] for k in keys if k in prefs} or None
+    if store == "recommendation.Recommendation":
+        from apps.recommendation.models import Recommendation
+
+        return list(
+            Recommendation.objects.filter(bot_user=bu).values(
+                "id", "why", "facts", "goal_id", "fingerprint", "alternatives", "what", "reaction"
+            )
+        )
+    if store == "redis.dre_state":
+        return fake_redis.store.get(f"dre:state:{person.conversation.id}")
     if store == "consent.ConsentRecord":
         return list(
             ConsentRecord.all_tenants.filter(bot_user=bu).values(
@@ -789,7 +924,7 @@ def snapshot(store: str, person: Person, fake_redis: _FakeRedis) -> Any:
         return list(
             StaffInvite.all_tenants.filter(used_by=bu).values("note", "used_at", "revoked_at")
         )
-    if store == CATALOG_STORE:
+    if store in CATALOG_STORES:
         return list(
             AylaErasureJob.objects.filter(ayla_user_id=person.ayla_user_id).values(
                 "status", "attempts", "completed_at"
@@ -811,11 +946,18 @@ def assert_outcome(
     """DELETE → 0 живых; ANONYMISE → строка есть, ПДн пусты; RETAIN → строка не изменилась."""
 
     expected = OUTCOMES[store].outcome
-    assert _present(before) or store in {"conversations.ArchivedMessage", CATALOG_STORE}, (
+    assert _present(before) or store in {"conversations.ArchivedMessage", *CATALOG_STORES}, (
         f"{store}: посев не оставил строки — проверять «после» не по чему"
     )
 
     if expected == RETAIN:
+        if store in CATALOG_RETAINED:
+            # DRF-2307 — бот каталожных строк не видит: его снимок — задание
+            # readback. Исход держит каталог (KEPT_BY_FORGET_ALL, сторож #539);
+            # здесь проверяемо одно — бот звал только C5.2, который избранных
+            # не трогает по договору, и ничего сверх него.
+            assert catalog.deleted_for == [str(person.ayla_user_id)]
+            return
         if store == "conversations.ArchivedMessage":
             # Строк «до» нет по построению: архив рождается в свипе.
             assert len(after) == len(snapshot("conversations.Message", person, _FakeRedis()))
@@ -848,14 +990,34 @@ def assert_outcome(
                 assert row["rendered_text"] == ""
                 assert row["action_data"] is None
                 assert row["tool_call"] is None
+            # DRF-2488 — канал ввода не слова человека: остаётся как был.
+            assert sorted(r["input_channel"] for r in before) == ["text", "voice"]
+            assert [r["input_channel"] for r in after] == [r["input_channel"] for r in before]
             return
         if store == "conversations.AiDraft":
             assert [row["content"] for row in after] == [""]
             return
+        if store == "recommendation.Recommendation":
+            assert len(after) == len(before)
+            for was, row in zip(before, after, strict=True):
+                assert row["why"] == []
+                assert row["facts"] == {}
+                assert row["goal_id"] == ""
+                # DRF-2308 — отпечаток нёс ключ цели открытым текстом (ABSENCE)
+                # или несолёный хеш цели/причин (DIRECTION): заменён на
+                # уникальную метку без смысла.
+                assert row["fingerprint"] == f"erased:{row['id']}", row["fingerprint"]
+                assert row["fingerprint"] != was["fingerprint"]
+                assert "weight" not in row["fingerprint"]
+                # Курируемое и атрибуция — остаются.
+                assert row["alternatives"] == was["alternatives"]
+                assert row["what"] == was["what"]
+                assert row["reaction"] == was["reaction"]
+            return
         raise AssertionError(f"{store}: ANONYMISE без списка полей ПДн")
 
     assert expected == DELETE
-    if store == CATALOG_STORE:
+    if store in CATALOG_STORES:
         assert catalog.deleted_for == [str(person.ayla_user_id)]
         assert catalog.readback_for == [str(person.ayla_user_id)]
         (job,) = after
@@ -871,8 +1033,8 @@ def assert_outcome(
             assert stone["status"] == MemoryEntry.STATUS_DELETED
             assert stone["deletion_reason"] == MemoryEntry.DELETION_REASON_FORGET_ALL
         return
-    if store.startswith("redis."):
-        assert after is None, f"{store}: ключ жив после «забудь всё»"
+    if store.startswith("redis.") or store == "nutrition_proactive:observations":
+        assert after is None, f"{store}: ключ жив после «забудь всё»: {after}"
         return
     if store == "conversations.Conversation":
         (row,) = after
@@ -948,7 +1110,7 @@ class TestAfterTheSweepEveryStoreHasItsOutcome:
         assert all(
             _present(before[s])
             for s in OUTCOMES
-            if s not in {"conversations.ArchivedMessage", CATALOG_STORE}
+            if s not in {"conversations.ArchivedMessage", *CATALOG_STORES}
         )
         after = {store: snapshot(store, run.neighbour, run.fake_redis) for store in OUTCOMES}
         changed = {

@@ -15,7 +15,7 @@
  *     покрывает фото; DRF-2106 снял последний stub `fetchHealthFlags`);
  *   - «Добавить приём» в дневнике и кнопка дашборда ведут сюда, а не в съёмку.
  */
-import { act, configure, fireEvent, getConfig, render, screen } from "@testing-library/react";
+import { configure, fireEvent, getConfig, render, screen } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -37,6 +37,7 @@ import { ApiError } from "../lib/api";
 import * as foodScanner from "../lib/food-scanner";
 import { estimateFoodText, fetchConsentAt, logFoodText, type FoodTextEstimate } from "../lib/food-scanner";
 import { FoodScannerManualScreen, MANUAL_COPY, renderEstimateLines } from "./FoodScannerManualScreen";
+import { settleScenario } from "../test/settleScenario";
 
 const GUARD_ASYNC_TIMEOUT_MS = 20;
 let previousAsyncUtilTimeout = 1000;
@@ -50,11 +51,6 @@ afterAll(() => {
   configure({ asyncUtilTimeout: previousAsyncUtilTimeout });
 });
 
-const settle = async (rounds = 4) => {
-  for (let i = 0; i < rounds; i += 1) {
-    await act(async () => {});
-  }
-};
 
 const mockedConsent = vi.mocked(fetchConsentAt);
 const mockedEstimate = vi.mocked(estimateFoodText);
@@ -97,7 +93,7 @@ function renderScreen() {
 async function typeAndEstimate(text: string) {
   fireEvent.change(screen.getByLabelText(MANUAL_COPY.whatInputLabel), { target: { value: text } });
   fireEvent.click(screen.getByRole("button", { name: MANUAL_COPY.estimate }));
-  await settle();
+  await settleScenario();
 }
 
 beforeEach(() => {
@@ -110,10 +106,12 @@ beforeEach(() => {
 describe("оценка → карточка → «В дневник»", () => {
   it("текст уходит на оценку без записи; карточка называет оценку оценкой; запись как показано → дневник", async () => {
     renderScreen();
-    await settle();
+    await settleScenario();
     await typeAndEstimate("борщ 250");
 
     expect(mockedEstimate).toHaveBeenCalledWith("борщ 250", undefined);
+    // DRF-2597: оценка не пишет в дневник до «В дневник» — замер после того, как оценка улеглась.
+    await settleScenario();
     expect(mockedLog).not.toHaveBeenCalled(); // оценка ничего не пишет
 
     const card = screen.getByTestId("estimate-card");
@@ -124,7 +122,7 @@ describe("оценка → карточка → «В дневник»", () => {
     expect(card.textContent).toMatch(/оценка/);
 
     fireEvent.click(screen.getByRole("button", { name: MANUAL_COPY.toDiary }));
-    await settle();
+    await settleScenario();
 
     expect(mockedLog).toHaveBeenCalledTimes(1);
     expect(mockedLog.mock.calls[0]?.[0]).toMatchObject({ dish_name: "борщ", portion_g: 250, corrected: false });
@@ -135,7 +133,7 @@ describe("оценка → карточка → «В дневник»", () => {
   it("без граммов в тексте порция — оценка, и карточка говорит это словами", async () => {
     mockedEstimate.mockResolvedValue(estimate({ portion_g: 100, portion_estimated: true }));
     renderScreen();
-    await settle();
+    await settleScenario();
     await typeAndEstimate("борщ");
     expect(screen.getByTestId("estimate-card")).toHaveTextContent(
       "Порция — примерно 100 г, это оценка: граммов в сообщении не было.",
@@ -154,7 +152,7 @@ describe("оценка → карточка → «В дневник»", () => {
 describe("«Поправить граммы» — код происхождения решается на карточке", () => {
   it("новая оценка с граммами → запись с corrected=true; ключ — новый на новую карточку", async () => {
     renderScreen();
-    await settle();
+    await settleScenario();
     await typeAndEstimate("борщ");
     const firstKey = (): string | undefined => mockedLog.mock.calls[0]?.[0].idempotency_key;
 
@@ -162,25 +160,25 @@ describe("«Поправить граммы» — код происхожден�
     fireEvent.change(screen.getByLabelText(MANUAL_COPY.gramsField), { target: { value: "300" } });
     mockedEstimate.mockResolvedValue(estimate({ portion_g: 300, portion_estimated: false, kcal: 360 }));
     fireEvent.click(screen.getByRole("button", { name: MANUAL_COPY.recalc }));
-    await settle();
+    await settleScenario();
 
     expect(mockedEstimate).toHaveBeenLastCalledWith("борщ", 300);
     expect(screen.getByTestId("estimate-card")).toHaveTextContent("Порция — 300 г, по твоим словам.");
 
     fireEvent.click(screen.getByRole("button", { name: MANUAL_COPY.toDiary }));
-    await settle();
+    await settleScenario();
     expect(mockedLog.mock.calls[0]?.[0]).toMatchObject({ portion_g: 300, corrected: true });
     expect(firstKey()).toBeTruthy();
   });
 
   it("не число → фраза, оценка не зовётся повторно", async () => {
     renderScreen();
-    await settle();
+    await settleScenario();
     await typeAndEstimate("борщ");
     fireEvent.click(screen.getByRole("button", { name: MANUAL_COPY.fixGrams }));
     fireEvent.change(screen.getByLabelText(MANUAL_COPY.gramsField), { target: { value: "много" } });
     fireEvent.click(screen.getByRole("button", { name: MANUAL_COPY.recalc }));
-    await settle();
+    await settleScenario();
     expect(screen.getByText(MANUAL_COPY.badGrams)).toBeInTheDocument();
     expect(mockedEstimate).toHaveBeenCalledTimes(1);
   });
@@ -190,7 +188,7 @@ describe("отказы — по имени", () => {
   it("food_not_recognized → своя фраза, карточки нет", async () => {
     mockedEstimate.mockRejectedValue(new ApiError(400, "food_not_recognized", "x"));
     renderScreen();
-    await settle();
+    await settleScenario();
     await typeAndEstimate("нечто");
     expect(screen.getByText(MANUAL_COPY.notRecognized)).toBeInTheDocument();
     expect(screen.queryByTestId("estimate-card")).toBeNull();
@@ -199,7 +197,7 @@ describe("отказы — по имени", () => {
   it("food_diary_consent_required → на гейт согласия с возвратом сюда", async () => {
     mockedEstimate.mockRejectedValue(new ApiError(403, "food_diary_consent_required", "x"));
     renderScreen();
-    await settle();
+    await settleScenario();
     await typeAndEstimate("борщ");
     expect(screen.getByTestId("location")).toHaveTextContent("/customer/food-scanner/capture|/customer/food-scanner/manual");
   });
@@ -207,10 +205,10 @@ describe("отказы — по имени", () => {
   it("nutrition_unavailable при записи → фраза, остаёмся на карточке", async () => {
     mockedLog.mockRejectedValue(new ApiError(503, "nutrition_unavailable", "x"));
     renderScreen();
-    await settle();
+    await settleScenario();
     await typeAndEstimate("борщ");
     fireEvent.click(screen.getByRole("button", { name: MANUAL_COPY.toDiary }));
-    await settle();
+    await settleScenario();
     expect(screen.getByText(MANUAL_COPY.unavailable)).toBeInTheDocument();
     expect(screen.getByTestId("estimate-card")).toBeInTheDocument();
   });
@@ -218,7 +216,7 @@ describe("отказы — по имени", () => {
   it("согласия нет по данным сервера → сразу на гейт (без вызова оценки)", async () => {
     mockedConsent.mockResolvedValue(null);
     renderScreen();
-    await settle();
+    await settleScenario();
     expect(screen.getByTestId("location")).toHaveTextContent("/customer/food-scanner/capture|/customer/food-scanner/manual");
     expect(mockedEstimate).not.toHaveBeenCalled();
   });

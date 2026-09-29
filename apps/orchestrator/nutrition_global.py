@@ -143,7 +143,14 @@ CLARIFY_FOOD_ENTRY_TOOL_SPEC: dict[str, Any] = {
     "description": (
         "Пользователь написал что-то похожее на еду («борщ 300г») — "
         "не напиток. Показывает карточку уточнения: записать в дневник "
-        "или это опечатка. Напитки — только через log_water."
+        "или это опечатка. Напитки — только через log_water. "
+        # DRF-2287 (живой проход 22.09): вопрос принимали за запись.
+        "Вопрос о справочнике блюд или о том, что ты умеешь («а торт в "
+        "справочнике есть?»), — не запись: этот инструмент не вызывай, ответь "
+        "словами."
+        # DRF-2285: про фото здесь НЕ говорим — фото распознаётся только при
+        # FOOD_PHOTO_SCAN_ENABLED, и строку об этом даёт флаг-зависимый блок
+        # промпта (concierge._nutrition_tools_prompt_block), а не описание.
     ),
     "parameters": {
         "type": "object",
@@ -540,6 +547,18 @@ def resolve_anketa_tap(text: str) -> AnketaTap | None:
     ref = parsed.get("ref") or ""
     step, _, value = ref.partition(":")
 
+    if step == "diet":
+        # DRF-2310. Второй шаг, чья метка НЕ идёт в историю, и по той же
+        # причине, что скрининг: «Халяль» и «Кошер» называют веру человека,
+        # а это спецкатегория 152-ФЗ наравне со здоровьем. Метка легла бы в
+        # ``record_global_message(role="user")`` — в постоянное хранилище,
+        # которое на следующих ходах читает промпт консьержа.
+        #
+        # Сам ответ от этого не теряется: он уезжает в каталог как значение
+        # профиля, с согласием и по своему пути. В историю чата копия не
+        # нужна, и раздел 9 решения владельца её прямо запрещает.
+        return AnketaTap(history_text=None)
+
     if step == "screening":
         # Единственный шаг анкеты, чья метка НЕ идёт в историю.
         #
@@ -858,6 +877,11 @@ def is_structured_nutrition_turn(
     )
 
 
+def _has_image_attachment(attachments: list[dict[str, Any]] | None) -> bool:
+    """Есть ли среди вложений ``image`` — единственный тип, который сканер еды читает."""
+    return any(isinstance(a, dict) and a.get("type") == "image" for a in attachments or [])
+
+
 def try_handle_structured_nutrition_turn(
     *,
     text: str,
@@ -874,7 +898,11 @@ def try_handle_structured_nutrition_turn(
     degrades to the concierge.
     """
 
-    has_attachments = bool(attachments)
+    # DRF-1942 — «фото без текста → сканер еды» решает ТИП вложения, а не
+    # сам факт вложения: голосовое (``audio``) сюда не относится, ему
+    # отвечает handler. ``video``/``file`` и прочее — как раньше не были
+    # фото, так и остаются: сканер их всё равно не прочитал бы.
+    has_attachments = _has_image_attachment(attachments)
     if not is_structured_nutrition_turn(
         text=text, has_attachments=has_attachments, conversation=conversation
     ):

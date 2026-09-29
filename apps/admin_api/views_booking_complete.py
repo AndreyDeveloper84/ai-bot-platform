@@ -50,12 +50,52 @@ from apps.integrations.ayla.user_proxy import external_user_id_for
 logger = logging.getLogger(__name__)
 
 
-def _error(slug: str, detail: str, status: int) -> JsonResponse:
-    return JsonResponse({"error": slug, "detail": detail}, status=status)
+def _error(
+    slug: str,
+    detail: str,
+    status: int,
+    *,
+    hint: str | None = None,
+) -> JsonResponse:
+    """Отказ. ``detail`` — нам в журнал, ``hint`` — слова человеку.
+
+    DRF-2453, тот же разрез, что у ``_outcome`` ниже. В конверте ОШИБКИ
+    подсказка едет в ``details.hint`` — так её уже отдаёт
+    ``views_staff_role.py:178`` и так её уже объявляет клиент (DRF-2273).
+    Четвёртого конверта не заводим.
+    """
+    body: dict[str, Any] = {"error": slug, "detail": detail}
+    if hint:
+        body["details"] = {"hint": hint}
+    return JsonResponse(body, status=status)
 
 
-def _outcome(outcome: str, detail: str, status: int, **extra: Any) -> JsonResponse:
-    return JsonResponse({"outcome": outcome, "detail": detail, **extra}, status=status)
+def _outcome(
+    outcome: str,
+    detail: str,
+    status: int,
+    *,
+    hint: str | None = None,
+    **extra: Any,
+) -> JsonResponse:
+    """Исход операции. ``detail`` — нам в журнал, ``hint`` — слова человеку.
+
+    DRF-2453. Раньше в ``detail`` лежало и то и другое: согласованная
+    русская фраза владельца, внутренний английский и ``str(exc)``. Экран
+    печатал этот канал целиком — значит показывал человеку и внутреннее
+    тоже; а перестать печатать было нельзя, не потеряв слова владельца.
+
+    Разрез не новый: ``hint`` рядом с внутренней причиной уже отдаёт
+    ``views_staff_role.py`` (``details={"hint": exc.hint}``), и клиент
+    объявляет это поле с DRF-2273. Здесь та же пара в конверте исхода.
+
+    Нет ``hint`` — экран скажет собственную согласованную фразу; выдумывать
+    её на сервере не нужно и нельзя.
+    """
+    body: dict[str, Any] = {"outcome": outcome, "detail": detail, **extra}
+    if hint:
+        body["hint"] = hint
+    return JsonResponse(body, status=status)
 
 
 def _own_booking(tenant_id, appointment_id) -> RemoteBookingProxy | None:
@@ -99,10 +139,17 @@ def booking_version(request: HttpRequest, appointment_id: str) -> HttpResponse:
         # No version means no action: the screen must not offer a button
         # it would have to aim blind.
         logger.warning("admin_api.booking_version.unavailable err=%s", exc)
-        return _error("unavailable", "расписание не ответило — попробуйте ещё раз", 503)
+        return _error(
+            "unavailable",
+            "booking version unavailable upstream",
+            503,
+            hint="расписание не ответило — попробуйте ещё раз",
+        )
     except BookingAPIError as exc:
         logger.warning("admin_api.booking_version.error err=%s", exc)
-        return _error("unavailable", "не удалось прочитать запись", 503)
+        return _error(
+            "unavailable", "booking version read failed", 503, hint="не удалось прочитать запись"
+        )
 
     return JsonResponse(
         {
@@ -191,7 +238,9 @@ def _settle_visit(request: HttpRequest, appointment_id: str, *, write: str) -> H
         return _outcome("blocked", str(exc), 400)
     except SalonNotConfigured as exc:
         logger.error("admin_api.%s.not_configured err=%s", log, exc)
-        return _outcome("blocked", copy["not_configured"], 503)
+        return _outcome(
+            "blocked", "not configured for this write", 503, hint=copy["not_configured"]
+        )
     except SalonUnauthorized as exc:
         logger.error(
             "admin_api.%s.upstream_unauthorized tenant=%s err=%s",
@@ -199,7 +248,7 @@ def _settle_visit(request: HttpRequest, appointment_id: str, *, write: str) -> H
             tenant.id,
             exc,
         )
-        return _outcome("blocked", copy["unauthorized"], 503)
+        return _outcome("blocked", "unauthorized for this write", 503, hint=copy["unauthorized"])
     except SalonForbidden as exc:
         logger.warning(
             "admin_api.%s.forbidden actor=%s tenant=%s err=%s",
@@ -214,8 +263,9 @@ def _settle_visit(request: HttpRequest, appointment_id: str, *, write: str) -> H
         # Not an error on their part — send them back to a fresh read.
         return _outcome(
             "conflict",
-            "запись изменилась — обновите день и попробуйте снова",
+            "version conflict: booking changed since it was read",
             409,
+            hint="запись изменилась — обновите день и попробуйте снова",
         )
     except SalonNotAllowed as exc:
         # Cancelled, or already settled. Settled, not contended.
@@ -229,7 +279,12 @@ def _settle_visit(request: HttpRequest, appointment_id: str, *, write: str) -> H
             appointment_id,
             exc,
         )
-        return _outcome("conflict", "запись не найдена в расписании — обновите день", 409)
+        return _outcome(
+            "conflict",
+            "mirror diverged: appointment missing upstream",
+            409,
+            hint="запись не найдена в расписании — обновите день",
+        )
     except SalonUnavailable as exc:
         # May have been applied. Never a failure — a second press on an
         # already-settled visit is refused, but the operator should be
@@ -237,8 +292,9 @@ def _settle_visit(request: HttpRequest, appointment_id: str, *, write: str) -> H
         logger.warning("admin_api.%s.unknown actor=%s err=%s", log, actor, exc)
         return _outcome(
             "pending",
-            "расписание не ответило — обновите день, прежде чем повторять",
+            "salon did not answer; the write may already have applied",
             504,
+            hint="расписание не ответило — обновите день, прежде чем повторять",
         )
     except SalonAPIError as exc:
         logger.warning("admin_api.%s.error actor=%s err=%s", log, actor, exc)
@@ -353,14 +409,24 @@ def reschedule_booking(request: HttpRequest, appointment_id: str) -> HttpRespons
         return _outcome("blocked", str(exc), 400)
     except SalonNotConfigured as exc:
         logger.error("admin_api.reschedule_booking.not_configured err=%s", exc)
-        return _outcome("blocked", "перенос не настроен", 503)
+        return _outcome(
+            "blocked",
+            "reschedule write is not configured for this tenant",
+            503,
+            hint="перенос не настроен",
+        )
     except SalonUnauthorized as exc:
         logger.error(
             "admin_api.reschedule_booking.upstream_unauthorized tenant=%s err=%s",
             tenant.id,
             exc,
         )
-        return _outcome("blocked", "перенос сейчас недоступен — обратитесь к поддержке", 503)
+        return _outcome(
+            "blocked",
+            "salon rejected the reschedule call as unauthorized",
+            503,
+            hint="перенос сейчас недоступен — обратитесь к поддержке",
+        )
     except SalonForbidden as exc:
         logger.warning(
             "admin_api.reschedule_booking.forbidden actor=%s tenant=%s err=%s",
@@ -374,16 +440,18 @@ def reschedule_booking(request: HttpRequest, appointment_id: str) -> HttpRespons
         # that no longer exists in that shape — send them back to read.
         return _outcome(
             "conflict",
-            "запись уже перенесли — обновите день и посмотрите заново",
+            "version conflict on reschedule: booking already moved",
             409,
+            hint="запись уже перенесли — обновите день и посмотрите заново",
         )
     except SalonSlotTaken:
         # Different fact, different instruction: the booking is as they
         # left it, the TIME went.
         return _outcome(
             "conflict",
-            "это время успели занять — выберите другое",
+            "slot conflict: target time taken upstream",
             409,
+            hint="это время успели занять — выберите другое",
         )
     except SalonNotAllowed as exc:
         return _outcome("blocked", str(exc), 409)
@@ -393,14 +461,20 @@ def reschedule_booking(request: HttpRequest, appointment_id: str) -> HttpRespons
             appointment_id,
             exc,
         )
-        return _outcome("conflict", "запись не найдена в расписании — обновите день", 409)
+        return _outcome(
+            "conflict",
+            "mirror diverged: appointment missing upstream",
+            409,
+            hint="запись не найдена в расписании — обновите день",
+        )
     except SalonUnavailable as exc:
         # May have been applied. A blind retry could move it twice.
         logger.warning("admin_api.reschedule_booking.unknown actor=%s err=%s", actor, exc)
         return _outcome(
             "pending",
-            "расписание не ответило — обновите день, прежде чем повторять",
+            "salon did not answer; the write may already have applied",
             504,
+            hint="расписание не ответило — обновите день, прежде чем повторять",
         )
     except SalonAPIError as exc:
         logger.warning("admin_api.reschedule_booking.error actor=%s err=%s", actor, exc)

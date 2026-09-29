@@ -175,6 +175,45 @@ describe("GoalSelectScreen — safety-стоп на тексте цели (DRF-1
     expect(within(frame).getByText(QUESTIONS[0])).toBeInTheDocument();
   });
 
+  it("[OD-BOT §170] G7: три структурированных ответа — кнопки, без поля ответа; значение уходит как safety_answer", async () => {
+    const G7_QUESTION =
+      "Сейчас есть хотя бы один из признаков: кажется, что вы вот-вот потеряете сознание; " +
+      "трудно самостоятельно стоять, говорить или дышать; появилась спутанность; " +
+      "состояние быстро ухудшается?";
+    const OPTIONS = [
+      { label: "Да, есть хотя бы один признак", value: "cb:s1g7:yes:0123456789ab" },
+      { label: "Нет — этих признаков не было и сейчас нет, состояние не ухудшается", value: "cb:s1g7:no:0123456789ab" },
+      { label: "Не уверен(а) или не могу ответить", value: "cb:s1g7:unsure:0123456789ab" },
+    ];
+    mockedPost
+      .mockResolvedValueOnce({
+        safety: {
+          kind: SAFETY_KIND_CLARIFY,
+          questions: [G7_QUESTION],
+          options: OPTIONS,
+          question_id: "health_screening.g7",
+        },
+      })
+      .mockResolvedValueOnce(SAVED_DOC);
+    renderScreen();
+    await typeGoalAndSend("Мне резко стало очень плохо");
+
+    const frame = await screen.findByTestId("goal-safety-frame");
+    expect(within(frame).getByText(G7_QUESTION)).toBeInTheDocument();
+    const options = within(frame).getByTestId("goal-safety-options");
+    for (const o of OPTIONS) expect(within(options).getByRole("button", { name: o.label })).toBeInTheDocument();
+    // свободный текст — не ответ на этот вопрос
+    expect(screen.queryByRole("textbox", { name: "Твой ответ" })).not.toBeInTheDocument();
+
+    fireEvent.click(within(options).getByRole("button", { name: OPTIONS[1]!.label }));
+    await waitFor(() => expect(mockedPost).toHaveBeenCalledTimes(2));
+    expect(mockedPost.mock.calls[1]?.[0]).toEqual({
+      goal_text: "Мне резко стало очень плохо",
+      [SAFETY_ANSWER_FIELD]: OPTIONS[1]!.value,
+      source_channel: "miniapp",
+    });
+  });
+
   it("negative-guard: копия экрана и константы не называют диагнозов", () => {
     const words = ["грыж", "остеохондроз", "протруз", "невралг", "артрит", "артроз", "сколиоз", "защемлен", "диагноз"];
     const own = ["Сначала уточню", "Здесь я не подскажу", "Твой ответ", "Ответь своими словами", HEALTH_ACKNOWLEDGEMENT_COPY]

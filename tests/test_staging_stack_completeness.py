@@ -95,7 +95,9 @@ STAGING_SETTINGS_MODULE = "config.settings.staging"
 #: Stateful infra the staging stack starts from the base file (DRF-1915).
 #: Pinned for the same reason as the Django sets above: a derived set that
 #: silently shrinks makes "every started service restarts" vacuously true.
-EXPECTED_STAGING_INFRA_SERVICES = {"postgres", "redis", "minio"}
+#: MinIO left the bot stack in DRF-2611: nothing in the bot wrote to it — only
+#: the readiness probe pinged it. The 2026-09-15 history below still names it.
+EXPECTED_STAGING_INFRA_SERVICES = {"postgres", "redis"}
 
 #: What a host reboot must not undo. `restart=no` (compose's default) left
 #: postgres/redis/minio down after the 2026-09-15 04:14 UTC reboot while

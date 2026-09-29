@@ -443,6 +443,19 @@ export function openPaymentConfirmation(url: string): void {
   }
 }
 
+/**
+ * DRF-2268 — ссылка на диалог бота, которую отдал сервер (`chat_link` с
+ * `last-topic`, #1961). Главная её запоминает, и экраны после неё зовут
+ * `returnToChat()` без аргумента — с той же ссылкой, без лишнего запроса.
+ * `closeApp()` снят целиком: он молчал там, где нет `close()`, и сторож
+ * `noBareCloseApp.guard` не даёт вернуть ни его, ни прямой `close()` моста.
+ */
+let rememberedChatLink: string | null = null;
+
+export function rememberChatLink(link: string | null): void {
+  rememberedChatLink = link && link.trim() ? link : null;
+}
+
 /** Чем кончилась попытка вернуть человека в чат (DRF-2266). */
 export type ReturnToChatOutcome = "closed" | "opened_chat" | "stuck";
 
@@ -457,6 +470,7 @@ export type ReturnToChatOutcome = "closed" | "opened_chat" | "stuck";
  * внутри приложения, а не в чат.
  */
 export function returnToChat(chatLink?: string | null): ReturnToChatOutcome {
+  const link = chatLink ?? rememberedChatLink;
   const b = maxBridge();
   if (b?.close) {
     try {
@@ -466,32 +480,13 @@ export function returnToChat(chatLink?: string | null): ReturnToChatOutcome {
       console.warn("[max-sdk] close() failed, trying the chat link", err);
     }
   }
-  if (b?.openLink && chatLink) {
+  if (b?.openLink && link) {
     try {
-      b.openLink(chatLink);
+      b.openLink(link);
       return "opened_chat";
     } catch (err) {
       console.warn("[max-sdk] openLink(chat) failed", err);
     }
   }
   return "stuck";
-}
-
-/**
- * Ask MAX to close the Mini App. Falls back to ``history.back()`` when
- * the bridge isn't available — at least navigates the dev browser away.
- */
-export function closeApp(): void {
-  const b = maxBridge();
-  if (b?.close) {
-    try {
-      b.close();
-      return;
-    } catch (err) {
-      console.warn("[max-sdk] close() failed", err);
-    }
-  }
-  if (typeof window !== "undefined" && window.history?.length > 1) {
-    window.history.back();
-  }
 }

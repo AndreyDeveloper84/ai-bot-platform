@@ -545,6 +545,43 @@ def export_personal_data(
         for row in preferences_qs
     ]
 
+    # DRF-2214 — what Ayla showed the person as a direction, and why (К-3):
+    # the reasons verbatim, the facts they were built from, the curated
+    # alternatives shown next to it and the person's reaction.
+    from apps.recommendation.models import Recommendation
+
+    recommendations_section = [
+        {
+            "kind": row.kind,
+            "goal_id": row.goal_id,
+            "what": row.what,
+            "subline": row.subline,
+            "why": row.why,
+            "facts": row.facts,
+            "alternatives": row.alternatives,
+            "reaction": row.reaction,
+            "reacted_at": row.reacted_at.isoformat() if row.reacted_at else None,
+            "booked_at": row.booked_at.isoformat() if row.booked_at else None,
+            "created_at": row.created_at.isoformat(),
+        }
+        for row in Recommendation.objects.filter(bot_user_id__in=shell_ids).order_by("created_at")
+    ]
+
+    # DRF-2214 — the proactive-nutrition toggles the person set themselves.
+    # Observations and the send journal are declared withheld in coverage.
+    nutrition_settings_section = []
+    for shell in BotUser.all_tenants.filter(pk__in=shell_ids).order_by("first_seen", "id"):
+        prefs = (shell.context or {}).get("nutrition_proactive")
+        if not isinstance(prefs, dict):
+            continue
+        nutrition_settings_section.append(
+            {
+                "daily_report_time": prefs.get("daily_report_time", "off"),
+                "water_reminders": bool(prefs.get("water_reminders", False)),
+                "opted_out_at": prefs.get("opted_out_at"),
+            }
+        )
+
     consents_qs = ConsentRecord.all_tenants.filter(bot_user_id__in=shell_ids).order_by(
         "captured_at"
     )
@@ -571,6 +608,8 @@ def export_personal_data(
                 "personal_context",
                 "memory_green",
                 "preferences",
+                "recommendations",
+                "nutrition_notification_settings",
                 "consents",
                 "coverage",
             ],
@@ -586,6 +625,8 @@ def export_personal_data(
         "personal_context": personal_context_section,
         "memory": memory_section,
         "preferences": preferences_section,
+        "recommendations": recommendations_section,
+        "nutrition_notification_settings": nutrition_settings_section,
         "consents": consents_section,
         # Last on purpose: the reader has just seen what IS here, and this is
         # the answer to «а это всё?». Under-reporting the composition is the

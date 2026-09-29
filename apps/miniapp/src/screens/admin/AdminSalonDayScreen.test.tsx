@@ -36,6 +36,7 @@ import {
   type MeResponse,
   type SalonDayResponse,
 } from "../../lib/admin-api";
+import { REFUSAL_CANON } from "../../lib/refusal-canon";
 import { AdminSalonDayScreen } from "./AdminSalonDayScreen";
 
 const mockedDay = vi.mocked(getSalonDay);
@@ -337,18 +338,107 @@ describe("cancelling a visit", () => {
   it("keeps the day as it is when the booking cannot be cancelled", async () => {
     const user = userEvent.setup();
     mockedDay.mockResolvedValue(dayWithOneVisit());
+    // DRF-2453. Узел подставлял русский `detail` и требовал напечатать его.
+    // В этом канале лежит текст ЧУЖОГО сервиса: `str(exc)` здесь — это
+    // `detail` ответа каталога (`salon_client.py:321`, `:340`), и ни язык
+    // его, ни согласованность владельцем этому репозиторию не известны.
+    // Показывать его человеку дословно — показывать внутреннее сообщение
+    // другого сервиса.
+    //
+    // Проверяем то, ради чего узел написан: день не тронут. Слова — свои.
     mockedCancel.mockResolvedValue({
       outcome: "blocked",
-      detail: "Визит уже завершён.",
+      detail: "appointment already completed upstream",
     });
     renderScreen();
 
     await user.click(await screen.findByRole("button", { name: /Отменить визит: Мария/ }));
     await user.click(screen.getByRole("button", { name: "Отменить визит" }));
 
-    expect(await screen.findByText("Визит уже завершён.")).toBeInTheDocument();
+    expect(await screen.findByText("Этот визит нельзя отменить.")).toBeInTheDocument();
+    expect(screen.queryByText(/already completed/)).toBeNull();
     // Settled, not contended: nothing changed, so nothing to reload.
     await waitFor(() => expect(mockedDay).toHaveBeenCalledTimes(1));
+  });
+});
+
+/**
+ * Подсказка сервера или своя фраза — но не внутренняя причина (DRF-2453).
+ *
+ * В канале `detail` лежало всё сразу: согласованная русская фраза
+ * владельца, внутренний английский и `str(exc)` — то есть текст ЧУЖОГО
+ * сервиса (`salon_client.py` кладёт в исключение `detail` ответа
+ * каталога). Теперь сервер разводит половины: `detail` — нам, `hint` —
+ * человеку; нет подсказки — экран говорит собственную фразу.
+ */
+describe("слова человеку отдельно от внутренней причины", () => {
+  function dayWithOneVisit(over = {}) {
+    return dayResponse({
+      summary: { total: 1, upcoming: 1, completed: 0, released: 0 },
+      masters: [
+        {
+          master_id: "m-1",
+          name: "Анна Петрова",
+          is_active: true,
+          visits: [visit(over)],
+        },
+      ],
+    });
+  }
+
+  /** Внутренняя причина — та, что сервер действительно кладёт в `detail`. */
+  const INTERNAL = "salon rejected the cancel call as unauthorized";
+
+  async function cancelTheVisit() {
+    const user = userEvent.setup();
+    mockedDay.mockResolvedValue(dayWithOneVisit());
+    renderScreen();
+    await user.click(await screen.findByRole("button", { name: /Отменить визит: Мария/ }));
+    await user.click(screen.getByRole("button", { name: "Отменить визит" }));
+  }
+
+  it("есть hint — человек читает слова владельца", async () => {
+    // Наличие раньше отсутствия: слова на экране есть, и они те самые.
+    mockedCancel.mockResolvedValue({
+      outcome: "blocked",
+      detail: INTERNAL,
+      hint: "отмена сейчас недоступна — обратитесь к поддержке",
+    });
+
+    await cancelTheVisit();
+
+    expect(
+      await screen.findByText("отмена сейчас недоступна — обратитесь к поддержке"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(new RegExp(INTERNAL))).toBeNull();
+  });
+
+  it("нет hint — своя согласованная фраза, а не внутренняя причина", async () => {
+    mockedCancel.mockResolvedValue({ outcome: "blocked", detail: INTERNAL });
+
+    await cancelTheVisit();
+
+    expect(await screen.findByText("Этот визит нельзя отменить.")).toBeInTheDocument();
+    expect(screen.queryByText(new RegExp(INTERNAL))).toBeNull();
+  });
+
+  it("чужой русский текст в detail на экран не попадает", async () => {
+    // Главный узел листа: `str(exc)` каталога бывает и русским. Русский —
+    // не признак согласованности: текст написан другим сервисом.
+    mockedCancel.mockResolvedValue({ outcome: "blocked", detail: "Визит уже завершён." });
+
+    await cancelTheVisit();
+
+    expect(await screen.findByText("Этот визит нельзя отменить.")).toBeInTheDocument();
+    expect(screen.queryByText("Визит уже завершён.")).toBeNull();
+  });
+
+  it("пустой hint читается как «подсказки нет»", async () => {
+    mockedCancel.mockResolvedValue({ outcome: "blocked", detail: INTERNAL, hint: "" });
+
+    await cancelTheVisit();
+
+    expect(await screen.findByText("Этот визит нельзя отменить.")).toBeInTheDocument();
   });
 });
 
@@ -635,6 +725,38 @@ describe("moving a visit", () => {
       expect(mockedMove).toHaveBeenCalledWith("v-1", 4, "2026-08-20T11:00:00+00:00"),
     );
   });
+
+  it.each([
+    ["conflict", "запись уже перенесли — обновите день и посмотрите заново"],
+    ["failed", undefined],
+  ] as const)(
+    "перенос не прошёл (%s) — фраза владельца, под ней шаг сервера, detail не виден (§6-кси п.6, DRF-2577)",
+    async (outcome, hint) => {
+      const user = userEvent.setup();
+      mockedDay.mockResolvedValue(dayWith());
+      mockedVersion.mockResolvedValue(okVersion);
+      mockedSlots.mockResolvedValue(
+        slotsPayload([
+          { time: "14:00", start_at: "2026-08-20T11:00:00+00:00", duration_min: 60 },
+        ]) as never,
+      );
+      mockedMove.mockResolvedValue({ outcome, detail: "slot conflict", ...(hint ? { hint } : {}) });
+      vi.spyOn(console, "warn").mockImplementation(() => undefined);
+      renderScreen();
+
+      await user.click(await screen.findByRole("button", { name: /Перенести визит: Мария/ }));
+      await user.click(await screen.findByRole("button", { name: "14:00" }));
+
+      // Фраза отказа — владельца, дословно, первой строкой; под ней — что
+      // делать дальше (`hint`), если сервер его назвал. `detail` — нигде.
+      const status = await screen.findByText((_, el) =>
+        el?.getAttribute("role") === "status" && (el.textContent ?? "").startsWith(REFUSAL_CANON.visitMove),
+      );
+      const step = hint ? "Запись уже перенесли — обновите день и посмотрите заново" : "";
+      expect(status.textContent).toBe(REFUSAL_CANON.visitMove + step);
+      expect(screen.queryByText(/slot conflict/)).toBeNull();
+    },
+  );
 
   it("never renders an unreachable slot list as «no free time»", async () => {
     const user = userEvent.setup();

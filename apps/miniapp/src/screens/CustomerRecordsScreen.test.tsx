@@ -9,6 +9,7 @@ import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes, useParams } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { primeDisplayName } from "../components/CustomerAvatarEntry";
 
 // Домашний экран теперь спрашивает decision-context (приглашение в
 // анкету цели). Мокаем, чтобы юнит-тест не ходил в сеть; отсутствие
@@ -38,6 +39,14 @@ vi.mock("../lib/api", async (importOriginal) => {
 import { ApiError, fetchMyBookings, type BookingItem } from "../lib/api";
 import { authErrorCopy } from "../lib/auth-error-copy";
 import { CustomerRecordsScreen } from "./CustomerRecordsScreen";
+
+// Дверь в профиль (`CustomerAvatarEntry`) без пропа спрашивает имя у
+// `/me`. Этот набор ручку не подменяет, поэтому имя засевается явно:
+// иначе в прогоне живёт неподменённый сетевой вызов и асинхронное
+// обновление, которое может прилететь посреди чужого теста (DRF-2523).
+beforeEach(() => {
+  primeDisplayName("Тест Тестов");
+});
 
 const mockedList = vi.mocked(fetchMyBookings);
 
@@ -167,6 +176,23 @@ describe("CustomerRecordsScreen (real data)", () => {
     expect(nav.getAllByRole("button").map((b) => b.getAttribute("aria-label"))).toEqual([
       "Главная", "План", "Дневник", "Записи", "Профиль",
     ]);
+  });
+
+  it("DRF-2436 B / п.15: у каждой записи в строке — мастер и салон; два салона различимы", async () => {
+    // Пара, которая обязана различаться: записи одного человека из двух
+    // салонов в одном списке. Без салона — «мастер {Имя}» (слова владельца 28.09, п.2).
+    mockLists([
+      booking({ id: "b-s1", master_name: "Ольга", salon_name: "Формула тела", visit_at: isoInHours(20) }),
+      booking({ id: "b-s2", master_name: "Марина", salon_name: "Люмина", visit_at: isoInHours(40) }),
+      booking({ id: "b-s3", master_name: "Анна", visit_at: isoInHours(60) }),
+    ]);
+    renderScreen();
+
+    expect(await screen.findByText("мастер Ольга · Формула тела")).toBeInTheDocument();
+    expect(screen.getByText("мастер Марина · Люмина")).toBeInTheDocument();
+    // Без салона в проводе — без хвоста « · ».
+    expect(screen.getByText("мастер Анна")).toBeInTheDocument();
+    expect(screen.queryByText(/ · $/)).not.toBeInTheDocument();
   });
 
   it("DRF-2172: цена записи «3 200 ₽» на карточке; без цены строки нет, не «0 ₽»", async () => {
@@ -355,7 +381,7 @@ describe("офлайн: действия выключены вместе с пр
     // Сами записи никуда не делись — офлайн выключает действия, не показ.
     expect(await screen.findByText("Маникюр")).toBeInTheDocument();
     expect(screen.getByText("Массаж")).toBeInTheDocument();
-    expect(screen.getAllByText(/у Анна Соколова/).length).toBeGreaterThan(0);
+    expect(screen.getAllByText(/мастер Анна Соколова/).length).toBeGreaterThan(0);
     // Чтение уже показанной записи остаётся доступным.
     const open = screen.getAllByRole("button", { name: "Открыть запись" })[0];
     expect(open).toBeEnabled();

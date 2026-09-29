@@ -31,6 +31,8 @@
  */
 import { describe, expect, it } from "vitest";
 
+import { stringLiteralsOf } from "./testing/string-literals";
+
 // Исходники — через `import.meta.glob`, как в `backContract.test.ts`: `node:fs`
 // в этом пакете не типизирован, а Vite отдаёт файлы строками на сборке теста.
 const SOURCES = import.meta.glob("./**/*.{ts,tsx}", {
@@ -46,21 +48,8 @@ const NAME_RE = new RegExp(
   "u",
 );
 
-/** Строковые литералы кода без комментариев — по одному на строку вывода. */
-export function stringLiteralsOf(source: string): string[] {
-  // `\r` снимается заранее: в JS `.` не матчит перевод строки, и строка
-  // комментария с CRLF-хвостом пережила бы `^\s*\/\/.*$` (нашлось пробой).
-  const noBlockComments = source.replace(/\r/g, "").replace(/\/\*[\s\S]*?\*\//g, "");
-  const literals: string[] = [];
-  for (const rawLine of noBlockComments.split("\n")) {
-    const line = rawLine.replace(/^\s*\/\/.*$/, "");
-    for (const m of line.matchAll(/"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'|`((?:[^`\\]|\\.)*)`/g)) {
-      const text = m[1] ?? m[2] ?? m[3] ?? "";
-      if (text.trim()) literals.push(text);
-    }
-  }
-  return literals;
-}
+
+export { stringLiteralsOf };
 
 export function personNameHits(source: string): string[] {
   return stringLiteralsOf(source).filter((text) => NAME_RE.test(text));

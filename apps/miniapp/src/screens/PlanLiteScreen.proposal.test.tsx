@@ -15,7 +15,7 @@
  *   - каденс per_2_weeks: подпись «раз в 2 недели» в предложении, ведро
  *     «2 недели» в карточке.
  */
-import { act, configure, fireEvent, getConfig, render, screen, within } from "@testing-library/react";
+import { configure, fireEvent, getConfig, render, screen, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes, useLocation } from "react-router-dom";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -53,6 +53,7 @@ import {
   type PlanLiteProposal,
 } from "../lib/plan-lite";
 import { PLAN_LITE_COPY, PLAN_LITE_ROUTE, PlanLiteScreen } from "./PlanLiteScreen";
+import { settleScenario } from "../test/settleScenario";
 
 const GUARD_ASYNC_TIMEOUT_MS = 20;
 let previousAsyncUtilTimeout = 1000;
@@ -65,11 +66,6 @@ afterAll(() => {
   vi.unstubAllEnvs();
 });
 
-const settle = async (rounds = 5) => {
-  for (let i = 0; i < rounds; i += 1) {
-    await act(async () => {});
-  }
-};
 
 const mockedGet = vi.mocked(getPlanLite);
 const mockedProposal = vi.mocked(getPlanLiteProposal);
@@ -143,7 +139,7 @@ beforeEach(() => {
 describe("предложение", () => {
   it("плана нет → блок с меткой цели, «почему» и три строки с числами из предложения; без слов результата", async () => {
     renderScreen();
-    await settle();
+    await settleScenario();
 
     const block = proposalBlock();
     expect(block).toHaveTextContent(PLAN_LITE_COPY.proposalTitle("Забота о себе"));
@@ -168,10 +164,10 @@ describe("предложение", () => {
 
   it("«Подтвердить план» шлёт actions из предложения + template_version; после — карточка", async () => {
     renderScreen();
-    await settle();
+    await settleScenario();
 
     fireEvent.click(screen.getByRole("button", { name: PLAN_LITE_COPY.confirm }));
-    await settle();
+    await settleScenario();
 
     expect(mockedCreate).toHaveBeenCalledTimes(1);
     expect(mockedCreate.mock.calls[0]).toEqual([
@@ -187,13 +183,13 @@ describe("предложение", () => {
 
   it("снятый пункт в POST не уходит; степпер меняет число в POST", async () => {
     renderScreen();
-    await settle();
+    await settleScenario();
 
     const block = proposalBlock();
     fireEvent.click(within(block).getByRole("checkbox", { name: PLAN_LITE_COPY.labelWater }));
     fireEvent.click(within(block).getByRole("button", { name: `${PLAN_LITE_COPY.labelFood}: ${PLAN_LITE_COPY.more}` }));
     fireEvent.click(screen.getByRole("button", { name: PLAN_LITE_COPY.confirm }));
-    await settle();
+    await settleScenario();
 
     expect(mockedCreate).toHaveBeenCalledTimes(1);
     const [actions, version] = mockedCreate.mock.calls[0] ?? [];
@@ -207,7 +203,7 @@ describe("предложение", () => {
 
   it("все пункты сняты → «Подтвердить» не активна и POST нет", async () => {
     renderScreen();
-    await settle();
+    await settleScenario();
 
     const block = proposalBlock();
     fireEvent.click(within(block).getByRole("checkbox", { name: PLAN_LITE_COPY.labelBook }));
@@ -220,7 +216,7 @@ describe("предложение", () => {
 
   it("«Собрать самому» → прежний конструктор из трёх обязательств", async () => {
     renderScreen();
-    await settle();
+    await settleScenario();
 
     fireEvent.click(screen.getByRole("button", { name: PLAN_LITE_COPY.byHand }));
 
@@ -235,7 +231,7 @@ describe("предложение", () => {
   it("no_template → прежний конструктор без блока и без ошибки", async () => {
     mockedProposal.mockRejectedValue(new ApiError(404, "no_template", "none"));
     renderScreen();
-    await settle();
+    await settleScenario();
 
     expect(mockedProposal).toHaveBeenCalledTimes(1);
     expect(screen.getByText(PLAN_LITE_COPY.builderTitle)).toBeInTheDocument();
@@ -247,7 +243,7 @@ describe("предложение", () => {
   it("no_active_goal → «сначала выбери цель», кнопка ведёт на экран цели", async () => {
     mockedProposal.mockRejectedValue(new ApiError(404, "no_active_goal", "none"));
     renderScreen();
-    await settle();
+    await settleScenario();
 
     expect(screen.getByText(PLAN_LITE_COPY.needGoal)).toBeInTheDocument();
     expect(screen.queryByTestId("plan-lite-proposal")).toBeNull();
@@ -258,7 +254,7 @@ describe("предложение", () => {
   it("план есть → карточка, предложение не спрашивается", async () => {
     mockedGet.mockResolvedValue(PLAN);
     renderScreen();
-    await settle();
+    await settleScenario();
 
     expect(screen.getByTestId("plan-lite-card")).toBeInTheDocument();
     expect(mockedProposal).not.toHaveBeenCalled();
@@ -272,7 +268,7 @@ describe("дневник без согласия", () => {
 
   it("строка «дневник» помечена «нужно согласие», снята и в POST не уходит", async () => {
     renderScreen();
-    await settle();
+    await settleScenario();
 
     const block = proposalBlock();
     expect(block).toHaveTextContent(PLAN_LITE_COPY.labelFood);
@@ -280,7 +276,7 @@ describe("дневник без согласия", () => {
     expect(within(block).getByRole("checkbox", { name: PLAN_LITE_COPY.labelFood })).not.toBeChecked();
 
     fireEvent.click(screen.getByRole("button", { name: PLAN_LITE_COPY.confirm }));
-    await settle();
+    await settleScenario();
 
     expect(mockedCreate).toHaveBeenCalledTimes(1);
     const [actions, version] = mockedCreate.mock.calls[0] ?? [];
@@ -294,7 +290,7 @@ describe("дневник без согласия", () => {
 
   it("пометка ведёт на гейт согласия сканера с возвратом сюда", async () => {
     renderScreen();
-    await settle();
+    await settleScenario();
 
     fireEvent.click(within(proposalBlock()).getByRole("button", { name: PLAN_LITE_COPY.needConsent }));
 
@@ -302,25 +298,30 @@ describe("дневник без согласия", () => {
     expect(screen.getByTestId("return-to")).toHaveTextContent(PLAN_LITE_ROUTE);
   });
 
-  it("гейт согласия не ответил → как без согласия (в POST не уходит)", async () => {
+  it("гейт согласия не ответил → строка остаётся у человека (DRF-2354)", async () => {
+    // Этот узел держал прежнее поведение: сбой гейта приравнивался к «нет»,
+    // и строка дневника молча выпадала из плана. Решение §77 (23.09) его
+    // меняет: «не знаю» — не «нет». Человек видит строку включённой и
+    // решает сам; если согласия действительно нет, откажет каталог — это
+    // его ответ, а не наша догадка за человека.
     mockedConsent.mockRejectedValue(new ApiError(502, "ayla_unavailable", "down"));
     renderScreen();
-    await settle();
+    await settleScenario();
 
-    expect(proposalBlock()).toHaveTextContent(PLAN_LITE_COPY.needConsent);
+    // Подсказка «Нужно согласие» — только на явное «нет», а его не было.
+    expect(proposalBlock()).not.toHaveTextContent(PLAN_LITE_COPY.needConsent);
     fireEvent.click(screen.getByRole("button", { name: PLAN_LITE_COPY.confirm }));
-    await settle();
+    await settleScenario();
 
     expect(mockedCreate).toHaveBeenCalledTimes(1);
     const actions = mockedCreate.mock.calls[0]?.[0] ?? [];
-    expect(actions).toHaveLength(2);
-    expect(actions.map((a) => a.action_type)).not.toContain("log_food");
+    expect(actions.map((a) => a.action_type)).toContain("log_food");
   });
 
   it("предложение без строки «дневник» → гейт согласия не спрашивается", async () => {
     mockedProposal.mockResolvedValue({ ...PROPOSAL, actions: PROPOSAL.actions.filter((a) => a.action_type !== "log_food") });
     renderScreen();
-    await settle();
+    await settleScenario();
 
     expect(proposalBlock()).toHaveTextContent(PLAN_LITE_COPY.labelWater);
     expect(mockedConsent).not.toHaveBeenCalled();
@@ -331,7 +332,7 @@ describe("карточка с per_2_weeks", () => {
   it("ведро подписано «2 недели», «N из M» как прежде, без слов результата", async () => {
     mockedGet.mockResolvedValue(PLAN);
     renderScreen();
-    await settle();
+    await settleScenario();
 
     const card = screen.getByTestId("plan-lite-card");
     expect(card).toHaveTextContent("0 из 1");

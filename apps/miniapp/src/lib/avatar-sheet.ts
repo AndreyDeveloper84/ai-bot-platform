@@ -92,15 +92,19 @@ export type MasterSurface = "master" | "solo";
  * Набор закрыт сторожем.
  */
 export function masterAvatarSheetItems(
-  opts: { surface?: MasterSurface; salonAdmin?: boolean } = {},
+  opts: { surface?: MasterSurface; salonAdmin?: boolean; selfService?: boolean } = {},
 ): AvatarSheetItem[] {
   if (opts.surface === "solo") {
-    const items: AvatarSheetItem[] = [
+    const soloItems: AvatarSheetItem[] = [
       { key: "profile", label: AVATAR_SHEET_COPY.profile, to: "/solo/profile" },
       { key: "customers", label: AVATAR_SHEET_COPY.customers, to: "/solo/customers" },
       { key: "services", label: AVATAR_SHEET_COPY.services, to: "/solo/services" },
       { key: "reviews", label: AVATAR_SHEET_COPY.reviews, to: "/solo/reviews" },
     ];
+    // DRF-2254: «Услуги» — только когда каталог не назвал пространство салоном.
+    const items = soloItems.filter(
+      (item) => opts.selfService !== false || item.key !== "services",
+    );
     if (opts.salonAdmin) {
       items.push({ key: "salon", label: AVATAR_SHEET_COPY.salon, to: "/admin/team" });
     }

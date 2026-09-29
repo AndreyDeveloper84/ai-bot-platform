@@ -178,6 +178,48 @@ a {
 }
 
 /* Secondary button used in error / empty / not-found states. */
+/* Главное действие экрана (DRF-2380).
+   ========================================================================
+   Правила первого уровня у `.btn-primary` НЕ БЫЛО, хотя класс стоял в 86
+   местах 33 файлов. Три из них выглядели верно — их накрывали два
+   потомковых островка (`.master-profile .btn-primary`,
+   `.m-notif__sheet .btn-primary`); остальные 83 рисовались глобальным
+   сбросом `button {}` выше, то есть как обычный текст без фона.
+
+   Объявление ниже — это те самые островки, поднятые на первый уровень
+   дословно: ни одного своего решения о виде. Островки после этого стали
+   повтором и сняты; их `:disabled` тоже здесь.
+
+   `:active` сюда сперва НЕ ставили: у островков его не было, и решать за
+   макет, как главная кнопка отзывается на нажатие, было нельзя. Владелец
+   решил 28.09 (§6-йота): «главная кнопка должна иметь такой же визуальный
+   отклик на нажатие, как второстепенная». Род отклика — тот же, что у
+   `.btn-secondary:active` (смена фона при нажатии); значение — то, каким
+   в словаре уже отзываются все остальные главные кнопки
+   (`.cta-bar__button`, `.ayla-btn--primary`, `.wellness-dash__cta`,
+   `.m6-btn-primary`, `.salon-today__cta`): `--c-accent-pressed`.
+   ======================================================================== */
+.btn-primary {
+  background: var(--c-accent);
+  color: var(--c-text-on-accent);
+  border: 0;
+  border-radius: var(--r-md);
+  padding: var(--s-2) var(--s-4);
+  font: inherit;
+  font-weight: 600;
+  min-height: 44px;
+  cursor: pointer;
+}
+
+.btn-primary:active {
+  background: var(--c-accent-pressed);
+}
+
+.btn-primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .btn-secondary {
   display: inline-block;
   padding: var(--s-2) var(--s-4);
@@ -193,6 +235,19 @@ a {
 
 .btn-secondary:active {
   background: var(--c-accent-subtle);
+}
+
+/* §6-йота (28.09) — тот же отклик у главных кнопок экранов, которые
+   собраны своими классами, а не `.btn-primary`. Стоит ПОСЛЕ
+   `.btn-secondary:active` намеренно: `.records-card__action--primary`
+   сидит на `.btn-secondary`, специфичность равная, и раньше при нажатии
+   побеждал второстепенный почти белый фон под белым текстом. */
+.records-card__action--primary:active,
+.records-empty__cta-primary:active,
+.schedule-sheet__primary:active,
+.catalog-empty__cta-primary:active,
+.ayla-compose__send:active {
+  background: var(--c-accent-pressed);
 }
 
 /* Skeleton placeholders — spec §7.1 + §9. */
@@ -631,6 +686,10 @@ a {
 .btn-secondary--danger {
   color: var(--c-warning);
   border-color: var(--c-warning);
+  /* §6-упсилон (28.09): опасное — контурное, но с рамкой толще обычной
+     (1 px): цвет больше не единственный признак. Сторож — пара
+     «опасное × обычное» в dangerBorder2469.build.test.ts. */
+  border-width: 2px;
 }
 
 .btn-danger {
@@ -965,6 +1024,40 @@ a {
   border-radius: var(--r-md);
   color: var(--c-text-primary);
   line-height: 1.5;
+}
+
+/* DRF-2282 [OD-BOT §170] — три структурированных ответа вопроса G7: столбец
+   кнопок во всю ширину, по одной на строку (подписи — длинные фразы владельца).
+   Макета для этого кадра нет — отступление названо в PR. */
+.goal-select__safety-options {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+  margin: var(--s-2) 0 var(--s-3);
+}
+
+.goal-select__safety-option {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  padding: var(--s-3);
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+  font-size: var(--font-size-200);
+  color: var(--c-text-primary);
+  text-align: left;
+  line-height: 1.4;
+  /* владелец, решения по PR #1982: длинный текст переносится */
+  white-space: normal;
+  overflow-wrap: anywhere;
+  cursor: pointer;
+}
+
+.goal-select__safety-option:disabled {
+  background: var(--c-surface-2);
+  color: var(--c-text-secondary);
+  cursor: default;
 }
 
 .goal-select__actions {
@@ -1863,10 +1956,15 @@ a {
 /* ---- «Сегодня»: содержимое главного экрана (DRF-1236) ---- */
 
 /*
- * Главное действие экрана. Своего `.btn-primary` в приложении нет —
- * заливка акцентом живёт только в `.cta-bar__button`, а он приколочен к
- * низу экрана, где уже стоит панель вкладок. Кнопка на макете стоит в
- * потоке, сразу под датой, поэтому правило своё, а токены — те же.
+ * Главное действие экрана. Правило своё, а токены те же: кнопка на макете
+ * стоит В ПОТОКЕ, сразу под датой, тогда как `.cta-bar__button` приколочен
+ * к низу экрана, где уже стоит панель вкладок.
+ *
+ * Прежняя причина («своего `.btn-primary` в приложении нет») с DRF-2380
+ * неверна: он есть и лежит первым уровнем рядом с `.btn-secondary`.
+ * Правило остаётся из-за РАСКЛАДКИ, а не из-за отсутствия класса;
+ * перевести экран на общую кнопку — отдельное решение о виде, и оно не
+ * принимается заодно.
  */
 .salon-today__cta {
   display: block;
@@ -2114,6 +2212,94 @@ a {
  * content (Tau §5.1). Matches the master tabbar offset pattern. */
 .solo-surface .screen {
   padding-bottom: calc(96px + var(--safe-bottom));
+}
+
+/* DRF-2465 — карточка выбора режима («Салон» / «Мастер» / «Клиент»,
+   `SurfaceCard` в App.tsx). Вид был собран инлайном целиком; перенесён
+   сюда ДОСЛОВНО, ни одного своего решения — рефакторинг ≠ редизайн
+   (решение владельца 28.09, п.10). Равенство вида до/после снято полным
+   getComputedStyle в Chrome, обе темы. Похожий `.wellness-dash__qa-btn`
+   не подобран: у него другой отступ и свой отклик. */
+.surface-card {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--s-1);
+  padding: var(--s-4);
+  min-height: 88px;
+  background: var(--c-surface-1);
+  border: 1px solid var(--c-divider);
+  border-radius: var(--r-md);
+  text-align: left;
+}
+
+/* DRF-2527 — элементы, собранные инлайном ЦЕЛИКОМ, одеты классами.
+   Объявления перенесены из `style={{…}}` ДОСЛОВНО (число JSX → px),
+   ни одного своего решения о виде — рефакторинг ≠ редизайн (решение
+   владельца 28.09, п.10). Равенство вида до/после снято полным
+   getComputedStyle в Chrome, обе темы. */
+
+/* Всплывающее уведомление (Snackbar.tsx): класс стоял, правила не было —
+   запись BASELINE стилевого контракта снята. */
+.snackbar {
+  position: fixed;
+  left: var(--s-3);
+  right: var(--s-3);
+  bottom: calc(var(--s-6) + var(--safe-bottom, 0px));
+  background: var(--c-text-primary);
+  color: var(--c-bg);
+  padding: var(--s-3) var(--s-4);
+  border-radius: var(--r-md);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-3);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.18);
+  z-index: 100;
+}
+
+.snackbar__action {
+  background: transparent;
+  color: var(--c-accent-subtle);
+  border: none;
+  font: inherit;
+  font-weight: 600;
+  padding: var(--s-1) var(--s-2);
+  cursor: pointer;
+}
+
+/* Матрица услуг мастеров (AdminServicesMatrixScreen.tsx). */
+.services-matrix__dirty-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--c-accent);
+  flex-shrink: 0;
+}
+
+.services-matrix__master-services {
+  padding: var(--s-2) var(--s-3) var(--s-3);
+  background: var(--c-surface-1);
+}
+
+.services-matrix__save-bar {
+  position: fixed;
+  inset-inline: 0;
+  bottom: 0;
+  padding: var(--s-2) var(--s-3) calc(var(--s-3) + env(safe-area-inset-bottom, 0px));
+  background: var(--c-surface-1);
+  border-top: 1px solid var(--c-divider);
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  z-index: 5;
+}
+
+/* Разделитель в настройках мастера (MasterSettingsScreen.tsx). */
+.master-settings__divider {
+  border: 0;
+  border-top: 1px solid var(--c-divider);
+  margin: var(--s-4) 0;
 }
 
 /* ---- «Ещё» bottom sheet (Tau §3) ------------------------------------ */
@@ -2684,6 +2870,130 @@ a {
 .schedule-month-dot--full {
   width: 8px;
   height: 8px;
+}
+
+/* Лист выбора в форме записи (DRF-2448, остаток).
+   -------------------------------------------------------------------
+   У `.sheet`, `.sheet__panel`, `.sheet__title` и `.sheet__item` не было
+   ни одного правила: диалог с `role="dialog" aria-modal="true"` рисовался
+   прямо в потоке страницы — без затемнения, без панели, без границ.
+   Кнопки выбора клиента, услуги и мастера выглядели обычным текстом.
+
+   ПОЧЕМУ ЭТО НЕ ЗАМЕТИЛИ РАНЬШЕ: поиск по подстроке `sheet__item` в
+   стилях отвечал «есть» — но находил ДРУГОЙ класс, `.avatar-sheet__item`.
+   Проверка по роли (объявление селектора) отвечает «нет».
+
+   НИЧЕГО НЕ ПРИДУМАНО. Взят язык уже работающих листов приложения:
+   затемнение и панель — с `.schedule-sheet-backdrop` / `.schedule-sheet`
+   (:2764, :2774); строка выбора — с `.avatar-sheet__item` (:1802), то есть
+   с того самого класса, который и подменял собой искомый.
+
+   Это МИНИМУМ, делающий диалог диалогом, а не решение о виде: макета на
+   этот лист нет, и как он должен выглядеть — вопрос к владельцу. */
+.sheet {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  z-index: 200;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+}
+
+.sheet__panel {
+  width: 100%;
+  max-width: 480px;
+  max-height: 85vh;
+  overflow-y: auto;
+  background: var(--c-surface-1);
+  border-top-left-radius: var(--r-lg);
+  border-top-right-radius: var(--r-lg);
+  padding: var(--s-4) var(--s-4) calc(var(--s-4) + var(--safe-bottom, 0px));
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+}
+
+.sheet__title {
+  margin: 0;
+  font-size: var(--font-size-300);
+  font-weight: 600;
+}
+
+.sheet__item {
+  width: 100%;
+  min-height: 44px;
+  text-align: left;
+  background: none;
+  border: 0;
+  border-bottom: 1px solid var(--c-divider);
+  padding: var(--s-2) 0;
+  font: inherit;
+  font-size: var(--font-size-300);
+  color: var(--c-text-primary);
+  cursor: pointer;
+}
+
+.sheet__item:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 2px;
+}
+
+/* Строка черновика записи. Вид был задан инлайном на самой кнопке, и там
+   лежала МЁРТВАЯ строка: `border: "none"` стояла ПОСЛЕ `borderBottom` и
+   затирала её сокращённой формой — разделителей между строками не было
+   вовсе, хотя код их объявлял. Перенесено в правило, разделитель ожил. */
+.draft-row {
+  display: flex;
+  width: 100%;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--s-3);
+  min-height: 44px;
+  padding: var(--s-3) 0;
+  border: 0;
+  border-bottom: 1px solid var(--c-divider);
+  background: none;
+  text-align: start;
+  font: inherit;
+  color: var(--c-text-primary);
+  cursor: pointer;
+}
+
+.draft-row__label {
+  color: var(--c-text-secondary);
+}
+
+.draft-row__value {
+  text-align: end;
+}
+
+/* Кнопка, выглядящая ссылкой ВНУТРИ текста («развернуть» в середине абзаца).
+   Правила не было; каждое место повторяло один и тот же инлайн.
+
+   Роль важна: на экране дня салона тот же класс стоял на ОТДЕЛЬНОМ элементе
+   управления под заголовком даты — там вид ссылки и делал кнопку невидимой,
+   и она переодета в обычную (соседний PR). Здесь роль обратная: элемент
+   стоит в потоке предложения, и вид ссылки — правильный. Одно имя, две
+   разные роли — это и была причина путаницы. */
+.btn-link {
+  display: inline;
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  color: var(--c-accent);
+  cursor: pointer;
+  text-align: inherit;
+}
+
+.btn-link:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 2px;
+}
+
+.draft-row__value--set {
+  font-weight: 600;
 }
 
 /* Mark-unavailable bottom sheet ------------------------------------------- */
@@ -3798,25 +4108,7 @@ a {
   margin-top: var(--s-2);
 }
 
-/* Primary save button — reuse accent treatment. */
-.master-profile__sheet .btn-primary,
-.master-profile .btn-primary {
-  background: var(--c-accent);
-  color: var(--c-text-on-accent);
-  border: 0;
-  border-radius: var(--r-md);
-  padding: var(--s-2) var(--s-4);
-  font: inherit;
-  font-weight: 600;
-  min-height: 44px;
-  cursor: pointer;
-}
-
-.master-profile__sheet .btn-primary:disabled,
-.master-profile .btn-primary:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
+/* Главная кнопка листа профиля — теперь общая `.btn-primary` (DRF-2380). */
 
 /* ===========================================================
    M7 — Master notification settings (Bundle B / item 3)
@@ -4073,22 +4365,7 @@ a {
   gap: var(--s-2);
 }
 
-.m-notif__sheet .btn-primary {
-  background: var(--c-accent);
-  color: var(--c-text-on-accent);
-  border: 0;
-  border-radius: var(--r-md, 8px);
-  padding: var(--s-2) var(--s-4);
-  font: inherit;
-  font-weight: 600;
-  min-height: 44px;
-  cursor: pointer;
-}
-
-.m-notif__sheet .btn-primary:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
+/* Главная кнопка листа уведомлений — теперь общая `.btn-primary` (DRF-2380). */
 
 .m-notif__skeleton-wrap {
   padding: var(--s-3);
@@ -4550,7 +4827,8 @@ a {
  *   - 2.5.8 — cards / suggestion chips ≥ 44dp, primary CTA ≥ 48dp
  *     (already inherited from .cta-bar__button).
  *   - 1.4.3 — body ≥ 4.5:1; reasoning text uses --c-text-secondary
- *     which is tokenised to 4.6:1 on --c-surface-0.
+ *     which is tokenised to ≥ 4.5:1 on --c-surface-2, the darkest
+ *     light surface (tokens.css:47; 4.52:1 measured 2026-09-26).
  *   - 1.3.1 — layer sections use <section> + <h2>; slot lists are
  *     <ul> per day; slot cells are <button>.
  * ──────────────────────────────────────────────────────────────────── */
@@ -5029,11 +5307,117 @@ a {
 .wellness-dash__header {
   display: flex;
   align-items: center;
+  /* Человек слева, фирменный знак справа (Д1, DRF-2331). Знак занял
+     место, где макет держал колокольчик: колокольчик не рисуется — за
+     ним нет ленты уведомлений. */
+  justify-content: space-between;
   gap: var(--s-3);
   height: 56px;
   padding: 0 var(--s-3);
   border-bottom: 1px solid var(--c-divider);
   background: var(--c-surface-1);
+}
+/* Д1 — аватар, имя, «Рада вас видеть!». */
+.wellness-dash__person {
+  display: flex;
+  align-items: center;
+  gap: var(--s-2);
+  /* Длинное имя ужимается, знак справа не выдавливается за край. */
+  min-width: 0;
+}
+
+/* Вход в профиль клиента — аватарка в шапке (решение владельца §77 п.60).
+   Кружок 36 px, как на Главной, а цель нажатия 44×44 (WCAG 2.5.8) — за
+   счёт обрамляющей кнопки, тем же приёмом, что стрелка возврата
+   (`.screen__back` выше): размером, не `::after`. Отрицательных отступов
+   тут нет намеренно — кнопка стоит в правом верхнем углу и выравнивать её
+   по краю текста не надо. */
+.customer-avatar-entry {
+  background: transparent;
+  border: none;
+  padding: 0;
+  min-width: 44px;
+  min-height: 44px;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+.customer-avatar-entry:active .customer-avatar-entry__circle {
+  transform: scale(0.94);
+}
+.customer-avatar-entry:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 2px;
+  border-radius: 50%;
+}
+/* На Главной кружок стоит слева, рядом с именем (так его поставил
+   DRF-2331, и фирменный знак занимает правый край). На остальных экранах
+   панели шапка — `records-screen__header`, флекс с заголовком слева, и
+   дверь уходит к правому краю — как аватарка админской поверхности
+   (`lib/avatar-sheet.ts`, «аватар справа вверху»).
+   Размещение задано КОНТЕКСТОМ, а не модификатором на кнопке: модификатор
+   пришлось бы собирать в рантайме (`className={...}`), а сторож
+   `miniapp_style_contract` намеренно не видит собранные имена — я бы своими
+   руками сделал его слепым на этой кнопке. */
+.records-screen__header .customer-avatar-entry {
+  margin-left: auto;
+}
+/* Краски и размер — те же, что у кружка на профиле клиента
+   (`.profile-header__avatar`, он 56 px и в другом месте): один человек —
+   один узнаваемый кружок. Прежнее правило Главной (`.wellness-dash__avatar`)
+   снято вместе с его разметкой: полное правило без потребителя — семя
+   второй реализации, а сторож стиля ходит только от класса к правилу и
+   такого не видит. */
+.customer-avatar-entry__circle {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--c-success);
+  color: var(--c-text-on-accent);
+  font-size: var(--font-size-100);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+/* Держит высоту строки имени, пока день грузится. */
+.wellness-dash__person-skel {
+  width: 96px;
+  height: 15px;
+  border-radius: var(--r-sm);
+}
+.wellness-dash__person-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.wellness-dash__person-name {
+  display: flex;
+  align-items: baseline;
+  /* Зазор стилем, а не пробелом в вёрстке: флекс обрезает пробел между
+     своими детьми, и 👋 прилипал к имени. */
+  gap: var(--s-1);
+  min-width: 0;
+  font-size: var(--font-size-200);
+  font-weight: 600;
+}
+/* Обрезается имя; 👋 рядом с многоточием, а не вместо него. */
+.wellness-dash__person-name-text {
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.wellness-dash__person-hi {
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 .wellness-dash__brand {
   display: flex;
@@ -5370,7 +5754,8 @@ a {
  * Карточка цели, один блок согласия, «План на сегодня», карточка записи,
  * «Продолжить разговор с Ayla», компактный ряд быстрых действий.
  * Токены — те же, что у всего экрана; заливка акцентом у главного
- * действия — как `.salon-today__cta` (своего `.btn-primary` нет).
+ * действия — как `.salon-today__cta`. (Оговорка «своего `.btn-primary`
+ * нет» с DRF-2380 устарела: он есть; здесь дело в раскладке.)
  * ────────────────────────────────────────────────────────────────── */
 
 /* Главное действие в потоке: «Продолжить сегодняшний план», «Составить
@@ -5907,6 +6292,14 @@ a {
 }
 .records-screen__title {
   margin: 0;
+  /* Правый край шапки теперь зависит от ширины заголовка (`margin-left: auto`
+     у двери в профиль). Без сжатия длинный заголовок схлопнулся бы до
+     min-content и полез из фиксированных 56 px, уводя цель нажатия за
+     отступ. Сегодня все заголовки короткие — правило на будущее. */
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: var(--font-size-300);
   font-weight: 600;
 }
@@ -6161,6 +6554,10 @@ a {
 }
 .records-card__action--danger {
   color: var(--c-danger);
+  /* §6-упсилон (28.09): опасное — контурное, но с рамкой толще обычной
+     (1 px): цвет больше не единственный признак. Сторож — пара
+     «опасное × обычное» в dangerBorder2469.build.test.ts. */
+  border-width: 2px;
 }
 @media (max-width: 320px) {
   /* WCAG 1.4.4 — at small viewport / 200% zoom, actions stack. */
@@ -7193,6 +7590,28 @@ a {
 .food-scanner-screen__error {
   margin: 0;
 }
+/* DRF-2289 — «Записать текстом» под съёмкой: ссылка, не третья кнопка. */
+.food-scanner-screen__text-link {
+  align-self: center;
+  background: transparent;
+  border: none;
+  color: var(--c-accent);
+  padding: var(--s-2) var(--s-1);
+  min-height: 44px;
+  font-family: var(--font-sans);
+  font-size: var(--font-size-200);
+  font-weight: 500;
+  cursor: pointer;
+}
+.food-scanner-screen__text-link:focus-visible {
+  outline: 2px solid var(--c-accent);
+  outline-offset: 2px;
+  border-radius: var(--r-sm);
+}
+.food-scanner-screen__text-link:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
 .food-scanner-screen__privacy {
   margin: 0;
   font-size: var(--font-size-100);
@@ -7673,6 +8092,57 @@ a {
   flex: 1 1 auto;
   min-width: 0;
 }
+/* DRF-2455 — миниатюра блюда слева в строке дневника (решение владельца
+   28.09, п.14: «небольшая миниатюра слева, данные справа, дневник остаётся
+   компактным списком»). Вида в словаре не было. С макета (экран 2
+   «Ближайшая запись» презентации клиента) взяты ПРОПОРЦИЯ снимка
+   116:68 = 1,71 и зазор до текста 16 pt; высота — по списку (решение
+   главного окна 28.09, §6-омега-кватер): 82×48, строка растёт с 36 до 64 px, а не вдвое.
+   Отступление от буквальной геометрии экрана 2 вынесено владельцу.
+
+   Раскладка — МОДИФИКАТОР строки, а не `:has(> img)`: нижний порог движка
+   вебвью MAX не измерен, а модификатор проверяем без этого знания. Строка
+   без модификатора (записи без фото и старше 30 суток) не получает ни
+   одного нового объявления — рефакторинг ≠ редизайн (п.10).
+
+   Снимок вынесен из потока, данные строки остаются тем же flex-рядом с
+   переносом, только правее снимка: перенесённый хвост не уезжает под
+   картинку. */
+.food-scanner-diary__entry--with-thumb {
+  position: relative;
+  min-height: calc(48px + 2 * var(--s-2));
+  padding-inline-start: calc(82px + var(--s-4));
+}
+
+.food-scanner-diary__entry--with-thumb > .food-scanner-diary__entry-thumb {
+  position: absolute;
+  inset-inline-start: 0;
+  top: 50%;
+  transform: translateY(-50%);
+}
+
+/* Кнопки строки (`flex: 0 0 auto`, без переноса) в месте справа от
+   снимка не помещаются: блок «Граммы / В избранное / Убрать» 227 px против
+   196 (строка 294 при экране 360) и 226 (390). Под модификатором им
+   разрешён перенос, а блоку — ширина не больше места справа: одного
+   переноса мало, блок с `flex: 0 0 auto` держит ширину содержимого и
+   вылезал бы по-прежнему (замер: 31 и 1 px). Кнопки остаются справа,
+   строка растёт до 90 px (решение главного окна 28.09, буква «а»; плата
+   вынесена владельцу, §6-омега-кватер). */
+.food-scanner-diary__entry--with-thumb .food-scanner-diary__entry-actions {
+  flex-wrap: wrap;
+  max-width: 100%;
+}
+
+.food-scanner-diary__entry-thumb {
+  width: 82px;
+  height: 48px;
+  border-radius: var(--r-md);
+  object-fit: cover;
+  display: block;
+  background: var(--c-surface-2);
+}
+
 .food-scanner-diary__entry-time {
   font-size: var(--font-size-100);
   color: var(--c-text-secondary);
@@ -7687,6 +8157,15 @@ a {
 }
 .food-scanner-diary__entry-cal {
   font-size: var(--font-size-200);
+  color: var(--c-text-secondary);
+  flex: 0 0 auto;
+}
+/* DRF-2455 — БЖУ рядом с калориями: §77 п.40 просит показывать запись
+   целиком. Тише калорий на ступень размером, а цвет тот же: токена
+   «третьего» уровня текста в наборе нет, и выдумывать его здесь значило
+   бы завести цвет мимо палитры. */
+.food-scanner-diary__entry-macros {
+  font-size: var(--font-size-100);
   color: var(--c-text-secondary);
   flex: 0 0 auto;
 }
@@ -8316,6 +8795,68 @@ a {
   border: 1px solid var(--c-divider);
 }
 
+/* Опасное действие — ОБВОДКОЙ, не заливкой (решение владельца, §77 п.51).
+   Довод: в строке визита рядом стоят ещё две кнопки, и заливка перетянула
+   бы глаз на самое редкое действие.
+
+   ОТКЛОНЕНИЕ, названное в PR: цвет владелец не называл, вопрос открыт.
+   Взят `--c-danger` — тот же токен, на котором в этой семье уже стоит
+   `.ayla-error`. Соседние `.btn-danger` и `.btn-secondary--danger` из
+   дефисной семьи красятся `--c-warning`, то есть цветом ПРЕДУПРЕЖДЕНИЯ;
+   тянуть его в семью `ayla` значило бы закрепить это расхождение. Если
+   владелец решит иначе — правка на одну строку. */
+.ayla-btn--danger {
+  background: transparent;
+  color: var(--c-danger);
+  /* §6-упсилон (28.09): опасное — контурное, но с рамкой толще обычной
+     (1 px): цвет больше не единственный признак. Сторож — пара
+     «опасное × обычное» в dangerBorder2469.build.test.ts. */
+  border: 2px solid var(--c-danger);
+}
+
+/* Компактный вид — ЗАВЕСТИ модификатор, а не снимать инлайн (решение
+   владельца там же). Довод замерен, а не предположен — но считать надо от
+   СЕГОДНЯШНЕГО состояния, а не от того, что было до DRF-2448. На HEAD обе
+   строки визита уже по 60px: база `.ayla-btn` держит 44px, а инлайн
+   перебивал только `padding` и `font-size`. Модификатор их УМЕНЬШАЕТ:
+   строка без длительности 60 → 48px, строка с длительностью 60 → 55px,
+   то есть возвращается ровно к тому, чем была до 2448. Число 37px — это
+   контрфакт «если бы порога не было вовсе», а не то, что восстановится.
+
+   Заменяет инлайновые рецепты, выдуманные экранами порознь; кегль берётся
+   токеном, а не сырым `0.85em`, как было на строке визита.
+
+   ЦЕЛЬ НАЖАТИЯ ОСТАЁТСЯ 44px. Политика (`docs/design/policies/
+   information-architecture.md:625`) требует 44dp от всякого управляющего
+   элемента, и уменьшить кнопку до 32px значило бы её нарушить. Поэтому
+   уменьшается ВИДИМАЯ коробка, а область нажатия возвращается накладкой
+   `::after`: она не занимает места в раскладке, и строка от неё не растёт.
+
+   Высота накладки задана ЧИСЛОМ, а не отрицательными отступами. Первая
+   версия писала `inset: -6px 0` и обещала 44px арифметикой 32 + 6 + 6.
+   Замер показал другое: содержащий блок для абсолютного потомка — это
+   padding-box, то есть без рамки. У `--ghost` рамка 1px с каждой стороны,
+   и накладка выходила 42px; у `--primary` (рамки нет) — 44px; в
+   растянутой строке визита, где кнопка тянется до 39px, — 49px. Обещание,
+   которое меняется от соседнего модификатора и от содержимого соседней
+   ячейки, обещанием не является. */
+.ayla-btn--compact {
+  position: relative;
+  min-height: 32px;
+  padding: 0 var(--s-2);
+  font-size: var(--font-size-100);
+}
+
+.ayla-btn--compact::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 44px;
+  transform: translateY(-50%);
+}
+
 .ayla-btn:disabled {
   opacity: 0.6;
   cursor: not-allowed;
@@ -8536,6 +9077,25 @@ a {
 .setup-landing__item--missing .setup-landing__state {
   color: var(--c-accent-pressed);
   font-weight: 600;
+}
+
+/* DRF-2326: недоступный шаг виден, но приглушён и с причиной на своей
+   строке — он не зовёт тапать, а объясняет, почему тапать некуда. */
+.setup-landing__item--unavailable .setup-landing__row {
+  flex-wrap: wrap;
+}
+
+.setup-landing__item--unavailable .setup-landing__mark,
+.setup-landing__item--unavailable .setup-landing__label,
+.setup-landing__item--unavailable .setup-landing__state {
+  color: var(--c-text-secondary);
+}
+
+.setup-landing__reason {
+  flex: 1 0 100%;
+  padding-left: calc(24px + var(--s-3));
+  font-size: var(--font-size-100);
+  color: var(--c-text-secondary);
 }
 
 .setup-landing__identity,
@@ -9560,7 +10120,10 @@ a {
   padding: var(--s-2) var(--s-3);
   border: 1px solid var(--c-divider);
   border-radius: var(--r-md);
-  background: var(--c-surface);
+  /* §6-хи (28.09): прозрачный — так он и рисовался, пока здесь стояло
+     несуществующее --c-surface (объявление недействительно → transparent).
+     Заливка — отдельное UI-решение, не побочный эффект правки CSS. */
+  background: transparent;
   color: var(--c-text-primary);
   font-size: var(--font-size-200);
   text-align: start;
@@ -9588,7 +10151,8 @@ a {
 
 .ayla-btn--secondary {
   border: 1px solid var(--c-accent);
-  background: var(--c-surface);
+  /* §6-хи (28.09): прозрачный явно — см. .ayla-card__option. */
+  background: transparent;
   color: var(--c-accent);
 }
 
@@ -9645,4 +10209,11 @@ a {
 
 .ayla-start__chip .ayla-card__row-main {
   flex-basis: 100%;
+}
+
+/* DRF-2268 — вернуться в чат не вышло: подсказка рядом с кнопкой. */
+.return-to-chat-hint {
+  margin: var(--s-2) 0 0;
+  color: var(--c-text-secondary);
+  font-size: var(--font-size-100);
 }

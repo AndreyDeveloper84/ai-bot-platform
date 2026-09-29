@@ -63,18 +63,28 @@ _FORGET_ALL_MARKER = "напиши одним словом: удалить"
 # apps.identity.services.forget_all_sweep) and the Ayla-side declared profile.
 # What still stands is now visible: the export carries the preferences and
 # declares its own composition (apps.identity.export_coverage).
+#
+# DRF-2214 (CD §76, №30) — the erasure is now wider than «what I remembered
+# from our conversations»: goals, the plan, the nutrition profile, the food
+# diary, recommendation cards (#526/#530/#541/#1980). The owner's text names
+# what stays instead: bookings and payments; favourite masters, which live in
+# the BeautyGO mobile app (``FavoriteSpecialist``) and are kept; the settings
+# on the profile screen. Pinned verbatim by
+# ``apps/persona/tests/test_forget_all_texts_2214.py``.
 FORGET_ALL_PROMPT = (
-    "Это серьёзный шаг: я забуду всё, что запомнила о тебе из наших разговоров, "
-    "и анкету предпочтений — вернуть будет нельзя.\n"
+    "Это серьёзный шаг: я забуду всё, что знаю о тебе, кроме бронирований и оплат, "
+    "— вернуть будет нельзя.\n"
     "Саму переписку я обезличу: текст останется без твоих контактов — только на "
     "случай спора о записи, и удалится через 90 дней.\n"
-    "Останутся бронирования и оплаты (это по закону) и настройки уведомлений "
-    "с датой рождения — ими ты управляешь сам на экране профиля.\n"
+    "Останутся бронирования и оплаты (это по закону), избранные мастера — они в "
+    "приложении BeautyGO, а также настройки уведомлений с датой рождения — их ты "
+    "меняешь сам на экране профиля.\n"
     f"Чтобы подтвердить — {_FORGET_ALL_MARKER}"
 )
 _FORGET_ALL_DONE = (
-    "Готово — я забыла всё, что о тебе помнила. Настройки уведомлений и дата "
-    "рождения остались на экране профиля: их меняешь ты, не я 🙂"
+    "Готово — я забыла всё, что о тебе помнила. Избранные мастера остались в "
+    "приложении BeautyGO, настройки уведомлений и дата рождения — на экране "
+    "профиля: их меняешь ты, не я 🙂"
 )
 
 # DRF-1367: said when the bot-side memory is gone but Ayla — the owner of the
@@ -148,6 +158,28 @@ _FACT_KEYWORDS: dict[tuple[str, str], tuple[str, ...]] = {
     ("diet", "keto"): ("кето",),
     ("diet", "halal"): ("халял",),
     ("diet", "kosher"): ("кошер",),
+    # DRF-2398: без этих двух «забудь что я ем все» не попадало в конкретный
+    # факт и уходило в общий стебель «ем » — то есть стирало ВСЮ тему питания
+    # вместо одной строки. Перебор хуже недобора: человек просил забыть одно.
+    #
+    # Стебля «ем всё» здесь НЕТ намеренно: ``_normalise`` сводит ё к е, и такой
+    # стебель не совпал бы никогда — мёртвый стебель хуже отсутствующего, он
+    # выглядит работающим. «Ем все» тоже не берём: он ловит «ем всегда» и
+    # «ем всего», то есть удалял бы строку по фразе не о питании, а перебор в
+    # удалении дороже недобора. Остаются однозначные слова.
+    ("diet", "omnivore"): ("без ограничений", "всеядн"),
+    # Падежи закрыты формами, а не обрубком: стебель «диет» совпал бы и с
+    # «забудь всё про диеты» — и тогда человек, просивший забыть ТЕМУ, потерял
+    # бы только одну строку. Недоудаление по прямой просьбе «всё» хуже, чем
+    # промах по падежу: промах уйдёт в тему целиком, то есть сделает больше,
+    # чем просили, но просили-то именно это.
+    ("diet", "other"): (
+        "особое питани",
+        "особого питани",
+        "особая диет",
+        "особую диет",
+        "особой диет",
+    ),
 }
 _KEY_KEYWORDS: dict[str, tuple[str, ...]] = {
     "diet": ("диет", "питани", "пищ", "еда", "ем "),
@@ -209,6 +241,13 @@ class MemoryCommandResult:
     text: str
     action_type: str = ""
     action_data: dict | None = None
+    #: DRF-2341 — см. ``apps.orchestrator.done_claims``.
+    #: DRF-2341 — те же имена и та же форма, что у ``SkillResult``: булев
+    #: признак плюс подтверждение «источник:что он ответил». ``meta`` у
+    #: этого класса нет, поэтому носитель — поле; читатель общий,
+    #: ``apps.skills.base.claims_done_of``.
+    claims_done: bool = False
+    claims_done_evidence: str = ""
 
 
 def _normalise(text: str) -> str:
@@ -525,7 +564,14 @@ def handle_memory_command(
                 # person would catch us out on the next turn, when the prompt
                 # still names their budget.
                 return MemoryCommandResult(text=_FORGET_ALL_PARTIAL)
-            return MemoryCommandResult(text=_FORGET_ALL_DONE)
+            return MemoryCommandResult(
+                text=_FORGET_ALL_DONE,
+                # Наше действие: доказательство — прочитанный исход стирания
+                # («erased»), а не факт вызова; «started» и «partial» выше
+                # отвечают другим текстом.
+                claims_done=True,
+                claims_done_evidence="bridge.erase:erased",
+            )
         return None  # bare «удалить» with no pending prompt → not a command
 
     # 2. «забудь всё» request → the confirmation prompt (does NOT delete yet).

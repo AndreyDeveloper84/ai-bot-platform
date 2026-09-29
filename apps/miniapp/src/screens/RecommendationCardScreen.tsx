@@ -25,7 +25,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { ScreenLayout } from "../components/ScreenLayout";
 import { ApiError } from "../lib/api";
 import { OPTION_ROUTE } from "../lib/booking-flow";
-import { closeApp, maxBridge } from "../lib/max-sdk";
+import { returnToChat } from "../lib/max-sdk";
 import { NO_VERIFIED_EVIDENCE_TEXT } from "../lib/recommendation-absence";
 import {
   ALT_HEAD,
@@ -81,11 +81,8 @@ export function RecommendationCardScreen() {
   // нечего, и тогда это Главная.
   const back = backByAction(
     useCallback(() => {
-      if (maxBridge()?.close) {
-        closeApp();
-        return;
-      }
-      navigate("/customer/main");
+      // DRF-2268: в чат — returnToChat; не вышло — Главная.
+      if (returnToChat() === "stuck") navigate("/customer/main");
     }, [navigate]),
   );
 
@@ -208,11 +205,8 @@ export function RecommendationCardScreen() {
         type="button"
         className="btn-secondary"
         onClick={() => {
-          if (maxBridge()?.close) {
-            closeApp();
-            return;
-          }
-          navigate("/customer/main");
+          // DRF-2268: в чат — returnToChat; не вышло — Главная.
+          if (returnToChat() === "stuck") navigate("/customer/main");
         }}
       >
         {BUTTON_SKIP}

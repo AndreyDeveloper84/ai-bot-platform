@@ -68,6 +68,7 @@ from django.utils import timezone
 
 from apps.eventbus.ingest_envelope import MAX_EVENT_ID_LENGTH, IngestEnvelope
 from apps.eventbus.ingest_redaction import redact_data_for_dlq
+from apps.eventbus.ingest_rejection import IngestRejection
 from apps.eventbus.models import HandlerFailureTracker, IngestDedupe, IngestDLQ
 
 
@@ -96,6 +97,7 @@ class DispatchOutcome(str, Enum):
     UNKNOWN_EVENT_VERSION = "unknown_event_version"  # §8.4 — 422 + DLQ.
     INVALID_EVENT_ID = "invalid_event_id"  # #1058 — event_id too long. 422 + DLQ.
     HANDLER_EXCEPTION = "handler_exception"  # §8.1 — 500, NO dedupe.
+    REJECTED = "rejected"  # DRF-2302, §8.12 — постоянный отказ: 422 + DLQ, NO dedupe.
     SATURATED = "saturated"  # Round-2 AS5/AS6 — 503 + Retry-After.
 
 
@@ -103,7 +105,8 @@ class DispatchOutcome(str, Enum):
 class DispatchResult:
     """Outcome of :func:`dispatch_envelope`.
 
-    The ``exception`` field is populated only on ``HANDLER_EXCEPTION``;
+    The ``exception`` field is populated on ``HANDLER_EXCEPTION`` and
+    ``REJECTED`` (its ``reason`` is the slug of the latter);
     the view layer logs its type (NOT its ``str()``) per §6.4 PII
     rules and increments the Prometheus failure counter.
     """
@@ -272,6 +275,20 @@ def dispatch_envelope(envelope: IngestEnvelope) -> DispatchResult:
             dedupe_row.processed_at = timezone.now()
             dedupe_row.save(update_fields=["processed_at"])
 
+    except IngestRejection as exc:
+        # DRF-2302 (§8.12) — повтор не поможет никогда. Откат уже снял
+        # дедуп-строку: повтор после починки (тенант заведён, конфиг
+        # поправлен) пройдёт как новое событие. DLQ — сразу, без счётчика
+        # попыток: попыток больше не будет, отправитель кладёт 4xx в dead.
+        logger.warning(
+            "eventbus.ingest.rejected event_id=%s name=%s version=%d reason=%s",
+            envelope.event_id,
+            envelope.event_name,
+            envelope.event_version,
+            exc.reason,
+        )
+        _write_dlq(envelope, reason=exc.reason)
+        return DispatchResult(outcome=DispatchOutcome.REJECTED, exception=exc)
     except Exception as exc:  # noqa: BLE001 — we deliberately catch all
         logger.exception(
             "eventbus.ingest.handler_exception event_id=%s name=%s version=%d",

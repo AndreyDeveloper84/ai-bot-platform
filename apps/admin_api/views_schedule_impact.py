@@ -66,7 +66,7 @@ from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.views.decorators.http import require_http_methods
 
 from apps.admin_api.auth import require_admin_or_reception_read
-from apps.admin_api.services.salon_day import tenant_tz
+from apps.tenancy.timezones import salon_zone
 from apps.admin_api.services.schedule_impact import impact_for_window
 from apps.catalog.models import CatalogMaster
 
@@ -116,7 +116,7 @@ def _parse_window(request: HttpRequest, tenant: Any) -> tuple[str, str] | JsonRe
         )
     if end <= start:
         return _error("bad_window", "to must be after from", 400)
-    tz = tenant_tz(tenant)
+    tz = salon_zone(tenant)
     return (
         datetime.combine(day, start, tzinfo=tz).isoformat(),
         datetime.combine(day, end, tzinfo=tz).isoformat(),

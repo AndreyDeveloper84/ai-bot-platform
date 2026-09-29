@@ -48,6 +48,7 @@ from apps.identity.services.staff_invites import (
 )
 from apps.identity.services.staff_roles import change_staff_role, grant_role_by_operator
 from apps.tenancy.models import StaffInvite, Tenant, TenantStaff
+from tests.support.pii_asserts import visible_text
 
 pytestmark = pytest.mark.django_db
 
@@ -156,7 +157,7 @@ class TestTheCatalogIsAskedFirst:
             linked.payload["actor_label"] == "django_admin:user=7"
             and linked.payload["created"] is True
         )
-        assert "2085001" not in json.dumps(linked.payload)  # MAX id не в аудите
+        assert "2085001" not in visible_text(linked.payload)  # MAX id не в аудите (DRF-2278)
         assert len(_audit(STAFF_ROLE_GRANTED, person)) == 1
 
     @pytest.mark.httpx_mock(assert_all_responses_were_requested=False)

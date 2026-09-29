@@ -151,7 +151,30 @@ def _make_booking(
     completed_at: dt.datetime | None,
     completed_by: str,
     visit_at: dt.datetime | None = None,
+    # DRF-2519: свидетельством стало только собственное завершение канона.
+    # Узлы этого файла — про актора закрытия и про гейт, а не про
+    # свидетельство; умолчание им нужно такое, при котором оно ЕСТЬ.
+    mirror_status: str | None = "completed",
 ) -> BookingRequest:
+    """Строка брони и — по умолчанию — зеркало канона на то же время.
+
+    DRF-2454: часовое закрытие требует положительного свидетельства канона, и
+    строка без зеркала штампа не получает. Здешние узлы про **актора** закрытия,
+    а не про свидетельство, поэтому зеркало заводится по умолчанию; отказы без
+    зеркала живут в ``test_completion_evidence_2454.py``.
+    """
+    if visit_at is not None and mirror_status is not None:
+        from apps.booking.models import RemoteBookingProxy
+
+        RemoteBookingProxy.all_tenants.create(
+            appointment_id=uuid.uuid4(),
+            tenant=tenant,
+            bot_user=customer,
+            start_at=visit_at,
+            end_at=visit_at + dt.timedelta(minutes=60),
+            status=mirror_status,
+            source=RemoteBookingProxy.Source.MOBILE_APP,
+        )
     return BookingRequest.all_tenants.create(
         tenant=tenant,
         bot_user=customer,

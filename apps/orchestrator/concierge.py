@@ -135,7 +135,7 @@ from apps.orchestrator.refusal_memo import (
     remember_refusal,
     render_refusal_block,
 )
-from apps.persona.voice import SURFACE_MARKETPLACE, assistant_identity
+from apps.persona.voice import NO_INTERNAL_TERMS_RULE, SURFACE_MARKETPLACE, assistant_identity
 
 logger = logging.getLogger(__name__)
 
@@ -1203,6 +1203,29 @@ _NUTRITION_TOOLS_PROMPT_LINES = (
 )
 
 
+#: DRF-2285 (живой проход 22.09): «Сфотографируем еду?» → «Я не умею делать
+#: фото», хотя фото без подписи — рабочий вход в сканер
+#: (``is_structured_nutrition_turn``). Строка — по воротам фото
+#: (:func:`apps.consent.photo_gate.photo_scan_refusal`, флаг
+#: ``FOOD_PHOTO_SCAN_ENABLED``, cross-border): при выключенном распознавании
+#: пригласить прислать фото значило бы пообещать и отказать (ревью #1979).
+FOOD_PHOTO_ON_PROMPT_LINE = (
+    "- Фото еды человек присылает прямо в этот чат, без подписи — бот "
+    "распознаёт его сам и покажет, прежде чем записать. На «сфотографируем "
+    "еду?» пригласи прислать фото; не говори, что не умеешь.\n"
+)
+FOOD_PHOTO_OFF_PROMPT_LINE = (
+    "- Распознавание фото еды сейчас выключено: не обещай разобрать фото — "
+    "предложи написать, что было, словами.\n"
+)
+
+
+def _food_photo_prompt_line() -> str:
+    from apps.consent.photo_gate import photo_scan_refusal
+
+    return FOOD_PHOTO_OFF_PROMPT_LINE if photo_scan_refusal() else FOOD_PHOTO_ON_PROMPT_LINE
+
+
 def _nutrition_tools_prompt_block() -> str:
     """Блок «Инструменты питания» промпта — с учётом единого выключателя.
 
@@ -1222,7 +1245,9 @@ def _nutrition_tools_prompt_block() -> str:
     другой в обоих положениях флага.
     """
     tool_lines = (
-        _NUTRITION_TOOLS_PROMPT_LINES if _nutrition_enabled() else _nutrition_off_prompt_line()
+        _NUTRITION_TOOLS_PROMPT_LINES + _food_photo_prompt_line()
+        if _nutrition_enabled()
+        else _nutrition_off_prompt_line()
     )
     return (
         "Инструменты питания (приоритет обязателен):\n"
@@ -1385,6 +1410,8 @@ def build_concierge_system_prompt(
         "простыми словами и предложи безопасный шаг — обратиться к "
         "профильному специалисту или сформулировать новое безопасное "
         "намерение. Не сохраняй медицинские выводы как факт о клиенте.",
+        # DRF-2593 — решение владельца 28.09, п.10.
+        NO_INTERNAL_TERMS_RULE,
         f"Ответ не длиннее {_MAX_REPLY_CHARS} символов.",
     ]
     if memory_block:
@@ -1782,10 +1809,17 @@ def _g4_question_turn(
     from apps.skills.base import SkillContext
     from apps.skills.health_screening.classifier import PainSignal, classify
     from apps.skills.health_screening.g4_question import g4_state
+    from apps.skills.health_screening.g7_question import g7_pending, is_g7_callback
     from apps.skills.health_screening.skill import HealthScreeningSkill
 
+    # [OD-BOT §164] G4 and [OD-BOT §170] G7 — an open safety question (or a G7
+    # structured answer) is answered before the model: the model never sees
+    # the turn, and a question of its own cannot replace the safety one.
     if not (
-        g4_state(conversation, bot_user).active or classify(message_text) is PainSignal.CLARIFY
+        g4_state(conversation, bot_user).active
+        or g7_pending(conversation) is not None
+        or is_g7_callback(message_text)
+        or classify(message_text) is PainSignal.CLARIFY
     ):
         return None
     started = time.monotonic()
@@ -1807,7 +1841,8 @@ def _g4_question_turn(
         latency_total_ms=int((time.monotonic() - started) * 1000),
         skill_selected="health_screening",
     )
-    return DiscoveryReply(text=result.reply_text, action_data=None, persisted=True)
+    # The G7 question carries its three structured answers as buttons.
+    return DiscoveryReply(text=result.reply_text, action_data=result.action_data, persisted=True)
 
 
 def _concierge_turn(
@@ -2528,7 +2563,19 @@ def _concierge_turn(
     # Only the KEYBOARD is taken from the renderer; the model keeps the words.
     # Same cards, same callbacks, same order — the tap path is identical to
     # the pre-DRF-1266 reply.
-    action_data = None
+    # DRF-2267 (CD §72) — ответ словами без карточек больше не тупик: под ним
+    # следующий шаг и «Меню». Карточки мастеров (ниже) заменяют эти кнопки —
+    # у них своя клавиатура с «Записаться».
+    from apps.orchestrator.next_steps import (
+        discover_button,
+        menu_button,
+        next_step_action_data,
+        salons_button,
+    )
+
+    action_data: dict[str, Any] | None = next_step_action_data(
+        discover_button(), salons_button(), menu_button()
+    )
     reply_text = text[:_MAX_REPLY_CHARS]
     if pending_cards:
         action_data = _render_master_cards(

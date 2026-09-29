@@ -47,6 +47,7 @@ vi.mock("../lib/payments", async (importOriginal) => {
 });
 
 import { ApiError, authVerify } from "../lib/api";
+import { REFUSAL_CANON } from "../lib/refusal-canon";
 import { createCustomerBooking } from "../lib/customer-booking";
 import { openPaymentConfirmation } from "../lib/max-sdk";
 import { createPayment } from "../lib/payments";
@@ -357,6 +358,17 @@ describe("C1 neutral unavailable message (contract §2)", () => {
 });
 
 describe("error matrix + idempotency (Wave 0 booking GO)", () => {
+  it("4xx без названной причины — ровно «Не удалось создать запись.» (§6-кси п.2, DRF-2577)", async () => {
+    // Раньше ветка `other` печатала серверный `detail` — английский текст.
+    const user = userEvent.setup();
+    mockedCreate.mockRejectedValue(new ApiError(400, "invalid_request", "start_at: invalid datetime"));
+    renderScreen();
+    await user.click(screen.getByRole("button", { name: "Записаться" }));
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent?.trim()).toBe(REFUSAL_CANON.bookingCreate);
+    expect(screen.queryByText(/invalid datetime/)).not.toBeInTheDocument();
+  });
+
   it("not-bookable 404 → neutral message + catalog alternative", async () => {
     const user = userEvent.setup();
     mockedCreate.mockRejectedValue(

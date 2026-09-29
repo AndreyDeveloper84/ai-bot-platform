@@ -8,6 +8,7 @@ from __future__ import annotations
 from django.urls import path
 
 from apps.miniapp_api import (
+    master_media,
     views,
     views_diary_days,
     views_last_topic,
@@ -230,6 +231,31 @@ urlpatterns = [
         "diary/day",
         views_diary_days.customer_diary_day,
         name="customer_diary_day",
+    ),
+    # DRF-2455 — снимок записи: файл идёт через бот, а не ссылкой на
+    # хранилище (адрес внутренний, бакет публичный).
+    path(
+        # `<str:>`, а не `<uuid:>`, как у соседних ручек записи: при
+        # `<uuid:>` неверный идентификатор даёт HTML-404 от резолвера, а
+        # клиент Mini App разбирает форму `{error, detail}`. Формат
+        # проверяет сама ручка и отвечает тем же отказом, что и на чужую
+        # запись, — по ответу нельзя отличить «не то имя» от «не твоё».
+        "diary/entry/<str:log_id>/photo",
+        views_diary_days.customer_food_photo,
+        name="customer_food_photo",
+    ),
+    # DRF-2539 — фото мастера и работы портфолио через бот (вариант 3 владельца).
+    # Строка, а не <uuid:>: ручка сама отвечает 404 на кривой id, одинаково с
+    # «фото нет».
+    path(
+        "media/masters/<str:master_id>/photo",
+        master_media.master_photo,
+        name="master_media_photo",
+    ),
+    path(
+        "media/masters/<str:master_id>/portfolio/<str:item_id>/image",
+        master_media.master_portfolio_image,
+        name="master_media_portfolio_image",
     ),
     # Dashboard rollup — next booking + this-week count (bookings-only).
     path(

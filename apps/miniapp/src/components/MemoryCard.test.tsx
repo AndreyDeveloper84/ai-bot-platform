@@ -178,4 +178,20 @@ describe("MemoryCard — действия", () => {
     expect(await screen.findByText(MEMORY_PENDING_TEXT)).toBeInTheDocument();
     expect(screen.queryByText("придерживается веганского питания")).toBeNull();
   });
+  it("«Забыть всё» — на экране то же обещание, что в боте (CD §76, DRF-2214)", async () => {
+    fetchMemoryMock.mockResolvedValue(doc());
+    render(<MemoryCard />);
+    await screen.findByText("придерживается веганского питания");
+
+    await userEvent.click(screen.getByRole("button", { name: "Забыть всё" }));
+    const dialog = await screen.findByRole("dialog");
+    const text = (dialog.textContent ?? "").replace(/\s+/g, " ");
+
+    expect(text).toContain(
+      "Удалю в течение часа всё, что знаю о тебе, кроме бронирований и оплат, — вернуть будет нельзя. " +
+        "Переписка обезличится: текст останется без твоих контактов. " +
+        "Избранные мастера останутся в приложении BeautyGO, настройки уведомлений — в профиле.",
+    );
+    expect(text).not.toContain("из наших разговоров");
+  });
 });

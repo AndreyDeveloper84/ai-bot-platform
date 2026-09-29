@@ -705,6 +705,32 @@ describe("Расписание салона — что уже назначено
     mockedAssigned.mockResolvedValue(assignedNothing());
   });
 
+  it("отгул в 01:00 по салону — дата и час салона, не вчерашний день (DRF-2601)", async () => {
+    // Провод отгулов — в поясе салона (admin_api, DRF-2601). До починки
+    // каталог давал «2026-09-12T22:00:00+00:00», и экран печатал «12 сентября
+    // · 22:00» — отгул уезжал во вчерашний день. Здесь строка салона.
+    mockedAssigned.mockResolvedValue(
+      assignedNothing({
+        time_off: {
+          state: "parsed",
+          rows: [
+            {
+              id: "o-night",
+              start_at: "2026-09-13T01:00:00+03:00",
+              end_at: "2026-09-13T05:00:00+03:00",
+              reason: "",
+            },
+          ],
+          seen_fields: [],
+        },
+      }),
+    );
+
+    renderScreen();
+
+    expect(await screen.findByText("13 сентября · 01:00–05:00 · недоступна")).toBeTruthy();
+  });
+
   it("показывает исключение, недоступность и закрытие салона", async () => {
     mockedAssigned.mockResolvedValue(
       assignedNothing({

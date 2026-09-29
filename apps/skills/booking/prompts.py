@@ -29,6 +29,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from apps.persona.voice import NO_INTERNAL_TERMS_RULE
+
 
 @dataclass
 class BrandVoiceConfig:
@@ -153,7 +155,7 @@ def _render_system_prompt(
 
     tool_lines = [
         "• show_masters — список мастеров для услуги.",
-        "• show_slots — свободные слоты для мастера.",
+        "• show_slots — свободное время мастера.",
         "• confirm_booking — показать карточку подтверждения новой "
         "записи (НЕ создаёт запись напрямую — ждёт нажатия ✅).",
         "• cancel_booking — показать карточку подтверждения отмены "
@@ -220,7 +222,7 @@ def _render_system_prompt(
 
     # Live-data rendering rule. The skill's two-call loop already
     # invoked a tool and is splicing the result into the prompt below
-    # (КАНДИДАТЫ-МАСТЕРА / СЛОТЫ / ВАШИ ЗАПИСИ / ...). Without an
+    # (КАНДИДАТЫ-МАСТЕРА / СВОБОДНОЕ ВРЕМЯ / ВАШИ ЗАПИСИ / ...). Without an
     # explicit instruction, gpt-4o-mini treats those blocks as future
     # tool context and replies with placeholder filler — observed live
     # 2026-05-21 ("Один момент!" after `хочу записаться на массаж`,
@@ -262,6 +264,8 @@ def _render_system_prompt(
     if flow_context:
         sections.append(_format_flow_block(flow_context))
 
+    # DRF-2593 — решение владельца 28.09, п.10.
+    sections.append(NO_INTERNAL_TERMS_RULE)
     sections.append(f"Ответ не длиннее {_MAX_ANSWER_CHARS} символов.")
     return "\n\n".join(sections)
 
@@ -480,7 +484,7 @@ def _format_masters_block(masters: list[dict[str, Any]]) -> str:
 
 
 def _format_slots_block(slots: list[dict[str, Any]]) -> str:
-    lines = ["СВОБОДНЫЕ СЛОТЫ:"]
+    lines = ["СВОБОДНОЕ ВРЕМЯ:"]
     for s in slots:
         dur = s.get("duration_minutes")
         dur_part = f" ({dur} мин)" if dur else ""

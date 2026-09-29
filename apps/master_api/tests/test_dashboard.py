@@ -68,6 +68,7 @@ def _make_booking(
     client_name: str = "Мария Иванова",
     bot_user: BotUser | None = None,
     completed_at: datetime | None = None,
+    completed_by: str = "master",
     conversation: Conversation | None = None,
 ) -> RemoteBookingProxy:
     """Create a visit the way the pilot actually has them (DRF-1085).
@@ -84,7 +85,9 @@ def _make_booking(
       ``ayla_service_id``, which is how the name is resolved for real;
     * ``client_name``  → written onto the ``BotUser``, same as production;
     * ``completed_at`` → ``status="completed"``; the mirror has a status,
-      not a completion timestamp.
+      not a completion timestamp. ``completed_by`` (default — a human) goes
+      with it: a clock-closed visit is not a visit for the «постоянный
+      клиент» chip (DRF-2462), pass ``completed_by="system"`` to model one.
 
     ``conversation`` is accepted and ignored: the mirror has no
     conversation FK, and the intent hint now finds the conversation via the
@@ -131,6 +134,7 @@ def _make_booking(
         start_at=_utc(visit_local),
         end_at=end_at,
         status="completed" if completed_at is not None else status,
+        completed_by=completed_by if completed_at is not None else "",
     )
 
 

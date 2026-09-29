@@ -32,7 +32,7 @@ import {
   type WellnessToday,
 } from "../lib/customer-wellness";
 import { useScreenBack } from "../hooks/useScreenBack";
-import { backTo } from "../lib/screen-back";
+import { backToOrigin, originFrom } from "../lib/screen-back";
 
 interface RouterState {
   dishName?: string;
@@ -44,9 +44,10 @@ export function FoodScannerSavedScreen() {
   const navigate = useNavigate();
 
   // Возврат (DRF-1493) — на дом; адрес прежний, теперь объявленный.
-  const onBack = useScreenBack(backTo("/customer/main"));
   const location = useLocation();
   const state = (location.state ?? {}) as RouterState;
+  // DRF-2349 — последний экран потока: выход ведёт туда, откуда вошли.
+  const onBack = useScreenBack(backToOrigin(location.state, "/customer/main"));
   const dishName = state.dishName ?? "Запись";
   const recapCalories = state.calories ?? null;
   // Default ED-mode TRUE — defence-in-depth for deep-link refresh
@@ -213,7 +214,7 @@ export function FoodScannerSavedScreen() {
           <button
             type="button"
             className="btn-secondary"
-            onClick={() => navigate("/customer/main")}
+            onClick={() => navigate(originFrom(location.state) ?? "/customer/main")}
           >
             Готово
           </button>

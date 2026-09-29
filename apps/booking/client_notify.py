@@ -136,7 +136,6 @@ from __future__ import annotations
 import datetime as dt
 import logging
 from uuid import UUID
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from django.db import transaction
 
@@ -144,6 +143,7 @@ from apps.booking.master_notify import resolve_master, resolve_service_name
 from apps.handoff.notify import send_max_notification
 from apps.identity.models import BotUser
 from apps.tenancy.models import Tenant
+from apps.tenancy.timezones import salon_zone
 
 logger = logging.getLogger(__name__)
 
@@ -153,35 +153,12 @@ logger = logging.getLogger(__name__)
 # already tells the customer the tap worked.
 _UNKNOWN = "—"
 
-_DEFAULT_TZ = "Europe/Moscow"
-
 # Comment prefix stamped by ``apps.skills.booking.tools.execute_confirm``
 # (and ``execute_reschedule``) on every ``BookingRequest`` the bot
 # creates from the dialog. Under ``BOOKING_VIA_AYLA_REST`` the id in it
 # is the canonical Ayla appointment UUID — the same value this module
 # receives as ``appointment_id``.
 _CHAT_BOOKING_COMMENT_PREFIX = "Bot booking | yclients_record_id="
-
-
-def tenant_timezone(tenant: Tenant) -> ZoneInfo:
-    """Tenant-local timezone, degrading to MSK and then UTC.
-
-    A confirmation rendered in the wrong timezone is worse than none:
-    the customer would arrive at the wrong hour, which is precisely the
-    confusion this ticket is meant to end. An unusable tenant value
-    therefore falls back to the pilot's real timezone, not to UTC.
-
-    Deliberately a local copy of the salon message's private helper
-    rather than an import of it: ``master_notify`` is merged and in
-    production, and this ticket does not touch it.
-    """
-
-    for candidate in (getattr(tenant, "timezone", "") or "", _DEFAULT_TZ):
-        try:
-            return ZoneInfo(candidate)
-        except (ZoneInfoNotFoundError, ValueError):
-            continue
-    return ZoneInfo("UTC")
 
 
 def resolve_client_user_id(bot_user: BotUser | None) -> str:
@@ -243,7 +220,7 @@ def build_booking_confirmation(
     tenant's timezone — no other person's data, no internal ids.
     """
 
-    when = start_at.astimezone(tenant_timezone(tenant)).strftime("%d.%m.%Y в %H:%M")
+    when = start_at.astimezone(salon_zone(tenant)).strftime("%d.%m.%Y в %H:%M")
     lines = [
         "✅ Вы записаны",
         f"Услуга: {service_name or _UNKNOWN}",

@@ -26,7 +26,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { Snackbar } from "../components/Snackbar";
 import { StateError } from "../components/StateError";
 import { PaymentStatusBadge } from "../components/PaymentStatusBadge";
@@ -41,7 +41,13 @@ import {
   type CancelReasonClass,
 } from "../lib/api";
 import { displayStatusFor, getBookingDetail, renderStatus } from "../lib/customer-records";
-import { formatDuration, formatMoney, formatVisitFull, priceFromLabel } from "../lib/format";
+import {
+  formatDayMonthTime,
+  formatDuration,
+  formatMoney,
+  formatVisitFull,
+  priceFromLabel,
+} from "../lib/format";
 import { visitAddressText } from "../lib/visit-address";
 import { useScreenBack } from "../hooks/useScreenBack";
 import { backTo } from "../lib/screen-back";
@@ -59,6 +65,22 @@ const REASON_CHIPS: { value: CancelReasonClass; label: string }[] = [
   { value: "other", label: "Другое" },
 ];
 
+/**
+ * DRF-2346 — текст ЖДЁТ СЛОВА ВЛАДЕЛЬЦА (вопрос задан 23.09).
+ *
+ * Смысл, который он обязан нести: отмена ЗАПУЩЕНА и через несколько секунд
+ * станет окончательной; завершится сама, даже если закрыть приложение;
+ * вернуть пока можно, кнопка рядом. Чего в нём быть не должно — слова,
+ * утверждающего выполненное («отменена», «отменила», «готово»): сервер в
+ * этот момент отвечает «отмена запрошена».
+ *
+ * Соседние два исхода не меняются и менять их не предлагалось: немедленная
+ * отмена (путь через Ayla) говорит «Запись отменена», и это правда;
+ * истёкшее окно возврата говорит «Окно отмены истекло».
+ */
+export const CANCEL_STARTED_COPY =
+  "Отменяю запись — через несколько секунд станет окончательно. Пока можно вернуть.";
+
 export function CustomerBookingDetailScreen() {
   const navigate = useNavigate();
 
@@ -68,6 +90,21 @@ export function CustomerBookingDetailScreen() {
   // нельзя.
   const onBack = useScreenBack(backTo("/customer/records"));
   const { bookingId } = useParams<{ bookingId: string }>();
+  // DRF-2585: экран переноса передаёт сюда, откуда перенесли. Читателя у
+  // этого состояния не было с 19.05 — подтверждение «было → стало» не
+  // рисовалось нигде.
+  // Запоминаем при первом показе и стираем из истории: иначе «Перенесла
+  // запись» всплывало бы снова при возврате «назад» и перезагрузке.
+  const location = useLocation();
+  const [moved] = useState(
+    () => location.state as { justRescheduled?: boolean; oldVisit?: string } | null,
+  );
+  useEffect(() => {
+    if (moved?.justRescheduled) {
+      navigate(location.pathname, { replace: true, state: null });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- только при первом показе: дальше состояние уже в `moved`, повтор стёр бы уже стёртое
+  }, []);
   const [state, setState] = useState<State>({ kind: "loading" });
   const [modalOpen, setModalOpen] = useState(false);
   const [reasonClass, setReasonClass] = useState<CancelReasonClass | null>(null);
@@ -112,8 +149,12 @@ export function CustomerBookingDetailScreen() {
       setModalOpen(false);
       setReasonClass(null);
       if (booking.status === "cancel_requested") {
-        // Local path: 2-step with the server-held undo window.
-        setSnack({ visible: true, message: "Запись отменена", showUndo: true });
+        // DRF-2346 — местный двухшаговый путь: сервер вернул «отмена
+        // запрошена», а не «отменена», и говорить о факте нельзя. Отмену
+        // теперь добивает сервер (`bookings.commit_expired_cancels`), даже
+        // если эту вкладку закрыть, — поэтому обещание «завершится само»
+        // правдиво, а не наоборот.
+        setSnack({ visible: true, message: CANCEL_STARTED_COPY, showUndo: true });
       } else {
         // Ayla path: cancel is immediate (no two-step confirm, no undo
         // window — the proxy flips to cancelled via the round-trip
@@ -125,7 +166,7 @@ export function CustomerBookingDetailScreen() {
       if (err instanceof ApiError) {
         setSnack({
           visible: true,
-          message: err.detail || "Не получилось отменить.",
+          message: "Не получилось отменить.",
           showUndo: false,
         });
       }
@@ -236,6 +277,20 @@ export function CustomerBookingDetailScreen() {
           {/* C7.3 — payment status when the passthrough ships it. */}
           <PaymentStatusBadge state={b.payment?.capture_state} />
         </div>
+
+        {/* DRF-2585 — слова владельца 28.09, п.8: «Перенесла запись» +
+            «Было / Стало». «Стало» — время самой записи, не состояние экрана. */}
+        {moved?.justRescheduled && moved.oldVisit && (
+          <div className="confirm-card" role="status">
+            <p>Перенесла запись</p>
+            <p>
+              <strong>Было:</strong> {formatDayMonthTime(moved.oldVisit)}
+            </p>
+            <p>
+              <strong>Стало:</strong> {formatDayMonthTime(b.visit_at)}
+            </p>
+          </div>
+        )}
 
         <div className="confirm-card">
           <dl>

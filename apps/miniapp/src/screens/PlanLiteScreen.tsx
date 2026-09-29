@@ -18,7 +18,8 @@
  *     цель», «Вести дневник N дней в неделю», «Пить воду N раз в день»),
  *     выбрать 1–3 → «Составить план» → POST только `actions` (активную
  *     цель знает каталог);
- *   - план есть → карточка: «Твоя цель: {метка}» (метка — из
+ *   - план есть → карточка: «{метка}» без подписи (п. 7 решений 28.09,
+ *     DRF-2576: «Никаких „Твоя цель:“»; метка — из
  *     decision-context, как на экране цели; иначе ключ) и по обязательству
  *     «N из M» за текущее ведро — и ничего о результате: ни процента цели,
  *     ни шкалы, ни «ты пропустил» (В-5, DRF-1332); у дневника при
@@ -41,7 +42,7 @@
  * прочее — фраза + «Повторить».
  */
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 
 import { useScreenBack } from "../hooks/useScreenBack";
 import { ApiError } from "../lib/api";
@@ -60,6 +61,7 @@ import {
   type PlanLiteProposal,
 } from "../lib/plan-lite";
 import { screenRoot } from "../lib/screen-back";
+import { CustomerAvatarEntry } from "../components/CustomerAvatarEntry";
 import { CustomerTabBar } from "../components/CustomerTabBar";
 
 export const PLAN_LITE_ROUTE = "/customer/plan";
@@ -81,7 +83,6 @@ export const PLAN_LITE_COPY = {
   more: "больше",
   compose: "Составить план",
   composing: "Составляю…",
-  goalTitle: (goal: string) => `Твоя цель: ${goal}`,
   thisWeek: "На этой неделе",
   today: "Сегодня",
   twoWeeks: "Эти 2 недели",
@@ -119,12 +120,48 @@ const ACTION_LABELS: Record<PlanLiteActionType, string> = {
   log_water: PLAN_LITE_COPY.labelWater,
 };
 
-/** Куда ведёт обязательство — туда, где оно делается (то, что уже работает). */
+/** Куда ведёт обязательство — туда, где оно делается (то, что уже работает).
+ *
+ * Маршруты проверены и верны: вода отмечается на Главной (там очередь,
+ * тост и отмена стакана), дневник — на своём экране, услуга — в каталоге.
+ * «Ведёт в никуда» (DRF-2441) — про другое: см. `shouldOfferGo`.
+ */
 const ACTION_ROUTES: Record<PlanLiteActionType, string> = {
   book_service: "/customer/catalog",
   log_food: "/customer/food-scanner/diary",
   log_water: "/customer/main",
 };
+
+/** Повторяемо ли обязательство после того, как норма набрана.
+ *
+ * Свойство названо, а не выведено из списка слагов: воду и дневник
+ * отмечают снова и снова (лишний стакан — не ошибка), а запись на услугу
+ * набрана один раз и второй «Перейти» зовёт записаться ещё раз. Добавит
+ * кто-то четвёртое действие — он обязан ответить на этот вопрос здесь, а
+ * не угадать по имени.
+ */
+const ACTION_REPEATABLE: Record<PlanLiteActionType, boolean> = {
+  book_service: false,
+  log_food: true,
+  log_water: true,
+};
+
+/** Предлагать ли «Перейти» у этого обязательства.
+ *
+ * Два правила, оба общие:
+ *   1. никуда не зовём с того экрана, на котором человек уже стоит —
+ *      нажатие без видимого следа и есть «ведёт в никуда»;
+ *   2. выполненное неповторяемое обязательство не зовёт сделать его ещё
+ *      раз; выполненное повторяемое (вода, дневник) — зовёт.
+ */
+export function shouldOfferGo(
+  action: { action_type: PlanLiteActionType; done_count: number; target_count: number },
+  currentPath: string,
+): boolean {
+  if (ACTION_ROUTES[action.action_type] === currentPath) return false;
+  const done = action.done_count >= action.target_count;
+  return !done || ACTION_REPEATABLE[action.action_type];
+}
 
 const CADENCE_PERIOD: Record<PlanLiteCadence, string> = {
   per_day: PLAN_LITE_COPY.perDay,
@@ -171,6 +208,7 @@ function cadenceLabel(row: ProposalRow): string {
 
 export function PlanLiteScreen() {
   const navigate = useNavigate();
+  const { pathname } = useLocation();
   // DRF-2201 — «План» вкладка панели, значит корень: стрелки «назад» у него
   // нет (ни нарисованной, ни системной в MAX), уход — другими вкладками.
   // Прежде стрелка вела на экран цели; такой дороги у корня быть не может —
@@ -246,8 +284,13 @@ export function PlanLiteScreen() {
   }, [load]);
 
   // Метка цели — как на экране цели: текст человека, иначе подпись
-  // курируемой цели из документа; сервер отдаёт лишь ключ. Не смогли
-  // спросить — показываем ключ, план от этого не зависит.
+  // курируемой цели из документа; сервер отдаёт лишь ключ.
+  //
+  // DRF-2355: не смогли спросить — метки просто нет, и заголовок обходится
+  // без имени цели. Ключ (`tone_up`) — адрес внутри системы, а не слово,
+  // которым человек называет свою цель; показывать его вместо названия
+  // значит отвечать служебным кодом на вопрос «а какая у меня цель».
+  // План от метки не зависит и рисуется полностью.
   useEffect(() => {
     let cancelled = false;
     fetchDecisionContext()
@@ -268,7 +311,17 @@ export function PlanLiteScreen() {
   }, []);
 
   // Согласие дневника — только когда в предложении есть строка «дневник»;
-  // тот же гейт, что у сканера. Не ответил — «согласия нет».
+  // тот же гейт, что у сканера.
+  //
+  // DRF-2354 — исходов ТРИ, и «не знаю» не выдаётся за «нет». Состояние
+  // уже трёхзначное (`boolean | null`), но сбой чтения сводился к `false`,
+  // строка дневника молча выпадала из отправки, и человек подтверждал план
+  // без дневника, не зная почему. Тихое замыкание «в безопасную сторону»
+  // неотличимо от его собственного решения — а решение здесь его.
+  //
+  // `null` (ответа нет) → строка видна, включена и уходит в план. Если
+  // согласия действительно нет, откажет каталог — и это его ответ, а не
+  // наша догадка за человека.
   const proposalHasFood = status.kind === "proposal" && rows.some((r) => r.action_type === "log_food");
   useEffect(() => {
     if (!proposalHasFood) return;
@@ -278,7 +331,8 @@ export function PlanLiteScreen() {
         if (!cancelled) setDiaryConsent(gate.grantedAt !== null);
       })
       .catch(() => {
-        if (!cancelled) setDiaryConsent(false);
+        // Не «нет», а «не знаем»: состояние остаётся `null`.
+        if (!cancelled) setDiaryConsent(null);
       });
     return () => {
       cancelled = true;
@@ -286,7 +340,7 @@ export function PlanLiteScreen() {
   }, [proposalHasFood]);
 
   const rowEffective = (row: ProposalRow): boolean =>
-    row.included && (row.action_type !== "log_food" || diaryConsent === true);
+    row.included && (row.action_type !== "log_food" || diaryConsent !== false);
 
   const proposalActions = (): PlanLiteActionSpec[] =>
     rows
@@ -372,6 +426,10 @@ export function PlanLiteScreen() {
     <div className="food-scanner-screen food-scanner-screen--tab-root">
       <header className="records-screen__header">
         <h1 className="records-screen__title">{PLAN_LITE_COPY.title}</h1>
+        {/* Вход в профиль — §77 п.60. Стоит на всех экранах нижней
+            панели: вход, который есть не везде, читается как «иногда
+            можно». Имя компонент берёт сам — у этого экрана его нет. */}
+        <CustomerAvatarEntry />
       </header>
 
       <main className="food-scanner-screen__main">
@@ -420,13 +478,15 @@ export function PlanLiteScreen() {
         {status.kind === "proposal" && (
           <section data-testid="plan-lite-proposal" aria-label={PLAN_LITE_COPY.title}>
             <h2 className="food-scanner-diary__caption">
-              {PLAN_LITE_COPY.proposalTitle(goalLabel ?? status.proposal.goal_key)}
+              {goalLabel ? PLAN_LITE_COPY.proposalTitle(goalLabel) : PLAN_LITE_COPY.title}
             </h2>
             <p className="food-scanner-diary__unreadable-hint">{status.proposal.why}</p>
             <p className="food-scanner-diary__caption">{PLAN_LITE_COPY.proposalHint}</p>
             <ul className="food-scanner-diary__list">
               {rows.map((row) => {
-                const needsConsent = row.action_type === "log_food" && diaryConsent !== true;
+                // Запрет — только на явное «нет»: при «не знаю» строка
+                // остаётся в руках человека (DRF-2354).
+                const needsConsent = row.action_type === "log_food" && diaryConsent === false;
                 const on = rowEffective(row);
                 return (
                   <li key={row.action_type} className="food-scanner-diary__entry">
@@ -442,7 +502,7 @@ export function PlanLiteScreen() {
                       </label>
                       <span className="food-scanner-diary__entry-time">{cadenceLabel(row)}</span>
                     </div>
-                    {needsConsent && diaryConsent === false && (
+                    {needsConsent && (
                       <div className="food-scanner-diary__entry-actions">
                         <button
                           type="button"
@@ -486,7 +546,7 @@ export function PlanLiteScreen() {
 
         {status.kind === "builder" && (
           <section aria-label={PLAN_LITE_COPY.builderTitle}>
-            {goalLabel && <p className="food-scanner-diary__caption">{PLAN_LITE_COPY.goalTitle(goalLabel)}</p>}
+            {goalLabel && <p className="food-scanner-diary__caption">{goalLabel}</p>}
             <h2 className="food-scanner-diary__caption">{PLAN_LITE_COPY.builderTitle}</h2>
             <p className="food-scanner-diary__unreadable-hint">{PLAN_LITE_COPY.builderHint}</p>
             <div className="chip-row" role="group" aria-label={PLAN_LITE_COPY.builderTitle}>
@@ -545,7 +605,7 @@ export function PlanLiteScreen() {
         {status.kind === "card" && (
           <section data-testid="plan-lite-card" aria-label={PLAN_LITE_COPY.title}>
             <h2 className="food-scanner-diary__caption">
-              {PLAN_LITE_COPY.goalTitle(goalLabel ?? status.plan.goal_key)}
+              {goalLabel || PLAN_LITE_COPY.title}
             </h2>
             <ul className="food-scanner-diary__list">
               {status.plan.actions.map((action) => (
@@ -563,16 +623,18 @@ export function PlanLiteScreen() {
                       </>
                     )}
                   </span>
-                  <div className="food-scanner-diary__entry-actions">
-                    <button
-                      type="button"
-                      className="food-scanner-diary__entry-action"
-                      aria-label={`${PLAN_LITE_COPY.go}: ${ACTION_LABELS[action.action_type]}`}
-                      onClick={() => navigate(ACTION_ROUTES[action.action_type])}
-                    >
-                      {PLAN_LITE_COPY.go}
-                    </button>
-                  </div>
+                  {shouldOfferGo(action, pathname) && (
+                    <div className="food-scanner-diary__entry-actions">
+                      <button
+                        type="button"
+                        className="food-scanner-diary__entry-action"
+                        aria-label={`${PLAN_LITE_COPY.go}: ${ACTION_LABELS[action.action_type]}`}
+                        onClick={() => navigate(ACTION_ROUTES[action.action_type])}
+                      >
+                        {PLAN_LITE_COPY.go}
+                      </button>
+                    </div>
+                  )}
                 </li>
               ))}
             </ul>

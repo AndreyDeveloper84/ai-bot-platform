@@ -119,6 +119,7 @@ from apps.master_api.auth import (
     require_master_init_data,
     validate_invite_token,
 )
+from apps.miniapp_api.master_media import master_photo_path
 
 logger = logging.getLogger(__name__)
 
@@ -208,7 +209,7 @@ def _master_card(master: CatalogMaster, *, include_services: bool = True) -> dic
         "name": master.name,
         "specialization": master.specialization,
         "bio": master.bio,
-        "photo_url": master.photo_url,
+        "photo_url": master_photo_path(master.id, master.photo_url),
     }
     if include_services:
         payload["services"] = _services_for_master(master)
@@ -755,6 +756,22 @@ def onboarding_accept(request: HttpRequest) -> HttpResponse:
             INVITE_TOKEN_SLUG_TO_STATUS.get(exc.slug, 400),
         )
 
+    # DRF-2442 — сказать КАТАЛОГУ, что эта личность и есть тот мастер.
+    #
+    # Всё выше — бот-сторона: ``linked_bot_user``, погашенный токен, статус.
+    # Каталог об этом не знает, и без связи ``users_user.linked_user_id`` его
+    # сторож субъекта отвечает 403 ``subject_unresolved`` на всех ручках
+    # кабинета. Записать связь мог только человек-оператор, и операторов ноль —
+    # отсюда «мастер принял приглашение и никуда не попал».
+    #
+    # Доказательство владения — ровно то гашение, которое уже случилось выше:
+    # ссылка одноразовая, и открыть её мог только тот, кому её передали.
+    #
+    # ПОСЛЕ коммита и НЕ ломая приём: мастер уже принял, токен уже погашен, и
+    # откат ради недоступного каталога потерял бы одноразовое приглашение. Отказ
+    # уходит в лог по имени; дозвонить можно командой ``link_master_identities``.
+    _link_identity_in_catalog(landed, bot_user)
+
     session_token, exp_ts = issue_master_session_token(
         master_id=landed.id,
         tenant_id=landed.tenant_id,
@@ -766,6 +783,53 @@ def onboarding_accept(request: HttpRequest) -> HttpResponse:
             "session_token": session_token,
             "expires_at": datetime.fromtimestamp(exp_ts, tz=dt_timezone.utc).isoformat(),
         }
+    )
+
+
+def _link_identity_in_catalog(master: CatalogMaster, bot_user: BotUser) -> None:
+    """Связь личности мастера в каталоге — лучшая попытка, приём не рушит (DRF-2442).
+
+    Нет ``catalog_specialist_id`` — связывать не с чем: строка ещё не привязана
+    к каталогу (``apps.catalog.identity``), её дозаводит подметальщик, и уже
+    после этого связь ставит команда ``link_master_identities``. Это отдельная
+    ветвь, а не отказ: у неё своя строка журнала, чтобы «не с чем связывать» не
+    читалось как «каталог отказал».
+    """
+
+    from apps.identity.services.specialist_identity_link import (
+        SpecialistIdentityLinkRefused,
+        bind_master_identity_in_catalog,
+    )
+
+    specialist_id = getattr(master, "catalog_specialist_id", None)
+    if not specialist_id:
+        logger.warning(
+            "master_api.onboarding_accept.identity_link_skipped reason=catalog_unlinked "
+            "master=%s — строка ещё не привязана к каталогу; связь поставит "
+            "link_master_identities после привязки",
+            master.id,
+        )
+        return
+    try:
+        outcome = bind_master_identity_in_catalog(
+            specialist_id=specialist_id,
+            bot_user=bot_user,
+        )
+    except SpecialistIdentityLinkRefused as exc:
+        logger.warning(
+            "master_api.onboarding_accept.identity_link_refused reason=%s master=%s "
+            "correlation_id=%s hint=%s",
+            exc.reason,
+            master.id,
+            exc.correlation_id,
+            exc.hint,
+        )
+        return
+    logger.info(
+        "master_api.onboarding_accept.identity_linked master=%s specialist=%s created=%s",
+        master.id,
+        outcome.specialist_id,
+        outcome.created,
     )
 
 
@@ -997,7 +1061,7 @@ def onboarding_profile(request: HttpRequest) -> HttpResponse:
                 "id": str(master.id),
                 "name": master.name,
                 "bio": master.bio,
-                "photo_url": master.photo_url,
+                "photo_url": master_photo_path(master.id, master.photo_url),
             }
         }
     )
@@ -1033,7 +1097,7 @@ def me(request: HttpRequest) -> HttpResponse:
                 "name": master.name,
                 "specialization": master.specialization,
                 "bio": master.bio,
-                "photo_url": master.photo_url,
+                "photo_url": master_photo_path(master.id, master.photo_url),
                 "services": _services_for_master(master),
             },
             "salon": {
@@ -1200,7 +1264,10 @@ def _working_hours_refusal(exc: BookingBadRequestError) -> HttpResponse:
 #: Отказы каталога, которые экран показывает по имени (M11, tenants/master_places.py).
 _LOCATION_REFUSALS: dict[str, str] = {
     "salon_place_owner_managed": "Место работы мастера салона ведёт владелец салона.",
-    "no_workspace_tenant": "У профиля ещё нет рабочего пространства — привязку выполнит оператор.",
+    # DRF-2378: роли «оператор» в системе нет — ни группы, ни роли, ни
+    # поля. Текст утверждён владельцем (§77 п. 27, 24.09); адресат на
+    # экране — студия, и дверь к ней рисует `StudioCallout`.
+    "no_workspace_tenant": "Профиль пока не подключён — место работы пока не указать.",
     "place_already_set": "Место уже указано — измените его, а не добавляйте второе.",
     "place_outside_workspace": "Это место не из вашего рабочего пространства.",
     "area_already_set": "Зона выезда уже указана — измените её.",
@@ -1673,7 +1740,9 @@ def onboarding_readiness(request: HttpRequest) -> HttpResponse:
     """
 
     master: CatalogMaster = request.master  # type: ignore[attr-defined]
-    return JsonResponse(build_readiness(master).as_dict())
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    # DRF-2370: место работы каталог отдаёт только под субъектом мастера.
+    return JsonResponse(build_readiness(master, actor=external_user_id_for(bot_user)).as_dict())
 
 
 # --- /publication/readiness, /publication, /publication/status (DRF-1797, M5) ---
@@ -2170,9 +2239,9 @@ def schedule(request: HttpRequest) -> HttpResponse:
 
     # Resolve defaults in tenant-local TZ so «today» means today for
     # the master, not for UTC.
-    from apps.master_api.services.schedule import get_tenant_tz
+    from apps.tenancy.timezones import salon_zone
 
-    tz = get_tenant_tz(tenant)
+    tz = salon_zone(tenant)
     today_local = dj_timezone.now().astimezone(tz).date()
 
     raw_from = request.GET.get("from", "").strip()
@@ -2459,7 +2528,8 @@ def notification_prefs(request: HttpRequest) -> HttpResponse:
 def customers_list(request: HttpRequest) -> HttpResponse:
     """Read-only customer roster for the calling master (Tau §4.3 P0 tab).
 
-    Aggregates :class:`apps.booking.BookingRequest` history grouped by
+    Aggregates the master's attended visits in the booking mirror
+    (:class:`apps.booking.RemoteBookingProxy`, DRF-1138) grouped by
     ``bot_user_id``. See :func:`apps.master_api.services.customers.list_master_customers`
     for the field shape + counting rules. Tenant scope is enforced by
     :func:`require_master_init_data`; the service layer adds an explicit

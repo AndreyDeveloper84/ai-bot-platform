@@ -175,6 +175,12 @@ class WellnessContext:
     #: DRF-2101 — Plan Lite стоит рядом с гейтами, не за ними: факты
     #: действий за текущее ведро. ``None`` — плана нет или флаг выключен.
     plan_lite: PlanLite | None = None
+    #: DRF-2356 — документ не разобрался: конверт не объект или блок плана
+    #: битый. Это НЕ «плана нет»: там ответ о человеке, здесь — о нас.
+    #: Признаком, а не исключением, потому что читателей двое: ручка Mini
+    #: App отвечает отказом, запертая проактивность пропускает тик как
+    #: прежде. Бросок поменял бы ей поведение молча.
+    unreadable: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -458,10 +464,14 @@ def _context_from_wire(payload: Any) -> WellnessContext:
     Толерантность к форме намеренная: документ сегодня приходит в
     gated-виде, и его контракт дорежеутся на стороне Ayla. Отсутствующие
     поля читаются как «нет плана / нет outcomes», а не как ошибка.
+
+    DRF-2356 — но «не разобралось» теперь ОТЛИЧИМО от «нет плана»:
+    ``unreadable`` несёт этот факт вызывающему, не меняя поведения
+    толерантных читателей.
     """
     data = payload.get("data") if isinstance(payload, dict) else None
     if not isinstance(data, dict):
-        return WellnessContext(has_plan=False)
+        return WellnessContext(has_plan=False, unreadable=True)
 
     outcomes_raw = data.get("outcomes")
     outcomes: list[OutcomeState] = []
@@ -477,11 +487,17 @@ def _context_from_wire(payload: Any) -> WellnessContext:
                     progress_state=_code(item.get("progress_state")),
                 )
             )
+    raw_plan_lite = data.get("plan_lite")
+    plan_lite = _plan_lite_from_wire(raw_plan_lite)
+    # Блок пришёл, но разобрать его не вышло — это не «плана нет» (DRF-2356).
+    # `null` и отсутствие ключа — честное «плана нет»; всё остальное битое.
+    plan_lite_broken = plan_lite is None and raw_plan_lite is not None
     return WellnessContext(
         has_plan=isinstance(data.get("plan"), dict),
         outcomes=tuple(outcomes),
         gated=isinstance(data.get("gated"), dict),
-        plan_lite=_plan_lite_from_wire(data.get("plan_lite")),
+        plan_lite=plan_lite,
+        unreadable=plan_lite_broken,
     )
 
 

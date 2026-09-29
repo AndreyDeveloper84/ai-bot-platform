@@ -256,6 +256,28 @@ CUSTOMER_ROUTES: dict[str, Entry] = {
             "on a booking and nothing beyond the published profile is added on detail"
         ),
     ),
+    # --- master photo bytes (DRF-2539) --------------------------------------
+    "master_media_photo": third_party(
+        "the photo file itself (image/*)",
+        via="apps.miniapp_api.master_media:master_photo",
+        whose="one master, by id — the face on the published card",
+        why=(
+            "the same photo the card lists as photo_url, now as bytes: the storage address "
+            "was internal to the container and signed for an hour, so the phone never "
+            "loaded it. Any signed Mini App session may read it — client on the storefront, "
+            "master on their own screen, admin in the team list; no identity is resolved "
+            "or created, and nothing but the bytes is returned"
+        ),
+    ),
+    "master_media_portfolio_image": third_party(
+        "the portfolio image itself (image/*)",
+        via="apps.miniapp_api.master_media:master_portfolio_image",
+        whose="one master's portfolio work, by master id + item id",
+        why=(
+            "the works the master publishes on their profile; the catalog serves the item "
+            "only when it belongs to that master (404 otherwise); bytes only, as above"
+        ),
+    ),
     # --- bookings (own + master name) --------------------------------------
     "create_booking": (
         own(
@@ -583,6 +605,20 @@ CUSTOMER_ROUTES: dict[str, Entry] = {
         note=(
             "the caller's own diary entries for one date — the catalog daily summary for "
             "that date in the wellness/today entry shape; read-only, no edit of past days here"
+        ),
+    ),
+    "customer_food_photo": own(
+        "the photo file itself (image/*)",
+        via="apps.miniapp_api.views_diary_days:customer_food_photo",
+        note=(
+            "the caller's own food photo, proxied from the catalog under their "
+            "external_user_id — the catalog checks ownership and answers 404 for "
+            "someone else's entry. The file goes through the bot on purpose: the "
+            "storage address is internal to the container AND the bucket is "
+            "public-read, so a leaked link would work for anyone. Nothing about "
+            "the photo is described in the answer — no dish name, no time, no "
+            "EXIF is stripped or read here; the body is the bytes as the catalog "
+            "stored them. Type is declared from a closed list, never reflected"
         ),
     ),
     # --- Plan Lite (DRF-2101, own) --------------------------------------

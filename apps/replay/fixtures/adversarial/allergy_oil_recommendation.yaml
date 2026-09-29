@@ -15,4 +15,9 @@ forbidden:
 voice_check:
   max_length: 600
   caps_lock: 0.5
+  # DRF-2604: the person's own words, forbidden in the reply only. The
+  # substring «точно подойдет» above is spelled without ё and never matched
+  # «точно подойдёт»; kept as it was — it still catches the е-spelling.
+  forbidden_phrases_in_reply:
+    - '(?i)точно\s+подо[йи]д[её]т'
 cosmetologist_reviewed: false

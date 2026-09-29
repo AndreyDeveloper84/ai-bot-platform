@@ -36,12 +36,13 @@ vi.mock("../lib/max-sdk", async (importOriginal) => {
   return {
     ...original,
     maxBridge: vi.fn(() => null),
-    closeApp: vi.fn(),
+    returnToChat: vi.fn(() => "closed"),
   };
 });
 
 import { fetchMasters, fetchRecommendations, fetchServices } from "../lib/api";
-import { closeApp, maxBridge } from "../lib/max-sdk";
+import { CHAT_STUCK_HINT } from "../components/ReturnToChatHint";
+import { maxBridge, returnToChat } from "../lib/max-sdk";
 import {
   ACTION_CLARIFY_REQUEST,
   ACTION_RETRY,
@@ -61,7 +62,7 @@ const mockedServices = vi.mocked(fetchServices);
 const mockedMasters = vi.mocked(fetchMasters);
 const mockedRecs = vi.mocked(fetchRecommendations);
 const mockedBridge = vi.mocked(maxBridge);
-const mockedClose = vi.mocked(closeApp);
+const mockedClose = vi.mocked(returnToChat);
 
 const SERVICES = [
   {
@@ -120,6 +121,7 @@ function onlyThisText(text: string) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockedClose.mockReturnValue("closed");
   vi.unstubAllEnvs();
   mockedBridge.mockReturnValue(null);
   mockedServices.mockResolvedValue({ services: SERVICES as never });
@@ -164,6 +166,18 @@ describe("C04.5 — safety boundary (DRF-1767)", () => {
 
     await userEvent.click(screen.getByRole("button", { name: ACTION_WRITE_AYLA }));
     expect(mockedClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("DRF-2268: вернуться в чат нечем — подсказка рядом, а не тишина", async () => {
+    mockedBridge.mockReturnValue({} as never);
+    mockedClose.mockReturnValue("stuck");
+    mockedRecs.mockResolvedValue(decision([], { reason_codes: ["ELIG_EXCLUDED_SAFETY"] }) as never);
+    renderScreen();
+    await catalogReady();
+
+    await userEvent.click(screen.getByRole("button", { name: ACTION_WRITE_AYLA }));
+    expect(mockedClose).toHaveBeenCalledTimes(1);
+    expect(await screen.findByText(CHAT_STUCK_HINT)).toBeInTheDocument();
   });
 
   it("сторож диагнозов стережёт класс, а не одно написание", () => {

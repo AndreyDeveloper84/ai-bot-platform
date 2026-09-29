@@ -12,6 +12,7 @@
 import { render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { primeDisplayName } from "../components/CustomerAvatarEntry";
 
 vi.mock("../lib/customer-wellness", async (importOriginal) => {
   const original = await importOriginal<typeof import("../lib/customer-wellness")>();
@@ -33,7 +34,7 @@ vi.mock("../lib/max-sdk", () => ({
   getInitData: () => "test-init-data",
   setBackButton: () => undefined,
   onBackButton: () => () => undefined,
-  closeApp: () => undefined,
+  returnToChat: () => "closed",
   hapticSelection: () => undefined,
   hapticImpact: () => undefined,
   signalReady: () => undefined,
@@ -44,6 +45,14 @@ import { getLastTopic } from "../lib/customer-last-topic";
 import { getRecentActivity, getWellnessToday } from "../lib/customer-wellness";
 import { getPlanLite } from "../lib/plan-lite";
 import { CustomerWellnessDashboardScreen } from "./CustomerWellnessDashboardScreen";
+
+// Дверь в профиль (`CustomerAvatarEntry`) без пропа спрашивает имя у
+// `/me`. Этот набор ручку не подменяет, поэтому имя засевается явно:
+// иначе в прогоне живёт неподменённый сетевой вызов и асинхронное
+// обновление, которое может прилететь посреди чужого теста (DRF-2523).
+beforeEach(() => {
+  primeDisplayName("Тест Тестов");
+});
 
 const TABS = ["Главная", "План", "Дневник", "Записи", "Профиль"] as const;
 

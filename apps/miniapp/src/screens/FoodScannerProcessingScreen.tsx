@@ -20,7 +20,7 @@
  * Pulsing dot animation respects `prefers-reduced-motion` via CSS.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
 import {
@@ -36,11 +36,13 @@ import {
 } from "../lib/food-scanner";
 import { ApiError } from "../lib/api";
 import { useScreenBack } from "../hooks/useScreenBack";
-import { backTo } from "../lib/screen-back";
+import { backToOrigin } from "../lib/screen-back";
 
 interface RouterState {
   photo?: File;
   mealType?: MealType;
+  /** DRF-2349 — откуда вошли в поток; едет по всем его шагам. */
+  returnTo?: string;
 }
 
 type ProcessingState =
@@ -58,9 +60,11 @@ export function FoodScannerProcessingScreen() {
   // (распознавание идёт секунды и его отменяют кнопкой «Отменить»), но
   // аппаратная кнопка MAX существует независимо от разметки — и без
   // объявления увела бы из приложения. Объявление обязательно и здесь.
-  const onBack = useScreenBack(backTo("/customer/main"));
   const location = useLocation();
   const state = (location.state ?? {}) as RouterState;
+  // DRF-2349 — происхождение пришло из съёмки; возврат и все переходы
+  // потока везут его дальше, иначе выход уйдёт на Главную.
+  const onBack = useScreenBack(backToOrigin(location.state, "/customer/main"));
   const photo = state.photo;
   const mealType = state.mealType ?? "lunch";
 
@@ -68,25 +72,34 @@ export function FoodScannerProcessingScreen() {
   const abortRef = useRef<AbortController | null>(null);
   const cancelTimerRef = useRef<number | null>(null);
   const timeoutTimerRef = useRef<number | null>(null);
-  const previewUrl = useMemo(
-    () => (photo ? URL.createObjectURL(photo) : null),
-    [photo],
-  );
-
+  // Адрес превью создаётся и освобождается В ОДНОМ эффекте (DRF-2399).
+  //
+  // Здесь был `useMemo`, и это та же половина дефекта, что вычищена на
+  // экране результата: `StrictMode` зовёт фабрику дважды, оставляет второе
+  // значение, а очистка отзывает именно его — адрес в `src` мёртв, пока
+  // экран смонтирован, а первый утекает насовсем. Форма ниже делает это
+  // невозможным: одна живая подписка — один адрес, и отзывает его она же.
+  //
+  // Цена названа: превью появляется на один коммит позже.
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   useEffect(() => {
-    return () => {
-      if (previewUrl) URL.revokeObjectURL(previewUrl);
-    };
-  }, [previewUrl]);
+    if (!photo) {
+      setPreviewUrl(null);
+      return;
+    }
+    const url = URL.createObjectURL(photo);
+    setPreviewUrl(url);
+    return () => URL.revokeObjectURL(url);
+  }, [photo]);
 
   const cancel = useCallback(() => {
     abortRef.current?.abort();
     // Preserve photo + mealType so the user does not re-pick.
     navigate("/customer/food-scanner/capture", {
       replace: true,
-      state: { photo, mealType },
+      state: { photo, mealType, returnTo: state.returnTo },
     });
-  }, [navigate, photo, mealType]);
+  }, [navigate, photo, mealType, state.returnTo]);
 
   useEffect(() => {
     // Guard — if user landed here without a photo (deep link refresh),
@@ -118,7 +131,10 @@ export function FoodScannerProcessingScreen() {
         if (controller.signal.aborted) return;
         navigate("/customer/food-scanner/result", {
           replace: true,
-          state: { result, photo, mealType, previewUrl },
+          // `previewUrl` НЕ передаётся (DRF-2399): адресом владеет тот,
+          // кто рисует. Экран результата получает файл и делает свой —
+          // иначе адрес переживал бы владельца и умирал у чужого экрана.
+          state: { result, photo, mealType, returnTo: state.returnTo },
         });
       } catch (err) {
         if (controller.signal.aborted) return;
@@ -138,13 +154,14 @@ export function FoodScannerProcessingScreen() {
       if (timeoutTimerRef.current !== null)
         window.clearTimeout(timeoutTimerRef.current);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- снимок обрабатывается один раз за вход на экран; все пять значений приходят навигацией и на монтировании постоянны
   }, []);
 
   // ── error branches per spec §7 ─────────────────────────────────────
   if (phase.kind === "error") {
     return (
       <ScanErrorScreen
+        returnTo={state.returnTo}
         onBack={onBack}
         err={phase.err}
         photo={photo ?? null}
@@ -209,6 +226,7 @@ function ScanErrorScreen({
   photo,
   mealType,
   previewUrl,
+  returnTo,
 }: {
   /**
    * Возврат приходит готовым от экрана (DRF-1493): экран ошибки
@@ -218,6 +236,12 @@ function ScanErrorScreen({
    */
   onBack: (() => void) | undefined;
   err: unknown;
+  /**
+   * DRF-2349 — происхождение приходит свойством по той же причине, что и
+   * возврат: экран ошибки живёт внутри потока, а состояние маршрута знает
+   * только его хозяин.
+   */
+  returnTo: string | undefined;
   photo: File | null;
   mealType: MealType;
   previewUrl: string | null;
@@ -340,7 +364,7 @@ function ScanErrorScreen({
               onClick={() =>
                 navigate("/customer/food-scanner/capture", {
                   replace: true,
-                  state: { photo, mealType },
+                  state: { photo, mealType, returnTo },
                 })
               }
             >
@@ -366,7 +390,7 @@ function ScanErrorScreen({
               }
               onClick={() =>
                 navigate("/customer/food-scanner/manual", {
-                  state: { mealType },
+                  state: { mealType, returnTo },
                 })
               }
             >

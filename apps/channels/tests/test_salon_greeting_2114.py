@@ -220,7 +220,8 @@ def sources(monkeypatch):
     monkeypatch.setattr(salon_greeting, "_masters_available", lambda: state["masters"])
     monkeypatch.setattr(salon_greeting, "_attention", lambda: state["attention"])
     monkeypatch.setattr(salon_greeting, "_readiness_problems", lambda tenant: state["readiness"])
-    monkeypatch.setattr(salon_greeting, "_tenant_now", lambda tenant: NOW)
+    # DRF-2595: «сейчас» — timezone.now() в поясе салона; подменяем часы.
+    monkeypatch.setattr(salon_greeting.timezone, "now", lambda: NOW)
     return state
 
 

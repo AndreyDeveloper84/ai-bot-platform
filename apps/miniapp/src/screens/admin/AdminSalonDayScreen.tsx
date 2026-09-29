@@ -40,6 +40,18 @@ import {
   type SalonDayVisit,
 } from "../../lib/admin-api";
 import { setBackButton } from "../../lib/max-sdk";
+import { REFUSAL_CANON } from "../../lib/refusal-canon";
+
+/** Перенос не прошёл: `detail` — нам в журнал, не на экран (DRF-2577). */
+function logMoveRefusal(outcome: string, detail?: string): void {
+  if (detail) console.warn(`[api-detail] reschedule ${outcome}: ${detail}`);
+}
+
+/** Строка следующего шага под фразой отказа: `hint` сервера с заглавной. */
+function stepLine(hint?: string): string | null {
+  const h = hint?.trim();
+  return h ? h.charAt(0).toUpperCase() + h.slice(1) : null;
+}
 
 /** `YYYY-MM-DD` for a Date, in that Date's own local fields. */
 function toIsoDate(d: Date): string {
@@ -190,8 +202,7 @@ function VisitRow({
       {closable && (
         <button
           type="button"
-          className="btn btn--ghost"
-          style={{ padding: "0 var(--s-2)", fontSize: "0.85em" }}
+          className="ayla-btn ayla-btn--ghost ayla-btn--compact"
           onClick={() => onComplete(visit)}
           aria-label={`Визит состоялся: ${clientLabel(visit)}, ${formatTime(
             visit.start_at,
@@ -204,8 +215,7 @@ function VisitRow({
       {movable && (
         <button
           type="button"
-          className="btn btn--ghost"
-          style={{ padding: "0 var(--s-2)", fontSize: "0.85em" }}
+          className="ayla-btn ayla-btn--ghost ayla-btn--compact"
           onClick={() => onMove(visit, masterId as string)}
           aria-label={`Перенести визит: ${clientLabel(visit)}, ${formatTime(
             visit.start_at,
@@ -218,8 +228,7 @@ function VisitRow({
       {cancellable && (
         <button
           type="button"
-          className="btn btn--ghost"
-          style={{ padding: "0 var(--s-2)", fontSize: "0.85em" }}
+          className="ayla-btn ayla-btn--ghost ayla-btn--compact"
           onClick={() => onCancel(visit)}
           aria-label={`Отменить визит: ${clientLabel(visit)}, ${formatTime(
             visit.start_at,
@@ -257,41 +266,47 @@ function CancelDialog({
   const [code, setCode] = useState<CancelReasonCode>("master_unavailable");
   return (
     <div className="sheet" role="dialog" aria-modal="true" aria-label="Отмена визита">
-      <h3 className="section__title">Отменить визит?</h3>
-      <p>
-        {clientLabel(visit)} · {formatTime(visit.start_at, timeZone)}
-        {visit.service_name ? ` · ${visit.service_name}` : ""}
-      </p>
-      <p className="muted">Клиент получит уведомление об отмене.</p>
+      {/* Содержимое — на панели, как у всех шторок приложения. Без неё
+          `.sheet` (flex, ряд) раскладывал детей в столбцы по нижнему краю
+          на затемнении — с 25.09, когда у общего класса появилось правило
+          (DRF-2448, #2077). DRF-2528. */}
+      <div className="sheet__panel">
+        <h3 className="section__title">Отменить визит?</h3>
+        <p>
+          {clientLabel(visit)} · {formatTime(visit.start_at, timeZone)}
+          {visit.service_name ? ` · ${visit.service_name}` : ""}
+        </p>
+        <p className="muted">Клиент получит уведомление об отмене.</p>
 
-      <fieldset style={{ border: 0, padding: 0, margin: "var(--s-3) 0" }}>
-        <legend className="muted">Причина</legend>
-        {CANCEL_REASONS.map((r) => (
-          <label key={r.code} style={{ display: "block", padding: "var(--s-1) 0" }}>
-            <input
-              type="radio"
-              name="cancel-reason"
-              value={r.code}
-              checked={code === r.code}
-              onChange={() => setCode(r.code)}
-            />{" "}
-            {r.label}
-          </label>
-        ))}
-      </fieldset>
+        <fieldset style={{ border: 0, padding: 0, margin: "var(--s-3) 0" }}>
+          <legend className="muted">Причина</legend>
+          {CANCEL_REASONS.map((r) => (
+            <label key={r.code} style={{ display: "block", padding: "var(--s-1) 0" }}>
+              <input
+                type="radio"
+                name="cancel-reason"
+                value={r.code}
+                checked={code === r.code}
+                onChange={() => setCode(r.code)}
+              />{" "}
+              {r.label}
+            </label>
+          ))}
+        </fieldset>
 
-      <div style={{ display: "flex", gap: "var(--s-2)" }}>
-        <button type="button" className="btn" onClick={onDismiss} disabled={busy}>
-          Не отменять
-        </button>
-        <button
-          type="button"
-          className="btn btn--danger"
-          onClick={() => onConfirm(code)}
-          disabled={busy}
-        >
-          {busy ? "Отменяем…" : "Отменить визит"}
-        </button>
+        <div style={{ display: "flex", gap: "var(--s-2)" }}>
+          <button type="button" className="ayla-btn ayla-btn--secondary" onClick={onDismiss} disabled={busy}>
+            Не отменять
+          </button>
+          <button
+            type="button"
+            className="ayla-btn ayla-btn--danger"
+            onClick={() => onConfirm(code)}
+            disabled={busy}
+          >
+            {busy ? "Отменяем…" : "Отменить визит"}
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -326,45 +341,47 @@ function CompleteDialog({
 }) {
   return (
     <div className="sheet" role="dialog" aria-modal="true" aria-label="Закрытие визита">
-      <h3 className="section__title">Визит состоялся?</h3>
-      <p>
-        {clientLabel(visit)} · {formatTime(visit.start_at, timeZone)}
-        {visit.service_name ? ` · ${visit.service_name}` : ""}
-      </p>
-
-      {version === null ? (
-        <p className="muted">Читаем запись в расписании…</p>
-      ) : (
-        <p className="muted">
-          {version.status === "confirmed"
-            ? "После закрытия визит уйдёт в историю, а клиенту придёт запрос отзыва."
-            : `Расписание считает эту запись «${version.status}». Проверьте, прежде чем закрывать.`}
+      <div className="sheet__panel">
+        <h3 className="section__title">Визит состоялся?</h3>
+        <p>
+          {clientLabel(visit)} · {formatTime(visit.start_at, timeZone)}
+          {visit.service_name ? ` · ${visit.service_name}` : ""}
         </p>
-      )}
 
-      <div style={{ display: "flex", gap: "var(--s-2)" }}>
-        <button type="button" className="btn" onClick={onDismiss} disabled={busy}>
-          Не сейчас
-        </button>
-        <button
-          type="button"
-          className="btn btn--primary"
-          onClick={onConfirm}
-          // Nothing to send until the canonical version has arrived —
-          // and it is never invented locally.
-          disabled={busy || version === null}
-        >
-          {busy ? "Закрываем…" : "Да, состоялся"}
-        </button>
-        <button
-          type="button"
-          className="btn"
-          onClick={onNoShow}
-          // The same version travels back: never invented locally.
-          disabled={busy || version === null}
-        >
-          Не пришёл
-        </button>
+        {version === null ? (
+          <p className="muted">Читаем запись в расписании…</p>
+        ) : (
+          <p className="muted">
+            {version.status === "confirmed"
+              ? "После закрытия визит уйдёт в историю, а клиенту придёт запрос отзыва."
+              : `Расписание считает эту запись «${version.status}». Проверьте, прежде чем закрывать.`}
+          </p>
+        )}
+
+        <div style={{ display: "flex", gap: "var(--s-2)" }}>
+          <button type="button" className="ayla-btn ayla-btn--secondary" onClick={onDismiss} disabled={busy}>
+            Не сейчас
+          </button>
+          <button
+            type="button"
+            className="ayla-btn ayla-btn--primary"
+            onClick={onConfirm}
+            // Nothing to send until the canonical version has arrived —
+            // and it is never invented locally.
+            disabled={busy || version === null}
+          >
+            {busy ? "Закрываем…" : "Да, состоялся"}
+          </button>
+          <button
+            type="button"
+            className="ayla-btn ayla-btn--secondary"
+            onClick={onNoShow}
+            // The same version travels back: never invented locally.
+            disabled={busy || version === null}
+          >
+            Не пришёл
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -402,47 +419,64 @@ function MoveDialog({
 }) {
   return (
     <div className="sheet" role="dialog" aria-modal="true" aria-label="Перенос визита">
-      <h3 className="section__title">Перенести визит</h3>
-      <p>
-        {clientLabel(visit)} · сейчас {formatTime(visit.start_at, timeZone)}
-        {visit.service_name ? ` · ${visit.service_name}` : ""}
-      </p>
-      <p className="muted">{formatDayTitle(date)} — свободное время того же мастера</p>
-
-      {slotsState === "loading" && <p className="muted">Спрашиваем расписание…</p>}
-
-      {slotsState === "unavailable" && (
-        <p className="muted">
-          Не смогли спросить расписание. Это не значит, что времени нет —
-          попробуйте ещё раз.
+      <div className="sheet__panel">
+        <h3 className="section__title">Перенести визит</h3>
+        <p>
+          {clientLabel(visit)} · сейчас {formatTime(visit.start_at, timeZone)}
+          {visit.service_name ? ` · ${visit.service_name}` : ""}
         </p>
-      )}
+        <p className="muted">{formatDayTitle(date)} — свободное время того же мастера</p>
 
-      {slotsState === "ready" && slots.length === 0 && (
-        <p className="muted">В этот день у мастера нет свободного времени.</p>
-      )}
+        {slotsState === "loading" && <p className="muted">Спрашиваем расписание…</p>}
 
-      {slotsState === "ready" && slots.length > 0 && (
-        <ul style={{ listStyle: "none", padding: 0, margin: "var(--s-2) 0" }}>
-          {slots.map((slot) => (
-            <li key={slot.time}>
-              <button
-                type="button"
-                className="sheet__item"
-                // Nothing to send until the canonical version arrives.
-                disabled={busy || version === null}
-                onClick={() => onPick(slot)}
-              >
-                {slot.time}
-              </button>
-            </li>
-          ))}
-        </ul>
-      )}
+        {slotsState === "unavailable" && (
+          <p className="muted">
+            Не смогли спросить расписание. Это не значит, что времени нет —
+            попробуйте ещё раз.
+          </p>
+        )}
 
-      <button type="button" className="btn" onClick={onDismiss} disabled={busy}>
-        Не переносить
-      </button>
+        {slotsState === "ready" && slots.length === 0 && (
+          <p className="muted">В этот день у мастера нет свободного времени.</p>
+        )}
+
+        {slotsState === "ready" && slots.length > 0 && (
+          <ul
+            style={{
+              listStyle: "none",
+              padding: 0,
+              margin: "var(--s-2) 0",
+              display: "flex",
+              flexWrap: "wrap",
+              columnGap: "var(--s-2)",
+              // Ряды разводятся НА 12px, а не на 8: у компактной кнопки
+              // видимая высота 32px, а цель нажатия — невидимые 44px
+              // (`.ayla-btn--compact::after`). При зазоре 8px шаг ряда
+              // выходит 40px, и цели соседних рядов перекрываются на 4px —
+              // в выборе времени это промах по чужому слоту. 12 + 32 = 44.
+              rowGap: "var(--s-3)",
+            }}
+          >
+            {slots.map((slot) => (
+              <li key={slot.time}>
+                <button
+                  type="button"
+                  className="ayla-btn ayla-btn--ghost ayla-btn--compact"
+                  // Nothing to send until the canonical version arrives.
+                  disabled={busy || version === null}
+                  onClick={() => onPick(slot)}
+                >
+                  {slot.time}
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+
+        <button type="button" className="ayla-btn ayla-btn--secondary" onClick={onDismiss} disabled={busy}>
+          Не переносить
+        </button>
+      </div>
     </div>
   );
 }
@@ -475,6 +509,9 @@ export function AdminSalonDayScreen({ me }: { me: MeResponse }) {
   >("loading");
   const [moveBusy, setMoveBusy] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
+  // Следующий шаг под отказом переноса («обновите день»). Привязан к тексту
+  // уведомления, к которому пришёл: другое уведомление его не наследует.
+  const [noticeStep, setNoticeStep] = useState<{ for: string; text: string } | null>(null);
 
   useEffect(() => {
     setBackButton(false);
@@ -544,10 +581,10 @@ export function AdminSalonDayScreen({ me }: { me: MeResponse }) {
           );
           break;
         case "blocked":
-          setNotice(res.detail || "Этот визит нельзя закрыть.");
+          setNotice(res.hint || "Этот визит нельзя закрыть.");
           break;
         default:
-          setNotice(res.detail || "Не удалось закрыть визит.");
+          setNotice(res.hint || "Не удалось закрыть визит.");
       }
       if (res.outcome !== "blocked") await load(date);
     } finally {
@@ -578,10 +615,10 @@ export function AdminSalonDayScreen({ me }: { me: MeResponse }) {
           );
           break;
         case "blocked":
-          setNotice(res.detail || "Для этого визита неявку отметить нельзя.");
+          setNotice(res.hint || "Для этого визита неявку отметить нельзя.");
           break;
         default:
-          setNotice(res.detail || "Не удалось отметить неявку.");
+          setNotice(res.hint || "Не удалось отметить неявку.");
       }
       if (res.outcome !== "blocked") await load(date);
     } finally {
@@ -625,6 +662,12 @@ export function AdminSalonDayScreen({ me }: { me: MeResponse }) {
     [date],
   );
 
+  const showMoveRefusal = useCallback((hint?: string) => {
+    const step = stepLine(hint);
+    setNoticeStep(step ? { for: REFUSAL_CANON.visitMove, text: step } : null);
+    setNotice(REFUSAL_CANON.visitMove);
+  }, []);
+
   const pickNewSlot = useCallback(
     async (slot: BookingSlot) => {
       const visit = moving;
@@ -650,7 +693,11 @@ export function AdminSalonDayScreen({ me }: { me: MeResponse }) {
             setNotice(`Визит перенесён на ${slot.time}.`);
             break;
           case "conflict":
-            setNotice(res.detail);
+            // §6-кси п.6 (DRF-2577): фраза отказа — владельца, дословно; под
+            // ней строка следующего шага (`hint`) — это не отказ, а что делать
+            // дальше, как даты под фразой пересечения (п.5).
+            logMoveRefusal(res.outcome, res.detail);
+            showMoveRefusal(res.hint);
             break;
           case "pending":
             setNotice(
@@ -658,17 +705,18 @@ export function AdminSalonDayScreen({ me }: { me: MeResponse }) {
             );
             break;
           case "blocked":
-            setNotice(res.detail || "Этот визит нельзя перенести.");
+            setNotice(res.hint || "Этот визит нельзя перенести.");
             break;
           default:
-            setNotice(res.detail || "Не удалось перенести визит.");
+            logMoveRefusal(res.outcome, res.detail);
+            showMoveRefusal(res.hint);
         }
         if (res.outcome !== "blocked") await load(date);
       } finally {
         setMoveBusy(false);
       }
     },
-    [moving, moveVersion, moveBusy, date, load],
+    [moving, moveVersion, moveBusy, date, load, showMoveRefusal],
   );
 
   const confirmCancel = useCallback(
@@ -698,10 +746,10 @@ export function AdminSalonDayScreen({ me }: { me: MeResponse }) {
             );
             break;
           case "blocked":
-            setNotice(res.detail || "Этот визит нельзя отменить.");
+            setNotice(res.hint || "Этот визит нельзя отменить.");
             break;
           default:
-            setNotice(res.detail || "Не удалось отменить.");
+            setNotice(res.hint || "Не удалось отменить.");
         }
         if (res.outcome !== "blocked") await load(date);
       } finally {
@@ -755,9 +803,8 @@ export function AdminSalonDayScreen({ me }: { me: MeResponse }) {
           {date !== today && (
             <button
               type="button"
-              className="btn-link"
+              className="ayla-btn ayla-btn--ghost ayla-btn--compact"
               onClick={() => setDate(today)}
-              style={{ fontSize: "var(--font-size-100)" }}
             >
               Вернуться к сегодня
             </button>
@@ -865,6 +912,12 @@ export function AdminSalonDayScreen({ me }: { me: MeResponse }) {
           style={{ marginTop: "var(--s-3)", color: "var(--c-text-secondary)" }}
         >
           {notice}
+          {noticeStep && noticeStep.for === notice && (
+            <>
+              <br />
+              {noticeStep.text}
+            </>
+          )}
         </p>
       )}
 

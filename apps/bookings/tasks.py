@@ -52,6 +52,7 @@ from django.utils import timezone
 
 from apps.audit.services import write_audit
 from apps.booking.models import BookingReminder
+from apps.booking.reminder_lookup import appointment_ref
 from apps.channels.max.outbound import MaxAPIError, send_message
 from apps.bookings.keyboards import day_before_keyboard
 
@@ -80,6 +81,12 @@ from apps.bookings.escalation import escalate_stale_reminders  # noqa: F401
 
 # Re-export R3's post-visit follow-up task — same autodiscover rationale.
 from apps.bookings.followups import send_post_visit_followups  # noqa: F401
+
+# DRF-2346 — подметание просроченных окон возврата живёт у владельца строки
+# (``apps/booking/``): читать ``BookingRequest`` из соседнего приложения
+# запрещает сторож границ G9, и запрещает по делу. Здесь только ввоз, чтобы
+# имя задачи нашлось там же, где остальные беты записи.
+from apps.booking.expired_cancels import commit_expired_cancels  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -170,6 +177,36 @@ def _target_status(kind: str) -> str:
     return BookingReminder.Status.SENT
 
 
+def _handoff_silenced(row: Any) -> bool:
+    """Занят ли этим человеком живой оператор прямо сейчас (DRF-2342).
+
+    Жалоба владельца: администратор переносит запись руками, а боту в этот
+    же момент наступает T-2, и человек получает напоминание о СТАРОМ
+    времени — о том самом, что сейчас меняют.
+
+    Отдельная проверка, а не расширение соседних, потому что обе соседние
+    про другое и обе легко принять за эту:
+
+    * :func:`_recheck_booking_state` откладывает ход при
+      ``CANCEL_REQUESTED`` / ``RESCHEDULE_REQUESTED`` — окно отмены в
+      секунды; пока оператор работает руками, статус остаётся
+      ``CONFIRMED``;
+    * :func:`_reminders_muted` — личный выключатель человека, он и должен
+      действовать независимо от того, занят ли им оператор.
+
+    **Срок здесь пока не стоит, и это не забывчивость.** Задача
+    администратора сама не закрывается (DRF-2345), то есть «молчать, пока
+    открыта» без срока — неограниченная тишина. Каким он будет (потолок
+    ожидания, отсечка по SLA подхвата, отправка с оговоркой), решает
+    владелец; когда решит, условие встанет ЗДЕСЬ, в одном месте, а не
+    рассыплется по ходу отправки.
+    """
+    from apps.orchestrator.handoff import person_handoff_muted
+
+    bot_user = row.bot_user
+    return person_handoff_muted(channel=bot_user.channel, channel_user_id=bot_user.channel_user_id)
+
+
 def _reminders_muted(row: Any) -> bool:
     """Has the person switched booking reminders off?
 
@@ -186,6 +223,84 @@ def _reminders_muted(row: Any) -> bool:
         .first()
     )
     return value is False
+
+
+#: Окно, за которое страница называет число недоставленных напоминаний.
+FAILED_WINDOW_DAYS = 7
+
+_FAILED_PAGE_CLAIM_PREFIX = "bookings.reminder.failed"
+#: Двое суток: час зашит в ключ, TTL лишь переживает опоздавший прогон.
+_FAILED_PAGE_CLAIM_TTL_SECONDS = 48 * 60 * 60
+
+
+def _page_failed_reminders(*, failed_this_run: int, now: Any) -> None:
+    """Недоставленное напоминание — число операторам, а не находка замера (DRF-2584).
+
+    ``FAILED`` — не норма: человек не узнал о своём визите. До этого листа
+    число жило только в строке ``bookings.dispatch.summary`` и в аудите, и
+    двенадцать недоставленных нашлись разовым замером через полтора месяца.
+
+    Страница — тем же рельсом, что прочие операционные (``alerting.page``,
+    MAX): два числа и где искать причину. Числа — СТРОК, а не событий: одна
+    строка может упасть несколько раз, потому что фабрика
+    (``reminders_factory``) при повторном подтверждении или переносе
+    перевзводит её в ``PENDING``. Поэтому второе число — строки, которые в
+    ``failed`` СЕЙЧАС, со сроком отправки за :data:`FAILED_WINDOW_DAYS` суток, а
+    не счёт событий ``bookings.reminder.send_failed``. Людей в тексте нет по
+    построению: ни имён, ни id. Первое число может быть больше второго: после
+    простоя прогон отправляет и строки со сроком старше окна.
+
+    Одна страница на UTC-час — прогоны идут каждые 15 минут, и затяжной сбой
+    канала давал бы четыре страницы в час. Час занимается ЗДЕСЬ, своим ключом
+    кэша на :data:`_FAILED_PAGE_CLAIM_TTL_SECONDS`: окно дедупа самого
+    ``alerting.page`` — ``ALERTS_DEDUP_TTL_SECONDS`` (300 с), и час в его ключе
+    лишь выбирает корзину, а через пять минут страница прозвучала бы снова
+    (тот же предел назван в ``scan_budget_alert``; образец —
+    ``outbox_dead_alert._claim``). Недоставленная страница час возвращает —
+    следующий прогон попробует снова. Потеря кэша — молчание, а не шквал.
+
+    Лучшая попытка: сбой страницы не ломает прогон — напоминания уже
+    обработаны, и их статусы записаны.
+    """
+    try:
+        from datetime import timedelta
+
+        from django.core.cache import cache
+
+        from apps.observability.alerting import page
+
+        claim = f"{_FAILED_PAGE_CLAIM_PREFIX}:{now:%Y-%m-%dT%H}"
+        try:
+            claimed = bool(cache.add(claim, 1, timeout=_FAILED_PAGE_CLAIM_TTL_SECONDS))
+        except Exception:  # noqa: BLE001 — без кэша молчим, а не шлём каждый прогон
+            logger.warning("bookings.dispatch.failed_page_dedup_unavailable")
+            return
+        if not claimed:
+            return
+
+        # Окно по ``scheduled_at``: отказ случается при отправке, то есть сразу
+        # после срока. ``updated_at`` у строки нет, а ``.update()`` его и не
+        # трогал бы.
+        window = BookingReminder.all_tenants.filter(
+            status=BookingReminder.Status.FAILED,
+            scheduled_at__gte=now - timedelta(days=FAILED_WINDOW_DAYS),
+        ).count()
+        delivered = page(
+            "warning",
+            "Напоминания о визите не доставлены",
+            (
+                f"за этот прогон не ушло: {failed_this_run}; "
+                f"напоминаний в статусе failed сейчас, со сроком за "
+                f"{FAILED_WINDOW_DAYS} суток: {window}. "
+                "Причина по каждому — аудит bookings.reminder.send_failed "
+                "(status_code / exception_type). Диспетчер их не переотправляет."
+            ),
+            dedup_key=claim,
+        )
+        if not delivered:
+            cache.delete(claim)
+    except Exception:  # noqa: BLE001 — страница не должна ронять прогон
+        logger.exception("bookings.dispatch.failed_page_error")
 
 
 @shared_task(name="bookings.send_due_reminders")
@@ -287,6 +402,7 @@ def send_due_reminders() -> dict[str, int]:
                     payload={
                         "kind": row.kind,
                         "yclients_record_id": row.yclients_record_id,
+                        "appointment_ref": appointment_ref(row),
                         "reason": reason,
                         "booking_request_id": (
                             str(row.booking_request_id) if row.booking_request_id else None
@@ -312,6 +428,17 @@ def send_due_reminders() -> dict[str, int]:
         # same either way. Service class (DRF-1833 registry): no consent
         # gate here — this IS the person's own booking — but their own
         # «no» is honoured.
+        # DRF-2342 — человеком занят живой оператор: напоминание ЖДЁТ, а не
+        # сгорает. Строка остаётся PENDING, следующий тик проверит заново:
+        # задача закроется — напоминание уйдёт, если визит ещё впереди.
+        # Стоит ПЕРЕД личным выключателем намеренно: выключатель меняет
+        # статус безвозвратно, и проверив его первым, мы сожгли бы строку,
+        # которую всего лишь надо придержать.
+        if _handoff_silenced(row):
+            deferred += 1
+            logger.info("bookings.dispatch.deferred_handoff pk=%s kind=%s", row.pk, row.kind)
+            continue
+
         if _reminders_muted(row):
             rowcount = BookingReminder.all_tenants.filter(
                 pk=row.pk,
@@ -329,6 +456,7 @@ def send_due_reminders() -> dict[str, int]:
                 payload={
                     "kind": row.kind,
                     "yclients_record_id": row.yclients_record_id,
+                    "appointment_ref": appointment_ref(row),
                     "reason": "notify_reminders_off",
                 },
             )
@@ -382,6 +510,7 @@ def send_due_reminders() -> dict[str, int]:
                 payload={
                     "kind": row.kind,
                     "yclients_record_id": row.yclients_record_id,
+                    "appointment_ref": appointment_ref(row),
                     "status_code": exc.status_code,
                 },
             )
@@ -404,6 +533,7 @@ def send_due_reminders() -> dict[str, int]:
                 payload={
                     "kind": row.kind,
                     "yclients_record_id": row.yclients_record_id,
+                    "appointment_ref": appointment_ref(row),
                     "exception_type": type(exc).__name__,
                 },
             )
@@ -419,6 +549,7 @@ def send_due_reminders() -> dict[str, int]:
             payload={
                 "kind": row.kind,
                 "yclients_record_id": row.yclients_record_id,
+                "appointment_ref": appointment_ref(row),
             },
         )
         sent += 1
@@ -433,6 +564,8 @@ def send_due_reminders() -> dict[str, int]:
             deferred,
             muted,
         )
+    if failed:
+        _page_failed_reminders(failed_this_run=failed, now=now)
     return {
         "sent": sent,
         "failed": failed,
@@ -461,14 +594,31 @@ COMPLETED_BATCH_LIMIT = 200
 
 @shared_task(name="bookings.detect_completed_bookings")
 def detect_completed_bookings() -> dict[str, int]:
-    """Scan CONFIRMED bookings whose visit time has passed; emit
-    ``booking.completed`` and stamp ``completed_at`` exactly once each.
+    """Закрыть визиты, чьё время прошло **и** чей канон не возражает.
+
+    Штамп ``completed_at`` + ``completed_by=system`` и событие
+    ``booking.completed`` — ровно по одному разу на строку.
+
+    ### Чем доказывается «состоялся» (DRF-2454)
+
+    Раньше единственным условием был ``status == CONFIRMED``. Это **не
+    состояние визита**: ни одно входящее событие эту колонку не двигает, а
+    отмены канона доезжают до зеркала ``RemoteBookingProxy``. Стенд 24.09: три
+    отменённых визита и один неоплаченный были объявлены состоявшимися.
+
+    Теперь перед штампом спрашивается зеркало
+    (:func:`apps.bookings.completion_evidence.mirror_evidence`), и **отсутствие
+    свидетельства — отказ**: не поставить штамп обратимо, поставить ложный —
+    нет. Цена этого выбора названа там же: строки без зеркала (устаревший путь
+    YClients) автоматически больше не закрываются.
 
     Returns:
-      Counters: ``{scanned, emitted, raced}``.
+      Counters: ``{scanned, emitted, raced, emit_failed, skipped}``.
       - ``scanned``: rows matched the time predicate
       - ``emitted``: rows where this worker won the CAS and emitted
       - ``raced``: rows another worker had already stamped (lost the CAS)
+      - ``emit_failed``: emit raised, stamp rolled back for the next tick
+      - ``skipped``: свидетельства нет либо оно против; причины — в логе сводки
 
     ### Race-safety
 
@@ -505,6 +655,7 @@ def detect_completed_bookings() -> dict[str, int]:
     """
 
     from apps.booking.models import BookingRequest
+    from apps.bookings.completion_evidence import mirror_evidence
     from apps.eventbus import services as eventbus_services
 
     now = timezone.now()
@@ -523,7 +674,10 @@ def detect_completed_bookings() -> dict[str, int]:
         ).order_by("visit_at")[:COMPLETED_BATCH_LIMIT]
     )
 
-    counters = {"scanned": 0, "emitted": 0, "raced": 0, "emit_failed": 0}
+    counters = {"scanned": 0, "emitted": 0, "raced": 0, "emit_failed": 0, "skipped": 0}
+    # Причины отказов — по имени: «не штамповали» без причины неотличимо от
+    # «нечего было штамповать», и ровно это скрывало дефект DRF-2454.
+    skipped_by_reason: dict[str, int] = {}
 
     for booking in candidates:
         duration = booking.duration_min or default_duration_min
@@ -540,6 +694,22 @@ def detect_completed_bookings() -> dict[str, int]:
             continue
 
         counters["scanned"] += 1
+
+        # DRF-2454 — штамп только по ПОЛОЖИТЕЛЬНОМУ свидетельству канона.
+        #
+        # ``status == CONFIRMED`` в запросе выше — не состояние визита: ни одно
+        # входящее событие эту колонку не двигает (``followups`` говорит это
+        # прямо), а отмены канона доезжают до зеркала. На стенде из-за этого три
+        # ОТМЕНЁННЫХ визита и один НЕОПЛАЧЕННЫЙ оказались «состоявшимися».
+        #
+        # Несимметричность цены: не поставить штамп — обратимо (следующий тик),
+        # поставить ложный — необратимо после разбора очереди. Поэтому
+        # отсутствие свидетельства здесь ОТКАЗ.
+        may_stamp, reason = mirror_evidence(booking)
+        if not may_stamp:
+            counters["skipped"] += 1
+            skipped_by_reason[reason] = skipped_by_reason.get(reason, 0) + 1
+            continue
 
         # CAS: win the right to emit. WHERE completed_at IS NULL guards
         # against two workers stamping the same row twice.
@@ -594,12 +764,17 @@ def detect_completed_bookings() -> dict[str, int]:
             # emit_failed} where scanned == emitted + raced + emit_failed.
             counters["emit_failed"] += 1
 
-    if counters["emitted"] or counters["raced"] or counters["emit_failed"]:
+    if counters["emitted"] or counters["raced"] or counters["emit_failed"] or counters["skipped"]:
         logger.info(
-            "bookings.detect_completed.summary scanned=%d emitted=%d raced=%d emit_failed=%d",
+            "bookings.detect_completed.summary scanned=%d emitted=%d raced=%d "
+            "emit_failed=%d skipped=%d reasons=%s",
             counters["scanned"],
             counters["emitted"],
             counters["raced"],
             counters["emit_failed"],
+            counters["skipped"],
+            # Каждый отказ назван: «пропустили N» без причин — то же молчание,
+            # из которого вырос этот лист.
+            ",".join(f"{k}={v}" for k, v in sorted(skipped_by_reason.items())) or "-",
         )
     return counters

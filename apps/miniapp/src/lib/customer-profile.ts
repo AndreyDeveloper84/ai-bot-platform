@@ -447,7 +447,6 @@ const PROACTIVE_STATE: Record<StubVariant, ProactivePrefsResponse> = {
 
 function devWarn(msg: string): void {
   if (import.meta.env.DEV && typeof console !== "undefined") {
-    // eslint-disable-next-line no-console
     console.warn(`[customer-profile stub] ${msg}`);
   }
 }

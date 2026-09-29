@@ -65,6 +65,7 @@ from apps.events.vocabulary import (
     MASTER_PROFILE_UPDATED_BY_ADMIN,
 )
 from apps.identity.models import BotUser
+from apps.miniapp_api.master_media import master_photo_path
 
 logger = logging.getLogger(__name__)
 
@@ -212,7 +213,7 @@ def _row_to_list_item(master: CatalogMaster, services_count: int) -> dict[str, A
         "id": str(master.id),
         "name": master.name,
         "specialization": master.specialization,
-        "photo_url": master.photo_url,
+        "photo_url": master_photo_path(master.id, master.photo_url),
         "is_active": master.is_active,
         "invite_status": master.invite_status,
         "last_seen_at": bot_user_last_seen,
@@ -274,7 +275,7 @@ def _detail_payload(master: CatalogMaster, *, include_audit: bool = False) -> di
         "is_active": master.is_active,
         "invite_status": master.invite_status,
         "mode": master.mode,
-        "photo_url": master.photo_url,
+        "photo_url": master_photo_path(master.id, master.photo_url),
         "max_handle": master.max_handle,
         "yclients_staff_id": master.yclients_staff_id,
         "invited_at": master.invited_at.isoformat() if master.invited_at else None,
@@ -715,7 +716,7 @@ def master_photo_upload(request: HttpRequest, master_id: str) -> HttpResponse:
             actor_id=bot_user.id,
         )
 
-    return JsonResponse({"photo_url": photo_url})
+    return JsonResponse({"photo_url": master_photo_path(master.id, photo_url)})
 
 
 # --- GET /api/v1/admin/masters/<master_id>/audit/ ------------------------

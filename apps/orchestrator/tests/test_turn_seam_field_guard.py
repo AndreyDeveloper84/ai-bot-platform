@@ -104,6 +104,13 @@ SKILL_RESULT_PROBES: dict[str, Any] = {
     "should_close_conversation": True,
     "meta": {"probe": "meta"},
     "confidence": 0.37,
+    # DRF-2341 — признак «утверждаю выполненное» и подтверждение от источника.
+    "claims_done": True,
+    "claims_done_evidence": "probe.source:2xx",
+    # DRF-2435 — признак «это собственные данные человека». Читает его
+    # исходящий гейт, то есть ЗА швом: без переноса починка выгрузки не
+    # доезжала бы до человека, а узлы уровня функции этого не показывают.
+    "subject_own_data": True,
 }
 
 

@@ -44,9 +44,10 @@ import {
   FOOD_DIARY_DISCLOSURE_VERSION,
 } from "../lib/food-diary-disclosure";
 import { Skeleton } from "../components/Skeleton";
+import { MANUAL_ROUTE } from "./FoodScannerManualScreen";
 import { StateError } from "../components/StateError";
 import { useScreenBack } from "../hooks/useScreenBack";
-import { backTo } from "../lib/screen-back";
+import { backToOrigin } from "../lib/screen-back";
 
 const MEAL_TYPES: ReadonlyArray<MealType> = [
   "breakfast",
@@ -64,11 +65,13 @@ interface RouterIn {
 export function FoodScannerCaptureScreen() {
   const navigate = useNavigate();
 
-  // Возврат (DRF-1493) — на дом. Адрес тот же, что стоял здесь
-  // раньше; теперь он объявлен и заводит аппаратную кнопку MAX.
-  const onBack = useScreenBack(backTo("/customer/main"));
   const location = useLocation();
   const incoming = (location.state ?? {}) as RouterIn;
+  // Возврат (DRF-1493) — туда, откуда пришли. Съёмку открывают и с
+  // Главной, и из «Дневника» (`FoodScannerDiaryScreen` давно передаёт
+  // `returnTo`), и до DRF-2349 оба входа уводило на Главную. Нет
+  // происхождения — прежний адрес, прежнее поведение.
+  const onBack = useScreenBack(backToOrigin(location.state, "/customer/main"));
   // Согласие спрашивается у СЕРВЕРА, а не у браузера (DRF-1564).
   //
   // `null` — «согласия нет», и экран показывает гейт. Пока ответ не
@@ -205,11 +208,14 @@ export function FoodScannerCaptureScreen() {
         return;
       }
       // Photo flows to F2 via router state (no global store needed).
+      // DRF-2349 — происхождение едет вместе с фото: выход из потока
+      // должен вернуть туда же, откуда в него вошли, а шагов в потоке
+      // три, и адрес теряется на первом же из них.
       navigate("/customer/food-scanner/processing", {
-        state: { photo: cleanFile, mealType },
+        state: { photo: cleanFile, mealType, returnTo: incoming.returnTo },
       });
     },
-    [navigate, mealType, processing],
+    [navigate, mealType, processing, incoming.returnTo],
   );
 
   // ── render branches ────────────────────────────────────────────────
@@ -373,6 +379,18 @@ export function FoodScannerCaptureScreen() {
             {error}
           </div>
         )}
+
+        {/* DRF-2289 — фото не единственный путь: вход с Главной ведёт
+            сюда, а ввод текстом — эта ссылка. Подпись — черновик для
+            владельца. */}
+        <button
+          type="button"
+          className="food-scanner-screen__text-link"
+          disabled={processing}
+          onClick={() => navigate(MANUAL_ROUTE)}
+        >
+          Записать текстом
+        </button>
 
         <p className="food-scanner-screen__privacy">
           Фото нужно только чтобы узнать блюдо — удаляю сразу.

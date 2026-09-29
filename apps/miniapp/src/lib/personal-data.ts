@@ -23,15 +23,14 @@
  * retained per legal retention and anonymised post-pilot — the delete
  * sheet copy says exactly that, nothing more.
  *
- * Auth mirrors `api.ts` (`MaxInitData` header + dev bypass) — duplicated
- * here rather than exported from `api.ts` because the export endpoint
- * answers a Blob, not JSON, and `api.ts::request` is JSON-typed.
+ * Auth: the same envelope as every client, from `auth-headers.ts`
+ * (DRF-2549). The request itself stays a local `fetch` rather than
+ * `api.ts::request` because the export endpoint answers a Blob, not JSON,
+ * and `api.ts::request` is JSON-typed.
  */
 
+import { applyIdentityHeaders } from "./auth-headers";
 import { ApiError } from "./api";
-import { applyDevBypassHeaders } from "./dev-bypass";
-import { applySalonChoiceHeader } from "./salon-choice";
-import { getInitData } from "./max-sdk";
 
 const API_BASE = "/api/v1/customer";
 const EXPORT_PATH = "/me/personal-data/export/";
@@ -86,14 +85,17 @@ export class PersonalDataPartialDeleteError extends Error {
 interface ErrorBody {
   error: string;
   detail: string;
+  /**
+   * Структурные подробности отказа (DRF-1708). Сегодня выгрузка C5.1 их не
+   * присылает — поле объявлено, чтобы клиент перестал быть местом, где оно
+   * теряется молча, когда сервер начнёт (DRF-2439).
+   */
+  details?: Record<string, unknown>;
 }
 
 function buildAuthHeaders(): Headers {
   const headers = new Headers();
-  const initData = getInitData();
-  if (initData) headers.set("Authorization", `MaxInitData ${initData}`);
-  applyDevBypassHeaders(headers);
-  applySalonChoiceHeader(headers);
+  applyIdentityHeaders(headers);
   return headers;
 }
 
@@ -104,7 +106,7 @@ async function throwApiError(res: Response): Promise<never> {
   } catch {
     /* non-JSON 5xx */
   }
-  throw new ApiError(res.status, body.error, body.detail);
+  throw new ApiError(res.status, body.error, body.detail, body.details);
 }
 
 /** C5.1 — fetch the aggregated personal-data export as a Blob. */

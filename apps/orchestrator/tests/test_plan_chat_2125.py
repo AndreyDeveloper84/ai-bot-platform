@@ -209,11 +209,16 @@ class TestProposal:
 
 
 class TestPlanCard:
+    """DRF-2283 / §77 (24.09): над списком действий — слова человека, и
+    ничего нашего. Здесь слов человека нет (цель выбрана чипом), поэтому
+    стоит курируемая подпись — без ярлыка «Твоя цель:» и без точки,
+    которых владелец не писал."""
+
     def test_plan_card_with_three_action_buttons(self) -> None:
         result = _turn("мой план", _fake(ctx=WITH_PLAN))
         assert result is not None and result.meta["reply_kind"] == "plan_lite_card"
         assert result.reply_text == (
-            "Твоя цель: Расслабиться.\nНа этой неделе: записаться на услугу —, дневник 1 из 3."
+            "Расслабиться\nНа этой неделе: записаться на услугу —, дневник 1 из 3."
         )
         assert _labels(result) == ["Записаться", "В дневник", "Изменить план"]
         book, diary, edit = _buttons(result)
@@ -226,7 +231,7 @@ class TestPlanCard:
             "мой план", _fake(ctx=WellnessContext(has_plan=False, plan_lite=PLAN_BIWEEKLY))
         )
         assert result.reply_text == (
-            "Твоя цель: Расслабиться.\n"
+            "Расслабиться\n"
             "На этой неделе: вода 2 из 6 (сегодня).\n"
             "Эти 2 недели: записаться на услугу —."
         )
@@ -234,7 +239,7 @@ class TestPlanCard:
     def test_unknown_goal_key_falls_back_to_the_key(self, monkeypatch) -> None:
         monkeypatch.setattr("apps.marketplace.discovery._known_goals", lambda: {})
         result = _turn("мой план", _fake(ctx=WITH_PLAN))
-        assert result.reply_text.startswith("Твоя цель: relax.")
+        assert result.reply_text.startswith("relax\n")
 
 
 # ─── p3: подтверждение кнопкой ──────────────────────────────────────────────
@@ -254,7 +259,7 @@ class TestAccept:
             ],
             "template_version": 3,
         }
-        assert result.reply_text.startswith("План составлен.\nТвоя цель: Расслабиться.")
+        assert result.reply_text.startswith("План составлен.\nРасслабиться\n")
         assert _labels(result) == ["Записаться", "В дневник", "Изменить план"]
 
     def test_changed_template_version_sends_a_fresh_card_and_creates_nothing(self) -> None:
@@ -269,7 +274,7 @@ class TestAccept:
         fake = _fake(ctx=WITH_PLAN, created=PlanLiteAlreadyActiveError("409"))
         result = _turn("cb:plan:accept:3", fake)
         assert result is not None and result.meta["reply_kind"] == "plan_lite_card"
-        assert result.reply_text.startswith("План уже есть — вот он.\nТвоя цель")
+        assert result.reply_text.startswith("План уже есть — вот он.\nРасслабиться")
 
     def test_already_active_without_a_document_does_not_promise_a_card(self) -> None:
         fake = _fake(ctx=NO_PLAN, created=PlanLiteAlreadyActiveError("409"))
@@ -326,42 +331,47 @@ class TestConfirmOnlyByButton:
 
 
 class TestLater:
-    def test_later_marks_declined_at_for_a4_and_my_plan_still_answers(self) -> None:
+    def test_later_answers_and_writes_no_marker(self) -> None:
+        """DRF-2356 — «Не сейчас» отвечает человеку и ничего не копит.
+
+        Прежде здесь писался `plan_proposal_declined_at` для недельного
+        возврата A4 (DRF-2126), которого нет, и читателей вне тестов у него
+        не было. Пометка, которую никто не читает, выглядит работающим
+        механизмом — поэтому её не стало. Вернётся вместе с правилом
+        возврата, которое называет владелец.
+        """
         conversation = SimpleNamespace(id="c", skill_state={})
         result = _turn("cb:plan:later", _fake(), conversation=conversation)
         assert result.reply_text == PLAN_LITE_COPY.later
         assert result.meta["reply_kind"] == "plan_lite_later"
-        assert card.declined_at(conversation) is not None
-        assert conversation.skill_state["plan_lite"]["plan_proposal_declined_at"]
+        assert conversation.skill_state == {}
         again = _turn("мой план", _fake(), conversation=conversation)
         assert again.meta["reply_kind"] == "plan_lite_proposal"  # явный запрос — показываем
 
-    def test_later_persists_the_marker_on_a_real_conversation_outside_a_tenant_scope(self) -> None:
-        """Глобальный путь идёт при current_tenant()=None; write_skill_state требует
-        область — маркер обязан долететь до строки, не до DEBUG-лога."""
+    def test_later_leaves_an_existing_marker_alone(self) -> None:
+        """Уже записанные значения остаются: не писать новые и стирать
+        старые — разные решения, и второе не наше."""
         from apps.conversations.models import Conversation
         from apps.identity.models import BotUser
         from apps.identity.services.global_tenant import get_global_bot_tenant
-        from apps.tenancy.context import current_tenant
 
         tenant = get_global_bot_tenant()
         bot_user = BotUser.all_tenants.create(
-            tenant=tenant, channel="max", channel_user_id="2125-l", chat_id="2125-l"
+            tenant=tenant, channel="max", channel_user_id="2356-l", chat_id="2356-l"
         )
         conversation = Conversation.all_tenants.create(
-            tenant=tenant, bot_user=bot_user, skill_state={"plan_lite": {"other": 1}}
+            tenant=tenant,
+            bot_user=bot_user,
+            skill_state={"plan_lite": {"plan_proposal_declined_at": "2026-09-01T10:00:00+00:00"}},
         )
-        assert current_tenant() is None
-        _turn("cb:plan:later", _fake(), conversation=conversation)
-        conversation.refresh_from_db()
-        bucket = conversation.skill_state["plan_lite"]
-        assert bucket["plan_proposal_declined_at"]
-        assert bucket["other"] == 1  # read-merge-write: соседние ключи ведра целы
-        assert card.declined_at(conversation) is not None
 
-    def test_declined_at_reads_none_without_a_marker(self) -> None:
-        assert card.declined_at(SimpleNamespace(skill_state={})) is None
-        assert card.declined_at(SimpleNamespace(skill_state={"plan_lite": {"x": 1}})) is None
+        _turn("cb:plan:later", _fake(), conversation=conversation)
+
+        conversation.refresh_from_db()
+        assert (
+            conversation.skill_state["plan_lite"]["plan_proposal_declined_at"]
+            == "2026-09-01T10:00:00+00:00"
+        )
 
 
 # ─── p6: «Записаться» — подбор по ключу цели ─────────────────────────────────

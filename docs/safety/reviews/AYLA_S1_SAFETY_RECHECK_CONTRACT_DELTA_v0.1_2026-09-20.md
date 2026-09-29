@@ -2,7 +2,7 @@
 
 **Статус:** `WORKING DOCUMENT` — engineering rendering зарегистрированного owner-контракта; не immutable, не physician sign-off. Источник истины — действующий immutable record **r4** `docs/safety/reviews/OWNER_RULINGS_SAFETY_RECHECK_CONTRACT_2026-09-20_r4.md` (RECORD SHA-256 `2245924e6f551cb5dd84a4e67f50093a1ec2a64646408881449281f1d64a7ef0`; дословный ответ владельца «согласен, утверждаем», 20.09.2026; полный утверждённый текст решений 1–5 без обрывов; r3 — `SUPERSEDED BY r4 — provenance-only correction`; r1 и r2 — superseded transmission drafts), реестр [OD-BOT §166] / [§167]. При расхождении — record и реестр.
 **Статус содержимого этого документа:** `ENGINEERING ELABORATION OF OWNER RULING` / `DERIVED CONTRACT SPECIFICATION`. Дословное слово владельца — только в r4; всё, что здесь детальнее утверждённого блока (именованная формула `eligible_basis` / `mandatory_guards`, перечни фраз, расширенная state machine Пакета B, `IMPLEMENTATION CARRIER: OPEN`, acceptance criteria, полный перечень clinical blockers), — инженерное расширение и не цитируется как owner wording.
-**Версия:** v0.1.4 (2026-09-21) — §10 clinical applicability 21.09 ([OD-BOT §168–§169]; record `OWNER_RULINGS_S1_RECHECK_CLINICAL_BOUNDARIES_2026-09-21.md`); §1–§9 без изменений (предыдущая версия v0.1.3 — sha256 `820e248432c163eb4bd4b9975204c59f7c3a97959086b2faf338b57b4f67a3dd`). v0.1.3 (2026-09-21) — источник переведён на record r4 (provenance-only correction r3); технический текст без изменений (предыдущая версия v0.1.2 — sha256 `45f69d3180033322b7c24438eb0848ae9ac9bee09f5e67670761e717934d4abe`). v0.1.2 (2026-09-20) — источник переведён на record r3 (canonical owner wording), содержимое помечено как engineering elaboration; технический текст без изменений (предыдущая версия v0.1.1 — sha256 `671ccb7a0fd3779237716c319776ac48dac3979f9029df60f8f54fae4179676e`). v0.1.1 (2026-09-20) — источник переведён на record r2, runtime baseline PR #1893 squash `40b61cb0`; содержательно без изменений (предыдущая версия v0.1 — sha256 `afc973ce458ee11a10fc9c0dca43a1ce7d47f26f627f8f4dd679b911f3cefa67`). **Пакет:** A (docs-first). **Runtime:** не меняется; `IMPLEMENTATION CARRIER: OPEN`.
+**Версия:** v0.1.5 (2026-09-21) — §11 G7 question contract 21.09 ([OD-BOT §170–§171]; record `OWNER_RULINGS_S1_G7_QUESTION_CONTRACT_2026-09-21.md`); §1–§10 без изменений, кроме отметки о снятом owner blocker G7 в §10 (предыдущая версия v0.1.4 — sha256 `00d25b65270b80d38706b5d2b8e1288a20040f665d8a2c38ff8b2945f2d10815`). v0.1.4 (2026-09-21) — §10 clinical applicability 21.09 ([OD-BOT §168–§169]; record `OWNER_RULINGS_S1_RECHECK_CLINICAL_BOUNDARIES_2026-09-21.md`); §1–§9 без изменений (предыдущая версия v0.1.3 — sha256 `820e248432c163eb4bd4b9975204c59f7c3a97959086b2faf338b57b4f67a3dd`). v0.1.3 (2026-09-21) — источник переведён на record r4 (provenance-only correction r3); технический текст без изменений (предыдущая версия v0.1.2 — sha256 `45f69d3180033322b7c24438eb0848ae9ac9bee09f5e67670761e717934d4abe`). v0.1.2 (2026-09-20) — источник переведён на record r3 (canonical owner wording), содержимое помечено как engineering elaboration; технический текст без изменений (предыдущая версия v0.1.1 — sha256 `671ccb7a0fd3779237716c319776ac48dac3979f9029df60f8f54fae4179676e`). v0.1.1 (2026-09-20) — источник переведён на record r2, runtime baseline PR #1893 squash `40b61cb0`; содержательно без изменений (предыдущая версия v0.1 — sha256 `afc973ce458ee11a10fc9c0dca43a1ce7d47f26f627f8f4dd679b911f3cefa67`). **Пакет:** A (docs-first). **Runtime:** не меняется; `IMPLEMENTATION CARRIER: OPEN`.
 **Не является:** `CLINICAL APPROVED`, `PHYSICIAN PASS`, `SAFE FOR PILOT`; разрешением включить live-clearance.
 
 ## 1. Что регистрируется (решения 1–5 → контракт)
@@ -92,7 +92,7 @@ policy_refs                  : ["OD-BOT §156", "OD-BOT §162", "OD-BOT §166"]
 - immutable records r1 и r2 (superseded transmission drafts), r3 (`SUPERSEDED BY r4 — provenance-only correction`) и действующий record r4 `OWNER_RULINGS_SAFETY_RECHECK_CONTRACT_2026-09-20_r4.md` (canonical owner wording, полный утверждённый текст решений 1–5; единственный источник истины);
 - Safety Matrix v0.12-reviewfix6: §6.1 «Owner amendments 20.09 — recheck contract», §14.2 OD-F0C3-09, §16;
 - Review Pack v0.1-reviewfix6: §7D physician queue (CQ-CTX-01…03 переформулированы под контракт + кнопка / recheck-вопросы / «ни один результат не звучит как разрешение»);
-- fixtures v0.2.6 (sha256 `ae9ea59e9f8e619d3059b4c527b43e53962a1ca4b22403ddf59f11efca9b05fc`; 24 contract fixtures добавлены в v0.2.2, 32 `T-S1-RCB-*` — в v0.2.6): `T-S1-REC-ALLOW-01…08`, `T-S1-REC-DENY-01…16`; индекс и counts;
+- fixtures v0.2.7 (sha256 `1340f15aa4c116a37e7144c6b9003e3d043e39b06d5bed0207b51e20d9e0f998`; 25 `T-S1-G7Q-*` — в v0.2.7; ранее: 24 contract fixtures добавлены в v0.2.2, 32 `T-S1-RCB-*` — в v0.2.6): `T-S1-REC-ALLOW-01…08`, `T-S1-REC-DENY-01…16`; индекс и counts;
 - этот delta-документ; README индекс.
 - Runtime, тесты, code fixtures — не тронуты.
 
@@ -153,6 +153,38 @@ Baseline: PR #1893 squash-merged в `dev` как `40b61cb02bcdad98b21987dd10e010
 
 Пять элементов реш. 3 (все обязательны; любой недостающий → `UNKNOWN`): attribution · actuality · temporality · question-contract exclusion · no new S1. Односложные / generic ответы («нет», «уже прошло», «стало лучше», «сейчас нормально», «всё хорошо») не устанавливают ни одного элемента.
 
-Blockers (Пакет A их не закрывает): (1) G7 question contract и group-specific матрица recent-resolved G7 не зарегистрированы — до их регистрации для G7 допустима только `EVIDENCE_CORRECTION` (реш. 2 G7). (2) Вопрос G5 [§164] не выясняет глубину / размер раны, инородное тело и нарушение чувствительности / движения — через зарегистрированные вопросы `SYMPTOM_UPDATE`-clearance для G5 достижим только если пользователь сам сообщает все условия; иначе `UNKNOWN` (реш. 3 запрещает расширять вопрос). (3) Составной вопрос G4 [§164] допускает одиночный ответ «нет», который по реш. 2 G4 не отрицает все части — нужен owner-зарегистрированный способ получить поэлементный ответ; до этого одиночный «нет» → `UNKNOWN`. (4) Независимый врачебный sign-off CQ-CTX-01…03 (+ CQ-CTX-08, CQ-CTX-09) — `PENDING`. (5) Пакет B (транспорт `safety_recheck.start`, runtime state machine, provenance carrier, live-clearance) не реализован; `clear_restriction()` закрыт.
+Blockers (Пакет A их не закрывает): (1) [снят как owner blocker 21.09 — [OD-BOT §170], §11] G7 question contract и group-specific матрица recent-resolved G7 не зарегистрированы — до их регистрации для G7 допустима только `EVIDENCE_CORRECTION` (реш. 2 G7). (2) Вопрос G5 [§164] не выясняет глубину / размер раны, инородное тело и нарушение чувствительности / движения — через зарегистрированные вопросы `SYMPTOM_UPDATE`-clearance для G5 достижим только если пользователь сам сообщает все условия; иначе `UNKNOWN` (реш. 3 запрещает расширять вопрос). (3) Составной вопрос G4 [§164] допускает одиночный ответ «нет», который по реш. 2 G4 не отрицает все части — нужен owner-зарегистрированный способ получить поэлементный ответ; до этого одиночный «нет» → `UNKNOWN`. (4) Независимый врачебный sign-off CQ-CTX-01…03 (+ CQ-CTX-08, CQ-CTX-09) — `PENDING`. (5) Пакет B (транспорт `safety_recheck.start`, runtime state machine, provenance carrier, live-clearance) не реализован; `clear_restriction()` закрыт.
 
 Fixtures v0.2.5 → v0.2.6: +32 `T-S1-RCB-*` (ALLOW 11 / DENY 12 / UNKNOWN 9); итог 125; technical `NOT_IMPLEMENTED`; clinical `PENDING_INDEPENDENT_PHYSICIAN_SIGNOFF`.
+## 11. G7 question contract 21.09 — `ENGINEERING ELABORATION OF OWNER RULING`
+
+Источник — immutable record `docs/safety/reviews/OWNER_RULINGS_S1_G7_QUESTION_CONTRACT_2026-09-21.md` (RECORD SHA-256 `b4f2f3f11045f5527b2c16f616bf4116e15c682ab309e54ccbea1d1f7c3597d9`; ответ владельца `утверждаю`); [OD-BOT §170–§171]. Формула §2 и record r4 **не меняются**. Сопоставление с r4: структурированный ответ 2 при активном ограничении — только основание №5 (`ambiguous-сигнал после зарегистрированного вопроса однозначно вне S1`) внутри явного `safety_recheck.start`, при ALL(6..8); на первом ambiguous-ходе без ограничения ответ 2 ограничение не создаёт (это не clearance, а отсутствие подтверждения G7). Для G7 это расширяет §10: помимо `EVIDENCE_CORRECTION` допустим basis №5 через `health_screening.g7`; `SYMPTOM_UPDATE`-clearance по самочувствию для G7 по-прежнему запрещён.
+
+`question_id: health_screening.g7` — «Сейчас есть хотя бы один из признаков: кажется, что вы вот-вот потеряете сознание; трудно самостоятельно стоять, говорить или дышать; появилась спутанность; состояние быстро ухудшается?»
+
+| Ситуация | Маршрут по контракту |
+|---|---|
+| конкретный признак G1–G6 | маршрутизируется в свою группу; G7 не применяется (реш. 1) |
+| не G7: обычная усталость, недосып, изолированная температура, тошнота без тяжёлого ухудшения, обычное головокружение, переносные выражения о цене, отдалённый эпизод | G7 не применяется; вопрос не задаётся (реш. 1) |
+| неоднозначная G7-фраза («Мне резко стало очень плохо» и подобные) | `CLARIFY` + один вопрос `health_screening.g7` (точный текст реш. 2) |
+| явный тяжёлый признак в сообщении | вопрос не задаётся; `STOP` + экстренная медицинская маршрутизация (реш. 2) |
+| структурированный ответ 1 | `STOP` + экстренная маршрутизация (реш. 3) |
+| структурированный ответ 2, первый ambiguous-ход, ограничения нет | `OUTSIDE_S1_G7` (если не выявлена другая S1-группа); G7 restriction не создаётся; остальные safety-классы проверяются (реш. 3–4) |
+| структурированный ответ 2 при активном ограничении | не снимает автоматически; только eligible basis №5 внутри явного `safety_recheck.start` при всех mandatory guards r4 (реш. 4) |
+| структурированный ответ 3 | `UNKNOWN`; ограничение сохраняется, если было активно (реш. 3) |
+| свободный текст («нет», «прошло», «сейчас нормально», молчание, смена темы) | не эквивалентен ответу 2; ограничение не снимается (реш. 3) |
+| реальный тяжёлый эпизод, который прошёл | не `OUTSIDE_S1_G7`, не `CLEARED_BY_RECHECK`; `STOP` сохраняется; booking / recommendations не разблокируются (реш. 5) |
+| «Было просто очень плохо, но не знаю как» | `UNKNOWN` / `CLARIFY` (реш. 5) |
+| третье лицо с тяжёлым признаком | личное ограничение не создаётся; безопасная экстренная рекомендация; без диагноза и beauty / wellness CTA (реш. 5) |
+
+Runtime: `health_screening.g7` не реализован (нет в `apps/`); enum / state machine / API / Mini App / Telegram / MAX / telemetry не меняются; Package B не реализован.
+
+Остающиеся blockers:
+1. независимый врачебный sign-off (`INDEPENDENT PHYSICIAN SIGN-OFF: PENDING`);
+2. CQ-CTX-01…03 — `OWNER_POLICY_RESOLVED / PENDING_INDEPENDENT_PHYSICIAN_SIGNOFF`; CQ-CTX-08 и CQ-CTX-09 — `PENDING_CLINICAL_EXPERT` (+ Legal для 08) — без изменений;
+3. G5: вопрос [§164] не выясняет глубину / размер раны, инородное тело, чувствительность / движение;
+4. G4: одиночный ответ «нет» на составной вопрос не отрицает все части;
+5. Package B не реализован (транспорт `safety_recheck.start`, runtime state machine, provenance carrier, runtime `health_screening.g7`);
+6. `clear_restriction()` закрыт (`RecheckNotRegistered`); live-clearance отсутствует.
+
+Fixtures v0.2.6 → v0.2.7: +25 `T-S1-G7Q-*` (ALLOW 10 / DENY 9 / UNKNOWN 6); итог 150; technical `NOT_IMPLEMENTED`; clinical `PENDING_INDEPENDENT_PHYSICIAN_SIGNOFF`.

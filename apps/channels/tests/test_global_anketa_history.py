@@ -372,7 +372,7 @@ class TestAnketaGoldenFixturesStillReplay:
                 "tool_calls": [],
             }
             if fixture.name not in self.CASE_MISMATCH:
-                for problem in evaluate(trace, fixture.must_pass, fixture.forbidden):
+                for problem in evaluate(trace, fixture.must_pass, fixture.reply_forbidden):
                     failures.append(f"{fixture.name}: {problem}")
             for problem in evaluate_voice(response, fixture.voice_check):
                 failures.append(f"{fixture.name}: voice: {problem}")

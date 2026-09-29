@@ -5,7 +5,7 @@
  * 2. The slot query does not happen until it can mean something.
  * 3. «Could not ask the schedule» never renders as «nothing free».
  */
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -245,7 +245,7 @@ describe("commit (§18)", () => {
     expect(body?.client_id).toBe("c-1");
     expect(body?.client_name).toBeUndefined();
     expect(body?.idempotency_key).toBeTruthy();
-  });
+  }, 15_000);
 
   it("reuses the same idempotency key when a pending submit is retried", async () => {
     // Ayla invents a key when the header is absent, so a retry with a fresh
@@ -352,13 +352,39 @@ describe("customer selection (§13, §14)", () => {
     fireEvent.change(input, { target: { value: text } });
   }
 
+  // DRF-2616: предмет здесь — ВРЕМЯ (дебаунс поиска в NewBookingForm). Вместо
+  // паузы 400 мс по часам — прыжок фейковых часов на 1000 мс: с запасом на
+  // любой дебаунс до секунды и без привязки к литералу приложения. Близнец ниже
+  // доказывает, что тот же прыжок перекрывает дебаунс: двух символов хватает.
   it("waits for two characters before searching", async () => {
-    renderScreen();
-    await openSearchAndType("М");
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      renderScreen();
+      await openSearchAndType("М");
 
-    expect(await screen.findByText(/Введите хотя бы два символа/)).toBeInTheDocument();
-    await new Promise((r) => setTimeout(r, 400));
-    expect(mockedSearch).not.toHaveBeenCalled();
+      expect(await screen.findByText(/Введите хотя бы два символа/)).toBeInTheDocument();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1000);
+      });
+      expect(mockedSearch).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("близнец: два символа после того же прыжка часов — поиск идёт", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      renderScreen();
+      await openSearchAndType("Ма");
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1000);
+      });
+      expect(mockedSearch).toHaveBeenCalledWith("Ма", expect.anything());
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("renders an unreachable search as «недоступен», never as «not found»", async () => {

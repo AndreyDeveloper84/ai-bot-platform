@@ -52,6 +52,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date as date_cls
 from datetime import datetime, time, timedelta
+import logging
 from typing import Iterable
 from uuid import UUID
 from zoneinfo import ZoneInfo
@@ -72,22 +73,9 @@ from apps.master_api.services.visit_source import (
     RELEASED_STATUSES,
     UPCOMING_STATUSES,
 )
+from apps.tenancy.timezones import salon_zone
 
-DEFAULT_TZ = "Europe/Moscow"
-
-
-def tenant_tz(tenant) -> ZoneInfo:
-    """The tenant's timezone, falling back to Moscow.
-
-    «Today» has to mean today for the salon, not for UTC — a visit at
-    01:00 MSK belongs to the day the receptionist calls today, not to the
-    previous UTC date.
-    """
-
-    try:
-        return ZoneInfo(getattr(tenant, "timezone", "") or DEFAULT_TZ)
-    except Exception:  # noqa: BLE001 — a bad tz string must not 500 the day
-        return ZoneInfo(DEFAULT_TZ)
+logger = logging.getLogger(__name__)
 
 
 def day_bounds_utc(day: date_cls, tz: ZoneInfo) -> tuple[datetime, datetime]:
@@ -256,7 +244,7 @@ def build_salon_day(tenant, *, day: date_cls, now: datetime | None = None) -> Sa
 
     if now is None:
         now = dj_timezone.now()
-    tz = tenant_tz(tenant)
+    tz = salon_zone(tenant)
     start_utc, end_utc = day_bounds_utc(day, tz)
 
     # Enter the scope explicitly rather than relying on the caller. The
@@ -333,5 +321,4 @@ __all__ = [
     "SalonDay",
     "build_salon_day",
     "day_bounds_utc",
-    "tenant_tz",
 ]

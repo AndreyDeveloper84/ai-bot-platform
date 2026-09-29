@@ -99,8 +99,13 @@ class WaterSkill:
         # заглушки. Сюда же приходит инструмент ``log_water`` через
         # ``nutrition_global._run_skill``.
         if not _nutrition_enabled():
+            # DRF-2267 (CD §72): отказ — тоже завершённый шаг. Повторять
+            # воду незачем (функции нет), но выход в меню есть.
+            from apps.orchestrator.next_steps import menu_button, next_step_action_data
+
             return SkillResult(
                 reply_text=_nutrition_unavailable_text(),
+                action_data=next_step_action_data(menu_button()),
                 meta={"reply_kind": "water_nutrition_off"},
             )
 
@@ -160,27 +165,49 @@ class WaterSkill:
             )
             return SkillResult(
                 reply_text=_AYLA_DOWN_FALLBACK,
+                action_data=_retry_water_action_data(),
                 meta={"reply_kind": "water_ayla_down"},
             )
         except NutritionAPIError:
             logger.exception("water.ayla_api_error user=%s", external_id)
             return SkillResult(
                 reply_text=_AYLA_DOWN_FALLBACK,
+                action_data=_retry_water_action_data(),
                 meta={"reply_kind": "water_ayla_error"},
             )
 
         reply = _format_reply(entry, parsed)
+        # DRF-2267 (CD §72): записанное — завершённый шаг; следующий —
+        # «Мой дневник» (где тап дойдёт до дневника) и «Меню».
+        from apps.orchestrator.next_steps import after_entry_buttons
+
         return SkillResult(
             reply_text=reply,
+            claims_done=True,
+            claims_done_evidence="ayla.water.add:entry_id",
             action_type="water_logged",
             action_data={
                 "entry_id": entry.entry_id,
                 "slug": parsed.slug,
                 "ml": parsed.ml,
                 "water_ml": entry.water_ml,
+                "buttons": after_entry_buttons(),
             },
-            meta={"reply_kind": "water_logged"},
+            meta={
+                "reply_kind": "water_logged",
+            },
         )
+
+
+def _retry_water_action_data() -> dict:
+    """DRF-2267 (CD §72) — «попробуй через минуту» и кнопка, которая пробует.
+
+    «Записать стакан воды» — та же фраза, что чип дневника: повтор того же
+    действия одним тапом. Плюс «Меню» — выход, если повторять не хочется.
+    """
+    from apps.orchestrator.next_steps import menu_button, next_step_action_data, water_button
+
+    return next_step_action_data(water_button(), menu_button())
 
 
 def _format_reply(entry, parsed: BeverageMatch) -> str:

@@ -691,17 +691,47 @@ def _deliver(decision: Decision, *, surface: str) -> None:
     send_message(user_id=user_id, text=decision.text, attachments=_stop_keyboard(surface))
 
 
-def _stop_keyboard(surface: str) -> list[dict[str, Any]]:
-    """The one-tap unsubscribe every proactive outbound carries (DRF-1468, R6).
+#: DRF-2267 (CD §72 + рамки владельца 22.09) — шаг, который предлагает каждая
+#: проактивная поверхность. Только ЗАПИСЬ: проактив пишет первым, и звать
+#: человека к мастеру, когда он об этом не просил, нельзя. «Меню» сюда тоже
+#: не ставится — оно перечисляет и запись к мастеру.
+_NEXT_STEPS: dict[str, tuple[str, ...]] = {
+    # «выпито X из N, до нормы ещё M» — кнопка записывает стакан.
+    "water": ("water",),
+    # Итоги дня, в том числе «записей не было — считать нечего»: и еда, и вода.
+    "report": ("log_food", "water"),
+    # Наблюдение диетолога — про еду.
+    "coach_hint": ("log_food",),
+}
 
-    One button, one deterministic callback (``cb:nutri:stop:{surface}``);
-    the tap is handled by :func:`apps.nutrition_proactive.optout.
-    try_handle_surface_stop` on the global surface and by the registry
-    skill on the per-tenant one.
+
+def _next_step_buttons(surface: str) -> list[dict[str, str]]:
+    """Кнопки следующего шага для поверхности — по таблице :data:`_NEXT_STEPS`."""
+    from apps.orchestrator.next_steps import log_food_button, water_button
+
+    builders = {"log_food": log_food_button, "water": water_button}
+    return [builders[name]() for name in _NEXT_STEPS.get(surface, ())]
+
+
+def _stop_keyboard(surface: str) -> list[dict[str, Any]]:
+    """Клавиатура проактивного сообщения: шаг записи и одно-тапная отписка.
+
+    Отписка (DRF-1468, R6) — один детерминированный колбэк
+    (``cb:nutri:stop:{surface}``), его разбирает
+    :func:`apps.nutrition_proactive.optout.try_handle_surface_stop` на
+    глобальной поверхности и скилл реестра на тенантной. Она стоит
+    ПОСЛЕДНЕЙ: новые кнопки не должны её прятать.
+
+    Перед ней — шаг, о котором сообщение и говорит (DRF-2267): до этого
+    единственным, что человек мог сделать одним тапом, была отписка, а
+    отчёт «записей не было — считать нечего» не давал их сделать.
     """
     return [
         make_inline_keyboard_attachment(
-            [{"label": optout.STOP_BUTTON_LABEL, "callback": optout.stop_callback(surface)}],
+            [
+                *_next_step_buttons(surface),
+                {"label": optout.STOP_BUTTON_LABEL, "callback": optout.stop_callback(surface)},
+            ],
             columns=1,
         )
     ]

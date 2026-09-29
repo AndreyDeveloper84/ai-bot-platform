@@ -327,7 +327,7 @@ _CONTEXT_GONE_TEXT = (
 )
 _SLOT_TAKEN_PROMPT = "Это время уже занято. Выберите другое:"
 _SLOT_TAKEN_NO_ALTERNATIVES = (
-    "Это время уже занято, и на эту дату свободных слотов больше нет. Выберите другую дату:"
+    "Это время уже занято, и на эту дату свободного времени больше нет. Выберите другую дату:"
 )
 # DRF-1490 / OPEN_DECISIONS §25 п.5 — «выберите другую дату» without a date
 # picker is an instruction the person cannot follow: the free-text branch of
@@ -653,25 +653,7 @@ class BookingSkill:
                     text=_BROKEN_CALLBACK_TEXT,
                     detail=f"field=service_id raw={raw_payload!r}",
                 )
-            # DRF-2178, Э-4 — ОДИН поток записи. Время спрашивают там,
-            # где его показывает макет: в приложении. Прежний чатовый
-            # пошаговый выбор остаётся только там, где в приложение не
-            # войти (`web_app` и `miniapp_url` у бота бывают пусты) —
-            # иначе мы отняли бы запись у такого развёртывания. Решает
-            # один предикат, а не эта ветка: две ветки со своим «а есть
-            # ли приложение» разъехались бы на первой правке.
-            from apps.skills.booking.one_flow import (
-                chat_step_by_step_allowed,
-                miniapp_entry_result,
-            )
-
-            if not chat_step_by_step_allowed():
-                entry = miniapp_entry_result(master_id=master_id)
-                # `None` — войти всё-таки некуда; тогда путь прежний.
-                # Без обоих способов человек остаться не может.
-                if entry is not None:
-                    return entry
-
+            # CD §69 (DRF-2265): запись, начатая в боте, в боте и заканчивается — не уводить в приложение.
             return _render_date_picker(
                 master_id=master_id,
                 service_id=service_id,
@@ -1421,6 +1403,13 @@ def _has_contraindication_text(tenant: Any, service_id: int | str) -> bool:
     try:
         rows = rows.filter(ayla_service_id=uuid.UUID(str(service_id)))
     except (ValueError, AttributeError, TypeError):
+        if _booking_via_ayla():
+            # DRF-2630: on the Ayla path a service is its UUID and nothing
+            # else — the legacy int ``external_id`` belongs to the flag-OFF
+            # (YClients) contour, as in the two neighbours
+            # (``_service_requires_health_check``, ``calc_price``). A non-UUID
+            # here is not a service we know: «absent», not a guess by int.
+            return False
         try:
             rows = rows.filter(external_id=int(service_id))
         except (ValueError, TypeError):

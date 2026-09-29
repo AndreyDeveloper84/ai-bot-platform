@@ -19,7 +19,8 @@ from django.test import Client
 from django.urls import reverse
 
 from apps.admin_api.auth import require_admin_or_reception_read
-from apps.admin_api.services.salon_day import build_salon_day, day_bounds_utc, tenant_tz
+from apps.admin_api.services.salon_day import build_salon_day, day_bounds_utc
+from apps.tenancy.timezones import salon_zone
 from apps.admin_api.tests.conftest import init_data_header, make_master
 from apps.booking.models import RemoteBookingProxy
 from apps.catalog.models import CatalogService
@@ -217,7 +218,7 @@ class TestProjection:
 class TestTimezoneHelpers:
     def test_bad_timezone_falls_back_instead_of_raising(self, tenant: Tenant) -> None:
         tenant.timezone = "Not/AZone"
-        assert str(tenant_tz(tenant)) == "Europe/Moscow"
+        assert str(salon_zone(tenant)) == "Europe/Moscow"
 
     def test_day_bounds_span_exactly_24h(self) -> None:
         start, end = day_bounds_utc(datetime(2026, 8, 20, tzinfo=MSK).date(), MSK)
@@ -237,6 +238,55 @@ class TestEndpoint:
         assert data["summary"]["total"] == 1
         assert data["masters"][0]["name"] == "Анна"
         assert data["orphan_visits"] == []
+
+    def test_visit_hour_on_the_wire_is_the_salon_hour_drf2591(
+        self, client: Client, owner_bot_user, tenant: Tenant
+    ) -> None:
+        """Администратор ведёт день по этому экрану, а экран берёт часы из
+        строки. Провод обязан нести ЧАС САЛОНА: «10:00+03:00», а не
+        «07:00+00:00». Тот же момент — иначе починка сдвинула бы визит.
+        «Время непустое» и «момент верный» проходят и при дефекте, поэтому
+        узел смотрит на сами часы в строке."""
+        master = make_master(tenant, name="Анна", external_id=1)
+        start = datetime(2026, 8, 20, 10, 0, tzinfo=MSK)
+        _visit(tenant, master, start_local=start)
+
+        resp = client.get(_url("2026-08-20"), HTTP_AUTHORIZATION=init_data_header("5001"))
+        assert resp.status_code == 200
+        visit = resp.json()["masters"][0]["visits"][0]
+        assert visit["start_at"][11:16] == "10:00", visit["start_at"]
+        assert visit["start_at"].endswith("+03:00"), visit["start_at"]
+        assert visit["end_at"][11:16] == "11:00", visit["end_at"]
+        assert datetime.fromisoformat(visit["start_at"]) == start
+
+    def test_empty_timezone_gives_one_hour_on_day_and_day_schedule_drf2591(
+        self, client: Client, owner_bot_user, tenant: Tenant
+    ) -> None:
+        """Салон без пояса: одна запись — один час на /day/ и в day-schedule.
+
+        Правил «пояс салона» в коде несколько, и при пустом ``timezone`` одно
+        из них молча давало UTC. Запасной пояс на проводе admin_api — один и
+        назван (МСК, ``tenancy.timezones.FALLBACK_TZ``). Подмена «UTC в одном из двух»
+        краснеет здесь, без стенда и без числа пустых салонов."""
+        from apps.admin_api.views_master_schedule import _in_salon_zone, _schedule_zone
+
+        tenant.timezone = ""
+        tenant.save(update_fields=["timezone"])
+        master = make_master(tenant, name="Анна", external_id=1)
+        start = datetime(2026, 8, 20, 10, 0, tzinfo=MSK)
+        _visit(tenant, master, start_local=start)
+
+        resp = client.get(_url("2026-08-20"), HTTP_AUTHORIZATION=init_data_header("5001"))
+        assert resp.status_code == 200
+        day_hour = resp.json()["masters"][0]["visits"][0]["start_at"][11:16]
+
+        body = {"days": [{"bookings": [{"visit_at": start.astimezone(timezone.utc).isoformat()}]}]}
+        schedule_hour = _in_salon_zone(body, _schedule_zone(master))["days"][0]["bookings"][0][
+            "visit_at"
+        ][11:16]
+
+        assert day_hour == "10:00"
+        assert schedule_hour == day_hour
 
     def test_admin_may_read_it_too(self, client: Client, admin_bot_user, tenant: Tenant) -> None:
         resp = client.get(_url("2026-08-20"), HTTP_AUTHORIZATION=init_data_header("5002"))
@@ -323,7 +373,7 @@ class TestEndpoint:
     ) -> None:
         resp = client.get(_url(), HTTP_AUTHORIZATION=init_data_header("5001"))
         assert resp.status_code == 200
-        expected = datetime.now(tz=timezone.utc).astimezone(tenant_tz(tenant)).date()
+        expected = datetime.now(tz=timezone.utc).astimezone(salon_zone(tenant)).date()
         assert resp.json()["date"] == expected.isoformat()
 
     def test_response_carries_no_phone_anywhere(

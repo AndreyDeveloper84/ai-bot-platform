@@ -22,7 +22,7 @@
  *
  * Сторож от зависимости от времени — как в тестах экранов 03/04.
  */
-import { act, configure, fireEvent, getConfig, render, screen, within } from "@testing-library/react";
+import { configure, fireEvent, getConfig, render, screen, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -64,7 +64,10 @@ import {
   type PortfolioList,
 } from "../lib/master-api";
 import { loadImage, renderSquareCrop } from "../lib/image-crop";
+import { ApiError } from "../lib/api";
+import { REFUSAL_CANON } from "../lib/refusal-canon";
 import { MasterProfileScreen, PROFILE_COPY } from "./MasterProfileScreen";
+import { settleScenario } from "../test/settleScenario";
 
 const GUARD_ASYNC_TIMEOUT_MS = 20;
 let previousAsyncUtilTimeout = 1000;
@@ -76,11 +79,6 @@ afterAll(() => {
   configure({ asyncUtilTimeout: previousAsyncUtilTimeout });
 });
 
-const settle = async (rounds = 4) => {
-  for (let i = 0; i < rounds; i += 1) {
-    await act(async () => {});
-  }
-};
 
 const LIMITS = {
   bio: 500,
@@ -148,7 +146,7 @@ beforeEach(() => {
 describe("6.4 превью — тот же MasterCard, бейдж только из слота, чипы из шаблонов", () => {
   it("C1: превью рендерит клиентскую карточку с именем из контракта", async () => {
     const { container } = mountScreen();
-    await settle();
+    await settleScenario();
 
     const preview = container.querySelector(".master-card");
     expect(preview).not.toBeNull();
@@ -157,7 +155,7 @@ describe("6.4 превью — тот же MasterCard, бейдж только �
 
   it("C2: accepts_today=true → бейдж есть; false с причиной → бейджа нет", async () => {
     const first = mountScreen();
-    await settle();
+    await settleScenario();
     expect(screen.getByText(PROFILE_COPY.preview.acceptsToday)).toBeInTheDocument();
     first.unmount();
 
@@ -165,13 +163,13 @@ describe("6.4 превью — тот же MasterCard, бейдж только �
       card({ accepts_today: false, accepts_today_reason: "no_slots" }),
     );
     mountScreen();
-    await settle();
+    await settleScenario();
     expect(screen.queryByText(PROFILE_COPY.preview.acceptsToday)).toBeNull();
   });
 
   it("C3: чипы — категории из контракта, строки-специализации нет", async () => {
     const { container } = mountScreen();
-    await settle();
+    await settleScenario();
 
     const chips = container.querySelectorAll(".master-card__chip");
     expect(Array.from(chips).map((c) => c.textContent)).toEqual(["Маникюр", "Педикюр"]);
@@ -185,13 +183,13 @@ describe("6.1 — лимиты из контракта, имя с «Измени
       master: { id: "m-1", name: "Анна Петрова", bio: "б".repeat(300), photo_url: "" },
     });
     mountScreen();
-    await settle();
+    await settleScenario();
 
     fireEvent.click(screen.getByText(PROFILE_COPY.buttons.editBio));
     const textarea = screen.getByRole("textbox", { name: PROFILE_COPY.bioEdit.title });
     fireEvent.change(textarea, { target: { value: "б".repeat(300) } });
     fireEvent.click(screen.getByText(PROFILE_COPY.buttons.save));
-    await settle();
+    await settleScenario();
     expect(patchMasterProfile).toHaveBeenCalledWith({ bio: "б".repeat(300) });
 
     fireEvent.click(screen.getByText(PROFILE_COPY.buttons.editBio));
@@ -211,26 +209,28 @@ describe("6.1 — лимиты из контракта, имя с «Измени
       master: { id: "m-1", name: "Аня", bio: "Опыт 5 лет", photo_url: "" },
     });
     mountScreen();
-    await settle();
+    await settleScenario();
 
     fireEvent.click(screen.getByText(PROFILE_COPY.buttons.editName));
     const input = screen.getByRole("textbox", { name: PROFILE_COPY.nameEdit.title });
     fireEvent.change(input, { target: { value: "А" } });
     fireEvent.click(screen.getByText(PROFILE_COPY.buttons.save));
-    await settle();
+    await settleScenario();
+    // DRF-2597: короткое имя не уходит на сервер вовсе — замер после того, как «Сохранить» улеглось.
+    await settleScenario();
     expect(patchMasterProfile).not.toHaveBeenCalled();
     expect(screen.getByRole("alert").textContent).toContain("2");
 
     fireEvent.change(input, { target: { value: "Аня" } });
     fireEvent.click(screen.getByText(PROFILE_COPY.buttons.save));
-    await settle();
+    await settleScenario();
     expect(patchMasterProfile).toHaveBeenCalledWith({ display_name: "Аня" });
     expect(screen.getAllByText("Аня").length).toBeGreaterThan(0);
   });
 
   it("H1: подсказки про настоящее фото и без фильтров — на экране", async () => {
     mountScreen();
-    await settle();
+    await settleScenario();
     for (const hint of PROFILE_COPY.photoHints) {
       expect(screen.getByText(hint)).toBeInTheDocument();
     }
@@ -240,7 +240,7 @@ describe("6.1 — лимиты из контракта, имя с «Измени
 describe("6.3 — работы: счётчик и лимит из контракта, «Пропустить пока», удаление", () => {
   it("W1: «2 из 10» из контракта и кнопка «Добавить» есть; при 10 из 10 — кнопки нет", async () => {
     const first = mountScreen();
-    await settle();
+    await settleScenario();
     expect(screen.getByText(PROFILE_COPY.portfolio.counter(2, 10))).toBeInTheDocument();
     expect(screen.getByText(PROFILE_COPY.buttons.addWork)).toBeInTheDocument();
     first.unmount();
@@ -248,7 +248,7 @@ describe("6.3 — работы: счётчик и лимит из контрак
     vi.mocked(getMasterProfileCard).mockResolvedValue(card({ portfolio: { count: 10, limit: 10 } }));
     vi.mocked(getPortfolio).mockResolvedValue(portfolio(10));
     mountScreen();
-    await settle();
+    await settleScenario();
     expect(screen.getByText(PROFILE_COPY.portfolio.counter(10, 10))).toBeInTheDocument();
     expect(screen.queryByText(PROFILE_COPY.buttons.addWork)).toBeNull();
   });
@@ -257,7 +257,7 @@ describe("6.3 — работы: счётчик и лимит из контрак
     vi.mocked(getMasterProfileCard).mockResolvedValue(card({ portfolio: { count: 0, limit: 10 } }));
     vi.mocked(getPortfolio).mockResolvedValue(portfolio(0));
     mountScreen();
-    await settle();
+    await settleScenario();
 
     fireEvent.click(screen.getByText(PROFILE_COPY.buttons.skipPortfolio));
     expect(screen.queryByText(PROFILE_COPY.buttons.addWork)).toBeNull();
@@ -270,12 +270,12 @@ describe("6.3 — работы: счётчик и лимит из контрак
     vi.mocked(deletePortfolioItem).mockResolvedValue({ count: 1, limit: 10 });
     vi.mocked(getPortfolio).mockResolvedValueOnce(portfolio(2)).mockResolvedValueOnce(portfolio(1));
     mountScreen();
-    await settle();
+    await settleScenario();
 
     const buttons = screen.getAllByLabelText(PROFILE_COPY.portfolio.removeAria);
     expect(buttons).toHaveLength(2);
     fireEvent.click(buttons[0] as HTMLElement);
-    await settle();
+    await settleScenario();
 
     expect(deletePortfolioItem).toHaveBeenCalledWith("w-1");
     expect(screen.getAllByLabelText(PROFILE_COPY.portfolio.removeAria)).toHaveLength(1);
@@ -293,18 +293,18 @@ describe("6.2 — кроп 1:1", () => {
       master: { id: "m-1", name: "Анна Петрова", bio: "Опыт 5 лет", photo_url: "https://c/a.jpg" },
     });
     const { container } = mountScreen();
-    await settle();
+    await settleScenario();
 
     const input = container.querySelector('input[type="file"][data-role="avatar"]') as HTMLInputElement;
     const file = new File([new Uint8Array([9, 9])], "me.jpg", { type: "image/jpeg" });
     fireEvent.change(input, { target: { files: [file] } });
-    await settle();
+    await settleScenario();
 
     expect(screen.getByRole("dialog", { name: PROFILE_COPY.crop.title })).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText(PROFILE_COPY.crop.zoom), { target: { value: "2" } });
     fireEvent.click(screen.getByText(PROFILE_COPY.crop.rotate));
     fireEvent.click(screen.getByText(PROFILE_COPY.crop.apply));
-    await settle();
+    await settleScenario();
 
     expect(renderSquareCrop).toHaveBeenCalledTimes(1);
     const cropCall = vi.mocked(renderSquareCrop).mock.calls[0];
@@ -321,13 +321,13 @@ describe("ошибки", () => {
   it("E1: карточка не загрузилась — ошибка с повтором, повтор зовёт API снова", async () => {
     vi.mocked(getMasterProfileCard).mockRejectedValueOnce(new Error("down")).mockResolvedValue(card());
     mountScreen();
-    await settle();
+    await settleScenario();
 
     // М-6b: общий SystemState — «Не удалось загрузить профиль» + «Попробовать снова».
     expect(screen.getByRole("alert")).toHaveTextContent("Не удалось загрузить профиль");
     expect(screen.queryByText(/Не получилось загрузить/)).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Попробовать снова" }));
-    await settle();
+    await settleScenario();
     expect(getMasterProfileCard).toHaveBeenCalledTimes(2);
     expect(screen.getAllByText("Анна Петрова").length).toBeGreaterThan(0);
   });
@@ -339,5 +339,24 @@ describe("системные состояния через SystemState (М-6b)",
     mountScreen();
     expect(screen.getByRole("status", { busy: true })).toBeInTheDocument();
     expect(screen.queryByText(/Загружаем/)).toBeNull();
+  });
+});
+
+describe("отказ сохранения — фраза владельца (§6-кси п.4, DRF-2577)", () => {
+  // Раньше экран печатал серверный `detail` — английский текст для нас.
+  it("сервер отказал с detail — человек читает ровно «Не удалось сохранить профиль.»", async () => {
+    vi.mocked(patchMasterProfile).mockRejectedValue(new ApiError(400, "invalid", "bio: invalid value"));
+    mountScreen();
+    await settleScenario();
+
+    fireEvent.click(screen.getByText(PROFILE_COPY.buttons.editBio));
+    fireEvent.change(screen.getByRole("textbox", { name: PROFILE_COPY.bioEdit.title }), {
+      target: { value: "Опыт 6 лет" },
+    });
+    fireEvent.click(screen.getByText(PROFILE_COPY.buttons.save));
+    await settleScenario();
+
+    expect(screen.getByText(REFUSAL_CANON.profileSave)).toBeInTheDocument();
+    expect(screen.queryByText(/invalid value/)).toBeNull();
   });
 });

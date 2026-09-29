@@ -98,8 +98,8 @@ import {
   type SafetyStop,
 } from "../lib/customer-goals";
 import { SAFETY_KIND_CLARIFY } from "../lib/health-gate-copy";
-import { closeApp, maxBridge } from "../lib/max-sdk";
-import { backTo, screenRoot, type BackIntent } from "../lib/screen-back";
+import { returnToChat } from "../lib/max-sdk";
+import { backToOrigin, originFrom, screenRoot, type BackIntent } from "../lib/screen-back";
 import {
   DEADLINE_PASSED_CTA,
   DEADLINE_STEP,
@@ -135,7 +135,7 @@ const NEXT_ROUTES: Record<string, string> = {
 
 /**
  * DRF-2177 — контекст собран (макет C03.5): не маршрут и не кнопка, а
- * кадр «✓ + Спасибо!» с авто-переходом. В MAX — `closeApp()`: человек
+ * кадр «✓ + Спасибо!» с авто-переходом. В MAX — `returnToChat()`: человек
  * возвращается в чат, где его ждёт следующий шаг (C04 — К-3); вне MAX —
  * на главный. Текст — дословно с макета DRF-1178; `next.label` документа
  * («Вернуться в чат») здесь не рисуется — он для потребителя, который
@@ -214,7 +214,11 @@ function noticeFor(body: GoalSelectBody): string | null {
 
 export function GoalSelectScreen({ initialDoc }: Props = {}) {
   const navigate = useNavigate();
-  const { pathname } = useLocation();
+  const { pathname, state: routerState } = useLocation();
+  // DRF-2349 — откуда пришли. «Изменить цель» открывают и с Главной, и с
+  // «Плана» (`PlanLiteScreen` давно передаёт `returnTo`), и возврат обязан
+  // вести туда же. Нет происхождения — прежний адрес, прежнее поведение.
+  const origin = originFrom(routerState);
   // Единственное, что экран отсюда берёт, — есть ли у человека вторая
   // поверхность. Ни на один вопрос документа это не влияет.
   const { canSwitch } = useSurfaceMode();
@@ -296,24 +300,27 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
   useEffect(() => {
     if (!isCompleted) return;
     const timer = window.setTimeout(() => {
-      // `closeApp()` закрывает только при живом `close()`; без него (или
-      // по deep-link без истории) человек остался бы на кадре без кнопки —
-      // тогда домой сами.
-      if (maxBridge()?.close) {
-        closeApp();
-      } else {
+      // DRF-2268: в чат — через returnToChat (мост close() → ссылка на
+      // диалог); вернуть не вышло — Главная, а не кадр без кнопки.
+      // Пришли изнутри приложения — возвращаемся туда же: человек менял
+      // цель СВОЕГО плана, и уводить его в переписку значило бы прервать
+      // начатое. Пришли по ссылке из бота — прежний путь: в чат, а не
+      // вышло — на Главную (DRF-2268).
+      if (origin !== null) {
+        navigate(origin, { replace: true });
+      } else if (returnToChat() === "stuck") {
         navigate(HOME_ROUTE, { replace: true });
       }
     }, COMPLETION_AUTO_MS);
     return () => window.clearTimeout(timer);
-  }, [isCompleted, navigate]);
+  }, [isCompleted, navigate, origin]);
 
   const back: BackIntent = isRoot
     ? screenRoot(
         "Поверхность цели смонтирована на `/` первым экраном клиента — " +
           "истории за корнем нет, вести кнопке некуда.",
       )
-    : backTo("/customer/main");
+    : backToOrigin(routerState, "/customer/main");
 
   const submit = useCallback((body: GoalSelectBody) => {
     setSubmitting(true);
@@ -398,7 +405,10 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
   if (safetyStop) {
     const { stop, pendingBody } = safetyStop;
     const clarify = stop.kind === SAFETY_KIND_CLARIFY;
-    const answerPending = clarify && safetyAnswer.trim().length > 0;
+    // [OD-BOT §170] — a question with structured answers (G7): the answer is
+    // one of the server's options, never free text.
+    const structured = clarify && (stop.options?.length ?? 0) > 0;
+    const answerPending = clarify && !structured && safetyAnswer.trim().length > 0;
     const cta = clarify ? (
       answerPending ? (
         <StickyBar>
@@ -452,7 +462,24 @@ export function GoalSelectScreen({ initialDoc }: Props = {}) {
               ))}
             </ol>
           )}
-          {clarify && (
+          {structured && (
+            <div className="goal-select__safety-options" data-testid="goal-safety-options">
+              {stop.options?.map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  className="goal-select__safety-option"
+                  disabled={submitting}
+                  onClick={() =>
+                    submit({ ...pendingBody, safety_answer: option.value } as GoalSelectBody)
+                  }
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+          )}
+          {clarify && !structured && (
             <textarea
               className="goal-select__textarea"
               value={safetyAnswer}

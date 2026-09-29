@@ -15,14 +15,19 @@
  *       §MM1 (roster list) + §MM5 (deactivation cascade).
  */
 
-import { getInitData } from "./max-sdk";
-import { ApiError } from "./api";
-import { applyDevBypassHeaders } from "./dev-bypass";
-import { applySalonChoiceHeader } from "./salon-choice";
+import { applyIdentityHeaders } from "./auth-headers";
+import { ApiError, logApiDetail } from "./api";
 
 interface ErrorBody {
   error: string;
   detail: string;
+  /**
+   * Structured refusal details when the server sends them — the same
+   * field `api.ts` already forwards (DRF-2273: the catalog's «что
+   * сделать» rides in `details.hint`). Dropping it here left the admin
+   * screens with only the English `detail`.
+   */
+  details?: Record<string, unknown>;
 }
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
@@ -45,11 +50,8 @@ async function requestWithResponse<T>(
   path: string,
   init: RequestInit = {},
 ): Promise<ResponseEnvelope<T>> {
-  const initData = getInitData();
   const headers = new Headers(init.headers);
-  if (initData) headers.set("Authorization", `MaxInitData ${initData}`);
-  applyDevBypassHeaders(headers);
-  applySalonChoiceHeader(headers);
+  applyIdentityHeaders(headers);
   if (init.body && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
@@ -62,7 +64,8 @@ async function requestWithResponse<T>(
     } catch {
       /* non-JSON 5xx */
     }
-    throw new ApiError(res.status, parsed.error, parsed.detail);
+    logApiDetail(res.status, parsed.error, parsed.detail);
+    throw new ApiError(res.status, parsed.error, parsed.detail, parsed.details);
   }
   if (res.status === 204) {
     return { data: undefined as T, response: res };
@@ -111,6 +114,14 @@ export interface MeResponse {
    * App.tsx treats absence as `false`.
    */
   is_solo_provider?: boolean;
+  /**
+   * DRF-2254 — «чьё место и кто ведёт услуги»: `Tenant.kind` каталога,
+   * единственный источник. `is_solo_provider` выше — только раскладка.
+   * Экраны самообслуживания мастера (место, услуги, выбор услуг) на соло-
+   * поверхности не рисуются при `"salon"`; `null`/отсутствие — «не знаю»,
+   * всё как прежде (авторитетен отказ каталога).
+   */
+  workspace_kind?: "salon" | "solo" | null;
 }
 
 export const getMe = (): Promise<MeResponse> =>
@@ -209,7 +220,13 @@ export const getSalonDay = (
  */
 export interface CreateBookingResult {
   outcome: "committed" | "conflict" | "blocked" | "pending" | "failed";
+  /** Внутренняя причина — нам в журнал, НЕ на экран (DRF-2446, DRF-2453). */
   detail: string;
+  /**
+   * Слова человеку, если у сервера они согласованы (DRF-2453). Нет
+   * подсказки — экран говорит собственную фразу, а не `detail`.
+   */
+  hint?: string;
   appointment_id?: string;
   /** Returned on `pending` so a retry can be the same write, not a new one. */
   idempotency_key?: string;
@@ -239,11 +256,8 @@ export interface CreateBookingBody {
 export const createSalonBooking = async (
   body: CreateBookingBody,
 ): Promise<CreateBookingResult> => {
-  const initData = getInitData();
   const headers = new Headers({ "Content-Type": "application/json" });
-  if (initData) headers.set("Authorization", `MaxInitData ${initData}`);
-  applyDevBypassHeaders(headers);
-  applySalonChoiceHeader(headers);
+  applyIdentityHeaders(headers);
 
   let res: Response;
   try {
@@ -288,7 +302,13 @@ export type CancelReasonCode = (typeof CANCEL_REASONS)[number]["code"];
 
 export interface CancelBookingResult {
   outcome: "committed" | "conflict" | "blocked" | "pending" | "failed";
+  /** Внутренняя причина — нам в журнал, НЕ на экран (DRF-2446, DRF-2453). */
   detail: string;
+  /**
+   * Слова человеку, если у сервера они согласованы (DRF-2453). Нет
+   * подсказки — экран говорит собственную фразу, а не `detail`.
+   */
+  hint?: string;
   appointment_id?: string;
 }
 
@@ -305,11 +325,8 @@ export const cancelSalonBooking = async (
   appointmentId: string,
   body: { reason_code?: CancelReasonCode; reason?: string } = {},
 ): Promise<CancelBookingResult> => {
-  const initData = getInitData();
   const headers = new Headers({ "Content-Type": "application/json" });
-  if (initData) headers.set("Authorization", `MaxInitData ${initData}`);
-  applyDevBypassHeaders(headers);
-  applySalonChoiceHeader(headers);
+  applyIdentityHeaders(headers);
 
   let res: Response;
   try {
@@ -361,7 +378,13 @@ export const getBookingVersion = (
 
 export interface CompleteBookingResult {
   outcome: "committed" | "conflict" | "blocked" | "pending" | "failed";
+  /** Внутренняя причина — нам в журнал, НЕ на экран (DRF-2446, DRF-2453). */
   detail: string;
+  /**
+   * Слова человеку, если у сервера они согласованы (DRF-2453). Нет
+   * подсказки — экран говорит собственную фразу, а не `detail`.
+   */
+  hint?: string;
   appointment_id?: string;
 }
 
@@ -395,11 +418,8 @@ const settleSalonBooking = async (
   action: "complete" | "no-show",
   expectedVersion: number,
 ): Promise<CompleteBookingResult> => {
-  const initData = getInitData();
   const headers = new Headers({ "Content-Type": "application/json" });
-  if (initData) headers.set("Authorization", `MaxInitData ${initData}`);
-  applyDevBypassHeaders(headers);
-  applySalonChoiceHeader(headers);
+  applyIdentityHeaders(headers);
 
   let res: Response;
   try {
@@ -436,11 +456,8 @@ export const rescheduleSalonBooking = async (
   expectedVersion: number,
   newStartAt: string,
 ): Promise<CompleteBookingResult> => {
-  const initData = getInitData();
   const headers = new Headers({ "Content-Type": "application/json" });
-  if (initData) headers.set("Authorization", `MaxInitData ${initData}`);
-  applyDevBypassHeaders(headers);
-  applySalonChoiceHeader(headers);
+  applyIdentityHeaders(headers);
 
   let res: Response;
   try {
@@ -1437,11 +1454,8 @@ export const uploadMasterPhoto = async (
 ): Promise<MasterPhotoUploadResponse> => {
   const formData = new FormData();
   formData.append("photo", file);
-  const initData = getInitData();
   const headers = new Headers();
-  if (initData) headers.set("Authorization", `MaxInitData ${initData}`);
-  applyDevBypassHeaders(headers);
-  applySalonChoiceHeader(headers);
+  applyIdentityHeaders(headers);
   // No Content-Type — let fetch set the multipart boundary.
   const res = await fetch(`/api/v1/admin/masters/${masterId}/photo/`, {
     method: "POST",
@@ -1455,7 +1469,11 @@ export const uploadMasterPhoto = async (
     } catch {
       /* non-JSON 5xx */
     }
-    throw new ApiError(res.status, parsed.error, parsed.detail);
+    // DRF-2439: сегодня сервер здесь `details` не присылает — аргумент
+    // добавлен, чтобы поле не потерялось молча, когда начнёт. Правило
+    // живёт в помощнике `requestWithResponse`, а этот `fetch` написан руками — multipart (boundary ставит браузер),
+    // то есть мимо помощника: `POST admin/masters/<id>/photo/`.
+    throw new ApiError(res.status, parsed.error, parsed.detail, parsed.details);
   }
   return (await res.json()) as MasterPhotoUploadResponse;
 };
@@ -1632,12 +1650,9 @@ export interface ServicesMappingConflictEnvelope extends ServicesMappingConflict
 export const patchServicesMapping = async (
   body: ServicesMappingBulkBody,
 ): Promise<ServicesMappingBulkResult | ServicesMappingConflictEnvelope> => {
-  const initData = getInitData();
   const headers = new Headers();
   headers.set("Content-Type", "application/json");
-  if (initData) headers.set("Authorization", `MaxInitData ${initData}`);
-  applyDevBypassHeaders(headers);
-  applySalonChoiceHeader(headers);
+  applyIdentityHeaders(headers);
 
   const res = await fetch("/api/v1/admin/services-mapping/bulk/", {
     method: "POST",
@@ -1656,7 +1671,11 @@ export const patchServicesMapping = async (
     } catch {
       /* non-JSON 5xx */
     }
-    throw new ApiError(res.status, parsed.error, parsed.detail);
+    // DRF-2439: сегодня сервер здесь `details` не присылает — аргумент
+    // добавлен, чтобы поле не потерялось молча, когда начнёт. Правило
+    // живёт в помощнике `requestWithResponse`, а этот `fetch` написан руками — снимок матрицы посылается целиком,
+    // то есть мимо помощника: `POST admin/services-mapping/bulk/`.
+    throw new ApiError(res.status, parsed.error, parsed.detail, parsed.details);
   }
   return (await res.json()) as ServicesMappingBulkResult;
 };
@@ -1693,18 +1712,23 @@ export interface AvailabilityListResponse {
 }
 
 /**
- * 409 envelope from approve/reject. Backend (PR #521) returns
- * ``{"error": "already_decided" | "overlap_conflict", "detail": "..."}``
- * — there's no structured `dates: [...]` field, conflicting dates are
- * embedded as a stringified Python list inside the detail
- * (e.g. ``"existing exceptions conflict on dates: ['2026-06-11']"``).
- * We parse them client-side; see ``parseOverlapDates`` in the screen.
+ * 409 envelope from approve/reject.
+ *
+ * DRF-2453: конфликтующие даты теперь приходят СТРУКТУРНО —
+ * ``details.dates`` (`admin_api/services/availability.py`). Раньше они
+ * ехали внутри английской фразы, и мы доставали их регуляркой: предложение
+ * не канал данных, перепишут формулировку — даты пропадут молча.
+ *
+ * Разбор фразы оставлен запасным ходом ровно на время выкладки: сервер
+ * старше этого листа структурного поля ещё не шлёт. Когда выложится —
+ * `parseDatesFromDetail` и эта строка убираются вместе.
  */
 export interface AvailabilityConflict {
   __conflict: true;
   conflict: "already_decided" | "overlap_conflict";
+  /** Внутренняя причина — в журнал, не на экран (DRF-2446). */
   detail: string;
-  /** Best-effort parse of dates embedded in the detail string. */
+  /** Конфликтующие даты: `details.dates` сервера (DRF-2453). */
   dates?: string[];
 }
 
@@ -1755,12 +1779,9 @@ async function decisionFetch(
   url: string,
   body: Record<string, unknown>,
 ): Promise<AvailabilityRequestItem | AvailabilityConflict> {
-  const initData = getInitData();
   const headers = new Headers();
   headers.set("Content-Type", "application/json");
-  if (initData) headers.set("Authorization", `MaxInitData ${initData}`);
-  applyDevBypassHeaders(headers);
-  applySalonChoiceHeader(headers);
+  applyIdentityHeaders(headers);
 
   const res = await fetch(url, {
     method: "POST",
@@ -1779,15 +1800,26 @@ async function decisionFetch(
     if (slug !== "already_decided" && slug !== "overlap_conflict") {
       // Unknown 409 — surface as ApiError so the caller's generic
       // error path renders it.
-      throw new ApiError(res.status, slug, parsed.detail);
+      //
+      // DRF-2439: сегодня сервер здесь `details` не присылает — аргумент
+      // добавлен, чтобы поле не потерялось молча, когда начнёт. `fetch`
+      // написан руками не из-за multipart, а потому что 409 для этой
+      // операции — ИСХОД («уже решено», «пересечение»), а не ошибка, и
+      // общий помощник бросил бы на нём исключение.
+      throw new ApiError(res.status, slug, parsed.detail, parsed.details);
     }
     const detail = parsed.detail || "";
+    const fromServer = (parsed.details?.dates as string[] | undefined) ?? undefined;
     return {
       __conflict: true,
       conflict: slug,
       detail,
       dates:
-        slug === "overlap_conflict" ? parseDatesFromDetail(detail) : undefined,
+        slug === "overlap_conflict"
+          ? // Структурное поле — первым; разбор фразы держится только до
+            // выкладки сервера этого листа (см. докстроку типа).
+            (fromServer ?? parseDatesFromDetail(detail))
+          : undefined,
     };
   }
 
@@ -1798,7 +1830,9 @@ async function decisionFetch(
     } catch {
       /* non-JSON 5xx */
     }
-    throw new ApiError(res.status, parsed.error, parsed.detail);
+    // DRF-2439: та же причина, что у 409 выше — эта функция живёт мимо
+    // помощника целиком, поэтому и второй её выход поле доносит.
+    throw new ApiError(res.status, parsed.error, parsed.detail, parsed.details);
   }
   const envelope = (await res.json()) as DecisionEnvelope;
   return envelope.request;
@@ -1885,6 +1919,57 @@ export const issueStaffInvite = (
   request("/api/v1/admin/staff/invite/", {
     method: "POST",
     body: JSON.stringify(payload),
+  });
+
+// --- /api/v1/admin/staff/invites/ ---------------------------------------
+//
+// DRF-2275. Codes already issued: list with a status, cancel, resend.
+// Owner AND admin — whoever issues codes manages them. An owner code is
+// the owner's alone: the server answers 403 to an admin acting on one.
+// The list never carries the code — only its hash exists; «Отправить
+// заново» issues a NEW code, returned once in the `staff/invite/` shape.
+
+export type StaffInviteStatus = "pending" | "accepted" | "expired" | "cancelled";
+
+export interface StaffInviteRow {
+  id: string;
+  role: StaffInviteRole;
+  status: StaffInviteStatus;
+  /** The issuer's own label, written at issue time. May be empty. */
+  note: string;
+  /** Catalog name of the card a master code links to; null otherwise. */
+  master_name: string | null;
+  created_at: string;
+  expires_at: string;
+  used_at: string | null;
+  revoked_at: string | null;
+}
+
+export interface StaffInvitesResponse {
+  items: StaffInviteRow[];
+  total_count: number;
+  truncated: boolean;
+}
+
+export const listStaffInvites = (
+  init: { signal?: AbortSignal } = {},
+): Promise<StaffInvitesResponse> =>
+  request("/api/v1/admin/staff/invites/", { method: "GET", signal: init.signal });
+
+export const cancelStaffInvite = (
+  inviteId: string,
+): Promise<{ changed: boolean; status: "cancelled" }> =>
+  request(`/api/v1/admin/staff/invites/${encodeURIComponent(inviteId)}/cancel/`, {
+    method: "POST",
+    body: "{}",
+  });
+
+export const resendStaffInvite = (
+  inviteId: string,
+): Promise<StaffInviteResponse & { resent_from: string }> =>
+  request(`/api/v1/admin/staff/invites/${encodeURIComponent(inviteId)}/resend/`, {
+    method: "POST",
+    body: "{}",
   });
 
 // --- /api/v1/admin/staff/ (roster) ---------------------------------------
@@ -2003,6 +2088,13 @@ export interface StaffRosterPerson {
    * blindness this endpoint was built to remove.
    */
   roles: StaffRoleGrant[];
+  /**
+   * DRF-2274. What `staff/restore/` would give back on this row, computed
+   * by the server with the same rule the endpoint applies. The screen must
+   * not derive it: a role change closes rows too and they read as
+   * «revoked», and a revoked master card looks like one nobody held.
+   */
+  restorable_roles: RestorableRole[];
 }
 
 export interface StaffRosterResponse {
@@ -2016,6 +2108,63 @@ export const getStaffRoster = (
   init: { signal?: AbortSignal } = {},
 ): Promise<StaffRosterResponse> =>
   request("/api/v1/admin/staff/", { method: "GET", signal: init.signal });
+
+// --- /api/v1/admin/staff/role/ -------------------------------------------
+//
+// DRF-2273. Replaces every active staff role one person holds with `role`.
+// OWNER ONLY — the view narrows `require_admin_role` the same way the
+// roster does. Never `owner` (403: ownership is handed over separately)
+// and never the caller themself (403). The master link is a different
+// table and is not touched.
+
+export type ChangeableRole = "admin" | "receptionist";
+
+export interface StaffRoleChangePayload {
+  bot_user_id: string;
+  role: ChangeableRole;
+}
+
+export interface StaffRoleChangeResponse {
+  role: ChangeableRole;
+  /** The staff roles that were replaced, sorted. */
+  previous_roles: string[];
+}
+
+export const changeStaffRole = (
+  payload: StaffRoleChangePayload,
+): Promise<StaffRoleChangeResponse> =>
+  request("/api/v1/admin/staff/role/", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+
+// --- /api/v1/admin/staff/restore/ ----------------------------------------
+//
+// DRF-2274. Gives back the role a person HELD and had revoked — never a new
+// one. OWNER ONLY. A staff role is named by `bot_user_id`; the master link
+// by `master_id` alone — the server finds who held the card in the revoke
+// journal. Restoring what is already back answers `changed: false`.
+
+export type RestorableRole = ChangeableRole | "master";
+
+export interface StaffRestorePayload {
+  role: RestorableRole;
+  bot_user_id?: string;
+  master_id?: string;
+}
+
+export interface StaffRestoreResponse {
+  changed: boolean;
+  role: RestorableRole;
+}
+
+export const restoreStaffAccess = (
+  payload: StaffRestorePayload,
+): Promise<StaffRestoreResponse> =>
+  request("/api/v1/admin/staff/restore/", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
 
 // --- /api/v1/admin/staff/revoke/ -----------------------------------------
 //

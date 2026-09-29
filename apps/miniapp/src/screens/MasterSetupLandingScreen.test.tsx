@@ -2,7 +2,9 @@
  * Экран 01 «всё готово» (DRF-1807, M15) — по контракту readiness (M2).
  *
  * Сторожа:
- * - пункты — ровно из `items` сервера, `unavailable` не рисуется;
+ * - пункты — ровно из `items` сервера; `unavailable` РИСУЕТСЯ с причиной и
+ *   без тапа (DRF-2326): спрятанный шаг мастер читает как «у меня всё», а
+ *   отправить профиль всё равно не может — молчание хуже отказа;
  * - `unknown` — «не удалось прочитать», без «настройте» и без тапа;
  * - бар — по числу `done`, в тексте экрана нет ни `%`, ни «из N»;
  * - «Начать настройку» ведёт на deep_link первого незакрытого пункта,
@@ -36,12 +38,16 @@ import {
 import {
   ITEM_STATE_TEXT,
   LATER_LABEL,
+  REASON_TEXT,
   MasterSetupLandingScreen,
   PUBLICATION_ROUTE,
   PUBLISH_ENTRY_LABEL,
+  SALON_REST_TEXT,
+  SETUP_EXPLAIN,
   SETUP_RESUME_NOTE,
   START_LABEL,
 } from "./MasterSetupLandingScreen";
+import { SALON_PLACE_TEXT } from "./MasterPlaceScreen";
 
 const mockedReadiness = vi.mocked(getOnboardingReadiness);
 const mockedMe = vi.mocked(getMasterMe);
@@ -114,7 +120,7 @@ beforeEach(() => {
 });
 
 describe("экран 01", () => {
-  it("приветствие по имени, пункты из readiness, unavailable не рисуется", async () => {
+  it("приветствие по имени, пункты из readiness, unavailable виден с причиной", async () => {
     mockedReadiness.mockResolvedValue(FRESH);
     renderScreen();
     expect(await screen.findByRole("heading", { name: "Андрей, всё готово 👋" })).toBeInTheDocument();
@@ -122,11 +128,169 @@ describe("экран 01", () => {
     const rows = within(list).getAllByRole("listitem");
     expect(rows.map((r) => r.textContent)).toEqual([
       `○Услуги и цены${ITEM_STATE_TEXT.missing}`,
+      `—Место работы${ITEM_STATE_TEXT.unavailable}${REASON_TEXT.capability_not_built}`,
       `○Расписание${ITEM_STATE_TEXT.missing}`,
       `○Профиль для клиентов${ITEM_STATE_TEXT.missing}`,
     ]);
-    expect(screen.queryByText("Место работы")).toBeNull();
     expect(screen.getByText(SETUP_RESUME_NOTE)).toBeInTheDocument();
+  });
+
+  it("недоступный пункт не тапается — даже когда сервер прислал ссылку", async () => {
+    // У location в FRESH deep_link НЕ пуст намеренно: проверяем поведение,
+    // а не форму. Иначе `onClick` на том же div прошёл бы обе проверки и
+    // открыл ровно ту дверь, которую тикет открывать запрещает.
+    mockedReadiness.mockResolvedValue(FRESH);
+    renderScreen();
+    const row = await screen.findByTestId("setup-item-location");
+    expect(row.tagName).not.toBe("BUTTON");
+    expect(within(row).queryByRole("button")).toBeNull();
+    fireEvent.click(row);
+    expect(screen.queryByTestId("location")).toBeNull();
+  });
+
+  it("причина «ведётся не здесь» названа своим текстом, чужой причины — нет", async () => {
+    mockedReadiness.mockResolvedValue(
+      readiness([
+        item("services", "unavailable", { reason: "managed_outside_app", deep_link: null }),
+        item("hours", "missing"),
+        item("profile", "missing"),
+      ]),
+    );
+    renderScreen();
+    const row = await screen.findByTestId("setup-item-services");
+    expect(row.textContent).toContain(REASON_TEXT.managed_outside_app);
+    expect(row.textContent).not.toContain(REASON_TEXT.capability_not_built);
+  });
+
+  it("причина, которой экран не знает: состояние названо, выдумки нет", async () => {
+    mockedReadiness.mockResolvedValue(
+      readiness([
+        item("services", "unavailable", { reason: "нечто_новое", deep_link: null }),
+        item("hours", "missing"),
+        item("profile", "missing"),
+      ]),
+    );
+    renderScreen();
+    const row = await screen.findByTestId("setup-item-services");
+    expect(row.textContent).toContain(ITEM_STATE_TEXT.unavailable);
+    expect(row.textContent).not.toContain("нечто_новое");
+  });
+
+  it("причины нет вовсе: пункт называет состояние и молчит о причине", async () => {
+    mockedReadiness.mockResolvedValue(
+      readiness([
+        item("services", "unavailable", { reason: null, deep_link: null }),
+        item("hours", "missing"),
+      ]),
+    );
+    renderScreen();
+    const row = await screen.findByTestId("setup-item-services");
+    expect(row.textContent).toContain(ITEM_STATE_TEXT.unavailable);
+    expect(row.textContent).toBe(`—Услуги и цены${ITEM_STATE_TEXT.unavailable}`);
+  });
+
+  it("салонный мастер: оба недоступных пункта названы; бар полон со словами владельца, кнопки нет", async () => {
+    // Замер, а не одобрение. У салонного мастера сервер помечает недоступными
+    // И услуги, И место (workspace_kind == "salon", DRF-2254). Когда остальное
+    // настроено, экран показывает полный бар, не даёт ни одной кнопки действия
+    // и не объясняет, почему нельзя отправить профиль: `ready` ложно, оба
+    // пункта остались в blocking. Тикет DRF-2326 этот тупик не чинит — он
+    // называет пункты; узел держит нынешнее поведение, чтобы молчание было
+    // записанным, а не случайным.
+    mockedReadiness.mockResolvedValue(
+      readiness([
+        item("services", "unavailable", { reason: "managed_outside_app", deep_link: null }),
+        item("location", "unavailable", { reason: "managed_outside_app", deep_link: null }),
+        item("hours", "done"),
+        item("profile", "done"),
+      ]),
+    );
+    renderScreen();
+    const list = await screen.findByRole("list", { name: "Осталось настроить" });
+    expect(within(list).getAllByRole("listitem")).toHaveLength(4);
+    // П.6 решений 28.09 (DRF-2581): у МЕСТА — фраза владельца, у услуг —
+    // прежняя причина. Пара обязана различаться: одна строка на оба пункта
+    // вернула бы «место настраивается не в приложении», а это не то решение.
+    expect(within(screen.getByTestId("setup-item-location")).getByText(SALON_PLACE_TEXT)).toBeInTheDocument();
+    expect(
+      within(screen.getByTestId("setup-item-services")).getByText(REASON_TEXT.managed_outside_app),
+    ).toBeInTheDocument();
+    expect(within(list).queryByText(/поддержк/)).toBeNull();
+    const bar = screen.getByTestId("setup-bar");
+    expect(bar).toHaveAttribute("aria-valuemax", "2");
+    expect(bar).toHaveAttribute("aria-valuenow", "2");
+    // Весь набор кнопок, а не отсутствие одной подписи: при fill.done > 0
+    // кнопка звалась бы «Продолжить настройку», и проверка на START_LABEL не
+    // могла бы упасть — ровно та вакуумность, против которой этот узел.
+    const actions = screen.getAllByRole("button").filter((b) => !list.contains(b));
+    expect(actions.map((b) => b.textContent)).toEqual(["Открыть кабинет"]);
+    expect(
+      screen.getByRole("heading", { name: "Андрей, всё готово 👋" }),
+    ).toBeInTheDocument();
+    // Решение владельца 28.09 (слова, п.7; DRF-2582). Здесь стояло «лид
+    // обещает подготовку профиля, которой мастеру негде сделать» — записанный
+    // тупик. Теперь и лид, и озвучка полосы говорят словами владельца, а
+    // обещания подготовки нет.
+    expect(screen.getByText(SALON_REST_TEXT)).toBeInTheDocument();
+    expect(bar).toHaveAttribute("aria-valuetext", SALON_REST_TEXT);
+    expect(screen.queryByText(SETUP_EXPLAIN)).toBeNull();
+  });
+
+  it.each([
+    [
+      "у мастера есть своё незакрытое",
+      [
+        item("services", "unavailable", { reason: "managed_outside_app", deep_link: null }),
+        item("location", "unavailable", { reason: "managed_outside_app", deep_link: null }),
+        item("hours", "missing"),
+        item("profile", "done"),
+      ],
+    ],
+    [
+      "своё не прочитано (unknown) — незнание не «готово»",
+      [
+        item("services", "unavailable", { reason: "managed_outside_app", deep_link: null }),
+        item("location", "unavailable", { reason: "managed_outside_app", deep_link: null }),
+        item("hours", "unknown"),
+        item("profile", "done"),
+      ],
+    ],
+  ])("не «остальное настроит салон», когда %s (DRF-2582)", async (_, items) => {
+    mockedReadiness.mockResolvedValue(readiness(items));
+    renderScreen();
+    await screen.findByRole("list", { name: "Осталось настроить" });
+    expect(screen.getByText(SETUP_EXPLAIN)).toBeInTheDocument();
+    expect(screen.queryByText(SALON_REST_TEXT)).toBeNull();
+    expect(screen.getByTestId("setup-bar")).not.toHaveAttribute("aria-valuetext");
+  });
+
+  it("недоступный пункт не становится следующим шагом", async () => {
+    // Недоступный пункт стоит ПЕРВЫМ: иначе «первый незакрытый» совпал бы с
+    // верным ответом и без отбора, и узел ничего бы не держал.
+    mockedReadiness.mockResolvedValue(
+      readiness([
+        item("location", "unavailable", { reason: "capability_not_built", deep_link: null }),
+        item("services", "missing"),
+        item("hours", "missing"),
+      ]),
+    );
+    renderScreen();
+    fireEvent.click(await screen.findByRole("button", { name: START_LABEL }));
+    expect(await screen.findByTestId("location")).toHaveTextContent("/solo/services");
+  });
+
+  it("бар считает только то, что мастер может закрыть сам", async () => {
+    mockedReadiness.mockResolvedValue(
+      readiness([
+        item("services", "done"),
+        item("location", "unavailable", { reason: "capability_not_built", deep_link: null }),
+        item("hours", "missing"),
+      ]),
+    );
+    renderScreen();
+    const bar = await screen.findByTestId("setup-bar");
+    expect(bar).toHaveAttribute("aria-valuemax", "2");
+    expect(bar).toHaveAttribute("aria-valuenow", "1");
   });
 
   it("в тексте экрана нет процентов и «из N»; бар — по числу done", async () => {
@@ -251,7 +415,10 @@ describe("системные состояния через SystemState (DRF-2194
   });
 
   it("ошибка — «Не удалось загрузить чек-лист настройки» + «Попробовать снова»", async () => {
-    mockedReadiness.mockRejectedValueOnce(new Error("boom"));
+    // DRF-2204 — the retry needs its own answer. Without it the second call
+    // returned whatever the previous test left (or nothing), and the screen
+    // crashed on `readiness.items` after the test had already passed.
+    mockedReadiness.mockRejectedValueOnce(new Error("boom")).mockResolvedValueOnce(FRESH);
     renderScreen();
     expect(await screen.findByRole("alert")).toHaveTextContent("Не удалось загрузить чек-лист настройки");
     expect(screen.queryByText(/Не получилось загрузить/)).toBeNull();

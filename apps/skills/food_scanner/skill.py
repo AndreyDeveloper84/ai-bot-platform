@@ -105,13 +105,20 @@ from apps.integrations.ayla import (
     NutritionAPIError,
     NutritionUnavailableError,
     ScanBudgetExhaustedError,
+    ScanProviderDownError,
     ScanDailyLimitError,
     external_user_id_for,
     get_nutrition_client,
 )
+from apps.integrations.ayla.portion_provenance import (
+    PortionProvenance,
+    portion_numbers_are_named,
+    portion_provenance_of,
+)
 from apps.orchestrator import food_history
 from apps.orchestrator.memory import food as food_memory
 from apps.orchestrator.ui.keyboards import (
+    Button,
     food_recognition_keyboard,
     parse_callback,
 )
@@ -153,6 +160,19 @@ AYLA_DOWN_FALLBACK = "Сервис распознавания временно �
 SCAN_DAILY_LIMIT_FALLBACK = "Сегодня фото больше не распознаю — напиши словами, что было."
 
 SCAN_BUDGET_EXHAUSTED_FALLBACK = "Распознавание фото сейчас недоступно — напиши словами."
+
+# DRF-2318 — стойкий отказ распознавателя в каталоге (счёт, ключ, квота).
+# Через минуту ничего не изменится; дорога рядом — записать словами. ЧЕРНОВИК
+# владельцу: текст не из листа, утверждает владелец.
+SCAN_PROVIDER_DOWN_FALLBACK = (
+    "Распознавание фото сейчас не работает — мы уже чиним. "
+    "А пока напиши словами, что было, — посчитаю и покажу."
+)
+#: Кнопка «Записать словами» — тот же тап, что «📔 В дневник» без фразы:
+#: ведёт в запись текстом (``food_clarify`` → ``ASK_WHAT_TEXT``).
+#: Контракт кнопки — ``Button`` (ключ ``label``): композер пропускает словари
+#: без ``label`` молча (ревью #1997).
+WRITE_IN_WORDS_BUTTON = Button(label="Записать словами", callback="cb:food:diary")
 
 NOT_RECOGNIZED_FALLBACK = (
     "Фото немного сложное — не разобралась. Можешь переснять поближе или просто написать, что было?"
@@ -229,6 +249,7 @@ class FoodScannerSkill:
             )
             return SkillResult(
                 reply_text=PHOTO_NO_BYTES,
+                action_data=_log_it_another_way(),
                 meta={"reply_kind": "food_scanner_no_bytes"},
             )
 
@@ -238,6 +259,7 @@ class FoodScannerSkill:
         except FoodNotRecognizedError:
             return SkillResult(
                 reply_text=NOT_RECOGNIZED_FALLBACK,
+                action_data=_log_it_another_way(),
                 meta={"reply_kind": "food_scanner_not_recognized"},
             )
         except ScanDailyLimitError as exc:
@@ -252,24 +274,41 @@ class FoodScannerSkill:
             )
             return SkillResult(
                 reply_text=SCAN_DAILY_LIMIT_FALLBACK,
+                action_data=_log_it_another_way(),
                 meta={"reply_kind": "food_scanner_daily_limit"},
             )
         except ScanBudgetExhaustedError:
             logger.info("food_scanner.budget_exhausted user=%s", external_id)
             return SkillResult(
                 reply_text=SCAN_BUDGET_EXHAUSTED_FALLBACK,
+                action_data=_log_it_another_way(),
                 meta={"reply_kind": "food_scanner_budget_exhausted"},
+            )
+        except ScanProviderDownError as exc:
+            # DRF-2318: стойкий отказ — честно и с дорогой. Старая фраза из
+            # состояния записи текстом забывается: иначе тап «Записать
+            # словами» оценил бы её, а не спросил, что было.
+            logger.warning("food_scanner.provider_down user=%s reason=%s", external_id, exc.reason)
+            from apps.skills.food_clarify import text_entry
+
+            text_entry.forget(context)
+            return SkillResult(
+                reply_text=SCAN_PROVIDER_DOWN_FALLBACK,
+                action_data={"buttons": [WRITE_IN_WORDS_BUTTON.as_dict()]},
+                meta={"reply_kind": "food_scanner_provider_down"},
             )
         except NutritionUnavailableError:
             logger.warning("food_scanner.unavailable user=%s", external_id)
             return SkillResult(
                 reply_text=AYLA_DOWN_FALLBACK,
+                action_data=_log_it_another_way(),
                 meta={"reply_kind": "food_scanner_unavailable"},
             )
         except NutritionAPIError:
             logger.exception("food_scanner.api_error user=%s", external_id)
             return SkillResult(
                 reply_text=AYLA_DOWN_FALLBACK,
+                action_data=_log_it_another_way(),
                 meta={"reply_kind": "food_scanner_error"},
             )
 
@@ -328,8 +367,17 @@ class FoodScannerSkill:
             # see food_memory.note_recognition_rejected for why it is a quality
             # signal and never a stored fact.
             food_memory.note_recognition_rejected(context.bot_user, scan_id=scan_id)
+            # DRF-2267 (CD §72): текст зовёт прислать ещё фото — кнопка
+            # «Записать еду» зовёт туда же (фото или название), плюс «Меню».
+            from apps.orchestrator.next_steps import (
+                log_food_button,
+                menu_button,
+                next_step_action_data,
+            )
+
             return SkillResult(
                 reply_text=REJECTED_ACK,
+                action_data=next_step_action_data(log_food_button(), menu_button()),
                 meta={"reply_kind": "food_scanner_rejected"},
             )
 
@@ -364,6 +412,42 @@ class FoodScannerSkill:
             # порции; число исправлено человеком (§136).
             extra = {"portion_multiplier": corrected}
             entry_origin = PHOTO_ORIGIN_USER_CORRECTED
+        # DRF-2444 — ТИПОВАЯ порция в дневник без подтверждения не идёт.
+        #
+        # Подтверждение стоит ДО записи, а не пометкой после, и причина не в
+        # удобстве: число из дневника попадает в сводки — «за день», «за
+        # неделю», подсказку модели, озвучку, — а там оно **растворяется в
+        # сумме**, и места для оговорки «обычно 300 г» не существует по
+        # построению. Пометить его вниз по течению нечем; значит правило
+        # ставится на входе.
+        #
+        # Слов лист не добавляет: спрашиваем существующим `CLARIFY_PROMPT` —
+        # тем же, что и кнопка «✏️ Уточнить».
+        #
+        # Сегодня эта ветка НЕ СРАБАТЫВАЕТ: каталог `typical` ещё не выдаёт
+        # (половина A, DRF-2402, оставила значение зарезервированным). Она
+        # написана раньше значения намеренно — «читатели раньше поведения»
+        # и есть содержание разделения половин.
+        if (
+            portion_provenance_of(_stashed_portion_source(context, scan_id))
+            is PortionProvenance.TYPICAL
+            and correction is None
+        ):
+            # Кнопки — существующие, и ведут ровно туда, куда просит вопрос:
+            # «⚖️ Грамм» открывает ввод веса. Ответ без кнопок был бы тупиком
+            # (§72, DRF-2267): человек услышал бы вопрос и не увидел хода.
+            from apps.orchestrator.ui.keyboards import correction_choice_keyboard
+
+            return SkillResult(
+                reply_text=CLARIFY_PROMPT,
+                action_type="food_scan_needs_weight",
+                action_data={
+                    "scan_id": scan_id,
+                    "buttons": correction_choice_keyboard(scan_id),
+                },
+                meta={"reply_kind": "food_scanner_log_needs_weight"},
+            )
+
         # «В полёте» ДО сетевого вызова: ответ про граммы, пришедший, пока запись
         # летит, не пообещает вес, который в неё уже не попадёт.
         # Уже записанный скан не понижается: повтор ключа вернёт ту же запись.
@@ -403,7 +487,25 @@ class FoodScannerSkill:
             )
 
         _mark_logged(context, scan_id, log.log_id)
-        reply = f"Записала: {log.dish_name} — {int(log.calories)} ккал."
+        # DRF-2371 — число называем, только когда вес кто-то назвал. Иначе
+        # правило держалось бы один ход: карточка о числе молчит, а ответ
+        # после тапа говорит «250 ккал», посчитанные по константе каталога.
+        # Ход назвать вес на карточке уже есть — кнопка «✏️ Уточнить»
+        # (``food_recognition_keyboard``) ведёт в вопрос «Сколько граммов?».
+        log_provenance = portion_provenance_of(
+            ((log.raw or {}).get("nutrition") or {}).get("portion_source")
+        )
+        if log.calories is None or not portion_numbers_are_named(log_provenance):
+            # DRF-2371 — каталог сохранил запись, а числа в ней нет: порция
+            # неизвестна или блюда нет в справочнике. Раньше здесь падал
+            # ``int(None)`` — человек не видел ничего, хотя запись легла.
+            # Число не выдумываем и ноль не подставляем: ноль читался бы как
+            # «посчитано, и вышло почти ничего». Текст карточки для случая
+            # «блюда нет в справочнике» ждёт слова владельца
+            # (OWNER_QUESTIONS) — до ответа говорим то же, без числа.
+            reply = f"Записала: {log.dish_name}."
+        else:
+            reply = f"Записала: {log.dish_name} — {int(log.calories)} ккал."
         if extra and (log.raw or {}).get("entry_origin") != PHOTO_ORIGIN_USER_CORRECTED:
             # Ключ повтора вернул ПРЕЖНЮЮ запись (первый тап дошёл, ответ — нет):
             # вес в неё не лёг, и сказать «записала» без оговорки было бы ложью.
@@ -411,6 +513,7 @@ class FoodScannerSkill:
         # DRF-2108 — §109 шаг 7 и под фото-записью: только «Удалить».
         # «Исправить граммы» (÷100) верно лишь для записи текстом; обработчик
         # чипов общий (``food_clarify.text_entry.on_entry_callback``).
+        from apps.orchestrator.next_steps import after_entry_buttons
         from apps.orchestrator.ui.keyboards import ENTRY_ID_RE, food_entry_keyboard
 
         action_data: dict[str, Any] = {
@@ -418,17 +521,36 @@ class FoodScannerSkill:
             "dish_name": log.dish_name,
             "calories": log.calories,
         }
+        entry_chips: list[dict[str, str]] = []
         if log.log_id and ENTRY_ID_RE.match(log.log_id):
-            action_data["buttons"] = food_entry_keyboard(log.log_id, fixable=False)
+            entry_chips = food_entry_keyboard(log.log_id, fixable=False)
+        # DRF-2267 (CD §72): и следующий шаг — «Мой дневник», «Меню».
+        action_data["buttons"] = [*entry_chips, *after_entry_buttons()]
         return SkillResult(
             reply_text=reply,
+            claims_done=True,
+            claims_done_evidence="ayla.meals.log:log_id",
             action_type="food_logged",
             action_data=action_data,
-            meta={"reply_kind": "food_scanner_logged"},
+            meta={
+                "reply_kind": "food_scanner_logged",
+            },
         )
 
 
 # ─── helpers ──────────────────────────────────────────────────────────────
+
+
+def _log_it_another_way() -> dict:
+    """DRF-2267 (CD §72) — под отказом по фото: «Записать еду» и «Меню».
+
+    Все эти тексты зовут в одно и то же — написать словами или прислать
+    ещё фото; ``cb:welcome:food`` отвечает ровно этим приглашением (и с
+    воротами дневника), то есть кнопка делает то, что обещает текст.
+    """
+    from apps.orchestrator.next_steps import log_food_button, menu_button, next_step_action_data
+
+    return next_step_action_data(log_food_button(), menu_button())
 
 
 def _extract_photo_bytes(context: SkillContext) -> bytes | None:
@@ -654,6 +776,20 @@ def _correction_for(context: SkillContext, scan_id: str) -> dict | None:
     return entry if isinstance(entry, dict) else None
 
 
+def _stashed_portion_source(context: SkillContext, scan_id: str) -> Any:
+    """Происхождение порции этого скана из заначки карточки, или ``None``.
+
+    Заначка уже везёт сюда ``portion_g`` ровно затем же: на тапе «В дневник»
+    карточки нет, а решение принимается по её фактам (DRF-1579, DRF-2444).
+    Чужой ``scan_id`` читается как «не знаем» — молчаливо, потому что
+    заначка best-effort по построению и её отсутствие не должно стоить ответа.
+    """
+    card = _state(context).get(LAST_CARD_STATE_KEY)
+    if not isinstance(card, dict) or card.get("scan_id") != scan_id:
+        return None
+    return card.get("portion_source")
+
+
 def _logged_id(context: SkillContext, scan_id: str) -> str | None:
     """``log_id`` уже записанного скана, или ``None`` (не записан / «в полёте»)."""
     logged = _state(context).get(LOGGED_STATE_KEY)
@@ -694,6 +830,26 @@ def _write_logged(context: SkillContext, logged: dict) -> None:
         )
 
 
+def _card_stash(scan) -> dict:
+    """Факты карточки, которые нужны на тапе «В дневник».
+
+    ``portion_source`` кладётся ТОЛЬКО когда он есть: пустой ключ поменял бы
+    форму заначки у всех прежних сканов, а её форму держит соседний узел
+    (``test_the_card_keeps_the_scan_portion``) — и держит по делу, там своя
+    цена. Отсутствие ключа читается разборщиком как «признака нет», то есть
+    как раньше (DRF-2444).
+    """
+    stash = {
+        "scan_id": scan.scan_id,
+        "dish": scan.dish_name or "",
+        "portion_g": getattr(scan, "portion_g", None),
+    }
+    source = (getattr(scan, "nutrition", None) or {}).get("portion_source")
+    if source:
+        stash["portion_source"] = source
+    return stash
+
+
 def _stash_last_card(context: SkillContext, scan) -> None:
     """Tie ``scan_id`` → dish in ``Conversation.skill_state``. Best-effort.
 
@@ -713,11 +869,7 @@ def _stash_last_card(context: SkillContext, scan) -> None:
             LAST_CARD_STATE_KEY,
             # DRF-1579: порция, которую распознал скан, — от неё считается
             # множитель, если человек поправит вес до «В дневник».
-            {
-                "scan_id": scan.scan_id,
-                "dish": scan.dish_name or "",
-                "portion_g": getattr(scan, "portion_g", None),
-            },
+            _card_stash(scan),
         )
     except Exception:  # noqa: BLE001 — degraded memory beats a lost reply
         logger.debug(
@@ -789,7 +941,15 @@ def _format_scan_card(
     parts.append(f"{hedge} {dish}.")
     if portion:
         parts.append(f"Примерно {int(portion)} г.")
-    if kcal is not None:
+    # DRF-2371 — число называем, только когда вес кто-то назвал. Признак
+    # берём из тела ответа каталога через единственный вход перевода:
+    # отсутствие поля и незнакомое значение оба читаются как «не названо».
+    # Число, посчитанное по константе каталога, существует — но выдавать
+    # его за названное нельзя.
+    # Каталог кладёт признак ВНУТРЬ ``nutrition``, рядом с числами
+    # (``FoodScanResponseSerializer``), а не на верхний уровень ответа.
+    provenance = portion_provenance_of(nutrition.get("portion_source"))
+    if kcal is not None and portion_numbers_are_named(provenance):
         macros_line = f"{int(kcal)} ккал"
         if protein is not None:
             macros_line += f" · Б {int(protein)}"

@@ -218,7 +218,7 @@ export function MasterInternalChatThreadScreen() {
       setBackButton(false);
       setClosingConfirmation(false);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `navigate` нужен только внутри обработчика системной кнопки; привязка делается один раз за монтирование
   }, []);
 
   // --- Closing confirmation while composer / escalate-reason dirty ---
@@ -300,7 +300,7 @@ export function MasterInternalChatThreadScreen() {
         );
         const detail =
           e instanceof ApiError
-            ? e.detail || COPY.toastSendError
+            ? COPY.toastSendError
             : COPY.toastSendError;
         setToast({
           visible: true,
@@ -384,7 +384,7 @@ export function MasterInternalChatThreadScreen() {
       hapticNotify("error");
       const detail =
         e instanceof ApiError
-          ? e.detail || COPY.escalateErrorToast
+          ? COPY.escalateErrorToast
           : COPY.escalateErrorToast;
       setEscalateSheet({ ...escalateSheet, submitting: false, err: detail });
     }

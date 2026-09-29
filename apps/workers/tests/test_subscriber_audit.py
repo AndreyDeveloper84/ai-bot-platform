@@ -21,7 +21,7 @@ import pytest
 from apps.events.models import Event
 from apps.workers import subscriber_audit
 from apps.workers.base import TenantAwareTask
-from apps.workers.registry import clear_registry, iter_handlers, register
+from apps.workers.registry import emptied_registry_for_tests, iter_handlers, register
 
 # Capture the real guard at module import time, BEFORE any autouse
 # fixture has a chance to monkeypatch it. Tests that exercise the
@@ -39,7 +39,6 @@ def _clean_registry_and_audit_guard(monkeypatch):
     that need the skip behaviour re-patch the guard explicitly.
     """
 
-    clear_registry()
     subscriber_audit._reset_for_tests()
     # By default, bypass the management-command/pytest skip — tests
     # opt in to the skip behaviour via their own monkeypatches.
@@ -48,8 +47,9 @@ def _clean_registry_and_audit_guard(monkeypatch):
         "_is_management_command_that_should_skip",
         lambda: False,
     )
-    yield
-    clear_registry()
+    # DRF-2220 — empty for the test, the production handlers back after.
+    with emptied_registry_for_tests():
+        yield
     subscriber_audit._reset_for_tests()
 
 

@@ -1,6 +1,5 @@
-import { getInitData } from "./max-sdk";
-import { applyDevBypassHeaders } from "./dev-bypass";
-import { applySalonChoiceHeader } from "./salon-choice";
+import { applyIdentityHeaders } from "./auth-headers";
+import { markRead } from "./claims";
 
 const API_BASE = "/api/v1/customer";
 
@@ -40,11 +39,8 @@ export async function requestWithStatus<T>(
   path: string,
   init: RequestInit = {},
 ): Promise<{ status: number; data: T }> {
-  const initData = getInitData();
   const headers = new Headers(init.headers);
-  if (initData) headers.set("Authorization", `MaxInitData ${initData}`);
-  applyDevBypassHeaders(headers);
-  applySalonChoiceHeader(headers);
+  applyIdentityHeaders(headers);
   // Multipart (DRF-2098 — фото еды) идёт `FormData`: заголовок пишет
   // браузер вместе с boundary, и выставленный вручную `application/json`
   // сломал бы разбор на сервере. То же правило — в `master-api.ts`.
@@ -60,10 +56,15 @@ export async function requestWithStatus<T>(
     } catch {
       /* non-JSON 5xx */
     }
+    logApiDetail(res.status, body.error, body.detail);
     throw new ApiError(res.status, body.error, body.detail, body.details);
   }
   if (res.status === 204) return { status: res.status, data: undefined as T };
-  return { status: res.status, data: (await res.json()) as T };
+  // DRF-2347 — метка прочитанного. Доказательство утверждения экрана можно
+  // поставить только здесь, внутри клиента: символ метки наружу не вывозится.
+  // Метка неперечислимая — тело ответа остаётся тем же телом.
+  const body = markRead((await res.json()) as T, { source: path, status: res.status });
+  return { status: res.status, data: body };
 }
 
 // --- auth ---
@@ -777,6 +778,13 @@ export interface BookingItem {
   service_name: string;
   master_id: string | null;
   master_name: string;
+  /**
+   * DRF-2436 B / решение владельца п.15 — клиентское имя салона записи
+   * (`Tenant.name`, как у витрины). «Мои записи» — единый список по всем
+   * салонам, и у каждой строки должно быть видно, в каком салоне она. Ключа
+   * нет (локальный путь, сервер старше) — `undefined`: строка без салона.
+   */
+  salon_name?: string;
   visit_at: string;
   duration_min: number | null;
   cancel_requested_at: string | null;
@@ -850,10 +858,19 @@ export const rescheduleBookingRequest = (
     body: JSON.stringify(body),
   });
 
+/**
+ * DRF-2561 — на пути Ayla откладывать кандидата некуда: подтверждение
+ * приносит время само, поэтому шлёт то же тело, что и запрос. Локальный
+ * путь тело подтверждения не читает.
+ */
 export const rescheduleBookingConfirm = (
   id: string,
+  body: { new_master_id: string; new_service_id: string; new_visit_at: string },
 ): Promise<{ old_booking: BookingItem; new_booking: BookingItem }> =>
-  request(`/bookings/${id}/reschedule/confirm`, { method: "POST" });
+  request(`/bookings/${id}/reschedule/confirm`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
 
 // --- profile (Phase 3 / F4) ---
 export interface Preferences {
@@ -912,3 +929,16 @@ export const submitFeedback = (
     method: "POST",
     body: JSON.stringify(body),
   });
+
+/** Журнал вместо экрана: серверный `detail` нужен нам, а не человеку.
+ *
+ * DRF-2446 убрал его с общего хвоста ошибки, DRF-2451 — с экранов, у
+ * которых уже была согласованная фраза. Чтобы диагностика не пропала
+ * вместе с показом, `detail` пишется здесь, в одном месте на клиент: так
+ * не нужно ставить строку журнала на каждый из двадцати пяти экранов, и
+ * следующему не придётся возвращать `detail` на экран, «чтобы было видно».
+ */
+export function logApiDetail(status: number, slug: string, detail: string): void {
+  if (!detail) return;
+  console.warn(`[api-detail] ${status} ${slug}: ${detail}`);
+}

@@ -24,6 +24,7 @@ import logging
 from datetime import date as date_cls
 from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.utils import timezone as dj_timezone
@@ -34,8 +35,8 @@ from apps.admin_api.services.salon_day import (
     DayVisit,
     SalonDay,
     build_salon_day,
-    tenant_tz,
 )
+from apps.tenancy.timezones import salon_iso, salon_zone
 
 logger = logging.getLogger(__name__)
 
@@ -44,11 +45,11 @@ def _error(slug: str, detail: str, status: int) -> JsonResponse:
     return JsonResponse({"error": slug, "detail": detail}, status=status)
 
 
-def _visit_payload(v: DayVisit) -> dict[str, Any]:
+def _visit_payload(v: DayVisit, tz: ZoneInfo) -> dict[str, Any]:
     return {
         "id": v.id,
-        "start_at": v.start_at.isoformat() if v.start_at else None,
-        "end_at": v.end_at.isoformat() if v.end_at else None,
+        "start_at": salon_iso(v.start_at, tz),
+        "end_at": salon_iso(v.end_at, tz),
         "duration_min": v.duration_min,
         "status": v.status,
         "service_id": v.service_id,
@@ -63,6 +64,7 @@ def _visit_payload(v: DayVisit) -> dict[str, Any]:
 
 
 def _day_payload(day: SalonDay) -> dict[str, Any]:
+    tz = ZoneInfo(day.timezone_name)
     return {
         "date": day.date.isoformat(),
         "timezone": day.timezone_name,
@@ -77,13 +79,13 @@ def _day_payload(day: SalonDay) -> dict[str, Any]:
                 "master_id": m.master_id,
                 "name": m.name,
                 "is_active": m.is_active,
-                "visits": [_visit_payload(v) for v in m.visits],
+                "visits": [_visit_payload(v, tz) for v in m.visits],
             }
             for m in day.masters
         ],
         # Present even when empty so the frontend never has to guess
         # whether the key is missing or the list is.
-        "orphan_visits": [_visit_payload(v) for v in day.orphan_visits],
+        "orphan_visits": [_visit_payload(v, tz) for v in day.orphan_visits],
     }
 
 
@@ -111,7 +113,7 @@ def salon_day(request: HttpRequest) -> HttpResponse:
         except ValueError:
             return _error("bad_request", "date must be YYYY-MM-DD", 400)
     else:
-        day = dj_timezone.now().astimezone(tenant_tz(tenant)).date()
+        day = dj_timezone.now().astimezone(salon_zone(tenant)).date()
 
     if not isinstance(day, date_cls):  # pragma: no cover — defensive
         return _error("bad_request", "date must be YYYY-MM-DD", 400)

@@ -100,6 +100,7 @@ def _mirror_row(
         start_at=start,
         end_at=start + timedelta(minutes=minutes),
         status=status,
+        completed_by="master" if status == "completed" else "",  # DRF-2462
         bot_user=bot_user,
     )
 
@@ -272,9 +273,11 @@ class TestSpecialistKeys:
 MIRROR_KEY_EXCEPTIONS: dict[tuple[str, int], str] = {}
 
 #: Сколько вызовов через ``specialist_keys`` гард обязан видеть — фактическое
-#: число после правки (visit_source ×3, schedule, master_deactivation,
-#: bookings ×2), не «≥1»: пустой скан не читается как «нарушителей нет».
-EXPECTED_RESOLVED_SITES = 7
+#: число после правки (visit_source ×4 — четвёртое ``attended_visits``,
+#: DRF-1138; master_deactivation, bookings ×1 — «была» и «постоянные» в
+#: schedule с DRF-2462 читают через ``attended_visits``), не «≥1»: пустой
+#: скан не читается как «нарушителей нет».
+EXPECTED_RESOLVED_SITES = 6
 
 _QUERY_ATTRS = {"filter", "exclude", "get"}
 _KEYS = {"specialist_id", "specialist_id__in"}

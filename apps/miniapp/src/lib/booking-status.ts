@@ -206,7 +206,6 @@ export function mapBookingStatus(backendStatus: string | undefined | null): {
 } {
   if (typeof backendStatus !== "string" || !backendStatus.trim()) {
     if (import.meta.env.DEV) {
-      // eslint-disable-next-line no-console
       console.warn(
         `[booking-status] empty / non-string backend status — rendering generic fallback`,
       );
@@ -220,7 +219,6 @@ export function mapBookingStatus(backendStatus: string | undefined | null): {
   const customerStatus = BACKEND_ALIAS_MAP[key];
   if (!customerStatus) {
     if (import.meta.env.DEV) {
-      // eslint-disable-next-line no-console
       console.warn(
         `[booking-status] unknown backend status "${backendStatus}" — falling back to generic. Add an alias to BACKEND_ALIAS_MAP.`,
       );

@@ -152,6 +152,24 @@ class NothingToConfirmError(NutritionAPIError):
         super().__init__(f"nothing_to_confirm:{source or 'unknown'}")
 
 
+class LegacyDefaultUnconfirmedError(NutritionAPIError):
+    """Каталог ответил ``409 LEGACY_DEFAULT_UNCONFIRMED`` (DRF-2279, DRF-2332).
+
+    Предложение есть, но посчитано на входах, которые подставила прежняя
+    анкета (``legacy_default_inputs``), — подтвердить его значило бы выдать
+    старое умолчание за ответ человека. ``fields`` — имена входов, как их
+    назвал каталог (``activity_coefficient``, ``pace``).
+
+    Отдельный класс, а не ``NothingToConfirmError``: до DRF-2332 любой 409
+    читался как «подтверждать нечего», и человеку с живым предложением бот
+    отвечал «Подтверждать пока нечего.» — неверная причина вместо верной.
+    """
+
+    def __init__(self, fields: list[str]) -> None:
+        self.fields = [str(f) for f in fields]
+        super().__init__(f"legacy_default_unconfirmed:{','.join(self.fields)}")
+
+
 class ManualTargetsRefusedError(NutritionAPIError):
     """Каталог отказал в ручном ориентире ``422`` (DRF-2138, режим 3 §82):
     ``CALORIES_BELOW_FLOOR`` — значение не сохранено. ``details`` — ответ
@@ -242,6 +260,36 @@ class ScanBudgetExhaustedError(ScanBudgetError):
     """
 
 
+class ScanProviderDownError(NutritionAPIError):
+    """503 ``FOOD_API_UNAVAILABLE`` с ``details.permanent`` — распознаватель отказал стойко (DRF-2318).
+
+    Каталог (#549): у всех провайдеров стойкий отказ — счёт не активен, ключ
+    отвергнут, квота исчерпана, ключ не задан. Через минуту ничего не
+    изменится, поэтому это
+
+    * НЕ наследник :class:`NutritionUnavailableError` — иначе лестница навыка
+      сказала бы «попробуй через минуту»;
+    * НЕ кормит предохранитель — неоплаченный распознаватель не гасит запись
+      текстом, дневник и сводку (как бюджет, DRF-2195).
+
+    ``reason`` — закрытое слово каталога или ``unknown``.
+    """
+
+    REASONS = frozenset(
+        {
+            "billing_not_active",
+            "quota_exhausted",
+            "invalid_api_key",
+            "auth_rejected",
+            "not_configured",
+        }
+    )
+
+    def __init__(self, reason: str = "unknown") -> None:
+        self.reason = reason if reason in self.REASONS else "unknown"
+        super().__init__(f"scan_provider_down:{self.reason}")
+
+
 class NutritionUncertainOutcomeError(NutritionUnavailableError):
     """DRF-1838: the request left, the answer never came back (timeout / network).
 
@@ -270,7 +318,9 @@ class FoodLogResponse:
     log_id: str
     dish_name: str
     meal_type: str
-    calories: float
+    #: DRF-2371 — ``None``, когда каталог сохранил запись без чисел.
+    #: Запись есть, числа нет; ноль здесь был бы выдумкой.
+    calories: float | None
     raw: dict[str, Any]
 
 
@@ -292,8 +342,10 @@ class SavedMealRow:
 
     meal_id: str
     dish_name: str
-    portion_g: float
-    calories: float
+    #: DRF-2371 — ``None``, когда снимок сделан без веса.
+    portion_g: float | None
+    #: DRF-2371 — ``None``, если снимок сделан с записи без чисел.
+    calories: float | None
     protein_g: float | None
     fat_g: float | None
     carbs_g: float | None
@@ -334,9 +386,13 @@ class DishEstimate:
     """
 
     matched_dish: str
-    portion_g: float
+    #: DRF-2371 — ``None``, когда веса нет вовсе.
+    portion_g: float | None
     portion_estimated: bool
-    kcal: float
+    #: DRF-2371 — ``None``, когда числа вывести неоткуда (блюда нет в
+    #: справочнике, вес неизвестен). Это НЕ ноль: ноль означал бы «съел и
+    #: не получил калорий», и произносить это за человека нельзя.
+    kcal: float | None
     protein_g: float | None
     fat_g: float | None
     carbs_g: float | None
@@ -586,6 +642,20 @@ def health_factor_refusals(profile: "ProfileResponse") -> list[str]:
     return names
 
 
+def insufficient_inputs(profile: "ProfileResponse") -> list[str]:
+    """Входы, без которых каталог отказал считать (``insufficient_inputs``).
+
+    С вопроса 59 (CD §72) каталог не подставляет темп и активность, а с
+    #527 — пол и цель: без них расчёта нет, и отказ называет поля. Пусто —
+    такого отказа не было.
+    """
+    overrides = profile.raw.get("overrides_applied") or []
+    for entry in overrides:
+        if isinstance(entry, dict) and entry.get("reason") == "insufficient_inputs":
+            return [str(name) for name in (entry.get("fields") or [])]
+    return []
+
+
 def _target_or_none(norms: dict[str, Any], key: str) -> int | None:
     """Ориентир из блока ``norms`` — или ``None``, если его там нет.
 
@@ -664,6 +734,12 @@ class ProfileResponse:
     #: уходят. Пусто, когда расчёта нет.
     targets_method_versions: dict[str, str] = field(default_factory=dict)
     targets_input_snapshot: dict[str, Any] = field(default_factory=dict)
+    #: DRF-2279 (CD §76, №32): входы, которые каталог пометил как прежние
+    #: умолчания (``pace``, ``activity_coefficient``) — подставлены до
+    #: вопроса 59, человек их не называл. Для расчёта они «не названы», и бот
+    #: переспрашивает, а не переносит. Пусто — пометок нет ИЛИ каталог ключа
+    #: ещё не присылает (бот выходит раньше каталога).
+    legacy_default_inputs: tuple[str, ...] = ()
     raw: dict[str, Any] = field(default_factory=dict)
 
     #: Поля, которые обязаны быть ``None`` у не настроенного профиля —
@@ -954,6 +1030,11 @@ class NutritionClient:
         if err_code == "FOOD_SCAN_BUDGET_EXHAUSTED":
             logger.info("nutrition_client.scan.budget_exhausted ext=%s", external_user_id)
             raise ScanBudgetExhaustedError("budget_exhausted")
+        if err_code == "FOOD_API_UNAVAILABLE" and err_details.get("permanent") is True:
+            # DRF-2318: стойкий отказ распознавателя — не авария каталога.
+            reason = str(err_details.get("reason") or "")
+            logger.warning("nutrition_client.scan.provider_down reason=%s", reason[:32])
+            raise ScanProviderDownError(reason)
 
         # Ни одна из двух веток выше не зовёт и `record_success()` — это
         # осознанно, а не забыто. Отказ по бюджету доказывает, что жива
@@ -1037,9 +1118,14 @@ class NutritionClient:
             data = resp.json().get("data", {})
             return DishEstimate(
                 matched_dish=str(data.get("matched_dish") or dish_name),
-                portion_g=float(data.get("portion_g") or 0.0),
+                # DRF-2371 — вес такое же число о еде, как калории:
+                # «Порция — 0 г, по твоим словам» утверждало бы слова,
+                # которых человек не говорил.
+                portion_g=_float_or_none(data.get("portion_g")),
                 portion_estimated=bool(data.get("portion_estimated")),
-                kcal=float(data.get("kcal") or 0.0),
+                # DRF-2371 — ``or 0.0`` здесь превращал «не посчитано» в
+                # «0 ккал», и ниже отсутствие было уже неотличимо.
+                kcal=_float_or_none(data.get("kcal")),
                 protein_g=_float_or_none(data.get("protein_g")),
                 fat_g=_float_or_none(data.get("fat_g")),
                 carbs_g=_float_or_none(data.get("carbs_g")),
@@ -1125,7 +1211,9 @@ class NutritionClient:
                 log_id=str(body.get("id") or ""),
                 dish_name=body.get("dish_name") or "",
                 meal_type=body.get("meal_type") or "",
-                calories=float(body.get("calories") or 0.0),
+                # DRF-2371 — см. ``FoodLogResponse.calories``: отсутствие
+                # остаётся отсутствием.
+                calories=_float_or_none(body.get("calories")),
                 raw=body,
             )
         if resp.status_code >= 500:
@@ -1244,6 +1332,95 @@ class NutritionClient:
             )
         raise self._meal_edit_refusal(resp, now=now)
 
+    #: Ниже этого тело не может быть фотографией еды: самый маленький
+    #: настоящий снимок на стенде — 36 КБ, пустышки замера 25.09 — сотни
+    #: байт. Порог грубый намеренно: он отделяет «файл есть» от «файла нет
+    #: по существу», а не сортирует снимки по качеству.
+    MIN_PHOTO_RESPONSE_BYTES = 1024
+
+    #: Верхняя граница тела снимка. Вход ограничен 10 MiB
+    #: (``MAX_PHOTO_BYTES``), и ответ каталога больше этого — признак
+    #: беды, а не большой фотографии.
+    MAX_PHOTO_RESPONSE_BYTES = 12 * 1024 * 1024
+
+    async def food_photo(
+        self,
+        *,
+        external_user_id: str,
+        log_id: str,
+    ) -> tuple[bytes, str] | None:
+        """GET ``internal/food-log/{log_id}/photo/`` — сам файл снимка.
+
+        DRF-2455. Возвращает ``(байты, тип)`` или ``None``, если снимка
+        нет: записана текстом или удалён по сроку (§134). Владение
+        проверяет каталог — здесь мы только называем человека.
+
+        Прямой адрес хранилища не запрашиваем и наружу не отдаём: он
+        внутренний для контейнера, а бакет публичный, и утёкшая ссылка
+        работала бы у любого.
+        """
+        now = time.monotonic()
+        if self._circuit.is_open(now=now):
+            raise NutritionUnavailableError("circuit_open")
+
+        url = self._urls.build(f"nutrition/internal/food-log/{log_id}/photo/")
+        headers = with_request_id(
+            {
+                "X-Service-Token": self._token,
+                "X-External-User-ID": external_user_id,
+            }
+        )
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout_s) as http:
+                resp = await http.get(url, headers=headers)
+        except (httpx.TimeoutException, httpx.NetworkError) as exc:
+            self._circuit.record_failure(now=now)
+            logger.warning(
+                "nutrition_client.food_photo.network ext=%s err=%s",
+                external_user_id,
+                type(exc).__name__,
+            )
+            raise NutritionUnavailableError(f"network: {type(exc).__name__}") from exc
+
+        if resp.status_code == 200:
+            self._circuit.record_success()
+            content_type = resp.headers.get("Content-Type", "application/octet-stream")
+            if len(resp.content) < self.MIN_PHOTO_RESPONSE_BYTES:
+                # Пустое или почти пустое тело поверхность прочитала бы как
+                # «фото есть, но сломано». Для неё это «снимка нет».
+                #
+                # Не теория: замер стенда 25.09 нашёл три живые записи из
+                # пятнадцати, чей объект существует и весит несколько сотен
+                # байт. Каталог такие уже не отдаёт, но полагаться на одну
+                # сторону нельзя — байты приходят сюда, и решение о показе
+                # принимается здесь.
+                logger.warning(
+                    "nutrition_client.food_photo.too_small ext=%s size=%d",
+                    external_user_id,
+                    len(resp.content),
+                )
+                return None
+            if len(resp.content) > self.MAX_PHOTO_RESPONSE_BYTES:
+                # Размеру, который назвал каталог, не доверяем: один
+                # неверно сохранённый объект не должен класть воркер.
+                self._circuit.record_failure(now=now)
+                raise NutritionUnavailableError("photo_too_large")
+            return resp.content, content_type
+        if resp.status_code == 404:
+            # Снимка нет — это не отказ и не сбой: штатное состояние записи.
+            self._circuit.record_success()
+            return None
+        if resp.status_code in (401, 403) or 300 <= resp.status_code < 400:
+            # Протухший токен и перенаправление на хранилище — сбой
+            # настройки, а не отказ человеку. И за ``Location`` не идём:
+            # он ведёт внутрь контура.
+            self._circuit.record_failure(now=now)
+            raise NutritionUnavailableError(f"http_{resp.status_code}")
+        if resp.status_code >= 500:
+            self._circuit.record_failure(now=now)
+            raise NutritionUnavailableError(f"http_{resp.status_code}")
+        raise NutritionAPIError(f"http_{resp.status_code}")
+
     async def restore_meal(self, *, external_user_id: str, log_id: str) -> FoodLogResponse:
         """POST ``/api/v1/nutrition/internal/food-log/{log_id}/restore/``.
 
@@ -1281,8 +1458,11 @@ class NutritionClient:
         return SavedMealRow(
             meal_id=str(body.get("id") or ""),
             dish_name=str(body.get("dish_name") or ""),
-            portion_g=_num("portion_g") or 0.0,
-            calories=_num("calories") or 0.0,
+            # DRF-2371 — см. выше: ноль граммов никто не называл.
+            portion_g=_num("portion_g"),
+            # DRF-2371 — снимок избранного мог быть сделан с записи без
+            # чисел; ``or 0.0`` печатал бы «0 ккал» в списке избранного.
+            calories=_num("calories"),
             protein_g=_num("protein_g"),
             fat_g=_num("fat_g"),
             carbs_g=_num("carbs_g"),
@@ -1687,7 +1867,11 @@ class NutritionClient:
                 err = resp.json().get("error") or {}
             except ValueError:
                 err = {}
-            source = str(((err.get("details") or {}).get("targets_source")) or "")
+            details = err.get("details") or {}
+            # DRF-2332: у 409 два смысла, и различает их код, а не статус.
+            if err.get("code") == "LEGACY_DEFAULT_UNCONFIRMED":
+                raise LegacyDefaultUnconfirmedError(list(details.get("fields") or []))
+            source = str(details.get("targets_source") or "")
             raise NothingToConfirmError(source)
 
         result = self._parse_profile_response(resp, allow_404=False)
@@ -1842,6 +2026,11 @@ class NutritionClient:
                 goal=str(body.get("goal") or ""),
                 # Ayla spec uses "pace"; "goal_pace" is the back-compat name.
                 goal_pace=str(body.get("pace") or body.get("goal_pace") or ""),
+                legacy_default_inputs=tuple(
+                    str(name)
+                    for name in (body.get("legacy_default_inputs") or [])
+                    if isinstance(name, str) and name
+                ),
                 # Ayla spec uses "activity_coefficient" (number); "activity"
                 # is the back-compat string name.
                 activity=str(body.get("activity_coefficient") or body.get("activity") or ""),

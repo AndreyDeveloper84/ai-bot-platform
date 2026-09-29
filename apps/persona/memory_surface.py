@@ -45,6 +45,12 @@ _DIET_PHRASES = {
     "kosher": "ешь кошерное",
     # «я теперь снова ем мясо» — the correction row itself is shown honestly.
     "none": "больше не называешь ограничений по питанию",
+    # DRF-2398: без этих двух локальная строка со значением словаря молча НЕ
+    # показывалась бы — человек не увидел бы, что про него помнят, и не смог
+    # бы это забыть. Слова те же, что в банке ниже: второй формулировки об
+    # одном и том же не заводим (видимый текст утверждает владелец).
+    "omnivore": "ешь всё",
+    "other": "называешь особое питание",
 }
 
 _FACT_RENDERERS = {
@@ -100,13 +106,13 @@ def _render_by_key(key: str, content: dict) -> str | None:
 # rows (silent-remember ruling 2026-08-23: the show/forget loop is what
 # justifies remembering without asking).
 _DECLARED_DIET_PHRASES = {
-    "omnivore": "ешь всё",
+    "omnivore": _DIET_PHRASES["omnivore"],
     "vegetarian": _DIET_PHRASES["vegetarian"],
     "vegan": _DIET_PHRASES["vegan"],
     "keto": _DIET_PHRASES["keto"],
     "halal": _DIET_PHRASES["halal"],
     "kosher": _DIET_PHRASES["kosher"],
-    "other": "называешь особое питание",
+    "other": _DIET_PHRASES["other"],
 }
 
 
@@ -226,10 +232,13 @@ def render_personal_context(view: PersonalContextView) -> str | None:
     parts: list[str] = []
     derived: list[str] = []
     if view.summary:
-        # Происхождение summary не хранится ни в каком виде — оставляем его
-        # там, где оно было. Это осознанный долг, а не недосмотр: тащить
-        # сюда «неизвестно» без источника было бы догадкой о догадке.
-        parts.append(view.summary.strip())
+        # Происхождение summary не хранится ни в каком виде, но его ПРИРОДА
+        # записана: проза «кто этот человек» — вывод по определению
+        # (POLICY_DEBT, apps/identity/personal_fields.py). Здесь она стояла в
+        # группе сказанного, то есть модель получила бы вывод как слова
+        # клиента. Место ей — среди выведенного; без «возможно, ты» — это
+        # свободный текст, а не фраза банка. Писателя у поля нет (DRF-2526). DRF-2548.
+        derived.append(view.summary.strip())
     for fact in view.green_facts:
         if not _prompt_visible(fact):
             continue

@@ -39,6 +39,7 @@ import {
   type AylaAskResponse,
 } from "../lib/master-api";
 import { MasterAylaScreen } from "./MasterAylaScreen";
+import { settleScenario } from "../test/settleScenario";
 
 const mockedHistory = vi.mocked(getAylaHistory);
 const mockedAsk = vi.mocked(askAyla);
@@ -341,6 +342,8 @@ describe("3 · подготовленное действие", () => {
       ),
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Отмена" })).toBeInTheDocument();
+    // DRF-2597: подтверждения нет до «Подтвердить» — замер после того, как карточка улеглась.
+    await settleScenario();
     expect(mockedConfirm).not.toHaveBeenCalled();
     screen.getByRole("button", { name: "Подтвердить" }).click();
     // Макет 3B: ✓ «Запись создана» / три строки / «Открыть запись» / ⓘ.

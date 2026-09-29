@@ -38,12 +38,20 @@ vi.mock("../../lib/max-sdk", async (importOriginal) => {
 
 vi.mock("../../lib/admin-api", async (importOriginal) => {
   const original = await importOriginal<typeof import("../../lib/admin-api")>();
-  return { ...original, getStaffRoster: vi.fn(), revokeStaffAccess: vi.fn() };
+  return {
+    ...original,
+    getStaffRoster: vi.fn(),
+    revokeStaffAccess: vi.fn(),
+    changeStaffRole: vi.fn(),
+    restoreStaffAccess: vi.fn(),
+  };
 });
 
 import { ApiError } from "../../lib/api";
 import {
+  changeStaffRole,
   getStaffRoster,
+  restoreStaffAccess,
   revokeStaffAccess,
   type MeResponse,
   type RoleSource,
@@ -56,6 +64,8 @@ import { AdminPeopleScreen } from "./AdminPeopleScreen";
 
 const mockedRoster = vi.mocked(getStaffRoster);
 const mockedRevoke = vi.mocked(revokeStaffAccess);
+const mockedChangeRole = vi.mocked(changeStaffRole);
+const mockedRestore = vi.mocked(restoreStaffAccess);
 
 const OWNER_ME: MeResponse = {
   user: { id: "u-1", name: "Карина", phone_masked: "+• ••• ••• ••12" },
@@ -106,6 +116,7 @@ const OWNER_MASTER: StaffRosterPerson = {
   name: "Карина",
   has_account: true,
   is_active: true,
+  restorable_roles: [],
   roles: [
     grant("owner", "active", "direct", daysAgo(300)),
     grant("master", "active", "master_invite", daysAgo(120)),
@@ -187,6 +198,7 @@ describe("pending, revoked and ayla_unlinked never share wording", () => {
     name: "Наталья Прохорова",
     has_account: false,
     is_active: false,
+  restorable_roles: [],
     roles: [],
   };
 
@@ -377,6 +389,7 @@ const ANYA: StaffRosterPerson = {
   name: "Аня Ковалёва",
   has_account: true,
   is_active: true,
+  restorable_roles: [],
   roles: [grant("master", "active", "master_invite", daysAgo(30))],
 };
 
@@ -410,8 +423,10 @@ describe("the confirmation names who and what", () => {
     // The role, so «доступ» is not an abstraction. A confirmation that
     // says neither is a confirmation of nothing.
     expect(screen.getByText(/Снимаем роль: Мастер\./)).toBeInTheDocument();
-    // And that this is a one-way door — the whole reason to confirm.
-    expect(screen.getByText(/придётся выдать новое/)).toBeInTheDocument();
+    // And where the way back is — since DRF-2274 it is on this screen.
+    expect(
+      screen.getByText(/Вернуть доступ можно будет здесь же/),
+    ).toBeInTheDocument();
   });
 
   it("lists every role a two-role person is about to lose", async () => {
@@ -494,17 +509,25 @@ describe("what actually reaches the server", () => {
 });
 
 describe("a refusal is shown, never swallowed", () => {
-  it("keeps the dialog open and prints what the server said", async () => {
+  it("keeps the dialog open and says so in our own words, not the server's", async () => {
+    // DRF-2446. Узел раньше подставлял русский `detail` и проверял, что
+    // экран печатает «слова сервера». Сервер здесь говорит по-английски:
+    // `staff_revoke.py:149` поднимает «the salon owner's access cannot be
+    // revoked here», и владелец увидел бы эту строку. То есть узел
+    // закреплял ровно тот дефект, ради которого заведён лист.
+    //
+    // Отказ по-прежнему НЕ проглочен — он назван собственной строкой
+    // экрана; внутренний текст уходит в журнал.
     mockedRevoke.mockRejectedValue(
-      new ApiError(409, "owner_revoke_refused", "нельзя отозвать этот доступ"),
+      new ApiError(409, "owner_revoke_refused", "the salon owner's access cannot be revoked here"),
     );
     await openConfirm(ANYA);
     fireEvent.click(confirmButton());
 
     // The outcome, in one line, before any diagnosis.
     expect(await screen.findByText("Доступ не отозван.")).toBeInTheDocument();
-    // And the server's own words, via the shared StateError.
-    expect(screen.getByText("нельзя отозвать этот доступ")).toBeInTheDocument();
+    // И ни слова внутреннего английского на экране.
+    expect(screen.queryByText(/salon owner's access/)).toBeNull();
     // Still open: closing on failure would leave the owner unsure.
     expect(screen.getByRole("dialog")).toBeInTheDocument();
     // And the list was NOT reloaded — nothing changed to re-read.
@@ -657,5 +680,412 @@ describe("the button is never offered where the server would refuse", () => {
     expect(
       screen.queryByRole("button", { name: /Отозвать доступ/ }),
     ).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * DRF-2273 — «Сменить роль». Owner only (her ruling, `views_staff_roster`).
+ *
+ * Pinned: the button appears only where the server would accept; the
+ * sheet names who and what they hold now; nothing is sent before a new
+ * role is picked; the current role and «Владелец» are never offered; the
+ * catalog's refusal (admin needs the catalog half, DRF-2085) is said in
+ * words with its own hint, not as an English slug.
+ */
+const LENA_ADMIN: StaffRosterPerson = {
+  id: "bot:u-8",
+  bot_user_id: "u-8",
+  master_id: null,
+  name: "Лена",
+  has_account: true,
+  is_active: true,
+  restorable_roles: [],
+  roles: [grant("admin", "active", "access_code", daysAgo(40))],
+};
+
+const roleButton = (name: string) =>
+  screen.getByRole("button", { name: `Сменить роль: ${name}` });
+
+const queryRoleButton = (name: string) =>
+  screen.queryByRole("button", { name: `Сменить роль: ${name}` });
+
+async function openRoleSheet(person: StaffRosterPerson) {
+  mockedRoster.mockResolvedValue(rosterOf(person));
+  renderScreen();
+  await waitFor(() => {
+    expect(roleButton(person.name)).toBeInTheDocument();
+  });
+  fireEvent.click(roleButton(person.name));
+  await screen.findByRole("dialog");
+}
+
+describe("DRF-2273 — the role sheet", () => {
+  beforeEach(() => {
+    mockedChangeRole.mockResolvedValue({
+      role: "receptionist",
+      previous_roles: ["admin"],
+    });
+  });
+
+  it("names the person and the role held now, and offers only the other one", async () => {
+    await openRoleSheet(LENA_ADMIN);
+
+    expect(screen.getByRole("dialog")).toHaveAccessibleName(
+      "Сменить роль: Лена",
+    );
+    expect(screen.getByText(/Сейчас: Администратор\./)).toBeInTheDocument();
+    const options = screen.getAllByRole("radio");
+    expect(options.map((o) => o.textContent)).toEqual(["Ресепшен"]);
+    expect(
+      screen.queryByRole("radio", { name: "Владелец" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("offers both roles to a person who holds both — never an empty sheet", async () => {
+    await openRoleSheet({
+      ...LENA_ADMIN,
+      roles: [
+        grant("admin", "active", "access_code", daysAgo(40)),
+        grant("receptionist", "active", "access_code", daysAgo(20)),
+      ],
+    });
+
+    expect(
+      screen.getByText(/Сейчас: Администратор и Ресепшен\./),
+    ).toBeInTheDocument();
+    expect(
+      screen.getAllByRole("radio").map((o) => o.textContent),
+    ).toEqual(["Администратор", "Ресепшен"]);
+  });
+
+  it("names a catalog refusal even without a hint", async () => {
+    mockedChangeRole.mockRejectedValue(
+      new ApiError(409, "catalog_admin_link_refused", "transport_error"),
+    );
+    await openRoleSheet({
+      ...LENA_ADMIN,
+      roles: [grant("receptionist", "active", "access_code", daysAgo(40))],
+    });
+
+    fireEvent.click(screen.getByRole("radio", { name: "Администратор" }));
+    fireEvent.click(screen.getByRole("button", { name: "Сменить роль" }));
+
+    expect(
+      await screen.findByText("Каталог не подтвердил администратора."),
+    ).toBeInTheDocument();
+  });
+
+  it("says a 404 in words and offers no pointless retry", async () => {
+    mockedChangeRole.mockRejectedValue(
+      new ApiError(404, "not_found", "no such person in this salon"),
+    );
+    await openRoleSheet(LENA_ADMIN);
+
+    fireEvent.click(screen.getByRole("radio", { name: "Ресепшен" }));
+    fireEvent.click(screen.getByRole("button", { name: "Сменить роль" }));
+
+    expect(
+      await screen.findByText(
+        "Этого человека больше нет в салоне — обновите список.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Попробовать снова" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("sends nothing until a new role is picked", async () => {
+    await openRoleSheet(LENA_ADMIN);
+
+    const confirm = screen.getByRole("button", { name: "Сменить роль" });
+    expect(confirm).toBeDisabled();
+    fireEvent.click(confirm);
+    expect(mockedChangeRole).not.toHaveBeenCalled();
+  });
+
+  it("sends the person and the picked role, then re-reads the roster", async () => {
+    await openRoleSheet(LENA_ADMIN);
+    const readsBefore = mockedRoster.mock.calls.length;
+
+    fireEvent.click(screen.getByRole("radio", { name: "Ресепшен" }));
+    fireEvent.click(screen.getByRole("button", { name: "Сменить роль" }));
+
+    await waitFor(() => {
+      expect(mockedChangeRole).toHaveBeenCalledTimes(1);
+    });
+    expect(mockedChangeRole.mock.calls.at(0)?.[0]).toEqual({
+      bot_user_id: "u-8",
+      role: "receptionist",
+    });
+    await waitFor(() => {
+      expect(mockedRoster.mock.calls.length).toBe(readsBefore + 1);
+    });
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    });
+  });
+
+  it("says a master role stays as it is", async () => {
+    await openRoleSheet({
+      ...LENA_ADMIN,
+      master_id: "m-8",
+      roles: [
+        grant("admin", "active", "access_code", daysAgo(40)),
+        grant("master", "active", "master_invite", daysAgo(90)),
+      ],
+    });
+
+    expect(
+      screen.getByText(/Роль мастера останется как есть\./),
+    ).toBeInTheDocument();
+  });
+
+  it("says the catalog's refusal in words, with its hint, and keeps the sheet", async () => {
+    mockedChangeRole.mockRejectedValue(
+      new ApiError(409, "catalog_admin_link_refused", "transport_error", {
+        hint: "каталог недоступен — повторить позже",
+      }),
+    );
+    await openRoleSheet({
+      ...LENA_ADMIN,
+      roles: [grant("receptionist", "active", "access_code", daysAgo(40))],
+    });
+
+    fireEvent.click(screen.getByRole("radio", { name: "Администратор" }));
+    fireEvent.click(screen.getByRole("button", { name: "Сменить роль" }));
+
+    expect(await screen.findByText("Роль не изменена.")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Каталог не подтвердил администратора: каталог недоступен — повторить позже.",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+  });
+});
+
+describe("DRF-2273 — «Сменить роль» only where the server would accept", () => {
+  it("is offered on an admin — the guards below are not always on", async () => {
+    mockedRoster.mockResolvedValue(rosterOf(LENA_ADMIN));
+    renderScreen();
+
+    await waitFor(() => {
+      expect(roleButton("Лена")).toBeInTheDocument();
+    });
+  });
+
+  it("never on the owner, on yourself, on a master-only row or a revoked role", async () => {
+    mockedRoster.mockResolvedValue(
+      rosterOf(
+        { ...LENA_ADMIN, id: "bot:u-1", bot_user_id: "u-1", name: "Сама" },
+        {
+          ...LENA_ADMIN,
+          id: "bot:u-9",
+          bot_user_id: "u-9",
+          name: "Владелица",
+          roles: [grant("owner", "active", "direct", daysAgo(300))],
+        },
+        { ...ANYA },
+        {
+          ...LENA_ADMIN,
+          id: "bot:u-10",
+          bot_user_id: "u-10",
+          name: "Ушедшая",
+          roles: [grant("admin", "revoked", "access_code", daysAgo(60))],
+        },
+      ),
+    );
+    renderScreen();
+
+    // Presence first: the rows rendered, so the absences below mean
+    // «no button», not «no screen».
+    expect(await screen.findByText("Ушедшая")).toBeInTheDocument();
+    expect(screen.getByText("Аня Ковалёва")).toBeInTheDocument();
+    for (const name of ["Сама", "Владелица", "Аня Ковалёва", "Ушедшая"]) {
+      expect(queryRoleButton(name)).not.toBeInTheDocument();
+    }
+  });
+});
+
+/**
+ * DRF-2274 — «Вернуть доступ». Owner only; gives back the role the row
+ * shows as revoked, never a new one.
+ *
+ * Pinned: the button appears only where the server has something to give
+ * back (a revoked staff chip on a row with an account, or a master card
+ * flagged `restorable_master`); the master card is named by `master_id`
+ * alone — after the revoke it has no account; a single role is
+ * preselected, several make the owner choose; refusals are words.
+ */
+const LENA_REVOKED: StaffRosterPerson = {
+  ...LENA_ADMIN,
+  is_active: false,
+  roles: [grant("admin", "revoked", "access_code", daysAgo(40))],
+  restorable_roles: ["admin"],
+};
+
+const MASTER_CARD_REVOKED: StaffRosterPerson = {
+  id: "master:m-5",
+  bot_user_id: null,
+  master_id: "m-5",
+  name: "Вера Лис",
+  has_account: false,
+  is_active: true,
+  restorable_roles: ["master"],
+  roles: [grant("master", "active", "master_invite", daysAgo(90))],
+};
+
+const restoreButton = (name: string) =>
+  screen.getByRole("button", { name: `Вернуть доступ: ${name}` });
+
+const queryRestoreButton = (name: string) =>
+  screen.queryByRole("button", { name: `Вернуть доступ: ${name}` });
+
+async function openRestore(person: StaffRosterPerson) {
+  mockedRoster.mockResolvedValue(rosterOf(person));
+  renderScreen();
+  await waitFor(() => {
+    expect(restoreButton(person.name)).toBeInTheDocument();
+  });
+  fireEvent.click(restoreButton(person.name));
+  await screen.findByRole("dialog");
+}
+
+describe("DRF-2274 — the restore sheet", () => {
+  beforeEach(() => {
+    mockedRestore.mockResolvedValue({ changed: true, role: "admin" });
+  });
+
+  it("names the person and the one role coming back, and sends it by bot_user_id", async () => {
+    await openRestore(LENA_REVOKED);
+
+    expect(screen.getByRole("dialog")).toHaveAccessibleName(
+      "Вернуть доступ: Лена",
+    );
+    expect(screen.getByText(/Вернём роль: Администратор\./)).toBeInTheDocument();
+    expect(screen.queryAllByRole("radio")).toHaveLength(0);
+
+    const readsBefore = mockedRoster.mock.calls.length;
+    fireEvent.click(screen.getByRole("button", { name: "Вернуть доступ" }));
+    await waitFor(() => {
+      expect(mockedRestore).toHaveBeenCalledTimes(1);
+    });
+    expect(mockedRestore.mock.calls.at(0)?.[0]).toEqual({
+      role: "admin",
+      bot_user_id: "u-8",
+    });
+    await waitFor(() => {
+      expect(mockedRoster.mock.calls.length).toBe(readsBefore + 1);
+    });
+  });
+
+  it("names a revoked master card by master_id alone", async () => {
+    mockedRestore.mockResolvedValue({ changed: true, role: "master" });
+    await openRestore(MASTER_CARD_REVOKED);
+
+    expect(screen.getByText(/Вернём роль: Мастер\./)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Вернуть доступ" }));
+    await waitFor(() => {
+      expect(mockedRestore).toHaveBeenCalledTimes(1);
+    });
+    expect(mockedRestore.mock.calls.at(0)?.[0]).toEqual({
+      role: "master",
+      master_id: "m-5",
+    });
+  });
+
+  it("makes the owner choose when two roles were revoked", async () => {
+    await openRestore({
+      ...LENA_REVOKED,
+      roles: [
+        grant("admin", "revoked", "access_code", daysAgo(40)),
+        grant("receptionist", "revoked", "access_code", daysAgo(20)),
+      ],
+      restorable_roles: ["admin", "receptionist"],
+    });
+
+    const confirm = screen.getByRole("button", { name: "Вернуть доступ" });
+    expect(confirm).toBeDisabled();
+    expect(screen.getAllByRole("radio").map((o) => o.textContent)).toEqual([
+      "Администратор",
+      "Ресепшен",
+    ]);
+    fireEvent.click(screen.getByRole("radio", { name: "Ресепшен" }));
+    fireEvent.click(confirm);
+    await waitFor(() => {
+      expect(mockedRestore).toHaveBeenCalledTimes(1);
+    });
+    expect(mockedRestore.mock.calls.at(0)?.[0]).toEqual({
+      role: "receptionist",
+      bot_user_id: "u-8",
+    });
+  });
+
+  it("says a person who is gone in words, and keeps the sheet", async () => {
+    mockedRestore.mockRejectedValue(
+      new ApiError(409, "person_gone", "no account"),
+    );
+    await openRestore(MASTER_CARD_REVOKED);
+
+    fireEvent.click(screen.getByRole("button", { name: "Вернуть доступ" }));
+
+    expect(await screen.findByText("Доступ не возвращён.")).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Аккаунта этого человека больше нет — пригласите его заново на экране «Команда».",
+      ),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+  });
+});
+
+describe("DRF-2274 — «Вернуть доступ» only where there is something to give back", () => {
+  it("is offered on a revoked admin and on a flagged master card", async () => {
+    mockedRoster.mockResolvedValue(rosterOf(LENA_REVOKED, MASTER_CARD_REVOKED));
+    renderScreen();
+
+    await waitFor(() => {
+      expect(restoreButton("Лена")).toBeInTheDocument();
+    });
+    expect(restoreButton("Вера Лис")).toBeInTheDocument();
+  });
+
+  it("never on a live role, an unflagged card, yourself or a revoked owner", async () => {
+    mockedRoster.mockResolvedValue(
+      rosterOf(
+        LENA_ADMIN,
+        { ...MASTER_CARD_REVOKED, id: "master:m-6", master_id: "m-6", name: "Нина", restorable_roles: [] },
+        { ...LENA_REVOKED, id: "bot:u-1", bot_user_id: "u-1", name: "Сама" },
+        {
+          ...LENA_REVOKED,
+          id: "bot:u-9",
+          bot_user_id: "u-9",
+          name: "Бывшая владелица",
+          roles: [grant("owner", "revoked", "direct", daysAgo(300))],
+          restorable_roles: [],
+        },
+        {
+          // A role change closes the old row and it reads as «revoked» —
+          // but no revoke took it, and the server says so.
+          ...LENA_ADMIN,
+          id: "bot:u-12",
+          bot_user_id: "u-12",
+          name: "Сменила роль",
+          roles: [
+            grant("admin", "revoked", "access_code", daysAgo(40)),
+            grant("receptionist", "active", "direct", daysAgo(1)),
+          ],
+          restorable_roles: [],
+        },
+      ),
+    );
+    renderScreen();
+
+    // Presence first: the rows rendered, so the absences mean «no button».
+    expect(await screen.findByText("Бывшая владелица")).toBeInTheDocument();
+    expect(screen.getByText("Нина")).toBeInTheDocument();
+    for (const name of ["Лена", "Нина", "Сама", "Бывшая владелица", "Сменила роль"]) {
+      expect(queryRestoreButton(name)).not.toBeInTheDocument();
+    }
   });
 });

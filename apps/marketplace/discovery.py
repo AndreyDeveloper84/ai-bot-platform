@@ -1890,6 +1890,20 @@ def get_master(master_id: UUID) -> MasterCard | None:
     return _to_card(master) if master is not None else None
 
 
+def master_for_media(master_id: UUID | str) -> CatalogMaster | None:
+    """Мастер — хозяин фото/портфолио по id бота, в любом салоне (DRF-2539).
+
+    Фото мастера отдаётся байтами через бот (``apps.miniapp_api.master_media``):
+    клиенту на витрине, мастеру на своём экране, администратору в «Команде».
+    Поиск межтенантный — поэтому здесь, в единственном разрешённом месте
+    ``all_tenants`` (MKT1). В отличие от :func:`get_master` не требует
+    «доступен для записи»: мастер видит своё фото до публикации, салон — у
+    архивного. Наружу из этого поиска уходят только байты фото; поля мастера
+    вызывающий на провод не отдаёт.
+    """
+    return CatalogMaster.all_tenants.filter(id=master_id).first()
+
+
 # ─── DRF-1354: finding a master the client named BY NAME ────────────────
 #
 # Every reader above answers «who does X?». The live pilot of 24.08 asked the

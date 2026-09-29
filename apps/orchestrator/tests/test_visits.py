@@ -85,8 +85,9 @@ class TestVisitsList:
         assert "Массаж спины" in reply.text
         # No «у {имя}»: the name arrives nominative and Russian would need the
         # genitive. A separator cannot decline a name wrongly.
-        assert "· Инна ·" in reply.text
-        assert "12 августа" in reply.text
+        # DRF-2569 / слова владельца 28.09 п.1–2: «мастер {Имя}», ДД.ММ.ГГГГ в ЧЧ:ММ
+        # в поясе салона (здесь салон не опознан — пилотный пояс, предел).
+        assert "Массаж спины — мастер Инна, 12.08.2026 в 12:30 — 2500 ₽" in reply.text
         assert "2500 ₽" in reply.text
 
     def test_upcoming_and_past_answer_the_same_question(self, capability, db) -> None:
@@ -550,7 +551,7 @@ class TestCapabilityAndAdapterTogether:
         reply = visits_mod.route_visits(global_bot_user=_BotUser())
 
         assert "Массаж спины" in reply.text
-        assert "12 августа" in reply.text
+        assert "12.08.2026 в 12:30" in reply.text  # DRF-2569, слова владельца п.1
 
 
 # --------------------------------------------------------------------------- #

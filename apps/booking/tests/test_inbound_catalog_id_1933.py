@@ -80,7 +80,7 @@ class TestProxyCatalogRefs:
 
         with tenant_scope(tenant):
             _service, master = _proxy_catalog_refs(
-                SimpleNamespace(service_id=None, specialist_id=catalog_id)
+                SimpleNamespace(tenant=tenant, service_id=None, specialist_id=catalog_id)
             )
 
         assert master is not None and master.pk == row.pk
@@ -91,7 +91,7 @@ class TestProxyCatalogRefs:
 
         with tenant_scope(tenant):
             _service, master = _proxy_catalog_refs(
-                SimpleNamespace(service_id=None, specialist_id=row.pk)
+                SimpleNamespace(tenant=tenant, service_id=None, specialist_id=row.pk)
             )
 
         assert master is not None and master.pk == row.pk

@@ -220,7 +220,7 @@ export function MasterInternalChatListScreen() {
       setBackButton(false);
       setClosingConfirmation(false);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `navigate` нужен только внутри обработчика системной кнопки; привязка делается один раз за монтирование
   }, []);
 
   // --- Closing confirmation while compose dirty ---
@@ -260,7 +260,7 @@ export function MasterInternalChatListScreen() {
       submitting: false,
       err: "",
     });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- совет правила здесь ломает замысел: с `sheet.kind` эффект перезапустится при закрытии шторки и откроет её снова
   }, [initialOpenTopic]);
 
   // --- Sheet handlers ---
@@ -354,7 +354,7 @@ export function MasterInternalChatListScreen() {
       hapticNotify("error");
       const msg =
         e instanceof ApiError
-          ? e.detail || COPY.toastCreateError
+          ? COPY.toastCreateError
           : COPY.toastCreateError;
       setSheet({ ...sheet, submitting: false, err: msg });
     }

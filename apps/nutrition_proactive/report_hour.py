@@ -186,7 +186,29 @@ def apply_command(bot_user: Any, command: ReportHourCommand) -> str:
     return SET_CONFIRMATION.format(time=command.time)
 
 
-def try_handle_report_hour(*, text: str, bot_user: Any) -> str | None:
+class ReportHourReply(str):
+    """Ответ ветки часа отчёта — и его род (DRF-2267).
+
+    ``silences`` — «больше не присылай итоги»: просьба замолчать, под
+    которой кнопка следующего шага спорила бы с тем, что бот только что
+    принял. У остальных команд (час поставлен, час назван) шаг завершён, и
+    выход человеку нужен. Род решает ЭТОТ модуль: только он разбирал фразу,
+    обработчику иначе пришлось бы гадать по тексту.
+
+    Это СТРОКА, а не пара: ответ ветки — по-прежнему текст, и всё, что его
+    читало (``optout_skill``, прежние узлы DRF-2141), читает его так же.
+    Признак едет рядом, а не вместо.
+    """
+
+    silences: bool
+
+    def __new__(cls, text: str, *, silences: bool) -> "ReportHourReply":
+        reply = super().__new__(cls, text)
+        reply.silences = silences
+        return reply
+
+
+def try_handle_report_hour(*, text: str, bot_user: Any) -> ReportHourReply | None:
     """Global-surface entry point. The reply, or None to fall through.
 
     Same contract as :func:`optout.try_handle_opt_out`: the pilot IS the
@@ -201,7 +223,7 @@ def try_handle_report_hour(*, text: str, bot_user: Any) -> str | None:
             return None
         if not enabled():
             return None
-        return apply_command(bot_user, command)
+        return ReportHourReply(apply_command(bot_user, command), silences=command.kind == "off")
     except Exception:  # noqa: BLE001 -- must never break the turn
         logger.exception("nutrition_proactive.report_hour_failed")
         return None

@@ -91,10 +91,15 @@ def _calculated(
             "input_snapshot": dict(snapshot or {}),
         }
     }
+    snap = dict(snapshot or {})
     return replace(
         _profile(),
         targets_source=source,
-        targets_input_snapshot=dict(snapshot or {}),
+        targets_input_snapshot=snap,
+        # Названные цель и темп — поля профиля (вопрос 59): до ступени пола
+        # BMR они совпадают со снимком.
+        goal=str(snap.get("goal") or ""),
+        goal_pace=str(snap.get("pace") or ""),
         raw=raw,
     )
 

@@ -119,6 +119,7 @@ import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from datetime import timezone as dt_timezone
 from typing import Any
 
 from django.conf import settings
@@ -155,6 +156,8 @@ class AnonymizeResult:
     messages_archived: int = 0
     drafts_cleared: int = 0
     windows_cleared: int = 0
+    #: DRF-2243 — обращения к оператору, чей снимок или причина обезличены.
+    admin_tasks_cleared: int = 0
     conversation_ids: tuple[uuid.UUID, ...] = field(default_factory=tuple)
     #: DRF-2220 — raw webhook entries of this person deleted from the
     #: ``ingress:*`` streams and their DLQs, and entries up to the cutoff
@@ -166,6 +169,9 @@ class AnonymizeResult:
     #: entries leave by INGRESS_RAW_RETENTION_HOURS; callers must say so
     #: rather than report the streams as erased.
     raw_streams_checked: bool = True
+    #: DRF-2242 — rows of ``WebhookJournal`` severed from this person: body
+    #: emptied, trace cleared, event id hashed.
+    journal_rows_severed: int = 0
 
     @property
     def changed(self) -> bool:
@@ -301,6 +307,7 @@ def _clear_redis_stores(conversation_id: uuid.UUID) -> None:
     """
 
     from apps.llm import pii_tokenizer
+    from apps.orchestrator.decision_readiness import state as dre_state
     from apps.orchestrator.memory import short_term
 
     # The window itself — the raw sentence the fact was extracted from. This
@@ -311,6 +318,10 @@ def _clear_redis_stores(conversation_id: uuid.UUID) -> None:
     # kept so the model's reply can be de-tokenised. Emptying the sentence
     # and leaving this behind would keep the number.
     pii_tokenizer.clear_conversation(conversation_id)
+    # DRF-2214 — the decision-readiness state: its slots hold what the person
+    # said in this conversation (``dre:state:<id>``, TTL 2 h). Keyed by the
+    # conversation id as a string — the same key ``dr_shadow`` writes.
+    dre_state.clear(str(conversation_id))
 
 
 def _purge_raw_entries(bot_user_ids: list[uuid.UUID], *, through: datetime) -> Any:
@@ -333,6 +344,125 @@ def _purge_raw_entries(bot_user_ids: list[uuid.UUID], *, through: datetime) -> A
         if cid
     ]
     return purge_person_entries(channel_user_ids, through=through)
+
+
+#: ``AdminTask.reason``, который — код причины (``booking_handoff``,
+#: ``skill_requested_handoff``), а не слова человека. Всё прочее — свободный
+#: текст: «Trigger phrase: {реплика}», фрагмент отзыва — и обезличивается.
+_REASON_CODE_RE = re.compile(r"^[a-z0-9_.:\-]*$")
+
+
+def _before(iso: Any, through: datetime) -> bool:
+    """Отметка времени из снимка — не позже ``through``? Непонятная → да
+    (обезличиваем: ошибка в сторону человека, как у черновиков выше)."""
+    try:
+        moment = datetime.fromisoformat(str(iso))
+    except (TypeError, ValueError):
+        return True
+    if timezone.is_naive(moment):
+        moment = moment.replace(tzinfo=dt_timezone.utc)
+    return moment <= through
+
+
+def _anonymize_admin_tasks(conversation_id: uuid.UUID, through: datetime) -> int:
+    """Обезличить обращения к оператору в этом диалоге (DRF-2243).
+
+    ``AdminTask`` держит вторую копию переписки, которую стирание не видело:
+
+    * ``transcript_snapshot`` (``handoff.services.package_transcript``) —
+      последние 20 сообщений с полным ``content`` и идентификаторы человека;
+    * ``reason`` — на двух путях handoff «Trigger phrase: {реплика}», у жалобы
+      после визита — фрагмент отзыва.
+
+    Пустая строка, а не редакция (решение главного окна): редакция оставила бы
+    слова в поле, которое читает оператор, а слова для спора уже лежат в
+    ``ArchivedMessage`` — редактированные, на :data:`ANONYMIZED_DIALOGUE_
+    RETENTION_DAYS`. Сама строка задачи — тип, статус, время, адресат —
+    остаётся: это форензика, как и строка ``Message``.
+
+    Cutoff тот же, что у сообщений: реплика снимка позже ``through`` — снова
+    своя; идентификаторы и причина снимаются, если задача заведена не позже
+    ``through`` или в снимке есть хотя бы одна реплика до него. Открытые
+    задачи обезличиваются наравне с закрытыми (рекомендация главного окна,
+    ждёт слова владельца).
+
+    Returns:
+      число задач, в которых что-то изменилось.
+    """
+
+    from apps.handoff.models import AdminTask
+
+    changed = 0
+    for task in AdminTask.all_tenants.filter(conversation_id=conversation_id):
+        snapshot = dict(task.transcript_snapshot or {})
+        blanked_any = False
+        messages = []
+        for entry in snapshot.get("messages") or []:
+            item = dict(entry) if isinstance(entry, dict) else {}
+            if item.get("content") and _before(item.get("created_at"), through):
+                item["content"] = ""
+                blanked_any = True
+            messages.append(item)
+        if "messages" in snapshot:
+            snapshot["messages"] = messages
+
+        in_scope = blanked_any or task.created_at <= through
+        fields: list[str] = []
+        if in_scope:
+            person = dict(snapshot.get("bot_user") or {})
+            for key in ("display_name", "channel_user_id", "phone_hash"):
+                if person.get(key):
+                    person[key] = ""
+                    blanked_any = True
+            if "bot_user" in snapshot:
+                snapshot["bot_user"] = person
+            if task.reason and not _REASON_CODE_RE.match(task.reason):
+                task.reason = ""
+                fields.append("reason")
+        if blanked_any:
+            task.transcript_snapshot = snapshot
+            fields.append("transcript_snapshot")
+        if fields:
+            task.save(update_fields=[*fields, "updated_at"] if _has_updated_at(task) else fields)
+            changed += 1
+    return changed
+
+
+def _has_updated_at(instance: Any) -> bool:
+    return any(f.name == "updated_at" for f in instance._meta.concrete_fields)
+
+
+def _erase_journal_rows(bot_user_ids: list[uuid.UUID], *, through: datetime) -> int:
+    """Оторвать строки ``WebhookJournal`` от человека до ``through`` (DRF-2242).
+
+    Тот же фильтр оболочек, что у :func:`_purge_raw_entries` (только MAX:
+    чужое пространство id могло бы совпасть числом), плюс ``trace_id`` его
+    сообщений: после ``INGRESS_RAW_RETENTION_HOURS`` тела уже нет, а трасса
+    связывает строку с человеком весь срок строки.
+    """
+
+    from apps.identity.models import BotUser
+    from apps.ingress.retention import erase_person_rows
+
+    channel_user_ids = [
+        cid
+        for cid in BotUser.all_tenants.filter(id__in=bot_user_ids, channel="max").values_list(
+            "channel_user_id", flat=True
+        )
+        if cid
+    ]
+    trace_ids = (
+        Message.all_tenants.filter(
+            conversation__bot_user_id__in=bot_user_ids,
+            created_at__lte=through,
+            trace_id__isnull=False,
+        )
+        .values_list("trace_id", flat=True)
+        .distinct()
+    )
+    return erase_person_rows(
+        channel_user_ids, trace_ids=[str(t) for t in trace_ids], through=through
+    )
 
 
 def shell_ids_for_person(
@@ -425,6 +555,13 @@ def anonymize_dialogue(
         raw = RawPurgeResult()
         raw_checked = False
 
+    # DRF-2242 — the same bodies' copy in Postgres (`WebhookJournal`), and the
+    # trace / event id that tie a body-less row back to the person. Same
+    # database as the dialogue, so unlike the streams a failure is NOT
+    # swallowed: it propagates, the cutoff stays unmoved, and the sweep
+    # retries — the same contract `_clear_redis_stores` keeps below.
+    journal_rows = _erase_journal_rows(ids, through=through)
+
     conversations = list(
         # ``created_at__lte`` matters: a thread STARTED after the request
         # instant cannot hold a pre-cutoff turn, so anonymising it would move
@@ -439,6 +576,7 @@ def anonymize_dialogue(
     archived_total = 0
     drafts_total = 0
     windows_total = 0
+    tasks_total = 0
     keep_until = timezone.now() + timedelta(days=retention_days())
 
     for conv in conversations:
@@ -554,6 +692,8 @@ def anonymize_dialogue(
             Conversation.all_tenants.filter(id=conv.id).update(
                 anonymized_through=through, anonymized_reason=reason, skill_state={}
             )
+            # DRF-2243 — вторая копия переписки: обращение к оператору.
+            tasks_total += _anonymize_admin_tasks(conv.id, through)
         touched.append(conv.id)
 
     result = AnonymizeResult(
@@ -561,10 +701,12 @@ def anonymize_dialogue(
         messages_archived=archived_total,
         drafts_cleared=drafts_total,
         windows_cleared=windows_total,
+        admin_tasks_cleared=tasks_total,
         conversation_ids=tuple(touched),
         raw_entries_deleted=raw.deleted,
         raw_entries_unattributed=raw.unattributed,
         raw_streams_checked=raw_checked,
+        journal_rows_severed=journal_rows,
     )
 
     if result.changed:
@@ -578,6 +720,7 @@ def anonymize_dialogue(
                 "conversations": result.conversations,
                 "messages_archived": result.messages_archived,
                 "drafts_cleared": result.drafts_cleared,
+                "admin_tasks_cleared": result.admin_tasks_cleared,
                 # Ids, never bodies (C5 §6.2) — the audit row must not carry
                 # the text this function just went to the trouble of moving.
                 "conversation_ids": [str(c) for c in touched],

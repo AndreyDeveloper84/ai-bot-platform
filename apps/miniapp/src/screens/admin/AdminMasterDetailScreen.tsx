@@ -52,6 +52,8 @@ import {
   useState,
 } from "react";
 import { useNavigate, useParams } from "react-router-dom";
+import { useScreenBack } from "../../hooks/useScreenBack";
+import { backTo } from "../../lib/screen-back";
 
 import { Snackbar } from "../../components/Snackbar";
 import { StateError } from "../../components/StateError";
@@ -74,6 +76,7 @@ import {
   type MasterSchedule,
   type MeResponse,
 } from "../../lib/admin-api";
+import { MasterPhoto } from "../../components/MasterPhoto";
 import {
   hapticNotify,
   hapticSelection,
@@ -414,6 +417,8 @@ function MasterScheduleSection({ masterId, isOwner }: { masterId: string; isOwne
 /** «9 сентября» — дата подтверждения словами, как в решении владельца. */
 export function AdminMasterDetailScreen({ me }: Props) {
   const navigate = useNavigate();
+  // DRF-2368 — карточка мастера открывается из ростера, туда и возвращает.
+  const onBack = useScreenBack(backTo("/admin/team"));
   const { masterId = "" } = useParams<{ masterId: string }>();
 
   const [master, setMaster] = useState<MasterDetail | null>(null);
@@ -461,7 +466,7 @@ export function AdminMasterDetailScreen({ me }: Props) {
       setBackButton(false);
       setClosingConfirmation(false);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- `navigate` нужен только внутри обработчика системной кнопки; привязка делается один раз за монтирование
   }, []);
 
   useEffect(() => {
@@ -596,7 +601,7 @@ export function AdminMasterDetailScreen({ me }: Props) {
           setEditor({
             ...editor,
             saving: false,
-            err: e.detail || "Не получилось сохранить",
+            err: "Не получилось сохранить",
           });
         }
       } else {
@@ -633,7 +638,7 @@ export function AdminMasterDetailScreen({ me }: Props) {
         setToast("✓ Фото обновлено");
       } catch (e) {
         if (e instanceof ApiError) {
-          setPhotoErr(e.detail || "Не получилось загрузить фото");
+          setPhotoErr("Не получилось загрузить фото");
         } else {
           setPhotoErr("Связь пропала. Проверьте интернет.");
         }
@@ -661,7 +666,7 @@ export function AdminMasterDetailScreen({ me }: Props) {
     } catch (e) {
       const msg =
         e instanceof ApiError
-          ? e.detail || "Не получилось восстановить"
+          ? "Не получилось восстановить"
           : "Связь пропала — попробуйте ещё раз";
       setToast(msg);
     } finally {
@@ -696,7 +701,7 @@ export function AdminMasterDetailScreen({ me }: Props) {
           type="button"
           className="btn-secondary"
           style={{ marginTop: "var(--s-3)" }}
-          onClick={() => navigate("/admin/team")}
+          onClick={onBack}
         >
           Вернуться к команде
         </button>
@@ -711,7 +716,7 @@ export function AdminMasterDetailScreen({ me }: Props) {
           <button
             type="button"
             className="admin-flow-back"
-            onClick={() => navigate("/admin/team")}
+            onClick={onBack}
             aria-label="К команде"
           >
             ← Мастера
@@ -729,7 +734,7 @@ export function AdminMasterDetailScreen({ me }: Props) {
           <button
             type="button"
             className="admin-flow-back"
-            onClick={() => navigate("/admin/team")}
+            onClick={onBack}
             aria-label="К команде"
           >
             ← Мастера
@@ -751,7 +756,7 @@ export function AdminMasterDetailScreen({ me }: Props) {
           type="button"
           className="btn-secondary"
           style={{ marginTop: "var(--s-3)" }}
-          onClick={() => navigate("/admin/team")}
+          onClick={onBack}
         >
           Вернуться к команде
         </button>
@@ -777,7 +782,7 @@ export function AdminMasterDetailScreen({ me }: Props) {
         <button
           type="button"
           className="admin-flow-back"
-          onClick={() => navigate("/admin/team")}
+          onClick={onBack}
           aria-label="Назад к команде"
           style={{
             background: "transparent",
@@ -954,15 +959,12 @@ export function AdminMasterDetailScreen({ me }: Props) {
               fontWeight: 600,
             }}
           >
-            {master.photo_url ? (
-              <img
-                src={master.photo_url}
-                alt={`Фото ${master.name}`}
-                style={{ width: "100%", height: "100%", objectFit: "cover" }}
-              />
-            ) : (
-              <span aria-hidden="true">{initials(master.name)}</span>
-            )}
+            <MasterPhoto
+              src={master.photo_url}
+              alt={`Фото ${master.name}`}
+              style={{ width: "100%", height: "100%", objectFit: "cover" }}
+              fallback={<span aria-hidden="true">{initials(master.name)}</span>}
+            />
           </span>
           <div style={{ display: "flex", flexDirection: "column", gap: "var(--s-2)" }}>
             <input

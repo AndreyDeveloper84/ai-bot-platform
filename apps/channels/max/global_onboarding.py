@@ -461,8 +461,53 @@ def run_onboarding_turn(
             from apps.skills.welcome.skill import CONSENT_RECOVERY_FAILED_TEXT
 
             return DiscoveryReply(text=CONSENT_RECOVERY_FAILED_TEXT)
+        if recorded:
+            resumed = _resume_after_consent(result, bot_user)
+            if resumed is not None:
+                return resumed
 
     return _to_discovery_reply(result, bot_user)
+
+
+def _resume_after_consent(result: Any, bot_user: Any) -> DiscoveryReply | None:
+    """Возврат в поток, ради которого человек дал согласие (DRF-2267).
+
+    Таких потоков два — чтение дневника и список памяти (``consent_origin``):
+    отказ «мне нужно согласие на обработку личных данных» получил кнопку
+    согласия, и после неё человек должен увидеть то, за чем шёл, а не начало.
+
+    **Почему здесь, а не в навыке.** Журнал 152-ФЗ пишется выше по этой же
+    функции, ПОСЛЕ ``WelcomeSkill.handle``. Дневник, нарисованный внутри
+    навыка, спросил бы своё согласие раньше записи и ответил бы отказом на
+    ход, которым согласие давали.
+
+    **Ворота не обходятся.** Дневник рисуется обычным путём и спрашивает
+    согласие сам: если его всё ещё нет, человек читает тот же отказ, а не
+    записи. ``UNTRACKED`` — как в :mod:`apps.orchestrator.health_return`:
+    заход не планировался как открытие дневника, и суточный слот
+    наблюдения диетолога он не тратит.
+
+    ``None`` — «возвращать нечего», ответ навыка уходит как есть. Сбой
+    отрисовки тоже ``None``: согласие уже записано, и ронять ход из-за
+    возврата нельзя.
+    """
+    from apps.skills.welcome.skill import CONSENT_RECOVERY_RESUMED_ORIGINS
+
+    origin = (getattr(result, "meta", None) or {}).get("consent_origin")
+    if origin not in CONSENT_RECOVERY_RESUMED_ORIGINS:
+        return None
+    try:
+        from apps.orchestrator import personal_surface
+        from apps.orchestrator.coach_observation import Cadence
+
+        if origin == "memory":
+            resumed = personal_surface.render_memory(bot_user)
+        else:
+            resumed = personal_surface.render_diary(bot_user, cadence=Cadence.UNTRACKED)
+    except Exception:  # noqa: BLE001 — возврат не может стоить согласия
+        logger.exception("global_onboarding.consent_resume_failed origin=%s", origin)
+        return None
+    return DiscoveryReply(text=resumed.text, action_data=resumed.action_data)
 
 
 def _is_consent_grant_turn(result: Any) -> bool:

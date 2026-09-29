@@ -26,6 +26,7 @@ import { useNavigate } from "react-router-dom";
 
 // Загрузка / ошибка загрузки — мастерский SystemState (DRF-2194), не клиентский StateError.
 import { SystemState } from "../components/master/SystemState";
+import { useSelfService } from "../hooks/useMasterAvatarItems";
 import { ApiError } from "../lib/api";
 import { formatDuration, formatMoney } from "../lib/format";
 import {
@@ -48,6 +49,7 @@ import { setBackButton, signalReady } from "../lib/max-sdk";
 import { SELECT_PATH } from "./MasterServicesScreen";
 import { HOME_ROUTE, READINESS_ITEM_LABELS, SETUP_ROUTE } from "./MasterSetupLandingScreen";
 import { DAY_LABELS } from "./MasterWorkingHoursScreen";
+import { SALON_PLACE_TEXT } from "./MasterPlaceScreen";
 
 /** Сколько ждём ответа на отправку, прежде чем назвать исход неизвестным. */
 export const PUBLISH_TIMEOUT_MS = 20_000;
@@ -85,7 +87,10 @@ export const PUBLICATION_COPY = {
   profileDone: "Фото и имя заполнены",
   locationDone: "Место указано",
   identityLabel: "Подтверждение личности",
-  locationUnavailable: "Указать место в приложении пока нельзя — напишите в поддержку.",
+  // П.6 решений 28.09 (DRF-2581): до DRF-2370 фраза «указать место пока
+  // нельзя — напишите в поддержку» была правдой для всех; после него место
+  // `unavailable` бывает только у салонного пространства, и она стала ложью.
+  locationUnavailable: SALON_PLACE_TEXT,
 } as const;
 
 /** Текст пункта 8.2 — по коду каталога (M4 `publication_readiness`). */
@@ -184,6 +189,7 @@ type SendState = "idle" | "sending" | "uncertain" | "checking";
 
 export function MasterPublicationScreen() {
   const navigate = useNavigate();
+  const selfService = useSelfService();
   const [phase, setPhase] = useState<Phase>({ kind: "loading" });
   const [send, setSend] = useState<SendState>("idle");
   const inFlight = useRef(false);
@@ -305,7 +311,7 @@ export function MasterPublicationScreen() {
         data={data}
         active={status.profile_status === "active"}
         onCabinet={() => navigate(HOME_ROUTE)}
-        onAddServices={() => navigate(SELECT_PATH)}
+        onAddServices={selfService ? () => navigate(SELECT_PATH) : undefined}
       />
     );
   }
@@ -468,7 +474,8 @@ function Submitted({
   data: Loaded;
   active: boolean;
   onCabinet: () => void;
-  onAddServices: () => void;
+  /** DRF-2254: нет — кнопки «добавить услуги» нет (каталог назвал пространство салоном). */
+  onAddServices?: () => void;
 }) {
   const days = workingDayLines(data.hours);
   const configured = data.selection?.services.filter((s) => s.configured && s.offer) ?? [];
@@ -525,9 +532,11 @@ function Submitted({
         <button type="button" className="btn-primary" onClick={onCabinet}>
           {PUBLICATION_COPY.toCabinet}
         </button>
-        <button type="button" className="btn-secondary" onClick={onAddServices}>
-          {PUBLICATION_COPY.addServices}
-        </button>
+        {onAddServices ? (
+          <button type="button" className="btn-secondary" onClick={onAddServices}>
+            {PUBLICATION_COPY.addServices}
+          </button>
+        ) : null}
       </div>
     </main>
   );
