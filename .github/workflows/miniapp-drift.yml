@@ -222,9 +222,19 @@ jobs:
             RUN_ID="$EVENT_RUN_ID"
             SHA="$EVENT_SHA"
           else
+            # Newest by createdAt, sorted HERE. `--limit 1` trusted the API's
+            # order, and on the runner it returned a run from 2026-09-11
+            # (34570842718) while a same-day success existed -- dispatch run
+            # 36569037350. The guard refused correctly (that artifact had
+            # expired), but it judged the wrong deploy.
+            gh run list -R "$GITHUB_REPOSITORY" --workflow deploy-dev.yml \
+              --branch dev --status success --limit 50 \
+              --json databaseId,createdAt \
+              -q 'sort_by(.createdAt) | reverse | .[:3][] | "\(.databaseId) \(.createdAt)"'
             LAST="$(gh run list -R "$GITHUB_REPOSITORY" --workflow deploy-dev.yml \
-              --branch dev --status success --limit 1 \
-              --json databaseId,headSha -q '.[0] | "\(.databaseId) \(.headSha)"')"
+              --branch dev --status success --limit 50 \
+              --json databaseId,headSha,createdAt \
+              -q 'sort_by(.createdAt) | last | "\(.databaseId) \(.headSha)"')"
             RUN_ID="${LAST%% *}"
             SHA="${LAST##* }"
           fi

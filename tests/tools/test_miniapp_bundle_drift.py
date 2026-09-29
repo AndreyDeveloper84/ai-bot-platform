@@ -330,3 +330,14 @@ def test_the_workflow_hands_the_artifact_to_the_guard() -> None:
     assert '-n "miniapp-sourcemap-${SHA}"' in wf
     assert "--map-dir sourcemap" in wf
     assert "github.event.workflow_run.id" in wf
+
+
+def test_schedule_picks_the_newest_deploy_by_its_own_sort() -> None:
+    """`--limit 1` trusted the API order; on the runner it returned a 2026-09-11 run.
+
+    Dispatch run 36569037350 judged deploy 34570842718 while a same-day success
+    existed. The pick must sort by createdAt itself.
+    """
+    wf = (_PROJECT_ROOT / ".github" / "workflows" / "miniapp-drift.yml").read_text(encoding="utf-8")
+    assert "sort_by(.createdAt) | last" in wf
+    assert "--status success --limit 1" not in wf
