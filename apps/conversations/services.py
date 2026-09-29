@@ -176,6 +176,22 @@ def resolve_active_conversation(
     return conversation
 
 
+def _check_input_channel(input_channel: str, role: str) -> None:
+    """Отвергнуть недопустимый канал ввода реплики (DRF-2488).
+
+    Значение вне ``Message.InputChannel`` не пишем: ``CharField`` с
+    ``choices`` на ``create()`` не валидируется, и опечатка молча легла бы
+    в базу. ``voice`` бывает только у реплики человека — голосовой реплики
+    бота нет, такая пометка у ассистента была бы ошибкой вызывающего.
+    """
+    if input_channel not in Message.InputChannel.values:
+        raise ValueError(
+            f"input_channel={input_channel!r} is not one of {Message.InputChannel.values!r}."
+        )
+    if input_channel == Message.InputChannel.VOICE and role != Message.Role.USER:
+        raise ValueError(f"input_channel='voice' is only valid for role='user', got role={role!r}.")
+
+
 def record_message(
     conversation: Conversation,
     *,
@@ -190,6 +206,7 @@ def record_message(
     tokens_in: int = 0,
     tokens_out: int = 0,
     latency_ms: int | None = None,
+    input_channel: str = Message.InputChannel.TEXT,
 ) -> Message:
     """Persist a single message turn under `conversation`.
 
@@ -208,17 +225,23 @@ def record_message(
       trace_id: explicit trace ID; when None, reads ``current_trace_id()``
                 from ContextVar. UUID string is normalised to UUID.
       tokens_in / tokens_out / latency_ms: telemetry, Sprint 3+ AI track.
+      input_channel: как человек передал реплику (DRF-2488) — ``text`` или
+                     ``voice`` (content — расшифровка голосового). ``voice``
+                     допустим только при ``role=user``.
 
     Returns:
       The created Message.
 
     Raises:
-      ValueError: ``current_tenant()`` is None.
+      ValueError: ``current_tenant()`` is None; ``input_channel`` не из
+                  ``Message.InputChannel`` или ``voice`` не у реплики человека.
       CrossTenantError: ``conversation.tenant_id != current_tenant.id``
                         — defends against handler bugs that resolve a
                         Conversation in one tenant_scope and then write
                         to it inside a different scope.
     """
+
+    _check_input_channel(input_channel, role)
 
     tenant = current_tenant()
     if tenant is None:
@@ -262,6 +285,7 @@ def record_message(
             tokens_in=tokens_in,
             tokens_out=tokens_out,
             latency_ms=latency_ms,
+            input_channel=input_channel,
         )
         # Atomic UPDATE (not .save()) — so concurrent appends from
         # racing webhook turns don't overwrite each other's
@@ -557,6 +581,7 @@ def record_global_message(
     tokens_in: int = 0,
     tokens_out: int = 0,
     latency_ms: int | None = None,
+    input_channel: str = Message.InputChannel.TEXT,
 ) -> Message:
     """Persist a turn under a global (sentinel) Conversation (#1026).
 
@@ -579,7 +604,13 @@ def record_global_message(
     is what a multi-select needs: the options it offered have to survive until
     the tap that answers them. Defaults to ``None``, i.e. exactly the old
     behaviour for every caller that does not pass it.
+
+    ``input_channel`` — как в :func:`record_message` (DRF-2488): ``voice``
+    помечает реплику человека, чей ``content`` — расшифровка голосового;
+    неизвестное значение или ``voice`` не у ``role=user`` — ``ValueError``.
     """
+
+    _check_input_channel(input_channel, role)
 
     from apps.identity.services.global_tenant import get_global_bot_tenant
 
@@ -612,6 +643,7 @@ def record_global_message(
             tokens_in=tokens_in,
             tokens_out=tokens_out,
             latency_ms=latency_ms,
+            input_channel=input_channel,
         )
         Conversation.all_tenants.filter(pk=conversation.pk).update(last_message_at=now)
     conversation.last_message_at = now

@@ -664,6 +664,9 @@ def seed_person(tenant: Tenant, fake_redis: _FakeRedis, label: str) -> Person:
             content=text,
             rendered_text=text,
             action_data={"offer": f"вариант для {label}"},
+            # DRF-2488 — реплика человека надиктована: пометка обязана
+            # пережить обезличивание (проверка ANONYMISE ниже).
+            input_channel="voice" if role == "user" else "text",
         )
         Message.all_tenants.filter(pk=message.pk).update(created_at=earlier)
     master = CatalogMaster.all_tenants.create(
@@ -817,7 +820,7 @@ def snapshot(store: str, person: Person, fake_redis: _FakeRedis) -> Any:
         return list(
             Message.all_tenants.filter(conversation=person.conversation)
             .order_by("created_at")
-            .values("content", "rendered_text", "action_data", "tool_call")
+            .values("content", "rendered_text", "action_data", "tool_call", "input_channel")
         )
     if store == "conversations.ArchivedMessage":
         return list(
@@ -987,6 +990,9 @@ def assert_outcome(
                 assert row["rendered_text"] == ""
                 assert row["action_data"] is None
                 assert row["tool_call"] is None
+            # DRF-2488 — канал ввода не слова человека: остаётся как был.
+            assert sorted(r["input_channel"] for r in before) == ["text", "voice"]
+            assert [r["input_channel"] for r in after] == [r["input_channel"] for r in before]
             return
         if store == "conversations.AiDraft":
             assert [row["content"] for row in after] == [""]
