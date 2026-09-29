@@ -42,6 +42,7 @@ import {
   MasterSetupLandingScreen,
   PUBLICATION_ROUTE,
   PUBLISH_ENTRY_LABEL,
+  SALON_REST_TEXT,
   SETUP_EXPLAIN,
   SETUP_RESUME_NOTE,
   START_LABEL,
@@ -187,7 +188,7 @@ describe("экран 01", () => {
     expect(row.textContent).toBe(`—Услуги и цены${ITEM_STATE_TEXT.unavailable}`);
   });
 
-  it("салонный мастер: оба недоступных пункта названы; бар полон, кнопки нет", async () => {
+  it("салонный мастер: оба недоступных пункта названы; бар полон со словами владельца, кнопки нет", async () => {
     // Замер, а не одобрение. У салонного мастера сервер помечает недоступными
     // И услуги, И место (workspace_kind == "salon", DRF-2254). Когда остальное
     // настроено, экран показывает полный бар, не даёт ни одной кнопки действия
@@ -215,12 +216,44 @@ describe("экран 01", () => {
     // могла бы упасть — ровно та вакуумность, против которой этот узел.
     const actions = screen.getAllByRole("button").filter((b) => !list.contains(b));
     expect(actions.map((b) => b.textContent)).toEqual(["Открыть кабинет"]);
-    // Самое громкое в тупике — слова: заголовок по-прежнему «всё готово», а
-    // лид обещает подготовку профиля, которой мастеру негде сделать.
     expect(
       screen.getByRole("heading", { name: "Андрей, всё готово 👋" }),
     ).toBeInTheDocument();
+    // Решение владельца 28.09 (слова, п.7; DRF-2582). Здесь стояло «лид
+    // обещает подготовку профиля, которой мастеру негде сделать» — записанный
+    // тупик. Теперь и лид, и озвучка полосы говорят словами владельца, а
+    // обещания подготовки нет.
+    expect(screen.getByText(SALON_REST_TEXT)).toBeInTheDocument();
+    expect(bar).toHaveAttribute("aria-valuetext", SALON_REST_TEXT);
+    expect(screen.queryByText(SETUP_EXPLAIN)).toBeNull();
+  });
+
+  it.each([
+    [
+      "у мастера есть своё незакрытое",
+      [
+        item("services", "unavailable", { reason: "managed_outside_app", deep_link: null }),
+        item("location", "unavailable", { reason: "managed_outside_app", deep_link: null }),
+        item("hours", "missing"),
+        item("profile", "done"),
+      ],
+    ],
+    [
+      "своё не прочитано (unknown) — незнание не «готово»",
+      [
+        item("services", "unavailable", { reason: "managed_outside_app", deep_link: null }),
+        item("location", "unavailable", { reason: "managed_outside_app", deep_link: null }),
+        item("hours", "unknown"),
+        item("profile", "done"),
+      ],
+    ],
+  ])("не «остальное настроит салон», когда %s (DRF-2582)", async (_, items) => {
+    mockedReadiness.mockResolvedValue(readiness(items));
+    renderScreen();
+    await screen.findByRole("list", { name: "Осталось настроить" });
     expect(screen.getByText(SETUP_EXPLAIN)).toBeInTheDocument();
+    expect(screen.queryByText(SALON_REST_TEXT)).toBeNull();
+    expect(screen.getByTestId("setup-bar")).not.toHaveAttribute("aria-valuetext");
   });
 
   it("недоступный пункт не становится следующим шагом", async () => {
