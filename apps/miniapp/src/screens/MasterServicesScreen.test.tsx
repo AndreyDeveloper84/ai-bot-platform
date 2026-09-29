@@ -81,6 +81,7 @@ import {
   pickedMessage,
   validateOwnService,
 } from "./MasterServicesScreen";
+import { settleScenario } from "../test/settleScenario";
 
 /**
  * Сторож от зависимости от времени (DRF-1810): только в этом файле.
@@ -662,6 +663,8 @@ describe("MasterServicesScreen — «Свои услуги»", () => {
 
     expect(within(ownSection()).getByText("Перманентный макияж бровей")).toBeInTheDocument();
     expect(mockedSimilar).toHaveBeenCalledWith("Татуаж бровей");
+    // DRF-2597: создания нет до «Всё равно добавить мою» — замер после того, как подсказка улеглась.
+    await settleScenario();
     expect(mockedCreate).not.toHaveBeenCalled();
     expect(within(ownSection()).getByRole("button", { name: PICK_CANON_LABEL })).toBeEnabled();
     expect(mockedSelect).not.toHaveBeenCalled();

@@ -67,6 +67,7 @@ import { loadImage, renderSquareCrop } from "../lib/image-crop";
 import { ApiError } from "../lib/api";
 import { REFUSAL_CANON } from "../lib/refusal-canon";
 import { MasterProfileScreen, PROFILE_COPY } from "./MasterProfileScreen";
+import { settleScenario } from "../test/settleScenario";
 
 const GUARD_ASYNC_TIMEOUT_MS = 20;
 let previousAsyncUtilTimeout = 1000;
@@ -220,6 +221,8 @@ describe("6.1 — лимиты из контракта, имя с «Измени
     fireEvent.change(input, { target: { value: "А" } });
     fireEvent.click(screen.getByText(PROFILE_COPY.buttons.save));
     await settle();
+    // DRF-2597: короткое имя не уходит на сервер вовсе — замер после того, как «Сохранить» улеглось.
+    await settleScenario();
     expect(patchMasterProfile).not.toHaveBeenCalled();
     expect(screen.getByRole("alert").textContent).toContain("2");
 
