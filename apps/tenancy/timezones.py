@@ -14,14 +14,25 @@
 * битое имя → :data:`FALLBACK_TZ` и строка ``tenancy.bad_tenant_tz`` в журнал.
   Журнал — не украшение: до DRF-2595 так делали ``salon_day`` и
   ``time_preference``, а наивное сведение стёрло бы и эти две строки;
-* ``strict=True`` — ни битое, ни ПУСТОЕ имя не подменяются, а дают отказ после
-  строки журнала; причины в журнале разные, потому что разное лечение:
-  ``tenancy.bad_tenant_tz`` — имя не разобрано (опечатка), исходное исключение;
-  ``tenancy.empty_tenant_tz`` — имя стёрто (у поля default есть, «никогда не
-  задавали» не бывает), :class:`EmptyTenantTimezone`. Для путей, чей выход —
-  обязательство (запись, предложенные часы): МСК там правдоподобен, а неверный
-  час — человек, который приедет не тогда. До DRF-2595 эти пути звали
-  ``ZoneInfo(tenant.timezone)`` и отказывали на обоих — это прежнее поведение.
+Отказ вместо подмены — ДВА разных вопроса, и у помощника два разных флага.
+Их склейка в один (``strict``) однажды уже дала неточный список мест:
+
+* ``refuse_broken=True`` — имя НЕПРИГОДНО (опечатка): исходное исключение после
+  ``tenancy.bad_tenant_tz``;
+* ``refuse_empty=True`` — пояс НЕ ЗАДАН (стёрт: у поля есть default, «никогда
+  не задавали» не бывает): :class:`EmptyTenantTimezone` после
+  ``tenancy.empty_tenant_tz``. Причины в журнале разные — разное лечение.
+
+Какие флаги ставить, решает цена ошибки на выходе пути и его прежнее поведение:
+
+* выход — ОБЯЗАТЕЛЬСТВО (создание записи, предложенные часы): оба флага. МСК
+  там правдоподобен, а неверный час — человек, который приедет не тогда. До
+  DRF-2595 эти пути звали ``ZoneInfo(tenant.timezone)`` и отказывали на обоих;
+* выход — ПОКАЗ (карточка профиля, полоса готовности): только
+  ``refuse_broken``. Там стояло ``ZoneInfo(... or "Europe/Moscow")`` — пусто
+  давало МСК, отказывало только битое; отказ на пустом сломал бы экран ради
+  косметической неточности;
+* остальные пути — ни одного флага.
 """
 
 from __future__ import annotations
@@ -41,11 +52,11 @@ FALLBACK_TZ = "Europe/Moscow"
 
 
 class EmptyTenantTimezone(ValueError):
-    """Строгий путь: пояс салона пуст. ``ValueError`` — как у прежнего
+    """``refuse_empty``: пояс салона пуст. ``ValueError`` — как у прежнего
     ``ZoneInfo("")`` на этих путях, чтобы вызывающие ловили то же, что ловили."""
 
 
-def salon_zone(tenant: Any, *, strict: bool = False) -> ZoneInfo:
+def salon_zone(tenant: Any, *, refuse_broken: bool = False, refuse_empty: bool = False) -> ZoneInfo:
     """Пояс салона ``tenant`` по правилу модуля; ``tenant=None`` — как пустой."""
 
     name = str(getattr(tenant, "timezone", "") or "").strip()
@@ -58,9 +69,9 @@ def salon_zone(tenant: Any, *, strict: bool = False) -> ZoneInfo:
                 getattr(tenant, "pk", None),
                 name[:64],
             )
-            if strict:
+            if refuse_broken:
                 raise
-    elif strict:
+    elif refuse_empty:
         logger.warning("tenancy.empty_tenant_tz tenant=%s", getattr(tenant, "pk", None))
         raise EmptyTenantTimezone(f"tenant {getattr(tenant, 'pk', None)} has no timezone")
     return ZoneInfo(FALLBACK_TZ)

@@ -127,7 +127,7 @@ def accepts_today(master: CatalogMaster, *, client: Any, today: date_cls | None 
     service_id = _bridged_service_id(master)
     if service_id is None:
         return {"value": False, "reason": ACCEPTS_TODAY_NO_SERVICE}
-    day = today or timezone.now().astimezone(salon_zone(master.tenant, strict=True)).date()
+    day = today or timezone.now().astimezone(salon_zone(master.tenant, refuse_broken=True)).date()
     try:
         slots = client.get_available_times(
             specialist_id=catalog_specialist_id(master),

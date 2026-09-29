@@ -598,10 +598,10 @@ def slots(request: HttpRequest) -> HttpResponse:
 
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
     tenant = bot_user.tenant
-    # DRF-2595: битый пояс — отказ (strict), а не окна по московскому часу.
+    # DRF-2595: битый или пустой пояс — отказ, а не окна по московскому часу.
     from apps.tenancy.timezones import salon_zone
 
-    tz = salon_zone(tenant, strict=True)
+    tz = salon_zone(tenant, refuse_broken=True, refuse_empty=True)
 
     master_id = request.GET.get("master_id", "")
     service_id = request.GET.get("service_id", "")

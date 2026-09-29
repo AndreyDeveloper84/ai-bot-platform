@@ -246,11 +246,11 @@ def create_customer_booking(
     7. Emit ``booking.created`` event.
     """
 
-    # DRF-2595: битый пояс — отказ (strict), а не запись по московскому часу:
+    # DRF-2595: битый или пустой пояс — отказ, а не запись по московскому часу:
     # в салоне не в Москве это неверный час визита, которого никто не заметит.
     from apps.tenancy.timezones import salon_zone
 
-    tz = salon_zone(inp.tenant, strict=True)
+    tz = salon_zone(inp.tenant, refuse_broken=True, refuse_empty=True)
 
     if inp.visit_at <= timezone.now():
         raise BookingCreateError("visit_in_past", "visit_at must be in the future")

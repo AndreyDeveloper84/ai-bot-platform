@@ -259,8 +259,9 @@ def _hours_item(master: CatalogMaster) -> ReadinessItem:
     today = timezone.now().date()
     from apps.tenancy.timezones import salon_zone
 
-    # DRF-2595: битое имя бросало и бросает (strict) — теперь с журналом.
-    tz = salon_zone(master.tenant, strict=True)
+    # DRF-2595: битое имя бросало и бросает — теперь с журналом; пусто давало
+    # МСК и даёт (выход — показ, не обязательство).
+    tz = salon_zone(master.tenant, refuse_broken=True)
     try:
         weekly, _exceptions, _blocks = load_day_frame(
             master,

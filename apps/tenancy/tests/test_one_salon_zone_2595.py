@@ -46,23 +46,82 @@ class TestTheRule:
         assert str(zone) == "Europe/Moscow"
         assert any("tenancy.bad_tenant_tz" in r.getMessage() for r in caplog.records)
 
-    def test_strict_raises_on_a_broken_zone_after_the_same_log_line(self, caplog) -> None:
+    def test_refuse_broken_raises_on_a_broken_zone_after_its_log_line(self, caplog) -> None:
         with caplog.at_level("WARNING"), pytest.raises(ZoneInfoNotFoundError):
-            salon_zone(_tenant("Not/AZone"), strict=True)
+            salon_zone(_tenant("Not/AZone"), refuse_broken=True)
         messages = [r.getMessage() for r in caplog.records]
         assert any("tenancy.bad_tenant_tz" in m for m in messages)
         assert not any("empty_tenant_tz" in m for m in messages)
 
-    def test_strict_refuses_an_empty_zone_with_its_own_reason(self, caplog) -> None:
-        # Пусто на строгом пути — отказ (так было до сведения: ZoneInfo("")),
+    def test_refuse_empty_raises_on_an_empty_zone_with_its_own_reason(self, caplog) -> None:
+        # Пусто на пути-обязательстве — отказ (так было до сведения: ZoneInfo("")),
         # и причина в журнале своя: стёрли, а не опечатались.
         from apps.tenancy.timezones import EmptyTenantTimezone
 
         with caplog.at_level("WARNING"), pytest.raises(EmptyTenantTimezone):
-            salon_zone(_tenant(""), strict=True)
+            salon_zone(_tenant(""), refuse_broken=True, refuse_empty=True)
         messages = [r.getMessage() for r in caplog.records]
         assert any("tenancy.empty_tenant_tz" in m for m in messages)
         assert not any("bad_tenant_tz" in m for m in messages)
+
+    def test_the_two_questions_are_answered_separately(self) -> None:
+        """Путь-показ: refuse_broken без refuse_empty — пусто даёт МСК, битое
+        отказывает. Склейка двух вопросов в один флаг сделала бы эти пары
+        одинаковыми."""
+        from apps.tenancy.timezones import EmptyTenantTimezone
+
+        assert str(salon_zone(_tenant(""), refuse_broken=True)) == "Europe/Moscow"
+        with pytest.raises(ZoneInfoNotFoundError):
+            salon_zone(_tenant("Not/AZone"), refuse_broken=True)
+        # и обратная половина: refuse_empty без refuse_broken
+        assert str(salon_zone(_tenant("Not/AZone"), refuse_empty=True)) == "Europe/Moscow"
+        with pytest.raises(EmptyTenantTimezone):
+            salon_zone(_tenant(""), refuse_empty=True)
+
+
+#: Решение главного окна 29.09 — какие флаги у каких путей, по цене ошибки на
+#: выходе и по прежнему поведению (см. докстринг apps.tenancy.timezones).
+#: Сверяется по коду: место вызова обязано нести ровно эти флаги.
+REFUSAL_BY_PATH: dict[tuple[str, str], frozenset[str]] = {
+    # выход — обязательство; до сведения ZoneInfo(tenant.timezone) отказывал на обоих
+    ("apps/booking/services/create.py", "create_customer_booking"): frozenset(
+        {"refuse_broken", "refuse_empty"}
+    ),
+    ("apps/miniapp_api/views.py", "slots"): frozenset({"refuse_broken", "refuse_empty"}),
+    # выход — показ; до сведения пусто давало МСК, отказывало только битое
+    ("apps/master_api/views_profile_card.py", "accepts_today"): frozenset({"refuse_broken"}),
+    ("apps/master_api/services/onboarding_readiness.py", "_hours_item"): frozenset(
+        {"refuse_broken"}
+    ),
+}
+
+
+class TestEachPathCarriesItsDecidedFlags:
+    def test_refusing_call_sites_are_exactly_the_decided_ones(self) -> None:
+        found: dict[tuple[str, str], frozenset[str]] = {}
+        for path, text in _production_sources().items():
+            tree = ast.parse(text)
+
+            def visit(node: ast.AST, function: str, path: str = path) -> None:
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    function = node.name
+                if isinstance(node, ast.Call):
+                    f = node.func
+                    name = f.id if isinstance(f, ast.Name) else getattr(f, "attr", None)
+                    flags = frozenset(
+                        k.arg
+                        for k in node.keywords
+                        if k.arg in ("refuse_broken", "refuse_empty")
+                        and isinstance(k.value, ast.Constant)
+                        and k.value.value is True
+                    )
+                    if name == "salon_zone" and flags:
+                        found[(path, function)] = flags
+                for child in ast.iter_child_nodes(node):
+                    visit(child, function)
+
+            visit(tree, "<module>")
+        assert found == REFUSAL_BY_PATH
 
 
 class TestSalonIso:
