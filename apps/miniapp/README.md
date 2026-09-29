@@ -81,10 +81,16 @@ is empty. To still exercise the auth flow:
 ## Runtime env vars
 
 - `VITE_SUPPORT_DEEPLINK` — support channel URL used by the profile
-  privacy sheets (#949). **Must be set for every deploy build** (DRF-2654):
-  unset or empty → the placeholder `https://max.me/aylasupport` is baked into
-  the bundle, and that is what the pilot shipped on 29.09. Where it is set
-  and how to check the bundle — `docs/runbooks/miniapp-build-env.md`.
+  privacy sheets (#949): export, account deletion, health consent, storage
+  revoke. It is the person's route to their 152-ФЗ rights when the in-app
+  action fails and an operator does it by hand, so it must open a live
+  channel. **Production builds refuse without it** (DRF-2654):
+  `npm run build` / `vite build` with the variable unset or empty fails with
+  `DRF-2654: production build needs VITE_SUPPORT_DEEPLINK`. Before that
+  refusal the pilot shipped the placeholder `https://max.me/aylasupport`
+  (measured 29.09). `npm run dev` still falls back to the placeholder. Where
+  it is set for the deploy and how to check the bundle —
+  `docs/runbooks/miniapp-build-env.md`.
 
 ## What's deferred (swap later in one PR)
 
