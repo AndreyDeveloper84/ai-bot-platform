@@ -46,6 +46,7 @@ from django.views.decorators.http import require_http_methods
 from apps.catalog.specialist_ref import CatalogSpecialistUnresolved, catalog_specialist_id
 from apps.integrations.ayla.booking_client import (
     BookingBadRequestError,
+    BookingRateLimitedError,
     BookingUnavailableError,
     get_ayla_booking_client,
 )
@@ -62,6 +63,24 @@ MEDIA_PREFIX = "/api/v1/customer/media/masters"
 #: объект, объявленный ``text/html`` или ``image/svg+xml``, исполнился бы в
 #: источнике Mini App вместе с initData.
 IMAGE_TYPES_SHOWN = frozenset({"image/jpeg", "image/png", "image/webp"})
+
+#: DRF-2618 — квота на человека: картинок в минуту, до похода в каталог.
+#:
+#: Выведена, а не взята с потолка. Самый тяжёлый экран клиента — витрина
+#: салона: ``masters_list`` отдаёт всех продаваемых мастеров без страниц,
+#: на пилоте 33–36 фото. Профиль мастера — фото + до 10 работ портфолио
+#: (лимит каталога) = 11. Минута честного пользования: витрина + три
+#: профиля = 36 + 3 × 11 = 69. Администратор: «Команда» — до 50 на страницу
+#: (``admin_api.views.MAX_LIST_LIMIT``) + карточка мастера = 51. Повтор в
+#: пределах 5 минут бесплатен (``Cache-Control: private, max-age=300`` и
+#: аренда Mini App). 120 — это ~1,7× честного пика: листающий человек не
+#: упрётся, зациклившийся клиент остановится на двух в секунду.
+#:
+#: **Предел:** квота каталога — 600/мин на ВЕСЬ бот (один адрес). Пять
+#: одновременных честных пиков выберут её и так; квота на человека лечит
+#: одиночку, не толпу.
+MEDIA_PER_PERSON_PER_MINUTE = 120
+MEDIA_QUOTA_WINDOW_SECONDS = 60
 
 
 def _version(raw: str) -> str:
@@ -103,6 +122,41 @@ def outward_portfolio(master_id: object, body: dict) -> dict:
     return out
 
 
+def _quota_key(identity: str) -> str:
+    return f"miniapp.master_media.quota:{identity}"
+
+
+def _over_quota(identity: str) -> bool:
+    """Сверх квоты ли этот запрос человека (фиксированное окно, общий кэш).
+
+    ``add`` ставит срок ровно один раз, в начале окна, — окно не ползёт за
+    запросами (тот же приём, что у ``staff_invites._check_rate_limit_for``).
+    Кэш недоступен — пропускаем: это тормоз, а не пропуск; отказ картинок
+    всем из-за кэша хуже, чем минута без тормоза.
+    """
+    from django.core.cache import cache
+
+    key = _quota_key(identity)
+    try:
+        if cache.add(key, 1, timeout=MEDIA_QUOTA_WINDOW_SECONDS):
+            return False
+        return int(cache.incr(key)) > MEDIA_PER_PERSON_PER_MINUTE
+    except ValueError:
+        return False  # ключ истёк между add и incr — первый запрос окна
+    except Exception as exc:  # noqa: BLE001 — тормоз, не ворота
+        logger.warning("miniapp_api.master_media.quota_unavailable exc=%s", type(exc).__name__)
+        return False
+
+
+def _rate_limited() -> JsonResponse:
+    response = JsonResponse(
+        {"error": "media_rate_limited", "detail": "too many images, retry in a minute"},
+        status=429,
+    )
+    response["Retry-After"] = str(MEDIA_QUOTA_WINDOW_SECONDS)
+    return response
+
+
 def _absent() -> JsonResponse:
     return JsonResponse({"error": "not_found", "detail": "photo not found"}, status=404)
 
@@ -126,6 +180,10 @@ def _serve(master_id: str, item_id: str | None) -> HttpResponse:
         return _absent()
     except BookingBadRequestError:
         return _absent()
+    except BookingRateLimitedError:
+        # Каталог выбрал свою квоту (600/мин на бот) — это не «каталог упал».
+        logger.warning("miniapp_api.master_media.catalog_rate_limited master=%s", master_id)
+        return _rate_limited()
     except BookingUnavailableError:
         logger.warning("miniapp_api.master_media.catalog_unavailable master=%s", master_id)
         return JsonResponse(
@@ -153,14 +211,27 @@ def require_signed_session(view_func: Callable[..., HttpResponse]) -> Callable[.
     метка :data:`GUARD_ATTR` — для переписи маршрутов
     (``test_transport_refusal_1893``). Обход разработки — как у мастерских
     ручек: только при ``DEBUG`` и только по заголовку.
+
+    DRF-2618 — квота на человека (:data:`MEDIA_PER_PERSON_PER_MINUTE`) —
+    здесь же, после подписи и до вьюхи: сверх квоты не делается ни поиска
+    мастера, ни похода в каталог. Ключ — бот подписи и id человека в канале
+    из той же подписи; строка личности не ищется.
     """
 
     @wraps(view_func)
     def wrapper(request: HttpRequest, *args: Any, **kwargs: Any) -> HttpResponse:
-        if try_dev_bypass(request) is None:
-            _verified, refusal = verify_request_init_data(request, surface="master_media")
+        bypass = try_dev_bypass(request)
+        if bypass is None:
+            verified, refusal = verify_request_init_data(request, surface="master_media")
             if refusal is not None:
                 return refusal
+            assert verified is not None  # noqa: S101 — отказа нет, значит подпись есть
+            identity = f"{verified.bot_slug}:{verified.user_id}"
+        else:
+            identity = f"dev:{bypass[0].pk}"
+        if _over_quota(identity):
+            logger.warning("miniapp_api.master_media.person_rate_limited")
+            return _rate_limited()
         return view_func(request, *args, **kwargs)
 
     setattr(wrapper, GUARD_ATTR, "master_media")
