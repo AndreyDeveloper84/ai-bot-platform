@@ -46,7 +46,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone as dt_timezone
 from typing import Any
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from zoneinfo import ZoneInfo
 
 from apps.master_api.services.visit_source import (
     UPCOMING_STATUSES,
@@ -248,18 +248,17 @@ def _dc_to_dict(obj: Any) -> Any:
 
 
 def get_tenant_tz(tenant: Any) -> ZoneInfo:
-    """Resolve the tenant's IANA TZ — falls back to UTC on bad values.
+    """Пояс салона — правилом дня салона (``salon_day.tenant_tz``), DRF-2595.
 
-    The :attr:`Tenant.timezone` field's docstring promises this fallback
-    so callers don't need to guard against operator typos.
+    До DRF-2595 здесь был свой запасной пояс — UTC, а у семи соседних
+    правил — Москва. У салона с пустым или битым ``timezone`` сутки мастера
+    резались по UTC: визит в 01:30 по Москве (22:30 UTC накануне) уезжал в
+    ПРЕДЫДУЩИЙ день — час верный, день чужой. Пятого правила не вводится:
+    запасной пояс один и назван там (``DEFAULT_TZ = "Europe/Moscow"``, пилот).
     """
+    from apps.admin_api.services.salon_day import tenant_tz
 
-    tz_name = getattr(tenant, "timezone", "") or "UTC"
-    try:
-        return ZoneInfo(tz_name)
-    except ZoneInfoNotFoundError:
-        logger.warning("master_api.dashboard.bad_tenant_tz tz=%s", tz_name)
-        return ZoneInfo("UTC")
+    return tenant_tz(tenant)
 
 
 def _split_name(client_name: str) -> tuple[str, str]:
