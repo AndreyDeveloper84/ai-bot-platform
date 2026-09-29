@@ -158,6 +158,7 @@ from apps.integrations.ayla.offer_refusal import OFFER_NOT_SELLABLE_SLUG, client
 from apps.skills.booking.provider import YClientsScheduleUnavailableError
 from apps.skills.booking.prompts import BrandVoiceConfig, build_booking_prompt
 from apps.skills.booking.tools import (
+    INVALID_ARGUMENT,
     BOOKING_TOOL_SPECS,
     BUY_CERTIFICATE_TOOL_SPEC,
     CALC_PRICE_TOOL_SPEC,
@@ -1228,6 +1229,10 @@ def _dispatch_tool(
         )
         if result.error == "invalid_master_id":
             return result, "booking_invalid_master_id"
+        # DRF-2667: аргумент модели не того типа — не сбой провайдера и не
+        # передача менеджеру; как ``invalid_datetime``, ответ собирает Phase 3.
+        if result.error == INVALID_ARGUMENT:
+            return result, ""
         # DRF-997: transient schedule outage (e.g. 429) is returned to the
         # user as a retry message, not a manager handoff.
         if result.error == "schedule_unavailable":
@@ -1253,6 +1258,10 @@ def _dispatch_tool(
             return result, "booking_invalid_master_id"
         if result.error == "invalid_service_id":
             return result, "booking_invalid_service_id"
+        # DRF-2667: аргумент модели не того типа — не сбой провайдера и не
+        # передача менеджеру; как ``invalid_datetime``, ответ собирает Phase 3.
+        if result.error == INVALID_ARGUMENT:
+            return result, ""
         # DRF-997: transient schedule outage (e.g. 429) is returned to the
         # user as a retry message, not a manager handoff.
         if result.error == "schedule_unavailable":
@@ -1275,6 +1284,10 @@ def _dispatch_tool(
         )
         if result.error == "invalid_record_id":
             return result, "booking_invalid_record_id"
+        # DRF-2667: аргумент модели не того типа — не сбой провайдера и не
+        # передача менеджеру; как ``invalid_datetime``, ответ собирает Phase 3.
+        if result.error == INVALID_ARGUMENT:
+            return result, ""
         # DRF-997: transient schedule outage (e.g. 429) is returned to the
         # user as a retry message, not a manager handoff.
         if result.error == "schedule_unavailable":

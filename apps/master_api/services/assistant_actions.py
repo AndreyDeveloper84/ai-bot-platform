@@ -309,8 +309,39 @@ def _signer() -> TimestampSigner:
     return TimestampSigner(key=key, salt=ACTION_TOKEN_SALT)
 
 
+#: DRF-2667 — аргумент пришёл от модели не текстом. Отдельный слаг, а не
+#: ветка «не названо»: «человек не назвал» и «модель прислала словарь» —
+#: разные события, второе должно быть видно в журнале.
+ARGUMENT_NOT_TEXT_SLUG: Final = "argument_not_text"
+#: Текст без самого значения: человеку — что делать, а не что прислала модель.
+ARGUMENT_NOT_TEXT_DETAIL: Final = "часть просьбы пришла не текстом — повторите своими словами"
+
+
+def text_argument(raw: Any, *, field: str, log_label: str) -> str:
+    """Текстовый аргумент модели: строка — обрезанная, нет — пустая строка.
+
+    Число принимается своим текстом: телефон ``79991234567`` JSON-числом —
+    годное значение, а не мусор. Отказ — контейнерам и ``bool`` (``"True"``).
+
+    DRF-2667. Модель по построению может прислать вместо строки словарь,
+    число или список; ``str(raw or "")`` превращал ``{"a": 1}`` в текст
+    ``"{'a': 1}"``, и он ложился в заявку и в сводку человеку. Нестрока —
+    отказ :class:`ActionError` со своим слагом и строкой журнала, значение
+    в текст отказа не попадает.
+    """
+
+    if raw is None:
+        return ""
+    if isinstance(raw, str):
+        return raw.strip()
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+        return str(raw)
+    logger.warning("%s.argument_not_text field=%s type=%s", log_label, field, type(raw).__name__)
+    raise ActionError(ARGUMENT_NOT_TEXT_DETAIL, slug=ARGUMENT_NOT_TEXT_SLUG)
+
+
 def _parse_dt(raw: Any, *, field: str) -> datetime:
-    text = str(raw or "").strip()
+    text = text_argument(raw, field=field, log_label="assistant")
     if not text:
         raise ActionError(f"{field}: время не указано")
     try:
@@ -356,7 +387,9 @@ def _validate_block_time(arguments: dict[str, Any], *, master) -> tuple[dict[str
     reason_class = str(arguments.get("reason_class") or "personal").strip()
     if reason_class not in _REASON_CLASSES:
         reason_class = "other"
-    reason_text = str(arguments.get("reason_text") or "").strip()[:200]
+    reason_text = text_argument(
+        arguments.get("reason_text"), field="reason_text", log_label="master_assistant"
+    )[:200]
 
     normalised = {
         "start": start.isoformat(),
@@ -477,7 +510,7 @@ def _resolve_service(master, raw: Any) -> Any:
     from apps.master_api.services.assistant_cards import service_options
 
     services = _master_services(master)
-    wanted = str(raw or "").strip().lower()
+    wanted = text_argument(raw, field="service", log_label="master_assistant").lower()
     if not wanted:
         raise ActionError(
             "Какая услуга?",
@@ -533,8 +566,12 @@ def _resolve_client(master, arguments: dict[str, Any], *, tz) -> dict[str, Any]:
 
     from apps.master_api.services.bookings import looks_like_phone
 
-    client_id = str(arguments.get("client_id") or "").strip()[:64]
-    client_name = str(arguments.get("client_name") or "").strip()[:80]
+    client_id = text_argument(
+        arguments.get("client_id"), field="client_id", log_label="master_assistant"
+    )[:64]
+    client_name = text_argument(
+        arguments.get("client_name"), field="client_name", log_label="master_assistant"
+    )[:80]
     if not client_name:
         raise ActionError("Кого записать?", verbatim=True)
     # DRF-1039: поиск по номеру закрыт и здесь — иначе «запиши +7999…» стал бы
