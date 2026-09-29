@@ -2716,9 +2716,32 @@ LOGGING = {
     # access-строка «метод путь?query статус» шла на диск мимо фильтра ПДн.
     # Django применяет этот конфиг при загрузке приложения — ПОСЛЕ uvicorn,
     # поэтому здесь его логгеры переводятся на тот же ``console``.
+    #
+    # DRF-2634 — SDK openai и anthropic на DEBUG пишут тело запроса целиком
+    # («Request options: …» в ``*._base_client``), а в нём ``messages`` модели:
+    # текст человека, набранный или расшифровка голосового, история и промпт.
+    # Сегодня это отсекает ``console`` на INFO; пин — на случай, если root или
+    # обработчик поднимут до DEBUG. Пинятся именно дочерние логгеры:
+    # ``OPENAI_LOG=debug`` / ``ANTHROPIC_LOG=debug`` при импорте SDK ставят
+    # DEBUG на родителя (``openai`` / ``anthropic``), а явный уровень ребёнка
+    # это перекрывает. INFO, а не WARNING — строка «Retrying request to …»
+    # остаётся. Realtime-клиент openai (в боте не используется) на DEBUG пишет
+    # сообщения сокета с транскриптами — его логгеры прибиты тем же правилом.
+    # httpx/httpcore тела не пишут и не пинятся.
     "loggers": {
-        name: {"handlers": ["console"], "level": "INFO", "propagate": False}
-        for name in ("uvicorn", "uvicorn.error", "uvicorn.access")
+        **{
+            name: {"handlers": ["console"], "level": "INFO", "propagate": False}
+            for name in ("uvicorn", "uvicorn.error", "uvicorn.access")
+        },
+        **{
+            name: {"level": "INFO"}
+            for name in (
+                "openai._base_client",
+                "anthropic._base_client",
+                "openai.resources.realtime.realtime",
+                "openai.resources.beta.realtime.realtime",
+            )
+        },
     },
 }
 
