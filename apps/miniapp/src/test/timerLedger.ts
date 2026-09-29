@@ -44,6 +44,7 @@ const realClearInterval = globalThis.clearInterval;
 function install(): void {
   const wrappedSetTimeout = function (callback: unknown, delay?: number, ...args: unknown[]) {
     const ms = Number(delay) || 0;
+    if (ms > SHORT_TIMER_MS && isBarePromiseResolve(callback)) refuseWallClockPause(ms);
     let id: unknown;
     const run =
       typeof callback === "function"
@@ -75,6 +76,60 @@ function install(): void {
     setInterval: wrappedSetInterval,
     clearInterval: wrappedClearInterval,
   });
+}
+
+/**
+ * `await new Promise((r) => setTimeout(r, N))` передаёт `setTimeout` сам
+ * нативный `resolve` промиса: безымянная нативная функция. У связанной
+ * (`.bind`) имя начинается с `bound `, и её этот признак не задевает.
+ */
+function isBarePromiseResolve(callback: unknown): boolean {
+  return (
+    typeof callback === "function" &&
+    callback.name === "" &&
+    Function.prototype.toString.call(callback).includes("[native code]")
+  );
+}
+
+/**
+ * Разрешённые паузы по часам в тестах: `файл:строка` → причина. Пусто
+ * намеренно. Исключение — только с причиной; ожидание времени — фейковые часы.
+ */
+export const ALLOWED_WALL_CLOCK_PAUSES: Record<string, string> = {};
+
+/**
+ * Сторож паузы по настоящим часам в теле теста (DRF-2624). Пауза шатка по
+ * устройству: под нагрузкой краснеет без дефекта, и её краснота списывается
+ * как «мигает» — вместе с настоящей находкой. Событие ждут `waitFor` или
+ * `settleScenario`, время — фейковые часы (`vi.useFakeTimers` +
+ * `advanceTimersByTimeAsync`): под ними vitest подменяет `setTimeout` своим,
+ * обёртка не вызывается, и прыжок по фейковым часам сторож не видит по
+ * построению.
+ *
+ * Стек снимается только здесь — в редком случае «нативный `resolve` и задержка
+ * длиннее короткой». Падение — только если ближайший кадр `src/` над вызовом —
+ * файл теста: код приложения спит так законно (отступ при повторе в
+ * `lib/customer-wellness.ts`), и это не предмет сторожа.
+ *
+ * Предел: пауза, записанная через обёртку (`setTimeout(() => r(), N)`) или
+ * через переменную-колбэк, признаком «нативный `resolve`» не ловится. Замер
+ * 29.09 (сканер всех `setTimeout(` в тестах, контроль на фикстуре 2/2): таких
+ * обёрток в тестах — 0, то есть на сегодня сторож полон.
+ */
+function refuseWallClockPause(ms: number): void {
+  const frames = (new Error().stack ?? "").split("\n").map((l) => l.split("\\").join("/"));
+  const own = frames.find((l) => l.includes("/src/") && !l.includes("timerLedger.ts"));
+  const m = own?.match(/\/src\/([^\s():]+):(\d+)/);
+  // Тестовым считается и помощник в `src/test/` — иначе пауза, вынесенная в
+  // него, обходила бы сторож. Законна только пауза кода приложения.
+  if (!m || !(/\.test\.tsx?$/.test(m[1]!) || m[1]!.startsWith("test/"))) return;
+  const site = `${m[1]}:${m[2]}`;
+  if (site in ALLOWED_WALL_CLOCK_PAUSES) return;
+  throw new Error(
+    `DRF-2624: пауза по настоящим часам в тесте — ${site}, ${ms} мс. Под нагрузкой она ` +
+      `краснеет без дефекта. Ждите событие (waitFor, settleScenario) или время на ` +
+      `фейковых часах (vi.useFakeTimers + advanceTimersByTimeAsync).`,
+  );
 }
 
 install();
