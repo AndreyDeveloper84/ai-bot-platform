@@ -329,16 +329,18 @@ class AylaSalonClient:
         refuse.
         """
 
-        headers = {
-            "Authorization": f"Bearer {person_token}",
-            "X-Tenant": tenant_slug,
-            "X-App-Type": "pro",
-            "Accept": "application/json",
-        }
+        headers = with_request_id(
+            {
+                "Authorization": f"Bearer {person_token}",
+                "X-Tenant": tenant_slug,
+                "X-App-Type": "pro",
+                "Accept": "application/json",
+            }
+        )
         if json_body:
             # Multipart sets its own Content-Type with the boundary.
             headers["Content-Type"] = "application/json"
-        return with_request_id(headers)
+        return headers
 
     def _send_as_person(
         self,

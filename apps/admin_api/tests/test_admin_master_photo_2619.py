@@ -179,7 +179,8 @@ class TestTheCatalogOwnsTheBytes:
         assert synced_master.photo_url == CATALOG_AVATAR
         assert resp.json() == {"photo_url": master_photo_path(synced_master.id, CATALOG_AVATAR)}
         assert _audit_rows(synced_master) == 1
-        assert list(tmp_path.iterdir()) == []  # диск бота пуст
+        # empty-assert-ok: бот не пишет байты фото никуда; MEDIA_ROOT указан сюда фикстурой
+        assert list(tmp_path.iterdir()) == []
 
     def test_a_refused_upload_changes_nothing_and_says_which_rule(
         self,
