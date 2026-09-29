@@ -344,8 +344,11 @@ def seeded_surface(
     a sweep over an empty list passes without looking at anything. What
     each route needs:
 
-    * **roster / conversations** — completed :class:`BookingRequest` rows
-      in the past, and an active conversation with messages.
+    * **roster** — past :class:`RemoteBookingProxy` rows the canon closed
+      and a human closed (``completed_by``): since DRF-1138 the roster reads
+      the mirror, and since DRF-2462 a clock-closed visit is not a visit.
+    * **conversations** — completed :class:`BookingRequest` rows in the
+      past, and an active conversation with messages.
     * **schedule / dashboard** — :class:`RemoteBookingProxy` rows. These
       readers moved to the Ayla mirror in DRF-1085 and no longer see
       ``BookingRequest`` at all, so the mirror is seeded alongside it:
@@ -391,6 +394,9 @@ def seeded_surface(
             start_at=visit_at,
             end_at=visit_at + timedelta(minutes=60),
             status=status,
+            # Закрыл человек — иначе список «Клиенты» (DRF-2462) визит не
+            # засчитает, и обход упрётся в пустой ответ.
+            completed_by="master" if status == RemoteBookingProxy.Status.COMPLETED else "",
         )
 
     for days_ago in PAST_VISIT_DAYS_AGO:

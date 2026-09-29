@@ -66,13 +66,12 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from django.utils import timezone as dj_timezone
 
-from apps.booking.models import RemoteBookingProxy
 from apps.catalog.models import CatalogMaster, CatalogService
-from apps.catalog.specialist_ref import specialist_keys
 from apps.identity.models import BotUser
 from apps.master_api.services.visit_source import (
     UPCOMING_STATUSES,
     VisitRow,
+    attended_visits,
     master_visits,
 )
 from apps.integrations.ayla.salon_client import (
@@ -603,12 +602,13 @@ def _build_returning_customer_index(master: CatalogMaster, bot_user_ids: list[An
         return set()
     from collections import Counter
 
-    rows = RemoteBookingProxy.all_tenants.filter(
-        tenant_id=master.tenant_id,
-        specialist_id__in=specialist_keys(master),
-        bot_user_id__in=list(bot_user_ids),
-        status="completed",
-    ).values_list("bot_user_id", flat=True)
+    # DRF-2462: «приходил» — одно правило с чипом дня и списком «Клиенты»
+    # (``attended_visits``): закрыл канон И закрыл человек.
+    rows = (
+        attended_visits(master)
+        .filter(bot_user_id__in=list(bot_user_ids))
+        .values_list("bot_user_id", flat=True)
+    )
     counts = Counter(rows)
     return {bid for bid, n in counts.items() if n > 1}
 

@@ -2527,7 +2527,8 @@ def notification_prefs(request: HttpRequest) -> HttpResponse:
 def customers_list(request: HttpRequest) -> HttpResponse:
     """Read-only customer roster for the calling master (Tau §4.3 P0 tab).
 
-    Aggregates :class:`apps.booking.BookingRequest` history grouped by
+    Aggregates the master's attended visits in the booking mirror
+    (:class:`apps.booking.RemoteBookingProxy`, DRF-1138) grouped by
     ``bot_user_id``. See :func:`apps.master_api.services.customers.list_master_customers`
     for the field shape + counting rules. Tenant scope is enforced by
     :func:`require_master_init_data`; the service layer adds an explicit

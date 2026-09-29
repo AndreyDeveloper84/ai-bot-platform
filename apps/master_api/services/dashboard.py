@@ -51,8 +51,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from apps.master_api.services.visit_source import (
     UPCOMING_STATUSES,
     VisitRow,
+    attended_visits,
     master_client_ids,
-    master_visit_count,
     master_visits,
 )
 from apps.catalog.models import CatalogMaster, CatalogService
@@ -384,11 +384,15 @@ def _is_returning_customer(master: CatalogMaster, booking: VisitRow) -> bool:
     they make a no-show risk. Until visit completion is used at scale
     (DRF-1048) the chip stays dark for everyone: an empty flag does not
     lie, a wrong one does.
+
+    «Приходил» — :func:`visit_source.attended_visits`: визит закрыт каноном
+    И закрыт человеком. Автозакрытие по часам не свидетельство прихода
+    (DRF-2462); то же правило читает список «Клиенты».
     """
 
     if booking.bot_user_id is None:
         return False
-    return master_visit_count(master, bot_user_id=booking.bot_user_id, statuses=("completed",)) > 1
+    return attended_visits(master).filter(bot_user_id=booking.bot_user_id).count() > 1
 
 
 def _customer_intent_hint(booking: VisitRow) -> str:

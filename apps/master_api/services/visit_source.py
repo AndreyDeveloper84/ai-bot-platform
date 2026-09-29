@@ -54,6 +54,8 @@ from datetime import datetime, timedelta
 from typing import Iterable
 from uuid import UUID
 
+from django.db.models import QuerySet
+
 from apps.booking.models import RemoteBookingProxy
 from apps.catalog.specialist_ref import specialist_keys
 
@@ -260,6 +262,49 @@ def master_client_ids(master, *, statuses: Iterable[str] | None = None) -> list[
     # ``order_by()`` — иначе ``DISTINCT`` ловит и колонку сортировки модели
     # (``-start_at``) и отдаёт клиента столько раз, сколько у него визитов.
     return list(qs.order_by().values_list("bot_user_id", flat=True).distinct())
+
+
+def attended_visits(master) -> QuerySet[RemoteBookingProxy]:
+    """Визиты мастера, про которые известно, что клиент ПРИШЁЛ (DRF-1138, DRF-2462).
+
+    Одно правило для всех счётчиков «клиент приходил»: чип «постоянный
+    клиент» на дне мастера и список «Клиенты» (визиты, последний визит,
+    «давно не была»). Два правила для одного вопроса уже разошлись один
+    раз: список читал ``BookingRequest`` по ``master_id``, а на пилоте
+    ``master_id`` пуст у всех строк, и список был пуст при живых визитах.
+
+    Визит засчитан, когда оба условия верны:
+
+    * ``status=completed`` — канон закрыл визит (``booking.completed``);
+    * закрыл его человек — :func:`apps.booking.completion.confirmed_by_human`,
+      решение владельца 30.08 «гейтим последствия по completed_by».
+      Автозакрытие по часам (``completed_by=system``) закрывает визит и
+      ничего не говорит о том, пришёл ли клиент: чип значит «приходил
+      больше одного раза» (DRF-1146), а не «часы досчитали дважды».
+
+    Решает САМ :func:`confirmed_by_human`, а не его пересказ на SQL: сперва
+    читаются различные значения ``completed_by`` у завершённых визитов
+    мастера (их единицы), Python отбирает человеческие, и запрос берёт строки
+    ровно с этими значениями. Пересказ через ``LOWER(TRIM(...))`` расходился
+    с ``str.strip()``: ``TRIM`` снимает только пробелы, и ``"system\\n"``
+    прошёл бы как «закрыл человек» — ошибка в опасную сторону.
+
+    Цена, названная сразу: зеркало стухает (DRF-2519, мёртвые письма
+    ``booking.completed``), и визит, закрытый каноном, может ещё стоять в
+    зеркале ``confirmed``. Ошибка здесь в одну сторону — недосчитать, но
+    не засчитать визит, которого не было.
+    """
+
+    from apps.booking.completion import confirmed_by_human
+
+    completed = RemoteBookingProxy.all_tenants.filter(
+        tenant_id=master.tenant_id,
+        specialist_id__in=specialist_keys(master),
+        status="completed",
+    )
+    actors = completed.order_by().values_list("completed_by", flat=True).distinct()
+    human = [actor for actor in actors if confirmed_by_human(actor)]
+    return completed.filter(completed_by__in=human)
 
 
 def occupied_intervals(

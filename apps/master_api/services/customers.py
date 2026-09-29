@@ -1,7 +1,7 @@
 """Master Mini App customer roster aggregator (master-solo-surface §4.3).
 
-Read-only aggregation over existing ``apps.booking.BookingRequest`` history
-grouped by ``bot_user`` for a given master. Surfaces the "Клиенты" tab in
+Read-only aggregation over the master's visits in the booking mirror
+(``apps.booking.RemoteBookingProxy``) grouped by ``bot_user``. Surfaces the "Клиенты" tab in
 the solo provider Mini App per Tau's Variant B navigation verdict.
 
 ### Scope (Tier 2 Phase 1)
@@ -30,7 +30,7 @@ the solo provider Mini App per Tau's Variant B navigation verdict.
 * Caller MUST hold a verified :class:`apps.catalog.models.CatalogMaster`
   via :func:`apps.master_api.auth.require_master_init_data` — the master
   carries the tenant scope. We pass ``tenant_id`` into every ORM filter
-  as defence-in-depth (BookingRequest already has a tenant FK).
+  as defence-in-depth (the mirror already has a tenant FK).
 
 ### Customer phone
 
@@ -51,7 +51,7 @@ question; do not reintroduce a phone fragment as the answer.
 
 ### Performance note
 
-The aggregation runs a single grouped query over ``BookingRequest`` with
+The aggregation runs a single grouped query over the mirror with
 :func:`Count` + :func:`Max`, then joins :class:`BotUser` for display
 fields. For a busy master with ~1k bookings the worst-case row count is
 ~hundreds of distinct ``bot_user_id`` values — well under any pagination
@@ -69,9 +69,9 @@ from typing import Any
 from django.db.models import Count, Max
 from django.utils import timezone as dj_timezone
 
-from apps.booking.models import BookingRequest
 from apps.catalog.models import CatalogMaster
 from apps.identity.models import BotUser
+from apps.master_api.services.visit_source import _resolve_service_names, attended_visits
 
 logger = logging.getLogger(__name__)
 
@@ -143,8 +143,8 @@ def list_master_customers(
 
     ### Counting rules
 
-    A "visit" is a :class:`BookingRequest` row for this master with
-    ``completed_at`` stamped — the visit actually happened. DRF-1146
+    A "visit" is one of :func:`visit_source.attended_visits` — the canon
+    closed it AND a human closed it (DRF-1138, DRF-2462). DRF-1146
     (owner decision 25.08, «чип по визитам»): bookings that were merely
     confirmed (or rescheduled) but never completed do NOT count — a
     customer with ten cancellations and zero visits is not «returning»,
@@ -152,14 +152,27 @@ def list_master_customers(
     (DRF-1048) the flags simply stay dark: an empty flag does not lie,
     a wrong one does.
 
+    ### Source (DRF-1138)
+
+    Until DRF-1138 this read ``BookingRequest`` by ``master_id``. On the
+    pilot that column is NULL on every row (the live bookings sit in the
+    mirror, keyed by ``specialist_id``) — so the roster was an empty list
+    with HTTP 200, the worst kind of break. It also counted any stamped
+    ``completed_at``, including the clock's auto-close on visits the canon
+    had cancelled (DRF-2462): the gate on ``completed_by`` lives in
+    ``attended_visits`` now, one rule shared with the day's «постоянный
+    клиент» chip. Already-stamped rows in ``BookingRequest`` are not
+    touched here — their clean-up is ``audit_false_completions --apply``,
+    run by the owner.
+
     Rows without a linked ``bot_user`` (legacy walk-ins, snapshot-only
     bookings) are SKIPPED — there's no stable identity to aggregate
     against. They remain visible in the booking history view.
 
     ### Cross-tenant isolation
 
-    Filtered explicitly by ``tenant_id=master.tenant_id`` AND
-    ``master_id=master.id`` even though :func:`require_master_init_data`
+    Filtered explicitly by ``tenant_id=master.tenant_id`` AND the master's
+    ``specialist_keys`` even though :func:`require_master_init_data`
     already enters ``tenant_scope`` — defence-in-depth so an accidental
     decorator regression can't leak a customer from a sibling salon.
     """
@@ -167,22 +180,16 @@ def list_master_customers(
     if now is None:
         now = dj_timezone.now()
 
-    # Completed visits only — see docstring "Counting rules" (DRF-1146).
+    visits = attended_visits(master).filter(bot_user__isnull=False)
 
     # Single grouped query: per bot_user_id, count rows + find the most-recent
     # visit. We then load BotUser display fields in a second query keyed by
     # the resulting ids. Two queries total — no N+1 in the row count.
     aggregates = (
-        BookingRequest.all_tenants.filter(
-            tenant_id=master.tenant_id,
-            master_id=master.id,
-            completed_at__isnull=False,
-            bot_user__isnull=False,
-        )
-        .values("bot_user_id")
+        visits.values("bot_user_id")
         .annotate(
-            total_visits=Count("id"),
-            last_visit_at=Max("visit_at"),
+            total_visits=Count("appointment_id"),
+            last_visit_at=Max("start_at"),
         )
         .order_by("-last_visit_at")
     )
@@ -211,25 +218,31 @@ def list_master_customers(
     # makes awkward), do a single ordered fetch and pick the first match
     # per bot_user_id while walking. Per-master booking volume is bounded
     # in the hundreds for Phase 1 pilots.
-    last_service_by_user: dict[Any, str] = {}
+    #
+    # The mirror keeps no service name — only ``service_id`` (Ayla's
+    # ``Service.id``) — so the name comes from the catalog mirror in one
+    # batched lookup, the same one the master's day uses.
+    last_service_id_by_user: dict[Any, Any] = {}
     last_visit_rows = (
-        BookingRequest.all_tenants.filter(
-            tenant_id=master.tenant_id,
-            master_id=master.id,
-            completed_at__isnull=False,
-            bot_user_id__in=bot_user_ids,
-        )
-        .order_by("bot_user_id", "-visit_at")
-        .values("bot_user_id", "visit_at", "service_name")
+        visits.filter(bot_user_id__in=bot_user_ids)
+        # ``-appointment_id`` — два визита в одну минуту: без него «последняя
+        # услуга» выбиралась бы базой как придётся.
+        .order_by("bot_user_id", "-start_at", "-appointment_id")
+        .values("bot_user_id", "service_id")
     )
     for row in last_visit_rows:
         bu_id = row["bot_user_id"]
-        if bu_id in last_service_by_user:
+        if bu_id in last_service_id_by_user:
             # We've already seen the most-recent row for this bot_user
             # because the inner ``order_by`` placed it first within the
             # group. Skipping is cheaper than DISTINCT ON.
             continue
-        last_service_by_user[bu_id] = row["service_name"] or ""
+        last_service_id_by_user[bu_id] = row["service_id"]
+    service_names = _resolve_service_names(last_service_id_by_user.values(), master.tenant_id)
+    last_service_by_user: dict[Any, str] = {
+        bu_id: service_names.get(sid, "") if sid else ""
+        for bu_id, sid in last_service_id_by_user.items()
+    }
 
     at_risk_cutoff = now - timedelta(days=AT_RISK_DAYS)
 
