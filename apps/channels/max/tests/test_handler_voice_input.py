@@ -137,6 +137,34 @@ def _messages(tenant, role: str) -> list[Message]:
     return list(Message.all_tenants.filter(conversation__tenant=tenant, role=role).order_by("id"))
 
 
+# DRF-2488 — паритет строк сравнивается по ВСЕМ колонкам Message, кроме тех,
+# что заведомо разные у двух ходов: ключи, диалог/салон, трасса и время.
+# Новая колонка попадает в сравнение сама, без правки этого списка.
+_UNSTABLE_COLUMNS = frozenset({"id", "conversation_id", "tenant_id", "trace_id", "created_at"})
+
+
+def _row_columns() -> list[str]:
+    return [f.attname for f in Message._meta.concrete_fields if f.attname not in _UNSTABLE_COLUMNS]
+
+
+def _rows_by_user(tenant) -> dict[str, list[dict]]:
+    """Строки Message по собеседнику, отсортированные по содержимому.
+
+    pk у Message — не монотонный, поэтому порядок вставки не восстановить;
+    сортировка по роли и тексту даёт обоим ходам один и тот же порядок.
+    """
+    by_user: dict[str, list[dict]] = {}
+    rows = Message.all_tenants.filter(conversation__tenant=tenant).values(
+        "conversation__bot_user__channel_user_id", *_row_columns()
+    )
+    for row in rows:
+        by_user.setdefault(row.pop("conversation__bot_user__channel_user_id"), []).append(row)
+    return {
+        key: sorted(value, key=lambda r: (r["role"], r["content"], r["action_type"]))
+        for key, value in by_user.items()
+    }
+
+
 class TestFlagOff:
     def test_byte_for_byte_the_drf1939_stub(self, tenant, mock_send, fake_redis, settings):
         settings.VOICE_INPUT_ENABLED = False
@@ -149,6 +177,10 @@ class TestFlagOff:
         assert assistant[0].content == VOICE_NOT_SUPPORTED_TEXT
         dl.assert_not_called()
         assert provider.calls == []
+        # DRF-2488 — без расшифровки голосовое не помечается: реплика
+        # человека остаётся ``text`` с пустым content.
+        assert [(m.content, m.input_channel) for m in _messages(tenant, "user")] == [("", "text")]
+        assert {m.input_channel for m in Message.all_tenants.filter(tenant=tenant)} == {"text"}
 
 
 class TestParity:
@@ -170,16 +202,21 @@ class TestParity:
         assert voice_sent
         assert voice_sent == typed_sent
 
-        # pk у Message — не монотонный, поэтому сравниваются отсортированные
-        # наборы строк, а не порядок вставки.
-        rows = Message.all_tenants.filter(conversation__tenant=tenant)
-        by_chat: dict[str, list[tuple[str, str, str]]] = {}
-        for m in rows:
-            key = m.conversation.bot_user.channel_user_id
-            by_chat.setdefault(key, []).append((m.role, m.content, m.action_type))
-        voice_rows, typed_rows = sorted(by_chat["1001"]), sorted(by_chat["1002"])
-        assert ("user", "привет", "") in voice_rows
-        assert voice_rows == typed_rows
+        # DRF-2488 — строки сравниваются по всем колонкам, кроме заведомо
+        # разных (``_UNSTABLE_COLUMNS``), и расходиться обязаны ровно в одном
+        # месте: ``input_channel`` у реплики человека.
+        assert "input_channel" in _row_columns()
+        by_user = _rows_by_user(tenant)
+        voice_rows, typed_rows = by_user["1001"], by_user["1002"]
+        assert len(voice_rows) == len(typed_rows) >= 2
+        differences = [
+            (a["role"], column, a[column], b[column])
+            for a, b in zip(voice_rows, typed_rows, strict=True)
+            for column in a
+            if a[column] != b[column]
+        ]
+        assert differences == [("user", "input_channel", "voice", "text")]
+        assert [r["content"] for r in voice_rows if r["role"] == "user"] == ["привет"]
 
     def test_numbers_arrive_as_digits_in_the_recorded_turn(self, tenant, mock_send, fake_redis):
         _provider("Съела борщ, триста грамм.")
@@ -259,6 +296,8 @@ class TestRefusalsReachThePerson:
             _run(tenant, _payload(attachments=[AUDIO]))
         assert [c["text"] for c in mock_send] == [REFUSAL_TEXTS[code]]
         assert [m.action_type for m in _messages(tenant, "assistant")] == [code]
+        # DRF-2488 — отказ не расшифровка: реплика человека ``text``.
+        assert [(m.content, m.input_channel) for m in _messages(tenant, "user")] == [("", "text")]
 
     def test_too_long_is_refused_before_the_provider(self, tenant, mock_send, fake_redis, settings):
         settings.VOICE_MAX_DURATION_S = 60
@@ -306,6 +345,10 @@ class TestIdempotencyAndHandoff:
         assert mock_send == []
         dl.assert_not_called()
         assert provider.calls == []
+        # DRF-2488 — под оператором голосовое не распознаётся, значит и не
+        # помечается: обе реплики человека — ``text``, вторая с пустым content.
+        user = sorted((m.content, m.input_channel) for m in _messages(tenant, "user"))
+        assert user == [("", "text"), ("привет", "text")]
 
 
 class TestEchoAndLogs:

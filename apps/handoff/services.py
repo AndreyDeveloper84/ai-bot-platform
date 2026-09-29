@@ -106,11 +106,15 @@ def package_transcript(
           "phone_hash": "<sha256 or empty>", # NEVER raw phone
         },
         "messages": [
-          {"role": "user", "content": "...", "action_type": "",
-           "created_at": "..."},
+          {"role": "user", "input_channel": "text", "content": "...",
+           "action_type": "", "created_at": "..."},
           ...
         ],
       }
+
+    ``input_channel`` (DRF-2488): ``voice`` — реплика надиктована голосовым,
+    и ``content`` — расшифровка, а не слова, набранные человеком; оператор
+    должен это видеть, прежде чем цитировать реплику клиенту.
     """
 
     from apps.conversations.models import Message
@@ -127,6 +131,7 @@ def package_transcript(
     messages_payload = [
         {
             "role": msg.role,
+            "input_channel": msg.input_channel,
             "content": msg.content,
             "action_type": msg.action_type or "",
             "created_at": msg.created_at.isoformat(),

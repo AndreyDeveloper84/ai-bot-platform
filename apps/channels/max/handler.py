@@ -141,7 +141,7 @@ from apps.channels.max.voice_turn import (
     resolve_voice_turn,
     with_voice_echo,
 )
-from apps.conversations.models import Conversation
+from apps.conversations.models import Conversation, Message
 from apps.conversations.services import (
     record_global_message,
     record_message,
@@ -1405,16 +1405,20 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     # стояла заглушка DRF-1939; при выключенном флаге текст и action_type
     # те же, что у неё. ``voice_gate_text`` — копия без знаков препинания
     # для гейта (K19-Б, решение владельца 22.09), ``voice_transcript`` —
-    # для эха «Я услышала: …» перед ответом.
+    # для эха «Я услышала: …» перед ответом. ``inbound_channel`` — пометка
+    # ``voice`` на записи реплики человека (DRF-2488): только у удачной
+    # расшифровки; отказ пишется как ``text`` с пустым content.
     voice_refusal: VoiceRefused | None = None
     voice_transcript = None
     voice_gate_text: str | None = None
+    inbound_channel = Message.InputChannel.TEXT
     if is_voice_only(event.text, event.attachments):
         voice_outcome = resolve_voice_turn(event, trace_id=trace_id)
         if isinstance(voice_outcome, VoiceResolved):
             event = voice_outcome.event
             voice_transcript = voice_outcome.transcript
             voice_gate_text = voice_outcome.gate_text
+            inbound_channel = Message.InputChannel.VOICE
         else:
             voice_refusal = voice_outcome
 
@@ -1713,7 +1717,11 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
         user_msg = None
     else:
         user_msg = record_global_message(
-            conversation, role="user", content=inbound_history_text, trace_id=trace_id
+            conversation,
+            role="user",
+            content=inbound_history_text,
+            trace_id=trace_id,
+            input_channel=inbound_channel,
         )
         short_term.append(conversation.id, role="user", content=inbound_history_text)
 
@@ -3233,10 +3241,12 @@ def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | N
 
     # DRF-1942 — голосовое становится текстом до записи сообщения и гейта
     # (см. тот же блок на глобальном пути). Под оператором (HUMAN_HANDOFF)
-    # не скачиваем и не распознаём: бот молчит, деньги не тратятся.
+    # не скачиваем и не распознаём: бот молчит, деньги не тратятся — такая
+    # реплика пишется как ``text`` с пустым content (DRF-2488).
     voice_refusal: VoiceRefused | None = None
     voice_transcript = None
     voice_gate_text: str | None = None
+    inbound_channel = Message.InputChannel.TEXT
     if (
         is_voice_only(event.text, event.attachments)
         and conversation.state != Conversation.State.HUMAN_HANDOFF
@@ -3246,6 +3256,7 @@ def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | N
             event = voice_outcome.event
             voice_transcript = voice_outcome.transcript
             voice_gate_text = voice_outcome.gate_text
+            inbound_channel = Message.InputChannel.VOICE
         else:
             voice_refusal = voice_outcome
     # DRF-2276 — блокировка оператором платформы; эффект ниже, после гейта.
@@ -3291,6 +3302,7 @@ def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | N
         role="user",
         content=event.text,
         trace_id=trace_id,
+        input_channel=inbound_channel,
     )
     # DRF-2511 — то, что этот ход выдавил из окна, просматривается перед
     # тем как исчезнуть. Чинится не «память на двадцати сообщениях», а

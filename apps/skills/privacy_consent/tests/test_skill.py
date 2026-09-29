@@ -92,6 +92,24 @@ class TestDataExport:
         assert len(export["conversations"]) == 1
         assert len(export["conversations"][0]["messages"]) == 1
 
+    def test_each_message_carries_its_input_channel(self, tenant, bot_user, conversation):
+        """DRF-2488 — человек видит в выгрузке, какие реплики он надиктовал."""
+        Message.all_tenants.create(
+            tenant=tenant, conversation=conversation, role="user", content="набрала"
+        )
+        Message.all_tenants.create(
+            tenant=tenant,
+            conversation=conversation,
+            role="user",
+            content="надиктовала",
+            input_channel=Message.InputChannel.VOICE,
+        )
+        with tenant_scope(tenant):
+            export = data_export(bot_user)
+        (conv,) = export["conversations"]
+        channels = sorted((m["content"], m["input_channel"]) for m in conv["messages"])
+        assert channels == [("набрала", "text"), ("надиктовала", "voice")]
+
     def test_phone_hashed_not_raw(self, tenant, bot_user, conversation):
         with tenant_scope(tenant):
             export = data_export(bot_user)

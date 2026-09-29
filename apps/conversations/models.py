@@ -430,6 +430,21 @@ class Message(models.Model):
     DB-level constraint because Django doesn't express cross-FK
     equality without a trigger. A drift would require a manual write
     path that bypasses `record_message()`; B3's tests pin the contract.
+
+    ### Канал ввода `input_channel` (DRF-2488)
+
+    Как человек передал реплику: `text` — набрал, `voice` — надиктовал
+    голосовым, и `content` получен расшифровкой (DRF-1942). Ставится
+    только у реплик `role=user`; ответы бота всегда `text`. Голосовое без
+    расшифровки (отказ, флаг выключен, под оператором на салонном пути)
+    пишется как `text` с пустым `content`. Аудио не хранится нигде.
+
+    Поле объявлено и с `default`, и с `db_default`. deploy-dev.yml гоняет
+    `migrate` через `run --rm web`, пока старые web/worker/celery ещё
+    живы и пишут реплики старым кодом, который про колонку не знает. С
+    одним `default` Django после ADD COLUMN снял бы DEFAULT со столбца, и
+    INSERT старого кода падал бы на NOT NULL. `db_default` оставляет
+    DEFAULT в схеме — это же страхует откат кода без отката схемы.
     """
 
     class Role(models.TextChoices):
@@ -437,6 +452,10 @@ class Message(models.Model):
         ASSISTANT = "assistant", "Assistant"
         TOOL = "tool", "Tool"
         SYSTEM = "system", "System"
+
+    class InputChannel(models.TextChoices):
+        TEXT = "text", "Text"
+        VOICE = "voice", "Voice (transcript)"
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     conversation = models.ForeignKey(
@@ -452,6 +471,16 @@ class Message(models.Model):
         "enforces the mirror invariant on every record_message() call.",
     )
     role = models.CharField(max_length=16, choices=Role.choices)
+    input_channel = models.CharField(
+        max_length=16,
+        choices=InputChannel.choices,
+        default=InputChannel.TEXT,
+        db_default=InputChannel.TEXT,
+        help_text="Как человек передал реплику (DRF-1942 / DRF-2488): voice — content "
+        "получен расшифровкой голосового; text — набран. Голосовое без расшифровки "
+        "(отказ, флаг выключен, под оператором на салонном пути) — text с пустым "
+        "content. Аудио не хранится.",
+    )
     content = models.TextField(
         blank=True,
         default="",
