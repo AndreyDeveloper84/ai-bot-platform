@@ -45,6 +45,7 @@ import {
 } from "../lib/master-api";
 import { onBackButton, setBackButton } from "../lib/max-sdk";
 import { MasterScheduleScreen } from "./MasterScheduleScreen";
+import { settleScenario } from "../test/settleScenario";
 
 const SCREEN_SOURCES = import.meta.glob(["./*.tsx", "./admin/*.tsx"], {
   query: "?raw",
@@ -142,7 +143,9 @@ describe("2 · чек-лист — только на соло-поверхнос
 
   it("на /master/dashboard карточки нет — и readiness не спрашивается", async () => {
     renderCardAt("/master/dashboard");
-    await new Promise((r) => setTimeout(r, 20));
+    // DRF-2616: ждём, пока монтирование улеглось (эффекты, микрозадачи,
+    // короткие таймеры), — а не 20 мс по часам.
+    await settleScenario();
     expect(
       screen.queryByRole("button", { name: "Открыть чек-лист" }),
     ).toBeNull();

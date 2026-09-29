@@ -4,7 +4,7 @@
  * real pending data (a zero state and errors belong to the full
  * billing screen — the dashboard card hides both, dev-warned).
  */
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -17,6 +17,7 @@ vi.mock("../lib/master-billing", async (importOriginal) => {
 import { ApiError } from "../lib/api";
 import { getPayoutPreview } from "../lib/master-billing";
 import { PayoutPreviewCard } from "./PayoutPreviewCard";
+import { settleScenario } from "../test/settleScenario";
 
 const mockedPayout = vi.mocked(getPayoutPreview);
 
@@ -73,8 +74,10 @@ describe("PayoutPreviewCard", () => {
         <PayoutPreviewCard />
       </MemoryRouter>,
     );
-    // Give the effect a tick to resolve, then the card must be absent.
-    await new Promise((r) => setTimeout(r, 50));
+    // DRF-2616: ждём событие — ответ getPayoutPreview пришёл и отрисован, — а
+    // не 50 мс по часам: под нагрузкой пауза не свидетель, что карточка решила.
+    await waitFor(() => expect(mockedPayout).toHaveBeenCalled());
+    await settleScenario();
     expect(container).toBeEmptyDOMElement();
   });
 
@@ -87,7 +90,10 @@ describe("PayoutPreviewCard", () => {
         <PayoutPreviewCard />
       </MemoryRouter>,
     );
-    await new Promise((r) => setTimeout(r, 50));
+    // DRF-2616: ждём событие — ответ getPayoutPreview пришёл и отрисован, — а
+    // не 50 мс по часам: под нагрузкой пауза не свидетель, что карточка решила.
+    await waitFor(() => expect(mockedPayout).toHaveBeenCalled());
+    await settleScenario();
     expect(container).toBeEmptyDOMElement();
   });
 });

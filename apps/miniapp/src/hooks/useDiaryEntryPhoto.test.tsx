@@ -143,8 +143,10 @@ describe("со снимком", () => {
 
     await act(async () => {
       resolve(photoResponse());
-      await new Promise((r) => setTimeout(r, 0));
     });
+    // DRF-2616: цепочка «ответ → blob → адрес» глубже одного оборота — проверка
+    // отсутствия после одного оборота не могла провалиться. Ждём, пока улеглось.
+    await settleScenario();
 
     expect(urls.created).toEqual([]);
     expect(urls.live()).toEqual([]);
@@ -187,8 +189,8 @@ describe("со снимком", () => {
 
     await act(async () => {
       second(photoResponse());
-      await new Promise((r) => setTimeout(r, 0));
     });
+    await settleScenario(); // DRF-2616: вместо одного оборота таймера
     await waitFor(() => expect(result.current).toBe("blob:ayla/2"));
 
     unmount();
