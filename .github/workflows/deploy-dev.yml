@@ -680,6 +680,11 @@ jobs:
 
       - name: Build Mini App on the runner
         working-directory: apps/miniapp
+        # DRF-2654: ссылка поддержки — переменная репозитория (Settings →
+        # Variables → Actions), БЕЗ заглушки. Не задана → vite build отказывает
+        # с её именем: на пилот больше не уезжает умолчание из кода.
+        env:
+          VITE_SUPPORT_DEEPLINK: ${{ vars.VITE_SUPPORT_DEEPLINK }}
         run: |
           npm ci --no-audit --no-fund
           npm run build

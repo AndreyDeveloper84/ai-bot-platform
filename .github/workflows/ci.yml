@@ -1824,6 +1824,11 @@ jobs:
       - name: vite build (the production bundle must actually build)
         if: steps.detect.outputs.run_fe == 'true'
         working-directory: apps/miniapp
+        # DRF-2654: production-сборка без VITE_SUPPORT_DEEPLINK отказывает. Этот
+        # бандл людям не уезжает (пилот собирает свой в deploy-dev, там — без
+        # заглушки), поэтому здесь названная заглушка, если переменная не задана.
+        env:
+          VITE_SUPPORT_DEEPLINK: ${{ vars.VITE_SUPPORT_DEEPLINK || 'https://example.invalid/ci-build-support' }}
         run: npx vite build
 
       # The artefact is the point, not a by-product. `apps/miniapp/dist` is

@@ -196,6 +196,10 @@ jobs:
 
       - name: vite build (reference bundle for the stylesheet comparison)
         working-directory: apps/miniapp
+        # DRF-2654: эталон для сравнения стилей и исходников; значение ссылки на
+        # них не влияет, но без переменной production-сборка отказывает.
+        env:
+          VITE_SUPPORT_DEEPLINK: ${{ vars.VITE_SUPPORT_DEEPLINK || 'https://example.invalid/drift-build-support' }}
         run: npx vite build
 
       # DRF-2621. The deploy does not ship `*.map` to the host (deploy-dev.yml:
