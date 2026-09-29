@@ -70,9 +70,9 @@ from django.views.decorators.http import require_http_methods
 
 from apps.catalog.specialist_ref import CatalogSpecialistUnresolved, catalog_specialist_id
 from apps.admin_api.auth import require_admin_or_reception_read
-from apps.admin_api.services.salon_day import tenant_tz
 from apps.admin_api.services.wire_lists import UNREADABLE, read_rows
 from apps.catalog.models import CatalogMaster
+from apps.tenancy.timezones import salon_zone
 from apps.integrations.ayla.salon_client import (
     SalonAPIError,
     SalonForbidden,
@@ -334,13 +334,13 @@ def master_exceptions(request: HttpRequest, master_id: str) -> HttpResponse:
             503,
         )
 
-    zone = tenant_tz(tenant)
+    zone = salon_zone(tenant)
     payload: dict[str, Any] = {
         "from": from_date.isoformat(),
         "to": to_date.isoformat(),
         "exceptions": read_rows(exceptions, _exception_row),
-        # Пояс — правило провода admin_api (salon_day.tenant_tz, МСК при пустом
-        # timezone), тот же, что у /day/ и day-schedule (DRF-2591, DRF-2601).
+        # Пояс — одно правило на бот (apps.tenancy.timezones.salon_zone, DRF-2595),
+        # тот же, что у /day/ и day-schedule (DRF-2591, DRF-2601).
         "time_off": read_rows(time_off, lambda item: _time_off_row(item, zone)),
         "closures": read_rows(closures, _closure_row),
     }
