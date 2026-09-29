@@ -5776,6 +5776,10 @@ def cards_setup(request: HttpRequest) -> HttpResponse:
     binding = _resolve_c7_ayla_user(request, body, establish_link=True)
     if isinstance(binding, JsonResponse):
         return binding
+    # DRF-2681: значение уходит в платёжный контур каталога — нестроковое
+    # получает отказ этой двери, а не становится текстом "{'a': 1}".
+    if body.get("consent_version") is not None and not isinstance(body.get("consent_version"), str):
+        return _error("bad_request", "consent_version must be a string", 400)
     consent_version = str(body.get("consent_version") or "").strip()
     if not consent_version:
         return _error("bad_request", "consent_version is required", 400)
