@@ -37,11 +37,11 @@ import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
-from zoneinfo import ZoneInfo
 
 from celery import shared_task  # type: ignore[import-untyped]
 from django.conf import settings
 from django.utils import timezone as dj_timezone
+from apps.tenancy.timezones import salon_zone
 
 logger = logging.getLogger(__name__)
 
@@ -89,13 +89,6 @@ def digest_hour(tenant: Any) -> int:
     return DEFAULT_HOUR
 
 
-def local_now(tenant: Any, now_utc: datetime) -> datetime:
-    try:
-        return now_utc.astimezone(ZoneInfo(getattr(tenant, "timezone", "") or "Europe/Moscow"))
-    except Exception:  # noqa: BLE001 — незнакомый пояс: Москва, как у приветствия по умолчанию
-        return now_utc.astimezone(ZoneInfo("Europe/Moscow"))
-
-
 class _AdminRole:
     """Роль-стаб для ``gather``: сводка владельца (с готовностью), без мастерских строк."""
 
@@ -128,7 +121,7 @@ def plan_morning_digests(*, now_utc: datetime | None = None) -> list[Decision]:
     now_utc = now_utc or dj_timezone.now()
     decisions: list[Decision] = []
     for tenant in _candidates():
-        local = local_now(tenant, now_utc)
+        local = now_utc.astimezone(salon_zone(tenant))
         hour = digest_hour(tenant)
 
         def decide(reason: str, *, send: bool = False, **detail: Any) -> Decision:
@@ -194,7 +187,7 @@ def send_morning_digests(now_utc: datetime | str | None = None) -> dict[str, int
             counters["no_recipients"] += 1
             continue
         try:
-            outcome = _deliver(tenant, local_now(tenant, now_utc))
+            outcome = _deliver(tenant, now_utc.astimezone(salon_zone(tenant)))
         except Exception:  # noqa: BLE001 — один салон не отменяет остальных
             logger.exception("channels.max.salon_digest.failed tenant=%s", decision.tenant_slug)
             outcome = "source_failed"
@@ -219,7 +212,6 @@ __all__ = [
     "digest_hour",
     "enabled",
     "gather_digest",
-    "local_now",
     "plan_morning_digests",
     "send_morning_digests",
 ]

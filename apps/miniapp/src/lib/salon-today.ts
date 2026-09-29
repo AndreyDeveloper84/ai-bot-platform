@@ -83,7 +83,7 @@ const COMPLETED_STATUS = "completed";
 /**
  * Пояс на случай, когда браузер не знает присланного сервером.
  *
- * Тот же, что у сервера (`DEFAULT_TZ`, `apps/admin_api/services/salon_day.py`)
+ * Тот же, что у сервера (`FALLBACK_TZ`, `apps/tenancy/timezones.py`)
  * — не пояс устройства.
  */
 const FALLBACK_TZ = "Europe/Moscow";
@@ -228,8 +228,8 @@ export function formatTime(iso: string | null, timeZone: string): string {
     // Пояс, которого не знает браузер, не должен ронять экран целиком —
     // но и печатать время в поясе УСТРОЙСТВА нельзя: получилось бы
     // правдоподобное и неверное время без единого признака подмены.
-    // Поэтому запасной вариант тот же, что у сервера (`DEFAULT_TZ` в
-    // `apps/admin_api/services/salon_day.py`), а не пояс телефона.
+    // Поэтому запасной вариант тот же, что у сервера (`FALLBACK_TZ` в
+    // `apps/tenancy/timezones.py`), а не пояс телефона.
     return new Intl.DateTimeFormat("ru-RU", {
       hour: "2-digit",
       minute: "2-digit",

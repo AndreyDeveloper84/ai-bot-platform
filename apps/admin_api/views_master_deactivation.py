@@ -222,9 +222,9 @@ def master_deactivation_preview(request: HttpRequest, master_id: str) -> HttpRes
         actor=bot_user,
         actor_role=role_ctx.primary_role,
     )
-    from apps.admin_api.services.salon_day import tenant_tz
+    from apps.tenancy.timezones import salon_zone
 
-    return JsonResponse(_preview_to_payload(preview, tenant_tz(tenant)))
+    return JsonResponse(_preview_to_payload(preview, salon_zone(tenant)))
 
 
 # --- POST /api/v1/admin/masters/<id>/deactivate/ -------------------------

@@ -21,6 +21,7 @@ from datetime import date
 
 import pytest
 
+from apps.tenancy.timezones import salon_zone
 from apps.orchestrator.time_preference import (
     CONTRACT_SLOT_TO_PART,
     PART_DAY,
@@ -36,7 +37,6 @@ from apps.orchestrator.time_preference import (
     part_of_iso_datetime,
     resolve_date,
     save_time_preference,
-    tenant_zone,
 )
 
 
@@ -253,14 +253,14 @@ class TestTenantZone:
             self.timezone = tz
 
     def test_tenant_timezone_is_used(self) -> None:
-        assert str(tenant_zone(self._Tenant("Asia/Yekaterinburg"))) == "Asia/Yekaterinburg"
+        assert str(salon_zone(self._Tenant("Asia/Yekaterinburg"))) == "Asia/Yekaterinburg"
 
     def test_missing_tenant_falls_back_to_moscow(self) -> None:
         """The global bot runs tenant-less; the pilot is Europe/Moscow."""
-        assert str(tenant_zone(None)) == "Europe/Moscow"
+        assert str(salon_zone(None)) == "Europe/Moscow"
 
     def test_garbage_timezone_falls_back_rather_than_raising(self) -> None:
-        assert str(tenant_zone(self._Tenant("Not/AZone"))) == "Europe/Moscow"
+        assert str(salon_zone(self._Tenant("Not/AZone"))) == "Europe/Moscow"
 
 
 class TestConversationState:

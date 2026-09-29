@@ -325,11 +325,11 @@ def _render_customer_notification(
     if booking.visit_at is not None:
         # Час салона, не UTC (DRF-2591). Здесь стоял комментарий «tenant-local
         # stringification», а код печатал `visit_at` как есть — UTC из базы:
-        # клиент читал в сообщении визит на 3 часа раньше. Пояс — правило
-        # `admin_api` (`salon_day.tenant_tz`, МСК по умолчанию).
-        from apps.admin_api.services.salon_day import tenant_tz
+        # клиент читал в сообщении визит на 3 часа раньше. Пояс — одно правило
+        # на бот (`apps.tenancy.timezones.salon_zone`, DRF-2595).
+        from apps.tenancy.timezones import salon_zone
 
-        zone = tenant_tz(old_master.tenant)
+        zone = salon_zone(old_master.tenant)
         moment = booking.visit_at
         local = moment.replace(tzinfo=zone) if moment.tzinfo is None else moment.astimezone(zone)
         visit_at_human = local.strftime("%d.%m.%Y %H:%M")

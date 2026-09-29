@@ -35,8 +35,8 @@ from apps.admin_api.services.salon_day import (
     DayVisit,
     SalonDay,
     build_salon_day,
-    tenant_tz,
 )
+from apps.tenancy.timezones import salon_iso, salon_zone
 
 logger = logging.getLogger(__name__)
 
@@ -45,29 +45,11 @@ def _error(slug: str, detail: str, status: int) -> JsonResponse:
     return JsonResponse({"error": slug, "detail": detail}, status=status)
 
 
-def _salon_iso(moment: datetime | None, tz: ZoneInfo) -> str | None:
-    """Момент визита на проводе — в поясе САЛОНА, тот же момент (DRF-2591).
-
-    База отдаёт ``DateTimeField`` в UTC, и ``isoformat()`` уезжал как
-    ``06:00+00:00`` при визите в 09:00 по салону. Экран дня берёт часы из
-    строки и показывал администратору «06:00» — он по этому экрану ведёт
-    день. Пояс — тот же, которым посчитан сам день и который назван в поле
-    ``timezone`` ответа: провод не противоречит сам себе. Приём тот же, что у
-    клиентского провода (DRF-2589, ``miniapp_api._salon_iso``): момент без
-    пояса — время салона, пояс пришивается без пересчёта.
-    """
-    if moment is None:
-        return None
-    if moment.tzinfo is None:
-        return moment.replace(tzinfo=tz).isoformat()
-    return moment.astimezone(tz).isoformat()
-
-
 def _visit_payload(v: DayVisit, tz: ZoneInfo) -> dict[str, Any]:
     return {
         "id": v.id,
-        "start_at": _salon_iso(v.start_at, tz),
-        "end_at": _salon_iso(v.end_at, tz),
+        "start_at": salon_iso(v.start_at, tz),
+        "end_at": salon_iso(v.end_at, tz),
         "duration_min": v.duration_min,
         "status": v.status,
         "service_id": v.service_id,
@@ -131,7 +113,7 @@ def salon_day(request: HttpRequest) -> HttpResponse:
         except ValueError:
             return _error("bad_request", "date must be YYYY-MM-DD", 400)
     else:
-        day = dj_timezone.now().astimezone(tenant_tz(tenant)).date()
+        day = dj_timezone.now().astimezone(salon_zone(tenant)).date()
 
     if not isinstance(day, date_cls):  # pragma: no cover — defensive
         return _error("bad_request", "date must be YYYY-MM-DD", 400)

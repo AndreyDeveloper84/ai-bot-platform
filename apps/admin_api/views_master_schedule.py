@@ -364,27 +364,27 @@ def master_day_schedule(request: HttpRequest, master_id: str) -> HttpResponse:
 def _schedule_zone(master: Any) -> Any:
     """Пояс салона для провода записей и блоков — ОДНО правило с /day/.
 
-    Запасной пояс при пустом ``tenant.timezone`` — названный и тот же, что у
-    экрана дня (``salon_day.tenant_tz``: МСК, пояс пилота), а не молчаливый
-    UTC ``schedule.get_tenant_tz``: иначе у салона без пояса одна и та же
-    запись читалась бы «10:00» на /day/ и «07:00» здесь (DRF-2591).
+    Правило — ``apps.tenancy.timezones.salon_zone`` (DRF-2595), то же у экрана
+    дня и у ``build_schedule``. До сведения здесь стоял МСК, а у
+    ``schedule.get_tenant_tz`` — UTC: у салона без пояса одна и та же запись
+    читалась «10:00» на /day/ и «07:00» здесь (DRF-2591).
     """
-    from apps.admin_api.services.salon_day import tenant_tz
+    from apps.tenancy.timezones import salon_zone
 
-    return tenant_tz(master.tenant)
+    return salon_zone(master.tenant)
 
 
 def _moment_in_zone(raw: Any, tz: Any) -> Any:
     """Момент (ISO) — тот же, но со смещением салона; не момент — как есть."""
+    from apps.tenancy.timezones import salon_iso
+
     if not isinstance(raw, str) or not raw:
         return raw
     try:
         moment = datetime.fromisoformat(raw)
     except ValueError:
         return raw
-    if moment.tzinfo is None:
-        return moment.replace(tzinfo=tz).isoformat()
-    return moment.astimezone(tz).isoformat()
+    return salon_iso(moment, tz)
 
 
 def _in_salon_zone(body: dict[str, Any], tz: Any) -> dict[str, Any]:
@@ -396,9 +396,8 @@ def _in_salon_zone(body: dict[str, Any], tz: Any) -> dict[str, Any]:
     Здесь — тот же момент в поясе салона по правилу экрана дня
     (:func:`_schedule_zone`). Расчёт мастера (``master_api``) не трогается:
     экран мастера разбирает время через ``Date`` и от смещения не зависит.
-    Предел: сам ``build_schedule`` делит дни по ``get_tenant_tz`` (UTC при
-    пустом поясе) — у салона без пояса визит около полуночи может попасть в
-    соседний день; это правило ``master_api``, сведение — отдельным листом.
+    ``build_schedule`` делит дни по тому же ``salon_zone`` (DRF-2595): прежний
+    предел — дни по UTC у салона без пояса — снят сведением.
     """
     for day in body.get("days", []):
         for booking in day.get("bookings", []):

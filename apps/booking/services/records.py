@@ -566,14 +566,14 @@ def _salon_tz_of(tenant: dict[str, Any], cache: dict[tuple[str, str], str] | Non
 
     Ответ канона называет салон (``id``/``slug``/``name``), но не его пояс.
     Локальная строка салона несёт ``timezone``, и правило то же, что у
-    «✅ Вы записаны» (``tenant_timezone``). Салон не опознан — пустая строка,
+    «✅ Вы записаны» (``apps.tenancy.timezones.salon_zone``, DRF-2595). Салон не опознан — пустая строка,
     а не догадка: показ назовёт это пределом.
 
     ``all_objects``: визит в выключенном салоне всё равно был в его поясе.
     Поиски по id и по slug — независимы: невалидный id не отменяет slug.
     ``cache`` — один запрос на салон в пределах списка, а не на визит.
     """
-    from apps.booking.client_notify import tenant_timezone
+    from apps.tenancy.timezones import salon_zone
     from apps.tenancy.models import Tenant
 
     ident, slug = str(tenant.get("id") or ""), str(tenant.get("slug") or "")
@@ -588,7 +588,7 @@ def _salon_tz_of(tenant: dict[str, Any], cache: dict[tuple[str, str], str] | Non
             row = None
     if row is None and slug:
         row = Tenant.all_objects.filter(slug=slug).first()
-    result = tenant_timezone(row).key if row is not None else ""
+    result = salon_zone(row).key if row is not None else ""
     if cache is not None:
         cache[key] = result
     return result
