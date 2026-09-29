@@ -23,9 +23,13 @@ BEFORE invoking the skill; returns a :class:`SafetyVerdict` ∈
   for medical / drug / acute / legal / suicidal / forbidden.
 - Tenant overrides via ``settings.SAFETY_PATTERNS`` (merged on top of
   defaults — partial override doesn't wipe defaults).
-- Per-tenant BrandVoiceConfig.forbidden_phrases is consulted as a
-  generic "block" gate (operators add tenant-specific disallowed
-  vocabulary there; voice_check (Sprint 4 / C4) validates outbound).
+- Per-tenant ``BrandVoiceConfig.forbidden_phrases`` is NOT consulted here
+  (DRF-2608). Those are words Ayla must not SAY — they are checked on the
+  reply by ``post_check`` → ``voice_check.validate_voice``. Blocking the
+  PERSON's message for a word forbidden to Ayla broke the side of the
+  conversation. The earlier design also used the list as an operator
+  filter of rude client requests; that filter is not cancelled by us — it
+  is put to the owner as a separate question (a separate list, if wanted).
 
 ### intent_decision integration
 
@@ -238,9 +242,11 @@ def pre_check(
       text: user message.
       intent_decision: optional :class:`IntentDecision` (O2). If risk_level=='high',
         verdict is elevated to at least 'handoff'.
-      brand_voice: optional dict (from BrandVoiceConfig). If
-        ``forbidden_phrases`` contains a pattern that matches, verdict
-        becomes 'block' regardless of other matches.
+      brand_voice: accepted for call compatibility and NOT used on the
+        input (DRF-2608): ``forbidden_phrases`` of the brand are words Ayla
+        must not say and are checked on the reply (``post_check``). An
+        input filter of client requests, if the owner wants one, is a
+        separate list — not this one.
 
     Returns:
       :class:`SafetyResult`. Default verdict is ALLOW. Empty text → ALLOW.
@@ -269,15 +275,10 @@ def pre_check(
                 matched.append(pattern)
                 triggered_verdicts.add(verdict)
 
-    # BrandVoice forbidden_phrases — operator-defined per-tenant block list.
-    if brand_voice:
-        for pattern in brand_voice.get("forbidden_phrases", []) or []:
-            compiled = _compile(pattern)
-            if compiled is None:
-                continue
-            if compiled.search(text):
-                matched.append(pattern)
-                triggered_verdicts.add(SafetyVerdict.BLOCK.value)
+    # DRF-2608: brand ``forbidden_phrases`` are NOT applied to the person's
+    # input — they belong to the reply side (``post_check``). ``brand_voice``
+    # stays in the signature for callers; see the docstring.
+    del brand_voice
 
     # Map intent_decision.risk_level into the verdict elevation.
     elevation = _risk_elevation(intent_decision)
