@@ -50,8 +50,10 @@ Masks that pass: ``+7 9xx xxx-xx-xx``, ``<имя>@example.org``, ``max:831…``.
 
 ``pii_guard_allow.txt`` next to this file: one path prefix per line with a
 reason after ``#``. Today's entries are named individually; the list can
-only shrink. Test directories get test-range phones for free — they do NOT
-get real-range phones or real e-mails.
+only shrink — :data:`ALLOW_CEILING` is the number of entries, held by a
+node (DRF-2676): lowering it is free, raising it shows in the diff.
+Test directories get test-range phones for free — they do NOT get
+real-range phones or real e-mails.
 
 # Positive proof
 
@@ -71,6 +73,9 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ALLOW_FILE = HERE / "pii_guard_allow.txt"
+
+#: Number of entries in pii_guard_allow.txt — the list may only shrink.
+ALLOW_CEILING = 26
 
 FORBIDDEN_SUFFIXES = {
     ".sqlite3",
