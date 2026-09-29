@@ -178,7 +178,12 @@ class TestTupleMindedIds:
         )
         assert pair == (["old.py:2"], [])
 
-    def test_the_whole_repo_is_clean_today(self):
+    def test_the_whole_repo_is_clean_today(self, tmp_path):
         """The census, by construction, over apps/ and tests/ (the known site
-        in tests/contracts is fixed in the same change)."""
-        assert sti.tuple_minded_census([str(ROOT / "apps"), str(ROOT / "tests")]) == []
+        in tests/contracts is fixed in the same change) — plus one planted
+        file with the old form, so «nothing found» is proven to be a census
+        that reads, not one that is blind."""
+        planted = tmp_path / "test_planted_old_form.py"
+        planted.write_text(self.OLD, encoding="utf-8")
+        found = sti.tuple_minded_census([str(ROOT / "apps"), str(ROOT / "tests"), str(tmp_path)])
+        assert found == [f"{planted.as_posix()}:2"], found
