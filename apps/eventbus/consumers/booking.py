@@ -1425,10 +1425,13 @@ def _parse_canonical_reschedule_data(data: dict[str, Any]) -> _CanonicalReschedu
     require (or read) ``new_start_at``/``old_start_at``/``rescheduled_by``.
 
     ``actor``'s wire shape is owned by the Ayla-side Domain Event
-    Registry (not repo-local); only presence is validated here pending
-    Phase 2 backend contract confirmation (see the Phase 2 dependency
-    checklist in AGENT_BOT_PHASE1_FINAL_REVIEW_RESULT.md §5) — it is
-    carried through for logging/analytics, not type-narrowed.
+    Registry (not repo-local); only presence is validated here, and it is
+    carried through for logging/analytics, not type-narrowed. The reason
+    given for stopping at presence — a Phase 2 dependency checklist in
+    ``AGENT_BOT_PHASE1_FINAL_REVIEW_RESULT.md`` §5 — is LOST: that review
+    is in neither repository nor in the working docs, and no text with
+    that checklist was found by content (DRF-2657). The presence-only
+    check therefore stands without a verifiable basis.
     """
     missing = [f for f in _CANONICAL_REQUIRED_FIELDS if data.get(f) in (None, "")]
     if missing:
