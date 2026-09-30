@@ -32,6 +32,12 @@
 * ``VOICE_CROSS_BORDER_ALLOWED`` — отдельное разрешение на передачу за
   рубеж: без него провайдер ``openai`` не вызывается и файл даже не
   скачивается.
+* ``VOICE_ALLOWED_USER_IDS`` — кому распознавать (DRF-2424): MAX user_id
+  через запятую; пусто — никому, ``*`` — всем. Флаги выше глобальны на весь
+  стек, а на стенде пилота рядом с тестовым ботом живые люди: живой проход
+  включается только для тестового аккаунта. Вне списка — та же заглушка
+  DRF-1939, что при выключенном флаге, без скачивания. Канал не
+  учитывается — сегодня голос есть только в MAX.
 * ``VOICE_ECHO_MODE`` — «Я услышала: …» перед ответом (``always``, по
   умолчанию — решение владельца 28.09, DRF-2425) или нет (``never``); режим
   «при неуверенности» невозможен, провайдер уверенность не отдаёт.
@@ -143,6 +149,32 @@ def cross_border_allowed() -> bool:
     return _flag("VOICE_CROSS_BORDER_ALLOWED")
 
 
+#: Значение списка допуска, означающее «всем» (DRF-2424).
+ALLOW_EVERYONE: Final[str] = "*"
+
+
+def parse_allowed_user_ids(raw: object) -> frozenset[str]:
+    """Разобрать ``VOICE_ALLOWED_USER_IDS``: id через запятую, пробелы и пустые — прочь.
+
+    Возвращает набор строк; ``*`` в нём — «всем». Строка разбирается всегда,
+    даже если в настройках уже лежит набор: проверка вхождения в строку
+    («100» in «1001») тихо пустила бы лишнего человека.
+    """
+    if isinstance(raw, str):
+        items = raw.split(",")
+    elif raw:
+        items = [str(item) for item in raw]
+    else:
+        items = []
+    return frozenset(item.strip() for item in items if item.strip())
+
+
+def voice_allowed_for(channel_user_id: str) -> bool:
+    """Распознавать ли голосовое этого человека (DRF-2424); пустой список — никому."""
+    allowed = parse_allowed_user_ids(getattr(settings, "VOICE_ALLOWED_USER_IDS", ""))
+    return ALLOW_EVERYONE in allowed or str(channel_user_id) in allowed
+
+
 def gate_strip_punct() -> bool:
     value = getattr(settings, "VOICE_GATE_STRIP_PUNCT", True)
     if isinstance(value, str):
@@ -205,6 +237,12 @@ def resolve_voice_turn(
 
     if not voice_input_enabled():
         return _refused(CODE_DISABLED, "flag_off")
+
+    # DRF-2424 — вне списка допуска ответ байт в байт как при выключенном
+    # флаге: другой текст выдал бы, что функция есть, но «не для тебя». В лог
+    # — только факт, без id человека (DRF-2009).
+    if not voice_allowed_for(event.channel_user_id):
+        return _log_refusal(_refused(CODE_DISABLED, "not_allowlisted"), started)
 
     ref = extract_first_audio(event.attachments)
     if ref is None:
