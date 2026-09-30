@@ -67,6 +67,7 @@ def _msg(
 def _flags(settings):
     settings.GLOBAL_BOT_ONBOARDING = False
     settings.VOICE_INPUT_ENABLED = True
+    settings.VOICE_ALLOWED_USER_IDS = "*"  # DRF-2424 — список допуска: всем
     settings.VOICE_CROSS_BORDER_ALLOWED = True
     settings.VOICE_STT_PROVIDER = "fake"
     settings.VOICE_GATE_STRIP_PUNCT = True
@@ -295,3 +296,24 @@ class TestGlobalVoice:
         assert "conversations.message.stored(global)" in text
         assert _user_rows(70014) == [("СЕКРЕТНОЕ СЛОВО ксилофон", "voice")]
         assert "ксилофон" not in text
+
+    def test_allowlist_on_the_global_path(self, sent, fake_redis, concierge, settings):
+        """DRF-2424 — на глобальном пути тот же список допуска."""
+        settings.VOICE_ALLOWED_USER_IDS = "70021"
+        provider = _provider("привет")
+        with patch(_DOWNLOAD, return_value=ogg_of(2)):
+            max_handler.handle_global_max_event(
+                _msg(user_id=70021, chat_id=21, mid="al-1", attachments=[AUDIO])
+            )
+        assert len(provider.calls) == 1
+        assert _user_rows(70021) == [("привет", "voice")]
+        sent.clear()
+
+        with patch(_DOWNLOAD) as dl:
+            max_handler.handle_global_max_event(
+                _msg(user_id=70022, chat_id=22, mid="al-2", attachments=[AUDIO])
+            )
+        assert [c["text"] for c in sent] == [VOICE_NOT_SUPPORTED_TEXT]
+        dl.assert_not_called()
+        assert len(provider.calls) == 1
+        assert _user_rows(70022) == [("", "text")]

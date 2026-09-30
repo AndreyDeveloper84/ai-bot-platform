@@ -118,6 +118,7 @@ def fake_redis(monkeypatch):
 def _voice_on(settings):
     settings.STRICT_TENANT_SCOPE = "strict"
     settings.VOICE_INPUT_ENABLED = True
+    settings.VOICE_ALLOWED_USER_IDS = "*"  # DRF-2424 — список допуска: всем
     settings.VOICE_CROSS_BORDER_ALLOWED = True
     settings.VOICE_STT_PROVIDER = "fake"
     settings.VOICE_GATE_STRIP_PUNCT = True
@@ -163,6 +164,27 @@ def _rows_by_user(tenant) -> dict[str, list[dict]]:
         key: sorted(value, key=lambda r: (r["role"], r["content"], r["action_type"]))
         for key, value in by_user.items()
     }
+
+
+class TestAllowlist:
+    def test_only_the_listed_person_is_recognised(self, tenant, mock_send, fake_redis, settings):
+        """DRF-2424 — флаги глобальны; распознаётся только список допуска."""
+        settings.VOICE_ALLOWED_USER_IDS = "1001"
+        provider = _provider("привет")
+        with patch(_DOWNLOAD, return_value=ogg_of(2)):
+            _run(tenant, _payload(attachments=[AUDIO], user_id=1001, chat_id=2001, mid="a-1"))
+        assert len(provider.calls) == 1
+        assert mock_send
+        assert VOICE_NOT_SUPPORTED_TEXT not in [c["text"] for c in mock_send]
+        mock_send.clear()
+
+        with patch(_DOWNLOAD) as dl:
+            _run(tenant, _payload(attachments=[AUDIO], user_id=1002, chat_id=2002, mid="a-2"))
+        assert [c["text"] for c in mock_send] == [VOICE_NOT_SUPPORTED_TEXT]
+        dl.assert_not_called()
+        assert len(provider.calls) == 1
+        user = sorted((m.content, m.input_channel) for m in _messages(tenant, "user"))
+        assert user == [("", "text"), ("привет", "voice")]
 
 
 class TestFlagOff:
