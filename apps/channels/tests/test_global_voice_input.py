@@ -67,6 +67,7 @@ def _msg(
 def _flags(settings):
     settings.GLOBAL_BOT_ONBOARDING = False
     settings.VOICE_INPUT_ENABLED = True
+    settings.VOICE_ALLOWED_USER_IDS = "*"  # DRF-2424 — список допуска: всем
     settings.VOICE_CROSS_BORDER_ALLOWED = True
     settings.VOICE_STT_PROVIDER = "fake"
     settings.VOICE_GATE_STRIP_PUNCT = True
@@ -280,10 +281,10 @@ class TestGlobalVoice:
     def test_logs_carry_no_transcript(self, sent, fake_redis, concierge, caplog, settings):
         """DRF-2488 — пометка не тянет расшифровку в логи: слушаем корень на DEBUG.
 
-        Пост-ответный разбор намерений выключен: это живой вызов OpenAI, и
-        SDK ``openai`` на DEBUG сам пишет тело запроса — с текстом реплики,
-        набранной или надиктованной одинаково. Это не код бота и не предмет
-        DRF-2488; на проде корень на INFO.
+        Пост-ответный разбор намерений выключен: это настоящий исходящий HTTP
+        к OpenAI (в CI ключ-заглушка → 401), тесту не нужна сеть. Тело запроса
+        SDK в лог больше не пишет и при DEBUG — ``openai._base_client`` прибит
+        на INFO в ``LOGGING`` (DRF-2634, свой тест в ``apps/observability``).
         """
         settings.INTENT_RESOLUTION_LIVE_ENABLED = False
         caplog.set_level(logging.DEBUG)
@@ -295,3 +296,24 @@ class TestGlobalVoice:
         assert "conversations.message.stored(global)" in text
         assert _user_rows(70014) == [("СЕКРЕТНОЕ СЛОВО ксилофон", "voice")]
         assert "ксилофон" not in text
+
+    def test_allowlist_on_the_global_path(self, sent, fake_redis, concierge, settings):
+        """DRF-2424 — на глобальном пути тот же список допуска."""
+        settings.VOICE_ALLOWED_USER_IDS = "70021"
+        provider = _provider("привет")
+        with patch(_DOWNLOAD, return_value=ogg_of(2)):
+            max_handler.handle_global_max_event(
+                _msg(user_id=70021, chat_id=21, mid="al-1", attachments=[AUDIO])
+            )
+        assert len(provider.calls) == 1
+        assert _user_rows(70021) == [("привет", "voice")]
+        sent.clear()
+
+        with patch(_DOWNLOAD) as dl:
+            max_handler.handle_global_max_event(
+                _msg(user_id=70022, chat_id=22, mid="al-2", attachments=[AUDIO])
+            )
+        assert [c["text"] for c in sent] == [VOICE_NOT_SUPPORTED_TEXT]
+        dl.assert_not_called()
+        assert len(provider.calls) == 1
+        assert _user_rows(70022) == [("", "text")]

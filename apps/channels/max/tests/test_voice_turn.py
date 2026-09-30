@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
 from unittest.mock import patch
 
 import pytest
@@ -22,6 +23,7 @@ from apps.channels.max.voice_turn import (
     REFUSAL_TEXTS,
     VoiceRefused,
     VoiceResolved,
+    parse_allowed_user_ids,
     resolve_voice_turn,
     strip_for_gate,
     with_voice_echo,
@@ -58,6 +60,7 @@ def voice_event(attachments=None) -> CanonicalEvent:
 @pytest.fixture(autouse=True)
 def _voice_on(settings):
     settings.VOICE_INPUT_ENABLED = True
+    settings.VOICE_ALLOWED_USER_IDS = "*"  # DRF-2424 — список допуска: всем
     settings.VOICE_CROSS_BORDER_ALLOWED = True
     settings.VOICE_STT_PROVIDER = "fake"
     settings.VOICE_GATE_STRIP_PUNCT = True
@@ -108,6 +111,66 @@ class TestResolved:
         assert "channels.max.voice.resolved provider=fake audio_s=2.0" in text
         assert "СЕКРЕТНАЯ" not in text
         assert "sig=S" not in text
+
+
+class TestAllowlist:
+    """DRF-2424 — кому распознавать: пусто — никому, «*» — всем, иначе — по id."""
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("", frozenset()),
+            ("   ", frozenset()),
+            (None, frozenset()),
+            ("1001", frozenset({"1001"})),
+            (" 1001 , ,2002,", frozenset({"1001", "2002"})),
+            ("*", frozenset({"*"})),
+            ("*,1001", frozenset({"*", "1001"})),
+            (["1001", " 2002 "], frozenset({"1001", "2002"})),
+        ],
+    )
+    def test_parse(self, raw, expected):
+        assert parse_allowed_user_ids(raw) == expected
+
+    def test_empty_list_refuses_everyone_like_flag_off(self, fake, settings):
+        settings.VOICE_ALLOWED_USER_IDS = ""
+        with patch(_DOWNLOAD) as dl:
+            out = resolve_voice_turn(voice_event())
+        assert out == VoiceRefused(
+            CODE_DISABLED, VOICE_NOT_SUPPORTED_TEXT, VOICE_ACTION_TYPE, "not_allowlisted"
+        )
+        dl.assert_not_called()
+        assert fake.calls == []
+
+    def test_listed_id_is_recognised_and_a_prefix_is_not(self, fake, settings):
+        # «100» — подстрока «1001»: проверка вхождения в строку пустила бы его.
+        settings.VOICE_ALLOWED_USER_IDS = "1001"
+        with patch(_DOWNLOAD, return_value=ogg_of(1)):
+            listed = resolve_voice_turn(replace(voice_event(), channel_user_id="1001"))
+        assert isinstance(listed, VoiceResolved)
+        assert len(fake.calls) == 1
+        with patch(_DOWNLOAD) as dl:
+            prefix = resolve_voice_turn(replace(voice_event(), channel_user_id="100"))
+        assert prefix == VoiceRefused(
+            CODE_DISABLED, VOICE_NOT_SUPPORTED_TEXT, VOICE_ACTION_TYPE, "not_allowlisted"
+        )
+        dl.assert_not_called()
+        assert len(fake.calls) == 1
+
+    @pytest.mark.parametrize("raw", ["*", "*,1001", " * "])
+    def test_star_means_everyone(self, fake, settings, raw):
+        settings.VOICE_ALLOWED_USER_IDS = raw
+        with patch(_DOWNLOAD, return_value=ogg_of(1)):
+            out = resolve_voice_turn(replace(voice_event(), channel_user_id="777"))
+        assert isinstance(out, VoiceResolved)
+
+    def test_log_names_the_reason_not_the_person(self, fake, settings, caplog):
+        settings.VOICE_ALLOWED_USER_IDS = "1001"
+        with caplog.at_level(logging.DEBUG, logger="apps.channels.max.voice_turn"):
+            resolve_voice_turn(replace(voice_event(), channel_user_id="5550123"))
+        text = "\n".join(r.getMessage() for r in caplog.records)
+        assert "channels.max.voice.refused code=voice_disabled reason=not_allowlisted" in text
+        assert "5550123" not in text
 
 
 class TestFlags:

@@ -2398,7 +2398,14 @@ VOICE_STT_MONTHLY_MINUTES_CAP = int(os.environ.get("VOICE_STT_MONTHLY_MINUTES_CA
 # набор слов (true/1/yes, регистр и пробелы по краям не важны); «on» — выключено.
 #
 # VOICE_INPUT_ENABLED — главный выключатель. Включать людям только словом
-#   владельца после S1-валидации (ТЗ §5, F0).
+#   владельца после S1-валидации (ТЗ §5, F0). Сам по себе людям голос не
+#   включает: см. VOICE_ALLOWED_USER_IDS.
+# VOICE_ALLOWED_USER_IDS — кому распознавать (DRF-2424): MAX user_id через
+#   запятую. Флаги глобальны на весь стек, а на стенде пилота рядом с тестовым
+#   ботом живут настоящие люди — поэтому пусто = никому (fail-closed), «*» =
+#   всем (это и есть включение людям — отдельное осознанное действие; «*»
+#   среди id тоже значит всем). Вне списка человек получает заглушку DRF-1939,
+#   как при выключенном флаге. Разбор строки — voice_turn.parse_allowed_user_ids.
 # VOICE_CROSS_BORDER_ALLOWED — отдельное разрешение на передачу голоса за
 #   рубеж (провайдер openai). Без него при включённом главном флаге файл
 #   не скачивается и человек получает «сейчас не могу разобрать голосовое».
@@ -2416,6 +2423,7 @@ VOICE_INPUT_ENABLED = os.environ.get("VOICE_INPUT_ENABLED", "false").strip().low
 VOICE_CROSS_BORDER_ALLOWED = (
     os.environ.get("VOICE_CROSS_BORDER_ALLOWED", "false").strip().lower() in _VOICE_TRUE
 )
+VOICE_ALLOWED_USER_IDS = os.environ.get("VOICE_ALLOWED_USER_IDS", "")
 VOICE_ECHO_MODE = os.environ.get("VOICE_ECHO_MODE", "always").strip().lower()
 VOICE_GATE_STRIP_PUNCT = (
     os.environ.get("VOICE_GATE_STRIP_PUNCT", "true").strip().lower() in _VOICE_TRUE

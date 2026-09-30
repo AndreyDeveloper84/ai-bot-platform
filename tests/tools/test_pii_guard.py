@@ -125,6 +125,15 @@ class TestAllowlist:
                 f"{path}: исключению нечего прикрывать — путь исчез, удалите строку"
             )
 
+    def test_the_list_may_only_shrink(self):
+        """Raising the ceiling must show in the diff; removing an entry lowers it (DRF-2676)."""
+        entries = g.load_allowlist()
+        assert len(entries) == g.ALLOW_CEILING, (
+            f"в списке {len(entries)} строк, потолок {g.ALLOW_CEILING}: новое исключение — "
+            "это решение, и его видно только если потолок поднят в том же диффе; "
+            "убранная строка — опустите потолок"
+        )
+
     def test_allow_prefix_semantics(self):
         allow = [("legacy_maxbot/", "frozen"), ("docs/catalog/MARKET_PENZA.md", "public")]
         assert g.is_allowed("legacy_maxbot/handlers/x.py", allow)

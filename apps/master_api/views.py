@@ -2707,6 +2707,10 @@ def billing_pay_debt(request: HttpRequest) -> HttpResponse:
         )
         return _error("forbidden", "specialist_id does not match the session identity", 403)
 
+    # DRF-2681: значение уходит в платёжный контур каталога — нестроковое
+    # получает отказ этой двери, а не становится текстом "{'a': 1}".
+    if body.get("return_url") is not None and not isinstance(body.get("return_url"), str):
+        return _error("malformed", "return_url must be a string", 400)
     return_url = str(body.get("return_url") or "").strip()
 
     return _billing_proxy_response(pay_debt_for_master(master, return_url=return_url))
@@ -2744,6 +2748,10 @@ def billing_card_setup(request: HttpRequest) -> HttpResponse:
         )
         return _error("forbidden", "specialist_id does not match the session identity", 403)
 
+    # DRF-2681: значение уходит в платёжный контур каталога — нестроковое
+    # получает отказ этой двери, а не становится текстом "{'a': 1}".
+    if body.get("return_url") is not None and not isinstance(body.get("return_url"), str):
+        return _error("validation_error", "return_url must be a string", 400)
     tariff = str(body.get("tariff") or "")
     return_url = str(body.get("return_url") or "").strip()
     if tariff not in ("solo", "salon") or not return_url:
