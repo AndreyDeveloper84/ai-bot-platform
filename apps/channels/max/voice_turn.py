@@ -52,6 +52,7 @@ from __future__ import annotations
 import logging
 import re
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from typing import Any, Final
 
@@ -160,9 +161,10 @@ def parse_allowed_user_ids(raw: object) -> frozenset[str]:
     даже если в настройках уже лежит набор: проверка вхождения в строку
     («100» in «1001») тихо пустила бы лишнего человека.
     """
+    items: list[str]
     if isinstance(raw, str):
         items = raw.split(",")
-    elif raw:
+    elif isinstance(raw, Iterable):
         items = [str(item) for item in raw]
     else:
         items = []
