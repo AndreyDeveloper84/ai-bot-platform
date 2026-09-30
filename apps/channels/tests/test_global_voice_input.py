@@ -280,10 +280,10 @@ class TestGlobalVoice:
     def test_logs_carry_no_transcript(self, sent, fake_redis, concierge, caplog, settings):
         """DRF-2488 — пометка не тянет расшифровку в логи: слушаем корень на DEBUG.
 
-        Пост-ответный разбор намерений выключен: это живой вызов OpenAI, и
-        SDK ``openai`` на DEBUG сам пишет тело запроса — с текстом реплики,
-        набранной или надиктованной одинаково. Это не код бота и не предмет
-        DRF-2488; на проде корень на INFO.
+        Пост-ответный разбор намерений выключен: это настоящий исходящий HTTP
+        к OpenAI (в CI ключ-заглушка → 401), тесту не нужна сеть. Тело запроса
+        SDK в лог больше не пишет и при DEBUG — ``openai._base_client`` прибит
+        на INFO в ``LOGGING`` (DRF-2634, свой тест в ``apps/observability``).
         """
         settings.INTENT_RESOLUTION_LIVE_ENABLED = False
         caplog.set_level(logging.DEBUG)
