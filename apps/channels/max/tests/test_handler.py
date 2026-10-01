@@ -493,7 +493,7 @@ class TestKeyboardPassThrough:
 
         sent = mock_send[0]
         # The ASK_PROMPT text is on the reply.
-        assert "Спросите" in sent["text"]
+        assert "Спроси о чём угодно" in sent["text"]
         # No keyboard on this turn.
         assert sent["attachments"] is None
 
