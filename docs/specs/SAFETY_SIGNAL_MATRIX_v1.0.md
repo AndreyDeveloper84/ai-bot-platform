@@ -351,8 +351,8 @@ shaving») приняты сознательно и в таблице обзор
 
 **Сегодня.** `pre_check.py`, набор `BLOCK`:
 
-```python
-(r"(?i)\b(ибупрофен|анальгин|парацетамол|кеторол|tramadol|opioid)\b",)
+```text
+r"(?i)\b(ибупрофен|анальгин|парацетамол|кеторол|tramadol|opioid)\b",
 ```
 
 Комментарий над строкой гласит `# Specific drug names (recommend → block)`.
