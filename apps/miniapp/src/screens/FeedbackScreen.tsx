@@ -85,7 +85,7 @@ export function FeedbackScreen() {
   return (
     <ScreenLayout
       back={BACK}
-      title="Оцените визит"
+      title="Оцени визит"
       cta={
         <StickyCta onClick={onSubmit} disabled={!canSubmit}>
           {phase.submitting ? "Отправляем…" : "Отправить"}
@@ -93,7 +93,7 @@ export function FeedbackScreen() {
       }
     >
       <p className="feedback-intro">
-        Ваша оценка поможет студии сделать визиты ещё приятнее.
+        Твоя оценка поможет студии сделать визиты ещё приятнее.
       </p>
 
       <StarPicker
@@ -111,7 +111,7 @@ export function FeedbackScreen() {
           rows={4}
           maxLength={COMMENT_MAX}
           value={phase.comment}
-          placeholder="Расскажите, что понравилось или что улучшить"
+          placeholder="Расскажи, что понравилось или что улучшить"
           onChange={(e) =>
             setPhase((p) => (p.kind === "form" ? { ...p, comment: e.target.value } : p))
           }
@@ -202,8 +202,8 @@ function ThankYou({ result, onClose }: { result: FeedbackResult; onClose: () => 
         <div className="feedback-thanks__stars">{"★".repeat(result.rating)}{"☆".repeat(5 - result.rating)}</div>
         <p className="feedback-thanks__body">
           {lowRating
-            ? "Мы передали ваш отзыв в студию — с вами свяжутся в ближайшее время, чтобы разобраться и помочь."
-            : "Мы рады, что вам понравилось. Будем ждать вас снова!"}
+            ? "Мы передали твой отзыв в студию — с тобой свяжутся в ближайшее время, чтобы разобраться и помочь."
+            : "Мы рады, что тебе понравилось. Будем ждать тебя снова!"}
         </p>
       </div>
     </ScreenLayout>

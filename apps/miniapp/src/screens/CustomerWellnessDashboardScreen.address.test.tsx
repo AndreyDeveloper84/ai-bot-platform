@@ -9,7 +9,7 @@
  * |---|---|---|
  * | строка | адрес известен | адрес |
  * | `""` | **салон сказал**, адреса нет | «Адрес не указан» |
- * | `null` | источник промолчал — наш пробел | «Уточните адрес в салоне» |
+ * | `null` | источник промолчал — наш пробел | «Уточни адрес в салоне» |
  *
  * Строка есть в обоих пустых случаях, и это решение владельца контура,
  * а не упрощение: различие «чей пробел» — наше, а у человека нужда
@@ -95,7 +95,7 @@ describe("адрес визита: три состояния, два текст�
 
     expect(await screen.findByText("Москва, Тверская 12")).toBeInTheDocument();
     // Отсутствие: подсказок про неизвестность нет — адрес известен.
-    expect(screen.queryByText(/Уточните адрес/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Уточни адрес/)).not.toBeInTheDocument();
     expect(screen.queryByText(/Адрес не указан/)).not.toBeInTheDocument();
   });
 
@@ -107,14 +107,14 @@ describe("адрес визита: три состояния, два текст�
     expect(await screen.findByText("Формула тела", { exact: false })).toBeInTheDocument();
     // …и вместо пустого блока — фраза. Спрашивать некого: салон ответил.
     expect(screen.getByText("Адрес не указан")).toBeInTheDocument();
-    expect(screen.queryByText(/Уточните адрес/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Уточни адрес/)).not.toBeInTheDocument();
   });
 
   it("источник промолчал — человека отправляют спросить, а не оставляют ни с чем", async () => {
     mockedActivity.mockResolvedValue(activityWithAddress(null));
     renderScreen();
 
-    expect(await screen.findByText("Уточните адрес в салоне")).toBeInTheDocument();
+    expect(await screen.findByText("Уточни адрес в салоне")).toBeInTheDocument();
     // Отсутствие: «адреса нет» тут было бы ложью — салон ничего не говорил.
     expect(screen.queryByText("Адрес не указан")).not.toBeInTheDocument();
   });
@@ -129,12 +129,12 @@ describe("адрес визита: три состояния, два текст�
         </MemoryRouter>,
       );
       seen.push(
-        (await screen.findByText(/Адрес не указан|Уточните адрес в салоне/)).textContent ?? "",
+        (await screen.findByText(/Адрес не указан|Уточни адрес в салоне/)).textContent ?? "",
       );
       unmount();
     }
 
-    expect(seen).toEqual(["Адрес не указан", "Уточните адрес в салоне"]);
+    expect(seen).toEqual(["Адрес не указан", "Уточни адрес в салоне"]);
     expect(new Set(seen).size).toBe(2);
   });
 });

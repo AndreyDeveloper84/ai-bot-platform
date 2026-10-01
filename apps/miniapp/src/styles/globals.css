@@ -5317,7 +5317,7 @@ a {
   border-bottom: 1px solid var(--c-divider);
   background: var(--c-surface-1);
 }
-/* Д1 — аватар, имя, «Рада вас видеть!». */
+/* Д1 — аватар, имя, «Рада тебя видеть!». */
 .wellness-dash__person {
   display: flex;
   align-items: center;

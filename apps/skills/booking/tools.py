@@ -3144,7 +3144,7 @@ def show_my_bookings(
 
 
 def _salon_tz_key(tenant: Any) -> str:
-    """Пояс салона — тем же правилом, что «✅ Вы записаны» (``tenant_timezone``)."""
+    """Пояс салона — тем же правилом, что «✅ Запись подтверждена» (``tenant_timezone``)."""
     from apps.tenancy.timezones import salon_zone
 
     return salon_zone(tenant).key
@@ -3162,8 +3162,8 @@ def _format_booking_line(b: BookingRow) -> str:
 
 def _format_bookings_text(bookings: list[BookingRow]) -> str:
     if not bookings:
-        return "У вас пока нет предстоящих записей."
-    lines = ["Ваши предстоящие записи:"]
+        return "У тебя пока нет предстоящих записей."
+    lines = ["Твои предстоящие записи:"]
     lines += [_format_booking_line(b) for b in bookings[:5]]
     return "\n".join(lines)
 

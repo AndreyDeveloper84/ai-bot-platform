@@ -113,12 +113,12 @@ def _format_day_before_text(reminder: BookingReminder) -> str:
     """
     visit_local = timezone.localtime(reminder.visit_at)
     return (
-        "Здравствуйте! Напоминаю о записи завтра:\n"
+        "Привет! Напоминаю о записи завтра:\n"
         f"{reminder.service_name or '—'} к мастеру "
         f"{reminder.master_name or '—'}\n"
         f"{visit_local.strftime('%d.%m в %H:%M')}\n"
         f"{_salon_address_line(reminder)}\n\n"
-        "Подтвердите, пожалуйста:"
+        "Подтверди, пожалуйста:"
     )
 
 
@@ -130,12 +130,12 @@ def _format_two_hours_text(reminder: BookingReminder) -> str:
     """
     visit_local = timezone.localtime(reminder.visit_at)
     return (
-        "Через 2 часа жду вас на приём:\n"
+        "Через 2 часа жду тебя на приём:\n"
         f"{reminder.service_name or '—'} к мастеру "
         f"{reminder.master_name or '—'}\n"
         f"в {visit_local.strftime('%H:%M')}\n"
         f"{_salon_address_line(reminder)}\n\n"
-        "Если планы изменились — напишите, постараемся помочь."
+        "Если планы изменились — напиши, постараемся помочь."
     )
 
 

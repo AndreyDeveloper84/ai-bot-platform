@@ -434,7 +434,7 @@ class TestTheServiceQuestionIsAnswerable:
 
         ```
         → [тап карточки мастера]
-        ← Выберите услугу мастера Сазонова Инна: …
+        ← Выбери услугу мастера Сазонова Инна: …
         → Лимфодренажный массаж всего тела
         ← Вот мастера, которые могут подойти: …   ← петля
         ```
@@ -466,7 +466,7 @@ class TestTheServiceQuestionIsAnswerable:
         """
         tenant, master, service = rf_salon
         _tap_serviceless(tenant, master)
-        assert mock_send[-1]["text"].startswith("Выберите услугу мастера Тихонова Ольга")
+        assert mock_send[-1]["text"].startswith("Выбери услугу мастера Тихонова Ольга")
 
         GlobalMaxHandler()(_raw(_typed(_RF_LIFT_NAME, "mm-rf")))
 
