@@ -143,6 +143,7 @@ from apps.channels.max.voice_turn import (
 )
 from apps.conversations.models import Conversation, Message
 from apps.conversations.services import (
+    amend_global_assistant_text,
     record_global_message,
     record_message,
     resolve_active_conversation,
@@ -2835,11 +2836,19 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     # администратора салона» is the one failure here that could cost more than
     # it saves. Nothing else is exempt — including the contour's own canned
     # lines, which a test pins clean rather than a whitelist excuses.
+    # DRF-2686 — (текст до эха, текст с эхом) для ответа, который консьерж
+    # уже записал в переписку сам; правится после гарда, перед отправкой.
+    voice_echo_amend: tuple[str, str] | None = None
     if voice_transcript is not None and assistant_action_type != "safety_pre_check":
         # DRF-1942 — эхо «Я услышала: …» (``VOICE_ECHO_MODE``), до гарда и
-        # записи: в переписке остаётся ровно то, что человек прочитал.
+        # записи: в переписке остаётся ровно то, что человек прочитал. Ответ
+        # консьержа (``persisted``) в переписке уже лежит без эха — его
+        # строку догоняет ``amend_global_assistant_text`` ниже (DRF-2686).
+        echoed_text = with_voice_echo(reply.text, voice_transcript.text)
+        if reply.persisted and echoed_text != reply.text:
+            voice_echo_amend = (reply.text, echoed_text)
         reply = DiscoveryReply(
-            text=with_voice_echo(reply.text, voice_transcript.text),
+            text=echoed_text,
             action_data=reply.action_data,
             persisted=reply.persisted,
         )
@@ -2949,6 +2958,30 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             action_data=reply.action_data,
             trace_id=trace_id,
         )
+    elif voice_echo_amend is not None and post_verdict != "block":
+        # DRF-2686 — консьерж записал ответ до эха; человек прочитает его с
+        # эхом, и в переписке должно быть так же. После гарда: заблокированный
+        # ответ заменён новой строкой выше, строку консьержа не трогаем.
+        # Служебная строка памяти в запись не идёт, как и раньше.
+        try:
+            amended = amend_global_assistant_text(
+                conversation,
+                trace_id=trace_id,
+                expected=voice_echo_amend[0],
+                text=voice_echo_amend[1],
+            )
+            if amended != 1:
+                logger.warning(
+                    "channels.max.voice.echo_not_recorded conversation=%s rows=%d",
+                    conversation.id,
+                    amended,
+                )
+        except Exception as exc:  # noqa: BLE001 — запись эха не стоит хода
+            logger.warning(
+                "channels.max.voice.echo_record_failed conversation=%s err=%s",
+                conversation.id,
+                type(exc).__name__,
+            )
     short_term.append(conversation.id, role="assistant", content=reply.text)
     if assistant_action_type == "safety_pre_check":
         # Crisis reply — alert loudly on delivery failure (#1082).

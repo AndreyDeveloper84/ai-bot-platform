@@ -11,6 +11,7 @@ test_handler_voice_input.py``), доказанный на втором вход�
 from __future__ import annotations
 
 import logging
+import uuid
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -317,3 +318,113 @@ class TestGlobalVoice:
         dl.assert_not_called()
         assert len(provider.calls) == 1
         assert _user_rows(70022) == [("", "text")]
+
+
+@pytest.fixture
+def persisting_concierge(monkeypatch):
+    """Консьерж, который, как настоящий, сам пишет свой ответ в переписку (DRF-2686).
+
+    Обычная фикстура ``concierge`` отдаёт ``persisted=False`` — строку пишет
+    обработчик, и потеря эха в строке консьержа на ней не видна.
+    """
+    from apps.conversations.services import record_global_message
+    from apps.orchestrator.discovery import DiscoveryReply
+
+    def reply(message_text, *, conversation, trace_id=None, **kwargs):
+        record_global_message(
+            conversation,
+            role="assistant",
+            content="Расскажи чуть подробнее?",
+            rendered_text="Расскажи чуть подробнее?",
+            action_type="concierge",
+            tokens_in=11,
+            tokens_out=5,
+            trace_id=trace_id,
+        )
+        return DiscoveryReply(text="Расскажи чуть подробнее?", persisted=True)
+
+    spy = MagicMock(side_effect=reply)
+    monkeypatch.setattr("apps.orchestrator.concierge.generate_concierge_reply", spy)
+    return spy
+
+
+def _assistant_rows(user_id: int) -> list[Message]:
+    return list(
+        Message.all_tenants.filter(
+            conversation__bot_user__channel_user_id=str(user_id), role="assistant"
+        )
+    )
+
+
+class TestEchoInTheConciergeRow:
+    """DRF-2686 — переписка хранит ответ консьержа таким, каким его прочитали."""
+
+    ECHOED = "Я услышала: «привет»\n\nРасскажи чуть подробнее?"
+
+    def _voice(self, user_id: int) -> None:
+        _provider("привет")
+        with patch(_DOWNLOAD, return_value=ogg_of(2)):
+            max_handler.handle_global_max_event(
+                _msg(user_id=user_id, attachments=[AUDIO]), trace_id=str(uuid.uuid4())
+            )
+
+    def test_the_row_carries_the_echo_the_person_read(
+        self, sent, fake_redis, persisting_concierge, settings
+    ):
+        settings.VOICE_ECHO_MODE = "always"
+        self._voice(70031)
+        assert [c["text"] for c in sent] == [self.ECHOED]
+        (row,) = _assistant_rows(70031)  # одна строка — не дубль
+        assert row.content == row.rendered_text == sent[0]["text"]
+        assert (row.action_type, row.tokens_in, row.tokens_out) == ("concierge", 11, 5)
+
+    def test_no_echo_mode_leaves_the_row_as_written(
+        self, sent, fake_redis, persisting_concierge, settings
+    ):
+        settings.VOICE_ECHO_MODE = "never"
+        self._voice(70032)
+        (row,) = _assistant_rows(70032)
+        assert row.content == sent[0]["text"] == "Расскажи чуть подробнее?"
+
+    def test_typed_text_leaves_the_row_as_written(
+        self, sent, fake_redis, persisting_concierge, settings
+    ):
+        settings.VOICE_ECHO_MODE = "always"
+        max_handler.handle_global_max_event(
+            _msg(text="привет", user_id=70033), trace_id=str(uuid.uuid4())
+        )
+        (row,) = _assistant_rows(70033)
+        assert row.content == sent[0]["text"] == "Расскажи чуть подробнее?"
+
+    def test_a_blocked_reply_is_a_new_row_and_the_concierge_row_is_untouched(
+        self, sent, fake_redis, persisting_concierge, settings, monkeypatch
+    ):
+        """Гард заблокировал ответ после эха: человеку ушла замена, она и записана."""
+        from apps.orchestrator.safety.gate import OUTBOUND_ACTION_TYPE
+        from apps.orchestrator.safety.outbound import OutboundVerdict
+
+        settings.VOICE_ECHO_MODE = "always"
+        monkeypatch.setattr(
+            max_handler,
+            "guard_outbound",
+            lambda text, **kwargs: OutboundVerdict(allowed=False, text="Тут нужен человек."),
+        )
+        self._voice(70034)
+        rows = {r.action_type: r.content for r in _assistant_rows(70034)}
+        assert rows == {
+            "concierge": "Расскажи чуть подробнее?",
+            OUTBOUND_ACTION_TYPE: "Тут нужен человек.",
+        }
+
+    def test_a_missing_row_does_not_cost_the_turn(self, sent, fake_redis, monkeypatch, settings):
+        """Консьерж сказал ``persisted``, а строки нет — ход всё равно доходит до человека."""
+        from apps.orchestrator.discovery import DiscoveryReply
+
+        settings.VOICE_ECHO_MODE = "always"
+        monkeypatch.setattr(
+            "apps.orchestrator.concierge.generate_concierge_reply",
+            MagicMock(return_value=DiscoveryReply(text="Расскажи чуть подробнее?", persisted=True)),
+        )
+        self._voice(70035)
+        assert [c["text"] for c in sent] == [self.ECHOED]
+        assert _assistant_rows(70035) == []
