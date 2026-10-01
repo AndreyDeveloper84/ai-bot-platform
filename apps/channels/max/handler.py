@@ -2597,9 +2597,7 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
                     personal_context_block = ""
                     try:
                         if ayla_user_id is not None:
-                            personal_context_block = (
-                                render_current_personal_context(ayla_user_id) or ""
-                            )
+                            personal_context_block = render_current_personal_context(bot_user) or ""
                     except Exception:  # noqa: BLE001 — memory surfacing must never break the turn
                         logger.exception(
                             "channels.max.global.memory_surface_failed bot_user=%s", bot_user.id

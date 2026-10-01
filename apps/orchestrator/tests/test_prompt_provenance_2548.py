@@ -48,10 +48,15 @@ def _groups(paragraph: str) -> tuple[str, str]:
 
 
 @pytest.mark.django_db
-def test_personal_context_puts_every_source_in_exactly_one_group():
+def test_personal_context_puts_every_source_in_exactly_one_group(monkeypatch):
     from apps.identity.models import MemoryEntry, UserPersonalContext
     from apps.identity.services.memory_writer import write_entry
     from apps.persona.memory_surface import render_current_personal_context
+
+    # DRF-2697: читатель сам спрашивает согласие. Эти узлы — про абзац, а не про
+    # затвор (его держит apps/persona/tests/test_memory_surface_consent_2697.py),
+    # поэтому затвор здесь открыт явно.
+    monkeypatch.setattr("apps.persona.memory_surface.can_store_green_memory", lambda bot_user: True)
 
     user_id = uuid.uuid4()
     upc = UserPersonalContext.objects.create(user_id=user_id, summary=SUMMARY)
@@ -72,7 +77,7 @@ def test_personal_context_puts_every_source_in_exactly_one_group():
     _write(MemoryEntry.SOURCE_EXPLICIT, {"key": "diet", "value": "vegan"})
     _write(MemoryEntry.SOURCE_INFERRED, {"key": "preferred_districts", "value": "Арбат"})
 
-    paragraph = render_current_personal_context(user_id)
+    paragraph = render_current_personal_context(SimpleNamespace(ayla_user_id=user_id))
     assert paragraph is not None
     assert STATED_LEAD in paragraph
     stated, derived = _groups(paragraph)
