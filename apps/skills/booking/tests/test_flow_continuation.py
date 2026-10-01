@@ -468,7 +468,7 @@ class TestContinuationMatches:
     ) -> None:
         """Review round 2 — «Подтверждаю» with a fresh flow but NO live
         pending is exactly the D-10 root-cause degradation (Phase 1
-        answered with free-text «Подтверждаете?» and made no tool call,
+        answered with free-text «Подтверждаешь?» and made no tool call,
         so no pending row exists). Booking claims the turn for a
         Phase-1 replay with flow grounding; the gate stays the owner
         whenever a pending row IS live."""
@@ -569,7 +569,7 @@ class TestSequenceA:
                             )
                         ],
                     ),
-                    _completion(text="Переношу на новое время. Подтверждаете?"),
+                    _completion(text="Переношу на новое время. Подтверждаешь?"),
                 ],
             ):
                 r3 = dispatch(_ctx(conversation, bot_user, "На 9 августа в 20:00"))
@@ -645,7 +645,7 @@ class TestSequenceB:
                             )
                         ],
                     ),
-                    _completion(text="Переношу вторую запись. Подтверждаете?"),
+                    _completion(text="Переношу вторую запись. Подтверждаешь?"),
                 ],
             ):
                 r2 = dispatch(_ctx(conversation, bot_user, "Первую, на 9 августа в 20:00"))
@@ -701,7 +701,7 @@ class TestSequenceC:
                             )
                         ],
                     ),
-                    _completion(text="Подтверждаете?"),
+                    _completion(text="Подтверждаешь?"),
                 ],
             ):
                 dispatch(_ctx(conversation, bot_user, "Первую, на 9 августа в 20:00"))
@@ -758,7 +758,7 @@ class TestSequenceD:
                             )
                         ],
                     ),
-                    _completion(text="Подтверждаете?"),
+                    _completion(text="Подтверждаешь?"),
                 ],
             ):
                 dispatch(_ctx(conversation, bot_user, "Первую, на 9 августа в 20:00"))
@@ -960,7 +960,7 @@ class TestNegatives:
                             )
                         ],
                     ),
-                    _completion(text="Подтверждаете?"),
+                    _completion(text="Подтверждаешь?"),
                 ],
             ):
                 dispatch(_ctx(conversation, bot_user, "Первую, на 9 августа в 20:00"))
@@ -1101,7 +1101,7 @@ class TestRoutingBoundaries:
 
         def _capture(messages: Any, **_: Any) -> CompletionResult:
             captured.append(messages)
-            return _completion(text="Подтверждаете перенос на 20:00?")
+            return _completion(text="Подтверждаешь перенос на 20:00?")
 
         with tenant_scope(tenant):
             _write_flow_state(conversation, flow="reschedule", bookings=[])
