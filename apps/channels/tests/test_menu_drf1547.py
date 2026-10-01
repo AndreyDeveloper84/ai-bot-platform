@@ -329,7 +329,7 @@ class TestEverySevenButtonDoesWhatItPromises:
             _tap(payload="cb:menu:my_bookings", user_id=71004, callback_id="s-3")
         )
 
-        assert "Ваши предстоящие записи" in sent[0]["text"], sent[0]["text"]
+        assert "Твои предстоящие записи" in sent[0]["text"], sent[0]["text"]
         assert _labels(sent[0]) == [
             "Подробнее: Маникюр",
             "Перенести: Маникюр",
@@ -367,7 +367,7 @@ class TestEverySevenButtonDoesWhatItPromises:
             _tap(payload="cb:menu:my_bookings", user_id=71014, callback_id="s-14")
         )
 
-        assert "Ваши последние визиты:" in sent[0]["text"], sent[0]["text"]
+        assert "Твои последние визиты:" in sent[0]["text"], sent[0]["text"]
         assert "Массаж спины" in sent[0]["text"], sent[0]["text"]
         assert concierge.call_count == 0
         # Приложение не открывалось: пять визитов и меньше читаются целиком.
@@ -388,7 +388,7 @@ class TestEverySevenButtonDoesWhatItPromises:
         )
 
         # Стража: ответ построен и предстоящая половина в нём есть.
-        assert "Ваши предстоящие записи" in sent[0]["text"], sent[0]["text"]
+        assert "Твои предстоящие записи" in sent[0]["text"], sent[0]["text"]
         # И только теперь — вторая половина, которая раньше молчала.
         assert "Завершённых визитов пока нет" in sent[0]["text"], sent[0]["text"]
 

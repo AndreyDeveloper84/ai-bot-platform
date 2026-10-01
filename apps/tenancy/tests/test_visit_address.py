@@ -40,5 +40,5 @@ def test_the_address_line_never_says_address_twice() -> None:
         tenant_address_line(SimpleNamespace(address="ул. Карпинского, 33А"))
         == "Адрес: ул. Карпинского, 33А"
     )
-    assert tenant_address_line(SimpleNamespace(address=None)) == "Адрес: Уточните адрес в салоне"
+    assert tenant_address_line(SimpleNamespace(address=None)) == "Адрес: Уточни адрес в салоне"
     assert tenant_address_line(SimpleNamespace(address="")) == "Адрес не указан"

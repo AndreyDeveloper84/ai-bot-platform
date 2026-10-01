@@ -95,8 +95,8 @@ logger = logging.getLogger(__name__)
 
 # Reply templates. Centralised so the tests assert against the
 # constants (not duplicated string literals — refactor-safe).
-REPLY_CONFIRMED = "Подтверждено, ждём вас!"
-REPLY_CANCELLED = "Запись отменена, надеемся увидеть вас позже."
+REPLY_CONFIRMED = "Подтверждено, ждём тебя!"
+REPLY_CANCELLED = "Запись отменена, надеемся увидеть тебя позже."
 REPLY_RESCHEDULE = "Передал администратору, скоро напишут."
 #: DRF-2341 — чем подтверждается «передал администратору»: ключ созданной
 #: задачи от исполнителя передачи. Форма общая с DRF-2337 (#2012):
@@ -157,13 +157,13 @@ REPLY_NOT_FOUND = "Не нашла эту запись — возможно, о�
 REPLY_FORBIDDEN = "Эта запись не для этого профиля."
 
 # B5 / DRF-841 — replies for the 2-button preview gate.
-REPLY_BOOK_EXPIRED = "Слишком много времени прошло — давайте подберём время заново."
+REPLY_BOOK_EXPIRED = "Слишком много времени прошло — давай подберём время заново."
 # DRF-1492 — the same timeout over a CANCEL or RESCHEDULE preview. Nothing was
 # booked and nothing was changed, so «подберём слот заново» is about the wrong
 # verb: the honest fact is that the existing booking is exactly where it was.
 REPLY_BOOK_EXPIRED_UNCHANGED = (
     "Слишком много времени прошло — ничего не изменила, запись осталась прежней. "
-    "Откройте актуальные записи и попробуйте ещё раз."
+    "Открой актуальные записи и попробуй ещё раз."
 )
 REPLY_BOOK_CANCELLED_PREVIEW = "Ок, не записываю."
 # DRF-1492 — the ❌ button aborts whatever preview it hangs under, and there
@@ -179,7 +179,7 @@ REPLY_BOOK_PARTIAL_FAILURE = "Не удалось завершить перен�
 REPLY_BOOK_CANCEL_FAILED = "Не получилось отменить запись — передал администратору, скоро уточнит."
 REPLY_BOOK_STALE_VERSION = (
     "Запись уже изменилась с момента выбора времени. "
-    "Откройте актуальные записи и попробуйте перенести снова."
+    "Открой актуальные записи и попробуй перенести снова."
 )
 
 
@@ -1153,7 +1153,7 @@ class BookingGateCallbackSkill:
             return SkillResult(
                 reply_text=REPLY_BOOK_CANCEL_FAILED
                 if row.kind != PendingBookingAction.Kind.CONFIRM
-                else "Сейчас не могу записать, попробуйте чуть позже.",
+                else "Сейчас не могу записать, попробуй чуть позже.",
                 should_handoff=True,
                 handoff_reason="booking_yclients_failure",
             )
