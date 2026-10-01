@@ -40,7 +40,8 @@ left the next one to be found the same way.
 * It does not touch tests that give the handler their own resolver: a later
   ``monkeypatch.setattr(max_handler, "resolve_and_log_turn_intent", ...)``
   replaces this one for that test.
-* It covers ``apps/channels`` only. Whether tests elsewhere reach a vendor
+* It covers this directory only (not ``apps/channels/max/tests``, which left
+  no rows in the same measurement). Whether tests elsewhere reach a vendor
   was measured for the shard-5 selection (they do not leave retry rows) and for
   nothing else.
 * The resolver's own behaviour is tested where it lives,
