@@ -768,6 +768,11 @@ def show_slots(
         _audit_tool(tenant_id=tenant_id, tool="show_slots", outcome="invalid_master_id")
         return BookingToolResult(error="invalid_master_id")
 
+    bad = _bad_argument(arguments, text=("date_from",), ids=("service_id",))
+    if bad is not None:
+        _refuse_argument(tenant_id=tenant_id, tool="show_slots", bad=bad)
+        return BookingToolResult(error=INVALID_ARGUMENT)
+
     service_id = _coerce_id(arguments.get("service_id"))
     service_ids = [service_id] if service_id is not None else None
 
@@ -937,6 +942,13 @@ def confirm_booking(
 
     tenant_id = str(getattr(tenant, "id", ""))
     _ = client  # explicitly unused on the preview path; see docstring
+    bad = _bad_argument(arguments, text=("slot_datetime", "client_phone"))
+    if bad is not None:
+        _refuse_argument(tenant_id=tenant_id, tool="confirm_booking", bad=bad)
+        return BookingToolResult(
+            confirmation=ConfirmationResult(ok=False, error=INVALID_ARGUMENT),
+            error=INVALID_ARGUMENT,
+        )
 
     if master_id is None or master_id not in allowed_master_ids:
         _audit_tool(tenant_id=tenant_id, tool="confirm_booking", outcome="invalid_master_id")
@@ -1738,6 +1750,10 @@ def cancel_booking(
     reason = str(arguments.get("reason") or "").strip()
     tenant_id = str(getattr(tenant, "id", ""))
     _ = client
+    bad = _bad_argument(arguments, text=("reason",))
+    if bad is not None:
+        _refuse_argument(tenant_id=tenant_id, tool="cancel_booking", bad=bad)
+        return BookingToolResult(error=INVALID_ARGUMENT)
 
     if record_id is None:
         _audit_tool(tenant_id=tenant_id, tool="cancel_booking", outcome="missing_record_id")
@@ -3194,6 +3210,10 @@ def calc_price(
     master_id = _coerce_id(arguments.get("master_id"))
 
     tenant_id = str(getattr(tenant, "id", ""))
+    bad = _bad_argument(arguments, text=("promo_code",), ids=("master_id",))
+    if bad is not None:
+        _refuse_argument(tenant_id=tenant_id, tool="calc_price", bad=bad)
+        return BookingToolResult(error=INVALID_ARGUMENT)
 
     if service_id is None or service_id not in allowed_service_ids:
         logger.info(
@@ -3561,6 +3581,13 @@ def buy_certificate(
             ),
         )
 
+    bad = _bad_argument(arguments, text=("recipient_name", "buyer_email"))
+    if bad is not None:
+        _refuse_argument(tenant_id=tenant_id, tool="buy_certificate", bad=bad)
+        return BookingToolResult(
+            certificate=BuyCertificateResult(ok=False, error=INVALID_ARGUMENT),
+            error=INVALID_ARGUMENT,
+        )
     recipient_name = str(arguments.get("recipient_name") or "").strip()
     buyer_email = str(arguments.get("buyer_email") or "").strip()
     description = f"Сертификат на {amount:.0f} ₽" + (
@@ -3751,6 +3778,53 @@ def _coerce_id(value: Any) -> int | str | None:
         text = str(value).strip()
         return text or None
     return _coerce_int(value)
+
+
+#: DRF-2667 — аргумент модели не того типа. Не «не названо» и не
+#: выдуманный id: модель прислала словарь, список или число туда, где ждут
+#: строку, и это событие должно быть отличимо в журнале. Передачи менеджеру
+#: нет — как у ``invalid_datetime``, ответ собирает второй заход модели.
+INVALID_ARGUMENT = "invalid_argument"
+
+
+def _bad_argument(
+    arguments: dict[str, Any],
+    *,
+    text: tuple[str, ...] = (),
+    ids: tuple[str, ...] = (),
+) -> tuple[str, str] | None:
+    """Первый аргумент модели не того типа — ``(поле, тип)``, иначе ``None``.
+
+    ``text`` — поля, где годен текст: строка или число (телефон JSON-числом —
+    годное значение); ``ids`` — строка или целое; ``bool`` — ни то ни другое.
+    Отсутствие (``None``) — не отказ: «не названо» остаётся своей веткой у
+    вызывающего.
+    """
+    for name in text:
+        value = arguments.get(name)
+        if value is None or isinstance(value, str):
+            continue
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return name, type(value).__name__
+    for name in ids:
+        value = arguments.get(name)
+        if value is None:
+            continue
+        if isinstance(value, bool) or not isinstance(value, (str, int)):
+            return name, type(value).__name__
+    return None
+
+
+def _refuse_argument(*, tenant_id: str, tool: str, bad: tuple[str, str]) -> None:
+    """Журнал и аудит отказа по типу — без самого значения."""
+    field, type_name = bad
+    logger.warning("booking.%s.argument_not_text field=%s type=%s", tool, field, type_name)
+    _audit_tool(
+        tenant_id=tenant_id,
+        tool=tool,
+        outcome=INVALID_ARGUMENT,
+        extra={"field": field, "type": type_name},
+    )
 
 
 def _ayla_handle(record: BookingRecord) -> str:

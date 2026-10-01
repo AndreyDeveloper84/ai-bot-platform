@@ -57,6 +57,8 @@ from apps.master_api.services.assistant_actions import (
     _human_window,
     _localise,
     _parse_dt,
+    ARGUMENT_NOT_TEXT_DETAIL,
+    text_argument,
 )
 from apps.master_api.services.assistant_tools import ToolError, ToolOutcome
 from apps.tenancy.timezones import salon_zone
@@ -196,7 +198,8 @@ def _resolve_master(tenant: Any, name: Any):
     from apps.catalog.models import CatalogMaster
     from apps.tenancy.context import tenant_scope
 
-    needle = str(name or "").strip().lower()
+    said = text_argument(name, field="master", log_label="admin_assistant")
+    needle = said.lower()
     if not needle:
         raise ActionError("не назван мастер")
     # ``.objects`` под явным ``tenant_scope``: вьюхи и так стоят в контексте
@@ -209,7 +212,7 @@ def _resolve_master(tenant: Any, name: Any):
         )
     hits = [m for m in rows if needle in (m.name or "").lower()]
     if not hits:
-        raise ActionError(f"мастер «{name}» в салоне не найден")
+        raise ActionError(f"мастер «{said}» в салоне не найден")
     if len(hits) > 1:
         names = ", ".join(m.name for m in hits[:5])
         raise ActionError(f"мастеров несколько: {names} — уточните")
@@ -222,7 +225,8 @@ def _resolve_service(tenant: Any, master: Any, name: Any):
     from apps.catalog.models import MasterService
     from apps.tenancy.context import tenant_scope
 
-    needle = str(name or "").strip().lower()
+    said = text_argument(name, field="service", log_label="admin_assistant")
+    needle = said.lower()
     if not needle:
         return None
     with tenant_scope(tenant):
@@ -231,7 +235,7 @@ def _resolve_service(tenant: Any, master: Any, name: Any):
         )
     hits = [e.service for e in edges if needle in (e.service.name or "").lower()]
     if not hits:
-        raise ActionError(f"услуга «{name}» у {master.name} не найдена")
+        raise ActionError(f"услуга «{said}» у {master.name} не найдена")
     if len(hits) > 1:
         names = ", ".join(s.name for s in hits[:5])
         raise ActionError(f"услуг несколько: {names} — уточните")
@@ -248,7 +252,12 @@ def _salon_day(tenant: Any, day: date, now: datetime):
 
 
 def _parse_day(raw: Any, *, default: date) -> date:
-    text = str(raw or "").strip()
+    if raw is not None and not isinstance(raw, str):
+        # DRF-2667 — читающий инструмент: тот же отказ, что у действий, но
+        # ToolError, которого ждёт ловец чтения; значение в текст не идёт.
+        logger.warning("admin_assistant.argument_not_text field=date type=%s", type(raw).__name__)
+        raise ToolError(ARGUMENT_NOT_TEXT_DETAIL)
+    text = (raw or "").strip()
     if not text:
         return default
     try:
@@ -354,8 +363,12 @@ def _propose_booking(arguments: dict[str, Any], *, tenant: Any) -> AdminProposal
     master = _resolve_master(tenant, arguments.get("master"))
     service = _resolve_service(tenant, master, arguments.get("service"))
     start = _localise(_parse_dt(arguments.get("start_at"), field="start_at"), tz)
-    client_id = str(arguments.get("client_id") or "").strip()
-    client_name = str(arguments.get("client_name") or "").strip()[:80]
+    client_id = text_argument(
+        arguments.get("client_id"), field="client_id", log_label="admin_assistant"
+    )
+    client_name = text_argument(
+        arguments.get("client_name"), field="client_name", log_label="admin_assistant"
+    )[:80]
     if not client_id and not client_name:
         raise ActionError("не назван клиент")
 
@@ -403,7 +416,9 @@ def _propose_schedule(arguments: dict[str, Any], *, tenant: Any, bot_user: Any) 
     reason_class = str(arguments.get("reason_class") or "personal").strip()
     if reason_class not in _REASON_CLASSES:
         reason_class = "other"
-    reason_text = str(arguments.get("reason_text") or "").strip()[:200]
+    reason_text = text_argument(
+        arguments.get("reason_text"), field="reason_text", log_label="admin_assistant"
+    )[:200]
 
     payload = {
         "action": ACTION_PREPARE_SCHEDULE,
