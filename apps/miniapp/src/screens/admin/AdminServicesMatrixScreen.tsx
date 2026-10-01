@@ -42,12 +42,19 @@
  *   - hapticNotify('success'/'error') on save outcomes
  *
  * Receptionist read-only:
- *   - Spec §642 doesn't explicitly call out Receptionist for this
- *     screen, and no document grounds the read-only rule: the §MM0
- *     cited here before does not exist (master-management-handoff has
- *     MM1–MM5; no admin-shell spec exists, see DRF-2679). We render
- *     the matrix with ``disabled`` checkboxes + a padlock banner for
- *     that role; the backend ``@require_admin_role`` decorator also gates the API.
+ *   - The MM4 section itself (spec §642) doesn't call out Receptionist
+ *     for this screen. The basis is one step earlier, in
+ *     ``docs/design/handoffs/2026-05-18-master-management-handoff.md``:
+ *     the row-level actions menu of the roster (Screen MM1) lists the
+ *     action that opens this matrix, «Услуги мастера (MM4)», as
+ *     ``❌ disabled`` for Receptionist.
+ *   - That document is STRICTER than this screen: it disables opening
+ *     MM4 for the role, while we render the matrix with ``disabled``
+ *     checkboxes + a padlock banner. Whether read-only access should
+ *     remain is an open question (DRF-2679), not settled here. The
+ *     backend ``@require_admin_role`` decorator also gates the API.
+ *   - The section MM0 cited here before does not exist (the handoff
+ *     has MM1–MM5; no admin-shell spec exists).
  */
 
 import {
