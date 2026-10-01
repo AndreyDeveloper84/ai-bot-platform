@@ -1105,6 +1105,8 @@ class BookingSkill:
             user_bookings=_bookings_payload(tool_result, tool_name),
             price=_price_payload(tool_result),
             certificate=_certificate_payload(tool_result),
+            refusal=_refusal_payload(tool_result, tool_name),
+            no_slots=_no_slots_payload(tool_result, tool_name),
         )
         # #473 LLM Y3 envelope expansion: same rationale as Phase 1
         # call site — catch all LLMError variants and produce a
@@ -1313,8 +1315,9 @@ def _dispatch_tool(
             # NOT a handoff — the LLM should phrase the clarification
             # itself ("на это время уже занято — могу подобрать
             # соседний слот?"). Return ``result`` with no handoff
-            # reason; the skill's second LLM call will see the empty
-            # ``pending`` field and pick the clarification template.
+            # reason; the second LLM call is told about the refusal by
+            # :func:`_refusal_payload` (DRF-2672 — before it, the call
+            # saw nothing at all: there is no «clarification template»).
             return result, ""
         if result.error == "invalid_datetime":
             return result, ""
@@ -2782,6 +2785,32 @@ def _certificate_payload(result: BookingToolResult) -> dict[str, Any] | None:
         "error": cert.error,
         "rendered_text": result.text,
     }
+
+
+def _refusal_payload(result: BookingToolResult, tool_name: str) -> dict[str, Any] | None:
+    """DRF-2672 — the refusal itself, for the second LLM call.
+
+    Every other payload here reads a success field, so a refusal that is
+    not a handoff reached the second call as an empty prompt — the model
+    answered blind. ``buy_certificate`` is the one tool that already
+    reports its own failure (:func:`_certificate_payload`), so it is left
+    to that block rather than told twice.
+    """
+    if not result.error or result.certificate is not None:
+        return None
+    return {"tool": tool_name, "error": result.error}
+
+
+def _no_slots_payload(result: BookingToolResult, tool_name: str) -> dict[str, Any] | None:
+    """DRF-2672 — ``show_slots`` succeeded and found no free time.
+
+    Not an error, so :func:`_refusal_payload` does not see it, and
+    :func:`_slots_payload` is ``None`` on an empty list — the «нет» stayed
+    in ``result.text`` and never reached the model.
+    """
+    if tool_name != SHOW_SLOTS_TOOL_SPEC["name"] or result.error or result.slots:
+        return None
+    return {"rendered_text": result.text}
 
 
 def _bookings_payload(result: BookingToolResult, tool_name: str) -> list[dict[str, Any]] | None:
