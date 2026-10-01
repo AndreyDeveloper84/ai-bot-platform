@@ -104,7 +104,7 @@ def captured_turn(monkeypatch):
 def no_memory(monkeypatch):
     """Silence the neighbouring memory surface — it is not under test here."""
     monkeypatch.setattr(max_handler, "build_concierge_memory_block", lambda bot_user: "")
-    monkeypatch.setattr(max_handler, "render_current_personal_context", lambda uid: "")
+    monkeypatch.setattr(max_handler, "render_current_personal_context", lambda bot_user: "")
 
 
 def _grant(user_id: int, *types: str) -> BotUser:
