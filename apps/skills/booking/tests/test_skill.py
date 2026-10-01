@@ -943,7 +943,7 @@ class TestSlotPickCallback:
         mock_complete.assert_not_called()
         assert result.should_handoff is False
         assert "занято" in result.reply_text.lower()
-        assert "выберите другую дату" in result.reply_text.lower()
+        assert "выбери другую дату" in result.reply_text.lower()
         assert result.action_data is not None
         assert result.action_data["kind"] == "date_pick"
         # The dead-ended day is not offered back — tapping it returns here.
@@ -982,7 +982,7 @@ class TestSlotPickCallback:
         mock_complete.assert_not_called()
         assert result.should_handoff is False
         assert "занято" in result.reply_text.lower()
-        assert "выберите другую дату" not in result.reply_text.lower()
+        assert "выбери другую дату" not in result.reply_text.lower()
         assert result.action_data is None
         assert PendingBookingAction.all_tenants.count() == 0
 
