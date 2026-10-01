@@ -318,13 +318,29 @@ MASTER_DRAFT_RELEASED_TO_AI = "master.draft_released_to_ai"
 
 # --- Master-Admin internal chat (handoff 2026-05-19, PR 6) ----------------
 # The handoff §10 ships 6 events; PR 6 registers the matching audit slugs
-# (analytics-bus event names — snake_case dotted notation aligned with
-# event-taxonomy.md §3.12). The SLA-breach + auto-close slugs land
-# alongside the Celery beat that detects them (separate PR); kept out of
-# the canonical set here so an out-of-vocab warning doesn't fire from
-# stub code that does not yet emit them.
+# (analytics-bus event names — snake_case dotted notation). The
+# SLA-breach + auto-close slugs land alongside the Celery beat that
+# detects them (separate PR); kept out of the canonical set here so an
+# out-of-vocab warning doesn't fire from stub code that does not yet
+# emit them.
 #
-# Payload contracts (consumed by event-taxonomy.md §3.12):
+# DRF-2683: this block used to cite «event-taxonomy.md §3.12» twice.
+# That section never existed — the catalog there ends at §3.10. The
+# handoff §10 only PLANNED to add a «3.12 master-admin-chat domain»
+# section, and it lists other slugs (``admin_chat.*``) with no payload
+# shapes.
+#
+# Do NOT repoint the citation to ``docs/architecture/event-contract.md``
+# §3.12: that section exists but is ``user.profile.updated`` — a
+# DIFFERENT document and a different bus (cross-service domain events),
+# not the contract for these slugs.
+#
+# Payload shapes — NOT a contract: no document describes the
+# ``internal_chat.*`` payloads. The list below is what PR 6 wrote down
+# and has not been reconciled with the emitters in
+# ``apps/internal_chat/services.py``. What the contract should be is an
+# open owner question (DRF-2683) — do not narrow or widen field reads
+# from this list.
 #   internal_chat.thread_created:
 #     {tenant_id, thread_id, master_id, topic, linked_artifact_type,
 #      linked_artifact_id, actor_id, is_sensitive}
