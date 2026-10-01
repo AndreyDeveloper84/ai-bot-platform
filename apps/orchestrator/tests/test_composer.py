@@ -46,7 +46,7 @@ class TestPostCheckBlock:
             matched_patterns=["pii_phone"],
         )
         r = compose(_skill_result(reply_text="Call +79991234567"), post_check=post)
-        assert "Извините" in r.text
+        assert "Извини, я не могу ответить" in r.text
         assert "+79991234567" not in r.text
         assert r.safety_revised is True
 

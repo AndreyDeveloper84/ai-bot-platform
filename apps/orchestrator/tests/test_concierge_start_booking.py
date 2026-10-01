@@ -187,7 +187,7 @@ class TestStartBookingTool:
         )
 
         # A question about the NAME, not a redraw of the catalog.
-        assert "Уточните" in reply.text
+        assert "Уточни, к кому именно" in reply.text
         assert "Архипкин Денис" in reply.text
         assert "Денис Кузнецов" in reply.text
         # …closable with one tap, on the same callback grammar as the cards.
