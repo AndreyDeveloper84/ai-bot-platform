@@ -47,7 +47,7 @@ vi.mock("../lib/payments", async (importOriginal) => {
 });
 
 import { ApiError, authVerify } from "../lib/api";
-import { REFUSAL_CANON } from "../lib/refusal-canon";
+import { MASTER_NOT_BOOKABLE_REFUSAL, REFUSAL_CANON } from "../lib/refusal-canon";
 import { createCustomerBooking } from "../lib/customer-booking";
 import { openPaymentConfirmation } from "../lib/max-sdk";
 import { createPayment } from "../lib/payments";
@@ -64,6 +64,15 @@ const mockedAuthVerify = vi.mocked(authVerify);
 const mockedCreate = vi.mocked(createCustomerBooking);
 const mockedOpenPayment = vi.mocked(openPaymentConfirmation);
 const mockedCreatePayment = vi.mocked(createPayment);
+
+/**
+ * Отказ «недоступен мастер» — решение владельца §47.4 (07.09), на «вы» по
+ * решению о регистре клиентских текстов 01.10 (DRF-2708). Литералом, а не
+ * из `refusal-canon`: узел, берущий фразу из константы, не заметил бы её
+ * смены.
+ */
+const MASTER_REFUSAL_OWNER_WORDS =
+  "К этому мастеру сейчас записаться нельзя. Посмотрите других — подберём подходящий вариант.";
 
 const CREATED = {
   booking: {
@@ -376,9 +385,7 @@ describe("error matrix + idempotency (Wave 0 booking GO)", () => {
     );
     renderScreen();
     await user.click(screen.getByRole("button", { name: "Записаться" }));
-    expect(
-      await screen.findByText(/Эта услуга или специалист сейчас недоступны/),
-    ).toBeInTheDocument();
+    expect(await screen.findByText(MASTER_REFUSAL_OWNER_WORDS)).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: "Посмотреть других мастеров" }),
     ).toBeInTheDocument();
@@ -397,11 +404,9 @@ describe("error matrix + idempotency (Wave 0 booking GO)", () => {
     );
     renderScreen();
     await user.click(screen.getByRole("button", { name: "Записаться" }));
-    expect(
-      await screen.findByText(/Эта услуга или специалист сейчас недоступны/),
-    ).toBeInTheDocument();
-    // Без записи слага в NOT_BOOKABLE_SLUGS ветка `other` нарисовала бы
-    // `detail` бэкенда как есть — служебную английскую фразу.
+    expect(await screen.findByText(MASTER_REFUSAL_OWNER_WORDS)).toBeInTheDocument();
+    // Без записи слага в MASTER_NOT_BOOKABLE_SLUGS ветка `other` нарисовала
+    // бы `detail` бэкенда как есть — служебную английскую фразу.
     expect(screen.queryByText(/ayla_user_id/)).not.toBeInTheDocument();
   });
 
@@ -416,13 +421,62 @@ describe("error matrix + idempotency (Wave 0 booking GO)", () => {
     );
     renderScreen();
     await user.click(screen.getByRole("button", { name: "Записаться" }));
-    expect(
-      await screen.findByText(/Эта услуга или специалист сейчас недоступны/),
-    ).toBeInTheDocument();
-    // Без записи слага в NOT_BOOKABLE_SLUGS ветка `other` нарисовала бы
-    // `detail` бэкенда как есть — служебную английскую фразу. Клиенту
+    expect(await screen.findByText(MASTER_REFUSAL_OWNER_WORDS)).toBeInTheDocument();
+    // Без записи слага в MASTER_NOT_BOOKABLE_SLUGS ветка `other` нарисовала
+    // бы `detail` бэкенда как есть — служебную английскую фразу. Клиенту
     // причина не показывается вовсе: она для владелицы салона.
     expect(screen.queryByText(/profile is not ready/)).not.toBeInTheDocument();
+  });
+
+  describe("DRF-2708 — отказ «недоступен мастер» словами владельца (§47.4)", () => {
+    // Все слаги, которыми сервер говорит «к этому мастеру записаться нельзя».
+    it.each([
+      "master_not_bookable",
+      "master_archived",
+      "master_ayla_unlinked",
+      "master_profile_incomplete",
+      "master_schedule_unconfirmed",
+      "master_catalog_unlinked",
+    ])("%s → утверждённая фраза, а не отвергнутая", async (slug) => {
+      const user = userEvent.setup();
+      mockedCreate.mockRejectedValue(new ApiError(404, slug, "internal detail"));
+      renderScreen();
+      await user.click(screen.getByRole("button", { name: "Записаться" }));
+
+      // Фраза литералом и целиком: `findByText` со строкой сверяет весь
+      // текст элемента, вариант с другим хвостом сюда не пройдёт.
+      const phrase = await screen.findByText(
+        "К этому мастеру сейчас записаться нельзя. Посмотрите других — подберём подходящий вариант.",
+      );
+      const alert = phrase.closest('[role="alert"]');
+      expect(alert).not.toBeNull();
+      // §47.4: «Не „подберём похожее“ — намеренно».
+      expect(alert?.textContent).not.toContain("подберём похожее");
+      expect(alert?.textContent).not.toContain("Эта услуга или специалист");
+      expect(screen.getByRole("button", { name: "Посмотреть других мастеров" })).toBeInTheDocument();
+      expect(screen.queryByText(/internal detail/)).not.toBeInTheDocument();
+    });
+
+    // Недоступна услуга — другой предмет: §47.4 про мастера, и общая фраза
+    // здесь остаётся прежней. Узел держит, что правка не задела её.
+    it.each(["service_not_found", "service_not_offered", "service_unbookable"])(
+      "%s → прежняя общая фраза, не фраза о мастере",
+      async (slug) => {
+        const user = userEvent.setup();
+        mockedCreate.mockRejectedValue(new ApiError(404, slug, "internal detail"));
+        renderScreen();
+        await user.click(screen.getByRole("button", { name: "Записаться" }));
+
+        const phrase = await screen.findByText(/Эта услуга или специалист сейчас недоступны/);
+        const alert = phrase.closest('[role="alert"]');
+        expect(alert?.textContent).not.toContain("К этому мастеру");
+        expect(screen.queryByText(/internal detail/)).not.toBeInTheDocument();
+      },
+    );
+
+    it("дом фразы — refusal-canon, и она равна записанной здесь дословно", () => {
+      expect(MASTER_NOT_BOOKABLE_REFUSAL).toBe(MASTER_REFUSAL_OWNER_WORDS);
+    });
   });
 
   it("double-tap on «Записаться» creates the booking exactly once", async () => {
