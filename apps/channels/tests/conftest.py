@@ -1,7 +1,8 @@
 """Fixtures for the channel tests.
 
-One fixture, autouse, and the reason it is autouse is the defect it closes
-(DRF-2691).
+Two fixtures, both autouse, and the reason they are autouse is the defect each
+closes: tests that reached a vendor over the network without anybody having
+asked them to (DRF-2691 for the model, DRF-2696 for MAX).
 
 ### What was happening
 
@@ -55,9 +56,28 @@ from unittest.mock import MagicMock
 import pytest
 
 from apps.channels.max import handler as max_handler
+from apps.channels.max import outbound as max_outbound
 
 
 @pytest.fixture(autouse=True)
 def _no_intent_llm(monkeypatch):
     """The post-reply intent resolver does not run: no second model call."""
     monkeypatch.setattr(max_handler, "resolve_and_log_turn_intent", MagicMock(return_value=None))
+
+
+@pytest.fixture(autouse=True)
+def _no_chat_indicator(monkeypatch):
+    """«Прочитано» and «печатает…» are not sent: no call to MAX.
+
+    DRF-2696. The handler fires ``send_chat_action`` at the start of a turn,
+    and the function goes to the network whenever a bot token is set — which
+    in a test run it is, as soon as any earlier test in the worker has put
+    one in place. Measured on `dev` f8579a5e: 10 tests in three files of this
+    directory made 22 real ``POST botapi.max.ru/chats/<id>/actions``. The
+    indicator swallows its own failures, so the tests were green either way.
+
+    41 test files in the repository already stub this function one at a
+    time; this is the same stub for the directory. A test that asserts on
+    the indicator installs its own spy, which replaces this one.
+    """
+    monkeypatch.setattr(max_outbound, "send_chat_action", lambda **kwargs: None)

@@ -22,6 +22,14 @@ from config import pytest_network_egress as egress
 PROBE_HOST = "egress-probe.invalid"
 PROBE_URL = f"http://{PROBE_HOST}/v1/anything"
 
+#: How the call to a name that cannot resolve ends is the resolver's business:
+#: a failed lookup (``ConnectError``) where the resolver answers, a timeout
+#: (``ConnectTimeout``) where it does not. Either is «did not get through»;
+#: what these tests assert is what was RECORDED. The timeout is short so a
+#: slow resolver costs seconds, not httpx's default five per test.
+NOT_DELIVERED = httpx.TransportError
+TIMEOUT = 2.0
+
 
 @pytest.fixture
 def own_events(request):
@@ -60,7 +68,7 @@ def test_what_counts_as_this_machine(host, local):
 
 
 def test_real_transport_to_a_foreign_host_is_recorded_on_both_layers(own_events):
-    with pytest.raises(httpx.ConnectError), httpx.Client() as client:
+    with pytest.raises(NOT_DELIVERED), httpx.Client(timeout=TIMEOUT) as client:
         client.get(PROBE_URL)
 
     seen = own_events()
@@ -71,8 +79,8 @@ def test_real_transport_to_a_foreign_host_is_recorded_on_both_layers(own_events)
 @pytest.mark.asyncio
 async def test_async_transport_is_recorded_too(own_events):
     """The async transport is the one both vendor SDKs use."""
-    with pytest.raises(httpx.ConnectError):
-        async with httpx.AsyncClient() as client:
+    with pytest.raises(NOT_DELIVERED):
+        async with httpx.AsyncClient(timeout=TIMEOUT) as client:
             await client.post(PROBE_URL, json={})
 
     assert own_events().get((PROBE_HOST, "http")) == 1
@@ -91,7 +99,7 @@ def test_a_mocked_transport_is_not_egress(own_events):
 
 def test_this_machine_is_not_egress(own_events):
     """Loopback through the real transport: refused connection, no record."""
-    with pytest.raises(httpx.ConnectError), httpx.Client() as client:
+    with pytest.raises(NOT_DELIVERED), httpx.Client(timeout=TIMEOUT) as client:
         client.get("http://127.0.0.1:9/")
 
     assert own_events() == {}
@@ -143,7 +151,7 @@ class TestForbidMode:
     def test_this_machine_is_never_refused(self, monkeypatch, own_events):
         monkeypatch.setenv(egress.MODE_ENV, "forbid")
 
-        with pytest.raises(httpx.ConnectError), httpx.Client() as client:
+        with pytest.raises(NOT_DELIVERED), httpx.Client(timeout=TIMEOUT) as client:
             client.get("http://127.0.0.1:9/")
 
         assert own_events() == {}
@@ -154,7 +162,7 @@ class TestForbidMode:
         monkeypatch.setitem(egress._current, "expected", True)
 
         # Let through by the plugin: the failure is the network's, not ours.
-        with pytest.raises(httpx.ConnectError), httpx.Client() as client:
+        with pytest.raises(NOT_DELIVERED), httpx.Client(timeout=TIMEOUT) as client:
             client.get(PROBE_URL)
 
         assert own_events().get((PROBE_HOST, "http")) == 1
