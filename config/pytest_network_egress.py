@@ -1,4 +1,4 @@
-"""Name the tests that open a connection to a host that is not this machine.
+"""No test reaches a host that is not this machine.
 
 DRF-2696. Loaded via ``-p`` in ``pyproject.toml``'s ``addopts``, next to the
 three plugins already there and for the same reason: it has to be in place
@@ -15,7 +15,7 @@ tests in 16 files.**
 * ``botapi.max.ru`` — 62 requests, 29 tests: typing indicators and
   ``POST /messages``.
 * names that cannot resolve (``*.invalid``, ``*.test``) — 101 requests, 64
-  tests. They leave no machine, and they still run the real transport up to
+  tests. They leave no machine, and they still ran the real transport up to
   the resolver.
 
 None of it was visible. The callers swallow the failure — a 401 with the CI's
@@ -27,16 +27,66 @@ With a real key or token in the environment the same tests would have made
 paid calls and sent actions to real chats. Nothing in the suite would have
 said so.
 
-### What this plugin does — registration, not refusal
+### What this plugin does
 
-It records, and passes every call through unchanged. At the end of the run it
-prints one line per (host, test). Nothing fails because of it.
+**A call to a foreign host does not leave the process, and the run fails.**
 
-That is deliberate and temporary. ``apps/llm/conftest.py`` says why a
-repository-wide autouse check is not introduced in one go: nobody has weighed
-its blast radius. This is the weighing — the list in the CI log is the radius,
-measured where it matters. ``AYLA_TEST_EGRESS=forbid`` turns the same
-observation into a refusal; it becomes the default when that list is empty.
+* The call is answered the way an unreachable network answers:
+  ``httpx.ConnectError`` from the transport, ``socket.gaierror`` from the
+  resolver. Not a new exception type — the callers already handle these two,
+  and a test whose subject is «what happens when the service is down» keeps
+  meaning exactly that. Nothing is sent, nothing is looked up.
+* The violation is not lost in whichever ``except`` swallowed it: it is
+  recorded against the test, printed in the run's summary as ``host — test``,
+  and the **run exits non-zero**. The test itself may well be green; the run
+  is not. Read the summary, not the traceback.
+
+That split — quiet for the test, loud for the run — is deliberate. Raising
+something the callers do not catch would have turned every swallowed failure
+into a red test at once, and what a red test would then be asserting is that
+the plugin exists.
+
+### Reserved names are not egress
+
+``*.invalid``, ``*.test``, ``*.example`` and ``*.localhost`` (RFC 6761) cannot
+resolve, by definition. A base URL like ``http://ayla-api.invalid`` is the
+honest way for a test to say «there is no such service here», and 54 tests in
+7 files say it. They are answered at once, with the same two errors and
+without asking a resolver, and they are not a violation. The summary lists
+them under ``reserved``.
+
+### A guard closer to the call is not overruled
+
+``apps/replay/golden_path.py`` has had its own ``NetworkTripwire`` since
+before this plugin: inside its block it replaces ``socket.getaddrinfo`` and
+classifies each fixture by what the turn TRIED to reach — a turn that reached
+for the Ayla API «needs the outside world» and is reported as uncovered
+instead of being asserted.
+
+The first version of the refusal answered at the transport, before any
+lookup. That starved the tripwire: nothing reached its hook, six fixtures were
+classified «our own deterministic code», asserted against an error reply, and
+went red (measured, the full run of this branch). So:
+
+* **Whoever owns name resolution owns the verdict.** When ``socket.
+  getaddrinfo`` is not this plugin's hook, a narrower guard is active; the
+  transport layer then records the call as ``guarded`` and lets it through to
+  that guard. Not a violation: the guard is doing the refusing.
+* **A reserved name is answered by the resolver layer only**, never at the
+  transport — the request goes down the real path as far as the lookup and is
+  answered there. Same error for the caller, one mechanism instead of two.
+
+### How this was introduced — the radius was measured before anything refused
+
+``apps/llm/conftest.py`` says why a repository-wide autouse check is not
+introduced in one go: nobody has weighed its blast radius. This one ran in
+registration mode first (#2245) and its report in CI was the weighing: with
+the vendor call sites repaired, the runner's own list held no vendor host at
+all — only reserved names. Refusal became the default on that evidence.
+
+``AYLA_TEST_EGRESS=record`` is the way back without a deploy of anything: the
+plugin then only observes and reports, calls go through, the run's exit code
+is untouched. Reserved names are short-circuited in both modes.
 
 ### Two layers, because each sees what the other cannot
 
@@ -54,9 +104,18 @@ observation into a refusal; it becomes the default when that list is empty.
   transport, no record. (Through httpx an IP is seen like any other host.)
 * Anything a test does in a **subprocess**.
 * A transport that a test **replaces at class level** itself.
+* A run that does not read this repository's ``addopts``: another ini file
+  via ``-c``, or a test path outside the tree (pytest then resolves its
+  configuration from that path). The plugin is simply not loaded, and says
+  nothing — the absence of the ``network egress from tests`` section in the
+  summary is the only sign. Measured the hard way while testing this very
+  plugin: one such run made a real request.
 * ``smoke``, ``cross_boundary`` and ``e2e`` tests are meant to cross a real
-  boundary. Their egress is recorded like any other and marked as expected in
-  the report; under ``forbid`` it is allowed.
+  boundary. Their calls go through, and the summary lists them as
+  ``expected``.
+* A test that replaces ``socket.getaddrinfo`` takes the verdict with it (see
+  «A guard closer to the call»): what its own hook lets through, goes through.
+  The summary still lists those calls, as ``guarded``.
 
 What counts as local: loopback addresses, ``localhost``, and ``testserver``
 (Django's test client host). CI's Postgres and Redis are on ``localhost``.
@@ -73,7 +132,7 @@ from typing import Any
 
 import pytest
 
-#: ``record`` (default) — observe and report. ``forbid`` — refuse.
+#: ``forbid`` (default) — refuse and fail the run. ``record`` — only observe.
 MODE_ENV = "AYLA_TEST_EGRESS"
 MODE_RECORD = "record"
 MODE_FORBID = "forbid"
@@ -81,8 +140,24 @@ MODE_FORBID = "forbid"
 #: Tests carrying one of these marks cross a real boundary on purpose.
 EXPECTED_EGRESS_MARKS: frozenset[str] = frozenset({"smoke", "cross_boundary", "e2e"})
 
+#: RFC 6761 — top-level names that never resolve. Not ``example.com`` and its
+#: siblings: those are reserved too, and they DO resolve, so a call to one
+#: would leave the machine.
+RESERVED_SUFFIXES: tuple[str, ...] = (".invalid", ".test", ".example", ".localhost")
+
 _LOCAL_NAMES: frozenset[str] = frozenset({"localhost", "testserver", ""})
 _OUTSIDE = "<outside any test>"
+
+KIND_VIOLATION = "EGRESS"
+KIND_RESERVED = "reserved"
+KIND_EXPECTED = "expected"
+KIND_GUARDED = "guarded"
+
+#: Event layers. ``guarded`` — seen at the transport while another guard owned
+#: name resolution; handed to that guard, not refused here.
+LAYER_HTTP = "http"
+LAYER_DNS = "dns"
+LAYER_GUARDED = "guarded"
 
 _lock = threading.Lock()
 #: (host, nodeid, layer) -> count. ``layer`` is ``http`` or ``dns``.
@@ -90,28 +165,9 @@ _events: Counter[tuple[str, str, str]] = Counter()
 _current: dict[str, Any] = {"nodeid": _OUTSIDE, "expected": False}
 
 
-class NetworkEgressForbidden(RuntimeError):
-    """A test tried to reach a host that is not this machine (``forbid`` mode)."""
-
-
 def mode() -> str:
-    value = os.environ.get(MODE_ENV, MODE_RECORD).strip().lower()
-    return MODE_FORBID if value == MODE_FORBID else MODE_RECORD
-
-
-def is_local(host: object) -> bool:
-    """True for this machine: loopback, ``localhost``, Django's ``testserver``."""
-    if host is None:
-        return True
-    if isinstance(host, bytes | bytearray):
-        host = bytes(host).decode("ascii", "replace")
-    name = str(host).strip().lower().strip("[]")
-    if name in _LOCAL_NAMES:
-        return True
-    try:
-        return ipaddress.ip_address(name).is_loopback
-    except ValueError:
-        return False
+    value = os.environ.get(MODE_ENV, MODE_FORBID).strip().lower()
+    return MODE_RECORD if value == MODE_RECORD else MODE_FORBID
 
 
 def _host_text(host: object) -> str:
@@ -120,17 +176,53 @@ def _host_text(host: object) -> str:
     return str(host)
 
 
-def _note(host: object, layer: str) -> None:
-    """Record one event for the running test; refuse it in ``forbid`` mode."""
-    name = _host_text(host)
+def _normalized(host: object) -> str:
+    return _host_text(host).strip().lower().strip("[]").rstrip(".")
+
+
+def is_local(host: object) -> bool:
+    """True for this machine: loopback, ``localhost``, Django's ``testserver``."""
+    if host is None:
+        return True
+    name = _normalized(host)
+    if name in _LOCAL_NAMES:
+        return True
+    try:
+        return ipaddress.ip_address(name).is_loopback
+    except ValueError:
+        return False
+
+
+def is_reserved(host: object) -> bool:
+    """True for a name that cannot resolve (RFC 6761)."""
+    if host is None:
+        return False
+    name = _normalized(host)
+    return any(name.endswith(suffix) or name == suffix[1:] for suffix in RESERVED_SUFFIXES)
+
+
+def _record(host: object, layer: str) -> None:
     with _lock:
-        _events[(name, _current["nodeid"], layer)] += 1
-    if mode() == MODE_FORBID and not _current["expected"]:
-        raise NetworkEgressForbidden(
-            f"a test reached for the network: {name} (seen at the {layer} layer). "
-            "Stub the call where it is made; a test must not depend on a host "
-            "outside this machine. config/pytest_network_egress.py explains."
-        )
+        _events[(_host_text(host), _current["nodeid"], layer)] += 1
+
+
+def _refusing() -> bool:
+    return mode() == MODE_FORBID and not _current["expected"]
+
+
+def _resolution_is_ours() -> bool:
+    """False while a narrower guard has replaced ``socket.getaddrinfo``."""
+    return socket.getaddrinfo is _getaddrinfo
+
+
+def _why(host: object) -> str:
+    name = _host_text(host)
+    if is_reserved(name):
+        return f"{name} is a reserved name that cannot resolve (config/pytest_network_egress.py)"
+    return (
+        f"test egress refused: {name} is not this machine. Stub the call where it is "
+        "made; the run fails on this (config/pytest_network_egress.py)"
+    )
 
 
 def events_for(nodeid: str) -> dict[tuple[str, str], int]:
@@ -142,8 +234,8 @@ def events_for(nodeid: str) -> dict[tuple[str, str], int]:
 def discard_events_for(nodeid: str) -> None:
     """Drop what was recorded for one test.
 
-    For the tests of this plugin: they reach for a non-local name on purpose,
-    and must not appear in the report they are testing.
+    For the tests of this plugin: they reach for a foreign name on purpose,
+    and must neither appear in the report they are testing nor fail the run.
     """
     with _lock:
         for key in [k for k in _events if k[1] == nodeid]:
@@ -157,7 +249,9 @@ _real_getaddrinfo = socket.getaddrinfo
 
 def _getaddrinfo(host: Any, port: Any, *args: Any, **kwargs: Any) -> Any:
     if not is_local(host):
-        _note(host, "dns")
+        _record(host, LAYER_DNS)
+        if is_reserved(host) or _refusing():
+            raise socket.gaierror(socket.EAI_NONAME, _why(host))
     return _real_getaddrinfo(host, port, *args, **kwargs)
 
 
@@ -173,14 +267,26 @@ def _install_httpx() -> None:
     real_async = httpx.AsyncHTTPTransport.handle_async_request
     real_sync = httpx.HTTPTransport.handle_request
 
+    def refused_here(request: Any) -> bool:
+        """Record the request; True when THIS layer must answer it."""
+        host = request.url.host
+        if is_local(host):
+            return False
+        if not _resolution_is_ours():
+            _record(host, LAYER_GUARDED)
+            return False
+        _record(host, LAYER_HTTP)
+        # A reserved name goes on to the resolver layer, which answers it.
+        return not is_reserved(host) and _refusing()
+
     async def handle_async_request(self: Any, request: Any) -> Any:
-        if not is_local(request.url.host):
-            _note(request.url.host, "http")
+        if refused_here(request):
+            raise httpx.ConnectError(_why(request.url.host), request=request)
         return await real_async(self, request)
 
     def handle_request(self: Any, request: Any) -> Any:
-        if not is_local(request.url.host):
-            _note(request.url.host, "http")
+        if refused_here(request):
+            raise httpx.ConnectError(_why(request.url.host), request=request)
         return real_sync(self, request)
 
     httpx.AsyncHTTPTransport.handle_async_request = handle_async_request  # type: ignore[method-assign]
@@ -237,13 +343,6 @@ def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
             _EXPECTED_TESTS.add(item.nodeid)
 
 
-def pytest_sessionfinish(session: pytest.Session) -> None:
-    workeroutput = getattr(session.config, "workeroutput", None)
-    if workeroutput is not None:
-        with _lock:
-            workeroutput[_WORKER_KEY] = [[h, t, layer, n] for (h, t, layer), n in _events.items()]
-
-
 def pytest_testnodedown(node: Any, error: Any) -> None:
     rows = getattr(node, "workeroutput", {}).get(_WORKER_KEY, [])
     with _lock:
@@ -251,35 +350,92 @@ def pytest_testnodedown(node: Any, error: Any) -> None:
             _events[(host, test, layer)] += count
 
 
-def summarize(events: dict[tuple[str, str, str], int]) -> list[tuple[str, str, int]]:
-    """``[(host, test, requests)]``, busiest first.
+def summarize(
+    events: dict[tuple[str, str, str], int],
+    expected_tests: frozenset[str] | set[str] = frozenset(),
+) -> list[tuple[str, str, str, int]]:
+    """``[(kind, host, test, requests)]`` — violations first, busiest first.
 
     One row per (host, test). The count is HTTP requests when the HTTP layer
     saw any, lookups otherwise — the two layers see the same call, and adding
     them would count it twice.
     """
-    http: Counter[tuple[str, str]] = Counter()
-    dns: Counter[tuple[str, str]] = Counter()
+    by_layer: dict[str, Counter[tuple[str, str]]] = {
+        LAYER_HTTP: Counter(),
+        LAYER_DNS: Counter(),
+        LAYER_GUARDED: Counter(),
+    }
     for (host, test, layer), count in events.items():
-        (http if layer == "http" else dns)[(host, test)] += count
-    rows = [(h, t, n) for (h, t), n in http.items()]
-    rows += [(h, t, n) for (h, t), n in dns.items() if (h, t) not in http]
-    return sorted(rows, key=lambda row: (-row[2], row[0], row[1]))
+        by_layer[layer][(host, test)] += count
+    http, dns, guarded = by_layer[LAYER_HTTP], by_layer[LAYER_DNS], by_layer[LAYER_GUARDED]
+
+    def kind(host: str, test: str) -> str:
+        if is_reserved(host):
+            return KIND_RESERVED
+        return KIND_EXPECTED if test in expected_tests else KIND_VIOLATION
+
+    rows = [(kind(h, t), h, t, n) for (h, t), n in http.items()]
+    rows += [(kind(h, t), h, t, n) for (h, t), n in dns.items() if (h, t) not in http]
+    # Seen only while another guard owned resolution: that guard's business.
+    rows += [
+        (KIND_GUARDED, h, t, n)
+        for (h, t), n in guarded.items()
+        if (h, t) not in http and (h, t) not in dns
+    ]
+    order = {KIND_VIOLATION: 0, KIND_EXPECTED: 1, KIND_RESERVED: 2, KIND_GUARDED: 3}
+    return sorted(rows, key=lambda row: (order[row[0]], -row[3], row[1], row[2]))
+
+
+def violations(rows: list[tuple[str, str, str, int]]) -> list[tuple[str, str, str, int]]:
+    return [row for row in rows if row[0] == KIND_VIOLATION]
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_sessionfinish(session: pytest.Session) -> None:
+    workeroutput = getattr(session.config, "workeroutput", None)
+    if workeroutput is not None:
+        # An xdist worker: hand the events over, the controller decides.
+        with _lock:
+            workeroutput[_WORKER_KEY] = [[h, t, layer, n] for (h, t, layer), n in _events.items()]
+        return
+    if mode() != MODE_FORBID:
+        return
+    with _lock:
+        rows = summarize(dict(_events), _EXPECTED_TESTS)
+    if violations(rows) and session.exitstatus == pytest.ExitCode.OK:
+        # Every test may be green — the callers swallow a refused connection.
+        # The run is not: that is the whole point of refusing at this level.
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
 
 
 def pytest_terminal_summary(terminalreporter: Any) -> None:
     with _lock:
-        rows = summarize(dict(_events))
+        rows = summarize(dict(_events), _EXPECTED_TESTS)
+    refusing = mode() == MODE_FORBID
     terminalreporter.section(f"network egress from tests (DRF-2696, mode: {mode()})")
     if not rows:
-        terminalreporter.write_line("EGRESS none: no test reached a host outside this machine.")
+        terminalreporter.write_line("EGRESS none: no test reached for a host outside this machine.")
         return
-    unexpected = [r for r in rows if r[1] not in _EXPECTED_TESTS]
-    hosts = sorted({r[0] for r in unexpected})
-    terminalreporter.write_line(
-        f"EGRESS tests={len({r[1] for r in unexpected})} requests={sum(r[2] for r in unexpected)} "
-        f"hosts={len(hosts)} ({', '.join(hosts)})"
-    )
-    for host, test, count in rows:
-        tag = "expected" if test in _EXPECTED_TESTS else "EGRESS"
-        terminalreporter.write_line(f"  {tag} {count:4d}  {host}  {test}")
+
+    bad = violations(rows)
+    if bad:
+        hosts = sorted({row[1] for row in bad})
+        verdict = "refused, RUN FAILED" if refusing else "let through (record mode)"
+        terminalreporter.write_line(
+            f"EGRESS tests={len({row[2] for row in bad})} requests={sum(row[3] for row in bad)} "
+            f"hosts={len(hosts)} ({', '.join(hosts)}) — {verdict}"
+        )
+    else:
+        terminalreporter.write_line("EGRESS none: no test reached for a host outside this machine.")
+
+    for label in (KIND_EXPECTED, KIND_RESERVED, KIND_GUARDED):
+        some = [row for row in rows if row[0] == label]
+        if some:
+            names = sorted({row[1] for row in some})
+            terminalreporter.write_line(
+                f"{label} tests={len({row[2] for row in some})} "
+                f"requests={sum(row[3] for row in some)} ({', '.join(names)})"
+            )
+
+    for kind, host, test, count in rows:
+        terminalreporter.write_line(f"  {kind} {count:4d}  {host}  {test}")
