@@ -61,11 +61,10 @@ _CALLBACK_BOOK_PICK_MASTER = "cb:book:pick_master:"
 # offers differ — one sentence covering both would have to be vague enough to
 # fit the weaker one.
 _UNAVAILABLE_REPLY = (
-    "К сожалению, запись к этому мастеру сейчас недоступна — "
-    "посмотрите, что ещё есть в этом салоне."
+    "К сожалению, запись к этому мастеру сейчас недоступна — посмотри, что ещё есть в этом салоне."
 )
 _UNAVAILABLE_REPLY_NO_TENANT = (
-    "К сожалению, запись к этому мастеру сейчас недоступна — посмотрите наши салоны."
+    "К сожалению, запись к этому мастеру сейчас недоступна — посмотри наши салоны."
 )
 
 _SALON_CATALOG_LABEL = "Что есть в этом салоне"
@@ -118,25 +117,25 @@ def _unavailable_reply(tenant_id: uuid.UUID | None = None) -> DiscoveryReply:
 #
 # Never dispatch a serviceless pick_master: the booking skill will only answer
 # it with the stale-context text.
-_ASK_SERVICE_PICK = "Выберите услугу мастера {name}:"
+_ASK_SERVICE_PICK = "Выбери услугу мастера {name}:"
 # The tap named a service this master does not offer (no MasterService edge).
 # Saying so is the whole point: the old reply re-asked the same question, and
 # the user had no way to learn that the name was fine but the master was wrong.
 _ASK_SERVICE_NOT_OFFERED = "У мастера {name} нет услуги «{service}». Вот что можно выбрать:"
 _ASK_SERVICE_NOT_OFFERED_BARE = (
     "У мастера {name} нет услуги «{service}», а других доступных услуг у него сейчас нет — "
-    "посмотрите, что ещё есть в этом салоне."
+    "посмотри, что ещё есть в этом салоне."
 )
 _ASK_SERVICE_REPLY_BARE = (
-    "Чтобы записаться к мастеру {name}, напишите, какая услуга вас интересует — "
-    "или посмотрите, что есть в этом салоне."
+    "Чтобы записаться к мастеру {name}, напиши, какая услуга тебя интересует — "
+    "или посмотри, что есть в этом салоне."
 )
 # Shown when the master offers more services than the keyboard carries. Typing
 # stays available as the escape hatch — it is a worse path (that is this
 # ticket), but for a long roster it is the only one left, so the message says
 # plainly that the list is partial instead of pretending it is complete.
 _ASK_SERVICE_TRUNCATED_NOTE = (
-    "Показаны первые {shown} услуг — если нужной нет в списке, напишите её название."
+    "Показаны первые {shown} услуг — если нужной нет в списке, напиши её название."
 )
 # DRF-1324 — the menu was narrowed by the request that surfaced this master,
 # so it is NOT the master's whole roster and must not read as one. Live pilot
@@ -148,7 +147,7 @@ _ASK_SERVICE_TRUNCATED_NOTE = (
 # replaces the truncation note rather than joining it (the count of a filtered
 # list says nothing about a roster).
 _ASK_SERVICE_FILTERED_NOTE = (
-    "Показаны услуги по вашему запросу — если нужно другое, напишите название."
+    "Показаны услуги по твоему запросу — если нужно другое, напиши название."
 )
 # Keyboard budget for the service menu. MAX hard-caps an inline_keyboard at
 # ``apps.channels.max.outbound.MAX_KEYBOARD_ROWS`` (29) and silently clamps
@@ -624,7 +623,7 @@ def handoff_to_booking(
             )
 
     reply_text = (result.reply_text if result is not None else "") or (
-        f"Отлично! Записываю вас к мастеру {master_name}. Какая услуга интересует?"
+        f"Отлично! Записываю тебя к мастеру {master_name}. Какая услуга интересует?"
     )
     action_data = result.action_data if result is not None else None
     return DiscoveryReply(text=reply_text, action_data=action_data)
@@ -658,7 +657,7 @@ BOOKING_CALLBACK_PREFIXES = (
 # in the journal.
 _UNRESOLVED_BOOKING_CALLBACK_REPLY = (
     "Не нахожу этого мастера в каталоге — записаться по этой кнопке не получится. "
-    "Посмотрите наши салоны и выберите заново."
+    "Посмотри наши салоны и выбери заново."
 )
 
 # The skill ran but produced nothing to say. Never observed in the pilot; it
@@ -666,7 +665,7 @@ _UNRESOLVED_BOOKING_CALLBACK_REPLY = (
 # is logged (it used to be the one silent branch on this path).
 _EMPTY_BOOKING_CALLBACK_REPLY = (
     "Не получилось продолжить запись по этой кнопке. "
-    "Посмотрите, что есть в этом салоне, и выберите заново."
+    "Посмотри, что есть в этом салоне, и выбери заново."
 )
 
 

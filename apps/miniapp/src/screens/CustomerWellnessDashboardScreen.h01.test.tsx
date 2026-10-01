@@ -256,13 +256,13 @@ describe("H01 · план", () => {
     expect(screen.getByTestId("location")).toHaveTextContent("/customer/plan");
   });
 
-  it("«План на сегодня»: действия с меткой «из вашего плана», состояние, «Смотреть весь план»", async () => {
+  it("«План на сегодня»: действия с меткой «из твоего плана», состояние, «Смотреть весь план»", async () => {
     serve({ plan: PLAN });
     renderHome();
 
     const heading = await screen.findByRole("heading", { name: "План на сегодня" });
     const block = heading.closest("section") as HTMLElement;
-    const chips = within(block).getAllByText("из вашего плана");
+    const chips = within(block).getAllByText("из твоего плана");
     expect(chips).toHaveLength(2);
     expect(within(block).getByText("4 из 7")).toBeInTheDocument();
     // Выполненное — галочка, не «3 из 3».

@@ -582,7 +582,7 @@ class TestRemovedActionsStayReachable:
 
         reply = visits_mod.route_visits(global_bot_user=_User())
 
-        assert "Ваши последние визиты:" in reply.text
+        assert "Твои последние визиты:" in reply.text
         assert "Массаж спины" in reply.text
 
     def test_the_catalog_became_a_pick_not_a_removal(self, bot_user, consent, miniapp):

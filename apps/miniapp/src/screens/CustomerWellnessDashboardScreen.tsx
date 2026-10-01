@@ -181,7 +181,7 @@ type ActiveGoal = NonNullable<WellnessToday["active_goals"]>[number];
  * оба). До его слова не трогаем ни то, ни другое: любой выбор здесь
  * выдал бы догадку за решение.
  */
-export const HEADER_WELCOME_LINE = "Рада вас видеть!";
+export const HEADER_WELCOME_LINE = "Рада тебя видеть!";
 
 /**
  * Согласие дневника — ОДИН блок на экране (DRF-2144 п.6). Формулировка из
@@ -723,7 +723,7 @@ export function CustomerWellnessDashboardScreen() {
           блоком «Продолжить разговор с Ayla» ниже: он несёт последнюю тему,
           а шапочная кнопка вела в тот же чат без неё.
 
-          Д1 (DRF-2331): человек слева — аватар, имя, «Рада вас видеть!».
+          Д1 (DRF-2331): человек слева — аватар, имя, «Рада тебя видеть!».
 
           Колокольчика макета НЕТ, и это решение: ленты уведомлений у
           клиента не существует — ни ручки на сервере, ни экрана на
@@ -750,7 +750,7 @@ export function CustomerWellnessDashboardScreen() {
           <CustomerAvatarEntry displayName={displayName} />
           <span className="wellness-dash__person-text">
             {/* Пока день грузится, имени ещё нет — и раньше строка просто
-                отсутствовала, отчего «Рада вас видеть!» прыгала внутри
+                отсутствовала, отчего «Рада тебя видеть!» прыгала внутри
                 56 px при каждом обновлении (в том числе при «Отменить» у
                 стакана воды, DRF-2331, по ревью). Скелет держит высоту и
                 говорит «грузится», а не «имени нет» — тем же приёмом, что
@@ -1603,7 +1603,7 @@ function PlanToday({
                   PLAN_LITE_COPY.ofTotal(a.done_count, a.target_count)
                 )}
               </div>
-              <span className="wellness-dash__plan-chip">из вашего плана</span>
+              <span className="wellness-dash__plan-chip">из твоего плана</span>
             </li>
           );
         })}
