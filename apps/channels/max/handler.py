@@ -2836,22 +2836,17 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     # администратора салона» is the one failure here that could cost more than
     # it saves. Nothing else is exempt — including the contour's own canned
     # lines, which a test pins clean rather than a whitelist excuses.
-    # DRF-2686 — (текст до эха, текст с эхом) для ответа, который консьерж
-    # уже записал в переписку сам; правится после гарда, перед отправкой.
-    voice_echo_amend: tuple[str, str] | None = None
-    if voice_transcript is not None and assistant_action_type != "safety_pre_check":
-        # DRF-1942 — эхо «Я услышала: …» (``VOICE_ECHO_MODE``), до гарда и
-        # записи: в переписке остаётся ровно то, что человек прочитал. Ответ
-        # консьержа (``persisted``) в переписке уже лежит без эха — его
-        # строку догоняет ``amend_global_assistant_text`` ниже (DRF-2686).
-        echoed_text = with_voice_echo(reply.text, voice_transcript.text)
-        if reply.persisted and echoed_text != reply.text:
-            voice_echo_amend = (reply.text, echoed_text)
-        reply = DiscoveryReply(
-            text=echoed_text,
-            action_data=reply.action_data,
-            persisted=reply.persisted,
-        )
+    #
+    # DRF-2702 — эхо голосового «Я услышала: «…»» приклеивается НИЖЕ, после
+    # вердикта, и в гард не идёт. Это не исключение из правила выше: гард
+    # по-прежнему видит всё, что произвёл бот. Эхо — дословная расшифровка
+    # слов самого человека (единственный источник — ``Transcript.text``, мимо
+    # модели и инструментов), уже прошедшая входной гейт; на текстовом ходе
+    # слова человека в гард исходящего не попадают вовсе. До DRF-2702 эхо
+    # проверялось вместе с ответом, и «мой номер 8 905…», «выпила
+    # парацетамол», «хожу раз в месяц» в собственной речи человека меняли
+    # нормальный ответ на заглушку. Исключение — только этой конструкцией:
+    # текст, начинающийся с «Я услышала», который написала МОДЕЛЬ, проверяется.
     if assistant_action_type != "safety_pre_check":
         guarded = guard_outbound(reply.text, surface="max", bot_user=bot_user, trace_id=trace_id)
         post_verdict = "block" if guarded.blocked else "allow"
@@ -2876,6 +2871,29 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             # message is also the only form in which «тут нужен человек» reads
             # as the turn stopping rather than the question changing.
             clarify_redraw = False
+
+    # DRF-2686 — (текст до эха, текст с эхом) для ответа, который консьерж
+    # уже записал в переписку сам; строка правится ниже, перед отправкой.
+    voice_echo_amend: tuple[str, str] | None = None
+    if (
+        voice_transcript is not None
+        and assistant_action_type != "safety_pre_check"
+        and post_verdict != "block"
+    ):
+        # DRF-1942 — эхо «Я услышала: …» (``VOICE_ECHO_MODE``). После гарда
+        # (DRF-2702, см. выше) и до служебной строки памяти и записи: в
+        # переписке остаётся ровно то, что человек прочитал. Заблокированный
+        # ответ уходит заглушкой без эха, как на текстовом ходе. Ответ
+        # консьержа (``persisted``) уже лежит в переписке без эха — его
+        # строку догоняет ``amend_global_assistant_text`` ниже (DRF-2686).
+        echoed_text = with_voice_echo(reply.text, voice_transcript.text)
+        if reply.persisted and echoed_text != reply.text:
+            voice_echo_amend = (reply.text, echoed_text)
+        reply = DiscoveryReply(
+            text=echoed_text,
+            action_data=reply.action_data,
+            persisted=reply.persisted,
+        )
 
     # DRF-1292 — memory write + the ONE service line, in one place.
     #
@@ -2958,10 +2976,10 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             action_data=reply.action_data,
             trace_id=trace_id,
         )
-    elif voice_echo_amend is not None and post_verdict != "block":
+    elif voice_echo_amend is not None:
         # DRF-2686 — консьерж записал ответ до эха; человек прочитает его с
-        # эхом, и в переписке должно быть так же. После гарда: заблокированный
-        # ответ заменён новой строкой выше, строку консьержа не трогаем.
+        # эхом, и в переписке должно быть так же. Заблокированный ответ сюда
+        # не приходит: эха у него нет, а замена записана новой строкой выше.
         # Служебная строка памяти в запись не идёт, как и раньше.
         try:
             amended = amend_global_assistant_text(
@@ -3652,9 +3670,6 @@ def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | N
         return
 
     reply_text = skill_result.reply_text if skill_result is not None else _echo_text(event)
-    if voice_transcript is not None:
-        # DRF-1942 — эхо «Я услышала: …» (``VOICE_ECHO_MODE``), до гарда и записи.
-        reply_text = with_voice_echo(reply_text, voice_transcript.text)
     action_type = skill_result.action_type if skill_result is not None else ""
     action_data = skill_result.action_data if skill_result is not None else None
     closing = skill_result is not None and skill_result.should_close_conversation
@@ -3678,6 +3693,11 @@ def _handle_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.UUID | N
         reply_text = _guarded.text
         action_type = OUTBOUND_ACTION_TYPE
         action_data = None
+    elif voice_transcript is not None:
+        # DRF-1942 — эхо «Я услышала: …» (``VOICE_ECHO_MODE``): после гарда
+        # (DRF-2702 — гард проверяет ответ бота, а не слова человека в эхе;
+        # обоснование — у гарда глобального пути) и до записи.
+        reply_text = with_voice_echo(reply_text, voice_transcript.text)
 
     # Persist the assistant turn BEFORE sending — if send fails, we
     # still have the intended reply on record. The send failure causes

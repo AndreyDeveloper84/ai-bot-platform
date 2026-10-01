@@ -399,7 +399,7 @@ class TestEchoInTheConciergeRow:
     def test_a_blocked_reply_is_a_new_row_and_the_concierge_row_is_untouched(
         self, sent, fake_redis, persisting_concierge, settings, monkeypatch
     ):
-        """Гард заблокировал ответ после эха: человеку ушла замена, она и записана."""
+        """Гард заблокировал ответ: человеку ушла замена без эха, она и записана."""
         from apps.orchestrator.safety.gate import OUTBOUND_ACTION_TYPE
         from apps.orchestrator.safety.outbound import OutboundVerdict
 
@@ -410,6 +410,7 @@ class TestEchoInTheConciergeRow:
             lambda text, **kwargs: OutboundVerdict(allowed=False, text="Тут нужен человек."),
         )
         self._voice(70034)
+        assert [c["text"] for c in sent] == ["Тут нужен человек."]  # эха у замены нет
         rows = {r.action_type: r.content for r in _assistant_rows(70034)}
         assert rows == {
             "concierge": "Расскажи чуть подробнее?",
@@ -428,3 +429,100 @@ class TestEchoInTheConciergeRow:
         self._voice(70035)
         assert [c["text"] for c in sent] == [self.ECHOED]
         assert _assistant_rows(70035) == []
+
+
+#: Обычная речь, которая в ЭХЕ цепляла гард исходящего (DRF-2702): по одной
+#: фразе на класс. Входной гейт их пропускает — это не кризис и не неотложка.
+SPOKEN_THAT_TRIPPED_THE_GUARD = [
+    pytest.param("Запишите меня на массаж, мой номер 8 905 123 45 67.", id="contact-phone"),
+    pytest.param("Моя почта ivan@example.com", id="contact-email"),
+    pytest.param("Я выпила парацетамол, можно на массаж?", id="medical"),
+    pytest.param("Вы гарантируете результат?", id="promise"),
+    pytest.param("Хожу на маникюр раз в месяц.", id="planning"),
+    pytest.param("Болит три дня подряд.", id="nag"),
+]
+
+
+class TestEchoStaysOutOfTheGuard:
+    """DRF-2702 — гард исходящего проверяет ответ бота, а не слова человека в эхе."""
+
+    REPLY = "Расскажи чуть подробнее?"
+
+    def _voice(self, user_id: int, spoken: str) -> None:
+        _provider(spoken)
+        with patch(_DOWNLOAD, return_value=ogg_of(2)):
+            max_handler.handle_global_max_event(
+                _msg(user_id=user_id, attachments=[AUDIO]), trace_id=str(uuid.uuid4())
+            )
+
+    @pytest.mark.parametrize("spoken", SPOKEN_THAT_TRIPPED_THE_GUARD)
+    def test_the_persons_own_words_do_not_block_the_reply(
+        self, sent, fake_redis, concierge, settings, spoken
+    ):
+        from apps.orchestrator.safety.outbound import evaluate_outbound
+
+        settings.VOICE_ECHO_MODE = "always"
+        self._voice(70041, spoken)
+        ((heard, channel),) = _user_rows(70041)
+        assert channel == "voice"
+        echoed = f"Я услышала: «{heard}»\n\n{self.REPLY}"
+        # Узел не пустой: именно эта склейка до DRF-2702 шла в гард и блокировалась.
+        assert evaluate_outbound(echoed).blocked
+        assert [c["text"] for c in sent] == [echoed]
+        assert [(r.action_type, r.content) for r in _assistant_rows(70041)] == [("", echoed)]
+
+    def test_the_guard_never_sees_the_echo(
+        self, sent, fake_redis, concierge, settings, monkeypatch
+    ):
+        settings.VOICE_ECHO_MODE = "always"
+        seen: list[str] = []
+        real = max_handler.guard_outbound
+
+        def spy(text, **kwargs):
+            seen.append(text)
+            return real(text, **kwargs)
+
+        monkeypatch.setattr(max_handler, "guard_outbound", spy)
+        self._voice(70042, "привет")
+        assert seen[0] == self.REPLY
+        assert sent[0]["text"] == f"Я услышала: «привет»\n\n{self.REPLY}"
+        assert [t for t in seen if "Я услышала" in t] == []
+
+    def test_a_contact_in_the_bots_reply_is_still_blocked(
+        self, sent, fake_redis, monkeypatch, settings
+    ):
+        """Голос ничего не ослабил: телефон в ОТВЕТЕ бота блокируется, эха у замены нет."""
+        from apps.orchestrator.discovery import DiscoveryReply
+        from apps.orchestrator.safety.gate import OUTBOUND_ACTION_TYPE
+        from apps.orchestrator.safety.outbound import REPLACEMENT_TEXT
+
+        settings.VOICE_ECHO_MODE = "always"
+        monkeypatch.setattr(
+            "apps.orchestrator.concierge.generate_concierge_reply",
+            MagicMock(
+                return_value=DiscoveryReply(
+                    text="Телефон мастера: +7 999 123-45-67", persisted=False
+                )
+            ),
+        )
+        self._voice(70043, "привет")
+        assert [c["text"] for c in sent] == [REPLACEMENT_TEXT]
+        assert [r.action_type for r in _assistant_rows(70043)] == [OUTBOUND_ACTION_TYPE]
+
+    def test_a_model_written_echo_lookalike_is_checked(
+        self, sent, fake_redis, monkeypatch, settings
+    ):
+        """Исключение — конструкцией, не формой: «Я услышала…» от модели идёт в гард."""
+        from apps.orchestrator.discovery import DiscoveryReply
+        from apps.orchestrator.safety.outbound import REPLACEMENT_TEXT
+
+        settings.VOICE_ECHO_MODE = "always"
+        lookalike = "Я услышала: «привет»\n\nТелефон мастера: +7 999 123-45-67"
+        monkeypatch.setattr(
+            "apps.orchestrator.concierge.generate_concierge_reply",
+            MagicMock(return_value=DiscoveryReply(text=lookalike, persisted=False)),
+        )
+        max_handler.handle_global_max_event(
+            _msg(text="привет", user_id=70044), trace_id=str(uuid.uuid4())
+        )
+        assert [c["text"] for c in sent] == [REPLACEMENT_TEXT]

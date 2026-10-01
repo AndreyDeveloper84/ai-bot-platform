@@ -383,6 +383,43 @@ class TestEchoAndLogs:
         assert mock_send[0]["text"].startswith("Я услышала: «привет»\n\n")
         assert _messages(tenant, "assistant")[0].content == mock_send[0]["text"]
 
+    def test_the_guard_checks_the_reply_not_the_echo(
+        self, tenant, mock_send, fake_redis, settings, monkeypatch
+    ):
+        """DRF-2702 — на салонном пути эхо приклеивается после гарда исходящего."""
+        settings.VOICE_ECHO_MODE = "always"
+        seen: list[str] = []
+        real = max_handler.guard_outbound
+
+        def spy(text, **kwargs):
+            seen.append(text)
+            return real(text, **kwargs)
+
+        monkeypatch.setattr(max_handler, "guard_outbound", spy)
+        _provider("привет")
+        with patch(_DOWNLOAD, return_value=ogg_of(2)):
+            _run(tenant, _payload(attachments=[AUDIO]))
+        assert len(seen) == 1
+        assert mock_send[0]["text"] == f"Я услышала: «привет»\n\n{seen[0]}"
+        assert [t for t in seen if "Я услышала" in t] == []
+
+    def test_a_blocked_reply_goes_out_without_the_echo(
+        self, tenant, mock_send, fake_redis, settings, monkeypatch
+    ):
+        from apps.orchestrator.safety.outbound import OutboundVerdict
+
+        settings.VOICE_ECHO_MODE = "always"
+        monkeypatch.setattr(
+            max_handler,
+            "guard_outbound",
+            lambda text, **kwargs: OutboundVerdict(allowed=False, text="Тут нужен человек."),
+        )
+        _provider("привет")
+        with patch(_DOWNLOAD, return_value=ogg_of(2)):
+            _run(tenant, _payload(attachments=[AUDIO]))
+        assert [c["text"] for c in mock_send] == ["Тут нужен человек."]
+        assert _messages(tenant, "assistant")[0].content == "Тут нужен человек."
+
     def test_logs_carry_neither_transcript_nor_url(self, tenant, mock_send, fake_redis, caplog):
         _provider("СЕКРЕТНОЕ СЛОВО ксилофон")
         with (
