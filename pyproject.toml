@@ -195,6 +195,14 @@ build-backend = "setuptools.build_meta"
 #                            и выход из строки в генерации кода (#30–#33, #41)
 #   pydantic-settings >= 2.14.2 — medium: NestedSecretsSettingsSource идёт по
 #                            симлинкам наружу (#18); приходит через chromadb
+#   urllib3 >= 2.8.0       — high ×2: настройки TLS для HTTPS-прокси могут быть
+#                            проигнорированы (#59), строка chunk-size читается
+#                            в память без предела (#60); medium: бесконечный
+#                            цикл на chunked deflate (#61); приходит через
+#                            requests, sentry-sdk, kubernetes
+#   virtualenv >= 21.7.12  — high: скачанные seed-колёса не проверяются на
+#                            целостность (#63); medium: инъекция в pyvenv.cfg
+#                            (#62); приходит через pre-commit (extra dev)
 #
 # Сборки идут строго по uv.lock (Dockerfile: `uv sync --locked`, CI:
 # `--frozen`), поэтому действует лок; пол держит его от отката.
@@ -202,6 +210,8 @@ constraint-dependencies = [
     "anyio>=4.14.2",
     "sqlparse>=0.6.0",
     "pydantic-settings>=2.14.2",
+    "urllib3>=2.8.0",
+    "virtualenv>=21.7.12",
 ]
 
 [tool.setuptools.packages.find]
