@@ -233,6 +233,8 @@ class TestThePersonSeesTheirOwnValues:
         assert NAME in text
         assert PHONE in text
         assert "роль здесь: owner" in text
+        # DRF-2712 — у человека здесь рабочая роль: сотруднику «вы».
+        assert "Что я о вас знаю:" in text
         assert "карточка мастера: есть" in text
         assert "ещё в салонах: 2" in text
         # Other salons are a number, never a name.
@@ -243,14 +245,24 @@ class TestThePersonSeesTheirOwnValues:
     def test_client_bot_shows_the_global_shell_and_memory(self, salon, other, third):
         _person(salon, other, third)
         text = render_for_person(build_card("max", CID), tenant_slug=None)
+        # DRF-2712 — клиентский бот говорит «ты» и тому, кто где-то сотрудник.
+        assert "Что я о тебе знаю:" in text
+        assert "о вас" not in text
         assert "записей в памяти: 1" in text
         assert "ещё в салонах" not in text or "ещё в салонах: 0" not in text
         assert "card-" not in text
 
     def test_a_stranger_gets_nothing_but_the_sentence(self):
         text = render_for_person(build_card("max", "404"), tenant_slug="card-salon")
-        assert "не знаю" in text
+        assert text == "Я тебя пока не знаю: в этом боте у тебя нет ни одной записи."
         assert "card-" not in text
+
+    def test_salon_bot_says_ty_to_a_person_without_a_role_here(self, salon):
+        """DRF-2712 — в салонном боте «вы» только сотруднику этого салона."""
+        BotUser.all_tenants.create(tenant=salon, channel="max", channel_user_id="555")
+        text = render_for_person(build_card("max", "555"), tenant_slug="card-salon")
+        assert "Что я о тебе знаю:" in text
+        assert "роль здесь: клиент" in text
 
 
 # --- the count is what Ayla remembers (DRF-2541) ------------------------------
@@ -443,7 +455,7 @@ class TestTheSalonDoor:
         with patch("apps.channels.max.outbound.send_message") as sent, tenant_scope(salon):
             handle_salon_max_event(self._message("/whoami"))
         text = sent.call_args.kwargs["text"]
-        assert "Что я о вас знаю" in text
+        assert "Что я о тебе знаю" in text
         assert "роль здесь" not in text
         assert "код" not in text.lower()
 
@@ -485,7 +497,7 @@ class TestTheClientDoor:
             {"data": json.dumps(payload), "trace_id": str(uuid.uuid4()), "resolved_tenant_id": ""}
         )
         assert len(calls) == 1
-        assert "Что я о вас знаю" in calls[0]["text"]
+        assert "Что я о тебе знаю" in calls[0]["text"]
         assert "записей в памяти: 0" in calls[0]["text"]
 
 
