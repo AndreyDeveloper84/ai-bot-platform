@@ -472,6 +472,16 @@ def test_check_skips_without_api_key(settings, recorder, monkeypatch):
 def test_check_reports_transition(monkeypatch, recorder):
     monkeypatch.setattr(health, "run_probe_sync", lambda **kw: _fail())
 
+    # DRF-2696 — a failed primary makes ``_measure_path`` probe the rest of
+    # the path through ``probe_llm`` (DRF-2065), which is not
+    # ``run_probe_sync``: with only the line above, each tick here was a real
+    # ``POST api.openai.com/v1/chat/completions``. The rest of the path is
+    # down too — what the vendor's 401 used to say, without asking it.
+    async def _rest_of_the_path_is_down(**kwargs):
+        return _fail()
+
+    monkeypatch.setattr(health, "probe_llm", _rest_of_the_path_is_down)
+
     first = check_llm_availability()
     assert first["ok"] is False
     assert first["transition"] == TRANSITION_NONE
