@@ -223,7 +223,7 @@ def _patch_booking_provider(client: FakeYClients):
       a base URL no test environment sets.
 
     One without the other does not leave a gap you can see: the tap answers
-    «Сейчас не могу записать, попробуйте чуть позже» from the
+    «Сейчас не могу записать, попробуй чуть позже» from the
     ``bookings.gate.yclients_init_failed`` branch and never reaches
     ``_dispatch_confirm`` — the assertion then measures the early refusal
     instead of the path under test. Any test that taps under the live flag
@@ -655,7 +655,7 @@ class TestConfirmTapReschedule:
 
         assert result.should_handoff is False
         assert result.reply_text == REPLY_BOOK_STALE_VERSION
-        # DRF-1492 — the text says «Откройте актуальные записи», so the reply
+        # DRF-1492 — the text says «Открой актуальные записи», so the reply
         # carries the button that opens them.
         assert result.action_data is not None
         buttons = result.action_data["attachments"][0]["payload"]["buttons"]

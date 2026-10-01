@@ -339,7 +339,7 @@ class TestFunnelEndsAreNotDeadEnds:
     def test_stale_version_opens_the_records_its_text_names(
         self, tenant: Tenant, bot_user: BotUser, conversation: Conversation
     ) -> None:
-        """«Откройте актуальные записи» — asserted where the text is, so the
+        """«Открой актуальные записи» — asserted where the text is, so the
         sentence and the button cannot drift apart."""
         from apps.bookings import callbacks as cb
 

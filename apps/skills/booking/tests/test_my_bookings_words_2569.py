@@ -32,7 +32,7 @@ def _row(**kw) -> BookingRow:
 def test_the_owners_sample_line_verbatim() -> None:
     text = _format_bookings_text([_row()])
     assert text.splitlines() == [
-        "Ваши предстоящие записи:",
+        "Твои предстоящие записи:",
         "• Массаж — мастер Марина · Формула тела, 25.09.2026 в 09:00",
     ]
 

@@ -81,7 +81,7 @@ class TestVisitsList:
 
         reply = visits_mod.route_visits(global_bot_user=_BotUser())
 
-        assert "Ваши последние визиты:" in reply.text
+        assert "Твои последние визиты:" in reply.text
         assert "Массаж спины" in reply.text
         # No «у {имя}»: the name arrives nominative and Russian would need the
         # genitive. A separator cannot decline a name wrongly.
@@ -102,8 +102,8 @@ class TestVisitsList:
 
         reply = visits_mod.route_visits(global_bot_user=_BotUser())
 
-        assert "Ваши предстоящие записи:" in reply.text
-        assert "Ваши последние визиты:" in reply.text
+        assert "Твои предстоящие записи:" in reply.text
+        assert "Твои последние визиты:" in reply.text
         assert reply.text.index("предстоящие") < reply.text.index("последние")
 
     def test_each_past_visit_gets_a_card_button(self, capability, db) -> None:
@@ -136,7 +136,7 @@ class TestVisitsList:
 
         # Стража НА ТЕХ ЖЕ данных: ответ построен и предстоящая половина в
         # нём есть — то есть выборка непуста (DRF-1411).
-        assert "Ваши предстоящие записи:" in reply.text
+        assert "Твои предстоящие записи:" in reply.text
         # И только теперь утверждение о второй половине.
         assert "Завершённых визитов пока нет" in reply.text
 
@@ -158,7 +158,7 @@ class TestVisitsList:
 
         reply = visits_mod.route_visits(global_bot_user=_BotUser())
 
-        assert "Ваши последние визиты:" in reply.text
+        assert "Твои последние визиты:" in reply.text
         assert "Услуга 5" in reply.text
         assert "Услуга 6" not in reply.text
         assert "весь список открою в приложении" in reply.text
@@ -238,7 +238,7 @@ class TestVisitsList:
 
         reply = visits_mod.route_visits(global_bot_user=_BotUser())
 
-        assert "попробуйте" in reply.text.lower()
+        assert "попробуй, пожалуйста" in reply.text.lower()
         assert "визит" not in reply.text.lower().replace("записи", "")
 
     def test_half_an_answer_is_not_served_as_a_whole_one(self, capability, db) -> None:
@@ -248,7 +248,7 @@ class TestVisitsList:
 
         reply = visits_mod.route_visits(global_bot_user=_BotUser())
 
-        assert "Ваши предстоящие записи" not in reply.text
+        assert "Твои предстоящие записи" not in reply.text
 
     def test_internal_fields_never_reach_the_customer(self, capability, db) -> None:
         capability["visits"] = VisitsResult(status="ok", visits=(_visit(),))
@@ -280,7 +280,7 @@ class TestVisitCard:
             global_bot_user=_BotUser(), callback_text="cb:visit:card:someone-elses"
         )
 
-        assert "попробуйте" in reply.text.lower()
+        assert "попробуй, пожалуйста" in reply.text.lower()
 
 
 class TestRepeat:
@@ -389,7 +389,7 @@ class TestRepeat:
         )
 
         assert expected in reply.text
-        assert "Нажмите на услугу" in reply.text
+        assert "Нажми на услугу" in reply.text
         assert _callbacks(reply) == ["Массаж спины"]
 
     def test_master_refusal_chips_the_service_that_is_still_fine(self, capability, db) -> None:
@@ -412,7 +412,7 @@ class TestRepeat:
             global_bot_user=_BotUser(), callback_text="cb:visit:repeat:a1"
         )
 
-        assert "Нажмите на услугу" in reply.text
+        assert "Нажми на услугу" in reply.text
         assert _callbacks(reply) == ["Массаж спины"]
         assert "svc-1" not in str(reply.action_data)
 
