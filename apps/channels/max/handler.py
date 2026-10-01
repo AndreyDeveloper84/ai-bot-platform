@@ -299,10 +299,10 @@ logger = logging.getLogger(__name__)
 # field, and changing it is a product call. Sprint 3 AI Concierge will
 # replace this with personalised welcome flow via tenant.brand_voice persona.
 _WELCOME_TEXT = (
-    "Здравствуйте! 👋\n\n"
+    "Привет! 👋\n\n"
     f"Это бот массажного салона «{SALON_BUSINESS_NAME}» в Пензе.\n"
     "Помогу записаться, расскажу об услугах и отвечу на частые вопросы.\n\n"
-    "Выберите раздел:"
+    "Выбери раздел:"
 )
 
 _FALLBACK_NO_ECHO = "(нечем эхом) 🙂"
@@ -312,7 +312,7 @@ _FALLBACK_EMPTY = "?"
 # own reply_text. Booking's _handoff always sets one («переключаю на менеджера…»),
 # so this is only the defensive fallback. Operational copy (low sensitivity vs the
 # crisis copy) — founder may tweak.
-_HANDOFF_FALLBACK_TEXT = "Передаю ваш вопрос менеджеру — он ответит здесь в ближайшее время."
+_HANDOFF_FALLBACK_TEXT = "Передаю твой вопрос менеджеру — он ответит здесь в ближайшее время."
 
 
 def _last_assistant_content(history: list[dict[str, Any]] | None) -> str | None:
@@ -3192,9 +3192,7 @@ def _discovery_handoff_reply(
         master_id = uuid.UUID(parts[1])
     except (ValueError, AttributeError):
         logger.warning("channels.max.global.handoff.bad_payload payload=%r", payload)
-        return DiscoveryReply(
-            text="Не удалось открыть запись — попробуйте выбрать мастера ещё раз."
-        )
+        return DiscoveryReply(text="Не удалось открыть запись — попробуй выбрать мастера ещё раз.")
 
     # The service part is genuinely optional: a corrupt third segment must not
     # throw away two valid ids — degrade to the serviceless handoff (which
