@@ -1103,6 +1103,7 @@ class BookingSkill:
             confirmation=_confirmation_payload(tool_result),
             pending=_pending_payload(tool_result),
             user_bookings=_bookings_payload(tool_result, tool_name),
+            bookings_check_failed=tool_result.bookings_check_failed,
             price=_price_payload(tool_result),
             certificate=_certificate_payload(tool_result),
             refusal=_refusal_payload(tool_result, tool_name),
@@ -2822,6 +2823,8 @@ def _bookings_payload(result: BookingToolResult, tool_name: str) -> list[dict[st
             "visit_at": b.visit_at,
             "master_name": b.master_name,
             "service_name": b.service_name,
+            # DRF-2701 — расписание прочитано, записи в нём нет.
+            "unconfirmed": b.unconfirmed,
         }
         for b in result.bookings
     ]

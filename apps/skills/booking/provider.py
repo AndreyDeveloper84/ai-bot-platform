@@ -778,7 +778,9 @@ def _to_yc_service(svc: AylaService) -> Service:
         # float-typed (anti-touch) and nothing downstream renders these two.
         price_min=svc.price_min,  # type: ignore[arg-type]
         price_max=svc.price_max,  # type: ignore[arg-type]
-        duration_s=svc.duration_s,
+        # DRF-2705: ``None`` = the catalog resolves no duration; same
+        # anti-touch DTO, and nothing downstream reads this field either.
+        duration_s=svc.duration_s,  # type: ignore[arg-type]
         category_id=svc.category_id,  # type: ignore[arg-type]
         raw=svc.raw,
     )

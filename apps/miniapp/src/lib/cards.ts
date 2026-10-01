@@ -7,8 +7,11 @@
  *
  * Consent boundary (C7.2, locked): card saving is a SEPARATE voluntary
  * action — never a side effect of paying. The client sends
- * `consent_version` + `consented_at` with every setup call; the server
- * requires them (400 without). The saved method is used ONLY for
+ * `consent_version` + `consented_at` with every setup call. The server
+ * requires `consent_version` to be present (400 without): its presence is
+ * the act of consent. Neither value is what gets recorded (DRF-2681) —
+ * the catalog stamps its own version and its own time, and `consented_at`
+ * is dropped at the bot door. The saved method is used ONLY for
  * user-initiated payments — no autocharges in the pilot (AYLA-DEC-0001);
  * after a revoke, the method is never charged again.
  */
@@ -23,8 +26,14 @@ export interface SavedCard {
 }
 
 /**
- * Consent text version sent with card-setup calls. PLACEHOLDER pending
- * the legal-approved offer text (orchestrator 2026-07-19).
+ * Version of the consent text THIS build shows on the cards screen.
+ *
+ * Not the recorded truth (DRF-2681): the catalog stamps the version from
+ * its own `CLIENT_CARD_CONSENT_VERSION` setting and only compares this
+ * value with it, logging a mismatch. So the two change together — a new
+ * text here without the setting there warns on every single binding.
+ *
+ * PLACEHOLDER pending the legal-approved offer text (orchestrator 2026-07-19).
  * TODO(legal): replace with the ratified offer version before pilot.
  */
 export const CLIENT_CARDS_CONSENT_VERSION = "offer-client-cards-0.0-todo-legal";
