@@ -275,7 +275,7 @@ class TestEverySevenButtonDoesWhatItPromises:
 
         max_handler.handle_global_max_event(_msg(text="меню", user_id=71001, mid="s-0"))
 
-        assert sent[0]["text"].startswith("Что хотите сделать?")
+        assert sent[0]["text"].startswith("Что хочешь сделать?")
         assert _labels(sent[0]) == [
             "Подобрать услугу",
             "Найти салон",
@@ -444,7 +444,7 @@ class TestEverySevenButtonDoesWhatItPromises:
 
         assert len(sent) == 2, sent
         for reply in sent:
-            assert reply["text"].startswith("Что хотите сделать?"), reply["text"]
+            assert reply["text"].startswith("Что хочешь сделать?"), reply["text"]
             assert "Помощь" in _labels(reply), _labels(reply)
         # Экрана подменю больше нет ни у одного из двух ходов.
         assert not [r for r in sent if r["text"] == "Дополнительные возможности"], sent
@@ -489,7 +489,7 @@ class TestEverySevenButtonDoesWhatItPromises:
         )
 
         assert len(sent) == 1, sent
-        assert sent[0]["text"].startswith("Что хотите сделать?")
+        assert sent[0]["text"].startswith("Что хочешь сделать?")
         assert "Помощь" in _labels(sent[0]), _labels(sent[0])
         assert concierge.call_count == 0
 
