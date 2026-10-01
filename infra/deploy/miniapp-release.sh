@@ -66,7 +66,7 @@ if [[ "$MODE" == "rollback" ]]; then
 fi
 
 # ------------------------------------------------------------ node runtime ---
-# The system node on this host is 16; Vite 5 refuses it and vitest 4's
+# The system node on this host is 16; Vite 6 refuses it and vitest 4's
 # dependencies need >=20.19. The version is declared once, in
 # apps/miniapp/.nvmrc, so CI and this host cannot silently disagree.
 # If it is not installed we stop with an instruction rather than fall through
