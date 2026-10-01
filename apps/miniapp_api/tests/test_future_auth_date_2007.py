@@ -16,6 +16,14 @@
   декораторе Mini App, вью не вызывается;
 * ровно +300 с проходит транспорт (положительная стража на границе);
 * причина в логе — ``future``; проверка поднимает ``InitDataFromFuture``.
+
+Часы (DRF-2691). Узлы, идущие через декоратор, останавливают часы
+проверяющего (``pinned_now``). Прежде подпись датировалась
+``int(time.time()) + 301``, а декоратор читал ``time.time()`` заново: если
+между двумя чтениями сменялась секунда, 301 превращалось в 300 — ровно в
+допуск, — транспорт пропускал, и узел падал на ответе следующего слоя
+(``404 user_not_registered`` у мастера, ``500 server_misconfigured`` у
+клиента и админа). Отказ зависел от того, попали ли два чтения в одну секунду.
 """
 
 from __future__ import annotations
@@ -56,6 +64,31 @@ def _bot_token(settings) -> None:
     settings.MAX_BOT_TOKEN = BOT_TOKEN
 
 
+class _PinnedClock:
+    """``time`` для проверяющего: ``time()`` стоит, остальное — настоящее."""
+
+    def __init__(self, now: int) -> None:
+        self._now = now
+
+    def time(self) -> float:
+        return float(self._now)
+
+    def __getattr__(self, name: str):
+        return getattr(time_module, name)
+
+
+@pytest.fixture
+def pinned_now(monkeypatch) -> int:
+    """Секунда, на которой стоят часы проверяющего.
+
+    Подменяется имя ``time_module`` в ``apps.miniapp_api.auth``, а не
+    ``time.time`` — то есть часы одного проверяющего, а не всего процесса.
+    """
+    now = int(time_module.time())
+    monkeypatch.setattr(miniapp_auth, "time_module", _PinnedClock(now))
+    return now
+
+
 def _signed(auth_date: int) -> str:
     params = {
         "user": json.dumps({"id": 200700, "first_name": "Проба"}),
@@ -82,14 +115,30 @@ def _json(resp: HttpResponse) -> dict:
 
 
 @pytest.mark.parametrize("surface", list(DECORATORS))
-def test_auth_date_from_the_future_is_a_transport_refusal(surface):
+def test_auth_date_from_the_future_is_a_transport_refusal(surface, pinned_now):
     view, calls = _decorated(DECORATORS[surface])
-    header = f"MaxInitData {_signed(int(time_module.time()) + SKEW + 1)}"
+    header = f"MaxInitData {_signed(pinned_now + SKEW + 1)}"
 
     resp = view(RequestFactory().get("/", HTTP_AUTHORIZATION=header))
 
     assert (resp.status_code, _json(resp).get("error")) == (401, "no_init_data"), surface
     assert calls == []
+
+
+@pytest.mark.parametrize("surface", list(DECORATORS))
+def test_auth_date_exactly_at_the_skew_is_not_a_transport_refusal(surface, pinned_now):
+    """Пара к узлу выше, через тот же декоратор: секундой ближе — уже не отказ транспорта.
+
+    Это и есть состояние, в которое прежний узел попадал случайно, когда
+    между подписью и проверкой сменялась секунда (DRF-2691). Что отвечает
+    следующий слой, здесь не предмет: у поверхностей он разный.
+    """
+    view, _calls = _decorated(DECORATORS[surface])
+    header = f"MaxInitData {_signed(pinned_now + SKEW)}"
+
+    resp = view(RequestFactory().get("/", HTTP_AUTHORIZATION=header))
+
+    assert (resp.status_code, _json(resp).get("error")) != (401, "no_init_data"), surface
 
 
 def test_auth_date_exactly_at_the_skew_passes_the_transport_check():
@@ -100,9 +149,9 @@ def test_auth_date_exactly_at_the_skew_passes_the_transport_check():
     assert verified.auth_date == now + SKEW
 
 
-def test_future_refusal_is_logged_with_reason_future(caplog):
+def test_future_refusal_is_logged_with_reason_future(caplog, pinned_now):
     view, _calls = _decorated(require_init_data)
-    header = f"MaxInitData {_signed(int(time_module.time()) + SKEW + 1)}"
+    header = f"MaxInitData {_signed(pinned_now + SKEW + 1)}"
 
     with caplog.at_level(logging.INFO):
         view(RequestFactory().get("/", HTTP_AUTHORIZATION=header))
