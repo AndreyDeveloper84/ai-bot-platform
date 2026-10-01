@@ -129,7 +129,7 @@ def test_handoff_enters_scope_bridges_identity_and_delegates(settings, monkeypat
         seen["tenant"] = current_tenant()
         seen["text"] = ctx.message_text
         seen["bot_user_tenant"] = ctx.bot_user.tenant_id
-        return SkillResult(reply_text="Выберите дату")
+        return SkillResult(reply_text="Выбери дату")
 
     monkeypatch.setattr("apps.skills.registry.dispatch", fake_dispatch)
 
@@ -141,7 +141,7 @@ def test_handoff_enters_scope_bridges_identity_and_delegates(settings, monkeypat
         chat_id="500",
     )
 
-    assert reply.text == "Выберите дату"
+    assert reply.text == "Выбери дату"
     assert seen["tenant"].id == t.id  # dispatch ran INSIDE tenant_scope(T)
     # Native ids on the Ayla path: master mirror pk (= canonical Ayla
     # specialist id, S3B rekey) + the service's ayla_service_id.
@@ -256,7 +256,7 @@ def test_service_button_reaches_the_date_step(settings, monkeypatch) -> None:
     def fake_dispatch(ctx):
         seen["text"] = ctx.message_text
         seen["tenant"] = current_tenant()
-        return SkillResult(reply_text="Выберите дату:", action_data={"keyboard": []})
+        return SkillResult(reply_text="Выбери дату:", action_data={"keyboard": []})
 
     monkeypatch.setattr("apps.skills.registry.dispatch", fake_dispatch)
 
@@ -276,7 +276,7 @@ def test_service_button_reaches_the_date_step(settings, monkeypatch) -> None:
     )
     reply = _discovery_handoff_reply(event, gbu, None)
 
-    assert reply.text == "Выберите дату:"
+    assert reply.text == "Выбери дату:"
     assert reply.action_data == {"keyboard": []}
     # Service context stamped from the button's id — the name was never typed.
     assert seen["text"] == f"cb:book:pick_master:{master.id}:{ayla_uuid}"
@@ -604,14 +604,14 @@ def test_route_pick_date_dispatches_into_tenant_pipeline(settings, monkeypatch) 
         seen["tenant"] = current_tenant()
         seen["text"] = ctx.message_text
         seen["bot_user_tenant"] = ctx.bot_user.tenant_id
-        return SkillResult(reply_text="Выберите время:", action_data={"keyboard": []})
+        return SkillResult(reply_text="Выбери время:", action_data={"keyboard": []})
 
     monkeypatch.setattr("apps.skills.registry.dispatch", fake_dispatch)
     callback = f"cb:book:pick_date:{master.id}:2026-08-11:{uuid4()}"
 
     reply = route_booking_callback(global_bot_user=gbu, callback_text=callback, chat_id="600")
 
-    assert reply.text == "Выберите время:"
+    assert reply.text == "Выбери время:"
     assert reply.action_data == {"keyboard": []}
     assert seen["tenant"].id == t.id  # dispatch ran INSIDE tenant_scope(T)
     assert seen["text"] == callback  # raw payload, verbatim

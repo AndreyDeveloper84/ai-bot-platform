@@ -458,7 +458,7 @@ CERTIFICATE_AMOUNT_MAX = Decimal("100000")
 
 # DRF-997: transient schedule-service outage (e.g. backend 429). The bot
 # keeps ownership of the conversation and asks the user to retry shortly.
-SCHEDULE_UNAVAILABLE_TEXT = "Сервис расписания сейчас недоступен, попробуйте через минуту."
+SCHEDULE_UNAVAILABLE_TEXT = "Сервис расписания сейчас недоступен, попробуй через минуту."
 
 
 # B6 / DRF-842 — promo_status values reported by ``calc_price``.
@@ -1133,7 +1133,7 @@ def _format_confirm_preview(
     price = _format_money(quoted_price)
     if price:
         parts.append(f"• Цена: {price}")
-    parts.append("Подтверждаете?")
+    parts.append("Подтверждаешь?")
     return "\n".join(parts)
 
 
@@ -1350,7 +1350,7 @@ def execute_confirm(
             quoted_price=new_payload.get("quoted_price"),
             quoted_duration_minutes=new_payload.get("quoted_duration_minutes"),
         )
-        text = f"Пока вы выбирали, {changed}. Запись не создана.\n\n{preview}"
+        text = f"Пока шёл выбор, {changed}. Запись не создана.\n\n{preview}"
         return BookingToolResult(
             text=text,
             error="quote_changed",
@@ -1819,7 +1819,7 @@ def _format_cancel_preview(*, booking: BookingRequest, reason: str) -> str:
         parts.append(f"• Мастер: {booking.master_name}")
     if reason:
         parts.append(f"• Причина: {reason}")
-    parts.append("Подтверждаете отмену?")
+    parts.append("Подтверждаешь отмену?")
     return "\n".join(parts)
 
 
@@ -2145,7 +2145,7 @@ def _format_reschedule_preview(
     if booking.master_name:
         parts.append(f"• Мастер: {booking.master_name}")
     parts.append(f"• Новое время: {new_datetime}")
-    parts.append("Подтверждаете перенос?")
+    parts.append("Подтверждаешь перенос?")
     return "\n".join(parts)
 
 
@@ -2873,7 +2873,7 @@ def execute_reschedule(
         master_name=master_name,
         service_name=service_name,
     )
-    text = f"Перенесла запись на {new_datetime}. Если что-то ещё нужно — пишите!"
+    text = f"Перенесла запись на {new_datetime}. Если что-то ещё нужно — пиши!"
     return BookingToolResult(text=text, confirmation=confirmation)
 
 
@@ -3682,7 +3682,7 @@ def buy_certificate(
 
     text = (
         f"Сертификат на {amount:.0f} ₽ готов к оплате. "
-        "Нажмите кнопку ниже, чтобы перейти к безопасной оплате."
+        "Нажми кнопку ниже, чтобы перейти к безопасной оплате."
     )
     keyboard = url_button("💳 Оплатить", result.checkout_url)
 

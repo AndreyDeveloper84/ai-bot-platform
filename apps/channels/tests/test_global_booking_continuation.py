@@ -202,7 +202,7 @@ def wired(monkeypatch, settings, mock_send, fake_redis):
 
     def fake_dispatch(ctx):
         seen.booking.append(ctx.message_text)
-        return SkillResult(reply_text="Выберите дату:")
+        return SkillResult(reply_text="Выбери дату:")
 
     def fake_turn(turn_ctx):
         seen.concierge.append(turn_ctx.text)
@@ -447,7 +447,7 @@ class TestTheServiceQuestionIsAnswerable:
 
         assert wired.concierge == []
         assert wired.booking == [f"cb:book:pick_master:{master.id}:{_LYMPH}"]
-        assert mock_send[-1]["text"] == "Выберите дату:"
+        assert mock_send[-1]["text"] == "Выбери дату:"
 
     def test_the_tickets_own_string_walks_the_whole_chain(self, wired, rf_salon, mock_send) -> None:
         """Симптом DRF-968 целиком, одной цепочкой:
@@ -456,7 +456,7 @@ class TestTheServiceQuestionIsAnswerable:
         → [тап карточки мастера]
         ← Чтобы записаться к мастеру Тихонова Ольга, напишите желаемую услугу
         → RF-лифтинг — Лицо/шея/декольте    ← ровно то, что попросил бот
-        ← Выберите дату:                    ← а было «Вот мастера, которые…»
+        ← Выбери дату:                    ← а было «Вот мастера, которые…»
         ```
 
         Три утверждения, и ни одно не лишнее. «Список мастеров не показан» —
@@ -472,7 +472,7 @@ class TestTheServiceQuestionIsAnswerable:
 
         assert wired.concierge == []
         assert wired.booking == [f"cb:book:pick_master:{master.id}:{_RF_LIFT}"]
-        assert mock_send[-1]["text"] == "Выберите дату:"
+        assert mock_send[-1]["text"] == "Выбери дату:"
 
     def test_two_matches_offer_a_choice_rather_than_a_dead_end(
         self, wired, salon, mock_send

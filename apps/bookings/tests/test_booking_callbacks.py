@@ -871,7 +871,7 @@ class TestConfirmTapNamedOutcomes:
         self, tenant: Tenant, bot_user: BotUser, conversation: Conversation
     ) -> None:
         buttons = [{"label": "✅ Подтвердить", "callback": "cb:book:confirm:new-token"}]
-        text = "Пока вы выбирали, цена изменилась: было 1 000 ₽, стало 1 200 ₽. Запись не создана."
+        text = "Пока шёл выбор, цена изменилась: было 1 000 ₽, стало 1 200 ₽. Запись не создана."
         result = self._tap(
             tenant,
             bot_user,
