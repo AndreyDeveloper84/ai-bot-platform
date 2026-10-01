@@ -5762,9 +5762,11 @@ def create_payment(request: HttpRequest) -> HttpResponse:
 @with_request_tenant
 def cards_setup(request: HttpRequest) -> HttpResponse:
     """C7.2 — start card binding (separate voluntary action). Body carries
-    the consent boundary: ``consent_version`` (required; ``consented_at``
-    accepted for the audit trail, not forwarded upstream) + optional
-    ``return_url``. Response: ``{confirmation_url}`` verbatim."""
+    the consent boundary: ``consent_version`` (required — its presence is the
+    act of consent; the catalog records its OWN version, DRF-2681) + optional
+    ``return_url``. ``consented_at`` may be sent and is ignored: it is neither
+    stored nor forwarded, the recorded moment is the catalog's clock.
+    Response: ``{confirmation_url}`` verbatim."""
 
     body = _c7_json_body(request)
     if isinstance(body, JsonResponse):
