@@ -528,6 +528,11 @@ class BookingRow:
     #: и его пояс — время человеку показывается в поясе салона, не в UTC.
     salon_name: str = ""
     salon_tz: str = ""
+    #: DRF-2701 — the schedule WAS read and holds no such record, so nothing
+    #: but our own row vouches for this booking (and its time is unknown).
+    #: Legacy YClients path only: under Ayla such a row is not listed at all
+    #: (DRF-1034). Told to the model; changes nothing the person is shown.
+    unconfirmed: bool = False
 
 
 @dataclass(frozen=True)
@@ -643,6 +648,9 @@ class BookingToolResult:
     #: decide this from the text: the two refusals differ by wording, not
     #: by a sign. False unless a branch says otherwise.
     handoff: bool = False
+    #: DRF-2701 — ``show_my_bookings`` could not read the schedule, so
+    #: ``bookings`` is the local list alone: times unknown, nothing checked.
+    bookings_check_failed: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -3086,6 +3094,7 @@ def show_my_bookings(
     # from YClients when available to know which bookings are still
     # upcoming. Fail-soft on network errors.
     live_records: dict[int | str, Any] = {}
+    check_failed = False
     try:
         for rec in client.get_user_records():
             live_records[rec.id] = rec
@@ -3095,7 +3104,9 @@ def show_my_bookings(
         return BookingToolResult(text=SCHEDULE_UNAVAILABLE_TEXT, error="schedule_unavailable")
     except (YClientsUnavailableError, YClientsAPIError):
         # Empty live_records → fall back to comment-marker only.
-        pass
+        # DRF-2701: and say so. The list below is still returned, but the
+        # model used to get it with nothing marking it as unchecked.
+        check_failed = True
 
     bookings: list[BookingRow] = []
     for row in rows:
@@ -3115,6 +3126,10 @@ def show_my_bookings(
                 status="CONFIRMED",
                 salon_name=getattr(tenant, "name", "") or "",
                 salon_tz=_salon_tz_key(tenant),
+                # Read and not found. When the read itself failed nothing was
+                # looked up, so «не найдена» would be untrue — that case is
+                # ``bookings_check_failed`` on the result instead.
+                unconfirmed=live is None and not check_failed,
             )
         )
 
@@ -3125,7 +3140,7 @@ def show_my_bookings(
         extra={"count": len(bookings)},
     )
     text = _format_bookings_text(bookings)
-    return BookingToolResult(text=text, bookings=bookings)
+    return BookingToolResult(text=text, bookings=bookings, bookings_check_failed=check_failed)
 
 
 def _salon_tz_key(tenant: Any) -> str:
