@@ -67,6 +67,19 @@ def sent(monkeypatch):
     return calls
 
 
+@pytest.fixture(autouse=True)
+def _no_chat_indicator(monkeypatch):
+    """«Прочитано» and «печатает…» are not sent: no call to MAX (DRF-2696).
+
+    ``send_chat_action`` goes to the network whenever a bot token is set, and
+    swallows its own failures — every turn in this file made two real
+    ``POST botapi.max.ru/chats/<id>/actions`` and stayed green.
+    """
+    from apps.channels.max import outbound
+
+    monkeypatch.setattr(outbound, "send_chat_action", lambda **kwargs: None)
+
+
 @pytest.fixture
 def events(monkeypatch):
     captured: list[tuple[str, dict]] = []
