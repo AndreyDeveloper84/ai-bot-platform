@@ -57,6 +57,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+from apps.persona.voice import CLIENT_ADDRESS_RULE
+
 
 # Platform-owned dataclass: the FAQ skill reads brand voice via
 # `persona` / `tone` / `forbidden` fields. F2 (DRF-589) adapts
@@ -241,6 +243,8 @@ def _render_system_prompt(
             'Если ответа не нашлось — скажи "уточню у мастера".'
         )
 
+    # DRF-2712 — канон обращения: к клиенту на «ты».
+    sections.append(CLIENT_ADDRESS_RULE)
     sections.append(f"Ответ не длиннее {_MAX_ANSWER_CHARS} символов.")
     return "\n\n".join(sections)
 
