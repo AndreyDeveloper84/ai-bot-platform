@@ -55,6 +55,27 @@ honest way for a test to say «there is no such service here», and 54 tests in
 without asking a resolver, and they are not a violation. The summary lists
 them under ``reserved``.
 
+### A guard closer to the call is not overruled
+
+``apps/replay/golden_path.py`` has had its own ``NetworkTripwire`` since
+before this plugin: inside its block it replaces ``socket.getaddrinfo`` and
+classifies each fixture by what the turn TRIED to reach — a turn that reached
+for the Ayla API «needs the outside world» and is reported as uncovered
+instead of being asserted.
+
+The first version of the refusal answered at the transport, before any
+lookup. That starved the tripwire: nothing reached its hook, six fixtures were
+classified «our own deterministic code», asserted against an error reply, and
+went red (measured, the full run of this branch). So:
+
+* **Whoever owns name resolution owns the verdict.** When ``socket.
+  getaddrinfo`` is not this plugin's hook, a narrower guard is active; the
+  transport layer then records the call as ``guarded`` and lets it through to
+  that guard. Not a violation: the guard is doing the refusing.
+* **A reserved name is answered by the resolver layer only**, never at the
+  transport — the request goes down the real path as far as the lookup and is
+  answered there. Same error for the caller, one mechanism instead of two.
+
 ### How this was introduced — the radius was measured before anything refused
 
 ``apps/llm/conftest.py`` says why a repository-wide autouse check is not
@@ -92,6 +113,9 @@ is untouched. Reserved names are short-circuited in both modes.
 * ``smoke``, ``cross_boundary`` and ``e2e`` tests are meant to cross a real
   boundary. Their calls go through, and the summary lists them as
   ``expected``.
+* A test that replaces ``socket.getaddrinfo`` takes the verdict with it (see
+  «A guard closer to the call»): what its own hook lets through, goes through.
+  The summary still lists those calls, as ``guarded``.
 
 What counts as local: loopback addresses, ``localhost``, and ``testserver``
 (Django's test client host). CI's Postgres and Redis are on ``localhost``.
@@ -127,6 +151,13 @@ _OUTSIDE = "<outside any test>"
 KIND_VIOLATION = "EGRESS"
 KIND_RESERVED = "reserved"
 KIND_EXPECTED = "expected"
+KIND_GUARDED = "guarded"
+
+#: Event layers. ``guarded`` — seen at the transport while another guard owned
+#: name resolution; handed to that guard, not refused here.
+LAYER_HTTP = "http"
+LAYER_DNS = "dns"
+LAYER_GUARDED = "guarded"
 
 _lock = threading.Lock()
 #: (host, nodeid, layer) -> count. ``layer`` is ``http`` or ``dns``.
@@ -170,14 +201,18 @@ def is_reserved(host: object) -> bool:
     return any(name.endswith(suffix) or name == suffix[1:] for suffix in RESERVED_SUFFIXES)
 
 
-def _note(host: object, layer: str) -> bool:
-    """Record one event for the running test. True when it must not go out."""
-    name = _host_text(host)
+def _record(host: object, layer: str) -> None:
     with _lock:
-        _events[(name, _current["nodeid"], layer)] += 1
-    if is_reserved(name):
-        return True
+        _events[(_host_text(host), _current["nodeid"], layer)] += 1
+
+
+def _refusing() -> bool:
     return mode() == MODE_FORBID and not _current["expected"]
+
+
+def _resolution_is_ours() -> bool:
+    """False while a narrower guard has replaced ``socket.getaddrinfo``."""
+    return socket.getaddrinfo is _getaddrinfo
 
 
 def _why(host: object) -> str:
@@ -213,8 +248,10 @@ _real_getaddrinfo = socket.getaddrinfo
 
 
 def _getaddrinfo(host: Any, port: Any, *args: Any, **kwargs: Any) -> Any:
-    if not is_local(host) and _note(host, "dns"):
-        raise socket.gaierror(socket.EAI_NONAME, _why(host))
+    if not is_local(host):
+        _record(host, LAYER_DNS)
+        if is_reserved(host) or _refusing():
+            raise socket.gaierror(socket.EAI_NONAME, _why(host))
     return _real_getaddrinfo(host, port, *args, **kwargs)
 
 
@@ -230,16 +267,26 @@ def _install_httpx() -> None:
     real_async = httpx.AsyncHTTPTransport.handle_async_request
     real_sync = httpx.HTTPTransport.handle_request
 
-    async def handle_async_request(self: Any, request: Any) -> Any:
+    def refused_here(request: Any) -> bool:
+        """Record the request; True when THIS layer must answer it."""
         host = request.url.host
-        if not is_local(host) and _note(host, "http"):
-            raise httpx.ConnectError(_why(host), request=request)
+        if is_local(host):
+            return False
+        if not _resolution_is_ours():
+            _record(host, LAYER_GUARDED)
+            return False
+        _record(host, LAYER_HTTP)
+        # A reserved name goes on to the resolver layer, which answers it.
+        return not is_reserved(host) and _refusing()
+
+    async def handle_async_request(self: Any, request: Any) -> Any:
+        if refused_here(request):
+            raise httpx.ConnectError(_why(request.url.host), request=request)
         return await real_async(self, request)
 
     def handle_request(self: Any, request: Any) -> Any:
-        host = request.url.host
-        if not is_local(host) and _note(host, "http"):
-            raise httpx.ConnectError(_why(host), request=request)
+        if refused_here(request):
+            raise httpx.ConnectError(_why(request.url.host), request=request)
         return real_sync(self, request)
 
     httpx.AsyncHTTPTransport.handle_async_request = handle_async_request  # type: ignore[method-assign]
@@ -313,20 +360,29 @@ def summarize(
     saw any, lookups otherwise — the two layers see the same call, and adding
     them would count it twice.
     """
-    http: Counter[tuple[str, str]] = Counter()
-    dns: Counter[tuple[str, str]] = Counter()
+    by_layer: dict[str, Counter[tuple[str, str]]] = {
+        LAYER_HTTP: Counter(),
+        LAYER_DNS: Counter(),
+        LAYER_GUARDED: Counter(),
+    }
     for (host, test, layer), count in events.items():
-        (http if layer == "http" else dns)[(host, test)] += count
-    pairs = [(h, t, n) for (h, t), n in http.items()]
-    pairs += [(h, t, n) for (h, t), n in dns.items() if (h, t) not in http]
+        by_layer[layer][(host, test)] += count
+    http, dns, guarded = by_layer[LAYER_HTTP], by_layer[LAYER_DNS], by_layer[LAYER_GUARDED]
 
     def kind(host: str, test: str) -> str:
         if is_reserved(host):
             return KIND_RESERVED
         return KIND_EXPECTED if test in expected_tests else KIND_VIOLATION
 
-    order = {KIND_VIOLATION: 0, KIND_EXPECTED: 1, KIND_RESERVED: 2}
-    rows = [(kind(h, t), h, t, n) for h, t, n in pairs]
+    rows = [(kind(h, t), h, t, n) for (h, t), n in http.items()]
+    rows += [(kind(h, t), h, t, n) for (h, t), n in dns.items() if (h, t) not in http]
+    # Seen only while another guard owned resolution: that guard's business.
+    rows += [
+        (KIND_GUARDED, h, t, n)
+        for (h, t), n in guarded.items()
+        if (h, t) not in http and (h, t) not in dns
+    ]
+    order = {KIND_VIOLATION: 0, KIND_EXPECTED: 1, KIND_RESERVED: 2, KIND_GUARDED: 3}
     return sorted(rows, key=lambda row: (order[row[0]], -row[3], row[1], row[2]))
 
 
@@ -372,7 +428,7 @@ def pytest_terminal_summary(terminalreporter: Any) -> None:
     else:
         terminalreporter.write_line("EGRESS none: no test reached for a host outside this machine.")
 
-    for label in (KIND_EXPECTED, KIND_RESERVED):
+    for label in (KIND_EXPECTED, KIND_RESERVED, KIND_GUARDED):
         some = [row for row in rows if row[0] == label]
         if some:
             names = sorted({row[1] for row in some})

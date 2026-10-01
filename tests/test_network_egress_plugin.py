@@ -228,7 +228,22 @@ class TestReservedNames:
         with pytest.raises(httpx.ConnectError), httpx.Client() as client:
             client.get(RESERVED_URL)
 
-        assert own_events() == {(RESERVED_HOST, "http"): 1}
+        # Seen at the transport, answered at the lookup — by the plugin, not
+        # by the resolver behind it.
+        seen = own_events()
+        assert seen.get((RESERVED_HOST, "http")) == 1
+        assert seen.get((RESERVED_HOST, "dns"), 0) >= 1
+        assert resolver == []
+
+    @pytest.mark.asyncio
+    async def test_async_transport_answers_without_asking_a_resolver(self, own_events, resolver):
+        with pytest.raises(httpx.ConnectError):
+            async with httpx.AsyncClient() as client:
+                await client.post(RESERVED_URL, json={})
+
+        seen = own_events()
+        assert seen.get((RESERVED_HOST, "http")) == 1
+        assert seen.get((RESERVED_HOST, "dns"), 0) >= 1
         assert resolver == []
 
     @pytest.mark.parametrize("mode", [egress.MODE_FORBID, egress.MODE_RECORD])
@@ -250,6 +265,70 @@ class TestReservedNames:
             socket.getaddrinfo(RESERVED_HOST, 80)
 
         assert own_events() == {(RESERVED_HOST, "dns"): 1}
+        assert resolver == []
+
+
+class TestAGuardCloserToTheCall:
+    """A test that owns name resolution owns the verdict.
+
+    ``apps/replay/golden_path.NetworkTripwire`` replaces ``socket.getaddrinfo``
+    inside its block and classifies a fixture by what the turn tried to reach.
+    Answering at the transport, before the lookup, starved it: six golden
+    fixtures were mis-classified and went red.
+    """
+
+    @pytest.fixture
+    def tripwire(self, monkeypatch):
+        tried: list[str] = []
+
+        def closed(host, port=None, *args, **kwargs):
+            tried.append(host.decode() if isinstance(host, bytes) else str(host))
+            raise socket.gaierror("name resolution is closed here")
+
+        monkeypatch.setattr(socket, "getaddrinfo", closed)
+        return tried
+
+    @pytest.mark.parametrize("url_host", [FOREIGN_HOST, RESERVED_HOST])
+    def test_the_call_reaches_the_inner_guard(self, own_events, tripwire, url_host):
+        with pytest.raises(httpx.ConnectError), httpx.Client() as client:
+            client.get(f"http://{url_host}/v1/x")
+
+        assert tripwire == [url_host]
+        assert own_events() == {(url_host, "guarded"): 1}
+
+    @pytest.mark.asyncio
+    async def test_the_async_call_reaches_it_too(self, own_events, tripwire):
+        with pytest.raises(httpx.ConnectError):
+            async with httpx.AsyncClient() as client:
+                await client.post(RESERVED_URL, json={})
+
+        assert tripwire == [RESERVED_HOST]
+        assert own_events() == {(RESERVED_HOST, "guarded"): 1}
+
+    def test_a_guarded_call_does_not_fail_the_run(self, own_events, tripwire):
+        with pytest.raises(httpx.ConnectError), httpx.Client() as client:
+            client.get(FOREIGN_URL)
+        session = SimpleNamespace(config=SimpleNamespace(), exitstatus=pytest.ExitCode.OK)
+
+        egress.pytest_sessionfinish(session)
+
+        assert own_events() == {(FOREIGN_HOST, "guarded"): 1}
+        assert session.exitstatus == pytest.ExitCode.OK
+
+    def test_once_the_guard_is_gone_the_plugin_answers_again(self, own_events, resolver):
+        def closed(*args, **kwargs):
+            raise socket.gaierror("name resolution is closed here")
+
+        with pytest.MonkeyPatch.context() as inner:
+            inner.setattr(socket, "getaddrinfo", closed)
+            with pytest.raises(httpx.ConnectError), httpx.Client() as client:
+                client.get(FOREIGN_URL)
+
+        with pytest.raises(httpx.ConnectError) as refused, httpx.Client() as client:
+            client.get(FOREIGN_URL)
+
+        assert "test egress refused" in str(refused.value)
+        assert own_events() == {(FOREIGN_HOST, "guarded"): 1, (FOREIGN_HOST, "http"): 1}
         assert resolver == []
 
 
@@ -314,6 +393,20 @@ class TestSummary:
         rows = egress.summarize({("ayla-api.invalid", "g.py::t", "http"): 58})
         assert rows == [(egress.KIND_RESERVED, "ayla-api.invalid", "g.py::t", 58)]
         assert egress.violations(rows) == []
+
+    def test_a_call_seen_only_under_another_guard_is_listed_and_is_not_a_violation(self):
+        rows = egress.summarize({("api.openai.com", "gate.py::t", "guarded"): 4})
+        assert rows == [(egress.KIND_GUARDED, "api.openai.com", "gate.py::t", 4)]
+        assert egress.violations(rows) == []
+
+    def test_the_same_host_reached_outside_the_guard_is_still_a_violation(self):
+        rows = egress.summarize(
+            {
+                ("api.openai.com", "gate.py::t", "guarded"): 4,
+                ("api.openai.com", "gate.py::t", "http"): 1,
+            }
+        )
+        assert rows == [(egress.KIND_VIOLATION, "api.openai.com", "gate.py::t", 1)]
 
     def test_nothing_recorded_is_an_empty_report(self):
         assert egress.summarize({}) == []
