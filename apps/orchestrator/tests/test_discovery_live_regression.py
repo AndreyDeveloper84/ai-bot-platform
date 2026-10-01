@@ -43,7 +43,7 @@ pytestmark = [
 ]
 
 # The exact string the user saw. If retrieval regresses, this comes back.
-_ZERO_RESULT_FALLBACK = "По вашему запросу мастеров пока не нашлось"
+_ZERO_RESULT_FALLBACK = "По твоему запросу мастеров пока не нашлось"
 
 _HISTORY = [
     {"role": "user", "content": "ищу массаж, что можешь предложить"},
@@ -239,7 +239,7 @@ def test_genuinely_absent_service_still_falls_back(
     assert "Пенза" in reply.text
     # …and without asking for what the client already said.
     assert _ZERO_RESULT_FALLBACK not in reply.text
-    assert "уточните город или услугу" not in reply.text
+    assert "уточни город или услугу" not in reply.text
 
 
 def test_wrong_city_still_falls_back(monkeypatch, penza_massage_salon: CatalogMaster) -> None:
