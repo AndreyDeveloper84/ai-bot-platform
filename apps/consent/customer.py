@@ -128,8 +128,8 @@ DATA_STORAGE_WITHDRAW_SOURCE = "miniapp:profile_data_storage_revoke"
 _MARKETING = ConsentRecord.ConsentType.MARKETING.value
 _PERSONAL_DATA = ConsentRecord.ConsentType.PERSONAL_DATA.value
 
-#: Why «Подсказки Ayla» cannot be turned on while the data-storage consent is
-#: not in force. The SAME slug the proactive gate uses
+#: Why «Подсказки Ayla» cannot be turned on after the data-storage consent was
+#: withdrawn. The SAME slug the proactive gate uses
 #: (:data:`apps.notifications.proactive.BLOCK_REASONS`): owner decision §47.3
 #: calls the fact «consent_revoked», the code has called it
 #: ``consent_withdrawn`` since DRF-1301, and a second name for one legal fact
@@ -219,6 +219,7 @@ def _active_states(shells: list["BotUser"]) -> dict[str, dict[str, Any]]:
 def proactive_hints_state(
     bot_user: "BotUser",
     *,
+    shells: list["BotUser"] | None = None,
     states: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Состояние тумблера «Подсказки Ayla»: включено ли и можно ли включить.
@@ -227,17 +228,29 @@ def proactive_hints_state(
     :func:`set_proactive_hints` — чтобы экран не мог показать обычный тумблер
     там, где сервер откажет (решение владельца §47.3).
 
-    ``can_enable`` — ``False``, пока согласие на хранение данных не действует;
-    ``blocked_reason`` тогда называет причину, иначе пуст. Текст объяснения
-    для человека сюда намеренно не входит — он приходит вместе с экраном.
+    ``can_enable`` — ``False`` только после ОТЗЫВА: согласие на хранение
+    данных у человека было и сейчас не действует — то же определение, каким
+    сторож рассылок отличает ``consent_withdrawn`` от «не давал никогда».
+    ``blocked_reason`` тогда называет причину, иначе пуст. Человека, который
+    согласия не давал вовсе, замок не касается: §47.3 говорит об отзыве, и
+    его тумблер ведёт себя как прежде. Текст объяснения для человека сюда
+    намеренно не входит — он приходит вместе с экраном.
     """
+    if shells is None:
+        shells = _person_shells(bot_user)
     if states is None:
-        states = _active_states(_person_shells(bot_user))
-    can_enable = bool(states[_PERSONAL_DATA]["granted"])
+        states = _active_states(shells)
+    withdrawn = (
+        not states[_PERSONAL_DATA]["granted"]
+        and ConsentRecord.all_tenants.filter(
+            bot_user_id__in=[s.id for s in shells],
+            consent_type=_PERSONAL_DATA,
+        ).exists()
+    )
     return {
         "enabled": not bool(getattr(bot_user, "proactive_messages_opt_out", False)),
-        "can_enable": can_enable,
-        "blocked_reason": "" if can_enable else PROACTIVE_HINTS_BLOCKED_REASON,
+        "can_enable": not withdrawn,
+        "blocked_reason": PROACTIVE_HINTS_BLOCKED_REASON if withdrawn else "",
     }
 
 
@@ -265,10 +278,11 @@ def read_consents(bot_user: "BotUser") -> dict[str, Any]:
     Дату отдаёт реестр: ``granted_at`` — момент действующей строки согласия.
     Если согласие отозвано, даты нет, и это правда, а не пробел.
     """
-    states = _active_states(_person_shells(bot_user))
+    shells = _person_shells(bot_user)
+    states = _active_states(shells)
     return {
         "consents": states,
-        "proactive_hints": proactive_hints_state(bot_user, states=states),
+        "proactive_hints": proactive_hints_state(bot_user, shells=shells, states=states),
         "data_storage": {
             **states[_PERSONAL_DATA],
             "revocation": {
@@ -298,14 +312,14 @@ def set_proactive_hints(bot_user: "BotUser", *, enabled: bool) -> None:
     никогда: это нужно и человеку, и каскаду отзыва.
 
     Raises:
-      ProactiveHintsUnavailable: при ``enabled=True``, пока согласие на
-        хранение данных не действует.
+      ProactiveHintsUnavailable: при ``enabled=True`` после отзыва согласия
+        на хранение данных, пока оно не выдано заново.
     """
     from apps.identity.models import BotUser as BotUserModel
 
     shells = _person_shells(bot_user)
     if enabled:
-        state = proactive_hints_state(bot_user)
+        state = proactive_hints_state(bot_user, shells=shells)
         if not state["can_enable"]:
             from apps.consent.exceptions import ProactiveHintsUnavailable
 

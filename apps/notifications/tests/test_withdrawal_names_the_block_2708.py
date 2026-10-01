@@ -17,8 +17,11 @@ the neighbouring suites assert.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone as dt_timezone
+
 import pytest
 
+from apps.consent.customer import PROACTIVE_HINTS_BLOCKED_REASON
 from apps.consent.models import ConsentRecord
 from apps.consent.services import withdraw
 from apps.identity.models import BotUser
@@ -34,10 +37,14 @@ from apps.tenancy.context import tenant_scope
 pytestmark = pytest.mark.django_db
 
 
-def _opt_out(user: BotUser) -> BotUser:
-    BotUser.all_tenants.filter(pk=user.pk).update(proactive_messages_opt_out=True)
+def _update(user: BotUser, **fields) -> BotUser:
+    BotUser.all_tenants.filter(pk=user.pk).update(**fields)
     user.refresh_from_db()
     return user
+
+
+def _opt_out(user: BotUser) -> BotUser:
+    return _update(user, proactive_messages_opt_out=True)
 
 
 def _withdraw(user: BotUser) -> None:
@@ -84,11 +91,11 @@ class TestTheNameOfTheBlock:
         assert consent_blocker(user) is None
         assert blocker_verdict(user).reason is None
 
-    def test_the_slug_is_the_existing_one(self) -> None:
-        """One legal fact, one name: §47.3 says «consent_revoked», the code has
-        called it ``consent_withdrawn`` since DRF-1301."""
-        assert "consent_withdrawn" in BLOCK_REASONS
-        assert "consent_revoked" not in BLOCK_REASONS
+    def test_the_toggle_lock_and_the_gate_use_one_name_for_the_fact(self) -> None:
+        """§47.3 says «consent_revoked»; the code has called the fact
+        ``consent_withdrawn`` since DRF-1301. The lock on the Mini App toggle
+        must refuse with the gate's own word, not a second one."""
+        assert PROACTIVE_HINTS_BLOCKED_REASON in BLOCK_REASONS
 
 
 class TestTheVetoIsUntouched:
@@ -103,7 +110,15 @@ class TestTheVetoIsUntouched:
 
         never = _opt_out(make_user(tenant, suffix="v-never"))  # no ConsentRecord at all
 
-        for user in (live, gone, never):
+        erased = _opt_out(make_user(tenant, suffix="v-erased"))
+        grant(erased, PERSONAL_DATA)
+        _update(erased, deleted_at=datetime(2026, 6, 1, tzinfo=dt_timezone.utc))
+
+        unstamped = _opt_out(make_user(tenant, suffix="v-unstamped"))
+        grant(unstamped, PERSONAL_DATA)
+        _update(unstamped, consent_at=None)
+
+        for user in (live, gone, never, erased, unstamped):
             assert consent_blocker(user) is not None, user.channel_user_id
 
     def test_against_anything_but_a_withdrawal_the_opt_out_still_names_it(self, tenant) -> None:  # noqa: F811
@@ -113,3 +128,23 @@ class TestTheVetoIsUntouched:
         assert ConsentRecord.all_tenants.filter(bot_user=never).count() == 0
 
         assert consent_blocker(never) == "opt_out"
+
+    def test_a_failed_lookup_of_the_name_does_not_lift_the_veto(
+        self,
+        tenant,  # noqa: F811
+        monkeypatch,
+    ) -> None:
+        """Finding the name reads the database; the veto does not. A failing
+        read leaves the person blocked, under the name the gate used before."""
+        user = make_user(tenant, suffix="v-db")
+        grant(user, PERSONAL_DATA)
+        _withdraw(user)
+        _opt_out(user)
+        assert consent_blocker(user) == "consent_withdrawn"  # the lookup works here
+
+        def _down(*args, **kwargs):
+            raise RuntimeError("consent registry unavailable")
+
+        monkeypatch.setattr("apps.consent.services.has_global_consent", _down)
+
+        assert consent_blocker(user) == "opt_out"

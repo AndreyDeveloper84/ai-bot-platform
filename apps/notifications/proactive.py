@@ -122,8 +122,11 @@ not written to, a blocked text is a message nobody should get.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 #: Slugs :func:`consent_blocker` can return. Enumerated so callers can
 #: assert on them without importing string literals, and so a dry run can
@@ -261,9 +264,19 @@ def blocker_verdict(
     returns ``BlockVerdict(None)`` for an opted-out person. Only the name
     can differ — a withdrawn PERSONAL_DATA consent names the block and the
     opt-out becomes the additional fact.
+
+    Naming must not cost the veto anything: the lookup that finds the name
+    reads the database, the veto does not. If that read fails, the person
+    is still blocked and the block is called ``opt_out`` — exactly what
+    this function answered before it learned to name a withdrawal.
     """
     if getattr(bot_user, "proactive_messages_opt_out", False):
-        if _basis(bot_user, required_consents) == "consent_withdrawn":
+        try:
+            basis = _basis(bot_user, required_consents)
+        except Exception:  # noqa: BLE001 — the veto stands without the name
+            logger.exception("notifications.proactive.block_naming_failed")
+            basis = None
+        if basis == "consent_withdrawn":
             return BlockVerdict("consent_withdrawn", ("opt_out",))
         return BlockVerdict("opt_out")
     return BlockVerdict(_basis(bot_user, required_consents))

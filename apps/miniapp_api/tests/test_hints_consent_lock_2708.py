@@ -10,6 +10,9 @@ Driven through the real Mini App endpoints. The live-consent case is the
 control: without it «the toggle did not turn on» would also be true of a
 toggle that never works.
 
+Narrow on purpose: the lock is about a WITHDRAWAL. A person who never gave the
+consent keeps the toggle they had (last class) — §47.3 does not speak of them.
+
 Not here, on purpose: the explanation the person reads instead of the switch
 (§47.3, second paragraph) and anything on the screen.
 """
@@ -26,7 +29,9 @@ from apps.audit.models import AuditLog
 from apps.consent.services import record_global_consent
 from apps.identity.models import BotUser
 from apps.miniapp_api.tests.test_customer_consents import (  # noqa: F401
+    CHANNEL_USER_ID,
     _bot_token,
+    _make_user,
     _no_ayla_link,
     _revoke,
     auth,
@@ -63,17 +68,18 @@ def _enable_audits() -> int:
     )
 
 
+def _revoked(client, revoke_url, auth) -> None:
+    """Revoke through the Mini App door and make sure it happened."""
+    res = _revoke(client, revoke_url, auth)
+    assert res.status_code == 200, res.content
+    assert res.json()["consents"]["personal_data"]["granted"] is False
+
+
 class TestRevokedConsentLocksTheToggle:
     def test_turning_on_is_refused_and_nothing_changes(
-        self,
-        client,
-        bot_user,
-        url,
-        hints_url,
-        revoke_url,
-        auth,
+        self, client, bot_user, url, hints_url, revoke_url, auth
     ) -> None:
-        assert _revoke(client, revoke_url, auth).status_code == 200
+        _revoked(client, revoke_url, auth)
         audits_before = _enable_audits()
 
         res = _set(client, hints_url, auth, True)
@@ -85,15 +91,9 @@ class TestRevokedConsentLocksTheToggle:
         assert _enable_audits() == audits_before  # no «enabled» row was written
 
     def test_turning_off_is_never_refused(
-        self,
-        client,
-        bot_user,
-        url,
-        hints_url,
-        revoke_url,
-        auth,
+        self, client, bot_user, url, hints_url, revoke_url, auth
     ) -> None:
-        _revoke(client, revoke_url, auth)
+        _revoked(client, revoke_url, auth)
 
         res = _set(client, hints_url, auth, False)
 
@@ -101,17 +101,12 @@ class TestRevokedConsentLocksTheToggle:
         assert res.json()["proactive_hints"]["enabled"] is False
 
     def test_the_document_says_it_cannot_be_enabled_and_why(
-        self,
-        client,
-        bot_user,
-        url,
-        revoke_url,
-        auth,
+        self, client, bot_user, url, revoke_url, auth
     ) -> None:
         before = _hints(client, url, auth)
         assert (before["can_enable"], before["blocked_reason"]) == (True, "")
 
-        _revoke(client, revoke_url, auth)
+        _revoked(client, revoke_url, auth)
 
         after = _hints(client, url, auth)
         assert (after["enabled"], after["can_enable"], after["blocked_reason"]) == (
@@ -121,54 +116,60 @@ class TestRevokedConsentLocksTheToggle:
         )
 
     def test_the_block_is_named_a_withdrawal_not_an_opt_out(
-        self,
-        client,
-        bot_user,
-        revoke_url,
-        auth,
+        self, client, bot_user, revoke_url, auth
     ) -> None:
         """The same legal fact through the door people actually use."""
-        _revoke(client, revoke_url, auth)
+        _revoked(client, revoke_url, auth)
 
         assert _row(bot_user).proactive_messages_opt_out is True
         assert consent_blocker(_row(bot_user)) == "consent_withdrawn"
 
 
 class TestALiveConsentLeavesTheToggleAlone:
-    def test_the_toggle_turns_off_and_back_on(
-        self,
-        client,
-        bot_user,
-        url,
-        hints_url,
-        auth,
+    def test_the_toggle_turns_off_and_back_on_and_the_switch_is_audited(
+        self, client, bot_user, url, hints_url, auth
     ) -> None:
         assert _set(client, hints_url, auth, False).json()["proactive_hints"]["enabled"] is False
+        audits_before = _enable_audits()
 
         res = _set(client, hints_url, auth, True)
 
         assert res.status_code == 200
         assert res.json()["proactive_hints"]["enabled"] is True
         assert _row(bot_user).proactive_messages_opt_out is False
+        # The control for «no enabled row was written» above: a real switch writes one.
+        assert _enable_audits() == audits_before + 1
 
     def test_a_new_consent_returns_the_switch_not_the_setting(
-        self,
-        client,
-        bot_user,
-        url,
-        hints_url,
-        revoke_url,
-        auth,
+        self, client, bot_user, url, hints_url, revoke_url, auth
     ) -> None:
         """«При повторной выдаче согласия подсказки не включать автоматически» —
         the person turned them off by revoking; what comes back is the ability
         to turn them on."""
-        _revoke(client, revoke_url, auth)
+        _revoked(client, revoke_url, auth)
         record_global_consent(_row(bot_user), source="test:regrant")
 
         state = _hints(client, url, auth)
         assert (state["enabled"], state["can_enable"]) == (False, True)
 
         res = _set(client, hints_url, auth, True)
+        assert res.status_code == 200
+        assert res.json()["proactive_hints"]["enabled"] is True
+
+
+class TestAPersonWhoNeverConsentedIsNotLocked:
+    @pytest.fixture
+    def never_consented(self, tenant) -> BotUser:
+        return _make_user(tenant, CHANNEL_USER_ID, consented=False)
+
+    def test_the_toggle_behaves_as_it_did(
+        self, client, never_consented, url, hints_url, auth
+    ) -> None:
+        state = _hints(client, url, auth)
+        assert (state["can_enable"], state["blocked_reason"]) == (True, "")
+
+        assert _set(client, hints_url, auth, False).status_code == 200
+        res = _set(client, hints_url, auth, True)
+
         assert res.status_code == 200
         assert res.json()["proactive_hints"]["enabled"] is True
