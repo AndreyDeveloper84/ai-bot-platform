@@ -318,27 +318,73 @@ MASTER_DRAFT_RELEASED_TO_AI = "master.draft_released_to_ai"
 
 # --- Master-Admin internal chat (handoff 2026-05-19, PR 6) ----------------
 # The handoff §10 ships 6 events; PR 6 registers the matching audit slugs
-# (analytics-bus event names — snake_case dotted notation aligned with
-# event-taxonomy.md §3.12). The SLA-breach + auto-close slugs land
-# alongside the Celery beat that detects them (separate PR); kept out of
-# the canonical set here so an out-of-vocab warning doesn't fire from
-# stub code that does not yet emit them.
+# (analytics-bus event names — snake_case dotted notation). The
+# SLA-breach + auto-close slugs land alongside the Celery beat that
+# detects them (separate PR); kept out of the canonical set here so an
+# out-of-vocab warning doesn't fire from stub code that does not yet
+# emit them.
 #
-# Payload contracts (consumed by event-taxonomy.md §3.12):
+# DRF-2683: this block used to cite «event-taxonomy.md §3.12» twice.
+# That section never existed — the catalog there ends at §3.10. The
+# handoff §10 only PLANNED to add a «3.12 master-admin-chat domain»
+# section, and it lists other slugs (``admin_chat.*``) with no payload
+# shapes.
+#
+# Do NOT repoint the citation to ``docs/architecture/event-contract.md``
+# §3.12: that section exists but is ``user.profile.updated`` — a
+# DIFFERENT document and a different bus (cross-service domain events),
+# not the contract for these slugs.
+#
+# Payload contracts (analytics bus + audit log). Owner decision, DRF-2683:
+# the contract is what the emitters in ``apps/internal_chat/services.py``
+# really send. No document describes these payloads — this block is the
+# contract, and ``apps/internal_chat/tests/test_payload_contract.py`` pins
+# every key set as a literal: a key added to an emitter and not written
+# down here and there turns that test red.
+#
+# Common to all of them: every ``*_id`` is ``str(uuid)``; enumerations
+# travel as their string value; the bus payload and the audit-log payload
+# are one and the same dict; the envelope (tenant, trace_id, distinct_id)
+# is added by ``emit`` and is not part of the payload. The message body
+# and the master's free-form escalation reason are NEVER in a payload.
+#
 #   internal_chat.thread_created:
-#     {tenant_id, thread_id, master_id, topic, linked_artifact_type,
-#      linked_artifact_id, actor_id, is_sensitive}
+#     {tenant_id, thread_id, master_id, topic: <str>,
+#      linked_artifact_type: <str>,          # "" when nothing is linked
+#      linked_artifact_id: <uuid|null>,
+#      actor_id, is_sensitive: bool,
+#      first_message_id: <uuid|null>}        # null = opened without a message
+#     A first message embedded here does NOT also emit message_sent.
 #   internal_chat.message_sent:
-#     {tenant_id, thread_id, message_id, sender_role, sender_user_id,
-#      has_attachments}     # NOTE: body content NEVER in payload
+#     {tenant_id, thread_id, message_id,
+#      sender_role: master|admin|founder|system,
+#      sender_user_id: <uuid|null>,          # null for a system message
+#      has_attachments: bool}                # the literal false, always
 #   internal_chat.thread_status_changed:
-#     {tenant_id, thread_id, from_status, to_status, actor_id}
+#     {tenant_id, thread_id, from_status, to_status, actor_id,
+#      from_topic?: <str>, to_topic?: <str>} # only when the same request
+#                                            # also re-tagged the topic
 #   internal_chat.thread_assigned:
-#     {tenant_id, thread_id, assigned_admin_id, actor_id}
+#     {tenant_id, thread_id,
+#      assigned_admin_id: <uuid|null>,       # null = unassigned
+#      previous_admin_id: <uuid|null>,
+#      actor_id}
 #   internal_chat.escalated_to_founder:
-#     {tenant_id, thread_id, master_id, reason_class}
+#     {tenant_id, thread_id, master_id, from_status,
+#      reason_class: provided|empty,
+#      actor_id}
 #   internal_chat.marked_read:
-#     {tenant_id, thread_id, reader_role, reader_user_id, count}
+#     {tenant_id, thread_id, reader_role: master|admin|founder,
+#      reader_user_id,
+#      count: int ≥ 1}                       # nothing to mark → no event
+#
+# Audit log ONLY — NOT on the analytics bus and NOT in CANONICAL_EVENTS
+# (``patch_thread_fields`` writes it with a bare string, there is no
+# constant for it here):
+#   internal_chat.thread_fields_patched:
+#     {tenant_id, thread_id, actor_id,
+#      fields_changed: [<model field>...],
+#      from_topic?: <str>, to_topic?: <str>} # only on a topic change
 INTERNAL_CHAT_THREAD_CREATED = "internal_chat.thread_created"
 INTERNAL_CHAT_MESSAGE_SENT = "internal_chat.message_sent"
 INTERNAL_CHAT_THREAD_STATUS_CHANGED = "internal_chat.thread_status_changed"
