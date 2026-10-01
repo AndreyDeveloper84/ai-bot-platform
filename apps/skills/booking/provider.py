@@ -379,6 +379,80 @@ class AylaYClientsAdapter:
             rows = self._client.get_user_appointments(external_user_id=self._external_user_id)
         return [_to_yc_user_record(r) for r in rows]
 
+    def _edge_rows_of_this_salon(
+        self, *, staff_id: int | str, service_id: int | str | None
+    ) -> list[dict[str, Any]]:
+        """Edge rows for the quote — only of THIS salon (DRF-2669).
+
+        The catalog's mirror door takes ``tenant`` as an optional filter by a
+        recorded decision (``beautygo_backend/docs/CATALOG_INTERNAL_API_CONTRACT.md`` §2a: «Verify,
+        don't trust — the consumer should re-check it»), and the edge read
+        sends none. So every returned row is re-checked against the bound
+        salon, the same test as ``upsert_master_services``:
+
+        * a row stamped with another salon is dropped — always;
+        * a row with an empty ``tenant`` is *unverifiable, not foreign* (same
+          contract) — kept only for a master this salon's mirror knows (by
+          mirror key or catalog id, saleable or not). For a master the model
+          named that the mirror does not place here, nothing vouches for it,
+          and it is dropped.
+
+        The catalog is still asked for a master the mirror has not caught up
+        with: a row stamped with THIS salon is kept, so such a master keeps
+        the edge price (DRF-1067) and the preview keeps ``quoted_price``
+        (DRF-1708). A master of another salon gets exactly what an invented
+        id gets — the salon's own base price; nothing about them leaks.
+
+        Unbound adapter (no tenant): nothing to verify against — as before.
+        """
+        with _translate_errors():
+            rows = self._client.get_specialist_service_edges(
+                specialist_id=self.catalog_specialist_id(staff_id),
+                service_id=str(service_id),
+            )
+        tenant = self._tenant
+        if tenant is None:
+            return rows
+        ours = str(tenant.id)
+        member = self._mirror_places_here(staff_id)
+        # Same test as upsert_master_services: an empty tenant is unverifiable.
+        kept = [r for r in rows if r.get("tenant") == ours or (member and not r.get("tenant"))]
+        if len(kept) != len(rows):
+            logger.warning(
+                "booking.edge.rows_not_of_this_salon_dropped tenant=%s staff_id=%s "
+                "member=%s dropped=%d",
+                ours,
+                staff_id,
+                member,
+                len(rows) - len(kept),
+            )
+        return kept
+
+    def _mirror_places_here(self, staff_id: int | str) -> bool:
+        """Does this salon's mirror hold the master — by mirror key or by
+        catalog id, WHETHER OR NOT saleable: the question is which salon, not
+        whether bookable. ``objects`` under ``tenant_scope`` is this salon's
+        rows only; the sale filter is the opt-in ``.bookable()``, not applied
+        here. Same path as :meth:`catalog_specialist_id` (MKT1: no
+        ``all_tenants`` outside the marketplace)."""
+
+        from django.db.models import Q
+
+        from apps.catalog.models import CatalogMaster
+        from apps.tenancy.context import tenant_scope
+
+        key = str(staff_id)
+        try:
+            uuid.UUID(key)
+        except ValueError:
+            return False
+        with tenant_scope(self._tenant):
+            return (
+                CatalogMaster.objects.filter(tenant=self._tenant)
+                .filter(Q(pk=key) | Q(catalog_specialist_id=key))
+                .exists()
+            )
+
     def get_specialist_service_quote(
         self,
         *,
@@ -389,11 +463,7 @@ class AylaYClientsAdapter:
         на НОВУЮ запись (DRF-1708). ``None`` в любой позиции — значение
         не известно; превью тогда его не показывает и не шлёт.
         """
-        with _translate_errors():
-            rows = self._client.get_specialist_service_edges(
-                specialist_id=self.catalog_specialist_id(staff_id),
-                service_id=str(service_id),
-            )
+        rows = self._edge_rows_of_this_salon(staff_id=staff_id, service_id=service_id)
         if not rows:
             return None, None
         _refuse_unsellable(rows[0])
@@ -426,11 +496,7 @@ class AylaYClientsAdapter:
         — the behaviour before this change. Errors are translated like every
         other read so the caller can degrade instead of crashing the quote.
         """
-        with _translate_errors():
-            rows = self._client.get_specialist_service_edges(
-                specialist_id=self.catalog_specialist_id(staff_id),
-                service_id=str(service_id),
-            )
+        rows = self._edge_rows_of_this_salon(staff_id=staff_id, service_id=service_id)
         if not rows:
             return None
         _refuse_unsellable(rows[0])
