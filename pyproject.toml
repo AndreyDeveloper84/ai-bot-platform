@@ -203,6 +203,12 @@ build-backend = "setuptools.build_meta"
 #   virtualenv >= 21.7.12  — high: скачанные seed-колёса не проверяются на
 #                            целостность (#63); medium: инъекция в pyvenv.cfg
 #                            (#62); приходит через pre-commit (extra dev)
+#   oauthlib >= 4.0.0      — medium ×2: JSONP-инъекция в RevocationEndpoint
+#                            (#57), сравнение PKCE code_verifier не за
+#                            постоянное время (#58). Обе — в СЕРВЕРНОЙ части
+#                            oauthlib; приходит через chromadb → kubernetes →
+#                            requests-oauthlib и нашим путём не импортируется
+#                            (DRF-2698). Мажор 3 → 4.
 #
 # Сборки идут строго по uv.lock (Dockerfile: `uv sync --locked`, CI:
 # `--frozen`), поэтому действует лок; пол держит его от отката.
@@ -212,6 +218,7 @@ constraint-dependencies = [
     "pydantic-settings>=2.14.2",
     "urllib3>=2.8.0",
     "virtualenv>=21.7.12",
+    "oauthlib>=4.0.0",
 ]
 
 [tool.setuptools.packages.find]
