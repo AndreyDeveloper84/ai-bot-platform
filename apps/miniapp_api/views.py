@@ -57,6 +57,7 @@ from django.core.cache import cache
 from django.utils.dateparse import parse_datetime
 
 from apps.catalog.models import CatalogMaster, CatalogService, MasterService, sellable_edge_q
+from apps.integrations.ayla.edge_duration import duration_from_edge
 from apps.integrations.ayla.offer_refusal import (
     OFFER_NOT_SELLABLE_SLUG,
     client_text_for,
@@ -1428,14 +1429,17 @@ def booking_quote(request: HttpRequest) -> HttpResponse:
                 # подтверждения рисовал «Цена 0 ₽».
                 return _offer_not_sellable(offer_reason)
             edge_price = edge.get("price")
-            edge_duration = edge.get("duration_minutes")
+            # DRF-2678: разрешённая каталогом длительность, не сырое
+            # переопределение — у мастера без своего значения оно пусто, и
+            # ответ уходил на зеркало услуги.
+            edge_duration = duration_from_edge(edge)
             try:
                 if edge_price is not None:
                     price = str(Decimal(str(edge_price)))
                     source = "edge"
             except (InvalidOperation, ValueError):
                 logger.warning("miniapp_api.booking_quote.bad_edge_price value=%r", edge_price)
-            if isinstance(edge_duration, int) and edge_duration > 0:
+            if edge_duration is not None:
                 duration = edge_duration
                 source = "edge"
 

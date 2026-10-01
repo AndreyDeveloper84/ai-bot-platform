@@ -54,6 +54,7 @@ from apps.integrations.ayla.booking_client import (
     BookingRateLimitedError,
     BookingUnavailableError,
 )
+from apps.integrations.ayla.edge_duration import duration_from_edge
 from apps.integrations.ayla.health_check import is_health_check_code
 from apps.integrations.ayla.offer_refusal import reason_from_edge, reason_from_refusal
 from apps.integrations.yclients.client import (
@@ -525,18 +526,16 @@ class AylaYClientsAdapter:
         """Цена и длительность ребра мастер+услуга — то, что Ayla поставит
         на НОВУЮ запись (DRF-1708). ``None`` в любой позиции — значение
         не известно; превью тогда его не показывает и не шлёт.
+
+        Длительность — разрешённая каталогом (``resolved_duration``), а не
+        сырое переопределение мастера: у мастера, который наследует
+        длительность салона, сырое поле пусто (DRF-2678).
         """
         rows = self._edge_rows_of_this_salon(staff_id=staff_id, service_id=service_id)
         if not rows:
             return None, None
         _refuse_unsellable(rows[0])
-        duration = rows[0].get("duration_minutes")
-        return (
-            _parse_edge_price(rows[0].get("price")),
-            duration
-            if isinstance(duration, int) and not isinstance(duration, bool) and duration > 0
-            else None,
-        )
+        return _parse_edge_price(rows[0].get("price")), duration_from_edge(rows[0])
 
     def get_specialist_service_price(
         self,

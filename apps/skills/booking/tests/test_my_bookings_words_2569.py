@@ -10,11 +10,13 @@ UTC буквально и имя в неверном падеже.
 
 from __future__ import annotations
 
+from typing import Any
+
 from apps.skills.booking.tools import BookingRow, _format_bookings_text
 
 
 def _row(**kw) -> BookingRow:
-    base = {
+    base: dict[str, Any] = {
         "record_id": "a1",
         "visit_at": "2026-09-25T06:00:00+00:00",
         "master_name": "Марина",
