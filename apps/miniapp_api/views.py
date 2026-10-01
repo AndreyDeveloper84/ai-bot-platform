@@ -3139,8 +3139,14 @@ def customer_proactive_hints(request: HttpRequest) -> HttpResponse:
     До DRF-1520 она по HTTP не отдавалась ни на чтение, ни на запись: бот
     решал, писать ли человеку первым, состоянием, которого человек не
     видел и изменить не мог.
+
+    Включение при отозванном согласии на хранение данных отклоняется: **409**
+    со слагом причины (решение владельца §47.3, DRF-2708). Не 200 с
+    пересчитанным состоянием — тело было бы правдой про базу и ложью про
+    запрос. Выключение не отклоняется никогда.
     """
     from apps.consent.customer import set_proactive_hints
+    from apps.consent.exceptions import ProactiveHintsUnavailable
 
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
     body = _json_object_body(request)
@@ -3150,7 +3156,14 @@ def customer_proactive_hints(request: HttpRequest) -> HttpResponse:
     if not isinstance(enabled, bool):
         return _error("bad_request", "enabled must be a boolean", 400)
 
-    set_proactive_hints(bot_user, enabled=enabled)
+    try:
+        set_proactive_hints(bot_user, enabled=enabled)
+    except ProactiveHintsUnavailable as exc:
+        return _error(
+            exc.reason,
+            "proactive hints cannot be enabled while the data-storage consent is withdrawn",
+            409,
+        )
     return JsonResponse(_consents_document(bot_user))
 
 

@@ -56,6 +56,16 @@ first and unconditionally, because it is the one veto whose failure is
 a trust break rather than a missed message — a veto evaluated late is a
 veto a future edit can skip.
 
+One exception, and it is about the NAME, not the veto (owner decision
+§47.3, DRF-2708). Since §35 п.9 a revocation from the Mini App also sets
+the column, so the door people actually use reported the withdrawal of a
+152-ФЗ consent as ``opt_out`` — «технический ``opt_out`` может быть
+дополнительным эффектом, но не должен подменять юридическое основание
+отзыва». An opted-out person is still blocked first and always; but when
+their PERSONAL_DATA consent is withdrawn, the block is CALLED
+``consent_withdrawn`` and the opt-out rides on :attr:`BlockVerdict.also`.
+Against every other condition the opt-out still names the block.
+
 * ``proactive_messages_opt_out`` — the person's global "do not write to
   me first".
 * ``deleted_at`` — a GDPR erasure request is the strongest withdrawal
@@ -112,7 +122,11 @@ not written to, a blocked text is a message nobody should get.
 
 from __future__ import annotations
 
+import logging
+from dataclasses import dataclass
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 #: Slugs :func:`consent_blocker` can return. Enumerated so callers can
 #: assert on them without importing string literals, and so a dry run can
@@ -225,6 +239,49 @@ DEFAULT_BLOCK_REASONS = (
 )
 
 
+@dataclass(frozen=True)
+class BlockVerdict:
+    """Why the bot may not write first — the name, and what else is true.
+
+    ``reason`` is the ONE slug that goes into an audit row or a dry-run
+    counter (``None`` when the bot may write). ``also`` carries a condition
+    that is true as well but did not get to name the block, so the fact is
+    demoted rather than dropped. Today that is at most ``("opt_out",)``,
+    next to ``consent_withdrawn`` (§47.3).
+    """
+
+    reason: str | None
+    also: tuple[str, ...] = ()
+
+
+def blocker_verdict(
+    bot_user: Any,
+    required_consents: tuple[str, ...] | None = None,
+) -> BlockVerdict:
+    """:func:`consent_blocker` plus the fact its single slug leaves out.
+
+    The opt-out veto is evaluated first and is absolute: no path below
+    returns ``BlockVerdict(None)`` for an opted-out person. Only the name
+    can differ — a withdrawn PERSONAL_DATA consent names the block and the
+    opt-out becomes the additional fact.
+
+    Naming must not cost the veto anything: the lookup that finds the name
+    reads the database, the veto does not. If that read fails, the person
+    is still blocked and the block is called ``opt_out`` — exactly what
+    this function answered before it learned to name a withdrawal.
+    """
+    if getattr(bot_user, "proactive_messages_opt_out", False):
+        try:
+            basis = _basis(bot_user, required_consents)
+        except Exception:  # noqa: BLE001 — the veto stands without the name
+            logger.exception("notifications.proactive.block_naming_failed")
+            basis = None
+        if basis == "consent_withdrawn":
+            return BlockVerdict("consent_withdrawn", ("opt_out",))
+        return BlockVerdict("opt_out")
+    return BlockVerdict(_basis(bot_user, required_consents))
+
+
 def consent_blocker(
     bot_user: Any,
     required_consents: tuple[str, ...] | None = None,
@@ -235,6 +292,18 @@ def consent_blocker(
     condition gets its own slug so a dry run tells the operator *which*
     one fired rather than a single undifferentiated "blocked".
 
+    The slug is :attr:`BlockVerdict.reason`; see :func:`blocker_verdict`
+    for the one case where it is not the first condition that failed.
+    """
+    return blocker_verdict(bot_user, required_consents).reason
+
+
+def _basis(
+    bot_user: Any,
+    required_consents: tuple[str, ...] | None,
+) -> str | None:
+    """Every condition of the gate except the opt-out preference.
+
     ``required_consents`` is the explicit set of ``ConsentRecord`` types
     that must all be active; ``None`` means the historical default,
     ``(PERSONAL_DATA,)``, so existing callers change nothing. Types are
@@ -244,9 +313,6 @@ def consent_blocker(
     ``Any`` so callers holding a lazily-loaded FK, a deferred row, or a
     test double do not have to import the model.
     """
-
-    if getattr(bot_user, "proactive_messages_opt_out", False):
-        return "opt_out"
 
     if getattr(bot_user, "deleted_at", None) is not None:
         return "deleted"
@@ -311,6 +377,8 @@ __all__ = [
     "SENDER_CLASS_PROMO",
     "SENDER_CLASS_SERVICE",
     "SENDER_CLASS_UNCLEAR",
+    "BlockVerdict",
+    "blocker_verdict",
     "consent_blocker",
     "marketing_blocker",
     "vet_outbound",
