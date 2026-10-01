@@ -85,6 +85,7 @@ from apps.catalog.services.throttle import ThrottleWaitBudget
 from apps.integrations.ayla.url_builder import AylaUrlBuilder, AylaUrlError
 from apps.integrations.ayla.offer_refusal import KNOWN_REASONS
 from apps.integrations.ayla.request_id import with_request_id
+from apps.integrations.ayla.salon_service_duration import salon_service_duration_field
 
 logger = logging.getLogger(__name__)
 
@@ -1790,7 +1791,12 @@ def _parse_salon_service(row: dict[str, Any]) -> CatalogSalonServiceDTO:
         is_active=bool(row.get("is_active", True)),
         requires_health_check=bool(row.get("requires_health_check", False)),
         price_from=_parse_decimal(row.get("base_price")),
-        duration_min=_parse_int(row.get("duration_minutes")),
+        # DRF-2705: the RESOLVED salon-level duration (salon → template) when
+        # the catalog sends it. The raw ``duration_minutes`` is ``null`` for
+        # every service that takes its timing from the template, and
+        # mirroring that ``null`` made the Mini App refuse slots for a
+        # service the catalog sells.
+        duration_min=_parse_int(salon_service_duration_field(row)),
         template=row.get("template"),
         category=row.get("category"),
         goals=_parse_goals(row.get("goals")),
