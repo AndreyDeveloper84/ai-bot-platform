@@ -12,6 +12,7 @@ from __future__ import annotations
 import uuid
 from datetime import timedelta
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from ayla_ai_core import INFERRED_MARK, MEMORY_INFERRED_HEADER
@@ -32,6 +33,18 @@ from apps.persona.memory_surface import render_current_personal_context
 pytestmark = pytest.mark.django_db
 
 _T0 = timezone.now() - timedelta(days=10)
+
+
+@pytest.fixture(autouse=True)
+def _memory_consent_open(monkeypatch):
+    # DRF-2697: читатель сам спрашивает согласие. Эти узлы — про абзац, а не про
+    # затвор (его держит apps/persona/tests/test_memory_surface_consent_2697.py),
+    # поэтому затвор здесь открыт явно.
+    monkeypatch.setattr("apps.persona.memory_surface.can_store_green_memory", lambda bot_user: True)
+
+
+def _person(user_id: uuid.UUID) -> Any:
+    return SimpleNamespace(ayla_user_id=user_id)
 
 
 def _upc() -> UserPersonalContext:
@@ -87,7 +100,7 @@ class TestExplicitCorrection:
         assert "Диета: keto" in block
         assert "vegan" not in block
 
-        out = render_current_personal_context(upc.user_id)
+        out = render_current_personal_context(_person(upc.user_id))
         assert out is not None
         assert "кето" in out
         assert "веганского" not in out
@@ -111,7 +124,7 @@ class TestInferredDoesNotDisplaceExplicit:
         assert "Диета: vegan" in block
         assert "keto" not in block
 
-        out = render_current_personal_context(upc.user_id)
+        out = render_current_personal_context(_person(upc.user_id))
         assert out is not None
         assert "веганского" in out
         assert "keto" not in out
@@ -148,7 +161,7 @@ class TestMultiValueKey:
         block = _block_for(upc.user_id, monkeypatch)
         assert "Предпочитает районы: Центр, Набережная" in block
 
-        out = render_current_personal_context(upc.user_id)
+        out = render_current_personal_context(_person(upc.user_id))
         assert out is not None
         assert "любит Центр" in out
         assert "любит Набережную" in out
