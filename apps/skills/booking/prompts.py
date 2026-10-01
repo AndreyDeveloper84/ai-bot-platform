@@ -64,6 +64,8 @@ def build_booking_prompt(
     price: dict[str, Any] | None = None,
     certificate: dict[str, Any] | None = None,
     flow_context: dict[str, Any] | None = None,
+    refusal: dict[str, Any] | None = None,
+    no_slots: dict[str, Any] | None = None,
 ) -> list[dict[str, str]]:
     """Build a ChatML messages list for one booking-skill LLM call.
 
@@ -96,6 +98,13 @@ def build_booking_prompt(
                preview question; the channel adapter renders the
                2-button card alongside the text.
       user_bookings: when set, the list from :func:`show_my_bookings`.
+      refusal: DRF-2672 — when set, the tool the model called refused:
+               ``{"tool": <name>, "error": <slug>}``. Spliced in as a
+               «НЕУДАЧА / Причина» block, the shape the certificate
+               block already had, so the second call knows the tool
+               failed and why instead of answering blind.
+      no_slots: DRF-2672 — when set, :func:`show_slots` ran and found no
+                free time: ``{"rendered_text": <the tool's own text>}``.
 
     Returns:
       ChatML messages list — pass straight to
@@ -113,6 +122,8 @@ def build_booking_prompt(
         price=price,
         certificate=certificate,
         flow_context=flow_context,
+        refusal=refusal,
+        no_slots=no_slots,
     )
     return [
         {"role": "system", "content": system_text},
@@ -133,6 +144,8 @@ def _render_system_prompt(
     price: dict[str, Any] | None = None,
     certificate: dict[str, Any] | None = None,
     flow_context: dict[str, Any] | None = None,
+    refusal: dict[str, Any] | None = None,
+    no_slots: dict[str, Any] | None = None,
 ) -> str:
     sections: list[str] = [f"Ты — {brand_voice.persona}."]
 
@@ -237,6 +250,8 @@ def _render_system_prompt(
             user_bookings,
             price,
             certificate,
+            refusal,
+            no_slots,
         )
     )
     if has_live_data:
@@ -261,6 +276,10 @@ def _render_system_prompt(
         sections.append(_format_price_block(price))
     if certificate is not None:
         sections.append(_format_certificate_block(certificate))
+    if refusal is not None:
+        sections.append(_format_refusal_block(refusal))
+    if no_slots is not None:
+        sections.append(_format_no_slots_block(no_slots))
     if flow_context:
         sections.append(_format_flow_block(flow_context))
 
@@ -348,6 +367,44 @@ def _format_certificate_block(certificate: dict[str, Any]) -> str:
         f"• Готовый текст: {certificate.get('rendered_text', '')}\n"
         "Скажи клиенту, что под сообщением появится кнопка для оплаты. "
         "Сохрани сумму и ссылку как есть."
+    )
+
+
+def _format_refusal_block(refusal: dict[str, Any]) -> str:
+    """DRF-2672 — tell the second call that the tool refused, and why.
+
+    Same shape as the failure half of :func:`_format_certificate_block`,
+    which was the only refusal the model ever heard about. Every other
+    refusal that reached the second call left nothing in the prompt, so
+    the model answered as if the tool had never been called.
+
+    The reason is the tool's own slug, as in the certificate block. There
+    is deliberately NO «Готовый текст» line and no instruction on what to
+    offer: no code path holds words for the person here, and inventing
+    them in a prompt would be writing the person's text by another hand.
+    What to say next is the model's call; ``NO_INTERNAL_TERMS_RULE`` keeps
+    the slug itself out of the reply.
+    """
+    return (
+        f"ИНСТРУМЕНТ {refusal.get('tool', '')} — НЕУДАЧА:\n"
+        f"• Причина: {refusal.get('error', '')}\n"
+        "Сообщи клиенту коротко и понятно, без технических деталей."
+    )
+
+
+def _format_no_slots_block(no_slots: dict[str, Any]) -> str:
+    """DRF-2672 — ``show_slots`` ran and there is no free time to offer.
+
+    Not a refusal: the tool worked and the answer is «нет». The answer
+    used to stay in the tool result's text, which the prompt never read —
+    the time block is rendered only when there is time. The text is the
+    tool's own and says which «нет» it is (no dates at all, or none on
+    the day asked for).
+    """
+    return (
+        "СВОБОДНОЕ ВРЕМЯ (show_slots): нет.\n"
+        f"• Готовый текст: {no_slots.get('rendered_text', '')}\n"
+        "Сообщи клиенту коротко и понятно, без технических деталей."
     )
 
 
