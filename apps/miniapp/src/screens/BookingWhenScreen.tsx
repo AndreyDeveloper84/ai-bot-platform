@@ -95,7 +95,7 @@ export function BookingWhenScreen() {
 
   if (state.kind === "loading") {
     return (
-      <ScreenLayout back={BACK} title="Выберите время">
+      <ScreenLayout back={BACK} title="Выбери время">
         <DelayedSkeleton loading>
           <div className="date-strip">
             {Array.from({ length: 6 }, (_, i) => (
@@ -110,7 +110,7 @@ export function BookingWhenScreen() {
 
   if (state.kind === "error") {
     return (
-      <ScreenLayout back={BACK} title="Выберите время">
+      <ScreenLayout back={BACK} title="Выбери время">
         <StateError err={state.err} onRetry={load} screenId="slots" />
       </ScreenLayout>
     );
@@ -118,7 +118,7 @@ export function BookingWhenScreen() {
 
   if (state.slots.length === 0) {
     return (
-      <ScreenLayout back={BACK} title="Выберите время">
+      <ScreenLayout back={BACK} title="Выбери время">
         <div className="callout">
           <p style={{ margin: 0 }}>На ближайшие две недели свободного времени нет.</p>
         </div>
@@ -133,7 +133,7 @@ export function BookingWhenScreen() {
   return (
     <ScreenLayout
       back={BACK}
-      title="Выберите время"
+      title="Выбери время"
       cta={
         <StickyCta onClick={onContinue} disabled={!draft.visitAt}>
           {draft.visitAt ? "Дальше" : "Выбрать время"}
