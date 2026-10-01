@@ -395,7 +395,7 @@ describe("системные состояния — через SystemState по 
       "Не удалось загрузить сегодняшний день",
     );
     expect(screen.queryByText(/Не получилось загрузить/)).toBeNull();
-    expect(screen.queryByText(/Проверьте интернет/)).toBeNull();
+    expect(screen.queryByText(/Провер(?:ь|ьте) интернет/)).toBeNull();
     await userEvent.click(
       screen.getByRole("button", { name: "Попробовать снова" }),
     );
