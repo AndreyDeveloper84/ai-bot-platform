@@ -83,6 +83,12 @@ is untouched. Reserved names are short-circuited in both modes.
   transport, no record. (Through httpx an IP is seen like any other host.)
 * Anything a test does in a **subprocess**.
 * A transport that a test **replaces at class level** itself.
+* A run that does not read this repository's ``addopts``: another ini file
+  via ``-c``, or a test path outside the tree (pytest then resolves its
+  configuration from that path). The plugin is simply not loaded, and says
+  nothing — the absence of the ``network egress from tests`` section in the
+  summary is the only sign. Measured the hard way while testing this very
+  plugin: one such run made a real request.
 * ``smoke``, ``cross_boundary`` and ``e2e`` tests are meant to cross a real
   boundary. Their calls go through, and the summary lists them as
   ``expected``.
