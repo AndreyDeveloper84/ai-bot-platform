@@ -68,6 +68,11 @@ from apps.integrations.yclients.client import (
 
 logger = logging.getLogger(__name__)
 
+#: What every «not this salon's master» refusal says, whatever its reason
+#: (DRF-2677): an invented id, another salon's master and an unverifiable
+#: one are one answer on the outside.
+_MASTER_NOT_FOUND = "specialist_not_found"
+
 
 def get_booking_provider(*, bot_user: Any) -> Any:
     """Return the booking provider for this request.
@@ -200,11 +205,17 @@ class AylaYClientsAdapter:
             rows = self._client.get_services()
         return [_to_yc_service(r) for r in rows]
 
-    def get_staff(self, *, staff_id: int | str | None = None) -> list[Staff]:
+    def get_staff(self) -> list[Staff]:
+        """This salon's roster.
+
+        DRF-2677: the YClients-shaped ``staff_id`` is gone from this side of
+        the seam, as it went from ``get_services`` (DRF-1019). It forwarded
+        to ``specialists/{id}/`` — a read by id with no salon in it — and no
+        caller ever passed one. Whether a given master is this salon's is
+        :meth:`_require_master_of_this_salon`'s question.
+        """
         with _translate_errors():
-            rows = self._client.get_masters(
-                specialist_id=str(staff_id) if staff_id is not None else None
-            )
+            rows = self._client.get_masters()
         return [_to_yc_staff(r) for r in rows]
 
     def get_available_dates(
@@ -215,6 +226,7 @@ class AylaYClientsAdapter:
     ) -> list[str]:
         if staff_id is None:
             return []
+        self._require_master_of_this_salon(staff_id, door="get_available_dates")
         with _translate_errors():
             # #1051: service_id is mandatory on the Ayla slots path. Pass the
             # selected service through ("" when absent → the client raises a
@@ -231,6 +243,7 @@ class AylaYClientsAdapter:
         date: str,
         service_ids: list[int] | list[str] | None = None,
     ) -> list[AvailableTime]:
+        self._require_master_of_this_salon(staff_id, door="get_available_times")
         with _translate_errors():
             rows = self._client.get_available_times(
                 specialist_id=self.catalog_specialist_id(staff_id),
@@ -264,6 +277,7 @@ class AylaYClientsAdapter:
                 "ayla_client_id_missing: BotUser has no ayla_user_id — cannot "
                 "create on behalf of an Ayla-unlinked user"
             )
+        self._require_master_of_this_salon(staff_id, door="create_record")
         service_id = _first_id(services) or ""
         # AMD-002: payment_required rides the create body AND the idempotency
         # seed — a retry with the same intent dedups; a deliberate intent flip
@@ -452,6 +466,55 @@ class AylaYClientsAdapter:
                 .filter(Q(pk=key) | Q(catalog_specialist_id=key))
                 .exists()
             )
+
+    def _require_master_of_this_salon(self, staff_id: int | str, *, door: str) -> None:
+        """Refuse a master who is not this salon's — before the door (DRF-2677).
+
+        ``specialists/{id}/slots/`` and the create take a master by id and
+        carry no salon, and a typed ``cb:book:pick_master:<id>:<svc>`` reaches
+        them without the roster allow-set the model's tools go through. So
+        «is this master ours» is asked here, for every door that sends a
+        ``staff_id`` to the catalog:
+
+        * this salon's mirror holds the master (:meth:`_mirror_places_here` —
+          by mirror key or catalog id, saleable or not) → ours, no network;
+        * otherwise the catalog is asked for the profile, and its ``tenant``
+          stamp is compared with the bound salon.
+
+        The mirror only shortcuts «ours». «Not ours» comes from the catalog
+        alone, so a master of this salon the mirror has not caught up with
+        stays bookable. An empty stamp is *unverifiable, not foreign* (same
+        contract as :meth:`_edge_rows_of_this_salon`): nothing vouches for
+        the master, so the door stays shut — under its own reason in the log.
+
+        Every refusal raises the one error, with no call to the door: «no
+        such master», «a master of another salon» and «cannot tell» must not
+        be tellable apart from outside. The reason lives in the log only.
+        Unbound adapter (no tenant): nothing to verify against — as before.
+        """
+        tenant = self._tenant
+        if tenant is None or self._mirror_places_here(staff_id):
+            return
+        with _translate_errors():
+            try:
+                rows = self._client.get_masters(specialist_id=str(staff_id))
+            except BookingBadRequestError as exc:
+                if exc.status_code != 404:
+                    raise
+                reason = "membership_unknown"
+            else:
+                stamp = rows[0].raw.get("tenant") if rows else None
+                if stamp and str(stamp) == str(tenant.id):
+                    return
+                reason = "membership_foreign" if stamp else "membership_unverifiable"
+        logger.warning(
+            "booking.master.not_of_this_salon reason=%s door=%s tenant=%s staff_id=%s",
+            reason,
+            door,
+            tenant.id,
+            staff_id,
+        )
+        raise YClientsAPIError(_MASTER_NOT_FOUND)
 
     def get_specialist_service_quote(
         self,

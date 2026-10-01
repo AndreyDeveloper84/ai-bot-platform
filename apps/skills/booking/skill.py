@@ -1368,7 +1368,7 @@ def _dispatch_tool(
 
 def _fetch_master_ids(yclients: Any) -> set[int | str]:
     try:
-        return {_id_key(s.id) for s in yclients.get_staff(staff_id=None)}
+        return {_id_key(s.id) for s in yclients.get_staff()}
     except YClientsScheduleUnavailableError:
         # DRF-997: do not silently disable the anti-hallucination guard on a
         # transient 429. Let the caller surface the retry text.
@@ -1379,7 +1379,7 @@ def _fetch_master_ids(yclients: Any) -> set[int | str]:
 
 def _fetch_master_lookup(yclients: Any) -> dict[int | str, str]:
     try:
-        return build_master_lookup(yclients.get_staff(staff_id=None))
+        return build_master_lookup(yclients.get_staff())
     except YClientsScheduleUnavailableError:
         # DRF-997: same guard as _fetch_master_ids.
         raise
@@ -1946,7 +1946,7 @@ def _handle_pick_slot_callback(
     # failure here is a handoff, NOT a "stale context" verdict — the two
     # failure modes must stay distinguishable for the user.
     try:
-        staff_rows = yclients.get_staff(staff_id=None)
+        staff_rows = yclients.get_staff()
     except (YClientsAPIError, YClientsUnavailableError) as exc:
         logger.warning("booking.pick_slot.staff_failed err=%s", exc)
         return _handoff(
