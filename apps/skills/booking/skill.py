@@ -1222,7 +1222,7 @@ def _dispatch_tool(
         # cross-turn yet). Fall back to the full staff list as the
         # allow-set so legitimate flows aren't blocked while still
         # rejecting outright fabrications.
-        allow_masters = _fetch_master_ids(yclients)
+        allow_masters = _fetch_master_ids(yclients, tenant)
         result = show_slots(
             client=yclients,
             arguments=arguments,
@@ -1244,8 +1244,8 @@ def _dispatch_tool(
         return result, ""
 
     if tool_name == CONFIRM_BOOKING_TOOL_SPEC["name"]:
-        allow_masters = _fetch_master_ids(yclients)
-        master_lookup = _fetch_master_lookup(yclients)
+        allow_masters = _fetch_master_ids(yclients, tenant)
+        master_lookup = _fetch_master_lookup(yclients, tenant)
         result = confirm_booking(
             client=yclients,
             arguments=arguments,
@@ -1369,9 +1369,9 @@ def _dispatch_tool(
     return BookingToolResult(error="unknown_tool"), "booking_unknown_tool"
 
 
-def _fetch_master_ids(yclients: Any) -> set[int | str]:
+def _fetch_master_ids(yclients: Any, tenant: Any) -> set[int | str]:
     try:
-        return {_id_key(s.id) for s in yclients.get_staff()}
+        return set(_roster_lookup(tenant, yclients.get_staff()))
     except YClientsScheduleUnavailableError:
         # DRF-997: do not silently disable the anti-hallucination guard on a
         # transient 429. Let the caller surface the retry text.
@@ -1380,14 +1380,62 @@ def _fetch_master_ids(yclients: Any) -> set[int | str]:
         return set()
 
 
-def _fetch_master_lookup(yclients: Any) -> dict[int | str, str]:
+def _fetch_master_lookup(yclients: Any, tenant: Any) -> dict[int | str, str]:
     try:
-        return build_master_lookup(yclients.get_staff())
+        return _roster_lookup(tenant, yclients.get_staff())
     except YClientsScheduleUnavailableError:
         # DRF-997: same guard as _fetch_master_ids.
         raise
     except Exception:  # noqa: BLE001
         return {}
+
+
+def _roster_lookup(tenant: Any, staff_rows: list[Any]) -> dict[int | str, str]:
+    """``id → name`` for the roster, under BOTH ids a master goes by (DRF-2695).
+
+    The roster comes from the catalog and names a master by the catalog id.
+    Inside the bot a master is the mirror row's primary key — the concierge
+    card and every ``cb:book:`` button drawn from it carry that — and for a
+    glued invite or a solo master the two differ (DRF-1933). Checked against
+    the catalog ids alone, such a master was drawn days and times and then
+    refused at the part-of-day and slot taps as unknown.
+
+    So a roster master whose mirror row in this salon has another primary
+    key is listed under that key too. Only an alias: a master not on the
+    roster gets none, so whatever the roster stands for — this salon's, and
+    a live catalog profile — holds for both ids. Legacy int ids (flag OFF)
+    name no mirror row and pass through unchanged.
+    """
+    lookup = build_master_lookup(staff_rows)
+    catalog_ids = []
+    for key in lookup:
+        try:
+            catalog_ids.append(uuid.UUID(str(key)))
+        except (ValueError, AttributeError, TypeError):
+            continue
+    if not catalog_ids:
+        return lookup
+    from apps.catalog.models import CatalogMaster
+
+    for pk, catalog_id in CatalogMaster.all_tenants.filter(
+        tenant=tenant, catalog_specialist_id__in=catalog_ids
+    ).values_list("pk", "catalog_specialist_id"):
+        lookup.setdefault(str(pk), lookup[str(catalog_id)])
+    return lookup
+
+
+def _mirror_master_q(master_key: uuid.UUID) -> Any:
+    """The edge's master, named by mirror key OR by catalog id (DRF-2695).
+
+    ``MasterService.master`` is the mirror row, but the id in hand may be the
+    catalog's — that is what the roster, the master cards and the model
+    carry. Read by primary key alone, a glued or solo master's edge was «not
+    found», and the health gate, closed on unknown, sent every booking of
+    theirs to a human.
+    """
+    from django.db.models import Q
+
+    return Q(master_id=master_key) | Q(master__catalog_specialist_id=master_key)
 
 
 # ---------------------------------------------------------------------------
@@ -1455,7 +1503,7 @@ def _offer_refusal_for_edge(
     from apps.catalog.models import MasterService
 
     edge = MasterService.all_tenants.filter(
-        tenant=tenant, master_id=master_key, service__ayla_service_id=service_key
+        _mirror_master_q(master_key), tenant=tenant, service__ayla_service_id=service_key
     )
     if edge.sellable().exists() or not edge.exists():
         return None
@@ -1504,8 +1552,8 @@ def _resolved_health_check_for_edge(
         return None
     return (
         MasterService.all_tenants.filter(
+            _mirror_master_q(master_key),
             tenant=tenant,
-            master_id=master_key,
             service__ayla_service_id=service_key,
         )
         .values_list("resolved_requires_health_check", flat=True)
@@ -1958,8 +2006,8 @@ def _handle_pick_slot_callback(
             text=_FALLBACK_HANDOFF_TEXT,
             tenant_id=tenant_id,
         )
-    allowed_master_ids = {_id_key(s.id) for s in staff_rows}
-    master_lookup = build_master_lookup(staff_rows)
+    master_lookup = _roster_lookup(tenant, staff_rows)
+    allowed_master_ids = set(master_lookup)
     if master_id not in allowed_master_ids:
         return _refuse_callback(
             step="pick_slot",
