@@ -19,3 +19,16 @@ class ConsentDenied(Exception):
             f"Consent '{consent_type}' is required but not granted"
             + (f" (bot_user={bot_user_id})" if bot_user_id else "")
         )
+
+
+class ProactiveHintsUnavailable(Exception):
+    """«Подсказки Ayla» cannot be turned ON: the consent is withdrawn (§47.3).
+
+    About enabling only. Turning the hints off is never refused — refusing a
+    person who asks the bot to stay quiet is the opposite of what the toggle
+    is for.
+    """
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+        super().__init__(f"proactive hints unavailable: {reason}")
