@@ -19,13 +19,14 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, cast
 from unittest.mock import patch
 
 import pytest
 
 from apps.booking.models import PendingBookingAction
 from apps.catalog.models import CatalogService
+from apps.integrations.ayla.booking_client import AylaBookingClient
 from apps.integrations.ayla_payments import CreatePaymentResult, reset_ayla_payments_client
 from apps.skills.booking.provider import AylaYClientsAdapter
 from apps.skills.booking.tests.test_tools import FakeYClients, bot_user, tenant  # noqa: F401 — фикстуры
@@ -156,6 +157,15 @@ class _Catalog:
         return []
 
 
+def _adapter(catalog: _Catalog, tenant) -> AylaYClientsAdapter:
+    # cast: у заглушки только три чтения — те, до которых доходят calc_price и
+    # show_slots. Запись, отмена, перенос и списки протокола ``AylaBookingClient``
+    # не реализованы: позови их узел — упадёт AttributeError, а не пройдёт молча.
+    return AylaYClientsAdapter(
+        client=cast(AylaBookingClient, catalog), external_user_id="x", tenant=tenant
+    )
+
+
 class TestKeysOnTheLivePath:
     """BOOKING_VIA_AYLA_REST=true, как на пилоте: ``_coerce_id`` делает ``str()``."""
 
@@ -175,7 +185,7 @@ class TestKeysOnTheLivePath:
             is_active=True,
             ayla_service_id=sid,
         )
-        adapter = AylaYClientsAdapter(client=catalog, external_user_id="x", tenant=tenant)
+        adapter = _adapter(catalog, tenant)
         with tenant_scope(tenant):
             calc_price(
                 tenant=tenant,
@@ -194,7 +204,7 @@ class TestKeysOnTheLivePath:
         assert LEAK not in str(calls)
 
     def _slots(self, tenant, catalog: _Catalog, service_id: Any) -> None:
-        adapter = AylaYClientsAdapter(client=catalog, external_user_id="x", tenant=tenant)
+        adapter = _adapter(catalog, tenant)
         master = str(uuid.uuid4())
         with tenant_scope(tenant):
             show_slots(
