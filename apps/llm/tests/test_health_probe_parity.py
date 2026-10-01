@@ -335,6 +335,13 @@ def test_openai_health_does_not_colour_the_anthropic_verdict(settings, monkeypat
     assert result.error_class == "LLMVendorCreditsExhausted"
 
 
+# ``transaction=True`` (DRF-2706): the hop writes its ``llm.quota_fallback_used``
+# audit row from a worker thread, on that thread's own connection — it commits
+# outside this test's transaction and a plain ``django_db`` rollback does not
+# take it back. It stayed in the table for the rest of the xdist worker, where
+# six tests that count audit rows live in the same CI shard. The flush that
+# ends a transactional test removes it.
+@pytest.mark.django_db(transaction=True)
 def test_serving_path_hops_vendors_and_says_so(settings, monkeypatch):
     """The serving path hops — under a policy now, and out loud.
 
