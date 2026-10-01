@@ -21,6 +21,7 @@ incorrectly did.
 from __future__ import annotations
 
 import datetime as dt
+import logging
 import threading
 from typing import Any
 from unittest.mock import patch
@@ -33,16 +34,19 @@ from apps.booking.models import BookingReminder, RemoteBookingProxy
 from apps.conversations.models import Conversation
 from apps.eventbus import ingest_dispatcher as dispatcher_module
 from apps.eventbus.consumers.booking import (
+    _CANONICAL_RESCHEDULE_ACTORS,
     CanonicalReschedulePayloadError,
     CanonicalReschedulePendingProxyError,
     CanonicalRescheduleVersionGapError,
+    _parse_canonical_reschedule_data,
     register_booking_handlers,
 )
 from apps.eventbus.ingest_dispatcher import DispatchOutcome, dispatch_envelope
 from apps.eventbus.ingest_envelope import IngestEnvelope
-from apps.eventbus.models import HandlerFailureTracker, IngestDedupe
+from apps.eventbus.models import HandlerFailureTracker, IngestDedupe, IngestDLQ
 from apps.identity.models import BotUser
 from apps.tenancy.models import Tenant
+from tests.fixtures.contracts import load_contract
 
 
 pytestmark = pytest.mark.django_db
@@ -323,6 +327,172 @@ class TestCanonicalPayloadHandling:
         proxy = RemoteBookingProxy.all_tenants.get(appointment_id=UUID(appointment_id))
         assert proxy.start_at == dt.datetime(2026, 5, 23, 11, 0, tzinfo=dt.timezone.utc)
         assert proxy.last_applied_appointment_version == 1
+
+
+# DRF-2673 — the registry's six, spelled out HERE and not read from the
+# consumer's constant: a node built from the constant would stay green
+# while the constant lost ``external_system``.
+REGISTRY_ACTORS = ("user", "specialist", "admin", "owner", "system", "external_system")
+
+# A value that must never surface anywhere. Shaped like what a wrong
+# producer would put in an initiator field: a person.
+LEAK_SENTINEL = "+70000000000 sentinel-leak-2673"
+
+
+class TestActorClosedList:
+    """DRF-2673 — payload ``actor`` is checked against the closed list of
+    ``Ayla Domain Event Registry`` §6.3, not for presence alone, and a
+    refused value is not echoed (``pseudonymous_identifiers_only``).
+
+    «Событие принято» is not this class's subject: with ``actor="admin"``
+    it passes on a consumer that checks nothing.
+    """
+
+    def test_consumer_list_is_the_registrys_six(self) -> None:
+        assert _CANONICAL_RESCHEDULE_ACTORS == frozenset(REGISTRY_ACTORS)
+        assert len(REGISTRY_ACTORS) == 6
+
+    @pytest.mark.parametrize("actor", REGISTRY_ACTORS)
+    def test_each_registry_actor_is_accepted_and_applied(
+        self, tenant: Tenant, existing_proxy: RemoteBookingProxy, actor: str
+    ) -> None:
+        """Positive control on EVERY value: a list one short would refuse
+        a lawful event — permanently, 422 + DLQ, the reschedule lost."""
+        result = dispatch_envelope(
+            _canonical_envelope(
+                event_id=f"evt-actor-{actor}", version=1, previous_version=0, actor=actor
+            )
+        )
+        assert result.outcome is DispatchOutcome.OK
+
+        proxy = RemoteBookingProxy.all_tenants.get(appointment_id=UUID(APPOINTMENT_ID))
+        assert proxy.start_at == dt.datetime(2026, 5, 23, 11, 0, tzinfo=dt.timezone.utc)
+        assert proxy.last_applied_appointment_version == 1
+        assert not IngestDLQ.objects.filter(event_id=f"evt-actor-{actor}").exists()
+
+    @pytest.mark.parametrize(
+        ("case", "actor", "cause"),
+        [
+            # Neighbouring vocabularies — each a real word one field over.
+            ("master", "master", "actor_not_in_registry_list"),  # §3.2 cancelled_by
+            ("client", "client", "actor_not_in_registry_list"),  # producer's internal name
+            ("salon", "salon", "actor_not_in_registry_list"),  # producer's internal name
+            ("human", "human", "actor_not_in_registry_list"),  # outbound envelope actor.type
+            # The list is exact: no case folding, no trimming.
+            ("uppercase", "Admin", "actor_not_in_registry_list"),
+            ("padded", " admin", "actor_not_in_registry_list"),
+            ("free-text", LEAK_SENTINEL, "actor_not_in_registry_list"),
+            # Not a string. The object is the shape this repository's own
+            # contract fixture carried until DRF-2673.
+            ("object", {"type": "system"}, "actor_not_a_string"),
+            ("list", ["admin"], "actor_not_a_string"),
+            ("int", 7, "actor_not_a_string"),
+            ("bool", True, "actor_not_a_string"),
+        ],
+    )
+    def test_actor_outside_the_list_is_rejected_with_its_cause(
+        self,
+        tenant: Tenant,
+        existing_proxy: RemoteBookingProxy,
+        caplog: pytest.LogCaptureFixture,
+        case: str,
+        actor: Any,
+        cause: str,
+    ) -> None:
+        event_id = f"evt-actor-bad-{case}"
+        with (
+            caplog.at_level(logging.WARNING, logger="apps.eventbus"),
+            patch("apps.eventbus.consumers.booking.emit_internal_event") as mock_emit,
+        ):
+            result = dispatch_envelope(
+                _canonical_envelope(event_id=event_id, version=1, previous_version=0, actor=actor)
+            )
+
+        assert result.outcome is DispatchOutcome.REJECTED
+        assert isinstance(result.exception, CanonicalReschedulePayloadError)
+        # §8.12 slug — what the 422 body, the audit row and the DLQ carry.
+        assert result.exception.reason == "invalid_payload"
+        assert IngestDLQ.objects.filter(event_id=event_id, reason="invalid_payload").count() == 1
+        # The cause is told apart in the consumer's own log line.
+        assert f"actor_rejected cause={cause}" in caplog.text
+
+        # Nothing applied, nothing reported to analytics.
+        proxy = RemoteBookingProxy.all_tenants.get(appointment_id=UUID(APPOINTMENT_ID))
+        assert proxy.last_applied_appointment_version is None
+        assert proxy.start_at == dt.datetime(2026, 5, 22, 15, 0, tzinfo=dt.timezone.utc)
+        assert not IngestDedupe.objects.filter(event_id=event_id).exists()
+        mock_emit.assert_not_called()
+
+    @pytest.mark.parametrize("actor", [None, ""])
+    def test_empty_actor_is_rejected_as_missing(
+        self, tenant: Tenant, existing_proxy: RemoteBookingProxy, actor: Any
+    ) -> None:
+        """``required`` in the registry: present-but-empty is absent."""
+        result = dispatch_envelope(
+            _canonical_envelope(
+                event_id=f"evt-actor-empty-{actor!r}", version=1, previous_version=0, actor=actor
+            )
+        )
+        assert result.outcome is DispatchOutcome.REJECTED
+        assert isinstance(result.exception, CanonicalReschedulePayloadError)
+
+        proxy = RemoteBookingProxy.all_tenants.get(appointment_id=UUID(APPOINTMENT_ID))
+        assert proxy.last_applied_appointment_version is None
+
+    @pytest.mark.parametrize(
+        ("case", "actor"),
+        [
+            ("string", LEAK_SENTINEL),
+            ("object", {"type": LEAK_SENTINEL}),
+            ("list", [LEAK_SENTINEL]),
+        ],
+    )
+    def test_refused_actor_value_is_not_echoed(
+        self,
+        tenant: Tenant,
+        existing_proxy: RemoteBookingProxy,
+        caplog: pytest.LogCaptureFixture,
+        case: str,
+        actor: Any,
+    ) -> None:
+        """The raw value reaches neither the log, nor the exception text
+        (what an error tracker would show), nor analytics, nor the DLQ."""
+        event_id = f"evt-actor-leak-{case}"
+        with (
+            caplog.at_level(logging.DEBUG),
+            patch("apps.eventbus.consumers.booking.emit_internal_event") as mock_emit,
+        ):
+            result = dispatch_envelope(
+                _canonical_envelope(event_id=event_id, version=1, previous_version=0, actor=actor)
+            )
+
+        # Presence first: the refusal happened and WAS logged — an empty
+        # capture would make the absence below a hope, not a check.
+        assert result.outcome is DispatchOutcome.REJECTED
+        assert "eventbus.consumer.appointment_rescheduled.actor_rejected" in caplog.text
+        assert "eventbus.ingest.rejected" in caplog.text
+        rendered = caplog.text + "".join(repr(r.args) for r in caplog.records)
+        assert event_id in rendered
+
+        assert "sentinel-leak-2673" not in rendered
+        assert "actor rejected" in repr(result.exception)
+        assert "sentinel-leak-2673" not in repr(result.exception)
+        mock_emit.assert_not_called()
+
+        # The DLQ row is there and holds the payload's keys — and not the
+        # value: ingest_redaction collapses a string outside its allowlist.
+        dlq = IngestDLQ.objects.get(event_id=event_id, reason="invalid_payload")
+        assert dlq.raw_body["data"]["appointment_id"] == APPOINTMENT_ID
+        assert "actor" in dlq.raw_body["data"]
+        assert "sentinel-leak-2673" not in repr(dlq.raw_body)
+
+    def test_contract_fixture_passes_the_consumer(self) -> None:
+        """The shared fixture and the consumer agree on ``actor``. Until
+        DRF-2673 nothing fed one to the other: the fixture carried an
+        object while the producer writes a bare string."""
+        data = load_contract("appointment.rescheduled.v1.json")["data"]
+        parsed = _parse_canonical_reschedule_data(data)
+        assert parsed.actor == "system"
 
 
 class TestLegacyContractUnaffected:
