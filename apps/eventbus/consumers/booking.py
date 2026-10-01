@@ -1391,6 +1391,29 @@ _CANONICAL_REQUIRED_FIELDS: Final[tuple[str, ...]] = (
 )
 
 
+# DRF-2673 — payload ``actor`` of ``appointment.rescheduled`` is a closed
+# list. The registry, verbatim (``ayla-knowledge/05 Architecture/Ayla
+# Domain Event Registry.md`` §6.3, registered v0.4 — AYLA-DEC-0022 п. 9):
+#
+#     `actor` — инициатор переноса (user | specialist | admin | owner |
+#     system | external_system)
+#
+# The same six are ``AppointmentRevision.actor`` in CDM §7.12. On the wire
+# it is a bare string: the producer writes ``registry_actor_for(...)``
+# (``beautygo_backend/appointments/domain/value_objects.py``), and today
+# emits four of the six — ``owner`` and ``external_system`` are registered
+# and not yet produced. ``external_system`` is the initiator of a time-only
+# change imported from an external calendar (CDM §7.12 инв. 15), so a
+# narrower list here would refuse a lawful event the day the import ships.
+#
+# The limits on ``system`` (AYLA-DEC-0022: автоматический перенос без
+# согласия клиента запрещён) bind the producer. ``system`` is a registered
+# value and is accepted here like the other five.
+_CANONICAL_RESCHEDULE_ACTORS: Final[frozenset[str]] = frozenset(
+    {"user", "specialist", "admin", "owner", "system", "external_system"}
+)
+
+
 @dataclass(frozen=True)
 class _CanonicalRescheduleData:
     """Parsed + validated ``appointment.rescheduled`` DER payload."""
@@ -1400,7 +1423,7 @@ class _CanonicalRescheduleData:
     previous_version: int
     revision_id: str
     changed_fields: tuple[str, ...]
-    actor: Any
+    actor: str
     starts_at: dt.datetime | None
     previous_starts_at: dt.datetime | None
 
@@ -1424,14 +1447,16 @@ def _parse_canonical_reschedule_data(data: dict[str, Any]) -> _CanonicalReschedu
     Distinct from the legacy ``booking.rescheduled`` shape — does NOT
     require (or read) ``new_start_at``/``old_start_at``/``rescheduled_by``.
 
-    ``actor``'s wire shape is owned by the Ayla-side Domain Event
-    Registry (not repo-local); only presence is validated here, and it is
-    carried through for logging/analytics, not type-narrowed. The reason
-    given for stopping at presence — a Phase 2 dependency checklist in
-    ``AGENT_BOT_PHASE1_FINAL_REVIEW_RESULT.md`` §5 — is LOST: that review
-    is in neither repository nor in the working docs, and no text with
-    that checklist was found by content (DRF-2657). The presence-only
-    check therefore stands without a verifiable basis.
+    ``actor`` is checked against the registry's closed list
+    (:data:`_CANONICAL_RESCHEDULE_ACTORS`, registry §6.3 + AYLA-DEC-0022),
+    not for presence alone (DRF-2673). The event is
+    ``pseudonymous_identifiers_only`` in the registry, and a value outside
+    the list is by definition not one of the six role words — so a refused
+    ``actor`` is never echoed: the log line and the exception carry a cause
+    slug only. ``IngestDLQ.raw_body`` does not keep it either
+    (:mod:`apps.eventbus.ingest_redaction` collapses an unlisted string),
+    so the cause slug is all an operator has to tell «not a string» from
+    «a string outside the list».
     """
     missing = [f for f in _CANONICAL_REQUIRED_FIELDS if data.get(f) in (None, "")]
     if missing:
@@ -1468,13 +1493,28 @@ def _parse_canonical_reschedule_data(data: dict[str, Any]) -> _CanonicalReschedu
             f"changed_fields must be a list of strings, got {changed_fields!r}"
         )
 
+    actor = data["actor"]
+    if not isinstance(actor, str):
+        actor_cause = "actor_not_a_string"
+    elif actor not in _CANONICAL_RESCHEDULE_ACTORS:
+        actor_cause = "actor_not_in_registry_list"
+    else:
+        actor_cause = None
+    if actor_cause is not None:
+        logger.warning(
+            "eventbus.consumer.appointment_rescheduled.actor_rejected cause=%s", actor_cause
+        )
+        raise CanonicalReschedulePayloadError(
+            f"appointment.rescheduled actor rejected: {actor_cause}"
+        )
+
     return _CanonicalRescheduleData(
         appointment_id=appointment_id,
         version=version,
         previous_version=previous_version,
         revision_id=revision_id,
         changed_fields=tuple(changed_fields),
-        actor=data["actor"],
+        actor=actor,
         starts_at=_parse_optional_iso(data.get("starts_at"), field_name="starts_at"),
         previous_starts_at=_parse_optional_iso(
             data.get("previous_starts_at"), field_name="previous_starts_at"
