@@ -1746,16 +1746,23 @@ jobs:
 
       # Node version lives in apps/miniapp/.nvmrc so CI and local dev cannot
       # drift apart. It is 22 (current LTS), and the reason is NOT the one in
-      # the ticket: Vite 5 is not the binding constraint — vite@5.4.21 accepts
-      # `^18.0.0 || >=20.0.0` and would run happily on Node 18. The real floor
-      # is `^20.19.0 || >=22.12.0`, and it comes from what vitest 4 drags in:
+      # the ticket: the project's own Vite is not the binding constraint —
+      # vite@6.4.3 accepts `^18.0.0 || ^20.0.0 || >=22.0.0` and would run
+      # happily on Node 18. The real floor is `^20.19.0 || >=22.12.0`, and it
+      # comes from what vitest 4 drags in:
       #   vitest@4.1.10          engines: ^20.0.0 || ^22.0.0 || >=24.0.0
       #   jsdom@29.1.1           engines: ^20.19.0 || ^22.13.0 || >=24.0.0
       #   vite@8.1.5 (rolldown)  engines: ^20.19.0 || >=22.12.0
-      # vitest 4's peer range is vite `^6 || ^7 || ^8`; the project's own
-      # vite@5 does not satisfy it, so npm nests vite@8 under vitest and the
-      # tests actually execute on that (confirmed in the run log:
-      # "`optimizeDeps.esbuildOptions` ... use `optimizeDeps.rolldownOptions`").
+      # TWO Vites live in this tree, and they do different jobs (DRF-2690).
+      # vitest 4's range is vite `^6 || ^7 || ^8`. The project's vite@6 does
+      # satisfy it, but the lockfile still nests vite@8 under vitest — the
+      # nesting dates from vite@5, which did not, and npm keeps an existing
+      # lock entry rather than re-deduping. So the tests execute on vite@8
+      # (confirmed in the run log: "`optimizeDeps.esbuildOptions` ... use
+      # `optimizeDeps.rolldownOptions`"), while `npx vite build` below runs
+      # the project's vite@6. A green vitest says nothing about vite@6; the
+      # build step is its only witness in this job. Regenerating the lock from
+      # scratch may collapse the two and silently move the tests to vite@6.
       #
       # Node 20 does satisfy all three (measured: setup-node resolved
       # 20.19.6 and every engine check passed). 22 is chosen because Node 20
