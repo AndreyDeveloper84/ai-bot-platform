@@ -3,7 +3,7 @@
 The handler at ``POST /api/v1/salon-knowledge/webhook/`` consumes
 ``knowledge.approved`` events from the colleague's ``salon-knowledge``
 service. The architectural decision (see
-``docs/design/2026-05-18-phase-5-architecture-comparison.md``): we do
+``docs/design/legacy/2026-05-18-phase-5-architecture-comparison.md``): we do
 **eager sync via webhook**, not query-time HTTP proxy. The webhook
 delivers the full markdown body; we upsert a ``KbDocument`` row in the
 matching tenant; the K6 Celery ingester picks it up on its next pass
