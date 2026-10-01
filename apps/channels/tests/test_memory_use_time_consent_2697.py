@@ -6,11 +6,13 @@ with it what the concierge is handed for the prompt.
 
 Driven end-to-end through the tenant-less global MAX handler and observed at
 the seam into the concierge: ``extra_system`` carries the
-``render_current_personal_context`` paragraph. That reader takes a bare user id
-and knows nothing about consent — the gate is the handler's, far above the call
-— so the property is pinned here, where both meet. The valid-consent case is
-the positive control: without it «nothing reached the prompt» would also be
-true of a dead surface.
+``render_current_personal_context`` paragraph. Two gates stand on this path —
+the handler's own (``ayla_user_id`` is set only under a live consent) and the
+reader's (DRF-2697) — and these nodes hold with EITHER one removed; only with
+both gone does the fact reach the prompt. The reader's gate alone is pinned in
+``apps/persona/tests/test_memory_surface_consent_2697.py``. The valid-consent
+case is the positive control: without it «nothing reached the prompt» would
+also be true of a dead surface.
 
 The sibling surface, ``memory_block``, gates inside its own builder and is
 covered in ``apps/orchestrator/tests/test_memory_block.py``. Fixtures are
@@ -21,6 +23,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -66,6 +69,8 @@ def _harness(monkeypatch, settings):
         "send_message",
         lambda *, chat_id, text, attachments=None, timeout=10.0: {"ok": True},
     )
+    # Post-reply intent resolution calls the LLM provider; not this node's subject.
+    monkeypatch.setattr(max_handler, "resolve_and_log_turn_intent", MagicMock())
 
 
 @pytest.fixture

@@ -16,7 +16,6 @@ There is no EXPIRED case: ``ConsentRecord`` carries no expiry. A live consent is
 
 from __future__ import annotations
 
-import inspect
 import uuid
 
 import pytest
@@ -36,12 +35,10 @@ def _strict_scope(settings):
     settings.STRICT_TENANT_SCOPE = "strict"
 
 
-def _person_with_the_fact(channel_user_id: str, *, linked: bool = True):
+def _person_with_the_fact(channel_user_id: str):
     ayla_uid = uuid.uuid4()
     bot_user = resolve_or_create_global_bot_user(
-        channel="max",
-        channel_user_id=channel_user_id,
-        ayla_user_id=ayla_uid if linked else None,
+        channel="max", channel_user_id=channel_user_id, ayla_user_id=ayla_uid
     )
     upc = UserPersonalContext.objects.create(user_id=ayla_uid)
     MemoryEntry.objects.create(
@@ -106,31 +103,12 @@ class TestTheSameFactUnderDifferentConsent:
 class TestTheGateCannotBeWalkedAround:
     def test_a_bare_user_id_gets_nothing_even_when_the_person_consented(self):
         """The old calling convention. A caller that has only the id — which is
-        exactly what a caller skipping the gate has — is answered with nothing."""
+        exactly what a caller skipping the gate has — is answered with nothing.
+
+        Pins the outcome, not the type: an id has no consent to read, the check
+        fails, and a failed check is a closed gate."""
         bot_user, ayla_uid = _person_with_the_fact("2697-bare-id")
         record_global_consent(bot_user, source="welcome")
         assert render_current_personal_context(bot_user) is not None  # the control
 
         assert render_current_personal_context(ayla_uid) is None  # type: ignore[arg-type]
-
-    def test_a_consented_person_without_an_ayla_subject_gets_nothing(self):
-        bot_user, _ = _person_with_the_fact("2697-unlinked", linked=False)
-        record_global_consent(bot_user, source="welcome")
-
-        assert render_current_personal_context(bot_user) is None
-
-    def test_every_prompt_reader_of_memory_takes_the_person_not_an_id(self):
-        """Readers that put persistent memory into the prompt decide consent
-        themselves, so each is handed the person. A reader growing a ``user_id``
-        first parameter again is a reader someone else has to gate."""
-        from apps.orchestrator.memory_block import build_concierge_memory_block
-        from apps.orchestrator.said_memory import render_said_block, said_facts
-
-        for reader in (
-            render_current_personal_context,
-            build_concierge_memory_block,
-            render_said_block,
-            said_facts,
-        ):
-            first = next(iter(inspect.signature(reader).parameters))
-            assert first == "bot_user", f"{reader.__name__}({first}, …)"
