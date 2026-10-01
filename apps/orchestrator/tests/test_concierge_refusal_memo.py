@@ -284,8 +284,8 @@ class TestTheRefusalNamesTheAlternative:
 
         assert reply.text == (
             "«маникюр» в городе Пенза — такого у наших мастеров сейчас нет. "
-            "Назовите другую услугу или другой город, и я поищу ещё."
-            " Или посмотрите, какие салоны есть."
+            "Назови другую услугу или другой город, и я поищу ещё."
+            " Или посмотри, какие салоны есть."
         )
         assert reply.action_data is not None
         buttons = reply.action_data["attachments"][0]["payload"]["buttons"]

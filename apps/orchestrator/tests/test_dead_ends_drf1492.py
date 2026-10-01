@@ -131,7 +131,7 @@ class TestDiscoveryRefusals:
         # said «Показать мастеров по одной из них», which was an offer
         # nothing on screen could accept.
         assert "«Массаж спины»" in reply.text
-        assert "Выберите одну из них" in reply.text
+        assert "Выбери одну из них" in reply.text
         assert _callbacks(reply) == ["Массаж спины", "Обёртывание"]
 
     def test_refusal_without_alternatives_still_offers_the_salon_list(self) -> None:

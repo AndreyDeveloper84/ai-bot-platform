@@ -159,7 +159,7 @@ class TestZeroResultsReachTheModel:
         spy_concierge.assert_called_once()
         # The model's words went out — NOT the deterministic no-match line.
         assert mock_send[-1]["text"] == "Массаж в Пензе — такого у наших мастеров сейчас нет."
-        assert "уточните город или услугу" not in mock_send[-1]["text"]
+        assert "уточни город или услугу" not in mock_send[-1]["text"]
 
     def test_the_model_sees_the_users_actual_words(
         self, monkeypatch, mock_send, fake_redis, spy_concierge
