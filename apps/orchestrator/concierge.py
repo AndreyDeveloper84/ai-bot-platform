@@ -992,10 +992,10 @@ def _tool_trace_entry(dto: Any) -> dict[str, Any]:
 # Both are answers, not refusals: one says who we could not find, the other
 # asks the ONE question that is still open, with the names in it.
 _BOOKING_NO_MASTER = (
-    "Не нашла мастера с таким именем — {name}. Проверьте написание или "
-    "назовите услугу, и я покажу, кто её делает."
+    "Не нашла мастера с таким именем — {name}. Проверь написание или "
+    "назови услугу, и я покажу, кто её делает."
 )
-_BOOKING_WHICH_ONE = "Уточните, к кому именно — напишите фамилию или нажмите кнопку:"
+_BOOKING_WHICH_ONE = "Уточни, к кому именно — напиши фамилию или нажми кнопку:"
 
 
 #: How far back a salon name may have been said and still count (DRF-1355).

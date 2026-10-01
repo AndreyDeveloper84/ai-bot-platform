@@ -43,8 +43,8 @@ logger = logging.getLogger(__name__)
 # Canned safety replies per verdict. Phase 0 ships fixed text; Phase 1
 # moves these to PromptRegistry so operators can tune per-tenant.
 _BLOCK_TEMPLATE = (
-    "Извините, я не могу ответить на этот запрос. "
-    "Свяжитесь с менеджером: напишите «оператор», и я переадресую вас."
+    "Извини, я не могу ответить на этот запрос. "
+    "Свяжись с менеджером: напиши «оператор», и я переадресую тебя."
 )
 
 _REVISE_PREFIX = "Пожалуйста, обратите внимание, что я не врач. "
