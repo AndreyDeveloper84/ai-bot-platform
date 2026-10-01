@@ -25,7 +25,7 @@ from unittest.mock import patch
 import pytest
 
 from apps.booking.models import PendingBookingAction
-from apps.catalog.models import CatalogService
+from apps.catalog.models import CatalogMaster, CatalogService
 from apps.integrations.ayla.booking_client import AylaBookingClient
 from apps.integrations.ayla_payments import CreatePaymentResult, reset_ayla_payments_client
 from apps.skills.booking.provider import AylaYClientsAdapter
@@ -39,6 +39,7 @@ from apps.skills.booking.tools import (
     show_slots,
 )
 from apps.tenancy.context import tenant_scope
+from tests.support.catalog_mirror import sync_shaped
 
 pytestmark = pytest.mark.django_db
 
@@ -205,7 +206,18 @@ class TestKeysOnTheLivePath:
 
     def _slots(self, tenant, catalog: _Catalog, service_id: Any) -> None:
         adapter = _adapter(catalog, tenant)
-        master = str(uuid.uuid4())
+        # Мастер из allow-set — мастер ростера, строка зеркала у него есть;
+        # без неё адаптер спросил бы каталог, чей он (DRF-2677).
+        master = str(
+            sync_shaped(
+                CatalogMaster.all_tenants.create(
+                    tenant=tenant,
+                    external_id=CatalogMaster.all_tenants.count() + 1,
+                    external_updated_at=datetime.now(tz=timezone.utc),
+                    name="M",
+                )
+            ).pk
+        )
         with tenant_scope(tenant):
             show_slots(
                 client=adapter,

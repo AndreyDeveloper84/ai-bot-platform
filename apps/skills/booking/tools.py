@@ -671,7 +671,7 @@ def show_masters(
     service_name = str(arguments.get("service_name") or "").strip()
 
     try:
-        staff_rows = client.get_staff(staff_id=None)
+        staff_rows = client.get_staff()
     except YClientsScheduleUnavailableError as exc:
         logger.warning("booking.show_masters.schedule_unavailable err=%s", exc)
         _audit_tool(tenant_id=tenant_id, tool="show_masters", outcome="schedule_unavailable")
