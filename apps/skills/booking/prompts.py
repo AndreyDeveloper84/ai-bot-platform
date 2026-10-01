@@ -29,7 +29,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from apps.persona.voice import NO_INTERNAL_TERMS_RULE
+from apps.persona.voice import CLIENT_ADDRESS_RULE, NO_INTERNAL_TERMS_RULE
 
 
 @dataclass
@@ -291,6 +291,8 @@ def _render_system_prompt(
 
     # DRF-2593 — решение владельца 28.09, п.10.
     sections.append(NO_INTERNAL_TERMS_RULE)
+    # DRF-2712 — канон обращения: к клиенту на «ты».
+    sections.append(CLIENT_ADDRESS_RULE)
     sections.append(f"Ответ не длиннее {_MAX_ANSWER_CHARS} символов.")
     return "\n\n".join(sections)
 

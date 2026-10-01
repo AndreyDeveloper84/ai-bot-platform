@@ -53,7 +53,7 @@ from apps.marketplace.discovery import (
 from apps.marketplace.dto import MasterCard, SalonCard, ServiceCard
 from apps.orchestrator.llm.templates import get_fallback
 from apps.persona.memory_surface import render_personal_context
-from apps.persona.voice import SURFACE_MARKETPLACE, assistant_identity
+from apps.persona.voice import CLIENT_ADDRESS_RULE, SURFACE_MARKETPLACE, assistant_identity
 
 if TYPE_CHECKING:
     from apps.identity.services.memory_reader import PersonalContextView
@@ -603,6 +603,8 @@ def build_discovery_prompt(
         "называй конкретный салон, цену или адрес — этих данных пока нет.",
         f"Если вопрос не про запись к мастеру — мягко верни в тему: "
         f"«{voice['off_topic_redirect']}»",
+        # DRF-2712 — канон обращения: к клиенту на «ты».
+        CLIENT_ADDRESS_RULE,
         f"Ответ не длиннее {_MAX_REPLY_CHARS} символов.",
     ]
     if personal_context:
