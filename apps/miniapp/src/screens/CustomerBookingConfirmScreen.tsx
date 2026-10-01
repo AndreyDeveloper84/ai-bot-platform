@@ -89,7 +89,7 @@ import {
   useBookingDraft,
 } from "../state/booking";
 import { backTo } from "../lib/screen-back";
-import { REFUSAL_CANON } from "../lib/refusal-canon";
+import { MASTER_NOT_BOOKABLE_REFUSAL, REFUSAL_CANON } from "../lib/refusal-canon";
 
 type ErrState =
   | { kind: "slot_unavailable"; substituteName?: string; substituteTime?: string }
@@ -100,7 +100,8 @@ type ErrState =
    */
   | { kind: "quote_changed"; change: QuoteChange }
   | { kind: "master_unavailable" }
-  | { kind: "not_bookable" }
+  | { kind: "master_not_bookable" }
+  | { kind: "service_not_bookable" }
   | { kind: "salon_suspended" }
   | { kind: "server" }
   | { kind: "network" }
@@ -136,12 +137,21 @@ const C1_UNAVAILABLE_SLUG = "unavailable";
  * the master/service vanished or can't be booked at all — distinct
  * from a slot race. Neutral copy + catalog alternative, raw slug never
  * rendered.
+ *
+ * DRF-2708 — два набора, а не один: у отказа два разных предмета, и для
+ * случая «недоступен мастер» владелец утвердил отдельный текст
+ * (`docs/OPEN_DECISIONS.md` §47.4). Общая фраза («…подберём похожее») честна
+ * там, где недоступна услуга: похожей бывает услуга, а при смене мастера
+ * потребность и услуга остаются теми же.
  */
-const NOT_BOOKABLE_SLUGS = new Set([
-  "master_not_bookable",
+const SERVICE_NOT_BOOKABLE_SLUGS = new Set([
   "service_not_found",
   "service_not_offered",
   "service_unbookable",
+]);
+
+const MASTER_NOT_BOOKABLE_SLUGS = new Set([
+  "master_not_bookable",
   "master_archived",
   // DRF-1548 — мастер без канонической связи с Ayla. Для клиента исход
   // тот же, что у `master_not_bookable`: записаться к этому мастеру
@@ -409,9 +419,13 @@ export function CustomerBookingConfirmScreen() {
         // C1 refusal (contract §2) — neutral message only; the backend
         // never sends the debt reason to the customer API.
         setErr({ kind: "master_unavailable" });
-      } else if (e instanceof ApiError && NOT_BOOKABLE_SLUGS.has(e.slug)) {
-        // Master/service can't be booked at all — neutral, no raw slug.
-        setErr({ kind: "not_bookable" });
+      } else if (e instanceof ApiError && MASTER_NOT_BOOKABLE_SLUGS.has(e.slug)) {
+        // К этому мастеру записаться нельзя — неважно, почему: слаг наружу
+        // не рисуется, текст владельца свой (§47.4).
+        setErr({ kind: "master_not_bookable" });
+      } else if (e instanceof ApiError && SERVICE_NOT_BOOKABLE_SLUGS.has(e.slug)) {
+        // The service can't be booked at all — neutral, no raw slug.
+        setErr({ kind: "service_not_bookable" });
       } else if (e instanceof ApiError && e.slug === "tenant_suspended") {
         setErr({ kind: "salon_suspended" });
       } else if (e instanceof ApiError && e.status >= 500) {
@@ -779,7 +793,20 @@ export function CustomerBookingConfirmScreen() {
           </div>
         </div>
       )}
-      {err?.kind === "not_bookable" && (
+      {err?.kind === "master_not_bookable" && (
+        <div className="callout" role="alert">
+          <p style={{ margin: 0 }}>{MASTER_NOT_BOOKABLE_REFUSAL}</p>
+          <button
+            type="button"
+            className="btn-secondary"
+            style={{ marginTop: "var(--s-3)" }}
+            onClick={() => navigate("/customer/catalog")}
+          >
+            Посмотреть других мастеров
+          </button>
+        </div>
+      )}
+      {err?.kind === "service_not_bookable" && (
         <div className="callout" role="alert">
           <p style={{ margin: 0 }}>
             Эта услуга или специалист сейчас недоступны. Посмотри других
