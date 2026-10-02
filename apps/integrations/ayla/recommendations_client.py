@@ -49,6 +49,7 @@ from django.conf import settings
 
 from apps.integrations.ayla.url_builder import AylaUrlBuilder, AylaUrlError
 from apps.integrations.ayla.request_id import with_request_id
+from apps.integrations.ayla.log_ref import external_user_log_ref
 
 logger = logging.getLogger(__name__)
 
@@ -224,8 +225,8 @@ def fetch_recommendations(
     except (httpx.TimeoutException, httpx.NetworkError) as exc:
         _circuit.record_failure(now=time.monotonic())
         logger.warning(
-            "recommendations_client.network_failure ext_user=%s exc=%s",
-            external_user_id,
+            "recommendations_client.network_failure ext_ref=%s exc=%s",
+            external_user_log_ref(external_user_id),
             type(exc).__name__,
         )
         raise RecommendationsUnavailable(f"network: {type(exc).__name__}") from exc
@@ -233,8 +234,8 @@ def fetch_recommendations(
     if resp.status_code >= 500:
         _circuit.record_failure(now=time.monotonic())
         logger.warning(
-            "recommendations_client.server_error ext_user=%s status=%d",
-            external_user_id,
+            "recommendations_client.server_error ext_ref=%s status=%d",
+            external_user_log_ref(external_user_id),
             resp.status_code,
         )
         raise RecommendationsUnavailable(f"server: HTTP {resp.status_code}")
@@ -251,8 +252,8 @@ def fetch_recommendations(
         except ValueError:
             body = {"detail": resp.text[:500]}
         logger.warning(
-            "recommendations_client.client_error ext_user=%s status=%d",
-            external_user_id,
+            "recommendations_client.client_error ext_ref=%s status=%d",
+            external_user_log_ref(external_user_id),
             resp.status_code,
         )
         raise RecommendationsBadRequest(resp.status_code, body)
