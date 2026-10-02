@@ -34,7 +34,10 @@ PACKAGE_DIR = Path(__file__).resolve().parent
 DATA_PATH = PACKAGE_DIR / "data" / "planning-rules-registry.yaml"
 
 REGISTRY_NAME = "ayla.planning-rules-registry"
-SUPPORTED_REGISTRY_MAJOR = 0
+# 1 — с 2026-09-21: владелец расширил закрытый перечень типов до 14
+# (PLAN_CADENCE, AYLA-DEC-0093); реестр 0.x эта точка приёма больше не
+# разбирает — артефакт 0.x после синхронизации не существует.
+SUPPORTED_REGISTRY_MAJOR = 1
 
 CLOSED_KINDS = frozenset(
     {
@@ -51,6 +54,7 @@ CLOSED_KINDS = frozenset(
         "INCOMPATIBILITY",
         "RECOVERY_WINDOW",
         "SAFETY_CONSTRAINT",
+        "PLAN_CADENCE",
     }
 )
 CLOSED_STATUSES = frozenset({"KNOWN", "UNKNOWN", "INTENTIONALLY_UNSUPPORTED"})
@@ -65,7 +69,16 @@ CLOSED_UNKNOWN_REASONS = frozenset(
     }
 )
 CLOSED_SCOPES = frozenset({"GENERAL", "TENANT", "MARKETPLACE"})
-CLOSED_SUBJECT_KINDS = frozenset({"capability", "canonical_service", "tenant_offer", "category"})
+CLOSED_SUBJECT_KINDS = frozenset(
+    {"capability", "canonical_service", "tenant_offer", "category", "plan_template"}
+)
+
+# AYLA-DEC-0093: PLAN_CADENCE — только организационная регулярность действия
+# плана. Держится вдвоём с subject_kind plan_template в обе стороны (как
+# scripts/validate_planning_rules.py в ayla-knowledge): регулярность привычки
+# не описывает услугу как курс, шаблон плана не несёт правил услуг.
+PLAN_CADENCE_KIND = "PLAN_CADENCE"
+PLAN_TEMPLATE_SUBJECT = "plan_template"
 
 VERSION_RE = re.compile(r"^(\d+)\.(\d+)$")
 
@@ -185,8 +198,20 @@ def _validate_rule(raw: Any, problems: list[str]) -> None:
     else:
         if applicability.get("scope") not in CLOSED_SCOPES:
             problems.append(f"{rule_id}: applicability.scope вне закрытого перечня §15.4")
-        if applicability.get("subject_kind") not in CLOSED_SUBJECT_KINDS:
+        subject_kind = applicability.get("subject_kind")
+        if subject_kind not in CLOSED_SUBJECT_KINDS:
             problems.append(f"{rule_id}: applicability.subject_kind вне закрытого перечня")
+        kind = raw.get("kind")
+        if kind == PLAN_CADENCE_KIND and subject_kind != PLAN_TEMPLATE_SUBJECT:
+            problems.append(
+                f"{rule_id}: PLAN_CADENCE допустим только с subject_kind=plan_template "
+                f"(AYLA-DEC-0093), получено {subject_kind!r}"
+            )
+        if subject_kind == PLAN_TEMPLATE_SUBJECT and kind != PLAN_CADENCE_KIND:
+            problems.append(
+                f"{rule_id}: subject_kind=plan_template допустим только у PLAN_CADENCE, "
+                f"получено kind={kind!r}"
+            )
     provenance = raw.get("provenance")
     if not isinstance(provenance, dict):
         problems.append(f"{rule_id}: provenance должен быть mapping")
