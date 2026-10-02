@@ -789,9 +789,12 @@ def _serve_unlinked(event: CanonicalEvent, verdict) -> None:
 
 
 def _support_text() -> str:
-    from django.conf import settings
+    # DRF-2751 — значение показывается, только если прошло сторож адреса
+    # поддержки: заданное, но недопустимое (внутренний чат, приглашение,
+    # чужой бот) человеку не называется — остаётся текст без адреса.
+    from apps.channels.support_contact import shown_support_contact
 
-    contact = str(getattr(settings, "AYLA_SUPPORT_CONTACT", "") or "").strip()
+    contact = shown_support_contact()
     return f"Поддержка Ayla: {contact}" if contact else SUPPORT_FALLBACK_TEXT
 
 

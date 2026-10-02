@@ -1465,6 +1465,48 @@ def route_global_human_handoff(
     return DiscoveryReply(text=_HANDOFF_REPLY)
 
 
+def route_support_request(
+    *,
+    global_conversation,
+    message_text: str,
+    trace_id: str | uuid.UUID | None = None,
+) -> DiscoveryReply:
+    """Обращение в поддержку Ayla из клиентского бота (DRF-2751).
+
+    Человек пришёл по ссылке поддержки и сделал второй шаг — нажал «Позвать
+    человека» или написал, что случилось. Задача ВСЕГДА ложится в очередь
+    платформы: GLOBAL-разговор под сентинел-тенантом.
+
+    Почему не :func:`route_global_human_handoff`: тот при единственном салоне
+    у личности кладёт задачу салону — «позовите администратора» там и
+    вправду про салон. Дверь поддержки открывается из шторок личных данных
+    мини-приложения (выгрузка, удаление): это обращение к Ayla, и салону
+    его видеть незачем — а его диалог с клиентом при этом замолчал бы.
+
+    Человек получает ту же строку, что и на любом другом пути передачи.
+    """
+    from apps.handoff.models import AdminTask
+    from apps.handoff.services import create_admin_task
+    from apps.identity.services.global_tenant import get_global_bot_tenant
+    from apps.skills.human_handoff.skill import _HANDOFF_REPLY
+    from apps.tenancy.context import tenant_scope
+
+    with tenant_scope(get_global_bot_tenant()):
+        task = create_admin_task(
+            global_conversation,
+            task_type=AdminTask.TaskType.HANDOFF,
+            reason=f"Support door (client bot): {message_text[:80]}",
+        )
+    logger.info(
+        "marketplace.support_request.routed task=%s tenant=%s global_conversation=%s trace=%s",
+        task.id,
+        task.tenant_id,
+        global_conversation.id,
+        trace_id,
+    )
+    return DiscoveryReply(text=_HANDOFF_REPLY)
+
+
 def _unambiguous_tenant_conversation(global_bot_user):
     """Салонный разговор этой личности — только если салон у неё ОДИН (DRF-2545, B).
 

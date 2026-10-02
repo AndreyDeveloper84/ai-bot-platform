@@ -71,7 +71,7 @@ from __future__ import annotations
 from typing import Any
 
 from django.conf import settings
-from django.core.checks import Warning as CheckWarning, register
+from django.core.checks import Error as CheckError, Warning as CheckWarning, register
 
 #: Идентификатор сторожа — по нему его ищут в логах выкладки.
 SUPPORT_CONTACT_CHECK_ID = "support.W001"
@@ -99,5 +99,52 @@ def check_support_contact_named(app_configs: Any, **kwargs: Any) -> list[CheckWa
                 "promise off the screen."
             ),
             id=SUPPORT_CONTACT_CHECK_ID,
+        )
+    ]
+
+
+#: DRF-2751 — адрес поддержки задан, но это не клиентский бот.
+SUPPORT_CONTACT_INVALID_CHECK_ID = "support.E002"
+
+
+@register()
+def check_support_contact_is_the_client_bot(app_configs: Any, **kwargs: Any) -> list[CheckError]:
+    """support.E002 — заданный адрес поддержки не ведёт в клиентского бота.
+
+    Решение владельца 02.10.2026: поддержка клиента идёт через клиентский
+    MAX-бот; внутренний чат сотрудников клиенту не показывается. Сторож —
+    белый список (:mod:`apps.channels.support_contact`): проходит только
+    ссылка на клиентского бота из реестра.
+
+    ОШИБКА, а не предупреждение, — в отличие от ``support.W001``. Пустой
+    адрес — молчание, с ним контур работает. Неверный адрес — это адрес,
+    который будет показан человеку: показать не то хуже, чем не показать.
+    Сам показ закрыт и без этой проверки (``shown_support_contact`` не
+    отдаёт недопустимое значение), так что ошибка здесь — чтобы выкладка
+    сказала о нём вслух, а не чтобы удержать его.
+
+    Только там, где это не отладка, — по той же причине, что ``W001``.
+    Значения в тексте нет: называется причина отказа, а не адрес.
+    """
+
+    from apps.channels.support_contact import support_contact_problem
+
+    contact = str(getattr(settings, "AYLA_SUPPORT_CONTACT", "") or "").strip()
+    if not contact or settings.DEBUG:
+        return []
+    problem = support_contact_problem(contact)
+    if problem is None:
+        return []
+    return [
+        CheckError(
+            f"The support address is not the client bot ({problem}).",
+            hint=(
+                "AYLA_SUPPORT_CONTACT must be the public link of the client bot from "
+                "the bot registry (MAX_BOT_<SLUG>_LINK of the max_global entry), "
+                "optionally with ?start=support — nothing else is accepted: not a "
+                "chat invitation, not a recipient id, not the salon bot, not free "
+                "text. Leave it empty rather than point it elsewhere."
+            ),
+            id=SUPPORT_CONTACT_INVALID_CHECK_ID,
         )
     ]
