@@ -191,10 +191,26 @@ jobs:
             echo "event=$EVENT — not a pull request, engineering jobs run."
             exit 0
           fi
-          git fetch origin "$BASE_REF" --depth=1
+          # DRF-2660 — brought back in line with `ci.yml`. This copy said «same
+          # logic as ci.yml» and had kept two things ci.yml had already fixed:
+          #
+          # * `--depth=1` on top of a full clone turns the clone shallow, and
+          #   then the three-dot diff below has no merge base whenever `dev`
+          #   moved after the PR was triggered (ci.yml: run 35191873092);
+          # * the diff's failure was swallowed (`|| true`), so «could not
+          #   compute the change set» read as «nothing changed» — docs-only —
+          #   and the replay gate was skipped green. A tool failure is not an
+          #   empty change set: fail closed, run the gate.
+          git fetch origin "$BASE_REF"
           BASE_SHA="$(git rev-parse "origin/$BASE_REF")"
-          CHANGED="$(git diff --name-only -z "$BASE_SHA"...HEAD | tr '\0' '\n' || true)"
-          NON_DOCS="$(printf '%s\n' "$CHANGED" | grep -vE '^$|^docs/|\.md$' || true)"
+          if ! CHANGED="$(git diff --name-only -z "$BASE_SHA"...HEAD | tr '\0' '\n')"; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "could not diff against $BASE_REF ($BASE_SHA) — treating as code changes (fail-closed)."
+            exit 0
+          fi
+          # Under docs/ a path is a document only if a person reads it: prose
+          # or a picture. `.py`, `.json`, `.sql` there are code (see ci.yml).
+          NON_DOCS="$(printf '%s\n' "$CHANGED" | grep -viE '^$|\.md$|^docs/.*\.(png|jpe?g|gif|svg|pdf)$' || true)"
           if [ -z "$NON_DOCS" ]; then
             echo "code=false" >> "$GITHUB_OUTPUT"
             echo "docs-only PR — engineering jobs are skipped (they report 'skipped', which satisfies branch protection)."
