@@ -216,6 +216,9 @@ ROUTE_TABLE: tuple[Route, ...] = (
     Route("DELETE", "/api/v1/internal/users/{id}/cards/{id}/", Auth.BEARER_EXT),
     # recommendations_client (#1048).
     Route("POST", "/api/v1/internal/me/catalog/recommendations/", Auth.BEARER_EXT),
+    # knowledge_client (DRF-2729) - Bearer only: nothing about a person rides
+    # in the request. Ayla side: beautygo_backend DRF-2724.
+    Route("GET", "/api/v1/internal/knowledge/procedures/", Auth.BEARER),
     # nutrition_client (#1050) — X-Service-Token + X-External-User-ID.
     Route("POST", "/api/v1/nutrition/internal/scan/", Auth.SERVICE_EXT),
     Route("POST", "/api/v1/nutrition/internal/food-log/", Auth.SERVICE_EXT),
@@ -358,6 +361,10 @@ def captured(
     # sentinel-tokened client leaks into another test's process state.
     from apps.integrations.ayla import identity_client, profile_client, reset_nutrition_client
     from apps.integrations.ayla.booking_client import reset_ayla_booking_client
+    from apps.integrations.ayla.knowledge_client import (
+        close_knowledge_client,
+        reset_knowledge_circuit,
+    )
     from apps.integrations.ayla.recommendations_client import reset_recommendations_circuit
     from apps.integrations.ayla_payments import reset_ayla_payments_client
 
@@ -365,6 +372,10 @@ def captured(
     reset_nutrition_client()
     reset_ayla_payments_client()
     reset_recommendations_circuit()
+    # The knowledge client pools its httpx.Client for the process: close it,
+    # or the sentinel-transport client outlives this test.
+    close_knowledge_client()
+    reset_knowledge_circuit()
     profile_client._circuit.record_success()
     identity_client._circuit.record_success()
 
@@ -588,6 +599,19 @@ def _exercise_recommendations() -> None:
     _swallow(lambda: fetch_recommendations(external_user_id=_EXT_USER, payload={"goal": "relax"}))
 
 
+def _exercise_knowledge() -> None:
+    from apps.integrations.ayla.knowledge_client import (
+        close_knowledge_client,
+        read_subject,
+        reset_knowledge_circuit,
+    )
+
+    # Drop a pooled client built before the transport was swapped in.
+    close_knowledge_client()
+    reset_knowledge_circuit()
+    _swallow(lambda: read_subject(salon_service_id=str(_PROFILE_UUID)))
+
+
 def _exercise_billing() -> None:
     from apps.integrations.ayla.billing_client import AylaBillingClient
 
@@ -705,6 +729,7 @@ async def test_all_clients_match_route_table(captured: list[Captured]) -> None:
     _exercise_billing()
     _exercise_client_payments()
     _exercise_recommendations()
+    _exercise_knowledge()
     _exercise_payments(captured)
     await _exercise_nutrition()
 

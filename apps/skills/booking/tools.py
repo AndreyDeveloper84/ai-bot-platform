@@ -458,7 +458,7 @@ CERTIFICATE_AMOUNT_MAX = Decimal("100000")
 
 # DRF-997: transient schedule-service outage (e.g. backend 429). The bot
 # keeps ownership of the conversation and asks the user to retry shortly.
-SCHEDULE_UNAVAILABLE_TEXT = "Сервис расписания сейчас недоступен, попробуйте через минуту."
+SCHEDULE_UNAVAILABLE_TEXT = "Сервис расписания сейчас недоступен, попробуй через минуту."
 
 
 # B6 / DRF-842 — promo_status values reported by ``calc_price``.
@@ -528,6 +528,11 @@ class BookingRow:
     #: и его пояс — время человеку показывается в поясе салона, не в UTC.
     salon_name: str = ""
     salon_tz: str = ""
+    #: DRF-2701 — the schedule WAS read and holds no such record, so nothing
+    #: but our own row vouches for this booking (and its time is unknown).
+    #: Legacy YClients path only: under Ayla such a row is not listed at all
+    #: (DRF-1034). Told to the model; changes nothing the person is shown.
+    unconfirmed: bool = False
 
 
 @dataclass(frozen=True)
@@ -643,6 +648,9 @@ class BookingToolResult:
     #: decide this from the text: the two refusals differ by wording, not
     #: by a sign. False unless a branch says otherwise.
     handoff: bool = False
+    #: DRF-2701 — ``show_my_bookings`` could not read the schedule, so
+    #: ``bookings`` is the local list alone: times unknown, nothing checked.
+    bookings_check_failed: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -1125,7 +1133,7 @@ def _format_confirm_preview(
     price = _format_money(quoted_price)
     if price:
         parts.append(f"• Цена: {price}")
-    parts.append("Подтверждаете?")
+    parts.append("Подтверждаешь?")
     return "\n".join(parts)
 
 
@@ -1342,7 +1350,7 @@ def execute_confirm(
             quoted_price=new_payload.get("quoted_price"),
             quoted_duration_minutes=new_payload.get("quoted_duration_minutes"),
         )
-        text = f"Пока вы выбирали, {changed}. Запись не создана.\n\n{preview}"
+        text = f"Пока шёл выбор, {changed}. Запись не создана.\n\n{preview}"
         return BookingToolResult(
             text=text,
             error="quote_changed",
@@ -1811,7 +1819,7 @@ def _format_cancel_preview(*, booking: BookingRequest, reason: str) -> str:
         parts.append(f"• Мастер: {booking.master_name}")
     if reason:
         parts.append(f"• Причина: {reason}")
-    parts.append("Подтверждаете отмену?")
+    parts.append("Подтверждаешь отмену?")
     return "\n".join(parts)
 
 
@@ -2137,7 +2145,7 @@ def _format_reschedule_preview(
     if booking.master_name:
         parts.append(f"• Мастер: {booking.master_name}")
     parts.append(f"• Новое время: {new_datetime}")
-    parts.append("Подтверждаете перенос?")
+    parts.append("Подтверждаешь перенос?")
     return "\n".join(parts)
 
 
@@ -2865,7 +2873,7 @@ def execute_reschedule(
         master_name=master_name,
         service_name=service_name,
     )
-    text = f"Перенесла запись на {new_datetime}. Если что-то ещё нужно — пишите!"
+    text = f"Перенесла запись на {new_datetime}. Если что-то ещё нужно — пиши!"
     return BookingToolResult(text=text, confirmation=confirmation)
 
 
@@ -3086,6 +3094,7 @@ def show_my_bookings(
     # from YClients when available to know which bookings are still
     # upcoming. Fail-soft on network errors.
     live_records: dict[int | str, Any] = {}
+    check_failed = False
     try:
         for rec in client.get_user_records():
             live_records[rec.id] = rec
@@ -3095,7 +3104,9 @@ def show_my_bookings(
         return BookingToolResult(text=SCHEDULE_UNAVAILABLE_TEXT, error="schedule_unavailable")
     except (YClientsUnavailableError, YClientsAPIError):
         # Empty live_records → fall back to comment-marker only.
-        pass
+        # DRF-2701: and say so. The list below is still returned, but the
+        # model used to get it with nothing marking it as unchecked.
+        check_failed = True
 
     bookings: list[BookingRow] = []
     for row in rows:
@@ -3115,6 +3126,10 @@ def show_my_bookings(
                 status="CONFIRMED",
                 salon_name=getattr(tenant, "name", "") or "",
                 salon_tz=_salon_tz_key(tenant),
+                # Read and not found. When the read itself failed nothing was
+                # looked up, so «не найдена» would be untrue — that case is
+                # ``bookings_check_failed`` on the result instead.
+                unconfirmed=live is None and not check_failed,
             )
         )
 
@@ -3125,11 +3140,11 @@ def show_my_bookings(
         extra={"count": len(bookings)},
     )
     text = _format_bookings_text(bookings)
-    return BookingToolResult(text=text, bookings=bookings)
+    return BookingToolResult(text=text, bookings=bookings, bookings_check_failed=check_failed)
 
 
 def _salon_tz_key(tenant: Any) -> str:
-    """Пояс салона — тем же правилом, что «✅ Вы записаны» (``tenant_timezone``)."""
+    """Пояс салона — тем же правилом, что «✅ Запись подтверждена» (``tenant_timezone``)."""
     from apps.tenancy.timezones import salon_zone
 
     return salon_zone(tenant).key
@@ -3147,8 +3162,8 @@ def _format_booking_line(b: BookingRow) -> str:
 
 def _format_bookings_text(bookings: list[BookingRow]) -> str:
     if not bookings:
-        return "У вас пока нет предстоящих записей."
-    lines = ["Ваши предстоящие записи:"]
+        return "У тебя пока нет предстоящих записей."
+    lines = ["Твои предстоящие записи:"]
     lines += [_format_booking_line(b) for b in bookings[:5]]
     return "\n".join(lines)
 
@@ -3667,7 +3682,7 @@ def buy_certificate(
 
     text = (
         f"Сертификат на {amount:.0f} ₽ готов к оплате. "
-        "Нажмите кнопку ниже, чтобы перейти к безопасной оплате."
+        "Нажми кнопку ниже, чтобы перейти к безопасной оплате."
     )
     keyboard = url_button("💳 Оплатить", result.checkout_url)
 

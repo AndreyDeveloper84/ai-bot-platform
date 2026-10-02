@@ -57,6 +57,7 @@ from django.core.cache import cache
 from django.utils.dateparse import parse_datetime
 
 from apps.catalog.models import CatalogMaster, CatalogService, MasterService, sellable_edge_q
+from apps.integrations.ayla.edge_duration import duration_from_edge
 from apps.integrations.ayla.offer_refusal import (
     OFFER_NOT_SELLABLE_SLUG,
     client_text_for,
@@ -1320,7 +1321,7 @@ def _create_booking_via_ayla(
                 "duration_min": service.duration_min,
                 # DRF-1952 — адрес салона записи, тот же источник, что у карточки
                 # записи (зеркало ``Tenant.address``); ``None`` — зеркало молчит,
-                # экран успеха скажет «Уточните адрес в салоне».
+                # экран успеха скажет «Уточни адрес в салоне».
                 "address": tenant.address,
                 # Ayla verbatim: confirmed (payment_required=false) or
                 # awaiting_payment (true, pending Payment created).
@@ -1428,14 +1429,17 @@ def booking_quote(request: HttpRequest) -> HttpResponse:
                 # подтверждения рисовал «Цена 0 ₽».
                 return _offer_not_sellable(offer_reason)
             edge_price = edge.get("price")
-            edge_duration = edge.get("duration_minutes")
+            # DRF-2678: разрешённая каталогом длительность, не сырое
+            # переопределение — у мастера без своего значения оно пусто, и
+            # ответ уходил на зеркало услуги.
+            edge_duration = duration_from_edge(edge)
             try:
                 if edge_price is not None:
                     price = str(Decimal(str(edge_price)))
                     source = "edge"
             except (InvalidOperation, ValueError):
                 logger.warning("miniapp_api.booking_quote.bad_edge_price value=%r", edge_price)
-            if isinstance(edge_duration, int) and edge_duration > 0:
+            if edge_duration is not None:
                 duration = edge_duration
                 source = "edge"
 
@@ -2088,7 +2092,7 @@ def _salon_iso(moment, tenant) -> str:
     из строки (``formatVisitFull``), и человек видел «в 06:00». Тот же момент
     в поясе салона: ``new Date()`` на фронте не меняется, а часы в строке
     становятся часами салона — правило владельца (28.09, п.1) и прецедент
-    «✅ Вы записаны». Пояс и запись момента — ``apps.tenancy.timezones``
+    «✅ Запись подтверждена». Пояс и запись момента — ``apps.tenancy.timezones``
     (DRF-2595); здесь только контракт провода: пусто — пустая строка.
     Время без пояса (канон без смещения, тело запроса без смещения) — время
     салона: ``astimezone`` принял бы его за пояс СЕРВЕРА и сдвинул час заново.
@@ -3135,8 +3139,14 @@ def customer_proactive_hints(request: HttpRequest) -> HttpResponse:
     До DRF-1520 она по HTTP не отдавалась ни на чтение, ни на запись: бот
     решал, писать ли человеку первым, состоянием, которого человек не
     видел и изменить не мог.
+
+    Включение при отозванном согласии на хранение данных отклоняется: **409**
+    со слагом причины (решение владельца §47.3, DRF-2708). Не 200 с
+    пересчитанным состоянием — тело было бы правдой про базу и ложью про
+    запрос. Выключение не отклоняется никогда.
     """
     from apps.consent.customer import set_proactive_hints
+    from apps.consent.exceptions import ProactiveHintsUnavailable
 
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
     body = _json_object_body(request)
@@ -3146,7 +3156,14 @@ def customer_proactive_hints(request: HttpRequest) -> HttpResponse:
     if not isinstance(enabled, bool):
         return _error("bad_request", "enabled must be a boolean", 400)
 
-    set_proactive_hints(bot_user, enabled=enabled)
+    try:
+        set_proactive_hints(bot_user, enabled=enabled)
+    except ProactiveHintsUnavailable as exc:
+        return _error(
+            exc.reason,
+            "proactive hints cannot be enabled while the data-storage consent is withdrawn",
+            409,
+        )
     return JsonResponse(_consents_document(bot_user))
 
 
@@ -5762,9 +5779,11 @@ def create_payment(request: HttpRequest) -> HttpResponse:
 @with_request_tenant
 def cards_setup(request: HttpRequest) -> HttpResponse:
     """C7.2 — start card binding (separate voluntary action). Body carries
-    the consent boundary: ``consent_version`` (required; ``consented_at``
-    accepted for the audit trail, not forwarded upstream) + optional
-    ``return_url``. Response: ``{confirmation_url}`` verbatim."""
+    the consent boundary: ``consent_version`` (required — its presence is the
+    act of consent; the catalog records its OWN version, DRF-2681) + optional
+    ``return_url``. ``consented_at`` may be sent and is ignored: it is neither
+    stored nor forwarded, the recorded moment is the catalog's clock.
+    Response: ``{confirmation_url}`` verbatim."""
 
     body = _c7_json_body(request)
     if isinstance(body, JsonResponse):

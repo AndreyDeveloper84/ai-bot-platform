@@ -112,7 +112,7 @@ def test_handoff_callback_enters_tenant_and_delegates(
     def fake_dispatch(ctx):
         seen["tenant"] = current_tenant()
         seen["text"] = ctx.message_text
-        return SkillResult(reply_text="Выберите дату к мастеру Анна")
+        return SkillResult(reply_text="Выбери дату к мастеру Анна")
 
     monkeypatch.setattr("apps.skills.registry.dispatch", fake_dispatch)
 

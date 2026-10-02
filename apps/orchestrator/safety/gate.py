@@ -71,6 +71,8 @@ from dataclasses import dataclass, field
 
 import logging
 
+from apps.orchestrator.knowledge_licence import KnowledgeLicence
+from apps.orchestrator.safety.claim_gate import shadow_observe
 from apps.orchestrator.safety.medical_emergency import MEDICAL_EMERGENCY_TEXT_V2
 from apps.orchestrator.safety.outbound import evaluate_action_promise, evaluate_outbound
 from apps.orchestrator.safety.pre_check import SafetyResult, SafetyVerdict, pre_check
@@ -258,6 +260,7 @@ def guard_outbound(
     trace_id: object | None = None,
     acted: bool | None = None,
     subject_own_data: bool = False,
+    knowledge: KnowledgeLicence | None = None,
 ) -> OutboundGuardOutcome:
     """Check a drafted reply on its way to a person; emit once if it is blocked.
 
@@ -283,6 +286,15 @@ def guard_outbound(
     so the person still gets an answer and it is not the one nobody checked.
     The emit is still wrapped: a telemetry failure must not be the thing that
     costs someone their answer.
+
+    ``knowledge`` (DRF-2725) — лицензия знания этого хода: что читатель знания
+    отдал модели (:mod:`apps.orchestrator.knowledge_licence`). ``None`` — в этом
+    ходу знания не читали; так отвечают все вызывающие, которым нести её
+    неоткуда. Сегодня параметр НИЧЕГО не решает: по нему считается теневая
+    оценка (:mod:`apps.orchestrator.safety.claim_gate`) и, при включённом
+    ``CLAIM_GATE_SHADOW_ENABLED``, пишется строка в журнал. Вердикт и текст
+    ниже от лицензии не зависят ни при каком значении флага — решение
+    владельца 02.10.2026: сначала теневой режим.
     """
 
     verdict = evaluate_outbound(text, subject_own_data=subject_own_data)
@@ -292,6 +304,16 @@ def guard_outbound(
         # про своих данные нет: признак запоминается ДО подмены, иначе запись
         # в журнал потерялась бы именно на этом пути.
         verdict = evaluate_action_promise(text)
+    # DRF-2725 — теневой затвор утверждений. Стоит ПОСЛЕ сторожа формы и
+    # читает его итог, но обратно ничего не отдаёт: возвращаемое значение
+    # намеренно не используется. Не бросает (см. ``shadow_observe``).
+    shadow_observe(
+        knowledge,
+        surface=surface,
+        form_categories=tuple(verdict.categories),
+        form_blocked=not verdict.allowed,
+        trace_id=trace_id,
+    )
     if own_data:
         # DRF-2435 — «заблокировали чужой контакт» и «это собственные данные
         # человека, пропускаем» обязаны читаться в журнале по-разному: иначе мы

@@ -284,8 +284,8 @@ class TestTheRefusalNamesTheAlternative:
 
         assert reply.text == (
             "«маникюр» в городе Пенза — такого у наших мастеров сейчас нет. "
-            "Назовите другую услугу или другой город, и я поищу ещё."
-            " Или посмотрите, какие салоны есть."
+            "Назови другую услугу или другой город, и я поищу ещё."
+            " Или посмотри, какие салоны есть."
         )
         assert reply.action_data is not None
         buttons = reply.action_data["attachments"][0]["payload"]["buttons"]
@@ -348,7 +348,7 @@ class TestTheRepeatIsAnsweredWithoutTheModel:
         # things that turned it into a circle.
         assert "Помогу найти" not in second.text
         assert "в каком городе" not in second.text.lower()
-        assert "уточните" not in second.text.lower()
+        assert "уточни" not in second.text.lower()  # корень: ловит и «уточни», и «уточните»
 
     def test_the_repeat_still_offers_the_alternative(self, monkeypatch, penza_massage_only) -> None:
         """A repeat must go somewhere, or it is just a wall said twice."""

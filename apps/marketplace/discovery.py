@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import re
+from collections.abc import Sequence
 from dataclasses import replace
 from typing import Any, NamedTuple, Protocol, TypeVar
 from uuid import UUID
@@ -2422,6 +2423,26 @@ def discover_masters_for_service(
         replace(_to_card(master), service_id=service.id, service_name=service.name)
         for master in masters
     ]
+
+
+def catalog_salon_service_ids(service_ids: Sequence[UUID]) -> list[str]:
+    """Mirror service ids -> the catalog's own salon-service ids, same order.
+
+    DRF-2729. ``MasterCard.service_id`` is the mirror row id; the catalog's
+    knowledge endpoint is addressed by ITS id of the salon service
+    (``CatalogService.ayla_service_id``). The lookup is cross-tenant for the
+    reason discovery itself is (MKT1): the cards it translates came from a
+    cross-tenant search. A row with no catalog id is dropped, not guessed.
+    """
+    if not service_ids:
+        return []
+    by_pk = {
+        row_id: str(ayla_id)
+        for row_id, ayla_id in CatalogService.all_tenants.filter(
+            pk__in=list(service_ids), ayla_service_id__isnull=False
+        ).values_list("pk", "ayla_service_id")
+    }
+    return [by_pk[service_id] for service_id in service_ids if service_id in by_pk]
 
 
 def _to_card(master: CatalogMaster) -> MasterCard:

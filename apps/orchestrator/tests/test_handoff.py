@@ -129,7 +129,7 @@ def test_handoff_enters_scope_bridges_identity_and_delegates(settings, monkeypat
         seen["tenant"] = current_tenant()
         seen["text"] = ctx.message_text
         seen["bot_user_tenant"] = ctx.bot_user.tenant_id
-        return SkillResult(reply_text="Выберите дату")
+        return SkillResult(reply_text="Выбери дату")
 
     monkeypatch.setattr("apps.skills.registry.dispatch", fake_dispatch)
 
@@ -141,7 +141,7 @@ def test_handoff_enters_scope_bridges_identity_and_delegates(settings, monkeypat
         chat_id="500",
     )
 
-    assert reply.text == "Выберите дату"
+    assert reply.text == "Выбери дату"
     assert seen["tenant"].id == t.id  # dispatch ran INSIDE tenant_scope(T)
     # Native ids on the Ayla path: master mirror pk (= canonical Ayla
     # specialist id, S3B rekey) + the service's ayla_service_id.
@@ -256,7 +256,7 @@ def test_service_button_reaches_the_date_step(settings, monkeypatch) -> None:
     def fake_dispatch(ctx):
         seen["text"] = ctx.message_text
         seen["tenant"] = current_tenant()
-        return SkillResult(reply_text="Выберите дату:", action_data={"keyboard": []})
+        return SkillResult(reply_text="Выбери дату:", action_data={"keyboard": []})
 
     monkeypatch.setattr("apps.skills.registry.dispatch", fake_dispatch)
 
@@ -276,7 +276,7 @@ def test_service_button_reaches_the_date_step(settings, monkeypatch) -> None:
     )
     reply = _discovery_handoff_reply(event, gbu, None)
 
-    assert reply.text == "Выберите дату:"
+    assert reply.text == "Выбери дату:"
     assert reply.action_data == {"keyboard": []}
     # Service context stamped from the button's id — the name was never typed.
     assert seen["text"] == f"cb:book:pick_master:{master.id}:{ayla_uuid}"
@@ -351,7 +351,7 @@ def test_menu_longer_than_the_keyboard_budget_is_truncated_and_says_so(
     # Capped, deterministically by name — never a random 10 of 12.
     assert [b["label"] for b in buttons] == [f"Услуга {i:02d}" for i in range(10)]
     assert "Показаны первые 10" in reply.text
-    assert "напишите" in reply.text  # typing stays available for the rest
+    assert "напиши её название" in reply.text  # typing stays available for the rest
     assert "Услуга 11" not in reply.text
 
 
@@ -395,7 +395,7 @@ def test_handoff_without_service_and_without_menu_still_asks(settings, monkeypat
 
     reply = handoff_to_booking(global_bot_user=gbu, tenant_id=t.id, master_id=master.id)
 
-    assert "какая услуга вас интересует" in reply.text
+    assert "какая услуга тебя интересует" in reply.text
     assert called == []
 
 
@@ -439,7 +439,7 @@ def test_handoff_unresolvable_service_asks_and_does_not_dispatch(
     # the service is real and visible in T, this master simply does not do it.
     # The rest are ungroundable-for-other-reasons misses with no offerable
     # alternative, so they stay the neutral ask.
-    expected = "нет услуги" if case == "no_edge" else "напишите"
+    expected = "нет услуги" if case == "no_edge" else "напиши, какая услуга"
     assert expected in reply.text, case
     # Nothing DELIVERABLE per service → no service buttons. That guarantee is
     # what this line has always been about, and it is unchanged: a chip
@@ -447,7 +447,7 @@ def test_handoff_unresolvable_service_asks_and_does_not_dispatch(
     assert [b for b in _buttons(reply) if b["callback"].startswith("cb:discover:book:")] == [], case
     # DRF-1492 — but the reply is no longer buttonless either: both bare
     # wordings named a move («попробуйте выбрать другого мастера»,
-    # «напишите, какая услуга вас интересует») with nothing to press. The one
+    # «напиши, какая услуга тебя интересует») with nothing to press. The one
     # chip is the salon's own catalog, addressed by the tenant id — an id
     # this branch does hold and one that resolves by construction.
     assert [b["callback"] for b in _buttons(reply)] == [f"cb:catalog:services:{t.id}"], case
@@ -521,7 +521,7 @@ def test_handoff_nullable_staff_id_is_graceful_no_dispatch(settings, monkeypatch
     # own catalog, not the whole marketplace. Which argument each of the four
     # call sites passes is the thing that decides this, and it is checkable
     # only here: a person standing inside a salon must not be answered with
-    # «посмотрите наши салоны».
+    # «посмотри наши салоны».
     assert [b["callback"] for b in _buttons(reply)] == [f"cb:catalog:services:{t.id}"]
     assert called == []  # no booking dispatch when the master has no native id
 
@@ -547,7 +547,7 @@ def test_empty_skill_reply_offers_the_salon_it_could_not_continue(settings, monk
     """DRF-1492 — the «skill said nothing» fallback of ``route_booking_callback``.
 
     A new early return, and the only branch of that function that both names a
-    move («выберите заново») and knows the tenant, so its chip can be that
+    move («выбери заново») and knows the tenant, so its chip can be that
     salon's catalog rather than the whole marketplace.
     """
     settings.STRICT_TENANT_SCOPE = "strict"
@@ -570,7 +570,7 @@ def test_empty_skill_reply_offers_the_salon_it_could_not_continue(settings, monk
         chat_id="609",
     )
 
-    assert "выберите заново" in reply.text.lower()
+    assert "выбери заново" in reply.text.lower()
     assert [b["callback"] for b in _buttons(reply)] == [f"cb:catalog:services:{t.id}"]
 
 
@@ -604,14 +604,14 @@ def test_route_pick_date_dispatches_into_tenant_pipeline(settings, monkeypatch) 
         seen["tenant"] = current_tenant()
         seen["text"] = ctx.message_text
         seen["bot_user_tenant"] = ctx.bot_user.tenant_id
-        return SkillResult(reply_text="Выберите время:", action_data={"keyboard": []})
+        return SkillResult(reply_text="Выбери время:", action_data={"keyboard": []})
 
     monkeypatch.setattr("apps.skills.registry.dispatch", fake_dispatch)
     callback = f"cb:book:pick_date:{master.id}:2026-08-11:{uuid4()}"
 
     reply = route_booking_callback(global_bot_user=gbu, callback_text=callback, chat_id="600")
 
-    assert reply.text == "Выберите время:"
+    assert reply.text == "Выбери время:"
     assert reply.action_data == {"keyboard": []}
     assert seen["tenant"].id == t.id  # dispatch ran INSIDE tenant_scope(T)
     assert seen["text"] == callback  # raw payload, verbatim
@@ -674,8 +674,8 @@ def test_route_unresolvable_callbacks_reply_stale_without_dispatch(settings, mon
         reply = route_booking_callback(global_bot_user=gbu, callback_text=callback, chat_id="602")
         assert reply.text == _UNRESOLVED_BOOKING_CALLBACK_REPLY, callback
         assert "устарел" not in reply.text, callback
-        # DRF-1492 — the refusal names a move («посмотрите наши салоны и
-        # выберите заново»), so every one of these four real routes carries
+        # DRF-1492 — the refusal names a move («посмотри наши салоны и
+        # выбери заново»), so every one of these four real routes carries
         # the button that performs it. Asserted on the ROUTE, not on the
         # helper: a reply built by the test itself would stay green after the
         # production branch stopped attaching a keyboard.

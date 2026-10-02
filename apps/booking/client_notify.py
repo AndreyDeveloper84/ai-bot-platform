@@ -213,7 +213,7 @@ def build_booking_confirmation(
     service_name: str,
     master_name: str,
 ) -> str:
-    """Format the client-facing «вы записаны» text.
+    """Format the client-facing «запись подтверждена» text.
 
     Answers the one question the broken success screen left open: *did
     it go through, and to what*. Service, master, date and time in the
@@ -222,7 +222,7 @@ def build_booking_confirmation(
 
     when = start_at.astimezone(salon_zone(tenant)).strftime("%d.%m.%Y в %H:%M")
     lines = [
-        "✅ Вы записаны",
+        "✅ Запись подтверждена",
         f"Услуга: {service_name or _UNKNOWN}",
         f"Мастер: {master_name or _UNKNOWN}",
         f"Когда: {when}",

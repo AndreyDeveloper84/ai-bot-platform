@@ -94,12 +94,12 @@ describe("CustomerBookingSuccessScreen — адрес салона (DRF-1952)", 
     expect(screen.getByText(/Карпинского, 33А/)).toBeInTheDocument();
   });
 
-  it("без адреса — «Уточните адрес в салоне», а не пустота и не «—»", () => {
+  it("без адреса — «Уточни адрес в салоне», а не пустота и не «—»", () => {
     renderWithState({
       service_name: "Маникюр",
       master_name: "Анна",
       visit_at: "2026-08-01T16:00:00+03:00",
     });
-    expect(screen.getByText(/Уточните адрес в салоне/)).toBeInTheDocument();
+    expect(screen.getByText(/Уточни адрес в салоне/)).toBeInTheDocument();
   });
 });

@@ -299,10 +299,10 @@ logger = logging.getLogger(__name__)
 # field, and changing it is a product call. Sprint 3 AI Concierge will
 # replace this with personalised welcome flow via tenant.brand_voice persona.
 _WELCOME_TEXT = (
-    "Здравствуйте! 👋\n\n"
+    "Привет! 👋\n\n"
     f"Это бот массажного салона «{SALON_BUSINESS_NAME}» в Пензе.\n"
     "Помогу записаться, расскажу об услугах и отвечу на частые вопросы.\n\n"
-    "Выберите раздел:"
+    "Выбери раздел:"
 )
 
 _FALLBACK_NO_ECHO = "(нечем эхом) 🙂"
@@ -312,7 +312,7 @@ _FALLBACK_EMPTY = "?"
 # own reply_text. Booking's _handoff always sets one («переключаю на менеджера…»),
 # so this is only the defensive fallback. Operational copy (low sensitivity vs the
 # crisis copy) — founder may tweak.
-_HANDOFF_FALLBACK_TEXT = "Передаю ваш вопрос менеджеру — он ответит здесь в ближайшее время."
+_HANDOFF_FALLBACK_TEXT = "Передаю твой вопрос менеджеру — он ответит здесь в ближайшее время."
 
 
 def _last_assistant_content(history: list[dict[str, Any]] | None) -> str | None:
@@ -962,7 +962,7 @@ def _dispatch_skill_handoff(
     # ретрая нет (запись остаётся в PEL до ручного XCLAIM). Записать после
     # отправки значило бы, что упавший ход оставляет диалог с меткой
     # «здесь ничего не говорили» — и на следующем сообщении человек прочитал
-    # бы «вы просили связать вас с сотрудником в ДРУГОМ нашем чате» ровно в
+    # бы «была просьба связать тебя с сотрудником в ДРУГОМ нашем чате» ровно в
     # том чате, где он и спрашивал. Раньше такой сбой давал молчание; врать
     # хуже, чем молчать.
     mark_handoff_announced(conversation=conversation, chat_id=chat_id)
@@ -2842,7 +2842,18 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             persisted=reply.persisted,
         )
     if assistant_action_type != "safety_pre_check":
-        guarded = guard_outbound(reply.text, surface="max", bot_user=bot_user, trace_id=trace_id)
+        guarded = guard_outbound(
+            reply.text,
+            surface="max",
+            bot_user=bot_user,
+            trace_id=trace_id,
+            # DRF-2725 — лицензия знания едет через шов рядом с трассой: канал
+            # проверяет ответ консьержа второй раз, и без неё судил бы вслепую.
+            # ``turn_reply`` существует только на ветке консьержа.
+            knowledge=(
+                getattr(turn_reply, "knowledge_licence", None) if concierge_turn_ran else None
+            ),
+        )
         post_verdict = "block" if guarded.blocked else "allow"
         if guarded.blocked:
             # The keyboard goes with the text. ``outbound.py``'s rule is that
@@ -3192,9 +3203,7 @@ def _discovery_handoff_reply(
         master_id = uuid.UUID(parts[1])
     except (ValueError, AttributeError):
         logger.warning("channels.max.global.handoff.bad_payload payload=%r", payload)
-        return DiscoveryReply(
-            text="Не удалось открыть запись — попробуйте выбрать мастера ещё раз."
-        )
+        return DiscoveryReply(text="Не удалось открыть запись — попробуй выбрать мастера ещё раз.")
 
     # The service part is genuinely optional: a corrupt third segment must not
     # throw away two valid ids — degrade to the serviceless handoff (which
