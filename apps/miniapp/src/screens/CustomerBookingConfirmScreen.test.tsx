@@ -436,6 +436,7 @@ describe("error matrix + idempotency (Wave 0 booking GO)", () => {
       "master_profile_incomplete",
       "master_schedule_unconfirmed",
       "master_catalog_unlinked",
+      "master_unbookable",
     ])("%s → утверждённая фраза, а не отвергнутая", async (slug) => {
       const user = userEvent.setup();
       mockedCreate.mockRejectedValue(new ApiError(404, slug, "internal detail"));
@@ -456,19 +457,25 @@ describe("error matrix + idempotency (Wave 0 booking GO)", () => {
       expect(screen.queryByText(/internal detail/)).not.toBeInTheDocument();
     });
 
-    // Недоступна услуга — другой предмет: §47.4 про мастера, и общая фраза
-    // здесь остаётся прежней. Узел держит, что правка не задела её.
+    // Недоступна услуга — другой предмет: §47.4 про мастера. Фраза об услуге
+    // говорит только об услуге (DRF-2708): ни «специалиста», ни «других
+    // мастеров» в ней нет — ни в тексте, ни на кнопке.
     it.each(["service_not_found", "service_not_offered", "service_unbookable"])(
-      "%s → прежняя общая фраза, не фраза о мастере",
+      "%s → фраза об услуге, не о мастере",
       async (slug) => {
         const user = userEvent.setup();
         mockedCreate.mockRejectedValue(new ApiError(404, slug, "internal detail"));
         renderScreen();
         await user.click(screen.getByRole("button", { name: "Записаться" }));
 
-        const phrase = await screen.findByText(/Эта услуга или специалист сейчас недоступны/);
+        const phrase = await screen.findByText(
+          "Эта услуга сейчас недоступна. Посмотри другие — подберём похожее.",
+        );
         const alert = phrase.closest('[role="alert"]');
         expect(alert?.textContent).not.toContain("К этому мастеру");
+        expect(alert?.textContent).not.toContain("специалист");
+        expect(alert?.textContent).not.toContain("мастер");
+        expect(screen.getByRole("button", { name: "Посмотреть другие" })).toBeInTheDocument();
         expect(screen.queryByText(/internal detail/)).not.toBeInTheDocument();
       },
     );

@@ -69,6 +69,19 @@ _UNAVAILABLE_REPLY_NO_TENANT = (
 
 _SALON_CATALOG_LABEL = "Что есть в этом салоне"
 
+# DRF-2708 — отказ «к этому мастеру записаться нельзя» словами владельца
+# (`docs/OPEN_DECISIONS.md` §47.4, слово 02.10: один текст на все поверхности
+# этого отказа). Та же фраза, что у мини-приложения
+# (`apps/miniapp/src/lib/refusal-canon.ts`, `MASTER_NOT_BOOKABLE_REFUSAL`);
+# две копии держит узел `test_master_refusal_one_text_2708.py`.
+#
+# Только для причины «мастер»: его нет в этом салоне или он не подключён к
+# записи. `_UNAVAILABLE_REPLY*` выше остаются у веток с другой причиной —
+# салон не найден, разговор не открылся.
+MASTER_NOT_BOOKABLE_REFUSAL = (
+    "К этому мастеру сейчас записаться нельзя. Посмотри других — подберём подходящий вариант."
+)
+
 
 def _salon_catalog_button(tenant_id: uuid.UUID) -> dict[str, str]:
     """The «open this salon's catalog» chip — ``cb:catalog:services:{tenant}``.
@@ -87,6 +100,11 @@ def _salon_catalog_button(tenant_id: uuid.UUID) -> dict[str, str]:
 def _chips(text: str, buttons: list[dict[str, str]]) -> DiscoveryReply:
     """Reply + keyboard, through the one envelope builder this surface has."""
     return DiscoveryReply(text=text, action_data=keyboard_envelope(buttons))
+
+
+def _master_not_bookable_reply(tenant_id: uuid.UUID) -> DiscoveryReply:
+    """§47.4 — the owner's sentence, with the way out DRF-1492 attached to it."""
+    return _chips(MASTER_NOT_BOOKABLE_REFUSAL, [_salon_catalog_button(tenant_id)])
 
 
 def _unavailable_reply(tenant_id: uuid.UUID | None = None) -> DiscoveryReply:
@@ -333,7 +351,7 @@ def handoff_to_booking(
                 master_id,
                 trace_id,
             )
-            return _unavailable_reply(tenant_id)
+            return _master_not_bookable_reply(tenant_id)
 
         # Resolve the native master id the booking entrypoint expects, per the
         # BOOKING_VIA_AYLA_REST flag. yclients_staff_id is NULLABLE (master not
@@ -348,7 +366,7 @@ def handoff_to_booking(
                 master_id,
                 trace_id,
             )
-            return _unavailable_reply(tenant_id)
+            return _master_not_bookable_reply(tenant_id)
         else:
             native_master_id = str(master.yclients_staff_id)
 

@@ -29,7 +29,7 @@ import {
   type CustomerMaster,
 } from "../lib/customer-booking";
 import { publicRating, reviewCountLabel } from "../lib/rating";
-import { setEntryPoint, setMaster, setService, useBookingDraft } from "../state/booking";
+import { alignMaster, alignService, setEntryPoint, useBookingDraft } from "../state/booking";
 import { backTo } from "../lib/screen-back";
 
 /** Возврат (DRF-1493): в каталог — единственный вход в карточку мастера. */
@@ -72,17 +72,16 @@ export function CustomerMasterDetailScreen() {
 
   function onChooseTime() {
     if (state.kind !== "ok" || !masterId) return;
+    // DRF-2752 — услуга из адреса главнее черновика. Раньше адрес учитывался
+    // только при ПУСТОМ черновике: услуга, оставшаяся от прошлого выбора,
+    // побеждала ту, что названа в адресе. Имя здесь неизвестно — экран
+    // времени спросит его у сервера. Идёт первым: другая услуга начинает
+    // путь заново, и источник входа с мастером ставятся уже в новый.
+    if (serviceId) alignService(serviceId);
     // DRF-1484 — provenance: this flow originates at the master profile.
     setEntryPoint("master");
-    setMaster(masterId, state.master.name);
-    // Pre-fill service in draft if URL param available — keeps the
-    // F3 → F4 chain consistent.
-    if (serviceId && !draft.serviceId) {
-      // Service name unknown here; the draft only needs the id for
-      // the slots query. F4 will fetch service name from the booking
-      // response if necessary.
-      setService(serviceId, "");
-    }
+    // Другой мастер — время, выбранное у прежнего, больше не выбрано.
+    alignMaster(masterId, state.master.name);
     navigate(`/customer/masters/${masterId}/slots`);
   }
 
@@ -175,9 +174,10 @@ export function CustomerMasterDetailScreen() {
           type="button"
           className="goal-select__minor-action"
           onClick={() => {
-            const svc = draft.serviceId || serviceId;
+            // DRF-2752 — то же правило: адрес главнее черновика.
+            const svc = serviceId || draft.serviceId;
             if (svc) {
-              if (!draft.serviceId) setService(svc, "");
+              if (serviceId) alignService(serviceId);
               navigate("/customer/book/master");
             } else {
               navigate("/customer/catalog");
