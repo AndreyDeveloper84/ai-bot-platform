@@ -58,6 +58,23 @@ exactly like the yellow/red memory zones, and a withdrawal puts it back
 to sleep on the next turn. The gate below is unchanged by that work:
 what changed is that there is now something on the other side of it.
 
+### Sensitive perimeter — §7.1, the same predicate as the coach (DRF-2760)
+
+Consent says the data MAY be read. It does not say this person may be
+talked to about food. Pregnancy, breastfeeding, an eating disorder, a goal
+Ayla moved off a deficit (``bmr_floor``) — for them the two coach surfaces
+(:mod:`apps.nutrition_proactive.coach`, :mod:`apps.orchestrator.
+coach_observation`) say nothing at all, and decide it with one predicate:
+:func:`apps.nutrition_proactive.render.remarks_suppressed`. This block is
+the third surface of the same dietitian and the only one that hands the
+picture to a model with leave to «назови связь своими словами» — so it
+asks the same predicate, not a copy of it.
+
+Fail-closed the same way: a profile that does not exist or could not be
+read is «не знаем», and «не знаем» is silence — no block. The profile is
+read per turn and never cached: the override flags are exactly the values
+a stale copy must not keep calling clean.
+
 ### Injection — reuse, never re-implement
 
 Two layers, both pre-existing:
@@ -168,13 +185,24 @@ def build_nutrition_context_block(bot_user: Any) -> str:
     """Return the concierge system-prompt nutrition block, or ``""``.
 
     ``""`` covers every gated and every failed case — flag off, consent
-    closed, Ayla unreachable, misconfigured token, a week with no signal
-    and a day with no rows — so the caller injects nothing and the prompt
-    is byte-identical to the no-nutrition one. Never raises.
+    closed, the sensitive perimeter, no profile, Ayla unreachable,
+    misconfigured token, a week with no signal and a day with no rows — so
+    the caller injects nothing and the prompt is byte-identical to the
+    no-nutrition one. Never raises.
     """
     if not concierge_nutrition_context_enabled():
         return ""
     if not _consent_open(bot_user):
+        return ""
+
+    # Чувствительный периметр §7.1 закрывает ВСЮ поверхность, как у двух
+    # поверхностей коуча: беременность, ГВ, РПП, цель, снятая Ayla с дефицита.
+    # Профиля нет или он не прочитан — «не знаем», а «не знаем» это тишина.
+    # Стоит до чтения цели и недели: закрытому периметру картина не нужна.
+    from apps.nutrition_proactive.render import remarks_suppressed
+
+    if remarks_suppressed(_fetch_profile(bot_user)):
+        logger.info("orchestrator.nutrition_context.skip reason=sensitive_perimeter")
         return ""
 
     # Вторая ступень гейта §48 — по ДАННЫМ, а не по ходу. Первая (текст
@@ -232,6 +260,38 @@ def _consent_open(bot_user: Any) -> bool:
     from apps.orchestrator.food_history import read_consent_open
 
     return read_consent_open(bot_user)
+
+
+def _fetch_profile(bot_user: Any) -> Any | None:
+    """The anketa profile, best-effort. ``None`` on every failure.
+
+    The sensitive perimeter lives in this response, so «could not read» must
+    stay distinguishable from «read, and clean»: ``None`` it is, and
+    :func:`apps.nutrition_proactive.render.remarks_suppressed` reads ``None``
+    as suppressed. ``None`` is also what Ayla answers for a person with no
+    profile (404 / ``exists=false``) — the same silence, for the same reason.
+
+    The same degradation ladder as :func:`_fetch_deficits`.
+    """
+    try:
+        from apps.integrations.ayla import external_user_id_for, get_nutrition_client
+
+        client = get_nutrition_client()
+        external_id = external_user_id_for(bot_user)
+    except Exception as exc:  # noqa: BLE001 — unconfigured env is not an error
+        logger.debug("orchestrator.nutrition_context.disabled: %s", exc)
+        return None
+
+    try:
+        from apps.integrations.ayla import NutritionAPIError, NutritionUnavailableError
+
+        return asyncio.run(client.get_profile(external_user_id=external_id))
+    except (NutritionUnavailableError, NutritionAPIError) as exc:
+        logger.info("orchestrator.nutrition_context.profile_unavailable reason=%s", exc)
+        return None
+    except Exception:  # noqa: BLE001 — never break the turn; reads as «не знаем»
+        logger.exception("orchestrator.nutrition_context.profile_failed")
+        return None
 
 
 def _fetch_goal(bot_user: Any) -> Any | None:
