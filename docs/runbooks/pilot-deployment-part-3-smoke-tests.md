@@ -47,6 +47,7 @@ Manual smoke tests для master + admin Mini App после deploy в Пенз�
   - 1 test customer (MAX account, не связан с tenant).
   - Тест-tenant создан через Django admin OR существует в Пензе с подсадными `is_test=True` (verify в DB перед launch).
 - [ ] **MAX channel verified:** test MAX DM от `@ai_bot` arrives within 5 секунд of trigger. Verify через `manage.py shell` + `send_message(test_master.linked_bot_user.max_chat_id, "smoke test")`.
+- [ ] **Support-канал Mini App (#949, DRF-2654):** мини-приложение собрано с настоящим `VITE_SUPPORT_DEEPLINK` — без переменной production-сборка отказывает намеренно, где её задают и кто — `miniapp-build-env.md`. Проверка: customer Mini App → Профиль → «Запросить данные» → кнопка «Написать в поддержку» (она же в «Удалить аккаунт», в шторках согласия на данные о здоровье и отзыва хранения данных) открывает живой MAX-канал, не 404 и не `max.me/aylasupport`. Зачем: в эти шторки человек попадает, когда выгрузка, удаление или отзыв согласия в приложении не получились, и тогда оператор канала делает это **вручную** — выгружает данные (152-ФЗ, право на доступ), принимает запрос на удаление, отзывает согласие. Настройки уведомлений через поддержку **не** идут: кнопка «Открыть настройки уведомлений» ведёт на экран приложения `/customer/notification-settings`.
 
 Без любого из этих prerequisites — НЕ запускать smoke tests. Зафиксируй gap в incident-response.md, дозаполнить prerequisites, потом возвращаться сюда.
 
@@ -493,6 +494,7 @@ N/A otherwise (single-role staff only).
 ## Changelog
 
 - _2026-05-25_ — W1 (Delta) — initial draft PART 3.1 + 3.2 with 6 master tests + 7 admin tests (4 mandatory + 2 extras для каждой части; 3 marked N/A pending feature build OR Django-admin-only).
+- _2026-09-29_ — prerequisite «Support-канал Mini App» (#949, DRF-2654): перенос шага из неслитого PR #1115 (12.07), сверенный с кодом на 29.09 — выгрузка и удаление теперь в приложении, поддержка — ручной запасной путь; настройки уведомлений через поддержку не идут.
 
 ## Cross-reference
 

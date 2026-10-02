@@ -41,8 +41,12 @@ describe("прод-сборка", () => {
       // import.meta.env.DEV=true — это не прод. CI зовёт `npx vite build`
       // без NODE_ENV, то есть production; повторяем именно его.
       const previousNodeEnv = process.env.NODE_ENV;
+      // DRF-2654: production-сборка без ссылки поддержки отказывает; этот узел
+      // о другом, поэтому ссылка задана на время сборки.
+      const previousDeeplink = process.env.VITE_SUPPORT_DEEPLINK;
       process.env.NODE_ENV = "production";
       process.env.VITE_DEV_INIT_DATA = `user=%7B%7D&${MARKER}`;
+      process.env.VITE_SUPPORT_DEEPLINK = "https://example.invalid/build-test-support";
       try {
         await build({
           root: ROOT,
@@ -54,6 +58,8 @@ describe("прод-сборка", () => {
         if (previous === undefined) delete process.env.VITE_DEV_INIT_DATA;
         else process.env.VITE_DEV_INIT_DATA = previous;
         process.env.NODE_ENV = previousNodeEnv;
+        if (previousDeeplink === undefined) delete process.env.VITE_SUPPORT_DEEPLINK;
+        else process.env.VITE_SUPPORT_DEEPLINK = previousDeeplink;
       }
       const bundle = files(OUT)
         .filter((f) => f.endsWith(".js"))
