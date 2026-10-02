@@ -118,7 +118,7 @@ class TestTheAddressIsDerived:
 
     def test_the_staff_setting_is_not_a_source_of_the_client_address(self, settings) -> None:
         """Что бы ни стояло в настройке персонала, клиентский адрес от неё не зависит."""
-        settings.AYLA_SUPPORT_CONTACT = "https://max.ru/join/AbCdEf123"
+        settings.AYLA_SUPPORT_CONTACT = "https://max.ru/join/team-chat-invite"
         assert support_contact.client_support_link() == SUPPORT_LINK
 
 
@@ -141,7 +141,7 @@ class TestTheClientLinkIsChecked:
             # получатель внутренних оповещений — тот самый чат сотрудников
             (STAFF_CHAT_ID, support_contact.PROBLEM_STAFF_RECIPIENT),
             # приглашение в чат: каким бы ни был адрес внутреннего чата, он такой
-            ("https://max.ru/join/AbCdEf123", support_contact.PROBLEM_NOT_A_BOT_LINK),
+            ("https://max.ru/join/team-chat-invite", support_contact.PROBLEM_NOT_A_BOT_LINK),
             ("https://max.ru/c/-70000000000001/AbCd", support_contact.PROBLEM_NOT_A_BOT_LINK),
             ("https://max.ru/", support_contact.PROBLEM_NOT_A_BOT_LINK),
             ("http://max.ru/ayla_client_bot", support_contact.PROBLEM_NOT_A_BOT_LINK),
@@ -180,7 +180,7 @@ class TestTheClientLinkIsChecked:
         assert support_contact.client_bot_link_problem() is None
 
     def test_an_empty_link_is_not_a_wrong_link(self, settings) -> None:
-        settings.MAX_BOT_REGISTRY = (SALON_BOT, _client("https://max.ru/join/AbCdEf123"))
+        settings.MAX_BOT_REGISTRY = (SALON_BOT, _client("https://max.ru/join/team-chat-invite"))
         assert support_contact.client_bot_link_problem() is not None
         settings.MAX_BOT_REGISTRY = (SALON_BOT, _client(""))
         assert support_contact.client_bot_link_problem() is None
@@ -191,7 +191,7 @@ class TestDeployCheck:
         self, settings
     ) -> None:
         settings.DEBUG = False
-        settings.MAX_BOT_REGISTRY = (SALON_BOT, _client("https://max.ru/join/AbCdEf123"))
+        settings.MAX_BOT_REGISTRY = (SALON_BOT, _client("https://max.ru/join/team-chat-invite"))
         (found,) = check_client_bot_link_is_the_client_bot(None)
         assert found.id == CLIENT_BOT_LINK_CHECK_ID == "support.W002"
         # Предупреждение: ``manage.py check`` / ``migrate`` на выкладке не падают.
@@ -204,17 +204,17 @@ class TestDeployCheck:
         assert support_contact.PROBLEM_NOT_A_BOT_LINK in found.msg
         # Имя настройки в подсказке есть — значения нет нигде.
         assert "MAX_BOT_<SLUG>_LINK" in (found.hint or "")
-        assert "AbCdEf123" not in found.msg + (found.hint or "")
+        assert "team-chat-invite" not in found.msg + (found.hint or "")
 
     def test_the_client_bot_is_silent(self, settings) -> None:
         settings.DEBUG = False
-        settings.MAX_BOT_REGISTRY = (SALON_BOT, _client("https://max.ru/join/AbCdEf123"))
+        settings.MAX_BOT_REGISTRY = (SALON_BOT, _client("https://max.ru/join/team-chat-invite"))
         assert len(check_client_bot_link_is_the_client_bot(None)) == 1
         settings.MAX_BOT_REGISTRY = (SALON_BOT, CLIENT_BOT)
         assert check_client_bot_link_is_the_client_bot(None) == []
 
     def test_debug_contour_is_silent(self, settings) -> None:
-        settings.MAX_BOT_REGISTRY = (SALON_BOT, _client("https://max.ru/join/AbCdEf123"))
+        settings.MAX_BOT_REGISTRY = (SALON_BOT, _client("https://max.ru/join/team-chat-invite"))
         settings.DEBUG = False
         assert len(check_client_bot_link_is_the_client_bot(None)) == 1
         settings.DEBUG = True
@@ -233,7 +233,7 @@ class TestTheStaffButtonIsNotTouched:
 
     def test_the_staff_setting_does_not_trip_the_client_check(self, settings) -> None:
         settings.DEBUG = False
-        settings.MAX_BOT_REGISTRY = (SALON_BOT, _client("https://max.ru/join/AbCdEf123"))
+        settings.MAX_BOT_REGISTRY = (SALON_BOT, _client("https://max.ru/join/team-chat-invite"))
         settings.AYLA_SUPPORT_CONTACT = "@ayla_support"
         assert len(check_client_bot_link_is_the_client_bot(None)) == 1
         settings.MAX_BOT_REGISTRY = (SALON_BOT, CLIENT_BOT)
