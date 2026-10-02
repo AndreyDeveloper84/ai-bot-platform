@@ -65,7 +65,7 @@ class TestPostCheckRevise:
     def test_revise_prefixes_text(self):
         post = PostCheckResult(verdict=PostCheckVerdict.REVISE)
         r = compose(_skill_result(reply_text="I am certain it helps"), post_check=post)
-        assert r.text.startswith("Пожалуйста, обратите внимание")
+        assert r.text.startswith("Пожалуйста, обрати внимание, что я не врач. ")
         assert "I am certain it helps" in r.text
         assert r.safety_revised is True
 

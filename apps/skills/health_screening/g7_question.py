@@ -2,7 +2,13 @@
 
 The registered owner contract (immutable record
 ``docs/safety/reviews/OWNER_RULINGS_S1_G7_QUESTION_CONTRACT_2026-09-21.md``,
-RECORD SHA-256 ``b4f2f3f11045f5527b2c16f616bf4116e15c682ab309e54ccbea1d1f7c3597d9``):
+RECORD SHA-256 ``b4f2f3f11045f5527b2c16f616bf4116e15c682ab309e54ccbea1d1f7c3597d9``;
+the exact TEXT of the question — form of address «ты» — is superseded by the
+immutable record
+``docs/safety/reviews/OWNER_RULINGS_S1_G7_QUESTION_ADDRESS_FORM_2026-10-01.md``,
+RECORD SHA-256 ``350ff8b996cd5bbfe4c8d54716945fe5e8a0a09f66c29b3fcff24b8655c061e3``,
+owner ruling 01.10.2026, DRF-2712: clinical content unchanged, only the form of
+address):
 
 * G7 is a FALLBACK after G1–G6 (решение 1) — the classifier reads it last;
 * an ambiguous G7 message gets exactly ONE question, ``health_screening.g7``,
@@ -58,9 +64,10 @@ logger = logging.getLogger(__name__)
 #: The one question id every surface binds the next reply to ([OD-BOT §170] решение 2).
 G7_QUESTION_ID = "health_screening.g7"
 
-#: [OD-BOT §170] решение 2 — verbatim. Do not edit; a new owner ruling supersedes it.
+#: [OD-BOT §170] решение 2 в редакции record 01.10.2026 (форма обращения «ты»,
+#: DRF-2712) — verbatim. Do not edit; a new owner ruling supersedes it.
 G7_QUESTION_TEXT = (
-    "Сейчас есть хотя бы один из признаков: кажется, что вы вот-вот потеряете сознание; "
+    "Сейчас есть хотя бы один из признаков: кажется, что ты вот-вот потеряешь сознание; "
     "трудно самостоятельно стоять, говорить или дышать; появилась спутанность; "
     "состояние быстро ухудшается?"
 )
