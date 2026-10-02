@@ -128,14 +128,24 @@ def check_llm_path() -> dict[str, Any]:
 
     start = time.monotonic()
     try:
-        from apps.llm.health import read_path_state
+        from apps.llm.health import read_path_state, read_reserve_state
 
         state = read_path_state()
+        # DRF-2688 — резервный вендор, отдельным полем: ``state`` говорит,
+        # кто отвечает сейчас, ``reserve`` — есть ли куда уйти. ``primary``
+        # при ``reserve.state == "down"`` — одиночная точка отказа.
+        reserve = read_reserve_state()
         return {
             "ok": True,
             "error": None,
             "duration_ms": int((time.monotonic() - start) * 1000),
             **state,
+            "reserve": {
+                "state": reserve["state"],
+                "provider": reserve["provider"],
+                "key_rejected": reserve["key_rejected"],
+                "checked_at": reserve["checked_at"],
+            },
         }
     except Exception as exc:  # noqa: BLE001 — health never raises
         logger.exception("health.check_llm_path.error")
