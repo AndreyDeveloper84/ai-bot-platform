@@ -1,7 +1,7 @@
 """BrandVoiceConfig skeleton (DRF-445 / Sprint 2 / E1).
 
-Sprint-1 debt clear-up: PHASE0_DESIGN.md §3.1 originally listed
-`brand_voice FK` on Tenant. Sprint 1 shipped Tenant without it (scope
+Sprint-1 debt clear-up: mysite/docs/arch/PHASE0_DESIGN.md §3.1 originally
+listed `brand_voice FK` on Tenant. Sprint 1 shipped Tenant without it (scope
 narrowed). Sprint 2 lands the *shell* so the schema migration is clean
 and Sprint 3+ AI orchestrator can wire prompt-composition through it.
 
