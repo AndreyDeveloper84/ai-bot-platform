@@ -461,6 +461,51 @@ describe("прямой вход на экран времени (перезагр
   });
 });
 
+describe("прямой вход на промежуточные шаги", () => {
+  it("«специалист» по ссылке при чужом черновике — имя выбранного мастера не теряется, даже если сервер имён не отдал", async () => {
+    // Так сюда приходит и «Изменить специалиста» с подтверждения. Услугу
+    // пути называет адрес; мастер и его имя — этот экран. Если бы услугу
+    // выравнивал только экран времени, смена услуги стёрла бы уже
+    // записанное имя мастера, и восстановить его было бы неоткуда.
+    mockedMaster.mockRejectedValue(new Error("offline"));
+    mockedService.mockRejectedValue(new Error("offline"));
+    leaveForeignDraft();
+    renderFlow("/customer/booking/provider?service=svc-1");
+    await userEvent.click(
+      await screen.findByRole("button", { name: PROVIDER_CTA("Екатерина С.") }),
+    );
+
+    await pickTheTenOClockSlot();
+
+    expect(slotRequests()).toEqual([{ masterId: "m-1", serviceId: "svc-1" }]);
+    expect(shownDraft()).toMatchObject({
+      serviceId: "svc-1",
+      masterId: "m-1",
+      masterName: "Екатерина С.",
+      visitAt: SLOT,
+    });
+  });
+
+  it("полный список мастеров по ссылке, пустой черновик — список по услуге из адреса, она же в черновике", async () => {
+    renderFlow("/customer/book/master?service=svc-1");
+
+    await userEvent.click(await screen.findByText("Мария К."));
+
+    expect(masterListRequests()).toEqual(["svc-1"]);
+    expect(shownDraft()).toMatchObject({ serviceId: "svc-1", masterId: "m-9", masterName: "Мария К." });
+  });
+
+  it("полный список мастеров по ссылке, чужой черновик — услуга из адреса, не чужая", async () => {
+    leaveForeignDraft();
+    renderFlow("/customer/book/master?service=svc-1");
+
+    await userEvent.click(await screen.findByText("Мария К."));
+
+    expect(masterListRequests()).toEqual(["svc-1"]);
+    expect(shownDraft()).toMatchObject({ serviceId: "svc-1", masterId: "m-9", visitAt: null });
+  });
+});
+
 describe("подтверждение — настоящий экран, подменена только ручка создания", () => {
   it("P0-07. показывает и отправляет выбранные услугу и мастера, а не чужие", async () => {
     leaveForeignDraft();
