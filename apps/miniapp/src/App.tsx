@@ -39,7 +39,7 @@
  */
 
 import type React from "react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Link,
   Navigate,
@@ -59,6 +59,7 @@ import {
 import { adminLandingPath, isAdminTabAllowed } from "./lib/admin-tabs";
 import { canOpenSalonPilot } from "./lib/salon-pilot";
 import { getStartPayload, parseStartRoute } from "./lib/max-sdk";
+import { isCustomerSurfacePath } from "./lib/customer-surface";
 import { channelIdentity } from "./lib/identity";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { OpenFromMaxScreen } from "./components/OpenFromMaxScreen";
@@ -534,20 +535,30 @@ function adminRouteElements(me: MeResponse): React.ReactNode {
  * level up.
  *
  * `enabled` gates it on a finished `/me` boot, matching the previous
- * behaviour of only redirecting after auth resolved. The ref makes it
+ * behaviour of only redirecting after auth resolved. It is
  * once-per-session: after the jump the user owns the navigation, and
  * `start_param` does not change for the life of the webview, so
  * re-running it would fight every subsequent `navigate`.
+ *
+ * DRF-2687 — возвращает `true`, пока переход ещё не сделан, и вызывающий
+ * в это время НЕ монтирует ролевое дерево (держит сплэш). Раньше дерево
+ * монтировалось на «/» одновременно с переходом, и исход зависел от
+ * порядка эффектов: `<Navigate>` catch-all дерева против `navigate`
+ * отсюда. В проде побеждал этот хук, под StrictMode (dev) — catch-all.
+ * Теперь дерево впервые монтируется уже на целевом адресе, и порядок
+ * эффектов ничего не решает. Без payload это один лишний кадр сплэша,
+ * неотличимый от загрузки `/me`.
  */
-function useStartParamRedirect(enabled: boolean): void {
+function useStartParamRedirect(enabled: boolean): boolean {
   const navigate = useNavigate();
-  const done = useRef(false);
+  const [handled, setHandled] = useState(false);
   useEffect(() => {
-    if (!enabled || done.current) return;
+    if (!enabled || handled) return;
     const target = parseStartRoute(getStartPayload());
-    done.current = true;
     if (target) navigate(target, { replace: true });
-  }, [enabled, navigate]);
+    setHandled(true);
+  }, [enabled, handled, navigate]);
+  return enabled && !handled;
 }
 
 /**
@@ -1563,7 +1574,7 @@ function AppShell() {
     void loadMe();
   }, [loadMe]);
 
-  useStartParamRedirect(boot.status === "ready");
+  const startRedirectPending = useStartParamRedirect(boot.status === "ready");
 
   // Round-1 FOLLOW_UP cleanup (#79): when the resolved role pattern
   // leaves nothing to choose between, drop any stale
@@ -1621,6 +1632,9 @@ function AppShell() {
     }
 
     if (boot.status === "ready" && boot.me) {
+      // DRF-2687 — ролевое дерево не монтируется, пока не выполнен переход
+      // по payload кнопки (см. `useStartParamRedirect`).
+      if (startRedirectPending) return <SplashScreen />;
       return (
         <SurfaceModeContext.Provider value={surfaceMode}>
           <RoleSurface
@@ -1659,6 +1673,7 @@ function RoleSurface({
 }) {
   const hasAdmin = me.is_owner || me.is_admin || me.is_receptionist;
   const hasMaster = me.is_master;
+  const location = useLocation();
   // Solo provider hint from W4 (`is_solo_provider(tenant)`) per Tau
   // §3.1 — true only when the tenant has exactly one distinct active
   // person. Missing field → false (graceful fallback for older
@@ -1714,6 +1729,29 @@ function RoleSurface({
     // Ровно та же поверхность, что у обычного клиента (DRF-1469).
     // Выход обратно к «Сменить режим» есть на ней самой, поэтому
     // отдельного поведения для многоролевого больше нет.
+    return <CustomerRoutes />;
+  }
+  // DRF-2687 — третье явное намерение: АДРЕС клиентской поверхности.
+  //
+  // Сотрудник салона пользуется ботом и как клиент. Кнопка из клиентского
+  // чата («Открыть и разрешить» дневник питания, «Мои записи», «Моя цель»,
+  // перенос записи…) несёт payload с целью `/customer/*`, и
+  // `useStartParamRedirect` приводит на неё до первого монтирования
+  // дерева. Но ветки ниже выбирают дерево по роли, а ни в одном рабочем
+  // дереве `/customer/*` нет: catch-all возвращал мастера на
+  // `/master/dashboard`, админа — на его посадку, соло — на
+  // `/solo/my-day`. Согласие на дневник дать было негде (живой проход
+  // 30.09). Теперь тому, у кого есть рабочая роль, на клиентском адресе
+  // отдаётся ровно клиентская поверхность.
+  //
+  // Не трогает `last surface`: кнопка — разовое намерение, следующий
+  // запуск без payload открывает кабинет, как раньше. Обычный клиент сюда
+  // не заходит — у него `CustomerRoutes` и так последняя ветка. Выхода
+  // обратно в кабинет у одноролевого сотрудника с клиентского экрана нет
+  // (кнопка «Сменить режим» — только у многоролевых): закрыть и открыть
+  // приложение. Видимой кнопки не добавлено намеренно — её текст решает
+  // владелец.
+  if ((hasAdmin || hasMaster) && isCustomerSurfacePath(location.pathname)) {
     return <CustomerRoutes />;
   }
   if (isSolo && hasMaster) {
