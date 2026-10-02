@@ -345,11 +345,14 @@ DIALOGUE_READERS: dict[str, DialogueReader] = {
             "ayla_ai_core/orchestrator.py (sync_to_async(store."
             "load_recent_history)). Measured on dev c38b54b8: once per concierge "
             "turn, limit=10, straight from Message rows in the DB (not the Redis "
-            "window), with no filter by consent, type or provenance; an "
-            "assistant sentence saved on one turn was in the provider's messages "
-            "on the next. Safe after erasure only because anonymisation empties "
-            "the column it reads — which the probe proves. If the DB half of "
-            "anonymize_dialogue does not run, these rows still reach the model."
+            "window); an assistant sentence saved on one turn was in the "
+            "provider's messages on the next. Two things make it safe after "
+            "erasure. Anonymisation empties the column it reads — which the "
+            "probe proves. And, since DRF-2700, the reader itself withholds rows "
+            "created at or before the person's latest personal_data withdrawal, "
+            "so a withdrawal whose anonymisation step failed no longer leaves "
+            "these rows reaching the model. It does not filter by type or "
+            "provenance, and the cutoff exists only where a grant was withdrawn."
         ),
     ),
     # ── Not prompt-bound ────────────────────────────────────────────────
