@@ -35,6 +35,7 @@ import logging
 from typing import TYPE_CHECKING
 
 from django.db import transaction
+from django.db.models import Max
 from django.utils import timezone
 
 from apps.audit.services import write_audit
@@ -45,6 +46,8 @@ from apps.eventbus import services as eventbus_services
 from apps.tenancy.context import current_tenant
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     from apps.identity.models import BotUser
 
 logger = logging.getLogger(__name__)
@@ -464,6 +467,37 @@ def has_person_consent(bot_user: "BotUser", consent_type: str) -> bool:
     if not withdrawals:
         return True
     return max(active) > max(withdrawals)
+
+
+def last_personal_data_withdrawal(bot_user: "BotUser") -> datetime | None:
+    """Момент последнего отзыва ``personal_data`` у ЧЕЛОВЕКА; ``None`` — отзыва не было.
+
+    DRF-2700. Это отсечка для чтения переписки в промпт: реплика, сказанная
+    до отзыва, после него модели не отдаётся — независимо от того, успело ли
+    обезличивание переписки отработать. Отзыв снимает согласие сразу, а
+    обезличивание — отдельный шаг каскада, который может упасть и повториться
+    позже (или не повториться); «хранится» в этом окне не значит «можно
+    использовать» — тот же принцип, что у памяти (DRF-2697, ADR-0011 §11.3).
+
+    По всем оболочкам человека (:func:`person_channel_shells`), как и
+    :func:`has_person_consent`: отзыв в Mini App стоит на одной строке, а
+    разговор чата висит на другой.
+
+    Новая выдача согласия отсечку НЕ снимает: согласие, данное сегодня, не
+    возвращает в оборот слова, отозванные вчера. Это же отличает её от
+    :func:`has_person_consent`, которая отвечает на вопрос «можно ли сейчас».
+
+    Предел: отсечка есть только там, где был грант. :func:`withdraw` ставит
+    ``withdrawn_at`` на действующий грант и ничего не пишет, если его не
+    было, — у человека, который отозвал согласие, ни разу его не дав, этой
+    функции опереться не на что.
+    """
+    latest: datetime | None = ConsentRecord.all_tenants.filter(
+        bot_user__in=person_channel_shells(bot_user),
+        consent_type=ConsentRecord.ConsentType.PERSONAL_DATA.value,
+        withdrawn_at__isnull=False,
+    ).aggregate(latest=Max("withdrawn_at"))["latest"]
+    return latest
 
 
 def has_global_consent(

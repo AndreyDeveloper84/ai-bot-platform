@@ -516,7 +516,10 @@ def test_handoff_nullable_staff_id_is_graceful_no_dispatch(settings, monkeypatch
     monkeypatch.setattr("apps.skills.registry.dispatch", lambda ctx: called.append(1))
 
     reply = handoff_to_booking(global_bot_user=gbu, tenant_id=t.id, master_id=master.id)
-    assert "недоступна" in reply.text
+    # DRF-2708 / §47.4: причина здесь — мастер, и слова владельца на неё свои.
+    assert reply.text == (
+        "К этому мастеру сейчас записаться нельзя. Посмотри других — подберём подходящий вариант."
+    )
     # DRF-1492 — T IS resolved on this branch, so the way out is that salon's
     # own catalog, not the whole marketplace. Which argument each of the four
     # call sites passes is the thing that decides this, and it is checkable

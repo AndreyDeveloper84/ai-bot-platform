@@ -556,11 +556,34 @@ class GlobalConversationStore:
         exclude_id: Any | None = None,
         limit: int = 10,
     ) -> list[Any]:
+        from apps.consent.services import last_personal_data_withdrawal
         from apps.conversations.models import Message
 
         qs = Message.all_tenants.filter(conversation=conversation).order_by("-created_at")
         if exclude_id is not None:
             qs = qs.exclude(id=exclude_id)
+
+        # DRF-2700 — согласие проверяется в точке ЧТЕНИЯ. Реплики, сказанные до
+        # последнего отзыва согласия, модели не отдаются, даже если строки ещё
+        # целы: обезличивание — отдельный шаг каскада, он может упасть (Redis
+        # переписки недоступен) при уже снятом согласии. Замер на c38b54b8:
+        # в этом окне прежняя реплика уходила модели на следующих ходах.
+        #
+        # Отказ чтения отсечки закрывает историю целиком, а не открывает её:
+        # ход без истории — неудобство, ход с отозванными словами — нарушение.
+        try:
+            cutoff = last_personal_data_withdrawal(conversation.bot_user)
+        except Exception:  # noqa: BLE001 — fail closed: no cutoff, no history
+            logger.exception(
+                "orchestrator.concierge.history_consent_cutoff_failed conversation=%s "
+                "— history withheld",
+                getattr(conversation, "id", None),
+            )
+            return []
+        if cutoff is not None:
+            # В сам момент отзыва реплика уже не говорится — граница строгая.
+            qs = qs.filter(created_at__gt=cutoff)
+
         # Last N (DESC) reversed → chronological, per the Protocol contract.
         return list(reversed(qs[:limit]))
 

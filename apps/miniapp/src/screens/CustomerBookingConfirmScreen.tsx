@@ -143,7 +143,13 @@ const C1_UNAVAILABLE_SLUG = "unavailable";
  * (`docs/OPEN_DECISIONS.md` §47.4). Общая фраза («…подберём похожее») честна
  * там, где недоступна услуга: похожей бывает услуга, а при смене мастера
  * потребность и услуга остаются теми же.
+ *
+ * Фраза об услуге говорит только об услуге: до DRF-2708 она называла ещё и
+ * «специалиста» и вела к «другим мастерам», хотя ветка — про услугу.
  */
+const SERVICE_NOT_BOOKABLE_REFUSAL =
+  "Эта услуга сейчас недоступна. Посмотри другие — подберём похожее.";
+
 const SERVICE_NOT_BOOKABLE_SLUGS = new Set([
   "service_not_found",
   "service_not_offered",
@@ -173,6 +179,11 @@ const MASTER_NOT_BOOKABLE_SLUGS = new Set([
   // нельзя. Без этой строки слаг падал бы в ветку `other`, а она рисует
   // `detail` бэкенда как есть — служебную английскую фразу.
   "master_catalog_unlinked",
+  // DRF-1933 / DRF-2708 — у строки мастера нет id профиля в каталоге, и
+  // создание отвечает 409 `master_unbookable`. Причина та же, что у
+  // соседей: к этому мастеру записаться нельзя. Без этой строки слаг
+  // падал в ветку `other` — с общей фразой вместо слов владельца (§47.4).
+  "master_unbookable",
 ]);
 
 /** Payment choice per C7.4 / AMD-002 — online is optional (D6). */
@@ -809,8 +820,7 @@ export function CustomerBookingConfirmScreen() {
       {err?.kind === "service_not_bookable" && (
         <div className="callout" role="alert">
           <p style={{ margin: 0 }}>
-            Эта услуга или специалист сейчас недоступны. Посмотри других
-            мастеров — подберём похожее.
+            {SERVICE_NOT_BOOKABLE_REFUSAL}
           </p>
           <button
             type="button"
@@ -818,7 +828,7 @@ export function CustomerBookingConfirmScreen() {
             style={{ marginTop: "var(--s-3)" }}
             onClick={() => navigate("/customer/catalog")}
           >
-            Посмотреть других мастеров
+            Посмотреть другие
           </button>
         </div>
       )}
