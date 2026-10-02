@@ -255,9 +255,24 @@ def test_a_value_and_a_path_with_spaces_are_not_citations(tmp_path: Path, code: 
 
 def test_an_ordinary_word_that_is_also_a_document_name_is_not_a_reference(tmp_path: Path) -> None:
     """``D`` is a document here (docs/D.md). Alone it is a letter; before a section — a citation."""
-    refs, problems = _bare(tmp_path, "# plan D for the on-call\nD = 1\n# D §6")
+    refs, problems = _bare(tmp_path / "letter", "# plan D for the on-call\nD = 1\n# D §6")
     assert [(r.where, r.doc, r.section) for r in refs] == [("app.py:3", "D.md", "6")]
     assert problems == []  # empty-assert-ok: one reference seen, asserted above
+    # …and a word that is NOT a document does not become one by standing before a section.
+    refs, problems = _bare(tmp_path / "word", "# решение §6, пункт §99\n# D §6")
+    assert [(r.where, r.doc) for r in refs] == [("app.py:2", "D.md")]
+    assert problems == []  # empty-assert-ok: one reference seen, asserted above
+
+
+def test_a_slash_earlier_on_a_plain_line_does_not_hide_a_bare_name(tmp_path: Path) -> None:
+    """Only a QUOTED path with spaces is skipped; ``apps/x.py … Gone.md`` is still a citation.
+
+    The first cut of the rule looked for a slash anywhere before the name: it hid
+    two dead references in this very tree and made the «another repository» rule
+    unfalsifiable.
+    """
+    red = _bare(tmp_path, "# see apps/x/y.py and then Gone.md")[1]
+    assert len(red) == 1 and "MISSING DOCUMENT Gone.md" in red[0]
 
 
 def test_the_real_tree_holds_bare_name_references() -> None:

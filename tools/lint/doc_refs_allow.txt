@@ -29,5 +29,6 @@ tests/tools/test_pii_guard.py  # строки-фикстуры сторожа П
 apps/observability/tests/test_surface_state.py  # docs/SURFACE_STATE.md — старый путь, который НЕ должен отслеживаться: проверка отсутствия
 tests/test_deploy_dev_backup.py  # docs/SURFACE_STATE.md — тот же старый путь в объяснении, почему файл выкладки не отслеживается
 tools/lint/doc_refs_guard.py  # примеры форм ссылки в документации сторожа
+apps/planning_rules/data/planning-rules-registry.yaml  # артефакт, синхронизируемый из ayla-knowledge под sha256 — править здесь нельзя; путь с пробелами в его прозе ведёт в ayla-knowledge
 scripts/fix_ayla_refs.py  # образцы меток, которые скрипт переписывает (single-assistant-identity → ayla-identity-and-brand), не ссылки
 tests/tools/test_doc_refs_guard.py  # фикстуры узлов сторожа — живые и мёртвые ссылки нарочно

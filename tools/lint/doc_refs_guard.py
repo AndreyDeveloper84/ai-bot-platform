@@ -60,7 +60,9 @@ at run time, not a basis, and is not checked either.
 * a name that is the whole of a quoted string (``"note.md"``) — a value the
   code handles (a file it writes, a fixture), not a citation; and a name at
   the end of a path with spaces (``ayla-knowledge/07 UX/… Contract.md``) —
-  the path names its own root, and this guard does not parse it.
+  the path names its own root, and this guard does not parse it. The path
+  must stand in quotes or backticks: unquoted, its last word is read as a
+  bare name.
 * whether the cited document SAYS what the code claims — only that it and
   the section exist;
 * documents in ``docs/`` citing other documents (prose, not code);
@@ -104,10 +106,11 @@ HERE = Path(__file__).resolve().parent
 ALLOW_FILE = HERE / "doc_refs_allow.txt"
 
 #: Number of entries in doc_refs_allow.txt — the list may only shrink.
-#: 16 → 20 with DRF-2682: the guard began to read bare names, and what it
+#: 16 → 21 with DRF-2682: the guard began to read bare names, and what it
 #: found there had been dead all along — three documents living outside git
-#: (register item 67) and one script that quotes the labels it rewrites.
-ALLOW_CEILING = 20
+#: (register item 67), one script that quotes the labels it rewrites, and
+#: one artefact synced from another repository under a checksum.
+ALLOW_CEILING = 21
 
 #: The owner's summary that «§N свода» refers to (form 4).
 SVOD_DOC = "docs/OWNER_DECISIONS_2026-09-11.md"
@@ -151,8 +154,10 @@ def _is_a_value_or_a_spaced_path(line: str, start: int, end: int) -> bool:
     before, after = line[start - 1 : start], line[end : end + 1]
     if before and before in "\"'" and after == before:
         return True
+    # Only inside a quoted span: a slash somewhere earlier on a plain comment
+    # line says nothing about this name.
     opened = max(line.rfind(q, 0, start) for q in _QUOTES)
-    return "/" in line[opened + 1 : start]
+    return opened >= 0 and "/" in line[opened + 1 : start]
 
 
 def _bare_refs(where: str, line: str, taken: list[tuple[int, int]], stems: set[str]) -> list[Ref]:
