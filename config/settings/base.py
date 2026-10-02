@@ -508,6 +508,15 @@ if "DRE_SHADOW_ENABLED" in os.environ:
 if "CLAIM_GATE_SHADOW_ENABLED" in os.environ:
     CLAIM_GATE_SHADOW_ENABLED = os.environ["CLAIM_GATE_SHADOW_ENABLED"]
 
+# Теневое чтение знания о процедуре (DRF-2729). Тот же способ чтения: ключа
+# нет, пока переменная не задана; три «выкл» различает `read_flag()` в
+# `apps/orchestrator/knowledge_reader.py`. Отдельный флаг: включённый, он
+# добавляет к ходу консьержа с разрешённой услугой вызов каталога и кладёт
+# лицензию знания в результат хода для теневого затвора выше. Модель знания не
+# видит, и ни одного ответа он НЕ меняет.
+if "KNOWLEDGE_READ_SHADOW_ENABLED" in os.environ:
+    KNOWLEDGE_READ_SHADOW_ENABLED = os.environ["KNOWLEDGE_READ_SHADOW_ENABLED"]
+
 # #433 umbrella — HANDLER_EXCEPTION → DLQ threshold. A handler that
 # raises gets retried by Ayla per §6.3; after this many failed
 # attempts (counted per event_id + handler), bot-platform upserts a
