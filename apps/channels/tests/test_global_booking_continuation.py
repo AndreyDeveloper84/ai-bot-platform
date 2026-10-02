@@ -392,6 +392,103 @@ class TestTheMeasuredDefect:
         assert all("мастера, которые могут подойти" not in call["text"] for call in mock_send)
 
 
+class TestTheDateSaidAloud:
+    """DRF-2710 — a booking continued by VOICE, against the same one typed.
+
+    A date is typed as «16 сентября» and said as «шестнадцатого сентября».
+    ``parse_explicit_date`` reads the first; the second reached it verbatim,
+    was not a date, and the turn fell through to the concierge — which
+    answers with the master list. On the wire that is the funnel starting
+    over, for a person who answered the question they were asked.
+
+    Measured on dev ffd6622b before the fix: typed → the continuation took the
+    turn; spoken → ``wired.concierge == ["Шестнадцатого сентября."]``.
+
+    What is asserted is WHO took the turn and WHICH day was stored — not what
+    the picker then drew: that part is the booking skill's, mocked here.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _voice_on(self, settings):
+        from apps.speech import registry
+
+        settings.VOICE_INPUT_ENABLED = True
+        settings.VOICE_ALLOWED_USER_IDS = "*"
+        settings.VOICE_CROSS_BORDER_ALLOWED = True
+        settings.VOICE_STT_PROVIDER = "fake"
+        registry.set_provider_for_tests(None)
+        yield
+        registry.set_provider_for_tests(None)
+
+    @staticmethod
+    def _say(kind: str, text: str) -> None:
+        if kind == "typed":
+            GlobalMaxHandler()(_raw(_typed(text, "mm-said")))
+            return
+        from unittest.mock import patch
+
+        from apps.speech import registry
+        from apps.speech.providers.fake import FakeSpeechProvider
+        from apps.speech.tests.test_ogg import opus_head, page
+
+        registry.set_provider_for_tests(FakeSpeechProvider(text=text))
+        voice = {
+            "update_type": "message_created",
+            "timestamp": 1731320000000,
+            "message": {
+                "sender": {"user_id": _USER_ID, "name": "Иван"},
+                "recipient": {"chat_id": _CHAT_ID, "chat_type": "dialog"},
+                "body": {
+                    "mid": "mm-said",
+                    "seq": 2,
+                    "text": "",
+                    "attachments": [
+                        {
+                            "type": "audio",
+                            "payload": {"id": 7, "url": "https://a.oneme.ru/v.ogg?sig=S"},
+                        }
+                    ],
+                },
+            },
+        }
+        ogg = page(0, opus_head(0), flags=2) + page(2 * 48_000, b"x", seq=1)
+        with patch("apps.channels.max.voice_turn.download_audio", return_value=ogg):
+            GlobalMaxHandler()(_raw(voice))
+
+    @pytest.mark.parametrize(
+        ("kind", "text"),
+        [
+            ("typed", "16 сентября"),
+            ("voice", "Шестнадцатого сентября."),
+            ("voice", "На шестнадцатое сентября, пожалуйста."),
+        ],
+    )
+    def test_the_date_continues_the_booking_however_it_arrived(
+        self, wired, salon, kind: str, text: str
+    ) -> None:
+        tenant, master, catalog = salon
+        _tap_with_service(tenant, master, catalog["lymph"].id)
+
+        self._say(kind, text)
+
+        assert wired.concierge == []
+        stored = load_time_preference(_global_conversation())
+        assert stored is not None
+        # SALON_TODAY is 25.08.2026; the 16th of September is 22 days on.
+        assert stored.day_offset == 22
+
+    def test_a_spoken_turn_that_is_not_about_time_still_belongs_to_the_concierge(
+        self, wired, salon
+    ) -> None:
+        """The control: voice is not a licence to swallow the turn either."""
+        tenant, master, catalog = salon
+        _tap_with_service(tenant, master, catalog["lymph"].id)
+
+        self._say("voice", "А сколько это стоит?")
+
+        assert wired.concierge == ["А сколько это стоит?"]
+
+
 class TestATypedTurnThatIsNotAboutTime:
     def test_it_still_belongs_to_the_concierge(self, wired, salon) -> None:
         """A live booking is not a licence to swallow the next turn. «А
