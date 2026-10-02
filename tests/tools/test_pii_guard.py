@@ -90,11 +90,162 @@ class TestChannelIds:
         assert g.DIGIT_RUN.search(fake_id) is not None  # цифровой ряд на месте
         assert g.scan_text("apps/x.py", "user_id = " + fake_id, known_hashes=frozenset()) == []
 
-    def test_unmasked_handle_in_docs_only(self):
+    def test_unmasked_handle_in_docs(self):
         assert len(_scan("клиент max:26071234567", rel="docs/report.md")) == 1
         assert _scan("клиент max:260…", rel="docs/report.md") == []
-        # в коде голая ручка не проверяется — только в docs/
+
+    def test_unmasked_handle_outside_docs(self):
+        """DRF-2744: до листа ``max:<цифры>`` в коде не проверялся вовсе.
+
+        Вне документов заведомо выдуманное значение проходит (примеры в
+        докстрингах), невыдуманное — находка; тестовые файлы не судятся.
+        """
+        real_looking = "handle = 'max:" + "58" + "20" + "69" + "137" + "'"
+        assert len(g.scan_text("apps/x.py", real_looking)) == 1
+        assert len(g.scan_text("apps/replay/fixtures/voice/x.yaml", real_looking)) == 1
         assert g.scan_text("apps/x.py", "handle = 'max:26071234567'") == []
+        assert g.scan_text("apps/channels/tests/test_x.py", real_looking) == []
+
+
+# Синтетические идентификаторы, собранные из частей: сплошной цифровой ряд в
+# дереве не лежит, и «выдуманными» по правилу сторожа они не считаются (нет
+# четырёх одинаковых цифр подряд, нет 1234 / 4321 / 0000) — как настоящие.
+_ID9 = "58" + "20" + "69" + "137"
+_ID12 = "584" + "206" + "913" + "775"
+
+#: Каждая форма носителя из листа DRF-2744 — и ещё три, найденные в дереве в
+#: день замера (JSON с кавычками и без, запись через «=» с пробелами).
+_CARRIER_FORMS = [
+    ("user_id: {id}", _ID9),
+    ("user_id={id}", _ID9),
+    ("channel_user_id={id}", _ID9),
+    ('"channel_user_id": "{id}"', _ID9),
+    ("recipient.chat_id = {id}", _ID9),
+    ('{{"chat_type": "dialog", "chat_id": {id}}}', _ID9),
+    ("POST botapi.max.ru/messages?chat_id={id} → 404", _ID9),
+    ("ext_user={id}", _ID9),
+    ("MAX-идентификатор {id}", _ID9),
+    ("MAX id {id}", _ID9),
+    ("MAX ID: {id}", _ID12),
+    ("пользователь {id} написал боту", _ID12),
+]
+
+#: Безобидные числа тех родов, что встретились на ОТЛОЖЕННЫХ деревьях (каталог,
+#: handoffs, architecture-prompts, ayla-knowledge, beautygo-mobile — 1181 файл,
+#: 141 цифровой ряд длиной 7–12, ни одного срабатывания; на них правило не
+#: настраивалось). Здесь — по одному представителю рода, собранному из частей.
+_BENIGN = [
+    "correlation_id: c4d5e6f7-a8b9-0123-cdef-" + "456" + "789" + "012" + "345",  # хвост UUID
+    "выгрузка от " + "2026" + "0915" + "1730",  # ГГГГММДДЧЧММ
+    "настоящий вывод git в логе job " + "104" + "882" + "615" + "937",  # номер задания CI
+    "run " + "344" + "827" + "444" + "36" + ", SHA e0640f3",  # номер прогона CI
+    "timestamp: " + "17313" + "20000",  # unix-время, 10 цифр
+    "дата " + "2026" + "09" + "15",  # 8 цифр
+    "цена " + "1" + "250" + "000" + " ₽ за курс",  # 7 цифр
+    "строк в журнале: " + "8" + "675" + "309",  # счётчик
+    "user_id человека берётся из initData",  # имя без числа
+    "user_id=260…",  # маска
+    "chat_id=<id>",  # заполнитель
+    "tenant_id=" + "58" + "20" + "69" + "137",  # имя вне закрытого списка
+]
+
+
+class TestChannelIdForms:
+    """DRF-2744 — идентификатор канала ловится по форме носителя, а не только как ``max:<цифры>``.
+
+    До листа сторож видел идентификатор человека в канале двумя способами:
+    шесть известных — по хешу, остальные — только в виде ``max:<цифры>`` и
+    только в ``docs/``. Тот же идентификатор в виде ``user_id=<цифры>`` или
+    ``"chat_id": <цифры>`` проходил — и в день замера лежал в дереве.
+    """
+
+    @pytest.mark.parametrize(("form", "ident"), _CARRIER_FORMS)
+    @pytest.mark.parametrize("rel", ["docs/report.md", "apps/channels/max/outbound.py"])
+    def test_each_carrier_form_is_exactly_one_finding(self, rel, form, ident):
+        text = "строка до\n" + form.format(id=ident) + "\nстрока после\n"
+
+        findings = g.scan_text(rel, text)
+
+        assert len(findings) == 1, findings
+        assert findings[0].startswith(f"{rel}:2:")
+        assert ident not in findings[0], "сторож не должен печатать значение"
+
+    @pytest.mark.parametrize("line", _BENIGN)
+    def test_benign_numbers_of_the_held_out_kinds_pass(self, line):
+        # сначала присутствие: тот же вызов на идентификаторе находку ДАЁТ —
+        # иначе «пусто» ниже верно и для выключенного правила
+        assert len(g.scan_text("docs/report.md", "user_id=" + _ID9)) == 1
+        assert len(g.scan_text("apps/x.py", "user_id=" + _ID9)) == 1
+        assert g.scan_text("docs/report.md", line) == [], line
+        assert g.scan_text("apps/x.py", line) == [], line
+
+    def test_the_benign_list_is_seen_by_the_patterns(self):
+        """Положительная стража: молчание выше — решение правила, а не слепота шаблона."""
+        uuid_tail, stamp, job = _BENIGN[0], _BENIGN[1], _BENIGN[2]
+        # отметка времени и номер задания шаблон ВИДИТ и отпускает по правилу
+        assert g.BARE_TWELVE_DIGITS.search(stamp) is not None
+        assert g.BARE_TWELVE_DIGITS.search(job) is not None
+        # хвост UUID не виден по построению: слева дефис
+        assert g.BARE_TWELVE_DIGITS.search(uuid_tail) is None
+        # то же число задания без подписи — уже находка
+        unlabelled = job.replace("в логе job ", "в логе ")
+        assert len(g.scan_text("docs/report.md", unlabelled)) == 1
+
+    def test_masked_and_synthetic_ids_pass(self):
+        seen = g.KEYED_CHANNEL_ID.search("user_id=" + "1234567")
+        assert seen is not None, "шаблон обязан видеть выдуманный идентификатор"
+        # присутствие: та же форма с невыдуманным значением — находка
+        assert len(g.scan_text("docs/x.md", "user_id=" + _ID9)) == 1
+        assert g.scan_text("docs/x.md", "user_id=" + "1234567") == []
+        assert g.scan_text("docs/x.md", "chat_id: " + "7" * 9) == []
+        assert g.scan_text("docs/x.md", "channel_user_id=" + _ID9[:3] + "…") == []
+
+    def test_tests_are_not_judged_by_form(self):
+        """В тестах идентификаторы — фикстуры; по хешу известные ловятся и там."""
+        line = "channel_user_id=" + _ID9
+        assert len(g.scan_text("apps/x.py", line)) == 1
+        for rel in (
+            "apps/channels/tests/test_handler.py",
+            "tests/tools/test_x.py",
+            "apps/miniapp/src/App.test.tsx",
+            "apps/identity/conftest.py",
+        ):
+            assert g.is_test_path(rel), rel
+            assert g.scan_text(rel, line) == [], rel
+        hashes = frozenset({hashlib.sha256(_ID9.encode()).hexdigest()})
+        known = g.scan_text("apps/channels/tests/test_handler.py", line, known_hashes=hashes)
+        assert len(known) == 1 and "§12" in known[0]
+
+    def test_a_known_id_is_named_once_not_twice(self):
+        hashes = frozenset({hashlib.sha256(_ID9.encode()).hexdigest()})
+        findings = g.scan_text("docs/x.md", "user_id=" + _ID9, known_hashes=hashes)
+        assert len(findings) == 1 and "§12" in findings[0]
+
+    def test_the_key_list_is_the_decided_one(self):
+        """Закрытый список литералом: новое имя — правка здесь, а не побочный эффект."""
+        assert set(g.CHANNEL_ID_KEYS) == {
+            "channel_user_id",
+            "max_user_id",
+            "ext_user_id",
+            "ext_user",
+            "user_id",
+            "chat_id",
+            "sender_id",
+            "recipient_id",
+        }
+
+    def test_what_the_form_rule_does_not_see_is_named(self):
+        """Пределы правила, названные узлом, — чтобы их не приняли за покрытие.
+
+        1. Слова между именем и числом: «chat_id владельца <цифры>».
+        2. Отдельно стоящее число короче двенадцати цифр без имени рядом: такие
+           ряды в дереве — даты, счётчики, номера прогонов; по форме их от
+           идентификатора не отличить, а настоящие идентификаторы в день замера
+           были как раз восьми- и девятизначными.
+        """
+        assert g.DIGIT_RUN.search(_ID9) is not None
+        assert g.scan_text("docs/x.md", "chat_id владельца на пилоте " + _ID9) == []
+        assert g.scan_text("docs/x.md", "написал человек " + _ID9 + " вчера") == []
 
 
 class TestFiles:
