@@ -36,9 +36,29 @@ Masks that pass: ``+7 9xx xxx-xx-xx``, ``<имя>@example.org``, ``max:831…``.
    is refused.
 5. **Unmasked channel handles in documents** — ``max:<digits>`` in
    ``docs/`` must be written ``max:123…``.
+6. **Channel identifiers by the form of their carrier** (DRF-2744) — outside
+   test files: ``user_id=<digits>``, ``"chat_id": <digits>``,
+   ``channel_user_id: <digits>`` and the other names in
+   :data:`CHANNEL_ID_KEYS`; «MAX-идентификатор <digits>» / «MAX id <digits>»;
+   and a stand-alone run of exactly twelve digits that is not a UUID tail, a
+   timestamp or a number labelled ``job`` / ``run``. Seven to twelve digits;
+   masked (``user_id=260…``) and plainly invented values (``1234567``,
+   ``7777777``) pass.
+
+   Measured on the day it was added, rule frozen first: 1181 files of five
+   other trees it was not built on carried 141 digit runs of 7–12 digits and
+   produced no finding; this tree produced 26 (25 outside the allowlist), every
+   one a real-looking
+   identifier written as ``user_id=`` / ``chat_id=``.
 
 # What it deliberately does NOT check
 
+* A channel identifier with words between its name and its digits
+  («chat_id владельца <digits>»), and a stand-alone identifier shorter than
+  twelve digits with no name next to it. By form those are indistinguishable
+  from dates, counters and run numbers — and the real identifiers found on
+  the day of the measurement were eight and nine digits long. The form rule
+  narrows the hole; it does not close it.
 * Names. A name is not a pattern.
 * Addresses, birth dates, health facts. Same reason.
 * History. This guard runs on the files being committed; a branch created
@@ -123,6 +143,56 @@ EMAIL = re.compile(r"(?<![\w.])([A-Za-z0-9._%+-]+)@([A-Za-z0-9.-]+\.[A-Za-z]{2,}
 DIGIT_RUN = re.compile(r"(?<!\d)\d{7,12}(?!\d)")
 CHANNEL_HANDLE_IN_DOCS = re.compile(r"\bmax:(\d{7,})\b")
 
+# --- DRF-2744: идентификатор канала по ФОРМЕ НОСИТЕЛЯ, а не по значению -------
+#
+# До этого листа сторож узнавал идентификатор человека в канале двумя
+# способами: шесть известных — по хешу, остальные — только в виде
+# ``max:<цифры>`` и только в ``docs/``. Тот же идентификатор, записанный как
+# ``user_id=<цифры>``, ``"chat_id": <цифры>`` или «MAX-идентификатор <цифры>»,
+# проходил — и на день замера лежал в дереве в 27 строках.
+#
+# Правило по значению (ещё один хеш в списке) здесь не годится по устройству:
+# SHA-256 числа из 7–12 цифр перебирается за минуты, так что список хешей в
+# открытом репозитории сам раскрывает то, что прячет. Поэтому — форма.
+
+#: Имена, которыми в коде, журналах и документах называют идентификатор
+#: человека или чата в канале. Закрытый список: слово вне его не судится.
+CHANNEL_ID_KEYS = (
+    "channel_user_id",
+    "max_user_id",
+    "ext_user_id",
+    "ext_user",
+    "user_id",
+    "chat_id",
+    "sender_id",
+    "recipient_id",
+)
+
+#: ``<имя><до шести знаков-разделителей><7–12 цифр>``: ``user_id=…``,
+#: ``user_id: …``, ``"chat_id": "…"``, ``chat_id = …``. Слова между именем и
+#: числом («chat_id владельца …») шаблон НЕ ловит — предел, названный в узлах.
+KEYED_CHANNEL_ID = re.compile(
+    r"(?i)(?<![A-Za-z0-9_])(?:" + "|".join(CHANNEL_ID_KEYS) + r")(?![A-Za-z0-9_])"
+    r"[^\w\n]{0,6}(\d{7,12})(?![\d…])"
+)
+
+#: «MAX-идентификатор <цифры>», «MAX id <цифры>», «MAX ID: <цифры>».
+NAMED_MAX_ID = re.compile(r"(?i)(?<![\w])MAX[- ]?(?:id|ид\w*)[^\w\n]{0,6}(\d{7,12})(?![\d…])")
+
+#: Ровно двенадцать цифр, стоящих отдельно: не хвост UUID (``-`` слева), не
+#: часть шестнадцатеричной строки, пути или десятичной дроби.
+BARE_TWELVE_DIGITS = re.compile(r"(?<![\w.\-/:#=])\d{12}(?![\w\-…])")
+
+#: Число, подписанное словом job / run, — номер задания или прогона CI. На день
+#: замера все четыре отдельно стоящих двенадцатизначных числа в документах
+#: были именно ими («в логе job …»), и ни одно — идентификатором.
+_LABELLED_CI_NUMBER = re.compile(r"(?i)(?<![\w])(?:job|run)s?\W{0,4}$")
+
+#: ГГГГММДДЧЧММ — отметка времени, а не идентификатор.
+_TIMESTAMP_12 = re.compile(
+    r"20\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])(?:[01]\d|2[0-3])[0-5]\d"
+)
+
 #: RFC 2606 / RFC 6761 reserved domains and our own operator domains.
 ALLOWED_DOMAIN_SUFFIXES = (
     ".example",
@@ -200,6 +270,35 @@ def is_test_phone(prefix: str, rest: str) -> bool:
     return False
 
 
+def is_synthetic_id(digits: str) -> bool:
+    """Заведомо выдуманный идентификатор — тем же приёмом, что тестовый телефон.
+
+    Четыре одинаковые цифры подряд, счётные ряды ``1234`` / ``4321`` и нули —
+    то, чем люди пишут примеры. Настоящий идентификатор сюда попадёт редко, а
+    пример в документации перестанет требовать маски.
+    """
+    if re.search(r"(\d)\1{3,}", digits):
+        return True
+    return any(run in digits for run in ("1234", "4321", "0000"))
+
+
+def is_test_path(rel: str) -> bool:
+    """Файл тестов: там идентификаторы — фикстуры, и правило формы их не судит.
+
+    Известные реальные идентификаторы (по хешу) ловятся и в тестах — это
+    правило от пути не зависит.
+    """
+    name = rel.rsplit("/", 1)[-1]
+    return (
+        rel.startswith("tests/")
+        or "/tests/" in rel
+        or "/__tests__/" in rel
+        or name.startswith("test_")
+        or name == "conftest.py"
+        or ".test." in name
+    )
+
+
 def domain_allowed(domain: str) -> bool:
     d = domain.lower()
     if d in ALLOWED_DOMAINS_EXACT:
@@ -233,6 +332,7 @@ def is_allowed(rel: str, allow: list[tuple[str, str]]) -> bool:
 def scan_text(rel: str, text: str, *, known_hashes: frozenset[str] = KNOWN_ID_HASHES) -> list[str]:
     """Return findings for one file's text. Never includes the matched value."""
     findings: list[str] = []
+    judge_form = not is_test_path(rel)
     for lineno, line in enumerate(text.splitlines(), 1):
         for m in PHONE.finditer(line):
             if not is_test_phone(m.group(1), m.group(2) + m.group(3) + m.group(4)):
@@ -255,6 +355,35 @@ def scan_text(rel: str, text: str, *, known_hashes: frozenset[str] = KNOWN_ID_HA
                     findings.append(
                         f"{rel}:{lineno}: незамаскированный идентификатор канала max:<цифры> в документе (маска: max:123…)"
                     )
+        if judge_form:
+            # DRF-2744 — идентификатор по форме носителя. Известные (по хешу)
+            # уже названы выше; заведомо выдуманные не судятся.
+            reported: set[int] = set()
+            for pattern, shape in (
+                (KEYED_CHANNEL_ID, "<имя>=<цифры>"),
+                (NAMED_MAX_ID, "«MAX-идентификатор <цифры>»"),
+            ):
+                for m in pattern.finditer(line):
+                    digits = m.group(1)
+                    if _h(digits) in known_hashes or is_synthetic_id(digits):
+                        continue
+                    reported.add(m.start(1))
+                    findings.append(
+                        f"{rel}:{lineno}: идентификатор канала в форме {shape} "
+                        "(маска: первые 3 цифры + «…»)"
+                    )
+            for m in BARE_TWELVE_DIGITS.finditer(line):
+                digits = m.group(0)
+                if m.start() in reported or _h(digits) in known_hashes:
+                    continue
+                if is_synthetic_id(digits) or _TIMESTAMP_12.fullmatch(digits):
+                    continue
+                if _LABELLED_CI_NUMBER.search(line[: m.start()]):
+                    continue
+                findings.append(
+                    f"{rel}:{lineno}: двенадцать цифр подряд — похоже на идентификатор канала "
+                    "(маска: первые 3 цифры + «…»)"
+                )
     return findings
 
 
