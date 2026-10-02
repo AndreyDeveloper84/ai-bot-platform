@@ -48,9 +48,9 @@ Masks that pass: ``+7 9xx xxx-xx-xx``, ``<имя>@example.org``, ``max:831…``.
 
    Measured on the day it was added, rule frozen first: 1181 files of five
    other trees it was not built on carried 141 digit runs of 7–12 digits and
-   produced no finding; this tree produced 26 (25 outside the allowlist), every
-   one a real-looking
-   identifier written as ``user_id=`` / ``chat_id=``.
+   produced no finding. This tree, before it was masked the same day, produced
+   26 (25 outside the allowlist) — every one a real-looking identifier written
+   as ``user_id=`` / ``chat_id=``.
 
 # What it deliberately does NOT check
 
