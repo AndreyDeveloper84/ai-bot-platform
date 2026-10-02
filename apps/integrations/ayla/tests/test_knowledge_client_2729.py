@@ -206,6 +206,8 @@ _VIOLATIONS: dict[str, Callable[[dict[str, Any]], None]] = {
     "known-without-claims": lambda d: d.__setitem__("claims", []),
     "unknown-with-claims": lambda d: d.__setitem__("state", "unknown"),
     "state-outside-vocabulary": lambda d: d.__setitem__("state", "partial"),
+    # Без утверждений слово вне словаря не должно тихо стать «знания нет».
+    "state-outside-vocabulary-without-claims": lambda d: d.update(state="partial", claims=[]),
     "claims-not-a-list": lambda d: d.__setitem__("claims", {"0": "x"}),
     "subject-missing": lambda d: d.pop("subject"),
     "claim-without-provenance": lambda d: _capability(d).pop("provenance"),
