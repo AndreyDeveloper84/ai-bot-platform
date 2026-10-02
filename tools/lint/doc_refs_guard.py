@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A reference to a document as a basis must lead somewhere (DRF-2657).
+"""A reference to a document as a basis must lead somewhere (DRF-2657, DRF-2682).
 
 Code in this repository justifies itself by pointing at documents: «решение
 владельца R6 (docs/OWNER_QUESTIONS_2026-09-12.md, раздел T)», «§6 свода
@@ -10,7 +10,7 @@ A reference into the void looks checkable and sends the next reader looking
 for what is not there; worse, the owner's question it recorded disappears
 with it. This guard makes a dead basis a red build.
 
-# What it checks — four forms, two failures
+# What it checks — five forms, two failures
 
 Forms (the census that found them is in the PR that introduced this file):
 
@@ -22,6 +22,16 @@ Forms (the census that found them is in the PR that introduced this file):
 4. **«§N свода»** — the owner's summary cited by section only. In this
    repository «свод» is ``docs/OWNER_DECISIONS_2026-09-11.md``
    (:data:`SVOD_DOC`); the section must exist among its headings.
+5. **bare name** (DRF-2682) — a document named without its directory:
+
+   * ``NAME.md`` — must be the file name of some tracked ``.md``;
+   * ``NAME §X`` / ``NAME.md §X`` — ``NAME`` is a document under ``docs/``
+     (or a family name of form 2 without ``.md``), and the section must exist.
+
+   On 02.10 a census found 270 such mentions next to the 513 references of
+   forms 1–4 — a third of all citations were outside the guard. Every cited
+   section resolved, but 18 ``NAME.md`` mentions led to no document in this
+   repository.
 
 Failures, reported apart because they are different defects:
 
@@ -37,9 +47,20 @@ at run time, not a basis, and is not checked either.
 
 # What it deliberately does NOT check
 
-* references with neither a path, a family name nor the word «свод» —
+* references with neither a path, a document name nor the word «свод» —
   «решение R6», «as the owner decided». Those are found only by content;
   green here does NOT mean the code has no dead bases.
+* a bare name with neither ``.md`` nor a section (``see event-contract``):
+  nothing tells it from an ordinary word (``Q1``, ``on-call``, ``README``,
+  ``architecture`` are all document names here). And a bare ``NAME §X``
+  whose document was DELETED: the name is recognised by the tree, so it
+  leaves the guard's sight together with the file. Only ``NAME.md`` and the
+  family names survive their document — write the ``.md``.
+* a section cited as «п. 3» / «№1», or on the next line;
+* a name that is the whole of a quoted string (``"note.md"``) — a value the
+  code handles (a file it writes, a fixture), not a citation; and a name at
+  the end of a path with spaces (``ayla-knowledge/07 UX/… Contract.md``) —
+  the path names its own root, and this guard does not parse it.
 * whether the cited document SAYS what the code claims — only that it and
   the section exist;
 * documents in ``docs/`` citing other documents (prose, not code);
@@ -83,7 +104,10 @@ HERE = Path(__file__).resolve().parent
 ALLOW_FILE = HERE / "doc_refs_allow.txt"
 
 #: Number of entries in doc_refs_allow.txt — the list may only shrink.
-ALLOW_CEILING = 16
+#: 16 → 20 with DRF-2682: the guard began to read bare names, and what it
+#: found there had been dead all along — three documents living outside git
+#: (register item 67) and one script that quotes the labels it rewrites.
+ALLOW_CEILING = 20
 
 #: The owner's summary that «§N свода» refers to (form 4).
 SVOD_DOC = "docs/OWNER_DECISIONS_2026-09-11.md"
@@ -97,6 +121,15 @@ _SECTION_AFTER = r"[`'\"]*,?\s*(?:раздел|§)\s*([A-ZА-Я0-9][\w.]*?)(?=[\
 PATH_RE = re.compile(_PATH)
 FAMILY_RE = re.compile(_FAMILY)
 SECTION_AFTER_RE = re.compile(_SECTION_AFTER)
+# Form 5. ``NAME.md`` with no directory in front of it …
+BARE_MD_RE = re.compile(r"(?<![\w/.\\-])(\w[\w.-]*\.md)\b")
+# … and the word standing right before a section mark: ``NAME §X``, ``NAME``, раздел X.
+_WORD_BEFORE_SECTION_RE = re.compile(r"(?<![\w/.\\-])(\w[\w.-]*?)[`'\"]*,?\s*$")
+_SECTION_MARK_RE = re.compile(r"(?:раздел|§)\s*[A-ZА-Я0-9]")
+_FAMILY_BARE_RE = re.compile(
+    r"(?:OWNER_[A-Z_]+|CURRENT_DECISIONS|OPEN_DECISIONS|ayla-owner-decisions)[\w.-]*"
+)
+_QUOTES = "\"'`"
 # «§6 свода», «§7 свода владельца», «§2 п.6 свода», «свод владельца 11.09 §3»
 SVOD_SECTION_RE = re.compile(
     r"§\s*(\d+(?:\.\d+)?)(?:\s*п\.\s*\d+)?\s+свод[а-яё]*"
@@ -110,16 +143,61 @@ class Ref:
     where: str  # citing "file:line"
     doc: str  # referenced document path
     section: str | None
-    form: str  # path | family | path+section | svod
+    form: str  # path | family | path+section | svod | name | name+section
 
 
-def iter_refs(rel: str, text: str) -> list[Ref]:
+def _is_a_value_or_a_spaced_path(line: str, start: int, end: int) -> bool:
+    """``"note.md"`` is a value; ``repo/07 UX/A Contract.md`` is a path this guard cannot parse."""
+    before, after = line[start - 1 : start], line[end : end + 1]
+    if before and before in "\"'" and after == before:
+        return True
+    opened = max(line.rfind(q, 0, start) for q in _QUOTES)
+    return "/" in line[opened + 1 : start]
+
+
+def _bare_refs(where: str, line: str, taken: list[tuple[int, int]], stems: set[str]) -> list[Ref]:
+    """Form 5: documents named without their directory (DRF-2682)."""
+    refs: list[Ref] = []
+    for m in BARE_MD_RE.finditer(line):
+        if any(a <= m.start() < b for a, b in taken):
+            continue  # forms 1–2 already read it
+        if _is_a_value_or_a_spaced_path(line, m.start(), m.end()):
+            continue
+        taken.append(m.span())
+        sec = SECTION_AFTER_RE.match(line, m.end())
+        if sec:
+            refs.append(Ref(where, m.group(1), sec.group(1).rstrip("."), "name+section"))
+        else:
+            refs.append(Ref(where, m.group(1), None, "name"))
+    # ``NAME §X`` with no ``.md``: the word before the section mark must be a document.
+    for mark in _SECTION_MARK_RE.finditer(line):
+        word = _WORD_BEFORE_SECTION_RE.search(line, 0, mark.start())
+        if not word or any(a <= word.start(1) < b for a, b in taken):
+            continue
+        name = word.group(1).rstrip(".-")
+        sec = SECTION_AFTER_RE.match(line, word.end(1))
+        if not sec or name.endswith(".md"):
+            continue
+        section = sec.group(1).rstrip(".")
+        if _FAMILY_BARE_RE.fullmatch(name):
+            # A family name outlives its document: a dead one is still seen.
+            refs.append(Ref(where, f"docs/{name}.md", section, "name+section"))
+        elif name in stems:
+            refs.append(Ref(where, f"{name}.md", section, "name+section"))
+    return refs
+
+
+def iter_refs(rel: str, text: str, stems: set[str] | None = None) -> list[Ref]:
+    """References in one file. ``stems`` — names of the documents under ``docs/``
+    (without ``.md``); ``None`` switches form 5 off."""
     refs: list[Ref] = []
     for lineno, line in enumerate(text.split("\n"), 1):
         where = f"{rel}:{lineno}"
+        taken: list[tuple[int, int]] = []
         for rx, form in ((PATH_RE, "path"), (FAMILY_RE, "family")):
             for m in rx.finditer(line):
                 doc = m.group(1)
+                taken.append(m.span())
                 if form == "family":
                     if line[max(0, m.start() - 5) : m.start()].endswith("docs/"):
                         continue  # already counted as a path
@@ -131,6 +209,8 @@ def iter_refs(rel: str, text: str) -> list[Ref]:
                     refs.append(Ref(where, doc, None, form))
         for m in SVOD_SECTION_RE.finditer(line):
             refs.append(Ref(where, SVOD_DOC, m.group(1) or m.group(2), "svod"))
+        if stems is not None:
+            refs.extend(_bare_refs(where, line, taken, stems))
     return refs
 
 
@@ -227,6 +307,15 @@ def check(
     ignored: set[str] | None = None,
 ) -> tuple[list[Ref], list[str]]:
     tracked = set(files)
+    # Form 5 resolves a bare name by file name: any tracked ``.md`` answers for
+    # ``NAME.md``; only a document under ``docs/`` makes ``NAME §X`` a citation.
+    by_name: dict[str, list[str]] = {}
+    for f in files:
+        if f.endswith(".md"):
+            by_name.setdefault(f.rsplit("/", 1)[-1], []).append(f)
+    stems = {
+        f.rsplit("/", 1)[-1][:-3] for f in files if f.startswith("docs/") and f.endswith(".md")
+    }
     refs: list[Ref] = []
     for rel in files:
         if rel.startswith("docs/") or not rel.endswith(CODE_SUFFIXES):
@@ -235,23 +324,30 @@ def check(
             text = (root / rel).read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             continue
-        refs.extend(iter_refs(rel, text))
+        refs.extend(iter_refs(rel, text, stems))
     if ignored is None:
-        ignored = ignored_docs(root, {r.doc for r in refs if r.doc not in tracked})
+        ignored = ignored_docs(root, {r.doc for r in refs if "/" in r.doc and r.doc not in tracked})
     problems: list[str] = []
     doc_cache: dict[str, str] = {}
+
+    def has_section(doc: str, section: str) -> bool:
+        text = doc_cache.setdefault(doc, (root / doc).read_text(encoding="utf-8"))
+        return section_exists(text, section)
+
     for ref in refs:
         if ref.doc in ignored or is_allowed(ref, allow):
             continue
-        if ref.doc not in tracked:
+        # A bare name may be the file name of several documents (README.md):
+        # it exists if any does, and its section — if any of them has it.
+        candidates = [ref.doc] if "/" in ref.doc else by_name.get(ref.doc, [])
+        candidates = [c for c in candidates if c in tracked]
+        if not candidates:
             problems.append(f"{ref.where}: MISSING DOCUMENT {ref.doc} ({ref.form})")
             continue
-        if ref.section:
-            text = doc_cache.setdefault(ref.doc, (root / ref.doc).read_text(encoding="utf-8"))
-            if not section_exists(text, ref.section):
-                problems.append(
-                    f"{ref.where}: MISSING SECTION «{ref.section}» in {ref.doc} ({ref.form})"
-                )
+        if ref.section and not any(has_section(c, ref.section) for c in candidates):
+            problems.append(
+                f"{ref.where}: MISSING SECTION «{ref.section}» in {' | '.join(candidates)} ({ref.form})"
+            )
     return refs, problems
 
 
@@ -264,13 +360,12 @@ def main() -> int:
     files = tracked_files(root)
     refs, problems = check(root, files, load_allowlist())
     if args.stats:
-        tracked = set(files)
+        # Dead = what the guard would report with no exceptions at all.
+        _, unexcepted = check(root, files, [], ignored=set())
+        dead_at = {(p.split(": ", 1)[0], p.rsplit("(", 1)[-1].rstrip(")")) for p in unexcepted}
         by_form: dict[str, list[int]] = {}
         for r in refs:
-            live = r.doc in tracked and (
-                r.section is None
-                or section_exists((root / r.doc).read_text(encoding="utf-8"), r.section)
-            )
+            live = (r.where, r.form) not in dead_at
             by_form.setdefault(r.form, [0, 0])[0 if live else 1] += 1
         for form, (n_live, n_dead) in sorted(by_form.items()):
             print(f"  {form:<13} live={n_live:<4} dead={n_dead}")

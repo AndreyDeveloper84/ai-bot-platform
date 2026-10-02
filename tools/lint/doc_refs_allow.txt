@@ -18,6 +18,9 @@ docs/OWNER_QUESTIONS_2026-09-23.md  # живой документ вне git: к
 docs/modules/03_client_journey_mockups_vs_reality.md  # лежит в Ayla/docs/modules вне git — пункт 67 реестра
 docs/MEASUREMENT_MAX_ACCOUNTS_IDENTITY_CARD_2026-09-11.md  # замер вне git — пункт 67 реестра
 docs/MEASURE_FOOD_DIARY_RUNTIME_VS_DESIGN_2026-09-10.md  # замер вне git — пункт 67 реестра
+docs/MEASUREMENT_PHASE1_OTP_SELF_LINK_2026-09-12.md  # замер вне git; был назван без пути, сторож его не видел (DRF-2682) — пункт 67 реестра
+docs/LANE_E_INVENTORY_ASK_VS_ACT_2026-09-10.md  # опись вне git; была названа без пути (DRF-2682) — пункт 67 реестра
+docs/CONTRACT_CLAIM_ENFORCEMENT_GATE_2026-10-02.md  # контракт затвора утверждений (DRF-2718) вне git; был назван без пути (DRF-2682) — пункт 67 реестра
 #
 # ── не основания ─────────────────────────────────────────────────────────────
 legacy_maxbot/  # замороженный снимок мигрированного кода (.FROZEN 2026-05-09), не редактируется
@@ -26,4 +29,5 @@ tests/tools/test_pii_guard.py  # строки-фикстуры сторожа П
 apps/observability/tests/test_surface_state.py  # docs/SURFACE_STATE.md — старый путь, который НЕ должен отслеживаться: проверка отсутствия
 tests/test_deploy_dev_backup.py  # docs/SURFACE_STATE.md — тот же старый путь в объяснении, почему файл выкладки не отслеживается
 tools/lint/doc_refs_guard.py  # примеры форм ссылки в документации сторожа
+scripts/fix_ayla_refs.py  # образцы меток, которые скрипт переписывает (single-assistant-identity → ayla-identity-and-brand), не ссылки
 tests/tools/test_doc_refs_guard.py  # фикстуры узлов сторожа — живые и мёртвые ссылки нарочно

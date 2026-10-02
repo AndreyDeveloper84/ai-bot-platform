@@ -1,6 +1,7 @@
 """Consent-gated access to Ayla declared prefs (personal-context API).
 
-The frozen contract v1.0 (``PERSONAL_CONTEXT_INTERNAL_API_CONTRACT.md``)
+The frozen contract v1.0
+(``beautygo_backend/docs/PERSONAL_CONTEXT_INTERNAL_API_CONTRACT.md``)
 states: *«Consent-гейт (memory_green) enforce'ится на боте ДО вызова»*.
 This module is that enforcement point — every function checks
 :func:`apps.consent.services.has_memory_consent` (zone ``green``,

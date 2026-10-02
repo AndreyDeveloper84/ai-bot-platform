@@ -262,7 +262,7 @@ def _telegram_proxies() -> dict[str, str] | None:
     """Pick TELEGRAM_PROXY → OPENAI_PROXY fallback.
 
     api.telegram.org is blocked in RU; production needs the proxy
-    threaded through. See memory `feedback_telegram_proxy.md`.
+    threaded through.
     """
     proxy = str(
         getattr(settings, "TELEGRAM_PROXY", "") or getattr(settings, "OPENAI_PROXY", "") or ""

@@ -1,7 +1,7 @@
 """HTTP client for Ayla's **billing status** (C2) and **payout preview** (C3).
 
 Typed wrapper for two pilot-2026-08-15 internal endpoints (frozen
-contracts, ``PILOT_CONTRACTS_2026-08-15.md`` §3/§4):
+contracts, ``beautygo_backend/docs/PILOT_CONTRACTS_2026-08-15.md`` §3/§4):
 
 * ``GET /api/v1/internal/billing/specialists/{specialist_id}/status/`` (C2, owner W2)
 * ``GET /api/v1/internal/specialists/{specialist_id}/payout-preview/`` (C3, owner W1)
