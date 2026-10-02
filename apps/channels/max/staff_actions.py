@@ -32,6 +32,20 @@ MAX_LISTED = 12
 """Cap on lines in one reply. A salon day beyond this is a Mini App job —
 a chat message with forty rows is not readable on a phone."""
 
+#: Ответ, когда источник записей (зеркало ``RemoteBookingProxy`` через
+#: ``visit_source``) не ответил. Отдельное состояние, а не «записей нет»:
+#: пустой день и упавший источник — разные факты, и путать их опасно
+#: (мастер решил бы, что он свободен, когда зеркало просто молчит). Текст
+#: зовёт попробовать снова; меню под ответом оставляет выход в кабинет, так
+#: что состояние ошибки не запирает человека (инцидент М-6b: единое
+#: состояние ошибки съело единственный выход). Без этого исключение из
+#: ``master_visits`` всплывало выше ``_handle_button`` и, при уже занятом
+#: ключе идемпотентности, гасило ответ целиком — немой тупик на нажатии.
+DAY_UNAVAILABLE = (
+    "Не удалось загрузить записи — источник временно недоступен. "
+    "Попробуйте ещё раз чуть позже."
+)
+
 
 def _day_bounds(now: datetime, tz) -> tuple[datetime, datetime]:
     local = now.astimezone(tz)
@@ -66,19 +80,23 @@ def salon_day(tenant, *, now: datetime | None = None) -> str:
 
     blocks: list[str] = []
     total = 0
-    for master in masters:
-        visits = master_visits(master, start=start, end=end)
-        if not visits:
-            continue
-        total += len(visits)
-        lines = [f"*{master.name}*"]
-        for visit in visits[:MAX_LISTED]:
-            when = visit.visit_at.astimezone(tz).strftime("%H:%M") if visit.visit_at else "—"
-            service = visit.service_name or "услуга не указана"
-            lines.append(f"  {when} · {visit.client_name} · {service}")
-        if len(visits) > MAX_LISTED:
-            lines.append(f"  …и ещё {len(visits) - MAX_LISTED}")
-        blocks.append("\n".join(lines))
+    try:
+        for master in masters:
+            visits = master_visits(master, start=start, end=end)
+            if not visits:
+                continue
+            total += len(visits)
+            lines = [f"*{master.name}*"]
+            for visit in visits[:MAX_LISTED]:
+                when = visit.visit_at.astimezone(tz).strftime("%H:%M") if visit.visit_at else "—"
+                service = visit.service_name or "услуга не указана"
+                lines.append(f"  {when} · {visit.client_name} · {service}")
+            if len(visits) > MAX_LISTED:
+                lines.append(f"  …и ещё {len(visits) - MAX_LISTED}")
+            blocks.append("\n".join(lines))
+    except Exception:  # noqa: BLE001 — источник недоступен ≠ «записей нет»; не 500
+        logger.warning("staff_actions.salon_day.source_unavailable", exc_info=True)
+        return DAY_UNAVAILABLE
 
     date_label = now.astimezone(tz).strftime("%d.%m")
     if not blocks:
@@ -97,7 +115,11 @@ def master_day(master, *, now: datetime | None = None) -> str:
     tz = salon_zone(master.tenant)
     start, end = _day_bounds(now, tz)
 
-    visits = master_visits(master, start=start, end=end)
+    try:
+        visits = master_visits(master, start=start, end=end)
+    except Exception:  # noqa: BLE001 — источник недоступен ≠ «записей нет»; не 500
+        logger.warning("staff_actions.master_day.source_unavailable", exc_info=True)
+        return DAY_UNAVAILABLE
     date_label = now.astimezone(tz).strftime("%d.%m")
     if not visits:
         return f"На {date_label} записей нет."
