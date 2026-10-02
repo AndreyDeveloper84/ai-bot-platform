@@ -581,7 +581,7 @@ class AdminSubject:
         return list(ADMIN_ACTION_SPECS)
 
     def system_prompt(self, *, today: date, tz_label: str) -> str:
-        from apps.master_api.services.assistant import _WEEKDAYS_RU
+        from apps.master_api.services.assistant import _WEEKDAYS_RU, STAFF_ADDRESS_LINE
         from apps.persona.voice import SURFACE_SALON, assistant_identity
 
         identity = assistant_identity(SURFACE_SALON)
@@ -596,6 +596,7 @@ class AdminSubject:
                 f"часовой пояс {tz_label}. Относительные даты («завтра», «в четверг») "
                 "считай от этой даты и передавай инструментам в формате ГГГГ-ММ-ДД.",
                 "Отвечай коротко и по делу. Без приветствий и без «чем ещё могу помочь».",
+                STAFF_ADDRESS_LINE,
                 "У тебя есть инструменты: найти записи салона на дату; подготовить "
                 "новую запись (черновик формы); подготовить изменение графика мастера "
                 "(предложение на подтверждение). Если вопрос про записи — вызови "
