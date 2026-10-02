@@ -396,6 +396,60 @@ class TestTheGreetingReadsTheSameStates:
         cache.clear()
         assert line == _day(tenant, master)
 
+    def test_the_schedule_is_read_only_when_the_day_is_empty(
+        self, monkeypatch, tenant, master
+    ) -> None:
+        """The frame costs three catalog reads; a greeting on a busy day must not pay them."""
+        from datetime import date
+
+        from apps.admin_api.services.salon_day import DayMaster, DaySummary, DayVisit, SalonDay
+
+        now = timezone.now().astimezone(salon_zone(tenant))
+
+        def day_with(n: int) -> SalonDay:
+            visits = [
+                DayVisit(
+                    id=str(uuid4()),
+                    start_at=now + timedelta(hours=1 + i),
+                    end_at=now + timedelta(hours=2 + i),
+                    duration_min=60,
+                    status="confirmed",
+                    service_id="svc",
+                    service_name="массаж",
+                    client_first_name="Мария",
+                    client_last_initial="К.",
+                    is_in_progress=False,
+                )
+                for i in range(n)
+            ]
+            return SalonDay(
+                date=date(now.year, now.month, now.day),
+                timezone_name="Europe/Moscow",
+                masters=[
+                    DayMaster(
+                        master_id=str(master.id), name=master.name, is_active=True, visits=visits
+                    )
+                ],
+                summary=DaySummary(total=n, upcoming=n, completed=0, released=0),
+            )
+
+        calls = _frame(monkeypatch, (None, True, True))
+        role = SimpleNamespace(is_master=True, is_owner=False, is_admin=False, master_id=master.id)
+
+        # Positive pair first: an empty day DOES read the frame, once.
+        monkeypatch.setattr(salon_greeting, "_salon_day", lambda tenant, now: day_with(0))
+        empty = salon_greeting.gather(tenant, role, now=now)
+        assert empty.my_records == 0
+        assert empty.my_empty_day == staff_actions.MASTER_DAY_OFF
+        assert len(calls) == 1
+
+        cache.clear()  # so that a second read, if it happened, would be counted
+        monkeypatch.setattr(salon_greeting, "_salon_day", lambda tenant, now: day_with(2))
+        busy = salon_greeting.gather(tenant, role, now=now)
+        assert busy.my_records == 2
+        assert busy.my_empty_day is None
+        assert len(calls) == 1
+
     def test_zero_visits_reads_as_the_state_not_as_a_zero(self) -> None:
         data = salon_greeting.GreetingData(my_records=0, my_empty_day=staff_actions.MASTER_DAY_OFF)
         text = salon_greeting.render_master("Ольга", "Формула тела", data)
