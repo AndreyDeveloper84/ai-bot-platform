@@ -26,7 +26,7 @@ phone-as-secondary-key cross-channel consolidation (Sprint 3+).
 * **`chat_id` separate from `channel_user_id`** — in some channels
   (Telegram private DM) they're identical. **In MAX they are not, even
   in a private dialog** (DRF-1558): measured on the pilot 2026-09-07,
-  `chat_id=518410834` while `channel_user_id=260237491` for the same
+  `chat_id=518…` while `channel_user_id=260…` for the same
   person in a one-to-one dialog. MAX's `chat_id` is the id of a
   **dialog**, so it is meaningful only together with the bot that opened
   it — and this row has no bot column, so all of one person's rows carry
