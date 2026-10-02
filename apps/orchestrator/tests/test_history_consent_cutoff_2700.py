@@ -192,8 +192,13 @@ class TestReader:
 
         assert len(GlobalConversationStore().load_recent_history(conversation)) == 5
 
-    def test_c2_the_limit_counts_readable_rows_not_withheld_ones(self) -> None:
-        """Окно в N строк набирается из разрешённых — закрытые его не съедают."""
+    def test_c2_the_limit_still_takes_the_newest_readable_rows(self) -> None:
+        """Под отсечкой предел по-прежнему берёт самые свежие строки, по порядку.
+
+        Чего этот узел НЕ различает: «отсечь, потом взять N» и «взять N, потом
+        отсечь». Закрытые строки всегда старше открытых, поэтому результат у
+        обоих порядков один — подмена порядка выживает, и она эквивалентная.
+        """
         person = _person("2700-c2-limit")
         conversation = resolve_active_global_conversation(person)
         for i in range(4):
