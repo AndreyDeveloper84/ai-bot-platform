@@ -404,11 +404,11 @@ class TestCascadePrecedence:
         возврат к диалогу даёт другое, а не то же самое.
         """
 
-        tenant.manager_user_id = "260237491"
+        tenant.manager_user_id = "200000001"
         tenant.manager_chat_id = "manager-chat-1"
         tenant.save(update_fields=["manager_user_id", "manager_chat_id"])
         _notify(tenant)
-        assert [c["addr"] for c in send.calls] == ["260237491"]
+        assert [c["addr"] for c in send.calls] == ["200000001"]
         assert [c["key"] for c in send.calls] == ["user_id"]
 
     def test_resolvers_report_their_decisions(self, tenant: Tenant, settings) -> None:
@@ -446,10 +446,10 @@ class TestCascadePrecedence:
         assert resolve_salon_target(tenant=tenant).channel == "none"
 
         # DRF-1559 — та же ступень, но адресуемая человеком.
-        tenant.manager_user_id = "260237491"
+        tenant.manager_user_id = "200000001"
         target = resolve_salon_target(tenant=tenant)
         assert target.channel == "manager"
-        assert [a.send_kwargs() for a in target.addresses] == [{"user_id": "260237491"}]
+        assert [a.send_kwargs() for a in target.addresses] == [{"user_id": "200000001"}]
 
 
 # ─── specialist delivery ───────────────────────────────────────────────────

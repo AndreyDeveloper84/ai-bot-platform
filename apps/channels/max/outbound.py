@@ -26,8 +26,8 @@ whichever bot happened to write first. Sending that to a second bot is
 a 404 `dialog.not.found`, measured on the pilot 2026-09-07 with one
 person and one salon bot::
 
-    POST /messages?user_id=260237491   → 200, delivered
-    POST /messages?chat_id=518410834   → 404 dialog.not.found
+    POST /messages?user_id=260…   → 200, delivered
+    POST /messages?chat_id=518…   → 404 dialog.not.found
 
 `user_id` is the **person**, is bot-independent, and is the same number
 we already store as `BotUser.channel_user_id` — MAX hands it back in
