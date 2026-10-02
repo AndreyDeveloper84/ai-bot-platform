@@ -51,6 +51,7 @@ from django.conf import settings
 
 from apps.integrations.ayla.url_builder import AylaUrlBuilder
 from apps.integrations.ayla.request_id import with_request_id
+from apps.integrations.ayla.log_ref import external_user_log_ref
 
 
 logger = logging.getLogger(__name__)
@@ -993,8 +994,8 @@ class NutritionClient:
         except (httpx.TimeoutException, httpx.NetworkError) as exc:
             self._breaker(BreakerPurpose.NUTRITION).record_failure(now=now)
             logger.warning(
-                "nutrition_client.scan.network ext=%s err=%s",
-                external_user_id,
+                "nutrition_client.scan.network ext_ref=%s err=%s",
+                external_user_log_ref(external_user_id),
                 type(exc).__name__,
             )
             raise NutritionUnavailableError(f"network: {type(exc).__name__}") from exc
@@ -1048,13 +1049,16 @@ class NutritionClient:
         if err_code == "FOOD_SCAN_DAILY_LIMIT":
             retry_after = err_details.get("retry_after")
             logger.info(
-                "nutrition_client.scan.daily_limit ext=%s retry_after=%s",
-                external_user_id,
+                "nutrition_client.scan.daily_limit ext_ref=%s retry_after=%s",
+                external_user_log_ref(external_user_id),
                 retry_after,
             )
             raise ScanDailyLimitError("daily_limit", retry_after=_retry_after_or_none(retry_after))
         if err_code == "FOOD_SCAN_BUDGET_EXHAUSTED":
-            logger.info("nutrition_client.scan.budget_exhausted ext=%s", external_user_id)
+            logger.info(
+                "nutrition_client.scan.budget_exhausted ext_ref=%s",
+                external_user_log_ref(external_user_id),
+            )
             raise ScanBudgetExhaustedError("budget_exhausted")
         if err_code == "FOOD_API_UNAVAILABLE" and err_details.get("permanent") is True:
             # DRF-2318: стойкий отказ распознавателя — не авария каталога.
@@ -1073,9 +1077,9 @@ class NutritionClient:
         if resp.status_code >= 500:
             self._breaker(purpose).record_failure(now=now)
             logger.warning(
-                "nutrition_client.scan.5xx status=%d ext=%s",
+                "nutrition_client.scan.5xx status=%d ext_ref=%s",
                 resp.status_code,
-                external_user_id,
+                external_user_log_ref(external_user_id),
             )
             raise NutritionUnavailableError(f"http_{resp.status_code}")
 
@@ -1086,9 +1090,9 @@ class NutritionClient:
             raise NutritionUnavailableError(err_code)
 
         logger.info(
-            "nutrition_client.scan.4xx status=%d ext=%s code=%s",
+            "nutrition_client.scan.4xx status=%d ext_ref=%s code=%s",
             resp.status_code,
-            external_user_id,
+            external_user_log_ref(external_user_id),
             err_code,
         )
         raise NutritionAPIError(f"http_{resp.status_code}_{err_code or 'unknown'}")
@@ -1133,8 +1137,8 @@ class NutritionClient:
         except (httpx.TimeoutException, httpx.NetworkError) as exc:
             self._breaker(BreakerPurpose.NUTRITION).record_failure(now=now)
             logger.warning(
-                "nutrition_client.estimate.network ext=%s err=%s",
-                external_user_id,
+                "nutrition_client.estimate.network ext_ref=%s err=%s",
+                external_user_log_ref(external_user_id),
                 type(exc).__name__,
             )
             raise NutritionUnavailableError(f"network: {type(exc).__name__}") from exc
@@ -1215,8 +1219,8 @@ class NutritionClient:
         except (httpx.TimeoutException, httpx.NetworkError) as exc:
             self._breaker(BreakerPurpose.NUTRITION).record_failure(now=now)
             logger.warning(
-                "nutrition_client.log.network ext=%s err=%s",
-                external_user_id,
+                "nutrition_client.log.network ext_ref=%s err=%s",
+                external_user_log_ref(external_user_id),
                 type(exc).__name__,
             )
             raise NutritionUnavailableError(f"network: {type(exc).__name__}") from exc
@@ -1303,9 +1307,9 @@ class NutritionClient:
         except (httpx.TimeoutException, httpx.NetworkError) as exc:
             self._breaker(purpose).record_failure(now=now)
             logger.warning(
-                "nutrition_client.meal_edit.network method=%s ext=%s err=%s",
+                "nutrition_client.meal_edit.network method=%s ext_ref=%s err=%s",
                 method,
-                external_user_id,
+                external_user_log_ref(external_user_id),
                 type(exc).__name__,
             )
             raise NutritionUncertainOutcomeError(f"network: {type(exc).__name__}") from exc
@@ -1412,8 +1416,8 @@ class NutritionClient:
         except (httpx.TimeoutException, httpx.NetworkError) as exc:
             self._breaker(BreakerPurpose.FOOD_PHOTO).record_failure(now=now)
             logger.warning(
-                "nutrition_client.food_photo.network ext=%s err=%s",
-                external_user_id,
+                "nutrition_client.food_photo.network ext_ref=%s err=%s",
+                external_user_log_ref(external_user_id),
                 type(exc).__name__,
             )
             raise NutritionUnavailableError(f"network: {type(exc).__name__}") from exc
@@ -1431,8 +1435,8 @@ class NutritionClient:
                 # сторону нельзя — байты приходят сюда, и решение о показе
                 # принимается здесь.
                 logger.warning(
-                    "nutrition_client.food_photo.too_small ext=%s size=%d",
-                    external_user_id,
+                    "nutrition_client.food_photo.too_small ext_ref=%s size=%d",
+                    external_user_log_ref(external_user_id),
                     len(resp.content),
                 )
                 return None
@@ -1637,8 +1641,8 @@ class NutritionClient:
         except (httpx.TimeoutException, httpx.NetworkError) as exc:
             self._breaker(BreakerPurpose.NUTRITION).record_failure(now=now)
             logger.warning(
-                "nutrition_client.summary.network ext=%s err=%s",
-                external_user_id,
+                "nutrition_client.summary.network ext_ref=%s err=%s",
+                external_user_log_ref(external_user_id),
                 type(exc).__name__,
             )
             raise NutritionUnavailableError(f"network: {type(exc).__name__}") from exc
@@ -1755,8 +1759,8 @@ class NutritionClient:
         except (httpx.TimeoutException, httpx.NetworkError) as exc:
             self._breaker(BreakerPurpose.NUTRITION).record_failure(now=now)
             logger.warning(
-                "nutrition_client.diary_days.network ext=%s err=%s",
-                external_user_id,
+                "nutrition_client.diary_days.network ext_ref=%s err=%s",
+                external_user_log_ref(external_user_id),
                 type(exc).__name__,
             )
             raise NutritionUnavailableError(f"network: {type(exc).__name__}") from exc
@@ -1784,8 +1788,8 @@ class NutritionClient:
         except (KeyError, TypeError, ValueError, AttributeError) as exc:
             # Ответ 200 не той формы — не «пустая неделя»: экран покажет отказ.
             logger.warning(
-                "nutrition_client.diary_days.malformed ext=%s err=%s",
-                external_user_id,
+                "nutrition_client.diary_days.malformed ext_ref=%s err=%s",
+                external_user_log_ref(external_user_id),
                 type(exc).__name__,
             )
             raise NutritionUnavailableError("malformed_body") from exc
@@ -2329,8 +2333,8 @@ class NutritionClient:
         except (httpx.TimeoutException, httpx.NetworkError) as exc:
             self._breaker(BreakerPurpose.NUTRITION).record_failure(now=now)
             logger.warning(
-                "nutrition_client.cross_domain.network ext=%s err=%s",
-                external_user_id,
+                "nutrition_client.cross_domain.network ext_ref=%s err=%s",
+                external_user_log_ref(external_user_id),
                 type(exc).__name__,
             )
             raise NutritionUnavailableError(f"network: {type(exc).__name__}") from exc
@@ -2354,9 +2358,9 @@ class NutritionClient:
         if resp.status_code >= 500:
             self._breaker(BreakerPurpose.NUTRITION).record_failure(now=now)
             logger.warning(
-                "nutrition_client.cross_domain.5xx status=%d ext=%s",
+                "nutrition_client.cross_domain.5xx status=%d ext_ref=%s",
                 resp.status_code,
-                external_user_id,
+                external_user_log_ref(external_user_id),
             )
             raise NutritionUnavailableError(f"http_{resp.status_code}")
         raise NutritionAPIError(f"http_{resp.status_code}")
@@ -2432,9 +2436,9 @@ class NutritionClient:
         except (httpx.TimeoutException, httpx.NetworkError) as exc:
             self._breaker(purpose).record_failure(now=now)
             logger.warning(
-                "nutrition_client.cross_domain.%s.network ext=%s err=%s",
+                "nutrition_client.cross_domain.%s.network ext_ref=%s err=%s",
                 action,
-                external_user_id,
+                external_user_log_ref(external_user_id),
                 type(exc).__name__,
             )
             raise NutritionUnavailableError(f"network: {type(exc).__name__}") from exc
