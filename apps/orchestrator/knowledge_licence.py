@@ -86,6 +86,10 @@ class LicensedSubject:
     template_id: str
     state: SubjectState
     claims: tuple[LicensedClaim, ...] = field(default_factory=tuple)
+    #: DRF-2729 — услуга салона, от которой читали (id в каталоге); пусто,
+    #: когда читали от самой процедуры. При ``UNAVAILABLE`` это единственное,
+    #: что о предмете известно: каталог не ответил и шаблона не назвал.
+    salon_service_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)

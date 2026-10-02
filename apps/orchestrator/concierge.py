@@ -93,6 +93,8 @@ from apps.orchestrator.discovery import (
 )
 from apps.orchestrator.fast_path import claims_direct_show_masters
 from apps.orchestrator.handoff import handoff_to_booking
+from apps.orchestrator.knowledge_licence import KnowledgeLicence
+from apps.orchestrator.knowledge_reader import licence_for_cards
 from apps.orchestrator.llm.templates import (
     get_booking_needs_name,
     get_fallback,
@@ -2023,13 +2025,20 @@ def _concierge_turn(
     # the intent BY choosing; the post-reply resolver reads THIS choice
     # instead of re-deriving it with a second model call.
     tool_trace: list[dict[str, Any]] = []
+    # DRF-2729 — лицензия знания этого хода: что теневой читатель узнал у
+    # каталога об услуге, которую ход разрешил. Едет в результате хода до
+    # исходящего хука; модель её не видит, в ответ из неё ничего не попадает.
+    # ``None`` — читателя в ходу не было (флаг выключен или услуги не искали).
+    turn_licence: KnowledgeLicence | None = None
 
     def _reply(**kwargs: Any) -> DiscoveryReply:
         # Every return AFTER the passes ran carries the accumulated trace.
         # A text-only turn (no tool was ever picked) and a turn that never
         # reached the model (the outage fallback) both leave it None —
         # an empty trace is spelled None, never an empty tuple.
-        return DiscoveryReply(tool_trace=tuple(tool_trace) or None, **kwargs)
+        return DiscoveryReply(
+            tool_trace=tuple(tool_trace) or None, knowledge_licence=turn_licence, **kwargs
+        )
 
     while pass_index < max_passes:
         pass_index += 1
@@ -2242,6 +2251,10 @@ def _concierge_turn(
         if tool_trace and isinstance(tool_trace[-1], dict):
             tool_trace[-1]["result_count"] = len(cards)
             tool_trace[-1]["ordered_ids"] = [str(getattr(card, "master_id", "")) for card in cards]
+        # DRF-2729 — теневое чтение знания по услуге, которую этот поиск
+        # разрешил (``MasterCard.service_id``). Под своим флагом, по умолчанию
+        # выключенным; ничего ниже от результата не зависит.
+        turn_licence = licence_for_cards(cards, trace_id=trace_id)
         if not cards:
             # DRF-1474 — the fact, written down where it is established. Every
             # branch below that can answer an empty search reads it back, and
