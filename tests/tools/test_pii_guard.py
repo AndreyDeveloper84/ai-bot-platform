@@ -90,11 +90,21 @@ class TestChannelIds:
         assert g.DIGIT_RUN.search(fake_id) is not None  # цифровой ряд на месте
         assert g.scan_text("apps/x.py", "user_id = " + fake_id, known_hashes=frozenset()) == []
 
-    def test_unmasked_handle_in_docs_only(self):
+    def test_unmasked_handle_in_docs(self):
         assert len(_scan("клиент max:26071234567", rel="docs/report.md")) == 1
         assert _scan("клиент max:260…", rel="docs/report.md") == []
-        # в коде голая ручка не проверяется — только в docs/
+
+    def test_unmasked_handle_outside_docs(self):
+        """DRF-2744: до листа ``max:<цифры>`` в коде не проверялся вовсе.
+
+        Вне документов заведомо выдуманное значение проходит (примеры в
+        докстрингах), невыдуманное — находка; тестовые файлы не судятся.
+        """
+        real_looking = "handle = 'max:" + "58" + "20" + "69" + "137" + "'"
+        assert len(g.scan_text("apps/x.py", real_looking)) == 1
+        assert len(g.scan_text("apps/replay/fixtures/voice/x.yaml", real_looking)) == 1
         assert g.scan_text("apps/x.py", "handle = 'max:26071234567'") == []
+        assert g.scan_text("apps/channels/tests/test_x.py", real_looking) == []
 
 
 # Синтетические идентификаторы, собранные из частей: сплошной цифровой ряд в

@@ -40,6 +40,7 @@ Masks that pass: ``+7 9xx xxx-xx-xx``, ``<имя>@example.org``, ``max:831…``.
    test files: ``user_id=<digits>``, ``"chat_id": <digits>``,
    ``channel_user_id: <digits>`` and the other names in
    :data:`CHANNEL_ID_KEYS`; «MAX-идентификатор <digits>» / «MAX id <digits>»;
+   ``max:<digits>`` outside ``docs/`` as well (code, fixtures, configuration);
    and a stand-alone run of exactly twelve digits that is not a UUID tail, a
    timestamp or a number labelled ``job`` / ``run``. Seven to twelve digits;
    masked (``user_id=260…``) and plainly invented values (``1234567``,
@@ -371,6 +372,18 @@ def scan_text(rel: str, text: str, *, known_hashes: frozenset[str] = KNOWN_ID_HA
                     findings.append(
                         f"{rel}:{lineno}: идентификатор канала в форме {shape} "
                         "(маска: первые 3 цифры + «…»)"
+                    )
+            if not rel.startswith("docs/"):
+                # ``max:<цифры>`` вне документов: в ``docs/`` его судит правило
+                # выше (строже — без скидки на выдуманные значения), в коде,
+                # фикстурах и конфигурации — здесь.
+                for m in CHANNEL_HANDLE_IN_DOCS.finditer(line):
+                    digits = m.group(1)
+                    if _h(digits) in known_hashes or is_synthetic_id(digits):
+                        continue
+                    reported.add(m.start(1))
+                    findings.append(
+                        f"{rel}:{lineno}: идентификатор канала max:<цифры> (маска: max:123…)"
                     )
             for m in BARE_TWELVE_DIGITS.finditer(line):
                 digits = m.group(0)
