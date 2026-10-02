@@ -1689,6 +1689,17 @@ CELERY_BEAT_SCHEDULE = {
         "task": "apps.llm.tasks.probe_llm_availability",
         "schedule": crontab(minute="*/5"),
     },
+    # DRF-2688 - the STANDBY vendor, checked while the primary still
+    # answers. A separate entry on purpose: the 5-minute tick above stays
+    # exactly one call (its cost and cadence are DRF-1054/1056's), and a
+    # standby does not need 5-minute resolution - what it protects against
+    # is "dead for days and nobody knew", which half an hour answers.
+    # 48 one-token calls a day. Minutes 7 and 37 never coincide with a
+    # */5 tick, so the two probes do not queue behind each other.
+    "llm.probe_reserve": {
+        "task": "apps.llm.tasks.probe_llm_reserve",
+        "schedule": crontab(minute="7,37"),
+    },
     # DRF-1285 - proactive nutrition layer. BOTH entries no-op while
     # NUTRITION_PROACTIVE_ENABLED is False (the default), and even once
     # enabled they only log while NUTRITION_PROACTIVE_DRY_RUN is True
@@ -2133,6 +2144,19 @@ LLM_WARMUP_PROVIDERS = [
 #   считается знанием для readyz (``checks.llm.state``). 900 = три тика по
 #   5 минут; дольше — ``unknown`` с ``detail="stale"``: умерший beat не
 #   должен вечно показывать последний зелёный тик.
+# LLM_HEALTH_RESERVE_PROBE_ENABLED (DRF-2688): проверка РЕЗЕРВНОГО вендора
+#   (beat "llm.probe_reserve", раз в 30 минут) — того, на кого ушёл бы
+#   живой ход при отказе основного. Включена по умолчанию; выключается и
+#   общим LLM_HEALTH_PROBE_ENABLED=0. Раздачу не меняет — только сообщает.
+# LLM_HEALTH_RESERVE_STALE_S (DRF-2688): сколько секунд последняя проверка
+#   резерва считается знанием для readyz (``checks.llm.reserve``). 5400 =
+#   три проверки по 30 минут; дольше — ``unknown``.
+LLM_HEALTH_RESERVE_PROBE_ENABLED = os.environ.get("LLM_HEALTH_RESERVE_PROBE_ENABLED", "1") not in {
+    "0",
+    "false",
+    "False",
+}
+LLM_HEALTH_RESERVE_STALE_S = int(os.environ.get("LLM_HEALTH_RESERVE_STALE_S", "5400"))
 LLM_HEALTH_PATH_STALE_S = int(os.environ.get("LLM_HEALTH_PATH_STALE_S", "900"))
 LLM_HEALTH_PROBE_ENABLED = os.environ.get("LLM_HEALTH_PROBE_ENABLED", "1") not in {
     "0",
