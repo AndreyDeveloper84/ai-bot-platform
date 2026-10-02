@@ -68,8 +68,9 @@ things are settled here and are not tuning knobs:
   the day Ayla starts sending it shows up instead of being guessed at.
 
 Scope, stated plainly: this is the conversational channel's routing
-policy, not a platform-wide interlock. No other booking entry point
-reads the flag.
+policy, not a bot-wide interlock. No other booking entry point of the bot
+reads the flag. The catalog enforces its own gate server-side when the
+booking is created (DRF-2614; see ``_service_requires_health_check``).
 
 ### Deterministic callback short-circuits
 
@@ -1598,10 +1599,18 @@ def _service_requires_health_check(
     Note what this gate is and is not. No other booking entry point in this
     codebase consults it — ``apps/booking/services/create.py``,
     ``apps/admin_api/views_booking_create.py`` and the miniapp all create
-    bookings without reading the flag — and Ayla's ``appointments`` app does
-    not enforce it server-side either. It is the conversational channel's
-    routing policy ("hand this one to a human"), not a system-wide safety
-    interlock.
+    bookings without reading the flag. Within the bot it is the
+    conversational channel's routing policy ("hand this one to a human"),
+    not a bot-wide interlock.
+
+    DRF-2614 — this paragraph used to add «and Ayla's ``appointments`` app
+    does not enforce it server-side either». That stopped being true: the
+    catalog refuses the booking itself, in
+    ``appointments/application/services/create_booking_service.py``
+    (``check_health_screening``), outside the time-override branch and
+    fail-closed on an unknown verdict. So the server-side interlock exists —
+    in the catalog, not here. Do not rebuild it in the bot on the strength
+    of the old sentence.
     """
     if _booking_via_ayla():
         resolved = _resolved_health_check_for_edge(tenant, master_id, service_id)
