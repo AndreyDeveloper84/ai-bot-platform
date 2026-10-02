@@ -17,7 +17,7 @@ from typing import Any
 
 from celery import shared_task  # type: ignore[import-untyped]
 
-from apps.llm.health import check_llm_availability
+from apps.llm.health import check_llm_availability, check_llm_reserve
 
 logger = logging.getLogger(__name__)
 
@@ -47,4 +47,26 @@ def probe_llm_availability() -> dict[str, Any]:
         return check_llm_availability()
     except Exception:  # noqa: BLE001 — hard containment
         logger.exception("llm.tasks.probe_llm_availability.unexpected")
+        return {"skipped": "error"}
+
+
+@shared_task(
+    name="apps.llm.tasks.probe_llm_reserve",
+    # Same containment as the primary tick: one probe under its own
+    # 60 s ceiling, and the next beat tick is the retry.
+    soft_time_limit=120,
+    time_limit=150,
+    max_retries=0,
+)
+def probe_llm_reserve() -> dict[str, Any]:
+    """One look at the STANDBY vendor while the primary still answers (DRF-2688).
+
+    Returns :func:`apps.llm.health.check_llm_reserve`'s summary dict.
+    Never raises.
+    """
+
+    try:
+        return check_llm_reserve()
+    except Exception:  # noqa: BLE001 — hard containment
+        logger.exception("llm.tasks.probe_llm_reserve.unexpected")
         return {"skipped": "error"}

@@ -152,6 +152,38 @@ Losing the Redis state (flush, restart with a cold cache) costs at most
 one duplicate alert on the next transition. Acceptable — the alternative
 is a table and a migration for two strings.
 
+### The standby vendor is checked too, on its own beat (DRF-2688)
+
+Everything above watches the vendor ``LLM_PROVIDER`` names. The vendor a
+live turn would HOP to (:func:`apps.llm.router.serving_fallback_candidates`)
+was looked at only after the primary had already failed
+(:func:`_measure_path`) — so while the primary was healthy, a dead
+standby was invisible. 30.09.2026: the Anthropic key started answering
+``401 invalid``; from 01.10 OpenAI is the primary and Anthropic the
+standby, dead, and nothing says so until OpenAI fails and the hop lands
+on a second failure.
+
+:func:`check_llm_reserve` is that look, made while it is still cheap to
+act on: one call to the standby, its own state (``llm:health:reserve``),
+its own page on transition. It runs on a SEPARATE beat entry
+(``llm.probe_reserve``, every 30 min) — the 5-minute tick stays exactly
+one call, as DRF-1054/1056 priced it and as
+``test_llm_path_state_2065.py::TestFallbackProbedOnlyWhenNeeded`` holds.
+
+It changes nothing about who serves: candidacy is still «a key is set»
+(:func:`apps.llm.router.provider_is_configured`) and the provider
+settings are the owner's. It only makes «the insurance is gone» a
+message instead of a discovery.
+
+### A rejected key is named as such (DRF-2688)
+
+A 401 from the vendor is not a blip and not «the provider answers with
+an error» in general: the key is revoked, expired or mistyped, and the
+only fix is a new key. The alert says that in words and names the
+setting to replace (:func:`key_hint`) — the name, never the value. For
+the standby a rejected key pages on the FIRST failed check: waiting for
+a second identical 401 buys nothing.
+
 ### Transport
 
 Each transition goes to :func:`apps.observability.alerting.page`
@@ -250,6 +282,21 @@ CAUSE_TEXT = {
     CAUSE_PROVIDER: "провайдер отвечает ошибкой",
     CAUSE_UNCLASSIFIED: "причина не классифицирована",
 }
+#: DRF-2688 — провайдер отклонил КЛЮЧ (HTTP 401; оба SDK называют класс
+#: одинаково). Словарь закрытый и узкий намеренно: 403 сюда не входит — у
+#: OpenAI это ещё и отказ по региону при живом ключе (замер 17.09), и совет
+#: «обнови ключ» там отправил бы оператора чинить не то.
+KEY_REJECTED_ERROR_CLASSES = frozenset({"AuthenticationError"})
+
+# DRF-2688 — состояние РЕЗЕРВНОГО вендора, отдельно от состояния пути.
+RESERVE_UP = "up"
+RESERVE_DOWN = "down"
+RESERVE_UNKNOWN = "unknown"
+CACHE_KEY_RESERVE = "llm:health:reserve"
+AUDIT_RESERVE_DOWN = "llm.health.reserve_down"
+AUDIT_RESERVE_RECOVERED = "llm.health.reserve_recovered"
+#: Три пропущенные проверки (beat раз в 30 минут) — это уже не знание.
+DEFAULT_RESERVE_STALE_S = 5400
 
 # DRF-2065 — состояние ПУТИ к LLM, которое читает readyz. Инцидент 16–17.09:
 # 9 ч аварийного текста при зелёном readyz. После DRF-2147 бот умеет уйти на
@@ -266,6 +313,8 @@ DEFAULT_PATH_STALE_S = 900
 #: Skip reasons returned by :func:`check_llm_availability` without probing.
 SKIP_DISABLED = "disabled"
 SKIP_NO_API_KEY = "no_api_key"  # pragma: allowlist secret — a skip reason, not a key
+#: DRF-2688 — живому ходу некуда уходить: резерв выключен или у него нет ключа.
+SKIP_NO_RESERVE = "no_reserve"
 
 # The cheapest completion that still exercises the whole path: one
 # token in, one token out. At gpt-4o-mini prices a tick costs on the
@@ -496,6 +545,8 @@ async def probe_llm(
     :func:`check_llm_availability` — для второго замера того же тика
     (резерв из ``fallback_candidates`` DRF-2147 или прямой путь без
     прокси). Без них — ровно прежняя проба основного вендора.
+    DRF-2688: тем же входом ``provider_name`` пользуется
+    :func:`check_llm_reserve` — проверка резерва при живом основном.
     """
 
     chosen_model = model or getattr(settings, "LLM_HEALTH_PROBE_MODEL", "") or None
@@ -738,7 +789,15 @@ def evaluate_probe(
 def reset_state() -> None:
     """Drop the persisted health state. Test + operator escape hatch."""
 
-    cache.delete_many([CACHE_KEY_STATE, CACHE_KEY_FAILURES, CACHE_KEY_DOWN_SINCE, CACHE_KEY_PATH])
+    cache.delete_many(
+        [
+            CACHE_KEY_STATE,
+            CACHE_KEY_FAILURES,
+            CACHE_KEY_DOWN_SINCE,
+            CACHE_KEY_PATH,
+            CACHE_KEY_RESERVE,
+        ]
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -860,6 +919,33 @@ def classify_cause(error_class: str | None) -> str:
     return CAUSE_UNCLASSIFIED
 
 
+def key_is_rejected(error_class: str | None) -> bool:
+    """Провайдер отклонил ключ (DRF-2688) — не сбой, а «нужен новый ключ»."""
+
+    return error_class in KEY_REJECTED_ERROR_CLASSES
+
+
+def key_hint(result: ProbeResult) -> str:
+    """Строка «что делать» для отклонённого ключа — или пусто.
+
+    Называет ИМЯ настройки (его даёт реестр роутера), значение ключа сюда
+    не попадает ни в каком виде. 30.09 разбор начинался с гипотез о
+    конфиге и обрыве строки; ответ «ключ отклонён провайдером» был в
+    классе исключения с первой минуты.
+    """
+
+    if not key_is_rejected(result.error_class):
+        return ""
+    from apps.llm.router import key_setting_name
+
+    setting = key_setting_name(result.provider)
+    where = f" — настройка {setting}" if setting else ""
+    return (
+        "Что делать: провайдер отклонил ключ API (отозван, истёк или введён с ошибкой). "
+        f"Нужен новый ключ{where}."
+    )
+
+
 def build_down_message(
     result: ProbeResult, *, failures: int, path: dict[str, Any] | None = None
 ) -> str:
@@ -891,6 +977,9 @@ def build_down_message(
         lines.append(f"Провайдер: {result.provider}")
     # DRF-1938 — сеть/прокси или провайдер: первым делом, до имени исключения.
     lines.append(f"Причина: {CAUSE_TEXT[classify_cause(result.error_class)]}")
+    hint = key_hint(result)
+    if hint:
+        lines.append(hint)
     direct = tick.get("direct_path")
     if direct is True:
         lines.append("Прямой путь к провайдеру: есть — сеть жива, менять нужно прокси.")
@@ -1072,4 +1161,261 @@ def _measure_path(primary: str, result: ProbeResult, *, model: str | None) -> di
         "primary": primary,
         "fallback": fallback,
         "direct_path": direct,
+    }
+
+
+# ---------------------------------------------------------------------------
+# The standby vendor (DRF-2688)
+# ---------------------------------------------------------------------------
+
+
+def _empty_reserve_state() -> dict[str, Any]:
+    return {
+        "state": RESERVE_UNKNOWN,
+        "provider": None,
+        "primary": None,
+        "failures": 0,
+        "down_since": None,
+        "error_class": "",
+        "key_rejected": False,
+        "checked_at": None,
+    }
+
+
+def read_reserve_state() -> dict[str, Any]:
+    """Последнее измеренное состояние резерва — или честное ``unknown``.
+
+    Без вызова LLM, как :func:`read_path_state`: его читает readyz.
+    Неизмеренное и давнее (``LLM_HEALTH_RESERVE_STALE_S``) — ``unknown``,
+    а не «резерв жив».
+    """
+
+    record = cache.get(CACHE_KEY_RESERVE)
+    if not isinstance(record, dict):
+        return _empty_reserve_state()
+    out = {**_empty_reserve_state(), **record}
+    try:
+        checked = datetime.fromisoformat(str(out["checked_at"]))
+    except ValueError:
+        return {**out, "state": RESERVE_UNKNOWN, "detail": "unparseable"}
+    if timezone.is_naive(checked):
+        checked = timezone.make_aware(checked, timezone.get_default_timezone())
+    stale_s = int(getattr(settings, "LLM_HEALTH_RESERVE_STALE_S", DEFAULT_RESERVE_STALE_S))
+    if (timezone.now() - checked).total_seconds() > stale_s:
+        return {**out, "state": RESERVE_UNKNOWN, "detail": "stale"}
+    return out
+
+
+def build_reserve_down_message(result: ProbeResult, *, primary: str, failures: int) -> str:
+    """Текст оператору: резерв не отвечает, пока основной ещё жив."""
+
+    lines = [
+        "🟠 Резервный провайдер LLM недоступен",
+        f"Основной: {primary}. Резерв: {result.provider} — проверка не проходит.",
+        f"Неудачных проверок подряд: {failures}",
+        f"Причина: {CAUSE_TEXT[classify_cause(result.error_class)]}",
+    ]
+    hint = key_hint(result)
+    if hint:
+        lines.append(hint)
+    lines.append(f"Ошибка: {result.error_class or 'unknown'}")
+    if result.error_message:
+        lines.append(f"Детали: {result.error_message}")
+    lines.append(f"Проверка длилась: {result.latency_s:.1f} с")
+    lines.append(f"Время: {_now_label()}")
+    lines.append(
+        "Клиентам сейчас отвечает основной провайдер. Но если он откажет, "
+        "переключаться некуда — бот ответит аварийным текстом."
+    )
+    return "\n".join(lines)
+
+
+def build_reserve_recovered_message(
+    result: ProbeResult, *, primary: str, down_since: object = None
+) -> str:
+    """Текст оператору: резерв снова отвечает."""
+
+    lines = [
+        "🟢 Резервный провайдер LLM снова доступен",
+        f"Основной: {primary}. Резерв: {result.provider} — ответ за {result.latency_s:.1f} с",
+    ]
+    downtime = _format_downtime(down_since)
+    if downtime:
+        lines.append(f"Резерва не было ≈ {downtime}")
+    lines.append(f"Время: {_now_label()}")
+    return "\n".join(lines)
+
+
+def evaluate_reserve(result: ProbeResult, *, primary: str) -> str:
+    """Свести проверку резерва в его состояние; сообщить только о смене.
+
+    Тот же принцип, что у :func:`evaluate_probe`: медленно тревожимся,
+    быстро успокаиваемся, на канал — только переход. Два отличия:
+
+    * отклонённый ключ — переход с ПЕРВОЙ неудачи: второй такой же 401
+      через полчаса ничего не добавит;
+    * всегда ``warning``: клиентам отвечает основной, это потеря
+      страховки, а не авария. Аварию («основной лёг, резерв тоже») по-
+      прежнему объявляет тик основного пути.
+
+    Запись привязана к имени резерва: сменился кандидат
+    (``LLM_FALLBACK_ORDER`` / ``LLM_PROVIDER``) — счёт начинается заново,
+    чужое «лежит» новому вендору не наследуется.
+    """
+
+    ttl = _state_ttl()
+    record = cache.get(CACHE_KEY_RESERVE)
+    if not isinstance(record, dict) or record.get("provider") != result.provider:
+        record = _empty_reserve_state()
+    was_down = record.get("state") == RESERVE_DOWN
+    now_iso = timezone.now().isoformat()
+    rejected = key_is_rejected(result.error_class)
+
+    def _store(state: str, failures: int, down_since: object) -> None:
+        cache.set(
+            CACHE_KEY_RESERVE,
+            {
+                "state": state,
+                "provider": result.provider,
+                "primary": primary,
+                "failures": failures,
+                "down_since": down_since,
+                "error_class": result.error_class,
+                "key_rejected": rejected,
+                "checked_at": now_iso,
+            },
+            ttl,
+        )
+
+    if result.ok:
+        down_since = record.get("down_since")
+        _store(RESERVE_UP, 0, None)
+        if not was_down:
+            logger.info(
+                "llm.health.reserve.ok provider=%s latency_s=%.2f",
+                result.provider,
+                result.latency_s,
+            )
+            return TRANSITION_NONE
+        logger.warning(
+            "llm.health.reserve.recovered provider=%s down_since=%s", result.provider, down_since
+        )
+        _write_audit(
+            AUDIT_RESERVE_RECOVERED,
+            {
+                "provider": result.provider,
+                "primary": primary,
+                "down_since": down_since,
+                "downtime": _format_downtime(down_since),
+            },
+        )
+        _page(
+            "warning",
+            "LLM: резерв снова доступен",
+            build_reserve_recovered_message(result, primary=primary, down_since=down_since),
+            dedup_key=f"llm.health.reserve_recovered:{result.provider}:{down_since}",
+        )
+        return TRANSITION_UP
+
+    failures = int(record.get("failures") or 0) + 1
+    if was_down:
+        _store(RESERVE_DOWN, failures, record.get("down_since"))
+        logger.warning(
+            "llm.health.reserve.still_down provider=%s failures=%d error=%s",
+            result.provider,
+            failures,
+            result.error_class,
+        )
+        return TRANSITION_NONE
+
+    threshold = 1 if rejected else _failure_threshold()
+    if failures < threshold:
+        # Ещё не «лежит»: счёт идёт, прежнее знание (жив / не мерили) остаётся.
+        _store(str(record.get("state") or RESERVE_UNKNOWN), failures, None)
+        logger.warning(
+            "llm.health.reserve.probe_failed provider=%s failures=%d/%d error=%s msg=%s",
+            result.provider,
+            failures,
+            threshold,
+            result.error_class,
+            result.error_message,
+        )
+        return TRANSITION_NONE
+
+    _store(RESERVE_DOWN, failures, now_iso)
+    logger.error(
+        "llm.health.reserve.down provider=%s primary=%s failures=%d error=%s "
+        "key_rejected=%s msg=%s",
+        result.provider,
+        primary,
+        failures,
+        result.error_class,
+        rejected,
+        result.error_message,
+    )
+    _write_audit(
+        AUDIT_RESERVE_DOWN,
+        {
+            "provider": result.provider,
+            "primary": primary,
+            "failures": failures,
+            "error_class": result.error_class,
+            "error_message": result.error_message,
+            "key_rejected": rejected,
+            "latency_s": round(result.latency_s, 3),
+        },
+    )
+    _page(
+        "warning",
+        "LLM: ключ резерва отклонён — нужен новый ключ" if rejected else "LLM: резерв недоступен",
+        build_reserve_down_message(result, primary=primary, failures=failures),
+        dedup_key=f"llm.health.reserve_down:{result.provider}:{now_iso}",
+    )
+    return TRANSITION_DOWN
+
+
+def check_llm_reserve() -> dict[str, object]:
+    """Один взгляд на РЕЗЕРВНОГО вендора, пока основной ещё жив. Never raises.
+
+    Резерв — тот, на кого ушёл бы живой ход:
+    :func:`apps.llm.router.serving_fallback_candidates` от вендора
+    ``LLM_PROVIDER``, первый кандидат — ровно правило
+    :class:`~apps.llm.router.FallbackProvider` (один хоп). Не список
+    «всех, у кого есть ключ»: проверять вендора, на которого ход не
+    уйдёт, — снова мерить не то (DRF-1631).
+
+    Нет кандидата (резерв выключен ``LLM_QUOTA_FALLBACK_ENABLED=0`` или у
+    второго вендора нет ключа) — проверять некого. Это конфигурация, то
+    есть решение, а не поломка: WARNING в лог, оператора не будим.
+    """
+
+    if not getattr(settings, "LLM_HEALTH_PROBE_ENABLED", True) or not getattr(
+        settings, "LLM_HEALTH_RESERVE_PROBE_ENABLED", True
+    ):
+        return {"skipped": SKIP_DISABLED}
+
+    from apps.llm.router import serving_fallback_candidates
+
+    primary, _source = probe_target()
+    candidates = serving_fallback_candidates(primary)
+    if not candidates:
+        logger.warning(
+            "llm.health.reserve.none primary=%s (no fallback candidate: the hop is switched "
+            "off or the other vendor has no key — a failure of %s has nowhere to go)",
+            primary,
+            primary,
+        )
+        return {"skipped": SKIP_NO_RESERVE, "primary": primary}
+
+    reserve = candidates[0]
+    result = asyncio.run(probe_llm(provider_name=reserve))
+    transition = evaluate_reserve(result, primary=primary)
+    return {
+        "ok": result.ok,
+        "provider": result.provider,
+        "primary": primary,
+        "latency_s": round(result.latency_s, 3),
+        "transition": transition,
+        "error_class": result.error_class,
+        "key_rejected": key_is_rejected(result.error_class),
     }
