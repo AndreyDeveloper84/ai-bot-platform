@@ -2842,7 +2842,18 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             persisted=reply.persisted,
         )
     if assistant_action_type != "safety_pre_check":
-        guarded = guard_outbound(reply.text, surface="max", bot_user=bot_user, trace_id=trace_id)
+        guarded = guard_outbound(
+            reply.text,
+            surface="max",
+            bot_user=bot_user,
+            trace_id=trace_id,
+            # DRF-2725 — лицензия знания едет через шов рядом с трассой: канал
+            # проверяет ответ консьержа второй раз, и без неё судил бы вслепую.
+            # ``turn_reply`` существует только на ветке консьержа.
+            knowledge=(
+                getattr(turn_reply, "knowledge_licence", None) if concierge_turn_ran else None
+            ),
+        )
         post_verdict = "block" if guarded.blocked else "allow"
         if guarded.blocked:
             # The keyboard goes with the text. ``outbound.py``'s rule is that
