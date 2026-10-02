@@ -1764,6 +1764,8 @@ def generate_concierge_reply(
         bot_user=bot_user,
         trace_id=trace_id,
         acted=_tool_acted(reply.tool_trace),
+        # DRF-2725 — лицензия знания этого хода; до появления читателя None.
+        knowledge=reply.knowledge_licence,
     )
     if _guarded.blocked:
         # action_data goes with the text (the channel drops keyboards on a
@@ -1777,6 +1779,9 @@ def generate_concierge_reply(
             persisted=reply.persisted,
             outage=reply.outage,
             tool_trace=reply.tool_trace,
+            # DRF-2725 — замена текста не отменяет того, что в этом ходу
+            # читали: канальная проверка должна видеть ту же лицензию.
+            knowledge_licence=reply.knowledge_licence,
         )
     if reply.persisted and (reply.text or "").strip():
         try:

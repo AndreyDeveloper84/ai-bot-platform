@@ -499,6 +499,15 @@ REPLAY_LIVE_CAPTURE_ENABLED = os.environ.get("REPLAY_LIVE_CAPTURE_ENABLED", "fal
 if "DRE_SHADOW_ENABLED" in os.environ:
     DRE_SHADOW_ENABLED = os.environ["DRE_SHADOW_ENABLED"]
 
+# Теневой затвор утверждений (DRF-2725; решение владельца 02.10.2026 — сначала
+# теневой режим). Тот же способ чтения и по той же причине: ключа нет, пока
+# переменная не задана, значение — сырой строкой; три «выкл» различает
+# `shadow_flag()` в `apps/orchestrator/safety/claim_gate.py`. Включённый флаг
+# добавляет строку в журнал на каждый исходящий ответ и НЕ меняет ни одного
+# ответа.
+if "CLAIM_GATE_SHADOW_ENABLED" in os.environ:
+    CLAIM_GATE_SHADOW_ENABLED = os.environ["CLAIM_GATE_SHADOW_ENABLED"]
+
 # #433 umbrella — HANDLER_EXCEPTION → DLQ threshold. A handler that
 # raises gets retried by Ayla per §6.3; after this many failed
 # attempts (counted per event_id + handler), bot-platform upserts a
