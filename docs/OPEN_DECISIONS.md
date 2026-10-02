@@ -4243,7 +4243,7 @@ A — сразу в `ayla-ai-core`: канонично, но плюс сетев
 событие приехало, `master_notify` нашёл адресата и вызвал отправку:
 
 ```
-POST botapi.max.ru/messages?chat_id=518410834 → 404 dialog.not.found
+POST botapi.max.ru/messages?chat_id=518… → 404 dialog.not.found
 booking.notify.partial_failure channel=master  recipients=1 failures=1
 booking.notify.partial_failure channel=fallback recipients=1 failures=1
 ```
@@ -4262,7 +4262,7 @@ booking.notify.partial_failure channel=fallback recipients=1 failures=1
 **`chat_id` в MAX — идентификатор диалога**, то есть величина, осмысленная
 только вместе с конкретным ботом. У `BotUser` **поля бота нет**: адрес хранится
 на строке, ключуемой тенантом. Отсюда три строки одного человека
-(`channel_user_id=260237491`) с **одним и тем же** `chat_id`.
+(`channel_user_id=260…`) с **одним и тем же** `chat_id`.
 
 ### Дефект внесён конфигурацией, а не правкой
 
@@ -4293,7 +4293,7 @@ booking.notify.partial_failure channel=fallback recipients=1 failures=1
 Успешный ответ MAX:
 
 ```json
-"recipient": {"chat_type": "dialog", "chat_id": 518410834, "user_id": 260237491}
+"recipient": {"chat_type": "dialog", "chat_id": 518…, "user_id": 260…}
 ```
 
 `user_id` — **тот же идентификатор**, по которому мы ключуем `BotUser`.
@@ -4418,13 +4418,13 @@ booking.notify.partial_failure channel=fallback recipients=1 failures=1
 адресации**:
 
 ```
-POST https://botapi.max.ru/messages?user_id=260237491
+POST https://botapi.max.ru/messages?user_id=260…
   → 200
   {"message":{"recipient":{"chat_type":"dialog",
-                           "chat_id":430388769,
-                           "user_id":260237491}, ...}}
+                           "chat_id":430…,
+                           "user_id":260…}, ...}}
 
-POST https://botapi.max.ru/messages?chat_id=518410834
+POST https://botapi.max.ru/messages?chat_id=518…
   → 404 {"code":"dialog.not.found","message":"Dialog not found"}
 ```
 
@@ -4432,8 +4432,8 @@ POST https://botapi.max.ru/messages?chat_id=518410834
 
 1. **Адресация по `user_id` работает** — 200 и доставка, тем самым ботом,
    который по `chat_id` получает отказ.
-2. **У салонного бота есть свой диалог** с этим человеком — `chat_id=430388769`.
-   Мы его не знали, потому что хранили чужой (`518410834`, диалог клиентского бота).
+2. **У салонного бота есть свой диалог** с этим человеком — `chat_id=430…`.
+   Мы его не знали, потому что хранили чужой (`518…`, диалог клиентского бота).
 3. Значит `chat_id` действительно принадлежит паре «бот + человек», а хранится
    на строке, ключуемой тенантом — диагноз §55 подтверждён **вторым, независимым
    способом**.
