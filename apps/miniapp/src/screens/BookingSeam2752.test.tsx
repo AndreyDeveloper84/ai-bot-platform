@@ -29,7 +29,8 @@
  *  06. назад и повторный выбор → прежнего мастера и его времени нет;
  *  07. подтверждение показывает и отправляет выбранные услугу и мастера;
  *  08. окна не загрузились → идти дальше нечем, запись не создаётся;
- *  09. без `?service=` прежние правила целы.
+ *  09. без `?service=` прежние правила целы;
+ *  10. карточка мастера: адрес главнее черновика; без услуги — в каталог.
  */
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
@@ -84,6 +85,7 @@ import {
   useBookingDraft,
 } from "../state/booking";
 import { CustomerBookingConfirmScreen } from "./CustomerBookingConfirmScreen";
+import { CustomerMasterDetailScreen, OTHER_MASTERS_LABEL } from "./CustomerMasterDetailScreen";
 import { CustomerSlotsScreen } from "./CustomerSlotsScreen";
 import { ExecutionOptionScreen } from "./ExecutionOptionScreen";
 import { MasterPickerScreen } from "./MasterPickerScreen";
@@ -196,7 +198,7 @@ function renderFlow(entry: string, { realConfirm = false } = {}) {
         <Route path="/customer/booking/option" element={<ExecutionOptionScreen />} />
         <Route path="/customer/booking/provider" element={<ProviderChoiceScreen />} />
         <Route path="/customer/masters/:masterId/slots" element={<CustomerSlotsScreen />} />
-        <Route path="/customer/masters/:masterId" element={<div>MASTER-CARD-PROBE</div>} />
+        <Route path="/customer/masters/:masterId" element={<CustomerMasterDetailScreen />} />
         <Route path="/customer/book/master" element={<MasterPickerScreen />} />
         <Route path="/customer/book/when" element={<DraftProbe />} />
         <Route
@@ -243,7 +245,16 @@ beforeEach(() => {
     masters: [{ id: "m-9", name: "Мария К." }],
   } as unknown as Awaited<ReturnType<typeof fetchMasters>>);
   mockedMaster.mockResolvedValue({
-    master: { id: "m-1", name: "Екатерина С." },
+    master: {
+      id: "m-1",
+      name: "Екатерина С.",
+      specialization: "массаж",
+      bio: "",
+      experience: "7 лет",
+      rating: "4.9",
+      photo_url: "",
+      service_ids: ["svc-1"],
+    },
   } as unknown as Awaited<ReturnType<typeof getCustomerMaster>>);
   mockedService.mockResolvedValue({
     service: SERVICE,
@@ -533,5 +544,47 @@ describe("без `?service=` прежние правила целы", () => {
     expect(screen.getByRole("button", { name: "Выбрать время" })).toBeDisabled();
     expect(getBookingDraft()).toMatchObject({ serviceId: "svc-7", masterId: "m-1", visitAt: null });
     expect(slotRequests()).toEqual([{ masterId: "m-1", serviceId: "svc-7" }]);
+  });
+});
+
+describe("карточка мастера — тот же шов", () => {
+  it("10а. `?service=` при чужом черновике — окна по услуге из адреса, время прежнего пути снято", async () => {
+    leaveForeignDraft();
+    renderFlow("/customer/masters/m-1?service=svc-1");
+
+    await userEvent.click(await screen.findByRole("button", { name: "Выбрать время" }));
+
+    await screen.findByRole("button", { name: /10:00/ });
+    expect(slotRequests()).toEqual([{ masterId: "m-1", serviceId: "svc-1" }]);
+    expect(getBookingDraft()).toMatchObject({
+      serviceId: "svc-1",
+      masterId: "m-1",
+      masterName: "Екатерина С.",
+      visitAt: null,
+      // Источник входа — этого пути, а не оставшийся от чужого («catalog»).
+      entryPoint: "master",
+    });
+  });
+
+  it("10б. «Другие специалисты» с `?service=` при чужом черновике — список по услуге из адреса", async () => {
+    leaveForeignDraft();
+    renderFlow("/customer/masters/m-1?service=svc-1");
+
+    await userEvent.click(await screen.findByRole("button", { name: OTHER_MASTERS_LABEL }));
+
+    expect(await screen.findByText("Мария К.")).toBeInTheDocument();
+    expect(masterListRequests()).toEqual(["svc-1"]);
+  });
+
+  it("10в. услуга не названа ни адресом, ни черновиком — «Выбрать время» ведёт выбрать услугу", async () => {
+    // Названный предел, а не починка: с карточки мастера, открытой из
+    // каталога без выбранной услуги, время выбрать нельзя — список услуг
+    // мастера на карточке не реализован (вопрос владельцу, P1).
+    renderFlow("/customer/masters/m-1");
+
+    await userEvent.click(await screen.findByRole("button", { name: "Выбрать время" }));
+
+    expect(await screen.findByText("CATALOG-PROBE")).toBeInTheDocument();
+    expect(mockedSlots).toHaveBeenCalledTimes(0);
   });
 });
