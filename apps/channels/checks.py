@@ -71,7 +71,7 @@ from __future__ import annotations
 from typing import Any
 
 from django.conf import settings
-from django.core.checks import Error as CheckError, Warning as CheckWarning, register
+from django.core.checks import Warning as CheckWarning, register
 
 #: Идентификатор сторожа — по нему его ищут в логах выкладки.
 SUPPORT_CONTACT_CHECK_ID = "support.W001"
@@ -104,12 +104,12 @@ def check_support_contact_named(app_configs: Any, **kwargs: Any) -> list[CheckWa
 
 
 #: DRF-2751 — ссылка клиентского бота в реестре ведёт не в клиентского бота.
-CLIENT_BOT_LINK_CHECK_ID = "support.E002"
+CLIENT_BOT_LINK_CHECK_ID = "support.W002"
 
 
 @register()
-def check_client_bot_link_is_the_client_bot(app_configs: Any, **kwargs: Any) -> list[CheckError]:
-    """support.E002 — ссылка клиентского бота в реестре не проходит сторож.
+def check_client_bot_link_is_the_client_bot(app_configs: Any, **kwargs: Any) -> list[CheckWarning]:
+    """support.W002 — ссылка клиентского бота в реестре не проходит сторож.
 
     Решение владельца 02.10.2026: поддержка клиента идёт через клиентский
     MAX-бот; внутренний чат сотрудников клиенту не показывается. До клиента
@@ -119,9 +119,16 @@ def check_client_bot_link_is_the_client_bot(app_configs: Any, **kwargs: Any) -> 
     ссылка на бота, не приглашение в чат, не салонный бот, имя совпадает с
     ``web_app`` той же записи.
 
-    ОШИБКА, а не предупреждение — в отличие от ``support.W001``. Пустая
-    ссылка — молчание, с ним контур работает (и проверка молчит). Неверная
-    ссылка будет показана человеку: показать не то хуже, чем не показать.
+    ПРЕДУПРЕЖДЕНИЕ, как ``support.W001``, — выкладку оно не останавливает,
+    и это решение (главное окно, 02.10.2026). Значение ссылки на стенде из
+    окна не читается, а проверки исполняются на выкладке: ошибка при
+    несовпадении формы остановила бы пилот из-за правила, которое никто не
+    сверил с живым значением. Цель владельца держится не остановкой, а
+    выводом: при непрошедшей ссылке
+    :func:`apps.channels.support_contact.client_support_link` отдаёт пусто —
+    клиент остаётся без адреса поддержки, а не с чужим адресом.
+
+    Пустая ссылка — не «неверная»: проверка молчит.
 
     Только там, где это не отладка, — по той же причине, что ``W001``.
     Значения в тексте нет: называется причина отказа, а не ссылка.
@@ -135,15 +142,15 @@ def check_client_bot_link_is_the_client_bot(app_configs: Any, **kwargs: Any) -> 
     if problem is None:
         return []
     return [
-        CheckError(
+        CheckWarning(
             f"The client bot's public link does not lead to the client bot ({problem}).",
             hint=(
                 "MAX_BOT_<SLUG>_LINK of the max_global registry entry is the one link "
                 "handed to customers (the «to the client bot» button, the Mini App's "
                 "chat_link, the support address). It must be https://<host>/<bot name> "
                 "— not a chat invitation, not a recipient id, not the salon bot — and "
-                "the bot name must equal the entry's web_app when that is set. Leave "
-                "it empty rather than point it elsewhere."
+                "the bot name must equal the entry's web_app when that is set. Until "
+                "it does, the customer support address is withheld (empty), not wrong."
             ),
             id=CLIENT_BOT_LINK_CHECK_ID,
         )

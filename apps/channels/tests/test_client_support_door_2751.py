@@ -10,8 +10,8 @@ MAX-бот; внутренний чат сотрудников клиенту н
   ссылка клиентской записи обязана быть ссылкой на бота (не приглашением в
   чат, не салонным ботом, не id получателя оповещений) и называть того же
   бота, что ``web_app``. Не прошла — адреса нет;
-* ``TestDeployCheck`` — ``support.E002``: непрошедшая ссылка — ошибка
-  выкладки, значение в текст не попадает;
+* ``TestDeployCheck`` — ``support.W002``: о непрошедшей ссылке выкладка
+  говорит, но не останавливается; значение в текст не попадает;
 * ``TestTheStaffButtonIsNotTouched`` — ``AYLA_SUPPORT_CONTACT`` читает только
   кнопка персонала в салонном боте; этот лист её не меняет;
 * ``TestTheDoor`` — «/start support» в клиентском боте: реплика с кнопкой и
@@ -187,12 +187,20 @@ class TestTheClientLinkIsChecked:
 
 
 class TestDeployCheck:
-    def test_a_link_that_is_not_the_client_bot_is_an_error(self, settings) -> None:
+    def test_a_link_that_is_not_the_client_bot_is_reported_without_stopping_the_deploy(
+        self, settings
+    ) -> None:
         settings.DEBUG = False
         settings.MAX_BOT_REGISTRY = (SALON_BOT, _client("https://max.ru/join/AbCdEf123"))
         (found,) = check_client_bot_link_is_the_client_bot(None)
-        assert found.id == CLIENT_BOT_LINK_CHECK_ID == "support.E002"
-        assert found.is_serious()
+        assert found.id == CLIENT_BOT_LINK_CHECK_ID == "support.W002"
+        # Предупреждение: ``manage.py check`` / ``migrate`` на выкладке не падают.
+        from django.core.checks import WARNING
+
+        assert found.level == WARNING
+        assert not found.is_serious()
+        # …а адрес при этом не показывается никому.
+        assert support_contact.client_support_link() == ""
         assert support_contact.PROBLEM_NOT_A_BOT_LINK in found.msg
         # Имя настройки в подсказке есть — значения нет нигде.
         assert "MAX_BOT_<SLUG>_LINK" in (found.hint or "")
