@@ -152,7 +152,7 @@ jobs:
             echo "could not diff against $BASE_REF ($BASE_SHA) — treating as code changes (fail-closed)."
             exit 0
           fi
-          NON_DOCS="$(printf '%s\n' "$CHANGED" | grep -vE '^$|^docs/|\.md$' || true)"
+          NON_DOCS="$(printf '%s\n' "$CHANGED" | grep -viE '^$|\.md$|^docs/.*\.(png|jpe?g|gif|svg|pdf)$' || true)"  # DRF-2660: под docs/ документ — только проза и картинки; .py/.json/.sql там — код (#2111 внёс .py при выключенном ruff)
           if [ -z "$NON_DOCS" ]; then
             echo "code=false" >> "$GITHUB_OUTPUT"
             echo "docs-only PR — engineering jobs are skipped (they report 'skipped', which satisfies branch protection)."

@@ -257,6 +257,16 @@ class TestLastTopic:
         assert topic == "Ок, без молочного."
         assert "Запомнила" not in topic
 
+    def test_voice_echo_paragraph_is_not_part_of_the_topic(self, client, tenant, bot_user):
+        """DRF-2686: эхо голосового «Я услышала: «…»» стоит над ответом — тема только ответ."""
+        conv = _conversation(tenant, bot_user)
+        text = "Я услышала: «хочу на массаж»\n\nПодберу мастера по массажу."
+        _turn(conv, Message.Role.ASSISTANT, text, minutes_ago=1)
+
+        topic = _get(client, bot_user).json()["last_topic"]["text"]
+
+        assert topic == "Подберу мастера по массажу."
+
     def test_memory_question_paragraph_is_not_part_of_the_topic(self, client, tenant, bot_user):
         conv = _conversation(tenant, bot_user)
         text = (
