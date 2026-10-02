@@ -339,11 +339,17 @@ DIALOGUE_READERS: dict[str, DialogueReader] = {
         storage="db_message",
         reaches_prompt=True,
         why=(
-            "A protocol method with NO production caller — the audit believed "
-            "this was the MAX prompt's history and it is not. Deliberately not "
-            "deleted (that is a separate decision), so it is classified and "
-            "probed like a live reader: if it is ever wired up, it is already "
-            "reading an emptied column."
+            "LIVE, and it IS prompt history (DRF-2700). This row used to say "
+            "«NO production caller»: true of this repository's call graph and "
+            "false of the running system — the caller is in the library, "
+            "ayla_ai_core/orchestrator.py (sync_to_async(store."
+            "load_recent_history)). Measured on dev c38b54b8: once per concierge "
+            "turn, limit=10, straight from Message rows in the DB (not the Redis "
+            "window), with no filter by consent, type or provenance; an "
+            "assistant sentence saved on one turn was in the provider's messages "
+            "on the next. Safe after erasure only because anonymisation empties "
+            "the column it reads — which the probe proves. If the DB half of "
+            "anonymize_dialogue does not run, these rows still reach the model."
         ),
     ),
     # ── Not prompt-bound ────────────────────────────────────────────────
