@@ -106,6 +106,11 @@ def salon_day(tenant, *, now: datetime | None = None) -> str:
     # `.objects` — the callers run inside tenant_scope (the consumer enters
     # it for the bot's tenant), so the scoped manager applies and a
     # cross-tenant read is impossible rather than just unintended.
+    #
+    # DRF-2759 (Z-1): the base here is «is_active, not archived» — everyone
+    # who is on the salon's staff. The greeting's «работают N мастеров»
+    # counts a narrower one (`AVAILABLE`, see `salon_greeting._masters_available`).
+    # The two numbers answer different questions and are not meant to match.
     masters = list(
         CatalogMaster.objects.filter(archived_at__isnull=True, is_active=True).order_by("name")
     )
