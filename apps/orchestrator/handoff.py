@@ -1465,6 +1465,13 @@ def route_global_human_handoff(
     return DiscoveryReply(text=_HANDOFF_REPLY)
 
 
+#: DRF-2751 — ответ на обращение из двери поддержки. ЧЕРНОВИК, финал за
+#: владельцем. Срока в нём нет намеренно: «ответят в течение 30 минут»
+#: ничем не держится ни на одном пути (DRF-2753), и новая строка это
+#: обещание не повторяет.
+SUPPORT_REQUEST_REPLY = "Передала человеку из поддержки Ayla. Он ответит здесь, в этом чате."
+
+
 def route_support_request(
     *,
     global_conversation,
@@ -1483,12 +1490,11 @@ def route_support_request(
     мини-приложения (выгрузка, удаление): это обращение к Ayla, и салону
     его видеть незачем — а его диалог с клиентом при этом замолчал бы.
 
-    Человек получает ту же строку, что и на любом другом пути передачи.
+    Человеку — :data:`SUPPORT_REQUEST_REPLY`, без срока.
     """
     from apps.handoff.models import AdminTask
     from apps.handoff.services import create_admin_task
     from apps.identity.services.global_tenant import get_global_bot_tenant
-    from apps.skills.human_handoff.skill import _HANDOFF_REPLY
     from apps.tenancy.context import tenant_scope
 
     with tenant_scope(get_global_bot_tenant()):
@@ -1504,7 +1510,7 @@ def route_support_request(
         global_conversation.id,
         trace_id,
     )
-    return DiscoveryReply(text=_HANDOFF_REPLY)
+    return DiscoveryReply(text=SUPPORT_REQUEST_REPLY)
 
 
 def _unambiguous_tenant_conversation(global_bot_user):

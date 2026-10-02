@@ -103,48 +103,48 @@ def check_support_contact_named(app_configs: Any, **kwargs: Any) -> list[CheckWa
     ]
 
 
-#: DRF-2751 — адрес поддержки задан, но это не клиентский бот.
-SUPPORT_CONTACT_INVALID_CHECK_ID = "support.E002"
+#: DRF-2751 — ссылка клиентского бота в реестре ведёт не в клиентского бота.
+CLIENT_BOT_LINK_CHECK_ID = "support.E002"
 
 
 @register()
-def check_support_contact_is_the_client_bot(app_configs: Any, **kwargs: Any) -> list[CheckError]:
-    """support.E002 — заданный адрес поддержки не ведёт в клиентского бота.
+def check_client_bot_link_is_the_client_bot(app_configs: Any, **kwargs: Any) -> list[CheckError]:
+    """support.E002 — ссылка клиентского бота в реестре не проходит сторож.
 
     Решение владельца 02.10.2026: поддержка клиента идёт через клиентский
-    MAX-бот; внутренний чат сотрудников клиенту не показывается. Сторож —
-    белый список (:mod:`apps.channels.support_contact`): проходит только
-    ссылка на клиентского бота из реестра.
+    MAX-бот; внутренний чат сотрудников клиенту не показывается. До клиента
+    доходит ровно одна ссылка — ``MAX_BOT_<S>_LINK`` записи ``max_global``
+    (кнопка «в клиентского бота», ``chat_link`` мини-приложения, адрес
+    поддержки). Её и проверяет :mod:`apps.channels.support_contact`:
+    ссылка на бота, не приглашение в чат, не салонный бот, имя совпадает с
+    ``web_app`` той же записи.
 
-    ОШИБКА, а не предупреждение, — в отличие от ``support.W001``. Пустой
-    адрес — молчание, с ним контур работает. Неверный адрес — это адрес,
-    который будет показан человеку: показать не то хуже, чем не показать.
-    Сам показ закрыт и без этой проверки (``shown_support_contact`` не
-    отдаёт недопустимое значение), так что ошибка здесь — чтобы выкладка
-    сказала о нём вслух, а не чтобы удержать его.
+    ОШИБКА, а не предупреждение — в отличие от ``support.W001``. Пустая
+    ссылка — молчание, с ним контур работает (и проверка молчит). Неверная
+    ссылка будет показана человеку: показать не то хуже, чем не показать.
 
     Только там, где это не отладка, — по той же причине, что ``W001``.
-    Значения в тексте нет: называется причина отказа, а не адрес.
+    Значения в тексте нет: называется причина отказа, а не ссылка.
     """
 
-    from apps.channels.support_contact import support_contact_problem
+    from apps.channels.support_contact import client_bot_link_problem
 
-    contact = str(getattr(settings, "AYLA_SUPPORT_CONTACT", "") or "").strip()
-    if not contact or settings.DEBUG:
+    if settings.DEBUG:
         return []
-    problem = support_contact_problem(contact)
+    problem = client_bot_link_problem()
     if problem is None:
         return []
     return [
         CheckError(
-            f"The support address is not the client bot ({problem}).",
+            f"The client bot's public link does not lead to the client bot ({problem}).",
             hint=(
-                "AYLA_SUPPORT_CONTACT must be the public link of the client bot from "
-                "the bot registry (MAX_BOT_<SLUG>_LINK of the max_global entry), "
-                "optionally with ?start=support — nothing else is accepted: not a "
-                "chat invitation, not a recipient id, not the salon bot, not free "
-                "text. Leave it empty rather than point it elsewhere."
+                "MAX_BOT_<SLUG>_LINK of the max_global registry entry is the one link "
+                "handed to customers (the «to the client bot» button, the Mini App's "
+                "chat_link, the support address). It must be https://<host>/<bot name> "
+                "— not a chat invitation, not a recipient id, not the salon bot — and "
+                "the bot name must equal the entry's web_app when that is set. Leave "
+                "it empty rather than point it elsewhere."
             ),
-            id=SUPPORT_CONTACT_INVALID_CHECK_ID,
+            id=CLIENT_BOT_LINK_CHECK_ID,
         )
     ]

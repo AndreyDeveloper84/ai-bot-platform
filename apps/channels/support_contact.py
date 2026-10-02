@@ -9,39 +9,49 @@ LLM, выкладке и передаче человеку, — клиенту �
 ### Адрес выводится, а не вписывается
 
 Клиентский бот уже назван в реестре: запись потока ``max_global``, её
-публичная ссылка — ``MAX_BOT_<S>_LINK`` (:attr:`BotEntry.link`). Той же
-ссылкой салонный бот отправляет человека в клиентский
-(``salon_handler._client_bot_link_button``), и её же получает
-мини-приложение как ``chat_link``. Адрес поддержки — эта ссылка со
-стартовым параметром :data:`SUPPORT_START_PAYLOAD`. Второго правила «как
-зовут клиентского бота» здесь нет.
+публичная ссылка — ``MAX_BOT_<S>_LINK`` (:attr:`BotEntry.link`). Эта ссылка
+уже доходит до людей двумя путями: салонный бот отправляет ею в клиентский
+(``salon_handler._client_bot_link_button``), мини-приложение получает её
+как ``chat_link``. Адрес поддержки — та же ссылка со стартовым параметром
+:data:`SUPPORT_START_PAYLOAD`.
 
-### Сторож — белый список
+Своей настройки «впишите адрес поддержки клиента» нет вовсе, и это
+намеренно: единственный адрес, который может получить клиент, строится из
+ссылки клиентского бота. Вписать сюда внутренний чат некуда.
 
-:func:`support_contact_problem` принимает РОВНО один адрес: ссылку на
-клиентского бота из реестра (с ``?start=support`` или без параметров).
-Всё остальное — отказ с названной причиной: свободный текст, числовой
-id, ссылка-приглашение в чат, чужой хост (включая прежнюю заглушку
-``max.me/aylasupport``), салонный бот, любой другой бот.
+### Сторож стоит на том, что доходит до клиента
 
-Почему не чёрный список: адреса внутреннего чата в репозитории нет — в
-окружении лежат только числовые id получателей
-(``HANDOFF_NOTIFY_MAX_CHAT_IDS`` / ``_USER_IDS``). Запретить то, чего не
-знаешь, нельзя; разрешить единственное известное — можно. Внутренний чат
-не проходит по построению, каким бы ни был его адрес.
+:func:`client_bot_link_problem` проверяет саму ссылку клиентской записи:
 
-### Чего здесь нет
+* это ссылка на бота — ``https``, один сегмент пути (``/join/<код>`` и
+  ``/c/<id>`` — приглашение в чат, не бот);
+* не салонный бот;
+* не id получателя внутренних оповещений
+  (``HANDOFF_NOTIFY_MAX_CHAT_IDS`` / ``_USER_IDS``);
+* её имя совпадает с ``web_app`` той же записи, если тот задан. Это
+  сильнее формы: бот назван в реестре дважды, и два названия обязаны
+  сходиться (на пилоте ``web_app`` — буква в букву имя из ссылки, см.
+  ``start_links.MAX_START_LINK_TEMPLATE``).
 
-* Проверки, что ссылка ОТКРЫВАЕТСЯ: это живой тап, не код.
-* Адресата для персонала салона: кнопка «Обратиться в поддержку»
-  салонного бота читает ``AYLA_SUPPORT_CONTACT`` и после этого листа
-  показывает значение, только если оно прошло этот сторож. Куда писать
-  сотруднику салона — отдельный вопрос владельцу.
+Не прошла — :func:`client_support_link` отдаёт пусто: адреса нет, и это
+лучше, чем не тот адрес. На контуре не для отладки об этом говорит
+``support.E002`` (:mod:`apps.channels.checks`).
+
+### Пределы
+
+* Публичная ссылка на чат или канал вида ``https://max.ru/<имя>`` по форме
+  неотличима от ссылки на бота. Её ловит только сверка с ``web_app``; когда
+  ``web_app`` не задан, проверяются форма и «не салонный бот», не больше.
+* Что ссылка ОТКРЫВАЕТСЯ и приводит в бот — живой тап, не код.
+* ``AYLA_SUPPORT_CONTACT`` здесь не участвует: его читает только кнопка
+  салонного бота для персонала, клиент его не видит. Адресат для персонала
+  — отдельный вопрос владельцу.
 """
 
 from __future__ import annotations
 
-from urllib.parse import parse_qsl, urlsplit
+from typing import Any
+from urllib.parse import urlsplit
 
 #: Поток клиентского бота в реестре — так его уже находит салонный бот.
 CLIENT_STREAM = "max_global"
@@ -53,23 +63,20 @@ SUPPORT_START_PAYLOAD = "support"
 # Причины отказа — закрытый словарь; по ним пишутся узлы и текст проверки.
 PROBLEM_NOT_A_LINK = "not_a_link"
 PROBLEM_STAFF_RECIPIENT = "staff_recipient_id"
-PROBLEM_FOREIGN_HOST = "foreign_host"
 PROBLEM_NOT_A_BOT_LINK = "not_a_bot_link"
 PROBLEM_SALON_BOT = "salon_bot"
-PROBLEM_OTHER_BOT = "not_the_client_bot"
-PROBLEM_UNEXPECTED_QUERY = "unexpected_query"
-PROBLEM_NO_CLIENT_LINK = "no_client_bot_link"
+PROBLEM_HANDLE_MISMATCH = "handle_differs_from_web_app"
 
 
 def _bot_address(link: str) -> tuple[str, str] | None:
-    """``(хост, handle)`` ссылки вида ``https://<хост>/<handle>`` — или None.
+    """``(хост, имя бота)`` ссылки вида ``https://<хост>/<имя>`` — или None.
 
-    Ровно один сегмент пути: ``/join/<код>`` и ``/c/<id>`` — приглашение в
-    чат, а не бот. Схема только ``https``.
+    Ровно один сегмент пути, без параметров и якоря: ссылка в реестре —
+    адрес бота, а не переход с намерением.
     """
 
     parts = urlsplit((link or "").strip())
-    if parts.scheme != "https" or not parts.hostname:
+    if parts.scheme != "https" or not parts.hostname or parts.query or parts.fragment:
         return None
     segments = [segment for segment in parts.path.split("/") if segment]
     if len(segments) != 1:
@@ -77,15 +84,10 @@ def _bot_address(link: str) -> tuple[str, str] | None:
     return parts.hostname.lower(), segments[0]
 
 
-def _entry(stream: str):
+def _entry(stream: str) -> Any:
     from apps.channels.bot_registry import effective_registry, resolve_by_stream
 
     return resolve_by_stream(stream, effective_registry())
-
-
-def _entry_link(stream: str) -> str:
-    entry = _entry(stream)
-    return (getattr(entry, "link", "") or "").strip() if entry is not None else ""
 
 
 def _salon_handles() -> set[str]:
@@ -104,28 +106,6 @@ def _salon_handles() -> set[str]:
     return handles
 
 
-def client_bot_link() -> str:
-    """Публичная ссылка на клиентского бота из реестра, или ``""``."""
-
-    return _entry_link(CLIENT_STREAM)
-
-
-def client_support_link() -> str:
-    """``<ссылка клиентского бота>?start=support``, или ``""``.
-
-    Пусто — когда у клиентской записи реестра нет ссылки (или она не ссылка
-    на бота): адреса поддержки тогда нет, и называть вместо него что-то
-    другое нельзя.
-    """
-
-    link = client_bot_link()
-    address = _bot_address(link)
-    if address is None:
-        return ""
-    host, handle = address
-    return f"https://{host}/{handle}?start={SUPPORT_START_PAYLOAD}"
-
-
 def _staff_recipient_ids() -> set[str]:
     from django.conf import settings
 
@@ -136,54 +116,48 @@ def _staff_recipient_ids() -> set[str]:
     return ids
 
 
-def support_contact_problem(value: str) -> str | None:
-    """Почему ``value`` нельзя показать клиенту как адрес поддержки — или None.
+def client_bot_link() -> str:
+    """Ссылка клиентской записи реестра как она задана, или ``""``."""
 
-    None — значение и есть ссылка на клиентского бота. Пустое значение сюда
-    не подаётся: «адрес не задан» — другой факт (``support.W001``), а не
-    «задан неверный».
+    entry = _entry(CLIENT_STREAM)
+    return (getattr(entry, "link", "") or "").strip() if entry is not None else ""
+
+
+def client_bot_link_problem() -> str | None:
+    """Почему ссылку клиентского бота нельзя отдавать клиенту — или None.
+
+    None и для пустой ссылки: «не задана» — не «задана неверно», адреса
+    тогда просто нет (:func:`client_support_link` отдаёт пусто).
     """
 
-    candidate = (value or "").strip()
-    if candidate in _staff_recipient_ids():
+    link = client_bot_link()
+    if not link:
+        return None
+    if link in _staff_recipient_ids():
         return PROBLEM_STAFF_RECIPIENT
-    if "://" not in candidate:
+    if "://" not in link:
         return PROBLEM_NOT_A_LINK
-
-    client = _bot_address(client_bot_link())
-    if client is None:
-        # Сверить не с чем — значит, не подтверждено. Отказ, а не допуск.
-        return PROBLEM_NO_CLIENT_LINK
-
-    parts = urlsplit(candidate)
-    if parts.scheme != "https" or (parts.hostname or "").lower() != client[0]:
-        return PROBLEM_FOREIGN_HOST
-    address = _bot_address(candidate)
+    address = _bot_address(link)
     if address is None:
         return PROBLEM_NOT_A_BOT_LINK
-
-    if address != client and address[1] in _salon_handles():
+    if address[1] in _salon_handles():
         return PROBLEM_SALON_BOT
-    if address != client:
-        return PROBLEM_OTHER_BOT
-    query = parse_qsl(parts.query, keep_blank_values=True)
-    if query and query != [("start", SUPPORT_START_PAYLOAD)]:
-        return PROBLEM_UNEXPECTED_QUERY
-    if parts.fragment:
-        return PROBLEM_UNEXPECTED_QUERY
+    web_app = (getattr(_entry(CLIENT_STREAM), "web_app", "") or "").strip()
+    if web_app and web_app != address[1]:
+        return PROBLEM_HANDLE_MISMATCH
     return None
 
 
-def shown_support_contact() -> str:
-    """Значение ``AYLA_SUPPORT_CONTACT``, которое можно показать человеку, или ``""``.
+def client_support_link() -> str:
+    """``<ссылка клиентского бота>?start=support``, или ``""``.
 
-    Заданное, но не прошедшее сторож значение не показывается никому: лучше
-    «напишите в поддержку» без адреса, чем адрес внутреннего чата.
+    Пусто — когда ссылки у клиентской записи нет или она не прошла сторож.
     """
 
-    from django.conf import settings
-
-    contact = str(getattr(settings, "AYLA_SUPPORT_CONTACT", "") or "").strip()
-    if not contact or support_contact_problem(contact) is not None:
+    link = client_bot_link()
+    if not link or client_bot_link_problem() is not None:
         return ""
-    return contact
+    address = _bot_address(link)
+    assert address is not None  # сторож выше это уже проверил
+    host, handle = address
+    return f"https://{host}/{handle}?start={SUPPORT_START_PAYLOAD}"

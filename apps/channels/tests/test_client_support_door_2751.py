@@ -4,12 +4,16 @@
 MAX-бот; внутренний чат сотрудников клиенту не показывается.
 
 * ``TestTheAddressIsDerived`` — адрес поддержки выводится из ссылки клиентского
-  бота в реестре, второго правила «как зовут клиентского бота» нет;
-* ``TestOnlyTheClientBotPasses`` — сторож-белый список: проходит ссылка на
-  клиентского бота, всё остальное названо причиной. Адреса внутреннего чата
-  узел не знает и знать не должен — он не проходит, каким бы ни был;
-* ``TestDeployCheck`` — ``support.E002``: заданный недопустимый адрес —
-  ошибка выкладки, значение в текст не попадает;
+  бота в реестре; своей настройки «адрес поддержки клиента» нет, вписать
+  внутренний чат некуда; адрес и дверь бота держатся за один параметр;
+* ``TestTheClientLinkIsChecked`` — сторож на том, что доходит до клиента:
+  ссылка клиентской записи обязана быть ссылкой на бота (не приглашением в
+  чат, не салонным ботом, не id получателя оповещений) и называть того же
+  бота, что ``web_app``. Не прошла — адреса нет;
+* ``TestDeployCheck`` — ``support.E002``: непрошедшая ссылка — ошибка
+  выкладки, значение в текст не попадает;
+* ``TestTheStaffButtonIsNotTouched`` — ``AYLA_SUPPORT_CONTACT`` читает только
+  кнопка персонала в салонном боте; этот лист её не меняет;
 * ``TestTheDoor`` — «/start support» в клиентском боте: реплика с кнопкой и
   НИ ОДНОЙ задачи; задача — по кнопке или по следующему сообщению;
 * ``TestWhereTheTaskLands`` — обращение в поддержку всегда в очереди
@@ -29,8 +33,8 @@ from django.core.cache import cache
 from apps.channels import support_contact
 from apps.channels.bot_registry import BotEntry
 from apps.channels.checks import (
-    SUPPORT_CONTACT_INVALID_CHECK_ID,
-    check_support_contact_is_the_client_bot,
+    CLIENT_BOT_LINK_CHECK_ID,
+    check_client_bot_link_is_the_client_bot,
 )
 from apps.channels.max import handler as max_handler, support_entry
 from apps.conversations.models import Conversation, Message
@@ -46,6 +50,8 @@ pytestmark = pytest.mark.django_db
 CLIENT_LINK = "https://max.ru/ayla_client_bot"
 SUPPORT_LINK = "https://max.ru/ayla_client_bot?start=support"
 HANDOFF_REPLY = "Передаю менеджеру — ответят в течение 30 минут."
+#: Ответ на обращение из двери — литералом: видимый текст, черновик до слова владельца.
+SUPPORT_REPLY = "Передала человеку из поддержки Ayla. Он ответит здесь, в этом чате."
 #: Получатель внутренних оповещений — вымышленный id чата сотрудников.
 STAFF_CHAT_ID = "-70000000000001"
 USER_ID = 2751
@@ -63,13 +69,20 @@ CLIENT_BOT = BotEntry(
     api_token="token-client",  # pragma: allowlist secret
     stream="max_global",
     link=CLIENT_LINK,
+    web_app="ayla_client_bot",
 )
-CLIENT_BOT_NO_LINK = BotEntry(
-    slug="client",
-    webhook_secret="secret-client",  # pragma: allowlist secret
-    api_token="token-client",  # pragma: allowlist secret
-    stream="max_global",
-)
+
+
+def _client(link: str, *, web_app: str = "ayla_client_bot") -> BotEntry:
+    """Клиентская запись реестра с заданной ссылкой."""
+    return BotEntry(
+        slug="client",
+        webhook_secret="secret-client",  # pragma: allowlist secret
+        api_token="token-client",  # pragma: allowlist secret
+        stream="max_global",
+        link=link,
+        web_app=web_app,
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -91,42 +104,39 @@ class TestTheAddressIsDerived:
         assert support_contact.client_support_link() == SUPPORT_LINK
 
     def test_no_link_in_the_registry_means_no_address(self, settings) -> None:
-        settings.MAX_BOT_REGISTRY = (SALON_BOT, CLIENT_BOT_NO_LINK)
+        assert support_contact.client_support_link() == SUPPORT_LINK
+        settings.MAX_BOT_REGISTRY = (SALON_BOT, _client(""))
         assert support_contact.client_support_link() == ""
 
-    def test_a_registry_link_that_is_not_a_bot_link_gives_no_address(self, settings) -> None:
-        settings.MAX_BOT_REGISTRY = (
-            SALON_BOT,
-            BotEntry(
-                slug="client",
-                webhook_secret="secret-client",  # pragma: allowlist secret
-                api_token="token-client",  # pragma: allowlist secret
-                stream="max_global",
-                link="https://max.ru/join/AbCdEf123",
-            ),
-        )
-        assert support_contact.client_support_link() == ""
+    def test_the_address_opens_the_door_the_bot_listens_on(self) -> None:
+        """Адрес и дверь держатся за один параметр: что строит ссылка, то слушает бот."""
+        from urllib.parse import parse_qs, urlsplit
 
-    def test_the_derived_address_passes_its_own_guard(self) -> None:
-        assert support_contact.support_contact_problem(SUPPORT_LINK) is None
+        (payload,) = parse_qs(urlsplit(support_contact.client_support_link()).query)["start"]
+        # Так парсер сворачивает ``bot_started.payload`` в текст хода.
+        assert f"/start {payload}" == support_entry.SUPPORT_ENTRY_COMMAND == "/start support"
+
+    def test_the_staff_setting_is_not_a_source_of_the_client_address(self, settings) -> None:
+        """Что бы ни стояло в настройке персонала, клиентский адрес от неё не зависит."""
+        settings.AYLA_SUPPORT_CONTACT = "https://max.ru/join/AbCdEf123"
+        assert support_contact.client_support_link() == SUPPORT_LINK
 
 
-class TestOnlyTheClientBotPasses:
+class TestTheClientLinkIsChecked:
+    def test_a_bot_link_passes(self) -> None:
+        assert support_contact.client_bot_link_problem() is None
+
     @pytest.mark.parametrize(
-        "value",
-        [
-            CLIENT_LINK,
-            SUPPORT_LINK,
-            CLIENT_LINK + "/",
-            "https://MAX.RU/ayla_client_bot?start=support",
-            f"  {SUPPORT_LINK}  ",
-        ],
+        "link",
+        [CLIENT_LINK + "/", "https://MAX.RU/ayla_client_bot", f"  {CLIENT_LINK}  "],
     )
-    def test_the_client_bot_is_accepted(self, value: str) -> None:
-        assert support_contact.support_contact_problem(value) is None
+    def test_spelling_of_the_same_bot_link_passes(self, settings, link: str) -> None:
+        settings.MAX_BOT_REGISTRY = (SALON_BOT, _client(link))
+        assert support_contact.client_bot_link_problem() is None
+        assert support_contact.client_support_link() == SUPPORT_LINK
 
     @pytest.mark.parametrize(
-        ("value", "reason"),
+        ("link", "reason"),
         [
             # получатель внутренних оповещений — тот самый чат сотрудников
             (STAFF_CHAT_ID, support_contact.PROBLEM_STAFF_RECIPIENT),
@@ -134,76 +144,92 @@ class TestOnlyTheClientBotPasses:
             ("https://max.ru/join/AbCdEf123", support_contact.PROBLEM_NOT_A_BOT_LINK),
             ("https://max.ru/c/-70000000000001/AbCd", support_contact.PROBLEM_NOT_A_BOT_LINK),
             ("https://max.ru/", support_contact.PROBLEM_NOT_A_BOT_LINK),
-            # прежняя заглушка мини-приложения
-            ("https://max.me/aylasupport", support_contact.PROBLEM_FOREIGN_HOST),
-            ("https://example.org/ayla_client_bot", support_contact.PROBLEM_FOREIGN_HOST),
-            ("http://max.ru/ayla_client_bot", support_contact.PROBLEM_FOREIGN_HOST),
-            # салонный бот — не адрес поддержки клиента
+            ("http://max.ru/ayla_client_bot", support_contact.PROBLEM_NOT_A_BOT_LINK),
+            # ссылка в реестре — адрес бота, а не переход с намерением
+            (CLIENT_LINK + "?start=inv_AYLA7K3M", support_contact.PROBLEM_NOT_A_BOT_LINK),
+            (CLIENT_LINK + "#chat", support_contact.PROBLEM_NOT_A_BOT_LINK),
+            # салонный бот — не клиентский
             ("https://max.ru/ayla_salon_bot", support_contact.PROBLEM_SALON_BOT),
-            ("https://max.ru/some_other_bot", support_contact.PROBLEM_OTHER_BOT),
+            # по форме бот, но не тот, кого запись называет в web_app:
+            # публичный чат или канал выглядит именно так
+            ("https://max.ru/it_ayla_team", support_contact.PROBLEM_HANDLE_MISMATCH),
+            ("https://max.me/aylasupport", support_contact.PROBLEM_HANDLE_MISMATCH),
             # не ссылка вовсе
             ("@ayla_support", support_contact.PROBLEM_NOT_A_LINK),
-            ("чат сотрудников", support_contact.PROBLEM_NOT_A_LINK),
             ("-70000000000002", support_contact.PROBLEM_NOT_A_LINK),
             ("max.ru/ayla_client_bot", support_contact.PROBLEM_NOT_A_LINK),
-            # клиентский бот, но с другим намерением
-            (CLIENT_LINK + "?start=inv_AYLA7K3M", support_contact.PROBLEM_UNEXPECTED_QUERY),
-            (SUPPORT_LINK + "&x=1", support_contact.PROBLEM_UNEXPECTED_QUERY),
-            (CLIENT_LINK + "#chat", support_contact.PROBLEM_UNEXPECTED_QUERY),
         ],
     )
-    def test_everything_else_is_refused_with_a_reason(self, value: str, reason: str) -> None:
-        assert support_contact.support_contact_problem(value) == reason
+    def test_anything_else_is_refused_and_gives_no_address(
+        self, settings, link: str, reason: str
+    ) -> None:
+        # Положительная пара на том же контуре: до подмены адрес есть.
+        assert support_contact.client_support_link() == SUPPORT_LINK
+        settings.MAX_BOT_REGISTRY = (SALON_BOT, _client(link))
+        assert support_contact.client_bot_link_problem() == reason
+        assert support_contact.client_support_link() == ""
 
-    def test_with_no_client_link_nothing_can_be_confirmed(self, settings) -> None:
-        """Сверить не с чем — отказ, а не допуск: даже то, что минуту назад проходило."""
-        assert support_contact.support_contact_problem(SUPPORT_LINK) is None
-        settings.MAX_BOT_REGISTRY = (SALON_BOT, CLIENT_BOT_NO_LINK)
-        assert (
-            support_contact.support_contact_problem(SUPPORT_LINK)
-            == support_contact.PROBLEM_NO_CLIENT_LINK
+    def test_without_web_app_only_the_form_is_checked(self, settings) -> None:
+        """Предел, названный узлом: имя сверить не с чем — проходит любой «бот» по форме."""
+        settings.MAX_BOT_REGISTRY = (SALON_BOT, _client("https://max.ru/it_ayla_team"))
+        assert support_contact.client_bot_link_problem() == support_contact.PROBLEM_HANDLE_MISMATCH
+        settings.MAX_BOT_REGISTRY = (
+            SALON_BOT,
+            _client("https://max.ru/it_ayla_team", web_app=""),
         )
+        assert support_contact.client_bot_link_problem() is None
 
-    def test_only_a_confirmed_address_is_ever_shown(self, settings) -> None:
-        settings.AYLA_SUPPORT_CONTACT = SUPPORT_LINK
-        assert support_contact.shown_support_contact() == SUPPORT_LINK
-        settings.AYLA_SUPPORT_CONTACT = "https://max.ru/join/AbCdEf123"
-        assert support_contact.shown_support_contact() == ""
+    def test_an_empty_link_is_not_a_wrong_link(self, settings) -> None:
+        settings.MAX_BOT_REGISTRY = (SALON_BOT, _client("https://max.ru/join/AbCdEf123"))
+        assert support_contact.client_bot_link_problem() is not None
+        settings.MAX_BOT_REGISTRY = (SALON_BOT, _client(""))
+        assert support_contact.client_bot_link_problem() is None
 
 
 class TestDeployCheck:
-    def test_an_address_that_is_not_the_client_bot_is_an_error(self, settings) -> None:
+    def test_a_link_that_is_not_the_client_bot_is_an_error(self, settings) -> None:
         settings.DEBUG = False
-        settings.AYLA_SUPPORT_CONTACT = "https://max.ru/join/AbCdEf123"
-        (found,) = check_support_contact_is_the_client_bot(None)
-        assert found.id == SUPPORT_CONTACT_INVALID_CHECK_ID
+        settings.MAX_BOT_REGISTRY = (SALON_BOT, _client("https://max.ru/join/AbCdEf123"))
+        (found,) = check_client_bot_link_is_the_client_bot(None)
+        assert found.id == CLIENT_BOT_LINK_CHECK_ID == "support.E002"
         assert found.is_serious()
         assert support_contact.PROBLEM_NOT_A_BOT_LINK in found.msg
         # Имя настройки в подсказке есть — значения нет нигде.
-        assert "AYLA_SUPPORT_CONTACT" in (found.hint or "")
+        assert "MAX_BOT_<SLUG>_LINK" in (found.hint or "")
         assert "AbCdEf123" not in found.msg + (found.hint or "")
 
     def test_the_client_bot_is_silent(self, settings) -> None:
         settings.DEBUG = False
-        settings.AYLA_SUPPORT_CONTACT = "https://max.ru/join/AbCdEf123"
-        assert len(check_support_contact_is_the_client_bot(None)) == 1
-        settings.AYLA_SUPPORT_CONTACT = SUPPORT_LINK
-        assert check_support_contact_is_the_client_bot(None) == []
-
-    def test_empty_is_the_other_guards_subject(self, settings) -> None:
-        """Пустой адрес — молчание (``support.W001``), а не неверный адрес."""
-        settings.DEBUG = False
-        settings.AYLA_SUPPORT_CONTACT = "@ayla_support"
-        assert len(check_support_contact_is_the_client_bot(None)) == 1
-        settings.AYLA_SUPPORT_CONTACT = ""
-        assert check_support_contact_is_the_client_bot(None) == []
+        settings.MAX_BOT_REGISTRY = (SALON_BOT, _client("https://max.ru/join/AbCdEf123"))
+        assert len(check_client_bot_link_is_the_client_bot(None)) == 1
+        settings.MAX_BOT_REGISTRY = (SALON_BOT, CLIENT_BOT)
+        assert check_client_bot_link_is_the_client_bot(None) == []
 
     def test_debug_contour_is_silent(self, settings) -> None:
-        settings.AYLA_SUPPORT_CONTACT = "@ayla_support"
+        settings.MAX_BOT_REGISTRY = (SALON_BOT, _client("https://max.ru/join/AbCdEf123"))
         settings.DEBUG = False
-        assert len(check_support_contact_is_the_client_bot(None)) == 1
+        assert len(check_client_bot_link_is_the_client_bot(None)) == 1
         settings.DEBUG = True
-        assert check_support_contact_is_the_client_bot(None) == []
+        assert check_client_bot_link_is_the_client_bot(None) == []
+
+
+class TestTheStaffButtonIsNotTouched:
+    def test_the_salon_bot_still_names_whatever_the_setting_holds(self, settings) -> None:
+        """Адресат для персонала — отдельный вопрос владельцу; здесь он не решается."""
+        from apps.channels.max import salon_handler
+
+        settings.AYLA_SUPPORT_CONTACT = "@ayla_support"
+        assert salon_handler._support_text() == "Поддержка Ayla: @ayla_support"
+        settings.AYLA_SUPPORT_CONTACT = ""
+        assert salon_handler._support_text() == salon_handler.SUPPORT_FALLBACK_TEXT
+
+    def test_the_staff_setting_does_not_trip_the_client_check(self, settings) -> None:
+        settings.DEBUG = False
+        settings.MAX_BOT_REGISTRY = (SALON_BOT, _client("https://max.ru/join/AbCdEf123"))
+        settings.AYLA_SUPPORT_CONTACT = "@ayla_support"
+        assert len(check_client_bot_link_is_the_client_bot(None)) == 1
+        settings.MAX_BOT_REGISTRY = (SALON_BOT, CLIENT_BOT)
+        assert check_client_bot_link_is_the_client_bot(None) == []
 
 
 # ─────────────────────────────── дверь в боте ───────────────────────────────
@@ -302,7 +328,7 @@ class TestTheDoor:
         _run_global("Хочу удалить свои данные", mid="d2")
         task = AdminTask.all_tenants.get()
         assert "Хочу удалить свои данные" in task.reason
-        assert sent[-1]["text"] == HANDOFF_REPLY
+        assert sent[-1]["text"] == SUPPORT_REPLY
         assert _global_conversation().state == Conversation.State.HUMAN_HANDOFF
         assert concierge.call_count == 0
 
@@ -310,7 +336,7 @@ class TestTheDoor:
         _run_global(support_entry.SUPPORT_ENTRY_COMMAND, mid="d1")
         _run_global(support_entry.CB_SUPPORT_CALL, mid="d2")
         assert AdminTask.all_tenants.count() == 1
-        assert sent[-1]["text"] == HANDOFF_REPLY
+        assert sent[-1]["text"] == SUPPORT_REPLY
         said = list(
             Message.all_tenants.filter(
                 conversation=_global_conversation(), role="user"
@@ -343,6 +369,7 @@ class TestWhereTheTaskLands:
         _run_global("позовите администратора, пожалуйста", mid="w1")
         task = AdminTask.all_tenants.get()
         assert task.tenant_id == salon.tenant_id
+        assert sent[-1]["text"] == HANDOFF_REPLY
 
 
 class TestTheDoorDoesNotStayOpen:

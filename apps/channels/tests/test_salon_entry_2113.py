@@ -66,8 +66,6 @@ CLIENT_BOT = BotEntry(
     stream="max_global",
     link="https://max.ru/ayla_client_bot",
 )
-#: DRF-2751 — адрес поддержки: ссылка клиентского бота со стартовым параметром.
-SUPPORT_LINK = "https://max.ru/ayla_client_bot?start=support"
 CLIENT_BOT_NO_LINK = BotEntry(
     slug="client",
     webhook_secret="secret-client",  # pragma: allowlist secret
@@ -428,31 +426,14 @@ class TestE7SupportButton:
         _admin(tenant, linked=False)
         _handle(salon_handler.CB_SALON_SUPPORT, update_id=1)
         assert sent.call_args.kwargs["text"] == salon_handler.SUPPORT_FALLBACK_TEXT
-        # DRF-2751: показывается только адрес, прошедший сторож, — ссылка на
-        # клиентского бота из реестра.
-        settings.AYLA_SUPPORT_CONTACT = SUPPORT_LINK
+        settings.AYLA_SUPPORT_CONTACT = "@ayla_support"
         _handle(salon_handler.CB_SALON_SUPPORT, update_id=2)
-        assert sent.call_args.kwargs["text"] == f"Поддержка Ayla: {SUPPORT_LINK}"
+        assert sent.call_args.kwargs["text"] == "Поддержка Ayla: @ayla_support"
 
     def test_stranger_gets_support_too(self, sent, settings) -> None:
-        settings.AYLA_SUPPORT_CONTACT = SUPPORT_LINK
+        settings.AYLA_SUPPORT_CONTACT = "@ayla_support"
         _handle(salon_handler.CB_SALON_SUPPORT)
-        assert sent.call_args.kwargs["text"] == f"Поддержка Ayla: {SUPPORT_LINK}"
-
-    @pytest.mark.parametrize(
-        "value",
-        ["@ayla_support", "https://max.ru/join/AbCdEf123", "https://max.me/aylasupport"],
-    )
-    def test_an_address_that_is_not_the_client_bot_is_not_shown(
-        self, sent, settings, value
-    ) -> None:
-        """DRF-2751: заданное, но недопустимое значение человеку не называется."""
-        settings.AYLA_SUPPORT_CONTACT = SUPPORT_LINK
-        _handle(salon_handler.CB_SALON_SUPPORT, update_id=1)
-        assert sent.call_args.kwargs["text"] == f"Поддержка Ayla: {SUPPORT_LINK}"
-        settings.AYLA_SUPPORT_CONTACT = value
-        _handle(salon_handler.CB_SALON_SUPPORT, update_id=2)
-        assert sent.call_args.kwargs["text"] == salon_handler.SUPPORT_FALLBACK_TEXT
+        assert sent.call_args.kwargs["text"] == "Поддержка Ayla: @ayla_support"
 
 
 class TestE8AnAdminCodeGrantsTheRoleButNotTheMenu:
