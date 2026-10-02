@@ -54,6 +54,10 @@ DETECTORS = ("ci.yml", "replay.yml")
 DOCS_ONLY = "false"  # the value of the ``code`` output
 CODE = "true"
 
+# The Markdown paths under ``docs/`` used below are names of documents that
+# exist: ``doc_refs_guard`` reads every such path written in code as a
+# reference to a basis and reddens on one that leads nowhere.
+
 
 def _detector_script(workflow: str) -> str:
     text = (WORKFLOWS / workflow).read_text(encoding="utf-8")
@@ -156,7 +160,7 @@ class TestWhatIsADocument:
             ["docs/specs/contract.pdf"],
             ["docs/diagrams/flow.svg"],
             ["docs/Свод решений владельца.md"],
-            ["docs/a.md", "docs/b/c.md", "CLAUDE.md"],
+            ["docs/OPEN_DECISIONS.md", "docs/runbooks/on-call.md", "CLAUDE.md"],
         ],
     )
     def test_prose_and_pictures_are_docs_only(self, pull_request, paths: list[str]) -> None:
@@ -188,8 +192,8 @@ class TestMixedPullRequest:
         [
             ["docs/OPEN_DECISIONS.md", "apps/llm/router.py"],
             ["README.md", "pyproject.toml"],
-            ["docs/a.md", "docs/measurements/census.py"],
-            ["docs/a.md", ".github/workflows/ci.yml"],
+            ["docs/runbooks/on-call.md", "docs/measurements/census.py"],
+            ["docs/runbooks/on-call.md", ".github/workflows/ci.yml"],
             ["docs/a.png", "tests/tools/test_x.py"],
         ],
     )
