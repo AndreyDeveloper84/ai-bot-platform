@@ -51,6 +51,7 @@ from apps.marketplace.discovery import (
     split_requested_services,
 )
 from apps.marketplace.dto import MasterCard, SalonCard, ServiceCard
+from apps.orchestrator.knowledge_licence import KnowledgeLicence
 from apps.orchestrator.llm.templates import get_fallback
 from apps.persona.memory_surface import render_personal_context
 from apps.persona.voice import CLIENT_ADDRESS_RULE, SURFACE_MARKETPLACE, assistant_identity
@@ -547,6 +548,12 @@ class DiscoveryReply:
     Contract 0.5 детерминированно, без второго вызова модели. Чисто
     текстовый ответ — ``None`` (пустая трасса). Legacy producers leave it
     None — обратная совместимость frozen dataclass.
+
+    ``knowledge_licence`` (DRF-2725): лицензия знания этого хода — что читатель
+    знания отдал модели (:mod:`apps.orchestrator.knowledge_licence`). Едет
+    рядом с трассой до канала, потому что ответ проверяется дважды, а знание
+    читает только консьерж. ``None`` — в этом ходу знания не читали; до
+    появления читателя так отвечает каждый ход.
     """
 
     text: str
@@ -554,6 +561,7 @@ class DiscoveryReply:
     persisted: bool = False
     outage: bool = False
     tool_trace: tuple[dict[str, Any], ...] | None = None
+    knowledge_licence: KnowledgeLicence | None = None
 
 
 def _discovery_voice_fields() -> dict[str, str]:
