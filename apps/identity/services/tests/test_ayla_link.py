@@ -26,7 +26,7 @@ pytestmark = pytest.mark.django_db
 
 
 CHANNEL = "max"
-CHANNEL_USER_ID = "260237491"  # the «Мой Парк» account from the DRF-1035 incident
+CHANNEL_USER_ID = "200000001"  # the «Мой Парк» account from the DRF-1035 incident
 
 
 @pytest.fixture

@@ -7,7 +7,7 @@
 
 Пары, которые обязаны различаться:
 
-* ``chat.id = null`` → пусто; ``chat.id = 518410834`` → ``"518410834"``;
+* ``chat.id = null`` → пусто; ``chat.id = 500000004`` → ``"500000004"``;
 * после входа с ``id: null`` первое сообщение боту ЗАПОЛНЯЕТ ``chat_id`` —
   это и есть починка необратимости, а не косметика.
 
@@ -35,7 +35,7 @@ pytestmark = pytest.mark.django_db
 
 BOT_TOKEN = "test-bot-token-2668"  # pragma: allowlist secret
 MAX_USER_ID = 26680001
-REAL_CHAT_ID = 518410834
+REAL_CHAT_ID = 500000004
 
 
 def _verified(chat: dict | None):
