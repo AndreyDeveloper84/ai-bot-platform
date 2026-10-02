@@ -7,7 +7,7 @@
 Живой проход, который ниже воспроизведён целиком:
 
     человек: массаж
-    Ayla:    Что именно вы ищете?
+    Ayla:    Что именно хочешь выбрать?
              [Классический массаж] [Лимфодренажный массаж]
              [Массаж головы] [Спортивный массаж]
     человек: (тап) Классический массаж
@@ -126,6 +126,22 @@ def _callbacks(reply: Any) -> list[str]:
 
 class TestTheQuestionItself:
     """«массаж» → вопрос с чипами из имён каталога."""
+
+    def test_the_words_are_the_owners_of_07_09(self, massage: Tenant) -> None:
+        """DRF-2708, §47.5: слова вопроса — литералом, а не через константу.
+
+        Остальные узлы сравнивают ответ с ``CLARIFY_SERVICE_QUESTION`` и при
+        смене константы остаются зелёными с любым текстом. Решение владельца
+        07.09 (``docs/OPEN_DECISIONS.md`` §47.5) называет слова дословно и
+        прямо закрывает эту константу; перевод клиентских текстов на «ты»
+        оставил в ней формулировку §35 п.12 от 06.09.
+        """
+        assert CLARIFY_SERVICE_QUESTION == "Что именно хочешь выбрать?"
+
+        reply = clarifying_question(specialization="массаж")
+
+        assert reply is not None
+        assert reply.text == "Что именно хочешь выбрать?"
 
     def test_a_one_word_service_request_is_answered_with_a_question(self, massage: Tenant) -> None:
         reply = clarifying_question(specialization="массаж")
