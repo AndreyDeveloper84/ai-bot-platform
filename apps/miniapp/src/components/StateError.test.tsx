@@ -75,7 +75,7 @@ describe("StateError — обычные ошибки как раньше", () =>
 
   it("не ApiError → фраза про интернет", () => {
     renderErr(new TypeError("Failed to fetch"));
-    expect(screen.getByText(/Проверьте интернет/)).toBeTruthy();
+    expect(screen.getByText("Не получилось загрузить. Проверь интернет и попробуй снова.")).toBeTruthy();
   });
 
   it("кнопка повтора есть всегда", () => {

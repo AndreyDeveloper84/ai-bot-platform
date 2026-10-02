@@ -143,7 +143,7 @@ class TestSevenButtons:
 
     def test_heading_is_the_owner_s_question(self, bot_user, consent, miniapp):
         text, _data = marketplace_menu_reply(bot_user=bot_user)
-        assert text.startswith("Что хотите сделать?")
+        assert text.startswith("Что хочешь сделать?")
 
     def test_nothing_in_the_main_menu_opens_the_app_directly(self, bot_user, consent, miniapp):
         """Предупреждение §37 п.6 было бы невозможно, если бы открывало сразу.
@@ -582,7 +582,7 @@ class TestRemovedActionsStayReachable:
 
         reply = visits_mod.route_visits(global_bot_user=_User())
 
-        assert "Ваши последние визиты:" in reply.text
+        assert "Твои последние визиты:" in reply.text
         assert "Массаж спины" in reply.text
 
     def test_the_catalog_became_a_pick_not_a_removal(self, bot_user, consent, miniapp):

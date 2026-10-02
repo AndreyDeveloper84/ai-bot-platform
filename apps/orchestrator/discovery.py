@@ -51,9 +51,10 @@ from apps.marketplace.discovery import (
     split_requested_services,
 )
 from apps.marketplace.dto import MasterCard, SalonCard, ServiceCard
+from apps.orchestrator.knowledge_licence import KnowledgeLicence
 from apps.orchestrator.llm.templates import get_fallback
 from apps.persona.memory_surface import render_personal_context
-from apps.persona.voice import SURFACE_MARKETPLACE, assistant_identity
+from apps.persona.voice import CLIENT_ADDRESS_RULE, SURFACE_MARKETPLACE, assistant_identity
 
 if TYPE_CHECKING:
     from apps.identity.services.memory_reader import PersonalContextView
@@ -114,7 +115,7 @@ SHOW_MORE_LABEL = "Показать ещё"
 #: Said when the button is tapped and the search behind it no longer has a
 #: next page — the catalog moved, or the callback is from an old render.
 #: An honest sentence beats a silent no-op keyboard.
-SHOW_MORE_STALE_TEXT = "Больше подходящих мастеров не нашлось — попробуйте назвать услугу иначе."
+SHOW_MORE_STALE_TEXT = "Больше подходящих мастеров не нашлось — попробуй назвать услугу иначе."
 
 _MORE_REF_SEP = ""
 
@@ -547,6 +548,12 @@ class DiscoveryReply:
     Contract 0.5 детерминированно, без второго вызова модели. Чисто
     текстовый ответ — ``None`` (пустая трасса). Legacy producers leave it
     None — обратная совместимость frozen dataclass.
+
+    ``knowledge_licence`` (DRF-2725): лицензия знания этого хода — что читатель
+    знания отдал модели (:mod:`apps.orchestrator.knowledge_licence`). Едет
+    рядом с трассой до канала, потому что ответ проверяется дважды, а знание
+    читает только консьерж. ``None`` — в этом ходу знания не читали; до
+    появления читателя так отвечает каждый ход.
     """
 
     text: str
@@ -554,6 +561,7 @@ class DiscoveryReply:
     persisted: bool = False
     outage: bool = False
     tool_trace: tuple[dict[str, Any], ...] | None = None
+    knowledge_licence: KnowledgeLicence | None = None
 
 
 def _discovery_voice_fields() -> dict[str, str]:
@@ -603,6 +611,8 @@ def build_discovery_prompt(
         "называй конкретный салон, цену или адрес — этих данных пока нет.",
         f"Если вопрос не про запись к мастеру — мягко верни в тему: "
         f"«{voice['off_topic_redirect']}»",
+        # DRF-2712 — канон обращения: к клиенту на «ты».
+        CLIENT_ADDRESS_RULE,
         f"Ответ не длиннее {_MAX_REPLY_CHARS} символов.",
     ]
     if personal_context:
@@ -663,7 +673,7 @@ def render_alternatives(
     unlike = f", а не «{said}»" if said else ""
     return (
         f"Это другие услуги{unlike}, но{where} они есть: {quoted}. "
-        "Выберите одну из них или назовите другой город."
+        "Выбери одну из них или назови другой город."
     )
 
 
@@ -764,7 +774,7 @@ def render_no_match(
     # The salon sentence rides only where the salon chip does. It is the
     # «and here is what always works» half of an invitation that otherwise
     # asks the person to guess which cities this marketplace is in.
-    tail_salons = " Или посмотрите, какие салоны есть."
+    tail_salons = " Или посмотри, какие салоны есть."
     if service and already_refused:
         # The repeat. «Я уже отвечал» is not a rebuke — it is the one thing
         # that tells the person the wall is the same wall and they have not
@@ -781,7 +791,7 @@ def render_no_match(
         # where the salon chip is the one actually drawn.
         where = f" в городе {place}" if place else ""
         text = f"Про «{service}»{where} я уже ответил: такого у наших мастеров нет."
-        tail = offer or "Назовите другую услугу или другой город, и я поищу ещё."
+        tail = offer or "Назови другую услугу или другой город, и я поищу ещё."
         salon_tail = "" if chips else tail_salons
         return _reply_with_chips(f"{text} {tail}{salon_tail}"[:_MAX_REPLY_CHARS], chips or salons)
     if service and place:
@@ -792,23 +802,21 @@ def render_no_match(
         head = f"«{service}» в городе {place} — такого у наших мастеров сейчас нет. "
         if offer:
             return _reply_with_chips((head + offer)[:_MAX_REPLY_CHARS], chips)
-        text = head + "Назовите другую услугу или другой город, и я поищу ещё." + tail_salons
+        text = head + "Назови другую услугу или другой город, и я поищу ещё." + tail_salons
     elif service:
         head = f"«{service}» — такой услуги у наших мастеров сейчас нет. "
         if offer:
             return _reply_with_chips((head + offer)[:_MAX_REPLY_CHARS], chips)
-        text = head + "Подскажите город или другую услугу, и я поищу ещё." + tail_salons
+        text = head + "Подскажи город или другую услугу, и я поищу ещё." + tail_salons
     elif place:
         text = (
             f"В городе {place} подключённых мастеров пока нет. "
-            "Назовите другой город, и я поищу ещё." + tail_salons
+            "Назови другой город, и я поищу ещё." + tail_salons
         )
     else:
         # Genuinely nothing to acknowledge — the only case where asking for
         # both the city and the service is the honest question.
-        text = (
-            "По вашему запросу мастеров пока не нашлось — уточните город или услугу." + tail_salons
-        )
+        text = "По твоему запросу мастеров пока не нашлось — уточни город или услугу." + tail_salons
     return _reply_with_chips(text[:_MAX_REPLY_CHARS], salons)
 
 
@@ -1314,7 +1322,7 @@ def render_no_salons(city: str | None = None) -> DiscoveryReply:
     if place:
         text = (
             f"В городе {place} подключённых салонов пока нет. "
-            "Назовите другой город — или посмотрите, где мы уже есть."
+            "Назови другой город — или посмотри, где мы уже есть."
         )
         return _reply_with_chips(text[:_MAX_REPLY_CHARS], [show_salons_button()])
     return DiscoveryReply(text="Подключённых салонов пока нет.")
@@ -1397,9 +1405,9 @@ def _render_salon_cards(
             # загружены», which the line already says. No chip.
             lines.append("  Услуги пока не загружены.")
     if len(salons) > shown:
-        lines.append("…и это не все — назовите город, покажу точнее.")
+        lines.append("…и это не все — назови город, покажу точнее.")
     if buttons:
-        lines.append("Нажмите на салон — покажу, что там делают.")
+        lines.append("Нажми на салон — покажу, что там делают.")
     return _reply_with_chips("\n".join(lines), buttons)
 
 
@@ -1455,26 +1463,26 @@ def render_no_services(
                 }
             ]
         else:
-            text += "Посмотрите, что есть в наших салонах."
+            text += "Посмотри, что есть в наших салонах."
     elif name:
         text = f"В салоне «{name}» услуги пока не загружены."
     elif service and place:
         text = (
             f"«{service}» в городе {place} — таких услуг у нас сейчас нет. "
-            "Назовите другую услугу или другой город — или посмотрите наши салоны."
+            "Назови другую услугу или другой город — или посмотри наши салоны."
         )
     elif service:
         text = (
             f"«{service}» — такой услуги у нас сейчас нет. "
-            "Подскажите другую — или посмотрите, что есть в наших салонах."
+            "Подскажи другую — или посмотри, что есть в наших салонах."
         )
     elif place:
         text = (
             f"В городе {place} услуг пока не нашлось. "
-            "Назовите другой город — или посмотрите, где мы уже есть."
+            "Назови другой город — или посмотри, где мы уже есть."
         )
     else:
-        text = "Услуги пока не загружены — посмотрите, что есть в наших салонах."
+        text = "Услуги пока не загружены — посмотри, что есть в наших салонах."
     return _reply_with_chips(text[:_MAX_REPLY_CHARS], buttons)
 
 
@@ -1564,9 +1572,9 @@ def _render_service_cards(
                 }
             )
     if len(services) > shown:
-        lines.append("…это не всё — уточните запрос, и я покажу точнее.")
+        lines.append("…это не всё — уточни запрос, и я покажу точнее.")
     if buttons:
-        lines.append("Нажмите на услугу — покажу, к кому записаться.")
+        lines.append("Нажми на услугу — покажу, к кому записаться.")
     return _reply_with_chips("\n".join(lines), buttons)
 
 
@@ -1884,7 +1892,7 @@ def _parse_service_tap(callback_text: str) -> tuple[UUID, int] | None:
 #: ends somewhere the user can act.
 CATALOG_STALE_CARD_TEXT = (
     "Эта карточка уже неактуальна — каталог с тех пор обновился. "
-    "Нажмите «Найти салон», и я покажу заново."
+    "Нажми «Найти салон», и я покажу заново."
 )
 
 
@@ -2004,7 +2012,7 @@ def execute_catalog_callback(
             # what this branch actually can do.
             return _reply_with_chips(
                 "На эту услугу сейчас записаться не к кому. "
-                "Посмотрите, что ещё есть в наших салонах.",
+                "Посмотри, что ещё есть в наших салонах.",
                 [show_salons_button()],
             )
         return _render_master_cards(cards, more_offset=next_offset, more_service_id=service_id)
@@ -2222,7 +2230,7 @@ def _render_ask_clarification(
     replies (:func:`render_no_criteria_clarification` and its service twin)
     keep their bytes — those are the canon window's to change.
     """
-    text = (question or "Уточните, пожалуйста?").strip()[:_MAX_REPLY_CHARS]
+    text = (question or "Уточни, пожалуйста?").strip()[:_MAX_REPLY_CHARS]
     cleaned = [str(opt).strip() for opt in options if str(opt).strip()]
     if not cleaned and not offer_dont_know:
         return DiscoveryReply(text=text)
@@ -2322,7 +2330,7 @@ CLARIFY_DONT_KNOW_LABEL = "Не знаю"
 #: факта, либо задаёт более простой вопрос». Без движка простой вопрос
 #: один: своими словами или показать, что доступно.
 CLARIFY_DONT_KNOW_TEXT = (
-    "Хорошо, это не обязательно знать. Расскажите своими словами, что вас "
+    "Хорошо, это не обязательно знать. Расскажи своими словами, что тебя "
     "беспокоит или чего хочется, — или посмотрим доступные услуги?"
 )
 
@@ -2400,17 +2408,17 @@ def selected_clarification_options(options: list[str], mask: int) -> list[str]:
 #: wording could not be recovered. Deliberately generic — inventing a
 #: paraphrase of a question we no longer hold would put words in the bot's
 #: mouth that it never said the first time.
-_MULTISELECT_REDRAW_QUESTION = "Выберите всё, что подходит, и нажмите «Продолжить»:"
+_MULTISELECT_REDRAW_QUESTION = "Выбери всё, что подходит, и нажми «Продолжить»:"
 
 CLARIFY_STALE_TEXT = (
     "Этот вопрос уже неактуален — я потеряла варианты, которые предлагала. "
-    "Напишите, что нужно, своими словами — подберу заново."
+    "Напиши, что нужно, своими словами — подберу заново."
 )
 
 #: Said when the user closes a multi-select without choosing anything. NOT a
 #: dead end and NOT «ничего не найдено»: nothing was asked for yet, so the
 #: honest next move is to invite the answer in their own words.
-CLARIFY_NONE_TEXT = "Поняла, ни один вариант не подошёл. Расскажите своими словами, что ищете?"
+CLARIFY_NONE_TEXT = "Поняла, ни один вариант не подошёл. Расскажи своими словами, что ищешь?"
 
 
 @dataclass(frozen=True)
@@ -2555,7 +2563,7 @@ def render_multiselect_clarification(
     options, matching :func:`_render_ask_clarification` — a multi-select
     over an empty set is a bare question, not an empty keyboard.
     """
-    text = (question or "Уточните, пожалуйста?").strip()[:_MAX_REPLY_CHARS]
+    text = (question or "Уточни, пожалуйста?").strip()[:_MAX_REPLY_CHARS]
     cleaned = [str(opt).strip() for opt in options if str(opt).strip()]
     shown = cleaned[:_MAX_CLARIFICATION_OPTIONS]
     if not shown:
@@ -2611,7 +2619,7 @@ def render_multiselect_clarification(
 # blocking gap (§6), not the «unnecessary questioning» the same paragraph bans:
 # we are not asking to avoid admitting no-match, we are asking because nothing
 # has been asked for yet.
-NO_CRITERIA_QUESTION = "Чтобы подобрать мастера, подскажите: какая услуга нужна и в каком городе?"
+NO_CRITERIA_QUESTION = "Чтобы подобрать мастера, подскажи: какая услуга нужна и в каком городе?"
 
 
 def has_discovery_criteria(city: str | None, specialization: str | None) -> bool:
@@ -2670,7 +2678,7 @@ def render_no_criteria_clarification() -> DiscoveryReply:
 #: продолжение чужой фразы. Эта работает с любой услугой и, главное, не
 #: требует грамматического рода: «Какой массаж?» собрать из каталога нельзя,
 #: род там не хранится, а «Какой косметология?» стоит дороже, чем экономит.
-CLARIFY_SERVICE_QUESTION = "Что именно вы ищете?"
+CLARIFY_SERVICE_QUESTION = "Что именно ты ищешь?"
 
 
 def clarifying_question(

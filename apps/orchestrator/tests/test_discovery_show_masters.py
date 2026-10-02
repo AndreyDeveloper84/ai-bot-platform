@@ -126,7 +126,7 @@ def test_show_masters_no_results_graceful(monkeypatch) -> None:
     # DRF-1283 — the refusal names back what was searched for instead of
     # asking the client to «уточнить услугу» they had just named.
     assert "маникюр" in reply.text
-    assert "уточните город или услугу" not in reply.text
+    assert "уточни город или услугу" not in reply.text
     # DRF-1492 — the refusal is not a dead end either. There are no master
     # cards to draw (that is the point of this test), so the only keyboard it
     # may carry is the one that opens the salon list.

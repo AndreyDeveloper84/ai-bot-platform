@@ -93,6 +93,8 @@ from apps.orchestrator.discovery import (
 )
 from apps.orchestrator.fast_path import claims_direct_show_masters
 from apps.orchestrator.handoff import handoff_to_booking
+from apps.orchestrator.knowledge_licence import KnowledgeLicence
+from apps.orchestrator.knowledge_reader import licence_for_cards
 from apps.orchestrator.llm.templates import (
     get_booking_needs_name,
     get_fallback,
@@ -135,7 +137,12 @@ from apps.orchestrator.refusal_memo import (
     remember_refusal,
     render_refusal_block,
 )
-from apps.persona.voice import NO_INTERNAL_TERMS_RULE, SURFACE_MARKETPLACE, assistant_identity
+from apps.persona.voice import (
+    CLIENT_ADDRESS_RULE,
+    NO_INTERNAL_TERMS_RULE,
+    SURFACE_MARKETPLACE,
+    assistant_identity,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -987,10 +994,10 @@ def _tool_trace_entry(dto: Any) -> dict[str, Any]:
 # Both are answers, not refusals: one says who we could not find, the other
 # asks the ONE question that is still open, with the names in it.
 _BOOKING_NO_MASTER = (
-    "Не нашла мастера с таким именем — {name}. Проверьте написание или "
-    "назовите услугу, и я покажу, кто её делает."
+    "Не нашла мастера с таким именем — {name}. Проверь написание или "
+    "назови услугу, и я покажу, кто её делает."
 )
-_BOOKING_WHICH_ONE = "Уточните, к кому именно — напишите фамилию или нажмите кнопку:"
+_BOOKING_WHICH_ONE = "Уточни, к кому именно — напиши фамилию или нажми кнопку:"
 
 
 #: How far back a salon name may have been said and still count (DRF-1355).
@@ -1412,6 +1419,8 @@ def build_concierge_system_prompt(
         "намерение. Не сохраняй медицинские выводы как факт о клиенте.",
         # DRF-2593 — решение владельца 28.09, п.10.
         NO_INTERNAL_TERMS_RULE,
+        # DRF-2712 — канон обращения: к клиенту на «ты».
+        CLIENT_ADDRESS_RULE,
         f"Ответ не длиннее {_MAX_REPLY_CHARS} символов.",
     ]
     if memory_block:
@@ -1757,6 +1766,8 @@ def generate_concierge_reply(
         bot_user=bot_user,
         trace_id=trace_id,
         acted=_tool_acted(reply.tool_trace),
+        # DRF-2725 — лицензия знания этого хода; до появления читателя None.
+        knowledge=reply.knowledge_licence,
     )
     if _guarded.blocked:
         # action_data goes with the text (the channel drops keyboards on a
@@ -1770,6 +1781,9 @@ def generate_concierge_reply(
             persisted=reply.persisted,
             outage=reply.outage,
             tool_trace=reply.tool_trace,
+            # DRF-2725 — замена текста не отменяет того, что в этом ходу
+            # читали: канальная проверка должна видеть ту же лицензию.
+            knowledge_licence=reply.knowledge_licence,
         )
     if reply.persisted and (reply.text or "").strip():
         try:
@@ -2011,13 +2025,20 @@ def _concierge_turn(
     # the intent BY choosing; the post-reply resolver reads THIS choice
     # instead of re-deriving it with a second model call.
     tool_trace: list[dict[str, Any]] = []
+    # DRF-2729 — лицензия знания этого хода: что теневой читатель узнал у
+    # каталога об услуге, которую ход разрешил. Едет в результате хода до
+    # исходящего хука; модель её не видит, в ответ из неё ничего не попадает.
+    # ``None`` — читателя в ходу не было (флаг выключен или услуги не искали).
+    turn_licence: KnowledgeLicence | None = None
 
     def _reply(**kwargs: Any) -> DiscoveryReply:
         # Every return AFTER the passes ran carries the accumulated trace.
         # A text-only turn (no tool was ever picked) and a turn that never
         # reached the model (the outage fallback) both leave it None —
         # an empty trace is spelled None, never an empty tuple.
-        return DiscoveryReply(tool_trace=tuple(tool_trace) or None, **kwargs)
+        return DiscoveryReply(
+            tool_trace=tuple(tool_trace) or None, knowledge_licence=turn_licence, **kwargs
+        )
 
     while pass_index < max_passes:
         pass_index += 1
@@ -2230,6 +2251,10 @@ def _concierge_turn(
         if tool_trace and isinstance(tool_trace[-1], dict):
             tool_trace[-1]["result_count"] = len(cards)
             tool_trace[-1]["ordered_ids"] = [str(getattr(card, "master_id", "")) for card in cards]
+        # DRF-2729 — теневое чтение знания по услуге, которую этот поиск
+        # разрешил (``MasterCard.service_id``). Под своим флагом, по умолчанию
+        # выключенным; ничего ниже от результата не зависит.
+        turn_licence = licence_for_cards(cards, trace_id=trace_id)
         if not cards:
             # DRF-1474 — the fact, written down where it is established. Every
             # branch below that can answer an empty search reads it back, and

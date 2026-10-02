@@ -1456,7 +1456,7 @@ function CustomerFallbackWithBanner({ onRetry }: { onRetry: () => void }) {
           role="alert"
           style={{ margin: "var(--s-2) var(--s-3)" }}
         >
-          <p style={{ margin: 0 }}>Не получилось загрузить ваш профиль. </p>
+          <p style={{ margin: 0 }}>Не получилось загрузить профиль. </p>
           <button
             type="button"
             className="btn-secondary"

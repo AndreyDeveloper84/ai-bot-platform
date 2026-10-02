@@ -128,6 +128,14 @@ DATA_STORAGE_WITHDRAW_SOURCE = "miniapp:profile_data_storage_revoke"
 _MARKETING = ConsentRecord.ConsentType.MARKETING.value
 _PERSONAL_DATA = ConsentRecord.ConsentType.PERSONAL_DATA.value
 
+#: Why «Подсказки Ayla» cannot be turned on after the data-storage consent was
+#: withdrawn. The SAME slug the proactive gate uses
+#: (:data:`apps.notifications.proactive.BLOCK_REASONS`): owner decision §47.3
+#: calls the fact «consent_revoked», the code has called it
+#: ``consent_withdrawn`` since DRF-1301, and a second name for one legal fact
+#: is exactly what that decision is against.
+PROACTIVE_HINTS_BLOCKED_REASON = "consent_withdrawn"
+
 
 def _person_shells(bot_user: "BotUser") -> list["BotUser"]:
     """Оболочки человека по его каналу. Fail-closed до самой строки.
@@ -208,6 +216,44 @@ def _active_states(shells: list["BotUser"]) -> dict[str, dict[str, Any]]:
     return states
 
 
+def proactive_hints_state(
+    bot_user: "BotUser",
+    *,
+    shells: list["BotUser"] | None = None,
+    states: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Состояние тумблера «Подсказки Ayla»: включено ли и можно ли включить.
+
+    Один источник и для документа согласий, и для отказа
+    :func:`set_proactive_hints` — чтобы экран не мог показать обычный тумблер
+    там, где сервер откажет (решение владельца §47.3).
+
+    ``can_enable`` — ``False`` только после ОТЗЫВА: согласие на хранение
+    данных у человека было и сейчас не действует — то же определение, каким
+    сторож рассылок отличает ``consent_withdrawn`` от «не давал никогда».
+    ``blocked_reason`` тогда называет причину, иначе пуст. Человека, который
+    согласия не давал вовсе, замок не касается: §47.3 говорит об отзыве, и
+    его тумблер ведёт себя как прежде. Текст объяснения для человека сюда
+    намеренно не входит — он приходит вместе с экраном.
+    """
+    if shells is None:
+        shells = _person_shells(bot_user)
+    if states is None:
+        states = _active_states(shells)
+    withdrawn = (
+        not states[_PERSONAL_DATA]["granted"]
+        and ConsentRecord.all_tenants.filter(
+            bot_user_id__in=[s.id for s in shells],
+            consent_type=_PERSONAL_DATA,
+        ).exists()
+    )
+    return {
+        "enabled": not bool(getattr(bot_user, "proactive_messages_opt_out", False)),
+        "can_enable": not withdrawn,
+        "blocked_reason": PROACTIVE_HINTS_BLOCKED_REASON if withdrawn else "",
+    }
+
+
 def read_consents(bot_user: "BotUser") -> dict[str, Any]:
     """Полное состояние согласий человека — все типы, без выборки.
 
@@ -232,12 +278,11 @@ def read_consents(bot_user: "BotUser") -> dict[str, Any]:
     Дату отдаёт реестр: ``granted_at`` — момент действующей строки согласия.
     Если согласие отозвано, даты нет, и это правда, а не пробел.
     """
-    states = _active_states(_person_shells(bot_user))
+    shells = _person_shells(bot_user)
+    states = _active_states(shells)
     return {
         "consents": states,
-        "proactive_hints": {
-            "enabled": not bool(getattr(bot_user, "proactive_messages_opt_out", False)),
-        },
+        "proactive_hints": proactive_hints_state(bot_user, shells=shells, states=states),
         "data_storage": {
             **states[_PERSONAL_DATA],
             "revocation": {
@@ -258,10 +303,32 @@ def set_proactive_hints(bot_user: "BotUser", *, enabled: bool) -> None:
 
     Оставляет audit-строку: тумблер решает, будет ли бот писать первым, и
     «кто и когда это переключил» — вопрос, на который придётся отвечать.
+
+    **Включение спрашивает согласие, выключение — нет** (решение владельца
+    §47.3, DRF-2708). После отзыва согласия тумблер не должен позволять
+    создать ложное «подсказки включены»: сообщения всё равно остановлены
+    ``consent_withdrawn``. Проверка стоит здесь, а не на экране — ручка
+    доступна любому с валидной initData. ``enabled=False`` не отказывает
+    никогда: это нужно и человеку, и каскаду отзыва.
+
+    Raises:
+      ProactiveHintsUnavailable: при ``enabled=True`` после отзыва согласия
+        на хранение данных, пока оно не выдано заново.
     """
     from apps.identity.models import BotUser as BotUserModel
 
     shells = _person_shells(bot_user)
+    if enabled:
+        state = proactive_hints_state(bot_user, shells=shells)
+        if not state["can_enable"]:
+            from apps.consent.exceptions import ProactiveHintsUnavailable
+
+            logger.info(
+                "consent.customer.proactive_hints_refused bot_user=%s reason=%s",
+                bot_user.id,
+                state["blocked_reason"],
+            )
+            raise ProactiveHintsUnavailable(state["blocked_reason"])
     opt_out = not enabled
     with transaction.atomic():
         BotUserModel.all_tenants.filter(id__in=[s.id for s in shells]).update(
@@ -388,16 +455,13 @@ def revoke_data_storage(bot_user: "BotUser") -> "DeleteCascadeResult":
        показывать выключено, раз эффект выключен, — иначе человек видит
        включённый тумблер при остановленных сообщениях.
 
-       Это **сброс, а не замок**, и границу стоит назвать вслух.
-       :func:`set_proactive_hints` согласия не проверяет, поэтому сразу
-       после отзыва человек может включить тумблер обратно — и снова
-       увидит «включено» при остановленных ``consent_withdrawn``
-       сообщениях. В обратную сторону: повторная выдача согласия колонку
-       не возвращает в ``False``, подсказки остаются выключенными, пока
-       человек сам не включит их. Обе ветки — вопрос к владельцу
-       (TODO(Q-CLIENT-04)): §35 п.9 говорит про момент отзыва и молчит
-       про то, что происходит после него. Пока сделано ровно то, что
-       решено, и ни шага сверх.
+       Это **замок, а не сброс** — решение владельца §47.3 (DRF-2708).
+       :func:`set_proactive_hints` включение отклоняет, пока согласия нет,
+       поэтому вернуть тумблер следующим тапом нельзя: ложного «включено»
+       при остановленных ``consent_withdrawn`` сообщениях не бывает. В
+       обратную сторону: повторная выдача согласия колонку в ``False`` не
+       возвращает, и это тоже решено — человек выключил подсказки своим
+       действием, возвращается возможность включить, а не включение.
     2. **Потом запускается процедура по уже накопленному** —
        :func:`apps.identity.services.privacy.delete_personal_data`, та самая
        предусмотренная процедура C5.2: удаление персональных данных в Ayla,
@@ -510,6 +574,8 @@ __all__ = [
     "DATA_STORAGE_REVOCATION_CONSEQUENCES",
     "DATA_STORAGE_REVOCATION_DISCLOSURE_VERSION",
     "DATA_STORAGE_REVOCATION_RETAINED",
+    "PROACTIVE_HINTS_BLOCKED_REASON",
+    "proactive_hints_state",
     "read_consents",
     "revoke_data_storage",
     "set_marketing",

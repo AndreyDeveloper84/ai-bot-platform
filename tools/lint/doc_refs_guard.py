@@ -83,7 +83,7 @@ HERE = Path(__file__).resolve().parent
 ALLOW_FILE = HERE / "doc_refs_allow.txt"
 
 #: Number of entries in doc_refs_allow.txt — the list may only shrink.
-ALLOW_CEILING = 17
+ALLOW_CEILING = 16
 
 #: The owner's summary that «§N свода» refers to (form 4).
 SVOD_DOC = "docs/OWNER_DECISIONS_2026-09-11.md"

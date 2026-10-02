@@ -4,6 +4,11 @@ Source, traced one-to-one by ID: ``docs/safety/reviews/S1_CONTEXT_RECHECK_ADVERS
 v0.2.7, section «G7 question contract fixtures» (25 fixtures), which renders the
 immutable owner record ``docs/safety/reviews/OWNER_RULINGS_S1_G7_QUESTION_CONTRACT_2026-09-21.md``
 (RECORD SHA-256 ``b4f2f3f11045f5527b2c16f616bf4116e15c682ab309e54ccbea1d1f7c3597d9``).
+The documentary fixtures quote the question in its 21.09 form («вы»); the runtime
+text follows the superseding record
+``docs/safety/reviews/OWNER_RULINGS_S1_G7_QUESTION_ADDRESS_FORM_2026-10-01.md``
+(RECORD SHA-256 ``350ff8b996cd5bbfe4c8d54716945fe5e8a0a09f66c29b3fcff24b8655c061e3``) —
+form of address only, the meaning of every fixture is unchanged.
 
 Each entry keeps the documentary meaning; ``check`` names the executable
 assertion in ``test_g7q_fixtures.py``. The clinical verdict of every fixture

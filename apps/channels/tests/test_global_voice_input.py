@@ -227,6 +227,32 @@ class TestGlobalVoice:
             max_handler.handle_global_max_event(_msg(user_id=70007, attachments=[AUDIO]))
         assert sent[0]["text"] == "Я услышала: «привет»\n\nРасскажи чуть подробнее?"
 
+    @pytest.mark.parametrize(
+        ("said", "reaches_the_model"),
+        [
+            ("Запиши к мастеру завтра в десять тридцать.", "Запиши к мастеру завтра в 10:30."),
+            ("Запиши к Денису на пятнадцать ноль ноль.", "Запиши к Денису на 15:00."),
+            ("Запиши на двадцать пятое октября.", "Запиши на 25 октября."),
+        ],
+    )
+    def test_a_spoken_time_reaches_the_model_as_it_was_said(
+        self, sent, fake_redis, concierge, settings, said, reaches_the_model
+    ):
+        """DRF-2710 — модели и человеку достаётся названное время, а не сумма.
+
+        До правки нормализатор чисел складывал «десять тридцать» в 40: модель
+        получала «…завтра в 40.», и запись уходила на время, которого человек
+        не называл. Та же строка стояла в эхе — так владелец это и увидел.
+        """
+        settings.VOICE_ECHO_MODE = "always"
+        _provider(said)
+        with patch(_DOWNLOAD, return_value=ogg_of(2)):
+            max_handler.handle_global_max_event(_msg(user_id=70020, attachments=[AUDIO]))
+
+        assert concierge.call_count == 1
+        assert concierge.call_args.args[0] == reaches_the_model
+        assert sent[0]["text"] == f"Я услышала: «{reaches_the_model}»\n\nРасскажи чуть подробнее?"
+
     def test_voice_and_typed_rows_differ_only_in_input_channel(self, sent, fake_redis, concierge):
         """DRF-2488 — паритет строк Message на глобальном пути.
 

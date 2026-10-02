@@ -49,6 +49,7 @@ from django.core.cache import cache
 
 from apps.integrations.ayla.url_builder import AylaUrlBuilder
 from apps.integrations.ayla.request_id import with_request_id
+from apps.integrations.ayla.salon_service_duration import salon_service_duration_field
 
 
 logger = logging.getLogger(__name__)
@@ -302,7 +303,10 @@ class AylaService:
     # edge). Not ``0.0``: zero is a price, absence is not (DRF-1727, §103).
     price_min: float | None
     price_max: float | None
-    duration_s: int
+    # ``None`` = the catalog resolves no duration for this row. Not ``0``:
+    # a zero-second service is a number, absence is not (DRF-2705). The
+    # duration a booking actually takes lives on the master×service edge.
+    duration_s: int | None
     category_id: str | None
     raw: dict[str, Any] = field(default_factory=dict)
 
@@ -577,14 +581,21 @@ def _service_from_wire(d: dict[str, Any]) -> AylaService:
     # DRF-1727: no price on either field is absence, not a zero-rouble
     # service. A numeric ``"0.00"`` stays ``0.0`` — that one is a real price.
     price = None if raw_price is None or raw_price == "" else float(raw_price)
-    dur_min = int(d.get("duration_minutes") or 0)
+    # DRF-2705: the resolved salon-level duration when the catalog sends it,
+    # the raw one for an older catalog. No usable value is ``None`` — this
+    # used to be ``int(... or 0)``, which reported an unknown duration as a
+    # zero-second service. Not a positive ``int`` (a string, a float, a
+    # bool) is unknown, not coerced — same rule as ``duration_from_edge``.
+    dur_min = salon_service_duration_field(d)
+    if isinstance(dur_min, bool) or not isinstance(dur_min, int) or dur_min <= 0:
+        dur_min = None
     category = d.get("category")
     return AylaService(
         id=str(d.get("id") or ""),
         title=str(d.get("name") or d.get("title") or ""),
         price_min=price,
         price_max=price,
-        duration_s=dur_min * 60,
+        duration_s=dur_min * 60 if dur_min is not None else None,
         category_id=str(category) if category else None,
         raw=d,
     )

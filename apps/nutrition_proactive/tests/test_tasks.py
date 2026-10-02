@@ -722,7 +722,9 @@ class TestConsentGate:
 
         Asserted against a row that would fail a *later* condition too:
         the reason must be ``opt_out``, which is only true if the veto is
-        evaluated before consent is even looked at.
+        decided before any other condition. (Since DRF-2708 a WITHDRAWN
+        consent is the one fact allowed to name the block instead — this
+        person never consented, so the opt-out still names it.)
         """
         user = make_user(tenant, opt_out=True, consented=False)
         assert selection.check_common(user) == "opt_out"

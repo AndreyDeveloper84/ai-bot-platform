@@ -169,13 +169,13 @@ logger = logging.getLogger(__name__)
 
 # Canned text used when the pipeline can't route normally.
 _FALLBACK_BLOCK = (
-    "Извините, я не могу ответить на этот запрос. Передам менеджеру — ответит в течение 30 минут."
+    "Извини, я не могу ответить на этот запрос. Передам менеджеру — ответит в течение 30 минут."
 )
 _FALLBACK_CLARIFY = (
-    "Не совсем понял, можете уточнить? Или напишите «оператор», и я свяжу с менеджером."
+    "Не совсем понял, можешь уточнить? Или напиши «оператор», и я свяжу с менеджером."
 )
 _FALLBACK_HANDOFF = "Передаю менеджеру — ответят в течение 30 минут."
-_FALLBACK_ERROR = "Извините, что-то пошло не так. Попробуйте позже или напишите «оператор»."
+_FALLBACK_ERROR = "Извини, что-то пошло не так. Попробуй позже или напиши «оператор»."
 
 
 def _confidence_floor_reason(skill_result: Any) -> str:
@@ -337,8 +337,8 @@ def _safe_emit_ai_request_metric(
 # WHICH cap (token vs cost) tripped so the operator can decide whether
 # to raise the cap or accept the natural reset at 00:00 UTC.
 _FALLBACK_QUOTA_EXHAUSTED = (
-    "Извините, дневной лимит обращений исчерпан. Менеджер уже знает — "
-    "обратитесь к нам напрямую или попробуйте завтра."
+    "Извини, дневной лимит обращений исчерпан. Менеджер уже знает — "
+    "обратись к нам напрямую или попробуй завтра."
 )
 
 # Phase 1 / PI7 (DRF-858) — LLM retry exhausted. Distinct from the PI9
@@ -350,7 +350,7 @@ _FALLBACK_QUOTA_EXHAUSTED = (
 # the operational detail (provider, attempts, last error class). DRF-2130:
 # the line no longer claims «я уже сообщил менеджеру» — the manager is
 # not told anything, so the sentence would be a lie to the client.
-_FALLBACK_RETRY_EXHAUSTED = "Извините, сейчас не могу ответить. Попробуйте написать чуть позже."
+_FALLBACK_RETRY_EXHAUSTED = "Извини, сейчас не могу ответить. Попробуй написать чуть позже."
 
 # Operators' page (DRF-2130): Telegram + Sentry via
 # ``apps.observability.alerting.page`` whenever the retry layer exhausts
