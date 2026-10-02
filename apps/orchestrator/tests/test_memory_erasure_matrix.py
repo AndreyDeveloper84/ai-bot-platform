@@ -551,10 +551,14 @@ class TestBackendDeclaredContext:
 class TestDialogueHistory:
     """FIXED (was four GAP cells, P0) — DRF-1369.
 
-    The audit read this section as «the concierge reads the переписка». It does
-    not: ``concierge.load_recent_history`` has no production caller and the MAX
-    prompt's history comes out of Redis. The route that DID exist is the
-    master's AI draft, assembled straight out of ``Message`` rows.
+    The audit read this section as «the concierge reads the переписка». This
+    docstring then said it does not — «``concierge.load_recent_history`` has no
+    production caller and the MAX prompt's history comes out of Redis». That
+    was measured to be wrong (DRF-2700, dev ``c38b54b8``): the method has no
+    caller in THIS repository, but ``ayla_ai_core/orchestrator.py`` calls it
+    once per concierge turn and feeds the last 10 ``Message`` rows from the
+    database to the model. So there are two routes out of ``Message`` rows, not
+    one: this reader and the master's AI draft.
 
     The owner's ruling (``OD_MEMORY.md`` §4) is anonymise, not delete, with a
     **guarantee** of unreachability from the prompt pipeline. So these cells are
