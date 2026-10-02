@@ -112,6 +112,16 @@ from apps.channels.max.outbound import (
     send_message,
 )
 from apps.channels.max.parser import CanonicalEvent, ParseError, parse_max_webhook
+from apps.channels.max.support_entry import (
+    SUPPORT_CALL_BUTTON,
+    SUPPORT_ENTRY_TEXT,
+    TURN_CALL,
+    TURN_ENTRY,
+    forget_support_entry,
+    remember_support_entry,
+    support_entry_action_data,
+    support_turn,
+)
 from apps.channels.max.quick_actions import (
     AI_UNAVAILABLE_TEXT,
     STALE_TAP_TEXT,
@@ -200,6 +210,7 @@ from apps.orchestrator.handoff import (
     matches_human_handoff_request,
     route_booking_callback,
     route_global_human_handoff,
+    route_support_request,
     try_continue_booking,
 )
 from apps.orchestrator.intent_resolution import resolve_and_log_turn_intent
@@ -1443,6 +1454,17 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     #
     # Побочно закрывает класс DRF-990 для этих кнопок: в историю глобального
     # диалога ложится фраза, а не «cb:…», который модель охотно толкует.
+    # DRF-2751 — дверь поддержки: переход по ссылке «/start support», кнопка
+    # «Позвать человека» или сообщение сразу после реплики двери. Решается
+    # ОДИН раз и ДО подстановки фраз ниже: тап по чипу или меню приходит сюда
+    # ещё как ``cb:…`` — это посторонний жест, он закрывает дверь; после
+    # подстановки он выглядел бы словами человека и уехал бы в поддержку.
+    # Свой тап входит в ход подписью кнопки — сырой ``cb:support:call`` в
+    # истории был бы тем же дефектом DRF-990.
+    support_kind = support_turn(event.text, conversation)
+    if support_kind == TURN_CALL:
+        event = replace(event, text=SUPPORT_CALL_BUTTON)
+
     stale_tap = False
     tap_text = resolve_tap_text(
         event.text,
@@ -2073,6 +2095,40 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
             outcome=AIRequestMetric.OUTCOME_FALLBACK,
             skill_selected="stale_tap",
             fallback_triggered=True,
+        )
+    elif support_kind == TURN_ENTRY:
+        # Реплика, а не задача: задача без слова клиента — шум дежурному.
+        reply = DiscoveryReply(text=SUPPORT_ENTRY_TEXT, action_data=support_entry_action_data())
+        remember_support_entry(conversation)
+        assistant_action_type = "support_entry"
+        _record_live_path_metric(
+            bot_user=bot_user,
+            conversation=conversation,
+            trace_id=trace_id,
+            message_text=event.text,
+            t_start=t_start,
+            outcome=AIRequestMetric.OUTCOME_SUCCESS,
+            skill_selected="support_entry",
+        )
+    elif support_kind is not None:
+        # Кнопка или сказанное после реплики двери — обращение в поддержку
+        # Ayla: всегда в очередь платформы, не в салон (см. route_support_request).
+        reply = route_support_request(
+            global_conversation=conversation,
+            message_text=event.text,
+            trace_id=trace_id,
+        )
+        forget_support_entry(conversation)
+        mark_handoff_announced(conversation=conversation, chat_id=event.chat_id)
+        assistant_action_type = "human_handoff"
+        _record_live_path_metric(
+            bot_user=bot_user,
+            conversation=conversation,
+            trace_id=trace_id,
+            message_text=event.text,
+            t_start=t_start,
+            outcome=AIRequestMetric.OUTCOME_ESCALATED,
+            skill_selected="support_request",
         )
     elif matches_human_handoff_request(event.text):
         reply = route_global_human_handoff(
