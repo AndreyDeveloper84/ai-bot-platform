@@ -49,7 +49,7 @@ pytestmark = pytest.mark.django_db
 
 CLIENT_LINK = "https://max.ru/ayla_client_bot"
 SUPPORT_LINK = "https://max.ru/ayla_client_bot?start=support"
-HANDOFF_REPLY = "Передаю менеджеру — ответят в течение 30 минут."
+HANDOFF_REPLY = "Передаю твой вопрос менеджеру."
 #: Ответ на обращение из двери — литералом: видимый текст, черновик до слова владельца.
 SUPPORT_REPLY = "Передаю твой вопрос менеджеру."
 #: Получатель внутренних оповещений — вымышленный id чата сотрудников.

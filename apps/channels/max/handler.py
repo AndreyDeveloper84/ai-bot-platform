@@ -324,7 +324,8 @@ _FALLBACK_EMPTY = "?"
 # own reply_text. Booking's _handoff always sets one («переключаю на менеджера…»),
 # so this is only the defensive fallback. Operational copy (low sensitivity vs the
 # crisis copy) — founder may tweak.
-_HANDOFF_FALLBACK_TEXT = "Передаю твой вопрос менеджеру — он ответит здесь в ближайшее время."
+# DRF-2753 — было «…он ответит здесь в ближайшее время»: и срок, и место без носителя.
+_HANDOFF_FALLBACK_TEXT = "Передаю твой вопрос менеджеру."
 
 
 def _last_assistant_content(history: list[dict[str, Any]] | None) -> str | None:
