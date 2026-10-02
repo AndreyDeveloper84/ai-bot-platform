@@ -224,6 +224,7 @@ class TestRejectedKey:
 
         row = AuditLog.all_tenants.get(action=health.AUDIT_RESERVE_DOWN)
         assert row.payload["key_rejected"] is True
+        assert "API key is invalid" in str(row.payload)
         assert _ANTHROPIC_KEY not in str(row.payload)
 
     def test_primary_key_rejected_says_which_setting_to_replace(self, monkeypatch, pages) -> None:
@@ -331,29 +332,39 @@ class TestWhichVendorIsTheReserve:
         assert calls == [serving_fallback_candidates("openai")[0]]
 
     def test_hop_switched_off_means_nobody_to_check(self, monkeypatch, settings, pages) -> None:
-        settings.LLM_QUOTA_FALLBACK_ENABLED = False
         calls = _world(monkeypatch, anthropic=_rejected("anthropic"))
+        # Положительная пара: с включённым хопом резерв спрошен и оператор разбужен.
+        health.check_llm_reserve()
+        assert calls == ["anthropic"], calls
+        assert len(pages) == 1, pages
+        settings.LLM_QUOTA_FALLBACK_ENABLED = False
+        health.reset_state()
         assert health.check_llm_reserve() == {
             "skipped": health.SKIP_NO_RESERVE,
             "primary": "openai",
         }
-        assert calls == []
-        assert pages == []
+        # Ни второго вызова, ни второй страницы.
+        assert calls == ["anthropic"], calls
+        assert len(pages) == 1, pages
 
     def test_no_key_means_nobody_to_check(self, monkeypatch, settings, pages) -> None:
-        settings.ANTHROPIC_API_KEY = ""
         calls = _world(monkeypatch)
+        health.check_llm_reserve()
+        assert calls == ["anthropic"], calls
+        settings.ANTHROPIC_API_KEY = ""
         assert health.check_llm_reserve()["skipped"] == health.SKIP_NO_RESERVE
-        assert calls == []
+        assert calls == ["anthropic"], calls
 
     @pytest.mark.parametrize(
         "switch", ["LLM_HEALTH_PROBE_ENABLED", "LLM_HEALTH_RESERVE_PROBE_ENABLED"]
     )
     def test_switched_off(self, monkeypatch, settings, pages, switch) -> None:
+        calls = _world(monkeypatch)
+        health.check_llm_reserve()
+        assert calls == ["anthropic"], calls
         setattr(settings, switch, False)
-        calls = _world(monkeypatch, anthropic=_rejected("anthropic"))
         assert health.check_llm_reserve() == {"skipped": health.SKIP_DISABLED}
-        assert calls == []
+        assert calls == ["anthropic"], calls
 
 
 class TestNothingElseMoved:
