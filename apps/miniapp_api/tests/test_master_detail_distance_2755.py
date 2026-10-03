@@ -166,8 +166,8 @@ class TestNoDistanceMeansTheOldCard:
         r = _get(client, anna.id)
 
         assert r.status_code == 200
-        assert "distance_meters" not in r.json()["master"]
         assert r.json()["master"]["name"] == "Анна"
+        assert "distance_meters" not in r.json()["master"]
         assert stub.calls == []
 
     def test_c5_with_the_rest_flag_off_the_catalog_is_not_asked(
@@ -180,6 +180,7 @@ class TestNoDistanceMeansTheOldCard:
         r = _get(client, anna.id, lat="53.2", lon="45.0")
 
         assert r.status_code == 200
+        assert r.json()["master"]["id"] == str(anna.id)
         assert "distance_meters" not in r.json()["master"]
         assert stub.calls == []
 
@@ -189,8 +190,8 @@ class TestNoDistanceMeansTheOldCard:
         r = _get(client, anna.id, lat="53.2", lon="45.0")
 
         assert r.status_code == 200
-        assert "distance_meters" not in r.json()["master"]
         assert r.json()["master"]["name"] == "Анна"
+        assert "distance_meters" not in r.json()["master"]
 
     def test_c7_another_master_in_the_answer_is_not_this_ones_distance(
         self, client, bot_user, anna, monkeypatch

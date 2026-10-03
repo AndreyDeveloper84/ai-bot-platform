@@ -64,6 +64,7 @@ class TestTheDetailBranchCarriesTheCoordinates:
 
         masters = client.get_masters(specialist_id=MASTER_ID)
 
+        assert captured[0].url.path == f"/api/v1/internal/specialists/{MASTER_ID}/"
         assert dict(captured[0].url.params) == {}
         assert [(m.id, m.distance_meters) for m in masters] == [(MASTER_ID, None)]
 
@@ -73,6 +74,7 @@ class TestTheDetailBranchCarriesTheCoordinates:
 
         client.get_masters(specialist_id=MASTER_ID, lat=53.2)
 
+        assert captured[0].url.path == f"/api/v1/internal/specialists/{MASTER_ID}/"
         assert dict(captured[0].url.params) == {}
 
     def test_d4_a_master_without_a_place_has_no_distance(self) -> None:
