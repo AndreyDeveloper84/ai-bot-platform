@@ -619,8 +619,11 @@ export interface BookingCreateResponse {
   booking: CreatedBooking;
 }
 
-export const getCustomerMaster = (masterId: string): Promise<{ master: CustomerMaster }> =>
-  fetchMaster(masterId);
+export const getCustomerMaster = (
+  masterId: string,
+  coords?: { lat: number; lon: number },
+): Promise<{ master: CustomerMaster }> =>
+  coords ? fetchMaster(masterId, { coords }) : fetchMaster(masterId);
 
 /**
  * Fetch slots for a master across the next `days` window.

@@ -16,7 +16,7 @@
  * days») is handled in F3 (the slots screen) — F2 just navigates.
  */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { ScreenLayout } from "../components/ScreenLayout";
 import { StickyCta } from "../components/StickyCta";
@@ -33,6 +33,7 @@ import {
   type CustomerMaster,
 } from "../lib/customer-booking";
 import { masterCardP1Enabled } from "../lib/feature-flags";
+import { formatDistance, locateOnce, NEARBY_LOCATING } from "../lib/nearby";
 import { publicRating, reviewCountLabel } from "../lib/rating";
 import { alignMaster, alignService, setEntryPoint, useBookingDraft } from "../state/booking";
 import { backTo } from "../lib/screen-back";
@@ -53,6 +54,31 @@ export const OTHER_MASTERS_LABEL = "Другие специалисты";
  * `masterCardP1Enabled`. Пока здесь метка, флаг включать для людей нельзя.
  */
 export const MASTER_SERVICES_HEAD = "[ТЕКСТ ВЛАДЕЛЬЦА: заголовок блока услуг мастера]";
+
+/**
+ * DRF-2755 — расстояние до мастера. Слов владельца для кнопки, пояснения и
+ * отказа ещё нет: подписи списка («Показать рядом со мной», «…показываю
+ * список без расстояний») говорят о списке, а не об одном мастере. Стоят
+ * метки, блок закрыт тем же флагом. «Определяю местоположение…» — общая
+ * подпись списка, она подходит и здесь.
+ */
+export const MASTER_DISTANCE_BUTTON = "[ТЕКСТ ВЛАДЕЛЬЦА: кнопка «сколько до мастера»]";
+export const MASTER_DISTANCE_EXPLANATION =
+  "[ТЕКСТ ВЛАДЕЛЬЦА: зачем карточке местоположение и что координаты не сохраняются — до вызова ОС]";
+export const MASTER_DISTANCE_DENIED =
+  "[ТЕКСТ ВЛАДЕЛЬЦА: не удалось определить местоположение на карточке мастера]";
+
+/**
+ * Исход запроса расстояния. Координат здесь нет по устройству (D3): они
+ * живут только внутри одного нажатия и уходят одним запросом.
+ * `unknown` — каталог ответил `null` или не ответил: блок не рисуется.
+ */
+type Distance =
+  | { kind: "idle" }
+  | { kind: "locating" }
+  | { kind: "denied" }
+  | { kind: "known"; meters: number }
+  | { kind: "unknown" };
 
 export function CustomerMasterDetailScreen() {
   const online = useOnline();
@@ -100,6 +126,40 @@ export function CustomerMasterDetailScreen() {
   }, [masterId]);
 
   useEffect(() => load(), [load]);
+
+  // DRF-2755 — расстояние по нажатию (D3: явное согласие на одноразовую
+  // геолокацию). Другой мастер — прежний исход не его; поздний ответ по
+  // прежнему мастеру или прежнему нажатию отбрасывается.
+  const [distance, setDistance] = useState<Distance>({ kind: "idle" });
+  const distanceTurn = useRef(0);
+  useEffect(() => {
+    distanceTurn.current += 1;
+    setDistance({ kind: "idle" });
+  }, [masterId]);
+
+  const showDistance = useCallback(async () => {
+    if (!masterId) return;
+    const turn = ++distanceTurn.current;
+    setDistance({ kind: "locating" });
+    const coords = await locateOnce();
+    if (turn !== distanceTurn.current) return;
+    if (!coords) {
+      setDistance({ kind: "denied" });
+      return;
+    }
+    try {
+      const { master } = await getCustomerMaster(masterId, coords);
+      if (turn !== distanceTurn.current) return;
+      const meters = master.distance_meters;
+      setDistance(
+        typeof meters === "number" && formatDistance(meters)
+          ? { kind: "known", meters }
+          : { kind: "unknown" },
+      );
+    } catch {
+      if (turn === distanceTurn.current) setDistance({ kind: "unknown" });
+    }
+  }, [masterId]);
 
   const offered = state.kind === "ok" ? masterServices(catalog, state.master.service_ids) : [];
 
@@ -211,6 +271,34 @@ export function CustomerMasterDetailScreen() {
           )}
         </div>
       </section>
+
+      {/* DRF-2755 — расстояние до места оказания услуги, как его посчитал
+          каталог. Только по нажатию; неизвестно — блока нет, не «0 м». */}
+      {p1 && distance.kind !== "unknown" ? (
+        <section data-testid="master-distance-block">
+          {distance.kind === "known" ? (
+            <div className="customer-master__spec" data-testid="master-distance">
+              {formatDistance(distance.meters)}
+            </div>
+          ) : distance.kind === "locating" ? (
+            <p style={{ color: "var(--c-text-secondary)", margin: 0 }}>{NEARBY_LOCATING}</p>
+          ) : (
+            <>
+              <p style={{ color: "var(--c-text-secondary)", margin: 0 }}>
+                {distance.kind === "denied" ? MASTER_DISTANCE_DENIED : MASTER_DISTANCE_EXPLANATION}
+              </p>
+              <button
+                type="button"
+                className="goal-select__minor-action"
+                disabled={!online}
+                onClick={() => void showDistance()}
+              >
+                {MASTER_DISTANCE_BUTTON}
+              </button>
+            </>
+          )}
+        </section>
+      ) : null}
 
       {m.bio && (
         <section aria-labelledby="master-bio-title">
