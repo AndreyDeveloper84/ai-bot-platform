@@ -337,13 +337,22 @@ def _entry_lines(summary: SummaryResponse) -> list[str]:
     reads as a verdict on the dish.
     """
     from apps.orchestrator.food_history import meals_from_summary
+    from apps.skills.food_clarify.text_entry import ai_kcal_phrase
 
     meals = meals_from_summary(summary)
     if not meals:
         return []
     lines = ["Что было записано:"]
     for meal in meals:
-        tail = f" — {meal.calories} ккал" if meal.calories else ""
+        if meal.calories:
+            tail = f" — {meal.calories} ккал"
+        elif meal.ai_calories:
+            # DRF-2761 — оценка ИИ видна в записи (решение владельца 02.10),
+            # всегда с пометкой. В итог дня выше она не входит: каталог её
+            # не суммирует.
+            tail = f" — {ai_kcal_phrase(meal.ai_calories)}"
+        else:
+            tail = ""
         lines.append(f"• {meal.dish}{tail}")
     return lines
 

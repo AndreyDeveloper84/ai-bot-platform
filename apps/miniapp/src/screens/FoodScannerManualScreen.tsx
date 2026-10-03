@@ -32,6 +32,7 @@ import {
   portionProvenanceOf,
 } from "../lib/portion-provenance";
 import { ApiError } from "../lib/api";
+import { aiCaloriesOf, aiKcalPhrase } from "../lib/format";
 import {
   estimateFoodText,
   fetchConsentAt,
@@ -109,6 +110,13 @@ export function renderEstimateLines(estimate: FoodTextEstimate): string[] {
   // Строка о числах появляется, только когда число есть И вес назван.
   if (estimate.kcal != null && portionNumbersAreNamed(portionProvenanceOf(estimate.portion_source))) {
     lines.push(MANUAL_COPY.macros(Math.round(estimate.kcal), rest));
+  } else if (estimate.kcal == null) {
+    // DRF-2761 — справочник блюда не знает, калории оценил ИИ (решение
+    // владельца 02.10). Показывается и без названных граммов: вес при
+    // промахе и так «примерно». Только калории, всегда с пометкой
+    // «Оценка ИИ»; проверенное число сюда не доходит (`kcal == null`).
+    const ai = aiCaloriesOf({ calories: null, ai_calories: estimate.kcal_ai_estimate });
+    if (ai != null) lines.push(`${aiKcalPhrase(ai)}.`);
   }
   return lines;
 }
