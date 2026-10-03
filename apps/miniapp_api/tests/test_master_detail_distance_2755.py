@@ -200,9 +200,9 @@ class TestNoDistanceMeansTheOldCard:
         r = _get(client, anna.id, lat="53.2", lon="45.0")
 
         assert r.status_code == 200
-        assert "distance_meters" not in r.json()["master"]
         # Положительная пара: карточка того мастера, о котором спросили.
         assert r.json()["master"]["id"] == str(anna.id)
+        assert "distance_meters" not in r.json()["master"]
 
 
 class TestTheBorders:
