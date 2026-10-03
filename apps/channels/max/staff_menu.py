@@ -37,10 +37,20 @@ Mini App address per bot a global would send staff to the customer app.
 When neither is configured the button is omitted entirely — a dead button
 is worse than a missing one.
 
-The payload carries no route: the Mini App already routes by resolved role
-(admin → /admin/team, master → /master/dashboard), and the frontend's
-``_ROUTE_MAP`` knows only customer slugs today. Sending an unknown slug
-would land the person on the default anyway.
+The cabinet button's payload carries no route, by choice: «Кабинет» means
+«wherever my role lands», and the Mini App already routes by resolved role
+(admin → /admin/team, master → /master/dashboard).
+
+That is a choice, not a limit of the frontend. Its ``_ROUTE_MAP``
+(``apps/miniapp/src/lib/max-sdk.ts``) knows the staff slugs —
+``open_admin_today`` / ``_schedule`` / ``_ayla`` / ``_booking_new`` and
+``open_master_today`` / ``_schedule`` / ``_ayla`` — and the bot uses them
+where a button names a SCREEN: the greeting's row
+(``salon_greeting.ADMIN_SLUGS`` / ``MASTER_SLUGS``) and «Расписание» under
+a master's empty day (DRF-2759). An earlier version of this paragraph said
+the map «knows only customer slugs today»; that stopped being true when the
+staff slugs landed, and a reader who believed it would have built a second
+way to open a staff screen.
 
 It is also written in a DIFFERENT grammar from the callback buttons above,
 and that is not a slip. MAX validates an ``open_app`` payload against
