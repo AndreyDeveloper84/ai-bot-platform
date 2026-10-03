@@ -293,12 +293,11 @@ def _my_empty_day(role_ctx: Any, now: datetime) -> str | None:
     from apps.catalog.models import CatalogMaster
     from apps.channels.max import staff_actions
 
+    master_id = getattr(role_ctx, "master_id", None)
+    if not master_id:
+        return None
     try:
-        master = (
-            CatalogMaster.objects.filter(pk=getattr(role_ctx, "master_id", None))
-            .select_related("tenant")
-            .first()
-        )
+        master = CatalogMaster.objects.filter(pk=master_id).select_related("tenant").first()
         if master is None:
             return None
         return staff_actions.EMPTY_DAY_TEXT[staff_actions.empty_day_state(master, now=now)]
