@@ -125,14 +125,14 @@ class TestDirectionMasterToAdmin:
         Значения намеренно разные: возврат к ``chat_id`` даёт другое, а не
         то же самое, и пройти зелёным не может.
         """
-        tenant.manager_user_id = "260237491"
+        tenant.manager_user_id = "200000001"
         tenant.manager_chat_id = "555"
         tenant.save(update_fields=["manager_user_id", "manager_chat_id"])
         msg = _message(_thread(tenant, _master(tenant)), role=SenderRoleChoices.MASTER)
 
         notify.notify_internal_message(message=msg)
 
-        assert self._addressed(sent) == [{"user_id": "260237491"}]
+        assert self._addressed(sent) == [{"user_id": "200000001"}]
 
     def test_the_global_operator_channel_is_never_a_salon_address(
         self, tenant, settings, sent, caplog

@@ -104,11 +104,14 @@ GOAL_TEXT = "хочу больше энергии днём"
 @pytest.fixture
 def nutrition_block(settings, monkeypatch) -> str:
     """Блок питания той функцией, что зовёт `handler.py`, при всех дверях Ayla
-    закрытых подменой: цель, неделя и сегодняшний день."""
+    закрытых подменой: профиль (DRF-2760 — обычный, вне чувствительного
+    периметра), цель, неделя и сегодняшний день."""
+    from apps.nutrition_proactive.tests.test_remarks_suppressed_2222 import profile
     from apps.orchestrator import food_history
 
     settings.CONCIERGE_NUTRITION_CONTEXT_ENABLED = True
     monkeypatch.setattr(nutrition_context, "_consent_open", lambda bot_user: True)
+    monkeypatch.setattr(nutrition_context, "_fetch_profile", lambda bot_user: profile())
     monkeypatch.setattr(
         nutrition_context,
         "_fetch_goal",

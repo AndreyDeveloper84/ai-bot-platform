@@ -324,7 +324,8 @@ _FALLBACK_EMPTY = "?"
 # own reply_text. Booking's _handoff always sets one («переключаю на менеджера…»),
 # so this is only the defensive fallback. Operational copy (low sensitivity vs the
 # crisis copy) — founder may tweak.
-_HANDOFF_FALLBACK_TEXT = "Передаю твой вопрос менеджеру — он ответит здесь в ближайшее время."
+# DRF-2753 — было «…он ответит здесь в ближайшее время»: и срок, и место без носителя.
+_HANDOFF_FALLBACK_TEXT = "Передаю твой вопрос менеджеру."
 
 
 def _last_assistant_content(history: list[dict[str, Any]] | None) -> str | None:
@@ -1841,7 +1842,7 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
     # DRF-1487 — «печатает…» ПОСЛЕ решения отвечать, а не до.
     #
     # Замер боевого контура, диалог 6e8fdde2, 13:34:20–13:34:34 UTC: на каждое
-    # входящее уходили два ``POST /chats/518410834/actions`` → 200, а следом
+    # входящее уходили два ``POST /chats/518…/actions`` → 200, а следом
     # ``silenced_by_handoff``. Пять сообщений — пять пар индикаторов и ноль
     # ответов. Бот, показавший «печатает», ОБЕЩАЕТ ответ, и обещание не
     # выполнялось пять раз подряд.

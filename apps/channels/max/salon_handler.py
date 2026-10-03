@@ -1693,7 +1693,30 @@ def _handle_button(event: CanonicalEvent, role_ctx, bot_user, tenant, entry) -> 
         _send_menu(event, role_ctx, tenant, entry)
         return
 
-    _reply(event, body, attachments=menu_attachments(role_ctx, entry))
+    _reply(event, body, attachments=_after_action_attachments(body, role_ctx, entry))
+
+
+def _after_action_attachments(body: str, role_ctx, entry):
+    """Меню после действия; под пустым днём мастера — ещё и «Расписание» (DRF-2759).
+
+    Кнопка — та же, что в приветствии мастера: существующий маршрут расписания
+    в мини-приложении (``open_master_schedule``), прав она не добавляет. У бота
+    без мини-приложения её нет, как и остальных кнопок кабинета.
+    """
+
+    from apps.channels.max import salon_greeting, staff_actions
+    from apps.channels.max.outbound import make_inline_keyboard_attachment
+    from apps.channels.max.staff_menu import menu_buttons
+
+    if not staff_actions.is_empty_day_text(body):
+        return menu_attachments(role_ctx, entry)
+    schedule = salon_greeting._app_button(
+        entry, salon_greeting.BUTTON_SCHEDULE, salon_greeting.MASTER_SLUGS["schedule"]
+    )
+    buttons = ([schedule] if schedule else []) + menu_buttons(role_ctx, entry)
+    if not buttons:
+        return None
+    return [make_inline_keyboard_attachment(buttons, columns=1)]
 
 
 def _master_of(bot_user):
