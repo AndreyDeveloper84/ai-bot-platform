@@ -236,8 +236,21 @@ export const fetchMasters = (params?: {
   const qs = q.toString();
   return request(`/masters${qs ? `?${qs}` : ""}`, { method: "GET" });
 };
-export const fetchMaster = (id: string): Promise<{ master: MasterDetail }> =>
-  request(`/masters/${id}`, { method: "GET" });
+export const fetchMaster = (
+  id: string,
+  params?: {
+    /** DRF-2755: одноразовые координаты — только в этот запрос, не хранятся. */
+    coords?: { lat: number; lon: number };
+  },
+): Promise<{ master: MasterDetail }> => {
+  const q = new URLSearchParams();
+  if (params?.coords) {
+    q.set("lat", params.coords.lat.toFixed(6));
+    q.set("lon", params.coords.lon.toFixed(6));
+  }
+  const qs = q.toString();
+  return request(`/masters/${id}${qs ? `?${qs}` : ""}`, { method: "GET" });
+};
 
 // --- catalog: recommendations (граница резолвера, §9.4) ---
 /**

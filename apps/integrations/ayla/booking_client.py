@@ -1031,6 +1031,10 @@ class AylaBookingHTTPClient:
         точки предложения. Здесь они не сохраняются и не пишутся в журнал
         (решение владельца D3: координаты не хранятся).
 
+        DRF-2755 / DRF-2762: ветка одного мастера тоже передаёт координаты —
+        раньше она их молча роняла, и карточка мастера не могла получить
+        расстояние, хотя каталог отвечает им и на ``specialists/{id}/``.
+
         The roster read is the origin of the pilot's «Контекст записи
         устарел» dead-end. ``internal/specialists/`` is a paginated DRF list
         (page size 20 on the pilot contour, 31 specialists on the feed) and
@@ -1055,15 +1059,17 @@ class AylaBookingHTTPClient:
           tenant-ownership check» (``_handle_pick_slot_callback``) and it
           was not. ``get_services`` has always scoped its read this way.
         """
+        geo: dict[str, Any] = {}
+        if lat is not None and lon is not None:
+            geo = {"lat": f"{lat:.6f}", "lon": f"{lon:.6f}"}
         if specialist_id:
-            resp = self._request("GET", f"specialists/{specialist_id}/", purpose="booking")
+            resp = self._request(
+                "GET", f"specialists/{specialist_id}/", params=geo or None, purpose="booking"
+            )
             payload = self._ok(resp)
             return [_master_from_wire(payload)] if isinstance(payload, dict) and payload else []
         tenant_id = _require_tenant_id()
-        params: dict[str, Any] = {"tenant": tenant_id}
-        if lat is not None and lon is not None:
-            params["lat"] = f"{lat:.6f}"
-            params["lon"] = f"{lon:.6f}"
+        params: dict[str, Any] = {"tenant": tenant_id, **geo}
         rows = self._get_all_rows("specialists/", params=params, purpose="booking")
         return [_master_from_wire(r) for r in rows]
 
