@@ -1005,16 +1005,22 @@ def master_detail(request: HttpRequest, master_id: str) -> HttpResponse:
     if coords_error:
         return _error("bad_request", coords_error, 400)
     if coords is not None:
-        _attach_master_distance(payload, lat=coords[0], lon=coords[1])
+        _attach_master_distance(payload, master, lat=coords[0], lon=coords[1])
     return JsonResponse({"master": payload})
 
 
-def _attach_master_distance(payload: dict[str, Any], *, lat: float, lon: float) -> None:
+def _attach_master_distance(
+    payload: dict[str, Any], master: CatalogMaster, *, lat: float, lon: float
+) -> None:
     """Дописать ``distance_meters`` одного мастера с провода каталога.
 
     Без ответа каталога (флаг выключен, источник лежит, каталог вернул
     другого мастера) поля нет вовсе; ``null`` с провода — неизвестно, и
     экран блок не рисует.
+
+    DRF-1933: в каталог уходит id профиля из колонки, а не первичный ключ
+    зеркала — у склеенного приглашения и соло-мастера это разные id. Колонка
+    пуста — звать каталог не с чем, поля нет.
     """
     if not getattr(settings, "BOOKING_VIA_AYLA_REST", False):
         return
@@ -1024,13 +1030,18 @@ def _attach_master_distance(payload: dict[str, Any], *, lat: float, lon: float) 
     )
 
     try:
+        catalog_id = catalog_specialist_id(master)
+    except CatalogSpecialistUnresolved:
+        logger.info("miniapp_api.master_detail.distance geo=1 unresolved=1")
+        return
+    try:
         remote = get_ayla_booking_client().get_masters(
-            specialist_id=payload["id"], lat=lat, lon=lon
+            specialist_id=catalog_specialist_id(master), lat=lat, lon=lon
         )
     except BookingAPIError:
         logger.warning("miniapp_api.master_detail.distance_unavailable geo=1")
         return
-    match = next((m for m in remote if m.id == payload["id"]), None)
+    match = next((m for m in remote if m.id == catalog_id), None)
     logger.info("miniapp_api.master_detail.distance geo=1 matched=%d", int(match is not None))
     if match is not None:
         payload["distance_meters"] = match.distance_meters

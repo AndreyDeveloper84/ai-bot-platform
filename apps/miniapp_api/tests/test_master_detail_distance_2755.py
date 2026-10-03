@@ -12,7 +12,10 @@ BC-правка, одобренная владельцем 02.10: ручка к�
 - без координат, без флага ``BOOKING_VIA_AYLA_REST``, при лежащем каталоге
   и при чужом мастере в ответе — поля нет вовсе, карточка прежняя;
 - кривые координаты — 400; мастер чужого салона — 404 и каталог не зовётся;
-- координаты не попадают в журнал.
+- координаты не попадают в журнал;
+- в каталог уходит id профиля из колонки (DRF-1933), а не первичный ключ
+  зеркала: у склеенного приглашения они разные; колонка пуста — каталог не
+  зовётся, поля нет.
 """
 
 from __future__ import annotations
@@ -76,10 +79,11 @@ def bot_user(tenant) -> BotUser:
     )
 
 
-def _master(tenant, name: str) -> CatalogMaster:
+def _master(tenant, name: str, *, catalog_id: uuid.UUID | None | str = "own") -> CatalogMaster:
+    """Строка зеркала. По умолчанию — строка синка: id каталога равен pk."""
     from django.utils import timezone as tz
 
-    return CatalogMaster.all_tenants.create(
+    master = CatalogMaster.all_tenants.create(
         tenant=tenant,
         external_updated_at=tz.now(),
         name=name,
@@ -88,6 +92,9 @@ def _master(tenant, name: str) -> CatalogMaster:
         invite_status=CatalogMaster.InviteStatus.ACCEPTED,
         ayla_user_id=uuid.uuid4(),
     )
+    master.catalog_specialist_id = master.id if catalog_id == "own" else catalog_id
+    master.save(update_fields=["catalog_specialist_id"])
+    return master
 
 
 @pytest.fixture
@@ -249,3 +256,35 @@ class TestTheBorders:
         assert "master_detail.distance geo=1 matched=1" in text
         assert "53.195878" not in text
         assert "45.018316" not in text
+
+
+class TestTheCatalogIdNotTheMirrorKey:
+    def test_c11_a_merged_invite_is_asked_by_its_catalog_id(
+        self, client, bot_user, tenant, monkeypatch
+    ):
+        catalog_id = uuid.uuid4()
+        merged = _master(tenant, "Склеенная", catalog_id=catalog_id)
+        assert merged.id != catalog_id
+        stub = _Stub({str(catalog_id): 640, str(merged.id): 9999})
+        _use(monkeypatch, stub)
+
+        r = _get(client, merged.id, lat="53.2", lon="45.0")
+
+        assert r.status_code == 200, r.content
+        assert r.json()["master"]["id"] == str(merged.id)
+        assert r.json()["master"]["distance_meters"] == 640
+        assert stub.calls == [{"specialist_id": str(catalog_id), "lat": 53.2, "lon": 45.0}]
+
+    def test_c12_without_a_catalog_id_the_catalog_is_not_asked(
+        self, client, bot_user, tenant, monkeypatch
+    ):
+        solo = _master(tenant, "Без профиля", catalog_id=None)
+        stub = _Stub({str(solo.id): 640})
+        _use(monkeypatch, stub)
+
+        r = _get(client, solo.id, lat="53.2", lon="45.0")
+
+        assert r.status_code == 200, r.content
+        assert r.json()["master"]["name"] == "Без профиля"
+        assert "distance_meters" not in r.json()["master"]
+        assert stub.calls == []
