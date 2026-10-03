@@ -177,6 +177,10 @@ def diary_consent_required_result(reply_kind: str) -> SkillResult:
 NUTRITION_OFF_TEXT = "Дневник еды пока недоступен — функция готовится."
 FIX_GRAMS_PROMPT = "Сколько граммов было на самом деле? Напиши число — пересчитаю запись."
 FIXED_TEXT = "Исправила: {dish} — теперь {kcal} ккал."
+# DRF-2761 — оценка калорий ИИ (решение владельца 02.10.2026, пересмотр §40).
+# Пометка — слова владельца дословно; число с ней всегда «≈», чтобы оценку
+# нельзя было принять за проверенное «N ккал» ни в одной из реплик.
+AI_ESTIMATE_MARK = "Оценка ИИ"
 #: DRF-2371 — та же правка, когда числа в записи нет: о числе молчим, а не
 #: подставляем ноль. Текст, называющий сам пробел, ждёт слова владельца.
 FIXED_WITHOUT_NUMBERS_TEXT = "Исправила: {dish}."
@@ -523,6 +527,23 @@ def show_estimate(
     )
 
 
+def ai_kcal_phrase(kcal: float) -> str:
+    """«≈ 320 ккал · Оценка ИИ» — единственная форма, в которой оценка звучит."""
+    return f"≈ {int(round(kcal))} ккал · {AI_ESTIMATE_MARK}"
+
+
+def _ai_calories_of(log: Any) -> float | None:
+    """Оценка ИИ у записи — только когда проверенного числа нет.
+
+    Проверенное бьёт оценку и здесь: если каталог отдал ``calories``, оценка
+    не показывается, даже если поле с ней почему-то пришло.
+    """
+    if getattr(log, "calories", None) is not None:
+        return None
+    value = getattr(log, "ai_calories", None)
+    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+
 def render_estimate_card(estimate: Any) -> str:
     """«Я распознала так» — каждое предположение названо предположением (§109 шаг 4)."""
     grams = int(round(estimate.portion_g))
@@ -548,6 +569,14 @@ def render_estimate_card(estimate: Any) -> str:
             if value is not None:
                 macros.append(f"{label} {int(round(value))}")
         lines.append(" · ".join(macros) + " — оценка по справочнику блюд.")
+    elif estimate.kcal is None and getattr(estimate, "kcal_ai_estimate", None) is not None:
+        # DRF-2761 — справочник блюда не знает, калории оценил ИИ. Довод
+        # владельца: вес при промахе мы и так показываем «примерно», значит
+        # и калории честнее показать примерными, чем прятать, — поэтому
+        # оценка звучит и тогда, когда граммов человек не называл. Только
+        # калории: БЖУ ИИ не оценивает. Проверенное число этой ветки не
+        # достигает (``kcal is None``).
+        lines.append(ai_kcal_phrase(estimate.kcal_ai_estimate) + ".")
     lines.append("Записать в дневник?")
     return "\n".join(lines)
 
@@ -604,6 +633,10 @@ def _log(context: SkillContext, bucket: dict[str, Any]) -> SkillResult:
         "calories": log.calories,
         "entry_origin": origin,
     }
+    ai_calories = _ai_calories_of(log)
+    if ai_calories is not None:
+        # Своим ключом: читатель ``calories`` оценку за проверенное не примет.
+        action_data["ai_calories"] = ai_calories
     entry_chips: list[dict[str, str]] = []
     if log.log_id and ENTRY_ID_RE.match(log.log_id):
         # DRF-1838 — §109 шаг 7: сохранённую запись можно исправить или удалить.
@@ -614,7 +647,9 @@ def _log(context: SkillContext, bucket: dict[str, Any]) -> SkillResult:
         reply_text=(
             # DRF-2371 — запись легла, числа нет: говорим о записи, а число
             # не выдумываем (ноль читался бы как посчитанный).
-            f"Записала в дневник: {log.dish_name}."
+            f"Записала в дневник: {log.dish_name} — {ai_kcal_phrase(ai_calories)}."
+            if ai_calories is not None
+            else f"Записала в дневник: {log.dish_name}."
             if log.calories is None
             else f"Записала в дневник: {log.dish_name} — {int(round(log.calories))} ккал."
         ),
@@ -787,7 +822,9 @@ def _restore_entry(context: SkillContext, log_id: str) -> SkillResult:
         return _entry_refusal(exc, external_id=external_id, step="restore")
     return SkillResult(
         reply_text=(
-            RESTORED_WITHOUT_NUMBERS_TEXT.format(dish=log.dish_name)
+            f"Вернула в дневник: {log.dish_name} — {ai_kcal_phrase(ai_calories)}."
+            if (ai_calories := _ai_calories_of(log)) is not None
+            else RESTORED_WITHOUT_NUMBERS_TEXT.format(dish=log.dish_name)
             if log.calories is None
             else RESTORED_TEXT.format(dish=log.dish_name, kcal=int(round(log.calories)))
         ),
@@ -835,7 +872,9 @@ def _on_fix_grams_answer(context: SkillContext, bucket: dict[str, Any], text: st
     forget(context)
     return SkillResult(
         reply_text=(
-            FIXED_WITHOUT_NUMBERS_TEXT.format(dish=log.dish_name)
+            f"Исправила: {log.dish_name} — теперь {ai_kcal_phrase(ai_calories)}."
+            if (ai_calories := _ai_calories_of(log)) is not None
+            else FIXED_WITHOUT_NUMBERS_TEXT.format(dish=log.dish_name)
             if log.calories is None
             else FIXED_TEXT.format(dish=log.dish_name, kcal=int(round(log.calories)))
         ),

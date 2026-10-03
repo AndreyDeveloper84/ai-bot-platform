@@ -509,6 +509,11 @@ export interface FoodTextEstimate {
   portion_estimated: boolean;
   /** DRF-2371 — `null`, когда считать нечем: блюда нет в справочнике. */
   kcal: number | null;
+  /**
+   * DRF-2761 — оценка калорий ИИ на эту порцию; `kcal` при ней `null`.
+   * Показывать только с пометкой «Оценка ИИ».
+   */
+  kcal_ai_estimate?: number | null;
   /** DRF-2402 — см. NutritionFacts.portion_source. */
   portion_source?: string | null;
   protein_g: number | null;

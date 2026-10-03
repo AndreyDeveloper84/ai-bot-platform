@@ -105,3 +105,33 @@ export type MaybeCount = number | null;
 export function countLabel(count: MaybeCount): string {
   return count === null ? UNKNOWN_MARK : String(count);
 }
+
+/**
+ * DRF-2761 — пометка оценки калорий ИИ: слова владельца, дословно
+ * (решение 02.10.2026, пересмотр вопроса 40).
+ */
+export const AI_ESTIMATE_MARK = "Оценка ИИ";
+
+/**
+ * «≈ 320 ккал · Оценка ИИ» — единственная форма, в которой оценка ИИ
+ * показывается человеку. Знак «≈» и пометка идут вместе, чтобы оценку
+ * нельзя было принять за проверенное «N ккал» ни на одном экране.
+ */
+export function aiKcalPhrase(kcal: number): string {
+  return `≈ ${Math.round(kcal)} ккал · ${AI_ESTIMATE_MARK}`;
+}
+
+/**
+ * Оценка ИИ у записи — число, которое можно показать, или `null`.
+ * Проверенное бьёт оценку: есть `calories` — оценки нет. Не число
+ * (строка, булево, NaN, отрицательное) — оценки нет.
+ */
+export function aiCaloriesOf(entry: {
+  calories?: number | null;
+  ai_calories?: unknown;
+}): number | null {
+  if (entry.calories != null) return null;
+  const value = entry.ai_calories;
+  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) return null;
+  return value;
+}

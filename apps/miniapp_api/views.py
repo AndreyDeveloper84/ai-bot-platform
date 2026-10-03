@@ -4855,6 +4855,9 @@ def customer_food_estimate(request: HttpRequest) -> HttpResponse:
             "protein_g": estimate.protein_g,
             "fat_g": estimate.fat_g,
             "carbs_g": estimate.carbs_g,
+            # DRF-2761 — оценка калорий ИИ, своим ключом: ``kcal`` при ней
+            # null. Экран показывает её только с пометкой «Оценка ИИ».
+            "kcal_ai_estimate": getattr(estimate, "kcal_ai_estimate", None),
         }
     )
 
@@ -4983,6 +4986,7 @@ def _customer_food_log(request: HttpRequest) -> HttpResponse:
             "log_id": log.log_id,
             "dish_name": log.dish_name,
             "calories": log.calories,
+            "ai_calories": getattr(log, "ai_calories", None),
             "entry_origin": origin,
         },
         status=201,
@@ -5184,6 +5188,8 @@ def _food_log_payload(log: Any) -> dict[str, Any]:
         "id": log.log_id,
         "dish_name": log.dish_name,
         "calories": log.calories,
+        # DRF-2761 — оценка ИИ после правки граммов / возврата записи.
+        "ai_calories": getattr(log, "ai_calories", None),
         "meal_type": log.meal_type,
     }
 
