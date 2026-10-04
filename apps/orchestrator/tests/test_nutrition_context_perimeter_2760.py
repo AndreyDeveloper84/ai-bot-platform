@@ -11,9 +11,12 @@
 флаг, согласие и медицинская цель.
 
 * a — профиля нет / он не прочитан → блока нет, и дальше в Ayla не ходим;
-* b — каждый признак §7.1 → блока нет;
+* b — РПП (флаг или оверрайд) → блока нет; беременность, ГВ, снятый дефицит →
+  с DRF-2766 фазы 1в (вариант «б», решение главного окна 04.10) только факты
+  дня и запрет советов: без сравнения белка, подсказки сервиса и цели;
 * c — обычный профиль → блок есть (контроль: молчание выше — не от стенда);
-* d — предикат тот же самый, что у двух поверхностей коуча, а не копия;
+* d — предикат тот же самый, что у двух поверхностей коуча, а не копия: при
+  «закрыт» блок — только факты, при «открыт» — полный;
 * e — до согласия и при выключенном флаге профиль не читается;
 * f — отказ чтения профиля любого рода — «не знаем», и хода не роняет.
 
@@ -126,26 +129,56 @@ def test_no_profile_no_block_and_no_further_reads(doors) -> None:
 
 # ── b: every sign of §7.1 ────────────────────────────────────────────────────
 
-_PERIMETER = [
+FACTS_ONLY = (
+    "Не давай советов о количестве и составе еды, не предлагай компенсировать "
+    "съеденное, не оценивай калорийность как хорошую или плохую — отвечай на "
+    "вопрос фактами из дневника."
+)
+
+_EATING_DISORDER = [
+    ("flag-eating-disorder", profile(health_flags={"eating_disorder": True})),
+    ("override-eating-disorder", profile(goal_overridden_by="eating_disorder")),
+    ("pending-eating-disorder", with_pending("eating_disorder")),
+]
+
+_FACTS_ONLY_PERIMETER = [
     ("flag-pregnant", profile(health_flags={"pregnant": True})),
     ("flag-breastfeeding", profile(health_flags={"breastfeeding": True})),
-    ("flag-eating-disorder", profile(health_flags={"eating_disorder": True})),
     ("override-bmr-floor", profile(goal_overridden_by="bmr_floor")),
     ("override-pregnancy", profile(goal_overridden_by="pregnancy")),
     ("override-breastfeeding", profile(goal_overridden_by="breastfeeding")),
-    ("override-eating-disorder", profile(goal_overridden_by="eating_disorder")),
     ("pending-bmr-floor", with_pending("bmr_floor")),
 ]
 
 
-@pytest.mark.parametrize("sensitive", [p for _, p in _PERIMETER], ids=[i for i, _ in _PERIMETER])
-def test_the_sensitive_perimeter_gets_no_block(doors, sensitive) -> None:
+@pytest.mark.parametrize(
+    "sensitive", [p for _, p in _EATING_DISORDER], ids=[i for i, _ in _EATING_DISORDER]
+)
+def test_an_eating_disorder_gets_no_block(doors, sensitive) -> None:
+    """DRF-2766 1в, вариант «б»: разговорную модель интейком при РПП не кормим."""
     client = doors(sensitive)
 
     assert build_nutrition_context_block(object()) == ""
     assert client.profile_calls == 1
     # A closed perimeter needs no picture: the week is not fetched to be thrown away.
     assert client.week_calls == 0
+
+
+@pytest.mark.parametrize(
+    "sensitive", [p for _, p in _FACTS_ONLY_PERIMETER], ids=[i for i, _ in _FACTS_ONLY_PERIMETER]
+)
+def test_the_rest_of_the_perimeter_gets_facts_only(doors, sensitive) -> None:
+    """Беременность, ГВ, снятый дефицит: факты дня и запрет советов, без #3."""
+    client = doors(sensitive)
+
+    block = build_nutrition_context_block(object())
+
+    assert client.profile_calls == 1
+    assert "Дней с записями за неделю: 5." in block
+    assert FACTS_ONLY in block
+    for advice in ("Белок", "Белка не хватает", "белка стабильно мало", "ориентир"):
+        assert advice not in block
+    assert client.goal.call_count <= 1  # type: ignore[attr-defined]
 
 
 def test_a_flag_that_is_present_and_false_does_not_silence(doors) -> None:
@@ -170,7 +203,9 @@ def test_the_coach_predicate_decides(doors, monkeypatch, verdict: bool) -> None:
     block = build_nutrition_context_block(object())
 
     asked.assert_called_once_with(ordinary)
-    assert (block == "") is verdict
+    # «Закрыт» без РПП — только факты; «открыт» — полный блок.
+    assert (FACTS_ONLY in block) is verdict
+    assert ("Белок: в среднем 62% от ориентира." in block) is (not verdict)
 
 
 # ── e: nothing is read before consent or with the flag off ───────────────────
@@ -219,3 +254,55 @@ def test_an_unconfigured_environment_is_silence(doors, monkeypatch) -> None:
     monkeypatch.setattr("apps.integrations.ayla.get_nutrition_client", _unconfigured)
 
     assert build_nutrition_context_block(object()) == ""
+
+
+# ── DRF-2766 1в: what the facts are, and «Без чисел» stays stronger ───────────
+
+
+def _with_day_and_goal(client) -> None:
+    from apps.orchestrator import food_history
+
+    client.today.return_value = food_history.TodayDiary(  # type: ignore[attr-defined]
+        food_history.Status.OK,
+        meals=(food_history.Meal(dish="борщ", calories=147, meal_type="lunch"),),
+    )
+    client.goal.return_value = SimpleNamespace(  # type: ignore[attr-defined]
+        text="похудеть на 5 кг к лету", key="lose", source="free_text"
+    )
+
+
+def test_facts_only_names_the_dishes_and_not_the_goal(doors) -> None:
+    client = doors(profile(health_flags={"pregnant": True}))
+    _with_day_and_goal(client)
+
+    block = build_nutrition_context_block(object())
+
+    assert "Сегодня в дневнике: борщ (147 ккал)." in block
+    assert FACTS_ONLY in block
+    assert "похудеть" not in block
+
+
+def test_twin_an_ordinary_profile_gets_the_goal_and_no_facts_only_line(doors) -> None:
+    client = doors(profile())
+    _with_day_and_goal(client)
+
+    block = build_nutrition_context_block(object())
+
+    assert "Сегодня в дневнике: борщ (147 ккал)." in block
+    assert "похудеть на 5 кг к лету" in block
+    assert FACTS_ONLY not in block
+
+
+def test_numbers_hidden_stays_stronger_than_facts_only(doors, monkeypatch) -> None:
+    client = doors(profile(health_flags={"breastfeeding": True}))
+    _with_day_and_goal(client)
+    monkeypatch.setattr(
+        "apps.nutrition_proactive.prefs.get_prefs", lambda bot_user: {"numbers_hidden": True}
+    )
+
+    block = build_nutrition_context_block(object())
+
+    assert "Сегодня в дневнике: борщ." in block
+    assert FACTS_ONLY in block
+    assert nutrition_context.NUMBERS_HIDDEN_INSTRUCTION in block
+    assert "ккал" not in block.split(nutrition_context.NUMBERS_HIDDEN_INSTRUCTION, 1)[1]
