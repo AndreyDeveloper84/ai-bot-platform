@@ -26,7 +26,7 @@ do exist each demand a reference only their own channel can produce — a
 
 ### Tap and text are the same person, and stay distinguishable
 
-Inventory 10.09 (`LANE_E_INVENTORY_ASK_VS_ACT_2026-09-10.md` §7 п.3) recorded a
+Inventory 10.09 (`docs/LANE_E_INVENTORY_ASK_VS_ACT_2026-09-10.md` §7 п.3) recorded a
 live hazard: `apps/channels/max_bot/quick_actions.py:416-472` substitutes a tap
 into the text pipeline as if the person had typed the button's caption. That
 substitution is convenient and it erases provenance — afterwards nobody can say
