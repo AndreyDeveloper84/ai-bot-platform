@@ -265,13 +265,33 @@ def _dispatch_beat_dry_run() -> bool:
     return bool(getattr(settings, "EVENTBUS_DISPATCH_BEAT_DRY_RUN", True))
 
 
+def registry_is_noop_only() -> bool:
+    """Нет ни одного настоящего подписчика: реестр пуст или в нём только Noop.
+
+    DRF-2434. Диспетчер считает строку доставленной, если ни один подписчик
+    не бросил исключения. У `NoopSubscriber` исключений не бывает, у пустого
+    реестра — тем более, поэтому живой прогон при таком реестре помечает
+    `is_dispatched=True` всё, до чего дотянется, не доставив ничего никому.
+    Обратного хода нет: `replay_dead_letter` отправленных не касается.
+    """
+
+    return all(isinstance(sub, NoopSubscriber) for sub in _subscribers())
+
+
 @shared_task(name="apps.eventbus.dispatch_pending_events_beat")
 def dispatch_pending_events_beat() -> dict[str, Any]:
     """Расписание → сюда → `dispatch_pending_events`, если открыто.
 
-    Три исхода, и все три различимы по ключу `mode` в ответе — чтобы
+    Четыре исхода, и все различимы по ключу `mode` в ответе — чтобы
     «ничего не отправлено» никогда не читалось одинаково для «выключено»,
-    «сухой прогон» и «отправлять было нечего».
+    «сухой прогон», «отказ» и «отправлять было нечего».
+
+    `refused_noop_only` (DRF-2434): рубильник открыт, сухой прогон снят, а
+    настоящих подписчиков нет. Порядок починки «счётчик → подписчик →
+    расписание» до этого держался только на прозе — подсказке W012 и листе;
+    одно открытие рубильника раньше подписчика пометило бы накопленное
+    доставленным никому. Теперь его держит код: обёртка считает и отказывает.
+    Прямой операторский вызов `dispatch_pending_events` не тронут.
     """
 
     if not _dispatch_beat_enabled():
@@ -282,5 +302,15 @@ def dispatch_pending_events_beat() -> dict[str, Any]:
         ).count()
         logger.info("eventbus.dispatch.beat.dry_run pending=%d — ничего не помечено", pending)
         return {"mode": "dry_run", "pending": pending}
+    if registry_is_noop_only():
+        pending = DomainEvent.objects.filter(
+            is_dispatched=False, dead_lettered_at__isnull=True
+        ).count()
+        logger.warning(
+            "eventbus.dispatch.beat.refused_noop_only pending=%d — живой режим открыт, "
+            "но в DOMAIN_EVENT_SUBSCRIBERS нет настоящего подписчика; ничего не помечено",
+            pending,
+        )
+        return {"mode": "refused_noop_only", "pending": pending}
     counters = dispatch_pending_events()
     return {"mode": "live", **counters}

@@ -122,6 +122,10 @@ def test_dry_run_counts_pending_and_marks_nothing(settings) -> None:
 def test_live_dispatches_and_reports_the_dispatcher_counters(settings) -> None:
     settings.EVENTBUS_DISPATCH_BEAT_ENABLED = True
     settings.EVENTBUS_DISPATCH_BEAT_DRY_RUN = False
+    # DRF-2434: при реестре только из Noop живой режим отказывает
+    # (`refused_noop_only`, см. test_dispatch_refuses_noop_only_2434.py);
+    # доставка проверяется с настоящим подписчиком.
+    settings.DOMAIN_EVENT_SUBSCRIBERS = ["apps.eventbus.subscribers.AuditSubscriber"]
     _emit(3)
 
     result = dispatch_pending_events_beat()
