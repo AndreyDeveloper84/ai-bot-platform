@@ -205,27 +205,43 @@ class TestDays:
         # анкеты нет вовсе — это не отказ чтения, числа показываются
         assert body["nutrition_numbers_hidden"] is False
 
-    def test_numbers_hidden_follows_the_profile_flag(
+    def test_numbers_hidden_follows_the_persons_choice_not_the_profile_flag(
         self, client: Client, bot_user: BotUser, consent
     ) -> None:
+        """DRF-2766: флаг РПП числа больше не прячет; прячет выбор «Без чисел»."""
+        from apps.nutrition_proactive.prefs import write_prefs
+
         patcher, _ = _patch_client(days=WEEK, profile=_Profile({"eating_disorder": True}))
         with patcher:
-            body = _get(client, bot_user, "customer_diary_days").json()
-        assert body["nutrition_numbers_hidden"] is True
+            flagged = _get(client, bot_user, "customer_diary_days").json()
+        bot_user.customer_status = BotUser.CustomerStatus.LINKED
+        bot_user.save(update_fields=["customer_status"])
+        write_prefs(bot_user, {"numbers_hidden": True})
+        patcher, _ = _patch_client(days=WEEK, profile=_Profile({}))
+        with patcher:
+            chosen = _get(client, bot_user, "customer_diary_days").json()
+
+        assert flagged["nutrition_numbers_hidden"] is False
+        assert chosen["nutrition_numbers_hidden"] is True
         # наружу — один булев, не диагноз: сырого флага в теле нет
-        flat = json.dumps(body)
+        flat = json.dumps(flagged)
         assert "nutrition_numbers_hidden" in flat
         assert "health_flags" not in flat
         assert "eating_disorder" not in flat
 
-    def test_profile_unreadable_leaves_the_key_out(
+    def test_profile_unreadable_keeps_the_persons_choice(
         self, client: Client, bot_user: BotUser, consent
     ) -> None:
+        from apps.nutrition_proactive.prefs import write_prefs
+
+        bot_user.customer_status = BotUser.CustomerStatus.LINKED
+        bot_user.save(update_fields=["customer_status"])
+        write_prefs(bot_user, {"numbers_hidden": True})
         patcher, _ = _patch_client(days=WEEK, profile=NutritionUnavailableError("http_503"))
         with patcher:
             body = _get(client, bot_user, "customer_diary_days").json()
         assert body["days"]
-        assert "nutrition_numbers_hidden" not in body
+        assert body["nutrition_numbers_hidden"] is True
 
     def test_catalog_refusal_of_the_period_is_a_named_error_not_an_empty_week(
         self, client: Client, bot_user: BotUser, consent
