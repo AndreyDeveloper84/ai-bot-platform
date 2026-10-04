@@ -388,6 +388,10 @@ class DiaryDayRow:
     meals_count: int
     kcal: float | None
     has_entries: bool
+    #: DRF-2766 (фаза 2) — сколько записей дня без какого-либо значения
+    #: калорий (итог дня неполный) и сколько вошло в ``kcal`` оценкой ИИ.
+    uncounted_meals: int = 0
+    kcal_ai_included: int = 0
 
 
 @dataclass(frozen=True)
@@ -1829,6 +1833,8 @@ class NutritionClient:
                     meals_count=int(row.get("meals_count") or 0),
                     kcal=_float_or_none(row.get("kcal")),
                     has_entries=bool(row.get("has_entries")),
+                    uncounted_meals=_count(row.get("uncounted_meals")),
+                    kcal_ai_included=_count(row.get("kcal_ai_included")),
                 )
                 for row in rows
             )

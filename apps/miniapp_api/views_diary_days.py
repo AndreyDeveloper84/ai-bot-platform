@@ -75,6 +75,9 @@ def _day_payload(row: Any) -> dict[str, Any]:
         "meals_count": row.meals_count,
         "kcal": row.kcal,
         "has_entries": row.has_entries,
+        # DRF-2766 (фаза 2) — итог дня неполный / с оценками ИИ.
+        "uncounted_meals": int(getattr(row, "uncounted_meals", 0) or 0),
+        "kcal_ai_included": int(getattr(row, "kcal_ai_included", 0) or 0),
     }
 
 

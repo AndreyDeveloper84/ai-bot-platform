@@ -198,9 +198,12 @@ class TestDays:
             body = _get(client, bot_user, "customer_diary_days").json()
         assert body["timezone"] == "Europe/Moscow"
         assert (body["from"], body["to"]) == ("2026-09-13", "2026-09-19")
+        # DRF-2766 (фаза 2) — у строки дня два счётчика: записей без калорий
+        # и вошедших оценкой ИИ.
+        zero = {"uncounted_meals": 0, "kcal_ai_included": 0}
         assert body["days"] == [
-            {"date": "2026-09-13", "meals_count": 0, "kcal": None, "has_entries": False},
-            {"date": "2026-09-14", "meals_count": 2, "kcal": 640.0, "has_entries": True},
+            {"date": "2026-09-13", "meals_count": 0, "kcal": None, "has_entries": False, **zero},
+            {"date": "2026-09-14", "meals_count": 2, "kcal": 640.0, "has_entries": True, **zero},
         ]
         # анкеты нет вовсе — это не отказ чтения, числа показываются
         assert body["nutrition_numbers_hidden"] is False
