@@ -126,6 +126,43 @@ export function aiKcalPhrase(kcal: number): string {
  * Проверенное бьёт оценку: есть `calories` — оценки нет. Не число
  * (строка, булево, NaN, отрицательное) — оценки нет.
  */
+// ── DRF-2766 фаза 2 — итог дня с оценками ИИ ────────────────────────────────
+// Решение владельца 04.10, п.3: оценки ИИ входят в дневной итог; итог
+// помечается «≈ … ккал, включая оценки ИИ»; запись без значения — не ноль,
+// итог неполный. Подписи — [confirmable], те же слова, что в чате.
+export const KCAL_TOTAL_AI_NOTE = "включая оценки ИИ";
+export const KCAL_TOTAL_INCOMPLETE = "Итог неполный: не у всех записей есть калории.";
+export const KCAL_TOTAL_UNKNOWN = "Калории пока не посчитаны.";
+
+/** Признаки итога дня с провода. Отсутствие и мусор — «нет». */
+export interface KcalTotalMarks {
+  /** В итог вошли оценки ИИ: число приблизительное. */
+  approx: boolean;
+  /** Есть записи без калорий: итог неполный. */
+  incomplete: boolean;
+}
+
+function positiveCount(value: unknown): boolean {
+  return typeof value === "number" && Number.isFinite(value) && value > 0;
+}
+
+export function kcalTotalMarks(source: {
+  calories_ai_included?: unknown;
+  calories_unscored?: unknown;
+  kcal_ai_included?: unknown;
+  uncounted_meals?: unknown;
+}): KcalTotalMarks {
+  return {
+    approx: positiveCount(source.calories_ai_included) || positiveCount(source.kcal_ai_included),
+    incomplete: positiveCount(source.calories_unscored) || positiveCount(source.uncounted_meals),
+  };
+}
+
+/** «≈ » перед числом итога, если в нём есть оценки ИИ. */
+export function approxPrefix(marks: KcalTotalMarks): string {
+  return marks.approx ? "≈ " : "";
+}
+
 export function aiCaloriesOf(entry: {
   calories?: number | null;
   ai_calories?: unknown;

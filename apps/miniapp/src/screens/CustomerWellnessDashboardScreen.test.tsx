@@ -1551,3 +1551,73 @@ describe("CustomerWellnessDashboardScreen — отмена стакана (DRF-1
     expect(screen.queryByText("Стакан убран")).not.toBeInTheDocument();
   });
 });
+
+// ── DRF-2766 фаза 2 — итог дня с оценками ИИ в блоке «Питание» ──────────────
+describe("CustomerWellnessDashboardScreen — итог с оценками ИИ (DRF-2766)", () => {
+  const AI_NOTE = "включая оценки ИИ";
+  const INCOMPLETE = "Итог неполный: не у всех записей есть калории.";
+  const UNKNOWN = "Калории пока не посчитаны.";
+  const DAY = {
+    calories_eaten: 447,
+    calories_target: 1900,
+    water_glasses_eaten: 3,
+    water_glasses_target: 8,
+    display_name: "Анна",
+  };
+
+  function serve(today: unknown) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: unknown) => {
+        const u = String(url);
+        const body = u.includes("/wellness/today")
+          ? today
+          : u.includes("/recent-activity")
+            ? { this_week_booking_count: 0 }
+            : null;
+        if (body === null) throw new Error(`unexpected fetch: ${u}`);
+        return { ok: true, status: 200, json: async () => body } as unknown as Response;
+      }),
+    );
+  }
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+    mockedBrowse.mockResolvedValue({ services: [], masters: [], picks: [], picksOutcome: "OK" });
+    window.history.replaceState({}, "", "/customer/main");
+  });
+
+  it("с оценками — «≈ 447 / 1900 ккал» и подпись «включая оценки ИИ»", async () => {
+    serve({ ...DAY, calories_ai_included: 1, calories_unscored: 0 });
+    await renderScreen(false);
+
+    expect(await screen.findByText("≈ 447 / 1900 ккал · 24 %")).toBeInTheDocument();
+    expect(screen.getByTestId("pulse-kcal-note")).toHaveTextContent(AI_NOTE);
+  });
+
+  it("целиком проверенный — без «≈» и без подписи", async () => {
+    serve({ ...DAY, calories_ai_included: 0, calories_unscored: 0 });
+    await renderScreen(false);
+
+    expect(await screen.findByText("447 / 1900 ккал · 24 %")).toBeInTheDocument();
+    expect(screen.queryByTestId("pulse-kcal-note")).not.toBeInTheDocument();
+  });
+
+  it("с записью без калорий — «Итог неполный»", async () => {
+    serve({ ...DAY, calories_ai_included: 0, calories_unscored: 1 });
+    await renderScreen(false);
+
+    expect(await screen.findByText("447 / 1900 ккал · 24 %")).toBeInTheDocument();
+    expect(screen.getByTestId("pulse-kcal-note")).toHaveTextContent(INCOMPLETE);
+  });
+
+  it("итога нет — «Калории пока не посчитаны.», а не «не удалось загрузить»", async () => {
+    const { calories_eaten: _omit, ...withoutTotal } = DAY;
+    void _omit;
+    serve({ ...withoutTotal, calories_unscored: 2 });
+    await renderScreen(false);
+
+    expect(await screen.findByText(UNKNOWN)).toBeInTheDocument();
+  });
+});

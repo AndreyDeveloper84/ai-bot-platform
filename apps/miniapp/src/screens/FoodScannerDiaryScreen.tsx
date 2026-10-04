@@ -36,7 +36,15 @@ import {
   pfcLine,
 } from "../lib/customer-wellness";
 import { ApiError } from "../lib/api";
-import { aiCaloriesOf, aiKcalPhrase } from "../lib/format";
+import {
+  aiCaloriesOf,
+  aiKcalPhrase,
+  approxPrefix,
+  KCAL_TOTAL_AI_NOTE,
+  KCAL_TOTAL_INCOMPLETE,
+  KCAL_TOTAL_UNKNOWN,
+  kcalTotalMarks,
+} from "../lib/format";
 import { minutesRu, restoreWindowMinutesLeft } from "../lib/restore-window";
 import { saveMealFromEntry } from "../lib/saved-meals";
 import { useScreenBack } from "../hooks/useScreenBack";
@@ -376,6 +384,9 @@ function DiaryReady({
   // «прятать» на уровне чтения (fail-closed, §10 Appendix ED Mode).
   const showNumbers = !day.hideNumbers;
   const { calories_eaten: eaten, calories_target: target, pfc } = day.today;
+  // DRF-2766 фаза 2 — итог включает оценки ИИ и говорит об этом.
+  const marks = kcalTotalMarks(day.today);
+  const approx = approxPrefix(marks);
   // DRF-2107. «Добавить приём» ведёт на запись текстом (DRF-2091) — живой
   // прокси, не заглушка; гейт `import.meta.env.DEV` времён DRF-1839 прятал
   // в проде работающий вход и снят.
@@ -495,8 +506,20 @@ function DiaryReady({
               (анкету человек не проходил), и «/ 0 ккал» на её месте
               было бы чужим числом, выданным за его собственное (§65). */}
           {eaten !== undefined && (
-            <p className="food-scanner-saved__total">
-              {target !== undefined ? `${eaten} / ${target} ккал` : `${eaten} ккал`}
+            <p className="food-scanner-saved__total" data-testid="day-kcal-total">
+              {target !== undefined ? `${approx}${eaten} / ${target} ккал` : `${approx}${eaten} ккал`}
+              {marks.approx ? `, ${KCAL_TOTAL_AI_NOTE}` : ""}
+            </p>
+          )}
+          {/* DRF-2766 — день прочитан, а итога нет: не ноль и не «сбой». */}
+          {eaten === undefined && marks.incomplete && (
+            <p className="food-scanner-saved__total" data-testid="day-kcal-total">
+              {KCAL_TOTAL_UNKNOWN}
+            </p>
+          )}
+          {eaten !== undefined && marks.incomplete && (
+            <p className="food-scanner-saved__macros" data-testid="day-kcal-incomplete">
+              {KCAL_TOTAL_INCOMPLETE}
             </p>
           )}
           {/* БЖУ — строка целевая: живёт и гаснет вместе с целью, ровно

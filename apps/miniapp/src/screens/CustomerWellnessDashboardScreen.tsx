@@ -114,7 +114,15 @@ import {
   getLastTopicAndChatLink,
   type LastTopic,
 } from "../lib/customer-last-topic";
-import { formatDuration, priceFromLabel } from "../lib/format";
+import {
+  approxPrefix,
+  formatDuration,
+  KCAL_TOTAL_AI_NOTE,
+  KCAL_TOTAL_INCOMPLETE,
+  KCAL_TOTAL_UNKNOWN,
+  kcalTotalMarks,
+  priceFromLabel,
+} from "../lib/format";
 import { returnToChat } from "../lib/max-sdk";
 import { ReturnToChatHint } from "../components/ReturnToChatHint";
 import {
@@ -644,8 +652,10 @@ export function CustomerWellnessDashboardScreen() {
     waterTargetKnown && waterTarget > 0 && waterEaten !== undefined
       ? waterEaten / waterTarget
       : undefined;
+  // DRF-2766 — записи без калорий — тоже записи: день не пустой.
   const hasAnyLogs =
-    !!todayData && ((caloriesEaten ?? 0) > 0 || (waterEaten ?? 0) > 0);
+    !!todayData &&
+    ((caloriesEaten ?? 0) > 0 || (waterEaten ?? 0) > 0 || kcalTotalMarks(todayData).incomplete);
   const oneLiner = todayData
     ? pickOneLiner({
         hour: now.getHours(),
@@ -1272,6 +1282,12 @@ function PulseStrip({ data }: { data: WellnessToday }) {
   // По образцу воды парой строк ниже: съеденное и цель — раздельно.
   const caloriesKnown = caloriesEaten !== undefined;
   const caloriesTargetKnown = caloriesTarget !== undefined;
+  // DRF-2766 фаза 2 — итог включает оценки ИИ («≈ … включая оценки ИИ»),
+  // записи без калорий делают его неполным; день прочитан, а итога нет —
+  // «пока не посчитаны», а не «не удалось загрузить».
+  const marks = kcalTotalMarks(data);
+  const approx = approxPrefix(marks);
+  const totalUnknown = !caloriesKnown && marks.incomplete;
   const waterEaten = data.water_glasses_eaten;
   const waterTarget = data.water_glasses_target;
   // Знать выпитое и не знать нормы — обычное состояние, а не сбой.
@@ -1311,14 +1327,16 @@ function PulseStrip({ data }: { data: WellnessToday }) {
       <div
         className="wellness-dash__pulse-row"
         aria-label={
-          !caloriesKnown
+          totalUnknown
+            ? `Питание: ${KCAL_TOTAL_UNKNOWN}`
+            : !caloriesKnown
             ? `Питание: ${sliceClosedCopy}`
             : dayIsEmpty
               ? // DRF-2288: скринридер слышит то же, что видно глазу, — не «0 из 2100».
                 `Питание: ${EMPTY_DAY_TEXT}`
               : caloriesTargetKnown
-                ? `Питание: ${caloriesEaten} из ${caloriesTarget} килокалорий, ${caloriesPct} процентов${pfcSpoken}`
-                : `Питание: ${caloriesEaten} килокалорий сегодня`
+                ? `Питание: ${marks.approx ? "примерно " : ""}${caloriesEaten} из ${caloriesTarget} килокалорий, ${caloriesPct} процентов${marks.approx ? `, ${KCAL_TOTAL_AI_NOTE}` : ""}${pfcSpoken}`
+                : `Питание: ${marks.approx ? "примерно " : ""}${caloriesEaten} килокалорий сегодня${marks.approx ? `, ${KCAL_TOTAL_AI_NOTE}` : ""}`
         }
       >
         <div className="wellness-dash__pulse-head">
@@ -1329,8 +1347,15 @@ function PulseStrip({ data }: { data: WellnessToday }) {
             <div className="wellness-dash__pulse-numbers" aria-hidden="true">
               {dayIsEmpty
                 ? EMPTY_DAY_TEXT
-                : `${caloriesEaten} / ${caloriesTarget} ккал · ${caloriesPct} %`}
+                : `${approx}${caloriesEaten} / ${caloriesTarget} ккал · ${caloriesPct} %`}
             </div>
+            {!dayIsEmpty && (marks.approx || marks.incomplete) && (
+              <div className="wellness-dash__pulse-pfc" aria-hidden="true" data-testid="pulse-kcal-note">
+                {[marks.approx ? KCAL_TOTAL_AI_NOTE : null, marks.incomplete ? KCAL_TOTAL_INCOMPLETE : null]
+                  .filter(Boolean)
+                  .join(" · ")}
+              </div>
+            )}
             {/* §11.1 — БЖУ row hidden when pfc absent. DRF-1844: белок
                 «108 / 130 г», когда ориентир по белку приехал; без него —
                 факт без второго числа (§85 §8: процент и «из» только при
@@ -1368,15 +1393,25 @@ function PulseStrip({ data }: { data: WellnessToday }) {
           /* Цель не известна — показываем ровно то, что знаем: сколько
              съедено. Ни шкалы, ни процентов: и то и другое считается ОТ
              цели, а цели нет. Та же форма, что у воды ниже. */
-          <div className="wellness-dash__pulse-numbers">
-            {dayIsEmpty
-              ? EMPTY_DAY_TEXT
-              : `${caloriesEaten} ккал сегодня`}
-          </div>
+          <>
+            <div className="wellness-dash__pulse-numbers">
+              {dayIsEmpty ? EMPTY_DAY_TEXT : `${approx}${caloriesEaten} ккал сегодня`}
+            </div>
+            {!dayIsEmpty && (marks.approx || marks.incomplete) && (
+              <div className="wellness-dash__pulse-pfc" aria-hidden="true" data-testid="pulse-kcal-note">
+                {[marks.approx ? KCAL_TOTAL_AI_NOTE : null, marks.incomplete ? KCAL_TOTAL_INCOMPLETE : null]
+                  .filter(Boolean)
+                  .join(" · ")}
+              </div>
+            )}
+          </>
         ) : (
           /* Read failed - no numbers, no bar. «0 / 0 ккал · 0 %» would
-             read as a logged-nothing day, which is a different fact. */
-          <div className="wellness-dash__pulse-numbers">{sliceClosedCopy}</div>
+             read as a logged-nothing day, which is a different fact.
+             DRF-2766 — day read but no total: «пока не посчитаны». */
+          <div className="wellness-dash__pulse-numbers">
+            {totalUnknown ? KCAL_TOTAL_UNKNOWN : sliceClosedCopy}
+          </div>
         )}
       </div>
 
