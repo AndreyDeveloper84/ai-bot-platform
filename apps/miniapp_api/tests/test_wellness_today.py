@@ -398,6 +398,47 @@ class TestWellnessTodayHappyPath:
         assert "water_glasses_target" not in data
 
 
+class TestTheDayTotalWithAIEstimates:
+    """DRF-2766 фаза 2: итог включает оценки ИИ, «итога нет» — не ноль."""
+
+    @staticmethod
+    def _get(client: Client, bot_user: BotUser, summary) -> dict:
+        with _patch_nutrition(summary=summary, water=_FakeWater(), profile=None):
+            resp = client.get(
+                _url(), HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id)
+            )
+        assert resp.status_code == 200
+        return resp.json()
+
+    def test_the_counters_travel_with_the_total(self, client: Client, bot_user: BotUser):
+        summary = _FakeSummary(calories_total=447.0)
+        summary.calories_ai_included = 1  # type: ignore[attr-defined]
+        summary.calories_unscored = 2  # type: ignore[attr-defined]
+
+        data = self._get(client, bot_user, summary)
+
+        assert data["calories_eaten"] == 447
+        assert data["calories_ai_included"] == 1
+        assert data["calories_unscored"] == 2
+
+    def test_no_total_is_not_a_zero_and_never_a_500(self, client: Client, bot_user: BotUser):
+        summary = _FakeSummary(calories_total=None)  # type: ignore[arg-type]
+        summary.calories_unscored = 2  # type: ignore[attr-defined]
+
+        data = self._get(client, bot_user, summary)
+
+        assert data["calories_unscored"] == 2
+        assert "calories_eaten" not in data
+
+    def test_an_old_summary_without_counters_reads_as_zero_counters(
+        self, client: Client, bot_user: BotUser
+    ):
+        data = self._get(client, bot_user, _FakeSummary())
+
+        assert data["calories_eaten"] == 1240
+        assert (data["calories_ai_included"], data["calories_unscored"]) == (0, 0)
+
+
 class TestWellnessTodayGracefulDegradation:
     """A read that FAILED omits its keys — it does not send zeros.
 

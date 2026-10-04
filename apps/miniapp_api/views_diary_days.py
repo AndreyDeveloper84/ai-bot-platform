@@ -75,6 +75,9 @@ def _day_payload(row: Any) -> dict[str, Any]:
         "meals_count": row.meals_count,
         "kcal": row.kcal,
         "has_entries": row.has_entries,
+        # DRF-2766 (фаза 2) — итог дня неполный / с оценками ИИ.
+        "uncounted_meals": int(getattr(row, "uncounted_meals", 0) or 0),
+        "kcal_ai_included": int(getattr(row, "kcal_ai_included", 0) or 0),
     }
 
 
@@ -262,6 +265,10 @@ def customer_diary_day(request: HttpRequest) -> HttpResponse:
     payload: dict[str, Any] = {
         "date": summary_res.date or date,
         "calories_total": summary_res.calories_total,
+        # DRF-2766 (фаза 2) — итог включает оценки ИИ: сколько вошло
+        # оценкой и сколько записей без калорий (итог неполный).
+        "calories_ai_included": int(getattr(summary_res, "calories_ai_included", 0) or 0),
+        "calories_unscored": int(getattr(summary_res, "calories_unscored", 0) or 0),
         "entries": list(summary_res.entries or []),
     }
     hidden = _numbers_hidden(profile_res, bot_user=bot_user)
