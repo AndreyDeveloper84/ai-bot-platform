@@ -208,6 +208,26 @@ class TestDays:
         # анкеты нет вовсе — это не отказ чтения, числа показываются
         assert body["nutrition_numbers_hidden"] is False
 
+    def test_drf2766_a_week_row_forwards_its_counters(
+        self, client: Client, bot_user: BotUser, consent
+    ) -> None:
+        """Фаза 2: строка дня несёт, сколько записей без калорий и сколько оценкой."""
+        week = DiaryDaysResponse(
+            timezone="Europe/Moscow",
+            date_from="2026-09-16",
+            date_to="2026-09-16",
+            days=(
+                DiaryDayRow("2026-09-16", 3, 447.0, True, uncounted_meals=1, kcal_ai_included=1),
+            ),
+        )
+        patcher, _ = _patch_client(days=week, profile=None)
+        with patcher:
+            body = _get(client, bot_user, "customer_diary_days").json()
+        (row,) = body["days"]
+        assert row["kcal"] == 447.0
+        assert row["uncounted_meals"] == 1
+        assert row["kcal_ai_included"] == 1
+
     def test_numbers_hidden_follows_the_persons_choice_not_the_profile_flag(
         self, client: Client, bot_user: BotUser, consent
     ) -> None:
