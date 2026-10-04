@@ -91,11 +91,9 @@ MEMORY_GREEN = ConsentRecord.ConsentType.MEMORY_GREEN.value
 
 
 def _regrant(client: Client, regrant_url: str, auth: dict, body: dict | None = None):
-    payload = (
-        {"document_version": customer_consents.DATA_STORAGE_REGRANT_DOCUMENT_VERSION}
-        if body is None
-        else body
-    )
+    # Литералом, а не константой модуля: это контракт клиента — версия, которую
+    # он присылает, — и узел не должен падать на отсутствии имени в коде.
+    payload = {"document_version": "welcome-s2-v1"} if body is None else body
     return client.post(
         regrant_url, data=json.dumps(payload), content_type="application/json", **auth
     )
