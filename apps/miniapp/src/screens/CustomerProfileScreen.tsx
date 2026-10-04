@@ -75,10 +75,22 @@ import {
   fetchHealthConsent,
   type HealthConsentState,
 } from "../lib/health-consent";
+import { fetchNutritionDisplay, setNumbersHidden } from "../lib/nutrition-display";
 import { SurfaceSwitchButton } from "../components/SurfaceSwitch";
 import { CustomerTabBar } from "../components/CustomerTabBar";
 import { useScreenBack } from "../hooks/useScreenBack";
 import { screenRoot } from "../lib/screen-back";
+
+// DRF-2766 — «Без чисел». Название — слово владельца (решение 04.10, п.2);
+// описание и подтверждения — [confirmable]: построены по смыслу решения
+// («скрытие калорий, БЖУ и числовых целей на всех экранах; записи дневника
+// сохраняются») и ждут финальной вычитки владельцем.
+export const NUMBERS_HIDDEN_TITLE = "Без чисел";
+export const NUMBERS_HIDDEN_ARIA = "Без чисел: скрывать калории, БЖУ и цели";
+export const NUMBERS_HIDDEN_DESCRIPTION =
+  "Скрывает калории, белки, жиры, углеводы и цели на всех экранах. Записи в дневнике остаются как есть. По умолчанию выключено.";
+export const NUMBERS_HIDDEN_ON = "Хорошо, числа скрыты. Записи дневника на месте.";
+export const NUMBERS_HIDDEN_OFF = "Хорошо, снова показываю числа.";
 
 // ---------------------------------------------------------------------------
 // Реальные данные (DRF-1475 §24, DRF-1520). Экран целиком стоит на
@@ -160,6 +172,10 @@ export function CustomerProfileScreen() {
   const [toast, setToast] = useState<ToastState>(EMPTY_TOAST);
   const [marketingBusy, setMarketingBusy] = useState(false);
   const [hintsBusy, setHintsBusy] = useState(false);
+  // DRF-2766 — «Без чисел». `null` — ещё не прочитано или чтение не
+  // удалось: строка тогда не рисуется, чтобы не показать выдуманное «выкл».
+  const [numbersHidden, setNumbersHiddenState] = useState<boolean | null>(null);
+  const [numbersBusy, setNumbersBusy] = useState(false);
   const [exportOpen, setExportOpen] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [storageOpen, setStorageOpen] = useState(false);
@@ -207,6 +223,36 @@ export function CustomerProfileScreen() {
   useEffect(() => {
     loadHealthConsent();
   }, [loadHealthConsent]);
+
+  useEffect(() => {
+    let alive = true;
+    fetchNutritionDisplay()
+      .then(({ numbers_hidden }) => {
+        if (alive) setNumbersHiddenState(numbers_hidden);
+      })
+      .catch(() => {
+        if (alive) setNumbersHiddenState(null);
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const onNumbersToggle = useCallback(async (next: boolean) => {
+    setNumbersBusy(true);
+    try {
+      const updated = await setNumbersHidden(next);
+      setNumbersHiddenState(updated.numbers_hidden);
+      setToast({ visible: true, message: next ? NUMBERS_HIDDEN_ON : NUMBERS_HIDDEN_OFF });
+    } catch {
+      setToast({
+        visible: true,
+        message: "Не получилось сохранить. Попробуй ещё раз.",
+      });
+    } finally {
+      setNumbersBusy(false);
+    }
+  }, []);
 
   // Состояние словами. Три исхода, и ни один не притворяется другим:
   // неизвестно / не смогли прочитать / известное да-нет с датой выдачи.
@@ -515,6 +561,18 @@ export function CustomerProfileScreen() {
                     </>
                   }
                 />
+                {/* DRF-2766 — «Без чисел»: выбор человека, не признак анкеты. */}
+                {numbersHidden !== null && (
+                  <ConsentRow
+                    variant="toggle"
+                    title={NUMBERS_HIDDEN_TITLE}
+                    ariaLabel={NUMBERS_HIDDEN_ARIA}
+                    checked={numbersHidden}
+                    busy={numbersBusy || offline}
+                    onChange={onNumbersToggle}
+                    description={<>{NUMBERS_HIDDEN_DESCRIPTION}</>}
+                  />
+                )}
               </dl>
               <p className="profile-section__caption">
                 Твои данные защищены. Здесь можно посмотреть, что хранится,
