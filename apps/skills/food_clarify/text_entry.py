@@ -213,6 +213,21 @@ _FILLER = re.compile(
     r"|съел|съела|поел|поела|ел|ела|скушал|скушала|был|была|были|было)\s+)+",
     re.IGNORECASE,
 )
+#: DRF-2765 — просьба записать («запиши в дневник», «добавь», «внеси») —
+#: не название еды. Без этого «запиши в дневник борщ 300гр» уходило в
+#: каталог целиком, справочник промахивался, и вместо проверенного борща
+#: ложилась оценка ИИ, которая не входит в сумму дня. Глагол — целым словом:
+#: «запеканка» и «добавка к супу» остаются блюдами.
+_DIARY = r"(?:в|во)\s+(?:мой\s+)?(?:дневник|журнал)(?:\s+(?:питания|еды))?"
+_ASK_TO_LOG = (
+    r"(?:запиши|запишите|запишем|записать|добавь|добавьте|добавить|внеси|внесите|внести"
+    r"|занеси|занесите|занести|отметь|отметьте|залогируй|зафиксируй)"
+    r"(?:\s+(?:мне|пожалуйста))*"
+)
+_COMMAND_HEAD = re.compile(
+    rf"^(?:(?:пожалуйста|давай)\s+)*{_ASK_TO_LOG}(?:\s+{_DIARY})?(?:\s+что)?(?:\s+|$)"
+)
+_COMMAND_TAIL = re.compile(rf"\s+(?:{_ASK_TO_LOG}(?:\s+{_DIARY})?|{_DIARY})$")
 _NOISE = re.compile(r"[^\w\s-]", re.UNICODE)
 _WS = re.compile(r"\s+")
 
@@ -248,6 +263,8 @@ def parse_food_text(text: str) -> ParsedFood | None:
             return None
         raw = f"{raw[: match.start()]} {raw[match.end() :]}"
     cleaned = _WS.sub(" ", _NOISE.sub(" ", raw)).strip().lower()
+    cleaned = _COMMAND_HEAD.sub("", cleaned)
+    cleaned = _COMMAND_TAIL.sub("", cleaned)
     cleaned = _FILLER.sub("", cleaned + " ").strip()
     if not cleaned or len(cleaned) > 60:
         return None
