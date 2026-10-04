@@ -1392,8 +1392,8 @@ _CANONICAL_REQUIRED_FIELDS: Final[tuple[str, ...]] = (
 
 
 # DRF-2673 — payload ``actor`` of ``appointment.rescheduled`` is a closed
-# list. The registry, verbatim (``ayla-knowledge/05 Architecture/Ayla
-# Domain Event Registry.md`` §6.3, registered v0.4 — AYLA-DEC-0022 п. 9):
+# list. The registry, verbatim, registered v0.4 — AYLA-DEC-0022 п. 9
+# (``ayla-knowledge/05 Architecture/Ayla Domain Event Registry.md`` §6.3):
 #
 #     `actor` — инициатор переноса (user | specialist | admin | owner |
 #     system | external_system)

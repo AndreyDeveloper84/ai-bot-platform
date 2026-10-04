@@ -32,7 +32,7 @@ Resilience:
   Telegram-alert path on transition.
 * Caller-side retries are out of scope — the bot fires once per turn.
 
-Schema fix note (per memory ``reference_ayla_backend.md``): Ayla nests
+Schema fix note: Ayla nests
 ``norms.*`` under ``data.norms.{daily_kcal, ...}``. The original mysite
 client carried a flat-top-level fallback for backward compat; DRF-270
 removed it. This port matches the DRF-270 state.

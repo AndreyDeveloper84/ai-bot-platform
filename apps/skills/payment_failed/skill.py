@@ -23,7 +23,7 @@ vocabulary) для observability.
 
 ### D3 consumer-side enrichment contract (tech-lead 2026-05-25)
 
-Event-contract.md §3.7 envelope содержит ТОЛЬКО ``payment_id``,
+``event-contract.md`` §3.7 envelope содержит ТОЛЬКО ``payment_id``,
 ``appointment_id``, ``reason``, ``failed_at`` — нет identity полей и
 нет суммы. Skill требует enriched data для построения DM-текстов и
 lookup BotUser-ов.

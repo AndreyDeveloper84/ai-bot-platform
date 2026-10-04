@@ -70,6 +70,7 @@ import {
   type ConsentsResponse,
   type MeProfileResponse,
 } from "../lib/customer-profile";
+import { ApiError } from "../lib/api";
 import { DELETE_CONFIRMATION_TOKEN } from "../lib/personal-data";
 import {
   fetchHealthConsent,
@@ -91,6 +92,27 @@ export const NUMBERS_HIDDEN_DESCRIPTION =
   "Скрывает калории, белки, жиры, углеводы и цели на всех экранах. Записи в дневнике остаются как есть. По умолчанию выключено.";
 export const NUMBERS_HIDDEN_ON = "Хорошо, числа скрыты. Записи дневника на месте.";
 export const NUMBERS_HIDDEN_OFF = "Хорошо, снова показываю числа.";
+
+/**
+ * DRF-2709 — решение владельца §47.3, дословно: «Подсказки недоступны, пока
+ * согласие отозвано». Без местоимений — от регистра обращения не зависит.
+ * Действия на восстановление здесь нет: выдать согласие заново из
+ * приложения сегодня нельзя (у `me/consents/data-storage/` только отзыв), а
+ * §47.3 просит действие, «если UX его допускает». Путь восстановления —
+ * вопрос владельцу.
+ */
+const HINTS_UNAVAILABLE = "Подсказки недоступны, пока согласие отозвано";
+
+/** Слаг отказа сервера — `apps/consent/customer.py::PROACTIVE_HINTS_BLOCKED_REASON`. */
+const HINTS_BLOCKED_SLUG = "consent_withdrawn";
+
+const hintsDescription = (
+  <>
+    Иногда <span lang="en">Ayla</span> напишет первой — напомнит про уход или
+    подскажет, когда пора повторить. Напоминания о твоих записях приходят
+    отдельно и от этого тумблера не зависят.
+  </>
+);
 
 // ---------------------------------------------------------------------------
 // Реальные данные (DRF-1475 §24, DRF-1520). Экран целиком стоит на
@@ -354,6 +376,11 @@ export function CustomerProfileScreen() {
 
   // «Подсказки от Ayla». Контракт клиента говорит в терминах opt-out,
   // экран — в терминах «включено»; инверсия одна и лежит в lib.
+  //
+  // DRF-2709: экран мог устареть — согласие отозвали в боте или в другой
+  // вкладке, а здесь ещё тумблер. Тогда сервер откажет 409
+  // `consent_withdrawn`, и «Попробуй ещё раз» было бы неправдой: повтор не
+  // поможет. Экран переходит к объяснению §47.3-б.
   const onHintsToggle = useCallback(async (next: boolean) => {
     setHintsBusy(true);
     try {
@@ -370,7 +397,23 @@ export function CustomerProfileScreen() {
           ? "Хорошо, иногда буду писать первой."
           : "Поняла, первой писать не буду.",
       });
-    } catch {
+    } catch (e) {
+      if (e instanceof ApiError && e.slug === HINTS_BLOCKED_SLUG) {
+        setStatus((s) =>
+          s.kind === "ready"
+            ? {
+                ...s,
+                consents: {
+                  ...s.consents,
+                  proactive_hints_enabled: false,
+                  proactive_hints_can_enable: false,
+                },
+              }
+            : s,
+        );
+        setToast({ visible: true, message: HINTS_UNAVAILABLE });
+        return;
+      }
       setToast({
         visible: true,
         message: "Не получилось сохранить. Попробуй ещё раз.",
@@ -670,22 +713,30 @@ export function CustomerProfileScreen() {
                 Подсказки от <span lang="en">Ayla</span>
               </h2>
               <dl className="profile-consent-list">
-                <ConsentRow
-                  variant="toggle"
-                  title="Подсказки от Ayla"
-                  ariaLabel="Получать подсказки от Ayla"
-                  checked={status.consents.proactive_hints_enabled}
-                  busy={hintsBusy || offline}
-                  onChange={onHintsToggle}
-                  description={
-                    <>
-                      Иногда <span lang="en">Ayla</span> напишет первой —
-                      напомнит про уход или подскажет, когда пора
-                      повторить. Напоминания о твоих записях приходят
-                      отдельно и от этого тумблера не зависят.
-                    </>
-                  }
-                />
+                {/* DRF-2709, решение владельца §47.3: после отзыва
+                    согласия — не серый тумблер, а объяснение вместо
+                    обычного включения. Включённые подсказки (так быть не
+                    должно: отзыв их гасит) оставляют тумблер — выключить
+                    можно всегда. */}
+                {!status.consents.proactive_hints_can_enable &&
+                !status.consents.proactive_hints_enabled ? (
+                  <ConsentRow
+                    variant="info"
+                    title="Подсказки от Ayla"
+                    statusText={HINTS_UNAVAILABLE}
+                    description={hintsDescription}
+                  />
+                ) : (
+                  <ConsentRow
+                    variant="toggle"
+                    title="Подсказки от Ayla"
+                    ariaLabel="Получать подсказки от Ayla"
+                    checked={status.consents.proactive_hints_enabled}
+                    busy={hintsBusy || offline}
+                    onChange={onHintsToggle}
+                    description={hintsDescription}
+                  />
+                )}
               </dl>
             </section>
 
