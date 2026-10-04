@@ -3236,11 +3236,14 @@ def customer_marketing_consent(request: HttpRequest) -> HttpResponse:
 
 
 @csrf_exempt
-@require_http_methods(["DELETE"])
+@require_http_methods(["POST", "DELETE"])
 @require_init_data
 @with_request_tenant
 def customer_data_storage_consent(request: HttpRequest) -> HttpResponse:
-    """Отзыв согласия на хранение данных. Только отзыв — выдача не здесь.
+    """Согласие на хранение данных: ``DELETE`` — отозвать, ``POST`` — выдать заново.
+
+    ``POST`` (DRF-2709) — в :func:`_regrant_data_storage`, ниже. Дальше —
+    про отзыв.
 
     Тело обязано нести обе половины подтверждения::
 
@@ -3279,6 +3282,8 @@ def customer_data_storage_consent(request: HttpRequest) -> HttpResponse:
     body = _json_object_body(request)
     if isinstance(body, HttpResponse):
         return body
+    if request.method == "POST":
+        return _regrant_data_storage(bot_user, body)
 
     # Ничего ещё не тронуто — обе проверки стоят до вызова процедуры.
     if body.get("confirmation", "") != DELETE_CONFIRMATION_TOKEN:
@@ -3323,6 +3328,49 @@ def customer_data_storage_consent(request: HttpRequest) -> HttpResponse:
         "failed_steps": result.failed_steps,
         "failed_details": {s.step: s.detail for s in result.steps if not s.ok and s.detail},
     }
+    return JsonResponse(document, status=200)
+
+
+def _regrant_data_storage(bot_user: BotUser, body: dict) -> HttpResponse:
+    """Повторная выдача согласия на хранение данных (DRF-2709).
+
+    Тело::
+
+        {"document_version": "welcome-s2-v1"}
+
+    ``document_version`` — доказательство, под каким текстом человек нажал,
+    как ``disclosure_version`` у отзыва. Согласие информированное (152-ФЗ):
+    строка реестра обязана говорить, КАКОЙ текст принят, и единственное, чем
+    сервер может это проверить, — версия, которую прислал показавший текст
+    клиент. Незнакомая или пустая — 409, и не пишется ничего: клиенту нужно
+    перечитать документ (``GET /me/consents/`` отдаёт её в
+    ``data_storage.regrant.document_version``), а не чинить тело.
+
+    Подсказки выдача не включает (решение владельца §47.3) — в ответе
+    ``proactive_hints.enabled`` остаётся ``false``, а ``can_enable``
+    становится ``true``.
+    """
+    from apps.consent.customer import (
+        DATA_STORAGE_REGRANT_DOCUMENT_VERSION,
+        regrant_data_storage,
+    )
+
+    if body.get("document_version", "") != DATA_STORAGE_REGRANT_DOCUMENT_VERSION:
+        return _error(
+            "stale_document",
+            "document_version does not match the current data-storage consent document",
+            409,
+        )
+
+    regrant_data_storage(bot_user)
+    document = _consents_document(bot_user)
+    if not document["data_storage"]["granted"]:
+        # Выдача не состоялась — состояние осталось «не разрешено».
+        logger.error(
+            "miniapp_api.consents.data_storage_regrant_failed bot_user=%s",
+            bot_user.id,
+        )
+        return JsonResponse(document, status=502)
     return JsonResponse(document, status=200)
 
 
