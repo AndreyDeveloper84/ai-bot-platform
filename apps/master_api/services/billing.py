@@ -1,6 +1,7 @@
 """Master billing status (C2) + payout preview (C3) proxy services.
 
-Pilot 2026-08-15, frozen contracts ``PILOT_CONTRACTS_2026-08-15.md``
+Pilot 2026-08-15, frozen contracts
+``beautygo_backend/docs/PILOT_CONTRACTS_2026-08-15.md``
 §3/§4. The master Mini App (W4) never calls Ayla directly — it reads
 these two bot-side proxies, which forward to Ayla's internal endpoints
 via :class:`apps.integrations.ayla.billing_client.AylaBillingClient`

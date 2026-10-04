@@ -1,6 +1,6 @@
 """Billing event consumer (C4 — pilot 2026-08-15).
 
-Per ``PILOT_CONTRACTS_2026-08-15.md`` §5 (contract version 1.0.0,
+Per ``beautygo_backend/docs/PILOT_CONTRACTS_2026-08-15.md`` §5 (contract version 1.0.0,
 frozen): W2's outbox produces three billing events; W3 (this repo) is
 the consumer for master-facing notifications, analytics follow later.
 
