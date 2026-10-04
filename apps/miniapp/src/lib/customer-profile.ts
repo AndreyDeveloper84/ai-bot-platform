@@ -137,6 +137,12 @@ export interface ConsentsResponse {
    * сервер считает актуальным; клиентская константа этого не докажет.
    */
   data_storage_disclosure_version: string;
+  /**
+   * Версия документа, под которой сервер примет повторную выдачу согласия
+   * (DRF-2709) — ТОЛЬКО из ответа сервера, как и версия раскрытия отзыва.
+   * Пустая строка — сервер её не прислал, выдача недоступна.
+   */
+  data_storage_regrant_version: string;
   /** «Подсказки от Ayla» — включены ли (не opt-out, а прямое «да»). */
   proactive_hints_enabled: boolean;
 }
@@ -176,6 +182,8 @@ interface ConsentsDocument {
       consequences: string[];
       retained: string[];
     };
+    /** DRF-2709 — версия документа для повторной выдачи. */
+    regrant?: { document_version: string };
   };
   /**
    * Есть только в ответе на отзыв (`DELETE me/consents/data-storage/`).
@@ -262,6 +270,18 @@ export interface DataStorageRevocationResult {
  * Не ошибка ввода и не повод «дожать» отзыв тем же телом: текст
  * последствий обновился, и его надо прочитать заново.
  */
+/**
+ * Сервер не принял версию документа, под которой человек нажал «Разрешить»
+ * (409 `stale_document`, DRF-2709). Ничего не записано: текст согласия
+ * обновился, его надо перечитать и показать заново, а не повторять тело.
+ */
+export class StaleRegrantDocumentError extends Error {
+  constructor() {
+    super("data-storage consent document version is stale");
+    this.name = "StaleRegrantDocumentError";
+  }
+}
+
 export class StaleDisclosureError extends Error {
   constructor() {
     super("data-storage revocation disclosure version is stale");
@@ -357,6 +377,7 @@ function toConsents(doc: ConsentsDocument): ConsentsResponse {
     data_storage_granted: Boolean(storage?.granted),
     data_storage_disclosure_version:
       storage?.revocation?.disclosure_version ?? "",
+    data_storage_regrant_version: storage?.regrant?.document_version ?? "",
     proactive_hints_enabled: Boolean(doc.proactive_hints?.enabled),
   };
 }
@@ -410,6 +431,7 @@ const CONSENTS_STATE: Record<StubVariant, ConsentsResponse> = {
     data_storage_consent_at: "2026-05-14T10:30:00+03:00",
     data_storage_granted: true,
     data_storage_disclosure_version: "data-storage-revocation-v1",
+    data_storage_regrant_version: "",
     proactive_hints_enabled: true,
   },
   new_user: {
@@ -419,6 +441,7 @@ const CONSENTS_STATE: Record<StubVariant, ConsentsResponse> = {
     data_storage_consent_at: "2026-05-30T12:00:00+03:00",
     data_storage_granted: true,
     data_storage_disclosure_version: "data-storage-revocation-v1",
+    data_storage_regrant_version: "",
     proactive_hints_enabled: true,
   },
   multi: {
@@ -428,6 +451,7 @@ const CONSENTS_STATE: Record<StubVariant, ConsentsResponse> = {
     data_storage_consent_at: "2026-05-14T10:30:00+03:00",
     data_storage_granted: true,
     data_storage_disclosure_version: "data-storage-revocation-v1",
+    data_storage_regrant_version: "",
     proactive_hints_enabled: true,
   },
 };
@@ -587,6 +611,35 @@ export async function revokeDataStorage(
     if (err instanceof ApiError) {
       if (err.status === 409) throw new StaleDisclosureError();
       if (err.status === 502) throw new DataStorageRevocationFailedError();
+    }
+    throw err;
+  }
+}
+
+/**
+ * Повторная выдача согласия на хранение данных (DRF-2709).
+ *
+ * `documentVersion` — версия ИЗ ОТВЕТА СЕРВЕРА
+ * (`data_storage_regrant_version`), под которой человеку показан текст
+ * согласия: сервер записывает её в реестр как доказательство, КАКОЙ текст
+ * принят (152-ФЗ). Подсказки выдача не включает (§47.3) — ответ это
+ * покажет сам.
+ *
+ * Кнопки на экране пока нет: какой текст человек видит перед выдачей —
+ * решение владельца, и кнопка придёт вместе с ним.
+ */
+export async function regrantDataStorage(
+  documentVersion: string,
+): Promise<ConsentsResponse> {
+  try {
+    const doc = await request<ConsentsDocument>(DATA_STORAGE_PATH, {
+      method: "POST",
+      body: JSON.stringify({ document_version: documentVersion }),
+    });
+    return toConsents(doc);
+  } catch (err) {
+    if (err instanceof ApiError && err.status === 409) {
+      throw new StaleRegrantDocumentError();
     }
     throw err;
   }
