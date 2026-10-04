@@ -26,6 +26,29 @@ workflow and run in bash against a throwaway repository with an ``origin`` and
 a ``dev`` branch — the same ``git fetch`` and three-dot diff the runner
 performs. The answer is read from ``$GITHUB_OUTPUT``, as the jobs read it.
 
+### Markdown that a test reads is code too (DRF-2660, measured)
+
+Running every suite the docs-only route switches off, with a hook on
+``open`` (22 099 nodes), found 20 nodes in 9 files that read a document.
+Thirteen are covered elsewhere. Of the rest:
+
+* ``apps/kb/services/tests/fixtures/gdocs_sample_response.md`` is a test
+  FIXTURE that happens to end in ``.md``. A PR changing only it was
+  «docs-only», and the node reading it did not run. So ``.md`` inside a
+  ``tests/`` or ``fixtures/`` directory is code;
+* ``docs/state/*.md`` is read by ``tests/test_state_check.py``, with no
+  always-on twin in CI. Those four files change together with the state
+  code, so ``docs/state/`` is code as well.
+
+Two runbooks read by one node each (``docs/runbooks/llm-proxy.md``,
+``docs/runbooks/strict-tenant-refuse-flip.md``) are left as documents on
+purpose — an accepted, recorded limit.
+
+What this file CANNOT notice: a new test that starts reading some other
+document. Finding the readers took a run of the whole suite under a probe;
+no node here repeats that. The list of «documents that are code» is kept by
+hand and can go stale silently.
+
 ### Two copies, one rule
 
 ``replay.yml`` carries its own copy of the detector (it gates the replay
@@ -182,6 +205,60 @@ class TestWhatIsADocument:
     )
     def test_anything_else_under_docs_is_code(self, pull_request, paths: list[str]) -> None:
         assert pull_request(paths) == CODE
+
+
+class TestMarkdownThatATestReads:
+    """DRF-2660 (в) — a document some node reads is that node's subject."""
+
+    @pytest.mark.parametrize(
+        "paths",
+        [
+            # the fixture the measurement found
+            ["apps/kb/services/tests/fixtures/gdocs_sample_response.md"],
+            ["tests/fixtures/contracts/README.md"],
+            ["tests/README.md"],
+            ["fixtures/sample.MD"],
+            # the surface-state documents, read by tests/test_state_check.py
+            ["docs/state/STATE-ADMIN.md"],
+            ["docs/state/README.md"],
+            # one of them among ordinary prose is still enough
+            ["docs/OPEN_DECISIONS.md", "docs/state/STATE-CLIENT.md"],
+        ],
+    )
+    def test_it_is_code(self, pull_request, paths: list[str]) -> None:
+        assert pull_request(paths) == CODE
+
+    @pytest.mark.parametrize(
+        "paths",
+        [
+            # the rule names directories, not look-alikes (the spaces keep these
+            # invented names out of doc_refs_guard, which reads a bare path as a basis)
+            ["docs/states/surface overview.md"],
+            ["docs/statement of work.md"],
+            ["apps/attests/notes.md"],
+            ["apps/x/fixtures.md"],
+            ["docs/testing/all tests.md"],
+            # a picture next to the state documents is still a picture
+            ["docs/state/diagram.png"],
+            # the two runbooks left as documents on purpose
+            ["docs/runbooks/llm-proxy.md"],
+            ["docs/runbooks/strict-tenant-refuse-flip.md"],
+        ],
+    )
+    def test_a_lookalike_or_an_accepted_limit_stays_a_document(
+        self, pull_request, paths: list[str]
+    ) -> None:
+        assert pull_request(paths) == DOCS_ONLY
+
+    def test_every_state_document_in_the_tree_is_code(self, pull_request) -> None:
+        """The real files, not a sample: a fifth state document is covered the day it lands."""
+        repo = WORKFLOWS.parents[1]
+        tracked = sorted(
+            path.relative_to(repo).as_posix() for path in (repo / "docs" / "state").glob("*.md")
+        )
+        assert len(tracked) >= 4, tracked
+        for rel in tracked:
+            assert pull_request([rel]) == CODE, rel
 
 
 class TestMixedPullRequest:
