@@ -4153,7 +4153,9 @@ def customer_wellness_today(request: HttpRequest) -> HttpResponse:
     # today», it is «we could not ask», and the two are indistinguishable
     # to the person reading the screen.
     summary_known = True
-    calories_eaten = 0
+    calories_eaten: int | None = 0
+    calories_ai_included = 0
+    calories_unscored = 0
     # None — «цели нет», не «цель ноль». Ключа в ответе не будет, как у
     # воды ниже: Ayla отдаёт ``calories_goal = 0``, когда считать цель
     # не из чего — анкету питания человек не проходил.
@@ -4177,7 +4179,14 @@ def customer_wellness_today(request: HttpRequest) -> HttpResponse:
         )
         summary_known = False
     else:
-        calories_eaten = round(summary_res.calories_total)
+        # DRF-2766 (фаза 2) — итога может не быть: записи есть, а калорий ни
+        # у одной (ни проверенного, ни оценки). Это не ноль; ключ тогда не
+        # уходит, а счётчики ниже говорят экрану, что день неполный.
+        calories_eaten = (
+            round(summary_res.calories_total) if summary_res.calories_total is not None else None
+        )
+        calories_ai_included = int(getattr(summary_res, "calories_ai_included", 0) or 0)
+        calories_unscored = int(getattr(summary_res, "calories_unscored", 0) or 0)
         # Ориентир приходит от Ayla уже КАК ОТСУТСТВИЕ: ключа
         # ``calories_goal`` в ответе нет, клиент отдаёт ``None``
         # (§82 — «Текущая плоская норма калорий для всех удаляется»).
@@ -4330,7 +4339,10 @@ def customer_wellness_today(request: HttpRequest) -> HttpResponse:
     # `summary_known` comment above; the frontend renders «Не удалось
     # загрузить» for an absent slice and numbers for a present one.
     if summary_known:
-        payload["calories_eaten"] = calories_eaten
+        if calories_eaten is not None:
+            payload["calories_eaten"] = calories_eaten
+        payload["calories_ai_included"] = calories_ai_included
+        payload["calories_unscored"] = calories_unscored
         # Цель уходит, только когда она есть И настроена. Ключа нет = цели
         # нет; ``NOT_CONFIGURED`` §6 на этой границе — отсутствие ключа.
         if calories_target is not None and calories_configured:

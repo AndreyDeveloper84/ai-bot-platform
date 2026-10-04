@@ -454,12 +454,40 @@ def _optional_int(raw: Any) -> int | None:
         return None
 
 
+def _optional_float(raw: Any) -> float | None:
+    """Число — или ``None`` (DRF-2766): «итога нет» не становится нулём.
+
+    Булево числом не считается; мусор — ``None``, а не ноль.
+    """
+    if raw is None or isinstance(raw, bool):
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
+def _count(raw: Any) -> int:
+    """Неотрицательный счётчик провода; отсутствие и мусор — ``0``."""
+    if isinstance(raw, bool):
+        return 0
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return 0
+    return value if value > 0 else 0
+
+
 @dataclass(frozen=True)
 class SummaryResponse:
     """Subset of ``NutritionSummaryResponseSerializer`` data we care about."""
 
     date: str
-    calories_total: float
+    #: DRF-2766 (фаза 2) — ``None``: записи за день есть, а калорий ни у одной
+    #: нет (ни проверенного числа, ни оценки ИИ). Это НЕ ноль: раньше здесь
+    #: стояло ``or 0.0``, и человек, записавший еду, видел «0 из N».
+    #: Пустой день каталог отдаёт честным нулём.
+    calories_total: float | None
     #: ``None`` — ОРИЕНТИРА НЕТ. Ayla перестала присылать ключ вовсе
     #: (§82: «Текущая плоская норма калорий для всех удаляется»), и
     #: нормализовать это в ноль на нашей стороне нельзя: ноль здесь
@@ -472,6 +500,12 @@ class SummaryResponse:
     entries: list[dict[str, Any]]
     raw: dict[str, Any]
     ai_comment: str | None = None
+    #: DRF-2766 (фаза 2) — сколько записей вошло в ``calories_total`` оценкой
+    #: ИИ: итог тогда приблизительный («≈ …, включая оценки ИИ»).
+    calories_ai_included: int = 0
+    #: DRF-2766 — сколько записей без какого-либо значения калорий: итог
+    #: неполный. Старый каталог полей не шлёт — ``0``, как было.
+    calories_unscored: int = 0
 
 
 def _targets_source(body: dict[str, Any]) -> str:
@@ -1675,7 +1709,7 @@ class NutritionClient:
             body = resp.json().get("data", {})
             return SummaryResponse(
                 date=str(body.get("date") or ""),
-                calories_total=float(body.get("calories_total") or 0.0),
+                calories_total=_optional_float(body.get("calories_total")),
                 calories_goal=_optional_int(body.get("calories_goal")),
                 protein_g=float(body.get("protein_g") or 0.0),
                 fat_g=float(body.get("fat_g") or 0.0),
@@ -1683,6 +1717,8 @@ class NutritionClient:
                 entries=list(body.get("entries") or []),
                 raw=body,
                 ai_comment=body.get("ai_comment") or None,
+                calories_ai_included=_count(body.get("calories_ai_included")),
+                calories_unscored=_count(body.get("calories_unscored")),
             )
         if resp.status_code >= 500:
             self._breaker(purpose).record_failure(now=now)
