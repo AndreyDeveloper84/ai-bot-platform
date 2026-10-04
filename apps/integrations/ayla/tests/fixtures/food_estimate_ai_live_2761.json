@@ -1,0 +1,65 @@
+{
+  "_source": {
+    "captured_on": "2026-10-03",
+    "catalog_commit": "a80f0fc4 (branch wt-9c/drf-2761)",
+    "catalog_repo": "beautygo_backend",
+    "how": "DRF APIClient on a Postgres test database; the model was replaced by a stub answering 250 kcal/100g; rows are synthetic.",
+    "what": "Live responses of the catalog food-estimate and food-log endpoints with the AI calorie estimate (DRF-2761) - captured, not hand-written."
+  },
+  "responses": {
+    "estimate_ai": {
+      "body": {
+        "data": {
+          "carbs_g": null,
+          "fat_g": null,
+          "kcal": null,
+          "kcal_ai_estimate": 750.0,
+          "kcal_per_100g": null,
+          "matched_dish": "зыбзик квантовый",
+          "portion_estimated": false,
+          "portion_g": 300.0,
+          "portion_source": "unknown",
+          "protein_g": null,
+          "source": "ai_estimate"
+        }
+      },
+      "status": 200
+    },
+    "estimate_reference": {
+      "body": {
+        "data": {
+          "carbs_g": 20.1,
+          "fat_g": 6.6,
+          "kcal": 147.0,
+          "kcal_ai_estimate": null,
+          "kcal_per_100g": 49,
+          "matched_dish": "борщ",
+          "portion_estimated": false,
+          "portion_g": 300.0,
+          "portion_source": "provider",
+          "protein_g": 4.8,
+          "source": "seed_ru"
+        }
+      },
+      "status": 200
+    },
+    "log_ai": {
+      "body": {
+        "data": {
+          "ai_calories": 750.0,
+          "calories": null,
+          "carbs_g": null,
+          "dish_name": "зыбзик квантовый",
+          "entry_origin": "text_estimated_confirmed",
+          "fat_g": null,
+          "has_photo": false,
+          "id": "760f8303-17ae-41d5-8909-051448089a93",
+          "logged_at": "2026-10-03T05:17:42.066515+03:00",
+          "meal_type": "other",
+          "protein_g": null
+        }
+      },
+      "status": 201
+    }
+  }
+}
