@@ -131,8 +131,17 @@ def render_daily_report(
     *,
     include_opt_out: bool = True,
     include_entries: bool = False,
+    hide_numbers: bool = False,
 ) -> str:
     """Compose the daily report.
+
+    ``hide_numbers`` (DRF-2766): the person chose «Без чисел» -- no calories,
+    no macros, no numeric targets on any screen (owner decision 04.10). The
+    report then says how many entries the day has, keeps the water FACT but
+    not its norm, names dishes without their calories, and drops the remark
+    (every remark is a comparison with a numeric target) and Ayla's own
+    comment (free model text that may carry a number; cutting numbers out of
+    someone else's sentence is not reliable).
 
     ``include_opt_out`` (DRF-1302): the off-switch footer belongs to the
     PUSH. When the person asks for the diary themselves
@@ -173,12 +182,16 @@ def render_daily_report(
         return "\n".join(lines)
 
     lines.append("")
-    lines.append(
-        _macro_line("Калории", summary.calories_total, _summary_goal(summary, profile), "ккал")
-    )
-    lines.append(_macro_line("Белки", summary.protein_g, _target(profile, "protein_g"), "г"))
-    lines.append(_macro_line("Жиры", summary.fat_g, _target(profile, "fat_g"), "г"))
-    lines.append(_macro_line("Углеводы", summary.carbs_g, _target(profile, "carbs_g"), "г"))
+    if hide_numbers:
+        if summary.entries:
+            lines.append(f"Записей в дневнике сегодня: {len(summary.entries)}.")
+    else:
+        lines.append(
+            _macro_line("Калории", summary.calories_total, _summary_goal(summary, profile), "ккал")
+        )
+        lines.append(_macro_line("Белки", summary.protein_g, _target(profile, "protein_g"), "г"))
+        lines.append(_macro_line("Жиры", summary.fat_g, _target(profile, "fat_g"), "г"))
+        lines.append(_macro_line("Углеводы", summary.carbs_g, _target(profile, "carbs_g"), "г"))
     if water is not None:
         # Норма воды приезжает в ответе по воде и происхождения не несёт —
         # как и ``calories_goal`` сводки. Показывается только при
@@ -188,22 +201,22 @@ def render_daily_report(
         # строка, вместе с фактом. Этот случай нашёл сторож, а не чтение:
         # три поверхности были закрыты, четвёртая — вода — пропускала
         # 2100 мл наружу.
-        norm = _water_norm(water, profile)
+        norm = None if hide_numbers else _water_norm(water, profile)
         if water.total_ml or norm is not None:
             lines.append(_macro_line("Вода", water.total_ml, norm, "мл"))
 
     if include_entries:
-        entries_lines = _entry_lines(summary)
+        entries_lines = _entry_lines(summary, hide_numbers=hide_numbers)
         if entries_lines:
             lines.append("")
             lines.extend(entries_lines)
 
-    remark = goal_remark(summary, water, profile)
+    remark = "" if hide_numbers else goal_remark(summary, water, profile)
     if remark:
         lines.append("")
         lines.append(remark)
 
-    if summary.ai_comment:
+    if summary.ai_comment and not hide_numbers:
         # Ayla's own text, generated under Ayla's safety rules. Passed
         # through verbatim rather than paraphrased -- rewording someone
         # else's reviewed copy is how a reviewed sentence stops being one.
@@ -326,7 +339,7 @@ def render_water_reminder(
 # -- helpers ----------------------------------------------------------------
 
 
-def _entry_lines(summary: SummaryResponse) -> list[str]:
+def _entry_lines(summary: SummaryResponse, *, hide_numbers: bool = False) -> list[str]:
     """The dishes behind the totals, one per line. ``[]`` when there are none.
 
     Every value printed comes from ``summary.entries`` as Ayla sent it, read
@@ -344,7 +357,10 @@ def _entry_lines(summary: SummaryResponse) -> list[str]:
         return []
     lines = ["Что было записано:"]
     for meal in meals:
-        if meal.calories:
+        if hide_numbers:
+            # DRF-2766 — «Без чисел»: блюдо называется, его калории — нет.
+            tail = ""
+        elif meal.calories:
             tail = f" — {meal.calories} ккал"
         elif meal.ai_calories:
             # DRF-2761 — оценка ИИ видна в записи (решение владельца 02.10),
