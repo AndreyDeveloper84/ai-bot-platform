@@ -257,6 +257,7 @@ class FoodScannerSkill:
         try:
             scan, diary = _scan_and_read_diary(context, external_id, photo_bytes)
         except FoodNotRecognizedError:
+            _mark_after_scan(context)
             return SkillResult(
                 reply_text=NOT_RECOGNIZED_FALLBACK,
                 action_data=_log_it_another_way(),
@@ -466,6 +467,7 @@ class FoodScannerSkill:
             )
         except FoodNotRecognizedError:
             _clear_in_flight(context, scan_id)
+            _mark_after_scan(context)
             return SkillResult(
                 reply_text=NOT_RECOGNIZED_FALLBACK,
                 meta={"reply_kind": "food_scanner_log_not_recognized"},
@@ -544,6 +546,22 @@ class FoodScannerSkill:
 
 
 # ─── helpers ──────────────────────────────────────────────────────────────
+
+
+def _mark_after_scan(context: SkillContext) -> None:
+    """DRF-2328: текст зовёт «просто написать, что было» — пусть набранное дойдёт.
+
+    Владелец 22.09: фото не распознано → человек написал, что ел → набранное
+    ушло модели, а модель лежала → «временные трудности с подключением».
+    Отметка ведёт следующую реплику к справочнику раньше модели
+    (``nutrition_global._try_handle_food_after_scan``). Не ломает ход.
+    """
+    try:
+        from apps.skills.food_clarify import text_entry
+
+        text_entry.mark_after_scan(context)
+    except Exception:  # noqa: BLE001 — отметка не стоит потерянного ответа
+        logger.debug("food_scanner.after_scan_mark_skipped")
 
 
 def _log_it_another_way() -> dict:
