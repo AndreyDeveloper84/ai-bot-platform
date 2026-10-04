@@ -23,7 +23,9 @@ from apps.integrations.ayla import nutrition_client as nc
 from apps.nutrition_proactive import render
 from apps.nutrition_proactive.tests import test_render as fx
 
-AI_TAIL = render.AI_INCLUDED_TAIL
+AI_TAIL = ", включая оценки ИИ"
+INCOMPLETE = "Итог неполный: не у всех записей есть калории."
+UNKNOWN = "Калории: пока не посчитаны."
 
 
 def _report(**summary_over) -> str:
@@ -58,12 +60,12 @@ class TestTheCaloriesLine:
     def test_an_incomplete_total_says_so_and_carries_no_remark(self) -> None:
         text = _report(calories_total=1500.0, calories_unscored=1)
         assert "Калории: 1500 из 1900 ккал." in text
-        assert render.INCOMPLETE_LINE in text
+        assert INCOMPLETE in text
         assert "осталось" not in text
 
     def test_no_total_at_all_is_not_zero(self) -> None:
         text = _report(calories_total=None, calories_unscored=2)
-        assert render.CALORIES_UNKNOWN_LINE in text
+        assert UNKNOWN in text
         assert "Калории: 0" not in text
         assert "осталось" not in text
         # Записи есть: это не «записей не было».
@@ -79,7 +81,7 @@ class TestTheCaloriesLine:
         assert "Записей в дневнике сегодня: 1." in text
         assert "≈" not in text
         assert AI_TAIL not in text
-        assert render.INCOMPLETE_LINE not in text
+        assert INCOMPLETE not in text
 
 
 class TestTheClientReadsTheWire:
