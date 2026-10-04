@@ -65,6 +65,8 @@ from apps.integrations.ayla.offer_refusal import (
     reason_from_refusal,
 )
 from apps.identity.models import BotUser
+from apps.nutrition_proactive.prefs import get_prefs, numbers_hidden_for, write_prefs
+from apps.nutrition_proactive.prefs import numbers_hidden as numbers_hidden_by_choice
 from apps.tenancy.models import Tenant
 from apps.miniapp_api.auth import VerifiedInitData
 from apps.miniapp_api.master_media import master_photo_path
@@ -3168,6 +3170,44 @@ def customer_proactive_hints(request: HttpRequest) -> HttpResponse:
 
 
 @csrf_exempt
+@require_http_methods(["GET", "POST"])
+@require_init_data
+@with_request_tenant
+def customer_nutrition_display(request: HttpRequest) -> HttpResponse:
+    """«Без чисел» (DRF-2766): ``GET`` — состояние, ``POST {"numbers_hidden": bool}``.
+
+    Решение владельца 04.10: добровольный режим — человек сам прячет
+    калории, БЖУ и числовые цели на всех экранах; записи дневника он не
+    трогает. Хранится в боте (настройки питания, тот же писатель
+    ``write_prefs``): каталог о показе не знает. Субъект — из проверенной
+    initData, чужой настройки отсюда не достать.
+
+    Записанное не легло (оболочка, которой закрыт личный контекст, §2.4) —
+    **409**, а не 200 с прежним состоянием: тело было бы правдой про базу и
+    ложью про запрос.
+    """
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    if request.method == "POST":
+        body = _json_object_body(request)
+        if isinstance(body, HttpResponse):
+            return body
+        wanted = body.get("numbers_hidden")
+        if not isinstance(wanted, bool):
+            return _error("bad_request", "numbers_hidden must be a boolean", 400)
+        write_prefs(bot_user, {"numbers_hidden": wanted})
+        if numbers_hidden_by_choice(get_prefs(bot_user)) is not wanted:
+            return _error(
+                "nutrition_display_unavailable",
+                "the display preference cannot be saved for this profile",
+                409,
+            )
+        logger.info(
+            "miniapp_api.nutrition_display bot_user=%s numbers_hidden=%s", bot_user.id, wanted
+        )
+    return JsonResponse({"numbers_hidden": numbers_hidden_by_choice(get_prefs(bot_user))})
+
+
+@csrf_exempt
 @require_http_methods(["POST", "DELETE"])
 @require_init_data
 @with_request_tenant
@@ -3196,11 +3236,14 @@ def customer_marketing_consent(request: HttpRequest) -> HttpResponse:
 
 
 @csrf_exempt
-@require_http_methods(["DELETE"])
+@require_http_methods(["POST", "DELETE"])
 @require_init_data
 @with_request_tenant
 def customer_data_storage_consent(request: HttpRequest) -> HttpResponse:
-    """Отзыв согласия на хранение данных. Только отзыв — выдача не здесь.
+    """Согласие на хранение данных: ``DELETE`` — отозвать, ``POST`` — выдать заново.
+
+    ``POST`` (DRF-2709) — в :func:`_regrant_data_storage`, ниже. Дальше —
+    про отзыв.
 
     Тело обязано нести обе половины подтверждения::
 
@@ -3239,6 +3282,8 @@ def customer_data_storage_consent(request: HttpRequest) -> HttpResponse:
     body = _json_object_body(request)
     if isinstance(body, HttpResponse):
         return body
+    if request.method == "POST":
+        return _regrant_data_storage(bot_user, body)
 
     # Ничего ещё не тронуто — обе проверки стоят до вызова процедуры.
     if body.get("confirmation", "") != DELETE_CONFIRMATION_TOKEN:
@@ -3283,6 +3328,49 @@ def customer_data_storage_consent(request: HttpRequest) -> HttpResponse:
         "failed_steps": result.failed_steps,
         "failed_details": {s.step: s.detail for s in result.steps if not s.ok and s.detail},
     }
+    return JsonResponse(document, status=200)
+
+
+def _regrant_data_storage(bot_user: BotUser, body: dict) -> HttpResponse:
+    """Повторная выдача согласия на хранение данных (DRF-2709).
+
+    Тело::
+
+        {"document_version": "welcome-s2-v1"}
+
+    ``document_version`` — доказательство, под каким текстом человек нажал,
+    как ``disclosure_version`` у отзыва. Согласие информированное (152-ФЗ):
+    строка реестра обязана говорить, КАКОЙ текст принят, и единственное, чем
+    сервер может это проверить, — версия, которую прислал показавший текст
+    клиент. Незнакомая или пустая — 409, и не пишется ничего: клиенту нужно
+    перечитать документ (``GET /me/consents/`` отдаёт её в
+    ``data_storage.regrant.document_version``), а не чинить тело.
+
+    Подсказки выдача не включает (решение владельца §47.3) — в ответе
+    ``proactive_hints.enabled`` остаётся ``false``, а ``can_enable``
+    становится ``true``.
+    """
+    from apps.consent.customer import (
+        DATA_STORAGE_REGRANT_DOCUMENT_VERSION,
+        regrant_data_storage,
+    )
+
+    if body.get("document_version", "") != DATA_STORAGE_REGRANT_DOCUMENT_VERSION:
+        return _error(
+            "stale_document",
+            "document_version does not match the current data-storage consent document",
+            409,
+        )
+
+    regrant_data_storage(bot_user)
+    document = _consents_document(bot_user)
+    if not document["data_storage"]["granted"]:
+        # Выдача не состоялась — состояние осталось «не разрешено».
+        logger.error(
+            "miniapp_api.consents.data_storage_regrant_failed bot_user=%s",
+            bot_user.id,
+        )
+        return JsonResponse(document, status=502)
     return JsonResponse(document, status=200)
 
 
@@ -4134,27 +4222,18 @@ def customer_wellness_today(request: HttpRequest) -> HttpResponse:
         # решается и не воспроизводится: значение проходит как есть.
         entries = list(summary_res.entries or [])
 
-    # ── прятать ли числа (from get_profile) ─────────────────────────────
-    # Наружу уходит ОДИН производный булев, а не `health_flags`.
+    # ── прятать ли числа — выбор самого человека «Без чисел» ─────────────
+    # DRF-2766 (решение владельца 04.10): числа прячутся только по
+    # добровольному выбору человека (`prefs.numbers_hidden`, тумблер в
+    # «Профиле»), а не по признаку профиля. Прежде признак выводился из
+    # `health_flags.eating_disorder` — владелец это автоматическое скрытие
+    # снял: калорийность еды доступна всем, включая РПП.
     #
-    # Клиенту нужно знать «прятать ли цифру», а не «что с человеком».
-    # Диагноз — специальная категория 152-ФЗ, и границу он пересекать не
-    # обязан: раз сырого флага в ответе нет, его нельзя ни залогировать,
-    # ни отправить дальше, ни прочитать в консоли браузера. Тот же приём,
-    # которым убрано `subject_ref` из тела запроса границы резолвера
-    # (§9.4): не давать пути, а не запрещать по нему ходить.
+    # Выбор хранится в боте, поэтому от ответа каталога он больше не
+    # зависит: ключ в ответе есть всегда. Экран на отсутствие ключа
+    # по-прежнему реагирует fail-closed — для старых ответов.
     #
-    # Имя называет СЛЕДСТВИЕ, а не причину. `ed_mode` было бы тем же
-    # диагнозом, только короче.
-    #
-    # Ключ отсутствует, если чтение не удалось, — и экран на отсутствие
-    # реагирует fail-closed, то есть числа прячет. Цена названа прямо:
-    # пока `get_profile` не отвечает, дневник у ВСЕХ без цифр. Это
-    # задумано. Обратное умолчание («не знаем → показать») превратило бы
-    # отсутствие данных в разрешение показать калории тому, кому спека
-    # их показывать запрещает (§10 Appendix ED Mode) — и цена ошибки
-    # здесь несимметрична.
-    numbers_hidden: bool | None = None
+    # Имя по-прежнему называет СЛЕДСТВИЕ («прятать числа»), а не причину.
     if isinstance(profile_res, nutrition_errors):
         logger.warning("wellness_today.profile_unavailable ext=%s err=%s", external_id, profile_res)
     elif isinstance(profile_res, Exception):
@@ -4163,13 +4242,7 @@ def customer_wellness_today(request: HttpRequest) -> HttpResponse:
             external_id,
             type(profile_res).__name__,
         )
-    elif profile_res is not None:
-        # `get_profile` отдаёт `None`, когда анкеты нет вовсе. Это не
-        # отказ чтения: спросили и узнали, что профиля нет, а значит и
-        # флага нет — числа показываются.
-        numbers_hidden = bool((profile_res.health_flags or {}).get("eating_disorder"))
-    else:
-        numbers_hidden = False
+    numbers_hidden: bool | None = numbers_hidden_for(bot_user)
 
     # ── настроены ли ориентиры (from get_profile) — §6 свода 11.09 ─────
     # Ориентир показывается только с названным происхождением

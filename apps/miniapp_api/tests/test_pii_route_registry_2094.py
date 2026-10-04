@@ -85,6 +85,7 @@ _CONSENTS_DOCUMENT = own(
     "consents.*.document_version",
     "proactive_hints.enabled",
     "data_storage.revocation",
+    "data_storage.regrant",
     via="apps.consent.customer:read_consents",
     note=(
         "the customer's own consent registry re-read from the database after the write; "
@@ -192,6 +193,16 @@ CUSTOMER_ROUTES: dict[str, Entry] = {
     ),
     "customer_consents": _CONSENTS_DOCUMENT,
     "customer_proactive_hints": _CONSENTS_DOCUMENT,
+    # DRF-2766 — «Без чисел»: the caller's own display preference.
+    "customer_nutrition_display": own(
+        "numbers_hidden",
+        via=V + "customer_nutrition_display",
+        note=(
+            "the caller's own voluntary display choice re-read from the bot's nutrition "
+            "preferences after the write; a boolean about showing numbers, no diary content "
+            "and no health flag"
+        ),
+    ),
     "customer_marketing_consent": _CONSENTS_DOCUMENT,
     "customer_data_storage_consent": own(
         "consents.*",

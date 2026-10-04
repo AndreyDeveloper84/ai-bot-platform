@@ -221,9 +221,13 @@ def build_nutrition_context_block(bot_user: Any) -> str:
     # no signal and a day with no rows are both ordinary, and so is one of
     # the two calls failing. The block is whatever came back — and "" when
     # nothing did.
+    # DRF-2766 — «Без чисел»: человек выбрал не видеть калории, БЖУ и цели.
+    # Модель не получает этих чисел вовсе (их нечем пересказать) и получает
+    # прямое указание их не называть — оборона в два слоя.
+    hide_numbers = _numbers_hidden(bot_user)
     lines = _render_goal_lines(goal)
-    lines.extend(_render_lines(_fetch_deficits(bot_user)))
-    lines.extend(_render_today_lines(bot_user))
+    lines.extend(_render_lines(_fetch_deficits(bot_user), hide_numbers=hide_numbers))
+    lines.extend(_render_today_lines(bot_user, hide_numbers=hide_numbers))
     if not lines:
         return ""
 
@@ -240,10 +244,33 @@ def build_nutrition_context_block(bot_user: Any) -> str:
     )
     if not safe.extra_hint:
         return ""
+    if hide_numbers:
+        # Наш собственный текст, а не данные сервиса: стоит вне блока
+        # данных, рядом с заголовком, который и есть указание модели.
+        return f"{_HEADER}\n{NUMBERS_HIDDEN_INSTRUCTION}\n{safe.extra_hint}"
     return f"{_HEADER}\n{safe.extra_hint}"
 
 
 # ─── internals ─────────────────────────────────────────────────────────────
+
+
+#: DRF-2766 — указание модели, когда человек выбрал «Без чисел».
+NUMBERS_HIDDEN_INSTRUCTION = (
+    "Человек выбрал режим «Без чисел»: не называй калории, белки, жиры, "
+    "углеводы и числовые цели — ни свои оценки, ни данные дневника."
+)
+
+
+def _numbers_hidden(bot_user: Any) -> bool:
+    """Выбор «Без чисел». Никогда не бросает, как и весь блок.
+
+    Не прочитали настройку — выбора не знаем, блок прежний. Это не пропуск
+    гейта: режим добровольный, а не охранный, и «не знаем» здесь не может
+    означать «скрыть за человека» — именно такое скрытие владелец снял.
+    """
+    from apps.nutrition_proactive.prefs import numbers_hidden_for
+
+    return numbers_hidden_for(bot_user)
 
 
 def _consent_open(bot_user: Any) -> bool:
@@ -361,7 +388,7 @@ def _fetch_deficits(bot_user: Any) -> Any | None:
         return None
 
 
-def _render_lines(deficits: Any) -> list[str]:
+def _render_lines(deficits: Any, *, hide_numbers: bool = False) -> list[str]:
     """Ayla's aggregate → prompt lines. Defensive on every field.
 
     ``DeficitsResponse`` int fields are already coerced by the client;
@@ -378,6 +405,12 @@ def _render_lines(deficits: Any) -> list[str]:
     days = _clamp_days(getattr(deficits, "days_observed", 0))
     if days:
         lines.append(f"Дней с записями за неделю: {days}.")
+
+    if hide_numbers:
+        # DRF-2766 — сравнения белка с ориентиром и свободная подсказка
+        # сервиса (в ней может быть число) не передаются; дни с записями —
+        # это не калории и не цель, они остаются.
+        return lines
 
     pct = _as_float(getattr(deficits, "protein_avg_pct_goal", None))
     if pct is not None:
@@ -400,7 +433,7 @@ def _render_lines(deficits: Any) -> list[str]:
     return lines
 
 
-def _render_today_lines(bot_user: Any) -> list[str]:
+def _render_today_lines(bot_user: Any, *, hide_numbers: bool = False) -> list[str]:
     """Today's dishes → at most one prompt line. ``[]`` on every failure.
 
     One line rather than a bullet per meal: this block is charged against
@@ -428,7 +461,8 @@ def _render_today_lines(bot_user: Any) -> list[str]:
 
     parts: list[str] = []
     for meal in diary.meals:
-        parts.append(f"{meal.dish} ({meal.calories} ккал)" if meal.calories else meal.dish)
+        shown = meal.calories and not hide_numbers
+        parts.append(f"{meal.dish} ({meal.calories} ккал)" if shown else meal.dish)
     return [f"Сегодня в дневнике: {', '.join(parts)}."]
 
 

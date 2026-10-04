@@ -128,6 +128,27 @@ DATA_STORAGE_WITHDRAW_SOURCE = "miniapp:profile_data_storage_revoke"
 _MARKETING = ConsentRecord.ConsentType.MARKETING.value
 _PERSONAL_DATA = ConsentRecord.ConsentType.PERSONAL_DATA.value
 
+#: DRF-2709 — повторная выдача согласия на хранение данных из профиля.
+#: Решение владельца 04.10: «согласие должно быть везде» — восстановить его
+#: можно в приложении, а не только через приветствие в чате.
+DATA_STORAGE_REGRANT_SOURCE = "miniapp:profile_regrant"
+
+#: Версия документа, которую записывает повторная выдача: та же, что у
+#: приветственного согласия (``global_onboarding.CONSENT_DOCUMENT_VERSION``) —
+#: объём тот же, что человек принимал. Клиент обязан прислать её в теле: это
+#: доказательство, под каким текстом человек нажал (152-ФЗ, информированное
+#: согласие), — без совпадения сервер не пишет ничего. Каким текстом её
+#: показывать — решение владельца (DRF-2709); равенство с онбордингом держит
+#: узел дрейфа.
+DATA_STORAGE_REGRANT_DOCUMENT_VERSION = "welcome-s2-v1"
+
+#: Тот же объём, что пишет приветствие (``global_onboarding``): базовое
+#: согласие и зелёная зона памяти — одной версией документа.
+_DATA_STORAGE_REGRANT_TYPES = (
+    _PERSONAL_DATA,
+    ConsentRecord.ConsentType.MEMORY_GREEN.value,
+)
+
 #: Why «Подсказки Ayla» cannot be turned on after the data-storage consent was
 #: withdrawn. The SAME slug the proactive gate uses
 #: (:data:`apps.notifications.proactive.BLOCK_REASONS`): owner decision §47.3
@@ -290,6 +311,9 @@ def read_consents(bot_user: "BotUser") -> dict[str, Any]:
                 "consequences": list(DATA_STORAGE_REVOCATION_CONSEQUENCES),
                 "retained": list(DATA_STORAGE_REVOCATION_RETAINED),
             },
+            # DRF-2709: под какой версией документа принимается повторная
+            # выдача — клиент шлёт её обратно как доказательство показа.
+            "regrant": {"document_version": DATA_STORAGE_REGRANT_DOCUMENT_VERSION},
         },
     }
 
@@ -570,13 +594,85 @@ def revoke_data_storage(bot_user: "BotUser") -> "DeleteCascadeResult":
     return result
 
 
+def regrant_data_storage(bot_user: "BotUser") -> None:
+    """Выдать согласие на хранение данных заново (DRF-2709). Идемпотентно.
+
+    Зеркало :func:`revoke_data_storage` по множеству: отзыв снимает согласие
+    по ПОЛНОМУ резолву личности, и выдача возвращает его туда же — иначе
+    оболочка, отозванная через ``ayla_user_id``, осталась бы без согласия при
+    «Разрешено» на экране.
+
+    Пишется тот же объём, что у приветствия: ``personal_data`` и
+    ``memory_green`` одной версией документа. Что НЕ возвращается:
+
+    * **подсказки** — решение владельца §47.3: «возвращаем возможность
+      включить, но не само включение». ``proactive_messages_opt_out``,
+      поставленный отзывом, не трогается; замок снимается сам — его считает
+      :func:`proactive_hints_state` от действующего согласия;
+    * **маркетинг** и **согласие дневника** — у каждого своя выдача на своём
+      экране; отзыв их снял, и вернуть их без отдельного «да» было бы
+      согласием, которого человек не давал;
+    * **удалённые данные** — отзыв запустил их удаление, выдача начинает
+      хранение заново, а не восстанавливает прежнее.
+
+    Версия документа здесь не проверяется — это делает ручка до вызова, как
+    у отзыва.
+    """
+    from apps.identity.models import BotUser as BotUserModel
+    from apps.identity.services.privacy import person_shell_ids
+
+    try:
+        shell_ids = list(person_shell_ids(bot_user))
+    except Exception:  # noqa: BLE001 — резолв личности не должен ронять выдачу
+        logger.exception(
+            "consent.customer.regrant_shell_resolve_failed bot_user=%s — narrowing",
+            bot_user.id,
+        )
+        shell_ids = [s.id for s in _person_shells(bot_user)]
+    shells = list(BotUserModel.all_tenants.filter(id__in=shell_ids).select_related("tenant"))
+
+    # Одной транзакцией: выданное наполовину согласие — то же худшее
+    # состояние, что и снятое наполовину.
+    with transaction.atomic():
+        for shell in shells:
+            for consent_type in _DATA_STORAGE_REGRANT_TYPES:
+                record_global_consent(
+                    shell,
+                    consent_type=consent_type,
+                    source=DATA_STORAGE_REGRANT_SOURCE,
+                    document_version=DATA_STORAGE_REGRANT_DOCUMENT_VERSION,
+                )
+
+    write_audit(
+        "consent.data_storage_regranted",
+        target="BotUser",
+        target_id=bot_user.id,
+        actor_id=bot_user.id,
+        payload={
+            "actor": "customer",
+            "shells": len(shells),
+            "document_version": DATA_STORAGE_REGRANT_DOCUMENT_VERSION,
+            # §47.3: выдача подсказки не включает — поле отвечает на
+            # «почему после „Разрешить“ подсказки всё ещё выключены».
+            "proactive_hints_enabled": False,
+        },
+    )
+    logger.info(
+        "consent.customer.data_storage_regranted bot_user=%s shells=%d",
+        bot_user.id,
+        len(shells),
+    )
+
+
 __all__ = [
+    "DATA_STORAGE_REGRANT_DOCUMENT_VERSION",
     "DATA_STORAGE_REVOCATION_CONSEQUENCES",
     "DATA_STORAGE_REVOCATION_DISCLOSURE_VERSION",
     "DATA_STORAGE_REVOCATION_RETAINED",
     "PROACTIVE_HINTS_BLOCKED_REASON",
     "proactive_hints_state",
     "read_consents",
+    "regrant_data_storage",
     "revoke_data_storage",
     "set_marketing",
     "set_proactive_hints",
