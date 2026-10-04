@@ -85,6 +85,7 @@ _CONSENTS_DOCUMENT = own(
     "consents.*.document_version",
     "proactive_hints.enabled",
     "data_storage.revocation",
+    "data_storage.regrant",
     via="apps.consent.customer:read_consents",
     note=(
         "the customer's own consent registry re-read from the database after the write; "
