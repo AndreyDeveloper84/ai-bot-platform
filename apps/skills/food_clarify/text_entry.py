@@ -401,6 +401,31 @@ def forget(context: SkillContext) -> None:
     _write(context.conversation, None)
 
 
+def mark_after_scan(context: SkillContext) -> None:
+    """Сканер сказал «не разобралась… просто напиши, что было» (DRF-2328).
+
+    Отметка МЯГКАЯ — не ``expect_food``. :func:`has_pending_text_entry` и
+    :func:`claims_text` её не видят, поэтому структурный путь реплику не
+    забирает: ``parse_food_text`` принимает что угодно («спасибо» → блюдо
+    «спасибо»), и взведённое ожидание увело бы вопрос человека в «Не
+    нашла…». Отметку читает только ярлык в ``nutrition_global``, который
+    отвечает лишь карточкой оценки, а всё остальное отпускает к модели.
+    """
+    _write(context.conversation, {"after_scan": True, "at": _now_iso()})
+
+
+def take_after_scan(conversation: Any) -> bool:
+    """Была ли свежая отметка :func:`mark_after_scan`; отметка расходуется.
+
+    Одноразовая: второй набранный текст уже не ответ на вопрос сканера.
+    """
+    bucket = _bucket(conversation)
+    if not bucket or not bucket.get("after_scan"):
+        return False
+    _write(conversation, None)
+    return True
+
+
 # ─── гейты ────────────────────────────────────────────────────────────────
 
 
@@ -540,7 +565,11 @@ def show_estimate(
             "portion_g": estimate.portion_g,
             "portion_estimated": estimate.portion_estimated,
         },
-        meta={"reply_kind": "food_text_estimate_card"},
+        # DRF-2328: число дал справочник (``seed_ru``/USDA). Каталог с DRF-2371
+        # не отказывает ни на какое имя — «спасибо» тоже получает оценку, с
+        # пустыми числами или числом ИИ (``kcal_ai_estimate``), так что
+        # «карточка пришла» ещё не значит «это еда».
+        meta={"reply_kind": "food_text_estimate_card", "kcal_known": estimate.kcal is not None},
     )
 
 

@@ -938,6 +938,17 @@ def try_handle_structured_nutrition_turn(
                 plan = None
             if plan is not None:
                 return plan
+        # DRF-2328 — ответ на «просто напиши, что было» сканера: справочник
+        # раньше модели, но отвечаем только найденной оценкой.
+        after_scan = _try_handle_food_after_scan(
+            text=text,
+            has_attachments=has_attachments,
+            bot_user=bot_user,
+            conversation=conversation,
+            trace_id=trace_id,
+        )
+        if after_scan is not None:
+            return after_scan
         # DRF-2078 — «борщ 250»: блюдо с порцией не нуждается в модели.
         return _try_handle_food_with_grams(
             text=text,
@@ -1059,6 +1070,105 @@ def _try_handle_diary_request(
 #: величина, что у детектора ``looks_like_food_drink`` (``hints._MAX_LEN``),
 #: не импорт: два детектора с одним числом — совпадение, а не связь.
 _FOOD_WITH_GRAMS_MAX_LEN = 30
+
+
+#: Предел длины для ответа на вопрос сканера — шире, чем у «борщ 250»: на
+#: «что было?» отвечают описанием («лепешка роти с творогом и сыром, кофе»,
+#: 37 знаков). Здесь это лишь экономия одного вызова — отвечаем всё равно
+#: только оценкой из справочника.
+_FOOD_AFTER_SCAN_MAX_LEN = 80
+
+#: Карточка оценки — единственный вид ответа ярлыка, и только с числом
+#: справочника (``meta["kcal_known"]``).
+_ESTIMATE_CARD_KIND = "food_text_estimate_card"
+
+
+def _try_handle_food_after_scan(
+    *,
+    text: str,
+    has_attachments: bool,
+    bot_user: Any,
+    conversation: Any,
+    trace_id: str,
+) -> SkillResult | None:
+    """Набранный ответ на «не разобралась… просто напиши, что было» (DRF-2328).
+
+    Владелец, живой проход 22.09: фото не распознано, бот сам предложил
+    написать словами, человек написал — и получил «временные трудности с
+    подключением». Набранное шло модели (свободный текст структурным не
+    бывает), а модель лежала. Дорога, которую бот назвал выходом, вела в
+    ту же стену.
+
+    Теперь сканер ставит мягкую отметку, и следующая реплика сперва идёт в
+    справочник (``show_estimate``), без модели бота. Отвечаем ТОЛЬКО
+    карточкой, число в которой дал справочник (``seed_ru``/USDA,
+    ``meta["kcal_known"]``). Любой другой исход — числа нет или его дала
+    модель каталога, справочник недоступен, ошибка, вопрос, напиток, нет
+    отметки — ``None``, и ход идёт дальше к модели, как шёл до этой правки.
+
+    Причина строгости измерена, и судей отпало три:
+
+    * ``parse_food_text`` принимает что угодно («спасибо» → блюдо «спасибо»);
+    * детектор «похоже на еду» говорит False на фразе владельца;
+    * сама карточка — тоже не судья: ручка оценки каталога с DRF-2371 не
+      отказывает ни на какое имя, и «спасибо» получает карточку с пустыми
+      числами или с числом ИИ.
+
+    Остаётся число справочника: его нет у того, чего в справочнике нет.
+
+    Отметка расходуется первым же ходом, что бы ни случилось. Вопрос
+    («а почему не распозналось?») — как у «📔 В дневник» (DRF-2287) — до
+    справочника не доходит. Напитки — по той же причине, что в
+    :func:`_try_handle_food_with_grams`. Никогда не бросает.
+    """
+
+    if has_attachments:
+        return None
+    stripped = text.strip()
+    if not stripped:
+        return None
+    try:
+        from apps.skills.food_clarify import text_entry
+
+        if not text_entry.take_after_scan(conversation):
+            return None
+        # Выключенный контур питания здесь не проверяется отдельно: ворота
+        # ``show_estimate`` (``diary_entry_refusal``) отказывают раньше
+        # оценки, а отказ — не карточка, и ход уходит к модели.
+        if len(stripped) > _FOOD_AFTER_SCAN_MAX_LEN:
+            return None
+        if stripped.rstrip(" )!.…").endswith(("?", "？")):
+            return None
+        from apps.skills.water.parser import BeverageMatch, parse_beverage
+
+        parsed = text_entry.parse_food_text(stripped)
+        if parsed is None or isinstance(parse_beverage(stripped), BeverageMatch):
+            return None
+        context = _build_context(
+            message_text=stripped,
+            bot_user=bot_user,
+            conversation=conversation,
+            trace_id=trace_id,
+        )
+        with tenant_scope(get_global_bot_tenant()):
+            result = text_entry.show_estimate(context, parsed.dish, parsed.grams, corrected=False)
+    except Exception:  # noqa: BLE001 — nutrition must never break the global turn
+        logger.exception("orchestrator.nutrition_global.food_after_scan_failed trace=%s", trace_id)
+        return None
+    meta = result.meta or {}
+    kind = meta.get("reply_kind")
+    answered = kind == _ESTIMATE_CARD_KIND and meta.get("kcal_known") is True
+    if kind == _ESTIMATE_CARD_KIND and not answered:
+        # Карточку не показываем — значит и тап по ней невозможен: её
+        # состояние (блюдо, токен) стирается, а не висит до TTL.
+        text_entry.forget(context)
+    logger.info(
+        "orchestrator.nutrition_global.food_after_scan kind=%s answered=%s trace=%s",
+        kind,
+        answered,
+        trace_id,
+    )
+    return result if answered else None
 
 
 def _try_handle_food_with_grams(
