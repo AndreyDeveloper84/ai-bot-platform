@@ -45,9 +45,9 @@
 Один и тот же **салонный** бот, один человек, менялся **только ключ**:
 
 ```
-POST botapi.max.ru/messages?user_id=260237491  → 200, доставлено
-                                                  recipient.chat_id = 430388769
-POST botapi.max.ru/messages?chat_id=518410834  → 404 dialog.not.found
+POST botapi.max.ru/messages?user_id=260…  → 200, доставлено
+                                                  recipient.chat_id = 430…
+POST botapi.max.ru/messages?chat_id=518…  → 404 dialog.not.found
 ```
 
 `chat_id` в MAX — идентификатор **диалога**, осмысленный только с конкретным

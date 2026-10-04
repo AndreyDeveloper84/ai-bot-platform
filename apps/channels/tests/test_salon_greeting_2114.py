@@ -278,12 +278,23 @@ class TestG2TheMasterGreeting:
             "open_master_ayla",
         ]
 
-    def test_no_visits_today_no_next_line(self, tenant, sources, sent) -> None:
+    def test_no_visits_today_no_next_line(self, tenant, sources, sent, monkeypatch) -> None:
+        """DRF-2759: ноль записей — не «0 записей», а причина, тем же правилом, что «Мой день»."""
+        from apps.channels.max import staff_actions
+
         _user, card = _master(tenant)
         sources["day"] = _fake_day(str(card.id), 0)
+        monkeypatch.setattr(
+            staff_actions, "empty_day_state", lambda master, now=None: staff_actions.EMPTY_DAY_OFF
+        )
         _handle("/start")
         text = sent.call_args.kwargs["text"]
-        assert "Сегодня у вас 0 записей." in text
+        assert text == (
+            "Здравствуйте, Анна!\n"
+            "Вы вошли в Ayla для салона «Формула тела» как мастер.\n"
+            "Сегодня у вас выходной по графику."
+        )
+        assert "0 записей" not in text
         assert "Ближайшая" not in text
 
 

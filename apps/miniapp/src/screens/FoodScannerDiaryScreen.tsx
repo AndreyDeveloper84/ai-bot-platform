@@ -36,6 +36,7 @@ import {
   pfcLine,
 } from "../lib/customer-wellness";
 import { ApiError } from "../lib/api";
+import { aiCaloriesOf, aiKcalPhrase } from "../lib/format";
 import { minutesRu, restoreWindowMinutesLeft } from "../lib/restore-window";
 import { saveMealFromEntry } from "../lib/saved-meals";
 import { useScreenBack } from "../hooks/useScreenBack";
@@ -418,6 +419,15 @@ function DiaryReady({
                   {showNumbers && entry.calories != null && (
                     <span className="food-scanner-diary__entry-cal">
                       ~{entry.calories} ккал
+                    </span>
+                  )}
+                  {/* DRF-2761 — оценка калорий ИИ видна в записи (решение
+                      владельца 02.10), всегда с пометкой «Оценка ИИ». Тот
+                      же выключатель чисел, что у проверенного; в итог дня
+                      не входит. */}
+                  {showNumbers && aiCaloriesOf(entry) != null && (
+                    <span className="food-scanner-diary__entry-cal" data-testid="ai-kcal">
+                      {aiKcalPhrase(aiCaloriesOf(entry) as number)}
                     </span>
                   )}
                   <div className="food-scanner-diary__entry-actions">

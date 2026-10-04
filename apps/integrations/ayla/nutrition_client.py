@@ -340,6 +340,11 @@ class FoodLogResponse:
     #: Запись есть, числа нет; ноль здесь был бы выдумкой.
     calories: float | None
     raw: dict[str, Any]
+    #: DRF-2761 — оценка калорий ИИ (решение владельца 02.10, пересмотр §40).
+    #: Отдельное поле: ``calories`` при ней ``None``. Проверенным числом не
+    #: является — показывать только с пометкой «Оценка ИИ», в суммы и
+    #: сравнение с целью не брать.
+    ai_calories: float | None = None
 
 
 @dataclass(frozen=True)
@@ -415,6 +420,10 @@ class DishEstimate:
     fat_g: float | None
     carbs_g: float | None
     raw: dict[str, Any]
+    #: DRF-2761 — оценка калорий ИИ на эту порцию: справочник блюда не знает,
+    #: число дала модель. ``kcal`` при ней ``None``; показывать только с
+    #: пометкой «Оценка ИИ».
+    kcal_ai_estimate: float | None = None
 
 
 def _float_or_none(raw: Any) -> float | None:
@@ -1160,6 +1169,7 @@ class NutritionClient:
                 fat_g=_float_or_none(data.get("fat_g")),
                 carbs_g=_float_or_none(data.get("carbs_g")),
                 raw=data,
+                kcal_ai_estimate=_float_or_none(data.get("kcal_ai_estimate")),
             )
         if resp.status_code >= 500:
             self._breaker(BreakerPurpose.NUTRITION).record_failure(now=now)
@@ -1248,6 +1258,7 @@ class NutritionClient:
                 # остаётся отсутствием.
                 calories=_float_or_none(body.get("calories")),
                 raw=body,
+                ai_calories=_float_or_none(body.get("ai_calories")),
             )
         if resp.status_code >= 500:
             self._breaker(purpose).record_failure(now=now)

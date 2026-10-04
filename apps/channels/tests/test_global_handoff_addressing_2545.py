@@ -61,7 +61,7 @@ from apps.tenancy.models import Tenant
 
 pytestmark = pytest.mark.django_db
 
-HANDOFF_REPLY = "Передаю менеджеру — ответят в течение 30 минут."
+HANDOFF_REPLY = "Передаю твой вопрос менеджеру."
 
 
 def _run_global(text: str, *, mid: str, user_id: int = 2545) -> None:

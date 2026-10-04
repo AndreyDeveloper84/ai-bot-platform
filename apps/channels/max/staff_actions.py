@@ -32,6 +32,54 @@ MAX_LISTED = 12
 """Cap on lines in one reply. A salon day beyond this is a Mini App job —
 a chat message with forty rows is not readable on a phone."""
 
+#: Ответ, когда источник записей (зеркало ``RemoteBookingProxy`` через
+#: ``visit_source``) не ответил. Отдельное состояние, а не «записей нет»:
+#: пустой день и упавший источник — разные факты, и путать их опасно
+#: (мастер решил бы, что он свободен, когда зеркало просто молчит). Текст
+#: зовёт попробовать снова; меню под ответом оставляет выход в кабинет, так
+#: что состояние ошибки не запирает человека (инцидент М-6b: единое
+#: состояние ошибки съело единственный выход). Без этого исключение из
+#: ``master_visits`` всплывало выше ``_handle_button`` и, при уже занятом
+#: ключе идемпотентности, гасило ответ целиком — немой тупик на нажатии.
+DAY_UNAVAILABLE = (
+    "Не удалось загрузить записи — источник временно недоступен. Попробуйте ещё раз чуть позже."
+)
+
+
+# ─── DRF-2759 — пустой день мастера говорит, ПОЧЕМУ он пуст ────────────────
+#
+# Было одно «На DD.MM записей нет.» на четыре разных факта: источник дня знал
+# только визиты, не график. Мастер в выходной, мастер без графика и мастер,
+# к которому сегодня просто никто не записался, читали одно и то же.
+#
+# Тексты — владельца, дословно (решение 02.10.2026 в DRF-2759). Не править
+# ради стиля; обращение к персоналу — на «вы».
+MASTER_DAY_OFF = "Сегодня у вас выходной по графику."
+MASTER_SCHEDULE_NOT_SET = (
+    "Ваш рабочий график ещё не настроен. Обратитесь к администратору салона, чтобы его настроить."
+)
+MASTER_NO_VISITS = "Сегодня у вас пока нет записей."
+MASTER_SCHEDULE_UNAVAILABLE = "Не удалось получить информацию о вашем графике. Попробуйте позже."
+
+EMPTY_DAY_OFF = "day_off"
+EMPTY_NOT_SET = "schedule_not_set"
+EMPTY_WORKING = "working_no_visits"
+EMPTY_UNKNOWN = "schedule_unavailable"
+
+EMPTY_DAY_TEXT = {
+    EMPTY_DAY_OFF: MASTER_DAY_OFF,
+    EMPTY_NOT_SET: MASTER_SCHEDULE_NOT_SET,
+    EMPTY_WORKING: MASTER_NO_VISITS,
+    EMPTY_UNKNOWN: MASTER_SCHEDULE_UNAVAILABLE,
+}
+
+#: Сколько секунд держать прочитанное состояние графика. При включённом
+#: ``BOOKING_VIA_AYLA_REST`` рамка — три REST-чтения каталога, синхронно в
+#: единственном потоке консьюмера; приветствие и «Мой день» подряд не должны
+#: платить за них дважды. «Не удалось прочитать» НЕ кешируется: следующий
+#: вопрос обязан спросить заново.
+EMPTY_DAY_CACHE_SECONDS = 120
+
 
 def _day_bounds(now: datetime, tz) -> tuple[datetime, datetime]:
     local = now.astimezone(tz)
@@ -58,6 +106,11 @@ def salon_day(tenant, *, now: datetime | None = None) -> str:
     # `.objects` — the callers run inside tenant_scope (the consumer enters
     # it for the bot's tenant), so the scoped manager applies and a
     # cross-tenant read is impossible rather than just unintended.
+    #
+    # DRF-2759 (Z-1): the base here is «is_active, not archived» — everyone
+    # who is on the salon's staff. The greeting's «работают N мастеров»
+    # counts a narrower one (`AVAILABLE`, see `salon_greeting._masters_available`).
+    # The two numbers answer different questions and are not meant to match.
     masters = list(
         CatalogMaster.objects.filter(archived_at__isnull=True, is_active=True).order_by("name")
     )
@@ -66,19 +119,23 @@ def salon_day(tenant, *, now: datetime | None = None) -> str:
 
     blocks: list[str] = []
     total = 0
-    for master in masters:
-        visits = master_visits(master, start=start, end=end)
-        if not visits:
-            continue
-        total += len(visits)
-        lines = [f"*{master.name}*"]
-        for visit in visits[:MAX_LISTED]:
-            when = visit.visit_at.astimezone(tz).strftime("%H:%M") if visit.visit_at else "—"
-            service = visit.service_name or "услуга не указана"
-            lines.append(f"  {when} · {visit.client_name} · {service}")
-        if len(visits) > MAX_LISTED:
-            lines.append(f"  …и ещё {len(visits) - MAX_LISTED}")
-        blocks.append("\n".join(lines))
+    try:
+        for master in masters:
+            visits = master_visits(master, start=start, end=end)
+            if not visits:
+                continue
+            total += len(visits)
+            lines = [f"*{master.name}*"]
+            for visit in visits[:MAX_LISTED]:
+                when = visit.visit_at.astimezone(tz).strftime("%H:%M") if visit.visit_at else "—"
+                service = visit.service_name or "услуга не указана"
+                lines.append(f"  {when} · {visit.client_name} · {service}")
+            if len(visits) > MAX_LISTED:
+                lines.append(f"  …и ещё {len(visits) - MAX_LISTED}")
+            blocks.append("\n".join(lines))
+    except Exception:  # noqa: BLE001 — источник недоступен ≠ «записей нет»; не 500
+        logger.warning("staff_actions.salon_day.source_unavailable", exc_info=True)
+        return DAY_UNAVAILABLE
 
     date_label = now.astimezone(tz).strftime("%d.%m")
     if not blocks:
@@ -97,11 +154,18 @@ def master_day(master, *, now: datetime | None = None) -> str:
     tz = salon_zone(master.tenant)
     start, end = _day_bounds(now, tz)
 
-    visits = master_visits(master, start=start, end=end)
-    date_label = now.astimezone(tz).strftime("%d.%m")
+    try:
+        visits = master_visits(master, start=start, end=end)
+    except Exception:  # noqa: BLE001 — источник недоступен ≠ «записей нет»; не 500
+        logger.warning("staff_actions.master_day.source_unavailable", exc_info=True)
+        return DAY_UNAVAILABLE
     if not visits:
-        return f"На {date_label} записей нет."
+        # DRF-2759 — записей нет, и только теперь нужен график: почему их нет.
+        # Есть записи — график не спрашивается вовсе, они показываются при
+        # любом его состоянии (решение владельца: записи видны и при конфликте).
+        return EMPTY_DAY_TEXT[empty_day_state(master, now=now)]
 
+    date_label = now.astimezone(tz).strftime("%d.%m")
     lines = [f"*{date_label}* — {len(visits)}:"]
     for visit in visits[:MAX_LISTED]:
         when = visit.visit_at.astimezone(tz).strftime("%H:%M") if visit.visit_at else "—"
@@ -110,6 +174,75 @@ def master_day(master, *, now: datetime | None = None) -> str:
     if len(visits) > MAX_LISTED:
         lines.append(f"…и ещё {len(visits) - MAX_LISTED}")
     return "\n".join(lines)
+
+
+def empty_day_state(master, *, now: datetime | None = None) -> str:
+    """Почему у мастера сегодня нет записей — одно из четырёх ``EMPTY_*``.
+
+    Вызывается ТОЛЬКО когда записей нет. Один источник на приветствие и на
+    кнопку «Мой день» — иначе они разойдутся с первой правкой.
+
+    График читается не из локальных таблиц ``apps/scheduling``: это копия,
+    которую боту никто не обновляет (DRF-2014; замер 15.09 — 28 строк у 4
+    мастеров против 63 у 9 в каталоге). Рамку даёт
+    ``master_api.services.dashboard._working_block_today_ex`` — то же правило
+    «исключение дня → неделя», которым дашборд мастера в мини-приложении уже
+    различает «выходной» и «часы не заданы» (DRF-2152, DRF-2200). Второго
+    правила здесь нет намеренно.
+
+    * рамка не прочитана (каталог не ответил; у салона нет владельца или
+      администратора, от чьего имени читать; у строки мастера нет профиля в
+      каталоге) → :data:`EMPTY_UNKNOWN`. «Не знаю» не становится ни выходным,
+      ни «не настроен»: утверждать что-либо о графике, который не прочитан,
+      нельзя;
+    * рабочий блок на сегодня есть → :data:`EMPTY_WORKING`;
+    * блока нет, а в недельном шаблоне нет ни одного рабочего дня →
+      :data:`EMPTY_NOT_SET`;
+    * блока нет, шаблон задан → :data:`EMPTY_DAY_OFF`. Сюда попадает и
+      исключение на весь день (отпуск, больничный, отгул): провод каталога
+      вида не называет, а текст владельца на этот случай один.
+    """
+
+    from django.core.cache import cache
+
+    now = now or timezone.now()
+    tz = salon_zone(master.tenant)
+    today = now.astimezone(tz).date()
+    key = f"staff:empty_day:{master.id}:{today.isoformat()}"
+    try:
+        cached = cache.get(key)
+    except Exception:  # noqa: BLE001 — нет кеша: читаем источник, ход не падает
+        cached = None
+    if cached in (EMPTY_DAY_OFF, EMPTY_NOT_SET, EMPTY_WORKING):
+        return str(cached)
+
+    try:
+        from apps.master_api.services.dashboard import _working_block_today_ex
+
+        block, readable, hours_set = _working_block_today_ex(master, today, tz=tz)
+    except Exception:  # noqa: BLE001 — любой отказ источника = «не знаю», не 500
+        logger.warning("staff_actions.empty_day.frame_failed master=%s", master.id, exc_info=True)
+        return EMPTY_UNKNOWN
+    if not readable:
+        return EMPTY_UNKNOWN
+
+    if block is not None:
+        state = EMPTY_WORKING
+    elif not hours_set:
+        state = EMPTY_NOT_SET
+    else:
+        state = EMPTY_DAY_OFF
+    try:
+        cache.set(key, state, EMPTY_DAY_CACHE_SECONDS)
+    except Exception:  # noqa: BLE001
+        pass
+    return state
+
+
+def is_empty_day_text(text: str) -> bool:
+    """True для четырёх ответов пустого дня — под ними рисуется «Расписание»."""
+
+    return text in EMPTY_DAY_TEXT.values()
 
 
 def pending_request_rows(tenant) -> list[tuple[str, str]]:

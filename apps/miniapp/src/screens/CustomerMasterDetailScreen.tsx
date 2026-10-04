@@ -21,15 +21,20 @@ import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { ScreenLayout } from "../components/ScreenLayout";
 import { StickyCta } from "../components/StickyCta";
 import { DelayedSkeleton, MasterCardSkeleton } from "../components/Skeleton";
+import { MasterPhoto } from "../components/MasterPhoto";
 import { OfflineBanner } from "../components/OfflineBanner";
 import { StateError } from "../components/StateError";
 import { useOnline } from "../hooks/useOnline";
+import { fetchServices, type Service } from "../lib/api";
+import { initialsOf } from "../lib/avatar-sheet";
+import { masterServiceMeta, masterServices } from "../lib/booking-flow";
 import {
   getCustomerMaster,
   type CustomerMaster,
 } from "../lib/customer-booking";
+import { masterCardP1Enabled } from "../lib/feature-flags";
 import { publicRating, reviewCountLabel } from "../lib/rating";
-import { setEntryPoint, setMaster, setService, useBookingDraft } from "../state/booking";
+import { alignMaster, alignService, setEntryPoint, useBookingDraft } from "../state/booking";
 import { backTo } from "../lib/screen-back";
 
 /** Возврат (DRF-1493): в каталог — единственный вход в карточку мастера. */
@@ -42,6 +47,13 @@ type State =
 
 export const OTHER_MASTERS_LABEL = "Другие специалисты";
 
+/**
+ * DRF-2755 — заголовок блока услуг мастера. Слов владельца для него ещё нет,
+ * и придумывать их нельзя: стоит метка-заполнитель, а блок закрыт флагом
+ * `masterCardP1Enabled`. Пока здесь метка, флаг включать для людей нельзя.
+ */
+export const MASTER_SERVICES_HEAD = "[ТЕКСТ ВЛАДЕЛЬЦА: заголовок блока услуг мастера]";
+
 export function CustomerMasterDetailScreen() {
   const online = useOnline();
   const navigate = useNavigate();
@@ -50,7 +62,26 @@ export function CustomerMasterDetailScreen() {
   const serviceId = params.get("service");
   const draft = useBookingDraft();
   const [state, setState] = useState<State>({ kind: "loading" });
+  // DRF-2755 — каталог услуг для блока «услуги мастера»; `null` — не
+  // загружен (флаг выключен, ещё грузится, сервер не ответил). Блок тогда
+  // не рисуется: карточка без списка честнее списка, собранного наугад.
+  const p1 = masterCardP1Enabled();
+  const [catalog, setCatalog] = useState<Service[] | null>(null);
 
+  useEffect(() => {
+    if (!p1) return;
+    let alive = true;
+    fetchServices()
+      .then(({ services }) => {
+        if (alive) setCatalog(services);
+      })
+      .catch(() => {
+        if (alive) setCatalog(null);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [p1]);
 
   const load = useCallback(() => {
     if (!masterId) return;
@@ -70,19 +101,41 @@ export function CustomerMasterDetailScreen() {
 
   useEffect(() => load(), [load]);
 
+  const offered = state.kind === "ok" ? masterServices(catalog, state.master.service_ids) : [];
+
+  // DRF-2755 — запись на конкретную услугу мастера: услуга и мастер
+  // фиксируются здесь, с именами, и уезжают на экран времени в адресе —
+  // тем же швом, что у потока C05 (DRF-2752).
+  function onChooseService(service: Service) {
+    if (state.kind !== "ok" || !masterId) return;
+    alignService(service.id, service.name);
+    setEntryPoint("master");
+    alignMaster(masterId, state.master.name);
+    navigate(`/customer/masters/${masterId}/slots?service=${service.id}`);
+  }
+
   function onChooseTime() {
     if (state.kind !== "ok" || !masterId) return;
+    // DRF-2755 — услугу, которую этот мастер не оказывает, в запись не несём.
+    // Список услуг мастера известен (флаг включён, каталог загружен), а
+    // услуга из адреса или оставшаяся в черновике в него не входит: это
+    // устаревший выбор, и безопаснее выбрать заново, чем открыть время
+    // под неё. Каталог не загружен — судить не о чем, правило прежнее.
+    const carried = serviceId || draft.serviceId;
+    if (p1 && catalog !== null && carried && !offered.some((s) => s.id === carried)) {
+      navigate("/customer/catalog");
+      return;
+    }
+    // DRF-2752 — услуга из адреса главнее черновика. Раньше адрес учитывался
+    // только при ПУСТОМ черновике: услуга, оставшаяся от прошлого выбора,
+    // побеждала ту, что названа в адресе. Имя здесь неизвестно — экран
+    // времени спросит его у сервера. Идёт первым: другая услуга начинает
+    // путь заново, и источник входа с мастером ставятся уже в новый.
+    if (serviceId) alignService(serviceId);
     // DRF-1484 — provenance: this flow originates at the master profile.
     setEntryPoint("master");
-    setMaster(masterId, state.master.name);
-    // Pre-fill service in draft if URL param available — keeps the
-    // F3 → F4 chain consistent.
-    if (serviceId && !draft.serviceId) {
-      // Service name unknown here; the draft only needs the id for
-      // the slots query. F4 will fetch service name from the booking
-      // response if necessary.
-      setService(serviceId, "");
-    }
+    // Другой мастер — время, выбранное у прежнего, больше не выбрано.
+    alignMaster(masterId, state.master.name);
     navigate(`/customer/masters/${masterId}/slots`);
   }
 
@@ -121,6 +174,17 @@ export function CustomerMasterDetailScreen() {
       }
     >
       <OfflineBanner online={online} />
+      {/* DRF-2755 — большое фото мастера. Байты идут через прокси бота
+          (DRF-2539); нет фото, ещё грузится или прокси отказал — инициалы. */}
+      {p1 ? (
+        <div className="customer-master__photo" data-testid="master-photo">
+          <MasterPhoto
+            src={m.photo_url}
+            alt={m.name}
+            fallback={<span aria-hidden="true">{initialsOf(m.name)}</span>}
+          />
+        </div>
+      ) : null}
       <section className="customer-master__intro">
         <div className="customer-master__identity">
           <div className="customer-master__name">{m.name}</div>
@@ -157,6 +221,33 @@ export function CustomerMasterDetailScreen() {
         </section>
       )}
 
+      {/* DRF-2755 — услуги мастера с длительностью и ценой. Цена «от» — только
+          из данных; `null` — цены нет в строке, а не «0 ₽». */}
+      {p1 && offered.length > 0 ? (
+        <section aria-labelledby="master-services-title">
+          <h2 id="master-services-title" className="customer-master__section-title">
+            {MASTER_SERVICES_HEAD}
+          </h2>
+          <ul className="customer-master__services">
+            {offered.map((service) => {
+              const meta = masterServiceMeta(service);
+              return (
+                <li key={service.id}>
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    disabled={!online}
+                    onClick={() => onChooseService(service)}
+                  >
+                    {meta ? `${service.name} · ${meta}` : service.name}
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        </section>
+      ) : null}
+
       <section aria-labelledby="master-slots-title">
         <h2 id="master-slots-title" className="customer-master__section-title">
           Ближайшие слоты
@@ -175,9 +266,10 @@ export function CustomerMasterDetailScreen() {
           type="button"
           className="goal-select__minor-action"
           onClick={() => {
-            const svc = draft.serviceId || serviceId;
+            // DRF-2752 — то же правило: адрес главнее черновика.
+            const svc = serviceId || draft.serviceId;
             if (svc) {
-              if (!draft.serviceId) setService(svc, "");
+              if (serviceId) alignService(serviceId);
               navigate("/customer/book/master");
             } else {
               navigate("/customer/catalog");

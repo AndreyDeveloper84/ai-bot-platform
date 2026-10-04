@@ -143,6 +143,10 @@ class GreetingData:
     readiness_problems: int | None = None
     my_records: int | None = None
     next_visit: NextVisit | None = None
+    #: DRF-2759 — у мастера сегодня ноль записей: готовая строка о том, почему
+    #: (выходной / график не настроен / просто нет записей / график не прочитан).
+    #: Та же функция, что отвечает на кнопку «Мой день».
+    my_empty_day: str | None = None
     missing: tuple[str, ...] = field(default_factory=tuple)
 
 
@@ -157,6 +161,21 @@ def _salon_day(tenant: Any, now: datetime):
 
 
 def _masters_available() -> int:
+    """«Работают N мастеров» — те, кто ПРОДАЁТСЯ клиенту (``AVAILABLE``).
+
+    DRF-2759 (Z-1) — это НЕ та же база, что у списка «Сегодня»
+    (:func:`apps.channels.max.staff_actions.salon_day`). Там мастера берутся
+    по ``is_active=True`` и «не в архиве»: кто числится в салоне. Здесь —
+    по ``AVAILABLE``: допущен, связан с каталогом, а при включённых
+    сторожах ещё и с каталожной личностью и подтверждённым графиком.
+
+    ``AVAILABLE`` уже: активный мастер без связи с каталогом есть в списке
+    дня и не входит в это число. Поэтому «работают 3 мастера» над списком из
+    четырёх имён — не ошибка счёта, а два разных вопроса; и равное число не
+    означает тот же состав. Выборки намеренно не сведены: какая из двух баз
+    «правильная» для сводки — решение владельца, не этого модуля.
+    """
+
     from apps.catalog.master_state import AVAILABLE
     from apps.catalog.models import CatalogMaster
 
@@ -217,6 +236,7 @@ def gather(tenant: Any, role_ctx: Any, *, now: datetime | None = None) -> Greeti
     records = masters_available = attention = my_records = None
     readiness_problems = None
     next_visit = None
+    my_empty_day = None
 
     with tenant_scope(tenant):
         try:
@@ -229,6 +249,8 @@ def gather(tenant: Any, role_ctx: Any, *, now: datetime | None = None) -> Greeti
             records = day.summary.total - day.summary.released
             if getattr(role_ctx, "is_master", False):
                 my_records, next_visit = _master_day(day, role_ctx, now)
+                if my_records == 0:
+                    my_empty_day = _my_empty_day(role_ctx, now)
 
         try:
             masters_available = _masters_available()
@@ -260,8 +282,28 @@ def gather(tenant: Any, role_ctx: Any, *, now: datetime | None = None) -> Greeti
         readiness_problems=readiness_problems,
         my_records=my_records,
         next_visit=next_visit,
+        my_empty_day=my_empty_day,
         missing=tuple(missing),
     )
+
+
+def _my_empty_day(role_ctx: Any, now: datetime) -> str | None:
+    """Строка пустого дня мастера — тем же правилом, что у кнопки «Мой день»."""
+
+    from apps.catalog.models import CatalogMaster
+    from apps.channels.max import staff_actions
+
+    master_id = getattr(role_ctx, "master_id", None)
+    if not master_id:
+        return None
+    try:
+        master = CatalogMaster.objects.filter(pk=master_id).select_related("tenant").first()
+        if master is None:
+            return None
+        return staff_actions.EMPTY_DAY_TEXT[staff_actions.empty_day_state(master, now=now)]
+    except Exception:  # noqa: BLE001 — §103: без источника строка опускается
+        logger.warning("channels.max.salon.greeting.empty_day_unavailable", exc_info=True)
+        return None
 
 
 def _master_day(day: Any, role_ctx: Any, now: datetime) -> tuple[int | None, NextVisit | None]:
@@ -318,7 +360,11 @@ def admin_role_word(role_ctx: Any) -> str:
 
 def render_master(name: str, salon: str, data: GreetingData) -> str:
     lines = [MASTER_HELLO.format(name=name), MASTER_ROLE_LINE.format(salon=salon)]
-    if data.my_records is not None:
+    if data.my_records == 0 and data.my_empty_day:
+        # DRF-2759 — «Сегодня у вас 0 записей» не отличало выходной от
+        # ненастроенного графика; строка владельца называет причину.
+        lines.append(data.my_empty_day)
+    elif data.my_records is not None:
         lines.append(MASTER_TODAY_LINE.format(records=records_phrase(data.my_records)))
     if data.next_visit is not None:
         n = data.next_visit

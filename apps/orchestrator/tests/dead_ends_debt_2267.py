@@ -87,6 +87,9 @@ EXCEPTIONS: dict[str, str] = {
     "apps/orchestrator/handoff.py::route_global_human_handoff": (
         "B24/F5 — передача оператору на глобальном пути; бот молчит, пока задача открыта"
     ),
+    "apps/orchestrator/handoff.py::route_support_request": (
+        "B24/F5 — обращение в поддержку Ayla из двери «/start support» (DRF-2751): передача человеку; бот молчит, пока задача открыта"
+    ),
     "apps/skills/booking/skill.py::_handoff": (
         "B24 — запись сорвалась → передача менеджеру; бот молчит, пока задача открыта"
     ),
