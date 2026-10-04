@@ -87,7 +87,7 @@ def _get(client: Client, who: str):
     return client.get(_url(), HTTP_AUTHORIZATION=_auth(who))
 
 
-def _post(client: Client, who: str, body) -> object:
+def _post(client: Client, who: str, body):
     return client.post(
         _url(),
         data=json.dumps(body),

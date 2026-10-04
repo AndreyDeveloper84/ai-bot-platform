@@ -551,9 +551,9 @@ def _numbers_hidden(context: SkillContext) -> bool:
     Записи дневника он не трогает: запись ложится с числами, а реплика о ней
     звучит без чисел — теми же шаблонами, что и запись, у которой числа нет.
     """
-    from apps.nutrition_proactive.prefs import get_prefs, numbers_hidden
+    from apps.nutrition_proactive.prefs import numbers_hidden_for
 
-    return numbers_hidden(get_prefs(context.bot_user))
+    return numbers_hidden_for(context.bot_user)
 
 
 def ai_kcal_phrase(kcal: float) -> str:

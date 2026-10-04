@@ -229,6 +229,20 @@ def numbers_hidden(prefs: dict[str, Any]) -> bool:
     return prefs.get("numbers_hidden") is True
 
 
+def numbers_hidden_for(bot_user: Any) -> bool:
+    """«Без чисел» для человека — единственный читатель для всех поверхностей.
+
+    Никогда не бросает: реплика в чате и экран не должны падать из-за
+    настройки отображения. Не прочитали — выбора не знаем, числа видны: режим
+    добровольный, и «не знаем» не может значить «скрыть за человека».
+    """
+    try:
+        return numbers_hidden(get_prefs(bot_user))
+    except Exception:  # noqa: BLE001 — a display preference must not break a reply
+        logger.exception("nutrition_proactive.prefs.numbers_choice_failed")
+        return False
+
+
 def report_time(prefs: dict[str, Any]) -> str:
     """Normalised ``daily_report_time``. Anything unparseable reads as off.
 

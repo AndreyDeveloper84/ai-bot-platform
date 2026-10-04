@@ -41,8 +41,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
 from apps.identity.models import BotUser
-from apps.nutrition_proactive.prefs import get_prefs
-from apps.nutrition_proactive.prefs import numbers_hidden as numbers_hidden_by_choice
+from apps.nutrition_proactive.prefs import numbers_hidden_for
 from apps.miniapp_api.per_person_quota import over_quota, rate_limited
 from apps.miniapp_api.views import (
     _diary_entry_gate,
@@ -67,7 +66,7 @@ def _numbers_hidden(profile_res: Any, *, bot_user: BotUser) -> bool | None:
             bot_user.pk,
             type(profile_res).__name__,
         )
-    return numbers_hidden_by_choice(get_prefs(bot_user))
+    return numbers_hidden_for(bot_user)
 
 
 def _day_payload(row: Any) -> dict[str, Any]:

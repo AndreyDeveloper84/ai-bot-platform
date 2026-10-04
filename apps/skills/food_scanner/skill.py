@@ -914,9 +914,9 @@ def _already_logged_line(diary, dish: str) -> str:
 
 def _numbers_hidden(context) -> bool:
     """«Без чисел» (DRF-2766) — выбор человека; тот же признак, что у текста."""
-    from apps.nutrition_proactive.prefs import get_prefs, numbers_hidden
+    from apps.nutrition_proactive.prefs import numbers_hidden_for
 
-    return numbers_hidden(get_prefs(context.bot_user))
+    return numbers_hidden_for(context.bot_user)
 
 
 def _format_scan_card(

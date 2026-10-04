@@ -65,7 +65,7 @@ from apps.integrations.ayla.offer_refusal import (
     reason_from_refusal,
 )
 from apps.identity.models import BotUser
-from apps.nutrition_proactive.prefs import get_prefs, write_prefs
+from apps.nutrition_proactive.prefs import get_prefs, numbers_hidden_for, write_prefs
 from apps.nutrition_proactive.prefs import numbers_hidden as numbers_hidden_by_choice
 from apps.tenancy.models import Tenant
 from apps.miniapp_api.auth import VerifiedInitData
@@ -4194,7 +4194,7 @@ def customer_wellness_today(request: HttpRequest) -> HttpResponse:
             external_id,
             type(profile_res).__name__,
         )
-    numbers_hidden: bool | None = numbers_hidden_by_choice(get_prefs(bot_user))
+    numbers_hidden: bool | None = numbers_hidden_for(bot_user)
 
     # ── настроены ли ориентиры (from get_profile) — §6 свода 11.09 ─────
     # Ориентир показывается только с названным происхождением
