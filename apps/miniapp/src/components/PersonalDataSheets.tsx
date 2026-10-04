@@ -53,8 +53,10 @@ import {
   DATA_STORAGE_PARTIAL_PROCESSING_NOTE,
   DATA_STORAGE_REVOCATION_DISCLOSURE_TEXT,
   DataStorageRevocationFailedError,
+  regrantDataStorage,
   revokeDataStorage,
   StaleDisclosureError as DataStorageStaleDisclosureError,
+  StaleRegrantDocumentError,
   SUPPORT_DEEPLINK,
   type ConsentsResponse,
 } from "../lib/customer-profile";
@@ -79,6 +81,10 @@ import {
   DISCLOSURE_BODY as FOOD_DIARY_DISCLOSURE_BODY,
   FOOD_DIARY_DISCLOSURE_VERSION,
 } from "../lib/food-diary-disclosure";
+import {
+  WELCOME_CONSENT_DOCUMENT_VERSION,
+  WELCOME_CONSENT_PARAGRAPHS,
+} from "../lib/welcome-consent";
 import { useSheetKeyNav } from "../hooks/useSheetKeyNav";
 
 // ---------------------------------------------------------------------------
@@ -708,6 +714,150 @@ export function HealthConsentSheet({
             </button>
             <button type="button" disabled className="btn-primary">
               {granted ? "Отозвать" : "Разрешить"}
+            </button>
+          </div>
+        </>
+      )}
+      {view === "stale" && (
+        <>
+          <p className="profile-support-sheet__body">
+            Текст про данные обновился, пока лист был открыт. Открой его заново
+            и прочитай — разрешение записывается на тот текст, который ты
+            видела.
+          </p>
+          <div className="profile-support-sheet__actions">
+            <button
+              type="button"
+              data-initial-focus
+              className="btn-primary profile-support-sheet__primary"
+              onClick={onClose}
+            >
+              Понятно
+            </button>
+          </div>
+        </>
+      )}
+      {view === "error" && (
+        <>
+          <p className="profile-support-sheet__body">
+            Не получилось сохранить. Ничего не изменилось.
+          </p>
+          <div className="profile-support-sheet__actions">
+            <button
+              type="button"
+              data-initial-focus
+              className="btn-secondary profile-support-sheet__cancel"
+              onClick={onClose}
+            >
+              Закрыть
+            </button>
+            <button
+              type="button"
+              className="btn-primary profile-support-sheet__primary"
+              onClick={submit}
+            >
+              Попробовать ещё раз
+            </button>
+            <SupportLink />
+          </div>
+        </>
+      )}
+    </SheetChrome>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Повторная выдача согласия на хранение данных — DRF-2709
+//
+// Решение владельца 04.10: «согласие должно быть везде, но показываться
+// только один раз клиенту» — и вариант А: перед выдачей человек видит тот же
+// текст, что принимал в чате, ДОСЛОВНО. Выдача записывается той же версией
+// документа, и строка журнала говорит правду о том, что принято.
+//
+// Слова листа — только существующие: текст приветствия (lib/welcome-consent),
+// заголовок — название строки, кнопки и состояния «сохраняю / текст обновился /
+// не получилось» — те же, что у листа медданных выше. Своих слов нет.
+//
+// Подсказки выдача не включает (§47.3): экран получит `enabled=false`.
+// ---------------------------------------------------------------------------
+
+type RegrantView = "confirm" | "busy" | "stale" | "error";
+
+interface DataStorageRegrantSheetProps extends SheetProps {
+  /** Выдача прошла: экран берёт состояние из ответа сервера целиком. */
+  onRegranted: (next: ConsentsResponse) => void;
+}
+
+export function DataStorageRegrantSheet({
+  open,
+  triggerRef,
+  onClose,
+  onRegranted,
+}: DataStorageRegrantSheetProps) {
+  const [view, setView] = useState<RegrantView>("confirm");
+
+  useEffect(() => {
+    if (open) setView("confirm");
+  }, [open]);
+
+  const submit = useCallback(async () => {
+    setView("busy");
+    try {
+      // Версия — того текста, что лист показал, а не взятая со стороны.
+      const next = await regrantDataStorage(WELCOME_CONSENT_DOCUMENT_VERSION);
+      onRegranted(next);
+      onClose();
+    } catch (err) {
+      setView(err instanceof StaleRegrantDocumentError ? "stale" : "error");
+    }
+  }, [onClose, onRegranted]);
+
+  if (!open) return null;
+  const busy = view === "busy";
+
+  return (
+    <SheetChrome
+      headlineId="data-storage-regrant-headline"
+      headline="Хранение данных"
+      closeDisabled={busy}
+      triggerRef={triggerRef}
+      onClose={onClose}
+    >
+      {view === "confirm" && (
+        <>
+          {WELCOME_CONSENT_PARAGRAPHS.map((paragraph) => (
+            <p key={paragraph} className="profile-support-sheet__body">
+              {paragraph}
+            </p>
+          ))}
+          <div className="profile-support-sheet__actions">
+            <button
+              type="button"
+              data-initial-focus
+              className="btn-secondary profile-support-sheet__cancel"
+              onClick={onClose}
+            >
+              Отмена
+            </button>
+            <button
+              type="button"
+              className="btn-primary profile-support-sheet__primary"
+              onClick={submit}
+            >
+              Разрешить
+            </button>
+          </div>
+        </>
+      )}
+      {view === "busy" && (
+        <>
+          <p className="profile-support-sheet__body">Сохраняю…</p>
+          <div className="profile-support-sheet__actions">
+            <button type="button" disabled className="btn-secondary">
+              Отмена
+            </button>
+            <button type="button" disabled className="btn-primary">
+              Разрешить
             </button>
           </div>
         </>

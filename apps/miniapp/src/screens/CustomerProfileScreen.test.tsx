@@ -42,6 +42,18 @@ const MEMORY = "/memory/";
 const MARKETING_SWITCH = "Получать акции и предложения от салонов";
 const HINTS_SWITCH = "Получать подсказки от Ayla";
 const REVOKE_ROW_BTN = "Отозвать согласие на хранение данных";
+const REGRANT_ROW_BTN = "Разрешить хранение данных";
+/**
+ * Текст приветственного согласия — литералом, а не импортом из lib: узел
+ * обязан поймать и расхождение копии в Mini App (`apps/skills/welcome/skill.py`
+ * S2_CONSENT_TEXT + S2A_DETAILS_TEXT, DRF-2709).
+ */
+const WELCOME_WORDS = [
+  "Прежде чем начать — короткое слово.",
+  "Я буду помнить о тебе только то, что поможет рекомендовать точнее. Хранится безопасно. Удалить можно в любой момент.",
+  "Продолжим?",
+  "Запоминаю: твои сообщения мне, выбранные цели, питание и вода если решишь логировать, записи к мастерам. Не делюсь с салонами без твоего разрешения. Подробнее в Профиле → «Данные обо мне» когда зайдёшь.",
+];
 /** Решение владельца §47.3, дословно (DRF-2709). Литералом: число слов — решение. */
 const HINTS_UNAVAILABLE = "Подсказки недоступны, пока согласие отозвано";
 
@@ -76,6 +88,11 @@ interface DocOptions {
    * умолчание следует за `storageGranted`; «не давал никогда» — явным `false`.
    */
   hintsBlocked?: boolean;
+  /**
+   * `data_storage.regrant.document_version` (DRF-2709). Сервер отдаёт её
+   * всегда; умолчание — та версия, что сервер шлёт сегодня.
+   */
+  regrantVersion?: string;
   revocation?: { status: string; failed_steps?: string[] };
 }
 
@@ -112,6 +129,7 @@ function consentsDoc(o: DocOptions = {}): Record<string, unknown> {
         consequences: ["ayla_delete", "memory_delete", "consent_withdraw"],
         retained: ["bookings", "payments"],
       },
+      regrant: { document_version: o.regrantVersion ?? "welcome-s2-v1" },
     },
   };
   if (o.revocation) doc.revocation = o.revocation;
@@ -656,16 +674,93 @@ describe("CustomerProfileScreen (настоящие ручки согласий)
     expect(screen.queryByText(/осталось действующим/)).toBeNull();
   }, 15000);
 
-  it("отозванное согласие: кнопки выдачи нет, потому что ручки нет", async () => {
-    routeRequests({}, { storageGranted: false });
+  it("отозванное согласие, а версию с известным экрану текстом сервер не предлагает — кнопки нет", async () => {
+    routeRequests({}, { storageGranted: false, regrantVersion: "welcome-s9-v9" });
     await renderFresh();
     await screen.findByText("Аня");
     // Положительная стража: строка на месте и говорит состояние.
     const row = screen.getByRole("group", { name: "Хранение данных" });
     expect(within(row).getByText("Не разрешено")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /Разрешить хранение/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: REGRANT_ROW_BTN })).toBeNull();
     expect(screen.queryByRole("button", { name: REVOKE_ROW_BTN })).toBeNull();
   }, 15000);
+
+  describe("DRF-2709 — «Разрешить»: лист с текстом приветствия дословно (вариант А)", () => {
+    it("после отзыва в строке хранения есть «Разрешить»", async () => {
+      routeRequests({}, { storageGranted: false, hintsEnabled: false });
+      await renderFresh();
+      const row = await screen.findByRole("group", { name: "Хранение данных" });
+      expect(within(row).getByText("Не разрешено")).toBeInTheDocument();
+      expect(within(row).getByRole("button", { name: REGRANT_ROW_BTN })).toBeInTheDocument();
+    }, 15000);
+
+    it("согласия не давали никогда (замка нет) — «Разрешить» здесь не предлагается", async () => {
+      routeRequests({}, { storageGranted: false, hintsBlocked: false, hintsEnabled: false });
+      await renderFresh();
+      const row = await screen.findByRole("group", { name: "Хранение данных" });
+      expect(within(row).getByText("Не разрешено")).toBeInTheDocument();
+      expect(screen.queryByRole("button", { name: REGRANT_ROW_BTN })).toBeNull();
+    }, 15000);
+
+    it("лист показывает текст приветствия дословно; «Отмена» ничего не шлёт", async () => {
+      const user = userEvent.setup();
+      routeRequests({}, { storageGranted: false, hintsEnabled: false });
+      await renderFresh();
+      await user.click(await screen.findByRole("button", { name: REGRANT_ROW_BTN }));
+      const dialog = await screen.findByRole("dialog");
+      for (const paragraph of WELCOME_WORDS) {
+        expect(within(dialog).getByText(paragraph)).toBeInTheDocument();
+      }
+      await user.click(within(dialog).getByRole("button", { name: "Отмена" }));
+      expect(requestMock).not.toHaveBeenCalledWith(DATA_STORAGE, expect.anything());
+    }, 15000);
+
+    it("«Разрешить» в листе шлёт версию показанного текста — согласие действует, подсказки выключены, но включаемы", async () => {
+      const user = userEvent.setup();
+      routeRequests(
+        {
+          [DATA_STORAGE]: () => consentsDoc({ storageGranted: true, hintsEnabled: false, hintsBlocked: false }),
+        },
+        { storageGranted: false, hintsEnabled: false },
+      );
+      await renderFresh();
+      // До выдачи — объяснение §47.3 вместо тумблера.
+      expect(await screen.findByText(HINTS_UNAVAILABLE)).toBeInTheDocument();
+      await user.click(await screen.findByRole("button", { name: REGRANT_ROW_BTN }));
+      const dialog = await screen.findByRole("dialog");
+      await user.click(within(dialog).getByRole("button", { name: "Разрешить" }));
+      await waitFor(() =>
+        expect(requestMock).toHaveBeenCalledWith(DATA_STORAGE, {
+          method: "POST",
+          body: JSON.stringify({ document_version: "welcome-s2-v1" }),
+        }),
+      );
+      expect(await screen.findByText("Разрешено 14 мая 2026")).toBeInTheDocument();
+      // §47.3: возможность включить вернулась, само включение — нет.
+      expect(
+        await screen.findByRole("switch", { name: HINTS_SWITCH }),
+      ).toHaveAttribute("aria-checked", "false");
+      expect(screen.queryByText(HINTS_UNAVAILABLE)).toBeNull();
+    }, 15000);
+
+    it("сервер не принял версию (409) — лист говорит, что текст обновился, и ничего не меняется", async () => {
+      const user = userEvent.setup();
+      routeRequests(
+        {
+          [DATA_STORAGE]: () => {
+            throw new ApiError(409, "stale_document", "changed");
+          },
+        },
+        { storageGranted: false, hintsEnabled: false },
+      );
+      await renderFresh();
+      await user.click(await screen.findByRole("button", { name: REGRANT_ROW_BTN }));
+      const dialog = await screen.findByRole("dialog");
+      await user.click(within(dialog).getByRole("button", { name: "Разрешить" }));
+      expect(await within(dialog).findByText(/Текст про данные обновился/)).toBeInTheDocument();
+      expect(screen.queryByText(/Разрешено 14 мая/)).toBeNull();
+    }, 15000);
+  });
 
   it("телефон на экране не появляется (DRF-1039)", async () => {
     await renderFresh();
