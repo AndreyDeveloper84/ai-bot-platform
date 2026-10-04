@@ -145,6 +145,13 @@ export interface ConsentsResponse {
   data_storage_regrant_version: string;
   /** «Подсказки от Ayla» — включены ли (не opt-out, а прямое «да»). */
   proactive_hints_enabled: boolean;
+  /**
+   * Можно ли их включить (DRF-2709, решение владельца §47.3). `false` только
+   * после ОТЗЫВА согласия на хранение данных — сервер тогда откажет во
+   * включении (409 `consent_withdrawn`), и экран вместо тумблера объясняет
+   * почему. Источник — `apps/consent/customer.py::proactive_hints_state`.
+   */
+  proactive_hints_can_enable: boolean;
 }
 
 export interface ProactivePrefsResponse {
@@ -175,7 +182,13 @@ interface ConsentStateDoc {
 
 interface ConsentsDocument {
   consents: Record<string, ConsentStateDoc | undefined>;
-  proactive_hints: { enabled: boolean };
+  /**
+   * `can_enable` / `blocked_reason` сервер присылает с DRF-2708 (#2248).
+   * Необязательны в типе только потому, что ответ без них — прежний
+   * сервер: тогда экран ведёт себя как раньше, а включение всё равно
+   * охраняет сервер.
+   */
+  proactive_hints: { enabled: boolean; can_enable?: boolean; blocked_reason?: string };
   data_storage: ConsentStateDoc & {
     revocation: {
       disclosure_version: string;
@@ -379,6 +392,7 @@ function toConsents(doc: ConsentsDocument): ConsentsResponse {
       storage?.revocation?.disclosure_version ?? "",
     data_storage_regrant_version: storage?.regrant?.document_version ?? "",
     proactive_hints_enabled: Boolean(doc.proactive_hints?.enabled),
+    proactive_hints_can_enable: doc.proactive_hints?.can_enable !== false,
   };
 }
 
@@ -433,6 +447,7 @@ const CONSENTS_STATE: Record<StubVariant, ConsentsResponse> = {
     data_storage_disclosure_version: "data-storage-revocation-v1",
     data_storage_regrant_version: "",
     proactive_hints_enabled: true,
+    proactive_hints_can_enable: true,
   },
   new_user: {
     is_booking_pii_locked: true,
@@ -443,6 +458,7 @@ const CONSENTS_STATE: Record<StubVariant, ConsentsResponse> = {
     data_storage_disclosure_version: "data-storage-revocation-v1",
     data_storage_regrant_version: "",
     proactive_hints_enabled: true,
+    proactive_hints_can_enable: true,
   },
   multi: {
     is_booking_pii_locked: true,
@@ -453,6 +469,7 @@ const CONSENTS_STATE: Record<StubVariant, ConsentsResponse> = {
     data_storage_disclosure_version: "data-storage-revocation-v1",
     data_storage_regrant_version: "",
     proactive_hints_enabled: true,
+    proactive_hints_can_enable: true,
   },
 };
 

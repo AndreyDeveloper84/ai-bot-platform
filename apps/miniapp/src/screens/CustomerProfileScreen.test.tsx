@@ -42,6 +42,8 @@ const MEMORY = "/memory/";
 const MARKETING_SWITCH = "Получать акции и предложения от салонов";
 const HINTS_SWITCH = "Получать подсказки от Ayla";
 const REVOKE_ROW_BTN = "Отозвать согласие на хранение данных";
+/** Решение владельца §47.3, дословно (DRF-2709). Литералом: число слов — решение. */
+const HINTS_UNAVAILABLE = "Подсказки недоступны, пока согласие отозвано";
 
 function profileFixture(overrides: Partial<Profile> = {}): Profile {
   return {
@@ -67,6 +69,13 @@ interface DocOptions {
   marketing?: boolean;
   storageGranted?: boolean;
   hintsEnabled?: boolean;
+  /**
+   * Замок подсказок (`apps/consent/customer.py::proactive_hints_state`):
+   * сервер ставит его, когда согласие на хранение было и отозвано. В этом
+   * файле «согласия на хранение нет» всегда значит «отозвано», поэтому
+   * умолчание следует за `storageGranted`; «не давал никогда» — явным `false`.
+   */
+  hintsBlocked?: boolean;
   revocation?: { status: string; failed_steps?: string[] };
 }
 
@@ -89,7 +98,11 @@ function consentsDoc(o: DocOptions = {}): Record<string, unknown> {
       },
       health: { granted: false, granted_at: null, document_version: "" },
     },
-    proactive_hints: { enabled: o.hintsEnabled ?? true },
+    proactive_hints: {
+      enabled: o.hintsEnabled ?? true,
+      can_enable: !(o.hintsBlocked ?? !storageGranted),
+      blocked_reason: (o.hintsBlocked ?? !storageGranted) ? "consent_withdrawn" : "",
+    },
     data_storage: {
       granted: storageGranted,
       granted_at: at,
@@ -462,7 +475,7 @@ describe("CustomerProfileScreen (настоящие ручки согласий)
     expect(within(dialog).queryByText(/revoked_something_new/)).toBeNull();
   }, 15000);
 
-  it("§35 п.9: подсказки после отзыва — то, что сказал сервер", async () => {
+  it("§35 п.9 + §47.3: после отзыва тумблера нет — есть объяснение", async () => {
     // Решение владельца требует, чтобы подсказки погасли, и теперь их
     // гасит сервер: `revoke_data_storage` ставит
     // `proactive_messages_opt_out` по всем оболочкам человека. Экран
@@ -491,10 +504,88 @@ describe("CustomerProfileScreen (настоящие ручки согласий)
     );
     await screen.findByText(/Согласие отозвано/);
     await user.click(screen.getByRole("button", { name: "Закрыть" }));
-    expect(
-      await screen.findByRole("switch", { name: HINTS_SWITCH }),
-    ).toHaveAttribute("aria-checked", "false");
+    // DRF-2709: сервер после отзыва говорит не только «выключено», но и
+    // «включить нельзя» — и экран показывает это словами владельца.
+    expect(await screen.findByText(HINTS_UNAVAILABLE)).toBeInTheDocument();
+    expect(screen.queryByRole("switch", { name: HINTS_SWITCH })).toBeNull();
   }, 15000);
+
+  describe("DRF-2709 — §47.3-б: объяснение вместо обычного включения", () => {
+    it("согласие отозвано: строка подсказок есть, тумблера нет, объяснение — дословно", async () => {
+      routeRequests({}, { storageGranted: false, hintsEnabled: false });
+      await renderFresh();
+      // Presence first: the section and its row are on screen.
+      const row = await screen.findByRole("group", { name: "Подсказки от Ayla" });
+      expect(within(row).getByText(HINTS_UNAVAILABLE)).toBeInTheDocument();
+      expect(within(row).getByText(/напишет первой/)).toBeInTheDocument();
+      expect(screen.queryByRole("switch", { name: HINTS_SWITCH })).toBeNull();
+    }, 15000);
+
+    it("согласия не давали никогда: замка нет, тумблер на месте", async () => {
+      routeRequests({}, { storageGranted: false, hintsBlocked: false, hintsEnabled: false });
+      await renderFresh();
+      expect(
+        await screen.findByRole("switch", { name: HINTS_SWITCH }),
+      ).toHaveAttribute("aria-checked", "false");
+      expect(screen.queryByText(HINTS_UNAVAILABLE)).toBeNull();
+    }, 15000);
+
+    it("включённые при замке (не должно быть): тумблер остаётся — выключить можно всегда", async () => {
+      routeRequests({}, { storageGranted: false, hintsEnabled: true });
+      await renderFresh();
+      expect(
+        await screen.findByRole("switch", { name: HINTS_SWITCH }),
+      ).toHaveAttribute("aria-checked", "true");
+    }, 15000);
+
+    it("экран устарел, сервер ответил 409 consent_withdrawn — объяснение, а не «попробуй ещё раз»", async () => {
+      const user = userEvent.setup();
+      routeRequests(
+        {
+          [HINTS]: () => {
+            throw new ApiError(
+              409,
+              "consent_withdrawn",
+              "proactive hints cannot be enabled while the data-storage consent is withdrawn",
+            );
+          },
+        },
+        { hintsEnabled: false },
+      );
+      await renderFresh();
+      const toggle = await screen.findByRole("switch", { name: HINTS_SWITCH });
+      await user.click(toggle);
+      await waitFor(() =>
+        expect(requestMock).toHaveBeenCalledWith(HINTS, {
+          method: "POST",
+          body: JSON.stringify({ enabled: true }),
+        }),
+      );
+      const row = await screen.findByRole("group", { name: "Подсказки от Ayla" });
+      await waitFor(() => expect(within(row).getByText(HINTS_UNAVAILABLE)).toBeInTheDocument());
+      expect(screen.queryByRole("switch", { name: HINTS_SWITCH })).toBeNull();
+      expect(screen.queryByText("Не получилось сохранить. Попробуй ещё раз.")).toBeNull();
+    }, 15000);
+
+    it("другой отказ сервера — прежний тост, тумблер на месте", async () => {
+      const user = userEvent.setup();
+      routeRequests(
+        {
+          [HINTS]: () => {
+            throw new ApiError(502, "", "");
+          },
+        },
+        { hintsEnabled: false },
+      );
+      await renderFresh();
+      await user.click(await screen.findByRole("switch", { name: HINTS_SWITCH }));
+      expect(
+        await screen.findByText("Не получилось сохранить. Попробуй ещё раз."),
+      ).toBeInTheDocument();
+      expect(screen.getByRole("switch", { name: HINTS_SWITCH })).toBeInTheDocument();
+      expect(screen.queryByText(HINTS_UNAVAILABLE)).toBeNull();
+    }, 15000);
+  });
 
   it("409 stale_disclosure: не дожимаем тело, а перечитываем раскрытие", async () => {
     const user = userEvent.setup();

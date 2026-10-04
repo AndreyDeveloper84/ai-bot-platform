@@ -70,6 +70,8 @@ interface DocOptions {
   storageGranted?: boolean;
   storageAt?: string | null;
   hintsEnabled?: boolean;
+  /** `proactive_hints.can_enable` сервера (DRF-2709): `false` — после отзыва. */
+  hintsCanEnable?: boolean;
   disclosureVersion?: string;
   revocation?: {
     status: string;
@@ -102,7 +104,11 @@ function consentsDoc(o: DocOptions = {}): Record<string, unknown> {
       memory_yellow: { granted: false, granted_at: null, document_version: "" },
       memory_red: { granted: false, granted_at: null, document_version: "" },
     },
-    proactive_hints: { enabled: o.hintsEnabled ?? true },
+    proactive_hints: {
+      enabled: o.hintsEnabled ?? true,
+      can_enable: o.hintsCanEnable ?? true,
+      blocked_reason: (o.hintsCanEnable ?? true) ? "" : "consent_withdrawn",
+    },
     data_storage: {
       granted: storageGranted,
       granted_at: storageGranted ? storageAt : null,
@@ -193,8 +199,29 @@ describe("fetchConsents (реальный GET me/consents/)", () => {
       "data-storage-revocation-v1",
     );
     expect(consents.proactive_hints_enabled).toBe(true);
+    expect(consents.proactive_hints_can_enable).toBe(true);
     expect(consents.is_booking_pii_locked).toBe(true);
     expect(consents.is_master_data_locked).toBe(true);
+  });
+
+  it("DRF-2709: замок подсказок доезжает до экрана как есть", async () => {
+    requestMock.mockResolvedValue(
+      consentsDoc({ storageGranted: false, hintsEnabled: false, hintsCanEnable: false }),
+    );
+    const consents = await fetchConsents();
+    // Presence first: the document was read and mapped.
+    expect(consents.data_storage_granted).toBe(false);
+    expect(consents.proactive_hints_can_enable).toBe(false);
+    expect(consents.proactive_hints_enabled).toBe(false);
+  });
+
+  it("DRF-2709: прежний сервер без can_enable — экран как раньше, включать можно", async () => {
+    const doc = consentsDoc({ hintsEnabled: false });
+    (doc.proactive_hints as Record<string, unknown>) = { enabled: false };
+    requestMock.mockResolvedValue(doc);
+    const consents = await fetchConsents();
+    expect(consents.proactive_hints_enabled).toBe(false);
+    expect(consents.proactive_hints_can_enable).toBe(true);
   });
 
   it("отозванное согласие: даты нет, и она не выдумывается", async () => {
