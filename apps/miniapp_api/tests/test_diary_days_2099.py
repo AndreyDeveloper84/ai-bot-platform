@@ -297,6 +297,27 @@ class TestDay:
         assert body["entries"] == [self.ENTRY]
         assert body["nutrition_numbers_hidden"] is False
 
+    def test_drf2766_the_day_carries_the_total_and_its_counters(
+        self, client: Client, bot_user: BotUser, consent
+    ) -> None:
+        """Фаза 2: итог с оценками ИИ и счётчики едут на экран дня; «нет итога» — null."""
+        from dataclasses import replace
+
+        summary = replace(
+            _summary([self.ENTRY]),
+            calories_total=None,
+            calories_ai_included=1,
+            calories_unscored=2,
+        )
+        patcher, _ = _patch_client(summary=summary, profile=None)
+        with patcher:
+            resp = _get(client, bot_user, "customer_diary_day", date="2026-09-14")
+        body = resp.json()
+        assert body["entries"] == [self.ENTRY]
+        assert body["calories_total"] is None
+        assert body["calories_ai_included"] == 1
+        assert body["calories_unscored"] == 2
+
     def test_a_day_without_entries_is_an_empty_list_not_an_error(
         self, client: Client, bot_user: BotUser, consent
     ) -> None:
