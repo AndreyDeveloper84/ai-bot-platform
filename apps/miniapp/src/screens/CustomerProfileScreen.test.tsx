@@ -782,3 +782,102 @@ describe("CustomerProfileScreen (prod build)", () => {
     );
   }, 15000);
 });
+
+// ── DRF-2766 — «Без чисел»: добровольный выбор, а не признак анкеты ─────────
+describe("CustomerProfileScreen — «Без чисел» (DRF-2766)", () => {
+  const DISPLAY = "/me/nutrition-display/";
+  const SWITCH = "Без чисел: скрывать калории, БЖУ и цели";
+
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+    vi.clearAllMocks();
+    fetchProfileMock.mockResolvedValue(profileFixture());
+  }, 15000);
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("строка «Без чисел» показывает сохранённый выбор (по умолчанию выключено)", async () => {
+    routeRequests({ [DISPLAY]: () => ({ numbers_hidden: false }) });
+    await renderFresh();
+
+    const toggle = await screen.findByRole("switch", { name: SWITCH });
+    expect(toggle).toHaveAttribute("aria-checked", "false");
+    expect(screen.getByText("Без чисел")).toBeVisible();
+  }, 15000);
+
+  it("включённый на сервере выбор виден включённым", async () => {
+    routeRequests({ [DISPLAY]: () => ({ numbers_hidden: true }) });
+    await renderFresh();
+
+    expect(await screen.findByRole("switch", { name: SWITCH })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+  }, 15000);
+
+  it("нажатие сохраняет выбор на сервере и показывает новое состояние", async () => {
+    const posted: unknown[] = [];
+    routeRequests({
+      [DISPLAY]: (init?: RequestInit) => {
+        if (init?.method === "POST") {
+          const body = JSON.parse(String(init.body)) as { numbers_hidden: boolean };
+          posted.push(body);
+          return { numbers_hidden: body.numbers_hidden };
+        }
+        return { numbers_hidden: false };
+      },
+    });
+    const user = userEvent.setup();
+    await renderFresh();
+
+    await user.click(await screen.findByRole("switch", { name: SWITCH }));
+
+    await waitFor(() =>
+      expect(screen.getByRole("switch", { name: SWITCH })).toHaveAttribute(
+        "aria-checked",
+        "true",
+      ),
+    );
+    expect(posted).toEqual([{ numbers_hidden: true }]);
+    expect(await screen.findByText("Хорошо, числа скрыты. Записи дневника на месте.")).toBeVisible();
+  }, 15000);
+
+  it("отказ сервера — состояние прежнее и честная подпись", async () => {
+    routeRequests({
+      [DISPLAY]: (init?: RequestInit) => {
+        if (init?.method === "POST") throw new ApiError(409, "nutrition_display_unavailable", "нет");
+        return { numbers_hidden: false };
+      },
+    });
+    const user = userEvent.setup();
+    await renderFresh();
+
+    await user.click(await screen.findByRole("switch", { name: SWITCH }));
+
+    expect(await screen.findByText("Не получилось сохранить. Попробуй ещё раз.")).toBeVisible();
+    expect(screen.getByRole("switch", { name: SWITCH })).toHaveAttribute("aria-checked", "false");
+  }, 15000);
+
+  it("выбор не прочитался — строки нет, выдуманного «выключено» нет", async () => {
+    routeRequests();
+    await renderFresh();
+
+    // Положительная пара: соседняя строка раздела отрисована.
+    expect(await screen.findByRole("switch", { name: MARKETING_SWITCH })).toBeVisible();
+    expect(screen.queryByRole("switch", { name: SWITCH })).not.toBeInTheDocument();
+  }, 15000);
+
+  it("без сети тумблер закрыт", async () => {
+    goOffline();
+    routeRequests({ [DISPLAY]: () => ({ numbers_hidden: false }) });
+    await renderFresh();
+
+    expect(await screen.findByRole("switch", { name: SWITCH })).toHaveAttribute(
+      "aria-disabled",
+      "true",
+    );
+  }, 15000);
+});

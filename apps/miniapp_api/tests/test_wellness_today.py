@@ -991,91 +991,71 @@ class TestWellnessTodayDiaryEntries:
 
 
 class TestWellnessTodayNumbersHidden:
-    """Прятать ли числа — производный признак, а не диагноз (§10 ED Mode).
+    """Прятать ли числа — выбор самого человека «Без чисел» (DRF-2766).
 
-    Наружу уходит ОДИН булев. Сырых `health_flags` в ответе нет и быть
-    не должно: клиенту нужно знать «прятать ли цифру», а не «что с
-    человеком». Раз поля нет, его нельзя ни залогировать, ни отправить
-    дальше, ни прочитать в консоли браузера.
+    Решение владельца 04.10: числа прячутся только по добровольному выбору
+    (тумблер в «Профиле», настройка в боте), а не по флагу расстройства
+    пищевого поведения в анкете — то автоматическое скрытие владелец снял.
+    Наружу по-прежнему уходит ОДИН булев, а не ``health_flags``.
     """
 
-    def test_ed_flag_hides_the_numbers(self, client: Client, bot_user: BotUser):
-        with _patch_nutrition(
-            summary=_FakeSummary(),
-            water=_FakeWater(),
-            profile=_FakeProfile(health_flags={"eating_disorder": True}),
-        ):
-            resp = client.get(
-                _url(), HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id)
-            )
-        data = resp.json()
-        assert data["nutrition_numbers_hidden"] is True
-
-    def test_a_person_without_the_flag_sees_numbers(self, client: Client, bot_user: BotUser):
-        with _patch_nutrition(
-            summary=_FakeSummary(),
-            water=_FakeWater(),
-            profile=_FakeProfile(health_flags={"pregnancy": True}),
-        ):
-            resp = client.get(
-                _url(), HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id)
-            )
-        data = resp.json()
-        # Другой флаг — не этот. Спрятать числа беременной спека не просит.
-        assert data["nutrition_numbers_hidden"] is False
-
-    def test_no_profile_at_all_is_an_answer_not_a_failure(self, client: Client, bot_user: BotUser):
-        # `get_profile` отдаёт None, когда анкеты нет вовсе: спросили и
-        # узнали, что профиля нет. Это НЕ отказ чтения.
-        with _patch_nutrition(summary=_FakeSummary(), water=_FakeWater(), profile=None):
-            resp = client.get(
-                _url(), HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id)
-            )
-        data = resp.json()
-        assert data["nutrition_numbers_hidden"] is False
-
-    def test_a_failed_profile_read_omits_the_key_so_the_screen_fails_closed(
-        self, client: Client, bot_user: BotUser
-    ):
-        from apps.integrations.ayla.nutrition_client import NutritionUnavailableError
-
-        with _patch_nutrition(
-            summary=_FakeSummary(),
-            water=_FakeWater(),
-            profile=NutritionUnavailableError("boom"),
-        ):
+    @staticmethod
+    def _get(client: Client, bot_user: BotUser, *, profile=None) -> dict:
+        with _patch_nutrition(summary=_FakeSummary(), water=_FakeWater(), profile=profile):
             resp = client.get(
                 _url(), HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id)
             )
         assert resp.status_code == 200
-        data = resp.json()
-        # Положительная стража ВПЕРЕДИ: остальные половины живы, то есть
-        # чтение профиля деградирует само по себе, а ответ не пуст.
+        return resp.json()
+
+    def test_the_ed_flag_alone_no_longer_hides_the_numbers(self, client: Client, bot_user: BotUser):
+        data = self._get(
+            client, bot_user, profile=_FakeProfile(health_flags={"eating_disorder": True})
+        )
+        assert data["calories_eaten"] == 1240
+        assert data["nutrition_numbers_hidden"] is False
+
+    def test_the_persons_choice_hides_the_numbers(self, client: Client, bot_user: BotUser):
+        from apps.nutrition_proactive.prefs import write_prefs
+
+        bot_user.customer_status = BotUser.CustomerStatus.LINKED
+        bot_user.save(update_fields=["customer_status"])
+        write_prefs(bot_user, {"numbers_hidden": True})
+        data = self._get(client, bot_user, profile=_FakeProfile(health_flags={}))
+        assert data["nutrition_numbers_hidden"] is True
+
+    def test_a_person_who_did_not_choose_sees_numbers(self, client: Client, bot_user: BotUser):
+        data = self._get(client, bot_user, profile=_FakeProfile(health_flags={"pregnancy": True}))
+        assert data["nutrition_numbers_hidden"] is False
+
+    def test_no_profile_at_all_still_answers(self, client: Client, bot_user: BotUser):
+        data = self._get(client, bot_user, profile=None)
+        assert data["nutrition_numbers_hidden"] is False
+
+    def test_a_failed_profile_read_no_longer_decides_the_numbers(
+        self, client: Client, bot_user: BotUser
+    ):
+        """Выбор хранится в боте: отказ каталога его не стирает и не подменяет."""
+        from apps.integrations.ayla.nutrition_client import NutritionUnavailableError
+        from apps.nutrition_proactive.prefs import write_prefs
+
+        bot_user.customer_status = BotUser.CustomerStatus.LINKED
+        bot_user.save(update_fields=["customer_status"])
+        write_prefs(bot_user, {"numbers_hidden": True})
+        data = self._get(client, bot_user, profile=NutritionUnavailableError("boom"))
         assert data["calories_eaten"] == 1240
         assert data["water_glasses_eaten"] == 4
-        # И только теперь отсутствие: `False` тут быть НЕ должно — это
-        # превратило бы «не смогли спросить» в разрешение показать
-        # калории тому, кому спека их показывать запрещает.
-        assert "nutrition_numbers_hidden" not in data
+        assert data["nutrition_numbers_hidden"] is True
 
     def test_an_unexpected_profile_error_degrades_and_never_500s(
         self, client: Client, bot_user: BotUser
     ):
-        with _patch_nutrition(
-            summary=_FakeSummary(), water=_FakeWater(), profile=RuntimeError("kaboom")
-        ):
-            resp = client.get(
-                _url(), HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id)
-            )
-        assert resp.status_code == 200
-        data = resp.json()
-        # Положительная стража ВПЕРЕДИ: неожиданная ошибка профиля не
-        # уронила соседние половины — дашборд остался дашбордом.
+        data = self._get(client, bot_user, profile=RuntimeError("kaboom"))
         assert data["calories_eaten"] == 1240
-        assert "nutrition_numbers_hidden" not in data
+        assert data["nutrition_numbers_hidden"] is False
 
     def test_the_raw_diagnosis_never_crosses_the_boundary(self, client: Client, bot_user: BotUser):
-        """152-ФЗ: наружу идёт следствие, а не специальная категория."""
+        """152-ФЗ: наружу идёт только признак показа, а не специальная категория."""
         with _patch_nutrition(
             summary=_FakeSummary(),
             water=_FakeWater(),
@@ -1085,8 +1065,8 @@ class TestWellnessTodayNumbersHidden:
                 _url(), HTTP_AUTHORIZATION=_init_data_header(bot_user.channel_user_id)
             )
         body = resp.content.decode()
-        # Присутствие: производный признак есть…
-        assert '"nutrition_numbers_hidden": true' in body.replace("'", '"')
+        # Присутствие: признак показа есть…
+        assert '"nutrition_numbers_hidden": false' in body.replace("'", '"')
         # …отсутствие: ни имени флага, ни контейнера, ни соседних диагнозов.
         assert "eating_disorder" not in body
         assert "health_flags" not in body

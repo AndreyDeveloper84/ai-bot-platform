@@ -106,6 +106,11 @@ urlpatterns = [
         name="customer_proactive_hints",
     ),
     path(
+        "me/nutrition-display/",
+        views.customer_nutrition_display,
+        name="customer_nutrition_display",
+    ),
+    path(
         "me/consents/marketing/",
         views.customer_marketing_consent,
         name="customer_marketing_consent",

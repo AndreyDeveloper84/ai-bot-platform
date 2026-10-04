@@ -321,7 +321,7 @@ class FoodScannerSkill:
         food_memory.note_meal(context.bot_user, dish=dish)
         _stash_last_card(context, scan)
 
-        reply = _format_scan_card(scan, recall, diary)
+        reply = _format_scan_card(scan, recall, diary, hide_numbers=_numbers_hidden(context))
         return SkillResult(
             reply_text=reply,
             action_type="food_scan_card",
@@ -495,7 +495,12 @@ class FoodScannerSkill:
         log_provenance = portion_provenance_of(
             ((log.raw or {}).get("nutrition") or {}).get("portion_source")
         )
-        if log.calories is None or not portion_numbers_are_named(log_provenance):
+        if (
+            _numbers_hidden(context)
+            or log.calories is None
+            or not portion_numbers_are_named(log_provenance)
+        ):
+            # DRF-2766 — «Без чисел»: о записи говорим, число не называем.
             # DRF-2371 — каталог сохранил запись, а числа в ней нет: порция
             # неизвестна или блюда нет в справочнике. Раньше здесь падал
             # ``int(None)`` — человек не видел ничего, хотя запись легла.
@@ -907,10 +912,19 @@ def _already_logged_line(diary, dish: str) -> str:
     return ALREADY_LOGGED_LINE if diary is not None and diary.has_dish(dish) else ""
 
 
+def _numbers_hidden(context) -> bool:
+    """«Без чисел» (DRF-2766) — выбор человека; тот же признак, что у текста."""
+    from apps.nutrition_proactive.prefs import numbers_hidden_for
+
+    return numbers_hidden_for(context.bot_user)
+
+
 def _format_scan_card(
     scan,
     recall: food_memory.FoodRecall | None = None,
     diary=None,
+    *,
+    hide_numbers: bool = False,
 ) -> str:
     """User-facing recognition card text.
 
@@ -949,7 +963,8 @@ def _format_scan_card(
     # Каталог кладёт признак ВНУТРЬ ``nutrition``, рядом с числами
     # (``FoodScanResponseSerializer``), а не на верхний уровень ответа.
     provenance = portion_provenance_of(nutrition.get("portion_source"))
-    if kcal is not None and portion_numbers_are_named(provenance):
+    # DRF-2766 — «Без чисел»: ни калорий, ни БЖУ; блюдо и порция остаются.
+    if not hide_numbers and kcal is not None and portion_numbers_are_named(provenance):
         macros_line = f"{int(kcal)} ккал"
         if protein is not None:
             macros_line += f" · Б {int(protein)}"

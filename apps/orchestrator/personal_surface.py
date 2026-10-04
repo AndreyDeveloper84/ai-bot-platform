@@ -517,7 +517,17 @@ def _render_today(bot_user: Any, profile: Any) -> DiscoveryReply:
     # The rows come from Ayla on this turn and are stored nowhere: her diary
     # sits behind the HEALTH consent and a copy here would be the same profile
     # on a weaker basis (``apps.orchestrator.food_history``).
-    text = render_daily_report(summary, water, profile, include_opt_out=False, include_entries=True)
+    from apps.nutrition_proactive.prefs import numbers_hidden_for
+
+    text = render_daily_report(
+        summary,
+        water,
+        profile,
+        include_opt_out=False,
+        include_entries=True,
+        # DRF-2766 — «Без чисел»: выбор человека действует и здесь.
+        hide_numbers=numbers_hidden_for(bot_user),
+    )
     if profile is None:
         text = f"{text}\n\n{NO_PROFILE_TEXT}"
     elif _targets_not_configured(profile):
