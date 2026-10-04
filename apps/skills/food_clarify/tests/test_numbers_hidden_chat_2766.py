@@ -22,14 +22,9 @@ from unittest.mock import patch
 
 import pytest
 
-from apps.integrations.ayla import (
-    DishEstimate,
-    ProfileResponse,
-    ScanResponse,
-    SummaryResponse,
-    WaterTodayResponse,
-)
+from apps.integrations.ayla import DishEstimate, ScanResponse
 from apps.nutrition_proactive import render
+from apps.nutrition_proactive.tests import test_render as render_fx
 from apps.skills.food_clarify import text_entry
 from apps.skills.food_clarify.tests.test_ai_estimate_2761 import (
     LOG_ID,
@@ -215,46 +210,24 @@ class TestThePhotoCard:
 # ─── отчёт за день ────────────────────────────────────────────────────────────
 
 
-_PROFILE = ProfileResponse(
-    gender="female",
-    age=32,
-    height_cm=168,
-    weight_kg=64,
-    goal="maintain",
-    daily_kcal=1900,
-    protein_g=95,
-    fat_g=60,
-    carbs_g=210,
-    water_ml=2000,
-    bmr=1400,
-    health_flags={},
-    disclaimer_acked=None,
-    targets_source="ayla_calculated",
-)
-
-_SUMMARY = SummaryResponse(
-    date="2026-10-04",
-    calories_total=1500.0,
-    calories_goal=1900,
-    protein_g=60.0,
-    fat_g=55.0,
-    carbs_g=160.0,
+# Состояние «ориентир ЕСТЬ» — фикстуры ``test_render`` (они в списке
+# ``nutrition_target_guard``): здесь проверяется, что режим снимает «из N».
+_PROFILE = render_fx.profile()
+_SUMMARY = render_fx.summary(
     entries=[
         {"dish_name": "борщ", "calories": 147},
         {"dish_name": "шакшука", "calories": None, "ai_calories": 300},
     ],
-    raw={},
     ai_comment="Сегодня 1500 ккал — ровный день.",
 )
-
-_WATER = WaterTodayResponse(total_ml=1200, norm_ml=2000, entries=[])
+_WATER = render_fx.water()
 
 
 class TestTheDailyReport:
     def test_by_default_the_report_has_numbers_targets_remark_and_comment(self) -> None:
         text = render.render_daily_report(_SUMMARY, _WATER, _PROFILE, include_entries=True)
         assert "Калории: 1500 из 1900 ккал." in text
-        assert "Вода: 1200 из 2000 мл." in text
+        assert "Вода: 1600 из 2000 мл." in text
         assert "• борщ — 147 ккал" in text
         assert "Сегодня 1500 ккал — ровный день." in text
 
@@ -264,7 +237,7 @@ class TestTheDailyReport:
         )
         assert text.startswith("Итоги дня по питанию.")
         assert "Записей в дневнике сегодня: 2." in text
-        assert "Вода: 1200 мл." in text
+        assert "Вода: 1600 мл." in text
         assert "• борщ" in text
         assert "• шакшука" in text
         _no_numbers(text)
