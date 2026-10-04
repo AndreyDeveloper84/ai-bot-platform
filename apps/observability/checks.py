@@ -141,6 +141,67 @@ def log_startup_config_drift() -> None:
         logger.exception("env_file_drift: startup drift report failed")
 
 
+NOOP_SUBSCRIBER_PATH = "apps.eventbus.dispatcher.NoopSubscriber"
+
+# Порядок починки повторяется в каждой ветке подсказки: он и есть то, ради
+# чего подсказка существует.
+_OUTBOX_REPAIR_ORDER = (
+    "Порядок починки — счётчик, затем подписчик, затем расписание: "
+    "`NoopSubscriber` не бросает исключений, поэтому диспетчер, запущенный "
+    "раньше подписчика, пометит накопленное доставленным никому, и обратного "
+    "хода нет."
+)
+
+
+def outbox_dispatch_cause() -> str:
+    """Почему ящик не разбирается — по фактическим флагам, а не по памяти.
+
+    DRF-2434. До этой правки подсказка W012 была строкой от 09.09: «задача
+    объявлена, но её нет в CELERY_BEAT_SCHEDULE». С 11.09 (DRF-1616) запись
+    в расписании есть — за рубильником. Оператор, пошедший по старой
+    подсказке, нашёл бы запись на месте, и следующим очевидным ходом открыл
+    бы рубильник, то есть сделал бы ровно необратимое. Подсказка, которая
+    врёт о причине, хуже её отсутствия.
+
+    Читаются только настройки, текстом: сторож стоит снаружи предмета
+    (`outbox_backlog.py`) и диспетчер не импортирует. Ветки повторяют
+    исходы `dispatch_pending_events_beat`: выключено → сухой прогон →
+    отказ при реестре только из Noop → живой режим.
+    """
+
+    from django.conf import settings
+
+    if not getattr(settings, "EVENTBUS_DISPATCH_BEAT_ENABLED", False):
+        cause = (
+            "Диспетчер стоит в CELERY_BEAT_SCHEDULE "
+            "(`dispatch_pending_events_every_minute`), но рубильник "
+            "EVENTBUS_DISPATCH_BEAT_ENABLED закрыт — обёртка возвращается, "
+            "не тронув ящик."
+        )
+    elif getattr(settings, "EVENTBUS_DISPATCH_BEAT_DRY_RUN", True):
+        cause = (
+            "Рубильник EVENTBUS_DISPATCH_BEAT_ENABLED открыт, но "
+            "EVENTBUS_DISPATCH_BEAT_DRY_RUN включён — обёртка только считает "
+            "pending и ничего не помечает."
+        )
+    elif all(
+        path == NOOP_SUBSCRIBER_PATH
+        for path in getattr(settings, "DOMAIN_EVENT_SUBSCRIBERS", [NOOP_SUBSCRIBER_PATH])
+    ):
+        cause = (
+            "Живой режим открыт, но в DOMAIN_EVENT_SUBSCRIBERS нет настоящего "
+            "подписчика — обёртка отказывает (`refused_noop_only`), иначе "
+            "пометила бы накопленное доставленным никому."
+        )
+    else:
+        cause = (
+            "Живой режим открыт и подписчики настоящие, а ящик стоит — "
+            "диспетчер не запускается или падает: смотреть, жив ли celery-beat, "
+            "и `dispatch_attempts`/`last_error` у старых строк."
+        )
+    return f"{cause} {_OUTBOX_REPAIR_ORDER}"
+
+
 def check_outbox_backlog(app_configs: Any = None, **kwargs: Any) -> list[CheckWarning]:
     """Сообщить, что исходящий ящик не разбирается.
 
@@ -199,14 +260,7 @@ def check_outbox_backlog(app_configs: Any = None, **kwargs: Any) -> list[CheckWa
     return [
         CheckWarning(
             f"Исходящий ящик не разбирается: {backlog.describe()}. Порог — {STALE_AFTER}.",
-            hint=(
-                "Задача `apps.eventbus.dispatch_pending_events` объявлена, но "
-                "её нет в CELERY_BEAT_SCHEDULE, и вызвать её больше неоткуда "
-                "(docs/PILOT_MEASUREMENTS.md §11). Порядок починки — счётчик, "
-                "затем подписчик, затем расписание: `NoopSubscriber` не бросает "
-                "исключений, поэтому диспетчер, запущенный раньше подписчика, "
-                "пометит накопленное доставленным никому, и обратного хода нет."
-            ),
+            hint=outbox_dispatch_cause(),
             id=OUTBOX_BACKLOG_CHECK_ID,
         )
     ]
