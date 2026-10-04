@@ -221,7 +221,7 @@ class TestNeverTalksAboutTheBody:
         text = render.render_daily_report(s, w, p)
         printed = {int(n) for n in re.findall(r"\d+", text)}
         allowed = {
-            round(s.calories_total),
+            round(s.calories_total or 0),
             s.calories_goal,
             round(s.protein_g),
             p.protein_g,
