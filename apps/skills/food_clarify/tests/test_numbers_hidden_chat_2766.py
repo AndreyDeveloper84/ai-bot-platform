@@ -115,6 +115,21 @@ class TestTheTextCard:
         _no_numbers(card)
 
 
+class TestTheCardThroughTheSkill:
+    """Путь навыка передаёт выбор в карточку (а не только функция умеет)."""
+
+    def test_by_default_the_skill_card_carries_the_ai_mark(self, conversation, consent) -> None:
+        card = _card(conversation, "зыбзик 300г", _MissWithEstimate())
+        assert text_entry.AI_ESTIMATE_MARK in card
+
+    def test_numbers_hidden_the_skill_card_has_no_numbers(
+        self, conversation, consent, hidden
+    ) -> None:
+        card = _card(conversation, "зыбзик 300г", _MissWithEstimate())
+        assert "Я распознала так: зыбзик." in card
+        _no_numbers(card)
+
+
 # ─── реплики о записи ─────────────────────────────────────────────────────────
 
 
