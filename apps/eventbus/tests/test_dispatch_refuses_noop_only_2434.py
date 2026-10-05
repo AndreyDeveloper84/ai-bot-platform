@@ -41,8 +41,14 @@ RECORDING = f"{__name__}.RecordingSubscriber"
 
 
 class RecordingSubscriber:
-    """Настоящий подписчик в миниатюре: запоминает, что ему доставили."""
+    """Настоящий подписчик в миниатюре: запоминает, что ему доставили.
 
+    Объявляет себя доставщиком смены согласия (DRF-2776): иначе живой режим
+    с согласием в ящике получил бы `refused_undelivered`, а этот файл про
+    другой отказ — про реестр из одних заглушек.
+    """
+
+    delivers = frozenset({"customer.consent.changed"})
     received: list[str] = []
 
     def handle(self, envelope: Envelope) -> None:
