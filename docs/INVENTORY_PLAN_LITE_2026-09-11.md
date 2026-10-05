@@ -1,5 +1,7 @@
 # Инвентарь Plan Lite (§133) — есть ли у связного пути предмет в коде — 11.09.2026
 
+> **УСТАРЕЛО с 18.09.2026 — запись дня, не текущее состояние (сверено 2026-10-05, DRF-2770).** Главный вывод ниже («слов `Plan Lite` … в коде нет») был верен на 11.09. С тех пор Plan Lite построен в каталоге: `beautygo_backend/wellness/plan_lite.py` (DRF-2101, коммит `d3e4106` от 18.09; план из 1–3 обязательств-действий из цели, без веса), `wellness/plan_lite_api.py`, `wellness/plan_lite_urls.py` (подключён в `djangoProject/urls.py:109–112`), `wellness/plan_lite_templates.py` (DRF-2123), флаг `PLAN_LITE_ENABLED` (`djangoProject/settings/base.py:612`, по умолчанию false). Текст ниже не правится: это замер 11.09, и его числа верны о том дне.
+
 Сабагент окна ЦЕЛИ И ПЛАН по брифу `docs/BRIEF_SUB_PLAN_LITE_INVENTORY.md`. Только чтение `origin/dev` обоих репозиториев: Linear не менялся, код не писался, `ssh` не использовался, на хосты не ходил. Рабочие копии на диске не читались — все пути ниже это `git show`/`git grep origin/dev:<путь>`.
 
 **Базы (после `git fetch origin dev`, 11.09):**
