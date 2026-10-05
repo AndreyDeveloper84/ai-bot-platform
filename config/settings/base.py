@@ -612,6 +612,13 @@ MEMORY_TOMBSTONE_PURGE_ENABLED = os.environ.get(
     "MEMORY_TOMBSTONE_PURGE_ENABLED", "false"
 ).lower() in ("true", "1")
 
+# DRF-2782 — свип сроков производной памяти Ф4 (30 дн неподтверждённые → надгробие,
+# 180 дн подтверждённые → status=expired, «нужно переподтвердить»). False по
+# умолчанию: включается вместе с выводами Ф4b.
+MEMORY_INFERENCE_TTL_SWEEP_ENABLED = os.environ.get(
+    "MEMORY_INFERENCE_TTL_SWEEP_ENABLED", "false"
+).lower() in ("true", "1")
+
 # Sprint 2 / D2 + D4 — MAX channel configuration.
 MAX_API_BASE = os.environ.get("MAX_API_BASE", "https://botapi.max.ru")
 MAX_BOT_TOKEN = os.environ.get("MAX_BOT_TOKEN", "")
@@ -1546,6 +1553,12 @@ CELERY_BEAT_SCHEDULE = {
     "identity_memory_tombstone_purge": {
         "task": "apps.identity.tasks.memory_tombstone_purge",
         "schedule": crontab(hour="3", minute="5"),
+    },
+    # DRF-2782 — сроки производной памяти Ф4. Инертна, пока
+    # MEMORY_INFERENCE_TTL_SWEEP_ENABLED закрыт.
+    "identity_memory_inference_ttl_sweep": {
+        "task": "apps.identity.tasks.memory_inference_ttl_sweep",
+        "schedule": crontab(hour="2", minute="50"),
     },
     # Sprint 8 / S4 (DRF-719) — daily shadow-delta sweep.
     # 08:00 МСК = 05:00 UTC — runs AFTER the mysite CSV publisher's
