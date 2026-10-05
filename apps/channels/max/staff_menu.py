@@ -86,6 +86,8 @@ CB_READINESS = "cb:staff:readiness"
 LABEL_DAY_ADMIN = "📅 Сегодня"
 LABEL_DAY_MASTER = "📅 Мой день"
 LABEL_REQUESTS = "🗒 Заявки от мастеров"
+#: DRF-2786 — the chat booking; distinct from the Mini App's «＋ Новая запись».
+LABEL_BOOK = "✍️ Записать клиента"
 
 #: Approving one request. The request id rides in the 4th segment;
 #: `parse_callback` splits on the first three colons only, so a UUID
@@ -117,6 +119,20 @@ CB_MVISIT_PREFIX = "cb:staff:mvisit:"
 #: Its answers, as the master (not the salon surface).
 CB_MDONE_PREFIX = "cb:staff:mdone:"
 CB_MNOSHOW_PREFIX = "cb:staff:mnoshow:"
+
+#: «✍️ Записать клиента» — a new booking in the chat (DRF-2786,
+#: ``staff_booking``). Every step's callback starts with ``cb:staff:bk_``;
+#: any OTHER staff button drops the draft.
+CB_BK_NEW = "cb:staff:bk_new"
+CB_BK_MASTER_PREFIX = "cb:staff:bk_m:"
+CB_BK_SERVICE_PREFIX = "cb:staff:bk_s:"
+CB_BK_DATE_PREFIX = "cb:staff:bk_d:"
+#: Ref — the index of the start in the draft (the timestamp stays server-side).
+CB_BK_SLOT_PREFIX = "cb:staff:bk_t:"
+CB_BK_CLIENT_PREFIX = "cb:staff:bk_c:"
+CB_BK_NEW_CLIENT = "cb:staff:bk_nc"
+CB_BK_CREATE = "cb:staff:bk_ok"
+BK_PREFIX = "cb:staff:bk_"
 
 #: Payload of the Mini App button — and the one identifier in this module
 #: that CANNOT use the ``cb:staff:*`` grammar above.
@@ -179,6 +195,10 @@ def menu_buttons(role_ctx, entry) -> list[dict[str, str]]:
     if is_admin_side:
         buttons.append({"label": LABEL_DAY_ADMIN, "callback": CB_DAY})
         buttons.append({"label": LABEL_REQUESTS, "callback": CB_REQUESTS})
+        if role_ctx.is_owner or role_ctx.is_admin:
+            # DRF-2786 — the booking write is owner / administrator only, as
+            # `require_admin_role` on the Mini App's create; not the front desk.
+            buttons.append({"label": LABEL_BOOK, "callback": CB_BK_NEW})
     elif role_ctx.is_master:
         buttons.append({"label": LABEL_DAY_MASTER, "callback": CB_DAY})
 

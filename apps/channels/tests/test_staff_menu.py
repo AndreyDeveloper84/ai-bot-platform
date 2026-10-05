@@ -192,8 +192,9 @@ class TestMenuComposition:
 
         # The menu is the entry, not the decisions: «состоялся» / «не пришёл»
         # live under the salon's day and «отклонить» under the request list
-        # (DRF-2784); booking in chat is not built. None of them is a menu row.
-        for forbidden in ("Записать", "Завершить", "Не пришёл", "Отменить"):
+        # (DRF-2784). «✍️ Записать клиента» IS a menu row since DRF-2786 — an
+        # entry into a flow, not a decision — so «Записать» left this list.
+        for forbidden in ("Завершить", "Не пришёл", "Отменить"):
             assert forbidden not in labels
 
     def test_callbacks_follow_the_shared_contract(self):

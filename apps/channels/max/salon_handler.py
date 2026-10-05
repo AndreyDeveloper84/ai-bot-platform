@@ -987,7 +987,7 @@ def _serve(event: CanonicalEvent, trace_id: str | uuid.UUID | None, *, tenant, b
             _greet_or_menu(event, role_ctx, tenant, bot_user, entry)
         elif _is_button_tap(event.text):
             _handle_button(event, role_ctx, bot_user, tenant, entry)
-        else:
+        elif not _booking_takes_text(event, role_ctx, bot_user, tenant, entry):
             _handle_talk(event, role_ctx, bot_user, tenant, entry)
 
 
@@ -1633,6 +1633,19 @@ def _handle_button(event: CanonicalEvent, role_ctx, bot_user, tenant, entry) -> 
 
     action = event.text
     is_admin_side = role_ctx.is_owner or role_ctx.is_admin or role_ctx.is_receptionist
+
+    from apps.channels.max import staff_booking
+    from apps.channels.max.staff_menu import BK_PREFIX
+
+    if action.startswith(BK_PREFIX):
+        if role_ctx.is_owner or role_ctx.is_admin:
+            _reply_booking(event, _booking_step(action, bot_user, tenant), role_ctx, entry)
+        else:
+            _send_menu(event, role_ctx, tenant, entry)
+        return
+    # Any other button ends a chat booking in progress (DRF-2786): a line
+    # typed afterwards is for the assistant, not a client search.
+    staff_booking.drop(tenant, bot_user)
     # DRF-2784: visit writes — owner / administrator, as on the salon surface
     # (IsTenantAdmin) and the admin Mini App (`require_admin_role`).
     can_settle = role_ctx.is_owner or role_ctx.is_admin
@@ -1853,6 +1866,65 @@ def _day_attachments(tenant, role_ctx, entry):
     if not buttons:
         return None
     return [make_inline_keyboard_attachment(buttons, columns=1)]
+
+
+def _booking_step(action: str, bot_user, tenant):
+    """Route one «✍️ Записать клиента» tap to its step (DRF-2786)."""
+
+    from apps.channels.max import staff_booking
+    from apps.channels.max.staff_menu import (
+        CB_BK_CLIENT_PREFIX,
+        CB_BK_CREATE,
+        CB_BK_DATE_PREFIX,
+        CB_BK_MASTER_PREFIX,
+        CB_BK_NEW,
+        CB_BK_NEW_CLIENT,
+        CB_BK_SERVICE_PREFIX,
+        CB_BK_SLOT_PREFIX,
+    )
+
+    kw = {"tenant": tenant, "bot_user": bot_user}
+    if action == CB_BK_NEW:
+        return staff_booking.start(**kw)
+    if action == CB_BK_NEW_CLIENT:
+        return staff_booking.new_client(**kw)
+    if action == CB_BK_CREATE:
+        return staff_booking.create(**kw)
+    for prefix, step in (
+        (CB_BK_MASTER_PREFIX, staff_booking.choose_master),
+        (CB_BK_SERVICE_PREFIX, staff_booking.choose_service),
+        (CB_BK_DATE_PREFIX, staff_booking.choose_date),
+        (CB_BK_SLOT_PREFIX, staff_booking.choose_slot),
+        (CB_BK_CLIENT_PREFIX, staff_booking.choose_client),
+    ):
+        if action.startswith(prefix):
+            return step(ref=action[len(prefix) :], **kw)
+    return staff_booking.start(**kw)
+
+
+def _reply_booking(event, reply, role_ctx, entry) -> None:
+    from apps.channels.max.outbound import make_inline_keyboard_attachment_rows
+
+    attachments: list[dict] | None
+    if reply.menu or not reply.rows:
+        attachments = menu_attachments(role_ctx, entry)
+    else:
+        attachments = [make_inline_keyboard_attachment_rows(reply.rows)]
+    _reply(event, reply.text, attachments=attachments)
+
+
+def _booking_takes_text(event, role_ctx, bot_user, tenant, entry) -> bool:
+    """A typed line while a chat booking waits for one (DRF-2786)."""
+
+    if not (role_ctx.is_owner or role_ctx.is_admin):
+        return False
+    from apps.channels.max import staff_booking
+
+    reply = staff_booking.take_text(tenant=tenant, bot_user=bot_user, text=event.text)
+    if reply is None:
+        return False
+    _reply_booking(event, reply, role_ctx, entry)
+    return True
 
 
 def _handle_master_action(event, action, master, bot_user, tenant, role_ctx, entry) -> None:
