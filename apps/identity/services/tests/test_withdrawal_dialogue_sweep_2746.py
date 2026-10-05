@@ -92,6 +92,7 @@ def _withdrawn(bot_user: BotUser, at: datetime, consent_type: str = PD) -> None:
 
 def _conversation(bot_user: BotUser, opened: datetime) -> Conversation:
     conversation = resolve_active_global_conversation(bot_user)
+    assert conversation is not None
     Conversation.all_tenants.filter(pk=conversation.pk).update(created_at=opened)
     conversation.refresh_from_db()
     return conversation
@@ -242,6 +243,7 @@ def test_d6_the_linked_forget_all_path_is_unchanged() -> None:
     UserPersonalContext.objects.create(user_id=user_id)
     request_forget_all(user_id)
     requested_at = UserPersonalContext.objects.get(user_id=user_id).forget_all_requested_at
+    assert requested_at is not None
     bot_user = _person("2746601", ayla_user_id=user_id)
     conversation = _conversation(bot_user, opened=requested_at - timedelta(minutes=10))
     _say(conversation, f"я {MARKER}", at=requested_at - timedelta(minutes=5))
@@ -272,7 +274,7 @@ def _source_of(call: ast.Call) -> str | None:
     for kw in call.keywords:
         if kw.arg == "source":
             if isinstance(kw.value, ast.Constant):
-                return kw.value.value
+                return str(kw.value.value)
             if isinstance(kw.value, ast.Name):
                 return _KNOWN_SOURCE_NAMES.get(kw.value.id, f"<name {kw.value.id}>")
             return "<expr>"
