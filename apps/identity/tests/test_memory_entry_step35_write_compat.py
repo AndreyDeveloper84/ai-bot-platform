@@ -3,9 +3,11 @@
 After the Step-3 backfills (0016/0018) every NEW explicit persistent write
 must carry the canonical §3.1 fields at creation time. The stamping lives
 in the single sanctioned write path (``memory_writer.write_entry``), so
-all explicit callers are covered. inferred/signal rows are deliberately
-NOT stamped — user_confirmed_inference may only come from the proposal
-flow (Step 4+).
+all explicit callers are covered. inferred/signal rows are NEVER
+promoted — user_confirmed_inference may only come from the confirmation
+flow. Since DRF-2780 (smart memory F4) inferred rows DO get their lifecycle
+fields (``test_inferred_canonical_fields_2780.py``); signal rows stay
+unstamped (no writer).
 """
 
 from __future__ import annotations
@@ -97,14 +99,20 @@ class TestExplicitWriteStampsCanonical:
 
 class TestInferredSignalNeverPromoted:
     @pytest.mark.parametrize("source", [MemoryEntry.SOURCE_INFERRED, MemoryEntry.SOURCE_SIGNAL])
-    def test_no_canonical_stamping(self, source):
+    def test_never_promoted(self, source):
         """11. inferred/signal writes never become user_confirmed_inference
-        automatically — canonical fields stay NULL (proposal flow only)."""
+        automatically — provenance stays NULL (confirmation flow only)."""
         entry = _write(_upc(), source=source)
         entry.refresh_from_db()
         assert entry.provenance is None
-        assert entry.status is None
         assert entry.source == source  # legacy metadata unchanged
+
+    def test_signal_stays_unstamped(self):
+        """Signal rows have no writer; their lifecycle is not decided yet."""
+        entry = _write(_upc(), source=MemoryEntry.SOURCE_SIGNAL)
+        entry.refresh_from_db()
+        assert entry.source == MemoryEntry.SOURCE_SIGNAL
+        assert entry.status is None
 
 
 @pytest.mark.django_db(transaction=True)

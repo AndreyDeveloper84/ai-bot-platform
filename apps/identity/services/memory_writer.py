@@ -174,6 +174,18 @@ def _is_consent_violation(exc: IntegrityError) -> bool:
     return _CONSENT_CONSTRAINT in str(exc)
 
 
+#: Умная память Ф4 (решение владельца 05.10.2026, DRF-2780): срок
+#: НЕподтверждённого предположения — 30 дней. PENDING — ждёт ратификации
+#: владельцем; подтверждённое живёт 180 дней (поток подтверждения, DRF-2781),
+#: свип сроков — DRF-2782. Число литералом и здесь, и в узле.
+INFERRED_UNCONFIRMED_TERM_DAYS = 30
+
+#: Основание, под которым пишется выводимое (``MemoryEntry.consent_scope``):
+#: добровольное согласие на предположения (DRF-2779). Значение равно типу
+#: согласия — чтобы атрибут записи и запись реестра называли одно и то же.
+INFERRED_CONSENT_SCOPE = "preference_inference"
+
+
 def write_entry(
     *,
     user_id: uuid.UUID,
@@ -188,6 +200,9 @@ def write_entry(
     source_tenant_id: Optional[uuid.UUID] = None,
     last_inferred_at: Optional[Any] = None,
     ttl_days: Optional[int] = None,
+    derivation_method: Optional[str] = None,
+    evidence_refs: Optional[list[Any]] = None,
+    source_event_id: Optional[uuid.UUID] = None,
 ) -> Optional[MemoryEntry]:
     """Create a new MemoryEntry with all spec §11 guards.
 
@@ -208,6 +223,11 @@ def write_entry(
         last_inferred_at: REQUIRED when source IN ('inferred','signal'),
             MUST be NULL when source='explicit' (CHECK 1 enforces it).
         ttl_days: per-zone retention cap. None = no auto-TTL (green).
+        derivation_method / evidence_refs / source_event_id: provenance of an
+            INFERRED fact (DRF-2780, owner 05.10: «каждое предположение —
+            источник, дата, статус, срок»). Stored as given — the writer never
+            fabricates them; ignored for explicit rows (a user_stated fact is
+            its own source).
 
     Returns:
         The created MemoryEntry on success, OR None when the write was
@@ -235,11 +255,14 @@ def write_entry(
     # writes are canonical user_stated facts — stamped here, in the single
     # sanctioned write path, so every explicit caller is covered. ONE
     # timestamp per write operation (no auto_now semantics): effective_from
-    # == updated_at == the expiry base. inferred/signal rows are NOT
-    # stamped — provenance=user_confirmed_inference may only come from the
-    # proposal flow (Step 4+), never silently from the writer. consent_scope
-    # / source_event_id / evidence_refs / derivation_method are never
-    # fabricated here; purpose_tags stays [] (no category policy yet).
+    # == updated_at == the expiry base. INFERRED rows are stamped too since
+    # DRF-2780 (smart memory F4, owner 05.10) — lifecycle, a 30-day
+    # unconfirmed term and the consent scope, but provenance stays NULL:
+    # user_confirmed_inference may only come from the confirmation flow
+    # (DRF-2781), never silently from the writer. Signal rows are not
+    # stamped (no writer). source_event_id / evidence_refs /
+    # derivation_method are stored as the caller gives them, never
+    # fabricated; purpose_tags stays [] (no category policy yet).
     canonical: dict[str, Any] = {}
     if source == MemoryEntry.SOURCE_EXPLICIT:
         write_ts = timezone.now()
@@ -249,6 +272,28 @@ def write_entry(
             "effective_from": write_ts,
             "updated_at": write_ts,
             "expires_at": (write_ts + timedelta(days=ttl_days) if ttl_days is not None else None),
+        }
+    elif source == MemoryEntry.SOURCE_INFERRED:
+        # DRF-2780 (умная память Ф4): предположение — не факт. Оно живое
+        # (``status=active``), но ``provenance`` остаётся NULL: стать
+        # ``user_confirmed_inference`` оно может только подтверждением
+        # человека (DRF-2781), никогда — молча здесь. Срок — 30 дней
+        # неподтверждённого, либо короче, если вызывающий назвал меньший.
+        # Основание записи — добровольное согласие на предположения.
+        write_ts = timezone.now()
+        term = INFERRED_UNCONFIRMED_TERM_DAYS
+        if ttl_days is not None:
+            term = min(term, ttl_days)
+        canonical = {
+            "status": MemoryEntry.STATUS_ACTIVE,
+            "provenance": None,
+            "effective_from": write_ts,
+            "updated_at": write_ts,
+            "expires_at": write_ts + timedelta(days=term),
+            "consent_scope": INFERRED_CONSENT_SCOPE,
+            "derivation_method": derivation_method,
+            "evidence_refs": list(evidence_refs or []),
+            "source_event_id": source_event_id,
         }
 
     # DRF-2544 — происхождение решается в момент записи и в одном месте:
