@@ -214,14 +214,11 @@ class TestAllowlistPaths:
 
     def test_the_memory_ttl_sweep_may_read_the_entry_stamp(self, tmp_path) -> None:
         """DRF-2748 — ``MemoryEntry.consent_at``, the start of the entry's term."""
-        assert (
-            _scan(
-                tmp_path,
-                "MemoryEntry.objects.exclude(consent_at__gt=cutoff)\n",
-                name="apps/identity/services/memory_deleter.py",
-            )
-            == []
-        )
+        source = "MemoryEntry.objects.exclude(consent_at__gt=cutoff)\n"
+        # The same read anywhere else is flagged — so the pass below is the
+        # allowlist entry at work, not a pattern the guard cannot see.
+        assert len(_scan(tmp_path, source, name="apps/identity/services/memory_reader.py")) == 1
+        assert _scan(tmp_path, source, name="apps/identity/services/memory_deleter.py") == []
 
     def test_tests_may_read(self, tmp_path) -> None:
         assert (
