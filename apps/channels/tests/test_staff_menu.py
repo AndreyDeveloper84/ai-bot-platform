@@ -190,7 +190,9 @@ class TestMenuComposition:
     def test_no_buttons_promise_what_the_backend_cannot_do(self):
         labels = " ".join(b["label"] for b in menu_buttons(_Role(owner=True), WITH_APP))
 
-        # Ayla has no salon-employee actor for these; a button would lie.
+        # The menu is the entry, not the decisions: «состоялся» / «не пришёл»
+        # live under the salon's day and «отклонить» under the request list
+        # (DRF-2784); booking in chat is not built. None of them is a menu row.
         for forbidden in ("Записать", "Завершить", "Не пришёл", "Отменить"):
             assert forbidden not in labels
 
@@ -520,11 +522,9 @@ class TestTaps:
 class TestApproveFromChat:
     """Deciding a schedule request with one tap (DRF-1061 block 3.2).
 
-    Only APPROVAL lives in chat. Rejection requires a written reason the
-    master will read — the service makes `rejection_reason` mandatory and
-    surfaces it in their DM — and asking for free text in chat would mean
-    an FSM, i.e. a "now send me the reason" state to get stuck in.
-    Approval needs no text, so it is the tap-sized half.
+    Approval here; rejection beside it since DRF-2784, with the template
+    reason — see ``test_staff_chat_actions_2784``. A rejection with a
+    written reason stays in the Mini App.
     """
 
     def _pending(self, tenant, master):
@@ -621,5 +621,5 @@ class TestApproveFromChat:
         with tenant_scope(tenant):
             text = staff_actions.pending_requests(tenant)
 
-        # The person must not hunt for a reject button that is not there.
+        # Where a rejection WITH a written reason lives (DRF-2784 keeps it).
         assert "Отклонить" in text and "кабинете" in text
