@@ -2028,6 +2028,47 @@ def handle_booking_no_show(envelope: IngestEnvelope) -> None:
 # ─── registration ──────────────────────────────────────────────────────────
 
 
+def handle_booking_acknowledged(envelope: IngestEnvelope) -> None:
+    """``booking.acknowledged`` v1 — the master confirmed the visit (DRF-2785).
+
+    The catalog emits it when a master taps «✅ Подтверждаю»; the booking's
+    status does not change. The envelope's ``user_id`` is the CLIENT (the
+    addressee of «мастер подтвердил»); who tapped is
+    ``data.acknowledged_by="specialist"``.
+
+    Accepted, checked against the tenant and the mirror, and logged. The
+    client is NOT written to yet: the words are the owner's to give, and a
+    text invented here would be a promise nobody approved. Until then the
+    point of accepting the name is that the topic can be switched on without
+    every acknowledgement dead-lettering as ``unknown_event_name``.
+    """
+
+    assert_envelope_tenant_authorized(envelope)
+
+    data = envelope.data
+    appointment_id = UUID(data["appointment_id"])
+
+    tenant = _resolve_tenant(envelope.tenant_id)
+    if tenant is None:
+        logger.warning(
+            "eventbus.consumer.booking.acknowledged.unknown_tenant tenant_id=%s",
+            envelope.tenant_id,
+        )
+        return
+
+    proxy = RemoteBookingProxy.all_tenants.filter(appointment_id=appointment_id).first()
+    _assert_proxy_tenant(proxy=proxy, expected_tenant=tenant, envelope=envelope)
+
+    logger.info(
+        "eventbus.consumer.booking.acknowledged appointment_id=%s version=%s "
+        "mirrored=%s event_id=%s",
+        appointment_id,
+        data.get("version"),
+        proxy is not None,
+        envelope.event_id,
+    )
+
+
 def register_booking_handlers() -> None:
     """Register the booking.* handlers with the ingest dispatcher.
 
@@ -2049,6 +2090,7 @@ def register_booking_handlers() -> None:
         ("appointment.rescheduled", 1, handle_appointment_rescheduled_canonical),
         ("booking.completed", 1, handle_booking_completed),
         ("booking.no_show", 1, handle_booking_no_show),
+        ("booking.acknowledged", 1, handle_booking_acknowledged),
     )
     for event_name, version, handler in pairs:
         try:
