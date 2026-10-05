@@ -3211,6 +3211,50 @@ def customer_nutrition_display(request: HttpRequest) -> HttpResponse:
 @require_http_methods(["POST", "DELETE"])
 @require_init_data
 @with_request_tenant
+def customer_preference_inference_consent(request: HttpRequest) -> HttpResponse:
+    """Согласие на предположения о предпочтениях (умная память Ф4, DRF-2779).
+
+    ``POST`` — выдать; тело ``{"document_version": "<версия>"}``. Версия —
+    доказательство, под каким текстом человек нажал: незнакомая отвергается
+    с 409, клиенту нужно перечитать ``GET /me/consents/`` (там
+    ``preference_inference.grant.document_version``). ``DELETE`` — отозвать.
+    Оба перехода идемпотентны и отвечают свежим документом согласий.
+
+    Добровольное: отказ не блокирует ни запись, ни что-либо ещё. Текст —
+    черновик владельца на юр-проверке (#947), документ это говорит
+    (``grant.pending_legal``).
+    """
+    from apps.consent import preference_inference
+
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    if request.method == "POST":
+        body = _json_object_body(request)
+        if isinstance(body, HttpResponse):
+            return body
+        try:
+            preference_inference.grant(
+                bot_user, document_version=str(body.get("document_version", ""))
+            )
+        except preference_inference.UnknownDisclosureVersionError:
+            return _error(
+                "stale_disclosure",
+                "document_version does not match the current preference-inference text",
+                409,
+            )
+    else:
+        preference_inference.withdraw(bot_user)
+    logger.info(
+        "miniapp_api.consents.preference_inference bot_user=%s granted=%s",
+        bot_user.id,
+        request.method == "POST",
+    )
+    return JsonResponse(_consents_document(bot_user))
+
+
+@csrf_exempt
+@require_http_methods(["POST", "DELETE"])
+@require_init_data
+@with_request_tenant
 def customer_marketing_consent(request: HttpRequest) -> HttpResponse:
     """Маркетинговое согласие: ``POST`` — выдать, ``DELETE`` — отозвать.
 

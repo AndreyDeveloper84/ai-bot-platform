@@ -115,6 +115,12 @@ urlpatterns = [
         views.customer_marketing_consent,
         name="customer_marketing_consent",
     ),
+    # DRF-2779 — умная память Ф4: добровольное согласие на предположения.
+    path(
+        "me/consents/preference-inference/",
+        views.customer_preference_inference_consent,
+        name="customer_preference_inference_consent",
+    ),
     # Только DELETE: выдаёт согласие человек своим действием в приветственном
     # потоке, эта ручка умеет ровно отзывать.
     path(

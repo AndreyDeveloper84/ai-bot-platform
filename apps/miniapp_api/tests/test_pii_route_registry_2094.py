@@ -86,6 +86,10 @@ _CONSENTS_DOCUMENT = own(
     "proactive_hints.enabled",
     "data_storage.revocation",
     "data_storage.regrant",
+    "preference_inference.granted",
+    "preference_inference.granted_at",
+    "preference_inference.document_version",
+    "preference_inference.grant",
     via="apps.consent.customer:read_consents",
     note=(
         "the customer's own consent registry re-read from the database after the write; "
@@ -204,6 +208,8 @@ CUSTOMER_ROUTES: dict[str, Entry] = {
         ),
     ),
     "customer_marketing_consent": _CONSENTS_DOCUMENT,
+    # DRF-2779 — умная память Ф4: добровольное согласие на предположения.
+    "customer_preference_inference_consent": _CONSENTS_DOCUMENT,
     "customer_data_storage_consent": own(
         "consents.*",
         "proactive_hints.enabled",
