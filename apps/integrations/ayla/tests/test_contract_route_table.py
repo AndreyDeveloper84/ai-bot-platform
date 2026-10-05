@@ -150,6 +150,9 @@ ROUTE_TABLE: tuple[Route, ...] = (
     # point: the subject is named ONLY by the header, and there is no request
     # body a caller could use to substitute a different one.
     Route("GET", "/api/v1/internal/me/identity/", Auth.BEARER_EXT),
+    # DRF-2776 — смена согласия бот → каталог (ручку объявил каталог, ayla-00);
+    # субъект — только из X-External-User-ID.
+    Route("POST", "/api/v1/internal/me/consent-events/", Auth.BEARER_EXT),
     # profile_client (#978 → DRF-1709, 12.09.2026). Until this day: Bearer
     # ALONE, on the reading that the `user.profile.updated` consumer acts on
     # a NOTIFICATION about a person and has nobody to name. Reversed with
@@ -565,6 +568,22 @@ def _exercise_identity() -> None:
     _swallow(lambda: identity_client.resolve_identity(_EXT_USER))
 
 
+def _exercise_consent_events() -> None:
+    from apps.integrations.ayla.consent_events_client import post_consent_event
+
+    _swallow(
+        lambda: post_consent_event(
+            external_user_id=_EXT_USER,
+            body={
+                "event_id": "01J9CONTRACTCONSENT000001",
+                "consent_type": "personal_calculation",
+                "granted": False,
+                "granted_at": "2026-10-05T10:00:00+00:00",
+            },
+        )
+    )
+
+
 def _exercise_personal_context() -> None:
     from apps.integrations.ayla.personal_context_client import PersonalContextHttpClient
 
@@ -725,6 +744,7 @@ async def test_all_clients_match_route_table(captured: list[Captured]) -> None:
     _exercise_booking()
     _exercise_profile()
     _exercise_identity()
+    _exercise_consent_events()
     _exercise_personal_context()
     _exercise_billing()
     _exercise_client_payments()
