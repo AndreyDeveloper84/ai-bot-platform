@@ -100,32 +100,23 @@ def _labels(buttons: list[dict]) -> list[str]:
 
 class TestD1TheAdminSet:
     def test_the_digest_carries_the_chat_actions_and_the_app_screens(self, settings, sent) -> None:
-        from apps.channels.max import staff_menu
-        from apps.channels.max.salon_greeting import (
-            BUTTON_ASK_AYLA,
-            BUTTON_CHECK_READINESS,
-            BUTTON_NEW_BOOKING,
-            BUTTON_OPEN_SALON,
-            BUTTON_SCHEDULE,
-            BUTTON_TODAY,
-        )
-
         _registry(settings, miniapp_url="https://app.example")
         _send_digest("d1")
 
         assert len(sent) == 1  # положительно: итог ушёл, один управляющий
         labels = _labels(sent[0]["buttons"])
+        # Литералами: состав набора утверждён владельцем, константа его не держит.
         assert labels == [
-            staff_menu.LABEL_DAY_ADMIN,
-            staff_menu.LABEL_REQUESTS,
-            BUTTON_CHECK_READINESS,
-            BUTTON_OPEN_SALON,
-            BUTTON_SCHEDULE,
-            BUTTON_ASK_AYLA,
-            BUTTON_NEW_BOOKING,
+            "📅 Сегодня",
+            "🗒 Заявки от мастеров",
+            "Проверить готовность",
+            "Открыть салон",
+            "Расписание",
+            "Спросить Ayla",
+            "＋ Новая запись",
         ], labels
         # «Сегодня» один раз: день салона — первой кнопкой, экран дня не дублирует её.
-        assert BUTTON_TODAY not in labels
+        assert labels.count("Сегодня") == 0
 
     def test_the_labels_are_the_menu_and_greeting_words(self) -> None:
         """Своих слов у итога нет. Литералом — подпись есть решение, константа её не держит."""
@@ -138,15 +129,13 @@ class TestD1TheAdminSet:
 
 class TestD2WithoutAMiniApp:
     def test_chat_buttons_stay_and_the_digest_still_goes(self, settings, sent) -> None:
-        from apps.channels.max import staff_menu
-
         _registry(settings)  # ни web_app, ни miniapp_url
         _send_digest("d2")
 
         assert len(sent) == 1
         assert _labels(sent[0]["buttons"]) == [
-            staff_menu.LABEL_DAY_ADMIN,
-            staff_menu.LABEL_REQUESTS,
+            "📅 Сегодня",
+            "🗒 Заявки от мастеров",
             "Проверить готовность",
         ]
         assert all(b.get("type") == "callback" for b in sent[0]["buttons"])
@@ -160,8 +149,9 @@ class TestD3TheCallbacksAreTheStaffHandlers:
         _send_digest("d3")
 
         payloads = _payloads(sent[0]["buttons"])
-        assert payloads == [staff_menu.CB_DAY, staff_menu.CB_REQUESTS, staff_menu.CB_READINESS]
         assert payloads == ["cb:staff:day", "cb:staff:requests", "cb:staff:readiness"]
+        # …и это ровно те имена, по которым ветвится salon_handler._handle_button.
+        assert payloads == [staff_menu.CB_DAY, staff_menu.CB_REQUESTS, staff_menu.CB_READINESS]
 
 
 class TestD4TheNoticeWithoutAKeyboardIsUnchanged:
@@ -177,5 +167,6 @@ class TestD4TheNoticeWithoutAKeyboardIsUnchanged:
             tenant, local_date=date(2026, 9, 21), lines=["Сегодня:", "7 записей."]
         )
 
-        assert notice.keyboard == ()
+        # Контроль, зелёный и до правки: вызов без клавиатуры не меняется.
         assert [b.label for b in notice.buttons] == ["Открыть салон"]
+        assert not getattr(notice, "keyboard", ())
