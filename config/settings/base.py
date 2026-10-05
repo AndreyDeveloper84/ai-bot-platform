@@ -1536,6 +1536,11 @@ CELERY_BEAT_SCHEDULE = {
         "task": "apps.identity.tasks.forget_all_sweep",
         "schedule": crontab(minute="50"),
     },
+    # DRF-2748 — ночной свип срока хранения жёлтой/красной памяти (спека §5).
+    "identity_memory_ttl_sweep": {
+        "task": "apps.identity.tasks.memory_ttl_sweep",
+        "schedule": crontab(hour="2", minute="35"),
+    },
     # DRF-2775 — физическая очистка надгробий памяти. Инертна, пока
     # MEMORY_TOMBSTONE_PURGE_ENABLED закрыт.
     "identity_memory_tombstone_purge": {
