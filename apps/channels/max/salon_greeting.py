@@ -360,6 +360,17 @@ def admin_role_word(role_ctx: Any) -> str:
 
 def render_master(name: str, salon: str, data: GreetingData) -> str:
     lines = [MASTER_HELLO.format(name=name), MASTER_ROLE_LINE.format(salon=salon)]
+    return NL.join(lines + render_master_summary_lines(data))
+
+
+def render_master_summary_lines(data: GreetingData) -> list[str]:
+    """Строки дня мастера — одни на приветствие и на утренний итог мастеру (DRF-2769).
+
+    Пусто, когда день мастера не прочитан (§103): вызывающий решает, что с
+    этим делать (приветствие — только шапка, итог — не слать).
+    """
+
+    lines: list[str] = []
     if data.my_records == 0 and data.my_empty_day:
         # DRF-2759 — «Сегодня у вас 0 записей» не отличало выходной от
         # ненастроенного графика; строка владельца называет причину.
@@ -373,7 +384,7 @@ def render_master(name: str, salon: str, data: GreetingData) -> str:
                 client=n.client, service=n.service, minutes=n.minutes, time=n.time
             )
         )
-    return NL.join(lines)
+    return lines
 
 
 def _attention_total(data: GreetingData) -> int | None:
@@ -496,6 +507,17 @@ def digest_admin_buttons(entry: Any) -> list[dict[str, str]]:
         {"label": BUTTON_CHECK_READINESS, "callback": CB_READINESS},
     ]
     app = [b for b in admin_buttons(entry) if b.get("label") != BUTTON_TODAY]
+    return chat + app
+
+
+def digest_master_buttons(entry: Any) -> list[dict[str, str]]:
+    """Кнопки утреннего итога мастеру (DRF-2769): «📅 Мой день» в чате — работает
+    без Mini App, — затем экраны :func:`master_buttons`, кроме «Сегодня» (день уже
+    первой кнопкой). Подписи — из меню персонала и приветствия."""
+    from apps.channels.max.staff_menu import CB_DAY, LABEL_DAY_MASTER
+
+    chat = [{"label": LABEL_DAY_MASTER, "callback": CB_DAY}]
+    app = [b for b in master_buttons(entry) if b.get("label") != BUTTON_TODAY]
     return chat + app
 
 

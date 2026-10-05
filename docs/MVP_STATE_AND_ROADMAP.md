@@ -2,6 +2,8 @@
 
 > **Status: authoritative, 2026-06-04.** This is the single source of truth for *what exists, what does not, what blocks us, and the path to MVP.* It supersedes scattered/aspirational status tables elsewhere. Where a `CLAUDE.md` "spec alignment" table or an older plan disagrees with this document, **this document wins** (and the older doc should be corrected — see §6).
 >
+> **Сверено 2026-10-05 (DRF-2770), только названное ниже:** память (G2, §3.3, §6 п.3, правило статусов) и версия `ayla-ai-core`. Эти места приведены к коду `origin/dev` `d17594c0` с адресами. **Остальные строки — снимок 2026-06-04 и заново НЕ проверялись**; часть из них заведомо старше кода (например, бот ходит в REST Ayla за слотами и записью — `apps/integrations/ayla/booking_client.py`, — так что G1/G8 в исходном виде устарели). Прежде чем опираться на любую строку этого документа, сверить её с кодом.
+>
 > Grounded in seven read-only code audits of `origin/dev` across `ai-bot-platform`, `beautygo_backend` (Ayla canonical SoR), `ayla-ai-core`, and the tech lead's in-production `formula_tela` monolith (2026-06-04 session).
 
 ---
@@ -18,7 +20,7 @@
 - **The bot (`ai-bot-platform`) is a read/write mirror via REST** — it reads slots+catalog and writes bookings through Ayla REST; it never owns canonical transactional state.
 - **Tenant isolation is the safety invariant** (`STRICT_TENANT_SCOPE`, `TenantScopedManager` → `CrossTenantError`), hardened this session (PRs #995/#998/#1000/#1009) and enforced by the import-boundary linter (#1011).
 - **Lock to a salon only at booking.** Discovery runs tenant-less (`current_tenant()=None`, blessed for global scope). Cross-tenant discovery is a **public, read-only carve-out** (`all_tenants`, public fields only); all commercial reads/writes stay tenant-scoped.
-- **AI conversation engine = `ayla-ai-core` v0.8.1** (frozen): `AIConcierge` orchestrator, provider-agnostic UUID-ready tool schemas, anti-hallucination dispatch, built-in Claude adapter, `AYLA_MARKETPLACE_VOICE`. Use as-is; do not modify during freeze.
+- **AI conversation engine = `ayla-ai-core`** — на 2026-10-05 в локе **0.9.0** (`uv.lock`, пакет `ayla-ai-core`, `version = "0.9.0"`, rev `ee6425ac`; на 2026-06-04 был v0.8.1, frozen): `AIConcierge` orchestrator, provider-agnostic UUID-ready tool schemas, anti-hallucination dispatch, built-in Claude adapter, `AYLA_MARKETPLACE_VOICE`. Use as-is; do not modify during freeze.
 - **Memory, recommendations & personalization are CHANNEL-INDEPENDENT PLATFORM SERVICES — not bot features.** They are owned by the AI runtime (`ai-bot-platform` + `ayla-ai-core`, per ADR-0009) and exposed via API, consumed **identically by every channel**: the MAX bot, the Mini App, and the **mobile app** (the mobile app reaches them through `beautygo_backend` proxying to the personalization/recommendation API). The bot is *one* channel into Ayla's memory — memory must never live only in the bot. North Star «AI, который помнит. Всегда.» = the **same** memory + recommendations on every surface (bot chat, mobile home screen, Mini App, booking assistant). A request like the mobile `GET /api/v1/customer/home` and a bot turn must draw on the same context (preferences, history, favourite masters, constraints, wellness signals).
 
 ```
@@ -67,8 +69,8 @@ The platform is **far more built than "greenfield."** A mature two-sided system 
 
 ### 3.3 Infrastructure (built, some not wired — see §4)
 - **Tenant isolation** — hardened, linter-enforced.
-- **Memory models** — `UserPersonalContext`, `MemoryEntry` (zones), `memory_writer` (consent/minor-protection), `red_zone_reader` (RLS). **Models exist; not wired into chat (§4).**
-- **`ayla-ai-core` v0.8.1** — the canonical, production-hardened concierge (extracted from `formula_tela`, 30+ days in prod), Claude-ready, frozen.
+- **Memory models** — `UserPersonalContext`, `MemoryEntry` (zones), `memory_writer` (consent/minor-protection), `red_zone_reader` (RLS). **Подключены к ходу консьержа** (на 2026-10-05; путь — §4 G2). На 2026-06-04 было: «Models exist; not wired into chat».
+- **`ayla-ai-core`** (в локе 0.9.0 на 2026-10-05; на 2026-06-04 — v0.8.1) — the canonical, production-hardened concierge (extracted from `formula_tela`, 30+ days in prod), Claude-ready, frozen.
 - **Ayla booking engine** — slot math (30-min grid, time-off/break/booked/min-notice/timezone), atomic `select_for_update` create, cancel/reschedule services. **Complete + tested.**
 - **Worker/consumer** — drains `ingress:max`; compose service added (#1010/#1012).
 
@@ -81,7 +83,7 @@ Ordered by impact on the vision.
 | # | Gap / blocker | Detail | Impact |
 |---|---|---|---|
 | **G1** | **Bot booking runs on YClients + single-tenant, not Ayla, not cross-salon** | `apps/skills/booking` resolves slots from YClients (dormant until `YCLIENTS_*`) and writes a local `BookingRequest`; bound to one tenant via `MAX_BOT_TENANT_SLUG`. Three divergent availability stores (Ayla native / bot-YClients / bot-own-scheduling), none reads Ayla `/slots`. | **Blocks the trunk + marketplace.** This is P0. |
-| **G2** | **Long-term memory NOT wired into runtime AI — across ANY channel** | `UserPersonalContext`/`MemoryEntry` have **zero runtime references** in skills/orchestrator. The infrastructure exists but is not wired into runtime AI experiences on **any** surface: bot chat, mobile app, Mini App, recommendation/home screens, the booking assistant. Memory is a **channel-independent platform capability**, not bot-only; today it feeds none (only short-term + RFM snapshot is live). | **Kills the headline differentiator on every channel.** |
+| **G2** | ~~Long-term memory NOT wired into runtime AI~~ → **закрыто для чата MAX (сверено 2026-10-05)** | Память подаётся в ход консьержа: `apps/channels/max/handler.py:2658` — `render_current_personal_context(bot_user)` (GREEN-память и сводка), `:2669` — `build_concierge_memory_block(bot_user)` (заявленные предпочтения + выведенные GREEN, за гейтом согласия `memory_green`, fail-closed); оба блока уходят в `orchestrate_turn` (`:2729`, параметры `memory_block` и `extra_system`) → `apps/orchestrator/turn_seam.py:448` → `apps/orchestrator/concierge.py:1449` (`build_concierge_system_prompt` кладёт блок в системный промпт `ayla_ai_core.AIConcierge`). Чтение — `apps/identity/services/memory_reader.py:140` (`read_personal_context`); Mini App показывает память — `apps/miniapp_api/views_memory.py`. **Что НЕ сверялось этой правкой:** мобильное приложение, домашние экраны и подбор каталога. Было (2026-06-04): «`UserPersonalContext`/`MemoryEntry` have zero runtime references in skills/orchestrator». | Для чата — снято; для остальных поверхностей — не измерено. |
 | **G3** | **No cross-tenant marketplace index** | `CatalogMaster`/`CatalogService` are per-tenant mirrors (`TenantScopedManager`). Discovery is within-tenant only. No nationwide search a master "joins." | **Blocks "finds a master across all salons."** |
 | **G4** | **No in-chat `recommend_services`; no proactive nudge engine** | `recommend_services` + a rich nudge engine (repeat-offer, win-back, re-engagement, care-by-health-signal, cross-promo — 11 classes) exist in `formula_tela`, **absent in platform**. Platform has only fixed reminders + one day-after nudge. `cross_domain` (mixed-intent) is a stub. | Weakens matching ("paralysis of choice") + retention. |
 | **G5** | **No provider manual/walk-in booking** | `appointments.create()` forbids non-clients. A salon can't enter a phone/walk-in booking into its own diary. If the salon books outside Ayla, the bot's slots go stale → **double-booking risk**. | Table-stakes for real salons; pilot risk. |
@@ -110,7 +112,7 @@ The "planned-as-done" pattern (a roadmap target cited as implemented) created re
 
 1. **`.importlinter.baseline` confabulation** — cited as enforcement across 3 docs; the file never existed (the real enforcement is `ruff` TID251 + the new AST linter #1011). Tracked: **#1001** (enforcement) + **#1002** (doc sweep).
 2. **"AI Chat / booking — not implemented"** (`beautygo_backend/CLAUDE.md` spec-alignment) — misleading: the **bot** (this repo) has a full 8-tool booking conversation, and `ayla-ai-core` ships the concierge. Correct to: *"AI booking conversation lives in `ai-bot-platform` + `ayla-ai-core`; what is missing is its **regrounding onto Ayla REST** (G1)."*
-3. **"UserPersonalContext — not implemented"** — half-true: the **models/writer exist** but are **not wired into chat** (G2). Correct to: *"infrastructure exists; not yet read/written during conversation."*
+3. **"UserPersonalContext — not implemented"** — неверно. На 2026-06-04 поправка была «модели есть, в чат не подключены»; на 2026-10-05 **и это устарело**: память читается в ход консьержа (G2, с адресами).
 4. **Tenant/marketplace model undocumented** — the "tenant = salon → N bots" implication and the cross-tenant marketplace plan were nowhere written, causing the core misunderstanding. Fixed by this document + the marketplace EPIC **#1014** (promote to an ADR).
 5. **Three availability stores** — no doc states which of Ayla-native / bot-YClients / bot-own-scheduling is canonical. This document fixes it: **Ayla is canonical; the others are divergences to retire** (G1).
 
@@ -122,7 +124,7 @@ Docs must **never** write "done"/"implemented" when only the spec or a model exi
 
 **`designed` → `implemented` → `wired` → `tested` → `production-ready`**
 
-"Implemented" ≠ "wired" (cf. G2: memory is *implemented* but not *wired*). This single rule prevents the planned-as-done disease that caused this session's confusion.
+"Implemented" ≠ "wired" (на 2026-06-04 примером была G2 — память *implemented*, но не *wired*; с тех пор её подключили, см. G2). This single rule prevents the planned-as-done disease that caused this session's confusion.
 
 ---
 

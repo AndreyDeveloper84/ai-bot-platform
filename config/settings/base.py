@@ -1874,6 +1874,15 @@ SALON_MORNING_DIGEST_ENABLED = os.environ.get("SALON_MORNING_DIGEST_ENABLED", "f
     "1",
 )
 
+# DRF-2769 (фаза 2): итог — и мастерам, каждому его день. Отдельный выключатель,
+# False по умолчанию: где итог управляющим уже включён, выкладка не должна сама
+# начать писать всем мастерам — включение их половины на стенде через env.
+# Работает только вместе с SALON_MORNING_DIGEST_ENABLED (тот же beat).
+SALON_MASTER_DIGEST_ENABLED = os.environ.get("SALON_MASTER_DIGEST_ENABLED", "false").lower() in (
+    "true",
+    "1",
+)
+
 # DRF-1464 - the two switches in front of the AI dietologist
 # (apps/nutrition_coach).
 #

@@ -72,6 +72,12 @@ def enabled() -> bool:
     return bool(getattr(settings, "SALON_MORNING_DIGEST_ENABLED", False))
 
 
+def masters_enabled() -> bool:
+    """Половина мастеров (DRF-2769) — свой выключатель, и только при общем."""
+
+    return enabled() and bool(getattr(settings, "SALON_MASTER_DIGEST_ENABLED", False))
+
+
 def digest_hour(tenant: Any) -> int:
     """Час итога по салону: ``features[morning_digest_hour]`` (0–23), иначе 09:00."""
 
@@ -106,6 +112,40 @@ def gather_digest(tenant: Any, *, now: datetime | None = None):
     return salon_greeting.gather(tenant, _AdminRole(), now=now)
 
 
+def master_recipients(tenant: Any) -> list[tuple[Any, Any]]:
+    """``(bot_user, role_ctx)`` мастеров салона, которым итог о их дне (DRF-2769).
+
+    Мастер — тем же предикатом, что у резолвера роли (``ENROLLED`` +
+    ``linked_bot_user``): кому бот отвечает как мастеру, тому и итог.
+    Мастер, который сам владелец или администратор, уже получает итог
+    управляющего — второго сообщения ему нет. Роль — через
+    :func:`resolve_role`, не копией.
+    """
+
+    from apps.catalog.master_state import ENROLLED
+    from apps.catalog.models import CatalogMaster
+    from apps.identity.services.role_resolver import resolve_role
+    from apps.tenancy.context import tenant_scope
+
+    # Тенантный менеджер внутри scope салона — как в ``salon_greeting.gather``:
+    # beat идёт без тенантного контекста, а ``all_tenants`` вне marketplace
+    # запрещён сторожем границ (MKT1).
+    with tenant_scope(tenant):
+        rows = list(
+            CatalogMaster.objects.filter(ENROLLED).select_related("linked_bot_user").order_by("id")
+        )
+    out: list[tuple[Any, Any]] = []
+    for row in rows:
+        bot_user = row.linked_bot_user
+        if bot_user is None:
+            continue
+        role_ctx = resolve_role(bot_user)
+        if not role_ctx.is_master or role_ctx.is_owner or role_ctx.is_admin:
+            continue
+        out.append((bot_user, role_ctx))
+    return out
+
+
 def _candidates():
     from apps.identity.constants import GLOBAL_BOT_TENANT_SLUG
     from apps.tenancy.models import Tenant
@@ -133,7 +173,7 @@ def plan_morning_digests(*, now_utc: datetime | None = None) -> list[Decision]:
         if local.hour != hour:
             decisions.append(decide("not_digest_hour", wanted_hour=hour))
             continue
-        if not manager_recipients(tenant):
+        if not manager_recipients(tenant) and not (masters_enabled() and master_recipients(tenant)):
             decisions.append(decide("no_recipients"))
             continue
         decisions.append(decide("send", send=True, local_date=local.date().isoformat()))
@@ -144,8 +184,11 @@ def _deliver(tenant: Any, local: datetime) -> str:
     """Собрать и отправить итог одному салону; вернуть reason."""
 
     from apps.channels.max import salon_greeting, salon_notify
-    from apps.channels.max.staff_outbound import salon_bot
+    from apps.channels.max.staff_outbound import manager_recipients, salon_bot
 
+    if not manager_recipients(tenant):
+        # Управляющих нет — салон в рассылке ради мастеров (DRF-2769).
+        return "no_recipients"
     data = gather_digest(tenant, now=local)
     lines = salon_greeting.render_summary_lines(tenant.name, data)
     if not lines:
@@ -169,6 +212,49 @@ def _deliver(tenant: Any, local: datetime) -> str:
     return "send"
 
 
+def _deliver_masters(tenant: Any, local: datetime) -> dict[str, int]:
+    """Итог каждому мастеру салона о его дне (DRF-2769). Никогда не бросает.
+
+    ``sent`` — ушло; ``source_failed`` — день мастера не прочитан, итог ему не
+    шлём (пустой «Итог» хуже молчания); ``already_sent_today`` — дедуп.
+    """
+
+    from apps.channels.max import salon_greeting, salon_notify
+    from apps.channels.max.addressing import MaxAddress
+    from apps.channels.max.staff_outbound import salon_bot
+
+    counts = {"sent": 0, "source_failed": 0, "already_sent_today": 0}
+    keyboard = salon_greeting.digest_master_buttons(salon_bot())
+    for bot_user, role_ctx in master_recipients(tenant):
+        try:
+            data = salon_greeting.gather(tenant, role_ctx, now=local)
+            lines = salon_greeting.render_master_summary_lines(data)
+            if not lines:
+                counts["source_failed"] += 1
+                continue
+            address = MaxAddress.resolve(user_id=getattr(bot_user, "channel_user_id", ""))
+            result = salon_notify.notify(
+                salon_notify.master_digest_notice(
+                    tenant,
+                    local_date=local.date(),
+                    master_id=role_ctx.master_id,
+                    address=address,
+                    lines=lines,
+                    keyboard=keyboard,
+                )
+            )
+        except Exception:  # noqa: BLE001 — один мастер не отменяет остальных
+            logger.exception(
+                "channels.max.salon_digest.master_failed tenant=%s master=%s",
+                tenant.slug,
+                role_ctx.master_id,
+            )
+            counts["source_failed"] += 1
+            continue
+        counts["sent" if result is not None else "already_sent_today"] += 1
+    return counts
+
+
 @shared_task(name="salon_notify.send_morning_digests")
 def send_morning_digests(now_utc: datetime | str | None = None) -> dict[str, int]:
     """Beat: раз в час; шлёт итог салонам, у которых сейчас их час. Никогда не бросает."""
@@ -183,6 +269,9 @@ def send_morning_digests(now_utc: datetime | str | None = None) -> dict[str, int
 
     counters: dict[str, int] = {reason: 0 for reason in REASONS}
     counters["sent"] = 0
+    counters["masters_sent"] = 0
+    counters["masters_source_failed"] = 0
+    counters["masters_already_sent_today"] = 0
     for decision in plan_morning_digests(now_utc=now_utc):
         if not decision.send:
             counters[decision.reason] += 1
@@ -200,6 +289,10 @@ def send_morning_digests(now_utc: datetime | str | None = None) -> dict[str, int
             counters["sent"] += 1
         else:
             counters[outcome] += 1
+        if masters_enabled():
+            local = now_utc.astimezone(salon_zone(tenant))
+            for key, value in _deliver_masters(tenant, local).items():
+                counters[f"masters_{key}"] += value
     counters.pop("send", None)
     logger.info(
         "channels.max.salon_digest.tick %s",
@@ -217,6 +310,8 @@ __all__ = [
     "digest_hour",
     "enabled",
     "gather_digest",
+    "master_recipients",
+    "masters_enabled",
     "plan_morning_digests",
     "send_morning_digests",
 ]
