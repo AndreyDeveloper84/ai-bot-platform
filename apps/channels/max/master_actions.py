@@ -200,19 +200,18 @@ def act(*, tenant: Any, bot_user: Any, master: Any, action: str, ref: str) -> Re
         version = known_version(tenant, appointment_id) or 1
 
     try:
-        specialist_id = catalog_specialist_id(master)
-    except CatalogSpecialistUnresolved:
-        logger.warning("master_actions.no_specialist_id master=%s", getattr(master, "pk", None))
-        return Reply(FAILED)
-
-    try:
         get_ayla_booking_client().act_as_specialist(
             external_user_id=external_user_id_for(bot_user),
-            specialist_id=specialist_id,
+            # The resolver right in the call (DRF-1933 guard): the mirror's PK
+            # is not the catalog's id for solo and merged masters.
+            specialist_id=catalog_specialist_id(master),
             appointment_id=appointment_id,
             action=action,
             expected_version=version,
         )
+    except CatalogSpecialistUnresolved:
+        logger.warning("master_actions.no_specialist_id master=%s", getattr(master, "pk", None))
+        return Reply(FAILED)
     except BookingBadRequestError as exc:
         return _refusal(tenant, appointment_id, action, exc)
     except Exception:  # noqa: BLE001 — a tap must not raise
