@@ -149,26 +149,19 @@ class TestWhatTheSweepNeverTouches:
         assert stated.soft_deleted_at is None
         assert stated.status != "expired"
 
-    def test_a_legacy_explicit_fact_without_provenance_stays(self) -> None:
-        """Явные строки до обратного заполнения несут ``provenance IS NULL`` —
-        ровно как неподтверждённый вывод. Различает их только ``source``."""
+    def test_a_signal_row_without_provenance_stays(self) -> None:
+        """Строки ``source='signal'`` несут ``provenance IS NULL`` по замыслу
+        (модель, §3.1) — ровно как неподтверждённый вывод. Различает их только
+        ``source``; явный факт без provenance база не пускает сама (CHECK)."""
         upc = _upc()
-        legacy = MemoryEntry.objects.create(
-            user_id=upc.user_id,
-            personal_context=upc,
-            sensitivity_zone=MemoryEntry.SENSITIVITY_GREEN,
-            source=MemoryEntry.SOURCE_EXPLICIT,
-            content={"key": "diet", "value": "vegan"},
-        )
-        MemoryEntry.objects.filter(pk=legacy.pk).update(
-            provenance=None, status="active", expires_at=NOW - timedelta(days=1)
-        )
+        signal = _inference(upc, expires_in_days=-1)
+        MemoryEntry.objects.filter(pk=signal.pk).update(source=MemoryEntry.SOURCE_SIGNAL)
         inferred = _inference(upc, expires_in_days=-1)
 
         _sweep()
 
         assert _reload(inferred).soft_deleted_at is not None
-        assert _reload(legacy).soft_deleted_at is None
+        assert _reload(signal).soft_deleted_at is None
 
     def test_a_yellow_inference_is_left_to_the_zone_sweep(self) -> None:
         upc = _upc()
