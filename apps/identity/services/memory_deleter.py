@@ -30,6 +30,9 @@ Two operations, both append the 152-ФЗ audit trail:
 - :func:`purge_expired_tombstones` — the physical half (DRF-2775). Every
   path above only tombstones; this deletes the row once the tombstone's
   retention ran out (ADR-0011 §5: 30 days, a consent withdrawal 24 h).
+- :func:`sweep_expired_inferences` — the terms of Ф4 inferred green memory
+  (DRF-2782): an unconfirmed inference is tombstoned after its 30 days, a
+  confirmed one is flagged ``status='expired'`` for re-confirmation.
 """
 
 from __future__ import annotations
@@ -682,3 +685,122 @@ def _log_red_zone_tombstone_purge(
             for entry_id, user_id in red
         ]
     )
+
+
+#: DRF-2782 — сколько строк каждого вида обрабатывает один прогон.
+INFERENCE_SWEEP_BATCH_SIZE = 500
+
+
+@dataclass(frozen=True)
+class InferenceExpiry:
+    """Что сделал один прогон свипа сроков Ф4. Числа, никогда не значения."""
+
+    unconfirmed_deleted: int = 0
+    confirmed_flagged: int = 0
+    users: int = 0
+
+    def as_summary(self) -> dict[str, int]:
+        return {
+            "unconfirmed_deleted": self.unconfirmed_deleted,
+            "confirmed_flagged": self.confirmed_flagged,
+            "users": self.users,
+        }
+
+
+def _expired_inferences(now: datetime):
+    """Живые зелёные выводы Ф4 с наступившим ``expires_at``.
+
+    Только ``source='inferred'`` в зелёной зоне: явные факты человека
+    («Вы сообщили») сроком не стареют, а жёлтую и красную зону ведёт свой свип
+    (:func:`soft_delete_expired_entries`). Человек с «забудь всё» или с живой
+    заявкой на удаление не трогается — у этих стираний свой путь и своя
+    причина в надгробии.
+    """
+    held = UserPersonalContext.objects.filter(user_id=OuterRef("user_id")).filter(
+        Q(forget_all_requested_at__isnull=False) | Q(deletion_requested_at__isnull=False)
+    )
+    return (
+        MemoryEntry.objects.filter(
+            sensitivity_zone=MemoryEntry.SENSITIVITY_GREEN,
+            source=MemoryEntry.SOURCE_INFERRED,
+            soft_deleted_at__isnull=True,
+            delete_requested_at__isnull=True,
+            expires_at__isnull=False,
+            expires_at__lte=now,
+        )
+        .exclude(Exists(held))
+        .order_by("expires_at", "id")
+    )
+
+
+def sweep_expired_inferences(
+    *,
+    now: datetime | None = None,
+    limit: int = INFERENCE_SWEEP_BATCH_SIZE,
+) -> InferenceExpiry:
+    """Применить сроки производной памяти Ф4 (DRF-2782).
+
+    Решение владельца 05.10 (``OWNER_DECISIONS_MEMORY_AND_CONSENT_2026-10-05``,
+    «Сроки производной памяти Ф4»): неподтверждённые предположения — 30 дней;
+    подтверждённые — 180 дней, «затем повторное подтверждение или удаление».
+    Сам срок ставит писатель в ``expires_at`` (Ф4a-2 — запись + 30 дней,
+    Ф4a-3 — подтверждение + 180 дней); свип только исполняет наступивший.
+
+    * **Неподтверждённый** (``provenance IS NULL``) — надгробие, причина
+      ``ttl_purge``, как у любого истёкшего срока. Физически строку удалит
+      :func:`purge_expired_tombstones`, когда (и если) её включат.
+    * **Подтверждённый** (``provenance='user_confirmed_inference'``) —
+      строка НЕ удаляется: ``status='expired'``, то есть «нужно
+      переподтвердить». Человек сам подтвердил этот факт, и молча стереть его
+      через полгода значило бы решить за него. Уже помеченные повторно не
+      трогаются.
+    * Любой другой ``provenance`` — не трогается: свип не угадывает.
+    * Замещённое исправлением (``status='superseded'``, Ф4a-3) — не
+      трогается: это история, а не действующее предложение.
+
+    Отдельный свип, а не ветка :func:`soft_delete_expired_entries`: тот
+    держит жёлтую и красную зону и скользящее окно спеки §5, а у выводов Ф4
+    срок абсолютный и исход для подтверждённых — не удаление.
+    """
+    now = now or timezone.now()
+    with transaction.atomic():
+        # Только действующие строки: замещённое исправлением (``superseded``)
+        # — история, а не предложение, и уже помеченное ``expired`` второй
+        # раз не трогается.
+        expired = (
+            _expired_inferences(now)
+            .filter(Q(status__isnull=True) | Q(status=MemoryEntry.STATUS_ACTIVE))
+            .select_for_update()
+        )
+        unconfirmed = list(
+            expired.filter(provenance__isnull=True).values_list("id", "user_id")[:limit]
+        )
+        confirmed = list(
+            expired.filter(provenance=MemoryEntry.PROVENANCE_USER_CONFIRMED_INFERENCE).values_list(
+                "id", "user_id"
+            )[:limit]
+        )
+        MemoryEntry.objects.filter(id__in=[row[0] for row in unconfirmed]).update(
+            delete_requested_at=now,
+            soft_deleted_at=now,
+            deletion_reason=MemoryEntry.DELETION_REASON_TTL_PURGE,
+            status=MemoryEntry.STATUS_DELETED,
+            updated_at=now,
+        )
+        MemoryEntry.objects.filter(id__in=[row[0] for row in confirmed]).update(
+            status=MemoryEntry.STATUS_EXPIRED,
+            updated_at=now,
+        )
+
+    result = InferenceExpiry(
+        unconfirmed_deleted=len(unconfirmed),
+        confirmed_flagged=len(confirmed),
+        users=len({user_id for _, user_id in unconfirmed + confirmed}),
+    )
+    if result.unconfirmed_deleted or result.confirmed_flagged:
+        write_audit(
+            "memory.inferences_expired",
+            target="MemoryEntry",
+            payload={**result.as_summary(), "reason": MemoryEntry.DELETION_REASON_TTL_PURGE},
+        )
+    return result
