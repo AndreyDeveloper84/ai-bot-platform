@@ -1529,6 +1529,11 @@ CELERY_BEAT_SCHEDULE = {
         "task": "apps.identity.tasks.forget_all_sweep",
         "schedule": crontab(minute="50"),
     },
+    # DRF-2748 — ночной свип срока хранения жёлтой/красной памяти (спека §5).
+    "identity_memory_ttl_sweep": {
+        "task": "apps.identity.tasks.memory_ttl_sweep",
+        "schedule": crontab(hour="2", minute="35"),
+    },
     # Sprint 8 / S4 (DRF-719) — daily shadow-delta sweep.
     # 08:00 МСК = 05:00 UTC — runs AFTER the mysite CSV publisher's
     # 04:00 МСК export window so the ground-truth file is on disk.

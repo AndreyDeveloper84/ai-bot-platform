@@ -188,6 +188,29 @@ def forget_all_sweep() -> dict:
     return sweep_pending_forget_all()
 
 
+@shared_task(name="apps.identity.tasks.memory_ttl_sweep")
+def memory_ttl_sweep() -> dict:
+    """Снять жёлтую и красную память с истёкшим сроком хранения (DRF-2748).
+
+    Что снимается, что нет и почему отбор живёт в делетере — см.
+    :func:`apps.identity.services.memory_deleter.soft_delete_expired_entries`.
+    Зелёная зона не трогается: у неё срока нет (спека §5).
+
+    Раз в сутки, ночью: спека §5 называет свип срока ночным, а срок меряется
+    днями (90 / 365) — час разницы ничего не меняет, в отличие от «забудь
+    всё», где он и есть время, пока стёртое ещё лежит.
+
+    Кросс-тенантная, без ``tenant_scope``: память ключуется каноническим
+    пользователем Ayla.
+
+    Returns:
+      Сводка {"expiry_backfilled", "purged", "purged_yellow", "purged_red", "users"}.
+    """
+    from apps.identity.services.memory_deleter import soft_delete_expired_entries
+
+    return soft_delete_expired_entries().as_summary()
+
+
 @shared_task(name="apps.identity.tasks.ayla_erasure_sweep")
 def ayla_erasure_sweep() -> dict:
     """Повторить просроченные задания удаления в Ayla (DRF-1950).

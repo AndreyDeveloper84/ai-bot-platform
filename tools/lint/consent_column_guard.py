@@ -79,6 +79,8 @@ ALLOWED:
     an operator census. It prints "... with consent_at set: N" as one
     line of a funnel *next to* the honest gate's count, which is the one
     place where showing what the column alone says is the point.
+  - `apps/identity/services/memory_deleter.py` — not this column at all:
+    the TTL sweep reads `MemoryEntry.consent_at` (see KNOWN LIMITATIONS).
   - `**/tests/**`, `**/test_*.py`, `**/migrations/**` — fixtures must be
     able to build the exact rows the gate rejects, and a backfill reads
     columns by definition.
@@ -88,13 +90,15 @@ ALLOWED:
   - **`MemoryEntry` has a `consent_at` column too**, unrelated to
     `BotUser`'s and with different semantics (per-entry consent for the
     yellow/red memory zones). This guard matches on the *name* and
-    cannot tell the two apart. Today that costs nothing — every
-    `MemoryEntry.consent_at` site in `apps/` is a write
-    (`memory_writer.py`, `memory_inferred.py`, `personal_context.py`),
-    and writes are allowed — but a future *read* of it would be a false
-    positive. The fix when that day comes is one more allowlist entry
-    plus a line here, not a cleverer matcher: an AST cannot resolve
-    which model an attribute belongs to without type inference.
+    cannot tell the two apart. Every `MemoryEntry.consent_at` site in
+    `apps/` was a write (`memory_writer.py`, `memory_inferred.py`,
+    `personal_context.py`), and writes are allowed — until DRF-2748: the
+    TTL sweep in `memory_deleter.py` reads the per-entry stamp, because
+    spec §5 counts a yellow/red entry's term from
+    `GREATEST(last_used_at, consent_at)`. That is the false positive this
+    note predicted, handled the way it said: one allowlist entry plus
+    this line, not a cleverer matcher — an AST cannot resolve which model
+    an attribute belongs to without type inference.
   - **Indirection**: `field = "consent_at"; getattr(u, field)`, or
     `**{"consent_at__isnull": True}`, or raw SQL. The constant never
     appears in a position this guard inspects.
@@ -137,6 +141,9 @@ _ALLOWLIST_FRAGMENTS = (
     # An operator census that prints what the column says next to what
     # the honest gate says.
     "apps/bookings/management/commands/post_visit_followup_dryrun.py",
+    # DRF-2748 — not BotUser's column: MemoryEntry's per-entry consent, the
+    # start of a yellow/red entry's storage term (spec §5).
+    "apps/identity/services/memory_deleter.py",
 )
 
 #: Directory fragments allowlisted wholesale. Fixtures must be able to
