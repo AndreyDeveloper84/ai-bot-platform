@@ -43,7 +43,7 @@ from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
 from apps.admin_api.auth import require_admin_role
-from apps.booking.models import RemoteBookingProxy
+from apps.admin_api.services.visit_settle import own_booking as _own_booking
 from apps.identity.models import BotUser
 from apps.integrations.ayla.user_proxy import external_user_id_for
 
@@ -98,58 +98,23 @@ def _outcome(
     return JsonResponse(body, status=status)
 
 
-def _own_booking(tenant_id, appointment_id) -> RemoteBookingProxy | None:
-    """This salon's booking, or None.
-
-    Checked against the mirror before anything is forwarded, so an id
-    belonging to another salon cannot be confirmed as existing by the
-    shape of the refusal.
-    """
-
-    return RemoteBookingProxy.objects.filter(
-        tenant_id=tenant_id, appointment_id=appointment_id
-    ).first()
-
-
 @require_http_methods(["GET"])
 @require_admin_role
 def booking_version(request: HttpRequest, appointment_id: str) -> HttpResponse:
     """The canonical facts about one booking, straight from Ayla."""
 
+    from apps.admin_api.services.visit_settle import VersionUnavailable, read_version
+
     tenant = request.tenant  # type: ignore[attr-defined]
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
 
-    if _own_booking(tenant.id, appointment_id) is None:
-        return _error("not_found", "booking not found", 404)
-
-    from apps.integrations.ayla.booking_client import (
-        BookingAPIError,
-        BookingUnavailableError,
-        get_ayla_booking_client,
-    )
-
-    actor = external_user_id_for(bot_user)
-
-    try:
-        record = get_ayla_booking_client().get_appointment_version(
-            external_user_id=actor,
-            booking_id=str(appointment_id),
-        )
-    except BookingUnavailableError as exc:
+    # DRF-2784: the read lives in the service — the salon bot's chat shows
+    # the operator the same version before its «Да, состоялся».
+    record = read_version(tenant=tenant, bot_user=bot_user, appointment_id=appointment_id)
+    if isinstance(record, VersionUnavailable):
         # No version means no action: the screen must not offer a button
         # it would have to aim blind.
-        logger.warning("admin_api.booking_version.unavailable err=%s", exc)
-        return _error(
-            "unavailable",
-            "booking version unavailable upstream",
-            503,
-            hint="расписание не ответило — попробуйте ещё раз",
-        )
-    except BookingAPIError as exc:
-        logger.warning("admin_api.booking_version.error err=%s", exc)
-        return _error(
-            "unavailable", "booking version read failed", 503, hint="не удалось прочитать запись"
-        )
+        return _error(record.slug, record.detail, record.status, hint=record.hint)
 
     return JsonResponse(
         {
@@ -161,25 +126,6 @@ def booking_version(request: HttpRequest, appointment_id: str) -> HttpResponse:
     )
 
 
-#: What each visit-settling write says in its refusals. One mapping of
-#: Ayla's answers for both, so «не пришёл» and «состоялся» can never drift
-#: into telling the operator different things about the same situation.
-_SETTLE_COPY = {
-    "complete_appointment": {
-        "log": "complete_booking",
-        "not_configured": "закрытие визита не настроено",
-        "unauthorized": "закрытие сейчас недоступно — обратитесь к поддержке",
-        "committed": "visit closed",
-    },
-    "mark_no_show": {
-        "log": "no_show_booking",
-        "not_configured": "отметка неявки не настроена",
-        "unauthorized": "отметка неявки сейчас недоступна — обратитесь к поддержке",
-        "committed": "visit marked no-show",
-    },
-}
-
-
 def _settle_visit(request: HttpRequest, appointment_id: str, *, write: str) -> HttpResponse:
     """Settle a visit through Ayla's state machine on behalf of the admin.
 
@@ -188,8 +134,8 @@ def _settle_visit(request: HttpRequest, appointment_id: str, *, write: str) -> H
     the transition on the locked row and the mirror follows its event.
     """
 
-    copy = _SETTLE_COPY[write]
-    log = copy["log"]
+    from apps.admin_api.services.visit_settle import settle_visit
+
     tenant = request.tenant  # type: ignore[attr-defined]
     bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
 
@@ -208,106 +154,22 @@ def _settle_visit(request: HttpRequest, appointment_id: str, *, write: str) -> H
     if raw_version < 1:
         return _error("bad_request", "expected_version must be positive", 400)
 
-    if _own_booking(tenant.id, appointment_id) is None:
-        return _error("not_found", "booking not found", 404)
-
-    from apps.integrations.ayla.salon_client import (
-        SalonAPIError,
-        SalonForbidden,
-        SalonNotAllowed,
-        SalonNotConfigured,
-        SalonNotFound,
-        SalonSlotTaken,
-        SalonStaleVersion,
-        SalonUnauthorized,
-        SalonUnavailable,
-        SalonValidationError,
-        get_salon_client,
+    # DRF-2784: Ayla's answers are mapped once, in the service, for both
+    # doors (this view and the salon bot's chat).
+    settled = settle_visit(
+        tenant=tenant,
+        bot_user=bot_user,
+        appointment_id=appointment_id,
+        expected_version=raw_version,
+        write=write,
     )
-
-    actor = external_user_id_for(bot_user)
-
-    try:
-        getattr(get_salon_client(), write)(
-            actor_external_id=actor,
-            tenant_slug=tenant.slug,
-            appointment_id=str(appointment_id),
-            expected_version=raw_version,
-        )
-    except SalonValidationError as exc:
-        return _outcome("blocked", str(exc), 400)
-    except SalonNotConfigured as exc:
-        logger.error("admin_api.%s.not_configured err=%s", log, exc)
+    if settled.outcome == "not_found":
+        return _error("not_found", settled.detail, settled.status)
+    if settled.outcome == "committed":
         return _outcome(
-            "blocked", "not configured for this write", 503, hint=copy["not_configured"]
+            "committed", settled.detail, settled.status, appointment_id=str(appointment_id)
         )
-    except SalonUnauthorized as exc:
-        logger.error(
-            "admin_api.%s.upstream_unauthorized tenant=%s err=%s",
-            log,
-            tenant.id,
-            exc,
-        )
-        return _outcome("blocked", "unauthorized for this write", 503, hint=copy["unauthorized"])
-    except SalonForbidden as exc:
-        logger.warning(
-            "admin_api.%s.forbidden actor=%s tenant=%s err=%s",
-            log,
-            actor,
-            tenant.id,
-            exc,
-        )
-        return _outcome("blocked", str(exc), 403)
-    except SalonStaleVersion:
-        # The guard fired: the booking changed after the operator looked.
-        # Not an error on their part — send them back to a fresh read.
-        return _outcome(
-            "conflict",
-            "version conflict: booking changed since it was read",
-            409,
-            hint="запись изменилась — обновите день и попробуйте снова",
-        )
-    except SalonNotAllowed as exc:
-        # Cancelled, or already settled. Settled, not contended.
-        return _outcome("blocked", str(exc), 409)
-    except SalonSlotTaken as exc:
-        return _outcome("conflict", str(exc), 409)
-    except SalonNotFound as exc:
-        logger.warning(
-            "admin_api.%s.mirror_divergence appointment=%s err=%s",
-            log,
-            appointment_id,
-            exc,
-        )
-        return _outcome(
-            "conflict",
-            "mirror diverged: appointment missing upstream",
-            409,
-            hint="запись не найдена в расписании — обновите день",
-        )
-    except SalonUnavailable as exc:
-        # May have been applied. Never a failure — a second press on an
-        # already-settled visit is refused, but the operator should be
-        # told to look rather than to retry blindly.
-        logger.warning("admin_api.%s.unknown actor=%s err=%s", log, actor, exc)
-        return _outcome(
-            "pending",
-            "salon did not answer; the write may already have applied",
-            504,
-            hint="расписание не ответило — обновите день, прежде чем повторять",
-        )
-    except SalonAPIError as exc:
-        logger.warning("admin_api.%s.error actor=%s err=%s", log, actor, exc)
-        return _outcome("failed", str(exc), 502)
-
-    logger.info(
-        "admin_api.%s.committed appointment=%s actor=%s tenant=%s",
-        log,
-        appointment_id,
-        actor,
-        tenant.id,
-    )
-    return _outcome("committed", copy["committed"], 200, appointment_id=str(appointment_id))
+    return _outcome(settled.outcome, settled.detail, settled.status, hint=settled.hint)
 
 
 @csrf_exempt
