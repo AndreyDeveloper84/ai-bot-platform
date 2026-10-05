@@ -119,6 +119,58 @@ def soft_delete_green_entries(
     return deleted
 
 
+def soft_delete_inferences_for_withdrawal(user_id: uuid.UUID) -> int:
+    """Стереть производную память Ф4 человека, отозвавшего согласие (DRF-2783).
+
+    Решение владельца 05.10: «при отзыве согласия Ф4 — сразу прекратить новые
+    выводы и их использование, удалить производную память по процедуре».
+    Производная — это зелёные строки ``source='inferred'``: и неподтверждённые
+    предложения, и подтверждённые выводы — подтверждение не делает вывод
+    сказанным самим человеком (``provenance`` остаётся
+    ``user_confirmed_inference``, а не ``user_stated``).
+
+    Не трогаются: явные факты («Вы сообщили») и сигнальные строки — у них
+    своё основание, а Ф4 добровольна отдельно, и её отзыв не должен стоить
+    человеку остальной памяти. Замещённые исправлением (``superseded``) —
+    тоже производные и тоже уходят: история вывода — всё ещё вывод.
+
+    Причина надгробия — ``withdrawal``: так её прочтёт аудит («почему строка
+    снята»), и так её физически удалит :func:`purge_expired_tombstones` —
+    через сутки, а не через 30 дней (ADR-0011 §5: отзыв — «physical purge
+    within 24h»). Идемпотентно: уже снятые строки не трогаются.
+
+    Returns:
+      Сколько строк снято.
+    """
+    now = timezone.now()
+    with transaction.atomic():
+        deleted = MemoryEntry.objects.filter(
+            user_id=user_id,
+            sensitivity_zone=MemoryEntry.SENSITIVITY_GREEN,
+            source=MemoryEntry.SOURCE_INFERRED,
+            soft_deleted_at__isnull=True,
+            delete_requested_at__isnull=True,
+        ).update(
+            delete_requested_at=now,
+            soft_deleted_at=now,
+            deletion_reason=MemoryEntry.DELETION_REASON_WITHDRAWAL,
+            status=MemoryEntry.STATUS_DELETED,
+            updated_at=now,
+        )
+
+    if deleted:
+        write_audit(
+            "memory.inferences_withdrawn",
+            target="MemoryEntry",
+            payload={
+                "user_id": str(user_id),
+                "count": deleted,
+                "reason": MemoryEntry.DELETION_REASON_WITHDRAWAL,
+            },
+        )
+    return deleted
+
+
 def soft_delete_all_zones_for_forget_all(
     user_id: uuid.UUID,
     *,
