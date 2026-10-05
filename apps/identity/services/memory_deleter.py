@@ -349,9 +349,7 @@ def _backfill_missing_expiry() -> int:
     rows = _live_rows_with_a_term().filter(expires_at__isnull=True)
     filled = 0
     for ttl in list(rows.order_by().values_list("ttl_days", flat=True).distinct()):
-        filled += rows.filter(ttl_days=ttl).update(
-            expires_at=F("created_at") + timedelta(days=ttl)
-        )
+        filled += rows.filter(ttl_days=ttl).update(expires_at=F("created_at") + timedelta(days=ttl))
     return filled
 
 
