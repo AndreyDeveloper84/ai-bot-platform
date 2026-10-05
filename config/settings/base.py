@@ -605,6 +605,13 @@ DOMAIN_EVENT_SUBSCRIBERS: list[str] = [
 SHORT_TERM_MEMORY_DEPTH = int(os.environ.get("SHORT_TERM_MEMORY_DEPTH", "20"))
 SHORT_TERM_MEMORY_TTL_SECONDS = int(os.environ.get("SHORT_TERM_MEMORY_TTL_SECONDS", str(24 * 3600)))
 
+# DRF-2775 — физическая очистка надгробий MemoryEntry после удержания
+# (ADR-0011 §5). False по умолчанию: физическое удаление на реальных данных
+# включается только по допуску владельца (§15 DRF-2748), через env стенда.
+MEMORY_TOMBSTONE_PURGE_ENABLED = os.environ.get(
+    "MEMORY_TOMBSTONE_PURGE_ENABLED", "false"
+).lower() in ("true", "1")
+
 # Sprint 2 / D2 + D4 — MAX channel configuration.
 MAX_API_BASE = os.environ.get("MAX_API_BASE", "https://botapi.max.ru")
 MAX_BOT_TOKEN = os.environ.get("MAX_BOT_TOKEN", "")
@@ -1528,6 +1535,12 @@ CELERY_BEAT_SCHEDULE = {
     "identity_forget_all_sweep": {
         "task": "apps.identity.tasks.forget_all_sweep",
         "schedule": crontab(minute="50"),
+    },
+    # DRF-2775 — физическая очистка надгробий памяти. Инертна, пока
+    # MEMORY_TOMBSTONE_PURGE_ENABLED закрыт.
+    "identity_memory_tombstone_purge": {
+        "task": "apps.identity.tasks.memory_tombstone_purge",
+        "schedule": crontab(hour="3", minute="5"),
     },
     # Sprint 8 / S4 (DRF-719) — daily shadow-delta sweep.
     # 08:00 МСК = 05:00 UTC — runs AFTER the mysite CSV publisher's

@@ -24,14 +24,20 @@ Two operations, both append the 152-ФЗ audit trail:
   DRF-1370 this docstring named a job that did not exist: the intent was
   recorded, nothing was ever tombstoned, and the read gate alone stood between
   the person's memory and the prompt.
+- :func:`purge_expired_tombstones` — the physical half (DRF-2775). Every
+  path above only tombstones; this deletes the row once the tombstone's
+  retention ran out (ADR-0011 §5: 30 days, a consent withdrawal 24 h).
 """
 
 from __future__ import annotations
 
 import uuid
 from collections.abc import Iterable
+from dataclasses import dataclass
+from datetime import datetime, timedelta
 
 from django.db import transaction
+from django.db.models import Q
 from django.utils import timezone
 
 from apps.audit.services import write_audit
@@ -277,3 +283,174 @@ def request_forget_all(user_id: uuid.UUID) -> bool:
         payload={"user_id": str(user_id)},
     )
     return True
+
+
+#: DRF-2775 — сколько живёт надгробие, прежде чем строка удаляется физически.
+#: ADR-0011 §5 (таблица зон): «Soft-delete tombstone retained 30 days …, then
+#: hard-purged» — для всех трёх зон; для отзыва согласия — «Physical purge
+#: within 24h». Сменит владелец срок — меняется здесь.
+TOMBSTONE_RETENTION = timedelta(days=30)
+WITHDRAWAL_TOMBSTONE_RETENTION = timedelta(hours=24)
+
+#: Сколько строк удаляет один прогон: хвост после простоя уходит за несколько
+#: ночей, а не одной транзакцией на всю таблицу.
+TOMBSTONE_PURGE_BATCH_SIZE = 500
+
+TOMBSTONE_PURGE_ACTOR = "memory_tombstone_purge"
+TOMBSTONE_PURGE_RED_PURPOSE = "tombstone_purge — удержание надгробия истекло"
+
+
+@dataclass(frozen=True)
+class TombstonePurge:
+    """Что удалил один прогон. Числа, никогда не значения."""
+
+    purged_green: int = 0
+    purged_yellow: int = 0
+    purged_red: int = 0
+    users: int = 0
+    by_reason: tuple[tuple[str, int], ...] = ()
+
+    @property
+    def purged(self) -> int:
+        return self.purged_green + self.purged_yellow + self.purged_red
+
+    def as_summary(self) -> dict:
+        return {
+            "purged": self.purged,
+            "purged_green": self.purged_green,
+            "purged_yellow": self.purged_yellow,
+            "purged_red": self.purged_red,
+            "users": self.users,
+            "by_reason": dict(self.by_reason),
+        }
+
+
+def _tombstones_past_retention(now: datetime):
+    """Надгробия, удержание которых истекло. Живые строки сюда не попадают.
+
+    Строка — надгробие, только если у неё стоит ``soft_deleted_at``: заявка
+    без него (``delete_requested_at`` одна) — не завершённое стирание, и
+    удалять её физически значило бы обогнать путь, который её снимает.
+    """
+    return MemoryEntry.objects.filter(soft_deleted_at__isnull=False).filter(
+        Q(
+            deletion_reason=MemoryEntry.DELETION_REASON_WITHDRAWAL,
+            soft_deleted_at__lte=now - WITHDRAWAL_TOMBSTONE_RETENTION,
+        )
+        | (
+            ~Q(deletion_reason=MemoryEntry.DELETION_REASON_WITHDRAWAL)
+            & Q(soft_deleted_at__lte=now - TOMBSTONE_RETENTION)
+        )
+    )
+
+
+def purge_expired_tombstones(
+    *,
+    now: datetime | None = None,
+    limit: int = TOMBSTONE_PURGE_BATCH_SIZE,
+) -> TombstonePurge:
+    """Удалить физически строки памяти, чьё надгробие отлежало срок (DRF-2775).
+
+    Все пути стирания этого модуля — «забудь X», «забудь всё», отзыв, срок —
+    только ставят надгробие: даты и причину. ``content`` остаётся в строке,
+    зашифрованный, и без этой функции оставался бы навсегда. ADR-0011 §5
+    обещает физическую очистку после удержания; до DRF-2775 её не делал никто,
+    и «удалено» было удалено только по виду (``OD_MEMORY.md`` §4).
+
+    # Удержание и «не вспоминать стёртое»
+
+    ``orchestrator.memory.evicted_review`` читает содержимое зелёных надгробий
+    «стёрто по просьбе», чтобы не вернуть факт из сообщения, ещё лежащего в
+    короткой памяти. Сообщение живёт там не дольше
+    ``SHORT_TERM_MEMORY_DEPTH × SHORT_TERM_MEMORY_TTL_SECONDS`` (каждая
+    реплика продлевает ключ на сутки, окно — 20 сообщений): ≤ 20 дней при 30
+    днях удержания. Узел держит это неравенство. Отзыв согласия — жёлтая и
+    красная зоны, которых ``evicted_review`` не читает, — удаляется через
+    сутки.
+
+    # Журнал красной зоны переживает строку
+
+    Каждая удаляемая красная строка — строка ``RedZoneAccessLog``
+    (``access_type='purge'``) в той же транзакции под GUC. Внешнего ключа у
+    журнала нет (ADR-0011 §7.3), поэтому след остаётся после строки — это и
+    есть его назначение. Строки отбираются ``FOR UPDATE``: журнал называет
+    ровно удалённые.
+
+    Карточка человека (``UserPersonalContext``) не удаляется — её
+    физическое удаление спека запрещает; её личные поля чистит «забудь всё».
+
+    Args:
+      now: момент, на который судим об удержании; по умолчанию — сейчас.
+      limit: сколько строк удалить за прогон.
+    """
+    now = now or timezone.now()
+    request_id = uuid.uuid4()
+    with transaction.atomic():
+        _set_red_zone_guc(request_id)
+        try:
+            doomed = list(
+                _tombstones_past_retention(now)
+                .select_for_update()
+                .order_by("soft_deleted_at", "id")
+                .values_list("id", "user_id", "sensitivity_zone", "deletion_reason")[:limit]
+            )
+            red = [
+                (entry_id, user_id)
+                for entry_id, user_id, zone, _ in doomed
+                if zone == MemoryEntry.SENSITIVITY_RED
+            ]
+            _log_red_zone_tombstone_purge(red, request_id=request_id)
+            # QuerySet.delete(), а не сырой DELETE: строки, которые ссылаются на
+            # удаляемую через ``superseded_by``, получают NULL (SET_NULL), а не
+            # нарушение ключа.
+            MemoryEntry.objects.filter(id__in=[row[0] for row in doomed]).delete()
+        finally:
+            _reset_red_zone_guc()
+
+    zones = [zone for _, _, zone, _ in doomed]
+    reasons: dict[str, int] = {}
+    for _, _, _, reason in doomed:
+        reasons[reason] = reasons.get(reason, 0) + 1
+    result = TombstonePurge(
+        purged_green=zones.count(MemoryEntry.SENSITIVITY_GREEN),
+        purged_yellow=zones.count(MemoryEntry.SENSITIVITY_YELLOW),
+        purged_red=len(red),
+        users=len({user_id for _, user_id, _, _ in doomed}),
+        by_reason=tuple(sorted(reasons.items())),
+    )
+    if result.purged:
+        write_audit(
+            "memory.tombstones_purged",
+            target="MemoryEntry",
+            payload={**result.as_summary(), "request_id": str(request_id)},
+        )
+    return result
+
+
+def _log_red_zone_tombstone_purge(
+    red: list[tuple[uuid.UUID, uuid.UUID]],
+    *,
+    request_id: uuid.UUID,
+) -> None:
+    """Строка журнала на каждую физически удаляемую красную строку.
+
+    Зовётся только изнутри :func:`purge_expired_tombstones`, в его транзакции
+    и ДО удаления: удалённое без следа неисправимо.
+    """
+    if not red:
+        return
+    principal = red_zone_principal(RedZoneAccessLog.ACCESSOR_SYSTEM_JOB, TOMBSTONE_PURGE_ACTOR)
+    RedZoneAccessLog.objects.bulk_create(
+        [
+            RedZoneAccessLog(
+                memory_entry_id=entry_id,
+                user_id=user_id,
+                accessor_role=RedZoneAccessLog.ACCESSOR_SYSTEM_JOB,
+                accessor_principal=principal,
+                access_type=RedZoneAccessLog.ACCESS_PURGE,
+                request_id=request_id,
+                purpose=TOMBSTONE_PURGE_RED_PURPOSE,
+            )
+            for entry_id, user_id in red
+        ]
+    )

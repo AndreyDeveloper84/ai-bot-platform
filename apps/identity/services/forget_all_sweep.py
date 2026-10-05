@@ -89,7 +89,9 @@ changes the stored state so that a gate-less read finds nothing to return.
 * **Nothing is hard-deleted.** Soft delete + tombstone is the contour's
   existing choice and it has reasons — audit, disputes, recovery from a
   mistaken erasure. The physical purge after the retention window is a
-  separate job and a separate decision.
+  separate job and a separate decision: the job is
+  ``memory_deleter.purge_expired_tombstones`` (DRF-2775); the decision is
+  the owner's, behind ``MEMORY_TOMBSTONE_PURGE_ENABLED``.
 
 # Why it re-runs instead of stopping at a marker
 
