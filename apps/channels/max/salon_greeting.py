@@ -470,6 +470,35 @@ def admin_buttons(entry: Any) -> list[dict[str, str]]:
     return [b for b in buttons if b]
 
 
+def digest_admin_buttons(entry: Any) -> list[dict[str, str]]:
+    """Кнопки утреннего итога владельцу / администратору (DRF-2769).
+
+    Сначала — действия в чате, они работают и без Mini App: день салона,
+    заявки мастеров (одобрение — в самом списке заявок), готовность. Затем —
+    экраны Mini App из :func:`admin_buttons`, те же, что под приветствием, кроме
+    «Сегодня»: день салона уже есть первой кнопкой, второй «Сегодня» рядом
+    был бы загадкой. Без ``web_app`` и ``miniapp_url`` у бота кнопок Mini App
+    нет вовсе — как везде (мёртвая кнопка хуже отсутствующей).
+
+    Своих слов здесь нет: подписи — из меню персонала и приветствия.
+    """
+    from apps.channels.max.staff_menu import (
+        CB_DAY,
+        CB_READINESS,
+        CB_REQUESTS,
+        LABEL_DAY_ADMIN,
+        LABEL_REQUESTS,
+    )
+
+    chat = [
+        {"label": LABEL_DAY_ADMIN, "callback": CB_DAY},
+        {"label": LABEL_REQUESTS, "callback": CB_REQUESTS},
+        {"label": BUTTON_CHECK_READINESS, "callback": CB_READINESS},
+    ]
+    app = [b for b in admin_buttons(entry) if b.get("label") != BUTTON_TODAY]
+    return chat + app
+
+
 def first_buttons(entry: Any) -> list[dict[str, str]]:
     """«Проверить готовность» — callback в чат (DRF-2117), «Открыть салон» — Mini App."""
     from apps.channels.max.staff_menu import CB_READINESS, _miniapp_button
