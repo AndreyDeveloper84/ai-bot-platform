@@ -24,14 +24,20 @@ Two operations, both append the 152-ФЗ audit trail:
   DRF-1370 this docstring named a job that did not exist: the intent was
   recorded, nothing was ever tombstoned, and the read gate alone stood between
   the person's memory and the prompt.
+- :func:`soft_delete_expired_entries` — retention, not a request (DRF-2748):
+  yellow/red rows whose storage term ran out, tombstoned with
+  ``deletion_reason='ttl_purge'``. The nightly ``memory_ttl_sweep`` task.
 """
 
 from __future__ import annotations
 
 import uuid
 from collections.abc import Iterable
+from dataclasses import dataclass
+from datetime import datetime, timedelta
 
 from django.db import transaction
+from django.db.models import Exists, F, OuterRef, Q
 from django.utils import timezone
 
 from apps.audit.services import write_audit
@@ -277,3 +283,228 @@ def request_forget_all(user_id: uuid.UUID) -> bool:
         payload={"user_id": str(user_id)},
     )
     return True
+
+
+#: DRF-2748 — зоны со сроком хранения. Зелёной здесь нет и быть не должно:
+#: спека §5 даёт ей «no auto-TTL», и свип срока её не трогает, даже если у
+#: строки по ошибке окажется ``expires_at``.
+TTL_ZONES: tuple[str, ...] = (MemoryEntry.SENSITIVITY_YELLOW, MemoryEntry.SENSITIVITY_RED)
+
+#: Сколько истёкших строк снимает один прогон. Хвост после простоя уходит за
+#: несколько ночей, а не одной транзакцией на всю таблицу.
+TTL_SWEEP_BATCH_SIZE = 500
+
+TTL_SWEEP_ACTOR = "memory_ttl_sweep"
+TTL_SWEEP_RED_PURPOSE = "ttl_sweep — срок хранения красной зоны истёк"
+
+
+@dataclass(frozen=True)
+class ExpiredPurge:
+    """Что сделал один прогон свипа срока. Числа, никогда не значения."""
+
+    expiry_backfilled: int = 0
+    purged_yellow: int = 0
+    purged_red: int = 0
+    users: int = 0
+
+    @property
+    def purged(self) -> int:
+        return self.purged_yellow + self.purged_red
+
+    def as_summary(self) -> dict[str, int]:
+        return {
+            "expiry_backfilled": self.expiry_backfilled,
+            "purged": self.purged,
+            "purged_yellow": self.purged_yellow,
+            "purged_red": self.purged_red,
+            "users": self.users,
+        }
+
+
+def _live_rows_with_a_term():
+    """Живые жёлтые и красные строки, у которых срок вообще есть.
+
+    ``ttl_days IS NULL`` — «срока нет» (спека §5, колонка ``ttl_days``), и
+    ничего за строку не придумывается: ни срок, ни дата истечения.
+    """
+    return MemoryEntry.objects.filter(
+        sensitivity_zone__in=TTL_ZONES,
+        soft_deleted_at__isnull=True,
+        delete_requested_at__isnull=True,
+        ttl_days__isnull=False,
+    )
+
+
+def _backfill_missing_expiry() -> int:
+    """Поставить ``expires_at`` тем строкам, где его нет, — по правилу 0016.
+
+    Миграция 0016 проставила ``created_at + ttl_days`` строкам, лежавшим на
+    момент её прогона, а писатель ставит дату только явным записям
+    (``memory_writer``: ``source == EXPLICIT``). Строка со сроком, но без даты
+    истечения, свипу невидима — а значит, жила бы вечно. Правило то же, что у
+    0016, слово в слово, чтобы у одной строки не было двух дат в зависимости
+    от того, кто её считал. Повторный прогон ничего не меняет: условие —
+    ``expires_at IS NULL``.
+    """
+    rows = _live_rows_with_a_term().filter(expires_at__isnull=True)
+    filled = 0
+    for ttl in list(rows.order_by().values_list("ttl_days", flat=True).distinct()):
+        filled += rows.filter(ttl_days=ttl).update(expires_at=F("created_at") + timedelta(days=ttl))
+    return filled
+
+
+def _expired(now: datetime):
+    """Строки, срок которых истёк по ОБОИМ правилам, — и только они.
+
+    В репозитории два правила срока, и они расходятся:
+
+    * контракт памяти §3.1 — абсолютная дата ``expires_at`` (= запись +
+      ``ttl_days``);
+    * спека §5 — скользящее окно ``GREATEST(last_used_at, consent_at) <
+      now() - ttl_days``: факт, которым пользуются, не стареет.
+
+    Снимается строка, только если истекла по обоим. Это не выбор между ними,
+    а их пересечение: расхождение решает владелец, а до его слова свип не
+    стирает ничего, что хоть одно из правил ещё держит. Сегодня они совпадают
+    (``last_used_at`` никто не пишет, он равен ``created_at``), но обновление
+    ``last_used_at`` в будущем не должно молча начать стирать живые факты.
+
+    Не трогаются строки человека, который уже попросил стереть всё
+    (``forget_all_requested_at``) или чья заявка на удаление ещё жива
+    (``deletion_requested_at``): у этих стираний свои пути, свои причины в
+    надгробии и свой журнал, и TTL не должен перебивать их ответ аудиту на
+    вопрос «почему снята строка».
+    """
+    ttls = list(
+        _live_rows_with_a_term()
+        .filter(expires_at__lte=now)
+        .order_by()
+        .values_list("ttl_days", flat=True)
+        .distinct()
+    )
+    if not ttls:
+        return MemoryEntry.objects.none()
+    window = Q()
+    for ttl in ttls:
+        cutoff = now - timedelta(days=ttl)
+        window |= Q(ttl_days=ttl, last_used_at__lte=cutoff) & ~Q(consent_at__gt=cutoff)
+    held = UserPersonalContext.objects.filter(user_id=OuterRef("user_id")).filter(
+        Q(forget_all_requested_at__isnull=False) | Q(deletion_requested_at__isnull=False)
+    )
+    return (
+        _live_rows_with_a_term()
+        .filter(expires_at__isnull=False, expires_at__lte=now)
+        .filter(window)
+        .exclude(Exists(held))
+    )
+
+
+def soft_delete_expired_entries(
+    *,
+    now: datetime | None = None,
+    limit: int = TTL_SWEEP_BATCH_SIZE,
+) -> ExpiredPurge:
+    """Снять жёлтые и красные строки, срок хранения которых истёк (DRF-2748).
+
+    Тот же вид надгробия, что у остальных путей этого модуля
+    (``delete_requested_at`` + ``soft_deleted_at`` + ``deletion_reason`` +
+    ``status='deleted'`` + ``updated_at``), с причиной ``ttl_purge``. Ничего не
+    удаляется физически: надгробие живёт свои 30 дней, как у любого стирания.
+
+    # Почему здесь, а не в отдельном модуле свипа
+
+    По той же причине, по которой отбор живёт в
+    :func:`soft_delete_all_zones_for_forget_all`: красные строки видны только
+    под GUC, и **WHERE у UPDATE подчиняется политике SELECT**. Граница «кто
+    ставит GUC» обязана совпадать с границей «кто трогает красное» — и
+    дозаполнение ``expires_at``, и отбор, и надгробие, и журнал идут в одной
+    транзакции под одним GUC. Иначе в день перехода на ``ayla_app`` красные
+    строки молча выпали бы из выборки, а свип вернул бы успех.
+
+    # Журнал
+
+    Каждая снятая красная строка — строка ``RedZoneAccessLog``
+    (``access_type='purge'``, ``accessor_role='system_job'``) в той же
+    транзакции: снятое без следа неисправимо, повторный прогон его уже не
+    увидит. Строки отбираются ``FOR UPDATE``, поэтому журнал называет ровно
+    те строки, которые снял этот прогон, а не те, что в промежутке снял
+    человек.
+
+    Args:
+      now: момент, на который судим о сроке; по умолчанию — сейчас.
+      limit: сколько строк снять за прогон.
+    """
+    now = now or timezone.now()
+    request_id = uuid.uuid4()
+    with transaction.atomic():
+        _set_red_zone_guc(request_id)
+        try:
+            backfilled = _backfill_missing_expiry()
+            doomed = list(
+                _expired(now)
+                .select_for_update()
+                .order_by("expires_at", "id")
+                .values_list("id", "user_id", "sensitivity_zone")[:limit]
+            )
+            MemoryEntry.objects.filter(id__in=[row[0] for row in doomed]).update(
+                delete_requested_at=now,
+                soft_deleted_at=now,
+                deletion_reason=MemoryEntry.DELETION_REASON_TTL_PURGE,
+                status=MemoryEntry.STATUS_DELETED,
+                updated_at=now,
+            )
+            red = [
+                (entry_id, user_id)
+                for entry_id, user_id, zone in doomed
+                if zone == MemoryEntry.SENSITIVITY_RED
+            ]
+            _log_red_zone_purge(red, request_id=request_id)
+        finally:
+            _reset_red_zone_guc()
+
+    result = ExpiredPurge(
+        expiry_backfilled=backfilled,
+        purged_yellow=len(doomed) - len(red),
+        purged_red=len(red),
+        users=len({user_id for _, user_id, _ in doomed}),
+    )
+    if result.purged or result.expiry_backfilled:
+        write_audit(
+            "memory.ttl_purged",
+            target="MemoryEntry",
+            payload={
+                **result.as_summary(),
+                "reason": MemoryEntry.DELETION_REASON_TTL_PURGE,
+                "request_id": str(request_id),
+            },
+        )
+    return result
+
+
+def _log_red_zone_purge(
+    red: list[tuple[uuid.UUID, uuid.UUID]],
+    *,
+    request_id: uuid.UUID,
+) -> None:
+    """Строка журнала на каждую красную строку, снятую по сроку.
+
+    Зовётся только изнутри :func:`soft_delete_expired_entries`, в его
+    транзакции — по той же причине, что :func:`_log_red_zone_erasure`.
+    """
+    if not red:
+        return
+    principal = red_zone_principal(RedZoneAccessLog.ACCESSOR_SYSTEM_JOB, TTL_SWEEP_ACTOR)
+    RedZoneAccessLog.objects.bulk_create(
+        [
+            RedZoneAccessLog(
+                memory_entry_id=entry_id,
+                user_id=user_id,
+                accessor_role=RedZoneAccessLog.ACCESSOR_SYSTEM_JOB,
+                accessor_principal=principal,
+                access_type=RedZoneAccessLog.ACCESS_PURGE,
+                request_id=request_id,
+                purpose=TTL_SWEEP_RED_PURPOSE,
+            )
+            for entry_id, user_id in red
+        ]
+    )
