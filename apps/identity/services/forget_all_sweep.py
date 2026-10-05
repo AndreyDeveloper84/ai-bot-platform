@@ -89,7 +89,9 @@ changes the stored state so that a gate-less read finds nothing to return.
 * **Nothing is hard-deleted.** Soft delete + tombstone is the contour's
   existing choice and it has reasons — audit, disputes, recovery from a
   mistaken erasure. The physical purge after the retention window is a
-  separate job and a separate decision.
+  separate job and a separate decision: the job is
+  ``memory_deleter.purge_expired_tombstones`` (DRF-2775); the decision is
+  the owner's, behind ``MEMORY_TOMBSTONE_PURGE_ENABLED``.
 
 # Why it re-runs instead of stopping at a marker
 
@@ -110,10 +112,11 @@ import logging
 import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import datetime
 from typing import cast
 
 from django.db import transaction
-from django.db.models import Exists, OuterRef, Q
+from django.db.models import Exists, OuterRef, Q, Subquery
 from django.utils import timezone
 
 from apps.audit.services import write_audit
@@ -122,8 +125,9 @@ from apps.conversations.erasure import (
     anonymize_dialogue,
     shell_ids_for_person,
 )
+from apps.consent.models import ConsentRecord
 from apps.conversations.models import ArchivedMessage, Conversation
-from apps.identity.models import MemoryEntry, UserPersonalContext
+from apps.identity.models import BotUser, MemoryEntry, UserPersonalContext
 from apps.identity.services.memory_deleter import soft_delete_all_zones_for_forget_all
 
 logger = logging.getLogger(__name__)
@@ -132,6 +136,23 @@ logger = logging.getLogger(__name__)
 #: handful; the cap exists so a backlog after an outage drains over several
 #: runs instead of holding one transaction open across all of them.
 SWEEP_BATCH_SIZE = 500
+
+#: DRF-2746 — источники отзыва ``personal_data``, которые и ЕСТЬ стирание.
+#: Носитель отсечки для второй выборки свипа — ``ConsentRecord.withdrawn_at``:
+#: источник отзыва в строке согласия не хранится (``withdraw()`` ставит одно
+#: время, поле ``source`` строки — источник выдачи), поэтому список держит
+#: перепись вызовов, а не фильтр запроса. Сегодня personal_data отзывают
+#: ровно два места, и оба — стирание: шаг 3 каскада удаления
+#: (``privacy.delete_personal_data``; его зовут удаление в Mini App, удаление
+#: аккаунта и отзыв хранения) и сам отзыв хранения
+#: (``consent.customer.revoke_data_storage``). Узел-перепись
+#: ``test_withdrawal_dialogue_sweep_2746.py`` краснеет, если появится отзыв
+#: personal_data с источником вне этого списка, — такой отзыв переписку
+#: стирать не должен, и решать это придётся явно, а не по факту.
+ERASING_PERSONAL_DATA_WITHDRAWAL_SOURCES = (
+    "privacy_delete",
+    "miniapp:profile_data_storage_revoke",
+)
 
 
 @dataclass(frozen=True)
@@ -489,4 +510,95 @@ def sweep_pending_forget_all(limit: int = SWEEP_BATCH_SIZE) -> dict:
         "errors": errors,
     }
     logger.info("identity.forget_all_sweep.summary=%s", summary)
+    # DRF-2746 — вторая выборка: переписка по отзыву personal_data, в том
+    # числе у людей без связки, которых выборка выше не видит по построению.
+    summary.update(sweep_pending_withdrawal_dialogues(limit))
+    return summary
+
+
+# --------------------------------------------------------------------------- #
+# DRF-2746 — переписка человека БЕЗ связки с Ayla
+# --------------------------------------------------------------------------- #
+#
+# Выборка выше ходит от ``UserPersonalContext``, а её первичный ключ — это
+# ``ayla_user_id``. У человека без связки такой строки нет и быть не может:
+# каскад удаления в ветке ``no_state`` не ставит ``forget_all_requested_at``
+# не по забывчивости, а потому что ставить его некуда. Значит, если шаг
+# каскада ``dialogue_anonymize`` упал (Redis переписки недоступен), повтора
+# у несвязанного не было: строки ``Message`` лежали до ручного вмешательства.
+#
+# Носитель повтора — отзыв ``personal_data``. Он и есть основание стирания,
+# пишется шагом 3 каскада ДО шага 6, в своей транзакции, и висит на
+# ``bot_user`` — то есть есть у связанного и у несвязанного одинаково.
+# Отсечка — последний ``withdrawn_at`` оболочки, а не «сейчас»: человек после
+# отзыва может дать согласие снова и продолжить разговор, и эти реплики его.
+
+
+def pending_withdrawal_dialogue_shells(
+    limit: int = SWEEP_BATCH_SIZE,
+) -> list[tuple[uuid.UUID, datetime]]:
+    """Оболочки, чья переписка до отзыва ``personal_data`` не обезличена.
+
+    Пара ``(bot_user_id, cutoff)``; ``cutoff`` — последний ``withdrawn_at``
+    ``personal_data`` этой оболочки. Кандидат — оболочка, у которой есть
+    разговор, начатый не позже отсечки, чья отметка обезличивания до
+    отсечки не дошла. Старые первыми — тот же порядок, что у выборки выше.
+    """
+
+    latest_withdrawal = (
+        ConsentRecord.all_tenants.filter(
+            bot_user=OuterRef("pk"),
+            consent_type=ConsentRecord.ConsentType.PERSONAL_DATA,
+            withdrawn_at__isnull=False,
+        )
+        .order_by("-withdrawn_at")
+        .values("withdrawn_at")[:1]
+    )
+    unanonymized = Conversation.all_tenants.filter(
+        bot_user=OuterRef("pk"),
+        created_at__lte=OuterRef("cutoff"),
+    ).filter(Q(anonymized_through__isnull=True) | Q(anonymized_through__lt=OuterRef("cutoff")))
+    qs = (
+        BotUser.all_tenants.annotate(cutoff=Subquery(latest_withdrawal))
+        .filter(cutoff__isnull=False)
+        .annotate(has_live_dialogue=Exists(unanonymized))
+        .filter(has_live_dialogue=True)
+        .order_by("cutoff")
+        .values_list("pk", "cutoff")
+    )
+    return list(qs[:limit])
+
+
+def sweep_pending_withdrawal_dialogues(limit: int = SWEEP_BATCH_SIZE) -> dict:
+    """Дочистить переписку по отзыву ``personal_data`` — повтор шага 6 каскада.
+
+    Идемпотентно: ``anonymize_dialogue`` пропускает разговор, чья отметка уже
+    дошла до отсечки, и сообщение, чьё тело уже в архиве. Одна плохая
+    оболочка считается и пропускается.
+    """
+
+    shells = pending_withdrawal_dialogue_shells(limit)
+    anonymized = 0
+    errors = 0
+    for bot_user_id, cutoff in shells:
+        try:
+            result = anonymize_dialogue(
+                [bot_user_id],
+                through=cutoff,
+                reason=ArchivedMessage.Reason.ACCOUNT_DELETE,
+            )
+        except Exception:  # noqa: BLE001 — one bad shell must not stall the queue
+            logger.exception(
+                "identity.forget_all_sweep.withdrawal_dialogue_failed bot_user=%s", bot_user_id
+            )
+            errors += 1
+            continue
+        if result.changed:
+            anonymized += 1
+    summary = {
+        "withdrawal_dialogue_candidates": len(shells),
+        "withdrawal_dialogues_anonymized": anonymized,
+        "withdrawal_dialogue_errors": errors,
+    }
+    logger.info("identity.forget_all_sweep.withdrawal_summary=%s", summary)
     return summary

@@ -211,6 +211,44 @@ def memory_ttl_sweep() -> dict:
     return soft_delete_expired_entries().as_summary()
 
 
+@shared_task(name="apps.identity.tasks.memory_tombstone_purge")
+def memory_tombstone_purge() -> dict:
+    """Физически удалить строки памяти, чьё надгробие отлежало срок (DRF-2775).
+
+    Что удаляется и почему именно так — см.
+    :func:`apps.identity.services.memory_deleter.purge_expired_tombstones`.
+
+    Инертна, пока ``MEMORY_TOMBSTONE_PURGE_ENABLED`` закрыт: физическое
+    удаление на реальных данных включается только по допуску владельца
+    (§15 DRF-2748). Кросс-тенантная, без ``tenant_scope``.
+    """
+    from django.conf import settings
+
+    from apps.identity.services.memory_deleter import purge_expired_tombstones
+
+    if not getattr(settings, "MEMORY_TOMBSTONE_PURGE_ENABLED", False):
+        return {"mode": "disabled"}
+    return purge_expired_tombstones().as_summary()
+
+
+@shared_task(name="apps.identity.tasks.memory_inference_ttl_sweep")
+def memory_inference_ttl_sweep() -> dict:
+    """Сроки производной памяти Ф4: 30 дн неподтверждённым, 180 подтверждённым (DRF-2782).
+
+    Что делается с каждым видом — см.
+    :func:`apps.identity.services.memory_deleter.sweep_expired_inferences`.
+    Инертна, пока ``MEMORY_INFERENCE_TTL_SWEEP_ENABLED`` закрыт.
+    Кросс-тенантная, без ``tenant_scope``.
+    """
+    from django.conf import settings
+
+    from apps.identity.services.memory_deleter import sweep_expired_inferences
+
+    if not getattr(settings, "MEMORY_INFERENCE_TTL_SWEEP_ENABLED", False):
+        return {"mode": "disabled"}
+    return sweep_expired_inferences().as_summary()
+
+
 @shared_task(name="apps.identity.tasks.ayla_erasure_sweep")
 def ayla_erasure_sweep() -> dict:
     """Повторить просроченные задания удаления в Ayla (DRF-1950).
