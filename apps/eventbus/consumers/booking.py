@@ -64,6 +64,7 @@ from django.utils import timezone
 
 from apps.booking.client_notify import (
     schedule_client_booking_confirmation,
+    schedule_client_master_cancelled,
     was_confirmed_in_chat,
 )
 from apps.booking.completion import actor_from_event
@@ -905,6 +906,49 @@ def _emit_domain_booking_created_pair(
 # ─── handlers ──────────────────────────────────────────────────────────────
 
 
+def _notes_appointment_version(handler: Any) -> Any:
+    """After ``handler`` succeeds, raise the mirror's ``appointment_version``.
+
+    DRF-2785. The catalog puts ``data.version`` on ``booking.created`` and on
+    both reschedule events; the master's actions send it back as
+    ``expected_version``. Written here, not inside each handler, because those
+    handlers have many exits (replay skip, advanced state, …) and the version
+    is a fact about the event, not about which branch ran.
+
+    Only ever raised (``UPDATE … WHERE version IS NULL OR version < v``): a
+    late or replayed event can never lower it. Scoped to the envelope's
+    tenant, after the handler's own tenant guard has passed — a raising
+    handler never gets here. An event without ``version`` (an older catalog)
+    leaves the field as it was.
+    """
+
+    import functools
+
+    @functools.wraps(handler)
+    def wrapped(envelope: IngestEnvelope) -> None:
+        handler(envelope)
+        data = envelope.data if isinstance(envelope.data, dict) else {}
+        raw = data.get("version")
+        if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1:
+            return
+        if envelope.tenant_id is None:
+            return
+        try:
+            appointment_id = UUID(str(data.get("appointment_id")))
+        except ValueError:
+            return
+        from django.db.models import Q
+
+        RemoteBookingProxy.all_tenants.filter(
+            appointment_id=appointment_id, tenant_id=envelope.tenant_id
+        ).filter(Q(appointment_version__isnull=True) | Q(appointment_version__lt=raw)).update(
+            appointment_version=raw
+        )
+
+    return wrapped
+
+
+@_notes_appointment_version
 def handle_booking_created(envelope: IngestEnvelope) -> None:
     """``booking.created`` — event-contract.md §3.1.
 
@@ -1220,6 +1264,15 @@ def handle_booking_cancelled(envelope: IngestEnvelope) -> None:
             proxy_pk=proxy.pk,
             reason="cancelled_by_client" if cancelled_by in ("client", "customer") else "cancelled",
         )
+    if cancelled_by == "master":
+        # DRF-2785 — «❌ Не смогу»: the client is told, with a way to re-book.
+        # Before this nobody wrote to the client about a master's cancellation.
+        schedule_client_master_cancelled(
+            tenant=tenant,
+            bot_user=proxy.bot_user,
+            appointment_id=appointment_id,
+            start_at=proxy.start_at,
+        )
 
     emit_internal_event(
         "booking_cancelled",
@@ -1231,6 +1284,7 @@ def handle_booking_cancelled(envelope: IngestEnvelope) -> None:
     )
 
 
+@_notes_appointment_version
 def handle_booking_rescheduled(envelope: IngestEnvelope) -> None:
     """``booking.rescheduled`` — event-contract.md §3.3.
 
@@ -1522,6 +1576,7 @@ def _parse_canonical_reschedule_data(data: dict[str, Any]) -> _CanonicalReschedu
     )
 
 
+@_notes_appointment_version
 def handle_appointment_rescheduled_canonical(envelope: IngestEnvelope) -> None:
     """``appointment.rescheduled`` — canonical cross-repo DER contract
     (AYLA-DEC-0022, AYLA-DEC-0036).
