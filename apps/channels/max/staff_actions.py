@@ -442,6 +442,31 @@ def day_visit_rows(tenant, *, now: datetime | None = None) -> list[tuple[str, st
     return [(appointment_id, label) for _, appointment_id, label in rows[:MAX_LISTED]]
 
 
+def master_visit_rows(master, *, now: datetime | None = None) -> list[tuple[str, str]]:
+    """``(appointment_id, label)`` for the master's own visits of today to settle.
+
+    DRF-2785 — the master's half of :func:`day_visit_rows`: the same day, the
+    same «not closed yet» rule, one master. No answer from the source — no
+    buttons; the text above already says so.
+    """
+
+    from apps.master_api.services.visit_source import UPCOMING_STATUSES, master_visits
+
+    now = now or timezone.now()
+    tz = salon_zone(master.tenant)
+    start, end = _day_bounds(now, tz)
+    try:
+        visits = master_visits(master, start=start, end=end, statuses=UPCOMING_STATUSES)
+    except Exception:  # noqa: BLE001 — нет дня ≠ ошибка нажатия
+        logger.warning("staff_actions.master_visit_rows.source_unavailable", exc_info=True)
+        return []
+    rows = []
+    for visit in visits[:MAX_LISTED]:
+        when = visit.visit_at.astimezone(tz).strftime("%H:%M") if visit.visit_at else "—"
+        rows.append((visit.id, f"{when} · {visit.client_name}"))
+    return rows
+
+
 def _visit_line(tenant, appointment_id: str, start_datetime) -> str:
     """«Клиент · ЧЧ:ММ · услуга» — время из ответа расписания, не из зеркала.
 

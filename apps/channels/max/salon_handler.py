@@ -64,9 +64,15 @@ from apps.channels.bot_context import bot_scope
 from apps.channels.max import outbound
 from apps.channels.max.parser import CanonicalEvent, ParseError, parse_max_webhook
 from apps.channels.max.staff_menu import (
+    CB_ACK_PREFIX,
     CB_APPROVE_PREFIX,
+    CB_CANT_OK_PREFIX,
+    CB_CANT_PREFIX,
     CB_COMPLETE_PREFIX,
     CB_DAY,
+    CB_MDONE_PREFIX,
+    CB_MNOSHOW_PREFIX,
+    CB_MVISIT_PREFIX,
     CB_NOSHOW_PREFIX,
     CB_REJECT_PREFIX,
     CB_VISIT_PREFIX,
@@ -1641,11 +1647,33 @@ def _handle_button(event: CanonicalEvent, role_ctx, bot_user, tenant, entry) -> 
             return
         else:
             master = _master_of(bot_user)
-            body = (
-                staff_actions.master_day(master)
-                if master is not None
-                else "Ваша карточка мастера не найдена."
+            if master is None:
+                body = "Ваша карточка мастера не найдена."
+            else:
+                body = staff_actions.master_day(master)
+                _reply(
+                    event,
+                    body,
+                    attachments=_master_day_attachments(master, body, role_ctx, entry),
+                )
+                return
+    elif (
+        action.startswith(
+            (
+                CB_ACK_PREFIX,
+                CB_CANT_PREFIX,
+                CB_CANT_OK_PREFIX,
+                CB_MVISIT_PREFIX,
+                CB_MDONE_PREFIX,
+                CB_MNOSHOW_PREFIX,
             )
+        )
+        and (master := _master_of(bot_user)) is not None
+    ):
+        # DRF-2785 — the master on their OWN appointment; the catalog checks
+        # ownership again (404 for anything not theirs).
+        _handle_master_action(event, action, master, bot_user, tenant, role_ctx, entry)
+        return
     elif action == CB_REQUESTS and is_admin_side:
         _reply(
             event,
@@ -1825,6 +1853,68 @@ def _day_attachments(tenant, role_ctx, entry):
     if not buttons:
         return None
     return [make_inline_keyboard_attachment(buttons, columns=1)]
+
+
+def _handle_master_action(event, action, master, bot_user, tenant, role_ctx, entry) -> None:
+    """«✅ Подтверждаю» / «❌ Не смогу» / «состоялся» / «не пришёл» — as the master."""
+
+    from apps.channels.max import master_actions
+    from apps.channels.max.outbound import make_inline_keyboard_attachment_rows
+
+    if action.startswith(CB_MVISIT_PREFIX):
+        reply = master_actions.visit_question(
+            tenant=tenant, appointment_id=action[len(CB_MVISIT_PREFIX) :]
+        )
+    elif action.startswith(CB_CANT_PREFIX):
+        appointment_id, version = master_actions.parse_ref(action[len(CB_CANT_PREFIX) :])
+        reply = master_actions.cancel_question(
+            tenant=tenant, appointment_id=appointment_id, version=version
+        )
+    else:
+        prefix, verb = next(
+            (p, v)
+            for p, v in (
+                (CB_ACK_PREFIX, "acknowledge"),
+                (CB_CANT_OK_PREFIX, "cancel"),
+                (CB_MDONE_PREFIX, "complete"),
+                (CB_MNOSHOW_PREFIX, "no-show"),
+            )
+            if action.startswith(p)
+        )
+        reply = master_actions.act(
+            tenant=tenant,
+            bot_user=bot_user,
+            master=master,
+            action=verb,
+            ref=action[len(prefix) :],
+        )
+    attachments: list[dict] | None
+    if reply.rows:
+        attachments = [make_inline_keyboard_attachment_rows(reply.rows)]
+    else:
+        # Done or refused: the menu comes back, so the panel persists.
+        attachments = menu_attachments(role_ctx, entry)
+    _reply(event, reply.text, attachments=attachments)
+
+
+def _master_day_attachments(master, body: str, role_ctx, entry):
+    """The master's day: a button per visit still to settle, then as before.
+
+    «As before» is :func:`_after_action_attachments` — the menu, plus
+    «Расписание» under an empty day (DRF-2759).
+    """
+
+    from apps.channels.max import staff_actions
+    from apps.channels.max.outbound import make_inline_keyboard_attachment
+
+    visits = [
+        {"label": f"✔ {label}", "callback": f"{CB_MVISIT_PREFIX}{appointment_id}"}
+        for appointment_id, label in staff_actions.master_visit_rows(master)
+    ]
+    rest = _after_action_attachments(body, role_ctx, entry) or []
+    if not visits:
+        return rest or None
+    return [make_inline_keyboard_attachment(visits, columns=1), *rest]
 
 
 def _visit_attachments(appointment_id: str, version: int | None):

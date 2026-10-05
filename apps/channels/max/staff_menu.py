@@ -24,8 +24,11 @@ Ayla had no such endpoint; that stopped being true with DRF-1063/1851, and
 the paragraph kept the bot from offering what the backend already did.
 
 Those writes are owner / administrator only — the salon surface admits
-``IsTenantAdmin`` and nobody else — so a master's own day stays read-only
-here. Manual booking in chat is the next phase.
+``IsTenantAdmin`` and nobody else. A master acts on their OWN appointments
+through the catalog's specialist endpoints instead (DRF-2785,
+``master_actions``): «✅ Подтверждаю» / «❌ Не смогу» on «У вас новая
+запись», «состоялся» / «не пришёл» under «📅 Мой день». Manual booking in
+chat is the next phase.
 
 ### Callback convention
 
@@ -101,6 +104,19 @@ CB_VISIT_PREFIX = "cb:staff:visit:"
 #: colon, so the id survives intact.
 CB_COMPLETE_PREFIX = "cb:staff:done:"
 CB_NOSHOW_PREFIX = "cb:staff:noshow:"
+
+#: The master's own appointment (DRF-2785) — ref ``<appointment_id>:<version>``
+#: (version 0 = not known; ``master_actions.parse_ref``).
+#: «✅ Подтверждаю» on «У вас новая запись».
+CB_ACK_PREFIX = "cb:staff:ack:"
+#: «❌ Не смогу» — asks first; the answer «Да, отменить» is ``CB_CANT_OK_PREFIX``.
+CB_CANT_PREFIX = "cb:staff:cant:"
+CB_CANT_OK_PREFIX = "cb:staff:cant_ok:"
+#: One visit of the master's own day → «Визит состоялся?» (ref — the id).
+CB_MVISIT_PREFIX = "cb:staff:mvisit:"
+#: Its answers, as the master (not the salon surface).
+CB_MDONE_PREFIX = "cb:staff:mdone:"
+CB_MNOSHOW_PREFIX = "cb:staff:mnoshow:"
 
 #: Payload of the Mini App button — and the one identifier in this module
 #: that CANNOT use the ``cb:staff:*`` grammar above.
