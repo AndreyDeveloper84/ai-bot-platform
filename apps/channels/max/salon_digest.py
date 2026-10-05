@@ -144,6 +144,7 @@ def _deliver(tenant: Any, local: datetime) -> str:
     """Собрать и отправить итог одному салону; вернуть reason."""
 
     from apps.channels.max import salon_greeting, salon_notify
+    from apps.channels.max.staff_outbound import salon_bot
 
     data = gather_digest(tenant, now=local)
     lines = salon_greeting.render_summary_lines(tenant.name, data)
@@ -156,8 +157,12 @@ def _deliver(tenant: Any, local: datetime) -> str:
             ",".join(data.missing) or "-",
         )
         return "source_failed"
+    # DRF-2769: адресаты итога сегодня — управляющие (MANAGER), поэтому набор
+    # кнопок — администраторский. Mini App — по записи салонного бота в реестре:
+    # нет ``web_app``/``miniapp_url`` — нет и этих кнопок, чат-кнопки остаются.
+    keyboard = salon_greeting.digest_admin_buttons(salon_bot())
     result = salon_notify.notify(
-        salon_notify.digest_notice(tenant, local_date=local.date(), lines=lines)
+        salon_notify.digest_notice(tenant, local_date=local.date(), lines=lines, keyboard=keyboard)
     )
     if result is None:
         return "already_sent_today"

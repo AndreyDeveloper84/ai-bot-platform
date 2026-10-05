@@ -72,6 +72,12 @@ CB_REQUESTS = "cb:staff:requests"
 #: администратора — поимённый список того, что мешает записи.
 CB_READINESS = "cb:staff:readiness"
 
+#: Labels of the chat buttons above — one place, so the menu and the morning
+#: digest (DRF-2769) cannot drift apart.
+LABEL_DAY_ADMIN = "📅 Сегодня"
+LABEL_DAY_MASTER = "📅 Мой день"
+LABEL_REQUESTS = "🗒 Заявки от мастеров"
+
 #: Approving one request. The request id rides in the 4th segment;
 #: `parse_callback` splits on the first three colons only, so a UUID
 #: survives intact.
@@ -136,10 +142,10 @@ def menu_buttons(role_ctx, entry) -> list[dict[str, str]]:
     is_admin_side = role_ctx.is_owner or role_ctx.is_admin or role_ctx.is_receptionist
 
     if is_admin_side:
-        buttons.append({"label": "📅 Сегодня", "callback": CB_DAY})
-        buttons.append({"label": "🗒 Заявки от мастеров", "callback": CB_REQUESTS})
+        buttons.append({"label": LABEL_DAY_ADMIN, "callback": CB_DAY})
+        buttons.append({"label": LABEL_REQUESTS, "callback": CB_REQUESTS})
     elif role_ctx.is_master:
-        buttons.append({"label": "📅 Мой день", "callback": CB_DAY})
+        buttons.append({"label": LABEL_DAY_MASTER, "callback": CB_DAY})
 
     label = "🏠 Кабинет салона" if is_admin_side else "🏠 Мой кабинет"
     app_button = _miniapp_button(entry, label)
