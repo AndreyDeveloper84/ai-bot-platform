@@ -171,7 +171,9 @@ class TestTheRedZoneTrailOutlivesTheRow:
         result = _purge()
 
         assert result.purged == 2
-        assert RedZoneAccessLog.objects.filter(memory_entry_id__in=[green.id, yellow.id]).count() == 0
+        assert (
+            RedZoneAccessLog.objects.filter(memory_entry_id__in=[green.id, yellow.id]).count() == 0
+        )
 
 
 class TestReferencesToADeletedRow:
@@ -183,6 +185,7 @@ class TestReferencesToADeletedRow:
 
         _purge()
 
+        assert _exists(older)
         older.refresh_from_db()
         assert older.superseded_by_id is None
         assert not _exists(replacement)
@@ -248,12 +251,15 @@ class TestTheSwitch:
         assert settings.MEMORY_TOMBSTONE_PURGE_ENABLED is False
 
     def test_the_open_switch_purges(self) -> None:
-        old = _tombstone(_upc(), GREEN, hours_ago=400 * 24)
+        upc = _upc()
+        old = _tombstone(upc, GREEN, hours_ago=400 * 24)
+        young = _tombstone(upc, GREEN, hours_ago=24)
 
         with override_settings(MEMORY_TOMBSTONE_PURGE_ENABLED=True):
             summary = memory_tombstone_purge()
 
         assert summary["purged_green"] == 1
+        assert _exists(young)
         assert not _exists(old)
 
     def test_the_task_is_scheduled_nightly(self) -> None:
