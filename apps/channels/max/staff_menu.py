@@ -13,13 +13,19 @@ Only capabilities that actually work are shown. A button that opens a
 "скоро" message is worse than no button: it costs a tap, teaches the person
 the bot is unfinished, and hides the working entries among the dead ones.
 So the menu carries the day view, the pending-requests queue, and the door
-into the Mini App — and nothing else yet.
+into the Mini App.
 
-Manual booking, completing a visit and marking a no-show are absent for a
-harder reason: **Ayla has no endpoint where the actor is a salon employee.**
-The public create rejects everyone but the client, complete/no_show check
-`is_specialist` and row ownership. A button here would be a promise the
-backend cannot keep. That work is the salon-ops window's (DRF-1063/1064).
+The decisions live under the answers, not in the menu (DRF-2784): approve
+or reject under the request list; «состоялся» / «не пришёл» under the
+salon's day. They go through the salon surface where the actor IS a salon
+employee (``salon_client.complete_appointment`` / ``mark_no_show``, the same
+writes as the admin Mini App). An earlier version of this paragraph said
+Ayla had no such endpoint; that stopped being true with DRF-1063/1851, and
+the paragraph kept the bot from offering what the backend already did.
+
+Those writes are owner / administrator only — the salon surface admits
+``IsTenantAdmin`` and nobody else — so a master's own day stays read-only
+here. Manual booking in chat is the next phase.
 
 ### Callback convention
 
@@ -82,6 +88,19 @@ LABEL_REQUESTS = "🗒 Заявки от мастеров"
 #: `parse_callback` splits on the first three colons only, so a UUID
 #: survives intact.
 CB_APPROVE_PREFIX = "cb:staff:req_ok:"
+
+#: Rejecting one request (DRF-2784) — same shape as approval.
+CB_REJECT_PREFIX = "cb:staff:req_no:"
+
+#: One visit of the salon's day (DRF-2784): the tap reads the canonical
+#: version and asks «Визит состоялся?». Ref — the appointment id.
+CB_VISIT_PREFIX = "cb:staff:visit:"
+
+#: The answers to that question. Ref — ``<appointment_id>:<version>``, the
+#: version the question showed; ``staff_actions.settle`` splits on the LAST
+#: colon, so the id survives intact.
+CB_COMPLETE_PREFIX = "cb:staff:done:"
+CB_NOSHOW_PREFIX = "cb:staff:noshow:"
 
 #: Payload of the Mini App button — and the one identifier in this module
 #: that CANNOT use the ``cb:staff:*`` grammar above.
