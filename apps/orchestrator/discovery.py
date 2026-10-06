@@ -283,8 +283,9 @@ SHOW_MASTERS_TOOL_SPEC: dict[str, Any] = {
     "description": (
         "Show bookable beauty masters across all salons matching the user's "
         "request. Call this when the user wants to find, browse, or pick a "
-        "master. Requires at least a city or a specialization: with neither, "
-        "there is nothing to match on — use ask_clarification instead."
+        "master. Requires at least a city, a specialization or a master name: "
+        "with none of them, there is nothing to match on — use "
+        "ask_clarification instead."
     ),
     "parameters": {
         "type": "object",
@@ -335,6 +336,27 @@ SHOW_MASTERS_TOOL_SPEC: dict[str, Any] = {
                 "minimum": 1,
                 "maximum": _MAX_MASTER_CARDS,
                 "description": "How many masters to show.",
+            },
+            # DRF-2829 — предпочтение мастера (решение владельца 06.10). Кто
+            # это и что он делает, решает каталог; модель только передаёт имя
+            # и силу. «только / именно» в реплике делают силу жёсткой и без
+            # модели (``master_preference.is_hard``).
+            "master": {
+                "type": "string",
+                "description": (
+                    "Имя мастера, которого клиент предпочитает или к которому "
+                    "хочет только его, — как прозвучало («Анна», «к Анне»). "
+                    "Только имя: без услуги и без города."
+                ),
+            },
+            "master_strength": {
+                "type": "string",
+                "enum": ["soft", "hard"],
+                "description": (
+                    "hard — клиент хочет ТОЛЬКО этого мастера («только к Анне», "
+                    "«именно Анна»): других не показывать. soft — предпочитает, "
+                    "но готов к другим («лучше бы к Анне», «предпочитаю Анну»)."
+                ),
             },
         },
         "required": [],
