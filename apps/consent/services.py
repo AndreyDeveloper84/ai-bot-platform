@@ -566,6 +566,13 @@ MEMORY_ZONE_CONSENT = {
 # другой путь отзыва personal_data оставлял его действующим. Теперь это строка
 # реестра, и снимается она там же, где снимаются остальные надстройки.
 # ``personal_calculation`` в каскаде нет — вне M1, вопрос назван в PR.
+#
+# DRF-2779 добавляет ``preference_inference`` (умная память Ф4) по тому же
+# правилу: это добровольная НАДСТРОЙКА над personal_data. Отзыв хранения и
+# удаление данных снимают её вместе с основанием — иначе после «удалить мои
+# данные» в реестре оставалось бы действующее разрешение анализировать
+# обращения человека. Обратного нет: отзыв Ф4 personal_data не трогает, и
+# повторная выдача хранения Ф4 не возвращает.
 _PERSONAL_DATA_CASCADE = (
     ConsentRecord.ConsentType.PERSONAL_DATA,
     ConsentRecord.ConsentType.HEALTH,
@@ -574,6 +581,7 @@ _PERSONAL_DATA_CASCADE = (
     ConsentRecord.ConsentType.MEMORY_YELLOW,
     ConsentRecord.ConsentType.MEMORY_RED,
     ConsentRecord.ConsentType.FOOD_DIARY_PROCESSING,
+    ConsentRecord.ConsentType.PREFERENCE_INFERENCE,
 )
 
 

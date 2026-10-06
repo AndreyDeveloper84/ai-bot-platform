@@ -57,6 +57,11 @@ def test_personal_context_puts_every_source_in_exactly_one_group(monkeypatch):
     # затвор (его держит apps/persona/tests/test_memory_surface_consent_2697.py),
     # поэтому затвор здесь открыт явно.
     monkeypatch.setattr("apps.persona.memory_surface.can_store_green_memory", lambda bot_user: True)
+    # DRF-2781: выведенное идёт в абзац только подтверждённым и при действующем
+    # согласии на предположения; узел — про группы абзаца, затвор открыт явно.
+    monkeypatch.setattr(
+        "apps.identity.services.memory_proposals.inference_use_allowed", lambda user_id: True
+    )
 
     user_id = uuid.uuid4()
     upc = UserPersonalContext.objects.create(user_id=user_id, summary=SUMMARY)
@@ -76,6 +81,9 @@ def test_personal_context_puts_every_source_in_exactly_one_group(monkeypatch):
 
     _write(MemoryEntry.SOURCE_EXPLICIT, {"key": "diet", "value": "vegan"})
     _write(MemoryEntry.SOURCE_INFERRED, {"key": "preferred_districts", "value": "Арбат"})
+    MemoryEntry.objects.filter(user_id=user_id, source=MemoryEntry.SOURCE_INFERRED).update(
+        provenance=MemoryEntry.PROVENANCE_USER_CONFIRMED_INFERENCE
+    )
 
     paragraph = render_current_personal_context(SimpleNamespace(ayla_user_id=user_id))
     assert paragraph is not None

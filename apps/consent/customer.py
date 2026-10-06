@@ -315,6 +315,25 @@ def read_consents(bot_user: "BotUser") -> dict[str, Any]:
             # выдача — клиент шлёт её обратно как доказательство показа.
             "regrant": {"document_version": DATA_STORAGE_REGRANT_DOCUMENT_VERSION},
         },
+        # DRF-2779 — умная память Ф4: добровольное согласие на предположения.
+        # ``grant`` — под какой версией текста выдаётся сейчас (клиент шлёт
+        # её обратно) и что текст ещё на юр-проверке (#947).
+        "preference_inference": {
+            **states[ConsentRecord.ConsentType.PREFERENCE_INFERENCE.value],
+            "grant": _preference_inference_grant_terms(),
+        },
+    }
+
+
+def _preference_inference_grant_terms() -> dict[str, Any]:
+    from apps.consent.preference_inference import (
+        PENDING_LEGAL,
+        PREFERENCE_INFERENCE_DOCUMENT_VERSION,
+    )
+
+    return {
+        "document_version": PREFERENCE_INFERENCE_DOCUMENT_VERSION,
+        "pending_legal": PENDING_LEGAL,
     }
 
 
