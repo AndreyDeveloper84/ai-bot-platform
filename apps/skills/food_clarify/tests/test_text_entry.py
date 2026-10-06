@@ -351,9 +351,24 @@ class TestRouting:
             assert tap.history_text, payload
 
     def test_keyboard_callbacks_are_the_ones_the_skill_owns(self) -> None:
-        from apps.orchestrator.ui.keyboards import food_text_estimate_keyboard
+        from apps.orchestrator.ui.keyboards import (
+            food_text_estimate_keyboard,
+            food_text_items_keyboard,
+            food_text_unpriced_keyboard,
+        )
 
-        assert {b["callback"] for b in food_text_estimate_keyboard()} == text_entry.TEXT_CALLBACKS
+        # DRF-2768 — три карточки подтверждения: одно блюдо, несколько позиций,
+        # запись без расчёта. Каждый их тап — тап этого скилла.
+        shown = {
+            b["callback"]
+            for keyboard in (
+                food_text_estimate_keyboard(),
+                food_text_items_keyboard(),
+                food_text_unpriced_keyboard(),
+            )
+            for b in keyboard
+        }
+        assert shown == text_entry.TEXT_CALLBACKS
 
 
 LOG_ID = "0b6f3c2e-9d1a-4c55-8e2f-1838aaaa0001"

@@ -83,7 +83,9 @@ from apps.orchestrator.ui.keyboards import (
     food_entry_keyboard,
     food_text_deleted_keyboard,
     food_text_estimate_keyboard,
+    food_text_items_keyboard,
     food_text_logged_keyboard,
+    food_text_unpriced_keyboard,
 )
 from apps.skills.base import SkillContext, SkillResult
 
@@ -111,7 +113,19 @@ MEAL_TYPE_UNNAMED = "other"
 CB_LOG = "cb:food:text_log"
 CB_GRAMS = "cb:food:text_grams"
 CB_REJECT = "cb:food:text_reject"
-TEXT_CALLBACKS = frozenset({CB_LOG, CB_GRAMS, CB_REJECT})
+#: DRF-2768 — карточка без расчёта («Сохранить / Изменить / Отменить», решение
+#: владельца 06.10) и «Изменить» под карточкой нескольких позиций. Свои
+#: payload'ы, а не повтор ``text_log``/``text_reject``: подпись тапа в истории
+#: берётся из клавиатуры по payload, и один payload с двумя подписями
+#: (``В дневник`` / ``Сохранить``) оставил бы в истории одну из них.
+CB_SAVE = "cb:food:text_save"
+CB_EDIT = "cb:food:text_edit"
+CB_CANCEL = "cb:food:text_cancel"
+TEXT_CALLBACKS = frozenset({CB_LOG, CB_GRAMS, CB_REJECT, CB_SAVE, CB_EDIT, CB_CANCEL})
+
+#: DRF-2768 — сколько позиций одной фразой принимает карточка. Больше — это
+#: уже рассказ, и каждая позиция стоит отдельного запроса к каталогу.
+MAX_POSITIONS = 6
 
 #: DRF-1838 — тапы под СОХРАНЁННОЙ записью. ``id`` записи в payload:
 #: запись переживает десятиминутное состояние разговора.
@@ -133,6 +147,23 @@ NOT_FOUND_TEXT = (
 GRAMS_PROMPT = "Сколько граммов было? Напиши число — пересчитаю."
 GRAMS_UNREADABLE = f"Не поняла число. Напиши граммы цифрами — от {MIN_GRAMS} до {MAX_GRAMS}."
 REJECTED_TEXT = "Поняла, не записываю."
+#: DRF-2768 — числа не посчитались ни справочником, ни ИИ: запись без расчёта
+#: предлагается, а не подставляется молча и не уходит модели бота (лёгший
+#: прокси давал C01). Текст НЕЙТРАЛЬНЫЙ — решение владельца 06.10 (Q4): «Сейчас
+#: не удалось…» только для настоящего временного сбоя, а каталог причину пока
+#: не различает (ИИ выключен / нет согласия / сбой — всё ``None``).
+#: Различающий текст — DRF-2823 (флаг ``kcal_ai_status`` от каталога).
+UNPRICED_TEXT = "Калорийность не рассчитана. Записать без расчёта?"
+#: Тот же вопрос в режиме «Без чисел»: о калориях человек слышать не выбрал.
+UNPRICED_HIDDEN_TEXT = "Записать в дневник?"
+EDIT_PROMPT = "Напиши, что было, ещё раз — посчитаю заново."
+#: Часть позиций записалась, на следующей дневник не ответил. Ключи записей
+#: не меняются, поэтому повторный тап дописывает остальное без дублей.
+PARTIAL_TEXT = (
+    "Записала не всё — дневник не ответил. Нажми «В дневник» ещё раз: уже записанное не задвоится."
+)
+INCOMPLETE_CARD_LINE = "Не всё посчитано — итог дня будет неполным."
+NOT_LOGGED_TEXT = "Ничего не записала: дневник не принял ни одной позиции."
 STALE_TEXT = "Эта оценка уже не действует — напиши, что было, ещё раз, и я посчитаю заново."
 UNAVAILABLE_TEXT = "Дневник сейчас не отвечает — ничего не записала. Попробуй через минуту."
 CONSENT_TEXT = (
@@ -271,6 +302,69 @@ def parse_food_text(text: str) -> ParsedFood | None:
     return ParsedFood(dish=cleaned, grams=grams)
 
 
+#: DRF-2768 — разделители позиций: запятая, «;», перевод строки, «+». НЕ «и» и
+#: НЕ «с»: «лепешка роти с творогом и сыром» — одно блюдо. Запятая между
+#: цифрами («1,5 %», «200,5 г») — часть числа, не разделитель.
+_POSITION_SPLIT = re.compile(r"\s*(?:[;\n+]|(?<!\d),|,(?!\d))\s*")
+
+
+def parse_food_positions(text: str) -> list[ParsedFood] | None:
+    """«лепешка роти с творогом и сыром, кофе» → две позиции; ``None`` — не еда.
+
+    Каждая часть разбирается тем же :func:`parse_food_text` — со своими
+    граммами и командными словами. Если хоть одна часть не разбирается —
+    ``None`` целиком: половина фразы о еде не делает её списком блюд.
+    """
+    raw = (text or "").strip()
+    if not raw or raw.startswith("cb:"):
+        return None
+    parts = [part for part in _POSITION_SPLIT.split(raw) if part.strip()]
+    if not parts or len(parts) > MAX_POSITIONS:
+        return None
+    positions = [parse_food_text(part) for part in parts]
+    if any(position is None for position in positions):
+        return None
+    return [position for position in positions if position is not None]
+
+
+#: DRF-2768 (Q2 главного окна 06.10) — закрытый короткий список реплик, которые
+#: не еда, хотя ``parse_food_text`` примет их за блюдо. Не детектор еды —
+#: предохранитель от карточки «Записать без расчёта?» на «спасибо». Держать
+#: маленьким: всё, чего здесь нет, получает карточку с «Отменить».
+_NOT_FOOD_REPLIES = frozenset(
+    {
+        "спасибо",
+        "спасибо большое",
+        "благодарю",
+        "ок",
+        "окей",
+        "хорошо",
+        "понятно",
+        "ясно",
+        "нет",
+        "не надо",
+        "не помню",
+        "не знаю",
+        "забыл",
+        "забыла",
+        "ничего",
+        "неважно",
+        "отмена",
+    }
+)
+
+
+def looks_like_not_food(text: str) -> bool:
+    """Ответ — не описание еды: вопрос, реплика из закрытого списка или запись к мастеру."""
+    stripped = (text or "").strip()
+    if stripped.rstrip(" )!.…").endswith(("?", "？")):
+        return True
+    normalized = _WS.sub(" ", _NOISE.sub(" ", stripped)).strip().lower()
+    if normalized in _NOT_FOOD_REPLIES:
+        return True
+    return "мастер" in normalized
+
+
 # ─── состояние ────────────────────────────────────────────────────────────
 
 
@@ -388,7 +482,9 @@ def claims_text(conversation: Any, text: str) -> bool:
     if bucket.get("awaiting_grams") or bucket.get("awaiting_fix_grams"):
         return bool(_GRAMS_ANSWER.match(text or ""))
     if bucket.get("expect_food"):
-        return parse_food_text(text) is not None
+        # DRF-2768 — «спасибо» в ответ на «напиши, что было» не еда: без этой
+        # строки оно получило бы карточку «Записать без расчёта?».
+        return parse_food_text(text) is not None and not looks_like_not_food(text)
     return False
 
 
@@ -480,11 +576,13 @@ def on_diary_tap(context: SkillContext) -> SkillResult:
     # еды. Оценить её значило бы искать в справочнике весь вопрос и ответить
     # «Не нашла «а есть вообще торт…»». Спрашиваем, что было, — как без фразы.
     is_question = isinstance(source, str) and source.rstrip(" )!.…").endswith(("?", "？"))
-    parsed = parse_food_text(source) if isinstance(source, str) and not is_question else None
-    if parsed is None:
+    positions = (
+        parse_food_positions(source) if isinstance(source, str) and not is_question else None
+    )
+    if positions is None:
         _write(context.conversation, {"expect_food": True, "at": _now_iso()})
         return SkillResult(reply_text=ASK_WHAT_TEXT, meta={"reply_kind": "food_text_ask"})
-    return show_estimate(context, parsed.dish, parsed.grams, corrected=False)
+    return show_positions(context, positions)
 
 
 def on_text(context: SkillContext, text: str) -> SkillResult:
@@ -494,20 +592,46 @@ def on_text(context: SkillContext, text: str) -> SkillResult:
         return _on_fix_grams_answer(context, bucket, text)
     if bucket.get("awaiting_grams"):
         return _on_grams_answer(context, bucket, text)
-    parsed = parse_food_text(text)
-    if parsed is None:
+    positions = parse_food_positions(text)
+    if positions is None:
         return SkillResult(reply_text=ASK_WHAT_TEXT, meta={"reply_kind": "food_text_ask"})
-    return show_estimate(context, parsed.dish, parsed.grams, corrected=False)
+    return show_positions(context, positions)
+
+
+def show_positions(context: SkillContext, positions: list[ParsedFood]) -> SkillResult:
+    """Одна позиция — прежняя карточка; несколько — карточка всех позиций (DRF-2768)."""
+    if len(positions) == 1:
+        return show_estimate(context, positions[0].dish, positions[0].grams, corrected=False)
+    return show_items(context, positions)
 
 
 def on_callback(context: SkillContext, text: str) -> SkillResult:
-    if text == CB_REJECT:
+    if text in (CB_REJECT, CB_CANCEL):
         forget(context)
         return SkillResult(reply_text=REJECTED_TEXT, meta={"reply_kind": "food_text_rejected"})
+    if text == CB_EDIT:
+        # «Изменить» — написать заново: блюдо и граммы правятся новой фразой.
+        _write(context.conversation, {"expect_food": True, "at": _now_iso()})
+        return SkillResult(
+            reply_text=EDIT_PROMPT,
+            action_data={"buttons": _after_entry_buttons()},
+            meta={"reply_kind": "food_text_edit"},
+        )
     bucket = _bucket(context.conversation)
-    if not bucket or not bucket.get("dish") or not bucket.get("token"):
+    has_card = bool(bucket and bucket.get("token") and (bucket.get("dish") or bucket.get("items")))
+    if not bucket or not has_card:
         forget(context)
         return SkillResult(reply_text=STALE_TEXT, meta={"reply_kind": "food_text_stale"})
+    if bucket.get("items"):
+        if text in (CB_LOG, CB_SAVE):
+            return _log_items(context, bucket)
+        # У карточки нескольких позиций граммов не правят — пишут заново.
+        _write(context.conversation, {"expect_food": True, "at": _now_iso()})
+        return SkillResult(
+            reply_text=EDIT_PROMPT,
+            action_data={"buttons": _after_entry_buttons()},
+            meta={"reply_kind": "food_text_edit"},
+        )
     if text == CB_GRAMS:
         _write(context.conversation, {**bucket, "awaiting_grams": True, "at": _now_iso()})
         return SkillResult(reply_text=GRAMS_PROMPT, meta={"reply_kind": "food_text_grams_prompt"})
@@ -556,6 +680,23 @@ def show_estimate(
             "at": _now_iso(),
         },
     )
+    if _unpriced(estimate):
+        # DRF-2768, путь 2: ни справочник, ни ИИ числа не дали. Запись без
+        # расчёта предлагается словами владельца — не молча и не через модель.
+        return SkillResult(
+            reply_text=render_unpriced_card(
+                [
+                    (
+                        estimate.matched_dish,
+                        None if estimate.portion_estimated else estimate.portion_g,
+                    )
+                ],
+                hide_numbers=_numbers_hidden(context),
+            ),
+            action_type="food_text_unpriced_card",
+            action_data={"buttons": food_text_unpriced_keyboard(), "dish": estimate.matched_dish},
+            meta={"reply_kind": UNPRICED_CARD_KIND, "kcal_known": False},
+        )
     return SkillResult(
         reply_text=render_estimate_card(estimate, hide_numbers=_numbers_hidden(context)),
         action_type="food_text_estimate_card",
@@ -642,6 +783,216 @@ def render_estimate_card(estimate: Any, *, hide_numbers: bool = False) -> str:
         lines.append(ai_kcal_phrase(estimate.kcal_ai_estimate) + ".")
     lines.append("Записать в дневник?")
     return "\n".join(lines)
+
+
+# ─── DRF-2768: несколько позиций одной фразой и запись без расчёта ────────
+
+ESTIMATE_CARD_KIND = "food_text_estimate_card"
+ITEMS_CARD_KIND = "food_text_items_card"
+UNPRICED_CARD_KIND = "food_text_unpriced_card"
+#: Все виды карточки подтверждения: ответ после фото (DRF-2328) отвечается
+#: любой из них — запись всё равно только по тапу.
+CARD_KINDS = frozenset({ESTIMATE_CARD_KIND, ITEMS_CARD_KIND, UNPRICED_CARD_KIND})
+
+SOURCE_DICTIONARY = "dictionary"
+SOURCE_AI = "ai"
+
+
+def _unpriced(estimate: Any) -> bool:
+    """Ни справочник, ни ИИ числа не дали — путь 2 решения владельца."""
+    return estimate.kcal is None and getattr(estimate, "kcal_ai_estimate", None) is None
+
+
+def render_unpriced_card(
+    entries: list[tuple[str, float | None]], *, hide_numbers: bool = False
+) -> str:
+    """«Калорийность не рассчитана. Записать без расчёта?» + что запишется.
+
+    Исходная фраза без чисел: человек видит, ЧТО ляжет в дневник, и что ляжет
+    без калорий (не нулём — итог дня пометится неполным). В режиме «Без чисел»
+    о калориях не говорим вовсе — только что запишется. Граммы, которые
+    человек назвал, показываются: они уйдут в запись.
+    """
+    named = ", ".join(
+        f"«{dish}» ({int(round(grams))} г)" if grams is not None else f"«{dish}»"
+        for dish, grams in entries
+    )
+    question = UNPRICED_HIDDEN_TEXT if hide_numbers else UNPRICED_TEXT
+    return f"{question}\nЗапишу как есть: {named}."
+
+
+def _item_of(position: ParsedFood, estimate: Any | None) -> dict[str, Any]:
+    """Позиция карточки и её число — с происхождением, или без числа.
+
+    Число справочника — только когда вес назван (тот же
+    ``portion_numbers_are_named``, что у карточки одного блюда); оценка ИИ —
+    когда справочник блюда не знает. Справочное число и оценка ИИ для одной
+    порции не складываются: проверенное бьёт оценку.
+    """
+    if estimate is None:
+        grams = position.grams if position.grams is not None else BASELINE_G
+        return {
+            "dish": position.dish,
+            "portion_g": grams,
+            "portion_estimated": position.grams is None,
+            "kcal": None,
+            "source": None,
+        }
+    item: dict[str, Any] = {
+        "dish": estimate.matched_dish,
+        "portion_g": estimate.portion_g,
+        "portion_estimated": estimate.portion_estimated,
+        "kcal": None,
+        "source": None,
+    }
+    provenance = portion_provenance_of((getattr(estimate, "raw", None) or {}).get("portion_source"))
+    if estimate.kcal is not None and portion_numbers_are_named(provenance):
+        item.update(kcal=float(estimate.kcal), source=SOURCE_DICTIONARY)
+    elif estimate.kcal is None and getattr(estimate, "kcal_ai_estimate", None) is not None:
+        item.update(kcal=float(estimate.kcal_ai_estimate), source=SOURCE_AI)
+    return item
+
+
+def render_items_card(items: list[dict[str, Any]], *, hide_numbers: bool = False) -> str:
+    """Карточка нескольких позиций: у каждого числа — откуда оно (handoff §5, путь 1)."""
+    lines = ["Я распознала так:"]
+    for item in items:
+        grams = int(round(float(item["portion_g"])))
+        portion = f"примерно {grams} г (оценка)" if item["portion_estimated"] else f"{grams} г"
+        line = f"• {item['dish']} — {portion}"
+        if not hide_numbers:
+            if item["source"] == SOURCE_DICTIONARY:
+                line += f" — примерно {int(round(item['kcal']))} ккал по справочнику"
+            elif item["source"] == SOURCE_AI:
+                line += f" — {ai_kcal_phrase(item['kcal'])}"
+            else:
+                line += " — без расчёта"
+        lines.append(line)
+    if not hide_numbers and any(item["source"] is None for item in items):
+        lines.append(INCOMPLETE_CARD_LINE)
+    lines.append("Записать в дневник?")
+    return "\n".join(lines)
+
+
+def show_items(context: SkillContext, positions: list[ParsedFood]) -> SkillResult:
+    """Оценка каждой позиции без записи и ОДНА карточка подтверждения на все."""
+    refused = _gate(context)
+    if refused is not None:
+        return refused
+    external_id = external_user_id_for(context.bot_user)
+    client = get_nutrition_client()
+    items: list[dict[str, Any]] = []
+    for position in positions:
+        try:
+            estimate = asyncio.run(
+                client.estimate_dish(
+                    external_user_id=external_id,
+                    dish_name=position.dish,
+                    portion_g=position.grams,
+                )
+            )
+        except FoodNotRecognizedError:
+            estimate = None
+        except (NutritionUnavailableError, NutritionAPIError):
+            logger.warning("food_text.items.estimate_failed user=%s", external_id)
+            return SkillResult(
+                reply_text=UNAVAILABLE_TEXT,
+                action_data={"buttons": _after_entry_buttons()},
+                meta={"reply_kind": "food_text_unavailable"},
+            )
+        items.append(_item_of(position, estimate))
+
+    _write(
+        context.conversation,
+        {"items": items, "token": uuid.uuid4().hex, "at": _now_iso()},
+    )
+    dishes = [str(item["dish"]) for item in items]
+    if all(item["source"] is None for item in items):
+        return SkillResult(
+            reply_text=render_unpriced_card(
+                [
+                    (str(item["dish"]), None if item["portion_estimated"] else item["portion_g"])
+                    for item in items
+                ],
+                hide_numbers=_numbers_hidden(context),
+            ),
+            action_type="food_text_unpriced_card",
+            action_data={"buttons": food_text_unpriced_keyboard(), "dishes": dishes},
+            meta={"reply_kind": UNPRICED_CARD_KIND, "kcal_known": False},
+        )
+    return SkillResult(
+        reply_text=render_items_card(items, hide_numbers=_numbers_hidden(context)),
+        action_type="food_text_items_card",
+        action_data={"buttons": food_text_items_keyboard(), "dishes": dishes},
+        meta={
+            "reply_kind": ITEMS_CARD_KIND,
+            "kcal_known": any(item["source"] == SOURCE_DICTIONARY for item in items),
+        },
+    )
+
+
+def _log_items(context: SkillContext, bucket: dict[str, Any]) -> SkillResult:
+    """Запись всех позиций карточки — по тапу, каждая со своим ключом идемпотентности.
+
+    Ключ ``food-text:{человек}:{токен карточки}:{номер}`` не меняется между
+    тапами: повторный тап после частичного сбоя дописывает остальное, а уже
+    записанное каталог узнаёт по ключу и не задваивает.
+    """
+    refused = _gate(context)
+    if refused is not None:
+        return refused
+    external_id = external_user_id_for(context.bot_user)
+    client = get_nutrition_client()
+    logged: list[Any] = []
+    for index, item in enumerate(bucket["items"]):
+        try:
+            log = asyncio.run(
+                client.log_meal(
+                    external_user_id=external_id,
+                    dish_name=str(item["dish"]),
+                    meal_type=MEAL_TYPE_UNNAMED,
+                    portion_multiplier=round(float(item["portion_g"]) / BASELINE_G, 3),
+                    idempotency_key=f"food-text:{external_id}:{bucket['token']}:{index}",
+                    entry_origin=ORIGIN_ESTIMATED_CONFIRMED,
+                )
+            )
+        except FoodNotRecognizedError:
+            logger.info("food_text.items.not_recognized user=%s index=%d", external_id, index)
+            continue
+        except (NutritionUnavailableError, NutritionAPIError):
+            logger.warning("food_text.items.log_failed user=%s index=%d", external_id, index)
+            # Повтор — та же карточка: «В дневник» дописывает остальное без дублей.
+            return SkillResult(
+                reply_text=PARTIAL_TEXT,
+                action_data={"buttons": food_text_items_keyboard()},
+                meta={"reply_kind": "food_text_partial"},
+            )
+        logged.append(log)
+
+    forget(context)
+    hide = _numbers_hidden(context)
+    parts = []
+    for log in logged:
+        ai_calories = _ai_calories_of(log)
+        if hide:
+            parts.append(log.dish_name)
+        elif ai_calories is not None:
+            parts.append(f"{log.dish_name} — {ai_kcal_phrase(ai_calories)}")
+        elif log.calories is None:
+            parts.append(log.dish_name)
+        else:
+            parts.append(f"{log.dish_name} — {int(round(log.calories))} ккал")
+    return SkillResult(
+        reply_text="Записала в дневник: " + "; ".join(parts) + "." if parts else NOT_LOGGED_TEXT,
+        claims_done=bool(parts),
+        claims_done_evidence="ayla.meals.log:log_id" if parts else "",
+        action_type="food_logged" if parts else "",
+        action_data={
+            "log_ids": [log.log_id for log in logged],
+            "buttons": _after_entry_buttons(),
+        },
+        meta={"reply_kind": "food_text_items_logged" if parts else "food_text_not_found"},
+    )
 
 
 def _on_grams_answer(context: SkillContext, bucket: dict[str, Any], text: str) -> SkillResult:
