@@ -11,6 +11,8 @@
 | `raw_payload` — тело вебхука | имя, текст сообщения, при «поделиться контактом» — телефон | **72 ч** (`INGRESS_RAW_RETENTION_HOURS`), затем `{}` — тот же срок, что у потоков `ingress:*` (DRF-2220) | `bot:apps/ingress/retention.py`, `bot:config/settings/base.py` |
 | строка без тела: `channel`, `external_event_id`, `resolved_tenant`, `trace_id`, `received_at`, `processed_at` | содержания нет; **псевдонимизированные ПДн**: `trace_id` → `Message.trace_id` → диалог → `BotUser.channel_user_id` | **90 дней** (`WEBHOOK_JOURNAL_ROW_RETENTION_DAYS`), затем строка удаляется | там же |
 
+**Голосовые (DRF-1943, решение владельца 06.10.2026 «голос не храним, только текст»).** Вебхук с голосовым несёт во вложении ссылку на аудиофайл (`payload.url`, отдаётся 24 ч без авторизации) и `token`. В `raw_payload` аудио-вложение ложится целиком заменённым на `{"type": "audio", "redacted": "voice"}` (`apps/ingress/redaction.py`): по журналу видно, что пришло голосовое, а скачать запись нечем. Воркер получает ссылку потоком Redis, запись потока удаляется сразу после успешной обработки. В логах адрес запроса `httpx` пишется без строки запроса (`apps/observability/url_log_filter.py`). Вложения `video` и `file` этим правилом не покрыты.
+
 Свип — `apps.ingress.tasks.sweep_webhook_journal`, ежечасно, по кромке последних 7 дней. Накопленное до выкладки DRF-2242 чистит команда `purge_webhook_journal`: по умолчанию сухой прогон, `--apply` — по слову владельца.
 
 ## 2. Зачем 90 дней

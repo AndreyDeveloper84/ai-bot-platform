@@ -2779,6 +2779,11 @@ LOGGING = {
         "context": {
             "()": "apps.observability.logging.ContextFilter",
         },
+        # DRF-1943 — адрес запроса в логе без строки запроса (подпись ссылки
+        # на голосовое / фото из вебхука MAX): см. ``url_log_filter``.
+        "request_url": {
+            "()": "apps.observability.url_log_filter.RequestUrlFilter",
+        },
     },
     "formatters": {
         "json": {
@@ -2818,6 +2823,12 @@ LOGGING = {
     # остаётся. Realtime-клиент openai (в боте не используется) на DEBUG пишет
     # сообщения сокета с транскриптами — его логгеры прибиты тем же правилом.
     # httpx/httpcore тела не пишут и не пинятся.
+    #
+    # DRF-1943 — но ``httpx`` на INFO пишет АДРЕС каждого запроса, а ссылка на
+    # голосовое из вебхука MAX — это и есть запись: 24 часа без авторизации.
+    # На логгере ``httpx`` висит фильтр, обрезающий строку запроса (подпись).
+    # Фильтр на логгере, а не на ``console``: адрес обрезан для любого
+    # получателя. Уровень не трогаем — строка «HTTP Request: POST …» остаётся.
     "loggers": {
         **{
             name: {"handlers": ["console"], "level": "INFO", "propagate": False}
@@ -2832,6 +2843,7 @@ LOGGING = {
                 "openai.resources.beta.realtime.realtime",
             )
         },
+        "httpx": {"filters": ["request_url"]},
     },
 }
 
