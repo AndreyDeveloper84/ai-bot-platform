@@ -634,7 +634,9 @@ def food_tap_labels(scan_id: str) -> dict[str, str]:
         food_recognition_keyboard,
         food_text_deleted_keyboard,
         food_text_estimate_keyboard,
+        food_text_items_keyboard,
         food_text_logged_keyboard,
+        food_text_unpriced_keyboard,
     )
 
     return {
@@ -644,6 +646,8 @@ def food_tap_labels(scan_id: str) -> dict[str, str]:
             *food_recognition_keyboard(scan_id),
             *correction_choice_keyboard(scan_id),
             *food_text_estimate_keyboard(),
+            *food_text_items_keyboard(),
+            *food_text_unpriced_keyboard(),
             *food_text_logged_keyboard(scan_id),
             *food_text_deleted_keyboard(scan_id),
         )
@@ -1074,13 +1078,8 @@ _FOOD_WITH_GRAMS_MAX_LEN = 30
 
 #: Предел длины для ответа на вопрос сканера — шире, чем у «борщ 250»: на
 #: «что было?» отвечают описанием («лепешка роти с творогом и сыром, кофе»,
-#: 37 знаков). Здесь это лишь экономия одного вызова — отвечаем всё равно
-#: только оценкой из справочника.
+#: 37 знаков). Длиннее — рассказ, и он идёт модели.
 _FOOD_AFTER_SCAN_MAX_LEN = 80
-
-#: Карточка оценки — единственный вид ответа ярлыка, и только с числом
-#: справочника (``meta["kcal_known"]``).
-_ESTIMATE_CARD_KIND = "food_text_estimate_card"
 
 
 def _try_handle_food_after_scan(
@@ -1099,26 +1098,23 @@ def _try_handle_food_after_scan(
     бывает), а модель лежала. Дорога, которую бот назвал выходом, вела в
     ту же стену.
 
-    Теперь сканер ставит мягкую отметку, и следующая реплика сперва идёт в
-    справочник (``show_estimate``), без модели бота. Отвечаем ТОЛЬКО
-    карточкой, число в которой дал справочник (``seed_ru``/USDA,
-    ``meta["kcal_known"]``). Любой другой исход — числа нет или его дала
-    модель каталога, справочник недоступен, ошибка, вопрос, напиток, нет
-    отметки — ``None``, и ход идёт дальше к модели, как шёл до этой правки.
+    Теперь сканер ставит мягкую отметку, и следующая реплика идёт в оценку
+    (``show_positions``), без модели бота. DRF-2328 отвечал только карточкой с
+    числом справочника и отпускал всё прочее к модели — и фраза владельца
+    «лепешка роти с творогом и сыром, кофе» (двух позиций, справочник целиком
+    её не знает) по-прежнему упиралась в C01. DRF-2768 (решение владельца
+    06.10, handoff §5) отвечает ЛЮБОЙ карточкой подтверждения: число
+    справочника, оценка ИИ, несколько позиций — или «Сейчас не удалось
+    рассчитать калорийность. Записать без расчёта?». Запись — только по тапу.
 
-    Причина строгости измерена, и судей отпало три:
+    Судей «это еда» по-прежнему нет (``parse_food_text`` примет «спасибо»,
+    детектор еды говорит False на фразе владельца, каталог с DRF-2371 не
+    отказывает ни на какое имя), поэтому предохранитель — короткий закрытый
+    список не-еды и вопрос (``text_entry.looks_like_not_food``): они идут к
+    модели. Остальное получает карточку, где «Отменить» — выход.
 
-    * ``parse_food_text`` принимает что угодно («спасибо» → блюдо «спасибо»);
-    * детектор «похоже на еду» говорит False на фразе владельца;
-    * сама карточка — тоже не судья: ручка оценки каталога с DRF-2371 не
-      отказывает ни на какое имя, и «спасибо» получает карточку с пустыми
-      числами или с числом ИИ.
-
-    Остаётся число справочника: его нет у того, чего в справочнике нет.
-
-    Отметка расходуется первым же ходом, что бы ни случилось. Вопрос
-    («а почему не распозналось?») — как у «📔 В дневник» (DRF-2287) — до
-    справочника не доходит. Напитки — по той же причине, что в
+    Отметка расходуется первым же ходом, что бы ни случилось. Одиночный
+    напиток — водяным путём, по той же причине, что в
     :func:`_try_handle_food_with_grams`. Никогда не бросает.
     """
 
@@ -1137,12 +1133,18 @@ def _try_handle_food_after_scan(
         # оценки, а отказ — не карточка, и ход уходит к модели.
         if len(stripped) > _FOOD_AFTER_SCAN_MAX_LEN:
             return None
-        if stripped.rstrip(" )!.…").endswith(("?", "？")):
+        # DRF-2768 — вопрос и короткий закрытый список не-еды («спасибо», «не
+        # помню», «запиши к мастеру») идут модели, как раньше.
+        if text_entry.looks_like_not_food(stripped):
             return None
         from apps.skills.water.parser import BeverageMatch, parse_beverage
 
-        parsed = text_entry.parse_food_text(stripped)
-        if parsed is None or isinstance(parse_beverage(stripped), BeverageMatch):
+        positions = text_entry.parse_food_positions(stripped)
+        if positions is None:
+            return None
+        # Одиночный напиток — водяным путём (DRF-819). Напиток внутри
+        # составной фразы пишется блюдом дневника (DRF-2768 Q1-а, DRF-2821).
+        if len(positions) == 1 and isinstance(parse_beverage(stripped), BeverageMatch):
             return None
         context = _build_context(
             message_text=stripped,
@@ -1151,17 +1153,17 @@ def _try_handle_food_after_scan(
             trace_id=trace_id,
         )
         with tenant_scope(get_global_bot_tenant()):
-            result = text_entry.show_estimate(context, parsed.dish, parsed.grams, corrected=False)
+            result = text_entry.show_positions(context, positions)
     except Exception:  # noqa: BLE001 — nutrition must never break the global turn
         logger.exception("orchestrator.nutrition_global.food_after_scan_failed trace=%s", trace_id)
         return None
     meta = result.meta or {}
     kind = meta.get("reply_kind")
-    answered = kind == _ESTIMATE_CARD_KIND and meta.get("kcal_known") is True
-    if kind == _ESTIMATE_CARD_KIND and not answered:
-        # Карточку не показываем — значит и тап по ней невозможен: её
-        # состояние (блюдо, токен) стирается, а не висит до TTL.
-        text_entry.forget(context)
+    # DRF-2768 — отвечаем ЛЮБОЙ карточкой подтверждения: с числом справочника,
+    # с оценкой ИИ, несколькими позициями или «Записать без расчёта?». Запись
+    # всё равно только по тапу, а модель бота этот ход больше не получает —
+    # при лёгшем прокси она давала C01 на дороге, которую бот сам назвал.
+    answered = kind in text_entry.CARD_KINDS
     logger.info(
         "orchestrator.nutrition_global.food_after_scan kind=%s answered=%s trace=%s",
         kind,

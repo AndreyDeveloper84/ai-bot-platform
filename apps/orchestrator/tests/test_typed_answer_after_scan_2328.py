@@ -224,6 +224,10 @@ def test_what_the_reference_book_does_not_know_goes_on_to_the_model(text, model_
 
     Без этой стражи «спасибо» после нераспознанного фото получило бы
     «Я распознала так: спасибо» — а с живой моделью каталога ещё и калории.
+
+    DRF-2768: ярлык отвечает теперь любой карточкой, в том числе «Записать без
+    расчёта?», поэтому не-еду отсекает закрытый список ДО каталога — и
+    запроса оценки нет вовсе (было: один запрос и отказ по числу).
     """
     conversation = _conversation()
     _mark(conversation)
@@ -231,7 +235,7 @@ def test_what_the_reference_book_does_not_know_goes_on_to_the_model(text, model_
 
     with patch("apps.skills.food_clarify.text_entry.get_nutrition_client", return_value=fake):
         assert _turn(text, conversation) is None
-    assert len(fake.estimates) == 1
+    assert fake.estimates == []
     assert "food_text" not in conversation.skill_state, "неотвеченная карточка оставила состояние"
 
 
