@@ -145,12 +145,19 @@ def _erase_derived_memory(bot_user: "BotUser") -> int:
             except Exception:  # noqa: BLE001 — резолв личности сужается до самой строки
                 logger.exception("consent.preference_inference.shell_resolution_failed")
                 shell_ids = {bot_user.pk}
-            ayla_user_ids = set(
-                BotUser.all_tenants.filter(
-                    pk__in=shell_ids, ayla_user_id__isnull=False
-                ).values_list("ayla_user_id", flat=True)
-            )
-            return sum(soft_delete_inferences_for_withdrawal(uid) for uid in ayla_user_ids)
+            # ``values_list`` типизирован ``UUID | None`` и после ``isnull=False``:
+            # фильтр в Python — то же условие, но видимое проверке типов.
+            ayla_user_ids = {
+                uid
+                for uid in BotUser.all_tenants.filter(pk__in=shell_ids).values_list(
+                    "ayla_user_id", flat=True
+                )
+                if uid is not None
+            }
+            erased = 0
+            for uid in ayla_user_ids:
+                erased += soft_delete_inferences_for_withdrawal(uid)
+            return erased
     except Exception:  # noqa: BLE001 — стирание не откатывает отзыв; см. докстринг
         logger.exception(
             "consent.preference_inference.derived_memory_erase_failed bot_user=%s",
