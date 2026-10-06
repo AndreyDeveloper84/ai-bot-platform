@@ -1,7 +1,8 @@
-"""BOT-9 (DRF-2790) — реестр body-care ``reason_codes``: закрытый, версионируемый.
+"""BOT-9 (DRF-2790) / BOT-9b (DRF-2800) — реестр body-care ``reason_codes``.
 
-Набор сверяется ЛИТЕРАЛАМИ из контракта v0.1 §21, а не самим перечислением:
-узел, построенный из константы, не поймает смену константы.
+Набор сверяется ЛИТЕРАЛАМИ контракта §21 (v0.1 — двадцать, v0.2 — плюс
+шесть), а не самим перечислением: узел, построенный из константы, не поймает
+смену константы.
 """
 
 from __future__ import annotations
@@ -45,12 +46,32 @@ CATALOG_RECOMMENDATION_PREFIXES = (
 )
 
 
-def test_r1_exactly_the_twenty_codes_of_section_21():
+#: Контракт v0.2 §21 — шесть кодов, добавленных к v0.1, дословно и по порядку.
+CONTRACT_V02_ADDED = (
+    "LEGAL_CLASSIFICATION_REQUIRED",
+    "MEDICAL_LICENSE_NOT_VERIFIED",
+    "LICENSE_SCOPE_MISMATCH",
+    "LICENSE_ADDRESS_MISMATCH",
+    "PRACTITIONER_QUALIFICATION_NOT_VERIFIED",
+    "MEDICAL_AD_CLAIM_REVIEW_REQUIRED",
+)
+
+
+def test_r1_exactly_the_twenty_six_codes_of_section_21_v02():
     from apps.orchestrator.body_care.reason_codes import ALL_CODES, ReasonCode
 
-    assert tuple(code.value for code in ReasonCode) == CONTRACT_V01_SECTION_21
-    assert ALL_CODES == frozenset(CONTRACT_V01_SECTION_21)
-    assert len(ALL_CODES) == 20
+    expected = CONTRACT_V01_SECTION_21 + CONTRACT_V02_ADDED
+    assert tuple(code.value for code in ReasonCode) == expected
+    assert ALL_CODES == frozenset(expected)
+    assert len(ALL_CODES) == 26
+
+
+def test_r1b_the_first_twenty_are_v01_unchanged():
+    """BOT-9b добавляет, не правит: первые двадцать — ровно v0.1, по порядку."""
+
+    from apps.orchestrator.body_care.reason_codes import ReasonCode
+
+    assert tuple(code.value for code in ReasonCode)[:20] == CONTRACT_V01_SECTION_21
 
 
 def test_r2_value_equals_name():
@@ -63,7 +84,7 @@ def test_r2_value_equals_name():
 def test_r3_the_registry_is_versioned():
     from apps.orchestrator.body_care.reason_codes import REGISTRY_VERSION
 
-    assert REGISTRY_VERSION == "0.1.0"
+    assert REGISTRY_VERSION == "0.2.0"
 
 
 def test_r4_no_overlap_with_the_bots_decision_readiness_registry():
@@ -83,7 +104,7 @@ def test_r4_no_overlap_with_the_bots_decision_readiness_registry():
 def test_r5_no_overlap_with_the_catalog_recommendation_prefixes():
     from apps.orchestrator.body_care.reason_codes import ALL_CODES
 
-    assert len(ALL_CODES) == 20  # присутствие: проверяем непустой реестр
+    assert len(ALL_CODES) == 26  # присутствие: проверяем непустой реестр
     # Положительный контроль предиката: код каталожного реестра им ловится.
     assert "ELIG_SAFETY_CLEARED".startswith(CATALOG_RECOMMENDATION_PREFIXES)
     for code in ALL_CODES:
@@ -91,18 +112,10 @@ def test_r5_no_overlap_with_the_catalog_recommendation_prefixes():
         assert not code.startswith(CATALOG_RECOMMENDATION_PREFIXES), code
 
 
-def test_r6_the_v02_legal_codes_are_not_in_this_version():
-    """Шесть кодов v0.2 §21 — следующая версия реестра, не тихая правка."""
+def test_r6_the_v02_legal_codes_came_with_version_020():
+    """Шесть кодов v0.2 §21 пришли вместе с версией 0.2.0, не тихой правкой."""
 
-    from apps.orchestrator.body_care.reason_codes import ALL_CODES
+    from apps.orchestrator.body_care.reason_codes import ALL_CODES, REGISTRY_VERSION
 
-    v02_only = {
-        "LEGAL_CLASSIFICATION_REQUIRED",
-        "MEDICAL_LICENSE_NOT_VERIFIED",
-        "LICENSE_SCOPE_MISMATCH",
-        "LICENSE_ADDRESS_MISMATCH",
-        "PRACTITIONER_QUALIFICATION_NOT_VERIFIED",
-        "MEDICAL_AD_CLAIM_REVIEW_REQUIRED",
-    }
-    assert len(ALL_CODES) == 20  # присутствие: реестр не пуст
-    assert ALL_CODES.isdisjoint(v02_only)
+    assert set(CONTRACT_V02_ADDED) <= ALL_CODES
+    assert REGISTRY_VERSION == "0.2.0"
