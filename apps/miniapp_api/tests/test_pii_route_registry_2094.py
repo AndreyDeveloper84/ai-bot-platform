@@ -755,6 +755,31 @@ CUSTOMER_ROUTES: dict[str, Entry] = {
         ),
     ),
     # --- «Продолжить разговор с Ayla» (DRF-2144, H01, own) ---------------
+    # DRF-2799 — разговор с Ayla внутри Mini App: тот же глобальный ход бота.
+    "customer_assistant_ask": own(
+        "answer",
+        "buttons",
+        "pending_action",
+        "cards",
+        via="apps.miniapp_api.views_customer_assistant:customer_assistant_ask",
+        note=(
+            "the reply the bot's own global turn produced for the caller's question, captured "
+            "from the MAX egress instead of sent: the same text, after the same inbound safety "
+            "gate, consent gates and outbound guard as in the chat; the person is the verified "
+            "init-data principal, never an id from the body; buttons are the reply's own "
+            "keyboard (label + callback payload or link)"
+        ),
+    ),
+    "customer_assistant_history": own(
+        "messages",
+        via="apps.miniapp_api.views_customer_assistant:customer_assistant_history",
+        note=(
+            "the caller's own dialogue with Ayla — user and assistant turns of the caller's "
+            "channel shells (person_channel_shells), the same thread the bot chat and "
+            "last-topic read; anonymised turns and turns before the last personal_data "
+            "withdrawal (DRF-2700) are excluded"
+        ),
+    ),
     "customer_last_topic": own(
         "last_topic.text",
         "last_topic.at",
