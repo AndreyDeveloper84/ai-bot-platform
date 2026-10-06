@@ -17,8 +17,10 @@ W5-owned) with the same guarantees, kept inside the W3 zone
 
   - **Consent-gated.** Writes only when
     :func:`apps.consent.memory.can_store_green_memory` passes (green's
-    152-ФЗ basis = PERSONAL_DATA welcome consent, ADR-0011 §11) and the
-    user has a canonical ``ayla_user_id``.
+    152-ФЗ basis = PERSONAL_DATA welcome consent, ADR-0011 §11), the
+    voluntary preference-inference consent is active
+    (:mod:`apps.consent.preference_inference`, DRF-2779, owner 05.10), and
+    the user has a canonical ``ayla_user_id``.
   - **Deduped.** A live fact with the same ``(kind, key, value)`` is not
     re-written — re-inferring the same value never churns the store. A
     *changed* value lands as a new entry (history preserved; readers
@@ -96,6 +98,28 @@ def record_inferred_green_facts(
     if not can_store_green_memory(bot_user):
         logger.info(
             "identity.memory.inferred_gate_closed bot_user=%s",
+            getattr(bot_user, "id", "?"),
+        )
+        return 0
+    # DRF-2779 (умная память Ф4): выводимое пишется только под отдельным
+    # добровольным согласием на предположения. Основание зелёной зоны
+    # (personal_data) разрешает ХРАНИТЬ сказанное человеком; анализировать
+    # его обращения и действия ради предложений — другой предмет, и решение
+    # владельца 05.10 вынесло его в своё согласие. Fail-closed: сбой чтения
+    # согласия — не запись.
+    try:
+        from apps.consent.preference_inference import is_granted as preference_inference_granted
+
+        inference_allowed = preference_inference_granted(bot_user)
+    except Exception:  # noqa: BLE001 — a failed consent read must not open the gate
+        logger.exception(
+            "identity.memory.inferred_consent_read_failed bot_user=%s",
+            getattr(bot_user, "id", "?"),
+        )
+        inference_allowed = False
+    if not inference_allowed:
+        logger.info(
+            "identity.memory.inferred_gate_closed bot_user=%s reason=preference_inference",
             getattr(bot_user, "id", "?"),
         )
         return 0

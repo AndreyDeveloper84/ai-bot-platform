@@ -86,6 +86,10 @@ _CONSENTS_DOCUMENT = own(
     "proactive_hints.enabled",
     "data_storage.revocation",
     "data_storage.regrant",
+    "preference_inference.granted",
+    "preference_inference.granted_at",
+    "preference_inference.document_version",
+    "preference_inference.grant",
     via="apps.consent.customer:read_consents",
     note=(
         "the customer's own consent registry re-read from the database after the write; "
@@ -204,6 +208,8 @@ CUSTOMER_ROUTES: dict[str, Entry] = {
         ),
     ),
     "customer_marketing_consent": _CONSENTS_DOCUMENT,
+    # DRF-2779 — умная память Ф4: добровольное согласие на предположения.
+    "customer_preference_inference_consent": _CONSENTS_DOCUMENT,
     "customer_data_storage_consent": own(
         "consents.*",
         "proactive_hints.enabled",
@@ -674,6 +680,8 @@ CUSTOMER_ROUTES: dict[str, Entry] = {
         "green[].value",
         "green[].said_at",
         "green[].provenance",
+        "green[].state",
+        "green[].expires_at",
         "health[].id",
         "health[].kind",
         "health[].value",
@@ -701,6 +709,39 @@ CUSTOMER_ROUTES: dict[str, Entry] = {
             "user_request_miniapp, and the deleted flag; a foreign, unknown or already "
             "forgotten id is 404 with no record, and a red entry goes through "
             "RedZoneReader.soft_delete_for_subject with a delete-type access log"
+        ),
+    ),
+    # DRF-2781 — умная память Ф4: ответ человека на предложение Ayla.
+    "customer_memory_confirm": own(
+        "id",
+        "key",
+        "label",
+        "value",
+        "said_at",
+        "provenance",
+        "state",
+        "expires_at",
+        via="apps.miniapp_api.views_memory:customer_memory_confirm",
+        note=(
+            "the caller's own green memory entry after they confirmed Ayla's proposal: the "
+            "same row shape as customer_memory, now state=confirmed with a 180-day term; a "
+            "foreign, unknown or non-proposal id is refused with no record"
+        ),
+    ),
+    "customer_memory_correct": own(
+        "id",
+        "key",
+        "label",
+        "value",
+        "said_at",
+        "provenance",
+        "state",
+        "expires_at",
+        via="apps.miniapp_api.views_memory:customer_memory_correct",
+        note=(
+            "the caller's own new said fact written from their correction of Ayla's "
+            "proposal (the proposal is superseded as corrected): the same row shape as "
+            "customer_memory, state=said"
         ),
     ),
     "customer_memory_forget_all": own(

@@ -1,8 +1,17 @@
 """«Что Ayla помнит» — память человека на экране Mini App (DRF-2133, Память-2).
 
-    GET    /customer/memory/               → {green: [...], health: [...], status}
-    DELETE /customer/memory/{entry_id}/    → своя запись забыта; чужая — 404
-    POST   /customer/memory/forget-all/    → то же, что «забудь всё» в чате
+    GET    /customer/memory/                      → {green: [...], health: [...], status}
+    DELETE /customer/memory/{entry_id}/           → своя запись забыта; чужая — 404
+    POST   /customer/memory/{entry_id}/confirm/   → предположение подтверждено (DRF-2781)
+    POST   /customer/memory/{entry_id}/correct/   → предположение исправлено (DRF-2781)
+    POST   /customer/memory/forget-all/           → то же, что «забудь всё» в чате
+
+Умная память Ф4 (DRF-2781): у каждой зелёной строки ``state`` — ``said``
+(сказал сам), ``proposed`` (Ayla предлагает запомнить), ``confirmed``
+(предположила, человек подтвердил), ``reconfirm`` (подтверждённое с
+истёкшим сроком). Как группировать на экране — решение макета, его пока нет;
+API отдаёт все состояния. ``provenance`` (said / inferred) остаётся прежним —
+экран, читающий его, не меняется.
 
 Экран — второе окно в ту же память, не вторая память. Читатели те же, что
 у чата: зелёные факты — ``memory_reader.read_green_entries`` под
@@ -85,6 +94,7 @@ def _provenance(entry: MemoryEntry) -> str:
 
 
 def _green_payload(entry: MemoryEntry) -> dict[str, Any]:
+    from apps.identity.services.memory_proposals import fact_state
     from apps.persona.memory_surface import describe_green_content
 
     content = entry.content if isinstance(entry.content, dict) else {}
@@ -98,6 +108,9 @@ def _green_payload(entry: MemoryEntry) -> dict[str, Any]:
         "value": value if isinstance(value, str) else None,
         "said_at": entry.created_at.isoformat(),
         "provenance": _provenance(entry),
+        # DRF-2781: said / proposed / confirmed / reconfirm, и срок у выводимого.
+        "state": fact_state(entry),
+        "expires_at": entry.expires_at.isoformat() if entry.expires_at else None,
     }
 
 
@@ -140,6 +153,7 @@ def _green_ids_to_forget(user_id: uuid.UUID, entry_id: uuid.UUID) -> list[uuid.U
     person — the deleter then moves nothing and the red path is tried.
     """
     from apps.identity.services.memory_key_policy import CARDINALITY_SINGLE, key_cardinality
+    from apps.identity.services.memory_proposals import STATE_PROPOSED, fact_state
     from apps.identity.services.memory_reader import read_green_entries
 
     live = read_green_entries(user_id)
@@ -150,7 +164,38 @@ def _green_ids_to_forget(user_id: uuid.UUID, entry_id: uuid.UUID) -> list[uuid.U
     key = content.get("key")
     if not isinstance(key, str) or not key or key_cardinality(key) != CARDINALITY_SINGLE:
         return [entry_id]
+    # DRF-2781: «удалить» на предложении снимает предложения этого ключа, но
+    # НЕ сказанное человеком — отказ от догадки не стирает его собственные слова.
+    if fact_state(target) == STATE_PROPOSED:
+        return [
+            e.id
+            for e in live
+            if isinstance(e.content, dict)
+            and e.content.get("key") == key
+            and fact_state(e) == STATE_PROPOSED
+        ]
     return [e.id for e in live if isinstance(e.content, dict) and e.content.get("key") == key]
+
+
+def _screen_facts(entries: list[MemoryEntry]) -> list[MemoryEntry]:
+    """Что показать: сказанное/подтверждённое — текущее по ключу; предложения — отдельно.
+
+    DRF-2781. Ключевая политика сводит строки одного ключа к одной — и если
+    сводить всё вместе, предложение того же ключа спрятало бы сказанное (или
+    наоборот), а человек должен видеть ОБА: «Вы сообщили: утро» и «Ayla
+    предлагает: после 18:00». Поэтому две группы сводятся порознь. Вытесненные
+    и строки без состояния не показываются.
+    """
+    from apps.identity.services.memory_key_policy import select_current_facts
+    from apps.identity.services.memory_proposals import (
+        STATE_PROPOSED,
+        STATE_RECONFIRM,
+        fact_state,
+    )
+
+    held = [e for e in entries if fact_state(e) not in (None, STATE_PROPOSED, STATE_RECONFIRM)]
+    offered = [e for e in entries if fact_state(e) in (STATE_PROPOSED, STATE_RECONFIRM)]
+    return select_current_facts(held) + select_current_facts(offered)
 
 
 @csrf_exempt
@@ -158,7 +203,6 @@ def _green_ids_to_forget(user_id: uuid.UUID, entry_id: uuid.UUID) -> list[uuid.U
 @require_init_data
 def customer_memory(request: HttpRequest) -> HttpResponse:
     """Что Ayla помнит о звонящем: зелёные факты + раздел «Здоровье» + статус."""
-    from apps.identity.services.memory_key_policy import select_current_facts
     from apps.identity.services.memory_reader import read_green_entries
     from apps.identity.services.red_zone_reader import RedZoneReader
 
@@ -172,7 +216,7 @@ def customer_memory(request: HttpRequest) -> HttpResponse:
         # The read gate already hides everything; say why the list is empty.
         return _empty(status)
 
-    green = [_green_payload(e) for e in select_current_facts(read_green_entries(user_id))]
+    green = [_green_payload(e) for e in _screen_facts(read_green_entries(user_id))]
     health = [
         _health_payload(e)
         for e in RedZoneReader.list_live_for_subject(
@@ -257,3 +301,59 @@ def customer_memory_forget_all(request: HttpRequest) -> HttpResponse:
         # Upstream profile survived; the sweep retries. Named in the log, not hidden.
         logger.warning("miniapp_api.memory.forget_all.bridge_failed bot_user=%s", bot_user.pk)
     return JsonResponse({"status": STATUS_DELETION_PENDING}, status=202)
+
+
+def _proposal_refusal(code: str) -> HttpResponse:
+    status = {"not_found": 404, "bad_value": 400}.get(code, 409)
+    detail = {
+        "not_found": "Такой записи нет.",
+        "not_a_proposal": "Это не предложение Ayla.",
+        "consent_required": "Нет согласия на эту функцию.",
+        "bad_value": "Нужно значение.",
+    }.get(code, code)
+    return _error(code, detail, status)
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_init_data
+def customer_memory_confirm(request: HttpRequest, entry_id: uuid.UUID) -> HttpResponse:
+    """Подтвердить предложение Ayla (DRF-2781): оно становится запомненным на 180 дней."""
+    from apps.identity.services.memory_proposals import ProposalError, confirm_proposal
+
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    user_id = _memory_user_id(bot_user)
+    if user_id is None or _gate_closed(bot_user):
+        return _error("not_found", "Такой записи нет.", 404)
+    try:
+        entry = confirm_proposal(bot_user=bot_user, user_id=user_id, entry_id=entry_id)
+    except ProposalError as refusal:
+        return _proposal_refusal(refusal.code)
+    return JsonResponse(_green_payload(entry))
+
+
+@csrf_exempt
+@require_http_methods(["POST"])
+@require_init_data
+def customer_memory_correct(request: HttpRequest, entry_id: uuid.UUID) -> HttpResponse:
+    """Исправить предложение Ayla (DRF-2781): ``{"value": "..."}`` — слова человека."""
+    import json
+
+    from apps.identity.services.memory_proposals import ProposalError, correct_proposal
+
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    user_id = _memory_user_id(bot_user)
+    if user_id is None or _gate_closed(bot_user):
+        return _error("not_found", "Такой записи нет.", 404)
+    try:
+        body = json.loads(request.body or b"{}")
+    except ValueError:
+        return _error("malformed", "body is not valid JSON", 400)
+    value = body.get("value") if isinstance(body, dict) else None
+    try:
+        said = correct_proposal(
+            bot_user=bot_user, user_id=user_id, entry_id=entry_id, value=str(value or "")
+        )
+    except ProposalError as refusal:
+        return _proposal_refusal(refusal.code)
+    return JsonResponse(_green_payload(said))
