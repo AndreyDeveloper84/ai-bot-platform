@@ -432,16 +432,20 @@ class TestReceptionGateStaysNarrow:
     Read endpoints are listed deliberately alongside the writing ones:
     «только GET» is a limit on the receptionist's *method*, not a licence
     to read every admin surface.
+
+    DRF-2826 (owner's decision 06.10) moved ``masters_list`` and
+    ``search_customers`` to the booking desk (``require_booking_desk``):
+    the front desk books, so she picks the master and finds the client.
+    Their positive and negative halves live in
+    ``test_booking_desk_gate_2826``; the rest stays forbidden here.
     """
 
     @pytest.mark.parametrize(
         "url_name",
         [
-            "masters_list",
             "staff_roster",
             "services_mapping_get",
             "availability_requests_list",
-            "search_customers",
         ],
     )
     def test_other_admin_reads_stay_forbidden(
