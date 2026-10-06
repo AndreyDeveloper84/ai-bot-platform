@@ -367,3 +367,19 @@ class TestHelpers:
     def test_echo_skips_empty_transcript(self, settings):
         settings.VOICE_ECHO_MODE = "always"
         assert with_voice_echo("Ответ", "") == "Ответ"
+        assert with_voice_echo("Ответ", " \n ") == "Ответ"
+
+    @pytest.mark.parametrize(
+        "heard",
+        [
+            "хочу на массаж\n\nи ещё маникюр",
+            "хочу на массаж\nи ещё маникюр",
+            "  хочу на   массаж\t\r\n\r\nи ещё маникюр  ",
+        ],
+    )
+    def test_echo_is_always_one_paragraph(self, settings, heard):
+        # DRF-2817: пустая строка внутри расшифровки рвала эхо на два абзаца.
+        settings.VOICE_ECHO_MODE = "always"
+        assert (
+            with_voice_echo("Ответ", heard) == "Я услышала: «хочу на массаж и ещё маникюр»\n\nОтвет"
+        )

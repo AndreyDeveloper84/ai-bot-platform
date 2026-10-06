@@ -204,10 +204,18 @@ def strip_for_gate(text: str) -> str:
 
 
 def with_voice_echo(reply_text: str, transcript_text: str) -> str:
-    """Добавить «Я услышала: …» перед ответом, если ``VOICE_ECHO_MODE=always``."""
-    if echo_mode() != "always" or not transcript_text:
+    """Добавить «Я услышала: …» перед ответом, если ``VOICE_ECHO_MODE=always``.
+
+    Эхо — всегда один абзац (DRF-2817): пробельные символы расшифровки
+    схлопываются в один пробел только для этой строки. Перевод строки внутри
+    длинной диктовки рвал эхо надвое, и «Последняя тема» в Mini App
+    (``views_last_topic``) брала за тему ответа обрывок слов самого человека.
+    Сама расшифровка в переписке и для модели не меняется.
+    """
+    heard = " ".join(transcript_text.split())
+    if echo_mode() != "always" or not heard:
         return reply_text
-    return f"{ECHO_LINE.format(text=transcript_text)}\n\n{reply_text}"
+    return f"{ECHO_LINE.format(text=heard)}\n\n{reply_text}"
 
 
 def _refused(code: str, reason: str) -> VoiceRefused:
