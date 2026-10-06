@@ -78,7 +78,7 @@ def _write(user_id: uuid.UUID, source: str, value: str, key: str = "visit_time")
 
 
 def _surfaced(user_id: uuid.UUID) -> list[str]:
-    return [f.content.get("value") for f in read_current_view(user_id).green_facts]
+    return [str(f.content.get("value")) for f in read_current_view(user_id).green_facts]
 
 
 # --------------------------------------------------------------------- #
@@ -176,6 +176,7 @@ def test_c1_confirming_marks_the_same_row_for_180_days_and_reconfirm_renews_it()
 
     assert renewed.status == MemoryEntry.STATUS_ACTIVE
     assert fact_state(renewed) == "confirmed"
+    assert renewed.updated_at is not None
     assert renewed.expires_at == renewed.updated_at + timedelta(days=180)
 
 

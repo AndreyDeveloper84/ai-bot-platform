@@ -88,6 +88,12 @@ def test_confirm_without_the_inference_consent_is_409(client, bot_user, upc) -> 
 
 
 def test_correct_writes_the_persons_value(client, bot_user, upc) -> None:
+    # Исправление пишет СКАЗАННОЕ — под основанием зелёной памяти, а оно
+    # (``can_store_green_memory``) требует оболочки, которую контур знает
+    # (S2-2, §2.4). Фикстура строит оболочку ORM-ом, мимо резолвера, — поэтому
+    # статус ставится здесь, как у соседей, которые сеют память.
+    BotUser.all_tenants.filter(pk=bot_user.pk).update(customer_status=BotUser.CustomerStatus.LINKED)
+    bot_user.refresh_from_db(fields=["customer_status"])
     _consent(bot_user, ConsentRecord.ConsentType.PERSONAL_DATA.value)
     proposal = _proposal(upc)
 

@@ -71,6 +71,7 @@ def test_i2_the_unconfirmed_term_is_thirty_days_from_one_write_instant() -> None
 def test_i3_a_shorter_caller_term_wins_a_longer_one_does_not(ttl_days: int, term: int) -> None:
     entry = _inferred(_upc(), ttl_days=ttl_days)
 
+    assert entry.effective_from is not None
     assert entry.expires_at == entry.effective_from + timedelta(days=term)
 
 
