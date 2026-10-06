@@ -65,6 +65,8 @@ from typing import TYPE_CHECKING, Any
 from django.conf import settings
 import httpx
 
+from apps.channels.max import delivery_capture
+
 from apps.channels.bot_context import current_bot
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -303,6 +305,16 @@ def send_message(
         )
         return {"blocked": True}
 
+    # DRF-2799 — ход из Mini App: ответ ЭТОМУ человеку уходит в Mini App, а
+    # не в MAX. Стоит ПОСЛЕ забора блокировки (заблокированный не получает
+    # ничего и там) и ДО токена и сети.
+    in_app = delivery_capture.active()
+    if in_app is not None and in_app.addressed_to_person(chat_id=chat_id, user_id=user_id):
+        if bypass_block is None and _recipient_blocked(user_id=in_app.user_id):
+            return {"blocked": True}
+        in_app.replies.append({"text": text, "attachments": list(attachments or [])})
+        return {"in_app": True}
+
     body: dict[str, Any] = {"text": text}
     if attachments:
         body["attachments"] = attachments
@@ -454,6 +466,14 @@ def edit_message(
         ``{"success": false}`` — see the note above; MAX reports a refused
         edit inside a successful HTTP response.
     """
+    # DRF-2799 — ход из Mini App: у него нет сообщений в MAX, правка относится
+    # к нему и уходит в Mini App как новая версия ответа.
+    in_app = delivery_capture.active()
+    if in_app is not None:
+        in_app.replies.append(
+            {"text": text or "", "attachments": list(attachments or []), "edit": True}
+        )
+        return {"in_app": True}
 
     token = _token(bot)
     if not token:
@@ -617,6 +637,11 @@ def send_chat_action(
     """
     if action not in _CHAT_ACTIONS:
         logger.warning("channels.max.outbound.unknown_action action=%r", action)
+        return
+
+    # DRF-2799 — «печатает» / «прочитано» в MAX для хода из Mini App не нужны.
+    in_app = delivery_capture.active()
+    if in_app is not None and in_app.addressed_to_person(chat_id=chat_id, user_id=None):
         return
 
     token = _token(bot)
