@@ -432,7 +432,16 @@ def _expired(now: datetime):
     (``deletion_requested_at``): у этих стираний свои пути, свои причины в
     надгробии и свой журнал, и TTL не должен перебивать их ответ аудиту на
     вопрос «почему снята строка».
+
+    DRF-2774: категория, чьи сроки владелец утвердил
+    (``memory_term.approved_categories``), судится по одной дате
+    ``expires_at`` — её продлевает только использование до предела, и
+    скользящее окно поверх неё держало бы строку за пределом. Остальные — то
+    же пересечение (fail-safe). Пока сроки не утверждены, список пуст и свип
+    прежний.
     """
+    from apps.identity.services.memory_term import F4_CONSENT_SCOPE, approved_categories
+
     ttls = list(
         _live_rows_with_a_term()
         .filter(expires_at__lte=now)
@@ -446,6 +455,8 @@ def _expired(now: datetime):
     for ttl in ttls:
         cutoff = now - timedelta(days=ttl)
         window |= Q(ttl_days=ttl, last_used_at__lte=cutoff) & ~Q(consent_at__gt=cutoff)
+    for zone, kind in approved_categories():
+        window |= Q(sensitivity_zone=zone, kind=kind) & ~Q(consent_scope=F4_CONSENT_SCOPE)
     held = UserPersonalContext.objects.filter(user_id=OuterRef("user_id")).filter(
         Q(forget_all_requested_at__isnull=False) | Q(deletion_requested_at__isnull=False)
     )
