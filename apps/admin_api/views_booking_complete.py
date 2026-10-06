@@ -42,7 +42,7 @@ from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 from django.views.decorators.http import require_http_methods
 
-from apps.admin_api.auth import require_admin_role
+from apps.admin_api.auth import require_booking_desk
 from apps.admin_api.services.visit_settle import own_booking as _own_booking
 from apps.identity.models import BotUser
 from apps.integrations.ayla.user_proxy import external_user_id_for
@@ -99,7 +99,7 @@ def _outcome(
 
 
 @require_http_methods(["GET"])
-@require_admin_role
+@require_booking_desk
 def booking_version(request: HttpRequest, appointment_id: str) -> HttpResponse:
     """The canonical facts about one booking, straight from Ayla."""
 
@@ -174,7 +174,7 @@ def _settle_visit(request: HttpRequest, appointment_id: str, *, write: str) -> H
 
 @csrf_exempt
 @require_http_methods(["POST"])
-@require_admin_role
+@require_booking_desk
 def complete_booking(request: HttpRequest, appointment_id: str) -> HttpResponse:
     """Close a visit on behalf of the calling administrator.
 
@@ -189,7 +189,7 @@ def complete_booking(request: HttpRequest, appointment_id: str) -> HttpResponse:
 
 @csrf_exempt
 @require_http_methods(["POST"])
-@require_admin_role
+@require_booking_desk
 def no_show_booking(request: HttpRequest, appointment_id: str) -> HttpResponse:
     """«Не пришёл» on behalf of the calling administrator (DRF-1851, OD-V1).
 
@@ -208,7 +208,7 @@ __all__ = ["booking_version", "complete_booking", "no_show_booking", "reschedule
 
 @csrf_exempt
 @require_http_methods(["POST"])
-@require_admin_role
+@require_booking_desk
 def reschedule_booking(request: HttpRequest, appointment_id: str) -> HttpResponse:
     """Move a booking to a new start, on behalf of the acting administrator.
 
