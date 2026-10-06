@@ -521,6 +521,33 @@ def digest_master_buttons(entry: Any) -> list[dict[str, str]]:
     return chat + app
 
 
+def greeting_admin_buttons(entry: Any) -> list[dict[str, str]]:
+    """Кнопки приветствия /start владельцу / администратору (DRF-2787).
+
+    Владелец работает в боте с первого экрана: сначала действия в чате —
+    набор утреннего итога (:func:`digest_admin_buttons`) и «✍️ Записать
+    клиента» (DRF-2786) после заявок, — затем экраны Mini App как опция рядом.
+    До этого приветствие несло только ``open_app``: все действия, которые бот
+    умеет сам, были спрятаны в меню (жалоба владельца 05.10, buttons3.png).
+    """
+    from apps.channels.max.staff_menu import CB_BK_NEW, LABEL_BOOK, LABEL_REQUESTS
+
+    buttons = digest_admin_buttons(entry)
+    at = next(
+        (i + 1 for i, b in enumerate(buttons) if b.get("label") == LABEL_REQUESTS),
+        len(buttons),
+    )
+    return [*buttons[:at], {"label": LABEL_BOOK, "callback": CB_BK_NEW}, *buttons[at:]]
+
+
+def greeting_master_buttons(entry: Any) -> list[dict[str, str]]:
+    """Кнопки приветствия /start мастеру (DRF-2787): «📅 Мой день» в чате — там
+    же его визиты «состоялся / не пришёл» (DRF-2785), — затем экраны Mini App.
+    Тот же набор, что у утреннего итога мастеру."""
+
+    return digest_master_buttons(entry)
+
+
 def first_buttons(entry: Any) -> list[dict[str, str]]:
     """«Проверить готовность» — callback в чат (DRF-2117), «Открыть салон» — Mini App."""
     from apps.channels.max.staff_menu import CB_READINESS, _miniapp_button
@@ -567,10 +594,10 @@ def build_greeting(
         if is_first_entry(bot_user):
             return render_first(name, salon, role_word), first_buttons(entry)
         data = gather(tenant, role_ctx, now=now)
-        return render_admin(name, salon, role_word, data), admin_buttons(entry)
+        return render_admin(name, salon, role_word, data), greeting_admin_buttons(entry)
     if getattr(role_ctx, "is_master", False):
         data = gather(tenant, role_ctx, now=now)
-        return render_master(name, salon, data), master_buttons(entry)
+        return render_master(name, salon, data), greeting_master_buttons(entry)
     return None
 
 
@@ -581,6 +608,8 @@ __all__ = [
     "NextVisit",
     "attention_phrase",
     "build_greeting",
+    "greeting_admin_buttons",
+    "greeting_master_buttons",
     "gather",
     "is_first_entry",
     "mark_greeted",
