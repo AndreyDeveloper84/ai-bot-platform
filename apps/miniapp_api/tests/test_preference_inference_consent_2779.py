@@ -8,9 +8,9 @@
 * p2 — чужая версия текста — 409, ничего не записано;
 * p3 — пишется по всем оболочкам человека (иначе писатель памяти, читающий
   чатовую оболочку, согласия не увидит);
-* p4 — добровольность: отзыв Ф4 не трогает ``personal_data``, отзыв
-  ``personal_data`` каскадом не трогает Ф4, повторная выдача хранения Ф4 не
-  выдаёт; тип не входит в каскад ``personal_data`` (литералом);
+* p4 — добровольность: отзыв Ф4 не трогает ``personal_data``, повторная
+  выдача хранения Ф4 не выдаёт; но отзыв ``personal_data`` снимает и Ф4 —
+  надстройку вместе с основанием, как согласие дневника;
 * p5 — выдаёт этот тип только :func:`apps.consent.preference_inference.grant`
   (перепись): «одной галочкой со всем остальным» он появиться не может;
 * p6 — документ согласий говорит версию текста и что он на юр-проверке.
@@ -121,16 +121,17 @@ def test_p4_voluntary_both_ways(client: Client, bot_user: BotUser, pi_url: str, 
     client.delete(pi_url, **auth)
     assert has_global_consent(bot_user, PD) is True
 
-    # Отзыв personal_data каскадом Ф4 не снимает: решение главного окна 05.10 —
-    # Ф4 не в каскаде personal_data.
+    # Отзыв personal_data снимает и Ф4 — надстройку вместе с основанием, иначе
+    # после «удалить мои данные» разрешение анализировать обращения осталось бы
+    # действующим (тот же род, что согласие дневника в каскаде).
     _post(client, pi_url, auth)
+    assert preference_inference.is_granted(bot_user) is True
     withdraw_personal_data_for_bot_users([bot_user], source="test-2779")
     assert has_global_consent(bot_user, PD) is False
-    assert preference_inference.is_granted(bot_user) is True
-    assert PI not in {str(t) for t in _PERSONAL_DATA_CASCADE}
+    assert preference_inference.is_granted(bot_user) is False
+    assert PI in {str(t) for t in _PERSONAL_DATA_CASCADE}
 
-    # Повторная выдача хранения Ф4 не выдаёт.
-    preference_inference.withdraw(bot_user)
+    # Повторная выдача хранения Ф4 не возвращает.
     regrant_data_storage(bot_user)
     assert has_global_consent(bot_user, PD) is True
     assert preference_inference.is_granted(bot_user) is False
