@@ -612,7 +612,11 @@ def on_callback(context: SkillContext, text: str) -> SkillResult:
     if text == CB_EDIT:
         # «Изменить» — написать заново: блюдо и граммы правятся новой фразой.
         _write(context.conversation, {"expect_food": True, "at": _now_iso()})
-        return SkillResult(reply_text=EDIT_PROMPT, meta={"reply_kind": "food_text_edit"})
+        return SkillResult(
+            reply_text=EDIT_PROMPT,
+            action_data={"buttons": _after_entry_buttons()},
+            meta={"reply_kind": "food_text_edit"},
+        )
     bucket = _bucket(context.conversation)
     has_card = bool(bucket and bucket.get("token") and (bucket.get("dish") or bucket.get("items")))
     if not bucket or not has_card:
@@ -623,7 +627,11 @@ def on_callback(context: SkillContext, text: str) -> SkillResult:
             return _log_items(context, bucket)
         # У карточки нескольких позиций граммов не правят — пишут заново.
         _write(context.conversation, {"expect_food": True, "at": _now_iso()})
-        return SkillResult(reply_text=EDIT_PROMPT, meta={"reply_kind": "food_text_edit"})
+        return SkillResult(
+            reply_text=EDIT_PROMPT,
+            action_data={"buttons": _after_entry_buttons()},
+            meta={"reply_kind": "food_text_edit"},
+        )
     if text == CB_GRAMS:
         _write(context.conversation, {**bucket, "awaiting_grams": True, "at": _now_iso()})
         return SkillResult(reply_text=GRAMS_PROMPT, meta={"reply_kind": "food_text_grams_prompt"})
@@ -888,7 +896,9 @@ def show_items(context: SkillContext, positions: list[ParsedFood]) -> SkillResul
         except (NutritionUnavailableError, NutritionAPIError):
             logger.warning("food_text.items.estimate_failed user=%s", external_id)
             return SkillResult(
-                reply_text=UNAVAILABLE_TEXT, meta={"reply_kind": "food_text_unavailable"}
+                reply_text=UNAVAILABLE_TEXT,
+                action_data={"buttons": _after_entry_buttons()},
+                meta={"reply_kind": "food_text_unavailable"},
             )
         items.append(_item_of(position, estimate))
 
@@ -951,7 +961,12 @@ def _log_items(context: SkillContext, bucket: dict[str, Any]) -> SkillResult:
             continue
         except (NutritionUnavailableError, NutritionAPIError):
             logger.warning("food_text.items.log_failed user=%s index=%d", external_id, index)
-            return SkillResult(reply_text=PARTIAL_TEXT, meta={"reply_kind": "food_text_partial"})
+            # Повтор — та же карточка: «В дневник» дописывает остальное без дублей.
+            return SkillResult(
+                reply_text=PARTIAL_TEXT,
+                action_data={"buttons": food_text_items_keyboard()},
+                meta={"reply_kind": "food_text_partial"},
+            )
         logged.append(log)
 
     forget(context)

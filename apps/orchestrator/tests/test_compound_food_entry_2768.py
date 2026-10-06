@@ -132,6 +132,9 @@ class TestNotFood:
 
     @pytest.mark.parametrize("text", [OWNER_PHRASE, "гречка", "борщ 300 г"])
     def test_food_is_not_caught_by_the_list(self, text) -> None:
+        # Положительная пара: на той же функции не-еда ловится — пропуск ниже
+        # значит «это еда», а не слепоту судьи.
+        assert text_entry.looks_like_not_food("спасибо")
         assert not text_entry.looks_like_not_food(text)
 
 
