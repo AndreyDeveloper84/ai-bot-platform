@@ -394,6 +394,32 @@ class AylaBookingPage:
 
 
 @dataclass(frozen=True)
+class AylaSpecialistAppointment:
+    """What the master's own appointment actions answer (DRF-2785).
+
+    ``acknowledged`` — whether the CURRENT time is acknowledged: a reschedule
+    makes an earlier acknowledgement stale. ``recorded`` — only on
+    ``acknowledge``: False when the same version was acknowledged already
+    (no second event). People are not in the answer by contract — names
+    come from the bot's own mirror.
+    """
+
+    appointment_id: str
+    specialist_id: str
+    status: str
+    version: int
+    start_at: str
+    acknowledged: bool
+    recorded: bool | None = None
+
+
+#: The master's actions on their own appointment (DRF-2785), by URL segment.
+SPECIALIST_ACTIONS: frozenset[str] = frozenset(
+    {"acknowledge", "cancel", "complete", "no-show", "reschedule"}
+)
+
+
+@dataclass(frozen=True)
 class AylaAppointmentVersion:
     """The four canonical facts a console needs before acting on a booking.
 
@@ -2206,6 +2232,85 @@ class AylaBookingHTTPClient:
             )
             raise BookingUnavailableError("malformed_response")
         return _user_record_from_wire(payload)
+
+    def act_as_specialist(
+        self,
+        *,
+        external_user_id: str,
+        specialist_id: str,
+        appointment_id: str,
+        action: str,
+        expected_version: int | None = None,
+        reason: str | None = None,
+        new_start_datetime: str | None = None,
+    ) -> AylaSpecialistAppointment:
+        """The master acts on THEIR OWN appointment (DRF-2785).
+
+        ``POST internal/specialists/{specialist_id}/appointments/{id}/{action}/``
+        with the master as ``X-External-User-ID``. The catalog admits only a
+        linked master, on their own record, with a live link to the record's
+        salon; anything else is 403 (subject) or 404 (not theirs —
+        deliberately indistinguishable from missing).
+
+        ``expected_version`` is required by the catalog for every action but
+        ``cancel``; it is never invented here. A missing one is refused
+        before the network, like the salon surface does.
+
+        Errors are the client's usual two: 5xx / network →
+        :class:`BookingUnavailableError`; 4xx → :class:`BookingBadRequestError`
+        carrying ``status_code`` and ``code`` (``STALE_VERSION``,
+        ``INVALID_STATUS``, ``CANCELLATION_NOT_ALLOWED``, …).
+        """
+
+        if action not in SPECIALIST_ACTIONS:
+            raise ValueError(f"unknown specialist action: {action!r}")
+        if expected_version is not None and (
+            isinstance(expected_version, bool)
+            or not isinstance(expected_version, int)
+            or expected_version < 1
+        ):
+            raise ValueError("expected_version must be a positive integer")
+        if action != "cancel" and expected_version is None:
+            raise ValueError(f"{action} requires expected_version")
+
+        body: dict[str, Any] = {}
+        if expected_version is not None:
+            body["expected_version"] = expected_version
+        if reason:
+            body["reason"] = reason
+        if action == "reschedule":
+            if not new_start_datetime:
+                raise ValueError("reschedule requires new_start_datetime")
+            body["new_start_datetime"] = new_start_datetime
+
+        resp = self._request(
+            "POST",
+            f"specialists/{specialist_id}/appointments/{appointment_id}/{action}/",
+            external_user_id=external_user_id,
+            json_body=body,
+            purpose="booking",
+        )
+        payload = self._ok(resp)
+        if not isinstance(payload, dict):
+            raise BookingUnavailableError("malformed_response")
+        try:
+            recorded = payload.get("recorded")
+            return AylaSpecialistAppointment(
+                appointment_id=str(payload["appointment_id"]),
+                specialist_id=str(payload["specialist_id"]),
+                status=str(payload["status"]),
+                version=int(payload["version"]),
+                start_at=str(payload.get("start_at") or ""),
+                acknowledged=bool(payload.get("acknowledged")),
+                recorded=None if recorded is None else bool(recorded),
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            logger.warning(
+                "booking_client.specialist_action_unexpected_shape action=%s keys=%s",
+                action,
+                sorted(payload),
+            )
+            raise BookingUnavailableError("malformed_response") from exc
 
     def get_appointment_version(
         self,

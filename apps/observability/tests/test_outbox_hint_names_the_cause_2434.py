@@ -26,6 +26,8 @@ from apps.observability.checks import check_outbox_backlog, outbox_dispatch_caus
 
 NOOP = "apps.eventbus.dispatcher.NoopSubscriber"
 REAL = "apps.eventbus.subscribers.AuditSubscriber"
+#: DRF-2776 — доставщик смены согласия; без него живой режим отказывает.
+CONSENT = "apps.eventbus.subscribers.CatalogConsentSubscriber"
 ORDER = "счётчик, затем подписчик, затем расписание"
 
 
@@ -49,7 +51,12 @@ CASES = [
         dict(enabled=True, dry_run=False, subscribers=[]), "refused_noop_only", id="empty"
     ),
     pytest.param(
-        dict(enabled=True, dry_run=False, subscribers=[NOOP, REAL]), "celery-beat", id="live"
+        dict(enabled=True, dry_run=False, subscribers=[NOOP, REAL]),
+        "refused_undelivered",
+        id="live-without-consent-deliverer",
+    ),
+    pytest.param(
+        dict(enabled=True, dry_run=False, subscribers=[REAL, CONSENT]), "celery-beat", id="live"
     ),
 ]
 

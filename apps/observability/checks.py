@@ -142,6 +142,9 @@ def log_startup_config_drift() -> None:
 
 
 NOOP_SUBSCRIBER_PATH = "apps.eventbus.dispatcher.NoopSubscriber"
+#: Доставщик смены согласия (DRF-2776). Текстом, как и Noop выше: сторож
+#: стоит снаружи предмета и диспетчер не импортирует.
+CATALOG_CONSENT_SUBSCRIBER_PATH = "apps.eventbus.subscribers.CatalogConsentSubscriber"
 
 # Порядок починки повторяется в каждой ветке подсказки: он и есть то, ради
 # чего подсказка существует.
@@ -192,6 +195,13 @@ def outbox_dispatch_cause() -> str:
             "Живой режим открыт, но в DOMAIN_EVENT_SUBSCRIBERS нет настоящего "
             "подписчика — обёртка отказывает (`refused_noop_only`), иначе "
             "пометила бы накопленное доставленным никому."
+        )
+    elif CATALOG_CONSENT_SUBSCRIBER_PATH not in getattr(settings, "DOMAIN_EVENT_SUBSCRIBERS", []):
+        cause = (
+            "Живой режим открыт, но в DOMAIN_EVENT_SUBSCRIBERS нет доставщика "
+            "смены согласия (CatalogConsentSubscriber) — если в ящике лежит "
+            "customer.consent.changed, обёртка отказывает (`refused_undelivered`): "
+            "журнал смену согласия не закрывает (решение владельца D)."
         )
     else:
         cause = (

@@ -1096,6 +1096,14 @@ class RemoteBookingProxy(models.Model):
         "for the ordering state machine (bootstrap / skip / apply / gap).",
         verbose_name="Версия визита",
     )
+    appointment_version = models.PositiveIntegerField(
+        null=True,
+        blank=True,
+        help_text=(
+            "Последняя известная версия записи в каталоге (DRF-2785): из data.version событий booking.created, booking.rescheduled и appointment.rescheduled, только растёт. Её бот отправляет как expected_version в действиях мастера. NULL — событие с версией не приходило. Не last_applied_appointment_version: тот ведёт порядок канонических переносов, и запись в него из других событий сломала бы его проверку."
+        ),
+        verbose_name="Версия записи для действий",
+    )
 
     objects = TenantScopedManager()
     all_tenants = models.Manager()

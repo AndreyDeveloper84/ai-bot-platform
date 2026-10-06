@@ -101,6 +101,13 @@ EXPECTED: dict[str, tuple[int, str, str]] = {
         SHOWS_REASON,
         "салонная админка, услуги мастера — sellable и причина",
     ),
+    "apps/channels/max/staff_booking.py": (
+        1,
+        SELLABLE,
+        "DRF-2786: «✍️ Записать клиента» в салонном боте предлагает услуги мастера — "
+        "только продаваемые рёбра (предикат sellable()); запись создаёт "
+        "create_appointment_as, как экран Mini App",
+    ),
     "apps/admin_api/services/assistant.py": (
         1,
         SELLABLE,
