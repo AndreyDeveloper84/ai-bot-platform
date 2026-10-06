@@ -22,6 +22,13 @@ from apps.orchestrator.nutrition_wellness import goal_is_medical
 
 WORDS = "хочу выглядеть отдохнувшей к отпуску"
 LINE = "Цель клиента своими словами: хочу выглядеть отдохнувшей к отпуску"
+RULE = (
+    "Цель — ориентир, а не правило: если клиент сейчас просит другое или уточняет "
+    "цель, следуй его текущим словам. Не делай из цели выводов о здоровье и не "
+    "называй диагнозов."
+)
+BLOCK = LINE + "\n" + RULE
+LABEL = "Расслабиться и снять стресс"
 
 
 def _profile(**flags):
@@ -61,20 +68,20 @@ def doors(monkeypatch):
 
 class TestTheBlock:
     def test_the_persons_words_reach_the_block(self, doors) -> None:
-        assert build_goal_block(object()) == LINE
+        assert build_goal_block(object()) == BLOCK
 
     def test_without_an_anketa_the_goal_still_shows(self, doors) -> None:
         """Анкеты питания у бьюти-клиента обычно нет — это не периметр."""
         doors["profile"] = None
 
-        assert build_goal_block(object()) == LINE
+        assert build_goal_block(object()) == BLOCK
         assert doors["profile_reads"] == 1
 
     def test_an_unreadable_profile_hides_the_goal(self, doors) -> None:
         """Не знаем состояние — берём ограничительное: человек в периметре не
         должен получить разговор к противопоказанной цели из-за сбоя каталога."""
         doors["profile"] = None
-        assert build_goal_block(object()) == LINE
+        assert build_goal_block(object()) == BLOCK
         doors["profile"] = "unreadable"
 
         assert build_goal_block(object()) == ""
@@ -82,18 +89,18 @@ class TestTheBlock:
     def test_an_ordinary_profile_shows_the_goal(self, doors) -> None:
         doors["profile"] = _profile()
 
-        assert build_goal_block(object()) == LINE
+        assert build_goal_block(object()) == BLOCK
 
 
 class TestWhatTheBlockKeepsOut:
-    def test_a_curated_key_without_words_is_never_rendered(self, doors) -> None:
-        doors["goal"] = SimpleNamespace(key="more_energy", text=None)
+    def test_a_bare_key_without_a_label_is_never_rendered(self, doors) -> None:
+        doors["goal"] = SimpleNamespace(key="more_energy", text=None, label=None)
 
         block = build_goal_block(object())
 
         assert render_goal_line(SimpleNamespace(key="", text=WORDS)) == LINE
         assert block == ""
-        assert doors["profile_reads"] == 0  # без слов — без похода за профилем
+        assert doors["profile_reads"] == 0  # рисовать нечего — без похода за профилем
 
     def test_no_goal_no_block(self, doors) -> None:
         doors["goal"] = None
@@ -156,3 +163,69 @@ class TestMergeIntoMemory:
         goal = SimpleNamespace(key="", text=WORDS)
         assert _render_goal_lines(goal) == [render_goal_line(goal)]
         assert goal_context.render_goal_line(goal) == LINE
+
+
+class TestAGoalChosenByButton:
+    """Решение владельца 06.10, вариант (Б): подпись опции с происхождением."""
+
+    def test_the_label_reaches_the_model_as_chosen_from_the_list(self, doors) -> None:
+        doors["goal"] = SimpleNamespace(key="relax", text=None, label=LABEL)
+
+        block = build_goal_block(object())
+
+        assert block == (
+            "Цель клиента выбрана им из списка: «Расслабиться и снять стресс». Это наша "
+            "формулировка, а не его слова — не цитируй её как слова клиента.\n" + RULE
+        )
+        assert "своими словами" not in block
+        assert "relax" not in block
+
+    def test_the_persons_words_outrank_the_label(self, doors) -> None:
+        doors["goal"] = SimpleNamespace(key="relax", text=WORDS, label=LABEL)
+
+        block = build_goal_block(object())
+
+        assert block == BLOCK
+        assert LABEL not in block
+
+    def test_the_chosen_goal_respects_the_perimeter_too(self, doors) -> None:
+        doors["goal"] = SimpleNamespace(key="relax", text=None, label=LABEL)
+        doors["profile"] = _profile(eating_disorder=True)
+
+        assert build_goal_block(object()) == ""
+
+
+class TestTheLabelFromTheCatalogDocument:
+    """``known.goal.label`` у каталога — слова, иначе подпись опции, иначе ключ."""
+
+    @staticmethod
+    def _goal(**known_goal):
+        from apps.nutrition_coach.goals import _goal_from_document
+
+        return _goal_from_document({"known": {"goal": known_goal}})
+
+    def test_a_curated_label_is_carried(self) -> None:
+        goal = self._goal(goal_key="relax", goal_text=None, label=LABEL)
+        assert goal is not None
+        assert goal.label == LABEL
+
+    def test_the_key_echoed_as_a_label_is_not_a_label(self) -> None:
+        goal = self._goal(goal_key="relax", goal_text=None, label="relax")
+        assert goal is not None
+        assert goal.label is None
+
+    def test_the_persons_words_echoed_as_a_label_are_not_a_label(self) -> None:
+        """Цель с ключом И словами: каталог кладёт в ``label`` слова человека —
+        это не подпись опции, иначе слова ушли бы в промпт как «выбрано из списка»."""
+        goal = self._goal(goal_key="relax", goal_text=WORDS, label=WORDS)
+        assert goal is not None
+        assert goal.text == WORDS
+        assert goal.label is None
+
+
+class TestMergeTheFullBlock:
+    def test_the_rule_rides_along_and_the_duplicate_is_still_caught(self) -> None:
+        nutrition = f"{LINE}\nБелок 62% от ориентира."
+
+        assert merge_goal_into_memory("ПАМЯТЬ", BLOCK, nutrition) == "ПАМЯТЬ"
+        assert merge_goal_into_memory("ПАМЯТЬ", BLOCK, "") == f"ПАМЯТЬ\n\n{BLOCK}"
