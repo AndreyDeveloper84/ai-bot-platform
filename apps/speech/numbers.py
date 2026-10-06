@@ -28,6 +28,19 @@
 октября» — только когда сразу за ним месяц в родительном падеже. Так дату
 видят одинаково модель, ``parse_explicit_date`` и строка «Я услышала: …».
 
+Дата целиком, как её говорят (DRF-2813):
+
+* дательный падеж — срок: «к пятому октября» → «к 5 октября»;
+* год сразу за датой — четыре цифры: «пятнадцатого декабря две тысячи
+  двадцать восьмого года» → «15 декабря 2028 года». Без этого разбор даты
+  терял год и ставил запись на текущий. Только с «тысяч» и только 1900–2100:
+  «двадцать восьмого года» может быть и 1928-м;
+* час перед датой — не часть дня: «на десять пятого октября» → «на десять
+  5 октября». Число здесь НАМЕРЕННО остаётся словом: «10 5 октября» — а с
+  днями 10–31 «10 15 октября» — выглядит как время «10:15», и ложное время
+  дороже неузнанного. Перед составным днём («на десять двадцать пятого
+  октября») двусмысленно — фраза остаётся словами целиком.
+
 Чего не делаем — намеренно:
 
 * порядковые без месяца («третьего числа», «первый раз», «двадцать пятое») —
@@ -150,6 +163,32 @@ _ORDINAL_FORMS: dict[int, tuple[str, ...]] = {
     30: ("тридцатое", "тридцатого"),
 }
 _ORDINAL_DAYS: dict[str, int] = {w: day for day, words in _ORDINAL_FORMS.items() for w in words}
+
+#: Дательный падеж дня — срок («к пятому октября», DRF-2813). Отдельной
+#: таблицей и только для дат: в ``_ORDINAL_DAYS`` он изменил бы счёт перед
+#: порядковым («дай пять первому клиенту» — это «5 первому», а не дата).
+_ORDINAL_DAYS_DATIVE: dict[str, int] = {
+    word[:-3] + ("ему" if word.endswith("его") else "ому"): day
+    for word, day in _ORDINAL_DAYS.items()
+    if word.endswith(("ого", "его"))
+}
+#: Слово дня в составе даты: именительный, родительный, дательный.
+_DATE_DAY_WORDS: dict[str, int] = {**_ORDINAL_DAYS, **_ORDINAL_DAYS_DATIVE}
+
+#: Порядковое в родительном — последнее слово года («…двадцать восьмого
+#: года», «…девяностого года»). Десятков 40–90 среди дней нет, поэтому своя
+#: таблица: «сорокового октября» днём стать не должно.
+_ORDINAL_GENITIVE: dict[str, int] = {
+    **{w: n for w, n in _ORDINAL_DAYS.items() if w.endswith(("ого", "его"))},
+    "сорокового": 40,
+    "пятидесятого": 50,
+    "шестидесятого": 60,
+    "семидесятого": 70,
+    "восьмидесятого": 80,
+    "девяностого": 90,
+}
+#: Год, который имеет смысл называть в дате записи или рождения.
+_YEAR_RANGE = range(1900, 2101)
 
 #: Порядковое числительное в любом роде и падеже, целым словом (DRF-2788):
 #: основа + окончание прилагательного. Количественные формы сюда не попадают
@@ -355,10 +394,10 @@ def _spoken_dates(text: str) -> str:
         word = first.group(0).lower()
         day: int | None = None
         last = i
-        if word in _ORDINAL_DAYS:
-            day = _ORDINAL_DAYS[word]
+        if word in _DATE_DAY_WORDS:
+            day = _DATE_DAY_WORDS[word]
         elif word in _DAY_TENS and i + 1 < len(tokens):
-            unit = _ORDINAL_DAYS.get(tokens[i + 1].group(0).lower())
+            unit = _DATE_DAY_WORDS.get(tokens[i + 1].group(0).lower())
             only_space = not text[first.end() : tokens[i + 1].start()].strip()
             if unit is not None and 1 <= unit <= 9 and only_space:
                 day = _DAY_TENS[word] + unit
@@ -366,11 +405,17 @@ def _spoken_dates(text: str) -> str:
         month = tokens[last + 1] if last + 1 < len(tokens) else None
         # Числительное вплотную перед днём — это другое, большее порядковое:
         # «тридцать второго октября», «сто двадцать пятого» днём не являются.
+        # Исключение (DRF-2813): 0–19 перед ОДИНОЧНЫМ днём составное
+        # порядковое не образуют — «на десять пятого октября» это час и день.
+        # Перед составным днём («на десять двадцать пятого») — двусмысленно,
+        # там любое числительное по-прежнему отменяет дату.
         before = tokens[i - 1] if i > 0 else None
+        before_word = before.group(0).lower() if before is not None else ""
         part_of_a_larger_ordinal = (
             before is not None
-            and before.group(0).lower() in _NUMERAL_WORDS
+            and before_word in _NUMERAL_WORDS
             and not text[before.end() : first.start()].strip()
+            and not (last == i and before_word in _UNITS)
         )
         if (
             day is not None
@@ -390,11 +435,87 @@ def _spoken_dates(text: str) -> str:
     return "".join(out)
 
 
+_MONTH_ALTERNATION = "|".join(sorted(_MONTHS_GENITIVE))
+#: «15 декабря» цифрами — после ``_spoken_dates`` или прямо от распознавателя.
+_DIGIT_DATE = re.compile(rf"\b\d{{1,2}}\s+(?:{_MONTH_ALTERNATION})\b", re.IGNORECASE)
+#: То же сразу за цепочкой числительных: «десять 5 октября».
+_DIGIT_DATE_AHEAD = re.compile(rf"\s+\d{{1,2}}\s+(?:{_MONTH_ALTERNATION})\b", re.IGNORECASE)
+
+
+def _year_after(text: str, start: int) -> tuple[int, int] | None:
+    """Год словами сразу за датой: ``(год, конец)`` или ``None``.
+
+    «тысяча» | «две тысячи», затем сотни, затем либо десятки и порядковое
+    единиц («двадцать восьмого»), либо одно порядковое («десятого»,
+    «девяностого»). Между словами — только пробелы. Слово за годом, если это
+    месяц, отменяет разбор: тогда последнее порядковое — день следующей даты.
+    """
+    tokens: list[re.Match[str]] = []
+    pos = start
+    for m in _TOKEN.finditer(text, start):
+        if text[pos : m.start()].strip() or len(tokens) == 6:
+            break
+        tokens.append(m)
+        pos = m.end()
+    words = [m.group(0).lower() for m in tokens]
+
+    if words[:1] == ["тысяча"]:
+        value, i = 1000, 1
+    elif words[:2] == ["две", "тысячи"]:
+        value, i = 2000, 2
+    else:
+        return None
+    if i < len(words) and words[i] in _HUNDREDS:
+        value += _HUNDREDS[words[i]]
+        i += 1
+    if (
+        i + 1 < len(words)
+        and words[i] in _TENS
+        and 1 <= _ORDINAL_GENITIVE.get(words[i + 1], 0) <= 9
+    ):
+        value += _TENS[words[i]] + _ORDINAL_GENITIVE[words[i + 1]]
+        i += 2
+    elif i < len(words) and words[i] in _ORDINAL_GENITIVE:
+        value += _ORDINAL_GENITIVE[words[i]]
+        i += 1
+    else:
+        return None
+    if value not in _YEAR_RANGE:
+        return None
+    if i < len(words) and words[i] in _MONTHS_GENITIVE:
+        return None
+    return value, tokens[i - 1].end()
+
+
+def _spoken_years(text: str) -> str:
+    """«15 декабря две тысячи двадцать восьмого года» → «15 декабря 2028 года»."""
+    out: list[str] = []
+    pos = 0
+    for date in _DIGIT_DATE.finditer(text):
+        if date.start() < pos:
+            continue
+        year = _year_after(text, date.end())
+        if year is None:
+            continue
+        value, end = year
+        out.append(text[pos : date.end()])
+        out.append(f" {value}")
+        pos = end
+    out.append(text[pos:])
+    return "".join(out)
+
+
+def _reads_as_clock_before_a_date(converted: str) -> bool:
+    """«10» или «10 15» перед «5 октября» выглядело бы как время (DRF-2813)."""
+    parts = converted.split()
+    return ":" not in converted and all(part.isdigit() and len(part) <= 2 for part in parts)
+
+
 def normalize_numbers(text: str) -> str:
     """Заменить числительные словами на цифры, остальной текст оставить как есть."""
     if not text:
         return text
-    text = _spoken_dates(text)
+    text = _spoken_years(_spoken_dates(text))
     out: list[str] = []
     pos = 0
     run: list[re.Match[str]] = []
@@ -433,6 +554,13 @@ def normalize_numbers(text: str) -> str:
                 [m.group(0) for m in run],
                 after_clock_preposition=neighbour(run[0], -1) in _CLOCK_PREPOSITIONS,
             )
+        if (
+            converted is not None
+            and _DIGIT_DATE_AHEAD.match(text, end) is not None
+            and _reads_as_clock_before_a_date(converted)
+        ):
+            # DRF-2813 — «на десять 5 октября»: час перед датой остаётся словом.
+            converted = None
         if converted is None:
             out.append(text[pos:end])
         else:
