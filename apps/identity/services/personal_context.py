@@ -113,6 +113,16 @@ def _gate(bot_user) -> uuid.UUID | None:
     return ayla_user_id
 
 
+def memory_green_open(bot_user) -> bool:
+    """Открыт ли гейт ``memory_green`` для человека — без похода за префами.
+
+    Для поверхностей, которые кладут в промпт заявленное человеком, но не
+    декларированные префы каталога (DRF-2808, цель): гейт тот же, что у
+    :func:`get_declared_prefs`, и закрыт так же — нет связки или согласия.
+    """
+    return _gate(bot_user) is not None
+
+
 def get_declared_prefs(
     bot_user,
     *,
