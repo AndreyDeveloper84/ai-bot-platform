@@ -34,7 +34,11 @@ from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.test import RequestFactory
 from django.urls import URLPattern, URLResolver, get_resolver
 
-from apps.admin_api.auth import require_admin_or_reception_read, require_admin_role
+from apps.admin_api.auth import (
+    require_admin_or_reception_read,
+    require_admin_role,
+    require_booking_desk,
+)
 from apps.master_api.auth import require_init_data_only, require_master_init_data
 from apps.miniapp_api.views import require_init_data
 from apps.miniapp_api.master_media import require_signed_session
@@ -50,6 +54,7 @@ DECORATORS: dict[str, Callable[[Callable[..., HttpResponse]], Callable[..., Http
     "master_onboarding": require_init_data_only,
     "admin": require_admin_role,
     "admin_or_reception_read": require_admin_or_reception_read,
+    "booking_desk": require_booking_desk,
     "master_media": require_signed_session,
 }
 
