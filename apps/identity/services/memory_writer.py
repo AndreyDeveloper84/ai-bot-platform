@@ -202,7 +202,6 @@ def write_entry(
     ttl_days: Optional[int] = None,
     derivation_method: Optional[str] = None,
     evidence_refs: Optional[list[Any]] = None,
-    source_event_id: Optional[uuid.UUID] = None,
 ) -> Optional[MemoryEntry]:
     """Create a new MemoryEntry with all spec §11 guards.
 
@@ -223,11 +222,13 @@ def write_entry(
         last_inferred_at: REQUIRED when source IN ('inferred','signal'),
             MUST be NULL when source='explicit' (CHECK 1 enforces it).
         ttl_days: per-zone retention cap. None = no auto-TTL (green).
-        derivation_method / evidence_refs / source_event_id: provenance of an
-            INFERRED fact (DRF-2780, owner 05.10: «каждое предположение —
-            источник, дата, статус, срок»). Stored as given — the writer never
-            fabricates them; ignored for explicit rows (a user_stated fact is
-            its own source).
+        derivation_method / evidence_refs: provenance of an INFERRED fact
+            (DRF-2780, owner 05.10: «каждое предположение — источник, дата,
+            статус, срок»). Stored as given — the writer never fabricates them;
+            ignored for explicit rows (a user_stated fact is its own source).
+            ``source_event_id`` is deliberately NOT a parameter: «nobody writes
+            the event key» is a guarded zero (``test_memory_reach_sql_2513``),
+            and the first producer (F4b) changes it together with that guard.
 
     Returns:
         The created MemoryEntry on success, OR None when the write was
@@ -260,9 +261,9 @@ def write_entry(
     # unconfirmed term and the consent scope, but provenance stays NULL:
     # user_confirmed_inference may only come from the confirmation flow
     # (DRF-2781), never silently from the writer. Signal rows are not
-    # stamped (no writer). source_event_id / evidence_refs /
-    # derivation_method are stored as the caller gives them, never
-    # fabricated; purpose_tags stays [] (no category policy yet).
+    # stamped (no writer). evidence_refs / derivation_method are stored as
+    # the caller gives them, never fabricated; source_event_id is not
+    # written at all; purpose_tags stays [] (no category policy yet).
     canonical: dict[str, Any] = {}
     if source == MemoryEntry.SOURCE_EXPLICIT:
         write_ts = timezone.now()
@@ -293,7 +294,6 @@ def write_entry(
             "consent_scope": INFERRED_CONSENT_SCOPE,
             "derivation_method": derivation_method,
             "evidence_refs": list(evidence_refs or []),
-            "source_event_id": source_event_id,
         }
 
     # DRF-2544 — происхождение решается в момент записи и в одном месте:

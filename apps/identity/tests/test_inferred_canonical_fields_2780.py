@@ -12,6 +12,7 @@
 * i3 — меньший срок вызывающего сильнее 30 дней; больший — нет;
 * i4 — основание записи — согласие на предположения;
 * i5 — источник хранится так, как дан, и не выдумывается, когда не дан;
+  событийный ключ писатель не пишет вовсе (ноль держит сторож 2513);
 * i6 — ``explicit`` прежний: ``user_stated``, своё основание не получает.
 """
 
@@ -82,21 +83,18 @@ def test_i4_the_write_is_authorised_by_the_preference_inference_consent() -> Non
 
 
 def test_i5_the_source_is_stored_as_given_and_never_fabricated() -> None:
-    event = uuid.uuid4()
     given = _inferred(
         _upc(),
         derivation_method="repeated_choice",
         evidence_refs=["booking:a", "booking:b"],
-        source_event_id=event,
     )
     assert given.derivation_method == "repeated_choice"
     assert given.evidence_refs == ["booking:a", "booking:b"]
-    assert given.source_event_id == event
+    assert given.source_event_id is None
 
     bare = _inferred(_upc())
     assert bare.derivation_method is None
     assert bare.evidence_refs == []
-    assert bare.source_event_id is None
 
 
 def test_i6_explicit_writes_are_unchanged() -> None:

@@ -72,6 +72,8 @@ KNOWN_READERS: dict[tuple[str, str, str], str] = {
     ): _GLOBAL,
     ("apps/identity/services/privacy.py", "delete_personal_data", "read_green_entries"): _OWN,
     ("apps/identity/services/privacy.py", "export_personal_data", "read_green_entries"): _OWN,
+    # DRF-2781 — ответ на предложение Ayla ищет строку в СВОЕЙ памяти субъекта.
+    ("apps/identity/services/memory_proposals.py", "_live_inferred", "read_green_entries"): _OWN,
     ("apps/miniapp_api/views_memory.py", "_green_ids_to_forget", "read_green_entries"): _OWN,
     ("apps/miniapp_api/views_memory.py", "customer_memory", "read_green_entries"): _OWN,
     ("apps/persona/memory_commands.py", "handle_memory_command", "read_current_view"): _OWN,
@@ -191,7 +193,7 @@ class TestEveryMemoryReaderIsKnown:
         census = _scan(_production_sources())
         seen = {(p, f, c) for p, f, c, _ in census.sites}
         stale = sorted(set(KNOWN_READERS) - seen)
-        assert len(KNOWN_READERS) == 29
+        assert len(KNOWN_READERS) == 30
         assert stale == [], stale  # empty-assert-ok: число известных мест утверждено строкой выше
 
     def test_never_crosses_names_favorite_masters(self) -> None:
