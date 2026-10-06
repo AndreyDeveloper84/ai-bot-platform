@@ -300,7 +300,18 @@ class TestWhatTheDoorNeverExtends:
         assert _expiry(entry) == NOW + timedelta(days=5)
         assert RedZoneAccessLog.objects.filter(memory_entry_id=entry.id).count() == 0
 
-    def test_green_is_not_extended(self, consent) -> None:
+    def test_green_is_not_extended(self, consent, monkeypatch) -> None:
+        # Даже с утверждённой политикой «use» — зелёная зона срока не продлевает.
+        monkeypatch.setitem(
+            TERM_POLICIES,
+            (GREEN, "preference"),
+            dataclasses.replace(
+                TERM_POLICIES[(YELLOW, "preference")],
+                initial_days=365,
+                extension_days=EXT,
+                hard_cap_days=CAP,
+            ),
+        )
         entry = _entry(_upc(), GREEN, "preference", age_days=10, expires_in_days=5)
 
         assert _use(entry) == 0
@@ -352,4 +363,28 @@ class TestTheSweepFollowsApproval:
         assert entry.soft_deleted_at == NOW
         assert entry.deletion_reason == "ttl_purge"
         assert other.soft_deleted_at is None
+        assert result.purged_yellow == 1
+
+    def test_an_f4_row_in_an_approved_category_keeps_the_intersection(self, approved) -> None:
+        approved(YELLOW, "lifestyle")
+        upc = _upc()
+        booked = _entry(upc, YELLOW, "lifestyle", age_days=400, expires_in_days=-1)
+        f4 = _entry(
+            upc,
+            YELLOW,
+            "lifestyle",
+            age_days=400,
+            expires_in_days=-1,
+            consent_scope="preference_inference",
+        )
+        MemoryEntry.objects.filter(pk__in=[booked.pk, f4.pk]).update(
+            last_used_at=NOW - timedelta(days=5)
+        )
+
+        result = soft_delete_expired_entries(now=NOW)
+
+        booked.refresh_from_db()
+        f4.refresh_from_db()
+        assert booked.soft_deleted_at == NOW
+        assert f4.soft_deleted_at is None
         assert result.purged_yellow == 1
