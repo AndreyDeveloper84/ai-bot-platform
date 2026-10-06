@@ -91,6 +91,7 @@ from apps.orchestrator.discovery import (
     render_no_match,
     requested_services,
 )
+from apps.orchestrator import master_preference
 from apps.orchestrator.fast_path import claims_direct_show_masters
 from apps.orchestrator.handoff import handoff_to_booking
 from apps.orchestrator.knowledge_licence import KnowledgeLicence
@@ -1013,13 +1014,10 @@ def _tool_trace_entry(dto: Any) -> dict[str, Any]:
     return {"tool": str(dto.action_type), "arguments": arguments}
 
 
-# Wording for the two outcomes of ``start_booking`` that are NOT a handoff.
-# Both are answers, not refusals: one says who we could not find, the other
-# asks the ONE question that is still open, with the names in it.
-_BOOKING_NO_MASTER = (
-    "Не нашла мастера с таким именем — {name}. Проверь написание или "
-    "назови услугу, и я покажу, кто её делает."
-)
+# Wording for the «several» outcome of ``start_booking``: it asks the ONE
+# question that is still open, with the names in it. The «nobody» outcome
+# speaks through ``master_preference`` since DRF-2829 — one text with the
+# show-others question, on both doors.
 _BOOKING_WHICH_ONE = "Уточни, к кому именно — напиши фамилию или нажми кнопку:"
 
 
@@ -1134,8 +1132,14 @@ def _execute_start_booking(
         return None
     service = str(args.get("service") or "").strip()
     city = str(args.get("city") or "").strip() or None
+    # DRF-2829 — с услугой ищется мастер, который ЕЁ делает: «только к Анне на
+    # педикюр» при Анне без педикюра уходило в запись к Анне без услуги.
     cards = find_masters_by_name(
-        master_query, city=city, service=service or None, limit=_MAX_MASTER_CARDS
+        master_query,
+        city=city,
+        service=service or None,
+        limit=_MAX_MASTER_CARDS,
+        require_service=bool(service),
     )
     logger.info(
         "orchestrator.concierge.start_booking master=%r city=%r service=%r matched=%d trace=%s",
@@ -1146,8 +1150,18 @@ def _execute_start_booking(
         trace_id,
     )
     if not cards:
+        # Объяснить и спросить разрешения на других — кнопкой (DRF-2829,
+        # решение владельца 06.10). Мастер есть, но не делает услугу, — это
+        # другое объяснение, чем «такого мастера нет».
+        if service and find_masters_by_name(master_query, city=city, limit=1):
+            rendered = master_preference.no_service_reply(master_query, service=service, city=city)
+        else:
+            rendered = master_preference.not_found_reply(
+                master_query, city=city, specialization=service or None
+            )
         return DiscoveryReply(
-            text=_BOOKING_NO_MASTER.format(name=master_query[:60])[:_MAX_REPLY_CHARS],
+            text=rendered.text[:_MAX_REPLY_CHARS],
+            action_data=rendered.action_data,
             persisted=True,
         )
     if len(cards) > 1:
@@ -2212,6 +2226,25 @@ def _concierge_turn(
             # a single service name by construction here, so there is no
             # composite request left to half-answer.
             requested = []
+        # DRF-2829 — предпочтение мастера. Жёсткое («только Анна») и имя без
+        # других критериев отвечаются здесь, детерминированно и без второго
+        # прохода: проход модели над пустым результатом и был местом, где
+        # «Анны нет» становилось чужими карточками. Мягкое — ниже, поднятием.
+        master = str(args.get("master") or "").strip() if isinstance(args, dict) else ""
+        if master and (
+            master_preference.is_hard(args, message_text)
+            or not has_discovery_criteria(city, specialization)
+        ):
+            rendered = master_preference.hard_reply(
+                master, city=city, specialization=specialization
+            )
+            if tool_trace and isinstance(tool_trace[-1], dict):
+                tool_trace[-1]["result"] = "master_preference_hard"
+            return _reply(
+                text=rendered.text[:_MAX_REPLY_CHARS],
+                action_data=rendered.action_data,
+                persisted=True,
+            )
         if not has_discovery_criteria(city, specialization):
             # Criteria-less call → continue discovery, never the catalogue
             # (BOT-003 §9 / prohibition #22 — see has_discovery_criteria).
@@ -2248,6 +2281,12 @@ def _concierge_turn(
             offset=0,
             limit=page_size,
         )
+        if master:
+            # DRF-2829 — мягкое предпочтение: названный первым, если он делает
+            # то же, что ищется; остальные остаются.
+            cards = master_preference.lift_named(
+                cards, master, city=city, specialization=specialization, limit=page_size
+            )
         # DRF-1312 — which of the requested services the CATALOG can serve.
         # Names come from the model, verdicts come from the catalog: the model
         # is not the authority on what exists (AYLA-DEC-0045 / OD-9).
