@@ -1267,6 +1267,10 @@ class RedZoneAccessLog(models.Model):
     ACCESS_WRITE_REJECTED_NO_CONSENT = "write_rejected_no_consent"
     # DRF-2133 — soft-delete по просьбе субъекта (tombstone, не purge).
     ACCESS_DELETE = "delete"
+    # DRF-2774 — факт процитирован в ответе / стал основанием рекомендации, и
+    # срок записи продлён (``memory_term.record_memory_use``). Не «read»:
+    # чтение в контекст срок не продлевает, и сторож различает их по значению.
+    ACCESS_USE = "use"
     ACCESS_TYPE_CHOICES = [
         (ACCESS_READ, "Read"),
         (ACCESS_WRITE, "Write"),
@@ -1281,6 +1285,7 @@ class RedZoneAccessLog(models.Model):
             ACCESS_WRITE_REJECTED_NO_CONSENT,
             "Write rejected — yellow/red without consent (DB CHECK)",
         ),
+        (ACCESS_USE, "Use — cited in an answer / recommendation, term extended"),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
