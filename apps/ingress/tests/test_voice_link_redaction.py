@@ -27,7 +27,7 @@ from apps.ingress.redaction import REDACTED_VOICE, REDACTION_FAILED, without_voi
 from apps.ingress.retention import erase_person_rows
 from apps.ingress.services import record_webhook
 
-_WEBHOOK_SECRET = "test-webhook-secret-123"
+_WEBHOOK_SECRET = "drf1943-secret"  # pragma: allowlist secret — test-only literal
 
 #: Подпись ссылки и ручка вложения — то, чего в журнале быть не должно.
 SIG = "SIG-MARKER-1943"
