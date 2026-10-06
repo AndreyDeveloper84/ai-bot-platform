@@ -287,6 +287,17 @@ urlpatterns = [
         views_memory.customer_memory_entry,
         name="customer_memory_entry",
     ),
+    # DRF-2781 — умная память Ф4: ответ на предложение Ayla.
+    path(
+        "memory/<uuid:entry_id>/confirm/",
+        views_memory.customer_memory_confirm,
+        name="customer_memory_confirm",
+    ),
+    path(
+        "memory/<uuid:entry_id>/correct/",
+        views_memory.customer_memory_correct,
+        name="customer_memory_correct",
+    ),
     # DRF-2144 (H01) — «Продолжить разговор с Ayla»: последняя тема — первые
     # 80 знаков последнего хода ассистента, без safety-строк и служебных
     # строк памяти; нет темы — null, экран говорит нейтрально.
