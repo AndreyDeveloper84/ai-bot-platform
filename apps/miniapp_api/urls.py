@@ -11,6 +11,7 @@ from apps.miniapp_api import (
     master_media,
     views,
     views_diary_days,
+    views_customer_assistant,
     views_last_topic,
     views_memory,
     views_plan_lite,
@@ -302,4 +303,16 @@ urlpatterns = [
     # 80 знаков последнего хода ассистента, без safety-строк и служебных
     # строк памяти; нет темы — null, экран говорит нейтрально.
     path("last-topic/", views_last_topic.customer_last_topic, name="customer_last_topic"),
+    # DRF-2799 — разговор с Ayla внутри Mini App: тот же глобальный ход бота,
+    # ответ приходит телом, а не в чат MAX.
+    path(
+        "assistant/history",
+        views_customer_assistant.customer_assistant_history,
+        name="customer_assistant_history",
+    ),
+    path(
+        "assistant/ask",
+        views_customer_assistant.customer_assistant_ask,
+        name="customer_assistant_ask",
+    ),
 ]
