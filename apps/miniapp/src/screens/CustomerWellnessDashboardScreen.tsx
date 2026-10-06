@@ -556,7 +556,10 @@ export function CustomerWellnessDashboardScreen() {
     },
     [chatLink],
   );
-  const onChatTap = useCallback(() => goToChat("ayla"), [goToChat]);
+  // DRF-2799 (решение владельца 06.10): разговор с Ayla продолжается здесь,
+  // в Mini App, — приложение не закрывается. Прочие двери в чат (согласие,
+  // план) остаются прежними.
+  const onChatTap = useCallback(() => navigate("/customer/ayla"), [navigate]);
   const onPlanChatTap = useCallback(() => goToChat("plan"), [goToChat]);
 
   // DRF-2230 — приглашение к согласию уходит в чат, и лишь потом экран
@@ -1071,9 +1074,9 @@ export function CustomerWellnessDashboardScreen() {
 
         {/* Block A — «Продолжить разговор с Ayla» (DRF-2144 п.5; фриз п.4:
             превью — только реальный последний контекст, иначе нейтрально).
-            Обе кнопки закрывают Mini App — человек возвращается в чат MAX,
-            откуда приложение открыто; фразу он пишет сам (deep link с
-            текстом в MAX не существует — см. StateError.tsx). */}
+            DRF-2799 (решение владельца 06.10, замещает Д2 §172 / DRF-2266):
+            обе кнопки ведут в разговор внутри Mini App (`/customer/ayla`),
+            а не закрывают приложение. Нить та же, что в чате бота. */}
         <section className="wellness-dash__ayla" aria-labelledby="ayla-header">
           <h2 id="ayla-header" className="wellness-dash__section-header">
             Продолжить разговор с <span lang="en">Ayla</span>
@@ -1096,7 +1099,6 @@ export function CustomerWellnessDashboardScreen() {
             <button type="button" className="wellness-dash__link-btn" onClick={onChatTap}>
               Задать новый вопрос
             </button>
-            {chatStuckAt === "ayla" && <ChatStuckHint />}
           </div>
         </section>
 
