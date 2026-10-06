@@ -64,8 +64,18 @@ from apps.channels.bot_context import bot_scope
 from apps.channels.max import outbound
 from apps.channels.max.parser import CanonicalEvent, ParseError, parse_max_webhook
 from apps.channels.max.staff_menu import (
+    CB_ACK_PREFIX,
     CB_APPROVE_PREFIX,
+    CB_CANT_OK_PREFIX,
+    CB_CANT_PREFIX,
+    CB_COMPLETE_PREFIX,
     CB_DAY,
+    CB_MDONE_PREFIX,
+    CB_MNOSHOW_PREFIX,
+    CB_MVISIT_PREFIX,
+    CB_NOSHOW_PREFIX,
+    CB_REJECT_PREFIX,
+    CB_VISIT_PREFIX,
     CB_READINESS,
     CB_REQUESTS,
     OPEN_APP_PAYLOAD,
@@ -715,10 +725,10 @@ def _greet_or_menu(event: CanonicalEvent, role_ctx, tenant, bot_user, entry) -> 
 
 
 def _greeting_attachments(buttons: list[dict[str, str]], role_ctx, entry) -> list | None:
-    """Кнопки приветствия — все в Mini App; без Mini App у бота — меню персонала.
+    """Кнопки приветствия: действия в чате и экраны Mini App (DRF-2787); пусто — меню.
 
-    Иначе владелец без ``web_app`` / ``miniapp_url`` получал бы приветствие
-    без единой кнопки, а «📅 Сегодня» в чате у него было всю жизнь.
+    Чатовые кнопки есть у каждого набора приветствия, так что пустой список —
+    защита на будущее: без кнопок вовсе человек получит меню, а не тупик.
     """
 
     if buttons:
@@ -977,7 +987,7 @@ def _serve(event: CanonicalEvent, trace_id: str | uuid.UUID | None, *, tenant, b
             _greet_or_menu(event, role_ctx, tenant, bot_user, entry)
         elif _is_button_tap(event.text):
             _handle_button(event, role_ctx, bot_user, tenant, entry)
-        else:
+        elif not _booking_takes_text(event, role_ctx, bot_user, tenant, entry):
             _handle_talk(event, role_ctx, bot_user, tenant, entry)
 
 
@@ -1624,16 +1634,59 @@ def _handle_button(event: CanonicalEvent, role_ctx, bot_user, tenant, entry) -> 
     action = event.text
     is_admin_side = role_ctx.is_owner or role_ctx.is_admin or role_ctx.is_receptionist
 
+    from apps.channels.max import staff_booking
+    from apps.channels.max.staff_menu import BK_PREFIX
+
+    if action.startswith(BK_PREFIX):
+        if role_ctx.is_owner or role_ctx.is_admin:
+            _reply_booking(event, _booking_step(action, bot_user, tenant), role_ctx, entry)
+        else:
+            _send_menu(event, role_ctx, tenant, entry)
+        return
+    # Any other button ends a chat booking in progress (DRF-2786): a line
+    # typed afterwards is for the assistant, not a client search.
+    staff_booking.drop(tenant, bot_user)
+    # DRF-2784: visit writes — owner / administrator, as on the salon surface
+    # (IsTenantAdmin) and the admin Mini App (`require_admin_role`).
+    can_settle = role_ctx.is_owner or role_ctx.is_admin
+
     if action == CB_DAY:
         if is_admin_side:
-            body = staff_actions.salon_day(tenant)
+            _reply(
+                event,
+                staff_actions.salon_day(tenant),
+                attachments=_day_attachments(tenant, role_ctx, entry),
+            )
+            return
         else:
             master = _master_of(bot_user)
-            body = (
-                staff_actions.master_day(master)
-                if master is not None
-                else "Ваша карточка мастера не найдена."
+            if master is None:
+                body = "Ваша карточка мастера не найдена."
+            else:
+                body = staff_actions.master_day(master)
+                _reply(
+                    event,
+                    body,
+                    attachments=_master_day_attachments(master, body, role_ctx, entry),
+                )
+                return
+    elif (
+        action.startswith(
+            (
+                CB_ACK_PREFIX,
+                CB_CANT_PREFIX,
+                CB_CANT_OK_PREFIX,
+                CB_MVISIT_PREFIX,
+                CB_MDONE_PREFIX,
+                CB_MNOSHOW_PREFIX,
             )
+        )
+        and (master := _master_of(bot_user)) is not None
+    ):
+        # DRF-2785 — the master on their OWN appointment; the catalog checks
+        # ownership again (404 for anything not theirs).
+        _handle_master_action(event, action, master, bot_user, tenant, role_ctx, entry)
+        return
     elif action == CB_REQUESTS and is_admin_side:
         _reply(
             event,
@@ -1650,7 +1703,9 @@ def _handle_button(event: CanonicalEvent, role_ctx, bot_user, tenant, entry) -> 
         _reply(
             event,
             staff_actions.salon_readiness(tenant),
-            attachments=_greeting_attachments(salon_greeting.admin_buttons(entry), role_ctx, entry),
+            attachments=_greeting_attachments(
+                salon_greeting.greeting_admin_buttons(entry), role_ctx, entry
+            ),
         )
         return
     elif action.startswith(CB_APPROVE_PREFIX) and is_admin_side:
@@ -1665,6 +1720,37 @@ def _handle_button(event: CanonicalEvent, role_ctx, bot_user, tenant, entry) -> 
             event,
             f"{outcome}\n\n{staff_actions.pending_requests(tenant)}",
             attachments=_requests_attachments(tenant, role_ctx, entry),
+        )
+        return
+    elif action.startswith(CB_REJECT_PREFIX) and is_admin_side:
+        # DRF-2784 — the same gate as approval beside it.
+        request_id = action[len(CB_REJECT_PREFIX) :]
+        outcome = staff_actions.reject_request(tenant=tenant, request_id=request_id, actor=bot_user)
+        _reply(
+            event,
+            f"{outcome}\n\n{staff_actions.pending_requests(tenant)}",
+            attachments=_requests_attachments(tenant, role_ctx, entry),
+        )
+        return
+    elif action.startswith(CB_VISIT_PREFIX) and can_settle:
+        appointment_id = action[len(CB_VISIT_PREFIX) :]
+        text, version = staff_actions.visit_prompt(
+            tenant=tenant, actor=bot_user, appointment_id=appointment_id
+        )
+        _reply(event, text, attachments=_visit_attachments(appointment_id, version))
+        return
+    elif action.startswith((CB_COMPLETE_PREFIX, CB_NOSHOW_PREFIX)) and can_settle:
+        if action.startswith(CB_COMPLETE_PREFIX):
+            ref, write = action[len(CB_COMPLETE_PREFIX) :], "complete_appointment"
+        else:
+            ref, write = action[len(CB_NOSHOW_PREFIX) :], "mark_no_show"
+        outcome = staff_actions.settle(tenant=tenant, actor=bot_user, ref=ref, write=write)
+        # The day after the decision, as the Mini App reloads it: the visit
+        # just settled leaves the buttons, a changed one shows as it is now.
+        _reply(
+            event,
+            f"{outcome}\n\n{staff_actions.salon_day(tenant)}",
+            attachments=_day_attachments(tenant, role_ctx, entry),
         )
         return
     elif action.startswith(salon_notify.CB_PREFIX):
@@ -1739,20 +1825,197 @@ def _master_of(bot_user):
 
 
 def _requests_attachments(tenant, role_ctx, entry):
-    """Menu keyboard plus one approve button per pending request."""
+    """Menu keyboard plus approve and reject buttons per pending request."""
+
+    from apps.channels.max import staff_actions
+    from apps.channels.max.outbound import make_inline_keyboard_attachment_rows
+    from apps.channels.max.staff_menu import menu_buttons
+
+    rows: list[list[dict[str, str]]] = []
+    for request_id, label in staff_actions.pending_request_rows(tenant):
+        # One row per request: «✅ <мастер · дата>» | «Отклонить» (DRF-2784).
+        # The reject label is the request notice's own (salon_notify).
+        rows.append(
+            [
+                {"label": label, "callback": f"{CB_APPROVE_PREFIX}{request_id}"},
+                {"label": "Отклонить", "callback": f"{CB_REJECT_PREFIX}{request_id}"},
+            ]
+        )
+    rows.extend([button] for button in menu_buttons(role_ctx, entry))
+    if not rows:
+        return None
+    return [make_inline_keyboard_attachment_rows(rows)]
+
+
+def _day_attachments(tenant, role_ctx, entry):
+    """The salon's day: one button per visit still to settle, then the menu.
+
+    Visit buttons only for those who may settle (owner / administrator,
+    DRF-2784); the front desk reads the day as before.
+    """
 
     from apps.channels.max import staff_actions
     from apps.channels.max.outbound import make_inline_keyboard_attachment
     from apps.channels.max.staff_menu import menu_buttons
 
-    buttons = [
-        {"label": label, "callback": f"{CB_APPROVE_PREFIX}{request_id}"}
-        for request_id, label in staff_actions.pending_request_rows(tenant)
-    ]
+    buttons: list[dict[str, str]] = []
+    if role_ctx.is_owner or role_ctx.is_admin:
+        buttons = [
+            {"label": f"✔ {label}", "callback": f"{CB_VISIT_PREFIX}{appointment_id}"}
+            for appointment_id, label in staff_actions.day_visit_rows(tenant)
+        ]
     buttons.extend(menu_buttons(role_ctx, entry))
     if not buttons:
         return None
     return [make_inline_keyboard_attachment(buttons, columns=1)]
+
+
+def _booking_step(action: str, bot_user, tenant):
+    """Route one «✍️ Записать клиента» tap to its step (DRF-2786)."""
+
+    from apps.channels.max import staff_booking
+    from apps.channels.max.staff_menu import (
+        CB_BK_CLIENT_PREFIX,
+        CB_BK_CREATE,
+        CB_BK_DATE_PREFIX,
+        CB_BK_MASTER_PREFIX,
+        CB_BK_NEW,
+        CB_BK_NEW_CLIENT,
+        CB_BK_SERVICE_PREFIX,
+        CB_BK_SLOT_PREFIX,
+    )
+
+    kw = {"tenant": tenant, "bot_user": bot_user}
+    if action == CB_BK_NEW:
+        return staff_booking.start(**kw)
+    if action == CB_BK_NEW_CLIENT:
+        return staff_booking.new_client(**kw)
+    if action == CB_BK_CREATE:
+        return staff_booking.create(**kw)
+    for prefix, step in (
+        (CB_BK_MASTER_PREFIX, staff_booking.choose_master),
+        (CB_BK_SERVICE_PREFIX, staff_booking.choose_service),
+        (CB_BK_DATE_PREFIX, staff_booking.choose_date),
+        (CB_BK_SLOT_PREFIX, staff_booking.choose_slot),
+        (CB_BK_CLIENT_PREFIX, staff_booking.choose_client),
+    ):
+        if action.startswith(prefix):
+            return step(ref=action[len(prefix) :], **kw)
+    return staff_booking.start(**kw)
+
+
+def _reply_booking(event, reply, role_ctx, entry) -> None:
+    from apps.channels.max.outbound import make_inline_keyboard_attachment_rows
+
+    attachments: list[dict] | None
+    if reply.menu or not reply.rows:
+        attachments = menu_attachments(role_ctx, entry)
+    else:
+        attachments = [make_inline_keyboard_attachment_rows(reply.rows)]
+    _reply(event, reply.text, attachments=attachments)
+
+
+def _booking_takes_text(event, role_ctx, bot_user, tenant, entry) -> bool:
+    """A typed line while a chat booking waits for one (DRF-2786)."""
+
+    if not (role_ctx.is_owner or role_ctx.is_admin):
+        return False
+    from apps.channels.max import staff_booking
+
+    reply = staff_booking.take_text(tenant=tenant, bot_user=bot_user, text=event.text)
+    if reply is None:
+        return False
+    _reply_booking(event, reply, role_ctx, entry)
+    return True
+
+
+def _handle_master_action(event, action, master, bot_user, tenant, role_ctx, entry) -> None:
+    """«✅ Подтверждаю» / «❌ Не смогу» / «состоялся» / «не пришёл» — as the master."""
+
+    from apps.channels.max import master_actions
+    from apps.channels.max.outbound import make_inline_keyboard_attachment_rows
+
+    if action.startswith(CB_MVISIT_PREFIX):
+        reply = master_actions.visit_question(
+            tenant=tenant, appointment_id=action[len(CB_MVISIT_PREFIX) :]
+        )
+    elif action.startswith(CB_CANT_PREFIX):
+        appointment_id, version = master_actions.parse_ref(action[len(CB_CANT_PREFIX) :])
+        reply = master_actions.cancel_question(
+            tenant=tenant, appointment_id=appointment_id, version=version
+        )
+    else:
+        prefix, verb = next(
+            (p, v)
+            for p, v in (
+                (CB_ACK_PREFIX, "acknowledge"),
+                (CB_CANT_OK_PREFIX, "cancel"),
+                (CB_MDONE_PREFIX, "complete"),
+                (CB_MNOSHOW_PREFIX, "no-show"),
+            )
+            if action.startswith(p)
+        )
+        reply = master_actions.act(
+            tenant=tenant,
+            bot_user=bot_user,
+            master=master,
+            action=verb,
+            ref=action[len(prefix) :],
+        )
+    attachments: list[dict] | None
+    if reply.rows:
+        attachments = [make_inline_keyboard_attachment_rows(reply.rows)]
+    else:
+        # Done or refused: the menu comes back, so the panel persists.
+        attachments = menu_attachments(role_ctx, entry)
+    _reply(event, reply.text, attachments=attachments)
+
+
+def _master_day_attachments(master, body: str, role_ctx, entry):
+    """The master's day: a button per visit still to settle, then as before.
+
+    «As before» is :func:`_after_action_attachments` — the menu, plus
+    «Расписание» under an empty day (DRF-2759).
+    """
+
+    from apps.channels.max import staff_actions
+    from apps.channels.max.outbound import make_inline_keyboard_attachment
+
+    visits = [
+        {"label": f"✔ {label}", "callback": f"{CB_MVISIT_PREFIX}{appointment_id}"}
+        for appointment_id, label in staff_actions.master_visit_rows(master)
+    ]
+    rest = _after_action_attachments(body, role_ctx, entry) or []
+    if not visits:
+        return rest or None
+    return [make_inline_keyboard_attachment(visits, columns=1), *rest]
+
+
+def _visit_attachments(appointment_id: str, version: int | None):
+    """«Да, состоялся» | «Не пришёл», then «Не сейчас» back to the day.
+
+    The version rides in the payload: it is the one the question showed,
+    and the write is checked against it. No version — no answer buttons,
+    only the way back.
+    """
+
+    from apps.channels.max import staff_actions
+    from apps.channels.max.outbound import make_inline_keyboard_attachment_rows
+
+    rows: list[list[dict[str, str]]] = []
+    if version is not None:
+        ref = f"{appointment_id}:{version}"
+        rows.append(
+            [
+                {"label": staff_actions.LABEL_VISIT_DONE, "callback": f"{CB_COMPLETE_PREFIX}{ref}"},
+                {
+                    "label": staff_actions.LABEL_VISIT_NO_SHOW,
+                    "callback": f"{CB_NOSHOW_PREFIX}{ref}",
+                },
+            ]
+        )
+    rows.append([{"label": staff_actions.LABEL_VISIT_LATER, "callback": CB_DAY}])
+    return [make_inline_keyboard_attachment_rows(rows)]
 
 
 def _handle_talk(event: CanonicalEvent, role_ctx, bot_user, tenant, entry) -> None:

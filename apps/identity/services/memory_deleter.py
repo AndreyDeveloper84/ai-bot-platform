@@ -27,6 +27,12 @@ Two operations, both append the 152-ФЗ audit trail:
 - :func:`soft_delete_expired_entries` — retention, not a request (DRF-2748):
   yellow/red rows whose storage term ran out, tombstoned with
   ``deletion_reason='ttl_purge'``. The nightly ``memory_ttl_sweep`` task.
+- :func:`purge_expired_tombstones` — the physical half (DRF-2775). Every
+  path above only tombstones; this deletes the row once the tombstone's
+  retention ran out (ADR-0011 §5: 30 days, a consent withdrawal 24 h).
+- :func:`sweep_expired_inferences` — the terms of Ф4 inferred green memory
+  (DRF-2782): an unconfirmed inference is tombstoned after its 30 days, a
+  confirmed one is flagged ``status='expired'`` for re-confirmation.
 """
 
 from __future__ import annotations
@@ -508,3 +514,293 @@ def _log_red_zone_purge(
             for entry_id, user_id in red
         ]
     )
+
+
+#: DRF-2775 — сколько живёт надгробие, прежде чем строка удаляется физически.
+#: ADR-0011 §5 (таблица зон): «Soft-delete tombstone retained 30 days …, then
+#: hard-purged» — для всех трёх зон; для отзыва согласия — «Physical purge
+#: within 24h». Сменит владелец срок — меняется здесь.
+TOMBSTONE_RETENTION = timedelta(days=30)
+WITHDRAWAL_TOMBSTONE_RETENTION = timedelta(hours=24)
+
+#: Сколько строк удаляет один прогон: хвост после простоя уходит за несколько
+#: ночей, а не одной транзакцией на всю таблицу.
+TOMBSTONE_PURGE_BATCH_SIZE = 500
+
+TOMBSTONE_PURGE_ACTOR = "memory_tombstone_purge"
+TOMBSTONE_PURGE_RED_PURPOSE = "tombstone_purge — удержание надгробия истекло"
+
+
+@dataclass(frozen=True)
+class TombstonePurge:
+    """Что удалил один прогон. Числа, никогда не значения."""
+
+    purged_green: int = 0
+    purged_yellow: int = 0
+    purged_red: int = 0
+    users: int = 0
+    by_reason: tuple[tuple[str, int], ...] = ()
+
+    @property
+    def purged(self) -> int:
+        return self.purged_green + self.purged_yellow + self.purged_red
+
+    def as_summary(self) -> dict:
+        return {
+            "purged": self.purged,
+            "purged_green": self.purged_green,
+            "purged_yellow": self.purged_yellow,
+            "purged_red": self.purged_red,
+            "users": self.users,
+            "by_reason": dict(self.by_reason),
+        }
+
+
+def _tombstones_past_retention(now: datetime):
+    """Надгробия, удержание которых истекло. Живые строки сюда не попадают.
+
+    Строка — надгробие, только если у неё стоит ``soft_deleted_at``: заявка
+    без него (``delete_requested_at`` одна) — не завершённое стирание, и
+    удалять её физически значило бы обогнать путь, который её снимает.
+    """
+    return MemoryEntry.objects.filter(soft_deleted_at__isnull=False).filter(
+        Q(
+            deletion_reason=MemoryEntry.DELETION_REASON_WITHDRAWAL,
+            soft_deleted_at__lte=now - WITHDRAWAL_TOMBSTONE_RETENTION,
+        )
+        | (
+            ~Q(deletion_reason=MemoryEntry.DELETION_REASON_WITHDRAWAL)
+            & Q(soft_deleted_at__lte=now - TOMBSTONE_RETENTION)
+        )
+    )
+
+
+def purge_expired_tombstones(
+    *,
+    now: datetime | None = None,
+    limit: int = TOMBSTONE_PURGE_BATCH_SIZE,
+) -> TombstonePurge:
+    """Удалить физически строки памяти, чьё надгробие отлежало срок (DRF-2775).
+
+    Все пути стирания этого модуля — «забудь X», «забудь всё», отзыв, срок —
+    только ставят надгробие: даты и причину. ``content`` остаётся в строке,
+    зашифрованный, и без этой функции оставался бы навсегда. ADR-0011 §5
+    обещает физическую очистку после удержания; до DRF-2775 её не делал никто,
+    и «удалено» было удалено только по виду (``OD_MEMORY.md`` §4).
+
+    # Удержание и «не вспоминать стёртое»
+
+    ``orchestrator.memory.evicted_review`` читает содержимое зелёных надгробий
+    «стёрто по просьбе», чтобы не вернуть факт из сообщения, ещё лежащего в
+    короткой памяти. Сообщение живёт там не дольше
+    ``SHORT_TERM_MEMORY_DEPTH × SHORT_TERM_MEMORY_TTL_SECONDS`` (каждая
+    реплика продлевает ключ на сутки, окно — 20 сообщений): ≤ 20 дней при 30
+    днях удержания. Узел держит это неравенство. Отзыв согласия — жёлтая и
+    красная зоны, которых ``evicted_review`` не читает, — удаляется через
+    сутки.
+
+    # Журнал красной зоны переживает строку
+
+    Каждая удаляемая красная строка — строка ``RedZoneAccessLog``
+    (``access_type='purge'``) в той же транзакции под GUC. Внешнего ключа у
+    журнала нет (ADR-0011 §7.3), поэтому след остаётся после строки — это и
+    есть его назначение. Строки отбираются ``FOR UPDATE``: журнал называет
+    ровно удалённые.
+
+    Карточка человека (``UserPersonalContext``) не удаляется — её
+    физическое удаление спека запрещает; её личные поля чистит «забудь всё».
+
+    Args:
+      now: момент, на который судим об удержании; по умолчанию — сейчас.
+      limit: сколько строк удалить за прогон.
+    """
+    now = now or timezone.now()
+    request_id = uuid.uuid4()
+    with transaction.atomic():
+        _set_red_zone_guc(request_id)
+        try:
+            doomed = list(
+                _tombstones_past_retention(now)
+                .select_for_update()
+                .order_by("soft_deleted_at", "id")
+                .values_list("id", "user_id", "sensitivity_zone", "deletion_reason")[:limit]
+            )
+            red = [
+                (entry_id, user_id)
+                for entry_id, user_id, zone, _ in doomed
+                if zone == MemoryEntry.SENSITIVITY_RED
+            ]
+            _log_red_zone_tombstone_purge(red, request_id=request_id)
+            # QuerySet.delete(), а не сырой DELETE: строки, которые ссылаются на
+            # удаляемую через ``superseded_by``, получают NULL (SET_NULL), а не
+            # нарушение ключа.
+            MemoryEntry.objects.filter(id__in=[row[0] for row in doomed]).delete()
+        finally:
+            _reset_red_zone_guc()
+
+    zones = [zone for _, _, zone, _ in doomed]
+    reasons: dict[str, int] = {}
+    for _, _, _, reason in doomed:
+        reasons[reason] = reasons.get(reason, 0) + 1
+    result = TombstonePurge(
+        purged_green=zones.count(MemoryEntry.SENSITIVITY_GREEN),
+        purged_yellow=zones.count(MemoryEntry.SENSITIVITY_YELLOW),
+        purged_red=len(red),
+        users=len({user_id for _, user_id, _, _ in doomed}),
+        by_reason=tuple(sorted(reasons.items())),
+    )
+    if result.purged:
+        write_audit(
+            "memory.tombstones_purged",
+            target="MemoryEntry",
+            payload={**result.as_summary(), "request_id": str(request_id)},
+        )
+    return result
+
+
+def _log_red_zone_tombstone_purge(
+    red: list[tuple[uuid.UUID, uuid.UUID]],
+    *,
+    request_id: uuid.UUID,
+) -> None:
+    """Строка журнала на каждую физически удаляемую красную строку.
+
+    Зовётся только изнутри :func:`purge_expired_tombstones`, в его транзакции
+    и ДО удаления: удалённое без следа неисправимо.
+    """
+    if not red:
+        return
+    principal = red_zone_principal(RedZoneAccessLog.ACCESSOR_SYSTEM_JOB, TOMBSTONE_PURGE_ACTOR)
+    RedZoneAccessLog.objects.bulk_create(
+        [
+            RedZoneAccessLog(
+                memory_entry_id=entry_id,
+                user_id=user_id,
+                accessor_role=RedZoneAccessLog.ACCESSOR_SYSTEM_JOB,
+                accessor_principal=principal,
+                access_type=RedZoneAccessLog.ACCESS_PURGE,
+                request_id=request_id,
+                purpose=TOMBSTONE_PURGE_RED_PURPOSE,
+            )
+            for entry_id, user_id in red
+        ]
+    )
+
+
+#: DRF-2782 — сколько строк каждого вида обрабатывает один прогон.
+INFERENCE_SWEEP_BATCH_SIZE = 500
+
+
+@dataclass(frozen=True)
+class InferenceExpiry:
+    """Что сделал один прогон свипа сроков Ф4. Числа, никогда не значения."""
+
+    unconfirmed_deleted: int = 0
+    confirmed_flagged: int = 0
+    users: int = 0
+
+    def as_summary(self) -> dict[str, int]:
+        return {
+            "unconfirmed_deleted": self.unconfirmed_deleted,
+            "confirmed_flagged": self.confirmed_flagged,
+            "users": self.users,
+        }
+
+
+def _expired_inferences(now: datetime):
+    """Живые зелёные выводы Ф4 с наступившим ``expires_at``.
+
+    Только ``source='inferred'`` в зелёной зоне: явные факты человека
+    («Вы сообщили») сроком не стареют, а жёлтую и красную зону ведёт свой свип
+    (:func:`soft_delete_expired_entries`). Человек с «забудь всё» или с живой
+    заявкой на удаление не трогается — у этих стираний свой путь и своя
+    причина в надгробии.
+    """
+    held = UserPersonalContext.objects.filter(user_id=OuterRef("user_id")).filter(
+        Q(forget_all_requested_at__isnull=False) | Q(deletion_requested_at__isnull=False)
+    )
+    return (
+        MemoryEntry.objects.filter(
+            sensitivity_zone=MemoryEntry.SENSITIVITY_GREEN,
+            source=MemoryEntry.SOURCE_INFERRED,
+            soft_deleted_at__isnull=True,
+            delete_requested_at__isnull=True,
+            expires_at__isnull=False,
+            expires_at__lte=now,
+        )
+        .exclude(Exists(held))
+        .order_by("expires_at", "id")
+    )
+
+
+def sweep_expired_inferences(
+    *,
+    now: datetime | None = None,
+    limit: int = INFERENCE_SWEEP_BATCH_SIZE,
+) -> InferenceExpiry:
+    """Применить сроки производной памяти Ф4 (DRF-2782).
+
+    Решение владельца 05.10 (``OWNER_DECISIONS_MEMORY_AND_CONSENT_2026-10-05``,
+    «Сроки производной памяти Ф4»): неподтверждённые предположения — 30 дней;
+    подтверждённые — 180 дней, «затем повторное подтверждение или удаление».
+    Сам срок ставит писатель в ``expires_at`` (Ф4a-2 — запись + 30 дней,
+    Ф4a-3 — подтверждение + 180 дней); свип только исполняет наступивший.
+
+    * **Неподтверждённый** (``provenance IS NULL``) — надгробие, причина
+      ``ttl_purge``, как у любого истёкшего срока. Физически строку удалит
+      :func:`purge_expired_tombstones`, когда (и если) её включат.
+    * **Подтверждённый** (``provenance='user_confirmed_inference'``) —
+      строка НЕ удаляется: ``status='expired'``, то есть «нужно
+      переподтвердить». Человек сам подтвердил этот факт, и молча стереть его
+      через полгода значило бы решить за него. Уже помеченные повторно не
+      трогаются.
+    * Любой другой ``provenance`` — не трогается: свип не угадывает.
+    * Замещённое исправлением (``status='superseded'``, Ф4a-3) — не
+      трогается: это история, а не действующее предложение.
+
+    Отдельный свип, а не ветка :func:`soft_delete_expired_entries`: тот
+    держит жёлтую и красную зону и скользящее окно спеки §5, а у выводов Ф4
+    срок абсолютный и исход для подтверждённых — не удаление.
+    """
+    now = now or timezone.now()
+    with transaction.atomic():
+        # Только действующие строки: замещённое исправлением (``superseded``)
+        # — история, а не предложение, и уже помеченное ``expired`` второй
+        # раз не трогается.
+        expired = (
+            _expired_inferences(now)
+            .filter(Q(status__isnull=True) | Q(status=MemoryEntry.STATUS_ACTIVE))
+            .select_for_update()
+        )
+        unconfirmed = list(
+            expired.filter(provenance__isnull=True).values_list("id", "user_id")[:limit]
+        )
+        confirmed = list(
+            expired.filter(provenance=MemoryEntry.PROVENANCE_USER_CONFIRMED_INFERENCE).values_list(
+                "id", "user_id"
+            )[:limit]
+        )
+        MemoryEntry.objects.filter(id__in=[row[0] for row in unconfirmed]).update(
+            delete_requested_at=now,
+            soft_deleted_at=now,
+            deletion_reason=MemoryEntry.DELETION_REASON_TTL_PURGE,
+            status=MemoryEntry.STATUS_DELETED,
+            updated_at=now,
+        )
+        MemoryEntry.objects.filter(id__in=[row[0] for row in confirmed]).update(
+            status=MemoryEntry.STATUS_EXPIRED,
+            updated_at=now,
+        )
+
+    result = InferenceExpiry(
+        unconfirmed_deleted=len(unconfirmed),
+        confirmed_flagged=len(confirmed),
+        users=len({user_id for _, user_id in unconfirmed + confirmed}),
+    )
+    if result.unconfirmed_deleted or result.confirmed_flagged:
+        write_audit(
+            "memory.inferences_expired",
+            target="MemoryEntry",
+            payload={**result.as_summary(), "reason": MemoryEntry.DELETION_REASON_TTL_PURGE},
+        )
+    return result

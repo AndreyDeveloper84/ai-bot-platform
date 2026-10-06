@@ -306,6 +306,99 @@ def notify_client_booking_confirmed(
         )
 
 
+# ─── DRF-2785 — мастер отменил запись («❌ Не смогу») ─────────────────────
+#
+# Текст владельца (05.10.2026, через главное окно), клиенту — на «ты». Другую
+# формулировку правят здесь, в одном месте.
+MASTER_CANCELLED_TEXT = (
+    "К сожалению, мастер не сможет провести твою запись {date} в {time}. "
+    "Запись отменена, оплата вернётся, если была. Подобрать другое время?"
+)
+#: Кнопка ведёт в «Записаться ещё» (DRF-1032): перепроверяет мастера и услугу
+#: и даёт выбрать время, а если они недоступны — отказ с выходом. Отменённая
+#: запись этот путь проходит: ``repeat-intent`` каталога ищет запись клиента
+#: без фильтра по статусу.
+LABEL_PICK_TIME = "Подобрать время"
+
+
+def build_master_cancelled(*, tenant: Tenant, start_at: dt.datetime) -> str:
+    local = start_at.astimezone(salon_zone(tenant))
+    return MASTER_CANCELLED_TEXT.format(date=local.strftime("%d.%m"), time=local.strftime("%H:%M"))
+
+
+def notify_client_master_cancelled(
+    *,
+    tenant: Tenant,
+    bot_user: BotUser | None,
+    appointment_id: UUID,
+    start_at: dt.datetime,
+) -> None:
+    """``on_commit``: tell the client their master cancelled. NEVER raises.
+
+    The client bot (default token, like the booking confirmation) — the
+    button's ``cb:visit:repeat:*`` is a client-bot route.
+    """
+
+    try:
+        user_id = resolve_client_user_id(bot_user)
+        if not user_id:
+            # Booked outside the bot — no conversation to write into.
+            logger.info(
+                "booking.client_notify.master_cancelled.no_chat tenant=%s appointment_id=%s",
+                tenant.slug,
+                appointment_id,
+            )
+            return
+
+        from apps.channels.max.outbound import make_inline_keyboard_attachment
+        from apps.orchestrator.visits import CALLBACK_VISIT_REPEAT_PREFIX
+
+        failures = send_max_notification(
+            text=build_master_cancelled(tenant=tenant, start_at=start_at),
+            user_ids=(user_id,),
+            attachments=[
+                make_inline_keyboard_attachment(
+                    [
+                        {
+                            "label": LABEL_PICK_TIME,
+                            "callback": f"{CALLBACK_VISIT_REPEAT_PREFIX}{appointment_id}",
+                        }
+                    ]
+                )
+            ],
+        )
+        logger.info(
+            "booking.client_notify.master_cancelled tenant=%s appointment_id=%s failures=%d",
+            tenant.slug,
+            appointment_id,
+            failures,
+        )
+    except Exception:  # noqa: BLE001 — hard containment; ingest must not break
+        logger.exception(
+            "booking.client_notify.master_cancelled.unexpected appointment_id=%s",
+            appointment_id,
+        )
+
+
+def schedule_client_master_cancelled(
+    *,
+    tenant: Tenant,
+    bot_user: BotUser | None,
+    appointment_id: UUID,
+    start_at: dt.datetime,
+) -> None:
+    """Queue the client's «мастер не сможет» for after the ingest commits."""
+
+    transaction.on_commit(
+        lambda: notify_client_master_cancelled(
+            tenant=tenant,
+            bot_user=bot_user,
+            appointment_id=appointment_id,
+            start_at=start_at,
+        )
+    )
+
+
 def schedule_client_booking_confirmation(
     *,
     tenant: Tenant,

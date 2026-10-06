@@ -170,3 +170,92 @@ def _build_payload(envelope: "Envelope") -> dict:
         "data": envelope.data,
         "metadata": envelope.metadata,
     }
+
+
+class CatalogConsentSubscriber:
+    """Смена согласия — в каталог (DRF-2776, решение владельца D от 05.10).
+
+    Каталог хранит данные под согласиями (параметры тела под
+    ``personal_calculation``, health_flags под ``health``) и стирает их при
+    отзыве; по ``food_diary_processing`` перестаёт слать бьюти-инсайт. Реестр
+    согласий живёт в боте, поэтому весть должна уехать отсюда — клиент
+    :mod:`apps.integrations.ayla.consent_events_client`.
+
+    Остальные события — не его: ``handle`` возвращается без исключения, иначе
+    каждое чужое событие уходило бы в DLQ. Какие события он доставляет,
+    объявлено в :attr:`delivers` — по нему сторож живого режима диспетчера
+    отличает «доставлено потребителю» от «записано в журнал».
+
+    Субъект каталогу называет ``X-External-User-ID``, а не тело: в событии
+    ``customer_id`` — UUID ``BotUser``, каталогу он ничего не говорит. Если
+    ``BotUser`` уже стёрт (forget-all), заголовок собрать не из чего, и
+    доставлять некому: строка помечается доставленной с исходом
+    ``no_subject_on_bot`` — симметрично ``no_subject`` каталога. Стирание
+    по удалению человека идёт своим путём (DRF-1699), не через это событие.
+
+    Отказ каталога — исключение, и подписчик его не ловит: диспетчер
+    оставляет строку недоставленной, ретраит и кладёт в DLQ с текстом. Это и
+    есть «результат доставки» в журнале. Успех пишется отдельной строкой
+    аудита ``consent.delivery.catalog`` с исходом каталога и ИМЕНАМИ
+    стёртых полей. Ключ строки — ``consent_event_id``, а не ``event_id``:
+    :class:`AuditSubscriber` пропускает событие, если ``event_id`` в журнале
+    уже есть, и наша строка, записанная раньше его, отняла бы у журнала
+    само изменение.
+
+    Идемпотентность — у каталога (квитанция по ``event_id``, повтор отвечает
+    ``duplicate``); строка аудита пишется один раз на событие.
+    """
+
+    delivers = frozenset({"customer.consent.changed"})
+
+    def handle(self, envelope: "Envelope") -> None:
+        if envelope.event_name not in self.delivers:
+            return
+
+        from apps.audit.models import AuditLog
+        from apps.identity.models import BotUser
+        from apps.integrations.ayla.consent_events_client import post_consent_event
+        from apps.integrations.ayla.user_proxy import external_user_id_for
+
+        data = envelope.data
+        bot_user = BotUser.all_tenants.filter(pk=_to_uuid_or_none(data.get("customer_id"))).first()
+        erased: tuple[str, ...] = ()
+        if bot_user is None:
+            outcome = "no_subject_on_bot"
+            logger.info("consent.delivery.catalog.no_subject_on_bot event_id=%s", envelope.event_id)
+        else:
+            body = {
+                "event_id": envelope.event_id,
+                "consent_type": data.get("consent_type"),
+                "granted": data.get("granted"),
+                "granted_at": data.get("granted_at"),
+            }
+            if data.get("granted_via"):
+                body["granted_via"] = data["granted_via"]
+            receipt = post_consent_event(external_user_id=external_user_id_for(bot_user), body=body)
+            outcome, erased = receipt.outcome, receipt.erased
+            logger.info(
+                "consent.delivery.catalog event_id=%s type=%s granted=%s outcome=%s erased=%d",
+                envelope.event_id,
+                data.get("consent_type"),
+                data.get("granted"),
+                outcome,
+                len(erased),
+            )
+
+        if AuditLog.all_tenants.filter(
+            action="consent.delivery.catalog", payload__consent_event_id=envelope.event_id
+        ).exists():
+            return
+        with tenant_scope(_resolve_tenant(envelope.tenant_id)):
+            write_audit(
+                action="consent.delivery.catalog",
+                target="consent",
+                payload={
+                    "consent_event_id": envelope.event_id,
+                    "consent_type": data.get("consent_type"),
+                    "granted": data.get("granted"),
+                    "outcome": outcome,
+                    "erased": list(erased),
+                },
+            )

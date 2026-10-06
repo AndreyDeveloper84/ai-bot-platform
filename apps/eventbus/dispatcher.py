@@ -278,13 +278,59 @@ def registry_is_noop_only() -> bool:
     return all(isinstance(sub, NoopSubscriber) for sub in _subscribers())
 
 
+#: События, которые нельзя пометить доставленными, пока в реестре нет
+#: подписчика, который их ДОСТАВЛЯЕТ потребителю (DRF-2776).
+#:
+#: Решение владельца D от 05.10: смену согласия получают системы, чьё
+#: поведение от неё зависит, — «одного журнала мало». Диспетчер же считает
+#: строку доставленной, если ни один подписчик не бросил исключения; с
+#: реестром «журнал + лояльность» смена согласия ушла бы в журнал и стала
+#: «доставленной», так и не дойдя до каталога, — а владелец решил доставить
+#: накопленное задним числом, и пометка закрыла бы этот путь навсегда.
+#:
+#: Набор узкий намеренно. События без единого потребителя в системе
+#: (``booking.created``, ``booking.attribution.assigned``) сюда НЕ входят:
+#: владелец требует, чтобы событие без потребителя не задерживало
+#: независимые, и требование «доставщик для каждого имени» держало бы ящик
+#: закрытым вечно.
+DELIVERY_REQUIRED: frozenset[str] = frozenset({"customer.consent.changed"})
+
+
+def undelivered_required_names() -> list[str]:
+    """Имена из :data:`DELIVERY_REQUIRED`, что лежат в ящике без доставщика.
+
+    Доставщик — подписчик реестра, назвавший имя в своём атрибуте
+    ``delivers``. Журнал (:class:`~apps.eventbus.subscribers.AuditSubscriber`)
+    его не объявляет и доставщиком не считается.
+    """
+
+    delivered: set[str] = set()
+    for sub in _subscribers():
+        delivered |= set(getattr(sub, "delivers", ()) or ())
+    missing = DELIVERY_REQUIRED - delivered
+    if not missing:
+        return []
+    pending = (
+        DomainEvent.objects.filter(
+            is_dispatched=False, dead_lettered_at__isnull=True, event_name__in=missing
+        )
+        .values_list("event_name", flat=True)
+        .distinct()
+    )
+    return sorted(set(pending))
+
+
 @shared_task(name="apps.eventbus.dispatch_pending_events_beat")
 def dispatch_pending_events_beat() -> dict[str, Any]:
     """Расписание → сюда → `dispatch_pending_events`, если открыто.
 
-    Четыре исхода, и все различимы по ключу `mode` в ответе — чтобы
+    Пять исходов, и все различимы по ключу `mode` в ответе — чтобы
     «ничего не отправлено» никогда не читалось одинаково для «выключено»,
     «сухой прогон», «отказ» и «отправлять было нечего».
+
+    `refused_undelivered` (DRF-2776): настоящие подписчики есть, но в ящике
+    лежит событие из :data:`DELIVERY_REQUIRED`, а доставщика для него в
+    реестре нет — живой прогон пометил бы его «доставленным» в журнал.
 
     `refused_noop_only` (DRF-2434): рубильник открыт, сухой прогон снят, а
     настоящих подписчиков нет. Порядок починки «счётчик → подписчик →
@@ -312,5 +358,18 @@ def dispatch_pending_events_beat() -> dict[str, Any]:
             pending,
         )
         return {"mode": "refused_noop_only", "pending": pending}
+    undelivered = undelivered_required_names()
+    if undelivered:
+        pending = DomainEvent.objects.filter(
+            is_dispatched=False, dead_lettered_at__isnull=True
+        ).count()
+        logger.warning(
+            "eventbus.dispatch.beat.refused_undelivered pending=%d names=%s — "
+            "в реестре нет доставщика для событий, которые журналом не закрываются; "
+            "ничего не помечено",
+            pending,
+            ",".join(undelivered),
+        )
+        return {"mode": "refused_undelivered", "pending": pending, "names": undelivered}
     counters = dispatch_pending_events()
     return {"mode": "live", **counters}

@@ -1,6 +1,6 @@
-"""What the salon bot's buttons actually do (DRF-1061).
+"""What the salon bot's buttons actually do (DRF-1061, DRF-2784).
 
-Two answers, both read-only, both built from data that already exists:
+Two answers, built from data that already exists:
 
 * **the day** — who is coming, when, to whom. The salon had no way to see
   this at all: the admin surface returns an empty queryset for a
@@ -9,6 +9,15 @@ Two answers, both read-only, both built from data that already exists:
 * **pending requests** — masters asking to change their schedule. The
   approve/reject endpoints exist and work; what was missing was any way for
   the admin to learn a request had been filed. Nothing notified them.
+
+And, since DRF-2784, the decisions on both, in the chat — so the salon can
+work without opening the Mini App, which stays one tap away beside them:
+
+* approve or reject a request (:func:`approve_request`, :func:`reject_request`);
+* close a visit or mark a no-show (:func:`visit_prompt`, :func:`settle`) —
+  through the same service as the admin Mini App
+  (``apps.admin_api.services.visit_settle``), with the version the operator
+  was shown.
 
 Both read the mirror that actually holds pilot data — ``RemoteBookingProxy``
 via ``apps.master_api.services.visit_source`` — not the local
@@ -273,12 +282,7 @@ def pending_request_rows(tenant) -> list[tuple[str, str]]:
 def approve_request(*, tenant, request_id: str, actor) -> str:
     """Approve one pending request from the chat. Returns what to reply.
 
-    Only approval is available here, deliberately. Rejection requires a
-    reason the master will read (`rejection_reason` is mandatory in the
-    service and surfaced in their DM), and asking for free text in chat
-    would mean an FSM — a "now send me the reason" state to get stuck in.
-    Approval needs no text, so it is the tap-sized half; rejection stays
-    where the person can type and see what they are refusing.
+    Its other half is :func:`reject_request`.
     """
 
     from uuid import UUID
@@ -320,6 +324,248 @@ def approve_request(*, tenant, request_id: str, actor) -> str:
     return "Заявка одобрена. Мастер получит уведомление."
 
 
+def reject_request(*, tenant, request_id: str, actor) -> str:
+    """Reject one pending request from the chat. Returns what to reply.
+
+    DRF-2784. The service requires a reason the master will read
+    (``rejection_reason``). Asking for free text in chat would mean an FSM —
+    a «now send me the reason» state to get stuck in — so the reason is the
+    template ``REJECT_REASON_BY_CODE["chat_declined"]``, which tells the
+    master where to ask for details. That template already rode on the
+    rejection button of the request notice (DRF-2118); this is now the one
+    implementation both buttons call.
+    """
+
+    from uuid import UUID
+
+    from apps.admin_api.services.availability import (
+        AvailabilityDecisionError,
+        reject_availability_request,
+    )
+    from apps.channels.max.salon_notify_actions import REJECT_REASON_BY_CODE
+
+    try:
+        parsed = UUID(str(request_id))
+    except (ValueError, AttributeError):
+        return "Заявка не найдена."
+
+    try:
+        reject_availability_request(
+            request_id=parsed,
+            tenant_id=tenant.id,
+            actor=None,
+            actor_bot_user_id=getattr(actor, "id", None),
+            actor_role="admin",
+            rejection_reason=REJECT_REASON_BY_CODE["chat_declined"],
+        )
+    except AvailabilityDecisionError as exc:
+        slug = getattr(exc, "slug", "")
+        if slug == "already_decided":
+            return "Эту заявку уже рассмотрели."
+        if slug == "not_found":
+            return "Заявка не найдена."
+        logger.warning("staff_actions.reject_failed slug=%s request=%s", slug, request_id)
+        return "Не получилось отклонить заявку. Попробуйте из кабинета салона."
+    except Exception:  # noqa: BLE001 — a chat tap must not raise
+        logger.exception("staff_actions.reject_crashed request=%s", request_id)
+        return "Не получилось отклонить заявку. Попробуйте из кабинета салона."
+
+    return "Заявка отклонена. Мастер получит уведомление."
+
+
+# ─── DRF-2784 — «состоялся» / «не пришёл» в чате ───────────────────────────
+#
+# Слова — экрана дня салона в мини-приложении (``AdminSalonDayScreen.tsx``):
+# одна операция, одни слова на обеих дверях.
+VISIT_QUESTION = "Визит состоялся?"
+VISIT_READING_FAILED = "Не удалось прочитать запись в расписании. Попробуйте ещё раз."
+VISIT_NOT_FOUND = "Запись не найдена."
+VISIT_CONFIRMED_NOTE = "После закрытия визит уйдёт в историю, а клиенту придёт запрос отзыва."
+VISIT_OTHER_STATUS_NOTE = (
+    "Расписание считает эту запись «{status}». Проверьте, прежде чем закрывать."
+)
+LABEL_VISIT_DONE = "Да, состоялся"
+LABEL_VISIT_NO_SHOW = "Не пришёл"
+LABEL_VISIT_LATER = "Не сейчас"
+
+#: Ответы на запись, по исходу — те же фразы, что у экрана дня.
+SETTLE_REPLY = {
+    "complete_appointment": {
+        "committed": "Визит закрыт.",
+        "conflict": "Запись изменилась — день обновлён, посмотрите ещё раз.",
+        "pending": (
+            "Расписание не ответило. Возможно, визит закрыт — проверьте день, прежде чем повторять."
+        ),
+        "blocked": "Этот визит нельзя закрыть.",
+        "failed": "Не удалось закрыть визит.",
+    },
+    "mark_no_show": {
+        "committed": "Отмечено: клиент не пришёл.",
+        "conflict": "Запись изменилась — день обновлён, посмотрите ещё раз.",
+        "pending": (
+            "Расписание не ответило. Возможно, неявка уже отмечена — проверьте день, "
+            "прежде чем повторять."
+        ),
+        "blocked": "Для этого визита неявку отметить нельзя.",
+        "failed": "Не удалось отметить неявку.",
+    },
+}
+
+
+def day_visit_rows(tenant, *, now: datetime | None = None) -> list[tuple[str, str]]:
+    """``(appointment_id, label)`` for each visit of today that can still be settled.
+
+    The same day and the same masters as :func:`salon_day`; a visit already
+    closed has nothing left to decide and gets no button. Capped like the
+    text. A source that does not answer gives no buttons — the text above
+    them already says the day could not be read.
+    """
+
+    from apps.catalog.models import CatalogMaster
+    from apps.master_api.services.visit_source import UPCOMING_STATUSES, master_visits
+
+    now = now or timezone.now()
+    tz = salon_zone(tenant)
+    start, end = _day_bounds(now, tz)
+    rows: list[tuple[datetime | None, str, str]] = []
+    try:
+        masters = CatalogMaster.objects.filter(archived_at__isnull=True, is_active=True)
+        for master in masters.order_by("name"):
+            for visit in master_visits(master, start=start, end=end, statuses=UPCOMING_STATUSES):
+                when = visit.visit_at.astimezone(tz).strftime("%H:%M") if visit.visit_at else "—"
+                rows.append((visit.visit_at, visit.id, f"{when} · {visit.client_name}"))
+    except Exception:  # noqa: BLE001 — нет дня ≠ ошибка нажатия
+        logger.warning("staff_actions.day_visit_rows.source_unavailable", exc_info=True)
+        return []
+    far = datetime.max.replace(tzinfo=dt_timezone.utc)
+    rows.sort(key=lambda r: r[0] or far)
+    return [(appointment_id, label) for _, appointment_id, label in rows[:MAX_LISTED]]
+
+
+def master_visit_rows(master, *, now: datetime | None = None) -> list[tuple[str, str]]:
+    """``(appointment_id, label)`` for the master's own visits of today to settle.
+
+    DRF-2785 — the master's half of :func:`day_visit_rows`: the same day, the
+    same «not closed yet» rule, one master. No answer from the source — no
+    buttons; the text above already says so.
+    """
+
+    from apps.master_api.services.visit_source import UPCOMING_STATUSES, master_visits
+
+    now = now or timezone.now()
+    tz = salon_zone(master.tenant)
+    start, end = _day_bounds(now, tz)
+    try:
+        visits = master_visits(master, start=start, end=end, statuses=UPCOMING_STATUSES)
+    except Exception:  # noqa: BLE001 — нет дня ≠ ошибка нажатия
+        logger.warning("staff_actions.master_visit_rows.source_unavailable", exc_info=True)
+        return []
+    rows = []
+    for visit in visits[:MAX_LISTED]:
+        when = visit.visit_at.astimezone(tz).strftime("%H:%M") if visit.visit_at else "—"
+        rows.append((visit.id, f"{when} · {visit.client_name}"))
+    return rows
+
+
+def _visit_line(tenant, appointment_id: str, start_datetime) -> str:
+    """«Клиент · ЧЧ:ММ · услуга» — время из ответа расписания, не из зеркала.
+
+    Версия описывает визит таким, каким его знает расписание; если его
+    перенесли, человек должен увидеть новое время, а не прежнее.
+    """
+
+    from apps.admin_api.services.visit_settle import own_booking
+    from apps.master_api.services.visit_source import GUEST_NAME, _to_rows
+
+    proxy = own_booking(tenant.id, appointment_id)
+    row = _to_rows([proxy], tenant.id)[0] if proxy is not None else None
+    tz = salon_zone(tenant)
+    when = "—"
+    try:
+        parsed = datetime.fromisoformat(str(start_datetime))
+        if parsed.tzinfo is not None:
+            when = parsed.astimezone(tz).strftime("%H:%M")
+    except (TypeError, ValueError):
+        if row is not None and row.visit_at is not None:
+            when = row.visit_at.astimezone(tz).strftime("%H:%M")
+    client = row.client_name if row is not None else GUEST_NAME
+    line = f"{client} · {when}"
+    if row is not None and row.service_name:
+        line += f" · {row.service_name}"
+    return line
+
+
+def visit_prompt(*, tenant, actor, appointment_id: str) -> tuple[str, int | None]:
+    """The question before settling one visit, and the version it describes.
+
+    Reads the canonical version NOW — at the tap on the visit — and shows
+    the operator the visit as that version knows it. The buttons under this
+    message carry that version back, so the write is checked against what
+    the person saw here: a change between this message and their «Да»
+    comes back as a conflict, never as a silent close (``visit_settle``).
+
+    Returns ``(text, version)``; ``version`` is None when nothing was read,
+    and then there must be no button to aim.
+    """
+
+    from apps.admin_api.services.visit_settle import VersionUnavailable, read_version
+
+    try:
+        record = read_version(tenant=tenant, bot_user=actor, appointment_id=appointment_id)
+    except Exception:  # noqa: BLE001 — a chat tap must not raise
+        logger.exception("staff_actions.visit_prompt_crashed appointment=%s", appointment_id)
+        return VISIT_READING_FAILED, None
+    if isinstance(record, VersionUnavailable):
+        return (VISIT_NOT_FOUND if record.slug == "not_found" else VISIT_READING_FAILED), None
+
+    note = (
+        VISIT_CONFIRMED_NOTE
+        if record.status == "confirmed"
+        else VISIT_OTHER_STATUS_NOTE.format(status=record.status)
+    )
+    line = _visit_line(tenant, appointment_id, record.start_datetime)
+    return f"*{VISIT_QUESTION}*\n{line}\n\n{note}", record.version
+
+
+def settle(*, tenant, actor, ref: str, write: str) -> str:
+    """«Да, состоялся» / «Не пришёл»: ``ref`` is ``<appointment_id>:<version>``.
+
+    The version is the one :func:`visit_prompt` showed — never read here.
+    Returns what to reply; never raises.
+    """
+
+    from apps.admin_api.services.visit_settle import settle_visit
+
+    words = SETTLE_REPLY[write]
+    appointment_id, _, raw_version = str(ref).rpartition(":")
+    try:
+        version = int(raw_version)
+    except ValueError:
+        version = 0
+    if not appointment_id or version < 1:
+        return VISIT_NOT_FOUND
+
+    try:
+        settled = settle_visit(
+            tenant=tenant,
+            bot_user=actor,
+            appointment_id=appointment_id,
+            expected_version=version,
+            write=write,
+        )
+    except Exception:  # noqa: BLE001 — a chat tap must not raise
+        logger.exception("staff_actions.settle_crashed appointment=%s", appointment_id)
+        return words["failed"]
+
+    if settled.outcome == "not_found":
+        return VISIT_NOT_FOUND
+    if settled.outcome in ("committed", "conflict", "pending"):
+        return words[settled.outcome]
+    if settled.hint:
+        return settled.hint[:1].upper() + settled.hint[1:] + "."
+    return words["blocked" if settled.outcome == "blocked" else "failed"]
+
+
 def salon_readiness(tenant) -> str:
     """«Проверить готовность» (DRF-2117): поимённый список того, что мешает записи.
 
@@ -337,9 +583,9 @@ def pending_requests(tenant) -> str:
 
     The approve/reject endpoints have existed and worked all along; what
     was missing was any way for an admin to find out a request was filed
-    (nothing notified them). This is that missing half — read-only for now:
-    deciding still happens in the Mini App, where the confirmation and the
-    audit trail already live.
+    (nothing notified them). The decision is a button under this list —
+    approve or reject (DRF-2784), the same services and audit trail as the
+    Mini App, which stays open for a rejection with a written reason.
     """
 
     from apps.scheduling.models import ScheduleChangeRequest
@@ -362,7 +608,9 @@ def pending_requests(tenant) -> str:
         lines.append(f"• {master_name} · {when}")
     if len(rows) > MAX_LISTED:
         lines.append("…и ещё")
-    # Approve is a button below this message; rejection needs a written
-    # reason the master will read, so it stays where they can type it.
-    lines.append("\nОдобрить — кнопкой ниже. Отклонить с причиной — в кабинете салона.")
+    # Both decisions are buttons below this message (DRF-2784). A chat
+    # rejection carries the template reason; a written one is the Mini App's.
+    lines.append(
+        "\nОдобрить или отклонить — кнопками ниже. Отклонить с причиной — в кабинете салона."
+    )
     return "\n".join(lines)
