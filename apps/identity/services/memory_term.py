@@ -1,6 +1,6 @@
 """Срок жёлтой и красной памяти — гибрид «использование продлевает до предела» (DRF-2774).
 
-Решение владельца 06.10 (``docs/AYLA_ORCHESTRATOR_HANDOFF_2026-10-06.md`` §6):
+Решение владельца 06.10 (передача оркестратора от 06.10, §6):
 
     Фактическое использование записи в ответе/рекомендации продлевает её
     текущий срок только до жёсткого предела от создания. Фоновое чтение,
@@ -123,56 +123,80 @@ TERM_POLICIES: dict[tuple[str, str], MemoryTermPolicy] = {
     (Y, "relationship"): MemoryTermPolicy(
         "дети, их возраст, чувствительности партнёра — только сказанное",
         "подбор услуг и времени",
-        None, None, None, EXTEND_BY_USE,
+        None,
+        None,
+        None,
+        EXTEND_BY_USE,
         "при использовании не нужно; уточнять при противоречии новому заявлению",
         _ON_EXPIRY_YELLOW,
     ),
     (Y, "financial"): MemoryTermPolicy(
         "ценовой порог, отказы «дорого»",
         "подбор по бюджету",
-        None, None, None, EXTEND_BY_USE,
+        None,
+        None,
+        None,
+        EXTEND_BY_USE,
         "не требует; вывод показывается как предположение",
         _ON_EXPIRY_YELLOW,
     ),
     (Y, "preference"): MemoryTermPolicy(
         "чувствительность кожи, тип питания — сказанные человеком",
         "безопасность и подбор",
-        None, None, None, EXTEND_BY_USE,
+        None,
+        None,
+        None,
+        EXTEND_BY_USE,
         "перед процедурой — уточнить",
         _ON_EXPIRY_YELLOW,
     ),
     (Y, "contraindication"): MemoryTermPolicy(
         "аллергии, сказанные человеком (извлечение — DRF-1290/DRF-2132)",
         "безопасность и подбор",
-        None, None, None, EXTEND_BY_USE,
+        None,
+        None,
+        None,
+        EXTEND_BY_USE,
         "перед процедурой — уточнить",
         _ON_EXPIRY_YELLOW,
     ),
     (Y, "lifestyle"): MemoryTermPolicy(
         "поведенческие паттерны из записей (не Ф4)",
         "удобное время",
-        None, None, None, EXTEND_BY_USE,
+        None,
+        None,
+        None,
+        EXTEND_BY_USE,
         "не требует",
         _ON_EXPIRY_YELLOW,
     ),
     (R, "contraindication"): MemoryTermPolicy(
         "беременность, хронические состояния, лекарства, значимые для процедур",
         "противопоказания к процедурам",
-        None, None, None, EXTEND_BY_USE,
+        None,
+        None,
+        None,
+        EXTEND_BY_USE,
         "перед процедурой — обязательно (проверки актуальности, D-7)",
         _ON_EXPIRY_RED,
     ),
     (R, "symptom"): MemoryTermPolicy(
         "симптомы и ментальное здоровье — сказанные человеком",
         "безопасность общения и противопоказания",
-        None, None, None, EXTEND_BY_CONFIRMATION_ONLY,
+        None,
+        None,
+        None,
+        EXTEND_BY_CONFIRMATION_ONLY,
         "продление только явным подтверждением человека",
         _ON_EXPIRY_RED,
     ),
     (R, "other"): MemoryTermPolicy(
         "особые категории 152-ФЗ ст. 10 — только сказанное и значимое для противопоказаний",
         "услуга / противопоказание",
-        None, None, None, EXTEND_BY_CONFIRMATION_ONLY,
+        None,
+        None,
+        None,
+        EXTEND_BY_CONFIRMATION_ONLY,
         "продление только явным подтверждением человека",
         _ON_EXPIRY_RED,
     ),
@@ -225,9 +249,7 @@ def record_memory_use(
     entries = list(entries)
     for entry in entries:
         if not isinstance(entry, MemoryEntry):
-            raise TypeError(
-                f"record_memory_use takes MemoryEntry only, got {type(entry).__name__}"
-            )
+            raise TypeError(f"record_memory_use takes MemoryEntry only, got {type(entry).__name__}")
     now = now or timezone.now()
     extended = 0
     for entry in entries:

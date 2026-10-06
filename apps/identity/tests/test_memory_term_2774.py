@@ -183,7 +183,11 @@ class TestOnlyAUseSurfaceCounts:
         from apps.orchestrator.body_care.screening_answer import ScreeningAnswer
 
         with pytest.raises(TypeError, match="ScreeningAnswer"):
-            record_memory_use([ScreeningAnswer.__new__(ScreeningAnswer)], surface="answer_cited")
+            # Нарочно чужой тип: дверь должна отказать, а не молча продлить.
+            record_memory_use(
+                [ScreeningAnswer.__new__(ScreeningAnswer)],  # type: ignore[list-item]
+                surface="answer_cited",
+            )
 
 
 class TestTheExtensionOnceApproved:
@@ -272,9 +276,7 @@ class TestDeletionAndWithdrawalWin:
     @pytest.mark.parametrize("hold", ["forgotten", "deletion_requested"])
     def test_a_person_who_asked_to_erase_is_untouched(self, hold, consent, approved) -> None:
         approved(YELLOW, "relationship")
-        entry = _entry(
-            _upc(**{hold: True}), YELLOW, "relationship", age_days=10, expires_in_days=5
-        )
+        entry = _entry(_upc(**{hold: True}), YELLOW, "relationship", age_days=10, expires_in_days=5)
 
         assert _use(entry) == 0
         assert _expiry(entry) == NOW + timedelta(days=5)
