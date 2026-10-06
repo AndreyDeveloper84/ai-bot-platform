@@ -2709,6 +2709,17 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
                             bot_user.id,
                         )
                         nutrition_block = ""
+                    # DRF-2808 — цель словами человека на КАЖДОМ ходе, под тем же
+                    # гейтом памяти; кладётся рядом с блоком памяти, кроме хода,
+                    # где блок питания уже несёт ту же строку как рамку чисел.
+                    from apps.orchestrator.goal_context import (
+                        build_goal_block,
+                        merge_goal_into_memory,
+                    )
+
+                    memory_block = merge_goal_into_memory(
+                        memory_block, build_goal_block(bot_user), nutrition_block
+                    )
                     if nutrition_block:
                         # Cost attribution (DRF-1211): the block grows the prompt,
                         # and the growth lands in AIRequestMetric.llm_tokens_input.
