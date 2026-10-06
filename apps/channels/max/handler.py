@@ -2739,16 +2739,19 @@ def _handle_global_max_event_inner(event: CanonicalEvent, trace_id: str | uuid.U
                             # проходит (booking 2.5, каталог, уточнение,
                             # визиты, cb:discover:book, протухший тап,
                             # приветствие), имеет СВОЮ ветку выше и до
-                            # консьержа не доходит. None здесь приезжает от
-                            # тапа, у которого ветки нет: нераспознанный тап
-                            # анкеты/еды правильной формы, а с DRF-990
-                            # (третий заход) — ещё и глагол семейства
-                            # `cb:discover:`, кроме `book:`. Своего маршрута
-                            # у такого глагола сегодня нет, и он доезжает
-                            # сюда сырым `event.text` — это и есть тот самый
-                            # «гейт как список исключений», отдельный
-                            # открытый вопрос. Ход при этом не теряется:
-                            # ответ бота записывается как обычно.
+                            # консьержа не доходит. Тап, у которого ветки
+                            # нет (нераспознанный тап анкеты/еды правильной
+                            # формы, глагол `cb:discover:`, кроме `book:`),
+                            # раньше доезжал сюда сырым `event.text`. С
+                            # DRF-1491 его забирает ветка «не поняла» выше
+                            # (`looks_like_callback_payload` → экран промаха
+                            # с клавиатурой меню), и до модели он не доходит;
+                            # держат это `test_global_max_handler::
+                            # test_foreign_callback_answers_with_the_menu_
+                            # instead_of_the_model` и `test_marketplace_menu_
+                            # drf1491::TestHonestFallbackOnTheGlobalPath`.
+                            # Сам гейт по-прежнему список исключений —
+                            # открытый вопрос устройства, не дефект этого хода.
                             user_message_id=user_msg.id if user_msg is not None else None,
                             memory_block=memory_block,
                             nutrition_block=nutrition_block,
