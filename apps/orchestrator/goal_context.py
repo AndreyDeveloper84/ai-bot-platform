@@ -24,11 +24,10 @@
   питания: там цели в этом периметре тоже нет (DRF-2766 фаза 1в).
 
 Профиль для периметра запрашивается только когда слова цели есть — иначе
-каждый ход платил бы поход в Ayla за ничего. Периметр применяется к
-ПРОЧИТАННОМУ профилю: анкеты питания у большинства бьюти-клиентов нет, и
-«нет анкеты» — не периметр. Цена названа: если чтение профиля человека в
-периметре сорвалось, его собственные слова цели (уже прошедшие проверку
-здоровья при записи) попадут в промпт — это слова, а не совет.
+каждый ход платил бы поход в Ayla за ничего. «Анкеты нет» (у большинства
+бьюти-клиентов) — не периметр, цель показывается; «прочитать не удалось» —
+состояние неизвестно, и блока нет (fail-closed): цель в промпте рулит
+советом модели.
 
 Сбой любого шага — пустой блок: ход дороже картины.
 """
@@ -68,7 +67,7 @@ def build_goal_block(bot_user: Any) -> str:
         if not concierge_memory_enabled() or not memory_green_open(bot_user):
             return ""
 
-        from apps.orchestrator.nutrition_context import _fetch_goal, _fetch_profile
+        from apps.orchestrator.nutrition_context import _fetch_goal
         from apps.orchestrator.nutrition_wellness import goal_is_medical
 
         goal = _fetch_goal(bot_user)
@@ -78,11 +77,18 @@ def build_goal_block(bot_user: Any) -> str:
 
         from apps.nutrition_proactive.render import remarks_suppressed
 
-        # Периметр — по ПРОЧИТАННОМУ профилю. У ``remarks_suppressed`` ``None``
-        # — «закрыто» (там он сторожит советы о еде), а ``None`` здесь и «анкеты
-        # нет» — обычное состояние бьюти-клиента. Читать его как периметр
-        # значило бы не показать цель почти никому.
-        profile = _fetch_profile(bot_user)
+        # Периметр — два разных «нет профиля», и они НЕ одно:
+        # * ``None`` — анкеты нет (обычный бьюти-клиент): флагов нет, это вне
+        #   периметра, цель показываем;
+        # * чтение сорвалось — состояние неизвестно: fail-closed, цели нет.
+        #   Цель в промпте рулит советом модели, и человек в периметре
+        #   (беременность, РПП) не должен получить разговор к противопоказанной
+        #   цели только потому, что каталог не ответил.
+        try:
+            profile = _read_profile(bot_user)
+        except Exception:  # noqa: BLE001 — не знаем состояние → ограничительное
+            logger.info("orchestrator.goal_context.skip reason=profile_unreadable")
+            return ""
         if profile is not None and remarks_suppressed(profile):
             logger.info("orchestrator.goal_context.skip reason=sensitive_perimeter")
             return ""
@@ -90,6 +96,24 @@ def build_goal_block(bot_user: Any) -> str:
     except Exception:  # noqa: BLE001 — ход дороже картины
         logger.exception("orchestrator.goal_context.failed")
         return ""
+
+
+def _read_profile(bot_user: Any) -> Any | None:
+    """Анкета питания: профиль, ``None`` — анкеты нет; исключение — не прочитали.
+
+    В отличие от ``nutrition_context._fetch_profile`` сбой НЕ сводится к
+    ``None``: там ``None`` и так значит «закрыто», здесь — «анкеты нет», и
+    смешать его со сбоем значило бы впустить цель вслепую. Ayla отвечает
+    ``None`` ровно на отсутствие (404 / ``exists=false``); неподключённое
+    окружение и недоступность — исключения.
+    """
+    import asyncio
+
+    from apps.integrations.ayla import external_user_id_for, get_nutrition_client
+
+    client = get_nutrition_client()
+    external_id = external_user_id_for(bot_user)
+    return asyncio.run(client.get_profile(external_user_id=external_id))
 
 
 def merge_goal_into_memory(memory_block: str, goal_block: str, nutrition_block: str) -> str:

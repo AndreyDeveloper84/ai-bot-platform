@@ -41,6 +41,8 @@ def doors(monkeypatch):
 
     def _profile_read(bot_user):
         state["profile_reads"] += 1
+        if state["profile"] == "unreadable":
+            raise RuntimeError("catalog did not answer")
         return state["profile"]
 
     monkeypatch.setattr(
@@ -53,7 +55,7 @@ def doors(monkeypatch):
     monkeypatch.setattr(
         "apps.orchestrator.nutrition_context._fetch_goal", lambda bot_user: state["goal"]
     )
-    monkeypatch.setattr("apps.orchestrator.nutrition_context._fetch_profile", _profile_read)
+    monkeypatch.setattr("apps.orchestrator.goal_context._read_profile", _profile_read)
     return state
 
 
@@ -67,6 +69,15 @@ class TestTheBlock:
 
         assert build_goal_block(object()) == LINE
         assert doors["profile_reads"] == 1
+
+    def test_an_unreadable_profile_hides_the_goal(self, doors) -> None:
+        """Не знаем состояние — берём ограничительное: человек в периметре не
+        должен получить разговор к противопоказанной цели из-за сбоя каталога."""
+        doors["profile"] = None
+        assert build_goal_block(object()) == LINE
+        doors["profile"] = "unreadable"
+
+        assert build_goal_block(object()) == ""
 
     def test_an_ordinary_profile_shows_the_goal(self, doors) -> None:
         doors["profile"] = _profile()
