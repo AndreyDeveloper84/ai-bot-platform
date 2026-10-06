@@ -215,8 +215,11 @@ class TestTheLabelFromTheCatalogDocument:
         assert goal.label is None
 
     def test_the_persons_words_echoed_as_a_label_are_not_a_label(self) -> None:
-        goal = self._goal(goal_key="", goal_text=WORDS, label=WORDS)
+        """Цель с ключом И словами: каталог кладёт в ``label`` слова человека —
+        это не подпись опции, иначе слова ушли бы в промпт как «выбрано из списка»."""
+        goal = self._goal(goal_key="relax", goal_text=WORDS, label=WORDS)
         assert goal is not None
+        assert goal.text == WORDS
         assert goal.label is None
 
 
