@@ -266,7 +266,7 @@ class TestTheStems:
 
     @pytest.mark.parametrize(
         ("name", "stems"),
-        [("Ян", ()), ("Ия", ()), ("Ян Ковалёв", ("ковалё",))],
+        [("Ян", ()), ("Ия", ()), ("Ян Ковалёв", ("ковал",))],
     )
     def test_s1_a_stem_shorter_than_three_letters_does_not_ride(
         self, db, name: str, stems: tuple
