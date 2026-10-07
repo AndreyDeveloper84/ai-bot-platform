@@ -71,7 +71,9 @@ class _Catalogue:
         self.model_estimates = model_estimates
         self.estimates: list[str] = []
 
-    async def estimate_dish(self, *, external_user_id, dish_name, portion_g=None):
+    async def estimate_dish(
+        self, *, external_user_id, dish_name, portion_g=None, ai_estimate_allowed=None
+    ):
         self.estimates.append(dish_name)
         if self.down:
             raise NutritionUnavailableError("down")

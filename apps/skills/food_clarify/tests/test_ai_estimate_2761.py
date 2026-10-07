@@ -72,7 +72,9 @@ class _MissWithEstimate(_Catalogue):
         self.ai = ai
         self.verified_kcal = verified_kcal
 
-    async def estimate_dish(self, *, external_user_id, dish_name, portion_g=None):
+    async def estimate_dish(
+        self, *, external_user_id, dish_name, portion_g=None, ai_estimate_allowed=None
+    ):
         self.estimates.append({"dish_name": dish_name, "portion_g": portion_g})
         grams = 100.0 if portion_g is None else float(portion_g)
         ai = AI_KCAL_PER_100G * grams / 100.0 if self.ai else None

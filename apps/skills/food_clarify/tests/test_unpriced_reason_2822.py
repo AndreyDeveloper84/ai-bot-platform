@@ -80,7 +80,9 @@ class _Unpriced(_Catalogue):
         self.statuses = statuses
         self.ai = ai
 
-    async def estimate_dish(self, *, external_user_id, dish_name, portion_g=None):
+    async def estimate_dish(
+        self, *, external_user_id, dish_name, portion_g=None, ai_estimate_allowed=None
+    ):
         self.estimates.append({"dish_name": dish_name, "portion_g": portion_g})
         if dish_name not in self.statuses:
             raise FoodNotRecognizedError("dish_not_found")

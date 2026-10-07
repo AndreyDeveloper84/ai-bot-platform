@@ -64,6 +64,7 @@ class _Diary(_Catalogue):
         idempotency_key=None,
         entry_origin=None,
         scan_id=None,
+        ai_estimate_allowed=None,
     ):
         self.calls.append(idempotency_key)
         if idempotency_key in self.rows:

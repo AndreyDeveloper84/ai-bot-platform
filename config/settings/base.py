@@ -1090,6 +1090,15 @@ FOOD_DIARY_CANONICAL_CONSENT = os.environ.get("FOOD_DIARY_CANONICAL_CONSENT", "f
     "1",
 )
 
+# 4. ``AI_FOOD_ESTIMATION_CONSENT_REQUIRED`` — отдельное добровольное согласие
+#    на ИИ-оценку еды (DRF-2845, решение владельца 07.10). Пока ВЫКЛЮЧЕН:
+#    текст согласия не утверждён и выдать его нечем. False → бот разрешает
+#    каталогу ИИ-оценку всем, как до листа. True → только при действующем
+#    согласии ``ai_food_estimation``. Включение — решение владельца.
+AI_FOOD_ESTIMATION_CONSENT_REQUIRED = os.environ.get(
+    "AI_FOOD_ESTIMATION_CONSENT_REQUIRED", "false"
+).lower() in ("true", "1")
+
 FOOD_PHOTO_SCAN_ENABLED = os.environ.get("FOOD_PHOTO_SCAN_ENABLED", "false").lower() in (
     "true",
     "1",

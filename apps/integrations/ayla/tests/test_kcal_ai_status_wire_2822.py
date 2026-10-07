@@ -65,7 +65,10 @@ async def _estimate(holder: dict[str, Any], body: dict[str, Any]) -> nc.DishEsti
     holder["transport"] = httpx.MockTransport(lambda request: httpx.Response(200, json=body))
     client = nc.NutritionClient(base_url="https://ayla.test", service_token="t")
     return await client.estimate_dish(
-        external_user_id="bot:max:2822", dish_name="зыбзик квантовый", portion_g=300
+        external_user_id="bot:max:2822",
+        dish_name="зыбзик квантовый",
+        portion_g=300,
+        ai_estimate_allowed=True,
     )
 
 
