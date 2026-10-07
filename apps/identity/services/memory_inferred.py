@@ -25,6 +25,13 @@ W5-owned) with the same guarantees, kept inside the W3 zone
     re-written — re-inferring the same value never churns the store. A
     *changed* value lands as a new entry (history preserved; readers
     order by ``created_at``).
+  - **Erased-by-request respected (DRF-2837).** A ``(kind, key, value)`` the
+    person asked to forget — said or proposed, deleted in chat or on the
+    memory screen — is not written again while its tombstone lies
+    (:mod:`apps.identity.services.erased_by_request`). The rule sits HERE, on
+    the only door inferred rows are written through, so a future pipeline
+    cannot forget it. An inference that merely expired (``ttl_purge``) is not
+    blocked: a term is not the person's will.
   - **Forget-all respected.** No new memory accretes onto a tombstoned
     UPC (152-ФЗ right-to-be-forgotten).
   - **Never breaks the caller.** All work is best-effort; failures are
@@ -53,6 +60,7 @@ from django.utils import timezone
 
 from apps.consent.memory import can_store_green_memory
 from apps.identity.models import MemoryEntry
+from apps.identity.services.erased_by_request import keys_erased_by_request
 from apps.identity.services.memory_reader import (
     get_or_create_personal_context,
     read_personal_context,
@@ -138,11 +146,20 @@ def record_inferred_green_facts(
         if upc.soft_deleted_at is not None or upc.forget_all_requested_at is not None:
             return 0
 
+        # DRF-2837: дедуп выше видит только живые строки. Стёртое по просьбе
+        # лежит надгробием, и без этого чтения следующий прогон предложил бы
+        # его снова — без единого нового слова человека.
+        erased = keys_erased_by_request(user_id)
+
         now = timezone.now()
         written = 0
+        blocked = 0
         for fact in facts:
             dedup_key = (fact.kind, fact.content.get("key"), fact.content.get("value"))
             if dedup_key in seen:
+                continue
+            if dedup_key in erased:
+                blocked += 1
                 continue
             entry = write_entry(
                 user_id=user_id,
@@ -162,6 +179,13 @@ def record_inferred_green_facts(
                 written += 1
                 seen.add(dedup_key)
 
+        if blocked:
+            # Число, без рода и значения: что именно человек стёр — не для журнала.
+            logger.info(
+                "identity.memory.inferred_blocked_erased bot_user=%s count=%d",
+                bot_user.id,
+                blocked,
+            )
         if written:
             # Count + kinds only — never the inferred values.
             logger.info(
