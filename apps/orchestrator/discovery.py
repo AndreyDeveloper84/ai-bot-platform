@@ -37,6 +37,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
 from apps.llm.router import get_router
+from apps.catalog.rating import rating_label
 from apps.marketplace.discovery import (
     clarification_material,
     discover_masters,
@@ -1212,8 +1213,10 @@ def _render_master_cards(
         # all of them through as «★ 0.00», which reads as «bad master»
         # (DRF-1224). Same shape as the em-dash below: guard the value that
         # actually shows up, not the one the schema allows.
-        has_rating = card.rating is not None and card.rating >= 1
-        rating = f" · ★ {card.rating}" if has_rating else ""
+        #
+        # DRF-2875 (решение владельца 07.10, п.20): оценка — только вместе
+        # с числом отзывов; без отзывов — «Пока нет отзывов», без звезды.
+        rating = f" · {rating_label(card.rating, getattr(card, 'review_count', 0))}"
         # NOT ``city`` — that name holds the QUERY's city, which the
         # «Показать ещё» ref below has to carry. Rebinding it here made the
         # button search for « · Пенза» and find nobody (caught by

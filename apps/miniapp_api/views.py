@@ -57,6 +57,7 @@ from django.core.cache import cache
 from django.utils.dateparse import parse_datetime
 
 from apps.catalog.models import CatalogMaster, CatalogService, MasterService, sellable_edge_q
+from apps.catalog.rating import public_rating
 from apps.integrations.ayla.edge_duration import duration_from_edge
 from apps.integrations.ayla.offer_refusal import (
     OFFER_NOT_SELLABLE_SLUG,
@@ -823,7 +824,10 @@ def _master_to_dict(m: CatalogMaster) -> dict[str, Any]:
         "specialization": m.specialization,
         "bio": m.bio,
         "experience": m.experience,
-        "rating": str(m.rating) if m.rating is not None else None,
+        # DRF-2875 — оценка без отзывов клиенту не уходит (п.20 листа 07.10).
+        "rating": (
+            str(shown) if (shown := public_rating(m.rating, m.review_count)) is not None else None
+        ),
         "photo_url": master_photo_path(m.id, m.photo_url),
         # DRF-1778 — trust signal только из данных: число отзывов из
         # зеркала (`reviews_count` фида). 0 — экран скобок не рисует.
