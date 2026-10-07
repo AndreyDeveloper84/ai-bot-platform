@@ -1290,6 +1290,12 @@ function PulseStrip({ data }: { data: WellnessToday }) {
   const marks = kcalTotalMarks(data);
   const approx = approxPrefix(marks);
   const totalUnknown = !caloriesKnown && marks.incomplete;
+  // DRF-2873 — «Без чисел» (решение владельца 04.10: на всех экранах).
+  // Человек сам выбрал не видеть калории, БЖУ и числовые цели: строка
+  // «Питание» тогда не рисует ни чисел, ни шкалы и не произносит их.
+  // Только явное `true`: режим добровольный, и «не знаем выбора» не значит
+  // «спрятать за человека» — то же правило, что у `numbers_hidden_for`.
+  const hideNumbers = data.nutrition_numbers_hidden === true;
   const waterEaten = data.water_glasses_eaten;
   const waterTarget = data.water_glasses_target;
   // Знать выпитое и не знать нормы — обычное состояние, а не сбой.
@@ -1329,7 +1335,13 @@ function PulseStrip({ data }: { data: WellnessToday }) {
       <div
         className="wellness-dash__pulse-row"
         aria-label={
-          totalUnknown
+          hideNumbers
+            ? dayIsEmpty
+              ? `Питание: ${EMPTY_DAY_TEXT}`
+              : !caloriesKnown && !totalUnknown
+                ? `Питание: ${sliceClosedCopy}`
+                : "Питание"
+            : totalUnknown
             ? `Питание: ${KCAL_TOTAL_UNKNOWN}`
             : !caloriesKnown
             ? `Питание: ${sliceClosedCopy}`
@@ -1344,7 +1356,15 @@ function PulseStrip({ data }: { data: WellnessToday }) {
         <div className="wellness-dash__pulse-head">
           <span aria-hidden="true">🍽 </span>Питание
         </div>
-        {caloriesKnown && caloriesTargetKnown ? (
+        {hideNumbers ? (
+          /* «Без чисел»: ни калорий, ни цели, ни процента, ни БЖУ, ни шкалы.
+             Слова без чисел остаются — пустой день и закрытый дневник. */
+          dayIsEmpty ? (
+            <div className="wellness-dash__pulse-numbers">{EMPTY_DAY_TEXT}</div>
+          ) : !caloriesKnown && !totalUnknown ? (
+            <div className="wellness-dash__pulse-numbers">{sliceClosedCopy}</div>
+          ) : null
+        ) : caloriesKnown && caloriesTargetKnown ? (
           <>
             <div className="wellness-dash__pulse-numbers" aria-hidden="true">
               {dayIsEmpty
