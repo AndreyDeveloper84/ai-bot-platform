@@ -200,6 +200,40 @@ class TestGrantAndWithdraw:
         withdraw(bot_user, source=SOURCE)
         assert is_granted(shell) is False
 
+    def test_c5_a_withdrawal_on_one_shell_closes_a_grant_left_on_another(self, bot_user) -> None:
+        """Отзыв задел одну оболочку, а действующая строка осталась на другой.
+
+        Решает последнее событие человека: отзыв позже выдачи закрывает, даже
+        если строка на соседней оболочке не отозвана; выдача после — открывает.
+        """
+        from apps.consent.services import record_global_consent
+        from apps.consent.services import withdraw as withdraw_row
+        from apps.tenancy.context import tenant_scope
+
+        other_tenant = Tenant.objects.create(slug="ai-food-2845-c", name="AI food 2845 c")
+        shell = BotUser.all_tenants.create(
+            tenant=other_tenant, channel="max", channel_user_id="92845", display_name="Клиент"
+        )
+        for row_owner in (shell, bot_user):
+            record_global_consent(
+                row_owner,
+                consent_type=AI_FOOD_ESTIMATION,
+                source=SOURCE,
+                document_version=AI_FOOD_ESTIMATION_DOCUMENT_VERSION,
+            )
+        assert is_granted(bot_user) is True
+
+        with tenant_scope(bot_user.tenant):
+            assert withdraw_row(bot_user, consent_type=AI_FOOD_ESTIMATION, source=SOURCE)
+
+        # Положительная пара: строка соседней оболочки по-прежнему не отозвана.
+        assert [row.withdrawn_at for row in _rows(shell)] == [None]
+        assert is_granted(bot_user) is False
+        assert is_granted(shell) is False
+
+        _grant(bot_user)
+        assert is_granted(shell) is True
+
     def test_c6_withdrawing_personal_data_takes_it_along(self, bot_user) -> None:
         _grant(bot_user)
 
