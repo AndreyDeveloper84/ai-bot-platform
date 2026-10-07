@@ -97,12 +97,20 @@ class PersonalField:
 #:
 #: DRF-2544: the ruling also names the mechanism — ``source_tenant_id``
 #: «проверяемым при чтении». The WRITE half is built: every MemoryEntry gets
-#: its origin at write time (``apps.identity.services.memory_origin``). The
-#: READ half is not, because no reader assembles memory FOR a tenant today
+#: its origin at write time (``apps.identity.services.memory_origin``).
+#:
+#: The READ half has its first user (DRF-2830): ``apps/marketplace/shelf_preferences.py``
+#: collects the favourite master for the person's OWN salons and carries each
+#: fact's origin with it — unknown origin does not travel, and only what the
+#: person said does (DRF-2864). It is Ayla's side, not a salon's: the result
+#: is not shown to a salon, it has no caller yet (nothing is sent), and «is
+#: this salon among the person's own» is the catalog's predicate to run.
+#:
+#: What still does not exist is a reader that assembles memory FOR a tenant
 #: (every prompt that carries personal memory is the global surface, and the
 #: global surface is not a salon). ``apps/identity/tests/test_never_crosses_readers_2544.py``
-#: turns red the day such a reader appears, naming these keys AND
-#: :data:`UNKNOWN_ORIGIN_NEVER_CROSSES` — that reader must obey both.
+#: turns red the day any new reader appears, naming these keys AND
+#: :data:`UNKNOWN_ORIGIN_NEVER_CROSSES` — a salon-scoped one must obey both.
 NEVER_CROSSES: frozenset[str] = frozenset(
     {
         "memory_key:favorite_masters",
@@ -146,7 +154,10 @@ POLICY_DEBT: Mapping[str, str] = {
         "user_id, and the tenant predicate is not built because no salon-scoped "
         "reader exists. Since DRF-2544 source_tenant_id is written honestly, and "
         "apps/identity/tests/test_never_crosses_readers_2544.py turns red when "
-        "the first such reader appears. That reader closes this line."
+        "a new reader appears. The personal shelf (DRF-2830, "
+        "apps/marketplace/shelf_preferences.py) is the first reader that USES the "
+        "origin, but it is Ayla's side and sends nothing yet — it does not close "
+        "this line. The first reader that assembles memory for a salon does."
     ),
     "identity.UserPersonalContext.summary": (
         "Ayla's running prose summary of who the user is — INFERRED by "
