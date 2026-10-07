@@ -217,8 +217,12 @@ def approved_categories() -> list[tuple[str, str]]:
     return [key for key, policy in TERM_POLICIES.items() if policy.approved]
 
 
-def _person_holds_back(user_id: uuid.UUID, zone: str) -> bool:
-    """Удаление и отзыв важнее: «забудь всё», живая заявка, нет согласия зоны."""
+def person_holds_back(user_id: uuid.UUID, zone: str) -> bool:
+    """Удаление и отзыв важнее: «забудь всё», живая заявка, нет согласия зоны.
+
+    Одно правило на продление срока и на чтение красной зоны ради использования
+    (``RedZoneReader.read``, DRF-2132): «хранится» не значит «можно использовать».
+    """
     from apps.consent.services import has_memory_consent
 
     upc = UserPersonalContext.objects.filter(user_id=user_id).first()
@@ -274,7 +278,7 @@ def _extended_expiry(entry: MemoryEntry, now: datetime) -> datetime | None:
     policy = policy_for(entry.sensitivity_zone, entry.kind)
     if not policy.approved or policy.extend_by != EXTEND_BY_USE:
         return None
-    if _person_holds_back(entry.user_id, entry.sensitivity_zone):
+    if person_holds_back(entry.user_id, entry.sensitivity_zone):
         return None
     assert policy.extension_days is not None and policy.hard_cap_days is not None
     cap = entry.created_at + timedelta(days=policy.hard_cap_days)
