@@ -1249,11 +1249,20 @@ class RedZoneAccessLog(models.Model):
     # «Что Ayla помнит». Не ops_admin с principal=user_id: аудит субъекта
     # под чужой ролью недопустим (152-ФЗ гл. 3 «кто обращался»).
     ACCESSOR_DATA_SUBJECT = "data_subject"
+    # DRF-2132 — два читателя периметра аллергий: фильтр рекомендаций и
+    # предупреждение сканера еды. Отдельные роли, а не ``ayla_llm``: в журнале
+    # должно быть видно, что факт ушёл в фильтр, а не в текст промпта. Сегодня
+    # ни одна из них не используется — читателей ещё нет, роли названы заранее,
+    # чтобы первый читатель не записался под чужой.
+    ACCESSOR_RECOMMENDATIONS = "recommendations"
+    ACCESSOR_SCANNER = "scanner"
     ACCESSOR_ROLE_CHOICES = [
         (ACCESSOR_AYLA_LLM, "Ayla LLM prompt construction"),
         (ACCESSOR_SYSTEM_JOB, "System job (TTL sweep, forget-all)"),
         (ACCESSOR_OPS_ADMIN, "Ops admin (break-glass)"),
         (ACCESSOR_DATA_SUBJECT, "Data subject (own memory, Mini App)"),
+        (ACCESSOR_RECOMMENDATIONS, "Recommendations filter (allergen exclusion)"),
+        (ACCESSOR_SCANNER, "Food scanner (allergen warning)"),
     ]
 
     ACCESS_READ = "read"
