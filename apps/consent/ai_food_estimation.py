@@ -37,8 +37,12 @@
 
 Механизм лежит за ``AI_FOOD_ESTIMATION_CONSENT_REQUIRED`` (выключен): пока
 флаг выключен, :func:`estimate_permitted` отвечает «можно» всем, как было до
-листа. Текста согласия здесь нет — его утверждает владелец; до тех пор у
-:func:`grant` нет ни одной поверхности, и включать флаг нечем.
+листа.
+
+Поверхность выдачи и отзыва — ручка Mini App ``me/consents/ai-food-estimation/``
+(DRF-2867). Отзыв работает всегда. Выдача закрыта, пока нет утверждённого
+текста (:data:`AI_FOOD_ESTIMATION_TEXT`): его утверждает владелец, и до тех
+пор включать флаг по-прежнему нечем.
 """
 
 from __future__ import annotations
@@ -61,6 +65,40 @@ AI_FOOD_ESTIMATION_DOCUMENT_VERSION = "ai-food-estimation-draft-v1"
 
 #: Текст не утверждён. Снимается вместе с подъёмом версии.
 PENDING_LEGAL = True
+
+#: Полный текст согласия, который человек читает перед «Разрешить» (DRF-2867).
+#: ``None`` — текста нет: его утверждает владелец (получатель и страна
+#: обработки ещё не подтверждены). Сюда кладётся ТОЛЬКО утверждённый текст,
+#: вместе с подъёмом версии; черновик с пробелами человеку не показывают.
+AI_FOOD_ESTIMATION_TEXT: str | None = None
+
+#: Откуда пришли выдача и отзыв с экрана Mini App.
+MINIAPP_SOURCE = "miniapp"
+
+
+class TextNotApprovedError(RuntimeError):
+    """Выдать согласие нельзя: текста, под которым его дают, ещё нет."""
+
+
+def text_approved() -> bool:
+    """Есть ли текст, который можно показать человеку перед выдачей."""
+    return bool(AI_FOOD_ESTIMATION_TEXT)
+
+
+def grant_from_screen(bot_user: "BotUser", *, document_version: str) -> bool:
+    """Выдача с экрана согласия Mini App (DRF-2867).
+
+    Экран обязан показать человеку полный текст. Пока текста нет, показать
+    нечего — и выдача закрыта здесь, на сервере, а не только спрятанной
+    кнопкой: согласие «под ничем» не было бы осведомлённым.
+
+    Raises:
+      TextNotApprovedError: текст не утверждён.
+      UnknownDisclosureVersionError: версия не та, что показывали.
+    """
+    if not text_approved():
+        raise TextNotApprovedError(AI_FOOD_ESTIMATION_DOCUMENT_VERSION)
+    return grant(bot_user, document_version=document_version, source=MINIAPP_SOURCE)
 
 
 class UnknownDisclosureVersionError(ValueError):
@@ -168,6 +206,11 @@ def estimate_permitted(bot_user: "BotUser") -> bool:
 __all__ = [
     "AI_FOOD_ESTIMATION",
     "AI_FOOD_ESTIMATION_DOCUMENT_VERSION",
+    "AI_FOOD_ESTIMATION_TEXT",
+    "MINIAPP_SOURCE",
+    "TextNotApprovedError",
+    "grant_from_screen",
+    "text_approved",
     "PENDING_LEGAL",
     "UnknownDisclosureVersionError",
     "consent_required",

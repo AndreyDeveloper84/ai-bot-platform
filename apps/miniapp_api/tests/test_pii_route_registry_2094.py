@@ -90,6 +90,9 @@ _CONSENTS_DOCUMENT = own(
     "preference_inference.granted_at",
     "preference_inference.document_version",
     "preference_inference.grant",
+    "ai_food_estimation.granted",
+    "ai_food_estimation.required",
+    "ai_food_estimation.grant",
     via="apps.consent.customer:read_consents",
     note=(
         "the customer's own consent registry re-read from the database after the write; "
@@ -210,6 +213,8 @@ CUSTOMER_ROUTES: dict[str, Entry] = {
     "customer_marketing_consent": _CONSENTS_DOCUMENT,
     # DRF-2779 — умная память Ф4: добровольное согласие на предположения.
     "customer_preference_inference_consent": _CONSENTS_DOCUMENT,
+    # DRF-2867 — согласие на ИИ-оценку еды: выдача и отзыв, тот же документ.
+    "customer_ai_food_estimation_consent": _CONSENTS_DOCUMENT,
     "customer_data_storage_consent": own(
         "consents.*",
         "proactive_hints.enabled",

@@ -59,6 +59,7 @@ from apps.llm.model_tiers import TIER_SMART
 from apps.llm.pricing import UnknownModelError, compute_cost
 from apps.llm.router import get_router
 from apps.orchestrator.clarify_guard import filter_clarification_options
+from apps.catalog.rating import public_rating, rating_label
 from apps.marketplace.discovery import (
     city_service_samples,
     discover_masters,
@@ -1568,9 +1569,10 @@ def _build_tool_result_message(
             parts.append(str(card.specialization))
         if getattr(card, "service_name", ""):
             parts.append(str(card.service_name))
-        rating = getattr(card, "rating", None)
-        if rating is not None and rating >= 1:
-            parts.append(f"★ {rating}")
+        # DRF-2875 — оценка модели называется только вместе с числом отзывов.
+        rating = public_rating(getattr(card, "rating", None), getattr(card, "review_count", 0))
+        if rating is not None:
+            parts.append(rating_label(rating, getattr(card, "review_count", 0)))
         if getattr(card, "city", ""):
             parts.append(str(card.city))
         lines.append("- " + ", ".join(parts))

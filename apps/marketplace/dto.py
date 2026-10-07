@@ -41,6 +41,9 @@ class MasterCard:
     city: str
     service_id: UUID | None = None
     service_name: str = ""
+    #: DRF-2875 — число отзывов за оценкой. ``rating`` без него не показывают:
+    #: при нуле проекция отдаёт ``rating=None`` (решение владельца 07.10, п.20).
+    review_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
