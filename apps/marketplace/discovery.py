@@ -41,6 +41,7 @@ from django.db.models.functions import Cast, Coalesce, Length, Replace, Trim
 
 from apps.catalog.master_state import AVAILABLE
 from apps.catalog.models import CatalogMaster, CatalogService, sellable_edge_q
+from apps.catalog.rating import public_rating
 from apps.marketplace.dto import MasterCard, SalonCard, ServiceCard
 from apps.tenancy.models import Tenant
 
@@ -2482,7 +2483,8 @@ def _to_card(master: CatalogMaster) -> MasterCard:
         master_id=master.id,
         name=master.name,
         specialization=master.specialization,
-        rating=master.rating,
+        rating=public_rating(master.rating, master.review_count),
         photo_url=master.photo_url,
         city=master.tenant.city,
+        review_count=int(master.review_count or 0),
     )
