@@ -542,6 +542,51 @@ def last_personal_data_withdrawal(bot_user: "BotUser") -> datetime | None:
     return latest
 
 
+def model_history_cutoff(bot_user: "BotUser") -> datetime | None:
+    """Момент, не позже которого переписка модели не отдаётся; ``None`` — отсечки нет.
+
+    DRF-2700, решение владельца 07.10.2026 (п.23). Самое позднее из трёх:
+
+    * отзыв ``personal_data`` (:func:`last_personal_data_withdrawal`);
+    * отзыв согласия на предположения — «перестать … использовать такие
+      выводы, в том числе из прошлых ответов»;
+    * последнее поштучное «забудь X»
+      (:mod:`apps.identity.services.model_history_cutoff`).
+
+    Отделить ответы, где Ayla опиралась на стёртое или на предположение, от
+    остальных надёжно нельзя, поэтому закрывается вся переписка до момента —
+    это прямо сказано в решении. Строки переписки не меняются: человек видит
+    их как прежде.
+
+    По всем оболочкам человека, как у остальных проверок согласия. Новая
+    выдача согласия отсечку не снимает.
+    """
+    from apps.identity.services import model_history_cutoff as memory_cutoff
+
+    shells = list(person_channel_shells(bot_user))
+    moments: list[datetime] = []
+
+    withdrawn = last_personal_data_withdrawal(bot_user)
+    if withdrawn is not None:
+        moments.append(withdrawn)
+
+    inference_withdrawn: datetime | None = ConsentRecord.all_tenants.filter(
+        bot_user__in=shells,
+        consent_type=ConsentRecord.ConsentType.PREFERENCE_INFERENCE.value,
+        withdrawn_at__isnull=False,
+    ).aggregate(latest=Max("withdrawn_at"))["latest"]
+    if inference_withdrawn is not None:
+        moments.append(inference_withdrawn)
+
+    user_ids = {getattr(shell, "ayla_user_id", None) for shell in shells}
+    user_ids.add(getattr(bot_user, "ayla_user_id", None))
+    forgotten = memory_cutoff.latest(uid for uid in user_ids if uid)
+    if forgotten is not None:
+        moments.append(forgotten)
+
+    return max(moments) if moments else None
+
+
 def has_global_consent(
     bot_user: "BotUser",
     consent_type: str,

@@ -558,7 +558,7 @@ class GlobalConversationStore:
         exclude_id: Any | None = None,
         limit: int = 10,
     ) -> list[Any]:
-        from apps.consent.services import last_personal_data_withdrawal
+        from apps.consent.services import model_history_cutoff
         from apps.conversations.models import Message
 
         qs = Message.all_tenants.filter(conversation=conversation).order_by("-created_at")
@@ -573,8 +573,12 @@ class GlobalConversationStore:
         #
         # Отказ чтения отсечки закрывает историю целиком, а не открывает её:
         # ход без истории — неудобство, ход с отозванными словами — нарушение.
+        #
+        # С решения владельца 07.10 (п.23) отсечка одна на все три случая:
+        # отзыв ``personal_data``, отзыв согласия на предположения, поштучное
+        # «забудь X» (``consent.services.model_history_cutoff``).
         try:
-            cutoff = last_personal_data_withdrawal(conversation.bot_user)
+            cutoff = model_history_cutoff(conversation.bot_user)
         except Exception:  # noqa: BLE001 — fail closed: no cutoff, no history
             logger.exception(
                 "orchestrator.concierge.history_consent_cutoff_failed conversation=%s "
@@ -1048,8 +1052,15 @@ def _conversation_text(conversation: Any, message_text: str) -> str:
     try:
         from apps.conversations.models import Message
 
+        from apps.conversations.model_history import after_model_cutoff
+
+        # DRF-2700 — сбой чтения отсечки уходит в ``except`` ниже: «сказано
+        # только в этом ходе» и есть безопасная сторона этой проверки.
         rows = (
-            Message.all_tenants.filter(conversation=conversation)
+            after_model_cutoff(
+                Message.all_tenants.filter(conversation=conversation),
+                conversation.bot_user,
+            )
             .order_by("-created_at")
             .values_list("content", flat=True)[:_SAID_HISTORY_TURNS]
         )

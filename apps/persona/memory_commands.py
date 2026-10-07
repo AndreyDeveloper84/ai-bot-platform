@@ -241,6 +241,10 @@ class MemoryCommandResult:
     text: str
     action_type: str = ""
     action_data: dict | None = None
+    #: DRF-2700 — ход стёр факт по просьбе человека. Канал после записи своего
+    #: ответа закрывает переписку для модели: ответ «забыла, что ты …» сам
+    #: повторяет стёртое.
+    erased: bool = False
     #: DRF-2341 — см. ``apps.orchestrator.done_claims``.
     #: DRF-2341 — те же имена и та же форма, что у ``SkillResult``: булев
     #: признак плюс подтверждение «источник:что он ответил». ``meta`` у
@@ -608,7 +612,7 @@ def handle_memory_command(
             _bridge_clear(bot_user, keys)
             label = describe_green_content(fact_matched[0].content) or "это"
             # Фраза факта — во 2-м лице (DRF-1292), поэтому «забыла, что ты …».
-            return MemoryCommandResult(text=f"Готово — забыла, что ты {label}.")
+            return MemoryCommandResult(text=f"Готово — забыла, что ты {label}.", erased=True)
 
         matched_domains: set[str] = set()
         for e in entries:
@@ -628,7 +632,9 @@ def handle_memory_command(
             soft_delete_green_entries(user_id, [e.id for e in doomed])
             _bridge_clear(bot_user, domain_keys)
             label = _DOMAIN_LABELS.get(domain_keys[0], domain_keys[0])
-            return MemoryCommandResult(text=f"Готово — забыла всё, что знала: {label}.")
+            return MemoryCommandResult(
+                text=f"Готово — забыла всё, что знала: {label}.", erased=True
+            )
 
         # 0 or several domains → clarify by showing what's remembered (DRF-1262:
         # the current view, so the clarification itself is not a contradiction).

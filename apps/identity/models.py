@@ -833,6 +833,21 @@ class UserPersonalContext(models.Model):
         "blocks future yellow/red writes via the writer guard. "
         "Reconciliation job tracked in issue #597.",
     )
+    model_history_cutoff_at = models.DateTimeField(
+        null=True,
+        blank=True,
+        help_text="DRF-2700: момент последнего поштучного «забудь X». Реплики не "
+        "позже него модели не отдаются; человек их видит как прежде. Только "
+        "время, без содержания стёртого. Только растёт.",
+    )
+    declared_fields_withheld = models.JSONField(
+        default=list,
+        blank=True,
+        help_text="DRF-2700: имена полей анкеты Ayla, которые человек попросил "
+        "забыть, а очистить в анкете нельзя (у контракта нет значения «пусто» "
+        "для цены). Такое поле из анкеты не читается, пока человек не назовёт "
+        "его заново. Только имена, без значений.",
+    )
 
     # NOT TenantScopedManager — UPC is cross-tenant by design.
     objects = models.Manager()
