@@ -6,10 +6,27 @@
  * Причину ставит каталог (`kcal_ai_status`), слова те же, что в чате.
  * Статусы здесь синтетические: каталог поле ещё не выложил.
  */
-import { describe, expect, it } from "vitest";
+import { fireEvent, render, screen } from "@testing-library/react";
+import { MemoryRouter, Route, Routes } from "react-router-dom";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import type { FoodTextEstimate } from "../lib/food-scanner";
-import { confirmQuestionFor, renderEstimateLines } from "./FoodScannerManualScreen";
+vi.mock("../lib/food-scanner", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../lib/food-scanner")>();
+  return { ...original, fetchConsentAt: vi.fn(), estimateFoodText: vi.fn() };
+});
+vi.mock("../lib/max-sdk", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../lib/max-sdk")>();
+  return { ...original, setBackButton: vi.fn(), signalReady: vi.fn() };
+});
+
+import { estimateFoodText, fetchConsentAt, type FoodTextEstimate } from "../lib/food-scanner";
+import { settleScenario } from "../test/settleScenario";
+import {
+  FoodScannerManualScreen,
+  MANUAL_COPY,
+  confirmQuestionFor,
+  renderEstimateLines,
+} from "./FoodScannerManualScreen";
 
 const PLAIN = "Записать в дневник?";
 const FAILED = "Сейчас не удалось рассчитать калорийность. Записать без расчёта?";
@@ -61,5 +78,50 @@ describe("DRF-2822 — причина «числа нет» в вопросе к
     expect(renderEstimateLines(estimate({ kcal_ai_status: "unavailable" }))).toEqual(
       renderEstimateLines(estimate()),
     );
+  });
+});
+
+describe("DRF-2822 — экран: вопрос под карточкой берётся из ответа оценки", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(fetchConsentAt).mockResolvedValue("2026-09-18T10:00:00Z");
+  });
+
+  async function cardFor(over: Partial<FoodTextEstimate>): Promise<HTMLElement> {
+    vi.mocked(estimateFoodText).mockResolvedValue(estimate(over));
+    render(
+      <MemoryRouter initialEntries={["/customer/food-scanner/manual"]}>
+        <Routes>
+          <Route path="/customer/food-scanner/manual" element={<FoodScannerManualScreen />} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    await settleScenario();
+    fireEvent.change(screen.getByLabelText(MANUAL_COPY.whatInputLabel), { target: { value: "зыбзик 300" } });
+    fireEvent.click(screen.getByRole("button", { name: MANUAL_COPY.estimate }));
+    await settleScenario();
+    return screen.getByTestId("estimate-card");
+  }
+
+  it("сбой: карточка спрашивает словами владельца, кнопка записи на месте", async () => {
+    const card = await cardFor({ kcal_ai_status: "unavailable" });
+
+    expect(card).toHaveTextContent(FAILED);
+    expect(card).not.toHaveTextContent(PLAIN);
+    expect(screen.getByRole("button", { name: MANUAL_COPY.toDiary })).toBeInTheDocument();
+  });
+
+  it("выключена: карточка говорит «выключена»", async () => {
+    const card = await cardFor({ kcal_ai_status: "disabled" });
+
+    expect(card).toHaveTextContent(SWITCHED_OFF);
+    expect(card).not.toHaveTextContent(PLAIN);
+  });
+
+  it("статуса нет: прежний вопрос", async () => {
+    const card = await cardFor({});
+
+    expect(card).toHaveTextContent(PLAIN);
+    expect(card).not.toHaveTextContent("Записать без расчёта?");
   });
 });
