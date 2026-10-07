@@ -69,6 +69,9 @@ SOURCE_GLOBAL_BOT: Final = "global_bot"
 MAX_PREFERENCES: Final = 3
 MAX_STEMS: Final = 3
 MAX_STEM_LEN: Final = 40
+#: Основа короче трёх знаков («Ян», «Ия») не едет: каталог такую не принимает
+#: и отклонил бы весь запрос полки, а по двум буквам совпало бы пол-салона.
+MIN_STEM_LEN: Final = 3
 
 
 def preferences_from_memory(bot_user: Any) -> tuple[dict[str, Any], ...]:
@@ -139,7 +142,7 @@ def name_stems(name: str) -> tuple[str, ...]:
     stems: list[str] = []
     for token in _name_tokens(name):
         stem = _name_stem(token)[:MAX_STEM_LEN]
-        if stem and stem not in stems:
+        if len(stem) >= MIN_STEM_LEN and stem not in stems:
             stems.append(stem)
     return tuple(stems[:MAX_STEMS])
 
@@ -170,6 +173,7 @@ __all__ = [
     "MAX_PREFERENCES",
     "MAX_STEMS",
     "MEMORY_KEY",
+    "MIN_STEM_LEN",
     "ORIGIN_CONFIRMED_MEMORY",
     "SOURCE_GLOBAL_BOT",
     "STRENGTH_SOFT",

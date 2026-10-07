@@ -36,6 +36,7 @@ from apps.consent.models import ConsentRecord
 from apps.identity.models import BotUser, MemoryEntry, UserPersonalContext
 from apps.identity.services.deletion_gate import mark_deletion_requested
 from apps.identity.services.global_tenant import find_global_bot_tenant
+from apps.identity.services.memory_key_policy import read_current_view
 from apps.marketplace import resolver_request, shelf_preferences
 from apps.marketplace.resolver_request import build_shelf_request
 from apps.marketplace.shelf_preferences import name_stems, preferences_from_memory
@@ -194,6 +195,19 @@ class TestTheGates:
 
         assert preferences_from_memory(person) == ()
 
+    def test_g1_a_deletion_request_means_memory_is_not_even_read(self, person, global_bot):
+        """Заявка на удаление: память не читается вовсе, а не «читается и пуста»."""
+        _remember(person, "Анне", origin=global_bot.id)
+        target = "apps.identity.services.memory_key_policy.read_current_view"
+        with patch(target, wraps=read_current_view) as spy:
+            assert len(preferences_from_memory(person)) == 1
+            assert spy.call_count == 1
+
+            mark_deletion_requested(person.ayla_user_id, request_id=str(uuid.uuid4()))
+
+            assert preferences_from_memory(person) == ()
+            assert spy.call_count == 1
+
     def test_g1_no_link_to_ayla_means_nothing(self, person, global_bot) -> None:
         _remember(person, "Анне", origin=global_bot.id)
         assert len(preferences_from_memory(person)) == 1
@@ -248,6 +262,18 @@ class TestTheStems:
         ],
     )
     def test_s1_the_stem_survives_the_case_ending(self, db, name: str, stems: tuple) -> None:
+        assert name_stems(name) == stems
+
+    @pytest.mark.parametrize(
+        ("name", "stems"),
+        [("Ян", ()), ("Ия", ()), ("Ян Ковалёв", ("ковалё",))],
+    )
+    def test_s1_a_stem_shorter_than_three_letters_does_not_ride(
+        self, db, name: str, stems: tuple
+    ) -> None:
+        """Каталог основу короче трёх знаков не принимает — и отклонил бы весь запрос."""
+        # Положительная пара: тот же разбор на обычном имени основу даёт.
+        assert name_stems("Анне") == ("анн",)
         assert name_stems(name) == stems
 
     @pytest.mark.parametrize("not_a_name", ["", "   ", "к", "—"])
