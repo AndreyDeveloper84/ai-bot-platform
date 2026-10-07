@@ -582,6 +582,8 @@ _PERSONAL_DATA_CASCADE = (
     ConsentRecord.ConsentType.MEMORY_RED,
     ConsentRecord.ConsentType.FOOD_DIARY_PROCESSING,
     ConsentRecord.ConsentType.PREFERENCE_INFERENCE,
+    # DRF-2845 — согласие на ИИ-оценку еды: та же надстройка над основанием.
+    ConsentRecord.ConsentType.AI_FOOD_ESTIMATION,
 )
 
 

@@ -61,6 +61,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from apps.consent import ai_food_estimation
 from apps.integrations.ayla import (
     FoodLogResponse,
     FoodNotRecognizedError,
@@ -659,7 +660,10 @@ def show_estimate(
     try:
         estimate = asyncio.run(
             get_nutrition_client().estimate_dish(
-                external_user_id=external_id, dish_name=dish, portion_g=grams
+                external_user_id=external_id,
+                dish_name=dish,
+                portion_g=grams,
+                ai_estimate_allowed=ai_food_estimation.estimate_permitted(context.bot_user),
             )
         )
     except FoodNotRecognizedError:
@@ -911,6 +915,8 @@ def show_items(context: SkillContext, positions: list[ParsedFood]) -> SkillResul
                     external_user_id=external_id,
                     dish_name=position.dish,
                     portion_g=position.grams,
+                    # DRF-2845 — на каждую позицию заново, не один раз перед циклом.
+                    ai_estimate_allowed=ai_food_estimation.estimate_permitted(context.bot_user),
                 )
             )
         except FoodNotRecognizedError:
@@ -980,6 +986,7 @@ def _log_items(context: SkillContext, bucket: dict[str, Any]) -> SkillResult:
                     portion_multiplier=round(float(item["portion_g"]) / BASELINE_G, 3),
                     idempotency_key=f"food-text:{external_id}:{bucket['token']}:{index}",
                     entry_origin=ORIGIN_ESTIMATED_CONFIRMED,
+                    ai_estimate_allowed=ai_food_estimation.estimate_permitted(context.bot_user),
                 )
             )
         except FoodNotRecognizedError:
@@ -1047,6 +1054,7 @@ def _log(context: SkillContext, bucket: dict[str, Any]) -> SkillResult:
                 portion_multiplier=round(float(bucket["portion_g"]) / BASELINE_G, 3),
                 idempotency_key=f"food-text:{external_id}:{bucket['token']}",
                 entry_origin=origin,
+                ai_estimate_allowed=ai_food_estimation.estimate_permitted(context.bot_user),
             )
         )
     except FoodNotRecognizedError:

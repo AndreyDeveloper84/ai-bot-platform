@@ -65,6 +65,7 @@ from apps.integrations.ayla.offer_refusal import (
     reason_from_refusal,
 )
 from apps.identity.models import BotUser
+from apps.consent import ai_food_estimation
 from apps.nutrition_proactive.prefs import get_prefs, numbers_hidden_for, write_prefs
 from apps.nutrition_proactive.prefs import numbers_hidden as numbers_hidden_by_choice
 from apps.tenancy.models import Tenant
@@ -4934,7 +4935,10 @@ def customer_food_estimate(request: HttpRequest) -> HttpResponse:
     try:
         estimate = asyncio.run(
             get_nutrition_client().estimate_dish(
-                external_user_id=external_id, dish_name=parsed.dish, portion_g=grams
+                external_user_id=external_id,
+                dish_name=parsed.dish,
+                portion_g=grams,
+                ai_estimate_allowed=ai_food_estimation.estimate_permitted(bot_user),
             )
         )
     except NutritionAPIError as exc:
@@ -5076,6 +5080,7 @@ def _customer_food_log(request: HttpRequest) -> HttpResponse:
                 portion_multiplier=round(float(portion) / _FOOD_TEXT_BASELINE_G, 3),
                 idempotency_key=f"food-text-ma:{external_id}:{key.strip()}",
                 entry_origin=origin,
+                ai_estimate_allowed=ai_food_estimation.estimate_permitted(bot_user),
             )
         )
     except NutritionAPIError as exc:
@@ -5265,7 +5270,10 @@ def _customer_food_log_scan(bot_user: BotUser, body: dict[str, Any]) -> HttpResp
     try:
         log = asyncio.run(
             get_nutrition_client().log_meal(
-                scan_id=kwargs.pop("scan_id"), entry_origin=entry_origin, **kwargs
+                scan_id=kwargs.pop("scan_id"),
+                entry_origin=entry_origin,
+                ai_estimate_allowed=ai_food_estimation.estimate_permitted(bot_user),
+                **kwargs,
             )
         )
     except NutritionAPIError as exc:

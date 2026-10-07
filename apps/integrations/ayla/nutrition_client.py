@@ -1178,8 +1178,14 @@ class NutritionClient:
         external_user_id: str,
         dish_name: str,
         portion_g: float | None = None,
+        ai_estimate_allowed: bool,
     ) -> DishEstimate:
         """POST ``/api/v1/nutrition/internal/food-estimate/`` — оценка без записи.
+
+        ``ai_estimate_allowed`` (DRF-2845) — можно ли каталогу отдать название
+        блюда внешней модели. Обязателен и без умолчания: каждое место вызова
+        решает это само, прямым вызовом
+        ``apps.consent.ai_food_estimation.estimate_permitted``.
 
         DRF-1837, §109 шаги 2–4: показать «Я распознала так» до того, как
         число стало данными человека. Каталог не пишет ничего.
@@ -1200,7 +1206,10 @@ class NutritionClient:
                 "X-External-User-ID": external_user_id,
             }
         )
-        body: dict[str, Any] = {"dish_name": dish_name}
+        body: dict[str, Any] = {
+            "dish_name": dish_name,
+            "ai_estimate_allowed": bool(ai_estimate_allowed),
+        }
         if portion_g is not None:
             body["portion_g"] = portion_g
 
@@ -1257,10 +1266,15 @@ class NutritionClient:
         portion_multiplier: float = 1.0,
         idempotency_key: str | None = None,
         entry_origin: str | None = None,
+        ai_estimate_allowed: bool,
     ) -> FoodLogResponse:
         """POST ``/api/v1/nutrition/internal/food-log/``.
 
         At least one of ``scan_id`` / ``dish_name`` must be provided.
+
+        ``ai_estimate_allowed`` (DRF-2845) — можно ли записи взять сохранённую
+        оценку ИИ. Обязателен, как у :meth:`estimate_dish`: согласие могли
+        отозвать между показом карточки и записью.
         """
         now = time.monotonic()
         if self._breaker(BreakerPurpose.NUTRITION).is_open(now=now):
@@ -1278,6 +1292,7 @@ class NutritionClient:
         body: dict[str, Any] = {
             "meal_type": meal_type,
             "portion_multiplier": portion_multiplier,
+            "ai_estimate_allowed": bool(ai_estimate_allowed),
         }
         if scan_id:
             body["scan_id"] = scan_id

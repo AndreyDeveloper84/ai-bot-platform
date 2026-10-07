@@ -37,7 +37,9 @@ class _Catalogue:
         self.restores: list[dict[str, Any]] = []
         self.not_found = not_found
 
-    async def estimate_dish(self, *, external_user_id, dish_name, portion_g=None):
+    async def estimate_dish(
+        self, *, external_user_id, dish_name, portion_g=None, ai_estimate_allowed=None
+    ):
         self.estimates.append({"dish_name": dish_name, "portion_g": portion_g})
         if self.not_found:
             raise FoodNotRecognizedError("dish_not_found")
