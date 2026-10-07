@@ -168,12 +168,22 @@ class TestRecord:
         assert len(ZONE_WRITER_CONDITIONS) == 7
         assert all(address.startswith("DRF-2542 §") for address in ZONE_WRITER_CONDITIONS.values())
 
-    def test_closed_are_exactly_the_two_measured_on_07_10(self) -> None:
+    def test_closed_are_exactly_the_five_signed_on_07_10(self) -> None:
         # Состав литералом: новое имя в закрытых — правка этого узла, а не
-        # тихое расширение. Закрыты §2 и §4 (слово главного окна 07.10 по
-        # замеру исполнением); пять остальных открыты.
+        # тихое расширение. Закрыты §1, §2, §4, §5, §7 (подпись главного окна
+        # 07.10); открыты §3 и §6 — решения владельца.
         assert len(ZONE_WRITER_CONDITIONS) == 7
-        assert ZONE_WRITER_CONDITIONS_CLOSED == {"targeted_integrity_error", "ttl_purge_sweep"}
+        assert ZONE_WRITER_CONDITIONS_CLOSED == {
+            "consent_check_in_write_entry",
+            "targeted_integrity_error",
+            "ttl_purge_sweep",
+            "withdrawal_deletes_zone_rows",
+            "account_reset_red_zone_rls",
+        }
+        assert set(ZONE_WRITER_CONDITIONS) - ZONE_WRITER_CONDITIONS_CLOSED == {
+            "export_152fz_covers_zones",
+            "minor_lock_spec_decision",
+        }
 
 
 def _adult():
