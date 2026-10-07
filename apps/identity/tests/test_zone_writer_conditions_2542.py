@@ -36,6 +36,7 @@ from apps.identity.services.memory_writer import (
     promote_zone,
     write_entry,
 )
+from apps.identity.tests._red_zone_consent import grant_memory_zone_consents
 
 pytestmark = pytest.mark.django_db
 
@@ -66,6 +67,9 @@ def _probe() -> WriterProbe:
     """Позвать оба пути к зонам и посчитать, что легло в базу."""
     upc = UserPersonalContext.objects.create(user_id=uuid.uuid4())
     assert upc.minor_lock is False  # замок не мешает пробе: спрашиваем возраст, не замок
+    # Согласие обеих зон выдано: с DRF-2542 §1 писатель спрашивает журнал
+    # согласий, и без него проба мерила бы согласие, а не «пишется ли зона».
+    grant_memory_zone_consents(upc.user_id)
     audit_before = RedZoneAccessLog.objects.filter(
         access_type=RedZoneAccessLog.ACCESS_WRITE_REJECTED_DOB
     ).count()
@@ -164,11 +168,12 @@ class TestRecord:
         assert len(ZONE_WRITER_CONDITIONS) == 7
         assert all(address.startswith("DRF-2542 §") for address in ZONE_WRITER_CONDITIONS.values())
 
-    def test_closed_is_empty_by_construction(self) -> None:
-        # Наличие впереди: условий семь — пустое множество закрытых значит «ничего
-        # не закрыто», а не «нечего закрывать».
+    def test_closed_are_exactly_the_two_measured_on_07_10(self) -> None:
+        # Состав литералом: новое имя в закрытых — правка этого узла, а не
+        # тихое расширение. Закрыты §2 и §4 (слово главного окна 07.10 по
+        # замеру исполнением); пять остальных открыты.
         assert len(ZONE_WRITER_CONDITIONS) == 7
-        assert len(ZONE_WRITER_CONDITIONS_CLOSED) == 0
+        assert ZONE_WRITER_CONDITIONS_CLOSED == {"targeted_integrity_error", "ttl_purge_sweep"}
 
 
 def _adult():
@@ -179,7 +184,7 @@ def _adult():
 class TestSubstitution:
     def test_writer_appears_and_all_open_conditions_are_named(self) -> None:
         with _adult(), pytest.raises(AssertionError) as caught:
-            _guard()
+            _guard(frozenset())
         message = str(caught.value)
         for name, address in ZONE_WRITER_CONDITIONS.items():
             assert f"{name}: {address}" in message, name

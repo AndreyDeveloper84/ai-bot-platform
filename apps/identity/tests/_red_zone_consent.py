@@ -33,3 +33,21 @@ def grant_red_zone_consent(user_id: uuid.UUID) -> BotUser:
         source="test",
     )
     return bot_user
+
+
+def grant_memory_zone_consents(user_id: uuid.UUID) -> BotUser:
+    """Согласия жёлтой и красной зоны — для узлов писателя (DRF-2542 §1).
+
+    С §1 писатель спрашивает журнал согласий. Узлы, чей предмет — отказ базы,
+    возраст или ``updated_at``, ставят согласие этим помощником, чтобы дойти до
+    своего предмета, а не остановиться на согласии.
+    """
+    bot_user = grant_red_zone_consent(user_id)
+    ConsentRecord.all_tenants.create(
+        tenant=bot_user.tenant,
+        bot_user=bot_user,
+        consent_type=ConsentRecord.ConsentType.MEMORY_YELLOW,
+        granted=True,
+        source="test",
+    )
+    return bot_user
