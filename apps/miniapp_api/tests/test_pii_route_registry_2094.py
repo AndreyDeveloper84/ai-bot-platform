@@ -210,6 +210,8 @@ CUSTOMER_ROUTES: dict[str, Entry] = {
     "customer_marketing_consent": _CONSENTS_DOCUMENT,
     # DRF-2779 — умная память Ф4: добровольное согласие на предположения.
     "customer_preference_inference_consent": _CONSENTS_DOCUMENT,
+    # DRF-2867 — согласие на ИИ-оценку еды: выдача и отзыв, тот же документ.
+    "customer_ai_food_estimation_consent": _CONSENTS_DOCUMENT,
     "customer_data_storage_consent": own(
         "consents.*",
         "proactive_hints.enabled",
