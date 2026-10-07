@@ -400,6 +400,64 @@ def _log_red_zone_erasure(
     )
 
 
+ACCOUNT_RESET_ACTOR = "account_reset"
+
+
+def hard_delete_memory_for_account_reset(user_ids: list[uuid.UUID]) -> dict[str, int]:
+    """Физически снять память тестового аккаунта при сбросе — включая красную зону.
+
+    DRF-2542 §7. Сброс (``account_reset.apply``, только аккаунты из allowlist)
+    удалял память каскадом от ``UserPersonalContext`` без GUC красной зоны.
+    Под суперпользователем это работает: RLS на него не действует. Под обычной
+    ролью (замер 07.10 на ``d62e07bd``) политика прячет красные строки от
+    сборщика каскада: он их не удаляет, сверка полноты их не видит и
+    рапортует «чисто», а транзакция падает на внешнем ключе при фиксации —
+    сброс откатывается целиком, с успешным отчётом на руках.
+
+    Поэтому каскад идёт под GUC, а на каждую красную строку пишется строка
+    журнала ``purge`` — то же правило, что у остальных путей этого модуля:
+    доступ к красной строке оставляет след. Журнал и удаление — одна
+    транзакция.
+
+    Returns:
+      Счётчики удалённого по моделям, как их отдаёт ``QuerySet.delete()``.
+    """
+    if not user_ids:
+        return {}
+    request_id = uuid.uuid4()
+    with transaction.atomic():
+        _set_red_zone_guc(request_id)
+        try:
+            # До удаления: после него спрашивать не у кого.
+            red = list(
+                MemoryEntry.objects.filter(
+                    user_id__in=user_ids, sensitivity_zone=MemoryEntry.SENSITIVITY_RED
+                ).values_list("id", "user_id")
+            )
+            _, per_model = UserPersonalContext.objects.filter(user_id__in=user_ids).delete()
+            if red:
+                principal = red_zone_principal(
+                    RedZoneAccessLog.ACCESSOR_SYSTEM_JOB, ACCOUNT_RESET_ACTOR
+                )
+                RedZoneAccessLog.objects.bulk_create(
+                    [
+                        RedZoneAccessLog(
+                            memory_entry_id=entry_id,
+                            user_id=owner_id,
+                            accessor_role=RedZoneAccessLog.ACCESSOR_SYSTEM_JOB,
+                            accessor_principal=principal,
+                            access_type=RedZoneAccessLog.ACCESS_PURGE,
+                            request_id=request_id,
+                            purpose="account_reset — сброс тестового аккаунта из allowlist",
+                        )
+                        for entry_id, owner_id in red
+                    ]
+                )
+        finally:
+            _reset_red_zone_guc()
+    return dict(per_model)
+
+
 def request_forget_all(user_id: uuid.UUID) -> bool:
     """Record the user's «forget everything» intent on their UPC.
 
