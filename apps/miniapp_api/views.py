@@ -4944,24 +4944,26 @@ def customer_food_estimate(request: HttpRequest) -> HttpResponse:
     except NutritionAPIError as exc:
         return _food_text_catalog_refusal(exc, external_id=external_id, step="estimate")
 
+    # DRF-2844 — «Без чисел» (решение владельца 04.10: на всех экранах). Экран
+    # текстового ввода режима не знает и рисует всё, что пришло, поэтому числа
+    # в этом режиме не едут вовсе: блюдо и порция остаются, калории, БЖУ,
+    # оценка ИИ и причина её отсутствия (DRF-2822) — нет. Запись от этого не
+    # меняется: экран шлёт в неё блюдо и граммы, а не числа.
+    hidden = numbers_hidden_for(bot_user)
     return JsonResponse(
         {
             "matched_dish": estimate.matched_dish,
             "portion_g": estimate.portion_g,
             "portion_estimated": estimate.portion_estimated,
-            "kcal": estimate.kcal,
-            "protein_g": estimate.protein_g,
-            "fat_g": estimate.fat_g,
-            "carbs_g": estimate.carbs_g,
+            "kcal": None if hidden else estimate.kcal,
+            "protein_g": None if hidden else estimate.protein_g,
+            "fat_g": None if hidden else estimate.fat_g,
+            "carbs_g": None if hidden else estimate.carbs_g,
             # DRF-2761 — оценка калорий ИИ, своим ключом: ``kcal`` при ней
             # null. Экран показывает её только с пометкой «Оценка ИИ».
-            "kcal_ai_estimate": getattr(estimate, "kcal_ai_estimate", None),
+            "kcal_ai_estimate": None if hidden else getattr(estimate, "kcal_ai_estimate", None),
             # DRF-2822 — почему оценки нет: экран называет сбой и «выключена».
-            # В режиме «Без чисел» причина не едет: о калориях там не говорим,
-            # а экран текстового ввода режима не знает.
-            "kcal_ai_status": (
-                None if numbers_hidden_for(bot_user) else getattr(estimate, "kcal_ai_status", None)
-            ),
+            "kcal_ai_status": None if hidden else getattr(estimate, "kcal_ai_status", None),
         }
     )
 
