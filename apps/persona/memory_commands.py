@@ -260,6 +260,32 @@ def _normalise(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "").strip().lower().replace("ё", "е"))
 
 
+#: DRF-2887 — знаки, которыми человек отделяет глагол команды от остального:
+#: «забудь, что я веган», «забудь: я веган», «удали; про бюджет». Тире и дефис
+#: не трогаются: тире между словами шаблоны и так переносят, а дефис стоит
+#: внутри слов («кето-диета»).
+_COMMAND_PUNCTUATION_RE = re.compile(r"[,;:]")
+_POLITENESS_RE = re.compile(r"\bпожалуйста\b")
+
+#: DRF-2887 — «не забудь, что я веган» — просьба ПОМНИТЬ. Замер на ``eac09fc6``:
+#: без запятой эта реплика стирала факт и получала ответ «забыла». Отрицание
+#: перед глаголом забывания — не команда, ни с запятой, ни без.
+_NEGATED_FORGET_RE = re.compile(r"\bне\s+(?:забудь|забывай|удали|удаляй|сотри|стирай)\b")
+
+
+def _spoken(norm: str) -> str:
+    """Нормализованная реплика без знаков и вежливости между глаголом и предметом.
+
+    Замер DRF-2887: «забудь, что я веган» — с запятой, как требует пунктуация —
+    командой не считалась: шаблоны ждут пробел сразу после глагола. Факт
+    оставался, реплика уходила модели, человек об этом не узнавал. То же с
+    «удали,», «сотри,», «забудь, пожалуйста, …», «покажи, что знаешь обо мне».
+    """
+
+    without_marks = _COMMAND_PUNCTUATION_RE.sub(" ", norm)
+    return re.sub(r"\s+", " ", _POLITENESS_RE.sub(" ", without_marks)).strip()
+
+
 def _fact_keywords(content: dict) -> tuple[str, ...]:
     """Value-specific stems only («забудь, что я веган» → the vegan row)."""
 
@@ -577,6 +603,14 @@ def handle_memory_command(
                 claims_done_evidence="bridge.erase:erased",
             )
         return None  # bare «удалить» with no pending prompt → not a command
+
+    # DRF-2887 — дальше команды ищутся в реплике без знаков между глаголом и
+    # предметом. Слово-подтверждение выше сверяется с исходной строкой: оно
+    # одно, и знаки в нём не разделители.
+    norm = _spoken(norm)
+    if _NEGATED_FORGET_RE.search(norm):
+        # «не забудь, что я веган» — просьба помнить, а не забыть.
+        return None
 
     # 2. «забудь всё» request → the confirmation prompt (does NOT delete yet).
     if _FORGET_ALL_RE.search(norm):
