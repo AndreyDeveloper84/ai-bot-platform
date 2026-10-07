@@ -338,7 +338,16 @@ export function MasterDashboardScreen() {
   const isEmptyToday =
     active_visit === null && next_visit === null && today_summary.total_clients_today === 0;
   const isDayDone = states.is_day_done && !active_visit && !next_visit;
-  const noServices = !data.master.specialization && today_summary.total_clients_today === 0;
+  // DRF-2881. «Услуг нет» — только по ЧИСЛУ услуг. Прежде фраза выводилась из
+  // пустой `specialization`, а её не заполняет ни один путь синхронизации:
+  // «Вам ещё не назначили услуги» видел каждый мастер без записей на сегодня.
+  // Число неизвестно (нет поля) — не утверждаем. И solo-мастер салонную фразу
+  // не видит никогда: услуги он настраивает сам, «написать администратору»
+  // ему некому. Своей фразы для solo пока нет — он получает обычный пустой день.
+  const noServices =
+    !isSolo &&
+    data.master.services_count === 0 &&
+    today_summary.total_clients_today === 0;
 
   return (
     <DashboardFrame
