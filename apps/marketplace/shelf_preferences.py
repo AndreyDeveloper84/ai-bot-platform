@@ -39,9 +39,17 @@
 # Гейты
 
 Заявка на удаление, отсутствие связки с Ayla, закрытая зелёная память — пусто.
-Неподтверждённый вывод сюда не попадает: его отсекает
-:func:`~apps.identity.services.memory_key_policy.read_current_view`. Любой сбой
-— пусто: предпочтение мягкое, и полка без него остаётся полкой.
+Любой сбой — пусто: предпочтение мягкое, и полка без него остаётся полкой.
+
+# Только названное самим человеком
+
+O-1b — о мастере, которого человек НАЗВАЛ САМ. Едет только сказанное
+(``source = explicit``). Предположение Ayla не едет никакое (DRF-2864):
+неподтверждённое отсекает
+:func:`~apps.identity.services.memory_key_policy.read_current_view`, а
+подтверждённое тот же читатель отдаёт — для разговора это верно, для полки нет.
+«Да, запомни» в ответ на догадку и «мой мастер — Анна» — разные основания, и
+первое здесь не выдаётся за второе.
 
 В журнал имя не пишется — только число собранных элементов.
 """
@@ -85,6 +93,7 @@ def preferences_from_memory(bot_user: Any) -> tuple[dict[str, Any], ...]:
 
 def _collect(bot_user: Any) -> tuple[dict[str, Any], ...]:
     from apps.consent.memory import can_store_green_memory
+    from apps.identity.models import MemoryEntry
     from apps.identity.services.deletion_gate import deletion_gate
     from apps.identity.services.memory_key_policy import read_current_view
 
@@ -102,6 +111,9 @@ def _collect(bot_user: Any) -> tuple[dict[str, Any], ...]:
     for fact in read_current_view(ayla_user_id).green_facts:
         content = fact.content if isinstance(fact.content, dict) else {}
         if content.get("key") != MEMORY_KEY:
+            continue
+        # DRF-2864 — только сказанное: подтверждённое предположение не едет.
+        if fact.source != MemoryEntry.SOURCE_EXPLICIT:
             continue
         source = _source_on_the_wire(fact.source_tenant_id, global_bot_id)
         if source is None:

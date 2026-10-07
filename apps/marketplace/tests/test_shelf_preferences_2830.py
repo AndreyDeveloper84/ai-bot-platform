@@ -14,6 +14,7 @@
 * g1 — гейты: заявка на удаление, нет связки с Ayla, SHADOW-оболочка, закрытая
   зелёная память;
 * u1 — неподтверждённый вывод не едет; чужие ключи памяти не едут;
+* u2 — ПОДТВЕРЖДЁННЫЙ вывод тоже не едет (DRF-2864): едет только сказанное;
 * s1 — основы имени: короткие и длинные имена, два слова, не-имя;
 * l1 — не больше трёх, без повторов;
 * f1 — сбой чтения памяти — пусто, не исключение;
@@ -96,8 +97,10 @@ def _remember(
     origin: uuid.UUID | None,
     key: str = "favorite_masters",
     source: str = MemoryEntry.SOURCE_EXPLICIT,
+    confirmed: bool = False,
 ) -> MemoryEntry:
     said = source == MemoryEntry.SOURCE_EXPLICIT
+    inferred_provenance = MemoryEntry.PROVENANCE_USER_CONFIRMED_INFERENCE if confirmed else None
     ayla_user_id = person.ayla_user_id
     assert ayla_user_id is not None
     return MemoryEntry.objects.create(
@@ -106,7 +109,7 @@ def _remember(
         sensitivity_zone=MemoryEntry.SENSITIVITY_GREEN,
         source=source,
         # Предложение Ayla, которое человек не подтвердил, метки происхождения не несёт.
-        provenance=MemoryEntry.PROVENANCE_USER_STATED if said else None,
+        provenance=MemoryEntry.PROVENANCE_USER_STATED if said else inferred_provenance,
         kind="preference",
         consent_at=timezone.now(),
         # У вывода обязано стоять время вывода (ограничение таблицы).
@@ -240,6 +243,32 @@ class TestOnlyWhatThePersonSaid:
         _remember(person, "Ольге", origin=global_bot.id, source=MemoryEntry.SOURCE_INFERRED)
         _remember(person, "Анне", origin=global_bot.id)
 
+        assert [e["name"] for e in preferences_from_memory(person)] == ["Анне"]
+
+    def test_u2_a_confirmed_inference_does_not_ride_either(self, person, global_bot) -> None:
+        """«Да, запомни» в ответ на догадку Ayla — не «назвал сам» (DRF-2864)."""
+        from apps.consent import preference_inference
+
+        assert preference_inference.grant(
+            person, document_version=preference_inference.PREFERENCE_INFERENCE_DOCUMENT_VERSION
+        )
+        _remember(
+            person,
+            "Ольге",
+            origin=global_bot.id,
+            source=MemoryEntry.SOURCE_INFERRED,
+            confirmed=True,
+        )
+        _remember(person, "Анне", origin=global_bot.id)
+
+        # Положительная пара: читатель памяти подтверждённый вывод ОТДАЁТ —
+        # отсекает его именно сборщик, а не пустой вид.
+        view = read_current_view(person.ayla_user_id)
+        assert sorted(
+            (fact.content["value"], fact.source)
+            for fact in view.green_facts
+            if fact.content.get("key") == "favorite_masters"
+        ) == [("Анне", "explicit"), ("Ольге", "inferred")]
         assert [e["name"] for e in preferences_from_memory(person)] == ["Анне"]
 
     def test_u1_other_memory_keys_do_not_ride(self, person, global_bot) -> None:
