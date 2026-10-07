@@ -3256,6 +3256,59 @@ def customer_preference_inference_consent(request: HttpRequest) -> HttpResponse:
 @require_http_methods(["POST", "DELETE"])
 @require_init_data
 @with_request_tenant
+def customer_ai_food_estimation_consent(request: HttpRequest) -> HttpResponse:
+    """Согласие на ИИ-оценку еды — выдать и отозвать (DRF-2867).
+
+    Решение владельца 07.10 (лист решений, п.17): согласие выдаётся и
+    отзывается на одном экране Mini App; отдельного механизма выдачи
+    сообщением в чате нет.
+
+    ``POST`` — выдать; тело ``{"document_version": "<версия>"}`` — под каким
+    текстом человек нажал. Незнакомая версия — 409 ``stale_disclosure``,
+    клиенту нужно перечитать ``GET /me/consents/``. Текст ещё не утверждён —
+    409 ``consent_text_not_approved``: показать человеку нечего, выдачи нет.
+    ``DELETE`` — отозвать; работает всегда, в том числе пока механизм
+    выключен. Оба перехода идемпотентны и отвечают свежим документом.
+
+    Добровольное: отказ и отзыв не закрывают ни справочник, ни дневник.
+    После отзыва блюдо наружу не уходит: предикат перед отправкой читается
+    заново на каждом вызове (``ai_food_estimation.estimate_permitted``).
+    """
+    bot_user: BotUser = request.bot_user  # type: ignore[attr-defined]
+    if request.method == "POST":
+        body = _json_object_body(request)
+        if isinstance(body, HttpResponse):
+            return body
+        try:
+            ai_food_estimation.grant_from_screen(
+                bot_user, document_version=str(body.get("document_version", ""))
+            )
+        except ai_food_estimation.TextNotApprovedError:
+            return _error(
+                "consent_text_not_approved",
+                "the AI food estimation consent text is not approved yet",
+                409,
+            )
+        except ai_food_estimation.UnknownDisclosureVersionError:
+            return _error(
+                "stale_disclosure",
+                "document_version does not match the current AI food estimation text",
+                409,
+            )
+    else:
+        ai_food_estimation.withdraw(bot_user, source=ai_food_estimation.MINIAPP_SOURCE)
+    logger.info(
+        "miniapp_api.consents.ai_food_estimation bot_user=%s granted=%s",
+        bot_user.id,
+        request.method == "POST",
+    )
+    return JsonResponse(_consents_document(bot_user))
+
+
+@csrf_exempt
+@require_http_methods(["POST", "DELETE"])
+@require_init_data
+@with_request_tenant
 def customer_marketing_consent(request: HttpRequest) -> HttpResponse:
     """Маркетинговое согласие: ``POST`` — выдать, ``DELETE`` — отозвать.
 

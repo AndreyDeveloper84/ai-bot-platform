@@ -123,6 +123,12 @@ urlpatterns = [
         views.customer_preference_inference_consent,
         name="customer_preference_inference_consent",
     ),
+    # DRF-2867 — согласие на ИИ-оценку еды: выдача и отзыв с экрана Mini App.
+    path(
+        "me/consents/ai-food-estimation/",
+        views.customer_ai_food_estimation_consent,
+        name="customer_ai_food_estimation_consent",
+    ),
     # Только DELETE: выдаёт согласие человек своим действием в приветственном
     # потоке, эта ручка умеет ровно отзывать.
     path(
