@@ -514,6 +514,11 @@ export interface FoodTextEstimate {
    * Показывать только с пометкой «Оценка ИИ».
    */
   kcal_ai_estimate?: number | null;
+  /**
+   * DRF-2822 — почему оценки ИИ нет (статус каталога). `null` / нет поля —
+   * причина не названа; в режиме «Без чисел» бот её не присылает.
+   */
+  kcal_ai_status?: string | null;
   /** DRF-2402 — см. NutritionFacts.portion_source. */
   portion_source?: string | null;
   protein_g: number | null;

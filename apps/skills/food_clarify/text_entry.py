@@ -73,6 +73,7 @@ from apps.integrations.ayla import (
     external_user_id_for,
     get_nutrition_client,
 )
+from apps.integrations.ayla.nutrition_client import KCAL_AI_DISABLED, KCAL_AI_UNAVAILABLE
 from apps.integrations.ayla.portion_provenance import (
     portion_numbers_are_named,
     portion_provenance_of,
@@ -152,8 +153,17 @@ REJECTED_TEXT = "Поняла, не записываю."
 #: прокси давал C01). Текст НЕЙТРАЛЬНЫЙ — решение владельца 06.10 (Q4): «Сейчас
 #: не удалось…» только для настоящего временного сбоя, а каталог причину пока
 #: не различает (ИИ выключен / нет согласия / сбой — всё ``None``).
-#: Различающий текст — DRF-2823 (флаг ``kcal_ai_status`` от каталога).
+#: Различающий текст — ниже, по ``kcal_ai_status`` от каталога (DRF-2822).
 UNPRICED_TEXT = "Калорийность не рассчитана. Записать без расчёта?"
+#: DRF-2822 — причина названа, когда каталог её назвал (слова владельца 06.10).
+#: Остальные статусы, незнакомое значение и каталог без поля — ``UNPRICED_TEXT``.
+#: «Нет согласия» здесь нет: такого согласия в коде нет, решение за владельцем.
+UNPRICED_UNAVAILABLE_TEXT = "Сейчас не удалось рассчитать калорийность. Записать без расчёта?"
+UNPRICED_DISABLED_TEXT = "ИИ-оценка калорийности выключена. Записать без расчёта?"
+UNPRICED_TEXT_BY_STATUS = {
+    KCAL_AI_UNAVAILABLE: UNPRICED_UNAVAILABLE_TEXT,
+    KCAL_AI_DISABLED: UNPRICED_DISABLED_TEXT,
+}
 #: Тот же вопрос в режиме «Без чисел»: о калориях человек слышать не выбрал.
 UNPRICED_HIDDEN_TEXT = "Записать в дневник?"
 EDIT_PROMPT = "Напиши, что было, ещё раз — посчитаю заново."
@@ -692,6 +702,7 @@ def show_estimate(
                     )
                 ],
                 hide_numbers=_numbers_hidden(context),
+                status=getattr(estimate, "kcal_ai_status", None),
             ),
             action_type="food_text_unpriced_card",
             action_data={"buttons": food_text_unpriced_keyboard(), "dish": estimate.matched_dish},
@@ -804,9 +815,15 @@ def _unpriced(estimate: Any) -> bool:
 
 
 def render_unpriced_card(
-    entries: list[tuple[str, float | None]], *, hide_numbers: bool = False
+    entries: list[tuple[str, float | None]],
+    *,
+    hide_numbers: bool = False,
+    status: str | None = None,
 ) -> str:
     """«Калорийность не рассчитана. Записать без расчёта?» + что запишется.
+
+    ``status`` — ``kcal_ai_status`` каталога (DRF-2822): сбой и «выключена»
+    названы своими словами, всё прочее — нейтрально.
 
     Исходная фраза без чисел: человек видит, ЧТО ляжет в дневник, и что ляжет
     без калорий (не нулём — итог дня пометится неполным). В режиме «Без чисел»
@@ -817,7 +834,11 @@ def render_unpriced_card(
         f"«{dish}» ({int(round(grams))} г)" if grams is not None else f"«{dish}»"
         for dish, grams in entries
     )
-    question = UNPRICED_HIDDEN_TEXT if hide_numbers else UNPRICED_TEXT
+    question = (
+        UNPRICED_HIDDEN_TEXT
+        if hide_numbers
+        else UNPRICED_TEXT_BY_STATUS.get(status or "", UNPRICED_TEXT)
+    )
     return f"{question}\nЗапишу как есть: {named}."
 
 
@@ -882,6 +903,7 @@ def show_items(context: SkillContext, positions: list[ParsedFood]) -> SkillResul
     external_id = external_user_id_for(context.bot_user)
     client = get_nutrition_client()
     items: list[dict[str, Any]] = []
+    statuses: set[str | None] = set()
     for position in positions:
         try:
             estimate = asyncio.run(
@@ -901,6 +923,7 @@ def show_items(context: SkillContext, positions: list[ParsedFood]) -> SkillResul
                 meta={"reply_kind": "food_text_unavailable"},
             )
         items.append(_item_of(position, estimate))
+        statuses.add(getattr(estimate, "kcal_ai_status", None))
 
     _write(
         context.conversation,
@@ -915,6 +938,9 @@ def show_items(context: SkillContext, positions: list[ParsedFood]) -> SkillResul
                     for item in items
                 ],
                 hide_numbers=_numbers_hidden(context),
+                # DRF-2822 — причина называется, только когда она у всех
+                # позиций одна; разные причины одной фразой не назвать.
+                status=next(iter(statuses)) if len(statuses) == 1 else None,
             ),
             action_type="food_text_unpriced_card",
             action_data={"buttons": food_text_unpriced_keyboard(), "dishes": dishes},
