@@ -38,8 +38,8 @@ CONVERTED = {
     # и подсказки адреса (DRF-1811, M19) — четыре вызова через колонку.
     ("apps/master_api/views.py", 22),
     ("apps/master_api/services/schedule_frame.py", 3),
-    # 1933b: переведено
-    ("apps/miniapp_api/views.py", 3),
+    # 1933b: переведено. DRF-2755: 3 → 4 — расстояние на карточке мастера.
+    ("apps/miniapp_api/views.py", 4),
     ("apps/admin_api/services/availability.py", 1),
     # DRF-2154: создание записи и слоты переехали из вьюх в общий сервис
     # (create_appointment + get_available_times — два вызова через колонку).
