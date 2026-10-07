@@ -705,12 +705,12 @@ export function nextPortion(current: number, direction: "up" | "down"): number {
 
 /**
  * Strip EXIF metadata (incl. GPS) from a customer photo via canvas
- * re-encode. Defence-in-depth layer 1 for spec §2 privacy promise
- * («Фото нужно только чтобы узнать блюдо — удаляю сразу») — follow-up
- * #957 / adversarial CR A12. Without this, geo-tagged JPEGs ship GPS
- * coordinates to the backend BEFORE the delete-after-recognition
- * runs, leaking the customer's meal location to anyone reading the
- * in-flight payload.
+ * re-encode. Defence-in-depth layer 1 for the privacy line under the
+ * camera («Фото нужно только чтобы узнать блюдо») — follow-up #957 /
+ * adversarial CR A12. Without this, geo-tagged JPEGs ship GPS coordinates
+ * to the backend, leaking the customer's meal location to anyone reading
+ * the in-flight payload. (DRF-2869: the line used to end «— удаляю
+ * сразу»; the photo is kept for its term, not deleted at once.)
  *
  * # Contract — fail-CLOSED, not fail-OPEN
  *
