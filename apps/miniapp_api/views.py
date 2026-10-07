@@ -4952,6 +4952,12 @@ def customer_food_estimate(request: HttpRequest) -> HttpResponse:
             # DRF-2761 — оценка калорий ИИ, своим ключом: ``kcal`` при ней
             # null. Экран показывает её только с пометкой «Оценка ИИ».
             "kcal_ai_estimate": getattr(estimate, "kcal_ai_estimate", None),
+            # DRF-2822 — почему оценки нет: экран называет сбой и «выключена».
+            # В режиме «Без чисел» причина не едет: о калориях там не говорим,
+            # а экран текстового ввода режима не знает.
+            "kcal_ai_status": (
+                None if numbers_hidden_for(bot_user) else getattr(estimate, "kcal_ai_status", None)
+            ),
         }
     )
 

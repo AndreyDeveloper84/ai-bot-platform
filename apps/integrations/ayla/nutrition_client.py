@@ -428,6 +428,32 @@ class DishEstimate:
     #: число дала модель. ``kcal`` при ней ``None``; показывать только с
     #: пометкой «Оценка ИИ».
     kcal_ai_estimate: float | None = None
+    #: DRF-2822 — почему числа ИИ нет (или что оно есть): одно из
+    #: ``KCAL_AI_STATUSES``. ``None`` — каталог поля не прислал (старый) или
+    #: прислал незнакомое значение; карточка тогда говорит нейтрально.
+    kcal_ai_status: str | None = None
+
+
+#: DRF-2822 — статус оценки ИИ, как его ставит каталог в ``food-estimate``.
+KCAL_AI_ESTIMATED = "estimated"
+KCAL_AI_UNAVAILABLE = "unavailable"
+KCAL_AI_DISABLED = "disabled"
+KCAL_AI_STATUSES = frozenset(
+    {
+        KCAL_AI_ESTIMATED,
+        KCAL_AI_UNAVAILABLE,
+        KCAL_AI_DISABLED,
+        "not_attempted",
+        "not_permitted",
+        "not_applicable",
+        "declined",
+    }
+)
+
+
+def _kcal_ai_status(raw: Any) -> str | None:
+    """Знакомый статус — или ``None``: незнакомое значение причиной не называем."""
+    return raw if isinstance(raw, str) and raw in KCAL_AI_STATUSES else None
 
 
 def _float_or_none(raw: Any) -> float | None:
@@ -1208,6 +1234,7 @@ class NutritionClient:
                 carbs_g=_float_or_none(data.get("carbs_g")),
                 raw=data,
                 kcal_ai_estimate=_float_or_none(data.get("kcal_ai_estimate")),
+                kcal_ai_status=_kcal_ai_status(data.get("kcal_ai_status")),
             )
         if resp.status_code >= 500:
             self._breaker(BreakerPurpose.NUTRITION).record_failure(now=now)
