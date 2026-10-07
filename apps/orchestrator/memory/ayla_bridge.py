@@ -56,6 +56,7 @@ from apps.identity.services.personal_context import (
     erase_declared_prefs,
     get_declared_prefs,
     patch_declared_prefs,
+    withhold_declared_fields,
 )
 from apps.integrations.ayla.diet_types import CATALOG_DIET_TYPES
 from apps.persona.memory_extract import GreenFactCandidate
@@ -77,6 +78,12 @@ _CLEARABLE_FIELDS: dict[str, list[tuple[str, Any]]] = {
 }
 
 _ALL_BRIDGE_KEYS = frozenset(_CLEARABLE_FIELDS) | {"price_range", "favorite_masters"}
+
+#: DRF-2700 — поля анкеты, которые при «забудь» нельзя очистить и потому
+#: перестают читаться (``personal_context.withhold_declared_fields``).
+_WITHHELD_ON_FORGET: dict[str, tuple[str, ...]] = {
+    "price_range": ("price_range_min", "price_range_max"),
+}
 
 
 def _key(candidate: GreenFactCandidate) -> str | None:
@@ -226,6 +233,12 @@ def clear_declared_fields(
                 "encoding in the frozen contract (contract gap)",
                 key,
             )
+            if key == "price_range":
+                # DRF-2700 — очистить нельзя, значит не читать: иначе «забыла»
+                # было бы неправдой, а цена продолжала бы уходить модели.
+                withhold_declared_fields(
+                    getattr(bot_user, "ayla_user_id", None), list(_WITHHELD_ON_FORGET[key])
+                )
             continue
         for field, empty in _CLEARABLE_FIELDS.get(key, []):
             updates.append({"field": field, "value": empty, "source": "explicit"})

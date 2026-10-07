@@ -755,6 +755,14 @@ NOT_PERSONAL: Mapping[str, str] = {
     "identity.UserPersonalContext.updated_at": "Row bookkeeping.",
     "identity.UserPersonalContext.soft_deleted_at": "Erasure bookkeeping — the forget-all tombstone.",
     "identity.UserPersonalContext.forget_all_requested_at": "Erasure bookkeeping — when the person asked.",
+    "identity.UserPersonalContext.model_history_cutoff_at": (
+        "Erasure bookkeeping (DRF-2700) — when the person last asked to forget one fact; "
+        "dialogue up to that moment is withheld from the model. A time only, no content."
+    ),
+    "identity.UserPersonalContext.declared_fields_withheld": (
+        "Erasure bookkeeping (DRF-2700) — names of Ayla-profile fields the person asked to "
+        "forget and the profile contract cannot clear; not read until restated. Names only."
+    ),
     "identity.UserPersonalContext.deletion_requested_at": (
         "Erasure bookkeeping (DRF-1699 D2) — when the account-deletion request was accepted; "
         "the personalisation stop-gate reads it."
