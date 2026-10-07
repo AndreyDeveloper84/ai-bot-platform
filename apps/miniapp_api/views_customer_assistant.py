@@ -103,7 +103,15 @@ def _buttons(attachments: list[dict[str, Any]]) -> list[dict[str, str]]:
 
     ``callback`` — подпись и payload: тап вернётся тем же ``ask``, и ход
     обработает его, как обрабатывает тап в MAX. ``link`` — подпись и адрес.
-    Остальные виды (``open_app`` и т.п.) в Mini App смысла не имеют.
+
+    ``open_app`` (DRF-2885) — подпись и слаг экрана: в MAX такая кнопка
+    открывает Mini App на нужном экране, а человек уже в Mini App, поэтому
+    здесь это переход внутри приложения. Слаг отдаётся как есть; в какой
+    экран он ведёт, решает одна карта клиента (``max-sdk.ts::_ROUTE_MAP``),
+    незнакомый слаг экран не рисует. Кнопка без слага открывала бы Mini App
+    «вообще» — человеку, который уже в нём, нажимать нечего, она не уходит.
+
+    Остальные виды (``request_contact`` и т.п.) в Mini App смысла не имеют.
     """
     out: list[dict[str, str]] = []
     for attachment in attachments:
@@ -119,6 +127,8 @@ def _buttons(attachments: list[dict[str, Any]]) -> list[dict[str, str]]:
                     out.append({"label": label, "payload": str(button["payload"])})
                 elif button.get("type") == "link" and button.get("url"):
                     out.append({"label": label, "url": str(button["url"])})
+                elif button.get("type") == "open_app" and button.get("payload"):
+                    out.append({"label": label, "open_app": str(button["payload"])})
     return out
 
 
