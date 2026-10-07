@@ -32,6 +32,7 @@ or any user-identifying string beyond `bot_user.id` (UUID). The
 from __future__ import annotations
 
 import logging
+import uuid
 from typing import TYPE_CHECKING
 
 from django.db import transaction
@@ -267,6 +268,45 @@ def record_global_consent(
     return record
 
 
+def _erase_zone_memory_on_withdrawal(bot_user: "BotUser", consent_type: str) -> int:
+    """Отозвано согласие жёлтой или красной зоны — её строки получают надгробие.
+
+    DRF-2542 §5. Стоит в :func:`withdraw`, самой нижней двери отзыва: так его
+    получает любой путь, а не те, кто вспомнил позвать.
+
+    Согласие зоны держится на человеке, а не на оболочке
+    (:func:`has_memory_consent`: достаточно действующего гранта на любой его
+    оболочке). Поэтому строки уходят, только когда действующего согласия зоны
+    не осталось ни на одной.
+
+    Сбой стирания отзыв НЕ откатывает (своя точка сохранения) — то же правило,
+    что у отзыва предположений: человек, отозвавший согласие, обязан остаться
+    без согласия, а использование строк уже остановлено читателем. Сбой
+    пишется в лог с исключением.
+    """
+    zone = next((z for z, ct in MEMORY_ZONE_CONSENT.items() if ct == consent_type), None)
+    ayla_user_id = getattr(bot_user, "ayla_user_id", None)
+    if zone is None or not ayla_user_id:
+        return 0
+    try:
+        from apps.identity.services.memory_deleter import (
+            WITHDRAWABLE_ZONES,
+            soft_delete_zone_for_withdrawal,
+        )
+
+        if zone not in WITHDRAWABLE_ZONES or has_memory_consent(ayla_user_id, zone):
+            return 0
+        with transaction.atomic():
+            return soft_delete_zone_for_withdrawal(ayla_user_id, zone, request_id=uuid.uuid4())
+    except Exception:  # noqa: BLE001 — стирание не откатывает отзыв; см. докстринг
+        logger.exception(
+            "consent.withdraw.zone_memory_erase_failed bot_user=%s type=%s",
+            bot_user.id,
+            consent_type,
+        )
+        return 0
+
+
 def withdraw(
     bot_user: "BotUser",
     *,
@@ -367,6 +407,8 @@ def withdraw(
                 bot_user.id,
                 consent_type,
             )
+
+    _erase_zone_memory_on_withdrawal(bot_user, consent_type)
 
     transaction.on_commit(_emit_withdraw)
     logger.info(

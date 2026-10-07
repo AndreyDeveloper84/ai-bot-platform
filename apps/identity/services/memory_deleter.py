@@ -171,6 +171,96 @@ def soft_delete_inferences_for_withdrawal(user_id: uuid.UUID) -> int:
     return deleted
 
 
+#: Зоны, чьи строки живут на отдельном согласии зоны и уходят с его отзывом.
+#: Зелёная сюда не входит: её основание — ``personal_data``, и его отзыв идёт
+#: каскадом через «забудь всё».
+WITHDRAWABLE_ZONES = frozenset({MemoryEntry.SENSITIVITY_YELLOW, MemoryEntry.SENSITIVITY_RED})
+
+ZONE_WITHDRAWAL_ACTOR = "consent_withdrawal"
+
+
+def soft_delete_zone_for_withdrawal(
+    user_id: uuid.UUID,
+    zone: str,
+    *,
+    request_id: uuid.UUID,
+) -> int:
+    """Снять живые строки жёлтой или красной зоны человека, отозвавшего её согласие.
+
+    DRF-2542 §5. Причина ``withdrawal`` объявлена в модели как «Consent
+    withdrawn for yellow/red entry», но до этого листа её не ставил никто:
+    отзыв согласия зоны снимал согласие, а строки оставались живыми. Читатель
+    их уже не отдаёт (согласие проверяется в точке использования), но «не
+    используется» — не «удалено».
+
+    Устройство то же, что у «забудь всё»
+    (:func:`soft_delete_all_zones_for_forget_all`) и по тем же причинам: отбор
+    и надгробие под GUC красной зоны, журнал на каждую красную строку в той же
+    транзакции. Физически строки уйдут через сутки
+    (``WITHDRAWAL_TOMBSTONE_RETENTION``). Идемпотентно.
+
+    Raises:
+      ValueError: зона не из :data:`WITHDRAWABLE_ZONES`.
+    """
+    if zone not in WITHDRAWABLE_ZONES:
+        raise ValueError(f"zone {zone!r} is not withdrawn by a zone consent")
+
+    now = timezone.now()
+    red_ids: list[uuid.UUID] = []
+    with transaction.atomic():
+        _set_red_zone_guc(request_id)
+        try:
+            live = MemoryEntry.objects.filter(
+                user_id=user_id,
+                sensitivity_zone=zone,
+                soft_deleted_at__isnull=True,
+                delete_requested_at__isnull=True,
+            )
+            if zone == MemoryEntry.SENSITIVITY_RED:
+                # До UPDATE: после него «живых» уже нет.
+                red_ids = list(live.values_list("id", flat=True))
+            deleted = live.update(
+                delete_requested_at=now,
+                soft_deleted_at=now,
+                deletion_reason=MemoryEntry.DELETION_REASON_WITHDRAWAL,
+                status=MemoryEntry.STATUS_DELETED,
+                updated_at=now,
+            )
+            if red_ids:
+                principal = red_zone_principal(
+                    RedZoneAccessLog.ACCESSOR_SYSTEM_JOB, ZONE_WITHDRAWAL_ACTOR
+                )
+                RedZoneAccessLog.objects.bulk_create(
+                    [
+                        RedZoneAccessLog(
+                            memory_entry_id=entry_id,
+                            user_id=user_id,
+                            accessor_role=RedZoneAccessLog.ACCESSOR_SYSTEM_JOB,
+                            accessor_principal=principal,
+                            access_type=RedZoneAccessLog.ACCESS_WITHDRAWAL,
+                            request_id=request_id,
+                            purpose="consent withdrawal — согласие зоны отозвано субъектом",
+                        )
+                        for entry_id in red_ids
+                    ]
+                )
+        finally:
+            _reset_red_zone_guc()
+
+    if deleted:
+        write_audit(
+            "memory.zone_withdrawn",
+            target="MemoryEntry",
+            payload={
+                "user_id": str(user_id),
+                "zone": zone,
+                "count": deleted,
+                "reason": MemoryEntry.DELETION_REASON_WITHDRAWAL,
+            },
+        )
+    return deleted
+
+
 def soft_delete_all_zones_for_forget_all(
     user_id: uuid.UUID,
     *,
