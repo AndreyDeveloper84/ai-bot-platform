@@ -14,6 +14,7 @@ from apps.miniapp_api import (
     views_customer_assistant,
     views_last_topic,
     views_memory,
+    views_plan_engine,
     views_plan_lite,
     views_saved_meals,
 )
@@ -231,6 +232,14 @@ urlpatterns = [
         "plan-lite/proposal",
         views_plan_lite.customer_plan_lite_proposal,
         name="customer_plan_lite_proposal",
+    ),
+    # DRF-2879 (Plan WP7 ч.1) — сборка эфемерного плана в каталоге; бот
+    # приносит реестр правил и состояние безопасности. Ничего не сохраняет;
+    # под флагом PLAN_ENGINE_ENABLED.
+    path(
+        "plan/decision",
+        views_plan_engine.customer_plan_decision,
+        name="customer_plan_decision",
     ),
     # DRF-2099 — дневник за неделю: строка на день и записи одного дня;
     # границы суток считает каталог по поясу человека.

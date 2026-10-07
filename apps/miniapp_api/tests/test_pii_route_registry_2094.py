@@ -653,6 +653,24 @@ CUSTOMER_ROUTES: dict[str, Entry] = {
             "created, DELETE answers with the closed flag only"
         ),
     ),
+    # --- Plan Engine decision (DRF-2879, own) ---------------------------
+    "customer_plan_decision": own(
+        "outcome",
+        "decision.decision_id",
+        "decision.goal_ref",
+        "decision.steps[].step_id / role / level / capability_ref / assertions",
+        "decision.assertions[].kind / subject / value / provenance",
+        "decision.validation.status / step_validations",
+        "decision.policy_versions",
+        via="apps.miniapp_api.views_plan_engine:plan_decision_payload",
+        note=(
+            "the ephemeral plan the catalog composes for the caller's own active goal, "
+            "read under their external_user_id and saved nowhere: the goal id, capability "
+            "KEYS (curated catalog vocabulary, never free text) and rule assertions taken "
+            "from the planning-rules registry; no name, phone, health answers or goal text. "
+            "For every outcome other than PLAN the answer is the outcome name alone"
+        ),
+    ),
     # --- Plan Lite proposal (DRF-2123, План-A, own) ---------------------
     "customer_plan_lite_proposal": own(
         "proposal.goal_key",
