@@ -1982,6 +1982,14 @@ PLAN_LITE_ENABLED = os.environ.get("PLAN_LITE_ENABLED", "false").lower() in (
     "1",
 )
 
+# DRF-2879 — Plan Engine (сборка плана в каталоге): тот же ключ, что в
+# каталоге. Default CLOSED. Выключен → прокси customer/plan/decision отвечает
+# 404 plan_engine_disabled ДО чтения реестра правил и ДО вызова каталога.
+PLAN_ENGINE_ENABLED = os.environ.get("PLAN_ENGINE_ENABLED", "false").lower() in (
+    "true",
+    "1",
+)
+
 # DRF-1301 — the same two switches in front of the post-visit follow-up
 # («как прошёл вчерашний визит?»), for the same reason and in the same
 # order. See apps/bookings/followups.py for the consent gate they guard.
