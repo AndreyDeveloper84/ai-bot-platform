@@ -779,7 +779,9 @@ class TestDialogueHistory:
             and p.name != "short_term.py"
             and pattern.search(p.read_text(encoding="utf-8"))
         )
-        assert callers == ["conversations/erasure.py"]
+        # DRF-2700 — второй названный вызывающий: окно очищается и при поштучном
+        # «забудь X», и при отзыве согласия на предположения.
+        assert callers == ["conversations/erasure.py", "conversations/model_history.py"]
 
 
 # ---------------------------------------------------------------------------

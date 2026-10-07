@@ -107,6 +107,14 @@ def soft_delete_green_entries(
         )
 
     if deleted:
+        # DRF-2700 — стёрто по просьбе человека: переписка до этого момента
+        # модели больше не отдаётся (решение владельца 07.10, п.23). «Забудь
+        # всё» идёт своим путём — обезличиванием переписки.
+        from apps.identity.services import model_history_cutoff
+
+        if reason in model_history_cutoff.PIECEWISE_REQUEST_REASONS:
+            model_history_cutoff.stamp(user_id, at=now)
+
         write_audit(
             "memory.forget_entry",
             target="MemoryEntry",

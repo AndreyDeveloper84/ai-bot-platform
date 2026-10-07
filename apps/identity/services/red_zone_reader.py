@@ -347,6 +347,12 @@ class RedZoneReader:
                         request_id=request_id,
                         purpose=purpose,
                     )
+                    # DRF-2700 — как у зелёной двери: переписка до стирания
+                    # модели больше не отдаётся.
+                    from apps.identity.services import model_history_cutoff
+
+                    if reason in model_history_cutoff.PIECEWISE_REQUEST_REASONS:
+                        model_history_cutoff.stamp(user_id, at=now)
                 return bool(moved)
         finally:
             cls._reset_guc()
