@@ -21,9 +21,14 @@
 читает никто, кроме стирания по просьбе человека (``retention``), а оно ищет
 строки по отправителю — его здесь не трогаем.
 
-Чего это НЕ покрывает (названо, а не скрыто): вложения ``video`` (кружочки) и
-``file`` — голос человека там тоже бывает, но бот их не распознаёт, и решения
-владельца о них не было; фото еды (``image``).
+Кружочки и аудио файлом (решение владельца 08.10.2026): голос человека бывает
+и там, поэтому то же правило действует на ``video`` — всегда — и на ``file``,
+если по имени это аудио или видео либо имя неизвестно. Бот такие вложения не
+распознаёт, ссылка в журнале ему не нужна вовсе.
+
+Чего это НЕ покрывает (названо, а не скрыто): ``file`` с именем документа
+(``.pdf``, ``.docx`` …) и фото еды (``image``) — решения владельца о них не
+было.
 """
 
 from __future__ import annotations
@@ -35,6 +40,33 @@ logger = logging.getLogger(__name__)
 
 #: Что остаётся в журнале на месте аудио-вложения.
 REDACTED_VOICE: dict[str, str] = {"type": "audio", "redacted": "voice"}
+
+#: Расширения файла, в котором может быть голос: аудио и видео.
+_VOICE_FILE_SUFFIXES: frozenset[str] = frozenset(
+    {
+        "aac", "amr", "flac", "m4a", "mp3", "oga", "ogg", "opus", "wav", "weba", "wma",
+        "3gp", "avi", "m4v", "mkv", "mov", "mp4", "mpeg", "mpg", "webm",
+    }
+)  # fmt: skip
+
+
+def _carries_voice(attachment: dict[str, Any]) -> bool:
+    """Вложение, в котором может быть голос человека.
+
+    ``audio`` и ``video`` (кружочки) — всегда. ``file`` — по расширению имени;
+    файл без имени или с именем не строкой считается голосовым: неизвестное
+    здесь вырезается, а не хранится.
+    """
+    kind = attachment.get("type")
+    if kind in ("audio", "video"):
+        return True
+    if kind != "file":
+        return False
+    name = attachment.get("filename")
+    if not isinstance(name, str) or "." not in name:
+        return True
+    return name.rsplit(".", 1)[1].strip().lower() in _VOICE_FILE_SUFFIXES
+
 
 #: Тело, которое пишется, если вырезать не удалось: сырое тело в журнал не идёт.
 REDACTION_FAILED: dict[str, bool] = {"redaction_failed": True}
@@ -48,8 +80,8 @@ def without_voice_links(payload: Any) -> Any:
     (``message.link.message.attachments``) покрывается тем же правилом.
     """
     if isinstance(payload, dict):
-        if payload.get("type") == "audio":
-            return dict(REDACTED_VOICE)
+        if _carries_voice(payload):
+            return {"type": payload["type"], "redacted": "voice"}
         return {key: without_voice_links(value) for key, value in payload.items()}
     if isinstance(payload, list):
         return [without_voice_links(item) for item in payload]

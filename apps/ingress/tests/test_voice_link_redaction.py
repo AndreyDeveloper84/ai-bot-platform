@@ -88,6 +88,49 @@ class TestWithoutVoiceLinks:
         assert out["message"]["body"]["attachments"] == [REDACTED_VOICE]
         assert SIG not in _dump(out)
 
+    @pytest.mark.parametrize(
+        "attachment",
+        [
+            # Кружочек и видео: ссылка на файл и на превью.
+            {
+                "type": "video",
+                "payload": {"url": f"https://v.oneme.ru/v.mp4?sig={SIG}", "token": TOKEN},
+                "thumbnail": {"url": f"https://v.oneme.ru/t.jpg?sig={SIG}"},
+                "duration": 12,
+            },
+            # Аудио и видео, присланные файлом.
+            {
+                "type": "file",
+                "payload": {"url": f"https://f.oneme.ru/f?sig={SIG}", "token": TOKEN},
+                "filename": "Запись 08.10.OGG",
+                "size": 4096,
+            },
+            {"type": "file", "payload": {"url": f"https://f/?sig={SIG}"}, "filename": "a.mp4"},
+            # Имя неизвестно — вырезается, а не хранится.
+            {"type": "file", "payload": {"url": f"https://f/?sig={SIG}", "token": TOKEN}},
+            {"type": "file", "payload": {"url": f"https://f/?sig={SIG}"}, "filename": None},
+            {"type": "file", "payload": {"url": f"https://f/?sig={SIG}"}, "filename": "voice"},
+        ],
+    )
+    def test_circles_and_audio_files_lose_their_links_too(self, attachment: dict) -> None:
+        """Решение владельца 08.10: «не храним» — и для кружочков, и для аудио файлом."""
+        out = without_voice_links(_body(attachments=[attachment]))
+        assert out["message"]["body"]["attachments"] == [
+            {"type": attachment["type"], "redacted": "voice"}
+        ]
+        assert SIG not in _dump(out) and TOKEN not in _dump(out)
+
+    def test_a_document_file_keeps_its_link(self) -> None:
+        # Решение было о голосе: документ остаётся в журнале как пришёл.
+        document = {
+            "type": "file",
+            "payload": {"url": "https://f.oneme.ru/f?sig=doc", "token": "d"},
+            "filename": "Договор.pdf",
+            "size": 1024,
+        }
+        out = without_voice_links(_body(attachments=[document]))
+        assert out["message"]["body"]["attachments"] == [document]
+
     def test_other_attachments_and_text_stay_as_they_came(self) -> None:
         image = {"type": "image", "payload": {"url": "https://i.oneme.ru/i?r=abc", "token": "p"}}
         body = _body(attachments=[image, copy.deepcopy(VOICE)], text="смотри")
