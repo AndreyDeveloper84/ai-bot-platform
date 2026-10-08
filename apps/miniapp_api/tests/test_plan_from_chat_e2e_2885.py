@@ -93,7 +93,9 @@ def test_e2_the_tap_saves_with_the_confirming_turns_own_revision(
     command = catalog.saved[0]
     revision = command["evaluated_at_revision"]
     assert isinstance(revision, int) and not isinstance(revision, bool)
-    assert command["confirmation"]["state_revision"] == revision
+    # Подтверждение опознаётся ревизией хода, где предложение ПОКАЗАНО, —
+    # она одна на все нажатия; вердикт несёт ревизию хода НАЖАТИЯ.
+    assert command["confirmation"]["state_revision"] == composed_at
     assert command["safety_state"] == "NORMAL"
     # Ревизия хода ПОДТВЕРЖДЕНИЯ: выше ревизии хода сборки, а не её повтор.
     assert revision > composed_at
@@ -114,3 +116,19 @@ def test_e3_an_unlisted_account_gets_no_card_and_the_catalog_is_not_asked(
     # …а карточки плана в ответе нет, и каталог не спрашивали.
     assert card.QUESTION_SAVE not in answer.json()["answer"]
     assert catalog.composed == []
+
+
+def test_e4_a_second_tap_through_the_real_turn_keeps_the_confirmation(
+    client: Client, tenant, wire, catalog: FakeCatalog
+) -> None:
+    _person_shell(tenant, PERSON)
+    _ask(client, card.TRIGGER, as_user=PERSON)
+
+    _ask(client, f"cb:plan:save:{TOKEN}", as_user=PERSON)
+    _ask(client, f"cb:plan:save:{TOKEN}", as_user=PERSON)
+
+    one, two = catalog.saved
+    assert one["confirmation"] == two["confirmation"]
+    assert one["decision_id"] == two["decision_id"]
+    # Ходы разные — и это видно по ревизии вердикта, а не подтверждения.
+    assert two["evaluated_at_revision"] > one["evaluated_at_revision"]

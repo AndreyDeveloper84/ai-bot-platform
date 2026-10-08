@@ -271,7 +271,16 @@ def try_handle_plan_trigger(
         _write_pending(conversation, None)
         return _named(PLAN_STEP_UNLABELLED)
 
-    _write_pending(conversation, {"decision": decision, "clarify_open": False})
+    _write_pending(
+        conversation,
+        {
+            "decision": decision,
+            "clarify_open": False,
+            # Ревизия хода, в котором предложение ПОКАЗАНО: она опознаёт это
+            # подтверждение у каталога и не меняется от нажатия к нажатию.
+            "shown_at_revision": safety.evaluated_at_revision,
+        },
+    )
     return _proposal([labels_by_key[key] for key in keys], _token(decision))
 
 
@@ -279,16 +288,31 @@ def try_handle_plan_trigger(
 
 
 def save_command(
-    decision: dict[str, Any], safety: Any, restrictions: list[dict[str, str]]
+    decision: dict[str, Any],
+    safety: Any,
+    restrictions: list[dict[str, str]],
+    *,
+    shown_at_revision: int,
 ) -> dict[str, Any]:
-    """Команда сохранения каталога: решение без правок + подтверждение + тройка."""
+    """Команда сохранения каталога: решение без правок + подтверждение + тройка.
+
+    Две ревизии, и они разные по смыслу:
+
+    * ``confirmation.state_revision`` — ревизия хода, в котором предложение
+      показано. Входит в ключ идемпотентности каталога
+      (пользователь + ``decision_id`` + вопрос + вариант + эта ревизия), поэтому
+      обязана быть одной для всех нажатий на этой карточке: с ревизией хода
+      нажатия второе нажатие дало бы второй план;
+    * ``evaluated_at_revision`` в тройке — ревизия хода НАЖАТИЯ: при каком
+      состоянии разговора вынесен вердикт. В ключ не входит.
+    """
     command: dict[str, Any] = {
         "decision_id": decision["decision_id"],
         "goal_ref": decision["goal_ref"],
         "confirmation": {
             "question_id": CONFIRM_QUESTION_ID,
             "option_id": CONFIRM_OPTION_ID,
-            "state_revision": safety.evaluated_at_revision,
+            "state_revision": shown_at_revision,
         },
         "provenance": {"policy_versions": decision["policy_versions"]},
         "decision": {
@@ -342,8 +366,13 @@ def try_handle_plan_save(
         # сохранять при «уточнить» нечем.
         return _named(CLARIFY_PENDING)
 
+    shown_at = pending.get("shown_at_revision")
+    if not isinstance(shown_at, int) or isinstance(shown_at, bool):
+        return _named(PLAN_PROPOSAL_EXPIRED)
     try:
-        command = save_command(pending["decision"], safety, restrictions)
+        command = save_command(
+            pending["decision"], safety, restrictions, shown_at_revision=shown_at
+        )
     except KeyError:
         return _named(PLAN_PROPOSAL_EXPIRED)
     try:

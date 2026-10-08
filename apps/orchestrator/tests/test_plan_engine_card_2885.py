@@ -22,7 +22,8 @@
 * c1 — команда: решение без правок, подтверждение, тройка хода ПОДТВЕРЖДЕНИЯ;
 * c2 — нет тройки — каталог не спрашивается;
 * c3 — чужая или устаревшая кнопка — отказ по имени, каталог не спрашивается;
-* c4 — повторное нажатие шлёт ту же команду (дубля не будет — узнаёт каталог);
+* c4 — повторное нажатие в следующем ходе — то же подтверждение: ревизия в ключе
+  идемпотентности каталога не меняется, меняется только ревизия вердикта;
 * c5 — отказы каталога названы по имени.
 
 Граница, которую каталог проверить не может
@@ -287,7 +288,9 @@ class TestSaving:
                 "confirmation": {
                     "question_id": "plan.save_confirm",
                     "option_id": "save",
-                    "state_revision": 9,
+                    # Ревизия хода, где предложение ПОКАЗАНО (7): ключ
+                    # идемпотентности каталога, одна на все нажатия.
+                    "state_revision": 7,
                 },
                 "provenance": {"policy_versions": POLICY_VERSIONS},
                 "decision": {
@@ -297,7 +300,7 @@ class TestSaving:
                 },
                 "safety_state": "NORMAL",
                 "safety_policy_version": "pre_check-abc",
-                # Ревизия хода ПОДТВЕРЖДЕНИЯ, а не хода сборки (7).
+                # Ревизия хода НАЖАТИЯ: при каком состоянии вынесен вердикт.
                 "evaluated_at_revision": 9,
             }
         ]
@@ -339,16 +342,28 @@ class TestSaving:
         assert result is None
         assert catalog.saved == []
 
-    def test_c4_a_second_tap_sends_the_same_command(self, catalog: FakeCatalog) -> None:
+    def test_c4_a_second_tap_in_a_later_turn_is_the_same_confirmation(
+        self, catalog: FakeCatalog
+    ) -> None:
+        """Повторное нажатие — НОВЫЙ ход со своей ревизией. Каталог узнаёт повтор
+        по ключу (решение + вопрос + вариант + ревизия подтверждения); попади
+        туда ревизия хода нажатия — второе нажатие создало бы второй план."""
         conversation = _conversation()
-        _proposed(conversation)
+        _turn(card.TRIGGER, conversation, safety=_safety("NORMAL", 7))
 
         first = _turn(SAVE, conversation, safety=_safety("NORMAL", 9))
-        second = _turn(SAVE, conversation, safety=_safety("NORMAL", 9))
+        second = _turn(SAVE, conversation, safety=_safety("NORMAL", 12))
 
         assert (first.reply_text, second.reply_text) == ("PLAN_SAVED · тест", "PLAN_SAVED · тест")
-        assert len(catalog.saved) == 2
-        assert catalog.saved[0] == catalog.saved[1]  # дубль отсекает каталог по этой команде
+        one, two = catalog.saved
+        # То, из чего каталог строит ключ идемпотентности, — одно и то же.
+        assert (one["decision_id"], one["confirmation"]) == (
+            two["decision_id"],
+            two["confirmation"],
+        )
+        assert one["confirmation"]["state_revision"] == 7
+        # А вердикт у каждого нажатия свой — при своей ревизии.
+        assert (one["evaluated_at_revision"], two["evaluated_at_revision"]) == (9, 12)
 
     @pytest.mark.parametrize(
         ("error", "name"),
