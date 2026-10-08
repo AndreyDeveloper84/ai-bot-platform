@@ -195,4 +195,4 @@ def test_e6_a_free_request_composes_with_the_triple_of_the_real_turn(
     assert answer.json()["answer"].startswith("• Режим сна")
     assert len(catalog.composed) == 1
     assert catalog.composed[0]["safety_state"] == "NORMAL"
-    assert isinstance(catalog.composed[0]["evaluated_at_revision"], int)
+    assert catalog.composed[0]["safety_policy_version"].startswith("pre_check-")
