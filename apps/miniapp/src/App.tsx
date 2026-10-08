@@ -64,6 +64,7 @@ import { channelIdentity } from "./lib/identity";
 import { ErrorBoundary } from "./components/ErrorBoundary";
 import { OpenFromMaxScreen } from "./components/OpenFromMaxScreen";
 import {
+  CabinetReturnBar,
   SurfaceModeContext,
   type SurfaceModeContextValue,
 } from "./components/SurfaceSwitch";
@@ -1766,13 +1767,23 @@ function RoleSurface({
   //
   // Не трогает `last surface`: кнопка — разовое намерение, следующий
   // запуск без payload открывает кабинет, как раньше. Обычный клиент сюда
-  // не заходит — у него `CustomerRoutes` и так последняя ветка. Выхода
-  // обратно в кабинет у одноролевого сотрудника с клиентского экрана нет
-  // (кнопка «Сменить режим» — только у многоролевых): закрыть и открыть
-  // приложение. Видимой кнопки не добавлено намеренно — её текст решает
-  // владелец.
+  // не заходит — у него `CustomerRoutes` и так последняя ветка.
+  //
+  // DRF-2918 — обратно в кабинет отсюда ведёт полоса «Вернуться в кабинет»
+  // (решение и подпись — ответ 08.10). Она стоит над каждым клиентским
+  // экраном этой ветки, а не в профиле: с экрана согласия сканера до
+  // профиля три нажатия, с карточки рекомендации пути нет вовсе. Условия
+  // на число ролей нет нарочно — соло-мастер и владелец-мастер приходят
+  // сюда так же, а их «Сменить режим» живёт только в профиле. В ветке
+  // режима «Клиент» выше полосы нет: там «/» остаётся клиентским, и выход
+  // оттуда — «Сменить режим».
   if ((hasAdmin || hasMaster) && isCustomerSurfacePath(location.pathname)) {
-    return <CustomerRoutes />;
+    return (
+      <>
+        <CabinetReturnBar />
+        <CustomerRoutes />
+      </>
+    );
   }
   if (isSolo && hasMaster) {
     return <UnifiedSoloSurface me={me} />;
